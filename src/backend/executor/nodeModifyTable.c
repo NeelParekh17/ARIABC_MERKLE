@@ -41,7 +41,9 @@
 #include "access/htup_details.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "access/merkle.h"
 #include "catalog/catalog.h"
+#include "catalog/pg_am_d.h"
 #include "commands/trigger.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
@@ -81,6 +83,177 @@ static ResultRelInfo *getTargetResultRelInfo(ModifyTableState *node);
 static void ExecSetupChildParentMapForSubplan(ModifyTableState *mtstate);
 static TupleConversionMap *tupconv_map_for_subplan(ModifyTableState *node,
 												   int whichplan);
+
+/*
+ * ExecDeleteMerkleIndexes - Update merkle indexes before DELETE
+ *
+ * When a row is deleted, we need to XOR out its hash from any merkle
+ * indexes on the table. This must be done BEFORE the row is deleted
+ * because we need to read the row to compute its hash.
+ */
+static void
+ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
+{
+    List       *indexList;
+    ListCell   *lc;
+
+    /* GUC: Check if Merkle index updates are enabled */
+    if (!enable_merkle_index)
+        return;
+    
+    /* Get list of indexes on this table */
+    indexList = RelationGetIndexList(heapRel);
+    
+    foreach(lc, indexList)
+    {
+        Oid         indexOid = lfirst_oid(lc);
+        Relation    indexRel;
+        
+        indexRel = index_open(indexOid, RowExclusiveLock);
+        
+        /* Check if this is a Merkle index */
+        if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+        {
+            MerkleHash      hash;
+            TupleDesc       indexTupdesc;
+            int             partitionId;
+            TupleTableSlot *slot;
+            int             nkeys;
+            int16          *indkey;
+            Datum          *keyValues;
+            bool           *keyNulls;
+            int             i;
+            int             totalLeaves;
+            
+            /* Get index structure info */
+            indexTupdesc = RelationGetDescr(indexRel);
+            nkeys = indexRel->rd_index->indnkeyatts;
+            indkey = indexRel->rd_index->indkey.values;
+            
+            /* Read tree configuration from metadata */
+            merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+            
+            /* Allocate key value arrays */
+            keyValues = (Datum *) palloc(nkeys * sizeof(Datum));
+            keyNulls = (bool *) palloc(nkeys * sizeof(bool));
+            
+            /* Compute hash of the row being deleted */
+            merkle_compute_row_hash(heapRel, tupleid, &hash);
+            
+            /* If hash is zero, nothing to remove */
+            if (!merkle_hash_is_zero(&hash))
+            {
+                /* Get key values from heap tuple to compute partition ID */
+                slot = table_slot_create(heapRel, NULL);
+                if (table_tuple_fetch_row_version(heapRel, tupleid, SnapshotSelf, slot))
+                {
+                    /* Extract all indexed column values */
+                    for (i = 0; i < nkeys; i++)
+                    {
+                        int heapAttr = indkey[i];  /* 1-based column number */
+                        keyValues[i] = slot_getattr(slot, heapAttr, &keyNulls[i]);
+                    }
+                    
+                    /* Compute partition ID using multi-column function */
+                    partitionId = merkle_compute_partition_id(keyValues, keyNulls,
+                                                                     nkeys, indexTupdesc,
+                                                                     totalLeaves);
+                    
+                    /* XOR the hash OUT of the tree (same as XOR in, since XOR is its own inverse) */
+                    merkle_update_tree_path(indexRel, partitionId, &hash, false);
+                }
+                ExecDropSingleTupleTableSlot(slot);
+            }
+            
+            pfree(keyValues);
+            pfree(keyNulls);
+        }
+        
+        index_close(indexRel, RowExclusiveLock);
+    }
+    
+    list_free(indexList);
+}
+
+/*
+ * ExecInsertMerkleIndexes - Insert new row hash into merkle indexes after UPDATE
+ *
+ * After an UPDATE, we need to XOR in the NEW row's hash into any merkle
+ * indexes. This is called after table_tuple_update completes, using the
+ * new tuple's TID.
+ */
+static void
+ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
+{
+    List       *indexList;
+    ListCell   *lc;
+    
+	/* GUC: Check if Merkle index updates are enabled */
+    if (!enable_merkle_index)
+        return;
+		
+    /* Get list of indexes on this table */
+    indexList = RelationGetIndexList(heapRel);
+    
+    foreach(lc, indexList)
+    {
+        Oid         indexOid = lfirst_oid(lc);
+        Relation    indexRel;
+        
+        indexRel = index_open(indexOid, RowExclusiveLock);
+        
+        /* Check if this is a Merkle index */
+        if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+        {
+            MerkleHash      hash;
+            TupleDesc       indexTupdesc;
+            int             partitionId;
+            int             nkeys;
+            int16          *indkey;
+            Datum          *keyValues;
+            bool           *keyNulls;
+            int             i;
+            int             totalLeaves;
+            
+            /* Get index structure info */
+            indexTupdesc = RelationGetDescr(indexRel);
+            nkeys = indexRel->rd_index->indnkeyatts;
+            indkey = indexRel->rd_index->indkey.values;
+            
+            /* Read tree configuration from metadata */
+            merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+            
+            /* Allocate key value arrays */
+            keyValues = (Datum *) palloc(nkeys * sizeof(Datum));
+            keyNulls = (bool *) palloc(nkeys * sizeof(bool));
+            
+            /* Compute hash of the new row */
+            merkle_compute_row_hash(heapRel, &slot->tts_tid, &hash);
+            
+            /* Extract all indexed column values */
+            for (i = 0; i < nkeys; i++)
+            {
+                int heapAttr = indkey[i];  /* 1-based column number */
+                keyValues[i] = slot_getattr(slot, heapAttr, &keyNulls[i]);
+            }
+            
+            /* Compute partition ID using multi-column function */
+            partitionId = merkle_compute_partition_id(keyValues, keyNulls,
+                                                             nkeys, indexTupdesc,
+                                                             totalLeaves);
+            
+            /* XOR the new hash IN to the tree */
+            merkle_update_tree_path(indexRel, partitionId, &hash, true);
+            
+            pfree(keyValues);
+            pfree(keyNulls);
+        }
+        
+        index_close(indexRel, RowExclusiveLock);
+    }
+    
+    list_free(indexList);
+}
 
 /*
  * Verify that the tuples to be produced by INSERT or UPDATE match the
@@ -590,7 +763,7 @@ ExecInsert(ModifyTableState *mtstate,
 			if (is_bcdb_worker)
 			{
 				store_optim_insert(slot);
-				return NULL;
+				//return NULL;
 			}
 			else
 			{
@@ -774,6 +947,13 @@ ExecDelete(ModifyTableState *mtstate,
 		 * mode transactions.
 		 */
 ldelete:;
+		/*
+		 * Update Merkle indexes BEFORE deleting the tuple.
+		 * We need to do this before the tuple is gone so we can
+		 * read the row data to compute the hash to XOR out.
+		 */
+		ExecDeleteMerkleIndexes(resultRelationDesc, tupleid);
+	
 		result = table_tuple_delete(resultRelationDesc, tupleid,
 								estate->es_output_cid,
 								estate->es_snapshot,
@@ -1328,18 +1508,29 @@ lreplace:;
   	       */
 			if (is_bcdb_worker)
 			{
+			//print_trace();
+			//debugtup(slot, NULL);
+	//printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 				PREDICATELOCKTARGETTAG tag;
 				SET_PREDICATELOCKTARGETTAG_TUPLE(tag,
 										 		 0,
 										 		 resultRelationDesc->rd_id,
 										 		 ItemPointerGetBlockNumber(tupleid),
 										 		 ItemPointerGetOffsetNumber(tupleid));
-				ws_table_reserve(&tag);
+				// ws_table_reserve(&tag);
+				ws_table_reserveDT(&tag);
 				store_optim_update(slot, tupleid);
-				return NULL;
+				//return NULL;
 			}
 			else
 			{
+				/*
+				 * Update Merkle indexes: XOR out the OLD row's hash before the update.
+				 * The NEW row's hash will be XOR'd in when ExecInsertIndexTuples
+				 * calls merkleInsert.
+				 */
+				ExecDeleteMerkleIndexes(resultRelationDesc, tupleid);
+
 				result = table_tuple_update(resultRelationDesc, tupleid, slot,
 											estate->es_output_cid,
 											estate->es_snapshot,
@@ -1478,6 +1669,19 @@ lreplace:;
 			/* insert index entries for tuple if necessary */
 			if (resultRelInfo->ri_NumIndices > 0 && update_indexes)
 				recheckIndexes = ExecInsertIndexTuples(slot, estate, false, NULL, NIL);
+					
+			/*
+			* For Merkle indexes: always insert the NEW row's hash, even if
+			* update_indexes is false (HOT update). Merkle indexes hash ALL
+			* columns, not just the indexed key, so data changes always need
+			* to be tracked even when the key doesn't change.
+			*
+			* Note: ExecInsertIndexTuples may also call merkleInsert if
+			* update_indexes is true, but that's okay because we only call
+			* ExecInsertMerkleIndexes when update_indexes is false.
+			*/
+			if (!update_indexes)
+				ExecInsertMerkleIndexes(resultRelationDesc, slot);
 		}
 	}
 
