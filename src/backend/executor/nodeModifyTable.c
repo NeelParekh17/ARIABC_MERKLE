@@ -1519,8 +1519,27 @@ lreplace:;
 										 		 ItemPointerGetOffsetNumber(tupleid));
 				// ws_table_reserve(&tag);
 				ws_table_reserveDT(&tag);
+				
+				/*
+				 * Merkle index updates for deterministic execution:
+				 * XOR out the OLD row's hash before the update.
+				 */
+				ExecDeleteMerkleIndexes(resultRelationDesc, tupleid);
+				
 				store_optim_update(slot, tupleid);
-				//return NULL;
+				
+				/*
+				 * XOR in the NEW row's hash after storing the update.
+				 * Note: The slot contains the new tuple values.
+				 */
+				ExecInsertMerkleIndexes(resultRelationDesc, slot);
+				
+				/*
+				 * Set result to TM_Ok since we're doing optimistic execution.
+				 * The actual update will be applied later in apply_optim_writes().
+				 * Without this, result would be uninitialized garbage!
+				 */
+				result = TM_Ok;
 			}
 			else
 			{
