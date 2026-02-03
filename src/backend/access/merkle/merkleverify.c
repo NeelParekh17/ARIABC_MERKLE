@@ -7,7 +7,7 @@
  * by recomputing the Merkle tree from table data and comparing with
  * the stored tree.
  *
- * Portions Copyright (c) 2024, PostgreSQL Global Development Group
+ * Copyright (c) 2026, Neel Parekh
  *
  * IDENTIFICATION
  *    src/backend/access/merkle/merkleverify.c
@@ -36,12 +36,12 @@
 #include "utils/syscache.h"
 
 
+PG_FUNCTION_INFO_V1(merkle_leaf_id);
 PG_FUNCTION_INFO_V1(merkle_verify);
 PG_FUNCTION_INFO_V1(merkle_root_hash);
 PG_FUNCTION_INFO_V1(merkle_tree_stats);
 PG_FUNCTION_INFO_V1(merkle_node_hash);
 PG_FUNCTION_INFO_V1(merkle_leaf_tuples);
-PG_FUNCTION_INFO_V1(merkle_partition_id_sql);
 
 /*
  * find_merkle_index() - Find the Merkle index on a table
@@ -103,11 +103,16 @@ find_merkle_index(Oid relid)
 }
 
 /*
- * merkle_verify() - Verify Merkle tree integrity
+ * merkle_verify() - Verify Merkle tree integrity.
  *
- * This function recomputes the Merkle tree from the table data and
- * compares it with the stored tree. Returns true if they match.
- *
+ * This is the main user-facing verification tool. It performs a full audit:
+ * 1. Scans the entire heap table (the actual data).
+ * 2. Recomputes what the Merkle tree *should* look like based on that data.
+ * 3. Compares this recomputed tree with the stored Merkle index.
+ * 
+ * Returns TRUE if everything matches exactly.
+ * Logs WARNINGS for any specific node mismatches found.
+ * 
  * Usage: SELECT merkle_verify('tablename');
  */
 Datum
@@ -127,10 +132,9 @@ merkle_verify(PG_FUNCTION_ARGS)
     int16          *indkey;         /* Heap column numbers for indexed keys */
     Datum          *keyValues;      /* Temporary storage for key values */
     bool           *keyNulls;       /* Temporary storage for null flags */
-    /* Dynamic tree configuration */
-    int             numSubtrees;
-    int             leavesPerTree;
-    int             nodesPerTree;
+    int             numPartitions;
+    int             leavesPerPartition;
+    int             nodesPerPartition;
     int             totalNodes;
     int             totalLeaves;
     
@@ -147,7 +151,7 @@ merkle_verify(PG_FUNCTION_ARGS)
     indexRel = index_open(indexOid, AccessShareLock);
     
     /* Read tree configuration from metadata */
-    merkle_read_meta(indexRel, &numSubtrees, &leavesPerTree, &nodesPerTree,
+    merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition, &nodesPerPartition,
                      &totalNodes, &totalLeaves, NULL, NULL);
     
     /* Get index key information */
@@ -179,7 +183,7 @@ merkle_verify(PG_FUNCTION_ARGS)
     {
         MerkleHash  hash;
         int         partitionId;
-        int         treeId, nodeInTree, nodeId;
+        int         partitionOffset, nodeInPartition, nodeId;
         
         /* Extract all indexed column values from heap tuple */
         for (i = 0; i < nkeys; i++)
@@ -197,16 +201,16 @@ merkle_verify(PG_FUNCTION_ARGS)
         merkle_compute_row_hash(heapRel, &slot->tts_tid, &hash);
         
         /* Update computed tree path using dynamic configuration */
-        treeId = partitionId / leavesPerTree;
-        nodeInTree = (partitionId % leavesPerTree) + leavesPerTree;
-        nodeId = nodeInTree + (treeId * nodesPerTree);
+        partitionOffset = partitionId / leavesPerPartition;
+        nodeInPartition = (partitionId % leavesPerPartition) + leavesPerPartition;
+        nodeId = nodeInPartition + (partitionOffset * nodesPerPartition);
         
-        while (nodeInTree > 0)
+        while (nodeInPartition > 0)
         {
             /* Subtract 1 for 0-based array indexing */
             merkle_hash_xor(&computedTree[nodeId - 1], &hash);
-            nodeInTree = nodeInTree / 2;
-            nodeId = nodeInTree + (treeId * nodesPerTree);
+            nodeInPartition = nodeInPartition / 2;
+            nodeId = nodeInPartition + (partitionOffset * nodesPerPartition);
         }
     }
     
@@ -265,9 +269,9 @@ merkle_verify(PG_FUNCTION_ARGS)
 }
 
 /*
- * merkle_root_hash() - Get combined root hash of all subtrees
+ * merkle_root_hash() - Get combined root hash of all partitions
  *
- * Returns the XOR of all subtree root hashes as a hex string.
+ * Returns the XOR of all partition root hashes as a hex string.
  * This provides a single hash representing the entire table's integrity state.
  *
  * Optimized to iterate page-wise to minimize buffer lock/unlock overhead.
@@ -282,8 +286,8 @@ merkle_root_hash(PG_FUNCTION_ARGS)
     Relation        indexRel;
     MerkleHash      combinedHash;
     char           *result;
-    int             numSubtrees;
-    int             nodesPerTree;
+    int             numPartitions;
+    int             nodesPerPartition;
     int             nodesPerPage;
     int             numTreePages;
     int             totalNodes;
@@ -302,12 +306,12 @@ merkle_root_hash(PG_FUNCTION_ARGS)
     indexRel = index_open(indexOid, AccessShareLock);
     
     /* Read tree configuration from metadata */
-    merkle_read_meta(indexRel, &numSubtrees, NULL, &nodesPerTree, &totalNodes, NULL,
+    merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition, &totalNodes, NULL,
                      &nodesPerPage, &numTreePages);
     
     /* 
-     * Combine all subtree roots by XOR - page-wise iteration.
-     * Root of subtree i is at global index (i * nodesPerTree).
+     * Combine all partition roots by XOR - page-wise iteration.
+     * Root of partition i is at global index (i * nodesPerPartition).
      */
     merkle_hash_zero(&combinedHash);
     nodeIdx = 0;
@@ -331,8 +335,8 @@ merkle_root_hash(PG_FUNCTION_ARGS)
         {
             int globalIdx = nodeIdx + j;
             
-            /* Check if this node is a subtree root (first node of each subtree) */
-            if (globalIdx % nodesPerTree == 0)
+            /* Check if this node is a partition root (first node of each partition) */
+            if (globalIdx % nodesPerPartition == 0)
             {
                 merkle_hash_xor(&combinedHash, &nodes[j].hash);
             }
@@ -360,6 +364,11 @@ merkle_root_hash(PG_FUNCTION_ARGS)
 Datum
 merkle_tree_stats(PG_FUNCTION_ARGS)
 {
+    StringInfoData  keybuf;
+    int             nonZeroNodes = 0;
+    int             totalNodes;
+    int             nodesPerPage;
+    int             numTreePages;
     Oid             relid = PG_GETARG_OID(0);
     Oid             indexOid;
     Relation        heapRel;
@@ -368,11 +377,6 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     Page            metapage;
     MerkleMetaPageData *meta;
     StringInfoData  buf;
-    StringInfoData  keybuf;
-    int             nonZeroNodes = 0;
-    int             totalNodes;
-    int             nodesPerPage;
-    int             numTreePages;
     int             nodeIdx;
     int             pageNum;
     int             nkeys;
@@ -455,18 +459,18 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     initStringInfo(&buf);
     appendStringInfo(&buf, 
                      "{\"version\": %u, "
-                     "\"num_subtrees\": %d, "
-                     "\"leaves_per_tree\": %d, "
-                     "\"nodes_per_tree\": %d, "
+                     "\"num_partitions\": %d, "
+                     "\"leaves_per_partition\": %d, "
+                     "\"nodes_per_partition\": %d, "
                      "\"total_nodes\": %d, "
                      "\"num_pages\": %d, "
                      "\"non_zero_nodes\": %d, "
                      "\"hash_bits\": %d, "
                      "\"index_keys\": %s}",
                      meta->version,
-                     meta->numSubtrees,
-                     meta->leavesPerTree,
-                     meta->nodesPerTree,
+                     meta->numPartitions,
+                     meta->leavesPerPartition,
+                     meta->nodesPerPartition,
                      meta->totalNodes,
                      meta->numTreePages,
                      nonZeroNodes,
@@ -490,7 +494,7 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
  *   SELECT * FROM merkle_node_hash('tablename'::regclass);
  *   SELECT * FROM merkle_node_hash('tablename'::regclass) WHERE nodeid = '10_4';
  *
- * Output columns: nodeid, subtree, node_in_tree, is_leaf, hash
+ * Output columns: nodeid, partition, node_in_partition, is_leaf, hash
  */
 /*
  * Data structure to hold pre-computed node information for SRF iteration.
@@ -498,9 +502,9 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
  */
 typedef struct NodeHashData
 {
-    Datum  *nodeids;        /* "subtree_nodeInTree" formatted string */
-    Datum  *subtrees;       /* subtree index */
-    Datum  *nodeintrees;    /* 1-indexed node position within subtree */
+    Datum  *nodeids;        /* "partition_nodeInPartition" formatted string */
+    Datum  *partitions;     /* partition index */
+    Datum  *nodeinpartitions;    /* 1-indexed node position within partition */
     bool   *isleafs;        /* true if this is a leaf node */
     Datum  *leafids;        /* global leaf ID (NULL for non-leaves) */
     bool   *leafidnulls;    /* true if leafid should be NULL */
@@ -508,15 +512,15 @@ typedef struct NodeHashData
 } NodeHashData;
 
 /*
- * merkle_node_hash() - Return all node hashes from the Merkle tree
+ * merkle_node_hash() - Debugging tool to inspect tree state.
  *
- * Returns a set of records with node information including:
- *   - nodeid: "subtree_nodeInTree" format
- *   - subtree: which subtree this node belongs to
- *   - node_in_tree: 1-indexed position within the subtree
- *   - is_leaf: whether this is a leaf node
- *   - leaf_id: global leaf ID (NULL for non-leaf nodes)
- *   - hash: 64-bit hash in hex format
+ * This function returns the raw internal state of the Merkle tree.
+ * It dumps every node, its ID, location, and current hash value.
+ * 
+ * Use this to pinpoint exactly *where* the tree is corrupt or to understand
+ * the tree structure (partitions, leaves, parents).
+ * 
+ * It is a Set Returning Function (SRF), so query it like a table.
  *
  * Usage: SELECT * FROM merkle_node_hash('tablename');
  */
@@ -534,9 +538,9 @@ merkle_node_hash(PG_FUNCTION_ARGS)
         Relation        indexRel;
         TupleDesc       tupdesc;
         NodeHashData   *data;
-        int             numSubtrees;
-        int             nodesPerTree;
-        int             leavesPerTree;
+        int             numPartitions;
+        int             nodesPerPartition;
+        int             leavesPerPartition;
         int             totalNodes;
         int             nodesPerPage;
         int             numTreePages;
@@ -557,14 +561,14 @@ merkle_node_hash(PG_FUNCTION_ARGS)
         indexRel = index_open(indexOid, AccessShareLock);
         
         /* Read tree configuration from metadata */
-        merkle_read_meta(indexRel, &numSubtrees, &leavesPerTree, &nodesPerTree,
+        merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition, &nodesPerPartition,
                          &totalNodes, NULL, &nodesPerPage, &numTreePages);
         
         /* Allocate result arrays in multi-call context (will persist across calls) */
         data = palloc(sizeof(NodeHashData));
         data->nodeids = palloc(totalNodes * sizeof(Datum));
-        data->subtrees = palloc(totalNodes * sizeof(Datum));
-        data->nodeintrees = palloc(totalNodes * sizeof(Datum));
+        data->partitions = palloc(totalNodes * sizeof(Datum));
+        data->nodeinpartitions = palloc(totalNodes * sizeof(Datum));
         data->isleafs = palloc(totalNodes * sizeof(bool));
         data->hashes = palloc(totalNodes * sizeof(Datum));
         data->leafids = palloc(totalNodes * sizeof(Datum));
@@ -594,26 +598,26 @@ merkle_node_hash(PG_FUNCTION_ARGS)
             for (j = 0; j < nodesThisPage; j++)
             {
                 int globalIdx = nodeIdx + j;
-                int subtree = globalIdx / nodesPerTree;
-                int nodeInTree = (globalIdx % nodesPerTree) + 1;  /* 1-indexed */
-                bool isLeaf = (nodeInTree >= leavesPerTree);
+                int partition = globalIdx / nodesPerPartition;
+                int nodeInPartition = (globalIdx % nodesPerPartition) + 1;  /* 1-indexed */
+                bool isLeaf = (nodeInPartition >= leavesPerPartition);
                 int leafId = -1;
                 char nodeid_str[32];
                 
                 /* Format node ID string */
-                snprintf(nodeid_str, sizeof(nodeid_str), "%d_%d", subtree, nodeInTree);
+                snprintf(nodeid_str, sizeof(nodeid_str), "%d_%d", partition, nodeInPartition);
                 
                 /* Compute global leaf ID for leaf nodes */
                 if (isLeaf)
                 {
-                    int leafInTree = nodeInTree - leavesPerTree;
-                    leafId = subtree * leavesPerTree + leafInTree;
+                    int leafInPartition = nodeInPartition - leavesPerPartition;
+                    leafId = partition * leavesPerPartition + leafInPartition;
                 }
                 
                 /* Deep copy all values into the persistent memory context */
                 data->nodeids[globalIdx] = CStringGetTextDatum(nodeid_str);
-                data->subtrees[globalIdx] = Int32GetDatum(subtree);
-                data->nodeintrees[globalIdx] = Int32GetDatum(nodeInTree);
+                data->partitions[globalIdx] = Int32GetDatum(partition);
+                data->nodeinpartitions[globalIdx] = Int32GetDatum(nodeInPartition);
                 data->isleafs[globalIdx] = isLeaf;
                 data->hashes[globalIdx] = CStringGetTextDatum(merkle_hash_to_hex(&nodes[j].hash));
                 data->leafids[globalIdx] = Int32GetDatum(leafId);
@@ -629,8 +633,8 @@ merkle_node_hash(PG_FUNCTION_ARGS)
         /* Build tuple descriptor for result set */
         tupdesc = CreateTemplateTupleDesc(6);
         TupleDescInitEntry(tupdesc, 1, "nodeid", TEXTOID, -1, 0);
-        TupleDescInitEntry(tupdesc, 2, "subtree", INT4OID, -1, 0);
-        TupleDescInitEntry(tupdesc, 3, "node_in_tree", INT4OID, -1, 0);
+        TupleDescInitEntry(tupdesc, 2, "partition", INT4OID, -1, 0);
+        TupleDescInitEntry(tupdesc, 3, "node_in_partition", INT4OID, -1, 0);
         TupleDescInitEntry(tupdesc, 4, "is_leaf", BOOLOID, -1, 0);
         TupleDescInitEntry(tupdesc, 5, "leaf_id", INT4OID, -1, 0);
         TupleDescInitEntry(tupdesc, 6, "hash", TEXTOID, -1, 0);
@@ -657,8 +661,8 @@ merkle_node_hash(PG_FUNCTION_ARGS)
         nulls[4] = data->leafidnulls[idx];
         
         values[0] = data->nodeids[idx];
-        values[1] = data->subtrees[idx];
-        values[2] = data->nodeintrees[idx];
+        values[1] = data->partitions[idx];
+        values[2] = data->nodeinpartitions[idx];
         values[3] = BoolGetDatum(data->isleafs[idx]);
         values[4] = data->leafids[idx];
         values[5] = data->hashes[idx];
@@ -730,7 +734,7 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         LockBuffer(metabuf, BUFFER_LOCK_SHARE);
         metapage = BufferGetPage(metabuf);
         meta = MerklePageGetMeta(metapage);
-        totalLeaves = meta->numSubtrees * meta->leavesPerTree;
+        totalLeaves = meta->numPartitions * meta->leavesPerPartition;
         UnlockReleaseBuffer(metabuf);
         
         /* Get index key info */
@@ -906,13 +910,14 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
     Buffer          metabuf;
     Page            metapage;
     MerkleMetaPageData *meta;
+    int             leavesPerPartition;
+    int             leafId, partition, nodeInPartition;
     TupleDesc       indexTupdesc;
     int             totalLeaves;
     int             nkeys;
     int             nargs;
     Datum          *keyValues;
     bool           *keyNulls;
-    int             result;
     int             i;
     
     /* First arg must be table OID */
@@ -935,12 +940,13 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
     indexTupdesc = RelationGetDescr(indexRel);
     nkeys = indexRel->rd_index->indnkeyatts;
     
-    /* Read metadata to get total leaves */
+    /* Read metadata to get tree configuration */
     metabuf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
     LockBuffer(metabuf, BUFFER_LOCK_SHARE);
     metapage = BufferGetPage(metabuf);
     meta = MerklePageGetMeta(metapage);
-    totalLeaves = meta->numSubtrees * meta->leavesPerTree;
+    leavesPerPartition = meta->leavesPerPartition;
+    totalLeaves = meta->numPartitions * leavesPerPartition;
     UnlockReleaseBuffer(metabuf);
     
     /* Check number of arguments provided (fcinfo->nargs includes table) */
@@ -960,8 +966,6 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
     
     /* 
      * Get key values and coerce types if necessary.
-     * When "any" type is used, literal strings come as UNKNOWNOID (cstring).
-     * We need to convert them to the expected column types.
      */
     for (i = 0; i < nkeys; i++)
     {
@@ -972,13 +976,10 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
             Oid argType = get_fn_expr_argtype(fcinfo->flinfo, i + 1);
             Oid expectedType = TupleDescAttr(indexTupdesc, i)->atttypid;
             
-            /* If argument is UNKNOWNOID (untyped literal), treat as cstring */
             if (argType == UNKNOWNOID)
             {
-                /* Convert cstring to the expected type */
                 Oid typInput;
                 Oid typIOParam;
-                
                 getTypeInputInfo(expectedType, &typInput, &typIOParam);
                 keyValues[i] = OidInputFunctionCall(typInput, 
                                                     DatumGetCString(argValue),
@@ -986,50 +987,57 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
             }
             else if (argType != expectedType)
             {
-                /* Types differ - try to coerce */
                 Oid castFunc;
                 CoercionPathType pathtype;
-                
                 pathtype = find_coercion_pathway(expectedType, argType, 
                                                  COERCION_IMPLICIT, &castFunc);
                 if (pathtype == COERCION_PATH_FUNC && OidIsValid(castFunc))
-                {
                     keyValues[i] = OidFunctionCall1(castFunc, argValue);
-                }
                 else if (pathtype == COERCION_PATH_RELABELTYPE)
-                {
-                    /* Binary compatible, use as-is */
                     keyValues[i] = argValue;
-                }
                 else
-                {
                     ereport(ERROR,
                             (errcode(ERRCODE_DATATYPE_MISMATCH),
                              errmsg("argument %d has type %s, expected %s",
                                     i + 1, format_type_be(argType),
                                     format_type_be(expectedType))));
-                }
             }
             else
-            {
-                /* Types match, use directly */
                 keyValues[i] = argValue;
-            }
         }
         else
-        {
             keyValues[i] = (Datum) 0;
-        }
     }
     
-    /* Compute partition ID using multi-key function */
-    result = merkle_compute_partition_id(keyValues, keyNulls,
+    /* Compute global leaf ID */
+    leafId = merkle_compute_partition_id(keyValues, keyNulls,
                                                 nkeys, indexTupdesc,
                                                 totalLeaves);
     
-    pfree(keyValues);
-    pfree(keyNulls);
-    index_close(indexRel, AccessShareLock);
-    
-    PG_RETURN_INT32(result);
+    /* Calculate partition components */
+    partition = leafId / leavesPerPartition;
+    nodeInPartition = (leafId % leavesPerPartition) + leavesPerPartition;
+
+    /* Build result tuple */
+    {
+        TupleDesc tupdesc;
+        Datum     values[3];
+        bool      nulls[3] = {false, false, false};
+        HeapTuple tuple;
+
+        get_call_result_type(fcinfo, NULL, &tupdesc);
+        tupdesc = BlessTupleDesc(tupdesc);
+
+        values[0] = Int32GetDatum(leafId);
+        values[1] = Int32GetDatum(partition);
+        values[2] = Int32GetDatum(nodeInPartition);
+
+        tuple = heap_form_tuple(tupdesc, values, nulls);
+        
+        pfree(keyValues);
+        pfree(keyNulls);
+        index_close(indexRel, AccessShareLock);
+        
+        PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+    }
 }

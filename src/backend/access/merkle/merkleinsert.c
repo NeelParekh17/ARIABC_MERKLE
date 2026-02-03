@@ -6,7 +6,7 @@
  * This file implements the index modification functions that are called
  * automatically by PostgreSQL when rows are inserted, updated, or deleted.
  *
- * Portions Copyright (c) 2024, PostgreSQL Global Development Group
+ * Copyright (c) 2026, Neel Parekh
  *
  * IDENTIFICATION
  *    src/backend/access/merkle/merkleinsert.c
@@ -31,7 +31,7 @@
  * 1. Fetch the full tuple from the heap
  * 2. Compute its hash
  * 3. Determine which leaf it maps to
- * 4. XOR the hash into the leaf and propagate up the tree
+ * 4. XOR the hash into the leaf and propagate up the partition-root
  *
  * Note: For UPDATE, PostgreSQL calls ambulkdelete for the old row
  * and aminsert for the new row (or just aminsert if the key didn't change).
@@ -190,10 +190,10 @@ merkleVacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     stats->num_pages = 2;  /* metadata + tree page */
     stats->num_index_tuples = 0;
     
-    /* Count subtree roots as representative of "index tuples" */
-    for (i = 0; i < MERKLE_NUM_SUBTREES; i++)
+    /* Count partition roots as representative of "index tuples" */
+    for (i = 0; i < MERKLE_NUM_PARTITIONS; i++)
     {
-        int rootNode = i * MERKLE_NODES_PER_TREE + 1;
+        int rootNode = i * MERKLE_NODES_PER_PARTITION + 1;
         if (rootNode < MERKLE_TOTAL_NODES && 
             !merkle_hash_is_zero(&nodes[rootNode].hash))
             stats->num_index_tuples++;

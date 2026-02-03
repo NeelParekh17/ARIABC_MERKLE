@@ -6,7 +6,7 @@
  * This file contains helper functions for hash computation, XOR operations,
  * tree traversal, and page access.
  *
- * Portions Copyright (c) 2024, PostgreSQL Global Development Group
+ * Copyright (c) 2026, Neel Parekh
  *
  * IDENTIFICATION
  *    src/backend/access/merkle/merkleutil.c
@@ -74,8 +74,8 @@ merkle_xact_callback(XactEvent event, void *arg)
             if (rel != NULL)
             {
                 /* Read tree configuration from metadata */
-                int         leavesPerTree;
-                int         nodesPerTree;
+                int         leavesPerPartition;
+                int         nodesPerPartition;
                 int         nodesPerPage;
                 Buffer      metabuf;
                 Page        metapage;
@@ -85,8 +85,8 @@ merkle_xact_callback(XactEvent event, void *arg)
                 LockBuffer(metabuf, BUFFER_LOCK_SHARE);
                 metapage = BufferGetPage(metabuf);
                 meta = MerklePageGetMeta(metapage);
-                leavesPerTree = meta->leavesPerTree;
-                nodesPerTree = meta->nodesPerTree;
+                leavesPerPartition = meta->leavesPerPartition;
+                nodesPerPartition = meta->nodesPerPartition;
                 nodesPerPage = meta->nodesPerPage;
                 UnlockReleaseBuffer(metabuf);
                 
@@ -95,15 +95,15 @@ merkle_xact_callback(XactEvent event, void *arg)
                      
                 /* Undo tree update using dynamic values with multi-page support */
                 {
-                    int         treeId = op->leafId / leavesPerTree;
-                    int         nodeInTree = (op->leafId % leavesPerTree) + leavesPerTree;
-                    int         nodeId = nodeInTree + (treeId * nodesPerTree);
+                    int         partitionId = op->leafId / leavesPerPartition;
+                    int         nodeInPartition = (op->leafId % leavesPerPartition) + leavesPerPartition;
+                    int         nodeId = nodeInPartition + (partitionId * nodesPerPartition);
                     int         currentPageBlkno = -1;
                     Buffer      buf = InvalidBuffer;
                     Page        page = NULL;
                     MerkleNode *nodes = NULL;
                     
-                    while (nodeInTree > 0)
+                    while (nodeInPartition > 0)
                     {
                         int         actualNodeIdx = nodeId - 1;
                         int         pageNum = actualNodeIdx / nodesPerPage;
@@ -127,8 +127,8 @@ merkle_xact_callback(XactEvent event, void *arg)
                         }
                         
                         merkle_hash_xor(&nodes[idxInPage].hash, &op->hash);
-                        nodeInTree = nodeInTree / 2;
-                        nodeId = nodeInTree + (treeId * nodesPerTree);
+                        nodeInPartition = nodeInPartition / 2;
+                        nodeId = nodeInPartition + (partitionId * nodesPerPartition);
                     }
                     
                     if (BufferIsValid(buf))
@@ -226,13 +226,17 @@ hex_char_to_int(char c)
 }
 
 /*
- * merkle_compute_row_hash() - Compute hash for a table row
+ * merkle_compute_row_hash() - Compute the integrity hash for a single row.
  *
- * This fetches the tuple from the heap and computes its MD5 hash,
- * then extracts the first 40 bits (5 bytes) as the Merkle hash.
+ * This function handles the "hashing the entire row" part of the Merkle index.
+ * It iterates over every column in the heap tuple (row), converts it to its
+ * text representation, concatenates them all with delimiters, and then computes
+ * an MD5 hash of this long string.
  *
- * The row data is concatenated as: *col1*col2*col3*...
- * NULL values are represented as *null*
+ * The resulting 128-bit hash is what gets stored in the Merkle tree leaves.
+ *
+ * NOTE: This relies on the standard type output functions. If a type's output
+ * logic changes, the hash will change, causing verification failures.
  */
 void
 merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
@@ -305,8 +309,8 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
     else
     {
         /*
-         * Extract first 16 hex chars (8 bytes = 64 bits)
-         * MD5 produces 32 hex chars, we use first 16 for full 64-bit hash
+         * Extract all 32 hex chars (16 bytes = 128 bits)
+         * MD5 produces 32 hex chars, we use all of them for full 128-bit hash
          */
         for (i = 0; i < MERKLE_HASH_BYTES; i++)
         {
@@ -382,11 +386,16 @@ merkle_compute_partition_id_single(Datum key, Oid keytype, int numLeaves)
 }
 
 /*
- * merkle_compute_partition_id() - Compute partition for key(s)
+ * merkle_compute_partition_id() - Determine which leaf a row maps to.
  *
- * Handles both single and multi-column indexes.
- * For single-column, uses optimized integer path.
- * For multi-column, concatenates string representations of all keys.
+ * This logic decides the "position" of a row in the Merkle tree.
+ * The index key(s) are hashed (modulo total_leaves) to pick a leaf index.
+ * 
+ * - Single-key optimization: If the key is an integer, we use modular arithmetic directly
+ *   for better distribution.
+ * - Multi-key/Non-integer: We stringify the keys, hash them, and then modulo.
+ *
+ * Important: This mapping must be deterministic!
  */
 int
 merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
@@ -439,23 +448,33 @@ merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
 }
 
 /*
- * merkle_update_tree_path() - Update tree from leaf to root
+ * merkle_update_tree_path() - Propagate a hash change up the tree.
  *
- * This XORs the hash into the leaf node and propagates the change
- * up to the subtree root.
+ * This function is the core tree maintenance routine. When a row is inserted or deleted:
+ * 1. We identify which leaf it affects (`leafId`).
+ * 2. We find the node corresponding to that leaf.
+ * 3. We XOR the row's hash into that leaf node.
+ * 4. We then move up to the parent node and XOR the hash there too.
+ * 5. We repeat until we reach the root of the partition.
  *
- * Supports multi-page trees - nodes are distributed across multiple pages.
+ * XOR Property:
+ *   Tree_Hash_New = Tree_Hash_Old XOR Row_Hash
+ *   This works for both INSERT (adding the hash) and DELETE (removing the hash),
+ *   because A XOR B XOR B = A.
  *
- * isXorIn: true for INSERT (XOR in), false for DELETE (XOR out - same operation)
+ * Multi-page support:
+ *   The tree structure is flattened into an array of nodes spread across multiple
+ *   database pages. This function handles the logic of calculating which page and offset
+ *   a node resides in.
  */
 void
 merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool isXorIn)
 {
-    int         treeId;
-    int         nodeInTree;
+    int         partitionId;
+    int         nodeInPartition;
     int         nodeId;
-    int         leavesPerTree;
-    int         nodesPerTree;
+    int         leavesPerPartition;
+    int         nodesPerPartition;
     int         nodesPerPage;
     int         currentPageBlkno = -1;
     Buffer      buf = InvalidBuffer;
@@ -465,7 +484,7 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
     MerklePendingOp *op;
     
     /* Read tree configuration from metadata */
-    merkle_read_meta(indexRel, NULL, &leavesPerTree, &nodesPerTree, NULL, NULL,
+    merkle_read_meta(indexRel, NULL, &leavesPerPartition, &nodesPerPartition, NULL, NULL,
                           &nodesPerPage, NULL);
     
     /*
@@ -493,13 +512,13 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
     
     MemoryContextSwitchTo(oldContext);
     
-    /* Calculate tree and node positions using dynamic values */
-    treeId = leafId / leavesPerTree;
-    nodeInTree = (leafId % leavesPerTree) + leavesPerTree;
-    nodeId = nodeInTree + (treeId * nodesPerTree);
+    /* Calculate partition and node positions using dynamic values */
+    partitionId = leafId / leavesPerPartition;
+    nodeInPartition = (leafId % leavesPerPartition) + leavesPerPartition;
+    nodeId = nodeInPartition + (partitionId * nodesPerPartition);
     
     /* Walk from leaf to root, XORing at each level */
-    while (nodeInTree > 0)
+    while (nodeInPartition > 0)
     {
         int         actualNodeIdx = nodeId - 1;  /* 0-based index */
         int         pageNum = actualNodeIdx / nodesPerPage;
@@ -528,8 +547,8 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
         merkle_hash_xor(&nodes[idxInPage].hash, hash);
         
         /* Move to parent */
-        nodeInTree = nodeInTree / 2;
-        nodeId = nodeInTree + (treeId * nodesPerTree);
+        nodeInPartition = nodeInPartition / 2;
+        nodeId = nodeInPartition + (partitionId * nodesPerPartition);
     }
     
     /* Release the last page if held */
@@ -551,8 +570,8 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
  * we compute the values from the stored configuration.
  */
 void
-merkle_read_meta(Relation indexRel, int *numSubtrees, int *leavesPerTree,
-                 int *nodesPerTree, int *totalNodes, int *totalLeaves,
+merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
+                 int *nodesPerPartition, int *totalNodes, int *totalLeaves,
                  int *nodesPerPage, int *numTreePages)
 {
     Buffer              buf;
@@ -567,16 +586,16 @@ merkle_read_meta(Relation indexRel, int *numSubtrees, int *leavesPerTree,
     meta = MerklePageGetMeta(page);
     
     /* Read values from metadata */
-    if (numSubtrees)
-        *numSubtrees = meta->numSubtrees;
-    if (leavesPerTree)
-        *leavesPerTree = meta->leavesPerTree;
-    if (nodesPerTree)
-        *nodesPerTree = meta->nodesPerTree;
+    if (numPartitions)
+        *numPartitions = meta->numPartitions;
+    if (leavesPerPartition)
+        *leavesPerPartition = meta->leavesPerPartition;
+    if (nodesPerPartition)
+        *nodesPerPartition = meta->nodesPerPartition;
     if (totalNodes)
         *totalNodes = meta->totalNodes;
     if (totalLeaves)
-        *totalLeaves = meta->numSubtrees * meta->leavesPerTree;
+        *totalLeaves = meta->numPartitions * meta->leavesPerPartition;
     
     /* 
      * Backward compatibility: old indexes don't have nodesPerPage/numTreePages.
@@ -619,9 +638,9 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
     Buffer          metabuf;
     Page            metapage;
     MerkleMetaPageData *meta;
-    int             numSubtrees;
-    int             leavesPerTree;
-    int             nodesPerTree;
+    int             numPartitions;
+    int             leavesPerPartition;
+    int             nodesPerPartition;
     int             totalNodes;
     int             nodesPerPage;
     int             numTreePages;
@@ -631,18 +650,18 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
     /* Use provided options or defaults */
     if (opts != NULL)
     {
-        numSubtrees = opts->subtrees;
-        leavesPerTree = opts->leaves_per_tree;
+        numPartitions = opts->partitions;
+        leavesPerPartition = opts->leaves_per_partition;
     }
     else
     {
-        numSubtrees = MERKLE_NUM_SUBTREES;
-        leavesPerTree = MERKLE_LEAVES_PER_TREE;
+        numPartitions = MERKLE_NUM_PARTITIONS;
+        leavesPerPartition = MERKLE_LEAVES_PER_PARTITION;
     }
     
     /* Calculate derived values */
-    nodesPerTree = 2 * leavesPerTree - 1;
-    totalNodes = numSubtrees * nodesPerTree;
+    nodesPerPartition = 2 * leavesPerPartition - 1;
+    totalNodes = numPartitions * nodesPerPartition;
     nodesPerPage = (int)MERKLE_MAX_NODES_PER_PAGE;
     numTreePages = (totalNodes + nodesPerPage - 1) / nodesPerPage;  /* ceiling division */
     
@@ -656,9 +675,9 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
     meta = MerklePageGetMeta(metapage);
     meta->version = MERKLE_VERSION;
     meta->heapRelid = heapOid;
-    meta->numSubtrees = numSubtrees;
-    meta->leavesPerTree = leavesPerTree;
-    meta->nodesPerTree = nodesPerTree;
+    meta->numPartitions = numPartitions;
+    meta->leavesPerPartition = leavesPerPartition;
+    meta->nodesPerPartition = nodesPerPartition;
     meta->totalNodes = totalNodes;
     meta->nodesPerPage = nodesPerPage;
     meta->numTreePages = numTreePages;

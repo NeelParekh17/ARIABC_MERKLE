@@ -7,7 +7,7 @@
  * integrity verification. On every INSERT/UPDATE/DELETE, the Merkle
  * tree is automatically updated by PostgreSQL's index infrastructure.
  *
- * Portions Copyright (c) 2024, PostgreSQL Global Development Group
+ * Copyright (c) 2026, Neel Parekh
  *
  * src/include/access/merkle.h
  *
@@ -30,50 +30,48 @@ extern bool enable_merkle_index;
 /*
  * Merkle tree configuration constants
  * 
- * The tree is organized as multiple subtrees for better distribution:
- * - NUM_SUBTREES: Number of independent subtrees (95 to fit in one page)
- * - LEAVES_PER_TREE: Leaves in each subtree (4, giving tree height 3)
- * - NODES_PER_TREE: Total nodes per subtree (2 * leaves - 1 = 7)
- * - TOTAL_LEAVES: Total leaf positions (95 * 4 = 380)
- * - TOTAL_NODES: Total nodes across all subtrees (95 * 7 = 665)
+ * The tree is organized as multiple partitions for better distribution:
+ * - NUM_PARTITIONS: Number of independent partitions (58 to fit in one page)
+ * - LEAVES_PER_PARTITION: Leaves in each partition (4, giving tree height 3)
+ * - NODES_PER_PARTITION: Total nodes per partition (2 * leaves - 1 = 7)
+ * - TOTAL_LEAVES: Total leaf positions (58 * 4 = 232)
+ * - TOTAL_NODES: Total nodes across all partitions (58 * 7 = 406)
  *
- * Due to struct alignment, MerkleNode is 12 bytes (not 9).
- * 665 * 12 = 7980 bytes < 8192 - header ≈ 8168 usable bytes
+ * Due to struct alignment, MerkleNode is 20 bytes (4 + 16).
+ * 406 * 20 = 8120 bytes < 8192 - header ≈ 8168 usable bytes.
  */
-#define MERKLE_NUM_SUBTREES         95
-#define MERKLE_LEAVES_PER_TREE      4
+#define MERKLE_NUM_PARTITIONS       58
+#define MERKLE_LEAVES_PER_PARTITION 4
 #define MERKLE_TREE_BASE            4   /* branching factor */
-#define MERKLE_NODES_PER_TREE       7   /* 2 * LEAVES_PER_TREE - 1 */
-#define MERKLE_TOTAL_LEAVES         380 /* NUM_SUBTREES * LEAVES_PER_TREE */
-#define MERKLE_TOTAL_NODES          665 /* NUM_SUBTREES * NODES_PER_TREE */
+#define MERKLE_NODES_PER_PARTITION  7   /* 2 * LEAVES_PER_PARTITION - 1 */
+#define MERKLE_TOTAL_LEAVES         232 /* NUM_PARTITIONS * LEAVES_PER_PARTITION */
+#define MERKLE_TOTAL_NODES          406 /* NUM_PARTITIONS * NODES_PER_PARTITION */
 
 /*
  * Hash configuration
- * Using 64-bit (8-byte) hashes derived from MD5 prefix
+ * Using 128-bit (16-byte) hashes - Utilizing full MD5 output
  * 
- * NOTE: We upgraded from 40-bit to 64-bit at no storage cost!
- * Due to struct alignment, MerkleNode was already 12 bytes
- * (4 nodeId + 5 hash + 3 padding). Now we use all 8 bytes
- * for the hash instead of wasting 3 bytes on padding.
+ * NOTE: Upgraded to 128-bit for maximum security.
+ * Each node now takes 20 bytes (4 nodeId + 16 hash).
  * 
- * Security: Collision threshold goes from 2^20 to 2^32 (4 billion rows)
+ * Security: Collision threshold is now 2^64 (astronomical)
  */
-#define MERKLE_HASH_BITS            64
-#define MERKLE_HASH_BYTES           8
-#define MERKLE_MD5_PREFIX_LEN       16  /* Full MD5 hex = 32 chars, use first 16 for 8 bytes */
+#define MERKLE_HASH_BITS            128
+#define MERKLE_HASH_BYTES           16
+#define MERKLE_MD5_PREFIX_LEN       32  /* Full MD5 hex = 32 chars */
 
 /*
  * Page layout constants
  */
 #define MERKLE_METAPAGE_BLKNO       0
 #define MERKLE_TREE_START_BLKNO     1
-#define MERKLE_VERSION              2   /* Bump version for 64-bit hash format */
+#define MERKLE_VERSION              3   /* Bump version for 128-bit hash format */
 
 /*
  * Calculate how many nodes fit per page
- * Each node: 4 bytes (nodeId) + 8 bytes (hash) = 12 bytes (same as before!)
+ * Each node: 4 bytes (nodeId) + 16 bytes (hash) = 20 bytes
  * Page size 8192, minus header ~24 bytes = ~8168 usable
- * Max ~680 nodes per page, we use 665
+ * Max ~408 nodes per page.
  */
 #define MERKLE_MAX_NODES_PER_PAGE   ((BLCKSZ - MAXALIGN(SizeOfPageHeaderData)) / sizeof(MerkleNode))
 
@@ -101,9 +99,9 @@ typedef struct MerkleMetaPageData
 {
     uint32          version;            /* format version */
     Oid             heapRelid;          /* OID of indexed table */
-    int32           numSubtrees;        /* number of subtrees */
-    int32           leavesPerTree;      /* leaves per subtree */
-    int32           nodesPerTree;       /* nodes per subtree */
+    int32           numPartitions;      /* number of partitions */
+    int32           leavesPerPartition; /* leaves per partition */
+    int32           nodesPerPartition;  /* nodes per partition */
     int32           totalNodes;         /* total nodes in tree */
     int32           nodesPerPage;       /* how many nodes fit per page */
     int32           numTreePages;       /* number of pages for tree nodes */
@@ -119,8 +117,8 @@ typedef struct MerkleMetaPageData
 typedef struct MerkleOptions
 {
     int32       vl_len_;        /* varlena header (required) */
-    int         subtrees;
-    int         leaves_per_tree;
+    int         partitions;
+    int         leaves_per_partition;
 } MerkleOptions;
 
 /*
@@ -138,8 +136,8 @@ extern MerkleOptions *merkle_get_options(Relation indexRel);
  * Helper to read tree config from metadata
  * (nodesPerPage and numTreePages can be NULL if not needed)
  */
-extern void merkle_read_meta(Relation indexRel, int *numSubtrees,
-                             int *leavesPerTree, int *nodesPerTree,
+extern void merkle_read_meta(Relation indexRel, int *numPartitions,
+                             int *leavesPerPartition, int *nodesPerPartition,
                              int *totalNodes, int *totalLeaves,
                              int *nodesPerPage, int *numTreePages);
 

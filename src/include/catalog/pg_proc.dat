@@ -932,7 +932,7 @@
   prorettype => 'record', proargtypes => 'regclass',
   proallargtypes => '{regclass,text,int4,int4,bool,int4,text}',
   proargmodes => '{i,o,o,o,o,o,o}',
-  proargnames => '{tablename,nodeid,subtree,node_in_tree,is_leaf,leaf_id,hash}',
+  proargnames => '{tablename,nodeid,partition,node_in_partition,is_leaf,leaf_id,hash}',
   prosrc => 'merkle_node_hash' },
 { oid => '9906', descr => 'view tuple-to-leaf bucketing',
   proname => 'merkle_leaf_tuples', provolatile => 'v',
@@ -944,8 +944,10 @@
   prosrc => 'merkle_leaf_tuples' },
 { oid => '9907', descr => 'compute merkle leaf bucket ID for key value(s)',
   proname => 'merkle_leaf_id', provolatile => 's', provariadic => 'any',
-  prorettype => 'int4', proargtypes => 'regclass any',
-  proargnames => '{tablename,keys}', proargmodes => '{i,v}',
+  prorettype => 'record', proargtypes => 'regclass any',
+  proallargtypes => '{regclass,any,int4,int4,int4}',
+  proargmodes => '{i,v,o,o,o}',
+  proargnames => '{tablename,keys,leaf_id,partition,node_in_partition}',
   prosrc => 'merkle_leaf_id' },
 
 { oid => '338', descr => 'validate an operator class',
@@ -10773,10 +10775,6 @@
 proname => 'bcdb_init', prorettype => 'bool',
 proargtypes => 'bool int4', prosrc => 'bcdb_init' },
 
-{ oid => '7102', descr => 'BCDB init2',
-proname => 'bcdb_init2', prorettype => 'bool',
-proargtypes => 'bool int4 int4 int4', prosrc => 'bcdb_init2' },
-
 # bcdb function
 { oid => '7003', descr => 'BCDB tx submit',
 proname => 'bcdb_tx_submit', prorettype => 'int4',
@@ -10808,12 +10806,8 @@ proname => 'bcdb_check_block_status', prorettype => 'cstring',
 proargtypes => 'int4', prosrc => 'bcdb_check_block_status' }
 
 # bcdb function
-{ oid => '7109', descr => 'BCDB block submit',
-proname => 'bcdb_block_submit2', prorettype => 'bool',
-proargtypes => 'cstring', prosrc => 'bcdb_block_submit2' },
-
 { oid => '7009', descr => 'BCDB block submit',
-proname => 'bcdb_block_submit', prorettype => 'cstring',
+proname => 'bcdb_block_submit', prorettype => 'bool',
 proargtypes => 'cstring', prosrc => 'bcdb_block_submit' },
 
 # bcdb function

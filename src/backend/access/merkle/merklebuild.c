@@ -6,7 +6,7 @@
  * This file implements the index build functions that create a new
  * Merkle index from existing table data.
  *
- * Portions Copyright (c) 2024, PostgreSQL Global Development Group
+ * Copyright (c) 2026, Neel Parekh
  *
  * IDENTIFICATION
  *    src/backend/access/merkle/merklebuild.c
@@ -23,6 +23,7 @@
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/smgr.h"
+#include "catalog/pg_am_d.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
@@ -92,8 +93,42 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     
     /* Get user-specified options or defaults */
     opts = merkle_get_options(indexRel);
-    totalLeaves = opts->subtrees * opts->leaves_per_tree;
+    totalLeaves = opts->partitions * opts->leaves_per_partition;
     
+    /*
+     * Enforce single Merkle index per table
+     */
+    {
+        List       *indexList;
+        ListCell   *lc;
+        Oid         currentIndexOid = RelationGetRelid(indexRel);
+
+        indexList =    RelationGetIndexList(heapRel);
+        foreach(lc, indexList)
+        {
+            Oid         indexOid = lfirst_oid(lc);
+            Relation    otherIndexRel;
+
+            /* Skip the index we are currently building */
+            if (indexOid == currentIndexOid)
+                continue;
+
+            otherIndexRel = index_open(indexOid, AccessShareLock);
+            if (otherIndexRel->rd_rel->relam == MERKLE_AM_OID)
+            {
+                index_close(otherIndexRel, AccessShareLock);
+                list_free(indexList);
+                ereport(ERROR,
+                        (errcode(ERRCODE_DUPLICATE_OBJECT),
+                         errmsg("table \"%s\" already has a Merkle index",
+                                RelationGetRelationName(heapRel)),
+                         errhint("Only one Merkle index is allowed per table as it hashes the entire row.")));
+            }
+            index_close(otherIndexRel, AccessShareLock);
+        }
+        list_free(indexList);
+    }
+
     /*
      * Initialize the index storage with user-specified tree dimensions
      */
@@ -134,31 +169,44 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 /*
  * merkleBuildempty() - Build an empty Merkle index
  *
- * This is called when CREATE INDEX is executed on an empty table,
- * or during recovery when we need to create the init fork.
+ * This function is part of the PostgreSQL Index AM interface. It is specifically
+ * called for UNLOGGED tables to create the 'initial fork' (INIT_FORKNUM).
+ *
+ * Unlogged tables do not write WAL, so on a crash/restart, PostgreSQL truncates
+ * the index to the state created by this function. While AriaBC (blockchain) 
+ * typically uses logged durable tables, this function is required for completeness
+ * and to support UNLOGGED relations.
  */
 void
 merkleBuildempty(Relation indexRel)
 {
     Page        metapage;
-    Page        treepage;
     MerkleMetaPageData *meta;
-    MerkleNode *nodes;
-    int         i;
+    int         totalNodes;
+    int         nodesPerPage;
+    int         numTreePages;
+    int         nodeIdx;
+    int         pageNum;
 
     /*
-     * Construct metadata page
+     * Construct metadata page using defaults
      */
     metapage = (Page) palloc(BLCKSZ);
     PageInit(metapage, BLCKSZ, 0);
     
+    nodesPerPage = (int)MERKLE_MAX_NODES_PER_PAGE;
+    totalNodes = MERKLE_TOTAL_NODES;
+    numTreePages = (totalNodes + nodesPerPage - 1) / nodesPerPage;
+
     meta = MerklePageGetMeta(metapage);
     meta->version = MERKLE_VERSION;
     meta->heapRelid = InvalidOid;  /* Will be set on first insert */
-    meta->numSubtrees = MERKLE_NUM_SUBTREES;
-    meta->leavesPerTree = MERKLE_LEAVES_PER_TREE;
-    meta->nodesPerTree = MERKLE_NODES_PER_TREE;
-    meta->totalNodes = MERKLE_TOTAL_NODES;
+    meta->numPartitions = MERKLE_NUM_PARTITIONS;
+    meta->leavesPerPartition = MERKLE_LEAVES_PER_PARTITION;
+    meta->nodesPerPartition = MERKLE_NODES_PER_PARTITION;
+    meta->totalNodes = totalNodes;
+    meta->nodesPerPage = nodesPerPage;
+    meta->numTreePages = numTreePages;
     
     /*
      * Make sure we have the smgr relation open
@@ -175,26 +223,40 @@ merkleBuildempty(Relation indexRel)
                 MERKLE_METAPAGE_BLKNO, metapage, true);
     
     /*
-     * Construct tree node page
+     * Construct and write tree node pages
      */
-    treepage = (Page) palloc(BLCKSZ);
-    PageInit(treepage, BLCKSZ, 0);
-    
-    nodes = (MerkleNode *) PageGetContents(treepage);
-    for (i = 0; i < MERKLE_TOTAL_NODES; i++)
+    nodeIdx = 0;
+    for (pageNum = 0; pageNum < numTreePages; pageNum++)
     {
-        nodes[i].nodeId = i;
-        merkle_hash_zero(&nodes[i].hash);
+        Page        treepage;
+        MerkleNode *nodes;
+        int         nodesThisPage;
+        int         i;
+
+        treepage = (Page) palloc(BLCKSZ);
+        PageInit(treepage, BLCKSZ, 0);
+        
+        nodes = (MerkleNode *) PageGetContents(treepage);
+        memset(nodes, 0, BLCKSZ - MAXALIGN(SizeOfPageHeaderData));
+        
+        nodesThisPage = Min(nodesPerPage, totalNodes - nodeIdx);
+        
+        for (i = 0; i < nodesThisPage; i++)
+        {
+            nodes[i].nodeId = nodeIdx + i;
+            merkle_hash_zero(&nodes[i].hash);
+        }
+        
+        nodeIdx += nodesThisPage;
+
+        PageSetChecksumInplace(treepage, MERKLE_TREE_START_BLKNO + pageNum);
+        smgrwrite(indexRel->rd_smgr, INIT_FORKNUM, MERKLE_TREE_START_BLKNO + pageNum,
+                  (char *) treepage, true);
+        log_newpage(&indexRel->rd_smgr->smgr_rnode.node, INIT_FORKNUM,
+                    MERKLE_TREE_START_BLKNO + pageNum, treepage, true);
+        
+        pfree(treepage);
     }
-    
-    /*
-     * Write tree page
-     */
-    PageSetChecksumInplace(treepage, MERKLE_TREE_START_BLKNO);
-    smgrwrite(indexRel->rd_smgr, INIT_FORKNUM, MERKLE_TREE_START_BLKNO,
-              (char *) treepage, true);
-    log_newpage(&indexRel->rd_smgr->smgr_rnode.node, INIT_FORKNUM,
-                MERKLE_TREE_START_BLKNO, treepage, true);
     
     /*
      * Sync to disk
@@ -202,5 +264,4 @@ merkleBuildempty(Relation indexRel)
     smgrimmedsync(indexRel->rd_smgr, INIT_FORKNUM);
     
     pfree(metapage);
-    pfree(treepage);
 }

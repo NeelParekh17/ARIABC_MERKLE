@@ -6,18 +6,18 @@ This repository contains the implementation of Merkle tree functionality integra
 
 The Merkle tree implementation provides cryptographic verification of data integrity through a hierarchical hash structure. Each leaf node contains a hash of data, and each internal node contains a hash of its children, creating a tamper-evident data structure.
 
-## Files Added
+## Files Added/Modified
 
 ### Core Merkle Tree Implementation
 
 #### `src/backend/access/merkle/`
 This directory contains the core Merkle tree access method implementation:
 
-- **`merkle.c`** - Main Merkle tree access method interface and core functions
-- **`merklebuild.c`** - Functions for building and initializing Merkle trees
-- **`merkleinsert.c`** - Insert operations for Merkle tree nodes
-- **`merkleutil.c`** - Utility functions for Merkle tree operations (hashing, verification)
-- **`merkleverify.c`** - Verification and audit functions for Merkle tree integrity
+- **`merkle.c`** - Main Merkle tree access method interface and core functions (recently updated)
+- **`merklebuild.c`** - Functions for building and initializing Merkle trees (recently updated)
+- **`merkleinsert.c`** - Insert operations for Merkle tree nodes (recently updated)
+- **`merkleutil.c`** - Utility functions for Merkle tree operations (hashing, verification) (recently updated)
+- **`merkleverify.c`** - Verification and audit functions for Merkle tree integrity (recently updated)
 - **`Makefile`** - Build configuration for the Merkle module
 
 #### `src/backend/access/Makefile`
@@ -38,12 +38,13 @@ Added configuration parameters for controlling Merkle tree behavior:
 
 ### Header Files
 
-#### `src/include/access/merkle.h`
+#### `src/include/access/merkle.h` (recently updated)
 Public API and data structures for the Merkle tree access method:
 - Merkle tree node structures
 - Function declarations for insert, build, verify operations
 - Hash computation interfaces
 - Proof generation and verification APIs
+- Updated function signatures and data structures
 
 ### System Catalog Updates
 
@@ -56,11 +57,15 @@ Defined operator classes for Merkle tree indexing support.
 #### `src/include/catalog/pg_opfamily.dat`
 Defined operator families for Merkle tree operations.
 
-#### `src/include/catalog/pg_proc.dat`
-Added stored procedure definitions for Merkle-related functions:
+#### `src/include/catalog/pg_proc.dat` (recently updated)
+Added and updated stored procedure definitions for Merkle-related functions:
 - Hash computation functions
 - Verification functions
 - Proof generation and validation functions
+- **Recent updates:**
+  - Updated `merkle_node_hash` to use partition terminology (nodeid, partition, node_in_partition)
+  - Enhanced `merkle_leaf_id` to return detailed record with leaf_id, partition, and node_in_partition
+  - Fixed BCDB function definitions for better integration
 
 ## Features
 
@@ -80,6 +85,27 @@ Added stored procedure definitions for Merkle-related functions:
 - Parallel hash computation support
 
 ## Usage
+
+### Creating a Merkle Index
+
+```sql
+-- Create a Merkle index with default parameters
+CREATE INDEX usertable_merkle_default ON usertable USING merkle(ycsb_key);
+
+-- Create a Merkle index with custom parameters
+CREATE INDEX usertable_merkle_variable ON usertable 
+  USING merkle(ycsb_key) 
+  WITH (partitions = 150, leaves_per_partition = 8);
+
+-- Create a multi-key Merkle index
+CREATE INDEX usertable_merkle_multikey ON usertable 
+  USING merkle(ycsb_key, field1);
+
+-- Create a multi-key Merkle index with custom parameters
+CREATE INDEX usertable_merkle_multikey_variable ON usertable 
+  USING merkle(ycsb_key, field1) 
+  WITH (partitions = 150, leaves_per_partition = 8);
+```
 
 ### Creating a Merkle-Indexed Table
 
@@ -102,8 +128,20 @@ SELECT merkle_verify('transactions');
 -- Get the root hash
 SELECT merkle_root_hash('transactions');
 
--- Generate a Merkle proof for a specific record
-SELECT merkle_generate_proof('transactions', 'id', 123);
+-- Get detailed tree statistics
+SELECT merkle_tree_stats('transactions');
+
+-- View all node hashes (returns nodeid, partition, node_in_partition, is_leaf, leaf_id, hash)
+SELECT * FROM merkle_node_hash('transactions');
+
+-- View tuple-to-leaf bucketing
+SELECT * FROM merkle_leaf_tuples('transactions');
+
+-- Get leaf ID for specific key(s) - returns leaf_id, partition, node_in_partition
+SELECT * from merkle_leaf_id('transactions', 1199);
+
+-- For multi-key indexes
+SELECT * from merkle_leaf_id('usertable', 120000, 'field1');
 ```
 
 ### Configuration
@@ -123,17 +161,26 @@ merkle_verification_level = 'full'
 
 ## Architecture
 
-### Hash Chain
-Each data block is hashed and linked in a binary tree structure:
+### Partition-Based Merkle Tree Structure
+The Merkle tree is organized into partitions (subtrees) for better scalability:
+- Each partition contains a configurable number of leaf nodes
+- Multiple partitions can be processed in parallel
+- Root hash is computed from partition roots
+
 ```
-         Root Hash
-        /         \
-    Hash AB     Hash CD
-     /  \        /  \
-  H(A) H(B)  H(C) H(D)
-   |    |     |    |
-  Row1 Row2 Row3 Row4
+         Global Root Hash
+        /       |       \
+    Part 0   Part 1   Part 2  ... (subtrees/partitions)
+     /  \      /  \      /  \
+  H(A) H(B) H(C) H(D) H(E) H(F)
+   |    |    |    |    |    |
+  L0   L1   L2   L3   L4   L5  (leaves_per_tree nodes each)
 ```
+
+### Terminology Updates
+- **Partition**: Previously called "subtree", represents a section of the Merkle tree
+- **Node in Partition**: Position of a node within its partition
+- **Leaf ID**: Unique identifier for leaf buckets that hold tuples
 
 ### Verification Process
 1. Compute hash of data block
@@ -148,6 +195,16 @@ When data is modified:
 3. Update root hash atomically
 4. Store previous root hash for audit trail
 
+## Utility Scripts
+
+The `scripts/` directory contains helpful utilities:
+
+- **`start_server.sh`** - Script to start the PostgreSQL/AriaBC server
+- **`restore.sql`** - Database restoration script
+- **`restore_and_index.sql`** - Database restoration with Merkle indexing
+- **`rebuild_all.sh`** - Complete rebuild script
+- **`test_bcdb_original.sh`** - BCDB testing script
+
 ## Building
 
 The Merkle tree implementation is built as part of the standard PostgreSQL/AriaBC build process:
@@ -159,6 +216,21 @@ make install
 ```
 
 ## Testing
+
+### Demo Script
+A comprehensive demo script is available at [demo.sql](demo.sql) that demonstrates:
+- Creating Merkle indexes with various configurations
+- Multi-key Merkle indexes
+- Verification and utility functions
+- Query and insert operations
+
+Run the demo:
+
+```bash
+psql -f demo.sql your_database
+```
+
+### Test Suite
 
 Run the test suite:
 
@@ -199,7 +271,7 @@ pg_regress merkle_basic merkle_verify merkle_proof
 
 ## Contributing
 
-This is part of the ARIABC project. For contributions, please follow the PostgreSQL coding standards and submit patches through the project's contribution process.
+This is part of the ARIABC_Merkle project. For contributions, please follow the PostgreSQL coding standards and submit patches through the project's contribution process.
 
 ## License
 
@@ -213,7 +285,7 @@ Same license as PostgreSQL/AriaBC.
 
 ## Authors
 
-ARIABC Development Team
+Neel Parekh
 
 ## Contact
 

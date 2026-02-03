@@ -6,7 +6,7 @@
  * This file implements the IndexAmRoutine handler function that returns
  * the callback function pointers for the merkle access method.
  *
- * Portions Copyright (c) 2024, PostgreSQL Global Development Group
+ * Copyright (c) 2026, Neel Parekh
  *
  * IDENTIFICATION
  *    src/backend/access/merkle/merkle.c
@@ -44,21 +44,21 @@ merkle_register_relopts(void)
     
     merkle_relopt_kind = add_reloption_kind();
     
-    add_int_reloption(merkle_relopt_kind, "subtrees",
-                      "Number of subtrees in the merkle index",
-                      MERKLE_NUM_SUBTREES, 1, 10000, AccessExclusiveLock);
+    add_int_reloption(merkle_relopt_kind, "partitions",
+                      "Number of partitions in the merkle index",
+                      MERKLE_NUM_PARTITIONS, 1, 10000, AccessExclusiveLock);
     
-    add_int_reloption(merkle_relopt_kind, "leaves_per_tree",
-                      "Number of leaves per subtree (must be power of 2)",
-                      MERKLE_LEAVES_PER_TREE, 2, 1024, AccessExclusiveLock);
+    add_int_reloption(merkle_relopt_kind, "leaves_per_partition",
+                      "Number of leaves per partition (must be power of 2)",
+                      MERKLE_LEAVES_PER_PARTITION, 2, 1024, AccessExclusiveLock);
     
     merkle_relopts_registered = true;
 }
 
 /* Reloption parsing table */
 static relopt_parse_elt merkle_relopt_tab[] = {
-    {"subtrees", RELOPT_TYPE_INT, offsetof(MerkleOptions, subtrees)},
-    {"leaves_per_tree", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaves_per_tree)}
+    {"partitions", RELOPT_TYPE_INT, offsetof(MerkleOptions, partitions)},
+    {"leaves_per_partition", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaves_per_partition)}
 };
 
 /*
@@ -80,6 +80,19 @@ merkle_options(Datum reloptions, bool validate)
                                                merkle_relopt_tab,
                                                lengthof(merkle_relopt_tab));
     
+    if (validate && opts != NULL)
+    {
+        /* Check if leaves_per_partition is power of 2 using bitwise trick */
+        if (opts->leaves_per_partition <= 0 || 
+            (opts->leaves_per_partition & (opts->leaves_per_partition - 1)) != 0)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("leaves_per_partition must be a power of 2"),
+                     errhint("Suggested values: 2, 4, 8, 16, 32, 64, 128, ...")));
+        }
+    }
+    
     return (bytea *) opts;
 }
 
@@ -100,8 +113,8 @@ merkle_get_options(Relation indexRel)
         /* No options specified, return defaults */
         opts = (MerkleOptions *) palloc0(sizeof(MerkleOptions));
         SET_VARSIZE(opts, sizeof(MerkleOptions));
-        opts->subtrees = MERKLE_NUM_SUBTREES;
-        opts->leaves_per_tree = MERKLE_LEAVES_PER_TREE;
+        opts->partitions = MERKLE_NUM_PARTITIONS;
+        opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
         return opts;
     }
     
@@ -114,14 +127,15 @@ merkle_get_options(Relation indexRel)
     memcpy(opts, relopts, VARSIZE(relopts));
     
     /* Validate options - if values look corrupt, use defaults */
-    if (opts->subtrees <= 0 || opts->subtrees > 10000 ||
-        opts->leaves_per_tree <= 0 || opts->leaves_per_tree > 1024)
+    if (opts->partitions <= 0 || opts->partitions > 10000 ||
+        opts->leaves_per_partition <= 0 || opts->leaves_per_partition > 1024 ||
+        (opts->leaves_per_partition & (opts->leaves_per_partition - 1)) != 0)
     {
         ereport(NOTICE,
-                (errmsg("merkle: invalid options detected (subtrees=%d, leaves=%d), using defaults",
-                        opts->subtrees, opts->leaves_per_tree)));
-        opts->subtrees = MERKLE_NUM_SUBTREES;
-        opts->leaves_per_tree = MERKLE_LEAVES_PER_TREE;
+                (errmsg("merkle: invalid options detected (partitions=%d, leaves=%d), using defaults",
+                        opts->partitions, opts->leaves_per_partition)));
+        opts->partitions = MERKLE_NUM_PARTITIONS;
+        opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
     }
     
     return opts;
@@ -187,7 +201,7 @@ merklehandler(PG_FUNCTION_ARGS)
      */
     amroutine->amcanreturn = NULL;          /* no index-only scans */
     amroutine->amcostestimate = merkleCostEstimate;
-    amroutine->amoptions = merkle_options;  /* parse subtrees, leaves_per_tree */
+    amroutine->amoptions = merkle_options;  /* parse partitions, leaves_per_partition */
     amroutine->amproperty = NULL;           /* no special properties */
     amroutine->ambuildphasename = NULL;     /* no build phases */
     amroutine->amvalidate = NULL;           /* no opclass validation needed */
