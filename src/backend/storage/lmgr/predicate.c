@@ -2429,7 +2429,11 @@ PredicateLockAcquire(const PREDICATELOCKTARGETTAG *targettag)
 	LOCALPREDICATELOCK *locallock;
 
 	if (is_bcdb_worker)
-		rs_table_reserve(targettag);
+{
+		//rs_table_reserve(targettag);
+		rs_table_reserveDT(targettag);
+	//printf("\nariaMyDbg pid %d %s : %s: %d \n", getpid(),  __FILE__, __FUNCTION__, __LINE__ );
+}
 
 	/* Do we have the lock already, or a covering lock? */
 	if (PredicateLockExists(targettag))

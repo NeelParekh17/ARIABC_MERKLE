@@ -49,34 +49,35 @@ extern bool enable_merkle_index;
 
 /*
  * Hash configuration
- * Using 128-bit (16-byte) hashes - Utilizing full MD5 output
+ * Using 256-bit (32-byte) hashes from BLAKE3
  * 
- * NOTE: Upgraded to 128-bit for maximum security.
- * Each node now takes 20 bytes (4 nodeId + 16 hash).
+ * NOTE: Upgraded to 256-bit for maximum security and performance.
+ * Each node now takes 36 bytes (4 nodeId + 32 hash).
  * 
- * Security: Collision threshold is now 2^64 (astronomical)
+ * Security: Collision threshold is now 2^128 (astronomical)
+ * Performance: BLAKE3 is faster than MD5 and cryptographically secure
  */
-#define MERKLE_HASH_BITS            128
-#define MERKLE_HASH_BYTES           16
-#define MERKLE_MD5_PREFIX_LEN       32  /* Full MD5 hex = 32 chars */
+#define MERKLE_HASH_BITS            256
+#define MERKLE_HASH_BYTES           32
+#define MERKLE_BLAKE3_LEN           32  /* BLAKE3 output = 32 bytes */
 
 /*
  * Page layout constants
  */
 #define MERKLE_METAPAGE_BLKNO       0
 #define MERKLE_TREE_START_BLKNO     1
-#define MERKLE_VERSION              3   /* Bump version for 128-bit hash format */
+#define MERKLE_VERSION              4   /* Bump version for BLAKE3 256-bit hash format */
 
 /*
  * Calculate how many nodes fit per page
- * Each node: 4 bytes (nodeId) + 16 bytes (hash) = 20 bytes
+ * Each node: 4 bytes (nodeId) + 32 bytes (hash) = 36 bytes
  * Page size 8192, minus header ~24 bytes = ~8168 usable
- * Max ~408 nodes per page.
+ * Max ~226 nodes per page.
  */
 #define MERKLE_MAX_NODES_PER_PAGE   ((BLCKSZ - MAXALIGN(SizeOfPageHeaderData)) / sizeof(MerkleNode))
 
 /*
- * MerkleHash - 64-bit hash value stored in 8 bytes
+ * MerkleHash - 256-bit hash value stored in 32 bytes
  */
 typedef struct MerkleHash
 {

@@ -20,13 +20,26 @@ echo ""
 # Step 1: Stop the server if running
 echo "--- Step 1: Stopping PostgreSQL server ---"
 if [ -f "${PGDATA}/postmaster.pid" ]; then
-    ${ARIABC_DIR}/src/bin/pg_ctl/pg_ctl stop -D ${PGDATA} -m fast 2>/dev/null || true
+    echo "Stopping server with pg_ctl..."
+    ${ARIABC_DIR}/src/bin/pg_ctl/pg_ctl stop -D ${PGDATA} -m fast -w -t 30 || {
+        echo "pg_ctl stop failed, trying immediate mode..."
+        ${ARIABC_DIR}/src/bin/pg_ctl/pg_ctl stop -D ${PGDATA} -m immediate -w -t 10 || true
+    }
     sleep 2
 fi
 # Kill any remaining postgres processes
-pkill -f "postgres -D ${PGDATA}" 2>/dev/null || true
-sleep 1
-echo "Server stopped."
+echo "Ensuring all postgres processes are stopped..."
+pkill -9 -f "postgres -D ${PGDATA}" 2>/dev/null || true
+sleep 2
+
+# Verify no postgres processes are running
+if pgrep -f "postgres -D ${PGDATA}" > /dev/null; then
+    echo "ERROR: Failed to stop all postgres processes!"
+    echo "Active processes:"
+    pgrep -af "postgres -D ${PGDATA}"
+    exit 1
+fi
+echo "Server stopped successfully."
 echo ""
 
 # Step 2: Clean build
@@ -52,12 +65,31 @@ echo ""
 echo "--- Step 4: Starting PostgreSQL server ---"
 cd ${ARIABC_DIR}/src/backend
 ./postgres -D ${PGDATA} >> ${SERVER_LOG} 2>&1 &
-sleep 3
+POSTGRES_PID=$!
+sleep 5
 
 # Check if server started
 if pgrep -f "postgres -D ${PGDATA}" > /dev/null; then
-    echo "Server started successfully."
+    echo "Server process started (PID: $POSTGRES_PID)."
     echo "Listening on port 5438"
+    
+    # Wait for server to be ready to accept connections
+    echo "Waiting for server to be ready..."
+    MAX_WAIT=30
+    WAITED=0
+    while [ $WAITED -lt $MAX_WAIT ]; do
+        if ${ARIABC_DIR}/src/bin/pg_ctl/pg_ctl status -D ${PGDATA} | grep -q "server is running"; then
+            echo "Server is ready!"
+            break
+        fi
+        sleep 1
+        WAITED=$((WAITED + 1))
+        echo "Waiting... ($WAITED/${MAX_WAIT}s)"
+    done
+    
+    if [ $WAITED -eq $MAX_WAIT ]; then
+        echo "WARNING: Server might not be fully ready yet."
+    fi
 else
     echo "ERROR: Server failed to start! Check ${SERVER_LOG} for details."
     exit 1

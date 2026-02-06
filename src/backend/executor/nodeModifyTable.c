@@ -97,6 +97,17 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
     List       *indexList;
     ListCell   *lc;
 
+    /*
+     * CRITICAL FIX: Validate tupleid before processing.
+     * Invalid ItemPointers can occur during BCDB worker operations,
+     * transaction rollbacks, or optimistic write failures.
+     */
+    if (!ItemPointerIsValid(tupleid))
+    {
+        elog(DEBUG1, "ExecDeleteMerkleIndexes: invalid tupleid, skipping Merkle index update");
+        return;
+    }
+
     /* GUC: Check if Merkle index updates are enabled */
     if (!enable_merkle_index)
         return;
@@ -137,6 +148,25 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
             keyValues = (Datum *) palloc(nkeys * sizeof(Datum));
             keyNulls = (bool *) palloc(nkeys * sizeof(bool));
             
+            /*
+             * CRITICAL FIX: Validate tupleid before calling merkle_compute_row_hash.
+             * During BCDB worker optimistic UPDATEs (store_optim_update), the old
+             * tuple's TID might be invalid (0xFFFFFFFF) because the actual deletion
+             * is deferred. Skip Merkle processing in this case.
+             * 
+             * Note: ItemPointerIsValid only checks ip_posid != 0, NOT the block number!
+             * We must also check for InvalidBlockNumber (0xFFFFFFFF).
+             */
+            if (!ItemPointerIsValid(tupleid) ||
+                ItemPointerGetBlockNumberNoCheck(tupleid) == InvalidBlockNumber)
+            {
+                /* Silently skip - this is expected for optimistic writes */
+                pfree(keyValues);
+                pfree(keyNulls);
+                index_close(indexRel, RowExclusiveLock);
+                continue;
+            }
+            
             /* Compute hash of the row being deleted */
             merkle_compute_row_hash(heapRel, tupleid, &hash);
             
@@ -145,23 +175,35 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
             {
                 /* Get key values from heap tuple to compute partition ID */
                 slot = table_slot_create(heapRel, NULL);
-                if (table_tuple_fetch_row_version(heapRel, tupleid, SnapshotSelf, slot))
+
+                /* Wrap in PG_TRY to ensure slot is dropped on error */
+                PG_TRY();
                 {
-                    /* Extract all indexed column values */
-                    for (i = 0; i < nkeys; i++)
+                    if (table_tuple_fetch_row_version(heapRel, tupleid, SnapshotSelf, slot))
                     {
-                        int heapAttr = indkey[i];  /* 1-based column number */
-                        keyValues[i] = slot_getattr(slot, heapAttr, &keyNulls[i]);
+                        /* Extract all indexed column values */
+                        for (i = 0; i < nkeys; i++)
+                        {
+                            int heapAttr = indkey[i];  /* 1-based column number */
+                            keyValues[i] = slot_getattr(slot, heapAttr, &keyNulls[i]);
+                        }
+                        
+                        /* Compute partition ID using multi-column function */
+                        partitionId = merkle_compute_partition_id(keyValues, keyNulls,
+                                                                         nkeys, indexTupdesc,
+                                                                         totalLeaves);
+                        
+                        /* XOR the hash OUT of the tree (same as XOR in, since XOR is its own inverse) */
+                        merkle_update_tree_path(indexRel, partitionId, &hash, false);
                     }
-                    
-                    /* Compute partition ID using multi-column function */
-                    partitionId = merkle_compute_partition_id(keyValues, keyNulls,
-                                                                     nkeys, indexTupdesc,
-                                                                     totalLeaves);
-                    
-                    /* XOR the hash OUT of the tree (same as XOR in, since XOR is its own inverse) */
-                    merkle_update_tree_path(indexRel, partitionId, &hash, false);
                 }
+                PG_CATCH();
+                {
+                    ExecDropSingleTupleTableSlot(slot);
+                    PG_RE_THROW();
+                }
+                PG_END_TRY();
+
                 ExecDropSingleTupleTableSlot(slot);
             }
             
@@ -187,6 +229,23 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
 {
     List       *indexList;
     ListCell   *lc;
+    
+    /*
+     * CRITICAL FIX: Validate slot->tts_tid before processing.
+     * During BCDB worker operations with optimistic writes (store_optim_update),
+     * the tuple is not yet in the heap, so tts_tid is invalid (0xFFFFFFFF).
+     * In this case, we skip Merkle index updates since the tuple doesn't
+     * exist yet and we can't compute its hash.
+     * 
+     * Note: ItemPointerIsValid only checks ip_posid != 0, NOT the block number!
+     * We must also check for InvalidBlockNumber (0xFFFFFFFF).
+     */
+    if (!ItemPointerIsValid(&slot->tts_tid) ||
+        ItemPointerGetBlockNumberNoCheck(&slot->tts_tid) == InvalidBlockNumber)
+    {
+        /* Silently skip - this is expected behavior for optimistic writes */
+        return;
+    }
     
 	/* GUC: Check if Merkle index updates are enabled */
     if (!enable_merkle_index)
@@ -1521,18 +1580,17 @@ lreplace:;
 				ws_table_reserveDT(&tag);
 				
 				/*
-				 * Merkle index updates for deterministic execution:
-				 * XOR out the OLD row's hash before the update.
+				 * Deferred Merkle update:
+				 * We do NOT update the Merkle tree here because we are in optimistic mode.
+				 * The actual XOR OUT (old) and XOR IN (new) will happen in 
+				 * apply_optim_update() when the update is actually applied to the heap.
+				 * This prevents double-counting and handling invalid TIDs for unwritten tuples.
 				 */
-				ExecDeleteMerkleIndexes(resultRelationDesc, tupleid);
+				// ExecDeleteMerkleIndexes(resultRelationDesc, tupleid);
 				
 				store_optim_update(slot, tupleid);
 				
-				/*
-				 * XOR in the NEW row's hash after storing the update.
-				 * Note: The slot contains the new tuple values.
-				 */
-				ExecInsertMerkleIndexes(resultRelationDesc, slot);
+				// ExecInsertMerkleIndexes(resultRelationDesc, slot);
 				
 				/*
 				 * Set result to TM_Ok since we're doing optimistic execution.
@@ -1540,6 +1598,18 @@ lreplace:;
 				 * Without this, result would be uninitialized garbage!
 				 */
 				result = TM_Ok;
+
+				/*
+				 * CRITICAL: Initialize update_indexes to false for BCDB workers.
+				 * In the non-BCDB path, table_tuple_update() sets update_indexes.
+				 * In the BCDB optimistic path, we skip table_tuple_update(), so
+				 * update_indexes was left UNINITIALIZED. If its garbage value
+				 * happened to be true, ExecInsertIndexTuples() would run and
+				 * pin buffers + TupleDescs on the portal's ResourceOwner that
+				 * never get cleaned up, causing resource leak warnings.
+				 * Index entries will be created later in apply_optim_update().
+				 */
+				update_indexes = false;
 			}
 			else
 			{

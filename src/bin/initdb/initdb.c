@@ -2466,6 +2466,8 @@ setup_bin_paths(const char *argv0)
 		if (find_my_exec(argv0, full_path) < 0)
 			strlcpy(full_path, progname, sizeof(full_path));
 
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+	printf("ariaMyDbg argv0 %s : %s: %d \n", argv0 , backend_exec, __LINE__ );
 		if (ret == -1)
 			pg_log_error("The program \"postgres\" is needed by %s but was not found in the\n"
 						 "same directory as \"%s\".\n"

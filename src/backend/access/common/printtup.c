@@ -15,6 +15,8 @@
  */
 #include "postgres.h"
 
+#include "bcdb/globals.h"
+#include "bcdb/shm_block.h"
 #include "access/printtup.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
@@ -80,6 +82,9 @@ printtup_create_DR(CommandDest dest)
 	DR_printtup *self = (DR_printtup *) palloc0(sizeof(DR_printtup));
 
 	self->pub.receiveSlot = printtup;	/* might get changed later */
+#if SAFEDBG2
+    printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	self->pub.rStartup = printtup_startup;
 	self->pub.rShutdown = printtup_shutdown;
 	self->pub.rDestroy = printtup_destroy;
@@ -100,6 +105,47 @@ printtup_create_DR(CommandDest dest)
 	return (DestReceiver *) self;
 }
 
+void safeOut(const char *outputstr, DestReceiver *receiver, int cmdtype, TupleDesc tupDesc)
+{
+	DR_printtup *myState = (DR_printtup *) receiver;
+	StringInfo	buf = &myState->buf;
+	printtup_startup(receiver, cmdtype, tupDesc);
+	initStringInfo(&myState->buf);
+
+    pq_beginmessage_reuse(buf, 'D');
+    // eq of portalRun()...
+    pq_sendint16(buf, 11);
+    for (int i = 0; i < 11; i++ ) 
+    {
+    //const char *outputstr = "sri ganesh";
+    pq_sendcountedtext(buf, outputstr, strlen(outputstr), false);
+
+    }
+    pq_endmessage_reuse(buf);
+
+//ereport(INFO, (errmsg("Hello from the backend!")));
+/*
+printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+StringInfoData buf;
+pq_beginmessage(&buf, 'C');  // 'C' is a placeholder for a custom type (be careful)
+pq_sendstring(&buf, "Your message"); // not printed !! just shows "select 1"
+pq_endmessage(&buf);
+*/
+
+/*
+DR_printtup *myState = (DR_printtup *) receiver;
+	initStringInfo(&myState->buf);
+StringInfo  buf = &myState->buf;
+ //pq_beginmessage_reuse(buf, 'B');
+pq_sendint32(buf, 11);
+pq_sendint32(buf, 21);
+pq_sendint32(buf, 32);
+pq_sendint32(buf, 42);
+        //pq_sendbytes(buf, VARDATA(outputbytes),
+          //           VARSIZE(outputbytes) - VARHDRSZ);
+pq_endmessage_reuse(buf);
+*/
+}
 /*
  * Set parameters for a DestRemote (or DestRemoteExecute) receiver
  */
@@ -107,6 +153,9 @@ void
 SetRemoteDestReceiverParams(DestReceiver *self, Portal portal)
 {
 	DR_printtup *myState = (DR_printtup *) self;
+#if SAFEDBG2
+        printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 
 	Assert(myState->pub.mydest == DestRemote ||
 		   myState->pub.mydest == DestRemoteExecute);
@@ -133,6 +182,9 @@ printtup_startup(DestReceiver *self, int operation, TupleDesc typeinfo)
 	DR_printtup *myState = (DR_printtup *) self;
 	Portal		portal = myState->portal;
 
+#if SAFEDBG2
+        printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	/*
 	 * Create I/O buffer to be used for all messages.  This cannot be inside
 	 * tmpcontext, since we want to re-use it across rows.
@@ -204,6 +256,10 @@ SendRowDescriptionMessage(StringInfo buf, TupleDesc typeinfo,
 	int			natts = typeinfo->natts;
 	int			proto = PG_PROTOCOL_MAJOR(FrontendProtocol);
 
+#if SAFEDBG2
+    printf("jdbc pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+    printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	/* tuple descriptor message type */
 	pq_beginmessage_reuse(buf, 'T');
 	/* # of attrs in tuples */
@@ -227,6 +283,10 @@ SendRowDescriptionCols_3(StringInfo buf, TupleDesc typeinfo, List *targetlist, i
 	int			i;
 	ListCell   *tlist_item = list_head(targetlist);
 
+#if SAFEDBG2
+    printf("jdbc pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+    printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	/*
 	 * Preallocate memory for the entire message to be sent. That allows to
 	 * use the significantly faster inline pqformat.h functions and to avoid
@@ -302,6 +362,9 @@ SendRowDescriptionCols_2(StringInfo buf, TupleDesc typeinfo, List *targetlist, i
 	int			natts = typeinfo->natts;
 	int			i;
 
+#if SAFEDBG2
+        printf("jdbc pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	for (i = 0; i < natts; ++i)
 	{
 		Form_pg_attribute att = TupleDescAttr(typeinfo, i);
@@ -328,6 +391,9 @@ printtup_prepare_info(DR_printtup *myState, TupleDesc typeinfo, int numAttrs)
 {
 	int16	   *formats = myState->portal->formats;
 	int			i;
+#if SAFEDBG2
+    printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 
 	/* get rid of any old data */
 	if (myState->myinfo)
@@ -377,12 +443,18 @@ printtup_prepare_info(DR_printtup *myState, TupleDesc typeinfo, int numAttrs)
 static bool
 printtup(TupleTableSlot *slot, DestReceiver *self)
 {
+#if SAFEDBG2
+    if(is_bcdb_worker) printf("bcdb-worker proto 3.0 !!! \n");
+    printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	TupleDesc	typeinfo = slot->tts_tupleDescriptor;
 	DR_printtup *myState = (DR_printtup *) self;
 	MemoryContext oldcontext;
 	StringInfo	buf = &myState->buf;
 	int			natts = typeinfo->natts;
 	int			i;
+    char  rowStr[1024] = "";
+    int offset = 0;
 
 	/* Set or update my derived attribute info, if needed */
 	if (myState->attrinfo != typeinfo || myState->nattrs != natts)
@@ -409,6 +481,7 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 		PrinttupAttrInfo *thisState = myState->myinfo + i;
 		Datum		attr = slot->tts_values[i];
 
+    //printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
 		if (slot->tts_isnull[i])
 		{
 			pq_sendint32(buf, -1);
@@ -432,13 +505,20 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 			char	   *outputstr;
 
 			outputstr = OutputFunctionCall(&thisState->finfo, attr);
+            if(is_bcdb_worker) {
+                //printf("bcdb-worker %s !!! \n", outputstr);
+                sprintf(rowStr+offset, " %s ;", outputstr);
+                offset += strlen(outputstr) +3 ;
+            }
 			pq_sendcountedtext(buf, outputstr, strlen(outputstr), false);
+    //printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
 		}
 		else
 		{
 			/* Binary output */
 			bytea	   *outputbytes;
 
+    //printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
 			outputbytes = SendFunctionCall(&thisState->finfo, attr);
 			pq_sendint32(buf, VARSIZE(outputbytes) - VARHDRSZ);
 			pq_sendbytes(buf, VARDATA(outputbytes),
@@ -446,8 +526,23 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 		}
 	}
 
+#if SAFEDBG2
+    printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	pq_endmessage_reuse(buf);
 
+    if(is_bcdb_worker) {
+        BCBlock* blk = get_block_by_id(1, false);
+        strcpy(&blk->result[(activeTx->tx_id)%(2*blk->blksize)], rowStr);
+#if SAFEDBG2
+        printf("bcdb-worker blk id %d blksz %d myID %d !!! \n", blk->id, blk->blksize, activeTx->tx_id);
+        printf("bcdb-worker %s !!! \n", rowStr);
+        printf("blk printup result at %d= %s\n", ((activeTx->tx_id)%(2*blk->blksize)), blk->result[(activeTx->tx_id)%(2*blk->blksize)]);
+#endif
+        //print_trace();
+	// ReadyForQuery(DestRemoteExecute); // didnt work...
+	//safeOut("sri ganesh", DestRemoteExecute, CMD_SELECT, typeinfo);
+    }
 	/* Return to caller's context, and flush row's temporary memory */
 	MemoryContextSwitchTo(oldcontext);
 	MemoryContextReset(myState->tmpcontext);
@@ -462,6 +557,9 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 static bool
 printtup_20(TupleTableSlot *slot, DestReceiver *self)
 {
+#if SAFEDBG2
+        printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	TupleDesc	typeinfo = slot->tts_tupleDescriptor;
 	DR_printtup *myState = (DR_printtup *) self;
 	MemoryContext oldcontext;
@@ -541,6 +639,9 @@ static void
 printtup_shutdown(DestReceiver *self)
 {
 	DR_printtup *myState = (DR_printtup *) self;
+#if SAFEDBG2
+        printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 
 	if (myState->myinfo)
 		pfree(myState->myinfo);
@@ -576,6 +677,11 @@ printatt(unsigned attributeId,
 		 Form_pg_attribute attributeP,
 		 char *value)
 {
+#if SAFEDBG2
+	//printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+    if(is_bcdb_worker) printf("bcdb-worker\n");
+#endif
+
 	printf("\t%2d: %s%s%s%s\t(typeid = %u, len = %d, typmod = %d, byval = %c)\n",
 		   attributeId,
 		   NameStr(attributeP->attname),
@@ -651,6 +757,10 @@ debugtup(TupleTableSlot *slot, DestReceiver *self)
 static bool
 printtup_internal_20(TupleTableSlot *slot, DestReceiver *self)
 {
+#if SAFEDBG2
+    if(is_bcdb_worker) printf("bcdb-worker\n");
+    printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
 	TupleDesc	typeinfo = slot->tts_tupleDescriptor;
 	DR_printtup *myState = (DR_printtup *) self;
 	MemoryContext oldcontext;

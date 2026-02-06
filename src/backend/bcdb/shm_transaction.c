@@ -21,6 +21,8 @@
 #include <access/genam.h>
 #include "access/xact.h"
 #include "access/heapam.h"
+#include "access/merkle.h"
+#include "catalog/pg_am_d.h"
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
 #include "utils/hashutils.h"
@@ -30,8 +32,14 @@
 #include "storage/spin.h"
 #include "storage/predicate_internals.h"
 #include <time.h>
+#include <stdio.h>
 
+// BCDBShmXact  *mapTxToShm[TX_MAP_SZ];
+//#define MAP_TX(id) ((id) % TX_MAP_SZ)
+//slock_t      *nexec_lock;
 BCDBShmXact  *activeTx;
+slock_t      *restart_counter_lock;
+int          *numExecPt ;
 HTAB         *tx_pool;
 slock_t      *tx_pool_lock;
 HTAB         *xid_map;
@@ -45,6 +53,13 @@ extern HTAB   *PredicateLockTargetHash;
 extern HTAB   *PredicateLockHash;
 
 static TupleTableSlot* clone_slot(TupleTableSlot* slot);
+
+#define PREDFMT " %d:%d:%d:%d "
+#define PRINT_PREDICATELOCKTARGETTAG(locktag) \
+              GET_PREDICATELOCKTARGETTAG_DB(locktag), \
+              GET_PREDICATELOCKTARGETTAG_RELATION(locktag), \
+              GET_PREDICATELOCKTARGETTAG_PAGE(locktag), \
+              GET_PREDICATELOCKTARGETTAG_OFFSET(locktag)
 
 #define WSTableGetPartitionIdx(hashcode) ((hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS)
 #define WSTablePartitionLock(hashcode) (&(ws_table->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS]))
@@ -60,13 +75,18 @@ dummy_hash(const void *key, Size key_size)
 BCDBShmXact *
 create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int isolation, bool pred_lock)
 {
+    HASHCTL info;
     BCDBShmXact *tx;
     bool found;
+
+    MemSet(&info, 0, sizeof(info));
     Assert(tx_pool != NULL);
+    //printf("safeDB %s : %s: %d txid %d hash %s \n", __FILE__, __FUNCTION__, __LINE__ , tx_id, hash);
     SpinLockAcquire(tx_pool_lock);
     tx = hash_search(tx_pool, hash, HASH_ENTER, &found);
     if (found)
     {
+        printf("safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
         ereport(DEBUG3,
             (errmsg("[ZL] transaction (%s) exists", hash)));
         SpinLockRelease(tx_pool_lock);
@@ -97,8 +117,11 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     SHA256_Init(&tx->state_hash);
     SIMPLEQ_INIT(&tx->optim_write_list);
 
-
     ConditionVariableInit(&tx->cond);
+    // mapTxToShm[ MAP_TX(tx_id) ] = tx;
+#if SAFEDBG2
+    printf("safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
     LWLockRelease(&tx->lock);
     return tx;
 }
@@ -146,13 +169,21 @@ create_tx_pool(void)
     HASHCTL info;
     slock_t *tx_pool_lock_array;
     bool    found;
+
+    restart_counter_lock = ShmemInitStruct("restart_counter_lock", sizeof(slock_t) , &found);
+    //nexec_lock = ShmemInitStruct("nexec_lock", sizeof(slock_t) , &found);
+    printf("\n\t $$$   safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
     tx_pool_lock_array = ShmemInitStruct("tx_pool_lock", sizeof(slock_t) * 2, &found);
     tx_pool_lock = tx_pool_lock_array;
     xid_map_lock = tx_pool_lock + 1;
+    numExecPt = (int  *) ShmemAlloc( sizeof(int ));
+    *numExecPt = 0;
 
     if (!found)
     {
         SpinLockInit(tx_pool_lock);
+        SpinLockInit(restart_counter_lock);
+        //SpinLockInit(nexec_lock);
         SpinLockInit(xid_map_lock);
     }
 
@@ -186,6 +217,7 @@ create_tx_pool(void)
     ws_table = ShmemInitStruct("bcdb_tx_ws_table", sizeof(WSTable), &found);
     if (!found)
     {
+	printf("\t safeDbg pid %d %s : %s: %d \n\n", getpid(),__FILE__, __FUNCTION__, __LINE__ );
         info.keysize = sizeof(PREDICATELOCKTARGETTAG);
         info.entrysize = sizeof(WSTableEntry);
         info.hash = dummy_hash;
@@ -194,9 +226,16 @@ create_tx_pool(void)
                                      MAX_WRITE_CONFLICT,
                                      MAX_WRITE_CONFLICT,
                                      &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE | HASH_PARTITION);
+        ws_table->mapB = ShmemInitHash("bcdb_write_conflict_mapDT",
+									MAX_WRITE_CONFLICT,
+									MAX_WRITE_CONFLICT,
+									&info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE | HASH_PARTITION);
+        ws_table->mapActive = ws_table->map;
         for (int i=0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
             SpinLockInit(&(ws_table->map_locks[i]));
     }
+    else
+	printf("safeDB %s : %s: %d found= %d\n", __FILE__, __FUNCTION__, __LINE__ , found);
 
     rs_table = ShmemInitStruct("bcdb_tx_rs_table", sizeof(WSTable), &found);
     if (!found)
@@ -229,10 +268,25 @@ tx_pool_size(void)
 void
 clear_tx_pool(void)
 {
+    printf("safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
     shm_hash_clear(tx_pool, MAX_SHM_TX);
     shm_hash_clear(xid_map, MAX_SHM_TX); 
     for (int i = 0; i < NUM_TX_QUEUE_PARTITION; i++)
         TAILQ_INIT(&tx_queues[i].list);
+}
+
+void
+rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
+{
+    uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
+    WSTableEntryRecord *record;
+
+    //printf("safeDB %s : %s: %d txhash %s tx %d tuphash %d\n", __FILE__,
+    //        __FUNCTION__, __LINE__ , activeTx->hash , activeTx->tx_id, tuple_hash);
+
+    record= MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
+    record->tag = *tag;
+    LIST_INSERT_HEAD(&rs_table_record, record, link);
 }
 
 void
@@ -245,30 +299,44 @@ rs_table_reserve(const PREDICATELOCKTARGETTAG *tag)
     WSTableEntryRecord *record;
 
     SpinLockAcquire(partition_lock);
+
+    printf("\nsafeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
     entry = hash_search_with_hash_value(rs_table->map, tag, tuple_hash, HASH_ENTER, &found);
     if (!found)
     {
+	printf("ariaDB [ZL] tx %s reserving read %d success, because not found\n", activeTx->hash, tuple_hash);
         entry->tx_id = activeTx->tx_id;
         DEBUGMSG("[ZL] tx %s reserving read %d success, because not found", activeTx->hash, tuple_hash);
     }
     else
     {
+	printf("\nariaDB %s : %s: %d found %d\n", __FILE__, __FUNCTION__, __LINE__ , found);
         if (entry->tx_id > activeTx->tx_id)
         {
             DEBUGMSG("[ZL] tx %s reserving read %d success, replacing %d", activeTx->hash, tuple_hash, entry->tx_id);
             entry->tx_id = activeTx->tx_id;
+            printf("ariaDB tx %s reserv read %d success, replacing %d\n",
+                    activeTx->hash, tuple_hash, entry->tx_id);
         }
-    }
-
-    if (entry->tx_id != activeTx->tx_id)
-    {
-        DEBUGMSG("[ZL] tx %s reserving read %d fail: winner %d", activeTx->hash, tuple_hash, entry->tx_id);
     }
     SpinLockRelease(partition_lock);
 
     record= MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
     record->tag = *tag;
     LIST_INSERT_HEAD(&rs_table_record, record, link);
+}
+
+void
+ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
+{
+    WSTableEntryRecord *record;
+
+    //printf("safeDB %s : %s: %d txid= %d \n",
+      //     __FILE__, __FUNCTION__, __LINE__, activeTx->tx_id );
+
+    record= MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
+    record->tag = *tag;
+    LIST_INSERT_HEAD(&ws_table_record, record, link);
 }
 
 void
@@ -280,12 +348,15 @@ ws_table_reserve(PREDICATELOCKTARGETTAG *tag)
     slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
     WSTableEntryRecord *record;
 
+    printf("ariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+
     SpinLockAcquire(partition_lock);
     entry = hash_search_with_hash_value(ws_table->map, tag, tuple_hash, HASH_ENTER, &found);
     if (!found)
     {
         entry->tx_id = activeTx->tx_id;
         DEBUGMSG("[ZL] tx %s reserving write %d success, because not found", activeTx->hash, tuple_hash);
+	printf("ariaDB [ZL] tx %s reserving write %d success, because not found\n", activeTx->hash, tuple_hash);
     }
     else
     {
@@ -293,11 +364,15 @@ ws_table_reserve(PREDICATELOCKTARGETTAG *tag)
         {
             DEBUGMSG("[ZL] tx %s reserving write %d success, replacing %d", activeTx->hash, tuple_hash, entry->tx_id);
             entry->tx_id = activeTx->tx_id;
+            printf("ariaDB tx %s reserv write %d success, replacing %d\n",
+                   activeTx->hash, tuple_hash, entry->tx_id);
         }
     }
 
     if (entry->tx_id != activeTx->tx_id)
     {
+	printf("ariaDB tx %s reserving write %d fail: winner %d\n",
+               activeTx->hash, tuple_hash, entry->tx_id);
         DEBUGMSG("[ZL] tx %s reserving write %d fail: winner %d", activeTx->hash, tuple_hash, entry->tx_id);
     }
     SpinLockRelease(partition_lock);
@@ -308,12 +383,69 @@ ws_table_reserve(PREDICATELOCKTARGETTAG *tag)
 }
 
 bool
+table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
+{
+    bool found;
+    WSTableEntry* entry;
+    uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
+    slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
+    static int once_out = false;
+
+    if(!once_out) {
+        once_out = true;
+#if SAFEDBG2
+        printf("\nsafeDB %s : %s: %d  getpid %d tx_id %d\n",
+                __FILE__, __FUNCTION__, __LINE__ , getpid(), activeTx->tx_id);
+#endif
+    }
+
+    SpinLockAcquire(partition_lock);
+    entry = hash_search_with_hash_value(table->map, tag,
+					tuple_hash, HASH_FIND, &found);
+    if (found && (entry->tx_id < activeTx->tx_id) &&
+				(entry->tx_id >  activeTx->tx_id_committed))
+    {
+	// TODO assert ?? activeTx-> last committed tx id <= entry->tx_id
+        //DEBUGMSG("safeDB tx %s check write %d failed, winner: %d",
+        printf("safeDB tx %d hash %s check write %d failed, winner: %d\n",
+		activeTx->tx_id, activeTx->hash, tuple_hash, entry->tx_id);
+        SpinLockRelease(partition_lock);
+        return true;
+    }
+
+    entry = hash_search_with_hash_value(table->mapB, tag,
+							tuple_hash, HASH_FIND, &found);
+    if (found && (entry->tx_id < activeTx->tx_id) &&
+				(entry->tx_id >  activeTx->tx_id_committed))
+    {
+        //DEBUGMSG("safeDB tx %s check write %d failed, winner: %d",
+        printf("safeDB tx %d hash %s check write %d failed, winner: %d\n",
+		activeTx->tx_id, activeTx->hash, tuple_hash, entry->tx_id);
+        SpinLockRelease(partition_lock);
+        return true;
+    }
+    SpinLockRelease(partition_lock);
+    DEBUGMSG("safeDB tx %s check write %d win", activeTx->hash, tuple_hash);
+    return false;
+}
+
+bool
+ws_table_checkDT(PREDICATELOCKTARGETTAG *tag)
+{
+    return table_checkDT(tag, ws_table);
+}
+
+bool
 ws_table_check(PREDICATELOCKTARGETTAG *tag)
 {
     bool found;
     WSTableEntry* entry;
     uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
     slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
+
+#if SAFEDBG
+    printf("\nariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 
     SpinLockAcquire(partition_lock);
     entry = hash_search_with_hash_value(ws_table->map, tag, tuple_hash, HASH_FIND, &found);
@@ -335,6 +467,10 @@ rs_table_check(PREDICATELOCKTARGETTAG *tag)
     WSTableEntry* entry;
     uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
     slock_t *partition_lock = RSTablePartitionLock(tuple_hash);
+
+#if SAFEDBG
+    printf("ariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 
     SpinLockAcquire(partition_lock);
     entry = hash_search_with_hash_value(rs_table->map, tag, tuple_hash, HASH_FIND, &found);
@@ -403,7 +539,16 @@ clean_rs_table_record(void)
 void
 tx_queue_insert(BCDBShmXact *tx, int32 partition)
 {
+    struct timeval tv1;
+    tv1.tv_sec = 0; tv1.tv_usec = 0;
+    bool    found;
+
     int num_queue = OEP_mode ? blocksize * 2 : blocksize;
+    num_queue = get_blksz(); // get_block_by_id(1, false)->blksize; ==nWorker
+
+#if SAFEDBG
+#endif
+	printf("safeDB %s : %s: %d partition %d num_queue %d txsql %s \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue, tx->sql);
     TxQueue *queue = tx_queues + (partition % num_queue);
     ConditionVariablePrepareToSleep(&queue->full_cond);
     SpinLockAcquire(&queue->lock);
@@ -415,8 +560,33 @@ tx_queue_insert(BCDBShmXact *tx, int32 partition)
     }
     ConditionVariableCancelSleep();
     TAILQ_INSERT_TAIL(&queue->list, tx, queue_link);
+/* #define TAILQ_INSERT_TAIL(head, elm, field) do {			\
+	(elm)->field.tqe_next = NULL;					\
+	(elm)->field.tqe_prev = (head)->tqh_last;			\
+	*(head)->tqh_last = (elm);					\
+	(head)->tqh_last = &(elm)->field.tqe_next;			\
+	printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
+fflush(0);
+	//(tx)->queue_link.tqe_next = NULL;					
+	printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
+fflush(0);
+	(tx)->queue_link.tqe_prev = (&queue->list)->tqh_last;			
+	printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
+fflush(0);
+	*(&queue->list)->tqh_last = (tx);					
+	printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
+	(&queue->list)->tqh_last = NULL; // &(tx)->queue_link.tqe_next;			
+	printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
+*/
+
     tx->queue_partition = partition;
     queue->size += 1;
+        //SpinLockAcquire(nexec_lock);
+    gettimeofday(&tv1, NULL);
+#if SAFEDBG
+    printf(" safeDB func %s hash %s time= %ld.%ld\n", __FUNCTION__, tx->hash, tv1.tv_sec, tv1.tv_usec);
+#endif
+        //SpinLockRelease(nexec_lock);
     SpinLockRelease(&queue->lock);
     ConditionVariableSignal(&queue->empty_cond);
 }
@@ -424,13 +594,30 @@ tx_queue_insert(BCDBShmXact *tx, int32 partition)
 BCDBShmXact*
 tx_queue_next(int32 partition)
 {
+    struct timeval tv1;
+    tv1.tv_sec = 0; tv1.tv_usec = 0;
+
     BCDBShmXact *tx;
     int num_queue = OEP_mode ? blocksize * 2 : blocksize;
+    num_queue = get_blksz(); // get_block_by_id(1, false)->blksize; ==nWorker
     TxQueue *queue = tx_queues + (partition % num_queue);
     ConditionVariablePrepareToSleep(&queue->empty_cond);
     SpinLockAcquire(&queue->lock);
+#if SAFEDBG
+	printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
+#endif
+    /*
+	//SpinLockAcquire(nexec_lock);
+    *numExecPt -= 1;
+    //SpinLockRelease(nexec_lock);
+    */
+    gettimeofday(&tv1, NULL);
+    // printf("\n safeDB func %s time= %ld.%ld\n", __FUNCTION__, tv1.tv_sec, tv1.tv_usec);
+	    //printf("safeDB %s : %s: %d nExec= %d \n\n", __FILE__, __FUNCTION__, __LINE__ ,  *numExecPt);
+//	}
     while (queue->size <= 0)
     {
+
         SpinLockRelease(&queue->lock);
         ConditionVariableSleep(&queue->empty_cond, WAIT_EVENT_TX_READY_TO_COMMIT);
         SpinLockAcquire(&queue->lock);
@@ -439,6 +626,30 @@ tx_queue_next(int32 partition)
     tx = TAILQ_FIRST(&queue->list);
     TAILQ_REMOVE(&queue->list, tx, queue_link);
     tx->queue_link.tqe_prev = NULL;
+    /*
+	if (((tx)->queue_link.tqe_next) == NULL)	{
+	printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
+	printf("safeDB ** next NULL ** %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue); }
+	printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
+#define TAILQ_REMOVE(head, elm, field) do {				\
+	if (((elm)->field.tqe_next) != NULL)				\
+	if (((tx)->queue_link.tqe_next) != NULL)				\
+	SpinLockAcquire(nexec_lock);
+    if( ( *numExecPt + blocksize) ==0) 
+	{
+	shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
+	shm_hash_clear(ws_table->mapB, MAX_WRITE_CONFLICT);
+	printf(" safeDB %s : %s: %d nExec= 0 !!! reset htab \n\n", __FILE__, __FUNCTION__, __LINE__ );
+	}
+	*numExecPt += 1;
+	SpinLockRelease(nexec_lock);
+	printf("safeDB %s : %s: %d nExec= %d tx %d\n\n", __FILE__, __FUNCTION__, __LINE__ ,  *numExecPt , tx->tx_id);
+    */
+    gettimeofday(&tv1, NULL);
+#if SAFEDBG
+    printf("\n func %s hash %s time= %ld.%ld", __FUNCTION__, tx->hash, tv1.tv_sec, tv1.tv_usec);
+	printf("safeDB %s : %s: %d pid %d tx %d\n", __FILE__, __FUNCTION__, __LINE__ ,  getpid() , tx->tx_id);
+#endif
     queue->size -= 1;
     SpinLockRelease(&queue->lock);
     ConditionVariableSignal(&queue->full_cond);
@@ -449,10 +660,20 @@ static TupleTableSlot*
 clone_slot(TupleTableSlot* slot)
 {
     TupleTableSlot* ret;
+    TupleDesc newdesc;
     ret = MakeTupleTableSlot(slot->tts_tupleDescriptor, slot->tts_ops);
     ExecCopySlot(ret, slot);
     ret->tts_tableOid = slot->tts_tableOid;
-    ret->tts_tupleDescriptor = CreateTupleDescCopy(slot->tts_tupleDescriptor);
+    /*
+     * Create an independent copy of the TupleDesc for the cloned slot.
+     * MakeTupleTableSlot already pinned the original TupleDesc, so we must
+     * release that pin before replacing the pointer with the copy.
+     * Without this, the original TupleDesc's refcount would never reach zero,
+     * causing TupleDesc reference leak warnings on every BCDB transaction.
+     */
+    newdesc = CreateTupleDescCopy(slot->tts_tupleDescriptor);
+    ReleaseTupleDesc(ret->tts_tupleDescriptor);
+    ret->tts_tupleDescriptor = newdesc;
     return ret;
 }
 
@@ -554,6 +775,11 @@ store_optim_update(TupleTableSlot* slot, ItemPointer old_tid)
     write_entry->cid = GetCurrentCommandId(true);
     SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
     MemoryContextSwitchTo(old_context);
+#if SAFEDBG1
+    printf("safeDB %s : %s: %d tx %d cid %d\n",
+            __FILE__, __FUNCTION__, __LINE__ , activeTx->tx_id, write_entry->cid );
+#endif
+    //debugtup(slot, NULL);
 }
 
 void
@@ -591,8 +817,113 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
     LockTupleMode lockmode;
     bool update_indexes;
     Relation relation = RelationIdGetRelation(slot->tts_tableOid);
+    List *indexList;
+    ListCell *lc;
 
     DEBUGMSG("[ZL] tx %s applying optim update (%d %d %d)", activeTx->hash, relation->rd_id, *(int*)&tid->ip_blkid, (int)tid->ip_posid);
+#if SAFEDBG1
+    printf("safeDB %s : %s: %d tm-ok %d tx %d cid %d\n",
+            __FILE__, __FUNCTION__, __LINE__ , TM_Ok, activeTx->tx_id, cid );
+#endif
+    
+    /*
+     * MERKLE INDEX FIX: XOR OUT the old tuple's hash before UPDATE.
+     * This ensures Merkle trees stay consistent during optimistic writes.
+     * The NEW hash will be XOR'd IN by heap_apply_index() below.
+     * 
+     * Note: ItemPointerIsValid only checks ip_posid != 0, NOT the block number!
+     * We must also check for InvalidBlockNumber (0xFFFFFFFF).
+     */
+    if (enable_merkle_index && ItemPointerIsValid(tid) &&
+        ItemPointerGetBlockNumberNoCheck(tid) != InvalidBlockNumber)
+    {
+        indexList = RelationGetIndexList(relation);
+        foreach(lc, indexList)
+        {
+            Oid indexOid = lfirst_oid(lc);
+            Relation indexRel = index_open(indexOid, RowExclusiveLock);
+            
+            if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+            {
+                MerkleHash hash;
+                TupleDesc indexTupdesc;
+                int partitionId;
+                int nkeys;
+                int16 *indkey;
+                Datum *keyValues;
+                bool *keyNulls;
+                int i;
+                int totalLeaves;
+                TupleTableSlot *oldSlot;
+                
+                indexTupdesc = RelationGetDescr(indexRel);
+                nkeys = indexRel->rd_index->indnkeyatts;
+                indkey = indexRel->rd_index->indkey.values;
+                
+                merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+                
+                keyValues = (Datum *) palloc(nkeys * sizeof(Datum));
+                keyNulls = (bool *) palloc(nkeys * sizeof(bool));
+                
+                /* Try to fetch the OLD tuple first to see if it exists */
+                oldSlot = table_slot_create(relation, NULL);
+                
+                /* 
+                 * Wrap in PG_TRY to ensure oldSlot is dropped even if 
+                 * merkle_compute_row_hash or other functions throw an error.
+                 */
+                PG_TRY();
+                {
+                    if (table_tuple_fetch_row_version(relation, tid, SnapshotSelf, oldSlot))
+                    {
+                        /* Compute hash of the OLD row being replaced */
+                        merkle_compute_row_hash(relation, tid, &hash);
+                        
+                        if (!merkle_hash_is_zero(&hash))
+                        {
+                            /* Get key values from old tuple to compute partition ID */
+                            for (i = 0; i < nkeys; i++)
+                            {
+                                int heapAttr = indkey[i];
+                                keyValues[i] = slot_getattr(oldSlot, heapAttr, &keyNulls[i]);
+                            }
+                            
+                            partitionId = merkle_compute_partition_id(keyValues, keyNulls,
+                                                                             nkeys, indexTupdesc,
+                                                                             totalLeaves);
+                            
+                            /* XOR OUT the old hash */
+                            merkle_update_tree_path(indexRel, partitionId, &hash, false);
+                        }
+                    }
+                }
+                PG_CATCH();
+                {
+                    ErrorData *edata;
+                    
+                    /* Clean up slot before re-throwing */
+                    ExecDropSingleTupleTableSlot(oldSlot);
+                    
+                    /* Log the error for debugging */
+                    edata = CopyErrorData();
+                    elog(DEBUG1, "apply_optim_update: Merkle error: %s", edata->message);
+                    FreeErrorData(edata);
+                    
+                    PG_RE_THROW();
+                }
+                PG_END_TRY();
+                
+                ExecDropSingleTupleTableSlot(oldSlot);
+                
+                pfree(keyValues);
+                pfree(keyNulls);
+            }
+            
+            index_close(indexRel, RowExclusiveLock);
+        }
+        list_free(indexList);
+    }
+    
     result = table_tuple_update(relation, tid, slot,
                        cid,
                        InvalidSnapshot,
@@ -600,18 +931,24 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
                        false, /* do not wait for commit */
                        &tmfd, &lockmode, &update_indexes);
 
-
     if (result != TM_Ok)
     {
         RelationClose(relation);
-		ereport(ERROR,
-				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-    			 errmsg("tx %s doomed because of ww-conflict", activeTx->hash)));
+#if SAFEDBG1
+        printf("safeDB %s : %s: %d ret %d tx %d tx %s doomed because of ww-conflict \n",
+               __FILE__, __FUNCTION__, __LINE__ , result, activeTx->tx_id, activeTx->hash );
+        printf("safeDB %s : %s: %d   tmfd.xmax %d, tmfd.cmax %d  ww-conflict \n",
+               __FILE__, __FUNCTION__, __LINE__ , tmfd.xmax, tmfd.cmax  );
+#endif
+        ereport(ERROR,
+                (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                 errmsg("tx %s doomed because of ww-conflict", activeTx->hash)));
     }
 
-
-    if (update_indexes)
+    else if (update_indexes)
         heap_apply_index(relation, slot, false, false);
+
+    ExecDropSingleTupleTableSlot(slot);
 
     RelationClose(relation);
 }
@@ -629,6 +966,14 @@ apply_optim_writes(void)
                 break;
             case CMD_INSERT:
                 apply_optim_insert(write_entry->slot, write_entry->cid);
+                /*
+                 * Clean up the cloned slot after insert.
+                 * apply_optim_update handles its own slot cleanup internally,
+                 * but apply_optim_insert does not, so we must do it here.
+                 * Without this, the slot's TupleDesc and any pinned resources
+                 * would leak on every INSERT through the BCDB worker.
+                 */
+                ExecDropSingleTupleTableSlot(write_entry->slot);
                 break;
             default:
                 ereport(ERROR, (errmsg("[ZL] tx %s applying unknown operation", activeTx->hash)));
@@ -662,35 +1007,147 @@ check_stale_read(void)
     return true;
 }
 
-void
-conflict_check(void)
+int
+conflict_checkDT()
 {
+const int ccMax = 1;
+static int ccCount = 0;
+static int cc2Count = 0;
+
     WSTableEntryRecord *record;
     
-    LIST_FOREACH(record, &ws_table_record, link)
-    {
-        if (ws_table_check(&record->tag))
-    		ereport(ERROR,
- 				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-   				 errmsg("tx %s aborted due to waw", activeTx->hash)));           
+    if(ccCount++ == ccMax) {
+	ccCount = 0;
+#if SAFEDBG2
+	printf("safeDB %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
     }
 
     LIST_FOREACH(record, &ws_table_record, link)
     {
+        // ws_table_check
+        if (ws_table_checkDT( &record->tag))
+	printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
+		__FILE__, __FUNCTION__, __LINE__ ,  activeTx->hash, activeTx->tx_id);
+	    return 1;
+    		//ereport(ERROR,
+ 		//		(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+   		//		 errmsg("tx %s aborted due to waw", activeTx->hash)));
+    }
+
+    LIST_FOREACH(record, &rs_table_record, link)
+    {
+        //ws_table_check
+        if (ws_table_checkDT( &record->tag))
+	    return 1;
+    		//ereport(ERROR,
+ 				//(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+   				 //errmsg("tx %s aborted due to raw", activeTx->hash)));
+    }
+
+    if(cc2Count++ == ccMax) {
+	cc2Count = 0;
+#if SAFEDBG2
+	printf("safeDB %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
+    }
+	    return 0;
+
+}
+
+void
+conflict_check(void)
+{
+int numRec = 0;
+const int ccMax = 20;
+static int ccCount = 0;
+static int cc2Count = 0;
+
+    WSTableEntryRecord *record;
+    
+    if(ccCount++ == ccMax) {
+	ccCount = 0;
+	printf("ariaDB %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__ );
+    }
+
+    LIST_FOREACH(record, &ws_table_record, link)
+    {
+        numRec++;
+        if (ws_table_check(&record->tag))
+    		ereport(ERROR,
+ 				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+   				 errmsg("tx %s aborted due to waw", activeTx->hash)));           
+	printf("ariaDB %s : %s: %d -- ws_table_record numRec= %d \n",
+			__FILE__, __FUNCTION__, __LINE__, numRec );
+    }
+
+    if(cc2Count++ == ccMax) {
+	cc2Count = 0;
+	printf("ariaDB %s : %s: %d -- one in 20\n",
+			__FILE__, __FUNCTION__, __LINE__ );
+    }
+
+    LIST_FOREACH(record, &ws_table_record, link)
+    {
+        numRec = 0;
         if (rs_table_check(&record->tag))
         {
             WSTableEntryRecord *raw_record;
             LIST_FOREACH(raw_record, &rs_table_record, link)
             {
+                numRec++;
                 if (ws_table_check(&raw_record->tag))
             		ereport(ERROR,
          				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
            				 errmsg("tx %s aborted due to raw and war", activeTx->hash)));
             }
-            break;
+	  printf("ariaDB %s : %s: %d -- rs_table_record numRec= %d \n",
+			__FILE__, __FUNCTION__, __LINE__, numRec );
+			break;
         }
     }
 
+}
+
+void
+publish_ws_tableDT(int id)
+{
+    bool found;
+    // WSTableEntry* entry;
+    PREDICATELOCKTARGETTAG *tag;
+    uint32  tuple_hash = 0;
+    WSTableEntryRecord *record;
+    int x = 0;
+    
+    if( HASHTAB_SWITCH_THRESHOLD <  2 * NUM_WORKERS - 1) {
+	printf("safeDB ** ERROR %s : %s: %d increase threshold ** \n",
+               __FILE__, __FUNCTION__, __LINE__ );
+	return;
+    }
+
+    x = id  / HASHTAB_SWITCH_THRESHOLD; // min 2* num_w -1
+    if(x % 2 == 0) {
+	    ws_table->mapActive = ws_table->map;
+	    if(id % HASHTAB_SWITCH_THRESHOLD == 0 ) {
+		    shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
+		    //shm_hash_clear(rs_table->map, MAX_WRITE_CONFLICT);
+	    }
+    }
+    else {
+	    ws_table->mapActive = ws_table->mapB;
+	    if(id % HASHTAB_SWITCH_THRESHOLD == 0 ) {
+		    shm_hash_clear(ws_table->mapB, MAX_WRITE_CONFLICT);
+		    // shm_hash_clear(rs_table->mapB, MAX_WRITE_CONFLICT);
+	    }
+    } // clean_rs_ws_table(id); // reset before HASH_ENTER get-write-set !!!
+
+    LIST_FOREACH(record, &ws_table_record, link)
+    {
+	    tag = &(record->tag);
+	    tuple_hash = PredicateLockTargetTagHashCode(tag);
+	    hash_search_with_hash_value(ws_table->mapActive, tag, tuple_hash,
+									HASH_ENTER, &found);
+    }
 }
 
 void

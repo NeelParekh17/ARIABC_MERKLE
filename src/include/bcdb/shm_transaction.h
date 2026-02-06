@@ -85,12 +85,26 @@ typedef struct _OptimWriteEntry
     SIMPLEQ_ENTRY(_OptimWriteEntry) link;
 } OptimWriteEntry;
 
+#define      TX_MAP_SZ  ((2 * NUM_WORKERS) - 1)
+typedef struct _WSTable
+{
+    /* partition the available list and HTAB to avoid contention */
+    HTAB               *map;
+    HTAB               *mapB;
+    HTAB               *mapActive;
+    slock_t             map_locks[WRITE_CONFLICT_MAP_NUM_PARTITIONS];
+} WSTable;
+
 /* to do: move non-shared element out */
 typedef struct _BCDBShmXact
 {
     /* hash servers as a unique ID accross the blocks */
     char               hash[TX_HASH_SIZE];
     BCTxID             tx_id;
+    BCTxID             tx_id_committed;
+
+    WSTable       *ws_table;
+    WSTable       *rs_table;
 
     BCBlockID          block_id_snapshot;
     BCBlockID volatile block_id_committed;
@@ -140,6 +154,14 @@ typedef struct _TxQueue
     int32 volatile                           size;
 } TxQueue;
 
+/*typedef struct _TxResult
+{
+    ConditionVariable                        done_cond;
+    int32 volatile                           txid;
+    char result[1024];
+} TxResult;
+*/
+
 typedef struct _XidMapEntry
 {
     TransactionId    xid;
@@ -152,13 +174,6 @@ typedef struct _WSTableEntry
     BCTxID  tx_id;
 } WSTableEntry;
 
-typedef struct _WSTable
-{
-    /* partition the available list and HTAB to avoid contention */
-    HTAB               *map;
-    slock_t             map_locks[WRITE_CONFLICT_MAP_NUM_PARTITIONS];
-} WSTable;
-
 typedef struct _WSTableEntryRecord
 {
     PREDICATELOCKTARGETTAG tag;
@@ -168,6 +183,8 @@ typedef struct _WSTableEntryRecord
 typedef LIST_HEAD(_WSTableRecord, _WSTableEntryRecord) WSTableRecord;
 
 extern BCDBShmXact  *activeTx;
+extern slock_t      *restart_counter_lock;
+
 extern HTAB         *tx_pool;
 extern TxQueue      *tx_queues;
 extern WSTableRecord ws_table_record;
@@ -198,12 +215,20 @@ extern void apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId 
 extern void apply_optim_insert(TupleTableSlot* slot, CommandId cid);
 extern void apply_optim_writes(void);
 extern bool check_stale_read(void);
-extern void ws_table_reserve(PREDICATELOCKTARGETTAG *tag);
-extern bool ws_table_check(PREDICATELOCKTARGETTAG *tag);
 extern void clean_ws_table_record(void);
-extern void rs_table_reserve(const PREDICATELOCKTARGETTAG *tag);
 extern bool rs_table_check(PREDICATELOCKTARGETTAG *tag);
 extern void clean_rs_table_record(void);
-extern void conflict_check(void);
 extern void clean_rs_ws_table(void);
+
+extern void rs_table_reserve(const PREDICATELOCKTARGETTAG *tag);
+extern void ws_table_reserve(PREDICATELOCKTARGETTAG *tag);
+extern bool ws_table_check(PREDICATELOCKTARGETTAG *tag);
+extern void conflict_check(void);
+
+extern void rs_table_reserveDT( const PREDICATELOCKTARGETTAG *tag);
+extern void ws_table_reserveDT( PREDICATELOCKTARGETTAG *tag);
+extern bool ws_table_checkDT(PREDICATELOCKTARGETTAG *tag);
+extern int conflict_checkDT(void);
+extern void publish_ws_tableDT(int id);
+
 #endif

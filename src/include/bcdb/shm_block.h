@@ -18,10 +18,18 @@ typedef struct
 {
     BCBlockID  id;
     int        num_tx;
+    int volatile   last_committed_tx_id;
     int volatile       num_ready;
     int volatile       num_finished;
     BCDBShmXact*       txs[MAX_TX_PER_BLOCK];
     ConditionVariable  cond;
+    ConditionVariable  condRecovery;
+    int num_tx_sub;
+    int num_tx_qd;
+    int blksize;
+    int snapTid;
+    ConditionVariable  done_conds[MAX_TX_PER_BLOCK];
+    char result[MAX_TX_PER_BLOCK][1024];
 } BCBlock;
 
 typedef struct
@@ -50,6 +58,8 @@ extern BlockMeta     *block_meta;
 
 extern Size     block_pool_size(void);
 extern void     create_block_pool(void);
+extern int      get_commited(int id);
+extern void     set_commited(int id,  BCDBShmXact* tx);
 extern BCBlock* get_block_by_id(BCBlockID id, bool create_if_not_found);
 extern void     delete_block(BCBlock *block);
 extern void     delete_block_by_id(BCBlockID id);

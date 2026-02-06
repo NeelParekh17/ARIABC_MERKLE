@@ -51,6 +51,93 @@ create_block_pool(void)
                    MAX_NUM_BLOCKS,
                    &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE);
  
+
+     //set_blksz(1); // cause segfault immediately on starting -- 
+     // -- b4 even printing 2025-11-18 16:32:20.830 IST [1199537] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0, 64-bit
+     // 2025-11-18 16:32:20.831 IST [1199537] LOG:  listening on IPv4 address "127.0.0.1", port 5432
+
+}
+
+void set_last_committed_id(int tx_id)
+{
+    //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
+    BCBlock* blk = get_block_by_id(1, true);
+    blk->last_committed_tx_id = tx_id;
+    block_meta->num_committed = tx_id;
+#if SAFEDBG
+    printf("safeDbg %s : %s: %d  blk %x txid= %d\n",
+              __FILE__, __FUNCTION__, __LINE__, blk, block_meta->num_committed);
+#endif
+}
+void set_last_committed_txid( BCDBShmXact *tx)
+{
+    //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
+    BCBlock* blk = get_block_by_id(1, true);
+    blk->last_committed_tx_id = tx->tx_id;
+    block_meta->num_committed = tx->tx_id;
+#if SAFEDBG2
+    printf("safeDbg %s : %s: %d  blk %x txid= %d\n",
+              __FILE__, __FUNCTION__, __LINE__, blk, block_meta->num_committed);
+#endif
+}
+
+void set_blksz(int num)
+{
+    BCBlock* blk = get_block_by_id(1, true);
+#if SAFEDBG2
+    printf("ariaMyDbg %s : %s: %d bid 1, blk %x\n",
+              __FILE__, __FUNCTION__, __LINE__, blk);
+#endif
+    blk->blksize = num;
+}
+
+BCTxID get_blksz()
+{
+    BCBlock* blk = get_block_by_id(1, false);
+    //printf("ariaMyDbg %s : %s: %d bid %d, blk %x\n",
+             // __FILE__, __FUNCTION__, __LINE__, id , blk);
+    return blk->blksize ;
+}
+
+void set_num_tx_sub(int num)
+{
+    BCBlock* blk = get_block_by_id(1, false);
+    //printf("ariaMyDbg %s : %s: %d bid %d, blk %x\n",
+             // __FILE__, __FUNCTION__, __LINE__, id , blk);
+    blk->num_tx_sub = num;
+}
+
+BCTxID get_num_tx_sub()
+{
+    BCBlock* blk = get_block_by_id(1, false);
+    //printf("ariaMyDbg %s : %s: %d bid %d, blk %x\n",
+             // __FILE__, __FUNCTION__, __LINE__, id , blk);
+    return blk->num_tx_sub ;
+}
+
+void set_num_txqd(int num)
+{
+    BCBlock* blk = get_block_by_id(1, false);
+    //printf("ariaMyDbg %s : %s: %d bid %d, blk %x\n",
+             // __FILE__, __FUNCTION__, __LINE__, id , blk);
+    blk->num_tx_qd = num;
+}
+
+BCTxID get_num_txqd()
+{
+    BCBlock* blk = get_block_by_id(1, false);
+    //printf("ariaMyDbg %s : %s: %d bid %d, blk %x\n",
+             // __FILE__, __FUNCTION__, __LINE__, id , blk);
+    return blk->num_tx_qd ;
+}
+
+BCTxID get_last_committed_txid(BCDBShmXact *tx)
+{
+    //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
+    BCBlock* blk = get_block_by_id(1, false);
+    //printf("ariaMyDbg %s : %s: %d bid 1, blk %x\n",
+              //__FILE__, __FUNCTION__, __LINE__, blk);
+    return blk->last_committed_tx_id ;
 }
 
 BCBlock*
@@ -60,17 +147,26 @@ get_block_by_id(BCBlockID id, bool create_if_not_found)
     bool found;
 
     Assert(block_pool != NULL);
+            bcdb_worker_init();
     if (create_if_not_found)
     {
         SpinLockAcquire(block_pool_lock);
         block = hash_search(block_pool, &id, HASH_ENTER, &found);
         if (!found)
         {
+    printf("\n \t ** safeDbg pid= %d new blk %s : %s: %d bid %d blk %x\n",
+              getpid(),__FILE__, __FUNCTION__, __LINE__, id , block);
             block->id = id;
             block->num_tx = 0;
             block->num_ready = 0;
             block->num_finished = 0;
+            block->last_committed_tx_id = -1;
             ConditionVariableInit(&block->cond);
+            ConditionVariableInit(&block->condRecovery);
+            for(int i = 0; i < MAX_TX_PER_BLOCK; i++) {
+                ConditionVariableInit(&block->done_conds[i]);
+                memset(&block->result[i], 0, 1024);
+            }
         }
         SpinLockRelease(block_pool_lock);
     }

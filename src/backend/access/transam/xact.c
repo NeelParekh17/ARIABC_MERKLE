@@ -2807,6 +2807,13 @@ CleanupTransaction(void)
 	s->state = TRANS_DEFAULT;
 }
 
+ResetTransactionState(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	s->blockState = TBLOCK_DEFAULT;
+}
+
 /*
  *	StartTransactionCommand
  */

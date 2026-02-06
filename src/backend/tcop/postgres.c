@@ -79,9 +79,16 @@
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 
+#include <stdio.h>
+#include <execinfo.h>
 #include "bcdb/globals.h"
 #include "bcdb/worker.h"
 #include "bcdb/middleware.h"
+
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/err.h>
+
 
 /* ----------------
  *		global variables
@@ -103,6 +110,7 @@ int			max_stack_depth = 100;
 /* wait N seconds to allow attach from a debugger */
 int			PostAuthDelay = 0;
 
+int t_pg_from_tx1 = 0;
 
 
 /* ----------------
@@ -1162,6 +1170,11 @@ exec_simple_query(const char *query_string)
 		plantree_list = pg_plan_queries(querytree_list,
 										CURSOR_OPT_PARALLEL_OK, NULL);
 
+#if PGDBG
+	printf("pg13Dbg pid %d %s : %s: %d Qstr= %s \n", getpid(),
+			__FILE__, __FUNCTION__, __LINE__, query_string );
+#endif
+
 		/* Done with the snapshot used for parsing/planning */
 		if (snapshot_set)
 			PopActiveSnapshot();
@@ -1231,6 +1244,11 @@ exec_simple_query(const char *query_string)
 		/*
 		 * Run the portal to completion, and then drop it (and the receiver).
 		 */
+#if SAFEDBG2
+        printf("pg13Dbg pid %d %s : %s: %d dest %d \n", getpid(),
+               __FILE__, __FUNCTION__, __LINE__ , dest);
+#endif
+
 		(void) PortalRun(portal,
 						 FETCH_ALL,
 						 true,	/* always top level */
@@ -1238,6 +1256,10 @@ exec_simple_query(const char *query_string)
 						 receiver,
 						 receiver,
 						 completionTag);
+#if SAFEDBG2
+        printf("pg13Dbg pid %d %s : %s: %d dest %d\n", getpid(),
+   	      __FILE__, __FUNCTION__, __LINE__ , whereToSendOutput);
+#endif
 
 		receiver->rDestroy(receiver);
 
@@ -1332,6 +1354,10 @@ exec_simple_query(const char *query_string)
 
 	TRACE_POSTGRESQL_QUERY_DONE(query_string);
 
+#if PGDBG
+    printf("pg13Dbg pid %d %s : %s: %d dest %d\n", getpid(), 
+		    __FILE__, __FUNCTION__, __LINE__ , whereToSendOutput);
+#endif
 	debug_query_string = NULL;
 }
 
@@ -1361,6 +1387,10 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	 * Report query to various monitoring facilities.
 	 */
 	debug_query_string = query_string;
+					if(query_string[0] == '0') {
+    set_blksz(1);
+	query_string = query_string + 9;
+					}
 
 	pgstat_report_activity(STATE_RUNNING, query_string);
 
@@ -1368,6 +1398,11 @@ exec_parse_message(const char *query_string,	/* string to execute */
 
 	if (save_log_statement_stats)
 		ResetUsage();
+
+#if SAFEDBG1
+    printf("jdbcDbg pid %d %s : %s: %d  sql %s\n", getpid(),
+	   __FILE__, __FUNCTION__, __LINE__ , query_string);
+#endif
 
 	ereport(DEBUG2,
 			(errmsg("parse %s: %s",
@@ -1627,6 +1662,11 @@ exec_bind_message(StringInfo input_message)
 	portal_name = pq_getmsgstring(input_message);
 	stmt_name = pq_getmsgstring(input_message);
 
+#if SAFEDBG1
+    printf("jdbcDbg pid %d %s : %s: %d  sql %s\n", getpid(),
+	   __FILE__, __FUNCTION__, __LINE__ , stmt_name);
+#endif
+	/*
 	ereport(DEBUG2,
 			(errmsg("bind %s to %s",
 					*portal_name ? portal_name : "<unnamed>",
@@ -1967,6 +2007,33 @@ exec_bind_message(StringInfo input_message)
 	debug_query_string = NULL;
 }
 
+static void
+copy_bcdb_result(Portal	portal) // const char *portal_name, long max_rows)
+{
+	CommandDest dest;
+	DestReceiver *receiver;
+
+	/* Adjust destination to tell printtup.c what to do */
+	dest = whereToSendOutput;
+	if (dest == DestRemote)
+		dest = DestRemoteExecute;
+
+	/*
+	 * Create dest receiver in MessageContext (we don't want it in transaction
+	 * context, because that may get deleted if portal contains VACUUM).
+	 */
+	receiver = CreateDestReceiver(dest);
+	//if (dest == DestRemoteExecute)
+	//printtup_startup(dest, CMD_SELECT, portal->tupDesc);
+	//	SetRemoteDestReceiverParams(receiver, portal);
+    // --jan31 // safeOut("21 ", receiver, CMD_SELECT, portal->tupDesc);
+
+	/*
+	receiver->rDestroy(receiver);
+    */
+
+}
+
 /*
  * exec_execute_message
  *
@@ -2000,6 +2067,10 @@ exec_execute_message(const char *portal_name, long max_rows)
 				(errcode(ERRCODE_UNDEFINED_CURSOR),
 				 errmsg("portal \"%s\" does not exist", portal_name)));
 
+#if SAFEDBG1
+    printf("jdbcDbg pid %d %s : %s: %d dest %d sql %s\n", getpid(),
+	   __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText);
+#endif
 	/*
 	 * If the original query was a null string, just return
 	 * EmptyQueryResponse.
@@ -2117,13 +2188,27 @@ exec_execute_message(const char *portal_name, long max_rows)
 	if (max_rows <= 0)
 		max_rows = FETCH_ALL;
 
-	completed = PortalRun(portal,
+#if SAFEDBG2
+    printf("jdbcDbg pid %d %s : %s: %d dest %d sql %s ctag %s\n", getpid(), 
+    __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText, completionTag);
+#endif
+			/*
+			 */
+        if( (strlen(portal->sourceText) > 7) &&( (portal->sourceText[4] == 'C') && (portal->sourceText[5] == 'T')) )
+            copy_bcdb_result(portal);
+	else  {
+#if SAFEDBG2
+    printf("jdbcDbg pid %d %s : %s: %d dest %d sql %s ctag %s\n", getpid(), 
+    __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText, completionTag);
+#endif
+            completed = PortalRun(portal,
 						  max_rows,
 						  true, /* always top level */
 						  !execute_is_fetch && max_rows == FETCH_ALL,
 						  receiver,
 						  receiver,
 						  completionTag);
+	}
 
 	receiver->rDestroy(receiver);
 
@@ -2136,9 +2221,17 @@ exec_execute_message(const char *portal_name, long max_rows)
 			 * will start a new xact command for the next command (if any).
 			 */
 			finish_xact_command();
+#if SAFEDBG3
+    printf("pg13Dbg pid %d %s : %s: %d dest %d sql %s\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText);
+#endif
 		}
 		else
 		{
+#if SAFEDBG3
+    printf("pg13Dbg pid %d %s : %s: %d dest %d sql %s\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText);
+#endif
 			/*
 			 * We need a CommandCounterIncrement after every query, except
 			 * those that start or end a transaction block.
@@ -2153,10 +2246,18 @@ exec_execute_message(const char *portal_name, long max_rows)
 		}
 
 		/* Send appropriate CommandComplete to client */
+#if SAFEDBG2
+    printf("pg13Dbg pid %d %s : %s: %d dest %d sql %s\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText);
+#endif
 		EndCommand(completionTag, dest);
 	}
 	else
 	{
+#if SAFEDBG1
+    printf("pg13Dbg pid %d %s : %s: %d dest %d sql %s\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText);
+#endif
 		/* Portal run not complete, so send PortalSuspended */
 		if (whereToSendOutput == DestRemote)
 			pq_putemptymessage('s');
@@ -2618,6 +2719,31 @@ start_xact_command(void)
 }
 
 void
+reset_xact_command(void)
+{
+	/* cancel active statement timeout after each command */
+	disable_statement_timeout();
+
+	ResetTransactionState();
+
+	if (xact_started)
+	{
+
+#ifdef MEMORY_CONTEXT_CHECKING
+		/* Check all memory contexts that weren't freed during commit */
+		/* (those that were, were checked before being deleted) */
+		MemoryContextCheck(TopMemoryContext);
+#endif
+
+#ifdef SHOW_MEMORY_STATS
+		/* Print mem stats after each commit for leak tracking */
+		MemoryContextStats(TopMemoryContext);
+#endif
+
+		xact_started = false;
+	}
+}
+void
 finish_xact_command(void)
 {
 	/* cancel active statement timeout after each command */
@@ -2839,10 +2965,30 @@ StatementCancelHandler(SIGNAL_ARGS)
 	errno = save_errno;
 }
 
+void print_trace(void) {
+    char **strings;
+    size_t i, size;
+    void *array[1024];
+    size = backtrace(array, 1024);
+    strings = backtrace_symbols(array, size);
+    for (i = 0; i < size; i++)
+        printf("%s\n", strings[i]);
+    puts("");
+/*
+		pqsignal(SIGFPE, FloatExceptionHandler);
+		pqsignal(SIGSEGV, FloatExceptionHandler);
+*/
+    free(strings);
+}
+
 /* signal handler for floating point exception */
 void
 FloatExceptionHandler(SIGNAL_ARGS)
 {
+	printf(" \n **** inside exception handler **** \n ");
+	printf("safeDbg pid %d %s : %s: %d worker %d\n", getpid(), __FILE__, __FUNCTION__, __LINE__, worker_id );
+	print_trace();
+	fflush(0);
 	/* We're not returning, so no need to save errno */
 	ereport(ERROR,
 			(errcode(ERRCODE_FLOATING_POINT_EXCEPTION),
@@ -3742,6 +3888,56 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 #endif
 }
 
+unsigned char* base64_decode(const char* input, int length, int* out_len) {
+    BIO *b64, *bmem;
+    unsigned char* buffer = (unsigned char*)malloc(length);
+    memset(buffer, 0, length);
+
+    b64 = BIO_new(BIO_f_base64());
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL); // Handle single-line b64
+    bmem = BIO_new_mem_buf(input, length);
+    bmem = BIO_push(b64, bmem);
+
+    *out_len = BIO_read(bmem, buffer, length);
+    BIO_free_all(bmem);
+    return buffer;
+}
+
+static int count = 0;
+int verify_signature_b64key(const char* public_key_b64, const char* message, const char* signature_b64) {
+    count += 1;
+    if(count %2000 < 2) printf("verify_signature_b64key %s\n", signature_b64);
+    int success = 0;
+    int der_len, sig_len;
+
+    // 1. Decode Base64 strings
+    unsigned char* der_data = base64_decode(public_key_b64, strlen(public_key_b64), &der_len);
+    unsigned char* sig_data = base64_decode(signature_b64, strlen(signature_b64), &sig_len);
+
+    // 2. Load Public Key from DER data
+    const unsigned char* p = der_data;
+    EVP_PKEY* pub_key = d2i_PUBKEY(NULL, &p, der_len);
+
+    if (pub_key) {
+        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+
+        // 3. Initialize Verification (Default is PKCS1 v1.5 padding)
+        if (EVP_DigestVerifyInit(ctx, NULL, EVP_sha256(), NULL, pub_key) == 1) {
+            EVP_DigestVerifyUpdate(ctx, message, strlen(message));
+
+            // 4. Finalize and verify
+            if (EVP_DigestVerifyFinal(ctx, sig_data, sig_len) == 1) {
+                success = 1; // Verified!
+            }
+        }
+        EVP_MD_CTX_free(ctx);
+        EVP_PKEY_free(pub_key);
+    }
+
+    free(der_data);
+    free(sig_data);
+    return success;
+}
 
 /* ----------------------------------------------------------------
  * PostgresMain
@@ -3759,6 +3955,8 @@ PostgresMain(int argc, char *argv[],
 			 const char *dbname,
 			 const char *username)
 {
+        FILE *fp;
+	int count = 0;
 	int			firstchar;
 	StringInfoData input_message;
 	sigjmp_buf	local_sigjmp_buf;
@@ -3844,6 +4042,7 @@ PostgresMain(int argc, char *argv[],
 		pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 		pqsignal(SIGUSR2, SIG_IGN);
 		pqsignal(SIGFPE, FloatExceptionHandler);
+		pqsignal(SIGSEGV, FloatExceptionHandler);
 
 		/*
 		 * Reset some signals that are accepted by postmaster but not by
@@ -4001,6 +4200,10 @@ PostgresMain(int argc, char *argv[],
 
     if (is_bcdb_worker)
 	{
+#if SAFEDBG
+	   printf("safeDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__, getpid() );
+#endif
+
 		if (!bcdb_worker_init())
 			ereport(FATAL,
 				(errmsg("[ZL] bcdb worker failed to init")));
@@ -4144,8 +4347,10 @@ PostgresMain(int argc, char *argv[],
 	if (!ignore_till_sync)
 		send_ready_for_query = true;	/* initially, or after error */
 
-	if (activeTx)
+	if (false) //if (activeTx)
 	{
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+
 		/* we are aborting from a tx */
 		BCBlock *block;
 		int32 num_finished;
@@ -4159,6 +4364,7 @@ PostgresMain(int argc, char *argv[],
 		{
 	    	num_ready = __sync_add_and_fetch(&block->num_ready, 1);
 	        DEBUGMSG("[ZL] tx %s waiting with num_ready: %d", activeTx->hash, num_ready);
+
 	        if (num_ready == block->num_tx)
             	ConditionVariableBroadcast(&block->cond);
 		}
@@ -4167,11 +4373,14 @@ PostgresMain(int argc, char *argv[],
 
 		num_finished = __sync_add_and_fetch(&block->num_finished, 1);
 		DEBUGMSG("[ZL] tx %s finishing with num_finish: %d", activeTx->hash, num_finished);
+
 		if (num_finished == block->num_tx)
 		{
 			int32 global_bmin;
 			BCDBShmXact *tx_iter;
 			int32 block_committed = 0;
+
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 
             clean_rs_ws_table();
 			global_bmin = __sync_add_and_fetch(&block_meta->global_bmin, 1);
@@ -4184,6 +4393,8 @@ PostgresMain(int argc, char *argv[],
                 if (tx_iter->status == TX_COMMITED)
                     block_committed += 1;
             }
+	printf("\nariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+	printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
 			__sync_fetch_and_add(&block_meta->num_committed, block_committed);
 			__sync_fetch_and_add(&block_meta->num_aborted, block->num_tx - block_committed);
 			block_cleaning(block->id);
@@ -4193,6 +4404,10 @@ PostgresMain(int argc, char *argv[],
 	/*
 	 * Non-error queries loop here.
 	 */
+#if SAFEDBG2
+	printf("pg13Dbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
+
 	for (;;)
 	{
 		/*
@@ -4337,34 +4552,152 @@ PostgresMain(int argc, char *argv[],
 		if (ignore_till_sync && firstchar != EOF)
 			continue;
 
+#if PGDBG
+	printf("pg13Dbg %s : %s: %d firstchar= %c int=%d dest= %d\n", __FILE__, __FUNCTION__, __LINE__, firstchar, firstchar, whereToSendOutput);
+#endif
+    //const char *signature2 = "ggwX8rWewlbGl4EwBnf1Xb/KW+ReZ/e9r5tDGeysRDihIDih1DRNtAWpDh5Zf2LFEEY7IlKM9U9YmeNLgMbUKwKtatjxU3e3/ekBJ0fzhUg1vVagqmauVRmPzbM+G2WaWInrD/pK4VIlgQSN87+po2lCLdMgttSqI7e9w5bA49OAKFo=";
+    //const char* msg2 = "SELECT * FROM usertable WHERE YCSB_KEY=868;";
+
+    const char* publicKey2 = "MIGiMA0GCSqGSIb3DQEBAQUAA4GQADCBjAKBhACFuG2SZFx6fduyYp8aQ5p6TjCKaytg2mM9afk6fmAwKs78IkGbXAIpS5YDYr8OilU8w7kfBJXjqLvlEnLh2sjAkmZEMJHzL8dkUZfzp0L6SwCsszXmzOk2uraVcnzeInP9xMuEScZ+Ss90vWQa/67c1UX0X0eIGyTONGZ5SkXNWu+bWwIDAQAB";
 		switch (firstchar)
 		{
 			case 'Q':			/* simple query */
 				{
 					const char *query_string;
+					char pfx_str[9] = "";
+					int pfx_id;
+					int bid = 1;
+    		struct timeval tv1, tv2;
 
+    		tv1.tv_sec = 0; tv2.tv_sec = 0;
+    		tv1.tv_usec = 0; tv2.tv_usec = 0;
 					/* Set statement_timestamp() */
 					SetCurrentStatementStartTimestamp();
 
 					query_string = pq_getmsgstring(&input_message);
+#if SAFEDBG1
+	printf("pg13Dbg %s : %s: %d pfx_hash= %s txid= %d q= %s\n", __FILE__, __FUNCTION__, __LINE__ , pfx_str, pfx_id, (query_string+8) );
+#endif
+#if PGDBG
+	printf("\n pg13Dbg %s : %s: %d q= %s\n", __FILE__, __FUNCTION__, __LINE__ , query_string);
+#endif
 					pq_getmsgend(&input_message);
+					//ssl
+					int i = 0; 
+					int maxlen = (&input_message)->len;
+					int sign = 0;
+					char qsig[1024] = {};
+			for(; ((i< maxlen)&&(query_string[i] != '#'));i++) ;
+  //printf("msg sig i= %d qschar=%c %c\n", i, query_string[i], query_string[i+1]);
+  //printf("msg sig i= %d qs=%s\n",i, query_string);
+  //printf("msg sig ipmsg=%s\n", input_message);
+					if(query_string[i+1] == '#')
+					    sign = 1;
+					// sign = 0; // TODO for initdb
+					char query_string2[1024] = {};
+					int valid = -1;
+					//int qOfst = i;
+    //printf("msg sig : %d\n", sign);
+					if(sign == 1)
+    strcpy(query_string2, (const char *) (&query_string[i+2]));
 
-					if (am_walsender)
+    /*valid = verify_signature_b64key( publicKey2, msg2, signature2);
+    printf("msg %s sig valid: %d\n", msg2, valid);
+    valid = verify_signature_b64key( publicKey2, "abracadabra", signature2);
+    printf("msg abracadabra sig valid: %d\n", valid);
+*/
+
+					if((query_string[0] == 's') &&
+					(query_string[1] == ' ') &&
+					(query_string[2] == '0')) {
+    set_blksz(1);
+					strncpy(pfx_str, query_string+2, 8);
+					pfx_str[8] = '\0';
+					pfx_id = atoi(pfx_str);
+     if(sign == 1) {
+       strncpy(qsig, query_string+11, i-11);
+       // printf("qmsg %s qsig: %s\n", query_string2, qsig);
+       valid = verify_signature_b64key( publicKey2, query_string2, qsig);
+       if(valid != 1) 
+         printf("qmsg %s qsig valid: %d\n", query_string2, valid);
+					}
+     else 
+       strcpy(query_string2, (const char *) (query_string+10));
+					
+					BCDBShmXact *tx = create_tx(pfx_str, query_string2, pfx_id, bid, XACT_SERIALIZABLE, true ); 
+#if SAFEDBG3
+	printf("safeDbg %s : %s: %d pfx_hash= %s txid= %d q= %s\n", __FILE__, __FUNCTION__, __LINE__ , pfx_str, pfx_id, (query_string2) );
+#endif
+					safedb_txdt(tx, true);
+					//bcdb_worker_process_tx_dt(tx, true);
+#if SAFEDBG2
+	printf("safeDbg %s : %s: %d pfx_hash= %s txid= %d q= %s\n", __FILE__, __FUNCTION__, __LINE__ , pfx_str, pfx_id, (query_string2) );
+#endif
+
+				    }   else if (am_walsender)
 					{
 						if (!exec_replication_command(query_string))
 							exec_simple_query(query_string);
 					}
 					else
-						exec_simple_query(query_string);
+					{
+    		gettimeofday(&tv1, NULL);
+     if(sign == 1) {
+       strncpy(qsig, query_string+2, i-2); // in-tx start with "s "
+       //printf("qmsg %s && qsig: %s\n", query_string2, qsig);
+       valid = verify_signature_b64key( publicKey2, query_string2, qsig);
+       if(valid != 1) 
+         printf("qmsg %s qsig valid: %d\n", query_string2, valid);
+					exec_simple_query(query_string2);
+					}	
+     else  
+     {
+	int offset = 0;
+	if ((query_string[0] == 's') &&(query_string[1] == ' '))
+		offset = 2;
+					exec_simple_query(&(query_string[offset]));
+     }
+    		gettimeofday(&tv2, NULL);
+      		int t_delta = (tv2.tv_usec - tv1.tv_usec) ;
+
+      if(t_delta < 0) t_delta += 1000000;
+      t_pg_from_tx1 += t_delta; 
+      count++;
+
+      if(count %1000 == 0) 
+      {
+        fp = fopen("/tmp/timestamps-pg.txt","a");
+        fprintf(fp, "id= %d, pid= %d "
+			"start-time= %ld.%ld finish time= %ld.%ld " 
+#if SAFEDBG1
+#endif
+			"exectime(us)= %d totalTime(us)= %d\n", 
+		count, getpid(), 
+		tv1.tv_sec , tv1.tv_usec, tv2.tv_sec, tv2.tv_usec,
+#if SAFEDBG1
+#endif
+		t_delta, t_pg_from_tx1);
+	fclose(fp);
+      }
+					}
 
 					send_ready_for_query = true;
+#if PGDBG
+	printf("pg13Dbg %s : %s: %d q= %s\n\n", __FILE__, __FUNCTION__, __LINE__ , query_string);
+#endif
 				}
 				break;
 
 			case 'J':			/* blockchain db Tx */
 				{
-					pq_getmsgstring(&input_message);
+					const char *query_string2;
+
+					query_string2 = pq_getmsgstring(&input_message);
 					pq_getmsgend(&input_message);
+					//exec_simple_query(query_string2);
+#if SAFEDBG
+	printf("safeDbg %s : %s: %d q= %s\n", __FILE__, __FUNCTION__, __LINE__ , query_string2);
+#endif
 
 					worker_loop:
 					if (is_bcdb_worker)
@@ -4372,7 +4705,9 @@ PostgresMain(int argc, char *argv[],
 						for(;;)
 						{
 							BCDBShmXact *tx = tx_queue_next(worker_id);
-							bcdb_worker_process_tx(tx);
+							// bcdb_worker_process_tx(tx);
+						bcdb_worker_process_tx_dt(tx, true);
+                       //printf("safeDbg %s : %s: %d hash= %s  q= %s\n", __FILE__, __FUNCTION__, __LINE__ , tx->hash, tx->sql);
 						}
 					}
 
@@ -4405,6 +4740,11 @@ PostgresMain(int argc, char *argv[],
 
 					exec_parse_message(query_string, stmt_name,
 									   paramTypes, numParams);
+#if SAFEDBG1
+    printf("jdbc pid %d %s : %s: %d dest %d Q %s name %s type %x nParams %d\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , whereToSendOutput, 
+           query_string, stmt_name, paramTypes, numParams);
+#endif
 				}
 				break;
 
@@ -4419,6 +4759,10 @@ PostgresMain(int argc, char *argv[],
 				 * the field extraction out-of-line
 				 */
 				exec_bind_message(&input_message);
+#if SAFEDBG1
+    printf("jdbc pid %d %s : %s: %d dest %d inputmsg %s\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , whereToSendOutput, input_message);
+#endif
 				break;
 
 			case 'E':			/* execute */
@@ -4435,6 +4779,11 @@ PostgresMain(int argc, char *argv[],
 					max_rows = pq_getmsgint(&input_message, 4);
 					pq_getmsgend(&input_message);
 
+#if SAFEDBG1
+    printf("jdbc pid %d %s : %s: %d dest %d portal %s maxRows %d\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , whereToSendOutput, 
+           portal_name, max_rows);
+#endif
 					exec_execute_message(portal_name, max_rows);
 				}
 				break;
@@ -4530,6 +4879,10 @@ PostgresMain(int argc, char *argv[],
 					describe_target = pq_getmsgstring(&input_message);
 					pq_getmsgend(&input_message);
 
+#if SAFEDBG1
+    printf("jdbc pid %d %s : %s: %d describe_type %d describe_target %s\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , describe_type, describe_target);
+#endif
 					switch (describe_type)
 					{
 						case 'S':
@@ -4546,6 +4899,10 @@ PostgresMain(int argc, char *argv[],
 							break;
 					}
 				}
+#if SAFEDBG1
+    printf("jdbc pid %d %s : %s: %d dest %d inputmsg %s\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , whereToSendOutput, input_message);
+#endif
 				break;
 
 			case 'H':			/* flush */
@@ -4558,6 +4915,11 @@ PostgresMain(int argc, char *argv[],
 				pq_getmsgend(&input_message);
 				finish_xact_command();
 				send_ready_for_query = true;
+#if SAFEDBG1
+    printf("jdbc pid %d %s : %s: %d dest %d inputmsg %s\n",
+           getpid(), __FILE__, __FUNCTION__, __LINE__ , whereToSendOutput, input_message);
+    print_trace();
+#endif
 				break;
 
 				/*

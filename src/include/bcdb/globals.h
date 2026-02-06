@@ -33,14 +33,21 @@ extern int32         worker_id;
 
 //#define FIRST_WRITER_WINS
 #define WAIT_GDB while(gdb_pause_sig == 0) {set_ps_display("waiting gdb", false); sleep(1);}
+#define PGDBG 0
+#define SAFEDBG 1
+#define SAFEDBG1 0
+#define SAFEDBG2 0
+#define SAFEDBG3 0
 #define BCDBInvalidBid -1
 #define BCDBMaxBid     0x7FFFFFFF
 #define BCDBInvalidTid -1
 #define CLEANING_DELAY_BLOCKS 5
 #define QUEUEING_BLOCKS 32
 #define MAX_NUM_BLOCKS (QUEUEING_BLOCKS + CLEANING_DELAY_BLOCKS + 100)
-#define MAX_TX_PER_BLOCK 200
+#define MAX_TX_PER_BLOCK 5500
 #define WORK_TOKENS 64
+#define NUM_WORKERS 2
+#define HASHTAB_SWITCH_THRESHOLD  (200 * NUM_WORKERS)
 #define WORKER_INIT_NUM 64
 #define NUM_BMIN_COND 1
 #define MAX_SHM_TX ((CLEANING_DELAY_BLOCKS + QUEUEING_BLOCKS + 100) * MAX_TX_PER_BLOCK)
@@ -77,12 +84,53 @@ if (!activeTx->holding_token) { \
     tx->holding_token = true; \
 }} while(0)
 
+#define WaitConditionPidDbg(v, pid, cond) \
+do {\
+if (!(cond)) { \
+    ConditionVariablePrepareToSleep(v); \
+    while(!(cond)) \
+        { printf("safeDbg pid %d checking cond %d\n", pid, cond); \
+        ConditionVariableSleep(v, WAIT_EVENT_BLOCK_COMMIT); } \
+    ConditionVariableCancelSleep(); \
+}} while(0)
+
+#define WaitConditionPid(v, pid, cond) \
+do {\
+if (!(cond)) { \
+    ConditionVariablePrepareToSleep(v); \
+    while(!(cond)) \
+        { ConditionVariableSleep(v, WAIT_EVENT_BLOCK_COMMIT); } \
+    ConditionVariableCancelSleep(); \
+}} while(0)
+
+	//	printf("pid %d checking timed cond %d\n", pid, cond); 
+#define WaitConditionPidTimeout(v, pid, timeout, cond) \
+do {\
+if (!(cond)) { \
+    ConditionVariablePrepareToSleep(v); \
+    while(!(cond)) \
+        { \
+        ConditionVariableTimedSleep(v, timeout, WAIT_EVENT_BLOCK_COMMIT); } \
+    ConditionVariableCancelSleep(); \
+}} while(0)
+
+#define WaitConditionTimeoutPid(v, cond, timeout, pid) \
+do {\
+if (!(cond)) { \
+    ConditionVariablePrepareToSleep(v); \
+    while(!(cond)) \
+        { printf("pid %d checking timed cond %d\n", pid, cond); \
+        ConditionVariableTimedSleep(v, timeout, WAIT_EVENT_BLOCK_COMMIT); } \
+    ConditionVariableCancelSleep(); \
+}} while(0)
+
 #define WaitCondition(v, cond) \
 do {\
 if (!(cond)) { \
     ConditionVariablePrepareToSleep(v); \
     while(!(cond)) \
-        ConditionVariableSleep(v, WAIT_EVENT_BLOCK_COMMIT); \
+        { printf("checking cond \n"); \
+        ConditionVariableSleep(v, WAIT_EVENT_BLOCK_COMMIT); } \
     ConditionVariableCancelSleep(); \
 }} while(0)
 

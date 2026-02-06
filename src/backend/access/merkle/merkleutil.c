@@ -20,7 +20,7 @@
 #include "access/htup_details.h"
 #include "access/tableam.h"
 #include "catalog/pg_type.h"
-#include "common/md5.h"
+#include "common/blake3.h"
 #include "storage/bufmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -231,9 +231,9 @@ hex_char_to_int(char c)
  * This function handles the "hashing the entire row" part of the Merkle index.
  * It iterates over every column in the heap tuple (row), converts it to its
  * text representation, concatenates them all with delimiters, and then computes
- * an MD5 hash of this long string.
+ * a BLAKE3 hash of this long string.
  *
- * The resulting 128-bit hash is what gets stored in the Merkle tree leaves.
+ * The resulting 256-bit hash is what gets stored in the Merkle tree leaves.
  *
  * NOTE: This relies on the standard type output functions. If a type's output
  * logic changes, the hash will change, causing verification failures.
@@ -244,82 +244,99 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
     TupleDesc       tupdesc;
     TupleTableSlot *slot;
     StringInfoData  buf;
-    char            md5_result[33];  /* MD5 hex = 32 chars + null */
+    blake3_hasher   hasher;
     int             i;
-    bool            found;
+    
+    /*
+     * CRITICAL FIX: Validate ItemPointer before attempting to fetch tuple.
+     * Invalid TIDs (offset=0 or block=Invalid) can occur during BCDB operations 
+     * and will cause fetch failures. Return zero hash for these cases.
+     */
+    if (!ItemPointerIsValid(tid) || 
+        ItemPointerGetBlockNumberNoCheck(tid) == InvalidBlockNumber)
+    {
+        /* 
+         * Changed from WARNING to DEBUG1 because these invalid TIDs are expected 
+         * during optimistic BCDB worker operations and shouldn't spam the logs.
+         */
+        elog(DEBUG1, "merkle_compute_row_hash: skipping invalid tid (blk=%u, off=%u)",
+             ItemPointerGetBlockNumberNoCheck(tid),
+             ItemPointerGetOffsetNumberNoCheck(tid));
+        merkle_hash_zero(result);
+        return;
+    }
     
     tupdesc = RelationGetDescr(heapRel);
     
     /* Create a slot to hold the tuple */
     slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsBufferHeapTuple);
     
-    /*
-     * Use SnapshotSelf to see our own uncommitted changes.
-     * During INSERT, the tuple is in the heap but not yet committed,
-     * so GetActiveSnapshot() won't see it.
-     */
-    if (!table_tuple_fetch_row_version(heapRel, tid, SnapshotSelf, slot))
+    /* Ensure resource cleanup if an error occurs during processing */
+    PG_TRY();
     {
-        /* Tuple not found, return zero hash */
-        merkle_hash_zero(result);
-        ExecDropSingleTupleTableSlot(slot);
-        return;
-    }
-    
-    /* Build concatenated string of all column values */
-    initStringInfo(&buf);
-    
-    for (i = 0; i < tupdesc->natts; i++)
-    {
-        Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-        Datum       val;
-        bool        isnull;
-        Oid         typoutput;
-        bool        typIsVarlena;
-        char       *str;
-        
-        /* Skip dropped columns */
-        if (attr->attisdropped)
-            continue;
-        
-        val = slot_getattr(slot, i + 1, &isnull);
-        
-        if (isnull)
+        /*
+         * Use SnapshotSelf to see our own uncommitted changes.
+         * During INSERT, the tuple is in the heap but not yet committed,
+         * so GetActiveSnapshot() won't see it.
+         */
+        if (!table_tuple_fetch_row_version(heapRel, tid, SnapshotSelf, slot))
         {
-            appendStringInfoString(&buf, "*null*");
+            /* Tuple not found, return zero hash */
+            merkle_hash_zero(result);
         }
         else
         {
-            /* Get output function for this type */
-            getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
-            str = OidOutputFunctionCall(typoutput, val);
-            appendStringInfo(&buf, "*%s", str);
-            pfree(str);
+            /* Build concatenated string of all column values */
+            initStringInfo(&buf);
+            
+            for (i = 0; i < tupdesc->natts; i++)
+            {
+                Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+                Datum       val;
+                bool        isnull;
+                Oid         typoutput;
+                bool        typIsVarlena;
+                char       *str;
+                
+                /* Skip dropped columns */
+                if (attr->attisdropped)
+                    continue;
+                
+                val = slot_getattr(slot, i + 1, &isnull);
+                
+                if (isnull)
+                {
+                    appendStringInfoString(&buf, "*null*");
+                }
+                else
+                {
+                    /* Get output function for this type */
+                    getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
+                    str = OidOutputFunctionCall(typoutput, val);
+                    appendStringInfo(&buf, "*%s", str);
+                    pfree(str);
+                }
+            }
+            
+            /*
+             * Compute BLAKE3 hash - produces 32 bytes (256 bits) directly
+             * BLAKE3 is faster than MD5 and cryptographically secure
+             */
+            blake3_hasher_init(&hasher);
+            blake3_hasher_update(&hasher, buf.data, buf.len);
+            blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+            
+            pfree(buf.data);
         }
     }
-    
-    /* Compute MD5 hash - pg_md5_hash produces 32 hex chars */
-    found = pg_md5_hash(buf.data, buf.len, md5_result);
-    
-    if (!found)
+    PG_CATCH();
     {
-        /* MD5 failed, return zero hash */
-        merkle_hash_zero(result);
+        /* Clean up slot even on error to prevent leaks */
+        ExecDropSingleTupleTableSlot(slot);
+        PG_RE_THROW();
     }
-    else
-    {
-        /*
-         * Extract all 32 hex chars (16 bytes = 128 bits)
-         * MD5 produces 32 hex chars, we use all of them for full 128-bit hash
-         */
-        for (i = 0; i < MERKLE_HASH_BYTES; i++)
-        {
-            result->data[i] = (hex_char_to_int(md5_result[i * 2]) << 4) |
-                              hex_char_to_int(md5_result[i * 2 + 1]);
-        }
-    }
-    
-    pfree(buf.data);
+    PG_END_TRY();
+
     ExecDropSingleTupleTableSlot(slot);
 }
 

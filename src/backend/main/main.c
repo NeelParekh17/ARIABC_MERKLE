@@ -197,6 +197,8 @@ main(int argc, char *argv[])
 	pgwin32_signal_initialize();
 #endif
 
+	printf("\n ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+
 	if (argc > 1 && strcmp(argv[1], "--boot") == 0)
 		AuxiliaryProcessMain(argc, argv);	/* does not return */
 	else if (argc > 1 && strcmp(argv[1], "--describe-config") == 0)

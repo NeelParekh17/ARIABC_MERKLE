@@ -71,7 +71,15 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
      * We fetch the actual tuple from the heap because we want to hash
      * ALL columns, not just the indexed column. This provides full row
      * integrity verification.
+     * 
+     * CRITICAL FIX: Skip if TID is invalid to avoid warnings and failures.
      */
+    if (!ItemPointerIsValid(ht_ctid) || 
+        ItemPointerGetBlockNumberNoCheck(ht_ctid) == InvalidBlockNumber)
+    {
+        return false;
+    }
+
     merkle_compute_row_hash(heapRel, ht_ctid, &hash);
     
     /*

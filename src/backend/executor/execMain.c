@@ -355,6 +355,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	/*
 	 * run plan
 	 */
+
 	if (!ScanDirectionIsNoMovement(direction))
 	{
 		if (execute_once && queryDesc->already_executed)
@@ -1615,6 +1616,17 @@ ExecutePlan(EState *estate,
 	 * initialize local variables
 	 */
 	current_tuple_count = 0;
+
+const int ccMax = 90;
+static int cc2Count = 0;
+
+    if(cc2Count++ == ccMax) {
+        cc2Count = 0;
+#if SAFEDBG1
+        printf("ariaMyDbg %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
+    }
+
 
 	/*
 	 * Set the direction.

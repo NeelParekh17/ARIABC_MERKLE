@@ -17,10 +17,15 @@ idle_worker_list_init(int num)
     worker = create_worker_controller();
     LIST_INSERT_HEAD(&idle_workers.list, worker, link);
     idle_workers.tail = worker;
+    // print_trace();
     if (!worker_start(worker))
         ereport(FATAL, (errmsg("[ZL] Cannot start worker")));
     for (idle_workers.num = 1; idle_workers.num < num; idle_workers.num++)
     {
+#if SAFEDBG
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
+
         worker = create_worker_controller();
         LIST_INSERT_AFTER(idle_workers.tail, worker, link);
         idle_workers.tail = worker;
@@ -75,6 +80,10 @@ create_worker_controller(void)
 
     worker->status      = WORKER_STATUS_IDLE;
     worker->conn        = PQconnectdbParams(keywords, values, true);
+
+#if SAFEDBG
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 
     if (PQstatus(worker->conn) == CONNECTION_BAD)
     {

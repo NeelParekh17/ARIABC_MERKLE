@@ -1,0 +1,6 @@
+Insert Time: 5s, Throughput: 2000 ops/sec
+VERIFICATION PASSED: Found 10000 records (Expected: 10000)
+Update Time: 5s, Throughput: 2000 ops/sec
+VERIFICATION PASSED: Found 10000 updated records (Expected: 10000)
+Delete Time: 4s, Throughput: 2500 ops/sec
+VERIFICATION PASSED: Found 0 records (Expected: 0)

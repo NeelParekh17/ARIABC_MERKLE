@@ -33,6 +33,7 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 
@@ -176,6 +177,10 @@ merkle_verify(PG_FUNCTION_ARGS)
      * Use GetActiveSnapshot() to see only committed, live tuples.
      * SnapshotAny would include dead tuples that were deleted, which
      * would cause verification mismatches.
+     * 
+     * NOTE: GetActiveSnapshot() returns a snapshot that is already managed
+     * by the active snapshot stack. We should NOT call RegisterSnapshot() on it
+     * as that would cause double registration and snapshot reference leaks.
      */
     scan = table_beginscan(heapRel, GetActiveSnapshot(), 0, NULL);
     
@@ -1026,7 +1031,8 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
         HeapTuple tuple;
 
         get_call_result_type(fcinfo, NULL, &tupdesc);
-        tupdesc = BlessTupleDesc(tupdesc);
+        /* NOTE: get_call_result_type already returns a blessed descriptor,
+         * so we should NOT call BlessTupleDesc() again to avoid reference leaks */
 
         values[0] = Int32GetDatum(leafId);
         values[1] = Int32GetDatum(partition);

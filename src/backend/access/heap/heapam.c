@@ -1924,8 +1924,6 @@ heap_insert(Relation relation, HeapTuple tup, CommandId cid,
 	 * Note: below this point, heaptup is the data we actually intend to store
 	 * into the relation; tup is the caller's original untoasted data.
 	 */
-	if (is_bcdb_worker)
-		SHA256_Update(&activeTx->state_hash, (char*)tup->t_data + sizeof(HeapTupleHeaderData), tup->t_len - sizeof(HeapTupleHeaderData));	
 
 	heaptup = heap_prepare_insert(relation, tup, xid, cid, options);
 
@@ -2115,9 +2113,6 @@ heap_prepare_insert(Relation relation, HeapTuple tup, TransactionId xid,
 	HeapTupleHeaderSetXmin(tup->t_data, xid);
 	if (options & HEAP_INSERT_FROZEN)
 		HeapTupleHeaderSetXminFrozen(tup->t_data);
-
-	BCDHeapTupleHeaderSetBCDBmin(tup->t_data, GetCurrentTxBlockId());
-    BCDHeapTupleHeaderSetBCDBmax(tup->t_data, BCDBInvalidBid);
 
 	HeapTupleHeaderSetCmin(tup->t_data, cid);
 	HeapTupleHeaderSetXmax(tup->t_data, 0); /* for cleanliness */
@@ -2765,7 +2760,6 @@ l1:
 	tp.t_data->t_infomask |= new_infomask;
 	tp.t_data->t_infomask2 |= new_infomask2;
 	HeapTupleHeaderClearHotUpdated(tp.t_data);
-	BCDHeapTupleHeaderSetBCDBmax(tp.t_data, GetCurrentTxBlockId());
 	HeapTupleHeaderSetXmax(tp.t_data, new_xmax);
 	HeapTupleHeaderSetCmax(tp.t_data, cid, iscombo);
 	/* Make sure there is no forward chain link in t_ctid */
@@ -2995,8 +2989,6 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
 				 errmsg("cannot update tuples during a parallel operation")));
 
-	if (is_bcdb_worker)
-		SHA256_Update(&activeTx->state_hash, (char*)newtup->t_data + sizeof(HeapTupleHeaderData), newtup->t_len - sizeof(HeapTupleHeaderData));
 
 	/*
 	 * Fetch the list of attributes to be checked for various operations.
@@ -3120,6 +3112,13 @@ l2:
 	checked_lockers = false;
 	locker_remains = false;
 	result = HeapTupleSatisfiesUpdate(&oldtup, cid, buffer);
+	if (result != TM_Ok)
+	{
+#if SAFEDBG
+		//print_trace();
+    	printf("ariaMyDbg %s : %s: %d cid= %d result= %d tup-infomask= %d\n", __FILE__, __FUNCTION__, __LINE__, cid, result, (oldtup.t_data)->t_infomask );
+#endif
+	}
 
 	/* see below about the "no wait" case */
 	Assert(result != TM_BeingModified || wait);
@@ -3127,6 +3126,8 @@ l2:
 	if (result == TM_Invisible)
 	{
 		UnlockReleaseBuffer(buffer);
+    		//printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+		//printtup();
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("attempted to update invisible tuple")));
@@ -3300,6 +3301,9 @@ l2:
 				can_continue = true;
 		}
 
+#if SAFEDBG
+    	printf("ariaMyDbg %s : %s: %d cid= %d\n", __FILE__, __FUNCTION__, __LINE__, cid );
+#endif
 		if (can_continue)
 			result = TM_Ok;
 		else if (!ItemPointerEquals(&oldtup.t_self, &oldtup.t_data->t_ctid) ||
@@ -3330,6 +3334,10 @@ l2:
 			   !ItemPointerEquals(&oldtup.t_self, &oldtup.t_data->t_ctid));
 		tmfd->ctid = oldtup.t_data->t_ctid;
 		tmfd->xmax = HeapTupleHeaderGetUpdateXid(oldtup.t_data);
+#if SAFEDBG
+    	printf("ariaMyDbg %s : %s: %d cid= %d\n", __FILE__, __FUNCTION__, __LINE__, cid );
+#endif
+	//debugtup(, NULL);
 		if (result == TM_SelfModified)
 			tmfd->cmax = HeapTupleHeaderGetCmax(oldtup.t_data);
 		else
@@ -3422,8 +3430,6 @@ l2:
 	 */
 	newtup->t_data->t_infomask &= ~(HEAP_XACT_MASK);
 	newtup->t_data->t_infomask2 &= ~(HEAP2_XACT_MASK);
-	BCDHeapTupleHeaderSetBCDBmin(newtup->t_data, GetCurrentTxBlockId());
-    BCDHeapTupleHeaderSetBCDBmax(newtup->t_data, BCDBInvalidBid);
 	HeapTupleHeaderSetXmin(newtup->t_data, xid);
 	HeapTupleHeaderSetCmin(newtup->t_data, cid);
 	newtup->t_data->t_infomask |= HEAP_UPDATED | infomask_new_tuple;
@@ -3506,7 +3512,6 @@ l2:
 		HeapTupleClearHotUpdated(&oldtup);
 		/* ... and store info about transaction updating this tuple */
 		Assert(TransactionIdIsValid(xmax_lock_old_tuple));
-		BCDHeapTupleHeaderSetBCDBmax(oldtup.t_data, GetCurrentTxBlockId());
 		HeapTupleHeaderSetXmax(oldtup.t_data, xmax_lock_old_tuple);
 		oldtup.t_data->t_infomask |= infomask_lock_old_tuple;
 		oldtup.t_data->t_infomask2 |= infomask2_lock_old_tuple;
@@ -3714,7 +3719,6 @@ l2:
 	oldtup.t_data->t_infomask2 &= ~HEAP_KEYS_UPDATED;
 	/* ... and store info about transaction updating this tuple */
 	Assert(TransactionIdIsValid(xmax_old_tuple));
-	BCDHeapTupleHeaderSetBCDBmax(oldtup.t_data, GetCurrentTxBlockId());
 	HeapTupleHeaderSetXmax(oldtup.t_data, xmax_old_tuple);
 	oldtup.t_data->t_infomask |= infomask_old_tuple;
 	oldtup.t_data->t_infomask2 |= infomask2_old_tuple;
@@ -4076,6 +4080,9 @@ l3:
 
 	if (result == TM_Invisible)
 	{
+#if SAFEDBG
+		printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 		/*
 		 * This is possible, but only when locking a tuple for ON CONFLICT
 		 * UPDATE.  We return this value here rather than throwing an error in
@@ -5689,7 +5696,6 @@ heap_abort_speculative(Relation relation, ItemPointer tid)
 	 * tuple immediately invisible everyone.  (In particular, to any
 	 * transactions waiting on the speculative token, woken up later.)
 	 */
-	BCDHeapTupleHeaderSetBCDBmin(tp.t_data, BCDBInvalidBid);
 	HeapTupleHeaderSetXmin(tp.t_data, InvalidTransactionId);
 
 	/* Clear the speculative insertion token too */

@@ -1082,6 +1082,7 @@ ResourceOwnerForgetRelationRef(ResourceOwner owner, Relation rel)
 static void
 PrintRelCacheLeakWarning(Relation rel)
 {
+	print_trace();
 	elog(WARNING, "relcache reference leak: relation \"%s\" not closed",
 		 RelationGetRelationName(rel));
 }
@@ -1217,8 +1218,8 @@ ResourceOwnerForgetSnapshot(ResourceOwner owner, Snapshot snapshot)
 static void
 PrintSnapshotLeakWarning(Snapshot snapshot)
 {
-	elog(WARNING, "Snapshot reference leak: Snapshot %p still referenced",
-		 snapshot);
+	elog(WARNING, "Snapshot reference leak: Snapshot %p still referenced (xmin %u, xmax %u)",
+		 snapshot, snapshot->xmin, snapshot->xmax);
 }
 
 

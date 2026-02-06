@@ -54,6 +54,7 @@ static const PQcommMethods PqCommMqMethods = {
 void
 pq_redirect_to_shm_mq(dsm_segment *seg, shm_mq_handle *mqh)
 {
+printf("safeDbg pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__  );
 	PqCommMethods = &PqCommMqMethods;
 	pq_mq_handle = mqh;
 	whereToSendOutput = DestRemote;

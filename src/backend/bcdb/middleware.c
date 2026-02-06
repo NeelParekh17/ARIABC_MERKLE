@@ -22,21 +22,22 @@
 MemoryContext bcdb_middleware_context;
 int32         tx_num = 0;
 int32         blocksize = 0;
+int32         numTxBurst = 0;
+int32         burstTime = 0;
 uint64        start_time;
+static int  tx_id_counter = 0; // not bcdb
 
 static BCDBShmXact *parse_tx(const char* json);
-//static BCBlock     *parse_block(const char* json);
 static void bcdb_middleware_attach_tx_to_block(BCDBShmXact *tx, BCBlock *block);
-//static void bcdb_middleware_conflict_check(BCBlock *block);
-//static void dfs_conflict_check_recursive(SERIALIZABLEXACT *sxact, BCBlockID bid, int *counter);
-//static RWConflict find_min_conflict(SHM_QUEUE *queue);
 static BCBlock *parse_block_with_txs(const char *json);
-//void signal_stale_read(SERIALIZABLEXACT *sxact);
 
 void
 bcdb_middleware_init(bool is_oep_mode, int32 block_size)
 {
     MemoryContext    old_context;
+    BCBlock *block;
+    //int32 nWorkers = block_size;
+    //nWorkers = 5;
 
     /* Aria does not have oep mode */
     is_bcdb_master = true;
@@ -46,9 +47,35 @@ bcdb_middleware_init(bool is_oep_mode, int32 block_size)
                               "middleware memory context", 
                               ALLOCSET_DEFAULT_SIZES);
     old_context = MemoryContextSwitchTo(bcdb_middleware_context);
+    block = get_block_by_id(1, true);
+    if(blocksize != 0) set_blksz(blocksize);
     idle_worker_list_init(block_size);
     MemoryContextSwitchTo(old_context);
-    pid = getpid();
+#if SAFEDBG2
+	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+#endif
+
+    start_time = bcdb_get_time();
+}
+
+void
+bcdb_middleware_init2(bool is_oep_mode, int32 block_size, int32 numTx, int32 timeSlot)
+{
+    MemoryContext    old_context;
+
+    is_bcdb_master = true;
+    blocksize = block_size;
+    numTxBurst = numTx;
+    burstTime = timeSlot;
+    bcdb_middleware_context = 
+        AllocSetContextCreate(TopMemoryContext, 
+                              "middleware memory context", 
+                              ALLOCSET_DEFAULT_SIZES);
+    old_context = MemoryContextSwitchTo(bcdb_middleware_context);
+    idle_worker_list_init(block_size);
+    MemoryContextSwitchTo(old_context);
+	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+
     start_time = bcdb_get_time();
 }
 
@@ -80,6 +107,7 @@ parse_tx(const char* json)
 
     tx = create_tx(hash->valuestring, sql->valuestring, BCDBInvalidTid, BCDBInvalidBid, isolation, pred_lock);
 
+	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
     create_time = cJSON_GetObjectItemCaseSensitive(parsed, "create_ts");
 
     if (cJSON_IsString(create_time))
@@ -112,22 +140,29 @@ parse_block_with_txs(const char *json)
     cJSON *block_id;
     cJSON *tx_json;
     BCBlock *block;
-    int   tx_id_counter = 0;
+    int j = 0;
+    //static int  tx_id_counter = 0; // not bcdb
+    //int  tx_id_counter = 0; // not bcdb
 
+	// printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+	//printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
     parsed = cJSON_Parse(json);
     if (!parsed)
         goto error;
     
+	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
     block_id = cJSON_GetObjectItemCaseSensitive(parsed, "bid");
-    if (!cJSON_IsNumber(block_id) || block_id->valueint != block_meta->global_bmax)
-        goto error;
     
+	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
     tx_list = cJSON_GetObjectItemCaseSensitive(parsed, "txs");
     if (!cJSON_IsArray(tx_list))
         goto error;
 
+	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
     block = get_block_by_id(block_id->valueint, true);
-    Assert(block->num_tx == 0);
+#if SAFEDBG
+	printf("ariaMyDbg %s : %s: %d blksz %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz(), getpid());
+#endif
     block->num_tx = cJSON_GetArraySize(tx_list);
     cJSON_ArrayForEach(tx_json, tx_list)
     {
@@ -139,18 +174,30 @@ parse_block_with_txs(const char *json)
         bool    pred_lock = false;
 
         sql = cJSON_GetObjectItemCaseSensitive(tx_json, "sql");
+	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
         if (!cJSON_IsString(sql) || (sql->valuestring == NULL))
             goto error;
 
+	if(j < 5) {
+		//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+		cJSON_Print(sql);
+	}
         hash = cJSON_GetObjectItemCaseSensitive(tx_json, "hash");
         if (!cJSON_IsString(hash))
             goto error;
+	if(j < 5) {
+		//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+		cJSON_Print(hash);
+		j++; 
+	}
+	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
 
         isolation = XACT_SERIALIZABLE;
         pred_lock = true;
 
         tx = create_tx(hash->valuestring, sql->valuestring, BCDBInvalidTid, BCDBInvalidBid, isolation, pred_lock);
 
+	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
         create_time = cJSON_GetObjectItemCaseSensitive(tx_json, "create_ts");
 
         if (cJSON_IsString(create_time))
@@ -159,14 +206,23 @@ parse_block_with_txs(const char *json)
             tx->create_time = strtoll(create_time->valuestring, &endpt, 10);
         }
         
+        tx_id_counter = get_num_tx_sub();
         tx->tx_id = tx_id_counter + (block->id - 1) * blocksize;
         tx->block_id_committed = block->id;
         block->txs[tx_id_counter] = tx;
         tx_id_counter += 1;
+        set_num_tx_sub(tx_id_counter); // get_block_by_id
+#if SAFEDBG
+		printf("ariaMyDbg %s : %s: %d txid %d bid %d hash %s \n", __FILE__, __FUNCTION__, __LINE__ , tx->tx_id, block->id, hash->valuestring);
+#endif
     }
+    //if(blocksize != 0) set_blksz(blocksize);
+    //block->blksize = blocksize;
+	//printf("ariaMyDbg %s : %s: %d blksz %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz());
     return block;
 
 error:
+    print_trace();
     ereport(FATAL,
         (errmsg("[ZL] cannot create block in shared memory")));
     return NULL;
@@ -178,19 +234,94 @@ bcdb_middleware_submit_tx(const char* tx_string)
     BCDBShmXact *tx;
     tx = parse_tx(tx_string);
     tx_queue_insert(tx, tx_num++);
+	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
     return 0;
 }
 
-void
+char *
 bcdb_middleware_submit_block(const char* block_json)
 {
     BCBlock     *block;
+    struct timeval tv1;
+    tv1.tv_sec = 0; tv1.tv_usec = 0;
+    static int next_tx_id = 0;
+    int tx_num2 = 0;
+    //struct timeval tv1 ;
+    //tv1.tv_sec = 0; tv1.tv_usec = 0;
+    // static int tmp = 0;
     ++block_meta->global_bmax;
+    block = parse_block_with_txs(block_json);
+    tx_num2 =  get_num_txqd(); //  get_block_by_id
+/*
+if(tmp < 2) {
+tmp++;
+print_trace();
+} else { return NULL; }
+*/
+#if SAFEDBG
+	printf("ariaMyDbg %s : %s: %d pid %d txnum %d txnum2 %d next_tx_id %d blk-numtx %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid(), tx_num, tx_num2, next_tx_id, block->num_tx);
+#endif
+	printf("ariaMyDbg %s : %s: %d pid %d tx %s \n", __FILE__, __FUNCTION__, __LINE__ , getpid(), block->txs[tx_num2]->sql);
+    for (int i= 0; i < block->num_tx; i++, next_tx_id++)
+    {
+      tx_queue_insert(block->txs[tx_num2], tx_num2);
+      //tx_queue_insert(block->txs[next_tx_id], tx_num++);
+      //tx_queue_insert(block->txs[i], tx_num++);
+      tx_num2++;
+    }
+    set_num_txqd(tx_num2); //  get_block_by_id
+	//printf("ariaMyDbg %s : %s: %d pid %d tx %s \n", __FILE__, __FUNCTION__, __LINE__ , getpid(), block->txs[tx_num2-1]->sql);
+        block = get_block_by_id(1, false);
+        Assert(block != NULL);
+		gettimeofday(&tv1, NULL);
+#if SAFEDBG
+		printf("\n\n\t time= %ld.%ld  getpid %d\n", tv1.tv_sec, tv1.tv_usec, getpid());
+          WaitConditionPidDbg(&block->done_conds[tx_num2 -1], getpid(),
+#else
+          WaitConditionPid(&block->done_conds[tx_num2 -1], getpid(),
+#endif
+                         ( block->last_committed_tx_id  == (tx_num2 -1) ));
+/*
+*/
+#if SAFEDBG
+		gettimeofday(&tv1, NULL);
+		printf("\n\n\t time= %ld.%ld  getpid %d\n", tv1.tv_sec, tv1.tv_usec, getpid());
+        printf("blkmid read result at %d= %s\n", ((tx_num2-1)%(2*block->blksize)), block->result[(tx_num2-1)%(2*block->blksize)]);
+        printf("\n\t *** safeDB completed txid %d pid %d %s : %s: %d *** \n\n",
+               tx_num2, getpid(), __FILE__, __FUNCTION__, __LINE__ );
+#endif
+        printf("\n\t *** safeDB txid %d pid %d result %s file %s : %s: %d *** \n\n", 
+               tx_num2, getpid(), &block->result[tx_num2-1],__FILE__, __FUNCTION__, __LINE__ );
+//ereport(INFO, (errmsg(&block->result[tx_num2-1])));
+// TODO -- another way to convey results...
+// wait-to-finish() ?? or 
+
+//safeOut();
+	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+return block->result[(tx_num2-1)%(2*block->blksize)];
+}
+
+void
+bcdb_middleware_submit_block2(const char* block_json)
+{
+    BCBlock     *block;
+    struct timeval tv1 ;
+    tv1.tv_sec = 0; tv1.tv_usec = 0;
+
+    ++block_meta->global_bmax;
+	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
     block = parse_block_with_txs(block_json);
     for (int i=0; i < block->num_tx; i++)
     {
-        tx_queue_insert(block->txs[i], tx_num++);
+      tx_queue_insert(block->txs[i], tx_num++);
+	  if( (i % numTxBurst == 0)&&(i > 0)) {
+		gettimeofday(&tv1, NULL);
+		printf("\n\n\t time= %ld.%ld  getpid %d\n", tv1.tv_sec, tv1.tv_usec, getpid());
+		printf("\t ariaMyDbg %s : %s: %d pid %d  sleeping %dms next burstSz %d from tx %d\n\n", __FILE__, __FUNCTION__, __LINE__ , getpid() ,burstTime, numTxBurst, i );
+		usleep(burstTime);
+	  }
     }
+	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
 }
 
 void 
@@ -235,6 +366,8 @@ block_cleaning(BCBlockID current_block_id)
     uint64 cur_report_ts = bcdb_get_time();
     int32  cur_num_committed = block_meta->num_committed;
     float abort_rate = (float)block_meta->num_aborted / (block_meta->num_aborted + block_meta->num_committed);
+	printf("\nariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+	printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
 
     if (current_block_id > CLEANING_DELAY_BLOCKS)
     {
@@ -272,86 +405,6 @@ allow_all_block_txs_to_commit(BCBlock *block)
     return;
 }
 /*
-RWConflict
-find_min_conflict(SHM_QUEUE *queue)
-{
-	RWConflict    cur_min;
-    RWConflict    iter;
-    iter = (RWConflict)SHMQueueNext(queue, queue, offsetof(RWConflictData, outLink));
-    cur_min = iter;
-    while(iter)
-    {
-        if (BCDB_TX(iter->sxactIn)->tx_id < BCDB_TX(cur_min->sxactIn)->tx_id)
-            cur_min = iter;
-        iter = (RWConflict)SHMQueueNext(queue, &iter->outLink, offsetof(RWConflictData, outLink));
-    }
-    return cur_min;
-}
-*/
-
-/*
-void
-signal_stale_read(SERIALIZABLEXACT *sxact)
-{
-    RWConflict iter;
-    iter = (RWConflict)SHMQueueNext(&sxact->inConflicts, &sxact->inConflicts, offsetof(RWConflictData, inLink));
-    while (iter)
-    {
-        if (BCDB_TX(iter->sxactOut)->block_id_committed > BCDB_TX(iter->sxactIn)->block_id_committed)
-        {
-            iter->sxactOut->flags |= SXACT_FLAG_DOOMED;
-            sprintf(BCDB_TX(iter->sxactOut)->why_doomed, "stale read, %s update first", BCDB_TX(iter->sxactIn)->hash);
-            ConditionVariableBroadcast(&BCDB_TX(iter->sxactOut)->cond);
-        }
-        iter = (RWConflict)SHMQueueNext(&sxact->inConflicts, &iter->inLink, offsetof(RWConflictData, inLink));
-    }
-}
-*/
-/*
-void
-dfs_conflict_check_recursive(SERIALIZABLEXACT *sxact, BCBlockID bid, int *counter)
-{
-	RWConflict        outConflict;
-    SERIALIZABLEXACT *decendant;
-    sxact->pre_ts = (*counter)++;
-
-    if (BCDB_TX(sxact)->status != TX_WAIT_FOR_COMMIT || SxactIsDoomed(sxact) || SxactIsRolledBack(sxact))
-        return;
-
-    DEBUGNOCHECK("[ZL] dfs step in Tx: %s", BCDB_TX(sxact)->hash);
-
-    outConflict = find_min_conflict(&sxact->outConflicts);
-    while (outConflict)
-    {
-        decendant = outConflict->sxactIn;
-        if (!SxactIsDoomed(decendant) && !SxactIsRolledBack(decendant))
-        {
-            if (BCDB_TX(decendant)->block_id_committed == block_meta->global_bmin)
-            {
-                DEBUGNOCHECK("[ZL] dfs visiting Tx: %d_%d", BCDB_TX(decendant)->block_id_committed, BCDB_TX(decendant)->tx_id);
-                if (decendant->pre_ts != -1 && decendant->pre_ts < sxact->pre_ts && decendant->post_ts == -1)
-                {
-                    sxact->flags |= SXACT_FLAG_DOOMED;
-                    BCDB_TX(sxact)->status = TX_ABORTING;
-                    sprintf(BCDB_TX(sxact)->why_doomed, "failed conflict check");
-                    DEBUGNOCHECK("[ZL] dfs Tx doomed: %d_%d", BCDB_TX(sxact)->block_id_committed, BCDB_TX(sxact)->tx_id);
-                    break;
-                }
-                if (decendant->pre_ts == -1)
-                    dfs_conflict_check_recursive(decendant, bid, counter);
-            }
-        }
-        if (ShmemAddrIsValid(outConflict->inLink.next) && ShmemAddrIsValid(outConflict->inLink.prev))
-            ReleaseRWConflict(outConflict);
-
-        outConflict = find_min_conflict(&sxact->outConflicts);
-    }
-    sxact->post_ts = (*counter)++;
-    //if (!SxactIsDoomed(sxact))
-    //    signal_stale_read(sxact);
-
-    DEBUGNOCHECK("[ZL] dfs step out Tx: %s", BCDB_TX(sxact)->hash);
-}
 */
 
 void
@@ -390,6 +443,8 @@ bool bcdb_is_tx_commited(char * tx_hash){
 void 
 bcdb_clear_block_txs_store()
 {
+	printf("\nariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+	printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
     shm_hash_clear(block_pool, MAX_NUM_BLOCKS);
     clear_tx_pool();
     block_meta->global_bmin = 1;
@@ -408,76 +463,20 @@ bcdb_clear_block_txs_store()
 
 /*
 void bcdb_middleware_new_block_handler(BCBlock* block){
-    // Search the SHM_TX and notify the the backend to process
-    Transaction *tmp_tx;
-
-    //notify the backend to proceed 1 by 1
-    for(int x=0; x < block->num_tx; x++){
-        if(!bcdb_middleware_set_txs_committed_blcok(tmp_tx->hash, block->id, false)){
-            //todo: should wait for tx execution
-        }
-    }
-
-    bcdb_middleware_allow_txs_exec_write_set_and_commit(block);
-}
 */
 
 /*
 // assume dummy file contains jsons per line
 Transaction* parsing_dummy_block_file(const char* file_path){
-    FILE *fptr;
-    char line_buffer[10000];
-    Transaction *tmp_tx, *last, *first;
-
-    last = NULL;
-
-    if ((fptr = fopen(file_path, "r")) != NULL){
-        while(fscanf(fptr, "%[^\n]\n", line_buffer) != EOF) {
-            tmp_tx = parse_tx(line_buffer);
-            //todo clean up
-            if (last) {
-                LIST_INSERT_AFTER(last, tmp_tx, link);
-            } else{
-                first = tmp_tx;
-            }
-            last = tmp_tx;
-        }
-        return first;
-    }
-
-    return NULL;
-}
 */
 
 /*
 //dummy function called by frontend
 void bcdb_middleware_dummy_block(const char* file_path, uint32 block_id){
-    BCBlock* block;
-    //read the file
-    Transaction* head_tx = parsing_dummy_block_file(file_path);
-
-    //construct BCBlock here
-    block = ShmemAlloc(sizeof(BCBlock));
-    block_initialize(block);
-
-    block->id = block_id;
-    block_set_txs(block, head_tx);
-
-    bcdb_middleware_new_block_handler(block);
-}
 */
 
 /*
 void bcdb_middleware_dummy_submit_tx(const char* file_path){
-    FILE *fptr;
-    char line_buffer[10000];
-
-    if ((fptr = fopen(file_path, "r")) != NULL){
-        while(fscanf(fptr, "%[^\n]\n", line_buffer) != EOF) {
-            bcdb_master_process_tx(line_buffer);
-        }
-    }
-}
 */
 
 //Return false if 1)no tx with that hash or 2) tx is not finish execution

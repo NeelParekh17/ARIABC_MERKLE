@@ -169,9 +169,13 @@ ProcessQuery(PlannedStmt *plan,
 	{
 		Oid			lastOid;
 
+	    //printf("safeDbg pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__ );
 		switch (queryDesc->operation)
 		{
 			case CMD_SELECT:
+				printf(completionTag, COMPLETION_TAG_BUFSIZE,
+						 "SELECT " UINT64_FORMAT,
+						 queryDesc->estate->es_processed);
 				snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
 						 "SELECT " UINT64_FORMAT,
 						 queryDesc->estate->es_processed);
@@ -931,10 +935,16 @@ PortalRunSelect(Portal portal,
 		if (count == FETCH_ALL)
 			count = 0;
 
+#if PGDBG
+	    printf("safeDbg pid %d %s : %s: %d worker %d\n", getpid(), __FILE__, __FUNCTION__, __LINE__, worker_id );
+#endif
 		if (portal->holdStore)
 			nprocessed = RunFromStore(portal, direction, (uint64) count, dest);
 		else
 		{
+#if PGDBG
+	        printf("safeDbg pid %d %s : %s: %d worker %d\n", getpid(), __FILE__, __FUNCTION__, __LINE__, worker_id );
+#endif
 			PushActiveSnapshot(queryDesc->snapshot);
 			ExecutorRun(queryDesc, direction, (uint64) count,
 						portal->run_once);
@@ -971,10 +981,12 @@ PortalRunSelect(Portal portal,
 		if (count == FETCH_ALL)
 			count = 0;
 
+	    printf("safeDbg pid %d %s : %s: %d worker %d\n", getpid(), __FILE__, __FUNCTION__, __LINE__, worker_id );
 		if (portal->holdStore)
 			nprocessed = RunFromStore(portal, direction, (uint64) count, dest);
 		else
 		{
+	        printf("safeDbg pid %d %s : %s: %d worker %d\n", getpid(), __FILE__, __FUNCTION__, __LINE__, worker_id );
 			PushActiveSnapshot(queryDesc->snapshot);
 			ExecutorRun(queryDesc, direction, (uint64) count,
 						portal->run_once);

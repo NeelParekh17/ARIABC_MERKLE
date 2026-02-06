@@ -179,9 +179,6 @@ HeapTupleSatisfiesSelf(HeapTuple htup, Snapshot snapshot, Buffer buffer)
 	Assert(ItemPointerIsValid(&htup->t_self));
 	Assert(htup->t_tableOid != InvalidOid);
 
-	if (BCDBHeapTupleHeaderGetBCDBmin(htup->t_data) == BCDBInvalidBid)
-		return false;
-
 	if (!HeapTupleHeaderXminCommitted(tuple))
 	{
 		if (HeapTupleHeaderXminInvalid(tuple))
@@ -375,9 +372,6 @@ HeapTupleSatisfiesToast(HeapTuple htup, Snapshot snapshot,
 	Assert(ItemPointerIsValid(&htup->t_self));
 	Assert(htup->t_tableOid != InvalidOid);
 
-	if (BCDBHeapTupleHeaderGetBCDBmin(htup->t_data) == BCDBInvalidBid)
-		return false;
-
 	if (!HeapTupleHeaderXminCommitted(tuple))
 	{
 		if (HeapTupleHeaderXminInvalid(tuple))
@@ -474,17 +468,16 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 	Assert(ItemPointerIsValid(&htup->t_self));
 	Assert(htup->t_tableOid != InvalidOid);
 
-	if (BCDBHeapTupleHeaderGetBCDBmin(htup->t_data) == BCDBInvalidBid)
-		return TM_Invisible;
-
 	if (!HeapTupleHeaderXminCommitted(tuple))
 	{
+    //printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 		if (HeapTupleHeaderXminInvalid(tuple))
 			return TM_Invisible;
 
 		/* Used by pre-9.0 binary upgrades */
 		if (tuple->t_infomask & HEAP_MOVED_OFF)
 		{
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 			TransactionId xvac = HeapTupleHeaderGetXvac(tuple);
 
 			if (TransactionIdIsCurrentTransactionId(xvac))
@@ -523,6 +516,9 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 		}
 		else if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmin(tuple)))
 		{
+#if SAFEDBG2
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 			if (HeapTupleHeaderGetCmin(tuple) >= curcid)
 				return TM_Invisible;	/* inserted after scan started */
 
@@ -579,6 +575,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 				}
 				else
 				{
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 					if (HeapTupleHeaderGetCmax(tuple) >= curcid)
 						return TM_SelfModified; /* updated after scan started */
 					else
@@ -594,6 +591,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 				return TM_Ok;
 			}
 
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 			if (HeapTupleHeaderGetCmax(tuple) >= curcid)
 				return TM_SelfModified; /* updated after scan started */
 			else
@@ -609,6 +607,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 			/* it must have aborted or crashed */
 			SetHintBits(tuple, buffer, HEAP_XMIN_INVALID,
 						InvalidTransactionId);
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 			return TM_Invisible;
 		}
 	}
@@ -623,6 +622,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 
 	if (tuple->t_infomask & HEAP_XMAX_COMMITTED)
 	{
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 		if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))
 			return TM_Ok;
 		if (!ItemPointerEquals(&htup->t_self, &tuple->t_ctid) ||
@@ -634,6 +634,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 
 	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
 	{
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 		TransactionId xmax;
 
 		if (HEAP_LOCKED_UPGRADED(tuple->t_infomask))
@@ -660,6 +661,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 
 		if (TransactionIdIsCurrentTransactionId(xmax))
 		{
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 			if (HeapTupleHeaderGetCmax(tuple) >= curcid)
 				return TM_SelfModified; /* updated after scan started */
 			else
@@ -704,6 +706,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 	{
 		if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))
 			return TM_BeingModified;
+    //printf("ariaMyDbg %s : %s: %d  getcmax= %d cucd=%d\n", __FILE__, __FUNCTION__, __LINE__, HeapTupleHeaderGetCmax(tuple), curcid );
 		if (HeapTupleHeaderGetCmax(tuple) >= curcid)
 			return TM_SelfModified; /* updated after scan started */
 		else
@@ -732,6 +735,7 @@ HeapTupleSatisfiesUpdate(HeapTuple htup, CommandId curcid,
 
 	SetHintBits(tuple, buffer, HEAP_XMAX_COMMITTED,
 				HeapTupleHeaderGetRawXmax(tuple));
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 	if (!ItemPointerEquals(&htup->t_self, &tuple->t_ctid) ||
 		HeapTupleHeaderIndicatesMovedPartitions(tuple))
 		return TM_Updated;		/* updated by other */
@@ -770,9 +774,6 @@ HeapTupleSatisfiesDirty(HeapTuple htup, Snapshot snapshot,
 
 	snapshot->xmin = snapshot->xmax = InvalidTransactionId;
 	snapshot->speculativeToken = 0;
-
-	if (BCDBHeapTupleHeaderGetBCDBmin(htup->t_data) == BCDBInvalidBid)
-		return false;
 
 	if (!HeapTupleHeaderXminCommitted(tuple))
 	{
@@ -988,9 +989,6 @@ HeapTupleSatisfiesMVCC(HeapTuple htup, Snapshot snapshot,
 	Assert(ItemPointerIsValid(&htup->t_self));
 	Assert(htup->t_tableOid != InvalidOid);
 
-	if (BCDBHeapTupleHeaderGetBCDBmin(htup->t_data) == BCDBInvalidBid)
-		return false;
-
 	if (!HeapTupleHeaderXminCommitted(tuple))
 	{
 		if (HeapTupleHeaderXminInvalid(tuple))
@@ -1192,8 +1190,6 @@ HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 	Assert(ItemPointerIsValid(&htup->t_self));
 	Assert(htup->t_tableOid != InvalidOid);
 
-	if (BCDBHeapTupleHeaderGetBCDBmin(htup->t_data) == BCDBInvalidBid)
-		return HEAPTUPLE_DEAD;
 	/*
 	 * Has inserting transaction committed?
 	 *
@@ -1410,9 +1406,6 @@ HeapTupleSatisfiesVacuum(HeapTuple htup, TransactionId OldestXmin,
 
 	/* Otherwise, it's dead and removable */
 return_dead:
-	if (BCDBHeapTupleHeaderGetBCDBmax(tuple) != 0 && BCDBHeapTupleHeaderGetBCDBmax(tuple) != BCDBInvalidBid && BCDBHeapTupleHeaderGetBCDBmax(tuple) >= block_meta->global_bmin - CLEANING_DELAY_BLOCKS)
-		return HEAPTUPLE_RECENTLY_DEAD;
-	else
 		return HEAPTUPLE_DEAD;
 
 }
@@ -1459,8 +1452,6 @@ HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin)
 
 	Assert(ItemPointerIsValid(&htup->t_self));
 	Assert(htup->t_tableOid != InvalidOid);
-	if (BCDBHeapTupleHeaderGetBCDBmin(htup->t_data) == BCDBInvalidBid)
-		return true;
 	/*
 	 * If the inserting transaction is marked invalid, then it aborted, and
 	 * the tuple is definitely dead.  If it's marked neither committed nor
@@ -1492,9 +1483,6 @@ HeapTupleIsSurelyDead(HeapTuple htup, TransactionId OldestXmin)
 
 	/* If deleter isn't known to have committed, assume it's still running. */
 	if (!(tuple->t_infomask & HEAP_XMAX_COMMITTED))
-		return false;
-
-	if (BCDBHeapTupleHeaderGetBCDBmax(tuple) != 0 && BCDBHeapTupleHeaderGetBCDBmax(tuple) != BCDBInvalidBid && BCDBHeapTupleHeaderGetBCDBmax(tuple) >= block_meta->global_bmin - CLEANING_DELAY_BLOCKS)
 		return false;
 
 	/* Deleter committed, so tuple is dead if the XID is old enough. */
@@ -1723,8 +1711,8 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
     bcdb_bmax = BCDBHeapTupleHeaderGetBCDBmax(tuple);
     current_bid = GetCurrentTxBlockIdSnapshot();
 
-	if (BCDBHeapTupleHeaderGetBCDBmin(tuple) == BCDBInvalidBid)
-		return false;
+    	//	printf("ariaMyDbg %s : %s: %d BCDB bmn %d bmx %d cubd %d \n",
+	//		 __FILE__, __FUNCTION__, __LINE__, bcdb_bmin, bcdb_bmax, current_bid);
 
 	if (!HeapTupleHeaderXminCommitted(tuple))
 	{
@@ -1733,6 +1721,7 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
 			if (HeapTupleHeaderGetCmin(tuple) >= snapshot->curcid)
 				return false;	/* inserted after scan started */
 	
+    		printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 			if (tuple->t_infomask & HEAP_XMAX_INVALID)	/* xid invalid */
 				return true;
 	
@@ -1748,6 +1737,7 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
 				/* not LOCKED_ONLY, so it has to have an xmax */
 				Assert(TransactionIdIsValid(xmax));
 	
+    		printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 				/* updating subtransaction must have aborted */
 				if (!TransactionIdIsCurrentTransactionId(xmax))
 					return true;
@@ -1755,6 +1745,7 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
 					return true;	/* updated after scan started */
 				else
 					return false;	/* updated before scan started */
+    		printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 			}
 
 			if (!TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmax(tuple)))
@@ -1770,13 +1761,14 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
 			else
 				return false;	/* deleted before scan started */
 		}
-		else if (bcdb_bmin > current_bid)
-			return false;
 		else if (TransactionIdDidCommit(HeapTupleHeaderGetRawXmin(tuple)))
 			SetHintBits(tuple, buffer, HEAP_XMIN_COMMITTED,
 						HeapTupleHeaderGetRawXmin(tuple));
 		else
 		{
+#if SAFEDBG2
+    		printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 			/* it must have aborted or crashed */
 			SetHintBits(tuple, buffer, HEAP_XMIN_INVALID,
 						InvalidTransactionId);
@@ -1787,19 +1779,20 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
 	else
 	{
 		/* xmin is still in progress according to our snapshot */
-		if (current_bid < bcdb_bmin)
-	    	return false;
 	}
 
 
 	if (tuple->t_infomask & HEAP_XMAX_INVALID)	/* xid invalid or aborted */
 		return true;
 
+    		//printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 	if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))
 		return true;
 
+    		//printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
 	{
+    		printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 		TransactionId xmax;
 
 		/* already checked above */
@@ -1812,31 +1805,30 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
 
 		if (TransactionIdIsCurrentTransactionId(xmax))
 		{
+    		printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 			if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
 				return true;	/* deleted after scan started */
 			else
 				return false;	/* deleted before scan started */
 		}
-		if (current_bid < bcdb_bmax)
-			return true;
 		if (TransactionIdDidCommit(xmax))
 			return false;		/* updating transaction committed */
+    		//printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 		/* it must have aborted or crashed */
 		return true;
 	}
 
 	if (!(tuple->t_infomask & HEAP_XMAX_COMMITTED))
 	{
+    		//printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 		if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmax(tuple)))
 		{
+    		printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
 			if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
 				return true;	/* deleted after scan started */
 			else
 				return false;	/* deleted before scan started */
 		}
-
-		if (current_bid < bcdb_bmax)
-			return true;
 
 		if (!TransactionIdDidCommit(HeapTupleHeaderGetRawXmax(tuple)))
 		{
@@ -1848,8 +1840,9 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
 	}
 	else
 	{
-		if (current_bid < bcdb_bmax)
-	    	return true;
+#if SAFEDBG2
+    		printf("ariaMyDbg %s : %s: %d\n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 	}
 	
 	return false;
@@ -1868,11 +1861,17 @@ bool BCDBHeapTupleSatisfiesBlock(Snapshot snapshot, HeapTuple tup, Buffer buffer
 bool
 HeapTupleSatisfiesVisibility(HeapTuple tup, Snapshot snapshot, Buffer buffer)
 {
+    bool x = false;
 	switch (snapshot->snapshot_type)
 	{
 		case SNAPSHOT_MVCC:
 			if (is_bcdb_worker && !IsCatalogRelationOid(tup->t_tableOid))
-				return BCDBHeapTupleSatisfiesBlock(snapshot, tup, buffer);
+				{
+				x = BCDBHeapTupleSatisfiesBlock(snapshot, tup, buffer);
+    		//printf("ariaMyDbg %s : %s: %d BCDBHeapTupleSatisfiesBlock %d\n",
+		//	 __FILE__, __FUNCTION__, __LINE__, x );
+				return x;
+				}
 			else
 				return HeapTupleSatisfiesMVCC(tup, snapshot, buffer);
 			break;

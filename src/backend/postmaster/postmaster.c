@@ -4314,6 +4314,9 @@ BackendInitialize(Port *port)
 	 */
 	pq_init();					/* initialize libpq to talk to client */
 	whereToSendOutput = DestRemote; /* now safe to ereport to client */
+#if SAFEDBG
+printf("safeDbg pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__ );
+#endif
 
 	/*
 	 * We arrange for a simple exit(1) if we receive SIGTERM or SIGQUIT or

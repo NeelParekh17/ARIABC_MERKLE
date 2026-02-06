@@ -173,6 +173,10 @@ bcdb_block_submit(PG_FUNCTION_ARGS)
     char	   *bcdb_query = PG_GETARG_CSTRING(0);
 
     bcdb_middleware_submit_block(bcdb_query);
+#if SAFEDBG
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+    print_trace();
+#endif
 
     PG_RETURN_BOOL(true);
 }
@@ -186,7 +190,7 @@ bcdb_add_tx_with_block_id(PG_FUNCTION_ARGS)
     bcdb_middleware_set_txs_committed_block(tx_hash, block_id);
 
     PG_RETURN_BOOL(true);
-
+ 
 }
 
 Datum
@@ -216,7 +220,10 @@ bcdb_check_txs_result(PG_FUNCTION_ARGS)
 Datum
 bcdb_wait_to_finish(PG_FUNCTION_ARGS)
 {
-    bcdb_middleware_wait_all_to_finish();
+    usleep(10000);
+    //bcdb_middleware_wait_all_to_finish();
+    //set_last_committed_txid();
+    //block_meta->num_committed = 0;
     PG_RETURN_BOOL(true);
 }
 
@@ -241,12 +248,15 @@ Datum
 bcdb_num_committed(PG_FUNCTION_ARGS)
 {
     ereport(LOG, (errmsg("[ZL] num committed: %d", (int)block_meta->num_committed)));
+	printf("\nariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+	printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
     PG_RETURN_INT32((int)block_meta->num_committed);
 }
 
 Datum
 bcdb_reset(PG_FUNCTION_ARGS)
 {
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
     bcdb_clear_block_txs_store();
     PG_RETURN_BOOL(true);
 }
@@ -254,8 +264,23 @@ bcdb_reset(PG_FUNCTION_ARGS)
 Datum
 bcdb_init(PG_FUNCTION_ARGS)
 {
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+
     bool is_oep_mode = PG_GETARG_BOOL(0);
     int32 block_size = PG_GETARG_INT32(1);
     bcdb_middleware_init(is_oep_mode, block_size);
+    PG_RETURN_BOOL(true);
+}
+
+Datum
+bcdb_init2(PG_FUNCTION_ARGS)
+{
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+
+    bool is_oep_mode = PG_GETARG_BOOL(0);
+    int32 block_size = PG_GETARG_INT32(1);
+    int32 numTx = PG_GETARG_INT32(2);
+    int32 timeSlot = PG_GETARG_INT32(3);
+    bcdb_middleware_init2(is_oep_mode, block_size, numTx, timeSlot);
     PG_RETURN_BOOL(true);
 }
