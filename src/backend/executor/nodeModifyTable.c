@@ -39,6 +39,7 @@
 
 #include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/genam.h"
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "access/merkle.h"
@@ -224,93 +225,51 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
  * indexes. This is called after table_tuple_update completes, using the
  * new tuple's TID.
  */
-static void
+void
 ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
 {
     List       *indexList;
     ListCell   *lc;
-    
+
     /*
-     * CRITICAL FIX: Validate slot->tts_tid before processing.
-     * During BCDB worker operations with optimistic writes (store_optim_update),
-     * the tuple is not yet in the heap, so tts_tid is invalid (0xFFFFFFFF).
-     * In this case, we skip Merkle index updates since the tuple doesn't
-     * exist yet and we can't compute its hash.
-     * 
-     * Note: ItemPointerIsValid only checks ip_posid != 0, NOT the block number!
-     * We must also check for InvalidBlockNumber (0xFFFFFFFF).
+     * Validate slot->tts_tid before processing.
+     * During optimistic writes the tuple is not yet in the heap,
+     * so tts_tid is invalid — skip silently.
      */
     if (!ItemPointerIsValid(&slot->tts_tid) ||
         ItemPointerGetBlockNumberNoCheck(&slot->tts_tid) == InvalidBlockNumber)
-    {
-        /* Silently skip - this is expected behavior for optimistic writes */
         return;
-    }
-    
-	/* GUC: Check if Merkle index updates are enabled */
+
     if (!enable_merkle_index)
         return;
-		
-    /* Get list of indexes on this table */
+
     indexList = RelationGetIndexList(heapRel);
-    
+
     foreach(lc, indexList)
     {
         Oid         indexOid = lfirst_oid(lc);
         Relation    indexRel;
-        
+
         indexRel = index_open(indexOid, RowExclusiveLock);
-        
-        /* Check if this is a Merkle index */
+
         if (indexRel->rd_rel->relam == MERKLE_AM_OID)
         {
-            MerkleHash      hash;
-            TupleDesc       indexTupdesc;
-            int             partitionId;
-            int             nkeys;
-            int16          *indkey;
-            Datum          *keyValues;
-            bool           *keyNulls;
-            int             i;
-            int             totalLeaves;
-            
-            /* Get index structure info */
-            indexTupdesc = RelationGetDescr(indexRel);
-            nkeys = indexRel->rd_index->indnkeyatts;
-            indkey = indexRel->rd_index->indkey.values;
-            
-            /* Read tree configuration from metadata */
-            merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
-            
-            /* Allocate key value arrays */
-            keyValues = (Datum *) palloc(nkeys * sizeof(Datum));
-            keyNulls = (bool *) palloc(nkeys * sizeof(bool));
-            
-            /* Compute hash of the new row */
-            merkle_compute_row_hash(heapRel, &slot->tts_tid, &hash);
-            
-            /* Extract all indexed column values */
-            for (i = 0; i < nkeys; i++)
-            {
-                int heapAttr = indkey[i];  /* 1-based column number */
-                keyValues[i] = slot_getattr(slot, heapAttr, &keyNulls[i]);
-            }
-            
-            /* Compute partition ID using multi-column function */
-            partitionId = merkle_compute_partition_id(keyValues, keyNulls,
-                                                             nkeys, indexTupdesc,
-                                                             totalLeaves);
-            
-            /* XOR the new hash IN to the tree */
-            merkle_update_tree_path(indexRel, partitionId, &hash, true);
-            
-            pfree(keyValues);
-            pfree(keyNulls);
+            IndexInfo  *indexInfo;
+            Datum       values[INDEX_MAX_KEYS];
+            bool        isnull[INDEX_MAX_KEYS];
+
+            indexInfo = BuildIndexInfo(indexRel);
+
+            FormIndexDatum(indexInfo, slot, NULL, values, isnull);
+
+            index_insert(indexRel, values, isnull,
+                         &slot->tts_tid, heapRel,
+                         UNIQUE_CHECK_NO, indexInfo);
         }
-        
+
         index_close(indexRel, RowExclusiveLock);
     }
-    
+
     list_free(indexList);
 }
 

@@ -14,6 +14,7 @@
 #include "utils/rel.h"
 #include <access/tableam.h>
 #include <executor/executor.h>
+#include <executor/nodeModifyTable.h>
 #include <bcdb/worker.h>
 #include "bcdb/bcdb_dsa.h"
 #include "utils/hsearch.h"
@@ -947,6 +948,20 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
 
     else if (update_indexes)
         heap_apply_index(relation, slot, false, false);
+
+    /*
+     * MERKLE HOT-UPDATE FIX: If update_indexes is false (HOT update),
+     * regular indexes don't need new entries because the key didn't change.
+     * But Merkle indexes hash ALL columns, so any column change (even
+     * non-indexed ones) changes the row hash. We already XOR'd OUT the old
+     * hash above; now we must XOR IN the new hash.
+     *
+     * Without this, HOT updates (e.g. "UPDATE t SET data='x' WHERE id=1"
+     * where 'id' is the indexed column) silently drop the row's hash
+     * contribution from the Merkle tree, causing merkle_verify() failures.
+     */
+    if (!update_indexes)
+        ExecInsertMerkleIndexes(relation, slot);
 
     ExecDropSingleTupleTableSlot(slot);
 
