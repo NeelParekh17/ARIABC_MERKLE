@@ -35,6 +35,8 @@
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "access/xact.h"
+#include "utils/resowner.h"
 
 int current_block_id;
 int total_num_restarts = 0; // worker specific -- move to shm for global
@@ -346,6 +348,7 @@ get_write_set(BCDBShmXact *tx, Snapshot snapshot) {
      */
     MemoryContextSwitchTo(oldcontext);
 
+    activeTx->portal = portal;
     (void) PortalRun(portal,
                      FETCH_ALL,
                      true,    /* always top level */
@@ -353,7 +356,6 @@ get_write_set(BCDBShmXact *tx, Snapshot snapshot) {
                      receiver,
                      receiver,
                      completionTag);
-    activeTx->portal = portal;
 
 #if SAFEDBG1
     printf("safeDbg pid %d %s : %s: %d \n",
@@ -366,7 +368,7 @@ get_write_set(BCDBShmXact *tx, Snapshot snapshot) {
 int chk_query_type(const char *query, const char* fmt1_str, const char *fmt2_str) {
 
   int cmd_type = 1;
-  int cmd_len = 1; // all of INSERT, UPDATE, DELETE, SELECT len = 6 !!
+  int cmd_len = 6; // all of INSERT, UPDATE, DELETE, SELECT len = 6 !!
   int ofst = 0; 
   for (ofst = 0; ofst < cmd_len; ofst++) {
     if((query[ofst] != fmt1_str[ofst]) && (query[ofst] != fmt2_str[ofst]))
@@ -483,7 +485,16 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                      activeTx->tx_id_committed);
 #endif
 	  } else {
+	      /* Fix: AbortCurrentTransaction properly releases all resources
+	       * (buffer pins, TupleDesc refs, locks) via ResourceOwnerRelease
+	       * with isCommit=false (silent, no leak warnings).
+	       * Then reset_xact_command sets xact_started=false so
+	       * start_xact_command will begin a fresh transaction. */
+	      AbortCurrentTransaction();
 	      reset_xact_command();
+	      if(hold_portal_snapshot) {
+	          hold_portal_snapshot = false;
+	      }
 #if SAFEDBG2
               printf("\n\n safeDbg tx %d rerun due to conflict pid %d %s : %s: %d \n",
                      tx->tx_id, getpid(), __FILE__, __FUNCTION__, __LINE__ );
@@ -491,10 +502,6 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	  }
           init = false;
 	  XactIsoLevel = tx->isolation;
-          if(hold_portal_snapshot) {
-	      PortalDrop(activeTx->portal, false);
-              hold_portal_snapshot = false;
-          }
 	  start_xact_command();
 	  tx->status = TX_EXECUTING;
 
@@ -686,10 +693,30 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
       int mem_txid = ( (tx->tx_id) % (block->blksize));
 
+      /* Fix: Silently release portal resources before PortalDrop to avoid
+       * leak warnings. ResourceOwnerRelease with isCommit=false releases
+       * remaining buffer pins and TupleDesc refs. */
       if(hold_portal_snapshot) {
+          if (activeTx->portal->resowner) {
+              ResourceOwnerRelease(activeTx->portal->resowner,
+                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
+              ResourceOwnerRelease(activeTx->portal->resowner,
+                                   RESOURCE_RELEASE_LOCKS, false, false);
+              ResourceOwnerRelease(activeTx->portal->resowner,
+                                   RESOURCE_RELEASE_AFTER_LOCKS, false, false);
+              ResourceOwnerDelete(activeTx->portal->resowner);
+              activeTx->portal->resowner = NULL;
+          }
 	  PortalDrop(activeTx->portal, false);
           hold_portal_snapshot = false;
       }
+      /* Also release TopTransactionResourceOwner's direct resources */
+      ResourceOwnerRelease(TopTransactionResourceOwner,
+                           RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
+      ResourceOwnerRelease(TopTransactionResourceOwner,
+                           RESOURCE_RELEASE_LOCKS, false, false);
+      ResourceOwnerRelease(TopTransactionResourceOwner,
+                           RESOURCE_RELEASE_AFTER_LOCKS, false, false);
       finish_xact_command();
       memset(&block->result[mem_txid], 0, 1024);
 #if SAFEDBG3
@@ -743,8 +770,10 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       //goto retry;
 
       //print_trace();
-      finish_xact_command();
-      EndCommand(completionTag, dest);
+      /* Fix: Do NOT call finish_xact_command() here — it tries to commit
+       * a transaction in error state, causing cascading warnings.
+       * After PG_RE_THROW(), PostgresMain's sigsetjmp handler will call
+       * AbortCurrentTransaction() which properly cleans up all resources. */
       if(condSig == 0) {
               BCBlock     *block2 = get_block_by_id(1, false);
 	      ConditionVariableBroadcast(&block2->cond);
