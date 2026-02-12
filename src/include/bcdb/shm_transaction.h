@@ -81,6 +81,7 @@ typedef struct _OptimWriteEntry
     CmdType         operation;
     TupleTableSlot  *slot;
     ItemPointerData old_tid;
+    Oid             relOid;     /* relation OID, used for CMD_DELETE */
     CommandId       cid;
     SIMPLEQ_ENTRY(_OptimWriteEntry) link;
 } OptimWriteEntry;
@@ -211,9 +212,11 @@ extern BCDBShmXact* get_tx_by_xid_locked(TransactionId xid, bool exclusive);
 extern uint32 dummy_hash(const void *key, Size key_size);
 extern void store_optim_update(TupleTableSlot* slot, ItemPointer old_tid);
 extern void store_optim_insert(TupleTableSlot* slot);
+extern void store_optim_delete(Oid relOid, ItemPointer tupleid);
 extern void apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid);
-extern void apply_optim_insert(TupleTableSlot* slot, CommandId cid);
-extern void apply_optim_writes(void);
+extern bool apply_optim_insert(TupleTableSlot* slot, CommandId cid);
+extern void apply_optim_delete(Oid relOid, ItemPointer tupleid, CommandId cid);
+extern bool apply_optim_writes(void);
 extern bool check_stale_read(void);
 extern void clean_ws_table_record(void);
 extern bool rs_table_check(PREDICATELOCKTARGETTAG *tag);

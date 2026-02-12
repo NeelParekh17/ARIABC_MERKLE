@@ -4624,7 +4624,26 @@ PostgresMain(int argc, char *argv[],
      else 
        strcpy(query_string2, (const char *) (query_string+10));
 					
-					BCDBShmXact *tx = create_tx(pfx_str, query_string2, pfx_id, bid, XACT_SERIALIZABLE, true ); 
+					BCDBShmXact *tx = NULL;
+					int tx_retry = 0;
+					const int tx_retry_limit = 400;
+
+					while ((tx = create_tx(pfx_str, query_string2, pfx_id, bid,
+										   XACT_SERIALIZABLE, true)) == NULL)
+					{
+						if (tx_retry == 0)
+							elog(WARNING, "create_tx returned NULL for hash %s, retrying", pfx_str);
+
+						CHECK_FOR_INTERRUPTS();
+						pg_usleep(5000L);
+						tx_retry++;
+
+						if (tx_retry >= tx_retry_limit)
+							ereport(ERROR,
+									(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
+									 errmsg("unable to allocate BCDB transaction slot for hash %s after %d retries", pfx_str, tx_retry_limit),
+									 errhint("Increase BCDB tx-pool capacity or reduce client concurrency.")));
+					}
 #if SAFEDBG3
 	printf("safeDbg %s : %s: %d pfx_hash= %s txid= %d q= %s\n", __FILE__, __FUNCTION__, __LINE__ , pfx_str, pfx_id, (query_string2) );
 #endif

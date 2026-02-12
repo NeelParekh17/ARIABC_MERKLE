@@ -87,7 +87,9 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     tx = hash_search(tx_pool, hash, HASH_ENTER, &found);
     if (found)
     {
-        printf("safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#if SAFEDBG2
+        printf("safeDB %s : %s: %d duplicate hash %s\n", __FILE__, __FUNCTION__, __LINE__, hash);
+#endif
         ereport(DEBUG3,
             (errmsg("[ZL] transaction (%s) exists", hash)));
         SpinLockRelease(tx_pool_lock);
@@ -774,6 +776,7 @@ store_optim_update(TupleTableSlot* slot, ItemPointer old_tid)
     write_entry->old_tid = *old_tid;
     write_entry->slot = clone_slot(slot);
     write_entry->cid = GetCurrentCommandId(true);
+    write_entry->relOid = InvalidOid;
     SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
     MemoryContextSwitchTo(old_context);
 #if SAFEDBG1
@@ -794,20 +797,87 @@ store_optim_insert(TupleTableSlot* slot)
     write_entry->operation = CMD_INSERT;
     write_entry->slot = clone_slot(slot);
     write_entry->cid = GetCurrentCommandId(true);
+    write_entry->relOid = InvalidOid;
     SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
     MemoryContextSwitchTo(old_context);
 }
 
 void
+store_optim_delete(Oid relOid, ItemPointer tupleid)
+{
+    OptimWriteEntry *write_entry;
+    MemoryContext    old_context;
+    DEBUGMSG("[ZL] tx %s storing delete (rel: %d)", activeTx->hash, relOid);
+    old_context = MemoryContextSwitchTo(bcdb_tx_context);
+    write_entry = palloc(sizeof(OptimWriteEntry));
+    write_entry->operation = CMD_DELETE;
+    write_entry->slot = NULL;           /* no slot needed for DELETE */
+    write_entry->old_tid = *tupleid;
+    write_entry->relOid = relOid;
+    write_entry->cid = GetCurrentCommandId(true);
+    SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
+    MemoryContextSwitchTo(old_context);
+}
+
+bool
 apply_optim_insert(TupleTableSlot* slot, CommandId cid)
 {
     Relation relation = RelationIdGetRelation(slot->tts_tableOid);
+    MemoryContext old_context = CurrentMemoryContext;
+    ResourceOwner old_owner = CurrentResourceOwner;
+    bool insert_ok = false;
 
     DEBUGMSG("[ZL] tx %s applying optim insert (rel: %d)", activeTx->hash, relation->rd_id);
-    table_tuple_insert(relation, slot, cid, 0, NULL);
 
-    heap_apply_index(relation, slot, true, true);
+    /*
+     * Two-phase index insertion to protect merkle tree integrity.
+     *
+     * Phase 1 (subtransaction): heap insert + btree indexes only.
+     *   If btree raises duplicate-key ERROR, the subtransaction is
+     *   rolled back cleanly — no merkle state was touched.
+     *
+     * Phase 2 (parent transaction): merkle index only.
+     *   Only runs if phase 1 succeeded, so the XOR into the merkle
+     *   tree is guaranteed to correspond to an actually-inserted row.
+     *
+     * Why: subtransaction rollback does NOT undo merkle XOR writes
+     * in shared buffers (they are direct page modifications, not
+     * undoable via CLOG abort). Processing merkle before btree in
+     * a single heap_apply_index call leaves phantom XOR entries
+     * when the btree unique check subsequently fails.
+     */
+
+    /* Phase 1: heap + btree (no merkle) inside subtransaction */
+    BeginInternalSubTransaction("bcdb_insert");
+    PG_TRY();
+    {
+        table_tuple_insert(relation, slot, cid, 0, NULL);
+        heap_apply_index_phase(relation, slot, true, true, HEAP_INDEX_NO_MERKLE);
+        /* Btree unique check passed — merge subtxn into parent */
+        ReleaseCurrentSubTransaction();
+        MemoryContextSwitchTo(old_context);
+        CurrentResourceOwner = old_owner;
+        insert_ok = true;
+    }
+    PG_CATCH();
+    {
+        /* Duplicate key or other error — rollback subtxn.
+         * Heap insert and btree entries are undone. Merkle is untouched. */
+        MemoryContextSwitchTo(old_context);
+        CurrentResourceOwner = old_owner;
+        RollbackAndReleaseCurrentSubTransaction();
+        FlushErrorState();
+    }
+    PG_END_TRY();
+
+    /* Phase 2: merkle index — only if phase 1 committed */
+    if (insert_ok)
+    {
+        heap_apply_index_phase(relation, slot, false, false, HEAP_INDEX_MERKLE_ONLY);
+    }
+
     RelationClose(relation);
+    return insert_ok;
 }
 
 void
@@ -818,8 +888,19 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
     LockTupleMode lockmode;
     bool update_indexes;
     Relation relation = RelationIdGetRelation(slot->tts_tableOid);
-    List *indexList;
+    List *indexList = NIL;
     ListCell *lc;
+    TupleTableSlot *oldSlot = NULL;
+    MerkleHash oldHash;
+    bool hasOldHash = false;
+    int pendingCount = 0;
+    int pendingCapacity = 0;
+    typedef struct PendingMerkleUpdate
+    {
+        Oid indexOid;
+        int partitionId;
+    } PendingMerkleUpdate;
+    PendingMerkleUpdate *pending = NULL;
 
     DEBUGMSG("[ZL] tx %s applying optim update (%d %d %d)", activeTx->hash, relation->rd_id, *(int*)&tid->ip_blkid, (int)tid->ip_posid);
 #if SAFEDBG1
@@ -827,102 +908,56 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
             __FILE__, __FUNCTION__, __LINE__ , TM_Ok, activeTx->tx_id, cid );
 #endif
     
-    /*
-     * MERKLE INDEX FIX: XOR OUT the old tuple's hash before UPDATE.
-     * This ensures Merkle trees stay consistent during optimistic writes.
-     * The NEW hash will be XOR'd IN by heap_apply_index() below.
-     * 
-     * Note: ItemPointerIsValid only checks ip_posid != 0, NOT the block number!
-     * We must also check for InvalidBlockNumber (0xFFFFFFFF).
-     */
     if (enable_merkle_index && ItemPointerIsValid(tid) &&
         ItemPointerGetBlockNumberNoCheck(tid) != InvalidBlockNumber)
     {
-        indexList = RelationGetIndexList(relation);
-        foreach(lc, indexList)
+        oldSlot = table_slot_create(relation, NULL);
+        if (!table_tuple_fetch_row_version(relation, tid, SnapshotSelf, oldSlot))
         {
-            Oid indexOid = lfirst_oid(lc);
-            Relation indexRel = index_open(indexOid, RowExclusiveLock);
-            
-            if (indexRel->rd_rel->relam == MERKLE_AM_OID)
-            {
-                MerkleHash hash;
-                TupleDesc indexTupdesc;
-                int partitionId;
-                int nkeys;
-                int16 *indkey;
-                Datum *keyValues;
-                bool *keyNulls;
-                int i;
-                int totalLeaves;
-                TupleTableSlot *oldSlot;
-                
-                indexTupdesc = RelationGetDescr(indexRel);
-                nkeys = indexRel->rd_index->indnkeyatts;
-                indkey = indexRel->rd_index->indkey.values;
-                
-                merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
-                
-                keyValues = (Datum *) palloc(nkeys * sizeof(Datum));
-                keyNulls = (bool *) palloc(nkeys * sizeof(bool));
-                
-                /* Try to fetch the OLD tuple first to see if it exists */
-                oldSlot = table_slot_create(relation, NULL);
-                
-                /* 
-                 * Wrap in PG_TRY to ensure oldSlot is dropped even if 
-                 * merkle_compute_row_hash or other functions throw an error.
-                 */
-                PG_TRY();
-                {
-                    if (table_tuple_fetch_row_version(relation, tid, SnapshotSelf, oldSlot))
-                    {
-                        /* Compute hash of the OLD row being replaced */
-                        merkle_compute_row_hash(relation, tid, &hash);
-                        
-                        if (!merkle_hash_is_zero(&hash))
-                        {
-                            /* Get key values from old tuple to compute partition ID */
-                            for (i = 0; i < nkeys; i++)
-                            {
-                                int heapAttr = indkey[i];
-                                keyValues[i] = slot_getattr(oldSlot, heapAttr, &keyNulls[i]);
-                            }
-                            
-                            partitionId = merkle_compute_partition_id(keyValues, keyNulls,
-                                                                             nkeys, indexTupdesc,
-                                                                             totalLeaves);
-                            
-                            /* XOR OUT the old hash */
-                            merkle_update_tree_path(indexRel, partitionId, &hash, false);
-                        }
-                    }
-                }
-                PG_CATCH();
-                {
-                    ErrorData *edata;
-                    
-                    /* Clean up slot before re-throwing */
-                    ExecDropSingleTupleTableSlot(oldSlot);
-                    
-                    /* Log the error for debugging */
-                    edata = CopyErrorData();
-                    elog(DEBUG1, "apply_optim_update: Merkle error: %s", edata->message);
-                    FreeErrorData(edata);
-                    
-                    PG_RE_THROW();
-                }
-                PG_END_TRY();
-                
-                ExecDropSingleTupleTableSlot(oldSlot);
-                
-                pfree(keyValues);
-                pfree(keyNulls);
-            }
-            
-            index_close(indexRel, RowExclusiveLock);
+            RelationClose(relation);
+            ereport(ERROR,
+                    (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                     errmsg("tx %s doomed because old row image was not fetchable", activeTx->hash)));
         }
-        list_free(indexList);
+
+        merkle_compute_slot_hash(relation, oldSlot, &oldHash);
+        hasOldHash = !merkle_hash_is_zero(&oldHash);
+
+        if (hasOldHash)
+        {
+            indexList = RelationGetIndexList(relation);
+            pendingCapacity = list_length(indexList);
+            if (pendingCapacity > 0)
+                pending = palloc0(sizeof(PendingMerkleUpdate) * pendingCapacity);
+
+            foreach(lc, indexList)
+            {
+                Oid indexOid = lfirst_oid(lc);
+                Relation indexRel = index_open(indexOid, RowExclusiveLock);
+
+                if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+                {
+                    IndexInfo  *indexInfo;
+                    Datum       values[INDEX_MAX_KEYS];
+                    bool        isnull[INDEX_MAX_KEYS];
+                    int         totalLeaves;
+
+                    indexInfo = BuildIndexInfo(indexRel);
+                    FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
+                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+
+                    pending[pendingCount].indexOid = indexOid;
+                    pending[pendingCount].partitionId =
+                        merkle_compute_partition_id(values, isnull,
+                                                    indexInfo->ii_NumIndexKeyAttrs,
+                                                    RelationGetDescr(indexRel),
+                                                    totalLeaves);
+                    pendingCount++;
+                }
+
+                index_close(indexRel, RowExclusiveLock);
+            }
+        }
     }
     
     result = table_tuple_update(relation, tid, slot,
@@ -934,6 +969,12 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
 
     if (result != TM_Ok)
     {
+        if (oldSlot)
+            ExecDropSingleTupleTableSlot(oldSlot);
+        if (indexList)
+            list_free(indexList);
+        if (pending)
+            pfree(pending);
         RelationClose(relation);
 #if SAFEDBG1
         printf("safeDB %s : %s: %d ret %d tx %d tx %s doomed because of ww-conflict \n",
@@ -946,8 +987,20 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
                  errmsg("tx %s doomed because of ww-conflict", activeTx->hash)));
     }
 
-    else if (update_indexes)
-        heap_apply_index(relation, slot, false, false);
+    if (hasOldHash)
+    {
+        int i;
+        for (i = 0; i < pendingCount; i++)
+        {
+            Relation indexRel = index_open(pending[i].indexOid, RowExclusiveLock);
+            if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+                merkle_update_tree_path(indexRel, pending[i].partitionId, &oldHash, false);
+            index_close(indexRel, RowExclusiveLock);
+        }
+    }
+
+    if (update_indexes)
+        heap_apply_index_phase(relation, slot, false, false, HEAP_INDEX_NO_MERKLE);
 
     /*
      * MERKLE HOT-UPDATE FIX: If update_indexes is false (HOT update),
@@ -960,8 +1013,14 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
      * where 'id' is the indexed column) silently drop the row's hash
      * contribution from the Merkle tree, causing merkle_verify() failures.
      */
-    if (!update_indexes)
-        ExecInsertMerkleIndexes(relation, slot);
+    ExecInsertMerkleIndexes(relation, slot);
+
+    if (oldSlot)
+        ExecDropSingleTupleTableSlot(oldSlot);
+    if (indexList)
+        list_free(indexList);
+    if (pending)
+        pfree(pending);
 
     ExecDropSingleTupleTableSlot(slot);
 
@@ -969,9 +1028,142 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
 }
 
 void
+apply_optim_delete(Oid relOid, ItemPointer tupleid, CommandId cid)
+{
+    Relation relation = RelationIdGetRelation(relOid);
+    TM_FailureData tmfd;
+    TM_Result result;
+    TupleTableSlot *oldSlot = NULL;
+    List *indexList = NIL;
+    ListCell *lc;
+    MerkleHash oldHash;
+    bool hasOldHash = false;
+    int pendingCount = 0;
+    int pendingCapacity = 0;
+    typedef struct PendingMerkleDelete
+    {
+        Oid indexOid;
+        int partitionId;
+    } PendingMerkleDelete;
+    PendingMerkleDelete *pending = NULL;
+
+    DEBUGMSG("[ZL] tx %s applying optim delete (rel: %d)", activeTx->hash, relOid);
+
+    if (!enable_merkle_index)
+    {
+        result = table_tuple_delete(relation, tupleid,
+                           cid,
+                           InvalidSnapshot,
+                           InvalidSnapshot,
+                           false,
+                           &tmfd,
+                           false);
+
+        if (result != TM_Ok)
+        {
+            RelationClose(relation);
+            ereport(ERROR,
+                    (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                     errmsg("tx %s doomed because of delete conflict", activeTx->hash)));
+        }
+
+        RelationClose(relation);
+        return;
+    }
+
+    oldSlot = table_slot_create(relation, NULL);
+    if (table_tuple_fetch_row_version(relation, tupleid, SnapshotSelf, oldSlot))
+    {
+        merkle_compute_slot_hash(relation, oldSlot, &oldHash);
+        hasOldHash = !merkle_hash_is_zero(&oldHash);
+
+        if (hasOldHash)
+        {
+            indexList = RelationGetIndexList(relation);
+            pendingCapacity = list_length(indexList);
+            if (pendingCapacity > 0)
+                pending = palloc0(sizeof(PendingMerkleDelete) * pendingCapacity);
+
+            foreach(lc, indexList)
+            {
+                Oid indexOid = lfirst_oid(lc);
+                Relation indexRel = index_open(indexOid, RowExclusiveLock);
+
+                if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+                {
+                    IndexInfo  *indexInfo;
+                    Datum       values[INDEX_MAX_KEYS];
+                    bool        isnull[INDEX_MAX_KEYS];
+                    int         totalLeaves;
+
+                    indexInfo = BuildIndexInfo(indexRel);
+                    FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
+                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+
+                    pending[pendingCount].indexOid = indexOid;
+                    pending[pendingCount].partitionId =
+                        merkle_compute_partition_id(values, isnull,
+                                                    indexInfo->ii_NumIndexKeyAttrs,
+                                                    RelationGetDescr(indexRel),
+                                                    totalLeaves);
+                    pendingCount++;
+                }
+
+                index_close(indexRel, RowExclusiveLock);
+            }
+        }
+    }
+
+    /* Now delete the heap tuple */
+    result = table_tuple_delete(relation, tupleid,
+                       cid,
+                       InvalidSnapshot,
+                       InvalidSnapshot,
+                       false, /* do not wait for commit */
+                       &tmfd,
+                       false);
+
+    if (result != TM_Ok)
+    {
+        if (oldSlot)
+            ExecDropSingleTupleTableSlot(oldSlot);
+        if (indexList)
+            list_free(indexList);
+        if (pending)
+            pfree(pending);
+        RelationClose(relation);
+        ereport(ERROR,
+                (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                 errmsg("tx %s doomed because of delete conflict", activeTx->hash)));
+    }
+
+    if (hasOldHash)
+    {
+        int i;
+        for (i = 0; i < pendingCount; i++)
+        {
+            Relation indexRel = index_open(pending[i].indexOid, RowExclusiveLock);
+            if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+                merkle_update_tree_path(indexRel, pending[i].partitionId, &oldHash, false);
+            index_close(indexRel, RowExclusiveLock);
+        }
+    }
+
+    if (oldSlot)
+        ExecDropSingleTupleTableSlot(oldSlot);
+    if (indexList)
+        list_free(indexList);
+    if (pending)
+        pfree(pending);
+
+    RelationClose(relation);
+}
+
+bool
 apply_optim_writes(void)
 {
     OptimWriteEntry *write_entry;
+
     while ((write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
     {
         switch (write_entry->operation)
@@ -980,21 +1172,31 @@ apply_optim_writes(void)
                 apply_optim_update(&write_entry->old_tid, write_entry->slot, write_entry->cid);
                 break;
             case CMD_INSERT:
-                apply_optim_insert(write_entry->slot, write_entry->cid);
-                /*
-                 * Clean up the cloned slot after insert.
-                 * apply_optim_update handles its own slot cleanup internally,
-                 * but apply_optim_insert does not, so we must do it here.
-                 * Without this, the slot's TupleDesc and any pinned resources
-                 * would leak on every INSERT through the BCDB worker.
-                 */
+                if (!apply_optim_insert(write_entry->slot, write_entry->cid))
+                {
+                    /*
+                     * INSERT failed (duplicate key).  This happens when
+                     * tx_id assignment doesn't preserve workload line order:
+                     * a DELETE-INSERT pair for the same key gets swapped so
+                     * the INSERT runs first and finds the original row still
+                     * present.  Signal failure so the worker retries the
+                     * whole transaction with a fresh snapshot.
+                     */
+                    ExecDropSingleTupleTableSlot(write_entry->slot);
+                    SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
+                    return false;
+                }
                 ExecDropSingleTupleTableSlot(write_entry->slot);
+                break;
+            case CMD_DELETE:
+                apply_optim_delete(write_entry->relOid, &write_entry->old_tid, write_entry->cid);
                 break;
             default:
                 ereport(ERROR, (errmsg("[ZL] tx %s applying unknown operation", activeTx->hash)));
         }
         SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
     }
+    return true;
 }
 
 bool
@@ -1041,10 +1243,11 @@ static int cc2Count = 0;
     LIST_FOREACH(record, &ws_table_record, link)
     {
         // ws_table_check
-        if (ws_table_checkDT( &record->tag))
-	printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
+        if (ws_table_checkDT( &record->tag)) {
+	    printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
 		__FILE__, __FUNCTION__, __LINE__ ,  activeTx->hash, activeTx->tx_id);
 	    return 1;
+	}
     		//ereport(ERROR,
  		//		(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
    		//		 errmsg("tx %s aborted due to waw", activeTx->hash)));

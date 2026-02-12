@@ -485,6 +485,18 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                      activeTx->tx_id_committed);
 #endif
 	  } else {
+	      /* Fix: Clear stale optim_write_list before retry.
+	       * AbortCurrentTransaction will undo heap/index changes,
+	       * but the SIMPLEQ entries allocated in bcdb_tx_context
+	       * need to be freed. MemoryContextReset frees the memory,
+	       * then SIMPLEQ_INIT resets the head pointer. */
+	      while ((optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
+	      {
+	          if (optim_write_entry->slot)
+	              ExecDropSingleTupleTableSlot(optim_write_entry->slot);
+	          SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
+	      }
+	      MemoryContextReset(bcdb_tx_context);
 	      /* Fix: AbortCurrentTransaction properly releases all resources
 	       * (buffer pins, TupleDesc refs, locks) via ResourceOwnerRelease
 	       * with isCommit=false (silent, no leak warnings).
@@ -492,9 +504,22 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	       * start_xact_command will begin a fresh transaction. */
 	      AbortCurrentTransaction();
 	      reset_xact_command();
-	      if(hold_portal_snapshot) {
-	          hold_portal_snapshot = false;
-	      }
+          if (hold_portal_snapshot && activeTx->portal)
+          {
+              if (activeTx->portal->resowner)
+              {
+                  ResourceOwnerRelease(activeTx->portal->resowner,
+                                       RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
+                  ResourceOwnerRelease(activeTx->portal->resowner,
+                                       RESOURCE_RELEASE_LOCKS, false, false);
+                  ResourceOwnerRelease(activeTx->portal->resowner,
+                                       RESOURCE_RELEASE_AFTER_LOCKS, false, false);
+                  ResourceOwnerDelete(activeTx->portal->resowner);
+                  activeTx->portal->resowner = NULL;
+              }
+              PortalDrop(activeTx->portal, false);
+              hold_portal_snapshot = false;
+          }
 #if SAFEDBG2
               printf("\n\n safeDbg tx %d rerun due to conflict pid %d %s : %s: %d \n",
                      tx->tx_id, getpid(), __FILE__, __FUNCTION__, __LINE__ );
@@ -502,7 +527,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	  }
           init = false;
 	  XactIsoLevel = tx->isolation;
-	  start_xact_command();
+      start_xact_command();
 	  tx->status = TX_EXECUTING;
 
 #if SAFEDBG2
@@ -581,9 +606,28 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       printf(" safeDbg pid %d %s : %s: %d tx %d \n",
                  getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id );
 #endif
-      set_last_committed_txid(tx);
-
-      apply_optim_writes();
+      /* CRITICAL FIX: Do NOT advance counter before apply_optim_writes.
+       * Old code had set_last_committed_txid(tx) HERE, which woke the
+       * next transaction before our writes were applied/committed,
+       * causing concurrent serial execution and Merkle corruption.
+       * Counter is now advanced AFTER finish_xact_command() below. */
+      if (!apply_optim_writes())
+      {
+          /*
+           * An INSERT failed (e.g. duplicate key because tx_id ordering
+           * didn't match workload line ordering).  Abort this attempt
+           * and retry the whole transaction with a fresh snapshot.
+           *
+           * It's safe to retry even after publish_ws_tableDT because:
+           * 1) No other tx has entered serial yet (counter not advanced)
+           * 2) Our stale published tags won't false-match ourselves
+           *    (table_checkDT checks entry->tx_id < activeTx->tx_id)
+           * 3) AbortCurrentTransaction rolls back partial apply_optim
+           *    writes done before the failure
+           */
+          rw_conflicts = 1;
+          continue;
+      }
       tx->sxact->flags |= SXACT_FLAG_PREPARED;
 
       DEBUGMSG("[ZL] worker(%d) commiting tx(%s)", getpid(), tx->hash);
@@ -623,8 +667,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     fclose(fp);
     }
 
-      ConditionVariableBroadcast(&block->cond);
-      condSig = 1;
+      /* CRITICAL FIX: Broadcast moved to after finish_xact_command
+       * to prevent next tx from starting serial phase before our
+       * writes are committed. condSig set after broadcast below. */
 
       // For tx "select saveState()" char 't' should be seen by offset 9
       for(sqlOffset = 0; sqlOffset < saveLen ; sqlOffset++) {
@@ -710,14 +755,28 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	  PortalDrop(activeTx->portal, false);
           hold_portal_snapshot = false;
       }
-      /* Also release TopTransactionResourceOwner's direct resources */
+      /* Release TopTransactionResourceOwner's direct resources.
+       * CRITICAL: isTopLevel (4th param) MUST be true since this is a
+       * top-level transaction. Using false triggers Assert(owner->parent != NULL)
+       * at resowner.c:582 during RESOURCE_RELEASE_LOCKS, because it tries
+       * retail lock release on child owners expecting subtransaction semantics.
+       * Standard PG always uses isTopLevel=true for TopTransactionResourceOwner
+       * (see CommitTransaction/AbortTransaction in xact.c). */
       ResourceOwnerRelease(TopTransactionResourceOwner,
-                           RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
+                           RESOURCE_RELEASE_BEFORE_LOCKS, false, true);
       ResourceOwnerRelease(TopTransactionResourceOwner,
-                           RESOURCE_RELEASE_LOCKS, false, false);
+                           RESOURCE_RELEASE_LOCKS, false, true);
       ResourceOwnerRelease(TopTransactionResourceOwner,
-                           RESOURCE_RELEASE_AFTER_LOCKS, false, false);
+                           RESOURCE_RELEASE_AFTER_LOCKS, false, true);
       finish_xact_command();
+
+      /* CRITICAL FIX: Advance counter and broadcast ONLY AFTER commit.
+       * This ensures the next transaction cannot enter its serial phase
+       * until our writes are fully committed and visible. */
+      set_last_committed_txid(tx);
+      ConditionVariableBroadcast(&block->cond);
+      condSig = 1;
+
       memset(&block->result[mem_txid], 0, 1024);
 #if SAFEDBG3
       printf("safeDbg txid= %d mem-txid = %d \n", tx->tx_id, mem_txid);
@@ -778,11 +837,28 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
               BCBlock     *block2 = get_block_by_id(1, false);
 	      ConditionVariableBroadcast(&block2->cond);
       }
+      if (hold_portal_snapshot && activeTx && activeTx->portal)
+      {
+          if (activeTx->portal->resowner)
+          {
+              ResourceOwnerRelease(activeTx->portal->resowner,
+                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
+              ResourceOwnerRelease(activeTx->portal->resowner,
+                                   RESOURCE_RELEASE_LOCKS, false, false);
+              ResourceOwnerRelease(activeTx->portal->resowner,
+                                   RESOURCE_RELEASE_AFTER_LOCKS, false, false);
+              ResourceOwnerDelete(activeTx->portal->resowner);
+              activeTx->portal->resowner = NULL;
+          }
+          PortalDrop(activeTx->portal, false);
+          hold_portal_snapshot = false;
+      }
       delete_tx(tx);
       MemoryContextReset(bcdb_tx_context);
       while ((optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
       {
-	   ExecDropSingleTupleTableSlot(optim_write_entry->slot);
+	   if (optim_write_entry->slot)
+	       ExecDropSingleTupleTableSlot(optim_write_entry->slot);
 	   SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
       }
       PG_RE_THROW();
@@ -866,6 +942,8 @@ bcdb_worker_process_tx(BCDBShmXact *tx)
         conflict_check();
         if (timing)
             tx->end_checking_time = bcdb_get_time();
+        /* Note: ignoring apply_optim_writes return value in non-DT path;
+         * the non-DT path uses conflict_check() which is less strict. */
         apply_optim_writes();
         if (timing)
             tx->end_local_copy_time = bcdb_get_time();

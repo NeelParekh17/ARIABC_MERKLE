@@ -73,8 +73,12 @@ void set_last_committed_txid( BCDBShmXact *tx)
 {
     //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
     BCBlock* blk = get_block_by_id(1, true);
+    /* Atomic counter update with spinlock to prevent race conditions */
+    SpinLockAcquire(block_pool_lock);
     blk->last_committed_tx_id = tx->tx_id;
     block_meta->num_committed = tx->tx_id;
+    pg_write_barrier();  /* Ensure write ordering across processes */
+    SpinLockRelease(block_pool_lock);
 #if SAFEDBG2
     printf("safeDbg %s : %s: %d  blk %x txid= %d\n",
               __FILE__, __FUNCTION__, __LINE__, blk, block_meta->num_committed);
@@ -135,9 +139,15 @@ BCTxID get_last_committed_txid(BCDBShmXact *tx)
 {
     //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
     BCBlock* blk = get_block_by_id(1, false);
+    BCTxID result;
+    /* Atomic counter read with spinlock to prevent torn reads */
+    SpinLockAcquire(block_pool_lock);
+    pg_read_barrier();  /* Ensure read ordering across processes */
+    result = blk->last_committed_tx_id;
+    SpinLockRelease(block_pool_lock);
     //printf("ariaMyDbg %s : %s: %d bid 1, blk %x\n",
               //__FILE__, __FUNCTION__, __LINE__, blk);
-    return blk->last_committed_tx_id ;
+    return result;
 }
 
 BCBlock*

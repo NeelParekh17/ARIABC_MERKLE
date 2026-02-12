@@ -1,0 +1,638 @@
+safeDbg pid 851064 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:17:08.794 IST [850679] LOG:  received fast shutdown request
+2026-02-13 02:17:08.800 IST [850679] LOG:  aborting any active transactions
+2026-02-13 02:17:08.800 IST [850679] LOG:  background worker "logical replication launcher" (PID 850697) exited with exit code 1
+2026-02-13 02:17:08.801 IST [850692] LOG:  shutting down
+2026-02-13 02:17:09.146 IST [850679] LOG:  database system is shut down
+2026-02-13 02:17:10.216 IST [851298] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:17:10.216 IST [851298] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:17:10.223 IST [851298] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 176 
+	 safeDbg pid 851298 shm_transaction.c : create_tx_pool: 221 
+
+2026-02-13 02:17:10.225 IST [851321] LOG:  database system was shut down at 2026-02-13 02:17:08 IST
+2026-02-13 02:17:10.228 IST [851298] LOG:  database system is ready to accept connections
+safeDbg pid 851329 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 851331 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 851352 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 851352 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4000 4000 myquery=  INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+
+ *** safeDbg pid 851352 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6000 6000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=447;
+safeDbg pid 851351 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 851351 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6001 6001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=354;
+
+ *** safeDbg pid 851351 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8001 8001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=847;
+
+ *** safeDbg pid 851351 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10001 10001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=410;
+
+ *** safeDbg pid 851351 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12001 12001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=701;
+
+ *** safeDbg pid 851351 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14001 14001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=242;
+
+ *** safeDbg pid 851351 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16001 16001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=814;
+
+ *** safeDbg pid 851351 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18001 18001 myquery=  DELETE FROM usertable WHERE YCSB_KEY=548;
+
+ *** safeDbg pid 851351 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20001 20001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=144;
+safeDbg pid 851346 postmaster.c : BackendInitialize: 4318 
+
+ 	 ** safeDbg pid= 851346 new blk shm_block.c : get_block_by_id: 168 bid 1 blk 5106f490
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 0 0 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=868;
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2001 2001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=58;
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8000 8000 myquery=  INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10000 10000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=979;
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12000 12000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=692;
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14000 14000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=659;
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16000 16000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=738;
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18000 18000 myquery=  SELECT * FROM usertable where YCSB_KEY=548;
+
+ *** safeDbg pid 851346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20000 20000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=778;
+safeDbg pid 851344 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 851344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2000 2000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=874;
+
+ *** safeDbg pid 851344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4001 4001 myquery=  SELECT * FROM usertable where YCSB_KEY=560;
+safeDbg pid 851345 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 851345 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 1 1 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=831;
+safeDbg pid 852122 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:19:24.577 IST [851298] LOG:  received fast shutdown request
+2026-02-13 02:19:24.583 IST [851298] LOG:  aborting any active transactions
+2026-02-13 02:19:24.583 IST [851298] LOG:  background worker "logical replication launcher" (PID 851327) exited with exit code 1
+2026-02-13 02:19:24.584 IST [851322] LOG:  shutting down
+2026-02-13 02:19:24.941 IST [851298] LOG:  database system is shut down
+2026-02-13 02:19:26.033 IST [852516] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:19:26.033 IST [852516] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:19:26.040 IST [852516] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 176 
+	 safeDbg pid 852516 shm_transaction.c : create_tx_pool: 221 
+
+2026-02-13 02:19:26.043 IST [852538] LOG:  database system was shut down at 2026-02-13 02:19:24 IST
+2026-02-13 02:19:26.045 IST [852516] LOG:  database system is ready to accept connections
+safeDbg pid 852547 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 852564 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 852581 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 852578 postmaster.c : BackendInitialize: 4318 
+
+ 	 ** safeDbg pid= 852578 new blk shm_block.c : get_block_by_id: 168 bid 1 blk 90e6f490
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 0 0 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=868;
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4000 4000 myquery=  INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6000 6000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=447;
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8000 8000 myquery=  INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10000 10000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=979;
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12000 12000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=692;
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14000 14000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=659;
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16000 16000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=738;
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18000 18000 myquery=  SELECT * FROM usertable where YCSB_KEY=548;
+
+ *** safeDbg pid 852578 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20000 20000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=778;
+safeDbg pid 852579 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4001 4001 myquery=  SELECT * FROM usertable where YCSB_KEY=560;
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6001 6001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=354;
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8001 8001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=847;
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10001 10001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=410;
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12001 12001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=701;
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14001 14001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=242;
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16001 16001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=814;
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18001 18001 myquery=  DELETE FROM usertable WHERE YCSB_KEY=548;
+
+ *** safeDbg pid 852579 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20001 20001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=144;
+safeDbg pid 852576 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 852576 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 1 1 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=831;
+
+ *** safeDbg pid 852576 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2000 2000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=874;
+safeDbg pid 852580 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 852580 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2001 2001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=58;
+safeDbg pid 853053 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 853055 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:20:44.255 IST [853057] WARNING:  merkle tree mismatch at node 1065: computed 1102277ed0ff2759ff9db8b01526c9ba5214d4c6da4e2a418699ddb73e8ced42, stored 7ba256de165c34d9bff12f2dfa8e696f696b100707faa14cee18888fc081d2dc
+2026-02-13 02:20:44.255 IST [853057] WARNING:  merkle tree mismatch at node 1067: computed 646debc17f7e9c82c6a02f90369e7a7458ae89d9d839889e80d09cd307cdc008, stored 0ecd9a61b9dd8f0286ccb80dd936daa163d14d18058d0393e851c9ebf9c0ff96
+2026-02-13 02:20:44.255 IST [853057] WARNING:  merkle tree mismatch at node 1071: computed 237b78479d10b97813f6d78656823bc5fa51ac28925389b2be27d62c4bd7ec89, stored 49db09e75bb3aaf8539a401bb92a9b10c12e68e94fe702bfd6a68314b5dad317
+2026-02-13 02:20:44.255 IST [853057] WARNING:  merkle tree mismatch at node 1078: computed 882bfee7b51a47259bd79baf5fa331c96b03c4372031c21e680ebb256d556237, stored e28b8f4773b954a5dbbb0c32b00b911c507c00f6fd854913008fee1d93585da9
+safeDbg pid 853057 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:20:44.263 IST [852516] LOG:  received fast shutdown request
+2026-02-13 02:20:44.269 IST [852516] LOG:  aborting any active transactions
+2026-02-13 02:20:44.270 IST [852516] LOG:  background worker "logical replication launcher" (PID 852544) exited with exit code 1
+2026-02-13 02:20:44.270 IST [852539] LOG:  shutting down
+2026-02-13 02:20:44.627 IST [852516] LOG:  database system is shut down
+2026-02-13 02:20:45.708 IST [853070] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:20:45.708 IST [853070] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:20:45.715 IST [853070] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 176 
+	 safeDbg pid 853070 shm_transaction.c : create_tx_pool: 221 
+
+2026-02-13 02:20:45.717 IST [853091] LOG:  database system was shut down at 2026-02-13 02:20:44 IST
+2026-02-13 02:20:45.719 IST [853070] LOG:  database system is ready to accept connections
+safeDbg pid 853099 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 853101 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 853117 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 853117 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6000 6000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=447;
+
+ *** safeDbg pid 853117 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8000 8000 myquery=  INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+
+ *** safeDbg pid 853117 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10000 10000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=979;
+
+ *** safeDbg pid 853117 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12000 12000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=692;
+
+ *** safeDbg pid 853117 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14000 14000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=659;
+
+ *** safeDbg pid 853117 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16000 16000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=738;
+
+ *** safeDbg pid 853117 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18000 18000 myquery=  SELECT * FROM usertable where YCSB_KEY=548;
+
+ *** safeDbg pid 853117 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20000 20000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=778;
+safeDbg pid 853114 postmaster.c : BackendInitialize: 4318 
+
+ 	 ** safeDbg pid= 853114 new blk shm_block.c : get_block_by_id: 168 bid 1 blk f246f490
+
+ *** safeDbg pid 853114 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 0 0 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=868;
+
+ *** safeDbg pid 853114 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2000 2000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=874;
+safeDbg pid 853115 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 1 1 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=831;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2001 2001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=58;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4001 4001 myquery=  SELECT * FROM usertable where YCSB_KEY=560;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6001 6001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=354;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8001 8001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=847;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10001 10001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=410;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12001 12001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=701;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14001 14001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=242;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16001 16001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=814;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18001 18001 myquery=  DELETE FROM usertable WHERE YCSB_KEY=548;
+
+ *** safeDbg pid 853115 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20001 20001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=144;
+safeDbg pid 853118 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 853112 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 853112 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4000 4000 myquery=  INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+safeDbg pid 853568 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 853570 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:22:02.366 IST [853572] WARNING:  merkle tree mismatch at node 420: computed ed9d67b027d22694bd69d411291eae2ef0057493ad93a6661d4e17c8f8e9c9b3, stored e9c4f0dab51927b731fe2e44b9546cfa310e742c865abf3ea2eed47ac4f2e60b
+2026-02-13 02:22:02.366 IST [853572] WARNING:  merkle tree mismatch at node 421: computed 3a4c5bf0ce846001efa862bf7cfd1ee8f220178c27a66867cf283f6c38e4cc56, stored 3e15cc9a5c4f6122633f98eaecb7dc3c332b17330c6f713f7088fcde04ffe3ee
+2026-02-13 02:22:02.366 IST [853572] WARNING:  merkle tree mismatch at node 423: computed a90bf09aa1fc3369f33a45d6e414a5daf399275b2cc267d7bfc8b011379dfc3b, stored ad5267f03337324a7fadbf83745e670e329227e4070b7e8f006873a30b86d383
+2026-02-13 02:22:02.366 IST [853572] WARNING:  merkle tree mismatch at node 427: computed 0f6804c07f71a0f1da6780a1796e1b80f35e320ae7e8a255052b23dc4b237319, stored 0b3193aaedbaa1d256f07af4e924d954325532b5cc21bb0dba8be06e77385ca1
+2026-02-13 02:22:02.366 IST [853572] WARNING:  merkle tree mismatch at node 1065: computed 1102277ed0ff2759ff9db8b01526c9ba5214d4c6da4e2a418699ddb73e8ced42, stored 7ba256de165c34d9bff12f2dfa8e696f696b100707faa14cee18888fc081d2dc
+2026-02-13 02:22:02.366 IST [853572] WARNING:  merkle tree mismatch at node 1067: computed 646debc17f7e9c82c6a02f90369e7a7458ae89d9d839889e80d09cd307cdc008, stored 0ecd9a61b9dd8f0286ccb80dd936daa163d14d18058d0393e851c9ebf9c0ff96
+2026-02-13 02:22:02.366 IST [853572] WARNING:  merkle tree mismatch at node 1071: computed 237b78479d10b97813f6d78656823bc5fa51ac28925389b2be27d62c4bd7ec89, stored 49db09e75bb3aaf8539a401bb92a9b10c12e68e94fe702bfd6a68314b5dad317
+2026-02-13 02:22:02.366 IST [853572] WARNING:  merkle tree mismatch at node 1078: computed 882bfee7b51a47259bd79baf5fa331c96b03c4372031c21e680ebb256d556237, stored e28b8f4773b954a5dbbb0c32b00b911c507c00f6fd854913008fee1d93585da9
+safeDbg pid 853572 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:22:02.374 IST [853070] LOG:  received fast shutdown request
+2026-02-13 02:22:02.380 IST [853070] LOG:  aborting any active transactions
+2026-02-13 02:22:02.380 IST [853070] LOG:  background worker "logical replication launcher" (PID 853097) exited with exit code 1
+2026-02-13 02:22:02.381 IST [853092] LOG:  shutting down
+2026-02-13 02:22:02.744 IST [853070] LOG:  database system is shut down
+2026-02-13 02:22:03.823 IST [853585] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:22:03.824 IST [853585] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:22:03.830 IST [853585] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 176 
+	 safeDbg pid 853585 shm_transaction.c : create_tx_pool: 221 
+
+2026-02-13 02:22:03.833 IST [853596] LOG:  database system was shut down at 2026-02-13 02:22:02 IST
+2026-02-13 02:22:03.835 IST [853585] LOG:  database system is ready to accept connections
+safeDbg pid 853604 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 853606 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 853638 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 853638 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4000 4000 myquery=  INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+
+ *** safeDbg pid 853638 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6000 6000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=447;
+safeDbg pid 853633 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 1 1 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=831;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2000 2000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=874;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4001 4001 myquery=  SELECT * FROM usertable where YCSB_KEY=560;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6001 6001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=354;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8001 8001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=847;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10001 10001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=410;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12001 12001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=701;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14001 14001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=242;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16001 16001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=814;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18001 18001 myquery=  DELETE FROM usertable WHERE YCSB_KEY=548;
+
+ *** safeDbg pid 853633 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20001 20001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=144;
+safeDbg pid 853631 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 853631 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8000 8000 myquery=  INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+
+ *** safeDbg pid 853631 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10000 10000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=979;
+
+ *** safeDbg pid 853631 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12000 12000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=692;
+
+ *** safeDbg pid 853631 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14000 14000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=659;
+
+ *** safeDbg pid 853631 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16000 16000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=738;
+
+ *** safeDbg pid 853631 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18000 18000 myquery=  SELECT * FROM usertable where YCSB_KEY=548;
+
+ *** safeDbg pid 853631 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20000 20000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=778;
+safeDbg pid 853632 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 853632 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2001 2001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=58;
+safeDbg pid 853630 postmaster.c : BackendInitialize: 4318 
+
+ 	 ** safeDbg pid= 853630 new blk shm_block.c : get_block_by_id: 168 bid 1 blk b086f490
+
+ *** safeDbg pid 853630 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 0 0 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=868;
+safeDbg pid 854110 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 854112 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:23:20.920 IST [854114] WARNING:  merkle tree mismatch at node 420: computed ed9d67b027d22694bd69d411291eae2ef0057493ad93a6661d4e17c8f8e9c9b3, stored e9c4f0dab51927b731fe2e44b9546cfa310e742c865abf3ea2eed47ac4f2e60b
+2026-02-13 02:23:20.920 IST [854114] WARNING:  merkle tree mismatch at node 421: computed 3a4c5bf0ce846001efa862bf7cfd1ee8f220178c27a66867cf283f6c38e4cc56, stored 3e15cc9a5c4f6122633f98eaecb7dc3c332b17330c6f713f7088fcde04ffe3ee
+2026-02-13 02:23:20.921 IST [854114] WARNING:  merkle tree mismatch at node 423: computed a90bf09aa1fc3369f33a45d6e414a5daf399275b2cc267d7bfc8b011379dfc3b, stored ad5267f03337324a7fadbf83745e670e329227e4070b7e8f006873a30b86d383
+2026-02-13 02:23:20.921 IST [854114] WARNING:  merkle tree mismatch at node 427: computed 0f6804c07f71a0f1da6780a1796e1b80f35e320ae7e8a255052b23dc4b237319, stored 0b3193aaedbaa1d256f07af4e924d954325532b5cc21bb0dba8be06e77385ca1
+safeDbg pid 854114 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:28:58.054 IST [853585] LOG:  received fast shutdown request
+2026-02-13 02:28:58.060 IST [853585] LOG:  aborting any active transactions
+2026-02-13 02:28:58.061 IST [853585] LOG:  background worker "logical replication launcher" (PID 853602) exited with exit code 1
+2026-02-13 02:28:58.061 IST [853597] LOG:  shutting down
+2026-02-13 02:28:58.406 IST [853585] LOG:  database system is shut down
+2026-02-13 02:29:22.513 IST [862353] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:29:22.514 IST [862353] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:29:22.521 IST [862353] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 178 
+	 safeDbg pid 862353 shm_transaction.c : create_tx_pool: 223 
+
+2026-02-13 02:29:22.524 IST [862356] LOG:  database system was shut down at 2026-02-13 02:28:58 IST
+2026-02-13 02:29:22.526 IST [862353] LOG:  database system is ready to accept connections
+safeDbg pid 862389 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:29:51.256 IST [862353] LOG:  received fast shutdown request
+2026-02-13 02:29:51.263 IST [862353] LOG:  aborting any active transactions
+2026-02-13 02:29:51.263 IST [862353] LOG:  background worker "logical replication launcher" (PID 862362) exited with exit code 1
+2026-02-13 02:29:51.263 IST [862357] LOG:  shutting down
+2026-02-13 02:29:51.602 IST [862353] LOG:  database system is shut down
+2026-02-13 02:29:52.696 IST [862552] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:29:52.696 IST [862552] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:29:52.703 IST [862552] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 178 
+	 safeDbg pid 862552 shm_transaction.c : create_tx_pool: 223 
+
+2026-02-13 02:29:52.705 IST [862580] LOG:  database system was shut down at 2026-02-13 02:29:51 IST
+2026-02-13 02:29:52.707 IST [862552] LOG:  database system is ready to accept connections
+safeDbg pid 862588 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 862590 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 862610 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 862610 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4001 4001 myquery=  SELECT * FROM usertable where YCSB_KEY=560;
+
+ *** safeDbg pid 862610 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6001 6001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=354;
+
+ *** safeDbg pid 862610 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8001 8001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=847;
+safeDbg pid 862611 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 862611 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2001 2001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=58;
+
+ *** safeDbg pid 862611 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18000 18000 myquery=  SELECT * FROM usertable where YCSB_KEY=548;
+
+ *** safeDbg pid 862611 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20000 20000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=778;
+safeDbg pid 862604 postmaster.c : BackendInitialize: 4318 
+
+ 	 ** safeDbg pid= 862604 new blk shm_block.c : get_block_by_id: 168 bid 1 blk bf26f490
+
+ *** safeDbg pid 862604 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2000 2000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=874;
+
+ *** safeDbg pid 862604 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10000 10000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=979;
+
+ *** safeDbg pid 862604 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12000 12000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=692;
+
+ *** safeDbg pid 862604 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14001 14001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=242;
+
+ *** safeDbg pid 862604 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18001 18001 myquery=  DELETE FROM usertable WHERE YCSB_KEY=548;
+
+ *** safeDbg pid 862604 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20001 20001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=144;
+safeDbg pid 862602 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 862602 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 1 1 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=831;
+
+ *** safeDbg pid 862602 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4000 4000 myquery=  INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+
+ *** safeDbg pid 862602 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6000 6000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=447;
+
+ *** safeDbg pid 862602 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8000 8000 myquery=  INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+
+ *** safeDbg pid 862602 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10001 10001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=410;
+
+ *** safeDbg pid 862602 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12001 12001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=701;
+
+ *** safeDbg pid 862602 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16000 16000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=738;
+safeDbg pid 862605 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 862605 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 0 0 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=868;
+
+ *** safeDbg pid 862605 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14000 14000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=659;
+
+ *** safeDbg pid 862605 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16001 16001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=814;
+safeDbg pid 863258 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 863260 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:31:36.614 IST [863262] WARNING:  merkle tree mismatch at node 420: computed ed9d67b027d22694bd69d411291eae2ef0057493ad93a6661d4e17c8f8e9c9b3, stored e9c4f0dab51927b731fe2e44b9546cfa310e742c865abf3ea2eed47ac4f2e60b
+2026-02-13 02:31:36.614 IST [863262] WARNING:  merkle tree mismatch at node 421: computed 3a4c5bf0ce846001efa862bf7cfd1ee8f220178c27a66867cf283f6c38e4cc56, stored 3e15cc9a5c4f6122633f98eaecb7dc3c332b17330c6f713f7088fcde04ffe3ee
+2026-02-13 02:31:36.614 IST [863262] WARNING:  merkle tree mismatch at node 423: computed a90bf09aa1fc3369f33a45d6e414a5daf399275b2cc267d7bfc8b011379dfc3b, stored ad5267f03337324a7fadbf83745e670e329227e4070b7e8f006873a30b86d383
+2026-02-13 02:31:36.614 IST [863262] WARNING:  merkle tree mismatch at node 427: computed 0f6804c07f71a0f1da6780a1796e1b80f35e320ae7e8a255052b23dc4b237319, stored 0b3193aaedbaa1d256f07af4e924d954325532b5cc21bb0dba8be06e77385ca1
+safeDbg pid 863262 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:31:36.622 IST [862552] LOG:  received fast shutdown request
+2026-02-13 02:31:36.624 IST [862552] LOG:  aborting any active transactions
+2026-02-13 02:31:36.624 IST [862552] LOG:  background worker "logical replication launcher" (PID 862586) exited with exit code 1
+2026-02-13 02:31:36.625 IST [862581] LOG:  shutting down
+2026-02-13 02:31:36.975 IST [862552] LOG:  database system is shut down
+2026-02-13 02:31:38.061 IST [863286] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:31:38.061 IST [863286] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:31:38.069 IST [863286] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 178 
+	 safeDbg pid 863286 shm_transaction.c : create_tx_pool: 223 
+
+2026-02-13 02:31:38.071 IST [863297] LOG:  database system was shut down at 2026-02-13 02:31:36 IST
+2026-02-13 02:31:38.074 IST [863286] LOG:  database system is ready to accept connections
+safeDbg pid 863307 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 863323 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 863335 postmaster.c : BackendInitialize: 4318 
+
+ 	 ** safeDbg pid= 863335 new blk shm_block.c : get_block_by_id: 168 bid 1 blk aca6f490
+
+ *** safeDbg pid 863335 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 0 0 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=868;
+
+ *** safeDbg pid 863335 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4000 4000 myquery=  INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+
+ *** safeDbg pid 863335 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6000 6000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=447;
+
+ *** safeDbg pid 863335 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8000 8000 myquery=  INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+
+ *** safeDbg pid 863335 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14000 14000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=659;
+
+ *** safeDbg pid 863335 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20001 20001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=144;
+safeDbg pid 863338 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 863338 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2001 2001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=58;
+
+ *** safeDbg pid 863338 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10001 10001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=410;
+
+ *** safeDbg pid 863338 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14001 14001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=242;
+safeDbg pid 863340 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 863340 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2000 2000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=874;
+
+ *** safeDbg pid 863340 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8001 8001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=847;
+
+ *** safeDbg pid 863340 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12001 12001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=701;
+
+ *** safeDbg pid 863340 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16000 16000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=738;
+
+ *** safeDbg pid 863340 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18000 18000 myquery=  SELECT * FROM usertable where YCSB_KEY=548;
+
+ *** safeDbg pid 863340 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20000 20000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=778;
+safeDbg pid 863337 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 863337 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 1 1 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=831;
+
+ *** safeDbg pid 863337 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6001 6001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=354;
+
+ *** safeDbg pid 863337 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12000 12000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=692;
+safeDbg pid 863339 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 863339 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4001 4001 myquery=  SELECT * FROM usertable where YCSB_KEY=560;
+
+ *** safeDbg pid 863339 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10000 10000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=979;
+
+ *** safeDbg pid 863339 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16001 16001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=814;
+
+ *** safeDbg pid 863339 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18001 18001 myquery=  DELETE FROM usertable WHERE YCSB_KEY=548;
+safeDbg pid 863948 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 863950 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:33:21.880 IST [863952] WARNING:  merkle tree mismatch at node 1065: computed 1102277ed0ff2759ff9db8b01526c9ba5214d4c6da4e2a418699ddb73e8ced42, stored 7ba256de165c34d9bff12f2dfa8e696f696b100707faa14cee18888fc081d2dc
+2026-02-13 02:33:21.880 IST [863952] WARNING:  merkle tree mismatch at node 1067: computed 646debc17f7e9c82c6a02f90369e7a7458ae89d9d839889e80d09cd307cdc008, stored 0ecd9a61b9dd8f0286ccb80dd936daa163d14d18058d0393e851c9ebf9c0ff96
+2026-02-13 02:33:21.880 IST [863952] WARNING:  merkle tree mismatch at node 1071: computed 237b78479d10b97813f6d78656823bc5fa51ac28925389b2be27d62c4bd7ec89, stored 49db09e75bb3aaf8539a401bb92a9b10c12e68e94fe702bfd6a68314b5dad317
+2026-02-13 02:33:21.880 IST [863952] WARNING:  merkle tree mismatch at node 1078: computed 882bfee7b51a47259bd79baf5fa331c96b03c4372031c21e680ebb256d556237, stored e28b8f4773b954a5dbbb0c32b00b911c507c00f6fd854913008fee1d93585da9
+safeDbg pid 863952 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:33:21.888 IST [863286] LOG:  received fast shutdown request
+2026-02-13 02:33:21.888 IST [863286] LOG:  aborting any active transactions
+2026-02-13 02:33:21.889 IST [863286] LOG:  background worker "logical replication launcher" (PID 863303) exited with exit code 1
+2026-02-13 02:33:21.889 IST [863298] LOG:  shutting down
+2026-02-13 02:33:22.250 IST [863286] LOG:  database system is shut down
+2026-02-13 02:33:23.319 IST [863965] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:33:23.319 IST [863965] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:33:23.326 IST [863965] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 178 
+	 safeDbg pid 863965 shm_transaction.c : create_tx_pool: 223 
+
+2026-02-13 02:33:23.328 IST [863988] LOG:  database system was shut down at 2026-02-13 02:33:21 IST
+2026-02-13 02:33:23.330 IST [863965] LOG:  database system is ready to accept connections
+safeDbg pid 863997 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 864014 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 864027 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 864027 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 1 1 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=831;
+safeDbg pid 864030 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4001 4001 myquery=  SELECT * FROM usertable where YCSB_KEY=560;
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6001 6001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=354;
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8001 8001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=847;
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10001 10001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=410;
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12001 12001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=701;
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14001 14001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=242;
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16001 16001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=814;
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18000 18000 myquery=  SELECT * FROM usertable where YCSB_KEY=548;
+
+ *** safeDbg pid 864030 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20000 20000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=778;
+safeDbg pid 864024 postmaster.c : BackendInitialize: 4318 
+
+ 	 ** safeDbg pid= 864024 new blk shm_block.c : get_block_by_id: 168 bid 1 blk e286f490
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 0 0 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=868;
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4000 4000 myquery=  INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6000 6000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=447;
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8000 8000 myquery=  INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10000 10000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=979;
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12000 12000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=692;
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14000 14000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=659;
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16000 16000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=738;
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18001 18001 myquery=  DELETE FROM usertable WHERE YCSB_KEY=548;
+
+ *** safeDbg pid 864024 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20001 20001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=144;
+safeDbg pid 864025 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 864025 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2000 2000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=874;
+safeDbg pid 864031 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 864031 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2001 2001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=58;
+safeDbg pid 864674 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 864676 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 195: computed 69b76a025f3e38459473d5f677cb1927a62bc5694f954deb7cc626458502e125, stored 8b8339599bfe5d335f978f72491a019cafa6f346f899ea17d74388485c564d2b
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 196: computed 96da768df91336509c336540ae8399472294be3e96f6712ecd1717c9ec44ec51, stored 74ee25d63dd3532657d73fc4905281fc2b19881121fad6d26692b9c43510405f
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 198: computed e69019540e90c20812b57a03aaea8b519a6134b718aeaf3e2d059eb75f2a9a0a, stored 04a44a0fca50a77ed9512087943b93ea93ec0298afa208c2868030ba867e3604
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 202: computed c7c53d2446384819b620c5b7bee1184be213ed89679748c1703389df4e7da055, stored 25f16e7f82f82d6f7dc49f33803000f0eb9edba6d09bef3ddbb627d297290c5b
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 420: computed ed9d67b027d22694bd69d411291eae2ef0057493ad93a6661d4e17c8f8e9c9b3, stored e9c4f0dab51927b731fe2e44b9546cfa310e742c865abf3ea2eed47ac4f2e60b
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 421: computed 3a4c5bf0ce846001efa862bf7cfd1ee8f220178c27a66867cf283f6c38e4cc56, stored 3e15cc9a5c4f6122633f98eaecb7dc3c332b17330c6f713f7088fcde04ffe3ee
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 423: computed a90bf09aa1fc3369f33a45d6e414a5daf399275b2cc267d7bfc8b011379dfc3b, stored ad5267f03337324a7fadbf83745e670e329227e4070b7e8f006873a30b86d383
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 427: computed 0f6804c07f71a0f1da6780a1796e1b80f35e320ae7e8a255052b23dc4b237319, stored 0b3193aaedbaa1d256f07af4e924d954325532b5cc21bb0dba8be06e77385ca1
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 1065: computed 1102277ed0ff2759ff9db8b01526c9ba5214d4c6da4e2a418699ddb73e8ced42, stored 7ba256de165c34d9bff12f2dfa8e696f696b100707faa14cee18888fc081d2dc
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 1067: computed 646debc17f7e9c82c6a02f90369e7a7458ae89d9d839889e80d09cd307cdc008, stored 0ecd9a61b9dd8f0286ccb80dd936daa163d14d18058d0393e851c9ebf9c0ff96
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 1071: computed 237b78479d10b97813f6d78656823bc5fa51ac28925389b2be27d62c4bd7ec89, stored 49db09e75bb3aaf8539a401bb92a9b10c12e68e94fe702bfd6a68314b5dad317
+2026-02-13 02:35:06.946 IST [864678] WARNING:  merkle tree mismatch at node 1078: computed 882bfee7b51a47259bd79baf5fa331c96b03c4372031c21e680ebb256d556237, stored e28b8f4773b954a5dbbb0c32b00b911c507c00f6fd854913008fee1d93585da9
+safeDbg pid 864678 postmaster.c : BackendInitialize: 4318 
+2026-02-13 02:51:04.731 IST [863965] LOG:  received fast shutdown request
+2026-02-13 02:51:04.737 IST [863965] LOG:  aborting any active transactions
+2026-02-13 02:51:04.737 IST [863965] LOG:  background worker "logical replication launcher" (PID 863994) exited with exit code 1
+2026-02-13 02:51:04.738 IST [863989] LOG:  shutting down
+2026-02-13 02:51:05.086 IST [863965] LOG:  database system is shut down
+2026-02-13 02:54:31.235 IST [883102] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, 64-bit
+2026-02-13 02:54:31.235 IST [883102] LOG:  listening on IPv4 address "127.0.0.1", port 5438
+2026-02-13 02:54:31.243 IST [883102] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5438"
+
+ ariaMyDbg main.c : main: 200 
+
+	 $$$   safeDB shm_transaction.c : create_tx_pool: 178 
+	 safeDbg pid 883102 shm_transaction.c : create_tx_pool: 223 
+
+2026-02-13 02:54:31.246 IST [883130] LOG:  database system was shut down at 2026-02-13 02:51:04 IST
+2026-02-13 02:54:31.254 IST [883102] LOG:  database system is ready to accept connections
+safeDbg pid 883161 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 883186 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 883353 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 883353 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2001 2001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=58;
+
+ *** safeDbg pid 883353 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4000 4000 myquery=  INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+
+ *** safeDbg pid 883353 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18000 18000 myquery=  SELECT * FROM usertable where YCSB_KEY=548;
+
+ *** safeDbg pid 883353 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20000 20000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=778;
+safeDbg pid 883348 postmaster.c : BackendInitialize: 4318 
+
+ 	 ** safeDbg pid= 883348 new blk shm_block.c : get_block_by_id: 168 bid 1 blk 7746f490
+
+ *** safeDbg pid 883348 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 0 0 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=868;
+
+ *** safeDbg pid 883348 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6000 6000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=447;
+
+ *** safeDbg pid 883348 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8000 8000 myquery=  INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+
+ *** safeDbg pid 883348 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10000 10000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=979;
+
+ *** safeDbg pid 883348 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12000 12000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=692;
+
+ *** safeDbg pid 883348 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14000 14000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=659;
+
+ *** safeDbg pid 883348 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16000 16000 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=738;
+safeDbg pid 883344 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 2000 2000 myquery=  DELETE FROM usertable WHERE YCSB_KEY=874;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 4001 4001 myquery=  SELECT * FROM usertable where YCSB_KEY=560;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 6001 6001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=354;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 8001 8001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=847;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 10001 10001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=410;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 12001 12001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=701;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 14001 14001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=242;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 16001 16001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=814;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 18001 18001 myquery=  DELETE FROM usertable WHERE YCSB_KEY=548;
+
+ *** safeDbg pid 883344 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 20001 20001 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=144;
+safeDbg pid 883352 postmaster.c : BackendInitialize: 4318 
+safeDbg pid 883346 postmaster.c : BackendInitialize: 4318 
+
+ *** safeDbg pid 883346 signaling worker.c : bcdb_worker_process_tx_dt: 790 latest-vs-myId= 1 1 myquery=  SELECT * FROM usertable WHERE YCSB_KEY=831;
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 420: computed ed9d67b027d22694bd69d411291eae2ef0057493ad93a6661d4e17c8f8e9c9b3, stored e9c4f0dab51927b731fe2e44b9546cfa310e742c865abf3ea2eed47ac4f2e60b
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 421: computed 3a4c5bf0ce846001efa862bf7cfd1ee8f220178c27a66867cf283f6c38e4cc56, stored 3e15cc9a5c4f6122633f98eaecb7dc3c332b17330c6f713f7088fcde04ffe3ee
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 423: computed a90bf09aa1fc3369f33a45d6e414a5daf399275b2cc267d7bfc8b011379dfc3b, stored ad5267f03337324a7fadbf83745e670e329227e4070b7e8f006873a30b86d383
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 427: computed 0f6804c07f71a0f1da6780a1796e1b80f35e320ae7e8a255052b23dc4b237319, stored 0b3193aaedbaa1d256f07af4e924d954325532b5cc21bb0dba8be06e77385ca1
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 1065: computed 1102277ed0ff2759ff9db8b01526c9ba5214d4c6da4e2a418699ddb73e8ced42, stored 7ba256de165c34d9bff12f2dfa8e696f696b100707faa14cee18888fc081d2dc
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 1067: computed 646debc17f7e9c82c6a02f90369e7a7458ae89d9d839889e80d09cd307cdc008, stored 0ecd9a61b9dd8f0286ccb80dd936daa163d14d18058d0393e851c9ebf9c0ff96
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 1071: computed 237b78479d10b97813f6d78656823bc5fa51ac28925389b2be27d62c4bd7ec89, stored 49db09e75bb3aaf8539a401bb92a9b10c12e68e94fe702bfd6a68314b5dad317
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 1078: computed 882bfee7b51a47259bd79baf5fa331c96b03c4372031c21e680ebb256d556237, stored e28b8f4773b954a5dbbb0c32b00b911c507c00f6fd854913008fee1d93585da9
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 1590: computed 8a64187bbe7980c157176fa3155fabdc55bf25b806511214d11d82c8fd5fd57d, stored 36171fd36b8fc61367f3f0d37fefcc029a71e02c69973c2af5d55fc1fbdf7750
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 1591: computed 7ed93d4566e5f753268fc2d1c1fb75cd7fd6f474ca37df52f85dbb8298e953eb, stored c2aa3aedb313b181166b5da1ab4b1213b01831e0a5f1f16cdc95668b9e69f1c6
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 1594: computed 288a84d30020ae460a50e947d4fdd06c110b9cd3796a5161dd3b4dfdeff86e2f, stored 94f9837bd5d6e8943ab47637be4db7b2dec5594716ac7f5ff9f390f4e978cc02
+2026-02-13 02:56:29.176 IST [884036] WARNING:  merkle tree mismatch at node 1599: computed 4280fd816b181f07bc312f4f84a0bf26aa3d6bfb93594788356b11dace5fd9be, stored fef3fa29beee59d58cd5b03fee10d8f865f3ae6ffc9f69b611a3ccd3c8df7b93
+safeDbg pid 884036 postmaster.c : BackendInitialize: 4318 

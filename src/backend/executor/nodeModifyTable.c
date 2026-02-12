@@ -67,6 +67,48 @@
 #include <bcdb/shm_transaction.h>
 #include <bcdb/globals.h>
 
+/*
+ * bcdb_compute_key_tag - Compute a write-set tag based on primary key values.
+ *
+ * Both INSERT and DELETE for the same primary key must produce the same tag
+ * so that conflict_checkDT detects cross-operation conflicts on the same key.
+ * Without this, INSERT operations are invisible to conflict detection,
+ * allowing DELETE transactions to proceed with stale snapshots where a key
+ * was temporarily absent, leaving phantom hashes in the merkle tree.
+ *
+ * We read the first column (assumed to be the primary key) from the given
+ * slot and use hash_any to compute a stable 32-bit hash.  The hash is split
+ * into blockNumber (upper 16 bits) and offsetNumber (lower 16 bits + 1,
+ * since offset 0 is invalid) inside a PREDICATELOCKTARGETTAG.
+ */
+static void
+bcdb_compute_key_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid,
+                     TupleTableSlot *slot)
+{
+    Datum   keyVal;
+    bool    isNull;
+    uint32  h;
+
+    /* Extract the first column (primary key) from the slot */
+    keyVal = slot_getattr(slot, 1, &isNull);
+    if (isNull)
+        h = 0;
+    else
+    {
+        int32 intKey = DatumGetInt32(keyVal);
+        h = hash_any((unsigned char *) &intKey, sizeof(int32));
+    }
+
+    /*
+     * Pack into tag.  We use a fixed dbOid of 0 (same as existing code)
+     * and the table's relOid.  The hash is split so that the lower 16-bit
+     * field (offsetNumber) is always >= 1 to keep ItemPointer-like validity.
+     */
+    SET_PREDICATELOCKTARGETTAG_TUPLE(*tag, 0, relOid,
+                                     (BlockNumber)(h >> 16),
+                                     (OffsetNumber)((h & 0xFFFF) | 1));
+}
+
 static bool ExecOnConflictUpdate(ModifyTableState *mtstate,
 								 ResultRelInfo *resultRelInfo,
 								 ItemPointer conflictTid,
@@ -85,6 +127,120 @@ static void ExecSetupChildParentMapForSubplan(ModifyTableState *mtstate);
 static TupleConversionMap *tupconv_map_for_subplan(ModifyTableState *node,
 												   int whichplan);
 
+typedef struct MerkleDeleteDelta
+{
+	Oid			indexOid;
+	int			partitionId;
+	MerkleHash	hash;
+} MerkleDeleteDelta;
+
+typedef struct MerkleDeletePlan
+{
+	int			count;
+	MerkleDeleteDelta *items;
+	bool		ready;
+} MerkleDeletePlan;
+
+static MerkleDeletePlan
+CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)
+{
+	MerkleDeletePlan plan;
+	List       *indexList;
+	ListCell   *lc;
+	TupleTableSlot *slot;
+	MerkleHash  hash;
+	int			maxItems;
+
+	plan.count = 0;
+	plan.items = NULL;
+	plan.ready = false;
+
+	if (!enable_merkle_index)
+	{
+		plan.ready = true;
+		return plan;
+	}
+
+	if (!ItemPointerIsValid(tupleid) ||
+		ItemPointerGetBlockNumberNoCheck(tupleid) == InvalidBlockNumber)
+		return plan;
+
+	slot = table_slot_create(heapRel, NULL);
+	if (!table_tuple_fetch_row_version(heapRel, tupleid, SnapshotSelf, slot))
+	{
+		ExecDropSingleTupleTableSlot(slot);
+		return plan;
+	}
+
+	merkle_compute_slot_hash(heapRel, slot, &hash);
+	if (merkle_hash_is_zero(&hash))
+	{
+		ExecDropSingleTupleTableSlot(slot);
+		plan.ready = true;
+		return plan;
+	}
+
+	indexList = RelationGetIndexList(heapRel);
+	maxItems = list_length(indexList);
+	if (maxItems > 0)
+		plan.items = (MerkleDeleteDelta *) palloc0(sizeof(MerkleDeleteDelta) * maxItems);
+
+	foreach(lc, indexList)
+	{
+		Oid         indexOid = lfirst_oid(lc);
+		Relation    indexRel;
+
+		indexRel = index_open(indexOid, RowExclusiveLock);
+		if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+		{
+			IndexInfo  *indexInfo;
+			Datum       values[INDEX_MAX_KEYS];
+			bool        isnull[INDEX_MAX_KEYS];
+			int         totalLeaves;
+			int         partitionId;
+
+			indexInfo = BuildIndexInfo(indexRel);
+			FormIndexDatum(indexInfo, slot, NULL, values, isnull);
+			merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+			partitionId = merkle_compute_partition_id(values, isnull,
+											 indexInfo->ii_NumIndexKeyAttrs,
+											 RelationGetDescr(indexRel),
+											 totalLeaves);
+
+			plan.items[plan.count].indexOid = indexOid;
+			plan.items[plan.count].partitionId = partitionId;
+			plan.items[plan.count].hash = hash;
+			plan.count++;
+		}
+		index_close(indexRel, RowExclusiveLock);
+	}
+
+	list_free(indexList);
+	ExecDropSingleTupleTableSlot(slot);
+	plan.ready = true;
+	return plan;
+}
+
+static void
+ApplyMerkleDeletePlan(MerkleDeletePlan *plan)
+{
+	int i;
+
+	if (plan == NULL)
+		return;
+
+	for (i = 0; i < plan->count; i++)
+	{
+		Relation indexRel = index_open(plan->items[i].indexOid, RowExclusiveLock);
+		if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+			merkle_update_tree_path(indexRel,
+							plan->items[i].partitionId,
+							&plan->items[i].hash,
+							false);
+		index_close(indexRel, RowExclusiveLock);
+	}
+}
+
 /*
  * ExecDeleteMerkleIndexes - Update merkle indexes before DELETE
  *
@@ -92,7 +248,7 @@ static TupleConversionMap *tupconv_map_for_subplan(ModifyTableState *node,
  * indexes on the table. This must be done BEFORE the row is deleted
  * because we need to read the row to compute its hash.
  */
-static void
+void
 ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
 {
     List       *indexList;
@@ -230,18 +386,17 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
 {
     List       *indexList;
     ListCell   *lc;
+	MerkleHash  hash;
 
-    /*
-     * Validate slot->tts_tid before processing.
-     * During optimistic writes the tuple is not yet in the heap,
-     * so tts_tid is invalid — skip silently.
-     */
-    if (!ItemPointerIsValid(&slot->tts_tid) ||
-        ItemPointerGetBlockNumberNoCheck(&slot->tts_tid) == InvalidBlockNumber)
+	if (slot == NULL || TTS_EMPTY(slot))
         return;
 
     if (!enable_merkle_index)
         return;
+
+	merkle_compute_slot_hash(heapRel, slot, &hash);
+	if (merkle_hash_is_zero(&hash))
+		return;
 
     indexList = RelationGetIndexList(heapRel);
 
@@ -257,14 +412,18 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
             IndexInfo  *indexInfo;
             Datum       values[INDEX_MAX_KEYS];
             bool        isnull[INDEX_MAX_KEYS];
+			int         totalLeaves;
+			int         partitionId;
 
             indexInfo = BuildIndexInfo(indexRel);
 
             FormIndexDatum(indexInfo, slot, NULL, values, isnull);
-
-            index_insert(indexRel, values, isnull,
-                         &slot->tts_tid, heapRel,
-                         UNIQUE_CHECK_NO, indexInfo);
+			merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+			partitionId = merkle_compute_partition_id(values, isnull,
+													 indexInfo->ii_NumIndexKeyAttrs,
+													 RelationGetDescr(indexRel),
+													 totalLeaves);
+			merkle_update_tree_path(indexRel, partitionId, &hash, true);
         }
 
         index_close(indexRel, RowExclusiveLock);
@@ -780,6 +939,19 @@ ExecInsert(ModifyTableState *mtstate,
 		{
 			if (is_bcdb_worker)
 			{
+				/*
+				 * BCDB WORKER: Register INSERT in the write-set using a
+				 * primary-key-based tag.  This ensures conflict_checkDT
+				 * detects DELETE-INSERT conflicts on the same key.
+				 * Without this, a DELETE transaction whose optimistic phase
+				 * found the key absent (between a prior DELETE commit and a
+				 * later INSERT commit) would proceed without retry, leaving
+				 * a phantom merkle hash from the prior INSERT.
+				 */
+				PREDICATELOCKTARGETTAG tag;
+				bcdb_compute_key_tag(&tag,
+									 resultRelationDesc->rd_id, slot);
+				ws_table_reserveDT(&tag);
 				store_optim_insert(slot);
 				//return NULL;
 			}
@@ -966,11 +1138,67 @@ ExecDelete(ModifyTableState *mtstate,
 		 */
 ldelete:;
 		/*
+		 * BCDB WORKER: Defer DELETE to serial phase.
+		 * Just like INSERT and UPDATE, store the operation for later
+		 * execution in apply_optim_writes(). This prevents Merkle tree
+		 * XOR-out from happening during the parallel phase, which would
+		 * cause hash corruption due to concurrent unprotected access.
+		 */
+		if (is_bcdb_worker)
+		{
+			PREDICATELOCKTARGETTAG tag;
+			PREDICATELOCKTARGETTAG tid_tag;
+			/*
+			 * DELETE registers TWO write-set tags:
+			 *
+			 * 1. TID-based tag — preserves RAW conflict detection with
+			 *    SELECT operations that read the same physical tuple.
+			 *    SELECT registers TID-based read-set tags via
+			 *    PredicateLockTuple; if we only publish key-hash tags,
+			 *    the conflict check (TID vs key-hash) never matches.
+			 *
+			 * 2. Key-based tag — enables WAW conflict detection with
+			 *    INSERT operations on the same primary key.  INSERT
+			 *    registers a key-hash write-set tag; the key-hash
+			 *    from DELETE matches it for same-key conflicts.
+			 */
+
+			/* Tag 1: TID-based (always available) */
+			SET_PREDICATELOCKTARGETTAG_TUPLE(tid_tag,
+											 0,
+											 resultRelationDesc->rd_id,
+											 ItemPointerGetBlockNumber(tupleid),
+											 ItemPointerGetOffsetNumber(tupleid));
+			ws_table_reserveDT(&tid_tag);
+
+			/* Tag 2: Key-based (read tuple to extract primary key) */
+			{
+				TupleTableSlot *keySlot;
+				keySlot = table_slot_create(resultRelationDesc, NULL);
+				if (table_tuple_fetch_row_version(resultRelationDesc,
+												  tupleid,
+												  estate->es_snapshot,
+												  keySlot))
+				{
+					bcdb_compute_key_tag(&tag,
+										 resultRelationDesc->rd_id,
+										 keySlot);
+					ws_table_reserveDT(&tag);
+				}
+				/* If tuple not readable, TID tag above is still registered */
+				ExecDropSingleTupleTableSlot(keySlot);
+			}
+			store_optim_delete(RelationGetRelid(resultRelationDesc), tupleid);
+			if (canSetTag)
+				(estate->es_processed)++;
+			return NULL;
+		}
+		/*
 		 * Update Merkle indexes BEFORE deleting the tuple.
 		 * We need to do this before the tuple is gone so we can
 		 * read the row data to compute the hash to XOR out.
 		 */
-		ExecDeleteMerkleIndexes(resultRelationDesc, tupleid);
+		MerkleDeletePlan merkleDeletePlan = CaptureMerkleDeletePlan(resultRelationDesc, tupleid);
 	
 		result = table_tuple_delete(resultRelationDesc, tupleid,
 								estate->es_output_cid,
@@ -1018,6 +1246,11 @@ ldelete:;
 					return NULL;
 
 				case TM_Ok:
+					if (!merkleDeletePlan.ready)
+						ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("failed to capture old-row Merkle delta for DELETE")));
+					ApplyMerkleDeletePlan(&merkleDeletePlan);
 					break;
 
 				case TM_Updated:
@@ -1323,6 +1556,10 @@ ExecUpdate(ModifyTableState *mtstate,
 		LockTupleMode lockmode;
 		bool		partition_constraint_failed;
 		bool		update_indexes;
+		MerkleDeletePlan merkleDeletePlan;
+		merkleDeletePlan.count = 0;
+		merkleDeletePlan.items = NULL;
+		merkleDeletePlan.ready = true;
 
 		/*
 		 * Constraints might reference the tableoid column, so (re-)initialize
@@ -1572,12 +1809,7 @@ lreplace:;
 			}
 			else
 			{
-				/*
-				 * Update Merkle indexes: XOR out the OLD row's hash before the update.
-				 * The NEW row's hash will be XOR'd in when ExecInsertIndexTuples
-				 * calls merkleInsert.
-				 */
-				ExecDeleteMerkleIndexes(resultRelationDesc, tupleid);
+				merkleDeletePlan = CaptureMerkleDeletePlan(resultRelationDesc, tupleid);
 
 				result = table_tuple_update(resultRelationDesc, tupleid, slot,
 											estate->es_output_cid,
@@ -1624,6 +1856,11 @@ lreplace:;
 					return NULL;
 
 				case TM_Ok:
+					if (!merkleDeletePlan.ready)
+						ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("failed to capture old-row Merkle delta for UPDATE")));
+					ApplyMerkleDeletePlan(&merkleDeletePlan);
 					break;
 
 				case TM_Updated:
