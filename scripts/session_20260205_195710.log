@@ -1,4 +1,0 @@
-Script started on 2026-02-05 19:57:10+05:30 [COMMAND="bcpsql" TERM="xterm-256color" TTY="/dev/pts/8" COLUMNS="184" LINES="45"]
-bash: line 1: bcpsql: command not found
-
-Script done on 2026-02-05 19:57:10+05:30 [COMMAND_EXIT_CODE="127"]

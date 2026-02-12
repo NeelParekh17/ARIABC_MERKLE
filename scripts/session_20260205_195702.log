@@ -1,6 +1,0 @@
-Script started on 2026-02-05 19:57:02+05:30 [COMMAND="psql" TERM="xterm-256color" TTY="/dev/pts/8" COLUMNS="184" LINES="45"]
-psql: error: could not connect to server: No such file or directory
-	Is the server running locally and accepting
-	connections on Unix domain socket "/tmp/.s.PGSQL.5432"?
-
-Script done on 2026-02-05 19:57:02+05:30 [COMMAND_EXIT_CODE="2"]
