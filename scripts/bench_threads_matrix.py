@@ -51,6 +51,10 @@ class RunResult:
     workload_overall_ms: Optional[float]
     workload_wait_ms: Optional[float]
     duplicate_key_errors: Optional[int]
+    retries_total: Optional[int]
+    serialization_retries: Optional[int]
+    reconnects: Optional[int]
+    permanent_failures: Optional[int]
     db_row_count: Optional[int]
     db_root_hash: Optional[str]
     db_merkle_verify: Optional[str]
@@ -63,6 +67,10 @@ class RunResult:
 OVERALL_MS_RE = re.compile(r"overall time taken \(millisec\)\s*=\s*([0-9.]+)")
 WAIT_MS_RE = re.compile(r"total wait time \(ms\)\s*([0-9.]+)")
 DUP_KEYS_RE = re.compile(r"duplicate_key_errors\s*=\s*([0-9]+)")
+RETRY_SUMMARY_RE = re.compile(
+    r"retry_summary:\s*retries_total=(\d+)\s+serialization_retries=(\d+)\s+reconnects=(\d+)\s+permanent_failures=(\d+)",
+    re.IGNORECASE,
+)
 
 
 def _now_utc_iso() -> str:
@@ -154,6 +162,16 @@ def _parse_workload_metrics(log_text: str) -> tuple[Optional[float], Optional[fl
     return overall_ms, wait_ms, dup_keys
 
 
+def _parse_retry_summary(log_text: str) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+    m = RETRY_SUMMARY_RE.search(log_text)
+    if not m:
+        return None, None, None, None
+    try:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    except Exception:
+        return None, None, None, None
+
+
 def _load_existing_keys(csv_path: Path) -> set[RunKey]:
     if not csv_path.exists():
         return set()
@@ -225,8 +243,19 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         wait = [x for x in wait if x is not None]
         dups = [as_int(r.get("duplicate_key_errors", "")) for r in rs]
         dups = [x for x in dups if x is not None]
+        retries_total = [as_int(r.get("retries_total", "")) for r in rs]
+        retries_total = [x for x in retries_total if x is not None]
+        serialization_retries = [as_int(r.get("serialization_retries", "")) for r in rs]
+        serialization_retries = [x for x in serialization_retries if x is not None]
+        reconnects = [as_int(r.get("reconnects", "")) for r in rs]
+        reconnects = [x for x in reconnects if x is not None]
+        permanent_failures = [as_int(r.get("permanent_failures", "")) for r in rs]
+        permanent_failures = [x for x in permanent_failures if x is not None]
 
         verify = [(r.get("db_merkle_verify", "") or "").strip().lower() == "t" for r in rs]
+
+        def max_or_empty(nums: list[int]) -> str:
+            return str(max(nums)) if nums else ""
 
         out_rows.append(
             {
@@ -239,6 +268,14 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
                 "mean_workload_overall_ms": f"{mean(overall):.3f}" if overall else "",
                 "mean_workload_wait_ms": f"{mean(wait):.3f}" if wait else "",
                 "mean_duplicate_key_errors": f"{mean([float(x) for x in dups]):.3f}" if dups else "",
+                "mean_retries_total": f"{mean([float(x) for x in retries_total]):.3f}" if retries_total else "",
+                "mean_serialization_retries": f"{mean([float(x) for x in serialization_retries]):.3f}" if serialization_retries else "",
+                "mean_reconnects": f"{mean([float(x) for x in reconnects]):.3f}" if reconnects else "",
+                "mean_permanent_failures": f"{mean([float(x) for x in permanent_failures]):.3f}" if permanent_failures else "",
+                "max_retries_total": max_or_empty(retries_total),
+                "max_serialization_retries": max_or_empty(serialization_retries),
+                "max_reconnects": max_or_empty(reconnects),
+                "max_permanent_failures": max_or_empty(permanent_failures),
             }
         )
 
@@ -341,6 +378,10 @@ def main() -> int:
         workload_overall_ms=None,
         workload_wait_ms=None,
         duplicate_key_errors=None,
+        retries_total=None,
+        serialization_retries=None,
+        reconnects=None,
+        permanent_failures=None,
         db_row_count=None,
         db_root_hash=None,
         db_merkle_verify=None,
@@ -441,6 +482,7 @@ def main() -> int:
                             pass
 
                         overall_ms, wait_ms, dup_keys = _parse_workload_metrics(log_text)
+                        retries_total, serialization_retries, reconnects, permanent_failures = _parse_retry_summary(log_text)
 
                         count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable;", cwd=scripts_dir, env=env)
                         root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable');", cwd=scripts_dir, env=env)
@@ -471,6 +513,10 @@ def main() -> int:
                             workload_overall_ms=overall_ms,
                             workload_wait_ms=wait_ms,
                             duplicate_key_errors=dup_keys,
+                            retries_total=retries_total,
+                            serialization_retries=serialization_retries,
+                            reconnects=reconnects,
+                            permanent_failures=permanent_failures,
                             db_row_count=row_count,
                             db_root_hash=root_hash,
                             db_merkle_verify=verify,
