@@ -1,15 +1,12 @@
 #!/usr/bin/python3
 
-import psycopg2
+import psycopg
 import sys
 import time
-import itertools
-from threading import Thread, Lock
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures
-from psycopg_pool import ConnectionPool
+from threading import Lock
 
 mutex = Lock()
 mutex_seqnum = Lock()
@@ -17,6 +14,8 @@ procSeqNum = 0
 inputSeqNum = 0
 message_dict = {}
 totalWaitTime = 0.0
+duplicate_key_errors = 0
+mutex_dups = Lock()
 
 DB_USER = "postgres"
 DB_PORT = "5438"
@@ -26,7 +25,10 @@ DB_PASS = ""
 DB_HOST = "localhost"
 RATE = 800
 NUM = 4
-LOG_SKIP = 1000
+LOG_SKIP = 4000
+MAX_RETRIES = 10  # Increased for BCDB slot contention
+RETRY_BACKOFF_SEC = 0.1  # Increased for BCDB
+STATEMENT_TIMEOUT = "90s"
  
 #print("arglen== " , len(sys.argv))
 if(len(sys.argv) < 4):
@@ -44,23 +46,10 @@ print(" arg3 a4 pause == ", sys.argv[3], sys.argv[4], reqPause);
 DB_NAME = sys.argv[1]
 connStr = "postgresql://"+DB_USER + ":" + DB_PASS + "@" + DB_HOST+":"+ DB_PORT + "/" + DB_NAME
 
-pool = ConnectionPool(connStr, min_size = NUM, max_size = NUM * 2)
-
 def getSeqHash(seqNum):
+    return f"{seqNum:08d}"
 
-    num = seqNum
-    nd = 0
-    for len in range(0, 8):
-      num =  (int) (num/10)
-      nd = nd + 1
-      if(num == 0):
-          break
-    numstr = ""
-    for len in range(0, 8-nd):
-      numstr = numstr + '0'
-    return numstr+str(seqNum)
-
-def getSeqNum(dummy):
+def getSeqNum():
     global procSeqNum
     global inputSeqNum
 
@@ -76,17 +65,58 @@ def getSeqNum(dummy):
 
     return currNum, message_dict[currNum]
 
-def execWrapper(dummy):
-    qCount, q  = getSeqNum(0)
-    while (qCount == -1):
-        time.sleep(0.00050)
-        qCount,q  = getSeqNum(0)
-    if (q == ''):
-        return
-    execTx(qCount, q)
+def open_worker_connection(worker_idx: int):
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            conn = psycopg.connect(connStr, autocommit=True)
+            cur = conn.cursor()
+            cur.execute(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'")
+            return conn, cur
+        except Exception as err:
+            last_exc = err
+            sleep_s = RETRY_BACKOFF_SEC * (2 ** attempt)
+            print(f"error connecting in 'worker-{worker_idx}': {err}")
+            time.sleep(sleep_s)
 
-def execTx(qCount, line):
+    raise last_exc
+
+def is_retryable_error(err: psycopg.Error) -> bool:
+    error_msg = str(err).lower()
+    error_code = err.sqlstate if hasattr(err, 'sqlstate') else None
+
+    return (
+        # Standard PostgreSQL errors
+        "serialization" in error_msg or
+        "statement timeout" in error_msg or
+        "canceling statement" in error_msg or
+        "got no result from the query" in error_msg or
+        "server closed" in error_msg or
+        "connection" in error_msg or
+        "terminating connection" in error_msg or
+        "in recovery mode" in error_msg or
+        "deadlock" in error_msg or
+        # BCDB-specific errors
+        "unable to allocate bcdb transaction slot" in error_msg or
+        "bcdb tx-pool capacity" in error_msg or
+        "transaction slot" in error_msg or
+        error_code == '57014' or  # query_canceled (includes statement_timeout)
+        error_code == '53400'  # ConfigurationLimitExceeded
+    )
+
+def should_reconnect(err: psycopg.Error) -> bool:
+    error_msg = str(err).lower()
+    return (
+        "server closed" in error_msg or
+        "connection" in error_msg or
+        "terminating connection" in error_msg or
+        "in recovery mode" in error_msg or
+        "got no result from the query" in error_msg
+    )
+
+def execTx(conn, cur, worker_idx: int, qCount, line):
  global totalWaitTime
+ global duplicate_key_errors
  
  ts1 = time.time()
  serialErr = 1
@@ -99,47 +129,101 @@ def execTx(qCount, line):
     print("timestamp1 = " + str(ts1) + " line= " + line)
  
  try:
-  # IMPROVED: Better connection and cursor management
-  conn = None
-  cur1 = None
-  
-  try:
-    conn = pool.getconn()
-    cur1 = conn.cursor()
-    
-    # Execute query
-    if (DB_TYPE == 1):
-        cur1.execute(pfx + mHash + ' ' + line)
-    else:
-        cur1.execute(pfx + line)
-    
-    # Fetch results BEFORE commit for SELECT queries
-    result_message = cur1.statusmessage if cur1.statusmessage else "NO STATUS"
-    result_data = None
-    
-    if((qCount % LOG_SKIP) < NUM):
-      if (line.strip().upper().startswith('SELECT') or 
-          line.strip().upper().startswith('S SELECT')):
+  result_message = "NO STATUS"
+  result_data = None
+  last_exc = None
+
+  for attempt in range(MAX_RETRIES):
+    try:
+      # Execute the actual query
+      if DB_TYPE == 1:
+          cur.execute(pfx + mHash + ' ' + line)
+      elif DB_TYPE == 2:
+          cur.execute(line)
+      else:
+          cur.execute(pfx + line)
+
+      # Get status message
+      result_message = cur.statusmessage if cur.statusmessage else "NO STATUS"
+      result_data = None
+
+      # Fetch results for SELECT queries
+      if line.strip().upper().startswith('SELECT'):
         try:
-          result_data = cur1.fetchall()
+          row = cur.fetchone()
+          result_data = [row] if row is not None else []
         except Exception as e:
-          print(f"  Warning: Could not fetch results: {e}")
-    
-    # Now commit
-    conn.commit()
-    
-    if((qCount % LOG_SKIP) < NUM):
-      print("  2timestamp1 = " + str(ts1) + " tid= " + str(threading.get_ident()))
-      print(result_message)
-      if result_data is not None:
-        print(str(result_data))
-    
-    serialErr = 0
-    
-  finally:
-    # IMPROVED: Always return connection to pool
-    if conn is not None:
-      pool.putconn(conn)
+          if (qCount % LOG_SKIP) < NUM:
+            print(f"  Warning: Could not fetch results: {e}")
+      
+      # If we get here, query succeeded
+      serialErr = 0
+      
+      # Log results
+      if((qCount % LOG_SKIP) < NUM):
+        print("  2timestamp1 = " + str(ts1) + " tid= " + str(threading.get_ident()))
+        print(result_message)
+        if result_data is not None:
+          print(str(result_data))
+      
+      # Success - break out of retry loop
+      break
+
+    except psycopg.Error as err:
+      last_exc = err
+
+      # Non-determinism path: treat duplicate-key as non-fatal (log + count + continue)
+      if DB_TYPE == 2 and getattr(err, 'sqlstate', None) == '23505':
+        with mutex_dups:
+          duplicate_key_errors += 1
+        print(f"Duplicate key (23505) qCount={qCount} tid={threading.get_ident()} line={line}")
+        serialErr = 0
+        break
+
+      if is_retryable_error(err) and attempt + 1 < MAX_RETRIES:
+        sleep_s = RETRY_BACKOFF_SEC * (2 ** attempt)
+        
+        if (qCount % LOG_SKIP) < NUM or "transaction slot" in str(err).lower():
+          print(f"  Retry {attempt+1}/{MAX_RETRIES} for qCount={qCount} tid={threading.get_ident()} due to: {err}")
+
+        if should_reconnect(err):
+          try:
+            cur.close()
+          except Exception:
+            pass
+          try:
+            conn.close()
+          except Exception:
+            pass
+          conn, cur = open_worker_connection(worker_idx)
+
+        time.sleep(sleep_s)
+        continue
+      else:
+        # Not retryable or max retries reached
+        raise
+    except Exception as err:
+      last_exc = err
+      if attempt + 1 < MAX_RETRIES:
+        sleep_s = RETRY_BACKOFF_SEC * (2 ** attempt)
+        if (qCount % LOG_SKIP) < NUM:
+          print(f"  Retry {attempt+1}/{MAX_RETRIES} for qCount={qCount} tid={threading.get_ident()} due to: {err}")
+        try:
+          cur.close()
+        except Exception:
+          pass
+        try:
+          conn.close()
+        except Exception:
+          pass
+        conn, cur = open_worker_connection(worker_idx)
+        time.sleep(sleep_s)
+        continue
+      raise
+
+  # If all retries failed, raise the last exception
+  if serialErr == 1 and last_exc is not None:
+    raise last_exc
   
   sys.stdout.flush()
   
@@ -150,30 +234,47 @@ def execTx(qCount, line):
   waitTime = reqPause - (ts2-ts1)
   
   if(waitTime > 0):
-       time.sleep(waitTime)
-       mutex.acquire()
-       totalWaitTime += waitTime
-       mutex.release()
+    time.sleep(waitTime)
+    mutex.acquire()
+    totalWaitTime += waitTime
+    mutex.release()
  
- except psycopg2.DatabaseError as err:
-      print("Database error... " + " tid= " + str(threading.get_ident()))
-      print("   chk rerun stoPro= " + line)
-      excpStr = traceback.format_exc()
-      print("    str==  "+ excpStr)
-      found = excpStr.find("SerializationFailure")
-      if (found != -1):
-        print("   rerun - found it to recurse...")
-        # Could implement retry logic here
- except psycopg2.Error as err:
-      print("psycopg2 error: " + str(err) + " tid= " + str(threading.get_ident()))
-      print("   chk rerun stoPro= " + line)
-      traceback.print_exc()
+ except psycopg.DatabaseError as err:
+    print("Database error: " + str(err) + " tid= " + str(threading.get_ident()))
+    print("   chk rerun stoPro= " + line)
+    traceback.print_exc()
+    raise
  except Exception as e:
-      print("Unexpected error: " + str(e) + " tid= " + str(threading.get_ident()))
-      print("   chk rerun stoPro= " + line)
-      traceback.print_exc()
+    print("Unexpected error: " + str(e) + " tid= " + str(threading.get_ident()))
+    print("   chk rerun stoPro= " + line)
+    traceback.print_exc()
+    raise
  
  sys.stdout.flush()
+
+ return conn, cur
+    
+def worker_loop(worker_idx: int):
+    conn = None
+    cur = None
+    try:
+        conn, cur = open_worker_connection(worker_idx)
+        while True:
+            qCount, q = getSeqNum()
+            if qCount == -1 or q == '':
+                return
+            conn, cur = execTx(conn, cur, worker_idx, qCount, q)
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
     
 allQueries = []
@@ -197,20 +298,16 @@ except FileNotFoundError:
 message_dict[inputSeqNum] = ''
 inputSeqNum += 1
 tStart = time.time()
-poolFutures = []
 
-try:
-    with ThreadPoolExecutor(max_workers= NUM) as execPool: 
-      mapAll = 1
-      if mapAll == 1:
-        results = execPool.map(execWrapper, itertools.repeat(None, inputSeqNum))
-        count = 0
-        for result in results:
-            count += 1
-finally:
-    pool.close()
+with ThreadPoolExecutor(max_workers=NUM) as execPool:
+    futures = []
+    for i in range(NUM):
+        futures.append(execPool.submit(worker_loop, i))
+    for fut in futures:
+        fut.result()
 
 tEnd = time.time()
 sys.stdout.flush()
 print("overall time taken (millisec) = " + str((tEnd - tStart)*1000))
 print(" total wait time (ms) " + str(totalWaitTime * 1000))
+print(f"duplicate_key_errors={duplicate_key_errors}")

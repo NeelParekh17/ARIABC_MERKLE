@@ -1,0 +1,76 @@
+ arg1 a2 ==  postgres ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt
+ arg3 a4 pause ==  1 1 0.00125
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=835;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=449;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=885;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=322;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=682;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (764, 'nMcgJOtSvWEXx8pcopDe', 'k5znGR90133NlmcDTQ2f', '7JqMPzSF2ksQKze4XZwO', '7urCkoRUO4Fhv1VAM0C0', 'ZlpeKVTxL4u7HUH99bG1', 'wBgDLNu8VfHVW23xZA6Y', 'iub2UyPJHdBZWsdZPFRm', 'WV39rJNiTkxAalWyNmnZ', '3UBFD2EId64hxwoL9jCy', '7Gc0jYLczoesyPYLKGtc');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=786;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1278;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=895;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (235, 'uBiWXFPzbzlwO6a4hpP2', 'fppkk3v9VfrWvXhBvbUL', 'WEBNvmZImtsFaQk4w0AE', 'jvslX61qcBeYY4X63A3N', 'ELVWzmXBjv41DJVCh09A', 'CDV1V42R8jeF4P8gu3Dm', 'sA1Hi0fzOPzmpUlHd18j', 'pPWqZYauFNhLNzbwmcME', 'I8nV09yd1DRyJqs5UeBp', 'xc9tDQhKc6e3gSxirZH5');  
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 1
+timestamp1 = 1770998089.1191225 line= SELECT * FROM usertable WHERE YCSB_KEY=868;
+  2timestamp1 = 1770998089.1191225 tid= 135437205096128
+SELECT 1
+[(868, 'Lsd4tAkKsWdOY29YLFLU', 'JESgr5T9kYuzUYwvIaNx', 'nfWxRk0l9ANXWF112MCg', 'LAPsgAJB34Wmps0wAYu5', 's7tEXozD5vg1RTBNpUkj', '1VhBtA5AIM63fZdnHLjv', 'bdX9jsPvibnsacR5vqac', 'o3MjXYlqsHtOqkO3n5Xn', 'f4pO6I4hT3JI1cGP7fvW', 'WcfqJru12ZwnntMxnoYE')]
+    time diff (ms) = 155.99560737609863 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 2001
+timestamp1 = 1770998093.8215709 line= DELETE FROM usertable WHERE YCSB_KEY=874;
+  2timestamp1 = 1770998093.8215709 tid= 135437205096128
+DELETE 1
+    time diff (ms) = 7.22193717956543 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 4001
+timestamp1 = 1770998106.323451 line= INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+  2timestamp1 = 1770998106.323451 tid= 135437205096128
+INSERT 0 1
+    time diff (ms) = 13.675689697265625 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 6001
+timestamp1 = 1770998128.2578828 line= SELECT * FROM usertable WHERE YCSB_KEY=447;
+  2timestamp1 = 1770998128.2578828 tid= 135437205096128
+SELECT 1
+[(447, '5v44gzOwfO68qWetrWpm', 'on30rmEdnotNOU8JAUfT', 'xlwyHvJLzY7hW62CP32X', 'iyfLXziLxzllmqURcw5k', 'JNXxkzMIe4oUyRk1jcp1', '5Xgy1XDTq032NVupETxx', 'neLTiLWX2YN6HvJAlla2', 'yorRjA5m323ObakMkC8O', 'CzUAUJy2jKj8rV59UGyi', 'P5r6FGcp5eb9bopdKfRd')]
+    time diff (ms) = 15.506744384765625 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 8001
+timestamp1 = 1770998159.1672904 line= INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+  2timestamp1 = 1770998159.1672904 tid= 135437205096128
+INSERT 0 1
+    time diff (ms) = 21.319866180419922 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 10001
+timestamp1 = 1770998197.9287806 line= SELECT * FROM usertable WHERE YCSB_KEY=979;
+  2timestamp1 = 1770998197.9287806 tid= 135437205096128
+SELECT 0
+[]
+    time diff (ms) = 26.0770320892334 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 12001
+timestamp1 = 1770998245.1887102 line= DELETE FROM usertable WHERE YCSB_KEY=692;
+  2timestamp1 = 1770998245.1887102 tid= 135437205096128
+DELETE 1
+    time diff (ms) = 27.045249938964844 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 14001
+timestamp1 = 1770998300.1896658 line= SELECT * FROM usertable WHERE YCSB_KEY=659;
+  2timestamp1 = 1770998300.1896658 tid= 135437205096128
+SELECT 0
+[]
+    time diff (ms) = 32.67979621887207 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 16001
+timestamp1 = 1770998363.6490893 line= SELECT * FROM usertable WHERE YCSB_KEY=738;
+  2timestamp1 = 1770998363.6490893 tid= 135437205096128
+SELECT 1
+[(738, 'kqEcO1pXhAjUKOOtHR75', 'a9g7zCCg1xhVTUybZVoO', 'g7EqQeIZ2mzqCLnRju3m', 'xB4j32qaYtaMvVFX4NaD', 'iZCgO8O1uIZRTPrcFuCQ', 'hOj4OgFbGSeAtKUy8Uop', 'gNvgR9kL20n5VCwFBaMe', 'schKm7J6c5F3W9zCpUJY', 'cYaGbl0twZoR0nQY1skh', 'SmlrhOjb7c1outOg1LGL')]
+    time diff (ms) = 37.630319595336914 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 18001
+timestamp1 = 1770998435.1451018 line= SELECT * FROM usertable where YCSB_KEY=548;
+  2timestamp1 = 1770998435.1451018 tid= 135437205096128
+SELECT 1
+[(548, 'p3JO2XN8zxUXvipSWkQW', 'YKzvecbkoqMEAOoU4UsF', 'fbGNRv6S4ZBR8F8oXemM', 'QxTa35lxnriTnRQrEe7y', 'U5PajWDrfCWgjOGEHL9J', '7gZW0C1TI294ETEbGBPi', 'JJqV1vGJBJRSHqPzgakn', 'Z4rr9HgzFoBITAGkPCWF', '8QiaysOCwofcFIR4QrJd', 'F1cJuM0hxRYenpBnMyYT')]
+    time diff (ms) = 41.32223129272461 tid= 135437205096128
+Thread: ThreadPoolExecutor-0_0 | ID: 135437205096128 | seq: 20001
+timestamp1 = 1770998514.931738 line= SELECT * FROM usertable WHERE YCSB_KEY=778;
+  2timestamp1 = 1770998514.931738 tid= 135437205096128
+SELECT 1
+[(778, 'DFSXMjXMm7WOlJYm16Lh', 'fi4oLP4GFL6eZecBOOU0', 'GDD6CPsRXx3nHQuc6Bmp', 'EdiIUOzbXZf1nMY7m4lK', 'SSVYHQw9iTaEq1g8W0Cr', 'TJ3Uh2da4RUMWi0VUJ0A', 'e5II1aBjMPE7D6e6blJy', 'dMD56PvWGbYiuqJPvrew', 'VZlWaLtCrTWw96p0YiBz', 'OUYjBJs9nTn50QKYNjNG')]
+    time diff (ms) = 50.04072189331055 tid= 135437205096128
+overall time taken (millisec) = 425981.1511039734
+ total wait time (ms) 121.62202835083048

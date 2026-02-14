@@ -31,7 +31,12 @@
 #include "pgstat.h"
 #include "parser/analyze.h"
 #include <unistd.h>
+#include <errno.h>
+#include <ctype.h>
+#include <string.h>
 #include "access/heapam.h"
+#include "access/hash.h"
+#include "catalog/namespace.h"
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -50,6 +55,125 @@ CommandDest dest;
 char completionTag[COMPLETION_TAG_BUFSIZE];
 
 static void get_write_set(BCDBShmXact *tx, Snapshot snapshot);
+
+static inline const char *
+skip_ws(const char *s)
+{
+    while (*s && isspace((unsigned char) *s))
+        s++;
+    return s;
+}
+
+static bool
+completiontag_is_delete_0(const char *tag)
+{
+    const char *p = skip_ws(tag);
+
+    if (pg_strncasecmp(p, "DELETE", 6) != 0)
+        return false;
+    p += 6;
+    p = skip_ws(p);
+    if (*p == '\0')
+        return false;
+
+    errno = 0;
+    char *endptr = NULL;
+    long n = strtol(p, &endptr, 10);
+    if (endptr == p || errno != 0)
+        return false;
+
+    return (n == 0);
+}
+
+static const char *
+find_token_ci(const char *haystack, const char *needle)
+{
+    size_t nlen = strlen(needle);
+
+    for (const char *p = haystack; *p; p++)
+    {
+        if (pg_strncasecmp(p, needle, nlen) == 0)
+            return p;
+    }
+
+    return NULL;
+}
+
+static bool
+parse_ycsb_key_eq_int32(const char *sql, int32 *key_out)
+{
+    const char *p;
+
+    p = find_token_ci(sql, "YCSB_KEY");
+    if (p == NULL)
+        return false;
+    p += strlen("YCSB_KEY");
+
+    p = skip_ws(p);
+    if (*p != '=')
+        return false;
+    p++;
+
+    p = skip_ws(p);
+    if (*p == '\0')
+        return false;
+
+    errno = 0;
+    char *endptr = NULL;
+    long v = strtol(p, &endptr, 10);
+    if (endptr == p || errno != 0)
+        return false;
+    if (v < PG_INT32_MIN || v > PG_INT32_MAX)
+        return false;
+
+    *key_out = (int32) v;
+    return true;
+}
+
+static void
+bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
+{
+    const char *sql;
+    int32 keyval;
+    Oid relOid;
+    uint32 h;
+    PREDICATELOCKTARGETTAG tag;
+
+    if (tx == NULL)
+        return;
+
+    sql = skip_ws(tx->sql);
+    if (pg_strncasecmp(sql, "DELETE", 6) != 0)
+        return;
+
+    if (!completiontag_is_delete_0(completionTag))
+        return;
+
+    if (!parse_ycsb_key_eq_int32(sql, &keyval))
+    {
+        elog(WARNING, "OPTIM_DEL_DEFER_SKIP: pid=%d completionTag=\"%s\" (could not parse YCSB_KEY)",
+             getpid(), completionTag);
+        return;
+    }
+
+    relOid = RelnameGetRelid("usertable");
+    if (!OidIsValid(relOid))
+    {
+        elog(WARNING, "OPTIM_DEL_DEFER_SKIP: pid=%d key=%d (rel usertable not found)",
+             getpid(), keyval);
+        return;
+    }
+
+    h = hash_any((unsigned char *) &keyval, sizeof(int32));
+    SET_PREDICATELOCKTARGETTAG_TUPLE(tag, 0, relOid,
+                                     (BlockNumber)(h >> 16),
+                                     (OffsetNumber)((h & 0xFFFF) | 1));
+    ws_table_reserveDT(&tag);
+    store_optim_delete_by_key(relOid, keyval, GetCurrentCommandId(true));
+
+    elog(WARNING, "OPTIM_DEL_DEFER_ENQUEUE: pid=%d key=%d relOid=%u",
+         getpid(), keyval, relOid);
+}
 
 BCBlockID 
 GetCurrentTxBlockId(void)
@@ -71,6 +195,8 @@ bool
 bcdb_worker_init(void)
 {
     MemoryContext old_context;
+    if (bcdb_worker_context != NULL && bcdb_tx_context != NULL)
+        return true;
     ereport(DEBUG3,
         (errmsg("[ZL] worker(%d) initializing", getpid())));
     bcdb_worker_context = 
@@ -465,8 +591,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
     PG_TRY();
     {
-      latest_tx_id = get_last_committed_txid(tx);
-      while( init || (latest_tx_id+1  != tx->tx_id)) {
+      for (;;)
+      {
+        latest_tx_id = get_last_committed_txid(tx);
 #if SAFEDBG3
           printf("safeDbg init %d own-id %d : latest-id %d \n",
                   init, tx->tx_id, latest_tx_id );
@@ -484,7 +611,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                      getpid(), __FILE__, __FUNCTION__, __LINE__ ,
                      activeTx->tx_id_committed);
 #endif
-	  } else {
+		  } else {
 	      /* Fix: Clear stale optim_write_list before retry.
 	       * AbortCurrentTransaction will undo heap/index changes,
 	       * but the SIMPLEQ entries allocated in bcdb_tx_context
@@ -497,34 +624,35 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	          SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
 	      }
 	      MemoryContextReset(bcdb_tx_context);
-	      /* Fix: AbortCurrentTransaction properly releases all resources
-	       * (buffer pins, TupleDesc refs, locks) via ResourceOwnerRelease
-	       * with isCommit=false (silent, no leak warnings).
-	       * Then reset_xact_command sets xact_started=false so
-	       * start_xact_command will begin a fresh transaction. */
-	      AbortCurrentTransaction();
-	      reset_xact_command();
-          if (hold_portal_snapshot && activeTx->portal)
-          {
-              if (activeTx->portal->resowner)
-              {
-                  ResourceOwnerRelease(activeTx->portal->resowner,
-                                       RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
-                  ResourceOwnerRelease(activeTx->portal->resowner,
-                                       RESOURCE_RELEASE_LOCKS, false, false);
-                  ResourceOwnerRelease(activeTx->portal->resowner,
-                                       RESOURCE_RELEASE_AFTER_LOCKS, false, false);
-                  ResourceOwnerDelete(activeTx->portal->resowner);
-                  activeTx->portal->resowner = NULL;
-              }
-              PortalDrop(activeTx->portal, false);
-              hold_portal_snapshot = false;
-          }
+		      /* Fix: AbortCurrentTransaction properly releases all resources
+		       * (buffer pins, TupleDesc refs, locks) via ResourceOwnerRelease
+		       * with isCommit=false (silent, no leak warnings).
+		       * Then reset_xact_command sets xact_started=false so
+		       * start_xact_command will begin a fresh transaction. */
+		      AbortCurrentTransaction();
+		      reset_xact_command();
+		      /*
+		       * AbortCurrentTransaction() already runs AtAbort/AtCleanup logic,
+		       * which releases and drops portals/resource owners created in the
+		       * failed transaction. Any pointers cached in activeTx may now be
+		       * stale; never dereference them here.
+		       */
+		      activeTx->portal = NULL;
+		      tx->queryDesc = NULL;
+		      tx->sxact = NULL;
+		      hold_portal_snapshot = false;
 #if SAFEDBG2
-              printf("\n\n safeDbg tx %d rerun due to conflict pid %d %s : %s: %d \n",
-                     tx->tx_id, getpid(), __FILE__, __FUNCTION__, __LINE__ );
+	              printf("\n\n safeDbg tx %d rerun due to conflict pid %d %s : %s: %d \n",
+	                     tx->tx_id, getpid(), __FILE__, __FUNCTION__, __LINE__ );
 #endif
-	  }
+			  }
+		  /*
+		   * tx_id_committed defines the "baseline" of what was committed when we
+		   * take our snapshot/simulate the transaction. On retries we must
+		   * refresh this baseline, otherwise conflict_checkDT will repeatedly
+		   * flag already-committed txs as conflicts and can livelock.
+		   */
+		  activeTx->tx_id_committed = get_last_committed_txid(tx);
           init = false;
 	  XactIsoLevel = tx->isolation;
       start_xact_command();
@@ -536,22 +664,24 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
 	  old_owner = CurrentResourceOwner;
 	  snapshot = GetTransactionSnapshot();	 // get snapshot
-	  tx->sxact = ShareSerializableXact();
-	  tx->sxact->bcdb_tx = tx;
-	  get_write_set(tx, snapshot); 	//  does CreatePortal
+		  tx->sxact = ShareSerializableXact();
+		  tx->sxact->bcdb_tx = tx;
+		  get_write_set(tx, snapshot); 	//  does CreatePortal
+		  bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
 #if SAFEDBG1
-       	  printf("safeDbg pid %d %s : %s: %d \n",
-                getpid(), __FILE__, __FUNCTION__, __LINE__ );
+	       	  printf("safeDbg pid %d %s : %s: %d \n",
+	                getpid(), __FILE__, __FUNCTION__, __LINE__ );
 #endif
-	  CurrentResourceOwner = activeTx->portal->resowner;
-	  ExecutorFinish(tx->queryDesc);
-	  ExecutorEnd(tx->queryDesc);
-	  FreeQueryDesc(tx->queryDesc);
-	  CurrentResourceOwner = old_owner;
-          hold_portal_snapshot = true;
+		  CurrentResourceOwner = activeTx->portal->resowner;
+		  ExecutorFinish(tx->queryDesc);
+		  ExecutorEnd(tx->queryDesc);
+		  FreeQueryDesc(tx->queryDesc);
+		  tx->queryDesc = NULL;
+		  CurrentResourceOwner = old_owner;
+	          hold_portal_snapshot = true;
 #if SAFEDBG1
-       	  printf("safeDbg pid %d %s : %s: %d \n",
-                getpid(), __FILE__, __FUNCTION__, __LINE__ );
+	       	  printf("safeDbg pid %d %s : %s: %d \n",
+	                getpid(), __FILE__, __FUNCTION__, __LINE__ );
 #endif
 	  tx->status = TX_WAIT_FOR_COMMIT;
 
@@ -594,8 +724,10 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        	    printf("\n\n safeDbg **ERROR not dualtab ** pid %d %s : %s: %d \n",
                  getpid(), __FILE__, __FUNCTION__, __LINE__ );
         } 
-      }
-      tx->status = TX_COMMITTING;
+        if (rw_conflicts == 1)
+            continue;
+
+        tx->status = TX_COMMITTING;
 #if SAFEDBG2
       printf(" safeDbg pid %d %s : %s: %d tx %d \n",
                  getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id );
@@ -742,19 +874,20 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        * leak warnings. ResourceOwnerRelease with isCommit=false releases
        * remaining buffer pins and TupleDesc refs. */
       if(hold_portal_snapshot) {
-          if (activeTx->portal->resowner) {
-              ResourceOwnerRelease(activeTx->portal->resowner,
-                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
-              ResourceOwnerRelease(activeTx->portal->resowner,
-                                   RESOURCE_RELEASE_LOCKS, false, false);
-              ResourceOwnerRelease(activeTx->portal->resowner,
-                                   RESOURCE_RELEASE_AFTER_LOCKS, false, false);
-              ResourceOwnerDelete(activeTx->portal->resowner);
-              activeTx->portal->resowner = NULL;
-          }
-	  PortalDrop(activeTx->portal, false);
-          hold_portal_snapshot = false;
-      }
+	          if (activeTx->portal->resowner) {
+	              ResourceOwnerRelease(activeTx->portal->resowner,
+	                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
+	              ResourceOwnerRelease(activeTx->portal->resowner,
+	                                   RESOURCE_RELEASE_LOCKS, false, false);
+	              ResourceOwnerRelease(activeTx->portal->resowner,
+	                                   RESOURCE_RELEASE_AFTER_LOCKS, false, false);
+	              ResourceOwnerDelete(activeTx->portal->resowner);
+	              activeTx->portal->resowner = NULL;
+	          }
+		  PortalDrop(activeTx->portal, false);
+		  activeTx->portal = NULL;
+	          hold_portal_snapshot = false;
+	      }
       /* Release TopTransactionResourceOwner's direct resources.
        * CRITICAL: isTopLevel (4th param) MUST be true since this is a
        * top-level transaction. Using false triggers Assert(owner->parent != NULL)
@@ -817,6 +950,8 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       EndCommand(completionTag, dest);
       delete_tx(tx);
       MemoryContextReset(bcdb_tx_context);
+      break;
+      }
     }
     PG_CATCH();
     {
@@ -837,22 +972,23 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
               BCBlock     *block2 = get_block_by_id(1, false);
 	      ConditionVariableBroadcast(&block2->cond);
       }
-      if (hold_portal_snapshot && activeTx && activeTx->portal)
-      {
-          if (activeTx->portal->resowner)
-          {
-              ResourceOwnerRelease(activeTx->portal->resowner,
-                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
-              ResourceOwnerRelease(activeTx->portal->resowner,
-                                   RESOURCE_RELEASE_LOCKS, false, false);
-              ResourceOwnerRelease(activeTx->portal->resowner,
-                                   RESOURCE_RELEASE_AFTER_LOCKS, false, false);
-              ResourceOwnerDelete(activeTx->portal->resowner);
-              activeTx->portal->resowner = NULL;
-          }
-          PortalDrop(activeTx->portal, false);
-          hold_portal_snapshot = false;
-      }
+	      if (hold_portal_snapshot && activeTx && activeTx->portal)
+	      {
+	          if (activeTx->portal->resowner)
+	          {
+	              ResourceOwnerRelease(activeTx->portal->resowner,
+	                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
+	              ResourceOwnerRelease(activeTx->portal->resowner,
+	                                   RESOURCE_RELEASE_LOCKS, false, false);
+	              ResourceOwnerRelease(activeTx->portal->resowner,
+	                                   RESOURCE_RELEASE_AFTER_LOCKS, false, false);
+	              ResourceOwnerDelete(activeTx->portal->resowner);
+	              activeTx->portal->resowner = NULL;
+	          }
+	          PortalDrop(activeTx->portal, false);
+	          activeTx->portal = NULL;
+	          hold_portal_snapshot = false;
+	      }
       delete_tx(tx);
       MemoryContextReset(bcdb_tx_context);
       while ((optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
@@ -1028,5 +1164,3 @@ bcdb_on_worker_exit(int code, Datum arg)
 {
     /* clean up here */
 }
-
-

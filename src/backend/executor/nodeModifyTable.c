@@ -1175,6 +1175,12 @@ ldelete:;
 			{
 				TupleTableSlot *keySlot;
 				keySlot = table_slot_create(resultRelationDesc, NULL);
+				/*
+				 * Use the executor snapshot so we capture the same visible row
+				 * version selected by this DELETE statement. SnapshotAny can pick
+				 * a dead/non-visible tuple version under concurrent churn, which
+				 * can poison deferred Merkle hash computation.
+				 */
 				if (table_tuple_fetch_row_version(resultRelationDesc,
 												  tupleid,
 												  estate->es_snapshot,
@@ -1185,10 +1191,14 @@ ldelete:;
 										 keySlot);
 					ws_table_reserveDT(&tag);
 				}
-				/* If tuple not readable, TID tag above is still registered */
+				/* Pass keySlot to store_optim_delete so apply can
+				 * re-lookup the correct TID at commit time. The
+				 * optimistic-phase TID may be stale if another
+				 * committed tx moved the row to a new heap page. */
+				store_optim_delete(RelationGetRelid(resultRelationDesc),
+								   tupleid, keySlot);
 				ExecDropSingleTupleTableSlot(keySlot);
 			}
-			store_optim_delete(RelationGetRelid(resultRelationDesc), tupleid);
 			if (canSetTag)
 				(estate->es_processed)++;
 			return NULL;

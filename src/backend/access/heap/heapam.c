@@ -1871,10 +1871,13 @@ void
 heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
 					   bool conflict_check, bool unique_check, int phase)
 {
-	ListCell       *index_cell;
+	List          *indexList;
+	ListCell      *index_cell;
 
 	skip_conflict_checking = conflict_check;
-    foreach(index_cell, relation->rd_indexlist)
+	indexList = RelationGetIndexList(relation);
+
+    foreach(index_cell, indexList)
 	{
         Oid 		indexOid;
         Relation 	indexRelation;
@@ -1884,7 +1887,7 @@ heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
         IndexUniqueCheck indexUniqueCheck;
         bool        is_merkle;
 
-        indexOid = index_cell->oid_value;
+		indexOid = lfirst_oid(index_cell);
         indexRelation = RelationIdGetRelation(indexOid);
 
         is_merkle = (indexRelation->rd_rel->relam == MERKLE_AM_OID);
@@ -1923,6 +1926,7 @@ heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
                 indexInfo);
         RelationClose(indexRelation);
     }
+		list_free(indexList);
 	skip_conflict_checking = false;
 }
 

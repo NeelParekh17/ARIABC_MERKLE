@@ -1,0 +1,55 @@
+ arg1 a2 ==  postgres ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt
+ arg3 a4 pause ==  2 4 0.00125
+next Tx = SELECT * FROM usertable where YCSB_KEY=686;  
+next Tx = UPDATE usertable SET FIELD10='EzIaDGO1RstnYGItmvk1', FIELD1='jAvAKGEBRxT3Jiv6YjqB', FIELD2='FtUh7BqLgRGHqqAB8CEK', FIELD3='OnsfB4yuEfFYYvtJvB1E', FIELD4='gKbap7JksVIB1x7h2c73', FIELD5='Gu02oknx9StQZyABGLDJ', FIELD6='ctAUxyaX18r08VT548ye', FIELD7='e59HDHwXsNpKl0GQfnJ1', FIELD8='OGMQsWAcFYS2iQWUKg5Y', FIELD9='oeWE72nEOkfd4tZToZWB' WHERE YCSB_KEY=686;  
+next Tx = DELETE FROM usertable where YCSB_KEY=186;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=740;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=798;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=479;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=449;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=88;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=10;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=235;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=11;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=115;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=23;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=65;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=753;  
+next Tx = UPDATE usertable SET FIELD10='eiVZDAdOVudXb7Rhdbxt', FIELD1='SvaQ6GcxL8b2LjZ1LfMi', FIELD2='NrAo4rqB4swpOwGf8aRn', FIELD3='UmBm57HNeqrOywPS1Fx7', FIELD4='02gzUHnVAslswktiIlL7', FIELD5='lS5qUjWlCebZ3NGGEDG1', FIELD6='PWV1hcBOd7GmKhP6cmqL', FIELD7='Xe8U6hxZF4bD5x9hsygM', FIELD8='IROvay9ltlTKhVkKIe71', FIELD9='E6xk1n0qXR6gu52zc4Sg' WHERE YCSB_KEY=6;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=341;  
+next Tx = UPDATE usertable SET FIELD10='m9nIU3TSwvXm4t13hXjX', FIELD1='xTvyF1AvAiAt2twvNPPV', FIELD2='OvlmiBQHnisoYKOYBvr3', FIELD3='tIi5RtAYv3LbfjiWuvZB', FIELD4='N7S6eZ16qOf6VRsfxaFg', FIELD5='pihgC4MupMkBfDYC60Vw', FIELD6='I7nLA79rDM3h6AOZSkzR', FIELD7='7PNIfzWML55tcRDvsScY', FIELD8='L7nBOsQXUf6Sdt6gQVFw', FIELD9='4hxMm0EkaFJiCop1gmLy' WHERE YCSB_KEY=0;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=384;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=72;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=9;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=0;  
+Thread: ThreadPoolExecutor-0_0 | ID: 129557638977216 | seq: 1
+timestamp1 = 1771074232.647503 line= SELECT * FROM usertable where YCSB_KEY=686;
+Thread: ThreadPoolExecutor-0_1 | ID: 129557630584512 | seq: 2
+timestamp1 = 1771074232.647649 line= UPDATE usertable SET FIELD10='EzIaDGO1RstnYGItmvk1', FIELD1='jAvAKGEBRxT3Jiv6YjqB', FIELD2='FtUh7BqLgRGHqqAB8CEK', FIELD3='OnsfB4yuEfFYYvtJvB1E', FIELD4='gKbap7JksVIB1x7h2c73', FIELD5='Gu02oknx9StQZyABGLDJ', FIELD6='ctAUxyaX18r08VT548ye', FIELD7='e59HDHwXsNpKl0GQfnJ1', FIELD8='OGMQsWAcFYS2iQWUKg5Y', FIELD9='oeWE72nEOkfd4tZToZWB' WHERE YCSB_KEY=686;
+Thread: ThreadPoolExecutor-0_3 | ID: 129557545871040 | seq: 3
+timestamp1 = 1771074232.6476955 line= DELETE FROM usertable where YCSB_KEY=186;
+Thread: ThreadPoolExecutor-0_2 | ID: 129557554263744 | seq: 4
+timestamp1 = 1771074232.6477673 line= SELECT * FROM usertable WHERE YCSB_KEY=132;
+  2timestamp1 = 1771074232.647503 tid= 129557638977216
+SELECT 1
+[(686, 'xyTBZfcDfdvXg4DvWxZn', 'olG9HiT5LJJwy1HMlvrl', 'KmADVH5dv5LlSuduSkSF', 'NJwPWow5a4YBSuaI9gUp', 'yP90ikFmptYjjOtAVFgJ', 'pOd7oFiEar9fF5JLJf5n', 'hMTum90vfl4oxCOcG04H', 'CEXnltSvA5D8ieiOeK21', '26lSH31ceMw5sQ0G6vwE', '9RdkhmWamHGYPfbD71z8')]
+    time diff (ms) = 1.199960708618164 tid= 129557638977216
+  2timestamp1 = 1771074232.6477673 tid= 129557554263744
+SELECT 1
+[(132, 'hGowwYZ9v1KUTsufiNEq', 'TjKCh1RabmK6Y9RHBtMy', 'Z2kN1KhgSHAG0T24hRHW', 'DdTMpKnT7JIT5QcWeFPi', 'taPHGBb7vSePSiI9CGTa', 'kS4rhc2n2lI6xGc9Oa9E', 'FZlx04MtjzHHNEIKo8eJ', '3nhwoQ2w5QepshehEaCs', '0qvMFbEf6nCiXF3riAGQ', '6aenq3XoEiIWTfsj3P3k')]
+    time diff (ms) = 1.0256767272949219 tid= 129557554263744
+  2timestamp1 = 1771074232.6476955 tid= 129557545871040
+DELETE 1
+    time diff (ms) = 6.395101547241211 tid= 129557545871040
+  2timestamp1 = 1771074232.647649 tid= 129557630584512
+UPDATE 1
+    time diff (ms) = 6.8454742431640625 tid= 129557630584512
+Database error: unexpected response from server; first received character was "s" tid= 129557554263744
+   chk rerun stoPro= SELECT * FROM usertable WHERE YCSB_KEY=0;
+Database error: unexpected response from server; first received character was "s" tid= 129557545871040
+   chk rerun stoPro= SELECT * FROM usertable WHERE YCSB_KEY=0;
+Database error: unexpected response from server; first received character was "s" tid= 129557630584512
+   chk rerun stoPro= SELECT * FROM usertable WHERE YCSB_KEY=1;
+Database error: unexpected response from server; first received character was "s" tid= 129557638977216
+   chk rerun stoPro= SELECT * FROM usertable WHERE YCSB_KEY=0;
