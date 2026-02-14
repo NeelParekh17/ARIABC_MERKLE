@@ -1022,14 +1022,17 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
     List *indexList = NIL;
     ListCell *lc;
     TupleTableSlot *oldSlot = NULL;
+    TupleTableSlot *newSlot = NULL;
     MerkleHash oldHash;
+    MerkleHash newHash;
     bool hasOldHash = false;
+    bool hasNewHash = false;
     int pendingCount = 0;
     int pendingCapacity = 0;
     typedef struct PendingMerkleUpdate
     {
         Oid indexOid;
-        int partitionId;
+        int oldLeafId;
     } PendingMerkleUpdate;
     PendingMerkleUpdate *pending = NULL;
 
@@ -1044,11 +1047,12 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
     {
         oldSlot = table_slot_create(relation, NULL);
         /*
-         * Use SnapshotAny here: deferred apply runs later than optimistic read,
-         * and SnapshotSelf can fail to see the physical tuple version that
-         * table_tuple_update() will still act upon by TID.
+         * Strict serial semantics: hash/leaf MUST match what we will remove
+         * from the Merkle tree. Use SnapshotSelf so we only act on tuples
+         * that are part of our committed serial view (and avoid hashing a
+         * dead/non-visible tuple version).
          */
-        if (!table_tuple_fetch_row_version(relation, tid, SnapshotAny, oldSlot))
+        if (!table_tuple_fetch_row_version(relation, tid, SnapshotSelf, oldSlot))
         {
             RelationClose(relation);
             ereport(ERROR,
@@ -1056,9 +1060,8 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
                      errmsg("tx %s doomed because old row image was not fetchable", activeTx->hash)));
         }
 
-        /* CRITICAL FIX: Use merkle_compute_row_hash instead of merkle_compute_slot_hash
-         * to ensure consistency with merkle_verify */
-        merkle_compute_row_hash(relation, tid, &oldHash);
+        /* Compute old hash from the same oldSlot image used for leafing */
+        merkle_compute_slot_hash(relation, oldSlot, &oldHash);
 
         hasOldHash = !merkle_hash_is_zero(&oldHash);
 
@@ -1086,7 +1089,7 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
                     merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
 
                     pending[pendingCount].indexOid = indexOid;
-                    pending[pendingCount].partitionId =
+                    pending[pendingCount].oldLeafId =
                         merkle_compute_partition_id(values, isnull,
                                                     indexInfo->ii_NumIndexKeyAttrs,
                                                     RelationGetDescr(indexRel),
@@ -1110,6 +1113,8 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
     {
         if (oldSlot)
             ExecDropSingleTupleTableSlot(oldSlot);
+        if (newSlot)
+            ExecDropSingleTupleTableSlot(newSlot);
         if (indexList)
             list_free(indexList);
         if (pending)
@@ -1126,72 +1131,90 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
                  errmsg("tx %s doomed because of ww-conflict", activeTx->hash)));
     }
 
-    if (hasOldHash)
-    {
-        int i;
-        for (i = 0; i < pendingCount; i++)
-        {
-            Relation indexRel = index_open(pending[i].indexOid, RowExclusiveLock);
-            if (indexRel->rd_rel->relam == MERKLE_AM_OID)
-                merkle_update_tree_path(indexRel, pending[i].partitionId, &oldHash, false);
-            index_close(indexRel, RowExclusiveLock);
-        }
-    }
-
     if (update_indexes)
         heap_apply_index_phase(relation, slot, false, false, HEAP_INDEX_NO_MERKLE);
 
     /*
-     * MERKLE HOT-UPDATE FIX: XOR in the new row hash.
-     * We use merkle_compute_row_hash on the NEW tuple's TID to ensure
-     * consistency with merkle_verify.
+     * Merkle UPDATE maintenance:
+     * Always apply Merkle delta, even for HOT (heap-only) updates where
+     * update_indexes is false. Merkle indexes hash full-row contents, so any
+     * UPDATE that changes data must be reflected in the tree.
+     *
+     * Important: leafing (key→leaf) may change for multi-key Merkle indexes
+     * (e.g. (ycsb_key, field1)). We therefore compute old and new leaf IDs
+     * from the OLD and NEW heap tuple images, not from the executor slot.
      */
-    if (enable_merkle_index && ItemPointerIsValid(&slot->tts_tid))
+    if (enable_merkle_index && hasOldHash && ItemPointerIsValid(&slot->tts_tid) &&
+        ItemPointerGetBlockNumberNoCheck(&slot->tts_tid) != InvalidBlockNumber)
     {
-        MerkleHash newHash;
-        List *newIndexList;
-        ListCell *newLc;
-        
-        /* Compute hash from the NEW heap tuple */
-        merkle_compute_row_hash(relation, &slot->tts_tid, &newHash);
-        
-        if (!merkle_hash_is_zero(&newHash))
+        /*
+         * Fetch NEW row image from heap and hash from that image so that
+         * merkle_verify (which hashes heap tuples) matches exactly.
+         */
+        newSlot = table_slot_create(relation, NULL);
+        if (!table_tuple_fetch_row_version(relation, &slot->tts_tid, SnapshotSelf, newSlot))
         {
-            newIndexList = RelationGetIndexList(relation);
-            
-            foreach(newLc, newIndexList)
+            if (oldSlot)
+                ExecDropSingleTupleTableSlot(oldSlot);
+            if (indexList)
+                list_free(indexList);
+            if (pending)
+                pfree(pending);
+            RelationClose(relation);
+            ereport(ERROR,
+                    (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                     errmsg("tx %s doomed because new row image was not fetchable", activeTx->hash)));
+        }
+
+        merkle_compute_slot_hash(relation, newSlot, &newHash);
+        hasNewHash = !merkle_hash_is_zero(&newHash);
+
+        if (hasNewHash)
+        {
+            int i;
+
+            for (i = 0; i < pendingCount; i++)
             {
-                Oid indexOid = lfirst_oid(newLc);
-                Relation indexRel = index_open(indexOid, RowExclusiveLock);
-                
+                Relation indexRel = index_open(pending[i].indexOid, RowExclusiveLock);
+
                 if (indexRel->rd_rel->relam == MERKLE_AM_OID)
                 {
                     IndexInfo *indexInfo;
                     Datum values[INDEX_MAX_KEYS];
                     bool isnull[INDEX_MAX_KEYS];
                     int totalLeaves;
-                    int partitionId;
-                    
+                    int newLeafId;
+
                     indexInfo = BuildIndexInfo(indexRel);
-                    FormIndexDatum(indexInfo, slot, NULL, values, isnull);
+                    FormIndexDatum(indexInfo, newSlot, NULL, values, isnull);
                     merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
-                    partitionId = merkle_compute_partition_id(values, isnull,
-                                                             indexInfo->ii_NumIndexKeyAttrs,
-                                                             RelationGetDescr(indexRel),
-                                                             totalLeaves);
-                    
-                    merkle_update_tree_path(indexRel, partitionId, &newHash, true);
+                    newLeafId = merkle_compute_partition_id(values, isnull,
+                                                           indexInfo->ii_NumIndexKeyAttrs,
+                                                           RelationGetDescr(indexRel),
+                                                           totalLeaves);
+
+                    if (newLeafId == pending[i].oldLeafId)
+                    {
+                        MerkleHash delta = oldHash;
+                        merkle_hash_xor(&delta, &newHash);
+                        merkle_update_tree_path(indexRel, pending[i].oldLeafId, &delta, true);
+                    }
+                    else
+                    {
+                        merkle_update_tree_path(indexRel, pending[i].oldLeafId, &oldHash, false);
+                        merkle_update_tree_path(indexRel, newLeafId, &newHash, true);
+                    }
                 }
-                
+
                 index_close(indexRel, RowExclusiveLock);
             }
-            
-            list_free(newIndexList);
         }
     }
 
     if (oldSlot)
         ExecDropSingleTupleTableSlot(oldSlot);
+    if (newSlot)
+        ExecDropSingleTupleTableSlot(newSlot);
     if (indexList)
         list_free(indexList);
     if (pending)

@@ -1776,14 +1776,35 @@ lreplace:;
 			//print_trace();
 			//debugtup(slot, NULL);
 	//printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
-				PREDICATELOCKTARGETTAG tag;
-				SET_PREDICATELOCKTARGETTAG_TUPLE(tag,
-										 		 0,
-										 		 resultRelationDesc->rd_id,
-										 		 ItemPointerGetBlockNumber(tupleid),
-										 		 ItemPointerGetOffsetNumber(tupleid));
-				// ws_table_reserve(&tag);
-				ws_table_reserveDT(&tag);
+				PREDICATELOCKTARGETTAG tid_tag;
+				PREDICATELOCKTARGETTAG key_tag;
+
+				/*
+				 * UPDATE registers TWO write-set tags:
+				 *
+				 * 1. TID-based tag — preserves RAW conflict detection with
+				 *    SELECT operations that read the same physical tuple.
+				 *
+				 * 2. Primary-key-based tag — enables WAW conflict detection
+				 *    with INSERT/DELETE/UPDATE operations on the same logical
+				 *    key.
+				 *
+				 * Note: We compute the key tag from the new slot. YCSB-style
+				 * updates don't change the primary key, and this avoids an
+				 * extra heap fetch in the optimistic phase.
+				 */
+
+				/* Tag 1: TID-based */
+				SET_PREDICATELOCKTARGETTAG_TUPLE(tid_tag,
+												 0,
+												 resultRelationDesc->rd_id,
+												 ItemPointerGetBlockNumber(tupleid),
+												 ItemPointerGetOffsetNumber(tupleid));
+				ws_table_reserveDT(&tid_tag);
+
+				/* Tag 2: Primary-key-based */
+				bcdb_compute_key_tag(&key_tag, resultRelationDesc->rd_id, slot);
+				ws_table_reserveDT(&key_tag);
 				
 				/*
 				 * Deferred Merkle update:
@@ -1975,7 +1996,7 @@ lreplace:;
 			* update_indexes is true, but that's okay because we only call
 			* ExecInsertMerkleIndexes when update_indexes is false.
 			*/
-			if (!update_indexes)
+			if (!is_bcdb_worker && !update_indexes)
 				ExecInsertMerkleIndexes(resultRelationDesc, slot);
 		}
 	}

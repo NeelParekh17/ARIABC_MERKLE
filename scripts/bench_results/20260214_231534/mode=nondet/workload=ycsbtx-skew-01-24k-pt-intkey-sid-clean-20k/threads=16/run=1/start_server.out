@@ -1,0 +1,7 @@
+Restarting AriaBC on port 5438...
+waiting for server to shut down.... done
+server stopped
+waiting for server to start..... done
+server started
+pg_ctl: server is running (PID: 59783)
+/work/ARIABC/AriaBC/src/backend/postgres "-D" "/work/ARIABC/pgdata"

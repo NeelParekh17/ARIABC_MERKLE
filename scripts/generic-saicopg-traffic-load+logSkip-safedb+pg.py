@@ -92,6 +92,9 @@ def is_retryable_error(err: psycopg.Error) -> bool:
         "canceling statement" in error_msg or
         "got no result from the query" in error_msg or
         "server closed" in error_msg or
+        # psycopg/libpq protocol desync / server-side abrupt close
+        "unexpected response from server" in error_msg or
+        "first received character was" in error_msg or
         "connection" in error_msg or
         "terminating connection" in error_msg or
         "in recovery mode" in error_msg or
@@ -108,6 +111,8 @@ def should_reconnect(err: psycopg.Error) -> bool:
     error_msg = str(err).lower()
     return (
         "server closed" in error_msg or
+        "unexpected response from server" in error_msg or
+        "first received character was" in error_msg or
         "connection" in error_msg or
         "terminating connection" in error_msg or
         "in recovery mode" in error_msg or
