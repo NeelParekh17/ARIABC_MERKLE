@@ -61,8 +61,50 @@ fi
 echo "Build complete."
 echo ""
 
-# Step 4: Start the server
-echo "--- Step 4: Starting PostgreSQL server ---"
+# Step 4: Initialize data directory if needed
+echo "--- Step 4: Initializing data directory ---"
+if [ ! -d "${PGDATA}" ] || [ ! -f "${PGDATA}/PG_VERSION" ]; then
+    echo "Data directory does not exist or is not initialized. Running initdb..."
+    ${ARIABC_DIR}/src/bin/initdb/initdb -D ${PGDATA}
+    if [ $? -ne 0 ]; then
+        echo "ERROR: initdb failed!"
+        exit 1
+    fi
+    echo "Data directory initialized successfully."
+    
+    # Configure postgresql.conf
+    echo "Configuring postgresql.conf..."
+    cat >> ${PGDATA}/postgresql.conf << EOF
+port = 5438
+max_connections = 200
+shared_buffers = 256MB
+log_min_messages = warning
+EOF
+    echo "Configuration added."
+    
+    # Start server temporarily to create postgres role
+    echo "Starting server temporarily to create postgres role..."
+    cd ${ARIABC_DIR}/src/backend
+    ./postgres -D ${PGDATA} >> ${SERVER_LOG} 2>&1 &
+    TEMP_PID=$!
+    sleep 3
+    
+    # Create postgres role
+    echo "Creating postgres superuser role..."
+    ${ARIABC_DIR}/src/bin/psql/psql -p 5438 -d postgres -c "CREATE ROLE postgres WITH SUPERUSER LOGIN;" 2>&1 || true
+    
+    # Stop temporary server
+    kill $TEMP_PID 2>/dev/null || true
+    sleep 2
+    pkill -9 -f "postgres -D ${PGDATA}" 2>/dev/null || true
+    sleep 1
+else
+    echo "Data directory already exists and is initialized. Skipping initdb."
+fi
+echo ""
+
+# Step 5: Start the server
+echo "--- Step 5: Starting PostgreSQL server ---"
 cd ${ARIABC_DIR}/src/backend
 ./postgres -D ${PGDATA} >> ${SERVER_LOG} 2>&1 &
 POSTGRES_PID=$!
@@ -96,8 +138,8 @@ else
 fi
 echo ""
 
-# Step 5: Quick verification
-echo "--- Step 5: Verification ---"
+# Step 6: Quick verification
+echo "--- Step 6: Verification ---"
 ${ARIABC_DIR}/src/bin/psql/psql -p 5438 -d postgres -U postgres -c "SELECT version();" 2>&1 || true
 echo ""
 

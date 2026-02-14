@@ -1,0 +1,427 @@
+ arg1 a2 ==  postgres /work/ARIABC/AriaBC/scripts/ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt
+ arg3 a4 pause ==  2 12 0.00125
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=868;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=831;  
+next Tx = DELETE FROM usertable where YCSB_KEY=937;  
+next Tx = SELECT * FROM usertable where YCSB_KEY=473;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=473;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=778;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=144;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=833;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1082;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=950;  
+next Tx = SELECT * FROM usertable where YCSB_KEY=848;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=449;  
+next Tx = INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');  
+next Tx = SELECT * FROM usertable where YCSB_KEY=560;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=560;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=275;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=991;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=727;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=659;  
+next Tx = SELECT * FROM usertable where YCSB_KEY=571;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=571;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (449, 'CUOLj06eWD8uNVcsOEWj', 'DZ0yEpV8uXUdgez2tERT', 'Bpdbd5l5VXgGC3OPsr5V', 'Z8azqBbzxw1OyFjAl5b7', 'q2YYX3mgx8yvtytAxwit', 'lZrDev0CXfDM1sp2y4n4', 'gwEImhwxPabl626OZXAh', 'KLgZb0XUMWFo1s6fpVy1', 'j9MmPuOFM4IPzdaFYiXy', 'IiqOkprmBTrEI89xyfeH');  
+next Tx = INSERT INTO usertable VALUES (12164,'GugtYiwh1vuwpZk4cOpU','5YeJEs37UIeHWs8xxBrC','ZvDLEnRV3XZ38jt4MSpm','1Ic13xkqgW5Tuz6LgLJW','JHUTgFwqMocEDNMB19sX','MJqi44lzH0aQLcEzxs0P','wKLQBcWONxIexOj2v86B','zH4pXqSXU2LS1r1mw3ME','gqNrOjyIDkaFirNQxDsC','gJqCJITaEBNFxFtGhksT');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=322;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=847;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=258;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=657;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (427, '4hVe6TsCCONFzHP609lX', 'D0QGvMZn3WuGIUbL6Ep3', 'cTQffX7pwEC4OjeuTjob', 'YgQyjDP3sPTQsOd1xa7c', 'j4z8WnZBkYR4Mt5W2aqO', 'fTJLT11btnaKhdkChBz0', 'BU4gGGBEEoe68vgKjEYy', 'dDlp7neH88E6d3GP108a', '3VPSljjeVLiK1GhzehqI', 'f8TsFnytpZy1p9yX2X5I');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1421;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=871;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (77, '8n6Y5r96bBvVhZUpxUzM', 'Peu5M4AUWUYygtjKTjFE', '95GjroetqFYh6F5i2YbH', 'O4tZWll99VzzrQwgUfSS', '2GcxFlWjOELWo60GMwrY', 'UhBtrg6HWAFezawBHqLK', 'mDecQHoMSIXCmpSKCDck', '5DI5R1bLGk56jlV8jXa0', 'RSWLpGrgUuzWFlchMJRG', 'panSXklyrFuj7UUwk2Wg');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=202;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=157;  
+next Tx = SELECT * FROM usertable where YCSB_KEY=217;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (764, 'nMcgJOtSvWEXx8pcopDe', 'k5znGR90133NlmcDTQ2f', '7JqMPzSF2ksQKze4XZwO', '7urCkoRUO4Fhv1VAM0C0', 'ZlpeKVTxL4u7HUH99bG1', 'wBgDLNu8VfHVW23xZA6Y', 'iub2UyPJHdBZWsdZPFRm', 'WV39rJNiTkxAalWyNmnZ', '3UBFD2EId64hxwoL9jCy', '7Gc0jYLczoesyPYLKGtc');  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=692;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=701;  
+next Tx = DELETE FROM usertable where YCSB_KEY=160;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=565;  
+next Tx = SELECT * FROM usertable where YCSB_KEY=378;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=378;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=60;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=816;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (692, 'qcU0wgKKavo502LOB9uX', 'ZwNK8Y5Pc3LAYliTmCTM', 'DiufFpjth5YGoQDoMmHf', 'ZlzKQezTGmZ7xxaj61zP', 'YLejXNYrBzXdhEkZFmV5', 'yHrAHfJuJu1sJ12j1EtL', 'zcHFIYq4CWPGSLI4xfUV', 'AlppRIAnwSOm05xiVFVt', 'tKgM8vhTYem1Zi1MvMbV', 'QiUFSkeZqrS7d8u4D2i8');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=997;  
+next Tx = DELETE FROM usertable where YCSB_KEY=456;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1278;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=738;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=814;  
+next Tx = INSERT INTO usertable VALUES (12614,'uZE5L1rZdRDyL1ok4bbV','ODtJGyz2viGu90HMTSJ7','iR9Z7gIhBP41JGNSHYYk','fQlhsUtiHrL6ARER2B7B','N2W5EmN7tSyDaUmcEGQU','xi7xEEOJAxrIjIAMm6j4','hKutYfUll9foAbE7M9b7','S472hhw1m0JYYm1yYw1R','wRpllOpXI1IrkNDwUgaZ','ovj5p4YBZFyt7JLIK3ui');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1473;  
+next Tx = DELETE FROM usertable where YCSB_KEY=152;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=810;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=0;  
+next Tx = SELECT * FROM usertable where YCSB_KEY=256;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=256;  
+next Tx = INSERT INTO usertable VALUES (12615,'0WrwqoUAb05Wd9OOMxor','7OYlmTBtXxNpokTeSjtM','LetTQboRhdYBxCQ8nvnU','avS81cQs9XlmcNLXmWgE','Z2r1gynAN5fqtIAf3Wwb','csuyLFK029lIEFX5HbYy','9T2zqPtIihhcirIpt6FE','5809ACIOk4KD4lSPQJOw','n77dTjZGOaJdSD0mHdTE','LqVDCpJGrEhGzrxxaHN3');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=919;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (235, 'uBiWXFPzbzlwO6a4hpP2', 'fppkk3v9VfrWvXhBvbUL', 'WEBNvmZImtsFaQk4w0AE', 'jvslX61qcBeYY4X63A3N', 'ELVWzmXBjv41DJVCh09A', 'CDV1V42R8jeF4P8gu3Dm', 'sA1Hi0fzOPzmpUlHd18j', 'pPWqZYauFNhLNzbwmcME', 'I8nV09yd1DRyJqs5UeBp', 'xc9tDQhKc6e3gSxirZH5');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=778;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=144;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=833;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1082;  
+Thread: ThreadPoolExecutor-0_1 | ID: 130624652781248 | seq: 1
+timestamp1 = 1771092282.859261 line= SELECT * FROM usertable WHERE YCSB_KEY=868;
+Thread: ThreadPoolExecutor-0_3 | ID: 130624635995840 | seq: 2
+timestamp1 = 1771092282.8594828 line= SELECT * FROM usertable WHERE YCSB_KEY=831;
+Thread: ThreadPoolExecutor-0_6 | ID: 130624610817728 | seq: 3
+timestamp1 = 1771092282.8597188 line= DELETE FROM usertable where YCSB_KEY=937;
+Thread: ThreadPoolExecutor-0_5 | ID: 130624619210432 | seq: 4
+timestamp1 = 1771092282.859867 line= SELECT * FROM usertable where YCSB_KEY=473;
+Thread: ThreadPoolExecutor-0_10 | ID: 130624039937728 | seq: 5
+timestamp1 = 1771092282.8603988 line= DELETE FROM usertable WHERE YCSB_KEY=473;
+Thread: ThreadPoolExecutor-0_4 | ID: 130624627603136 | seq: 6
+timestamp1 = 1771092282.8606298 line= SELECT * FROM usertable WHERE YCSB_KEY=778;
+Thread: ThreadPoolExecutor-0_2 | ID: 130624644388544 | seq: 7
+timestamp1 = 1771092282.8607678 line= SELECT * FROM usertable WHERE YCSB_KEY=144;
+Thread: ThreadPoolExecutor-0_9 | ID: 130624048330432 | seq: 8
+timestamp1 = 1771092282.8610446 line= SELECT * FROM usertable WHERE YCSB_KEY=833;
+Thread: ThreadPoolExecutor-0_11 | ID: 130624031545024 | seq: 9
+timestamp1 = 1771092282.8612387 line= SELECT * FROM usertable WHERE YCSB_KEY=1082;
+  2timestamp1 = 1771092282.859867 tid= 130624619210432
+SELECT 1
+[(473, 'gIfS4pMcCYxiWYSmSwlh', 'Efy5mAiwWbFo4UIY7ugh', 'Gmlgou0h231gl0pUOcna', '2IsxtjJNBjJ26xrZk5YN', 'FvPzhyWJpcPwV2CzSSSs', 'E1NIhvdsaHAmWXmpEMkz', 'jm7rmsukFfdsBUXKkDIN', 'bSXjYtKe8jKOmzZMXWbK', 'KOKNSLFQOOYtV6HueTDK', 'w3uRk2tWr5NYEfkLCpxy')]
+j                  «        |cd d d «       cd d d «       S # 1 sw Y   nxY wd d d «       y # 1 sw Y   y xY w        2timestamp1 = 1771092282.859261 tid= 130624652781248
+SELECT 1
+[(868, 'Lsd4tAkKsWdOY29YLFLU', 'JESgr5T9kYuzUYwvIaNx', 'nfWxRk0l9ANXWF112MCg', 'LAPsgAJB34Wmps0wAYu5', 's7tEXozD5vg1RTBNpUkj', '1VhBtA5AIM63fZdnHLjv', 'bdX9jsPvibnsacR5vqac', 'o3MjXYlqsHtOqkO3n5Xn', 'f4pO6I4hT3JI1cGP7fvW', 'WcfqJru12ZwnntMxnoYE')]
+    time diff (ms) = 2.251148223876953 tid= 130624619210432
+Thread: ThreadPoolExecutor-0_0 | ID: 130624661173952 | seq: 11
+timestamp1 = 1771092282.8621507 line= SELECT * FROM usertable where YCSB_KEY=848;
+Thread: ThreadPoolExecutor-0_8 | ID: 130624594032320 | seq: 12
+timestamp1 = 1771092282.8622215 line= DELETE FROM usertable WHERE YCSB_KEY=848;
+    time diff (ms) = 3.1838417053222656 tid= 130624652781248
+  2timestamp1 = 1771092282.8606298 tid= 130624627603136
+SELECT 1
+[(778, 'uzJr62vCinZwlaXEMzvk', 'O9WccFJNi4P0tic26MrS', 'UeWaGviUdVzThpcnbTiw', 'py6JrlxgOKsWwkeP71Wi', '5lrPIucvGzXsGxf654rZ', 'MAGA6lpLsdxxinKuj9l0', 'B86QJY2PBigGdG3UVgrA', 'B4H87G3WJKZb6Ajejp6M', 'Fh9DHcpxa2iKWdAYgsVC', 'DQtyhpPj2aHlcVkAqhMz')]
+    time diff (ms) = 2.595186233520508 tid= 130624627603136
+  2timestamp1 = 1771092282.8612387 tid= 130624031545024
+SELECT 1
+[(1082, 'FykI6Vojnpq36vV17CNY', 'AzVJcluVnJZqGxVlBLkc', 'xf5NzUHVLBkh9JbkIRZi', 'gWe2Rj8drLe3QonSqq41', 'ixy1x3cRWZu6zdy5SzY1', 'dYPbDle2Wbrt50N4ukh0', 'lPcA1zVpWqGoFG5HaPJF', 'H78oA3t2m0PP9Df7rSV0', 'H2MGKdu2YXRdbXmnKurF', 'Sfq0eKZkTpb1BS7I20zR')]
+    time diff (ms) = 2.3500919342041016 tid= 130624031545024
+  2timestamp1 = 1771092282.8594828 tid= 130624635995840
+SELECT 1
+[(831, 'gkYjkQldZl86soZUV77R', 'VVMQG9EXmgtIAzvyXoB7', '2xRtUzXXNbwOETlPlDBQ', 'MoFE44KbHGMeJuN5oH5C', 'HrHtiP9Ygl5cM0pkDeOJ', '98YV80fXa97T1HK3eHgi', 'pHoog4v9KepR2lnwdCA4', '1b1jlaT4hi7kBkDhLdF3', '9dix6hJhMU84TgBJwC1g', 'zhu7KdLjcmnESSx38j5i')]
+    time diff (ms) = 4.1561126708984375 tid= 130624635995840
+  2timestamp1 = 1771092282.8607678 tid= 130624644388544
+SELECT 1
+[(144, 'eZjBp0SntqZzVWVZyFMb', 'uao3idesVjGQZOoqGmqV', 'fvqtv4A8ZEhWtercPfck', 'XUTT4rMuKQ9NXADznEth', 'F6kGtBL2wxudU4moxMb2', 'XxImZ83ePgZgygAK0EYr', 'H2rC3kU8hl0xumwq5UGH', '0vaHZR99zrJZAKllSsXa', 'sqC68X9gjh3apLvT1a0j', 'LGaoAeE4EgBCzW8zYfLp')]
+    time diff (ms) = 2.9649734497070312 tid= 130624644388544
+  2timestamp1 = 1771092282.8610446 tid= 130624048330432
+SELECT 1
+[(833, 'vfWK3KqU9B7zNquSgP8u', 'IML5ZSOLtzSvvNDmnU5L', 'bjZSqW1AoFpp6PhLOJL0', 'tMnMF2RdmtPZ71YhEO6y', 'ssCYtKhMU4ASgTbtOK3b', 'YYiu1OC1Szgx06rOzBvr', 'alAMxYt6144Ixl3X7Fzr', '2KPnCcr3uUbQBLDnZgcr', 'JOD0PjzsL9SF43WzkqbG', '56YdsLA4PyR3KwE7ygTA')]
+    time diff (ms) = 3.054380416870117 tid= 130624048330432
+  2timestamp1 = 1771092282.8621507 tid= 130624661173952
+SELECT 1
+[(848, 'zo92h0Xc6fKcyAFwLTdm', 'uZyEQ6yzjK5KqtKTrMwO', 'xeFN8Jh1QIrFzlhuBiix', 'QYaaC5zMnERS05X9nKI3', 'iuuooBFmv4EjzZcIDMm9', '299Z5m8zsHA2heO9V2bL', 'JLKKevkNQQU5VjaSVW7o', 'Q8omV0TJBwElDJDbGTiS', 'twQ9uzp75aUCVluMcxaN', 'CtBSRhIvPqeXcJHlBQpM')]
+    time diff (ms) = 2.3741722106933594 tid= 130624661173952
+  2timestamp1 = 1771092282.8597188 tid= 130624610817728
+DELETE 1
+    time diff (ms) = 6.801605224609375 tid= 130624610817728
+  2timestamp1 = 1771092282.8603988 tid= 130624039937728
+DELETE 1
+    time diff (ms) = 7.240772247314453 tid= 130624039937728
+  2timestamp1 = 1771092282.861957 tid= 130624602425024
+DELETE 1
+    time diff (ms) = 6.524801254272461 tid= 130624602425024
+  2timestamp1 = 1771092282.8622215 tid= 130624594032320
+DELETE 1
+    time diff (ms) = 6.918191909790039 tid= 130624594032320
+Duplicate key (23505) qCount=2534 tid=130624661173952 line=INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (377, 'aj1DuuSGrAYJrq9U3KPi', 'oEEYnbYKU2hUdoCoEXya', 'qU5V73yQmLo1HP5GJRTP', 'N2o0qpslLCHGbZwGU1Lg', '2jkLGmLIuOWER0RXN7Ft', 'xhLJD14YtTf5d6Ie0boZ', '4kEIqrPlQIa2JG6io4KD', 'L5dWFHhM0FlUQv0ORRXN', '2sZyRe254P9sV5OOjfU3', 'bGkdSKal3lNcdmPhYOJe');
+Thread: ThreadPoolExecutor-0_4 | ID: 130624627603136 | seq: 4001
+timestamp1 = 1771092283.6811838 line= INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+Thread: ThreadPoolExecutor-0_6 | ID: 130624610817728 | seq: 4002
+timestamp1 = 1771092283.6814961 line= SELECT * FROM usertable where YCSB_KEY=560;
+Thread: ThreadPoolExecutor-0_3 | ID: 130624635995840 | seq: 4003
+timestamp1 = 1771092283.6815565 line= DELETE FROM usertable WHERE YCSB_KEY=560;
+Thread: ThreadPoolExecutor-0_5 | ID: 130624619210432 | seq: 4004
+timestamp1 = 1771092283.6816325 line= SELECT * FROM usertable WHERE YCSB_KEY=275;
+Thread: ThreadPoolExecutor-0_9 | ID: 130624048330432 | seq: 4005
+timestamp1 = 1771092283.6818523 line= SELECT * FROM usertable WHERE YCSB_KEY=991;
+Thread: ThreadPoolExecutor-0_0 | ID: 130624661173952 | seq: 4006
+timestamp1 = 1771092283.6822577 line= SELECT * FROM usertable WHERE YCSB_KEY=727;
+Thread: ThreadPoolExecutor-0_11 | ID: 130624031545024 | seq: 4007
+timestamp1 = 1771092283.682576 line= SELECT * FROM usertable WHERE YCSB_KEY=659;
+Thread: ThreadPoolExecutor-0_10 | ID: 130624039937728 | seq: 4008
+timestamp1 = 1771092283.6826801 line= SELECT * FROM usertable where YCSB_KEY=571;
+  2timestamp1 = 1771092283.6816325 tid= 130624619210432
+SELECT 0
+[]
+    time diff (ms) = 1.1777877807617188 tid= 130624619210432
+Thread: ThreadPoolExecutor-0_7 | ID: 130624602425024 | seq: 4009
+timestamp1 = 1771092283.6828628 line= DELETE FROM usertable WHERE YCSB_KEY=571;
+  2timestamp1 = 1771092283.6815565 tid= 130624635995840
+DELETE 1
+Thread: ThreadPoolExecutor-0_8 | ID: 130624594032320 | seq: 4010
+timestamp1 = 1771092283.6831474 line= INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (449, 'CUOLj06eWD8uNVcsOEWj', 'DZ0yEpV8uXUdgez2tERT', 'Bpdbd5l5VXgGC3OPsr5V', 'Z8azqBbzxw1OyFjAl5b7', 'q2YYX3mgx8yvtytAxwit', 'lZrDev0CXfDM1sp2y4n4', 'gwEImhwxPabl626OZXAh', 'KLgZb0XUMWFo1s6fpVy1', 'j9MmPuOFM4IPzdaFYiXy', 'IiqOkprmBTrEI89xyfeH');
+  2timestamp1 = 1771092283.6811838 tid= 130624627603136
+INSERT 0 1
+    time diff (ms) = 1.6825199127197266 tid= 130624635995840
+    time diff (ms) = 2.1948814392089844 tid= 130624627603136
+Thread: ThreadPoolExecutor-0_5 | ID: 130624619210432 | seq: 4011
+timestamp1 = 1771092283.6834493 line= INSERT INTO usertable VALUES (12164,'GugtYiwh1vuwpZk4cOpU','5YeJEs37UIeHWs8xxBrC','ZvDLEnRV3XZ38jt4MSpm','1Ic13xkqgW5Tuz6LgLJW','JHUTgFwqMocEDNMB19sX','MJqi44lzH0aQLcEzxs0P','wKLQBcWONxIexOj2v86B','zH4pXqSXU2LS1r1mw3ME','gqNrOjyIDkaFirNQxDsC','gJqCJITaEBNFxFtGhksT');
+Thread: ThreadPoolExecutor-0_3 | ID: 130624635995840 | seq: 4012
+timestamp1 = 1771092283.6836438 line= SELECT * FROM usertable WHERE YCSB_KEY=662;
+  2timestamp1 = 1771092283.6814961 tid= 130624610817728
+SELECT 1
+[(560, '8QHDgPHWGbCSC6hZCoUr', 'BdjteLiNi2VjUyAoXqZ6', 'SPQNK07Ax7aHiPfBEfPj', 'k2VB64V0j6wMw3P6GWcJ', 'WpGcH5247nf5kFv7sltw', 'FMsBIVO39hts3SHMGZB6', 'oREIIUyf5xNJMb5DTSxv', 'CYSTZVGrGFxQTdyJTL0V', 'KJcNNL51VOAONoiB07od', 'YRmMT7Twj5iT3vxJ2How')]
+    time diff (ms) = 2.8023719787597656 tid= 130624610817728
+  2timestamp1 = 1771092283.6818523 tid= 130624048330432
+SELECT 1
+[(991, 'QnuSBJDVrfh5iBmXG2Q4', 'OJVI2cGwEWe3xMFtxfTY', 'XtK2EgmzTnxuRhmGRjf7', 'vkGDGWIIU3BKMKDzh3TS', 'mGXOYGu9LsFZ7UP7EqaQ', 'IfwXmYGP5C7tJeGtIroo', 'X4wZxcksOrP7ulSmh7tQ', 'zjcRG7vlZHGGDQlM4saE', 'WCmZYaVgpizsQFUxoCBu', 'DFAxl8P92NgGQbdMsuXj')]
+  2timestamp1 = 1771092283.6828628 tid= 130624602425024
+DELETE 1
+    time diff (ms) = 2.686738967895508 tid= 130624048330432
+  2timestamp1 = 1771092283.6831474 tid= 130624594032320
+INSERT 0 1
+    time diff (ms) = 2.052783966064453 tid= 130624594032320
+  2timestamp1 = 1771092283.6826801 tid= 130624039937728
+SELECT 1
+[(571, 'l7qksqSrNn5tV2NvWGrA', 'knx7gMlOS9JAxYUTLNzI', 'kOBmuyXk4qRHtgEyNSYb', 'Gcj8kb6hVeDSXCfFnfT2', 'Y9bmJwSst2iTfXDaJKwn', 'BS8mYG7RFdLwSj0oENDC', 'k2lvrSG1S43SD1BSkFCz', 'a5pKX41KOtNkqwe0ZBTX', 'CO9KufBV5KXaJabT5oiB', 'yNlV2Dr7TRuxX7hoYGPC')]
+    time diff (ms) = 2.6624202728271484 tid= 130624039937728
+  2timestamp1 = 1771092283.6822577 tid= 130624661173952
+SELECT 1
+[(727, 'MLLeVYke2BBrxGfyL1gq', 'YWOkPT9u0bn6d3uziSeT', 'xkXhmE2SY005M2ZkB3es', 'dP6LING0L0Vv1LZBShsZ', 'eeZ1ElbThdykngYGSwBO', 'ZuB648V6vEZB6m99ibta', 'Nmo18L3lVMfAg8U9peBj', '1PAgK3W9FZAxK8z9dKZl', 'rrcSCYWgqMRohwStJGxi', 'KJvq6CzoaNPvnjSfqcc2')]
+  2timestamp1 = 1771092283.6836438 tid= 130624635995840
+SELECT 0
+[]
+    time diff (ms) = 2.0842552185058594 tid= 130624602425024
+  2timestamp1 = 1771092283.6834493 tid= 130624619210432
+INSERT 0 1
+    time diff (ms) = 3.129720687866211 tid= 130624661173952
+  2timestamp1 = 1771092283.682576 tid= 130624031545024
+SELECT 1
+[(659, 'bebKYFUGC74DrrOokZJR', 'UqeZrKVMc5hXmaUz94li', 'cOrtkgnFZs7vvjS6PasB', 'IycoFEINxTXw4gr6rKRi', 'eBaokSRxsQgGKNl0F8o5', '6nQcD0sWvtAlVSe63lts', 'tqSAuJVeNWbAmcTdrLPV', 'lxbW4lEEIHAD6tsYuT0N', '8q1ANhQvDhuUwK7xXBEL', 'vhNwM4NYwhYi4qjqSgnl')]
+    time diff (ms) = 2.297639846801758 tid= 130624619210432
+    time diff (ms) = 1.8241405487060547 tid= 130624635995840
+    time diff (ms) = 3.254413604736328 tid= 130624031545024
+Thread: ThreadPoolExecutor-0_10 | ID: 130624039937728 | seq: 8001
+timestamp1 = 1771092284.598697 line= INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');
+Thread: ThreadPoolExecutor-0_7 | ID: 130624602425024 | seq: 8002
+timestamp1 = 1771092284.5988297 line= SELECT * FROM usertable WHERE YCSB_KEY=847;
+Thread: ThreadPoolExecutor-0_2 | ID: 130624644388544 | seq: 8003
+timestamp1 = 1771092284.599002 line= SELECT * FROM usertable WHERE YCSB_KEY=258;
+Thread: ThreadPoolExecutor-0_4 | ID: 130624627603136 | seq: 8004
+timestamp1 = 1771092284.5992107 line= DELETE FROM usertable WHERE YCSB_KEY=657;
+Thread: ThreadPoolExecutor-0_9 | ID: 130624048330432 | seq: 8005
+timestamp1 = 1771092284.5993278 line= INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (427, '4hVe6TsCCONFzHP609lX', 'D0QGvMZn3WuGIUbL6Ep3', 'cTQffX7pwEC4OjeuTjob', 'YgQyjDP3sPTQsOd1xa7c', 'j4z8WnZBkYR4Mt5W2aqO', 'fTJLT11btnaKhdkChBz0', 'BU4gGGBEEoe68vgKjEYy', 'dDlp7neH88E6d3GP108a', '3VPSljjeVLiK1GhzehqI', 'f8TsFnytpZy1p9yX2X5I');
+Thread: ThreadPoolExecutor-0_11 | ID: 130624031545024 | seq: 8006
+timestamp1 = 1771092284.599543 line= SELECT * FROM usertable WHERE YCSB_KEY=1421;
+Thread: ThreadPoolExecutor-0_8 | ID: 130624594032320 | seq: 8007
+timestamp1 = 1771092284.599919 line= DELETE FROM usertable WHERE YCSB_KEY=871;
+  2timestamp1 = 1771092284.5992107 tid= 130624627603136
+DELETE 1
+    time diff (ms) = 1.1403560638427734 tid= 130624627603136
+Thread: ThreadPoolExecutor-0_3 | ID: 130624635995840 | seq: 8008
+timestamp1 = 1771092284.6003957 line= INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (77, '8n6Y5r96bBvVhZUpxUzM', 'Peu5M4AUWUYygtjKTjFE', '95GjroetqFYh6F5i2YbH', 'O4tZWll99VzzrQwgUfSS', '2GcxFlWjOELWo60GMwrY', 'UhBtrg6HWAFezawBHqLK', 'mDecQHoMSIXCmpSKCDck', '5DI5R1bLGk56jlV8jXa0', 'RSWLpGrgUuzWFlchMJRG', 'panSXklyrFuj7UUwk2Wg');
+Thread: ThreadPoolExecutor-0_0 | ID: 130624661173952 | seq: 8009
+timestamp1 = 1771092284.6006243 line= SELECT * FROM usertable WHERE YCSB_KEY=202;
+  2timestamp1 = 1771092284.598697 tid= 130624039937728
+INSERT 0 1
+Thread: ThreadPoolExecutor-0_5 | ID: 130624619210432 | seq: 8011
+timestamp1 = 1771092284.6011293 line= SELECT * FROM usertable where YCSB_KEY=217;
+    time diff (ms) = 2.493619918823242 tid= 130624039937728
+Thread: ThreadPoolExecutor-0_4 | ID: 130624627603136 | seq: 8010
+timestamp1 = 1771092284.6009648 line= SELECT * FROM usertable WHERE YCSB_KEY=157;
+  2timestamp1 = 1771092284.5993278 tid= 130624048330432
+INSERT 0 1
+    time diff (ms) = 2.100229263305664 tid= 130624048330432
+  2timestamp1 = 1771092284.599919 tid= 130624594032320
+DELETE 0
+  2timestamp1 = 1771092284.5988297 tid= 130624602425024
+SELECT 0
+[]
+    time diff (ms) = 1.9659996032714844 tid= 130624594032320
+Thread: ThreadPoolExecutor-0_9 | ID: 130624048330432 | seq: 8012
+timestamp1 = 1771092284.6014392 line= DELETE FROM usertable WHERE YCSB_KEY=217;
+  2timestamp1 = 1771092284.599002 tid= 130624644388544
+SELECT 1
+[(258, 'tcu6Fjbcl5g8JexXFsPU', 'D481322Aa3rpW4oFlalS', 'K8cvgO8B6J1fZDrwGRKW', 'HaSoWTUOCxgwQDPd0y0U', '2A5aMNwl287a7liFBhQv', 'AE88UGzY1HZovrIWSOjF', 'pLyF71PPOG36QlL4hWu3', 'aGcds1rFqnME2fRXBpPs', 'ixuGGmHLBjEd94YPKyq4', '5qdiNpGUnvkMaD5NvDVk')]
+  2timestamp1 = 1771092284.6006243 tid= 130624661173952
+SELECT 1
+[(202, 'OqxRjMZmK3bSzChzXIqL', 'zMOUUmOQqqNkBEDKMxvn', '4YCGqvrcew7iqNOats6W', '13BLgmvNe790gwHUZtyW', 'airA8kclMVcTUJ90mOac', 'wfwJazQUiC7DgQGrNUZp', 'Zj4p0fPdwHUMa2JeHrgF', 'r21vWorSEfs0ijcwLtte', 'TWAEOTvaynqfoswX2yWi', 'k5x4Mb7skvGoav6q2goM')]
+    time diff (ms) = 3.3240318298339844 tid= 130624602425024
+    time diff (ms) = 3.5009384155273438 tid= 130624644388544
+  2timestamp1 = 1771092284.6009648 tid= 130624627603136
+SELECT 1
+[(157, 'QblDD40PyYZIyZmZAZ4u', 'etujabGxeIpQMD8bhJjI', 'wptKQ9ZainrboQ73pEqb', 'eb3QdliZ2fIkLNpYJDI1', 'Zpab4Rq4MOoJC68LAqAk', 'L482vpRFAqbX9xE5uGYG', 'KxhmmXNmmqSi8DxK4ie0', 'rNP1Kh88yGn4cj7uNW3j', 'GYODSZubgDUL93yLMMtq', 'c3Ho2etB8aAEt8nkHZ5r')]
+    time diff (ms) = 2.2089481353759766 tid= 130624661173952
+  2timestamp1 = 1771092284.6003957 tid= 130624635995840
+INSERT 0 1
+  2timestamp1 = 1771092284.6014392 tid= 130624048330432
+DELETE 1
+  2timestamp1 = 1771092284.6011293 tid= 130624619210432
+SELECT 1
+[(217, 'NN3wsIEvPeKunZLD3kbI', '52mnd3YaVHc14Jjhbo3V', '5SFUZb7jBM6NkXJ7ikAF', 'P6BiK5ipD0LTRgTYhmMf', 'HBII8LeBVGcfI288TueO', '7lF5iAXAzVnCdpVgWHmB', 'vpr7J4ppJGUkqELV7nM3', 'WfGMfKKYH4Qv50EekxSH', 'JvtdiWUHyqoultHZVgMS', 'TgReb8plIrrhy6lDQH1a')]
+  2timestamp1 = 1771092284.599543 tid= 130624031545024
+SELECT 1
+[(1421, 'drtXeNn0h5FyLXhiBerL', 'YxOdm0bVC9q08zB3f5s9', 'sEV9UY35nARt5twRlY0F', '2xi4eWWVVGNbuRDAIer0', 'p622oOrGeWfePtIYyf0u', 'W55VBY8p09r50XntAJi6', 'N6eqdw8pxwYYsvn5WMIG', 'bZQ0odc1JmS3eJv9T8vt', 'R3hiOHuZJgqjPIjLnIZg', 'ukmPqmNeNFP4Rdf9z3Xh')]
+    time diff (ms) = 3.1731128692626953 tid= 130624635995840
+    time diff (ms) = 2.32696533203125 tid= 130624048330432
+    time diff (ms) = 4.433631896972656 tid= 130624031545024
+    time diff (ms) = 2.2668838500976562 tid= 130624627603136
+    time diff (ms) = 2.7837753295898438 tid= 130624619210432
+Thread: ThreadPoolExecutor-0_8 | ID: 130624594032320 | seq: 12001
+timestamp1 = 1771092285.4455655 line= DELETE FROM usertable WHERE YCSB_KEY=692;
+Thread: ThreadPoolExecutor-0_4 | ID: 130624627603136 | seq: 12002
+timestamp1 = 1771092285.4458258 line= SELECT * FROM usertable WHERE YCSB_KEY=701;
+Thread: ThreadPoolExecutor-0_9 | ID: 130624048330432 | seq: 12003
+timestamp1 = 1771092285.4459717 line= DELETE FROM usertable where YCSB_KEY=160;
+Thread: ThreadPoolExecutor-0_5 | ID: 130624619210432 | seq: 12004
+timestamp1 = 1771092285.4460478 line= SELECT * FROM usertable WHERE YCSB_KEY=565;
+Thread: ThreadPoolExecutor-0_10 | ID: 130624039937728 | seq: 12005
+timestamp1 = 1771092285.4463036 line= SELECT * FROM usertable where YCSB_KEY=378;
+Thread: ThreadPoolExecutor-0_0 | ID: 130624661173952 | seq: 12006
+timestamp1 = 1771092285.4463856 line= DELETE FROM usertable WHERE YCSB_KEY=378;
+Thread: ThreadPoolExecutor-0_7 | ID: 130624602425024 | seq: 12007
+timestamp1 = 1771092285.4465108 line= DELETE FROM usertable WHERE YCSB_KEY=60;
+Thread: ThreadPoolExecutor-0_11 | ID: 130624031545024 | seq: 12008
+timestamp1 = 1771092285.4471216 line= SELECT * FROM usertable WHERE YCSB_KEY=816;
+Thread: ThreadPoolExecutor-0_3 | ID: 130624635995840 | seq: 12010
+timestamp1 = 1771092285.4475474 line= SELECT * FROM usertable WHERE YCSB_KEY=997;
+Thread: ThreadPoolExecutor-0_2 | ID: 130624644388544 | seq: 12009
+timestamp1 = 1771092285.447201 line= INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (692, 'qcU0wgKKavo502LOB9uX', 'ZwNK8Y5Pc3LAYliTmCTM', 'DiufFpjth5YGoQDoMmHf', 'ZlzKQezTGmZ7xxaj61zP', 'YLejXNYrBzXdhEkZFmV5', 'yHrAHfJuJu1sJ12j1EtL', 'zcHFIYq4CWPGSLI4xfUV', 'AlppRIAnwSOm05xiVFVt', 'tKgM8vhTYem1Zi1MvMbV', 'QiUFSkeZqrS7d8u4D2i8');
+  2timestamp1 = 1771092285.4459717 tid= 130624048330432
+DELETE 1
+    time diff (ms) = 1.9457340240478516 tid= 130624048330432
+  2timestamp1 = 1771092285.4463856 tid= 130624661173952
+DELETE 1
+Thread: ThreadPoolExecutor-0_1 | ID: 130624652781248 | seq: 12011
+timestamp1 = 1771092285.4477785 line= DELETE FROM usertable where YCSB_KEY=456;
+  2timestamp1 = 1771092285.4465108 tid= 130624602425024
+DELETE 0
+  2timestamp1 = 1771092285.4455655 tid= 130624594032320
+DELETE 1
+    time diff (ms) = 1.6353130340576172 tid= 130624602425024
+  2timestamp1 = 1771092285.447201 tid= 130624644388544
+INSERT 0 1
+  2timestamp1 = 1771092285.4458258 tid= 130624627603136
+SELECT 1
+[(701, 'durgKvnSBaQvmlBxPMEp', 's1Oxs7JCxrl1ZoHO2Ded', 'hx6aZJo5SletzXYDJspq', 'ayeRXmonl9nqITGeIKce', 'QxERdOBJ9ARPWrfZRgus', 'oPQTC5Nl8djdzKD1FMZg', 'vwHu8dfk4PB4Ki9sxajE', '4KnQIABB8jWxTmH1ezTY', '1SD1JEGJXKGKCexEHUck', 'jvmN71NfDDd7Z9vygSTu')]
+  2timestamp1 = 1771092285.4475474 tid= 130624635995840
+SELECT 0
+[]
+  2timestamp1 = 1771092285.4477785 tid= 130624652781248
+DELETE 1
+  2timestamp1 = 1771092285.4460478 tid= 130624619210432
+SELECT 1
+[(565, 'kzzZv3dGF8rs8WznsFnf', 'MocdWZq6QiDs6ZhwtWDd', 'EmSfmqTB5azIA2mKXmbz', '6eZEjorG33gnF8ewZqxl', 'O4lZwNwxC9I0ZzJjZSSf', 'vOEHyg2UMDrRbF2iLmiY', 'f1ZS3xpcyKn753y3bVqp', '2MKhIETsGeOSqcOOfpfZ', 'ekkSMgJQIRpYIZ7J7kFT', 'D8vdxcL3dUeTxyWbwdO6')]
+  2timestamp1 = 1771092285.4471216 tid= 130624031545024
+SELECT 1
+[(816, 'vCoBVqjHh2Z5qdlCdUJb', '2ElxUnLjnYrJypcmWlhi', 'c41FLIp9gSIWVrcr36YV', 'qImeieNztXx1VMjFu3Sq', 'nYc5emutkBt356RrOZkI', 'bqmQ5RG9a5a1jrQXb6HJ', 'FEqIBjUEwo7pmCAFqLeQ', '6WiNhbXKcm3bQEqYI6hB', 'i1u0lASiULQ3FxDKEebw', 'qGqZ0NzptFlzHMb5Lw7I')]
+Thread: ThreadPoolExecutor-0_9 | ID: 130624048330432 | seq: 12012
+timestamp1 = 1771092285.4479299 line= INSERT INTO usertable VALUES (12439,'cbWFH0tJDEhS682ODZl5','DPM6aIO1cOWXDT7L4mWV','JTzVynkMAtQDzA7AJN0l','aB0DaSnesLLEuQCXJI8D','qCp3PMgJB5xMAG9FSil4','KQnr52lpMvIQWx7Gcc9W','DtpCQHBWeEaZUGg2tlH8','MR1HmfBUxZON6yXtdyLn','vhtTuEEWMg12uc1VilXT','BQgQn2LLKMUfuxMeL7qy');
+    time diff (ms) = 1.6627311706542969 tid= 130624661173952
+    time diff (ms) = 1.6851425170898438 tid= 130624644388544
+  2timestamp1 = 1771092285.4463036 tid= 130624039937728
+SELECT 1
+[(378, 'iT7DUszpXp9zqDH4hyjg', 'QXinSY98M9WIKI6B8MKJ', 'VZavQi0zirwirjwh1jJM', '0HBjg2L3mgzdyfMicyfL', 'miZ2vOzyYTaUfHObhejt', 'kwLC1QnSdAM1DXD8FFtM', 'Yx9W6P4VIUqnUEWJAqf4', 'nRdQRruvYAoqrEcKqQZ6', '22raIlUTzGQ3kwcmzGNi', '9SUGqV9YdyOY0gVtFgww')]
+    time diff (ms) = 2.9265880584716797 tid= 130624039937728
+  2timestamp1 = 1771092285.4479299 tid= 130624048330432
+INSERT 0 1
+    time diff (ms) = 1.3303756713867188 tid= 130624048330432
+    time diff (ms) = 3.226041793823242 tid= 130624627603136
+    time diff (ms) = 1.5454292297363281 tid= 130624635995840
+    time diff (ms) = 1.3432502746582031 tid= 130624652781248
+    time diff (ms) = 2.192974090576172 tid= 130624031545024
+    time diff (ms) = 3.7686824798583984 tid= 130624619210432
+    time diff (ms) = 2.986431121826172 tid= 130624594032320
+Thread: ThreadPoolExecutor-0_5 | ID: 130624619210432 | seq: 16001
+timestamp1 = 1771092286.2257102 line= SELECT * FROM usertable WHERE YCSB_KEY=738;
+Thread: ThreadPoolExecutor-0_3 | ID: 130624635995840 | seq: 16002
+timestamp1 = 1771092286.2262537 line= SELECT * FROM usertable WHERE YCSB_KEY=814;
+Thread: ThreadPoolExecutor-0_2 | ID: 130624644388544 | seq: 16003
+timestamp1 = 1771092286.226429 line= INSERT INTO usertable VALUES (12614,'uZE5L1rZdRDyL1ok4bbV','ODtJGyz2viGu90HMTSJ7','iR9Z7gIhBP41JGNSHYYk','fQlhsUtiHrL6ARER2B7B','N2W5EmN7tSyDaUmcEGQU','xi7xEEOJAxrIjIAMm6j4','hKutYfUll9foAbE7M9b7','S472hhw1m0JYYm1yYw1R','wRpllOpXI1IrkNDwUgaZ','ovj5p4YBZFyt7JLIK3ui');
+Thread: ThreadPoolExecutor-0_6 | ID: 130624610817728 | seq: 16004
+timestamp1 = 1771092286.2266183 line= SELECT * FROM usertable WHERE YCSB_KEY=1473;
+Thread: ThreadPoolExecutor-0_0 | ID: 130624661173952 | seq: 16005
+timestamp1 = 1771092286.2268357 line= DELETE FROM usertable where YCSB_KEY=152;
+Thread: ThreadPoolExecutor-0_9 | ID: 130624048330432 | seq: 16006
+timestamp1 = 1771092286.2270157 line= SELECT * FROM usertable WHERE YCSB_KEY=810;
+Thread: ThreadPoolExecutor-0_4 | ID: 130624627603136 | seq: 16007
+timestamp1 = 1771092286.2272866 line= SELECT * FROM usertable WHERE YCSB_KEY=0;
+  2timestamp1 = 1771092286.226429 tid= 130624644388544
+INSERT 0 1
+Thread: ThreadPoolExecutor-0_1 | ID: 130624652781248 | seq: 16008
+timestamp1 = 1771092286.2275376 line= SELECT * FROM usertable where YCSB_KEY=256;
+    time diff (ms) = 1.5108585357666016 tid= 130624644388544
+  2timestamp1 = 1771092286.2268357 tid= 130624661173952
+DELETE 1
+Thread: ThreadPoolExecutor-0_2 | ID: 130624644388544 | seq: 16010
+timestamp1 = 1771092286.2283673 line= INSERT INTO usertable VALUES (12615,'0WrwqoUAb05Wd9OOMxor','7OYlmTBtXxNpokTeSjtM','LetTQboRhdYBxCQ8nvnU','avS81cQs9XlmcNLXmWgE','Z2r1gynAN5fqtIAf3Wwb','csuyLFK029lIEFX5HbYy','9T2zqPtIihhcirIpt6FE','5809ACIOk4KD4lSPQJOw','n77dTjZGOaJdSD0mHdTE','LqVDCpJGrEhGzrxxaHN3');
+    time diff (ms) = 1.6047954559326172 tid= 130624661173952
+Thread: ThreadPoolExecutor-0_8 | ID: 130624594032320 | seq: 16009
+timestamp1 = 1771092286.2280905 line= DELETE FROM usertable WHERE YCSB_KEY=256;
+  2timestamp1 = 1771092286.2257102 tid= 130624619210432
+SELECT 1
+[(738, 'kqEcO1pXhAjUKOOtHR75', 'a9g7zCCg1xhVTUybZVoO', 'g7EqQeIZ2mzqCLnRju3m', 'xB4j32qaYtaMvVFX4NaD', 'iZCgO8O1uIZRTPrcFuCQ', 'hOj4OgFbGSeAtKUy8Uop', 'gNvgR9kL20n5VCwFBaMe', 'schKm7J6c5F3W9zCpUJY', 'cYaGbl0twZoR0nQY1skh', 'SmlrhOjb7c1outOg1LGL')]
+Thread: ThreadPoolExecutor-0_0 | ID: 130624661173952 | seq: 16011
+timestamp1 = 1771092286.2284524 line= SELECT * FROM usertable WHERE YCSB_KEY=919;
+    time diff (ms) = 3.0295848846435547 tid= 130624619210432
+Thread: ThreadPoolExecutor-0_7 | ID: 130624602425024 | seq: 16012
+timestamp1 = 1771092286.228881 line= SELECT * FROM usertable where YCSB_KEY=341;
+  2timestamp1 = 1771092286.2280905 tid= 130624594032320
+DELETE 1
+  2timestamp1 = 1771092286.2266183 tid= 130624610817728
+SELECT 1
+[(1473, 'TVHfdwhwJsGML89qJX7M', 'fizyrkNY3Xu1QdU6LTyn', 'hhtAdQrOW3RjWJUYsKtM', 'BFMpvYJRVrWw7FrJ4B0o', 'mchVaYbZcvVB8uhpIbid', 'BNjorn3cvV9uF1ZSBl5u', 'fzwbnea5WDvzzLeJGbRl', 'r3NO1WA8pNcipIRFbZ8Q', 'YfWDJUAwiiTF3oXU3ZaF', '9FLpSg4dycDg2N0N4NVf')]
+    time diff (ms) = 1.41143798828125 tid= 130624594032320
+  2timestamp1 = 1771092286.2283673 tid= 130624644388544
+INSERT 0 1
+  2timestamp1 = 1771092286.2262537 tid= 130624635995840
+SELECT 1
+[(814, 'VjvMCwFJif6B4PsApCXY', '67GFt07x6G9tLW640gti', 'OVsa56qwGOMRgDGzOeZ2', 'nqFwcRU17sJAuUkzyXmE', 'eQIIYAjiPyHQiaYq6aNY', '33HE4et9swcXeeoKgAYS', 'YCSxd1lakeUCWJ9hiFqQ', 'ZsBDJbuWsst8f7aVe5OV', 'FuuLIPzGnBQeGhibmGpi', 'LUsHPZa2UpfEhBkTyD6k')]
+    time diff (ms) = 3.9911270141601562 tid= 130624635995840
+  2timestamp1 = 1771092286.2270157 tid= 130624048330432
+SELECT 1
+[(810, 'zx0BymDfRilRiZpGQvET', 'JtIBC77hlJHB7bq4cWM0', '7m6XhHgnAlQYxAvIhz7I', 'WTkYMRRzNbiMUjcxlJGA', 'FrksNNzYaen5oFGhSB5J', 'MpKPBwFi08Y8y255fpGg', 'nA5UUlWlLskD6XMYbiFm', 'aJDD5gDZA6tMH3NuYxj3', 'ryn9ujTRHu2VIINC32KT', '3IXJIW1lYGv8CufMEaXh')]
+  2timestamp1 = 1771092286.2275376 tid= 130624652781248
+SELECT 1
+[(256, 'QYAWyAJnO2SUX5FjWvML', 'LOzye7f9CATjFpX38jUa', 'KKtUZpj6N61aApEBXqGO', 'PlbqCN2QuTKFnF4Bxb1b', 'vRoe5Pt8HYirrtnnKKFA', 'rOvs0OJ4gmrljVKePDOz', 'NOHk8h8muaASP118ikrc', '4ra6SEPPfZl2QbM1WtsU', 'EFdWFFEcIeiw2nkhYciG', '0PeR35pZbzKq26hoH0ho')]
+    time diff (ms) = 3.1332969665527344 tid= 130624652781248
+  2timestamp1 = 1771092286.228881 tid= 130624602425024
+SELECT 0
+[]
+    time diff (ms) = 1.8973350524902344 tid= 130624602425024
+    time diff (ms) = 3.592252731323242 tid= 130624048330432
+    time diff (ms) = 3.1805038452148438 tid= 130624610817728
+  2timestamp1 = 1771092286.2272866 tid= 130624627603136
+SELECT 1
+[(0, 'gMTk2x9eBLwyXirhrsnP', 'GREwPPblVoKsUh067jTs', 'YUFqGo4wsOHVEndcvTxD', 'G1z8bIcCcslmu9PltYoh', 'KcCCyWAsPpENJgxMieIT', 'KDITatDdW3NSUrBHdmy2', 'XLhKoZbW0JAgewruvYLw', 'VyJOmYjbnogbcSLSHBQN', 'DJ6Ji3hgz9Ok88rQw8jW', 'U97gAzwAID2tBDMzGMTo')]
+  2timestamp1 = 1771092286.2284524 tid= 130624661173952
+SELECT 1
+[(919, '5CneyRlnbvlmXcP7IDAD', 'mU2nx8zLIj8ojxPHWChG', 'IosJf4AmN02WDnxNKorF', 'yYqNIazVvVvOqvtC856D', 'GFHRK7asNCkGRLtPWGMm', 'UdoYPqsThOJlHqoyBrvu', 'Kh0YQKl84hUKzDRzevaf', 'm9KvKLvJ9PdmmKDiRdIV', 'zOUlBFjaemg1s3afWRzV', 'HwNr6pvuIK8H0u7PO3us')]
+    time diff (ms) = 2.727985382080078 tid= 130624661173952
+    time diff (ms) = 3.8604736328125 tid= 130624627603136
+    time diff (ms) = 1.7406940460205078 tid= 130624644388544
+Thread: ThreadPoolExecutor-0_5 | ID: 130624619210432 | seq: 20001
+timestamp1 = 1771092287.004593 line= SELECT * FROM usertable WHERE YCSB_KEY=778;
+Thread: ThreadPoolExecutor-0_7 | ID: 130624602425024 | seq: 20002
+timestamp1 = 1771092287.004948 line= SELECT * FROM usertable WHERE YCSB_KEY=144;
+Thread: ThreadPoolExecutor-0_8 | ID: 130624594032320 | seq: 20003
+timestamp1 = 1771092287.0051906 line= SELECT * FROM usertable WHERE YCSB_KEY=833;
+Thread: ThreadPoolExecutor-0_3 | ID: 130624635995840 | seq: 20004
+timestamp1 = 1771092287.0052774 line= SELECT * FROM usertable WHERE YCSB_KEY=1082;
+Thread: ThreadPoolExecutor-0_11 | ID: 130624031545024 | seq: 20005
+  2timestamp1 = 1771092287.004948 tid= 130624602425024
+SELECT 1
+[(144, 'nmx7GE5CKM1Nu6BG8jUM', 'yi5vYi29fcgMkiWQgOJ7', 'Lv32oPfiCp2PbbrrTxVn', 'PiVHklyaSIizoaohlbvc', 'HDnxwu8OwFQK9VPhCg3t', 'WjscGgls57VyrVNNp8jm', 'N5uuALd8nIzlYgEOf0Gb', '2P00POI0ca3tes83Wpwi', 'AcOVcTCY6AEuP3oHvbEm', 'REsp1540XTtTXZ3Wpbss')]
+    time diff (ms) = 2.759218215942383 tid= 130624602425024
+  2timestamp1 = 1771092287.004593 tid= 130624619210432
+SELECT 1
+[(778, 'DFSXMjXMm7WOlJYm16Lh', 'fi4oLP4GFL6eZecBOOU0', 'GDD6CPsRXx3nHQuc6Bmp', 'EdiIUOzbXZf1nMY7m4lK', 'SSVYHQw9iTaEq1g8W0Cr', 'TJ3Uh2da4RUMWi0VUJ0A', 'e5II1aBjMPE7D6e6blJy', 'dMD56PvWGbYiuqJPvrew', 'VZlWaLtCrTWw96p0YiBz', 'OUYjBJs9nTn50QKYNjNG')]
+    time diff (ms) = 3.434419631958008 tid= 130624619210432
+  2timestamp1 = 1771092287.0051906 tid= 130624594032320
+SELECT 1
+[(833, 'qdHRKWTvyu3vWL1NtbH2', 'atewT1tRLsGl9S8yQFBJ', 'KxhmVwhLexPXg6C7fzqM', 'VBBwN0H6zvLNV4y8M6Vv', 'mTbI42RW0D13S8elby9F', '4Ok4z07TmbHqdet7kmsb', 'KOgCmFK4R2EbGZIRzAbj', 'Sa1OO8mDSamb43JTEUb4', 'AWcTp7yrp7iMJfya5l8K', 'PFywAKwyJC3IDKNL4frf')]
+    time diff (ms) = 2.874612808227539 tid= 130624594032320
+  2timestamp1 = 1771092287.0052774 tid= 130624635995840
+SELECT 1
+[(1082, 'FykI6Vojnpq36vV17CNY', 'AzVJcluVnJZqGxVlBLkc', 'xf5NzUHVLBkh9JbkIRZi', 'gWe2Rj8drLe3QonSqq41', 'ixy1x3cRWZu6zdy5SzY1', 'dYPbDle2Wbrt50N4ukh0', 'lPcA1zVpWqGoFG5HaPJF', 'H78oA3t2m0PP9Df7rSV0', 'H2MGKdu2YXRdbXmnKurF', 'Sfq0eKZkTpb1BS7I20zR')]
+    time diff (ms) = 2.9516220092773438 tid= 130624635995840
+overall time taken (millisec) = 4160.675525665283
+ total wait time (ms) 307.50925064086255
+duplicate_key_errors=1

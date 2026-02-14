@@ -1,0 +1,309 @@
+ arg1 a2 ==  postgres ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt
+ arg3 a4 pause ==  1 4 0.00125
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=868;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=831;  
+next Tx = DELETE FROM usertable where YCSB_KEY=937;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=835;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=874;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=58;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=684;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=449;  
+next Tx = INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');  
+next Tx = SELECT * FROM usertable where YCSB_KEY=560;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=560;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=885;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=447;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=354;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=714;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=322;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (473, 'k77CYHi5b5Qdb11t0VAp', 'w45YL1P4JzDvRX5jIBvR', 'ao09GyExO9CvU83wNEuq', 'YhjlPeciNWWmlnSh1fvJ', 'UJAnn45lrRrXy315mshK', 'qdFfpeyDQz6jKhwZsAC0', 'OcMAMoYzrjkQxs7RVPiw', '5FZYEShrmPKCXBX637Au', 'MPlrrUpevxoBdqDVk7xv', 'JRvtYzROxwsdqVu4iEY0');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=847;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=258;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=682;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=979;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=410;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=714;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (764, 'nMcgJOtSvWEXx8pcopDe', 'k5znGR90133NlmcDTQ2f', '7JqMPzSF2ksQKze4XZwO', '7urCkoRUO4Fhv1VAM0C0', 'ZlpeKVTxL4u7HUH99bG1', 'wBgDLNu8VfHVW23xZA6Y', 'iub2UyPJHdBZWsdZPFRm', 'WV39rJNiTkxAalWyNmnZ', '3UBFD2EId64hxwoL9jCy', '7Gc0jYLczoesyPYLKGtc');  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=692;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=701;  
+next Tx = DELETE FROM usertable where YCSB_KEY=160;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=786;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=659;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=242;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (872, 'B0ySDJjJrxcmdiLAB6i5', 'ZOC3miUVUPqT3P60nl13', 'f0CVrHAYNcHUxTxmgcMh', 'akwZQathKnBKfdLG4g02', 'xUqSqAD34JjxAFtjUmhx', 'rrQA7kzm8BRykIHruE89', 'c5xFzWug2T8FI1SVk3Id', 'M3ZCt7r1VZuT0OkJRiF7', 'k8Bxaa1lvOr5eSEfBPkh', '8hr3zT9irX9O60oZzPJL');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1278;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=738;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=814;  
+next Tx = INSERT INTO usertable VALUES (12614,'uZE5L1rZdRDyL1ok4bbV','ODtJGyz2viGu90HMTSJ7','iR9Z7gIhBP41JGNSHYYk','fQlhsUtiHrL6ARER2B7B','N2W5EmN7tSyDaUmcEGQU','xi7xEEOJAxrIjIAMm6j4','hKutYfUll9foAbE7M9b7','S472hhw1m0JYYm1yYw1R','wRpllOpXI1IrkNDwUgaZ','ovj5p4YBZFyt7JLIK3ui');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=895;  
+next Tx = SELECT * FROM usertable where YCSB_KEY=548;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=548;  
+next Tx = DELETE FROM usertable WHERE YCSB_KEY=843;  
+next Tx = INSERT INTO usertable (ycsb_key, FIELD10, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9) VALUES (235, 'uBiWXFPzbzlwO6a4hpP2', 'fppkk3v9VfrWvXhBvbUL', 'WEBNvmZImtsFaQk4w0AE', 'jvslX61qcBeYY4X63A3N', 'ELVWzmXBjv41DJVCh09A', 'CDV1V42R8jeF4P8gu3Dm', 'sA1Hi0fzOPzmpUlHd18j', 'pPWqZYauFNhLNzbwmcME', 'I8nV09yd1DRyJqs5UeBp', 'xc9tDQhKc6e3gSxirZH5');  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=778;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=144;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=833;  
+Thread: ThreadPoolExecutor-0_0 | ID: 127555599787712 | seq: 1
+timestamp1 = 1770976591.3215969 line= SELECT * FROM usertable WHERE YCSB_KEY=868;
+Thread: ThreadPoolExecutor-0_1 | ID: 127555591395008 | seq: 2
+timestamp1 = 1770976591.3220332 line= SELECT * FROM usertable WHERE YCSB_KEY=831;
+Thread: ThreadPoolExecutor-0_2 | ID: 127555583002304 | seq: 3
+timestamp1 = 1770976591.323061 line= DELETE FROM usertable where YCSB_KEY=937;
+Thread: ThreadPoolExecutor-0_3 | ID: 127555574609600 | seq: 4
+timestamp1 = 1770976591.3237236 line= SELECT * FROM usertable where YCSB_KEY=473;
+  2timestamp1 = 1770976591.3215969 tid= 127555599787712
+SELECT 1
+[(868, 'Lsd4tAkKsWdOY29YLFLU', 'JESgr5T9kYuzUYwvIaNx', 'nfWxRk0l9ANXWF112MCg', 'LAPsgAJB34Wmps0wAYu5', 's7tEXozD5vg1RTBNpUkj', '1VhBtA5AIM63fZdnHLjv', 'bdX9jsPvibnsacR5vqac', 'o3MjXYlqsHtOqkO3n5Xn', 'f4pO6I4hT3JI1cGP7fvW', 'WcfqJru12ZwnntMxnoYE')]
+    time diff (ms) = 139.94956016540527 tid= 127555599787712
+  2timestamp1 = 1770976591.3220332 tid= 127555591395008
+SELECT 1
+[(831, 'gkYjkQldZl86soZUV77R', 'VVMQG9EXmgtIAzvyXoB7', '2xRtUzXXNbwOETlPlDBQ', 'MoFE44KbHGMeJuN5oH5C', 'HrHtiP9Ygl5cM0pkDeOJ', '98YV80fXa97T1HK3eHgi', 'pHoog4v9KepR2lnwdCA4', '1b1jlaT4hi7kBkDhLdF3', '9dix6hJhMU84TgBJwC1g', 'zhu7KdLjcmnESSx38j5i')]
+    time diff (ms) = 140.06567001342773 tid= 127555591395008
+  2timestamp1 = 1770976591.323061 tid= 127555583002304
+DELETE 1
+    time diff (ms) = 139.48726654052734 tid= 127555583002304
+  2timestamp1 = 1770976591.3237236 tid= 127555574609600
+SELECT 1
+[(473, 'gIfS4pMcCYxiWYSmSwlh', 'Efy5mAiwWbFo4UIY7ugh', 'Gmlgou0h231gl0pUOcna', '2IsxtjJNBjJ26xrZk5YN', 'FvPzhyWJpcPwV2CzSSSs', 'E1NIhvdsaHAmWXmpEMkz', 'jm7rmsukFfdsBUXKkDIN', 'bSXjYtKe8jKOmzZMXWbK', 'KOKNSLFQOOYtV6HueTDK', 'w3uRk2tWr5NYEfkLCpxy')]
+    time diff (ms) = 139.52970504760742 tid= 127555574609600
+Thread: ThreadPoolExecutor-0_0 | ID: 127555599787712 | seq: 2001
+timestamp1 = 1770976592.5806909 line= DELETE FROM usertable WHERE YCSB_KEY=874;
+Thread: ThreadPoolExecutor-0_3 | ID: 127555574609600 | seq: 2002
+timestamp1 = 1770976592.581543 line= SELECT * FROM usertable WHERE YCSB_KEY=58;
+Thread: ThreadPoolExecutor-0_2 | ID: 127555583002304 | seq: 2003
+timestamp1 = 1770976592.582792 line= SELECT * FROM usertable WHERE YCSB_KEY=684;
+Thread: ThreadPoolExecutor-0_1 | ID: 127555591395008 | seq: 2004
+timestamp1 = 1770976592.5837686 line= SELECT * FROM usertable WHERE YCSB_KEY=968;
+  2timestamp1 = 1770976592.5806909 tid= 127555599787712
+DELETE 1
+    time diff (ms) = 14.642715454101562 tid= 127555599787712
+  2timestamp1 = 1770976592.581543 tid= 127555574609600
+SELECT 1
+[(58, '1Fr3JbfpIYgaMtDdoJaA', 'LsfgfLN8NkQnYqBh00dS', 'ZgTqEpAgVc4fvWXJRzH9', 'taVAOMGJYbZZpHjDoAv7', 'yryEKeaFhNwfEpsvyw2r', 'kAj8LAqY329eSbRx1xwI', 'AM1ObUqXuV71m8YqLQPV', 'tjr5qggEXKjaRjMVBWYL', 'zvvFU1yesXQ5AdqamOYN', '5I0mDuJ5vK3YMoo71asq')]
+    time diff (ms) = 14.400005340576172 tid= 127555574609600
+  2timestamp1 = 1770976592.582792 tid= 127555583002304
+SELECT 1
+[(684, 'scTRyG6y49ziYnPN8Evw', 'PrY6Tk9qSvrfVEHk8Uu5', 'zHKdIVLJFATYi29X5yoQ', 'r7aNdUAjI4QCDTC5JQjB', 'Q5K3fu8TqdJtsRPS4xCs', '7QqR4EbFwgtPhe4Sz0or', 'lxh9wMTdWAYEpAyKls3G', 'SF0l3Cb4OaO6kLgXUy9I', 'wja66NNn0Id9UCSySJRF', 'qPZ2jutOjjnKqAnuJMOm')]
+    time diff (ms) = 14.146804809570312 tid= 127555583002304
+  2timestamp1 = 1770976592.5837686 tid= 127555591395008
+SELECT 1
+[(968, 'EUNLhiv8lAqL6AbaDDMu', 'u1J73aPzjHVrTGJ5B0ye', 'HVUR8Sjuni1GKKUvL0EK', 'q88M9hnj2LN4cJlFQl3u', 'Ph9WqQRFWeO2w5UwTCbe', 'HidMuKhOrPgsWA8v6U5r', 'jIQjdrbv8oqgQhaoXR3t', 'LmgGtWviexm3uNW5lgQh', 'q1z0cFdrx5CiFBaqFF4r', '0gMZsIuxRYeTFUkCE89w')]
+    time diff (ms) = 13.732433319091797 tid= 127555591395008
+Thread: ThreadPoolExecutor-0_3 | ID: 127555574609600 | seq: 4001
+timestamp1 = 1770976594.9748237 line= INSERT INTO usertable VALUES (12163,'OqY5xx2eTEDutKCCDSTV','swQJXPEgOiHeB1fm77Ao','via4xvmuNmyrv6hWnGK4','O00L1crRKE9QlkTHLtJI','uI2CBBh5oACp5Os5Gyla','09bjHnAcYAS3SHbjldQM','AVJhXak7XoPlCwG6vkWR','lB4cSftwnYWESeTjnrvK','KfqcDSGVNlw2bL80vbyy','v74hgLYGjZW5sj7UskCg');
+Thread: ThreadPoolExecutor-0_0 | ID: 127555599787712 | seq: 4002
+timestamp1 = 1770976594.9767046 line= SELECT * FROM usertable where YCSB_KEY=560;
+Thread: ThreadPoolExecutor-0_1 | ID: 127555591395008 | seq: 4003
+timestamp1 = 1770976594.9776928 line= DELETE FROM usertable WHERE YCSB_KEY=560;
+Thread: ThreadPoolExecutor-0_2 | ID: 127555583002304 | seq: 4004
+timestamp1 = 1770976594.9804885 line= SELECT * FROM usertable WHERE YCSB_KEY=275;
+  2timestamp1 = 1770976594.9748237 tid= 127555574609600
+INSERT 0 1
+    time diff (ms) = 10.097265243530273 tid= 127555574609600
+  2timestamp1 = 1770976594.9767046 tid= 127555599787712
+SELECT 1
+[(560, '8QHDgPHWGbCSC6hZCoUr', 'BdjteLiNi2VjUyAoXqZ6', 'SPQNK07Ax7aHiPfBEfPj', 'k2VB64V0j6wMw3P6GWcJ', 'WpGcH5247nf5kFv7sltw', 'FMsBIVO39hts3SHMGZB6', 'oREIIUyf5xNJMb5DTSxv', 'CYSTZVGrGFxQTdyJTL0V', 'KJcNNL51VOAONoiB07od', 'YRmMT7Twj5iT3vxJ2How')]
+    time diff (ms) = 9.641408920288086 tid= 127555599787712
+  2timestamp1 = 1770976594.9776928 tid= 127555591395008
+DELETE 1
+    time diff (ms) = 10.59103012084961 tid= 127555591395008
+  2timestamp1 = 1770976594.9804885 tid= 127555583002304
+SELECT 0
+[]
+    time diff (ms) = 9.14311408996582 tid= 127555583002304
+discarding closed connection: <psycopg.Connection [BAD] at 0x7402bb613e30>
+discarding closed connection: <psycopg.Connection [BAD] at 0x7402bbca7110>
+discarding closed connection: <psycopg.Connection [BAD] at 0x7402bbd37020>
+discarding closed connection: <psycopg.Connection [BAD] at 0x7402bb91f740>
+error connecting in 'pool-1': connection failed: the database system is shutting down
+error connecting in 'pool-1': connection failed: the database system is shutting down
+discarding closed connection: <psycopg.Connection [BAD] at 0x7402dd9e19d0>
+error connecting in 'pool-1': connection failed: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+error connecting in 'pool-1': connection failed: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+error connecting in 'pool-1': connection failed: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+error connecting in 'pool-1': connection failed: could not connect to server: Connection refused
+	Is the server running on host "127.0.0.1" and accepting
+	TCP/IP connections on port 5438?
+Traceback (most recent call last):
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 233, in <module>
+Traceback (most recent call last):
+    for result in results:
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 110, in execTx
+    with pool.connection() as conn:
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 619, in result_iterator
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 110, in execTx
+    with pool.connection() as conn:
+Traceback (most recent call last):
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 180, in connection
+    conn = self.getconn(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 210, in getconn
+    return self._getconn_with_check_loop(deadline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+Traceback (most recent call last):
+    yield _result_or_cancel(fs.pop())
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 180, in connection
+    conn = self.getconn(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 210, in getconn
+    return self._getconn_with_check_loop(deadline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 222, in _getconn_with_check_loop
+    conn = self._getconn_unchecked(deadline - monotonic())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 262, in _getconn_unchecked
+    conn = pos.wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 901, in wait
+    raise self.error
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 110, in execTx
+    with pool.connection() as conn:
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 317, in _result_or_cancel
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+psycopg_pool.PoolClosed: the pool 'pool-1' is closed
+Database error: the pool 'pool-1' is closed tid= 127555599787712
+   chk rerun stoPro= SELECT * FROM usertable WHERE YCSB_KEY=412;
+Database error: the pool 'pool-1' is closed tid= 127555591395008
+   chk rerun stoPro= SELECT * FROM usertable WHERE YCSB_KEY=566;
+Database error: the pool 'pool-1' is closed tid= 127555583002304
+   chk rerun stoPro= DELETE FROM usertable where YCSB_KEY=313;
+Database error: the pool 'pool-1' is closed tid= 127555574609600
+   chk rerun stoPro= DELETE FROM usertable WHERE YCSB_KEY=961;
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 180, in connection
+    conn = self.getconn(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 110, in execTx
+    with pool.connection() as conn:
+    return fut.result(timeout)
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 222, in _getconn_with_check_loop
+    conn = self._getconn_unchecked(deadline - monotonic())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 210, in getconn
+    return self._getconn_with_check_loop(deadline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 180, in connection
+    conn = self.getconn(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 210, in getconn
+    return self._getconn_with_check_loop(deadline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 262, in _getconn_unchecked
+    conn = pos.wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 222, in _getconn_with_check_loop
+    conn = self._getconn_unchecked(deadline - monotonic())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 451, in result
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 262, in _getconn_unchecked
+    conn = pos.wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 901, in wait
+    raise self.error
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 901, in wait
+    raise self.error
+psycopg_pool.PoolClosed: the pool 'pool-1' is closed
+    self._condition.wait(timeout)
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 222, in _getconn_with_check_loop
+    conn = self._getconn_unchecked(deadline - monotonic())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/threading.py", line 355, in wait
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 262, in _getconn_unchecked
+    conn = pos.wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+psycopg_pool.PoolClosed: the pool 'pool-1' is closed
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg_pool/pool.py", line 901, in wait
+    raise self.error
+    waiter.acquire()
+psycopg_pool.PoolClosed: the pool 'pool-1' is closed
+KeyboardInterrupt
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 228, in <module>
+    with ThreadPoolExecutor(max_workers= NUM) as execPool: 
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 647, in __exit__
+    self.shutdown(wait=True)
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 238, in shutdown
+    t.join()
+  File "/usr/lib/python3.12/threading.py", line 1147, in join
+    self._wait_for_tstate_lock()
+  File "/usr/lib/python3.12/threading.py", line 1167, in _wait_for_tstate_lock
+    if lock.acquire(block, timeout):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

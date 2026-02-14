@@ -25,6 +25,7 @@
 #include <semaphore.h>
 #include "storage/spin.h"
 #include "openssl/sha.h"
+#include "access/merkle.h"
 
 typedef enum 
 {
@@ -81,6 +82,8 @@ typedef struct _OptimWriteEntry
     CmdType         operation;
     TupleTableSlot  *slot;
     ItemPointerData old_tid;
+    Oid             relOid;     /* relation OID, used for CMD_DELETE */
+    int32           keyval;     /* primary key value for deferred DELETE-0 reexec */
     CommandId       cid;
     SIMPLEQ_ENTRY(_OptimWriteEntry) link;
 } OptimWriteEntry;
@@ -182,6 +185,20 @@ typedef struct _WSTableEntryRecord
 
 typedef LIST_HEAD(_WSTableRecord, _WSTableEntryRecord) WSTableRecord;
 
+/*
+ * Merkle Change Set structures for batched Merkle updates
+ */
+typedef struct _PendingMerkleUpdate
+{
+    Oid         indexOid;
+    int         partitionId;
+    MerkleHash  hash;
+    bool        is_insert;  /* true = XOR in, false = XOR out */
+    LIST_ENTRY(_PendingMerkleUpdate) link;
+} PendingMerkleUpdate;
+
+typedef LIST_HEAD(_MerkleChangeSet, _PendingMerkleUpdate) MerkleChangeSet;
+
 extern BCDBShmXact  *activeTx;
 extern slock_t      *restart_counter_lock;
 
@@ -211,9 +228,13 @@ extern BCDBShmXact* get_tx_by_xid_locked(TransactionId xid, bool exclusive);
 extern uint32 dummy_hash(const void *key, Size key_size);
 extern void store_optim_update(TupleTableSlot* slot, ItemPointer old_tid);
 extern void store_optim_insert(TupleTableSlot* slot);
+extern void store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot);
+extern void store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid);
 extern void apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid);
-extern void apply_optim_insert(TupleTableSlot* slot, CommandId cid);
-extern void apply_optim_writes(void);
+extern bool apply_optim_insert(TupleTableSlot* slot, CommandId cid);
+extern void apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid);
+extern void apply_deferred_delete_by_key(Oid relOid, int keyval);
+extern bool apply_optim_writes(void);
 extern bool check_stale_read(void);
 extern void clean_ws_table_record(void);
 extern bool rs_table_check(PREDICATELOCKTARGETTAG *tag);
@@ -230,5 +251,9 @@ extern void ws_table_reserveDT( PREDICATELOCKTARGETTAG *tag);
 extern bool ws_table_checkDT(PREDICATELOCKTARGETTAG *tag);
 extern int conflict_checkDT(void);
 extern void publish_ws_tableDT(int id);
+
+/* Merkle change set functions */
+extern void merkle_record_update(Oid indexOid, int partitionId, MerkleHash *hash, bool is_insert);
+extern void apply_merkle_changeset(MerkleChangeSet *changeset);
 
 #endif

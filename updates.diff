@@ -1,0 +1,699 @@
+diff --git a/src/backend/access/heap/heapam.c b/src/backend/access/heap/heapam.c
+index db289fb..0bb17ce 100644
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -69,6 +69,7 @@
+ #include "utils/snapmgr.h"
+ #include "utils/spccache.h"
+ #include "catalog/index.h"
++#include "catalog/pg_am_d.h"
+ #include "access/htup_details.h"
+ #include "bcdb/worker.h"
+ 
+@@ -1850,6 +1851,25 @@ ReleaseBulkInsertStatePin(BulkInsertState bistate)
+ 
+ void
+ heap_apply_index(Relation relation, TupleTableSlot *slot, bool conflict_check, bool unique_check)
++{
++	heap_apply_index_phase(relation, slot, conflict_check, unique_check, HEAP_INDEX_ALL);
++}
++
++/*
++ * heap_apply_index_phase - insert into indexes with phase control.
++ *
++ * phase controls which indexes are processed:
++ *   HEAP_INDEX_ALL        - all indexes (default, same as heap_apply_index)
++ *   HEAP_INDEX_NO_MERKLE  - skip merkle indexes (for btree-only pass)
++ *   HEAP_INDEX_MERKLE_ONLY - only merkle indexes
++ *
++ * This split is needed for BCDB optimistic inserts: the btree unique
++ * check must succeed BEFORE any merkle XOR is applied, because
++ * subtransaction rollback does NOT undo merkle shared-buffer writes.
++ */
++void
++heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
++					   bool conflict_check, bool unique_check, int phase)
+ {
+ 	ListCell       *index_cell;
+ 
+@@ -1862,9 +1882,25 @@ heap_apply_index(Relation relation, TupleTableSlot *slot, bool conflict_check, b
+         Datum   	index_values[INDEX_MAX_KEYS];
+         bool 		isNull[INDEX_MAX_KEYS];
+         IndexUniqueCheck indexUniqueCheck;
++        bool        is_merkle;
+ 
+         indexOid = index_cell->oid_value;
+         indexRelation = RelationIdGetRelation(indexOid);
++
++        is_merkle = (indexRelation->rd_rel->relam == MERKLE_AM_OID);
++
++        /* Skip based on phase */
++        if (phase == HEAP_INDEX_NO_MERKLE && is_merkle)
++        {
++            RelationClose(indexRelation);
++            continue;
++        }
++        if (phase == HEAP_INDEX_MERKLE_ONLY && !is_merkle)
++        {
++            RelationClose(indexRelation);
++            continue;
++        }
++
+         indexInfo = BuildIndexInfo(indexRelation);
+ 
+ 		if (unique_check && indexRelation->rd_index->indisunique)
+diff --git a/src/backend/access/merkle/merkleutil.c b/src/backend/access/merkle/merkleutil.c
+index 49a0d30..ba646e2 100644
+--- a/src/backend/access/merkle/merkleutil.c
++++ b/src/backend/access/merkle/merkleutil.c
+@@ -352,6 +352,13 @@ merkle_compute_partition_id_single(Datum key, Oid keytype, int numLeaves)
+     int64   keyval;
+     int     pid;
+     
++    /* Safety check: prevent division by zero */
++    if (numLeaves <= 0)
++    {
++        elog(WARNING, "merkle_compute_partition_id_single: invalid numLeaves=%d, returning 0", numLeaves);
++        return 0;
++    }
++    
+     /*
+      * Convert key to integer for partition calculation.
+      * For non-integer types, we hash the key value.
+@@ -423,6 +430,13 @@ merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
+     char       *p;
+     int         i;
+     
++    /* Safety check: prevent division by zero */
++    if (numLeaves <= 0)
++    {
++        elog(WARNING, "merkle_compute_partition_id: invalid numLeaves=%d, returning 0", numLeaves);
++        return 0;
++    }
++    
+     /* If only one key, use the optimized single-key path */
+     if (nkeys == 1)
+     {
+@@ -504,6 +518,13 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
+     merkle_read_meta(indexRel, NULL, &leavesPerPartition, &nodesPerPartition, NULL, NULL,
+                           &nodesPerPage, NULL);
+     
++    /* Safety check: prevent division by zero if metadata is invalid */
++    if (leavesPerPartition <= 0)
++    {
++        elog(WARNING, "merkle_update_tree_path: invalid leavesPerPartition=%d, ignoring update", leavesPerPartition);
++        return;
++    }
++    
+     /*
+      * Register transaction callback if not done yet.
+      * This ensures we can undo changes if the transaction aborts.
+@@ -602,6 +623,19 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
+     page = BufferGetPage(buf);
+     meta = MerklePageGetMeta(page);
+     
++    /* Validate metadata integrity - corrupted/uninitialized values cause crashes */
++    if (meta->numPartitions <= 0 || meta->leavesPerPartition <= 0)
++    {
++        UnlockReleaseBuffer(buf);
++        ereport(ERROR,
++                (errcode(ERRCODE_INDEX_CORRUPTED),
++                 errmsg("Merkle index \"%s\" has corrupted metadata",
++                        RelationGetRelationName(indexRel)),
++                 errdetail("numPartitions=%d, leavesPerPartition=%d",
++                           meta->numPartitions, meta->leavesPerPartition),
++                 errhint("Try REINDEXing the Merkle index.")));
++    }
++    
+     /* Read values from metadata */
+     if (numPartitions)
+         *numPartitions = meta->numPartitions;
+diff --git a/src/backend/bcdb/shm_block.c b/src/backend/bcdb/shm_block.c
+index 1545e58..12ec52e 100644
+--- a/src/backend/bcdb/shm_block.c
++++ b/src/backend/bcdb/shm_block.c
+@@ -73,8 +73,12 @@ void set_last_committed_txid( BCDBShmXact *tx)
+ {
+     //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
+     BCBlock* blk = get_block_by_id(1, true);
++    /* Atomic counter update with spinlock to prevent race conditions */
++    SpinLockAcquire(block_pool_lock);
+     blk->last_committed_tx_id = tx->tx_id;
+     block_meta->num_committed = tx->tx_id;
++    pg_write_barrier();  /* Ensure write ordering across processes */
++    SpinLockRelease(block_pool_lock);
+ #if SAFEDBG2
+     printf("safeDbg %s : %s: %d  blk %x txid= %d\n",
+               __FILE__, __FUNCTION__, __LINE__, blk, block_meta->num_committed);
+@@ -135,9 +139,15 @@ BCTxID get_last_committed_txid(BCDBShmXact *tx)
+ {
+     //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
+     BCBlock* blk = get_block_by_id(1, false);
++    BCTxID result;
++    /* Atomic counter read with spinlock to prevent torn reads */
++    SpinLockAcquire(block_pool_lock);
++    pg_read_barrier();  /* Ensure read ordering across processes */
++    result = blk->last_committed_tx_id;
++    SpinLockRelease(block_pool_lock);
+     //printf("ariaMyDbg %s : %s: %d bid 1, blk %x\n",
+               //__FILE__, __FUNCTION__, __LINE__, blk);
+-    return blk->last_committed_tx_id ;
++    return result;
+ }
+ 
+ BCBlock*
+diff --git a/src/backend/bcdb/shm_transaction.c b/src/backend/bcdb/shm_transaction.c
+index 5fd1606..18e4e61 100644
+--- a/src/backend/bcdb/shm_transaction.c
++++ b/src/backend/bcdb/shm_transaction.c
+@@ -774,6 +774,7 @@ store_optim_update(TupleTableSlot* slot, ItemPointer old_tid)
+     write_entry->old_tid = *old_tid;
+     write_entry->slot = clone_slot(slot);
+     write_entry->cid = GetCurrentCommandId(true);
++    write_entry->relOid = InvalidOid;
+     SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
+     MemoryContextSwitchTo(old_context);
+ #if SAFEDBG1
+@@ -794,20 +795,85 @@ store_optim_insert(TupleTableSlot* slot)
+     write_entry->operation = CMD_INSERT;
+     write_entry->slot = clone_slot(slot);
+     write_entry->cid = GetCurrentCommandId(true);
++    write_entry->relOid = InvalidOid;
+     SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
+     MemoryContextSwitchTo(old_context);
+ }
+ 
+ void
++store_optim_delete(Oid relOid, ItemPointer tupleid)
++{
++    OptimWriteEntry *write_entry;
++    MemoryContext    old_context;
++    DEBUGMSG("[ZL] tx %s storing delete (rel: %d)", activeTx->hash, relOid);
++    old_context = MemoryContextSwitchTo(bcdb_tx_context);
++    write_entry = palloc(sizeof(OptimWriteEntry));
++    write_entry->operation = CMD_DELETE;
++    write_entry->slot = NULL;           /* no slot needed for DELETE */
++    write_entry->old_tid = *tupleid;
++    write_entry->relOid = relOid;
++    write_entry->cid = GetCurrentCommandId(true);
++    SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
++    MemoryContextSwitchTo(old_context);
++}
++
++bool
+ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
+ {
+     Relation relation = RelationIdGetRelation(slot->tts_tableOid);
++    MemoryContext old_context = CurrentMemoryContext;
++    ResourceOwner old_owner = CurrentResourceOwner;
++    bool insert_ok = false;
+ 
+     DEBUGMSG("[ZL] tx %s applying optim insert (rel: %d)", activeTx->hash, relation->rd_id);
+-    table_tuple_insert(relation, slot, cid, 0, NULL);
+ 
+-    heap_apply_index(relation, slot, true, true);
++    /*
++     * Two-phase index insertion to protect merkle tree integrity.
++     *
++     * Phase 1 (subtransaction): heap insert + btree indexes only.
++     *   If btree raises duplicate-key ERROR, the subtransaction is
++     *   rolled back cleanly — no merkle state was touched.
++     *
++     * Phase 2 (parent transaction): merkle index only.
++     *   Only runs if phase 1 succeeded, so the XOR into the merkle
++     *   tree is guaranteed to correspond to an actually-inserted row.
++     *
++     * Why: subtransaction rollback does NOT undo merkle XOR writes
++     * in shared buffers (they are direct page modifications, not
++     * undoable via CLOG abort). Processing merkle before btree in
++     * a single heap_apply_index call leaves phantom XOR entries
++     * when the btree unique check subsequently fails.
++     */
++
++    /* Phase 1: heap + btree (no merkle) inside subtransaction */
++    BeginInternalSubTransaction("bcdb_insert");
++    PG_TRY();
++    {
++        table_tuple_insert(relation, slot, cid, 0, NULL);
++        heap_apply_index_phase(relation, slot, true, true, HEAP_INDEX_NO_MERKLE);
++        /* Btree unique check passed — merge subtxn into parent */
++        ReleaseCurrentSubTransaction();
++        insert_ok = true;
++    }
++    PG_CATCH();
++    {
++        /* Duplicate key or other error — rollback subtxn.
++         * Heap insert and btree entries are undone. Merkle is untouched. */
++        MemoryContextSwitchTo(old_context);
++        CurrentResourceOwner = old_owner;
++        RollbackAndReleaseCurrentSubTransaction();
++        FlushErrorState();
++    }
++    PG_END_TRY();
++
++    /* Phase 2: merkle index — only if phase 1 committed */
++    if (insert_ok)
++    {
++        heap_apply_index_phase(relation, slot, false, false, HEAP_INDEX_MERKLE_ONLY);
++    }
++
+     RelationClose(relation);
++    return insert_ok;
+ }
+ 
+ void
+@@ -969,9 +1035,40 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
+ }
+ 
+ void
++apply_optim_delete(Oid relOid, ItemPointer tupleid, CommandId cid)
++{
++    Relation relation = RelationIdGetRelation(relOid);
++    TM_FailureData tmfd;
++    TM_Result result;
++
++    DEBUGMSG("[ZL] tx %s applying optim delete (rel: %d)", activeTx->hash, relOid);
++
++    /* XOR out the old tuple's hash from Merkle tree BEFORE deleting.
++     * If the row is already gone (committed delete by prior tx),
++     * ExecDeleteMerkleIndexes will fail to read it and do nothing. */
++    ExecDeleteMerkleIndexes(relation, tupleid);
++
++    /* Now delete the heap tuple */
++    result = table_tuple_delete(relation, tupleid,
++                       cid,
++                       InvalidSnapshot,
++                       InvalidSnapshot,
++                       false, /* do not wait for commit */
++                       &tmfd,
++                       false);
++
++    if (result != TM_Ok)
++    {
++    }
++
++    RelationClose(relation);
++}
++
++bool
+ apply_optim_writes(void)
+ {
+     OptimWriteEntry *write_entry;
++
+     while ((write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
+     {
+         switch (write_entry->operation)
+@@ -980,21 +1077,31 @@ apply_optim_writes(void)
+                 apply_optim_update(&write_entry->old_tid, write_entry->slot, write_entry->cid);
+                 break;
+             case CMD_INSERT:
+-                apply_optim_insert(write_entry->slot, write_entry->cid);
+-                /*
+-                 * Clean up the cloned slot after insert.
+-                 * apply_optim_update handles its own slot cleanup internally,
+-                 * but apply_optim_insert does not, so we must do it here.
+-                 * Without this, the slot's TupleDesc and any pinned resources
+-                 * would leak on every INSERT through the BCDB worker.
+-                 */
++                if (!apply_optim_insert(write_entry->slot, write_entry->cid))
++                {
++                    /*
++                     * INSERT failed (duplicate key).  This happens when
++                     * tx_id assignment doesn't preserve workload line order:
++                     * a DELETE-INSERT pair for the same key gets swapped so
++                     * the INSERT runs first and finds the original row still
++                     * present.  Signal failure so the worker retries the
++                     * whole transaction with a fresh snapshot.
++                     */
++                    ExecDropSingleTupleTableSlot(write_entry->slot);
++                    SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
++                    return false;
++                }
+                 ExecDropSingleTupleTableSlot(write_entry->slot);
+                 break;
++            case CMD_DELETE:
++                apply_optim_delete(write_entry->relOid, &write_entry->old_tid, write_entry->cid);
++                break;
+             default:
+                 ereport(ERROR, (errmsg("[ZL] tx %s applying unknown operation", activeTx->hash)));
+         }
+         SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
+     }
++    return true;
+ }
+ 
+ bool
+@@ -1041,10 +1148,11 @@ static int cc2Count = 0;
+     LIST_FOREACH(record, &ws_table_record, link)
+     {
+         // ws_table_check
+-        if (ws_table_checkDT( &record->tag))
+-	printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
++        if (ws_table_checkDT( &record->tag)) {
++	    printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
+ 		__FILE__, __FUNCTION__, __LINE__ ,  activeTx->hash, activeTx->tx_id);
+ 	    return 1;
++	}
+     		//ereport(ERROR,
+  		//		(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+    		//		 errmsg("tx %s aborted due to waw", activeTx->hash)));
+diff --git a/src/backend/bcdb/worker.c b/src/backend/bcdb/worker.c
+index 6e9201e..5e41dfe 100644
+--- a/src/backend/bcdb/worker.c
++++ b/src/backend/bcdb/worker.c
+@@ -485,6 +485,18 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
+                      activeTx->tx_id_committed);
+ #endif
+ 	  } else {
++	      /* Fix: Clear stale optim_write_list before retry.
++	       * AbortCurrentTransaction will undo heap/index changes,
++	       * but the SIMPLEQ entries allocated in bcdb_tx_context
++	       * need to be freed. MemoryContextReset frees the memory,
++	       * then SIMPLEQ_INIT resets the head pointer. */
++	      while ((optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
++	      {
++	          if (optim_write_entry->slot)
++	              ExecDropSingleTupleTableSlot(optim_write_entry->slot);
++	          SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
++	      }
++	      MemoryContextReset(bcdb_tx_context);
+ 	      /* Fix: AbortCurrentTransaction properly releases all resources
+ 	       * (buffer pins, TupleDesc refs, locks) via ResourceOwnerRelease
+ 	       * with isCommit=false (silent, no leak warnings).
+@@ -581,9 +593,28 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
+       printf(" safeDbg pid %d %s : %s: %d tx %d \n",
+                  getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id );
+ #endif
+-      set_last_committed_txid(tx);
+-
+-      apply_optim_writes();
++      /* CRITICAL FIX: Do NOT advance counter before apply_optim_writes.
++       * Old code had set_last_committed_txid(tx) HERE, which woke the
++       * next transaction before our writes were applied/committed,
++       * causing concurrent serial execution and Merkle corruption.
++       * Counter is now advanced AFTER finish_xact_command() below. */
++      if (!apply_optim_writes())
++      {
++          /*
++           * An INSERT failed (e.g. duplicate key because tx_id ordering
++           * didn't match workload line ordering).  Abort this attempt
++           * and retry the whole transaction with a fresh snapshot.
++           *
++           * It's safe to retry even after publish_ws_tableDT because:
++           * 1) No other tx has entered serial yet (counter not advanced)
++           * 2) Our stale published tags won't false-match ourselves
++           *    (table_checkDT checks entry->tx_id < activeTx->tx_id)
++           * 3) AbortCurrentTransaction rolls back partial apply_optim
++           *    writes done before the failure
++           */
++          rw_conflicts = 1;
++          continue;
++      }
+       tx->sxact->flags |= SXACT_FLAG_PREPARED;
+ 
+       DEBUGMSG("[ZL] worker(%d) commiting tx(%s)", getpid(), tx->hash);
+@@ -623,8 +654,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
+     fclose(fp);
+     }
+ 
+-      ConditionVariableBroadcast(&block->cond);
+-      condSig = 1;
++      /* CRITICAL FIX: Broadcast moved to after finish_xact_command
++       * to prevent next tx from starting serial phase before our
++       * writes are committed. condSig set after broadcast below. */
+ 
+       // For tx "select saveState()" char 't' should be seen by offset 9
+       for(sqlOffset = 0; sqlOffset < saveLen ; sqlOffset++) {
+@@ -710,14 +742,28 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
+ 	  PortalDrop(activeTx->portal, false);
+           hold_portal_snapshot = false;
+       }
+-      /* Also release TopTransactionResourceOwner's direct resources */
++      /* Release TopTransactionResourceOwner's direct resources.
++       * CRITICAL: isTopLevel (4th param) MUST be true since this is a
++       * top-level transaction. Using false triggers Assert(owner->parent != NULL)
++       * at resowner.c:582 during RESOURCE_RELEASE_LOCKS, because it tries
++       * retail lock release on child owners expecting subtransaction semantics.
++       * Standard PG always uses isTopLevel=true for TopTransactionResourceOwner
++       * (see CommitTransaction/AbortTransaction in xact.c). */
+       ResourceOwnerRelease(TopTransactionResourceOwner,
+-                           RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
++                           RESOURCE_RELEASE_BEFORE_LOCKS, false, true);
+       ResourceOwnerRelease(TopTransactionResourceOwner,
+-                           RESOURCE_RELEASE_LOCKS, false, false);
++                           RESOURCE_RELEASE_LOCKS, false, true);
+       ResourceOwnerRelease(TopTransactionResourceOwner,
+-                           RESOURCE_RELEASE_AFTER_LOCKS, false, false);
++                           RESOURCE_RELEASE_AFTER_LOCKS, false, true);
+       finish_xact_command();
++
++      /* CRITICAL FIX: Advance counter and broadcast ONLY AFTER commit.
++       * This ensures the next transaction cannot enter its serial phase
++       * until our writes are fully committed and visible. */
++      set_last_committed_txid(tx);
++      ConditionVariableBroadcast(&block->cond);
++      condSig = 1;
++
+       memset(&block->result[mem_txid], 0, 1024);
+ #if SAFEDBG3
+       printf("safeDbg txid= %d mem-txid = %d \n", tx->tx_id, mem_txid);
+@@ -782,7 +828,8 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
+       MemoryContextReset(bcdb_tx_context);
+       while ((optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
+       {
+-	   ExecDropSingleTupleTableSlot(optim_write_entry->slot);
++	   if (optim_write_entry->slot)
++	       ExecDropSingleTupleTableSlot(optim_write_entry->slot);
+ 	   SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
+       }
+       PG_RE_THROW();
+@@ -866,6 +913,8 @@ bcdb_worker_process_tx(BCDBShmXact *tx)
+         conflict_check();
+         if (timing)
+             tx->end_checking_time = bcdb_get_time();
++        /* Note: ignoring apply_optim_writes return value in non-DT path;
++         * the non-DT path uses conflict_check() which is less strict. */
+         apply_optim_writes();
+         if (timing)
+             tx->end_local_copy_time = bcdb_get_time();
+diff --git a/src/backend/executor/nodeModifyTable.c b/src/backend/executor/nodeModifyTable.c
+index c7a33f5..9ca52ef 100644
+--- a/src/backend/executor/nodeModifyTable.c
++++ b/src/backend/executor/nodeModifyTable.c
+@@ -67,6 +67,48 @@
+ #include <bcdb/shm_transaction.h>
+ #include <bcdb/globals.h>
+ 
++/*
++ * bcdb_compute_key_tag - Compute a write-set tag based on primary key values.
++ *
++ * Both INSERT and DELETE for the same primary key must produce the same tag
++ * so that conflict_checkDT detects cross-operation conflicts on the same key.
++ * Without this, INSERT operations are invisible to conflict detection,
++ * allowing DELETE transactions to proceed with stale snapshots where a key
++ * was temporarily absent, leaving phantom hashes in the merkle tree.
++ *
++ * We read the first column (assumed to be the primary key) from the given
++ * slot and use hash_any to compute a stable 32-bit hash.  The hash is split
++ * into blockNumber (upper 16 bits) and offsetNumber (lower 16 bits + 1,
++ * since offset 0 is invalid) inside a PREDICATELOCKTARGETTAG.
++ */
++static void
++bcdb_compute_key_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid,
++                     TupleTableSlot *slot)
++{
++    Datum   keyVal;
++    bool    isNull;
++    uint32  h;
++
++    /* Extract the first column (primary key) from the slot */
++    keyVal = slot_getattr(slot, 1, &isNull);
++    if (isNull)
++        h = 0;
++    else
++    {
++        int32 intKey = DatumGetInt32(keyVal);
++        h = hash_any((unsigned char *) &intKey, sizeof(int32));
++    }
++
++    /*
++     * Pack into tag.  We use a fixed dbOid of 0 (same as existing code)
++     * and the table's relOid.  The hash is split so that the lower 16-bit
++     * field (offsetNumber) is always >= 1 to keep ItemPointer-like validity.
++     */
++    SET_PREDICATELOCKTARGETTAG_TUPLE(*tag, 0, relOid,
++                                     (BlockNumber)(h >> 16),
++                                     (OffsetNumber)((h & 0xFFFF) | 1));
++}
++
+ static bool ExecOnConflictUpdate(ModifyTableState *mtstate,
+ 								 ResultRelInfo *resultRelInfo,
+ 								 ItemPointer conflictTid,
+@@ -92,7 +134,7 @@ static TupleConversionMap *tupconv_map_for_subplan(ModifyTableState *node,
+  * indexes on the table. This must be done BEFORE the row is deleted
+  * because we need to read the row to compute its hash.
+  */
+-static void
++void
+ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
+ {
+     List       *indexList;
+@@ -780,6 +822,19 @@ ExecInsert(ModifyTableState *mtstate,
+ 		{
+ 			if (is_bcdb_worker)
+ 			{
++				/*
++				 * BCDB WORKER: Register INSERT in the write-set using a
++				 * primary-key-based tag.  This ensures conflict_checkDT
++				 * detects DELETE-INSERT conflicts on the same key.
++				 * Without this, a DELETE transaction whose optimistic phase
++				 * found the key absent (between a prior DELETE commit and a
++				 * later INSERT commit) would proceed without retry, leaving
++				 * a phantom merkle hash from the prior INSERT.
++				 */
++				PREDICATELOCKTARGETTAG tag;
++				bcdb_compute_key_tag(&tag,
++									 resultRelationDesc->rd_id, slot);
++				ws_table_reserveDT(&tag);
+ 				store_optim_insert(slot);
+ 				//return NULL;
+ 			}
+@@ -965,6 +1020,62 @@ ExecDelete(ModifyTableState *mtstate,
+ 		 * mode transactions.
+ 		 */
+ ldelete:;
++		/*
++		 * BCDB WORKER: Defer DELETE to serial phase.
++		 * Just like INSERT and UPDATE, store the operation for later
++		 * execution in apply_optim_writes(). This prevents Merkle tree
++		 * XOR-out from happening during the parallel phase, which would
++		 * cause hash corruption due to concurrent unprotected access.
++		 */
++		if (is_bcdb_worker)
++		{
++			PREDICATELOCKTARGETTAG tag;
++			PREDICATELOCKTARGETTAG tid_tag;
++			/*
++			 * DELETE registers TWO write-set tags:
++			 *
++			 * 1. TID-based tag — preserves RAW conflict detection with
++			 *    SELECT operations that read the same physical tuple.
++			 *    SELECT registers TID-based read-set tags via
++			 *    PredicateLockTuple; if we only publish key-hash tags,
++			 *    the conflict check (TID vs key-hash) never matches.
++			 *
++			 * 2. Key-based tag — enables WAW conflict detection with
++			 *    INSERT operations on the same primary key.  INSERT
++			 *    registers a key-hash write-set tag; the key-hash
++			 *    from DELETE matches it for same-key conflicts.
++			 */
++
++			/* Tag 1: TID-based (always available) */
++			SET_PREDICATELOCKTARGETTAG_TUPLE(tid_tag,
++											 0,
++											 resultRelationDesc->rd_id,
++											 ItemPointerGetBlockNumber(tupleid),
++											 ItemPointerGetOffsetNumber(tupleid));
++			ws_table_reserveDT(&tid_tag);
++
++			/* Tag 2: Key-based (read tuple to extract primary key) */
++			{
++				TupleTableSlot *keySlot;
++				keySlot = table_slot_create(resultRelationDesc, NULL);
++				if (table_tuple_fetch_row_version(resultRelationDesc,
++												  tupleid,
++												  estate->es_snapshot,
++												  keySlot))
++				{
++					bcdb_compute_key_tag(&tag,
++										 resultRelationDesc->rd_id,
++										 keySlot);
++					ws_table_reserveDT(&tag);
++				}
++				/* If tuple not readable, TID tag above is still registered */
++				ExecDropSingleTupleTableSlot(keySlot);
++			}
++			store_optim_delete(RelationGetRelid(resultRelationDesc), tupleid);
++			if (canSetTag)
++				(estate->es_processed)++;
++			return NULL;
++		}
+ 		/*
+ 		 * Update Merkle indexes BEFORE deleting the tuple.
+ 		 * We need to do this before the tuple is gone so we can
+diff --git a/src/backend/tcop/postgres.c b/src/backend/tcop/postgres.c
+index 7c7fa4f..eac4ebb 100644
+--- a/src/backend/tcop/postgres.c
++++ b/src/backend/tcop/postgres.c
+@@ -4625,6 +4625,10 @@ PostgresMain(int argc, char *argv[],
+        strcpy(query_string2, (const char *) (query_string+10));
+ 					
+ 					BCDBShmXact *tx = create_tx(pfx_str, query_string2, pfx_id, bid, XACT_SERIALIZABLE, true ); 
++					if (tx == NULL)
++						ereport(ERROR,
++							(errcode(ERRCODE_DUPLICATE_OBJECT),
++							 errmsg("duplicate transaction hash %s, skipping", pfx_str)));
+ #if SAFEDBG3
+ 	printf("safeDbg %s : %s: %d pfx_hash= %s txid= %d q= %s\n", __FILE__, __FUNCTION__, __LINE__ , pfx_str, pfx_id, (query_string2) );
+ #endif
+diff --git a/src/bin/bcsql/bcsql b/src/bin/bcsql/bcsql
+index 1fb4d5a..be2aa81 100755
+Binary files a/src/bin/bcsql/bcsql and b/src/bin/bcsql/bcsql differ
+diff --git a/src/include/access/heapam.h b/src/include/access/heapam.h
+index 9f72378..6a7a790 100644
+--- a/src/include/access/heapam.h
++++ b/src/include/access/heapam.h
+@@ -112,6 +112,15 @@ typedef enum
+ #define HeapScanIsValid(scan) PointerIsValid(scan)
+ 
+ extern void heap_apply_index(Relation relation, TupleTableSlot *slot, bool conflict_check, bool unique_check);
++
++/* Phase constants for heap_apply_index_phase */
++#define HEAP_INDEX_ALL         0   /* process all indexes */
++#define HEAP_INDEX_NO_MERKLE   1   /* skip merkle indexes */
++#define HEAP_INDEX_MERKLE_ONLY 2   /* only merkle indexes */
++
++extern void heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
++								   bool conflict_check, bool unique_check, int phase);
++
+ extern TableScanDesc heap_beginscan(Relation relation, Snapshot snapshot,
+ 									int nkeys, ScanKey key,
+ 									ParallelTableScanDesc parallel_scan,
+diff --git a/src/include/bcdb/shm_transaction.h b/src/include/bcdb/shm_transaction.h
+index fedee8b..9adb634 100644
+--- a/src/include/bcdb/shm_transaction.h
++++ b/src/include/bcdb/shm_transaction.h
+@@ -81,6 +81,7 @@ typedef struct _OptimWriteEntry
+     CmdType         operation;
+     TupleTableSlot  *slot;
+     ItemPointerData old_tid;
++    Oid             relOid;     /* relation OID, used for CMD_DELETE */
+     CommandId       cid;
+     SIMPLEQ_ENTRY(_OptimWriteEntry) link;
+ } OptimWriteEntry;
+@@ -211,9 +212,11 @@ extern BCDBShmXact* get_tx_by_xid_locked(TransactionId xid, bool exclusive);
+ extern uint32 dummy_hash(const void *key, Size key_size);
+ extern void store_optim_update(TupleTableSlot* slot, ItemPointer old_tid);
+ extern void store_optim_insert(TupleTableSlot* slot);
++extern void store_optim_delete(Oid relOid, ItemPointer tupleid);
+ extern void apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid);
+-extern void apply_optim_insert(TupleTableSlot* slot, CommandId cid);
+-extern void apply_optim_writes(void);
++extern bool apply_optim_insert(TupleTableSlot* slot, CommandId cid);
++extern void apply_optim_delete(Oid relOid, ItemPointer tupleid, CommandId cid);
++extern bool apply_optim_writes(void);
+ extern bool check_stale_read(void);
+ extern void clean_ws_table_record(void);
+ extern bool rs_table_check(PREDICATELOCKTARGETTAG *tag);
+diff --git a/src/include/executor/nodeModifyTable.h b/src/include/executor/nodeModifyTable.h
+index 6342f07..c33afa0 100644
+--- a/src/include/executor/nodeModifyTable.h
++++ b/src/include/executor/nodeModifyTable.h
+@@ -18,6 +18,7 @@
+ 
+ extern void ExecComputeStoredGenerated(EState *estate, TupleTableSlot *slot);
+ extern void ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot);
++extern void ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid);
+ 
+ extern ModifyTableState *ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags);
+ extern void ExecEndModifyTable(ModifyTableState *node);

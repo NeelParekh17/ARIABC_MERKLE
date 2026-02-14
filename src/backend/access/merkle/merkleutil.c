@@ -73,22 +73,32 @@ merkle_xact_callback(XactEvent event, void *arg)
             rel = try_relation_open(op->relid, RowExclusiveLock);
             if (rel != NULL)
             {
-                /* Read tree configuration from metadata */
+                /* Read validated tree configuration from metadata */
+                int         numPartitions;
                 int         leavesPerPartition;
                 int         nodesPerPartition;
+                int         totalNodes;
+                int         totalLeaves;
                 int         nodesPerPage;
-                Buffer      metabuf;
-                Page        metapage;
-                MerkleMetaPageData *meta;
-                
-                metabuf = ReadBuffer(rel, MERKLE_METAPAGE_BLKNO);
-                LockBuffer(metabuf, BUFFER_LOCK_SHARE);
-                metapage = BufferGetPage(metabuf);
-                meta = MerklePageGetMeta(metapage);
-                leavesPerPartition = meta->leavesPerPartition;
-                nodesPerPartition = meta->nodesPerPartition;
-                nodesPerPage = meta->nodesPerPage;
-                UnlockReleaseBuffer(metabuf);
+                int         numTreePages;
+				
+                merkle_read_meta(rel,
+                                 &numPartitions,
+                                 &leavesPerPartition,
+                                 &nodesPerPartition,
+                                 &totalNodes,
+                                 &totalLeaves,
+                                 &nodesPerPage,
+                                 &numTreePages);
+
+                if (op->leafId < 0 || op->leafId >= totalLeaves)
+                {
+                    ereport(WARNING,
+                            (errmsg("merkle_xact_callback: skipping invalid undo leafId %d (totalLeaves=%d)",
+                                    op->leafId, totalLeaves)));
+                    relation_close(rel, RowExclusiveLock);
+                    continue;
+                }
                 
                 ereport(NOTICE, (errmsg("merkle_xact_callback: Undoing op for leaf %d hash %s", 
                      op->leafId, merkle_hash_to_hex(&op->hash))));
@@ -106,9 +116,26 @@ merkle_xact_callback(XactEvent event, void *arg)
                     while (nodeInPartition > 0)
                     {
                         int         actualNodeIdx = nodeId - 1;
-                        int         pageNum = actualNodeIdx / nodesPerPage;
+                        int         pageNum;
                         int         idxInPage = actualNodeIdx % nodesPerPage;
-                        BlockNumber blkno = MERKLE_TREE_START_BLKNO + pageNum;
+                        BlockNumber blkno;
+
+                        if (actualNodeIdx < 0 || actualNodeIdx >= totalNodes)
+                        {
+                            ereport(WARNING,
+                                    (errmsg("merkle_xact_callback: invalid node index %d during undo", actualNodeIdx)));
+                            break;
+                        }
+
+                        pageNum = actualNodeIdx / nodesPerPage;
+                        if (pageNum < 0 || pageNum >= numTreePages)
+                        {
+                            ereport(WARNING,
+                                    (errmsg("merkle_xact_callback: invalid page number %d during undo", pageNum)));
+                            break;
+                        }
+
+                        blkno = MERKLE_TREE_START_BLKNO + pageNum;
                         
                         /* Switch pages if needed */
                         if ((int)blkno != currentPageBlkno)
@@ -341,6 +368,64 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 }
 
 /*
+ * merkle_compute_slot_hash() - Compute integrity hash from an already-fetched slot.
+ *
+ * This variant avoids heap re-fetch by hashing the visible values currently
+ * present in `slot`. It is used when we must defer Merkle mutation until after
+ * heap operation success, while still hashing the OLD row image.
+ */
+void
+merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *result)
+{
+    TupleDesc       tupdesc;
+    StringInfoData  buf;
+    blake3_hasher   hasher;
+    int             i;
+
+    if (slot == NULL || TTS_EMPTY(slot))
+    {
+        merkle_hash_zero(result);
+        return;
+    }
+
+    tupdesc = RelationGetDescr(heapRel);
+    initStringInfo(&buf);
+
+    for (i = 0; i < tupdesc->natts; i++)
+    {
+        Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+        Datum       val;
+        bool        isnull;
+        Oid         typoutput;
+        bool        typIsVarlena;
+        char       *str;
+
+        if (attr->attisdropped)
+            continue;
+
+        val = slot_getattr(slot, i + 1, &isnull);
+
+        if (isnull)
+        {
+            appendStringInfoString(&buf, "*null*");
+        }
+        else
+        {
+            getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
+            str = OidOutputFunctionCall(typoutput, val);
+            appendStringInfo(&buf, "*%s", str);
+            pfree(str);
+        }
+    }
+
+    blake3_hasher_init(&hasher);
+    blake3_hasher_update(&hasher, buf.data, buf.len);
+    blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+
+    pfree(buf.data);
+}
+
+/*
  * merkle_compute_partition_id_single() - Internal helper for single-key partition
  *
  * Uses modular arithmetic to distribute keys across leaves:
@@ -351,6 +436,13 @@ merkle_compute_partition_id_single(Datum key, Oid keytype, int numLeaves)
 {
     int64   keyval;
     int     pid;
+    
+    /* Safety check: prevent division by zero */
+    if (numLeaves <= 0)
+    {
+        elog(WARNING, "merkle_compute_partition_id_single: invalid numLeaves=%d, returning 0", numLeaves);
+        return 0;
+    }
     
     /*
      * Convert key to integer for partition calculation.
@@ -423,6 +515,13 @@ merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
     char       *p;
     int         i;
     
+    /* Safety check: prevent division by zero */
+    if (numLeaves <= 0)
+    {
+        elog(WARNING, "merkle_compute_partition_id: invalid numLeaves=%d, returning 0", numLeaves);
+        return 0;
+    }
+    
     /* If only one key, use the optimized single-key path */
     if (nkeys == 1)
     {
@@ -487,12 +586,16 @@ merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
 void
 merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool isXorIn)
 {
+    int         numPartitions;
     int         partitionId;
     int         nodeInPartition;
     int         nodeId;
     int         leavesPerPartition;
     int         nodesPerPartition;
+    int         totalNodes;
+    int         totalLeaves;
     int         nodesPerPage;
+    int         numTreePages;
     int         currentPageBlkno = -1;
     Buffer      buf = InvalidBuffer;
     Page        page = NULL;
@@ -501,8 +604,29 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
     MerklePendingOp *op;
     
     /* Read tree configuration from metadata */
-    merkle_read_meta(indexRel, NULL, &leavesPerPartition, &nodesPerPartition, NULL, NULL,
-                          &nodesPerPage, NULL);
+    merkle_read_meta(indexRel,
+                     &numPartitions,
+                     &leavesPerPartition,
+                     &nodesPerPartition,
+                     &totalNodes,
+                     &totalLeaves,
+                     &nodesPerPage,
+                     &numTreePages);
+    
+    /* Safety check: prevent division by zero if metadata is invalid */
+    if (leavesPerPartition <= 0)
+    {
+        elog(WARNING, "merkle_update_tree_path: invalid leavesPerPartition=%d, ignoring update", leavesPerPartition);
+        return;
+    }
+
+    if (leafId < 0 || leafId >= totalLeaves)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("merkle_update_tree_path: leafId %d out of range [0,%d)",
+                        leafId, totalLeaves)));
+    }
     
     /*
      * Register transaction callback if not done yet.
@@ -538,9 +662,28 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
     while (nodeInPartition > 0)
     {
         int         actualNodeIdx = nodeId - 1;  /* 0-based index */
-        int         pageNum = actualNodeIdx / nodesPerPage;
+        int         pageNum;
         int         idxInPage = actualNodeIdx % nodesPerPage;
-        BlockNumber blkno = MERKLE_TREE_START_BLKNO + pageNum;
+        BlockNumber blkno;
+
+        if (actualNodeIdx < 0 || actualNodeIdx >= totalNodes)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDEX_CORRUPTED),
+                     errmsg("merkle_update_tree_path: node index %d out of range [0,%d)",
+                            actualNodeIdx, totalNodes)));
+        }
+
+        pageNum = actualNodeIdx / nodesPerPage;
+        if (pageNum < 0 || pageNum >= numTreePages)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDEX_CORRUPTED),
+                     errmsg("merkle_update_tree_path: page number %d out of range [0,%d)",
+                            pageNum, numTreePages)));
+        }
+
+        blkno = MERKLE_TREE_START_BLKNO + pageNum;
         
         /* Switch pages if needed */
         if ((int)blkno != currentPageBlkno)
@@ -601,6 +744,19 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
     LockBuffer(buf, BUFFER_LOCK_SHARE);
     page = BufferGetPage(buf);
     meta = MerklePageGetMeta(page);
+    
+    /* Validate metadata integrity - corrupted/uninitialized values cause crashes */
+    if (meta->numPartitions <= 0 || meta->leavesPerPartition <= 0)
+    {
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("Merkle index \"%s\" has corrupted metadata",
+                        RelationGetRelationName(indexRel)),
+                 errdetail("numPartitions=%d, leavesPerPartition=%d",
+                           meta->numPartitions, meta->leavesPerPartition),
+                 errhint("Try REINDEXing the Merkle index.")));
+    }
     
     /* Read values from metadata */
     if (numPartitions)

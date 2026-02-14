@@ -183,6 +183,8 @@ extern void merkleCostEstimate(struct PlannerInfo *root,
  */
 extern void merkle_compute_row_hash(Relation heapRel, ItemPointer tid,
                                     MerkleHash *result);
+extern void merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot,
+                                     MerkleHash *result);
 extern int  merkle_compute_partition_id(Datum *values, bool *isnull,
                                         int nkeys, TupleDesc tupdesc,
                                         int numLeaves);

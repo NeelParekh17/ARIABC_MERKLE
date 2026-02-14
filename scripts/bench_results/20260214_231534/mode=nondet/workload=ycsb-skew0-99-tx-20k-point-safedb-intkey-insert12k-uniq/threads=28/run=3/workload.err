@@ -1,0 +1,31 @@
+Traceback (most recent call last):
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 147, in execTx
+    cur.execute(line)
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg/cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.SerializationFailure: could not serialize access due to concurrent update
+Traceback (most recent call last):
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 147, in execTx
+    cur.execute(line)
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg/cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.SerializationFailure: could not serialize access due to concurrent update
+Traceback (most recent call last):
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 312, in <module>
+    fut.result()
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 271, in worker_loop
+    conn, cur = execTx(conn, cur, worker_idx, qCount, q)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py", line 147, in execTx
+    cur.execute(line)
+  File "/home/neel/.local/lib/python3.12/site-packages/psycopg/cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.SerializationFailure: could not serialize access due to concurrent update
