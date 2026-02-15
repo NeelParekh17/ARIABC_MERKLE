@@ -1,0 +1,46 @@
+ arg1 a2 ==  postgres /work/ARIABC/AriaBC/scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt
+ arg3 a4 pause ==  1 1 0.00125
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=740;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=1;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=11;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=753;  
+next Tx = SELECT * FROM usertable WHERE YCSB_KEY=384;  
+Thread: ThreadPoolExecutor-0_0 | ID: 138258597074624 | seq: 1
+timestamp1 = 1771113276.4663455 line= SELECT * FROM usertable where YCSB_KEY=686;
+  2timestamp1 = 1771113276.4663455 tid= 138258597074624
+SELECT 1
+[(686, 'xyTBZfcDfdvXg4DvWxZn', 'olG9HiT5LJJwy1HMlvrl', 'KmADVH5dv5LlSuduSkSF', 'NJwPWow5a4YBSuaI9gUp', 'yP90ikFmptYjjOtAVFgJ', 'pOd7oFiEar9fF5JLJf5n', 'hMTum90vfl4oxCOcG04H', 'CEXnltSvA5D8ieiOeK21', '26lSH31ceMw5sQ0G6vwE', '9RdkhmWamHGYPfbD71z8')]
+    time diff (ms) = 17.29559898376465 tid= 138258597074624
+Thread: ThreadPoolExecutor-0_0 | ID: 138258597074624 | seq: 4001
+timestamp1 = 1771113281.7779543 line= SELECT * FROM usertable WHERE YCSB_KEY=798;
+  2timestamp1 = 1771113281.7779543 tid= 138258597074624
+SELECT 0
+[]
+    time diff (ms) = 3.4399032592773438 tid= 138258597074624
+Thread: ThreadPoolExecutor-0_0 | ID: 138258597074624 | seq: 8001
+timestamp1 = 1771113287.030956 line= SELECT * FROM usertable WHERE YCSB_KEY=88;
+  2timestamp1 = 1771113287.030956 tid= 138258597074624
+SELECT 1
+[(88, 'WhpxG6Lg8g9B3JLA65Q9', 'cidbrC3PXpWGZEHidNYE', '9N1SIeJPRgnFC84FFIbQ', 'oQB90W7vCeCLJRblPDka', 'QaEQF4GxBhtpg5W9B2eD', 'fSLW43Yv8DZy7CoGHHQr', 'mieLxJoWmkLrW1RNLekq', 'TxQY1UF6qxdfhSkdEkUC', 'iqjasLwUCjStteCEBCWf', 'STyvRtzN3fPERjag5NCe')]
+    time diff (ms) = 3.303050994873047 tid= 138258597074624
+Thread: ThreadPoolExecutor-0_0 | ID: 138258597074624 | seq: 12001
+timestamp1 = 1771113292.2815099 line= SELECT * FROM usertable WHERE YCSB_KEY=115;
+  2timestamp1 = 1771113292.2815099 tid= 138258597074624
+SELECT 0
+[]
+    time diff (ms) = 3.1948089599609375 tid= 138258597074624
+Thread: ThreadPoolExecutor-0_0 | ID: 138258597074624 | seq: 16001
+timestamp1 = 1771113297.5326374 line= UPDATE usertable SET FIELD10='eiVZDAdOVudXb7Rhdbxt', FIELD1='SvaQ6GcxL8b2LjZ1LfMi', FIELD2='NrAo4rqB4swpOwGf8aRn', FIELD3='UmBm57HNeqrOywPS1Fx7', FIELD4='02gzUHnVAslswktiIlL7', FIELD5='lS5qUjWlCebZ3NGGEDG1', FIELD6='PWV1hcBOd7GmKhP6cmqL', FIELD7='Xe8U6hxZF4bD5x9hsygM', FIELD8='IROvay9ltlTKhVkKIe71', FIELD9='E6xk1n0qXR6gu52zc4Sg' WHERE YCSB_KEY=6;
+  2timestamp1 = 1771113297.5326374 tid= 138258597074624
+UPDATE 0
+    time diff (ms) = 3.1545162200927734 tid= 138258597074624
+Thread: ThreadPoolExecutor-0_0 | ID: 138258597074624 | seq: 20001
+timestamp1 = 1771113302.782202 line= SELECT * FROM usertable WHERE YCSB_KEY=72;
+  2timestamp1 = 1771113302.782202 tid= 138258597074624
+SELECT 0
+[]
+    time diff (ms) = 3.284931182861328 tid= 138258597074624
+overall time taken (millisec) = 26995.47505378723
+ total wait time (ms) 19323.752498627488
+duplicate_key_errors=0
+retry_summary: retries_total=0 serialization_retries=0 reconnects=0 permanent_failures=0

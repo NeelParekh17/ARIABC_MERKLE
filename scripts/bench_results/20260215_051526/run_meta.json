@@ -1,0 +1,42 @@
+{
+  "created_utc": "2026-02-14T23:45:26+00:00",
+  "repo_root": "/work/ARIABC/AriaBC",
+  "scripts_dir": "/work/ARIABC/AriaBC/scripts",
+  "threads": [
+    1,
+    4,
+    8,
+    12,
+    16,
+    20,
+    24,
+    28,
+    32,
+    36,
+    40,
+    44,
+    48,
+    52,
+    56,
+    60,
+    64
+  ],
+  "runs": 3,
+  "modes": [
+    "det",
+    "nondet"
+  ],
+  "rate": 800,
+  "db": {
+    "name": "postgres",
+    "user": "postgres",
+    "port": 5438
+  },
+  "commands": {
+    "start_server": "/work/ARIABC/AriaBC/scripts/start_server.sh",
+    "restore_sql": "/work/ARIABC/AriaBC/scripts/restore_usertable.sql",
+    "workload_py": "/work/ARIABC/AriaBC/scripts/generic-saicopg-traffic-load+logSkip-safedb+pg.py",
+    "psql": "/work/ARIABC/install/bin/psql",
+    "python": "/usr/bin/python3"
+  }
+}
