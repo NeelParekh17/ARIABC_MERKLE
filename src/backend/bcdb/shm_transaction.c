@@ -908,18 +908,7 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
     PG_TRY();
     {
         table_tuple_insert(relation, slot, cid, 0, NULL);
-        
-        /* DIAGNOSTIC: Log every INSERT completion */
-        {
-            bool isnull;
-            Datum d = slot_getattr(slot, 1, &isnull);
-            int keyval = isnull ? -1 : DatumGetInt32(d);
-            elog(WARNING, "OPTIM_INS: pid=%d key=%d tid=(%u,%u)",
-                 getpid(), keyval,
-                 ItemPointerGetBlockNumberNoCheck(&slot->tts_tid),
-                 ItemPointerGetOffsetNumberNoCheck(&slot->tts_tid));
-        }
-        
+
         heap_apply_index(relation, slot, true, true);
 
         ReleaseCurrentSubTransaction();
@@ -933,14 +922,6 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
         CurrentResourceOwner = old_owner;
         RollbackAndReleaseCurrentSubTransaction();
         FlushErrorState();
-        
-        /* DIAGNOSTIC: Log every INSERT failure */
-        {
-            bool isnull;
-            Datum d = slot_getattr(slot, 1, &isnull);
-            elog(WARNING, "OPTIM_INS_FAIL: pid=%d key=%d (duplicate?)",
-                 getpid(), isnull ? -1 : DatumGetInt32(d));
-        }
     }
     PG_END_TRY();
 
@@ -1186,27 +1167,8 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
 
     DEBUGMSG("[ZL] tx %s applying optim delete (rel: %d)", activeTx->hash, relOid);
 
-    /* Count all apply_optim_delete calls */
-    {
-        bool _d_isnull;
-        Datum _d_key = (Datum)0;
-        int _d_keyval = -1;
-        if (storedSlot != NULL && !TTS_EMPTY(storedSlot))
-        {
-            _d_key = slot_getattr(storedSlot, 1, &_d_isnull);
-            if (!_d_isnull) _d_keyval = DatumGetInt32(_d_key);
-        }
-        elog(WARNING, "OPTIM_DEL_ENTER: pid=%d key=%d tid=(%u,%u) merkle_enabled=%d",
-             getpid(), _d_keyval,
-             ItemPointerGetBlockNumberNoCheck(tupleid),
-             ItemPointerGetOffsetNumberNoCheck(tupleid),
-             enable_merkle_index);
-    }
-
     if (!enable_merkle_index)
     {
-        elog(WARNING, "MERKLE_DISABLED_DEL: pid=%d relOid=%u — deleting without Merkle XOR-OUT!",
-             getpid(), relOid);
         result = table_tuple_delete(relation, tupleid,
                            cid,
                            InvalidSnapshot,
@@ -1267,13 +1229,6 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
         bool d_isnull;
         Datum d_key;
         d_key = slot_getattr(oldSlot, 1, &d_isnull);
-        elog(WARNING,
-             "MERKLE_DEL_ZERO_HASH: pid=%d empty=%d key=%d tid=(%u,%u) — Merkle XOR-OUT SKIPPED!",
-             getpid(),
-             TTS_EMPTY(oldSlot) ? 1 : 0,
-             d_isnull ? -1 : DatumGetInt32(d_key),
-             ItemPointerGetBlockNumberNoCheck(&currentTid),
-             ItemPointerGetOffsetNumberNoCheck(&currentTid));
     }
 
         if (hasOldHash)
@@ -1305,20 +1260,6 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
                                                     indexInfo->ii_NumIndexKeyAttrs,
                                                     RelationGetDescr(indexRel),
                                                     totalLeaves);
-
-                    /* GENERIC DIAGNOSTIC: Log every Merkle DELETE */
-                    {
-                        bool key_isnull;
-                        Datum key_datum = slot_getattr(oldSlot, 1, &key_isnull);
-                        elog(WARNING,
-                             "MERKLE_DEL: pid=%d leaf=%d key=%d tid=(%u,%u) hash=%08x",
-                             getpid(),
-                             pending[pendingCount].partitionId,
-                             key_isnull ? -1 : DatumGetInt32(key_datum),
-                             ItemPointerGetBlockNumberNoCheck(&currentTid),
-                             ItemPointerGetOffsetNumberNoCheck(&currentTid),
-                             *(uint32 *) oldHash.data);
-                    }
 
                     pendingCount++;
                 }
@@ -1458,20 +1399,13 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
          * that already committed and the INSERT hasn't come yet).
          * Nothing to XOR-out, nothing to delete. This is normal.
          */
-        elog(WARNING, "DEFERRED_DEL_KEY_NOTFOUND: pid=%d key=%d — no row to delete, skipping",
-             getpid(), keyval);
         if (oldSlot)
             ExecDropSingleTupleTableSlot(oldSlot);
         RelationClose(relation);
         return;
     }
 
-    elog(WARNING, "DEFERRED_DEL_REEXEC: pid=%d key=%d tid=(%u,%u)",
-         getpid(), keyval,
-         ItemPointerGetBlockNumberNoCheck(&currentTid),
-         ItemPointerGetOffsetNumberNoCheck(&currentTid));
-
-    /* CRITICAL FIX: Use merkle_compute_row_hash instead of merkle_compute_slot_hash */
+    /* Use merkle_compute_row_hash to get the old hash before deletion */
     merkle_compute_row_hash(relation, &currentTid, &oldHash);
     hasOldHash = !merkle_hash_is_zero(&oldHash);
 
@@ -1506,14 +1440,6 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
                                                 RelationGetDescr(indexRel),
                                                 totalLeaves);
 
-                elog(WARNING, "MERKLE_DEL: pid=%d leaf=%d key=%d tid=(%u,%u) hash=%08x [deferred-reexec]",
-                     getpid(),
-                     pending[pendingCount].partitionId,
-                     keyval,
-                     ItemPointerGetBlockNumberNoCheck(&currentTid),
-                     ItemPointerGetOffsetNumberNoCheck(&currentTid),
-                     *(uint32 *)&oldHash);
-
                 pendingCount++;
             }
 
@@ -1529,12 +1455,6 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
                                 false,
                                 &tmfd,
                                 false);
-
-    if (result != TM_Ok)
-    {
-        elog(WARNING, "DEFERRED_DEL_HEAP_FAIL: pid=%d key=%d result=%d",
-             getpid(), keyval, (int)result);
-    }
 
     /* Apply Merkle XOR-outs after successful heap delete */
     if (result == TM_Ok && hasOldHash)

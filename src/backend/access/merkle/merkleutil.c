@@ -79,7 +79,6 @@ merkle_xact_callback(XactEvent event, void *arg)
     }
     else if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
     {
-        ereport(NOTICE, (errmsg("merkle_xact_callback: ABORT detected, %d pending ops", list_length(pendingOps))));
         foreach(lc, pendingOps)
         {
             MerklePendingOp *op = (MerklePendingOp *) lfirst(lc);
@@ -155,7 +154,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
     indexRel = op->indexRel;
     if (indexRel == NULL)
     {
-        ereport(WARNING,
+        ereport(DEBUG5,
                 (errmsg("merkle_xact_callback: missing relation for undo (relid=%u)", op->relid)));
         return;
     }
@@ -171,7 +170,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
         totalNodes <= 0 || totalLeaves <= 0 ||
         nodesPerPage <= 0 || numTreePages <= 0)
     {
-        ereport(WARNING,
+        ereport(DEBUG5,
                 (errmsg("merkle_xact_callback: skipping undo due to invalid metadata "
                         "(leavesPerPartition=%d nodesPerPartition=%d totalNodes=%d totalLeaves=%d nodesPerPage=%d numTreePages=%d)",
                         leavesPerPartition, nodesPerPartition, totalNodes, totalLeaves, nodesPerPage, numTreePages)));
@@ -180,7 +179,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
 
     if (op->leafId < 0 || op->leafId >= totalLeaves)
     {
-        ereport(WARNING,
+        ereport(DEBUG5,
                 (errmsg("merkle_xact_callback: skipping invalid undo leafId %d (totalLeaves=%d)",
                         op->leafId, totalLeaves)));
         return;
@@ -206,7 +205,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
 
             if (actualNodeIdx < 0 || actualNodeIdx >= totalNodes)
             {
-                ereport(WARNING,
+                ereport(DEBUG5,
                         (errmsg("merkle_xact_callback: invalid node index %d during undo", actualNodeIdx)));
                 break;
             }
@@ -214,7 +213,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
             pageNum = actualNodeIdx / nodesPerPage;
             if (pageNum < 0 || pageNum >= numTreePages)
             {
-                ereport(WARNING,
+                ereport(DEBUG5,
                         (errmsg("merkle_xact_callback: invalid page number %d during undo", pageNum)));
                 break;
             }
@@ -262,7 +261,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
         }
 
         FlushErrorState();
-        ereport(WARNING,
+        ereport(DEBUG5,
                 (errmsg("merkle_xact_callback: failed to undo op (relid=%u leafId=%d)",
                         op->relid, op->leafId)));
     }
@@ -514,10 +513,7 @@ merkle_compute_partition_id_single(Datum key, Oid keytype, int numLeaves)
     
     /* Safety check: prevent division by zero */
     if (numLeaves <= 0)
-    {
-        elog(WARNING, "merkle_compute_partition_id_single: invalid numLeaves=%d, returning 0", numLeaves);
         return 0;
-    }
     
     /*
      * Convert key to integer for partition calculation.
@@ -592,10 +588,7 @@ merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
     
     /* Safety check: prevent division by zero */
     if (numLeaves <= 0)
-    {
-        elog(WARNING, "merkle_compute_partition_id: invalid numLeaves=%d, returning 0", numLeaves);
         return 0;
-    }
     
     /* If only one key, use the optimized single-key path */
     if (nkeys == 1)
@@ -692,10 +685,7 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
     
     /* Safety check: prevent division by zero if metadata is invalid */
     if (leavesPerPartition <= 0)
-    {
-        elog(WARNING, "merkle_update_tree_path: invalid leavesPerPartition=%d, ignoring update", leavesPerPartition);
         return;
-    }
 
     if (leafId < 0 || leafId >= totalLeaves)
     {

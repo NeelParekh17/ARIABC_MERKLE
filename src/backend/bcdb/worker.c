@@ -150,19 +150,11 @@ bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
         return;
 
     if (!parse_ycsb_key_eq_int32(sql, &keyval))
-    {
-        elog(WARNING, "OPTIM_DEL_DEFER_SKIP: pid=%d completionTag=\"%s\" (could not parse YCSB_KEY)",
-             getpid(), completionTag);
         return;
-    }
 
     relOid = RelnameGetRelid("usertable");
     if (!OidIsValid(relOid))
-    {
-        elog(WARNING, "OPTIM_DEL_DEFER_SKIP: pid=%d key=%d (rel usertable not found)",
-             getpid(), keyval);
         return;
-    }
 
     h = hash_any((unsigned char *) &keyval, sizeof(int32));
     SET_PREDICATELOCKTARGETTAG_TUPLE(tag, 0, relOid,
@@ -170,9 +162,6 @@ bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
                                      (OffsetNumber)((h & 0xFFFF) | 1));
     ws_table_reserveDT(&tag);
     store_optim_delete_by_key(relOid, keyval, GetCurrentCommandId(true));
-
-    elog(WARNING, "OPTIM_DEL_DEFER_ENQUEUE: pid=%d key=%d relOid=%u",
-         getpid(), keyval, relOid);
 }
 
 BCBlockID 
