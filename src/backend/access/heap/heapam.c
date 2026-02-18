@@ -1860,12 +1860,15 @@ heap_apply_index(Relation relation, TupleTableSlot *slot, bool conflict_check, b
  *
  * phase controls which indexes are processed:
  *   HEAP_INDEX_ALL        - all indexes (default, same as heap_apply_index)
- *   HEAP_INDEX_NO_MERKLE  - skip merkle indexes (for btree-only pass)
- *   HEAP_INDEX_MERKLE_ONLY - only merkle indexes
+ *   HEAP_INDEX_NO_MERKLE  - skip merkle indexes
  *
- * This split is needed for BCDB optimistic inserts: the btree unique
- * check must succeed BEFORE any merkle XOR is applied, because
- * subtransaction rollback does NOT undo merkle shared-buffer writes.
+ * Some BCDB paths maintain Merkle indexes separately (e.g. UPDATE must
+ * reflect changes even for HOT updates where update_indexes is false), so
+ * they may call with HEAP_INDEX_NO_MERKLE to avoid double-applying Merkle
+ * maintenance here.
+ *
+ * Merkle index updates mutate shared buffers directly, but are rollback-safe
+ * via merkleutil.c's xact/subxact undo callbacks.
  */
 void
 heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
@@ -1873,61 +1876,68 @@ heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
 {
 	List          *indexList;
 	ListCell      *index_cell;
+	bool			save_skip_conflict_checking;
 
+	indexList = NIL;
+	save_skip_conflict_checking = skip_conflict_checking;
 	skip_conflict_checking = conflict_check;
-	indexList = RelationGetIndexList(relation);
 
-    foreach(index_cell, indexList)
+	PG_TRY();
 	{
-        Oid 		indexOid;
-        Relation 	indexRelation;
-        IndexInfo  *indexInfo;
-        Datum   	index_values[INDEX_MAX_KEYS];
-        bool 		isNull[INDEX_MAX_KEYS];
-        IndexUniqueCheck indexUniqueCheck;
-        bool        is_merkle;
+		indexList = RelationGetIndexList(relation);
 
-		indexOid = lfirst_oid(index_cell);
-        indexRelation = RelationIdGetRelation(indexOid);
+		foreach(index_cell, indexList)
+		{
+			Oid 		indexOid;
+			Relation 	indexRelation;
+			IndexInfo  *indexInfo;
+			Datum   	index_values[INDEX_MAX_KEYS];
+			bool 		isNull[INDEX_MAX_KEYS];
+			IndexUniqueCheck indexUniqueCheck;
+			bool        is_merkle;
 
-        is_merkle = (indexRelation->rd_rel->relam == MERKLE_AM_OID);
+			indexOid = lfirst_oid(index_cell);
+			indexRelation = RelationIdGetRelation(indexOid);
 
-        /* Skip based on phase */
-        if (phase == HEAP_INDEX_NO_MERKLE && is_merkle)
-        {
-            RelationClose(indexRelation);
-            continue;
-        }
-        if (phase == HEAP_INDEX_MERKLE_ONLY && !is_merkle)
-        {
-            RelationClose(indexRelation);
-            continue;
-        }
+			is_merkle = (indexRelation->rd_rel->relam == MERKLE_AM_OID);
 
-        indexInfo = BuildIndexInfo(indexRelation);
+			/* Skip based on phase */
+			if (phase == HEAP_INDEX_NO_MERKLE && is_merkle)
+			{
+				RelationClose(indexRelation);
+				continue;
+			}
 
-		if (unique_check && indexRelation->rd_index->indisunique)
-			indexUniqueCheck = UNIQUE_CHECK_YES;
-		else
-			indexUniqueCheck = UNIQUE_CHECK_NO;
+			indexInfo = BuildIndexInfo(indexRelation);
 
-        FormIndexDatum(indexInfo,
-                slot,
-                NULL,
-                index_values,
-                isNull);
+			if (unique_check && indexRelation->rd_index->indisunique)
+				indexUniqueCheck = UNIQUE_CHECK_YES;
+			else
+				indexUniqueCheck = UNIQUE_CHECK_NO;
 
-        index_insert(indexRelation,
-                index_values,
-                isNull,
-                &(slot->tts_tid),
-                relation,
-                indexUniqueCheck,
-                indexInfo);
-        RelationClose(indexRelation);
-    }
-		list_free(indexList);
-	skip_conflict_checking = false;
+			FormIndexDatum(indexInfo,
+					slot,
+					NULL,
+					index_values,
+					isNull);
+
+			index_insert(indexRelation,
+					index_values,
+					isNull,
+					&(slot->tts_tid),
+					relation,
+					indexUniqueCheck,
+					indexInfo);
+			RelationClose(indexRelation);
+		}
+	}
+	PG_FINALLY();
+	{
+		if (indexList != NIL)
+			list_free(indexList);
+		skip_conflict_checking = save_skip_conflict_checking;
+	}
+	PG_END_TRY();
 }
 
 /*
