@@ -69,7 +69,6 @@
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
 #include "catalog/index.h"
-#include "catalog/pg_am_d.h"
 #include "access/htup_details.h"
 #include "bcdb/worker.h"
 
@@ -1852,32 +1851,10 @@ ReleaseBulkInsertStatePin(BulkInsertState bistate)
 void
 heap_apply_index(Relation relation, TupleTableSlot *slot, bool conflict_check, bool unique_check)
 {
-	heap_apply_index_phase(relation, slot, conflict_check, unique_check, HEAP_INDEX_ALL);
-}
-
-/*
- * heap_apply_index_phase - insert into indexes with phase control.
- *
- * phase controls which indexes are processed:
- *   HEAP_INDEX_ALL        - all indexes (default, same as heap_apply_index)
- *   HEAP_INDEX_NO_MERKLE  - skip merkle indexes (for btree-only pass)
- *   HEAP_INDEX_MERKLE_ONLY - only merkle indexes
- *
- * This split is needed for BCDB optimistic inserts: the btree unique
- * check must succeed BEFORE any merkle XOR is applied, because
- * subtransaction rollback does NOT undo merkle shared-buffer writes.
- */
-void
-heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
-					   bool conflict_check, bool unique_check, int phase)
-{
-	List          *indexList;
-	ListCell      *index_cell;
+	ListCell       *index_cell;
 
 	skip_conflict_checking = conflict_check;
-	indexList = RelationGetIndexList(relation);
-
-    foreach(index_cell, indexList)
+    foreach(index_cell, relation->rd_indexlist)
 	{
         Oid 		indexOid;
         Relation 	indexRelation;
@@ -1885,25 +1862,9 @@ heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
         Datum   	index_values[INDEX_MAX_KEYS];
         bool 		isNull[INDEX_MAX_KEYS];
         IndexUniqueCheck indexUniqueCheck;
-        bool        is_merkle;
 
-		indexOid = lfirst_oid(index_cell);
+        indexOid = index_cell->oid_value;
         indexRelation = RelationIdGetRelation(indexOid);
-
-        is_merkle = (indexRelation->rd_rel->relam == MERKLE_AM_OID);
-
-        /* Skip based on phase */
-        if (phase == HEAP_INDEX_NO_MERKLE && is_merkle)
-        {
-            RelationClose(indexRelation);
-            continue;
-        }
-        if (phase == HEAP_INDEX_MERKLE_ONLY && !is_merkle)
-        {
-            RelationClose(indexRelation);
-            continue;
-        }
-
         indexInfo = BuildIndexInfo(indexRelation);
 
 		if (unique_check && indexRelation->rd_index->indisunique)
@@ -1926,7 +1887,6 @@ heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
                 indexInfo);
         RelationClose(indexRelation);
     }
-		list_free(indexList);
 	skip_conflict_checking = false;
 }
 

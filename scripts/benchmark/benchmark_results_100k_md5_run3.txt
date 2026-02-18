@@ -1,6 +1,0 @@
-Insert Time: 52s, Throughput: 1923 ops/sec
-VERIFICATION PASSED: Found 100000 records (Expected: 100000)
-Update Time: 55s, Throughput: 1818 ops/sec
-VERIFICATION PASSED: Found 100000 updated records (Expected: 100000)
-Delete Time: 45s, Throughput: 2222 ops/sec
-VERIFICATION PASSED: Found 0 records (Expected: 0)

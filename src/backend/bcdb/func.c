@@ -172,11 +172,24 @@ bcdb_block_submit(PG_FUNCTION_ARGS)
 {
     char	   *bcdb_query = PG_GETARG_CSTRING(0);
 
-    bcdb_middleware_submit_block(bcdb_query);
+    char *output = bcdb_middleware_submit_block(bcdb_query);
 #if SAFEDBG
 	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
     print_trace();
+	printf("ariaMyDbg %s : %s: %d out = %s\n", __FILE__, __FUNCTION__, __LINE__ , output);
 #endif
+
+    PG_RETURN_CSTRING(output);
+    //PG_RETURN_BOOL(true);
+}
+
+Datum
+bcdb_block_submit2(PG_FUNCTION_ARGS)
+{
+    char	   *bcdb_query = PG_GETARG_CSTRING(0);
+
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+    bcdb_middleware_submit_block2(bcdb_query);
 
     PG_RETURN_BOOL(true);
 }
@@ -190,7 +203,7 @@ bcdb_add_tx_with_block_id(PG_FUNCTION_ARGS)
     bcdb_middleware_set_txs_committed_block(tx_hash, block_id);
 
     PG_RETURN_BOOL(true);
- 
+
 }
 
 Datum

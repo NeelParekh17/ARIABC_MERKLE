@@ -28,7 +28,6 @@
 
 #include "access/commit_ts.h"
 #include "access/gin.h"
-#include "access/merkle.h"
 #include "access/rmgr.h"
 #include "access/tableam.h"
 #include "access/transam.h"
@@ -889,15 +888,6 @@ static const unit_conversion time_unit_conversion_table[] =
 
 static struct config_bool ConfigureNamesBool[] =
 {
-	{
-		{"enable_merkle_index", PGC_USERSET, DEVELOPER_OPTIONS,
-			gettext_noop("Enables Merkle index maintenance operations."),
-			gettext_noop("When disabled, Merkle indexes will not be updated by data modifications, leading to inconsistency. Use with caution.")
-		},
-		&enable_merkle_index,
-		true,
-		NULL, NULL, NULL
-	},
 	{
 		{"is_bcdb_master", PGC_BACKEND, CLIENT_CONN,
 			gettext_noop("Start a bcdb master."),
