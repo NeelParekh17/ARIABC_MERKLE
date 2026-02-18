@@ -131,9 +131,6 @@ merkle_get_options(Relation indexRel)
         opts->leaves_per_partition <= 0 || opts->leaves_per_partition > 1024 ||
         (opts->leaves_per_partition & (opts->leaves_per_partition - 1)) != 0)
     {
-        ereport(NOTICE,
-                (errmsg("merkle: invalid options detected (partitions=%d, leaves=%d), using defaults",
-                        opts->partitions, opts->leaves_per_partition)));
         opts->partitions = MERKLE_NUM_PARTITIONS;
         opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
     }
