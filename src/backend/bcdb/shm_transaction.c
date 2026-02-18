@@ -895,30 +895,21 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
     DEBUGMSG("[ZL] tx %s applying optim insert (rel: %d)", activeTx->hash, relation->rd_id);
 
     /*
-     * Two-phase index insertion to protect merkle tree integrity.
+     * Run the heap + index insert inside a subtransaction so we can catch a
+     * duplicate-key ERROR (or any ERROR) without aborting the caller's serial
+     * transaction.
      *
-     * Phase 1 (subtransaction): heap insert + btree indexes only.
-     *   If btree raises duplicate-key ERROR, the subtransaction is
-     *   rolled back cleanly — no merkle state was touched.
-     *
-     * Phase 2 (parent transaction): merkle index only.
-     *   Only runs if phase 1 succeeded, so the XOR into the merkle
-     *   tree is guaranteed to correspond to an actually-inserted row.
-     *
-     * Why: subtransaction rollback does NOT undo merkle XOR writes
-     * in shared buffers (they are direct page modifications, not
-     * undoable via CLOG abort). Processing merkle before btree in
-     * a single heap_apply_index call leaves phantom XOR entries
-     * when the btree unique check subsequently fails.
+     * Note: Merkle indexes mutate shared buffers directly, so they rely on the
+     * explicit (sub)xact undo mechanism in merkleutil.c to rollback XOR writes
+     * on subtransaction abort.
      */
 
-    /* Phase 1: heap + btree (no merkle) inside subtransaction */
     BeginInternalSubTransaction("bcdb_insert");
     PG_TRY();
     {
         table_tuple_insert(relation, slot, cid, 0, NULL);
         
-        /* DIAGNOSTIC: Log every INSERT Phase1 completion */
+        /* DIAGNOSTIC: Log every INSERT completion */
         {
             bool isnull;
             Datum d = slot_getattr(slot, 1, &isnull);
@@ -929,8 +920,8 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
                  ItemPointerGetOffsetNumberNoCheck(&slot->tts_tid));
         }
         
-        heap_apply_index_phase(relation, slot, true, true, HEAP_INDEX_NO_MERKLE);
-        /* Btree unique check passed — merge subtxn into parent */
+        heap_apply_index(relation, slot, true, true);
+
         ReleaseCurrentSubTransaction();
         MemoryContextSwitchTo(old_context);
         CurrentResourceOwner = old_owner;
@@ -938,14 +929,12 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
     }
     PG_CATCH();
     {
-        /* Duplicate key or other error — rollback subtxn.
-         * Heap insert and btree entries are undone. Merkle is untouched. */
         MemoryContextSwitchTo(old_context);
         CurrentResourceOwner = old_owner;
         RollbackAndReleaseCurrentSubTransaction();
         FlushErrorState();
         
-        /* DIAGNOSTIC: Log every INSERT Phase1 failure */
+        /* DIAGNOSTIC: Log every INSERT failure */
         {
             bool isnull;
             Datum d = slot_getattr(slot, 1, &isnull);
@@ -954,58 +943,6 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
         }
     }
     PG_END_TRY();
-
-    /* Phase 2: merkle index — only if phase 1 committed */
-    if (insert_ok)
-    {
-        /* CRITICAL FIX: Use merkle_compute_row_hash (heap tuple) instead of
-         * merkle_compute_slot_hash to ensure consistency with merkle_verify.
-         * The slot-based hash can differ from the heap-based hash due to
-         * tuple representation differences, causing verification failures. */
-        if (enable_merkle_index && ItemPointerIsValid(&slot->tts_tid))
-        {
-            List *indexList;
-            ListCell *lc;
-            MerkleHash hash;
-            
-            /* Compute hash from the HEAP TUPLE (via TID), not the slot */
-            merkle_compute_row_hash(relation, &slot->tts_tid, &hash);
-            
-            if (!merkle_hash_is_zero(&hash))
-            {
-                indexList = RelationGetIndexList(relation);
-                
-                foreach(lc, indexList)
-                {
-                    Oid indexOid = lfirst_oid(lc);
-                    Relation indexRel = index_open(indexOid, RowExclusiveLock);
-                    
-                    if (indexRel->rd_rel->relam == MERKLE_AM_OID)
-                    {
-                        IndexInfo *indexInfo;
-                        Datum values[INDEX_MAX_KEYS];
-                        bool isnull[INDEX_MAX_KEYS];
-                        int totalLeaves;
-                        int partitionId;
-                        
-                        indexInfo = BuildIndexInfo(indexRel);
-                        FormIndexDatum(indexInfo, slot, NULL, values, isnull);
-                        merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
-                        partitionId = merkle_compute_partition_id(values, isnull,
-                                                                 indexInfo->ii_NumIndexKeyAttrs,
-                                                                 RelationGetDescr(indexRel),
-                                                                 totalLeaves);
-                        
-                        merkle_update_tree_path(indexRel, partitionId, &hash, true);
-                    }
-                    
-                    index_close(indexRel, RowExclusiveLock);
-                }
-                
-                list_free(indexList);
-            }
-        }
-    }
 
     RelationClose(relation);
     return insert_ok;
