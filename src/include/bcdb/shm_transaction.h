@@ -214,16 +214,13 @@ extern void         create_tx_pool(void);
 extern void         clear_tx_pool(void);
 extern Size         tx_pool_size(void);
 extern BCDBShmXact* get_tx_by_hash(const char *hash);
-extern BCDBShmXact* get_tx_by_xid(TransactionId xid);
+/* get_tx_by_xid and get_tx_by_xid_locked removed — no callers; see shm_transaction.c */
 extern void         add_tx_xid_map(TransactionId id, BCDBShmXact *tx);
 extern void         remove_tx_xid_map(TransactionId id);
 extern BCDBShmXact* create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int isolation, bool pred_lock);
 extern void         delete_tx(BCDBShmXact* tx);
 
-extern uint32 compose_tuple_hash(Oid relation_id, ItemPointer tid);
-extern uint32 compose_index_hash(Oid relation_id, IndexTuple itup);
-extern void  compose_tx_hash(BCBlockID bid, BCTxID tx_id, char* out_hash);
-extern BCDBShmXact* get_tx_by_xid_locked(TransactionId xid, bool exclusive);
+/* compose_tuple_hash, compose_index_hash, compose_tx_hash removed — no callers */
 
 extern uint32 dummy_hash(const void *key, Size key_size);
 extern void store_optim_update(TupleTableSlot* slot, ItemPointer old_tid);
@@ -235,14 +232,14 @@ extern bool apply_optim_insert(TupleTableSlot* slot, CommandId cid);
 extern void apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid);
 extern void apply_deferred_delete_by_key(Oid relOid, int keyval);
 extern bool apply_optim_writes(void);
-extern bool check_stale_read(void);
-extern void clean_ws_table_record(void);
+/* check_stale_read removed — SSI stale-read check that was never called; see shm_transaction.c */
+/* clean_ws_table_record, clean_rs_table_record removed — non-DT per-entry cleanup with no callers;
+ * use clean_rs_ws_table() (bulk clear) instead */
 extern bool rs_table_check(PREDICATELOCKTARGETTAG *tag);
-extern void clean_rs_table_record(void);
 extern void clean_rs_ws_table(void);
 
-extern void rs_table_reserve(const PREDICATELOCKTARGETTAG *tag);
-extern void ws_table_reserve(PREDICATELOCKTARGETTAG *tag);
+/* ws_table_reserve, rs_table_reserve removed — non-DT variants with no callers;
+ * use ws_table_reserveDT / rs_table_reserveDT instead */
 extern bool ws_table_check(PREDICATELOCKTARGETTAG *tag);
 extern void conflict_check(void);
 

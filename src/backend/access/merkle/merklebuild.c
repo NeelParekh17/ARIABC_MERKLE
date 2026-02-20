@@ -6,8 +6,6 @@
  * This file implements the index build functions that create a new
  * Merkle index from existing table data.
  *
- * Copyright (c) 2026, Neel Parekh
- *
  * IDENTIFICATION
  *    src/backend/access/merkle/merklebuild.c
  *
@@ -90,7 +88,18 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     double              reltuples;
     MerkleOptions      *opts;
     int                 totalLeaves;
+    bool                saved_suppress;
     
+    /*
+     * If merkle_update_detection is enabled, suppress touched-node reporting
+     * during CREATE INDEX/REINDEX builds. Users generally want the report only
+     * for DML (INSERT/UPDATE/DELETE), not for bulk index construction.
+     */
+    saved_suppress = merkle_update_detection_suppress;
+    merkle_update_detection_suppress = true;
+
+    PG_TRY();
+    {
     /* Get user-specified options or defaults */
     opts = merkle_get_options(indexRel);
     totalLeaves = opts->partitions * opts->leaves_per_partition;
@@ -163,6 +172,15 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     result->heap_tuples = reltuples;
     result->index_tuples = buildstate.indtuples;
     
+    }
+    PG_CATCH();
+    {
+        merkle_update_detection_suppress = saved_suppress;
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    merkle_update_detection_suppress = saved_suppress;
     return result;
 }
 

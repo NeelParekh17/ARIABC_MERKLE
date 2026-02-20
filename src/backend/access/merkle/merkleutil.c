@@ -6,8 +6,6 @@
  * This file contains helper functions for hash computation, XOR operations,
  * tree traversal, and page access.
  *
- * Copyright (c) 2026, Neel Parekh
- *
  * IDENTIFICATION
  *    src/backend/access/merkle/merkleutil.c
  *
@@ -54,9 +52,39 @@ static List *pendingOps = NIL;
 static bool xactCallbackRegistered = false;
 static bool subxactCallbackRegistered = false;
 
+/*
+ * Optional per-transaction reporting of touched nodes (GUC-controlled).
+ * We record the pre-change hash for each touched node and, at PRE_COMMIT,
+ * emit a NOTICE table of nodes whose final hash differs from the initial.
+ */
+typedef struct MerkleTouchedNode
+{
+    Oid                 indexRelid;
+    SubTransactionId    subxid;
+    int                 partition;       /* subtree/partition id */
+    int                 nodeInPartition; /* 1-indexed */
+    int                 actualNodeIdx;   /* 0-based global node index */
+    int                 pageNum;
+    int                 idxInPage;
+    int                 nodesPerPage;
+    int                 numTreePages;
+    MerkleHash          initialHash;
+    MerkleHash          finalHash;
+    bool                finalValid;
+    bool                changed;
+} MerkleTouchedNode;
+
+static List *touchedNodes = NIL;
+
 static void merkle_undo_pending_op(MerklePendingOp *op);
 static void merkle_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
                                     SubTransactionId parentSubid, void *arg);
+static void merkle_track_touched_node(Relation indexRel, int partition,
+                                      int nodeInPartition, int actualNodeIdx,
+                                      int pageNum, int idxInPage,
+                                      int nodesPerPage, int numTreePages,
+                                      const MerkleHash *oldHash);
+static void merkle_emit_touched_nodes_report(void);
 
 /*
  * merkle_xact_callback() - Handle transaction commit/abort
@@ -72,10 +100,31 @@ merkle_xact_callback(XactEvent event, void *arg)
 
     (void) arg;
 
+    /*
+     * IMPORTANT: We must emit the report at PRE_COMMIT, not COMMIT.
+     *
+     * At XACT_EVENT_COMMIT, PostgreSQL has already ended the transaction
+     * from the relcache perspective (ProcArrayEndTransaction ran), and
+     * opening relations can trip IsTransactionState() assertions.
+     *
+     * Also, do not emit from parallel workers (PARALLEL_PRE_COMMIT), since
+     * they may not hold the relevant relation locks and shouldn't be doing
+     * extra I/O/NOTICE output during leader commit.
+     */
+    if (event == XACT_EVENT_PRE_COMMIT)
+    {
+        merkle_emit_touched_nodes_report();
+        return;
+    }
+
     if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_PARALLEL_COMMIT)
     {
+
         list_free_deep(pendingOps);
         pendingOps = NIL;
+
+        list_free_deep(touchedNodes);
+        touchedNodes = NIL;
     }
     else if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
     {
@@ -87,6 +136,9 @@ merkle_xact_callback(XactEvent event, void *arg)
         
         list_free_deep(pendingOps);
         pendingOps = NIL;
+
+        list_free_deep(touchedNodes);
+        touchedNodes = NIL;
     }
     else if (event == XACT_EVENT_PREPARE)
     {
@@ -97,6 +149,9 @@ merkle_xact_callback(XactEvent event, void *arg)
          */
         list_free_deep(pendingOps);
         pendingOps = NIL;
+
+        list_free_deep(touchedNodes);
+        touchedNodes = NIL;
     }
 }
 
@@ -127,6 +182,17 @@ merkle_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
         merkle_undo_pending_op(op);
         pfree(op);
         pendingOps = foreach_delete_current(pendingOps, lc);
+    }
+
+    foreach(lc, touchedNodes)
+    {
+        MerkleTouchedNode *entry = (MerkleTouchedNode *) lfirst(lc);
+
+        if (entry->subxid < mySubid)
+            continue;
+
+        pfree(entry);
+        touchedNodes = foreach_delete_current(touchedNodes, lc);
     }
 }
 
@@ -266,6 +332,288 @@ merkle_undo_pending_op(MerklePendingOp *op)
                         op->relid, op->leafId)));
     }
     PG_END_TRY();
+}
+
+static void
+merkle_track_touched_node(Relation indexRel, int partition,
+                          int nodeInPartition, int actualNodeIdx,
+                          int pageNum, int idxInPage,
+                          int nodesPerPage, int numTreePages,
+                          const MerkleHash *oldHash)
+{
+    ListCell   *lc;
+    MemoryContext oldContext;
+    MerkleTouchedNode *entry;
+    Oid relid;
+
+    if (indexRel == NULL || oldHash == NULL)
+        return;
+
+    relid = RelationGetRelid(indexRel);
+
+    foreach(lc, touchedNodes)
+    {
+        entry = (MerkleTouchedNode *) lfirst(lc);
+        if (entry->indexRelid == relid && entry->actualNodeIdx == actualNodeIdx)
+            return; /* already tracked */
+    }
+
+    oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+    entry = (MerkleTouchedNode *) palloc(sizeof(MerkleTouchedNode));
+    entry->indexRelid = relid;
+    entry->subxid = GetCurrentSubTransactionId();
+    entry->partition = partition;
+    entry->nodeInPartition = nodeInPartition;
+    entry->actualNodeIdx = actualNodeIdx;
+    entry->pageNum = pageNum;
+    entry->idxInPage = idxInPage;
+    entry->nodesPerPage = nodesPerPage;
+    entry->numTreePages = numTreePages;
+    entry->initialHash = *oldHash;
+    merkle_hash_zero(&entry->finalHash);
+    entry->finalValid = false;
+    entry->changed = false;
+
+    touchedNodes = lappend(touchedNodes, entry);
+
+    MemoryContextSwitchTo(oldContext);
+}
+
+static int
+merkle_cmp_touch_read_order(const void *a, const void *b)
+{
+    const MerkleTouchedNode *ea = *(const MerkleTouchedNode * const *) a;
+    const MerkleTouchedNode *eb = *(const MerkleTouchedNode * const *) b;
+
+    if (ea->indexRelid != eb->indexRelid)
+        return (ea->indexRelid < eb->indexRelid) ? -1 : 1;
+    if (ea->pageNum != eb->pageNum)
+        return (ea->pageNum < eb->pageNum) ? -1 : 1;
+    if (ea->idxInPage != eb->idxInPage)
+        return (ea->idxInPage < eb->idxInPage) ? -1 : 1;
+    return 0;
+}
+
+static int
+merkle_cmp_touch_output_order(const void *a, const void *b)
+{
+    const MerkleTouchedNode *ea = *(const MerkleTouchedNode * const *) a;
+    const MerkleTouchedNode *eb = *(const MerkleTouchedNode * const *) b;
+
+    if (ea->indexRelid != eb->indexRelid)
+        return (ea->indexRelid < eb->indexRelid) ? -1 : 1;
+    if (ea->partition != eb->partition)
+        return (ea->partition < eb->partition) ? -1 : 1;
+    if (ea->nodeInPartition != eb->nodeInPartition)
+        return (ea->nodeInPartition < eb->nodeInPartition) ? -1 : 1;
+    return 0;
+}
+
+static void
+merkle_emit_touched_nodes_report(void)
+{
+    int         nentries;
+    int         i;
+    MerkleTouchedNode **entries;
+    MerkleTouchedNode **changed;
+    int         nchanged = 0;
+    ListCell   *lc;
+    Oid         currentRelid = InvalidOid;
+    Relation    indexRel = NULL;
+    int         currentPageNum = -1;
+    Buffer      buf = InvalidBuffer;
+    Page        page = NULL;
+    MerkleNode *nodes = NULL;
+    bool        saved_is_bcdb_worker = false;
+
+    if (!merkle_update_detection)
+        return;
+
+    nentries = list_length(touchedNodes);
+    if (nentries <= 0)
+        return;
+
+    entries = (MerkleTouchedNode **) palloc(sizeof(MerkleTouchedNode *) * nentries);
+    i = 0;
+    foreach(lc, touchedNodes)
+        entries[i++] = (MerkleTouchedNode *) lfirst(lc);
+
+    qsort(entries, nentries, sizeof(MerkleTouchedNode *), merkle_cmp_touch_read_order);
+
+    PG_TRY();
+    {
+        for (i = 0; i < nentries; i++)
+        {
+            MerkleTouchedNode *e = entries[i];
+            BlockNumber blkno;
+
+            if (e->pageNum < 0 || e->pageNum >= e->numTreePages)
+                continue;
+
+            if (e->idxInPage < 0 || e->idxInPage >= e->nodesPerPage)
+                continue;
+
+            if (e->indexRelid != currentRelid)
+            {
+                if (BufferIsValid(buf))
+                {
+                    UnlockReleaseBuffer(buf);
+                    buf = InvalidBuffer;
+                }
+                if (indexRel != NULL)
+                {
+                    relation_close(indexRel, AccessShareLock);
+                    indexRel = NULL;
+                }
+
+                indexRel = relation_open(e->indexRelid, AccessShareLock);
+                currentRelid = e->indexRelid;
+                currentPageNum = -1;
+            }
+
+            if (e->pageNum != currentPageNum)
+            {
+                if (BufferIsValid(buf))
+                {
+                    UnlockReleaseBuffer(buf);
+                    buf = InvalidBuffer;
+                }
+
+                blkno = MERKLE_TREE_START_BLKNO + e->pageNum;
+                buf = ReadBuffer(indexRel, blkno);
+                LockBuffer(buf, BUFFER_LOCK_SHARE);
+                page = BufferGetPage(buf);
+                nodes = (MerkleNode *) PageGetContents(page);
+                currentPageNum = e->pageNum;
+            }
+
+            e->finalHash = nodes[e->idxInPage].hash;
+            e->finalValid = true;
+            e->changed = (memcmp(&e->initialHash, &e->finalHash, sizeof(MerkleHash)) != 0);
+        }
+
+        if (BufferIsValid(buf))
+        {
+            UnlockReleaseBuffer(buf);
+            buf = InvalidBuffer;
+        }
+        if (indexRel != NULL)
+        {
+            relation_close(indexRel, AccessShareLock);
+            indexRel = NULL;
+        }
+    }
+    PG_CATCH();
+    {
+        if (BufferIsValid(buf))
+        {
+            UnlockReleaseBuffer(buf);
+            buf = InvalidBuffer;
+        }
+        if (indexRel != NULL)
+        {
+            relation_close(indexRel, AccessShareLock);
+            indexRel = NULL;
+        }
+
+        pfree(entries);
+        FlushErrorState();
+        return;
+    }
+    PG_END_TRY();
+
+    changed = (MerkleTouchedNode **) palloc(sizeof(MerkleTouchedNode *) * nentries);
+    for (i = 0; i < nentries; i++)
+    {
+        MerkleTouchedNode *e = entries[i];
+        if (e->finalValid && e->changed)
+            changed[nchanged++] = e;
+    }
+
+    if (nchanged <= 0)
+    {
+        pfree(entries);
+        pfree(changed);
+        return;
+    }
+
+    qsort(changed, nchanged, sizeof(MerkleTouchedNode *), merkle_cmp_touch_output_order);
+
+    currentRelid = InvalidOid;
+    indexRel = NULL;
+
+    PG_TRY();
+    {
+        /*
+         * BCDB deterministic transactions (triggered via "s <seq> ...") set
+         * is_bcdb_worker=true in the session backend, which suppresses all
+         * client-visible NOTICE output in EmitErrorReport().
+         *
+         * We only want to bypass that suppression for this Merkle report so
+         * users can see which partitions/nodes were touched. Preserve the old
+         * value and restore it on all paths.
+         */
+        saved_is_bcdb_worker = is_bcdb_worker;
+        is_bcdb_worker = false;
+
+        for (i = 0; i < nchanged; i++)
+        {
+            MerkleTouchedNode *e = changed[i];
+            char *hex;
+
+            if (e->indexRelid != currentRelid)
+            {
+                if (indexRel != NULL)
+                {
+                    relation_close(indexRel, AccessShareLock);
+                    indexRel = NULL;
+                }
+
+                indexRel = relation_open(e->indexRelid, AccessShareLock);
+                currentRelid = e->indexRelid;
+
+                ereport(NOTICE,
+                        (errmsg("Merkle update detection: index \"%s\"",
+                                RelationGetRelationName(indexRel))));
+                ereport(NOTICE,
+                        (errmsg("Partition\tnode_in_partition\tUpdated_Hash")));
+            }
+
+            hex = merkle_hash_to_hex(&e->finalHash);
+            ereport(NOTICE,
+                    (errmsg("%d\t%d\t%s",
+                            e->partition, e->nodeInPartition, hex)));
+            pfree(hex);
+        }
+
+        if (indexRel != NULL)
+        {
+            relation_close(indexRel, AccessShareLock);
+            indexRel = NULL;
+        }
+
+        is_bcdb_worker = saved_is_bcdb_worker;
+    }
+    PG_CATCH();
+    {
+        is_bcdb_worker = saved_is_bcdb_worker;
+
+        if (indexRel != NULL)
+        {
+            relation_close(indexRel, AccessShareLock);
+            indexRel = NULL;
+        }
+
+        pfree(entries);
+        pfree(changed);
+        FlushErrorState();
+        return;
+    }
+    PG_END_TRY();
+
+    pfree(entries);
+    pfree(changed);
 }
 
 /*
@@ -783,6 +1131,13 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
             nodes = (MerkleNode *) PageGetContents(page);
             currentPageBlkno = blkno;
         }
+
+        /* Record pre-change hash for optional commit-time reporting */
+        if (merkle_update_detection && !merkle_update_detection_suppress)
+            merkle_track_touched_node(indexRel, partitionId, nodeInPartition,
+                                      actualNodeIdx, pageNum, idxInPage,
+                                      nodesPerPage, numTreePages,
+                                      &nodes[idxInPage].hash);
         
         /* XOR hash into this node */
         merkle_hash_xor(&nodes[idxInPage].hash, hash);

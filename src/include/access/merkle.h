@@ -7,8 +7,6 @@
  * integrity verification. On every INSERT/UPDATE/DELETE, the Merkle
  * tree is automatically updated by PostgreSQL's index infrastructure.
  *
- * Copyright (c) 2026, Neel Parekh
- *
  * src/include/access/merkle.h
  *
  *-------------------------------------------------------------------------
@@ -26,6 +24,13 @@
 
 /* GUC: Enable/disable Merkle index updates */
 extern bool enable_merkle_index;
+/* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
+extern bool merkle_update_detection;
+/*
+ * Internal: temporarily suppress update-detection reporting in non-DML
+ * contexts (e.g. CREATE INDEX / REINDEX builds).
+ */
+extern bool merkle_update_detection_suppress;
 
 /*
  * Merkle tree configuration constants
