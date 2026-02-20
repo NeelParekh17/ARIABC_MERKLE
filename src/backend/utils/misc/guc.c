@@ -899,6 +899,15 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"merkle_update_detection", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Emit NOTICE lines for touched Merkle nodes on commit."),
+			gettext_noop("When enabled, INSERT/UPDATE/DELETE that touch Merkle indexes will emit a table of updated (partition, node_in_partition) hashes at transaction commit.")
+		},
+		&merkle_update_detection,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"is_bcdb_master", PGC_BACKEND, CLIENT_CONN,
 			gettext_noop("Start a bcdb master."),
 			NULL,

@@ -40,7 +40,83 @@
 
 // BCDBShmXact  *mapTxToShm[TX_MAP_SZ];
 //#define MAP_TX(id) ((id) % TX_MAP_SZ)
+/*
+ * shm_transaction.c — shared-memory transaction pool and conflict detection.
+ *
+ * OVERVIEW
+ * --------
+ * Every transaction that enters the BCDB pipeline is represented by a
+ * BCDBShmXact entry in the shared-memory hash table tx_pool (keyed by hash
+ * string).  A parallel xid_map (keyed by PostgreSQL TransactionId) allows
+ * looking up the same entry during SSI predicate-lock callbacks.
+ *
+ * CONFLICT DETECTION — DETERMINISTIC EXECUTION (DT) PATH
+ * -----------------------------------------------------
+ * The current active path is the "DT" (Deterministic Execution) design:
+ *
+ *  1. During the OPTIMISTIC phase each backend calls ws_table_reserveDT() for
+ *     every tuple it writes and rs_table_reserveDT() for every tuple it reads.
+ *     These functions only append a WSTableEntryRecord to the process-local
+ *     linked lists (ws_table_record / rs_table_record) — they do NOT touch
+ *     the shared hash tables yet.
+ *
+ *  2. After the worker decides the tx ordering slot, it calls conflict_checkDT()
+ *     which walks the local ws/rs record lists and queries BOTH shards of the
+ *     dual write-set table (ws_table->map and ws_table->mapB) using
+ *     ws_table_checkDT().  A conflict is detected if any earlier-ordered
+ *     transaction registered that tuple.
+ *
+ *  3. Once the tx passes conflict check, publish_ws_tableDT() atomically
+ *     commits the local write-set records into whichever hash-table shard is
+ *     currently "active" (the DT ping-pong ensures older entries are cleared
+ *     without blocking concurrent readers).
+ *
+ * NON-DT PATH (legacy, accessed when OEP_mode=false or dual_tab=false)
+ * -----------------------------------------------------------------------
+ * The non-DT path calls conflict_check() which queries ws_table->map via
+ * ws_table_check() / rs_table_check().  However ws_table_reserve() and
+ * rs_table_reserve() (which wrote to ws_table->map) have been removed because
+ * all their call sites were replaced by the DT variants.  Consequently
+ * ws_table_get() is never called to populate the map during the serial phase,
+ * and conflict_check() is a no-op for conflict detection in this path.
+ *
+ * TX QUEUE
+ * --------
+ * Each worker has an associated TxQueue partition.  Backends call
+ * tx_queue_insert() to enqueue work; workers call tx_queue_next() to dequeue.
+ * Both sides use a spinlock + condition variable to implement blocking.
+ */
+
 //slock_t      *nexec_lock;
+
+/*
+ * activeTx — per-process pointer to the BCDBShmXact currently being executed
+ *             by this worker.  Set at the start of each transaction's serial
+ *             phase and cleared on completion.  Never accessed concurrently
+ *             by multiple processes (it is purely process-local state that
+ *             points into shared memory).
+ *
+ * tx_pool / tx_pool_lock — fixed-size shared-memory hash table holding all
+ *             in-flight BCDBShmXact entries, keyed by TX_HASH_SIZE hash string.
+ *             Guarded by tx_pool_lock (spinlock).
+ *
+ * xid_map / xid_map_lock — secondary index from PostgreSQL TransactionId to
+ *             BCDBShmXact*, populated by add_tx_xid_map() when a worker
+ *             assigns an XID.  Needed for SSI predicate-lock callbacks that
+ *             only know the XID.
+ *
+ * ws_table / rs_table — shared write-set and read-set conflict maps.  Each
+ *             is a WSTable holding two partitioned hash tables (map + mapB)
+ *             for the Deterministic Execution (DT) ping-pong scheme, plus
+ *             per-partition spinlocks.
+ *
+ * ws_table_record / rs_table_record — process-local singly-linked lists
+ *             (LIST_HEAD) of WSTableEntryRecord nodes allocated in
+ *             bcdb_tx_context.  Built during the optimistic phase by the
+ *             reserveDT functions; read by conflict_checkDT() and
+ *             publish_ws_tableDT(); freed automatically when bcdb_tx_context
+ *             is reset between transactions.
+ */
 BCDBShmXact  *activeTx;
 slock_t      *restart_counter_lock;
 int          *numExecPt ;
@@ -70,6 +146,14 @@ static TupleTableSlot* clone_slot(TupleTableSlot* slot);
 #define RSTableGetPartitionIdx(hashcode) ((hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS)
 #define RSTablePartitionLock(hashcode) (&(rs_table->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS]))
 
+/*
+ * dummy_hash
+ *
+ * Identity hash for use with the WSTable partitioned hash tables.
+ * The caller (PredicateLockTargetTagHashCode) already computes a uint32
+ * hash of the PREDICATELOCKTARGETTAG; storing that precomputed value as
+ * the key and using this function avoids double-hashing.
+ */
 uint32
 dummy_hash(const void *key, Size key_size)
 {
@@ -151,12 +235,16 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     return tx;
 }
 
-void
-compose_tx_hash(BCBlockID bid, BCTxID tx_id, char* out_hash)
-{
-    sprintf(out_hash, "%d_%d", bid, tx_id);
-}
-
+/*
+ * delete_tx
+ *
+ * Removes tx from the xid_map (via remove_tx_xid_map) then from tx_pool.
+ * The xid_map removal must come first because it also acquires the per-tx
+ * LWLock and drops it, ensuring no concurrent reader holds the lock while
+ * the entry is freed.
+ *
+ * Safe to call with tx==NULL (no-op).
+ */
 void
 delete_tx(BCDBShmXact *tx)
 {
@@ -174,20 +262,25 @@ delete_tx(BCDBShmXact *tx)
         DEBUGNOCHECK("[ZL] removed tx %s", tx->hash);
 }
 
-uint32
-compose_tuple_hash(Oid relation_id, ItemPointer tid)
-{
-    return hash_uint32((uint32)relation_id) + hash_any((unsigned char*)tid, sizeof(ItemPointerData));
-}
-
-uint32
-compose_index_hash(Oid relation_id, IndexTuple itup)
-{
-    return hash_uint32((uint32)relation_id) + 
-           hash_any((unsigned char*)itup + IndexInfoFindDataOffset(itup->t_info),
-                    IndexTupleSize(itup) - IndexInfoFindDataOffset(itup->t_info));
-}
-
+/*
+ * create_tx_pool
+ *
+ * Allocates and initialises all shared-memory structures used by the
+ * transaction subsystem.  Called once from the postmaster during
+ * shared-memory setup, before any worker or backend process is forked.
+ *
+ * Allocations:
+ *   - restart_counter_lock    one spinlock (currently unused counter)
+ *   - tx_pool_lock / xid_map_lock  two spinlocks packed into one ShmemInitStruct
+ *   - tx_pool                 hash table of BCDBShmXact, keyed by hash string
+ *   - xid_map                 hash table of XidMapEntry, keyed by TransactionId
+ *   - tx_queues               array of NUM_TX_QUEUE_PARTITION TxQueue structs,
+ *                             each with its own spinlock + 2 condition variables
+ *   - ws_table / rs_table     partitioned write-set and read-set conflict maps
+ *                             (dual tables map+mapB for ping-pong; only ws_table
+ *                             uses the Deterministic Execution (DT) scheme;
+ *                             rs_table has one shard)
+ */
 void
 create_tx_pool(void)
 {
@@ -197,7 +290,9 @@ create_tx_pool(void)
 
     restart_counter_lock = ShmemInitStruct("restart_counter_lock", sizeof(slock_t) , &found);
     //nexec_lock = ShmemInitStruct("nexec_lock", sizeof(slock_t) , &found);
-    printf("\n\t $$$   safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#if SAFEDBG
+    DEBUGNOCHECK("[BCDB] create_tx_pool (%s:%s:%d)", __FILE__, __FUNCTION__, __LINE__);
+#endif
     tx_pool_lock_array = ShmemInitStruct("tx_pool_lock", sizeof(slock_t) * 2, &found);
     tx_pool_lock = tx_pool_lock_array;
     xid_map_lock = tx_pool_lock + 1;
@@ -242,7 +337,10 @@ create_tx_pool(void)
     ws_table = ShmemInitStruct("bcdb_tx_ws_table", sizeof(WSTable), &found);
     if (!found)
     {
-	printf("\t safeDbg pid %d %s : %s: %d \n\n", getpid(),__FILE__, __FUNCTION__, __LINE__ );
+#if SAFEDBG
+        DEBUGNOCHECK("[BCDB] init ws_table pid=%d (%s:%s:%d)",
+                     (int) getpid(), __FILE__, __FUNCTION__, __LINE__);
+#endif
         info.keysize = sizeof(PREDICATELOCKTARGETTAG);
         info.entrysize = sizeof(WSTableEntry);
         info.hash = dummy_hash;
@@ -258,9 +356,14 @@ create_tx_pool(void)
         ws_table->mapActive = ws_table->map;
         for (int i=0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
             SpinLockInit(&(ws_table->map_locks[i]));
-    }
-    else
-	printf("safeDB %s : %s: %d found= %d\n", __FILE__, __FUNCTION__, __LINE__ , found);
+	    }
+	    else
+        {
+#if SAFEDBG
+            DEBUGNOCHECK("[BCDB] ws_table already exists (%s:%s:%d)",
+                         __FILE__, __FUNCTION__, __LINE__);
+#endif
+        }
 
     rs_table = ShmemInitStruct("bcdb_tx_rs_table", sizeof(WSTable), &found);
     if (!found)
@@ -293,120 +396,84 @@ tx_pool_size(void)
 void
 clear_tx_pool(void)
 {
-    printf("safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#if SAFEDBG
+    DEBUGNOCHECK("[BCDB] clear_tx_pool (%s:%s:%d)", __FILE__, __FUNCTION__, __LINE__);
+#endif
     shm_hash_clear(tx_pool, MAX_SHM_TX);
     shm_hash_clear(xid_map, MAX_SHM_TX); 
     for (int i = 0; i < NUM_TX_QUEUE_PARTITION; i++)
         TAILQ_INIT(&tx_queues[i].list);
 }
 
+/*
+ * rs_table_reserveDT
+ *
+ * Deterministic Execution (DT) path read-set reservation.  Intentionally
+ * lightweight: just appends a WSTableEntryRecord to the process-local
+ * rs_table_record linked list WITHOUT touching the shared rs_table hash.
+ * The shared table is only queried (not written) during conflict_checkDT(),
+ * so there is no per-read write contention.
+ *
+ * Called from predicate.c whenever PostgreSQL SSI records a predicate lock
+ * for a BCDB transaction.
+ *
+ * NOTE: rs_table_reserve() (the old non-DT variant that actually wrote to
+ * rs_table->map) has been removed — all its call sites were replaced by
+ * this function.
+ */
 void
 rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 {
-    uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
     WSTableEntryRecord *record;
 
-    //printf("safeDB %s : %s: %d txhash %s tx %d tuphash %d\n", __FILE__,
-    //        __FUNCTION__, __LINE__ , activeTx->hash , activeTx->tx_id, tuple_hash);
-
-    record= MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
+    record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
     record->tag = *tag;
     LIST_INSERT_HEAD(&rs_table_record, record, link);
 }
 
-void
-rs_table_reserve(const PREDICATELOCKTARGETTAG *tag)
-{
-    bool found;
-    WSTableEntry* entry;
-    uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
-    slock_t *partition_lock = RSTablePartitionLock(tuple_hash);
-    WSTableEntryRecord *record;
-
-    SpinLockAcquire(partition_lock);
-
-    printf("\nsafeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
-    entry = hash_search_with_hash_value(rs_table->map, tag, tuple_hash, HASH_ENTER, &found);
-    if (!found)
-    {
-	printf("ariaDB [ZL] tx %s reserving read %d success, because not found\n", activeTx->hash, tuple_hash);
-        entry->tx_id = activeTx->tx_id;
-        DEBUGMSG("[ZL] tx %s reserving read %d success, because not found", activeTx->hash, tuple_hash);
-    }
-    else
-    {
-	printf("\nariaDB %s : %s: %d found %d\n", __FILE__, __FUNCTION__, __LINE__ , found);
-        if (entry->tx_id > activeTx->tx_id)
-        {
-            DEBUGMSG("[ZL] tx %s reserving read %d success, replacing %d", activeTx->hash, tuple_hash, entry->tx_id);
-            entry->tx_id = activeTx->tx_id;
-            printf("ariaDB tx %s reserv read %d success, replacing %d\n",
-                    activeTx->hash, tuple_hash, entry->tx_id);
-        }
-    }
-    SpinLockRelease(partition_lock);
-
-    record= MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
-    record->tag = *tag;
-    LIST_INSERT_HEAD(&rs_table_record, record, link);
-}
-
+/*
+ * ws_table_reserveDT
+ *
+ * Deterministic Execution (DT) path write-set reservation.  Like
+ * rs_table_reserveDT, this only appends to the process-local ws_table_record
+ * list.  The actual write to the shared DT hash table happens later in
+ * publish_ws_tableDT(), after the tx's serial ordering slot is decided.
+ * This separation means:
+ *   - No shared-table write contention during execution.
+ *   - Only committed write-sets are ever published, keeping the table clean.
+ *
+ * Called from nodeModifyTable.c (INSERT/UPDATE/DELETE paths) and from
+ * worker.c (re-reservation after a retry).
+ *
+ * NOTE: ws_table_reserve() (the old non-DT variant that wrote eagerly to
+ * ws_table->map) has been removed — all its call sites were replaced by
+ * this function.
+ */
 void
 ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
 {
     WSTableEntryRecord *record;
 
-    //printf("safeDB %s : %s: %d txid= %d \n",
-      //     __FILE__, __FUNCTION__, __LINE__, activeTx->tx_id );
-
-    record= MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
+    record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
     record->tag = *tag;
     LIST_INSERT_HEAD(&ws_table_record, record, link);
 }
 
-void
-ws_table_reserve(PREDICATELOCKTARGETTAG *tag)
-{
-    bool found;
-    WSTableEntry* entry;
-    uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
-    slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
-    WSTableEntryRecord *record;
-
-    printf("ariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
-
-    SpinLockAcquire(partition_lock);
-    entry = hash_search_with_hash_value(ws_table->map, tag, tuple_hash, HASH_ENTER, &found);
-    if (!found)
-    {
-        entry->tx_id = activeTx->tx_id;
-        DEBUGMSG("[ZL] tx %s reserving write %d success, because not found", activeTx->hash, tuple_hash);
-	printf("ariaDB [ZL] tx %s reserving write %d success, because not found\n", activeTx->hash, tuple_hash);
-    }
-    else
-    {
-        if (entry->tx_id > activeTx->tx_id)
-        {
-            DEBUGMSG("[ZL] tx %s reserving write %d success, replacing %d", activeTx->hash, tuple_hash, entry->tx_id);
-            entry->tx_id = activeTx->tx_id;
-            printf("ariaDB tx %s reserv write %d success, replacing %d\n",
-                   activeTx->hash, tuple_hash, entry->tx_id);
-        }
-    }
-
-    if (entry->tx_id != activeTx->tx_id)
-    {
-	printf("ariaDB tx %s reserving write %d fail: winner %d\n",
-               activeTx->hash, tuple_hash, entry->tx_id);
-        DEBUGMSG("[ZL] tx %s reserving write %d fail: winner %d", activeTx->hash, tuple_hash, entry->tx_id);
-    }
-    SpinLockRelease(partition_lock);
-
-    record= MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
-    record->tag = *tag;
-    LIST_INSERT_HEAD(&ws_table_record, record, link);
-}
-
+/*
+ * table_checkDT
+ *
+ * Core Deterministic Execution (DT) conflict check.  Queries BOTH shards of
+ * the given WSTable (table->map and table->mapB) for the given tag.  A
+ * conflict is detected when the entry's tx_id is strictly LESS than the
+ * current tx's tx_id (meaning an earlier-ordered tx wrote that slot) AND
+ * strictly GREATER than tx_id_committed (meaning it wasn't committed before
+ * our snapshot — a committed write wouldn't constitute a unseen conflict).
+ *
+ * Holds the per-partition spinlock only for the hash lookup to minimise
+ * contention; the early-exit paths release it immediately on conflict.
+ *
+ * Used by ws_table_checkDT() and indirectly by conflict_checkDT().
+ */
 bool
 table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
 {
@@ -430,11 +497,15 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
     if (found && (entry->tx_id < activeTx->tx_id) &&
 				(entry->tx_id >  activeTx->tx_id_committed))
     {
-	// TODO assert ?? activeTx-> last committed tx id <= entry->tx_id
-        //DEBUGMSG("safeDB tx %s check write %d failed, winner: %d",
-        printf("safeDB tx %d hash %s check write %d failed, winner: %d\n",
-		activeTx->tx_id, activeTx->hash, tuple_hash, entry->tx_id);
+#if SAFEDBG
+        int winner_tx_id = entry->tx_id;
+#endif
         SpinLockRelease(partition_lock);
+#if SAFEDBG
+        ereport(DEBUG3,
+                (errmsg("safeDB tx %d hash %s check write %u failed, winner: %d",
+                        activeTx->tx_id, activeTx->hash, tuple_hash, winner_tx_id)));
+#endif
         return true;
     }
 
@@ -443,10 +514,15 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
     if (found && (entry->tx_id < activeTx->tx_id) &&
 				(entry->tx_id >  activeTx->tx_id_committed))
     {
-        //DEBUGMSG("safeDB tx %s check write %d failed, winner: %d",
-        printf("safeDB tx %d hash %s check write %d failed, winner: %d\n",
-		activeTx->tx_id, activeTx->hash, tuple_hash, entry->tx_id);
+#if SAFEDBG
+        int winner_tx_id = entry->tx_id;
+#endif
         SpinLockRelease(partition_lock);
+#if SAFEDBG
+        ereport(DEBUG3,
+                (errmsg("safeDB tx %d hash %s check write %u failed, winner: %d",
+                        activeTx->tx_id, activeTx->hash, tuple_hash, winner_tx_id)));
+#endif
         return true;
     }
     SpinLockRelease(partition_lock);
@@ -454,12 +530,31 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
     return false;
 }
 
+/*
+ * ws_table_checkDT
+ *
+ * Convenience wrapper: checks the DT (Deterministic Execution) tables
+ * for the given tag.  Returns true if a waw (write-after-write) conflict
+ * is detected.
+ */
 bool
 ws_table_checkDT(PREDICATELOCKTARGETTAG *tag)
 {
     return table_checkDT(tag, ws_table);
 }
 
+/*
+ * ws_table_check  (non-DT path)
+ *
+ * Queries only ws_table->map (the single, non-DT shard).
+ * Used by conflict_check() in the non-DT execution path.
+ *
+ * NOTE: Because ws_table_reserve() has been removed (all callers migrated
+ * to ws_table_reserveDT), ws_table->map is never populated in the current
+ * codebase.  This function will therefore always return false, making
+ * conflict_check() a no-op for conflict detection.  Kept to avoid
+ * breaking the non-DT code path structure.
+ */
 bool
 ws_table_check(PREDICATELOCKTARGETTAG *tag)
 {
@@ -476,7 +571,7 @@ ws_table_check(PREDICATELOCKTARGETTAG *tag)
     entry = hash_search_with_hash_value(ws_table->map, tag, tuple_hash, HASH_FIND, &found);
     if (found && entry->tx_id < activeTx->tx_id)
     {
-        DEBUGMSG("[ZL] tx %s check write %d failed, winner: %d", activeTx->hash, tuple_hash, entry->tx_id);
+        // DEBUGMSG("[ZL] tx %s check write %d failed, winner: %d", activeTx->hash, tuple_hash, entry->tx_id);
         SpinLockRelease(partition_lock);
         return true;
     }
@@ -485,6 +580,15 @@ ws_table_check(PREDICATELOCKTARGETTAG *tag)
     return false;
 }
 
+/*
+ * rs_table_check  (non-DT path)
+ *
+ * Queries rs_table->map for the given tag to detect raw (read-after-write)
+ * conflicts.  Used by conflict_check() in the non-DT path.
+ *
+ * Same caveat as ws_table_check: rs_table_reserve() (which wrote
+ * rs_table->map) has been removed, so this function always returns false.
+ */
 bool
 rs_table_check(PREDICATELOCKTARGETTAG *tag)
 {
@@ -501,66 +605,39 @@ rs_table_check(PREDICATELOCKTARGETTAG *tag)
     entry = hash_search_with_hash_value(rs_table->map, tag, tuple_hash, HASH_FIND, &found);
     if (found && entry->tx_id < activeTx->tx_id)
     {
-        DEBUGMSG("[ZL] tx %s check read %d failed, winner: %d", activeTx->hash, tuple_hash, entry->tx_id);
+        // DEBUGMSG("[ZL] tx %s check read %d failed, winner: %d", activeTx->hash, tuple_hash, entry->tx_id);
         SpinLockRelease(partition_lock);
         return true;
     }
-    DEBUGMSG("[ZL] tx %s check read %d win", activeTx->hash, tuple_hash);
+    // DEBUGMSG("[ZL] tx %s check read %d win", activeTx->hash, tuple_hash);
     SpinLockRelease(partition_lock);
     return false;
 }
 
-void
-clean_ws_table_record(void)
-{
-    WSTableEntryRecord *record;
-    while ((record = LIST_FIRST(&ws_table_record)))
-    {
-        bool found;
-        WSTableEntry* entry;
-        uint32  tuple_hash = PredicateLockTargetTagHashCode(&record->tag);
-        slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
+/*
+ * clean_ws_table_record and clean_rs_table_record have been removed.
+ *
+ * They were the non-DT per-entry cleanup functions that removed individual
+ * entries from ws_table->map / rs_table->map using the ws/rs_table_record
+ * local lists.  They had no callers: the DT path relies on
+ * clean_rs_ws_table() (bulk hash clear) called from worker.c and tcop/
+ * postgres.c.  The per-entry removal logic is unnecessary when the whole
+ * table is cleared at block boundaries.
+ */
 
-        SpinLockAcquire(partition_lock);
-        entry = hash_search_with_hash_value(ws_table->map, &record->tag, tuple_hash, HASH_FIND, &found);
-        if (found)
-        {
-            if (entry->tx_id == activeTx->tx_id)
-            {
-                DEBUGMSG("[ZL] tx %s deleting write entry %d", activeTx->hash, tuple_hash);
-                hash_search_with_hash_value(ws_table->map, &record->tag, tuple_hash, HASH_REMOVE, &found);
-            }
-        }
-        SpinLockRelease(partition_lock);
-        LIST_REMOVE(record, link);
-    }
-}
-
-void
-clean_rs_table_record(void)
-{
-    WSTableEntryRecord *record;
-    while ((record = LIST_FIRST(&rs_table_record)))
-    {
-        bool found;
-        WSTableEntry* entry;
-        uint32  tuple_hash = PredicateLockTargetTagHashCode(&record->tag);
-        slock_t *partition_lock = RSTablePartitionLock(tuple_hash);
-
-        SpinLockAcquire(partition_lock);
-        entry = hash_search_with_hash_value(rs_table->map, &record->tag, tuple_hash, HASH_FIND, &found);
-        if (found)
-        {
-            if (entry->tx_id == activeTx->tx_id)
-            {
-                DEBUGMSG("[ZL] tx %s deleting read entry %d", activeTx->hash, tuple_hash);
-                hash_search_with_hash_value(rs_table->map, &record->tag, tuple_hash, HASH_REMOVE, &found);
-            }
-        }
-        SpinLockRelease(partition_lock);
-        LIST_REMOVE(record, link);
-    }
-}
+/*
+ * tx_queue_insert
+ *
+ * Enqueues tx onto the TxQueue shard identified by (partition % num_queue).
+ * Blocks (using full_cond condition variable) if the queue already holds
+ * QUEUEING_BLOCKS entries, providing back-pressure on frontend backends.
+ *
+ * num_queue is re-read from the sentinel BCBlock every call so it picks up
+ * runtime changes to the worker count without restart.
+ *
+ * Callers (frontend backends) hold no locks when they call this — the queue's
+ * own spinlock serialises all enqueue/dequeue operations.
+ */
 void
 tx_queue_insert(BCDBShmXact *tx, int32 partition)
 {
@@ -572,8 +649,9 @@ tx_queue_insert(BCDBShmXact *tx, int32 partition)
     num_queue = get_blksz(); // get_block_by_id(1, false)->blksize; ==nWorker
 
 #if SAFEDBG
+    DEBUGNOCHECK("safeDB %s:%s:%d partition %d num_queue %d txsql %s",
+                 __FILE__, __FUNCTION__, __LINE__, partition, num_queue, tx->sql);
 #endif
-	printf("safeDB %s : %s: %d partition %d num_queue %d txsql %s \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue, tx->sql);
     TxQueue *queue = tx_queues + (partition % num_queue);
     ConditionVariablePrepareToSleep(&queue->full_cond);
     SpinLockAcquire(&queue->lock);
@@ -616,6 +694,20 @@ fflush(0);
     ConditionVariableSignal(&queue->empty_cond);
 }
 
+/*
+ * tx_queue_next
+ *
+ * Dequeues and returns the next BCDBShmXact from the TxQueue shard
+ * identified by (partition % num_queue).  Blocks (using empty_cond
+ * condition variable) until at least one transaction is available.
+ *
+ * Called exclusively by worker processes.  Only one worker dequeues from
+ * any given partition shard, so there is no consumer-side contention beyond
+ * the spinlock.
+ *
+ * Signals full_cond after dequeue to unblock any producer held in
+ * tx_queue_insert due to back-pressure.
+ */
 BCDBShmXact*
 tx_queue_next(int32 partition)
 {
@@ -720,6 +812,14 @@ clone_slot(TupleTableSlot* slot)
     return ret;
 }
 
+/*
+ * get_tx_by_hash
+ *
+ * Looks up tx_pool by the transaction's string hash.  Acquires tx_pool_lock
+ * for the duration of the hash_search (HASH_FIND).  Returns NULL if not found.
+ * Does NOT acquire the per-tx LWLock; callers that need to mutate the entry
+ * must acquire tx->lock themselves.
+ */
 BCDBShmXact*
 get_tx_by_hash(const char *hash)
 {
@@ -730,37 +830,28 @@ get_tx_by_hash(const char *hash)
     return ret;
 }
 
-BCDBShmXact*
-get_tx_by_xid(TransactionId xid)
-{
-    XidMapEntry *ret;
+/*
+ * get_tx_by_xid and get_tx_by_xid_locked have been removed.
+ *
+ * get_tx_by_xid: looked up xid_map without acquiring the per-tx LWLock.
+ *   It had no callers in the live codebase.
+ *
+ * get_tx_by_xid_locked: looked up xid_map AND acquired tx->lock before
+ *   returning (for safe mutation of the entry).  Also had no callers; it
+ *   was intended for SSI predicate-lock conflict callbacks but was never
+ *   wired up.  If SSI callbacks need this in future, re-introduce it here.
+ */
 
-    SpinLockAcquire(xid_map_lock);
-    ret = hash_search(xid_map, &xid, HASH_FIND, NULL);
-    SpinLockRelease(xid_map_lock);
-    if (!ret)
-    {
-        ereport(FATAL, (errmsg("[ZL] no conflict xid")));
-    }
-    return ret->tx;
-}
-
-BCDBShmXact*
-get_tx_by_xid_locked(TransactionId xid, bool exclusive)
-{
-    XidMapEntry *ret;
-    LWLockMode lockmode = exclusive ? LW_EXCLUSIVE : LW_SHARED;
-    SpinLockAcquire(xid_map_lock);
-    ret = hash_search(xid_map, &xid, HASH_FIND, NULL);
-    if (!ret)
-    {
-        ereport(FATAL, (errmsg("[ZL] no conflict xid")));
-    }
-    LWLockAcquire(&ret->tx->lock, lockmode);
-    SpinLockRelease(xid_map_lock);
-    return ret->tx;
-}
-
+/*
+ * add_tx_xid_map
+ *
+ * Associates PostgreSQL TransactionId xid with the BCDBShmXact tx in the
+ * xid_map hash table.  Called from the worker when it begins executing a
+ * transaction (so that SSI callbacks — which only know the XID — can
+ * reach the BCDBShmXact).
+ *
+ * Calls ereport(FATAL) if the XID is already mapped (indicates a bug).
+ */
 void
 add_tx_xid_map(TransactionId xid, BCDBShmXact *tx)
 {
@@ -782,6 +873,19 @@ add_tx_xid_map(TransactionId xid, BCDBShmXact *tx)
     SpinLockRelease(xid_map_lock);
 }
 
+/*
+ * remove_tx_xid_map
+ *
+ * Removes the xid->tx mapping from xid_map.  Called by delete_tx() so the
+ * global XID entry is cleaned up before the BCDBShmXact itself is freed.
+ *
+ * Acquires the per-tx LWLock (exclusive) while performing the HASH_REMOVE to
+ * prevent concurrent readers (e.g. SSI callbacks) from accessing the entry
+ * after it has been freed.  Calls ereport(FATAL) if the entry was already
+ * absent (indicates a double-free or logic bug).
+ *
+ * Safe to call with InvalidTransactionId (no-op).
+ */
 void
 remove_tx_xid_map(TransactionId xid)
 {
@@ -1526,31 +1630,33 @@ apply_optim_writes(void)
     return true;
 }
 
-bool
-check_stale_read(void)
-{
-    RWConflict       conflict;
-    LWLockAcquire(SerializableXactHashLock, LW_SHARED);
-    conflict = (RWConflict)
-		SHMQueueNext(&activeTx->sxact->outConflicts,
-					 &activeTx->sxact->outConflicts,
-					 offsetof(RWConflictData, outLink));
-	while (conflict)
-	{
-		if (BCDB_TX(conflict->sxactIn)->block_id_committed < activeTx->block_id_committed)
-    		ereport(ERROR,
-    				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-    				 errmsg("tx %s stale read found, %s update first", activeTx->hash, BCDB_TX(conflict->sxactIn)->hash)));
+/*
+ * check_stale_read has been removed.
+ *
+ * It walked activeTx->sxact->outConflicts (SSI rw-conflict list) and raised
+ * a serialization failure if any conflicting transaction committed in an
+ * earlier blockchain block.  It was never called from any code path (it was
+ * intended as an optional SSI-layer guard but was superseded by the DT
+ * conflict detection).  If SSI-based stale-read detection is needed in
+ * future, re-introduce it here and wire it into the worker commit path.
+ */
 
-		conflict = (RWConflict)
-			SHMQueueNext(&activeTx->sxact->outConflicts,
-						 &conflict->outLink,
-						 offsetof(RWConflictData, outLink));
-	}
-    LWLockRelease(SerializableXactHashLock);
-    return true;
-}
-
+/*
+ * conflict_checkDT
+ *
+ * Deterministic Execution (DT) path per-transaction conflict check.  Called
+ * by the worker immediately after establishing the transaction's serial
+ * ordering slot, before apply_optim_writes().
+ *
+ * Walk both ws_table_record and rs_table_record (the local write-set and
+ * read-set lists built during optimistic execution) and call
+ * ws_table_checkDT() for each tag.  Returns 1 if any conflict is found
+ * (caller will retry the transaction), 0 if clean.
+ *
+ * The Deterministic Execution (DT) path design (map and mapB) means the
+ * check sees BOTH the "old" shard and the "new" shard for the current
+ * epoch, so no conflicts are missed across a hash-table rotation boundary.
+ */
 int
 conflict_checkDT()
 {
@@ -1571,8 +1677,8 @@ static int cc2Count = 0;
     {
         // ws_table_check
         if (ws_table_checkDT( &record->tag)) {
-	    printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
-		__FILE__, __FUNCTION__, __LINE__ ,  activeTx->hash, activeTx->tx_id);
+	    // printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
+		// __FILE__, __FUNCTION__, __LINE__ ,  activeTx->hash, activeTx->tx_id);
 	    return 1;
 	}
     		//ereport(ERROR,
@@ -1600,60 +1706,73 @@ static int cc2Count = 0;
 
 }
 
+/*
+ * conflict_check  (non-DT path)
+ *
+ * Legacy conflict check used when OEP_mode=false or the Deterministic
+ * Execution (DT) scheme is not active.  Walks ws_table_record and
+ * rs_table_record using ws_table_check() / rs_table_check() against
+ * ws_table->map.
+ *
+ * Design note: because ws_table_reserve() (which populated ws_table->map)
+ * has been removed, ws_table_check() and rs_table_check() always return
+ * false.  This function is therefore a no-op for conflict detection in the
+ * current codebase.  It is kept to avoid breaking the non-DT code path
+ * in worker.c.  If the non-DT path needs to be made functional again,
+ * ws_table_reserve() and rs_table_reserve() should be re-introduced.
+ */
 void
 conflict_check(void)
 {
-int numRec = 0;
-const int ccMax = 20;
-static int ccCount = 0;
-static int cc2Count = 0;
-
     WSTableEntryRecord *record;
-    
-    if(ccCount++ == ccMax) {
-	ccCount = 0;
-	printf("ariaDB %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__ );
-    }
 
     LIST_FOREACH(record, &ws_table_record, link)
     {
-        numRec++;
         if (ws_table_check(&record->tag))
     		ereport(ERROR,
  				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
    				 errmsg("tx %s aborted due to waw", activeTx->hash)));           
-	printf("ariaDB %s : %s: %d -- ws_table_record numRec= %d \n",
-			__FILE__, __FUNCTION__, __LINE__, numRec );
-    }
-
-    if(cc2Count++ == ccMax) {
-	cc2Count = 0;
-	printf("ariaDB %s : %s: %d -- one in 20\n",
-			__FILE__, __FUNCTION__, __LINE__ );
     }
 
     LIST_FOREACH(record, &ws_table_record, link)
     {
-        numRec = 0;
         if (rs_table_check(&record->tag))
         {
             WSTableEntryRecord *raw_record;
             LIST_FOREACH(raw_record, &rs_table_record, link)
             {
-                numRec++;
                 if (ws_table_check(&raw_record->tag))
             		ereport(ERROR,
          				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
            				 errmsg("tx %s aborted due to raw and war", activeTx->hash)));
             }
-	  printf("ariaDB %s : %s: %d -- rs_table_record numRec= %d \n",
-			__FILE__, __FUNCTION__, __LINE__, numRec );
-			break;
+				break;
         }
     }
 
 }
 
+/*
+ * publish_ws_tableDT
+ *
+ * Publishes the current transaction's write-set (ws_table_record list) into
+ * the shared Deterministic Execution (DT) write-set hash table so that
+ * future transactions can detect waw conflicts via ws_table_checkDT().
+ *
+ * Deterministic Execution (DT) path ping-pong:
+ *   id / HASHTAB_SWITCH_THRESHOLD determines which shard (map vs mapB) is
+ *   "active".  When the threshold crosses a new epoch, the inactive shard is
+ *   bulk-cleared (shm_hash_clear) and becomes the new active shard.  This
+ *   avoids clearing the table while active readers/writers are using it.
+ *
+ *   Requirement: HASHTAB_SWITCH_THRESHOLD >= 2 * NUM_WORKERS - 1 so that
+ *   no worker is still reading the old shard when it is cleared.
+ *
+ * For each write-set record, HASH_ENTER stores entry->tx_id = min(existing,
+ * activeTx->tx_id) so that the earliest ordering tx_id "wins" the slot.
+ *
+ * Called from worker.c after conflict_checkDT() returns clean.
+ */
 void
 publish_ws_tableDT(int id)
 {
@@ -1666,9 +1785,9 @@ publish_ws_tableDT(int id)
     int x = 0;
     
     if( HASHTAB_SWITCH_THRESHOLD <  2 * NUM_WORKERS - 1) {
-	printf("safeDB ** ERROR %s : %s: %d increase threshold ** \n",
-               __FILE__, __FUNCTION__, __LINE__ );
-	return;
+        ereport(ERROR,
+                (errmsg("HASHTAB_SWITCH_THRESHOLD (%d) must be >= %d",
+                        HASHTAB_SWITCH_THRESHOLD, 2 * NUM_WORKERS - 1)));
     }
 
     x = id  / HASHTAB_SWITCH_THRESHOLD; // min 2* num_w -1
@@ -1704,6 +1823,16 @@ publish_ws_tableDT(int id)
     }
 }
 
+/*
+ * clean_rs_ws_table
+ *
+ * Bulk-clears both the write-set and read-set conflict maps (ws_table->map
+ * and rs_table->map).  Called at the start of a new block epoch from
+ * worker.c and tcop/postgres.c to reset the non-DT conflict tables.
+ *
+ * Note: only ws_table->map is cleared here (not mapB), because the DT
+ * path manages mapB rotation inside publish_ws_tableDT().
+ */
 void
 clean_rs_ws_table(void)
 {

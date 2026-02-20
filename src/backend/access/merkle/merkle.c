@@ -6,8 +6,6 @@
  * This file implements the IndexAmRoutine handler function that returns
  * the callback function pointers for the merkle access method.
  *
- * Copyright (c) 2026, Neel Parekh
- *
  * IDENTIFICATION
  *    src/backend/access/merkle/merkle.c
  *
@@ -24,6 +22,10 @@
 
 /* GUC: Enable/disable Merkle index updates */
 bool enable_merkle_index = true;
+/* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
+bool merkle_update_detection = false;
+/* Internal: suppress update-detection in non-DML contexts (e.g. index build) */
+bool merkle_update_detection_suppress = false;
 
 /*
  * Merkle index reloption definitions using standard framework
@@ -39,7 +41,7 @@ static bool merkle_relopts_registered = false;
 static void
 merkle_register_relopts(void)
 {
-    if (merkle_relopts_registered) //if merkle options are passed then return
+    if (merkle_relopts_registered) /* already registered */
         return;
     
     merkle_relopt_kind = add_reloption_kind();

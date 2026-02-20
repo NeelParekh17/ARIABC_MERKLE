@@ -248,15 +248,19 @@ Datum
 bcdb_num_committed(PG_FUNCTION_ARGS)
 {
     ereport(LOG, (errmsg("[ZL] num committed: %d", (int)block_meta->num_committed)));
-	printf("\nariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
-	printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
+#if SAFEDBG
+    printf("\nariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+    printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
     PG_RETURN_INT32((int)block_meta->num_committed);
 }
 
 Datum
 bcdb_reset(PG_FUNCTION_ARGS)
 {
-	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#if SAFEDBG
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
     bcdb_clear_block_txs_store();
     PG_RETURN_BOOL(true);
 }
@@ -264,7 +268,9 @@ bcdb_reset(PG_FUNCTION_ARGS)
 Datum
 bcdb_init(PG_FUNCTION_ARGS)
 {
-	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#if SAFEDBG
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 
     bool is_oep_mode = PG_GETARG_BOOL(0);
     int32 block_size = PG_GETARG_INT32(1);
@@ -275,7 +281,9 @@ bcdb_init(PG_FUNCTION_ARGS)
 Datum
 bcdb_init2(PG_FUNCTION_ARGS)
 {
-	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#if SAFEDBG
+    printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
 
     bool is_oep_mode = PG_GETARG_BOOL(0);
     int32 block_size = PG_GETARG_INT32(1);

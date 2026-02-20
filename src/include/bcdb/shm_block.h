@@ -62,9 +62,9 @@ extern int      get_commited(int id);
 extern void     set_commited(int id,  BCDBShmXact* tx);
 extern BCBlock* get_block_by_id(BCBlockID id, bool create_if_not_found);
 extern void     delete_block(BCBlock *block);
-extern void     delete_block_by_id(BCBlockID id);
 extern void     block_add_tx(BCBlock* block, BCDBShmXact* tx);
-extern char*    print_block_status(BCBlockID block_id);
+/* delete_block_by_id, print_block_status, and set_last_committed_id
+ * have been removed — they had no callers in the codebase. */
 
 
 

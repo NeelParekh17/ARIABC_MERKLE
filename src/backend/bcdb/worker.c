@@ -1007,9 +1007,6 @@ bcdb_worker_process_tx(BCDBShmXact *tx)
     activeTx = tx;
     DEBUGMSG("[ZL] tx %s scheduled on worker: %d", tx->hash, tx->worker_pid);
 
-	printf("ariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
-	printf("ariaDB tx %s scheduled on worker: %d", tx->hash, tx->worker_pid);
-
     WaitGlobalBmin(tx->block_id_committed);
     tx->block_id_snapshot = tx->block_id_committed - 1;
 
@@ -1079,7 +1076,6 @@ bcdb_worker_process_tx(BCDBShmXact *tx)
         tx->status = TX_COMMITED;
         num_finished = __sync_add_and_fetch(&block->num_finished, 1);
         DEBUGMSG("[ZL] tx %s finishing with num_finish: %d", tx->hash, num_finished);
-	printf("ariaDB tx %s finishing with num_finish: %d\n", tx->hash, num_finished);
 
         if (num_finished == block->num_tx)
         {
