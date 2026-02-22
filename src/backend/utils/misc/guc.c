@@ -908,6 +908,15 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"merkle_update_detection_suppress", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Suppress Merkle update-detection output during index builds."),
+			gettext_noop("When enabled, CREATE INDEX/REINDEX for Merkle indexes will not emit the touched-node NOTICE report even if merkle_update_detection is on. Set this to off to see the updated nodes during a build.")
+		},
+		&merkle_update_detection_suppress,
+		true,
+		NULL, NULL, NULL
+	},
+	{
 		{"is_bcdb_master", PGC_BACKEND, CLIENT_CONN,
 			gettext_noop("Start a bcdb master."),
 			NULL,

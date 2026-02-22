@@ -2,6 +2,7 @@
 #include "bcdb/shm_transaction.h"
 #include "bcdb/utils/aligned_heap.h"
 #include "utils/elog.h"
+#include "utils/errcodes.h"
 #include "libpq-fe.h"
 #include "storage/shmem.h"
 #include "string.h"
@@ -995,6 +996,7 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
     MemoryContext old_context = CurrentMemoryContext;
     ResourceOwner old_owner = CurrentResourceOwner;
     bool insert_ok = false;
+    ErrorData *edata = NULL;
 
     DEBUGMSG("[ZL] tx %s applying optim insert (rel: %d)", activeTx->hash, relation->rd_id);
 
@@ -1023,13 +1025,28 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
     PG_CATCH();
     {
         MemoryContextSwitchTo(old_context);
-        CurrentResourceOwner = old_owner;
-        RollbackAndReleaseCurrentSubTransaction();
+        edata = CopyErrorData();
         FlushErrorState();
+        MemoryContextSwitchTo(old_context);
+        RollbackAndReleaseCurrentSubTransaction();
+        MemoryContextSwitchTo(old_context);
+        CurrentResourceOwner = old_owner;
     }
     PG_END_TRY();
 
     RelationClose(relation);
+
+    if (edata != NULL)
+    {
+        if (edata->sqlerrcode == ERRCODE_UNIQUE_VIOLATION)
+        {
+            FreeErrorData(edata);
+            return false;
+        }
+
+        ReThrowError(edata);
+    }
+
     return insert_ok;
 }
 

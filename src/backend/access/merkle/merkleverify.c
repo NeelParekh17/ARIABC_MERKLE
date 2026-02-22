@@ -167,10 +167,6 @@ merkle_verify(PG_FUNCTION_ARGS)
     /* Allocate space for computed tree using dynamic size */
     computedTree = (MerkleHash *) palloc0(totalNodes * sizeof(MerkleHash));
     
-    /* Initialize all hashes to zero */
-    for (i = 0; i < totalNodes; i++)
-        merkle_hash_zero(&computedTree[i]);
-    
     /* Scan the heap table and recompute the tree */
     slot = table_slot_create(heapRel, NULL);
     /*
@@ -187,8 +183,11 @@ merkle_verify(PG_FUNCTION_ARGS)
     while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
     {
         MerkleHash  hash;
+        int         leafId;
         int         partitionId;
-        int         partitionOffset, nodeInPartition, nodeId;
+        int         leafPos;
+        int         nodeInPartition;
+        int         nodeIdx;
         
         /* Extract all indexed column values from heap tuple */
         for (i = 0; i < nkeys; i++)
@@ -198,29 +197,54 @@ merkle_verify(PG_FUNCTION_ARGS)
         }
         
         /* Compute partition ID using multi-column function */
-        partitionId = merkle_compute_partition_id(keyValues, keyNulls,
-                                                         nkeys, indexTupdesc,
-                                                         totalLeaves);
+        leafId = merkle_compute_partition_id(keyValues, keyNulls,
+                                             nkeys, indexTupdesc,
+                                             totalLeaves);
         
-        /* Compute hash of this row */
-        merkle_compute_row_hash(heapRel, &slot->tts_tid, &hash);
+        /* Compute hash of this row (slot already contains the tuple) */
+        merkle_compute_slot_hash(heapRel, slot, &hash);
         
-        /* Update computed tree path using dynamic configuration */
-        partitionOffset = partitionId / leavesPerPartition;
-        nodeInPartition = (partitionId % leavesPerPartition) + leavesPerPartition;
-        nodeId = nodeInPartition + (partitionOffset * nodesPerPartition);
-        
-        while (nodeInPartition > 0)
-        {
-            /* Subtract 1 for 0-based array indexing */
-            merkle_hash_xor(&computedTree[nodeId - 1], &hash);
-            nodeInPartition = nodeInPartition / 2;
-            nodeId = nodeInPartition + (partitionOffset * nodesPerPartition);
-        }
+        /*
+         * Verification optimization: accumulate XOR only at the leaf node in
+         * memory, then construct internal nodes bottom-up after the scan.
+         *
+         * This is equivalent to XORing the row hash into every ancestor on the
+         * path, but avoids O(rows * log(leaves)) updates.
+         */
+        partitionId = leafId / leavesPerPartition;
+        leafPos = leafId % leavesPerPartition;
+        nodeInPartition = leavesPerPartition + leafPos; /* 1-indexed */
+        nodeIdx = partitionId * nodesPerPartition + (nodeInPartition - 1);
+        merkle_hash_xor(&computedTree[nodeIdx], &hash);
     }
     
     table_endscan(scan);
     ExecDropSingleTupleTableSlot(slot);
+    
+    /*
+     * Construct internal nodes bottom-up within each partition:
+     * parent = left_child XOR right_child
+     */
+    {
+        int partition;
+        
+        for (partition = 0; partition < numPartitions; partition++)
+        {
+            int base = partition * nodesPerPartition;
+            int nodeInPartition;
+            
+            for (nodeInPartition = leavesPerPartition - 1; nodeInPartition >= 1; nodeInPartition--)
+            {
+                int parentIdx = base + (nodeInPartition - 1);
+                int leftIdx = base + ((nodeInPartition * 2) - 1);
+                int rightIdx = base + ((nodeInPartition * 2 + 1) - 1);
+                
+                merkle_hash_zero(&computedTree[parentIdx]);
+                merkle_hash_xor(&computedTree[parentIdx], &computedTree[leftIdx]);
+                merkle_hash_xor(&computedTree[parentIdx], &computedTree[rightIdx]);
+            }
+        }
+    }
     
     /* Compare computed tree with stored tree - supports multi-page storage */
     {
@@ -710,14 +734,14 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         MerkleMetaPageData *meta;
         TupleDesc       tupdesc;
         TupleDesc       indexTupdesc;
-        TupleDesc       heapTupdesc;
         int             totalLeaves;
         int            *counts;
         StringInfo     *keyLists;  /* Store full key lists as strings */
         int             i;
         int             nkeys;
         int16          *indkey;
-        #define MAX_DISPLAY_KEYS 20
+        Oid            *keytypes;
+        FmgrInfo       *keyoutfuncs;
         
         funcctx = SRF_FIRSTCALL_INIT();
         oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -732,7 +756,6 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         
         heapRel = table_open(relid, AccessShareLock);
         indexRel = index_open(indexOid, AccessShareLock);
-        heapTupdesc = RelationGetDescr(heapRel);
         
         /* Read metadata */
         metabuf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
@@ -746,6 +769,19 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         indexTupdesc = RelationGetDescr(indexRel);
         nkeys = indexRel->rd_index->indnkeyatts;
         indkey = indexRel->rd_index->indkey.values;
+        
+        /* Cache output functions for key display */
+        keytypes = palloc(nkeys * sizeof(Oid));
+        keyoutfuncs = palloc(nkeys * sizeof(FmgrInfo));
+        for (i = 0; i < nkeys; i++)
+        {
+            Oid typoutput;
+            bool typIsVarlena;
+            
+            keytypes[i] = TupleDescAttr(indexTupdesc, i)->atttypid;
+            getTypeOutputInfo(keytypes[i], &typoutput, &typIsVarlena);
+            fmgr_info(typoutput, &keyoutfuncs[i]);
+        }
         
         /* Allocate arrays for counting and collecting keys */
         counts = palloc0(totalLeaves * sizeof(int));
@@ -761,75 +797,131 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         slot = table_slot_create(heapRel, NULL);
         scan = table_beginscan(heapRel, GetActiveSnapshot(), 0, NULL);
         
-        while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+        /* Reuse per-tuple scratch buffers to avoid per-row palloc/pfree churn */
         {
             Datum      *keyValues;
             bool       *keyNulls;
-            int         partitionId;
-            int         k;
             StringInfoData keyStr;
             
             keyValues = palloc(nkeys * sizeof(Datum));
             keyNulls = palloc(nkeys * sizeof(bool));
-            
-            /* Get all key values */
-            for (k = 0; k < nkeys; k++)
-            {
-                int heapAttr = indkey[k];
-                keyValues[k] = slot_getattr(slot, heapAttr, &keyNulls[k]);
-            }
-            
-            /* Compute partition ID */
-            partitionId = merkle_compute_partition_id(keyValues, keyNulls,
-                                                             nkeys, indexTupdesc,
-                                                             totalLeaves);
-            
-            /* Build key string for this tuple */
             initStringInfo(&keyStr);
-            if (nkeys == 1)
+        
+            while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
             {
-                /* Single key - just show value */
-                Oid typoutput;
-                bool typIsVarlena;
-                Oid keytype = TupleDescAttr(indexTupdesc, 0)->atttypid;
-                
-                getTypeOutputInfo(keytype, &typoutput, &typIsVarlena);
-                if (keyNulls[0])
-                    appendStringInfoString(&keyStr, "NULL");
-                else
-                    appendStringInfoString(&keyStr, OidOutputFunctionCall(typoutput, keyValues[0]));
-            }
-            else
-            {
-                /* Multi-key - show as tuple (val1,val2,...) */
-                appendStringInfoChar(&keyStr, '(');
+                int         leafId;
+                int         k;
+            
+                /* Get all key values */
                 for (k = 0; k < nkeys; k++)
                 {
-                    Oid typoutput;
-                    bool typIsVarlena;
-                    Oid keytype = TupleDescAttr(indexTupdesc, k)->atttypid;
-                    
-                    if (k > 0)
-                        appendStringInfoChar(&keyStr, ',');
-                    
-                    getTypeOutputInfo(keytype, &typoutput, &typIsVarlena);
-                    if (keyNulls[k])
-                        appendStringInfoString(&keyStr, "NULL");
-                    else
-                        appendStringInfoString(&keyStr, OidOutputFunctionCall(typoutput, keyValues[k]));
+                    int heapAttr = indkey[k];
+                    keyValues[k] = slot_getattr(slot, heapAttr, &keyNulls[k]);
                 }
-                appendStringInfoChar(&keyStr, ')');
+            
+                /* Build key string for this tuple and compute leaf mapping */
+                resetStringInfo(&keyStr);
+                if (nkeys == 1)
+                {
+                    /* Single key - just show value */
+                    int64 keyval;
+                    
+                    if (keyNulls[0])
+                    {
+                        leafId = 0;
+                        appendStringInfoString(&keyStr, "NULL");
+                    }
+                    else
+                    {
+                        char *str = OutputFunctionCall(&keyoutfuncs[0], keyValues[0]);
+                        appendStringInfoString(&keyStr, str);
+                        
+                        switch (keytypes[0])
+                        {
+                            case INT2OID:
+                                keyval = (int64) DatumGetInt16(keyValues[0]);
+                                break;
+                            case INT4OID:
+                                keyval = (int64) DatumGetInt32(keyValues[0]);
+                                break;
+                            case INT8OID:
+                                keyval = DatumGetInt64(keyValues[0]);
+                                break;
+                            default:
+                                {
+                                    uint32 h = 0;
+                                    const unsigned char *p = (const unsigned char *) str;
+                                    
+                                    while (*p)
+                                        h = h * 31 + *p++;
+                                    
+                                    leafId = (int) (h % totalLeaves);
+                                    keyval = 0; /* keep compiler quiet */
+                                }
+                                break;
+                        }
+                        
+                        if (keytypes[0] == INT2OID || keytypes[0] == INT4OID || keytypes[0] == INT8OID)
+                        {
+                            if (keyval < 0)
+                                keyval = -keyval;
+                            leafId = (int) (keyval % totalLeaves);
+                        }
+                        
+                        pfree(str);
+                    }
+                }
+                else
+                {
+                    /* Multi-key - show as tuple (val1,val2,...) */
+                    uint64 hash = 0;
+                    static const char null_marker[] = "*null*";
+                    
+                    appendStringInfoChar(&keyStr, '(');
+                    for (k = 0; k < nkeys; k++)
+                    {
+                        if (k > 0)
+                            appendStringInfoChar(&keyStr, ',');
+                        
+                        if (keyNulls[k])
+                        {
+                            const unsigned char *p = (const unsigned char *) null_marker;
+                            
+                            appendStringInfoString(&keyStr, "NULL");
+                            while (*p)
+                                hash = hash * 33 + *p++;
+                        }
+                        else
+                        {
+                            char *str = OutputFunctionCall(&keyoutfuncs[k], keyValues[k]);
+                            const unsigned char *p = (const unsigned char *) str;
+                            
+                            appendStringInfoString(&keyStr, str);
+                            
+                            hash = hash * 33 + (unsigned char) '*';
+                            while (*p)
+                                hash = hash * 33 + *p++;
+                            hash = hash * 33 + (unsigned char) '*';
+                            
+                            pfree(str);
+                        }
+                    }
+                    appendStringInfoChar(&keyStr, ')');
+                    
+                    leafId = (int) (hash % totalLeaves);
+                }
+            
+                /* Add to key list - no limit, show all keys */
+                if (counts[leafId] > 0)
+                    appendStringInfoString(keyLists[leafId], ", ");
+                appendStringInfoString(keyLists[leafId], keyStr.data);
+            
+                counts[leafId]++;
             }
             
-            /* Add to key list - no limit, show all keys */
-                if (counts[partitionId] > 0)
-                    appendStringInfoString(keyLists[partitionId], ", ");
-                appendStringInfoString(keyLists[partitionId], keyStr.data);
-            
-            counts[partitionId]++;
+            pfree(keyStr.data);
             pfree(keyValues);
             pfree(keyNulls);
-            pfree(keyStr.data);
         }
         
         /* Close key lists */

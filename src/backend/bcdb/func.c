@@ -256,6 +256,19 @@ bcdb_num_committed(PG_FUNCTION_ARGS)
 }
 
 Datum
+bcdb_last_committed_txid(PG_FUNCTION_ARGS)
+{
+    /*
+     * Return the commit-order counter used by deterministic BCDB execution.
+     *
+     * IMPORTANT: Ensure the sentinel block (bid=1) exists so callers can use
+     * this value even before any deterministic tx has run.
+     */
+    (void) get_block_by_id(1, true);
+    PG_RETURN_INT32((int) get_last_committed_txid(NULL));
+}
+
+Datum
 bcdb_reset(PG_FUNCTION_ARGS)
 {
 #if SAFEDBG

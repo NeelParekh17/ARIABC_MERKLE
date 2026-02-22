@@ -10823,6 +10823,11 @@ proargtypes => '', prosrc => 'bcdb_num_committed' },
 # bcdb function
 { oid => '7012', descr => 'BCDB verify signature',
 proname => 'bcdb_verify', prorettype => 'bool',
-proargtypes => 'text text text', prosrc => 'bcdb_verify' }
+proargtypes => 'text text text', prosrc => 'bcdb_verify' },
+
+# bcdb function
+{ oid => '7013', descr => 'BCDB last committed txid (deterministic counter)',
+proname => 'bcdb_last_committed_txid', prorettype => 'int4',
+proargtypes => '', prosrc => 'bcdb_last_committed_txid' }
 
 ]

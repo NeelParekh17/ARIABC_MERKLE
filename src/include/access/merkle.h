@@ -27,10 +27,19 @@ extern bool enable_merkle_index;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
 extern bool merkle_update_detection;
 /*
- * Internal: temporarily suppress update-detection reporting in non-DML
- * contexts (e.g. CREATE INDEX / REINDEX builds).
+ * GUC: Suppress Merkle update-detection output during Merkle index builds
+ * (CREATE INDEX / REINDEX).
  */
 extern bool merkle_update_detection_suppress;
+/*
+ * Internal: temporarily suppress per-tuple undo tracking in non-DML contexts
+ * where the Merkle index relation is being built (CREATE INDEX / REINDEX).
+ *
+ * During an index build, the Merkle index is new and will be dropped on error
+ * or transaction abort, so recording per-row undo state is unnecessary and
+ * can exhaust memory for large tables.
+ */
+extern bool merkle_undo_suppress;
 
 /*
  * Merkle tree configuration constants
