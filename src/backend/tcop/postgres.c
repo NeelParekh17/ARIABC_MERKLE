@@ -4606,9 +4606,25 @@ PostgresMain(int argc, char *argv[],
     printf("msg abracadabra sig valid: %d\n", valid);
 */
 
-					if((query_string[0] == 's') &&
-					(query_string[1] == ' ') &&
-					(query_string[2] == '0')) {
+					bool is_bcdb_hashed_det = false;
+					int qlen = strlen(query_string);
+					if (qlen >= 11 && query_string[0] == 's' && query_string[1] == ' ')
+					{
+						is_bcdb_hashed_det = true;
+						for (int j = 2; j < 10; j++)
+						{
+							char c = query_string[j];
+							if (c < '0' || c > '9')
+							{
+								is_bcdb_hashed_det = false;
+								break;
+							}
+						}
+						if (is_bcdb_hashed_det && query_string[10] != ' ')
+							is_bcdb_hashed_det = false;
+					}
+
+					if (is_bcdb_hashed_det) {
     set_blksz(1);
 					strncpy(pfx_str, query_string+2, 8);
 					pfx_str[8] = '\0';

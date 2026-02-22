@@ -130,12 +130,170 @@ parse_ycsb_key_eq_int32(const char *sql, int32 *key_out)
     return true;
 }
 
+static inline bool
+is_ident_char(unsigned char c)
+{
+    return isalnum(c) || c == '_';
+}
+
+static const char *
+find_keyword_ci(const char *haystack, const char *needle)
+{
+    size_t nlen = strlen(needle);
+
+    for (const char *p = haystack; *p; p++)
+    {
+        if (pg_strncasecmp(p, needle, nlen) == 0)
+        {
+            unsigned char before = (p == haystack) ? 0 : (unsigned char) p[-1];
+            unsigned char after = (unsigned char) p[nlen];
+
+            if ((p == haystack || !is_ident_char(before)) &&
+                (after == '\0' || !is_ident_char(after)))
+                return p;
+        }
+    }
+
+    return NULL;
+}
+
+static bool
+parse_quoted_ident(const char **sp, char *out, Size outsz)
+{
+    const char *s = *sp;
+    Size        n = 0;
+
+    if (*s != '"')
+        return false;
+    s++;
+
+    while (*s)
+    {
+        if (*s == '"')
+        {
+            if (s[1] == '"')
+            {
+                if (n + 1 >= outsz)
+                    return false;
+                out[n++] = '"';
+                s += 2;
+                continue;
+            }
+
+            s++;
+            out[n] = '\0';
+            *sp = s;
+            return (n > 0);
+        }
+
+        if (n + 1 >= outsz)
+            return false;
+        out[n++] = *s++;
+    }
+
+    return false;
+}
+
+static bool
+parse_delete_from_relname(const char *sql, char *relname_out, Size relname_out_sz)
+{
+    const char *p;
+    const char *from;
+
+    p = skip_ws(sql);
+    if (pg_strncasecmp(p, "DELETE", 6) != 0)
+        return false;
+
+    from = find_keyword_ci(p + 6, "FROM");
+    if (from == NULL)
+        return false;
+
+    p = skip_ws(from + 4);
+
+    if (pg_strncasecmp(p, "ONLY", 4) == 0 && isspace((unsigned char) p[4]))
+        p = skip_ws(p + 4);
+
+    if (*p == '\0')
+        return false;
+
+    if (*p == '"')
+    {
+        char first[NAMEDATALEN];
+
+        if (!parse_quoted_ident(&p, first, sizeof(first)))
+            return false;
+
+        p = skip_ws(p);
+        if (*p == '.')
+        {
+            p = skip_ws(p + 1);
+
+            if (*p == '"')
+            {
+                char second[NAMEDATALEN];
+
+                if (!parse_quoted_ident(&p, second, sizeof(second)))
+                    return false;
+                strlcpy(relname_out, second, relname_out_sz);
+                return true;
+            }
+            else
+            {
+                const char *start = p;
+                size_t      len;
+
+                while (*p &&
+                       !isspace((unsigned char) *p) &&
+                       *p != ';' && *p != ',' && *p != '(')
+                    p++;
+                len = (size_t) (p - start);
+                if (len == 0 || len >= relname_out_sz)
+                    return false;
+                memcpy(relname_out, start, len);
+                relname_out[len] = '\0';
+                return true;
+            }
+        }
+
+        strlcpy(relname_out, first, relname_out_sz);
+        return true;
+    }
+    else
+    {
+        const char *start = p;
+        size_t      len;
+        char        token[NAMEDATALEN * 2];
+        char       *last_dot;
+        const char *rel;
+
+        while (*p &&
+               !isspace((unsigned char) *p) &&
+               *p != ';' && *p != ',' && *p != '(')
+            p++;
+        len = (size_t) (p - start);
+        if (len == 0 || len >= sizeof(token))
+            return false;
+
+        memcpy(token, start, len);
+        token[len] = '\0';
+
+        last_dot = strrchr(token, '.');
+        rel = last_dot ? last_dot + 1 : token;
+        if (*rel == '\0')
+            return false;
+
+        strlcpy(relname_out, rel, relname_out_sz);
+        return true;
+    }
+}
+
 static void
 bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
 {
     const char *sql;
     int32 keyval;
     Oid relOid;
+    char relname[NAMEDATALEN];
     uint32 h;
     PREDICATELOCKTARGETTAG tag;
 
@@ -152,7 +310,10 @@ bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
     if (!parse_ycsb_key_eq_int32(sql, &keyval))
         return;
 
-    relOid = RelnameGetRelid("usertable");
+    if (!parse_delete_from_relname(sql, relname, sizeof(relname)))
+        return;
+
+    relOid = RelnameGetRelid(relname);
     if (!OidIsValid(relOid))
         return;
 
@@ -944,12 +1105,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     }
     PG_CATCH();
     {
-      //set_last_committed_id(tx->tx_id);
-      SpinLockAcquire(restart_counter_lock);
-      if(get_last_committed_txid() == (tx->tx_id - 1)) set_last_committed_txid(tx);
-      SpinLockRelease(restart_counter_lock);
+      ConditionVariableCancelSleep();
         printf("safeDbg pg-catch() pid %d %s : %s: %d  tx %d %s \n",
-		    getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id, tx->sql );
+			    getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id, tx->sql );
       //goto retry;
 
       //print_trace();
@@ -961,10 +1119,10 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
               BCBlock     *block2 = get_block_by_id(1, false);
 	      ConditionVariableBroadcast(&block2->cond);
       }
-	      if (hold_portal_snapshot && activeTx && activeTx->portal)
-	      {
-	          if (activeTx->portal->resowner)
-	          {
+		      if (hold_portal_snapshot && activeTx && activeTx->portal)
+		      {
+		          if (activeTx->portal->resowner)
+		          {
 	              ResourceOwnerRelease(activeTx->portal->resowner,
 	                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
 	              ResourceOwnerRelease(activeTx->portal->resowner,
@@ -975,17 +1133,21 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	              activeTx->portal->resowner = NULL;
 	          }
 	          PortalDrop(activeTx->portal, false);
-	          activeTx->portal = NULL;
-	          hold_portal_snapshot = false;
+		          activeTx->portal = NULL;
+		          hold_portal_snapshot = false;
+		      }
+
+	      while (activeTx &&
+	             (optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
+	      {
+	          if (optim_write_entry->slot)
+	              ExecDropSingleTupleTableSlot(optim_write_entry->slot);
+	          SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
 	      }
-      delete_tx(tx);
-      MemoryContextReset(bcdb_tx_context);
-      while ((optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
-      {
-	   if (optim_write_entry->slot)
-	       ExecDropSingleTupleTableSlot(optim_write_entry->slot);
-	   SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
-      }
+
+	      MemoryContextReset(bcdb_tx_context);
+	      delete_tx(tx);
+	      activeTx = NULL;
       PG_RE_THROW();
     }
     PG_END_TRY();

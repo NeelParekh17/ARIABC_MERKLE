@@ -47,3 +47,11 @@ lib*.pc
 /src/.vscode/
 /.idea/
 *.bcdbtest
+
+# Exclude log, markdown, diff files
+*.log
+*.md
+*.diff
+
+# Exclude entire scripts directory
+/scripts/

@@ -26,6 +26,7 @@
 #include "utils/snapmgr.h"
 #include "utils/snapshot.h"
 #include "access/xact.h"
+#include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
 #include "utils/memutils.h"
 #include "access/relation.h"
@@ -523,11 +524,15 @@ merkle_emit_touched_nodes_report(void)
     }
     PG_END_TRY();
 
+    /*
+     * Collect the root node (node_in_partition=1) for each touched partition.
+     * This is the partition "root hash" users typically care about.
+     */
     changed = (MerkleTouchedNode **) palloc(sizeof(MerkleTouchedNode *) * nentries);
     for (i = 0; i < nentries; i++)
     {
         MerkleTouchedNode *e = entries[i];
-        if (e->finalValid && e->changed)
+        if (e->finalValid && e->nodeInPartition == 1 && e->changed)
             changed[nchanged++] = e;
     }
 
@@ -540,11 +545,10 @@ merkle_emit_touched_nodes_report(void)
 
     qsort(changed, nchanged, sizeof(MerkleTouchedNode *), merkle_cmp_touch_output_order);
 
-    currentRelid = InvalidOid;
-    indexRel = NULL;
-
     PG_TRY();
     {
+        StringInfoData out;
+
         /*
          * BCDB deterministic transactions (triggered via "s <seq> ...") set
          * is_bcdb_worker=true in the session backend, which suppresses all
@@ -557,53 +561,29 @@ merkle_emit_touched_nodes_report(void)
         saved_is_bcdb_worker = is_bcdb_worker;
         is_bcdb_worker = false;
 
+        initStringInfo(&out);
+
         for (i = 0; i < nchanged; i++)
         {
             MerkleTouchedNode *e = changed[i];
-            char *hex;
+            char *hex = merkle_hash_to_hex(&e->finalHash);
 
-            if (e->indexRelid != currentRelid)
-            {
-                if (indexRel != NULL)
-                {
-                    relation_close(indexRel, AccessShareLock);
-                    indexRel = NULL;
-                }
-
-                indexRel = relation_open(e->indexRelid, AccessShareLock);
-                currentRelid = e->indexRelid;
-
-                ereport(NOTICE,
-                        (errmsg("Merkle update detection: index \"%s\"",
-                                RelationGetRelationName(indexRel))));
-                ereport(NOTICE,
-                        (errmsg("Partition\tnode_in_partition\tUpdated_Hash")));
-            }
-
-            hex = merkle_hash_to_hex(&e->finalHash);
-            ereport(NOTICE,
-                    (errmsg("%d\t%d\t%s",
-                            e->partition, e->nodeInPartition, hex)));
+            if (i > 0)
+                appendStringInfoString(&out, " ");
+            appendStringInfo(&out, "(%d, %s)", e->partition, hex);
             pfree(hex);
         }
 
-        if (indexRel != NULL)
-        {
-            relation_close(indexRel, AccessShareLock);
-            indexRel = NULL;
-        }
+        ereport(NOTICE,
+                (errmsg("BCDB_MERKLE_ROOTS: %s", out.data)));
+
+        pfree(out.data);
 
         is_bcdb_worker = saved_is_bcdb_worker;
     }
     PG_CATCH();
     {
         is_bcdb_worker = saved_is_bcdb_worker;
-
-        if (indexRel != NULL)
-        {
-            relation_close(indexRel, AccessShareLock);
-            indexRel = NULL;
-        }
 
         pfree(entries);
         pfree(changed);
@@ -692,7 +672,6 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 {
     TupleDesc       tupdesc;
     TupleTableSlot *slot;
-    StringInfoData  buf;
     blake3_hasher   hasher;
     int             i;
     
@@ -735,9 +714,9 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
         }
         else
         {
-            /* Build concatenated string of all column values */
-            initStringInfo(&buf);
-            
+            /* Hash concatenated text output of all columns (deterministic) */
+            blake3_hasher_init(&hasher);
+
             for (i = 0; i < tupdesc->natts; i++)
             {
                 Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
@@ -755,14 +734,16 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
                 
                 if (isnull)
                 {
-                    appendStringInfoString(&buf, "*null*");
+                    static const char null_marker[] = "*null*";
+                    blake3_hasher_update(&hasher, null_marker, sizeof(null_marker) - 1);
                 }
                 else
                 {
                     /* Get output function for this type */
                     getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
                     str = OidOutputFunctionCall(typoutput, val);
-                    appendStringInfo(&buf, "*%s", str);
+                    blake3_hasher_update(&hasher, "*", 1);
+                    blake3_hasher_update(&hasher, str, strlen(str));
                     pfree(str);
                 }
             }
@@ -771,11 +752,7 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
              * Compute BLAKE3 hash - produces 32 bytes (256 bits) directly
              * BLAKE3 is faster than MD5 and cryptographically secure
              */
-            blake3_hasher_init(&hasher);
-            blake3_hasher_update(&hasher, buf.data, buf.len);
             blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
-            
-            pfree(buf.data);
         }
     }
     PG_CATCH();
@@ -800,7 +777,6 @@ void
 merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *result)
 {
     TupleDesc       tupdesc;
-    StringInfoData  buf;
     blake3_hasher   hasher;
     int             i;
 
@@ -811,7 +787,7 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
     }
 
     tupdesc = RelationGetDescr(heapRel);
-    initStringInfo(&buf);
+    blake3_hasher_init(&hasher);
 
     for (i = 0; i < tupdesc->natts; i++)
     {
@@ -829,22 +805,20 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
 
         if (isnull)
         {
-            appendStringInfoString(&buf, "*null*");
+            static const char null_marker[] = "*null*";
+            blake3_hasher_update(&hasher, null_marker, sizeof(null_marker) - 1);
         }
         else
         {
             getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
             str = OidOutputFunctionCall(typoutput, val);
-            appendStringInfo(&buf, "*%s", str);
+            blake3_hasher_update(&hasher, "*", 1);
+            blake3_hasher_update(&hasher, str, strlen(str));
             pfree(str);
         }
     }
 
-    blake3_hasher_init(&hasher);
-    blake3_hasher_update(&hasher, buf.data, buf.len);
     blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
-
-    pfree(buf.data);
 }
 
 /*
@@ -929,9 +903,7 @@ int
 merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
                             TupleDesc tupdesc, int numLeaves)
 {
-    StringInfoData buf;
     uint64      hash = 0;
-    char       *p;
     int         i;
     
     /* Safety check: prevent division by zero */
@@ -946,15 +918,25 @@ merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
         return merkle_compute_partition_id_single(values[0], 
                    TupleDescAttr(tupdesc, 0)->atttypid, numLeaves);
     }
-    
-    /* Build concatenated string of all key values */
-    initStringInfo(&buf);
-    
+
+    /*
+     * Multi-key: hash deterministically using djb2 over the same byte stream
+     * that the previous implementation built via StringInfo:
+     *   NULL   -> "*null*"
+     *   value  -> "*" + typoutput(value) + "*"
+     *
+     * Avoid building the concatenated string to reduce allocations and a
+     * second pass over the bytes.
+     */
     for (i = 0; i < nkeys; i++)
     {
         if (isnull[i])
         {
-            appendStringInfoString(&buf, "*null*");
+            static const char null_marker[] = "*null*";
+            const unsigned char *p = (const unsigned char *) null_marker;
+
+            while (*p)
+                hash = hash * 33 + *p++;
         }
         else
         {
@@ -962,20 +944,20 @@ merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
             bool typIsVarlena;
             char *str;
             Oid atttypid = TupleDescAttr(tupdesc, i)->atttypid;
-            
+            const unsigned char *p;
+
             getTypeOutputInfo(atttypid, &typoutput, &typIsVarlena);
             str = OidOutputFunctionCall(typoutput, values[i]);
-            appendStringInfo(&buf, "*%s*", str);
+
+            hash = hash * 33 + (unsigned char) '*';
+            for (p = (const unsigned char *) str; *p != '\0'; p++)
+                hash = hash * 33 + *p;
+            hash = hash * 33 + (unsigned char) '*';
+
             pfree(str);
         }
     }
-    
-    /* Hash the combined string using djb2 algorithm */
-    for (p = buf.data; *p != '\0'; p++)
-        hash = hash * 33 + (unsigned char) *p;
-    
-    pfree(buf.data);
-    
+
     return (int)(hash % numLeaves);
 }
 
@@ -1016,8 +998,6 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
     Buffer      buf = InvalidBuffer;
     Page        page = NULL;
     MerkleNode *nodes = NULL;
-    MemoryContext oldContext;
-    MerklePendingOp *op;
 
     (void) isXorIn;
     
@@ -1043,43 +1023,49 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
                         leafId, totalLeaves)));
     }
     
-    /*
-     * Register transaction callback if not done yet.
-     * This ensures we can undo changes if the transaction aborts.
-     */
-    if (!xactCallbackRegistered)
+    if (!merkle_undo_suppress)
     {
-        RegisterXactCallback(merkle_xact_callback, NULL);
-        xactCallbackRegistered = true;
+        MemoryContext oldContext;
+        MerklePendingOp *op;
+
+        /*
+         * Register transaction callback if not done yet.
+         * This ensures we can undo changes if the transaction aborts.
+         */
+        if (!xactCallbackRegistered)
+        {
+            RegisterXactCallback(merkle_xact_callback, NULL);
+            xactCallbackRegistered = true;
+        }
+        if (!subxactCallbackRegistered)
+        {
+            RegisterSubXactCallback(merkle_subxact_callback, NULL);
+            subxactCallbackRegistered = true;
+        }
+
+        /*
+         * Record this operation in the pending list for potential rollback.
+         * We use TopTransactionContext to ensure the list survives until commit/abort.
+         */
+        oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+        op = (MerklePendingOp *) palloc(sizeof(MerklePendingOp));
+        op->indexRel = indexRel;
+        op->relid = RelationGetRelid(indexRel);
+        op->subxid = GetCurrentSubTransactionId();
+        op->leafId = leafId;
+        op->hash = *hash;
+        op->leavesPerPartition = leavesPerPartition;
+        op->nodesPerPartition = nodesPerPartition;
+        op->totalNodes = totalNodes;
+        op->totalLeaves = totalLeaves;
+        op->nodesPerPage = nodesPerPage;
+        op->numTreePages = numTreePages;
+
+        pendingOps = lappend(pendingOps, op);
+
+        MemoryContextSwitchTo(oldContext);
     }
-    if (!subxactCallbackRegistered)
-    {
-        RegisterSubXactCallback(merkle_subxact_callback, NULL);
-        subxactCallbackRegistered = true;
-    }
-    
-    /*
-     * Record this operation in the pending list for potential rollback.
-     * We use TopTransactionContext to ensure the list survives until commit/abort.
-     */
-    oldContext = MemoryContextSwitchTo(TopTransactionContext);
-    
-    op = (MerklePendingOp *) palloc(sizeof(MerklePendingOp));
-    op->indexRel = indexRel;
-    op->relid = RelationGetRelid(indexRel);
-    op->subxid = GetCurrentSubTransactionId();
-    op->leafId = leafId;
-    op->hash = *hash;
-    op->leavesPerPartition = leavesPerPartition;
-    op->nodesPerPartition = nodesPerPartition;
-    op->totalNodes = totalNodes;
-    op->totalLeaves = totalLeaves;
-    op->nodesPerPage = nodesPerPage;
-    op->numTreePages = numTreePages;
-    
-    pendingOps = lappend(pendingOps, op);
-    
-    MemoryContextSwitchTo(oldContext);
     
     /* Calculate partition and node positions using dynamic values */
     partitionId = leafId / leavesPerPartition;
@@ -1133,7 +1119,7 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
         }
 
         /* Record pre-change hash for optional commit-time reporting */
-        if (merkle_update_detection && !merkle_update_detection_suppress)
+        if (merkle_update_detection)
             merkle_track_touched_node(indexRel, partitionId, nodeInPartition,
                                       actualNodeIdx, pageNum, idxInPage,
                                       nodesPerPage, numTreePages,

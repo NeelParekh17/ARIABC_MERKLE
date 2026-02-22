@@ -24,6 +24,7 @@
 #include "catalog/pg_am_d.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "lib/stringinfo.h"
 
 /*
  * Per-tuple callback state for index build
@@ -34,8 +35,77 @@ typedef struct
     Relation    heapRel;
     double      indtuples;
     int         nkeys;          /* Number of index key columns */
-    int         totalLeaves;    /* Total leaves from options */
+    int         numPartitions;
+    int         leavesPerPartition;
+    int         nodesPerPartition;
+    int         totalLeaves;    /* numPartitions * leavesPerPartition */
+    int         totalNodes;     /* numPartitions * nodesPerPartition */
+    int         nodesPerPage;
+    int         numTreePages;
+    MerkleHash *nodeHashes;     /* per-node accumulated hashes (0-based) */
 } MerkleBuildState;
+
+static void merkle_emit_build_nodes_report(Relation indexRel,
+                                          MerkleBuildState *buildstate);
+
+static void
+merkle_emit_build_nodes_report(Relation indexRel, MerkleBuildState *buildstate)
+{
+    bool saved_is_bcdb_worker;
+    int  partition;
+
+    if (!merkle_update_detection)
+        return;
+    if (merkle_update_detection_suppress)
+        return;
+    if (buildstate == NULL || buildstate->nodeHashes == NULL)
+        return;
+
+    saved_is_bcdb_worker = is_bcdb_worker;
+
+    PG_TRY();
+    {
+        StringInfoData out;
+        bool first = true;
+
+        is_bcdb_worker = false;
+
+        initStringInfo(&out);
+
+        for (partition = 0; partition < buildstate->numPartitions; partition++)
+        {
+            int base = partition * buildstate->nodesPerPartition;
+            MerkleHash *h = &buildstate->nodeHashes[base];
+            char       *hex;
+
+            if (merkle_hash_is_zero(h))
+                continue;
+
+            hex = merkle_hash_to_hex(h);
+
+            if (!first)
+                appendStringInfoString(&out, " ");
+            appendStringInfo(&out, "(%d, %s)", partition, hex);
+            first = false;
+
+            pfree(hex);
+        }
+
+        if (!first)
+            ereport(NOTICE,
+                    (errmsg("BCDB_MERKLE_ROOTS: %s", out.data)));
+
+        pfree(out.data);
+
+        is_bcdb_worker = saved_is_bcdb_worker;
+    }
+    PG_CATCH();
+    {
+        is_bcdb_worker = saved_is_bcdb_worker;
+        FlushErrorState();
+    }
+    PG_END_TRY();
+}
 
 /*
  * merkle_build_callback() - Process one tuple during index build
@@ -50,7 +120,7 @@ merkle_build_callback(Relation indexRel,
 {
     MerkleBuildState *buildstate = (MerkleBuildState *) state;
     MerkleHash      hash;
-    int             partitionId;
+    int             leafId;
     TupleDesc       tupdesc;
     
     /* Only process live tuples */
@@ -59,17 +129,28 @@ merkle_build_callback(Relation indexRel,
     
     tupdesc = RelationGetDescr(indexRel);
     
-    /* Compute partition ID using multi-column support and dynamic leaf count */
-    partitionId = merkle_compute_partition_id(values, isnull,
-                                                     buildstate->nkeys,
-                                                     tupdesc,
-                                                     buildstate->totalLeaves);
+    /* Compute leaf ID using multi-column support and dynamic leaf count */
+    leafId = merkle_compute_partition_id(values, isnull,
+                                         buildstate->nkeys,
+                                         tupdesc,
+                                         buildstate->totalLeaves);
     
     /* Compute hash of the full row */
     merkle_compute_row_hash(buildstate->heapRel, tid, &hash);
     
-    /* Update the Merkle tree path */
-    merkle_update_tree_path(indexRel, partitionId, &hash, true);
+    /*
+     * Build optimization: during CREATE INDEX/REINDEX, avoid per-tuple buffer
+     * traffic by accumulating XOR only at the leaf node in memory, then
+     * constructing internal nodes once at the end.
+     */
+    {
+        int partitionId = leafId / buildstate->leavesPerPartition;
+        int leafPos = leafId % buildstate->leavesPerPartition;
+        int nodeInPartition = buildstate->leavesPerPartition + leafPos;
+        int nodeIdx = partitionId * buildstate->nodesPerPartition + (nodeInPartition - 1);
+
+        merkle_hash_xor(&buildstate->nodeHashes[nodeIdx], &hash);
+    }
     
     buildstate->indtuples += 1;
 }
@@ -88,15 +169,15 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     double              reltuples;
     MerkleOptions      *opts;
     int                 totalLeaves;
-    bool                saved_suppress;
+    bool                saved_undo_suppress;
     
     /*
-     * If merkle_update_detection is enabled, suppress touched-node reporting
-     * during CREATE INDEX/REINDEX builds. Users generally want the report only
-     * for DML (INSERT/UPDATE/DELETE), not for bulk index construction.
+     * During an index build, the Merkle index is new and will be dropped on
+     * error or transaction abort. Recording per-tuple undo state is unnecessary
+     * and can consume large amounts of memory for big tables.
      */
-    saved_suppress = merkle_update_detection_suppress;
-    merkle_update_detection_suppress = true;
+    saved_undo_suppress = merkle_undo_suppress;
+    merkle_undo_suppress = true;
 
     PG_TRY();
     {
@@ -143,6 +224,18 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
      */
     merkle_init_tree(indexRel, RelationGetRelid(heapRel), opts);
     
+    /*
+     * Prepare in-memory node hash array for build accumulation.
+     */
+    buildstate.numPartitions = opts->partitions;
+    buildstate.leavesPerPartition = opts->leaves_per_partition;
+    buildstate.nodesPerPartition = 2 * buildstate.leavesPerPartition - 1;
+    buildstate.totalLeaves = totalLeaves;
+    buildstate.totalNodes = buildstate.numPartitions * buildstate.nodesPerPartition;
+    buildstate.nodesPerPage = (int) MERKLE_MAX_NODES_PER_PAGE;
+    buildstate.numTreePages = (buildstate.totalNodes + buildstate.nodesPerPage - 1) / buildstate.nodesPerPage;
+    buildstate.nodeHashes = (MerkleHash *) palloc0(sizeof(MerkleHash) * buildstate.totalNodes);
+
     /* Free options after use */
     pfree(opts);
     
@@ -153,7 +246,6 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     buildstate.heapRel = heapRel;
     buildstate.indtuples = 0;
     buildstate.nkeys = indexInfo->ii_NumIndexKeyAttrs;
-    buildstate.totalLeaves = totalLeaves;
     
     /*
      * Scan the heap and build the index
@@ -164,6 +256,68 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
                                        merkle_build_callback,
                                        (void *) &buildstate,
                                        NULL);  /* use heap scan */
+
+    /*
+     * Finalize: compute internal nodes from leaves, then write the completed
+     * Merkle tree to the index pages.
+     */
+    {
+        int partition;
+        int nodeIdx = 0;
+        int pageNum;
+
+        /* Construct internal nodes per partition (children first). */
+        for (partition = 0; partition < buildstate.numPartitions; partition++)
+        {
+            int base = partition * buildstate.nodesPerPartition;
+            int i;
+
+            for (i = buildstate.leavesPerPartition - 1; i >= 1; i--)
+            {
+                int leftChildIdx = base + (2 * i - 1);
+                int rightChildIdx = base + (2 * i);
+                MerkleHash h = buildstate.nodeHashes[leftChildIdx];
+
+                merkle_hash_xor(&h, &buildstate.nodeHashes[rightChildIdx]);
+                buildstate.nodeHashes[base + (i - 1)] = h;
+            }
+        }
+
+        /* Write nodes to index pages in on-disk layout order. */
+        for (pageNum = 0; pageNum < buildstate.numTreePages; pageNum++)
+        {
+            Buffer      buf;
+            Page        page;
+            MerkleNode *nodes;
+            int         nodesThisPage;
+            int         i;
+            int         pageContentBytes = BLCKSZ - MAXALIGN(SizeOfPageHeaderData);
+
+            nodesThisPage = Min(buildstate.nodesPerPage, buildstate.totalNodes - nodeIdx);
+
+            buf = ReadBuffer(indexRel, MERKLE_TREE_START_BLKNO + pageNum);
+            LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+            page = BufferGetPage(buf);
+            nodes = (MerkleNode *) PageGetContents(page);
+
+            for (i = 0; i < nodesThisPage; i++)
+            {
+                nodes[i].nodeId = nodeIdx + i;
+                nodes[i].hash = buildstate.nodeHashes[nodeIdx + i];
+            }
+
+            if (nodesThisPage * (int)sizeof(MerkleNode) < pageContentBytes)
+            {
+                memset(((char *) nodes) + nodesThisPage * sizeof(MerkleNode), 0,
+                       pageContentBytes - nodesThisPage * sizeof(MerkleNode));
+            }
+
+            MarkBufferDirty(buf);
+            UnlockReleaseBuffer(buf);
+
+            nodeIdx += nodesThisPage;
+        }
+    }
     
     /*
      * Return statistics
@@ -172,15 +326,16 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     result->heap_tuples = reltuples;
     result->index_tuples = buildstate.indtuples;
     
+    merkle_emit_build_nodes_report(indexRel, &buildstate);
     }
     PG_CATCH();
     {
-        merkle_update_detection_suppress = saved_suppress;
+        merkle_undo_suppress = saved_undo_suppress;
         PG_RE_THROW();
     }
     PG_END_TRY();
 
-    merkle_update_detection_suppress = saved_suppress;
+    merkle_undo_suppress = saved_undo_suppress;
     return result;
 }
 

@@ -24,8 +24,16 @@
 bool enable_merkle_index = true;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
 bool merkle_update_detection = false;
-/* Internal: suppress update-detection in non-DML contexts (e.g. index build) */
-bool merkle_update_detection_suppress = false;
+/*
+ * GUC: Suppress Merkle update-detection output during Merkle index builds
+ * (CREATE INDEX / REINDEX).
+ *
+ * When enabled, Merkle index builds will not emit the touched-node report even
+ * if merkle_update_detection is on. Default is enabled to avoid noisy output.
+ */
+bool merkle_update_detection_suppress = true;
+/* Internal: suppress undo tracking in non-DML contexts (e.g. index build) */
+bool merkle_undo_suppress = false;
 
 /*
  * Merkle index reloption definitions using standard framework
