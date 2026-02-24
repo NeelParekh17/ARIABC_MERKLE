@@ -812,26 +812,29 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
           printf("safeDbg pid %d %s : %s: %d \n",
                   getpid(), __FILE__, __FUNCTION__, __LINE__ );
 #endif
-	  old_owner = CurrentResourceOwner;
-	  snapshot = GetTransactionSnapshot();	 // get snapshot
+		  old_owner = CurrentResourceOwner;
+		  snapshot = GetTransactionSnapshot();	 // get snapshot
 		  tx->sxact = ShareSerializableXact();
 		  tx->sxact->bcdb_tx = tx;
 		  get_write_set(tx, snapshot); 	//  does CreatePortal
 		  bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
 #if SAFEDBG1
-	       	  printf("safeDbg pid %d %s : %s: %d \n",
-	                getpid(), __FILE__, __FUNCTION__, __LINE__ );
+		  printf("safeDbg pid %d %s : %s: %d \n",
+			  getpid(), __FILE__, __FUNCTION__, __LINE__ );
 #endif
 		  CurrentResourceOwner = activeTx->portal->resowner;
-		  ExecutorFinish(tx->queryDesc);
-		  ExecutorEnd(tx->queryDesc);
-		  FreeQueryDesc(tx->queryDesc);
-		  tx->queryDesc = NULL;
+		  if (tx->queryDesc != NULL)
+		  {
+			  ExecutorFinish(tx->queryDesc);
+			  ExecutorEnd(tx->queryDesc);
+			  FreeQueryDesc(tx->queryDesc);
+			  tx->queryDesc = NULL;
+		  }
 		  CurrentResourceOwner = old_owner;
-	          hold_portal_snapshot = true;
+		  hold_portal_snapshot = true;
 #if SAFEDBG1
-	       	  printf("safeDbg pid %d %s : %s: %d \n",
-	                getpid(), __FILE__, __FUNCTION__, __LINE__ );
+		  printf("safeDbg pid %d %s : %s: %d \n",
+			  getpid(), __FILE__, __FUNCTION__, __LINE__ );
 #endif
 	  tx->status = TX_WAIT_FOR_COMMIT;
 
@@ -1184,16 +1187,20 @@ bcdb_worker_process_tx(BCDBShmXact *tx)
             tx->start_simulation_time = bcdb_get_time();
         start_xact_command();
         snapshot = GetTransactionSnapshot();
-        tx->sxact = ShareSerializableXact();
-        tx->sxact->bcdb_tx = tx;
-        get_write_set(tx, snapshot);
-        old_owner = CurrentResourceOwner;
-        CurrentResourceOwner = activeTx->portal->resowner;
-        ExecutorFinish(tx->queryDesc);
-        ExecutorEnd(tx->queryDesc);
-        FreeQueryDesc(tx->queryDesc);
-        CurrentResourceOwner = old_owner;
-        PortalDrop(activeTx->portal, false);
+		tx->sxact = ShareSerializableXact();
+		tx->sxact->bcdb_tx = tx;
+		get_write_set(tx, snapshot);
+		old_owner = CurrentResourceOwner;
+		CurrentResourceOwner = activeTx->portal->resowner;
+		if (tx->queryDesc != NULL)
+		{
+			ExecutorFinish(tx->queryDesc);
+			ExecutorEnd(tx->queryDesc);
+			FreeQueryDesc(tx->queryDesc);
+			tx->queryDesc = NULL;
+		}
+		CurrentResourceOwner = old_owner;
+		PortalDrop(activeTx->portal, false);
 
         if (block == NULL)
         {
