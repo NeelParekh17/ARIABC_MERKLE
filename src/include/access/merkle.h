@@ -45,18 +45,19 @@ extern bool merkle_undo_suppress;
  * Merkle tree configuration constants
  * 
  * The tree is organized as multiple partitions for better distribution:
- * - NUM_PARTITIONS: Number of independent partitions (58 to fit in one page)
- * - LEAVES_PER_PARTITION: Leaves in each partition (4, giving tree height 3)
- * - NODES_PER_PARTITION: Total nodes per partition (2 * leaves - 1 = 7)
- * - TOTAL_LEAVES: Total leaf positions (58 * 4 = 232)
- * - TOTAL_NODES: Total nodes across all partitions (58 * 7 = 406)
+ * - NUM_PARTITIONS: Number of independent partitions
+ * - LEAVES_PER_PARTITION: Leaf buckets in each partition
+ * - DEFAULT_FANOUT: Branching factor (children per internal node)
+ * - NODES_PER_PARTITION (default): Total nodes per partition for a perfect
+ *   k-ary tree with k=DEFAULT_FANOUT (2 * leaves - 1 = 7)
+ * - TOTAL_LEAVES (default): NUM_PARTITIONS * LEAVES_PER_PARTITION
+ * - TOTAL_NODES (default): NUM_PARTITIONS * NODES_PER_PARTITION
  *
- * Due to struct alignment, MerkleNode is 20 bytes (4 + 16).
- * 406 * 20 = 8120 bytes < 8192 - header ≈ 8168 usable bytes.
+ * NOTE: With 256-bit (32-byte) hashes, the default tree spans multiple pages.
  */
 #define MERKLE_NUM_PARTITIONS       58
 #define MERKLE_LEAVES_PER_PARTITION 4
-#define MERKLE_TREE_BASE            4   /* branching factor */
+#define MERKLE_DEFAULT_FANOUT       2   /* branching factor */
 #define MERKLE_NODES_PER_PARTITION  7   /* 2 * LEAVES_PER_PARTITION - 1 */
 #define MERKLE_TOTAL_LEAVES         232 /* NUM_PARTITIONS * LEAVES_PER_PARTITION */
 #define MERKLE_TOTAL_NODES          406 /* NUM_PARTITIONS * NODES_PER_PARTITION */
@@ -80,7 +81,7 @@ extern bool merkle_undo_suppress;
  */
 #define MERKLE_METAPAGE_BLKNO       0
 #define MERKLE_TREE_START_BLKNO     1
-#define MERKLE_VERSION              4   /* Bump version for BLAKE3 256-bit hash format */
+#define MERKLE_VERSION              5   /* Bump version for fanout in metadata */
 
 /*
  * Calculate how many nodes fit per page
@@ -120,6 +121,7 @@ typedef struct MerkleMetaPageData
     int32           totalNodes;         /* total nodes in tree */
     int32           nodesPerPage;       /* how many nodes fit per page */
     int32           numTreePages;       /* number of pages for tree nodes */
+    int32           fanout;             /* branching factor (children per internal node) */
 } MerkleMetaPageData;
 
 #define MerklePageGetMeta(page) \
@@ -127,13 +129,14 @@ typedef struct MerkleMetaPageData
 
 /*
  * MerkleOptions - User-configurable options for Merkle index
- * Parsed from CREATE INDEX ... WITH (subtrees=X, leaves_per_tree=Y)
+ * Parsed from CREATE INDEX ... WITH (partitions=X, leaves_per_partition=Y, fanout=Z)
  */
 typedef struct MerkleOptions
 {
     int32       vl_len_;        /* varlena header (required) */
     int         partitions;
     int         leaves_per_partition;
+    int         fanout;
 } MerkleOptions;
 
 /*
@@ -154,7 +157,8 @@ extern MerkleOptions *merkle_get_options(Relation indexRel);
 extern void merkle_read_meta(Relation indexRel, int *numPartitions,
                              int *leavesPerPartition, int *nodesPerPartition,
                              int *totalNodes, int *totalLeaves,
-                             int *nodesPerPage, int *numTreePages);
+                             int *nodesPerPage, int *numTreePages,
+                             int *fanout);
 
 /*
  * Index build functions

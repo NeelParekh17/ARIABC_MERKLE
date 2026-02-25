@@ -138,6 +138,9 @@ merkle_verify(PG_FUNCTION_ARGS)
     int             nodesPerPartition;
     int             totalNodes;
     int             totalLeaves;
+    int             fanout;
+    int             internalNodes;
+    int             leafStart;
     
     /* Find the Merkle index on this table */
     indexOid = find_merkle_index(relid);
@@ -153,7 +156,10 @@ merkle_verify(PG_FUNCTION_ARGS)
     
     /* Read tree configuration from metadata */
     merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition, &nodesPerPartition,
-                     &totalNodes, &totalLeaves, NULL, NULL);
+                     &totalNodes, &totalLeaves, NULL, NULL, &fanout);
+
+    internalNodes = nodesPerPartition - leavesPerPartition;
+    leafStart = internalNodes + 1;
     
     /* Get index key information */
     indexTupdesc = RelationGetDescr(indexRel);
@@ -213,7 +219,7 @@ merkle_verify(PG_FUNCTION_ARGS)
          */
         partitionId = leafId / leavesPerPartition;
         leafPos = leafId % leavesPerPartition;
-        nodeInPartition = leavesPerPartition + leafPos; /* 1-indexed */
+        nodeInPartition = leafStart + leafPos; /* 1-indexed */
         nodeIdx = partitionId * nodesPerPartition + (nodeInPartition - 1);
         merkle_hash_xor(&computedTree[nodeIdx], &hash);
     }
@@ -223,7 +229,7 @@ merkle_verify(PG_FUNCTION_ARGS)
     
     /*
      * Construct internal nodes bottom-up within each partition:
-     * parent = left_child XOR right_child
+     * parent = XOR of all children
      */
     {
         int partition;
@@ -233,15 +239,17 @@ merkle_verify(PG_FUNCTION_ARGS)
             int base = partition * nodesPerPartition;
             int nodeInPartition;
             
-            for (nodeInPartition = leavesPerPartition - 1; nodeInPartition >= 1; nodeInPartition--)
+            for (nodeInPartition = internalNodes; nodeInPartition >= 1; nodeInPartition--)
             {
                 int parentIdx = base + (nodeInPartition - 1);
-                int leftIdx = base + ((nodeInPartition * 2) - 1);
-                int rightIdx = base + ((nodeInPartition * 2 + 1) - 1);
+                int child;
+                int firstChildIdx = base + fanout * (nodeInPartition - 1) + 1;
+                MerkleHash h = computedTree[firstChildIdx];
                 
-                merkle_hash_zero(&computedTree[parentIdx]);
-                merkle_hash_xor(&computedTree[parentIdx], &computedTree[leftIdx]);
-                merkle_hash_xor(&computedTree[parentIdx], &computedTree[rightIdx]);
+                for (child = 2; child <= fanout; child++)
+                    merkle_hash_xor(&h, &computedTree[base + fanout * (nodeInPartition - 1) + child]);
+
+                computedTree[parentIdx] = h;
             }
         }
     }
@@ -336,7 +344,7 @@ merkle_root_hash(PG_FUNCTION_ARGS)
     
     /* Read tree configuration from metadata */
     merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition, &totalNodes, NULL,
-                     &nodesPerPage, &numTreePages);
+                     &nodesPerPage, &numTreePages, NULL);
     
     /* 
      * Combine all partition roots by XOR - page-wise iteration.
@@ -411,6 +419,7 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     int             nkeys;
     int             i;
     TupleDesc       heapTupdesc;
+    int             fanout;
     
     /* Find the Merkle index on this table */
     indexOid = find_merkle_index(relid);
@@ -435,6 +444,7 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     totalNodes = meta->totalNodes;
     nodesPerPage = meta->nodesPerPage;
     numTreePages = meta->numTreePages;
+    fanout = (meta->version >= 5) ? meta->fanout : MERKLE_DEFAULT_FANOUT;
     
     /* Count non-zero nodes across all tree pages */
     nodeIdx = 0;
@@ -490,6 +500,7 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
                      "{\"version\": %u, "
                      "\"num_partitions\": %d, "
                      "\"leaves_per_partition\": %d, "
+                     "\"fanout\": %d, "
                      "\"nodes_per_partition\": %d, "
                      "\"total_nodes\": %d, "
                      "\"num_pages\": %d, "
@@ -499,6 +510,7 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
                      meta->version,
                      meta->numPartitions,
                      meta->leavesPerPartition,
+                     fanout,
                      meta->nodesPerPartition,
                      meta->totalNodes,
                      meta->numTreePages,
@@ -575,6 +587,7 @@ merkle_node_hash(PG_FUNCTION_ARGS)
         int             numTreePages;
         int             nodeIdx;
         int             pageNum;
+        int             leafStart;
         
         funcctx = SRF_FIRSTCALL_INIT();
         oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -591,7 +604,9 @@ merkle_node_hash(PG_FUNCTION_ARGS)
         
         /* Read tree configuration from metadata */
         merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition, &nodesPerPartition,
-                         &totalNodes, NULL, &nodesPerPage, &numTreePages);
+                         &totalNodes, NULL, &nodesPerPage, &numTreePages, NULL);
+
+        leafStart = nodesPerPartition - leavesPerPartition + 1;
         
         /* Allocate result arrays in multi-call context (will persist across calls) */
         data = palloc(sizeof(NodeHashData));
@@ -629,7 +644,7 @@ merkle_node_hash(PG_FUNCTION_ARGS)
                 int globalIdx = nodeIdx + j;
                 int partition = globalIdx / nodesPerPartition;
                 int nodeInPartition = (globalIdx % nodesPerPartition) + 1;  /* 1-indexed */
-                bool isLeaf = (nodeInPartition >= leavesPerPartition);
+                bool isLeaf = (nodeInPartition >= leafStart);
                 int leafId = -1;
                 char nodeid_str[32];
                 
@@ -639,7 +654,7 @@ merkle_node_hash(PG_FUNCTION_ARGS)
                 /* Compute global leaf ID for leaf nodes */
                 if (isLeaf)
                 {
-                    int leafInPartition = nodeInPartition - leavesPerPartition;
+                    int leafInPartition = nodeInPartition - leafStart;
                     leafId = partition * leavesPerPartition + leafInPartition;
                 }
                 
@@ -1004,10 +1019,8 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
     Oid             relid;
     Oid             indexOid;
     Relation        indexRel;
-    Buffer          metabuf;
-    Page            metapage;
-    MerkleMetaPageData *meta;
     int             leavesPerPartition;
+    int             nodesPerPartition;
     int             leafId, partition, nodeInPartition;
     TupleDesc       indexTupdesc;
     int             totalLeaves;
@@ -1037,14 +1050,9 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
     indexTupdesc = RelationGetDescr(indexRel);
     nkeys = indexRel->rd_index->indnkeyatts;
     
-    /* Read metadata to get tree configuration */
-    metabuf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
-    LockBuffer(metabuf, BUFFER_LOCK_SHARE);
-    metapage = BufferGetPage(metabuf);
-    meta = MerklePageGetMeta(metapage);
-    leavesPerPartition = meta->leavesPerPartition;
-    totalLeaves = meta->numPartitions * leavesPerPartition;
-    UnlockReleaseBuffer(metabuf);
+    /* Read tree configuration from metadata */
+    merkle_read_meta(indexRel, NULL, &leavesPerPartition, &nodesPerPartition, NULL,
+                     &totalLeaves, NULL, NULL, NULL);
     
     /* Check number of arguments provided (fcinfo->nargs includes table) */
     nargs = PG_NARGS() - 1;  /* Subtract table arg */
@@ -1113,7 +1121,7 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
     
     /* Calculate partition components */
     partition = leafId / leavesPerPartition;
-    nodeInPartition = (leafId % leavesPerPartition) + leavesPerPartition;
+    nodeInPartition = (leafId % leavesPerPartition) + (nodesPerPartition - leavesPerPartition + 1);
 
     /* Build result tuple */
     {

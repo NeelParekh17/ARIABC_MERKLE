@@ -41,6 +41,18 @@ bool merkle_undo_suppress = false;
 static relopt_kind merkle_relopt_kind;
 static bool merkle_relopts_registered = false;
 
+static bool
+merkle_is_power_of(int value, int base)
+{
+    if (value < 1 || base < 2)
+        return false;
+
+    while ((value % base) == 0)
+        value /= base;
+
+    return (value == 1);
+}
+
 /*
  * merkle_register_relopts() - Register merkle reloptions with PostgreSQL
  *
@@ -59,8 +71,12 @@ merkle_register_relopts(void)
                       MERKLE_NUM_PARTITIONS, 1, 10000, AccessExclusiveLock);
     
     add_int_reloption(merkle_relopt_kind, "leaves_per_partition",
-                      "Number of leaves per partition (must be power of 2)",
+                      "Number of leaves per partition (must be power of fanout)",
                       MERKLE_LEAVES_PER_PARTITION, 2, 1024, AccessExclusiveLock);
+
+    add_int_reloption(merkle_relopt_kind, "fanout",
+                      "Branching factor (children per internal node)",
+                      MERKLE_DEFAULT_FANOUT, 2, 1024, AccessExclusiveLock);
     
     merkle_relopts_registered = true;
 }
@@ -68,7 +84,8 @@ merkle_register_relopts(void)
 /* Reloption parsing table */
 static relopt_parse_elt merkle_relopt_tab[] = {
     {"partitions", RELOPT_TYPE_INT, offsetof(MerkleOptions, partitions)},
-    {"leaves_per_partition", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaves_per_partition)}
+    {"leaves_per_partition", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaves_per_partition)},
+    {"fanout", RELOPT_TYPE_INT, offsetof(MerkleOptions, fanout)}
 };
 
 /*
@@ -92,14 +109,24 @@ merkle_options(Datum reloptions, bool validate)
     
     if (validate && opts != NULL)
     {
-        /* Check if leaves_per_partition is power of 2 using bitwise trick */
-        if (opts->leaves_per_partition <= 0 || 
-            (opts->leaves_per_partition & (opts->leaves_per_partition - 1)) != 0)
+        if (opts->fanout < 2 || opts->fanout > 1024)
         {
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("leaves_per_partition must be a power of 2"),
-                     errhint("Suggested values: 2, 4, 8, 16, 32, 64, 128, ...")));
+                     errmsg("fanout must be between 2 and 1024")));
+        }
+
+        /* Check if leaves_per_partition is a power of fanout */
+        if (!merkle_is_power_of(opts->leaves_per_partition, opts->fanout))
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("leaves_per_partition must be a power of fanout"),
+                     errhint("For fanout=%d, suggested values: %d, %d, %d, ...",
+                             opts->fanout,
+                             opts->fanout,
+                             opts->fanout * opts->fanout,
+                             opts->fanout * opts->fanout * opts->fanout)));
         }
     }
     
@@ -125,6 +152,7 @@ merkle_get_options(Relation indexRel)
         SET_VARSIZE(opts, sizeof(MerkleOptions));
         opts->partitions = MERKLE_NUM_PARTITIONS;
         opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
+        opts->fanout = MERKLE_DEFAULT_FANOUT;
         return opts;
     }
     
@@ -133,16 +161,23 @@ merkle_get_options(Relation indexRel)
      * The options are stored with local_reloptions format which includes
      * a varlena header followed by the option values at their defined offsets.
      */
-    opts = (MerkleOptions *) palloc(VARSIZE(relopts));
-    memcpy(opts, relopts, VARSIZE(relopts));
+    opts = (MerkleOptions *) palloc0(sizeof(MerkleOptions));
+    memcpy(opts, relopts, Min(VARSIZE(relopts), sizeof(MerkleOptions)));
+    SET_VARSIZE(opts, sizeof(MerkleOptions));
+
+    /* Backward compatibility: older rd_options blobs won't have fanout */
+    if (VARSIZE(relopts) < (offsetof(MerkleOptions, fanout) + sizeof(int)))
+        opts->fanout = MERKLE_DEFAULT_FANOUT;
     
     /* Validate options - if values look corrupt, use defaults */
     if (opts->partitions <= 0 || opts->partitions > 10000 ||
         opts->leaves_per_partition <= 0 || opts->leaves_per_partition > 1024 ||
-        (opts->leaves_per_partition & (opts->leaves_per_partition - 1)) != 0)
+        opts->fanout < 2 || opts->fanout > 1024 ||
+        !merkle_is_power_of(opts->leaves_per_partition, opts->fanout))
     {
         opts->partitions = MERKLE_NUM_PARTITIONS;
         opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
+        opts->fanout = MERKLE_DEFAULT_FANOUT;
     }
     
     return opts;

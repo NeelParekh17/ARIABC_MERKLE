@@ -56,7 +56,7 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
     nkeys = indexInfo->ii_NumIndexKeyAttrs;
 
     /* Read tree configuration from metadata */
-    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
     
     /*
      * Compute partition ID from the indexed key values (supports multi-column)
@@ -123,10 +123,12 @@ merkleBulkdelete(IndexVacuumInfo *info,
 {
     Relation        indexRel = info->index;
     Relation        heapRel;
-    Buffer          treebuf;
-    Page            treepage;
-    MerkleNode     *nodes;
     int             i;
+    int             totalNodes;
+    int             nodesPerPage;
+    int             numTreePages;
+    int             nodeIdx;
+    int             pageNum;
     
     /* Allocate stats if not provided */
     if (stats == NULL)
@@ -144,21 +146,36 @@ merkleBulkdelete(IndexVacuumInfo *info,
     
     heapRel = table_open(IndexGetRelation(RelationGetRelid(indexRel), false),
                          AccessShareLock);
-    
-    /* Read tree state to report statistics */
-    treebuf = ReadBuffer(indexRel, MERKLE_TREE_START_BLKNO);
-    LockBuffer(treebuf, BUFFER_LOCK_SHARE);
-    treepage = BufferGetPage(treebuf);
-    nodes = (MerkleNode *) PageGetContents(treepage);
-    
-    /* Count non-zero nodes for stats */
-    for (i = 0; i < MERKLE_TOTAL_NODES; i++)
+
+    /* Read tree configuration from metadata */
+    merkle_read_meta(indexRel, NULL, NULL, NULL, &totalNodes, NULL,
+                     &nodesPerPage, &numTreePages, NULL);
+
+    /* Count non-zero nodes across all tree pages */
+    nodeIdx = 0;
+    for (pageNum = 0; pageNum < numTreePages; pageNum++)
     {
-        if (!merkle_hash_is_zero(&nodes[i].hash))
-            stats->num_index_tuples++;
+        Buffer      treebuf;
+        Page        treepage;
+        MerkleNode *nodes;
+        int         nodesThisPage;
+
+        treebuf = ReadBuffer(indexRel, MERKLE_TREE_START_BLKNO + pageNum);
+        LockBuffer(treebuf, BUFFER_LOCK_SHARE);
+        treepage = BufferGetPage(treebuf);
+        nodes = (MerkleNode *) PageGetContents(treepage);
+
+        nodesThisPage = Min(nodesPerPage, totalNodes - nodeIdx);
+        for (i = 0; i < nodesThisPage; i++)
+        {
+            if (!merkle_hash_is_zero(&nodes[i].hash))
+                stats->num_index_tuples++;
+        }
+
+        nodeIdx += nodesThisPage;
+        UnlockReleaseBuffer(treebuf);
     }
-    
-    UnlockReleaseBuffer(treebuf);
+
     table_close(heapRel, AccessShareLock);
     
     return stats;
@@ -178,10 +195,12 @@ IndexBulkDeleteResult *
 merkleVacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
     Relation    indexRel = info->index;
-    Buffer      treebuf;
-    Page        treepage;
-    MerkleNode *nodes;
-    int         i;
+    int         nodesPerPartition;
+    int         totalNodes;
+    int         nodesPerPage;
+    int         numTreePages;
+    int         nodeIdx;
+    int         pageNum;
     
     /* Allocate stats if not provided (no deletions occurred) */
     if (stats == NULL)
@@ -190,24 +209,40 @@ merkleVacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     /*
      * Update index statistics
      */
-    treebuf = ReadBuffer(indexRel, MERKLE_TREE_START_BLKNO);
-    LockBuffer(treebuf, BUFFER_LOCK_SHARE);
-    treepage = BufferGetPage(treebuf);
-    nodes = (MerkleNode *) PageGetContents(treepage);
-    
-    stats->num_pages = 2;  /* metadata + tree page */
+    merkle_read_meta(indexRel, NULL, NULL, &nodesPerPartition, &totalNodes, NULL,
+                     &nodesPerPage, &numTreePages, NULL);
+
+    stats->num_pages = numTreePages + 1;  /* metadata + tree pages */
     stats->num_index_tuples = 0;
-    
-    /* Count partition roots as representative of "index tuples" */
-    for (i = 0; i < MERKLE_NUM_PARTITIONS; i++)
+
+    nodeIdx = 0;
+    for (pageNum = 0; pageNum < numTreePages; pageNum++)
     {
-        int rootNode = i * MERKLE_NODES_PER_PARTITION + 1;
-        if (rootNode < MERKLE_TOTAL_NODES && 
-            !merkle_hash_is_zero(&nodes[rootNode].hash))
-            stats->num_index_tuples++;
+        Buffer      buf;
+        Page        page;
+        MerkleNode *nodes;
+        int         nodesThisPage;
+        int         j;
+
+        buf = ReadBuffer(indexRel, MERKLE_TREE_START_BLKNO + pageNum);
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+        nodes = (MerkleNode *) PageGetContents(page);
+
+        nodesThisPage = Min(nodesPerPage, totalNodes - nodeIdx);
+        for (j = 0; j < nodesThisPage; j++)
+        {
+            int globalIdx = nodeIdx + j;
+
+            /* Root of each partition is the first node in the partition */
+            if (globalIdx % nodesPerPartition == 0 &&
+                !merkle_hash_is_zero(&nodes[j].hash))
+                stats->num_index_tuples++;
+        }
+
+        nodeIdx += nodesThisPage;
+        UnlockReleaseBuffer(buf);
     }
-    
-    UnlockReleaseBuffer(treebuf);
     
     return stats;
 }

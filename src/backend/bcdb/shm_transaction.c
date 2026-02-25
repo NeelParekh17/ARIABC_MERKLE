@@ -1125,7 +1125,7 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
 
                     indexInfo = BuildIndexInfo(indexRel);
                     FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
-                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
 
                     pending[pendingCount].indexOid = indexOid;
                     pending[pendingCount].oldLeafId =
@@ -1226,7 +1226,7 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
 
                     indexInfo = BuildIndexInfo(indexRel);
                     FormIndexDatum(indexInfo, newSlot, NULL, values, isnull);
-                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
                     newLeafId = merkle_compute_partition_id(values, isnull,
                                                            indexInfo->ii_NumIndexKeyAttrs,
                                                            RelationGetDescr(indexRel),
@@ -1373,7 +1373,7 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
 
                     indexInfo = BuildIndexInfo(indexRel);
                     FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
-                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
 
                     pending[pendingCount].indexOid = indexOid;
                     pending[pendingCount].partitionId =
@@ -1552,7 +1552,7 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
 
                 indexInfo = BuildIndexInfo(indexRel);
                 FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
-                merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+                merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
 
                 pending[pendingCount].indexOid = indexOid;
                 pending[pendingCount].partitionId =

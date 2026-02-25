@@ -201,7 +201,7 @@ CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)
 
 			indexInfo = BuildIndexInfo(indexRel);
 			FormIndexDatum(indexInfo, slot, NULL, values, isnull);
-			merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+			merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
 			partitionId = merkle_compute_partition_id(values, isnull,
 											 indexInfo->ii_NumIndexKeyAttrs,
 											 RelationGetDescr(indexRel),
@@ -299,7 +299,7 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
             indkey = indexRel->rd_index->indkey.values;
             
             /* Read tree configuration from metadata */
-            merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+            merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
             
             /* Allocate key value arrays */
             keyValues = (Datum *) palloc(nkeys * sizeof(Datum));
@@ -418,7 +418,7 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
             indexInfo = BuildIndexInfo(indexRel);
 
             FormIndexDatum(indexInfo, slot, NULL, values, isnull);
-			merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL);
+			merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
 			partitionId = merkle_compute_partition_id(values, isnull,
 													 indexInfo->ii_NumIndexKeyAttrs,
 													 RelationGetDescr(indexRel),
