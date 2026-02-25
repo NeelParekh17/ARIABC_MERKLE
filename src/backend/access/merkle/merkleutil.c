@@ -31,6 +31,18 @@
 #include "utils/memutils.h"
 #include "access/relation.h"
 
+static bool
+merkle_is_power_of(int value, int base)
+{
+    if (value < 1 || base < 2)
+        return false;
+
+    while ((value % base) == 0)
+        value /= base;
+
+    return (value == 1);
+}
+
 /*
  * Pending operation for transaction rollback
  */
@@ -43,6 +55,7 @@ typedef struct MerklePendingOp
     MerkleHash          hash;
     int                 leavesPerPartition;
     int                 nodesPerPartition;
+    int                 fanout;
     int                 totalNodes;
     int                 totalLeaves;
     int                 nodesPerPage;
@@ -203,6 +216,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
     Relation    indexRel;
     int         leavesPerPartition;
     int         nodesPerPartition;
+    int         fanout;
     int         totalNodes;
     int         totalLeaves;
     int         nodesPerPage;
@@ -210,6 +224,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
     int         partitionId;
     int         nodeInPartition;
     int         nodeId;
+    int         leafStart;
     int         currentPageBlkno = -1;
     Buffer      buf = InvalidBuffer;
     Page        page = NULL;
@@ -228,19 +243,20 @@ merkle_undo_pending_op(MerklePendingOp *op)
 
     leavesPerPartition = op->leavesPerPartition;
     nodesPerPartition = op->nodesPerPartition;
+    fanout = op->fanout;
     totalNodes = op->totalNodes;
     totalLeaves = op->totalLeaves;
     nodesPerPage = op->nodesPerPage;
     numTreePages = op->numTreePages;
 
-    if (leavesPerPartition <= 0 || nodesPerPartition <= 0 ||
+    if (leavesPerPartition <= 0 || nodesPerPartition <= 0 || fanout < 2 ||
         totalNodes <= 0 || totalLeaves <= 0 ||
         nodesPerPage <= 0 || numTreePages <= 0)
     {
         ereport(DEBUG5,
                 (errmsg("merkle_xact_callback: skipping undo due to invalid metadata "
-                        "(leavesPerPartition=%d nodesPerPartition=%d totalNodes=%d totalLeaves=%d nodesPerPage=%d numTreePages=%d)",
-                        leavesPerPartition, nodesPerPartition, totalNodes, totalLeaves, nodesPerPage, numTreePages)));
+                        "(leavesPerPartition=%d nodesPerPartition=%d fanout=%d totalNodes=%d totalLeaves=%d nodesPerPage=%d numTreePages=%d)",
+                        leavesPerPartition, nodesPerPartition, fanout, totalNodes, totalLeaves, nodesPerPage, numTreePages)));
         return;
     }
 
@@ -252,9 +268,17 @@ merkle_undo_pending_op(MerklePendingOp *op)
         return;
     }
 
+    leafStart = nodesPerPartition - leavesPerPartition + 1;
+    if (leafStart < 1)
+    {
+        ereport(DEBUG5,
+                (errmsg("merkle_xact_callback: skipping undo due to invalid leafStart %d", leafStart)));
+        return;
+    }
+
     /* Calculate partition and node positions using cached dynamic values */
     partitionId = op->leafId / leavesPerPartition;
-    nodeInPartition = (op->leafId % leavesPerPartition) + leavesPerPartition;
+    nodeInPartition = (op->leafId % leavesPerPartition) + leafStart;
     nodeId = nodeInPartition + (partitionId * nodesPerPartition);
 
     /*
@@ -307,7 +331,7 @@ merkle_undo_pending_op(MerklePendingOp *op)
             merkle_hash_xor(&nodes[idxInPage].hash, &op->hash);
 
             /* Move to parent */
-            nodeInPartition = nodeInPartition / 2;
+            nodeInPartition = (nodeInPartition + fanout - 2) / fanout;
             nodeId = nodeInPartition + (partitionId * nodesPerPartition);
         }
 
@@ -988,8 +1012,10 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
     int         partitionId;
     int         nodeInPartition;
     int         nodeId;
+    int         leafStart;
     int         leavesPerPartition;
     int         nodesPerPartition;
+    int         fanout;
     int         totalNodes;
     int         totalLeaves;
     int         nodesPerPage;
@@ -1009,7 +1035,8 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
                      &totalNodes,
                      &totalLeaves,
                      &nodesPerPage,
-                     &numTreePages);
+                     &numTreePages,
+                     &fanout);
     
     /* Safety check: prevent division by zero if metadata is invalid */
     if (leavesPerPartition <= 0)
@@ -1021,6 +1048,23 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
                 (errcode(ERRCODE_INDEX_CORRUPTED),
                  errmsg("merkle_update_tree_path: leafId %d out of range [0,%d)",
                         leafId, totalLeaves)));
+    }
+
+    if (fanout < 2)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("merkle_update_tree_path: invalid fanout %d in metadata",
+                        fanout)));
+    }
+
+    leafStart = nodesPerPartition - leavesPerPartition + 1;
+    if (leafStart < 1)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("merkle_update_tree_path: invalid leafStart %d (nodesPerPartition=%d leavesPerPartition=%d)",
+                        leafStart, nodesPerPartition, leavesPerPartition)));
     }
     
     if (!merkle_undo_suppress)
@@ -1057,6 +1101,7 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
         op->hash = *hash;
         op->leavesPerPartition = leavesPerPartition;
         op->nodesPerPartition = nodesPerPartition;
+        op->fanout = fanout;
         op->totalNodes = totalNodes;
         op->totalLeaves = totalLeaves;
         op->nodesPerPage = nodesPerPage;
@@ -1069,7 +1114,7 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
     
     /* Calculate partition and node positions using dynamic values */
     partitionId = leafId / leavesPerPartition;
-    nodeInPartition = (leafId % leavesPerPartition) + leavesPerPartition;
+    nodeInPartition = (leafId % leavesPerPartition) + leafStart;
     nodeId = nodeInPartition + (partitionId * nodesPerPartition);
     
     /* Walk from leaf to root, XORing at each level */
@@ -1129,7 +1174,7 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
         merkle_hash_xor(&nodes[idxInPage].hash, hash);
         
         /* Move to parent */
-        nodeInPartition = nodeInPartition / 2;
+        nodeInPartition = (nodeInPartition + fanout - 2) / fanout;
         nodeId = nodeInPartition + (partitionId * nodesPerPartition);
     }
     
@@ -1155,11 +1200,13 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
 void
 merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
                  int *nodesPerPartition, int *totalNodes, int *totalLeaves,
-                 int *nodesPerPage, int *numTreePages)
+                 int *nodesPerPage, int *numTreePages,
+                 int *fanout)
 {
     Buffer              buf;
     Page                page;
     MerkleMetaPageData *meta;
+    int                 effectiveFanout;
     
     buf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
     LockBuffer(buf, BUFFER_LOCK_SHARE);
@@ -1168,6 +1215,7 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
     
     /* Validate metadata integrity - corrupted/uninitialized values cause crashes */
     if (meta->numPartitions <= 0 || meta->leavesPerPartition <= 0 ||
+        meta->nodesPerPartition <= 0 || meta->totalNodes <= 0 ||
         meta->nodesPerPage <= 0 || meta->numTreePages <= 0)
     {
         UnlockReleaseBuffer(buf);
@@ -1175,9 +1223,49 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
                 (errcode(ERRCODE_INDEX_CORRUPTED),
                  errmsg("Merkle index \"%s\" has corrupted metadata",
                         RelationGetRelationName(indexRel)),
-                 errdetail("numPartitions=%d, leavesPerPartition=%d, nodesPerPage=%d, numTreePages=%d",
+                 errdetail("numPartitions=%d, leavesPerPartition=%d, nodesPerPartition=%d, totalNodes=%d, nodesPerPage=%d, numTreePages=%d",
                            meta->numPartitions, meta->leavesPerPartition,
+                           meta->nodesPerPartition, meta->totalNodes,
                            meta->nodesPerPage, meta->numTreePages),
+                 errhint("Try REINDEXing the Merkle index.")));
+    }
+
+    if ((int64) meta->numPartitions * (int64) meta->nodesPerPartition != (int64) meta->totalNodes)
+    {
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("Merkle index \"%s\" has inconsistent metadata",
+                        RelationGetRelationName(indexRel)),
+                 errdetail("numPartitions=%d, nodesPerPartition=%d, totalNodes=%d",
+                           meta->numPartitions, meta->nodesPerPartition, meta->totalNodes),
+                 errhint("Try REINDEXing the Merkle index.")));
+    }
+
+    effectiveFanout = MERKLE_DEFAULT_FANOUT;
+    if (meta->version >= 5)
+        effectiveFanout = meta->fanout;
+
+    if (effectiveFanout < 2 || effectiveFanout > 1024)
+    {
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("Merkle index \"%s\" has invalid fanout %d in metadata",
+                        RelationGetRelationName(indexRel),
+                        effectiveFanout),
+                 errhint("Try REINDEXing the Merkle index.")));
+    }
+
+    if (!merkle_is_power_of(meta->leavesPerPartition, effectiveFanout))
+    {
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("Merkle index \"%s\" has invalid leaves_per_partition %d for fanout %d in metadata",
+                        RelationGetRelationName(indexRel),
+                        meta->leavesPerPartition,
+                        effectiveFanout),
                  errhint("Try REINDEXing the Merkle index.")));
     }
     
@@ -1196,6 +1284,8 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
         *nodesPerPage = meta->nodesPerPage;
     if (numTreePages)
         *numTreePages = meta->numTreePages;
+    if (fanout)
+        *fanout = effectiveFanout;
     
     UnlockReleaseBuffer(buf);
 }
@@ -1219,6 +1309,7 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
     MerkleMetaPageData *meta;
     int             numPartitions;
     int             leavesPerPartition;
+    int             fanout;
     int             nodesPerPartition;
     int             totalNodes;
     int             nodesPerPage;
@@ -1231,15 +1322,33 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
     {
         numPartitions = opts->partitions;
         leavesPerPartition = opts->leaves_per_partition;
+        fanout = opts->fanout;
     }
     else
     {
         numPartitions = MERKLE_NUM_PARTITIONS;
         leavesPerPartition = MERKLE_LEAVES_PER_PARTITION;
+        fanout = MERKLE_DEFAULT_FANOUT;
     }
     
     /* Calculate derived values */
-    nodesPerPartition = 2 * leavesPerPartition - 1;
+    if (fanout < 2 || fanout > 1024)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("fanout must be between 2 and 1024")));
+
+    /* For a perfect k-ary tree with L leaves: nodes = (k*L - 1)/(k - 1). */
+    if (!merkle_is_power_of(leavesPerPartition, fanout))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("leaves_per_partition must be a power of fanout")));
+
+    if (((int64) fanout * (int64) leavesPerPartition - 1) % (fanout - 1) != 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("leaves_per_partition must be a power of fanout")));
+
+    nodesPerPartition = (int) (((int64) fanout * (int64) leavesPerPartition - 1) / (fanout - 1));
     totalNodes = numPartitions * nodesPerPartition;
     nodesPerPage = (int)MERKLE_MAX_NODES_PER_PAGE;
     numTreePages = (totalNodes + nodesPerPage - 1) / nodesPerPage;  /* ceiling division */
@@ -1260,6 +1369,7 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
     meta->totalNodes = totalNodes;
     meta->nodesPerPage = nodesPerPage;
     meta->numTreePages = numTreePages;
+    meta->fanout = fanout;
     
     MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);

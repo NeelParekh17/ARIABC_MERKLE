@@ -38,6 +38,9 @@ typedef struct
     int         numPartitions;
     int         leavesPerPartition;
     int         nodesPerPartition;
+    int         fanout;
+    int         internalNodes;  /* nodesPerPartition - leavesPerPartition */
+    int         leafStart;      /* 1-indexed start position of leaves */
     int         totalLeaves;    /* numPartitions * leavesPerPartition */
     int         totalNodes;     /* numPartitions * nodesPerPartition */
     int         nodesPerPage;
@@ -146,7 +149,7 @@ merkle_build_callback(Relation indexRel,
     {
         int partitionId = leafId / buildstate->leavesPerPartition;
         int leafPos = leafId % buildstate->leavesPerPartition;
-        int nodeInPartition = buildstate->leavesPerPartition + leafPos;
+        int nodeInPartition = buildstate->leafStart + leafPos;
         int nodeIdx = partitionId * buildstate->nodesPerPartition + (nodeInPartition - 1);
 
         merkle_hash_xor(&buildstate->nodeHashes[nodeIdx], &hash);
@@ -229,7 +232,11 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
      */
     buildstate.numPartitions = opts->partitions;
     buildstate.leavesPerPartition = opts->leaves_per_partition;
-    buildstate.nodesPerPartition = 2 * buildstate.leavesPerPartition - 1;
+    buildstate.fanout = opts->fanout;
+    buildstate.nodesPerPartition = (int) (((int64) buildstate.fanout * (int64) buildstate.leavesPerPartition - 1) /
+                                          (buildstate.fanout - 1));
+    buildstate.internalNodes = buildstate.nodesPerPartition - buildstate.leavesPerPartition;
+    buildstate.leafStart = buildstate.internalNodes + 1;
     buildstate.totalLeaves = totalLeaves;
     buildstate.totalNodes = buildstate.numPartitions * buildstate.nodesPerPartition;
     buildstate.nodesPerPage = (int) MERKLE_MAX_NODES_PER_PAGE;
@@ -272,13 +279,15 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
             int base = partition * buildstate.nodesPerPartition;
             int i;
 
-            for (i = buildstate.leavesPerPartition - 1; i >= 1; i--)
+            for (i = buildstate.internalNodes; i >= 1; i--)
             {
-                int leftChildIdx = base + (2 * i - 1);
-                int rightChildIdx = base + (2 * i);
-                MerkleHash h = buildstate.nodeHashes[leftChildIdx];
+                int child;
+                int firstChildIdx = base + buildstate.fanout * (i - 1) + 1;
+                MerkleHash h = buildstate.nodeHashes[firstChildIdx];
 
-                merkle_hash_xor(&h, &buildstate.nodeHashes[rightChildIdx]);
+                for (child = 2; child <= buildstate.fanout; child++)
+                    merkle_hash_xor(&h, &buildstate.nodeHashes[base + buildstate.fanout * (i - 1) + child]);
+
                 buildstate.nodeHashes[base + (i - 1)] = h;
             }
         }
@@ -355,6 +364,11 @@ merkleBuildempty(Relation indexRel)
 {
     Page        metapage;
     MerkleMetaPageData *meta;
+    MerkleOptions *opts;
+    int         numPartitions;
+    int         leavesPerPartition;
+    int         fanout;
+    int         nodesPerPartition;
     int         totalNodes;
     int         nodesPerPage;
     int         numTreePages;
@@ -367,19 +381,33 @@ merkleBuildempty(Relation indexRel)
     metapage = (Page) palloc(BLCKSZ);
     PageInit(metapage, BLCKSZ, 0);
     
+    /* Respect reloptions for INIT_FORKNUM on UNLOGGED relations */
+    opts = merkle_get_options(indexRel);
+    numPartitions = opts->partitions;
+    leavesPerPartition = opts->leaves_per_partition;
+    fanout = opts->fanout;
+
+    if (fanout < 2 || fanout > 1024)
+        fanout = MERKLE_DEFAULT_FANOUT;
+
+    nodesPerPartition = (int) (((int64) fanout * (int64) leavesPerPartition - 1) / (fanout - 1));
+
     nodesPerPage = (int)MERKLE_MAX_NODES_PER_PAGE;
-    totalNodes = MERKLE_TOTAL_NODES;
+    totalNodes = numPartitions * nodesPerPartition;
     numTreePages = (totalNodes + nodesPerPage - 1) / nodesPerPage;
 
     meta = MerklePageGetMeta(metapage);
     meta->version = MERKLE_VERSION;
     meta->heapRelid = InvalidOid;  /* Will be set on first insert */
-    meta->numPartitions = MERKLE_NUM_PARTITIONS;
-    meta->leavesPerPartition = MERKLE_LEAVES_PER_PARTITION;
-    meta->nodesPerPartition = MERKLE_NODES_PER_PARTITION;
+    meta->numPartitions = numPartitions;
+    meta->leavesPerPartition = leavesPerPartition;
+    meta->nodesPerPartition = nodesPerPartition;
     meta->totalNodes = totalNodes;
     meta->nodesPerPage = nodesPerPage;
     meta->numTreePages = numTreePages;
+    meta->fanout = fanout;
+
+    pfree(opts);
     
     /*
      * Make sure we have the smgr relation open
