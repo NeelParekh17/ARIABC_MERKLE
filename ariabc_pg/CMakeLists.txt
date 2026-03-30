@@ -62,7 +62,8 @@ set(ARIABC_PG_KAFKA_LIBS ${RDKAFKA_LIBRARY})
 
 set(ARIABC_COMMON_SRC
     src/logger.cc
-    src/in_memory_log_store.cxx)
+    src/in_memory_log_store.cxx
+    src/file_log_store.cxx)
 
 set(ARIABC_COMMON_INC
     ${CMAKE_CURRENT_LIST_DIR}/src

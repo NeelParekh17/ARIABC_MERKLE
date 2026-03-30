@@ -275,6 +275,21 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
         err = "--pubKeyFile is required when --querySign=1";
         return false;
     }
+    /* F1 FIX: Warn loudly about configurations that disable deterministic mode.
+     * In healthcare systems, silent compat mode means serial execution at ~380 ops/s
+     * when the system should be doing 3000+ ops/s. These are not errors — the gateway
+     * still functions — but they represent serious performance misconfigurations. */
+    if (opt.db_type == 1) {
+        if (opt.det_raw_sql == 1) {
+            std::cerr << "WARNING: --dbType=1 with --detRawSql=1 will force compatibility mode.\n"
+                      << "  The executor will serialize to 1 in-flight request, capping throughput at ~380 ops/s.\n"
+                      << "  For deterministic parallel execution, use --detRawSql=0 (default).\n";
+        }
+        if (opt.submit_mode == "blocking" || opt.submit_mode.empty()) {
+            std::cerr << "WARNING: --dbType=1 with --submitMode=blocking (default) serializes gateway I/O.\n"
+                      << "  For pipelined submission, use: --submitMode=event --detSubmitPipeline=1\n";
+        }
+    }
     return true;
 }
 
@@ -2345,6 +2360,33 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "reset barrier reached: commit_idx=" << target_commit_idx
+                  << " nodes=" << nodes.size() << std::endl;
+
+        // F4/F11 FIX: Second barrier — wait for BCDB serial apply to finish.
+        // The Raft commit index confirms log replication, but BCDB's deterministic
+        // serial apply (including Merkle XOR updates) may still be in progress.
+        // Without this, pre-state root hash checks race against in-progress apply.
+        const std::string bcdb_wait_cmd =
+            "__ARIABC_CTRL_WAIT_BCDB_COMMITTED " +
+            std::to_string(target_commit_idx) + " 30000";
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            ariabc_pg::client_api_response bcdb_resp;
+            std::string bcdb_err;
+            if (!ariabc_pg::send_control_req_to_node(nodes[i], bcdb_wait_cmd, bcdb_resp, bcdb_err)) {
+                std::cerr << "reset barrier bcdb-committed wait failed node=" << (i + 1)
+                          << " target=" << target_commit_idx
+                          << " err=" << bcdb_err << std::endl;
+                return false;
+            }
+            if (bcdb_resp.status != 0) {
+                std::cerr << "reset barrier bcdb-committed wait rejected node=" << (i + 1)
+                          << " target=" << target_commit_idx
+                          << " msg=" << bcdb_resp.msg << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "reset barrier bcdb apply reached: target=" << target_commit_idx
                   << " nodes=" << nodes.size() << std::endl;
         return true;
     };

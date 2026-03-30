@@ -421,10 +421,13 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
 
         const int leader_node_id = (i < leader_node_hints.size()) ? leader_node_hints[i] : -1;
         const uint64_t raft_log_idx = (i < raft_log_idxs.size()) ? raft_log_idxs[i] : 0;
-        // Keep full results on all replicas (clean-break protocol behavior is
-        // controlled by the gateway). This avoids correctness surprises when
-        // the Raft leader changes frequently in single-host deployments.
-        const bool include_full_result = true;
+        // Only send full result from the leader node; followers send hash-only.
+        // This reduces Kafka bandwidth proportionally to the cluster size.
+        // The gateway extracts the full result from the leader's payload and
+        // verifies hashes from follower payloads for majority agreement.
+        const bool include_full_result =
+            (leader_node_id <= 0) ||
+            (static_cast<int>(node_id) == leader_node_id);
         const uint64_t ts_ms = now_epoch_ms();
         const std::string result_hash = canonical_result_hash(results[i]);
         const std::string sig_payload = make_sig_payload(req_num,
@@ -436,7 +439,7 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
                                                          ts_ms,
                                                          include_full_result);
         const std::string sig = sign_payload(sig_key, sig_payload);
-        const uint8_t flags = 0x1u;
+        const uint8_t flags = include_full_result ? 0x1u : 0x0u;
 
         append_u64_le(out, req_num);
         append_u64_le(out, raft_log_idx);

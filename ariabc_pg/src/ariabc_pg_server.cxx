@@ -7,6 +7,8 @@
 
 #include "nuraft.hxx"
 
+#include <libpq-fe.h>
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -308,7 +310,8 @@ int listen_tcp(int port) {
 
 void handle_client_fd(int fd,
                       nuraft::ptr<nuraft::raft_server> raft,
-                      nuraft::ptr<nuraft::state_machine> sm) {
+                      nuraft::ptr<nuraft::state_machine> sm,
+                      const db_options& opt) {
     // Low-latency request/response: avoid Nagle delays on small frames.
     {
         int one = 1;
@@ -373,6 +376,74 @@ void handle_client_fd(int fd,
                     resp.status = 1;
                     resp.msg = "WAIT_COMMIT_ABORTED cur=" + std::to_string(cur) +
                                " target=" + std::to_string(target_idx);
+                }
+            }
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
+
+        // F4/F11 FIX: Wait until BCDB serial-apply counter reaches the target.
+        // This queries the local PostgreSQL for bcdb_num_committed() which
+        // returns block_meta->num_committed — the count of transactions that
+        // have completed their full serial apply phase (including Merkle updates).
+        // Without this, the gateway's pre-state Merkle check races against
+        // in-progress serial apply, causing sporadic failures at t=24/28/48.
+        if (psm && starts_with(req.sql, "__ARIABC_CTRL_WAIT_BCDB_COMMITTED")) {
+            client_api_response resp;
+            // Parse: __ARIABC_CTRL_WAIT_BCDB_COMMITTED <target_count> [timeout_ms]
+            const std::string prefix = "__ARIABC_CTRL_WAIT_BCDB_COMMITTED";
+            std::istringstream iss(req.sql.substr(prefix.size()));
+            long long target = 0;
+            long long timeout_ms = 30000;
+            if (!(iss >> target) || target < 0) {
+                resp.status = 1;
+                resp.msg = "INVALID_WAIT_BCDB_COMMITTED_CMD";
+            } else {
+                if (iss >> timeout_ms) { /* optional timeout */ }
+                if (timeout_ms <= 0) timeout_ms = 1;
+
+                // Open a dedicated PG connection for the poll query.
+                // This avoids interfering with the executor's connection pool.
+                const std::string conninfo =
+                    "host=" + opt.host + " port=" + opt.port +
+                    " dbname=" + opt.dbname + " user=" + opt.user +
+                    (opt.password.empty() ? "" : " password=" + opt.password);
+                PGconn* poll_conn = PQconnectdb(conninfo.c_str());
+                if (!poll_conn || PQstatus(poll_conn) != CONNECTION_OK) {
+                    resp.status = 1;
+                    resp.msg = "BCDB_COMMITTED_CONN_FAILED";
+                    if (poll_conn) PQfinish(poll_conn);
+                } else {
+                    const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(static_cast<int>(timeout_ms));
+                    bool reached = false;
+                    long long last_val = -1;
+                    while (!g_stop.load(std::memory_order_relaxed)) {
+                        PGresult* res = PQexec(poll_conn, "SELECT bcdb_num_committed()");
+                        if (res && PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+                            last_val = std::atoll(PQgetvalue(res, 0, 0));
+                        }
+                        if (res) PQclear(res);
+                        if (last_val >= target) {
+                            reached = true;
+                            break;
+                        }
+                        if (std::chrono::steady_clock::now() >= deadline) {
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    }
+                    PQfinish(poll_conn);
+                    if (reached) {
+                        resp.status = 0;
+                        resp.msg = std::to_string(last_val);
+                    } else {
+                        resp.status = 1;
+                        resp.msg = "WAIT_BCDB_COMMITTED_TIMEOUT cur=" +
+                                   std::to_string(last_val) +
+                                   " target=" + std::to_string(target);
+                    }
                 }
             }
             const bool ok_write = write_response_frame(fd, resp, err);
@@ -647,7 +718,7 @@ int main(int argc, char** argv) {
             std::cerr << "accept failed: " << ::strerror(errno) << std::endl;
             continue;
         }
-        std::thread th([fd, raft, sm] { ariabc_pg::handle_client_fd(fd, raft, sm); });
+        std::thread th([fd, raft, sm, &opt] { ariabc_pg::handle_client_fd(fd, raft, sm, opt.db); });
         th.detach();
     }
 
