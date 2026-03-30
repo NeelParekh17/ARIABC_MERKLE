@@ -227,10 +227,10 @@ extern void store_optim_update(TupleTableSlot* slot, ItemPointer old_tid);
 extern void store_optim_insert(TupleTableSlot* slot);
 extern void store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot);
 extern void store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid);
-extern void apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid);
+extern bool apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid);
 extern bool apply_optim_insert(TupleTableSlot* slot, CommandId cid);
-extern void apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid);
-extern void apply_deferred_delete_by_key(Oid relOid, int keyval);
+extern bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid);
+extern bool apply_deferred_delete_by_key(Oid relOid, int keyval);
 extern bool apply_optim_writes(void);
 /* check_stale_read removed — SSI stale-read check that was never called; see shm_transaction.c */
 /* clean_ws_table_record, clean_rs_table_record removed — non-DT per-entry cleanup with no callers;

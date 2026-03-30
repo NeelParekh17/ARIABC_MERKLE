@@ -56,6 +56,24 @@ char completionTag[COMPLETION_TAG_BUFSIZE];
 
 static void get_write_set(BCDBShmXact *tx, Snapshot snapshot);
 
+/*
+ * During retry/error cleanup we may be handling partially-applied entries.
+ * Do not drop slot pointers here; just drain the queue and let
+ * MemoryContextReset(bcdb_tx_context) reclaim cloned slot memory.
+ */
+static inline void
+bcdb_drain_optim_write_list(BCDBShmXact *tx)
+{
+    OptimWriteEntry *optim_write_entry;
+
+
+    if (tx == NULL)
+        return;
+
+    while ((optim_write_entry = SIMPLEQ_FIRST(&tx->optim_write_list)))
+        SIMPLEQ_REMOVE_HEAD(&tx->optim_write_list, link);
+}
+
 static inline const char *
 skip_ws(const char *s)
 {
@@ -695,7 +713,6 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     bool init = true;
     bool hold_portal_snapshot = false;
     int num_restarts = -1;
-    OptimWriteEntry *optim_write_entry;
     int t_delta = 0;
     char saveState[]="saveState";
     char freeState[]="releaseState";
@@ -709,6 +726,8 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     char tx_result[1024];
     struct timeval tv1, tv2;
     int condSig = 0;
+    int result_slots = 1;
+    int read_slots = 1;
 
     is_bcdb_worker = true;
 
@@ -767,12 +786,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	       * but the SIMPLEQ entries allocated in bcdb_tx_context
 	       * need to be freed. MemoryContextReset frees the memory,
 	       * then SIMPLEQ_INIT resets the head pointer. */
-	      while ((optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
-	      {
-	          if (optim_write_entry->slot)
-	              ExecDropSingleTupleTableSlot(optim_write_entry->slot);
-	          SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
-	      }
+          bcdb_drain_optim_write_list(activeTx);
 	      MemoryContextReset(bcdb_tx_context);
 		      /* Fix: AbortCurrentTransaction properly releases all resources
 		       * (buffer pins, TupleDesc refs, locks) via ResourceOwnerRelease
@@ -851,6 +865,15 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
         block = get_block_by_id(1, false);
         Assert(block != NULL);
+        result_slots = block->blksize;
+        if (result_slots <= 0)
+            result_slots = 1;
+        if (result_slots > MAX_TX_PER_BLOCK)
+            result_slots = MAX_TX_PER_BLOCK;
+        read_slots = 2 * result_slots;
+        if (read_slots > MAX_TX_PER_BLOCK)
+            read_slots = MAX_TX_PER_BLOCK;
+
         latest_tx_id = get_last_committed_txid(tx) ;
         if(dualTab) {
 #if SAFEDBG1
@@ -858,14 +881,23 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                getpid(), __FILE__, __FUNCTION__, __LINE__ ,
                latest_tx_id, tx->tx_id, 2*block->blksize);
 #endif
-#if SAFEDBG2
-           WaitConditionPidDbg(&block->cond, getpid(), 
-#else
-           //WaitConditionPidTimeout(&block->cond, getpid(), 1500,
-           WaitConditionPid(&block->cond, getpid(), 
-#endif
-                        ( ( get_last_committed_txid(tx)+1)  == tx->tx_id ));
-           strcpy(tx_result, block->result[(tx->tx_id)%(2*block->blksize)]);
+           /*
+            * Deterministic serial gate via interruptible polling.
+            *
+            * This avoids ConditionVariable wait-list corruption observed
+            * under concurrent direct "s <txid> ..." execution.
+            */
+           while (((get_last_committed_txid(tx) + 1) != tx->tx_id))
+           {
+               CHECK_FOR_INTERRUPTS();
+               pg_usleep(5L);
+           }
+           {
+               int read_idx = tx->tx_id % read_slots;
+               if (read_idx < 0)
+                   read_idx += read_slots;
+               strlcpy(tx_result, block->result[read_idx], sizeof(tx_result));
+           }
 
 #if SAFEDBG2
            printf("safeDbg blk read result = %s\n", tx_result);
@@ -983,7 +1015,10 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
           for( j = 0 ; j < 32 ; j++, sqlOffset++) {
              if(tx->sql[sqlOffset] == '\'') break;
           }
-          strncpy(snapId, &(tx->sql[sqlCmdOffset]), j); // why exception...
+          if (j >= (int) sizeof(snapId))
+              j = (int) sizeof(snapId) - 1;
+          memcpy(snapId, &(tx->sql[sqlCmdOffset]), j);
+          snapId[j] = '\0';
           block->snapTid = tx->tx_id;
 #if SAFEDBG3
           printf("safeDbg tx save snapId = %s blk snapTid= %d myPid= %d \n", snapId, block->snapTid, getpid());
@@ -1011,7 +1046,10 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
           for( j = 0 ; j < 32 ; j++, sqlOffset++) {
              if(tx->sql[sqlOffset] == '\'') break;
           }
-          strncpy(snapId, &(tx->sql[sqlCmdOffset]), j); // is it exception...
+          if (j >= (int) sizeof(snapId))
+              j = (int) sizeof(snapId) - 1;
+          memcpy(snapId, &(tx->sql[sqlCmdOffset]), j);
+          snapId[j] = '\0';
 #if SAFEDBG3
           printf("safeDbg tx release snapId = %s blk snapTid= %d myPid= %d \n", snapId, block->snapTid, getpid());
 #endif
@@ -1021,7 +1059,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #if SAFEDBG3
       printf("safeDbg tx matchLen = %d \n", matchLen);
 #endif
-      int mem_txid = ( (tx->tx_id) % (block->blksize));
+      int mem_txid = tx->tx_id % result_slots;
+      if (mem_txid < 0)
+          mem_txid += result_slots;
 
       /* Fix: Silently release portal resources before PortalDrop to avoid
        * leak warnings. ResourceOwnerRelease with isCommit=false releases
@@ -1059,21 +1099,22 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       /* CRITICAL FIX: Advance counter and broadcast ONLY AFTER commit.
        * This ensures the next transaction cannot enter its serial phase
        * until our writes are fully committed and visible. */
-    set_last_committed_txid(tx);
-    ConditionVariableBroadcast(&block->cond);
-      condSig = 1;
+            set_last_committed_txid(tx);
+            condSig = 1;
 
-      memset(&block->result[mem_txid], 0, 1024);
+    memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
 #if SAFEDBG3
       printf("safeDbg txid= %d mem-txid = %d \n", tx->tx_id, mem_txid);
        
       printf("\n\n ** safeDbg pid %d %s : %s: %d tx sql %s \n",
              getpid(), __FILE__, __FUNCTION__, __LINE__ , tx->sql);
 #endif
-      if((tx->tx_id)%2000 < 2)
-      printf("\n *** safeDbg pid %d signaling %s : %s: %d "
+#if SAFEDBG1
+    if((tx->tx_id)%2000 < 2)
+    printf("\n *** safeDbg pid %d signaling %s : %s: %d "
 	"latest-vs-myId= %d %d myquery= %s\n", getpid(), __FILE__, __FUNCTION__,
 		__LINE__ , get_last_committed_txid(tx), tx->tx_id, tx->sql);
+#endif
 
       int read_cmd = chk_query_type( tx->sql, "select", "SELECT");
       int del_cmd = chk_query_type( tx->sql, "delete", "DELETE");
@@ -1081,13 +1122,16 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       int ins_cmd = chk_query_type( tx->sql, "insert", "INSERT");
 
       if(read_cmd == 1)
-        sprintf(&block->result[mem_txid], tx_result);
+                strlcpy(block->result[mem_txid], tx_result, sizeof(block->result[mem_txid]));
       else if(ins_cmd == 1)
-        sprintf(&block->result[mem_txid],"\n\t*%s* INSERT 0 1\n", tx->hash);
+                snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+                                 "\n\t*%s* INSERT 0 1\n", tx->hash);
       else if(upd_cmd == 1)
-        sprintf(&block->result[mem_txid],"\n\t*%s* UPDATE 0 1\n", tx->hash);
+                snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+                                 "\n\t*%s* UPDATE 0 1\n", tx->hash);
       else if(del_cmd == 1)
-        sprintf(&block->result[mem_txid],"\n\t*%s* DELETE 0 1\n", tx->hash);
+                snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+                                 "\n\t*%s* DELETE 0 1\n", tx->hash);
 
 #if SAFEDBG3
       //printf("blkmid read result at %d= %s\n", ((tx->tx_id)%(2*block->blksize)), block->result[(tx->tx_id)%(2*block->blksize)]); // does it get overwritten
@@ -1108,9 +1152,11 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     }
     PG_CATCH();
     {
-      ConditionVariableCancelSleep();
-        printf("safeDbg pg-catch() pid %d %s : %s: %d  tx %d %s \n",
+    ConditionVariableCancelSleep();
+#if SAFEDBG1
+      printf("safeDbg pg-catch() pid %d %s : %s: %d  tx %d %s \n",
 			    getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id, tx->sql );
+#endif
       //goto retry;
 
       //print_trace();
@@ -1119,8 +1165,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        * After PG_RE_THROW(), PostgresMain's sigsetjmp handler will call
        * AbortCurrentTransaction() which properly cleans up all resources. */
               if(condSig == 0) {
-                  BCBlock     *block2 = get_block_by_id(1, false);
-         	      ConditionVariableBroadcast(&block2->cond);
+                  /* No waiter wake-up required in polling-gate mode. */
               }
 		      if (hold_portal_snapshot && activeTx && activeTx->portal)
 		      {
@@ -1140,13 +1185,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		          hold_portal_snapshot = false;
 		      }
 
-	      while (activeTx &&
-	             (optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
-	      {
-	          if (optim_write_entry->slot)
-	              ExecDropSingleTupleTableSlot(optim_write_entry->slot);
-	          SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
-	      }
+          bcdb_drain_optim_write_list(activeTx);
 
 	      MemoryContextReset(bcdb_tx_context);
 	      delete_tx(tx);
@@ -1300,13 +1339,7 @@ bcdb_worker_process_tx(BCDBShmXact *tx)
     }
     PG_CATCH();
     {
-		OptimWriteEntry *optim_write_entry;
-
-        while ((optim_write_entry = SIMPLEQ_FIRST(&activeTx->optim_write_list)))
-        {
-            ExecDropSingleTupleTableSlot(optim_write_entry->slot);
-            SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
-        }
+        bcdb_drain_optim_write_list(activeTx);
         PG_RE_THROW();
     }
     PG_END_TRY();
