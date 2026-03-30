@@ -425,11 +425,15 @@ clear_tx_pool(void)
 void
 rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 {
+#if !DT_CONFLICT_TRACKING
+    (void) tag;
+    return;
+#else
     WSTableEntryRecord *record;
-
     record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
     record->tag = *tag;
     LIST_INSERT_HEAD(&rs_table_record, record, link);
+#endif
 }
 
 /*
@@ -453,11 +457,15 @@ rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 void
 ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
 {
+#if !DT_CONFLICT_TRACKING
+    (void) tag;
+    return;
+#else
     WSTableEntryRecord *record;
-
     record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
     record->tag = *tag;
     LIST_INSERT_HEAD(&ws_table_record, record, link);
+#endif
 }
 
 /*
@@ -1050,7 +1058,7 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
     return insert_ok;
 }
 
-void
+bool
 apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
 {
     TM_FailureData tmfd;
@@ -1093,10 +1101,9 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
          */
         if (!table_tuple_fetch_row_version(relation, tid, SnapshotSelf, oldSlot))
         {
+            ExecDropSingleTupleTableSlot(oldSlot);
             RelationClose(relation);
-            ereport(ERROR,
-                    (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-                     errmsg("tx %s doomed because old row image was not fetchable", activeTx->hash)));
+            return false;
         }
 
         /* Compute old hash from the same oldSlot image used for leafing */
@@ -1165,9 +1172,7 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
         printf("safeDB %s : %s: %d   tmfd.xmax %d, tmfd.cmax %d  ww-conflict \n",
                __FILE__, __FUNCTION__, __LINE__ , tmfd.xmax, tmfd.cmax  );
 #endif
-        ereport(ERROR,
-                (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-                 errmsg("tx %s doomed because of ww-conflict", activeTx->hash)));
+    return false;
     }
 
     if (update_indexes)
@@ -1195,14 +1200,14 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
         {
             if (oldSlot)
                 ExecDropSingleTupleTableSlot(oldSlot);
+            if (newSlot)
+                ExecDropSingleTupleTableSlot(newSlot);
             if (indexList)
                 list_free(indexList);
             if (pending)
                 pfree(pending);
             RelationClose(relation);
-            ereport(ERROR,
-                    (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-                     errmsg("tx %s doomed because new row image was not fetchable", activeTx->hash)));
+            return false;
         }
 
         merkle_compute_slot_hash(relation, newSlot, &newHash);
@@ -1262,9 +1267,10 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
     ExecDropSingleTupleTableSlot(slot);
 
     RelationClose(relation);
+    return true;
 }
 
-void
+bool
 apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid)
 {
     Relation relation = RelationIdGetRelation(relOid);
@@ -1301,13 +1307,11 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
         if (result != TM_Ok)
         {
             RelationClose(relation);
-            ereport(ERROR,
-                    (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-                     errmsg("tx %s doomed because of delete conflict", activeTx->hash)));
+            return false;
         }
 
         RelationClose(relation);
-        return;
+        return true;
     }
 
     ItemPointerCopy(tupleid, &currentTid);
@@ -1332,12 +1336,7 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
             if (oldSlotOwned && oldSlot)
                 ExecDropSingleTupleTableSlot(oldSlot);
             RelationClose(relation);
-            ereport(ERROR,
-                    (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-                     errmsg("tx %s doomed because deferred delete could not fetch tuple tid=(%u,%u)",
-                            activeTx->hash,
-                            ItemPointerGetBlockNumberNoCheck(&currentTid),
-                            ItemPointerGetOffsetNumberNoCheck(&currentTid))));
+            return false;
         }
     }
 
@@ -1400,16 +1399,14 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
 
     if (result != TM_Ok)
     {
-        if (oldSlot)
+        if (oldSlotOwned && oldSlot)
             ExecDropSingleTupleTableSlot(oldSlot);
         if (indexList)
             list_free(indexList);
         if (pending)
             pfree(pending);
         RelationClose(relation);
-        ereport(ERROR,
-                (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-                 errmsg("tx %s doomed because of delete conflict", activeTx->hash)));
+        return false;
     }
 
     if (hasOldHash)
@@ -1432,6 +1429,7 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
         pfree(pending);
 
     RelationClose(relation);
+    return true;
 }
 
 /*
@@ -1445,7 +1443,7 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
  * This duplicates the core logic of apply_optim_delete but starts from a
  * primary-key value instead of a stored TupleTableSlot.
  */
-void
+bool
 apply_deferred_delete_by_key(Oid relOid, int keyval)
 {
     Relation relation = RelationIdGetRelation(relOid);
@@ -1523,7 +1521,7 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
         if (oldSlot)
             ExecDropSingleTupleTableSlot(oldSlot);
         RelationClose(relation);
-        return;
+        return true;
     }
 
     /* Use merkle_compute_row_hash to get the old hash before deletion */
@@ -1597,7 +1595,10 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
         pfree(pending);
 
     RelationClose(relation);
-}bool
+    return (result == TM_Ok);
+}
+
+bool
 apply_optim_writes(void)
 {
     OptimWriteEntry *write_entry;
@@ -1607,7 +1608,13 @@ apply_optim_writes(void)
         switch (write_entry->operation)
         {
             case CMD_UPDATE:
-                apply_optim_update(&write_entry->old_tid, write_entry->slot, write_entry->cid);
+                if (!apply_optim_update(&write_entry->old_tid, write_entry->slot, write_entry->cid))
+                {
+                    if (write_entry->slot)
+                        ExecDropSingleTupleTableSlot(write_entry->slot);
+                    SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
+                    return false;
+                }
                 break;
             case CMD_INSERT:
                 if (!apply_optim_insert(write_entry->slot, write_entry->cid))
@@ -1629,12 +1636,24 @@ apply_optim_writes(void)
             case CMD_DELETE:
                 if (ItemPointerIsValid(&write_entry->old_tid))
                 {
-                    apply_optim_delete(write_entry->relOid, &write_entry->old_tid,
-                                       write_entry->slot, write_entry->cid);
+                    if (!apply_optim_delete(write_entry->relOid, &write_entry->old_tid,
+                                            write_entry->slot, write_entry->cid))
+                    {
+                        if (write_entry->slot)
+                            ExecDropSingleTupleTableSlot(write_entry->slot);
+                        SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
+                        return false;
+                    }
                 }
                 else
                 {
-                    apply_deferred_delete_by_key(write_entry->relOid, write_entry->keyval);
+                    if (!apply_deferred_delete_by_key(write_entry->relOid, write_entry->keyval))
+                    {
+                        if (write_entry->slot)
+                            ExecDropSingleTupleTableSlot(write_entry->slot);
+                        SIMPLEQ_REMOVE_HEAD(&activeTx->optim_write_list, link);
+                        return false;
+                    }
                 }
                 if (write_entry->slot)
                     ExecDropSingleTupleTableSlot(write_entry->slot);
@@ -1677,6 +1696,9 @@ apply_optim_writes(void)
 int
 conflict_checkDT()
 {
+#if !DT_CONFLICT_TRACKING
+    return 0;
+#else
 const int ccMax = 1;
 static int ccCount = 0;
 static int cc2Count = 0;
@@ -1720,6 +1742,7 @@ static int cc2Count = 0;
 #endif
     }
 	    return 0;
+#endif
 
 }
 
@@ -1793,6 +1816,9 @@ conflict_check(void)
 void
 publish_ws_tableDT(int id)
 {
+#if !DT_CONFLICT_TRACKING
+    return;
+#else
     bool found;
     WSTableEntry* entry;
     PREDICATELOCKTARGETTAG *tag;
@@ -1838,6 +1864,7 @@ publish_ws_tableDT(int id)
             entry->tx_id = activeTx->tx_id;
         SpinLockRelease(partition_lock);
     }
+#endif
 }
 
 /*
