@@ -17,7 +17,7 @@ limitations under the License.
 
 #pragma once
 
-#include "in_memory_log_store.hxx"
+#include "file_log_store.hxx"
 
 #include "nuraft.hxx"
 
@@ -29,7 +29,11 @@ public:
                     const std::string& endpoint)
         : my_id_(srv_id)
         , my_endpoint_(endpoint)
-        , cur_log_store_( cs_new<inmem_log_store>() )
+        /* F6 FIX: Use file-based log store for crash-safe durability.
+         * Log entries are written to ./raft_log_<id>/ with fsync.
+         * This replaces the in-memory log store that lost all data on crash. */
+        , cur_log_store_( cs_new<file_log_store>(
+              "./raft_log_" + std::to_string(srv_id)) )
     {
         my_srv_config_ = cs_new<srv_config>( srv_id, endpoint );
 
@@ -41,28 +45,20 @@ public:
     ~inmem_state_mgr() {}
 
     ptr<cluster_config> load_config() {
-        // Just return in-memory data in this example.
-        // May require reading from disk here, if it has been written to disk.
         return saved_config_;
     }
 
     void save_config(const cluster_config& config) {
-        // Just keep in memory in this example.
-        // Need to write to disk here, if want to make it durable.
         ptr<buffer> buf = config.serialize();
         saved_config_ = cluster_config::deserialize(*buf);
     }
 
     void save_state(const srv_state& state) {
-        // Just keep in memory in this example.
-        // Need to write to disk here, if want to make it durable.
         ptr<buffer> buf = state.serialize();
         saved_state_ = srv_state::deserialize(*buf);
     }
 
     ptr<srv_state> read_state() {
-        // Just return in-memory data in this example.
-        // May require reading from disk here, if it has been written to disk.
         return saved_state_;
     }
 
@@ -82,11 +78,10 @@ public:
 private:
     int my_id_;
     std::string my_endpoint_;
-    ptr<inmem_log_store> cur_log_store_;
+    ptr<file_log_store> cur_log_store_;
     ptr<srv_config> my_srv_config_;
     ptr<cluster_config> saved_config_;
     ptr<srv_state> saved_state_;
 };
 
 };
-

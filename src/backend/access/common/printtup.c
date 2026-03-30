@@ -507,8 +507,11 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 			outputstr = OutputFunctionCall(&thisState->finfo, attr);
             if(is_bcdb_worker) {
                 //printf("bcdb-worker %s !!! \n", outputstr);
-                sprintf(rowStr+offset, " %s ;", outputstr);
-                offset += strlen(outputstr) +3 ;
+                int needed = strlen(outputstr) + 3;
+                if (offset + needed < (int)sizeof(rowStr)) {
+                    snprintf(rowStr+offset, sizeof(rowStr) - offset, " %s ;", outputstr);
+                    offset += needed;
+                }
             }
 			pq_sendcountedtext(buf, outputstr, strlen(outputstr), false);
     //printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
@@ -533,7 +536,8 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 
     if(is_bcdb_worker) {
         BCBlock* blk = get_block_by_id(1, false);
-        strcpy(&blk->result[(activeTx->tx_id)%(2*blk->blksize)], rowStr);
+        strncpy(&blk->result[(activeTx->tx_id)%(2*blk->blksize)], rowStr, 1024 - 1);
+        blk->result[(activeTx->tx_id)%(2*blk->blksize)][1024 - 1] = '\0';
 #if SAFEDBG2
         printf("bcdb-worker blk id %d blksz %d myID %d !!! \n", blk->id, blk->blksize, activeTx->tx_id);
         printf("bcdb-worker %s !!! \n", rowStr);

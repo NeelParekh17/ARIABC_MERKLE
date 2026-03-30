@@ -52,9 +52,13 @@ extern int32         worker_id;
 #define CLEANING_DELAY_BLOCKS 5
 #define QUEUEING_BLOCKS 32
 #define MAX_NUM_BLOCKS (QUEUEING_BLOCKS + CLEANING_DELAY_BLOCKS + 100)
-#define MAX_TX_PER_BLOCK 5500
+/* F9 FIX: Reduced from 5500 to 256. For DT path with NUM_WORKERS=8 and
+ * blksize<=20, only 2*blksize active slots are used at once. 256 gives
+ * generous headroom while cutting block pool SHM from ~780MB to ~36MB.
+ * If using very large block sizes (>128), increase this accordingly. */
+#define MAX_TX_PER_BLOCK 256
 #define WORK_TOKENS 64
-#define NUM_WORKERS 2
+#define NUM_WORKERS 8
 #define HASHTAB_SWITCH_THRESHOLD  (200 * NUM_WORKERS)
 #define WORKER_INIT_NUM 64
 #define NUM_BMIN_COND 1

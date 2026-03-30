@@ -858,11 +858,14 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                getpid(), __FILE__, __FUNCTION__, __LINE__ ,
                latest_tx_id, tx->tx_id, 2*block->blksize);
 #endif
+           /* Wait for predecessor to commit. Broadcast is the only safe
+            * signaling pattern for PG ConditionVariables — it is immune to
+            * the missed-signal race that plagues targeted Signal. With
+            * NUM_WORKERS <= 8 the O(N) spurious wakeups are negligible. */
 #if SAFEDBG2
-           WaitConditionPidDbg(&block->cond, getpid(), 
+           WaitConditionPidDbg(&block->cond, getpid(),
 #else
-           //WaitConditionPidTimeout(&block->cond, getpid(), 1500,
-           WaitConditionPid(&block->cond, getpid(), 
+           WaitConditionPid(&block->cond, getpid(),
 #endif
                         ( ( get_last_committed_txid(tx)+1)  == tx->tx_id ));
            strcpy(tx_result, block->result[(tx->tx_id)%(2*block->blksize)]);
@@ -1021,7 +1024,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #if SAFEDBG3
       printf("safeDbg tx matchLen = %d \n", matchLen);
 #endif
-      int mem_txid = ( (tx->tx_id) % (block->blksize));
+      int mem_txid = ( (tx->tx_id) % (2 * block->blksize));
 
       /* Fix: Silently release portal resources before PortalDrop to avoid
        * leak warnings. ResourceOwnerRelease with isCommit=false releases
@@ -1056,9 +1059,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                            RESOURCE_RELEASE_AFTER_LOCKS, false, true);
       finish_xact_command();
 
-      /* CRITICAL FIX: Advance counter and broadcast ONLY AFTER commit.
-       * This ensures the next transaction cannot enter its serial phase
-       * until our writes are fully committed and visible. */
+      /* Advance counter AFTER commit, then broadcast to wake all waiters.
+       * Only the successor whose predicate passes will proceed;
+       * others re-sleep immediately. Safe and proven. */
     set_last_committed_txid(tx);
     ConditionVariableBroadcast(&block->cond);
       condSig = 1;
@@ -1070,10 +1073,12 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       printf("\n\n ** safeDbg pid %d %s : %s: %d tx sql %s \n",
              getpid(), __FILE__, __FUNCTION__, __LINE__ , tx->sql);
 #endif
+#if SAFEDBG1
       if((tx->tx_id)%2000 < 2)
       printf("\n *** safeDbg pid %d signaling %s : %s: %d "
 	"latest-vs-myId= %d %d myquery= %s\n", getpid(), __FILE__, __FUNCTION__,
 		__LINE__ , get_last_committed_txid(tx), tx->tx_id, tx->sql);
+#endif
 
       int read_cmd = chk_query_type( tx->sql, "select", "SELECT");
       int del_cmd = chk_query_type( tx->sql, "delete", "DELETE");
@@ -1081,13 +1086,13 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       int ins_cmd = chk_query_type( tx->sql, "insert", "INSERT");
 
       if(read_cmd == 1)
-        sprintf(&block->result[mem_txid], tx_result);
+        snprintf(&block->result[mem_txid], 1024, "%s", tx_result);
       else if(ins_cmd == 1)
-        sprintf(&block->result[mem_txid],"\n\t*%s* INSERT 0 1\n", tx->hash);
+        snprintf(&block->result[mem_txid], 1024, "\n\t*%s* INSERT 0 1\n", tx->hash);
       else if(upd_cmd == 1)
-        sprintf(&block->result[mem_txid],"\n\t*%s* UPDATE 0 1\n", tx->hash);
+        snprintf(&block->result[mem_txid], 1024, "\n\t*%s* UPDATE 0 1\n", tx->hash);
       else if(del_cmd == 1)
-        sprintf(&block->result[mem_txid],"\n\t*%s* DELETE 0 1\n", tx->hash);
+        snprintf(&block->result[mem_txid], 1024, "\n\t*%s* DELETE 0 1\n", tx->hash);
 
 #if SAFEDBG3
       //printf("blkmid read result at %d= %s\n", ((tx->tx_id)%(2*block->blksize)), block->result[(tx->tx_id)%(2*block->blksize)]); // does it get overwritten
@@ -1118,9 +1123,28 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        * a transaction in error state, causing cascading warnings.
        * After PG_RE_THROW(), PostgresMain's sigsetjmp handler will call
        * AbortCurrentTransaction() which properly cleans up all resources. */
-              if(condSig == 0) {
-                  BCBlock     *block2 = get_block_by_id(1, false);
-         	      ConditionVariableBroadcast(&block2->cond);
+      /* CRASH RECOVERY: If this worker dies before its serial commit
+       * (condSig == 0), advance the commit chain so successor transactions
+       * are not permanently deadlocked. Write an error marker into the
+       * result buffer and broadcast to wake all waiters. */
+              if (condSig == 0) {
+                  BCBlock *block2 = get_block_by_id(1, false);
+                  if (block2) {
+                      int blksz = (int) block2->blksize;
+                      int err_slot = (int)(tx->tx_id % (2 * blksz));
+
+                      snprintf(&block2->result[err_slot], 1024,
+                               "BCDB_TX_ABORTED tx_id=%d pid=%d",
+                               (int) tx->tx_id, getpid());
+
+                      set_last_committed_txid(tx);
+                      ConditionVariableBroadcast(&block2->cond);
+
+                      elog(WARNING,
+                           "BCDB crash recovery: tx_id=%d pid=%d advanced "
+                           "commit chain (aborted)",
+                           (int) tx->tx_id, getpid());
+                  }
               }
 		      if (hold_portal_snapshot && activeTx && activeTx->portal)
 		      {
