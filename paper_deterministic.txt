@@ -1,0 +1,146 @@
+Algorithm 1 gives the pseudocode of the deterministic execution
+algorithm that we use, which is based on Aria [15].
+Each worker thread picks the next transaction (current_Id) from
+the input log and executes the Run_Tx function on the transaction.
+The function atomically performs two operations: (a) takes the
+current database snapshot S and (b) records the lowest unfinished
+transaction-id (check_from_id as the last committed transaction
+ID + 1 (Lines 40 − 41). (We assume that transactions are numbered
+sequentially in log/commit order.) Executing atomically ensures
+that all updates from transaction-IDs prior to check_from_id are
+committed in the snapshot. Thus, the current transaction needs
+to be checked for any possible conflict with transactions that had
+started but had not finished, before this transaction started.
+The rw-conflict check is implemented as described in Aria [15],
+using code from an implementation of AriaBC on PostgreSQL from
+github.com/lzllai/AriaBC. As noted in [15], the read-write check
+also detects phantom conflicts since PostgreSQL uses leaf conflicts
+for checking conflicts between predicates and updates/deletes/inserts,
+and these conflicts show up as read-write conflicts on index leaves.
+We also note that the changes to PostgreSQL above are minimal.
+The worker executes the transaction on the database snapshot
+S, to determine the read-write-set which was not known prior to
+scheduling the transaction (Line 42). However, it does not commit
+updates to the database, similar to [14], [15]. A transaction commits
+updates after verifying that it does not have any data conflicts with
+the preceding transactions (Line 47).
+If there is a conflict the transaction is re-executed by the while
+loop, after a waiting time as determined in Line 44. The intuition
+behind the condition variable wait and conflict checking code in
+the while loop above is depicted pictorially in Figure 3.
+If all preceding transactions have committed before snapshot S
+was taken (the check in the while loop in Line 43), the transaction
+will commit updates and send a signal to subsequent transactions
+(higher IDs) that may be waiting (Lines 53, 54). Otherwise, if at least
+one preceding transaction had not committed before snapshot S
+was taken, this transaction will wait for the commit signal. This
+wait can be either for a certain threshold period of time, or a count
+of commit signals, etc (Line 44). The commit signal indicates the
+availability of a read-write set from a preceding transaction that
+committed.
+When a commit signal is received, the worker will (a) record the
+ID of that transaction and (b) compare the read-write set of the
+current transaction with all those who have published a commit
+signal (i.e. committed, Line 47). In the optimized case, this translates
+to the number of signals reaching threshold count or timer expiry.
+It then compares the read-write sets of all transactions till this
+recorded ID, with its own read-write set (Line 21).
+If there is a conflict, the transaction is restarted by taking a new
+database snapshot with the latest state. If there is no conflict, and all
+conflict checks with preceding transactions are done, a transaction
+can commit (Line 7). It commits its changes and saves read-write
+sets to the global hash table (Line 8−16) and then sends a broadcast
+signal to other workers (Line 54).
+
+The hash table stores read-write sets of all committed transac-
+tions. However, once a transaction is old enough that no currently
+executing transaction is concurrent with it, its read-write sets can
+be deleted.
+To simplify deletion of data from the hash table, we use a pair
+of hash tables setA and setB, where one table is used till it fills
+up, and then the other table is used till it fills up. The function
+mapToSet() (line 8) determines which table to use for the current
+transaction, based on the transaction ID number. The tables are
+sized based on the maximum number of threads N, such that when
+setB becomes full, all current transactions in setA are redundant
+can can be deleted, and symmetrically for setA becoming full. Due
+to commit ordering, with N threads the oldest currently executing
+transaction cannot be more than N transactions before the newest
+currently executing one.
+
+It is possible that upon re-execution on a new snapshot, the trans-
+action may follow a different codepath from the original simulated
+execution, resulting in new read-write sets. This is expected to be a
+rare scenario, and even in this case, the new execution will account
+for all conflicts.
+
+Algorithm 1 Deterministic Transaction Execution Algorithm
+1: maxSetSize ← K
+2: RW_SET[] setA, setB ⊲ global read-write sets
+3:
+4: check_f rom_id ← 0 ⊲ private to worker
+5: last_committed_tx_id ← 0 ⊲ global across threads
+6:
+7: function Commit (T x_idi
+)
+8: if (mapToSet(T x_idi
+
+, maxSetSize) == 0) then
+9: if (getSetSize(setA) == maxSetSize) then empty(setA)
+10: end if
+11: Insert (i, r w_seti
+) into setA
+
+12: else
+13: if (getSetSize(setB) == maxSetSize) then empty(setB)
+14: end if
+15: Insert (i, r w_seti
+) into setB
+
+16: end if
+17: last_committed_tx_id← T x_idi
+18: return
+19: end function
+20:
+21: function CheckConflict (TX_ID1,TX_ID2, RW _SETi
+)
+
+22: i ← TX_ID1
+23: while (i ≠ TX_ID2) do
+24: if (mapToSet( i, maxSetSize) == 0) then
+25: if ( (RW_SETi conflicts with RW_SETj from setA) &
+(TX_IDj >= check_f rom_id ) ) then return true
+
+26: end if
+27: else
+28: if ( (RW_SETi conflicts with RW_SETj from setB) &
+(TX_IDj >= check_f rom_id ) ) then return true
+
+29: end if
+30: end if
+31: i ← i + 1
+32: end while
+33: return false
+34: end function
+35:
+36: function Run_Tx (Tk ) :
+37: loop ← true
+38: while (loop) do
+39: oldest_commit_id ← last_committed_tx_id
+40: check_f rom_id ← oldest_commit_id + 1
+41: S ← DB_Snapshot ( )
+42: r w_setk ← Execute(Tk , S)
+43: while (oldest_commit_id ≠ (k − 1)) do
+44: WaitForCommitSignals()
+45: ⊲ periodic or count-based or combination
+46: latest_commit_id ← last_committed_tx_id
+47: loop ← CheckConflict( oldest_commit_id,
+latest_commit_id, r w_setk )
+48: oldest_commit_id ← latest_commit_id
+49: if ( loop ) then break
+50: end if
+51: end while
+52: end while
+53: Commit(Tk )
+54: CommitSignalBroadcast()
+55: end function

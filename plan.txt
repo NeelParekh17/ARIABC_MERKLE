@@ -1,0 +1,170 @@
+## Complete Flaw Analysis — All Three Architecture Docs + Benchmark Data
+
+---
+
+## Flaw 1: Blocking Submit + Compat Mode (The 380 ops/s Ceiling)
+
+This is two flaws that compound each other.
+
+**From the data:**
+```
+gw_read_ms  = 53,466ms = 98.85% of all time  
+gw_write_ms =    594ms =  1.10% of all time
+Thread scaling t1→t64 = 379→380 ops/s = 1.001x improvement
+RTT per tx = 2.67ms → ceiling = 374 ops/s ← matches exactly
+```
+
+**From the architecture doc (Section 12.1):** blocking submit does write-then-read per transaction on one TCP connection. Every thread is independently blocked waiting for its own RPC response before submitting the next.
+
+**But the deeper cause is compat mode (Section 16, Case C):** `det_runtime_mode = "compat"` appears in every single row of your summary.csv. This means the `s <8digit-seq>` SQL prefix is not being sent correctly, so the executor falls into compatibility mode which explicitly allows only **one in-flight request at a time** even in event mode. The deterministic in-flight window, the block fast path (`bcdb_block_submit_results`), and the parallel worker coordination are all **completely bypassed**.
+
+The paper's entire Aria concurrency model is never activated in any of your runs.
+
+**Fix (two steps, both required):**
+
+Step 1 — Fix the SQL prefix so det mode activates instead of compat:
+```
+# gateway must submit: s 00000001 INSERT INTO ...
+# not raw SQL directly
+# check --detRawSql flag and dbType=1 are both set correctly
+```
+
+Step 2 — Switch from blocking to event+pipeline submit mode:
+```
+--submitMode=event --detSubmitPipeline=1
+```
+
+Once compat mode is off and pipeline is on, the gateway uses `async_cluster_submitter` which maintains N in-flight submissions per connection via `poll()`. Expected result: **380 → 3000+ ops/s** just from this.
+
+---
+
+## Flaw 2: NUM_WORKERS = 2 Hardcoded
+
+**From BCDB_ARCHITECTURE.md Section 4.1:**
+```c
+NUM_WORKERS = 2   // compile-time constant in globals.h
+HASHTAB_SWITCH_THRESHOLD = 200 * NUM_WORKERS = 400
+```
+
+With `conn_pool_size=8` in pg_executor, you have 8 PostgreSQL connections all feeding into 2 BCDB worker processes. Six connections are always waiting for a worker slot. This is a hard ceiling on deterministic execution parallelism that no amount of gateway threading can overcome.
+
+**Fix:** In `globals.h`, raise `NUM_WORKERS` to match your CPU count / worker count, rebuild PostgreSQL. For your 3-instance local setup, set it to 8. For the 192-core server, set it to 32+.
+
+---
+
+## Flaw 3: Single Sentinel Block — Global Condition Variable
+
+**From BCDB_ARCHITECTURE.md Section 3.2:**
+```
+Block 1 owns: last_committed_tx_id, cond, condRecovery, blksize,
+              result ring — ALL shared globally across all workers
+```
+
+One condition variable means every commit broadcasts to all workers simultaneously. This is the thundering herd confirmed architecturally — it's not just in `worker.c:1057`, it's baked into the data structure design. As you raise `NUM_WORKERS`, this gets worse proportionally.
+
+**Fix:** Per-tx condition variables already exist (`tx->cond` as found earlier). The targeted successor signaling fix from our earlier discussion applies here, with the missed-signal flag guard:
+
+```c
+// In commit path: signal only tx_id+1, not broadcast
+Transaction *next = get_tx(tx->tx_id + 1);
+if (next) {
+    pthread_mutex_lock(&next->mutex);
+    next->predecessor_committed = true;  // flag guards missed signal
+    pthread_cond_signal(&next->cond);
+    pthread_mutex_unlock(&next->mutex);
+}
+```
+
+---
+
+## Flaw 4: Sporadic Pre-State Failures at t=24/28/48
+
+**From summary.csv:**
+```
+t=24: pass_rate_pre_root_hash_equal = 0.667
+t=28: pass_rate_pre_root_hash_equal = 0.667  
+t=48 (ycsbtx): pass_rate_root_hash_equal = 0.667
+```
+
+**Root cause from the architecture:** The reset barrier (Section 23) uses `__ARIABC_CTRL_WAIT_COMMIT_INDEX` which confirms all nodes are at the same **Raft commit index**. But from MERKLE_INDEX_COMPLETE_DETAILS.md Section 10: Merkle updates are **deferred to serial apply phase**, which happens after Raft commits. So:
+
+```
+Raft commits index N      ← barrier confirms this
+  ↓
+BCDB serial apply runs    ← Merkle XOR updates happen HERE
+  ↓
+Merkle root is final      ← pre-check should happen after this
+```
+
+The pre-check fires immediately after the Raft barrier, catching nodes mid-apply. Higher thread counts make this window larger, which is why it only fails at specific thread counts.
+
+**Fix:** After `WAIT_COMMIT_INDEX`, add a second barrier that waits for `bcdb_num_committed()` to match the expected transaction count on all nodes before running the pre-root-hash check:
+
+```python
+def reset_barrier():
+    target_idx = max(get_commit_index(node) for node in nodes)
+    wait_all_nodes_at(target_idx)          # existing barrier
+    
+    # NEW: wait for BCDB serial apply to finish on all nodes
+    expected_committed = get_expected_tx_count()
+    for node in nodes:
+        wait_until(lambda: bcdb_num_committed(node) >= expected_committed)
+    
+    # NOW safe to check Merkle root
+    assert_root_hash_equal_across_nodes()
+```
+
+---
+
+## Flaw 5: Full Result Sent From All Replicas (Distributed Only)
+
+**From ARIABC_PG_ARCHITECTURE.md Section 11.3:**
+> "Current behavior intentionally includes the full result on all replicas"
+
+**From the paper Section 3.1:**
+> "send a hash from all nodes except for one node that sends the full result"
+
+With 3 replicas, every transaction produces 3× full result serialization + 3× Kafka writes. On distributed nodes this means 3× network bandwidth to Kafka for every result. The paper's design sends 1 full result + 2 hashes — a 3x reduction in result-path bandwidth.
+
+**Fix in `pg_executor.cxx`:** Check if this node is the current Raft leader. Leader sends full result; followers send hash only:
+
+```cpp
+bool is_leader = (node_id_ == leader_node_id_hint);
+build_kafka_payload(result, 
+    /*include_full_result=*/ is_leader,
+    /*include_hash=*/ true);
+```
+
+---
+
+## Flaw 6: In-Memory Raft Log (Distributed Only)
+
+**From ARIABC_PG_ARCHITECTURE.md Section 29:**
+> "Raft state and log storage are in-memory, not durable"
+> "snapshot apply is a metadata no-op — database snapshot semantics explicitly out of scope"
+
+Crash = complete log loss. No replay possible. The only recovery path is full DB copy from a healthy replica, which contradicts the paper's efficient Merkle-based partial recovery.
+
+**Fix:** Replace `in_memory_log_store` with NuRaft's file-based log store for distributed deployment. This is a config swap in the NuRaft initialization, not a redesign.
+
+---
+
+## Priority Table By Setup
+
+**Local machine (3 PG + 1 Raft) — do these in order:**
+
+| Priority | Flaw | File to Change | Expected Gain |
+|---|---|---|---|
+| P1 | Compat mode / blocking submit | Gateway launch flags + SQL shaping | 380 → 3000+ ops/s |
+| P2 | NUM_WORKERS=2 | `globals.h` + rebuild | Unlocks parallelism |
+| P3 | Thundering herd broadcast | `worker.c:1057`, `shm_block.c` | Removes cliff past 8 workers |
+| P4 | Pre-state barrier race | Benchmark script reset path | Eliminates t=24/28/48 failures |
+
+**Distributed (3 PG machines + 1 Raft machine) — all of above plus:**
+
+| Priority | Flaw | File to Change | Expected Gain |
+|---|---|---|---|
+| P5 | Full result from all replicas | `pg_executor.cxx` Kafka emit | 3× Kafka bandwidth reduction |
+| P6 | In-memory Raft log | `in_memory_log_store` → file store | Crash safety |
+
+**Fix P1 first.** Everything else is invisible at 380 ops/s because the gateway is the bottleneck. Once pipelining is active and compat mode is off, the actual server-side bottlenecks (P2, P3) will become measurable and P2/P3 fixes will show real gains.

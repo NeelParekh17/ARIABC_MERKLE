@@ -16,6 +16,7 @@ void bcdb_middleware_init(bool is_oep_mode, int32 block_size);
 void bcdb_middleware_init2(bool is_oep_mode, int32 block_size, int32 nTx, int32 time);
 int bcdb_middleware_submit_tx(const char* tx_string);
 char *bcdb_middleware_submit_block(const char* block_json);
+char *bcdb_middleware_submit_block_results(const char* block_json);
 void bcdb_middleware_submit_block2(const char* block_json);
 void bcdb_middleware_set_txs_committed_block(char * tx_hash, int32 block_id);
 void bcdb_wait_tx_finish(char *tx_hash);

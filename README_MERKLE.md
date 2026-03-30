@@ -105,7 +105,13 @@ CREATE INDEX usertable_merkle_default ON usertable USING merkle(ycsb_key);
 -- Create a Merkle index with custom parameters
 CREATE INDEX usertable_merkle_variable ON usertable 
   USING merkle(ycsb_key) 
-  WITH (partitions = 150, leaves_per_partition = 8);
+  WITH (partitions = 150, leaves_per_partition = 8, fanout = 2);
+
+-- Create a Merkle index with higher fanout (10-ary tree)
+-- NOTE: leaves_per_partition must be fanout^n (e.g., 10, 100, 1000 for fanout=10)
+CREATE INDEX usertable_merkle_fanout10 ON usertable
+  USING merkle(ycsb_key)
+  WITH (partitions = 150, leaves_per_partition = 100, fanout = 10);
 
 -- Create a multi-key Merkle index
 CREATE INDEX usertable_merkle_multikey ON usertable 
@@ -114,7 +120,7 @@ CREATE INDEX usertable_merkle_multikey ON usertable
 -- Create a multi-key Merkle index with custom parameters
 CREATE INDEX usertable_merkle_multikey_variable ON usertable 
   USING merkle(ycsb_key, field1) 
-  WITH (partitions = 150, leaves_per_partition = 8);
+  WITH (partitions = 150, leaves_per_partition = 8, fanout = 2);
 ```
 
 ### Creating a Merkle-Indexed Table

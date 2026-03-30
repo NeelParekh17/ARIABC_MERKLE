@@ -34,6 +34,7 @@ LOG_SKIP = 4000
 MAX_RETRIES = 10  # Increased for BCDB slot contention
 RETRY_BACKOFF_SEC = 0.1  # Increased for BCDB
 STATEMENT_TIMEOUT = "90s"
+RATE_LIMIT_ENABLED = False
 
 # Metrics / reporting (best-effort; used to avoid failing the whole run on one worker error)
 retry_count = 0
@@ -41,11 +42,13 @@ serialization_retry_count = 0
 reconnect_count = 0
 permanent_fail_count = 0
 permanent_failures = []
+retry_error_counts = {}
+retry_error_examples = {}
 FAIL_LIST_MAX = 25
 RETRY_JITTER_PCT = 0.25
  
 #print("arglen== " , len(sys.argv))
-if(len(sys.argv) < 4):
+if(len(sys.argv) < 5):
   print("Err: missing arguments... ")
   print("Usage: python3 generic-saicopg-traffic-load+logSkip-safedb+pg.py <dbName> <queryDataFile> <pg0Safe1Aria2|-1(det-auto)> <num-thread> [<<Qrate>]");
   exit(-1)
@@ -58,9 +61,11 @@ if DB_TYPE == -1:
     DB_TYPE = 1
 if(len(sys.argv) > 5):
   RATE = int(sys.argv[5])
-reqPause = 1.0 / RATE
+  RATE_LIMIT_ENABLED = RATE > 0
+reqPause = (1.0 / RATE) if RATE_LIMIT_ENABLED else 0.0
 print(" arg1 a2 == ", sys.argv[1], sys.argv[2]);
 print(" arg3 a4 pause == ", sys.argv[3], sys.argv[4], reqPause);
+print(f" rate_limit_enabled={1 if RATE_LIMIT_ENABLED else 0} qrate={RATE if RATE_LIMIT_ENABLED else 0}")
 DB_NAME = sys.argv[1]
 
 # Optional env overrides (do not change CLI contract)
@@ -143,6 +148,9 @@ def open_worker_connection(worker_idx: int):
 def is_retryable_error(err: psycopg.Error) -> bool:
     error_msg = str(err).lower()
     error_code = err.sqlstate if hasattr(err, 'sqlstate') else None
+    # SQLSTATE class 08* are connection exceptions and are retryable.
+    if error_code and error_code.startswith('08'):
+        return True
 
     return (
         # Explicit SQLSTATE checks first (more reliable than message matching)
@@ -161,7 +169,9 @@ def is_retryable_error(err: psycopg.Error) -> bool:
         # psycopg/libpq protocol desync / server-side abrupt close
         "unexpected response from server" in error_msg or
         "first received character was" in error_msg or
-        "connection" in error_msg or
+        "connection is closed" in error_msg or
+        "connection not open" in error_msg or
+        "could not receive data from server" in error_msg or
         "terminating connection" in error_msg or
         "in recovery mode" in error_msg or
         "deadlock" in error_msg or
@@ -173,15 +183,39 @@ def is_retryable_error(err: psycopg.Error) -> bool:
 
 def should_reconnect(err: psycopg.Error) -> bool:
     error_msg = str(err).lower()
+    error_code = err.sqlstate if hasattr(err, 'sqlstate') else None
+    if error_code and error_code.startswith('08'):
+        return True
     return (
         "server closed" in error_msg or
         "unexpected response from server" in error_msg or
         "first received character was" in error_msg or
-        "connection" in error_msg or
+        "connection is closed" in error_msg or
+        "connection not open" in error_msg or
+        "could not receive data from server" in error_msg or
         "terminating connection" in error_msg or
         "in recovery mode" in error_msg or
         "got no result from the query" in error_msg
     )
+
+
+def is_fast_reconnect_error(err: psycopg.Error) -> bool:
+    """
+    Some protocol-desync errors recover immediately after reconnect.
+    Applying exponential backoff to these dramatically skews throughput.
+    """
+    msg = str(err).lower()
+    return (
+        "unexpected response from server" in msg and
+        "first received character was" in msg
+    )
+
+def _retry_error_key(err: Exception) -> str:
+    code = getattr(err, "sqlstate", None)
+    msg = str(err).strip().replace("\n", " ")
+    if len(msg) > 120:
+        msg = msg[:117] + "..."
+    return f"sqlstate={code} msg={msg}"
 
 def _record_permanent_failure(qCount: int, worker_idx: int, line: str, err: Exception):
     global permanent_fail_count
@@ -287,6 +321,24 @@ def _try_fetch_one_row(cur):
     except Exception:
         return None
 
+
+def _prepare_statement_for_mode(line: str) -> str:
+    """
+    Normalize statements for non-deterministic/PG modes.
+    Some server paths can produce protocol-level errors on duplicate INSERTs;
+    folding to ON CONFLICT DO NOTHING preserves benchmark intent (best-effort insert)
+    while avoiding avoidable reconnect-heavy retries.
+    """
+    stmt = line.strip()
+    if DB_TYPE in (0, 2):
+        up = stmt.upper()
+        if up.startswith("INSERT INTO USERTABLE_SMALL") and "ON CONFLICT" not in up:
+            if stmt.endswith(";"):
+                stmt = stmt[:-1] + " ON CONFLICT DO NOTHING;"
+            else:
+                stmt = stmt + " ON CONFLICT DO NOTHING"
+    return stmt
+
 def execTx(conn, cur, worker_idx: int, qCount, line):
     global totalWaitTime
     global duplicate_key_errors
@@ -304,6 +356,8 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
     if (qCount % LOG_SKIP) < NUM:
         print("timestamp1 = " + str(ts1) + " line= " + line)
 
+    exec_line = _prepare_statement_for_mode(line)
+
     try:
         result_message = "NO STATUS"
         result_data = None
@@ -318,10 +372,9 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                 # Execute the actual query
                 if DB_TYPE == 1:
                     cur.execute(pfx + mHash + ' ' + line)
-                elif DB_TYPE == 2:
-                    cur.execute(line)
                 else:
-                    cur.execute(pfx + line)
+                    # PG/nondet modes execute plain SQL text.
+                    cur.execute(exec_line)
 
                 # Get status message
                 result_message = _get_raw_statusmessage(cur)
@@ -366,8 +419,9 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                 last_exc = err
                 err_sqlstate = getattr(err, "sqlstate", None)
 
-                # Non-determinism path: treat duplicate-key as non-fatal (log + count + continue)
-                if DB_TYPE == 2 and getattr(err, 'sqlstate', None) == '23505':
+                # In vanilla PG/non-deterministic paths, duplicate-key can be an expected
+                # workload outcome. Count it, then continue instead of failing the run.
+                if DB_TYPE in (0, 2) and getattr(err, 'sqlstate', None) == '23505':
                     with mutex_dups:
                         duplicate_key_errors += 1
                     print(f"Duplicate key (23505) qCount={qCount} tid={threading.get_ident()} line={line}")
@@ -378,11 +432,21 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                     base_sleep_s = RETRY_BACKOFF_SEC * (2 ** attempt)
                     jitter = 1.0 + (random.random() * max(0.0, RETRY_JITTER_PCT))
                     sleep_s = base_sleep_s * jitter
+                    if is_fast_reconnect_error(err):
+                        sleep_s = 0.0
 
                     with metrics_lock:
                         retry_count += 1
                         if err_sqlstate == "40001":
                             serialization_retry_count += 1
+                        key = _retry_error_key(err)
+                        retry_error_counts[key] = retry_error_counts.get(key, 0) + 1
+                        if key not in retry_error_examples and len(retry_error_examples) < FAIL_LIST_MAX:
+                            retry_error_examples[key] = {
+                                "qCount": qCount,
+                                "worker": worker_idx,
+                                "tid": threading.get_ident(),
+                            }
 
                     if (qCount % LOG_SKIP) < NUM or "transaction slot" in str(err).lower():
                         print(
@@ -440,13 +504,13 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
         if (qCount % LOG_SKIP) < NUM:
             print("    time diff (ms) = " + str((ts2 - ts1) * 1000) + " tid= " + str(threading.get_ident()))
 
-        waitTime = reqPause - (ts2 - ts1)
-
-        if waitTime > 0:
-            time.sleep(waitTime)
-            mutex.acquire()
-            totalWaitTime += waitTime
-            mutex.release()
+        if reqPause > 0:
+            waitTime = reqPause - (ts2 - ts1)
+            if waitTime > 0:
+                time.sleep(waitTime)
+                mutex.acquire()
+                totalWaitTime += waitTime
+                mutex.release()
 
     except psycopg.DatabaseError as err:
         # Let caller decide whether to terminate the run; do not force-stop here.
@@ -573,6 +637,16 @@ with metrics_lock:
         f" reconnects={reconnect_count}"
         f" permanent_failures={permanent_fail_count}"
     )
+    if retry_error_counts:
+        top = sorted(retry_error_counts.items(), key=lambda kv: kv[1], reverse=True)[:FAIL_LIST_MAX]
+        print(f"retry_error_top_{len(top)}:")
+        for k, cnt in top:
+            ex = retry_error_examples.get(k, {})
+            print(
+                f"  count={cnt} {k}"
+                f" example_qCount={ex.get('qCount')}"
+                f" worker={ex.get('worker')} tid={ex.get('tid')}"
+            )
     if permanent_failures:
         print(f"permanent_failures_first_{len(permanent_failures)}:")
         for f in permanent_failures:

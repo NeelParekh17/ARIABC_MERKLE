@@ -66,3 +66,38 @@ postgres=# select merkle_verify('usertable');
 ---------------
  t
 (1 row)
+
+
+neel@neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE:/work/ARIABC/AriaBC/scripts$ bcpsql
+psql (13devel)
+Type "help" for help.
+
+postgres=# select merkle_tree_stats('usertable');
+                                                                                                           merkle_tree_stats                                                            
+                                               
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-----------------------------------------------
+ {"version": 5, "num_partitions": 500, "leaves_per_partition": 100, "fanout": 10, "nodes_per_partition": 111, "total_nodes": 55500, "num_pages": 246, "non_zero_nodes": 55500, "hash_bit
+s": 256, "index_keys": ["ycsb_key", "field1"]}
+(1 row)
+
+postgres=# select merkle_root_hash('usertable');
+                         merkle_root_hash                         
+------------------------------------------------------------------
+ e157f368e401e8f52b6e9e45da477d6dfe2d2155ae7b997ea8a50ffae5f0a4f2
+(1 row)
+
+neel@neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE:/work/ARIABC/AriaBC/scripts$ time python3 generic-saicopg-traffic-load+logSkip-safedb+pg.py postgres big_workload.sql 1 16 > output_determinism_16.txt
+
+real	8m48.001s
+user	2m4.766s
+sys	0m34.448s
+neel@neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE:/work/ARIABC/AriaBC/scripts$ bcpsql
+psql (13devel)
+Type "help" for help.
+
+postgres=# select merkle_root_hash('usertable');
+                         merkle_root_hash                         
+------------------------------------------------------------------
+ e7f3c4dfc4a5ce57a2d1e66976104cb4107c123f2c7c9101b5291cdbd1990964
+(1 row)

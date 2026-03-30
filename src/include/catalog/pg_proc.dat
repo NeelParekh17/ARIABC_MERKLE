@@ -10830,4 +10830,9 @@ proargtypes => 'text text text', prosrc => 'bcdb_verify' },
 proname => 'bcdb_last_committed_txid', prorettype => 'int4',
 proargtypes => '', prosrc => 'bcdb_last_committed_txid' }
 
+# bcdb function
+{ oid => '7014', descr => 'BCDB block submit with per-tx results',
+proname => 'bcdb_block_submit_results', prorettype => 'text',
+proargtypes => 'cstring', prosrc => 'bcdb_block_submit_results' }
+
 ]

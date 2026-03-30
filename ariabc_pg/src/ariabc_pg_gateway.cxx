@@ -1,0 +1,3220 @@
+#include "ariabc_pg_util.hxx"
+#include "async_cluster_submitter.hxx"
+#include "kafka_console.hxx"
+#include "wire_protocol.hxx"
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <signal.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cctype>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <deque>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <limits>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include <stdio.h>
+
+#ifndef SSL_LIBRARY_NOT_FOUND
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/pem.h>
+#include <openssl/sha.h>
+#endif
+
+namespace ariabc_pg {
+
+struct gateway_options {
+    std::string query_from;
+    int query_sign = 0;
+    std::string pub_key_file;
+    std::string priv_key_file;
+
+    // 0: "s <SQL>" (safe wrapper), 1: "s <8digit(seq)> <SQL>" (det), 2: "<SQL>" (raw).
+    int db_type = 2;
+    uint64_t det_start_seq = 0;
+    // Deterministic (dbType=1) compatibility mode:
+    // 0 => send "s <8digit(seq)> <SQL>" (default behavior),
+    // 1 => keep ordered deterministic submission but send raw SQL text.
+    int det_raw_sql = 0;
+
+    int tx_interval_ms = 0;
+    int qrate = 0; // per terminal, 0=unthrottled
+    int num_terminals = 1;
+    std::string client_id = "cli";
+    uint64_t req_id_offset = 0;
+
+    std::string nodes_csv;
+
+    std::string kafka_bootstrap;
+    std::string result_topic = "topic2";
+    std::string err_topic = "errTopic";
+    std::string result_sig_key;
+
+    // Faster majority-result detection under load.
+    int poll_interval_us = 500;
+    int poll_count = 0; // 0=forever
+
+    // 1: wait for Kafka majority per request, 0: do not block on majority.
+    int wait_majority = 1;
+
+    // Optional override for deterministic mode in-flight window.
+    // 0 => auto (larger pipeline for modern multi-core boxes).
+    int det_window = 128;
+    // Optional DB connection-pool hint from benchmark harness. When provided,
+    // deterministic in-flight window is clamped to 2x this value.
+    int db_conn_pool_size = 0;
+
+    // Optional cap for concurrent in-flight submit RPCs in non-deterministic mode.
+    // 0 => auto-tune based on num_terminals.
+    int submit_limit = 0;
+
+    // Gateway submit I/O mode:
+    //  - "blocking" (default): per-caller blocking read/write on sockets.
+    //  - "event": shared reactor thread with nonblocking sockets + multiplexing.
+    std::string submit_mode = "blocking";
+
+    // Deterministic leader-ACK pipelining.
+    // 0 => disabled
+    // 1 => enabled (default)
+    int det_submit_pipeline = 1;
+
+    // Optional per-worker in-flight majority window in non-deterministic mode.
+    // 0 => auto (scales to keep total in-flight bounded).
+    int nondet_window = 0;
+
+    int total_nodes = 0; // 0 => use nodes.size()
+    size_t vote_store_max_entries = 300000;
+};
+
+void usage(const char* argv0) {
+    std::cout
+        << "Usage:\n"
+        << "  " << argv0 << " \\\n"
+        << "    --queryFrom <file|port> --nodes <host:port,host:port,...> \\\n"
+        << "    [--querySign 0|1] [--pubKeyFile <path>] [--privKeyFile <path>] \\\n"
+        << "    [--dbType 0|1|2] [--detStartSeq <n>] [--detRawSql 0|1] [--qrate <n>] [--txIntervalMs <ms>] \\\n"
+        << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
+        << "    [--kafkaBootstrap <host:port>] \\\n"
+        << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--detWindow <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>]\n";
+}
+
+bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto need = [&](const char* flag) -> std::string {
+            if (i + 1 >= argc) throw std::runtime_error(std::string("missing value for ") + flag);
+            return std::string(argv[++i]);
+        };
+
+        try {
+            if (a == "--help" || a == "-h") {
+                usage(argv[0]);
+                exit(0);
+            } else if (a == "--queryFrom") {
+                opt.query_from = need("--queryFrom");
+            } else if (a == "--querySign") {
+                opt.query_sign = std::stoi(need("--querySign"));
+            } else if (a == "--pubKeyFile") {
+                opt.pub_key_file = need("--pubKeyFile");
+            } else if (a == "--privKeyFile") {
+                opt.priv_key_file = need("--privKeyFile");
+            } else if (a == "--dbType") {
+                opt.db_type = std::stoi(need("--dbType"));
+            } else if (a == "--detStartSeq") {
+                opt.det_start_seq = static_cast<uint64_t>(std::stoull(need("--detStartSeq")));
+            } else if (a == "--detRawSql") {
+                opt.det_raw_sql = std::stoi(need("--detRawSql"));
+            } else if (a == "--qrate") {
+                opt.qrate = std::stoi(need("--qrate"));
+            } else if (a == "--txIntervalMs") {
+                opt.tx_interval_ms = std::stoi(need("--txIntervalMs"));
+            } else if (a == "--numTerminals") {
+                opt.num_terminals = std::stoi(need("--numTerminals"));
+            } else if (a == "--clientId") {
+                opt.client_id = need("--clientId");
+            } else if (a == "--reqIdOffset") {
+                opt.req_id_offset = static_cast<uint64_t>(std::stoull(need("--reqIdOffset")));
+            } else if (a == "--nodes") {
+                opt.nodes_csv = need("--nodes");
+            } else if (a == "--kafkaBootstrap") {
+                opt.kafka_bootstrap = need("--kafkaBootstrap");
+            } else if (a == "--resultTopic") {
+                opt.result_topic = need("--resultTopic");
+            } else if (a == "--errTopic") {
+                opt.err_topic = need("--errTopic");
+            } else if (a == "--resultSigKey") {
+                opt.result_sig_key = need("--resultSigKey");
+            } else if (a == "--pollIntervalUs") {
+                opt.poll_interval_us = std::stoi(need("--pollIntervalUs"));
+            } else if (a == "--pollCount") {
+                opt.poll_count = std::stoi(need("--pollCount"));
+            } else if (a == "--waitMajority") {
+                opt.wait_majority = std::stoi(need("--waitMajority"));
+            } else if (a == "--detWindow") {
+                opt.det_window = std::stoi(need("--detWindow"));
+            } else if (a == "--dbConnPoolSize") {
+                opt.db_conn_pool_size = std::stoi(need("--dbConnPoolSize"));
+            } else if (a == "--submitLimit") {
+                opt.submit_limit = std::stoi(need("--submitLimit"));
+            } else if (a == "--submitMode") {
+                opt.submit_mode = need("--submitMode");
+            } else if (a == "--detSubmitPipeline") {
+                opt.det_submit_pipeline = std::stoi(need("--detSubmitPipeline"));
+            } else if (a == "--nondetWindow") {
+                opt.nondet_window = std::stoi(need("--nondetWindow"));
+            } else if (a == "--totalNodes") {
+                opt.total_nodes = std::stoi(need("--totalNodes"));
+            } else if (a == "--voteStoreMax") {
+                opt.vote_store_max_entries = static_cast<size_t>(std::stoull(need("--voteStoreMax")));
+            } else {
+                throw std::runtime_error("unknown flag: " + a);
+            }
+        } catch (const std::exception& e) {
+            err = e.what();
+            return false;
+        }
+    }
+
+    if (opt.query_from.empty()) {
+        err = "missing --queryFrom";
+        return false;
+    }
+    if (opt.nodes_csv.empty()) {
+        err = "missing --nodes";
+        return false;
+    }
+    if (opt.db_type != 0 && opt.db_type != 1 && opt.db_type != 2) {
+        err = "invalid --dbType (expected 0, 1, or 2)";
+        return false;
+    }
+    if (opt.db_type == 1 && opt.det_start_seq >= 100000000ULL) {
+        err = "--detStartSeq too large for 8-digit seq";
+        return false;
+    }
+    if (opt.det_raw_sql != 0 && opt.det_raw_sql != 1) {
+        err = "invalid --detRawSql (expected 0 or 1)";
+        return false;
+    }
+    if (opt.qrate < 0) {
+        err = "invalid --qrate (expected >= 0)";
+        return false;
+    }
+    if (opt.num_terminals <= 0) {
+        err = "invalid --numTerminals";
+        return false;
+    }
+    if (opt.poll_interval_us <= 0) {
+        err = "invalid --pollIntervalUs";
+        return false;
+    }
+    if (opt.wait_majority != 0 && opt.wait_majority != 1) {
+        err = "invalid --waitMajority (expected 0 or 1)";
+        return false;
+    }
+    if (opt.det_window < 0) {
+        err = "invalid --detWindow (expected >= 0)";
+        return false;
+    }
+    if (opt.db_conn_pool_size < 0) {
+        err = "invalid --dbConnPoolSize (expected >= 0)";
+        return false;
+    }
+    if (opt.submit_limit < 0) {
+        err = "invalid --submitLimit (expected >= 0)";
+        return false;
+    }
+    if (opt.det_submit_pipeline != 0 && opt.det_submit_pipeline != 1) {
+        err = "invalid --detSubmitPipeline (expected 0 or 1)";
+        return false;
+    }
+    if (opt.nondet_window < 0) {
+        err = "invalid --nondetWindow (expected >= 0)";
+        return false;
+    }
+    {
+        const std::string m = ariabc_pg::trim_copy(opt.submit_mode);
+        if (!m.empty() && m != "blocking" && m != "event") {
+            err = "invalid --submitMode (expected blocking|event)";
+            return false;
+        }
+    }
+    if (opt.vote_store_max_entries == 0) {
+        err = "invalid --voteStoreMax (expected > 0)";
+        return false;
+    }
+    if (opt.query_sign != 0 && opt.query_sign != 1) {
+        err = "invalid --querySign (expected 0 or 1)";
+        return false;
+    }
+    if (opt.query_sign == 1 && opt.pub_key_file.empty()) {
+        err = "--pubKeyFile is required when --querySign=1";
+        return false;
+    }
+    return true;
+}
+
+std::string format_det_seq8(uint64_t seq) {
+    std::ostringstream oss;
+    oss << std::setw(8) << std::setfill('0') << seq;
+    return oss.str();
+}
+
+bool is_duplicate_key_result(const std::string& s) {
+    if (s.find("23505") != std::string::npos) return true;
+    std::string lower;
+    lower.reserve(s.size());
+    for (unsigned char ch : s) lower.push_back(static_cast<char>(std::tolower(ch)));
+    return (lower.find("duplicate key") != std::string::npos) ||
+           (lower.find("unique constraint") != std::string::npos);
+}
+
+int connect_tcp(const std::string& host, int port, std::string& err) {
+    struct addrinfo hints;
+    ::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo* res = nullptr;
+    const std::string port_s = std::to_string(port);
+    const int rc = ::getaddrinfo(host.c_str(), port_s.c_str(), &hints, &res);
+    if (rc != 0) {
+        err = std::string("getaddrinfo failed: ") + gai_strerror(rc);
+        return -1;
+    }
+
+    int fd = -1;
+    for (struct addrinfo* p = res; p; p = p->ai_next) {
+        fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) continue;
+        if (::connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
+            // Low-latency request/response: avoid Nagle delays on small frames.
+            int one = 1;
+            (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            ::freeaddrinfo(res);
+            return fd;
+        }
+        ::close(fd);
+        fd = -1;
+    }
+    ::freeaddrinfo(res);
+    err = std::string("connect failed: ") + ::strerror(errno);
+    return -1;
+}
+
+bool parse_signed_sql_line(const std::string& line,
+                           std::string& out_sql,
+                           std::string& out_sig_b64,
+                           std::string& err)
+{
+    const std::string s = trim_copy(line);
+    const size_t pos = s.rfind(';');
+    if (pos == std::string::npos || pos + 1 >= s.size()) {
+        err = "expected 'SQL; <base64_sig>'";
+        return false;
+    }
+    out_sql = trim_copy(s.substr(0, pos + 1));
+    out_sig_b64 = trim_copy(s.substr(pos + 1));
+    if (out_sql.empty() || out_sig_b64.empty()) {
+        err = "empty sql or signature";
+        return false;
+    }
+    return true;
+}
+
+bool parse_kafka_result_line(const std::string& line,
+                             std::string& out_req_id,
+                             int& out_node_id,
+                             std::string& out_result)
+{
+    // "<req_id>␠␠<node_id>␠␠<result>"
+    const std::string sep = "  ";
+    const size_t p1 = line.find(sep);
+    if (p1 == std::string::npos) return false;
+    const size_t p2 = line.find(sep, p1 + sep.size());
+    if (p2 == std::string::npos) return false;
+
+    out_req_id = line.substr(0, p1);
+    const std::string node_s = line.substr(p1 + sep.size(), p2 - (p1 + sep.size()));
+    out_result = line.substr(p2 + sep.size());
+    try {
+        out_node_id = std::stoi(trim_copy(node_s));
+    } catch (...) {
+        return false;
+    }
+    out_req_id = trim_copy(out_req_id);
+    return !out_req_id.empty();
+}
+
+bool parse_req_num(const std::string& req_id, uint64_t& out_req_num) {
+    out_req_num = 0;
+    const size_t dash = req_id.rfind('-');
+    if (dash == std::string::npos || dash + 1 >= req_id.size()) return false;
+    try {
+        out_req_num = static_cast<uint64_t>(std::stoull(req_id.substr(dash + 1)));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool starts_with(const std::string& s, const std::string& prefix) {
+    return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+std::string lower_copy(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char ch : s) out.push_back(static_cast<char>(std::tolower(ch)));
+    return out;
+}
+
+bool is_reset_barrier_sql(const std::string& sql) {
+    const std::string t = lower_copy(trim_copy(sql));
+    // Keep this strict to avoid adding barrier latency to hot-path workloads.
+    return t.find("bcdb_reset(") != std::string::npos;
+}
+
+bool send_control_req_to_node(const host_port& hp,
+                              const std::string& control_sql,
+                              client_api_response& out_resp,
+                              std::string& err)
+{
+    err.clear();
+    int fd = connect_tcp(hp.host, hp.port, err);
+    if (fd < 0) return false;
+
+    const uint64_t ts_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    client_api_request req;
+    req.req_id = "ctrl-" + std::to_string(ts_ms);
+    req.sql = control_sql;
+
+    std::string io_err;
+    if (!write_request_frame(fd, req, io_err)) {
+        ::close(fd);
+        err = io_err;
+        return false;
+    }
+
+    if (!read_response_frame(fd, out_resp, io_err)) {
+        ::close(fd);
+        err = io_err;
+        return false;
+    }
+
+    ::close(fd);
+    return true;
+}
+
+bool parse_u64_str(const std::string& s, uint64_t& out) {
+    out = 0;
+    try {
+        out = static_cast<uint64_t>(std::stoull(trim_copy(s)));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+struct kafka_reply_record {
+    uint64_t req_num = 0;
+    uint64_t raft_log_idx = 0;
+    std::string req_id;
+    int node_id = -1;
+    int leader_node_id = -1;
+    std::string result_hash;
+    std::string hash_algo;
+    std::string server_sig;
+    uint64_t timestamp_ms = 0;
+    std::string full_result;
+};
+
+constexpr const char* kHashAlgo = "sha256";
+constexpr uint8_t kHashAlgoIdSha256 = 1;
+constexpr const char* kDefaultResultSigKey = "ariabc-result-v2-dev-key";
+
+uint8_t read_u8(const char* p) {
+    return static_cast<uint8_t>(p[0]);
+}
+
+uint16_t read_u16_le(const char* p) {
+    return static_cast<uint16_t>(
+        static_cast<uint8_t>(p[0]) |
+        (static_cast<uint16_t>(static_cast<uint8_t>(p[1])) << 8));
+}
+
+uint32_t read_u32_le(const char* p) {
+    return static_cast<uint32_t>(
+        static_cast<uint8_t>(p[0]) |
+        (static_cast<uint32_t>(static_cast<uint8_t>(p[1])) << 8) |
+        (static_cast<uint32_t>(static_cast<uint8_t>(p[2])) << 16) |
+        (static_cast<uint32_t>(static_cast<uint8_t>(p[3])) << 24));
+}
+
+uint64_t read_u64_le(const char* p) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+        v |= (static_cast<uint64_t>(static_cast<uint8_t>(p[i])) << (8 * i));
+    }
+    return v;
+}
+
+std::string hex_encode(const unsigned char* data, size_t len) {
+    static const char* kHex = "0123456789abcdef";
+    std::string out;
+    out.resize(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        const unsigned char b = data[i];
+        out[2 * i] = kHex[(b >> 4) & 0xF];
+        out[2 * i + 1] = kHex[b & 0xF];
+    }
+    return out;
+}
+
+uint64_t now_epoch_ms() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(
+        duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
+}
+
+uint64_t steady_now_ns() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(
+        duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
+void atomic_max_u64(std::atomic<uint64_t>& dst, uint64_t v) {
+    uint64_t cur = dst.load(std::memory_order_relaxed);
+    while (cur < v &&
+           !dst.compare_exchange_weak(cur, v,
+                                     std::memory_order_relaxed,
+                                     std::memory_order_relaxed)) {
+    }
+}
+
+[[maybe_unused]] std::string fnv1a64_hex(const std::string& in) {
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : in) {
+        h ^= static_cast<uint64_t>(c);
+        h *= 1099511628211ULL;
+    }
+    std::ostringstream oss;
+    oss << std::hex << std::setw(16) << std::setfill('0') << h;
+    return oss.str();
+}
+
+std::string canonical_result_hash(const std::string& result) {
+#ifndef SSL_LIBRARY_NOT_FOUND
+    unsigned char md[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(result.data()),
+           static_cast<size_t>(result.size()),
+           md);
+    return hex_encode(md, SHA256_DIGEST_LENGTH);
+#else
+    return fnv1a64_hex(result);
+#endif
+}
+
+std::string sign_payload(const std::string& key, const std::string& payload) {
+#ifndef SSL_LIBRARY_NOT_FOUND
+    unsigned int out_len = 0;
+    unsigned char mac[EVP_MAX_MD_SIZE];
+    unsigned char* out = HMAC(EVP_sha256(),
+                              reinterpret_cast<const unsigned char*>(key.data()),
+                              static_cast<int>(key.size()),
+                              reinterpret_cast<const unsigned char*>(payload.data()),
+                              static_cast<int>(payload.size()),
+                              mac,
+                              &out_len);
+    if (!out || out_len == 0) return "";
+    return hex_encode(mac, static_cast<size_t>(out_len));
+#else
+    return fnv1a64_hex(key + "|" + payload);
+#endif
+}
+
+std::string make_sig_payload(uint64_t req_num,
+                             uint64_t raft_log_idx,
+                             const std::string& req_id,
+                             int node_id,
+                             int leader_node_id,
+                             const std::string& result_hash,
+                             uint64_t timestamp_ms,
+                             bool has_full_result)
+{
+    std::ostringstream oss;
+    oss << req_num << "|"
+        << raft_log_idx << "|"
+        << req_id << "|"
+        << node_id << "|"
+        << leader_node_id << "|"
+        << result_hash << "|"
+        << kHashAlgo << "|"
+        << timestamp_ms << "|"
+        << (has_full_result ? 1 : 0);
+    return oss.str();
+}
+
+std::string make_sig_payload_legacy(uint64_t req_num,
+                                    const std::string& req_id,
+                                    int node_id,
+                                    int leader_node_id,
+                                    const std::string& result_hash,
+                                    uint64_t timestamp_ms,
+                                    bool has_full_result)
+{
+    std::ostringstream oss;
+    oss << req_num << "|"
+        << req_id << "|"
+        << node_id << "|"
+        << leader_node_id << "|"
+        << result_hash << "|"
+        << kHashAlgo << "|"
+        << timestamp_ms << "|"
+        << (has_full_result ? 1 : 0);
+    return oss.str();
+}
+
+bool verify_result_signature(const kafka_reply_record& rec, const std::string& sig_key) {
+    if (rec.req_id.empty()) return false;
+    if (rec.hash_algo != kHashAlgo) return false;
+    if (rec.server_sig.empty()) return false;
+    const bool has_full = !rec.full_result.empty();
+    const std::string payload = make_sig_payload(rec.req_num,
+                                                 rec.raft_log_idx,
+                                                 rec.req_id,
+                                                 rec.node_id,
+                                                 rec.leader_node_id,
+                                                 rec.result_hash,
+                                                 rec.timestamp_ms,
+                                                 has_full);
+    const std::string expected = sign_payload(sig_key, payload);
+    if (!expected.empty() && expected == rec.server_sig) {
+        return true;
+    }
+    // Backward compatibility: accept pre-raft_log_idx signature shape.
+    if (rec.raft_log_idx == 0) {
+        const std::string legacy = make_sig_payload_legacy(rec.req_num,
+                                                           rec.req_id,
+                                                           rec.node_id,
+                                                           rec.leader_node_id,
+                                                           rec.result_hash,
+                                                           rec.timestamp_ms,
+                                                           has_full);
+        const std::string expected_legacy = sign_payload(sig_key, legacy);
+        if (!expected_legacy.empty() && expected_legacy == rec.server_sig) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parse_kafka_payload_records(const std::string& payload,
+                                 std::vector<kafka_reply_record>& out)
+{
+    out.clear();
+    if (payload.size() >= 8 && payload[0] == 'B' && payload[1] == '3') {
+        const char* p = payload.data();
+        size_t pos = 0;
+        const uint16_t nrec = read_u16_le(p + 2);
+        pos = 8; // magic+ver+count+reserved
+        out.reserve(nrec);
+        for (uint16_t i = 0; i < nrec; ++i) {
+            if (pos + 40 > payload.size()) return false;
+            kafka_reply_record r;
+            r.req_num = read_u64_le(p + pos);
+            pos += 8;
+            r.raft_log_idx = read_u64_le(p + pos);
+            pos += 8;
+            r.node_id = static_cast<int>(read_u16_le(p + pos));
+            pos += 2;
+            r.leader_node_id = static_cast<int>(read_u16_le(p + pos));
+            if (r.leader_node_id == 0) r.leader_node_id = -1;
+            pos += 2;
+            r.timestamp_ms = read_u64_le(p + pos);
+            pos += 8;
+            const uint8_t flags = read_u8(p + pos);
+            pos += 1;
+            const uint8_t hash_algo_id = read_u8(p + pos);
+            pos += 1;
+            const uint16_t req_id_len = read_u16_le(p + pos);
+            pos += 2;
+            const uint16_t hash_len = read_u16_le(p + pos);
+            pos += 2;
+            const uint16_t sig_len = read_u16_le(p + pos);
+            pos += 2;
+            const uint32_t full_len = read_u32_le(p + pos);
+            pos += 4;
+            if (pos + req_id_len + hash_len + sig_len + full_len > payload.size()) return false;
+            r.req_id.assign(p + pos, p + pos + req_id_len);
+            pos += req_id_len;
+            r.result_hash.assign(p + pos, p + pos + hash_len);
+            pos += hash_len;
+            r.server_sig.assign(p + pos, p + pos + sig_len);
+            pos += sig_len;
+            if ((flags & 0x1u) != 0u) {
+                r.full_result.assign(p + pos, p + pos + full_len);
+            }
+            pos += full_len;
+            if (hash_algo_id == kHashAlgoIdSha256) {
+                r.hash_algo = kHashAlgo;
+            } else {
+                r.hash_algo = "unknown";
+            }
+            out.push_back(std::move(r));
+        }
+        return true;
+    }
+
+    // Legacy B2 payload support (without raft_log_idx).
+    if (payload.size() >= 8 && payload[0] == 'B' && payload[1] == '2') {
+        const char* p = payload.data();
+        size_t pos = 0;
+        const uint16_t nrec = read_u16_le(p + 2);
+        pos = 8; // magic+ver+count+reserved
+        out.reserve(nrec);
+        for (uint16_t i = 0; i < nrec; ++i) {
+            if (pos + 32 > payload.size()) return false;
+            kafka_reply_record r;
+            r.req_num = read_u64_le(p + pos);
+            pos += 8;
+            r.node_id = static_cast<int>(read_u16_le(p + pos));
+            pos += 2;
+            r.leader_node_id = static_cast<int>(read_u16_le(p + pos));
+            if (r.leader_node_id == 0) r.leader_node_id = -1;
+            pos += 2;
+            r.timestamp_ms = read_u64_le(p + pos);
+            pos += 8;
+            const uint8_t flags = read_u8(p + pos);
+            pos += 1;
+            const uint8_t hash_algo_id = read_u8(p + pos);
+            pos += 1;
+            const uint16_t req_id_len = read_u16_le(p + pos);
+            pos += 2;
+            const uint16_t hash_len = read_u16_le(p + pos);
+            pos += 2;
+            const uint16_t sig_len = read_u16_le(p + pos);
+            pos += 2;
+            const uint32_t full_len = read_u32_le(p + pos);
+            pos += 4;
+            if (pos + req_id_len + hash_len + sig_len + full_len > payload.size()) return false;
+            r.req_id.assign(p + pos, p + pos + req_id_len);
+            pos += req_id_len;
+            r.result_hash.assign(p + pos, p + pos + hash_len);
+            pos += hash_len;
+            r.server_sig.assign(p + pos, p + pos + sig_len);
+            pos += sig_len;
+            if ((flags & 0x1u) != 0u) {
+                r.full_result.assign(p + pos, p + pos + full_len);
+            }
+            pos += full_len;
+            if (hash_algo_id == kHashAlgoIdSha256) {
+                r.hash_algo = kHashAlgo;
+            } else {
+                r.hash_algo = "unknown";
+            }
+            out.push_back(std::move(r));
+        }
+        return true;
+    }
+
+    // Legacy B1 payload support (unsigned).
+    if (payload.size() >= 8 && payload[0] == 'B' && payload[1] == '1') {
+        const char* p = payload.data();
+        size_t pos = 0;
+        const uint16_t nrec = read_u16_le(p + 2);
+        pos = 8; // magic+ver+count+reserved
+        out.reserve(nrec);
+        for (uint16_t i = 0; i < nrec; ++i) {
+            if (pos + 14 > payload.size()) return false;
+            kafka_reply_record r;
+            r.req_num = read_u64_le(p + pos);
+            pos += 8;
+            r.node_id = static_cast<int>(read_u16_le(p + pos));
+            pos += 2;
+            const uint32_t rlen = read_u32_le(p + pos);
+            pos += 4;
+            if (pos + rlen > payload.size()) return false;
+            r.full_result.assign(p + pos, p + pos + rlen);
+            pos += rlen;
+            r.result_hash = canonical_result_hash(r.full_result);
+            r.hash_algo = kHashAlgo;
+            out.push_back(std::move(r));
+        }
+        return true;
+    }
+
+    std::string req_id;
+    int node_id = -1;
+    std::string result;
+    if (!parse_kafka_result_line(payload, req_id, node_id, result)) {
+        return false;
+    }
+    uint64_t req_num = 0;
+    if (!parse_req_num(req_id, req_num)) {
+        return false;
+    }
+    kafka_reply_record r;
+    r.req_num = req_num;
+    r.req_id = req_id;
+    r.node_id = node_id;
+    r.result_hash = canonical_result_hash(result);
+    r.hash_algo = kHashAlgo;
+    r.full_result = std::move(result);
+    out.push_back(std::move(r));
+    return true;
+}
+
+std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 16);
+    for (unsigned char ch : s) {
+        switch (ch) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (ch < 0x20) {
+                char buf[7];
+                ::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(ch));
+                out += buf;
+            } else {
+                out.push_back(static_cast<char>(ch));
+            }
+        }
+    }
+    return out;
+}
+
+bool debug_req_trace_enabled() {
+    static const bool enabled = []() -> bool {
+        const char* v = std::getenv("ARIABC_DEBUG_REQ_TRACE");
+        if (!v) return false;
+        const std::string s = trim_copy(v);
+        return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+    }();
+    return enabled;
+}
+
+uint64_t debug_req_trace_limit() {
+    static const uint64_t limit = []() -> uint64_t {
+        const char* v = std::getenv("ARIABC_DEBUG_REQ_TRACE_LIMIT");
+        if (!v || !*v) return 32;
+        try {
+            const unsigned long long n = std::stoull(v);
+            return (n == 0ULL) ? 32ULL : static_cast<uint64_t>(n);
+        } catch (...) {
+            return 32ULL;
+        }
+    }();
+    return limit;
+}
+
+std::atomic<uint64_t> g_debug_submit_trace_count(0);
+std::atomic<uint64_t> g_debug_kafka_trace_count(0);
+
+void debug_trace_submit(uint64_t req_num, const std::string& req_id, const std::string& sql) {
+    if (!debug_req_trace_enabled()) return;
+    const uint64_t idx = g_debug_submit_trace_count.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= debug_req_trace_limit()) return;
+    std::string sql_head = trim_copy(sql);
+    if (sql_head.size() > 96) sql_head.resize(96);
+    std::cerr << "REQ_TRACE submit"
+              << " idx=" << idx
+              << " req_num=" << req_num
+              << " req_id=" << req_id
+              << " sql=" << json_escape(sql_head)
+              << std::endl;
+}
+
+void debug_trace_kafka(const kafka_reply_record& rec, bool sig_valid) {
+    if (!debug_req_trace_enabled()) return;
+    const uint64_t idx = g_debug_kafka_trace_count.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= debug_req_trace_limit()) return;
+    std::cerr << "REQ_TRACE kafka"
+              << " idx=" << idx
+              << " req_num=" << rec.req_num
+              << " req_id=" << rec.req_id
+              << " node=" << rec.node_id
+              << " leader=" << rec.leader_node_id
+              << " raft_log_idx=" << rec.raft_log_idx
+              << " sig=" << (sig_valid ? 1 : 0)
+              << " full=" << (!rec.full_result.empty() ? 1 : 0)
+              << std::endl;
+}
+
+#ifndef SSL_LIBRARY_NOT_FOUND
+struct openssl_keypair {
+    EVP_PKEY* pub = nullptr;
+    EVP_PKEY* priv = nullptr;
+
+    ~openssl_keypair() {
+        if (pub) EVP_PKEY_free(pub);
+        if (priv) EVP_PKEY_free(priv);
+    }
+};
+
+bool load_public_key(const std::string& path, EVP_PKEY*& out, std::string& err) {
+    const std::string content = read_file_all(path);
+    BIO* bio = BIO_new_mem_buf(content.data(), static_cast<int>(content.size()));
+    if (!bio) {
+        err = "BIO_new_mem_buf failed";
+        return false;
+    }
+
+    EVP_PKEY* key = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    if (key) {
+        out = key;
+        return true;
+    }
+
+    // Fallback: Base64 DER (SubjectPublicKeyInfo).
+    try {
+        const std::string b64 = trim_copy(content);
+        const std::string der = base64_decode(b64);
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(der.data());
+        key = d2i_PUBKEY(nullptr, &p, static_cast<long>(der.size()));
+        if (!key) {
+            err = "failed to parse public key (PEM or base64 DER)";
+            return false;
+        }
+        out = key;
+        return true;
+    } catch (const std::exception& e) {
+        err = std::string("public key decode failed: ") + e.what();
+        return false;
+    }
+}
+
+bool load_private_key(const std::string& path, EVP_PKEY*& out, std::string& err) {
+    const std::string content = read_file_all(path);
+    BIO* bio = BIO_new_mem_buf(content.data(), static_cast<int>(content.size()));
+    if (!bio) {
+        err = "BIO_new_mem_buf failed";
+        return false;
+    }
+
+    EVP_PKEY* key = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    if (key) {
+        out = key;
+        return true;
+    }
+
+    // Fallback: Base64 DER (PKCS8).
+    try {
+        const std::string b64 = trim_copy(content);
+        const std::string der = base64_decode(b64);
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(der.data());
+        key = d2i_AutoPrivateKey(nullptr, &p, static_cast<long>(der.size()));
+        if (!key) {
+            err = "failed to parse private key (PEM or base64 DER)";
+            return false;
+        }
+        out = key;
+        return true;
+    } catch (const std::exception& e) {
+        err = std::string("private key decode failed: ") + e.what();
+        return false;
+    }
+}
+
+bool verify_sig_sha256_rsa(EVP_PKEY* pub,
+                           const std::string& msg,
+                           const std::string& sig_b64,
+                           std::string& err)
+{
+    if (!pub) {
+        err = "public key not loaded";
+        return false;
+    }
+    std::string sig;
+    try {
+        sig = base64_decode(sig_b64);
+    } catch (const std::exception& e) {
+        err = std::string("base64 sig decode failed: ") + e.what();
+        return false;
+    }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        err = "EVP_MD_CTX_new failed";
+        return false;
+    }
+    bool ok = false;
+    do {
+        if (EVP_DigestVerifyInit(ctx, nullptr, EVP_sha256(), nullptr, pub) != 1) {
+            err = "EVP_DigestVerifyInit failed";
+            break;
+        }
+        if (EVP_DigestVerifyUpdate(ctx, msg.data(), msg.size()) != 1) {
+            err = "EVP_DigestVerifyUpdate failed";
+            break;
+        }
+        const int rc = EVP_DigestVerifyFinal(ctx,
+                                             reinterpret_cast<const unsigned char*>(sig.data()),
+                                             sig.size());
+        if (rc == 1) {
+            ok = true;
+        } else {
+            err = "signature verification failed";
+        }
+    } while (false);
+
+    EVP_MD_CTX_free(ctx);
+    return ok;
+}
+
+bool sign_sha256_rsa(EVP_PKEY* priv,
+                     const std::string& msg,
+                     std::string& out_sig_b64,
+                     std::string& err)
+{
+    if (!priv) {
+        err = "private key not loaded";
+        return false;
+    }
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        err = "EVP_MD_CTX_new failed";
+        return false;
+    }
+
+    bool ok = false;
+    do {
+        if (EVP_DigestSignInit(ctx, nullptr, EVP_sha256(), nullptr, priv) != 1) {
+            err = "EVP_DigestSignInit failed";
+            break;
+        }
+        if (EVP_DigestSignUpdate(ctx, msg.data(), msg.size()) != 1) {
+            err = "EVP_DigestSignUpdate failed";
+            break;
+        }
+        size_t sig_len = 0;
+        if (EVP_DigestSignFinal(ctx, nullptr, &sig_len) != 1) {
+            err = "EVP_DigestSignFinal(size) failed";
+            break;
+        }
+        std::string sig(sig_len, '\0');
+        if (EVP_DigestSignFinal(ctx,
+                                reinterpret_cast<unsigned char*>(&sig[0]),
+                                &sig_len) != 1) {
+            err = "EVP_DigestSignFinal(data) failed";
+            break;
+        }
+        sig.resize(sig_len);
+        out_sig_b64 = base64_encode(sig);
+        ok = true;
+    } while (false);
+
+    EVP_MD_CTX_free(ctx);
+    return ok;
+}
+#endif
+
+struct vote_entry {
+    struct node_obs {
+        kafka_reply_record rec;
+        bool sig_valid = false;
+    };
+    std::unordered_map<std::string, std::set<int>> hash_to_nodes_valid;
+    std::unordered_map<int, node_obs> by_node;
+    std::set<int> nodes_seen;
+    int leader_node_id = -1;
+    bool divergence_reported = false;
+    bool all_reported = false;
+    std::string majority_hash;
+    std::unordered_map<std::string, std::string> seen_reply_keys;
+    bool terminal_set = false;
+    std::string terminal_result;
+    std::string terminal_error;
+    uint64_t first_reply_ns = 0;
+    bool ready_recorded = false;
+};
+
+struct vote_store_profile {
+    double consume_to_ready_ms_mean = 0.0;
+    double consume_to_ready_ms_p95 = 0.0;
+    double wait_cv_sleep_ms_mean = 0.0;
+    double wait_cv_sleep_ms_p95 = 0.0;
+    double ready_queue_depth_mean = 0.0;
+    size_t ready_queue_depth_max = 0;
+};
+
+struct vote_store {
+    explicit vote_store(int total_nodes,
+                        int majority,
+                        size_t max_entries,
+                        std::string sig_key)
+        : total_nodes_(total_nodes)
+        , majority_(majority)
+        , max_entries_(std::max<size_t>(1024, max_entries))
+        , sig_key_(std::move(sig_key))
+        {}
+
+    void add_reply(const kafka_reply_record& rec,
+                   std::string& out_recovery_note)
+    {
+        out_recovery_note.clear();
+        std::lock_guard<std::mutex> lk(mu_);
+        const uint64_t add_ns = steady_now_ns();
+        vote_entry& e = m_[rec.req_num];
+        if (seen_reqs_.insert(rec.req_num).second) {
+            req_order_.push_back(rec.req_num);
+        }
+        evict_if_needed_locked();
+        if (e.first_reply_ns == 0) {
+            e.first_reply_ns = add_ns;
+        }
+
+        e.nodes_seen.insert(rec.node_id);
+        if (rec.leader_node_id > 0) {
+            e.leader_node_id = rec.leader_node_id;
+        }
+
+        const std::string full_result_hash = rec.full_result.empty()
+            ? std::string()
+            : canonical_result_hash(rec.full_result);
+        std::ostringstream id_oss;
+        id_oss << rec.req_num << "|"
+               << rec.node_id << "|"
+               << rec.raft_log_idx;
+        const std::string reply_identity = id_oss.str();
+        const std::string reply_fingerprint = rec.result_hash + "|" + full_result_hash;
+        auto it_seen = e.seen_reply_keys.find(reply_identity);
+        if (it_seen != e.seen_reply_keys.end()) {
+            if (it_seen->second == reply_fingerprint) {
+                // Duplicate of an already-observed reply identity+payload; ignore.
+                return;
+            }
+            // Same logical reply identity but conflicting payload.
+            e.terminal_set = true;
+            e.terminal_result.clear();
+            e.terminal_error = "duplicate_identity_conflict";
+            std::ostringstream oss;
+            const std::string req_id = rec.req_id.empty() ? first_req_id_locked(e) : rec.req_id;
+            oss << "{\"type\":\"duplicate_identity_conflict\""
+                << ",\"req_num\":" << rec.req_num
+                << ",\"request_id\":\"" << json_escape(req_id) << "\""
+                << ",\"node_id\":" << rec.node_id
+                << ",\"raft_log_idx\":" << rec.raft_log_idx
+                << "}";
+            out_recovery_note = oss.str();
+            cv_.notify_all();
+            return;
+        }
+        e.seen_reply_keys[reply_identity] = reply_fingerprint;
+
+        vote_entry::node_obs obs;
+        obs.rec = rec;
+        obs.sig_valid = verify_result_signature(rec, sig_key_);
+        debug_trace_kafka(rec, obs.sig_valid);
+
+        auto prev_it = e.by_node.find(rec.node_id);
+        if (prev_it != e.by_node.end()) {
+            const vote_entry::node_obs& prev_obs = prev_it->second;
+            if (prev_obs.sig_valid && !prev_obs.rec.result_hash.empty()) {
+                auto it_hash = e.hash_to_nodes_valid.find(prev_obs.rec.result_hash);
+                if (it_hash != e.hash_to_nodes_valid.end()) {
+                    it_hash->second.erase(rec.node_id);
+                    if (it_hash->second.empty()) {
+                        e.hash_to_nodes_valid.erase(it_hash);
+                    }
+                }
+            }
+        }
+        e.by_node[rec.node_id] = obs;
+
+        if (obs.sig_valid && !rec.result_hash.empty()) {
+            e.hash_to_nodes_valid[rec.result_hash].insert(rec.node_id);
+        }
+        refresh_majority_locked(rec.req_num, e, add_ns);
+
+        cv_.notify_all();
+
+        if (!e.all_reported && static_cast<int>(e.nodes_seen.size()) >= total_nodes_) {
+            e.all_reported = true;
+            if (!e.divergence_reported &&
+                (e.hash_to_nodes_valid.size() > 1 || has_invalid_sig_locked(e))) {
+                e.divergence_reported = true;
+                std::ostringstream oss;
+                const std::string req_id = first_req_id_locked(e);
+                oss << "{\"type\":\"result_divergence\""
+                    << ",\"req_num\":" << rec.req_num
+                    << ",\"request_id\":\"" << json_escape(req_id) << "\""
+                    << ",\"leader_node\":" << e.leader_node_id
+                    << ",\"invalid_sig_nodes\":\"" << json_escape(invalid_sig_nodes_csv_locked(e)) << "\""
+                    << ",\"hash_votes\":\"";
+                bool first = true;
+                for (const auto& kv : e.hash_to_nodes_valid) {
+                    if (!first) oss << ";";
+                    first = false;
+                    oss << kv.first << "=" << kv.second.size();
+                }
+                oss << "\"}";
+                out_recovery_note = oss.str();
+            }
+        }
+    }
+
+    bool wait_majority(uint64_t req_num,
+                       int poll_interval_us,
+                       int poll_count,
+                       std::string& out_result,
+                       std::string& out_error)
+    {
+        std::unique_lock<std::mutex> lk(mu_);
+        out_result.clear();
+        out_error.clear();
+
+        auto terminal = [&]() -> bool {
+            return resolve_terminal_locked(req_num, out_result, out_error);
+        };
+
+        if (terminal()) return out_error.empty();
+        if (poll_count <= 0) {
+            while (!terminal()) {
+                const auto wait_t0 = std::chrono::steady_clock::now();
+                cv_.wait(lk);
+                const auto wait_t1 = std::chrono::steady_clock::now();
+                record_wait_sleep_locked(static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            }
+            return out_error.empty();
+        }
+
+        const long long total_us =
+            static_cast<long long>(poll_interval_us) * static_cast<long long>(poll_count);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::microseconds(std::max<long long>(1, total_us));
+        while (!terminal()) {
+            const auto wait_t0 = std::chrono::steady_clock::now();
+            const std::cv_status st = cv_.wait_until(lk, deadline);
+            const auto wait_t1 = std::chrono::steady_clock::now();
+            record_wait_sleep_locked(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            if (st == std::cv_status::timeout && !terminal()) {
+                std::cerr << "vote_store timeout req=" << req_num
+                          << " detail=" << describe_req_locked(req_num)
+                          << std::endl;
+                out_error = "majority_timeout";
+                return false;
+            }
+        }
+        return out_error.empty();
+    }
+
+    // Wait until any req_id in `inflight` reaches majority, remove it from
+    // `inflight`, and return its majority result.
+    bool wait_any_majority(std::deque<uint64_t>& inflight,
+                           int poll_interval_us,
+                           int poll_count,
+                           uint64_t& out_req_num,
+                           std::string& out_result,
+                           std::string& out_error)
+    {
+        out_req_num = 0;
+        out_result.clear();
+        out_error.clear();
+        std::unique_lock<std::mutex> lk(mu_);
+        auto terminal = [&]() -> bool {
+            if (pop_terminal_inflight_locked(inflight, out_req_num, out_result, out_error)) {
+                return true;
+            }
+            for (auto it_req = inflight.begin(); it_req != inflight.end(); ++it_req) {
+                std::string err;
+                std::string result;
+                if (resolve_terminal_locked(*it_req, result, err)) {
+                    out_req_num = *it_req;
+                    out_result = std::move(result);
+                    out_error = std::move(err);
+                    inflight.erase(it_req);
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        if (terminal()) return out_error.empty();
+        if (poll_count <= 0) {
+            while (!terminal()) {
+                const auto wait_t0 = std::chrono::steady_clock::now();
+                cv_.wait(lk);
+                const auto wait_t1 = std::chrono::steady_clock::now();
+                record_wait_sleep_locked(static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            }
+            return out_error.empty();
+        }
+
+        const long long total_us =
+            static_cast<long long>(poll_interval_us) * static_cast<long long>(poll_count);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::microseconds(std::max<long long>(1, total_us));
+        while (!terminal()) {
+            const auto wait_t0 = std::chrono::steady_clock::now();
+            const std::cv_status st = cv_.wait_until(lk, deadline);
+            const auto wait_t1 = std::chrono::steady_clock::now();
+            record_wait_sleep_locked(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            if (st == std::cv_status::timeout && !terminal()) {
+                std::cerr << "vote_store timeout inflight="
+                          << describe_inflight_locked(inflight)
+                          << std::endl;
+                out_error = "majority_timeout";
+                return false;
+            }
+        }
+        return out_error.empty();
+    }
+
+    // Wait until all nodes have reported this request and all valid signatures
+    // agree on a single result hash across the full replica set.
+    bool wait_all_nodes_consistent(uint64_t req_num,
+                                   int poll_interval_us,
+                                   int poll_count,
+                                   std::string& out_error)
+    {
+        out_error.clear();
+        std::unique_lock<std::mutex> lk(mu_);
+
+        auto all_nodes_ready = [&]() -> bool {
+            return resolve_all_nodes_consistent_locked(req_num, out_error);
+        };
+
+        if (all_nodes_ready()) return out_error.empty();
+        if (poll_count <= 0) {
+            while (!all_nodes_ready()) {
+                const auto wait_t0 = std::chrono::steady_clock::now();
+                cv_.wait(lk);
+                const auto wait_t1 = std::chrono::steady_clock::now();
+                record_wait_sleep_locked(static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            }
+            return out_error.empty();
+        }
+
+        const long long total_us =
+            static_cast<long long>(poll_interval_us) * static_cast<long long>(poll_count);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::microseconds(std::max<long long>(1, total_us));
+        while (!all_nodes_ready()) {
+            const auto wait_t0 = std::chrono::steady_clock::now();
+            const std::cv_status st = cv_.wait_until(lk, deadline);
+            const auto wait_t1 = std::chrono::steady_clock::now();
+            record_wait_sleep_locked(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            if (st == std::cv_status::timeout && !all_nodes_ready()) {
+                std::cerr << "vote_store all-nodes timeout req=" << req_num
+                          << " detail=" << describe_req_locked(req_num)
+                          << std::endl;
+                out_error = "all_nodes_timeout";
+                return false;
+            }
+        }
+        return out_error.empty();
+    }
+
+    vote_store_profile profile() {
+        std::lock_guard<std::mutex> lk(mu_);
+        vote_store_profile out;
+        out.consume_to_ready_ms_mean = mean_ms_locked(consume_to_ready_samples_, consume_to_ready_sum_ns_);
+        out.consume_to_ready_ms_p95 = p95_ms_locked(consume_to_ready_samples_);
+        out.wait_cv_sleep_ms_mean = mean_ms_locked(wait_cv_sleep_samples_, wait_cv_sleep_sum_ns_);
+        out.wait_cv_sleep_ms_p95 = p95_ms_locked(wait_cv_sleep_samples_);
+        if (ready_queue_depth_obs_ > 0) {
+            out.ready_queue_depth_mean =
+                static_cast<double>(ready_queue_depth_sum_) / static_cast<double>(ready_queue_depth_obs_);
+        }
+        out.ready_queue_depth_max = ready_queue_depth_max_;
+        return out;
+    }
+
+    bool try_pop_any_terminal(std::deque<uint64_t>& inflight,
+                              uint64_t& out_req_num,
+                              std::string& out_result,
+                              std::string& out_error)
+    {
+        out_req_num = 0;
+        out_result.clear();
+        out_error.clear();
+        std::lock_guard<std::mutex> lk(mu_);
+        if (pop_terminal_inflight_locked(inflight, out_req_num, out_result, out_error)) {
+            return true;
+        }
+        for (auto it_req = inflight.begin(); it_req != inflight.end(); ++it_req) {
+            std::string err;
+            std::string result;
+            if (resolve_terminal_locked(*it_req, result, err)) {
+                out_req_num = *it_req;
+                out_result = std::move(result);
+                out_error = std::move(err);
+                inflight.erase(it_req);
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    bool has_invalid_sig_locked(const vote_entry& e) const {
+        for (const auto& kv : e.by_node) {
+            if (!kv.second.sig_valid) return true;
+        }
+        return false;
+    }
+
+    std::string first_req_id_locked(const vote_entry& e) const {
+        for (const auto& kv : e.by_node) {
+            if (!kv.second.rec.req_id.empty()) return kv.second.rec.req_id;
+        }
+        return "";
+    }
+
+    std::string invalid_sig_nodes_csv_locked(const vote_entry& e) const {
+        std::ostringstream oss;
+        bool first = true;
+        for (const auto& kv : e.by_node) {
+            if (kv.second.sig_valid) continue;
+            if (!first) oss << ",";
+            first = false;
+            oss << kv.first;
+        }
+        return oss.str();
+    }
+
+    std::string compute_majority_hash_locked(const vote_entry& e) const {
+        std::string best_hash;
+        int best_votes = 0;
+        for (const auto& kv : e.hash_to_nodes_valid) {
+            const int votes = static_cast<int>(kv.second.size());
+            if (votes < majority_) continue;
+            if (votes > best_votes || (votes == best_votes && (best_hash.empty() || kv.first < best_hash))) {
+                best_votes = votes;
+                best_hash = kv.first;
+            }
+        }
+        return best_hash;
+    }
+
+    void record_consume_to_ready_locked(uint64_t delta_ns) {
+        consume_to_ready_sum_ns_ += delta_ns;
+        consume_to_ready_samples_.push_back(delta_ns);
+    }
+
+    void record_wait_sleep_locked(uint64_t delta_ns) {
+        wait_cv_sleep_sum_ns_ += delta_ns;
+        wait_cv_sleep_samples_.push_back(delta_ns);
+    }
+
+    static double mean_ms_locked(const std::vector<uint64_t>& samples, uint64_t sum_ns) {
+        if (samples.empty()) return 0.0;
+        return (static_cast<double>(sum_ns) / static_cast<double>(samples.size())) / 1000000.0;
+    }
+
+    static double p95_ms_locked(std::vector<uint64_t> samples) {
+        if (samples.empty()) return 0.0;
+        const size_t idx = static_cast<size_t>(
+            std::ceil(0.95 * static_cast<double>(samples.size()))) - 1;
+        std::nth_element(samples.begin(),
+                         samples.begin() + std::min(idx, samples.size() - 1),
+                         samples.end());
+        return static_cast<double>(samples[std::min(idx, samples.size() - 1)]) / 1000000.0;
+    }
+
+    void refresh_majority_locked(uint64_t req_num, vote_entry& e, uint64_t now_ns) {
+        const bool had_majority = !e.majority_hash.empty();
+        e.majority_hash = compute_majority_hash_locked(e);
+        if (!had_majority && !e.terminal_set && !e.majority_hash.empty() && !e.ready_recorded) {
+            e.ready_recorded = true;
+            if (e.first_reply_ns > 0 && now_ns >= e.first_reply_ns) {
+                record_consume_to_ready_locked(now_ns - e.first_reply_ns);
+            }
+        }
+        if (!e.terminal_set && !e.majority_hash.empty()) {
+            if (ready_seen_.insert(req_num).second) {
+                ready_reqs_.push_back(req_num);
+                ready_queue_depth_sum_ += static_cast<uint64_t>(ready_reqs_.size());
+                ++ready_queue_depth_obs_;
+                ready_queue_depth_max_ = std::max<size_t>(ready_queue_depth_max_, ready_reqs_.size());
+            }
+        }
+    }
+
+    void evict_if_needed_locked() {
+        while (m_.size() > max_entries_ && !req_order_.empty()) {
+            const uint64_t old_req = req_order_.front();
+            req_order_.pop_front();
+            seen_reqs_.erase(old_req);
+            m_.erase(old_req);
+            ready_seen_.erase(old_req);
+        }
+    }
+
+    bool resolve_terminal_locked(uint64_t req_num,
+                                 std::string& out_result,
+                                 std::string& out_error)
+    {
+        out_result.clear();
+        out_error.clear();
+        auto it = m_.find(req_num);
+        if (it == m_.end()) return false;
+        vote_entry& e = it->second;
+        if (e.terminal_set) {
+            out_result = e.terminal_result;
+            out_error = e.terminal_error;
+            return true;
+        }
+        // Majority success rule:
+        // 1) majority (>= quorum) of *valid signatures* agrees on result_hash
+        // 2) return a canonical full_result whose hash matches that majority
+        //
+        // NOTE:
+        // We intentionally do not require the Raft leader's full_result here.
+        // Under strict byzantine semantics, if the leader is the minority, the
+        // gateway should still be able to return a correct full result from the
+        // majority quorum. (The recovery/errTopic pipeline can still flag the
+        // divergent node.)
+        e.majority_hash = compute_majority_hash_locked(e);
+        if (e.majority_hash.empty()) {
+            if (e.all_reported) {
+                out_error = "no_majority";
+                e.terminal_set = true;
+                e.terminal_error = out_error;
+                return true;
+            }
+            return false;
+        }
+
+        auto it_maj = e.hash_to_nodes_valid.find(e.majority_hash);
+        if (it_maj == e.hash_to_nodes_valid.end() ||
+            static_cast<int>(it_maj->second.size()) < majority_) {
+            return false;
+        }
+
+        for (int node_id : it_maj->second) {
+            auto it_obs = e.by_node.find(node_id);
+            if (it_obs == e.by_node.end()) continue;
+            const vote_entry::node_obs& obs = it_obs->second;
+            if (!obs.sig_valid) continue;
+            if (obs.rec.result_hash != e.majority_hash) continue;
+            if (obs.rec.full_result.empty()) continue;
+            const std::string full_hash = canonical_result_hash(obs.rec.full_result);
+            if (full_hash != e.majority_hash) continue;
+            out_result = obs.rec.full_result;
+            e.terminal_set = true;
+            e.terminal_result = out_result;
+            e.terminal_error.clear();
+            return true;
+        }
+
+        // Majority exists but we don't yet have a full result for it.
+        if (!e.all_reported) return false;
+        out_error = "majority_full_result_missing";
+        e.terminal_set = true;
+        e.terminal_error = out_error;
+        return true;
+    }
+
+    bool resolve_all_nodes_consistent_locked(uint64_t req_num,
+                                             std::string& out_error) const
+    {
+        out_error.clear();
+        auto it = m_.find(req_num);
+        if (it == m_.end()) return false;
+        const vote_entry& e = it->second;
+
+        if (static_cast<int>(e.by_node.size()) < total_nodes_) {
+            return false;
+        }
+        if (has_invalid_sig_locked(e)) {
+            out_error = "all_nodes_signature_invalid";
+            return true;
+        }
+
+        bool unanimous_hash = false;
+        for (const auto& kv : e.hash_to_nodes_valid) {
+            if (static_cast<int>(kv.second.size()) == total_nodes_) {
+                unanimous_hash = true;
+                break;
+            }
+        }
+        if (!unanimous_hash) {
+            out_error = "all_nodes_hash_mismatch";
+        }
+        return true;
+    }
+
+    bool pop_terminal_inflight_locked(std::deque<uint64_t>& inflight,
+                                      uint64_t& out_req_num,
+                                      std::string& out_result,
+                                      std::string& out_error)
+    {
+        while (!ready_reqs_.empty()) {
+            const uint64_t req_num = ready_reqs_.front();
+            ready_reqs_.pop_front();
+            ready_seen_.erase(req_num);
+
+            auto it_req = std::find(inflight.begin(), inflight.end(), req_num);
+            if (it_req == inflight.end()) {
+                continue;
+            }
+            std::string err;
+            std::string result;
+            if (!resolve_terminal_locked(req_num, result, err)) {
+                continue;
+            }
+
+            out_req_num = req_num;
+            out_result = std::move(result);
+            out_error = std::move(err);
+            inflight.erase(it_req);
+            return true;
+        }
+        return false;
+    }
+
+    std::string describe_req_locked(uint64_t req_num) const
+    {
+        std::ostringstream oss;
+        auto it = m_.find(req_num);
+        if (it == m_.end()) {
+            oss << "missing(req=" << req_num << ")";
+            return oss.str();
+        }
+
+        const vote_entry& e = it->second;
+        oss << "req=" << req_num
+            << ",nodes_seen=" << e.nodes_seen.size()
+            << ",by_node=" << e.by_node.size()
+            << ",leader=" << e.leader_node_id
+            << ",majority_hash=" << (e.majority_hash.empty() ? "<none>" : e.majority_hash)
+            << ",terminal=" << (e.terminal_set ? 1 : 0)
+            << ",all_reported=" << (e.all_reported ? 1 : 0)
+            << ",hash_votes=";
+        bool first_hash = true;
+        for (const auto& kv : e.hash_to_nodes_valid) {
+            if (!first_hash) oss << ";";
+            first_hash = false;
+            oss << kv.first << "=" << kv.second.size();
+        }
+        if (first_hash) oss << "<none>";
+        oss << ",node_obs=";
+        bool first_obs = true;
+        for (const auto& kv : e.by_node) {
+            if (!first_obs) oss << ";";
+            first_obs = false;
+            const vote_entry::node_obs& obs = kv.second;
+            oss << kv.first
+                << "[sig=" << (obs.sig_valid ? 1 : 0)
+                << ",hash=" << (obs.rec.result_hash.empty() ? "<none>" : obs.rec.result_hash)
+                << ",full=" << (!obs.rec.full_result.empty() ? 1 : 0)
+                << ",raft_log_idx=" << obs.rec.raft_log_idx
+                << "]";
+        }
+        if (first_obs) oss << "<none>";
+        return oss.str();
+    }
+
+    std::string describe_inflight_locked(const std::deque<uint64_t>& inflight) const
+    {
+        std::ostringstream oss;
+        bool first = true;
+        for (uint64_t req_num : inflight) {
+            if (!first) oss << " || ";
+            first = false;
+            oss << describe_req_locked(req_num);
+        }
+        if (first) oss << "<empty>";
+        return oss.str();
+    }
+
+    int total_nodes_;
+    int majority_;
+    size_t max_entries_;
+    std::string sig_key_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::unordered_map<uint64_t, vote_entry> m_;
+    std::deque<uint64_t> req_order_;
+    std::unordered_set<uint64_t> seen_reqs_;
+    std::deque<uint64_t> ready_reqs_;
+    std::unordered_set<uint64_t> ready_seen_;
+    uint64_t consume_to_ready_sum_ns_ = 0;
+    std::vector<uint64_t> consume_to_ready_samples_;
+    uint64_t wait_cv_sleep_sum_ns_ = 0;
+    std::vector<uint64_t> wait_cv_sleep_samples_;
+    uint64_t ready_queue_depth_sum_ = 0;
+    uint64_t ready_queue_depth_obs_ = 0;
+    size_t ready_queue_depth_max_ = 0;
+};
+
+struct cluster_client {
+    int fd = -1;
+    size_t node_idx = 0;
+    bool leader_known = false;
+    size_t leader_idx = 0;
+
+    void close_fd() {
+        if (fd >= 0) {
+            ::close(fd);
+            fd = -1;
+        }
+    }
+
+    ~cluster_client() { close_fd(); }
+};
+
+struct submit_profile_stats {
+    std::atomic<uint64_t> attempts{0};
+    std::atomic<uint64_t> connect_calls{0};
+    std::atomic<uint64_t> connect_ns{0};
+    std::atomic<uint64_t> write_calls{0};
+    std::atomic<uint64_t> write_ns{0};
+    std::atomic<uint64_t> read_calls{0};
+    std::atomic<uint64_t> read_ns{0};
+    std::atomic<uint64_t> not_accepted{0};
+};
+
+submit_profile_stats g_submit_prof;
+std::atomic<int> g_event_submit_leader_idx(-1);
+
+static bool parse_leader_hint_from_msg(const std::string& msg, int& out_leader_id) {
+    out_leader_id = -1;
+    const std::string key = "leader=";
+    const size_t pos = msg.find(key);
+    if (pos == std::string::npos) return false;
+    size_t i = pos + key.size();
+    bool neg = false;
+    if (i < msg.size() && msg[i] == '-') {
+        neg = true;
+        ++i;
+    }
+    if (i >= msg.size()) return false;
+    if (!std::isdigit(static_cast<unsigned char>(msg[i]))) return false;
+    long v = 0;
+    while (i < msg.size() && std::isdigit(static_cast<unsigned char>(msg[i]))) {
+        v = v * 10 + (msg[i] - '0');
+        ++i;
+        if (v > 1000000) break;
+    }
+    out_leader_id = neg ? -static_cast<int>(v) : static_cast<int>(v);
+    return true;
+}
+
+bool submit_to_cluster(const std::vector<host_port>& nodes,
+                       std::atomic<size_t>& rr_idx,
+                       const client_api_request& req,
+                       std::string& err)
+{
+    // Reuse one TCP connection per gateway worker thread to avoid:
+    // - 20k connect()/close() calls per run.
+    // - one server-side std::thread spawn per request.
+    static thread_local cluster_client cli;
+
+    const size_t n = nodes.size();
+    if (n == 0) {
+        err = "no nodes";
+        return false;
+    }
+
+    size_t start = 0;
+    if (cli.leader_known && cli.leader_idx < n) {
+        start = cli.leader_idx;
+    } else if (cli.fd >= 0 && cli.node_idx < n) {
+        start = cli.node_idx;
+    } else {
+        cli.close_fd();
+        start = rr_idx.fetch_add(1) % n;
+    }
+    for (size_t attempt = 0; attempt < n; ++attempt) {
+        g_submit_prof.attempts.fetch_add(1, std::memory_order_relaxed);
+        const size_t idx = (start + attempt) % n;
+        const host_port& hp = nodes[idx];
+
+        if (cli.fd < 0 || cli.node_idx != idx) {
+            cli.close_fd();
+            g_submit_prof.connect_calls.fetch_add(1, std::memory_order_relaxed);
+            const auto c0 = std::chrono::steady_clock::now();
+            int fd = connect_tcp(hp.host, hp.port, err);
+            const auto c1 = std::chrono::steady_clock::now();
+            g_submit_prof.connect_ns.fetch_add(
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(c1 - c0).count()),
+                std::memory_order_relaxed);
+            if (fd < 0) continue;
+            cli.fd = fd;
+            cli.node_idx = idx;
+        }
+
+        std::string werr;
+        g_submit_prof.write_calls.fetch_add(1, std::memory_order_relaxed);
+        const auto w0 = std::chrono::steady_clock::now();
+        const bool ok_write = write_request_frame(cli.fd, req, werr);
+        const auto w1 = std::chrono::steady_clock::now();
+        g_submit_prof.write_ns.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count()),
+            std::memory_order_relaxed);
+        if (!ok_write) {
+            cli.close_fd();
+            err = werr;
+            continue;
+        }
+
+        client_api_response resp;
+        g_submit_prof.read_calls.fetch_add(1, std::memory_order_relaxed);
+        const auto r0 = std::chrono::steady_clock::now();
+        const bool ok_read = read_response_frame(cli.fd, resp, werr);
+        const auto r1 = std::chrono::steady_clock::now();
+        g_submit_prof.read_ns.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(r1 - r0).count()),
+            std::memory_order_relaxed);
+        if (!ok_read) {
+            cli.close_fd();
+            err = werr;
+            continue;
+        }
+
+        if (resp.status == 0) {
+            // Sticky leader hint: most requests should go to the leader.
+            cli.leader_known = true;
+            cli.leader_idx = idx;
+            return true;
+        }
+        if (resp.status == 1) {
+            // Not accepted: follower redirect, Raft transient, or admission-control backpressure.
+            g_submit_prof.not_accepted.fetch_add(1, std::memory_order_relaxed);
+            err = resp.msg;
+
+            int leader_id = -1;
+            if (parse_leader_hint_from_msg(resp.msg, leader_id) && leader_id > 0 &&
+                static_cast<size_t>(leader_id) <= n) {
+                cli.leader_known = true;
+                cli.leader_idx = static_cast<size_t>(leader_id - 1);
+            }
+
+            const bool is_busy = resp.msg.rfind("NOT_ACCEPTED_BUSY", 0) == 0;
+            if (is_busy) {
+                // If the current leader is overloaded, probing other nodes only adds load and
+                // often creates a submit+connect storm. Treat as backpressure and let the
+                // caller retry with bounded backoff, keeping the leader connection open.
+                if (cli.leader_known && idx == cli.leader_idx) {
+                    return false;
+                }
+            }
+
+            // Switch away from this node for subsequent attempts.
+            cli.close_fd();
+            continue;
+        }
+        err = resp.msg;
+        cli.close_fd();
+        return false;
+    }
+    return false;
+}
+
+bool submit_to_cluster_event(async_cluster_submitter& submitter,
+                             const std::vector<host_port>& nodes,
+                             std::atomic<size_t>& rr_idx,
+                             const client_api_request& req,
+                             std::string& err)
+{
+    const size_t n = nodes.size();
+    if (n == 0) {
+        err = "no nodes";
+        return false;
+    }
+
+    size_t start = 0;
+    const int li = g_event_submit_leader_idx.load(std::memory_order_relaxed);
+    if (li >= 0 && static_cast<size_t>(li) < n) {
+        start = static_cast<size_t>(li);
+    } else {
+        start = rr_idx.fetch_add(1) % n;
+    }
+
+    for (size_t attempt = 0; attempt < n; ++attempt) {
+        const size_t idx = (start + attempt) % n;
+
+        client_api_response resp;
+        std::string io_err;
+        if (!submitter.submit_to_node(idx, req, resp, io_err)) {
+            err = io_err.empty() ? std::string("submit_io_failed") : io_err;
+            continue;
+        }
+
+        if (resp.status == 0) {
+            g_event_submit_leader_idx.store(static_cast<int>(idx), std::memory_order_relaxed);
+            return true;
+        }
+
+        if (resp.status == 1) {
+            err = resp.msg;
+
+            int leader_id = -1;
+            if (parse_leader_hint_from_msg(resp.msg, leader_id) && leader_id > 0 &&
+                static_cast<size_t>(leader_id) <= n) {
+                g_event_submit_leader_idx.store(static_cast<int>(leader_id - 1), std::memory_order_relaxed);
+            }
+
+            const bool is_busy = resp.msg.rfind("NOT_ACCEPTED_BUSY", 0) == 0;
+            if (is_busy) {
+                const int cur_li = g_event_submit_leader_idx.load(std::memory_order_relaxed);
+                if (cur_li >= 0 && static_cast<size_t>(cur_li) == idx) {
+                    // Backpressure from leader: don't probe other nodes.
+                    return false;
+                }
+            }
+            continue;
+        }
+
+        err = resp.msg;
+        return false;
+    }
+    return false;
+}
+
+bool read_fd_line(int fd, std::string& out, std::string& err) {
+    out.clear();
+    char ch = 0;
+    while (true) {
+        const ssize_t r = ::read(fd, &ch, 1);
+        if (r == 0) {
+            err = "EOF";
+            return false;
+        }
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            err = std::string("read failed: ") + ::strerror(errno);
+            return false;
+        }
+        if (ch == '\n') break;
+        out.push_back(ch);
+        if (out.size() > (16u * 1024u * 1024u)) {
+            err = "line too large";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool write_fd_all(int fd, const std::string& s, std::string& err) {
+    const char* p = s.data();
+    size_t left = s.size();
+    while (left > 0) {
+        const ssize_t w = ::write(fd, p, left);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            err = std::string("write failed: ") + ::strerror(errno);
+            return false;
+        }
+        p += w;
+        left -= static_cast<size_t>(w);
+    }
+    return true;
+}
+
+int listen_tcp(int port) {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) throw std::runtime_error(std::string("socket failed: ") + ::strerror(errno));
+    int on = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+    sockaddr_in addr;
+    ::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        const std::string msg = std::string("bind failed: ") + ::strerror(errno);
+        ::close(fd);
+        throw std::runtime_error(msg);
+    }
+    if (::listen(fd, 128) != 0) {
+        const std::string msg = std::string("listen failed: ") + ::strerror(errno);
+        ::close(fd);
+        throw std::runtime_error(msg);
+    }
+    return fd;
+}
+
+} // namespace ariabc_pg
+
+int main(int argc, char** argv) {
+    using ariabc_pg::gateway_options;
+
+    gateway_options opt;
+    std::string err;
+    if (!ariabc_pg::parse_args(argc, argv, opt, err)) {
+        std::cerr << "Argument error: " << err << std::endl;
+        ariabc_pg::usage(argv[0]);
+        return 1;
+    }
+
+    // Ignore SIGPIPE so broken sockets don't kill the process.
+    ::signal(SIGPIPE, SIG_IGN);
+
+    // Parse nodes.
+    std::vector<ariabc_pg::host_port> nodes;
+    try {
+        const std::vector<std::string> parts = ariabc_pg::split_csv_trim(opt.nodes_csv);
+        for (const auto& p : parts) nodes.push_back(ariabc_pg::parse_host_port(p));
+    } catch (const std::exception& e) {
+        std::cerr << "nodes parse error: " << e.what() << std::endl;
+        return 1;
+    }
+    if (nodes.empty()) {
+        std::cerr << "no nodes given" << std::endl;
+        return 1;
+    }
+
+    const int total_nodes = (opt.total_nodes > 0) ? opt.total_nodes : static_cast<int>(nodes.size());
+    const int majority = (total_nodes / 2) + 1;
+    std::string result_sig_key = opt.result_sig_key;
+    if (result_sig_key.empty()) {
+        const char* env_key = ::getenv("ARIABC_RESULT_SIG_KEY");
+        if (env_key && *env_key) {
+            result_sig_key = env_key;
+        } else {
+            result_sig_key = ariabc_pg::kDefaultResultSigKey;
+        }
+    }
+    ariabc_pg::vote_store votes(total_nodes, majority, opt.vote_store_max_entries, result_sig_key);
+
+#ifndef SSL_LIBRARY_NOT_FOUND
+    ariabc_pg::openssl_keypair keys;
+    if (opt.query_sign == 1) {
+        if (!ariabc_pg::load_public_key(opt.pub_key_file, keys.pub, err)) {
+            std::cerr << "failed to load public key: " << err << std::endl;
+            return 1;
+        }
+    }
+    const bool socket_mode = ariabc_pg::is_number(opt.query_from);
+    if (socket_mode && !opt.priv_key_file.empty()) {
+        if (!ariabc_pg::load_private_key(opt.priv_key_file, keys.priv, err)) {
+            std::cerr << "failed to load private key: " << err << std::endl;
+            return 1;
+        }
+    }
+#else
+    const bool socket_mode = ariabc_pg::is_number(opt.query_from);
+    if (opt.query_sign == 1 || (socket_mode && !opt.priv_key_file.empty())) {
+        std::cerr << "OpenSSL is not available (built with SSL_LIBRARY_NOT_FOUND=1)" << std::endl;
+        return 1;
+    }
+#endif
+
+    const bool majority_wait_enabled = (opt.wait_majority == 1);
+
+    const std::string submit_mode = ariabc_pg::trim_copy(opt.submit_mode);
+    std::unique_ptr<ariabc_pg::async_cluster_submitter> submitter;
+    if (submit_mode == "event") {
+        submitter.reset(new ariabc_pg::async_cluster_submitter());
+        std::string serr;
+        if (!submitter->start(nodes, serr)) {
+            std::cerr << "submitMode=event disabled: " << serr << std::endl;
+            return 1;
+        }
+        std::cout << "submitMode=event: shared nonblocking submit reactor enabled" << std::endl;
+    }
+
+    // Kafka setup (optional).
+    ariabc_pg::kafka_console_consumer consumer;
+    ariabc_pg::kafka_console_producer err_prod;
+    bool kafka_enabled = false;
+    if (majority_wait_enabled && !opt.kafka_bootstrap.empty()) {
+        std::vector<std::string> result_topics{opt.result_topic};
+        std::cout << "Kafka result topic: " << opt.result_topic << std::endl;
+        std::string kerr;
+        if (!consumer.start_latest_multi(opt.kafka_bootstrap, result_topics,
+                                         opt.client_id /*group_id*/, kerr)) {
+            std::cerr << "Kafka consumer disabled: " << kerr << std::endl;
+        } else {
+            kafka_enabled = true;
+        }
+        if (!err_prod.start(opt.kafka_bootstrap,
+                            opt.err_topic,
+                            ariabc_pg::kafka_producer_profile::control_durable,
+                            kerr)) {
+            std::cerr << "Kafka errTopic producer disabled: " << kerr << std::endl;
+        }
+    }
+
+    if (socket_mode && !kafka_enabled) {
+        std::cerr << "socket mode requires Kafka (set --kafkaBootstrap)" << std::endl;
+        return 1;
+    }
+
+    if (!majority_wait_enabled) {
+        std::cout << "waitMajority=0: not waiting for Kafka majority replies" << std::endl;
+    }
+
+    std::atomic<bool> stop(false);
+    std::thread kafka_thread;
+    std::atomic<int> divergence_count(0);
+    std::atomic<uint64_t> kafka_messages(0);
+    std::atomic<uint64_t> kafka_records(0);
+    std::atomic<uint64_t> kafka_parse_ns(0);
+    std::atomic<uint64_t> kafka_add_reply_ns(0);
+    std::atomic<uint64_t> kafka_consume_lag_ns(0);
+    std::atomic<uint64_t> kafka_consume_lag_count(0);
+    std::atomic<uint64_t> kafka_consume_lag_ns_max(0);
+    if (kafka_enabled) {
+        kafka_thread = std::thread([&] {
+            while (!stop.load()) {
+                std::string kerr;
+                std::vector<ariabc_pg::kafka_consumed_message> kafka_batch;
+                if (!consumer.poll_batch_messages(kafka_batch, 1000, 10, kerr)) {
+                    if (kerr == "timeout") {
+                        continue;
+                    }
+                    if (!stop.load()) {
+                        std::cerr << "Kafka consumer stopped: " << kerr << std::endl;
+                    }
+                    break;
+                }
+
+                kafka_messages.fetch_add(static_cast<uint64_t>(kafka_batch.size()), std::memory_order_relaxed);
+
+                for (size_t b = 0; b < kafka_batch.size(); ++b) {
+                    std::vector<ariabc_pg::kafka_reply_record> recs;
+                    const auto p0 = std::chrono::steady_clock::now();
+                    const bool ok_parse = ariabc_pg::parse_kafka_payload_records(kafka_batch[b].payload, recs);
+                    const auto p1 = std::chrono::steady_clock::now();
+                    kafka_parse_ns.fetch_add(
+                        static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count()),
+                        std::memory_order_relaxed);
+                    if (!ok_parse) {
+                        continue;
+                    }
+
+                    kafka_records.fetch_add(static_cast<uint64_t>(recs.size()), std::memory_order_relaxed);
+
+                    for (size_t i = 0; i < recs.size(); ++i) {
+                        if (recs[i].timestamp_ms != 0) {
+                            const uint64_t now_ms = ariabc_pg::now_epoch_ms();
+                            if (now_ms >= recs[i].timestamp_ms) {
+                                const uint64_t lag_ns = (now_ms - recs[i].timestamp_ms) * 1000000ULL;
+                                kafka_consume_lag_ns.fetch_add(lag_ns, std::memory_order_relaxed);
+                                kafka_consume_lag_count.fetch_add(1, std::memory_order_relaxed);
+                                ariabc_pg::atomic_max_u64(kafka_consume_lag_ns_max, lag_ns);
+                            }
+                        }
+
+                        std::string recovery;
+                        const auto a0 = std::chrono::steady_clock::now();
+                        votes.add_reply(recs[i], recovery);
+                        const auto a1 = std::chrono::steady_clock::now();
+                        kafka_add_reply_ns.fetch_add(
+                            static_cast<uint64_t>(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(a1 - a0).count()),
+                            std::memory_order_relaxed);
+                        if (!recovery.empty()) {
+                            divergence_count.fetch_add(1);
+                            if (!opt.kafka_bootstrap.empty()) {
+                                std::string perr;
+                                if (!err_prod.send_line(recovery, perr)) {
+                                    std::cerr << "errTopic send failed: " << perr << std::endl;
+                                }
+                            } else {
+                                std::cerr << recovery << std::endl;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    std::atomic<size_t> rr_idx(0);
+    std::atomic<uint64_t> req_seq(0);
+    std::atomic<uint64_t> det_seq(opt.det_start_seq);
+    std::atomic<long long> total_wait_ns(0);
+    std::atomic<long long> total_submit_ns(0);
+    std::atomic<long long> total_majority_wait_ns(0);
+    std::atomic<int> duplicate_key_errors(0);
+    std::atomic<int> permanent_failures(0);
+    std::atomic<uint64_t> term_leader_unknown(0);
+    std::atomic<uint64_t> term_leader_reply_missing(0);
+    std::atomic<uint64_t> term_leader_full_result_hash_mismatch(0);
+    std::atomic<uint64_t> term_leader_signature_invalid(0);
+    std::atomic<uint64_t> term_majority_timeout(0);
+    std::atomic<uint64_t> term_other_failure(0);
+
+    auto req_id_for_idx = [&](size_t idx) -> std::string {
+        const uint64_t id_num = opt.req_id_offset + static_cast<uint64_t>(idx);
+        return opt.client_id + "-" + std::to_string(id_num);
+    };
+
+    auto req_num_for_idx = [&](size_t idx) -> uint64_t {
+        return opt.req_id_offset + static_cast<uint64_t>(idx);
+    };
+
+    auto bump_terminal_reason = [&](const std::string& reason) {
+        if (reason == "leader_unknown") {
+            term_leader_unknown.fetch_add(1, std::memory_order_relaxed);
+        } else if (reason == "leader_reply_missing") {
+            term_leader_reply_missing.fetch_add(1, std::memory_order_relaxed);
+        } else if (reason == "leader_full_result_hash_mismatch") {
+            term_leader_full_result_hash_mismatch.fetch_add(1, std::memory_order_relaxed);
+        } else if (reason == "leader_signature_invalid") {
+            term_leader_signature_invalid.fetch_add(1, std::memory_order_relaxed);
+        } else if (reason == "majority_timeout") {
+            term_majority_timeout.fetch_add(1, std::memory_order_relaxed);
+        } else if (!reason.empty()) {
+            term_other_failure.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    auto submit_only_quiet = [&](const std::string& req_id,
+                                 const std::string& sql_in,
+                                 std::string& out_err) -> bool {
+        out_err.clear();
+        ariabc_pg::client_api_request req;
+        req.req_id = req_id;
+        req.sql = sql_in;
+
+        if (submitter) {
+            return ariabc_pg::submit_to_cluster_event(*submitter, nodes, rr_idx, req, out_err);
+        }
+        return ariabc_pg::submit_to_cluster(nodes, rr_idx, req, out_err);
+    };
+
+    auto submit_only = [&](const std::string& req_id, const std::string& sql_in) -> bool {
+        std::string sub_err;
+        if (!submit_only_quiet(req_id, sql_in, sub_err)) {
+            std::cerr << "submit failed: " << sub_err << std::endl;
+            return false;
+        }
+        return true;
+    };
+
+    auto emit_recovery_event = [&](uint64_t req_num, const std::string& reason) {
+        std::ostringstream oss;
+        oss << "{\"type\":\"majority_failure\""
+            << ",\"req_num\":" << req_num
+            << ",\"reason\":\"" << ariabc_pg::json_escape(reason) << "\"}";
+        const std::string msg = oss.str();
+        if (!opt.kafka_bootstrap.empty()) {
+            std::string perr;
+            if (!err_prod.send_line(msg, perr)) {
+                std::cerr << "errTopic send failed: " << perr << std::endl;
+            }
+        } else {
+            std::cerr << msg << std::endl;
+        }
+    };
+
+    auto wait_majority = [&](uint64_t req_num, std::string& out_majority) -> bool {
+        out_majority.clear();
+        if (!majority_wait_enabled) return true;
+        if (!kafka_enabled) return true;
+        std::string wait_err;
+        if (!votes.wait_majority(req_num, opt.poll_interval_us, opt.poll_count, out_majority, wait_err)) {
+            if (wait_err.empty()) wait_err = "majority_timeout";
+            bump_terminal_reason(wait_err);
+            std::cerr << "majority wait failed for req_num=" << req_num << " err=" << wait_err << std::endl;
+            emit_recovery_event(req_num, wait_err);
+            return false;
+        }
+        return true;
+    };
+
+    std::unordered_set<uint64_t> reset_pending_reqs;
+    auto track_reset_req = [&](uint64_t req_num, const std::string& sql_text) {
+        if (ariabc_pg::is_reset_barrier_sql(sql_text)) {
+            reset_pending_reqs.insert(req_num);
+        }
+    };
+    auto maybe_wait_reset_all_nodes = [&](uint64_t req_num) -> bool {
+        auto it = reset_pending_reqs.find(req_num);
+        if (it == reset_pending_reqs.end()) return true;
+        if (!majority_wait_enabled || !kafka_enabled) {
+            reset_pending_reqs.erase(it);
+            return true;
+        }
+
+        std::string all_err;
+        if (!votes.wait_all_nodes_consistent(req_num,
+                                             opt.poll_interval_us,
+                                             opt.poll_count,
+                                             all_err)) {
+            if (all_err.empty()) all_err = "all_nodes_timeout";
+            bump_terminal_reason(all_err);
+            emit_recovery_event(req_num, all_err);
+            std::cerr << "reset all-nodes wait failed for req_num=" << req_num
+                      << " err=" << all_err << std::endl;
+            return false;
+        }
+
+        if (!all_err.empty()) {
+            bump_terminal_reason(all_err);
+            emit_recovery_event(req_num, all_err);
+            std::cerr << "reset all-nodes consistency failed for req_num=" << req_num
+                      << " err=" << all_err << std::endl;
+            return false;
+        }
+
+        reset_pending_reqs.erase(it);
+        return true;
+    };
+
+    auto reset_commit_barrier = [&](const std::string& sql_text) -> bool {
+        if (!ariabc_pg::is_reset_barrier_sql(sql_text)) return true;
+
+        uint64_t target_commit_idx = 0;
+        bool saw_any = false;
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            ariabc_pg::client_api_response resp;
+            std::string cerr;
+            if (!ariabc_pg::send_control_req_to_node(nodes[i], "__ARIABC_CTRL_GET_COMMIT_INDEX", resp, cerr)) {
+                std::cerr << "reset barrier get-commit failed node=" << (i + 1)
+                          << " err=" << cerr << std::endl;
+                continue;
+            }
+            if (resp.status != 0) {
+                std::cerr << "reset barrier get-commit rejected node=" << (i + 1)
+                          << " msg=" << resp.msg << std::endl;
+                continue;
+            }
+            uint64_t idx = 0;
+            if (!ariabc_pg::parse_u64_str(resp.msg, idx)) {
+                std::cerr << "reset barrier get-commit parse failed node=" << (i + 1)
+                          << " msg=" << resp.msg << std::endl;
+                continue;
+            }
+            saw_any = true;
+            target_commit_idx = std::max<uint64_t>(target_commit_idx, idx);
+        }
+
+        if (!saw_any) {
+            std::cerr << "reset barrier could not read commit index from any node" << std::endl;
+            return false;
+        }
+
+        const std::string wait_cmd =
+            "__ARIABC_CTRL_WAIT_COMMIT_INDEX " + std::to_string(target_commit_idx) + " 30000";
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            ariabc_pg::client_api_response resp;
+            std::string cerr;
+            if (!ariabc_pg::send_control_req_to_node(nodes[i], wait_cmd, resp, cerr)) {
+                std::cerr << "reset barrier wait failed node=" << (i + 1)
+                          << " target=" << target_commit_idx
+                          << " err=" << cerr << std::endl;
+                return false;
+            }
+            if (resp.status != 0) {
+                std::cerr << "reset barrier wait rejected node=" << (i + 1)
+                          << " target=" << target_commit_idx
+                          << " msg=" << resp.msg << std::endl;
+                return false;
+            }
+        }
+
+        std::cout << "reset barrier reached: commit_idx=" << target_commit_idx
+                  << " nodes=" << nodes.size() << std::endl;
+        return true;
+    };
+
+    auto effective_det_window = [&]() -> size_t {
+        const size_t user_window = std::max<size_t>(
+            1,
+            static_cast<size_t>(opt.det_window > 0 ? opt.det_window : 32));
+        if (opt.db_conn_pool_size <= 0) {
+            return user_window;
+        }
+        const size_t adaptive_cap = std::max<size_t>(
+            1,
+            static_cast<size_t>(opt.db_conn_pool_size) * 4);
+        return std::max<size_t>(1, std::min(user_window, adaptive_cap));
+    };
+
+    int exit_code = 0;
+    if (!socket_mode) {
+        // File mode.
+        std::ifstream ifs(opt.query_from.c_str());
+        if (!ifs) {
+            std::cerr << "failed to open query file: " << opt.query_from << std::endl;
+            return 1;
+        }
+
+        std::vector<std::string> queries;
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (ariabc_pg::is_skippable_sql_line(line)) continue;
+            queries.push_back(line);
+        }
+
+        std::cout << "loaded " << queries.size() << " queries" << std::endl;
+
+        const auto t_start = std::chrono::steady_clock::now();
+        if (majority_wait_enabled && kafka_enabled) {
+            consumer.set_busy_hint(true);
+        }
+
+        auto warm_leader_route = [&]() -> bool {
+            if (opt.db_type != 1 || opt.det_raw_sql == 1) return true;
+            const std::string probe_req_id = opt.client_id + "_leader_probe";
+            std::string probe_err;
+            std::chrono::milliseconds backoff(2);
+            for (int tries = 0; tries < 20; ++tries) {
+                if (submit_only_quiet(probe_req_id, "SELECT 1;", probe_err)) {
+                    return true;
+                }
+                std::this_thread::sleep_for(backoff);
+                if (backoff < std::chrono::milliseconds(20)) {
+                    backoff *= 2;
+                    if (backoff > std::chrono::milliseconds(20)) {
+                        backoff = std::chrono::milliseconds(20);
+                    }
+                }
+            }
+            std::cerr << "leader warmup failed: " << probe_err << std::endl;
+            return false;
+        };
+
+        // Deterministic mode (dbType=1) must be appended to the Raft log in the
+        // same order as its 8-digit deterministic sequence. Otherwise, the
+        // safedb_dt executor can deadlock when a higher seq reaches the head of
+        // the FIFO work queue before an earlier seq exists in the queue yet.
+        //
+        // To guarantee ordering, we submit queries in increasing `idx` order,
+        // while still allowing up to `num_terminals` in-flight requests.
+        if (opt.db_type == 1) {
+            if (!warm_leader_route()) {
+                permanent_failures.fetch_add(1);
+                if (majority_wait_enabled && kafka_enabled) {
+                    consumer.set_busy_hint(false);
+                }
+                return 1;
+            }
+            const size_t window = effective_det_window();
+            std::cout << "det mode: ordered submission (window=" << window
+                      << ", configured_det_window=" << std::max(1, opt.det_window > 0 ? opt.det_window : 32)
+                      << ", dbConnPoolSize=" << opt.db_conn_pool_size
+                      << ", detRawSql=" << opt.det_raw_sql
+                      << ")" << std::endl;
+            std::deque<uint64_t> inflight;
+
+            bool failed = false;
+            auto shape_det_request = [&](size_t idx,
+                                         std::string& out_req_id,
+                                         uint64_t& out_req_num,
+                                         std::string& out_sql) -> bool {
+                out_sql = queries[idx];
+                if (opt.query_sign == 1) {
+                    std::string sig_b64;
+                    std::string perr;
+                    if (!ariabc_pg::parse_signed_sql_line(out_sql, out_sql, sig_b64, perr)) {
+                        std::cerr << "bad signed line: " << perr << std::endl;
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+#ifndef SSL_LIBRARY_NOT_FOUND
+                    std::string verr;
+                    const std::string raw_sql = out_sql;
+                    const std::string trim_sql = ariabc_pg::trim_copy(out_sql);
+                    bool ok = ariabc_pg::verify_sig_sha256_rsa(keys.pub, raw_sql, sig_b64, verr);
+                    if (!ok && trim_sql != raw_sql) {
+                        ok = ariabc_pg::verify_sig_sha256_rsa(keys.pub, trim_sql, sig_b64, verr);
+                    }
+                    if (!ok) {
+                        std::cerr << "signature verify failed: " << verr << std::endl;
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+#endif
+                }
+
+                const uint64_t det_seq = opt.det_start_seq + static_cast<uint64_t>(idx);
+                if (det_seq >= 100000000ULL) {
+                    std::cerr << "det seq overflow for 8-digit: " << det_seq << std::endl;
+                    permanent_failures.fetch_add(1);
+                    return false;
+                }
+                if (opt.det_raw_sql == 1) {
+                    out_sql = ariabc_pg::trim_copy(out_sql);
+                } else {
+                    out_sql = "s " + ariabc_pg::format_det_seq8(det_seq) + " " + ariabc_pg::trim_copy(out_sql);
+                }
+
+                out_req_id = req_id_for_idx(idx);
+                out_req_num = req_num_for_idx(idx);
+                return true;
+            };
+
+            const bool det_event_pipeline =
+                (submitter &&
+                 submit_mode == "event" &&
+                 opt.det_submit_pipeline == 1 &&
+                 ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed) >= 0 &&
+                 static_cast<size_t>(ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed)) < nodes.size());
+
+            if (det_event_pipeline) {
+                struct det_submit_ticket {
+                    uint64_t req_num = 0;
+                    std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> ctx;
+                    std::chrono::steady_clock::time_point submit_started_at;
+                };
+
+                const size_t det_submit_limit = (opt.submit_limit > 0)
+                    ? static_cast<size_t>(std::max(1, opt.submit_limit))
+                    : window;
+                const size_t leader_idx =
+                    static_cast<size_t>(ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed));
+                std::deque<det_submit_ticket> pending_accepts;
+                size_t next_idx = 0;
+
+                auto drain_one_accept = [&]() -> bool {
+                    if (pending_accepts.empty()) return true;
+                    det_submit_ticket ticket = pending_accepts.front();
+                    pending_accepts.pop_front();
+
+                    ariabc_pg::client_api_response resp;
+                    std::string submit_err;
+                    const bool ok_submit =
+                        submitter->wait_submit(ticket.ctx, resp, submit_err);
+                    const auto submit_done_at = std::chrono::steady_clock::now();
+                    total_submit_ns.fetch_add(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            submit_done_at - ticket.submit_started_at).count());
+                    if (!ok_submit) {
+                        std::cerr << "det pipeline submit failed req=" << ticket.req_num
+                                  << " err=" << submit_err << std::endl;
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+                    if (resp.status != 0) {
+                        std::cerr << "det pipeline not accepted req=" << ticket.req_num
+                                  << " msg=" << resp.msg << std::endl;
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+
+                    if (!reset_commit_barrier(ticket.ctx->req.sql)) {
+                        std::cerr << "det pipeline reset barrier failed req=" << ticket.req_num << std::endl;
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+
+                    inflight.push_back(ticket.req_num);
+                    track_reset_req(ticket.req_num, ticket.ctx->req.sql);
+                    return true;
+                };
+
+                while (!failed && (next_idx < queries.size() || !pending_accepts.empty())) {
+                    while (!failed &&
+                           next_idx < queries.size() &&
+                           (inflight.size() + pending_accepts.size()) < window &&
+                           pending_accepts.size() < det_submit_limit) {
+                        std::string sql;
+                        std::string req_id;
+                        uint64_t req_num = 0;
+                        if (!shape_det_request(next_idx, req_id, req_num, sql)) {
+                            failed = true;
+                            break;
+                        }
+                        ariabc_pg::debug_trace_submit(req_num, req_id, sql);
+
+                        ariabc_pg::client_api_request req;
+                        req.req_id = req_id;
+                        req.sql = sql;
+                        std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> ctx;
+                        std::string submit_err;
+                        const auto submit_started_at = std::chrono::steady_clock::now();
+                        if (!submitter->submit_async_to_node(leader_idx, req, ctx, submit_err)) {
+                            std::cerr << "det pipeline enqueue failed idx=" << next_idx
+                                      << " err=" << submit_err << std::endl;
+                            permanent_failures.fetch_add(1);
+                            failed = true;
+                            break;
+                        }
+
+                        det_submit_ticket ticket;
+                        ticket.req_num = req_num;
+                        ticket.ctx = std::move(ctx);
+                        ticket.submit_started_at = submit_started_at;
+                        pending_accepts.push_back(std::move(ticket));
+                        ++next_idx;
+                    }
+
+                    if (failed) break;
+
+                    if (!pending_accepts.empty()) {
+                        if (!drain_one_accept()) {
+                            failed = true;
+                            break;
+                        }
+                    }
+
+                    if (majority_wait_enabled && inflight.size() >= window) {
+                        std::string maj;
+                        std::string wait_err;
+                        uint64_t rid = 0;
+                        const auto w0 = std::chrono::steady_clock::now();
+                        const bool ok_wait = votes.wait_any_majority(
+                            inflight, opt.poll_interval_us, opt.poll_count, rid, maj, wait_err);
+                        const auto w1 = std::chrono::steady_clock::now();
+                        total_majority_wait_ns.fetch_add(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
+                        if (!ok_wait) {
+                            if (wait_err.empty()) wait_err = "majority_timeout";
+                            bump_terminal_reason(wait_err);
+                            emit_recovery_event(rid, wait_err);
+                            permanent_failures.fetch_add(1);
+                            failed = true;
+                            break;
+                        }
+                        if (!maybe_wait_reset_all_nodes(rid)) {
+                            permanent_failures.fetch_add(1);
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for (size_t idx = 0; idx < queries.size(); ++idx) {
+                    std::string sql;
+                    std::string req_id;
+                    uint64_t req_num = 0;
+                    if (!shape_det_request(idx, req_id, req_num, sql)) {
+                        failed = true;
+                        break;
+                    }
+
+                    const auto tx_t0 = std::chrono::steady_clock::now();
+                    ariabc_pg::debug_trace_submit(req_num, req_id, sql);
+
+                    // Submit this request; do not proceed to the next idx until it is accepted.
+                    int tries = 0;
+                    std::chrono::milliseconds backoff(2);
+                    while (true) {
+                        const auto submit_t0 = std::chrono::steady_clock::now();
+                        const bool ok_submit = submit_only(req_id, sql);
+                        const auto submit_t1 = std::chrono::steady_clock::now();
+                        total_submit_ns.fetch_add(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(submit_t1 - submit_t0).count());
+                        if (ok_submit) break;
+                        ++tries;
+                        if (tries % 50 == 0) {
+                            std::cerr << "det submit retry idx=" << idx << " tries=" << tries << std::endl;
+                        }
+                        std::this_thread::sleep_for(backoff);
+                        if (backoff < std::chrono::milliseconds(20)) {
+                            backoff *= 2;
+                            if (backoff > std::chrono::milliseconds(20)) backoff = std::chrono::milliseconds(20);
+                        }
+                    }
+
+                    if (!reset_commit_barrier(sql)) {
+                        permanent_failures.fetch_add(1);
+                        failed = true;
+                        break;
+                    }
+
+                    inflight.push_back(req_num);
+                    track_reset_req(req_num, sql);
+
+                    // Backpressure: keep <= window outstanding majorities.
+                    if (majority_wait_enabled && inflight.size() >= window) {
+                        std::string maj;
+                        std::string wait_err;
+                        uint64_t rid = 0;
+                        const auto w0 = std::chrono::steady_clock::now();
+                        const bool ok_wait = votes.wait_any_majority(
+                            inflight, opt.poll_interval_us, opt.poll_count, rid, maj, wait_err);
+                        const auto w1 = std::chrono::steady_clock::now();
+                        total_majority_wait_ns.fetch_add(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
+                        if (!ok_wait) {
+                            if (wait_err.empty()) wait_err = "majority_timeout";
+                            bump_terminal_reason(wait_err);
+                            emit_recovery_event(rid, wait_err);
+                            permanent_failures.fetch_add(1);
+                            failed = true;
+                            break;
+                        }
+                        if (!maybe_wait_reset_all_nodes(rid)) {
+                            permanent_failures.fetch_add(1);
+                            failed = true;
+                            break;
+                        }
+                    }
+
+                    const auto tx_t1 = std::chrono::steady_clock::now();
+                    if (opt.qrate > 0) {
+                        const std::chrono::duration<double> target_interval(
+                            1.0 / static_cast<double>(opt.qrate));
+                        const std::chrono::duration<double> elapsed = tx_t1 - tx_t0;
+                        if (elapsed < target_interval) {
+                            const auto wait_d = target_interval - elapsed;
+                            total_wait_ns.fetch_add(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(wait_d).count());
+                            std::this_thread::sleep_for(wait_d);
+                        }
+                    } else if (opt.tx_interval_ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(opt.tx_interval_ms));
+                    }
+                }
+            }
+
+            if (majority_wait_enabled) {
+                while (!failed && !inflight.empty()) {
+                    std::string maj;
+                    std::string wait_err;
+                    uint64_t rid = 0;
+                    const auto w0 = std::chrono::steady_clock::now();
+                    const bool ok_wait = votes.wait_any_majority(
+                        inflight, opt.poll_interval_us, opt.poll_count, rid, maj, wait_err);
+                    const auto w1 = std::chrono::steady_clock::now();
+                    total_majority_wait_ns.fetch_add(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
+                    if (!ok_wait) {
+                        if (wait_err.empty()) wait_err = "majority_timeout";
+                        bump_terminal_reason(wait_err);
+                        emit_recovery_event(rid, wait_err);
+                        permanent_failures.fetch_add(1);
+                        failed = true;
+                        break;
+                    }
+                    if (!maybe_wait_reset_all_nodes(rid)) {
+                        permanent_failures.fetch_add(1);
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+
+        } else {
+            // Non-deterministic modes: parallel terminals.
+            //
+            // At high terminal counts on a single machine (3 nodes + Postgres + Kafka),
+            // letting every terminal issue a Raft client request concurrently can
+            // cause request timeouts and leader churn. Limit concurrent submits:
+            // the DB/Kafka pipeline is typically the real bottleneck.
+            const int submit_limit = (opt.submit_limit > 0)
+                ? std::max(1, opt.submit_limit)
+                : std::max(1, std::min(std::max(16, opt.num_terminals * 2), 128));
+            std::mutex submit_mu;
+            std::condition_variable submit_cv;
+            int submits_inflight = 0;
+
+            auto acquire_submit_slot = [&] {
+                std::unique_lock<std::mutex> lk(submit_mu);
+                submit_cv.wait(lk, [&] { return submits_inflight < submit_limit; });
+                ++submits_inflight;
+            };
+            auto release_submit_slot = [&] {
+                std::lock_guard<std::mutex> lk(submit_mu);
+                --submits_inflight;
+                submit_cv.notify_one();
+            };
+
+            std::atomic<size_t> next_idx(0);
+            std::vector<std::thread> workers;
+            workers.reserve(static_cast<size_t>(opt.num_terminals));
+            for (int t = 0; t < opt.num_terminals; ++t) {
+                workers.emplace_back([&, t] {
+                    (void)t;
+                    // In nondet mode we pipeline "submit" vs "wait majority".
+                    // If we keep a fixed per-worker window, total in-flight
+                    // requests grows with thread count and can overwhelm the
+                    // DB (lock contention / long tails) and trigger majority
+                    // timeouts. Auto-tune to keep total in-flight bounded.
+                    const size_t auto_total_inflight = 128;
+                    const size_t auto_per_worker = std::max<size_t>(
+                        1,
+                        auto_total_inflight / std::max(1, opt.num_terminals));
+                    const size_t worker_window = std::max<size_t>(
+                        1,
+                        static_cast<size_t>(opt.nondet_window > 0 ? opt.nondet_window : auto_per_worker));
+                    std::deque<uint64_t> inflight;
+                    while (true) {
+                        const size_t idx = next_idx.fetch_add(1);
+                        if (idx >= queries.size()) break;
+
+                        std::string sql = queries[idx];
+                        if (opt.query_sign == 1) {
+                            std::string sig_b64;
+                            std::string perr;
+                            if (!ariabc_pg::parse_signed_sql_line(sql, sql, sig_b64, perr)) {
+                                std::cerr << "bad signed line: " << perr << std::endl;
+                                permanent_failures.fetch_add(1);
+                                break;
+                            }
+#ifndef SSL_LIBRARY_NOT_FOUND
+                            // Verify both raw and trimmed forms (best-effort compatibility).
+                            std::string verr;
+                            const std::string raw_sql = sql;
+                            const std::string trim_sql = ariabc_pg::trim_copy(sql);
+                            bool ok = ariabc_pg::verify_sig_sha256_rsa(keys.pub, raw_sql, sig_b64, verr);
+                            if (!ok && trim_sql != raw_sql) {
+                                ok = ariabc_pg::verify_sig_sha256_rsa(keys.pub, trim_sql, sig_b64, verr);
+                            }
+                            if (!ok) {
+                                std::cerr << "signature verify failed: " << verr << std::endl;
+                                permanent_failures.fetch_add(1);
+                                break;
+                            }
+#endif
+                        }
+
+                        // Apply dbType request shaping.
+                        if (opt.db_type == 0) {
+                            sql = "s " + ariabc_pg::trim_copy(sql);
+                        } else {
+                            // 2: raw sql
+                            sql = ariabc_pg::trim_copy(sql);
+                        }
+
+                        const auto tx_t0 = std::chrono::steady_clock::now();
+                        const std::string req_id = req_id_for_idx(idx);
+                        const uint64_t req_num = req_num_for_idx(idx);
+                        ariabc_pg::debug_trace_submit(req_num, req_id, sql);
+
+                        // Submit + wait for majority (if enabled).
+                        bool submitted = false;
+                        int tries = 0;
+                        std::chrono::milliseconds backoff(2);
+                        std::string sub_err;
+                        while (true) {
+                            const auto submit_t0 = std::chrono::steady_clock::now();
+                            acquire_submit_slot();
+                            submitted = submit_only_quiet(req_id, sql, sub_err);
+                            release_submit_slot();
+                            const auto submit_t1 = std::chrono::steady_clock::now();
+                            total_submit_ns.fetch_add(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(submit_t1 - submit_t0).count());
+                            if (submitted) break;
+                            ++tries;
+                            if (tries % 50 == 0) {
+                                std::cerr << "submit retry idx=" << idx
+                                          << " tries=" << tries
+                                          << " err=" << sub_err
+                                          << std::endl;
+                            }
+                            std::this_thread::sleep_for(backoff);
+                            if (backoff < std::chrono::milliseconds(20)) {
+                                backoff *= 2;
+                                if (backoff > std::chrono::milliseconds(20)) backoff = std::chrono::milliseconds(20);
+                            }
+                        }
+
+                        inflight.push_back(req_num);
+                        if (inflight.size() >= worker_window) {
+                            std::string maj;
+                            std::string wait_err;
+                            uint64_t rid = 0;
+                            const auto w0 = std::chrono::steady_clock::now();
+                            bool ok_wait = false;
+                            if (votes.try_pop_any_terminal(inflight, rid, maj, wait_err)) {
+                                ok_wait = wait_err.empty();
+                            } else {
+                                rid = inflight.front();
+                                inflight.pop_front();
+                                ok_wait = wait_majority(rid, maj);
+                            }
+                            const auto w1 = std::chrono::steady_clock::now();
+                            total_majority_wait_ns.fetch_add(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
+                            if (!ok_wait) {
+                                if (!wait_err.empty()) {
+                                    bump_terminal_reason(wait_err);
+                                    emit_recovery_event(rid, wait_err);
+                                }
+                                permanent_failures.fetch_add(1);
+                            } else if (opt.db_type == 2 && !maj.empty() && ariabc_pg::is_duplicate_key_result(maj)) {
+                                duplicate_key_errors.fetch_add(1);
+                            }
+                        }
+
+                        const auto tx_t1 = std::chrono::steady_clock::now();
+                        if (opt.qrate > 0) {
+                            const std::chrono::duration<double> target_interval(1.0 / static_cast<double>(opt.qrate));
+                            const std::chrono::duration<double> elapsed = tx_t1 - tx_t0;
+                            if (elapsed < target_interval) {
+                                const auto wait_d = target_interval - elapsed;
+                                total_wait_ns.fetch_add(
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_d).count());
+                                std::this_thread::sleep_for(wait_d);
+                            }
+                        } else if (opt.tx_interval_ms > 0) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(opt.tx_interval_ms));
+                        }
+                    }
+
+                    while (!inflight.empty()) {
+                        std::string maj;
+                        std::string wait_err;
+                        uint64_t rid = 0;
+                        const auto w0 = std::chrono::steady_clock::now();
+                        bool ok_wait = false;
+                        if (votes.try_pop_any_terminal(inflight, rid, maj, wait_err)) {
+                            ok_wait = wait_err.empty();
+                        } else {
+                            rid = inflight.front();
+                            inflight.pop_front();
+                            ok_wait = wait_majority(rid, maj);
+                        }
+                        const auto w1 = std::chrono::steady_clock::now();
+                        total_majority_wait_ns.fetch_add(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
+                        if (!ok_wait) {
+                            if (!wait_err.empty()) {
+                                bump_terminal_reason(wait_err);
+                                emit_recovery_event(rid, wait_err);
+                            }
+                            permanent_failures.fetch_add(1);
+                        } else if (opt.db_type == 2 && !maj.empty() && ariabc_pg::is_duplicate_key_result(maj)) {
+                            duplicate_key_errors.fetch_add(1);
+                        }
+                    }
+                });
+            }
+            for (auto& th : workers) th.join();
+        }
+
+        const auto t_end = std::chrono::steady_clock::now();
+        if (kafka_enabled) {
+            consumer.set_busy_hint(false);
+        }
+        const auto overall_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
+        const auto wait_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::nanoseconds(total_wait_ns.load()))
+                .count();
+        const auto submit_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::nanoseconds(total_submit_ns.load()))
+                .count();
+        const auto majority_wait_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::nanoseconds(total_majority_wait_ns.load()))
+                .count();
+
+        // Best-effort: give Kafka thread a moment to observe late replies for divergence detection.
+        if (kafka_enabled) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+
+        std::cout << "overall time taken (millisec) = " << overall_ms << std::endl;
+        std::cout << " total wait time (ms) " << wait_ms << std::endl;
+        std::cout << " submit time (ms) " << submit_ms << std::endl;
+        std::cout << " majority wait time (ms) " << majority_wait_ms << std::endl;
+        std::cout << "duplicate_key_errors=" << duplicate_key_errors.load() << std::endl;
+        std::cout << "divergence_count=" << divergence_count.load() << std::endl;
+        std::cout << "permanent_failures=" << permanent_failures.load() << std::endl;
+
+        uint64_t sub_attempts = ariabc_pg::g_submit_prof.attempts.load(std::memory_order_relaxed);
+        uint64_t sub_conn_calls = ariabc_pg::g_submit_prof.connect_calls.load(std::memory_order_relaxed);
+        uint64_t sub_write_calls = ariabc_pg::g_submit_prof.write_calls.load(std::memory_order_relaxed);
+        uint64_t sub_read_calls = ariabc_pg::g_submit_prof.read_calls.load(std::memory_order_relaxed);
+        uint64_t sub_not_acc = ariabc_pg::g_submit_prof.not_accepted.load(std::memory_order_relaxed);
+        double sub_conn_ms = ariabc_pg::g_submit_prof.connect_ns.load(std::memory_order_relaxed) / 1000000.0;
+        double sub_write_ms = ariabc_pg::g_submit_prof.write_ns.load(std::memory_order_relaxed) / 1000000.0;
+        double sub_read_ms = ariabc_pg::g_submit_prof.read_ns.load(std::memory_order_relaxed) / 1000000.0;
+        if (submitter) {
+            const ariabc_pg::async_submitter_stats s = submitter->stats();
+            sub_attempts = s.attempts;
+            sub_conn_calls = s.connect_calls;
+            sub_write_calls = s.write_calls;
+            sub_read_calls = s.read_calls;
+            sub_not_acc = s.not_accepted;
+            sub_conn_ms = s.connect_ns / 1000000.0;
+            sub_write_ms = s.write_ns / 1000000.0;
+            sub_read_ms = s.read_ns / 1000000.0;
+        }
+        const ariabc_pg::kafka_consumer_stats kc = consumer.stats();
+        const ariabc_pg::kafka_producer_stats ep = err_prod.stats();
+        const auto vote_prof = votes.profile();
+        const uint64_t lag_cnt = kafka_consume_lag_count.load(std::memory_order_relaxed);
+        const double lag_ms_sum = kafka_consume_lag_ns.load(std::memory_order_relaxed) / 1000000.0;
+        const double lag_ms_mean = (lag_cnt > 0) ? (lag_ms_sum / static_cast<double>(lag_cnt)) : 0.0;
+        const double lag_ms_max = kafka_consume_lag_ns_max.load(std::memory_order_relaxed) / 1000000.0;
+        std::cout
+            << "PROFILE_GATEWAY "
+            << " submit_mode=" << (submitter ? "event" : "blocking")
+            << " submit_attempts=" << sub_attempts
+            << " conn_calls=" << sub_conn_calls
+            << " conn_ms=" << sub_conn_ms
+            << " write_calls=" << sub_write_calls
+            << " write_ms=" << sub_write_ms
+            << " read_calls=" << sub_read_calls
+            << " read_ms=" << sub_read_ms
+            << " not_accepted=" << sub_not_acc
+            << " kafka_msgs=" << kafka_messages.load(std::memory_order_relaxed)
+            << " kafka_recs=" << kafka_records.load(std::memory_order_relaxed)
+            << " kafka_parse_ms=" << (kafka_parse_ns.load(std::memory_order_relaxed) / 1000000.0)
+            << " kafka_add_reply_ms=" << (kafka_add_reply_ns.load(std::memory_order_relaxed) / 1000000.0)
+            << " consume_lag_ms_mean=" << lag_ms_mean
+            << " consume_lag_ms_max=" << lag_ms_max
+            << " consume_to_ready_ms_mean=" << vote_prof.consume_to_ready_ms_mean
+            << " consume_to_ready_ms_p95=" << vote_prof.consume_to_ready_ms_p95
+            << " wait_cv_sleep_ms_mean=" << vote_prof.wait_cv_sleep_ms_mean
+            << " wait_cv_sleep_ms_p95=" << vote_prof.wait_cv_sleep_ms_p95
+            << " ready_queue_depth_mean=" << vote_prof.ready_queue_depth_mean
+            << " ready_queue_depth_max=" << vote_prof.ready_queue_depth_max
+            << " kc_poll_calls=" << kc.poll_calls
+            << " kc_poll_ms=" << (kc.poll_ns / 1000000.0)
+            << " kc_msgs=" << kc.message_count
+            << " kc_timeouts=" << kc.poll_timeouts
+            << " kc_errors=" << kc.poll_errors
+            << " kc_kb=" << (kc.payload_bytes / 1024.0)
+            << " term_leader_unknown=" << term_leader_unknown.load(std::memory_order_relaxed)
+            << " term_leader_reply_missing=" << term_leader_reply_missing.load(std::memory_order_relaxed)
+            << " term_leader_full_result_hash_mismatch=" << term_leader_full_result_hash_mismatch.load(std::memory_order_relaxed)
+            << " term_leader_signature_invalid=" << term_leader_signature_invalid.load(std::memory_order_relaxed)
+            << " term_majority_timeout=" << term_majority_timeout.load(std::memory_order_relaxed)
+            << " term_other_failure=" << term_other_failure.load(std::memory_order_relaxed)
+            << " err_send_calls=" << ep.send_calls
+            << " err_send_ok=" << ep.send_ok
+            << " err_producev_ms=" << (ep.producev_ns / 1000000.0)
+            << " err_poll_ms=" << (ep.poll_ns / 1000000.0)
+            << " err_flush_ms=" << (ep.flush_ns / 1000000.0)
+            << std::endl;
+
+        exit_code = (permanent_failures.load() > 0) ? 1 : 0;
+
+    } else {
+        // Socket server mode.
+        const int port = std::stoi(opt.query_from);
+        if (opt.priv_key_file.empty()) {
+            std::cerr << "--privKeyFile is required in socket mode (reply signing)" << std::endl;
+            return 1;
+        }
+#ifndef SSL_LIBRARY_NOT_FOUND
+        if (!keys.priv) {
+            std::cerr << "private key not loaded" << std::endl;
+            return 1;
+        }
+#endif
+        const int listen_fd = ariabc_pg::listen_tcp(port);
+        std::cout << "gateway listening on " << port << std::endl;
+
+        while (true) {
+            sockaddr_in cli;
+            socklen_t len = sizeof(cli);
+            const int fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&cli), &len);
+            if (fd < 0) {
+                if (errno == EINTR) continue;
+                std::cerr << "accept failed: " << ::strerror(errno) << std::endl;
+                continue;
+            }
+
+            std::thread([&, fd] {
+                struct pending_req {
+                    uint64_t req_num;
+                };
+                std::deque<pending_req> pending;
+                const size_t socket_window = effective_det_window();
+
+                auto write_error_json = [&](const std::string& err_text) {
+                    std::string werr;
+                    ariabc_pg::write_fd_all(fd,
+                                            std::string("{\"req\":\"\",\"sig\":\"\",\"err\":\"") +
+                                                ariabc_pg::json_escape(err_text) + "\"}\n",
+                                            werr);
+                };
+
+                auto write_ok_json = [&](const std::string& maj) {
+#ifndef SSL_LIBRARY_NOT_FOUND
+                    std::string sig_b64;
+                    std::string serr;
+                    if (!ariabc_pg::sign_sha256_rsa(keys.priv, maj, sig_b64, serr)) {
+                        write_error_json(serr);
+                        return false;
+                    }
+                    const std::string json =
+                        std::string("{\"req\":\"") + ariabc_pg::json_escape(maj) +
+                        "\",\"sig\":\"" + ariabc_pg::json_escape(sig_b64) + "\"}\n";
+                    std::string werr;
+                    ariabc_pg::write_fd_all(fd, json, werr);
+#else
+                    std::string werr;
+                    ariabc_pg::write_fd_all(fd,
+                                            std::string("{\"req\":\"") +
+                                                ariabc_pg::json_escape(maj) +
+                                                "\",\"sig\":\"\"}\n",
+                                            werr);
+#endif
+                    return true;
+                };
+
+                auto maybe_sleep_rate = [&]() {
+                    if (opt.qrate > 0) {
+                        std::this_thread::sleep_for(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::duration<double>(1.0 / static_cast<double>(opt.qrate))));
+                    } else if (opt.tx_interval_ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(opt.tx_interval_ms));
+                    }
+                };
+
+                // Keep response order stable while allowing pipelined submission.
+                auto drain_pending = [&](bool force_all) -> bool {
+                    while (!pending.empty()) {
+                        if (!force_all && pending.size() < socket_window) {
+                            break;
+                        }
+
+                        const uint64_t req_num = pending.front().req_num;
+                        std::string maj;
+                        const bool ok_wait = wait_majority(req_num, maj);
+                        if (!ok_wait) {
+                            write_error_json("majority_timeout");
+                            return false;
+                        }
+
+                        pending.pop_front();
+                        if (!write_ok_json(maj)) {
+                            return false;
+                        }
+                        maybe_sleep_rate();
+                    }
+                    return true;
+                };
+
+                while (true) {
+                    std::string qline;
+                    std::string rerr;
+                    if (!ariabc_pg::read_fd_line(fd, qline, rerr)) {
+                        break;
+                    }
+                    if (ariabc_pg::is_skippable_sql_line(qline)) continue;
+
+                    std::string sql = qline;
+                    if (opt.query_sign == 1) {
+                        std::string sig_b64;
+                        std::string perr;
+                        if (!ariabc_pg::parse_signed_sql_line(qline, sql, sig_b64, perr)) {
+                            std::string werr;
+                            ariabc_pg::write_fd_all(fd, std::string("{\"req\":\"\",\"sig\":\"\",\"err\":\"") +
+                                                        ariabc_pg::json_escape(perr) + "\"}\n",
+                                                    werr);
+                            continue;
+                        }
+#ifndef SSL_LIBRARY_NOT_FOUND
+                        std::string verr;
+                        const std::string trim_sql = ariabc_pg::trim_copy(sql);
+                        bool ok = ariabc_pg::verify_sig_sha256_rsa(keys.pub, sql, sig_b64, verr);
+                        if (!ok && trim_sql != sql) {
+                            ok = ariabc_pg::verify_sig_sha256_rsa(keys.pub, trim_sql, sig_b64, verr);
+                        }
+                        if (!ok) {
+                            std::string werr;
+                            ariabc_pg::write_fd_all(fd, std::string("{\"req\":\"\",\"sig\":\"\",\"err\":\"") +
+                                                        ariabc_pg::json_escape(verr) + "\"}\n",
+                                                    werr);
+                            continue;
+                        }
+#endif
+                    }
+
+                    // Apply dbType request shaping (best-effort parity with file mode).
+                    if (opt.db_type == 0) {
+                        sql = "s " + ariabc_pg::trim_copy(sql);
+                    } else if (opt.db_type == 1) {
+                        const uint64_t det = det_seq.fetch_add(1);
+                        if (det >= 100000000ULL) {
+                            std::string werr;
+                            ariabc_pg::write_fd_all(fd, std::string("{\"req\":\"\",\"sig\":\"\",\"err\":\"det_seq_overflow\"}\n"),
+                                                    werr);
+                            continue;
+                        }
+                        if (opt.det_raw_sql == 1) {
+                            sql = ariabc_pg::trim_copy(sql);
+                        } else {
+                            sql = "s " + ariabc_pg::format_det_seq8(det) + " " + ariabc_pg::trim_copy(sql);
+                        }
+                    } else {
+                        sql = ariabc_pg::trim_copy(sql);
+                    }
+
+                    std::string req_id;
+                    uint64_t req_num = 0;
+                    bool submitted = false;
+                    int det_submit_tries = 0;
+                    std::chrono::milliseconds backoff(2);
+                    while (true) {
+                        const uint64_t id_num = opt.req_id_offset + req_seq.fetch_add(1);
+                        req_id = opt.client_id + "-" + std::to_string(id_num);
+                        req_num = id_num;
+                        submitted = submit_only(req_id, sql);
+                        if (submitted) break;
+
+                        // In deterministic mode, retry submit failures (likely follower not accepting)
+                        // to preserve forward progress.
+                        if (opt.db_type == 1 && !submitted) {
+                            ++det_submit_tries;
+                            if (det_submit_tries % 50 == 0) {
+                                std::cerr << "det submit retry tries=" << det_submit_tries << std::endl;
+                            }
+                            std::this_thread::sleep_for(backoff);
+                            if (backoff < std::chrono::milliseconds(20)) {
+                                backoff *= 2;
+                                if (backoff > std::chrono::milliseconds(20)) backoff = std::chrono::milliseconds(20);
+                            }
+                            continue;
+                        }
+
+                        // For non-det or majority timeouts, surface an error to the client.
+                        write_error_json("submit_failed");
+                        break;
+                    }
+                    if (!submitted) {
+                        continue;
+                    }
+                    pending.push_back(pending_req{req_num});
+                    if (!drain_pending(false)) {
+                        break;
+                    }
+                }
+
+                if (!pending.empty()) {
+                    (void)drain_pending(true);
+                }
+                ::close(fd);
+            }).detach();
+        }
+    }
+
+    stop = true;
+    if (kafka_thread.joinable()) kafka_thread.join();
+    consumer.stop();
+    err_prod.stop();
+    return exit_code;
+}
