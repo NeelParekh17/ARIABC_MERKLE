@@ -1567,6 +1567,8 @@ ExecUpdate(ModifyTableState *mtstate,
 		bool		partition_constraint_failed;
 		bool		update_indexes;
 		MerkleDeletePlan merkleDeletePlan;
+		bool		saved_enable_merkle_index = enable_merkle_index;
+		bool		need_exec_update_merkle_insert = false;
 		merkleDeletePlan.count = 0;
 		merkleDeletePlan.items = NULL;
 		merkleDeletePlan.ready = true;
@@ -1982,21 +1984,34 @@ lreplace:;
 					return NULL;
 			}
 
-			/* insert index entries for tuple if necessary */
-			if (resultRelInfo->ri_NumIndices > 0 && update_indexes)
-				recheckIndexes = ExecInsertIndexTuples(slot, estate, false, NULL, NIL);
-					
 			/*
-			* For Merkle indexes: always insert the NEW row's hash, even if
-			* update_indexes is false (HOT update). Merkle indexes hash ALL
-			* columns, not just the indexed key, so data changes always need
-			* to be tracked even when the key doesn't change.
-			*
-			* Note: ExecInsertIndexTuples may also call merkleInsert if
-			* update_indexes is true, but that's okay because we only call
-			* ExecInsertMerkleIndexes when update_indexes is false.
-			*/
-			if (!is_bcdb_worker && !update_indexes)
+			 * Exact-once Merkle UPDATE maintenance:
+			 * - old-row XOR-out is handled by ApplyMerkleDeletePlan() above
+			 * - new-row XOR-in must happen exactly once regardless of HOT/non-HOT
+			 *
+			 * The generic ExecInsertIndexTuples() path also invokes the Merkle
+			 * AM on non-HOT updates. Suppress that temporarily so UPDATE owns the
+			 * Merkle insert path uniformly, then apply ExecInsertMerkleIndexes()
+			 * exactly once below.
+			 */
+			if (!is_bcdb_worker && update_indexes && saved_enable_merkle_index)
+				enable_merkle_index = false;
+			PG_TRY();
+			{
+				/* insert non-Merkle index entries for tuple if necessary */
+				if (resultRelInfo->ri_NumIndices > 0 && update_indexes)
+					recheckIndexes = ExecInsertIndexTuples(slot, estate, false, NULL, NIL);
+			}
+			PG_CATCH();
+			{
+				enable_merkle_index = saved_enable_merkle_index;
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			enable_merkle_index = saved_enable_merkle_index;
+
+			need_exec_update_merkle_insert = (!is_bcdb_worker && saved_enable_merkle_index);
+			if (need_exec_update_merkle_insert)
 				ExecInsertMerkleIndexes(resultRelationDesc, slot);
 		}
 	}

@@ -15,6 +15,7 @@
 #include "storage/lwlock.h"
 #include "storage/predicate.h"
 #include "bcdb/globals.h"
+#include "lib/stringinfo.h"
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,7 @@ static int  tx_id_counter = 0; // not bcdb
 static BCDBShmXact *parse_tx(const char* json);
 static void bcdb_middleware_attach_tx_to_block(BCDBShmXact *tx, BCBlock *block);
 static BCBlock *parse_block_with_txs(const char *json);
+static void append_hex_encoded(StringInfo out, const char *input);
 
 void
 bcdb_middleware_init(bool is_oep_mode, int32 block_size)
@@ -309,6 +311,55 @@ print_trace();
 return block->result[(tx_num2-1)%(2*block->blksize)];
 }
 
+char *
+bcdb_middleware_submit_block_results(const char* block_json)
+{
+    BCBlock     *block;
+    StringInfoData out;
+    int tx_num2 = 0;
+
+    /*
+     * This path is used by the deterministic benchmark executor, which
+     * submits one block at a time and needs every per-tx result back.
+     * Reset the per-block submission/queue counters so tx ids for this
+     * block are dense and aligned with bid*blocksize.
+     */
+    set_num_tx_sub(0);
+    set_num_txqd(0);
+
+    ++block_meta->global_bmax;
+    block = parse_block_with_txs(block_json);
+    Assert(block != NULL);
+
+    for (int i = 0; i < block->num_tx; ++i)
+    {
+        tx_queue_insert(block->txs[i], i);
+        tx_num2++;
+    }
+    set_num_txqd(tx_num2);
+
+    if (tx_num2 > 0)
+    {
+        BCDBShmXact *last_tx = block->txs[tx_num2 - 1];
+        WaitConditionPid(&block->cond, getpid(),
+                         (block->last_committed_tx_id == last_tx->tx_id));
+    }
+
+    initStringInfo(&out);
+    for (int i = 0; i < tx_num2; ++i)
+    {
+        BCDBShmXact *tx = block->txs[i];
+        const int mem_txid = tx->tx_id % block->blksize;
+
+        appendStringInfoString(&out, tx->hash);
+        appendStringInfoChar(&out, '\t');
+        append_hex_encoded(&out, block->result[mem_txid]);
+        appendStringInfoChar(&out, '\n');
+    }
+
+    return out.data;
+}
+
 void
 bcdb_middleware_submit_block2(const char* block_json)
 {
@@ -469,6 +520,8 @@ bcdb_clear_block_txs_store()
     block_meta->global_bmax = 0;
     block_meta->debug_seq += 1;
     block_meta->num_committed = 0;
+    set_num_tx_sub(0);
+    set_num_txqd(0);
     while(!LIST_EMPTY(&idle_workers.list))
     {
         WorkerController *worker = LIST_FIRST(&idle_workers.list);
@@ -477,6 +530,23 @@ bcdb_clear_block_txs_store()
         pfree(worker);
     }
     idle_workers.num = 0;
+}
+
+static void
+append_hex_encoded(StringInfo out, const char *input)
+{
+    static const char kHex[] = "0123456789abcdef";
+    const unsigned char *p = (const unsigned char *) input;
+
+    if (input == NULL)
+        return;
+
+    while (*p)
+    {
+        appendStringInfoChar(out, kHex[(*p >> 4) & 0x0F]);
+        appendStringInfoChar(out, kHex[*p & 0x0F]);
+        ++p;
+    }
 }
 
 /*

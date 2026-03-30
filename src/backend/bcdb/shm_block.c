@@ -24,6 +24,19 @@
 HTAB          *block_pool;
 slock_t       *block_pool_lock;
 BlockMeta     *block_meta;
+static BCBlock *block1_cache = NULL;
+
+static inline BCBlock *
+get_block1_cached(bool create)
+{
+    BCBlock *blk = block1_cache;
+    if (blk != NULL)
+        return blk;
+    blk = get_block_by_id(1, create);
+    if (blk != NULL)
+        block1_cache = blk;
+    return blk;
+}
 
 /*
  * block_pool_size
@@ -117,13 +130,13 @@ create_block_pool(void)
 void set_last_committed_txid( BCDBShmXact *tx)
 {
     //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
-    BCBlock* blk = get_block_by_id(1, true);
-    /* Atomic counter update with spinlock to prevent race conditions */
-    SpinLockAcquire(block_pool_lock);
-    blk->last_committed_tx_id = tx->tx_id;
-    block_meta->num_committed = tx->tx_id;
-    pg_write_barrier();  /* Ensure write ordering across processes */
-    SpinLockRelease(block_pool_lock);
+    BCBlock* blk = get_block1_cached(true);
+    /*
+     * Deterministic workers update/read this field on every commit gate check.
+     * Avoid block_pool_lock contention by using lock-free atomic publish.
+     */
+    __atomic_store_n(&blk->last_committed_tx_id, tx->tx_id, __ATOMIC_RELEASE);
+    __atomic_store_n(&block_meta->num_committed, tx->tx_id, __ATOMIC_RELEASE);
 #if SAFEDBG2
     printf("safeDbg %s : %s: %d  blk %x txid= %d\n",
               __FILE__, __FUNCTION__, __LINE__, blk, block_meta->num_committed);
@@ -143,7 +156,7 @@ void set_last_committed_txid( BCDBShmXact *tx)
  */
 void set_blksz(int num)
 {
-    BCBlock* blk = get_block_by_id(1, true);
+    BCBlock* blk = get_block1_cached(true);
 #if SAFEDBG2
     printf("ariaMyDbg %s : %s: %d bid 1, blk %x\n",
               __FILE__, __FUNCTION__, __LINE__, blk);
@@ -153,7 +166,7 @@ void set_blksz(int num)
 
 BCTxID get_blksz()
 {
-    BCBlock* blk = get_block_by_id(1, false);
+    BCBlock* blk = get_block1_cached(false);
     return blk->blksize;
 }
 
@@ -166,13 +179,13 @@ BCTxID get_blksz()
  */
 void set_num_tx_sub(int num)
 {
-    BCBlock* blk = get_block_by_id(1, false);
+    BCBlock* blk = get_block1_cached(false);
     blk->num_tx_sub = num;
 }
 
 BCTxID get_num_tx_sub()
 {
-    BCBlock* blk = get_block_by_id(1, false);
+    BCBlock* blk = get_block1_cached(false);
     return blk->num_tx_sub;
 }
 
@@ -185,13 +198,13 @@ BCTxID get_num_tx_sub()
  */
 void set_num_txqd(int num)
 {
-    BCBlock* blk = get_block_by_id(1, false);
+    BCBlock* blk = get_block1_cached(false);
     blk->num_tx_qd = num;
 }
 
 BCTxID get_num_txqd()
 {
-    BCBlock* blk = get_block_by_id(1, false);
+    BCBlock* blk = get_block1_cached(false);
     return blk->num_tx_qd;
 }
 
@@ -206,14 +219,9 @@ BCTxID get_num_txqd()
  */
 BCTxID get_last_committed_txid(BCDBShmXact *tx)
 {
-    BCBlock* blk = get_block_by_id(1, false);
-    BCTxID result;
-    /* Atomic counter read with spinlock to prevent torn reads */
-    SpinLockAcquire(block_pool_lock);
-    pg_read_barrier();  /* Ensure read ordering across processes */
-    result = blk->last_committed_tx_id;
-    SpinLockRelease(block_pool_lock);
-    return result;
+    BCBlock* blk = get_block1_cached(false);
+    (void) tx;
+    return (BCTxID) __atomic_load_n(&blk->last_committed_tx_id, __ATOMIC_ACQUIRE);
 }
 
 /*

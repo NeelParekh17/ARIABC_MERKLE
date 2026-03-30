@@ -1059,8 +1059,8 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       /* CRITICAL FIX: Advance counter and broadcast ONLY AFTER commit.
        * This ensures the next transaction cannot enter its serial phase
        * until our writes are fully committed and visible. */
-      set_last_committed_txid(tx);
-      ConditionVariableBroadcast(&block->cond);
+    set_last_committed_txid(tx);
+    ConditionVariableBroadcast(&block->cond);
       condSig = 1;
 
       memset(&block->result[mem_txid], 0, 1024);
@@ -1118,10 +1118,10 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        * a transaction in error state, causing cascading warnings.
        * After PG_RE_THROW(), PostgresMain's sigsetjmp handler will call
        * AbortCurrentTransaction() which properly cleans up all resources. */
-      if(condSig == 0) {
-              BCBlock     *block2 = get_block_by_id(1, false);
-	      ConditionVariableBroadcast(&block2->cond);
-      }
+              if(condSig == 0) {
+                  BCBlock     *block2 = get_block_by_id(1, false);
+         	      ConditionVariableBroadcast(&block2->cond);
+              }
 		      if (hold_portal_snapshot && activeTx && activeTx->portal)
 		      {
 		          if (activeTx->portal->resowner)

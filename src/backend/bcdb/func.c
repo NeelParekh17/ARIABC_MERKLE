@@ -182,6 +182,18 @@ bcdb_block_submit(PG_FUNCTION_ARGS)
 }
 
 Datum
+bcdb_block_submit_results(PG_FUNCTION_ARGS)
+{
+    char   *bcdb_query = PG_GETARG_CSTRING(0);
+    char   *payload = bcdb_middleware_submit_block_results(bcdb_query);
+
+    if (payload == NULL)
+        PG_RETURN_TEXT_P(cstring_to_text(""));
+
+    PG_RETURN_TEXT_P(cstring_to_text(payload));
+}
+
+Datum
 bcdb_add_tx_with_block_id(PG_FUNCTION_ARGS)
 {
     char	   *tx_hash = PG_GETARG_CSTRING(0);
