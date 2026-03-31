@@ -14,6 +14,11 @@ extern PGDLLIMPORT int                 gdb_pause_sig;
 extern PGDLLIMPORT char                *bcdb_host;
 extern PGDLLIMPORT char                *bcdb_port;
 extern PGDLLIMPORT bool                OEP_mode;
+extern PGDLLIMPORT int32               bcdb_worker_count;
+extern PGDLLIMPORT bool                bcdb_dt_conflict_tracking;
+extern PGDLLIMPORT int32               bcdb_serial_gate_mode;
+extern PGDLLIMPORT int32               bcdb_dt_hashtab_switch_threshold;
+extern PGDLLIMPORT int32               bcdb_result_ring_slots;
 
 typedef enum BcdbIsolationLevel{
     BCDB_READ_COMMITED,
@@ -54,8 +59,13 @@ extern int32         worker_id;
 #define MAX_NUM_BLOCKS (QUEUEING_BLOCKS + CLEANING_DELAY_BLOCKS + 100)
 #define MAX_TX_PER_BLOCK 5500
 #define WORK_TOKENS 64
-#define NUM_WORKERS 2
-#define HASHTAB_SWITCH_THRESHOLD 1500
+#define BCDB_DEFAULT_WORKER_COUNT 2
+#define BCDB_DEFAULT_HASHTAB_SWITCH_THRESHOLD 1500
+#define BCDB_DEFAULT_RESULT_RING_SLOTS 128
+#define BCDB_SERIAL_GATE_MODE_POLL 0
+#define BCDB_SERIAL_GATE_MODE_CONDVAR 1
+#define NUM_WORKERS BCDB_DEFAULT_WORKER_COUNT
+#define HASHTAB_SWITCH_THRESHOLD BCDB_DEFAULT_HASHTAB_SWITCH_THRESHOLD
 #define WORKER_INIT_NUM 64
 #define NUM_BMIN_COND 1
 #define MAX_SHM_TX ((CLEANING_DELAY_BLOCKS + QUEUEING_BLOCKS + 100) * MAX_TX_PER_BLOCK)

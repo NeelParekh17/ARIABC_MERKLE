@@ -654,6 +654,8 @@ def main() -> int:
     env.setdefault("PGPORT", str(args.port))
     env.setdefault("PGUSER", args.user)
     env.setdefault("PGDATABASE", args.db)
+    # Avoid client-side statement timeouts interrupting long deterministic runs.
+    env.setdefault("STATEMENT_TIMEOUT", "0")
 
     meta = {
         "created_utc": _now_utc_iso(),

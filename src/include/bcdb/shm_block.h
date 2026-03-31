@@ -18,12 +18,13 @@ typedef struct
 {
     BCBlockID  id;
     int        num_tx;
-    int volatile   last_committed_tx_id;
+    int volatile   last_committed_tx_id pg_attribute_aligned(PG_CACHE_LINE_SIZE);
     int volatile       num_ready;
     int volatile       num_finished;
     BCDBShmXact*       txs[MAX_TX_PER_BLOCK];
     ConditionVariable  cond;
     ConditionVariable  condRecovery;
+    ConditionVariable  condCommit;
     int num_tx_sub;
     int num_tx_qd;
     int blksize;
@@ -75,6 +76,8 @@ extern BCTxID   get_num_tx_sub(void);
 
 extern void     set_num_txqd(int num);
 extern BCTxID   get_num_txqd(void);
+extern int      bcdb_get_result_ring_slots(void);
+extern int      bcdb_get_runtime_result_ring_slots(void);
 /* delete_block_by_id, print_block_status, and set_last_committed_id
  * have been removed — they had no callers in the codebase. */
 

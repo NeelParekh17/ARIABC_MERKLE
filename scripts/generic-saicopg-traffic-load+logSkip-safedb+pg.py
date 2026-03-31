@@ -33,7 +33,9 @@ NUM = 4
 LOG_SKIP = 4000
 MAX_RETRIES = 10  # Increased for BCDB slot contention
 RETRY_BACKOFF_SEC = 0.1  # Increased for BCDB
-STATEMENT_TIMEOUT = "90s"
+# Benchmarks can legitimately have long deterministic waits/retries.
+# Keep statement timeout disabled by default; allow override via env.
+STATEMENT_TIMEOUT = "0"
 RATE_LIMIT_ENABLED = False
 
 # Metrics / reporting (best-effort; used to avoid failing the whole run on one worker error)

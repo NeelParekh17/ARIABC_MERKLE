@@ -137,6 +137,8 @@ void set_last_committed_txid( BCDBShmXact *tx)
      */
     __atomic_store_n(&blk->last_committed_tx_id, tx->tx_id, __ATOMIC_RELEASE);
     __atomic_store_n(&block_meta->num_committed, tx->tx_id, __ATOMIC_RELEASE);
+    if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
+        ConditionVariableBroadcast(&blk->condCommit);
 #if SAFEDBG2
     printf("safeDbg %s : %s: %d  blk %x txid= %d\n",
               __FILE__, __FUNCTION__, __LINE__, blk, block_meta->num_committed);
@@ -167,7 +169,45 @@ void set_blksz(int num)
 BCTxID get_blksz()
 {
     BCBlock* blk = get_block1_cached(false);
+    if (blk == NULL)
+        blk = get_block1_cached(true);
+    if (blk == NULL)
+        return 0;
     return blk->blksize;
+}
+
+int
+bcdb_get_result_ring_slots(void)
+{
+    int slots = bcdb_result_ring_slots;
+
+    if (slots < 2)
+        slots = 2;
+    if (slots > MAX_TX_PER_BLOCK)
+        slots = MAX_TX_PER_BLOCK;
+    return slots;
+}
+
+int
+bcdb_get_runtime_result_ring_slots(void)
+{
+    int workers = get_blksz();
+    int min_slots;
+    int slots = bcdb_get_result_ring_slots();
+
+    if (workers <= 0)
+        workers = bcdb_worker_count;
+    if (workers <= 0)
+        workers = 1;
+
+    min_slots = 2 * workers;
+    if (slots < min_slots)
+        slots = min_slots;
+    if (slots < 2)
+        slots = 2;
+    if (slots > MAX_TX_PER_BLOCK)
+        slots = MAX_TX_PER_BLOCK;
+    return slots;
 }
 
 /*
@@ -180,12 +220,20 @@ BCTxID get_blksz()
 void set_num_tx_sub(int num)
 {
     BCBlock* blk = get_block1_cached(false);
+    if (blk == NULL)
+        blk = get_block1_cached(true);
+    if (blk == NULL)
+        return;
     blk->num_tx_sub = num;
 }
 
 BCTxID get_num_tx_sub()
 {
     BCBlock* blk = get_block1_cached(false);
+    if (blk == NULL)
+        blk = get_block1_cached(true);
+    if (blk == NULL)
+        return 0;
     return blk->num_tx_sub;
 }
 
@@ -199,12 +247,20 @@ BCTxID get_num_tx_sub()
 void set_num_txqd(int num)
 {
     BCBlock* blk = get_block1_cached(false);
+    if (blk == NULL)
+        blk = get_block1_cached(true);
+    if (blk == NULL)
+        return;
     blk->num_tx_qd = num;
 }
 
 BCTxID get_num_txqd()
 {
     BCBlock* blk = get_block1_cached(false);
+    if (blk == NULL)
+        blk = get_block1_cached(true);
+    if (blk == NULL)
+        return 0;
     return blk->num_tx_qd;
 }
 
@@ -220,6 +276,10 @@ BCTxID get_num_txqd()
 BCTxID get_last_committed_txid(BCDBShmXact *tx)
 {
     BCBlock* blk = get_block1_cached(false);
+    if (blk == NULL)
+        blk = get_block1_cached(true);
+    if (blk == NULL)
+        return -1;
     (void) tx;
     return (BCTxID) __atomic_load_n(&blk->last_committed_tx_id, __ATOMIC_ACQUIRE);
 }
@@ -272,6 +332,11 @@ get_block_by_id(BCBlockID id, bool create_if_not_found)
             block->last_committed_tx_id = -1;
             ConditionVariableInit(&block->cond);
             ConditionVariableInit(&block->condRecovery);
+            ConditionVariableInit(&block->condCommit);
+            block->num_tx_sub = 0;
+            block->num_tx_qd = 0;
+            block->blksize = (id == 1) ? bcdb_worker_count : 0;
+            block->snapTid = 0;
             for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
             {
                 ConditionVariableInit(&block->done_conds[i]);

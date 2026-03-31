@@ -1388,8 +1388,9 @@ exec_parse_message(const char *query_string,	/* string to execute */
 	 */
 	debug_query_string = query_string;
 					if(query_string[0] == '0') {
-    set_blksz(1);
-	query_string = query_string + 9;
+						if (get_blksz() <= 0)
+							set_blksz(1);
+						query_string = query_string + 9;
 					}
 
 	pgstat_report_activity(STATE_RUNNING, query_string);
@@ -4625,7 +4626,8 @@ PostgresMain(int argc, char *argv[],
 					}
 
 					if (is_bcdb_hashed_det) {
-    set_blksz(1);
+						if (get_blksz() <= 0)
+							set_blksz(1);
 					strncpy(pfx_str, query_string+2, 8);
 					pfx_str[8] = '\0';
 					pfx_id = atoi(pfx_str);

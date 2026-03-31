@@ -425,15 +425,16 @@ clear_tx_pool(void)
 void
 rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 {
-#if !DT_CONFLICT_TRACKING
-    (void) tag;
-    return;
-#else
+    if (!bcdb_dt_conflict_tracking)
+    {
+        (void) tag;
+        return;
+    }
+
     WSTableEntryRecord *record;
     record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
     record->tag = *tag;
     LIST_INSERT_HEAD(&rs_table_record, record, link);
-#endif
 }
 
 /*
@@ -457,15 +458,16 @@ rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 void
 ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
 {
-#if !DT_CONFLICT_TRACKING
-    (void) tag;
-    return;
-#else
+    if (!bcdb_dt_conflict_tracking)
+    {
+        (void) tag;
+        return;
+    }
+
     WSTableEntryRecord *record;
     record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
     record->tag = *tag;
     LIST_INSERT_HEAD(&ws_table_record, record, link);
-#endif
 }
 
 /*
@@ -1696,9 +1698,9 @@ apply_optim_writes(void)
 int
 conflict_checkDT()
 {
-#if !DT_CONFLICT_TRACKING
-    return 0;
-#else
+    if (!bcdb_dt_conflict_tracking)
+        return 0;
+
 const int ccMax = 1;
 static int ccCount = 0;
 static int cc2Count = 0;
@@ -1742,7 +1744,6 @@ static int cc2Count = 0;
 #endif
     }
 	    return 0;
-#endif
 
 }
 
@@ -1816,9 +1817,13 @@ conflict_check(void)
 void
 publish_ws_tableDT(int id)
 {
-#if !DT_CONFLICT_TRACKING
-    return;
-#else
+    int threshold;
+    int min_threshold;
+    int workers;
+
+    if (!bcdb_dt_conflict_tracking)
+        return;
+
     bool found;
     WSTableEntry* entry;
     PREDICATELOCKTARGETTAG *tag;
@@ -1826,24 +1831,32 @@ publish_ws_tableDT(int id)
     WSTableEntryRecord *record;
     slock_t *partition_lock;
     int x = 0;
-    
-    if( HASHTAB_SWITCH_THRESHOLD <  2 * NUM_WORKERS - 1) {
+
+    workers = bcdb_worker_count;
+    if (workers <= 0)
+        workers = BCDB_DEFAULT_WORKER_COUNT;
+    if (workers <= 0)
+        workers = 1;
+
+    threshold = bcdb_dt_hashtab_switch_threshold;
+    min_threshold = 2 * workers - 1;
+    if (threshold < min_threshold) {
         ereport(ERROR,
                 (errmsg("HASHTAB_SWITCH_THRESHOLD (%d) must be >= %d",
-                        HASHTAB_SWITCH_THRESHOLD, 2 * NUM_WORKERS - 1)));
+                        threshold, min_threshold)));
     }
 
-    x = id  / HASHTAB_SWITCH_THRESHOLD; // min 2* num_w -1
+    x = id / threshold; // min 2* num_w -1
     if(x % 2 == 0) {
 	    ws_table->mapActive = ws_table->map;
-	    if(id % HASHTAB_SWITCH_THRESHOLD == 0 ) {
+	    if(id % threshold == 0 ) {
 		    shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
 		    //shm_hash_clear(rs_table->map, MAX_WRITE_CONFLICT);
 	    }
     }
     else {
 	    ws_table->mapActive = ws_table->mapB;
-	    if(id % HASHTAB_SWITCH_THRESHOLD == 0 ) {
+	    if(id % threshold == 0 ) {
 		    shm_hash_clear(ws_table->mapB, MAX_WRITE_CONFLICT);
 		    // shm_hash_clear(rs_table->mapB, MAX_WRITE_CONFLICT);
 	    }
@@ -1864,7 +1877,6 @@ publish_ws_tableDT(int id)
             entry->tx_id = activeTx->tx_id;
         SpinLockRelease(partition_lock);
     }
-#endif
 }
 
 /*
