@@ -947,6 +947,15 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"bcdb_dt_conflict_tracking", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("Enable BCDB deterministic conflict tracking."),
+			gettext_noop("When enabled, DT conflict checks and write-set publication are active at runtime.")
+		},
+		&bcdb_dt_conflict_tracking,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"enable_seqscan", PGC_USERSET, QUERY_TUNING_METHOD,
 			gettext_noop("Enables the planner's use of sequential-scan plans."),
 			NULL,
@@ -2027,6 +2036,42 @@ static struct config_bool ConfigureNamesBool[] =
 
 static struct config_int ConfigureNamesInt[] =
 {
+	{
+		{"bcdb_worker_count", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("Number of BCDB deterministic workers."),
+			gettext_noop("Used as the default deterministic worker count and queue partition width.")
+		},
+		&bcdb_worker_count,
+		BCDB_DEFAULT_WORKER_COUNT, 1, 1024,
+		NULL, NULL, NULL
+	},
+	{
+		{"bcdb_serial_gate_mode", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("BCDB serial gate waiting mode."),
+			gettext_noop("0=poll, 1=condition-variable wait.")
+		},
+		&bcdb_serial_gate_mode,
+		BCDB_SERIAL_GATE_MODE_POLL, BCDB_SERIAL_GATE_MODE_POLL, BCDB_SERIAL_GATE_MODE_CONDVAR,
+		NULL, NULL, NULL
+	},
+	{
+		{"bcdb_dt_hashtab_switch_threshold", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("BCDB DT hash-table shard switch threshold."),
+			gettext_noop("Controls epoch rotation frequency for DT write-set hash tables.")
+		},
+		&bcdb_dt_hashtab_switch_threshold,
+		BCDB_DEFAULT_HASHTAB_SWITCH_THRESHOLD, 1, INT_MAX,
+		NULL, NULL, NULL
+	},
+	{
+		{"bcdb_result_ring_slots", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("BCDB deterministic result-ring slot count."),
+			gettext_noop("Number of slots used for deterministic result handoff.")
+		},
+		&bcdb_result_ring_slots,
+		BCDB_DEFAULT_RESULT_RING_SLOTS, 2, MAX_TX_PER_BLOCK,
+		NULL, NULL, NULL
+	},
 	{
 		{"blocksize", PGC_BACKEND, CLIENT_CONN,
 			gettext_noop("BCDB block size."),

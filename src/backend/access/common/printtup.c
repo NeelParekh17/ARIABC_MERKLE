@@ -547,13 +547,8 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 		BCBlock *blk = get_block_by_id(1, false);
 		if (blk != NULL && activeTx != NULL)
 		{
-			int ring_slots = 2 * blk->blksize;
+			int ring_slots = bcdb_get_runtime_result_ring_slots();
 			int slot_idx;
-
-			if (ring_slots <= 0)
-				ring_slots = 1;
-			if (ring_slots > MAX_TX_PER_BLOCK)
-				ring_slots = MAX_TX_PER_BLOCK;
 
 			slot_idx = activeTx->tx_id % ring_slots;
 			if (slot_idx < 0)

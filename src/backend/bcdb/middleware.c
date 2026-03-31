@@ -32,6 +32,21 @@ static BCDBShmXact *parse_tx(const char* json);
 static void bcdb_middleware_attach_tx_to_block(BCDBShmXact *tx, BCBlock *block);
 static BCBlock *parse_block_with_txs(const char *json);
 static void append_hex_encoded(StringInfo out, const char *input);
+static int32 bcdb_select_worker_count(int32 requested);
+
+static int32
+bcdb_select_worker_count(int32 requested)
+{
+    int32 workers = requested;
+
+    if (workers <= 0)
+        workers = bcdb_worker_count;
+    if (workers <= 0)
+        workers = BCDB_DEFAULT_WORKER_COUNT;
+    if (workers <= 0)
+        workers = 1;
+    return workers;
+}
 
 void
 bcdb_middleware_init(bool is_oep_mode, int32 block_size)
@@ -43,15 +58,29 @@ bcdb_middleware_init(bool is_oep_mode, int32 block_size)
 
     /* Aria does not have oep mode */
     is_bcdb_master = true;
-    blocksize = block_size;
+    blocksize = bcdb_select_worker_count(block_size);
+    bcdb_worker_count = blocksize;
     bcdb_middleware_context = 
         AllocSetContextCreate(TopMemoryContext, 
                               "middleware memory context", 
                               ALLOCSET_DEFAULT_SIZES);
     old_context = MemoryContextSwitchTo(bcdb_middleware_context);
     block = get_block_by_id(1, true);
-    if(blocksize != 0) set_blksz(blocksize);
-    idle_worker_list_init(block_size);
+        if (bcdb_get_result_ring_slots() < 2 * blocksize)
+        ereport(WARNING,
+            (errmsg("bcdb_result_ring_slots=%d is lower than 2 * bcdb_worker_count=%d; runtime will clamp slots",
+                bcdb_get_result_ring_slots(), 2 * blocksize)));
+    if (block->blksize > 0 && block->blksize != blocksize)
+        ereport(ERROR,
+                (errmsg("bcdb_worker_count mismatch: existing=%d requested=%d; restart required",
+                        block->blksize, blocksize)));
+    set_blksz(blocksize);
+    if (idle_workers.num == 0)
+        idle_worker_list_init(blocksize);
+    else if (idle_workers.num != blocksize)
+        ereport(ERROR,
+                (errmsg("BCDB workers already initialized with %d workers; requested %d",
+                        idle_workers.num, blocksize)));
     MemoryContextSwitchTo(old_context);
 #if SAFEDBG2
 	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
@@ -64,9 +93,11 @@ void
 bcdb_middleware_init2(bool is_oep_mode, int32 block_size, int32 numTx, int32 timeSlot)
 {
     MemoryContext    old_context;
+    BCBlock *block;
 
     is_bcdb_master = true;
-    blocksize = block_size;
+    blocksize = bcdb_select_worker_count(block_size);
+    bcdb_worker_count = blocksize;
     numTxBurst = numTx;
     burstTime = timeSlot;
     bcdb_middleware_context = 
@@ -74,7 +105,22 @@ bcdb_middleware_init2(bool is_oep_mode, int32 block_size, int32 numTx, int32 tim
                               "middleware memory context", 
                               ALLOCSET_DEFAULT_SIZES);
     old_context = MemoryContextSwitchTo(bcdb_middleware_context);
-    idle_worker_list_init(block_size);
+    block = get_block_by_id(1, true);
+        if (bcdb_get_result_ring_slots() < 2 * blocksize)
+        ereport(WARNING,
+            (errmsg("bcdb_result_ring_slots=%d is lower than 2 * bcdb_worker_count=%d; runtime will clamp slots",
+                bcdb_get_result_ring_slots(), 2 * blocksize)));
+    if (block->blksize > 0 && block->blksize != blocksize)
+        ereport(ERROR,
+                (errmsg("bcdb_worker_count mismatch: existing=%d requested=%d; restart required",
+                        block->blksize, blocksize)));
+    set_blksz(blocksize);
+    if (idle_workers.num == 0)
+        idle_worker_list_init(blocksize);
+    else if (idle_workers.num != blocksize)
+        ereport(ERROR,
+                (errmsg("BCDB workers already initialized with %d workers; requested %d",
+                        idle_workers.num, blocksize)));
     MemoryContextSwitchTo(old_context);
 #if SAFEDBG
     printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());

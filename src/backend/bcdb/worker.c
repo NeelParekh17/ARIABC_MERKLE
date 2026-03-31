@@ -82,6 +82,54 @@ skip_ws(const char *s)
     return s;
 }
 
+static inline int
+bcdb_runtime_workers(void)
+{
+    int workers = get_blksz();
+
+    if (workers <= 0)
+        workers = bcdb_worker_count;
+    if (workers <= 0)
+        workers = 1;
+    return workers;
+}
+
+static inline int
+bcdb_runtime_result_slots(void)
+{
+    return bcdb_get_runtime_result_ring_slots();
+}
+
+static inline void
+bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
+{
+    Assert(block != NULL);
+
+    for (;;)
+    {
+        if ((get_last_committed_txid(tx) + 1) == tx->tx_id)
+            break;
+
+        CHECK_FOR_INTERRUPTS();
+
+        if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
+        {
+            ConditionVariablePrepareToSleep(&block->condCommit);
+            if ((get_last_committed_txid(tx) + 1) == tx->tx_id)
+            {
+                ConditionVariableCancelSleep();
+                break;
+            }
+            ConditionVariableSleep(&block->condCommit, WAIT_EVENT_BLOCK_COMMIT);
+            ConditionVariableCancelSleep();
+        }
+        else
+        {
+            pg_usleep(5L);
+        }
+    }
+}
+
 static bool
 completiontag_is_delete_0(const char *tag)
 {
@@ -865,14 +913,8 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
         block = get_block_by_id(1, false);
         Assert(block != NULL);
-        result_slots = block->blksize;
-        if (result_slots <= 0)
-            result_slots = 1;
-        if (result_slots > MAX_TX_PER_BLOCK)
-            result_slots = MAX_TX_PER_BLOCK;
-        read_slots = 2 * result_slots;
-        if (read_slots > MAX_TX_PER_BLOCK)
-            read_slots = MAX_TX_PER_BLOCK;
+        result_slots = bcdb_runtime_result_slots();
+        read_slots = result_slots;
 
         latest_tx_id = get_last_committed_txid(tx) ;
         if(dualTab) {
@@ -887,11 +929,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             * This avoids ConditionVariable wait-list corruption observed
             * under concurrent direct "s <txid> ..." execution.
             */
-           while (((get_last_committed_txid(tx) + 1) != tx->tx_id))
-           {
-               CHECK_FOR_INTERRUPTS();
-               pg_usleep(5L);
-           }
+           bcdb_wait_for_serial_slot(tx, block);
            {
                int read_idx = tx->tx_id % read_slots;
                if (read_idx < 0)
@@ -969,7 +1007,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
       t_sinceTx1 += t_delta; 
 
-    if((tx->tx_id)%1000 < 3*NUM_WORKERS) {
+    if((tx->tx_id)%1000 < 3 * bcdb_runtime_workers()) {
         fp = fopen("/tmp/timestamps.txt","a");
         fprintf(fp, "id= %d, pid= %d restarts=%d total_num_restarts= %d "
 #if SAFEDBG1
@@ -1096,9 +1134,13 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                            RESOURCE_RELEASE_AFTER_LOCKS, false, true);
       finish_xact_command();
 
-      /* CRITICAL FIX: Advance counter and broadcast ONLY AFTER commit.
+      /* CRITICAL FIX: Advance counter and wake ONLY AFTER commit.
        * This ensures the next transaction cannot enter its serial phase
        * until our writes are fully committed and visible. */
+            if ((get_last_committed_txid(tx) + 1) != tx->tx_id)
+                ereport(ERROR,
+                        (errmsg("BCDB serial gate invariant violated: expected next tx_id %d, got %d",
+                                get_last_committed_txid(tx) + 1, tx->tx_id)));
             set_last_committed_txid(tx);
             condSig = 1;
 
