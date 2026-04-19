@@ -56,3 +56,7 @@ lib*.pc
 
 # Exclude entire scripts directory
 /scripts/
+
+# Local AI/tooling metadata (do not commit)
+/.claude/
+/.codex
