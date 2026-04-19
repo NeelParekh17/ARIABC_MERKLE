@@ -2,6 +2,8 @@
 
 #include "kafka_console.hxx"
 
+#include <poll.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -108,6 +110,12 @@ public:
 
     bool admission_control_blocked() const;
 
+    // Block until admission control is no longer engaged or `deadline_ns` from
+    // now elapses (whichever comes first). Returns true if admission cleared
+    // before the deadline. This replaces the 1ms sleep-poll on RPC threads and
+    // lets the executor notify exactly when the queue drains.
+    bool wait_for_admission_drain(uint64_t max_wait_ns);
+
 private:
     struct notice_state;
     static void notice_processor(void* arg, const char* message);
@@ -194,6 +202,7 @@ private:
         uint64_t exec_start_ns = 0;
     };
     std::vector<conn_state> conns_;
+    std::vector<pollfd> pfds_scratch_;
     std::thread event_thread_;
     bool event_mode_ = false;
     bool det_parallel_workers_ = false;
@@ -243,6 +252,8 @@ private:
     std::atomic<uint64_t> st_queue_overload_exit_{0};
     std::atomic<uint64_t> st_queue_depth_cur_{0};
     std::atomic<bool> queue_overloaded_{false};
+    std::mutex admission_mu_;
+    std::condition_variable admission_cv_;
     std::atomic<bool> st_det_block_seen_{false};
     std::atomic<bool> st_det_block_fallback_seen_{false};
     std::atomic<uint64_t> next_dispatch_seq_{1};

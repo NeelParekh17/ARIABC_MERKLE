@@ -101,23 +101,51 @@ std::string format_result(PGresult* res) {
     if (!res) return "ERROR null_result";
     const ExecStatusType st = PQresultStatus(res);
     if (st == PGRES_TUPLES_OK) {
-        std::string out = PQcmdStatus(res) ? PQcmdStatus(res) : "SELECT";
+        const char* tag = PQcmdStatus(res);
+        std::string out = tag ? std::string(tag) : std::string("SELECT");
         const int rows = PQntuples(res);
         const int cols = PQnfields(res);
-        std::vector<std::string> canonical_rows;
-        canonical_rows.reserve(static_cast<size_t>(std::max(0, rows)));
-        for (int r = 0; r < rows; ++r) {
-            std::string row;
+        if (rows <= 0 || cols <= 0) return out;
+
+        // Sort row indices by lexicographic value of the row text,
+        // avoiding a per-row std::string copy and a post-sort re-append.
+        // Row-text format is " <v0> <v1> ..." (space then value, per column).
+        std::vector<int> order;
+        order.reserve(static_cast<size_t>(rows));
+        for (int r = 0; r < rows; ++r) order.push_back(r);
+
+        auto cmp = [&](int a, int b) {
             for (int c = 0; c < cols; ++c) {
-                row.push_back(' ');
-                const char* v = PQgetvalue(res, r, c);
-                if (v) row.append(v);
+                const char* va = PQgetvalue(res, a, c);
+                const char* vb = PQgetvalue(res, b, c);
+                const int la = PQgetlength(res, a, c);
+                const int lb = PQgetlength(res, b, c);
+                // Each field is prefixed by ' ' in the canonical row text;
+                // the leading-space is identical across rows so skip it.
+                const int n = std::min(la, lb);
+                const int d = memcmp(va ? va : "", vb ? vb : "", static_cast<size_t>(std::max(0, n)));
+                if (d != 0) return d < 0;
+                if (la != lb) return la < lb;
             }
-            canonical_rows.push_back(std::move(row));
+            return false;
+        };
+        std::sort(order.begin(), order.end(), cmp);
+
+        // Single pass: reserve exact byte size, then append once per field.
+        size_t total = out.size();
+        for (int r = 0; r < rows; ++r) {
+            for (int c = 0; c < cols; ++c) {
+                total += 1u + static_cast<size_t>(std::max(0, PQgetlength(res, r, c)));
+            }
         }
-        std::sort(canonical_rows.begin(), canonical_rows.end());
-        for (const auto& row : canonical_rows) {
-            out.append(row);
+        out.reserve(total);
+        for (int r : order) {
+            for (int c = 0; c < cols; ++c) {
+                out.push_back(' ');
+                const char* v = PQgetvalue(res, r, c);
+                const int n = PQgetlength(res, r, c);
+                if (v && n > 0) out.append(v, static_cast<size_t>(n));
+            }
         }
         return out;
     }
@@ -177,31 +205,50 @@ bool parse_det_prefixed_sql_parts(const std::string& sql,
     return true;
 }
 
-std::string json_escape(const std::string& in) {
-    std::string out;
-    out.reserve(in.size() + 16);
+std::string maybe_strip_det_prefix_for_compat(const std::string& sql,
+                                              bool det_raw_compat_mode,
+                                              int db_type) {
+    if (!det_raw_compat_mode || db_type != 1) {
+        return sql;
+    }
+    uint64_t seq = 0;
+    std::string raw_sql;
+    if (!parse_det_prefixed_sql_parts(sql, &seq, &raw_sql)) {
+        return sql;
+    }
+    if (raw_sql.empty()) {
+        return sql;
+    }
+    return raw_sql;
+}
+
+void json_escape_append(std::string& out, const std::string& in) {
+    static const char kHex[] = "0123456789abcdef";
+    out.reserve(out.size() + in.size() + 8);
     for (unsigned char ch : in) {
         switch (ch) {
-            case '\\': out += "\\\\"; break;
-            case '"': out += "\\\""; break;
-            case '\b': out += "\\b"; break;
-            case '\f': out += "\\f"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
+            case '\\': out.append("\\\\", 2); break;
+            case '"':  out.append("\\\"", 2); break;
+            case '\b': out.append("\\b", 2); break;
+            case '\f': out.append("\\f", 2); break;
+            case '\n': out.append("\\n", 2); break;
+            case '\r': out.append("\\r", 2); break;
+            case '\t': out.append("\\t", 2); break;
             default:
                 if (ch < 0x20) {
-                    std::ostringstream oss;
-                    oss << "\\u"
-                        << std::hex << std::setw(4) << std::setfill('0')
-                        << static_cast<int>(ch);
-                    out += oss.str();
+                    char buf[6] = {'\\','u','0','0', kHex[(ch >> 4) & 0xF], kHex[ch & 0xF]};
+                    out.append(buf, 6);
                 } else {
                     out.push_back(static_cast<char>(ch));
                 }
                 break;
         }
     }
+}
+
+std::string json_escape(const std::string& in) {
+    std::string out;
+    json_escape_append(out, in);
     return out;
 }
 
@@ -219,21 +266,35 @@ std::string build_bcdb_block_submit_results_sql(
     uint64_t block_id,
     const std::vector<std::pair<std::string, std::string>>& txs)
 {
-    std::ostringstream json;
-    json << "{\"bid\":" << block_id << ",\"txs\":[";
-    for (size_t i = 0; i < txs.size(); ++i) {
-        if (i) json << ",";
-        json << "{\"hash\":\"" << json_escape(txs[i].first)
-             << "\",\"sql\":\"" << json_escape(txs[i].second)
-             << "\"}";
-    }
-    json << "]}";
+    // Estimate JSON size: 32 (bid prefix) + per-tx overhead + hash/sql bodies.
+    size_t est = 64;
+    for (const auto& p : txs) est += 64 + p.first.size() + 2 * p.second.size();
 
-    std::ostringstream sql;
-    sql << "SELECT bcdb_block_submit_results('"
-        << sql_escape_literal(json.str())
-        << "');";
-    return sql.str();
+    std::string json;
+    json.reserve(est);
+    json.append("{\"bid\":");
+    json.append(std::to_string(block_id));
+    json.append(",\"txs\":[");
+    for (size_t i = 0; i < txs.size(); ++i) {
+        if (i) json.push_back(',');
+        json.append("{\"hash\":\"");
+        json_escape_append(json, txs[i].first);
+        json.append("\",\"sql\":\"");
+        json_escape_append(json, txs[i].second);
+        json.append("\"}");
+    }
+    json.append("]}");
+
+    std::string sql;
+    sql.reserve(json.size() * 2 + 48);
+    sql.append("SELECT bcdb_block_submit_results('");
+    // Inline sql_escape_literal to avoid an extra allocation+copy.
+    for (char ch : json) {
+        if (ch == '\'') sql.append("''", 2);
+        else sql.push_back(ch);
+    }
+    sql.append("');");
+    return sql;
 }
 
 bool decode_hex_char(char ch, uint8_t& out) {
@@ -504,6 +565,11 @@ void pg_executor::ensure_bcdb_initialized_for_sql(const std::string& sql) {
                   << std::endl;
         if (c) PQfinish(c);
         bcdb_init_failed_ = true;
+        if (event_mode_) {
+            det_raw_compat_mode_ = true;
+            std::cerr << "bcdb_init fallback: enabling serialized deterministic compatibility mode on node "
+                      << node_id_ << std::endl;
+        }
         return;
     }
 
@@ -519,6 +585,11 @@ void pg_executor::ensure_bcdb_initialized_for_sql(const std::string& sql) {
         if (res) PQclear(res);
         PQfinish(c);
         bcdb_init_failed_ = true;
+        if (event_mode_) {
+            det_raw_compat_mode_ = true;
+            std::cerr << "bcdb_init fallback: enabling serialized deterministic compatibility mode on node "
+                      << node_id_ << std::endl;
+        }
         return;
     }
 
@@ -539,12 +610,25 @@ pg_executor::pg_executor(int node_id, const db_options& db_opt, const kafka_opti
 {
     event_mode_ = is_event_mode(db_opt_.exec_mode);
     if (db_opt_.db_type == 1) {
+        // Parallel deterministic workers are on by default in threaded mode:
+        // ordering is enforced by the PG serial gate (worker.c:bcdb_wait_for_serial_slot),
+        // so multiple client-side worker threads dispatching in parallel stay
+        // deterministic while fully utilising the connection pool. Users can
+        // force the legacy single-worker block-batch fast path with
+        // ARIABC_DET_PARALLEL_WORKERS=0.
+        det_parallel_workers_ = !event_mode_;
         const char* v = ::getenv("ARIABC_DET_PARALLEL_WORKERS");
         if (v && *v) {
             const std::string s = trim_copy(v);
             det_parallel_workers_ =
                 !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
         }
+    }
+    if (event_mode_ && det_parallel_workers_) {
+        std::cerr << "event-mode deterministic server execution does not support parallel worker coordination; "
+                     "forcing ARIABC_DET_PARALLEL_WORKERS=0 on node "
+                  << node_id_ << std::endl;
+        det_parallel_workers_ = false;
     }
 
     if (result_sig_key_.empty()) {
@@ -807,6 +891,22 @@ bool pg_executor::admission_control_blocked() const {
     return queue_overloaded_.load(std::memory_order_relaxed);
 }
 
+bool pg_executor::wait_for_admission_drain(uint64_t max_wait_ns) {
+    if (!queue_overloaded_.load(std::memory_order_acquire)) return true;
+    if (stop_.load(std::memory_order_relaxed)) return false;
+    std::unique_lock<std::mutex> lk(admission_mu_);
+    // Re-check under the lock to avoid lost-wakeup.
+    if (!queue_overloaded_.load(std::memory_order_acquire)) return true;
+    if (stop_.load(std::memory_order_relaxed)) return false;
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::nanoseconds(max_wait_ns);
+    admission_cv_.wait_until(lk, deadline, [this] {
+        return !queue_overloaded_.load(std::memory_order_acquire) ||
+               stop_.load(std::memory_order_relaxed);
+    });
+    return !queue_overloaded_.load(std::memory_order_acquire);
+}
+
 bool pg_executor::wait_for_ordered_emit_turn(uint64_t dispatch_seq) {
     if (!(db_opt_.db_type == 1 && !event_mode_ && det_parallel_workers_) || dispatch_seq == 0) {
         return true;
@@ -884,6 +984,7 @@ void pg_executor::stop() {
     det_emit_cv_.notify_all();
     det_compat_cv_.notify_all();
     det_apply_cv_.notify_all();
+    admission_cv_.notify_all();
     if (event_mode_ && wakeup_wfd_ >= 0) {
         const uint8_t b = 1;
         (void)::write(wakeup_wfd_, &b, 1);
@@ -1148,38 +1249,34 @@ void pg_executor::worker_loop() {
         st_kafka_flush_calls_.fetch_add(1, std::memory_order_relaxed);
 
         std::string err;
-        for (size_t i = 0; i < batch_req_ids.size(); ++i) {
-            std::vector<std::string> one_req{batch_req_ids[i]};
-            std::vector<std::string> one_res{batch_results[i]};
-            std::vector<uint64_t> one_log_idx{batch_raft_log_idxs[i]};
-            std::vector<int> one_leader{batch_leader_hints[i]};
+        // True batching: build ONE multi-record payload for the whole batch,
+        // send ONCE. The consumer (gateway) already decodes 'B3' payloads
+        // with N>1 records via parse_kafka_payload_records.
+        const auto b0 = std::chrono::steady_clock::now();
+        const std::string payload = build_bin_batch_payload_v2(
+            batch_req_ids,
+            batch_results,
+            batch_raft_log_idxs,
+            batch_leader_hints,
+            static_cast<uint16_t>(node_id_),
+            result_sig_key_);
+        const auto b1 = std::chrono::steady_clock::now();
+        st_kafka_build_payload_ns_.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count()),
+            std::memory_order_relaxed);
+        st_kafka_payload_bytes_.fetch_add(static_cast<uint64_t>(payload.size()),
+                                          std::memory_order_relaxed);
 
-            const auto b0 = std::chrono::steady_clock::now();
-            const std::string payload = build_bin_batch_payload_v2(
-                one_req,
-                one_res,
-                one_log_idx,
-                one_leader,
-                static_cast<uint16_t>(node_id_),
-                result_sig_key_);
-            const auto b1 = std::chrono::steady_clock::now();
-            st_kafka_build_payload_ns_.fetch_add(
-                static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count()),
-                std::memory_order_relaxed);
-            st_kafka_payload_bytes_.fetch_add(static_cast<uint64_t>(payload.size()),
-                                              std::memory_order_relaxed);
-
-            const auto s0 = std::chrono::steady_clock::now();
-            if (!kafka_prod_.send_payload(payload, batch_req_ids[i], err)) {
-                std::cerr << "Kafka send failed: " << err << std::endl;
-            }
-            const auto s1 = std::chrono::steady_clock::now();
-            st_kafka_send_ns_.fetch_add(
-                static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
-                std::memory_order_relaxed);
+        const auto s0 = std::chrono::steady_clock::now();
+        if (!kafka_prod_.send_payload(payload, batch_req_ids.front(), err)) {
+            std::cerr << "Kafka send failed: " << err << std::endl;
         }
+        const auto s1 = std::chrono::steady_clock::now();
+        st_kafka_send_ns_.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
+            std::memory_order_relaxed);
         batch_req_ids.clear();
         batch_results.clear();
         batch_raft_log_idxs.clear();
@@ -1229,8 +1326,9 @@ void pg_executor::worker_loop() {
                 q_depth_after_pop <= queue_low_wm_) {
                 bool expected = true;
                 if (queue_overloaded_.compare_exchange_strong(
-                        expected, false, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                        expected, false, std::memory_order_release, std::memory_order_relaxed)) {
                     st_queue_overload_exit_.fetch_add(1, std::memory_order_relaxed);
+                    admission_cv_.notify_all();
                 }
             } else if (!queue_overloaded_.load(std::memory_order_relaxed) &&
                        q_depth_before_pop >
@@ -1298,7 +1396,9 @@ void pg_executor::worker_loop() {
         }
 
         PGconn* c = acquire_conn();
-        const std::string result = exec_sql(c, t.sql);
+        const std::string sql_exec =
+            maybe_strip_det_prefix_for_compat(t.sql, det_raw_compat_mode_, db_opt_.db_type);
+        const std::string result = exec_sql(c, sql_exec);
         release_conn(c);
         if (det_prefixed_parallel) {
             det_finish_apply(det_tx_seq);
@@ -1370,38 +1470,32 @@ void pg_executor::event_loop() {
         st_kafka_flush_calls_.fetch_add(1, std::memory_order_relaxed);
 
         std::string err;
-        for (size_t i = 0; i < batch_req_ids.size(); ++i) {
-            std::vector<std::string> one_req{batch_req_ids[i]};
-            std::vector<std::string> one_res{batch_results[i]};
-            std::vector<uint64_t> one_log_idx{batch_raft_log_idxs[i]};
-            std::vector<int> one_leader{batch_leader_hints[i]};
+        // True batching: build ONE multi-record payload, send ONCE.
+        const auto b0 = std::chrono::steady_clock::now();
+        const std::string payload = build_bin_batch_payload_v2(
+            batch_req_ids,
+            batch_results,
+            batch_raft_log_idxs,
+            batch_leader_hints,
+            static_cast<uint16_t>(node_id_),
+            result_sig_key_);
+        const auto b1 = std::chrono::steady_clock::now();
+        st_kafka_build_payload_ns_.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count()),
+            std::memory_order_relaxed);
+        st_kafka_payload_bytes_.fetch_add(static_cast<uint64_t>(payload.size()),
+                                          std::memory_order_relaxed);
 
-            const auto b0 = std::chrono::steady_clock::now();
-            const std::string payload = build_bin_batch_payload_v2(
-                one_req,
-                one_res,
-                one_log_idx,
-                one_leader,
-                static_cast<uint16_t>(node_id_),
-                result_sig_key_);
-            const auto b1 = std::chrono::steady_clock::now();
-            st_kafka_build_payload_ns_.fetch_add(
-                static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count()),
-                std::memory_order_relaxed);
-            st_kafka_payload_bytes_.fetch_add(static_cast<uint64_t>(payload.size()),
-                                              std::memory_order_relaxed);
-
-            const auto s0 = std::chrono::steady_clock::now();
-            if (!kafka_prod_.send_payload(payload, batch_req_ids[i], err)) {
-                std::cerr << "Kafka send failed: " << err << std::endl;
-            }
-            const auto s1 = std::chrono::steady_clock::now();
-            st_kafka_send_ns_.fetch_add(
-                static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
-                std::memory_order_relaxed);
+        const auto s0 = std::chrono::steady_clock::now();
+        if (!kafka_prod_.send_payload(payload, batch_req_ids.front(), err)) {
+            std::cerr << "Kafka send failed: " << err << std::endl;
         }
+        const auto s1 = std::chrono::steady_clock::now();
+        st_kafka_send_ns_.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
+            std::memory_order_relaxed);
         batch_req_ids.clear();
         batch_results.clear();
         batch_raft_log_idxs.clear();
@@ -1424,8 +1518,9 @@ void pg_executor::event_loop() {
             if (queued <= queue_low_wm_) {
                 bool expected = true;
                 if (queue_overloaded_.compare_exchange_strong(
-                        expected, false, std::memory_order_relaxed, std::memory_order_relaxed)) {
+                        expected, false, std::memory_order_release, std::memory_order_relaxed)) {
                     st_queue_overload_exit_.fetch_add(1, std::memory_order_relaxed);
+                    admission_cv_.notify_all();
                 }
             }
         } else {
@@ -1615,11 +1710,20 @@ void pg_executor::event_loop() {
                         break;
                     }
                     if (det_raw_compat_mode_ && inflight > 0) {
-                        // Raw deterministic SQL compatibility mode:
-                        // dispatch exactly one in-flight request at a time.
-                        // This preserves commit order and keeps Merkle valid
-                        // on installs that do not support "s <seq> <SQL>".
-                        break;
+                        // Raw deterministic SQL compatibility mode.
+                        // By default we do NOT force lockstep: the PG-side
+                        // BCDB serial gate (worker.c:bcdb_wait_for_serial_slot)
+                        // already orders writes deterministically. Lockstep is
+                        // retained as an opt-in safety valve for installs that
+                        // lack BCDB det hooks (ARIABC_DET_COMPAT_LOCKSTEP=1).
+                        static const bool k_compat_lockstep = [] {
+                            const char* v = ::getenv("ARIABC_DET_COMPAT_LOCKSTEP");
+                            if (!v || !*v) return false;
+                            const std::string s = trim_copy(v);
+                            return !(s == "0" || s == "false" || s == "FALSE" ||
+                                     s == "no" || s == "NO");
+                        }();
+                        if (k_compat_lockstep) break;
                     }
                     t = std::move(q_.front());
                     q_.pop();
@@ -1660,7 +1764,9 @@ void pg_executor::event_loop() {
             notice_state* ns = (it != notice_state_by_conn_.end()) ? it->second : nullptr;
             if (ns) ns->last_merkle_roots.clear();
 
-            if (PQsendQuery(cs.c, t.sql.c_str()) != 1) {
+            const std::string sql_exec =
+                maybe_strip_det_prefix_for_compat(t.sql, det_raw_compat_mode_, db_opt_.db_type);
+            if (PQsendQuery(cs.c, sql_exec.c_str()) != 1) {
                 std::string msg = trim_copy(PQerrorMessage(cs.c));
                 const std::string out = "ERROR " + (msg.empty() ? std::string("send_failed") : msg);
                 if (t.exec_begin_ns != 0 && now_ns >= t.exec_begin_ns) {
@@ -1714,9 +1820,12 @@ void pg_executor::event_loop() {
             }
         }
 
-        // Prepare poll set.
-        std::vector<pollfd> pfds;
-        pfds.reserve(1 + conns_.size());
+        // Prepare poll set (reuse scratch buffer to avoid per-iter alloc).
+        std::vector<pollfd>& pfds = pfds_scratch_;
+        pfds.clear();
+        if (pfds.capacity() < 1 + conns_.size()) {
+            pfds.reserve(1 + conns_.size());
+        }
         if (wakeup_rfd_ >= 0) {
             pollfd p;
             p.fd = wakeup_rfd_;

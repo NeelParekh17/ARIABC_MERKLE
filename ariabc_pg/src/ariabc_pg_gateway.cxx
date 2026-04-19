@@ -79,7 +79,18 @@ struct gateway_options {
     int poll_count = 0; // 0=forever
 
     // 1: wait for Kafka majority per request, 0: do not block on majority.
-    int wait_majority = 1;
+    // New default is direct completion path (no synchronous Kafka majority wait).
+    int wait_majority = 0;
+
+    // Completion path:
+    //   - direct: append accepted by leader, completion returned on leader path.
+    //   - kafka_majority: wait for Kafka majority terminal result synchronously.
+    std::string completion_path = "direct";
+
+    // Validation mode:
+    //   - async_hash: follower divergence is observed asynchronously via Kafka.
+    //   - strict_majority: legacy strict majority validation semantics.
+    std::string validation_mode = "async_hash";
 
     // Optional override for deterministic mode in-flight window.
     // 0 => auto (larger pipeline for modern multi-core boxes).
@@ -108,6 +119,11 @@ struct gateway_options {
 
     int total_nodes = 0; // 0 => use nodes.size()
     size_t vote_store_max_entries = 300000;
+
+    // When 1: submit each request to ALL nodes (broadcast), not just the leader.
+    // Used for kafka-only-no-raft profile where ordering is provided by the
+    // gateway itself (sequential broadcast) rather than Raft consensus.
+    int broadcast_to_all = 0;
 };
 
 void usage(const char* argv0) {
@@ -120,10 +136,11 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--detWindow <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>]\n";
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority] [--detWindow <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1]\n";
 }
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
+    bool completion_path_explicit = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto need = [&](const char* flag) -> std::string {
@@ -175,6 +192,11 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.poll_count = std::stoi(need("--pollCount"));
             } else if (a == "--waitMajority") {
                 opt.wait_majority = std::stoi(need("--waitMajority"));
+            } else if (a == "--completionPath") {
+                opt.completion_path = ariabc_pg::trim_copy(need("--completionPath"));
+                completion_path_explicit = true;
+            } else if (a == "--validationMode") {
+                opt.validation_mode = ariabc_pg::trim_copy(need("--validationMode"));
             } else if (a == "--detWindow") {
                 opt.det_window = std::stoi(need("--detWindow"));
             } else if (a == "--dbConnPoolSize") {
@@ -191,6 +213,8 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.total_nodes = std::stoi(need("--totalNodes"));
             } else if (a == "--voteStoreMax") {
                 opt.vote_store_max_entries = static_cast<size_t>(std::stoull(need("--voteStoreMax")));
+            } else if (a == "--broadcastToAll") {
+                opt.broadcast_to_all = std::stoi(need("--broadcastToAll"));
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -235,6 +259,30 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     if (opt.wait_majority != 0 && opt.wait_majority != 1) {
         err = "invalid --waitMajority (expected 0 or 1)";
         return false;
+    }
+    if (opt.completion_path != "direct" && opt.completion_path != "kafka_majority") {
+        err = "invalid --completionPath (expected direct|kafka_majority)";
+        return false;
+    }
+    if (opt.validation_mode != "async_hash" && opt.validation_mode != "strict_majority") {
+        err = "invalid --validationMode (expected async_hash|strict_majority)";
+        return false;
+    }
+    // completion_path is authoritative when explicitly provided.
+    if (completion_path_explicit) {
+        if (opt.completion_path == "direct") {
+            opt.wait_majority = 0;
+            opt.broadcast_to_all = 0;
+        } else if (opt.completion_path == "kafka_majority") {
+            opt.wait_majority = 1;
+        }
+    } else {
+        // Keep completion_path/legacy waitMajority coherent for profile/reporting.
+        opt.completion_path = (opt.wait_majority == 1) ? "kafka_majority" : "direct";
+    }
+    if (opt.validation_mode == "strict_majority" && opt.wait_majority == 0) {
+        opt.wait_majority = 1;
+        opt.completion_path = "kafka_majority";
     }
     if (opt.det_window < 0) {
         err = "invalid --detWindow (expected >= 0)";
@@ -1120,6 +1168,11 @@ struct vote_store {
             e.terminal_set = true;
             e.terminal_result.clear();
             e.terminal_error = "duplicate_identity_conflict";
+            // Ensure the ready_reqs_ fast path picks this up without relying
+            // on any O(N) fallback scan in wait_any_majority().
+            if (ready_seen_.insert(rec.req_num).second) {
+                ready_reqs_.push_back(rec.req_num);
+            }
             std::ostringstream oss;
             const std::string req_id = rec.req_id.empty() ? first_req_id_locked(e) : rec.req_id;
             oss << "{\"type\":\"duplicate_identity_conflict\""
@@ -1246,22 +1299,12 @@ struct vote_store {
         out_result.clear();
         out_error.clear();
         std::unique_lock<std::mutex> lk(mu_);
+        // Fast path only: the producer (apply_record / refresh_majority_locked /
+        // duplicate_identity_conflict) pushes req_num onto ready_reqs_ whenever
+        // the entry may have transitioned to terminal. Consumer just drains that
+        // queue — no O(N) scan of `inflight` per wakeup.
         auto terminal = [&]() -> bool {
-            if (pop_terminal_inflight_locked(inflight, out_req_num, out_result, out_error)) {
-                return true;
-            }
-            for (auto it_req = inflight.begin(); it_req != inflight.end(); ++it_req) {
-                std::string err;
-                std::string result;
-                if (resolve_terminal_locked(*it_req, result, err)) {
-                    out_req_num = *it_req;
-                    out_result = std::move(result);
-                    out_error = std::move(err);
-                    inflight.erase(it_req);
-                    return true;
-                }
-            }
-            return false;
+            return pop_terminal_inflight_locked(inflight, out_req_num, out_result, out_error);
         };
 
         if (terminal()) return out_error.empty();
@@ -1368,21 +1411,7 @@ struct vote_store {
         out_result.clear();
         out_error.clear();
         std::lock_guard<std::mutex> lk(mu_);
-        if (pop_terminal_inflight_locked(inflight, out_req_num, out_result, out_error)) {
-            return true;
-        }
-        for (auto it_req = inflight.begin(); it_req != inflight.end(); ++it_req) {
-            std::string err;
-            std::string result;
-            if (resolve_terminal_locked(*it_req, result, err)) {
-                out_req_num = *it_req;
-                out_result = std::move(result);
-                out_error = std::move(err);
-                inflight.erase(it_req);
-                return true;
-            }
-        }
-        return false;
+        return pop_terminal_inflight_locked(inflight, out_req_num, out_result, out_error);
     }
 
 private:
@@ -1845,6 +1874,111 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
     return false;
 }
 
+// Broadcast a request to ALL nodes in order, waiting for each to accept.
+// Used in kafka-only-no-raft mode: the gateway itself provides total ordering
+// by sending each transaction to all replicas sequentially before moving on.
+// Correctness: all nodes receive transactions in identical sequence => determinism.
+bool submit_to_all_nodes(const std::vector<host_port>& nodes,
+                         const client_api_request& req,
+                         std::string& err)
+{
+    // Thread-local persistent connections: one fd per node index.
+    static thread_local std::vector<int> node_fds;
+    if (node_fds.size() < nodes.size()) {
+        node_fds.resize(nodes.size(), -1);
+    }
+
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const host_port& hp = nodes[i];
+
+        // Reconnect if needed.
+        if (node_fds[i] < 0) {
+            std::string cerr;
+            node_fds[i] = connect_tcp(hp.host, hp.port, cerr);
+            if (node_fds[i] < 0) {
+                err = "broadcast connect to node " + std::to_string(i) + " (" +
+                      hp.host + ":" + std::to_string(hp.port) + ") failed: " + cerr;
+                return false;
+            }
+        }
+
+        std::string werr;
+        if (!write_request_frame(node_fds[i], req, werr)) {
+            ::close(node_fds[i]);
+            node_fds[i] = -1;
+            err = "broadcast write to node " + std::to_string(i) + " failed: " + werr;
+            return false;
+        }
+
+        client_api_response resp;
+        if (!read_response_frame(node_fds[i], resp, werr)) {
+            ::close(node_fds[i]);
+            node_fds[i] = -1;
+            err = "broadcast read from node " + std::to_string(i) + " failed: " + werr;
+            return false;
+        }
+
+        if (resp.status != 0) {
+            err = "broadcast: node " + std::to_string(i) + " rejected: " + resp.msg;
+            return false;
+        }
+    }
+    return true;
+}
+
+// Parallel broadcast: issue submits to all N nodes concurrently via the async
+// submitter, then wait for every ACK. Latency becomes max(RTT_i) instead of
+// sum(RTT_i). Preserves "all nodes accepted" semantics — any single-node
+// rejection fails the whole broadcast, matching the sequential variant.
+bool submit_to_all_nodes_parallel(async_cluster_submitter& submitter,
+                                  const std::vector<host_port>& nodes,
+                                  const client_api_request& req,
+                                  std::string& err)
+{
+    err.clear();
+    const size_t n = nodes.size();
+    if (n == 0) { err = "no nodes"; return false; }
+
+    std::vector<std::shared_ptr<async_cluster_submitter::submit_ctx>> ctxs;
+    ctxs.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        std::shared_ptr<async_cluster_submitter::submit_ctx> ctx;
+        std::string serr;
+        if (!submitter.submit_async_to_node(i, req, ctx, serr)) {
+            err = "broadcast async-submit to node " + std::to_string(i) + " failed: " + serr;
+            // Drain any already-issued contexts so we don't leak reply data.
+            for (auto& c : ctxs) {
+                client_api_response resp;
+                std::string werr;
+                (void)submitter.wait_submit(c, resp, werr);
+            }
+            return false;
+        }
+        ctxs.push_back(std::move(ctx));
+    }
+
+    bool ok = true;
+    for (size_t i = 0; i < ctxs.size(); ++i) {
+        client_api_response resp;
+        std::string werr;
+        if (!submitter.wait_submit(ctxs[i], resp, werr)) {
+            if (ok) {
+                err = "broadcast wait from node " + std::to_string(i) + " failed: " + werr;
+                ok = false;
+            }
+            continue;
+        }
+        if (resp.status != 0) {
+            if (ok) {
+                err = "broadcast: node " + std::to_string(i) + " rejected: " + resp.msg;
+                ok = false;
+            }
+            continue;
+        }
+    }
+    return ok;
+}
+
 bool submit_to_cluster_event(async_cluster_submitter& submitter,
                              const std::vector<host_port>& nodes,
                              std::atomic<size_t>& rr_idx,
@@ -2037,6 +2171,7 @@ int main(int argc, char** argv) {
 #endif
 
     const bool majority_wait_enabled = (opt.wait_majority == 1);
+    const bool async_hash_validation = (opt.validation_mode == "async_hash");
 
     const std::string submit_mode = ariabc_pg::trim_copy(opt.submit_mode);
     std::unique_ptr<ariabc_pg::async_cluster_submitter> submitter;
@@ -2054,7 +2189,7 @@ int main(int argc, char** argv) {
     ariabc_pg::kafka_console_consumer consumer;
     ariabc_pg::kafka_console_producer err_prod;
     bool kafka_enabled = false;
-    if (majority_wait_enabled && !opt.kafka_bootstrap.empty()) {
+    if (!opt.kafka_bootstrap.empty()) {
         std::vector<std::string> result_topics{opt.result_topic};
         std::cout << "Kafka result topic: " << opt.result_topic << std::endl;
         std::string kerr;
@@ -2071,14 +2206,28 @@ int main(int argc, char** argv) {
             std::cerr << "Kafka errTopic producer disabled: " << kerr << std::endl;
         }
     }
+    if (majority_wait_enabled && opt.kafka_bootstrap.empty()) {
+        std::cerr << "completion_path=kafka_majority requires --kafkaBootstrap" << std::endl;
+        return 1;
+    }
 
     if (socket_mode && !kafka_enabled) {
         std::cerr << "socket mode requires Kafka (set --kafkaBootstrap)" << std::endl;
         return 1;
     }
 
+    std::cout << "completion_path=" << opt.completion_path
+              << " validation_mode=" << opt.validation_mode
+              << " waitMajority=" << (majority_wait_enabled ? 1 : 0)
+              << std::endl;
+
     if (!majority_wait_enabled) {
-        std::cout << "waitMajority=0: not waiting for Kafka majority replies" << std::endl;
+        std::cout << "waitMajority=0: synchronous Kafka majority wait disabled (direct completion path)"
+                  << std::endl;
+        if (kafka_enabled && async_hash_validation) {
+            std::cout << "async_hash validation enabled: consuming follower replies asynchronously"
+                      << std::endl;
+        }
     }
 
     std::atomic<bool> stop(false);
@@ -2207,6 +2356,16 @@ int main(int argc, char** argv) {
         req.req_id = req_id;
         req.sql = sql_in;
 
+        if (opt.broadcast_to_all) {
+            // kafka-only-no-raft: broadcast to every node.
+            // When the async submitter is available, fan out in parallel
+            // (latency = max(RTT_i) instead of sum). Fall back to the
+            // thread-local sequential sockets otherwise.
+            if (submitter) {
+                return ariabc_pg::submit_to_all_nodes_parallel(*submitter, nodes, req, out_err);
+            }
+            return ariabc_pg::submit_to_all_nodes(nodes, req, out_err);
+        }
         if (submitter) {
             return ariabc_pg::submit_to_cluster_event(*submitter, nodes, rr_idx, req, out_err);
         }
@@ -2967,6 +3126,8 @@ int main(int argc, char** argv) {
         const double lag_ms_max = kafka_consume_lag_ns_max.load(std::memory_order_relaxed) / 1000000.0;
         std::cout
             << "PROFILE_GATEWAY "
+            << " completion_path=" << opt.completion_path
+            << " validation_mode=" << opt.validation_mode
             << " submit_mode=" << (submitter ? "event" : "blocking")
             << " submit_attempts=" << sub_attempts
             << " conn_calls=" << sub_conn_calls

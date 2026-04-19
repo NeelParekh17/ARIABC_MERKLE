@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa neel@10.129.148.240 \"pgrep -fa 'ariabc_pg_gateway\\\\|ariabc_pg_server\\\\|bench_nuraft' 2>/dev/null | head -5\")",
+      "Bash(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -i '~/.ssh/id_rsa' neel@10.129.148.248 ':*)",
+      "Bash(ssh -i /home/neel/.ssh/id_rsa -o StrictHostKeyChecking=no neel@10.129.148.240 'ls /tmp/ariabc_cluster/scripts/bench_full_results/distributed_20260403_122107/ 2>/dev/null | head -20')",
+      "Bash(ssh -i /home/neel/.ssh/id_rsa -o StrictHostKeyChecking=no neel@10.129.148.240 'ls /tmp/ariabc_cluster/scripts/bench_full_results/distributed_20260403_122107/mode=det/ 2>/dev/null | head -20')"
+    ]
+  }
+}

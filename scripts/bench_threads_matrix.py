@@ -122,6 +122,10 @@ def _run(
                 check=False,
             )
             return int(proc.returncode)
+        except subprocess.TimeoutExpired:
+            # Keep matrix execution alive when a single workload case hangs.
+            # 124 mirrors GNU timeout's timeout exit code.
+            return 124
         finally:
             if stdin is not None:
                 stdin.close()
@@ -149,6 +153,96 @@ def _psql_value(psql: str, *, db: str, port: int, user: str, query: str, cwd: Pa
     if proc.returncode != 0:
         return None
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+
+
+def _capture_timeout_diagnostics(
+    *,
+    case_dir: Path,
+    psql: str,
+    db: str,
+    port: int,
+    user: str,
+    cwd: Path,
+    env: dict[str, str],
+    server_log: Path,
+) -> Optional[Path]:
+    diag_path = case_dir / "timeout_diagnostics.txt"
+    lines: list[str] = []
+    lines.append(f"captured_utc={_now_utc_iso()}")
+    lines.append(f"db={db} user={user} port={port}")
+    lines.append("")
+
+    queries: list[tuple[str, str]] = [
+        (
+            "pg_stat_activity (workload backends)",
+            "select pid,state,wait_event_type,wait_event,"
+            "extract(epoch from now()-query_start)::int as sec,left(query,140) "
+            "from pg_stat_activity "
+            "where datname = current_database() and usename = current_user "
+            "and query not ilike '%pg_stat_activity%' "
+            "order by query_start;",
+        ),
+        (
+            "pg_locks (workload backends)",
+            "select l.pid,l.locktype,l.mode,l.granted,l.relation::regclass,l.page,l.tuple,l.transactionid "
+            "from pg_locks l "
+            "join pg_stat_activity a on a.pid=l.pid "
+            "where a.datname = current_database() and a.usename = current_user "
+            "order by l.pid,l.granted,l.locktype;",
+        ),
+        (
+            "blocking summary",
+            "select pid, cardinality(pg_blocking_pids(pid)) as blockers, wait_event_type, wait_event, left(query,140) "
+            "from pg_stat_activity "
+            "where datname = current_database() and usename = current_user "
+            "and query not ilike '%pg_stat_activity%' "
+            "order by pid;",
+        ),
+    ]
+
+    for title, query in queries:
+        lines.append(f"=== {title} ===")
+        argv = [
+            psql,
+            "-X",
+            "-q",
+            "-p",
+            str(port),
+            "-U",
+            user,
+            "-d",
+            db,
+            "-At",
+            "-c",
+            query,
+        ]
+        try:
+            proc = subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True, text=True, check=False)
+            lines.append(f"returncode={proc.returncode}")
+            if proc.stdout.strip():
+                lines.extend(proc.stdout.rstrip("\n").splitlines())
+            if proc.stderr.strip():
+                lines.append("-- stderr --")
+                lines.extend(proc.stderr.rstrip("\n").splitlines())
+        except Exception as e:
+            lines.append(f"query_failed={e}")
+        lines.append("")
+
+    lines.append("=== server.log tail (last 120 lines) ===")
+    if server_log.exists():
+        try:
+            tail_lines = server_log.read_text(errors="replace").splitlines()[-120:]
+            lines.extend(tail_lines)
+        except Exception as e:
+            lines.append(f"read_server_log_failed={e}")
+    else:
+        lines.append(f"missing_server_log={server_log}")
+
+    try:
+        diag_path.write_text("\n".join(lines) + "\n")
+        return diag_path
+    except Exception:
+        return None
 
 
 def _parse_workload_metrics(log_text: str) -> tuple[Optional[float], Optional[float], Optional[int]]:
@@ -596,6 +690,18 @@ def main() -> int:
         action="store_true",
         help="Do not restart server before each run (ignored for det/safedb).",
     )
+    parser.add_argument(
+        "--timeout-workload-s",
+        type=int,
+        default=0,
+        help="Per-case workload process timeout in seconds; 0 disables timeout.",
+    )
+    parser.add_argument(
+        "--timeout-workload-det-s",
+        type=int,
+        default=1800,
+        help="Per-case workload timeout for det/safedb mode; 0 falls back to --timeout-workload-s.",
+    )
 
     args = parser.parse_args()
 
@@ -648,12 +754,19 @@ def main() -> int:
         psql_src = repo_root / "src" / "bin" / "psql" / "psql"
         psql_path = str(psql_src) if psql_src.exists() else "/work/ARIABC/install/bin/psql"
     python_path = os.environ.get("ARIABC_PYTHON", sys.executable or "python3")
+    server_log_path = repo_root / "server.log"
 
     env = dict(os.environ)
     env.setdefault("PGHOST", "localhost")
     env.setdefault("PGPORT", str(args.port))
     env.setdefault("PGUSER", args.user)
     env.setdefault("PGDATABASE", args.db)
+    # generic-saicopg-traffic-load+logSkip-safedb+pg.py reads DB_* env vars,
+    # not PG* vars; set both so remote/non-default socket layouts work.
+    env.setdefault("DB_HOST", "localhost")
+    env.setdefault("DB_PORT", str(args.port))
+    env.setdefault("DB_USER", args.user)
+    env.setdefault("DB_NAME", args.db)
     # Avoid client-side statement timeouts interrupting long deterministic runs.
     env.setdefault("STATEMENT_TIMEOUT", "0")
 
@@ -668,6 +781,10 @@ def main() -> int:
         "rate": args.rate,
         "rates": rates,
         "db": {"name": args.db, "user": args.user, "port": args.port},
+        "timeouts": {
+            "workload_s": args.timeout_workload_s,
+            "workload_det_s": args.timeout_workload_det_s,
+        },
         "commands": {
             "start_server": str(start_server),
             "restore_sql": str(restore_sql),
@@ -790,6 +907,28 @@ def main() -> int:
 
                             workload_exit = -1
                             if restore_exit == 0:
+                                case_env = dict(env)
+                                case_env.setdefault("PYTHONUNBUFFERED", "1")
+                                if db_type == 1:
+                                    # Deterministic runs against a freshly restarted server must start at txid 0.
+                                    # Force a clean start even if the parent shell has DET_START_SEQ set.
+                                    case_env["DET_START_SEQ"] = "0"
+                                # Publish a pointer file so an external monitor can follow the
+                                # active workload output (workload.out) for this run.
+                                pointer_path = out_dir / "current_case.json"
+                                try:
+                                    pointer_payload = {
+                                        "case_dir": str(case_dir),
+                                        "mode": mode,
+                                        "workload": workload,
+                                        "threads": th,
+                                        "rate": rate,
+                                        "run": run_idx,
+                                        "ts": _now_utc_iso(),
+                                    }
+                                    pointer_path.write_text(json.dumps(pointer_payload) + "\n")
+                                except Exception as _e:
+                                    print(f"WARNING: could not write current_case pointer: {_e}", file=sys.stderr)
                                 workload_argv = [
                                     python_path,
                                     str(workload_py),
@@ -801,13 +940,30 @@ def main() -> int:
                                 if rate > 0:
                                     workload_argv.append(str(rate))
 
+                                timeout_workload_s = args.timeout_workload_s
+                                if db_type == 1 and args.timeout_workload_det_s > 0:
+                                    timeout_workload_s = args.timeout_workload_det_s
+
+                                timeout_for_run: Optional[int] = None
+                                if timeout_workload_s > 0:
+                                    timeout_for_run = int(timeout_workload_s)
+
                                 workload_exit = _run(
                                     workload_argv,
                                     cwd=scripts_dir,
-                                    env=env,
+                                    env=case_env,
                                     stdout_path=workload_log_out,
                                     stderr_path=workload_log_err,
+                                    timeout_s=timeout_for_run,
                                 )
+
+                                # Remove the pointer after the workload process completes so
+                                # the monitor knows we're idle.
+                                try:
+                                    if pointer_path.exists():
+                                        pointer_path.unlink()
+                                except Exception as _e:
+                                    print(f"WARNING: could not remove current_case pointer: {_e}", file=sys.stderr)
 
                             t1 = time.monotonic()
 
@@ -823,10 +979,22 @@ def main() -> int:
                             count_s = None
                             root_hash = None
                             verify = None
+                            timeout_diag_path: Optional[Path] = None
                             if restore_exit == 0:
                                 count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=env)
                                 root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=env)
                                 verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=env)
+                                if workload_exit == 124:
+                                    timeout_diag_path = _capture_timeout_diagnostics(
+                                        case_dir=case_dir,
+                                        psql=psql_path,
+                                        db=args.db,
+                                        port=args.port,
+                                        user=args.user,
+                                        cwd=scripts_dir,
+                                        env=env,
+                                        server_log=server_log_path,
+                                    )
 
                             row_count = None
                             if count_s is not None and count_s.strip().isdigit():
@@ -840,6 +1008,10 @@ def main() -> int:
                                 notes_parts.append("workload_skipped=1")
                             elif workload_exit != 0:
                                 notes_parts.append(f"workload_exit={workload_exit}")
+                                if workload_exit == 124:
+                                    notes_parts.append("workload_timeout=1")
+                                    if timeout_diag_path is not None:
+                                        notes_parts.append(f"timeout_diag={timeout_diag_path.name}")
                             elif verify is not None and verify.strip().lower() not in ("t", "f", ""):
                                 notes_parts.append(f"unexpected_verify={verify!r}")
                             notes = ";".join(notes_parts)

@@ -67,6 +67,94 @@ static bool xactCallbackRegistered = false;
 static bool subxactCallbackRegistered = false;
 
 /*
+ * Per-backend, per-transaction cache of merkle metapage values.
+ *
+ * merkle_read_meta() pins + share-locks the metapage (block 0) on every call.
+ * During apply_optim_writes(), we can call merkle_update_tree_path() dozens
+ * of times on the SAME index within one tx — each call doing the metapage
+ * round-trip. Once the tree geometry (partitions, fanout, etc.) is read,
+ * it's stable for the lifetime of the relation (geometry changes require
+ * AccessExclusiveLock, so no concurrent DML can change it).
+ *
+ * Cache is cleared on XactCallback so a new txn always re-reads at least
+ * once (protects against REINDEX-induced geometry changes between txns).
+ */
+#define MERKLE_META_CACHE_SLOTS 4
+typedef struct MerkleMetaCacheEntry {
+    Oid  relid;              /* InvalidOid => empty slot */
+    int  numPartitions;
+    int  leavesPerPartition;
+    int  nodesPerPartition;
+    int  totalNodes;
+    int  totalLeaves;
+    int  nodesPerPage;
+    int  numTreePages;
+    int  fanout;
+} MerkleMetaCacheEntry;
+static MerkleMetaCacheEntry merkle_meta_cache[MERKLE_META_CACHE_SLOTS];
+static bool merkle_meta_cache_registered = false;
+
+static void
+merkle_meta_cache_clear(void)
+{
+    int i;
+    for (i = 0; i < MERKLE_META_CACHE_SLOTS; ++i)
+        merkle_meta_cache[i].relid = InvalidOid;
+}
+
+static void
+merkle_meta_cache_xact_callback(XactEvent event, void *arg)
+{
+    (void) arg;
+    if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT ||
+        event == XACT_EVENT_PARALLEL_COMMIT || event == XACT_EVENT_PARALLEL_ABORT ||
+        event == XACT_EVENT_PREPARE)
+    {
+        merkle_meta_cache_clear();
+    }
+}
+
+static const MerkleMetaCacheEntry *
+merkle_meta_cache_lookup(Oid relid)
+{
+    int i;
+    for (i = 0; i < MERKLE_META_CACHE_SLOTS; ++i)
+        if (merkle_meta_cache[i].relid == relid)
+            return &merkle_meta_cache[i];
+    return NULL;
+}
+
+static void
+merkle_meta_cache_store(Oid relid,
+                        int numPartitions, int leavesPerPartition,
+                        int nodesPerPartition, int totalNodes, int totalLeaves,
+                        int nodesPerPage, int numTreePages, int fanout)
+{
+    int i;
+    /* LRU-ish: replace first empty slot, else replace slot 0. */
+    int target = 0;
+    for (i = 0; i < MERKLE_META_CACHE_SLOTS; ++i)
+    {
+        if (merkle_meta_cache[i].relid == InvalidOid) { target = i; break; }
+        if (merkle_meta_cache[i].relid == relid)      { target = i; break; }
+    }
+    if (!merkle_meta_cache_registered)
+    {
+        RegisterXactCallback(merkle_meta_cache_xact_callback, NULL);
+        merkle_meta_cache_registered = true;
+    }
+    merkle_meta_cache[target].relid              = relid;
+    merkle_meta_cache[target].numPartitions      = numPartitions;
+    merkle_meta_cache[target].leavesPerPartition = leavesPerPartition;
+    merkle_meta_cache[target].nodesPerPartition  = nodesPerPartition;
+    merkle_meta_cache[target].totalNodes         = totalNodes;
+    merkle_meta_cache[target].totalLeaves        = totalLeaves;
+    merkle_meta_cache[target].nodesPerPage       = nodesPerPage;
+    merkle_meta_cache[target].numTreePages       = numTreePages;
+    merkle_meta_cache[target].fanout             = fanout;
+}
+
+/*
  * Optional per-transaction reporting of touched nodes (GUC-controlled).
  * We record the pre-change hash for each touched node and, at PRE_COMMIT,
  * emit a NOTICE table of nodes whose final hash differs from the initial.
@@ -1207,7 +1295,22 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
     Page                page;
     MerkleMetaPageData *meta;
     int                 effectiveFanout;
-    
+    Oid                 cache_relid = RelationGetRelid(indexRel);
+    const MerkleMetaCacheEntry *cached = merkle_meta_cache_lookup(cache_relid);
+
+    if (cached != NULL)
+    {
+        if (numPartitions)      *numPartitions      = cached->numPartitions;
+        if (leavesPerPartition) *leavesPerPartition = cached->leavesPerPartition;
+        if (nodesPerPartition)  *nodesPerPartition  = cached->nodesPerPartition;
+        if (totalNodes)         *totalNodes         = cached->totalNodes;
+        if (totalLeaves)        *totalLeaves        = cached->totalLeaves;
+        if (nodesPerPage)       *nodesPerPage       = cached->nodesPerPage;
+        if (numTreePages)       *numTreePages       = cached->numTreePages;
+        if (fanout)             *fanout             = cached->fanout;
+        return;
+    }
+
     buf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
     LockBuffer(buf, BUFFER_LOCK_SHARE);
     page = BufferGetPage(buf);
@@ -1286,7 +1389,17 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
         *numTreePages = meta->numTreePages;
     if (fanout)
         *fanout = effectiveFanout;
-    
+
+    merkle_meta_cache_store(cache_relid,
+                            meta->numPartitions,
+                            meta->leavesPerPartition,
+                            meta->nodesPerPartition,
+                            meta->totalNodes,
+                            meta->numPartitions * meta->leavesPerPartition,
+                            meta->nodesPerPage,
+                            meta->numTreePages,
+                            effectiveFanout);
+
     UnlockReleaseBuffer(buf);
 }
 
