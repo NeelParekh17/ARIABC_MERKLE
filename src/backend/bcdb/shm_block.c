@@ -146,6 +146,67 @@ void set_last_committed_txid( BCDBShmXact *tx)
 }
 
 /*
+ * advance_last_committed_txid
+ *
+ * T3: non-blocking replacement for the old
+ * bcdb_wait_for_prev_committed + set_last_committed_txid pair.
+ *
+ * Each tx tries a single CAS: advance last_committed_tx_id from
+ * (my_tx_id - 1) to my_tx_id.  If the predecessor has not committed yet,
+ * the CAS fails and the function returns immediately — the predecessor will
+ * carry the scan through this tx's slot when it finishes.
+ *
+ * After a successful CAS, the function eagerly scans forward through any
+ * consecutive successor slots that have already set result_committed_txid,
+ * so the fastest-finishing thread amortises the watermark advance for all.
+ */
+BCBlock *
+bcdb_get_block1(void)
+{
+    return get_block1_cached(false);
+}
+
+void
+advance_last_committed_txid(BCDBShmXact *tx)
+{
+    BCBlock *blk   = get_block1_cached(true);
+    int      slots = bcdb_get_runtime_result_ring_slots();
+    BCTxID   my_id = tx->tx_id;
+    BCTxID   prev  = my_id - 1;
+    BCTxID   cur;
+
+    if (slots < 1)
+        slots = 1;
+
+    if (!__sync_bool_compare_and_swap(&blk->last_committed_tx_id, prev, my_id))
+        return;
+
+    __atomic_store_n(&block_meta->num_committed, my_id, __ATOMIC_RELEASE);
+    if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
+        ConditionVariableBroadcast(&blk->condCommit);
+
+    cur = my_id;
+    for (int step = 0; step < slots; step++)
+    {
+        BCTxID next_id   = cur + 1;
+        int    next_slot = (int)(next_id % (BCTxID)slots);
+        BCTxID published;
+
+        if (next_slot < 0)
+            next_slot += slots;
+
+        published = __atomic_load_n(&blk->result_committed_txid[next_slot],
+                                    __ATOMIC_ACQUIRE);
+        if (published != next_id)
+            break;
+        if (!__sync_bool_compare_and_swap(&blk->last_committed_tx_id, cur, next_id))
+            break;
+        __atomic_store_n(&block_meta->num_committed, next_id, __ATOMIC_RELEASE);
+        cur = next_id;
+    }
+}
+
+/*
  * set_blksz / get_blksz
  *
  * Accessors for the "block size" (number of transactions per blockchain
@@ -285,6 +346,47 @@ BCTxID get_last_committed_txid(BCDBShmXact *tx)
 }
 
 /*
+ * Lever D publish-phase gate accessors.
+ *
+ * published_max_tx_id is advanced atomically immediately after
+ * publish_ws_tableDT in worker.c (Lever D v2). The serial gate waits on
+ * published_max instead of last_committed so apply/finish can run in
+ * parallel across backends.
+ *
+ * CONDVAR mode broadcast is intentionally omitted — the gate path uses
+ * POLL by default (see bcdb_wait_for_serial_slot) and the CONDVAR mode has
+ * historic wait-list corruption concerns under concurrent direct exec.
+ */
+void set_published_max_txid(BCDBShmXact *tx)
+{
+    BCBlock* blk = get_block1_cached(true);
+    BCTxID current;
+
+    current = (BCTxID) __atomic_load_n(&blk->published_max_tx_id, __ATOMIC_ACQUIRE);
+    while (current < tx->tx_id)
+    {
+        if (__atomic_compare_exchange_n(&blk->published_max_tx_id,
+                                        &current,
+                                        tx->tx_id,
+                                        false,
+                                        __ATOMIC_RELEASE,
+                                        __ATOMIC_ACQUIRE))
+            break;
+    }
+}
+
+BCTxID get_published_max_txid(BCDBShmXact *tx)
+{
+    BCBlock* blk = get_block1_cached(false);
+    if (blk == NULL)
+        blk = get_block1_cached(true);
+    if (blk == NULL)
+        return -1;
+    (void) tx;
+    return (BCTxID) __atomic_load_n(&blk->published_max_tx_id, __ATOMIC_ACQUIRE);
+}
+
+/*
  * get_block_by_id
  *
  * Looks up — and optionally creates — a BCBlock entry in the shared-memory
@@ -330,6 +432,7 @@ get_block_by_id(BCBlockID id, bool create_if_not_found)
             block->num_ready = 0;
             block->num_finished = 0;
             block->last_committed_tx_id = -1;
+            block->published_max_tx_id = -1;
             ConditionVariableInit(&block->cond);
             ConditionVariableInit(&block->condRecovery);
             ConditionVariableInit(&block->condCommit);
@@ -341,6 +444,8 @@ get_block_by_id(BCBlockID id, bool create_if_not_found)
             {
                 ConditionVariableInit(&block->done_conds[i]);
                 memset(&block->result[i], 0, 1024);
+                block->result_committed_txid[i] = -1;
+                block->result_commit_xid[i] = InvalidTransactionId;
             }
         }
         SpinLockRelease(block_pool_lock);

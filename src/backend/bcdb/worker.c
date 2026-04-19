@@ -28,6 +28,7 @@
 #include "bcdb/bcdb_dsa.h"
 #include "bcdb/shm_block.h"
 #include "storage/condition_variable.h"
+#include "port/atomics.h"
 #include "pgstat.h"
 #include "parser/analyze.h"
 #include <unistd.h>
@@ -48,6 +49,264 @@ int total_num_restarts = 0; // worker specific -- move to shm for global
 int t_sinceTx1 = 0;
 FILE *fp;
 struct timeval tx_start_time;
+
+#define BCDB_APPLY_RETRY_MAX 64
+#define BCDB_APPLY_RETRY_BACKOFF_MAX_US 256
+
+/*
+ * Hot-path debug I/O gate. /tmp/timestamps.txt open/fprintf/close per-tx is
+ * costly under load; default OFF. Enable with BCDB_TRACE_TIMESTAMPS=1 when
+ * investigating latency. Evaluated once per worker startup.
+ */
+static bool
+bcdb_trace_timestamps_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char *v = getenv("BCDB_TRACE_TIMESTAMPS");
+        cached = (v && *v && *v != '0' && *v != 'n' && *v != 'N' && *v != 'f' && *v != 'F') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+/*
+ * Gate wait diagnostics are intentionally opt-in because they can be chatty
+ * under high concurrency.
+ */
+static bool
+bcdb_gate_debug_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *v = getenv("BCDB_GATE_DEBUG");
+        cached = (v && *v && *v != '0' && *v != 'n' && *v != 'N' && *v != 'f' && *v != 'F') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+/*
+ * Broad execution-flow diagnostics for pinpointing where a transaction stalls.
+ * Keep this OFF by default; enable temporarily with BCDB_FLOW_DEBUG=1.
+ */
+static bool
+bcdb_flow_debug_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *v = getenv("BCDB_FLOW_DEBUG");
+        cached = (v && *v && *v != '0' && *v != 'n' && *v != 'N' && *v != 'f' && *v != 'F') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+#define BCDB_FLOW_LOG(...) \
+    do { \
+        if (bcdb_flow_debug_enabled()) \
+            ereport(LOG, (errmsg(__VA_ARGS__))); \
+    } while (0)
+
+/*
+ * Per-tx phase tracer. When BCDB_PHASE_TRACE is set to a path prefix, each
+ * worker backend appends CSV lines to "<prefix>.<pid>" capturing the time
+ * spent in each commit-path phase plus a set of finer-grained deterministic
+ * microphases. Zero overhead when disabled beyond a cached bool check.
+ */
+typedef enum
+{
+    BCDB_PHASE_PARSE_PLAN = 0,     /* pg_parse_query + analyze + plan + CreatePortal */
+    BCDB_PHASE_PORTAL_RUN,         /* PortalRun (plpgsql body, nested SELECTs) */
+    BCDB_PHASE_GATE,
+    BCDB_PHASE_CONFLICT,
+    BCDB_PHASE_APPLY,
+    BCDB_PHASE_FINISH,
+    BCDB_PHASE_TOTAL,
+    BCDB_PHASE_COUNT
+} bcdb_phase_id;
+
+static FILE *bcdb_ptrace_fp = NULL;
+static struct timespec bcdb_ptrace_phase_start[BCDB_PHASE_COUNT];
+static uint64 bcdb_ptrace_phase_us[BCDB_PHASE_COUNT];
+static uint64 bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_COUNT];
+static uint64 bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_COUNT];
+static uint64 bcdb_ptrace_pending_queue_pop_wait_us = 0;
+
+bool
+bcdb_ptrace_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char *v = getenv("BCDB_PHASE_TRACE");
+        cached = (v && *v) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+uint64
+bcdb_ptrace_now_us(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((uint64) ts.tv_sec * 1000000ULL) + ((uint64) ts.tv_nsec / 1000ULL);
+}
+
+void
+bcdb_ptrace_add_us(bcdb_ptrace_metric_id metric, uint64 delta_us)
+{
+    if (!bcdb_ptrace_enabled())
+        return;
+    Assert(metric >= 0 && metric < BCDB_PTRACE_METRIC_COUNT);
+    bcdb_ptrace_metric_us[metric] += delta_us;
+}
+
+void
+bcdb_ptrace_inc_counter(bcdb_ptrace_counter_id counter, uint64 delta)
+{
+    if (!bcdb_ptrace_enabled())
+        return;
+    Assert(counter >= 0 && counter < BCDB_PTRACE_COUNTER_COUNT);
+    bcdb_ptrace_counter[counter] += delta;
+}
+
+void
+bcdb_ptrace_note_queue_pop_wait(uint64 wait_us)
+{
+    if (!bcdb_ptrace_enabled())
+        return;
+    bcdb_ptrace_pending_queue_pop_wait_us += wait_us;
+}
+
+static void
+bcdb_ptrace_open(void)
+{
+    const char *prefix;
+    char path[512];
+
+    if (bcdb_ptrace_fp != NULL)
+        return;
+
+    prefix = getenv("BCDB_PHASE_TRACE");
+    if (!prefix || !*prefix)
+        return;
+
+    snprintf(path, sizeof(path), "%s.%d", prefix, (int) getpid());
+    bcdb_ptrace_fp = fopen(path, "a");
+    if (bcdb_ptrace_fp == NULL)
+        return;
+
+    /* Line-buffered so flushes happen at each tx row without explicit fflush. */
+    setvbuf(bcdb_ptrace_fp, NULL, _IOLBF, 4096);
+
+    /* Header once per file open. */
+    fprintf(bcdb_ptrace_fp,
+            "tx_id,restarts,parse_plan_us,portal_run_us,gate_us,conflict_us,apply_us,finish_us,total_us,"
+            "queue_pop_wait_us,publish_ws_us,publish_hash_clear_us,prev_apply_wait_us,"
+            "conflict_ws_us,conflict_rs_us,apply_insert_us,apply_update_us,apply_delete_us,"
+            "apply_update_wait_us,apply_delete_wait_us,"
+            "apply_delete_lookup_us,apply_merkle_prep_us,apply_merkle_update_us,"
+            "finish_result_us,finish_prev_commit_wait_us,finish_publish_us,"
+            "ws_publish_entries,ws_conflict_checks,rs_conflict_checks,"
+            "apply_insert_count,apply_update_count,apply_delete_count,"
+            "apply_update_tm_being_modified_count,apply_delete_tm_being_modified_count,"
+            "apply_update_wait_incident_count,apply_delete_wait_incident_count,"
+            "merkle_update_count,apply_retry_count,publish_hash_clear_count\n");
+}
+
+static inline uint64
+bcdb_ptrace_delta_us(struct timespec *start, struct timespec *end)
+{
+    return ((uint64) (end->tv_sec - start->tv_sec) * 1000000ULL) +
+           ((uint64) (end->tv_nsec - start->tv_nsec) / 1000ULL);
+}
+
+#define PTRACE_BEGIN(phase) \
+    do { if (bcdb_ptrace_enabled()) \
+             clock_gettime(CLOCK_MONOTONIC, &bcdb_ptrace_phase_start[(phase)]); \
+    } while (0)
+
+#define PTRACE_END(phase) \
+    do { if (bcdb_ptrace_enabled()) { \
+             struct timespec _pt_end; \
+             clock_gettime(CLOCK_MONOTONIC, &_pt_end); \
+             bcdb_ptrace_phase_us[(phase)] += \
+                 bcdb_ptrace_delta_us(&bcdb_ptrace_phase_start[(phase)], &_pt_end); \
+         } \
+    } while (0)
+
+static inline void
+bcdb_ptrace_reset(void)
+{
+    if (!bcdb_ptrace_enabled())
+        return;
+    for (int i = 0; i < BCDB_PHASE_COUNT; i++)
+        bcdb_ptrace_phase_us[i] = 0;
+    for (int i = 0; i < BCDB_PTRACE_METRIC_COUNT; i++)
+        bcdb_ptrace_metric_us[i] = 0;
+    for (int i = 0; i < BCDB_PTRACE_COUNTER_COUNT; i++)
+        bcdb_ptrace_counter[i] = 0;
+    bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_QUEUE_POP_WAIT_US] =
+        bcdb_ptrace_pending_queue_pop_wait_us;
+    bcdb_ptrace_pending_queue_pop_wait_us = 0;
+}
+
+static void
+bcdb_ptrace_emit(int tx_id, int restarts)
+{
+    if (!bcdb_ptrace_enabled())
+        return;
+    bcdb_ptrace_open();
+    if (bcdb_ptrace_fp == NULL)
+        return;
+    fprintf(bcdb_ptrace_fp,
+            "%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+            tx_id, restarts,
+            (unsigned long long) bcdb_ptrace_phase_us[BCDB_PHASE_PARSE_PLAN],
+            (unsigned long long) bcdb_ptrace_phase_us[BCDB_PHASE_PORTAL_RUN],
+            (unsigned long long) bcdb_ptrace_phase_us[BCDB_PHASE_GATE],
+            (unsigned long long) bcdb_ptrace_phase_us[BCDB_PHASE_CONFLICT],
+            (unsigned long long) bcdb_ptrace_phase_us[BCDB_PHASE_APPLY],
+            (unsigned long long) bcdb_ptrace_phase_us[BCDB_PHASE_FINISH],
+            (unsigned long long) bcdb_ptrace_phase_us[BCDB_PHASE_TOTAL],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_QUEUE_POP_WAIT_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_PUBLISH_WS_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_PRE_APPLY_WAIT_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_CONFLICT_WS_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_CONFLICT_RS_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_APPLY_INSERT_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_APPLY_UPDATE_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_APPLY_DELETE_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_APPLY_UPDATE_WAIT_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_APPLY_DELETE_WAIT_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_APPLY_DELETE_LOOKUP_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_APPLY_MERKLE_PREP_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_APPLY_MERKLE_UPDATE_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_FINISH_RESULT_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_FINISH_PREV_COMMIT_WAIT_US],
+            (unsigned long long) bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_FINISH_PUBLISH_US],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_WS_PUBLISH_ENTRIES],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_WS_CONFLICT_CHECKS],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_RS_CONFLICT_CHECKS],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_INSERT_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_UPDATE_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_DELETE_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_UPDATE_TM_BEING_MODIFIED_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_DELETE_TM_BEING_MODIFIED_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_UPDATE_WAIT_INCIDENT_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_DELETE_WAIT_INCIDENT_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT],
+            (unsigned long long) bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT]);
+}
 MemoryContext bcdb_tx_context;
 MemoryContext bcdb_worker_context;
 
@@ -55,6 +314,22 @@ CommandDest dest;
 char completionTag[COMPLETION_TAG_BUFSIZE];
 
 static void get_write_set(BCDBShmXact *tx, Snapshot snapshot);
+
+static inline void
+bcdb_cleanup_optim_write_list(BCDBShmXact *tx, bool drop_slots)
+{
+    OptimWriteEntry *optim_write_entry;
+
+    if (tx == NULL)
+        return;
+
+    while ((optim_write_entry = SIMPLEQ_FIRST(&tx->optim_write_list)))
+    {
+        if (drop_slots && optim_write_entry->slot)
+            ExecDropSingleTupleTableSlot(optim_write_entry->slot);
+        SIMPLEQ_REMOVE_HEAD(&tx->optim_write_list, link);
+    }
+}
 
 /*
  * During retry/error cleanup we may be handling partially-applied entries.
@@ -64,14 +339,106 @@ static void get_write_set(BCDBShmXact *tx, Snapshot snapshot);
 static inline void
 bcdb_drain_optim_write_list(BCDBShmXact *tx)
 {
-    OptimWriteEntry *optim_write_entry;
+    bcdb_cleanup_optim_write_list(tx, false);
+}
 
+/*
+ * Lever D v2 apply stage.
+ *
+ * After publish_ws_tableDT + published_max advancement, prefer retrying only
+ * the apply stage first. We run each apply attempt in a subtransaction so
+ * partial writes rollback cleanly between attempts.
+ */
+static bool
+bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
+                                   int *num_apply_retries,
+                                   bool *nonretryable_error)
+{
+    int retries = 0;
+    int backoff_us = 1;
 
-    if (tx == NULL)
-        return;
+    if (num_apply_retries)
+        *num_apply_retries = 0;
+    if (nonretryable_error)
+        *nonretryable_error = false;
 
-    while ((optim_write_entry = SIMPLEQ_FIRST(&tx->optim_write_list)))
-        SIMPLEQ_REMOVE_HEAD(&tx->optim_write_list, link);
+    for (;;)
+    {
+        MemoryContext old_context = CurrentMemoryContext;
+        ResourceOwner old_owner = CurrentResourceOwner;
+        bool apply_ok = false;
+        bool apply_failed_unique = false;
+
+        BeginInternalSubTransaction("bcdb_apply_retry");
+        PG_TRY();
+        {
+            bcdb_reset_apply_error_flags();
+            BCDB_FLOW_LOG("[BCDB_FLOW] apply_attempt_enter pid=%d txid=%d xid=%u attempt=%d",
+                          getpid(),
+                          tx ? (int) tx->tx_id : -1,
+                          (unsigned int) (tx ? tx->xid : InvalidTransactionId),
+                          retries + 1);
+            apply_ok = apply_optim_writes();
+            apply_failed_unique = (!apply_ok && bcdb_apply_had_unique_violation());
+            if (apply_ok)
+                ReleaseCurrentSubTransaction();
+            else
+                RollbackAndReleaseCurrentSubTransaction();
+
+            BCDB_FLOW_LOG("[BCDB_FLOW] apply_attempt_exit pid=%d txid=%d xid=%u attempt=%d ok=%d",
+                          getpid(),
+                          tx ? (int) tx->tx_id : -1,
+                          (unsigned int) (tx ? tx->xid : InvalidTransactionId),
+                          retries + 1,
+                          apply_ok ? 1 : 0);
+
+            MemoryContextSwitchTo(old_context);
+            CurrentResourceOwner = old_owner;
+        }
+        PG_CATCH();
+        {
+            MemoryContextSwitchTo(old_context);
+            RollbackAndReleaseCurrentSubTransaction();
+            MemoryContextSwitchTo(old_context);
+            CurrentResourceOwner = old_owner;
+            PG_RE_THROW();
+        }
+        PG_END_TRY();
+
+        if (apply_ok)
+        {
+            if (num_apply_retries)
+                *num_apply_retries = retries;
+            return true;
+        }
+
+        retries++;
+        if (retries > BCDB_APPLY_RETRY_MAX)
+        {
+            BCDB_FLOW_LOG("[BCDB_FLOW] apply_retry_exhausted pid=%d txid=%d xid=%u retries=%d",
+                          getpid(),
+                          tx ? (int) tx->tx_id : -1,
+                          (unsigned int) (tx ? tx->xid : InvalidTransactionId),
+                          retries);
+
+            if (apply_failed_unique)
+            {
+                BCDB_FLOW_LOG("[BCDB_FLOW] apply_retry_exhausted_nonretryable_unique pid=%d txid=%d xid=%u retries=%d",
+                              getpid(),
+                              tx ? (int) tx->tx_id : -1,
+                              (unsigned int) (tx ? tx->xid : InvalidTransactionId),
+                              retries);
+                if (nonretryable_error)
+                    *nonretryable_error = true;
+            }
+            return false;
+        }
+
+        CHECK_FOR_INTERRUPTS();
+        pg_usleep((long) backoff_us);
+        if (backoff_us < BCDB_APPLY_RETRY_BACKOFF_MAX_US)
+            backoff_us <<= 1;
+    }
 }
 
 static inline const char *
@@ -100,22 +467,165 @@ bcdb_runtime_result_slots(void)
     return bcdb_get_runtime_result_ring_slots();
 }
 
+static inline int
+bcdb_result_slot_for_txid(BCTxID tx_id)
+{
+    int slots = bcdb_runtime_result_slots();
+    int idx;
+
+    if (slots <= 0)
+        slots = 1;
+    idx = tx_id % slots;
+    if (idx < 0)
+        idx += slots;
+    return idx;
+}
+
 static inline void
 bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 {
+    /*
+    * Lever D publish gate: wait until `published_max_tx_id + 1 >= tx->tx_id`.
+     *
+     * This replaces the old "wait until last_committed_tx_id + 1 == my_tx_id"
+    * gate, which forced every tx to wait for ALL earlier tx's to finish
+    * apply + finish_xact_command. Lever D v2 advances published_max right
+    * after publish_ws_tableDT, so the gate serializes only the
+    * conflict_check + publish_ws critical section.
+     *
+     * Two modes:
+     *  - CONDVAR: wakes on condCommit broadcast (currently not broadcast by
+     *    set_published_max_txid — intentionally POLL-only; see shm_block.c).
+     *  - POLL (default): adaptive-backoff spin. First few iterations are a
+     *    CPU-yield hint (close neighbour finishing), then short sleeps that
+     *    cap at 64us.
+     */
+    int poll_us = 0;
+    int spins = 0;
+    uint64 wait_start_us = bcdb_get_time();
+    uint64 next_log_us   = 0;
+    uint64 next_warn_us  = wait_start_us + 5000000; /* 5 s always-on watchdog */
+    bool gate_debug = bcdb_gate_debug_enabled();
+
+    if (gate_debug)
+        next_log_us = wait_start_us + 1000000;
+
     Assert(block != NULL);
+
+    /*
+     * Fail-fast on a common deterministic-mode misconfiguration.
+     *
+     * On a fresh server, the Lever-D serial gate expects tx_ids to start at 0
+     * (published_max=-1, last_committed=-1). If the client starts at a higher
+     * txid (e.g., DET_START_SEQ set after a restart), the gate would otherwise
+     * wait forever because no predecessor can ever advance the watermarks.
+     *
+     * HOWEVER: multi-threaded clients submit txid=0..N in parallel, and txid>0
+     * can legitimately arrive before txid=0. We must not error in that normal
+     * start-of-run race.
+     *
+     * Strategy: when the server looks fresh and we see txid>0, briefly wait
+     * for txid=0 to appear in the tx_pool. If txid=0 is in-flight, keep
+     * waiting (it may simply be slow). If txid=0 never appears, error with a
+     * clear hint instead of hanging forever.
+     */
+    uint64 fresh_guard_start_us = 0;
+    uint64 next_tx0_check_us = 0;
+    const uint64 fresh_guard_grace_us = 2000000; /* 2s */
+    const uint64 tx0_check_period_us = 1000;     /* 1ms */
+    {
+        BCTxID published = get_published_max_txid(tx);
+        BCTxID committed = get_last_committed_txid(tx);
+
+        if (published < 0 && committed < 0 && tx->tx_id > 0)
+            fresh_guard_start_us = wait_start_us;
+    }
 
     for (;;)
     {
-        if ((get_last_committed_txid(tx) + 1) == tx->tx_id)
+        if ((get_published_max_txid(tx) + 1) >= tx->tx_id)
             break;
+
+        if (fresh_guard_start_us != 0)
+        {
+            uint64 now_us = bcdb_get_time();
+            BCTxID published = get_published_max_txid(tx);
+            BCTxID committed = get_last_committed_txid(tx);
+
+            if (published >= 0 || committed >= 0)
+            {
+                /* txid=0 (or a predecessor) advanced watermarks; normal gating applies. */
+                fresh_guard_start_us = 0;
+            }
+            else
+            {
+                /* Check whether txid=0 exists in-flight (normal parallel startup). */
+                if (now_us >= next_tx0_check_us)
+                {
+                    char tx0_key[TX_HASH_SIZE];
+                    BCDBShmXact *tx0;
+
+                    MemSet(tx0_key, 0, sizeof(tx0_key));
+                    memcpy(tx0_key, "00000000", 8);
+                    tx0 = get_tx_by_hash(tx0_key);
+                    if (tx0 != NULL)
+                    {
+                        /* txid=0 exists; do not treat this as misconfiguration. */
+                        fresh_guard_start_us = 0;
+                    }
+
+                    next_tx0_check_us = now_us + tx0_check_period_us;
+                }
+
+                if (fresh_guard_start_us != 0 && (now_us - fresh_guard_start_us) >= fresh_guard_grace_us)
+                {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                             errmsg("BCDB deterministic serial gate cannot start at txid=%d on a fresh server (published_max=%d last_committed=%d)",
+                                    (int) tx->tx_id, (int) published, (int) committed),
+                             errhint("This usually means deterministic tx ids did not start at 0 after a restart (e.g., DET_START_SEQ>0). Unset DET_START_SEQ (or set it to 0) for fresh-server runs. If you intend to resume at a higher tx id, keep the server running so published_max advances past the resume point.")));
+                }
+            }
+        }
+
+        {
+            uint64 now_us = bcdb_get_time();
+
+            /* Always-on hang watchdog: every 5 s regardless of BCDB_GATE_DEBUG */
+            if (now_us >= next_warn_us)
+            {
+                BCTxID published = get_published_max_txid(tx);
+                BCTxID committed = get_last_committed_txid(tx);
+
+                ereport(LOG,
+                        (errmsg("[BCDB_HANG] serial_gate_stuck pid=%d txid=%d published_max=%d last_committed=%d waited_us=%lu spins=%d poll_us=%d",
+                                (int) getpid(), (int) tx->tx_id, (int) published,
+                                (int) committed, (unsigned long) (now_us - wait_start_us),
+                                spins, poll_us)));
+                next_warn_us = now_us + 5000000;
+            }
+
+            /* Opt-in per-second trace (BCDB_GATE_DEBUG=1) */
+            if (gate_debug && now_us >= next_log_us)
+            {
+                BCTxID published = get_published_max_txid(tx);
+                BCTxID committed = get_last_committed_txid(tx);
+
+                ereport(LOG,
+                        (errmsg("[BCDB_GATE] serial_gate_wait pid=%d txid=%d published_max=%d last_committed=%d waited_us=%lu spins=%d poll_us=%d mode=%d",
+                                (int) getpid(), (int) tx->tx_id, (int) published,
+                                (int) committed, (unsigned long) (now_us - wait_start_us),
+                                spins, poll_us, bcdb_serial_gate_mode)));
+                next_log_us = now_us + 1000000;
+            }
+        }
 
         CHECK_FOR_INTERRUPTS();
 
         if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
         {
             ConditionVariablePrepareToSleep(&block->condCommit);
-            if ((get_last_committed_txid(tx) + 1) == tx->tx_id)
+            if ((get_published_max_txid(tx) + 1) >= tx->tx_id)
             {
                 ConditionVariableCancelSleep();
                 break;
@@ -123,10 +633,117 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
             ConditionVariableSleep(&block->condCommit, WAIT_EVENT_BLOCK_COMMIT);
             ConditionVariableCancelSleep();
         }
+        else if (spins < 64)
+        {
+            /* Hot neighbour finishing any moment — spin without syscall. */
+            spins++;
+            pg_spin_delay();
+        }
         else
         {
-            pg_usleep(5L);
+            if (poll_us == 0)
+                poll_us = 1;
+            else if (poll_us < 64)
+                poll_us *= 2;
+            pg_usleep((long) poll_us);
         }
+    }
+
+    if (gate_debug)
+    {
+        uint64 total_wait_us = bcdb_get_time() - wait_start_us;
+
+        if (total_wait_us >= 100000)
+            ereport(LOG,
+                    (errmsg("[BCDB_GATE] serial_gate_done pid=%d txid=%d waited_us=%lu",
+                            (int) getpid(), (int) tx->tx_id, (unsigned long) total_wait_us)));
+    }
+}
+
+/*
+ * Wait until tx_id-1 is durably committed.
+ *
+ * Lever D v2 allows publish to run ahead, but applying writes out of commit
+ * order can create lock/liveness cycles (a higher tx holds tuple locks while
+ * waiting to commit, starving the lower tx it depends on).  We therefore
+ * serialize write-apply by commit order while keeping early publish overlap.
+ *
+ * HANG DEBUG: two tiers of logging:
+ *  1. Always-on watchdog at 5 s: fires unconditionally — visible without
+ *     any env-var setup.  Shows which predecessor is still missing and the
+ *     current published_max watermark, which helps distinguish "predecessor
+ *     not yet in apply" from "predecessor stuck in serial gate".
+ *  2. Opt-in per-second trace at 1 s: BCDB_GATE_DEBUG=1 (existing).
+ */
+static inline void
+bcdb_wait_for_prev_committed(BCDBShmXact *tx)
+{
+    int spins = 0;
+    int poll_us = 0;
+    uint64 wait_start_us = bcdb_get_time();
+    uint64 next_log_us   = 0;
+    uint64 next_warn_us  = wait_start_us + 5000000; /* 5 s always-on */
+    bool gate_debug = bcdb_gate_debug_enabled();
+
+    if (gate_debug)
+        next_log_us = wait_start_us + 1000000;
+
+    while (get_last_committed_txid(tx) != tx->tx_id - 1)
+    {
+        uint64 now_us = bcdb_get_time();
+
+        /* Always-on hang watchdog: every 5 s regardless of BCDB_GATE_DEBUG */
+        if (now_us >= next_warn_us)
+        {
+            BCTxID committed = get_last_committed_txid(tx);
+            BCTxID published = get_published_max_txid(tx);
+
+            ereport(LOG,
+                    (errmsg("[BCDB_HANG] prev_commit_stuck pid=%d txid=%d need_committed=%d last_committed=%d published_max=%d waited_us=%lu spins=%d poll_us=%d",
+                            (int) getpid(), (int) tx->tx_id, (int) (tx->tx_id - 1),
+                            (int) committed, (int) published,
+                            (unsigned long) (now_us - wait_start_us),
+                            spins, poll_us)));
+            next_warn_us = now_us + 5000000;
+        }
+
+        /* Opt-in per-second trace (BCDB_GATE_DEBUG=1) */
+        if (gate_debug && now_us >= next_log_us)
+        {
+            BCTxID committed = get_last_committed_txid(tx);
+
+            ereport(LOG,
+                    (errmsg("[BCDB_GATE] prev_commit_wait pid=%d txid=%d prev_needed=%d last_committed=%d waited_us=%lu spins=%d poll_us=%d",
+                            (int) getpid(), (int) tx->tx_id, (int) (tx->tx_id - 1),
+                            (int) committed, (unsigned long) (now_us - wait_start_us),
+                            spins, poll_us)));
+            next_log_us = now_us + 1000000;
+        }
+
+        CHECK_FOR_INTERRUPTS();
+        if (spins < 128)
+        {
+            spins++;
+            pg_spin_delay();
+        }
+        else
+        {
+            if (poll_us == 0)
+                poll_us = 1;
+            else if (poll_us < 64)
+                poll_us *= 2;
+            pg_usleep((long) poll_us);
+        }
+    }
+
+    if (gate_debug)
+    {
+        uint64 total_wait_us = bcdb_get_time() - wait_start_us;
+
+        if (total_wait_us >= 100000)
+            ereport(LOG,
+                    (errmsg("[BCDB_GATE] prev_commit_done pid=%d txid=%d waited_us=%lu",
+                            (int) getpid(), (int) tx->tx_id, (unsigned long) total_wait_us)));
     }
 }
 
@@ -462,6 +1079,12 @@ get_write_set(BCDBShmXact *tx, Snapshot snapshot) {
     activeTx->start_parsing_time = bcdb_get_time();
     pgstat_report_activity(STATE_RUNNING, query_string);
 
+    if (bcdb_flow_debug_enabled())
+        ereport(LOG,
+                (errmsg("[BCDB_FLOW] get_write_set_begin pid=%d txid=%d xid=%u sql=%.120s",
+                        getpid(), (int) tx->tx_id, (unsigned int) tx->xid,
+                        query_string ? query_string : "<null>")));
+
     TRACE_POSTGRESQL_QUERY_START(query_string);
 
     /*
@@ -691,6 +1314,13 @@ get_write_set(BCDBShmXact *tx, Snapshot snapshot) {
     MemoryContextSwitchTo(oldcontext);
 
     activeTx->portal = portal;
+    PTRACE_END(BCDB_PHASE_PARSE_PLAN);
+    PTRACE_BEGIN(BCDB_PHASE_PORTAL_RUN);
+        if (bcdb_flow_debug_enabled())
+        ereport(LOG,
+            (errmsg("[BCDB_FLOW] portal_run_enter pid=%d txid=%d xid=%u cmd=%s",
+                getpid(), (int) tx->tx_id, (unsigned int) tx->xid,
+                commandTag ? commandTag : "<null>")));
     (void) PortalRun(portal,
                      FETCH_ALL,
                      true,    /* always top level */
@@ -698,6 +1328,13 @@ get_write_set(BCDBShmXact *tx, Snapshot snapshot) {
                      receiver,
                      receiver,
                      completionTag);
+        if (bcdb_flow_debug_enabled())
+        ereport(LOG,
+            (errmsg("[BCDB_FLOW] portal_run_exit pid=%d txid=%d xid=%u completion=%s",
+                getpid(), (int) tx->tx_id, (unsigned int) tx->xid,
+                completionTag)));
+    PTRACE_END(BCDB_PHASE_PORTAL_RUN);
+    PTRACE_BEGIN(BCDB_PHASE_PARSE_PLAN);  /* continue timing any post-run setup */
 
 #if SAFEDBG1
     printf("safeDbg pid %d %s : %s: %d \n",
@@ -774,8 +1411,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     char tx_result[1024];
     struct timeval tv1, tv2;
     int condSig = 0;
-    int result_slots = 1;
-    int read_slots = 1;
+    int apply_retries = 0;
+    bool apply_nonretryable = false;
+    bool apply_terminal_noop = false;
 
     is_bcdb_worker = true;
 
@@ -793,6 +1431,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #if SAFEDBG3
     printf(" id= %d  time= %ld.%ld\n",  tx->tx_id, tv1.tv_sec, tv1.tv_usec);
 #endif
+
+    bcdb_ptrace_reset();
+    PTRACE_BEGIN(BCDB_PHASE_TOTAL);
 
     if(tx->tx_id == 0) {
     	tx_start_time.tv_sec = 0;
@@ -867,6 +1508,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		  activeTx->tx_id_committed = get_last_committed_txid(tx);
           init = false;
 	  XactIsoLevel = tx->isolation;
+      PTRACE_BEGIN(BCDB_PHASE_PARSE_PLAN);
       start_xact_command();
 	  tx->status = TX_EXECUTING;
 
@@ -876,10 +1518,12 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
 		  old_owner = CurrentResourceOwner;
 		  snapshot = GetTransactionSnapshot();	 // get snapshot
+		  activeTx->snap_xmin = snapshot->xmin;  /* T3-v2: save for XID-based conflict skip */
 		  tx->sxact = ShareSerializableXact();
 		  tx->sxact->bcdb_tx = tx;
 		  get_write_set(tx, snapshot); 	//  does CreatePortal
 		  bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
+      PTRACE_END(BCDB_PHASE_PARSE_PLAN);
 #if SAFEDBG1
 		  printf("safeDbg pid %d %s : %s: %d \n",
 			  getpid(), __FILE__, __FUNCTION__, __LINE__ );
@@ -913,9 +1557,6 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
         block = get_block_by_id(1, false);
         Assert(block != NULL);
-        result_slots = bcdb_runtime_result_slots();
-        read_slots = result_slots;
-
         latest_tx_id = get_last_committed_txid(tx) ;
         if(dualTab) {
 #if SAFEDBG1
@@ -929,11 +1570,11 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             * This avoids ConditionVariable wait-list corruption observed
             * under concurrent direct "s <txid> ..." execution.
             */
+           PTRACE_BEGIN(BCDB_PHASE_GATE);
            bcdb_wait_for_serial_slot(tx, block);
+           PTRACE_END(BCDB_PHASE_GATE);
            {
-               int read_idx = tx->tx_id % read_slots;
-               if (read_idx < 0)
-                   read_idx += read_slots;
+               int read_idx = bcdb_result_slot_for_txid(tx->tx_id);
                strlcpy(tx_result, block->result[read_idx], sizeof(tx_result));
            }
 
@@ -941,7 +1582,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
            printf("safeDbg blk read result = %s\n", tx_result);
            printf("safeDbg worker read result at %d= %s\n", ((tx->tx_id)%(2*block->blksize)), block->result[(tx->tx_id)%(2*block->blksize)]);
 #endif
+           PTRACE_BEGIN(BCDB_PHASE_CONFLICT);
            rw_conflicts = conflict_checkDT();
+           PTRACE_END(BCDB_PHASE_CONFLICT);
                     // conflict_check();
         } else {
        	    printf("\n\n safeDbg **ERROR not dualtab ** pid %d %s : %s: %d \n",
@@ -955,34 +1598,62 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       printf(" safeDbg pid %d %s : %s: %d tx %d \n",
                  getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id );
 #endif
-      publish_ws_tableDT(tx->tx_id) ; // HASHTAB_SWITCH_THRESHOLD 
-					  
+      publish_ws_tableDT(tx->tx_id) ; // HASHTAB_SWITCH_THRESHOLD
+
+      /*
+       * Step 0 (2026-04-19): publish gate release immediately after conflict
+       * check so tx N+1 can enter conflict/apply while tx N applies.
+       * The pre-apply bcdb_wait_for_prev_committed that was here in v2-fix1
+       * has been removed — it re-serialized apply and caused the 8t 335→223
+       * TPS regression.  Conflict check + wait=true in apply_optim_update are
+       * sufficient to handle any co-write edge cases.
+       */
+      set_published_max_txid(tx);
+
+      /*
+       * Lever D v2 apply path:
+       * retry apply in a subtransaction without re-running parse/plan.
+       */
+      PTRACE_BEGIN(BCDB_PHASE_APPLY);
+      apply_nonretryable = false;
+      apply_terminal_noop = false;
+      if (!bcdb_apply_optim_writes_with_retry(tx, &apply_retries,
+                                              &apply_nonretryable))
+      {
+          PTRACE_END(BCDB_PHASE_APPLY);
+
+          if (apply_nonretryable)
+          {
+              BCDB_FLOW_LOG("[BCDB_FLOW] apply_nonretryable_finalize_noop pid=%d txid=%d xid=%u",
+                            getpid(),
+                            tx ? (int) tx->tx_id : -1,
+                            (unsigned int) (tx ? tx->xid : InvalidTransactionId));
+              apply_terminal_noop = true;
+          }
+          else
+          {
+          /*
+           * Fallback to full transaction retry if apply retries are exhausted.
+           * With published_max already advanced, gate check uses >= so this
+           * tx_id can re-enter deterministic conflict-check/apply safely.
+           */
+          rw_conflicts = 1;
+          continue;
+          }
+      }
+      else
+      {
+          PTRACE_END(BCDB_PHASE_APPLY);
+      }
+      num_restarts += apply_retries;
+      bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT,
+                              (uint64) apply_retries);
+
 #if SAFEDBG2
       printf(" safeDbg pid %d %s : %s: %d tx %d \n",
                  getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id );
 #endif
-      /* CRITICAL FIX: Do NOT advance counter before apply_optim_writes.
-       * Old code had set_last_committed_txid(tx) HERE, which woke the
-       * next transaction before our writes were applied/committed,
-       * causing concurrent serial execution and Merkle corruption.
-       * Counter is now advanced AFTER finish_xact_command() below. */
-      if (!apply_optim_writes())
-      {
-          /*
-           * An INSERT failed (e.g. duplicate key because tx_id ordering
-           * didn't match workload line ordering).  Abort this attempt
-           * and retry the whole transaction with a fresh snapshot.
-           *
-           * It's safe to retry even after publish_ws_tableDT because:
-           * 1) No other tx has entered serial yet (counter not advanced)
-           * 2) Our stale published tags won't false-match ourselves
-           *    (table_checkDT checks entry->tx_id < activeTx->tx_id)
-           * 3) AbortCurrentTransaction rolls back partial apply_optim
-           *    writes done before the failure
-           */
-          rw_conflicts = 1;
-          continue;
-      }
+
       tx->sxact->flags |= SXACT_FLAG_PREPARED;
 
       DEBUGMSG("[ZL] worker(%d) commiting tx(%s)", getpid(), tx->hash);
@@ -1007,24 +1678,25 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
       t_sinceTx1 += t_delta; 
 
-    if((tx->tx_id)%1000 < 3 * bcdb_runtime_workers()) {
+    if (bcdb_trace_timestamps_enabled() &&
+        (tx->tx_id)%1000 < 3 * bcdb_runtime_workers()) {
         fp = fopen("/tmp/timestamps.txt","a");
-        fprintf(fp, "id= %d, pid= %d restarts=%d total_num_restarts= %d "
+        if (fp) {
+            fprintf(fp, "id= %d, pid= %d restarts=%d total_num_restarts= %d "
 #if SAFEDBG1
-			"start-time= %ld.%ld finish time= %ld.%ld " 
+                "start-time= %ld.%ld finish time= %ld.%ld "
 #endif
-			"exectime(us)= %d totalTime(us)= %d\n", 
-		tx->tx_id, getpid(), num_restarts, total_num_restarts,
+                "exectime(us)= %d totalTime(us)= %d\n",
+            tx->tx_id, getpid(), num_restarts, total_num_restarts,
 #if SAFEDBG1
-		tv1.tv_sec , tv1.tv_usec, tv2.tv_sec, tv2.tv_usec,
+            tv1.tv_sec , tv1.tv_usec, tv2.tv_sec, tv2.tv_usec,
 #endif
-		t_delta, t_sinceTx1);
-    fclose(fp);
+            t_delta, t_sinceTx1);
+            fclose(fp);
+        }
     }
 
-      /* CRITICAL FIX: Broadcast moved to after finish_xact_command
-       * to prevent next tx from starting serial phase before our
-       * writes are committed. condSig set after broadcast below. */
+      /* saveState/releaseState helpers for recovery flow (unchanged). */
 
       // For tx "select saveState()" char 't' should be seen by offset 9
       for(sqlOffset = 0; sqlOffset < saveLen ; sqlOffset++) {
@@ -1097,9 +1769,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #if SAFEDBG3
       printf("safeDbg tx matchLen = %d \n", matchLen);
 #endif
-      int mem_txid = tx->tx_id % result_slots;
-      if (mem_txid < 0)
-          mem_txid += result_slots;
+      int mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
 
       /* Fix: Silently release portal resources before PortalDrop to avoid
        * leak warnings. ResourceOwnerRelease with isCommit=false releases
@@ -1126,6 +1796,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        * retail lock release on child owners expecting subtransaction semantics.
        * Standard PG always uses isTopLevel=true for TopTransactionResourceOwner
        * (see CommitTransaction/AbortTransaction in xact.c). */
+      PTRACE_BEGIN(BCDB_PHASE_FINISH);
       ResourceOwnerRelease(TopTransactionResourceOwner,
                            RESOURCE_RELEASE_BEFORE_LOCKS, false, true);
       ResourceOwnerRelease(TopTransactionResourceOwner,
@@ -1133,16 +1804,6 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
       ResourceOwnerRelease(TopTransactionResourceOwner,
                            RESOURCE_RELEASE_AFTER_LOCKS, false, true);
       finish_xact_command();
-
-      /* CRITICAL FIX: Advance counter and wake ONLY AFTER commit.
-       * This ensures the next transaction cannot enter its serial phase
-       * until our writes are fully committed and visible. */
-            if ((get_last_committed_txid(tx) + 1) != tx->tx_id)
-                ereport(ERROR,
-                        (errmsg("BCDB serial gate invariant violated: expected next tx_id %d, got %d",
-                                get_last_committed_txid(tx) + 1, tx->tx_id)));
-            set_last_committed_txid(tx);
-            condSig = 1;
 
     memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
 #if SAFEDBG3
@@ -1158,22 +1819,52 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		__LINE__ , get_last_committed_txid(tx), tx->tx_id, tx->sql);
 #endif
 
-      int read_cmd = chk_query_type( tx->sql, "select", "SELECT");
-      int del_cmd = chk_query_type( tx->sql, "delete", "DELETE");
-      int upd_cmd = chk_query_type( tx->sql, "update", "UPDATE");
-      int ins_cmd = chk_query_type( tx->sql, "insert", "INSERT");
+      {
+          uint64 finish_result_start = bcdb_ptrace_timer_start();
+          int affected_rows = apply_terminal_noop ? 0 : 1;
+          int read_cmd = chk_query_type( tx->sql, "select", "SELECT");
+          int del_cmd = chk_query_type( tx->sql, "delete", "DELETE");
+          int upd_cmd = chk_query_type( tx->sql, "update", "UPDATE");
+          int ins_cmd = chk_query_type( tx->sql, "insert", "INSERT");
 
-      if(read_cmd == 1)
-                strlcpy(block->result[mem_txid], tx_result, sizeof(block->result[mem_txid]));
-      else if(ins_cmd == 1)
-                snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
-                                 "\n\t*%s* INSERT 0 1\n", tx->hash);
-      else if(upd_cmd == 1)
-                snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
-                                 "\n\t*%s* UPDATE 0 1\n", tx->hash);
-      else if(del_cmd == 1)
-                snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
-                                 "\n\t*%s* DELETE 0 1\n", tx->hash);
+          if(read_cmd == 1)
+                    strlcpy(block->result[mem_txid], tx_result, sizeof(block->result[mem_txid]));
+          else if(ins_cmd == 1)
+                    snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+                                     "\n\t*%s* INSERT 0 %d\n", tx->hash, affected_rows);
+          else if(upd_cmd == 1)
+                    snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+                                     "\n\t*%s* UPDATE 0 %d\n", tx->hash, affected_rows);
+          else if(del_cmd == 1)
+                    snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+                                     "\n\t*%s* DELETE 0 %d\n", tx->hash, affected_rows);
+
+          /*
+           * Publish result before advertising tx as committed to middleware waiters.
+           * Ensure visibility ordering across CPUs.
+           */
+          pg_write_barrier();
+          /*
+           * T3-v2: store commit XID before committed marker for release-acquire
+           * ordering.  When a reader observes result_committed_txid[slot]==tx_id,
+           * result_commit_xid[slot] is guaranteed visible.
+           */
+          __atomic_store_n(&block->result_commit_xid[mem_txid],
+                           tx->xid, __ATOMIC_RELEASE);
+          __atomic_store_n(&block->result_committed_txid[mem_txid],
+                           tx->tx_id, __ATOMIC_RELEASE);
+          bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_RESULT_US,
+                                 finish_result_start);
+      }
+
+      {
+          uint64 finish_publish_start = bcdb_ptrace_timer_start();
+          bcdb_wait_for_prev_committed(tx);
+          set_last_committed_txid(tx);
+          bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_PUBLISH_US,
+                                 finish_publish_start);
+      }
+      condSig = 1;
 
 #if SAFEDBG3
       //printf("blkmid read result at %d= %s\n", ((tx->tx_id)%(2*block->blksize)), block->result[(tx->tx_id)%(2*block->blksize)]); // does it get overwritten
@@ -1187,14 +1878,39 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		__LINE__ , get_last_committed_txid(tx), tx->tx_id);
 #endif
       EndCommand(completionTag, dest);
+    bcdb_cleanup_optim_write_list(activeTx, true);
       delete_tx(tx);
       MemoryContextReset(bcdb_tx_context);
+      PTRACE_END(BCDB_PHASE_FINISH);
+      PTRACE_END(BCDB_PHASE_TOTAL);
+      bcdb_ptrace_emit(tx->tx_id, num_restarts);
       break;
       }
     }
     PG_CATCH();
     {
+        ErrorData *edata = NULL;
     ConditionVariableCancelSleep();
+
+            if (bcdb_flow_debug_enabled())
+            {
+                    const char *msg;
+                    const char *sqlstate;
+
+                    edata = CopyErrorData();
+                    msg = (edata && edata->message) ? edata->message : "<null>";
+                    sqlstate = (edata != NULL) ? unpack_sql_state(edata->sqlerrcode) : "00000";
+                    ereport(LOG,
+                                    (errmsg("[BCDB_FLOW] tx_error pid=%d txid=%d xid=%u sqlstate=%s status=%d msg=%s",
+                                                    getpid(),
+                                                    tx ? (int) tx->tx_id : -1,
+                                                    (unsigned int) (tx ? tx->xid : InvalidTransactionId),
+                                                    sqlstate,
+                                                    tx ? (int) tx->status : -1,
+                                                    msg)));
+                    FlushErrorState();
+            }
+
 #if SAFEDBG1
       printf("safeDbg pg-catch() pid %d %s : %s: %d  tx %d %s \n",
 			    getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id, tx->sql );
@@ -1232,6 +1948,9 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	      MemoryContextReset(bcdb_tx_context);
 	      delete_tx(tx);
 	      activeTx = NULL;
+
+      if (edata != NULL)
+          ReThrowError(edata);
       PG_RE_THROW();
     }
     PG_END_TRY();
@@ -1366,6 +2085,7 @@ bcdb_worker_process_tx(BCDBShmXact *tx)
 
         if (timing)
             tx->commit_time = bcdb_get_time();
+        bcdb_cleanup_optim_write_list(activeTx, true);
         MemoryContextReset(bcdb_tx_context);
         if (timing)
             ereport(LOG, (errmsg("[ZL] tx (%s) runtime: %lu, parsing: %lu, simulation: %lu, wait: %lu, check: %lu, apply: %lu, commit %lu", tx->hash, 

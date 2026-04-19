@@ -33,6 +33,9 @@ static void bcdb_middleware_attach_tx_to_block(BCDBShmXact *tx, BCBlock *block);
 static BCBlock *parse_block_with_txs(const char *json);
 static void append_hex_encoded(StringInfo out, const char *input);
 static int32 bcdb_select_worker_count(int32 requested);
+static inline int bcdb_result_slot_for_txid(BCTxID tx_id);
+static inline void bcdb_wait_until_committed(BCTxID target_tx_id);
+static inline void bcdb_wait_until_slot_ready(BCTxID target_tx_id);
 
 static int32
 bcdb_select_worker_count(int32 requested)
@@ -46,6 +49,142 @@ bcdb_select_worker_count(int32 requested)
     if (workers <= 0)
         workers = 1;
     return workers;
+}
+
+/*
+ * Use one runtime slot mapping everywhere in DT path to avoid stale/mismatched
+ * result reads when blksize and result ring size diverge.
+ */
+static inline int
+bcdb_result_slot_for_txid(BCTxID tx_id)
+{
+    int slots = bcdb_get_runtime_result_ring_slots();
+    int idx;
+
+    if (slots <= 0)
+        slots = 1;
+    idx = tx_id % slots;
+    if (idx < 0)
+        idx += slots;
+    return idx;
+}
+
+/*
+ * DT completion wait that does not depend on fragile CV broadcast contracts.
+ * We poll commit progression with interruptible adaptive backoff.
+ *
+ * HANG DEBUG: logs every 5 s if last_committed_tx_id does not advance.
+ * This fires unconditionally (no env-var gate) so hangs are always visible
+ * in server.log without any pre-configuration.
+ */
+static inline void
+bcdb_wait_until_committed(BCTxID target_tx_id)
+{
+    int spins = 0;
+    int poll_us = 0;
+    uint64 wait_start_us = bcdb_get_time();
+    uint64 next_warn_us  = wait_start_us + 5000000; /* 5 s */
+
+    for (;;)
+    {
+        BCTxID committed = get_last_committed_txid(NULL);
+        if (committed >= target_tx_id)
+            break;
+
+        CHECK_FOR_INTERRUPTS();
+
+        /* Always-on hang watchdog: fire every 5 s so a stuck loop is visible */
+        {
+            uint64 now_us = bcdb_get_time();
+            if (now_us >= next_warn_us)
+            {
+                ereport(LOG,
+                        (errmsg("[BCDB_HANG] committed_wait_stuck pid=%d target_txid=%d last_committed=%d waited_us=%lu poll_us=%d spins=%d",
+                                (int) getpid(), (int) target_tx_id,
+                                (int) committed,
+                                (unsigned long) (now_us - wait_start_us),
+                                poll_us, spins)));
+                next_warn_us = now_us + 5000000;
+            }
+        }
+
+        if (spins < 128)
+        {
+            spins++;
+            pg_spin_delay();
+        }
+        else
+        {
+            if (poll_us == 0)
+                poll_us = 1;
+            else if (poll_us < 64)
+                poll_us *= 2;
+            pg_usleep((long) poll_us);
+        }
+    }
+}
+
+/*
+ * T3: per-slot middleware wait.
+ * Waits for result_committed_txid[slot] == target_tx_id rather than for
+ * the contiguous last_committed_tx_id watermark.  Each tx's result is
+ * independently readable as soon as that tx calls advance_last_committed_txid.
+ *
+ * HANG DEBUG: logs every 5 s if the slot value does not become target_tx_id.
+ * Fires unconditionally — if a worker crashes or misses writing the slot,
+ * this hang is immediately visible in server.log without any env-var setup.
+ * Key fields: slot index, current slot value vs expected, and elapsed time.
+ */
+static inline void
+bcdb_wait_until_slot_ready(BCTxID target_tx_id)
+{
+    BCBlock *blk     = get_block_by_id(1, false);
+    int      slot    = bcdb_result_slot_for_txid(target_tx_id);
+    int      spins   = 0;
+    int      poll_us = 0;
+    uint64   wait_start_us = bcdb_get_time();
+    uint64   next_warn_us  = wait_start_us + 5000000; /* 5 s */
+
+    Assert(blk != NULL);
+    for (;;)
+    {
+        BCTxID published = __atomic_load_n(&blk->result_committed_txid[slot],
+                                           __ATOMIC_ACQUIRE);
+        if (published == target_tx_id)
+            break;
+
+        CHECK_FOR_INTERRUPTS();
+
+        /* Always-on hang watchdog: fire every 5 s so a stuck loop is visible */
+        {
+            uint64 now_us = bcdb_get_time();
+            if (now_us >= next_warn_us)
+            {
+                BCTxID last_committed = get_last_committed_txid(NULL);
+                ereport(LOG,
+                        (errmsg("[BCDB_HANG] slot_ready_stuck pid=%d target_txid=%d slot=%d slot_value=%d last_committed=%d waited_us=%lu poll_us=%d spins=%d",
+                                (int) getpid(), (int) target_tx_id, slot,
+                                (int) published, (int) last_committed,
+                                (unsigned long) (now_us - wait_start_us),
+                                poll_us, spins)));
+                next_warn_us = now_us + 5000000;
+            }
+        }
+
+        if (spins < 128)
+        {
+            spins++;
+            pg_spin_delay();
+        }
+        else
+        {
+            if (poll_us == 0)
+                poll_us = 1;
+            else if (poll_us < 64)
+                poll_us *= 2;
+            pg_usleep((long) poll_us);
+        }
+    }
 }
 
 void
@@ -193,6 +332,9 @@ parse_block_with_txs(const char *json)
     cJSON *tx_json;
     BCBlock *block;
     int j = 0;
+    int tx_base = 0;
+    int tx_local_idx = 0;
+    BCBlock *sentinel = NULL;
     //static int  tx_id_counter = 0; // not bcdb
     //int  tx_id_counter = 0; // not bcdb
 
@@ -216,6 +358,9 @@ parse_block_with_txs(const char *json)
 	printf("ariaMyDbg %s : %s: %d blksz %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz(), getpid());
 #endif
     block->num_tx = cJSON_GetArraySize(tx_list);
+    sentinel = get_block_by_id(1, false);
+    Assert(sentinel != NULL);
+    tx_base = __sync_fetch_and_add(&sentinel->num_tx_sub, block->num_tx);
     cJSON_ArrayForEach(tx_json, tx_list)
     {
         cJSON   *sql      = NULL;
@@ -258,12 +403,10 @@ parse_block_with_txs(const char *json)
             tx->create_time = strtoll(create_time->valuestring, &endpt, 10);
         }
         
-        tx_id_counter = get_num_tx_sub();
-        tx->tx_id = tx_id_counter + (block->id - 1) * blocksize;
+        tx->tx_id = tx_base + tx_local_idx;
         tx->block_id_committed = block->id;
-        block->txs[tx_id_counter] = tx;
-        tx_id_counter += 1;
-        set_num_tx_sub(tx_id_counter); // get_block_by_id
+        block->txs[tx_local_idx] = tx;
+        tx_local_idx += 1;
 #if SAFEDBG
 		printf("ariaMyDbg %s : %s: %d txid %d bid %d hash %s \n", __FILE__, __FUNCTION__, __LINE__ , tx->tx_id, block->id, hash->valuestring);
 #endif
@@ -298,14 +441,12 @@ bcdb_middleware_submit_block(const char* block_json)
     BCBlock     *block;
     struct timeval tv1;
     tv1.tv_sec = 0; tv1.tv_usec = 0;
-    static int next_tx_id = 0;
-    int tx_num2 = 0;
+    int last_tx_id = -1;
     //struct timeval tv1 ;
     //tv1.tv_sec = 0; tv1.tv_usec = 0;
     // static int tmp = 0;
     ++block_meta->global_bmax;
     block = parse_block_with_txs(block_json);
-    tx_num2 =  get_num_txqd(); //  get_block_by_id
 /*
 if(tmp < 2) {
 tmp++;
@@ -313,40 +454,30 @@ print_trace();
 } else { return NULL; }
 */
 #if SAFEDBG
-		printf("ariaMyDbg %s : %s: %d pid %d txnum %d txnum2 %d next_tx_id %d blk-numtx %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid(), tx_num, tx_num2, next_tx_id, block->num_tx);
+		printf("ariaMyDbg %s : %s: %d pid %d txnum %d blk-numtx %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid(), tx_num, block->num_tx);
 #endif
-#if SAFEDBG
-        printf("ariaMyDbg %s : %s: %d pid %d tx %s \n", __FILE__, __FUNCTION__, __LINE__ , getpid(), block->txs[tx_num2]->sql);
-#endif
-    for (int i= 0; i < block->num_tx; i++, next_tx_id++)
+    for (int i= 0; i < block->num_tx; i++)
     {
-      tx_queue_insert(block->txs[tx_num2], tx_num2);
-      //tx_queue_insert(block->txs[next_tx_id], tx_num++);
-      //tx_queue_insert(block->txs[i], tx_num++);
-      tx_num2++;
+      BCDBShmXact *tx = block->txs[i];
+      tx_queue_insert(tx, tx->tx_id);
+      last_tx_id = tx->tx_id;
     }
-    set_num_txqd(tx_num2); //  get_block_by_id
-	//printf("ariaMyDbg %s : %s: %d pid %d tx %s \n", __FILE__, __FUNCTION__, __LINE__ , getpid(), block->txs[tx_num2-1]->sql);
+
         block = get_block_by_id(1, false);
         Assert(block != NULL);
-		gettimeofday(&tv1, NULL);
-#if SAFEDBG
-		printf("\n\n\t time= %ld.%ld  getpid %d\n", tv1.tv_sec, tv1.tv_usec, getpid());
-          WaitConditionPidDbg(&block->done_conds[tx_num2 -1], getpid(),
-#else
-          WaitConditionPid(&block->done_conds[tx_num2 -1], getpid(),
-#endif
-                         ( block->last_committed_tx_id  == (tx_num2 -1) ));
+        gettimeofday(&tv1, NULL);
+        if (last_tx_id >= 0)
+            bcdb_wait_until_slot_ready((BCTxID) last_tx_id);
 /*
 */
 #if SAFEDBG
 			gettimeofday(&tv1, NULL);
 			printf("\n\n\t time= %ld.%ld  getpid %d\n", tv1.tv_sec, tv1.tv_usec, getpid());
-	        printf("blkmid read result at %d= %s\n", ((tx_num2-1)%(2*block->blksize)), block->result[(tx_num2-1)%(2*block->blksize)]);
+	        printf("blkmid read result at %d= %s\n", last_tx_id, block->result[bcdb_result_slot_for_txid(last_tx_id)]);
 	        printf("\n\t *** safeDB completed txid %d pid %d %s : %s: %d *** \n\n",
-	               tx_num2, getpid(), __FILE__, __FUNCTION__, __LINE__ );
+	               last_tx_id, getpid(), __FILE__, __FUNCTION__, __LINE__ );
 	        printf("\n\t *** safeDB txid %d pid %d result %s file %s : %s: %d *** \n\n", 
-	               tx_num2, getpid(), &block->result[tx_num2-1],__FILE__, __FUNCTION__, __LINE__ );
+	               last_tx_id, getpid(), &block->result[bcdb_result_slot_for_txid(last_tx_id)],__FILE__, __FUNCTION__, __LINE__ );
 #endif
 //ereport(INFO, (errmsg(&block->result[tx_num2-1])));
 // TODO -- another way to convey results...
@@ -354,7 +485,9 @@ print_trace();
 
 //safeOut();
 	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
-return block->result[(tx_num2-1)%(2*block->blksize)];
+    if (last_tx_id < 0)
+        return block->result[0];
+    return block->result[bcdb_result_slot_for_txid((BCTxID) last_tx_id)];
 }
 
 char *
@@ -362,16 +495,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
 {
     BCBlock     *block;
     StringInfoData out;
-    int tx_num2 = 0;
-
-    /*
-     * This path is used by the deterministic benchmark executor, which
-     * submits one block at a time and needs every per-tx result back.
-     * Reset the per-block submission/queue counters so tx ids for this
-     * block are dense and aligned with bid*blocksize.
-     */
-    set_num_tx_sub(0);
-    set_num_txqd(0);
+    int last_tx_id = -1;
 
     ++block_meta->global_bmax;
     block = parse_block_with_txs(block_json);
@@ -379,23 +503,20 @@ bcdb_middleware_submit_block_results(const char* block_json)
 
     for (int i = 0; i < block->num_tx; ++i)
     {
-        tx_queue_insert(block->txs[i], i);
-        tx_num2++;
+        BCDBShmXact *tx = block->txs[i];
+        tx_queue_insert(tx, tx->tx_id);
+        last_tx_id = tx->tx_id;
     }
-    set_num_txqd(tx_num2);
-
-    if (tx_num2 > 0)
+    if (last_tx_id >= 0)
     {
-        BCDBShmXact *last_tx = block->txs[tx_num2 - 1];
-        WaitConditionPid(&block->cond, getpid(),
-                         (block->last_committed_tx_id == last_tx->tx_id));
+        bcdb_wait_until_slot_ready((BCTxID) last_tx_id);
     }
 
     initStringInfo(&out);
-    for (int i = 0; i < tx_num2; ++i)
+    for (int i = 0; i < block->num_tx; ++i)
     {
         BCDBShmXact *tx = block->txs[i];
-        const int mem_txid = tx->tx_id % block->blksize;
+        const int mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
 
         appendStringInfoString(&out, tx->hash);
         appendStringInfoChar(&out, '\t');
@@ -420,7 +541,7 @@ bcdb_middleware_submit_block2(const char* block_json)
     block = parse_block_with_txs(block_json);
     for (int i=0; i < block->num_tx; i++)
     {
-      tx_queue_insert(block->txs[i], tx_num++);
+      tx_queue_insert(block->txs[i], block->txs[i]->tx_id);
 		  if( (i % numTxBurst == 0)&&(i > 0)) {
 			gettimeofday(&tv1, NULL);
 #if SAFEDBG

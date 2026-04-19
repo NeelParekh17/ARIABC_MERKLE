@@ -206,14 +206,9 @@ ProcessQuery(PlannedStmt *plan,
 	/*
 	 * Now, we close down all the scans and free allocated resources.
 	 */
-	if(!is_bcdb_worker) {
-        ExecutorFinish(queryDesc);
-        ExecutorEnd(queryDesc);
-
-        FreeQueryDesc(queryDesc);
-    }else{
-	    activeTx->queryDesc = queryDesc;
-	}
+	ExecutorFinish(queryDesc);
+	ExecutorEnd(queryDesc);
+	FreeQueryDesc(queryDesc);
 }
 
 /*

@@ -21,6 +21,7 @@
 #include "storage/condition_variable.h"
 #include "storage/predicate_internals.h"
 #include "utils/hsearch.h"
+#include "port/atomics.h"
 #include <sys/types.h>
 #include <semaphore.h>
 #include "storage/spin.h"
@@ -95,6 +96,8 @@ typedef struct _WSTable
     HTAB               *map;
     HTAB               *mapB;
     HTAB               *mapActive;
+    /* mapB emptiness cache for DT conflict probes */
+    pg_atomic_uint32    mapB_nonempty;
     slock_t             map_locks[WRITE_CONFLICT_MAP_NUM_PARTITIONS];
 } WSTable;
 
@@ -105,6 +108,7 @@ typedef struct _BCDBShmXact
     char               hash[TX_HASH_SIZE];
     BCTxID             tx_id;
     BCTxID             tx_id_committed;
+    TransactionId      snap_xmin;     /* xmin of snapshot taken at portal_run start; T3-v2 */
 
     WSTable       *ws_table;
     WSTable       *rs_table;
@@ -232,6 +236,8 @@ extern bool apply_optim_insert(TupleTableSlot* slot, CommandId cid);
 extern bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid);
 extern bool apply_deferred_delete_by_key(Oid relOid, int keyval);
 extern bool apply_optim_writes(void);
+extern void bcdb_reset_apply_error_flags(void);
+extern bool bcdb_apply_had_unique_violation(void);
 /* check_stale_read removed — SSI stale-read check that was never called; see shm_transaction.c */
 /* clean_ws_table_record, clean_rs_table_record removed — non-DT per-entry cleanup with no callers;
  * use clean_rs_ws_table() (bulk clear) instead */

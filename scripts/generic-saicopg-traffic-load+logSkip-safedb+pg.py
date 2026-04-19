@@ -3,11 +3,12 @@
 import os
 import random
 import psycopg
+import re
 import sys
 import time
 import threading
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from threading import Lock
 
 mutex = Lock()
@@ -48,6 +49,12 @@ retry_error_counts = {}
 retry_error_examples = {}
 FAIL_LIST_MAX = 25
 RETRY_JITTER_PCT = 0.25
+WORKER_FUTURE_TIMEOUT_S = 0.0
+# Experimental: disabled by default because the deterministic EXECUTE-prepared
+# path currently crashes the live AriaBC server into recovery.
+DET_PREPARED_CALLS_ENABLED = os.getenv("DET_PREPARED_CALLS", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
  
 #print("arglen== " , len(sys.argv))
 if(len(sys.argv) < 5):
@@ -110,11 +117,47 @@ try:
     RETRY_JITTER_PCT = float(os.getenv("RETRY_JITTER_PCT", str(RETRY_JITTER_PCT)))
 except Exception:
     pass
+try:
+    WORKER_FUTURE_TIMEOUT_S = float(os.getenv("WORKER_FUTURE_TIMEOUT_S", str(WORKER_FUTURE_TIMEOUT_S)))
+except Exception:
+    pass
+try:
+    LOG_SKIP = int(os.getenv("LOG_SKIP", str(LOG_SKIP)))
+except Exception:
+    pass
 
 def getSeqHash(seqNum):
     return f"{seqNum:08d}"
 
+# Lock-free sequence dispatch (W5.20).
+#
+# The original getSeqNum() acquired mutex_seqnum on EVERY query, which
+# serialized all NUM worker threads through a single Python lock — a
+# significant bottleneck above ~16 workers. Each worker now owns a stride
+# of the input range (worker i handles seqs base + i, base + i + NUM, ...)
+# so no lock is needed on the hot path. Preserved log-throttle behavior.
+def getSeqNumForWorker(worker_idx: int, next_local: int):
+    """Return (absolute_seq, sql) for this worker, or (-1, '') if done.
+
+    `next_local` is the 0-based count of queries this worker has processed;
+    the caller increments it. This keeps per-worker state in the worker loop
+    and avoids any global mutex."""
+    base = 0
+    # When DET_START_SEQ offset is used, procSeqNum is set at startup.
+    # We read inputSeqNum (total input count) and procSeqNum (start offset)
+    # without a lock because they are set BEFORE workers start and only
+    # incremented under the global mutex by the legacy path (unused here).
+    base = procSeqNum
+    absolute = base + worker_idx + next_local * NUM
+    if absolute >= inputSeqNum:
+        return -1, ''
+    if ((absolute % LOG_SKIP) < NUM):
+        print(f"Thread: {threading.current_thread().name} | ID: {threading.get_ident()} | seq: {absolute}")
+    return absolute, message_dict[absolute]
+
 def getSeqNum():
+    # Legacy entry point retained for any external callers. Not used by
+    # worker_loop anymore. Acquires mutex only on the slow fallback path.
     global procSeqNum
     global inputSeqNum
 
@@ -323,6 +366,88 @@ def _try_fetch_one_row(cur):
     except Exception:
         return None
 
+_CALL_STMT_RE = re.compile(
+    r"^\s*call\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*)\)\s*;\s*$",
+    re.IGNORECASE,
+)
+
+_PREPARED_DET_CALL_SPECS = {
+    "new_order_proc": {
+        "prepared_name": "__ariabc_stmt_new_order_proc",
+        "prepare_sql": (
+            "PREPARE __ariabc_stmt_new_order_proc "
+            "(int, int, int, int[], int[], int[]) AS "
+            "SELECT public.new_order_proc_exec($1, $2, $3, $4, $5, $6)"
+        ),
+    },
+    "payment_proc": {
+        "prepared_name": "__ariabc_stmt_payment_proc",
+        "prepare_sql": (
+            "PREPARE __ariabc_stmt_payment_proc "
+            "(int, int, int, int, int, numeric) AS "
+            "SELECT public.payment_proc_exec($1, $2, $3, $4, $5, $6)"
+        ),
+    },
+    "payment_by_name_proc": {
+        "prepared_name": "__ariabc_stmt_payment_by_name_proc",
+        "prepare_sql": (
+            "PREPARE __ariabc_stmt_payment_by_name_proc "
+            "(text, int, int, int, int, numeric) AS "
+            "SELECT public.payment_by_name_proc_exec($1, $2, $3, $4, $5, $6)"
+        ),
+    },
+    "delivery_proc": {
+        "prepared_name": "__ariabc_stmt_delivery_proc",
+        "prepare_sql": (
+            "PREPARE __ariabc_stmt_delivery_proc "
+            "(int, int, int, timestamp) AS "
+            "SELECT public.delivery_proc_exec($1, $2, $3, $4)"
+        ),
+    },
+}
+
+def _prepared_call_state(conn):
+    state = getattr(conn, "_ariabc_prepared_calls", None)
+    if state is None:
+        state = {}
+        conn._ariabc_prepared_calls = state
+    return state
+
+def _ensure_prepared_det_call(conn, cur, proc_name: str) -> bool:
+    state = _prepared_call_state(conn)
+    if proc_name in state:
+        return state[proc_name]
+
+    spec = _PREPARED_DET_CALL_SPECS[proc_name]
+    try:
+        cur.execute(spec["prepare_sql"])
+        state[proc_name] = True
+    except Exception as err:
+        state[proc_name] = False
+        print(f"Prepared deterministic-call fallback for {proc_name}: {err}")
+
+    return state[proc_name]
+
+def _rewrite_det_call_for_execute(conn, cur, line: str) -> str:
+    stmt = line.strip()
+    if DB_TYPE != 1 or not DET_PREPARED_CALLS_ENABLED:
+        return stmt
+
+    match = _CALL_STMT_RE.match(stmt)
+    if not match:
+        return stmt
+
+    proc_name = match.group(1).lower()
+    spec = _PREPARED_DET_CALL_SPECS.get(proc_name)
+    if spec is None:
+        return stmt
+
+    if not _ensure_prepared_det_call(conn, cur, proc_name):
+        return stmt
+
+    args_sql = match.group(2).strip()
+    return f"EXECUTE {spec['prepared_name']}({args_sql});"
+
 
 def _prepare_statement_for_mode(line: str) -> str:
     """
@@ -358,8 +483,6 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
     if (qCount % LOG_SKIP) < NUM:
         print("timestamp1 = " + str(ts1) + " line= " + line)
 
-    exec_line = _prepare_statement_for_mode(line)
-
     try:
         result_message = "NO STATUS"
         result_data = None
@@ -371,9 +494,11 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                 if hasattr(conn, "_bcdb_merkle_roots"):
                     conn._bcdb_merkle_roots = None
 
+                exec_line = _prepare_statement_for_mode(_rewrite_det_call_for_execute(conn, cur, line))
+
                 # Execute the actual query
                 if DB_TYPE == 1:
-                    cur.execute(pfx + mHash + ' ' + line)
+                    cur.execute(pfx + mHash + ' ' + exec_line)
                 else:
                     # PG/nondet modes execute plain SQL text.
                     cur.execute(exec_line)
@@ -530,8 +655,10 @@ def worker_loop(worker_idx: int):
     cur = None
     try:
         conn, cur = open_worker_connection(worker_idx)
+        local_idx = 0
         while True:
-            qCount, q = getSeqNum()
+            qCount, q = getSeqNumForWorker(worker_idx, local_idx)
+            local_idx += 1
             if qCount == -1 or q == '':
                 return
             try:
@@ -595,6 +722,13 @@ try:
         if base >= 100_000_000:
             print(f"Err: DET_START_SEQ too large for 8-digit hashes: {base}")
             exit(-1)
+
+        if base != 0:
+            print(
+                f"WARN: DET_START_SEQ={base}. This must match the server's current "
+                f"published_max watermark. If you restarted the server, set DET_START_SEQ=0 "
+                f"or the run will not make progress."
+            )
         procSeqNum = base
         inputSeqNum = base
 
@@ -618,12 +752,29 @@ message_dict[inputSeqNum] = ''
 inputSeqNum += 1
 tStart = time.time()
 
-with ThreadPoolExecutor(max_workers=NUM) as execPool:
-    futures = []
-    for i in range(NUM):
-        futures.append(execPool.submit(worker_loop, i))
+timed_out = False
+execPool = ThreadPoolExecutor(max_workers=NUM)
+futures = []
+for i in range(NUM):
+    futures.append(execPool.submit(worker_loop, i))
+
+try:
+    if WORKER_FUTURE_TIMEOUT_S > 0:
+        for fut in as_completed(futures, timeout=WORKER_FUTURE_TIMEOUT_S):
+            fut.result()
+    else:
+        for fut in futures:
+            fut.result()
+except FuturesTimeoutError:
+    timed_out = True
+    print(f"ERROR: worker futures exceeded timeout: {WORKER_FUTURE_TIMEOUT_S}s")
     for fut in futures:
-        fut.result()
+        fut.cancel()
+finally:
+    execPool.shutdown(wait=not timed_out, cancel_futures=timed_out)
+
+if timed_out:
+    sys.exit(2)
 
 tEnd = time.time()
 sys.stdout.flush()

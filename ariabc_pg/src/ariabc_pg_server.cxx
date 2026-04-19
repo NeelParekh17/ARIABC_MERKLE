@@ -62,12 +62,26 @@ bool starts_with(const std::string& s, const std::string& prefix) {
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
-bool parse_wait_commit_cmd(const std::string& sql, uint64_t& out_target_idx, int& out_timeout_ms) {
+bool parse_wait_commit_cmd(const std::string& sql,
+                           uint64_t& out_target_idx,
+                           int& out_timeout_ms,
+                           bool& out_wait_result_mode) {
     out_target_idx = 0;
     out_timeout_ms = 30000;
-    const std::string prefix = "__ARIABC_CTRL_WAIT_COMMIT_INDEX";
-    if (!starts_with(sql, prefix)) return false;
-    std::istringstream iss(sql.substr(prefix.size()));
+    out_wait_result_mode = false;
+    const std::string ctrl_prefix = "__ARIABC_CTRL_WAIT_COMMIT_INDEX";
+    const std::string wait_result_prefix = "WAIT_RESULT";
+    std::string rest;
+    if (starts_with(sql, ctrl_prefix)) {
+        rest = sql.substr(ctrl_prefix.size());
+    } else if (starts_with(sql, wait_result_prefix)) {
+        rest = sql.substr(wait_result_prefix.size());
+        out_wait_result_mode = true;
+    } else {
+        return false;
+    }
+
+    std::istringstream iss(rest);
     long long target = 0;
     long long timeout = 30000;
     if (!(iss >> target)) return false;
@@ -134,6 +148,9 @@ struct server_options {
     int client_port = 0;
     std::string raft_members;
 
+    // When true: skip Raft entirely and directly enqueue to pg_executor.
+    bool bypass_raft = false;
+
     db_options db;
     kafka_options kafka;
 };
@@ -146,7 +163,8 @@ void usage(const char* argv0) {
         << "    --raftMembers <id=host:port,id=host:port,...> \\\n"
         << "    --dbName <name> --dbPort <port> [--dbHost <host>] [--dbUser <user>] [--dbPass <pass>] \\\n"
         << "    [--dbType <0|1|2>] [--safedb <0|1|2>] [--dbConnPoolSize <N>] [--pgExecMode threaded|event] \\\n"
-        << "    [--kafkaBootstrap <host:port>] [--resultTopic <t>] [--resultSigKey <k>]\n";
+        << "    [--kafkaBootstrap <host:port>] [--resultTopic <t>] [--resultSigKey <k>] \\\n"
+        << "    [--bypassRaft 0|1]  # skip Raft, direct-enqueue to executor (kafka-only profile)\n";
 }
 
 bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
@@ -193,6 +211,8 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.kafka.result_topic = need("--resultTopic");
             } else if (a == "--resultSigKey") {
                 opt.kafka.result_sig_key = need("--resultSigKey");
+            } else if (a == "--bypassRaft") {
+                opt.bypass_raft = (std::stoi(need("--bypassRaft")) != 0);
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -205,7 +225,7 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
         err = "invalid/missing --id";
         return false;
     }
-    if (opt.raft_endpoint.empty()) {
+    if (!opt.bypass_raft && opt.raft_endpoint.empty()) {
         err = "missing --raftEndpoint";
         return false;
     }
@@ -341,11 +361,13 @@ void handle_client_fd(int fd,
             if (!ok_write) break;
             continue;
         }
-        if (psm && starts_with(req.sql, "__ARIABC_CTRL_WAIT_COMMIT_INDEX")) {
+        if (psm && (starts_with(req.sql, "__ARIABC_CTRL_WAIT_COMMIT_INDEX") ||
+                    starts_with(req.sql, "WAIT_RESULT"))) {
             uint64_t target_idx = 0;
             int timeout_ms = 30000;
+            bool wait_result_mode = false;
             client_api_response resp;
-            if (!parse_wait_commit_cmd(req.sql, target_idx, timeout_ms)) {
+            if (!parse_wait_commit_cmd(req.sql, target_idx, timeout_ms, wait_result_mode)) {
                 resp.status = 1;
                 resp.msg = "INVALID_WAIT_COMMIT_COMMAND";
             } else {
@@ -356,7 +378,13 @@ void handle_client_fd(int fd,
                     const uint64_t cur = static_cast<uint64_t>(psm->last_commit_index());
                     if (cur >= target_idx) {
                         resp.status = 0;
-                        resp.msg = std::to_string(cur);
+                        if (wait_result_mode) {
+                            resp.msg = "WAIT_RESULT_OK completion_source=commit_index raft_log_idx=" +
+                                       std::to_string(cur) +
+                                       " result_payload=NA result_hash=NA";
+                        } else {
+                            resp.msg = std::to_string(cur);
+                        }
                         ok = true;
                         break;
                     }
@@ -380,15 +408,15 @@ void handle_client_fd(int fd,
             continue;
         }
 
-        // Admission control: apply backpressure by stalling the submit RPC
-        // instead of rejecting with NOT_ACCEPTED_BUSY. This keeps deterministic
-        // gateways stable (no retry storms) and makes NOT_ACCEPTED_BUSY = 0.
+        // Admission control: backpressure via condvar-backed wait so the queue
+        // drain wakes us exactly, instead of 1ms sleep-polling.
         if (psm) {
             const auto s0 = std::chrono::steady_clock::now();
             bool stalled = false;
             while (psm->admission_control_blocked() && !g_stop.load(std::memory_order_relaxed)) {
                 stalled = true;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // Cap a single wait so we re-check g_stop periodically.
+                (void)psm->wait_for_admission_drain(50ULL * 1000ULL * 1000ULL); // 50ms
             }
             if (stalled) {
                 const auto s1 = std::chrono::steady_clock::now();
@@ -432,13 +460,18 @@ void handle_client_fd(int fd,
             resp.status = 1;
             resp.msg =
                 "NOT_ACCEPTED code=" + std::to_string(static_cast<int>(r->get_result_code())) +
-                " leader=" + std::to_string(raft->get_leader());
+                " accepted=0 leader=" + std::to_string(raft->get_leader()) +
+                " leader_id=" + std::to_string(raft ? raft->get_leader() : -1) +
+                " raft_log_idx=0";
         } else {
             // Fast path: once accepted by current leader, return immediately.
             // Correctness is enforced in gateway by waiting for majority result
             // replies from all nodes (via vote_store), not by this immediate ACK.
+            const uint64_t raft_log_idx = raft ? static_cast<uint64_t>(raft->get_last_log_idx()) : 0ULL;
             resp.status = 0;
-            resp.msg = "ACCEPTED leader=" + std::to_string(raft ? raft->get_leader() : -1);
+            resp.msg = "ACCEPTED accepted=1 leader=" + std::to_string(raft ? raft->get_leader() : -1) +
+                       " leader_id=" + std::to_string(raft ? raft->get_leader() : -1) +
+                       " raft_log_idx=" + std::to_string(raft_log_idx);
         }
 
         const auto w0 = std::chrono::steady_clock::now();
@@ -452,6 +485,108 @@ void handle_client_fd(int fd,
         if (!ok_write) {
             break;
         }
+    }
+    ::close(fd);
+}
+
+// Bypass-Raft handler: directly enqueues requests into pg_executor without
+// going through NuRaft. Used for the kafka-only-no-raft configuration where
+// ordering is provided by the gateway broadcasting in the same sequence to all
+// replicas. Kafka result collection in the gateway enforces distributed agreement.
+void handle_client_fd_direct(int fd,
+                              pg_state_machine* psm,
+                              std::atomic<uint64_t>& seq_counter) {
+    {
+        int one = 1;
+        (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    }
+    while (true) {
+        client_api_request req;
+        std::string err;
+        const auto r0 = std::chrono::steady_clock::now();
+        const bool ok_read = read_request_frame(fd, req, err);
+        const auto r1 = std::chrono::steady_clock::now();
+        if (!ok_read) break;
+
+        debug_trace_server_request(req);
+        g_prof.client_read_frames.fetch_add(1, std::memory_order_relaxed);
+        g_prof.client_read_ns.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(r1 - r0).count()),
+            std::memory_order_relaxed);
+
+        if (!psm) {
+            client_api_response resp;
+            resp.status = 1;
+            resp.msg = "BYPASS_RAFT_NO_PSM";
+            write_response_frame(fd, resp, err);
+            break;
+        }
+
+        // Control-plane: return seq counter as proxy for commit index.
+        if (req.sql == "__ARIABC_CTRL_GET_COMMIT_INDEX") {
+            client_api_response resp;
+            resp.status = 0;
+            resp.msg = std::to_string(seq_counter.load(std::memory_order_relaxed));
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
+        if (starts_with(req.sql, "__ARIABC_CTRL_WAIT_COMMIT_INDEX") || starts_with(req.sql, "WAIT_RESULT")) {
+            // In bypass mode we don't have separate commit tracking;
+            // the seq counter advances before enqueue, so just return ok.
+            client_api_response resp;
+            resp.status = 0;
+            if (starts_with(req.sql, "WAIT_RESULT")) {
+                const uint64_t cur = seq_counter.load(std::memory_order_relaxed);
+                resp.msg = "WAIT_RESULT_OK completion_source=direct_enqueue raft_log_idx=" +
+                           std::to_string(cur) +
+                           " result_payload=NA result_hash=NA";
+            } else {
+                resp.msg = std::to_string(seq_counter.load(std::memory_order_relaxed));
+            }
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
+
+        // Admission control (direct path): condvar-backed wait instead of sleep polling.
+        {
+            const auto s0 = std::chrono::steady_clock::now();
+            bool stalled = false;
+            while (psm->admission_control_blocked() && !g_stop.load(std::memory_order_relaxed)) {
+                stalled = true;
+                (void)psm->wait_for_admission_drain(50ULL * 1000ULL * 1000ULL); // 50ms
+            }
+            if (stalled) {
+                const auto s1 = std::chrono::steady_clock::now();
+                g_prof.append_stall_calls.fetch_add(1, std::memory_order_relaxed);
+                g_prof.append_stall_ns.fetch_add(
+                    static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
+                    std::memory_order_relaxed);
+            }
+        }
+
+        // Assign a monotonically increasing sequence number (replaces Raft log index).
+        const uint64_t seq = seq_counter.fetch_add(1, std::memory_order_relaxed);
+        psm->direct_enqueue(req.req_id, req.sql, seq);
+        g_prof.append_calls.fetch_add(1, std::memory_order_relaxed);
+
+        client_api_response resp;
+        resp.status = 0;
+        resp.msg = "ACCEPTED_DIRECT accepted=1 leader=-1 leader_id=-1 raft_log_idx=" +
+                   std::to_string(seq) + " seq=" + std::to_string(seq);
+
+        const auto w0 = std::chrono::steady_clock::now();
+        const bool ok_write = write_response_frame(fd, resp, err);
+        const auto w1 = std::chrono::steady_clock::now();
+        g_prof.client_write_frames.fetch_add(1, std::memory_order_relaxed);
+        g_prof.client_write_ns.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count()),
+            std::memory_order_relaxed);
+        if (!ok_write) break;
     }
     ::close(fd);
 }
@@ -549,6 +684,52 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Ignore SIGPIPE so a broken client connection doesn't kill the server.
+    ::signal(SIGPIPE, SIG_IGN);
+    ::signal(SIGTERM, ariabc_pg::on_term);
+    ::signal(SIGINT, ariabc_pg::on_term);
+
+    // State machine (always needed: owns pg_executor + Kafka publisher).
+    ptr<state_machine> sm =
+        cs_new<ariabc_pg::pg_state_machine>(opt.id, opt.db, opt.kafka);
+
+    if (opt.bypass_raft) {
+        // ---- Bypass-Raft mode (kafka-only-no-raft profile) ----
+        // Skip NuRaft entirely. The gateway broadcasts transactions to all
+        // replicas in the same order; each replica executes deterministically
+        // and publishes results to Kafka. The gateway collects Kafka results
+        // and waits for threshold agreement.
+        std::cout << "ariabc_pg_server ready (bypass-raft): id=" << opt.id
+                  << " clientPort=" << opt.client_port
+                  << std::endl;
+
+        std::atomic<uint64_t> direct_seq{1};
+        ariabc_pg::pg_state_machine* psm =
+            dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
+
+        const int listen_fd = ariabc_pg::listen_tcp(opt.client_port);
+        ariabc_pg::g_listen_fd = listen_fd;
+        while (!ariabc_pg::g_stop.load()) {
+            sockaddr_in cli;
+            socklen_t len = sizeof(cli);
+            const int fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&cli), &len);
+            if (fd < 0) {
+                if (errno == EINTR) continue;
+                if (ariabc_pg::g_stop.load()) break;
+                std::cerr << "accept failed: " << ::strerror(errno) << std::endl;
+                continue;
+            }
+            std::thread th([fd, psm, &direct_seq] {
+                ariabc_pg::handle_client_fd_direct(fd, psm, direct_seq);
+            });
+            th.detach();
+        }
+
+        ariabc_pg::dump_profile(nullptr, sm);
+        return 0;
+    }
+
+    // ---- Normal Raft mode ----
     std::vector<ariabc_pg::raft_member> members;
     try {
         members = ariabc_pg::parse_raft_members(opt);
@@ -556,11 +737,6 @@ int main(int argc, char** argv) {
         std::cerr << "Raft members error: " << e.what() << std::endl;
         return 1;
     }
-
-    // Ignore SIGPIPE so a broken client connection doesn't kill the server.
-    ::signal(SIGPIPE, SIG_IGN);
-    ::signal(SIGTERM, ariabc_pg::on_term);
-    ::signal(SIGINT, ariabc_pg::on_term);
 
     // Logger.
     const std::string log_file = "./ariabc_pg_srv" + std::to_string(opt.id) + ".log";
@@ -573,10 +749,6 @@ int main(int argc, char** argv) {
         conf->get_servers().push_back(cs_new<srv_config>(m.id, m.endpoint));
     }
     smgr->save_config(*conf);
-
-    // State machine.
-    ptr<state_machine> sm =
-        cs_new<ariabc_pg::pg_state_machine>(opt.id, opt.db, opt.kafka);
 
     // ASIO options.
     asio_service::options asio_opt;

@@ -17,6 +17,16 @@ public:
     pg_executor_stats executor_stats() const { return executor_.stats(); }
     kafka_producer_stats kafka_stats() const { return executor_.kafka_stats(); }
     bool admission_control_blocked() const { return executor_.admission_control_blocked(); }
+    bool wait_for_admission_drain(uint64_t max_wait_ns) {
+        return executor_.wait_for_admission_drain(max_wait_ns);
+    }
+
+    // Bypass-Raft path: directly enqueue a request with a caller-provided
+    // monotonic sequence number, skipping Raft log deserialization.
+    void direct_enqueue(const std::string& req_id, const std::string& sql, uint64_t seq) {
+        executor_.enqueue(req_id, sql, -1, seq);
+        last_committed_idx_.store(seq, std::memory_order_relaxed);
+    }
 
     nuraft::ptr<nuraft::buffer> commit(const nuraft::ulong log_idx,
                                        nuraft::buffer& data) override;
