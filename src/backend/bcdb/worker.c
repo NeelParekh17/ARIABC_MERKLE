@@ -678,6 +678,10 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 static inline void
 bcdb_wait_for_prev_committed(BCDBShmXact *tx)
 {
+    /* tx_id 0 has no predecessor; tx_id-1 would underflow to UINT32_MAX. */
+    if (tx->tx_id == 0)
+        return;
+
     int spins = 0;
     int poll_us = 0;
     uint64 wait_start_us = bcdb_get_time();
