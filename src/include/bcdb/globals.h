@@ -19,6 +19,8 @@ extern PGDLLIMPORT bool                bcdb_dt_conflict_tracking;
 extern PGDLLIMPORT int32               bcdb_serial_gate_mode;
 extern PGDLLIMPORT int32               bcdb_dt_hashtab_switch_threshold;
 extern PGDLLIMPORT int32               bcdb_result_ring_slots;
+extern PGDLLIMPORT char                *bcdb_client_public_key;
+extern PGDLLIMPORT bool                bcdb_enforce_signatures;
 
 typedef enum BcdbIsolationLevel{
     BCDB_READ_COMMITED,
@@ -62,6 +64,14 @@ extern int32         worker_id;
 #define BCDB_DEFAULT_WORKER_COUNT 2
 #define BCDB_DEFAULT_HASHTAB_SWITCH_THRESHOLD 1500
 #define BCDB_DEFAULT_RESULT_RING_SLOTS 128
+/*
+ * BCDB_RESULT_RING_CAPACITY — compile-time capacity of the three per-slot
+ * result arrays in BCBlock (result[], result_committed_txid[],
+ * result_commit_xid[]).  Must be >= 2 * bcdb_worker_count max (1024) so
+ * bcdb_get_runtime_result_ring_slots() never produces an out-of-bounds index.
+ * 2048 = 2 × 1024 satisfies this for all valid GUC settings.
+ */
+#define BCDB_RESULT_RING_CAPACITY 2048
 #define BCDB_SERIAL_GATE_MODE_POLL 0
 #define BCDB_SERIAL_GATE_MODE_CONDVAR 1
 #define NUM_WORKERS BCDB_DEFAULT_WORKER_COUNT

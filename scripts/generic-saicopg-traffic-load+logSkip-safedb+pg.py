@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+import argparse
+import base64
 import os
 import random
 import psycopg
@@ -50,32 +52,63 @@ retry_error_examples = {}
 FAIL_LIST_MAX = 25
 RETRY_JITTER_PCT = 0.25
 WORKER_FUTURE_TIMEOUT_S = 0.0
-# Experimental: disabled by default because the deterministic EXECUTE-prepared
-# path currently crashes the live AriaBC server into recovery.
-DET_PREPARED_CALLS_ENABLED = os.getenv("DET_PREPARED_CALLS", "").strip().lower() in {
+PREPARED_CALLS_ENABLED = os.getenv("PREPARED_CALLS", "1").strip().lower() in {
     "1", "true", "yes", "on"
 }
- 
-#print("arglen== " , len(sys.argv))
-if(len(sys.argv) < 5):
-  print("Err: missing arguments... ")
-  print("Usage: python3 generic-saicopg-traffic-load+logSkip-safedb+pg.py <dbName> <queryDataFile> <pg0Safe1Aria2|-1(det-auto)> <num-thread> [<<Qrate>]");
-  exit(-1)
+DET_PREPARED_CALLS_ENABLED = os.getenv(
+    "DET_PREPARED_CALLS",
+    "0",
+).strip().lower() in {
+    "1", "true", "yes", "on"
+}
+SIGNING_ENABLED = False
+ENFORCE_SIGNATURES = False
+SIGNING_PRIVATE_KEY = None
+CLIENT_PUBLIC_KEY_B64 = ""
+_CRYPTO_HASHES = None
+_CRYPTO_PADDING = None
+WORKLOAD_FILE = ""
+tx_type_metrics = {}
+det_timing_metrics = {
+    "build_us": [],
+    "sign_us": [],
+    "b64_us": [],
+    "roundtrip_us": [],
+}
 
-NUM = int(sys.argv[4])
-DB_TYPE_RAW = int(sys.argv[3])
+
+parser = argparse.ArgumentParser(
+    description="Run BCDB/PG traffic against a workload file."
+)
+parser.add_argument("db_name")
+parser.add_argument("query_data_file")
+parser.add_argument("db_type", type=int, help="0=pg, 1=det, 2=nondet, -1=det alias")
+parser.add_argument("num_thread", type=int)
+parser.add_argument("qrate", nargs="?", type=int, default=0)
+parser.add_argument("--signing", type=int, choices=[0, 1], default=0,
+                    help="For deterministic mode, sign each SQL and send 'sig##sql'.")
+parser.add_argument("--privkey", default="",
+                    help="PEM private key path used when --signing=1.")
+parser.add_argument("--enforce-signatures", type=int, choices=[0, 1], default=0,
+                    help="Set bcdb_enforce_signatures in each session.")
+args = parser.parse_args()
+
+NUM = args.num_thread
+DB_TYPE_RAW = args.db_type
 DB_TYPE = DB_TYPE_RAW
 if DB_TYPE == -1:
     # Requested shortcut: -1 means deterministic execution (same wire format as DB_TYPE=1).
     DB_TYPE = 1
-if(len(sys.argv) > 5):
-  RATE = int(sys.argv[5])
-  RATE_LIMIT_ENABLED = RATE > 0
+RATE = int(args.qrate)
+RATE_LIMIT_ENABLED = RATE > 0
 reqPause = (1.0 / RATE) if RATE_LIMIT_ENABLED else 0.0
-print(" arg1 a2 == ", sys.argv[1], sys.argv[2]);
-print(" arg3 a4 pause == ", sys.argv[3], sys.argv[4], reqPause);
+print(" arg1 a2 == ", args.db_name, args.query_data_file);
+print(" arg3 a4 pause == ", args.db_type, args.num_thread, reqPause);
 print(f" rate_limit_enabled={1 if RATE_LIMIT_ENABLED else 0} qrate={RATE if RATE_LIMIT_ENABLED else 0}")
-DB_NAME = sys.argv[1]
+DB_NAME = args.db_name
+WORKLOAD_FILE = args.query_data_file
+SIGNING_ENABLED = bool(args.signing)
+ENFORCE_SIGNATURES = bool(args.enforce_signatures)
 
 # Optional env overrides (do not change CLI contract)
 DB_USER = os.getenv("DB_USER", DB_USER)
@@ -126,8 +159,155 @@ try:
 except Exception:
     pass
 
+
+def _init_signing_material():
+    global SIGNING_PRIVATE_KEY
+    global CLIENT_PUBLIC_KEY_B64
+    global _CRYPTO_HASHES
+    global _CRYPTO_PADDING
+
+    if not SIGNING_ENABLED:
+        return
+
+    if DB_TYPE != 1:
+        print("Err: --signing=1 is only supported for deterministic BCDB mode (db_type=1 or -1)")
+        exit(-1)
+    if not args.privkey:
+        print("Err: --privkey is required when --signing=1")
+        exit(-1)
+
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+    except Exception as err:
+        print(f"Err: could not import cryptography for signing: {err}")
+        exit(-1)
+
+    try:
+        with open(args.privkey, "rb") as f:
+            SIGNING_PRIVATE_KEY = serialization.load_pem_private_key(f.read(), password=None)
+    except Exception as err:
+        print(f"Err: could not load signing private key '{args.privkey}': {err}")
+        exit(-1)
+
+    try:
+        pub_der = SIGNING_PRIVATE_KEY.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        CLIENT_PUBLIC_KEY_B64 = base64.b64encode(pub_der).decode("ascii")
+    except Exception as err:
+        print(f"Err: could not derive public key from '{args.privkey}': {err}")
+        exit(-1)
+
+    _CRYPTO_HASHES = hashes
+    _CRYPTO_PADDING = padding
+
+
+_init_signing_material()
+print(f" signing_enabled={1 if SIGNING_ENABLED else 0} enforce_signatures={1 if ENFORCE_SIGNATURES else 0}")
+
 def getSeqHash(seqNum):
     return f"{seqNum:08d}"
+
+
+def _build_det_command(seq_hash: str, sql: str) -> str:
+    build_start = time.perf_counter()
+    if not SIGNING_ENABLED:
+        cmd = f"s {seq_hash} {sql}"
+        _record_det_timing_sample("build_us", (time.perf_counter() - build_start) * 1_000_000.0)
+        return cmd
+
+    sign_start = time.perf_counter()
+    sig = SIGNING_PRIVATE_KEY.sign(
+        sql.encode("utf-8"),
+        _CRYPTO_PADDING.PKCS1v15(),
+        _CRYPTO_HASHES.SHA256(),
+    )
+    sign_end = time.perf_counter()
+    sig_b64 = base64.b64encode(sig).decode("ascii")
+    b64_end = time.perf_counter()
+    cmd = f"s {seq_hash} {sig_b64}##{sql}"
+    build_end = time.perf_counter()
+
+    _record_det_timing_sample("sign_us", (sign_end - sign_start) * 1_000_000.0)
+    _record_det_timing_sample("b64_us", (b64_end - sign_end) * 1_000_000.0)
+    _record_det_timing_sample("build_us", (build_end - build_start) * 1_000_000.0)
+    return cmd
+
+
+def _classify_tx_type(line: str) -> str:
+    s = line.strip().lower()
+    if "new_order_proc_exec" in s or "new_order_proc(" in s:
+        return "new_order"
+    if "payment_by_name_proc_exec" in s or "payment_by_name_proc(" in s:
+        return "payment_name"
+    if "payment_proc_exec" in s or "payment_proc(" in s:
+        return "payment_id"
+    if "order_status_summary" in s or "order_status_" in s:
+        return "order_status"
+    if "stock_level(" in s or "stock_level_proc(" in s:
+        return "stock_level"
+    if "delivery_proc_exec" in s or "delivery_proc(" in s:
+        return "delivery"
+    return "other"
+
+
+def _get_tx_metric_bucket(tx_type: str):
+    bucket = tx_type_metrics.get(tx_type)
+    if bucket is None:
+        bucket = {
+            "count": 0,
+            "ok": 0,
+            "permanent_failures": 0,
+            "retries_total": 0,
+            "serialization_retries": 0,
+            "reconnects": 0,
+            "latencies_ms": [],
+        }
+        tx_type_metrics[tx_type] = bucket
+    return bucket
+
+
+def _record_tx_success(tx_type: str, latency_ms: float, retries_total: int, serialization_retries: int, reconnects: int):
+    with metrics_lock:
+        bucket = _get_tx_metric_bucket(tx_type)
+        bucket["count"] += 1
+        bucket["ok"] += 1
+        bucket["retries_total"] += retries_total
+        bucket["serialization_retries"] += serialization_retries
+        bucket["reconnects"] += reconnects
+        bucket["latencies_ms"].append(latency_ms)
+
+
+def _record_tx_failure(tx_type: str, retries_total: int, serialization_retries: int, reconnects: int):
+    with metrics_lock:
+        bucket = _get_tx_metric_bucket(tx_type)
+        bucket["count"] += 1
+        bucket["permanent_failures"] += 1
+        bucket["retries_total"] += retries_total
+        bucket["serialization_retries"] += serialization_retries
+        bucket["reconnects"] += reconnects
+
+
+def _percentile(nums, pct: float):
+    if not nums:
+        return None
+    xs = sorted(nums)
+    if pct <= 0:
+        return xs[0]
+    if pct >= 100:
+        return xs[-1]
+    idx = (len(xs) - 1) * (pct / 100.0)
+    lo = int(idx)
+    hi = min(lo + 1, len(xs) - 1)
+    frac = idx - lo
+    return xs[lo] * (1.0 - frac) + xs[hi] * frac
+
+
+def _record_det_timing_sample(kind: str, sample_us: float):
+    with metrics_lock:
+        det_timing_metrics.setdefault(kind, []).append(sample_us)
 
 # Lock-free sequence dispatch (W5.20).
 #
@@ -173,19 +353,47 @@ def getSeqNum():
 
     return currNum, message_dict[currNum]
 
+def _apply_worker_session_settings(cur):
+    cur.execute(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'")
+    cur.execute(
+        f"SET bcdb_enforce_signatures = '{'on' if ENFORCE_SIGNATURES else 'off'}'"
+    )
+    if CLIENT_PUBLIC_KEY_B64:
+        # Use SET instead of SELECT set_config(...): this fork still has some
+        # row-return paths that can leak raw debug bytes into libpq sessions.
+        cur.execute(
+            psycopg.sql.SQL("SET bcdb_client_public_key = {}").format(
+                psycopg.sql.Literal(CLIENT_PUBLIC_KEY_B64)
+            )
+        )
+
 def open_worker_connection(worker_idx: int):
     last_exc = None
     for attempt in range(MAX_RETRIES):
+        conn = None
+        cur = None
+        stage = "connect"
         try:
             conn = psycopg.connect(connStr, autocommit=True)
             _install_bcdb_merkle_notice_handler(conn)
             cur = conn.cursor()
-            cur.execute(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'")
+            stage = "session bootstrap"
+            _apply_worker_session_settings(cur)
             return conn, cur
         except Exception as err:
             last_exc = err
             sleep_s = RETRY_BACKOFF_SEC * (2 ** attempt)
-            print(f"error connecting in 'worker-{worker_idx}': {err}")
+            try:
+                if cur is not None:
+                    cur.close()
+            except Exception:
+                pass
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+            print(f"error during {stage} in 'worker-{worker_idx}': {err}")
             time.sleep(sleep_s)
 
     raise last_exc
@@ -370,8 +578,17 @@ _CALL_STMT_RE = re.compile(
     r"^\s*call\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*)\)\s*;\s*$",
     re.IGNORECASE,
 )
+_SELECT_VOID_FUNC_RE = re.compile(
+    r"^\s*select\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*)\)\s*;\s*$",
+    re.IGNORECASE,
+)
+_SELECT_ORDER_STATUS_SUMMARY_RE = re.compile(
+    r"^\s*select\s+order_id\s*,\s*entry_date\s*,\s*carrier_id\s+from\s+public\."
+    r"(order_status_summary_id|order_status_summary_by_last_name)\s*\((.*)\)\s*;\s*$",
+    re.IGNORECASE,
+)
 
-_PREPARED_DET_CALL_SPECS = {
+_PREPARED_STMT_SPECS = {
     "new_order_proc": {
         "prepared_name": "__ariabc_stmt_new_order_proc",
         "prepare_sql": (
@@ -404,6 +621,32 @@ _PREPARED_DET_CALL_SPECS = {
             "SELECT public.delivery_proc_exec($1, $2, $3, $4)"
         ),
     },
+    "order_status_summary_id": {
+        "prepared_name": "__ariabc_stmt_order_status_summary_id",
+        "prepare_sql": (
+            "PREPARE __ariabc_stmt_order_status_summary_id "
+            "(int, int, int) AS "
+            "SELECT order_id, entry_date, carrier_id "
+            "FROM public.order_status_summary_id($1, $2, $3)"
+        ),
+    },
+    "order_status_summary_by_last_name": {
+        "prepared_name": "__ariabc_stmt_order_status_summary_by_last_name",
+        "prepare_sql": (
+            "PREPARE __ariabc_stmt_order_status_summary_by_last_name "
+            "(int, int, text) AS "
+            "SELECT order_id, entry_date, carrier_id "
+            "FROM public.order_status_summary_by_last_name($1, $2, $3)"
+        ),
+    },
+    "stock_level": {
+        "prepared_name": "__ariabc_stmt_stock_level",
+        "prepare_sql": (
+            "PREPARE __ariabc_stmt_stock_level "
+            "(int, int, int) AS "
+            "SELECT public.stock_level($1, $2, $3)"
+        ),
+    },
 }
 
 def _prepared_call_state(conn):
@@ -413,40 +656,45 @@ def _prepared_call_state(conn):
         conn._ariabc_prepared_calls = state
     return state
 
-def _ensure_prepared_det_call(conn, cur, proc_name: str) -> bool:
+def _ensure_prepared_statement(conn, cur, proc_name: str) -> bool:
     state = _prepared_call_state(conn)
     if proc_name in state:
         return state[proc_name]
 
-    spec = _PREPARED_DET_CALL_SPECS[proc_name]
+    spec = _PREPARED_STMT_SPECS[proc_name]
     try:
         cur.execute(spec["prepare_sql"])
         state[proc_name] = True
     except Exception as err:
         state[proc_name] = False
-        print(f"Prepared deterministic-call fallback for {proc_name}: {err}")
+        print(f"Prepared statement fallback for {proc_name}: {err}")
 
     return state[proc_name]
 
-def _rewrite_det_call_for_execute(conn, cur, line: str) -> str:
+def _prepared_statements_enabled_for_mode() -> bool:
+    if DB_TYPE == 1:
+        return DET_PREPARED_CALLS_ENABLED
+    return PREPARED_CALLS_ENABLED
+
+
+def _rewrite_stmt_for_execute(conn, cur, line: str) -> str:
     stmt = line.strip()
-    if DB_TYPE != 1 or not DET_PREPARED_CALLS_ENABLED:
+    if not _prepared_statements_enabled_for_mode():
         return stmt
 
-    match = _CALL_STMT_RE.match(stmt)
-    if not match:
-        return stmt
-
-    proc_name = match.group(1).lower()
-    spec = _PREPARED_DET_CALL_SPECS.get(proc_name)
-    if spec is None:
-        return stmt
-
-    if not _ensure_prepared_det_call(conn, cur, proc_name):
-        return stmt
-
-    args_sql = match.group(2).strip()
-    return f"EXECUTE {spec['prepared_name']}({args_sql});"
+    for rx in (_CALL_STMT_RE, _SELECT_VOID_FUNC_RE, _SELECT_ORDER_STATUS_SUMMARY_RE):
+        match = rx.match(stmt)
+        if not match:
+            continue
+        proc_name = match.group(1).lower()
+        spec = _PREPARED_STMT_SPECS.get(proc_name)
+        if spec is None:
+            return stmt
+        if not _ensure_prepared_statement(conn, cur, proc_name):
+            return stmt
+        args_sql = match.group(2).strip()
+        return f"EXECUTE {spec['prepared_name']}({args_sql});"
+    return stmt
 
 
 def _prepare_statement_for_mode(line: str) -> str:
@@ -477,6 +725,10 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
     serialErr = 1
     pfx = 's '
     mHash = getSeqHash(qCount)
+    tx_type = _classify_tx_type(line)
+    tx_retry_total = 0
+    tx_serialization_retries = 0
+    tx_reconnects = 0
 
     if line != message_dict[qCount]:
         print(" qCount = " + str(qCount) + ' ' + message_dict[qCount] + ' whereas line= ' + line)
@@ -494,13 +746,16 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                 if hasattr(conn, "_bcdb_merkle_roots"):
                     conn._bcdb_merkle_roots = None
 
-                exec_line = _prepare_statement_for_mode(_rewrite_det_call_for_execute(conn, cur, line))
+                exec_line = _prepare_statement_for_mode(_rewrite_stmt_for_execute(conn, cur, line))
 
                 # Execute the actual query
                 if DB_TYPE == 1:
-                    cur.execute(pfx + mHash + ' ' + exec_line)
+                    det_cmd = _build_det_command(mHash, exec_line)
+                    roundtrip_start = time.perf_counter()
+                    cur.execute(det_cmd)
                 else:
                     # PG/nondet modes execute plain SQL text.
+                    roundtrip_start = None
                     cur.execute(exec_line)
 
                 # Get status message
@@ -528,6 +783,12 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                 if merkle_roots:
                     result_message = result_message + " , " + str(merkle_roots)
                     conn._bcdb_merkle_roots = None
+
+                if roundtrip_start is not None:
+                    _record_det_timing_sample(
+                        "roundtrip_us",
+                        (time.perf_counter() - roundtrip_start) * 1_000_000.0,
+                    )
 
                 # If we get here, query succeeded
                 serialErr = 0
@@ -574,6 +835,9 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                                 "worker": worker_idx,
                                 "tid": threading.get_ident(),
                             }
+                    tx_retry_total += 1
+                    if err_sqlstate == "40001":
+                        tx_serialization_retries += 1
 
                     if (qCount % LOG_SKIP) < NUM or "transaction slot" in str(err).lower():
                         print(
@@ -593,6 +857,7 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                         conn, cur = open_worker_connection(worker_idx)
                         with metrics_lock:
                             reconnect_count += 1
+                        tx_reconnects += 1
 
                     time.sleep(sleep_s)
                     continue
@@ -617,17 +882,21 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                     except Exception:
                         pass
                     conn, cur = open_worker_connection(worker_idx)
+                    tx_retry_total += 1
+                    tx_reconnects += 1
                     time.sleep(sleep_s)
                     continue
                 raise
 
         # If all retries failed, raise the last exception
         if serialErr == 1 and last_exc is not None:
+            _record_tx_failure(tx_type, tx_retry_total, tx_serialization_retries, tx_reconnects)
             raise last_exc
 
         sys.stdout.flush()
 
         ts2 = time.time()
+        _record_tx_success(tx_type, (ts2 - ts1) * 1000.0, tx_retry_total, tx_serialization_retries, tx_reconnects)
         if (qCount % LOG_SKIP) < NUM:
             print("    time diff (ms) = " + str((ts2 - ts1) * 1000) + " tid= " + str(threading.get_ident()))
 
@@ -732,7 +1001,7 @@ try:
         procSeqNum = base
         inputSeqNum = base
 
-    with open(sys.argv[2], 'r') as fptr:
+    with open(WORKLOAD_FILE, 'r') as fptr:
          count = 0
          for line in fptr:
             if _is_skippable_sql_line(line):
@@ -745,7 +1014,7 @@ try:
             inputSeqNum += 1
             k = k + 1
 except FileNotFoundError:
-    print(f"Error: Query data file '{sys.argv[2]}' not found")
+    print(f"Error: Query data file '{WORKLOAD_FILE}' not found")
     exit(-1)
 
 message_dict[inputSeqNum] = ''
@@ -807,6 +1076,42 @@ with metrics_lock:
                 f"  qCount={f['qCount']} worker={f['worker']} tid={f['tid']} "
                 f"sqlstate={f['sqlstate']} stmt={f['stmt']} err={f['error']}"
             )
+    for tx_type in sorted(tx_type_metrics.keys()):
+        bucket = tx_type_metrics[tx_type]
+        latencies = bucket.get("latencies_ms", [])
+        mean_ms = (sum(latencies) / len(latencies)) if latencies else 0.0
+        p50_ms = _percentile(latencies, 50.0) if latencies else 0.0
+        p95_ms = _percentile(latencies, 95.0) if latencies else 0.0
+        print(
+            "TX_TYPE_STATS|"
+            f"tx_type={tx_type}|"
+            f"count={bucket.get('count', 0)}|"
+            f"ok={bucket.get('ok', 0)}|"
+            f"permanent_failures={bucket.get('permanent_failures', 0)}|"
+            f"retries_total={bucket.get('retries_total', 0)}|"
+            f"serialization_retries={bucket.get('serialization_retries', 0)}|"
+            f"reconnects={bucket.get('reconnects', 0)}|"
+            f"mean_ms={mean_ms:.3f}|"
+            f"p50_ms={p50_ms:.3f}|"
+            f"p95_ms={p95_ms:.3f}"
+        )
+    for kind in ("build_us", "sign_us", "b64_us", "roundtrip_us"):
+        samples = det_timing_metrics.get(kind, [])
+        total_ms = (sum(samples) / 1000.0) if samples else 0.0
+        mean_us = (sum(samples) / len(samples)) if samples else 0.0
+        p50_us = _percentile(samples, 50.0) if samples else 0.0
+        p95_us = _percentile(samples, 95.0) if samples else 0.0
+        max_us = max(samples) if samples else 0.0
+        print(
+            "DET_TIMING_STATS|"
+            f"kind={kind}|"
+            f"count={len(samples)}|"
+            f"total_ms={total_ms:.3f}|"
+            f"mean_us={mean_us:.3f}|"
+            f"p50_us={p50_us:.3f}|"
+            f"p95_us={p95_us:.3f}|"
+            f"max_us={max_us:.3f}"
+        )
 
 if permanent_fail_count > 0:
     sys.exit(1)

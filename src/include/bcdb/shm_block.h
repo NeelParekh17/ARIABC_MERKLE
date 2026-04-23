@@ -30,7 +30,7 @@ typedef struct
     int blksize;
     int snapTid;
     ConditionVariable  done_conds[MAX_TX_PER_BLOCK];
-    char result[MAX_TX_PER_BLOCK][1024];
+    char result[BCDB_RESULT_RING_CAPACITY][1024];
     /*
      * Lever D: publish-phase ordering counter.
      *
@@ -62,7 +62,7 @@ typedef struct
      * ConditionVariable fields causes CV-mutex byte displacement (wave-2.9
      * PANIC class of bug).
      */
-    int32 volatile    result_committed_txid[MAX_TX_PER_BLOCK];
+    int32 volatile    result_committed_txid[BCDB_RESULT_RING_CAPACITY];
     /*
      * T3-v2 (2026-04-19): per-slot PostgreSQL commit XID for snapshot-based
      * conflict skip.
@@ -78,7 +78,7 @@ typedef struct
      *
      * Initialized to InvalidTransactionId (0). Must remain LAST in BCBlock.
      */
-    TransactionId volatile result_commit_xid[MAX_TX_PER_BLOCK];
+    TransactionId volatile result_commit_xid[BCDB_RESULT_RING_CAPACITY];
 } BCBlock;
 
 typedef struct
@@ -107,6 +107,7 @@ extern BlockMeta     *block_meta;
 
 extern Size     block_pool_size(void);
 extern void     create_block_pool(void);
+extern void     bcdb_reset_block_pool_state(void);
 extern int      get_commited(int id);
 extern void     set_commited(int id,  BCDBShmXact* tx);
 extern BCBlock* get_block_by_id(BCBlockID id, bool create_if_not_found);

@@ -20,6 +20,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Silence ad-hoc stdout debug prints in deterministic middleware.  Raw
+ * printf() output can leak into frontend sessions.
+ */
+#undef printf
+#define printf(...) ((void) 0)
+
 MemoryContext bcdb_middleware_context;
 int32         tx_num = 0;
 int32         blocksize = 0;
@@ -127,8 +134,9 @@ bcdb_wait_until_committed(BCTxID target_tx_id)
 /*
  * T3: per-slot middleware wait.
  * Waits for result_committed_txid[slot] == target_tx_id rather than for
- * the contiguous last_committed_tx_id watermark.  Each tx's result is
- * independently readable as soon as that tx calls advance_last_committed_txid.
+ * the contiguous last_committed_tx_id watermark.  Safe only for polling a
+ * single target tx; does NOT imply earlier slots are set (slots are written
+ * at Step 10, before bcdb_wait_for_prev_committed serialises at Step 11).
  *
  * HANG DEBUG: logs every 5 s if the slot value does not become target_tx_id.
  * Fires unconditionally — if a worker crashes or misses writing the slot,
@@ -467,7 +475,7 @@ print_trace();
         Assert(block != NULL);
         gettimeofday(&tv1, NULL);
         if (last_tx_id >= 0)
-            bcdb_wait_until_slot_ready((BCTxID) last_tx_id);
+            bcdb_wait_until_committed((BCTxID) last_tx_id);
 /*
 */
 #if SAFEDBG
@@ -509,7 +517,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
     }
     if (last_tx_id >= 0)
     {
-        bcdb_wait_until_slot_ready((BCTxID) last_tx_id);
+        bcdb_wait_until_committed((BCTxID) last_tx_id);
     }
 
     initStringInfo(&out);
@@ -682,11 +690,17 @@ bcdb_clear_block_txs_store()
     printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
 #endif
     shm_hash_clear(block_pool, MAX_NUM_BLOCKS);
+    bcdb_reset_block_pool_state();
     clear_tx_pool();
+    tx_num = 0;
     block_meta->global_bmin = 1;
     block_meta->global_bmax = 0;
     block_meta->debug_seq += 1;
     block_meta->num_committed = 0;
+    block_meta->num_aborted = 0;
+    block_meta->previous_report_commit = 0;
+    block_meta->previous_report_ts = 0;
+    start_time = bcdb_get_time();
     set_num_tx_sub(0);
     set_num_txqd(0);
     while(!LIST_EMPTY(&idle_workers.list))

@@ -29,6 +29,13 @@
 #include "utils/snapmgr.h"
 #include "bcdb/shm_transaction.h"
 
+/*
+ * Silence raw stdout debug prints so portal execution does not leak bytes onto
+ * the FE/BE protocol stream.
+ */
+#undef printf
+#define printf(...) ((void) 0)
+
 
 /*
  * ActivePortal is the currently executing Portal (the most closely nested,

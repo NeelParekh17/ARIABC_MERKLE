@@ -68,6 +68,13 @@
 #include "storage/proc.h"
 #include "storage/procsignal.h"
 #include "storage/sinval.h"
+
+/*
+ * Silence ad-hoc stdout debug prints in the backend hot path.  Raw printf()
+ * output can corrupt the frontend/backend protocol for libpq/psycopg clients.
+ */
+#undef printf
+#define printf(...) ((void) 0)
 #include "tcop/fastpath.h"
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
@@ -3889,7 +3896,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 #endif
 }
 
-unsigned char* base64_decode(const char* input, int length, int* out_len) {
+static unsigned char* base64_decode(const char* input, int length, int* out_len) {
     BIO *b64, *bmem;
     unsigned char* buffer = (unsigned char*)malloc(length);
     memset(buffer, 0, length);
@@ -3905,39 +3912,145 @@ unsigned char* base64_decode(const char* input, int length, int* out_len) {
 }
 
 static int count = 0;
-int verify_signature_b64key(const char* public_key_b64, const char* message, const char* signature_b64) {
+typedef struct BcdbSigVerifyMetrics
+{
+	uint64		calls;
+	uint64		success;
+	uint64		failure;
+	double		total_us;
+	double		decode_pub_us;
+	double		decode_sig_us;
+	double		load_pub_us;
+	double		digest_init_us;
+	double		digest_update_us;
+	double		digest_final_us;
+} BcdbSigVerifyMetrics;
+
+static BcdbSigVerifyMetrics bcdb_sig_verify_metrics = {0};
+
+static double
+bcdb_now_us(void)
+{
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	return ((double) tv.tv_sec * 1000000.0) + (double) tv.tv_usec;
+}
+
+static void
+bcdb_log_signature_verify_summary(void)
+{
+	if (bcdb_sig_verify_metrics.calls == 0)
+		return;
+
+	ereport(LOG,
+			(errmsg("BCDB_SIG_VERIFY_SUMMARY pid=%d calls=" UINT64_FORMAT
+					" success=" UINT64_FORMAT " failure=" UINT64_FORMAT
+					" total_ms=%.3f avg_us=%.3f decode_pub_ms=%.3f decode_sig_ms=%.3f"
+					" load_pub_ms=%.3f digest_init_ms=%.3f digest_update_ms=%.3f"
+					" digest_final_ms=%.3f",
+					getpid(),
+					bcdb_sig_verify_metrics.calls,
+					bcdb_sig_verify_metrics.success,
+					bcdb_sig_verify_metrics.failure,
+					bcdb_sig_verify_metrics.total_us / 1000.0,
+					bcdb_sig_verify_metrics.calls > 0 ?
+					(bcdb_sig_verify_metrics.total_us / (double) bcdb_sig_verify_metrics.calls) : 0.0,
+					bcdb_sig_verify_metrics.decode_pub_us / 1000.0,
+					bcdb_sig_verify_metrics.decode_sig_us / 1000.0,
+					bcdb_sig_verify_metrics.load_pub_us / 1000.0,
+					bcdb_sig_verify_metrics.digest_init_us / 1000.0,
+					bcdb_sig_verify_metrics.digest_update_us / 1000.0,
+					bcdb_sig_verify_metrics.digest_final_us / 1000.0)));
+}
+
+static int verify_signature_b64key(const char* public_key_b64, const char* message, const char* signature_b64) {
     count += 1;
     if(count %2000 < 2) printf("verify_signature_b64key %s\n", signature_b64);
     int success = 0;
     int der_len, sig_len;
+    double total_start = bcdb_now_us();
+    double stage_start;
 
     // 1. Decode Base64 strings
+    stage_start = bcdb_now_us();
     unsigned char* der_data = base64_decode(public_key_b64, strlen(public_key_b64), &der_len);
+    bcdb_sig_verify_metrics.decode_pub_us += bcdb_now_us() - stage_start;
+    stage_start = bcdb_now_us();
     unsigned char* sig_data = base64_decode(signature_b64, strlen(signature_b64), &sig_len);
+    bcdb_sig_verify_metrics.decode_sig_us += bcdb_now_us() - stage_start;
 
     // 2. Load Public Key from DER data
+    stage_start = bcdb_now_us();
     const unsigned char* p = der_data;
     EVP_PKEY* pub_key = d2i_PUBKEY(NULL, &p, der_len);
+    bcdb_sig_verify_metrics.load_pub_us += bcdb_now_us() - stage_start;
 
     if (pub_key) {
         EVP_MD_CTX* ctx = EVP_MD_CTX_new();
 
         // 3. Initialize Verification (Default is PKCS1 v1.5 padding)
+        stage_start = bcdb_now_us();
         if (EVP_DigestVerifyInit(ctx, NULL, EVP_sha256(), NULL, pub_key) == 1) {
+            bcdb_sig_verify_metrics.digest_init_us += bcdb_now_us() - stage_start;
+            stage_start = bcdb_now_us();
             EVP_DigestVerifyUpdate(ctx, message, strlen(message));
+            bcdb_sig_verify_metrics.digest_update_us += bcdb_now_us() - stage_start;
 
             // 4. Finalize and verify
+            stage_start = bcdb_now_us();
             if (EVP_DigestVerifyFinal(ctx, sig_data, sig_len) == 1) {
                 success = 1; // Verified!
             }
+            bcdb_sig_verify_metrics.digest_final_us += bcdb_now_us() - stage_start;
         }
+        else
+            bcdb_sig_verify_metrics.digest_init_us += bcdb_now_us() - stage_start;
         EVP_MD_CTX_free(ctx);
         EVP_PKEY_free(pub_key);
     }
 
     free(der_data);
     free(sig_data);
+    bcdb_sig_verify_metrics.calls += 1;
+    if (success)
+        bcdb_sig_verify_metrics.success += 1;
+    else
+        bcdb_sig_verify_metrics.failure += 1;
+    bcdb_sig_verify_metrics.total_us += bcdb_now_us() - total_start;
+    if (bcdb_sig_verify_metrics.calls % 5000 == 0)
+        bcdb_log_signature_verify_summary();
     return success;
+}
+
+static const char *
+bcdb_client_public_key_or_default(void)
+{
+	static const char *default_public_key =
+		"MIGiMA0GCSqGSIb3DQEBAQUAA4GQADCBjAKBhACFuG2SZFx6fduyYp8aQ5p6TjCKaytg2mM9afk6fmAwKs78IkGbXAIpS5YDYr8OilU8w7kfBJXjqLvlEnLh2sjAkmZEMJHzL8dkUZfzp0L6SwCsszXmzOk2uraVcnzeInP9xMuEScZ+Ss90vWQa/67c1UX0X0eIGyTONGZ5SkXNWu+bWwIDAQAB";
+
+	if (bcdb_client_public_key != NULL && bcdb_client_public_key[0] != '\0')
+		return bcdb_client_public_key;
+
+	return default_public_key;
+}
+
+static void
+bcdb_handle_signature_failure(const char *query_string, int valid)
+{
+	if (bcdb_enforce_signatures)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("BCDB client signature verification failed"),
+				 errdetail("valid=%d query=\"%s\"", valid, query_string)));
+	}
+	else
+	{
+		ereport(WARNING,
+				(errmsg("BCDB client signature verification failed"),
+				 errdetail("valid=%d query=\"%s\"", valid, query_string)));
+	}
 }
 
 /* ----------------------------------------------------------------
@@ -4138,7 +4251,7 @@ PostgresMain(int argc, char *argv[],
 	 * Also set up handler to log session end; we have to wait till now to be
 	 * sure Log_disconnections has its final value.
 	 */
-	if (IsUnderPostmaster && Log_disconnections)
+	if (IsUnderPostmaster)
 		on_proc_exit(log_disconnections, 0);
 
 	/* Perform initialization specific to a WAL sender process. */
@@ -4558,7 +4671,7 @@ PostgresMain(int argc, char *argv[],
     //const char *signature2 = "ggwX8rWewlbGl4EwBnf1Xb/KW+ReZ/e9r5tDGeysRDihIDih1DRNtAWpDh5Zf2LFEEY7IlKM9U9YmeNLgMbUKwKtatjxU3e3/ekBJ0fzhUg1vVagqmauVRmPzbM+G2WaWInrD/pK4VIlgQSN87+po2lCLdMgttSqI7e9w5bA49OAKFo=";
     //const char* msg2 = "SELECT * FROM usertable WHERE YCSB_KEY=868;";
 
-    const char* publicKey2 = "MIGiMA0GCSqGSIb3DQEBAQUAA4GQADCBjAKBhACFuG2SZFx6fduyYp8aQ5p6TjCKaytg2mM9afk6fmAwKs78IkGbXAIpS5YDYr8OilU8w7kfBJXjqLvlEnLh2sjAkmZEMJHzL8dkUZfzp0L6SwCsszXmzOk2uraVcnzeInP9xMuEScZ+Ss90vWQa/67c1UX0X0eIGyTONGZ5SkXNWu+bWwIDAQAB";
+		const char *publicKey2 = bcdb_client_public_key_or_default();
 		switch (firstchar)
 		{
 			case 'Q':			/* simple query */
@@ -4631,13 +4744,13 @@ PostgresMain(int argc, char *argv[],
 					strncpy(pfx_str, query_string+2, 8);
 					pfx_str[8] = '\0';
 					pfx_id = atoi(pfx_str);
-     if(sign == 1) {
-       strncpy(qsig, query_string+11, i-11);
-       // printf("qmsg %s qsig: %s\n", query_string2, qsig);
-       valid = verify_signature_b64key( publicKey2, query_string2, qsig);
-       if(valid != 1) 
-         printf("qmsg %s qsig valid: %d\n", query_string2, valid);
-					}
+						if(sign == 1) {
+							strncpy(qsig, query_string+11, i-11);
+							// printf("qmsg %s qsig: %s\n", query_string2, qsig);
+							valid = verify_signature_b64key( publicKey2, query_string2, qsig);
+							if(valid != 1)
+								bcdb_handle_signature_failure(query_string2, valid);
+						}
      else 
        strcpy(query_string2, (const char *) (query_string+10));
 					
@@ -4678,14 +4791,14 @@ PostgresMain(int argc, char *argv[],
 					else
 					{
     		gettimeofday(&tv1, NULL);
-     if(sign == 1) {
-       strncpy(qsig, query_string+2, i-2); // in-tx start with "s "
-       //printf("qmsg %s && qsig: %s\n", query_string2, qsig);
-       valid = verify_signature_b64key( publicKey2, query_string2, qsig);
-       if(valid != 1) 
-         printf("qmsg %s qsig valid: %d\n", query_string2, valid);
-					exec_simple_query(query_string2);
-					}	
+						if(sign == 1) {
+							strncpy(qsig, query_string+2, i-2); // in-tx start with "s "
+							//printf("qmsg %s && qsig: %s\n", query_string2, qsig);
+							valid = verify_signature_b64key( publicKey2, query_string2, qsig);
+							if(valid != 1)
+								bcdb_handle_signature_failure(query_string2, valid);
+						exec_simple_query(query_string2);
+						}
      else  
      {
 	int offset = 0;
@@ -5197,12 +5310,17 @@ log_disconnections(int code, Datum arg)
 	minutes = secs / SECS_PER_MINUTE;
 	seconds = secs % SECS_PER_MINUTE;
 
-	ereport(LOG,
-			(errmsg("disconnection: session time: %d:%02d:%02d.%03d "
-					"user=%s database=%s host=%s%s%s",
-					hours, minutes, seconds, msecs,
-					port->user_name, port->database_name, port->remote_host,
-					port->remote_port[0] ? " port=" : "", port->remote_port)));
+	bcdb_log_signature_verify_summary();
+
+	if (Log_disconnections)
+	{
+		ereport(LOG,
+				(errmsg("disconnection: session time: %d:%02d:%02d.%03d "
+						"user=%s database=%s host=%s%s%s",
+						hours, minutes, seconds, msecs,
+						port->user_name, port->database_name, port->remote_host,
+						port->remote_port[0] ? " port=" : "", port->remote_port)));
+	}
 }
 
 /*
