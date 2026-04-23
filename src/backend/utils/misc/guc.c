@@ -946,18 +946,27 @@ static struct config_bool ConfigureNamesBool[] =
 		false,
 		NULL, NULL, NULL
 	},
-	{
-		{"bcdb_dt_conflict_tracking", PGC_POSTMASTER, DEVELOPER_OPTIONS,
-			gettext_noop("Enable BCDB deterministic conflict tracking."),
-			gettext_noop("When enabled, DT conflict checks and write-set publication are active at runtime.")
+		{
+			{"bcdb_dt_conflict_tracking", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+				gettext_noop("Enable BCDB deterministic conflict tracking."),
+				gettext_noop("When enabled, DT conflict checks and write-set publication are active at runtime.")
+			},
+			&bcdb_dt_conflict_tracking,
+			false,
+			NULL, NULL, NULL
 		},
-		&bcdb_dt_conflict_tracking,
-		false,
-		NULL, NULL, NULL
-	},
-	{
-		{"enable_seqscan", PGC_USERSET, QUERY_TUNING_METHOD,
-			gettext_noop("Enables the planner's use of sequential-scan plans."),
+		{
+			{"bcdb_enforce_signatures", PGC_USERSET, CLIENT_CONN_STATEMENT,
+				gettext_noop("Reject BCDB signed queries whose RSA verification fails."),
+				gettext_noop("When off, verification failures are logged but execution continues.")
+			},
+			&bcdb_enforce_signatures,
+			false,
+			NULL, NULL, NULL
+		},
+		{
+			{"enable_seqscan", PGC_USERSET, QUERY_TUNING_METHOD,
+				gettext_noop("Enables the planner's use of sequential-scan plans."),
 			NULL,
 			GUC_EXPLAIN
 		},
@@ -2069,7 +2078,7 @@ static struct config_int ConfigureNamesInt[] =
 			gettext_noop("Number of slots used for deterministic result handoff.")
 		},
 		&bcdb_result_ring_slots,
-		BCDB_DEFAULT_RESULT_RING_SLOTS, 2, MAX_TX_PER_BLOCK,
+		BCDB_DEFAULT_RESULT_RING_SLOTS, 2, BCDB_RESULT_RING_CAPACITY,
 		NULL, NULL, NULL
 	},
 	{
@@ -3647,18 +3656,27 @@ static struct config_string ConfigureNamesString[] =
 		NULL, NULL, NULL
 	},
 
-	{
-		{"recovery_end_command", PGC_SIGHUP, WAL_ARCHIVE_RECOVERY,
-			gettext_noop("Sets the shell command that will be executed once at the end of recovery."),
-			NULL
+		{
+			{"recovery_end_command", PGC_SIGHUP, WAL_ARCHIVE_RECOVERY,
+				gettext_noop("Sets the shell command that will be executed once at the end of recovery."),
+				NULL
+			},
+			&recoveryEndCommand,
+			"",
+			NULL, NULL, NULL
 		},
-		&recoveryEndCommand,
-		"",
-		NULL, NULL, NULL
-	},
+		{
+			{"bcdb_client_public_key", PGC_USERSET, CLIENT_CONN_STATEMENT,
+				gettext_noop("Base64 DER public key used by postgres.c BCDB signature verification."),
+				gettext_noop("If empty, postgres.c falls back to its built-in development key.")
+			},
+			&bcdb_client_public_key,
+			"",
+			NULL, NULL, NULL
+		},
 
-	{
-		{"recovery_target_timeline", PGC_POSTMASTER, WAL_RECOVERY_TARGET,
+		{
+			{"recovery_target_timeline", PGC_POSTMASTER, WAL_RECOVERY_TARGET,
 			gettext_noop("Specifies the timeline to recover into."),
 			NULL
 		},

@@ -5,6 +5,13 @@
 #include <sys/queue.h>
 
 /*
+ * Silence ad-hoc stdout debug prints in the deterministic shared-memory block
+ * machinery to avoid corrupting frontend protocol responses.
+ */
+#undef printf
+#define printf(...) ((void) 0)
+
+/*
  * Shared-memory block pool and associated metadata.
  *
  * block_pool      - Hash table (keyed by BCBlockID) living in shared memory.
@@ -25,6 +32,35 @@ HTAB          *block_pool;
 slock_t       *block_pool_lock;
 BlockMeta     *block_meta;
 static BCBlock *block1_cache = NULL;
+
+static void
+bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
+{
+    block->id = id;
+    block->num_tx = 0;
+    block->num_ready = 0;
+    block->num_finished = 0;
+    block->last_committed_tx_id = -1;
+    block->published_max_tx_id = -1;
+    ConditionVariableInit(&block->cond);
+    ConditionVariableInit(&block->condRecovery);
+    ConditionVariableInit(&block->condCommit);
+    block->num_tx_sub = 0;
+    block->num_tx_qd = 0;
+    block->blksize = (id == 1) ? bcdb_worker_count : 0;
+    block->snapTid = 0;
+    for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
+    {
+        block->txs[i] = NULL;
+        ConditionVariableInit(&block->done_conds[i]);
+    }
+    for (int i = 0; i < BCDB_RESULT_RING_CAPACITY; i++)
+    {
+        memset(&block->result[i], 0, sizeof(block->result[i]));
+        block->result_committed_txid[i] = -1;
+        block->result_commit_xid[i] = InvalidTransactionId;
+    }
+}
 
 static inline BCBlock *
 get_block1_cached(bool create)
@@ -112,6 +148,21 @@ create_block_pool(void)
                    MAX_NUM_BLOCKS,
                    MAX_NUM_BLOCKS,
                    &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE);
+}
+
+void
+bcdb_reset_block_pool_state(void)
+{
+    BCBlockID id = 1;
+    BCBlock  *block;
+    bool      found;
+
+    block1_cache = NULL;
+    SpinLockAcquire(block_pool_lock);
+    block = hash_search(block_pool, &id, HASH_ENTER, &found);
+    bcdb_reset_block_entry(block, id);
+    SpinLockRelease(block_pool_lock);
+    block1_cache = block;
 }
 
 /*
@@ -244,8 +295,8 @@ bcdb_get_result_ring_slots(void)
 
     if (slots < 2)
         slots = 2;
-    if (slots > MAX_TX_PER_BLOCK)
-        slots = MAX_TX_PER_BLOCK;
+    if (slots > BCDB_RESULT_RING_CAPACITY)
+        slots = BCDB_RESULT_RING_CAPACITY;
     return slots;
 }
 
@@ -266,8 +317,8 @@ bcdb_get_runtime_result_ring_slots(void)
         slots = min_slots;
     if (slots < 2)
         slots = 2;
-    if (slots > MAX_TX_PER_BLOCK)
-        slots = MAX_TX_PER_BLOCK;
+    if (slots > BCDB_RESULT_RING_CAPACITY)
+        slots = BCDB_RESULT_RING_CAPACITY;
     return slots;
 }
 
@@ -427,26 +478,7 @@ get_block_by_id(BCBlockID id, bool create_if_not_found)
         {
             printf("\n \t ** safeDbg pid= %d new blk %s : %s: %d bid %d blk %x\n",
                    getpid(), __FILE__, __FUNCTION__, __LINE__, id, block);
-            block->id = id;
-            block->num_tx = 0;
-            block->num_ready = 0;
-            block->num_finished = 0;
-            block->last_committed_tx_id = -1;
-            block->published_max_tx_id = -1;
-            ConditionVariableInit(&block->cond);
-            ConditionVariableInit(&block->condRecovery);
-            ConditionVariableInit(&block->condCommit);
-            block->num_tx_sub = 0;
-            block->num_tx_qd = 0;
-            block->blksize = (id == 1) ? bcdb_worker_count : 0;
-            block->snapTid = 0;
-            for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
-            {
-                ConditionVariableInit(&block->done_conds[i]);
-                memset(&block->result[i], 0, 1024);
-                block->result_committed_txid[i] = -1;
-                block->result_commit_xid[i] = InvalidTransactionId;
-            }
+            bcdb_reset_block_entry(block, id);
         }
         SpinLockRelease(block_pool_lock);
     }

@@ -39,6 +39,8 @@ class RunKey:
     workload: str
     threads: int
     rate: int
+    signing: int
+    enforce_signatures: int
     run: int
 
 
@@ -51,6 +53,8 @@ class RunResult:
     threads: int
     run: int
     rate: int
+    signing: int
+    enforce_signatures: int
     start_server_exit: int
     restore_exit: int
     py_exit: int
@@ -153,6 +157,15 @@ def _psql_value(psql: str, *, db: str, port: int, user: str, query: str, cwd: Pa
     if proc.returncode != 0:
         return None
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+
+
+def _canonical_path_str(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    s = value.strip()
+    if s == "":
+        return None
+    return os.path.realpath(s)
 
 
 def _capture_timeout_diagnostics(
@@ -288,6 +301,8 @@ def _load_existing_keys(csv_path: Path) -> set[RunKey]:
                         workload=row["workload"],
                         threads=int(row["threads"]),
                         rate=int(rate_s) if rate_s != "" else 0,
+                        signing=int((row.get("signing") or "0").strip() or 0),
+                        enforce_signatures=int((row.get("enforce_signatures") or "0").strip() or 0),
                         run=int(row["run"]),
                     )
                 )
@@ -373,13 +388,15 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         except Exception:
             return None
 
-    groups: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str, int, int, int, int], list[dict[str, Any]]] = {}
     for r in rows:
         key = (
             r.get("mode", ""),
             r.get("workload", ""),
             int(r.get("threads") or 0),
             int(r.get("rate") or 0),
+            int(r.get("signing") or 0),
+            int(r.get("enforce_signatures") or 0),
         )
         groups.setdefault(key, []).append(r)
 
@@ -405,7 +422,7 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         return sum(1 for y in ys if y) / len(ys)
 
     out_rows: list[dict[str, Any]] = []
-    for (mode, workload, threads, rate), rs in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1], x[0][2], x[0][3])):
+    for (mode, workload, threads, rate, signing, enforce_signatures), rs in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1], x[0][2], x[0][3], x[0][4], x[0][5])):
         wall = [as_float(r.get("wall_time_s", "")) for r in rs]
         wall = [x for x in wall if x is not None]
         overall = [as_float(r.get("workload_overall_ms", "")) for r in rs]
@@ -436,6 +453,8 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
                 "workload": workload,
                 "threads": threads,
                 "rate": rate,
+                "signing": signing,
+                "enforce_signatures": enforce_signatures,
                 "runs": len(rs),
                 "pass_rate_merkle_verify": f"{pass_rate(verify):.3f}",
                 "mean_wall_time_s": f"{mean(wall):.6f}" if wall else "",
@@ -471,6 +490,334 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
             writer.writerow(r)
 
 
+def _write_det_overhead(summary_csv: Path, out_csv: Path) -> None:
+    if not summary_csv.exists():
+        raise FileNotFoundError(f"missing summary.csv: {summary_csv}")
+
+    rows: list[dict[str, str]] = []
+    with summary_csv.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+
+    def as_int(v: str) -> Optional[int]:
+        s = (v or "").strip()
+        if s == "":
+            return None
+        try:
+            return int(s)
+        except Exception:
+            return None
+
+    def as_float(v: str) -> Optional[float]:
+        s = (v or "").strip()
+        if s == "":
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    def pick_metric(row: dict[str, str], preferred: str, fallback: str) -> Optional[float]:
+        v = as_float(row.get(preferred, ""))
+        if v is not None:
+            return v
+        return as_float(row.get(fallback, ""))
+
+    mode_norm = {
+        "postgres": "pg",
+        "pg": "pg",
+        "safedb": "det",
+        "det": "det",
+        "aria": "nondet",
+        "nondet": "nondet",
+    }
+
+    by_key_mode: dict[tuple[str, int, int, int, int, str], dict[str, str]] = {}
+    for r in rows:
+        workload = (r.get("workload") or "").strip()
+        th = as_int(r.get("threads", ""))
+        rate = as_int(r.get("rate", ""))
+        signing = as_int(r.get("signing", ""))
+        if signing is None:
+            signing = 0
+        enforce_signatures = as_int(r.get("enforce_signatures", ""))
+        if enforce_signatures is None:
+            enforce_signatures = 0
+        mode_raw = (r.get("mode") or "").strip().lower()
+        mode = mode_norm.get(mode_raw, mode_raw)
+        if workload == "" or th is None or rate is None or mode not in ("pg", "det"):
+            continue
+        by_key_mode[(workload, th, rate, signing, enforce_signatures, mode)] = r
+
+    out_rows: list[dict[str, Any]] = []
+    keys: set[tuple[str, int, int, int, int]] = set((w, t, r, s, e) for (w, t, r, s, e, _m) in by_key_mode.keys())
+    for workload, th, rate, signing, enforce_signatures in sorted(keys, key=lambda x: (x[0], x[1], x[2], x[3], x[4])):
+        pg = by_key_mode.get((workload, th, rate, signing, enforce_signatures, "pg"))
+        det = by_key_mode.get((workload, th, rate, signing, enforce_signatures, "det"))
+        if pg is None or det is None:
+            continue
+
+        pg_tps = pick_metric(pg, "median_throughput_tps", "mean_throughput_tps")
+        det_tps = pick_metric(det, "median_throughput_tps", "mean_throughput_tps")
+        pg_ms = pick_metric(pg, "median_workload_overall_ms", "mean_workload_overall_ms")
+        det_ms = pick_metric(det, "median_workload_overall_ms", "mean_workload_overall_ms")
+        pg_wait_ms = pick_metric(pg, "median_workload_wait_ms", "mean_workload_wait_ms")
+        det_wait_ms = pick_metric(det, "median_workload_wait_ms", "mean_workload_wait_ms")
+        pg_retries = as_float(pg.get("mean_retries_total", ""))
+        det_retries = as_float(det.get("mean_retries_total", ""))
+
+        tps_delta_abs = (det_tps - pg_tps) if (det_tps is not None and pg_tps is not None) else None
+        tps_delta_pct = (100.0 * tps_delta_abs / pg_tps) if (tps_delta_abs is not None and pg_tps and pg_tps != 0) else None
+        overhead_pct_from_tps = (100.0 * (pg_tps - det_tps) / pg_tps) if (det_tps is not None and pg_tps and pg_tps != 0) else None
+        extra_ms_abs = (det_ms - pg_ms) if (det_ms is not None and pg_ms is not None) else None
+        extra_ms_pct = (100.0 * extra_ms_abs / pg_ms) if (extra_ms_abs is not None and pg_ms and pg_ms != 0) else None
+        wait_extra_ms_abs = (det_wait_ms - pg_wait_ms) if (det_wait_ms is not None and pg_wait_ms is not None) else None
+        wait_extra_ms_pct = (100.0 * wait_extra_ms_abs / pg_wait_ms) if (wait_extra_ms_abs is not None and pg_wait_ms and pg_wait_ms != 0) else None
+        retries_extra = (det_retries - pg_retries) if (det_retries is not None and pg_retries is not None) else None
+
+        if overhead_pct_from_tps is None:
+            overhead_class = "unknown"
+        elif overhead_pct_from_tps > 0:
+            overhead_class = "det_slower"
+        elif overhead_pct_from_tps < 0:
+            overhead_class = "det_faster"
+        else:
+            overhead_class = "equal"
+
+        out_rows.append(
+            {
+                "workload": workload,
+                "threads": th,
+                "rate": rate,
+                "signing": signing,
+                "enforce_signatures": enforce_signatures,
+                "pg_runs": as_int(pg.get("runs", "")) or "",
+                "det_runs": as_int(det.get("runs", "")) or "",
+                "pg_pass_rate_merkle_verify": pg.get("pass_rate_merkle_verify", ""),
+                "det_pass_rate_merkle_verify": det.get("pass_rate_merkle_verify", ""),
+                "pg_median_tps": f"{pg_tps:.3f}" if pg_tps is not None else "",
+                "det_median_tps": f"{det_tps:.3f}" if det_tps is not None else "",
+                "det_tps_delta_abs": f"{tps_delta_abs:.3f}" if tps_delta_abs is not None else "",
+                "det_tps_delta_pct_vs_pg": f"{tps_delta_pct:.3f}" if tps_delta_pct is not None else "",
+                "det_overhead_pct_from_tps": f"{overhead_pct_from_tps:.3f}" if overhead_pct_from_tps is not None else "",
+                "pg_median_workload_ms": f"{pg_ms:.3f}" if pg_ms is not None else "",
+                "det_median_workload_ms": f"{det_ms:.3f}" if det_ms is not None else "",
+                "det_extra_workload_ms_abs": f"{extra_ms_abs:.3f}" if extra_ms_abs is not None else "",
+                "det_extra_workload_ms_pct_vs_pg": f"{extra_ms_pct:.3f}" if extra_ms_pct is not None else "",
+                "pg_wait_ms": f"{pg_wait_ms:.3f}" if pg_wait_ms is not None else "",
+                "det_wait_ms": f"{det_wait_ms:.3f}" if det_wait_ms is not None else "",
+                "det_extra_wait_ms_abs": f"{wait_extra_ms_abs:.3f}" if wait_extra_ms_abs is not None else "",
+                "det_extra_wait_ms_pct_vs_pg": f"{wait_extra_ms_pct:.3f}" if wait_extra_ms_pct is not None else "",
+                "pg_mean_retries_total": f"{pg_retries:.3f}" if pg_retries is not None else "",
+                "det_mean_retries_total": f"{det_retries:.3f}" if det_retries is not None else "",
+                "det_extra_retries_total": f"{retries_extra:.3f}" if retries_extra is not None else "",
+                "pg_cv_tps_pct": pg.get("cv_throughput_tps_pct", ""),
+                "det_cv_tps_pct": det.get("cv_throughput_tps_pct", ""),
+                "overhead_class": overhead_class,
+            }
+        )
+
+    with out_csv.open("w", newline="") as f:
+        fieldnames = list(out_rows[0].keys()) if out_rows else [
+            "workload",
+            "threads",
+            "rate",
+            "signing",
+            "enforce_signatures",
+            "pg_runs",
+            "det_runs",
+            "pg_pass_rate_merkle_verify",
+            "det_pass_rate_merkle_verify",
+            "pg_median_tps",
+            "det_median_tps",
+            "det_tps_delta_abs",
+            "det_tps_delta_pct_vs_pg",
+            "det_overhead_pct_from_tps",
+            "pg_median_workload_ms",
+            "det_median_workload_ms",
+            "det_extra_workload_ms_abs",
+            "det_extra_workload_ms_pct_vs_pg",
+            "pg_wait_ms",
+            "det_wait_ms",
+            "det_extra_wait_ms_abs",
+            "det_extra_wait_ms_pct_vs_pg",
+            "pg_mean_retries_total",
+            "det_mean_retries_total",
+            "det_extra_retries_total",
+            "pg_cv_tps_pct",
+            "det_cv_tps_pct",
+            "overhead_class",
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in out_rows:
+            writer.writerow(r)
+
+
+def _write_signing_overhead(summary_csv: Path, out_csv: Path) -> None:
+    if not summary_csv.exists():
+        raise FileNotFoundError(f"missing summary.csv: {summary_csv}")
+
+    rows: list[dict[str, str]] = []
+    with summary_csv.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+
+    def as_int(v: str) -> Optional[int]:
+        s = (v or "").strip()
+        if s == "":
+            return None
+        try:
+            return int(s)
+        except Exception:
+            return None
+
+    def as_float(v: str) -> Optional[float]:
+        s = (v or "").strip()
+        if s == "":
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    def pick_metric(row: dict[str, str], preferred: str, fallback: str) -> Optional[float]:
+        v = as_float(row.get(preferred, ""))
+        if v is not None:
+            return v
+        return as_float(row.get(fallback, ""))
+
+    mode_norm = {
+        "postgres": "pg",
+        "pg": "pg",
+        "safedb": "det",
+        "det": "det",
+        "aria": "nondet",
+        "nondet": "nondet",
+    }
+
+    by_key_signing: dict[tuple[str, str, int, int, int, int], dict[str, str]] = {}
+    for r in rows:
+        workload = (r.get("workload") or "").strip()
+        th = as_int(r.get("threads", ""))
+        rate = as_int(r.get("rate", ""))
+        signing = as_int(r.get("signing", ""))
+        enforce_signatures = as_int(r.get("enforce_signatures", ""))
+        if enforce_signatures is None:
+            enforce_signatures = 0
+        mode_raw = (r.get("mode") or "").strip().lower()
+        mode = mode_norm.get(mode_raw, mode_raw)
+        if workload == "" or th is None or rate is None or signing is None:
+            continue
+        by_key_signing[(mode, workload, th, rate, enforce_signatures, signing)] = r
+
+    out_rows: list[dict[str, Any]] = []
+    keys: set[tuple[str, str, int, int, int]] = set((m, w, t, r, e) for (m, w, t, r, e, _s) in by_key_signing.keys())
+    for mode, workload, th, rate, enforce_signatures in sorted(keys, key=lambda x: (x[0], x[1], x[2], x[3], x[4])):
+        unsigned = by_key_signing.get((mode, workload, th, rate, enforce_signatures, 0))
+        signed = by_key_signing.get((mode, workload, th, rate, enforce_signatures, 1))
+        if unsigned is None or signed is None:
+            continue
+
+        unsigned_tps = pick_metric(unsigned, "median_throughput_tps", "mean_throughput_tps")
+        signed_tps = pick_metric(signed, "median_throughput_tps", "mean_throughput_tps")
+        unsigned_ms = pick_metric(unsigned, "median_workload_overall_ms", "mean_workload_overall_ms")
+        signed_ms = pick_metric(signed, "median_workload_overall_ms", "mean_workload_overall_ms")
+        unsigned_wait_ms = pick_metric(unsigned, "median_workload_wait_ms", "mean_workload_wait_ms")
+        signed_wait_ms = pick_metric(signed, "median_workload_wait_ms", "mean_workload_wait_ms")
+        unsigned_retries = as_float(unsigned.get("mean_retries_total", ""))
+        signed_retries = as_float(signed.get("mean_retries_total", ""))
+
+        tps_delta_abs = (signed_tps - unsigned_tps) if (signed_tps is not None and unsigned_tps is not None) else None
+        tps_delta_pct = (100.0 * tps_delta_abs / unsigned_tps) if (tps_delta_abs is not None and unsigned_tps and unsigned_tps != 0) else None
+        overhead_pct_from_tps = (100.0 * (unsigned_tps - signed_tps) / unsigned_tps) if (signed_tps is not None and unsigned_tps and unsigned_tps != 0) else None
+        extra_ms_abs = (signed_ms - unsigned_ms) if (signed_ms is not None and unsigned_ms is not None) else None
+        extra_ms_pct = (100.0 * extra_ms_abs / unsigned_ms) if (extra_ms_abs is not None and unsigned_ms and unsigned_ms != 0) else None
+        wait_extra_ms_abs = (signed_wait_ms - unsigned_wait_ms) if (signed_wait_ms is not None and unsigned_wait_ms is not None) else None
+        wait_extra_ms_pct = (100.0 * wait_extra_ms_abs / unsigned_wait_ms) if (wait_extra_ms_abs is not None and unsigned_wait_ms and unsigned_wait_ms != 0) else None
+        retries_extra = (signed_retries - unsigned_retries) if (signed_retries is not None and unsigned_retries is not None) else None
+
+        if overhead_pct_from_tps is None:
+            overhead_class = "unknown"
+        elif overhead_pct_from_tps > 0:
+            overhead_class = "signed_slower"
+        elif overhead_pct_from_tps < 0:
+            overhead_class = "signed_faster"
+        else:
+            overhead_class = "equal"
+
+        out_rows.append(
+            {
+                "mode": mode,
+                "workload": workload,
+                "threads": th,
+                "rate": rate,
+                "enforce_signatures": enforce_signatures,
+                "unsigned_runs": as_int(unsigned.get("runs", "")) or "",
+                "signed_runs": as_int(signed.get("runs", "")) or "",
+                "unsigned_pass_rate_merkle_verify": unsigned.get("pass_rate_merkle_verify", ""),
+                "signed_pass_rate_merkle_verify": signed.get("pass_rate_merkle_verify", ""),
+                "unsigned_median_tps": f"{unsigned_tps:.3f}" if unsigned_tps is not None else "",
+                "signed_median_tps": f"{signed_tps:.3f}" if signed_tps is not None else "",
+                "signing_tps_delta_abs": f"{tps_delta_abs:.3f}" if tps_delta_abs is not None else "",
+                "signing_tps_delta_pct_vs_unsigned": f"{tps_delta_pct:.3f}" if tps_delta_pct is not None else "",
+                "signing_overhead_pct_from_tps": f"{overhead_pct_from_tps:.3f}" if overhead_pct_from_tps is not None else "",
+                "unsigned_median_workload_ms": f"{unsigned_ms:.3f}" if unsigned_ms is not None else "",
+                "signed_median_workload_ms": f"{signed_ms:.3f}" if signed_ms is not None else "",
+                "signing_extra_workload_ms_abs": f"{extra_ms_abs:.3f}" if extra_ms_abs is not None else "",
+                "signing_extra_workload_ms_pct_vs_unsigned": f"{extra_ms_pct:.3f}" if extra_ms_pct is not None else "",
+                "unsigned_wait_ms": f"{unsigned_wait_ms:.3f}" if unsigned_wait_ms is not None else "",
+                "signed_wait_ms": f"{signed_wait_ms:.3f}" if signed_wait_ms is not None else "",
+                "signing_extra_wait_ms_abs": f"{wait_extra_ms_abs:.3f}" if wait_extra_ms_abs is not None else "",
+                "signing_extra_wait_ms_pct_vs_unsigned": f"{wait_extra_ms_pct:.3f}" if wait_extra_ms_pct is not None else "",
+                "unsigned_mean_retries_total": f"{unsigned_retries:.3f}" if unsigned_retries is not None else "",
+                "signed_mean_retries_total": f"{signed_retries:.3f}" if signed_retries is not None else "",
+                "signing_extra_retries_total": f"{retries_extra:.3f}" if retries_extra is not None else "",
+                "unsigned_cv_tps_pct": unsigned.get("cv_throughput_tps_pct", ""),
+                "signed_cv_tps_pct": signed.get("cv_throughput_tps_pct", ""),
+                "overhead_class": overhead_class,
+            }
+        )
+
+    with out_csv.open("w", newline="") as f:
+        fieldnames = list(out_rows[0].keys()) if out_rows else [
+            "mode",
+            "workload",
+            "threads",
+            "rate",
+            "enforce_signatures",
+            "unsigned_runs",
+            "signed_runs",
+            "unsigned_pass_rate_merkle_verify",
+            "signed_pass_rate_merkle_verify",
+            "unsigned_median_tps",
+            "signed_median_tps",
+            "signing_tps_delta_abs",
+            "signing_tps_delta_pct_vs_unsigned",
+            "signing_overhead_pct_from_tps",
+            "unsigned_median_workload_ms",
+            "signed_median_workload_ms",
+            "signing_extra_workload_ms_abs",
+            "signing_extra_workload_ms_pct_vs_unsigned",
+            "unsigned_wait_ms",
+            "signed_wait_ms",
+            "signing_extra_wait_ms_abs",
+            "signing_extra_wait_ms_pct_vs_unsigned",
+            "unsigned_mean_retries_total",
+            "signed_mean_retries_total",
+            "signing_extra_retries_total",
+            "unsigned_cv_tps_pct",
+            "signed_cv_tps_pct",
+            "overhead_class",
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in out_rows:
+            writer.writerow(r)
+
+
 def _print_scaling_check(summary_csv: Path) -> None:
     if not summary_csv.exists():
         return
@@ -490,14 +837,23 @@ def _print_scaling_check(summary_csv: Path) -> None:
         except Exception:
             return None
 
-    by_workload: dict[str, list[dict[str, str]]] = {}
+    by_workload: dict[tuple[str, str, int, int, int], list[dict[str, str]]] = {}
     for r in rows:
-        by_workload.setdefault(r.get("workload", ""), []).append(r)
+        by_workload.setdefault(
+            (
+                r.get("workload", ""),
+                r.get("mode", ""),
+                int(r.get("rate") or 0),
+                int(r.get("signing") or 0),
+                int(r.get("enforce_signatures") or 0),
+            ),
+            [],
+        ).append(r)
 
     print("")
     print("Scaling check (throughput should be non-decreasing with threads):")
-    for workload in sorted(by_workload.keys()):
-        rs = sorted(by_workload[workload], key=lambda x: int(x.get("threads") or 0))
+    for (workload, mode, rate, signing, enforce_signatures) in sorted(by_workload.keys()):
+        rs = sorted(by_workload[(workload, mode, rate, signing, enforce_signatures)], key=lambda x: int(x.get("threads") or 0))
         mean_tps = [as_float(r.get("mean_throughput_tps", "")) for r in rs]
         med_tps = [as_float(r.get("median_throughput_tps", "")) for r in rs]
 
@@ -516,7 +872,7 @@ def _print_scaling_check(summary_csv: Path) -> None:
                 pairs.append(f"{th}:{tps:.1f}")
 
         print(
-            f"  workload={workload} median_non_decreasing={int(med_ok)} mean_non_decreasing={int(mean_ok)} median_tps_by_threads=[{' '.join(pairs)}]"
+            f"  workload={workload} mode={mode} rate={rate} signing={signing} enforce={enforce_signatures} median_non_decreasing={int(med_ok)} mean_non_decreasing={int(mean_ok)} median_tps_by_threads=[{' '.join(pairs)}]"
         )
 
 
@@ -596,13 +952,24 @@ def _generate_tps_graphs(summary_csv: Path, out_dir: Path) -> list[Path]:
 
     out_paths: list[Path] = []
     for (workload, rate), rs in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1])):
-        series: dict[str, list[tuple[int, float]]] = {m: [] for m in mode_order}
+        series: dict[str, list[tuple[int, float]]] = {}
 
         for r in rs:
             raw_mode = (r.get("mode") or "").strip().lower()
             mode = mode_norm.get(raw_mode, raw_mode)
-            if mode not in series:
+            if mode not in mode_order:
                 continue
+            signing = as_int(r.get("signing", ""))
+            if signing is None:
+                signing = 0
+            enforce_signatures = as_int(r.get("enforce_signatures", ""))
+            if enforce_signatures is None:
+                enforce_signatures = 0
+            label = mode
+            if signing == 1:
+                label += "+sig"
+            if enforce_signatures == 1:
+                label += "+enf"
 
             th = as_int(r.get("threads", ""))
             # Preferred: median throughput (robust summary).
@@ -617,20 +984,28 @@ def _generate_tps_graphs(summary_csv: Path, out_dir: Path) -> list[Path]:
                     tps = 1000.0 * 20000.0 / overall_ms
             if th is None or tps is None:
                 continue
-            series[mode].append((th, tps))
+            series.setdefault(label, []).append((th, tps))
 
         # Skip graph if no data points at all for this workload/rate.
-        if not any(series[m] for m in mode_order):
+        if not any(series.values()):
             continue
 
         fig, ax = plt.subplots(figsize=(9.5, 5.5), dpi=130)
+        label_order = []
         for mode in mode_order:
-            points = sorted(series[mode], key=lambda x: x[0])
+            label_order.append(mode)
+            label_order.append(f"{mode}+sig")
+            label_order.append(f"{mode}+enf")
+            label_order.append(f"{mode}+sig+enf")
+        for label in label_order:
+            points = sorted(series.get(label, []), key=lambda x: x[0])
             if not points:
                 continue
+            mode = label.replace("+sig", "").replace("+enf", "")
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
-            ax.plot(xs, ys, marker="o", linewidth=2.0, markersize=4.5, color=mode_colors[mode], label=mode)
+            linestyle = "--" if "+sig" in label else "-"
+            ax.plot(xs, ys, marker="o", linewidth=2.0, markersize=4.5, linestyle=linestyle, color=mode_colors[mode], label=label)
 
         ax.set_xlabel("Threads")
         ax.set_ylabel("TPS (median throughput)")
@@ -670,6 +1045,23 @@ def main() -> int:
         help="Comma-separated modes: pg/postgres, det/safedb, nondet/aria.",
     )
     parser.add_argument(
+        "--signing-modes",
+        default="0",
+        help="Comma-separated signing modes for deterministic runs: 0=unsigned, 1=signed.",
+    )
+    parser.add_argument(
+        "--signing-privkey",
+        default="",
+        help="PEM private key path used by the inner workload when signing mode includes 1.",
+    )
+    parser.add_argument(
+        "--enforce-signatures",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Set bcdb_enforce_signatures in workload sessions.",
+    )
+    parser.add_argument(
         "--rate",
         type=int,
         default=0,
@@ -684,6 +1076,11 @@ def main() -> int:
     parser.add_argument("--user", default="postgres", help="DB user.")
     parser.add_argument("--port", type=int, default=5438, help="DB port.")
     parser.add_argument("--out-dir", default="", help="Output directory. Default: scripts/bench_results/<timestamp>.")
+    parser.add_argument(
+        "--analyze-only",
+        action="store_true",
+        help="Do not run workloads. Rebuild summary.csv (if needed) and generate det_overhead.csv for --out-dir.",
+    )
     parser.add_argument("--no-resume", action="store_true", help="Do not skip runs already present in results.csv.")
     parser.add_argument(
         "--no-server-restart",
@@ -732,6 +1129,16 @@ def main() -> int:
         if m not in MODE_NAME_TO_DB_TYPE:
             print(f"ERROR: unknown mode {m!r} (supported: {', '.join(MODE_NAME_TO_DB_TYPE)})", file=sys.stderr)
             return 2
+    signing_modes = _split_csv_ints(args.signing_modes)
+    if not signing_modes:
+        print("ERROR: no signing modes selected", file=sys.stderr)
+        return 2
+    if any(s not in (0, 1) for s in signing_modes):
+        print("ERROR: --signing-modes supports only 0 and 1", file=sys.stderr)
+        return 2
+    if 1 in signing_modes and not args.signing_privkey:
+        print("ERROR: --signing-privkey is required when --signing-modes includes 1", file=sys.stderr)
+        return 2
 
     rates = _split_csv_ints(args.rates) if args.rates.strip() else [int(args.rate)]
     for r in rates:
@@ -745,6 +1152,8 @@ def main() -> int:
 
     raw_csv = out_dir / "results.csv"
     summary_csv = out_dir / "summary.csv"
+    det_overhead_csv = out_dir / "det_overhead.csv"
+    signing_overhead_csv = out_dir / "signing_overhead.csv"
     meta_json = out_dir / "run_meta.json"
 
     psql_env = os.environ.get("ARIABC_PSQL", "").strip()
@@ -753,7 +1162,12 @@ def main() -> int:
     else:
         psql_src = repo_root / "src" / "bin" / "psql" / "psql"
         psql_path = str(psql_src) if psql_src.exists() else "/work/ARIABC/install/bin/psql"
-    python_path = os.environ.get("ARIABC_PYTHON", sys.executable or "python3")
+    python_env = os.environ.get("ARIABC_PYTHON", "").strip()
+    if python_env:
+        python_path = python_env
+    else:
+        venv_python = repo_root / ".venv" / "bin" / "python3"
+        python_path = str(venv_python) if venv_python.exists() else (sys.executable or "python3")
     server_log_path = repo_root / "server.log"
 
     env = dict(os.environ)
@@ -778,6 +1192,9 @@ def main() -> int:
         "workloads": workloads,
         "runs": args.runs,
         "modes": modes,
+        "signing_modes": signing_modes,
+        "signing_privkey": args.signing_privkey,
+        "enforce_signatures": args.enforce_signatures,
         "rate": args.rate,
         "rates": rates,
         "db": {"name": args.db, "user": args.user, "port": args.port},
@@ -795,6 +1212,22 @@ def main() -> int:
     }
     meta_json.write_text(json.dumps(meta, indent=2) + "\n")
 
+    if args.analyze_only:
+        if not args.out_dir:
+            print("ERROR: --analyze-only requires --out-dir pointing to an existing run directory.", file=sys.stderr)
+            return 2
+        if not summary_csv.exists():
+            if not raw_csv.exists():
+                print(f"ERROR: missing both {raw_csv} and {summary_csv}", file=sys.stderr)
+                return 2
+            _write_summary(raw_csv, summary_csv)
+        _write_det_overhead(summary_csv, det_overhead_csv)
+        _write_signing_overhead(summary_csv, signing_overhead_csv)
+        print(f"Wrote summary:      {summary_csv}")
+        print(f"Wrote det overhead: {det_overhead_csv}")
+        print(f"Wrote sign overhead:{signing_overhead_csv}")
+        return 0
+
     existing = _load_existing_keys(raw_csv) if not args.no_resume else set()
     if args.no_server_restart and any(MODE_NAME_TO_DB_TYPE[m] == 1 for m in modes):
         print(
@@ -810,6 +1243,8 @@ def main() -> int:
         threads=0,
         run=0,
         rate=0,
+        signing=0,
+        enforce_signatures=0,
         start_server_exit=0,
         restore_exit=0,
         py_exit=0,
@@ -836,11 +1271,16 @@ def main() -> int:
         if write_header:
             writer.writeheader()
 
-        total = len(modes) * len(workloads) * len(threads) * len(rates) * args.runs
+        total = sum(
+            len(workloads) * len(threads) * len(rates) * args.runs *
+            (len(signing_modes) if MODE_NAME_TO_DB_TYPE[mode] == 1 else 1)
+            for mode in modes
+        )
         done = 0
 
         for mode in modes:
             db_type = MODE_NAME_TO_DB_TYPE[mode]
+            effective_signing_modes = signing_modes if db_type == 1 else [0]
             for workload in workloads:
                 workload_path = scripts_dir / workload
                 if not workload_path.exists():
@@ -849,211 +1289,259 @@ def main() -> int:
 
                 for th in threads:
                     for rate in rates:
-                        for run_idx in range(1, args.runs + 1):
-                            key = RunKey(mode=mode, workload=workload, threads=th, rate=rate, run=run_idx)
-                            if key in existing:
-                                done += 1
-                                continue
+                        for signing in effective_signing_modes:
+                            for run_idx in range(1, args.runs + 1):
+                                key = RunKey(mode=mode, workload=workload, threads=th, rate=rate, signing=signing, enforce_signatures=args.enforce_signatures, run=run_idx)
+                                if key in existing:
+                                    done += 1
+                                    continue
 
-                            case_dir = (
-                                out_dir
-                                / f"mode={mode}"
-                                / f"workload={workload_path.stem}"
-                                / f"rate={rate}"
-                                / f"threads={th}"
-                                / f"run={run_idx}"
-                            )
-                            case_dir.mkdir(parents=True, exist_ok=True)
-
-                            start_log_out = case_dir / "start_server.out"
-                            start_log_err = case_dir / "start_server.err"
-                            restore_log_out = case_dir / "restore.out"
-                            restore_log_err = case_dir / "restore.err"
-                            workload_log_out = case_dir / "workload.out"
-                            workload_log_err = case_dir / "workload.err"
-
-                            t0 = time.monotonic()
-
-                            restart_server = (not args.no_server_restart) or (db_type == 1)
-                            start_exit = 0
-                            if restart_server:
-                                start_exit = _run(
-                                    ["/usr/bin/bash", str(start_server)],
-                                    cwd=scripts_dir,
-                                    env=env,
-                                    stdout_path=start_log_out,
-                                    stderr_path=start_log_err,
+                                case_dir = (
+                                    out_dir
+                                    / f"mode={mode}"
+                                    / f"workload={workload_path.stem}"
+                                    / f"rate={rate}"
+                                    / f"signing={signing}"
+                                    / f"enforce={args.enforce_signatures}"
+                                    / f"threads={th}"
+                                    / f"run={run_idx}"
                                 )
+                                case_dir.mkdir(parents=True, exist_ok=True)
 
-                            restore_exit = _run(
-                                [
-                                    psql_path,
-                                    "-X",
-                                    "-q",
-                                    "-p",
-                                    str(args.port),
-                                    "-U",
-                                    args.user,
-                                    "-d",
-                                    args.db,
-                                    "-f",
-                                    str(restore_sql),
-                                ],
-                                cwd=scripts_dir,
-                                env=env,
-                                stdout_path=restore_log_out,
-                                stderr_path=restore_log_err,
-                            )
+                                start_log_out = case_dir / "start_server.out"
+                                start_log_err = case_dir / "start_server.err"
+                                restore_log_out = case_dir / "restore.out"
+                                restore_log_err = case_dir / "restore.err"
+                                workload_log_out = case_dir / "workload.out"
+                                workload_log_err = case_dir / "workload.err"
 
-                            workload_exit = -1
-                            if restore_exit == 0:
-                                case_env = dict(env)
-                                case_env.setdefault("PYTHONUNBUFFERED", "1")
-                                if db_type == 1:
-                                    # Deterministic runs against a freshly restarted server must start at txid 0.
-                                    # Force a clean start even if the parent shell has DET_START_SEQ set.
-                                    case_env["DET_START_SEQ"] = "0"
-                                # Publish a pointer file so an external monitor can follow the
-                                # active workload output (workload.out) for this run.
-                                pointer_path = out_dir / "current_case.json"
-                                try:
-                                    pointer_payload = {
-                                        "case_dir": str(case_dir),
-                                        "mode": mode,
-                                        "workload": workload,
-                                        "threads": th,
-                                        "rate": rate,
-                                        "run": run_idx,
-                                        "ts": _now_utc_iso(),
-                                    }
-                                    pointer_path.write_text(json.dumps(pointer_payload) + "\n")
-                                except Exception as _e:
-                                    print(f"WARNING: could not write current_case pointer: {_e}", file=sys.stderr)
-                                workload_argv = [
-                                    python_path,
-                                    str(workload_py),
-                                    args.db,
-                                    str(workload_path),
-                                    str(db_type),
-                                    str(th),
-                                ]
-                                if rate > 0:
-                                    workload_argv.append(str(rate))
+                                t0 = time.monotonic()
 
-                                timeout_workload_s = args.timeout_workload_s
-                                if db_type == 1 and args.timeout_workload_det_s > 0:
-                                    timeout_workload_s = args.timeout_workload_det_s
-
-                                timeout_for_run: Optional[int] = None
-                                if timeout_workload_s > 0:
-                                    timeout_for_run = int(timeout_workload_s)
-
-                                workload_exit = _run(
-                                    workload_argv,
-                                    cwd=scripts_dir,
-                                    env=case_env,
-                                    stdout_path=workload_log_out,
-                                    stderr_path=workload_log_err,
-                                    timeout_s=timeout_for_run,
-                                )
-
-                                # Remove the pointer after the workload process completes so
-                                # the monitor knows we're idle.
-                                try:
-                                    if pointer_path.exists():
-                                        pointer_path.unlink()
-                                except Exception as _e:
-                                    print(f"WARNING: could not remove current_case pointer: {_e}", file=sys.stderr)
-
-                            t1 = time.monotonic()
-
-                            log_text = ""
-                            try:
-                                log_text = workload_log_out.read_text(errors="replace") + "\n" + workload_log_err.read_text(errors="replace")
-                            except Exception:
-                                pass
-
-                            overall_ms, wait_ms, dup_keys = _parse_workload_metrics(log_text)
-                            retries_total, serialization_retries, reconnects, permanent_failures = _parse_retry_summary(log_text)
-
-                            count_s = None
-                            root_hash = None
-                            verify = None
-                            timeout_diag_path: Optional[Path] = None
-                            if restore_exit == 0:
-                                count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=env)
-                                root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=env)
-                                verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=env)
-                                if workload_exit == 124:
-                                    timeout_diag_path = _capture_timeout_diagnostics(
-                                        case_dir=case_dir,
-                                        psql=psql_path,
-                                        db=args.db,
-                                        port=args.port,
-                                        user=args.user,
+                                restart_server = (not args.no_server_restart) or (db_type == 1)
+                                start_exit = 0
+                                if restart_server:
+                                    start_exit = _run(
+                                        ["/usr/bin/bash", str(start_server)],
                                         cwd=scripts_dir,
                                         env=env,
-                                        server_log=server_log_path,
+                                        stdout_path=start_log_out,
+                                        stderr_path=start_log_err,
                                     )
 
-                            row_count = None
-                            if count_s is not None and count_s.strip().isdigit():
-                                row_count = int(count_s.strip())
+                                expected_data_dir = _canonical_path_str(env.get("ARIABC_PGDATA", "/work/ARIABC/pgdata"))
+                                live_data_dir = None
+                                live_data_dir_raw = _psql_value(
+                                    psql_path,
+                                    db=args.db,
+                                    port=args.port,
+                                    user=args.user,
+                                    query="show data_directory;",
+                                    cwd=scripts_dir,
+                                    env=env,
+                                )
+                                live_data_dir = _canonical_path_str(live_data_dir_raw)
 
-                            notes_parts: list[str] = []
-                            if restart_server and start_exit != 0:
-                                notes_parts.append(f"start_server_exit={start_exit}")
-                            if restore_exit != 0:
-                                notes_parts.append(f"restore_exit={restore_exit}")
-                                notes_parts.append("workload_skipped=1")
-                            elif workload_exit != 0:
-                                notes_parts.append(f"workload_exit={workload_exit}")
-                                if workload_exit == 124:
-                                    notes_parts.append("workload_timeout=1")
-                                    if timeout_diag_path is not None:
-                                        notes_parts.append(f"timeout_diag={timeout_diag_path.name}")
-                            elif verify is not None and verify.strip().lower() not in ("t", "f", ""):
-                                notes_parts.append(f"unexpected_verify={verify!r}")
-                            notes = ";".join(notes_parts)
+                                restore_exit = 0
+                                if expected_data_dir and live_data_dir != expected_data_dir:
+                                    restore_exit = 97
+                                    restore_log_err.write_text(
+                                        f"expected_data_directory={expected_data_dir}\n"
+                                        f"live_data_directory={live_data_dir_raw or ''}\n"
+                                        "data_directory_mismatch=1\n"
+                                    )
+                                else:
+                                    restore_exit = _run(
+                                        [
+                                            psql_path,
+                                            "-X",
+                                            "-q",
+                                            "-p",
+                                            str(args.port),
+                                            "-U",
+                                            args.user,
+                                            "-d",
+                                            args.db,
+                                            "-f",
+                                            str(restore_sql),
+                                        ],
+                                        cwd=scripts_dir,
+                                        env=env,
+                                        stdout_path=restore_log_out,
+                                        stderr_path=restore_log_err,
+                                    )
 
-                            result = RunResult(
-                                ts_utc=_now_utc_iso(),
-                                mode=mode,
-                                db_type=db_type,
-                                workload=workload,
-                                threads=th,
-                                run=run_idx,
-                                rate=rate,
-                                start_server_exit=start_exit,
-                                restore_exit=restore_exit,
-                                py_exit=workload_exit,
-                                wall_time_s=round(t1 - t0, 6),
-                                workload_overall_ms=overall_ms,
-                                workload_wait_ms=wait_ms,
-                                duplicate_key_errors=dup_keys,
-                                retries_total=retries_total,
-                                serialization_retries=serialization_retries,
-                                reconnects=reconnects,
-                                permanent_failures=permanent_failures,
-                                db_row_count=row_count,
-                                db_root_hash=root_hash,
-                                db_merkle_verify=verify,
-                                workload_log=str(workload_log_out),
-                                start_server_log=str(start_log_out),
-                                restore_log=str(restore_log_out),
-                                notes=notes,
-                            )
+                                workload_exit = -1
+                                if restore_exit == 0:
+                                    case_env = dict(env)
+                                    case_env.setdefault("PYTHONUNBUFFERED", "1")
+                                    if db_type == 1:
+                                        # Deterministic runs against a freshly restarted server must start at txid 0.
+                                        # Force a clean start even if the parent shell has DET_START_SEQ set.
+                                        case_env["DET_START_SEQ"] = "0"
+                                    # Publish a pointer file so an external monitor can follow the
+                                    # active workload output (workload.out) for this run.
+                                    pointer_path = out_dir / "current_case.json"
+                                    try:
+                                        pointer_payload = {
+                                            "case_dir": str(case_dir),
+                                            "mode": mode,
+                                            "workload": workload,
+                                            "threads": th,
+                                            "rate": rate,
+                                            "signing": signing,
+                                            "enforce_signatures": args.enforce_signatures,
+                                            "run": run_idx,
+                                            "ts": _now_utc_iso(),
+                                        }
+                                        pointer_path.write_text(json.dumps(pointer_payload) + "\n")
+                                    except Exception as _e:
+                                        print(f"WARNING: could not write current_case pointer: {_e}", file=sys.stderr)
+                                    workload_argv = [
+                                        python_path,
+                                        str(workload_py),
+                                        args.db,
+                                        str(workload_path),
+                                        str(db_type),
+                                        str(th),
+                                        str(rate),
+                                        "--signing",
+                                        str(signing),
+                                        "--enforce-signatures",
+                                        str(args.enforce_signatures),
+                                    ]
+                                    if signing == 1:
+                                        workload_argv.extend(["--privkey", args.signing_privkey])
 
-                            writer.writerow(asdict(result))
-                            fcsv.flush()
+                                    timeout_workload_s = args.timeout_workload_s
+                                    if db_type == 1 and args.timeout_workload_det_s > 0:
+                                        timeout_workload_s = args.timeout_workload_det_s
 
-                            done += 1
-                            print(f"[{done}/{total}] {mode} workload={workload} rate={rate} threads={th} run={run_idx} exit={workload_exit} verify={verify}")
+                                    timeout_for_run: Optional[int] = None
+                                    if timeout_workload_s > 0:
+                                        timeout_for_run = int(timeout_workload_s)
+
+                                    workload_exit = _run(
+                                        workload_argv,
+                                        cwd=scripts_dir,
+                                        env=case_env,
+                                        stdout_path=workload_log_out,
+                                        stderr_path=workload_log_err,
+                                        timeout_s=timeout_for_run,
+                                    )
+
+                                    # Remove the pointer after the workload process completes so
+                                    # the monitor knows we're idle.
+                                    try:
+                                        if pointer_path.exists():
+                                            pointer_path.unlink()
+                                    except Exception as _e:
+                                        print(f"WARNING: could not remove current_case pointer: {_e}", file=sys.stderr)
+
+                                t1 = time.monotonic()
+
+                                log_text = ""
+                                try:
+                                    log_text = workload_log_out.read_text(errors="replace") + "\n" + workload_log_err.read_text(errors="replace")
+                                except Exception:
+                                    pass
+
+                                overall_ms, wait_ms, dup_keys = _parse_workload_metrics(log_text)
+                                retries_total, serialization_retries, reconnects, permanent_failures = _parse_retry_summary(log_text)
+
+                                count_s = None
+                                root_hash = None
+                                verify = None
+                                timeout_diag_path: Optional[Path] = None
+                                if restore_exit == 0:
+                                    count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=env)
+                                    root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=env)
+                                    verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=env)
+                                    if workload_exit == 124:
+                                        timeout_diag_path = _capture_timeout_diagnostics(
+                                            case_dir=case_dir,
+                                            psql=psql_path,
+                                            db=args.db,
+                                            port=args.port,
+                                            user=args.user,
+                                            cwd=scripts_dir,
+                                            env=env,
+                                            server_log=server_log_path,
+                                        )
+
+                                row_count = None
+                                if count_s is not None and count_s.strip().isdigit():
+                                    row_count = int(count_s.strip())
+
+                                notes_parts: list[str] = []
+                                if restart_server and start_exit != 0:
+                                    notes_parts.append(f"start_server_exit={start_exit}")
+                                if expected_data_dir and live_data_dir != expected_data_dir:
+                                    notes_parts.append(f"expected_data_directory={expected_data_dir}")
+                                    notes_parts.append(f"live_data_directory={live_data_dir or live_data_dir_raw or 'unknown'}")
+                                    notes_parts.append("data_directory_mismatch=1")
+                                if restore_exit != 0:
+                                    notes_parts.append(f"restore_exit={restore_exit}")
+                                    notes_parts.append("workload_skipped=1")
+                                elif workload_exit != 0:
+                                    notes_parts.append(f"workload_exit={workload_exit}")
+                                    if workload_exit == 124:
+                                        notes_parts.append("workload_timeout=1")
+                                        if timeout_diag_path is not None:
+                                            notes_parts.append(f"timeout_diag={timeout_diag_path.name}")
+                                elif verify is not None and verify.strip().lower() not in ("t", "f", ""):
+                                    notes_parts.append(f"unexpected_verify={verify!r}")
+                                notes = ";".join(notes_parts)
+
+                                result = RunResult(
+                                    ts_utc=_now_utc_iso(),
+                                    mode=mode,
+                                    db_type=db_type,
+                                    workload=workload,
+                                    threads=th,
+                                    run=run_idx,
+                                    rate=rate,
+                                    signing=signing,
+                                    enforce_signatures=args.enforce_signatures,
+                                    start_server_exit=start_exit,
+                                    restore_exit=restore_exit,
+                                    py_exit=workload_exit,
+                                    wall_time_s=round(t1 - t0, 6),
+                                    workload_overall_ms=overall_ms,
+                                    workload_wait_ms=wait_ms,
+                                    duplicate_key_errors=dup_keys,
+                                    retries_total=retries_total,
+                                    serialization_retries=serialization_retries,
+                                    reconnects=reconnects,
+                                    permanent_failures=permanent_failures,
+                                    db_row_count=row_count,
+                                    db_root_hash=root_hash,
+                                    db_merkle_verify=verify,
+                                    workload_log=str(workload_log_out),
+                                    start_server_log=str(start_log_out),
+                                    restore_log=str(restore_log_out),
+                                    notes=notes,
+                                )
+
+                                writer.writerow(asdict(result))
+                                fcsv.flush()
+
+                                done += 1
+                                print(f"[{done}/{total}] {mode} workload={workload} rate={rate} signing={signing} enforce={args.enforce_signatures} threads={th} run={run_idx} exit={workload_exit} verify={verify}")
 
     try:
         _write_summary(raw_csv, summary_csv)
     except Exception as e:
         print(f"WARNING: failed to write summary: {e}", file=sys.stderr)
+
+    try:
+        _write_det_overhead(summary_csv, det_overhead_csv)
+    except Exception as e:
+        print(f"WARNING: failed to write det overhead summary: {e}", file=sys.stderr)
+
+    try:
+        _write_signing_overhead(summary_csv, signing_overhead_csv)
+    except Exception as e:
+        print(f"WARNING: failed to write signing overhead summary: {e}", file=sys.stderr)
 
     try:
         _print_scaling_check(summary_csv)
@@ -1069,6 +1557,8 @@ def main() -> int:
     print("")
     print(f"Wrote raw results: {raw_csv}")
     print(f"Wrote summary:     {summary_csv}")
+    print(f"Wrote det overhead:{det_overhead_csv}")
+    print(f"Wrote sign overhead:{signing_overhead_csv}")
     print(f"Wrote metadata:    {meta_json}")
     if graph_paths:
         print("Wrote graphs:")

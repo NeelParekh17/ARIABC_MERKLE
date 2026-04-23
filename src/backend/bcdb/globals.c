@@ -28,6 +28,8 @@ bool    bcdb_dt_conflict_tracking = false;
 int32   bcdb_serial_gate_mode = BCDB_SERIAL_GATE_MODE_POLL;
 int32   bcdb_dt_hashtab_switch_threshold = BCDB_DEFAULT_HASHTAB_SWITCH_THRESHOLD;
 int32   bcdb_result_ring_slots = BCDB_DEFAULT_RESULT_RING_SLOTS;
+char*   bcdb_client_public_key = NULL;
+bool    bcdb_enforce_signatures = false;
 pid_t   pid;
 BcdbIsolationLevel BcdbCurrentIsolationLevel = BCDB_SERIALIZABLE;
 int32         worker_id;

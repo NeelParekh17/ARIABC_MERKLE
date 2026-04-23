@@ -33,6 +33,13 @@
 #include "parser/analyze.h"
 #include <unistd.h>
 #include <errno.h>
+
+/*
+ * Silence ad-hoc stdout debug prints in deterministic execution.  Raw
+ * backend printf() output can corrupt client protocol responses.
+ */
+#undef printf
+#define printf(...) ((void) 0)
 #include <ctype.h>
 #include <string.h>
 #include "access/heapam.h"
@@ -692,7 +699,7 @@ bcdb_wait_for_prev_committed(BCDBShmXact *tx)
     if (gate_debug)
         next_log_us = wait_start_us + 1000000;
 
-    while (get_last_committed_txid(tx) != tx->tx_id - 1)
+    while (get_last_committed_txid(tx) < tx->tx_id - 1)
     {
         uint64 now_us = bcdb_get_time();
 
@@ -1418,6 +1425,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     int apply_retries = 0;
     bool apply_nonretryable = false;
     bool apply_terminal_noop = false;
+    bool published_max_advanced = false;
 
     is_bcdb_worker = true;
 
@@ -1613,6 +1621,7 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        * sufficient to handle any co-write edge cases.
        */
       set_published_max_txid(tx);
+      published_max_advanced = true;
 
       /*
        * Lever D v2 apply path:
@@ -1927,7 +1936,18 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        * After PG_RE_THROW(), PostgresMain's sigsetjmp handler will call
        * AbortCurrentTransaction() which properly cleans up all resources. */
               if(condSig == 0) {
-                  /* No waiter wake-up required in polling-gate mode. */
+                  /* If published_max was advanced for this tx but the watermark
+                   * was never set (condSig==0), advance it now so downstream txs
+                   * waiting in bcdb_wait_for_prev_committed are not permanently
+                   * blocked. Only advance if our predecessor already committed
+                   * (to preserve monotonicity); otherwise leave it — the
+                   * predecessor's own PG_CATCH will advance when it can. */
+                  if (published_max_advanced && tx != NULL)
+                  {
+                      BCTxID last = get_last_committed_txid(tx);
+                      if (tx->tx_id == 0 || last >= (BCTxID)(tx->tx_id - 1))
+                          set_last_committed_txid(tx);
+                  }
               }
 		      if (hold_portal_snapshot && activeTx && activeTx->portal)
 		      {
