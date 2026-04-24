@@ -936,7 +936,7 @@ uint64_t pg_executor::get_det_tx_seq(const task& t) const {
     if (parse_req_num(t.req_id, tx_seq) && tx_seq > 0) {
         return tx_seq;
     }
-    return t.dispatch_seq;
+    return 0;
 }
 
 void pg_executor::det_mark_tx_state(uint64_t tx_seq, det_tx_state st) {

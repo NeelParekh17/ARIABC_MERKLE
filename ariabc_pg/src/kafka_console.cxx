@@ -1,5 +1,6 @@
 #include "kafka_console.hxx"
 
+#ifdef ARIABC_HAVE_RDKAFKA
 #include <librdkafka/rdkafka.h>
 
 #include <chrono>
@@ -466,3 +467,59 @@ void kafka_console_consumer::stop() {
 }
 
 } // namespace ariabc_pg
+
+#else // !ARIABC_HAVE_RDKAFKA — no-op stubs for builds without librdkafka
+
+namespace ariabc_pg {
+
+kafka_console_producer::kafka_console_producer() : rk_(nullptr), poll_thread_stop_(false) {}
+kafka_console_producer::~kafka_console_producer() {}
+
+bool kafka_console_producer::start(const std::string&, const std::string&,
+                                   kafka_producer_profile, std::string& err) {
+    err = "Kafka disabled at build time (KAFKA_OPTIONAL=ON)";
+    return false;
+}
+bool kafka_console_producer::send_line(const std::string&, std::string& err) {
+    err = "Kafka disabled";
+    return false;
+}
+bool kafka_console_producer::send_payload(const std::string&, const std::string&,
+                                          std::string& err) {
+    err = "Kafka disabled";
+    return false;
+}
+kafka_producer_stats kafka_console_producer::stats() const { return stats_; }
+void kafka_console_producer::stop() {}
+
+kafka_console_consumer::kafka_console_consumer() : rk_(nullptr), busy_hint_(false) {}
+kafka_console_consumer::~kafka_console_consumer() {}
+
+bool kafka_console_consumer::start_latest(const std::string&, const std::string&,
+                                           const std::string&, std::string& err) {
+    err = "Kafka disabled at build time (KAFKA_OPTIONAL=ON)";
+    return false;
+}
+bool kafka_console_consumer::start_latest_multi(const std::string&,
+                                                  const std::vector<std::string>&,
+                                                  const std::string&, std::string& err) {
+    err = "Kafka disabled";
+    return false;
+}
+bool kafka_console_consumer::poll_batch_messages(std::vector<kafka_consumed_message>&,
+                                                   size_t, int, std::string& err) {
+    err = "timeout";
+    return false;
+}
+bool kafka_console_consumer::poll_message(std::string&, std::string&,
+                                           std::string& err) {
+    err = "timeout";
+    return false;
+}
+void kafka_console_consumer::set_busy_hint(bool busy) { busy_hint_ = busy; }
+kafka_consumer_stats kafka_console_consumer::stats() const { return stats_; }
+void kafka_console_consumer::stop() {}
+
+} // namespace ariabc_pg
+
+#endif // ARIABC_HAVE_RDKAFKA
