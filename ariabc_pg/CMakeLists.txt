@@ -54,11 +54,22 @@ find_library(RDKAFKA_LIBRARY
                /usr/lib/x86_64-linux-gnu
                /usr/local/lib/x86_64-linux-gnu)
 
-if(NOT RDKAFKA_INCLUDE_DIR OR NOT RDKAFKA_LIBRARY)
-    message(FATAL_ERROR "librdkafka is required for ariabc_pg. Install librdkafka development headers and library.")
-endif()
+option(KAFKA_OPTIONAL "Allow building without librdkafka (disables Kafka result publishing)" OFF)
 
-set(ARIABC_PG_KAFKA_LIBS ${RDKAFKA_LIBRARY})
+if(NOT RDKAFKA_INCLUDE_DIR OR NOT RDKAFKA_LIBRARY)
+    if(KAFKA_OPTIONAL)
+        message(WARNING "librdkafka not found — building without Kafka support (KAFKA_OPTIONAL=ON).")
+        set(RDKAFKA_INCLUDE_DIR "")
+        set(RDKAFKA_LIBRARY "")
+        set(ARIABC_PG_KAFKA_LIBS "")
+        set(ARIABC_HAVE_KAFKA OFF)
+    else()
+        message(FATAL_ERROR "librdkafka is required. Install librdkafka development headers and library, or pass -DKAFKA_OPTIONAL=ON to build without Kafka.")
+    endif()
+else()
+    set(ARIABC_HAVE_KAFKA ON)
+    set(ARIABC_PG_KAFKA_LIBS ${RDKAFKA_LIBRARY})
+endif()
 
 set(ARIABC_COMMON_SRC
     src/logger.cc
@@ -76,7 +87,9 @@ if(BOOST_ASIO)
     set(ARIABC_TRANSPORT_DEFS USE_BOOST_ASIO)
 endif()
 
-add_compile_definitions(ARIABC_HAVE_RDKAFKA)
+if(ARIABC_HAVE_KAFKA)
+    add_compile_definitions(ARIABC_HAVE_RDKAFKA)
+endif()
 
 if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
     add_executable(ariabc_pg_server
