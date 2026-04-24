@@ -3911,7 +3911,6 @@ static unsigned char* base64_decode(const char* input, int length, int* out_len)
     return buffer;
 }
 
-static int count = 0;
 typedef struct BcdbSigVerifyMetrics
 {
 	uint64		calls;
@@ -3927,6 +3926,11 @@ typedef struct BcdbSigVerifyMetrics
 } BcdbSigVerifyMetrics;
 
 static BcdbSigVerifyMetrics bcdb_sig_verify_metrics = {0};
+
+/* Process-local public-key cache: avoid repeated base64-decode + DER parse */
+static EVP_PKEY   *bcdb_cached_pubkey = NULL;
+static char        bcdb_cached_pubkey_b64[2048] = "";
+static EVP_MD_CTX *bcdb_cached_md_ctx = NULL;
 
 static double
 bcdb_now_us(void)
@@ -3965,52 +3969,70 @@ bcdb_log_signature_verify_summary(void)
 }
 
 static int verify_signature_b64key(const char* public_key_b64, const char* message, const char* signature_b64) {
-    count += 1;
-    if(count %2000 < 2) printf("verify_signature_b64key %s\n", signature_b64);
     int success = 0;
     int der_len, sig_len;
     double total_start = bcdb_now_us();
     double stage_start;
 
-    // 1. Decode Base64 strings
-    stage_start = bcdb_now_us();
-    unsigned char* der_data = base64_decode(public_key_b64, strlen(public_key_b64), &der_len);
-    bcdb_sig_verify_metrics.decode_pub_us += bcdb_now_us() - stage_start;
+    /* 1. Public-key cache: only decode+parse when key changes (e.g. new session) */
+    if (strcmp(public_key_b64, bcdb_cached_pubkey_b64) != 0)
+    {
+        if (bcdb_cached_pubkey != NULL)
+        {
+            EVP_PKEY_free(bcdb_cached_pubkey);
+            bcdb_cached_pubkey = NULL;
+            bcdb_cached_pubkey_b64[0] = '\0';
+        }
+
+        stage_start = bcdb_now_us();
+        unsigned char* der_data = base64_decode(public_key_b64, strlen(public_key_b64), &der_len);
+        bcdb_sig_verify_metrics.decode_pub_us += bcdb_now_us() - stage_start;
+
+        stage_start = bcdb_now_us();
+        const unsigned char* p = der_data;
+        bcdb_cached_pubkey = d2i_PUBKEY(NULL, &p, der_len);
+        bcdb_sig_verify_metrics.load_pub_us += bcdb_now_us() - stage_start;
+        free(der_data);
+
+        if (bcdb_cached_pubkey != NULL)
+        {
+            strncpy(bcdb_cached_pubkey_b64, public_key_b64, sizeof(bcdb_cached_pubkey_b64) - 1);
+            bcdb_cached_pubkey_b64[sizeof(bcdb_cached_pubkey_b64) - 1] = '\0';
+        }
+    }
+    /* cache hit: decode_pub_us and load_pub_us not charged (correct) */
+
+    /* 2. Decode signature — always per-call (unique per transaction) */
     stage_start = bcdb_now_us();
     unsigned char* sig_data = base64_decode(signature_b64, strlen(signature_b64), &sig_len);
     bcdb_sig_verify_metrics.decode_sig_us += bcdb_now_us() - stage_start;
 
-    // 2. Load Public Key from DER data
-    stage_start = bcdb_now_us();
-    const unsigned char* p = der_data;
-    EVP_PKEY* pub_key = d2i_PUBKEY(NULL, &p, der_len);
-    bcdb_sig_verify_metrics.load_pub_us += bcdb_now_us() - stage_start;
+    /* 3. Verify using cached key and reused EVP_MD_CTX */
+    if (bcdb_cached_pubkey != NULL)
+    {
+        if (bcdb_cached_md_ctx == NULL)
+            bcdb_cached_md_ctx = EVP_MD_CTX_new();
+        EVP_MD_CTX_reset(bcdb_cached_md_ctx);
 
-    if (pub_key) {
-        EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-
-        // 3. Initialize Verification (Default is PKCS1 v1.5 padding)
         stage_start = bcdb_now_us();
-        if (EVP_DigestVerifyInit(ctx, NULL, EVP_sha256(), NULL, pub_key) == 1) {
+        if (EVP_DigestVerifyInit(bcdb_cached_md_ctx, NULL, EVP_sha256(), NULL, bcdb_cached_pubkey) == 1)
+        {
             bcdb_sig_verify_metrics.digest_init_us += bcdb_now_us() - stage_start;
+
             stage_start = bcdb_now_us();
-            EVP_DigestVerifyUpdate(ctx, message, strlen(message));
+            EVP_DigestVerifyUpdate(bcdb_cached_md_ctx, message, strlen(message));
             bcdb_sig_verify_metrics.digest_update_us += bcdb_now_us() - stage_start;
 
-            // 4. Finalize and verify
             stage_start = bcdb_now_us();
-            if (EVP_DigestVerifyFinal(ctx, sig_data, sig_len) == 1) {
-                success = 1; // Verified!
-            }
+            if (EVP_DigestVerifyFinal(bcdb_cached_md_ctx, sig_data, sig_len) == 1)
+                success = 1;
             bcdb_sig_verify_metrics.digest_final_us += bcdb_now_us() - stage_start;
         }
         else
             bcdb_sig_verify_metrics.digest_init_us += bcdb_now_us() - stage_start;
-        EVP_MD_CTX_free(ctx);
-        EVP_PKEY_free(pub_key);
+        /* bcdb_cached_pubkey and bcdb_cached_md_ctx are NOT freed — owned by cache */
     }
 
-    free(der_data);
     free(sig_data);
     bcdb_sig_verify_metrics.calls += 1;
     if (success)

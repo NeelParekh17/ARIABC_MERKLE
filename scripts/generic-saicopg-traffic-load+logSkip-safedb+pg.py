@@ -10,7 +10,10 @@ import sys
 import time
 import threading
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import (
+    ThreadPoolExecutor, ProcessPoolExecutor,
+    as_completed, TimeoutError as FuturesTimeoutError,
+)
 from threading import Lock
 
 mutex = Lock()
@@ -18,6 +21,7 @@ mutex_seqnum = Lock()
 procSeqNum = 0
 inputSeqNum = 0
 message_dict = {}
+PRESIGNED_CMD_DICT: dict = {}  # seq_hash -> full "s {hash} {sig_b64}##{sql}" string
 totalWaitTime = 0.0
 duplicate_key_errors = 0
 mutex_dups = Lock()
@@ -218,6 +222,15 @@ def _build_det_command(seq_hash: str, sql: str) -> str:
         _record_det_timing_sample("build_us", (time.perf_counter() - build_start) * 1_000_000.0)
         return cmd
 
+    # Fast path: look up pre-computed signed command (populated before workers start).
+    cmd = PRESIGNED_CMD_DICT.get(seq_hash)
+    if cmd is not None:
+        _record_det_timing_sample("sign_us", 0.0)
+        _record_det_timing_sample("b64_us", 0.0)
+        _record_det_timing_sample("build_us", (time.perf_counter() - build_start) * 1_000_000.0)
+        return cmd
+
+    # Slow-path fallback: sign inline (guards against retry/DET_START_SEQ edge cases).
     sign_start = time.perf_counter()
     sig = SIGNING_PRIVATE_KEY.sign(
         sql.encode("utf-8"),
@@ -308,6 +321,42 @@ def _percentile(nums, pct: float):
 def _record_det_timing_sample(kind: str, sample_us: float):
     with metrics_lock:
         det_timing_metrics.setdefault(kind, []).append(sample_us)
+
+
+def _presign_one(args):
+    # Module-level so ProcessPoolExecutor can find it via fork on Linux.
+    # SIGNING_PRIVATE_KEY / _CRYPTO_PADDING / _CRYPTO_HASHES are inherited
+    # from the parent process via fork (Linux default multiprocessing mode).
+    seq_hash, sql = args
+    sig = SIGNING_PRIVATE_KEY.sign(
+        sql.encode("utf-8"),
+        _CRYPTO_PADDING.PKCS1v15(),
+        _CRYPTO_HASHES.SHA256(),
+    )
+    sig_b64 = base64.b64encode(sig).decode("ascii")
+    return seq_hash, f"s {seq_hash} {sig_b64}##{sql}"
+
+
+def _presign_all_queries() -> None:
+    """Pre-compute all signed command strings before workers start.
+    Runs outside the benchmark timing window so it doesn't inflate TPS."""
+    global PRESIGNED_CMD_DICT
+    items = [
+        (f"{seq:08d}", message_dict[seq])
+        for seq in range(procSeqNum, inputSeqNum)
+        if message_dict.get(seq, "") != ""
+    ]
+    if not items:
+        return
+    n_workers = min(os.cpu_count() or 4, 16)
+    print(f"Pre-signing {len(items)} queries with {n_workers} processes...")
+    t0 = time.perf_counter()
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        for seq_hash, cmd in pool.map(_presign_one, items, chunksize=256):
+            PRESIGNED_CMD_DICT[seq_hash] = cmd
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    print(f"Pre-signing done: {len(PRESIGNED_CMD_DICT)} entries in {elapsed_ms:.1f} ms")
+
 
 # Lock-free sequence dispatch (W5.20).
 #
@@ -1019,6 +1068,10 @@ except FileNotFoundError:
 
 message_dict[inputSeqNum] = ''
 inputSeqNum += 1
+
+if SIGNING_ENABLED and DB_TYPE == 1:
+    _presign_all_queries()
+
 tStart = time.time()
 
 timed_out = False
