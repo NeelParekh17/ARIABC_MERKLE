@@ -44,12 +44,33 @@ void debug_trace_commit(const std::string& req_id, nuraft::ulong log_idx, const 
               << std::endl;
 }
 
+void debug_trace_batch_commit(const raft_request_batch& batch,
+                              nuraft::ulong log_idx) {
+    if (!debug_req_trace_enabled()) return;
+    const uint64_t idx = g_debug_commit_trace_count.fetch_add(1, std::memory_order_relaxed);
+    if (idx >= debug_req_trace_limit()) return;
+    const client_api_request_item* first =
+        batch.items.empty() ? nullptr : &batch.items.front();
+    std::string sql_head = first ? trim_copy(first->sql) : std::string();
+    if (sql_head.size() > 96) sql_head.resize(96);
+    std::cerr << "REQ_TRACE commit_batch"
+              << " idx=" << idx
+              << " items=" << batch.items.size()
+              << " first_req_id=" << (first ? first->req_id : std::string("NA"))
+              << " log_idx=" << log_idx
+              << " sql=" << sql_head
+              << std::endl;
+}
+
 } // namespace
 
 pg_state_machine::pg_state_machine(int node_id,
                                    const db_options& db_opt,
                                    const kafka_options& k_opt)
-    : executor_(node_id, db_opt, k_opt)
+    : executor_(node_id,
+                db_opt,
+                k_opt,
+                [this](uint64_t result_token) { note_result_applied(result_token); })
     , last_committed_idx_(0)
     , last_snapshot_(nullptr)
     {}
@@ -61,33 +82,40 @@ pg_state_machine::~pg_state_machine() {
 nuraft::ptr<nuraft::buffer> pg_state_machine::commit(const nuraft::ulong log_idx,
                                                      nuraft::buffer& data)
 {
-    std::string req_id;
-    std::string sql;
-    int leader_node_hint = -1;
-    try {
-        nuraft::buffer_serializer bs(data);
-        req_id = bs.get_str();
-        sql = bs.get_str();
-        if (bs.pos() + sizeof(int32_t) <= bs.size()) {
-            leader_node_hint = bs.get_i32();
-        }
-    } catch (const std::exception& e) {
-        // Best-effort: keep Raft progressing even if payload is malformed.
-        req_id = "ERR";
-        sql = std::string("/* commit parse failed: ") + e.what() + " */";
+    raft_request_batch batch;
+    std::string parse_err;
+    if (!parse_raft_request_log(data, batch, parse_err)) {
+        client_api_request_item item;
+        item.req_id = "ERR";
+        item.sql = std::string("/* commit parse failed: ") + parse_err + " */";
+        batch.items.push_back(std::move(item));
+        batch.leader_node_hint = -1;
         std::cerr << "pg_state_machine commit parse failed at log " << log_idx
-                  << ": " << e.what() << std::endl;
+                  << ": " << parse_err << std::endl;
     }
 
-    debug_trace_commit(req_id, log_idx, sql);
-    executor_.enqueue(req_id, sql, leader_node_hint, static_cast<uint64_t>(log_idx));
+    if (batch.items.size() <= 1) {
+        const client_api_request_item& item = batch.items.front();
+        debug_trace_commit(item.req_id, log_idx, item.sql);
+    } else {
+        debug_trace_batch_commit(batch, log_idx);
+    }
+    register_result_batch(static_cast<uint64_t>(log_idx), batch.items.size());
+    for (size_t i = 0; i < batch.items.size(); ++i) {
+        executor_.enqueue(batch.items[i].req_id,
+                          batch.items[i].sql,
+                          batch.leader_node_hint,
+                          static_cast<uint64_t>(log_idx));
+    }
     last_committed_idx_ = log_idx;
 
     // ACK: {req_id, log_idx}
-    const size_t ack_sz = sizeof(int32_t) + req_id.size() + sizeof(uint64_t);
+    const std::string ack_req_id =
+        batch.items.empty() ? std::string("ERR") : batch.items.front().req_id;
+    const size_t ack_sz = sizeof(int32_t) + ack_req_id.size() + sizeof(uint64_t);
     nuraft::ptr<nuraft::buffer> ack = nuraft::buffer::alloc(ack_sz);
     nuraft::buffer_serializer bs_ack(ack);
-    bs_ack.put_str(req_id);
+    bs_ack.put_str(ack_req_id);
     bs_ack.put_u64(log_idx);
     return ack;
 }
@@ -108,6 +136,42 @@ nuraft::ptr<nuraft::snapshot> pg_state_machine::last_snapshot() {
 
 nuraft::ulong pg_state_machine::last_commit_index() {
     return last_committed_idx_;
+}
+
+bool pg_state_machine::wait_for_result(uint64_t result_token, int timeout_ms) {
+    if (result_token == 0) return false;
+    if (timeout_ms <= 0) timeout_ms = 1;
+
+    std::unique_lock<std::mutex> lk(result_mu_);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    const bool ready = result_cv_.wait_until(lk, deadline, [&] {
+        return completed_result_tokens_.find(result_token) != completed_result_tokens_.end();
+    });
+    if (!ready) return false;
+    completed_result_tokens_.erase(result_token);
+    return true;
+}
+
+void pg_state_machine::register_result_batch(uint64_t result_token, size_t item_count) {
+    if (result_token == 0 || item_count == 0) return;
+    std::lock_guard<std::mutex> lk(result_mu_);
+    pending_result_counts_[result_token] = item_count;
+    completed_result_tokens_.erase(result_token);
+}
+
+void pg_state_machine::note_result_applied(uint64_t result_token) {
+    if (result_token == 0) return;
+    std::lock_guard<std::mutex> lk(result_mu_);
+    auto it = pending_result_counts_.find(result_token);
+    if (it == pending_result_counts_.end()) return;
+    if (it->second > 1) {
+        --(it->second);
+        return;
+    }
+    pending_result_counts_.erase(it);
+    completed_result_tokens_.insert(result_token);
+    result_cv_.notify_all();
 }
 
 void pg_state_machine::create_snapshot(nuraft::snapshot& s,

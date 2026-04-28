@@ -43,12 +43,14 @@ find_library(LIBPQ_LIBRARY
 find_path(RDKAFKA_INCLUDE_DIR
           NAMES librdkafka/rdkafka.h
           HINTS
+            $ENV{HOME}/Desktop/rdkafka_local/include
             /usr/include
             /usr/local/include)
 
 find_library(RDKAFKA_LIBRARY
              NAMES rdkafka
              HINTS
+               $ENV{HOME}/Desktop/rdkafka_local/lib
                /usr/lib
                /usr/local/lib
                /usr/lib/x86_64-linux-gnu
@@ -140,3 +142,24 @@ target_link_libraries(ariabc_pg_gateway
                       ${ARIABC_PG_KAFKA_LIBS}
                       z
                       dl)
+
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/wire_protocol_test.cxx")
+    add_executable(ariabc_pg_wire_protocol_test
+                   src/wire_protocol_test.cxx
+                   src/wire_protocol.cxx
+                   src/wire_protocol_async.cxx)
+
+    target_include_directories(ariabc_pg_wire_protocol_test
+                              PRIVATE
+                                ${ARIABC_COMMON_INC}
+                                ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
+
+    target_compile_definitions(ariabc_pg_wire_protocol_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
+
+    target_link_libraries(ariabc_pg_wire_protocol_test
+                          NuRaft::static_lib
+                          z
+                          dl)
+else()
+    message(STATUS "Skipping ariabc_pg_wire_protocol_test: src/wire_protocol_test.cxx not present in this checkout")
+endif()

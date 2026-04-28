@@ -94,9 +94,30 @@ bool assign_topics_from_beginning(rd_kafka_t* rk,
             }
 
             for (int pi = 0; pi < found->partition_cnt; ++pi) {
+                const int32_t pid = found->partitions[pi].id;
                 rd_kafka_topic_partition_t* tp =
-                    rd_kafka_topic_partition_list_add(plist, topic.c_str(), found->partitions[pi].id);
-                tp->offset = RD_KAFKA_OFFSET_BEGINNING;
+                    rd_kafka_topic_partition_list_add(plist, topic.c_str(), pid);
+                // start_latest_multi must actually start at the END of the topic.
+                // Reading from BEGINNING re-consumes hundreds of thousands of stale
+                // result records from prior runs before reaching the current run's
+                // votes, which causes the gateway to time out waiting for majority
+                // even though the live cluster is publishing correctly.
+                //
+                // RD_KAFKA_OFFSET_END as the assign offset proved unreliable in
+                // practice (librdkafka returned no messages even after fresh
+                // publishes appeared in the topic). Query the high-water mark
+                // explicitly and assign at that exact offset so the consumer
+                // is guaranteed to start above the historical backlog and pick
+                // up everything published from this point forward.
+                int64_t lo = 0, hi = 0;
+                const rd_kafka_resp_err_t wm_err =
+                    rd_kafka_query_watermark_offsets(rk, topic.c_str(), pid,
+                                                     &lo, &hi, 5000);
+                if (wm_err == RD_KAFKA_RESP_ERR_NO_ERROR && hi >= 0) {
+                    tp->offset = hi;
+                } else {
+                    tp->offset = RD_KAFKA_OFFSET_END;
+                }
             }
         }
 
@@ -164,8 +185,9 @@ bool kafka_console_producer::start(const std::string& bootstrap,
     }
 
     const char* acks = (profile == kafka_producer_profile::control_durable) ? "all" : "1";
+    const char* linger_ms = (profile == kafka_producer_profile::result_fast) ? "0" : "5";
     if (!conf_set(conf, "acks", acks, err) ||
-        !conf_set(conf, "linger.ms", "5", err) ||
+        !conf_set(conf, "linger.ms", linger_ms, err) ||
         !conf_set(conf, "batch.num.messages", "10000", err) ||
         !conf_set(conf, "batch.size", "1048576", err) ||
         !conf_set(conf, "compression.type", "snappy", err) ||
@@ -318,9 +340,11 @@ bool kafka_console_consumer::start_latest_multi(const std::string& bootstrap,
 
     if (!conf_set(conf, "group.id", gid, err) ||
         !conf_set(conf, "enable.auto.commit", "false", err) ||
-        !conf_set(conf, "auto.offset.reset", "earliest", err) ||
-        !conf_set(conf, "fetch.min.bytes", "65536", err) ||
-        !conf_set(conf, "fetch.wait.max.ms", "10", err) ||
+        !conf_set(conf, "auto.offset.reset", "latest", err) ||
+        // Majority-completion waits on these replies synchronously. Favor
+        // low-latency fetch return over large broker-side batching.
+        !conf_set(conf, "fetch.min.bytes", "1", err) ||
+        !conf_set(conf, "fetch.wait.max.ms", "2", err) ||
         !conf_set(conf, "max.partition.fetch.bytes", "1048576", err) ||
         !conf_set(conf, "socket.nagle.disable", "true", err)) {
         rd_kafka_conf_destroy(conf);

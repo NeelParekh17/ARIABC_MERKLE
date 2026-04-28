@@ -30,4 +30,5 @@ bool bcdb_is_tx_commited(char * tx_hash);
 void bcdb_middleware_wait_all_to_finish(void);
 void bcdb_middleware_conflict_check(BCBlock *block);
 void block_cleaning(BCBlockID current_block_id);
+void block_cleaning_dt(BCBlockID current_block_id);
 #endif //BLOCKCHAIN_DATABASE_MIDDLEWARE_H

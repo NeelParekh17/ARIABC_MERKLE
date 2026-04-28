@@ -171,30 +171,89 @@ CMakeFiles/ariabc_pg_gateway.dir/src/ariabc_pg_gateway.cxx.o: \
  /usr/include/c++/13/bits/vector.tcc \
  /work/ARIABC/AriaBC/ariabc_pg/src/async_cluster_submitter.hxx \
  /work/ARIABC/AriaBC/ariabc_pg/src/wire_protocol.hxx \
- /work/ARIABC/AriaBC/ariabc_pg/src/wire_protocol_async.hxx \
- /usr/include/c++/13/cstddef /usr/include/c++/13/atomic \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/nuraft.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/asio_service.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/asio_service_options.hxx \
+ /usr/include/c++/13/functional /usr/include/c++/13/tuple \
+ /usr/include/c++/13/bits/uses_allocator.h \
+ /usr/include/c++/13/bits/std_function.h /usr/include/c++/13/memory \
+ /usr/include/c++/13/bits/stl_raw_storage_iter.h \
+ /usr/include/c++/13/bits/align.h /usr/include/c++/13/bit \
+ /usr/include/c++/13/bits/unique_ptr.h \
+ /usr/include/c++/13/bits/shared_ptr.h \
+ /usr/include/c++/13/bits/shared_ptr_base.h \
+ /usr/include/c++/13/bits/allocated_ptr.h \
+ /usr/include/c++/13/ext/aligned_buffer.h \
+ /usr/include/c++/13/ext/concurrence.h \
+ /usr/include/c++/13/bits/shared_ptr_atomic.h \
  /usr/include/c++/13/bits/atomic_base.h \
  /usr/include/c++/13/bits/atomic_lockfree_defines.h \
+ /usr/include/c++/13/backward/auto_ptr.h \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/delayed_task_scheduler.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/delayed_task.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/basic_types.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/pp_util.hxx \
+ /usr/include/c++/13/atomic \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/ptr.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/rpc_cli_factory.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/rpc_cli.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/async.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/msg_type.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/attr_unused.hxx \
  /usr/include/c++/13/condition_variable /usr/include/c++/13/bits/chrono.h \
  /usr/include/c++/13/ratio /usr/include/c++/13/limits \
  /usr/include/c++/13/ctime /usr/include/c++/13/bits/parse_numbers.h \
  /usr/include/c++/13/bits/std_mutex.h \
- /usr/include/c++/13/bits/unique_lock.h \
- /usr/include/c++/13/bits/shared_ptr.h \
- /usr/include/c++/13/bits/shared_ptr_base.h \
- /usr/include/c++/13/bits/allocated_ptr.h \
- /usr/include/c++/13/bits/unique_ptr.h /usr/include/c++/13/tuple \
- /usr/include/c++/13/bits/uses_allocator.h \
- /usr/include/c++/13/ext/aligned_buffer.h \
- /usr/include/c++/13/ext/concurrence.h /usr/include/c++/13/deque \
- /usr/include/c++/13/bits/stl_deque.h /usr/include/c++/13/bits/deque.tcc \
- /usr/include/c++/13/memory \
- /usr/include/c++/13/bits/stl_raw_storage_iter.h \
- /usr/include/c++/13/bits/align.h /usr/include/c++/13/bit \
- /usr/include/c++/13/bits/shared_ptr_atomic.h \
- /usr/include/c++/13/backward/auto_ptr.h /usr/include/c++/13/mutex \
+ /usr/include/c++/13/bits/unique_lock.h /usr/include/c++/13/mutex \
+ /usr/include/c++/13/unordered_map \
+ /usr/include/c++/13/bits/unordered_map.h \
+ /usr/include/c++/13/bits/hashtable.h \
+ /usr/include/c++/13/bits/hashtable_policy.h \
+ /usr/include/c++/13/bits/enable_special_members.h \
+ /usr/include/c++/13/bits/erase_if.h \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/req_msg.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/log_entry.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/buffer.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/log_val_type.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/msg_base.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/resp_msg.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/rpc_exception.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/buffer_serializer.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/callback.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/cluster_config.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/srv_config.hxx \
+ /usr/include/c++/13/list /usr/include/c++/13/bits/stl_list.h \
+ /usr/include/c++/13/bits/list.tcc \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/context.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/raft_params.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/error_code.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/global_mgr.hxx \
  /usr/include/c++/13/thread /usr/include/c++/13/bits/std_thread.h \
  /usr/include/c++/13/bits/this_thread_sleep.h \
+ /usr/include/c++/13/unordered_set \
+ /usr/include/c++/13/bits/unordered_set.h \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/log_store.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/logger.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/raft_server.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/internal_timer.hxx \
+ /usr/include/c++/13/chrono \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/snapshot_sync_req.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/snapshot.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/srv_role.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/srv_state.hxx \
+ /usr/include/c++/13/cassert /usr/include/assert.h \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/timer_task.hxx \
+ /usr/include/c++/13/map /usr/include/c++/13/bits/stl_tree.h \
+ /usr/include/c++/13/bits/stl_map.h \
+ /usr/include/c++/13/bits/stl_multimap.h \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/rpc_listener.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/state_machine.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/state_mgr.hxx \
+ /work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft/launcher.hxx \
+ /usr/include/c++/13/cstddef \
+ /work/ARIABC/AriaBC/ariabc_pg/src/wire_protocol_async.hxx \
+ /usr/include/c++/13/deque /usr/include/c++/13/bits/stl_deque.h \
+ /usr/include/c++/13/bits/deque.tcc \
  /work/ARIABC/AriaBC/ariabc_pg/src/kafka_console.hxx \
  /usr/include/arpa/inet.h /usr/include/netinet/in.h \
  /usr/include/x86_64-linux-gnu/sys/socket.h \
@@ -251,7 +310,7 @@ CMakeFiles/ariabc_pg_gateway.dir/src/ariabc_pg_gateway.cxx.o: \
  /usr/include/strings.h \
  /usr/include/x86_64-linux-gnu/bits/strings_fortified.h \
  /usr/include/x86_64-linux-gnu/bits/string_fortified.h \
- /usr/include/c++/13/chrono /usr/include/c++/13/cmath /usr/include/math.h \
+ /usr/include/c++/13/cmath /usr/include/math.h \
  /usr/include/x86_64-linux-gnu/bits/math-vector.h \
  /usr/include/x86_64-linux-gnu/bits/libm-simd-decl-stubs.h \
  /usr/include/x86_64-linux-gnu/bits/flt-eval-method.h \
@@ -267,16 +326,8 @@ CMakeFiles/ariabc_pg_gateway.dir/src/ariabc_pg_gateway.cxx.o: \
  /usr/include/x86_64-linux-gnu/c++/13/bits/messages_members.h \
  /usr/include/libintl.h /usr/include/c++/13/bits/locale_facets_nonio.tcc \
  /usr/include/c++/13/bits/locale_conv.h /usr/include/c++/13/iostream \
- /usr/include/c++/13/set /usr/include/c++/13/bits/stl_tree.h \
- /usr/include/c++/13/bits/stl_set.h \
- /usr/include/c++/13/bits/stl_multiset.h \
- /usr/include/c++/13/bits/erase_if.h /usr/include/c++/13/unordered_map \
- /usr/include/c++/13/bits/unordered_map.h \
- /usr/include/c++/13/bits/hashtable.h \
- /usr/include/c++/13/bits/hashtable_policy.h \
- /usr/include/c++/13/bits/enable_special_members.h \
- /usr/include/c++/13/unordered_set \
- /usr/include/c++/13/bits/unordered_set.h /usr/include/openssl/bio.h \
+ /usr/include/c++/13/set /usr/include/c++/13/bits/stl_set.h \
+ /usr/include/c++/13/bits/stl_multiset.h /usr/include/openssl/bio.h \
  /usr/include/openssl/macros.h \
  /usr/include/x86_64-linux-gnu/openssl/opensslconf.h \
  /usr/include/x86_64-linux-gnu/openssl/configuration.h \

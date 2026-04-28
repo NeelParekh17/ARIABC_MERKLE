@@ -366,7 +366,7 @@ parse_block_with_txs(const char *json)
 	printf("ariaMyDbg %s : %s: %d blksz %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz(), getpid());
 #endif
     block->num_tx = cJSON_GetArraySize(tx_list);
-    sentinel = get_block_by_id(1, false);
+    sentinel = get_block_by_id(1, true);
     Assert(sentinel != NULL);
     tx_base = __sync_fetch_and_add(&sentinel->num_tx_sub, block->num_tx);
     cJSON_ArrayForEach(tx_json, tx_list)
@@ -503,7 +503,6 @@ bcdb_middleware_submit_block_results(const char* block_json)
 {
     BCBlock     *block;
     StringInfoData out;
-    int last_tx_id = -1;
 
     ++block_meta->global_bmax;
     block = parse_block_with_txs(block_json);
@@ -513,19 +512,14 @@ bcdb_middleware_submit_block_results(const char* block_json)
     {
         BCDBShmXact *tx = block->txs[i];
         tx_queue_insert(tx, tx->tx_id);
-        last_tx_id = tx->tx_id;
     }
-    if (last_tx_id >= 0)
-    {
-        bcdb_wait_until_committed((BCTxID) last_tx_id);
-    }
-
     initStringInfo(&out);
     for (int i = 0; i < block->num_tx; ++i)
     {
         BCDBShmXact *tx = block->txs[i];
         const int mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
 
+        bcdb_wait_until_slot_ready((BCTxID) tx->tx_id);
         appendStringInfoString(&out, tx->hash);
         appendStringInfoChar(&out, '\t');
         append_hex_encoded(&out, block->result[mem_txid]);
@@ -613,7 +607,11 @@ block_cleaning(BCBlockID current_block_id)
 
     if (current_block_id > CLEANING_DELAY_BLOCKS)
     {
-        block_to_clean = get_block_by_id(current_block_id - CLEANING_DELAY_BLOCKS, false);
+        BCBlockID clean_block_id = current_block_id - CLEANING_DELAY_BLOCKS;
+
+        block_to_clean = (clean_block_id == 1)
+            ? NULL
+            : get_block_by_id(clean_block_id, false);
         if (block_to_clean != NULL)
         {
             for (int i=0; i < block_to_clean->num_tx; i++)
@@ -639,6 +637,29 @@ block_cleaning(BCBlockID current_block_id)
         block_meta->previous_report_ts = cur_report_ts;
         block_meta->previous_report_commit = cur_num_committed;
     }
+}
+
+void
+block_cleaning_dt(BCBlockID current_block_id)
+{
+    BCBlock *block_to_clean;
+    BCBlockID clean_block_id;
+
+    if (current_block_id <= CLEANING_DELAY_BLOCKS)
+        return;
+
+    /*
+     * The DT path stores committed results on the sentinel block and deletes
+     * each BCDBShmXact in bcdb_worker_process_tx_dt().  Only reclaim the
+     * per-block header here; block->txs[] may point at already-removed tx-pool
+     * entries by the time the block ages out.
+     */
+    clean_block_id = current_block_id - CLEANING_DELAY_BLOCKS;
+    if (clean_block_id == 1)
+        return;
+
+    block_to_clean = get_block_by_id(clean_block_id, false);
+    delete_block(block_to_clean);
 }
 
 void

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -62,6 +63,8 @@ struct pg_executor_stats {
     uint64_t queue_low_watermark = 0;
     uint64_t queue_depth_cur = 0;
     int queue_overloaded = 0;
+    int bcdb_init_enabled = 0;
+    int bcdb_block_size = 0;
 };
 
 struct db_options {
@@ -94,7 +97,12 @@ struct kafka_options {
 
 class pg_executor {
 public:
-    pg_executor(int node_id, const db_options& db_opt, const kafka_options& k_opt);
+    using completion_callback = std::function<void(uint64_t)>;
+
+    pg_executor(int node_id,
+                const db_options& db_opt,
+                const kafka_options& k_opt,
+                completion_callback on_task_applied = completion_callback());
     ~pg_executor();
 
     void enqueue(const std::string& req_id,
@@ -146,6 +154,7 @@ private:
 
     std::string exec_sql(PGconn* c, const std::string& sql);
     bool exec_det_block_batch(PGconn* c,
+                              uint64_t block_id,
                               const std::vector<task>& tasks,
                               std::vector<std::string>& out_results);
     void ensure_bcdb_initialized_for_sql(const std::string& sql);
@@ -153,6 +162,7 @@ private:
     void det_mark_tx_state(uint64_t tx_seq, det_tx_state st);
     bool det_wait_for_apply_turn(uint64_t tx_seq);
     void det_finish_apply(uint64_t tx_seq);
+    void notify_task_applied(uint64_t raft_log_idx);
     bool wait_for_ordered_emit_turn(uint64_t dispatch_seq);
     void finish_ordered_emit(uint64_t dispatch_seq);
 
@@ -173,6 +183,7 @@ private:
     std::string result_sig_key_;
     kafka_console_producer kafka_prod_;
     bool kafka_enabled_;
+    completion_callback on_task_applied_;
 
     std::atomic<bool> stop_{false};
     std::mutex q_mu_;
@@ -207,10 +218,13 @@ private:
     bool event_mode_ = false;
     bool det_parallel_workers_ = false;
     bool det_raw_compat_mode_ = false;
+    uint64_t det_next_block_id_ = 2;
+    uint64_t det_block_tx_key_base_ = 0;
     PGconn* bcdb_ctrl_conn_ = nullptr;
     std::mutex bcdb_init_mu_;
     bool bcdb_init_done_ = false;
     bool bcdb_init_failed_ = false;
+    int bcdb_block_size_ = 0;
     int wakeup_rfd_ = -1;
     int wakeup_wfd_ = -1;
     std::atomic<uint64_t> st_backlog_cur_{0};

@@ -1,61 +1,8 @@
-## The five configurations and whether each makes sense
+Add Kafka (multi-node, pre-serialized input)
+Now bring in multiple replicas but feed them a pre-serialized transaction log (bypass Raft for now). Kafka carries results back.
+Correctness check:
 
-### Config 1: Vanilla PostgreSQL (baseline)
+All replicas must return the same result hash for every transaction. Feed a compareStates manually and confirm Merkle roots match across all replicas.
+Deliberately corrupt one replica's row, run compareStates, verify the divergence is detected.
 
-**What it measures:** Raw PostgreSQL performance with serializable isolation, no BCDB machinery at all.
-
-**How to measure:** Standard BenchBase YCSB against PostgreSQL directly, same hardware, same workload, same thread count. Single node.
-
-**Verdict: Must have.**
-
----
-
-### Config 2: Deterministic execution only (single node, no replication)
-
-**What it measures:** The cost of BCDB's optimistic execution + serial gate + Merkle maintenance, isolated from any network overhead.
-
-**Why it's needed:** This is the core systems contribution. It tells you whether the deterministic algorithm itself is practical.
-
-**How to measure:** Single machine, `bcdb_block_submit_results()` called by a local client, no Raft, no Kafka.
-
-**Verdict: Must have.**
-
----
-
-### Config 3: Raft + deterministic execution, NO Kafka result collection
-
-**What it measures:** The cost of Raft consensus for ordering transactions, with deterministic execution on each replica, but without the overhead of Kafka pub/sub for collecting results.
-
-**Is it logical?**
-
-This configuration cannot actually exist as a complete system. Here is why: once transactions are committed to the Raft log and executed on replicas, the client needs to collect results from replicas to compare them and to get the query result back. In the architecture, that result collection goes through Kafka. Without Kafka, the client has no fault-tolerant way to receive results from multiple replicas.
-
-You could measure it artificially — submit through Raft, execute on one replica, return directly — but that would not be a replicated system. It would be Raft as a serialization mechanism feeding a single executor.
-
-**Verdict: Not a logically independent configuration. Do not add this as a separate experiment.**
-
----
-
-### Config 4: Kafka result collection only, no Raft (pre-serialized input)
-
-**What it measures:** The overhead of Kafka's pub/sub mechanism for distributing results across replicas, assuming the input is already serialized by some external mechanism. This represents use cases like the stock exchange example — where the transaction log is produced by an external system and BCDB just needs to execute and verify agreement.
-
-**Why it's needed:** It isolates Kafka's contribution to end-to-end latency from Raft's contribution. Figure 11 in the paper already has this as the "Cluster with Kafka" line. This is the most directly useful separation because it tells you how much of the overhead comes from consensus vs result collection.
-
-**How to measure:** Submit transactions to all replicas in the same pre-determined order (skip the Raft client), each replica executes and publishes to Kafka, client collects from Kafka and waits for threshold matching results. 4 replicas, one is Kafka broker.
-
-**Verdict: Must have. Already in paper as "Cluster with Kafka."**
-
----
-
-### Config 5: Full system — Raft + deterministic execution + Kafka (end-to-end)
-
-**What it measures:** The complete PROTECT-DB pipeline as deployed. This is the number that answers "is the system practical?" It includes every component's overhead: Raft consensus latency, deterministic execution cost, Kafka pub/sub latency, and result comparison at the client.
-
-**Why it's needed:** This is the headline number. Everything else is ablation to explain this number.
-
-**How to measure:** 4 replicas (one doubles as Kafka broker). Client submits to Raft client → Raft commits → each replica executes → results published to Kafka → client collects from Kafka → complete when threshold matching results received.
-
-**Verdict: Must have.**
-
----
+Performance check: throughput will drop compared to single node (Kafka messaging overhead). This is expected. The number you get here is your Kafka-only overhead baseline.
