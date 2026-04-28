@@ -489,6 +489,28 @@ bcdb_result_slot_for_txid(BCTxID tx_id)
 }
 
 static inline void
+bcdb_publish_error_result(BCBlock *block, BCDBShmXact *tx, const char *sqlstate)
+{
+    int mem_txid;
+
+    if (block == NULL || tx == NULL)
+        return;
+
+    mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
+    memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
+    snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+             "\n\t*%s* ERROR %s\n",
+             tx->hash,
+             (sqlstate != NULL && sqlstate[0] != '\0') ? sqlstate : "XX000");
+
+    pg_write_barrier();
+    __atomic_store_n(&block->result_commit_xid[mem_txid],
+                     tx->xid, __ATOMIC_RELEASE);
+    __atomic_store_n(&block->result_committed_txid[mem_txid],
+                     tx->tx_id, __ATOMIC_RELEASE);
+}
+
+static inline void
 bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 {
     /*
@@ -500,12 +522,10 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
     * after publish_ws_tableDT, so the gate serializes only the
     * conflict_check + publish_ws critical section.
      *
-     * Two modes:
-     *  - CONDVAR: wakes on condCommit broadcast (currently not broadcast by
-     *    set_published_max_txid — intentionally POLL-only; see shm_block.c).
-     *  - POLL (default): adaptive-backoff spin. First few iterations are a
-     *    CPU-yield hint (close neighbour finishing), then short sleeps that
-     *    cap at 64us.
+     * The historical bcdb_serial_gate_mode=1 condition-variable path is not
+     * safe for this gate: set_published_max_txid() intentionally does not
+     * broadcast condCommit.  Always use the adaptive poll/yield loop here so
+     * stale configs cannot strand workers on a missed wakeup.
      */
     int poll_us = 0;
     int spins = 0;
@@ -629,18 +649,7 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 
         CHECK_FOR_INTERRUPTS();
 
-        if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
-        {
-            ConditionVariablePrepareToSleep(&block->condCommit);
-            if ((get_published_max_txid(tx) + 1) >= tx->tx_id)
-            {
-                ConditionVariableCancelSleep();
-                break;
-            }
-            ConditionVariableSleep(&block->condCommit, WAIT_EVENT_BLOCK_COMMIT);
-            ConditionVariableCancelSleep();
-        }
-        else if (spins < 64)
+        if (spins < 64)
         {
             /* Hot neighbour finishing any moment — spin without syscall. */
             spins++;
@@ -1870,12 +1879,27 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                                  finish_result_start);
       }
 
+	      {
+	          uint64 finish_publish_start = bcdb_ptrace_timer_start();
+	          advance_last_committed_txid(tx);
+	          bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_PUBLISH_US,
+	                                 finish_publish_start);
+	      }
       {
-          uint64 finish_publish_start = bcdb_ptrace_timer_start();
-          bcdb_wait_for_prev_committed(tx);
-          set_last_committed_txid(tx);
-          bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_PUBLISH_US,
-                                 finish_publish_start);
+          BCBlock *committed_block = get_block_by_id(tx->block_id_committed, false);
+
+          if (committed_block != NULL)
+          {
+              int32 num_finished = __sync_add_and_fetch(&committed_block->num_finished, 1);
+
+              if (num_finished == committed_block->num_tx)
+              {
+                  uint32 global_bmin = __sync_add_and_fetch(&block_meta->global_bmin, 1);
+
+                  ConditionVariableBroadcast(&block_meta->conds[global_bmin % NUM_BMIN_COND]);
+                  block_cleaning_dt(committed_block->id);
+              }
+          }
       }
       condSig = 1;
 
@@ -1935,19 +1959,38 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
        * a transaction in error state, causing cascading warnings.
        * After PG_RE_THROW(), PostgresMain's sigsetjmp handler will call
        * AbortCurrentTransaction() which properly cleans up all resources. */
-              if(condSig == 0) {
-                  /* If published_max was advanced for this tx but the watermark
-                   * was never set (condSig==0), advance it now so downstream txs
-                   * waiting in bcdb_wait_for_prev_committed are not permanently
-                   * blocked. Only advance if our predecessor already committed
-                   * (to preserve monotonicity); otherwise leave it — the
-                   * predecessor's own PG_CATCH will advance when it can. */
-                  if (published_max_advanced && tx != NULL)
+              if(condSig == 0 && tx != NULL) {
+                  /*
+                   * Block-submit callers wait on result_committed_txid[slot],
+                   * not just the contiguous watermark.  Publish a canonical
+                   * error result before advancing; otherwise one failed worker
+                   * can leave bcdb_block_submit_results() asleep forever.
+                   */
+                  if (block == NULL)
+                      block = get_block_by_id(1, false);
+                  bcdb_publish_error_result(block,
+                                            tx,
+                                            edata != NULL
+                                                ? unpack_sql_state(edata->sqlerrcode)
+                                                : "XX000");
+                  advance_last_committed_txid(tx);
                   {
-                      BCTxID last = get_last_committed_txid(tx);
-                      if (tx->tx_id == 0 || last >= (BCTxID)(tx->tx_id - 1))
-                          set_last_committed_txid(tx);
+                      BCBlock *committed_block = get_block_by_id(tx->block_id_committed, false);
+
+                      if (committed_block != NULL)
+                      {
+                          int32 num_finished = __sync_add_and_fetch(&committed_block->num_finished, 1);
+
+                          if (num_finished == committed_block->num_tx)
+                          {
+                              uint32 global_bmin = __sync_add_and_fetch(&block_meta->global_bmin, 1);
+
+                              ConditionVariableBroadcast(&block_meta->conds[global_bmin % NUM_BMIN_COND]);
+                              block_cleaning_dt(committed_block->id);
+                          }
+                      }
                   }
+                  condSig = 1;
               }
 		      if (hold_portal_snapshot && activeTx && activeTx->portal)
 		      {

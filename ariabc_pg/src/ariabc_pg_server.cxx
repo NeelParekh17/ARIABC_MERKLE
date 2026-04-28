@@ -117,11 +117,14 @@ void debug_trace_server_request(const client_api_request& req) {
     if (!debug_req_trace_enabled()) return;
     const uint64_t idx = g_debug_server_trace_count.fetch_add(1, std::memory_order_relaxed);
     if (idx >= debug_req_trace_limit()) return;
-    std::string sql_head = ariabc_pg::trim_copy(req.sql);
+    const std::string req_id = req.is_batch() ? req.batch_items.front().req_id : req.req_id;
+    const std::string sql = req.is_batch() ? req.batch_items.front().sql : req.sql;
+    std::string sql_head = ariabc_pg::trim_copy(sql);
     if (sql_head.size() > 96) sql_head.resize(96);
     std::cerr << "REQ_TRACE server"
               << " idx=" << idx
-              << " req_id=" << req.req_id
+              << " req_id=" << req_id
+              << " batch_items=" << req.item_count()
               << " sql=" << sql_head
               << std::endl;
 }
@@ -135,7 +138,8 @@ void debug_trace_server_append(const client_api_request& req,
     if (idx >= debug_req_trace_limit()) return;
     std::cerr << "REQ_TRACE append"
               << " idx=" << idx
-              << " req_id=" << req.req_id
+              << " req_id=" << (req.is_batch() ? req.batch_items.front().req_id : req.req_id)
+              << " batch_items=" << req.item_count()
               << " accepted=" << (accepted ? 1 : 0)
               << " code=" << result_code
               << " leader=" << leader_id
@@ -371,6 +375,22 @@ void handle_client_fd(int fd,
                 resp.status = 1;
                 resp.msg = "INVALID_WAIT_COMMIT_COMMAND";
             } else {
+                if (wait_result_mode) {
+                    if (psm->wait_for_result(target_idx, timeout_ms)) {
+                        resp.status = 0;
+                        resp.msg = "WAIT_RESULT_OK completion_source=apply_complete raft_log_idx=" +
+                                   std::to_string(target_idx) +
+                                   " result_payload=NA result_hash=NA";
+                    } else {
+                        const uint64_t cur = static_cast<uint64_t>(psm->last_commit_index());
+                        resp.status = 1;
+                        resp.msg = "WAIT_RESULT_TIMEOUT cur=" + std::to_string(cur) +
+                                   " target=" + std::to_string(target_idx);
+                    }
+                    const bool ok_write = write_response_frame(fd, resp, err);
+                    if (!ok_write) break;
+                    continue;
+                }
                 const auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(timeout_ms);
                 bool ok = false;
@@ -378,13 +398,7 @@ void handle_client_fd(int fd,
                     const uint64_t cur = static_cast<uint64_t>(psm->last_commit_index());
                     if (cur >= target_idx) {
                         resp.status = 0;
-                        if (wait_result_mode) {
-                            resp.msg = "WAIT_RESULT_OK completion_source=commit_index raft_log_idx=" +
-                                       std::to_string(cur) +
-                                       " result_payload=NA result_hash=NA";
-                        } else {
-                            resp.msg = std::to_string(cur);
-                        }
+                        resp.msg = std::to_string(cur);
                         ok = true;
                         break;
                     }
@@ -428,18 +442,18 @@ void handle_client_fd(int fd,
             }
         }
 
-        // Build Raft log: {req_id, sql}.
         const int leader_hint = raft ? raft->get_leader() : -1;
         nuraft::ptr<nuraft::buffer> log =
-            nuraft::buffer::alloc(sizeof(int32_t) + req.req_id.size() +
-                                  sizeof(int32_t) + req.sql.size() +
-                                  sizeof(int32_t));
-        nuraft::buffer_serializer bs(log);
-        bs.put_str(req.req_id);
-        bs.put_str(req.sql);
-        bs.put_i32(leader_hint);
+            build_raft_request_log(req, leader_hint, err);
 
         client_api_response resp;
+        if (!log) {
+            resp.status = 2;
+            resp.msg = err.empty() ? std::string("LOG_BUILD_FAILED") : err;
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
         g_prof.append_calls.fetch_add(1, std::memory_order_relaxed);
         const auto a0 = std::chrono::steady_clock::now();
         nuraft::ptr<nuraft::cmd_result<nuraft::ptr<nuraft::buffer>>> r =
@@ -471,7 +485,8 @@ void handle_client_fd(int fd,
             resp.status = 0;
             resp.msg = "ACCEPTED accepted=1 leader=" + std::to_string(raft ? raft->get_leader() : -1) +
                        " leader_id=" + std::to_string(raft ? raft->get_leader() : -1) +
-                       " raft_log_idx=" + std::to_string(raft_log_idx);
+                       " raft_log_idx=" + std::to_string(raft_log_idx) +
+                       " batch_items=" + std::to_string(req.item_count());
         }
 
         const auto w0 = std::chrono::steady_clock::now();
@@ -533,16 +548,27 @@ void handle_client_fd_direct(int fd,
             continue;
         }
         if (starts_with(req.sql, "__ARIABC_CTRL_WAIT_COMMIT_INDEX") || starts_with(req.sql, "WAIT_RESULT")) {
-            // In bypass mode we don't have separate commit tracking;
-            // the seq counter advances before enqueue, so just return ok.
+            uint64_t target_idx = 0;
+            int timeout_ms = 30000;
+            bool wait_result_mode = false;
             client_api_response resp;
-            resp.status = 0;
-            if (starts_with(req.sql, "WAIT_RESULT")) {
-                const uint64_t cur = seq_counter.load(std::memory_order_relaxed);
-                resp.msg = "WAIT_RESULT_OK completion_source=direct_enqueue raft_log_idx=" +
-                           std::to_string(cur) +
-                           " result_payload=NA result_hash=NA";
+            if (!parse_wait_commit_cmd(req.sql, target_idx, timeout_ms, wait_result_mode)) {
+                resp.status = 1;
+                resp.msg = "INVALID_WAIT_COMMIT_COMMAND";
+            } else if (wait_result_mode) {
+                if (psm->wait_for_result(target_idx, timeout_ms)) {
+                    resp.status = 0;
+                    resp.msg = "WAIT_RESULT_OK completion_source=direct_apply raft_log_idx=" +
+                               std::to_string(target_idx) +
+                               " result_payload=NA result_hash=NA";
+                } else {
+                    const uint64_t cur = seq_counter.load(std::memory_order_relaxed);
+                    resp.status = 1;
+                    resp.msg = "WAIT_RESULT_TIMEOUT cur=" + std::to_string(cur) +
+                               " target=" + std::to_string(target_idx);
+                }
             } else {
+                resp.status = 0;
                 resp.msg = std::to_string(seq_counter.load(std::memory_order_relaxed));
             }
             const bool ok_write = write_response_frame(fd, resp, err);
@@ -569,14 +595,23 @@ void handle_client_fd_direct(int fd,
         }
 
         // Assign a monotonically increasing sequence number (replaces Raft log index).
-        const uint64_t seq = seq_counter.fetch_add(1, std::memory_order_relaxed);
-        psm->direct_enqueue(req.req_id, req.sql, seq);
+        const uint64_t seq = seq_counter.fetch_add(
+            static_cast<uint64_t>(req.item_count()),
+            std::memory_order_relaxed);
+        if (req.is_batch()) {
+            psm->direct_enqueue_batch(req.batch_items, seq);
+        } else {
+            psm->direct_enqueue(req.req_id, req.sql, seq);
+        }
         g_prof.append_calls.fetch_add(1, std::memory_order_relaxed);
 
         client_api_response resp;
         resp.status = 0;
+        const uint64_t last_seq = seq + static_cast<uint64_t>(req.item_count() - 1);
         resp.msg = "ACCEPTED_DIRECT accepted=1 leader=-1 leader_id=-1 raft_log_idx=" +
-                   std::to_string(seq) + " seq=" + std::to_string(seq);
+                   std::to_string(last_seq) +
+                   " seq=" + std::to_string(last_seq) +
+                   " batch_items=" + std::to_string(req.item_count());
 
         const auto w0 = std::chrono::steady_clock::now();
         const bool ok_write = write_response_frame(fd, resp, err);
@@ -656,6 +691,8 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " queue_overloaded=" << exec.queue_overloaded
         << " queue_overload_enter=" << exec.queue_overload_enter
         << " queue_overload_exit=" << exec.queue_overload_exit
+        << " bcdb_init_enabled=" << exec.bcdb_init_enabled
+        << " bcdb_block_size=" << exec.bcdb_block_size
         << " conn_wait_ms=" << (exec.conn_acquire_wait_ns / 1000000.0)
         << " kafka_flush_calls=" << exec.kafka_flush_calls
         << " kafka_payload_kb=" << (exec.kafka_payload_bytes / 1024.0)

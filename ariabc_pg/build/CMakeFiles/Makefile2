@@ -65,6 +65,7 @@ CMAKE_BINARY_DIR = /work/ARIABC/AriaBC/ariabc_pg/build
 # The main recursive "all" target.
 all: CMakeFiles/ariabc_pg_server.dir/all
 all: CMakeFiles/ariabc_pg_gateway.dir/all
+all: CMakeFiles/ariabc_pg_wire_protocol_test.dir/all
 all: nuraft-build/all
 .PHONY : all
 
@@ -75,6 +76,7 @@ preinstall: nuraft-build/preinstall
 # The main recursive "clean" target.
 clean: CMakeFiles/ariabc_pg_server.dir/clean
 clean: CMakeFiles/ariabc_pg_gateway.dir/clean
+clean: CMakeFiles/ariabc_pg_wire_protocol_test.dir/clean
 clean: nuraft-build/clean
 .PHONY : clean
 
@@ -151,6 +153,32 @@ CMakeFiles/ariabc_pg_gateway.dir/clean:
 .PHONY : CMakeFiles/ariabc_pg_gateway.dir/clean
 
 #=============================================================================
+# Target rules for target CMakeFiles/ariabc_pg_wire_protocol_test.dir
+
+# All Build rule for target.
+CMakeFiles/ariabc_pg_wire_protocol_test.dir/all: nuraft-build/CMakeFiles/static_lib.dir/all
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/work/ARIABC/AriaBC/ariabc_pg/build/CMakeFiles --progress-num=41,42,43,44 "Built target ariabc_pg_wire_protocol_test"
+.PHONY : CMakeFiles/ariabc_pg_wire_protocol_test.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/ariabc_pg_wire_protocol_test.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /work/ARIABC/AriaBC/ariabc_pg/build/CMakeFiles 31
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/ariabc_pg_wire_protocol_test.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /work/ARIABC/AriaBC/ariabc_pg/build/CMakeFiles 0
+.PHONY : CMakeFiles/ariabc_pg_wire_protocol_test.dir/rule
+
+# Convenience name for target.
+ariabc_pg_wire_protocol_test: CMakeFiles/ariabc_pg_wire_protocol_test.dir/rule
+.PHONY : ariabc_pg_wire_protocol_test
+
+# clean rule for target.
+CMakeFiles/ariabc_pg_wire_protocol_test.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/clean
+.PHONY : CMakeFiles/ariabc_pg_wire_protocol_test.dir/clean
+
+#=============================================================================
 # Target rules for target nuraft-build/CMakeFiles/build_ssl_key.dir
 
 # All Build rule for target.
@@ -209,7 +237,7 @@ nuraft-build/CMakeFiles/RAFT_CORE_OBJ.dir/clean:
 nuraft-build/CMakeFiles/static_lib.dir/all: nuraft-build/CMakeFiles/RAFT_CORE_OBJ.dir/all
 	$(MAKE) $(MAKESILENT) -f nuraft-build/CMakeFiles/static_lib.dir/build.make nuraft-build/CMakeFiles/static_lib.dir/depend
 	$(MAKE) $(MAKESILENT) -f nuraft-build/CMakeFiles/static_lib.dir/build.make nuraft-build/CMakeFiles/static_lib.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/work/ARIABC/AriaBC/ariabc_pg/build/CMakeFiles --progress-num=42 "Built target static_lib"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/work/ARIABC/AriaBC/ariabc_pg/build/CMakeFiles --progress-num=46 "Built target static_lib"
 .PHONY : nuraft-build/CMakeFiles/static_lib.dir/all
 
 # Build rule for subdir invocation for target.
@@ -235,7 +263,7 @@ nuraft-build/CMakeFiles/static_lib.dir/clean:
 nuraft-build/CMakeFiles/shared_lib.dir/all: nuraft-build/CMakeFiles/RAFT_CORE_OBJ.dir/all
 	$(MAKE) $(MAKESILENT) -f nuraft-build/CMakeFiles/shared_lib.dir/build.make nuraft-build/CMakeFiles/shared_lib.dir/depend
 	$(MAKE) $(MAKESILENT) -f nuraft-build/CMakeFiles/shared_lib.dir/build.make nuraft-build/CMakeFiles/shared_lib.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/work/ARIABC/AriaBC/ariabc_pg/build/CMakeFiles --progress-num=41 "Built target shared_lib"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/work/ARIABC/AriaBC/ariabc_pg/build/CMakeFiles --progress-num=45 "Built target shared_lib"
 .PHONY : nuraft-build/CMakeFiles/shared_lib.dir/all
 
 # Build rule for subdir invocation for target.

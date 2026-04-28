@@ -39,10 +39,16 @@ constexpr size_t kQueueHighWatermarkMin = 32;
 constexpr size_t kQueueLowWatermarkMin = 16;
 constexpr size_t kQueueHighWatermarkFactor = 4;  // high = max(minHigh, 4*pool)
 constexpr size_t kQueueLowWatermarkFactor = 2;   // low  = max(minLow,  2*pool)
+// Session-restart heuristic for deterministic-apply ordering: a newly queued
+// tx_seq more than this much below the current head means a fresh client
+// session (e.g. workload starting at tx_seq=1 after a probe used 99000000)
+// rather than late out-of-order arrival inside the same session.
+constexpr uint64_t kDetApplyEpochGap = 1000000ULL;
 constexpr size_t kDetQueueHighWatermarkMin = 24;
 constexpr size_t kDetQueueLowWatermarkMin = 12;
 constexpr size_t kDetQueueHighWatermarkFactor = 2;  // high = max(minHigh, 2*pool)
 constexpr size_t kDetQueueLowWatermarkFactor = 1;   // low  = max(minLow,  1*pool)
+constexpr uint64_t kDetPartialBlockMaxWaitNs = 2ULL * 1000ULL * 1000ULL;
 constexpr const char* kHashAlgo = "sha256";
 constexpr uint8_t kHashAlgoId = 1;
 constexpr const char* kDefaultResultSigKey = "ariabc-result-v2-dev-key";
@@ -51,6 +57,16 @@ bool debug_req_trace_enabled() {
     static const bool enabled = []() -> bool {
         const char* v = std::getenv("ARIABC_DEBUG_REQ_TRACE");
         if (!v) return false;
+        const std::string s = trim_copy(v);
+        return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+    }();
+    return enabled;
+}
+
+bool det_event_block_fastpath_enabled() {
+    static const bool enabled = []() -> bool {
+        const char* v = std::getenv("ARIABC_DET_EVENT_BLOCK_FASTPATH");
+        if (!v) return true;   // on by default; set =0 to disable
         const std::string s = trim_copy(v);
         return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
     }();
@@ -596,17 +612,22 @@ void pg_executor::ensure_bcdb_initialized_for_sql(const std::string& sql) {
     if (res) PQclear(res);
     bcdb_ctrl_conn_ = c;
     bcdb_init_done_ = true;
+    bcdb_block_size_ = block_size;
     std::cerr << "bcdb_init enabled on node " << node_id_
               << " with block_size=" << block_size
               << std::endl;
 }
 
-pg_executor::pg_executor(int node_id, const db_options& db_opt, const kafka_options& k_opt)
+pg_executor::pg_executor(int node_id,
+                         const db_options& db_opt,
+                         const kafka_options& k_opt,
+                         completion_callback on_task_applied)
     : node_id_(node_id)
     , db_opt_(db_opt)
     , kafka_opt_(k_opt)
     , result_sig_key_(k_opt.result_sig_key)
     , kafka_enabled_(false)
+    , on_task_applied_(std::move(on_task_applied))
 {
     event_mode_ = is_event_mode(db_opt_.exec_mode);
     if (db_opt_.db_type == 1) {
@@ -629,6 +650,14 @@ pg_executor::pg_executor(int node_id, const db_options& db_opt, const kafka_opti
                      "forcing ARIABC_DET_PARALLEL_WORKERS=0 on node "
                   << node_id_ << std::endl;
         det_parallel_workers_ = false;
+    }
+
+    // Assign a per-process-instance base so BCDB tx_pool keys are unique
+    // across ariabc_pg_server restarts sharing the same PostgreSQL instance.
+    {
+        static std::atomic<uint64_t> s_block_tx_key_session{0};
+        det_block_tx_key_base_ =
+            s_block_tx_key_session.fetch_add(100000000ULL, std::memory_order_relaxed);
     }
 
     if (result_sig_key_.empty()) {
@@ -880,6 +909,8 @@ pg_executor_stats pg_executor::stats() const {
     out.queue_low_watermark = static_cast<uint64_t>(queue_low_wm_);
     out.queue_depth_cur = st_queue_depth_cur_.load(std::memory_order_relaxed);
     out.queue_overloaded = queue_overloaded_.load(std::memory_order_relaxed) ? 1 : 0;
+    out.bcdb_init_enabled = bcdb_init_done_ ? 1 : 0;
+    out.bcdb_block_size = bcdb_block_size_;
     return out;
 }
 
@@ -942,9 +973,25 @@ uint64_t pg_executor::get_det_tx_seq(const task& t) const {
 void pg_executor::det_mark_tx_state(uint64_t tx_seq, det_tx_state st) {
     if (tx_seq == 0) return;
     std::lock_guard<std::mutex> lk(det_apply_mu_);
-    if (st == det_tx_state::QUEUED && !det_apply_initialized_) {
-        det_next_apply_seq_ = tx_seq;
-        det_apply_initialized_ = true;
+    if (st == det_tx_state::QUEUED) {
+        if (!det_apply_initialized_) {
+            det_next_apply_seq_ = tx_seq;
+            det_apply_initialized_ = true;
+        } else if (tx_seq < det_next_apply_seq_) {
+            // Session-restart detection. Tasks are enqueued in Raft commit
+            // order and popped in FIFO order, so within a single client
+            // session tx_seqs arrive here strictly monotonically. A newly
+            // queued tx_seq below the current head therefore means a new
+            // client/session started a fresh deterministic numbering after a
+            // previous session ran (e.g. the bcdb_init probe uses
+            // detStartSeq=99000000; the subsequent workload restarts at 1, or
+            // back-to-back gateway invocations both start at detStartSeq=1).
+            // Rewind so the new session's requests aren't blocked forever
+            // waiting for a det_next_apply_seq_ they will never reach.
+            det_next_apply_seq_ = tx_seq;
+            det_tx_states_.clear();
+            det_apply_cv_.notify_all();
+        }
     }
     det_tx_states_[tx_seq] = st;
 }
@@ -972,6 +1019,13 @@ void pg_executor::det_finish_apply(uint64_t tx_seq) {
         }
     }
     det_apply_cv_.notify_all();
+}
+
+void pg_executor::notify_task_applied(uint64_t raft_log_idx) {
+    if (raft_log_idx == 0) return;
+    if (on_task_applied_) {
+        on_task_applied_(raft_log_idx);
+    }
 }
 
 void pg_executor::stop() {
@@ -1146,6 +1200,7 @@ std::string pg_executor::exec_sql(PGconn* c, const std::string& sql) {
 }
 
 bool pg_executor::exec_det_block_batch(PGconn* c,
+                                       uint64_t block_id,
                                        const std::vector<task>& tasks,
                                        std::vector<std::string>& out_results) {
     out_results.clear();
@@ -1153,23 +1208,21 @@ bool pg_executor::exec_det_block_batch(PGconn* c,
 
     std::vector<std::pair<std::string, std::string>> txs;
     txs.reserve(tasks.size());
-    uint64_t first_req_num = 0;
 
     for (size_t i = 0; i < tasks.size(); ++i) {
-        uint64_t req_num = 0;
-        if (!parse_req_num(tasks[i].req_id, req_num)) {
-            return false;
-        }
         uint64_t seq = 0;
         std::string raw_sql;
         if (!parse_det_prefixed_sql_parts(tasks[i].sql, &seq, &raw_sql)) {
             return false;
         }
-        if (i == 0) first_req_num = req_num;
-        txs.emplace_back(std::to_string(req_num), std::move(raw_sql));
+        // Use a session-unique key (base + block * 1024 + slot) so that tx_pool
+        // entries from previous server sessions sharing the same PostgreSQL
+        // instance don't cause duplicate-hash crashes in parse_block_with_txs.
+        const std::string key = std::to_string(
+            det_block_tx_key_base_ + block_id * 1024ULL + static_cast<uint64_t>(i));
+        txs.emplace_back(key, std::move(raw_sql));
     }
 
-    const uint64_t block_id = first_req_num;
     const std::string sql = build_bcdb_block_submit_results_sql(block_id, txs);
 
     notice_state* ns = nullptr;
@@ -1216,10 +1269,9 @@ bool pg_executor::exec_det_block_batch(PGconn* c,
     if (!parsed) return false;
 
     out_results.reserve(tasks.size());
-    for (const auto& t : tasks) {
-        uint64_t req_num = 0;
-        if (!parse_req_num(t.req_id, req_num)) return false;
-        const std::string key = std::to_string(req_num);
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        const std::string key = std::to_string(
+            det_block_tx_key_base_ + block_id * 1024ULL + static_cast<uint64_t>(i));
         auto rit = result_by_hash.find(key);
         if (rit == result_by_hash.end()) return false;
         out_results.push_back(rit->second);
@@ -1403,6 +1455,7 @@ void pg_executor::worker_loop() {
         if (det_prefixed_parallel) {
             det_finish_apply(det_tx_seq);
         }
+        notify_task_applied(t.raft_log_idx);
 
         if (!det_raw_compat_serial_turn) {
             if (!wait_for_ordered_emit_turn(t.dispatch_seq)) {
@@ -1548,10 +1601,19 @@ void pg_executor::event_loop() {
 
         // Deterministic BCDB block fast path: batch a full block of parser-mode
         // requests into one SQL call so worker fanout can execute them together.
+        // Guard by queue-front det-prefix check so non-det setup queries that
+        // triggered det_raw_compat_mode_ don't permanently disable this path.
+        {
+            bool front_is_det = false;
+            {
+                std::lock_guard<std::mutex> lk(q_mu_);
+                if (!q_.empty()) front_is_det = is_det_prefixed_sql(q_.front().sql);
+            }
         if (!stop_.load() &&
             db_opt_.db_type == 1 &&
             !det_parallel_workers_ &&
-            !det_raw_compat_mode_ &&
+            det_event_block_fastpath_enabled() &&
+            front_is_det &&
             bcdb_init_done_ &&
             !conns_.empty()) {
             bool any_inflight = false;
@@ -1563,8 +1625,11 @@ void pg_executor::event_loop() {
             }
 
             if (!any_inflight) {
-                const size_t block_cap =
-                    std::max<size_t>(1, static_cast<size_t>(db_opt_.conn_pool_size));
+                // Use the block size that BCDB was initialised with so the
+                // cut boundary matches the server-side block capacity exactly.
+                const size_t block_cap = bcdb_init_done_
+                    ? static_cast<size_t>(bcdb_block_size_)
+                    : std::max<size_t>(1, static_cast<size_t>(db_opt_.conn_pool_size));
                 std::vector<task> det_batch;
                 size_t depth_after_pop = 0;
 
@@ -1580,12 +1645,29 @@ void pg_executor::event_loop() {
                         }
 
                         bool eligible = !candidate.empty();
+                        uint64_t first_req_num = 0;
                         for (size_t i = 0; eligible && i < candidate.size(); ++i) {
                             uint64_t req_num = 0;
                             if (!parse_req_num(candidate[i].req_id, req_num) ||
                                 !is_det_prefixed_sql(candidate[i].sql)) {
                                 eligible = false;
                                 break;
+                            }
+                            if (i == 0) {
+                                first_req_num = req_num;
+                            } else if (req_num != first_req_num + static_cast<uint64_t>(i)) {
+                                eligible = false;
+                                break;
+                            }
+                        }
+
+                        if (eligible && candidate.size() < block_cap) {
+                            const uint64_t now_ns = now_steady_ns();
+                            const uint64_t oldest_enqueue_ns = candidate.front().enqueue_ns;
+                            if (oldest_enqueue_ns != 0 &&
+                                now_ns >= oldest_enqueue_ns &&
+                                (now_ns - oldest_enqueue_ns) < kDetPartialBlockMaxWaitNs) {
+                                eligible = false;
                             }
                         }
 
@@ -1622,7 +1704,8 @@ void pg_executor::event_loop() {
                     }
 
                     std::vector<std::string> det_results;
-                    bool batch_ok = exec_det_block_batch(conns_[0].c, det_batch, det_results);
+                    const uint64_t block_id = det_next_block_id_++;
+                    bool batch_ok = exec_det_block_batch(conns_[0].c, block_id, det_batch, det_results);
                     if (batch_ok) {
                         bool expected = false;
                         if (st_det_block_seen_.compare_exchange_strong(expected, true)) {
@@ -1651,6 +1734,7 @@ void pg_executor::event_loop() {
                     for (size_t i = 0; i < det_batch.size(); ++i) {
                         const task& done_task = det_batch[i];
                         const std::string& out = det_results[i];
+                        notify_task_applied(done_task.raft_log_idx);
                         if (kafka_enabled_) {
                             debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
                             if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
@@ -1665,19 +1749,28 @@ void pg_executor::event_loop() {
                         }
                     }
 
-                    if (kafka_enabled_) {
-                        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - batch_start).count();
-                        if (batch_req_ids.size() >= kKafkaBatchMaxRecords ||
-                            batch_bytes >= kKafkaBatchMaxBytes ||
-                            age_ms >= kKafkaBatchMaxDelayMs) {
-                            flush_batch();
-                        }
-                    }
-                    continue;
-                }
+	                    if (kafka_enabled_) {
+	                        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                            std::chrono::steady_clock::now() - batch_start).count();
+	                        if (batch_req_ids.size() >= kKafkaBatchMaxRecords ||
+	                            batch_bytes >= kKafkaBatchMaxBytes ||
+	                            age_ms >= kKafkaBatchMaxDelayMs) {
+	                            flush_batch();
+	                        }
+	                        bool flush_idle_batch = false;
+	                        if (!batch_req_ids.empty()) {
+	                            std::lock_guard<std::mutex> lk(q_mu_);
+	                            flush_idle_batch = q_.empty() && delayed_.empty();
+	                        }
+	                        if (flush_idle_batch) {
+	                            flush_batch();
+	                        }
+	                    }
+	                    continue;
+	                }
             }
         }
+        } // end front_is_det block
 
         // Assign ready work to idle connections.
         size_t inflight = 0;
@@ -1700,22 +1793,27 @@ void pg_executor::event_loop() {
                         det_raw_compat_mode_ = true;
                     }
                     if (!det_parallel_workers_ &&
-                        !det_raw_compat_mode_ &&
+                        det_event_block_fastpath_enabled() &&
                         db_opt_.db_type == 1 &&
                         bcdb_init_done_ &&
                         is_det_prefixed_sql(front.sql)) {
                         // Deterministic parser-mode throughput path is handled by the
-                        // block submit fast path above. Do not leak these requests
-                        // into the individual async-connection dispatch path.
+                        // block submit fast path above. Always block det-prefixed BCDB
+                        // queries from leaking to the multi-connection async path,
+                        // regardless of det_raw_compat_mode_ — concurrent async
+                        // connections cause non-deterministic snapshot reads.
                         break;
                     }
                     if (det_raw_compat_mode_ && inflight > 0) {
                         // Raw deterministic SQL compatibility mode.
-                        // By default we do NOT force lockstep: the PG-side
-                        // BCDB serial gate (worker.c:bcdb_wait_for_serial_slot)
-                        // already orders writes deterministically. Lockstep is
-                        // retained as an opt-in safety valve for installs that
-                        // lack BCDB det hooks (ARIABC_DET_COMPAT_LOCKSTEP=1).
+                        // For BCDB (db_type==1): always enforce single-connection
+                        // serialization. Concurrent async connections produce
+                        // different per-node MVCC snapshots due to OS-scheduling
+                        // variance, causing divergent results after restore even
+                        // though the BCDB serial gate orders commits correctly.
+                        if (db_opt_.db_type == 1) break;
+                        // For non-BCDB installs lockstep is opt-in via
+                        // ARIABC_DET_COMPAT_LOCKSTEP=1 (serial gate sufficient).
                         static const bool k_compat_lockstep = [] {
                             const char* v = ::getenv("ARIABC_DET_COMPAT_LOCKSTEP");
                             if (!v || !*v) return false;
@@ -2001,6 +2099,7 @@ void pg_executor::event_loop() {
                 if (done_task.exec_begin_ns != 0 && finish_ns >= done_task.exec_begin_ns) {
                     st_exec_ns_.fetch_add(finish_ns - done_task.exec_begin_ns, std::memory_order_relaxed);
                 }
+                notify_task_applied(done_task.raft_log_idx);
 
                 if (kafka_enabled_) {
                     debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);

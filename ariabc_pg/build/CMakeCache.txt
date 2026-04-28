@@ -222,6 +222,9 @@ CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
 //Enable Coverage
 CODE_COVERAGE:BOOL=OFF
 
+//Allow building without librdkafka (disables Kafka result publishing)
+KAFKA_OPTIONAL:BOOL=OFF
+
 //Path to a file.
 LIBPQ_INCLUDE_DIR:PATH=/work/ARIABC/AriaBC/src/interfaces/libpq
 

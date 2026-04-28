@@ -799,6 +799,11 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         {
             cand_id = entry->tx_id;
             SpinLockRelease(partition_lock);
+            /* T3-v2: skip if candidate committed before our snapshot xmin.
+             * bcdb_xid_preceded_snapshot() is conservative: returns false if
+             * snap_xmin is unset, slot is recycled, or xid is invalid. */
+            if (bcdb_xid_preceded_snapshot(cand_id))
+                goto check_done;
 #if SAFEDBG
             ereport(DEBUG3,
                     (errmsg("safeDB tx %d hash %s check write %u failed, winner: %d",
@@ -830,6 +835,9 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         {
             cand_id = entry->tx_id;
             SpinLockRelease(partition_lock);
+            /* T3-v2: same snapshot-based skip for mapB candidates. */
+            if (bcdb_xid_preceded_snapshot(cand_id))
+                goto check_done;
 #if SAFEDBG
             ereport(DEBUG3,
                     (errmsg("safeDB tx %d hash %s check write %u failed, winner: %d",

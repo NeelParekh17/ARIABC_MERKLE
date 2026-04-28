@@ -59,6 +59,7 @@ set(CMAKE_MAKEFILE_PRODUCTS
 set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/ariabc_pg_server.dir/DependInfo.cmake"
   "CMakeFiles/ariabc_pg_gateway.dir/DependInfo.cmake"
+  "CMakeFiles/ariabc_pg_wire_protocol_test.dir/DependInfo.cmake"
   "nuraft-build/CMakeFiles/build_ssl_key.dir/DependInfo.cmake"
   "nuraft-build/CMakeFiles/RAFT_CORE_OBJ.dir/DependInfo.cmake"
   "nuraft-build/CMakeFiles/static_lib.dir/DependInfo.cmake"
