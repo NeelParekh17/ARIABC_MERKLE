@@ -37,6 +37,7 @@ static int  tx_id_counter = 0; // not bcdb
 
 static BCDBShmXact *parse_tx(const char* json);
 static void bcdb_middleware_attach_tx_to_block(BCDBShmXact *tx, BCBlock *block);
+static BCBlock *parse_block_object(cJSON *parsed);
 static BCBlock *parse_block_with_txs(const char *json);
 static void append_hex_encoded(StringInfo out, const char *input);
 static int32 bcdb_select_worker_count(int32 requested);
@@ -331,10 +332,9 @@ error:
     return NULL;
 }
 
-BCBlock *
-parse_block_with_txs(const char *json)
+static BCBlock *
+parse_block_object(cJSON *parsed)
 {
-    cJSON *parsed;
     cJSON *tx_list;
     cJSON *block_id;
     cJSON *tx_json;
@@ -348,12 +348,13 @@ parse_block_with_txs(const char *json)
 
 	// printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
 	//printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
-    parsed = cJSON_Parse(json);
     if (!parsed)
         goto error;
     
 	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
     block_id = cJSON_GetObjectItemCaseSensitive(parsed, "bid");
+    if (!cJSON_IsNumber(block_id))
+        goto error;
     
 	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
     tx_list = cJSON_GetObjectItemCaseSensitive(parsed, "txs");
@@ -366,6 +367,8 @@ parse_block_with_txs(const char *json)
 	printf("ariaMyDbg %s : %s: %d blksz %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz(), getpid());
 #endif
     block->num_tx = cJSON_GetArraySize(tx_list);
+    if (block->num_tx < 0 || block->num_tx > MAX_TX_PER_BLOCK)
+        goto error;
     sentinel = get_block_by_id(1, true);
     Assert(sentinel != NULL);
     tx_base = __sync_fetch_and_add(&sentinel->num_tx_sub, block->num_tx);
@@ -422,6 +425,27 @@ parse_block_with_txs(const char *json)
     //if(blocksize != 0) set_blksz(blocksize);
     //block->blksize = blocksize;
 	//printf("ariaMyDbg %s : %s: %d blksz %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz());
+    return block;
+
+error:
+    print_trace();
+    ereport(FATAL,
+        (errmsg("[ZL] cannot create block in shared memory")));
+    return NULL;
+}
+
+BCBlock *
+parse_block_with_txs(const char *json)
+{
+    cJSON *parsed;
+    BCBlock *block;
+
+    parsed = cJSON_Parse(json);
+    if (!parsed)
+        goto error;
+
+    block = parse_block_object(parsed);
+    cJSON_Delete(parsed);
     return block;
 
 error:
@@ -501,31 +525,83 @@ print_trace();
 char *
 bcdb_middleware_submit_block_results(const char* block_json)
 {
-    BCBlock     *block;
+    cJSON       *parsed;
+    cJSON       *blocks_json;
+    BCBlock    **blocks = NULL;
+    int          num_blocks = 0;
+    int          block_idx = 0;
+    BCBlock     *block = NULL;
     StringInfoData out;
 
-    ++block_meta->global_bmax;
-    block = parse_block_with_txs(block_json);
-    Assert(block != NULL);
-
-    for (int i = 0; i < block->num_tx; ++i)
+    parsed = cJSON_Parse(block_json);
+    if (!parsed)
     {
-        BCDBShmXact *tx = block->txs[i];
-        tx_queue_insert(tx, tx->tx_id);
+        print_trace();
+        ereport(FATAL,
+            (errmsg("[ZL] cannot parse block-submit-results payload")));
     }
+
+    blocks_json = cJSON_GetObjectItemCaseSensitive(parsed, "blocks");
+    if (cJSON_IsArray(blocks_json))
+    {
+        cJSON *block_json_item;
+
+        num_blocks = cJSON_GetArraySize(blocks_json);
+        if (num_blocks <= 0)
+        {
+            cJSON_Delete(parsed);
+            initStringInfo(&out);
+            return out.data;
+        }
+        blocks = (BCBlock **) palloc0(sizeof(BCBlock *) * num_blocks);
+
+        cJSON_ArrayForEach(block_json_item, blocks_json)
+        {
+            ++block_meta->global_bmax;
+            blocks[block_idx] = parse_block_object(block_json_item);
+            Assert(blocks[block_idx] != NULL);
+            block_idx++;
+        }
+    }
+    else
+    {
+        ++block_meta->global_bmax;
+        block = parse_block_object(parsed);
+        Assert(block != NULL);
+        num_blocks = 1;
+        blocks = (BCBlock **) palloc0(sizeof(BCBlock *));
+        blocks[0] = block;
+    }
+
+    for (int b = 0; b < num_blocks; ++b)
+    {
+        block = blocks[b];
+        for (int i = 0; i < block->num_tx; ++i)
+        {
+            BCDBShmXact *tx = block->txs[i];
+            tx_queue_insert(tx, tx->tx_id);
+        }
+    }
+
     initStringInfo(&out);
-    for (int i = 0; i < block->num_tx; ++i)
+    for (int b = 0; b < num_blocks; ++b)
     {
-        BCDBShmXact *tx = block->txs[i];
-        const int mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
+        block = blocks[b];
+        for (int i = 0; i < block->num_tx; ++i)
+        {
+            BCDBShmXact *tx = block->txs[i];
+            const int mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
 
-        bcdb_wait_until_slot_ready((BCTxID) tx->tx_id);
-        appendStringInfoString(&out, tx->hash);
-        appendStringInfoChar(&out, '\t');
-        append_hex_encoded(&out, block->result[mem_txid]);
-        appendStringInfoChar(&out, '\n');
+            bcdb_wait_until_slot_ready((BCTxID) tx->tx_id);
+            appendStringInfoString(&out, tx->hash);
+            appendStringInfoChar(&out, '\t');
+            append_hex_encoded(&out, block->result[mem_txid]);
+            appendStringInfoChar(&out, '\n');
+        }
     }
 
+    pfree(blocks);
+    cJSON_Delete(parsed);
     return out.data;
 }
 
