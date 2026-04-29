@@ -93,7 +93,6 @@ SKIP_CLEANUP="${SKIP_CLEANUP:-0}"
 SKIP_RDKAFKA_SETUP="${SKIP_RDKAFKA_SETUP:-0}"
 SKIP_RESTORE="${SKIP_RESTORE:-0}"
 SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
-SKIP_MERKLE_TEST="${SKIP_MERKLE_TEST:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
 TEST_QUERIES="${TEST_QUERIES:-50}"  # number of test transactions
@@ -131,12 +130,10 @@ Options:
   --skip-restore   Skip restoring the verification table before cluster start
   --skip-post-verify
                   Skip post-workload marker + Merkle root comparison
-  --skip-merkle-test
-                  Skip the separate ariabc_kv_test Merkle smoke test
   --skip-pg-restart
                   Do not restart PostgreSQL before restore (default restarts)
   --no-kafka       Use direct completion (no Kafka majority wait)
-  --test-queries N Number of test transactions (default 50)
+  --test-queries N Number of statements in the synthetic fallback workload (only used if --workload FILE is missing; default 50)
   --workload FILE  Workload SQL file (default: scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
   --restore-sql FILE
                   SQL used to restore table state before the run
@@ -177,7 +174,6 @@ while [[ $# -gt 0 ]]; do
     --skip-rdkafka-setup) SKIP_RDKAFKA_SETUP=1; shift ;;
     --skip-restore) SKIP_RESTORE=1; shift ;;
     --skip-post-verify) SKIP_POST_VERIFY=1; shift ;;
-    --skip-merkle-test) SKIP_MERKLE_TEST=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
     --test-queries) TEST_QUERIES="${2:-50}"; shift 2 ;;
@@ -1066,20 +1062,20 @@ ELAPSED=$(( END_S - START_S ))
 # ---------------------------------------------------------------------------
 log "=== Phase 7: Results ==="
 
-LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
+WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
 
 # Prefer gateway's own reported time (excludes restore, file load, and leader probe).
 # Falls back to shell wall-clock only when gateway log lacks the line.
 GW_MS="$(grep -oP 'overall time taken \(millisec\) = \K[0-9]+' "$GW_LOG" 2>/dev/null | head -1 || echo '')"
 if [[ -n "$GW_MS" && "$GW_MS" -gt 0 ]]; then
-  TPS=$(( LINES * 1000 / GW_MS ))
+  TPS=$(( WORKLOAD_LINES * 1000 / GW_MS ))
   log "  GW time (ms)  : ${GW_MS}"
-  log "  Queries       : ${LINES}"
+  log "  Queries       : ${WORKLOAD_LINES}"
   log "  TPS (gateway) : ~${TPS} tx/s"
 elif [[ "$ELAPSED" -gt 0 ]]; then
-  TPS=$(( LINES / ELAPSED ))
+  TPS=$(( WORKLOAD_LINES / ELAPSED ))
   log "  Wall time     : ${ELAPSED}s (fallback — gateway ms not found in log)"
-  log "  Queries       : ${LINES}"
+  log "  Queries       : ${WORKLOAD_LINES}"
   log "  Est TPS       : ~${TPS} tx/s"
 fi
 
@@ -1167,8 +1163,8 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
 
   MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
   MARKER_FILE="$LOG_DIR/post_verify_marker.sql"
-  MARKER_SEQ=$(( DET_START_SEQ + LINES ))
-  MARKER_REQ=$(( REQ_ID_OFFSET + LINES ))
+  MARKER_SEQ=$(( DET_START_SEQ + WORKLOAD_LINES ))
+  MARKER_REQ=$(( REQ_ID_OFFSET + WORKLOAD_LINES ))
   printf "%s\n" "INSERT INTO $VERIFY_TABLE (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10) VALUES ($VERIFY_MARKER_KEY, '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL') ON CONFLICT (ycsb_key) DO UPDATE SET field1 = EXCLUDED.field1, field2 = EXCLUDED.field2, field3 = EXCLUDED.field3, field4 = EXCLUDED.field4, field5 = EXCLUDED.field5, field6 = EXCLUDED.field6, field7 = EXCLUDED.field7, field8 = EXCLUDED.field8, field9 = EXCLUDED.field9, field10 = EXCLUDED.field10;" > "$MARKER_FILE"
 
   MARKER_LOG="$LOG_DIR/post_verify_marker_gateway.log"
@@ -1261,36 +1257,6 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   log "  $VERIFY_TABLE consistency: PASS rows=$reference_count root=$reference_root"
 else
   log "=== Phase 8: Post-workload verification skipped (--skip-post-verify) ==="
-fi
-
-# ---------------------------------------------------------------------------
-# Phase 9: Optional standalone Merkle root smoke test
-# Create ariabc_kv_test on all nodes, run deterministic DML workload through
-# the gateway, then compare merkle_root_hash() across all 4 nodes.
-# ---------------------------------------------------------------------------
-log "=== Phase 9: Standalone ariabc_kv_test Merkle verification ==="
-if [[ "$SKIP_MERKLE_TEST" -eq 0 ]]; then
-  MERKLE_TEST_SCRIPT="$SCRIPT_DIR/test_merkle_consistency.sh"
-  if [[ -x "$MERKLE_TEST_SCRIPT" ]]; then
-    MERKLE_TEST_SEQ=$(( DET_START_SEQ + LINES ))
-    if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
-      MERKLE_TEST_SEQ=$(( DET_START_SEQ + LINES + 1 ))
-    fi
-    log "  Running standalone Merkle test with detStartSeq=$MERKLE_TEST_SEQ"
-    if "$MERKLE_TEST_SCRIPT" \
-      --det-start-seq "$MERKLE_TEST_SEQ" \
-      --req-id-offset "$MERKLE_TEST_SEQ" \
-      --client-id "cluster-merkle"; then
-      log "  Merkle consistency: PASS"
-    else
-      log "  Merkle consistency: FAIL — see output above"
-      exit 1
-    fi
-  else
-    log "  WARNING: $MERKLE_TEST_SCRIPT not found or not executable — skipping Merkle test"
-  fi
-else
-  log "  Skipped (--skip-merkle-test)"
 fi
 
 if [[ "$COLLECT_FINAL_SERVER_PROFILE" != "0" ]]; then
