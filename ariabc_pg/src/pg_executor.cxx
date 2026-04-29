@@ -73,21 +73,6 @@ bool det_event_block_fastpath_enabled() {
     return enabled;
 }
 
-size_t det_block_pipeline_depth() {
-    static const size_t depth = []() -> size_t {
-        const char* v = std::getenv("ARIABC_DET_BLOCK_PIPELINE");
-        if (!v || !*v) return static_cast<size_t>(1);
-        try {
-            const unsigned long n = std::stoul(trim_copy(v));
-            if (n == 0UL) return static_cast<size_t>(1);
-            return static_cast<size_t>(std::min<unsigned long>(n, 16UL));
-        } catch (...) {
-            return static_cast<size_t>(1);
-        }
-    }();
-    return depth;
-}
-
 uint64_t debug_req_trace_limit() {
     static const uint64_t limit = []() -> uint64_t {
         const char* v = std::getenv("ARIABC_DEBUG_REQ_TRACE_LIMIT");
@@ -320,49 +305,6 @@ std::string build_bcdb_block_submit_results_sql(
     sql.reserve(json.size() * 2 + 48);
     sql.append("SELECT bcdb_block_submit_results('");
     // Inline sql_escape_literal to avoid an extra allocation+copy.
-    for (char ch : json) {
-        if (ch == '\'') sql.append("''", 2);
-        else sql.push_back(ch);
-    }
-    sql.append("');");
-    return sql;
-}
-
-std::string build_bcdb_blocks_submit_results_sql(
-    const std::vector<std::pair<uint64_t, std::vector<std::pair<std::string, std::string>>>>& blocks)
-{
-    size_t est = 64;
-    for (const auto& block : blocks) {
-        est += 32;
-        for (const auto& tx : block.second) {
-            est += 64 + tx.first.size() + 2 * tx.second.size();
-        }
-    }
-
-    std::string json;
-    json.reserve(est);
-    json.append("{\"blocks\":[");
-    for (size_t b = 0; b < blocks.size(); ++b) {
-        if (b) json.push_back(',');
-        json.append("{\"bid\":");
-        json.append(std::to_string(blocks[b].first));
-        json.append(",\"txs\":[");
-        const auto& txs = blocks[b].second;
-        for (size_t i = 0; i < txs.size(); ++i) {
-            if (i) json.push_back(',');
-            json.append("{\"hash\":\"");
-            json_escape_append(json, txs[i].first);
-            json.append("\",\"sql\":\"");
-            json_escape_append(json, txs[i].second);
-            json.append("\"}");
-        }
-        json.append("]}");
-    }
-    json.append("]}");
-
-    std::string sql;
-    sql.reserve(json.size() * 2 + 48);
-    sql.append("SELECT bcdb_block_submit_results('");
     for (char ch : json) {
         if (ch == '\'') sql.append("''", 2);
         else sql.push_back(ch);
@@ -1264,12 +1206,8 @@ bool pg_executor::exec_det_block_batch(PGconn* c,
     out_results.clear();
     if (!c || tasks.empty()) return false;
 
-    const size_t logical_block_size =
-        bcdb_block_size_ > 0 ? static_cast<size_t>(bcdb_block_size_) : tasks.size();
-    const size_t block_count =
-        (tasks.size() + logical_block_size - 1) / logical_block_size;
-    std::vector<std::pair<uint64_t, std::vector<std::pair<std::string, std::string>>>> blocks;
-    blocks.reserve(block_count);
+    std::vector<std::pair<std::string, std::string>> txs;
+    txs.reserve(tasks.size());
 
     for (size_t i = 0; i < tasks.size(); ++i) {
         uint64_t seq = 0;
@@ -1277,27 +1215,15 @@ bool pg_executor::exec_det_block_batch(PGconn* c,
         if (!parse_det_prefixed_sql_parts(tasks[i].sql, &seq, &raw_sql)) {
             return false;
         }
-        const size_t block_offset = i / logical_block_size;
-        const size_t slot = i % logical_block_size;
-        if (slot == 0) {
-            blocks.emplace_back(block_id + static_cast<uint64_t>(block_offset),
-                                std::vector<std::pair<std::string, std::string>>{});
-            blocks.back().second.reserve(
-                std::min(logical_block_size, tasks.size() - i));
-        }
         // Use a session-unique key (base + block * 1024 + slot) so that tx_pool
         // entries from previous server sessions sharing the same PostgreSQL
         // instance don't cause duplicate-hash crashes in parse_block_with_txs.
         const std::string key = std::to_string(
-            det_block_tx_key_base_ +
-            (block_id + static_cast<uint64_t>(block_offset)) * 1024ULL +
-            static_cast<uint64_t>(slot));
-        blocks.back().second.emplace_back(key, std::move(raw_sql));
+            det_block_tx_key_base_ + block_id * 1024ULL + static_cast<uint64_t>(i));
+        txs.emplace_back(key, std::move(raw_sql));
     }
 
-    const std::string sql = blocks.size() == 1
-        ? build_bcdb_block_submit_results_sql(blocks.front().first, blocks.front().second)
-        : build_bcdb_blocks_submit_results_sql(blocks);
+    const std::string sql = build_bcdb_block_submit_results_sql(block_id, txs);
 
     notice_state* ns = nullptr;
     auto it = notice_state_by_conn_.find(c);
@@ -1344,12 +1270,8 @@ bool pg_executor::exec_det_block_batch(PGconn* c,
 
     out_results.reserve(tasks.size());
     for (size_t i = 0; i < tasks.size(); ++i) {
-        const size_t block_offset = i / logical_block_size;
-        const size_t slot = i % logical_block_size;
         const std::string key = std::to_string(
-            det_block_tx_key_base_ +
-            (block_id + static_cast<uint64_t>(block_offset)) * 1024ULL +
-            static_cast<uint64_t>(slot));
+            det_block_tx_key_base_ + block_id * 1024ULL + static_cast<uint64_t>(i));
         auto rit = result_by_hash.find(key);
         if (rit == result_by_hash.end()) return false;
         out_results.push_back(rit->second);
@@ -1553,7 +1475,7 @@ void pg_executor::worker_loop() {
             batch_bytes += t.req_id.size() + result.size() + 32;
             const size_t max_records = (q_depth_after_pop >= 64) ? 128 : kKafkaBatchMaxRecords;
             const size_t max_bytes = (q_depth_after_pop >= 64) ? (256 * 1024) : kKafkaBatchMaxBytes;
-            const int max_delay_ms = kKafkaBatchMaxDelayMs;
+            const int max_delay_ms = (q_depth_after_pop >= 16) ? 0 : kKafkaBatchMaxDelayMs;
             const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - batch_start).count();
             if (batch_req_ids.size() >= max_records ||
@@ -1703,15 +1625,11 @@ void pg_executor::event_loop() {
             }
 
             if (!any_inflight) {
-                // Pull several BCDB-sized blocks at once. exec_det_block_batch()
-                // still cuts them into deterministic server-side blocks, but the
-                // backend can enqueue the next block before waiting on the current
-                // one, removing per-block idle gaps.
-                const size_t logical_block_cap = bcdb_init_done_
+                // Use the block size that BCDB was initialised with so the
+                // cut boundary matches the server-side block capacity exactly.
+                const size_t block_cap = bcdb_init_done_
                     ? static_cast<size_t>(bcdb_block_size_)
                     : std::max<size_t>(1, static_cast<size_t>(db_opt_.conn_pool_size));
-                const size_t block_cap =
-                    std::max<size_t>(1, logical_block_cap) * det_block_pipeline_depth();
                 std::vector<task> det_batch;
                 size_t depth_after_pop = 0;
 
@@ -1786,13 +1704,7 @@ void pg_executor::event_loop() {
                     }
 
                     std::vector<std::string> det_results;
-                    const uint64_t block_id = det_next_block_id_;
-                    const size_t logical_block_size =
-                        logical_block_cap > 0 ? logical_block_cap : det_batch.size();
-                    const size_t emitted_blocks =
-                        (det_batch.size() + logical_block_size - 1) / logical_block_size;
-                    det_next_block_id_ += std::max<uint64_t>(
-                        1ULL, static_cast<uint64_t>(emitted_blocks));
+                    const uint64_t block_id = det_next_block_id_++;
                     bool batch_ok = exec_det_block_batch(conns_[0].c, block_id, det_batch, det_results);
                     if (batch_ok) {
                         bool expected = false;
@@ -1998,7 +1910,7 @@ void pg_executor::event_loop() {
                 std::chrono::steady_clock::now() - batch_start).count();
             const size_t max_records = (backlog >= 64) ? 128 : kKafkaBatchMaxRecords;
             const size_t max_bytes = (backlog >= 64) ? (256 * 1024) : kKafkaBatchMaxBytes;
-            const int max_delay_ms = kKafkaBatchMaxDelayMs;
+            const int max_delay_ms = (backlog >= 16) ? 0 : kKafkaBatchMaxDelayMs;
             if (batch_req_ids.size() >= max_records ||
                 batch_bytes >= max_bytes ||
                 age_ms >= max_delay_ms) {
