@@ -57,8 +57,8 @@ if [[ "$FORCE_REBUILD" != "1" ]] && verify_install "$INSTALL_DIR"; then
   exit 0
 fi
 
-if [[ ! -f "$REPO_ROOT/GNUmakefile" ]]; then
-  echo "ERROR: GNUmakefile not found under repo root: $REPO_ROOT" >&2
+if [[ ! -x "$REPO_ROOT/configure" ]]; then
+  echo "ERROR: configure not found or not executable under repo root: $REPO_ROOT" >&2
   exit 1
 fi
 

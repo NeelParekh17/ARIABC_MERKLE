@@ -808,45 +808,64 @@ void pg_executor::enqueue(const std::string& req_id,
                           const std::string& sql,
                           int leader_node_hint,
                           uint64_t raft_log_idx) {
+    std::vector<std::string> req_ids;
+    std::vector<std::string> sqls;
+    req_ids.push_back(req_id);
+    sqls.push_back(sql);
+    enqueue_batch(req_ids, sqls, leader_node_hint, raft_log_idx);
+}
+
+void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
+                                const std::vector<std::string>& sqls,
+                                int leader_node_hint,
+                                uint64_t raft_log_idx) {
     if (stop_.load()) return;
-    ensure_bcdb_initialized_for_sql(sql);
-    st_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    if (req_ids.empty() || req_ids.size() != sqls.size()) return;
+
+    for (const std::string& sql : sqls) {
+        ensure_bcdb_initialized_for_sql(sql);
+    }
+
+    st_enqueued_.fetch_add(static_cast<uint64_t>(req_ids.size()), std::memory_order_relaxed);
     {
         const uint64_t now_ns = now_steady_ns();
         std::lock_guard<std::mutex> lk(q_mu_);
-        task t;
-        t.req_id = req_id;
-        t.sql = sql;
-        t.leader_node_hint = leader_node_hint;
-        t.raft_log_idx = raft_log_idx;
-        t.enqueue_ns = now_ns;
-        t.exec_begin_ns = 0;
-        t.attempt = 0;
-        q_.push(std::move(t));
-        const size_t depth = q_.size();
-        st_queue_depth_cur_.store(static_cast<uint64_t>(depth), std::memory_order_relaxed);
-        st_queue_depth_samples_.fetch_add(1, std::memory_order_relaxed);
-        st_queue_depth_sum_.fetch_add(static_cast<uint64_t>(depth), std::memory_order_relaxed);
-        if (depth <= 16) {
-            st_queue_depth_bin_le_16_.fetch_add(1, std::memory_order_relaxed);
-        } else if (depth <= 64) {
-            st_queue_depth_bin_17_64_.fetch_add(1, std::memory_order_relaxed);
-        } else if (depth <= 256) {
-            st_queue_depth_bin_65_256_.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            st_queue_depth_bin_gt_256_.fetch_add(1, std::memory_order_relaxed);
-        }
-        uint64_t cur_max = st_queue_depth_max_.load(std::memory_order_relaxed);
-        while (depth > cur_max &&
-               !st_queue_depth_max_.compare_exchange_weak(
-                   cur_max,
-                   static_cast<uint64_t>(depth),
-                   std::memory_order_relaxed,
-                   std::memory_order_relaxed)) {
+        for (size_t i = 0; i < req_ids.size(); ++i) {
+            task t;
+            t.req_id = req_ids[i];
+            t.sql = sqls[i];
+            t.leader_node_hint = leader_node_hint;
+            t.raft_log_idx = raft_log_idx;
+            t.enqueue_ns = now_ns;
+            t.exec_begin_ns = 0;
+            t.attempt = 0;
+            q_.push(std::move(t));
+
+            const size_t depth = q_.size();
+            st_queue_depth_cur_.store(static_cast<uint64_t>(depth), std::memory_order_relaxed);
+            st_queue_depth_samples_.fetch_add(1, std::memory_order_relaxed);
+            st_queue_depth_sum_.fetch_add(static_cast<uint64_t>(depth), std::memory_order_relaxed);
+            if (depth <= 16) {
+                st_queue_depth_bin_le_16_.fetch_add(1, std::memory_order_relaxed);
+            } else if (depth <= 64) {
+                st_queue_depth_bin_17_64_.fetch_add(1, std::memory_order_relaxed);
+            } else if (depth <= 256) {
+                st_queue_depth_bin_65_256_.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                st_queue_depth_bin_gt_256_.fetch_add(1, std::memory_order_relaxed);
+            }
+            uint64_t cur_max = st_queue_depth_max_.load(std::memory_order_relaxed);
+            while (depth > cur_max &&
+                   !st_queue_depth_max_.compare_exchange_weak(
+                       cur_max,
+                       static_cast<uint64_t>(depth),
+                       std::memory_order_relaxed,
+                       std::memory_order_relaxed)) {
+            }
         }
         const size_t delayed = delayed_.size();
         const size_t inflight = static_cast<size_t>(st_inflight_cur_.load(std::memory_order_relaxed));
-        const size_t queued = depth + delayed;
+        const size_t queued = q_.size() + delayed;
         const size_t backlog = queued + inflight;
         st_backlog_cur_.store(static_cast<uint64_t>(backlog), std::memory_order_relaxed);
         st_delayed_cur_.store(static_cast<uint64_t>(delayed), std::memory_order_relaxed);
@@ -911,6 +930,16 @@ pg_executor_stats pg_executor::stats() const {
     out.queue_overloaded = queue_overloaded_.load(std::memory_order_relaxed) ? 1 : 0;
     out.bcdb_init_enabled = bcdb_init_done_ ? 1 : 0;
     out.bcdb_block_size = bcdb_block_size_;
+    out.det_block_batches = st_det_block_batches_.load(std::memory_order_relaxed);
+    out.det_block_items = st_det_block_items_.load(std::memory_order_relaxed);
+    out.det_block_min = st_det_block_min_.load(std::memory_order_relaxed);
+    out.det_block_max = st_det_block_max_.load(std::memory_order_relaxed);
+    out.det_block_bin_1 = st_det_block_bin_1_.load(std::memory_order_relaxed);
+    out.det_block_bin_2_15 = st_det_block_bin_2_15_.load(std::memory_order_relaxed);
+    out.det_block_bin_16_63 = st_det_block_bin_16_63_.load(std::memory_order_relaxed);
+    out.det_block_bin_64_127 = st_det_block_bin_64_127_.load(std::memory_order_relaxed);
+    out.det_block_bin_128_plus = st_det_block_bin_128_plus_.load(std::memory_order_relaxed);
+    out.det_block_fallbacks = st_det_block_fallbacks_.load(std::memory_order_relaxed);
     return out;
 }
 
@@ -1025,6 +1054,41 @@ void pg_executor::notify_task_applied(uint64_t raft_log_idx) {
     if (raft_log_idx == 0) return;
     if (on_task_applied_) {
         on_task_applied_(raft_log_idx);
+    }
+}
+
+void pg_executor::record_det_block_batch(size_t size, bool fallback) {
+    if (size == 0) return;
+
+    const uint64_t n = static_cast<uint64_t>(size);
+    st_det_block_batches_.fetch_add(1, std::memory_order_relaxed);
+    st_det_block_items_.fetch_add(n, std::memory_order_relaxed);
+    if (fallback) {
+        st_det_block_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    uint64_t cur_min = st_det_block_min_.load(std::memory_order_relaxed);
+    while ((cur_min == 0 || n < cur_min) &&
+           !st_det_block_min_.compare_exchange_weak(
+               cur_min, n, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+
+    uint64_t cur_max = st_det_block_max_.load(std::memory_order_relaxed);
+    while (n > cur_max &&
+           !st_det_block_max_.compare_exchange_weak(
+               cur_max, n, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+
+    if (n == 1) {
+        st_det_block_bin_1_.fetch_add(1, std::memory_order_relaxed);
+    } else if (n < 16) {
+        st_det_block_bin_2_15_.fetch_add(1, std::memory_order_relaxed);
+    } else if (n < 64) {
+        st_det_block_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+    } else if (n < 128) {
+        st_det_block_bin_64_127_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        st_det_block_bin_128_plus_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -1706,6 +1770,7 @@ void pg_executor::event_loop() {
                     std::vector<std::string> det_results;
                     const uint64_t block_id = det_next_block_id_++;
                     bool batch_ok = exec_det_block_batch(conns_[0].c, block_id, det_batch, det_results);
+                    record_det_block_batch(det_batch.size(), !batch_ok);
                     if (batch_ok) {
                         bool expected = false;
                         if (st_det_block_seen_.compare_exchange_strong(expected, true)) {
