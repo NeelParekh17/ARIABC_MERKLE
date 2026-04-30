@@ -281,16 +281,21 @@ collect_cluster_logs() {
     user="${NODE_USERS[$idx]}"
     REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
     REMOTE_NURAFT_LOG="/home/neel/ariabc_pg_srv${id}.log"
+    REMOTE_PG_LOG="$REMOTE_REPO_ROOT/server.log"
     if [[ "$idx" -eq 2 ]]; then
       sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
         "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
       sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
         "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
+      sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+        "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
     else
       rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
         "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
       rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
         "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
+      rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
+        "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
     fi
   done
 }
@@ -1089,12 +1094,14 @@ collect_cluster_logs "  Collecting server logs from all nodes..."
 log ""
 log "=== Cluster logs ==="
 log "  Server stdout : $LOG_DIR/server_node*.log"
+log "  Postgres logs  : $LOG_DIR/postgres_node*.log"
 log "  NuRaft logs   : $LOG_DIR/nuraft_node*.log"
 log "  Gateway log   : $GW_LOG"
 log ""
 log "=== Quick diagnostics ==="
 log "  Raft leader      : grep -i 'leader' $LOG_DIR/nuraft_node*.log | grep 'my id'"
 log "  BCDB init status : grep 'bcdb_init' $LOG_DIR/server_node*.log"
+log "  BCDB block profile: grep 'PROFILE_BCDB_BLOCK' $LOG_DIR/postgres_node*.log"
 log "  Divergences      : grep 'divergence' $GW_LOG"
 log ""
 
@@ -1274,6 +1281,7 @@ if [[ "$COLLECT_FINAL_SERVER_PROFILE" != "0" ]]; then
   sleep 2
   collect_cluster_logs "  Collecting final server logs with PROFILE_SERVER lines..."
   log "  Server profiles: grep 'PROFILE_SERVER' $LOG_DIR/server_node*.log"
+  log "  BCDB profiles: grep 'PROFILE_BCDB_BLOCK' $LOG_DIR/postgres_node*.log"
 fi
 
 log "=== 4-node cluster test complete ==="

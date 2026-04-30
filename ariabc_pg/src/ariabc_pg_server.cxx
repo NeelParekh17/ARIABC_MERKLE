@@ -693,6 +693,20 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " queue_overload_exit=" << exec.queue_overload_exit
         << " bcdb_init_enabled=" << exec.bcdb_init_enabled
         << " bcdb_block_size=" << exec.bcdb_block_size
+        << " det_block_batches=" << exec.det_block_batches
+        << " det_block_items=" << exec.det_block_items
+        << " det_block_avg="
+        << ((exec.det_block_batches > 0)
+                ? (static_cast<double>(exec.det_block_items) / static_cast<double>(exec.det_block_batches))
+                : 0.0)
+        << " det_block_min=" << exec.det_block_min
+        << " det_block_max=" << exec.det_block_max
+        << " det_block_bin_1=" << exec.det_block_bin_1
+        << " det_block_bin_2_15=" << exec.det_block_bin_2_15
+        << " det_block_bin_16_63=" << exec.det_block_bin_16_63
+        << " det_block_bin_64_127=" << exec.det_block_bin_64_127
+        << " det_block_bin_128_plus=" << exec.det_block_bin_128_plus
+        << " det_block_fallbacks=" << exec.det_block_fallbacks
         << " conn_wait_ms=" << (exec.conn_acquire_wait_ns / 1000000.0)
         << " kafka_flush_calls=" << exec.kafka_flush_calls
         << " kafka_payload_kb=" << (exec.kafka_payload_bytes / 1024.0)

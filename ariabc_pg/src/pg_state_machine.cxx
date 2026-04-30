@@ -101,12 +101,18 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit(const nuraft::ulong log_idx
         debug_trace_batch_commit(batch, log_idx);
     }
     register_result_batch(static_cast<uint64_t>(log_idx), batch.items.size());
-    for (size_t i = 0; i < batch.items.size(); ++i) {
-        executor_.enqueue(batch.items[i].req_id,
-                          batch.items[i].sql,
-                          batch.leader_node_hint,
-                          static_cast<uint64_t>(log_idx));
+    std::vector<std::string> req_ids;
+    std::vector<std::string> sqls;
+    req_ids.reserve(batch.items.size());
+    sqls.reserve(batch.items.size());
+    for (const auto& item : batch.items) {
+        req_ids.push_back(item.req_id);
+        sqls.push_back(item.sql);
     }
+    executor_.enqueue_batch(req_ids,
+                            sqls,
+                            batch.leader_node_hint,
+                            static_cast<uint64_t>(log_idx));
     last_committed_idx_ = log_idx;
 
     // ACK: {req_id, log_idx}

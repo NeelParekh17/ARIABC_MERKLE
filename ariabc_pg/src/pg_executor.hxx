@@ -65,6 +65,16 @@ struct pg_executor_stats {
     int queue_overloaded = 0;
     int bcdb_init_enabled = 0;
     int bcdb_block_size = 0;
+    uint64_t det_block_batches = 0;
+    uint64_t det_block_items = 0;
+    uint64_t det_block_min = 0;
+    uint64_t det_block_max = 0;
+    uint64_t det_block_bin_1 = 0;
+    uint64_t det_block_bin_2_15 = 0;
+    uint64_t det_block_bin_16_63 = 0;
+    uint64_t det_block_bin_64_127 = 0;
+    uint64_t det_block_bin_128_plus = 0;
+    uint64_t det_block_fallbacks = 0;
 };
 
 struct db_options {
@@ -109,6 +119,10 @@ public:
                  const std::string& sql,
                  int leader_node_hint,
                  uint64_t raft_log_idx);
+    void enqueue_batch(const std::vector<std::string>& req_ids,
+                       const std::vector<std::string>& sqls,
+                       int leader_node_hint,
+                       uint64_t raft_log_idx);
 
     pg_executor_stats stats() const;
 
@@ -163,6 +177,7 @@ private:
     bool det_wait_for_apply_turn(uint64_t tx_seq);
     void det_finish_apply(uint64_t tx_seq);
     void notify_task_applied(uint64_t raft_log_idx);
+    void record_det_block_batch(size_t size, bool fallback);
     bool wait_for_ordered_emit_turn(uint64_t dispatch_seq);
     void finish_ordered_emit(uint64_t dispatch_seq);
 
@@ -264,6 +279,16 @@ private:
     std::atomic<uint64_t> st_queue_depth_bin_gt_256_{0};
     std::atomic<uint64_t> st_queue_overload_enter_{0};
     std::atomic<uint64_t> st_queue_overload_exit_{0};
+    std::atomic<uint64_t> st_det_block_batches_{0};
+    std::atomic<uint64_t> st_det_block_items_{0};
+    std::atomic<uint64_t> st_det_block_min_{0};
+    std::atomic<uint64_t> st_det_block_max_{0};
+    std::atomic<uint64_t> st_det_block_bin_1_{0};
+    std::atomic<uint64_t> st_det_block_bin_2_15_{0};
+    std::atomic<uint64_t> st_det_block_bin_16_63_{0};
+    std::atomic<uint64_t> st_det_block_bin_64_127_{0};
+    std::atomic<uint64_t> st_det_block_bin_128_plus_{0};
+    std::atomic<uint64_t> st_det_block_fallbacks_{0};
     std::atomic<uint64_t> st_queue_depth_cur_{0};
     std::atomic<bool> queue_overloaded_{false};
     std::mutex admission_mu_;

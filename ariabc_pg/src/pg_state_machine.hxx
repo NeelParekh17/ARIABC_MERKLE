@@ -36,12 +36,15 @@ public:
         if (items.empty()) return;
         const uint64_t last_seq = first_seq + static_cast<uint64_t>(items.size() - 1);
         register_result_batch(last_seq, items.size());
-        for (size_t i = 0; i < items.size(); ++i) {
-            executor_.enqueue(items[i].req_id,
-                              items[i].sql,
-                              -1,
-                              last_seq);
+        std::vector<std::string> req_ids;
+        std::vector<std::string> sqls;
+        req_ids.reserve(items.size());
+        sqls.reserve(items.size());
+        for (const auto& item : items) {
+            req_ids.push_back(item.req_id);
+            sqls.push_back(item.sql);
         }
+        executor_.enqueue_batch(req_ids, sqls, -1, last_seq);
         last_committed_idx_.store(last_seq, std::memory_order_relaxed);
     }
 
