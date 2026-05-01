@@ -19,6 +19,7 @@ extern PGDLLIMPORT bool                bcdb_dt_conflict_tracking;
 extern PGDLLIMPORT int32               bcdb_serial_gate_mode;
 extern PGDLLIMPORT int32               bcdb_dt_hashtab_switch_threshold;
 extern PGDLLIMPORT int32               bcdb_result_ring_slots;
+extern PGDLLIMPORT bool                bcdb_advance_commit_watermark;
 extern PGDLLIMPORT char                *bcdb_client_public_key;
 extern PGDLLIMPORT bool                bcdb_enforce_signatures;
 

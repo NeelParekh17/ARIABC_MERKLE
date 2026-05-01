@@ -150,6 +150,9 @@ create_block_pool(void)
                    &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE);
 }
 
+/*
+ * reset the block entry for block 1, which holds global counters and state for the current block.
+ */
 void
 bcdb_reset_block_pool_state(void)
 {
@@ -288,6 +291,19 @@ BCTxID get_blksz()
     return blk->blksize;
 }
 
+/*
+ * bcdb_get_result_ring_slots / bcdb_get_runtime_result_ring_slots
+ *
+ * Accessors for the number of slots in the block result ring buffer,
+ * which is currently fixed at compile time (BCDB_RESULT_RING_CAPACITY)
+ * but may be made configurable in the future.
+ *
+ * The runtime accessor enforces a minimum size of 2x the worker count
+ * to ensure that all workers can publish without blocking on a predecessor
+ * (see advance_last_committed_txid).  It is called by the worker during
+ * init and must be safe to call before the sentinel block entry is created,
+ * so it falls back to the compile-time default if block 1 is not yet available.
+ */
 int
 bcdb_get_result_ring_slots(void)
 {

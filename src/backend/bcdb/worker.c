@@ -1353,6 +1353,9 @@ get_write_set(BCDBShmXact *tx, Snapshot snapshot) {
             (errmsg("[BCDB_FLOW] portal_run_exit pid=%d txid=%d xid=%u completion=%s",
                 getpid(), (int) tx->tx_id, (unsigned int) tx->xid,
                 completionTag)));
+	if (receiver)
+		receiver->rDestroy(receiver);
+	receiver = NULL;
     PTRACE_END(BCDB_PHASE_PORTAL_RUN);
     PTRACE_BEGIN(BCDB_PHASE_PARSE_PLAN);  /* continue timing any post-run setup */
 
@@ -1411,7 +1414,6 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 {
     BCBlock     *block = NULL;
     Snapshot     snapshot;
-    ResourceOwner old_owner;
 
     int latest_tx_id = 0;
     int rw_conflicts = 1;
@@ -1537,7 +1539,6 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
           printf("safeDbg pid %d %s : %s: %d \n",
                   getpid(), __FILE__, __FUNCTION__, __LINE__ );
 #endif
-		  old_owner = CurrentResourceOwner;
 		  snapshot = GetTransactionSnapshot();	 // get snapshot
 		  activeTx->snap_xmin = snapshot->xmin;  /* T3-v2: save for XID-based conflict skip */
 		  tx->sxact = ShareSerializableXact();
@@ -1549,16 +1550,18 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		  printf("safeDbg pid %d %s : %s: %d \n",
 			  getpid(), __FILE__, __FUNCTION__, __LINE__ );
 #endif
-		  CurrentResourceOwner = activeTx->portal->resowner;
-		  if (tx->queryDesc != NULL)
-		  {
-			  ExecutorFinish(tx->queryDesc);
-			  ExecutorEnd(tx->queryDesc);
-			  FreeQueryDesc(tx->queryDesc);
-			  tx->queryDesc = NULL;
-		  }
-		  CurrentResourceOwner = old_owner;
-		  hold_portal_snapshot = true;
+          /*
+           * Drop the unnamed portal immediately after PortalRun completes.
+           * This ensures the executor is shut down and releases buffer pins and
+           * TupleDesc refs before commit-time ResourceOwnerRelease, avoiding leak
+           * warnings in server.log.
+           */
+          if (activeTx->portal != NULL)
+          {
+              PortalDrop(activeTx->portal, false);
+              activeTx->portal = NULL;
+          }
+          hold_portal_snapshot = false;
 #if SAFEDBG1
 		  printf("safeDbg pid %d %s : %s: %d \n",
 			  getpid(), __FILE__, __FUNCTION__, __LINE__ );
@@ -1793,38 +1796,15 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
       int mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
 
-      /* Fix: Silently release portal resources before PortalDrop to avoid
-       * leak warnings. ResourceOwnerRelease with isCommit=false releases
-       * remaining buffer pins and TupleDesc refs. */
-      if(hold_portal_snapshot) {
-	          if (activeTx->portal->resowner) {
-	              ResourceOwnerRelease(activeTx->portal->resowner,
-	                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
-	              ResourceOwnerRelease(activeTx->portal->resowner,
-	                                   RESOURCE_RELEASE_LOCKS, false, false);
-	              ResourceOwnerRelease(activeTx->portal->resowner,
-	                                   RESOURCE_RELEASE_AFTER_LOCKS, false, false);
-	              ResourceOwnerDelete(activeTx->portal->resowner);
-	              activeTx->portal->resowner = NULL;
-	          }
-		  PortalDrop(activeTx->portal, false);
-		  activeTx->portal = NULL;
-	          hold_portal_snapshot = false;
-	      }
-      /* Release TopTransactionResourceOwner's direct resources.
-       * CRITICAL: isTopLevel (4th param) MUST be true since this is a
-       * top-level transaction. Using false triggers Assert(owner->parent != NULL)
-       * at resowner.c:582 during RESOURCE_RELEASE_LOCKS, because it tries
-       * retail lock release on child owners expecting subtransaction semantics.
-       * Standard PG always uses isTopLevel=true for TopTransactionResourceOwner
-       * (see CommitTransaction/AbortTransaction in xact.c). */
+      /* Portal was dropped right after PortalRun; keep this as a safety net. */
+      if (hold_portal_snapshot && activeTx && activeTx->portal)
+      {
+          PortalDrop(activeTx->portal, false);
+          activeTx->portal = NULL;
+          hold_portal_snapshot = false;
+      }
+
       PTRACE_BEGIN(BCDB_PHASE_FINISH);
-      ResourceOwnerRelease(TopTransactionResourceOwner,
-                           RESOURCE_RELEASE_BEFORE_LOCKS, false, true);
-      ResourceOwnerRelease(TopTransactionResourceOwner,
-                           RESOURCE_RELEASE_LOCKS, false, true);
-      ResourceOwnerRelease(TopTransactionResourceOwner,
-                           RESOURCE_RELEASE_AFTER_LOCKS, false, true);
       finish_xact_command();
 
     memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
@@ -1881,7 +1861,12 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
 	      {
 	          uint64 finish_publish_start = bcdb_ptrace_timer_start();
-	          advance_last_committed_txid(tx);
+	          if (bcdb_advance_commit_watermark)
+	              advance_last_committed_txid(tx);
+	          else {
+	              bcdb_wait_for_prev_committed(tx);
+	              set_last_committed_txid(tx);
+	          }
 	          bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_PUBLISH_US,
 	                                 finish_publish_start);
 	      }
@@ -1973,7 +1958,12 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                                             edata != NULL
                                                 ? unpack_sql_state(edata->sqlerrcode)
                                                 : "XX000");
-                  advance_last_committed_txid(tx);
+                  if (bcdb_advance_commit_watermark)
+                      advance_last_committed_txid(tx);
+                  else {
+                      bcdb_wait_for_prev_committed(tx);
+                      set_last_committed_txid(tx);
+                  }
                   {
                       BCBlock *committed_block = get_block_by_id(tx->block_id_committed, false);
 
@@ -1992,23 +1982,10 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                   }
                   condSig = 1;
               }
-		      if (hold_portal_snapshot && activeTx && activeTx->portal)
-		      {
-		          if (activeTx->portal->resowner)
-		          {
-	              ResourceOwnerRelease(activeTx->portal->resowner,
-	                                   RESOURCE_RELEASE_BEFORE_LOCKS, false, false);
-	              ResourceOwnerRelease(activeTx->portal->resowner,
-	                                   RESOURCE_RELEASE_LOCKS, false, false);
-	              ResourceOwnerRelease(activeTx->portal->resowner,
-	                                   RESOURCE_RELEASE_AFTER_LOCKS, false, false);
-	              ResourceOwnerDelete(activeTx->portal->resowner);
-	              activeTx->portal->resowner = NULL;
-	          }
-	          PortalDrop(activeTx->portal, false);
-		          activeTx->portal = NULL;
-		          hold_portal_snapshot = false;
-		      }
+              /* Let AbortCurrentTransaction() perform portal/resource-owner cleanup. */
+              hold_portal_snapshot = false;
+              if (activeTx)
+                  activeTx->portal = NULL;
 
           bcdb_drain_optim_write_list(activeTx);
 
