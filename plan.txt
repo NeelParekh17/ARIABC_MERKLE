@@ -1,8 +1,165 @@
-Add Kafka (multi-node, pre-serialized input)
-Now bring in multiple replicas but feed them a pre-serialized transaction log (bypass Raft for now). Kafka carries results back.
-Correctness check:
+Here is a clean issue you can give to Claude Code.
 
-All replicas must return the same result hash for every transaction. Feed a compareStates manually and confirm Merkle roots match across all replicas.
-Deliberately corrupt one replica's row, run compareStates, verify the divergence is detected.
+---
 
-Performance check: throughput will drop compared to single node (Kafka messaging overhead). This is expected. The number you get here is your Kafka-only overhead baseline.
+# Issue: Prevent result-ring overwrite from losing unread transaction results
+
+## Background
+
+BCDB stores transaction results in a fixed-size shared-memory ring inside `BCBlock`:
+
+```c
+result[BCDB_RESULT_RING_CAPACITY][1024]
+result_committed_txid[BCDB_RESULT_RING_CAPACITY]
+result_commit_xid[BCDB_RESULT_RING_CAPACITY]
+```
+
+A transaction result is written at:
+
+```c
+slot = tx_id % bcdb_get_runtime_result_ring_slots();
+```
+
+`result_committed_txid[slot]` is used as a marker to verify that the result currently stored in `result[slot]` belongs to the expected `tx_id`.
+
+This prevents middleware from reading a wrong result after slot reuse, but it does **not** prevent the old result from being overwritten before middleware reads it. The current sizing logic only ensures the runtime slot count is at least `2 * workers`, capped by `BCDB_RESULT_RING_CAPACITY`. That reduces risk but does not provide a hard correctness guarantee if middleware lags behind producers. The relevant result-ring sizing and marker logic lives in `shm_block.c`. 
+
+---
+
+# Problem
+
+If the ring is too small or middleware is slow, this can happen:
+
+```text
+tx 0 -> slot 0
+tx 4 -> slot 0
+```
+
+Timeline:
+
+```text
+tx 0 commits:
+  result[0] = tx0 result
+  result_committed_txid[0] = 0
+
+middleware has not read tx0 yet
+
+tx 4 commits:
+  result[0] = tx4 result
+  result_committed_txid[0] = 4
+
+middleware tries to read tx0:
+  result_committed_txid[0] != 0
+```
+
+The marker prevents returning tx4’s result as tx0’s result, which is good.
+
+But tx0’s result is already lost.
+
+So the system currently has **stale/wrong-read detection**, but not **overwrite prevention**.
+
+---
+
+# Desired behavior
+
+Before a worker writes to a result-ring slot, it should ensure that overwriting that slot is safe.
+
+A slot should be safe to reuse only if the previous transaction result in that slot is no longer needed by middleware.
+
+At minimum, the code should detect unsafe overwrite and log/error instead of silently replacing an unread result.
+
+Better: implement backpressure so workers wait until the slot becomes reusable.
+
+---
+
+# Suggested implementation options
+
+## Option A: Add per-slot consumption markers
+
+Add another array to `BCBlock`:
+
+```c
+int32 volatile result_consumed_txid[BCDB_RESULT_RING_CAPACITY];
+```
+
+Meaning:
+
+```text
+result_committed_txid[slot]
+  = latest tx_id published into this slot
+
+result_consumed_txid[slot]
+  = latest tx_id read/consumed by middleware from this slot
+```
+
+Initialize it in `bcdb_reset_block_entry()`:
+
+```c
+block->result_consumed_txid[i] = -1;
+```
+
+When middleware successfully reads a result for `tx_id`, it marks:
+
+```c
+__atomic_store_n(&block->result_consumed_txid[slot],
+                 tx_id,
+                 __ATOMIC_RELEASE);
+```
+
+Before worker writes a new result into a slot, it checks the old occupant:
+
+```c
+BCTxID old_txid = __atomic_load_n(&block->result_committed_txid[slot],
+                                  __ATOMIC_ACQUIRE);
+
+if (old_txid >= 0 && old_txid != tx_id) {
+    BCTxID consumed = __atomic_load_n(&block->result_consumed_txid[slot],
+                                      __ATOMIC_ACQUIRE);
+
+    if (consumed != old_txid) {
+        // unsafe overwrite
+        wait / backpressure / ERROR depending on policy
+    }
+}
+```
+
+This gives a real correctness guard.
+
+---
+
+## Option B: Use global safe-to-overwrite watermark
+
+Instead of per-slot consumed markers, maintain a global value:
+
+```c
+int32 volatile result_consumed_watermark;
+```
+
+Meaning:
+
+```text
+All results <= result_consumed_watermark have been read by middleware.
+```
+
+Before writing `tx_id` into `slot`, compute the previous possible occupant:
+
+```text
+previous_txid = tx_id - runtime_slots
+```
+
+Then check:
+
+```c
+if (previous_txid >= 0 &&
+    previous_txid > result_consumed_watermark)
+{
+    // previous result may not have been consumed yet
+    wait or error
+}
+```
+
+This is simpler and cheaper than per-slot markers, but only works well if middleware reads results in tx_id order.
+
+Since the middleware usually assembles block results in tx order, this may be enough.
+
+---

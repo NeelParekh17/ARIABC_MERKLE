@@ -965,6 +965,16 @@ static struct config_bool ConfigureNamesBool[] =
 			NULL, NULL, NULL
 		},
 		{
+			{"bcdb_advance_commit_watermark", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+				gettext_noop("Use non-blocking CAS watermark advance on deterministic commit."),
+				gettext_noop("On: advance_last_committed_txid (lock-free CAS prefix-scan). "
+							 "Off: legacy bcdb_wait_for_prev_committed + set_last_committed_txid (blocking).")
+			},
+			&bcdb_advance_commit_watermark,
+			true,
+			NULL, NULL, NULL
+		},
+		{
 			{"enable_seqscan", PGC_USERSET, QUERY_TUNING_METHOD,
 				gettext_noop("Enables the planner's use of sequential-scan plans."),
 			NULL,
