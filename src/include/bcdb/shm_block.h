@@ -79,6 +79,27 @@ typedef struct
      * Initialized to InvalidTransactionId (0). Must remain LAST in BCBlock.
      */
     TransactionId volatile result_commit_xid[BCDB_RESULT_RING_CAPACITY];
+    /*
+     * Per-slot consumed markers for result-ring overwrite protection.
+     * result_consumed_txid[slot] is set to tx_id by middleware (and
+     * self-marked by the worker in direct mode) after the result is read.
+     * Workers spin on this before overwriting a slot whose previous occupant
+     * has not yet been consumed.  Initialized to -1.
+     * Must remain LAST in BCBlock (CV-layout hazard).
+     */
+    int32 volatile    result_consumed_txid[BCDB_RESULT_RING_CAPACITY];
+    /*
+     * Publish-gate readiness markers.
+     *
+     * A slot contains tx_id when that deterministic transaction no longer
+     * needs to block later transactions at the write-set publish gate. Writers
+     * set this after conflict_checkDT() + publish_ws_tableDT(); no-write
+     * transactions may set it as soon as their write set is known empty.
+     *
+     * This array is keyed by tx_id % MAX_TX_PER_BLOCK rather than the result
+     * ring size because the submit window can be larger than the result ring.
+     */
+    int32 volatile    published_ready_txid[MAX_TX_PER_BLOCK];
 } BCBlock;
 
 typedef struct
@@ -120,6 +141,7 @@ extern void     advance_last_committed_txid(BCDBShmXact *tx);
 extern BCBlock *bcdb_get_block1(void);
 
 extern void     set_published_max_txid(BCDBShmXact *tx);
+extern void     mark_published_ready_txid(BCDBShmXact *tx);
 extern BCTxID   get_published_max_txid(BCDBShmXact *tx);
 
 extern void     set_blksz(int num);

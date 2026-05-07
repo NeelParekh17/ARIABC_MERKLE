@@ -16,7 +16,8 @@
 #   - utkarsh port 8000 is taken by system HP printer snap service.
 #     Node 4 uses clientPort=8001 instead.
 #   - Use `fuser -k 9000/tcp` to kill servers — pkill -f/-x self-kills the SSH session.
-#   - postgres bcdb_worker_count is driven by --pool-size and must match --dbConnPoolSize.
+#   - By default postgres bcdb_worker_count follows --pool-size. For profiling,
+#     --bcdb-decouple-workers can keep 256-tx blocks while using fewer worker queues.
 #   - utkarsh system clock is stuck in March 2026 (hardware issue) — functionally OK.
 #
 # Phases:
@@ -59,7 +60,8 @@ RAFT_PORT=9000
 DB_PORT=5438
 DB_USER=postgres
 DB_NAME=postgres
-DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Best verified 4-node majority point; must match bcdb_worker_count
+DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Gateway dbConnPoolSize and bcdb_init block size
+BCDB_WORKER_COUNT="${BCDB_WORKER_COUNT:-}"    # Defaults to DB_CONN_POOL_SIZE after args are parsed
 
 REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"
 REMOTE_INSTALL_DIR="/home/neel/Desktop/ariabc_install"
@@ -72,6 +74,8 @@ REMOTE_BIN_U24="/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_
 REMOTE_BIN_U22="/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server"
 # Static cmake for Ubuntu 22.04 nodes (no system cmake 3.16+) — stays in /tmp (only needed at build time)
 REMOTE_CMAKE_U22="/tmp/cmake-3.28.3-linux-x86_64/bin/cmake"
+REMOTE_CMAKE_TARBALL_U22="/tmp/cmake-3.28.3-linux-x86_64.tar.gz"
+REMOTE_CMAKE_URL_U22="https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz"
 # OpenSSL headers pushed from ASUS for Ubuntu 22.04 build — stays in /tmp (build-time only)
 REMOTE_OPENSSL_INCLUDE_U22="/tmp/openssl_include"
 
@@ -110,10 +114,22 @@ DET_SUBMIT_PIPELINE="${DET_SUBMIT_PIPELINE:-1}"
 PG_EXEC_MODE="${PG_EXEC_MODE:-event}"
 DET_BLOCK_PARALLEL="${DET_BLOCK_PARALLEL:-1}"  # parallel PG conns per det block (1=legacy, 4-8=Lever1)
 DET_BLOCK_PIPELINE="${DET_BLOCK_PIPELINE:-1}"  # logical BCDB blocks per backend submit call
+DET_BLOCK_MAX="${DET_BLOCK_MAX:-2048}"         # max txs per backend deterministic block submit
 BCDB_BLOCK_PROFILE="${BCDB_BLOCK_PROFILE:-0}"  # postgres-side bcdb_block_submit_results phase logging
+BCDB_BLOCK_WAIT_WATERMARK="${BCDB_BLOCK_WAIT_WATERMARK:-0}"  # 1=wait on block commit watermark instead of scanning every slot
 BCDB_PHASE_TRACE_ON="${BCDB_PHASE_TRACE_ON:-0}"  # postgres-side per-worker CSV phase traces
 BCDB_POLL_MAX_US="${BCDB_POLL_MAX_US:-8}"      # last known good 4-node run used 8us
+BCDB_SERIAL_GATE_MODE="${BCDB_SERIAL_GATE_MODE:-0}"  # 0=poll, 1=condvar published-max wakeups
+BCDB_DT_PARSE_BARRIER="${BCDB_DT_PARSE_BARRIER:-0}"  # 1 enables pre-gate parse barrier when block_txs <= workers
+BCDB_BLOCK_ENQUEUE_YIELD_EVERY="${BCDB_BLOCK_ENQUEUE_YIELD_EVERY:-0}"  # 0=off; tiny yield every N block enqueues
+BCDB_DECOUPLE_WORKERS="${BCDB_DECOUPLE_WORKERS:-0}"  # 1=use bcdb_worker_count queues independent of bcdb_init block size
+BCDB_DT_CONFLICT_TRACKING="${BCDB_DT_CONFLICT_TRACKING:-1}"  # 0 disables DT rs/ws conflict table checks for benchmark A/B
+BCDB_DT_LIGHT_SNAPSHOT="${BCDB_DT_LIGHT_SNAPSHOT:-0}"  # 1=READ COMMITTED/no SSI sxact when dt conflict tracking is off
+BCDB_DT_SKIP_READONLY_GATE="${BCDB_DT_SKIP_READONLY_GATE:-0}"  # 1=skip no-write txs in the DT publish gate
+ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-0}"  # 0=all replicas include full SQL results in Kafka
+ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-0}"  # 0=Raft default election priority
 RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-2048}"
+BCDB_OVERWRITE_PROTECTION="${BCDB_OVERWRITE_PROTECTION:-0}"  # 0=off 1=Option-A 2=Option-B
 COLLECT_FINAL_SERVER_PROFILE="${COLLECT_FINAL_SERVER_PROFILE:-1}"
 
 usage() {
@@ -154,13 +170,40 @@ Options:
                   set to 4-8 to enable Lever1 parallel block execution)
   --det-block-pipeline N
                   Logical BCDB blocks per backend submit call (default: 1)
+  --det-block-max N
+                  Max transactions per backend deterministic block submit (default: 2048)
   --bcdb-block-profile N
                   Enable PROFILE_BCDB_BLOCK lines inside PostgreSQL backends (default: 0)
+  --bcdb-block-wait-watermark N
+                  Wait for the block commit watermark before result submit instead of scanning
+                  every result slot: 0|1 (default: 0)
   --bcdb-phase-trace N
                   Enable BCDB_PHASE_TRACE CSVs inside PostgreSQL worker backends (default: 0)
   --bcdb-poll-max-us N
                   Max poll sleep for BCDB ordered waits, 1..64 usec (default: 8)
-  --pool-size N    Gateway dbConnPoolSize and server bcdb_worker_count (default: 256)
+  --bcdb-serial-gate-mode N
+                  Ordered DT gate wait mode: 0=poll, 1=condvar wake (default: 0)
+  --bcdb-dt-parse-barrier N
+                  Enable pre-gate deterministic block parse barrier when safe: 0|1 (default: 0)
+  --bcdb-block-enqueue-yield-every N
+                  Tiny pg_usleep(1) after every N queued block txs, 0 disables (default: 0)
+  --bcdb-worker-count N
+                  PostgreSQL bcdb_worker_count / BCDB worker queues (default: --pool-size)
+  --bcdb-decouple-workers N
+                  Use bcdb_worker_count queues independent of bcdb_init block size: 0|1 (default: 0)
+  --bcdb-dt-conflict-tracking N
+                  Set bcdb_dt_conflict_tracking: 0|1 (default: 1)
+  --bcdb-dt-light-snapshot N
+                  In DT with bcdb_dt_conflict_tracking=off, skip SSI sxact and use READ COMMITTED snapshot: 0|1 (default: 0)
+  --bcdb-dt-skip-readonly-gate N
+                  Let no-write DT transactions stop blocking later publish-gate entrants: 0|1 (default: 0)
+  --full-result-replica-limit N
+                  Emit full Kafka results only from replica ids <= N, hashes from all replicas; 0=all replicas (default: 0)
+  --preferred-leader-id N
+                  Set higher Raft election priority for server id N; 0=default election (default: 0)
+  --bcdb-overwrite-protection N
+                  Result-ring overwrite protection: 0=off, 1=Option-A (per-slot), 2=Option-B (watermark) (default: 0)
+  --pool-size N    Gateway dbConnPoolSize and bcdb_init deterministic block size (default: 256)
   -h, --help
 EOF
 }
@@ -189,9 +232,22 @@ while [[ $# -gt 0 ]]; do
     --pg-exec-mode) PG_EXEC_MODE="${2:-event}"; shift 2 ;;
     --det-block-parallel) DET_BLOCK_PARALLEL="${2:-1}"; shift 2 ;;
     --det-block-pipeline) DET_BLOCK_PIPELINE="${2:-1}"; shift 2 ;;
+    --det-block-max) DET_BLOCK_MAX="${2:-2048}"; shift 2 ;;
     --bcdb-block-profile) BCDB_BLOCK_PROFILE="${2:-0}"; shift 2 ;;
+    --bcdb-block-wait-watermark) BCDB_BLOCK_WAIT_WATERMARK="${2:-0}"; shift 2 ;;
     --bcdb-phase-trace) BCDB_PHASE_TRACE_ON="${2:-0}"; shift 2 ;;
     --bcdb-poll-max-us) BCDB_POLL_MAX_US="${2:-8}"; shift 2 ;;
+    --bcdb-serial-gate-mode) BCDB_SERIAL_GATE_MODE="${2:-0}"; shift 2 ;;
+    --bcdb-dt-parse-barrier) BCDB_DT_PARSE_BARRIER="${2:-0}"; shift 2 ;;
+    --bcdb-block-enqueue-yield-every) BCDB_BLOCK_ENQUEUE_YIELD_EVERY="${2:-0}"; shift 2 ;;
+    --bcdb-worker-count) BCDB_WORKER_COUNT="${2:-}"; shift 2 ;;
+    --bcdb-decouple-workers) BCDB_DECOUPLE_WORKERS="${2:-0}"; shift 2 ;;
+    --bcdb-dt-conflict-tracking) BCDB_DT_CONFLICT_TRACKING="${2:-1}"; shift 2 ;;
+    --bcdb-dt-light-snapshot) BCDB_DT_LIGHT_SNAPSHOT="${2:-0}"; shift 2 ;;
+    --bcdb-dt-skip-readonly-gate) BCDB_DT_SKIP_READONLY_GATE="${2:-0}"; shift 2 ;;
+    --full-result-replica-limit) ARIABC_FULL_RESULT_REPLICA_LIMIT="${2:-0}"; shift 2 ;;
+    --preferred-leader-id) ARIABC_PREFERRED_LEADER_ID="${2:-0}"; shift 2 ;;
+    --bcdb-overwrite-protection) BCDB_OVERWRITE_PROTECTION="${2:-0}"; shift 2 ;;
     --pool-size)    DB_CONN_POOL_SIZE="${2:-256}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
@@ -204,6 +260,61 @@ if [[ "$DET_START_SEQ" -lt 1 || "$REQ_ID_OFFSET" -lt 1 ]]; then
 fi
 if [[ "$DET_BATCH_SIZE" -lt 1 ]]; then
   echo "ERROR: --det-batch-size must be >= 1" >&2
+  exit 2
+fi
+if [[ -z "$BCDB_WORKER_COUNT" ]]; then
+  BCDB_WORKER_COUNT="$DB_CONN_POOL_SIZE"
+fi
+if [[ "$BCDB_WORKER_COUNT" -lt 1 || "$BCDB_WORKER_COUNT" -gt 1024 ]]; then
+  echo "ERROR: --bcdb-worker-count must be between 1 and 1024" >&2
+  exit 2
+fi
+if [[ "$BCDB_DECOUPLE_WORKERS" != "0" && "$BCDB_DECOUPLE_WORKERS" != "1" ]]; then
+  echo "ERROR: --bcdb-decouple-workers must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$BCDB_DT_CONFLICT_TRACKING" != "0" && "$BCDB_DT_CONFLICT_TRACKING" != "1" ]]; then
+  echo "ERROR: --bcdb-dt-conflict-tracking must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$BCDB_DT_LIGHT_SNAPSHOT" != "0" && "$BCDB_DT_LIGHT_SNAPSHOT" != "1" ]]; then
+  echo "ERROR: --bcdb-dt-light-snapshot must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$BCDB_DT_SKIP_READONLY_GATE" != "0" && "$BCDB_DT_SKIP_READONLY_GATE" != "1" ]]; then
+  echo "ERROR: --bcdb-dt-skip-readonly-gate must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$BCDB_BLOCK_WAIT_WATERMARK" != "0" && "$BCDB_BLOCK_WAIT_WATERMARK" != "1" ]]; then
+  echo "ERROR: --bcdb-block-wait-watermark must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$ARIABC_FULL_RESULT_REPLICA_LIMIT" -lt 0 || "$ARIABC_FULL_RESULT_REPLICA_LIMIT" -gt 4 ]]; then
+  echo "ERROR: --full-result-replica-limit must be between 0 and 4" >&2
+  exit 2
+fi
+if [[ "$ARIABC_PREFERRED_LEADER_ID" -lt 0 || "$ARIABC_PREFERRED_LEADER_ID" -gt 4 ]]; then
+  echo "ERROR: --preferred-leader-id must be between 0 and 4" >&2
+  exit 2
+fi
+if [[ "$BCDB_DECOUPLE_WORKERS" == "0" && "$BCDB_WORKER_COUNT" != "$DB_CONN_POOL_SIZE" ]]; then
+  echo "ERROR: --bcdb-worker-count differs from --pool-size; pass --bcdb-decouple-workers 1 to test decoupled worker queues" >&2
+  exit 2
+fi
+if [[ "$BCDB_SERIAL_GATE_MODE" != "0" && "$BCDB_SERIAL_GATE_MODE" != "1" ]]; then
+  echo "ERROR: --bcdb-serial-gate-mode must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$BCDB_DT_PARSE_BARRIER" != "0" && "$BCDB_DT_PARSE_BARRIER" != "1" ]]; then
+  echo "ERROR: --bcdb-dt-parse-barrier must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$BCDB_BLOCK_ENQUEUE_YIELD_EVERY" -lt 0 || "$BCDB_BLOCK_ENQUEUE_YIELD_EVERY" -gt 256 ]]; then
+  echo "ERROR: --bcdb-block-enqueue-yield-every must be between 0 and 256" >&2
+  exit 2
+fi
+if [[ "$DET_BLOCK_MAX" -lt 1 || "$DET_BLOCK_MAX" -gt 8192 ]]; then
+  echo "ERROR: --det-block-max must be between 1 and 8192" >&2
   exit 2
 fi
 if [[ "$PG_EXEC_MODE" != "threaded" && "$PG_EXEC_MODE" != "event" ]]; then
@@ -289,6 +400,11 @@ collect_cluster_logs() {
         "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
       sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
         "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
+      if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
+        sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+          "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
+          "$LOG_DIR/" 2>/dev/null || true
+      fi
     else
       rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
         "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
@@ -296,6 +412,11 @@ collect_cluster_logs() {
         "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
       rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
         "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
+      if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
+        rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
+          "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
+          "$LOG_DIR/" 2>/dev/null || true
+      fi
     fi
   done
 }
@@ -311,6 +432,7 @@ node_rsync_repo() {
       --exclude='.bench_tmp' \
       --exclude='__pycache__' \
       --exclude='*.pyc' \
+      --exclude='conftest*' \
       --exclude='scripts/bench_full_results' \
       --exclude='scripts/bench_results' \
       -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
@@ -322,6 +444,7 @@ node_rsync_repo() {
       --exclude='.bench_tmp' \
       --exclude='__pycache__' \
       --exclude='*.pyc' \
+      --exclude='conftest*' \
       --exclude='scripts/bench_full_results' \
       --exclude='scripts/bench_results' \
       -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
@@ -346,6 +469,68 @@ node_rsync_install() {
 
 log() { echo "[$(date +'%H:%M:%S')] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+collect_final_profiles_before_fail() {
+  local reason="${1:-failure}"
+  if [[ "$COLLECT_FINAL_SERVER_PROFILE" == "0" ]]; then
+    return 0
+  fi
+  log "  Collecting final server profiles before failing (${reason})"
+  for idx in "${!NODE_IDS[@]}"; do
+    client_port="${NODE_CLIENT_PORTS[$idx]}"
+    node_ssh "$idx" "
+      fuser -k -TERM 9000/tcp 2>/dev/null || true
+      fuser -k -TERM ${client_port}/tcp 2>/dev/null || true
+    " >/dev/null 2>&1 || true
+  done
+  sleep 2
+  collect_cluster_logs "  Collecting failure-path server logs with PROFILE_SERVER lines..."
+}
+
+find_local_cmake_tarball() {
+  local candidate
+  for candidate in /tmp/cmake-3.28.3-linux-x86_64.tar.gz "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
+    if [[ -s "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_u22_cmake() {
+  local idx="$1"
+  local name="${NODE_NAMES[$idx]}"
+  local cmake_tarball
+
+  if node_ssh "$idx" "command -v cmake >/dev/null 2>&1 || command -v cmake3 >/dev/null 2>&1 || test -x '$REMOTE_CMAKE_U22'" 2>/dev/null; then
+    return 0
+  fi
+
+  log "  Staging portable CMake on $name"
+  cmake_tarball="$(find_local_cmake_tarball || true)"
+  if [[ -n "$cmake_tarball" ]]; then
+    node_rsync_to "$idx" "$cmake_tarball" "$REMOTE_CMAKE_TARBALL_U22"
+  fi
+
+  node_ssh "$idx" "
+    set -euo pipefail
+    if [[ ! -s '$REMOTE_CMAKE_TARBALL_U22' ]]; then
+      if command -v wget >/dev/null 2>&1; then
+        wget -T 30 -t 2 -q --show-progress -O '$REMOTE_CMAKE_TARBALL_U22' '$REMOTE_CMAKE_URL_U22'
+      elif command -v curl >/dev/null 2>&1; then
+        curl --connect-timeout 10 --max-time 120 --retry 2 -sSL -o '$REMOTE_CMAKE_TARBALL_U22' '$REMOTE_CMAKE_URL_U22'
+      else
+        echo 'ERROR: cmake is missing and neither wget nor curl is available to fetch portable CMake' >&2
+        exit 1
+      fi
+    fi
+    rm -rf /tmp/cmake-3.28.3-linux-x86_64
+    tar -C /tmp -xzf '$REMOTE_CMAKE_TARBALL_U22'
+    test -x '$REMOTE_CMAKE_U22'
+    '$REMOTE_CMAKE_U22' --version | head -1
+  " 2>&1 | sed "s/^/[$name] /" || die "failed to stage portable CMake on $name"
+}
 
 build_raft_members() {
   local members=""
@@ -398,10 +583,7 @@ if [[ "$SKIP_RDKAFKA_SETUP" -eq 0 ]]; then
   "$ENSURE_RDKAFKA_SCRIPT" 2>&1 | sed 's/^/  [local] /' || die "ensure_rdkafka failed on local machine"
 
   # Locate cmake portable tarball (needed on nodes without a system cmake)
-  CMAKE_TARBALL=""
-  for candidate in /tmp/cmake-3.28.3-linux-x86_64.tar.gz "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
-    [[ -s "$candidate" ]] && { CMAKE_TARBALL="$candidate"; break; }
-  done
+  CMAKE_TARBALL="$(find_local_cmake_tarball || true)"
   if [[ -z "$CMAKE_TARBALL" ]]; then
     log "  cmake-3.28.3 tarball not found locally — will attempt apt-get on remote nodes"
     log "    (pre-download: wget -P /tmp https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz)"
@@ -558,6 +740,8 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
         --clean-when-rebuild
     " 2>&1 | sed "s/^/[$name] /"
 
+    ensure_u22_cmake "$idx"
+
     # Push OpenSSL headers from ASUS if not already there (needed by NuRaft TLS)
     node_ssh "$idx" "mkdir -p '$REMOTE_OPENSSL_INCLUDE_U22/openssl'" 2>/dev/null || true
     node_rsync_to "$idx" "/usr/include/openssl/" "$REMOTE_OPENSSL_INCLUDE_U22/openssl/"
@@ -697,9 +881,18 @@ for idx in "${!NODE_IDS[@]}"; do
     BIN=\$INSTALL_DIR/bin
     export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
     export BCDB_BLOCK_PROFILE='$BCDB_BLOCK_PROFILE'
+    export BCDB_BLOCK_WAIT_WATERMARK='$BCDB_BLOCK_WAIT_WATERMARK'
     export BCDB_POLL_MAX_US='$BCDB_POLL_MAX_US'
+    export BCDB_DT_PARSE_BARRIER='$BCDB_DT_PARSE_BARRIER'
+    export BCDB_BLOCK_ENQUEUE_YIELD_EVERY='$BCDB_BLOCK_ENQUEUE_YIELD_EVERY'
+    export BCDB_DECOUPLE_WORKERS='$BCDB_DECOUPLE_WORKERS'
+    export BCDB_DT_LIGHT_SNAPSHOT='$BCDB_DT_LIGHT_SNAPSHOT'
+    export BCDB_DT_SKIP_READONLY_GATE='$BCDB_DT_SKIP_READONLY_GATE'
     if [[ -f \"\$PGDATA/postgresql.auto.conf\" ]]; then
       sed -i -E \"s/^(bcdb_result_ring_slots[[:space:]]*=[[:space:]]*)'?[0-9]+'?/\\1'$RESULT_RING_CAPACITY'/\" \"\$PGDATA/postgresql.auto.conf\"
+      if [[ '$BCDB_OVERWRITE_PROTECTION' == '0' ]]; then
+        sed -i -E \"/^[[:space:]]*bcdb_overwrite_protection[[:space:]]*=/d\" \"\$PGDATA/postgresql.auto.conf\"
+      fi
     fi
     if [[ '$BCDB_PHASE_TRACE_ON' != '0' ]]; then
       mkdir -p '$REMOTE_REPO_ROOT/.bench_tmp'
@@ -708,11 +901,70 @@ for idx in "${!NODE_IDS[@]}"; do
     else
       unset BCDB_PHASE_TRACE
     fi
+    hard_stop_benchmark_postgres() {
+      echo '  hard-stopping stale benchmark postgres if needed'
+      old_pid=''
+      old_state=''
+      if [[ -f \"\$PGDATA/postmaster.pid\" ]]; then
+        old_pid=\$(head -n 1 \"\$PGDATA/postmaster.pid\" 2>/dev/null || true)
+        old_state=\$(sed -n '8p' \"\$PGDATA/postmaster.pid\" 2>/dev/null | tr -d '[:space:]' || true)
+        old_shmid=\$(sed -n '7p' \"\$PGDATA/postmaster.pid\" 2>/dev/null | awk '{print \$2}' || true)
+        if [[ \"\$old_pid\" =~ ^[0-9]+$ ]] && ! kill -0 \"\$old_pid\" 2>/dev/null; then
+          echo \"  removing stale postmaster.pid for dead pid \$old_pid\"
+          rm -f \"\$PGDATA/postmaster.pid\"
+        fi
+      fi
+      if [[ -f \"\$PGDATA/postmaster.pid\" && \"\$old_state\" == \"stopping\" ]]; then
+        echo \"  postmaster.pid is stuck in stopping state; skipping pg_ctl wait\"
+      else
+        timeout 25s \$BIN/pg_ctl -D \$PGDATA -w -t 20 stop -m fast 2>&1 || true
+      fi
+      if [[ -f \"\$PGDATA/postmaster.pid\" ]]; then
+        old_pid=\$(head -n 1 \"\$PGDATA/postmaster.pid\" 2>/dev/null || true)
+        if [[ \"\$old_pid\" =~ ^[0-9]+$ ]] && kill -0 \"\$old_pid\" 2>/dev/null; then
+          echo \"  postmaster pid \$old_pid still alive; sending TERM\"
+          kill -TERM \"\$old_pid\" 2>/dev/null || true
+          for _i in \$(seq 1 20); do
+            kill -0 \"\$old_pid\" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 \"\$old_pid\" 2>/dev/null; then
+            echo \"  postmaster pid \$old_pid still alive after TERM; sending KILL\"
+            kill -KILL \"\$old_pid\" 2>/dev/null || true
+          fi
+        fi
+        if [[ -n \"\${old_pid:-}\" ]] && ! kill -0 \"\$old_pid\" 2>/dev/null; then
+          rm -f \"\$PGDATA/postmaster.pid\"
+        fi
+        if [[ -f \"\$PGDATA/postmaster.pid\" ]]; then
+          old_state=\$(sed -n '8p' \"\$PGDATA/postmaster.pid\" 2>/dev/null | tr -d '[:space:]' || true)
+          old_shmid=\$(sed -n '7p' \"\$PGDATA/postmaster.pid\" 2>/dev/null | awk '{print \$2}' || true)
+          if [[ \"\$old_state\" == \"stopping\" ]]; then
+            echo '  removing postmaster.pid left in stopping state'
+            rm -f \"\$PGDATA/postmaster.pid\"
+          fi
+        fi
+      fi
+      # Benchmark postgres children can remain after a killed postmaster and
+      # keep the old SysV shared memory segment attached.  They run as the
+      # benchmark user; the system PostgreSQL service runs as user postgres.
+      pkill -TERM -u \"\$(id -u)\" -f '^postgres:' 2>/dev/null || true
+      sleep 1
+      pkill -KILL -u \"\$(id -u)\" -f '^postgres:' 2>/dev/null || true
+      if [[ \"\${old_shmid:-}\" =~ ^[0-9]+$ ]]; then
+        if ipcs -m 2>/dev/null | awk '{print \$2}' | grep -qx \"\$old_shmid\"; then
+          echo \"  removing stale shared memory segment shmid=\$old_shmid\"
+          ipcrm -m \"\$old_shmid\" 2>/dev/null || true
+        fi
+      fi
+    }
     ensure_ready() {
       if \$BIN/pg_isready -h 127.0.0.1 -p $DB_PORT -U $DB_USER >/dev/null 2>&1; then
         return 0
       fi
-      echo '  postgres not ready — attempting start'
+      echo '  postgres not ready — clearing stale benchmark postmaster before start'
+      hard_stop_benchmark_postgres
+      echo '  attempting postgres start'
       \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log' 2>&1 || echo 'start attempted'
       sleep 3
       \$BIN/pg_isready -h 127.0.0.1 -p $DB_PORT -U $DB_USER >/dev/null 2>&1 || {
@@ -723,65 +975,106 @@ for idx in "${!NODE_IDS[@]}"; do
     ensure_ready
     if [[ "$FORCE_PG_RESTART" -eq 1 ]]; then
       echo '  restarting postgres to clear stale benchmark backends'
-      \$BIN/pg_ctl -D \$PGDATA -w -t 60 restart -l '$REMOTE_REPO_ROOT/server.log'
+      if ! \$BIN/pg_ctl -D \$PGDATA -w -t 60 restart -l '$REMOTE_REPO_ROOT/server.log'; then
+        hard_stop_benchmark_postgres
+        \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log'
+      fi
       ensure_ready
     fi
     worker_count=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_worker_count;' | tr -d '[:space:]')
     serial_gate=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_serial_gate_mode;' | tr -d '[:space:]')
+    dt_conflict=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_conflict_tracking;' | tr -d '[:space:]')
     ring_slots=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_result_ring_slots;' | tr -d '[:space:]')
+    owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || echo '')
+    if [[ -z \"\$owp\" && '$BCDB_OVERWRITE_PROTECTION' != '0' ]]; then
+      echo \"ERROR: --bcdb-overwrite-protection was requested, but this PostgreSQL build does not expose bcdb_overwrite_protection\" >&2
+      exit 1
+    fi
     max_connections=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show max_connections;' | tr -d '[:space:]')
     min_max_connections=$(( $DB_CONN_POOL_SIZE * 3 + 64 ))
+    worker_min_max_connections=$(( $BCDB_WORKER_COUNT + $DB_CONN_POOL_SIZE + 64 ))
+    if [[ "\$min_max_connections" -lt "\$worker_min_max_connections" ]]; then
+      min_max_connections="\$worker_min_max_connections"
+    fi
     if [[ "\$min_max_connections" -lt 256 ]]; then
       min_max_connections=256
     fi
     target_ring_slots=\"$RESULT_RING_CAPACITY\"
+    target_owp=\"$BCDB_OVERWRITE_PROTECTION\"
     needs_restart=0
-    if [[ \"\$worker_count\" != \"$DB_CONN_POOL_SIZE\" ]]; then
+    if [[ \"\$worker_count\" != \"$BCDB_WORKER_COUNT\" ]]; then
       needs_restart=1
     fi
-    if [[ \"\$serial_gate\" != \"0\" ]]; then
+    if [[ \"\$serial_gate\" != \"$BCDB_SERIAL_GATE_MODE\" ]]; then
+      needs_restart=1
+    fi
+    target_dt_conflict=\"$([[ "$BCDB_DT_CONFLICT_TRACKING" == "1" ]] && echo on || echo off)\"
+    if [[ \"\$dt_conflict\" != \"\$target_dt_conflict\" ]]; then
       needs_restart=1
     fi
     if [[ \"\$ring_slots\" != \"\$target_ring_slots\" ]]; then
+      needs_restart=1
+    fi
+    if [[ -n \"\$owp\" && \"\$owp\" != \"\$target_owp\" ]]; then
       needs_restart=1
     fi
     if [[ -z \"\$max_connections\" || \"\$max_connections\" -lt \"\$min_max_connections\" ]]; then
       needs_restart=1
     fi
     if [[ \"\$needs_restart\" -eq 1 ]]; then
-      echo \"reconfiguring bcdb_worker_count=\$worker_count -> $DB_CONN_POOL_SIZE bcdb_serial_gate_mode=\$serial_gate -> 0 bcdb_result_ring_slots=\$ring_slots -> \$target_ring_slots max_connections=\$max_connections -> >=\$min_max_connections\"
-      if [[ \"\$worker_count\" != \"$DB_CONN_POOL_SIZE\" ]]; then
-        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_worker_count = '$DB_CONN_POOL_SIZE';\"
+      echo \"reconfiguring bcdb_worker_count=\$worker_count -> $BCDB_WORKER_COUNT bcdb_serial_gate_mode=\$serial_gate -> $BCDB_SERIAL_GATE_MODE bcdb_dt_conflict_tracking=\$dt_conflict -> \$target_dt_conflict bcdb_result_ring_slots=\$ring_slots -> \$target_ring_slots bcdb_overwrite_protection=\$owp -> \$target_owp max_connections=\$max_connections -> >=\$min_max_connections\"
+      if [[ \"\$worker_count\" != \"$BCDB_WORKER_COUNT\" ]]; then
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_worker_count = '$BCDB_WORKER_COUNT';\"
       fi
-      if [[ \"\$serial_gate\" != \"0\" ]]; then
-        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_serial_gate_mode = '0';\"
+      if [[ \"\$serial_gate\" != \"$BCDB_SERIAL_GATE_MODE\" ]]; then
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_serial_gate_mode = '$BCDB_SERIAL_GATE_MODE';\"
+      fi
+      if [[ \"\$dt_conflict\" != \"\$target_dt_conflict\" ]]; then
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_dt_conflict_tracking = '\$target_dt_conflict';\"
       fi
       if [[ \"\$ring_slots\" != \"\$target_ring_slots\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_result_ring_slots = '\$target_ring_slots';\"
       fi
+      if [[ -n \"\$owp\" && \"\$owp\" != \"\$target_owp\" ]]; then
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_overwrite_protection = '\$target_owp';\"
+      fi
       if [[ -z \"\$max_connections\" || \"\$max_connections\" -lt \"\$min_max_connections\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET max_connections = '\$min_max_connections';\"
       fi
-      \$BIN/pg_ctl -D \$PGDATA -w -t 60 restart -l '$REMOTE_REPO_ROOT/server.log'
+      if ! \$BIN/pg_ctl -D \$PGDATA -w -t 60 restart -l '$REMOTE_REPO_ROOT/server.log'; then
+        hard_stop_benchmark_postgres
+        \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log'
+      fi
       ensure_ready
       worker_count=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_worker_count;' | tr -d '[:space:]')
       serial_gate=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_serial_gate_mode;' | tr -d '[:space:]')
+      dt_conflict=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_conflict_tracking;' | tr -d '[:space:]')
       ring_slots=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_result_ring_slots;' | tr -d '[:space:]')
+      owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || echo '')
       max_connections=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show max_connections;' | tr -d '[:space:]')
     fi
-    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_result_ring_slots=\$ring_slots max_connections=\$max_connections\"
+    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_dt_conflict_tracking=\$dt_conflict bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp max_connections=\$max_connections\"
   " 2>&1)" || die "could not verify postgres on ${NODE_NAMES[$idx]}"
   log "  ${NODE_NAMES[$idx]}: $status_line"
   actual_workers="$(sed -n 's/.*bcdb_worker_count=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
-  if [[ -n "$actual_workers" && "$actual_workers" != "$DB_CONN_POOL_SIZE" ]]; then
-    die "bcdb_worker_count mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_workers runner_pool=$DB_CONN_POOL_SIZE"
+  if [[ -n "$actual_workers" && "$actual_workers" != "$BCDB_WORKER_COUNT" ]]; then
+    die "bcdb_worker_count mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_workers expected=$BCDB_WORKER_COUNT"
   fi
   actual_serial_gate="$(sed -n 's/.*bcdb_serial_gate_mode=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
-  if [[ -n "$actual_serial_gate" && "$actual_serial_gate" != "0" ]]; then
-    die "bcdb_serial_gate_mode mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_serial_gate expected=0"
+  if [[ -n "$actual_serial_gate" && "$actual_serial_gate" != "$BCDB_SERIAL_GATE_MODE" ]]; then
+    die "bcdb_serial_gate_mode mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_serial_gate expected=$BCDB_SERIAL_GATE_MODE"
+  fi
+  actual_dt_conflict="$(sed -n 's/.*bcdb_dt_conflict_tracking=\([^[:space:]]*\).*/\1/p' <<<"$status_line" | tail -1)"
+  expected_dt_conflict="$([[ "$BCDB_DT_CONFLICT_TRACKING" == "1" ]] && echo on || echo off)"
+  if [[ -n "$actual_dt_conflict" && "$actual_dt_conflict" != "$expected_dt_conflict" ]]; then
+    die "bcdb_dt_conflict_tracking mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_dt_conflict expected=$expected_dt_conflict"
   fi
   actual_max_connections="$(sed -n 's/.*max_connections=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
   required_max_connections=$(( DB_CONN_POOL_SIZE * 3 + 64 ))
+  worker_required_max_connections=$(( BCDB_WORKER_COUNT + DB_CONN_POOL_SIZE + 64 ))
+  if [[ "$required_max_connections" -lt "$worker_required_max_connections" ]]; then
+    required_max_connections="$worker_required_max_connections"
+  fi
   if [[ "$required_max_connections" -lt 256 ]]; then
     required_max_connections=256
   fi
@@ -872,7 +1165,7 @@ for idx in "${!NODE_IDS[@]}"; do
 
   log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port"
   log "    binary: $srv_bin"
-  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US"
+  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
 
@@ -887,6 +1180,9 @@ for idx in "${!NODE_IDS[@]}"; do
 	    export ARIABC_PROFILE='${ARIABC_PROFILE:-1}'
 	    export ARIABC_DET_BLOCK_PARALLEL='${DET_BLOCK_PARALLEL}'
 	    export ARIABC_DET_BLOCK_PIPELINE='${DET_BLOCK_PIPELINE}'
+	    export ARIABC_DET_BLOCK_MAX='${DET_BLOCK_MAX}'
+	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
+	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
 	    nohup '$srv_bin' \
       --id $id \
       --raftEndpoint ${ip}:${RAFT_PORT} \
@@ -1035,7 +1331,7 @@ fi
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2)"
-log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS submitMode=$SUBMIT_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US"
+log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
 START_S="$(date +%s)"
 
@@ -1107,6 +1403,7 @@ log ""
 
 if [[ "$DIVERGENCE" != "0" && "$DIVERGENCE" != "?" ]] || [[ "$FAILURES" != "0" && "$FAILURES" != "?" ]]; then
   log "WARNING: Cluster correctness issues detected (divergence=$DIVERGENCE failures=$FAILURES)"
+  collect_final_profiles_before_fail "gateway correctness issue"
   exit 1
 fi
 
@@ -1119,29 +1416,54 @@ fi
 if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   log "=== Phase 8: Post-workload $VERIFY_TABLE Merkle verification ==="
 
-  # --- Pre-marker check: verify all nodes agree on rows/root after the workload
-  #     but BEFORE the barrier marker is inserted (marker adds one extra row).
+  # --- Pre-marker check: diagnostic only.
+  #     With waitMajority=1 the gateway is allowed to finish once a 3/4 quorum
+  #     has published matching Kafka results.  The fourth replica can still be
+  #     applying or publishing late here, so the correctness barrier is the
+  #     marker transaction below, not this immediate snapshot.
   log "  Pre-marker row count + Merkle root check..."
   declare -a PRE_COUNTS=()
   declare -a PRE_ROOTS=()
-  for idx in "${!NODE_IDS[@]}"; do
-    name="${NODE_NAMES[$idx]}"
-    readback="$(node_ssh "$idx" "
-      INSTALL_DIR='$REMOTE_INSTALL_DIR'
-      export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
-      cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
-      root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
-      echo \"\$cnt|\$root\"
-    " 2>/dev/null | tr -d '[:space:]')" || readback="error|error"
-    IFS='|' read -r cnt root <<<"$readback"
-    PRE_COUNTS+=("$cnt")
-    PRE_ROOTS+=("$root")
-    log "  [$name] pre-marker: rows=$cnt root=$root"
-  done
+  PRE_PASS=0
+  pre_ref_cnt=""
+  pre_ref_root=""
+  for pre_attempt in $(seq 1 20); do
+    PRE_COUNTS=()
+    PRE_ROOTS=()
+    for idx in "${!NODE_IDS[@]}"; do
+      name="${NODE_NAMES[$idx]}"
+      readback="$(node_ssh "$idx" "
+        INSTALL_DIR='$REMOTE_INSTALL_DIR'
+        export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+        cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
+        root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
+        echo \"\$cnt|\$root\"
+      " 2>/dev/null | tr -d '[:space:]')" || readback="error|error"
+      IFS='|' read -r cnt root <<<"$readback"
+      PRE_COUNTS+=("$cnt")
+      PRE_ROOTS+=("$root")
+      log "  [$name] pre-marker attempt=$pre_attempt: rows=$cnt root=$root"
+    done
 
-  PRE_PASS=1
-  pre_ref_cnt="${PRE_COUNTS[0]}"
-  pre_ref_root="${PRE_ROOTS[0]}"
+    PRE_PASS=1
+    pre_ref_cnt="${PRE_COUNTS[0]}"
+    pre_ref_root="${PRE_ROOTS[0]}"
+
+    for idx in "${!NODE_IDS[@]}"; do
+      if [[ "${PRE_COUNTS[$idx]}" != "$pre_ref_cnt" || "${PRE_ROOTS[$idx]}" != "$pre_ref_root" ]]; then
+        PRE_PASS=0
+      fi
+    done
+
+    if [[ -n "${EXPECTED_ROWS:-}" && "$pre_ref_cnt" != "$EXPECTED_ROWS" ]]; then
+      PRE_PASS=0
+    fi
+    if [[ -n "${EXPECTED_ROOT:-}" && "$pre_ref_root" != "$EXPECTED_ROOT" ]]; then
+      PRE_PASS=0
+    fi
+    [[ "$PRE_PASS" -eq 1 ]] && break
+    sleep 1
+  done
 
   for idx in "${!NODE_IDS[@]}"; do
     if [[ "${PRE_COUNTS[$idx]}" != "$pre_ref_cnt" || "${PRE_ROOTS[$idx]}" != "$pre_ref_root" ]]; then
@@ -1164,8 +1486,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     [[ -n "${EXPECTED_ROWS:-}" ]] && exp_note=" (matches expected rows=$EXPECTED_ROWS root=$EXPECTED_ROOT)"
     log "  Pre-marker consistency: PASS rows=$pre_ref_cnt root=$pre_ref_root${exp_note}"
   else
-    log "  ERROR: Pre-marker consistency check FAILED — aborting Phase 8"
-    exit 1
+    log "  Pre-marker consistency: DIAGNOSTIC MISMATCH — continuing to marker barrier"
   fi
 
   MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
@@ -1220,6 +1541,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     [[ "$all_ready" -eq 1 ]] && break
     if [[ "$elapsed" -ge "$VERIFY_TIMEOUT" ]]; then
       log "ERROR: marker was not visible on all nodes after ${VERIFY_TIMEOUT}s"
+      collect_final_profiles_before_fail "marker timeout"
       exit 1
     fi
     sleep 2
@@ -1259,6 +1581,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
 
   if [[ "$POST_PASS" -ne 1 ]]; then
     log "ERROR: $VERIFY_TABLE Merkle/root consistency failed"
+    collect_final_profiles_before_fail "post-marker Merkle mismatch"
     exit 1
   fi
   log "  $VERIFY_TABLE consistency: PASS rows=$reference_count root=$reference_root"

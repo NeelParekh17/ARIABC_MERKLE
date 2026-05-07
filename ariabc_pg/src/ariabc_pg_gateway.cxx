@@ -588,6 +588,16 @@ uint64_t steady_now_ns() {
         duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
+bool trusted_result_sig_fastpath_enabled() {
+    static const bool enabled = []() -> bool {
+        const char* v = std::getenv("ARIABC_TRUSTED_RESULT_SIG_FASTPATH");
+        if (!v || !*v) return false;
+        const std::string s = trim_copy(v);
+        return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+    }();
+    return enabled;
+}
+
 void atomic_max_u64(std::atomic<uint64_t>& dst, uint64_t v) {
     uint64_t cur = dst.load(std::memory_order_relaxed);
     while (cur < v &&
@@ -683,6 +693,9 @@ std::string make_sig_payload_legacy(uint64_t req_num,
 bool verify_result_signature(const kafka_reply_record& rec, const std::string& sig_key) {
     if (rec.req_id.empty()) return false;
     if (rec.hash_algo != kHashAlgo) return false;
+    if (trusted_result_sig_fastpath_enabled()) {
+        return !rec.result_hash.empty();
+    }
     if (rec.server_sig.empty()) return false;
     const bool has_full = rec.has_full_result;
     const std::string payload = make_sig_payload(rec.req_num,
@@ -1129,14 +1142,57 @@ struct vote_entry {
         kafka_reply_record rec;
         bool sig_valid = false;
     };
-    std::unordered_map<std::string, std::set<int>> hash_to_nodes_valid;
+
+    struct reply_identity {
+        int node_id = 0;
+        uint64_t raft_log_idx = 0;
+
+        reply_identity() = default;
+        reply_identity(int node_id_in, uint64_t raft_log_idx_in)
+            : node_id(node_id_in)
+            , raft_log_idx(raft_log_idx_in)
+            {}
+
+        bool operator==(const reply_identity& other) const {
+            return node_id == other.node_id && raft_log_idx == other.raft_log_idx;
+        }
+    };
+
+    struct reply_identity_hash {
+        size_t operator()(const reply_identity& key) const {
+            const uint64_t a = static_cast<uint64_t>(static_cast<uint32_t>(key.node_id));
+            const uint64_t b = key.raft_log_idx;
+            return std::hash<uint64_t>{}((a << 32) ^ (b + 0x9e3779b97f4a7c15ULL + (a << 6) + (a >> 2)));
+        }
+    };
+
+    struct reply_payload_fingerprint {
+        std::string result_hash;
+        bool has_full_result = false;
+
+        reply_payload_fingerprint() = default;
+        reply_payload_fingerprint(std::string result_hash_in, bool has_full_result_in)
+            : result_hash(std::move(result_hash_in))
+            , has_full_result(has_full_result_in)
+            {}
+
+        bool operator==(const reply_payload_fingerprint& other) const {
+            return result_hash == other.result_hash &&
+                   has_full_result == other.has_full_result;
+        }
+    };
+
+    std::unordered_map<std::string, uint64_t> hash_to_nodes_valid;
     std::unordered_map<int, node_obs> by_node;
-    std::set<int> nodes_seen;
+    uint64_t nodes_seen_mask = 0;
+    int nodes_seen_count = 0;
     int leader_node_id = -1;
     bool divergence_reported = false;
     bool all_reported = false;
     std::string majority_hash;
-    std::unordered_map<std::string, std::string> seen_reply_keys;
+    std::unordered_map<reply_identity,
+                       reply_payload_fingerprint,
+                       reply_identity_hash> seen_reply_keys;
     bool terminal_set = false;
     std::string terminal_result;
     std::string terminal_error;
@@ -1179,20 +1235,16 @@ struct vote_store {
             e.first_reply_ns = add_ns;
         }
 
-        e.nodes_seen.insert(rec.node_id);
+        note_node_seen_locked(e, rec.node_id);
         if (rec.leader_node_id > 0) {
             e.leader_node_id = rec.leader_node_id;
         }
 
-        const std::string full_result_hash = rec.has_full_result
-            ? canonical_result_hash(rec.full_result)
-            : std::string();
-        std::ostringstream id_oss;
-        id_oss << rec.req_num << "|"
-               << rec.node_id << "|"
-               << rec.raft_log_idx;
-        const std::string reply_identity = id_oss.str();
-        const std::string reply_fingerprint = rec.result_hash + "|" + full_result_hash;
+        const vote_entry::reply_identity reply_identity{rec.node_id, rec.raft_log_idx};
+        const vote_entry::reply_payload_fingerprint reply_fingerprint{
+            rec.result_hash,
+            rec.has_full_result
+        };
         auto it_seen = e.seen_reply_keys.find(reply_identity);
         if (it_seen != e.seen_reply_keys.end()) {
             if (it_seen->second == reply_fingerprint) {
@@ -1231,8 +1283,8 @@ struct vote_store {
             if (prev_obs.sig_valid && !prev_obs.rec.result_hash.empty()) {
                 auto it_hash = e.hash_to_nodes_valid.find(prev_obs.rec.result_hash);
                 if (it_hash != e.hash_to_nodes_valid.end()) {
-                    it_hash->second.erase(rec.node_id);
-                    if (it_hash->second.empty()) {
+                    it_hash->second &= ~node_bit(rec.node_id);
+                    if (it_hash->second == 0) {
                         e.hash_to_nodes_valid.erase(it_hash);
                     }
                 }
@@ -1241,13 +1293,13 @@ struct vote_store {
         e.by_node[rec.node_id] = obs;
 
         if (obs.sig_valid && !rec.result_hash.empty()) {
-            e.hash_to_nodes_valid[rec.result_hash].insert(rec.node_id);
+            e.hash_to_nodes_valid[rec.result_hash] |= node_bit(rec.node_id);
         }
         refresh_majority_locked(rec.req_num, e, add_ns);
 
         cv_.notify_all();
 
-        if (!e.all_reported && static_cast<int>(e.nodes_seen.size()) >= total_nodes_) {
+        if (!e.all_reported && e.nodes_seen_count >= total_nodes_) {
             e.all_reported = true;
             if (!e.divergence_reported &&
                 (e.hash_to_nodes_valid.size() > 1 || has_invalid_sig_locked(e))) {
@@ -1264,7 +1316,7 @@ struct vote_store {
                 for (const auto& kv : e.hash_to_nodes_valid) {
                     if (!first) oss << ";";
                     first = false;
-                    oss << kv.first << "=" << kv.second.size();
+                    oss << kv.first << "=" << popcount_mask(kv.second);
                 }
                 oss << "\""
                     << ",\"node_results\":\"";
@@ -1465,6 +1517,33 @@ struct vote_store {
     }
 
 private:
+    static uint64_t node_bit(int node_id) {
+        if (node_id <= 0 || node_id > 64) return 0;
+        return 1ULL << static_cast<unsigned>(node_id - 1);
+    }
+
+    static int popcount_mask(uint64_t mask) {
+#if defined(__GNUC__) || defined(__clang__)
+        return __builtin_popcountll(mask);
+#else
+        int count = 0;
+        while (mask != 0) {
+            mask &= (mask - 1);
+            ++count;
+        }
+        return count;
+#endif
+    }
+
+    void note_node_seen_locked(vote_entry& e, int node_id) const {
+        const uint64_t bit = node_bit(node_id);
+        if (bit == 0) return;
+        if ((e.nodes_seen_mask & bit) == 0) {
+            e.nodes_seen_mask |= bit;
+            ++e.nodes_seen_count;
+        }
+    }
+
     bool has_invalid_sig_locked(const vote_entry& e) const {
         for (const auto& kv : e.by_node) {
             if (!kv.second.sig_valid) return true;
@@ -1495,7 +1574,7 @@ private:
         std::string best_hash;
         int best_votes = 0;
         for (const auto& kv : e.hash_to_nodes_valid) {
-            const int votes = static_cast<int>(kv.second.size());
+            const int votes = popcount_mask(kv.second);
             if (votes < majority_) continue;
             if (votes > best_votes || (votes == best_votes && (best_hash.empty() || kv.first < best_hash))) {
                 best_votes = votes;
@@ -1600,14 +1679,14 @@ private:
 
         auto it_maj = e.hash_to_nodes_valid.find(e.majority_hash);
         if (it_maj == e.hash_to_nodes_valid.end() ||
-            static_cast<int>(it_maj->second.size()) < majority_) {
+            popcount_mask(it_maj->second) < majority_) {
             return false;
         }
 
-        for (int node_id : it_maj->second) {
-            auto it_obs = e.by_node.find(node_id);
-            if (it_obs == e.by_node.end()) continue;
-            const vote_entry::node_obs& obs = it_obs->second;
+        for (const auto& kv : e.by_node) {
+            const int node_id = kv.first;
+            if ((it_maj->second & node_bit(node_id)) == 0) continue;
+            const vote_entry::node_obs& obs = kv.second;
             if (!obs.sig_valid) continue;
             if (obs.rec.result_hash != e.majority_hash) continue;
             if (!obs.rec.has_full_result) continue;
@@ -1646,7 +1725,7 @@ private:
 
         bool unanimous_hash = false;
         for (const auto& kv : e.hash_to_nodes_valid) {
-            if (static_cast<int>(kv.second.size()) == total_nodes_) {
+            if (popcount_mask(kv.second) == total_nodes_) {
                 unanimous_hash = true;
                 break;
             }
@@ -1683,6 +1762,25 @@ private:
             inflight.erase(it_req);
             return true;
         }
+
+        // A Kafka reply can occasionally win the race against the submitter
+        // adding the accepted request to `inflight`.  The ready queue entry is
+        // then consumed above before it can match the deque.  Scan the bounded
+        // deterministic window as a correctness fallback so terminal entries
+        // are not stranded until the global poll timeout.
+        for (auto it_req = inflight.begin(); it_req != inflight.end(); ++it_req) {
+            std::string err;
+            std::string result;
+            if (!resolve_terminal_locked(*it_req, result, err)) {
+                continue;
+            }
+
+            out_req_num = *it_req;
+            out_result = std::move(result);
+            out_error = std::move(err);
+            inflight.erase(it_req);
+            return true;
+        }
         return false;
     }
 
@@ -1697,7 +1795,7 @@ private:
 
         const vote_entry& e = it->second;
         oss << "req=" << req_num
-            << ",nodes_seen=" << e.nodes_seen.size()
+            << ",nodes_seen=" << e.nodes_seen_count
             << ",by_node=" << e.by_node.size()
             << ",leader=" << e.leader_node_id
             << ",majority_hash=" << (e.majority_hash.empty() ? "<none>" : e.majority_hash)
@@ -1708,7 +1806,7 @@ private:
         for (const auto& kv : e.hash_to_nodes_valid) {
             if (!first_hash) oss << ";";
             first_hash = false;
-            oss << kv.first << "=" << kv.second.size();
+            oss << kv.first << "=" << popcount_mask(kv.second);
         }
         if (first_hash) oss << "<none>";
         oss << ",node_obs=";

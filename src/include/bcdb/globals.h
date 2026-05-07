@@ -20,6 +20,7 @@ extern PGDLLIMPORT int32               bcdb_serial_gate_mode;
 extern PGDLLIMPORT int32               bcdb_dt_hashtab_switch_threshold;
 extern PGDLLIMPORT int32               bcdb_result_ring_slots;
 extern PGDLLIMPORT bool                bcdb_advance_commit_watermark;
+extern PGDLLIMPORT int32               bcdb_serial_gate_source;
 extern PGDLLIMPORT char                *bcdb_client_public_key;
 extern PGDLLIMPORT bool                bcdb_enforce_signatures;
 
@@ -72,9 +73,13 @@ extern int32         worker_id;
  * bcdb_get_runtime_result_ring_slots() never produces an out-of-bounds index.
  * 2048 = 2 × 1024 satisfies this for all valid GUC settings.
  */
-#define BCDB_RESULT_RING_CAPACITY 2048
+#define BCDB_RESULT_RING_CAPACITY 32768
 #define BCDB_SERIAL_GATE_MODE_POLL 0
 #define BCDB_SERIAL_GATE_MODE_CONDVAR 1
+
+/* bcdb_serial_gate_source values */
+#define BCDB_GATE_SRC_PUBLISHED_MAX  0  /* Lever D v2: wait on published_max_tx_id (default) */
+#define BCDB_GATE_SRC_LAST_COMMITTED 1  /* Paper-style: wait on last_committed_tx_id before conflict-check */
 #define NUM_WORKERS BCDB_DEFAULT_WORKER_COUNT
 #define HASHTAB_SWITCH_THRESHOLD BCDB_DEFAULT_HASHTAB_SWITCH_THRESHOLD
 #define WORKER_INIT_NUM 64

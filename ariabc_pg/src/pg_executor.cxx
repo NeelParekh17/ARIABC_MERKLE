@@ -87,6 +87,18 @@ uint64_t debug_req_trace_limit() {
     return limit;
 }
 
+int full_result_replica_limit() {
+    static const int limit = []() -> int {
+        const char* v = std::getenv("ARIABC_FULL_RESULT_REPLICA_LIMIT");
+        if (!v || !*v) return 0;
+        char* end = nullptr;
+        const long parsed = std::strtol(v, &end, 10);
+        if (end == v || parsed <= 0) return 0;
+        return static_cast<int>(std::min<long>(parsed, 1024));
+    }();
+    return limit;
+}
+
 std::atomic<uint64_t> g_debug_exec_trace_count(0);
 
 void debug_trace_exec(const std::string& req_id,
@@ -498,10 +510,10 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
 
         const int leader_node_id = (i < leader_node_hints.size()) ? leader_node_hints[i] : -1;
         const uint64_t raft_log_idx = (i < raft_log_idxs.size()) ? raft_log_idxs[i] : 0;
-        // Keep full results on all replicas (clean-break protocol behavior is
-        // controlled by the gateway). This avoids correctness surprises when
-        // the Raft leader changes frequently in single-host deployments.
-        const bool include_full_result = true;
+        const int full_result_limit = full_result_replica_limit();
+        const bool include_full_result =
+            (full_result_limit <= 0 ||
+             static_cast<int>(node_id) <= full_result_limit);
         const uint64_t ts_ms = now_epoch_ms();
         const std::string result_hash = canonical_result_hash(results[i]);
         const std::string sig_payload = make_sig_payload(req_num,
@@ -513,7 +525,7 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
                                                          ts_ms,
                                                          include_full_result);
         const std::string sig = sign_payload(sig_key, sig_payload);
-        const uint8_t flags = 0x1u;
+        const uint8_t flags = include_full_result ? 0x1u : 0x0u;
 
         append_u64_le(out, req_num);
         append_u64_le(out, raft_log_idx);
@@ -525,11 +537,13 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
         append_u16_le(out, static_cast<uint16_t>(req_ids[i].size()));
         append_u16_le(out, static_cast<uint16_t>(result_hash.size()));
         append_u16_le(out, static_cast<uint16_t>(sig.size()));
-        append_u32_le(out, static_cast<uint32_t>(results[i].size()));
+        append_u32_le(out, static_cast<uint32_t>(include_full_result ? results[i].size() : 0));
         out.append(req_ids[i]);
         out.append(result_hash);
         out.append(sig);
-        out.append(results[i]);
+        if (include_full_result) {
+            out.append(results[i]);
+        }
     }
     return out;
 }
@@ -650,6 +664,29 @@ pg_executor::pg_executor(int node_id,
                      "forcing ARIABC_DET_PARALLEL_WORKERS=0 on node "
                   << node_id_ << std::endl;
         det_parallel_workers_ = false;
+    }
+    if (db_opt_.db_type == 1) {
+        const char* v = ::getenv("ARIABC_DET_BLOCK_PIPELINE");
+        if (v && *v) {
+            char* end = nullptr;
+            const long parsed = std::strtol(v, &end, 10);
+            if (end != v && parsed > 0) {
+                /*
+                 * Allow one backend submit to cover multiple ordered BCDB
+                 * worker waves. The runtime cap is still bounded below by the
+                 * result ring size used by the trusted 4-node runner.
+                 */
+                det_block_pipeline_ = static_cast<int>(std::min<long>(parsed, 64));
+            }
+        }
+        v = ::getenv("ARIABC_DET_BLOCK_MAX");
+        if (v && *v) {
+            char* end = nullptr;
+            const long parsed = std::strtol(v, &end, 10);
+            if (end != v && parsed > 0) {
+                det_block_max_ = static_cast<size_t>(std::min<long>(parsed, 8192));
+            }
+        }
     }
 
     // Assign a per-process-instance base so BCDB tx_pool keys are unique
@@ -1264,7 +1301,7 @@ std::string pg_executor::exec_sql(PGconn* c, const std::string& sql) {
 }
 
 bool pg_executor::exec_det_block_batch(PGconn* c,
-                                       uint64_t block_id,
+                                       uint64_t tx_key_start,
                                        const std::vector<task>& tasks,
                                        std::vector<std::string>& out_results) {
     out_results.clear();
@@ -1279,15 +1316,16 @@ bool pg_executor::exec_det_block_batch(PGconn* c,
         if (!parse_det_prefixed_sql_parts(tasks[i].sql, &seq, &raw_sql)) {
             return false;
         }
-        // Use a session-unique key (base + block * 1024 + slot) so that tx_pool
-        // entries from previous server sessions sharing the same PostgreSQL
-        // instance don't cause duplicate-hash crashes in parse_block_with_txs.
-        const std::string key = std::to_string(
-            det_block_tx_key_base_ + block_id * 1024ULL + static_cast<uint64_t>(i));
+        // Use a session-unique monotonically allocated key so tx_pool entries
+        // from previous server sessions sharing the same PostgreSQL instance
+        // don't collide. This used to be block_id * 1024 + slot, which silently
+        // capped safe block sizes at 1024 because larger blocks overlapped the
+        // next block's key range.
+        const std::string key = std::to_string(tx_key_start + static_cast<uint64_t>(i));
         txs.emplace_back(key, std::move(raw_sql));
     }
 
-    const std::string sql = build_bcdb_block_submit_results_sql(block_id, txs);
+    const std::string sql = build_bcdb_block_submit_results_sql(det_next_block_id_++, txs);
 
     notice_state* ns = nullptr;
     auto it = notice_state_by_conn_.find(c);
@@ -1334,8 +1372,7 @@ bool pg_executor::exec_det_block_batch(PGconn* c,
 
     out_results.reserve(tasks.size());
     for (size_t i = 0; i < tasks.size(); ++i) {
-        const std::string key = std::to_string(
-            det_block_tx_key_base_ + block_id * 1024ULL + static_cast<uint64_t>(i));
+        const std::string key = std::to_string(tx_key_start + static_cast<uint64_t>(i));
         auto rit = result_by_hash.find(key);
         if (rit == result_by_hash.end()) return false;
         out_results.push_back(rit->second);
@@ -1689,11 +1726,19 @@ void pg_executor::event_loop() {
             }
 
             if (!any_inflight) {
-                // Use the block size that BCDB was initialised with so the
-                // cut boundary matches the server-side block capacity exactly.
-                const size_t block_cap = bcdb_init_done_
+                /*
+                 * Use an ordered multi-block backend submit when requested.
+                 * This keeps one deterministic queue and one result mapping,
+                 * but amortizes libpq/SQL/block-submit overhead across
+                 * multiple logical BCDB worker waves.
+                 */
+                const size_t base_block_cap = bcdb_init_done_
                     ? static_cast<size_t>(bcdb_block_size_)
                     : std::max<size_t>(1, static_cast<size_t>(db_opt_.conn_pool_size));
+                const size_t block_cap =
+                    std::min<size_t>(det_block_max_,
+                                     base_block_cap *
+                                     static_cast<size_t>(std::max(1, det_block_pipeline_)));
                 std::vector<task> det_batch;
                 size_t depth_after_pop = 0;
 
@@ -1768,8 +1813,10 @@ void pg_executor::event_loop() {
                     }
 
                     std::vector<std::string> det_results;
-                    const uint64_t block_id = det_next_block_id_++;
-                    bool batch_ok = exec_det_block_batch(conns_[0].c, block_id, det_batch, det_results);
+                    const uint64_t tx_key_start =
+                        det_block_tx_key_base_ + det_block_next_tx_key_;
+                    det_block_next_tx_key_ += static_cast<uint64_t>(det_batch.size());
+                    bool batch_ok = exec_det_block_batch(conns_[0].c, tx_key_start, det_batch, det_results);
                     record_det_block_batch(det_batch.size(), !batch_ok);
                     if (batch_ok) {
                         bool expected = false;

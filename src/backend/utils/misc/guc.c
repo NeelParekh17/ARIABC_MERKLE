@@ -2074,6 +2074,16 @@ static struct config_int ConfigureNamesInt[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"bcdb_serial_gate_source", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("Deterministic serial gate source watermark."),
+			gettext_noop("0=published_max_tx_id (Lever D v2, default). "
+						 "1=last_committed_tx_id (paper-style baseline: blocks conflict-check until predecessor fully commits).")
+		},
+		&bcdb_serial_gate_source,
+		BCDB_GATE_SRC_PUBLISHED_MAX, BCDB_GATE_SRC_PUBLISHED_MAX, BCDB_GATE_SRC_LAST_COMMITTED,
+		NULL, NULL, NULL
+	},
+	{
 		{"bcdb_dt_hashtab_switch_threshold", PGC_POSTMASTER, DEVELOPER_OPTIONS,
 			gettext_noop("BCDB DT hash-table shard switch threshold."),
 			gettext_noop("Controls epoch rotation frequency for DT write-set hash tables.")

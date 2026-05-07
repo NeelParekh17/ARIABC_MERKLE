@@ -210,6 +210,23 @@ bcdb_step1_tm_probe_enabled(void)
     return cached == 1;
 }
 
+static bool
+bcdb_apply_wait_debug_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *v = getenv("BCDB_APPLY_WAIT_DEBUG");
+
+        cached = (v != NULL && v[0] != '\0' &&
+                  v[0] != '0' && v[0] != 'n' && v[0] != 'N' &&
+                  v[0] != 'f' && v[0] != 'F') ? 1 : 0;
+    }
+
+    return cached == 1;
+}
+
 static inline void
 bcdb_step1_note_tm_being_modified(bool is_update)
 {
@@ -253,41 +270,19 @@ bcdb_table_tuple_update_step1(Relation relation,
     uint64 wall_start = bcdb_get_time();
     TM_Result result;
 
-    if (bcdb_ptrace_enabled() && bcdb_step1_tm_probe_enabled())
-    {
-        result = table_tuple_update(relation, tid, slot,
-                                    cid,
-                                    InvalidSnapshot,
-                                    InvalidSnapshot,
-                                    false,
-                                    tmfd, lockmode, update_indexes);
-
-        if (result == TM_BeingModified ||
-            result == TM_Updated ||
-            result == TM_Deleted)
-        {
-            uint64 wait_start = bcdb_get_time();
-
-            if (result == TM_BeingModified)
-                bcdb_step1_note_tm_being_modified(true);
-            result = table_tuple_update(relation, tid, slot,
-                                        cid,
-                                        InvalidSnapshot,
-                                        InvalidSnapshot,
-                                        true,
-                                        tmfd, lockmode, update_indexes);
-            bcdb_step1_note_wait_us(true, bcdb_get_time() - wait_start);
-        }
-    }
-    else
-    {
-        result = table_tuple_update(relation, tid, slot,
-                                    cid,
-                                    InvalidSnapshot,
-                                    InvalidSnapshot,
-                                    true,
-                                    tmfd, lockmode, update_indexes);
-    }
+    /*
+     * Always use wait=true here.  The old phase-trace probe first called
+     * table_tuple_update(..., wait=false) to count TM_BeingModified incidents,
+     * but heap_update asserts on TM_BeingModified || !wait in this call path.
+     * That made tracing itself capable of aborting a backend and invalidating
+     * distributed runs.  Wall time still captures actual wait cost.
+     */
+    result = table_tuple_update(relation, tid, slot,
+                                cid,
+                                InvalidSnapshot,
+                                InvalidSnapshot,
+                                true,
+                                tmfd, lockmode, update_indexes);
 
     if (elapsed_us != NULL)
         *elapsed_us = bcdb_get_time() - wall_start;
@@ -306,44 +301,17 @@ bcdb_table_tuple_delete_step1(Relation relation,
     uint64 wall_start = bcdb_get_time();
     TM_Result result;
 
-    if (bcdb_ptrace_enabled() && bcdb_step1_tm_probe_enabled())
-    {
-        result = table_tuple_delete(relation, tid,
-                                    cid,
-                                    InvalidSnapshot,
-                                    InvalidSnapshot,
-                                    false,
-                                    tmfd,
-                                    changingPart);
-
-        if (result == TM_BeingModified ||
-            result == TM_Updated ||
-            result == TM_Deleted)
-        {
-            uint64 wait_start = bcdb_get_time();
-
-            if (result == TM_BeingModified)
-                bcdb_step1_note_tm_being_modified(false);
-            result = table_tuple_delete(relation, tid,
-                                        cid,
-                                        InvalidSnapshot,
-                                        InvalidSnapshot,
-                                        true,
-                                        tmfd,
-                                        changingPart);
-            bcdb_step1_note_wait_us(false, bcdb_get_time() - wait_start);
-        }
-    }
-    else
-    {
-        result = table_tuple_delete(relation, tid,
-                                    cid,
-                                    InvalidSnapshot,
-                                    InvalidSnapshot,
-                                    true,
-                                    tmfd,
-                                    changingPart);
-    }
+    /*
+     * As with updates, do not use a wait=false tracing probe here.  The real
+     * deterministic apply path must wait on in-flight tuple modifiers.
+     */
+    result = table_tuple_delete(relation, tid,
+                                cid,
+                                InvalidSnapshot,
+                                InvalidSnapshot,
+                                true,
+                                tmfd,
+                                changingPart);
 
     if (elapsed_us != NULL)
         *elapsed_us = bcdb_get_time() - wall_start;
@@ -1603,7 +1571,8 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
                                                &update_indexes,
                                                &apply_update_elapsed);
 
-        if (apply_update_elapsed >= 1000) /* log if blocked > 1 ms */
+        if (bcdb_apply_wait_debug_enabled() &&
+            apply_update_elapsed >= 1000) /* log if blocked > 1 ms */
             ereport(LOG,
                     (errmsg("[BCDB_HANG] apply_update_wait pid=%d txid=%d rel=%u waited_us=%lu result=%d",
                             (int) getpid(),

@@ -59,7 +59,10 @@ bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
         memset(&block->result[i], 0, sizeof(block->result[i]));
         block->result_committed_txid[i] = -1;
         block->result_commit_xid[i] = InvalidTransactionId;
+        block->result_consumed_txid[i] = -1;
     }
+    for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
+        block->published_ready_txid[i] = -1;
 }
 
 static inline BCBlock *
@@ -420,26 +423,88 @@ BCTxID get_last_committed_txid(BCDBShmXact *tx)
  * published_max instead of last_committed so apply/finish can run in
  * parallel across backends.
  *
- * CONDVAR mode broadcast is intentionally omitted — the gate path uses
- * POLL by default (see bcdb_wait_for_serial_slot) and the CONDVAR mode has
- * historic wait-list corruption concerns under concurrent direct exec.
+ * In CONDVAR mode, wake only the immediate successor's per-slot condition
+ * variable.  The successor still rechecks published_max_tx_id before entering
+ * conflict_checkDT(), so this changes wakeup latency, not deterministic order.
  */
-void set_published_max_txid(BCDBShmXact *tx)
+static inline int
+bcdb_published_ready_slot_for_txid(BCTxID tx_id)
 {
-    BCBlock* blk = get_block1_cached(true);
-    BCTxID current;
+    int idx = tx_id % MAX_TX_PER_BLOCK;
 
-    current = (BCTxID) __atomic_load_n(&blk->published_max_tx_id, __ATOMIC_ACQUIRE);
-    while (current < tx->tx_id)
+    if (idx < 0)
+        idx += MAX_TX_PER_BLOCK;
+    return idx;
+}
+
+static inline void
+bcdb_signal_serial_successor(BCBlock *blk, BCTxID published_txid)
+{
+    if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
     {
+        int wake_slot = (int) ((published_txid + 1) % MAX_TX_PER_BLOCK);
+
+        if (wake_slot < 0)
+            wake_slot += MAX_TX_PER_BLOCK;
+        ConditionVariableSignal(&blk->done_conds[wake_slot]);
+    }
+}
+
+static void
+bcdb_advance_published_ready_prefix(BCBlock *blk)
+{
+    BCTxID current;
+    int steps = 0;
+
+    Assert(blk != NULL);
+
+    while (steps++ < MAX_TX_PER_BLOCK)
+    {
+        BCTxID next_id;
+        int next_slot;
+        BCTxID ready;
+
+        current = (BCTxID) __atomic_load_n(&blk->published_max_tx_id,
+                                           __ATOMIC_ACQUIRE);
+        next_id = current + 1;
+        next_slot = bcdb_published_ready_slot_for_txid(next_id);
+        ready = (BCTxID) __atomic_load_n(&blk->published_ready_txid[next_slot],
+                                         __ATOMIC_ACQUIRE);
+        if (ready != next_id)
+            break;
+
         if (__atomic_compare_exchange_n(&blk->published_max_tx_id,
                                         &current,
-                                        tx->tx_id,
+                                        next_id,
                                         false,
                                         __ATOMIC_RELEASE,
                                         __ATOMIC_ACQUIRE))
-            break;
+        {
+            bcdb_signal_serial_successor(blk, next_id);
+        }
     }
+}
+
+void
+mark_published_ready_txid(BCDBShmXact *tx)
+{
+    BCBlock *blk = get_block1_cached(true);
+    int slot;
+
+    Assert(tx != NULL);
+    Assert(blk != NULL);
+
+    slot = bcdb_published_ready_slot_for_txid(tx->tx_id);
+    __atomic_store_n(&blk->published_ready_txid[slot],
+                     tx->tx_id,
+                     __ATOMIC_RELEASE);
+    bcdb_advance_published_ready_prefix(blk);
+}
+
+void
+set_published_max_txid(BCDBShmXact *tx)
+{
+    mark_published_ready_txid(tx);
 }
 
 BCTxID get_published_max_txid(BCDBShmXact *tx)
