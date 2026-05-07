@@ -26,6 +26,15 @@
 
 namespace ariabc_pg {
 
+int preferred_leader_id_from_env() {
+    const char* v = std::getenv("ARIABC_PREFERRED_LEADER_ID");
+    if (!v || !*v) return 0;
+    char* end = nullptr;
+    const long parsed = std::strtol(v, &end, 10);
+    if (end == v || parsed <= 0 || parsed > 1000000) return 0;
+    return static_cast<int>(parsed);
+}
+
 struct server_profile_stats {
     std::atomic<uint64_t> client_read_frames{0};
     std::atomic<uint64_t> client_read_ns{0};
@@ -796,8 +805,15 @@ int main(int argc, char** argv) {
     // State manager + initial config.
     ptr<state_mgr> smgr = cs_new<inmem_state_mgr>(opt.id, opt.raft_endpoint);
     ptr<cluster_config> conf = cs_new<cluster_config>();
+    const int preferred_leader_id = ariabc_pg::preferred_leader_id_from_env();
     for (const auto& m : members) {
-        conf->get_servers().push_back(cs_new<srv_config>(m.id, m.endpoint));
+        const int priority = (preferred_leader_id > 0 && m.id == preferred_leader_id) ? 10 : 1;
+        conf->get_servers().push_back(cs_new<srv_config>(m.id,
+                                                         0,
+                                                         m.endpoint,
+                                                         "",
+                                                         false,
+                                                         priority));
     }
     smgr->save_config(*conf);
 

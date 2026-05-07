@@ -1,165 +1,607 @@
-Here is a clean issue you can give to Claude Code.
+I would **not** say your code has an obvious correctness bug. But I would also not call it **exact Algorithm 1 paper mode** without a caveat.
 
----
-
-# Issue: Prevent result-ring overwrite from losing unread transaction results
-
-## Background
-
-BCDB stores transaction results in a fixed-size shared-memory ring inside `BCBlock`:
-
-```c
-result[BCDB_RESULT_RING_CAPACITY][1024]
-result_committed_txid[BCDB_RESULT_RING_CAPACITY]
-result_commit_xid[BCDB_RESULT_RING_CAPACITY]
-```
-
-A transaction result is written at:
-
-```c
-slot = tx_id % bcdb_get_runtime_result_ring_slots();
-```
-
-`result_committed_txid[slot]` is used as a marker to verify that the result currently stored in `result[slot]` belongs to the expected `tx_id`.
-
-This prevents middleware from reading a wrong result after slot reuse, but it does **not** prevent the old result from being overwritten before middleware reads it. The current sizing logic only ensures the runtime slot count is at least `2 * workers`, capped by `BCDB_RESULT_RING_CAPACITY`. That reduces risk but does not provide a hard correctness guarantee if middleware lags behind producers. The relevant result-ring sizing and marker logic lives in `shm_block.c`. 
-
----
-
-# Problem
-
-If the ring is too small or middleware is slow, this can happen:
+The clean verdict:
 
 ```text
-tx 0 -> slot 0
-tx 4 -> slot 0
+Your implementation = safe strict-paper baseline
+Paper Algorithm 1 = incremental commit-signal conflict checking
+Lever D = early write-set publication gate, allowing apply overlap
 ```
 
-Timeline:
+### What Algorithm 1 actually says
+
+The paper’s flow is roughly:
 
 ```text
-tx 0 commits:
-  result[0] = tx0 result
-  result_committed_txid[0] = 0
+Run_Tx(Tk):
 
-middleware has not read tx0 yet
-
-tx 4 commits:
-  result[0] = tx4 result
-  result_committed_txid[0] = 4
-
-middleware tries to read tx0:
-  result_committed_txid[0] != 0
+1. Atomically take snapshot S
+2. Record check_from_id = last_committed_tx_id + 1
+3. Execute transaction on snapshot S to collect rw_set
+4. While not all previous txns up to k-1 have committed:
+      wait for commit signals
+      latest_commit_id = last_committed_tx_id
+      CheckConflict(oldest_commit_id, latest_commit_id, rw_set_k)
+      oldest_commit_id = latest_commit_id
+      if conflict: restart
+5. Commit(Tk)
+6. Broadcast commit signal
 ```
 
-The marker prevents returning tx4’s result as tx0’s result, which is good.
+The paper explicitly says the transaction executes on snapshot `S` to determine its read/write set, without committing updates yet. Then it waits for commit signals from preceding transactions and checks conflicts against transactions whose read/write sets became available after they committed. Finally, `Commit(Tk)` stores the read/write set in the global table and advances `last_committed_tx_id`.  
 
-But tx0’s result is already lost.
+So Algorithm 1 is **not**:
 
-So the system currently has **stale/wrong-read detection**, but not **overwrite prevention**.
+```c
+wait until T_{k-1} fully commits;
+then do one conflict check;
+then apply;
+```
+
+It is more like:
+
+```c
+execute first;
+then incrementally wait/check committed predecessors;
+then commit once all predecessors are checked;
+```
+
+### Where your implementation differs
+
+Your pasted trace says your current paper mode does this:
+
+```text
+get_write_set(tx, snapshot)
+
+bcdb_wait_for_prev_committed(tx)
+
+conflict_checkDT()
+
+publish_ws_tableDT(tx->tx_id)
+
+apply + commit
+
+set_last_committed_txid(tx)
+```
+
+and the code path confirms that `bcdb_wait_for_prev_committed(tx)` runs before `conflict_checkDT()` in the last-committed gate mode, while `publish_ws_tableDT(tx->tx_id)` runs in both modes. 
+
+That is **correctly conservative**, but it collapses Algorithm 1’s incremental loop into one big wait. Tiny but important dragon-scale difference.
+
+### So is the gate condition wrong?
+
+For **correctness**, no.
+
+For **“exact paper Algorithm 1” fidelity**, yes, slightly.
+
+Your gate:
+
+```c
+bcdb_wait_for_prev_committed(tx);
+```
+
+means:
+
+```text
+Do not conflict-check until every predecessor up to tx_id - 1 has committed.
+```
+
+Algorithm 1 means:
+
+```text
+Conflict-check chunks of predecessors as commit signals arrive.
+Only final commit waits until all predecessors are checked.
+```
+
+So your mode is stricter than the paper. I would name it:
+
+```text
+paper_strict
+```
+
+not:
+
+```text
+paper_exact
+```
+
+### Is the finish phase wrong?
+
+Probably not, assuming this ordering is true:
+
+```c
+apply_writes();
+finish_xact_command();          // actual PostgreSQL commit succeeds
+write_result_slot();
+set_last_committed_txid(tx);
+```
+
+In strict paper mode, direct:
+
+```c
+set_last_committed_txid(tx);
+```
+
+is fine because your earlier gate guarantees no successor can overtake. T3/CAS is needed only when apply completion can happen out of order.
+
+### One subtle thing to check
+
+In the paper, the committed transaction’s read/write set becomes visible as part of `Commit(Tk)`, then `last_committed_tx_id` advances. In your code, `publish_ws_tableDT(tx->tx_id)` happens **before apply + commit**.
+
+In strict paper mode, that is usually harmless because successors are waiting on `last_committed`, so they cannot observe/use that write-set until after the predecessor commits anyway. But it means your implementation is not literally the paper’s ordering. It is logically equivalent only because the strict gate hides the early publication.
+
+### Why your 2.6× slowdown is meaningful
+
+Yes, the slowdown is meaningful, but phrase the claim carefully:
+
+```text
+Lever D is 2.6× faster than the strict last_committed-gated baseline.
+```
+
+Not quite:
+
+```text
+Lever D is 2.6× faster than exact Algorithm 1.
+```
+
+Because exact Algorithm 1 already allows some incremental conflict-check overlap. Your strict version waits for the whole predecessor chain before doing conflict check.
+
+Also, your architecture doc says the active optimized path runs optimistic SQL first, then passes a serial gate, checks conflicts, applies writes, publishes result markers, and advances a global contiguous watermark. It also says the old blocking `bcdb_wait_for_prev_committed(tx)` exists as legacy/reference rather than the normal active finish path. 
+
+### Final answer
+
+I agree with the pasted analysis **except for one sentence**:
+
+```text
+“Paper mode IS the pre-Lever-D algorithm.”
+```
+
+I would rewrite it as:
+
+```text
+Paper mode is a conservative last_committed-gated implementation of the paper idea, but stricter than Algorithm 1 because it does not perform incremental WaitForCommitSignals + CheckConflict over partial committed ranges.
+```
+
+So: **no obvious bug**, but for a paper comparison, label it honestly as **strict paper baseline**. The real exact-paper version would sit between your current paper mode and Lever D in performance, like a middle bridge rather than a one-lane tunnel.
+
+Yes. To make it **exactly paper-style**, do **not** wait for `T_i-1` fully at the gate before conflict checking.
+
+Right now your “paper mode” does this:
+
+```text
+optimistic execution
+wait until tx_id - 1 fully committed
+conflict_checkDT()
+publish_ws_tableDT()
+apply + commit
+set_last_committed_txid()
+```
+
+But Algorithm 1 does this instead:
+
+```text
+optimistic execution
+while predecessors are still committing:
+    wait until last_committed advances at least a little
+    check conflicts for newly committed predecessors
+    if conflict: restart
+commit
+publish rw-set
+advance last_committed
+broadcast commit signal
+```
+
+The paper says the worker captures `last_committed_tx_id`, takes a DB snapshot, executes the transaction on that snapshot to get its read/write set, then repeatedly waits for commit signals and checks conflicts until all preceding transactions have committed. Only after that does it commit and broadcast a signal.  
+
+So the code change is: **replace one big wait with incremental wait + conflict-check loop.**
 
 ---
 
-# Desired behavior
+## Change 1: Add a new mode name
 
-Before a worker writes to a result-ring slot, it should ensure that overwriting that slot is safe.
+Do not reuse `BCDB_GATE_SRC_LAST_COMMITTED`, because that currently means your strict mode.
 
-A slot should be safe to reuse only if the previous transaction result in that slot is no longer needed by middleware.
+Add a third mode:
 
-At minimum, the code should detect unsafe overwrite and log/error instead of silently replacing an unread result.
+```c
+#define BCDB_GATE_SRC_PUBLISHED_MAX   0   /* Lever D */
+#define BCDB_GATE_SRC_LAST_COMMITTED  1   /* strict baseline */
+#define BCDB_GATE_SRC_PAPER_EXACT     2   /* Algorithm 1 */
+```
 
-Better: implement backpressure so workers wait until the slot becomes reusable.
+Then your benchmark labels become clean:
+
+```text
+paper_strict      = wait fully before conflict check
+paper_exact       = Algorithm 1 wait/check loop
+leverd            = published_max gate
+leverd_t3         = published_max + CAS watermark
+```
+
+This avoids confusing future-you, the most dangerous debugger in the building. 🧭
 
 ---
 
-# Suggested implementation options
+## Change 2: Replace this block in `worker.c`
 
-## Option A: Add per-slot consumption markers
-
-Add another array to `BCBlock`:
+Your current critical section is around here:
 
 ```c
-int32 volatile result_consumed_txid[BCDB_RESULT_RING_CAPACITY];
+PTRACE_BEGIN(BCDB_PHASE_GATE);
+
+if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
+    bcdb_wait_for_prev_committed(tx);
+else
+    bcdb_wait_for_serial_slot(tx, block);
+
+PTRACE_END(BCDB_PHASE_GATE);
+
+PTRACE_BEGIN(BCDB_PHASE_CONFLICT);
+rw_conflicts = conflict_checkDT();
+PTRACE_END(BCDB_PHASE_CONFLICT);
+
+if (rw_conflicts) {
+    /* retry */
+}
+
+publish_ws_tableDT(tx->tx_id);
+
+if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED) {
+    set_published_max_txid(tx);
+    published_max_advanced = true;
+}
 ```
 
-Meaning:
-
-```text
-result_committed_txid[slot]
-  = latest tx_id published into this slot
-
-result_consumed_txid[slot]
-  = latest tx_id read/consumed by middleware from this slot
-```
-
-Initialize it in `bcdb_reset_block_entry()`:
+This is strict because `bcdb_wait_for_prev_committed(tx)` waits until:
 
 ```c
-block->result_consumed_txid[i] = -1;
+last_committed_tx_id >= tx->tx_id - 1
 ```
 
-When middleware successfully reads a result for `tx_id`, it marks:
+Your pasted code confirms that this full predecessor wait happens before `conflict_checkDT()`, and that `publish_ws_tableDT(tx->tx_id)` currently runs in both modes. 
+
+Replace it with a three-way branch:
 
 ```c
-__atomic_store_n(&block->result_consumed_txid[slot],
-                 tx_id,
-                 __ATOMIC_RELEASE);
+if (bcdb_serial_gate_source == BCDB_GATE_SRC_PAPER_EXACT) {
+    rw_conflicts = bcdb_paper_wait_and_check(tx, block);
+}
+else {
+    PTRACE_BEGIN(BCDB_PHASE_GATE);
+
+    if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
+        bcdb_wait_for_prev_committed(tx);
+    else
+        bcdb_wait_for_serial_slot(tx, block);
+
+    PTRACE_END(BCDB_PHASE_GATE);
+
+    PTRACE_BEGIN(BCDB_PHASE_CONFLICT);
+    rw_conflicts = conflict_checkDT();
+    PTRACE_END(BCDB_PHASE_CONFLICT);
+}
+
+if (rw_conflicts) {
+    /* same retry path as today */
+}
 ```
 
-Before worker writes a new result into a slot, it checks the old occupant:
+Then only publish early for non-paper-exact modes:
 
 ```c
-BCTxID old_txid = __atomic_load_n(&block->result_committed_txid[slot],
-                                  __ATOMIC_ACQUIRE);
+if (bcdb_serial_gate_source != BCDB_GATE_SRC_PAPER_EXACT) {
+    publish_ws_tableDT(tx->tx_id);
 
-if (old_txid >= 0 && old_txid != tx_id) {
-    BCTxID consumed = __atomic_load_n(&block->result_consumed_txid[slot],
-                                      __ATOMIC_ACQUIRE);
-
-    if (consumed != old_txid) {
-        // unsafe overwrite
-        wait / backpressure / ERROR depending on policy
+    if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED) {
+        set_published_max_txid(tx);
+        published_max_advanced = true;
     }
 }
 ```
 
-This gives a real correctness guard.
+Why? In the paper, `Commit(Tx_id_i)` inserts the read/write set into the global set and then advances `last_committed_tx_id`. The global table represents **committed** transactions, not merely simulated transactions. 
 
 ---
 
-## Option B: Use global safe-to-overwrite watermark
+## Change 3: Add the paper-style wait/check helper
 
-Instead of per-slot consumed markers, maintain a global value:
-
-```c
-int32 volatile result_consumed_watermark;
-```
-
-Meaning:
-
-```text
-All results <= result_consumed_watermark have been read by middleware.
-```
-
-Before writing `tx_id` into `slot`, compute the previous possible occupant:
-
-```text
-previous_txid = tx_id - runtime_slots
-```
-
-Then check:
+Add this in `worker.c`:
 
 ```c
-if (previous_txid >= 0 &&
-    previous_txid > result_consumed_watermark)
+static int
+bcdb_paper_wait_and_check(BCDBShmXact *tx, BCBlock *block)
 {
-    // previous result may not have been consumed yet
-    wait or error
+    BCTxID oldest_commit_id;
+    BCTxID latest_commit_id;
+    BCTxID target_commit_id;
+    int rw_conflicts = 0;
+
+    /*
+     * Algorithm 1:
+     * oldest_commit_id was captured before snapshot / optimistic execution.
+     *
+     * In your code, activeTx->tx_id_committed is already set before
+     * get_write_set(), so it represents the snapshot baseline:
+     *
+     *     oldest_commit_id = last_committed_tx_id at snapshot time
+     */
+    oldest_commit_id = activeTx->tx_id_committed;
+    target_commit_id = tx->tx_id - 1;
+
+    while (oldest_commit_id < target_commit_id) {
+        /*
+         * WaitForCommitSignals().
+         *
+         * Important: wait only until last_committed advances beyond
+         * oldest_commit_id, NOT until tx_id - 1.
+         */
+        PTRACE_BEGIN(BCDB_PHASE_GATE);
+        latest_commit_id =
+            bcdb_wait_until_commit_advances(tx, block, oldest_commit_id);
+        PTRACE_END(BCDB_PHASE_GATE);
+
+        if (latest_commit_id > target_commit_id)
+            latest_commit_id = target_commit_id;
+
+        /*
+         * CheckConflict(oldest_commit_id, latest_commit_id, rw_set_k).
+         *
+         * Minimal version:
+         * temporarily move the lower bound so conflict_checkDT()
+         * checks only newly committed predecessors.
+         *
+         * Cleaner version:
+         * implement conflict_checkDT_range(oldest, latest).
+         */
+        PTRACE_BEGIN(BCDB_PHASE_CONFLICT);
+
+        activeTx->tx_id_committed = oldest_commit_id;
+
+        /*
+         * If your conflict_checkDT always checks up to current
+         * last_committed_tx_id, this is still safe, but slightly less exact.
+         * For exact paper behavior, add an upper bound latest_commit_id.
+         */
+        rw_conflicts = conflict_checkDT();
+
+        PTRACE_END(BCDB_PHASE_CONFLICT);
+
+        if (rw_conflicts)
+            return 1;
+
+        oldest_commit_id = latest_commit_id;
+    }
+
+    return 0;
 }
 ```
 
-This is simpler and cheaper than per-slot markers, but only works well if middleware reads results in tx_id order.
+Then add the helper it calls:
 
-Since the middleware usually assembles block results in tx order, this may be enough.
+```c
+static BCTxID
+bcdb_wait_until_commit_advances(BCDBShmXact *tx,
+                                BCBlock *block,
+                                BCTxID old_commit_id)
+{
+    BCTxID latest;
+    uint64 wait_start_us = bcdb_get_time();
+    uint64 next_warn_us = wait_start_us + 5000000;
+    int spins = 0;
+
+    for (;;) {
+        latest = get_last_committed_txid(tx);
+
+        if (latest > old_commit_id)
+            return latest;
+
+        /*
+         * Poll/sleep version.
+         * This matches the paper's "periodic or count-based or combination"
+         * wait idea.
+         */
+        if (++spins < 128) {
+            pg_spin_delay();
+        }
+        else {
+            pg_usleep(64);
+        }
+
+        if (bcdb_get_time() >= next_warn_us) {
+            ereport(LOG,
+                    (errmsg("[BCDB_PAPER_WAIT] txid=%d old_commit=%d last_committed=%d waited_us=%lu",
+                            tx->tx_id,
+                            old_commit_id,
+                            latest,
+                            (unsigned long)(bcdb_get_time() - wait_start_us))));
+            next_warn_us += 5000000;
+        }
+    }
+}
+```
+
+This is the heart transplant. Your old wait function waits for the whole bridge to clear. This one waits for one or more cars to move, checks, then waits again.
 
 ---
+
+## Change 4: For exactness, add an upper-bound conflict check
+
+The better version is not:
+
+```c
+conflict_checkDT();
+```
+
+It is:
+
+```c
+conflict_checkDT_range(oldest_commit_id, latest_commit_id);
+```
+
+Because Algorithm 1 calls:
+
+```text
+CheckConflict(oldest_commit_id, latest_commit_id, rw_set_k)
+```
+
+The paper pseudocode explicitly passes both lower and upper transaction IDs into `CheckConflict`. 
+
+So add this wrapper:
+
+```c
+static int
+conflict_checkDT_range(BCTxID from_exclusive, BCTxID to_inclusive)
+{
+    /*
+     * Best implementation:
+     * teach table_checkDT/ws lookup to ignore committed write-set records with:
+     *
+     *     writer_txid <= from_exclusive
+     *     writer_txid >  to_inclusive
+     *
+     * Return conflict only when:
+     *
+     *     from_exclusive < writer_txid <= to_inclusive
+     */
+}
+```
+
+Then the paper loop becomes:
+
+```c
+rw_conflicts =
+    conflict_checkDT_range(oldest_commit_id, latest_commit_id);
+```
+
+If you want a **minimal patch first**, you can temporarily keep `conflict_checkDT()` and only use the incremental wait loop. That will be safe, but not perfectly Algorithm 1 if `conflict_checkDT()` cannot limit the upper bound.
+
+---
+
+## Change 5: Move `publish_ws_tableDT()` in paper-exact mode
+
+For `BCDB_GATE_SRC_PAPER_EXACT`, do **not** publish here:
+
+```c
+publish_ws_tableDT(tx->tx_id);  /* old location before apply */
+```
+
+Instead publish during finish, after successful apply, immediately before advancing `last_committed`.
+
+Your finish phase should become:
+
+```c
+if (bcdb_serial_gate_source == BCDB_GATE_SRC_PAPER_EXACT) {
+    /*
+     * At this point:
+     * - optimistic execution succeeded
+     * - conflict checks against all predecessors succeeded
+     * - apply succeeded
+     *
+     * Now make this transaction visible to later transactions.
+     */
+    publish_ws_tableDT(tx->tx_id);
+
+    /*
+     * Make sure ws publication is visible before the commit watermark.
+     */
+    pg_write_barrier();
+
+    set_last_committed_txid(tx);
+
+    /*
+     * Optional but closer to the paper's CommitSignalBroadcast().
+     * If your wait helper is polling-only, this is not required,
+     * but it is cleaner and reduces latency.
+     */
+    ConditionVariableBroadcast(&block->condCommit);
+}
+else if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED) {
+    set_last_committed_txid(tx);
+}
+else if (bcdb_advance_commit_watermark) {
+    advance_last_committed_txid(tx);
+}
+```
+
+Important: only do this after you are sure the PostgreSQL apply/commit path has succeeded. If apply fails and you already published the write-set, later transactions may see a ghost transaction. Ghosts belong in haunted houses, not conflict tables. 👻
+
+---
+
+## Change 6: Make sure paper-exact does not use Lever D/T3 shortcuts
+
+For exact paper mode:
+
+```c
+set_published_max_txid(tx);        /* no */
+advance_last_committed_txid(tx);   /* no */
+bcdb_wait_for_serial_slot(...);    /* no */
+```
+
+Use only:
+
+```c
+last_committed_tx_id
+commit signals / polling
+publish_ws_tableDT at commit
+set_last_committed_txid
+```
+
+Your architecture doc says the current active optimized path uses `published_max_tx_id` for Lever D and uses `advance_last_committed_txid()` for the T3 finish path. Those are exactly the optimizations you should bypass for paper-exact benchmarking. 
+
+---
+
+## Final paper-exact flow
+
+After changes, `paper_exact` should look like this:
+
+```text
+retry_loop:
+
+  oldest_commit_id = get_last_committed_txid()
+  activeTx->tx_id_committed = oldest_commit_id
+
+  snapshot = GetTransactionSnapshot()
+
+  rw_set_k = get_write_set(tx, snapshot)
+
+  while oldest_commit_id < tx_id - 1:
+      wait until last_committed_tx_id > oldest_commit_id
+      latest_commit_id = last_committed_tx_id
+
+      conflict = CheckConflict(oldest_commit_id,
+                               min(latest_commit_id, tx_id - 1),
+                               rw_set_k)
+
+      if conflict:
+          restart transaction with new snapshot
+
+      oldest_commit_id = latest_commit_id
+
+  apply buffered writes
+
+  publish_ws_tableDT(tx_id)
+
+  set_last_committed_txid(tx_id)
+
+  broadcast commit signal
+```
+
+This is the version I would call:
+
+```text
+paper_exact
+```
+
+Your current version should be called:
+
+```text
+paper_strict
+```
+
+And Lever D remains:
+
+```text
+leverd = publish write-set before apply, then let successor conflict-check early
+```
+
+One final practical warning: turn `bcdb_dt_conflict_tracking=on` during these tests. Your architecture doc says conflict tracking is an active GUC but defaults to `off`, and with it off the “paper algorithm” becomes mostly a commit-ordering benchmark rather than an Aria-style read/write conflict benchmark. 

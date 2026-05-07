@@ -168,7 +168,7 @@ private:
 
     std::string exec_sql(PGconn* c, const std::string& sql);
     bool exec_det_block_batch(PGconn* c,
-                              uint64_t block_id,
+                              uint64_t tx_key_start,
                               const std::vector<task>& tasks,
                               std::vector<std::string>& out_results);
     void ensure_bcdb_initialized_for_sql(const std::string& sql);
@@ -235,11 +235,14 @@ private:
     bool det_raw_compat_mode_ = false;
     uint64_t det_next_block_id_ = 2;
     uint64_t det_block_tx_key_base_ = 0;
+    uint64_t det_block_next_tx_key_ = 0;
     PGconn* bcdb_ctrl_conn_ = nullptr;
     std::mutex bcdb_init_mu_;
     bool bcdb_init_done_ = false;
     bool bcdb_init_failed_ = false;
     int bcdb_block_size_ = 0;
+    int det_block_pipeline_ = 1;
+    size_t det_block_max_ = 2048;
     int wakeup_rfd_ = -1;
     int wakeup_wfd_ = -1;
     std::atomic<uint64_t> st_backlog_cur_{0};

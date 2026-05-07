@@ -86,6 +86,20 @@ combined_ldflags="${LDFLAGS:-}"
 if [[ -n "$EXTRA_LIB_ROOT" ]]; then
   combined_ldflags="-L$EXTRA_LIB_ROOT${combined_ldflags:+ $combined_ldflags}"
 fi
+USE_EXISTING_CONFIG=0
+if [[ -x "$REPO_ROOT/config.status" ]]; then
+  USE_EXISTING_CONFIG=1
+  if [[ -L "$REPO_ROOT/src/include/utils/errcodes.h" ]]; then
+    errcodes_target="$(readlink "$REPO_ROOT/src/include/utils/errcodes.h")"
+    case "$errcodes_target" in
+      "$REPO_ROOT"/*|../*) ;;
+      *) USE_EXISTING_CONFIG=0 ;;
+    esac
+  fi
+fi
+if [[ "$FORCE_REBUILD" == "1" && "$CLEAN_WHEN_REBUILD" == "1" ]]; then
+  USE_EXISTING_CONFIG=0
+fi
 
 {
   echo "[INFO] repo_root=$REPO_ROOT"
@@ -97,11 +111,16 @@ fi
   echo "[INFO] extra_include_root=${EXTRA_INCLUDE_ROOT:-none}"
   echo "[INFO] extra_lib_root=${EXTRA_LIB_ROOT:-none}"
   cd "$REPO_ROOT"
-  if [[ "$CLEAN_WHEN_REBUILD" == "1" ]]; then
+  if [[ "$USE_EXISTING_CONFIG" == "1" ]]; then
+    echo "[INFO] configured tree found; refreshing generated files via config.status"
+    ./config.status
+  elif [[ "$CLEAN_WHEN_REBUILD" == "1" ]]; then
     echo "[INFO] pre-configure clean=distclean"
     make -C "$REPO_ROOT" distclean || make -C "$REPO_ROOT" clean || true
+    ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" ./configure --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+  else
+    ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" ./configure --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
   fi
-  ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" ./configure --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
   make -C "$REPO_ROOT" -j"$jobs" install prefix="$INSTALL_DIR"
 } >"$build_log" 2>&1
 
