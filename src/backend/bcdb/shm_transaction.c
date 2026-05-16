@@ -332,6 +332,57 @@ bcdb_table_tuple_delete_step1(Relation relation,
 #define RSTablePartitionLock(hashcode) (&(rs_table->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS]))
 
 /*
+ * WSTableLockAllPartitions / WSTableUnlockAllPartitions
+ *
+ * DT hash rotation uses shm_hash_clear(), which rewrites the dynahash bucket
+ * and freelist state in bulk.  Normal readers/writers already protect each
+ * hash_search_with_hash_value() with one WSTable partition spinlock; rotation
+ * must therefore take every partition lock before clearing a shard.  Without
+ * this, one backend can be inside dynahash while another resets the same hash
+ * table, leaving a partition spinlock held forever and eventually panicking as
+ * "stuck spinlock detected" in table_checkDT().
+ *
+ * Locks are acquired in ascending index and released in reverse order.  Normal
+ * operations only ever take one partition lock, so this ordering cannot form a
+ * cycle with them.
+ */
+static void
+WSTableLockAllPartitions(WSTable *table)
+{
+	int i;
+
+	for (i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
+		SpinLockAcquire(&table->map_locks[i]);
+}
+
+static void
+WSTableUnlockAllPartitions(WSTable *table)
+{
+	int i;
+
+	for (i = WRITE_CONFLICT_MAP_NUM_PARTITIONS - 1; i >= 0; i--)
+		SpinLockRelease(&table->map_locks[i]);
+}
+
+/*
+ * WSTableClearShard
+ *
+ * Safely clear one DT write-set shard while excluding all concurrent
+ * table_checkDT() probes and publish_ws_tableDT() inserts.  mapB has an
+ * additional non-empty cache bit; clear it while the table is still locked so
+ * later readers cannot skip/scan based on stale state.
+ */
+static void
+WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b)
+{
+	WSTableLockAllPartitions(table);
+	shm_hash_clear(map, MAX_WRITE_CONFLICT);
+	if (clears_map_b)
+		pg_atomic_write_u32(&table->mapB_nonempty, 0);
+	WSTableUnlockAllPartitions(table);
+}
+
+/*
  * dummy_hash
  *
  * Identity hash for use with the WSTable partitioned hash tables.
@@ -2284,8 +2335,10 @@ conflict_check(void)
  *   Requirement: HASHTAB_SWITCH_THRESHOLD >= 2 * NUM_WORKERS - 1 so that
  *   no worker is still reading the old shard when it is cleared.
  *
- * For each write-set record, HASH_ENTER stores entry->tx_id = min(existing,
- * activeTx->tx_id) so that the earliest ordering tx_id "wins" the slot.
+ * For each write-set record, HASH_ENTER stores the latest writer tx_id seen in
+ * the active shard.  That is enough for later conflict checks: if the latest
+ * earlier writer committed before our snapshot, every older writer is also safe;
+ * if it did not, the current tx must retry.
  *
  * Called from worker.c after conflict_checkDT() returns clean.
  */
@@ -2328,7 +2381,7 @@ publish_ws_tableDT(int id)
 	    ws_table->mapActive = ws_table->map;
 	    if(id % threshold == 0 ) {
                 uint64 hash_clear_start = bcdb_ptrace_timer_start();
-		    shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
+			WSTableClearShard(ws_table, ws_table->map, false);
                 bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
                                        hash_clear_start);
                 bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
@@ -2340,11 +2393,10 @@ publish_ws_tableDT(int id)
 	        using_map_b = true;
 	    if(id % threshold == 0 ) {
                 uint64 hash_clear_start = bcdb_ptrace_timer_start();
-		    shm_hash_clear(ws_table->mapB, MAX_WRITE_CONFLICT);
+			WSTableClearShard(ws_table, ws_table->mapB, true);
                 bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
                                        hash_clear_start);
                 bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
-	            pg_atomic_write_u32(&ws_table->mapB_nonempty, 0);
 		    // shm_hash_clear(rs_table->mapB, MAX_WRITE_CONFLICT);
 	    }
     } // clean_rs_ws_table(id); // reset before HASH_ENTER get-write-set !!!
