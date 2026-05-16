@@ -57,16 +57,15 @@ lib*.pc
 # Exclude scripts by default (but allow whitelisting specific files)
 /scripts/*
 
-# ...except for a small set of distributed orchestration scripts
+# ...except for all distributed orchestration / benchmark / runbook files.
+# This folder is the collaborator-facing entrypoint for the 4-node Raft
+# cluster work, so everything in it is intentionally tracked.  The earlier
+# whitelist-only model kept churning every time a new script was added.
 !/scripts/distributed/
+!/scripts/distributed/**
 
-# Ignore everything under scripts/distributed/ by default...
-/scripts/distributed/*
-
-# ...but track these specific entrypoints
-!/scripts/distributed/ensure_rdkafka.sh
-!/scripts/distributed/ensure_custom_install_from_repo.sh
-!/scripts/distributed/run_4node_raft_cluster.sh
+# Python bytecode under the distributed/ folder is still build output.
+/scripts/distributed/__pycache__/
 
 # Local AI/tooling metadata (do not commit)
 /.claude/

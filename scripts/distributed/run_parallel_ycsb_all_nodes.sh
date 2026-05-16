@@ -1,0 +1,925 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#
+# run_parallel_ycsb_all_nodes.sh
+#
+# Syncs updated AriaBC source to all lab nodes simultaneously, then launches
+# the YCSB det-mode benchmark on every node IN PARALLEL (no waiting for one
+# to finish before starting the next).
+#
+# Active nodes:
+#   neel@10.129.148.248    utkarsh-MS-7C96
+#   neel@10.129.27.54      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
+#   neel@10.129.148.236    neel-MS-7C96
+#   neel@10.129.148.179    anant-side       (Ubuntu 22.04 – passwordless key auth)
+#
+# Default benchmark profiles (runs 3 × modes in this order):
+#   1. pg mode             – plain PostgreSQL baseline (no BCDB)
+#   2. det mode sign=0     – deterministic, unsigned,  enforce_signatures=1
+#   3. det mode sign=1     – deterministic, signed,    enforce_signatures=1
+#
+# Signing key for sign=1 runs lives at scripts/bench_signing_privkey.pem (EC P-256).
+#
+# Flow:
+#   Phase 1 – Sync source + install to all remote nodes in parallel (rsync bg)
+#   Phase 2 – Launch bench on every node in parallel (nohup SSH, capture PIDs)
+#   Phase 3 – Monitor loop: poll every POLL_INTERVAL_S seconds, hang detection
+#   Phase 4 – Collect results from all nodes, print final summary
+#
+# Usage:
+#   scripts/distributed/run_parallel_ycsb_all_nodes.sh [options]
+#
+#   --ssh-key <path>        SSH private key (optional if key-auth is default)
+#   --ssh-port <22>         SSH port
+#   --modes <pg,det>        Comma-separated modes: pg, det, nondet  [default: pg,det]
+#   --threads <csv>         Thread counts csv  [default: 1,2,3,4,5,6,8,10,12,16]
+#   --runs <3>              Runs per workload/thread combination
+#   --workloads <csv>       Workload filenames (default: bench_threads_matrix.py defaults)
+#   --rates <csv>           Rate limits csv (optional)
+#   --signing-modes <0,1>   Signing modes for det runs: 0=unsigned, 1=signed  [default: 0,1]
+#   --signing-privkey <p>   Signing key path (relative to repo root)  [default: scripts/bench_signing_privkey.pem]
+#   --enforce-signatures <1> 0|1 — set bcdb_enforce_signatures in workload sessions  [default: 1]
+#   --poll-interval <60>    Seconds between monitoring polls
+#   --hang-timeout <1200>   Seconds of no log change before hang warning
+#   --skip-sync             Skip the rsync phase (reuse last-synced remote source)
+#
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$SCRIPT_DIR/benchmark_defaults.sh"
+
+# ---- Static node config ----
+NEEL_NODES=(
+  "neel@10.129.148.248"
+  "neel@10.129.27.54"
+  "neel@10.129.148.236"
+  "neel@10.129.148.179"
+)
+NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"
+NEEL_REMOTE_INSTALL="/home/neel/Desktop/ariabc_install"
+TEMPLATE_CONF_LOCAL="/work/ARIABC/pgdata/postgresql.conf"
+
+# Node-specific password auth (all nodes now use key auth; add entries here only
+# if a node requires sshpass).
+declare -A NODE_PASSWORDS=()
+
+# ---- Tunable defaults ----
+SSH_KEY=""
+SSH_PORT=22
+MODES="pg,det"
+THREADS="${ARIABC_DEFAULT_FULL_THREADS}"
+RUNS=3
+WORKLOADS=""
+RATES=""
+SIGNING_MODES="0"
+SIGNING_PRIVKEY="scripts/bench_signing_privkey.pem"
+ENFORCE_SIGNATURES="1"
+DB_NAME="postgres"
+DB_USER="postgres"
+DB_PORT=5438
+POLL_INTERVAL_S=60
+HANG_TIMEOUT_S=1200
+SKIP_SYNC=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ssh-key)       SSH_KEY="${2:-}"; shift 2 ;;
+    --ssh-port)      SSH_PORT="${2:-22}"; shift 2 ;;
+    --modes)         MODES="${2:-det}"; shift 2 ;;
+    --threads)       THREADS="${2:-}"; shift 2 ;;
+    --runs)          RUNS="${2:-3}"; shift 2 ;;
+    --workloads)     WORKLOADS="${2:-}"; shift 2 ;;
+    --rates)         RATES="${2:-}"; shift 2 ;;
+    --signing-modes) SIGNING_MODES="${2:-}"; shift 2 ;;
+    --signing-privkey) SIGNING_PRIVKEY="${2:-}"; shift 2 ;;
+    --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
+    --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
+    --hang-timeout)  HANG_TIMEOUT_S="${2:-1200}"; shift 2 ;;
+    --skip-sync)     SKIP_SYNC=1; shift 1 ;;
+    -h|--help)
+      sed -n '/^# Usage/,/^[^#]/p' "$0" | head -n 20
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+SIGNING_PRIVKEY_LOCAL=""
+if [[ -n "$SIGNING_PRIVKEY" ]]; then
+  if [[ "$SIGNING_PRIVKEY" == /* ]]; then
+    SIGNING_PRIVKEY_LOCAL="$SIGNING_PRIVKEY"
+  else
+    SIGNING_PRIVKEY_LOCAL="$REPO_ROOT/${SIGNING_PRIVKEY#./}"
+  fi
+
+  if [[ ! -f "$SIGNING_PRIVKEY_LOCAL" ]]; then
+    echo "ERROR: signing private key not found: $SIGNING_PRIVKEY_LOCAL" >&2
+    exit 1
+  fi
+
+  if [[ "$SIGNING_PRIVKEY_LOCAL" != "$REPO_ROOT/"* ]]; then
+    echo "ERROR: --signing-privkey must be inside repo root for remote runs: $REPO_ROOT" >&2
+    echo "       provided: $SIGNING_PRIVKEY_LOCAL" >&2
+    exit 1
+  fi
+fi
+
+# ---- Helpers ----
+_ts()   { date '+%F %T'; }
+lmsg()  { echo "[$(_ts)] $*"; }
+
+# Node tracking arrays — declared here so _abort_run() can reference them
+# even if called before Phase 2 populates them.
+declare -A NODE_PID=()
+declare -A NODE_LOG=()
+declare -A NODE_REMOTE_OUT=()
+declare -A NODE_TYPE=()
+declare -A NODE_REPO=()
+declare -A NODE_INST=()
+declare -A NODE_STATUS=()
+declare -A NODE_LAST_HASH=()
+declare -A NODE_LAST_CHG=()
+declare -A NODE_RSYNC_PID=()
+
+# _abort_run REASON [node1 node2 ...]
+# Prints which nodes have issues, kills any in-flight bench processes, exits 1.
+_abort_run() {
+  local reason="$1"; shift
+  local -a bad_nodes=("$@")
+
+  echo ""
+  echo "╔══════════════════════════════════════════════════════════╗"
+  echo "║  BENCHMARK ABORTED                                       ║"
+  echo "╚══════════════════════════════════════════════════════════╝"
+  lmsg "Reason: $reason"
+
+  if [[ "${#bad_nodes[@]}" -gt 0 ]]; then
+    lmsg "Nodes with issues (${#bad_nodes[@]}):"
+    for n in "${bad_nodes[@]}"; do
+      lmsg "  ✗  $n"
+    done
+  fi
+  echo ""
+
+  # Kill any bench processes that are still running.
+  local killed_any=0
+  for n in "${!NODE_STATUS[@]}"; do
+    [[ "${NODE_STATUS[$n]:-}" != "running" ]] && continue
+    local pid="${NODE_PID[$n]:-}"
+    [[ -z "$pid" ]] && continue
+    if ssh_run "$n" "kill $pid 2>/dev/null" 2>/dev/null; then
+      lmsg "  Killed remote bench pid=$pid on $n"
+      killed_any=1
+    fi
+  done
+  [[ "$killed_any" == "0" ]] && lmsg "  (no running bench processes to kill)"
+
+  lmsg "Logs: $LOG_DIR"
+  exit 1
+}
+
+safe_label() {
+  local s="$1"
+  s="${s//@/_at_}"; s="${s//./_}"; s="${s//-/_}"
+  printf '%s' "$s"
+}
+
+_ssh_base() {
+  local arr=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p "$SSH_PORT")
+  [[ -n "$SSH_KEY" ]] && arr+=(-i "$SSH_KEY")
+  printf '%q ' "${arr[@]}"
+}
+
+_node_password() {
+  local node="$1"
+  printf '%s' "${NODE_PASSWORDS[$node]:-}"
+}
+
+ssh_run() {
+  local node="$1"; shift
+  local pass
+  pass="$(_node_password "$node")"
+  local ssh_arr=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p "$SSH_PORT")
+  if [[ -n "$pass" ]]; then
+    command -v sshpass >/dev/null 2>&1 || {
+      echo "ERROR: sshpass is required for password-auth node $node" >&2
+      return 127
+    }
+    ssh_arr=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p "$SSH_PORT")
+    [[ -n "$SSH_KEY" ]] && ssh_arr+=(-i "$SSH_KEY")
+    sshpass -p "$pass" "${ssh_arr[@]}" "$node" "$@"
+  else
+    ssh_arr=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p "$SSH_PORT")
+    [[ -n "$SSH_KEY" ]] && ssh_arr+=(-i "$SSH_KEY")
+    "${ssh_arr[@]}" "$node" "$@"
+  fi
+}
+
+_rsync_e_for_node() {
+  local node="$1"
+  local pass
+  pass="$(_node_password "$node")"
+  local e="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p $SSH_PORT"
+  if [[ -n "$pass" ]]; then
+    command -v sshpass >/dev/null 2>&1 || {
+      echo "ERROR: sshpass is required for password-auth node $node" >&2
+      return 127
+    }
+    [[ -n "$SSH_KEY" ]] && e+=" -i $SSH_KEY"
+    printf 'sshpass -p %q %s' "$pass" "$e"
+  else
+    e+=" -o BatchMode=yes"
+    [[ -n "$SSH_KEY" ]] && e+=" -i $SSH_KEY"
+    printf '%s' "$e"
+  fi
+}
+
+# ---- Pre-flight validation ----
+for req in \
+  "$TEMPLATE_CONF_LOCAL" \
+  "$REPO_ROOT/scripts/distributed/ensure_single_node_postgres.sh" \
+  "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh" \
+  "$REPO_ROOT/scripts/start_server.sh" \
+  "$REPO_ROOT/scripts/bench_threads_matrix.py" \
+  "$REPO_ROOT/scripts/restore_usertable_small.sql"; do
+  if [[ ! -f "$req" ]]; then
+    echo "ERROR: required file missing: $req" >&2; exit 1
+  fi
+done
+
+for node in "${!NODE_PASSWORDS[@]}"; do
+  if [[ -n "${NODE_PASSWORDS[$node]}" ]]; then
+    command -v sshpass >/dev/null 2>&1 || {
+      echo "ERROR: sshpass is required because password auth is configured for $node" >&2
+      exit 1
+    }
+  fi
+done
+
+ts="$(date +%Y%m%d_%H%M%S)"
+LOCAL_RESULT_ROOT="$REPO_ROOT/scripts/bench_full_results/parallel_ycsb_${ts}"
+LOG_DIR="$LOCAL_RESULT_ROOT/_run_logs"
+mkdir -p "$LOG_DIR"
+
+lmsg "=== Parallel YCSB benchmark – all nodes ==="
+lmsg "Timestamp    : $ts"
+lmsg "Modes        : $MODES"
+lmsg "Threads      : $THREADS"
+lmsg "Runs         : $RUNS"
+lmsg "Workloads    : ${WORKLOADS:-<bench_threads_matrix.py defaults>}"
+lmsg "SigningModes : ${SIGNING_MODES:-<default>}"
+lmsg "SigningKey   : ${SIGNING_PRIVKEY_LOCAL:-<not set>}"
+lmsg "EnforceSig   : ${ENFORCE_SIGNATURES:-<default>}"
+lmsg "Result root  : $LOCAL_RESULT_ROOT"
+echo
+
+# ---- Build node registry ----
+# Entry format: "node|repo_root|install_dir|type"
+declare -a ALL_NODES=()
+
+for n in "${NEEL_NODES[@]}"; do
+  ALL_NODES+=("$n|${NEEL_REMOTE_REPO}|${NEEL_REMOTE_INSTALL}|neel")
+done
+
+lmsg "Nodes:"
+for entry in "${ALL_NODES[@]}"; do
+  IFS='|' read -r node repo inst type <<< "$entry"
+  lmsg "  [$type] $node"
+done
+echo
+
+# ============================================================
+# PREFLIGHT: SSH REACHABILITY CHECK
+# Every remote node must be reachable before any work starts.
+# Fail fast with a clear list of unreachable nodes.
+# ============================================================
+lmsg "=== Preflight: SSH reachability check ==="
+declare -a _unreachable=()
+for entry in "${ALL_NODES[@]}"; do
+  IFS='|' read -r node repo inst type <<< "$entry"
+  if ssh_run "$node" "echo alive" >/dev/null 2>&1; then
+    lmsg "  [OK]          $node"
+  else
+    lmsg "  [UNREACHABLE] $node"
+    _unreachable+=("$node")
+  fi
+done
+if [[ "${#_unreachable[@]}" -gt 0 ]]; then
+  _abort_run "${#_unreachable[@]} node(s) unreachable via SSH" "${_unreachable[@]}"
+fi
+lmsg "Preflight: all nodes reachable."
+echo
+
+# ============================================================
+# PHASE 0: KILL STALE BENCHMARK PROCESSES ON ALL NODES
+# ============================================================
+lmsg "=== Phase 0: Killing any stale benchmark processes ==="
+
+# Patterns to kill (bench orchestrator + workload traffic loader).
+# We do NOT touch postgres itself – ensure_single_node_postgres.sh handles that.
+_KILL_PATTERNS=(
+  "bench_threads_matrix.py"
+  "generic-saicopg"
+  "saicopg-traffic"
+)
+
+_kill_on_node() {
+  local node="$1"
+  local type="$2"
+  local killed=0
+
+  for pat in "${_KILL_PATTERNS[@]}"; do
+    local result
+    result=$(ssh_run "$node" "pkill -f '$pat' 2>/dev/null && echo KILLED || true" 2>/dev/null || true)
+    if [[ "$result" == "KILLED" ]]; then
+      lmsg "  [KILL] $node – terminated processes matching '$pat'"
+      killed=1
+    fi
+  done
+
+  if [[ "$killed" == "0" ]]; then
+    lmsg "  [CLEAN] ${node} – no stale processes found"
+  fi
+}
+
+for entry in "${ALL_NODES[@]}"; do
+  IFS='|' read -r node repo inst type <<< "$entry"
+  _kill_on_node "$node" "$type"
+done
+
+# Give processes a moment to fully exit before we sync/launch
+sleep 2
+lmsg "Phase 0 complete."
+echo
+
+# ============================================================
+# PHASE 1: PARALLEL SOURCE SYNC
+# ============================================================
+declare -A SYNC_STATUS=()
+
+if [[ "$SKIP_SYNC" == "1" ]]; then
+  lmsg "=== Phase 1: SKIPPED (--skip-sync) ==="
+  for entry in "${ALL_NODES[@]}"; do
+    IFS='|' read -r node repo inst type <<< "$entry"
+    SYNC_STATUS["$node"]="OK"
+  done
+else
+  lmsg "=== Phase 1: Syncing source to all remote nodes in parallel ==="
+
+  declare -A SYNC_BGPIDS=()
+  declare -A SYNC_LOGS=()
+
+  for entry in "${ALL_NODES[@]}"; do
+    IFS='|' read -r node repo inst type <<< "$entry"
+    slog="$LOG_DIR/sync_$(safe_label "$node").log"
+    SYNC_LOGS["$node"]="$slog"
+    SYNC_STATUS["$node"]="running"
+
+    (
+      set -euo pipefail
+      echo "[SYNC] $node  repo=$repo  install=$inst" > "$slog"
+      echo "Started: $(_ts)" >> "$slog"
+
+      # rsync may return 24 when transient build artifacts disappear mid-transfer.
+      # Treat that specific code as a warning; keep all other failures fatal.
+      _rsync_allow_vanished() {
+        local rc
+        if rsync "$@"; then
+          return 0
+        fi
+        rc=$?
+        if [[ "$rc" -eq 24 ]]; then
+          echo "WARN: rsync exited 24 (vanished source files) — continuing" >> "$slog"
+          return 0
+        fi
+        return "$rc"
+      }
+
+      # Ensure remote dirs exist
+      ssh_run "$node" "mkdir -p '$repo' '$inst' '$repo/.bench_tmp' '$repo/.bench_tmp/deps/lib'" >> "$slog" 2>&1
+
+      # Stage OpenSSL headers (needed for Ubuntu 22.04 on-host rebuild)
+      if [[ -f /usr/include/openssl/sha.h ]]; then
+        ssh_run "$node" "mkdir -p '$repo/.bench_tmp/deps/include/openssl'" >> "$slog" 2>&1
+        _rsync_allow_vanished -az --delete \
+          -e "$(_rsync_e_for_node "$node")" \
+          /usr/include/openssl/ "$node:$repo/.bench_tmp/deps/include/openssl/" >> "$slog" 2>&1
+        if [[ -d /usr/include/x86_64-linux-gnu/openssl ]]; then
+          _rsync_allow_vanished -az \
+            -e "$(_rsync_e_for_node "$node")" \
+            /usr/include/x86_64-linux-gnu/openssl/ \
+            "$node:$repo/.bench_tmp/deps/include/openssl/" >> "$slog" 2>&1
+        fi
+      fi
+
+      # libcrypto.so symlink shim for nodes missing libssl-dev
+      ssh_run "$node" "
+        for cand in \
+          /usr/lib/x86_64-linux-gnu/libcrypto.so \
+          /lib/x86_64-linux-gnu/libcrypto.so \
+          /usr/lib/x86_64-linux-gnu/libcrypto.so.3 \
+          /lib/x86_64-linux-gnu/libcrypto.so.3; do
+          if [[ -e \$cand ]]; then
+            ln -sf \"\$cand\" '$repo/.bench_tmp/deps/lib/libcrypto.so'
+            break
+          fi
+        done
+      " >> "$slog" 2>&1
+
+      # Sync source tree (excludes .git, .venv, .bench_tmp, bench results)
+      _rsync_allow_vanished -az --delete \
+        --exclude='.git' \
+        --exclude='.venv' \
+        --exclude='.bench_tmp' \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        --exclude='scripts/big_usertable.sql' \
+        --exclude='scripts/bench_full_results' \
+        --exclude='scripts/bench_results' \
+        --exclude='scripts/bench_results_tpcc' \
+        -e "$(_rsync_e_for_node "$node")" \
+        "$REPO_ROOT/" "$node:$repo/" >> "$slog" 2>&1
+
+      # Sync compiled install tree (Ubuntu 24.04 nodes may use it directly;
+      # ensure_custom_install_from_repo.sh will rebuild on Ubuntu 22.04 if glibc differs)
+      _rsync_allow_vanished -az --delete \
+        -e "$(_rsync_e_for_node "$node")" \
+        /work/ARIABC/install/ "$node:$inst/" >> "$slog" 2>&1
+
+      # Copy canonical postgresql.conf template
+      _rsync_allow_vanished -az \
+        -e "$(_rsync_e_for_node "$node")" \
+        "$TEMPLATE_CONF_LOCAL" "$node:$repo/.bench_tmp/shared_postgresql.conf" >> "$slog" 2>&1
+
+      echo "Finished OK: $(_ts)" >> "$slog"
+    ) &
+    SYNC_BGPIDS["$node"]=$!
+    lmsg "  Started sync for $node (bg PID=${SYNC_BGPIDS[$node]})"
+  done
+
+  lmsg "  Waiting for all syncs to complete..."
+  for node in "${!SYNC_BGPIDS[@]}"; do
+    if wait "${SYNC_BGPIDS[$node]}" 2>/dev/null; then
+      SYNC_STATUS["$node"]="OK"
+      lmsg "  [OK]   $node"
+    else
+      SYNC_STATUS["$node"]="FAIL"
+      lmsg "  [FAIL] $node  – see ${SYNC_LOGS[$node]}"
+    fi
+  done
+
+  declare -a _sync_failed=()
+  for node in "${!SYNC_STATUS[@]}"; do
+    [[ "${SYNC_STATUS[$node]}" != "OK" ]] && _sync_failed+=("$node") || true
+  done
+  if [[ "${#_sync_failed[@]}" -gt 0 ]]; then
+    lmsg "Sync logs for failed nodes:"
+    for node in "${_sync_failed[@]}"; do
+      lmsg "  -- $node: ${SYNC_LOGS[$node]:-<no log>} --"
+      tail -10 "${SYNC_LOGS[$node]:-/dev/null}" 2>/dev/null | while IFS= read -r l; do lmsg "     $l"; done
+    done
+    _abort_run "Sync failed on ${#_sync_failed[@]} node(s)" "${_sync_failed[@]}"
+  fi
+fi
+
+echo
+
+# ============================================================
+# PHASE 2: PARALLEL BENCHMARK LAUNCH
+# ============================================================
+lmsg "=== Phase 2: Launching benchmarks on all nodes in parallel ==="
+
+declare -A NODE_PID=()       # remote PID (string) or local bash PID
+declare -A NODE_LOG=()       # path to bench log on the machine where it runs
+declare -A NODE_REMOTE_OUT=() # path to bench_threads_matrix --out-dir on remote
+declare -A NODE_TYPE=()
+declare -A NODE_REPO=()
+declare -A NODE_INST=()
+declare -A NODE_STATUS=()    # running | done | failed | skipped
+declare -A NODE_LAST_HASH=()
+declare -A NODE_LAST_CHG=()
+declare -A NODE_RSYNC_PID=() # PID of in-flight live-sync rsync (remote nodes only)
+
+_build_bench_flags() {
+  local repo_root="$1"
+  local extra=""
+  [[ -n "$WORKLOADS" ]] && extra+=" --workloads '$WORKLOADS'"
+  [[ -n "$RATES" ]]     && extra+=" --rates '$RATES'"
+  [[ -n "$SIGNING_MODES" ]] && extra+=" --signing-modes '$SIGNING_MODES'"
+  if [[ -n "$SIGNING_PRIVKEY_LOCAL" ]]; then
+    if [[ "$repo_root" == "$REPO_ROOT" ]]; then
+      extra+=" --signing-privkey '$SIGNING_PRIVKEY_LOCAL'"
+    else
+      extra+=" --signing-privkey '$repo_root/${SIGNING_PRIVKEY_LOCAL#$REPO_ROOT/}'"
+    fi
+  fi
+  [[ -n "$ENFORCE_SIGNATURES" ]] && extra+=" --enforce-signatures '$ENFORCE_SIGNATURES'"
+  printf '%s' "$extra"
+}
+
+_signing_needs_crypto() {
+  [[ ",$SIGNING_MODES," == *,1,* ]]
+}
+
+for entry in "${ALL_NODES[@]}"; do
+  IFS='|' read -r node repo inst type <<< "$entry"
+  NODE_REPO["$node"]="$repo"
+  NODE_INST["$node"]="$inst"
+  NODE_TYPE["$node"]="$type"
+  NODE_STATUS["$node"]="pending"
+  NODE_LAST_HASH["$node"]=""
+  NODE_LAST_CHG["$node"]="$(date +%s)"
+
+  safe_node="$(safe_label "$node")"
+  local_node_dir="$LOCAL_RESULT_ROOT/$safe_node"
+  mkdir -p "$local_node_dir"
+
+  # ---- Remote node ----
+  {
+    sync_ok="${SYNC_STATUS[$node]:-FAIL}"
+    if [[ "$sync_ok" != "OK" ]]; then
+      lmsg "  [SKIP] $node – sync failed"
+      NODE_STATUS["$node"]="skipped"
+      continue
+    fi
+
+    remote_out="$repo/scripts/bench_results/parallel_ycsb_$(safe_label "$node")_${ts}"
+    remote_log="$repo/.bench_tmp/bench_parallel_${ts}.log"
+    NODE_LOG["$node"]="$remote_log"
+    NODE_REMOTE_OUT["$node"]="$remote_out"
+
+    extra_flags="$(_build_bench_flags "$repo")"
+    remote_cmd="set -euo pipefail
+mkdir -p '$remote_out' '$repo/.bench_tmp'
+cd '$repo/scripts'
+bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+  --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+export ARIABC_REQUIRE_CUSTOM_PG=1
+export ARIABC_PSQL='$inst/bin/psql'
+export ARIABC_INSTALL_DIR='$inst'
+export ARIABC_DIR='$repo'
+export ARIABC_PGPORT='$DB_PORT'
+export LD_LIBRARY_PATH='$inst/lib:\${LD_LIBRARY_PATH:-}'
+pgdata_line=\$(bash '$repo/scripts/distributed/ensure_single_node_postgres.sh' \
+  --repo-root '$repo' --install-dir '$inst' \
+  --db-port '$DB_PORT' --db-user '$DB_USER' --db-name '$DB_NAME' \
+  --template-config '$repo/.bench_tmp/shared_postgresql.conf' \
+  --require-custom | tail -n 1)
+[[ \$pgdata_line == PGDATA=* ]] && export ARIABC_PGDATA=\${pgdata_line#PGDATA=}
+PYTHON_BIN=''
+if [[ -x '$repo/.venv/bin/python' ]] && '$repo/.venv/bin/python' -c 'import psycopg' >/dev/null 2>&1; then
+  PYTHON_BIN='$repo/.venv/bin/python'
+elif python3 -c 'import psycopg' >/dev/null 2>&1; then
+  PYTHON_BIN=python3
+else
+  PYTHON_BIN='$repo/.venv/bin/python'
+  [[ ! -x \"\$PYTHON_BIN\" ]] && python3 -m venv '$repo/.venv'
+  if ! \"\$PYTHON_BIN\" -c 'import psycopg' >/dev/null 2>&1; then
+    dest=\$(\"\$PYTHON_BIN\" -c 'import sysconfig; print(sysconfig.get_path(\"purelib\"))')
+    for oroot in '$repo/.venv' '/home/neel/Desktop/ariabc_cluster/.venv' '/home/neel/.local'; do
+      csite=\$(find \"\$oroot/lib\" -maxdepth 2 -type d -name site-packages 2>/dev/null | head -n1 || true)
+      [[ -z \"\$csite\" ]] && continue
+      [[ -d \"\$csite/psycopg\" ]] && cp -a \"\$csite/psycopg\" \"\$dest/\" 2>/dev/null || true
+      for x in \"\$csite\"/psycopg_binary* \"\$csite\"/typing_extensions.py \"\$csite\"/psycopg-*.dist-info; do
+        [[ -e \"\$x\" ]] && cp -a \"\$x\" \"\$dest/\" 2>/dev/null || true
+      done
+      \"\$PYTHON_BIN\" -c 'import psycopg' >/dev/null 2>&1 && break || true
+    done
+  fi
+  if ! \"\$PYTHON_BIN\" -c 'import psycopg' >/dev/null 2>&1; then
+    if ! "\$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+      "\$PYTHON_BIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+    fi
+    if "\$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+      "\$PYTHON_BIN" -m pip install -q --disable-pip-version-check 'psycopg[binary]' || \
+        "\$PYTHON_BIN" -m pip install -q --disable-pip-version-check psycopg
+    elif [[ -x '$repo/.venv/bin/pip' ]]; then
+      '$repo/.venv/bin/pip' install -q --disable-pip-version-check 'psycopg[binary]' || \
+        '$repo/.venv/bin/pip' install -q --disable-pip-version-check psycopg
+    else
+      echo 'ERROR: pip unavailable to install psycopg on remote' >&2; exit 2
+    fi
+  fi
+  if ! \"\$PYTHON_BIN\" -c 'import psycopg' >/dev/null 2>&1; then
+    echo 'ERROR: psycopg unavailable on remote' >&2; exit 2
+  fi
+fi
+export ARIABC_PYTHON="\$PYTHON_BIN"
+if $(_signing_needs_crypto && echo true || echo false); then
+  if ! "\$PYTHON_BIN" -c 'import cryptography' >/dev/null 2>&1; then
+    if python3 -c 'import psycopg, cryptography' >/dev/null 2>&1; then
+      PYTHON_BIN=python3
+    fi
+  fi
+  if ! "\$PYTHON_BIN" -c 'import cryptography' >/dev/null 2>&1; then
+    if "\$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+      "\$PYTHON_BIN" -m pip install -q --disable-pip-version-check cryptography
+    elif [[ -x '$repo/.venv/bin/pip' ]]; then
+      '$repo/.venv/bin/pip' install -q --disable-pip-version-check cryptography
+    else
+      "\$PYTHON_BIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+      "\$PYTHON_BIN" -m pip install -q --disable-pip-version-check cryptography
+    fi
+  fi
+  "\$PYTHON_BIN" -c 'import cryptography' >/dev/null 2>&1 || {
+    echo 'ERROR: cryptography unavailable for signing mode' >&2; exit 2
+  }
+fi
+\$PYTHON_BIN -u bench_threads_matrix.py \
+  --modes '$MODES' --threads '$THREADS' --runs '$RUNS' \
+  --db '$DB_NAME' --user '$DB_USER' --port '$DB_PORT' \
+  --out-dir '$remote_out'${extra_flags}"
+
+    launch_err="$LOG_DIR/launch_err_$(safe_label "$node").log"
+    # setsid creates a new session detached from the terminal so the bench
+    # survives SSH disconnect even on hosts where bare `nohup` is killed when
+    # the parent SSH session closes (observed on Ubuntu 22.04). stdin from
+    # /dev/null prevents the bg shell from blocking on tty read.
+    remote_pid=$(ssh_run "$node" "
+      mkdir -p '$repo/.bench_tmp' '$remote_out'
+      setsid nohup bash -lc $(printf '%q' "$remote_cmd") > '$remote_log' 2>&1 < /dev/null &
+      echo \$!
+    " 2>"$launch_err" | tail -n 1) || true
+
+    if [[ -z "$remote_pid" ]] || ! [[ "$remote_pid" =~ ^[0-9]+$ ]]; then
+      lmsg "  [FAIL] $node – could not capture remote PID (got: '$remote_pid') – see $launch_err"
+      NODE_STATUS["$node"]="failed"
+      continue
+    fi
+
+    NODE_PID["$node"]="$remote_pid"
+    NODE_STATUS["$node"]="running"
+    lmsg "  [LAUNCHED] $node  remote_pid=$remote_pid  log=$remote_log"
+  }
+done
+
+echo
+
+# Abort if any expected node failed to launch.
+declare -a _launch_failed=()
+for node in "${!NODE_STATUS[@]}"; do
+  [[ "${NODE_STATUS[$node]}" == "failed" ]] && _launch_failed+=("$node")
+done
+if [[ "${#_launch_failed[@]}" -gt 0 ]]; then
+  _abort_run "Bench launch failed on ${#_launch_failed[@]} node(s)" "${_launch_failed[@]}"
+fi
+
+running_at_start=0
+for node in "${!NODE_STATUS[@]}"; do
+  [[ "${NODE_STATUS[$node]}" == "running" ]] && ((running_at_start++)) || true
+done
+
+if [[ "$running_at_start" -eq 0 ]]; then
+  _abort_run "No nodes were launched successfully — check sync/launch logs in $LOG_DIR"
+fi
+
+lmsg "All benchmarks launched ($running_at_start running). Monitoring every ${POLL_INTERVAL_S}s."
+lmsg "Hang detection threshold: ${HANG_TIMEOUT_S}s of no log change."
+echo
+
+# ============================================================
+# PHASE 2.5: VERIFY synchronous_commit = on ON ALL NODES
+# Query the live running Postgres on every node right now,
+# while the benchmark is active, to confirm the setting has
+# not been flipped by auto.conf, ALTER SYSTEM, or a session SET.
+# ============================================================
+lmsg "=== Phase 2.5: Verifying synchronous_commit on all nodes ==="
+declare -a _sc_bad=()
+_check_synchronous_commit() {
+  local node="$1"
+  local type="$2"
+  local inst="${NODE_INST[$node]:-}"
+  local psql_bin="$inst/bin/psql"
+  local sc_val=""
+
+  sc_val=$(ssh_run "$node" \
+    "LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
+     -tAc 'SHOW synchronous_commit;' 2>/dev/null || true" 2>/dev/null || true)
+
+  sc_val="${sc_val// /}"  # trim whitespace
+  if [[ "$sc_val" == "on" ]]; then
+    lmsg "  [OK]  $node  synchronous_commit = on"
+  elif [[ -z "$sc_val" ]]; then
+    lmsg "  [WARN] $node  could not read synchronous_commit (postgres may still be starting)"
+  else
+    lmsg "  [FAIL] $node  synchronous_commit = $sc_val  (expected: on)"
+    _sc_bad+=("$node")
+  fi
+}
+
+for entry in "${ALL_NODES[@]}"; do
+  IFS='|' read -r node repo inst type <<< "$entry"
+  [[ "${NODE_STATUS[$node]:-}" == "running" ]] || continue
+  _check_synchronous_commit "$node" "$type"
+done
+
+if [[ "${#_sc_bad[@]}" -gt 0 ]]; then
+  _abort_run "synchronous_commit != on on ${#_sc_bad[@]} node(s)" "${_sc_bad[@]}"
+fi
+lmsg "Phase 2.5 complete: synchronous_commit = on on all nodes."
+echo
+
+# ============================================================
+# PHASE 3: MONITOR LOOP
+# ============================================================
+
+_active_count() {
+  local c=0
+  for n in "${!NODE_STATUS[@]}"; do
+    [[ "${NODE_STATUS[$n]}" == "running" ]] && ((c++)) || true
+  done
+  echo "$c"
+}
+
+_collect_node() {
+  local node="$1"
+  local remote_out="${NODE_REMOTE_OUT[$node]}"
+  local local_node_dir="$LOCAL_RESULT_ROOT/$(safe_label "$node")"
+
+  mkdir -p "$local_node_dir"
+  rsync -az \
+    -e "$(_rsync_e_for_node "$node")" \
+    "$node:$remote_out/" "$local_node_dir/" 2>/dev/null || \
+    lmsg "  WARNING: rsync of results failed for $node"
+
+  if [[ -f "$local_node_dir/results.csv" && -f "$local_node_dir/summary.csv" ]]; then
+    NODE_STATUS["$node"]="done"
+    lmsg "  [DONE] $node – results collected → $local_node_dir"
+    _generate_graphs "$local_node_dir" "$node"
+  else
+    NODE_STATUS["$node"]="failed"
+    lmsg "  [FAIL] $node – missing results.csv or summary.csv in $local_node_dir"
+  fi
+}
+
+_generate_graphs() {
+  local out_dir="$1"
+  local node="$2"
+  local summary="$out_dir/summary.csv"
+  [[ -f "$summary" ]] || return 0
+  local existing
+  existing=$(find "$out_dir" -maxdepth 1 -name '*.png' | wc -l)
+  if [[ "$existing" -gt 0 ]]; then
+    lmsg "  [GRAPH] $node – $existing PNG(s) already present, skipping"
+    return 0
+  fi
+  ARIABC_REPO_ROOT="$REPO_ROOT" python3 - "$summary" "$out_dir" <<'PYEOF' \
+    && lmsg "  [GRAPH] $node – graphs generated in $out_dir" \
+    || lmsg "  [GRAPH] WARNING: graph generation failed for $node"
+import importlib.util, os, sys
+from pathlib import Path
+repo = os.environ["ARIABC_REPO_ROOT"]
+spec = importlib.util.spec_from_file_location("btm", f"{repo}/scripts/bench_threads_matrix.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+paths = mod._generate_tps_graphs(Path(sys.argv[1]), Path(sys.argv[2]))
+print(f"  generated {len(paths)} graph(s)")
+PYEOF
+}
+
+_live_sync_node() {
+  # Non-blocking rsync of partial results from a running remote node.
+  # Skips if a previous rsync for this node is still in flight.
+  local node="$1"
+  local remote_out="${NODE_REMOTE_OUT[$node]}"
+  local safe_node
+  safe_node="$(safe_label "$node")"
+  local local_node_dir="$LOCAL_RESULT_ROOT/$safe_node"
+  local sync_log="$LOG_DIR/livesync_${safe_node}.log"
+
+  # If a previous live-sync rsync is still running, skip this poll cycle
+  local prev_pid="${NODE_RSYNC_PID[$node]:-}"
+  if [[ -n "$prev_pid" ]] && kill -0 "$prev_pid" 2>/dev/null; then
+    return 0
+  fi
+
+  mkdir -p "$local_node_dir"
+  (
+    # Check if the remote output directory exists yet (bench may still be in setup)
+    if ! ssh_run "$node" "test -d '$remote_out'" 2>>"$sync_log"; then
+      echo "[$(_ts)] live-sync: remote dir not ready yet: $remote_out" >> "$sync_log"
+      exit 0
+    fi
+
+    rsync -az \
+      -e "$(_rsync_e_for_node "$node")" \
+      "$node:$remote_out/" "$local_node_dir/" \
+      >> "$sync_log" 2>&1
+    echo "[$(_ts)] live-sync OK: $(find "$local_node_dir" -name '*.csv' | wc -l) csv(s) present" \
+      >> "$sync_log"
+  ) &
+  NODE_RSYNC_PID["$node"]=$!
+}
+
+_check_node() {
+  local node="$1"
+  local pid="${NODE_PID[$node]}"
+  local bench_log="${NODE_LOG[$node]}"
+
+  local alive=0
+  ssh_run "$node" "kill -0 $pid 2>/dev/null" 2>/dev/null && alive=1 || true
+
+  if [[ "$alive" == "1" ]]; then
+    local tail_out=""
+    tail_out=$(ssh_run "$node" "tail -10 '$bench_log' 2>/dev/null || true" 2>/dev/null || true)
+
+    # Hang detection
+    local hash; hash=$(printf '%s' "$tail_out" | md5sum | cut -d' ' -f1)
+    local prev="${NODE_LAST_HASH[$node]:-}"
+    local now; now="$(date +%s)"
+    if [[ "$hash" != "$prev" ]]; then
+      NODE_LAST_HASH["$node"]="$hash"
+      NODE_LAST_CHG["$node"]="$now"
+    else
+      local stale=$(( now - NODE_LAST_CHG["$node"] ))
+      if [[ "$stale" -ge "$HANG_TIMEOUT_S" ]]; then
+        echo "  *** HANG WARNING: $node – no log change for ${stale}s (pid=$pid) ***"
+      fi
+    fi
+
+    echo "  -- $node [RUNNING pid=$pid] --"
+    if [[ -n "$tail_out" ]]; then
+      while IFS= read -r line; do echo "     $line"; done <<< "$tail_out"
+    else
+      echo "     (no output yet)"
+    fi
+
+    _live_sync_node "$node"
+  else
+    lmsg "  Process finished on $node – collecting results..."
+    # Wait for any in-flight live-sync to finish before the final collect
+    local prev_pid="${NODE_RSYNC_PID[$node]:-}"
+    [[ -n "$prev_pid" ]] && wait "$prev_pid" 2>/dev/null || true
+    _collect_node "$node"
+  fi
+}
+
+while [[ "$(_active_count)" -gt 0 ]]; do
+  echo "=========================================="
+  echo "  Poll $(_ts)  |  Running: $(_active_count)"
+  echo "=========================================="
+
+  for node in "${!NODE_STATUS[@]}"; do
+    [[ "${NODE_STATUS[$node]}" == "running" ]] || continue
+    _check_node "$node"
+  done
+
+  # Summary line
+  running_nodes=(); done_nodes=(); fail_nodes=()
+  for node in "${!NODE_STATUS[@]}"; do
+    case "${NODE_STATUS[$node]}" in
+      running)  running_nodes+=("$node") ;;
+      done)     done_nodes+=("$node") ;;
+      failed)   fail_nodes+=("$node") ;;
+    esac
+  done
+  echo
+  echo "  Running  (${#running_nodes[@]}): ${running_nodes[*]:-—}"
+  echo "  Done     (${#done_nodes[@]}):    ${done_nodes[*]:-—}"
+  echo "  Failed   (${#fail_nodes[@]}):    ${fail_nodes[*]:-—}"
+  echo
+
+  # Abort immediately if any node failed during the run.
+  if [[ "${#fail_nodes[@]}" -gt 0 ]]; then
+    lmsg "Bench log tails for failed nodes:"
+    for node in "${fail_nodes[@]}"; do
+      local_bench_log="${NODE_LOG[$node]:-}"
+      if [[ -n "$local_bench_log" ]]; then
+        lmsg "  -- $node: $local_bench_log (remote) --"
+        ssh_run "$node" "tail -15 '$local_bench_log' 2>/dev/null || true" 2>/dev/null \
+          | while IFS= read -r l; do lmsg "     $l"; done
+      fi
+    done
+    _abort_run "Bench process failed on ${#fail_nodes[@]} node(s) during monitoring" "${fail_nodes[@]}"
+  fi
+
+  [[ "$(_active_count)" -gt 0 ]] && sleep "$POLL_INTERVAL_S"
+done
+
+# ============================================================
+# PHASE 4: FINAL REPORT
+# ============================================================
+lmsg "=== Phase 4: All nodes finished ==="
+echo
+
+# Final collect pass for any that finished right before the loop ended
+for node in "${!NODE_STATUS[@]}"; do
+  [[ "${NODE_STATUS[$node]}" != "done" ]] && continue
+  local_node_dir="$LOCAL_RESULT_ROOT/$(safe_label "$node")"
+  if [[ ! -f "$local_node_dir/results.csv" ]]; then
+    _collect_node "$node"
+  fi
+done
+
+echo "=== Final Status ==="
+printf "%-52s %-8s %s\n" "Node" "Status" "Local results dir"
+printf "%-52s %-8s %s\n" "----" "------" "-----------------"
+for node in "${!NODE_STATUS[@]}"; do
+  safe_node="$(safe_label "$node")"
+  local_node_dir="$LOCAL_RESULT_ROOT/$safe_node"
+  status="${NODE_STATUS[$node]}"
+  printf "%-52s %-8s %s\n" "$node" "$status" "$local_node_dir"
+done
+echo
+lmsg "Logs:    $LOG_DIR"
+lmsg "Results: $LOCAL_RESULT_ROOT"

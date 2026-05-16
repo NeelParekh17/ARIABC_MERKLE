@@ -5,7 +5,7 @@
  *
  *
  * IDENTIFICATION
- *	  src/backend/bcdb/bcdb.c
+ *	  src/backend/bcdb/globals.c
  *
  *-------------------------------------------------------------------------
  */
