@@ -2015,33 +2015,6 @@ exec_bind_message(StringInfo input_message)
 	debug_query_string = NULL;
 }
 
-static void
-copy_bcdb_result(Portal	portal) // const char *portal_name, long max_rows)
-{
-	CommandDest dest;
-	DestReceiver *receiver;
-
-	/* Adjust destination to tell printtup.c what to do */
-	dest = whereToSendOutput;
-	if (dest == DestRemote)
-		dest = DestRemoteExecute;
-
-	/*
-	 * Create dest receiver in MessageContext (we don't want it in transaction
-	 * context, because that may get deleted if portal contains VACUUM).
-	 */
-	receiver = CreateDestReceiver(dest);
-	//if (dest == DestRemoteExecute)
-	//printtup_startup(dest, CMD_SELECT, portal->tupDesc);
-	//	SetRemoteDestReceiverParams(receiver, portal);
-    // --jan31 // safeOut("21 ", receiver, CMD_SELECT, portal->tupDesc);
-
-	/*
-	receiver->rDestroy(receiver);
-    */
-
-}
-
 /*
  * exec_execute_message
  *
@@ -2200,23 +2173,13 @@ exec_execute_message(const char *portal_name, long max_rows)
     printf("jdbcDbg pid %d %s : %s: %d dest %d sql %s ctag %s\n", getpid(), 
     __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText, completionTag);
 #endif
-			/*
-			 */
-        if( (strlen(portal->sourceText) > 7) &&( (portal->sourceText[4] == 'C') && (portal->sourceText[5] == 'T')) )
-            copy_bcdb_result(portal);
-	else  {
-#if SAFEDBG2
-    printf("jdbcDbg pid %d %s : %s: %d dest %d sql %s ctag %s\n", getpid(), 
-    __FILE__, __FUNCTION__, __LINE__ , dest, portal->sourceText, completionTag);
-#endif
-            completed = PortalRun(portal,
+	completed = PortalRun(portal,
 						  max_rows,
 						  true, /* always top level */
 						  !execute_is_fetch && max_rows == FETCH_ALL,
 						  receiver,
 						  receiver,
 						  completionTag);
-	}
 
 	receiver->rDestroy(receiver);
 
