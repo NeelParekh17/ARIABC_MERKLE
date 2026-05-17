@@ -371,7 +371,7 @@ def _plot(summary: list[dict[str, str]], out_dir: Path, workload: str, machine: 
             label=labels[series],
         )
     ax.set_xlabel("Threads (single node) / ordered concurrency budget (full system)")
-    ax.set_ylabel("Valid TPS (3-run mean with one outlier removed)")
+    ax.set_ylabel("Valid TPS (trimmed mean when 3+ runs are available)")
     ax.set_title(f"YCSB skew full workload TPS comparison\n{workload}")
     ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.4)
     ax.legend()

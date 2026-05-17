@@ -716,6 +716,7 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " det_block_bin_64_127=" << exec.det_block_bin_64_127
         << " det_block_bin_128_plus=" << exec.det_block_bin_128_plus
         << " det_block_fallbacks=" << exec.det_block_fallbacks
+        << " det_block_skipped_readonly=" << exec.det_block_skipped_readonly
         << " conn_wait_ms=" << (exec.conn_acquire_wait_ns / 1000000.0)
         << " kafka_flush_calls=" << exec.kafka_flush_calls
         << " kafka_payload_kb=" << (exec.kafka_payload_bytes / 1024.0)

@@ -38,8 +38,10 @@ FULL_FIXED_POOL_SIZE="${FULL_FIXED_POOL_SIZE:-256}"
 FULL_DET_BATCH_SIZE="${FULL_DET_BATCH_SIZE:-256}"
 FULL_DET_WINDOW="${FULL_DET_WINDOW:-4096}"
 FULL_DET_WINDOW_MULTIPLIER="${FULL_DET_WINDOW_MULTIPLIER:-256}"
+FULL_DET_WINDOW_MAX="${FULL_DET_WINDOW_MAX:-3072}"
+FULL_DET_BLOCK_PARALLEL="${FULL_DET_BLOCK_PARALLEL:-1}"
 FULL_DET_BLOCK_PIPELINE="${FULL_DET_BLOCK_PIPELINE:-8}"
-FULL_DET_BLOCK_MAX="${FULL_DET_BLOCK_MAX:-2048}"
+FULL_DET_BLOCK_MAX="${FULL_DET_BLOCK_MAX:-256}"
 FULL_BCDB_WORKER_COUNT="${FULL_BCDB_WORKER_COUNT:-512}"
 FULL_BCDB_DECOUPLE_WORKERS="${FULL_BCDB_DECOUPLE_WORKERS:-1}"
 FULL_TEST_QUERIES="${FULL_TEST_QUERIES:-20512}"
@@ -48,7 +50,9 @@ FULL_BCDB_BLOCK_WAIT_WATERMARK="${FULL_BCDB_BLOCK_WAIT_WATERMARK:-0}"
 FULL_BCDB_SERIAL_GATE_MODE="${FULL_BCDB_SERIAL_GATE_MODE:-1}"
 FULL_BCDB_DT_PARSE_BARRIER="${FULL_BCDB_DT_PARSE_BARRIER:-0}"
 FULL_BCDB_DT_SKIP_READONLY_GATE="${FULL_BCDB_DT_SKIP_READONLY_GATE:-1}"
+FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS="${FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS:-1}"
 FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD:-65536}"
+FULL_RESULT_REPLICA_LIMIT="${FULL_RESULT_REPLICA_LIMIT:-1}"
 FULL_CASE_TIMEOUT_S="${FULL_CASE_TIMEOUT_S:-900}"
 FULL_SKIP_SYNC="${FULL_SKIP_SYNC:-0}"
 FULL_SKIP_BUILD="${FULL_SKIP_BUILD:-0}"
@@ -84,6 +88,7 @@ Environment:
   deterministic window while keeping the proven batch size and backend capacity
   normalized.  --num-terminals remains 1 because the deterministic/Raft path has
   one global sequence order.
+  FULL_DET_WINDOW_MAX caps the mapped deterministic window; set 0 to disable.
   FULL_POOL_SIZE_MODE=sweep maps x-axis thread value to --pool-size, with a
   minimum of 2 because bcdb_init requires at least two workers.
   FULL_CONTINUE_ON_ERROR=1 keeps sweeping after an invalid full-system case.
@@ -283,6 +288,9 @@ run_full_system() {
         if [[ "$full_det_window" -lt "$full_det_batch_size" ]]; then
           full_det_window="$full_det_batch_size"
         fi
+        if [[ "$FULL_DET_WINDOW_MAX" -gt 0 && "$full_det_window" -gt "$FULL_DET_WINDOW_MAX" ]]; then
+          full_det_window="$FULL_DET_WINDOW_MAX"
+        fi
       else
         full_det_batch_size="$FULL_DET_BATCH_SIZE"
         full_det_window="$FULL_DET_WINDOW"
@@ -293,7 +301,7 @@ run_full_system() {
         full_bcdb_worker_count="$full_pool_size"
       fi
       req_id_offset=$(( (run * 1000000) + (th * 10000) + 1 ))
-      log "Full-system case thread=$th run=$run (pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-pipeline=$FULL_DET_BLOCK_PIPELINE serial-gate=$FULL_BCDB_SERIAL_GATE_MODE)"
+      log "Full-system case thread=$th run=$run (pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-parallel=$FULL_DET_BLOCK_PARALLEL det-block-pipeline=$FULL_DET_BLOCK_PIPELINE det-block-max=$FULL_DET_BLOCK_MAX serial-gate=$FULL_BCDB_SERIAL_GATE_MODE completion-only-skip-reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS full-result-replica-limit=$FULL_RESULT_REPLICA_LIMIT)"
       before_file="$RUN_LOG_DIR/full_before_${th}_${run}.txt"
       after_file="$RUN_LOG_DIR/full_after_${th}_${run}.txt"
       ls -td "$REPO_ROOT"/scripts/bench_full_results/cluster4_* 2>/dev/null > "$before_file" || true
@@ -316,6 +324,7 @@ run_full_system() {
         --det-batch-size "$full_det_batch_size" \
         --det-window "$full_det_window" \
         --det-block-pipeline "$FULL_DET_BLOCK_PIPELINE" \
+        --det-block-parallel "$FULL_DET_BLOCK_PARALLEL" \
         --det-block-max "$FULL_DET_BLOCK_MAX" \
         --num-terminals 1 \
         --bcdb-block-profile "$FULL_BCDB_BLOCK_PROFILE" \
@@ -323,7 +332,9 @@ run_full_system() {
         --bcdb-serial-gate-mode "$FULL_BCDB_SERIAL_GATE_MODE" \
         --bcdb-dt-parse-barrier "$FULL_BCDB_DT_PARSE_BARRIER" \
         --bcdb-dt-skip-readonly-gate "$FULL_BCDB_DT_SKIP_READONLY_GATE" \
+        --bcdb-dt-completion-only-skip-reads "$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS" \
         --bcdb-dt-hashtab-switch-threshold "$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD" \
+        --full-result-replica-limit "$FULL_RESULT_REPLICA_LIMIT" \
         > "$RUN_LOG_DIR/full_thread_${th}_run_${run}.log" 2>&1
       rc=$?
       set -e
@@ -335,7 +346,7 @@ run_full_system() {
         artifact="$(head -n 1 "$after_file" || true)"
       fi
       [[ -n "$artifact" ]] || artifact="$RUN_LOG_DIR/missing_full_artifact_thread_${th}_run_${run}"
-      notes="full_system_thread_knob=$FULL_THREAD_KNOB;full_pool_size_mode=$FULL_POOL_SIZE_MODE;num_terminals=1;trusted_gate=kafka_majority_merkle;pool_size_min=2;det_window_multiplier=$FULL_DET_WINDOW_MULTIPLIER;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;bcdb_block_wait_watermark=$FULL_BCDB_BLOCK_WAIT_WATERMARK;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;backend_capacity=normalized"
+      notes="full_system_thread_knob=$FULL_THREAD_KNOB;full_pool_size_mode=$FULL_POOL_SIZE_MODE;num_terminals=1;trusted_gate=kafka_majority_merkle;pool_size_min=2;det_window_multiplier=$FULL_DET_WINDOW_MULTIPLIER;det_window_max=$FULL_DET_WINDOW_MAX;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;bcdb_block_wait_watermark=$FULL_BCDB_BLOCK_WAIT_WATERMARK;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_dt_skip_readonly_gate=$FULL_BCDB_DT_SKIP_READONLY_GATE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;det_block_skip_readonly=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;full_result_replica_limit=$FULL_RESULT_REPLICA_LIMIT;backend_capacity=normalized"
       printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$th" "$run" "$artifact" "$rc" "$FULL_THREAD_KNOB" "$full_pool_size" "$full_bcdb_worker_count" "$full_det_batch_size" "$full_det_window" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "$notes" \
         >> "$FULL_MANIFEST"
