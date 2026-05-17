@@ -24,7 +24,7 @@ SSH_PORT="${SSH_PORT:-22}"
 
 THREADS="${THREADS:-1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16}"
 RUNS="${RUNS:-3}"
-WORKLOAD="${WORKLOAD:-ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt}"
+WORKLOADS="${WORKLOADS:-${WORKLOAD:-ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt}}"
 DB_PORT="${DB_PORT:-5438}"
 DB_USER="${DB_USER:-postgres}"
 DB_NAME="${DB_NAME:-postgres}"
@@ -74,7 +74,9 @@ Usage: $0 [options]
 Options:
   --threads CSV       Default: $THREADS
   --runs N            Default: $RUNS
-  --workload FILE     Default: $WORKLOAD
+  --workload FILE     Single workload (back-compat).
+  --workloads CSV     Comma-separated list of workload files; each produces its
+                      own subdir + graph under OUT_ROOT. Default: $WORKLOADS
   --target NODE       Default: $TARGET_NODE
   --target-label NAME Label used in CSV/graph for the single-node target.
   --skip-sync
@@ -101,7 +103,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --threads) THREADS="${2:-}"; shift 2 ;;
     --runs) RUNS="${2:-3}"; shift 2 ;;
-    --workload) WORKLOAD="${2:-}"; shift 2 ;;
+    --workload) WORKLOADS="${2:-}"; shift 2 ;;
+    --workloads) WORKLOADS="${2:-}"; shift 2 ;;
     --target) TARGET_NODE="${2:-}"; shift 2 ;;
     --target-label) TARGET_MACHINE_LABEL="${2:-}"; shift 2 ;;
     --skip-sync) SKIP_SYNC=1; shift ;;
@@ -130,10 +133,20 @@ fi
 
 ts="$(date +%Y%m%d_%H%M%S)"
 OUT_ROOT="${OUT_ROOT:-$REPO_ROOT/scripts/bench_full_results/ycsb_skew_compare_${ts}}"
-RUN_LOG_DIR="$OUT_ROOT/_run_logs"
-SINGLE_LOCAL_DIR="$OUT_ROOT/single_${TARGET_MACHINE_LABEL//./_}"
-FULL_MANIFEST="$OUT_ROOT/full_system_manifest.csv"
-mkdir -p "$RUN_LOG_DIR" "$SINGLE_LOCAL_DIR"
+mkdir -p "$OUT_ROOT/_run_logs"
+
+# Per-workload paths. set_workload_paths <workload-file> populates:
+#   WORKLOAD, WORKLOAD_SLUG, OUT_DIR, SINGLE_LOCAL_DIR, FULL_MANIFEST
+set_workload_paths() {
+  WORKLOAD="$1"
+  WORKLOAD_SLUG="$(printf '%s' "${WORKLOAD%.*}" | tr -cs '[:alnum:]' '_' | sed 's/^_*//; s/_*$//')"
+  [[ -z "$WORKLOAD_SLUG" ]] && WORKLOAD_SLUG="workload"
+  OUT_DIR="$OUT_ROOT/$WORKLOAD_SLUG"
+  SINGLE_LOCAL_DIR="$OUT_DIR/single_${TARGET_MACHINE_LABEL//./_}"
+  FULL_MANIFEST="$OUT_DIR/full_system_manifest.csv"
+  RUN_LOG_DIR="$OUT_ROOT/_run_logs/$WORKLOAD_SLUG"
+  mkdir -p "$OUT_DIR" "$SINGLE_LOCAL_DIR" "$RUN_LOG_DIR"
+}
 
 log() { echo "[$(date +'%F %T')] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -201,10 +214,10 @@ sync_single_target() {
 
 run_single_node() {
   [[ "$FULL_ONLY" == "1" ]] && return
-  log "Running single-node PG/DET benchmark on $TARGET_NODE"
-  remote_out="$REMOTE_REPO/scripts/bench_results/ycsb_skew_compare_${ts}"
-  remote_log="$REMOTE_REPO/.bench_tmp/ycsb_skew_compare_single_${ts}.log"
-  local log_file="$RUN_LOG_DIR/single_node_${TARGET_MACHINE_LABEL//./_}.log"
+  log "Running single-node PG/DET benchmark on $TARGET_NODE (workload=$WORKLOAD)"
+  remote_out="$REMOTE_REPO/scripts/bench_results/ycsb_skew_compare_${ts}_${WORKLOAD_SLUG}"
+  remote_log="$REMOTE_REPO/.bench_tmp/ycsb_skew_compare_single_${ts}_${WORKLOAD_SLUG}.log"
+  local log_file="$RUN_LOG_DIR/single_node_${TARGET_MACHINE_LABEL//./_}_${WORKLOAD_SLUG}.log"
   local no_resume_arg=""
   local single_extra_gucs="bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD"
   [[ "$NO_RESUME" == "1" ]] && no_resume_arg="--no-resume"
@@ -225,6 +238,7 @@ export ARIABC_DIR='$REMOTE_REPO'
 export ARIABC_PGPORT='$DB_PORT'
 export BCDB_EXTRA_GUCS='$single_extra_gucs'
 export LD_LIBRARY_PATH='$REMOTE_INSTALL/lib:\${LD_LIBRARY_PATH:-}'
+export ARIABC_PSYCOPG_CLIENT_CURSOR=1
 PYTHON_BIN=''
 if [[ -x '$REMOTE_REPO/.venv/bin/python3' ]] && '$REMOTE_REPO/.venv/bin/python3' -c 'import psycopg' >/dev/null 2>&1; then
   PYTHON_BIN='$REMOTE_REPO/.venv/bin/python3'
@@ -262,13 +276,14 @@ echo \"ARIABC_PYTHON=\$ARIABC_PYTHON\"
   rsync_to_target "$TARGET_NODE:$remote_out/" "$SINGLE_LOCAL_DIR/"
 }
 
+FULL_SYNC_FIRST=1
+
 run_full_system() {
   [[ "$SINGLE_ONLY" == "1" ]] && return
   append_full_manifest_header
-  log "Running full-system Kafka+Raft+BCDB sweep"
+  log "Running full-system Kafka+Raft+BCDB sweep (workload=$WORKLOAD)"
   log "Full-system x-axis mapping: thread value -> ordered concurrency budget; --num-terminals remains 1"
 
-  local first=1
   IFS=',' read -ra thread_arr <<< "$THREADS"
   for th in "${thread_arr[@]}"; do
     th="${th//[[:space:]]/}"
@@ -307,9 +322,9 @@ run_full_system() {
       ls -td "$REPO_ROOT"/scripts/bench_full_results/cluster4_* 2>/dev/null > "$before_file" || true
 
       extra_skip=()
-      [[ "$FULL_SKIP_SYNC" == "1" || "$first" == "0" ]] && extra_skip+=(--skip-sync)
-      [[ "$FULL_SKIP_BUILD" == "1" || "$first" == "0" ]] && extra_skip+=(--skip-build)
-      [[ "$FULL_SKIP_RDKAFKA_SETUP" == "1" || "$first" == "0" ]] && extra_skip+=(--skip-rdkafka-setup)
+      [[ "$FULL_SKIP_SYNC" == "1" || "$FULL_SYNC_FIRST" == "0" ]] && extra_skip+=(--skip-sync)
+      [[ "$FULL_SKIP_BUILD" == "1" || "$FULL_SYNC_FIRST" == "0" ]] && extra_skip+=(--skip-build)
+      [[ "$FULL_SKIP_RDKAFKA_SETUP" == "1" || "$FULL_SYNC_FIRST" == "0" ]] && extra_skip+=(--skip-rdkafka-setup)
 
       set +e
       timeout "$FULL_CASE_TIMEOUT_S" env POLL_COUNT="$POLL_COUNT" RESULT_RING_CAPACITY="$RESULT_RING_CAPACITY" \
@@ -338,7 +353,7 @@ run_full_system() {
         > "$RUN_LOG_DIR/full_thread_${th}_run_${run}.log" 2>&1
       rc=$?
       set -e
-      first=0
+      FULL_SYNC_FIRST=0
 
       ls -td "$REPO_ROOT"/scripts/bench_full_results/cluster4_* 2>/dev/null > "$after_file" || true
       artifact="$(grep -vxF -f "$before_file" "$after_file" | head -n 1 || true)"
@@ -378,28 +393,47 @@ generate_outputs() {
     python3 "$SCRIPT_DIR/plot_ycsb_skew_tps_comparison.py" \
       --single-results "$single_results" \
       --full-manifest "$FULL_MANIFEST" \
-      --out-dir "$OUT_ROOT" \
+      --out-dir "$OUT_DIR" \
       --workload "$WORKLOAD" \
       --machine "$TARGET_MACHINE_LABEL" \
       --threads "$THREADS"
 }
 
 log "=== YCSB skew TPS comparison ==="
-log "Out root : $OUT_ROOT"
-log "Threads  : $THREADS"
-log "Runs     : $RUNS"
-log "Workload : $WORKLOAD"
-log "Target   : $TARGET_NODE"
+log "Out root  : $OUT_ROOT"
+log "Threads   : $THREADS"
+log "Runs      : $RUNS"
+log "Workloads : $WORKLOADS"
+log "Target    : $TARGET_NODE"
+
+IFS=',' read -ra workload_arr <<< "$WORKLOADS"
 
 if [[ "$ANALYZE_ONLY" != "1" ]]; then
   sync_single_target
-  run_single_node
-  run_full_system
 fi
-generate_outputs
+
+for wl in "${workload_arr[@]}"; do
+  wl="${wl//[[:space:]]/}"
+  [[ -z "$wl" ]] && continue
+  set_workload_paths "$wl"
+  log "--- Workload: $WORKLOAD (out=$OUT_DIR) ---"
+  if [[ "$ANALYZE_ONLY" != "1" ]]; then
+    run_single_node
+    run_full_system
+  fi
+  if [[ "$SINGLE_ONLY" == "1" ]]; then
+    log "Workload single-only done: $WORKLOAD"
+    log "  Single results : $SINGLE_LOCAL_DIR/results.csv"
+    log "  Single summary : $SINGLE_LOCAL_DIR/summary.csv"
+    continue
+  fi
+  generate_outputs
+  log "Workload done: $WORKLOAD"
+  log "  Results : $OUT_DIR/results.csv"
+  log "  Summary : $OUT_DIR/summary.csv"
+  log "  Overhead: $OUT_DIR/overhead.csv"
+  log "  Graph   : $OUT_DIR/ycsb_skew_tps_comparison.png"
+done
 
 log "Done"
-log "Results : $OUT_ROOT/results.csv"
-log "Summary : $OUT_ROOT/summary.csv"
-log "Overhead: $OUT_ROOT/overhead.csv"
-log "Graph   : $OUT_ROOT/ycsb_skew_tps_comparison.png"
+log "Out root : $OUT_ROOT"
