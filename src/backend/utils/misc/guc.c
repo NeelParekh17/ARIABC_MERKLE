@@ -956,6 +956,15 @@ static struct config_bool ConfigureNamesBool[] =
 			NULL, NULL, NULL
 		},
 		{
+			{"bcdb_dt_completion_only_skip_reads", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+				gettext_noop("Skip SELECT executor work in BCDB completion-only deterministic block mode."),
+				gettext_noop("When enabled, SELECT transactions in completion-only block-submit runs publish an empty completion result and advance ordered watermarks without reading row payloads.")
+			},
+			&bcdb_dt_completion_only_skip_reads,
+			false,
+			NULL, NULL, NULL
+		},
+		{
 			{"bcdb_enforce_signatures", PGC_USERSET, CLIENT_CONN_STATEMENT,
 				gettext_noop("Reject BCDB signed queries whose RSA verification fails."),
 				gettext_noop("When off, verification failures are logged but execution continues.")

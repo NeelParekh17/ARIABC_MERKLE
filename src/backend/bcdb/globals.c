@@ -25,6 +25,7 @@ char*   bcdb_port;
 bool    OEP_mode = false;
 int32   bcdb_worker_count = BCDB_DEFAULT_WORKER_COUNT;
 bool    bcdb_dt_conflict_tracking = false;
+bool    bcdb_dt_completion_only_skip_reads = false;
 int32   bcdb_serial_gate_mode = BCDB_SERIAL_GATE_MODE_POLL;
 int32   bcdb_dt_hashtab_switch_threshold = BCDB_DEFAULT_HASHTAB_SWITCH_THRESHOLD;
 int32   bcdb_result_ring_slots = BCDB_DEFAULT_RESULT_RING_SLOTS;

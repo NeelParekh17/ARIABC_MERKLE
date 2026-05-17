@@ -126,6 +126,7 @@ BCDB_DECOUPLE_WORKERS="${BCDB_DECOUPLE_WORKERS:-0}"  # 1=use bcdb_worker_count q
 BCDB_DT_CONFLICT_TRACKING="${BCDB_DT_CONFLICT_TRACKING:-1}"  # 0 disables DT rs/ws conflict table checks for benchmark A/B
 BCDB_DT_LIGHT_SNAPSHOT="${BCDB_DT_LIGHT_SNAPSHOT:-0}"  # 1=READ COMMITTED/no SSI sxact when dt conflict tracking is off
 BCDB_DT_SKIP_READONLY_GATE="${BCDB_DT_SKIP_READONLY_GATE:-0}"  # 1=skip no-write txs in the DT publish gate
+BCDB_DT_COMPLETION_ONLY_SKIP_READS="${BCDB_DT_COMPLETION_ONLY_SKIP_READS:-0}"  # 1=completion-only block mode bypasses SELECT executor work
 BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${BCDB_DT_HASHTAB_SWITCH_THRESHOLD:-1500}"  # DT write-set shard rotation threshold
 ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-0}"  # 0=all replicas include full SQL results in Kafka
 ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-0}"  # 0=Raft default election priority
@@ -198,6 +199,8 @@ Options:
                   In DT with bcdb_dt_conflict_tracking=off, skip SSI sxact and use READ COMMITTED snapshot: 0|1 (default: 0)
   --bcdb-dt-skip-readonly-gate N
                   Let no-write DT transactions stop blocking later publish-gate entrants: 0|1 (default: 0)
+  --bcdb-dt-completion-only-skip-reads N
+                  In completion-only block mode, bypass SELECT executor work: 0|1 (default: 0)
   --bcdb-dt-hashtab-switch-threshold N
                   Set bcdb_dt_hashtab_switch_threshold on every PostgreSQL node
                   before restore/start (default: 1500)
@@ -249,6 +252,7 @@ while [[ $# -gt 0 ]]; do
     --bcdb-dt-conflict-tracking) BCDB_DT_CONFLICT_TRACKING="${2:-1}"; shift 2 ;;
     --bcdb-dt-light-snapshot) BCDB_DT_LIGHT_SNAPSHOT="${2:-0}"; shift 2 ;;
     --bcdb-dt-skip-readonly-gate) BCDB_DT_SKIP_READONLY_GATE="${2:-0}"; shift 2 ;;
+    --bcdb-dt-completion-only-skip-reads) BCDB_DT_COMPLETION_ONLY_SKIP_READS="${2:-0}"; shift 2 ;;
     --bcdb-dt-hashtab-switch-threshold) BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${2:-1500}"; shift 2 ;;
     --full-result-replica-limit) ARIABC_FULL_RESULT_REPLICA_LIMIT="${2:-0}"; shift 2 ;;
     --preferred-leader-id) ARIABC_PREFERRED_LEADER_ID="${2:-0}"; shift 2 ;;
@@ -288,6 +292,10 @@ if [[ "$BCDB_DT_LIGHT_SNAPSHOT" != "0" && "$BCDB_DT_LIGHT_SNAPSHOT" != "1" ]]; t
 fi
 if [[ "$BCDB_DT_SKIP_READONLY_GATE" != "0" && "$BCDB_DT_SKIP_READONLY_GATE" != "1" ]]; then
   echo "ERROR: --bcdb-dt-skip-readonly-gate must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$BCDB_DT_COMPLETION_ONLY_SKIP_READS" != "0" && "$BCDB_DT_COMPLETION_ONLY_SKIP_READS" != "1" ]]; then
+  echo "ERROR: --bcdb-dt-completion-only-skip-reads must be 0 or 1" >&2
   exit 2
 fi
 if [[ "$BCDB_DT_HASHTAB_SWITCH_THRESHOLD" -lt 1 ]]; then
@@ -998,6 +1006,7 @@ for idx in "${!NODE_IDS[@]}"; do
     worker_count=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_worker_count;' | tr -d '[:space:]')
     serial_gate=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_serial_gate_mode;' | tr -d '[:space:]')
     dt_conflict=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_conflict_tracking;' | tr -d '[:space:]')
+    dt_skip_reads=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_completion_only_skip_reads;' | tr -d '[:space:]')
     hashtab_threshold=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_hashtab_switch_threshold;' | tr -d '[:space:]')
     ring_slots=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_result_ring_slots;' | tr -d '[:space:]')
     owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || echo '')
@@ -1027,6 +1036,10 @@ for idx in "${!NODE_IDS[@]}"; do
     if [[ \"\$dt_conflict\" != \"\$target_dt_conflict\" ]]; then
       needs_restart=1
     fi
+    target_dt_skip_reads=\"$([[ "$BCDB_DT_COMPLETION_ONLY_SKIP_READS" == "1" ]] && echo on || echo off)\"
+    if [[ \"\$dt_skip_reads\" != \"\$target_dt_skip_reads\" ]]; then
+      needs_restart=1
+    fi
     if [[ \"\$hashtab_threshold\" != \"$BCDB_DT_HASHTAB_SWITCH_THRESHOLD\" ]]; then
       needs_restart=1
     fi
@@ -1040,7 +1053,7 @@ for idx in "${!NODE_IDS[@]}"; do
       needs_restart=1
     fi
     if [[ \"\$needs_restart\" -eq 1 ]]; then
-      echo \"reconfiguring bcdb_worker_count=\$worker_count -> $BCDB_WORKER_COUNT bcdb_serial_gate_mode=\$serial_gate -> $BCDB_SERIAL_GATE_MODE bcdb_dt_conflict_tracking=\$dt_conflict -> \$target_dt_conflict bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold -> $BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdb_result_ring_slots=\$ring_slots -> \$target_ring_slots bcdb_overwrite_protection=\$owp -> \$target_owp max_connections=\$max_connections -> >=\$min_max_connections\"
+      echo \"reconfiguring bcdb_worker_count=\$worker_count -> $BCDB_WORKER_COUNT bcdb_serial_gate_mode=\$serial_gate -> $BCDB_SERIAL_GATE_MODE bcdb_dt_conflict_tracking=\$dt_conflict -> \$target_dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads -> \$target_dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold -> $BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdb_result_ring_slots=\$ring_slots -> \$target_ring_slots bcdb_overwrite_protection=\$owp -> \$target_owp max_connections=\$max_connections -> >=\$min_max_connections\"
       if [[ \"\$worker_count\" != \"$BCDB_WORKER_COUNT\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_worker_count = '$BCDB_WORKER_COUNT';\"
       fi
@@ -1049,6 +1062,9 @@ for idx in "${!NODE_IDS[@]}"; do
       fi
       if [[ \"\$dt_conflict\" != \"\$target_dt_conflict\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_dt_conflict_tracking = '\$target_dt_conflict';\"
+      fi
+      if [[ \"\$dt_skip_reads\" != \"\$target_dt_skip_reads\" ]]; then
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_dt_completion_only_skip_reads = '\$target_dt_skip_reads';\"
       fi
       if [[ \"\$hashtab_threshold\" != \"$BCDB_DT_HASHTAB_SWITCH_THRESHOLD\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_dt_hashtab_switch_threshold = '$BCDB_DT_HASHTAB_SWITCH_THRESHOLD';\"
@@ -1070,12 +1086,13 @@ for idx in "${!NODE_IDS[@]}"; do
       worker_count=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_worker_count;' | tr -d '[:space:]')
       serial_gate=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_serial_gate_mode;' | tr -d '[:space:]')
       dt_conflict=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_conflict_tracking;' | tr -d '[:space:]')
+      dt_skip_reads=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_completion_only_skip_reads;' | tr -d '[:space:]')
       hashtab_threshold=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_hashtab_switch_threshold;' | tr -d '[:space:]')
       ring_slots=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_result_ring_slots;' | tr -d '[:space:]')
       owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || echo '')
       max_connections=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show max_connections;' | tr -d '[:space:]')
     fi
-    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp max_connections=\$max_connections\"
+    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp max_connections=\$max_connections\"
   " 2>&1)" || die "could not verify postgres on ${NODE_NAMES[$idx]}"
   log "  ${NODE_NAMES[$idx]}: $status_line"
   actual_workers="$(sed -n 's/.*bcdb_worker_count=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
@@ -1090,6 +1107,11 @@ for idx in "${!NODE_IDS[@]}"; do
   expected_dt_conflict="$([[ "$BCDB_DT_CONFLICT_TRACKING" == "1" ]] && echo on || echo off)"
   if [[ -n "$actual_dt_conflict" && "$actual_dt_conflict" != "$expected_dt_conflict" ]]; then
     die "bcdb_dt_conflict_tracking mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_dt_conflict expected=$expected_dt_conflict"
+  fi
+  actual_dt_skip_reads="$(sed -n 's/.*bcdb_dt_completion_only_skip_reads=\([^[:space:]]*\).*/\1/p' <<<"$status_line" | tail -1)"
+  expected_dt_skip_reads="$([[ "$BCDB_DT_COMPLETION_ONLY_SKIP_READS" == "1" ]] && echo on || echo off)"
+  if [[ -n "$actual_dt_skip_reads" && "$actual_dt_skip_reads" != "$expected_dt_skip_reads" ]]; then
+    die "bcdb_dt_completion_only_skip_reads mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_dt_skip_reads expected=$expected_dt_skip_reads"
   fi
   actual_hashtab_threshold="$(sed -n 's/.*bcdb_dt_hashtab_switch_threshold=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
   if [[ -n "$actual_hashtab_threshold" && "$actual_hashtab_threshold" != "$BCDB_DT_HASHTAB_SWITCH_THRESHOLD" ]]; then
@@ -1191,7 +1213,7 @@ for idx in "${!NODE_IDS[@]}"; do
 
   log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port"
   log "    binary: $srv_bin"
-  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
 
@@ -1207,8 +1229,10 @@ for idx in "${!NODE_IDS[@]}"; do
 	    export ARIABC_DET_BLOCK_PARALLEL='${DET_BLOCK_PARALLEL}'
 	    export ARIABC_DET_BLOCK_PIPELINE='${DET_BLOCK_PIPELINE}'
 	    export ARIABC_DET_BLOCK_MAX='${DET_BLOCK_MAX}'
+	    export ARIABC_DET_BLOCK_SKIP_READONLY='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
+	    export BCDB_DT_COMPLETION_ONLY_SKIP_READS='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    nohup '$srv_bin' \
       --id $id \
       --raftEndpoint ${ip}:${RAFT_PORT} \
@@ -1357,7 +1381,7 @@ fi
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2)"
-log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
 START_S="$(date +%s)"
 

@@ -207,6 +207,43 @@ bcdb_dt_skip_readonly_gate_enabled(void)
     return cached == 1;
 }
 
+static bool
+bcdb_dt_completion_only_skip_reads_enabled(void)
+{
+    return bcdb_dt_completion_only_skip_reads;
+}
+
+static bool
+bcdb_block_return_actual_results_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *v = getenv("BCDB_BLOCK_RETURN_ACTUAL_RESULTS");
+
+        cached = (v != NULL && *v != '\0' &&
+                  strcmp(v, "0") != 0 &&
+                  strcmp(v, "false") != 0 &&
+                  strcmp(v, "FALSE") != 0 &&
+                  strcmp(v, "no") != 0 &&
+                  strcmp(v, "NO") != 0);
+    }
+    return cached == 1;
+}
+
+static bool
+bcdb_query_is_select(const char *query)
+{
+    const char *s = query;
+
+    if (s == NULL)
+        return false;
+    while (*s != '\0' && isspace((unsigned char) *s))
+        s++;
+    return strncasecmp(s, "select", 6) == 0;
+}
+
 #define BCDB_FLOW_LOG(...) \
     do { \
         if (bcdb_flow_debug_enabled()) \
@@ -1717,6 +1754,61 @@ bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 #endif
     PG_TRY();
     {
+      if (bcdb_dt_completion_only_skip_reads_enabled() &&
+          !bcdb_block_return_actual_results_enabled() &&
+          bcdb_query_is_select(tx->sql))
+      {
+          BCTxID fast_tx_id = tx->tx_id;
+          int mem_txid;
+          BCBlock *committed_block;
+
+          block = get_block_by_id(1, false);
+          Assert(block != NULL);
+          mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
+
+          tx->status = TX_COMMITTING;
+          bcdb_wait_for_slot_consumable(block, tx->tx_id, mem_txid);
+          memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
+          pg_write_barrier();
+          __atomic_store_n(&block->result_commit_xid[mem_txid],
+                           tx->xid, __ATOMIC_RELEASE);
+          __atomic_store_n(&block->result_committed_txid[mem_txid],
+                           tx->tx_id, __ATOMIC_RELEASE);
+          __atomic_store_n(&block->result_consumed_txid[mem_txid],
+                           (int32) tx->tx_id, __ATOMIC_RELEASE);
+
+          if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED)
+              set_published_max_txid(tx);
+          if (bcdb_advance_commit_watermark)
+              advance_last_committed_txid(tx);
+          else
+          {
+              bcdb_wait_for_prev_committed(tx);
+              set_last_committed_txid(tx);
+          }
+
+          tx->status = TX_COMMITED;
+          committed_block = get_block_by_id(tx->block_id_committed, false);
+          if (committed_block != NULL)
+          {
+              int32 num_finished = __sync_add_and_fetch(&committed_block->num_finished, 1);
+
+              if (num_finished == committed_block->num_tx)
+              {
+                  uint32 global_bmin = __sync_add_and_fetch(&block_meta->global_bmin, 1);
+
+                  ConditionVariableBroadcast(&block_meta->conds[global_bmin % NUM_BMIN_COND]);
+                  block_cleaning_dt(committed_block->id);
+              }
+          }
+          condSig = 1;
+          delete_tx(tx);
+          MemoryContextReset(bcdb_tx_context);
+          PTRACE_END(BCDB_PHASE_TOTAL);
+          bcdb_ptrace_emit(fast_tx_id, 0);
+          return;
+      }
+
       for (;;)
       {
         latest_tx_id = get_last_committed_txid(tx);

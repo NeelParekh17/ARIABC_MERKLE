@@ -16,6 +16,7 @@ extern PGDLLIMPORT char                *bcdb_port;
 extern PGDLLIMPORT bool                OEP_mode;
 extern PGDLLIMPORT int32               bcdb_worker_count;
 extern PGDLLIMPORT bool                bcdb_dt_conflict_tracking;
+extern PGDLLIMPORT bool                bcdb_dt_completion_only_skip_reads;
 extern PGDLLIMPORT int32               bcdb_serial_gate_mode;
 extern PGDLLIMPORT int32               bcdb_dt_hashtab_switch_threshold;
 extern PGDLLIMPORT int32               bcdb_result_ring_slots;

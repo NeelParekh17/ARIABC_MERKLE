@@ -11,6 +11,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <poll.h>
 #include <sstream>
 #include <string.h>
@@ -71,6 +72,30 @@ bool det_event_block_fastpath_enabled() {
         return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
     }();
     return enabled;
+}
+
+bool det_block_skip_readonly_enabled() {
+    static const bool enabled = []() -> bool {
+        const char* v = std::getenv("ARIABC_DET_BLOCK_SKIP_READONLY");
+        if (!v) return false;
+        const std::string s = trim_copy(v);
+        return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+    }();
+    return enabled;
+}
+
+bool sql_is_plain_select(const std::string& sql) {
+    const std::string s = trim_copy(sql);
+    if (s.size() < 6) return false;
+    const char prefix[] = {'s', 'e', 'l', 'e', 'c', 't'};
+    for (size_t i = 0; i < 6; ++i) {
+        if (static_cast<char>(std::tolower(static_cast<unsigned char>(s[i]))) != prefix[i]) {
+            return false;
+        }
+    }
+    return s.size() == 6 ||
+           std::isspace(static_cast<unsigned char>(s[6])) ||
+           s[6] == '(';
 }
 
 uint64_t debug_req_trace_limit() {
@@ -666,6 +691,20 @@ pg_executor::pg_executor(int node_id,
         det_parallel_workers_ = false;
     }
     if (db_opt_.db_type == 1) {
+        const char* vp = ::getenv("ARIABC_DET_BLOCK_PARALLEL");
+        if (vp && *vp) {
+            char* end = nullptr;
+            const long parsed = std::strtol(vp, &end, 10);
+            if (end != vp && parsed > 0) {
+                /*
+                 * Event-mode deterministic blocks can be submitted on several
+                 * PG connections at once.  The backend serial gate preserves
+                 * tx order; the event loop emits completed block results in
+                 * submission order.
+                 */
+                det_block_parallel_ = static_cast<int>(std::min<long>(parsed, 64));
+            }
+        }
         const char* v = ::getenv("ARIABC_DET_BLOCK_PIPELINE");
         if (v && *v) {
             char* end = nullptr;
@@ -977,6 +1016,7 @@ pg_executor_stats pg_executor::stats() const {
     out.det_block_bin_64_127 = st_det_block_bin_64_127_.load(std::memory_order_relaxed);
     out.det_block_bin_128_plus = st_det_block_bin_128_plus_.load(std::memory_order_relaxed);
     out.det_block_fallbacks = st_det_block_fallbacks_.load(std::memory_order_relaxed);
+    out.det_block_skipped_readonly = st_det_block_skipped_readonly_.load(std::memory_order_relaxed);
     return out;
 }
 
@@ -1658,6 +1698,54 @@ void pg_executor::event_loop() {
         batch_start = std::chrono::steady_clock::now();
     };
 
+    struct ready_det_block {
+        std::vector<task> tasks;
+        std::vector<std::string> results;
+    };
+    std::map<uint64_t, ready_det_block> ready_det_blocks;
+    uint64_t next_det_block_submit_seq = 0;
+    uint64_t next_det_block_emit_seq = 0;
+
+    auto emit_det_result = [&](const task& done_task, const std::string& out) {
+        notify_task_applied(done_task.raft_log_idx);
+        if (kafka_enabled_) {
+            debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
+            if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
+            batch_req_ids.push_back(done_task.req_id);
+            batch_results.push_back(out);
+            batch_raft_log_idxs.push_back(done_task.raft_log_idx);
+            batch_leader_hints.push_back(done_task.leader_node_hint);
+            batch_bytes += done_task.req_id.size() + out.size() + 32;
+        } else {
+            std::cout << (done_task.req_id + "  " + std::to_string(node_id_) + "  " + out)
+                      << std::endl;
+        }
+    };
+
+    auto drain_ready_det_blocks = [&]() {
+        for (;;) {
+            auto it = ready_det_blocks.find(next_det_block_emit_seq);
+            if (it == ready_det_blocks.end()) break;
+
+            ready_det_block ready = std::move(it->second);
+            ready_det_blocks.erase(it);
+            const size_t n = std::min(ready.tasks.size(), ready.results.size());
+            for (size_t i = 0; i < n; ++i) {
+                emit_det_result(ready.tasks[i], ready.results[i]);
+            }
+            if (kafka_enabled_) {
+                const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - batch_start).count();
+                if (batch_req_ids.size() >= kKafkaBatchMaxRecords ||
+                    batch_bytes >= kKafkaBatchMaxBytes ||
+                    age_ms >= kKafkaBatchMaxDelayMs) {
+                    flush_batch();
+                }
+            }
+            ++next_det_block_emit_seq;
+        }
+    };
+
     auto update_overload_state = [&](size_t backlog, size_t queued) {
         st_backlog_cur_.store(static_cast<uint64_t>(backlog), std::memory_order_relaxed);
         // Allow dispatch jitter margin before entering overload in non-det
@@ -1700,51 +1788,40 @@ void pg_executor::event_loop() {
             st_delayed_cur_.store(static_cast<uint64_t>(delayed_.size()), std::memory_order_relaxed);
         }
 
-        // Deterministic BCDB block fast path: batch a full block of parser-mode
-        // requests into one SQL call so worker fanout can execute them together.
-        // Guard by queue-front det-prefix check so non-det setup queries that
-        // triggered det_raw_compat_mode_ don't permanently disable this path.
-        {
-            bool front_is_det = false;
-            {
-                std::lock_guard<std::mutex> lk(q_mu_);
-                if (!q_.empty()) front_is_det = is_det_prefixed_sql(q_.front().sql);
-            }
+        // Deterministic BCDB block fast path: submit ordered parser-mode
+        // blocks on several PG connections, then emit completed block results
+        // in submission order.  This preserves the global result stream while
+        // allowing later blocks to parse/simulate while earlier blocks finish.
         if (!stop_.load() &&
             db_opt_.db_type == 1 &&
             !det_parallel_workers_ &&
             det_event_block_fastpath_enabled() &&
-            front_is_det &&
             bcdb_init_done_ &&
             !conns_.empty()) {
-            bool any_inflight = false;
+            const size_t base_block_cap = bcdb_init_done_
+                ? static_cast<size_t>(bcdb_block_size_)
+                : std::max<size_t>(1, static_cast<size_t>(db_opt_.conn_pool_size));
+            const size_t block_cap =
+                std::min<size_t>(det_block_max_,
+                                 base_block_cap *
+                                 static_cast<size_t>(std::max(1, det_block_pipeline_)));
+            int det_blocks_inflight = 0;
+
             for (const auto& cs : conns_) {
-                if (cs.st != conn_state::state::IDLE) {
-                    any_inflight = true;
-                    break;
+                if (cs.has_det_block && cs.st != conn_state::state::IDLE) {
+                    ++det_blocks_inflight;
                 }
             }
 
-            if (!any_inflight) {
-                /*
-                 * Use an ordered multi-block backend submit when requested.
-                 * This keeps one deterministic queue and one result mapping,
-                 * but amortizes libpq/SQL/block-submit overhead across
-                 * multiple logical BCDB worker waves.
-                 */
-                const size_t base_block_cap = bcdb_init_done_
-                    ? static_cast<size_t>(bcdb_block_size_)
-                    : std::max<size_t>(1, static_cast<size_t>(db_opt_.conn_pool_size));
-                const size_t block_cap =
-                    std::min<size_t>(det_block_max_,
-                                     base_block_cap *
-                                     static_cast<size_t>(std::max(1, det_block_pipeline_)));
+            for (auto& cs : conns_) {
+                if (det_blocks_inflight >= det_block_parallel_) break;
+                if (block_cap == 0 || cs.st != conn_state::state::IDLE) continue;
+
                 std::vector<task> det_batch;
                 size_t depth_after_pop = 0;
-
-                if (block_cap > 0) {
+                {
                     std::lock_guard<std::mutex> lk(q_mu_);
-                    if (delayed_.empty() && !q_.empty()) {
+                    if (delayed_.empty() && !q_.empty() && is_det_prefixed_sql(q_.front().sql)) {
                         std::queue<task> restored;
                         std::vector<task> candidate;
                         candidate.reserve(block_cap);
@@ -1771,7 +1848,6 @@ void pg_executor::event_loop() {
                         }
 
                         if (eligible && candidate.size() < block_cap) {
-                            const uint64_t now_ns = now_steady_ns();
                             const uint64_t oldest_enqueue_ns = candidate.front().enqueue_ns;
                             if (oldest_enqueue_ns != 0 &&
                                 now_ns >= oldest_enqueue_ns &&
@@ -1798,91 +1874,101 @@ void pg_executor::event_loop() {
                         }
                     }
                 }
+                if (det_batch.empty()) break;
 
-                if (!det_batch.empty()) {
-                    const uint64_t exec_begin_ns = now_steady_ns();
-                    for (auto& t : det_batch) {
-                        if (t.exec_begin_ns == 0) t.exec_begin_ns = exec_begin_ns;
-                        st_dequeued_.fetch_add(1, std::memory_order_relaxed);
-                        st_exec_calls_.fetch_add(1, std::memory_order_relaxed);
-                        if (t.enqueue_ns != 0 && exec_begin_ns >= t.enqueue_ns) {
-                            const uint64_t delay_ns = exec_begin_ns - t.enqueue_ns;
-                            st_queue_delay_ns_.fetch_add(delay_ns, std::memory_order_relaxed);
-                            st_queue_delay_exec_start_ns_.fetch_add(delay_ns, std::memory_order_relaxed);
-                        }
+                const uint64_t exec_begin_ns = now_steady_ns();
+                std::vector<std::pair<std::string, std::string>> txs;
+                std::vector<uint8_t> backend_mask;
+                const uint64_t tx_key_start = det_block_tx_key_base_ + det_block_next_tx_key_;
+                bool build_ok = true;
+                uint64_t skipped_readonly = 0;
+                txs.reserve(det_batch.size());
+                backend_mask.reserve(det_batch.size());
+                for (size_t i = 0; i < det_batch.size(); ++i) {
+                    uint64_t seq = 0;
+                    std::string raw_sql;
+                    if (!parse_det_prefixed_sql_parts(det_batch[i].sql, &seq, &raw_sql)) {
+                        build_ok = false;
+                        break;
                     }
+                    if (det_block_skip_readonly_enabled() && sql_is_plain_select(raw_sql)) {
+                        backend_mask.push_back(0);
+                        ++skipped_readonly;
+                        continue;
+                    }
+                    backend_mask.push_back(1);
+                    const std::string key = std::to_string(tx_key_start + static_cast<uint64_t>(i));
+                    txs.emplace_back(key, std::move(raw_sql));
+                }
+                det_block_next_tx_key_ += static_cast<uint64_t>(det_batch.size());
+                if (skipped_readonly > 0) {
+                    st_det_block_skipped_readonly_.fetch_add(skipped_readonly,
+                                                             std::memory_order_relaxed);
+                }
 
-                    std::vector<std::string> det_results;
-                    const uint64_t tx_key_start =
-                        det_block_tx_key_base_ + det_block_next_tx_key_;
-                    det_block_next_tx_key_ += static_cast<uint64_t>(det_batch.size());
-                    bool batch_ok = exec_det_block_batch(conns_[0].c, tx_key_start, det_batch, det_results);
-                    record_det_block_batch(det_batch.size(), !batch_ok);
-                    if (batch_ok) {
-                        bool expected = false;
-                        if (st_det_block_seen_.compare_exchange_strong(expected, true)) {
-                            std::cerr << "det_block_batch active on node " << node_id_
-                                      << " size=" << det_batch.size() << std::endl;
-                        }
+                for (auto& t : det_batch) {
+                    if (t.exec_begin_ns == 0) t.exec_begin_ns = exec_begin_ns;
+                    st_dequeued_.fetch_add(1, std::memory_order_relaxed);
+                    st_exec_calls_.fetch_add(1, std::memory_order_relaxed);
+                    if (t.enqueue_ns != 0 && exec_begin_ns >= t.enqueue_ns) {
+                        const uint64_t delay_ns = exec_begin_ns - t.enqueue_ns;
+                        st_queue_delay_ns_.fetch_add(delay_ns, std::memory_order_relaxed);
+                        st_queue_delay_exec_start_ns_.fetch_add(delay_ns, std::memory_order_relaxed);
                     }
-                    if (!batch_ok || det_results.size() != det_batch.size()) {
-                        bool expected = false;
-                        if (st_det_block_fallback_seen_.compare_exchange_strong(expected, true)) {
-                            std::cerr << "det_block_batch fallback on node " << node_id_
-                                      << " size=" << det_batch.size() << std::endl;
-                        }
-                        det_results.clear();
-                        det_results.reserve(det_batch.size());
-                        for (const auto& t : det_batch) {
-                            det_results.push_back(exec_sql(conns_[0].c, t.sql));
-                        }
-                    }
+                }
 
-                    const uint64_t finish_ns = now_steady_ns();
-                    if (finish_ns >= exec_begin_ns) {
-                        st_exec_ns_.fetch_add(finish_ns - exec_begin_ns, std::memory_order_relaxed);
-                    }
+                const uint64_t block_seq = next_det_block_submit_seq++;
+                if (!build_ok) {
+                    ready_det_block ready;
+                    ready.tasks = std::move(det_batch);
+                    ready.results.assign(ready.tasks.size(), "ERROR det_block_build_failed");
+                    record_det_block_batch(ready.tasks.size(), true);
+                    ready_det_blocks.emplace(block_seq, std::move(ready));
+                    continue;
+                }
+                if (txs.empty()) {
+                    ready_det_block ready;
+                    ready.tasks = std::move(det_batch);
+                    ready.results.assign(ready.tasks.size(), "");
+                    record_det_block_batch(ready.tasks.size(), false);
+                    ready_det_blocks.emplace(block_seq, std::move(ready));
+                    continue;
+                }
 
-                    for (size_t i = 0; i < det_batch.size(); ++i) {
-                        const task& done_task = det_batch[i];
-                        const std::string& out = det_results[i];
-                        notify_task_applied(done_task.raft_log_idx);
-                        if (kafka_enabled_) {
-                            debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
-                            if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
-                            batch_req_ids.push_back(done_task.req_id);
-                            batch_results.push_back(out);
-                            batch_raft_log_idxs.push_back(done_task.raft_log_idx);
-                            batch_leader_hints.push_back(done_task.leader_node_hint);
-                            batch_bytes += done_task.req_id.size() + out.size() + 32;
-                        } else {
-                            std::cout << (done_task.req_id + "  " + std::to_string(node_id_) + "  " + out)
-                                      << std::endl;
-                        }
+                const std::string sql = build_bcdb_block_submit_results_sql(det_next_block_id_++, txs);
+                if (PQstatus(cs.c) != CONNECTION_OK) {
+                    PQreset(cs.c);
+                    auto it = notice_state_by_conn_.find(cs.c);
+                    if (it != notice_state_by_conn_.end()) {
+                        PQsetNoticeProcessor(cs.c, &pg_executor::notice_processor, it->second);
                     }
+                }
+                auto it = notice_state_by_conn_.find(cs.c);
+                notice_state* ns = (it != notice_state_by_conn_.end()) ? it->second : nullptr;
+                if (ns) ns->last_merkle_roots.clear();
 
-	                    if (kafka_enabled_) {
-	                        const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-	                            std::chrono::steady_clock::now() - batch_start).count();
-	                        if (batch_req_ids.size() >= kKafkaBatchMaxRecords ||
-	                            batch_bytes >= kKafkaBatchMaxBytes ||
-	                            age_ms >= kKafkaBatchMaxDelayMs) {
-	                            flush_batch();
-	                        }
-	                        bool flush_idle_batch = false;
-	                        if (!batch_req_ids.empty()) {
-	                            std::lock_guard<std::mutex> lk(q_mu_);
-	                            flush_idle_batch = q_.empty() && delayed_.empty();
-	                        }
-	                        if (flush_idle_batch) {
-	                            flush_batch();
-	                        }
-	                    }
-	                    continue;
-	                }
+                if (PQsendQuery(cs.c, sql.c_str()) != 1) {
+                    ready_det_block ready;
+                    ready.tasks = std::move(det_batch);
+                    ready.results.assign(ready.tasks.size(), "ERROR det_block_send_failed");
+                    record_det_block_batch(ready.tasks.size(), true);
+                    ready_det_blocks.emplace(block_seq, std::move(ready));
+                    continue;
+                }
+
+                cs.cur = task{};
+                cs.has_task = false;
+                cs.has_det_block = true;
+                cs.det_block_seq = block_seq;
+                cs.det_block_tx_key_start = tx_key_start;
+                cs.det_block_tasks = std::move(det_batch);
+                cs.det_block_backend_mask = std::move(backend_mask);
+                cs.exec_start_ns = exec_begin_ns;
+                cs.st = conn_state::state::SENDING;
+                ++det_blocks_inflight;
             }
         }
-        } // end front_is_det block
+        drain_ready_det_blocks();
 
         // Assign ready work to idle connections.
         size_t inflight = 0;
@@ -2116,6 +2202,9 @@ void pg_executor::event_loop() {
                 } else if (fr < 0) {
                     cs.st = conn_state::state::IDLE;
                     cs.has_task = false;
+                    cs.has_det_block = false;
+                    cs.det_block_tasks.clear();
+                    cs.det_block_backend_mask.clear();
                 }
             }
 
@@ -2123,6 +2212,9 @@ void pg_executor::event_loop() {
                 if (PQconsumeInput(cs.c) != 1) {
                     cs.st = conn_state::state::IDLE;
                     cs.has_task = false;
+                    cs.has_det_block = false;
+                    cs.det_block_tasks.clear();
+                    cs.det_block_backend_mask.clear();
                     continue;
                 }
                 if (PQisBusy(cs.c)) continue;
@@ -2138,6 +2230,94 @@ void pg_executor::event_loop() {
                 const uint64_t query_end_ns = now_steady_ns();
                 if (cs.exec_start_ns != 0 && query_end_ns >= cs.exec_start_ns) {
                     st_pg_query_ns_.fetch_add(query_end_ns - cs.exec_start_ns, std::memory_order_relaxed);
+                }
+
+                if (cs.has_det_block) {
+                    ready_det_block ready;
+                    ready.tasks = std::move(cs.det_block_tasks);
+                    std::vector<uint8_t> backend_mask = std::move(cs.det_block_backend_mask);
+                    if (backend_mask.size() != ready.tasks.size()) {
+                        backend_mask.assign(ready.tasks.size(), 1);
+                    }
+                    bool batch_ok = false;
+                    const ExecStatusType st = last ? PQresultStatus(last) : PGRES_FATAL_ERROR;
+
+                    if ((st == PGRES_TUPLES_OK || st == PGRES_COMMAND_OK) &&
+                        last && PQntuples(last) >= 1 && PQnfields(last) >= 1) {
+                        const auto f0 = std::chrono::steady_clock::now();
+                        const char* val = PQgetvalue(last, 0, 0);
+                        std::unordered_map<std::string, std::string> result_by_hash;
+                        batch_ok = parse_bcdb_block_results_text(
+                            val ? std::string(val) : std::string(),
+                            result_by_hash);
+                        if (batch_ok) {
+                            ready.results.assign(ready.tasks.size(), "");
+                            for (size_t i = 0; i < ready.tasks.size(); ++i) {
+                                if (backend_mask[i] == 0) {
+                                    continue;
+                                }
+                                const std::string key =
+                                    std::to_string(cs.det_block_tx_key_start +
+                                                   static_cast<uint64_t>(i));
+                                auto it = result_by_hash.find(key);
+                                if (it == result_by_hash.end()) {
+                                    batch_ok = false;
+                                    break;
+                                }
+                                ready.results[i] = it->second;
+                            }
+                        }
+                        const auto f1 = std::chrono::steady_clock::now();
+                        st_result_format_ns_.fetch_add(
+                            static_cast<uint64_t>(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(f1 - f0).count()),
+                            std::memory_order_relaxed);
+                    }
+
+                    record_det_block_batch(ready.tasks.size(), !batch_ok);
+                    if (batch_ok) {
+                        bool expected = false;
+                        if (st_det_block_seen_.compare_exchange_strong(expected, true)) {
+                            std::cerr << "det_block_batch active on node " << node_id_
+                                      << " size=" << ready.tasks.size()
+                                      << " parallel=" << det_block_parallel_ << std::endl;
+                        }
+                    } else {
+                        bool expected = false;
+                        if (st_det_block_fallback_seen_.compare_exchange_strong(expected, true)) {
+                            std::cerr << "det_block_batch fallback on node " << node_id_
+                                      << " size=" << ready.tasks.size()
+                                      << " parallel=" << det_block_parallel_ << std::endl;
+                        }
+                        ready.results.clear();
+                        ready.results.reserve(ready.tasks.size());
+                        for (size_t i = 0; i < ready.tasks.size(); ++i) {
+                            if (backend_mask[i] == 0) {
+                                ready.results.push_back("");
+                            } else {
+                                ready.results.push_back(exec_sql(cs.c, ready.tasks[i].sql));
+                            }
+                        }
+                    }
+
+                    const uint64_t finish_ns = now_steady_ns();
+                    if (cs.exec_start_ns != 0 && finish_ns >= cs.exec_start_ns) {
+                        st_exec_ns_.fetch_add(finish_ns - cs.exec_start_ns, std::memory_order_relaxed);
+                    }
+                    if (last) PQclear(last);
+
+                    const uint64_t block_seq = cs.det_block_seq;
+                    cs.st = conn_state::state::IDLE;
+                    cs.has_task = false;
+                    cs.has_det_block = false;
+                    cs.det_block_seq = 0;
+                    cs.det_block_tx_key_start = 0;
+                    cs.det_block_backend_mask.clear();
+                    cs.exec_start_ns = 0;
+
+                    ready_det_blocks.emplace(block_seq, std::move(ready));
+                    drain_ready_det_blocks();
+                    continue;
                 }
 
                 std::string out;

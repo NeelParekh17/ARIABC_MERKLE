@@ -75,6 +75,7 @@ struct pg_executor_stats {
     uint64_t det_block_bin_64_127 = 0;
     uint64_t det_block_bin_128_plus = 0;
     uint64_t det_block_fallbacks = 0;
+    uint64_t det_block_skipped_readonly = 0;
 };
 
 struct db_options {
@@ -225,6 +226,11 @@ private:
         enum class state : uint8_t { IDLE = 0, SENDING = 1, READING = 2 } st = state::IDLE;
         task cur;
         bool has_task = false;
+        bool has_det_block = false;
+        uint64_t det_block_seq = 0;
+        uint64_t det_block_tx_key_start = 0;
+        std::vector<task> det_block_tasks;
+        std::vector<uint8_t> det_block_backend_mask;
         uint64_t exec_start_ns = 0;
     };
     std::vector<conn_state> conns_;
@@ -241,6 +247,7 @@ private:
     bool bcdb_init_done_ = false;
     bool bcdb_init_failed_ = false;
     int bcdb_block_size_ = 0;
+    int det_block_parallel_ = 1;
     int det_block_pipeline_ = 1;
     size_t det_block_max_ = 2048;
     int wakeup_rfd_ = -1;
@@ -292,6 +299,7 @@ private:
     std::atomic<uint64_t> st_det_block_bin_64_127_{0};
     std::atomic<uint64_t> st_det_block_bin_128_plus_{0};
     std::atomic<uint64_t> st_det_block_fallbacks_{0};
+    std::atomic<uint64_t> st_det_block_skipped_readonly_{0};
     std::atomic<uint64_t> st_queue_depth_cur_{0};
     std::atomic<bool> queue_overloaded_{false};
     std::mutex admission_mu_;
