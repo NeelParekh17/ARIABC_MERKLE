@@ -65,6 +65,12 @@ DET_PREPARED_CALLS_ENABLED = os.getenv(
 ).strip().lower() in {
     "1", "true", "yes", "on"
 }
+CLIENT_CURSOR_ENABLED = os.getenv(
+    "ARIABC_PSYCOPG_CLIENT_CURSOR",
+    "0",
+).strip().lower() in {
+    "1", "true", "yes", "on"
+}
 SIGNING_ENABLED = False
 ENFORCE_SIGNATURES = False
 SIGNING_PRIVATE_KEY = None
@@ -423,7 +429,12 @@ def open_worker_connection(worker_idx: int):
         cur = None
         stage = "connect"
         try:
-            conn = psycopg.connect(connStr, autocommit=True)
+            cursor_factory = psycopg.ClientCursor if CLIENT_CURSOR_ENABLED else None
+            conn = psycopg.connect(
+                connStr,
+                autocommit=True,
+                cursor_factory=cursor_factory,
+            )
             _install_bcdb_merkle_notice_handler(conn)
             cur = conn.cursor()
             stage = "session bootstrap"
