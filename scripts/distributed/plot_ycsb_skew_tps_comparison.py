@@ -203,6 +203,8 @@ def _load_full_rows(manifest: Path, *, workload: str) -> list[dict[str, str]]:
                 "valid_tps": raw_tps if valid else "",
                 "overall_ms": _fmt(parsed["overall_ms"], 3),
                 "valid": "1" if valid else "0",
+                "num_terminals": m.get("num_terminals", ""),
+                "det_pipeline_depth": m.get("det_pipeline_depth", ""),
                 "completion_path": str(parsed["completion_path"]),
                 "wait_majority": str(parsed["wait_majority"] or ""),
                 "divergence_count": str(parsed["divergence_count"] if parsed["divergence_count"] is not None else ""),
@@ -229,6 +231,8 @@ def _write_results(rows: list[dict[str, str]], path: Path) -> None:
         "valid_tps",
         "overall_ms",
         "valid",
+        "num_terminals",
+        "det_pipeline_depth",
         "completion_path",
         "wait_majority",
         "divergence_count",
@@ -324,7 +328,11 @@ def _write_overhead(summary: list[dict[str, str]], path: Path) -> None:
             w.writerow(row)
 
 
-def _plot(summary: list[dict[str, str]], out_dir: Path, workload: str, machine: str) -> Path:
+def _plot(summary: list[dict[str, str]],
+          out_dir: Path,
+          workload: str,
+          machine: str,
+          x_label: str) -> Path:
     try:
         import matplotlib
 
@@ -370,7 +378,7 @@ def _plot(summary: list[dict[str, str]], out_dir: Path, workload: str, machine: 
             color=colors[series],
             label=labels[series],
         )
-    ax.set_xlabel("Threads (single node) / ordered concurrency budget (full system)")
+    ax.set_xlabel(x_label or "Threads")
     ax.set_ylabel("Valid TPS (trimmed mean when 3+ runs are available)")
     ax.set_title(f"YCSB skew full workload TPS comparison\n{workload}")
     ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.4)
@@ -390,6 +398,7 @@ def main() -> int:
     ap.add_argument("--workload", required=True)
     ap.add_argument("--machine", default="10.129.148.248")
     ap.add_argument("--threads", default="", help="Optional CSV thread filter for graph-ready output")
+    ap.add_argument("--x-label", default="Threads")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -404,7 +413,7 @@ def main() -> int:
     _write_results(rows, args.out_dir / "results.csv")
     summary = _write_summary(rows, args.out_dir / "summary.csv")
     _write_overhead(summary, args.out_dir / "overhead.csv")
-    graph = _plot(summary, args.out_dir, args.workload, args.machine)
+    graph = _plot(summary, args.out_dir, args.workload, args.machine, args.x_label)
     print(f"Wrote results:  {args.out_dir / 'results.csv'}")
     print(f"Wrote summary:  {args.out_dir / 'summary.csv'}")
     print(f"Wrote overhead: {args.out_dir / 'overhead.csv'}")

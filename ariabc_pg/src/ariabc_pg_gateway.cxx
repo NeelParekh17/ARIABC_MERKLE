@@ -114,6 +114,10 @@ struct gateway_options {
     // 1 => enabled (default)
     int det_submit_pipeline = 1;
 
+    // Deterministic client-lane pipeline depth.
+    // 0 => auto from detWindow / numTerminals for backwards compatibility.
+    int det_pipeline_depth = 0;
+
     // Optional per-worker in-flight majority window in non-deterministic mode.
     // 0 => auto (scales to keep total in-flight bounded).
     int nondet_window = 0;
@@ -137,7 +141,7 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1]\n";
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1]\n";
 }
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
@@ -210,6 +214,8 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.submit_mode = need("--submitMode");
             } else if (a == "--detSubmitPipeline") {
                 opt.det_submit_pipeline = std::stoi(need("--detSubmitPipeline"));
+            } else if (a == "--detPipelineDepth") {
+                opt.det_pipeline_depth = std::stoi(need("--detPipelineDepth"));
             } else if (a == "--nondetWindow") {
                 opt.nondet_window = std::stoi(need("--nondetWindow"));
             } else if (a == "--totalNodes") {
@@ -253,10 +259,6 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     }
     if (opt.num_terminals <= 0) {
         err = "invalid --numTerminals";
-        return false;
-    }
-    if (opt.db_type == 1 && opt.num_terminals != 1) {
-        err = "deterministic mode currently requires --numTerminals 1; multi-lane det submission is not implemented";
         return false;
     }
     if (opt.poll_interval_us <= 0) {
@@ -309,6 +311,10 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     }
     if (opt.det_submit_pipeline != 0 && opt.det_submit_pipeline != 1) {
         err = "invalid --detSubmitPipeline (expected 0 or 1)";
+        return false;
+    }
+    if (opt.det_pipeline_depth < 0) {
+        err = "invalid --detPipelineDepth (expected >= 0)";
         return false;
     }
     if (opt.nondet_window < 0) {
@@ -2748,6 +2754,16 @@ int main(int argc, char** argv) {
         return std::max<size_t>(32, static_cast<size_t>(opt.db_conn_pool_size) * 16);
     };
 
+    auto effective_det_pipeline_depth = [&](size_t terminal_count, size_t window) -> size_t {
+        if (opt.det_pipeline_depth > 0) {
+            return static_cast<size_t>(opt.det_pipeline_depth);
+        }
+        // Preserve the old single-lane behavior when the benchmark does not
+        // opt into a client-lane pipeline depth: numTerminals=1 gets the full
+        // deterministic window, while multi-terminal runs divide it evenly.
+        return std::max<size_t>(1, window / std::max<size_t>(1, terminal_count));
+    };
+
     int exit_code = 0;
     if (!socket_mode) {
         // File mode.
@@ -2797,10 +2813,10 @@ int main(int argc, char** argv) {
         // safedb_dt executor can deadlock when a higher seq reaches the head of
         // the FIFO work queue before an earlier seq exists in the queue yet.
         //
-        // To guarantee ordering, we submit queries in increasing `idx` order.
-        // Deterministic mode currently stays single-lane at the gateway, so
-        // throughput comes from batching and windowed majority tracking rather
-        // than from multiple terminal submitters.
+        // To guarantee ordering, the gateway still assigns one global sequence
+        // in increasing `idx` order.  numTerminals models client lanes on top of
+        // that sequencer: request idx is assigned to lane idx % numTerminals,
+        // and each lane may have at most detPipelineDepth requests outstanding.
         if (opt.db_type == 1) {
             if (!warm_leader_route()) {
                 permanent_failures.fetch_add(1);
@@ -2810,13 +2826,78 @@ int main(int argc, char** argv) {
                 return 1;
             }
             const size_t window = effective_det_window();
+            const size_t det_terminal_count =
+                std::max<size_t>(1, static_cast<size_t>(opt.num_terminals));
+            const size_t det_lane_pipeline_depth =
+                effective_det_pipeline_depth(det_terminal_count, window);
+            const size_t det_pipeline_cap =
+                std::max<size_t>(
+                    1,
+                    std::min<size_t>(
+                        window,
+                        det_terminal_count * det_lane_pipeline_depth));
             std::cout << "det mode: ordered submission (window=" << window
                       << ", configured_det_window=" << std::max(1, opt.det_window > 0 ? opt.det_window : 32)
                       << ", detBatchSize=" << opt.det_batch_size
+                      << ", numTerminals=" << det_terminal_count
+                      << ", detPipelineDepth=" << det_lane_pipeline_depth
+                      << ", detPipelineCap=" << det_pipeline_cap
                       << ", dbConnPoolSize=" << opt.db_conn_pool_size
                       << ", detRawSql=" << opt.det_raw_sql
                       << ")" << std::endl;
             std::deque<uint64_t> inflight;
+            std::atomic<bool> det_progress_stop(false);
+            std::atomic<size_t> det_sent_count(0);
+            std::atomic<size_t> det_accepted_count(0);
+            std::atomic<size_t> det_completed_count(0);
+            std::atomic<size_t> det_inflight_count(0);
+            std::atomic<size_t> det_pending_accept_count(0);
+            std::atomic<size_t> det_pipeline_outstanding_count(0);
+            std::mutex det_progress_mu;
+            std::condition_variable det_progress_cv;
+            const auto det_progress_start = std::chrono::steady_clock::now();
+            auto emit_det_progress = [&](bool final) {
+                const auto now = std::chrono::steady_clock::now();
+                const double elapsed_s =
+                    std::chrono::duration_cast<std::chrono::duration<double>>(
+                        now - det_progress_start).count();
+                const size_t completed =
+                    det_completed_count.load(std::memory_order_relaxed);
+                const double completed_tps = (elapsed_s > 0.0)
+                    ? (static_cast<double>(completed) / elapsed_s)
+                    : 0.0;
+
+                std::ostringstream oss;
+                oss << "PROGRESS_GATEWAY_DET"
+                    << " elapsed_s=" << std::fixed << std::setprecision(1) << elapsed_s
+                    << " total=" << queries.size()
+                    << " sent=" << det_sent_count.load(std::memory_order_relaxed)
+                    << " accepted=" << det_accepted_count.load(std::memory_order_relaxed)
+                    << " completed=" << completed
+                    << " completed_tps=" << std::fixed << std::setprecision(2) << completed_tps
+                    << " terminal_lanes=" << det_terminal_count
+                    << " terminal_depth=" << det_lane_pipeline_depth
+                    << " pipeline_outstanding=" << det_pipeline_outstanding_count.load(std::memory_order_relaxed)
+                    << " majority_inflight=" << det_inflight_count.load(std::memory_order_relaxed)
+                    << " pending_accept=" << det_pending_accept_count.load(std::memory_order_relaxed)
+                    << " permanent_failures=" << permanent_failures.load(std::memory_order_relaxed)
+                    << " divergence_count=" << divergence_count.load(std::memory_order_relaxed);
+                if (final) oss << " final=1";
+                std::cout << oss.str() << std::endl;
+            };
+            std::thread det_progress_thread([&] {
+                std::unique_lock<std::mutex> lk(det_progress_mu);
+                while (!det_progress_stop.load(std::memory_order_relaxed)) {
+                    if (det_progress_cv.wait_for(lk, std::chrono::seconds(5), [&] {
+                            return det_progress_stop.load(std::memory_order_relaxed);
+                        })) {
+                        break;
+                    }
+                    lk.unlock();
+                    emit_det_progress(false);
+                    lk.lock();
+                }
+            });
 
             bool failed = false;
             struct det_shaped_request {
@@ -2825,6 +2906,69 @@ int main(int argc, char** argv) {
                 uint64_t req_num = 0;
                 std::string sql;
             };
+
+            std::vector<size_t> det_lane_outstanding(det_terminal_count, 0);
+            size_t det_total_outstanding = 0;
+            std::unordered_map<uint64_t, size_t> det_req_lane;
+
+            auto det_lane_for_idx = [&](size_t idx) -> size_t {
+                return idx % det_terminal_count;
+            };
+
+            auto release_det_req_lane = [&](uint64_t req_num) {
+                auto it = det_req_lane.find(req_num);
+                if (it == det_req_lane.end()) {
+                    return;
+                }
+                const size_t lane = it->second;
+                if (lane < det_lane_outstanding.size() && det_lane_outstanding[lane] > 0) {
+                    --det_lane_outstanding[lane];
+                }
+                if (det_total_outstanding > 0) {
+                    --det_total_outstanding;
+                }
+                det_req_lane.erase(it);
+                det_pipeline_outstanding_count.store(det_total_outstanding, std::memory_order_relaxed);
+            };
+
+            auto release_det_item_lanes = [&](const std::vector<det_shaped_request>& items) {
+                for (const auto& item : items) {
+                    release_det_req_lane(item.req_num);
+                }
+            };
+
+            auto reserve_det_item_lanes = [&](const std::vector<det_shaped_request>& items) -> bool {
+                if (items.empty()) {
+                    return true;
+                }
+                std::vector<size_t> needed(det_terminal_count, 0);
+                for (const auto& item : items) {
+                    const size_t lane = det_lane_for_idx(item.idx);
+                    ++needed[lane];
+                    if (det_lane_outstanding[lane] + needed[lane] > det_lane_pipeline_depth) {
+                        std::cerr << "det lane capacity exceeded lane=" << lane
+                                  << " outstanding=" << det_lane_outstanding[lane]
+                                  << " need=" << needed[lane]
+                                  << " depth=" << det_lane_pipeline_depth << std::endl;
+                        return false;
+                    }
+                }
+                if (det_total_outstanding + items.size() > det_pipeline_cap) {
+                    std::cerr << "det pipeline capacity exceeded outstanding=" << det_total_outstanding
+                              << " need=" << items.size()
+                              << " cap=" << det_pipeline_cap << std::endl;
+                    return false;
+                }
+                for (const auto& item : items) {
+                    const size_t lane = det_lane_for_idx(item.idx);
+                    ++det_lane_outstanding[lane];
+                    ++det_total_outstanding;
+                    det_req_lane[item.req_num] = lane;
+                }
+                det_pipeline_outstanding_count.store(det_total_outstanding, std::memory_order_relaxed);
+                return true;
+            };
+
             auto shape_det_request = [&](size_t idx,
                                          std::string& out_req_id,
                                          uint64_t& out_req_num,
@@ -2930,9 +3074,14 @@ int main(int argc, char** argv) {
                         permanent_failures.fetch_add(1);
                         return false;
                     }
+                    det_accepted_count.fetch_add(1, std::memory_order_relaxed);
                     if (majority_wait_enabled) {
                         inflight.push_back(items[i].req_num);
+                        det_inflight_count.fetch_add(1, std::memory_order_relaxed);
                         track_reset_req(items[i].req_num, items[i].sql);
+                    } else {
+                        det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                        release_det_req_lane(items[i].req_num);
                     }
                 }
                 return true;
@@ -2956,6 +3105,9 @@ int main(int argc, char** argv) {
                         permanent_failures.fetch_add(1);
                         return false;
                     }
+                    det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                    det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                    release_det_req_lane(rid);
                     if (!maybe_wait_reset_all_nodes(rid)) {
                         permanent_failures.fetch_add(1);
                         return false;
@@ -2965,13 +3117,33 @@ int main(int argc, char** argv) {
             };
 
             auto desired_det_batch_slots = [&](size_t start_idx) -> size_t {
-                if (start_idx >= queries.size()) return 1;
+                if (start_idx >= queries.size()) return 0;
                 const size_t remaining = queries.size() - start_idx;
-                return std::max<size_t>(
-                    1,
+                const size_t target_slots =
                     std::min<size_t>(
                         static_cast<size_t>(opt.det_batch_size),
-                        std::min(window, remaining)));
+                        std::min(det_pipeline_cap, remaining));
+                std::vector<size_t> tmp_lane_outstanding = det_lane_outstanding;
+                size_t tmp_total = det_total_outstanding;
+                size_t slots = 0;
+                for (size_t idx = start_idx;
+                     idx < queries.size() && slots < target_slots;
+                     ++idx) {
+                    const size_t lane = det_lane_for_idx(idx);
+                    if (tmp_lane_outstanding[lane] >= det_lane_pipeline_depth) {
+                        break;
+                    }
+                    if (tmp_total >= det_pipeline_cap) {
+                        break;
+                    }
+                    ++tmp_lane_outstanding[lane];
+                    ++tmp_total;
+                    ++slots;
+                }
+                if (slots < target_slots) {
+                    return 0;
+                }
+                return slots;
             };
 
             const bool det_event_pipeline =
@@ -2988,9 +3160,11 @@ int main(int argc, char** argv) {
                     std::chrono::steady_clock::time_point submit_started_at;
                 };
 
-                const size_t det_submit_limit = (opt.submit_limit > 0)
+                const size_t configured_det_submit_limit = (opt.submit_limit > 0)
                     ? static_cast<size_t>(std::max(1, opt.submit_limit))
-                    : window;
+                    : det_pipeline_cap;
+                const size_t det_submit_limit =
+                    std::max<size_t>(1, std::min(det_pipeline_cap, configured_det_submit_limit));
                 const size_t leader_idx =
                     static_cast<size_t>(ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed));
                 std::deque<det_submit_ticket> pending_accepts;
@@ -3006,6 +3180,9 @@ int main(int argc, char** argv) {
                     } else {
                         pending_request_count = 0;
                     }
+                    det_pending_accept_count.fetch_sub(
+                        ticket.items.size(),
+                        std::memory_order_relaxed);
 
                     ariabc_pg::client_api_response resp;
                     std::string submit_err;
@@ -3019,6 +3196,7 @@ int main(int argc, char** argv) {
                         std::cerr << "det pipeline submit failed req="
                                   << (ticket.items.empty() ? 0 : ticket.items.front().req_num)
                                   << " err=" << submit_err << std::endl;
+                        release_det_item_lanes(ticket.items);
                         permanent_failures.fetch_add(1);
                         return false;
                     }
@@ -3026,6 +3204,7 @@ int main(int argc, char** argv) {
                         std::cerr << "det pipeline not accepted req="
                                   << (ticket.items.empty() ? 0 : ticket.items.front().req_num)
                                   << " msg=" << resp.msg << std::endl;
+                        release_det_item_lanes(ticket.items);
                         permanent_failures.fetch_add(1);
                         return false;
                     }
@@ -3034,6 +3213,7 @@ int main(int argc, char** argv) {
                             resp,
                             ticket.items.empty() ? std::string("det_pipeline_batch")
                                                  : ticket.items.front().req_id)) {
+                        release_det_item_lanes(ticket.items);
                         return false;
                     }
 
@@ -3047,10 +3227,11 @@ int main(int argc, char** argv) {
                 };
 
                 while (!failed && (next_idx < queries.size() || !pending_accepts.empty())) {
-                while (!failed &&
+                    while (!failed &&
                            next_idx < queries.size() &&
                            pending_request_count < det_submit_limit) {
                         size_t batch_cap = desired_det_batch_slots(next_idx);
+                        if (batch_cap == 0) break;
                         if (pending_request_count + batch_cap > det_submit_limit) {
                             batch_cap = det_submit_limit - pending_request_count;
                             if (batch_cap == 0) break;
@@ -3074,12 +3255,18 @@ int main(int argc, char** argv) {
                             break;
                         }
                         if (batch_items.empty()) break;
+                        if (!reserve_det_item_lanes(batch_items)) {
+                            permanent_failures.fetch_add(1);
+                            failed = true;
+                            break;
+                        }
                         std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> ctx;
                         std::string submit_err;
                         const auto submit_started_at = std::chrono::steady_clock::now();
                         if (!submitter->submit_async_to_node(leader_idx, req, ctx, submit_err)) {
                             std::cerr << "det pipeline enqueue failed idx=" << next_idx
                                       << " err=" << submit_err << std::endl;
+                            release_det_item_lanes(batch_items);
                             permanent_failures.fetch_add(1);
                             failed = true;
                             break;
@@ -3090,6 +3277,8 @@ int main(int argc, char** argv) {
                         ticket.ctx = std::move(ctx);
                         ticket.submit_started_at = submit_started_at;
                         pending_request_count += ticket.items.size();
+                        det_sent_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
+                        det_pending_accept_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
                         pending_accepts.push_back(std::move(ticket));
                         next_idx = next_after_batch;
                     }
@@ -3105,8 +3294,23 @@ int main(int argc, char** argv) {
 
                     if (majority_wait_enabled && next_idx < queries.size()) {
                         const size_t next_batch_slots = desired_det_batch_slots(next_idx);
-                        const size_t max_total_before_submit =
-                            (window > next_batch_slots) ? (window - next_batch_slots) : 0;
+                        size_t max_total_before_submit = 0;
+                        if (next_batch_slots == 0) {
+                            if (inflight.empty()) {
+                                if (pending_accepts.empty()) {
+                                    std::cerr << "det pipeline has no available terminal slot, but no request can complete"
+                                              << std::endl;
+                                    permanent_failures.fetch_add(1);
+                                    failed = true;
+                                    break;
+                                }
+                                continue;
+                            }
+                            max_total_before_submit = inflight.size() - 1;
+                        } else {
+                            max_total_before_submit =
+                                (window > next_batch_slots) ? (window - next_batch_slots) : 0;
+                        }
                         if (!wait_det_majority_window(max_total_before_submit)) {
                             failed = true;
                             break;
@@ -3116,6 +3320,20 @@ int main(int argc, char** argv) {
             } else {
                 for (size_t idx = 0; idx < queries.size();) {
                     size_t batch_cap = desired_det_batch_slots(idx);
+                    if (batch_cap == 0) {
+                        if (majority_wait_enabled && !inflight.empty()) {
+                            if (!wait_det_majority_window(inflight.size() - 1)) {
+                                failed = true;
+                                break;
+                            }
+                            continue;
+                        }
+                        std::cerr << "det submit has no available terminal slot, but no request can complete"
+                                  << std::endl;
+                        permanent_failures.fetch_add(1);
+                        failed = true;
+                        break;
+                    }
                     if (majority_wait_enabled) {
                         const size_t max_total_before_submit =
                             (window > batch_cap) ? (window - batch_cap) : 0;
@@ -3139,6 +3357,11 @@ int main(int argc, char** argv) {
                         break;
                     }
                     if (batch_items.empty()) break;
+                    if (!reserve_det_item_lanes(batch_items)) {
+                        permanent_failures.fetch_add(1);
+                        failed = true;
+                        break;
+                    }
 
                     const auto tx_t0 = std::chrono::steady_clock::now();
 
@@ -3163,12 +3386,14 @@ int main(int argc, char** argv) {
                             if (backoff > std::chrono::milliseconds(20)) backoff = std::chrono::milliseconds(20);
                         }
                     }
+                    det_sent_count.fetch_add(batch_items.size(), std::memory_order_relaxed);
 
                     if (!wait_direct_completion(
                             submit_node_idx,
                             submit_resp,
                             batch_items.empty() ? std::string("det_batch")
                                                 : batch_items.front().req_id)) {
+                        release_det_item_lanes(batch_items);
                         failed = true;
                         break;
                     }
@@ -3228,6 +3453,9 @@ int main(int argc, char** argv) {
                         failed = true;
                         break;
                     }
+                    det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                    det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                    release_det_req_lane(rid);
                     if (!maybe_wait_reset_all_nodes(rid)) {
                         permanent_failures.fetch_add(1);
                         failed = true;
@@ -3235,6 +3463,13 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+
+            det_progress_stop.store(true, std::memory_order_relaxed);
+            det_progress_cv.notify_all();
+            if (det_progress_thread.joinable()) {
+                det_progress_thread.join();
+            }
+            emit_det_progress(true);
 
         } else {
             // Non-deterministic modes: parallel terminals.
@@ -3484,11 +3719,17 @@ int main(int argc, char** argv) {
         const double lag_ms_mean = (lag_cnt > 0) ? (lag_ms_sum / static_cast<double>(lag_cnt)) : 0.0;
         const double lag_ms_max = kafka_consume_lag_ns_max.load(std::memory_order_relaxed) / 1000000.0;
         const size_t prof_det_window = (opt.db_type == 1) ? effective_det_window() : 0;
+        const size_t prof_det_terminals =
+            (opt.db_type == 1) ? std::max<size_t>(1, static_cast<size_t>(opt.num_terminals)) : 0;
+        const size_t prof_det_pipeline_depth =
+            (opt.db_type == 1) ? effective_det_pipeline_depth(prof_det_terminals, prof_det_window) : 0;
         std::cout
             << "PROFILE_GATEWAY "
             << " completion_path=" << opt.completion_path
             << " validation_mode=" << opt.validation_mode
             << " submit_mode=" << (submitter ? "event" : "blocking")
+            << " num_terminals=" << opt.num_terminals
+            << " det_pipeline_depth=" << prof_det_pipeline_depth
             << " det_batch_size=" << opt.det_batch_size
             << " effective_det_window=" << prof_det_window
             << " configured_det_window=" << ((opt.db_type == 1) ? std::max(1, opt.det_window > 0 ? opt.det_window : 32) : 0)

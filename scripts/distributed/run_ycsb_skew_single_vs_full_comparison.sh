@@ -29,19 +29,24 @@ DB_PORT="${DB_PORT:-5438}"
 DB_USER="${DB_USER:-postgres}"
 DB_NAME="${DB_NAME:-postgres}"
 
-# The deterministic gateway must preserve a single global request order, so
-# full-system "threads" are modeled as the ordered deterministic concurrency
-# budget: gateway pool size, deterministic batch size, and deterministic window.
-FULL_THREAD_KNOB="${FULL_THREAD_KNOB:-concurrency}"
+# The fair full-system x-axis is real deterministic gateway client terminals.
+# The gateway still preserves one global order internally, but --num-terminals
+# now controls terminal lanes and --det-pipeline-depth controls per-lane
+# outstanding work.
+FULL_THREAD_KNOB="${FULL_THREAD_KNOB:-client-pipeline}"
 FULL_POOL_SIZE_MODE="${FULL_POOL_SIZE_MODE:-fixed}" # fixed|sweep
 FULL_FIXED_POOL_SIZE="${FULL_FIXED_POOL_SIZE:-256}"
-FULL_DET_BATCH_SIZE="${FULL_DET_BATCH_SIZE:-256}"
+FULL_DET_BATCH_SIZE="${FULL_DET_BATCH_SIZE:-80}"
+FULL_DET_PIPELINE_DEPTH="${FULL_DET_PIPELINE_DEPTH:-80}"
 FULL_DET_WINDOW="${FULL_DET_WINDOW:-4096}"
 FULL_DET_WINDOW_MULTIPLIER="${FULL_DET_WINDOW_MULTIPLIER:-256}"
 FULL_DET_WINDOW_MAX="${FULL_DET_WINDOW_MAX:-3072}"
+FULL_DET_BATCH_SIZE_MAP="${FULL_DET_BATCH_SIZE_MAP:-}"
+FULL_DET_WINDOW_MAP="${FULL_DET_WINDOW_MAP:-}"
 FULL_DET_BLOCK_PARALLEL="${FULL_DET_BLOCK_PARALLEL:-1}"
 FULL_DET_BLOCK_PIPELINE="${FULL_DET_BLOCK_PIPELINE:-8}"
 FULL_DET_BLOCK_MAX="${FULL_DET_BLOCK_MAX:-256}"
+FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US="${FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US:-0}"
 FULL_BCDB_WORKER_COUNT="${FULL_BCDB_WORKER_COUNT:-512}"
 FULL_BCDB_DECOUPLE_WORKERS="${FULL_BCDB_DECOUPLE_WORKERS:-1}"
 FULL_TEST_QUERIES="${FULL_TEST_QUERIES:-20512}"
@@ -86,11 +91,17 @@ Options:
   --no-resume         Pass --no-resume to the single-machine runner.
 
 Environment:
-  FULL_THREAD_KNOB=concurrency maps each x-axis thread value to the outstanding
-  deterministic window while keeping the proven batch size and backend capacity
-  normalized.  --num-terminals remains 1 because the deterministic/Raft path has
-  one global sequence order.
+  FULL_THREAD_KNOB=client-pipeline maps each x-axis thread value to
+  --num-terminals and uses FULL_DET_PIPELINE_DEPTH as the per-terminal
+  outstanding depth.  The full-system detWindow is set to
+  thread * FULL_DET_PIPELINE_DEPTH unless FULL_DET_WINDOW_MAP overrides it.
+  This is the proper terminal-aware graph shape from plan.txt.
+  FULL_THREAD_KNOB=concurrency is the older capacity-calibration mode that maps
+  each x-axis value to deterministic window while keeping --num-terminals 1.
+  FULL_THREAD_KNOB=fixed-window keeps detWindow fixed for all x-axis values.
   FULL_DET_WINDOW_MAX caps the mapped deterministic window; set 0 to disable.
+  FULL_DET_WINDOW_MAP and FULL_DET_BATCH_SIZE_MAP accept comma-separated
+  thread:value overrides, e.g. FULL_DET_WINDOW_MAP=1:96,2:192.
   FULL_POOL_SIZE_MODE=sweep maps x-axis thread value to --pool-size, with a
   minimum of 2 because bcdb_init requires at least two workers.
   FULL_CONTINUE_ON_ERROR=1 keeps sweeping after an invalid full-system case.
@@ -117,8 +128,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$FULL_THREAD_KNOB" != "pool-size" && "$FULL_THREAD_KNOB" != "concurrency" ]]; then
-  echo "ERROR: FULL_THREAD_KNOB=$FULL_THREAD_KNOB is not supported; use pool-size or concurrency" >&2
+if [[ "$FULL_THREAD_KNOB" != "client-pipeline" && "$FULL_THREAD_KNOB" != "pool-size" && "$FULL_THREAD_KNOB" != "concurrency" && "$FULL_THREAD_KNOB" != "fixed-window" ]]; then
+  echo "ERROR: FULL_THREAD_KNOB=$FULL_THREAD_KNOB is not supported; use client-pipeline, pool-size, concurrency, or fixed-window" >&2
+  exit 2
+fi
+if [[ "$FULL_THREAD_KNOB" == "client-pipeline" && "$FULL_DET_PIPELINE_DEPTH" -lt 1 ]]; then
+  echo "ERROR: FULL_DET_PIPELINE_DEPTH must be >= 1 for FULL_THREAD_KNOB=client-pipeline" >&2
   exit 2
 fi
 if [[ "$FULL_POOL_SIZE_MODE" != "fixed" && "$FULL_POOL_SIZE_MODE" != "sweep" ]]; then
@@ -183,8 +198,27 @@ local_install_has_bcdb_gucs() {
 
 append_full_manifest_header() {
   if [[ ! -f "$FULL_MANIFEST" ]]; then
-    echo "thread,run,artifact_dir,exit_code,thread_knob,pool_size,bcdb_worker_count,det_batch_size,det_window,det_block_pipeline,det_block_max,req_id_offset,notes" > "$FULL_MANIFEST"
+    echo "thread,run,artifact_dir,exit_code,thread_knob,pool_size,bcdb_worker_count,det_batch_size,det_window,num_terminals,det_pipeline_depth,det_block_pipeline,det_block_max,req_id_offset,notes" > "$FULL_MANIFEST"
   fi
+}
+
+lookup_thread_override() {
+  local map="$1"
+  local thread="$2"
+  local entry key value
+  [[ -n "$map" ]] || return 1
+  IFS=',' read -ra entries <<< "$map"
+  for entry in "${entries[@]}"; do
+    entry="${entry//[[:space:]]/}"
+    [[ -n "$entry" ]] || continue
+    key="${entry%%:*}"
+    value="${entry#*:}"
+    if [[ "$key" == "$thread" && "$value" != "$entry" && -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  return 1
 }
 
 sync_single_target() {
@@ -282,7 +316,13 @@ run_full_system() {
   [[ "$SINGLE_ONLY" == "1" ]] && return
   append_full_manifest_header
   log "Running full-system Kafka+Raft+BCDB sweep (workload=$WORKLOAD)"
-  log "Full-system x-axis mapping: thread value -> ordered concurrency budget; --num-terminals remains 1"
+  if [[ "$FULL_THREAD_KNOB" == "client-pipeline" ]]; then
+    log "Full-system x-axis mapping: thread value -> --num-terminals; detPipelineDepth=$FULL_DET_PIPELINE_DEPTH per terminal"
+  elif [[ "$FULL_THREAD_KNOB" == "fixed-window" ]]; then
+    log "Full-system x-axis mapping: thread labels with fixed detWindow=$FULL_DET_WINDOW; --num-terminals remains 1"
+  else
+    log "Full-system x-axis mapping: thread value -> ordered concurrency budget; --num-terminals remains 1"
+  fi
 
   IFS=',' read -ra thread_arr <<< "$THREADS"
   for th in "${thread_arr[@]}"; do
@@ -297,7 +337,14 @@ run_full_system() {
           full_pool_size=2
         fi
       fi
-      if [[ "$FULL_THREAD_KNOB" == "concurrency" ]]; then
+      full_num_terminals=1
+      full_det_pipeline_depth=0
+      if [[ "$FULL_THREAD_KNOB" == "client-pipeline" ]]; then
+        full_num_terminals="$th"
+        full_det_pipeline_depth="$FULL_DET_PIPELINE_DEPTH"
+        full_det_batch_size="$FULL_DET_BATCH_SIZE"
+        full_det_window=$(( th * FULL_DET_PIPELINE_DEPTH ))
+      elif [[ "$FULL_THREAD_KNOB" == "concurrency" ]]; then
         full_det_batch_size="$FULL_DET_BATCH_SIZE"
         full_det_window=$(( th * FULL_DET_WINDOW_MULTIPLIER ))
         if [[ "$full_det_window" -lt "$full_det_batch_size" ]]; then
@@ -306,9 +353,18 @@ run_full_system() {
         if [[ "$FULL_DET_WINDOW_MAX" -gt 0 && "$full_det_window" -gt "$FULL_DET_WINDOW_MAX" ]]; then
           full_det_window="$FULL_DET_WINDOW_MAX"
         fi
+      elif [[ "$FULL_THREAD_KNOB" == "fixed-window" ]]; then
+        full_det_batch_size="$FULL_DET_BATCH_SIZE"
+        full_det_window="$FULL_DET_WINDOW"
       else
         full_det_batch_size="$FULL_DET_BATCH_SIZE"
         full_det_window="$FULL_DET_WINDOW"
+      fi
+      if override="$(lookup_thread_override "$FULL_DET_BATCH_SIZE_MAP" "$th")"; then
+        full_det_batch_size="$override"
+      fi
+      if override="$(lookup_thread_override "$FULL_DET_WINDOW_MAP" "$th")"; then
+        full_det_window="$override"
       fi
       if [[ -n "$FULL_BCDB_WORKER_COUNT" ]]; then
         full_bcdb_worker_count="$FULL_BCDB_WORKER_COUNT"
@@ -316,7 +372,7 @@ run_full_system() {
         full_bcdb_worker_count="$full_pool_size"
       fi
       req_id_offset=$(( (run * 1000000) + (th * 10000) + 1 ))
-      log "Full-system case thread=$th run=$run (pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-parallel=$FULL_DET_BLOCK_PARALLEL det-block-pipeline=$FULL_DET_BLOCK_PIPELINE det-block-max=$FULL_DET_BLOCK_MAX serial-gate=$FULL_BCDB_SERIAL_GATE_MODE completion-only-skip-reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS full-result-replica-limit=$FULL_RESULT_REPLICA_LIMIT)"
+      log "Full-system case thread=$th run=$run (num-terminals=$full_num_terminals det-pipeline-depth=$full_det_pipeline_depth pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-parallel=$FULL_DET_BLOCK_PARALLEL det-block-pipeline=$FULL_DET_BLOCK_PIPELINE det-block-max=$FULL_DET_BLOCK_MAX det-partial-block-max-wait-us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US serial-gate=$FULL_BCDB_SERIAL_GATE_MODE completion-only-skip-reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS full-result-replica-limit=$FULL_RESULT_REPLICA_LIMIT)"
       before_file="$RUN_LOG_DIR/full_before_${th}_${run}.txt"
       after_file="$RUN_LOG_DIR/full_after_${th}_${run}.txt"
       ls -td "$REPO_ROOT"/scripts/bench_full_results/cluster4_* 2>/dev/null > "$before_file" || true
@@ -341,7 +397,9 @@ run_full_system() {
         --det-block-pipeline "$FULL_DET_BLOCK_PIPELINE" \
         --det-block-parallel "$FULL_DET_BLOCK_PARALLEL" \
         --det-block-max "$FULL_DET_BLOCK_MAX" \
-        --num-terminals 1 \
+        --det-partial-block-max-wait-us "$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US" \
+        --num-terminals "$full_num_terminals" \
+        --det-pipeline-depth "$full_det_pipeline_depth" \
         --bcdb-block-profile "$FULL_BCDB_BLOCK_PROFILE" \
         --bcdb-block-wait-watermark "$FULL_BCDB_BLOCK_WAIT_WATERMARK" \
         --bcdb-serial-gate-mode "$FULL_BCDB_SERIAL_GATE_MODE" \
@@ -361,9 +419,9 @@ run_full_system() {
         artifact="$(head -n 1 "$after_file" || true)"
       fi
       [[ -n "$artifact" ]] || artifact="$RUN_LOG_DIR/missing_full_artifact_thread_${th}_run_${run}"
-      notes="full_system_thread_knob=$FULL_THREAD_KNOB;full_pool_size_mode=$FULL_POOL_SIZE_MODE;num_terminals=1;trusted_gate=kafka_majority_merkle;pool_size_min=2;det_window_multiplier=$FULL_DET_WINDOW_MULTIPLIER;det_window_max=$FULL_DET_WINDOW_MAX;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;bcdb_block_wait_watermark=$FULL_BCDB_BLOCK_WAIT_WATERMARK;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_dt_skip_readonly_gate=$FULL_BCDB_DT_SKIP_READONLY_GATE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;det_block_skip_readonly=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;full_result_replica_limit=$FULL_RESULT_REPLICA_LIMIT;backend_capacity=normalized"
-      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$th" "$run" "$artifact" "$rc" "$FULL_THREAD_KNOB" "$full_pool_size" "$full_bcdb_worker_count" "$full_det_batch_size" "$full_det_window" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "$notes" \
+      notes="full_system_thread_knob=$FULL_THREAD_KNOB;full_pool_size_mode=$FULL_POOL_SIZE_MODE;num_terminals=$full_num_terminals;det_pipeline_depth=$full_det_pipeline_depth;trusted_gate=kafka_majority_merkle;pool_size_min=2;det_window_multiplier=$FULL_DET_WINDOW_MULTIPLIER;det_window_max=$FULL_DET_WINDOW_MAX;det_window_map=$FULL_DET_WINDOW_MAP;det_batch_size_map=$FULL_DET_BATCH_SIZE_MAP;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;det_partial_block_max_wait_us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US;bcdb_block_wait_watermark=$FULL_BCDB_BLOCK_WAIT_WATERMARK;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_dt_skip_readonly_gate=$FULL_BCDB_DT_SKIP_READONLY_GATE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;det_block_skip_readonly=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;full_result_replica_limit=$FULL_RESULT_REPLICA_LIMIT;backend_capacity=normalized"
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$th" "$run" "$artifact" "$rc" "$FULL_THREAD_KNOB" "$full_pool_size" "$full_bcdb_worker_count" "$full_det_batch_size" "$full_det_window" "$full_num_terminals" "$full_det_pipeline_depth" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "$notes" \
         >> "$FULL_MANIFEST"
       if [[ "$rc" != "0" ]]; then
         if [[ "$FULL_CONTINUE_ON_ERROR" == "1" ]]; then
@@ -389,6 +447,14 @@ generate_outputs() {
     fi
   fi
   [[ -f "$FULL_MANIFEST" ]] || die "missing full-system manifest: $FULL_MANIFEST"
+  local x_label="Threads"
+  if [[ "$FULL_THREAD_KNOB" == "client-pipeline" ]]; then
+    x_label="Single-node client threads / full-system numTerminals (detPipelineDepth=$FULL_DET_PIPELINE_DEPTH)"
+  elif [[ "$FULL_THREAD_KNOB" == "concurrency" ]]; then
+    x_label="Single-node client threads / full-system ordered concurrency budget"
+  elif [[ "$FULL_THREAD_KNOB" == "fixed-window" ]]; then
+    x_label="Single-node client threads / full-system labeled points (fixed detWindow=$FULL_DET_WINDOW)"
+  fi
   MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mplconfig}" \
     python3 "$SCRIPT_DIR/plot_ycsb_skew_tps_comparison.py" \
       --single-results "$single_results" \
@@ -396,7 +462,8 @@ generate_outputs() {
       --out-dir "$OUT_DIR" \
       --workload "$WORKLOAD" \
       --machine "$TARGET_MACHINE_LABEL" \
-      --threads "$THREADS"
+      --threads "$THREADS" \
+      --x-label "$x_label"
 }
 
 log "=== YCSB skew TPS comparison ==="

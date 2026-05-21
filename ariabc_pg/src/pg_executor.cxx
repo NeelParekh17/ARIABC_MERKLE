@@ -49,7 +49,7 @@ constexpr size_t kDetQueueHighWatermarkMin = 24;
 constexpr size_t kDetQueueLowWatermarkMin = 12;
 constexpr size_t kDetQueueHighWatermarkFactor = 2;  // high = max(minHigh, 2*pool)
 constexpr size_t kDetQueueLowWatermarkFactor = 1;   // low  = max(minLow,  1*pool)
-constexpr uint64_t kDetPartialBlockMaxWaitNs = 2ULL * 1000ULL * 1000ULL;
+constexpr uint64_t kDefaultDetPartialBlockMaxWaitNs = 2ULL * 1000ULL * 1000ULL;
 constexpr const char* kHashAlgo = "sha256";
 constexpr uint8_t kHashAlgoId = 1;
 constexpr const char* kDefaultResultSigKey = "ariabc-result-v2-dev-key";
@@ -72,6 +72,26 @@ bool det_event_block_fastpath_enabled() {
         return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
     }();
     return enabled;
+}
+
+uint64_t det_partial_block_max_wait_ns() {
+    static const uint64_t wait_ns = []() -> uint64_t {
+        const char* v = std::getenv("ARIABC_DET_PARTIAL_BLOCK_MAX_WAIT_US");
+        if (!v || !*v) return kDefaultDetPartialBlockMaxWaitNs;
+
+        errno = 0;
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(v, &end, 10);
+        if (end == v || errno != 0) return kDefaultDetPartialBlockMaxWaitNs;
+        if (end && *end != '\0' && !trim_copy(end).empty()) {
+            return kDefaultDetPartialBlockMaxWaitNs;
+        }
+
+        constexpr unsigned long long kMaxWaitUs = 1000000ULL;
+        const unsigned long long capped = std::min(parsed, kMaxWaitUs);
+        return static_cast<uint64_t>(capped) * 1000ULL;
+    }();
+    return wait_ns;
 }
 
 bool det_block_skip_readonly_enabled() {
@@ -1779,6 +1799,7 @@ void pg_executor::event_loop() {
     while (!stop_.load()) {
         // Move due retries into the ready queue.
         const uint64_t now_ns = now_steady_ns();
+        uint64_t next_det_partial_block_ready_ns = 0;
         {
             std::lock_guard<std::mutex> lk(q_mu_);
             while (!delayed_.empty() && delayed_.top().deadline_ns <= now_ns) {
@@ -1847,12 +1868,18 @@ void pg_executor::event_loop() {
                             }
                         }
 
-                        if (eligible && candidate.size() < block_cap) {
+                        const uint64_t partial_wait_ns = det_partial_block_max_wait_ns();
+                        if (eligible && partial_wait_ns > 0 && candidate.size() < block_cap) {
                             const uint64_t oldest_enqueue_ns = candidate.front().enqueue_ns;
-                            if (oldest_enqueue_ns != 0 &&
-                                now_ns >= oldest_enqueue_ns &&
-                                (now_ns - oldest_enqueue_ns) < kDetPartialBlockMaxWaitNs) {
-                                eligible = false;
+                            if (oldest_enqueue_ns != 0) {
+                                const uint64_t ready_ns = oldest_enqueue_ns + partial_wait_ns;
+                                if (now_ns < ready_ns) {
+                                    if (next_det_partial_block_ready_ns == 0 ||
+                                        ready_ns < next_det_partial_block_ready_ns) {
+                                        next_det_partial_block_ready_ns = ready_ns;
+                                    }
+                                    eligible = false;
+                                }
                             }
                         }
 
@@ -2155,6 +2182,17 @@ void pg_executor::event_loop() {
                     const uint64_t delta_ms = delta_ns / 1000000ULL;
                     timeout_ms = static_cast<int>(std::min<uint64_t>(delta_ms, 50ULL));
                 }
+            }
+        }
+        if (next_det_partial_block_ready_ns != 0) {
+            if (next_det_partial_block_ready_ns <= now_ns) {
+                timeout_ms = 0;
+            } else {
+                const uint64_t delta_ns = next_det_partial_block_ready_ns - now_ns;
+                const uint64_t delta_ms = (delta_ns + 999999ULL) / 1000000ULL;
+                timeout_ms = std::min(
+                    timeout_ms,
+                    static_cast<int>(std::max<uint64_t>(1ULL, std::min<uint64_t>(delta_ms, 50ULL))));
             }
         }
         if (kafka_enabled_ && !batch_req_ids.empty()) {

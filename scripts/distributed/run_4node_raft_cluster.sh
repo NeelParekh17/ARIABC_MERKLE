@@ -111,10 +111,12 @@ DET_BATCH_SIZE="${DET_BATCH_SIZE:-256}"
 NUM_TERMINALS="${NUM_TERMINALS:-1}"
 SUBMIT_MODE="${SUBMIT_MODE:-event}"
 DET_SUBMIT_PIPELINE="${DET_SUBMIT_PIPELINE:-1}"
+DET_PIPELINE_DEPTH="${DET_PIPELINE_DEPTH:-0}"
 PG_EXEC_MODE="${PG_EXEC_MODE:-event}"
 DET_BLOCK_PARALLEL="${DET_BLOCK_PARALLEL:-1}"  # parallel PG conns per det block (1=legacy, 4-8=Lever1)
 DET_BLOCK_PIPELINE="${DET_BLOCK_PIPELINE:-1}"  # logical BCDB blocks per backend submit call
 DET_BLOCK_MAX="${DET_BLOCK_MAX:-2048}"         # max txs per backend deterministic block submit
+DET_PARTIAL_BLOCK_MAX_WAIT_US="${DET_PARTIAL_BLOCK_MAX_WAIT_US:-0}"  # low-latency partial deterministic blocks; 0=dispatch immediately
 BCDB_BLOCK_PROFILE="${BCDB_BLOCK_PROFILE:-0}"  # postgres-side bcdb_block_submit_results phase logging
 BCDB_BLOCK_WAIT_WATERMARK="${BCDB_BLOCK_WAIT_WATERMARK:-0}"  # 1=wait on block commit watermark instead of scanning every slot
 BCDB_PHASE_TRACE_ON="${BCDB_PHASE_TRACE_ON:-0}"  # postgres-side per-worker CSV phase traces
@@ -165,6 +167,9 @@ Options:
                   Gateway deterministic Raft batch size (default: 256)
   --num-terminals N
                   Gateway terminal count (default: 1)
+  --det-pipeline-depth N
+                  Per-terminal deterministic in-flight depth; 0 auto-splits
+                  detWindow across terminals (default: 0)
   --submit-mode M  Gateway submit mode: blocking|event (default: event)
   --pg-exec-mode M Server pgExecMode: threaded|event (default: event)
   --det-block-parallel N
@@ -174,6 +179,9 @@ Options:
                   Logical BCDB blocks per backend submit call (default: 1)
   --det-block-max N
                   Max transactions per backend deterministic block submit (default: 2048)
+  --det-partial-block-max-wait-us N
+                  Max microseconds to wait for a partial deterministic block
+                  before dispatch; 0 dispatches immediately (default: 0)
   --bcdb-block-profile N
                   Enable PROFILE_BCDB_BLOCK lines inside PostgreSQL backends (default: 0)
   --bcdb-block-wait-watermark N
@@ -235,11 +243,13 @@ while [[ $# -gt 0 ]]; do
     --det-window)   DET_WINDOW="${2:-4096}"; shift 2 ;;
     --det-batch-size) DET_BATCH_SIZE="${2:-256}"; shift 2 ;;
     --num-terminals) NUM_TERMINALS="${2:-1}"; shift 2 ;;
+    --det-pipeline-depth) DET_PIPELINE_DEPTH="${2:-0}"; shift 2 ;;
     --submit-mode)  SUBMIT_MODE="${2:-event}"; shift 2 ;;
     --pg-exec-mode) PG_EXEC_MODE="${2:-event}"; shift 2 ;;
     --det-block-parallel) DET_BLOCK_PARALLEL="${2:-1}"; shift 2 ;;
     --det-block-pipeline) DET_BLOCK_PIPELINE="${2:-1}"; shift 2 ;;
     --det-block-max) DET_BLOCK_MAX="${2:-2048}"; shift 2 ;;
+    --det-partial-block-max-wait-us) DET_PARTIAL_BLOCK_MAX_WAIT_US="${2:-0}"; shift 2 ;;
     --bcdb-block-profile) BCDB_BLOCK_PROFILE="${2:-0}"; shift 2 ;;
     --bcdb-block-wait-watermark) BCDB_BLOCK_WAIT_WATERMARK="${2:-0}"; shift 2 ;;
     --bcdb-phase-trace) BCDB_PHASE_TRACE_ON="${2:-0}"; shift 2 ;;
@@ -269,6 +279,10 @@ if [[ "$DET_START_SEQ" -lt 1 || "$REQ_ID_OFFSET" -lt 1 ]]; then
 fi
 if [[ "$DET_BATCH_SIZE" -lt 1 ]]; then
   echo "ERROR: --det-batch-size must be >= 1" >&2
+  exit 2
+fi
+if [[ "$NUM_TERMINALS" -lt 1 || "$DET_PIPELINE_DEPTH" -lt 0 ]]; then
+  echo "ERROR: --num-terminals must be >= 1 and --det-pipeline-depth must be >= 0" >&2
   exit 2
 fi
 if [[ -z "$BCDB_WORKER_COUNT" ]]; then
@@ -1213,7 +1227,7 @@ for idx in "${!NODE_IDS[@]}"; do
 
   log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port"
   log "    binary: $srv_bin"
-  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
 
@@ -1229,6 +1243,7 @@ for idx in "${!NODE_IDS[@]}"; do
 	    export ARIABC_DET_BLOCK_PARALLEL='${DET_BLOCK_PARALLEL}'
 	    export ARIABC_DET_BLOCK_PIPELINE='${DET_BLOCK_PIPELINE}'
 	    export ARIABC_DET_BLOCK_MAX='${DET_BLOCK_MAX}'
+	    export ARIABC_DET_PARTIAL_BLOCK_MAX_WAIT_US='${DET_PARTIAL_BLOCK_MAX_WAIT_US}'
 	    export ARIABC_DET_BLOCK_SKIP_READONLY='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
@@ -1339,6 +1354,7 @@ if ! "$GW_BIN" \
   --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
   --submitMode "$SUBMIT_MODE" \
   --detSubmitPipeline "$DET_SUBMIT_PIPELINE" \
+  --detPipelineDepth 1 \
   --clientId "cluster-bcdb-probe" \
   --numTerminals 1 \
   --waitMajority 0 \
@@ -1381,7 +1397,7 @@ fi
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2)"
-log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
 START_S="$(date +%s)"
 
@@ -1396,6 +1412,7 @@ if ! "$GW_BIN" \
   --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
   --submitMode "$SUBMIT_MODE" \
   --detSubmitPipeline "$DET_SUBMIT_PIPELINE" \
+  --detPipelineDepth "$DET_PIPELINE_DEPTH" \
   ${POLL_COUNT:+--pollCount $POLL_COUNT} \
   ${POLL_INTERVAL_US:+--pollIntervalUs $POLL_INTERVAL_US} \
   --clientId "cluster-ycsb" \
@@ -1430,8 +1447,10 @@ elif [[ "$ELAPSED" -gt 0 ]]; then
   log "  Est TPS       : ~${TPS} tx/s"
 fi
 
-DIVERGENCE="$(grep -o 'divergence_count=[0-9]*' "$GW_LOG" 2>/dev/null | cut -d= -f2 || echo '?')"
-FAILURES="$(grep -o 'permanent_failures=[0-9]*' "$GW_LOG" 2>/dev/null | cut -d= -f2 || echo '?')"
+DIVERGENCE="$(grep -E '^divergence_count=[0-9]+$' "$GW_LOG" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+FAILURES="$(grep -E '^permanent_failures=[0-9]+$' "$GW_LOG" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+[[ -n "$DIVERGENCE" ]] || DIVERGENCE="?"
+[[ -n "$FAILURES" ]] || FAILURES="?"
 log "  divergence_count : $DIVERGENCE"
 log "  permanent_failures: $FAILURES"
 
@@ -1557,6 +1576,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
     --submitMode blocking \
     --detSubmitPipeline 0 \
+    --detPipelineDepth 1 \
     --clientId "cluster-ycsb-marker" \
     --numTerminals 1 \
     $GW_EXTRA_ARGS \
