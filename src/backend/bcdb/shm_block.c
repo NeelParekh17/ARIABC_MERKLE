@@ -31,8 +31,27 @@
 HTAB          *block_pool;
 slock_t       *block_pool_lock;
 BlockMeta     *block_meta;
+/*
+ * Per-process cache of the sentinel BCBlock (id=1). Avoids a hash_search()
+ * + spinlock acquisition on every hot-path accessor (set/get_blksz,
+ * set/get_num_tx_sub, last/published watermarks). Populated lazily and
+ * cleared explicitly by bcdb_reset_block_pool_state.
+ */
 static BCBlock *block1_cache = NULL;
 
+/*
+ * bcdb_reset_block_entry
+ *
+ * Zero-initialises a freshly-allocated BCBlock so that all counters, ring
+ * buffers and condition variables are in a well-defined starting state.
+ * Used both for newly-inserted hash entries (get_block_by_id) and to recycle
+ * the sentinel entry (bcdb_reset_block_pool_state).
+ *
+ * Note: blksize defaults to bcdb_worker_count *only* for the sentinel block
+ * (id=1), which is the canonical place worker code reads the per-block
+ * transaction count from. All other blocks start with blksize=0 and have it
+ * set explicitly by the ordering layer when the block is finalised.
+ */
 static void
 bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
 {
@@ -49,11 +68,19 @@ bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
     block->num_tx_qd = 0;
     block->blksize = (id == 1) ? bcdb_worker_count : 0;
     block->snapTid = 0;
+
+    /* Clear the per-transaction slot array and its per-slot done CVs. */
     for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
     {
         block->txs[i] = NULL;
         ConditionVariableInit(&block->done_conds[i]);
     }
+
+    /*
+     * Result ring buffer: result[] holds the produced tuples, the parallel
+     * *_txid arrays track which txid owns each slot. Sentinel value -1 means
+     * "slot empty"; InvalidTransactionId means "no PG xid bound yet".
+     */
     for (int i = 0; i < BCDB_RESULT_RING_CAPACITY; i++)
     {
         memset(&block->result[i], 0, sizeof(block->result[i]));
@@ -61,10 +88,27 @@ bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
         block->result_commit_xid[i] = InvalidTransactionId;
         block->result_consumed_txid[i] = -1;
     }
+
+    /* Lever D publish-phase ready-bitset; -1 = txid not yet published. */
     for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
         block->published_ready_txid[i] = -1;
 }
 
+/*
+ * get_block1_cached
+ *
+ * Hot-path accessor for the sentinel BCBlock (id=1). Returns the
+ * per-process cached pointer if available; otherwise consults the
+ * shared hash table once and memoises the result.
+ *
+ * The cache is process-local, so it is safe to populate without locking:
+ * any racing writer is in another process and would re-resolve from the
+ * shared hash table on its own first call.
+ *
+ * `create` is forwarded to get_block_by_id: pass true when this is the
+ * first call in a process that must guarantee the entry exists; pass
+ * false for read-only fast paths.
+ */
 static inline BCBlock *
 get_block1_cached(bool create)
 {
@@ -121,9 +165,11 @@ block_pool_size()
 void
 create_block_pool(void)
 {
-    /* need to keep params in memory */
+    /* HASHCTL must outlive the ShmemInitHash call -- declared on stack here. */
     HASHCTL info;
     bool    found;
+
+    /* (1) Singleton BlockMeta: global watermarks, commit/abort counters. */
 	block_meta = ShmemInitStruct("BCDB_BLOCK_META", sizeof(BlockMeta), &found);
     block_meta->global_bmin = 1;
     block_meta->global_bmax = 0;
@@ -136,13 +182,21 @@ create_block_pool(void)
     block_meta->log[0] = '\0';
     block_meta->log_counter = 0;
 #endif
+
+    /*
+     * (2) Bucketed CV array used to wake backends waiting for global_bmin
+     * to advance. Sharding by bucket reduces wakeup storms when many
+     * backends wait on different bmin values concurrently.
+     */
     for (int i = 0; i < NUM_BMIN_COND; i++)
         ConditionVariableInit(&block_meta->conds[i]);
 
+    /* (3) Spinlock guarding structural mutations of the block_pool hash. */
     block_pool_lock = ShmemInitStruct("block_pool_lock", sizeof(slock_t), &found);
     if (!found)
         SpinLockInit(block_pool_lock);
 
+    /* (4) Fixed-size shared hash table, keyed by BCBlockID (uint32). */
     MemSet(&info, 0, sizeof(info));
 	info.keysize = sizeof(BCBlockID);
 	info.entrysize = sizeof(BCBlock);
@@ -154,7 +208,17 @@ create_block_pool(void)
 }
 
 /*
- * reset the block entry for block 1, which holds global counters and state for the current block.
+ * bcdb_reset_block_pool_state
+ *
+ * Re-initialises the sentinel BCBlock (id=1), which holds the global
+ * counters and watermarks consulted by every worker. Called between runs
+ * (e.g. when restarting a deterministic batch) so stale state from a
+ * previous run does not leak into the next.
+ *
+ * The per-process cache pointer is cleared first, then repopulated under
+ * the spinlock after the entry has been re-initialised, so any concurrent
+ * reader either still sees the old cached pointer (whose fields are about
+ * to be reset under the lock anyway) or the freshly-reset block.
  */
 void
 bcdb_reset_block_pool_state(void)
@@ -165,6 +229,7 @@ bcdb_reset_block_pool_state(void)
 
     block1_cache = NULL;
     SpinLockAcquire(block_pool_lock);
+    /* HASH_ENTER acts as upsert: returns existing entry if present. */
     block = hash_search(block_pool, &id, HASH_ENTER, &found);
     bcdb_reset_block_entry(block, id);
     SpinLockRelease(block_pool_lock);
@@ -174,12 +239,14 @@ bcdb_reset_block_pool_state(void)
 /*
  * set_last_committed_txid
  *
- * Records the most-recently-committed transaction ID both on the sentinel
- * BCBlock (id=1) and in block_meta->num_committed.
+ * Publishes tx->tx_id as the most-recently-committed transaction id on
+ * both the sentinel BCBlock (id=1) and the global block_meta counter.
  *
- * Uses block_pool_lock + pg_write_barrier() to ensure that concurrent
- * readers (get_last_committed_txid) in other processes never observe a
- * torn or stale value — important on weakly-ordered architectures.
+ * The deterministic workers consult this watermark on every commit-gate
+ * check, so we avoid block_pool_lock contention entirely and rely on
+ * release-store / acquire-load atomics for visibility. In CONDVAR gate
+ * mode we additionally broadcast condCommit so any waiter that parked
+ * on the gate is woken without a spin.
  *
  * NOTE: The older non-atomic variant set_last_committed_id() has been
  * removed; its only call site in worker.c was already commented out.
@@ -188,18 +255,34 @@ void set_last_committed_txid( BCDBShmXact *tx)
 {
     //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
     BCBlock* blk = get_block1_cached(true);
-    /*
-     * Deterministic workers update/read this field on every commit gate check.
-     * Avoid block_pool_lock contention by using lock-free atomic publish.
-     */
+
+    /* Release-store: any reader that acquires this value sees all prior
+     * writes performed by the committing tx (its result tuple, etc.). */
     __atomic_store_n(&blk->last_committed_tx_id, tx->tx_id, __ATOMIC_RELEASE);
     __atomic_store_n(&block_meta->num_committed, tx->tx_id, __ATOMIC_RELEASE);
+
+    /* CV gate mode parks waiters; spin/yield modes re-read the watermark. */
     if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
         ConditionVariableBroadcast(&blk->condCommit);
 #if SAFEDBG2
     printf("safeDbg %s : %s: %d  blk %x txid= %d\n",
               __FILE__, __FUNCTION__, __LINE__, blk, block_meta->num_committed);
 #endif
+}
+
+/*
+ * bcdb_get_block1
+ *
+ * Public, read-only accessor for the sentinel BCBlock (id=1). Returns NULL
+ * if it has not yet been created in this process's cache and the entry does
+ * not exist in shared memory. Used by external callers that just need to
+ * peek at watermarks; use get_block1_cached(true) internally when creation
+ * is required.
+ */
+BCBlock *
+bcdb_get_block1(void)
+{
+    return get_block1_cached(false);
 }
 
 /*
@@ -216,13 +299,11 @@ void set_last_committed_txid( BCDBShmXact *tx)
  * After a successful CAS, the function eagerly scans forward through any
  * consecutive successor slots that have already set result_committed_txid,
  * so the fastest-finishing thread amortises the watermark advance for all.
+ *
+ * The scan is bounded by the ring-buffer slot count to guarantee O(slots)
+ * worst-case work per commit and to avoid livelock if successors keep
+ * arriving while we are still advancing.
  */
-BCBlock *
-bcdb_get_block1(void)
-{
-    return get_block1_cached(false);
-}
-
 void
 advance_last_committed_txid(BCDBShmXact *tx)
 {
@@ -235,13 +316,27 @@ advance_last_committed_txid(BCDBShmXact *tx)
     if (slots < 1)
         slots = 1;
 
+    /*
+     * Step 1: Try to claim "I am the next to commit". CAS succeeds iff our
+     * immediate predecessor has already published; otherwise bail and let
+     * the predecessor's eventual scan pick up our slot.
+     */
     if (!__sync_bool_compare_and_swap(&blk->last_committed_tx_id, prev, my_id))
         return;
 
+    /* Step 2: Mirror the watermark on block_meta and wake CV waiters. */
     __atomic_store_n(&block_meta->num_committed, my_id, __ATOMIC_RELEASE);
     if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
         ConditionVariableBroadcast(&blk->condCommit);
 
+    /*
+     * Step 3: Opportunistically carry the watermark forward through any
+     * already-published successor slots. Each iteration:
+     *   - locate the ring slot owned by the next contiguous txid;
+     *   - load it with ACQUIRE so a successful match also synchronises
+     *     with the successor's RELEASE store of its result tuple;
+     *   - CAS our watermark forward (paranoia: another scanner may race).
+     */
     cur = my_id;
     for (int step = 0; step < slots; step++)
     {
@@ -255,9 +350,9 @@ advance_last_committed_txid(BCDBShmXact *tx)
         published = __atomic_load_n(&blk->result_committed_txid[next_slot],
                                     __ATOMIC_ACQUIRE);
         if (published != next_id)
-            break;
+            break;                  /* gap: successor not yet ready */
         if (!__sync_bool_compare_and_swap(&blk->last_committed_tx_id, cur, next_id))
-            break;
+            break;                  /* another scanner advanced past us */
         __atomic_store_n(&block_meta->num_committed, next_id, __ATOMIC_RELEASE);
         cur = next_id;
     }
@@ -399,10 +494,14 @@ BCTxID get_num_txqd()
  * get_last_committed_txid
  *
  * Returns the most-recently-committed transaction ID from the sentinel
- * BCBlock (id=1).  Mirrors set_last_committed_txid: acquires
- * block_pool_lock and issues pg_read_barrier() to prevent the compiler
- * or CPU from reordering the load before the lock acquire, ensuring we
- * always see the latest value written by any process.
+ * BCBlock (id=1). Mirrors set_last_committed_txid: uses an acquire-load
+ * atomic so the reader synchronises with the writer's release-store and
+ * also observes any data the committing tx published (e.g. its result
+ * tuple in the ring buffer) before bumping the watermark.
+ *
+ * The `tx` parameter is currently unused (cast to void) and retained for
+ * call-site symmetry with the setter; remove it if/when callers are
+ * updated.
  */
 BCTxID get_last_committed_txid(BCDBShmXact *tx)
 {
@@ -427,6 +526,15 @@ BCTxID get_last_committed_txid(BCDBShmXact *tx)
  * variable.  The successor still rechecks published_max_tx_id before entering
  * conflict_checkDT(), so this changes wakeup latency, not deterministic order.
  */
+
+/*
+ * bcdb_published_ready_slot_for_txid
+ *
+ * Map a transaction id to its slot in the published_ready_txid[] bitset.
+ * MAX_TX_PER_BLOCK is the modulus so each block's id space wraps cleanly.
+ * The post-modulo +MAX_TX_PER_BLOCK is defensive against negative results
+ * if BCTxID is ever made signed.
+ */
 static inline int
 bcdb_published_ready_slot_for_txid(BCTxID tx_id)
 {
@@ -437,6 +545,17 @@ bcdb_published_ready_slot_for_txid(BCTxID tx_id)
     return idx;
 }
 
+/*
+ * bcdb_signal_serial_successor
+ *
+ * After advancing published_max_tx_id to `published_txid`, wake exactly
+ * one waiter: the backend that owns the per-slot CV for txid+1 (the
+ * immediate successor in deterministic order). Cheaper than broadcasting
+ * because only one tx is now eligible to make forward progress.
+ *
+ * No-op outside CONDVAR gate mode -- spin/yield modes re-read the
+ * watermark themselves.
+ */
 static inline void
 bcdb_signal_serial_successor(BCBlock *blk, BCTxID published_txid)
 {
@@ -450,6 +569,18 @@ bcdb_signal_serial_successor(BCBlock *blk, BCTxID published_txid)
     }
 }
 
+/*
+ * bcdb_advance_published_ready_prefix
+ *
+ * Carry published_max_tx_id forward over every contiguous successor that
+ * has already marked itself ready in published_ready_txid[]. Analogous to
+ * the watermark scan in advance_last_committed_txid: the fastest publisher
+ * amortises the advance for any stalled predecessors that have already
+ * deposited their slot.
+ *
+ * Bounded by MAX_TX_PER_BLOCK to guarantee termination if a peer keeps
+ * publishing further successors concurrently.
+ */
 static void
 bcdb_advance_published_ready_prefix(BCBlock *blk)
 {
@@ -464,6 +595,7 @@ bcdb_advance_published_ready_prefix(BCBlock *blk)
         int next_slot;
         BCTxID ready;
 
+        /* Re-read watermark each iter: another scanner may have moved it. */
         current = (BCTxID) __atomic_load_n(&blk->published_max_tx_id,
                                            __ATOMIC_ACQUIRE);
         next_id = current + 1;
@@ -471,8 +603,13 @@ bcdb_advance_published_ready_prefix(BCBlock *blk)
         ready = (BCTxID) __atomic_load_n(&blk->published_ready_txid[next_slot],
                                          __ATOMIC_ACQUIRE);
         if (ready != next_id)
-            break;
+            break;                          /* gap: stop scanning */
 
+        /*
+         * CAS to claim the advance. On success, wake the new successor
+         * (now next_id+1). On failure, another scanner won the race and
+         * is responsible for the wake — we just exit.
+         */
         if (__atomic_compare_exchange_n(&blk->published_max_tx_id,
                                         &current,
                                         next_id,
@@ -485,6 +622,14 @@ bcdb_advance_published_ready_prefix(BCBlock *blk)
     }
 }
 
+/*
+ * mark_published_ready_txid
+ *
+ * Worker entry-point invoked from publish_ws_tableDT in worker.c after a
+ * tx has finished publishing its write-set. Marks the tx's slot as ready
+ * with a release-store (so the readiness flag becomes visible only after
+ * the write-set itself), then opportunistically advances the watermark.
+ */
 void
 mark_published_ready_txid(BCDBShmXact *tx)
 {
@@ -501,12 +646,27 @@ mark_published_ready_txid(BCDBShmXact *tx)
     bcdb_advance_published_ready_prefix(blk);
 }
 
+/*
+ * set_published_max_txid
+ *
+ * Back-compat shim: older worker call sites used this name before the
+ * publish-readiness bitset was introduced. Forwards to
+ * mark_published_ready_txid so legacy callers participate in the same
+ * watermark-advance path as new ones.
+ */
 void
 set_published_max_txid(BCDBShmXact *tx)
 {
     mark_published_ready_txid(tx);
 }
 
+/*
+ * get_published_max_txid
+ *
+ * Acquire-load the current Lever D publish watermark. Returns -1 if the
+ * sentinel block cannot be created (out-of-memory / shutdown). The `tx`
+ * parameter is reserved for future per-tx accounting; currently unused.
+ */
 BCTxID get_published_max_txid(BCDBShmXact *tx)
 {
     BCBlock* blk = get_block1_cached(false);

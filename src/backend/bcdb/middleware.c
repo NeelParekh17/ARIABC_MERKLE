@@ -1,6 +1,43 @@
 //
 // Created by Chris Liu on 6/5/2020.
 //
+// ---------------------------------------------------------------------------
+//  middleware.c -- BCDB SQL-facing middleware layer
+// ---------------------------------------------------------------------------
+//
+//  This file is the entry point for every BCDB SQL function that submits
+//  transactions or blocks into the deterministic (DT) execution engine.
+//  PostgreSQL backends call into the symbols defined here when client code
+//  invokes the BCDB SQL helpers (bcdb_tx_submit, bcdb_block_submit, etc.)
+//  exposed via the C-language function bindings.
+//
+//  Pipeline overview (deterministic block path, active production flow):
+//    1. Frontend submits a JSON block of transactions via SQL.
+//    2. parse_block_with_txs() reserves a contiguous tx-id range from the
+//       sentinel block (block id 1) and materialises each tx in shared
+//       memory using create_tx().
+//    3. Each tx is pushed onto a worker queue via tx_queue_insert().
+//    4. Backend workers (worker.c) drain those queues, execute the SQL
+//       deterministically, and publish results into the sentinel block's
+//       result ring (one slot per tx, indexed by tx_id % ring_slots).
+//    5. The submitting backend waits until every per-tx slot is published
+//       (either by polling the contiguous committed watermark or by
+//       scanning the block-local slots), then formats and returns a
+//       newline-delimited completion payload back to the SQL caller.
+//
+//  Key correctness invariants enforced in this file:
+//    - tx_id assignment is atomic across concurrent backends so block
+//      members have stable, unique, ordered identifiers.
+//    - A result slot is only read when result_committed_txid[slot] equals
+//      the exact tx_id being fetched; otherwise the slot has been recycled
+//      by a later tx and the data would be wrong.
+//    - The sentinel block (id 1) owns runtime metadata (worker count,
+//      result ring) and is never garbage-collected by block_cleaning_dt().
+//
+//  Legacy code paths (single-tx submit, burst submit, hash-addressed wait,
+//  cleaning) remain for backward compatibility with older tests and tools
+//  but are not part of the active distributed YCSB/TPCC pipelines.
+// ---------------------------------------------------------------------------
 
 #include "bcdb/shm_transaction.h"
 #include "bcdb/worker.h"
@@ -21,20 +58,64 @@
 #include <string.h>
 
 /*
- * Silence ad-hoc stdout debug prints in deterministic middleware.  Raw
- * printf() output can leak into frontend sessions.
+ * Silence ad-hoc stdout debug prints in deterministic middleware.
+ *
+ * Many helpers in this file historically used raw printf() for ad-hoc
+ * debugging.  In a live PostgreSQL backend those writes go to the same fd
+ * as the frontend protocol stream and can corrupt client sessions.  We
+ * redefine printf as a no-op so any forgotten debug call is compiled away
+ * without having to touch every site.  Use ereport(LOG, ...) for anything
+ * that needs to be visible at runtime.
  */
 #undef printf
 #define printf(...) ((void) 0)
 
+/* ----------------------------------------------------------------------
+ *  File-scope state
+ * ----------------------------------------------------------------------
+ *  bcdb_middleware_context : long-lived memory context reused across
+ *                            bcdb_init() calls so restore scripts and
+ *                            benchmark loops do not leak one context per
+ *                            invocation.
+ *  tx_num                  : monotonic tx-id counter for the legacy
+ *                            single-tx submit path (bcdb_tx_submit).
+ *  blocksize               : effective worker/queue count for this backend.
+ *                            Despite the name, this is NOT a tx batch size;
+ *                            the SQL parameter retains the historical name.
+ *  numTxBurst / burstTime  : legacy controls used by submit_block2() to
+ *                            throttle the enqueue rate during experiments.
+ *  start_time              : wall-clock timestamp captured at init, used
+ *                            only for the total-throughput LOG line.
+ *  tx_id_counter           : unused holdover from the original sketch
+ *                            (predates the atomic counter in bcdb).
+ * ---------------------------------------------------------------------- */
 MemoryContext bcdb_middleware_context;
 int32         tx_num = 0;
 int32         blocksize = 0;
 int32         numTxBurst = 0;
 int32         burstTime = 0;
 uint64        start_time;
-static int  tx_id_counter = 0; // not bcdb
+static int  tx_id_counter = 0; /* legacy: not used by deterministic path */
 
+/* ----------------------------------------------------------------------
+ *  Forward declarations for file-local helpers.
+ *
+ *  Grouped by role:
+ *    Parsing/attach   : parse_tx, parse_block_with_txs,
+ *                       bcdb_middleware_attach_tx_to_block,
+ *                       append_hex_encoded
+ *    Worker sizing    : bcdb_select_worker_count
+ *    Result indexing  : bcdb_result_slot_for_txid
+ *    Wait primitives  : bcdb_wait_until_committed,
+ *                       bcdb_wait_until_slot_ready,
+ *                       bcdb_wait_until_block_slots_ready
+ *    Tunable env vars : bcdb_block_profile_enabled,
+ *                       bcdb_block_return_actual_results_enabled,
+ *                       bcdb_block_wait_watermark_enabled,
+ *                       bcdb_decouple_workers_enabled,
+ *                       bcdb_block_enqueue_yield_every
+ *    Misc utilities   : bcdb_uint64_cmp
+ * ---------------------------------------------------------------------- */
 static BCDBShmXact *parse_tx(const char* json);
 static void bcdb_middleware_attach_tx_to_block(BCDBShmXact *tx, BCBlock *block);
 static BCBlock *parse_block_with_txs(const char *json);
@@ -51,10 +132,22 @@ static bool bcdb_decouple_workers_enabled(void);
 static int bcdb_block_enqueue_yield_every(void);
 static int bcdb_uint64_cmp(const void *a, const void *b);
 
+/*
+ * bcdb_block_profile_enabled
+ * --------------------------
+ * Reads BCDB_BLOCK_PROFILE from the environment and caches the answer in a
+ * function-local static (so the cost is one strcmp pass per backend, not per
+ * block).  When enabled, bcdb_middleware_submit_block_results() records and
+ * logs phase timings (parse / enqueue / wait / format) plus per-slot wait
+ * percentiles.
+ *
+ * Accepted "off" values: unset, empty, "0", "false"/"FALSE", "no"/"NO".
+ * Everything else is treated as on.
+ */
 static bool
 bcdb_block_profile_enabled(void)
 {
-	static int enabled = -1;
+	static int enabled = -1; /* -1 = not yet evaluated */
 
 	if (enabled < 0)
 	{
@@ -70,6 +163,18 @@ bcdb_block_profile_enabled(void)
 	return enabled != 0;
 }
 
+/*
+ * bcdb_block_return_actual_results_enabled
+ * ----------------------------------------
+ * Reads BCDB_BLOCK_RETURN_ACTUAL_RESULTS and caches the result.
+ *
+ * The deterministic block-submit path defaults to returning a "completion
+ * receipt" (tx hash + newline) per tx rather than the full row payload.  The
+ * post-run Merkle gate is what verifies state correctness across replicas;
+ * the per-tx row text returned to the frontend can otherwise reflect local
+ * worker timing on reads.  Setting this env var to a truthy value reinstates
+ * the full hex-encoded payload for diagnostics.
+ */
 static bool
 bcdb_block_return_actual_results_enabled(void)
 {
@@ -89,6 +194,24 @@ bcdb_block_return_actual_results_enabled(void)
 	return enabled != 0;
 }
 
+/*
+ * bcdb_block_wait_watermark_enabled
+ * ---------------------------------
+ * Reads BCDB_BLOCK_WAIT_WATERMARK and caches the result.
+ *
+ * Selects between two equivalent wait strategies inside
+ * bcdb_middleware_submit_block_results():
+ *
+ *   - default (off): scan every block-local result slot in a single loop
+ *                    (bcdb_wait_until_block_slots_ready).
+ *   - on           : wait only on the contiguous committed watermark for
+ *                    the highest tx_id in the block; workers always
+ *                    publish result_committed_txid BEFORE advancing
+ *                    last_committed_tx_id, so this is correctness-equivalent.
+ *
+ * Watermark mode was not faster on the 4-node YCSB run, so it remains opt-in
+ * for A/B testing.
+ */
 static bool
 bcdb_block_wait_watermark_enabled(void)
 {
@@ -98,13 +221,6 @@ bcdb_block_wait_watermark_enabled(void)
 	{
 		const char *v = getenv("BCDB_BLOCK_WAIT_WATERMARK");
 
-		/*
-		 * Safe for the current queued block path: workers publish
-		 * result_committed_txid before advancing last_committed_tx_id, so a
-		 * contiguous watermark at the block's last tx implies every block-local
-		 * result slot is readable.  It was not faster on the strict 4-node
-		 * YCSB run, so keep it opt-in for A/B testing.
-		 */
 		enabled = (v != NULL && v[0] != '\0' &&
 				   strcmp(v, "0") != 0 &&
 				   strcmp(v, "false") != 0 &&
@@ -115,6 +231,17 @@ bcdb_block_wait_watermark_enabled(void)
 	return enabled != 0;
 }
 
+/*
+ * bcdb_block_enqueue_yield_every
+ * ------------------------------
+ * Reads BCDB_BLOCK_ENQUEUE_YIELD_EVERY and caches the parsed int.
+ *
+ * If non-zero, the block submit loop calls pg_usleep(1) after every N
+ * tx_queue_insert() operations.  This gives workers a chance to drain the
+ * queue while a backend is still pushing large blocks, smoothing the
+ * producer/consumer pipeline on heavily loaded CPUs.  Clamped to [0, 256];
+ * 0 disables the yield entirely (default).
+ */
 static int
 bcdb_block_enqueue_yield_every(void)
 {
@@ -138,6 +265,17 @@ bcdb_block_enqueue_yield_every(void)
 	return cached;
 }
 
+/*
+ * bcdb_decouple_workers_enabled
+ * -----------------------------
+ * Reads BCDB_DECOUPLE_WORKERS and caches the result.
+ *
+ * When enabled, bcdb_middleware_init() ignores the SQL-supplied "block_size"
+ * argument and uses bcdb_worker_count / BCDB_DEFAULT_WORKER_COUNT instead.
+ * That decouples the SQL frontend's notion of batch sizing from the worker
+ * pool sizing, which is useful when running benchmarks that vary one
+ * dimension without restarting the cluster.
+ */
 static bool
 bcdb_decouple_workers_enabled(void)
 {
@@ -157,6 +295,12 @@ bcdb_decouple_workers_enabled(void)
 	return enabled != 0;
 }
 
+/*
+ * bcdb_uint64_cmp
+ * ---------------
+ * Standard ascending comparator for qsort() over an array of uint64.
+ * Used by the profiling path to compute slot-wait percentiles.
+ */
 static int
 bcdb_uint64_cmp(const void *a, const void *b)
 {
@@ -170,6 +314,20 @@ bcdb_uint64_cmp(const void *a, const void *b)
 	return 0;
 }
 
+/*
+ * bcdb_select_worker_count
+ * ------------------------
+ * Resolve the effective worker/queue count for this backend, applying a
+ * fall-through chain of preference:
+ *
+ *   1. explicit caller request (the SQL `block_size` argument);
+ *   2. the GUC-level default bcdb_worker_count if the caller passed <= 0;
+ *   3. the compile-time BCDB_DEFAULT_WORKER_COUNT if both are missing;
+ *   4. a hard floor of 1 to keep the worker list non-empty.
+ *
+ * Returning at least 1 ensures idle_worker_list_init() and the result ring
+ * sizing logic always operate on a valid worker count.
+ */
 static int32
 bcdb_select_worker_count(int32 requested)
 {
@@ -185,8 +343,24 @@ bcdb_select_worker_count(int32 requested)
 }
 
 /*
- * Use one runtime slot mapping everywhere in DT path to avoid stale/mismatched
- * result reads when blksize and result ring size diverge.
+ * bcdb_result_slot_for_txid
+ * -------------------------
+ * Map a tx_id onto its slot index in the sentinel block's result ring.
+ *
+ * The result ring is a fixed-size circular buffer; slot ownership is
+ * established by the worker writing result_committed_txid[slot] = tx_id
+ * (RELEASE) after publishing the row payload, and verified by the reader
+ * loading the same field (ACQUIRE) and comparing it to its expected tx_id.
+ *
+ * This helper MUST be used everywhere in the DT path (writers and readers)
+ * because the result ring size is configurable independently of the worker
+ * count -- a hard-coded modulus by blksize would silently disagree with the
+ * ring and corrupt slot lookups.
+ *
+ * Guards against degenerate inputs:
+ *   - clamps slots to >= 1 so the modulus is well-defined;
+ *   - normalises negative results (BCTxID is signed) so the index is
+ *     always within [0, slots).
  */
 static inline int
 bcdb_result_slot_for_txid(BCTxID tx_id)
@@ -203,32 +377,52 @@ bcdb_result_slot_for_txid(BCTxID tx_id)
 }
 
 /*
- * DT completion wait that does not depend on fragile CV broadcast contracts.
- * We poll commit progression with interruptible adaptive backoff.
+ * bcdb_wait_until_committed
+ * -------------------------
+ * Block the caller until the contiguous "last committed tx id" watermark
+ * has caught up to target_tx_id.
  *
- * HANG DEBUG: logs every 5 s if last_committed_tx_id does not advance.
- * This fires unconditionally (no env-var gate) so hangs are always visible
- * in server.log without any pre-configuration.
+ * Why poll instead of just sleeping on a condition variable?
+ *   Earlier revisions used ConditionVariableBroadcast() from worker.c, but
+ *   we hit cases where a wakeup landed between the loader's CHECK and its
+ *   ConditionVariableSleep(), causing indefinite hangs.  This loop instead
+ *   uses adaptive backoff (busy-spin -> exponential usleep), and only falls
+ *   back to a condition variable in BCDB_SERIAL_GATE_MODE_CONDVAR mode for
+ *   experiments that explicitly want that path.
+ *
+ * Backoff schedule:
+ *   - first 128 iterations: pg_spin_delay() (a few cycles of PAUSE-equivalent);
+ *   - thereafter           : usleep ramping 1us -> 2 -> 4 -> ... -> 64us;
+ *   - alternative          : ConditionVariableSleep gated by the global
+ *                            bcdb_serial_gate_mode tunable.
+ *
+ * HANG DEBUG: logs every 5 s if the watermark fails to advance.  This fires
+ * unconditionally (no env-var gate) so any production hang is immediately
+ * visible in server.log with the relevant pid / target / observed state.
+ *
+ * Returns: elapsed wait time in microseconds (consumed by profiling).
  */
 static inline uint64
 bcdb_wait_until_committed(BCTxID target_tx_id)
 {
-	BCBlock *blk = get_block_by_id(1, false);
+	BCBlock *blk = get_block_by_id(1, false); /* sentinel block holds the CV */
 	int spins = 0;
 	int poll_us = 0;
 	uint64 wait_start_us = bcdb_get_time();
-	uint64 next_warn_us  = wait_start_us + 5000000; /* 5 s */
+	uint64 next_warn_us  = wait_start_us + 5000000; /* first warning at +5 s */
 
 	Assert(blk != NULL);
 	for (;;)
 	{
+		/* Fast path: a worker may already have caught the watermark up. */
 		BCTxID committed = get_last_committed_txid(NULL);
 		if (committed >= target_tx_id)
 			return bcdb_get_time() - wait_start_us;
 
+		/* Respect SIGINT/SIGTERM/SIGUSR while we wait. */
 		CHECK_FOR_INTERRUPTS();
 
-		/* Always-on hang watchdog: fire every 5 s so a stuck loop is visible */
+		/* Always-on hang watchdog: fire every 5 s so a stuck loop is visible. */
 		{
 			uint64 now_us = bcdb_get_time();
 			if (now_us >= next_warn_us)
@@ -245,6 +439,8 @@ bcdb_wait_until_committed(BCTxID target_tx_id)
 
 		if (spins < 128)
 		{
+			/* Phase 1: busy-spin briefly; this is the cheapest path when
+			 * the watermark is about to advance within a few microseconds. */
 			spins++;
 			pg_spin_delay();
 		}
@@ -252,6 +448,9 @@ bcdb_wait_until_committed(BCTxID target_tx_id)
 		{
 			if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
 			{
+				/* Phase 2a (opt-in): block on the sentinel block's commit
+				 * CV.  We MUST re-check the watermark between Prepare and
+				 * Sleep to avoid missing a wakeup that fired in between. */
 				ConditionVariablePrepareToSleep(&blk->condCommit);
 				if (get_last_committed_txid(NULL) < target_tx_id)
 					ConditionVariableSleep(&blk->condCommit, WAIT_EVENT_BLOCK_COMMIT);
@@ -259,6 +458,8 @@ bcdb_wait_until_committed(BCTxID target_tx_id)
 			}
 			else
 			{
+				/* Phase 2b (default): exponential backoff sleep, capped at 64us
+				 * so we still respond quickly once the watermark moves. */
 				if (poll_us == 0)
 					poll_us = 1;
 				else if (poll_us < 64)
@@ -270,30 +471,48 @@ bcdb_wait_until_committed(BCTxID target_tx_id)
 }
 
 /*
- * T3: per-slot middleware wait.
- * Waits for result_committed_txid[slot] == target_tx_id rather than for
- * the contiguous last_committed_tx_id watermark.  Safe only for polling a
- * single target tx; does NOT imply earlier slots are set (slots are written
- * at Step 10, before bcdb_wait_for_prev_committed serialises at Step 11).
+ * bcdb_wait_until_slot_ready
+ * --------------------------
+ * Per-slot completion wait: spin/sleep until the sentinel block's
+ * result_committed_txid[slot] equals the caller's target_tx_id, indicating
+ * that the worker has finished writing both the row payload and the slot
+ * ownership marker.
  *
- * HANG DEBUG: logs every 5 s if the slot value does not become target_tx_id.
- * Fires unconditionally — if a worker crashes or misses writing the slot,
- * this hang is immediately visible in server.log without any env-var setup.
- * Key fields: slot index, current slot value vs expected, and elapsed time.
+ * Memory ordering:
+ *   The worker writes the row payload first and only then publishes the
+ *   tx_id into result_committed_txid[slot] with __ATOMIC_RELEASE.  This
+ *   reader uses __ATOMIC_ACQUIRE so the row store is visible iff the
+ *   tx_id match succeeds.  Reading the slot any other way is unsafe.
+ *
+ * Important scope limitation (T3 experiment context):
+ *   Observing that THIS slot is ready does NOT imply that earlier slots
+ *   in the same block are also ready -- workers write slots at Step 10
+ *   but only enter the serialisation gate at Step 11.  Use this only when
+ *   waiting on a specific tx in isolation.  For whole-block readiness,
+ *   prefer bcdb_wait_until_block_slots_ready (or the watermark variant).
+ *
+ * HANG DEBUG: fires every 5 s if the slot value never matches.  The log
+ * line includes the slot index, the current vs expected tx id, and the
+ * latest committed watermark -- enough to distinguish "worker crashed
+ * before publishing" from "worker still running but slow".
+ *
+ * Returns: elapsed wait time in microseconds.
  */
 static inline uint64
 bcdb_wait_until_slot_ready(BCTxID target_tx_id)
 {
-	BCBlock *blk     = get_block_by_id(1, false);
+	BCBlock *blk     = get_block_by_id(1, false); /* sentinel block holds the result ring */
 	int      slot    = bcdb_result_slot_for_txid(target_tx_id);
 	int      spins   = 0;
 	int      poll_us = 0;
 	uint64   wait_start_us = bcdb_get_time();
-	uint64   next_warn_us  = wait_start_us + 5000000; /* 5 s */
+	uint64   next_warn_us  = wait_start_us + 5000000; /* first warning at +5 s */
 
 	Assert(blk != NULL);
 	for (;;)
 	{
+		/* ACQUIRE so any payload write done before the release-store
+		 * in the worker is observable when the tx ids match. */
 		BCTxID published = __atomic_load_n(&blk->result_committed_txid[slot],
 										   __ATOMIC_ACQUIRE);
 		if (published == target_tx_id)
@@ -301,7 +520,7 @@ bcdb_wait_until_slot_ready(BCTxID target_tx_id)
 
 		CHECK_FOR_INTERRUPTS();
 
-		/* Always-on hang watchdog: fire every 5 s so a stuck loop is visible */
+		/* Always-on hang watchdog: fire every 5 s so a stuck loop is visible. */
 		{
 			uint64 now_us = bcdb_get_time();
 			if (now_us >= next_warn_us)
@@ -319,11 +538,13 @@ bcdb_wait_until_slot_ready(BCTxID target_tx_id)
 
 		if (spins < 128)
 		{
+			/* Phase 1: busy-spin briefly. */
 			spins++;
 			pg_spin_delay();
 		}
 		else
 		{
+			/* Phase 2: exponential backoff sleep, capped at 64us. */
 			if (poll_us == 0)
 				poll_us = 1;
 			else if (poll_us < 64)
@@ -334,22 +555,37 @@ bcdb_wait_until_slot_ready(BCTxID target_tx_id)
 }
 
 /*
- * Wait once for every result slot in this block to be fully published.
+ * bcdb_wait_until_block_slots_ready
+ * ---------------------------------
+ * Wait until every tx in `block` has its result slot published in the
+ * sentinel block's result ring.
  *
- * The old block-result path walked slots in request order and performed a
- * separate adaptive wait for each missing slot.  Under a 256-tx block that can
- * turn one true readiness delay into many short poll sleeps.  This keeps the
- * exact same correctness condition (every tx's result_committed_txid must match
- * before read) but pays the wait loop once per block.
+ * Rationale (vs. per-slot waits in a loop):
+ *   The earlier code path walked block->txs[] in order and called the
+ *   per-slot wait for each entry.  When a block contains hundreds of txs
+ *   that turns a single ~few-microsecond readiness delay into hundreds of
+ *   small adaptive backoff loops -- a lot of wasted spinning.  This routine
+ *   amortises the wait by scanning all slots once per backoff iteration
+ *   and only continuing to spin/sleep when at least one is still missing.
+ *
+ *   Correctness is identical: each slot is verified with the same
+ *   ACQUIRE-load tx_id match, so we never read a recycled slot.
+ *
+ * Reporting:
+ *   On the 5-second hang watchdog, we report the FIRST missing slot
+ *   (which is the one stalling the block).  That makes server.log point
+ *   directly at the slowest tx without flooding logs for every slot.
+ *
+ * Returns: elapsed wait time in microseconds.
  */
 static inline uint64
 bcdb_wait_until_block_slots_ready(BCBlock *block)
 {
-	BCBlock *result_block = get_block_by_id(1, false);
+	BCBlock *result_block = get_block_by_id(1, false); /* sentinel block holds the ring */
 	int    spins = 0;
 	int    poll_us = 0;
 	uint64 wait_start_us = bcdb_get_time();
-	uint64 next_warn_us = wait_start_us + 5000000; /* 5 s */
+	uint64 next_warn_us = wait_start_us + 5000000; /* first warning at +5 s */
 
 	Assert(block != NULL);
 	Assert(result_block != NULL);
@@ -360,12 +596,16 @@ bcdb_wait_until_block_slots_ready(BCBlock *block)
 		BCTxID first_missing_value = -1;
 		int first_missing_slot = -1;
 
+		/* One pass over every tx; bail out as soon as a slot is missing. */
 		for (int i = 0; i < block->num_tx; ++i)
 		{
 			BCDBShmXact *tx = block->txs[i];
 			const int slot = bcdb_result_slot_for_txid(tx->tx_id);
 			BCTxID published;
 
+			/* ACQUIRE-load: pairs with the worker's RELEASE-store after
+			 * publishing the row payload.  Slot is owned by tx only when
+			 * the stored tx_id matches exactly. */
 			published = __atomic_load_n(&result_block->result_committed_txid[slot],
 										__ATOMIC_ACQUIRE);
 			if (published != tx->tx_id)
@@ -382,6 +622,7 @@ bcdb_wait_until_block_slots_ready(BCBlock *block)
 
 		CHECK_FOR_INTERRUPTS();
 
+		/* Hang watchdog -- log the first stalled slot so it's actionable. */
 		{
 			uint64 now_us = bcdb_get_time();
 			if (now_us >= next_warn_us)
@@ -400,11 +641,13 @@ bcdb_wait_until_block_slots_ready(BCBlock *block)
 
 		if (spins < 128)
 		{
+			/* Phase 1: busy-spin briefly between full slot scans. */
 			spins++;
 			pg_spin_delay();
 		}
 		else
 		{
+			/* Phase 2: exponential backoff sleep, capped at 64us. */
 			if (poll_us == 0)
 				poll_us = 1;
 			else if (poll_us < 64)
@@ -415,16 +658,43 @@ bcdb_wait_until_block_slots_ready(BCBlock *block)
 }
 
 /*
- * Initialize the middleware-facing BCDB runtime for a backend.
+ * bcdb_middleware_init
+ * --------------------
+ * Initialize the middleware-facing BCDB runtime for the calling backend.
+ * This is the C-callable side of the SQL function bcdb_init().
  *
- * The SQL argument is still named block_size for historical reasons, but in
- * this implementation it selects the worker/queue count.  The sentinel block
- * (block id 1) owns the runtime result ring and worker-count metadata; it must
- * already match any earlier initialization in this backend lifetime.
+ * Arguments:
+ *   is_oep_mode -- legacy flag from the original codebase; Aria does NOT
+ *                  use OEP mode, so this is ignored.  We always set
+ *                  is_bcdb_master = true (every node behaves as a master).
+ *   block_size  -- historical name; in this implementation it selects the
+ *                  WORKER/QUEUE count, not a tx batch size.  See
+ *                  BCDB_DECOUPLE_WORKERS for the case where the caller
+ *                  wants to ignore this parameter entirely.
  *
- * The memory context is intentionally reused across repeated bcdb_init() calls
- * so restore scripts and benchmark loops do not allocate one long-lived context
- * per invocation.
+ * Sentinel block (block id 1):
+ *   This block does not contain user txs -- it stores runtime metadata
+ *   (blksize, result ring, condition variables).  Its blksize value is
+ *   the source of truth for the worker count.  If a later bcdb_init()
+ *   call requests a different size we abort with ERROR: the worker pool
+ *   cannot be safely resized once workers have been launched, so the
+ *   correct fix is to restart PostgreSQL.
+ *
+ * Memory context:
+ *   bcdb_middleware_context is created once under TopMemoryContext and
+ *   then reused across every subsequent bcdb_init() call within the same
+ *   backend.  Restore scripts and benchmark drivers call bcdb_init()
+ *   repeatedly; without this reuse we would leak one long-lived context
+ *   per invocation.
+ *
+ * Side effects (in order):
+ *   - selects worker_queues per the env-var / param fallback chain;
+ *   - publishes blocksize globally;
+ *   - lazily creates the middleware memory context;
+ *   - allocates/locates the sentinel block;
+ *   - warns if the result ring is shallower than 2x the worker count;
+ *   - validates against a prior blksize and errors on mismatch;
+ *   - initialises the idle-worker list on first call.
  */
 void
 bcdb_middleware_init(bool is_oep_mode, int32 block_size)
@@ -432,34 +702,53 @@ bcdb_middleware_init(bool is_oep_mode, int32 block_size)
 	MemoryContext    old_context;
 	BCBlock *block;
 	int32 worker_queues;
-	//int32 nWorkers = block_size;
-	//nWorkers = 5;
 
-	/* Aria does not have oep mode */
+	/* Aria does not have OEP (Original Execution Plan) mode -- every node
+	 * behaves as a deterministic master regardless of the is_oep_mode arg. */
 	is_bcdb_master = true;
+
 	if (bcdb_decouple_workers_enabled())
+	{
+		/* Ignore the SQL block_size and pick the worker count purely from
+		 * the GUC / compile-time default. */
 		worker_queues = bcdb_select_worker_count(0);
+	}
 	else
 	{
+		/* Honour the SQL argument and also publish it as the GUC value so
+		 * subsequent code (and other modules) see a consistent number. */
 		worker_queues = bcdb_select_worker_count(block_size);
 		bcdb_worker_count = worker_queues;
 	}
 	blocksize = worker_queues;
+
+	/* Lazy, one-time context creation; reused across re-inits. */
 	if (bcdb_middleware_context == NULL)
 		bcdb_middleware_context =
 			AllocSetContextCreate(TopMemoryContext,
 								  "middleware memory context",
 								  ALLOCSET_DEFAULT_SIZES);
 	old_context = MemoryContextSwitchTo(bcdb_middleware_context);
+
+	/* Materialise/locate the sentinel block, the holder of runtime metadata. */
 	block = get_block_by_id(1, true);
-		if (bcdb_get_result_ring_slots() < 2 * blocksize)
+
+	/* Result ring sizing warning.  The runtime clamps slots when it's
+	 * smaller than 2x worker count, but that hides throughput problems --
+	 * we want operators to notice and tune bcdb_result_ring_slots. */
+	if (bcdb_get_result_ring_slots() < 2 * blocksize)
 		ereport(WARNING,
 			(errmsg("bcdb_result_ring_slots=%d is lower than 2 * bcdb_worker_count=%d; runtime will clamp slots",
 				bcdb_get_result_ring_slots(), 2 * blocksize)));
+
+	/* Worker count is immutable for the life of the cluster. */
 	if (block->blksize > 0 && block->blksize != blocksize)
 		ereport(ERROR,
 				(errmsg("bcdb_worker_count mismatch: existing=%d requested=%d; restart required",
 						block->blksize, blocksize)));
+
+	/* Publish the agreed-upon blksize and bring up the idle-worker list
+	 * on the very first init.  Subsequent inits validate consistency. */
 	set_blksz(blocksize);
 	if (idle_workers.num == 0)
 		idle_worker_list_init(blocksize);
@@ -467,21 +756,29 @@ bcdb_middleware_init(bool is_oep_mode, int32 block_size)
 		ereport(ERROR,
 				(errmsg("BCDB workers already initialized with %d workers; requested %d",
 						idle_workers.num, blocksize)));
+
 	MemoryContextSwitchTo(old_context);
 #if SAFEDBG2
 	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
 #endif
 
+	/* Timestamp used only for the "total throughput" LOG line. */
 	start_time = bcdb_get_time();
 }
 
 /*
- * Initialize BCDB with the same worker/queue semantics as bcdb_middleware_init
- * plus the legacy burst controls used by bcdb_middleware_submit_block2().
+ * bcdb_middleware_init2
+ * ---------------------
+ * Identical to bcdb_middleware_init() but additionally captures the legacy
+ * burst-throttle parameters used by bcdb_middleware_submit_block2().
  *
- * numTx and timeSlot do not change deterministic correctness; they only govern
- * how submit_block2 pauses between enqueue bursts.  The normal distributed
- * YCSB path uses bcdb_block_submit_results() instead.
+ * numTx     -- number of txs between throttle pauses (numTxBurst).
+ * timeSlot  -- microseconds of usleep() per pause (burstTime).
+ *
+ * These knobs do NOT influence determinism or correctness; they only
+ * govern how aggressively submit_block2() pushes txs onto worker queues.
+ * The active distributed YCSB/TPCC path uses
+ * bcdb_middleware_submit_block_results() instead and ignores these values.
  */
 void
 bcdb_middleware_init2(bool is_oep_mode, int32 block_size, int32 numTx, int32 timeSlot)
@@ -499,8 +796,10 @@ bcdb_middleware_init2(bool is_oep_mode, int32 block_size, int32 numTx, int32 tim
 		bcdb_worker_count = worker_queues;
 	}
 	blocksize = worker_queues;
+	/* Capture legacy burst knobs for submit_block2(). */
 	numTxBurst = numTx;
 	burstTime = timeSlot;
+
 	if (bcdb_middleware_context == NULL)
 		bcdb_middleware_context =
 			AllocSetContextCreate(TopMemoryContext,
@@ -508,7 +807,7 @@ bcdb_middleware_init2(bool is_oep_mode, int32 block_size, int32 numTx, int32 tim
 								  ALLOCSET_DEFAULT_SIZES);
 	old_context = MemoryContextSwitchTo(bcdb_middleware_context);
 	block = get_block_by_id(1, true);
-		if (bcdb_get_result_ring_slots() < 2 * blocksize)
+	if (bcdb_get_result_ring_slots() < 2 * blocksize)
 		ereport(WARNING,
 			(errmsg("bcdb_result_ring_slots=%d is lower than 2 * bcdb_worker_count=%d; runtime will clamp slots",
 				bcdb_get_result_ring_slots(), 2 * blocksize)));
@@ -532,15 +831,32 @@ bcdb_middleware_init2(bool is_oep_mode, int32 block_size, int32 numTx, int32 tim
 }
 
 /*
- * Parse one SQL transaction JSON object and allocate its shared tx entry.
+ * parse_tx
+ * --------
+ * Parse a single transaction JSON object and allocate its shared-memory
+ * tx entry (BCDBShmXact).
  *
- * Expected shape:
- *   {"hash": "...", "sql": "...", "create_ts": "optional integer"}
+ * Expected JSON shape:
+ *   { "hash":      "<unique tx identifier string>",   // required
+ *     "sql":       "<SQL command text>",              // required
+ *     "create_ts": "<optional integer timestamp>" }   // optional, ms epoch
  *
- * The tx id is not assigned here.  Single-tx submission assigns it atomically
- * in bcdb_middleware_submit_tx(); block submission assigns a contiguous range
- * in parse_block_with_txs() so a whole deterministic block has stable ids
- * before workers see any member of it.
+ * Tx id is intentionally NOT assigned here:
+ *   - Single-tx flow: bcdb_middleware_submit_tx() assigns the id atomically
+ *     via an fetch-and-add on tx_num after parsing.
+ *   - Block flow: parse_block_with_txs() reserves a contiguous tx-id range
+ *     up front so every tx in the block has a stable id BEFORE any worker
+ *     can observe it.  This guarantees deterministic order within the block.
+ *
+ * pred_lock=false:
+ *   Aligns with the direct deterministic wire path ("s <seq> <sql>").
+ *   PostgreSQL's predicate-lock hook still records BCDB read-set tags
+ *   for our own conflict_checkDT(), but the heavyweight SSI predicate
+ *   lock acquisition is skipped because BCDB's deterministic conflict
+ *   resolution does not rely on SSI.
+ *
+ * On parse failure we ereport(ERROR); cJSON allocations live in the current
+ * memory context and will be reaped automatically when the error unwinds.
  */
 BCDBShmXact *
 parse_tx(const char* json)
@@ -557,25 +873,26 @@ parse_tx(const char* json)
 	if (!parsed)
 		goto error;
 
+	/* Required: "sql" -- the actual SQL string to execute. */
 	sql = cJSON_GetObjectItemCaseSensitive(parsed, "sql");
 	if (!cJSON_IsString(sql) || (sql->valuestring == NULL))
 		goto error;
 
+	/* Required: "hash" -- a caller-supplied unique identifier; used as
+	 * the key for get_tx_by_hash() in the legacy attach/wait paths. */
 	hash = cJSON_GetObjectItemCaseSensitive(parsed, "hash");
 	if (!cJSON_IsString(hash))
 		goto error;
 
+	/* BCDB always runs SERIALIZABLE; deterministic execution is built on
+	 * top of serial-equivalent ordering. */
 	isolation = XACT_SERIALIZABLE;
-	/*
-	 * Match the direct deterministic wire path ("s <seq> <sql>"):
-	 * PostgreSQL's predicate-lock hook still records BCDB read-set tags before
-	 * returning when pred_lock=false, but it skips heavyweight SSI predicate
-	 * lock acquisition.  The queued block path relies on BCDB's own
-	 * conflict_checkDT(), not PostgreSQL SSI conflict resolution.
-	 */
-	pred_lock = false;
+	pred_lock = false; /* see header comment for rationale */
 
-	tx = create_tx(hash->valuestring, sql->valuestring, BCDBInvalidTid, BCDBInvalidBid, isolation, pred_lock);
+	/* Materialise the tx in shared memory.  Tx id and block id are left
+	 * invalid here -- callers fill them in once they know the assignment. */
+	tx = create_tx(hash->valuestring, sql->valuestring,
+				   BCDBInvalidTid, BCDBInvalidBid, isolation, pred_lock);
 	if (tx == NULL)
 	{
 		ereport(ERROR,
@@ -586,8 +903,9 @@ parse_tx(const char* json)
 #if SAFEDBG
 	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
 #endif
+	/* Optional: "create_ts" is the millisecond-epoch timestamp of when
+	 * the frontend produced the tx; used for end-to-end latency telemetry. */
 	create_time = cJSON_GetObjectItemCaseSensitive(parsed, "create_ts");
-
 	if (cJSON_IsString(create_time))
 	{
 		char *endpt;
@@ -600,17 +918,39 @@ parse_tx(const char* json)
 error:
 	ereport(ERROR,
 		(errmsg("[ZL] Cannot parse transaction: %s", json)));
-	/* no need to do clean here, because memory context will do that for us */
+	/* Memory context cleanup handles partially-built cJSON nodes. */
 	return NULL;
 }
 
 /*
- * Parse a block-submit JSON payload into a shared BCBlock and BCDBShmXact set.
+ * parse_block_with_txs
+ * --------------------
+ * Parse a "block of transactions" JSON payload, materialise every tx in
+ * shared memory, and stitch them into a BCBlock with stable, contiguous
+ * tx ids.  This is the central setup step for the deterministic execution
+ * pipeline.
  *
- * The active distributed path builds JSON with full tx objects under "txs".
- * A contiguous tx-id range is reserved from the sentinel block before the loop,
- * then each tx receives tx_base + local_index.  That makes each block internally
- * ordered even when multiple frontend backends submit blocks concurrently.
+ * Expected JSON shape:
+ *   { "bid": <int block id>,
+ *     "txs": [ { "hash": "...", "sql": "...", "create_ts": "..." }, ... ] }
+ *
+ * Key invariant -- contiguous tx-id range:
+ *   We reserve [tx_base, tx_base + num_tx) atomically from the sentinel
+ *   block's num_tx_sub counter BEFORE entering the per-tx loop.  Then we
+ *   assign tx->tx_id = tx_base + tx_local_idx in order.  Without this
+ *   reservation, two backends submitting blocks concurrently could
+ *   interleave their tx-id assignments and break the in-block ordering
+ *   that workers rely on.
+ *
+ * Side effects:
+ *   - block->num_tx is set from the JSON array size;
+ *   - block->txs[i] is populated in order;
+ *   - each tx has tx_id and block_id_committed set BEFORE workers see it
+ *     (workers can only see a tx after tx_queue_insert(), which our caller
+ *     performs after this function returns).
+ *
+ * On any failure we ereport(FATAL) -- a malformed block is unrecoverable
+ * because shared-memory state may already be partially mutated.
  */
 BCBlock *
 parse_block_with_txs(const char *json)
@@ -620,36 +960,37 @@ parse_block_with_txs(const char *json)
 	cJSON *block_id;
 	cJSON *tx_json;
 	BCBlock *block;
-	int j = 0;
-	int tx_base = 0;
-	int tx_local_idx = 0;
+	int j = 0;             /* cap for first-N SAFEDBG cJSON_Print calls */
+	int tx_base = 0;       /* atomically reserved starting tx-id */
+	int tx_local_idx = 0;  /* offset within this block, 0..num_tx-1 */
 	BCBlock *sentinel = NULL;
-	//static int  tx_id_counter = 0; // not bcdb
-	//int  tx_id_counter = 0; // not bcdb
 
-	// printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
-	//printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 	parsed = cJSON_Parse(json);
 	if (!parsed)
 		goto error;
 
-	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+	/* "bid" -- the block id this submission targets. */
 	block_id = cJSON_GetObjectItemCaseSensitive(parsed, "bid");
 
-	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+	/* "txs" -- mandatory array of per-tx JSON objects. */
 	tx_list = cJSON_GetObjectItemCaseSensitive(parsed, "txs");
 	if (!cJSON_IsArray(tx_list))
 		goto error;
 
-	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+	/* Locate/allocate the destination block header (create=true). */
 	block = get_block_by_id(block_id->valueint, true);
 #if SAFEDBG
 	printf("ariaMyDbg %s : %s: %d blksz %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz(), getpid());
 #endif
 	block->num_tx = cJSON_GetArraySize(tx_list);
+
+	/* Reserve a contiguous tx-id range from the sentinel.  __sync_fetch_and_add
+	 * returns the pre-increment value; that becomes our tx_base so the first
+	 * tx gets exactly the value other backends will skip past. */
 	sentinel = get_block_by_id(1, true);
 	Assert(sentinel != NULL);
 	tx_base = __sync_fetch_and_add(&sentinel->num_tx_sub, block->num_tx);
+
 	cJSON_ArrayForEach(tx_json, tx_list)
 	{
 		cJSON   *sql      = NULL;
@@ -659,46 +1000,47 @@ parse_block_with_txs(const char *json)
 		int     isolation;
 		bool    pred_lock = false;
 
+		/* Required: "sql". */
 		sql = cJSON_GetObjectItemCaseSensitive(tx_json, "sql");
-	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
 		if (!cJSON_IsString(sql) || (sql->valuestring == NULL))
 			goto error;
 
-	if(j < 5) {
-		//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
-		cJSON_Print(sql);
-	}
+		/* Diagnostic dump of the first few txs only -- bounded so a 1024-tx
+		 * block doesn't produce 1024 prints when SAFEDBG is on. */
+		if(j < 5) {
+			cJSON_Print(sql);
+		}
+
+		/* Required: "hash" -- caller-supplied unique tx identifier. */
 		hash = cJSON_GetObjectItemCaseSensitive(tx_json, "hash");
 		if (!cJSON_IsString(hash))
 			goto error;
-	if(j < 5) {
-		//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
-		cJSON_Print(hash);
-		j++;
-	}
-	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+		if(j < 5) {
+			cJSON_Print(hash);
+			j++;
+		}
 
 		isolation = XACT_SERIALIZABLE;
-		/*
-		 * Keep block-submit semantics aligned with direct DET execution.
-		 * pred_lock=false preserves BCDB read-set capture while avoiding
-		 * additional PostgreSQL SSI predicate locks on every YCSB read.
-		 */
+		/* See parse_tx() for full rationale: pred_lock=false matches the
+		 * direct DT wire path -- read-set capture still happens via BCDB's
+		 * own predicate-lock hook, just without the SSI heavyweight locks. */
 		pred_lock = false;
 
-		tx = create_tx(hash->valuestring, sql->valuestring, BCDBInvalidTid, BCDBInvalidBid, isolation, pred_lock);
+		tx = create_tx(hash->valuestring, sql->valuestring,
+					   BCDBInvalidTid, BCDBInvalidBid, isolation, pred_lock);
 		if (tx == NULL)
 			goto error;
 
-	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
+		/* Optional: "create_ts" frontend-side millisecond timestamp. */
 		create_time = cJSON_GetObjectItemCaseSensitive(tx_json, "create_ts");
-
 		if (cJSON_IsString(create_time))
 		{
 			char *endpt;
 			tx->create_time = strtoll(create_time->valuestring, &endpt, 10);
 		}
 
+		/* Stamp the assigned ids and slot into the block's tx array.  Order
+		 * here defines deterministic execution order within the block. */
 		tx->tx_id = tx_base + tx_local_idx;
 		tx->block_id_committed = block->id;
 		block->txs[tx_local_idx] = tx;
@@ -707,9 +1049,6 @@ parse_block_with_txs(const char *json)
 		printf("ariaMyDbg %s : %s: %d txid %d bid %d hash %s \n", __FILE__, __FUNCTION__, __LINE__ , tx->tx_id, block->id, hash->valuestring);
 #endif
 	}
-	//if(blocksize != 0) set_blksz(blocksize);
-	//block->blksize = blocksize;
-	//printf("ariaMyDbg %s : %s: %d blksz %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz());
 	return block;
 
 error:
@@ -720,12 +1059,26 @@ error:
 }
 
 /*
- * SQL helper behind bcdb_tx_submit().
+ * bcdb_middleware_submit_tx
+ * -------------------------
+ * C entry point for the legacy SQL function bcdb_tx_submit(tx_json).
  *
- * This is the older one-transaction-at-a-time API: parse a tx, assign a unique
- * queue partition/tx id with an atomic counter, enqueue it, and return that id
- * to the caller.  Returning the id is important because callers otherwise see a
- * meaningless constant success value.
+ * Pipeline:
+ *   1. Parse the JSON via parse_tx() to materialise the tx in shared memory.
+ *   2. Assign a unique tx_id by atomically incrementing the file-scope
+ *      counter tx_num (__sync_fetch_and_add returns the pre-increment value).
+ *   3. Push the tx onto its worker queue (worker selection is hashed on
+ *      tx_id inside tx_queue_insert()).
+ *   4. Return the tx_id back to the SQL caller.
+ *
+ * Why return the id?
+ *   The SQL caller pairs this with a later wait/lookup; if we simply
+ *   returned a success constant they would have no way to address the
+ *   in-flight tx.
+ *
+ * Note: this single-tx path is preserved for backward compatibility.
+ * The deterministic block-submit path uses parse_block_with_txs() to
+ * assign a contiguous tx-id range from the sentinel block instead.
  */
 int
 bcdb_middleware_submit_tx(const char* tx_string)
@@ -738,6 +1091,7 @@ bcdb_middleware_submit_tx(const char* tx_string)
 		ereport(ERROR,
 				(errmsg("failed to parse BCDB transaction")));
 
+	/* Atomic monotonic id assignment across concurrent submitting backends. */
 	tx_id = __sync_fetch_and_add(&tx_num, 1);
 	tx->tx_id = tx_id;
 	tx_queue_insert(tx, tx_id);
@@ -748,14 +1102,28 @@ bcdb_middleware_submit_tx(const char* tx_string)
 }
 
 /*
- * Legacy block-submit API behind bcdb_block_submit().
+ * bcdb_middleware_submit_block
+ * ----------------------------
+ * Legacy block-submit C entry point behind the SQL function
+ * bcdb_block_submit().  Submits an entire block and returns the result
+ * text of ONLY the highest tx id in the block.
  *
- * This path enqueues every tx in the parsed block and returns the result for
- * the highest tx id in that block.  The public SQL wrapper currently ignores
- * that return value; the distributed benchmark path uses
- * bcdb_middleware_submit_block_results() below when it needs per-tx completion
- * records.  Keep this function defensive anyway because older tests and tools
- * still call bcdb_block_submit().
+ * Why "only the last result"?
+ *   Older callers used this when they cared about a single read-back
+ *   value (or just wanted to wait for completion).  The current SQL
+ *   wrapper ignores the return value entirely.  When per-tx receipts
+ *   are needed -- the distributed YCSB/TPCC path -- callers use
+ *   bcdb_middleware_submit_block_results() instead.  This function is
+ *   kept defensive because older tests/tools still call it.
+ *
+ * Slot-ownership safety:
+ *   Result slots in the sentinel ring are recycled by future txs.  Before
+ *   reading result[slot], we ACQUIRE-load result_committed_txid[slot] and
+ *   verify it equals max_tx_id.  Any mismatch means the slot was taken by
+ *   a later tx and we error out rather than return stale/wrong data.
+ *
+ * Empty block:
+ *   max_tx_id stays at -1 -- we skip the wait and return an empty string.
  */
 char *
 bcdb_middleware_submit_block(const char* block_json)
@@ -766,23 +1134,16 @@ bcdb_middleware_submit_block(const char* block_json)
 	int max_tx_id = -1;
 
 	tv1.tv_sec = 0; tv1.tv_usec = 0;
-	//struct timeval tv1 ;
-	//tv1.tv_sec = 0; tv1.tv_usec = 0;
-	// static int tmp = 0;
 	submitted_block = parse_block_with_txs(block_json);
 	if (submitted_block == NULL)
 		ereport(ERROR,
 				(errmsg("failed to parse BCDB block JSON")));
+	/* Advance the global block watermark so cleaning sees this block. */
 	__sync_add_and_fetch(&block_meta->global_bmax, 1);
-/*
-if(tmp < 2) {
-tmp++;
-print_trace();
-} else { return NULL; }
-*/
 #if SAFEDBG
 		printf("ariaMyDbg %s : %s: %d pid %d txnum %d blk-numtx %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid(), tx_num, submitted_block->num_tx);
 #endif
+	/* Push every tx onto its worker queue and remember the maximum id. */
 	for (int i= 0; i < submitted_block->num_tx; i++)
 	{
 	  BCDBShmXact *tx = submitted_block->txs[i];
@@ -791,15 +1152,16 @@ print_trace();
 		  max_tx_id = tx->tx_id;
 	}
 
-		result_block = get_block_by_id(1, false);
-		if (result_block == NULL)
-			ereport(ERROR,
-					(errmsg("BCDB result block is not initialized")));
-		gettimeofday(&tv1, NULL);
-		if (max_tx_id >= 0)
-			bcdb_wait_until_committed((BCTxID) max_tx_id);
-/*
-*/
+	result_block = get_block_by_id(1, false);
+	if (result_block == NULL)
+		ereport(ERROR,
+				(errmsg("BCDB result block is not initialized")));
+	gettimeofday(&tv1, NULL);
+	/* Wait for the contiguous committed watermark to reach max_tx_id.
+	 * Because the watermark only advances after each predecessor publishes
+	 * its result slot, this implies our target slot is also published. */
+	if (max_tx_id >= 0)
+		bcdb_wait_until_committed((BCTxID) max_tx_id);
 #if SAFEDBG
 			gettimeofday(&tv1, NULL);
 			printf("\n\n\t time= %ld.%ld  getpid %d\n", tv1.tv_sec, tv1.tv_usec, getpid());
@@ -809,18 +1171,16 @@ print_trace();
 			printf("\n\t *** safeDB txid %d pid %d result %s file %s : %s: %d *** \n\n",
 				   max_tx_id, getpid(), &result_block->result[bcdb_result_slot_for_txid(max_tx_id)],__FILE__, __FUNCTION__, __LINE__ );
 #endif
-//ereport(INFO, (errmsg(&block->result[tx_num2-1])));
-// TODO -- another way to convey results...
-// wait-to-finish() ?? or
 
-//safeOut();
-	//printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
 	if (max_tx_id < 0)
 		return "";
 	{
 		const int slot = bcdb_result_slot_for_txid((BCTxID) max_tx_id);
 		BCTxID published;
 
+		/* ACQUIRE pairs with the worker's RELEASE-store of the tx id.  If
+		 * the values don't match, the slot already belongs to a newer tx
+		 * (ring recycling) and we MUST NOT return its row payload. */
 		published = __atomic_load_n(&result_block->result_committed_txid[slot],
 									 __ATOMIC_ACQUIRE);
 		if (published != max_tx_id)
@@ -832,13 +1192,46 @@ print_trace();
 }
 
 /*
- * Active deterministic block-submit API used by ariabc_pg.
+ * bcdb_middleware_submit_block_results
+ * ------------------------------------
+ * Active deterministic block-submit API used by ariabc_pg's production
+ * YCSB/TPCC pipeline.  The frontend submits ONE block of transactions as
+ * JSON, this function:
  *
- * The caller submits one JSON block, workers execute the contained txs through
- * the BCDB queues, and the function returns a newline-delimited completion
- * payload keyed by tx hash.  The hot correctness rule is slot ownership:
- * result_committed_txid[slot] must equal the exact tx id before the result slot
- * is read or marked consumed, because the ring slot can be reused by later txs.
+ *   1. parses and materialises every tx,
+ *   2. enqueues each tx onto its worker queue,
+ *   3. waits until every tx in the block has its result slot published,
+ *   4. emits a newline-delimited completion payload keyed by tx hash,
+ *   5. marks each slot consumed so workers can reuse the ring.
+ *
+ * Returned payload format (one line per tx, in submission order):
+ *   "<tx_hash>\t<optional hex payload>\n"
+ *
+ * The optional payload is included only when BCDB_BLOCK_RETURN_ACTUAL_RESULTS
+ * is set; the production default is completion-only.  Rationale: workers
+ * apply writes in deterministic order so final database state is identical
+ * across replicas, but read-row text can reflect local worker timing.  The
+ * post-run Merkle gate validates state; completion-only payloads avoid
+ * coupling correctness to per-tx text comparison.
+ *
+ * Hot correctness rule -- slot ownership:
+ *   result_committed_txid[slot] MUST equal tx->tx_id at the moment of read.
+ *   A mismatch indicates the slot has been reused by a later tx (the ring
+ *   is finite and wraps), in which case reading result[slot] would return
+ *   data from a different transaction.  We:
+ *     - ACQUIRE-load to pair with the worker's RELEASE-store;
+ *     - fall back to bcdb_wait_until_slot_ready() if the load misses
+ *       (defensive: the block-level wait above should already cover this);
+ *     - publish result_consumed_txid[slot] = tx_id with RELEASE so workers
+ *       know the slot is free for the next write.
+ *
+ * Profiling (BCDB_BLOCK_PROFILE=1):
+ *   Records parse/enqueue/wait/format phase timings plus per-slot wait
+ *   p50/p95/max and emits one PROFILE_BCDB_BLOCK LOG line per block.
+ *   Useful for diagnosing whether throughput is bottlenecked on enqueue,
+ *   worker execution, or post-execution formatting.
+ *
+ * Returns: a palloc'd string in the caller's memory context.
  */
 char *
 bcdb_middleware_submit_block_results(const char* block_json)
@@ -847,13 +1240,14 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	BCBlock     *result_block;
 	StringInfoData out;
 	bool        profile = bcdb_block_profile_enabled();
+	/* Profiling timestamps (microsecond resolution).  All "_us" suffixed. */
 	uint64      t_start_us = 0;
 	uint64      t_parse_us = 0;
 	uint64      t_enqueue_us = 0;
 	uint64      t_wait_us = 0;
 	uint64      t_format_us = 0;
 	uint64      block_wait_us = 0;
-	uint64     *slot_wait_us = NULL;
+	uint64     *slot_wait_us = NULL;    /* per-tx fallback wait timings */
 	uint64      slot_wait_sum_us = 0;
 	uint64      slot_wait_p50_us = 0;
 	uint64      slot_wait_p95_us = 0;
@@ -861,11 +1255,16 @@ bcdb_middleware_submit_block_results(const char* block_json)
 
 	if (profile)
 		t_start_us = bcdb_get_time();
+
+	/* Phase 1: parse JSON -> shared-memory block + tx entries. */
 	block = parse_block_with_txs(block_json);
 	if (block == NULL)
 		ereport(ERROR,
 				(errmsg("failed to parse BCDB block JSON")));
+	/* Bump the global block watermark so cleaning logic sees this block. */
 	__sync_add_and_fetch(&block_meta->global_bmax, 1);
+
+	/* Sentinel block holds the result ring; it must already exist. */
 	result_block = get_block_by_id(1, false);
 	if (result_block == NULL)
 		ereport(ERROR,
@@ -873,9 +1272,13 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	if (profile)
 		t_parse_us = bcdb_get_time();
 
+	/* Allocate per-tx wait array only when profiling -- avoids palloc cost
+	 * on the hot path when profiling is disabled. */
 	if (profile && block->num_tx > 0)
 		slot_wait_us = (uint64 *) palloc0(sizeof(uint64) * block->num_tx);
 
+	/* Phase 2: enqueue every tx.  Optional yield-every-N gives workers a
+	 * chance to drain the queue during large-block bursts. */
 	for (int i = 0; i < block->num_tx; ++i)
 	{
 		BCDBShmXact *tx = block->txs[i];
@@ -887,22 +1290,29 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	if (profile)
 		t_enqueue_us = bcdb_get_time();
 
+	/* Phase 3: wait for every result slot in this block to be published.
+	 * Two equivalent strategies (see bcdb_block_wait_watermark_enabled docs);
+	 * both ensure every block-local slot is readable before we read it. */
 	if (block->num_tx > 0)
 	{
 		BCDBShmXact *last_tx = block->txs[block->num_tx - 1];
 
-		/*
-		 * Prefer the contiguous committed watermark.  It advances only after
-		 * result_committed_txid has been published for every predecessor, so it
-		 * avoids repeatedly scanning a 512/1024-tx block while preserving the
-		 * per-slot correctness check below.
-		 */
 		if (bcdb_block_wait_watermark_enabled())
+		{
+			/* Watermark mode: workers publish slot before advancing the
+			 * contiguous committed watermark, so a watermark >= last_tx_id
+			 * implies all slots in [first..last] are also published. */
 			block_wait_us = bcdb_wait_until_committed((BCTxID) last_tx->tx_id);
+		}
 		else
+		{
+			/* Block-scan mode: one amortised wait that polls every slot
+			 * per backoff iteration. */
 			block_wait_us = bcdb_wait_until_block_slots_ready(block);
+		}
 	}
 
+	/* Phase 4: format the completion payload and mark slots consumed. */
 	initStringInfo(&out);
 	for (int i = 0; i < block->num_tx; ++i)
 	{
@@ -911,11 +1321,16 @@ bcdb_middleware_submit_block_results(const char* block_json)
 		BCTxID published;
 		uint64 wait_us = 0;
 
+		/* ACQUIRE-load the slot owner.  This must exactly equal tx->tx_id;
+		 * any other value means the slot is owned by a different tx. */
 		published = __atomic_load_n(&result_block->result_committed_txid[mem_txid],
 									 __ATOMIC_ACQUIRE);
 		if (published != tx->tx_id)
 		{
-			/* Defensive fallback; the block-local wait above should cover this. */
+			/* Defensive: block-level wait above should have made this
+			 * unreachable.  Fall back to a per-slot wait so we never
+			 * read a recycled slot.  Mismatch here would indicate
+			 * an ordering bug in the worker publish path. */
 			wait_us = bcdb_wait_until_slot_ready((BCTxID) tx->tx_id);
 		}
 		if (profile)
@@ -926,24 +1341,23 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			if (slot_wait_us != NULL)
 				slot_wait_us[i] = wait_us;
 		}
+
+		/* Always emit the hash; emit the row payload only when explicitly
+		 * requested via BCDB_BLOCK_RETURN_ACTUAL_RESULTS. */
 		appendStringInfoString(&out, tx->hash);
 		appendStringInfoChar(&out, '\t');
-		/*
-		 * Default to completion-only result payloads for deterministic block
-		 * submit.  The queued path applies txs in deterministic order for
-		 * final state, but read-row payloads can reflect replica-local worker
-		 * timing.  Throughput/consistency runs vote on completion and then use
-		 * the post-run Merkle gate for state correctness.  Actual payloads
-		 * remain available for diagnostics via BCDB_BLOCK_RETURN_ACTUAL_RESULTS=1.
-		 */
 		if (bcdb_block_return_actual_results_enabled())
 			append_hex_encoded(&out, result_block->result[mem_txid]);
 		appendStringInfoChar(&out, '\n');
 
-		/* Mark slot consumed so the next writer can reuse it safely. */
+		/* Hand the slot back: publish result_consumed_txid = tx_id with
+		 * RELEASE so a worker writing the next tx into this slot knows
+		 * the previous occupant has been fully consumed. */
 		__atomic_store_n(&result_block->result_consumed_txid[mem_txid],
 						 (int32) tx->tx_id, __ATOMIC_RELEASE);
 	}
+
+	/* Phase 5 (optional): emit profiling LOG line. */
 	if (profile)
 	{
 		uint64 t_done_us;
@@ -952,6 +1366,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
 		t_wait_us = block_wait_us + slot_wait_sum_us;
 		if (slot_wait_us != NULL && block->num_tx > 0)
 		{
+			/* Compute p50/p95 over per-slot fallback wait timings. */
 			int p50_idx = block->num_tx / 2;
 			int p95_idx = (block->num_tx * 95) / 100;
 
@@ -962,6 +1377,8 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			slot_wait_p95_us = slot_wait_us[p95_idx];
 		}
 		t_done_us = bcdb_get_time();
+		/* Format time = total - (parse + enqueue + wait).  Guard against
+		 * negative arithmetic in case of clock jitter. */
 		t_format_us = (t_done_us > t_enqueue_us + t_wait_us)
 			? (t_done_us - t_enqueue_us - t_wait_us)
 			: 0;
@@ -991,11 +1408,24 @@ bcdb_middleware_submit_block_results(const char* block_json)
 }
 
 /*
- * Legacy burst-submit variant.
+ * bcdb_middleware_submit_block2
+ * -----------------------------
+ * Legacy burst-submit variant of the block-submit API.  Unlike
+ * submit_block_results(), this function:
  *
- * This is kept for older experiments that intentionally sleep after every
- * numTxBurst enqueues.  It shares the same parse-before-counter-update rule as
- * the other block-submit APIs but does not wait for or return results.
+ *   - intentionally pauses for `burstTime` microseconds after every
+ *     `numTxBurst` enqueues (the throttle controls captured in
+ *     bcdb_middleware_init2()),
+ *   - does not wait for any tx to complete,
+ *   - does not return any result payload.
+ *
+ * Used by older experiments that wanted to feed transactions to workers
+ * at a controlled producer rate (to study queue depths, batching effects,
+ * etc.).  The normal distributed YCSB/TPCC pipeline does not use this.
+ *
+ * Like the other submit paths it follows the parse-before-counter-update
+ * rule (parse_block_with_txs() reserves the tx-id range before we touch
+ * any worker queue).
  */
 void
 bcdb_middleware_submit_block2(const char* block_json)
@@ -1012,17 +1442,22 @@ bcdb_middleware_submit_block2(const char* block_json)
 		ereport(ERROR,
 				(errmsg("failed to parse BCDB block JSON")));
 	__sync_add_and_fetch(&block_meta->global_bmax, 1);
+
+	/* Push txs at a throttled rate: after every numTxBurst enqueues we sleep
+	 * for burstTime microseconds.  The "(i > 0)" guard prevents an extra
+	 * sleep at i == 0 when i % numTxBurst is trivially zero. */
 	for (int i=0; i < block->num_tx; i++)
 	{
-	  tx_queue_insert(block->txs[i], block->txs[i]->tx_id);
-		  if( (i % numTxBurst == 0)&&(i > 0)) {
+		tx_queue_insert(block->txs[i], block->txs[i]->tx_id);
+		if ((i % numTxBurst == 0) && (i > 0))
+		{
 			gettimeofday(&tv1, NULL);
 #if SAFEDBG
 			printf("\n\n\t time= %ld.%ld  getpid %d\n", tv1.tv_sec, tv1.tv_usec, getpid());
 			printf("\t ariaMyDbg %s : %s: %d pid %d  sleeping %dms next burstSz %d from tx %d\n\n", __FILE__, __FUNCTION__, __LINE__ , getpid() ,burstTime, numTxBurst, i );
 #endif
 			usleep(burstTime);
-		  }
+		}
 	}
 #if SAFEDBG
 	printf("ariaMyDbg %s : %s: %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , getpid());
@@ -1030,13 +1465,28 @@ bcdb_middleware_submit_block2(const char* block_json)
 }
 
 /*
- * Wait for a legacy hash-addressed transaction to reach a terminal state.
+ * bcdb_wait_tx_finish
+ * -------------------
+ * Block the caller until the named tx reaches TX_COMMITED or TX_ABORTED.
  *
- * Missing hashes are reported as SQL errors instead of crashing on a NULL tx.
- * The wait itself remains open-ended because this compatibility API has no
- * caller-supplied deadline, so it emits a LOG line every five seconds with the
- * tx id and current status.  That makes worker crashes or lost condition
- * variable wakeups visible in server.log while preserving old SQL semantics.
+ * This is the legacy hash-addressed compatibility API (called from the
+ * older bcdb_wait_tx_finish() SQL wrapper).  Modern callers should prefer
+ * the block-submit results path, which waits on slot publication rather
+ * than per-tx condition variables.
+ *
+ * Robustness details:
+ *   - A missing hash is reported via ereport(ERROR) rather than a
+ *     null-pointer dereference.  Returning silently would conflate
+ *     "never submitted" with "submitted and aborted".
+ *   - The wait is open-ended (no caller-supplied deadline).  To avoid
+ *     truly invisible hangs, we use ConditionVariableTimedSleep with a
+ *     1 ms cap and emit a LOG line every 5 s reporting the current tx
+ *     id and status.  That makes worker crashes or lost CV wakeups
+ *     visible without changing the SQL surface contract.
+ *   - The Prepare/Sleep/Cancel envelope is REQUIRED by PostgreSQL's
+ *     condition-variable contract -- it registers this backend on the
+ *     CV waiter list so a concurrent ConditionVariableBroadcast()
+ *     reliably wakes us.
  */
 void
 bcdb_wait_tx_finish(char *tx_hash)
@@ -1050,12 +1500,14 @@ bcdb_wait_tx_finish(char *tx_hash)
 		ereport(ERROR,
 				(errmsg("BCDB transaction not found: %s", tx_hash)));
 	wait_start_us = bcdb_get_time();
-	next_warn_us = wait_start_us + 5000000; /* 5 s */
+	next_warn_us = wait_start_us + 5000000; /* first warning at +5 s */
 	ConditionVariablePrepareToSleep(&tx->cond);
 	while(tx->status != TX_COMMITED && tx->status != TX_ABORTED)
 	{
 		uint64 now_us;
 
+		/* 1 ms timed sleep keeps the watchdog responsive even if a
+		 * broadcast wakeup is lost. */
 		ConditionVariableTimedSleep(&tx->cond, 1000L, WAIT_EVENT_TX_FINISH);
 		CHECK_FOR_INTERRUPTS();
 		now_us = bcdb_get_time();
@@ -1072,23 +1524,46 @@ bcdb_wait_tx_finish(char *tx_hash)
 	ConditionVariableCancelSleep();
 }
 
+/*
+ * bcdb_middleware_wait_all_to_finish
+ * ----------------------------------
+ * Block the caller until every submitted block has been committed AND log
+ * the aggregate throughput.
+ *
+ * Implementation: WaitGlobalBmin(target) sleeps until block_meta->global_bmin
+ * (the lowest active block) advances past `target`.  We pass global_bmax+1,
+ * meaning "wait until no submitted block remains in flight".
+ *
+ * Throughput formula: num_committed / elapsed seconds, where elapsed is
+ * computed against start_time captured in bcdb_init().  Used by benchmark
+ * harnesses for an end-of-run summary line.
+ */
 void
 bcdb_middleware_wait_all_to_finish()
 {
 	WaitGlobalBmin(block_meta->global_bmax + 1);
-	ereport(LOG, (errmsg("[ZL] total throughput: %.3f", (double)block_meta->num_committed * 1e6 / (bcdb_get_time() - start_time))));
+	ereport(LOG, (errmsg("[ZL] total throughput: %.3f",
+		(double)block_meta->num_committed * 1e6 / (bcdb_get_time() - start_time))));
 }
 
 /*
- * Attach a previously submitted single transaction to a block by hash.
+ * bcdb_middleware_set_txs_committed_block
+ * ---------------------------------------
+ * Attach a previously submitted (hash-addressed) tx to a block.
  *
- * This supports the older two-step workflow:
- *   1. bcdb_tx_submit(tx_json)
- *   2. bcdb_add_tx_with_block_id(hash, block_id)
+ * Supports the older two-step submission workflow:
+ *   step 1: bcdb_tx_submit(tx_json)                -- creates the tx
+ *   step 2: bcdb_add_tx_with_block_id(hash, bid)   -- assigns the block
  *
- * A tx can be attached once.  Re-attaching to the same block is treated as
- * idempotent; moving it to a different block is rejected because workers and
- * conflict metadata may already reference the original block membership.
+ * Idempotency / reattachment policy:
+ *   - Attaching a tx to the SAME block it already belongs to is a no-op
+ *     and returns silently (callers may retry on transient errors).
+ *   - Attaching a tx to a DIFFERENT block when it already has a real
+ *     block id is rejected -- worker queues and conflict metadata may
+ *     already reference the original block membership, and silently
+ *     moving the tx would corrupt that state.
+ *   - The "no block yet" sentinel values are BCDBInvalidBid and
+ *     BCDBMaxBid; either is treated as unattached.
  */
 void
 bcdb_middleware_set_txs_committed_block(char * tx_hash, int32 block_id)
@@ -1100,7 +1575,7 @@ bcdb_middleware_set_txs_committed_block(char * tx_hash, int32 block_id)
 		ereport(ERROR,
 				(errmsg("BCDB transaction not found: %s", tx_hash)));
 	if (tx->block_id_committed == block_id)
-		return;
+		return; /* idempotent */
 	if (tx->block_id_committed != BCDBInvalidBid &&
 		tx->block_id_committed != BCDBMaxBid)
 		ereport(ERROR,
@@ -1111,11 +1586,15 @@ bcdb_middleware_set_txs_committed_block(char * tx_hash, int32 block_id)
 }
 
 /*
- * Add tx to block and publish the block id on the tx object.
+ * bcdb_middleware_attach_tx_to_block
+ * ----------------------------------
+ * Internal helper: add `tx` into `block`'s tx array and stamp the block id
+ * onto the tx.
  *
- * block_add_tx() owns the lock protecting block->txs[] and block->num_tx.  The
- * caller is responsible for validating that the tx exists and has not already
- * been attached to a different block.
+ * Locking is handled inside block_add_tx(), which owns the lock protecting
+ * block->txs[] and block->num_tx.  This helper assumes the caller has
+ * already validated that the tx exists and is not already attached to a
+ * different block (see bcdb_middleware_set_txs_committed_block).
  */
 void
 bcdb_middleware_attach_tx_to_block(BCDBShmXact *tx, BCBlock *block)
@@ -1125,12 +1604,30 @@ bcdb_middleware_attach_tx_to_block(BCDBShmXact *tx, BCBlock *block)
 }
 
 /*
- * Reclaim old non-DT block headers and transaction entries.
+ * block_cleaning
+ * --------------
+ * Reclaim old non-DT block headers and their txs, AND emit periodic
+ * throughput/abort-rate telemetry.
  *
- * This function is not a read-only status check: it can delete txs and blocks
- * once the global block window has advanced beyond CLEANING_DELAY_BLOCKS.
- * Deterministic execution uses block_cleaning_dt(), which avoids deleting txs
- * that the DT worker path already reclaimed.
+ * NOTE: This is NOT a read-only status function.  It actively deletes txs
+ * and block headers once the block window has advanced past
+ * CLEANING_DELAY_BLOCKS.  Use block_cleaning_dt() instead on the
+ * deterministic execution path -- DT workers reclaim individual tx-pool
+ * entries themselves, so deleting them again here would double-free.
+ *
+ * Two responsibilities, on independent triggers:
+ *   1. GC: when current_block_id > CLEANING_DELAY_BLOCKS, the block at
+ *      offset `current - delay` ages out.  Block id 1 (sentinel) is
+ *      explicitly skipped to preserve runtime metadata.
+ *   2. Reporting: every REPORT_INTERVAL seconds, log throughput
+ *      (committed delta / elapsed) and the running abort rate.  The
+ *      first call only seeds the timestamps -- the rate report skips
+ *      on previous_report_ts == 0 because the delta would be bogus.
+ *
+ * LOG_STATUS (compile-time): if enabled, every cleaned tx's
+ * "<hash> <status>\n" line is appended to a 10 MiB in-memory log buffer
+ * for offline analysis; overflow is FATAL to make truncation impossible
+ * to miss.
  */
 void
 block_cleaning(BCBlockID current_block_id)
@@ -1147,10 +1644,13 @@ block_cleaning(BCBlockID current_block_id)
 	printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
 #endif
 
+	/* GC: reclaim a block once it's CLEANING_DELAY_BLOCKS behind the head. */
 	if (current_block_id > CLEANING_DELAY_BLOCKS)
 	{
 		BCBlockID clean_block_id = current_block_id - CLEANING_DELAY_BLOCKS;
 
+		/* Skip the sentinel (id 1) -- it permanently holds runtime metadata
+		 * and the result ring, and must never be freed. */
 		block_to_clean = (clean_block_id == 1)
 			? NULL
 			: get_block_by_id(clean_block_id, false);
@@ -1160,7 +1660,7 @@ block_cleaning(BCBlockID current_block_id)
 			{
 #ifdef LOG_STATUS
 				block_meta->log_counter += sprintf(block_meta->log + block_meta->log_counter, "%s %d\n", block_to_clean->txs[i]->hash, block_to_clean->txs[i]->status);
-				if (block_meta->log_counter > 1024 * 1024 * 10)
+				if (block_meta->log_counter > 1024 * 1024 * 10) /* 10 MiB cap */
 					ereport(FATAL, (errmsg("[ZL] log overflow")));
 #endif
 				delete_tx(block_to_clean->txs[i]);
@@ -1169,10 +1669,12 @@ block_cleaning(BCBlockID current_block_id)
 		delete_block(block_to_clean);
 	}
 
+	/* Reporting: emit throughput/abort-rate every REPORT_INTERVAL seconds. */
 	if (cur_report_ts - block_meta->previous_report_ts > 1e6 * REPORT_INTERVAL)
 	{
 		if (block_meta->previous_report_ts != 0)
 		{
+			/* Skip the first interval where we have no baseline timestamp. */
 			ereport(LOG, (errmsg("[ZL] throughput: %.3f", (cur_num_committed - block_meta->previous_report_commit) * 1e6 / (cur_report_ts - block_meta->previous_report_ts))));
 			ereport(LOG, (errmsg("[ZL] abort rate: %.3f", abort_rate)));
 		}
@@ -1182,11 +1684,20 @@ block_cleaning(BCBlockID current_block_id)
 }
 
 /*
- * DT-safe block-header cleanup.
+ * block_cleaning_dt
+ * -----------------
+ * Deterministic-execution-safe equivalent of block_cleaning().
  *
- * The deterministic worker path writes final results to the sentinel block and
- * removes tx-pool entries itself.  This cleanup therefore deletes only aged
- * per-block headers and intentionally skips block id 1, the runtime sentinel.
+ * In the DT pipeline, workers (worker.c) write final results into the
+ * sentinel block's result ring and call delete_tx() themselves as each
+ * BCDBShmXact is finalised.  By the time a per-block header ages out,
+ * its block->txs[] entries may already point at freed tx-pool slots.
+ *
+ * Therefore this function ONLY reclaims the per-block header.  It must
+ * NOT iterate block->txs[] and must NOT touch the sentinel (block id 1).
+ *
+ * Triggering: nothing to do until current_block_id has advanced past
+ * CLEANING_DELAY_BLOCKS; the early return keeps the hot path cheap.
  */
 void
 block_cleaning_dt(BCBlockID current_block_id)
@@ -1194,16 +1705,12 @@ block_cleaning_dt(BCBlockID current_block_id)
 	BCBlock *block_to_clean;
 	BCBlockID clean_block_id;
 
+	/* Not enough history accumulated yet -- nothing to reclaim. */
 	if (current_block_id <= CLEANING_DELAY_BLOCKS)
 		return;
 
-	/*
-	 * The DT path stores committed results on the sentinel block and deletes
-	 * each BCDBShmXact in bcdb_worker_process_tx_dt().  Only reclaim the
-	 * per-block header here; block->txs[] may point at already-removed tx-pool
-	 * entries by the time the block ages out.
-	 */
 	clean_block_id = current_block_id - CLEANING_DELAY_BLOCKS;
+	/* Sentinel is permanent. */
 	if (clean_block_id == 1)
 		return;
 
@@ -1212,53 +1719,69 @@ block_cleaning_dt(BCBlockID current_block_id)
 }
 
 /*
- * Historical commit-release hook.
+ * allow_all_block_txs_to_commit
+ * -----------------------------
+ * Historical commit-release hook from the original BCDB design.
  *
- * Current BCDB workers do not wait on a per-block "commit allowed" flag, so
- * there is no meaningful state to flip here.  Leave this as an explicit no-op
- * rather than inventing a flag that no worker observes.
+ * The original protocol had a per-block "commit allowed" flag that workers
+ * polled before persisting.  Current BCDB workers do not consult any such
+ * flag -- the deterministic worker pipeline commits a tx as soon as it
+ * passes conflict_checkDT() and finishes executing.
+ *
+ * We keep the function (and its callers) as an explicit no-op to preserve
+ * the legacy SQL surface.  Adding a flag that no worker reads would be a
+ * footgun: callers might think they were gating commits when they were not.
  */
 void
 allow_all_block_txs_to_commit(BCBlock *block)
 {
 	return;
 }
-/*
-*/
 
 /*
- * Historical conflict-check hook for the old block API.
+ * bcdb_middleware_conflict_check
+ * ------------------------------
+ * Historical conflict-check hook for the old block-submit API.
  *
- * Active deterministic execution performs conflict_checkDT() inside worker.c
- * as each queued tx is processed.  This compatibility hook therefore has no
- * work to do and must not be mistaken for the active conflict checker.
+ * Active deterministic execution performs conflict_checkDT() inside
+ * worker.c as each queued tx is processed -- the conflict graph is built
+ * and walked there, not here.  This hook therefore has no work to do.
+ *
+ * Kept as an explicit no-op (rather than removed) so legacy SQL wrappers
+ * that still call it remain link-compatible.  Do NOT add real conflict
+ * logic here -- it would race the worker's own conflict_checkDT().
  */
 void
 bcdb_middleware_conflict_check(BCBlock *block)
 {
-	/* we assume no one is touching the conflict graph here */
+	/* No work: deterministic conflict resolution lives in worker.c. */
 	return;
 }
 
 
 /*
- * Compatibility wrapper for the old "allow execute/write/commit" SQL flow.
+ * bcdb_middleware_allow_txs_exec_write_set_and_commit
+ * ---------------------------------------------------
+ * Compatibility wrapper for the older "allow execute / allow write / allow
+ * commit" three-phase SQL flow.
  *
- * The only remaining callable behavior is the explicit no-op commit-release
- * hook above; active queued deterministic execution does not use this path.
+ * In current BCDB only the commit-release step remains, and it is itself
+ * a no-op (see allow_all_block_txs_to_commit above).  Active deterministic
+ * execution does not use this code path at all.
  */
 void bcdb_middleware_allow_txs_exec_write_set_and_commit(BCBlock *block) {
-
-//    bcdb_middleware_allow_execute_write_set(block);
-
 	allow_all_block_txs_to_commit(block);
 }
 
 /*
- * Look up a block id for the compatibility commit-release wrapper.
+ * bcdb_middleware_allow_txs_exec_write_set_and_commit_by_id
+ * ---------------------------------------------------------
+ * Convenience wrapper that resolves a block id to a BCBlock* before
+ * delegating to the function above.
  *
- * A missing block is a caller error and is reported with ereport(ERROR) instead
- * of relying on Assert(), which may be compiled out in production builds.
+ * Uses ereport(ERROR) rather than Assert() for the missing-block case so
+ * the diagnostic survives production builds (Asserts are compiled out
+ * unless USE_ASSERT_CHECKING is defined).
  */
 void bcdb_middleware_allow_txs_exec_write_set_and_commit_by_id(int32 id){
 	BCBlock *block;
@@ -1271,10 +1794,19 @@ void bcdb_middleware_allow_txs_exec_write_set_and_commit_by_id(int32 id){
 }
 
 /*
- * Return true only when the named legacy tx is committed.
+ * bcdb_is_tx_commited
+ * -------------------
+ * Legacy "is this hash-addressed tx committed?" SQL helper.
  *
- * Invalid hashes are errors.  Returning false for "not found" would make a
- * missing transaction indistinguishable from a real aborted/uncommitted tx.
+ * Returns true iff status == TX_COMMITED.  Any other status (including
+ * TX_ABORTED) returns false.
+ *
+ * Important: we ereport(ERROR) on an unknown hash rather than returning
+ * false.  Conflating "never submitted" with "submitted and aborted" would
+ * silently mask client/runner bugs that submit txs to the wrong replica.
+ *
+ * (Note: function name retains the original misspelling "commited"
+ *  for ABI/SQL-binding compatibility.)
  */
 bool bcdb_is_tx_commited(char * tx_hash){
 	BCDBShmXact* target_tx = get_tx_by_hash(tx_hash);
@@ -1283,21 +1815,34 @@ bool bcdb_is_tx_commited(char * tx_hash){
 		ereport(ERROR,
 				(errmsg("BCDB transaction not found: %s", tx_hash)));
 
-	if(target_tx->status == TX_COMMITED){
-		return true;
-	}else{
-		return false;
-	}
+	return (target_tx->status == TX_COMMITED);
 }
 
 /*
- * Reset in-memory BCDB metadata for restore/benchmark setup.
+ * bcdb_clear_block_txs_store
+ * --------------------------
+ * Reset in-memory BCDB metadata to a fresh state.  Used by the restore /
+ * benchmark setup phase between independent runs.
  *
- * This clears block and tx shared-memory pools, resets counters and the
- * sentinel result ring, and closes idle worker controllers.  It does not reset
- * SQL tables, Merkle indexes, Kafka/Raft state, or already-active workers; the
- * distributed runners call it only as part of controlled restore phases after
- * stopping/restarting PostgreSQL backends.
+ * What this clears:
+ *   - shared-memory block pool (block_pool[]) and its bookkeeping;
+ *   - shared-memory tx pool (clear_tx_pool());
+ *   - counters: tx_num, num_committed, num_aborted, reporting checkpoints;
+ *   - block window bounds: global_bmin = 1, global_bmax = 0;
+ *   - debug_seq (incremented so post-reset events can be correlated);
+ *   - the idle-worker list, finishing each WorkerController in turn so
+ *     the worker processes shut down cleanly.
+ *
+ * What this does NOT clear:
+ *   - SQL table data, indexes, Merkle state on disk;
+ *   - distributed coordination state (Kafka offsets, Raft logs);
+ *   - already-running worker processes that aren't on the idle list
+ *     (they must be stopped externally first).
+ *
+ * Callers (the distributed runners and restore scripts) invoke this only
+ * during controlled restart phases AFTER stopping any active workload, so
+ * concurrent submission isn't a concern.  Calling this while another
+ * backend is mid-submit will produce undefined behaviour.
  */
 void
 bcdb_clear_block_txs_store()
@@ -1306,13 +1851,18 @@ bcdb_clear_block_txs_store()
 	printf("\nariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 	printf("ariaMyDbg %s : %s: %d \n\n", __FILE__, __FUNCTION__, __LINE__ );
 #endif
+	/* Wipe the block pool hash table and reset its internal allocation state. */
 	shm_hash_clear(block_pool, MAX_NUM_BLOCKS);
 	bcdb_reset_block_pool_state();
+
+	/* Wipe the tx pool. */
 	clear_tx_pool();
+
+	/* Reset counters. */
 	tx_num = 0;
 	block_meta->global_bmin = 1;
 	block_meta->global_bmax = 0;
-	block_meta->debug_seq += 1;
+	block_meta->debug_seq += 1; /* bumped so post-reset logs are distinguishable */
 	block_meta->num_committed = 0;
 	block_meta->num_aborted = 0;
 	block_meta->previous_report_commit = 0;
@@ -1320,6 +1870,10 @@ bcdb_clear_block_txs_store()
 	start_time = bcdb_get_time();
 	set_num_tx_sub(0);
 	set_num_txqd(0);
+
+	/* Tear down idle workers: stop each controller process, remove from
+	 * the list, and free its host-side struct.  Active workers (still
+	 * processing txs) are not on this list, by definition. */
 	while(!LIST_EMPTY(&idle_workers.list))
 	{
 		WorkerController *worker = LIST_FIRST(&idle_workers.list);
@@ -1330,6 +1884,19 @@ bcdb_clear_block_txs_store()
 	idle_workers.num = 0;
 }
 
+/*
+ * append_hex_encoded
+ * ------------------
+ * Lowercase hex-encode `input` and append it to `out`.
+ *
+ * Used by bcdb_middleware_submit_block_results() when
+ * BCDB_BLOCK_RETURN_ACTUAL_RESULTS=1 to emit raw row payloads safely on
+ * the same line as the tx hash -- arbitrary bytes (including \n and \t)
+ * in a SQL row would otherwise break the newline/tab-delimited frontend
+ * parser.  Hex encoding is uniform and trivially reversible.
+ *
+ * NULL inputs are a no-op (defensive against missing slot data).
+ */
 static void
 append_hex_encoded(StringInfo out, const char *input)
 {
@@ -1341,6 +1908,7 @@ append_hex_encoded(StringInfo out, const char *input)
 
 	while (*p)
 	{
+		/* Two hex nibbles per input byte. */
 		appendStringInfoChar(out, kHex[(*p >> 4) & 0x0F]);
 		appendStringInfoChar(out, kHex[*p & 0x0F]);
 		++p;
@@ -1348,21 +1916,29 @@ append_hex_encoded(StringInfo out, const char *input)
 }
 
 /*
-void bcdb_middleware_new_block_handler(BCBlock* block){
-*/
-
-/*
-// assume dummy file contains jsons per line
-Transaction* parsing_dummy_block_file(const char* file_path){
-*/
-
-/*
-//dummy function called by frontend
-void bcdb_middleware_dummy_block(const char* file_path, uint32 block_id){
-*/
-
-/*
-void bcdb_middleware_dummy_submit_tx(const char* file_path){
-*/
-
-//Return false if 1)no tx with that hash or 2) tx is not finish execution
+ * ----------------------------------------------------------------------
+ *  Vestigial declarations preserved for historical reference.
+ *
+ *  These four prototypes belonged to an earlier file-based "dummy block"
+ *  workflow that read transactions from a JSON-per-line file and submitted
+ *  them in batch.  The active SQL/JSON path replaced them long ago; the
+ *  signatures are kept here only as breadcrumbs for anyone digging through
+ *  git blame.  Do not re-enable without rewriting against the current
+ *  parse_block_with_txs / submit_block_results contract.
+ * ----------------------------------------------------------------------
+ *
+ *   void bcdb_middleware_new_block_handler(BCBlock* block);
+ *
+ *   // assume dummy file contains jsons per line
+ *   Transaction* parsing_dummy_block_file(const char* file_path);
+ *
+ *   // dummy function called by frontend
+ *   void bcdb_middleware_dummy_block(const char* file_path, uint32 block_id);
+ *
+ *   void bcdb_middleware_dummy_submit_tx(const char* file_path);
+ *
+ *   // Returned false if 1) no tx with that hash, or 2) tx had not finished
+ *   // execution.  Replaced by bcdb_is_tx_commited() above, which now
+ *   // ereport(ERROR)s on the missing-hash case to avoid masking client bugs.
+ * ----------------------------------------------------------------------
+ */
