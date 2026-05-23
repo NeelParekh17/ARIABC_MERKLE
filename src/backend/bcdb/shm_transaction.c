@@ -22,10 +22,12 @@
 #include <stddef.h>
 #include <access/genam.h>
 #include "access/xact.h"
+#include "access/subtrans.h"
 #include "access/heapam.h"
 #include "access/merkle.h"
 #include "catalog/pg_am_d.h"
 #include "storage/bufmgr.h"
+#include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "utils/hashutils.h"
 #include "access/itup.h"
@@ -177,6 +179,20 @@ bcdb_flow_debug_enabled(void)
         cached = (v && *v && *v != '0' && *v != 'n' && *v != 'N' && *v != 'f' && *v != 'F') ? 1 : 0;
     }
     return cached == 1;
+}
+
+static BCTxID bcdb_last_conflict_txid = -1;
+
+void
+bcdb_reset_last_conflict_txid(void)
+{
+    bcdb_last_conflict_txid = -1;
+}
+
+BCTxID
+bcdb_get_last_conflict_txid(void)
+{
+    return bcdb_last_conflict_txid;
 }
 
 #define BCDB_FLOW_LOG(...) \
@@ -771,6 +787,65 @@ bcdb_xid_preceded_snapshot(BCTxID cand_id)
     return TransactionIdPrecedes(cxid, activeTx->snap_xmin);
 }
 
+static void
+bcdb_log_dt_conflict_detail(const char *source,
+                            PREDICATELOCKTARGETTAG *tag,
+                            uint32 tuple_hash,
+                            BCTxID cand_id)
+{
+    BCBlock       *blk;
+    int            slots = 0;
+    int            slot = -1;
+    BCTxID         published = -1;
+    TransactionId  cxid = InvalidTransactionId;
+    bool           committed_before_snapshot = false;
+
+    bcdb_last_conflict_txid = cand_id;
+
+    if (!bcdb_flow_debug_enabled())
+        return;
+
+    blk = bcdb_get_block1();
+    if (blk != NULL)
+    {
+        slots = bcdb_get_runtime_result_ring_slots();
+        if (slots < 1)
+            slots = 1;
+
+        slot = (int) (cand_id % (BCTxID) slots);
+        if (slot < 0)
+            slot += slots;
+
+        published = __atomic_load_n(&blk->result_committed_txid[slot],
+                                    __ATOMIC_ACQUIRE);
+        cxid = __atomic_load_n(&blk->result_commit_xid[slot],
+                               __ATOMIC_ACQUIRE);
+        if (published == cand_id &&
+            TransactionIdIsValid(cxid) &&
+            TransactionIdIsValid(activeTx->snap_xmin))
+            committed_before_snapshot =
+                TransactionIdPrecedes(cxid, activeTx->snap_xmin);
+    }
+
+    BCDB_FLOW_LOG("[BCDB_FLOW] dt_conflict map=%s pid=%d txid=%d cand_txid=%d baseline=%d snap_xmin=%u cand_slot=%d cand_published=%d cand_cxid=%u cand_before_snapshot=%d hash=%u tag_type=%d db=%u rel=%u page=%u off=%u",
+                  source,
+                  (int) getpid(),
+                  activeTx ? (int) activeTx->tx_id : -1,
+                  (int) cand_id,
+                  activeTx ? (int) activeTx->tx_id_committed : -1,
+                  (unsigned int) (activeTx ? activeTx->snap_xmin : InvalidTransactionId),
+                  slot,
+                  (int) published,
+                  (unsigned int) cxid,
+                  committed_before_snapshot ? 1 : 0,
+                  tuple_hash,
+                  (int) GET_PREDICATELOCKTARGETTAG_TYPE(*tag),
+                  (unsigned int) GET_PREDICATELOCKTARGETTAG_DB(*tag),
+                  (unsigned int) GET_PREDICATELOCKTARGETTAG_RELATION(*tag),
+                  (unsigned int) GET_PREDICATELOCKTARGETTAG_PAGE(*tag),
+                  (unsigned int) GET_PREDICATELOCKTARGETTAG_OFFSET(*tag));
+}
+
 /*
  * table_checkDT
  *
@@ -816,13 +891,17 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         if (found && (entry->tx_id < activeTx->tx_id) &&
                     (entry->tx_id > activeTx->tx_id_committed))
         {
+            bool cand_before_snapshot;
+
             cand_id = entry->tx_id;
             SpinLockRelease(partition_lock);
             /* T3-v2: skip if candidate committed before our snapshot xmin.
              * bcdb_xid_preceded_snapshot() is conservative: returns false if
              * snap_xmin is unset, slot is recycled, or xid is invalid. */
-            if (bcdb_xid_preceded_snapshot(cand_id))
+            cand_before_snapshot = bcdb_xid_preceded_snapshot(cand_id);
+            if (cand_before_snapshot)
                 goto check_done;
+            bcdb_log_dt_conflict_detail("map", tag, tuple_hash, cand_id);
 #if SAFEDBG
             ereport(DEBUG3,
                     (errmsg("safeDB tx %d hash %s check write %u failed, winner: %d",
@@ -852,11 +931,15 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         if (found && (entry->tx_id < activeTx->tx_id) &&
                     (entry->tx_id > activeTx->tx_id_committed))
         {
+            bool cand_before_snapshot;
+
             cand_id = entry->tx_id;
             SpinLockRelease(partition_lock);
             /* T3-v2: same snapshot-based skip for mapB candidates. */
-            if (bcdb_xid_preceded_snapshot(cand_id))
+            cand_before_snapshot = bcdb_xid_preceded_snapshot(cand_id);
+            if (cand_before_snapshot)
                 goto check_done;
+            bcdb_log_dt_conflict_detail("mapB", tag, tuple_hash, cand_id);
 #if SAFEDBG
             ereport(DEBUG3,
                     (errmsg("safeDB tx %d hash %s check write %u failed, winner: %d",
@@ -1310,6 +1393,46 @@ remove_tx_xid_map(TransactionId xid)
                         (int) getpid(), (unsigned int) xid);
         ereport(FATAL, (errmsg("[ZL] xid map %d is already deleted!", (int)xid)));
     }
+}
+
+/*
+ * Return true when xid belongs to an in-flight BCDB transaction that is
+ * ordered before activeTx.  Dirty tuple snapshots can surface both directions:
+ * a predecessor we must wait for and a successor this transaction must ignore.
+ */
+static bool
+bcdb_dirty_xid_is_ordered_predecessor(TransactionId xid)
+{
+    XidMapEntry *entry;
+    TransactionId topxid;
+    BCTxID mapped_txid = -1;
+
+    if (!TransactionIdIsValid(xid) || activeTx == NULL)
+        return false;
+
+    SpinLockAcquire(xid_map_lock);
+    /*
+     * SnapshotDirty can report the subtransaction XID that inserted the heap
+     * tuple. apply_optim_insert() uses an internal subtransaction, and
+     * GetCurrentTransactionId() records exactly that observed XID in xid_map.
+     * Try it before falling back to the top transaction ID.
+     */
+    entry = hash_search(xid_map, &xid, HASH_FIND, NULL);
+    if (entry != NULL && entry->tx != NULL)
+        mapped_txid = entry->tx->tx_id;
+    else
+    {
+        topxid = SubTransGetTopmostTransaction(xid);
+        if (topxid != xid)
+        {
+            entry = hash_search(xid_map, &topxid, HASH_FIND, NULL);
+            if (entry != NULL && entry->tx != NULL)
+                mapped_txid = entry->tx->tx_id;
+        }
+    }
+    SpinLockRelease(xid_map_lock);
+
+    return mapped_txid >= 0 && mapped_txid < activeTx->tx_id;
 }
 
 void
@@ -1948,8 +2071,9 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
  *
  * Called when a DELETE found 0 rows during the optimistic phase because the
  * target row was inserted by a concurrent transaction that had not yet
- * committed.  By the time this function runs (serial phase), all prior
- * transactions have committed, so the row is reachable via btree lookup.
+ * committed.  Lever-D can let the serial apply gate run before the matching
+ * earlier INSERT finishes its PostgreSQL commit, so lookup must wait on dirty
+ * predecessor rows before it decides that the DELETE is genuinely a no-op.
  *
  * This duplicates the core logic of apply_optim_delete but starts from a
  * primary-key value instead of a stored TupleTableSlot.
@@ -1981,47 +2105,138 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
 
     bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_DELETE_COUNT, 1);
     oldSlot = table_slot_create(relation, NULL);
+    BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_lookup_enter pid=%d txid=%d xid=%u rel=%u key=%d",
+                  getpid(),
+                  activeTx ? (int) activeTx->tx_id : -1,
+                  (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
+                  (unsigned int) relOid,
+                  keyval);
 
-    /* Btree lookup by primary key using SnapshotSelf */
+    /*
+     * Btree lookup by primary key.
+     *
+     * A SnapshotSelf lookup alone can miss an earlier deterministic INSERT
+     * that has published its BCDB slot but is still finishing its PostgreSQL
+     * transaction.  SnapshotDirty lets us find that tuple by the unique index,
+     * wait for the in-flight creator/deleter, and then retry with a stable row
+     * image before hashing and deleting it.
+     */
     {
         List *btreeIndexList = RelationGetIndexList(relation);
-        ListCell *blc;
+        bool retry_lookup;
 
-        foreach(blc, btreeIndexList)
+        do
         {
-            Oid btreeOid = lfirst_oid(blc);
-            Relation btreeRel = index_open(btreeOid, AccessShareLock);
+            ListCell *blc;
+            TransactionId wait_xid = InvalidTransactionId;
 
-            if (btreeRel->rd_rel->relam != MERKLE_AM_OID &&
-                btreeRel->rd_index->indisunique &&
-                btreeRel->rd_index->indnkeyatts >= 1)
+            found = false;
+            retry_lookup = false;
+            ExecClearTuple(oldSlot);
+
+            foreach(blc, btreeIndexList)
             {
-                IndexScanDesc iscan;
-                ScanKeyData skey[1];
+                Oid btreeOid = lfirst_oid(blc);
+                Relation btreeRel = index_open(btreeOid, AccessShareLock);
 
-                ScanKeyInit(&skey[0],
-                            1,
-                            BTEqualStrategyNumber,
-                            F_INT4EQ,
-                            Int32GetDatum(keyval));
-
-                iscan = index_beginscan(relation, btreeRel,
-                                        SnapshotSelf, 1, 0);
-                index_rescan(iscan, skey, 1, NULL, 0);
-
-                if (index_getnext_slot(iscan, ForwardScanDirection, oldSlot))
+                if (btreeRel->rd_rel->relam != MERKLE_AM_OID &&
+                    btreeRel->rd_index->indisunique &&
+                    btreeRel->rd_index->indnkeyatts >= 1)
                 {
-                    ItemPointerCopy(&oldSlot->tts_tid, &currentTid);
-                    found = true;
+                    IndexScanDesc iscan;
+                    ScanKeyData skey[1];
+                    SnapshotData dirty_snapshot;
+
+                    ScanKeyInit(&skey[0],
+                                1,
+                                BTEqualStrategyNumber,
+                                F_INT4EQ,
+                                Int32GetDatum(keyval));
+
+                    InitDirtySnapshot(dirty_snapshot);
+                    iscan = index_beginscan(relation, btreeRel,
+                                            &dirty_snapshot, 1, 0);
+                    index_rescan(iscan, skey, 1, NULL, 0);
+
+                    while (index_getnext_slot(iscan, ForwardScanDirection, oldSlot))
+                    {
+                        TransactionId candidate_wait_xid = InvalidTransactionId;
+                        bool candidate_is_predecessor = false;
+
+                        ItemPointerCopy(&oldSlot->tts_tid, &currentTid);
+
+                        if (TransactionIdIsValid(dirty_snapshot.xmin))
+                            candidate_wait_xid = dirty_snapshot.xmin;
+                        else if (TransactionIdIsValid(dirty_snapshot.xmax))
+                            candidate_wait_xid = dirty_snapshot.xmax;
+
+                        if (TransactionIdIsValid(candidate_wait_xid))
+                        {
+                            candidate_is_predecessor =
+                                bcdb_dirty_xid_is_ordered_predecessor(candidate_wait_xid);
+                            BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_dirty_candidate pid=%d txid=%d rel=%u key=%d tid_block=%u tid_off=%u xmin=%u xmax=%u wait_xid=%u predecessor=%d",
+                                          getpid(),
+                                          activeTx ? (int) activeTx->tx_id : -1,
+                                          (unsigned int) relOid,
+                                          keyval,
+                                          ItemPointerGetBlockNumberNoCheck(&currentTid),
+                                          ItemPointerGetOffsetNumberNoCheck(&currentTid),
+                                          (unsigned int) dirty_snapshot.xmin,
+                                          (unsigned int) dirty_snapshot.xmax,
+                                          (unsigned int) candidate_wait_xid,
+                                          candidate_is_predecessor ? 1 : 0);
+                            if (candidate_is_predecessor)
+                            {
+                                wait_xid = candidate_wait_xid;
+                                found = true;
+                                break;
+                            }
+
+                            /*
+                             * A later deterministic INSERT can sort before
+                             * the row this DELETE needs in the dirty btree
+                             * scan. Skip it and keep looking for an older
+                             * committed/predecessor row before preserving
+                             * the original DELETE-0 result.
+                             */
+                            ExecClearTuple(oldSlot);
+                            continue;
+                        }
+
+                        BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_stable_candidate pid=%d txid=%d rel=%u key=%d tid_block=%u tid_off=%u",
+                                      getpid(),
+                                      activeTx ? (int) activeTx->tx_id : -1,
+                                      (unsigned int) relOid,
+                                      keyval,
+                                      ItemPointerGetBlockNumberNoCheck(&currentTid),
+                                      ItemPointerGetOffsetNumberNoCheck(&currentTid));
+                        found = true;
+                        break;
+                    }
+
+                    index_endscan(iscan);
                 }
 
-                index_endscan(iscan);
+                index_close(btreeRel, AccessShareLock);
+                if (found)
+                    break;
             }
 
-            index_close(btreeRel, AccessShareLock);
-            if (found)
-                break;
-        }
+            if (TransactionIdIsValid(wait_xid) &&
+                bcdb_dirty_xid_is_ordered_predecessor(wait_xid))
+            {
+                BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_wait_predecessor pid=%d txid=%d rel=%u key=%d wait_xid=%u tid_block=%u tid_off=%u",
+                              getpid(),
+                              activeTx ? (int) activeTx->tx_id : -1,
+                              (unsigned int) relOid,
+                              keyval,
+                              (unsigned int) wait_xid,
+                              ItemPointerGetBlockNumberNoCheck(&currentTid),
+                              ItemPointerGetOffsetNumberNoCheck(&currentTid));
+                XactLockTableWait(wait_xid, relation, &currentTid, XLTW_Delete);
+                retry_lookup = true;
+            }
+        } while (retry_lookup);
 
         list_free(btreeIndexList);
     }
@@ -2030,6 +2245,12 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
 
     if (!found)
     {
+        BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_lookup_miss pid=%d txid=%d xid=%u rel=%u key=%d",
+                      getpid(),
+                      activeTx ? (int) activeTx->tx_id : -1,
+                      (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
+                      (unsigned int) relOid,
+                      keyval);
         /*
          * Row genuinely doesn't exist (e.g., first DELETE of this key
          * that already committed and the INSERT hasn't come yet).
@@ -2095,6 +2316,15 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
                                            &tmfd,
                                            false,
                                            NULL);
+    BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_heap_result pid=%d txid=%d xid=%u rel=%u key=%d tid_block=%u tid_off=%u result=%d",
+                  getpid(),
+                  activeTx ? (int) activeTx->tx_id : -1,
+                  (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
+                  (unsigned int) relOid,
+                  keyval,
+                  ItemPointerGetBlockNumberNoCheck(&currentTid),
+                  ItemPointerGetOffsetNumberNoCheck(&currentTid),
+                  (int) result);
 
     /* Apply Merkle XOR-outs after successful heap delete */
     if (result == TM_Ok && hasOldHash)
@@ -2216,6 +2446,8 @@ conflict_checkDT()
     if (!bcdb_dt_conflict_tracking)
         return 0;
 
+    bcdb_reset_last_conflict_txid();
+
 #if SAFEDBG2
     const int ccMax = 1;
     static int ccCount = 0;
@@ -2233,6 +2465,10 @@ conflict_checkDT()
         bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_WS_CONFLICT_CHECKS, 1);
         // ws_table_check
         if (ws_table_checkDT( &record->tag)) {
+            BCDB_FLOW_LOG("[BCDB_FLOW] conflict_check_ws_hit pid=%d txid=%d cand_txid=%d",
+                          (int) getpid(),
+                          activeTx ? (int) activeTx->tx_id : -1,
+                          (int) bcdb_get_last_conflict_txid());
             bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_CONFLICT_WS_US,
                                    ws_check_start);
 	    // printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
@@ -2253,6 +2489,10 @@ conflict_checkDT()
         //ws_table_check
         if (ws_table_checkDT( &record->tag))
         {
+            BCDB_FLOW_LOG("[BCDB_FLOW] conflict_check_rs_hit pid=%d txid=%d cand_txid=%d",
+                          (int) getpid(),
+                          activeTx ? (int) activeTx->tx_id : -1,
+                          (int) bcdb_get_last_conflict_txid());
             bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_CONFLICT_RS_US,
                                    rs_check_start);
 		    return 1;

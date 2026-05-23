@@ -9,7 +9,6 @@ import re
 import sys
 import time
 import threading
-import traceback
 from concurrent.futures import (
     ThreadPoolExecutor, ProcessPoolExecutor,
     as_completed, TimeoutError as FuturesTimeoutError,
@@ -789,7 +788,6 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
     tx_retry_total = 0
     tx_serialization_retries = 0
     tx_reconnects = 0
-
     if line != message_dict[qCount]:
         print(" qCount = " + str(qCount) + ' ' + message_dict[qCount] + ' whereas line= ' + line)
     if (qCount % LOG_SKIP) < NUM:
@@ -807,7 +805,6 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                     conn._bcdb_merkle_roots = None
 
                 exec_line = _prepare_statement_for_mode(_rewrite_stmt_for_execute(conn, cur, line))
-
                 # Execute the actual query
                 if DB_TYPE == 1:
                     det_cmd = _build_det_command(mHash, exec_line)
@@ -822,7 +819,9 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                 result_message = _get_raw_statusmessage(cur)
                 result_data = None
 
-                # Fetch results for SELECT queries
+                # Fetch one row for SELECTs. In DET completion-only mode the
+                # backend returns a tiny placeholder row so libpq clients stay
+                # protocol-consistent without materializing the real payload.
                 if line.strip().upper().startswith('SELECT'):
                     try:
                         row = cur.fetchone()

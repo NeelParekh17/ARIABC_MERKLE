@@ -485,6 +485,81 @@ fi
 echo
 
 # ============================================================
+# PHASE 1.5: VERIFY/REBUILD CUSTOM INSTALL BEFORE LAUNCH
+# ============================================================
+lmsg "=== Phase 1.5: Verifying custom install on all nodes ==="
+
+declare -A INSTALL_STATUS=()
+declare -A INSTALL_LOGS=()
+
+for entry in "${ALL_NODES[@]}"; do
+  IFS='|' read -r node repo inst type <<< "$entry"
+  ilog="$LOG_DIR/install_$(safe_label "$node").log"
+  INSTALL_LOGS["$node"]="$ilog"
+  INSTALL_STATUS["$node"]="running"
+
+  if [[ "${SYNC_STATUS[$node]:-FAIL}" != "OK" ]]; then
+    INSTALL_STATUS["$node"]="SKIP"
+    lmsg "  [SKIP] $node – sync failed"
+    continue
+  fi
+
+  if ssh_run "$node" "
+    set -euo pipefail
+    mkdir -p '$repo/.bench_tmp'
+    chmod +x '$repo/scripts/distributed/ensure_custom_install_from_repo.sh'
+    if [[ '$SKIP_SYNC' == '0' ]]; then
+      echo '[INFO] source/install were just synced; trusting synced install if it verifies'
+      if bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
+        --trust-install; then
+        exit 0
+      fi
+      echo '[INFO] synced install did not verify on this host; attempting local rebuild'
+      if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
+        echo 'ERROR: synced install did not verify and make/gcc are unavailable for rebuild' >&2
+        exit 1
+      fi
+      bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+    elif ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
+      echo '[INFO] make/gcc missing; trusting existing install if it verifies'
+      bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
+        --trust-install
+    else
+      bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+    fi
+  " >"$ilog" 2>&1; then
+    INSTALL_STATUS["$node"]="OK"
+    if grep -q '^TRUST_INSTALL=1' "$ilog"; then
+      lmsg "  [OK] $node – synced install verified"
+    else
+      lmsg "  [OK] $node – custom install ready"
+    fi
+  else
+    INSTALL_STATUS["$node"]="FAIL"
+    lmsg "  [FAIL] $node – custom install not ready; see $ilog"
+  fi
+done
+
+declare -a _install_failed=()
+for node in "${!INSTALL_STATUS[@]}"; do
+  [[ "${INSTALL_STATUS[$node]}" != "OK" ]] && _install_failed+=("$node") || true
+done
+if [[ "${#_install_failed[@]}" -gt 0 ]]; then
+  lmsg "Install logs for failed nodes:"
+  for node in "${_install_failed[@]}"; do
+    lmsg "  -- $node: ${INSTALL_LOGS[$node]:-<no log>} --"
+    tail -12 "${INSTALL_LOGS[$node]:-/dev/null}" 2>/dev/null | while IFS= read -r l; do lmsg "     $l"; done
+  done
+  _abort_run "Custom install verification failed on ${#_install_failed[@]} node(s)" "${_install_failed[@]}"
+fi
+lmsg "Phase 1.5 complete: custom install ready on all nodes."
+echo
+
+# ============================================================
 # PHASE 2: PARALLEL BENCHMARK LAUNCH
 # ============================================================
 lmsg "=== Phase 2: Launching benchmarks on all nodes in parallel ==="
@@ -552,8 +627,27 @@ for entry in "${ALL_NODES[@]}"; do
     remote_cmd="set -euo pipefail
 mkdir -p '$remote_out' '$repo/.bench_tmp'
 cd '$repo/scripts'
-bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
-  --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+ensure_install_args=()
+if [[ '$SKIP_SYNC' == '0' ]]; then
+  if ! bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+    --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
+    --trust-install; then
+    if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
+      echo 'ERROR: synced install did not verify and make/gcc are unavailable for rebuild' >&2
+      exit 1
+    fi
+    bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+      --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+  fi
+elif ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
+  ensure_install_args+=(--trust-install)
+  bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+    --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
+    \"\${ensure_install_args[@]}\"
+else
+  bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
+    --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+fi
 export ARIABC_REQUIRE_CUSTOM_PG=1
 export ARIABC_PSQL='$inst/bin/psql'
 export ARIABC_INSTALL_DIR='$inst'

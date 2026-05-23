@@ -253,6 +253,8 @@ extern void rs_table_reserveDT( const PREDICATELOCKTARGETTAG *tag);
 extern void ws_table_reserveDT( PREDICATELOCKTARGETTAG *tag);
 extern bool ws_table_checkDT(PREDICATELOCKTARGETTAG *tag);
 extern int conflict_checkDT(void);
+extern void bcdb_reset_last_conflict_txid(void);
+extern BCTxID bcdb_get_last_conflict_txid(void);
 extern void publish_ws_tableDT(int id);
 
 /* Merkle change set functions */

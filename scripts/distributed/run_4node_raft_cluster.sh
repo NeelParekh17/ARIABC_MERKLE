@@ -27,7 +27,9 @@
 #   3. Postgres — verify BCDB postgres on :5438 on all 4 nodes
 #   4. Servers  — start ariabc_pg_server on each node (background nohup)
 #   5. Wait    — poll until Raft leader is elected (all 4 nodes respond)
-#   6. Test    — run test workload through gateway (det mode, direct or kafka_majority)
+#   6. Test    — run test workload through gateway (det mode, direct or kafka_majority;
+#                --ordering-mode kafka-only bypasses Raft and broadcasts ordered
+#                requests to all replicas while still using Kafka majority)
 #   7. Results — print TPS, check for divergence, collect logs
 #   8. Verify  — submit a barrier marker and compare Merkle roots/counts across nodes
 
@@ -99,6 +101,7 @@ SKIP_RESTORE="${SKIP_RESTORE:-0}"
 SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
+ORDERING_MODE="${ORDERING_MODE:-${CLUSTER_ORDERING_MODE:-raft-kafka}}" # raft-kafka|kafka-only
 TEST_QUERIES="${TEST_QUERIES:-50}"  # number of test transactions
 WORKLOAD_FILE="${WORKLOAD_FILE:-$REPO_ROOT/scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt}"
 RESTORE_SQL="${RESTORE_SQL:-$REPO_ROOT/scripts/restore_usertable_small.sql}"
@@ -122,7 +125,8 @@ BCDB_BLOCK_WAIT_WATERMARK="${BCDB_BLOCK_WAIT_WATERMARK:-0}"  # 1=wait on block c
 BCDB_PHASE_TRACE_ON="${BCDB_PHASE_TRACE_ON:-0}"  # postgres-side per-worker CSV phase traces
 BCDB_POLL_MAX_US="${BCDB_POLL_MAX_US:-8}"      # last known good 4-node run used 8us
 BCDB_SERIAL_GATE_MODE="${BCDB_SERIAL_GATE_MODE:-0}"  # 0=poll, 1=condvar published-max wakeups
-BCDB_DT_PARSE_BARRIER="${BCDB_DT_PARSE_BARRIER:-0}"  # 1 enables pre-gate parse barrier when block_txs <= workers
+BCDB_SERIAL_GATE_SOURCE="${BCDB_SERIAL_GATE_SOURCE:-0}"  # 0=published-max handoff, 1=last-committed predecessor
+BCDB_DT_PARSE_BARRIER="${BCDB_DT_PARSE_BARRIER:-1}"  # 1 enables pre-gate parse barrier when block_txs <= workers
 BCDB_BLOCK_ENQUEUE_YIELD_EVERY="${BCDB_BLOCK_ENQUEUE_YIELD_EVERY:-0}"  # 0=off; tiny yield every N block enqueues
 BCDB_DECOUPLE_WORKERS="${BCDB_DECOUPLE_WORKERS:-0}"  # 1=use bcdb_worker_count queues independent of bcdb_init block size
 BCDB_DT_CONFLICT_TRACKING="${BCDB_DT_CONFLICT_TRACKING:-1}"  # 0 disables DT rs/ws conflict table checks for benchmark A/B
@@ -130,6 +134,7 @@ BCDB_DT_LIGHT_SNAPSHOT="${BCDB_DT_LIGHT_SNAPSHOT:-0}"  # 1=READ COMMITTED/no SSI
 BCDB_DT_SKIP_READONLY_GATE="${BCDB_DT_SKIP_READONLY_GATE:-0}"  # 1=skip no-write txs in the DT publish gate
 BCDB_DT_COMPLETION_ONLY_SKIP_READS="${BCDB_DT_COMPLETION_ONLY_SKIP_READS:-0}"  # 1=completion-only block mode bypasses SELECT executor work
 BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${BCDB_DT_HASHTAB_SWITCH_THRESHOLD:-1500}"  # DT write-set shard rotation threshold
+BCDB_FLOW_DEBUG="${BCDB_FLOW_DEBUG:-0}"      # 1=emit targeted worker/apply flow logs on cluster replicas
 ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-0}"  # 0=all replicas include full SQL results in Kafka
 ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-0}"  # 0=Raft default election priority
 RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-2048}"
@@ -153,6 +158,11 @@ Options:
   --skip-pg-restart
                   Do not restart PostgreSQL before restore (default restarts)
   --no-kafka       Use direct completion (no Kafka majority wait)
+  --ordering-mode M
+                  Cluster ordering mode:
+                    raft-kafka  = normal Raft ordering + Kafka-majority completion
+                    kafka-only  = bypass Raft; gateway broadcasts preordered requests
+                                  to all replicas and still waits for Kafka majority
   --test-queries N Number of statements in the synthetic fallback workload (only used if --workload FILE is missing; default 50)
   --workload FILE  Workload SQL file (default: scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
   --restore-sql FILE
@@ -193,8 +203,10 @@ Options:
                   Max poll sleep for BCDB ordered waits, 1..64 usec (default: 8)
   --bcdb-serial-gate-mode N
                   Ordered DT gate wait mode: 0=poll, 1=condvar wake (default: 0)
+  --bcdb-serial-gate-source N
+                  Ordered DT gate source: 0=published-max, 1=last-committed (default: 0)
   --bcdb-dt-parse-barrier N
-                  Enable pre-gate deterministic block parse barrier when safe: 0|1 (default: 0)
+                  Enable pre-gate deterministic block parse barrier when safe: 0|1 (default: 1)
   --bcdb-block-enqueue-yield-every N
                   Tiny pg_usleep(1) after every N queued block txs, 0 disables (default: 0)
   --bcdb-worker-count N
@@ -234,6 +246,7 @@ while [[ $# -gt 0 ]]; do
     --skip-post-verify) SKIP_POST_VERIFY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
+    --ordering-mode) ORDERING_MODE="${2:-raft-kafka}"; shift 2 ;;
     --test-queries) TEST_QUERIES="${2:-50}"; shift 2 ;;
     --workload)     WORKLOAD_FILE="${2:-}"; shift 2 ;;
     --restore-sql)  RESTORE_SQL="${2:-}"; shift 2 ;;
@@ -255,6 +268,7 @@ while [[ $# -gt 0 ]]; do
     --bcdb-phase-trace) BCDB_PHASE_TRACE_ON="${2:-0}"; shift 2 ;;
     --bcdb-poll-max-us) BCDB_POLL_MAX_US="${2:-8}"; shift 2 ;;
     --bcdb-serial-gate-mode) BCDB_SERIAL_GATE_MODE="${2:-0}"; shift 2 ;;
+    --bcdb-serial-gate-source) BCDB_SERIAL_GATE_SOURCE="${2:-0}"; shift 2 ;;
     --bcdb-dt-parse-barrier) BCDB_DT_PARSE_BARRIER="${2:-0}"; shift 2 ;;
     --bcdb-block-enqueue-yield-every) BCDB_BLOCK_ENQUEUE_YIELD_EVERY="${2:-0}"; shift 2 ;;
     --bcdb-worker-count) BCDB_WORKER_COUNT="${2:-}"; shift 2 ;;
@@ -276,6 +290,32 @@ done
 if [[ "$DET_START_SEQ" -lt 1 || "$REQ_ID_OFFSET" -lt 1 ]]; then
   echo "ERROR: --det-start-seq and --req-id-offset must be >= 1 for deterministic cluster runs" >&2
   exit 2
+fi
+case "$ORDERING_MODE" in
+  raft|raft-kafka|raft_kafka)
+    ORDERING_MODE="raft-kafka"
+    ;;
+  kafka|kafka-only|kafka_only|preordered-direct-broadcast|preordered_direct_broadcast)
+    ORDERING_MODE="kafka-only"
+    ;;
+  *)
+    echo "ERROR: --ordering-mode must be raft-kafka or kafka-only (got $ORDERING_MODE)" >&2
+    exit 2
+    ;;
+esac
+if [[ "$NO_KAFKA" -eq 1 && "$ORDERING_MODE" == "kafka-only" ]]; then
+  echo "ERROR: kafka-only ordering requires Kafka majority; do not combine --ordering-mode kafka-only with --no-kafka" >&2
+  exit 2
+fi
+BYPASS_RAFT=0
+GATEWAY_BROADCAST_TO_ALL=0
+ORDERING_PATH="raft"
+CLUSTER_SERIES="cluster_raft_kafka"
+if [[ "$ORDERING_MODE" == "kafka-only" ]]; then
+  BYPASS_RAFT=1
+  GATEWAY_BROADCAST_TO_ALL=1
+  ORDERING_PATH="preordered_direct_broadcast"
+  CLUSTER_SERIES="cluster_kafka"
 fi
 if [[ "$DET_BATCH_SIZE" -lt 1 ]]; then
   echo "ERROR: --det-batch-size must be >= 1" >&2
@@ -341,6 +381,10 @@ if [[ "$BCDB_SERIAL_GATE_MODE" != "0" && "$BCDB_SERIAL_GATE_MODE" != "1" ]]; the
   echo "ERROR: --bcdb-serial-gate-mode must be 0 or 1" >&2
   exit 2
 fi
+if [[ "$BCDB_SERIAL_GATE_SOURCE" != "0" && "$BCDB_SERIAL_GATE_SOURCE" != "1" ]]; then
+  echo "ERROR: --bcdb-serial-gate-source must be 0 or 1" >&2
+  exit 2
+fi
 if [[ "$BCDB_DT_PARSE_BARRIER" != "0" && "$BCDB_DT_PARSE_BARRIER" != "1" ]]; then
   echo "ERROR: --bcdb-dt-parse-barrier must be 0 or 1" >&2
   exit 2
@@ -385,10 +429,16 @@ node_ssh() {
   local idx="$1"; shift
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
+  local cmd=()
   if [[ "$idx" -eq 2 ]]; then
-    sshpass -p "$NODE_PASS_3" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@"
+    cmd=(sshpass -p "$NODE_PASS_3" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@")
   else
-    ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$user@$ip" "$@"
+    cmd=(ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$user@$ip" "$@")
+  fi
+  if [[ -n "${NODE_SSH_COMMAND_TIMEOUT:-}" && "${NODE_SSH_COMMAND_TIMEOUT:-0}" != "0" ]]; then
+    timeout "$NODE_SSH_COMMAND_TIMEOUT" "${cmd[@]}"
+  else
+    "${cmd[@]}"
   fi
 }
 
@@ -420,6 +470,7 @@ node_rsync_from() {
 
 collect_cluster_logs() {
   local label="${1:-Collecting server logs from all nodes...}"
+  local log_rsync_timeout="${LOG_RSYNC_TIMEOUT:-20}"
   log "$label"
   for idx in "${!NODE_IDS[@]}"; do
     id="${NODE_IDS[$idx]}"
@@ -430,26 +481,26 @@ collect_cluster_logs() {
     REMOTE_NURAFT_LOG="/home/neel/ariabc_pg_srv${id}.log"
     REMOTE_PG_LOG="$REMOTE_REPO_ROOT/server.log"
     if [[ "$idx" -eq 2 ]]; then
-      sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+      timeout "$log_rsync_timeout" sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
         "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
-      sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+      timeout "$log_rsync_timeout" sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
         "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
-      sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+      timeout "$log_rsync_timeout" sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
         "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
       if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
-        sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+        timeout "$log_rsync_timeout" sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
           "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
           "$LOG_DIR/" 2>/dev/null || true
       fi
     else
-      rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
+      timeout "$log_rsync_timeout" rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
         "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
-      rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
+      timeout "$log_rsync_timeout" rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
         "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
-      rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
+      timeout "$log_rsync_timeout" rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
         "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
       if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
-        rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no" \
+        timeout "$log_rsync_timeout" rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
           "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
           "$LOG_DIR/" 2>/dev/null || true
       fi
@@ -514,7 +565,7 @@ collect_final_profiles_before_fail() {
   log "  Collecting final server profiles before failing (${reason})"
   for idx in "${!NODE_IDS[@]}"; do
     client_port="${NODE_CLIENT_PORTS[$idx]}"
-    node_ssh "$idx" "
+    NODE_SSH_COMMAND_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}" node_ssh "$idx" "
       fuser -k -TERM 9000/tcp 2>/dev/null || true
       fuser -k -TERM ${client_port}/tcp 2>/dev/null || true
     " >/dev/null 2>&1 || true
@@ -578,6 +629,18 @@ build_raft_members() {
 }
 
 RAFT_MEMBERS="$(build_raft_members)"
+
+log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass_raft=$BYPASS_RAFT, gateway_broadcast_to_all=$GATEWAY_BROADCAST_TO_ALL)"
+{
+  printf 'ordering_mode=%s\n' "$ORDERING_MODE"
+  printf 'ordering_path=%s\n' "$ORDERING_PATH"
+  printf 'cluster_series=%s\n' "$CLUSTER_SERIES"
+  printf 'bypass_raft=%s\n' "$BYPASS_RAFT"
+  printf 'gateway_broadcast_to_all=%s\n' "$GATEWAY_BROADCAST_TO_ALL"
+  printf 'completion_path=%s\n' "$([[ "$NO_KAFKA" -eq 0 ]] && echo kafka_majority || echo direct)"
+  printf 'kafka_bootstrap=%s\n' "$KAFKA_BOOTSTRAP"
+  printf 'result_topic=%s\n' "$KAFKA_RESULT_TOPIC"
+} > "$LOG_DIR/run_meta.env"
 
 # ---------------------------------------------------------------------------
 # Phase 0: Cleanup
@@ -681,7 +744,10 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   log "=== Phase 0.8: Rebuild local canonical install/binaries ==="
   local_globals="$REPO_ROOT/src/include/bcdb/globals.h"
   [[ -f "$local_globals" ]] || die "missing local globals header: $local_globals"
-  sed -i -E "s/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+[0-9]+/#define BCDB_RESULT_RING_CAPACITY $RESULT_RING_CAPACITY/" "$local_globals"
+  current_ring_capacity="$(sed -n -E 's/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+([0-9]+).*/\1/p' "$local_globals" | head -n 1)"
+  if [[ "$current_ring_capacity" != "$RESULT_RING_CAPACITY" ]]; then
+    sed -i -E "s/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+[0-9]+/#define BCDB_RESULT_RING_CAPACITY $RESULT_RING_CAPACITY/" "$local_globals"
+  fi
 
   log "  Rebuilding local PostgreSQL install at $LOCAL_INSTALL_DIR with BCDB_RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
   chmod +x "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh"
@@ -920,6 +986,7 @@ for idx in "${!NODE_IDS[@]}"; do
     export BCDB_BLOCK_WAIT_WATERMARK='$BCDB_BLOCK_WAIT_WATERMARK'
     export BCDB_POLL_MAX_US='$BCDB_POLL_MAX_US'
     export BCDB_DT_PARSE_BARRIER='$BCDB_DT_PARSE_BARRIER'
+    export BCDB_FLOW_DEBUG='$BCDB_FLOW_DEBUG'
     export BCDB_BLOCK_ENQUEUE_YIELD_EVERY='$BCDB_BLOCK_ENQUEUE_YIELD_EVERY'
     export BCDB_DECOUPLE_WORKERS='$BCDB_DECOUPLE_WORKERS'
     export BCDB_DT_LIGHT_SNAPSHOT='$BCDB_DT_LIGHT_SNAPSHOT'
@@ -1019,6 +1086,7 @@ for idx in "${!NODE_IDS[@]}"; do
     fi
     worker_count=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_worker_count;' | tr -d '[:space:]')
     serial_gate=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_serial_gate_mode;' | tr -d '[:space:]')
+    serial_gate_source=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_serial_gate_source;' | tr -d '[:space:]')
     dt_conflict=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_conflict_tracking;' | tr -d '[:space:]')
     dt_skip_reads=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_completion_only_skip_reads;' | tr -d '[:space:]')
     hashtab_threshold=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_hashtab_switch_threshold;' | tr -d '[:space:]')
@@ -1046,6 +1114,9 @@ for idx in "${!NODE_IDS[@]}"; do
     if [[ \"\$serial_gate\" != \"$BCDB_SERIAL_GATE_MODE\" ]]; then
       needs_restart=1
     fi
+    if [[ \"\$serial_gate_source\" != \"$BCDB_SERIAL_GATE_SOURCE\" ]]; then
+      needs_restart=1
+    fi
     target_dt_conflict=\"$([[ "$BCDB_DT_CONFLICT_TRACKING" == "1" ]] && echo on || echo off)\"
     if [[ \"\$dt_conflict\" != \"\$target_dt_conflict\" ]]; then
       needs_restart=1
@@ -1067,12 +1138,15 @@ for idx in "${!NODE_IDS[@]}"; do
       needs_restart=1
     fi
     if [[ \"\$needs_restart\" -eq 1 ]]; then
-      echo \"reconfiguring bcdb_worker_count=\$worker_count -> $BCDB_WORKER_COUNT bcdb_serial_gate_mode=\$serial_gate -> $BCDB_SERIAL_GATE_MODE bcdb_dt_conflict_tracking=\$dt_conflict -> \$target_dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads -> \$target_dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold -> $BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdb_result_ring_slots=\$ring_slots -> \$target_ring_slots bcdb_overwrite_protection=\$owp -> \$target_owp max_connections=\$max_connections -> >=\$min_max_connections\"
+      echo \"reconfiguring bcdb_worker_count=\$worker_count -> $BCDB_WORKER_COUNT bcdb_serial_gate_mode=\$serial_gate -> $BCDB_SERIAL_GATE_MODE bcdb_serial_gate_source=\$serial_gate_source -> $BCDB_SERIAL_GATE_SOURCE bcdb_dt_conflict_tracking=\$dt_conflict -> \$target_dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads -> \$target_dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold -> $BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdb_result_ring_slots=\$ring_slots -> \$target_ring_slots bcdb_overwrite_protection=\$owp -> \$target_owp max_connections=\$max_connections -> >=\$min_max_connections\"
       if [[ \"\$worker_count\" != \"$BCDB_WORKER_COUNT\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_worker_count = '$BCDB_WORKER_COUNT';\"
       fi
       if [[ \"\$serial_gate\" != \"$BCDB_SERIAL_GATE_MODE\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_serial_gate_mode = '$BCDB_SERIAL_GATE_MODE';\"
+      fi
+      if [[ \"\$serial_gate_source\" != \"$BCDB_SERIAL_GATE_SOURCE\" ]]; then
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_serial_gate_source = '$BCDB_SERIAL_GATE_SOURCE';\"
       fi
       if [[ \"\$dt_conflict\" != \"\$target_dt_conflict\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_dt_conflict_tracking = '\$target_dt_conflict';\"
@@ -1099,6 +1173,7 @@ for idx in "${!NODE_IDS[@]}"; do
       ensure_ready
       worker_count=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_worker_count;' | tr -d '[:space:]')
       serial_gate=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_serial_gate_mode;' | tr -d '[:space:]')
+      serial_gate_source=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_serial_gate_source;' | tr -d '[:space:]')
       dt_conflict=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_conflict_tracking;' | tr -d '[:space:]')
       dt_skip_reads=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_completion_only_skip_reads;' | tr -d '[:space:]')
       hashtab_threshold=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_hashtab_switch_threshold;' | tr -d '[:space:]')
@@ -1106,7 +1181,7 @@ for idx in "${!NODE_IDS[@]}"; do
       owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || echo '')
       max_connections=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show max_connections;' | tr -d '[:space:]')
     fi
-    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp max_connections=\$max_connections\"
+    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_serial_gate_source=\$serial_gate_source bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp max_connections=\$max_connections\"
   " 2>&1)" || die "could not verify postgres on ${NODE_NAMES[$idx]}"
   log "  ${NODE_NAMES[$idx]}: $status_line"
   actual_workers="$(sed -n 's/.*bcdb_worker_count=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
@@ -1116,6 +1191,10 @@ for idx in "${!NODE_IDS[@]}"; do
   actual_serial_gate="$(sed -n 's/.*bcdb_serial_gate_mode=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
   if [[ -n "$actual_serial_gate" && "$actual_serial_gate" != "$BCDB_SERIAL_GATE_MODE" ]]; then
     die "bcdb_serial_gate_mode mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_serial_gate expected=$BCDB_SERIAL_GATE_MODE"
+  fi
+  actual_serial_gate_source="$(sed -n 's/.*bcdb_serial_gate_source=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
+  if [[ -n "$actual_serial_gate_source" && "$actual_serial_gate_source" != "$BCDB_SERIAL_GATE_SOURCE" ]]; then
+    die "bcdb_serial_gate_source mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_serial_gate_source expected=$BCDB_SERIAL_GATE_SOURCE"
   fi
   actual_dt_conflict="$(sed -n 's/.*bcdb_dt_conflict_tracking=\([^[:space:]]*\).*/\1/p' <<<"$status_line" | tail -1)"
   expected_dt_conflict="$([[ "$BCDB_DT_CONFLICT_TRACKING" == "1" ]] && echo on || echo off)"
@@ -1225,9 +1304,9 @@ for idx in "${!NODE_IDS[@]}"; do
   is_u22="${NODE_IS_U22[$idx]}"
   [[ "$is_u22" -eq 1 ]] && srv_bin="$REMOTE_BIN_U22" || srv_bin="$REMOTE_BIN_U24"
 
-  log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port"
+  log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port orderingMode=$ORDERING_MODE"
   log "    binary: $srv_bin"
-  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
 
@@ -1248,6 +1327,7 @@ for idx in "${!NODE_IDS[@]}"; do
 	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
 	    export BCDB_DT_COMPLETION_ONLY_SKIP_READS='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
+	    export BCDB_FLOW_DEBUG='${BCDB_FLOW_DEBUG}'
 	    nohup '$srv_bin' \
       --id $id \
       --raftEndpoint ${ip}:${RAFT_PORT} \
@@ -1261,6 +1341,7 @@ for idx in "${!NODE_IDS[@]}"; do
       --safedb 1 \
       --dbConnPoolSize $DB_CONN_POOL_SIZE \
       --pgExecMode $PG_EXEC_MODE \
+      --bypassRaft $BYPASS_RAFT \
       $KAFKA_ARGS \
       >'$REMOTE_SRV_LOG' 2>&1 &
     echo \"started pid=\$!\"
@@ -1272,7 +1353,11 @@ log "  All 4 server launch commands sent"
 # ---------------------------------------------------------------------------
 # Phase 5: Wait for Raft cluster to stabilize
 # ---------------------------------------------------------------------------
-log "=== Phase 5: Waiting for Raft cluster (up to 60s) ==="
+if [[ "$BYPASS_RAFT" -eq 1 ]]; then
+  log "=== Phase 5: Waiting for bypass-Raft server ports (up to 60s) ==="
+else
+  log "=== Phase 5: Waiting for Raft cluster (up to 60s) ==="
+fi
 MAX_WAIT=60
 ALL_UP=0
 
@@ -1299,10 +1384,18 @@ done
 
 [[ "$ALL_UP" -eq 0 ]] && log "WARNING: Not all 4 nodes responded within ${MAX_WAIT}s"
 
-sleep 5  # Let Raft elect a leader and stabilize
+if [[ "$BYPASS_RAFT" -eq 1 ]]; then
+  sleep 2
+else
+  sleep 5  # Let Raft elect a leader and stabilize
+fi
 
 # Check for bcdb_init success on the leader node (any node that started)
-log "  Checking BCDB init and leader status..."
+if [[ "$BYPASS_RAFT" -eq 1 ]]; then
+  log "  Checking BCDB init and bypass-server readiness..."
+else
+  log "  Checking BCDB init and leader status..."
+fi
 for idx in "${!NODE_IDS[@]}"; do
   id="${NODE_IDS[$idx]}"
   name="${NODE_NAMES[$idx]}"
@@ -1343,6 +1436,10 @@ log "  Running bcdb_init preflight probe before workload..."
 PRECHECK_SQL="$LOG_DIR/bcdb_init_probe.sql"
 PRECHECK_LOG="$LOG_DIR/bcdb_init_probe.log"
 printf 'SELECT 1;\n' > "$PRECHECK_SQL"
+GW_PRECHECK_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes 4"
+if [[ "$BYPASS_RAFT" -eq 1 ]]; then
+  GW_PRECHECK_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes 4 --broadcastToAll 1"
+fi
 if ! "$GW_BIN" \
   --nodes "$GW_NODES" \
   --queryFrom "$PRECHECK_SQL" \
@@ -1357,9 +1454,7 @@ if ! "$GW_BIN" \
   --detPipelineDepth 1 \
   --clientId "cluster-bcdb-probe" \
   --numTerminals 1 \
-  --waitMajority 0 \
-  --completionPath direct \
-  --totalNodes 4 \
+  $GW_PRECHECK_EXTRA_ARGS \
   >"$PRECHECK_LOG" 2>&1; then
   die "bcdb_init preflight probe failed — see $PRECHECK_LOG"
 fi
@@ -1390,14 +1485,17 @@ fi
 GW_EXTRA_ARGS=""
 if [[ "$NO_KAFKA" -eq 0 ]]; then
   GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes 4"
+  if [[ "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
+    GW_EXTRA_ARGS="$GW_EXTRA_ARGS --broadcastToAll 1"
+  fi
 else
   GW_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes 4"
 fi
 
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
-log "  Mode:          dbType=1 (det) | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2)"
-log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL"
+log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
 START_S="$(date +%s)"
 
@@ -1464,7 +1562,11 @@ log "  NuRaft logs   : $LOG_DIR/nuraft_node*.log"
 log "  Gateway log   : $GW_LOG"
 log ""
 log "=== Quick diagnostics ==="
-log "  Raft leader      : grep -i 'leader' $LOG_DIR/nuraft_node*.log | grep 'my id'"
+if [[ "$BYPASS_RAFT" -eq 1 ]]; then
+  log "  Ordering mode    : bypass-Raft; grep 'ready (bypass-raft)' $LOG_DIR/server_node*.log"
+else
+  log "  Raft leader      : grep -i 'leader' $LOG_DIR/nuraft_node*.log | grep 'my id'"
+fi
 log "  BCDB init status : grep 'bcdb_init' $LOG_DIR/server_node*.log"
 log "  BCDB block profile: grep 'PROFILE_BCDB_BLOCK' $LOG_DIR/postgres_node*.log"
 log "  Divergences      : grep 'divergence' $GW_LOG"
@@ -1478,12 +1580,15 @@ fi
 
 # ---------------------------------------------------------------------------
 # Phase 8: Post-workload table consistency verification
-# Submit one final marker transaction through the same Raft path.  When every
-# node can read the marker, every previous workload log entry has been applied
-# before the Merkle root sample.
+# Submit one final marker transaction through the same ordering path.  In
+# raft-kafka mode this goes through Raft; in kafka-only mode the gateway
+# broadcasts the preordered marker directly to every replica.  When every node
+# can read the marker, every previous workload entry has been applied before
+# the Merkle root sample.
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   log "=== Phase 8: Post-workload $VERIFY_TABLE Merkle verification ==="
+  VERIFY_NODE_SSH_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}"
 
   # --- Pre-marker check: diagnostic only.
   #     With waitMajority=1 the gateway is allowed to finish once a 3/4 quorum
@@ -1501,7 +1606,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     PRE_ROOTS=()
     for idx in "${!NODE_IDS[@]}"; do
       name="${NODE_NAMES[$idx]}"
-      readback="$(node_ssh "$idx" "
+      readback="$(NODE_SSH_COMMAND_TIMEOUT="$VERIFY_NODE_SSH_TIMEOUT" node_ssh "$idx" "
         INSTALL_DIR='$REMOTE_INSTALL_DIR'
         export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
         cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
@@ -1595,7 +1700,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     for idx in "${!NODE_IDS[@]}"; do
       [[ "${NODE_MARKER_READY[$idx]}" -eq 1 ]] && continue
       name="${NODE_NAMES[$idx]}"
-      val="$(node_ssh "$idx" "
+      val="$(NODE_SSH_COMMAND_TIMEOUT="$VERIFY_NODE_SSH_TIMEOUT" node_ssh "$idx" "
         INSTALL_DIR='$REMOTE_INSTALL_DIR'
         export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
         \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
@@ -1622,7 +1727,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   declare -a POST_VERIFY=()
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
-    readback="$(node_ssh "$idx" "
+    readback="$(NODE_SSH_COMMAND_TIMEOUT="$VERIFY_NODE_SSH_TIMEOUT" node_ssh "$idx" "
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
@@ -1665,7 +1770,7 @@ if [[ "$COLLECT_FINAL_SERVER_PROFILE" != "0" ]]; then
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
     client_port="${NODE_CLIENT_PORTS[$idx]}"
-    node_ssh "$idx" "
+    NODE_SSH_COMMAND_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}" node_ssh "$idx" "
       fuser -k -TERM 9000/tcp 2>/dev/null || true
       fuser -k -TERM ${client_port}/tcp 2>/dev/null || true
     " >/dev/null 2>&1 || true
