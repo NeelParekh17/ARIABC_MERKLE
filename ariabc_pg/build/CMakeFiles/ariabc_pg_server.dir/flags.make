@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -DARIABC_HAVE_RDKAFKA -DASIO_STANDALONE
 
-CXX_INCLUDES = -I/work/ARIABC/AriaBC/ariabc_pg/src -I/work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include -I/work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft -I/work/ARIABC/AriaBC/ariabc_pg/../NuRaft/src -I/work/ARIABC/AriaBC/ariabc_pg/../NuRaft/asio/asio/include -I/work/ARIABC/AriaBC/src/interfaces/libpq -I/work/ARIABC/AriaBC/src/include -I/work/ARIABC/AriaBC/NuRaft/include
+CXX_INCLUDES = -I/work/ARIABC/AriaBC/ariabc_pg/src -I/work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include -I/work/ARIABC/AriaBC/ariabc_pg/../NuRaft/include/libnuraft -I/work/ARIABC/AriaBC/ariabc_pg/../NuRaft/src -I/work/ARIABC/AriaBC/ariabc_pg/../NuRaft/asio/asio/include -I/work/ARIABC/install/include -I/work/ARIABC/install/include/postgresql/server -I/home/neel/Desktop/rdkafka_local/include -I/work/ARIABC/AriaBC/NuRaft/include
 
 CXX_FLAGS = -O3 -DNDEBUG -std=gnu++11
 

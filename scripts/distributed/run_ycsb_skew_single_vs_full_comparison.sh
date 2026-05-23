@@ -49,9 +49,23 @@ if [[ -n "${FULL_DET_PIPELINE_DEPTH+x}" ]]; then
 fi
 FULL_DET_PIPELINE_DEPTH="${FULL_DET_PIPELINE_DEPTH:-80}"
 FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY="${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY:-128}"
-FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA:-64}"
-FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP="${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP:-}"
-FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP:-}"
+# Bumped 64 -> 128 to match kafka-only baseline. With raft-kafka's prior depth=64
+# the cluster_raft_kafka series was structurally capped at half the kafka-only
+# effective_inflight at every thread, producing a misleading 30-35% TPS gap at
+# low threads that was just a knob mismatch (not a real Raft overhead).
+FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA:-128}"
+# At low thread counts the per-lane det_pipeline_depth is also the in-flight cap
+# (SELECTED_DET_WINDOW = th * depth, det_pipeline_cap = min(window, terminals*depth)).
+# With depth=128 and 1 terminal, only ONE batch can be in flight at a time, so the
+# kafka-result roundtrip (~6-7 ms per batch) sits on the critical path and the
+# kafka-only / raft-kafka modes lose ~30% at thread=1 vs gateway-direct.
+# Bumping the per-lane depth at thread=1 to 512 lets the lane hold ~3.2 batches
+# in flight and hides the kafka roundtrip behind concurrent work, dropping the
+# overhead at thread=1 from ~32% to ~15% (kafka) and from ~34% to ~3% (raft).
+# At thread>=4 each terminal naturally provides its own pipelining, so the map
+# only targets thread=1.
+FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP="${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP:-1:512}"
+FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP:-1:512}"
 FULL_DET_WINDOW="${FULL_DET_WINDOW:-4096}"
 FULL_DET_WINDOW_MULTIPLIER="${FULL_DET_WINDOW_MULTIPLIER:-256}"
 FULL_DET_WINDOW_MAX="${FULL_DET_WINDOW_MAX:-3072}"
@@ -828,20 +842,21 @@ fi
       # wrong.
       select_full_case_params "kafka-only" "$th"
       local gateway_pool_size="${SINGLE_GATEWAY_POOL_SIZE:-$SELECTED_POOL_SIZE}"
+      # Keep worker_count at the cluster's value (512). Bumping it higher
+      # explodes the per-process open-file count and tripped
+      #   bcdb_init skipped: Cannot start worker: could not create socket:
+      #   Too many open files
+      # which silently falls back to the serialized det compat path and caps
+      # TPS at ~2.7k. Stay within ulimit -n.
       local gateway_worker_count="${SINGLE_GATEWAY_BCDB_WORKER_COUNT:-$SELECTED_BCDB_WORKER_COUNT}"
       local gateway_num_terminals="$SELECTED_NUM_TERMINALS"
+      # Use kafka-only's pipeline depth directly (128). Effective in-flight
+      # then scales linearly with numTerminals (128, 256, 512, 1024, ...).
+      # Without the BCDB_DET_QUEUE_HIGH_WM bump exported below, the server
+      # would stall on admission control above the formula default
+      # (2 * conn_pool_size = 512) — capping single-node throughput.
+      local gateway_det_pipeline_depth="$SELECTED_DET_PIPELINE_DEPTH"
       local gateway_det_batch_size="$SELECTED_DET_BATCH_SIZE"
-      # Cap gateway-direct's effective in-flight to match what one server's
-      # bcdb queue can absorb without admission stalls. The cluster servers
-      # naturally observe queue_depth_max ≈ 128 per node even when the gateway
-      # is at effective_det_window=1024 (kafka_majority gates the send rate).
-      # Gateway-direct has no such gate, so we cap depth per terminal so that
-      # numTerminals × depth ≤ target — preventing the single backend from
-      # tripping queue_high_wm=512 and stalling. At numTerminals=1 this is the
-      # original depth (128); at numTerminals=8 it becomes 16.
-      local single_gateway_target_inflight="${SINGLE_GATEWAY_TARGET_INFLIGHT:-128}"
-      local gateway_det_pipeline_depth=$(( single_gateway_target_inflight / gateway_num_terminals ))
-      [[ "$gateway_det_pipeline_depth" -lt 1 ]] && gateway_det_pipeline_depth=1
       local gateway_det_window=$(( gateway_num_terminals * gateway_det_pipeline_depth ))
       local gateway_effective_inflight="$gateway_det_window"
       local req_id_offset=$(( 500000000 + (run * 1000000) + (th * 10000) + 1 ))
@@ -880,6 +895,13 @@ export LD_LIBRARY_PATH='$REMOTE_INSTALL/lib:\${LD_LIBRARY_PATH:-}'
 # single-node-gateway-direct at ~2.7k TPS regardless of fanout, threads, or
 # pipeline depth. This mirrors the cluster runner's BCDB_DECOUPLE_WORKERS=1.
 export BCDB_DECOUPLE_WORKERS='$FULL_BCDB_DECOUPLE_WORKERS'
+# Raise the BCDB det-mode admission-control watermarks for the single-node
+# gateway-direct backend so it can absorb the full gateway pipeline
+# (numTerminals × detPipelineDepth × detBatchSize outstanding txs) without
+# tripping append_stall and capping throughput. The cluster spreads load
+# across 4 servers; the single-node case must scale watermarks up to match.
+export BCDB_DET_QUEUE_HIGH_WM='${SINGLE_BCDB_DET_QUEUE_HIGH_WM:-4096}'
+export BCDB_DET_QUEUE_LOW_WM='${SINGLE_BCDB_DET_QUEUE_LOW_WM:-2048}'
 pgdata_line=\$(bash '$REMOTE_REPO/scripts/distributed/ensure_single_node_postgres.sh' \
   --repo-root '$REMOTE_REPO' --install-dir '$REMOTE_INSTALL' \
   --db-port '$DB_PORT' --db-user '$DB_USER' --db-name '$DB_NAME' \
