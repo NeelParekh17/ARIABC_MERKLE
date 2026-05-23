@@ -189,8 +189,8 @@ bin/ariabc_pg_server: CMakeFiles/ariabc_pg_server.dir/src/logger.cc.o
 bin/ariabc_pg_server: CMakeFiles/ariabc_pg_server.dir/src/in_memory_log_store.cxx.o
 bin/ariabc_pg_server: CMakeFiles/ariabc_pg_server.dir/build.make
 bin/ariabc_pg_server: nuraft-build/libnuraft.a
-bin/ariabc_pg_server: /work/ARIABC/AriaBC/src/interfaces/libpq/libpq.so
-bin/ariabc_pg_server: /usr/lib/x86_64-linux-gnu/librdkafka.so
+bin/ariabc_pg_server: /work/ARIABC/install/lib/libpq.so
+bin/ariabc_pg_server: /home/neel/Desktop/rdkafka_local/lib/librdkafka.so
 bin/ariabc_pg_server: /usr/lib/x86_64-linux-gnu/libssl.a
 bin/ariabc_pg_server: /usr/lib/x86_64-linux-gnu/libcrypto.a
 bin/ariabc_pg_server: CMakeFiles/ariabc_pg_server.dir/link.txt

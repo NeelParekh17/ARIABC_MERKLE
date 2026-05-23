@@ -790,6 +790,13 @@ pg_executor::pg_executor(int node_id,
     // Hysteresis watermarks for admission control. Deterministic mode uses
     // lower queue targets to reduce overload latch oscillation and long-tail
     // append stalls under serialized execution.
+    //
+    // Env overrides:
+    //   BCDB_DET_QUEUE_HIGH_WM, BCDB_DET_QUEUE_LOW_WM: hard override the
+    //   computed values when set to a positive integer. Used by the
+    //   single-node gateway-direct profile so the gateway can pipeline more
+    //   in-flight work into a single backend without tripping admission
+    //   control stalls (which cap throughput at the formula's 2*pool=512).
     const bool det_mode = (db_opt_.db_type == 1);
     const size_t high_min = det_mode ? kDetQueueHighWatermarkMin : kQueueHighWatermarkMin;
     const size_t low_min = det_mode ? kDetQueueLowWatermarkMin : kQueueLowWatermarkMin;
@@ -801,6 +808,24 @@ pg_executor::pg_executor(int node_id,
     queue_low_wm_ = std::max<size_t>(
         low_min,
         static_cast<size_t>(db_opt_.conn_pool_size) * low_factor);
+    if (det_mode) {
+        if (const char* v = std::getenv("BCDB_DET_QUEUE_HIGH_WM")) {
+            errno = 0;
+            char* end = nullptr;
+            const unsigned long long override_high = std::strtoull(v, &end, 10);
+            if (errno == 0 && end && *end == '\0' && override_high > 0) {
+                queue_high_wm_ = static_cast<size_t>(override_high);
+            }
+        }
+        if (const char* v = std::getenv("BCDB_DET_QUEUE_LOW_WM")) {
+            errno = 0;
+            char* end = nullptr;
+            const unsigned long long override_low = std::strtoull(v, &end, 10);
+            if (errno == 0 && end && *end == '\0' && override_low > 0) {
+                queue_low_wm_ = static_cast<size_t>(override_low);
+            }
+        }
+    }
     if (queue_low_wm_ > queue_high_wm_) {
         queue_low_wm_ = queue_high_wm_;
     }

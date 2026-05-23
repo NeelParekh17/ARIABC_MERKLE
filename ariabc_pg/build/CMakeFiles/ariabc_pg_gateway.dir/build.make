@@ -157,7 +157,7 @@ bin/ariabc_pg_gateway: CMakeFiles/ariabc_pg_gateway.dir/src/wire_protocol_async.
 bin/ariabc_pg_gateway: CMakeFiles/ariabc_pg_gateway.dir/src/wire_protocol.cxx.o
 bin/ariabc_pg_gateway: CMakeFiles/ariabc_pg_gateway.dir/build.make
 bin/ariabc_pg_gateway: nuraft-build/libnuraft.a
-bin/ariabc_pg_gateway: /usr/lib/x86_64-linux-gnu/librdkafka.so
+bin/ariabc_pg_gateway: /home/neel/Desktop/rdkafka_local/lib/librdkafka.so
 bin/ariabc_pg_gateway: /usr/lib/x86_64-linux-gnu/libssl.a
 bin/ariabc_pg_gateway: /usr/lib/x86_64-linux-gnu/libcrypto.a
 bin/ariabc_pg_gateway: CMakeFiles/ariabc_pg_gateway.dir/link.txt

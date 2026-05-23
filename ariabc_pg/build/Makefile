@@ -188,19 +188,6 @@ ariabc_pg_gateway/fast:
 .PHONY : ariabc_pg_gateway/fast
 
 #=============================================================================
-# Target rules for targets named ariabc_pg_wire_protocol_test
-
-# Build rule for target.
-ariabc_pg_wire_protocol_test: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 ariabc_pg_wire_protocol_test
-.PHONY : ariabc_pg_wire_protocol_test
-
-# fast build rule for target.
-ariabc_pg_wire_protocol_test/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/build
-.PHONY : ariabc_pg_wire_protocol_test/fast
-
-#=============================================================================
 # Target rules for targets named build_ssl_key
 
 # Build rule for target.
@@ -454,7 +441,6 @@ src/wire_protocol.o: src/wire_protocol.cxx.o
 src/wire_protocol.cxx.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_server.dir/build.make CMakeFiles/ariabc_pg_server.dir/src/wire_protocol.cxx.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_gateway.dir/build.make CMakeFiles/ariabc_pg_gateway.dir/src/wire_protocol.cxx.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol.cxx.o
 .PHONY : src/wire_protocol.cxx.o
 
 src/wire_protocol.i: src/wire_protocol.cxx.i
@@ -464,7 +450,6 @@ src/wire_protocol.i: src/wire_protocol.cxx.i
 src/wire_protocol.cxx.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_server.dir/build.make CMakeFiles/ariabc_pg_server.dir/src/wire_protocol.cxx.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_gateway.dir/build.make CMakeFiles/ariabc_pg_gateway.dir/src/wire_protocol.cxx.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol.cxx.i
 .PHONY : src/wire_protocol.cxx.i
 
 src/wire_protocol.s: src/wire_protocol.cxx.s
@@ -474,7 +459,6 @@ src/wire_protocol.s: src/wire_protocol.cxx.s
 src/wire_protocol.cxx.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_server.dir/build.make CMakeFiles/ariabc_pg_server.dir/src/wire_protocol.cxx.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_gateway.dir/build.make CMakeFiles/ariabc_pg_gateway.dir/src/wire_protocol.cxx.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol.cxx.s
 .PHONY : src/wire_protocol.cxx.s
 
 src/wire_protocol_async.o: src/wire_protocol_async.cxx.o
@@ -483,7 +467,6 @@ src/wire_protocol_async.o: src/wire_protocol_async.cxx.o
 # target to build an object file
 src/wire_protocol_async.cxx.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_gateway.dir/build.make CMakeFiles/ariabc_pg_gateway.dir/src/wire_protocol_async.cxx.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol_async.cxx.o
 .PHONY : src/wire_protocol_async.cxx.o
 
 src/wire_protocol_async.i: src/wire_protocol_async.cxx.i
@@ -492,7 +475,6 @@ src/wire_protocol_async.i: src/wire_protocol_async.cxx.i
 # target to preprocess a source file
 src/wire_protocol_async.cxx.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_gateway.dir/build.make CMakeFiles/ariabc_pg_gateway.dir/src/wire_protocol_async.cxx.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol_async.cxx.i
 .PHONY : src/wire_protocol_async.cxx.i
 
 src/wire_protocol_async.s: src/wire_protocol_async.cxx.s
@@ -501,32 +483,7 @@ src/wire_protocol_async.s: src/wire_protocol_async.cxx.s
 # target to generate assembly for a file
 src/wire_protocol_async.cxx.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_gateway.dir/build.make CMakeFiles/ariabc_pg_gateway.dir/src/wire_protocol_async.cxx.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol_async.cxx.s
 .PHONY : src/wire_protocol_async.cxx.s
-
-src/wire_protocol_test.o: src/wire_protocol_test.cxx.o
-.PHONY : src/wire_protocol_test.o
-
-# target to build an object file
-src/wire_protocol_test.cxx.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol_test.cxx.o
-.PHONY : src/wire_protocol_test.cxx.o
-
-src/wire_protocol_test.i: src/wire_protocol_test.cxx.i
-.PHONY : src/wire_protocol_test.i
-
-# target to preprocess a source file
-src/wire_protocol_test.cxx.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol_test.cxx.i
-.PHONY : src/wire_protocol_test.cxx.i
-
-src/wire_protocol_test.s: src/wire_protocol_test.cxx.s
-.PHONY : src/wire_protocol_test.s
-
-# target to generate assembly for a file
-src/wire_protocol_test.cxx.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ariabc_pg_wire_protocol_test.dir/build.make CMakeFiles/ariabc_pg_wire_protocol_test.dir/src/wire_protocol_test.cxx.s
-.PHONY : src/wire_protocol_test.cxx.s
 
 # Help Target
 help:
@@ -544,7 +501,6 @@ help:
 	@echo "... RAFT_CORE_OBJ"
 	@echo "... ariabc_pg_gateway"
 	@echo "... ariabc_pg_server"
-	@echo "... ariabc_pg_wire_protocol_test"
 	@echo "... shared_lib"
 	@echo "... static_lib"
 	@echo "... src/ariabc_pg_gateway.o"
@@ -577,9 +533,6 @@ help:
 	@echo "... src/wire_protocol_async.o"
 	@echo "... src/wire_protocol_async.i"
 	@echo "... src/wire_protocol_async.s"
-	@echo "... src/wire_protocol_test.o"
-	@echo "... src/wire_protocol_test.i"
-	@echo "... src/wire_protocol_test.s"
 .PHONY : help
 
 
