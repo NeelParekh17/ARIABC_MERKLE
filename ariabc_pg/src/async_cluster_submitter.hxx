@@ -31,9 +31,16 @@ struct async_submitter_stats {
 // - owns a small number of persistent nonblocking TCP connections
 // - multiplexes request/response frames via poll()
 // - supports pipelining multiple in-flight requests per connection
+// - optional conn_fanout: open N parallel sockets per logical node, so
+//   gateway-side write paths and server-side per-connection handler threads
+//   scale beyond one per node. Round-robins per-node when dispatching.
 class async_cluster_submitter {
 public:
     struct submit_ctx {
+        // Physical connection index (logical_node_idx * conn_fanout + lane).
+        // The caller passes a logical node_idx into submit_async_to_node and
+        // submit_to_node; this field stores the chosen physical conn for the
+        // io_loop's dispatch.
         size_t node_idx = 0;
         client_api_request req;
         client_api_response resp;
@@ -47,7 +54,9 @@ public:
     async_cluster_submitter();
     ~async_cluster_submitter();
 
+    // conn_fanout >= 1. If conn_fanout > 1, opens N sockets per logical node.
     bool start(const std::vector<host_port>& nodes, std::string& err);
+    bool start(const std::vector<host_port>& nodes, size_t conn_fanout, std::string& err);
     void stop();
 
     // Submit exactly one request to the specified node index and wait for its response.
@@ -95,6 +104,13 @@ private:
     std::deque<std::shared_ptr<submit_ctx>> pending_;
 
     std::vector<node_conn> conns_;
+
+    // Mapping/configuration for multi-conn-per-node fanout.
+    size_t num_logical_nodes_ = 0;
+    size_t conn_fanout_ = 1;
+    // Per-logical-node round-robin counter, used by submit_async_to_node to
+    // pick which physical lane to dispatch the next request to.
+    std::vector<std::atomic<size_t>> rr_per_node_;
 
     // Stats updated by the I/O thread.
     std::atomic<uint64_t> st_attempts_{0};

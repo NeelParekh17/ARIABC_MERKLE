@@ -5,6 +5,7 @@ REPO_ROOT=""
 INSTALL_DIR=""
 CLEAN_WHEN_REBUILD=0
 FORCE_REBUILD=0
+TRUST_INSTALL=0
 EXTRA_INCLUDE_ROOT=""
 EXTRA_LIB_ROOT=""
 
@@ -14,11 +15,16 @@ Usage:
   ensure_custom_install_from_repo.sh \
     --repo-root </path/to/ariabc_cluster> \
     --install-dir </path/to/ariabc_install> \
-    [--clean-when-rebuild] [--force-rebuild]
+    [--clean-when-rebuild] [--force-rebuild] [--trust-install]
 
 Ensures the custom BCDB PostgreSQL install tree is runnable. If the install tree
 is missing or not runnable on the current host, rebuilds it from the synced repo
 and installs it into the requested install directory.
+
+--trust-install: caller guarantees the install was just synced from a known-good
+  build (e.g. via rsync from the orchestrator). Skips the source-mtime staleness
+  check and the make/gcc toolchain requirement; only verify_install runs. Use on
+  execution-only hosts that have no compiler.
 EOF
 }
 
@@ -28,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
     --clean-when-rebuild) CLEAN_WHEN_REBUILD=1; shift 1 ;;
     --force-rebuild) FORCE_REBUILD=1; shift 1 ;;
+    --trust-install) TRUST_INSTALL=1; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -51,10 +58,43 @@ verify_install() {
   return 0
 }
 
+install_is_stale() {
+  local dir="$1"
+  local postgres_bin="$dir/bin/postgres"
+  local stale_path=""
+
+  [[ -x "$postgres_bin" ]] || return 0
+
+  stale_path="$(
+    find \
+      "$REPO_ROOT/GNUmakefile" \
+      "$REPO_ROOT/Makefile" \
+      "$REPO_ROOT/configure" \
+      "$REPO_ROOT/src" \
+      "$REPO_ROOT/contrib" \
+      -type f \
+      \( -name '*.c' -o -name '*.h' -o -name '*.l' -o -name '*.y' -o -name 'Makefile' -o -name 'GNUmakefile' \) \
+      -newer "$postgres_bin" \
+      -print -quit 2>/dev/null || true
+  )"
+
+  [[ -n "$stale_path" ]]
+}
+
 if [[ "$FORCE_REBUILD" != "1" ]] && verify_install "$INSTALL_DIR"; then
-  echo "INSTALL_READY=1"
-  echo "INSTALL_DIR=$INSTALL_DIR"
-  exit 0
+  if [[ "$TRUST_INSTALL" == "1" ]] || ! install_is_stale "$INSTALL_DIR"; then
+    echo "INSTALL_READY=1"
+    echo "INSTALL_DIR=$INSTALL_DIR"
+    [[ "$TRUST_INSTALL" == "1" ]] && echo "TRUST_INSTALL=1"
+    exit 0
+  fi
+  FORCE_REBUILD=1
+fi
+
+if [[ "$TRUST_INSTALL" == "1" ]]; then
+  echo "ERROR: --trust-install passed but install at $INSTALL_DIR did not verify" >&2
+  echo "       (binaries missing, not executable, or fail --version on this host)" >&2
+  exit 1
 fi
 
 if [[ ! -x "$REPO_ROOT/configure" ]]; then
@@ -70,6 +110,15 @@ for tool in make gcc; do
 done
 
 mkdir -p "$INSTALL_DIR" "$REPO_ROOT/.bench_tmp"
+
+# configure/distclean mutate the source tree, so keep concurrent benchmark
+# runners from rebuilding the same checkout at the same time.
+build_lock="$REPO_ROOT/.bench_tmp/build_custom_install.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$build_lock"
+  flock 9
+fi
+
 build_log="$REPO_ROOT/.bench_tmp/build_custom_install_$(date +%Y%m%d_%H%M%S).log"
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)"
 if [[ -d "$REPO_ROOT/.bench_tmp/deps/include" ]]; then

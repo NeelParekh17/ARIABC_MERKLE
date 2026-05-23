@@ -129,6 +129,12 @@ struct gateway_options {
     // Used for kafka-only-no-raft profile where ordering is provided by the
     // gateway itself (sequential broadcast) rather than Raft consensus.
     int broadcast_to_all = 0;
+
+    // Number of parallel TCP connections to open per logical node. >1 gives
+    // the gateway multiple concurrent write paths into a single server and
+    // forces the server to spawn that many per-connection handler threads,
+    // which is essential for single-node gateway-direct throughput to scale.
+    int conn_fanout = 1;
 };
 
 void usage(const char* argv0) {
@@ -141,7 +147,7 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1]\n";
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--connFanout <N>]\n";
 }
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
@@ -224,6 +230,9 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.vote_store_max_entries = static_cast<size_t>(std::stoull(need("--voteStoreMax")));
             } else if (a == "--broadcastToAll") {
                 opt.broadcast_to_all = std::stoi(need("--broadcastToAll"));
+            } else if (a == "--connFanout") {
+                opt.conn_fanout = std::stoi(need("--connFanout"));
+                if (opt.conn_fanout < 1) opt.conn_fanout = 1;
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -2344,11 +2353,12 @@ int main(int argc, char** argv) {
     if (submit_mode == "event") {
         submitter.reset(new ariabc_pg::async_cluster_submitter());
         std::string serr;
-        if (!submitter->start(nodes, serr)) {
+        const size_t fanout = static_cast<size_t>(opt.conn_fanout > 0 ? opt.conn_fanout : 1);
+        if (!submitter->start(nodes, fanout, serr)) {
             std::cerr << "submitMode=event disabled: " << serr << std::endl;
             return 1;
         }
-        std::cout << "submitMode=event: shared nonblocking submit reactor enabled" << std::endl;
+        std::cout << "submitMode=event: shared nonblocking submit reactor enabled (connFanout=" << fanout << ")" << std::endl;
     }
 
     // Kafka setup (optional).
@@ -2385,6 +2395,7 @@ int main(int argc, char** argv) {
     std::cout << "completion_path=" << opt.completion_path
               << " validation_mode=" << opt.validation_mode
               << " waitMajority=" << (majority_wait_enabled ? 1 : 0)
+              << " broadcastToAll=" << (opt.broadcast_to_all ? 1 : 0)
               << std::endl;
 
     if (!majority_wait_enabled) {
@@ -3727,6 +3738,7 @@ int main(int argc, char** argv) {
             << "PROFILE_GATEWAY "
             << " completion_path=" << opt.completion_path
             << " validation_mode=" << opt.validation_mode
+            << " broadcast_to_all=" << (opt.broadcast_to_all ? 1 : 0)
             << " submit_mode=" << (submitter ? "event" : "blocking")
             << " num_terminals=" << opt.num_terminals
             << " det_pipeline_depth=" << prof_det_pipeline_depth

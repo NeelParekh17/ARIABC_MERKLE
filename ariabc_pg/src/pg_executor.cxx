@@ -1847,6 +1847,19 @@ void pg_executor::event_loop() {
                         std::vector<task> candidate;
                         candidate.reserve(block_cap);
                         while (!q_.empty() && candidate.size() < block_cap) {
+                            /*
+                             * Keep one BCDB block inside the request batch that
+                             * the gateway or Raft state machine accepted.
+                             * Kafka-only bypass replicas receive those batches
+                             * in the same order, but their executor queues can
+                             * drain at different rates; merging adjacent queue
+                             * batches here would make replica-local timing pick
+                             * BCDB block boundaries.
+                             */
+                            if (!candidate.empty() &&
+                                q_.front().raft_log_idx != candidate.front().raft_log_idx) {
+                                break;
+                            }
                             candidate.push_back(std::move(q_.front()));
                             q_.pop();
                         }

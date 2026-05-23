@@ -97,6 +97,20 @@ int32         burstTime = 0;
 uint64        start_time;
 static int  tx_id_counter = 0; /* legacy: not used by deterministic path */
 
+/*
+ * Backend-local copy of the immutable per-tx fields needed after enqueue.
+ *
+ * DT workers own the lifecycle of BCDBShmXact entries once tx_queue_insert()
+ * hands them off, and block_cleaning_dt() can reclaim old block headers as the
+ * pipeline advances.  Submitters therefore must not keep dereferencing
+ * block->txs[] while waiting for or formatting results.
+ */
+typedef struct BCDBBlockResultRef
+{
+	BCTxID tx_id;
+	char   hash[TX_HASH_SIZE];
+} BCDBBlockResultRef;
+
 /* ----------------------------------------------------------------------
  *  Forward declarations for file-local helpers.
  *
@@ -124,7 +138,9 @@ static int32 bcdb_select_worker_count(int32 requested);
 static inline int bcdb_result_slot_for_txid(BCTxID tx_id);
 static inline uint64 bcdb_wait_until_committed(BCTxID target_tx_id);
 static inline uint64 bcdb_wait_until_slot_ready(BCTxID target_tx_id);
-static inline uint64 bcdb_wait_until_block_slots_ready(BCBlock *block);
+static inline uint64 bcdb_wait_until_block_slots_ready(const BCDBBlockResultRef *refs,
+													  int num_tx,
+													  BCBlockID block_id);
 static bool bcdb_block_profile_enabled(void);
 static bool bcdb_block_return_actual_results_enabled(void);
 static bool bcdb_block_wait_watermark_enabled(void);
@@ -557,8 +573,8 @@ bcdb_wait_until_slot_ready(BCTxID target_tx_id)
 /*
  * bcdb_wait_until_block_slots_ready
  * ---------------------------------
- * Wait until every tx in `block` has its result slot published in the
- * sentinel block's result ring.
+ * Wait until every locally copied tx ref has its result slot published in
+ * the sentinel block's result ring.
  *
  * Rationale (vs. per-slot waits in a loop):
  *   The earlier code path walked block->txs[] in order and called the
@@ -571,6 +587,10 @@ bcdb_wait_until_slot_ready(BCTxID target_tx_id)
  *   Correctness is identical: each slot is verified with the same
  *   ACQUIRE-load tx_id match, so we never read a recycled slot.
  *
+ *   The input is a backend-local copy, not block->txs[].  Workers can free
+ *   BCDBShmXact entries and block_cleaning_dt() can reclaim block headers
+ *   while the submitter is still waiting under deeper gateway pipelines.
+ *
  * Reporting:
  *   On the 5-second hang watchdog, we report the FIRST missing slot
  *   (which is the one stalling the block).  That makes server.log point
@@ -579,7 +599,9 @@ bcdb_wait_until_slot_ready(BCTxID target_tx_id)
  * Returns: elapsed wait time in microseconds.
  */
 static inline uint64
-bcdb_wait_until_block_slots_ready(BCBlock *block)
+bcdb_wait_until_block_slots_ready(const BCDBBlockResultRef *refs,
+								  int num_tx,
+								  BCBlockID block_id)
 {
 	BCBlock *result_block = get_block_by_id(1, false); /* sentinel block holds the ring */
 	int    spins = 0;
@@ -587,7 +609,7 @@ bcdb_wait_until_block_slots_ready(BCBlock *block)
 	uint64 wait_start_us = bcdb_get_time();
 	uint64 next_warn_us = wait_start_us + 5000000; /* first warning at +5 s */
 
-	Assert(block != NULL);
+	Assert(refs != NULL || num_tx == 0);
 	Assert(result_block != NULL);
 	for (;;)
 	{
@@ -597,10 +619,10 @@ bcdb_wait_until_block_slots_ready(BCBlock *block)
 		int first_missing_slot = -1;
 
 		/* One pass over every tx; bail out as soon as a slot is missing. */
-		for (int i = 0; i < block->num_tx; ++i)
+		for (int i = 0; i < num_tx; ++i)
 		{
-			BCDBShmXact *tx = block->txs[i];
-			const int slot = bcdb_result_slot_for_txid(tx->tx_id);
+			const BCTxID tx_id = refs[i].tx_id;
+			const int slot = bcdb_result_slot_for_txid(tx_id);
 			BCTxID published;
 
 			/* ACQUIRE-load: pairs with the worker's RELEASE-store after
@@ -608,10 +630,10 @@ bcdb_wait_until_block_slots_ready(BCBlock *block)
 			 * the stored tx_id matches exactly. */
 			published = __atomic_load_n(&result_block->result_committed_txid[slot],
 										__ATOMIC_ACQUIRE);
-			if (published != tx->tx_id)
+			if (published != tx_id)
 			{
 				all_ready = false;
-				first_missing_txid = tx->tx_id;
+				first_missing_txid = tx_id;
 				first_missing_value = published;
 				first_missing_slot = slot;
 				break;
@@ -630,7 +652,7 @@ bcdb_wait_until_block_slots_ready(BCBlock *block)
 				BCTxID last_committed = get_last_committed_txid(NULL);
 				ereport(LOG,
 						(errmsg("[BCDB_HANG] block_slots_ready_stuck pid=%d block_id=%d first_missing_txid=%d slot=%d slot_value=%d last_committed=%d waited_us=%lu poll_us=%d spins=%d",
-								(int) getpid(), (int) block->id,
+								(int) getpid(), (int) block_id,
 								(int) first_missing_txid, first_missing_slot,
 								(int) first_missing_value, (int) last_committed,
 								(unsigned long) (now_us - wait_start_us),
@@ -1238,8 +1260,11 @@ bcdb_middleware_submit_block_results(const char* block_json)
 {
 	BCBlock     *block;
 	BCBlock     *result_block;
+	BCDBBlockResultRef *tx_refs = NULL;
 	StringInfoData out;
 	bool        profile = bcdb_block_profile_enabled();
+	int         num_tx;
+	BCBlockID  block_id;
 	/* Profiling timestamps (microsecond resolution).  All "_us" suffixed. */
 	uint64      t_start_us = 0;
 	uint64      t_parse_us = 0;
@@ -1269,17 +1294,38 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	if (result_block == NULL)
 		ereport(ERROR,
 				(errmsg("BCDB result block is not initialized")));
+
+	/*
+	 * Copy the immutable fields needed by the waiter/formatter before
+	 * enqueueing.  From tx_queue_insert() onward, workers may finish and
+	 * delete BCDBShmXact entries, and sufficiently deep pipelines may reclaim
+	 * old block headers before this backend returns to the gateway.
+	 */
+	num_tx = block->num_tx;
+	block_id = block->id;
+	if (num_tx > 0)
+	{
+		tx_refs = (BCDBBlockResultRef *) palloc0(sizeof(BCDBBlockResultRef) * num_tx);
+		for (int i = 0; i < num_tx; ++i)
+		{
+			BCDBShmXact *tx = block->txs[i];
+
+			Assert(tx != NULL);
+			tx_refs[i].tx_id = tx->tx_id;
+			strlcpy(tx_refs[i].hash, tx->hash, sizeof(tx_refs[i].hash));
+		}
+	}
 	if (profile)
 		t_parse_us = bcdb_get_time();
 
 	/* Allocate per-tx wait array only when profiling -- avoids palloc cost
 	 * on the hot path when profiling is disabled. */
-	if (profile && block->num_tx > 0)
-		slot_wait_us = (uint64 *) palloc0(sizeof(uint64) * block->num_tx);
+	if (profile && num_tx > 0)
+		slot_wait_us = (uint64 *) palloc0(sizeof(uint64) * num_tx);
 
 	/* Phase 2: enqueue every tx.  Optional yield-every-N gives workers a
 	 * chance to drain the queue during large-block bursts. */
-	for (int i = 0; i < block->num_tx; ++i)
+	for (int i = 0; i < num_tx; ++i)
 	{
 		BCDBShmXact *tx = block->txs[i];
 		tx_queue_insert(tx, tx->tx_id);
@@ -1293,45 +1339,45 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	/* Phase 3: wait for every result slot in this block to be published.
 	 * Two equivalent strategies (see bcdb_block_wait_watermark_enabled docs);
 	 * both ensure every block-local slot is readable before we read it. */
-	if (block->num_tx > 0)
+	if (num_tx > 0)
 	{
-		BCDBShmXact *last_tx = block->txs[block->num_tx - 1];
+		BCTxID last_tx_id = tx_refs[num_tx - 1].tx_id;
 
 		if (bcdb_block_wait_watermark_enabled())
 		{
 			/* Watermark mode: workers publish slot before advancing the
 			 * contiguous committed watermark, so a watermark >= last_tx_id
 			 * implies all slots in [first..last] are also published. */
-			block_wait_us = bcdb_wait_until_committed((BCTxID) last_tx->tx_id);
+			block_wait_us = bcdb_wait_until_committed(last_tx_id);
 		}
 		else
 		{
 			/* Block-scan mode: one amortised wait that polls every slot
 			 * per backoff iteration. */
-			block_wait_us = bcdb_wait_until_block_slots_ready(block);
+			block_wait_us = bcdb_wait_until_block_slots_ready(tx_refs, num_tx, block_id);
 		}
 	}
 
 	/* Phase 4: format the completion payload and mark slots consumed. */
 	initStringInfo(&out);
-	for (int i = 0; i < block->num_tx; ++i)
+	for (int i = 0; i < num_tx; ++i)
 	{
-		BCDBShmXact *tx = block->txs[i];
-		const int mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
+		const BCTxID tx_id = tx_refs[i].tx_id;
+		const int mem_txid = bcdb_result_slot_for_txid(tx_id);
 		BCTxID published;
 		uint64 wait_us = 0;
 
-		/* ACQUIRE-load the slot owner.  This must exactly equal tx->tx_id;
+		/* ACQUIRE-load the slot owner.  This must exactly equal tx_id;
 		 * any other value means the slot is owned by a different tx. */
 		published = __atomic_load_n(&result_block->result_committed_txid[mem_txid],
 									 __ATOMIC_ACQUIRE);
-		if (published != tx->tx_id)
+		if (published != tx_id)
 		{
 			/* Defensive: block-level wait above should have made this
 			 * unreachable.  Fall back to a per-slot wait so we never
 			 * read a recycled slot.  Mismatch here would indicate
 			 * an ordering bug in the worker publish path. */
-			wait_us = bcdb_wait_until_slot_ready((BCTxID) tx->tx_id);
+			wait_us = bcdb_wait_until_slot_ready(tx_id);
 		}
 		if (profile)
 		{
@@ -1344,7 +1390,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
 
 		/* Always emit the hash; emit the row payload only when explicitly
 		 * requested via BCDB_BLOCK_RETURN_ACTUAL_RESULTS. */
-		appendStringInfoString(&out, tx->hash);
+		appendStringInfoString(&out, tx_refs[i].hash);
 		appendStringInfoChar(&out, '\t');
 		if (bcdb_block_return_actual_results_enabled())
 			append_hex_encoded(&out, result_block->result[mem_txid]);
@@ -1354,7 +1400,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
 		 * RELEASE so a worker writing the next tx into this slot knows
 		 * the previous occupant has been fully consumed. */
 		__atomic_store_n(&result_block->result_consumed_txid[mem_txid],
-						 (int32) tx->tx_id, __ATOMIC_RELEASE);
+						 (int32) tx_id, __ATOMIC_RELEASE);
 	}
 
 	/* Phase 5 (optional): emit profiling LOG line. */
@@ -1364,15 +1410,15 @@ bcdb_middleware_submit_block_results(const char* block_json)
 		uint64 total_us;
 
 		t_wait_us = block_wait_us + slot_wait_sum_us;
-		if (slot_wait_us != NULL && block->num_tx > 0)
+		if (slot_wait_us != NULL && num_tx > 0)
 		{
 			/* Compute p50/p95 over per-slot fallback wait timings. */
-			int p50_idx = block->num_tx / 2;
-			int p95_idx = (block->num_tx * 95) / 100;
+			int p50_idx = num_tx / 2;
+			int p95_idx = (num_tx * 95) / 100;
 
-			if (p95_idx >= block->num_tx)
-				p95_idx = block->num_tx - 1;
-			qsort(slot_wait_us, block->num_tx, sizeof(uint64), bcdb_uint64_cmp);
+			if (p95_idx >= num_tx)
+				p95_idx = num_tx - 1;
+			qsort(slot_wait_us, num_tx, sizeof(uint64), bcdb_uint64_cmp);
 			slot_wait_p50_us = slot_wait_us[p50_idx];
 			slot_wait_p95_us = slot_wait_us[p95_idx];
 		}
@@ -1387,15 +1433,15 @@ bcdb_middleware_submit_block_results(const char* block_json)
 		ereport(LOG,
 				(errmsg("PROFILE_BCDB_BLOCK pid=%d block_txs=%d total_ms=%.3f parse_ms=%.3f enqueue_ms=%.3f wait_block_ms=%.3f wait_slot_ms=%.3f format_ms=%.3f slot_wait_avg_us=%.3f slot_wait_p50_us=%lu slot_wait_p95_us=%lu slot_wait_max_us=%lu",
 						(int) getpid(),
-						block->num_tx,
+						num_tx,
 						total_us / 1000.0,
 						(t_parse_us - t_start_us) / 1000.0,
 						(t_enqueue_us - t_parse_us) / 1000.0,
 						block_wait_us / 1000.0,
 						t_wait_us / 1000.0,
 						t_format_us / 1000.0,
-						block->num_tx > 0
-							? ((double) slot_wait_sum_us / (double) block->num_tx)
+						num_tx > 0
+							? ((double) slot_wait_sum_us / (double) num_tx)
 							: 0.0,
 						(unsigned long) slot_wait_p50_us,
 						(unsigned long) slot_wait_p95_us,
@@ -1403,6 +1449,8 @@ bcdb_middleware_submit_block_results(const char* block_json)
 		if (slot_wait_us != NULL)
 			pfree(slot_wait_us);
 	}
+	if (tx_refs != NULL)
+		pfree(tx_refs);
 
 	return out.data;
 }

@@ -74,6 +74,12 @@ async_cluster_submitter::~async_cluster_submitter() {
 }
 
 bool async_cluster_submitter::start(const std::vector<host_port>& nodes, std::string& err) {
+    return start(nodes, /*conn_fanout=*/1, err);
+}
+
+bool async_cluster_submitter::start(const std::vector<host_port>& nodes,
+                                    size_t conn_fanout,
+                                    std::string& err) {
     err.clear();
     stop_.store(false);
 
@@ -81,6 +87,7 @@ bool async_cluster_submitter::start(const std::vector<host_port>& nodes, std::st
         err = "no nodes";
         return false;
     }
+    if (conn_fanout == 0) conn_fanout = 1;
 
     int pfd[2];
     if (::pipe(pfd) != 0) {
@@ -92,13 +99,22 @@ bool async_cluster_submitter::start(const std::vector<host_port>& nodes, std::st
     set_nonblocking(wake_rfd_);
     set_nonblocking(wake_wfd_);
 
+    num_logical_nodes_ = nodes.size();
+    conn_fanout_ = conn_fanout;
+
+    // One node_conn per (logical_node, lane). conns_[i].hp = nodes[i / fanout].
     conns_.clear();
-    conns_.reserve(nodes.size());
-    for (size_t i = 0; i < nodes.size(); ++i) {
+    conns_.reserve(nodes.size() * conn_fanout_);
+    for (size_t i = 0; i < nodes.size() * conn_fanout_; ++i) {
         node_conn nc;
-        nc.hp = nodes[i];
+        nc.hp = nodes[i / conn_fanout_];
         conns_.push_back(std::move(nc));
     }
+
+    // Per-node round-robin counters. std::atomic is non-copyable/movable, so
+    // we have to construct in place rather than resize().
+    std::vector<std::atomic<size_t>> rr(num_logical_nodes_);
+    rr_per_node_.swap(rr);
 
     io_thread_ = std::thread([this] { io_loop(); });
     return true;
@@ -143,7 +159,7 @@ async_submitter_stats async_cluster_submitter::stats() const {
     return s;
 }
 
-bool async_cluster_submitter::submit_async_to_node(size_t node_idx,
+bool async_cluster_submitter::submit_async_to_node(size_t logical_node_idx,
                                                    const client_api_request& req,
                                                    std::shared_ptr<submit_ctx>& out_ctx,
                                                    std::string& err) {
@@ -153,13 +169,21 @@ bool async_cluster_submitter::submit_async_to_node(size_t node_idx,
         err = "stopped";
         return false;
     }
-    if (node_idx >= conns_.size()) {
+    if (logical_node_idx >= num_logical_nodes_) {
         err = "invalid node_idx";
         return false;
     }
 
+    // Round-robin among the fanout lanes for this logical node, so a server
+    // sees multiple concurrent connections from this gateway and per-connection
+    // handler threads on the server can parallelize through the BCDB pool.
+    const size_t lane = (conn_fanout_ > 1)
+        ? (rr_per_node_[logical_node_idx].fetch_add(1, std::memory_order_relaxed) % conn_fanout_)
+        : 0;
+    const size_t physical_idx = logical_node_idx * conn_fanout_ + lane;
+
     std::shared_ptr<submit_ctx> ctx(new submit_ctx());
-    ctx->node_idx = node_idx;
+    ctx->node_idx = physical_idx;
     ctx->req = req;
 
     {
