@@ -118,12 +118,21 @@ def _parse_gateway_log(path: Path) -> dict[str, Any]:
         broadcast_to_all = _as_int(first(r"broadcast_to_all=([0-9]+)"))
     tps_denominator = progress_completed or progress_accepted or loaded
     tps = (1000.0 * tps_denominator / overall_ms) if tps_denominator and overall_ms and overall_ms > 0 else None
+    # Apples-to-apples requires that EVERY workload statement actually
+    # completed. A partially-finished run can otherwise produce a plausible TPS
+    # number from progress_accepted alone and silently enter the graph.
+    fully_completed = (
+        loaded > 0
+        and progress_completed is not None
+        and progress_completed == loaded
+    )
     valid = (
         completion_path == "kafka_majority"
         and wait_majority == 1
         and divergence == 0
         and permanent == 0
         and tps is not None
+        and fully_completed
     )
     return {
         "loaded_queries": loaded,
@@ -142,6 +151,7 @@ def _parse_gateway_log(path: Path) -> dict[str, Any]:
         "broadcast_to_all": broadcast_to_all,
         "tps": tps,
         "valid": valid,
+        "fully_completed": fully_completed,
     }
 
 
@@ -164,13 +174,21 @@ def _load_single_rows(single_results: Path, *, workload: str, machine: str) -> l
         if executed is None:
             executed = _infer_workload_statement_count(workload)
         tps = (1000.0 * executed / overall_ms) if executed and overall_ms and overall_ms > 0 else None
+        permanent_failures = _as_int(r.get("permanent_failures")) or 0
         valid = (
             tps is not None
             and (_as_int(r.get("start_server_exit")) or 0) == 0
             and (_as_int(r.get("restore_exit")) or 0) == 0
             and (_as_int(r.get("py_exit")) or 0) == 0
             and (r.get("db_merkle_verify") or "").strip().lower() == "t"
+            and permanent_failures == 0
         )
+        invalid_reason = ""
+        if not valid:
+            if permanent_failures > 0:
+                invalid_reason = f"permanent_failures_{permanent_failures}"
+            else:
+                invalid_reason = "single_node_runner_or_merkle_failed"
         tps_s = _fmt(tps, 6)
         out.append(
             {
@@ -199,9 +217,9 @@ def _load_single_rows(single_results: Path, *, workload: str, machine: str) -> l
                 "completion_path": "direct_pg" if mode == "pg" else "direct_bcdb_det",
                 "wait_majority": "0",
                 "divergence_count": "",
-                "permanent_failures": str(_as_int(r.get("permanent_failures")) or 0),
+                "permanent_failures": str(permanent_failures),
                 "artifact_dir": str(single_results.parent),
-                "invalid_reason": "" if valid else "single_node_runner_or_merkle_failed",
+                "invalid_reason": invalid_reason,
                 "notes": "single-node bench_threads_matrix signing=0",
             }
         )
@@ -247,6 +265,10 @@ def _load_full_rows(manifest: Path, *, workload: str) -> list[dict[str, str]]:
             invalid_reasons.append(f"permanent_failures_{parsed['permanent_failures']}")
         if parsed["tps"] is None:
             invalid_reasons.append("missing_gateway_tps")
+        if not parsed["fully_completed"]:
+            invalid_reasons.append(
+                f"partial_completed_{parsed['progress_completed']}_of_{parsed['loaded_queries']}"
+            )
         raw_tps = _fmt(parsed["tps"], 6)
         out.append(
             {
@@ -309,6 +331,7 @@ def _load_single_gateway_rows(manifest: Path, *, workload: str, machine: str) ->
             and parsed["divergence_count"] in (0, None)
             and parsed["permanent_failures"] in (0, None)
             and parsed["tps"] is not None
+            and parsed["fully_completed"]
         )
         invalid_reasons: list[str] = []
         if not exit_ok:
@@ -321,6 +344,10 @@ def _load_single_gateway_rows(manifest: Path, *, workload: str, machine: str) ->
             invalid_reasons.append(f"permanent_failures_{parsed['permanent_failures']}")
         if parsed["tps"] is None:
             invalid_reasons.append("missing_gateway_tps")
+        if not parsed["fully_completed"]:
+            invalid_reasons.append(
+                f"partial_completed_{parsed['progress_completed']}_of_{parsed['loaded_queries']}"
+            )
         raw_tps = _fmt(parsed["tps"], 6)
         out.append(
             {

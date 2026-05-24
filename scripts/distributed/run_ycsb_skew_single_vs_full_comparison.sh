@@ -1120,7 +1120,16 @@ run_full_system() {
       full_det_window="$SELECTED_DET_WINDOW"
       full_effective_inflight="$SELECTED_EFFECTIVE_INFLIGHT"
       full_bcdb_worker_count="$SELECTED_BCDB_WORKER_COUNT"
-      req_id_offset=$(( (run * 1000000) + (th * 10000) + 1 ))
+      # Disjoint req-id range per cluster mode so stale Kafka result messages
+      # from a kafka-only case cannot contaminate a later raft-kafka case (and
+      # vice versa) — the gateway result-matching key is the req id, and the
+      # base formula (run*1e6 + th*1e4 + 1) was identical across modes.
+      if [[ "$cluster_mode" == "kafka-only" ]]; then
+        mode_offset=100000000
+      else
+        mode_offset=200000000
+      fi
+      req_id_offset=$(( mode_offset + (run * 1000000) + (th * 10000) + 1 ))
       log "Cluster case mode=$cluster_mode thread=$th run=$run experiment=$EXPERIMENT_MODE (num-terminals=$full_num_terminals det-pipeline-depth=$full_det_pipeline_depth effective-inflight=$full_effective_inflight pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-parallel=$FULL_DET_BLOCK_PARALLEL det-block-pipeline=$FULL_DET_BLOCK_PIPELINE det-block-max=$FULL_DET_BLOCK_MAX det-partial-block-max-wait-us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US serial-gate=$FULL_BCDB_SERIAL_GATE_MODE serial-gate-source=$FULL_BCDB_SERIAL_GATE_SOURCE dt-parse-barrier=$FULL_BCDB_DT_PARSE_BARRIER completion-only-skip-reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS full-result-replica-limit=$FULL_RESULT_REPLICA_LIMIT ordering_path=$ordering_path)"
       before_file="$RUN_LOG_DIR/full_${cluster_mode}_before_${th}_${run}.txt"
       after_file="$RUN_LOG_DIR/full_${cluster_mode}_after_${th}_${run}.txt"
