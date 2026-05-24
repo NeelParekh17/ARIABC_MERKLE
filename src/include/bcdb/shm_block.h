@@ -12,6 +12,8 @@
 #include "storage/spin.h"
 #include "c.h"
 
+#define BCDB_FIRST_SUBMIT_BLOCK_ID 2
+
 
 /* unfortunately, the name Block conflicts with another component in postgres, so use ugly BCBlock for now */
 typedef struct
@@ -119,6 +121,16 @@ typedef struct
     char log[1024 * 1024 * 10];
     int  log_counter;
 #endif
+	/*
+	 * Next block id allowed to enqueue worker-visible txs.
+	 *
+	 * Parallel PostgreSQL backends may parse block-submit SQL calls out of
+	 * order.  Workers consume FIFO queues per partition, so allowing a higher
+	 * block's txid to enter a worker queue before a lower block can make that
+	 * worker wait forever on a predecessor queued behind it.  This gate keeps
+	 * enqueue order monotonic while allowing later completion waits to overlap.
+	 */
+	BCBlockID volatile next_enqueue_block_id;
 } BlockMeta;
 
 /* todo: change it to HTAB */

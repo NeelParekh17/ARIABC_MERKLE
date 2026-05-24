@@ -3157,17 +3157,21 @@ int main(int argc, char** argv) {
                 return slots;
             };
 
+            const int event_leader_idx =
+                ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed);
             const bool det_event_pipeline =
                 (submitter &&
                  submit_mode == "event" &&
                  opt.det_submit_pipeline == 1 &&
-                 ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed) >= 0 &&
-                 static_cast<size_t>(ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed)) < nodes.size());
+                 (opt.broadcast_to_all ||
+                  (event_leader_idx >= 0 &&
+                   static_cast<size_t>(event_leader_idx) < nodes.size())));
 
             if (det_event_pipeline) {
                 struct det_submit_ticket {
                     std::vector<det_shaped_request> items;
-                    std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> ctx;
+                    std::vector<std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx>> ctxs;
+                    size_t submit_node_idx = 0;
                     std::chrono::steady_clock::time_point submit_started_at;
                 };
 
@@ -3176,8 +3180,9 @@ int main(int argc, char** argv) {
                     : det_pipeline_cap;
                 const size_t det_submit_limit =
                     std::max<size_t>(1, std::min(det_pipeline_cap, configured_det_submit_limit));
-                const size_t leader_idx =
-                    static_cast<size_t>(ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed));
+                const size_t single_submit_node_idx = opt.broadcast_to_all
+                    ? 0
+                    : static_cast<size_t>(event_leader_idx);
                 std::deque<det_submit_ticket> pending_accepts;
                 size_t pending_request_count = 0;
                 size_t next_idx = 0;
@@ -3197,8 +3202,32 @@ int main(int argc, char** argv) {
 
                     ariabc_pg::client_api_response resp;
                     std::string submit_err;
-                    const bool ok_submit =
-                        submitter->wait_submit(ticket.ctx, resp, submit_err);
+                    bool ok_submit = true;
+                    for (size_t ctx_idx = 0; ctx_idx < ticket.ctxs.size(); ++ctx_idx) {
+                        ariabc_pg::client_api_response node_resp;
+                        std::string node_err;
+                        const bool ok_node =
+                            submitter->wait_submit(ticket.ctxs[ctx_idx], node_resp, node_err);
+                        if (!ok_node) {
+                            if (ok_submit) {
+                                submit_err = node_err.empty()
+                                    ? std::string("io_failed")
+                                    : node_err;
+                            }
+                            ok_submit = false;
+                            continue;
+                        }
+                        if (node_resp.status != 0) {
+                            if (ok_submit) {
+                                submit_err = node_resp.msg;
+                            }
+                            ok_submit = false;
+                            continue;
+                        }
+                        if (ctx_idx == 0) {
+                            resp = node_resp;
+                        }
+                    }
                     const auto submit_done_at = std::chrono::steady_clock::now();
                     total_submit_ns.fetch_add(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -3211,16 +3240,9 @@ int main(int argc, char** argv) {
                         permanent_failures.fetch_add(1);
                         return false;
                     }
-                    if (resp.status != 0) {
-                        std::cerr << "det pipeline not accepted req="
-                                  << (ticket.items.empty() ? 0 : ticket.items.front().req_num)
-                                  << " msg=" << resp.msg << std::endl;
-                        release_det_item_lanes(ticket.items);
-                        permanent_failures.fetch_add(1);
-                        return false;
-                    }
-                    if (!wait_direct_completion(
-                            leader_idx,
+                    if (!opt.broadcast_to_all &&
+                        !wait_direct_completion(
+                            ticket.submit_node_idx,
                             resp,
                             ticket.items.empty() ? std::string("det_pipeline_batch")
                                                  : ticket.items.front().req_id)) {
@@ -3271,10 +3293,35 @@ int main(int argc, char** argv) {
                             failed = true;
                             break;
                         }
-                        std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> ctx;
+                        std::vector<std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx>> ctxs;
                         std::string submit_err;
                         const auto submit_started_at = std::chrono::steady_clock::now();
-                        if (!submitter->submit_async_to_node(leader_idx, req, ctx, submit_err)) {
+                        bool enqueue_ok = true;
+                        if (opt.broadcast_to_all) {
+                            ctxs.reserve(nodes.size());
+                            for (size_t node_idx = 0; node_idx < nodes.size(); ++node_idx) {
+                                std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> node_ctx;
+                                if (!submitter->submit_async_to_node_lane(
+                                        node_idx, 0, req, node_ctx, submit_err)) {
+                                    enqueue_ok = false;
+                                    break;
+                                }
+                                ctxs.push_back(std::move(node_ctx));
+                            }
+                        } else {
+                            std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> ctx;
+                            enqueue_ok = submitter->submit_async_to_node(
+                                single_submit_node_idx, req, ctx, submit_err);
+                            if (enqueue_ok) {
+                                ctxs.push_back(std::move(ctx));
+                            }
+                        }
+                        if (!enqueue_ok) {
+                            for (const auto& queued_ctx : ctxs) {
+                                ariabc_pg::client_api_response drain_resp;
+                                std::string drain_err;
+                                (void)submitter->wait_submit(queued_ctx, drain_resp, drain_err);
+                            }
                             std::cerr << "det pipeline enqueue failed idx=" << next_idx
                                       << " err=" << submit_err << std::endl;
                             release_det_item_lanes(batch_items);
@@ -3285,7 +3332,8 @@ int main(int argc, char** argv) {
 
                         det_submit_ticket ticket;
                         ticket.items = std::move(batch_items);
-                        ticket.ctx = std::move(ctx);
+                        ticket.ctxs = std::move(ctxs);
+                        ticket.submit_node_idx = single_submit_node_idx;
                         ticket.submit_started_at = submit_started_at;
                         pending_request_count += ticket.items.size();
                         det_sent_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);

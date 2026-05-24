@@ -163,6 +163,26 @@ bool async_cluster_submitter::submit_async_to_node(size_t logical_node_idx,
                                                    const client_api_request& req,
                                                    std::shared_ptr<submit_ctx>& out_ctx,
                                                    std::string& err) {
+    if (logical_node_idx >= num_logical_nodes_) {
+        err = "invalid node_idx";
+        out_ctx.reset();
+        return false;
+    }
+
+    // Round-robin among the fanout lanes for this logical node, so a server
+    // sees multiple concurrent connections from this gateway and per-connection
+    // handler threads on the server can parallelize through the BCDB pool.
+    const size_t lane = (conn_fanout_ > 1)
+        ? (rr_per_node_[logical_node_idx].fetch_add(1, std::memory_order_relaxed) % conn_fanout_)
+        : 0;
+    return submit_async_to_node_lane(logical_node_idx, lane, req, out_ctx, err);
+}
+
+bool async_cluster_submitter::submit_async_to_node_lane(size_t logical_node_idx,
+                                                        size_t lane,
+                                                        const client_api_request& req,
+                                                        std::shared_ptr<submit_ctx>& out_ctx,
+                                                        std::string& err) {
     err.clear();
     out_ctx.reset();
     if (stop_.load()) {
@@ -173,13 +193,14 @@ bool async_cluster_submitter::submit_async_to_node(size_t logical_node_idx,
         err = "invalid node_idx";
         return false;
     }
+    if (conn_fanout_ == 0) {
+        err = "invalid conn_fanout";
+        return false;
+    }
+    if (lane >= conn_fanout_) {
+        lane = conn_fanout_ - 1;
+    }
 
-    // Round-robin among the fanout lanes for this logical node, so a server
-    // sees multiple concurrent connections from this gateway and per-connection
-    // handler threads on the server can parallelize through the BCDB pool.
-    const size_t lane = (conn_fanout_ > 1)
-        ? (rr_per_node_[logical_node_idx].fetch_add(1, std::memory_order_relaxed) % conn_fanout_)
-        : 0;
     const size_t physical_idx = logical_node_idx * conn_fanout_ + lane;
 
     std::shared_ptr<submit_ctx> ctx(new submit_ctx());

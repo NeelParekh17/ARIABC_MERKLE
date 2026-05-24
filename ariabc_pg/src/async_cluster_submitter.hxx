@@ -71,6 +71,12 @@ public:
                               std::shared_ptr<submit_ctx>& out_ctx,
                               std::string& err);
 
+    bool submit_async_to_node_lane(size_t node_idx,
+                                   size_t lane,
+                                   const client_api_request& req,
+                                   std::shared_ptr<submit_ctx>& out_ctx,
+                                   std::string& err);
+
     bool wait_submit(const std::shared_ptr<submit_ctx>& ctx,
                      client_api_response& out_resp,
                      std::string& err);

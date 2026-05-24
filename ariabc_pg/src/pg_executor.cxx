@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <climits>
 #include <cstdlib>
 #include <cerrno>
 #include <fcntl.h>
@@ -50,6 +51,7 @@ constexpr size_t kDetQueueLowWatermarkMin = 12;
 constexpr size_t kDetQueueHighWatermarkFactor = 2;  // high = max(minHigh, 2*pool)
 constexpr size_t kDetQueueLowWatermarkFactor = 1;   // low  = max(minLow,  1*pool)
 constexpr uint64_t kDefaultDetPartialBlockMaxWaitNs = 2ULL * 1000ULL * 1000ULL;
+constexpr uint64_t kDetExplicitTxidMaxSeq = 80000000ULL;
 constexpr const char* kHashAlgo = "sha256";
 constexpr uint8_t kHashAlgoId = 1;
 constexpr const char* kDefaultResultSigKey = "ariabc-result-v2-dev-key";
@@ -337,11 +339,14 @@ std::string sql_escape_literal(const std::string& in) {
 
 std::string build_bcdb_block_submit_results_sql(
     uint64_t block_id,
-    const std::vector<std::pair<std::string, std::string>>& txs)
+    const std::vector<std::pair<std::string, std::string>>& txs,
+    const std::vector<int64_t>* explicit_txids = nullptr)
 {
     // Estimate JSON size: 32 (bid prefix) + per-tx overhead + hash/sql bodies.
     size_t est = 64;
-    for (const auto& p : txs) est += 64 + p.first.size() + 2 * p.second.size();
+    const bool use_explicit_txids =
+        explicit_txids != nullptr && explicit_txids->size() == txs.size();
+    for (const auto& p : txs) est += 96 + p.first.size() + 2 * p.second.size();
 
     std::string json;
     json.reserve(est);
@@ -354,7 +359,13 @@ std::string build_bcdb_block_submit_results_sql(
         json_escape_append(json, txs[i].first);
         json.append("\",\"sql\":\"");
         json_escape_append(json, txs[i].second);
-        json.append("\"}");
+        if (use_explicit_txids) {
+            json.append("\",\"txid\":");
+            json.append(std::to_string((*explicit_txids)[i]));
+            json.append("}");
+        } else {
+            json.append("\"}");
+        }
     }
     json.append("]}");
 
@@ -1943,11 +1954,13 @@ void pg_executor::event_loop() {
 
                 const uint64_t exec_begin_ns = now_steady_ns();
                 std::vector<std::pair<std::string, std::string>> txs;
+                std::vector<uint64_t> tx_det_seqs;
                 std::vector<uint8_t> backend_mask;
                 const uint64_t tx_key_start = det_block_tx_key_base_ + det_block_next_tx_key_;
                 bool build_ok = true;
                 uint64_t skipped_readonly = 0;
                 txs.reserve(det_batch.size());
+                tx_det_seqs.reserve(det_batch.size());
                 backend_mask.reserve(det_batch.size());
                 for (size_t i = 0; i < det_batch.size(); ++i) {
                     uint64_t seq = 0;
@@ -1964,6 +1977,7 @@ void pg_executor::event_loop() {
                     backend_mask.push_back(1);
                     const std::string key = std::to_string(tx_key_start + static_cast<uint64_t>(i));
                     txs.emplace_back(key, std::move(raw_sql));
+                    tx_det_seqs.push_back(seq);
                 }
                 det_block_next_tx_key_ += static_cast<uint64_t>(det_batch.size());
                 if (skipped_readonly > 0) {
@@ -2000,7 +2014,54 @@ void pg_executor::event_loop() {
                     continue;
                 }
 
-                const std::string sql = build_bcdb_block_submit_results_sql(det_next_block_id_++, txs);
+                std::vector<int64_t> explicit_backend_txids;
+                if (skipped_readonly == 0 && tx_det_seqs.size() == txs.size()) {
+                    bool can_use_explicit_txids = true;
+                    if (!det_block_backend_txid_delta_set_) {
+                        if (tx_det_seqs.empty() ||
+                            tx_det_seqs.front() > kDetExplicitTxidMaxSeq) {
+                            can_use_explicit_txids = false;
+                        } else {
+                            det_block_backend_txid_delta_ =
+                                static_cast<int64_t>(det_block_next_backend_txid_) -
+                                static_cast<int64_t>(tx_det_seqs.front());
+                            det_block_backend_txid_delta_set_ = true;
+                        }
+                    }
+                    if (can_use_explicit_txids && det_block_backend_txid_delta_set_) {
+                        explicit_backend_txids.reserve(tx_det_seqs.size());
+                        for (uint64_t det_seq : tx_det_seqs) {
+                            if (det_seq > kDetExplicitTxidMaxSeq) {
+                                can_use_explicit_txids = false;
+                                break;
+                            }
+                            const int64_t txid =
+                                static_cast<int64_t>(det_seq) + det_block_backend_txid_delta_;
+                            if (txid < 0 || txid > INT32_MAX) {
+                                can_use_explicit_txids = false;
+                                break;
+                            }
+                            explicit_backend_txids.push_back(txid);
+                        }
+                    }
+                    if (!can_use_explicit_txids) {
+                        explicit_backend_txids.clear();
+                    }
+                }
+                if (!explicit_backend_txids.empty()) {
+                    const uint64_t next_backend =
+                        static_cast<uint64_t>(explicit_backend_txids.back()) + 1ULL;
+                    if (next_backend > det_block_next_backend_txid_) {
+                        det_block_next_backend_txid_ = next_backend;
+                    }
+                } else {
+                    det_block_next_backend_txid_ += static_cast<uint64_t>(txs.size());
+                }
+
+                const std::string sql = build_bcdb_block_submit_results_sql(
+                    det_next_block_id_++,
+                    txs,
+                    explicit_backend_txids.empty() ? nullptr : &explicit_backend_txids);
                 if (PQstatus(cs.c) != CONNECTION_OK) {
                     PQreset(cs.c);
                     auto it = notice_state_by_conn_.find(cs.c);
