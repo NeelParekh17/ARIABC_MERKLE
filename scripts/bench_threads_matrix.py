@@ -73,6 +73,7 @@ class RunResult:
     start_server_log: str
     restore_log: str
     notes: str
+    statement_count: Optional[int] = None
 
 
 OVERALL_MS_RE = re.compile(r"overall time taken \(millisec\)\s*=\s*([0-9.]+)")
@@ -258,6 +259,27 @@ def _capture_timeout_diagnostics(
         return None
 
 
+def _is_skippable_workload_line(line: str) -> bool:
+    s = line.strip()
+    if s == "":
+        return True
+    if s.startswith("--") or s.startswith("/*") or s.startswith("\\"):
+        return True
+    return False
+
+
+def _count_workload_statements(path: Path) -> Optional[int]:
+    try:
+        n = 0
+        with path.open("r", errors="replace") as f:
+            for line in f:
+                if not _is_skippable_workload_line(line):
+                    n += 1
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
 def _parse_workload_metrics(log_text: str) -> tuple[Optional[float], Optional[float], Optional[int]]:
     overall_ms = None
     wait_ms = None
@@ -388,6 +410,16 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         except Exception:
             return None
 
+    scripts_dir = Path(__file__).resolve().parent
+    workload_stmt_cache: dict[str, Optional[int]] = {}
+
+    def _resolve_stmt_count(workload_name: str) -> Optional[int]:
+        if workload_name in workload_stmt_cache:
+            return workload_stmt_cache[workload_name]
+        count = _count_workload_statements(scripts_dir / workload_name)
+        workload_stmt_cache[workload_name] = count
+        return count
+
     groups: dict[tuple[str, str, int, int, int, int], list[dict[str, Any]]] = {}
     for r in rows:
         key = (
@@ -440,7 +472,24 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         permanent_failures = [as_int(r.get("permanent_failures", "")) for r in rs]
         permanent_failures = [x for x in permanent_failures if x is not None]
 
-        throughput_tps = [1000.0 * 20000.0 / x for x in overall if x and x > 0]
+        # Per-row statement_count (from results.csv) takes precedence so a
+        # different statement count per workload is reflected in TPS. Fall back
+        # to counting the workload file on disk; final fallback is 20000.0 so
+        # older results.csv files without the column still summarise without
+        # crashing.
+        per_row_counts: list[int] = []
+        for r in rs:
+            sc = as_int(r.get("statement_count", ""))
+            if sc is None or sc <= 0:
+                sc = _resolve_stmt_count(r.get("workload", ""))
+            if sc and sc > 0:
+                per_row_counts.append(sc)
+        workload_stmt_count = (
+            max(set(per_row_counts), key=per_row_counts.count) if per_row_counts else 20000
+        )
+        throughput_tps = [
+            1000.0 * workload_stmt_count / x for x in overall if x and x > 0
+        ]
 
         verify = [(r.get("db_merkle_verify", "") or "").strip().lower() == "t" for r in rs]
 
@@ -981,7 +1030,8 @@ def _generate_tps_graphs(summary_csv: Path, out_dir: Path) -> list[Path]:
             if tps is None:
                 overall_ms = as_float(r.get("mean_workload_overall_ms", ""))
                 if overall_ms is not None and overall_ms > 0:
-                    tps = 1000.0 * 20000.0 / overall_ms
+                    stmt_count = as_int(r.get("statement_count", "")) or 20000
+                    tps = 1000.0 * stmt_count / overall_ms
             if th is None or tps is None:
                 continue
             series.setdefault(label, []).append((th, tps))
@@ -1263,6 +1313,7 @@ def main() -> int:
         start_server_log="",
         restore_log="",
         notes="",
+        statement_count=None,
     )).keys())
 
     write_header = not raw_csv.exists()
@@ -1286,6 +1337,7 @@ def main() -> int:
                 if not workload_path.exists():
                     print(f"WARNING: missing workload file {workload_path}, skipping", file=sys.stderr)
                     continue
+                workload_stmt_count = _count_workload_statements(workload_path)
 
                 for th in threads:
                     for rate in rates:
@@ -1520,6 +1572,7 @@ def main() -> int:
                                     start_server_log=str(start_log_out),
                                     restore_log=str(restore_log_out),
                                     notes=notes,
+                                    statement_count=workload_stmt_count,
                                 )
 
                                 writer.writerow(asdict(result))
