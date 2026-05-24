@@ -68,7 +68,7 @@ FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP="${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP
 FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP:-1:512}"
 FULL_DET_WINDOW="${FULL_DET_WINDOW:-4096}"
 FULL_DET_WINDOW_MULTIPLIER="${FULL_DET_WINDOW_MULTIPLIER:-256}"
-FULL_DET_WINDOW_MAX="${FULL_DET_WINDOW_MAX:-3072}"
+FULL_DET_WINDOW_MAX="${FULL_DET_WINDOW_MAX:-4096}"
 FULL_DET_BATCH_SIZE_MAP="${FULL_DET_BATCH_SIZE_MAP:-}"
 FULL_DET_WINDOW_MAP="${FULL_DET_WINDOW_MAP:-}"
 FULL_DET_BLOCK_PARALLEL="${FULL_DET_BLOCK_PARALLEL:-1}"
@@ -84,8 +84,11 @@ FULL_BCDB_SERIAL_GATE_MODE="${FULL_BCDB_SERIAL_GATE_MODE:-1}"
 FULL_BCDB_SERIAL_GATE_SOURCE="${FULL_BCDB_SERIAL_GATE_SOURCE:-0}"
 FULL_BCDB_DT_PARSE_BARRIER="${FULL_BCDB_DT_PARSE_BARRIER:-1}"
 FULL_BCDB_DT_SKIP_READONLY_GATE="${FULL_BCDB_DT_SKIP_READONLY_GATE:-1}"
-FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS="${FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS:-1}"
+FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS="${FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS:-0}"
 FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD:-65536}"
+FULL_BCDB_DET_QUEUE_HIGH_WM="${FULL_BCDB_DET_QUEUE_HIGH_WM:-4096}"
+FULL_BCDB_DET_QUEUE_LOW_WM="${FULL_BCDB_DET_QUEUE_LOW_WM:-2048}"
+FULL_CONN_FANOUT="${FULL_CONN_FANOUT:-}"
 FULL_RESULT_REPLICA_LIMIT="${FULL_RESULT_REPLICA_LIMIT:-1}"
 FULL_CASE_TIMEOUT_S="${FULL_CASE_TIMEOUT_S:-900}"
 FULL_SKIP_SYNC="${FULL_SKIP_SYNC:-0}"
@@ -95,6 +98,7 @@ POLL_COUNT="${POLL_COUNT:-120000}"
 RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-32768}"
 FULL_CONTINUE_ON_ERROR="${FULL_CONTINUE_ON_ERROR:-0}"
 FULL_CLUSTER_MODES="${FULL_CLUSTER_MODES:-kafka-only,raft-kafka}"
+SINGLE_TARGET_PICK="${SINGLE_TARGET_PICK:-majority-pivot}" # fastest|majority-pivot|slowest|index:N
 SINGLE_GATEWAY_DIRECT="${SINGLE_GATEWAY_DIRECT:-1}"
 SINGLE_GATEWAY_CLIENT_PORT_BASE="${SINGLE_GATEWAY_CLIENT_PORT_BASE:-19100}"
 SINGLE_GATEWAY_RAFT_PORT_BASE="${SINGLE_GATEWAY_RAFT_PORT_BASE:-19200}"
@@ -108,7 +112,7 @@ SINGLE_BCDB_POLL_MAX_US="${SINGLE_BCDB_POLL_MAX_US:-1}"
 SINGLE_BCDB_DT_PARSE_BARRIER="${SINGLE_BCDB_DT_PARSE_BARRIER:-0}"
 SINGLE_BCDB_DT_LIGHT_SNAPSHOT="${SINGLE_BCDB_DT_LIGHT_SNAPSHOT:-0}"
 SINGLE_BCDB_DT_SKIP_READONLY_GATE="${SINGLE_BCDB_DT_SKIP_READONLY_GATE:-1}"
-SINGLE_BCDB_DT_COMPLETION_ONLY_SKIP_READS="${SINGLE_BCDB_DT_COMPLETION_ONLY_SKIP_READS:-on}"
+SINGLE_BCDB_DT_COMPLETION_ONLY_SKIP_READS="${SINGLE_BCDB_DT_COMPLETION_ONLY_SKIP_READS:-$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS}"
 SINGLE_BCDB_RESULT_RING_SLOTS="${SINGLE_BCDB_RESULT_RING_SLOTS:-$RESULT_RING_CAPACITY}"
 SINGLE_BCDB_BLOCK_RETURN_ACTUAL_RESULTS="${SINGLE_BCDB_BLOCK_RETURN_ACTUAL_RESULTS:-0}"
 SINGLE_BCDB_FLOW_DEBUG="${SINGLE_BCDB_FLOW_DEBUG:-0}"
@@ -139,10 +143,10 @@ Options:
   --target NODE       Single-target back-compat shortcut for --targets NODE.
   --targets CSV       Comma-separated user@host list to run the single-node bench
                       on in parallel. Default: $TARGETS_DEFAULT
-                      One single_<label>/ subdir + graph per target. The 3rd-
-                      fastest node (by peak DET median TPS across the thread
-                      sweep) is then used for the gateway-direct baseline and
-                      the combined det-vs-cluster comparison plot.
+                      One single_<label>/ subdir + graph per target. The
+                      SINGLE_TARGET_PICK node (by peak DET median TPS across
+                      the thread sweep) is then used for the gateway-direct
+                      baseline and combined comparison plots.
   --target-label NAME Label used in CSV/graph for the chosen comparison target.
   --skip-sync
   --single-only
@@ -188,6 +192,9 @@ Environment:
   gateway-direct baseline by sending the same workload through
   ariabc_pg_gateway --completionPath direct --totalNodes 1 against one
   bypass-Raft server. Set SINGLE_GATEWAY_DIRECT=0 only for legacy output.
+  SINGLE_TARGET_PICK=majority-pivot picks the 3rd-fastest DET node by default.
+  Use fastest, slowest, or index:N when the comparison needs an explicit
+  upper/lower-bound single-node target.
   SINGLE_PYTHON_BIN=/path/to/python3 forces the single-node matrix runner to
   use that remote Python when the executable can import psycopg.
 EOF
@@ -493,10 +500,10 @@ remote_can_run_local_install() {
 
 single_node_can_trust_synced_install() {
   local TARGET_NODE="$1"
-  # With --skip-sync there is no fresh local-install compatibility decision to
-  # carry into the remote ensure step. Let the existing trust/fallback path
-  # check whatever install is already present on that host.
-  [[ "$SKIP_SYNC" == "1" ]] && return 0
+  # With --skip-sync there may be an old copied install on the remote host.
+  # Do not blindly trust it: U24-built gateway binaries fail immediately on
+  # U22 nodes with missing GLIBC/GLIBCXX symbols. Rebuild on-host unless the
+  # remote libc can run the local install.
   remote_can_run_local_install "$TARGET_NODE"
 }
 
@@ -735,13 +742,14 @@ run_single_node() {
   done
 }
 
-pick_third_fastest_node() {
+pick_comparison_node() {
   local out
-  out="$(python3 - "$OUT_DIR" "${LABELS_ARR[@]}" "--" "${TARGETS_ARR[@]}" <<'PYEOF' 2> >(tee -a "$RUN_LOG_DIR/third_fastest_pick.log" >&2)
+  out="$(python3 - "$OUT_DIR" "$SINGLE_TARGET_PICK" "${LABELS_ARR[@]}" "--" "${TARGETS_ARR[@]}" <<'PYEOF' 2> >(tee -a "$RUN_LOG_DIR/comparison_node_pick.log" >&2)
 import csv, os, sys
 out_dir = sys.argv[1]
-sep = sys.argv.index("--", 2)
-labels = sys.argv[2:sep]
+pick = sys.argv[2]
+sep = sys.argv.index("--", 3)
+labels = sys.argv[3:sep]
 targets = sys.argv[sep+1:]
 results = []
 for label, target in zip(labels, targets):
@@ -770,20 +778,37 @@ if not results:
 print("RANKING:", file=sys.stderr)
 for r in results:
     print(f"  peak_det_tps={r[0]:.2f}  label={r[1]}  target={r[2]}", file=sys.stderr)
-idx = min(2, len(results) - 1)
+if pick == "fastest":
+    idx = 0
+elif pick == "slowest":
+    idx = len(results) - 1
+elif pick == "majority-pivot":
+    idx = min(2, len(results) - 1)
+elif pick.startswith("index:"):
+    try:
+        idx = int(pick.split(":", 1)[1])
+    except ValueError:
+        print(f"unsupported SINGLE_TARGET_PICK={pick!r}", file=sys.stderr)
+        sys.exit(2)
+    if idx < 0 or idx >= len(results):
+        print(f"SINGLE_TARGET_PICK index out of range: {idx} for {len(results)} result(s)", file=sys.stderr)
+        sys.exit(2)
+else:
+    print(f"unsupported SINGLE_TARGET_PICK={pick!r}; use fastest, majority-pivot, slowest, or index:N", file=sys.stderr)
+    sys.exit(2)
 peak, label, target = results[idx]
 print(f"{label}\t{target}\t{peak:.2f}")
 PYEOF
   )"
   if [[ -z "$out" ]]; then
-    die "could not pick 3rd-fastest node — no successful single-node summary.csv files under $OUT_DIR"
+    die "could not pick comparison node — no successful single-node summary.csv files under $OUT_DIR"
   fi
-  IFS=$'\t' read -r THIRD_FASTEST_LABEL THIRD_FASTEST_NODE THIRD_FASTEST_TPS <<< "$out"
-  log "3rd-fastest node selected: $THIRD_FASTEST_NODE (label=$THIRD_FASTEST_LABEL, peak DET TPS=$THIRD_FASTEST_TPS)"
+  IFS=$'\t' read -r COMPARISON_NODE_LABEL COMPARISON_NODE COMPARISON_NODE_TPS <<< "$out"
+  log "Comparison node selected ($SINGLE_TARGET_PICK): $COMPARISON_NODE (label=$COMPARISON_NODE_LABEL, peak DET TPS=$COMPARISON_NODE_TPS)"
   # Reassign the globals used by run_single_gateway_direct and generate_outputs
-  TARGET_NODE="$THIRD_FASTEST_NODE"
-  TARGET_MACHINE_LABEL="$THIRD_FASTEST_LABEL"
-  SINGLE_LOCAL_DIR="$(single_dir_for_label "$THIRD_FASTEST_LABEL")"
+  TARGET_NODE="$COMPARISON_NODE"
+  TARGET_MACHINE_LABEL="$COMPARISON_NODE_LABEL"
+  SINGLE_LOCAL_DIR="$(single_dir_for_label "$COMPARISON_NODE_LABEL")"
 }
 
 run_single_gateway_direct() {
@@ -820,9 +845,14 @@ else
 fi
 srv_bin='$REMOTE_REPO/ariabc_pg/build/bin/ariabc_pg_server'
 gw_bin='$REMOTE_REPO/ariabc_pg/build/bin/ariabc_pg_gateway'
-if [[ ! -x \"\$srv_bin\" || ! -x \"\$gw_bin\" ]]; then
+if [[ '$trust_synced_install' != '1' || ! -x \"\$srv_bin\" || ! -x \"\$gw_bin\" ]]; then
   if command -v cmake >/dev/null 2>&1 && [[ -d '$REMOTE_REPO/ariabc_pg/build' ]]; then
     cmake --build '$REMOTE_REPO/ariabc_pg/build' --target ariabc_pg_server ariabc_pg_gateway -j\$(nproc)
+  elif command -v make >/dev/null 2>&1 && [[ -f '$REMOTE_REPO/ariabc_pg/build/Makefile' ]]; then
+    make -C '$REMOTE_REPO/ariabc_pg/build' ariabc_pg_server ariabc_pg_gateway -j\$(nproc)
+  else
+    echo \"ERROR: cannot rebuild ariabc_pg_server/gateway on this host; missing cmake and build Makefile\" >&2
+    exit 1
   fi
 fi
 [[ -x \"\$srv_bin\" ]] || { echo \"ERROR: missing ariabc_pg_server at \$srv_bin\" >&2; exit 1; }
@@ -857,8 +887,18 @@ fi
       # (2 * conn_pool_size = 512) — capping single-node throughput.
       local gateway_det_pipeline_depth="$SELECTED_DET_PIPELINE_DEPTH"
       local gateway_det_batch_size="$SELECTED_DET_BATCH_SIZE"
-      local gateway_det_window=$(( gateway_num_terminals * gateway_det_pipeline_depth ))
-      local gateway_effective_inflight="$gateway_det_window"
+      local gateway_det_window
+      local gateway_effective_inflight
+      if [[ "$FULL_THREAD_KNOB" == "client-pipeline" ]]; then
+        gateway_det_window=$(( gateway_num_terminals * gateway_det_pipeline_depth ))
+        gateway_effective_inflight="$gateway_det_window"
+      else
+        gateway_det_window="$SELECTED_DET_WINDOW"
+        gateway_effective_inflight="$SELECTED_EFFECTIVE_INFLIGHT"
+        if [[ "$gateway_det_pipeline_depth" -lt 1 ]]; then
+          gateway_det_pipeline_depth="$gateway_det_window"
+        fi
+      fi
       local req_id_offset=$(( 500000000 + (run * 1000000) + (th * 10000) + 1 ))
       local client_port=$(( SINGLE_GATEWAY_CLIENT_PORT_BASE + (th * 20) + run ))
       local raft_port=$(( SINGLE_GATEWAY_RAFT_PORT_BASE + (th * 20) + run ))
@@ -1057,7 +1097,7 @@ fi
 
       notes="single_node_gateway_direct;completion_path=direct;experiment_mode=$EXPERIMENT_MODE;thread_knob=$FULL_THREAD_KNOB;num_terminals=$gateway_num_terminals;det_pipeline_depth=$gateway_det_pipeline_depth;effective_inflight=$gateway_effective_inflight;pool_size=$gateway_pool_size;bcdb_worker_count=$gateway_worker_count;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_serial_gate_source=$FULL_BCDB_SERIAL_GATE_SOURCE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;result_ring_capacity=$RESULT_RING_CAPACITY;remote_case=$remote_case"
       printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "single_node_gateway_direct" "gateway_direct_bcdb" "$EXPERIMENT_MODE" "direct" "single_node_gateway" "direct" "1" "0" "$th" "$run" "$local_case" "$rc" "$FULL_THREAD_KNOB" "$gateway_pool_size" "$gateway_worker_count" "$gateway_det_batch_size" "$gateway_det_window" "$gateway_num_terminals" "$gateway_det_pipeline_depth" "$gateway_effective_inflight" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "completed_or_accepted_or_loaded" "$notes" \
+        "single_node_gateway_direct" "gateway_direct_bcdb" "$EXPERIMENT_MODE" "direct" "single_node_gateway" "direct" "1" "0" "$th" "$run" "$local_case" "$rc" "$FULL_THREAD_KNOB" "$gateway_pool_size" "$gateway_worker_count" "$gateway_det_batch_size" "$gateway_det_window" "$gateway_num_terminals" "$gateway_det_pipeline_depth" "$gateway_effective_inflight" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "completed_eq_loaded_required" "$notes" \
         >> "$SINGLE_GATEWAY_MANIFEST"
 
       if [[ "$rc" != "0" ]]; then
@@ -1120,6 +1160,7 @@ run_full_system() {
       full_det_window="$SELECTED_DET_WINDOW"
       full_effective_inflight="$SELECTED_EFFECTIVE_INFLIGHT"
       full_bcdb_worker_count="$SELECTED_BCDB_WORKER_COUNT"
+      full_conn_fanout="${FULL_CONN_FANOUT:-$full_num_terminals}"
       # Disjoint req-id range per cluster mode so stale Kafka result messages
       # from a kafka-only case cannot contaminate a later raft-kafka case (and
       # vice versa) — the gateway result-matching key is the req id, and the
@@ -1130,7 +1171,7 @@ run_full_system() {
         mode_offset=200000000
       fi
       req_id_offset=$(( mode_offset + (run * 1000000) + (th * 10000) + 1 ))
-      log "Cluster case mode=$cluster_mode thread=$th run=$run experiment=$EXPERIMENT_MODE (num-terminals=$full_num_terminals det-pipeline-depth=$full_det_pipeline_depth effective-inflight=$full_effective_inflight pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-parallel=$FULL_DET_BLOCK_PARALLEL det-block-pipeline=$FULL_DET_BLOCK_PIPELINE det-block-max=$FULL_DET_BLOCK_MAX det-partial-block-max-wait-us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US serial-gate=$FULL_BCDB_SERIAL_GATE_MODE serial-gate-source=$FULL_BCDB_SERIAL_GATE_SOURCE dt-parse-barrier=$FULL_BCDB_DT_PARSE_BARRIER completion-only-skip-reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS full-result-replica-limit=$FULL_RESULT_REPLICA_LIMIT ordering_path=$ordering_path)"
+      log "Cluster case mode=$cluster_mode thread=$th run=$run experiment=$EXPERIMENT_MODE (num-terminals=$full_num_terminals conn-fanout=$full_conn_fanout det-pipeline-depth=$full_det_pipeline_depth effective-inflight=$full_effective_inflight pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-parallel=$FULL_DET_BLOCK_PARALLEL det-block-pipeline=$FULL_DET_BLOCK_PIPELINE det-block-max=$FULL_DET_BLOCK_MAX det-partial-block-max-wait-us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US serial-gate=$FULL_BCDB_SERIAL_GATE_MODE serial-gate-source=$FULL_BCDB_SERIAL_GATE_SOURCE dt-parse-barrier=$FULL_BCDB_DT_PARSE_BARRIER completion-only-skip-reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS full-result-replica-limit=$FULL_RESULT_REPLICA_LIMIT ordering_path=$ordering_path)"
       before_file="$RUN_LOG_DIR/full_${cluster_mode}_before_${th}_${run}.txt"
       after_file="$RUN_LOG_DIR/full_${cluster_mode}_after_${th}_${run}.txt"
       ls -td "$REPO_ROOT"/scripts/bench_full_results/cluster4_* 2>/dev/null > "$before_file" || true
@@ -1158,6 +1199,7 @@ run_full_system() {
         --det-block-max "$FULL_DET_BLOCK_MAX" \
         --det-partial-block-max-wait-us "$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US" \
         --num-terminals "$full_num_terminals" \
+        --conn-fanout "$full_conn_fanout" \
         --det-pipeline-depth "$full_det_pipeline_depth" \
         --bcdb-block-profile "$FULL_BCDB_BLOCK_PROFILE" \
         --bcdb-block-wait-watermark "$FULL_BCDB_BLOCK_WAIT_WATERMARK" \
@@ -1167,6 +1209,8 @@ run_full_system() {
         --bcdb-dt-skip-readonly-gate "$FULL_BCDB_DT_SKIP_READONLY_GATE" \
         --bcdb-dt-completion-only-skip-reads "$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS" \
         --bcdb-dt-hashtab-switch-threshold "$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD" \
+        --bcdb-det-queue-high-wm "$FULL_BCDB_DET_QUEUE_HIGH_WM" \
+        --bcdb-det-queue-low-wm "$FULL_BCDB_DET_QUEUE_LOW_WM" \
         --full-result-replica-limit "$FULL_RESULT_REPLICA_LIMIT" \
         > "$RUN_LOG_DIR/full_${cluster_mode}_thread_${th}_run_${run}.log" 2>&1
       rc=$?
@@ -1179,9 +1223,9 @@ run_full_system() {
         artifact="$(head -n 1 "$after_file" || true)"
       fi
       [[ -n "$artifact" ]] || artifact="$RUN_LOG_DIR/missing_full_artifact_thread_${th}_run_${run}"
-      notes="cluster_mode=$cluster_mode;ordering_path=$ordering_path;completion_path=kafka_majority;experiment_mode=$EXPERIMENT_MODE;full_system_thread_knob=$FULL_THREAD_KNOB;full_pool_size_mode=$FULL_POOL_SIZE_MODE;num_terminals=$full_num_terminals;det_pipeline_depth=$full_det_pipeline_depth;effective_inflight=$full_effective_inflight;trusted_gate=kafka_majority_merkle;pool_size_min=2;det_window_multiplier=$FULL_DET_WINDOW_MULTIPLIER;det_window_max=$FULL_DET_WINDOW_MAX;det_window_map=$FULL_DET_WINDOW_MAP;det_batch_size_map=$FULL_DET_BATCH_SIZE_MAP;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;det_partial_block_max_wait_us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US;bcdb_block_wait_watermark=$FULL_BCDB_BLOCK_WAIT_WATERMARK;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_serial_gate_source=$FULL_BCDB_SERIAL_GATE_SOURCE;bcdb_dt_parse_barrier=$FULL_BCDB_DT_PARSE_BARRIER;bcdb_dt_skip_readonly_gate=$FULL_BCDB_DT_SKIP_READONLY_GATE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;det_block_skip_readonly=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;full_result_replica_limit=$FULL_RESULT_REPLICA_LIMIT;backend_capacity=normalized"
+      notes="cluster_mode=$cluster_mode;ordering_path=$ordering_path;completion_path=kafka_majority;experiment_mode=$EXPERIMENT_MODE;full_system_thread_knob=$FULL_THREAD_KNOB;full_pool_size_mode=$FULL_POOL_SIZE_MODE;num_terminals=$full_num_terminals;conn_fanout=$full_conn_fanout;det_pipeline_depth=$full_det_pipeline_depth;effective_inflight=$full_effective_inflight;trusted_gate=kafka_majority_merkle;pool_size_min=2;det_window_multiplier=$FULL_DET_WINDOW_MULTIPLIER;det_window_max=$FULL_DET_WINDOW_MAX;det_window_map=$FULL_DET_WINDOW_MAP;det_batch_size_map=$FULL_DET_BATCH_SIZE_MAP;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;det_partial_block_max_wait_us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US;bcdb_block_wait_watermark=$FULL_BCDB_BLOCK_WAIT_WATERMARK;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_serial_gate_source=$FULL_BCDB_SERIAL_GATE_SOURCE;bcdb_dt_parse_barrier=$FULL_BCDB_DT_PARSE_BARRIER;bcdb_dt_skip_readonly_gate=$FULL_BCDB_DT_SKIP_READONLY_GATE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;det_block_skip_readonly=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;bcdb_det_queue_high_wm=$FULL_BCDB_DET_QUEUE_HIGH_WM;bcdb_det_queue_low_wm=$FULL_BCDB_DET_QUEUE_LOW_WM;full_result_replica_limit=$FULL_RESULT_REPLICA_LIMIT;backend_capacity=normalized"
       printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$cluster_series" "$cluster_mode_label" "$EXPERIMENT_MODE" "$cluster_mode" "$ordering_path" "kafka_majority" "$server_bypass_raft" "$gateway_broadcast_to_all" "$th" "$run" "$artifact" "$rc" "$FULL_THREAD_KNOB" "$full_pool_size" "$full_bcdb_worker_count" "$full_det_batch_size" "$full_det_window" "$full_num_terminals" "$full_det_pipeline_depth" "$full_effective_inflight" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "completed_or_accepted_or_loaded" "$notes" \
+        "$cluster_series" "$cluster_mode_label" "$EXPERIMENT_MODE" "$cluster_mode" "$ordering_path" "kafka_majority" "$server_bypass_raft" "$gateway_broadcast_to_all" "$th" "$run" "$artifact" "$rc" "$FULL_THREAD_KNOB" "$full_pool_size" "$full_bcdb_worker_count" "$full_det_batch_size" "$full_det_window" "$full_num_terminals" "$full_det_pipeline_depth" "$full_effective_inflight" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "completed_eq_loaded_required" "$notes" \
         >> "$FULL_MANIFEST"
       if [[ "$rc" != "0" ]]; then
         if [[ "$FULL_CONTINUE_ON_ERROR" == "1" ]]; then
@@ -1242,8 +1286,13 @@ log "Threads   : $THREADS"
 log "Runs      : $RUNS"
 log "Workloads : $WORKLOADS"
 log "Targets   : ${TARGETS_ARR[*]}"
+log "Single target pick: $SINGLE_TARGET_PICK"
 log "Cluster modes: $FULL_CLUSTER_MODES"
 log "Experiment mode: $EXPERIMENT_MODE"
+log "Skip-read semantics: full/gateway bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS raw-single-det=$SINGLE_BCDB_DT_COMPLETION_ONLY_SKIP_READS"
+if [[ "$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS" != "$SINGLE_BCDB_DT_COMPLETION_ONLY_SKIP_READS" ]]; then
+  log "WARNING: raw single-node DET skip-read semantics differ from full/gateway runs; artifact notes will show the mismatch"
+fi
 
 IFS=',' read -ra workload_arr <<< "$WORKLOADS"
 
@@ -1268,7 +1317,7 @@ for wl in "${workload_arr[@]}"; do
     continue
   fi
   if [[ "$FULL_ONLY" != "1" ]]; then
-    pick_third_fastest_node
+    pick_comparison_node
   fi
   if [[ "$ANALYZE_ONLY" != "1" ]]; then
     run_single_gateway_direct
@@ -1281,6 +1330,7 @@ for wl in "${workload_arr[@]}"; do
   log "  Overhead: $OUT_DIR/overhead.csv"
   log "  Graph   : $OUT_DIR/ycsb_skew_pg_vs_det.png"
   log "  Graph   : $OUT_DIR/ycsb_skew_det_vs_cluster.png"
+  log "  Graph   : $OUT_DIR/ycsb_skew_all_systems.png"
 done
 
 log "Done"

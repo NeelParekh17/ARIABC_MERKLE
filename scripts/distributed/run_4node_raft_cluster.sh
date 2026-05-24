@@ -112,6 +112,7 @@ REQ_ID_OFFSET="${REQ_ID_OFFSET:-1}"
 DET_WINDOW="${DET_WINDOW:-4096}"
 DET_BATCH_SIZE="${DET_BATCH_SIZE:-256}"
 NUM_TERMINALS="${NUM_TERMINALS:-1}"
+CONN_FANOUT="${CONN_FANOUT:-1}"
 SUBMIT_MODE="${SUBMIT_MODE:-event}"
 DET_SUBMIT_PIPELINE="${DET_SUBMIT_PIPELINE:-1}"
 DET_PIPELINE_DEPTH="${DET_PIPELINE_DEPTH:-0}"
@@ -134,6 +135,8 @@ BCDB_DT_LIGHT_SNAPSHOT="${BCDB_DT_LIGHT_SNAPSHOT:-0}"  # 1=READ COMMITTED/no SSI
 BCDB_DT_SKIP_READONLY_GATE="${BCDB_DT_SKIP_READONLY_GATE:-0}"  # 1=skip no-write txs in the DT publish gate
 BCDB_DT_COMPLETION_ONLY_SKIP_READS="${BCDB_DT_COMPLETION_ONLY_SKIP_READS:-0}"  # 1=completion-only block mode bypasses SELECT executor work
 BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${BCDB_DT_HASHTAB_SWITCH_THRESHOLD:-1500}"  # DT write-set shard rotation threshold
+BCDB_DET_QUEUE_HIGH_WM="${BCDB_DET_QUEUE_HIGH_WM:-0}"  # >0 overrides deterministic server admission high watermark
+BCDB_DET_QUEUE_LOW_WM="${BCDB_DET_QUEUE_LOW_WM:-0}"    # >0 overrides deterministic server admission low watermark
 BCDB_FLOW_DEBUG="${BCDB_FLOW_DEBUG:-0}"      # 1=emit targeted worker/apply flow logs on cluster replicas
 ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-0}"  # 0=all replicas include full SQL results in Kafka
 ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-0}"  # 0=Raft default election priority
@@ -177,6 +180,8 @@ Options:
                   Gateway deterministic Raft batch size (default: 256)
   --num-terminals N
                   Gateway terminal count (default: 1)
+  --conn-fanout N Gateway submit sockets per logical node in event submit mode
+                  (default: 1)
   --det-pipeline-depth N
                   Per-terminal deterministic in-flight depth; 0 auto-splits
                   detWindow across terminals (default: 0)
@@ -224,6 +229,12 @@ Options:
   --bcdb-dt-hashtab-switch-threshold N
                   Set bcdb_dt_hashtab_switch_threshold on every PostgreSQL node
                   before restore/start (default: 1500)
+  --bcdb-det-queue-high-wm N
+                  Override deterministic server admission high watermark; 0 uses
+                  the server default derived from dbConnPoolSize (default: 0)
+  --bcdb-det-queue-low-wm N
+                  Override deterministic server admission low watermark; 0 uses
+                  the server default derived from dbConnPoolSize (default: 0)
   --full-result-replica-limit N
                   Emit full Kafka results only from replica ids <= N, hashes from all replicas; 0=all replicas (default: 0)
   --preferred-leader-id N
@@ -256,6 +267,7 @@ while [[ $# -gt 0 ]]; do
     --det-window)   DET_WINDOW="${2:-4096}"; shift 2 ;;
     --det-batch-size) DET_BATCH_SIZE="${2:-256}"; shift 2 ;;
     --num-terminals) NUM_TERMINALS="${2:-1}"; shift 2 ;;
+    --conn-fanout) CONN_FANOUT="${2:-1}"; shift 2 ;;
     --det-pipeline-depth) DET_PIPELINE_DEPTH="${2:-0}"; shift 2 ;;
     --submit-mode)  SUBMIT_MODE="${2:-event}"; shift 2 ;;
     --pg-exec-mode) PG_EXEC_MODE="${2:-event}"; shift 2 ;;
@@ -278,6 +290,8 @@ while [[ $# -gt 0 ]]; do
     --bcdb-dt-skip-readonly-gate) BCDB_DT_SKIP_READONLY_GATE="${2:-0}"; shift 2 ;;
     --bcdb-dt-completion-only-skip-reads) BCDB_DT_COMPLETION_ONLY_SKIP_READS="${2:-0}"; shift 2 ;;
     --bcdb-dt-hashtab-switch-threshold) BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${2:-1500}"; shift 2 ;;
+    --bcdb-det-queue-high-wm) BCDB_DET_QUEUE_HIGH_WM="${2:-0}"; shift 2 ;;
+    --bcdb-det-queue-low-wm) BCDB_DET_QUEUE_LOW_WM="${2:-0}"; shift 2 ;;
     --full-result-replica-limit) ARIABC_FULL_RESULT_REPLICA_LIMIT="${2:-0}"; shift 2 ;;
     --preferred-leader-id) ARIABC_PREFERRED_LEADER_ID="${2:-0}"; shift 2 ;;
     --bcdb-overwrite-protection) BCDB_OVERWRITE_PROTECTION="${2:-0}"; shift 2 ;;
@@ -325,6 +339,10 @@ if [[ "$NUM_TERMINALS" -lt 1 || "$DET_PIPELINE_DEPTH" -lt 0 ]]; then
   echo "ERROR: --num-terminals must be >= 1 and --det-pipeline-depth must be >= 0" >&2
   exit 2
 fi
+if [[ "$CONN_FANOUT" -lt 1 ]]; then
+  echo "ERROR: --conn-fanout must be >= 1" >&2
+  exit 2
+fi
 if [[ -z "$BCDB_WORKER_COUNT" ]]; then
   BCDB_WORKER_COUNT="$DB_CONN_POOL_SIZE"
 fi
@@ -354,6 +372,10 @@ if [[ "$BCDB_DT_COMPLETION_ONLY_SKIP_READS" != "0" && "$BCDB_DT_COMPLETION_ONLY_
 fi
 if [[ "$BCDB_DT_HASHTAB_SWITCH_THRESHOLD" -lt 1 ]]; then
   echo "ERROR: --bcdb-dt-hashtab-switch-threshold must be >= 1" >&2
+  exit 2
+fi
+if [[ "$BCDB_DET_QUEUE_HIGH_WM" -lt 0 || "$BCDB_DET_QUEUE_LOW_WM" -lt 0 ]]; then
+  echo "ERROR: --bcdb-det-queue-high-wm and --bcdb-det-queue-low-wm must be >= 0" >&2
   exit 2
 fi
 min_hashtab_threshold=$(( BCDB_WORKER_COUNT * 2 - 1 ))
@@ -1306,7 +1328,7 @@ for idx in "${!NODE_IDS[@]}"; do
 
   log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port orderingMode=$ORDERING_MODE"
   log "    binary: $srv_bin"
-  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbDetQueueHighWm=$BCDB_DET_QUEUE_HIGH_WM bcdbDetQueueLowWm=$BCDB_DET_QUEUE_LOW_WM bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
 
@@ -1328,6 +1350,8 @@ for idx in "${!NODE_IDS[@]}"; do
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
 	    export BCDB_DT_COMPLETION_ONLY_SKIP_READS='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export BCDB_FLOW_DEBUG='${BCDB_FLOW_DEBUG}'
+	    export BCDB_DET_QUEUE_HIGH_WM='${BCDB_DET_QUEUE_HIGH_WM}'
+	    export BCDB_DET_QUEUE_LOW_WM='${BCDB_DET_QUEUE_LOW_WM}'
 	    nohup '$srv_bin' \
       --id $id \
       --raftEndpoint ${ip}:${RAFT_PORT} \
@@ -1495,7 +1519,7 @@ fi
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL"
-log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS connFanout=$CONN_FANOUT detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
 START_S="$(date +%s)"
 
@@ -1515,6 +1539,7 @@ if ! "$GW_BIN" \
   ${POLL_INTERVAL_US:+--pollIntervalUs $POLL_INTERVAL_US} \
   --clientId "cluster-ycsb" \
   --numTerminals "$NUM_TERMINALS" \
+  --connFanout "$CONN_FANOUT" \
   $GW_EXTRA_ARGS \
   2>&1 | tee "$GW_LOG"; then
   log "WARNING: Gateway exited with non-zero status — check $GW_LOG"

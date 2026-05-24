@@ -28,6 +28,8 @@
 //  Key correctness invariants enforced in this file:
 //    - tx_id assignment is atomic across concurrent backends so block
 //      members have stable, unique, ordered identifiers.
+//    - block-submit txs become worker-visible in monotonically increasing
+//      block id order, even when PostgreSQL backends parse later blocks first.
 //    - A result slot is only read when result_committed_txid[slot] equals
 //      the exact tx_id being fetched; otherwise the slot has been recycled
 //      by a later tx and the data would be wrong.
@@ -120,6 +122,8 @@ typedef struct BCDBBlockResultRef
  *                       append_hex_encoded
  *    Worker sizing    : bcdb_select_worker_count
  *    Result indexing  : bcdb_result_slot_for_txid
+ *    Enqueue ordering : bcdb_wait_for_block_enqueue_turn,
+ *                       bcdb_advance_block_enqueue_turn
  *    Wait primitives  : bcdb_wait_until_committed,
  *                       bcdb_wait_until_slot_ready,
  *                       bcdb_wait_until_block_slots_ready
@@ -136,6 +140,8 @@ static BCBlock *parse_block_with_txs(const char *json);
 static void append_hex_encoded(StringInfo out, const char *input);
 static int32 bcdb_select_worker_count(int32 requested);
 static inline int bcdb_result_slot_for_txid(BCTxID tx_id);
+static inline void bcdb_wait_for_block_enqueue_turn(BCBlockID block_id);
+static inline void bcdb_advance_block_enqueue_turn(BCBlockID block_id);
 static inline uint64 bcdb_wait_until_committed(BCTxID target_tx_id);
 static inline uint64 bcdb_wait_until_slot_ready(BCTxID target_tx_id);
 static inline uint64 bcdb_wait_until_block_slots_ready(const BCDBBlockResultRef *refs,
@@ -390,6 +396,108 @@ bcdb_result_slot_for_txid(BCTxID tx_id)
 	if (idx < 0)
 		idx += slots;
 	return idx;
+}
+
+/*
+ * bcdb_wait_for_block_enqueue_turn / bcdb_advance_block_enqueue_turn
+ * ------------------------------------------------------------------
+ * Enforce worker-visible block order for parallel block-submit backends.
+ *
+ * The gateway may have several PostgreSQL connections in flight.  If backend
+ * B parses/enqueues block 3 before backend A enqueues block 2, a worker queue
+ * can contain tx 769 before tx 257.  The worker that pops 769 waits for 768,
+ * but 257 may be trapped behind 769 in that same FIFO queue -- a deterministic
+ * deadlock.  We therefore gate only the enqueue phase by block id:
+ *
+ *   parse block N        may happen concurrently
+ *   enqueue block N      must happen in block-id order
+ *   wait/format block N  may happen concurrently after enqueue
+ */
+static inline void
+bcdb_wait_for_block_enqueue_turn(BCBlockID block_id)
+{
+	int spins = 0;
+	int poll_us = 0;
+	uint64 wait_start_us = bcdb_get_time();
+	uint64 next_warn_us = wait_start_us + 5000000; /* first warning at +5 s */
+
+	if (block_id < BCDB_FIRST_SUBMIT_BLOCK_ID)
+		return;
+
+	for (;;)
+	{
+		BCBlockID expected;
+
+		expected = __atomic_load_n(&block_meta->next_enqueue_block_id,
+								   __ATOMIC_ACQUIRE);
+		if (expected == block_id)
+			return;
+		if (expected > block_id)
+			return;
+
+		CHECK_FOR_INTERRUPTS();
+
+		{
+			uint64 now_us = bcdb_get_time();
+			if (now_us >= next_warn_us)
+			{
+				ereport(LOG,
+						(errmsg("[BCDB_HANG] block_enqueue_order_wait_stuck pid=%d block_id=%d expected_block_id=%d waited_us=%lu poll_us=%d spins=%d",
+								(int) getpid(), (int) block_id,
+								(int) expected,
+								(unsigned long) (now_us - wait_start_us),
+								poll_us, spins)));
+				next_warn_us = now_us + 5000000;
+			}
+		}
+
+		if (spins < 128)
+		{
+			spins++;
+			pg_spin_delay();
+		}
+		else
+		{
+			if (poll_us == 0)
+				poll_us = 1;
+			else if (poll_us < 1000)
+				poll_us *= 2;
+			if (poll_us > 1000)
+				poll_us = 1000;
+			pg_usleep((long) poll_us);
+		}
+	}
+}
+
+static inline void
+bcdb_advance_block_enqueue_turn(BCBlockID block_id)
+{
+	BCBlockID next_block_id;
+
+	if (block_id < BCDB_FIRST_SUBMIT_BLOCK_ID)
+		return;
+	next_block_id = block_id + 1;
+
+	for (;;)
+	{
+		BCBlockID expected;
+
+		expected = __atomic_load_n(&block_meta->next_enqueue_block_id,
+								   __ATOMIC_ACQUIRE);
+		if (expected > block_id)
+			return;
+		if (expected < block_id)
+		{
+			ereport(LOG,
+					(errmsg("BCDB block enqueue turn advanced out of order: block_id=%d expected_block_id=%d",
+							(int) block_id, (int) expected)));
+			return;
+		}
+		if (__sync_bool_compare_and_swap(&block_meta->next_enqueue_block_id,
+										 block_id,
+										 next_block_id))
+			return;
+	}
 }
 
 /*
@@ -982,6 +1090,8 @@ parse_block_with_txs(const char *json)
 	cJSON *block_id;
 	cJSON *tx_json;
 	BCBlock *block;
+	BCTxID *explicit_txids = NULL;
+	bool use_explicit_txids = true;
 	int j = 0;             /* cap for first-N SAFEDBG cJSON_Print calls */
 	int tx_base = 0;       /* atomically reserved starting tx-id */
 	int tx_local_idx = 0;  /* offset within this block, 0..num_tx-1 */
@@ -1005,13 +1115,53 @@ parse_block_with_txs(const char *json)
 	printf("ariaMyDbg %s : %s: %d blksz %d pid %d \n", __FILE__, __FUNCTION__, __LINE__ , get_blksz(), getpid());
 #endif
 	block->num_tx = cJSON_GetArraySize(tx_list);
+	if (block->num_tx > MAX_TX_PER_BLOCK)
+		goto error;
 
-	/* Reserve a contiguous tx-id range from the sentinel.  __sync_fetch_and_add
-	 * returns the pre-increment value; that becomes our tx_base so the first
-	 * tx gets exactly the value other backends will skip past. */
 	sentinel = get_block_by_id(1, true);
 	Assert(sentinel != NULL);
-	tx_base = __sync_fetch_and_add(&sentinel->num_tx_sub, block->num_tx);
+	if (block->num_tx > 0)
+	{
+		int explicit_idx = 0;
+		BCTxID prev_txid = -1;
+
+		explicit_txids = (BCTxID *) palloc0(sizeof(BCTxID) * block->num_tx);
+		cJSON_ArrayForEach(tx_json, tx_list)
+		{
+			cJSON *txid_json = cJSON_GetObjectItemCaseSensitive(tx_json, "txid");
+			BCTxID txid;
+
+			if (!cJSON_IsNumber(txid_json) ||
+				txid_json->valuedouble < 0 ||
+				txid_json->valuedouble > PG_INT32_MAX)
+			{
+				use_explicit_txids = false;
+				break;
+			}
+			txid = (BCTxID) txid_json->valuedouble;
+			if (explicit_idx > 0 && txid != prev_txid + 1)
+				goto error;
+			explicit_txids[explicit_idx++] = txid;
+			prev_txid = txid;
+		}
+	}
+	else
+	{
+		use_explicit_txids = false;
+	}
+
+	if (!use_explicit_txids)
+	{
+		if (explicit_txids != NULL)
+		{
+			pfree(explicit_txids);
+			explicit_txids = NULL;
+		}
+		/* Reserve a contiguous tx-id range from the sentinel.  __sync_fetch_and_add
+		 * returns the pre-increment value; that becomes our tx_base so the first
+		 * tx gets exactly the value other backends will skip past. */
+		tx_base = __sync_fetch_and_add(&sentinel->num_tx_sub, block->num_tx);
+	}
 
 	cJSON_ArrayForEach(tx_json, tx_list)
 	{
@@ -1063,7 +1213,9 @@ parse_block_with_txs(const char *json)
 
 		/* Stamp the assigned ids and slot into the block's tx array.  Order
 		 * here defines deterministic execution order within the block. */
-		tx->tx_id = tx_base + tx_local_idx;
+		tx->tx_id = use_explicit_txids
+			? explicit_txids[tx_local_idx]
+			: tx_base + tx_local_idx;
 		tx->block_id_committed = block->id;
 		block->txs[tx_local_idx] = tx;
 		tx_local_idx += 1;
@@ -1071,6 +1223,24 @@ parse_block_with_txs(const char *json)
 		printf("ariaMyDbg %s : %s: %d txid %d bid %d hash %s \n", __FILE__, __FUNCTION__, __LINE__ , tx->tx_id, block->id, hash->valuestring);
 #endif
 	}
+	if (use_explicit_txids && block->num_tx > 0)
+	{
+		int desired_next = explicit_txids[block->num_tx - 1] + 1;
+
+		for (;;)
+		{
+			int current = sentinel->num_tx_sub;
+
+			if (current >= desired_next)
+				break;
+			if (__sync_bool_compare_and_swap(&sentinel->num_tx_sub,
+											 current,
+											 desired_next))
+				break;
+		}
+	}
+	if (explicit_txids != NULL)
+		pfree(explicit_txids);
 	return block;
 
 error:
@@ -1323,8 +1493,10 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	if (profile && num_tx > 0)
 		slot_wait_us = (uint64 *) palloc0(sizeof(uint64) * num_tx);
 
-	/* Phase 2: enqueue every tx.  Optional yield-every-N gives workers a
-	 * chance to drain the queue during large-block bursts. */
+	/* Phase 2: enqueue every tx.  Parsing can overlap across PostgreSQL
+	 * backends, but tx_queue_insert() must expose blocks to worker FIFO queues
+	 * in block-id order or a higher txid can block a lower one behind it. */
+	bcdb_wait_for_block_enqueue_turn(block_id);
 	for (int i = 0; i < num_tx; ++i)
 	{
 		BCDBShmXact *tx = block->txs[i];
@@ -1333,6 +1505,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			((i + 1) % bcdb_block_enqueue_yield_every()) == 0)
 			pg_usleep(1);
 	}
+	bcdb_advance_block_enqueue_turn(block_id);
 	if (profile)
 		t_enqueue_us = bcdb_get_time();
 
@@ -1915,6 +2088,7 @@ bcdb_clear_block_txs_store()
 	block_meta->num_aborted = 0;
 	block_meta->previous_report_commit = 0;
 	block_meta->previous_report_ts = 0;
+	block_meta->next_enqueue_block_id = BCDB_FIRST_SUBMIT_BLOCK_ID;
 	start_time = bcdb_get_time();
 	set_num_tx_sub(0);
 	set_num_txqd(0);

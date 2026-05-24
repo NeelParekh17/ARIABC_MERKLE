@@ -242,6 +242,9 @@ private:
     uint64_t det_next_block_id_ = 2;
     uint64_t det_block_tx_key_base_ = 0;
     uint64_t det_block_next_tx_key_ = 0;
+    uint64_t det_block_next_backend_txid_ = 0;
+    bool det_block_backend_txid_delta_set_ = false;
+    int64_t det_block_backend_txid_delta_ = 0;
     PGconn* bcdb_ctrl_conn_ = nullptr;
     std::mutex bcdb_init_mu_;
     bool bcdb_init_done_ = false;

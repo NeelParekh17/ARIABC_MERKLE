@@ -1259,6 +1259,17 @@ def main() -> int:
             "psql": psql_path,
             "python": python_path,
         },
+        "env_config": {
+            key: env.get(key, "")
+            for key in [
+                "BCDB_EXTRA_GUCS",
+                "BCDB_BLOCK_RETURN_ACTUAL_RESULTS",
+                "BCDB_DT_SKIP_READONLY_GATE",
+                "BCDB_DT_PARSE_BARRIER",
+                "BCDB_DT_LIGHT_SNAPSHOT",
+                "ARIABC_PSYCOPG_CLIENT_CURSOR",
+            ]
+        },
     }
     meta_json.write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -1525,6 +1536,20 @@ def main() -> int:
                                     row_count = int(count_s.strip())
 
                                 notes_parts: list[str] = []
+                                bcdb_extra_gucs = env.get("BCDB_EXTRA_GUCS", "")
+                                if bcdb_extra_gucs:
+                                    notes_parts.append(
+                                        "bcdb_extra_gucs=" + bcdb_extra_gucs.replace(",", "|")
+                                    )
+                                for env_key in [
+                                    "BCDB_BLOCK_RETURN_ACTUAL_RESULTS",
+                                    "BCDB_DT_SKIP_READONLY_GATE",
+                                    "BCDB_DT_PARSE_BARRIER",
+                                    "BCDB_DT_LIGHT_SNAPSHOT",
+                                ]:
+                                    env_value = env.get(env_key, "")
+                                    if env_value:
+                                        notes_parts.append(f"{env_key.lower()}={env_value}")
                                 if restart_server and start_exit != 0:
                                     notes_parts.append(f"start_server_exit={start_exit}")
                                 if expected_data_dir and live_data_dir != expected_data_dir:

@@ -169,8 +169,10 @@ def _load_single_rows(single_results: Path, *, workload: str, machine: str) -> l
         threads = _as_int(r.get("threads"))
         run = _as_int(r.get("run"))
         overall_ms = _as_float(r.get("workload_overall_ms"))
+        executed = _as_int(r.get("statement_count"))
         workload_log = Path(r.get("workload_log") or "")
-        executed = _count_sql_statements_from_log(workload_log)
+        if executed is None or executed <= 0:
+            executed = _count_sql_statements_from_log(workload_log)
         if executed is None:
             executed = _infer_workload_statement_count(workload)
         tps = (1000.0 * executed / overall_ms) if executed and overall_ms and overall_ms > 0 else None
@@ -220,7 +222,12 @@ def _load_single_rows(single_results: Path, *, workload: str, machine: str) -> l
                 "permanent_failures": str(permanent_failures),
                 "artifact_dir": str(single_results.parent),
                 "invalid_reason": invalid_reason,
-                "notes": "single-node bench_threads_matrix signing=0",
+                "notes": ";".join(
+                    part for part in [
+                        "single-node bench_threads_matrix signing=0",
+                        r.get("notes", ""),
+                    ] if part
+                ),
             }
         )
     return out
@@ -428,7 +435,12 @@ def _count_sql_statements(path: Path) -> int | None:
     count = 0
     for line in path.read_text(errors="replace").splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("--"):
+        if (
+            not stripped
+            or stripped.startswith("--")
+            or stripped.startswith("/*")
+            or stripped.startswith("\\")
+        ):
             continue
         count += 1
     return count
@@ -827,7 +839,39 @@ def _plot(summary: list[dict[str, str]],
             "single_node_det": 0.55,
         },
     )
-    return [pg_vs_det, det_vs_cluster]
+    all_systems = _plot_series(
+        summary,
+        out_dir,
+        workload,
+        x_label,
+        filename="ycsb_skew_all_systems.png",
+        title="YCSB skew: all measured systems",
+        labels={
+            "single_node_pg": f"Single-node PG ({machine})",
+            "single_node_det": f"Single-node DET ({machine})",
+            "single_node_gateway_direct": f"Direct gateway ({machine})",
+            "cluster_kafka": "Kafka cluster",
+            "cluster_raft_kafka": "Raft + Kafka cluster",
+            "full_system_kafka_raft_bcdb": "Raft + Kafka cluster",
+        },
+        colors={
+            "single_node_pg": "#2563eb",
+            "single_node_det": "#16a34a",
+            "single_node_gateway_direct": "#0891b2",
+            "cluster_kafka": "#f59e0b",
+            "cluster_raft_kafka": "#dc2626",
+            "full_system_kafka_raft_bcdb": "#dc2626",
+        },
+        markers={
+            "single_node_pg": "o",
+            "single_node_det": "s",
+            "single_node_gateway_direct": "D",
+            "cluster_kafka": "P",
+            "cluster_raft_kafka": "^",
+            "full_system_kafka_raft_bcdb": "^",
+        },
+    )
+    return [pg_vs_det, det_vs_cluster, all_systems]
 
 
 def main() -> int:

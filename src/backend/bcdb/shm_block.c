@@ -178,6 +178,7 @@ create_block_pool(void)
     block_meta->num_aborted = 0;
     block_meta->previous_report_commit = 0;
     block_meta->previous_report_ts = 0;
+	block_meta->next_enqueue_block_id = BCDB_FIRST_SUBMIT_BLOCK_ID;
 #ifdef LOG_STATUS
     block_meta->log[0] = '\0';
     block_meta->log_counter = 0;
