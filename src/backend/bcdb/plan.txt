@@ -1,0 +1,222 @@
+Yes, that's actually a pretty fragile piece of code.
+
+Look at what it's doing:
+
+```c
+for(sqlOffset = 0; sqlOffset < saveLen; sqlOffset++) {
+    if(tx->sql[sqlOffset] == 't') break;
+    if(tx->sql[sqlOffset] == 'T') break;
+}
+
+sqlOffset += 2;
+```
+
+The author is implicitly assuming the SQL looks like:
+
+```sql
+select saveState('snap1')
+```
+
+and that:
+
+```text
+s e l e c t _ s a v e S t a t e
+          ^
+          t
+```
+
+So after finding the `t` in `select`, they skip:
+
+```text
+"t "
+```
+
+and expect to land exactly on:
+
+```text
+saveState
+```
+
+---
+
+### Why this is dangerous
+
+Consider:
+
+```sql
+delete saveState('snap1')
+```
+
+Indexes:
+
+```text
+d e l e t e _ s a v e S t a t e
+        ^
+```
+
+The loop finds the `t` inside `delete`.
+
+Then:
+
+```c
+sqlOffset += 2;
+```
+
+lands at:
+
+```text
+e _
+```
+
+not at:
+
+```text
+saveState
+```
+
+The later comparison fails.
+
+So in this case it won't incorrectly detect `saveState()`, but only by accident.
+
+---
+
+### Even worse examples
+
+```sql
+WITH x AS (...)
+SELECT saveState('snap1')
+```
+
+First `t` encountered:
+
+```text
+WITH
+   ^
+```
+
+Now the parser jumps to the wrong location.
+
+Detection breaks.
+
+---
+
+Or:
+
+```sql
+/* comment */
+select saveState('snap1')
+```
+
+Could fail depending on spacing.
+
+---
+
+Or:
+
+```sql
+SELECT    saveState('snap1')
+```
+
+Multiple spaces.
+
+The code assumes exactly:
+
+```text
+"t "
+```
+
+(one space after `select`)
+
+which is not guaranteed.
+
+---
+
+### Why it probably "worked"
+
+This looks like an internal testing command.
+
+The developers likely always issued:
+
+```sql
+select saveState('foo')
+select releaseState('foo')
+```
+
+with that exact formatting.
+
+So they took a shortcut instead of building a real SQL parser.
+
+---
+
+### A much safer check
+
+Even a simple:
+
+```c
+if (pg_strncasecmp(tx->sql, "select ", 7) == 0)
+```
+
+would be better.
+
+Then check:
+
+```c
+pg_strncasecmp(
+    tx->sql + 7,
+    "saveState",
+    9
+);
+```
+
+Or use PostgreSQL's parser output instead of string matching.
+
+---
+
+### Something even stranger
+
+Notice this:
+
+```c
+for(sqlOffset = 0;
+    sqlOffset < saveLen;
+    sqlOffset++)
+```
+
+where:
+
+```c
+saveLen = 9;
+```
+
+So it only searches the **first 9 characters** of the SQL string.
+
+That's enough for:
+
+```text
+select...
+```
+
+because the `t` is at index 5.
+
+But if the query starts with:
+
+```sql
+   select saveState(...)
+```
+
+(leading spaces)
+
+the `t` may not even be found before offset 9.
+
+Then the whole mechanism fails.
+
+So yes, your intuition is correct. This code is not really detecting `"select"` at all. It's using a very brittle heuristic:
+
+```text
+Find first 't' in first 9 chars
+Assume it's the 't' in SELECT
+Skip 2 chars
+Assume saveState follows
+```
+
+It works only if the SQL is formatted almost exactly as the developer expected. That's usually a sign of an internal debugging feature rather than production-grade SQL handling.

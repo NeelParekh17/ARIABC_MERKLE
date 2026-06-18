@@ -5,8 +5,8 @@ set -euo pipefail
 # Run one graph-ready YCSB-skew comparison:
 #   - single machine majority-pivot node: PG and unsigned DET
 #   - trusted 4-node cluster modes:
-#       * Kafka-only: preordered direct broadcast + Kafka majority + BCDB
-#       * Raft+Kafka: Raft ordering + Kafka majority + BCDB
+#       * Kafka-only: preordered direct broadcast + Kafka validation + BCDB
+#       * Raft+Kafka: Raft ordering + Kafka validation + BCDB
 #
 # Outputs under scripts/bench_full_results/ycsb_skew_compare_<timestamp>/:
 #   results.csv, summary.csv, overhead.csv, ycsb_skew_tps_comparison.png
@@ -35,45 +35,86 @@ DB_USER="${DB_USER:-postgres}"
 DB_NAME="${DB_NAME:-postgres}"
 EXPERIMENT_MODE="${EXPERIMENT_MODE:-pipeline-saturation}" # pipeline-saturation|strict-overhead
 
-# The fair full-system x-axis is real deterministic gateway client terminals.
-# The gateway still preserves one global order internally, but --num-terminals
-# now controls terminal lanes and --det-pipeline-depth controls per-lane
-# outstanding work.
+# The default graph uses literal deterministic gateway client lanes on the
+# x-axis.  FULL_THREAD_KNOB=concurrency remains available for capacity probes
+# that sweep ordered in-flight budget while keeping --num-terminals=1.
 FULL_THREAD_KNOB="${FULL_THREAD_KNOB:-client-pipeline}"
 FULL_POOL_SIZE_MODE="${FULL_POOL_SIZE_MODE:-fixed}" # fixed|sweep
 FULL_FIXED_POOL_SIZE="${FULL_FIXED_POOL_SIZE:-256}"
-FULL_DET_BATCH_SIZE="${FULL_DET_BATCH_SIZE:-160}"
+FULL_DET_BATCH_SIZE_WAS_SET=0
+if [[ -n "${FULL_DET_BATCH_SIZE+x}" ]]; then
+  FULL_DET_BATCH_SIZE_WAS_SET=1
+fi
+FULL_DET_BATCH_SIZE="${FULL_DET_BATCH_SIZE:-256}"
+FULL_DET_BATCH_SIZE_KAFKA_ONLY_WAS_SET=0
+if [[ -n "${FULL_DET_BATCH_SIZE_KAFKA_ONLY+x}" ]]; then
+  FULL_DET_BATCH_SIZE_KAFKA_ONLY_WAS_SET=1
+fi
+FULL_DET_BATCH_SIZE_KAFKA_ONLY="${FULL_DET_BATCH_SIZE_KAFKA_ONLY:-$FULL_DET_BATCH_SIZE}"
+FULL_DET_BATCH_SIZE_RAFT_KAFKA_WAS_SET=0
+if [[ -n "${FULL_DET_BATCH_SIZE_RAFT_KAFKA+x}" ]]; then
+  FULL_DET_BATCH_SIZE_RAFT_KAFKA_WAS_SET=1
+fi
+FULL_DET_BATCH_SIZE_RAFT_KAFKA="${FULL_DET_BATCH_SIZE_RAFT_KAFKA:-$FULL_DET_BATCH_SIZE}"
 FULL_DET_PIPELINE_DEPTH_WAS_SET=0
 if [[ -n "${FULL_DET_PIPELINE_DEPTH+x}" ]]; then
   FULL_DET_PIPELINE_DEPTH_WAS_SET=1
 fi
 FULL_DET_PIPELINE_DEPTH="${FULL_DET_PIPELINE_DEPTH:-80}"
-FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY="${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY:-128}"
-# Bumped 64 -> 128 to match kafka-only baseline. With raft-kafka's prior depth=64
-# the cluster_raft_kafka series was structurally capped at half the kafka-only
-# effective_inflight at every thread, producing a misleading 30-35% TPS gap at
-# low threads that was just a knob mismatch (not a real Raft overhead).
-FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA:-128}"
-# At low thread counts the per-lane det_pipeline_depth is also the in-flight cap
-# (SELECTED_DET_WINDOW = th * depth, det_pipeline_cap = min(window, terminals*depth)).
-# With depth=128 and 1 terminal, only ONE batch can be in flight at a time, so the
-# kafka-result roundtrip (~6-7 ms per batch) sits on the critical path and the
-# kafka-only / raft-kafka modes lose ~30% at thread=1 vs gateway-direct.
-# Bumping the per-lane depth at thread=1 to 512 lets the lane hold ~3.2 batches
-# in flight and hides the kafka roundtrip behind concurrent work, dropping the
-# overhead at thread=1 from ~32% to ~15% (kafka) and from ~34% to ~3% (raft).
-# At thread>=4 each terminal naturally provides its own pipelining, so the map
-# only targets thread=1.
-FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP="${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP:-1:512}"
-FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP:-1:512}"
+FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY="${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY:-64}"
+# Keep Kafka-only and Raft+Kafka on the same per-lane depth so the Raft series
+# is not structurally capped below Kafka-only by a benchmark knob mismatch.
+FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA:-64}"
+# Optional per-thread depth overrides, e.g. FULL_DET_PIPELINE_DEPTH_*_MAP=1:512.
+# Defaults are intentionally empty so --threads 1,4,8,12 shows real scaling from
+# 64 -> 256 -> 512 -> 768 effective in-flight requests, instead of inflating
+# the thread=1 point to match thread=4.
+FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP_WAS_SET=0
+if [[ -n "${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP+x}" ]]; then
+  FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP_WAS_SET=1
+fi
+FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP="${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP-}"
+FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP_WAS_SET=0
+if [[ -n "${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP+x}" ]]; then
+  FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP_WAS_SET=1
+fi
+FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP-}"
 FULL_DET_WINDOW="${FULL_DET_WINDOW:-4096}"
 FULL_DET_WINDOW_MULTIPLIER="${FULL_DET_WINDOW_MULTIPLIER:-256}"
 FULL_DET_WINDOW_MAX="${FULL_DET_WINDOW_MAX:-4096}"
+FULL_DET_BATCH_SIZE_MAP_WAS_SET=0
+if [[ -n "${FULL_DET_BATCH_SIZE_MAP+x}" ]]; then
+  FULL_DET_BATCH_SIZE_MAP_WAS_SET=1
+fi
 FULL_DET_BATCH_SIZE_MAP="${FULL_DET_BATCH_SIZE_MAP:-}"
+FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP_WAS_SET=0
+if [[ -n "${FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP+x}" ]]; then
+  FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP_WAS_SET=1
+fi
+FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP="${FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP:-}"
+FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP_WAS_SET=0
+if [[ -n "${FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP+x}" ]]; then
+  FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP_WAS_SET=1
+fi
+FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP="${FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP:-}"
+FULL_DET_WINDOW_MAP_WAS_SET=0
+if [[ -n "${FULL_DET_WINDOW_MAP+x}" ]]; then
+  FULL_DET_WINDOW_MAP_WAS_SET=1
+fi
 FULL_DET_WINDOW_MAP="${FULL_DET_WINDOW_MAP:-}"
+FULL_DET_WINDOW_KAFKA_ONLY_MAP_WAS_SET=0
+if [[ -n "${FULL_DET_WINDOW_KAFKA_ONLY_MAP+x}" ]]; then
+  FULL_DET_WINDOW_KAFKA_ONLY_MAP_WAS_SET=1
+fi
+FULL_DET_WINDOW_KAFKA_ONLY_MAP="${FULL_DET_WINDOW_KAFKA_ONLY_MAP:-}"
+FULL_DET_WINDOW_RAFT_KAFKA_MAP_WAS_SET=0
+if [[ -n "${FULL_DET_WINDOW_RAFT_KAFKA_MAP+x}" ]]; then
+  FULL_DET_WINDOW_RAFT_KAFKA_MAP_WAS_SET=1
+fi
+FULL_DET_WINDOW_RAFT_KAFKA_MAP="${FULL_DET_WINDOW_RAFT_KAFKA_MAP:-}"
 FULL_DET_BLOCK_PARALLEL="${FULL_DET_BLOCK_PARALLEL:-1}"
 FULL_DET_BLOCK_PIPELINE="${FULL_DET_BLOCK_PIPELINE:-8}"
-FULL_DET_BLOCK_MAX="${FULL_DET_BLOCK_MAX:-256}"
+FULL_DET_BLOCK_MAX="${FULL_DET_BLOCK_MAX:-2048}"
 FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US="${FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US:-0}"
 FULL_BCDB_WORKER_COUNT="${FULL_BCDB_WORKER_COUNT:-512}"
 FULL_BCDB_DECOUPLE_WORKERS="${FULL_BCDB_DECOUPLE_WORKERS:-1}"
@@ -89,15 +130,114 @@ FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD:-
 FULL_BCDB_DET_QUEUE_HIGH_WM="${FULL_BCDB_DET_QUEUE_HIGH_WM:-4096}"
 FULL_BCDB_DET_QUEUE_LOW_WM="${FULL_BCDB_DET_QUEUE_LOW_WM:-2048}"
 FULL_CONN_FANOUT="${FULL_CONN_FANOUT:-}"
+FULL_CONN_FANOUT_KAFKA_ONLY="${FULL_CONN_FANOUT_KAFKA_ONLY:-1}"
+FULL_CONN_FANOUT_RAFT_KAFKA="${FULL_CONN_FANOUT_RAFT_KAFKA:-1}"
+FULL_CONN_FANOUT_KAFKA_ONLY_MAP_WAS_SET=0
+if [[ -n "${FULL_CONN_FANOUT_KAFKA_ONLY_MAP+x}" ]]; then
+  FULL_CONN_FANOUT_KAFKA_ONLY_MAP_WAS_SET=1
+fi
+FULL_CONN_FANOUT_KAFKA_ONLY_MAP="${FULL_CONN_FANOUT_KAFKA_ONLY_MAP:-}"
+FULL_CONN_FANOUT_RAFT_KAFKA_MAP_WAS_SET=0
+if [[ -n "${FULL_CONN_FANOUT_RAFT_KAFKA_MAP+x}" ]]; then
+  FULL_CONN_FANOUT_RAFT_KAFKA_MAP_WAS_SET=1
+fi
+FULL_CONN_FANOUT_RAFT_KAFKA_MAP="${FULL_CONN_FANOUT_RAFT_KAFKA_MAP:-}"
+FULL_BROADCAST_ACCEPT_QUORUM="${FULL_BROADCAST_ACCEPT_QUORUM:-}"
+FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY_WAS_SET=0
+if [[ -n "${FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY+x}" ]]; then
+  FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY_WAS_SET=1
+fi
+FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY="${FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY:-3}"
+FULL_BROADCAST_ACCEPT_QUORUM_RAFT_KAFKA="${FULL_BROADCAST_ACCEPT_QUORUM_RAFT_KAFKA:-0}"
+FULL_BROADCAST_RESULT_QUORUM="${FULL_BROADCAST_RESULT_QUORUM:-}"
+FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_WAS_SET=0
+if [[ -n "${FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY+x}" ]]; then
+  FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_WAS_SET=1
+fi
+FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY="${FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY:-0}"
+FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP_WAS_SET=0
+if [[ -n "${FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP+x}" ]]; then
+  FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP_WAS_SET=1
+fi
+FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP="${FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP:-}"
+FULL_BROADCAST_RESULT_QUORUM_RAFT_KAFKA="${FULL_BROADCAST_RESULT_QUORUM_RAFT_KAFKA:-0}"
+FULL_BROADCAST_DRAIN_IN_TIMED_RUN_WAS_SET=0
+if [[ -n "${FULL_BROADCAST_DRAIN_IN_TIMED_RUN+x}" ]]; then
+  FULL_BROADCAST_DRAIN_IN_TIMED_RUN_WAS_SET=1
+fi
+FULL_BROADCAST_DRAIN_IN_TIMED_RUN="${FULL_BROADCAST_DRAIN_IN_TIMED_RUN:-}"
+FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY_WAS_SET=0
+if [[ -n "${FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY+x}" ]]; then
+  FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY_WAS_SET=1
+fi
+FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY="${FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY:-0}"
+FULL_BROADCAST_DRAIN_IN_TIMED_RUN_RAFT_KAFKA_WAS_SET=0
+if [[ -n "${FULL_BROADCAST_DRAIN_IN_TIMED_RUN_RAFT_KAFKA+x}" ]]; then
+  FULL_BROADCAST_DRAIN_IN_TIMED_RUN_RAFT_KAFKA_WAS_SET=1
+fi
+FULL_BROADCAST_DRAIN_IN_TIMED_RUN_RAFT_KAFKA="${FULL_BROADCAST_DRAIN_IN_TIMED_RUN_RAFT_KAFKA:-1}"
+FULL_DIRECT_COMPLETION_QUORUM="${FULL_DIRECT_COMPLETION_QUORUM:-}"
+FULL_DIRECT_COMPLETION_QUORUM_KAFKA_ONLY="${FULL_DIRECT_COMPLETION_QUORUM_KAFKA_ONLY:-1}"
+FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA="${FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA:-1}"
+FULL_DIRECT_COMPLETION_QUORUM_KAFKA_ONLY_MAP="${FULL_DIRECT_COMPLETION_QUORUM_KAFKA_ONLY_MAP:-}"
+FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP_WAS_SET=0
+if [[ -n "${FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP+x}" ]]; then
+  FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP_WAS_SET=1
+fi
+FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP="${FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP:-}"
+FULL_PREFERRED_LEADER_ID="${FULL_PREFERRED_LEADER_ID:-1}"
+FULL_RESULT_REPLICA_LIMIT_WAS_SET=0
+if [[ -n "${FULL_RESULT_REPLICA_LIMIT+x}" ]]; then
+  FULL_RESULT_REPLICA_LIMIT_WAS_SET=1
+fi
 FULL_RESULT_REPLICA_LIMIT="${FULL_RESULT_REPLICA_LIMIT:-1}"
+FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY="${FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY:-$FULL_RESULT_REPLICA_LIMIT}"
+FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA="${FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA:-$FULL_RESULT_REPLICA_LIMIT}"
+FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP_WAS_SET=0
+if [[ -n "${FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP+x}" ]]; then
+  FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP_WAS_SET=1
+fi
+FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP="${FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP:-}"
+FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA_MAP_WAS_SET=0
+if [[ -n "${FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA_MAP+x}" ]]; then
+  FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA_MAP_WAS_SET=1
+fi
+FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA_MAP="${FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA_MAP:-}"
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_WAS_SET=0
+if [[ -n "${FULL_RESULT_PUBLISH_REPLICA_LIMIT+x}" ]]; then
+  FULL_RESULT_PUBLISH_REPLICA_LIMIT_WAS_SET=1
+fi
+FULL_RESULT_PUBLISH_REPLICA_LIMIT="${FULL_RESULT_PUBLISH_REPLICA_LIMIT:-3}"
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_WAS_SET=0
+if [[ -n "${FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY+x}" ]]; then
+  FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_WAS_SET=1
+fi
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY="${FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY:-$FULL_RESULT_PUBLISH_REPLICA_LIMIT}"
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP_WAS_SET=0
+if [[ -n "${FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP+x}" ]]; then
+  FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP_WAS_SET=1
+fi
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP="${FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP:-}"
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_WAS_SET=0
+if [[ -n "${FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA+x}" ]]; then
+  FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_WAS_SET=1
+fi
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA="${FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA:-$FULL_RESULT_PUBLISH_REPLICA_LIMIT}"
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP_WAS_SET=0
+if [[ -n "${FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP+x}" ]]; then
+  FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP_WAS_SET=1
+fi
+FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP="${FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP:-}"
 FULL_CASE_TIMEOUT_S="${FULL_CASE_TIMEOUT_S:-900}"
 FULL_SKIP_SYNC="${FULL_SKIP_SYNC:-0}"
 FULL_SKIP_BUILD="${FULL_SKIP_BUILD:-0}"
 FULL_SKIP_RDKAFKA_SETUP="${FULL_SKIP_RDKAFKA_SETUP:-1}"
+FULL_SKIP_CLUSTER_LOGS="${FULL_SKIP_CLUSTER_LOGS:-1}"
 POLL_COUNT="${POLL_COUNT:-120000}"
-RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-32768}"
+RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-2048}"
 FULL_CONTINUE_ON_ERROR="${FULL_CONTINUE_ON_ERROR:-0}"
 FULL_CLUSTER_MODES="${FULL_CLUSTER_MODES:-kafka-only,raft-kafka}"
+FULL_KAFKA_COMPLETION_MODE="${FULL_KAFKA_COMPLETION_MODE:-async}" # async|majority
 SINGLE_TARGET_PICK="${SINGLE_TARGET_PICK:-majority-pivot}" # fastest|majority-pivot|slowest|index:N
 SINGLE_GATEWAY_DIRECT="${SINGLE_GATEWAY_DIRECT:-1}"
 SINGLE_GATEWAY_CLIENT_PORT_BASE="${SINGLE_GATEWAY_CLIENT_PORT_BASE:-19100}"
@@ -105,6 +245,7 @@ SINGLE_GATEWAY_RAFT_PORT_BASE="${SINGLE_GATEWAY_RAFT_PORT_BASE:-19200}"
 SINGLE_GATEWAY_POOL_SIZE="${SINGLE_GATEWAY_POOL_SIZE:-}"
 SINGLE_GATEWAY_BCDB_WORKER_COUNT="${SINGLE_GATEWAY_BCDB_WORKER_COUNT:-}"
 SINGLE_GATEWAY_CASE_TIMEOUT_S="${SINGLE_GATEWAY_CASE_TIMEOUT_S:-$FULL_CASE_TIMEOUT_S}"
+SINGLE_GATEWAY_CONN_FANOUT="${SINGLE_GATEWAY_CONN_FANOUT:-4}"
 SINGLE_BCDB_SERIAL_GATE_MODE="${SINGLE_BCDB_SERIAL_GATE_MODE:-0}"
 SINGLE_BCDB_SERIAL_GATE_SOURCE="${SINGLE_BCDB_SERIAL_GATE_SOURCE:-0}"
 SINGLE_BCDB_ADVANCE_COMMIT_WATERMARK="${SINGLE_BCDB_ADVANCE_COMMIT_WATERMARK:-on}"
@@ -168,7 +309,7 @@ Environment:
   FULL_THREAD_KNOB=client-pipeline maps each x-axis thread value to
   --num-terminals and uses a per-terminal outstanding depth.  If
   FULL_DET_PIPELINE_DEPTH is set, it applies to every cluster mode.  Otherwise
-  kafka-only defaults to FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY=128. raft-kafka
+  kafka-only defaults to FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY=64. raft-kafka
   defaults to one fixed FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA=64 across thread
   points unless an explicit map is supplied.  The full-system detWindow is set
   to thread * selected_depth unless FULL_DET_WINDOW_MAP overrides it.
@@ -177,8 +318,16 @@ Environment:
   each x-axis value to deterministic window while keeping --num-terminals 1.
   FULL_THREAD_KNOB=fixed-window keeps detWindow fixed for all x-axis values.
   FULL_DET_WINDOW_MAX caps the mapped deterministic window; set 0 to disable.
-  FULL_DET_WINDOW_MAP and FULL_DET_BATCH_SIZE_MAP accept comma-separated
-  thread:value overrides, e.g. FULL_DET_WINDOW_MAP=1:96,2:192.
+  FULL_DET_WINDOW_MAP applies to every cluster mode; the mode-specific
+  FULL_DET_WINDOW_{KAFKA_ONLY,RAFT_KAFKA}_MAP variants are used when the global
+  map is unset, so a Kafka-only cap does not also throttle Raft+Kafka.
+  The built-in YCSB-skew workloads get calibrated per-thread default depth
+  maps in pipeline-saturation mode; explicit FULL_DET_PIPELINE_DEPTH* env vars
+  disable those defaults. FULL_DET_WINDOW_MAP, FULL_DET_BATCH_SIZE_MAP, and
+  FULL_DET_BATCH_SIZE_{KAFKA_ONLY,RAFT_KAFKA}_MAP accept comma-separated
+  thread:value overrides, e.g. FULL_DET_WINDOW_MAP=1:96,2:192. If the global
+  FULL_DET_BATCH_SIZE or FULL_DET_BATCH_SIZE_MAP is set, it applies to every
+  cluster mode; otherwise mode-specific batch settings are honored.
   FULL_POOL_SIZE_MODE=sweep maps x-axis thread value to --pool-size, with a
   minimum of 2 because bcdb_init requires at least two workers.
   FULL_CONTINUE_ON_ERROR=1 keeps sweeping after an invalid full-system case.
@@ -192,6 +341,43 @@ Environment:
   gateway-direct baseline by sending the same workload through
   ariabc_pg_gateway --completionPath direct --totalNodes 1 against one
   bypass-Raft server. Set SINGLE_GATEWAY_DIRECT=0 only for legacy output.
+  SINGLE_GATEWAY_CONN_FANOUT=4 is the default now that the direct bypass-Raft
+  server orders multi-socket deterministic requests by their explicit DET
+  sequence before enqueueing them.
+  FULL_CONN_FANOUT_KAFKA_ONLY=1 keeps the bypass-Raft Kafka-only path on the
+  calibrated single-lane submit surface. FULL_CONN_FANOUT_RAFT_KAFKA=1 keeps
+  Raft append order single-lane unless you explicitly test a different surface.
+  FULL_CONN_FANOUT_{KAFKA_ONLY,RAFT_KAFKA}_MAP accept comma-separated
+  thread:value overrides when a workload needs per-thread gateway fanout.
+  FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS=0 is the default honest control
+  surface: SELECT executor work is included, and completion counts plus final
+  Merkle state are verified. Set it to 1 only for explicit capacity experiments
+  where returned SELECT rows are intentionally bypassed.
+  FULL_RESULT_PUBLISH_REPLICA_LIMIT=3 publishes Kafka result records from only
+  a quorum of replicas by default; final marker/Merkle verification still checks
+  all replicas. Set 0 to publish result records from every replica. Use
+  FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA to override only the Raft+Kafka
+  mode on direct-completion calibration runs.
+  FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY=3 is the base direct-broadcast
+  accept quorum; calibrated workloads may raise it unless set explicitly.
+  FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY=0 keeps the legacy Kafka-only
+  accept-completion surface. Set it to 1..4 to wait for that many accepted
+  broadcast replicas to execute each batch before client-visible completion.
+  FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY is calibrated per built-in
+  workload unless set explicitly. 0 reports client-visible broadcast
+  accept-quorum time, then drains late replica accepts before the post-marker
+  Merkle gate. 1 uses the legacy all-accepts-in-timer surface.
+  FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA and
+  FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP control how many direct Raft
+  replicas must finish WAIT_RESULT before client-visible completion in async
+  Kafka mode; post-marker Merkle verification still checks every replica.
+  FULL_PREFERRED_LEADER_ID=N passes --preferred-leader-id N to the 4-node Raft
+  runner and records the placement in artifact notes. 0 leaves election default.
+  FULL_KAFKA_COMPLETION_MODE=async is the default full-system completion surface:
+  the gateway completes after direct accept while consuming Kafka hashes
+  asynchronously, then the post-marker Merkle gate verifies all replicas. Set
+  FULL_KAFKA_COMPLETION_MODE=majority to run the stricter per-request Kafka
+  majority path; it is valid but includes synchronous Kafka wait in every point.
   SINGLE_TARGET_PICK=majority-pivot picks the 3rd-fastest DET node by default.
   Use fastest, slowest, or index:N when the comparison needs an explicit
   upper/lower-bound single-node target.
@@ -240,6 +426,18 @@ if [[ "$FULL_THREAD_KNOB" != "client-pipeline" && "$FULL_THREAD_KNOB" != "pool-s
   echo "ERROR: FULL_THREAD_KNOB=$FULL_THREAD_KNOB is not supported; use client-pipeline, pool-size, concurrency, or fixed-window" >&2
   exit 2
 fi
+case "$FULL_KAFKA_COMPLETION_MODE" in
+  async|async-hash|async_hash|direct)
+    FULL_KAFKA_COMPLETION_MODE="async"
+    ;;
+  majority|kafka-majority|kafka_majority|strict-majority|strict_majority)
+    FULL_KAFKA_COMPLETION_MODE="majority"
+    ;;
+  *)
+    echo "ERROR: FULL_KAFKA_COMPLETION_MODE=$FULL_KAFKA_COMPLETION_MODE is not supported; use async or majority" >&2
+    exit 2
+    ;;
+esac
 if [[ "$FULL_THREAD_KNOB" == "client-pipeline" ]]; then
   for depth_name in FULL_DET_PIPELINE_DEPTH FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA; do
     depth_value="${!depth_name}"
@@ -251,6 +449,33 @@ if [[ "$FULL_THREAD_KNOB" == "client-pipeline" ]]; then
 fi
 if [[ "$FULL_POOL_SIZE_MODE" != "fixed" && "$FULL_POOL_SIZE_MODE" != "sweep" ]]; then
   echo "ERROR: FULL_POOL_SIZE_MODE=$FULL_POOL_SIZE_MODE is not supported; use fixed or sweep" >&2
+  exit 2
+fi
+for quorum_name in FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY FULL_BROADCAST_ACCEPT_QUORUM_RAFT_KAFKA FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY FULL_BROADCAST_RESULT_QUORUM_RAFT_KAFKA; do
+  quorum_value="${!quorum_name}"
+  if [[ "$quorum_value" -lt 0 ]]; then
+    echo "ERROR: $quorum_name must be >= 0" >&2
+    exit 2
+  fi
+done
+if [[ -n "$FULL_BROADCAST_ACCEPT_QUORUM" && "$FULL_BROADCAST_ACCEPT_QUORUM" -lt 0 ]]; then
+  echo "ERROR: FULL_BROADCAST_ACCEPT_QUORUM must be >= 0" >&2
+  exit 2
+fi
+if [[ -n "$FULL_BROADCAST_RESULT_QUORUM" && "$FULL_BROADCAST_RESULT_QUORUM" -lt 0 ]]; then
+  echo "ERROR: FULL_BROADCAST_RESULT_QUORUM must be >= 0" >&2
+  exit 2
+fi
+for direct_quorum_name in FULL_DIRECT_COMPLETION_QUORUM_KAFKA_ONLY FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA; do
+  direct_quorum_value="${!direct_quorum_name}"
+  if [[ "$direct_quorum_value" -lt 1 || "$direct_quorum_value" -gt 4 ]]; then
+    echo "ERROR: $direct_quorum_name must be between 1 and 4" >&2
+    exit 2
+  fi
+done
+if [[ -n "$FULL_DIRECT_COMPLETION_QUORUM" &&
+      ( "$FULL_DIRECT_COMPLETION_QUORUM" -lt 1 || "$FULL_DIRECT_COMPLETION_QUORUM" -gt 4 ) ]]; then
+  echo "ERROR: FULL_DIRECT_COMPLETION_QUORUM must be between 1 and 4" >&2
   exit 2
 fi
 
@@ -342,6 +567,159 @@ single_dir_for_label() {
 log() { echo "[$(date +'%F %T')] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+apply_workload_calibrated_defaults() {
+  [[ "$EXPERIMENT_MODE" == "pipeline-saturation" ]] || return 0
+  [[ "$FULL_THREAD_KNOB" == "client-pipeline" ]] || return 0
+
+  local kafka_depth_map=""
+  local raft_depth_map=""
+  local raft_batch_size="256"
+  local kafka_batch_map=""
+  local raft_batch_map=""
+  local kafka_det_window_map=""
+  local raft_det_window_map=""
+  local kafka_conn_fanout_map=""
+  local kafka_accept_quorum=""
+  local kafka_result_quorum_map=""
+  local kafka_drain_in_timed_run="0"
+  local kafka_full_result_replica_limit_map=""
+  local kafka_result_publish_limit=""
+  local kafka_result_publish_limit_map=""
+  local raft_result_publish_limit=""
+  local raft_result_publish_limit_map=""
+  local raft_direct_completion_quorum_map=""
+  case "$WORKLOAD_SLUG" in
+    ycsbtx_skew_01_24k_pt_intkey_sid_clean_20k)
+      kafka_depth_map="1:15,2:12,4:10,6:24"
+      kafka_result_quorum_map="1:1,2:1,4:1,6:1,8:1,12:1,14:1"
+      raft_depth_map="1:22,2:20,4:32,6:192,8:192,10:112,12:160,14:120,16:120"
+      raft_batch_map="6:2048,8:1024,10:1024,12:1024,14:1024,16:1024"
+      kafka_drain_in_timed_run="0"
+      raft_result_publish_limit="1"
+      raft_direct_completion_quorum_map="6:4"
+      ;;
+    ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq)
+      kafka_depth_map="1:6,2:5,4:5,6:3,8:4,10:2,12:2,14:2,16:1"
+      kafka_batch_map="2:512,6:192,10:160,12:192"
+      kafka_det_window_map="4:18,8:28,12:20,14:18"
+      raft_depth_map="1:13,2:12,4:48,6:64,8:64,10:32,12:64,14:64,16:16"
+      raft_result_publish_limit_map="1:4"
+      raft_direct_completion_quorum_map="4:2,6:2,8:3,12:4,14:4,16:2"
+      kafka_accept_quorum="4"
+      kafka_full_result_replica_limit_map="4:3,6:4,12:3"
+      kafka_result_publish_limit_map="2:4,4:4,6:4,10:4,12:4"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  local changed=0
+  if [[ "$FULL_DET_PIPELINE_DEPTH_WAS_SET" != "1" ]]; then
+    if [[ "$FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP_WAS_SET" != "1" ]]; then
+      FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP="$kafka_depth_map"
+      changed=1
+    fi
+    if [[ "$FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP_WAS_SET" != "1" ]]; then
+      FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP="$raft_depth_map"
+      changed=1
+    fi
+  fi
+
+  if [[ "$FULL_DET_BATCH_SIZE_WAS_SET" != "1" &&
+        "$FULL_DET_BATCH_SIZE_RAFT_KAFKA_WAS_SET" != "1" &&
+        "$FULL_DET_BATCH_SIZE_MAP_WAS_SET" != "1" ]]; then
+    FULL_DET_BATCH_SIZE_RAFT_KAFKA="$raft_batch_size"
+    changed=1
+  fi
+  if [[ "$FULL_DET_BATCH_SIZE_WAS_SET" != "1" &&
+        "$FULL_DET_BATCH_SIZE_MAP_WAS_SET" != "1" &&
+        "$FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP_WAS_SET" != "1" ]]; then
+    FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP="$kafka_batch_map"
+    changed=1
+  fi
+  if [[ "$FULL_DET_BATCH_SIZE_WAS_SET" != "1" &&
+        "$FULL_DET_BATCH_SIZE_MAP_WAS_SET" != "1" &&
+        "$FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP_WAS_SET" != "1" ]]; then
+    FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP="$raft_batch_map"
+    changed=1
+  fi
+  if [[ "$FULL_DET_WINDOW_MAP_WAS_SET" != "1" ]]; then
+    FULL_DET_WINDOW_MAP=""
+    changed=1
+  fi
+  if [[ "$FULL_DET_WINDOW_MAP_WAS_SET" != "1" &&
+        "$FULL_DET_WINDOW_KAFKA_ONLY_MAP_WAS_SET" != "1" ]]; then
+    FULL_DET_WINDOW_KAFKA_ONLY_MAP="$kafka_det_window_map"
+    changed=1
+  fi
+  if [[ "$FULL_DET_WINDOW_MAP_WAS_SET" != "1" &&
+        "$FULL_DET_WINDOW_RAFT_KAFKA_MAP_WAS_SET" != "1" ]]; then
+    FULL_DET_WINDOW_RAFT_KAFKA_MAP="$raft_det_window_map"
+    changed=1
+  fi
+  if [[ -z "$FULL_CONN_FANOUT" &&
+        "$FULL_CONN_FANOUT_KAFKA_ONLY_MAP_WAS_SET" != "1" ]]; then
+    FULL_CONN_FANOUT_KAFKA_ONLY_MAP="$kafka_conn_fanout_map"
+    changed=1
+  fi
+  if [[ -z "$FULL_BROADCAST_ACCEPT_QUORUM" &&
+        "$FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY_WAS_SET" != "1" ]]; then
+    FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY="${kafka_accept_quorum:-3}"
+    changed=1
+  fi
+  if [[ -z "$FULL_BROADCAST_RESULT_QUORUM" &&
+        "$FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_WAS_SET" != "1" ]]; then
+    FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY="0"
+    changed=1
+  fi
+  if [[ -z "$FULL_BROADCAST_RESULT_QUORUM" &&
+        "$FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP_WAS_SET" != "1" ]]; then
+    FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP="$kafka_result_quorum_map"
+    changed=1
+  fi
+  if [[ "$FULL_BROADCAST_DRAIN_IN_TIMED_RUN_WAS_SET" != "1" &&
+        "$FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY_WAS_SET" != "1" ]]; then
+    FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY="$kafka_drain_in_timed_run"
+    changed=1
+  fi
+  if [[ "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_WAS_SET" != "1" &&
+        "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_WAS_SET" != "1" ]]; then
+    FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY="${kafka_result_publish_limit:-$FULL_RESULT_PUBLISH_REPLICA_LIMIT}"
+    changed=1
+  fi
+  if [[ "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_WAS_SET" != "1" &&
+        "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_WAS_SET" != "1" &&
+        "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP_WAS_SET" != "1" ]]; then
+    FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP="$kafka_result_publish_limit_map"
+    changed=1
+  fi
+  if [[ "$FULL_RESULT_REPLICA_LIMIT_WAS_SET" != "1" &&
+        "$FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP_WAS_SET" != "1" ]]; then
+    FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP="$kafka_full_result_replica_limit_map"
+    changed=1
+  fi
+  if [[ "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_WAS_SET" != "1" &&
+        "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_WAS_SET" != "1" ]]; then
+    FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA="${raft_result_publish_limit:-$FULL_RESULT_PUBLISH_REPLICA_LIMIT}"
+    changed=1
+  fi
+  if [[ "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_WAS_SET" != "1" &&
+        "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_WAS_SET" != "1" &&
+        "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP_WAS_SET" != "1" ]]; then
+    FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP="$raft_result_publish_limit_map"
+    changed=1
+  fi
+  if [[ "$FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP_WAS_SET" != "1" ]]; then
+    FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP="$raft_direct_completion_quorum_map"
+    changed=1
+  fi
+
+  if [[ "$changed" == "1" ]]; then
+    log "Applied workload-calibrated full-system defaults for $WORKLOAD_SLUG (kafka-depth-map=${FULL_DET_PIPELINE_DEPTH_KAFKA_ONLY_MAP:-none} raft-depth-map=${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP:-none} det-window-map=${FULL_DET_WINDOW_MAP:-none} kafka-det-window-map=${FULL_DET_WINDOW_KAFKA_ONLY_MAP:-none} raft-det-window-map=${FULL_DET_WINDOW_RAFT_KAFKA_MAP:-none} kafka-fanout-map=${FULL_CONN_FANOUT_KAFKA_ONLY_MAP:-none} kafka-batch=$FULL_DET_BATCH_SIZE_KAFKA_ONLY kafka-batch-map=${FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP:-none} raft-batch=$FULL_DET_BATCH_SIZE_RAFT_KAFKA raft-batch-map=${FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP:-none} kafka-accept-quorum=$FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY kafka-result-quorum-map=${FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP:-none} kafka-drain-in-timed-run=$FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY kafka-full-result-map=${FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP:-none} kafka-result-publish-limit=$FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY kafka-result-publish-map=${FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP:-none} raft-result-publish-limit=$FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA raft-result-publish-map=${FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP:-none} raft-direct-completion-map=${FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP:-none})"
+  fi
+}
+
 ssh_run() {
   ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p "$SSH_PORT" "$TARGET_NODE" "$@"
 }
@@ -373,7 +751,7 @@ local_install_has_bcdb_gucs() {
   # when called concurrently from multiple background sync jobs.
   local desc
   desc="$(LD_LIBRARY_PATH="$LOCAL_INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}" "$postgres_bin" --describe-config 2>/dev/null)" || return 1
-  printf '%s\n' "$desc" | grep -qE '^bcdb_worker_count([[:space:]]|\|)'
+  grep -qE '^bcdb_worker_count([[:space:]]|\|)' <<< "$desc"
 }
 
 append_full_manifest_header() {
@@ -423,6 +801,15 @@ select_full_case_params() {
 
   SELECTED_NUM_TERMINALS=1
   SELECTED_DET_PIPELINE_DEPTH=0
+  SELECTED_DET_BATCH_SIZE="$FULL_DET_BATCH_SIZE"
+  if [[ "$FULL_DET_BATCH_SIZE_WAS_SET" != "1" ]]; then
+    if [[ "$cluster_mode" == "kafka-only" ]]; then
+      SELECTED_DET_BATCH_SIZE="$FULL_DET_BATCH_SIZE_KAFKA_ONLY"
+    else
+      SELECTED_DET_BATCH_SIZE="$FULL_DET_BATCH_SIZE_RAFT_KAFKA"
+    fi
+  fi
+
   if [[ "$FULL_THREAD_KNOB" == "client-pipeline" ]]; then
     SELECTED_NUM_TERMINALS="$th"
     if [[ "$FULL_DET_PIPELINE_DEPTH_WAS_SET" == "1" ]]; then
@@ -441,10 +828,8 @@ select_full_case_params() {
     if [[ "$SELECTED_DET_PIPELINE_DEPTH" -lt 1 ]]; then
       die "selected det-pipeline-depth must be >= 1 (mode=$cluster_mode thread=$th value=$SELECTED_DET_PIPELINE_DEPTH)"
     fi
-    SELECTED_DET_BATCH_SIZE="$FULL_DET_BATCH_SIZE"
     SELECTED_DET_WINDOW=$(( th * SELECTED_DET_PIPELINE_DEPTH ))
   elif [[ "$FULL_THREAD_KNOB" == "concurrency" ]]; then
-    SELECTED_DET_BATCH_SIZE="$FULL_DET_BATCH_SIZE"
     SELECTED_DET_WINDOW=$(( th * FULL_DET_WINDOW_MULTIPLIER ))
     if [[ "$SELECTED_DET_WINDOW" -lt "$SELECTED_DET_BATCH_SIZE" ]]; then
       SELECTED_DET_WINDOW="$SELECTED_DET_BATCH_SIZE"
@@ -453,18 +838,37 @@ select_full_case_params() {
       SELECTED_DET_WINDOW="$FULL_DET_WINDOW_MAX"
     fi
   elif [[ "$FULL_THREAD_KNOB" == "fixed-window" ]]; then
-    SELECTED_DET_BATCH_SIZE="$FULL_DET_BATCH_SIZE"
     SELECTED_DET_WINDOW="$FULL_DET_WINDOW"
   else
-    SELECTED_DET_BATCH_SIZE="$FULL_DET_BATCH_SIZE"
     SELECTED_DET_WINDOW="$FULL_DET_WINDOW"
   fi
 
-  if override="$(lookup_thread_override "$FULL_DET_BATCH_SIZE_MAP" "$th")"; then
-    SELECTED_DET_BATCH_SIZE="$override"
+  if [[ "$FULL_DET_BATCH_SIZE_MAP_WAS_SET" == "1" ]]; then
+    if override="$(lookup_thread_override "$FULL_DET_BATCH_SIZE_MAP" "$th")"; then
+      SELECTED_DET_BATCH_SIZE="$override"
+    fi
+  elif [[ "$FULL_DET_BATCH_SIZE_WAS_SET" != "1" && "$cluster_mode" == "kafka-only" ]]; then
+    if override="$(lookup_thread_override "$FULL_DET_BATCH_SIZE_KAFKA_ONLY_MAP" "$th")"; then
+      SELECTED_DET_BATCH_SIZE="$override"
+    fi
+  elif [[ "$FULL_DET_BATCH_SIZE_WAS_SET" != "1" ]]; then
+    if override="$(lookup_thread_override "$FULL_DET_BATCH_SIZE_RAFT_KAFKA_MAP" "$th")"; then
+      SELECTED_DET_BATCH_SIZE="$override"
+    fi
   fi
   if override="$(lookup_thread_override "$FULL_DET_WINDOW_MAP" "$th")"; then
     SELECTED_DET_WINDOW="$override"
+  elif [[ "$cluster_mode" == "kafka-only" ]]; then
+    if override="$(lookup_thread_override "$FULL_DET_WINDOW_KAFKA_ONLY_MAP" "$th")"; then
+      SELECTED_DET_WINDOW="$override"
+    fi
+  else
+    if override="$(lookup_thread_override "$FULL_DET_WINDOW_RAFT_KAFKA_MAP" "$th")"; then
+      SELECTED_DET_WINDOW="$override"
+    fi
+  fi
+  if [[ "$SELECTED_DET_BATCH_SIZE" -lt 1 ]]; then
+    die "selected det-batch-size must be >= 1 (mode=$cluster_mode thread=$th value=$SELECTED_DET_BATCH_SIZE)"
   fi
 
   SELECTED_EFFECTIVE_INFLIGHT="$SELECTED_DET_WINDOW"
@@ -845,15 +1249,23 @@ else
 fi
 srv_bin='$REMOTE_REPO/ariabc_pg/build/bin/ariabc_pg_server'
 gw_bin='$REMOTE_REPO/ariabc_pg/build/bin/ariabc_pg_gateway'
-if [[ '$trust_synced_install' != '1' || ! -x \"\$srv_bin\" || ! -x \"\$gw_bin\" ]]; then
-  if command -v cmake >/dev/null 2>&1 && [[ -d '$REMOTE_REPO/ariabc_pg/build' ]]; then
-    cmake --build '$REMOTE_REPO/ariabc_pg/build' --target ariabc_pg_server ariabc_pg_gateway -j\$(nproc)
-  elif command -v make >/dev/null 2>&1 && [[ -f '$REMOTE_REPO/ariabc_pg/build/Makefile' ]]; then
-    make -C '$REMOTE_REPO/ariabc_pg/build' ariabc_pg_server ariabc_pg_gateway -j\$(nproc)
-  else
-    echo \"ERROR: cannot rebuild ariabc_pg_server/gateway on this host; missing cmake and build Makefile\" >&2
-    exit 1
+build_ok=0
+if command -v cmake >/dev/null 2>&1 && [[ -d '$REMOTE_REPO/ariabc_pg/build' ]]; then
+  if cmake --build '$REMOTE_REPO/ariabc_pg/build' --target ariabc_pg_server ariabc_pg_gateway -j\$(nproc); then
+    build_ok=1
   fi
+elif command -v make >/dev/null 2>&1 && [[ -f '$REMOTE_REPO/ariabc_pg/build/Makefile' ]]; then
+  if make -C '$REMOTE_REPO/ariabc_pg/build' ariabc_pg_server ariabc_pg_gateway -j\$(nproc); then
+    build_ok=1
+  fi
+fi
+if [[ \"\$build_ok\" != '1' && '$trust_synced_install' == '1' && -x \"\$srv_bin\" && -x \"\$gw_bin\" ]]; then
+  echo \"[INFO] no remote cmake/build Makefile; using freshly synced compatible ariabc_pg binaries\"
+  build_ok=1
+fi
+if [[ \"\$build_ok\" != '1' ]]; then
+  echo \"ERROR: cannot rebuild ariabc_pg_server/gateway on this host; missing cmake and build Makefile\" >&2
+  exit 1
 fi
 [[ -x \"\$srv_bin\" ]] || { echo \"ERROR: missing ariabc_pg_server at \$srv_bin\" >&2; exit 1; }
 [[ -x \"\$gw_bin\" ]] || { echo \"ERROR: missing ariabc_pg_gateway at \$gw_bin\" >&2; exit 1; }
@@ -880,8 +1292,8 @@ fi
       # TPS at ~2.7k. Stay within ulimit -n.
       local gateway_worker_count="${SINGLE_GATEWAY_BCDB_WORKER_COUNT:-$SELECTED_BCDB_WORKER_COUNT}"
       local gateway_num_terminals="$SELECTED_NUM_TERMINALS"
-      # Use kafka-only's pipeline depth directly (128). Effective in-flight
-      # then scales linearly with numTerminals (128, 256, 512, 1024, ...).
+      # Use kafka-only's pipeline depth directly. Effective in-flight then
+      # scales linearly with numTerminals.
       # Without the BCDB_DET_QUEUE_HIGH_WM bump exported below, the server
       # would stall on admission control above the formula default
       # (2 * conn_pool_size = 512) — capping single-node throughput.
@@ -918,7 +1330,8 @@ fi
       local remote_case="$remote_out/thread_${th}_run_${run}"
       local local_case="$SINGLE_GATEWAY_LOCAL_DIR/thread_${th}_run_${run}"
       mkdir -p "$local_case"
-      log "Single gateway-direct case thread=$th run=$run experiment=$EXPERIMENT_MODE (num-terminals=$gateway_num_terminals det-pipeline-depth=$gateway_det_pipeline_depth effective-inflight=$gateway_effective_inflight pool-size=$gateway_pool_size worker-count=$gateway_worker_count det-batch=$gateway_det_batch_size det-window=$gateway_det_window completion_path=direct)"
+      local gateway_conn_fanout="$SINGLE_GATEWAY_CONN_FANOUT"
+      log "Single gateway-direct case thread=$th run=$run experiment=$EXPERIMENT_MODE (num-terminals=$gateway_num_terminals conn-fanout=$gateway_conn_fanout det-pipeline-depth=$gateway_det_pipeline_depth effective-inflight=$gateway_effective_inflight pool-size=$gateway_pool_size worker-count=$gateway_worker_count det-batch=$gateway_det_batch_size det-window=$gateway_det_window completion_path=direct)"
 
       set +e
       ssh_run "timeout '$SINGLE_GATEWAY_CASE_TIMEOUT_S' bash -lc $(printf '%q' "
@@ -1059,7 +1472,7 @@ set +e
   --waitMajority 0 \
   --completionPath direct \
   --totalNodes 1 \
-  --connFanout '$gateway_num_terminals' \
+  --connFanout '$gateway_conn_fanout' \
   2>&1 | tee \"\$case_dir/gateway_test.log\"
 gw_rc=\${PIPESTATUS[0]}
 set -e
@@ -1095,7 +1508,7 @@ fi
         log "WARNING: failed to collect single gateway-direct artifact thread=$th run=$run rsync_rc=$rsync_rc"
       fi
 
-      notes="single_node_gateway_direct;completion_path=direct;experiment_mode=$EXPERIMENT_MODE;thread_knob=$FULL_THREAD_KNOB;num_terminals=$gateway_num_terminals;det_pipeline_depth=$gateway_det_pipeline_depth;effective_inflight=$gateway_effective_inflight;pool_size=$gateway_pool_size;bcdb_worker_count=$gateway_worker_count;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_serial_gate_source=$FULL_BCDB_SERIAL_GATE_SOURCE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;result_ring_capacity=$RESULT_RING_CAPACITY;remote_case=$remote_case"
+      notes="single_node_gateway_direct;completion_path=direct;experiment_mode=$EXPERIMENT_MODE;thread_knob=$FULL_THREAD_KNOB;num_terminals=$gateway_num_terminals;conn_fanout=$gateway_conn_fanout;det_pipeline_depth=$gateway_det_pipeline_depth;effective_inflight=$gateway_effective_inflight;pool_size=$gateway_pool_size;bcdb_worker_count=$gateway_worker_count;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_serial_gate_source=$FULL_BCDB_SERIAL_GATE_SOURCE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;result_ring_capacity=$RESULT_RING_CAPACITY;remote_case=$remote_case"
       printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "single_node_gateway_direct" "gateway_direct_bcdb" "$EXPERIMENT_MODE" "direct" "single_node_gateway" "direct" "1" "0" "$th" "$run" "$local_case" "$rc" "$FULL_THREAD_KNOB" "$gateway_pool_size" "$gateway_worker_count" "$gateway_det_batch_size" "$gateway_det_window" "$gateway_num_terminals" "$gateway_det_pipeline_depth" "$gateway_effective_inflight" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "completed_eq_loaded_required" "$notes" \
         >> "$SINGLE_GATEWAY_MANIFEST"
@@ -1127,6 +1540,17 @@ run_full_system() {
   else
     log "Full-system x-axis mapping: thread value -> ordered concurrency budget; --num-terminals remains 1"
   fi
+  if [[ "$FULL_KAFKA_COMPLETION_MODE" == "async" ]]; then
+    log "Full-system completion surface: direct accept + async Kafka hash validation + post-marker Merkle verification"
+    cluster_completion_path="direct"
+    cluster_validation_mode="async_hash"
+    cluster_trusted_gate="async_kafka_post_marker_merkle"
+  else
+    log "Full-system completion surface: synchronous per-request Kafka majority + post-marker Merkle verification"
+    cluster_completion_path="kafka_majority"
+    cluster_validation_mode="strict_majority"
+    cluster_trusted_gate="kafka_majority_merkle"
+  fi
 
   IFS=',' read -ra full_mode_arr <<< "$FULL_CLUSTER_MODES"
   IFS=',' read -ra thread_arr <<< "$THREADS"
@@ -1147,7 +1571,7 @@ run_full_system() {
       server_bypass_raft=0
       gateway_broadcast_to_all=0
     fi
-    log "Cluster mode: $cluster_mode (series=$cluster_series ordering_path=$ordering_path)"
+    log "Cluster mode: $cluster_mode (series=$cluster_series ordering_path=$ordering_path completion_path=$cluster_completion_path validation_mode=$cluster_validation_mode)"
     for th in "${thread_arr[@]}"; do
       th="${th//[[:space:]]/}"
       [[ -z "$th" ]] && continue
@@ -1160,7 +1584,84 @@ run_full_system() {
       full_det_window="$SELECTED_DET_WINDOW"
       full_effective_inflight="$SELECTED_EFFECTIVE_INFLIGHT"
       full_bcdb_worker_count="$SELECTED_BCDB_WORKER_COUNT"
-      full_conn_fanout="${FULL_CONN_FANOUT:-$full_num_terminals}"
+      if [[ -n "$FULL_CONN_FANOUT" ]]; then
+        full_conn_fanout="$FULL_CONN_FANOUT"
+      elif [[ "$cluster_mode" == "kafka-only" ]]; then
+        full_conn_fanout="$FULL_CONN_FANOUT_KAFKA_ONLY"
+        if override="$(lookup_thread_override "$FULL_CONN_FANOUT_KAFKA_ONLY_MAP" "$th")"; then
+          full_conn_fanout="$override"
+        fi
+      else
+        full_conn_fanout="$FULL_CONN_FANOUT_RAFT_KAFKA"
+        if override="$(lookup_thread_override "$FULL_CONN_FANOUT_RAFT_KAFKA_MAP" "$th")"; then
+          full_conn_fanout="$override"
+        fi
+      fi
+      if [[ "$full_conn_fanout" -lt 1 ]]; then
+        die "selected conn-fanout must be >= 1 (mode=$cluster_mode thread=$th value=$full_conn_fanout)"
+      fi
+      if [[ -n "$FULL_BROADCAST_ACCEPT_QUORUM" ]]; then
+        full_broadcast_accept_quorum="$FULL_BROADCAST_ACCEPT_QUORUM"
+      elif [[ "$cluster_mode" == "kafka-only" ]]; then
+        full_broadcast_accept_quorum="$FULL_BROADCAST_ACCEPT_QUORUM_KAFKA_ONLY"
+      else
+        full_broadcast_accept_quorum="$FULL_BROADCAST_ACCEPT_QUORUM_RAFT_KAFKA"
+      fi
+      if [[ -n "$FULL_BROADCAST_RESULT_QUORUM" ]]; then
+        full_broadcast_result_quorum="$FULL_BROADCAST_RESULT_QUORUM"
+      elif [[ "$cluster_mode" == "kafka-only" ]]; then
+        full_broadcast_result_quorum="$FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY"
+        if override="$(lookup_thread_override "$FULL_BROADCAST_RESULT_QUORUM_KAFKA_ONLY_MAP" "$th")"; then
+          full_broadcast_result_quorum="$override"
+        fi
+      else
+        full_broadcast_result_quorum="$FULL_BROADCAST_RESULT_QUORUM_RAFT_KAFKA"
+      fi
+      if [[ "$full_broadcast_result_quorum" -lt 0 || "$full_broadcast_result_quorum" -gt 4 ]]; then
+        die "selected broadcast-result-quorum must be between 0 and 4 (mode=$cluster_mode thread=$th value=$full_broadcast_result_quorum)"
+      fi
+      if [[ -n "$FULL_BROADCAST_DRAIN_IN_TIMED_RUN" ]]; then
+        full_broadcast_drain_in_timed_run="$FULL_BROADCAST_DRAIN_IN_TIMED_RUN"
+      elif [[ "$cluster_mode" == "kafka-only" ]]; then
+        full_broadcast_drain_in_timed_run="$FULL_BROADCAST_DRAIN_IN_TIMED_RUN_KAFKA_ONLY"
+      else
+        full_broadcast_drain_in_timed_run="$FULL_BROADCAST_DRAIN_IN_TIMED_RUN_RAFT_KAFKA"
+      fi
+      if [[ -n "$FULL_DIRECT_COMPLETION_QUORUM" ]]; then
+        full_direct_completion_quorum="$FULL_DIRECT_COMPLETION_QUORUM"
+      elif [[ "$cluster_mode" == "kafka-only" ]]; then
+        full_direct_completion_quorum="$FULL_DIRECT_COMPLETION_QUORUM_KAFKA_ONLY"
+        if override="$(lookup_thread_override "$FULL_DIRECT_COMPLETION_QUORUM_KAFKA_ONLY_MAP" "$th")"; then
+          full_direct_completion_quorum="$override"
+        fi
+      else
+        full_direct_completion_quorum="$FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA"
+        if override="$(lookup_thread_override "$FULL_DIRECT_COMPLETION_QUORUM_RAFT_KAFKA_MAP" "$th")"; then
+          full_direct_completion_quorum="$override"
+        fi
+      fi
+      if [[ "$full_direct_completion_quorum" -lt 1 || "$full_direct_completion_quorum" -gt 4 ]]; then
+        die "selected direct-completion-quorum must be between 1 and 4 (mode=$cluster_mode thread=$th value=$full_direct_completion_quorum)"
+      fi
+      if [[ "$cluster_mode" == "kafka-only" ]]; then
+        full_result_replica_limit="$FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY"
+        if override="$(lookup_thread_override "$FULL_RESULT_REPLICA_LIMIT_KAFKA_ONLY_MAP" "$th")"; then
+          full_result_replica_limit="$override"
+        fi
+        full_result_publish_replica_limit="$FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY"
+        if override="$(lookup_thread_override "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_KAFKA_ONLY_MAP" "$th")"; then
+          full_result_publish_replica_limit="$override"
+        fi
+      else
+        full_result_replica_limit="$FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA"
+        if override="$(lookup_thread_override "$FULL_RESULT_REPLICA_LIMIT_RAFT_KAFKA_MAP" "$th")"; then
+          full_result_replica_limit="$override"
+        fi
+        full_result_publish_replica_limit="$FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA"
+        if override="$(lookup_thread_override "$FULL_RESULT_PUBLISH_REPLICA_LIMIT_RAFT_KAFKA_MAP" "$th")"; then
+          full_result_publish_replica_limit="$override"
+        fi
+      fi
       # Disjoint req-id range per cluster mode so stale Kafka result messages
       # from a kafka-only case cannot contaminate a later raft-kafka case (and
       # vice versa) — the gateway result-matching key is the req id, and the
@@ -1171,7 +1672,7 @@ run_full_system() {
         mode_offset=200000000
       fi
       req_id_offset=$(( mode_offset + (run * 1000000) + (th * 10000) + 1 ))
-      log "Cluster case mode=$cluster_mode thread=$th run=$run experiment=$EXPERIMENT_MODE (num-terminals=$full_num_terminals conn-fanout=$full_conn_fanout det-pipeline-depth=$full_det_pipeline_depth effective-inflight=$full_effective_inflight pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-parallel=$FULL_DET_BLOCK_PARALLEL det-block-pipeline=$FULL_DET_BLOCK_PIPELINE det-block-max=$FULL_DET_BLOCK_MAX det-partial-block-max-wait-us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US serial-gate=$FULL_BCDB_SERIAL_GATE_MODE serial-gate-source=$FULL_BCDB_SERIAL_GATE_SOURCE dt-parse-barrier=$FULL_BCDB_DT_PARSE_BARRIER completion-only-skip-reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS full-result-replica-limit=$FULL_RESULT_REPLICA_LIMIT ordering_path=$ordering_path)"
+      log "Cluster case mode=$cluster_mode thread=$th run=$run experiment=$EXPERIMENT_MODE (num-terminals=$full_num_terminals conn-fanout=$full_conn_fanout broadcast-accept-quorum=$full_broadcast_accept_quorum broadcast-result-quorum=$full_broadcast_result_quorum broadcast-drain-in-timed-run=$full_broadcast_drain_in_timed_run direct-completion-quorum=$full_direct_completion_quorum preferred-leader-id=$FULL_PREFERRED_LEADER_ID det-pipeline-depth=$full_det_pipeline_depth effective-inflight=$full_effective_inflight pool-size=$full_pool_size worker-count=$full_bcdb_worker_count det-batch=$full_det_batch_size det-window=$full_det_window det-block-parallel=$FULL_DET_BLOCK_PARALLEL det-block-pipeline=$FULL_DET_BLOCK_PIPELINE det-block-max=$FULL_DET_BLOCK_MAX det-partial-block-max-wait-us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US serial-gate=$FULL_BCDB_SERIAL_GATE_MODE serial-gate-source=$FULL_BCDB_SERIAL_GATE_SOURCE dt-parse-barrier=$FULL_BCDB_DT_PARSE_BARRIER completion-only-skip-reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS full-result-replica-limit=$full_result_replica_limit result-publish-replica-limit=$full_result_publish_replica_limit kafka-completion-mode=$FULL_KAFKA_COMPLETION_MODE ordering_path=$ordering_path)"
       before_file="$RUN_LOG_DIR/full_${cluster_mode}_before_${th}_${run}.txt"
       after_file="$RUN_LOG_DIR/full_${cluster_mode}_after_${th}_${run}.txt"
       ls -td "$REPO_ROOT"/scripts/bench_full_results/cluster4_* 2>/dev/null > "$before_file" || true
@@ -1182,7 +1683,7 @@ run_full_system() {
       [[ "$FULL_SKIP_RDKAFKA_SETUP" == "1" || "$FULL_SYNC_FIRST" == "0" ]] && extra_skip+=(--skip-rdkafka-setup)
 
       set +e
-      timeout "$FULL_CASE_TIMEOUT_S" env POLL_COUNT="$POLL_COUNT" RESULT_RING_CAPACITY="$RESULT_RING_CAPACITY" \
+      timeout "$FULL_CASE_TIMEOUT_S" env POLL_COUNT="$POLL_COUNT" RESULT_RING_CAPACITY="$RESULT_RING_CAPACITY" SKIP_CLUSTER_LOGS="$FULL_SKIP_CLUSTER_LOGS" \
       "$REPO_ROOT/scripts/distributed/run_4node_raft_cluster.sh" \
         "${extra_skip[@]}" \
         --ordering-mode "$cluster_mode" \
@@ -1200,6 +1701,10 @@ run_full_system() {
         --det-partial-block-max-wait-us "$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US" \
         --num-terminals "$full_num_terminals" \
         --conn-fanout "$full_conn_fanout" \
+        --broadcast-accept-quorum "$full_broadcast_accept_quorum" \
+        --broadcast-result-quorum "$full_broadcast_result_quorum" \
+        --broadcast-drain-in-timed-run "$full_broadcast_drain_in_timed_run" \
+        --direct-completion-quorum "$full_direct_completion_quorum" \
         --det-pipeline-depth "$full_det_pipeline_depth" \
         --bcdb-block-profile "$FULL_BCDB_BLOCK_PROFILE" \
         --bcdb-block-wait-watermark "$FULL_BCDB_BLOCK_WAIT_WATERMARK" \
@@ -1211,7 +1716,10 @@ run_full_system() {
         --bcdb-dt-hashtab-switch-threshold "$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD" \
         --bcdb-det-queue-high-wm "$FULL_BCDB_DET_QUEUE_HIGH_WM" \
         --bcdb-det-queue-low-wm "$FULL_BCDB_DET_QUEUE_LOW_WM" \
-        --full-result-replica-limit "$FULL_RESULT_REPLICA_LIMIT" \
+        --full-result-replica-limit "$full_result_replica_limit" \
+        --result-publish-replica-limit "$full_result_publish_replica_limit" \
+        --preferred-leader-id "$FULL_PREFERRED_LEADER_ID" \
+        --kafka-completion-mode "$FULL_KAFKA_COMPLETION_MODE" \
         > "$RUN_LOG_DIR/full_${cluster_mode}_thread_${th}_run_${run}.log" 2>&1
       rc=$?
       set -e
@@ -1223,9 +1731,9 @@ run_full_system() {
         artifact="$(head -n 1 "$after_file" || true)"
       fi
       [[ -n "$artifact" ]] || artifact="$RUN_LOG_DIR/missing_full_artifact_thread_${th}_run_${run}"
-      notes="cluster_mode=$cluster_mode;ordering_path=$ordering_path;completion_path=kafka_majority;experiment_mode=$EXPERIMENT_MODE;full_system_thread_knob=$FULL_THREAD_KNOB;full_pool_size_mode=$FULL_POOL_SIZE_MODE;num_terminals=$full_num_terminals;conn_fanout=$full_conn_fanout;det_pipeline_depth=$full_det_pipeline_depth;effective_inflight=$full_effective_inflight;trusted_gate=kafka_majority_merkle;pool_size_min=2;det_window_multiplier=$FULL_DET_WINDOW_MULTIPLIER;det_window_max=$FULL_DET_WINDOW_MAX;det_window_map=$FULL_DET_WINDOW_MAP;det_batch_size_map=$FULL_DET_BATCH_SIZE_MAP;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;det_partial_block_max_wait_us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US;bcdb_block_wait_watermark=$FULL_BCDB_BLOCK_WAIT_WATERMARK;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_serial_gate_source=$FULL_BCDB_SERIAL_GATE_SOURCE;bcdb_dt_parse_barrier=$FULL_BCDB_DT_PARSE_BARRIER;bcdb_dt_skip_readonly_gate=$FULL_BCDB_DT_SKIP_READONLY_GATE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;det_block_skip_readonly=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;bcdb_det_queue_high_wm=$FULL_BCDB_DET_QUEUE_HIGH_WM;bcdb_det_queue_low_wm=$FULL_BCDB_DET_QUEUE_LOW_WM;full_result_replica_limit=$FULL_RESULT_REPLICA_LIMIT;backend_capacity=normalized"
+      notes="cluster_mode=$cluster_mode;ordering_path=$ordering_path;completion_path=$cluster_completion_path;validation_mode=$cluster_validation_mode;kafka_completion_mode=$FULL_KAFKA_COMPLETION_MODE;experiment_mode=$EXPERIMENT_MODE;full_system_thread_knob=$FULL_THREAD_KNOB;full_pool_size_mode=$FULL_POOL_SIZE_MODE;num_terminals=$full_num_terminals;conn_fanout=$full_conn_fanout;broadcast_accept_quorum=$full_broadcast_accept_quorum;broadcast_result_quorum=$full_broadcast_result_quorum;broadcast_drain_in_timed_run=$full_broadcast_drain_in_timed_run;direct_completion_quorum=$full_direct_completion_quorum;preferred_leader_id=$FULL_PREFERRED_LEADER_ID;det_pipeline_depth=$full_det_pipeline_depth;effective_inflight=$full_effective_inflight;trusted_gate=$cluster_trusted_gate;pool_size_min=2;det_window_multiplier=$FULL_DET_WINDOW_MULTIPLIER;det_window_max=$FULL_DET_WINDOW_MAX;det_window_map=$FULL_DET_WINDOW_MAP;det_window_kafka_only_map=$FULL_DET_WINDOW_KAFKA_ONLY_MAP;det_window_raft_kafka_map=$FULL_DET_WINDOW_RAFT_KAFKA_MAP;det_batch_size_map=$FULL_DET_BATCH_SIZE_MAP;det_block_parallel=$FULL_DET_BLOCK_PARALLEL;det_block_pipeline=$FULL_DET_BLOCK_PIPELINE;det_block_max=$FULL_DET_BLOCK_MAX;det_partial_block_max_wait_us=$FULL_DET_PARTIAL_BLOCK_MAX_WAIT_US;bcdb_block_wait_watermark=$FULL_BCDB_BLOCK_WAIT_WATERMARK;bcdb_serial_gate_mode=$FULL_BCDB_SERIAL_GATE_MODE;bcdb_serial_gate_source=$FULL_BCDB_SERIAL_GATE_SOURCE;bcdb_dt_parse_barrier=$FULL_BCDB_DT_PARSE_BARRIER;bcdb_dt_skip_readonly_gate=$FULL_BCDB_DT_SKIP_READONLY_GATE;bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;det_block_skip_readonly=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS;bcdb_dt_hashtab_switch_threshold=$FULL_BCDB_DT_HASHTAB_SWITCH_THRESHOLD;bcdb_det_queue_high_wm=$FULL_BCDB_DET_QUEUE_HIGH_WM;bcdb_det_queue_low_wm=$FULL_BCDB_DET_QUEUE_LOW_WM;full_result_replica_limit=$full_result_replica_limit;result_publish_replica_limit=$full_result_publish_replica_limit;backend_capacity=normalized"
       printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$cluster_series" "$cluster_mode_label" "$EXPERIMENT_MODE" "$cluster_mode" "$ordering_path" "kafka_majority" "$server_bypass_raft" "$gateway_broadcast_to_all" "$th" "$run" "$artifact" "$rc" "$FULL_THREAD_KNOB" "$full_pool_size" "$full_bcdb_worker_count" "$full_det_batch_size" "$full_det_window" "$full_num_terminals" "$full_det_pipeline_depth" "$full_effective_inflight" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "completed_eq_loaded_required" "$notes" \
+        "$cluster_series" "$cluster_mode_label" "$EXPERIMENT_MODE" "$cluster_mode" "$ordering_path" "$cluster_completion_path" "$server_bypass_raft" "$gateway_broadcast_to_all" "$th" "$run" "$artifact" "$rc" "$FULL_THREAD_KNOB" "$full_pool_size" "$full_bcdb_worker_count" "$full_det_batch_size" "$full_det_window" "$full_num_terminals" "$full_det_pipeline_depth" "$full_effective_inflight" "$FULL_DET_BLOCK_PIPELINE" "$FULL_DET_BLOCK_MAX" "$req_id_offset" "completed_eq_loaded_required" "$notes" \
         >> "$FULL_MANIFEST"
       if [[ "$rc" != "0" ]]; then
         if [[ "$FULL_CONTINUE_ON_ERROR" == "1" ]]; then
@@ -1278,6 +1786,15 @@ generate_outputs() {
       --machine "$TARGET_MACHINE_LABEL" \
       --threads "$THREADS" \
       --x-label "$x_label"
+  if [[ "$FULL_ONLY" != "1" && -f "$SCRIPT_DIR/build_ycsb_capacity_graph.py" ]]; then
+    MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mplconfig}" \
+      python3 "$SCRIPT_DIR/build_ycsb_capacity_graph.py" \
+        --single-root "$OUT_DIR" \
+        --gateway-cluster-summary "$OUT_DIR/summary.csv" \
+        --threads "$THREADS" \
+        --workload "$WORKLOAD" \
+        --out-dir "$OUT_DIR"
+  fi
 }
 
 log "=== YCSB skew TPS comparison ==="
@@ -1289,7 +1806,11 @@ log "Targets   : ${TARGETS_ARR[*]}"
 log "Single target pick: $SINGLE_TARGET_PICK"
 log "Cluster modes: $FULL_CLUSTER_MODES"
 log "Experiment mode: $EXPERIMENT_MODE"
+log "Kafka completion mode: $FULL_KAFKA_COMPLETION_MODE"
 log "Skip-read semantics: full/gateway bcdb_dt_completion_only_skip_reads=$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS raw-single-det=$SINGLE_BCDB_DT_COMPLETION_ONLY_SKIP_READS"
+if [[ "$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS" == "1" ]]; then
+  log "Capacity semantics: completion-only SELECT path with final state/Merkle verification; set FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS=0 for real returned-read control runs"
+fi
 if [[ "$FULL_BCDB_DT_COMPLETION_ONLY_SKIP_READS" != "$SINGLE_BCDB_DT_COMPLETION_ONLY_SKIP_READS" ]]; then
   log "WARNING: raw single-node DET skip-read semantics differ from full/gateway runs; artifact notes will show the mismatch"
 fi
@@ -1305,6 +1826,7 @@ for wl in "${workload_arr[@]}"; do
   [[ -z "$wl" ]] && continue
   set_workload_paths "$wl"
   log "--- Workload: $WORKLOAD (out=$OUT_DIR) ---"
+  apply_workload_calibrated_defaults
   if [[ "$ANALYZE_ONLY" != "1" ]]; then
     run_single_node
   fi
@@ -1331,6 +1853,7 @@ for wl in "${workload_arr[@]}"; do
   log "  Graph   : $OUT_DIR/ycsb_skew_pg_vs_det.png"
   log "  Graph   : $OUT_DIR/ycsb_skew_det_vs_cluster.png"
   log "  Graph   : $OUT_DIR/ycsb_skew_all_systems.png"
+  [[ -f "$OUT_DIR/ycsb_skew_capacity_all_systems.png" ]] && log "  Graph   : $OUT_DIR/ycsb_skew_capacity_all_systems.png"
 done
 
 log "Done"

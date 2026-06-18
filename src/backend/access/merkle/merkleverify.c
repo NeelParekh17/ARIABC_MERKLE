@@ -207,8 +207,14 @@ merkle_verify(PG_FUNCTION_ARGS)
                                              nkeys, indexTupdesc,
                                              totalLeaves);
         
-        /* Compute hash of this row (slot already contains the tuple) */
-        merkle_compute_slot_hash(heapRel, slot, &hash);
+        /* Compute hash of this row using the same code path as merkleInsert:
+         * merkle_compute_row_hash() fetches via SnapshotSelf to match the
+         * exact hash that was XOR'd into the tree during INSERT/UPDATE/DELETE.
+         * Using merkle_compute_slot_hash() here would diverge because it hashes
+         * the slot's already-materialized values which may differ in detoasting
+         * or snapshot visibility from what merkleInsert saw.
+         */
+        merkle_compute_row_hash(heapRel, &slot->tts_tid, &hash);
         
         /*
          * Verification optimization: accumulate XOR only at the leaf node in

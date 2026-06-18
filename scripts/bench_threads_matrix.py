@@ -160,6 +160,99 @@ def _psql_value(psql: str, *, db: str, port: int, user: str, query: str, cwd: Pa
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
 
 
+def _psql_exec(psql: str, *, db: str, port: int, user: str, query: str, cwd: Path, env: dict[str, str]) -> tuple[bool, str]:
+    argv = [
+        psql,
+        "-X",
+        "-q",
+        "-p",
+        str(port),
+        "-U",
+        user,
+        "-d",
+        db,
+        "-c",
+        query,
+    ]
+    try:
+        proc = subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True, text=True, check=False)
+    except Exception as e:
+        return False, str(e)
+    msg = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip())
+    return proc.returncode == 0, msg
+
+
+def _force_pgoption(env: dict[str, str], key: str, value: str) -> None:
+    option = f"-c {key}={value}"
+    existing = env.get("PGOPTIONS", "").strip()
+    env["PGOPTIONS"] = f"{existing} {option}".strip() if existing else option
+
+
+def _ensure_merkle_index_enabled(
+    psql: str,
+    *,
+    db: str,
+    port: int,
+    user: str,
+    cwd: Path,
+    env: dict[str, str],
+) -> tuple[bool, list[str]]:
+    notes: list[str] = []
+    server_env = dict(env)
+    server_env.pop("PGOPTIONS", None)
+
+    ok, msg = _psql_exec(
+        psql,
+        db=db,
+        port=port,
+        user=user,
+        query="ALTER SYSTEM SET enable_merkle_index = 'on';",
+        cwd=cwd,
+        env=server_env,
+    )
+    if not ok:
+        notes.append("alter_system_enable_merkle_index_failed=" + msg.replace("\n", " ")[:240])
+    else:
+        reload_ok, reload_msg = _psql_exec(
+            psql,
+            db=db,
+            port=port,
+            user=user,
+            query="SELECT pg_reload_conf();",
+            cwd=cwd,
+            env=server_env,
+        )
+        if not reload_ok:
+            notes.append("reload_after_enable_merkle_index_failed=" + reload_msg.replace("\n", " ")[:240])
+
+    persistent_value = _psql_value(
+        psql,
+        db=db,
+        port=port,
+        user=user,
+        query="SHOW enable_merkle_index;",
+        cwd=cwd,
+        env=server_env,
+    )
+    effective_value = _psql_value(
+        psql,
+        db=db,
+        port=port,
+        user=user,
+        query="SHOW enable_merkle_index;",
+        cwd=cwd,
+        env=env,
+    )
+
+    if (persistent_value or "").strip().lower() != "on":
+        notes.append(f"persistent_enable_merkle_index={persistent_value or 'unknown'}")
+    if (effective_value or "").strip().lower() != "on":
+        notes.append(f"effective_enable_merkle_index={effective_value or 'unknown'}")
+        return False, notes
+
+    return True, notes
+
+
 def _canonical_path_str(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -1149,6 +1242,17 @@ def main() -> int:
         default=1800,
         help="Per-case workload timeout for det/safedb mode; 0 falls back to --timeout-workload-s.",
     )
+    parser.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=1,
+        help=(
+            "Number of un-measured warmup workload executions to run after restore, before the"
+            " first measured run. Warmup heats the buffer pool / OS page cache so that pg and det"
+            " are compared on an equal footing. Output is discarded and not written to results.csv."
+            " Default: 1. Set to 0 to disable."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1233,6 +1337,9 @@ def main() -> int:
     env.setdefault("DB_NAME", args.db)
     # Avoid client-side statement timeouts interrupting long deterministic runs.
     env.setdefault("STATEMENT_TIMEOUT", "0")
+    # Make every libpq client in the benchmark see Merkle maintenance enabled,
+    # even if a stale postgresql.auto.conf was left with enable_merkle_index=off.
+    _force_pgoption(env, "enable_merkle_index", "on")
 
     meta = {
         "created_utc": _now_utc_iso(),
@@ -1268,6 +1375,7 @@ def main() -> int:
                 "BCDB_DT_PARSE_BARRIER",
                 "BCDB_DT_LIGHT_SNAPSHOT",
                 "ARIABC_PSYCOPG_CLIENT_CURSOR",
+                "PGOPTIONS",
             ]
         },
     }
@@ -1338,6 +1446,12 @@ def main() -> int:
             (len(signing_modes) if MODE_NAME_TO_DB_TYPE[mode] == 1 else 1)
             for mode in modes
         )
+        # Single global warmup flag: we only need to warm the buffer pool once
+        # at the start of the entire benchmark, not before every individual run.
+        # The cold-start bias only affects the very first case (typically pg t=1)
+        # because all subsequent cases benefit from the already-warm cache.
+        _warmup_done = False
+
         done = 0
 
         for mode in modes:
@@ -1404,8 +1518,25 @@ def main() -> int:
                                 )
                                 live_data_dir = _canonical_path_str(live_data_dir_raw)
 
+                                merkle_enable_notes: list[str] = []
+                                merkle_enabled_ok, merkle_enable_notes = _ensure_merkle_index_enabled(
+                                    psql_path,
+                                    db=args.db,
+                                    port=args.port,
+                                    user=args.user,
+                                    cwd=scripts_dir,
+                                    env=env,
+                                )
+
                                 restore_exit = 0
-                                if expected_data_dir and live_data_dir != expected_data_dir:
+                                if not merkle_enabled_ok:
+                                    restore_exit = 98
+                                    restore_log_err.write_text(
+                                        "enable_merkle_index_not_on=1\n"
+                                        + "\n".join(merkle_enable_notes)
+                                        + "\n"
+                                    )
+                                elif expected_data_dir and live_data_dir != expected_data_dir:
                                     restore_exit = 97
                                     restore_log_err.write_text(
                                         f"expected_data_directory={expected_data_dir}\n"
@@ -1483,14 +1614,64 @@ def main() -> int:
                                     if timeout_workload_s > 0:
                                         timeout_for_run = int(timeout_workload_s)
 
-                                    workload_exit = _run(
-                                        workload_argv,
-                                        cwd=scripts_dir,
-                                        env=case_env,
-                                        stdout_path=workload_log_out,
-                                        stderr_path=workload_log_err,
-                                        timeout_s=timeout_for_run,
-                                    )
+                                    # --- Warmup runs (not recorded) ---
+                                    # Run the workload args.warmup_runs times before measuring.
+                                    # This ensures the pg buffer pool, OS page cache, and BCDB
+                                    # workers are hot before the first measured run, eliminating
+                                    # the cold-start bias that makes pg look slower than det at
+                                    # low thread counts.
+                                    if not _warmup_done and args.warmup_runs > 0:
+                                        for warmup_i in range(args.warmup_runs):
+                                            warmup_env = dict(case_env)
+                                            if db_type == 1:
+                                                warmup_env["DET_START_SEQ"] = "0"
+                                            print(
+                                                f"  [warmup {warmup_i + 1}/{args.warmup_runs}]"
+                                                f" mode={mode} workload={workload} threads={th} run={run_idx}",
+                                                flush=True,
+                                            )
+                                            _run(
+                                                workload_argv,
+                                                cwd=scripts_dir,
+                                                env=warmup_env,
+                                                stdout_path=case_dir / f"warmup_{warmup_i + 1}.out",
+                                                stderr_path=case_dir / f"warmup_{warmup_i + 1}.err",
+                                                timeout_s=timeout_for_run,
+                                            )
+                                        _warmup_done = True
+                                        restore_exit = _run(
+                                            [
+                                                psql_path,
+                                                "-X",
+                                                "-q",
+                                                "-p",
+                                                str(args.port),
+                                                "-U",
+                                                args.user,
+                                                "-d",
+                                                args.db,
+                                                "-f",
+                                                str(restore_sql),
+                                            ],
+                                            cwd=scripts_dir,
+                                            env=env,
+                                            stdout_path=case_dir / "restore_after_warmup.out",
+                                            stderr_path=case_dir / "restore_after_warmup.err",
+                                        )
+                                        # Reset DET txid counter to 0 for the actual measured run.
+                                        if db_type == 1:
+                                            case_env["DET_START_SEQ"] = "0"
+                                    # --- End warmup ---
+
+                                    if restore_exit == 0:
+                                        workload_exit = _run(
+                                            workload_argv,
+                                            cwd=scripts_dir,
+                                            env=case_env,
+                                            stdout_path=workload_log_out,
+                                            stderr_path=workload_log_err,
+                                            timeout_s=timeout_for_run,
+                                        )
 
                                     # Remove the pointer after the workload process completes so
                                     # the monitor knows we're idle.
@@ -1541,11 +1722,13 @@ def main() -> int:
                                     notes_parts.append(
                                         "bcdb_extra_gucs=" + bcdb_extra_gucs.replace(",", "|")
                                     )
+                                notes_parts.extend(merkle_enable_notes)
                                 for env_key in [
                                     "BCDB_BLOCK_RETURN_ACTUAL_RESULTS",
                                     "BCDB_DT_SKIP_READONLY_GATE",
                                     "BCDB_DT_PARSE_BARRIER",
                                     "BCDB_DT_LIGHT_SNAPSHOT",
+                                    "PGOPTIONS",
                                 ]:
                                     env_value = env.get(env_key, "")
                                     if env_value:

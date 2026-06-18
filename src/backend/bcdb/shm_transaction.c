@@ -42,7 +42,7 @@
 #include <stdio.h>
 
 // BCDBShmXact  *mapTxToShm[TX_MAP_SZ];
-//#define MAP_TX(id) ((id) % TX_MAP_SZ)
+// #define MAP_TX(id) ((id) % TX_MAP_SZ)
 /*
  * shm_transaction.c — shared-memory transaction pool and conflict detection.
  *
@@ -90,7 +90,7 @@
  * Both sides use a spinlock + condition variable to implement blocking.
  */
 
-//slock_t      *nexec_lock;
+// slock_t      *nexec_lock;
 
 /*
  * activeTx — per-process pointer to the BCDBShmXact currently being executed
@@ -120,23 +120,23 @@
  *             publish_ws_tableDT(); freed automatically when bcdb_tx_context
  *             is reset between transactions.
  */
-BCDBShmXact  *activeTx;
-slock_t      *restart_counter_lock;
-int          *numExecPt ;
-HTAB         *tx_pool;
-slock_t      *tx_pool_lock;
-HTAB         *xid_map;
-slock_t      *xid_map_lock;
-TxQueue       *tx_queues;
-WSTable       *ws_table;
-WSTable       *rs_table;
-WSTableRecord  ws_table_record;
-WSTableRecord  rs_table_record;
-static bool    bcdb_apply_unique_violation = false;
-extern HTAB   *PredicateLockTargetHash;
-extern HTAB   *PredicateLockHash;
+BCDBShmXact *activeTx;
+slock_t *restart_counter_lock;
+int *numExecPt;
+HTAB *tx_pool;
+slock_t *tx_pool_lock;
+HTAB *xid_map;
+slock_t *xid_map_lock;
+TxQueue *tx_queues;
+WSTable *ws_table;
+WSTable *rs_table;
+WSTableRecord ws_table_record;
+WSTableRecord rs_table_record;
+static bool bcdb_apply_unique_violation = false;
+extern HTAB *PredicateLockTargetHash;
+extern HTAB *PredicateLockHash;
 
-static TupleTableSlot* clone_slot(TupleTableSlot* slot);
+static TupleTableSlot *clone_slot(TupleTableSlot *slot);
 
 static bool
 bcdb_xidmap_debug_enabled(void)
@@ -152,14 +152,12 @@ bcdb_xidmap_debug_enabled(void)
     return cached == 1;
 }
 
-void
-bcdb_reset_apply_error_flags(void)
+void bcdb_reset_apply_error_flags(void)
 {
     bcdb_apply_unique_violation = false;
 }
 
-bool
-bcdb_apply_had_unique_violation(void)
+bool bcdb_apply_had_unique_violation(void)
 {
     return bcdb_apply_unique_violation;
 }
@@ -183,8 +181,7 @@ bcdb_flow_debug_enabled(void)
 
 static BCTxID bcdb_last_conflict_txid = -1;
 
-void
-bcdb_reset_last_conflict_txid(void)
+void bcdb_reset_last_conflict_txid(void)
 {
     bcdb_last_conflict_txid = -1;
 }
@@ -195,15 +192,17 @@ bcdb_get_last_conflict_txid(void)
     return bcdb_last_conflict_txid;
 }
 
-#define BCDB_FLOW_LOG(...) \
-    do { \
-        if (bcdb_flow_debug_enabled()) \
+#define BCDB_FLOW_LOG(...)                       \
+    do                                           \
+    {                                            \
+        if (bcdb_flow_debug_enabled())           \
             ereport(LOG, (errmsg(__VA_ARGS__))); \
     } while (0)
 
-#define BCDB_XIDMAP_LOG(...) \
-    do { \
-        if (bcdb_xidmap_debug_enabled()) \
+#define BCDB_XIDMAP_LOG(...)                     \
+    do                                           \
+    {                                            \
+        if (bcdb_xidmap_debug_enabled())         \
             ereport(LOG, (errmsg(__VA_ARGS__))); \
     } while (0)
 
@@ -220,7 +219,9 @@ bcdb_step1_tm_probe_enabled(void)
             cached = 1;
         else
             cached = (v[0] != '0' && v[0] != 'n' && v[0] != 'N' &&
-                      v[0] != 'f' && v[0] != 'F') ? 1 : 0;
+                      v[0] != 'f' && v[0] != 'F')
+                         ? 1
+                         : 0;
     }
 
     return cached == 1;
@@ -237,7 +238,9 @@ bcdb_apply_wait_debug_enabled(void)
 
         cached = (v != NULL && v[0] != '\0' &&
                   v[0] != '0' && v[0] != 'n' && v[0] != 'N' &&
-                  v[0] != 'f' && v[0] != 'F') ? 1 : 0;
+                  v[0] != 'f' && v[0] != 'F')
+                     ? 1
+                     : 0;
     }
 
     return cached == 1;
@@ -336,11 +339,11 @@ bcdb_table_tuple_delete_step1(Relation relation,
 }
 
 #define PREDFMT " %d:%d:%d:%d "
-#define PRINT_PREDICATELOCKTARGETTAG(locktag) \
-              GET_PREDICATELOCKTARGETTAG_DB(locktag), \
-              GET_PREDICATELOCKTARGETTAG_RELATION(locktag), \
-              GET_PREDICATELOCKTARGETTAG_PAGE(locktag), \
-              GET_PREDICATELOCKTARGETTAG_OFFSET(locktag)
+#define PRINT_PREDICATELOCKTARGETTAG(locktag)         \
+    GET_PREDICATELOCKTARGETTAG_DB(locktag),           \
+        GET_PREDICATELOCKTARGETTAG_RELATION(locktag), \
+        GET_PREDICATELOCKTARGETTAG_PAGE(locktag),     \
+        GET_PREDICATELOCKTARGETTAG_OFFSET(locktag)
 
 #define WSTableGetPartitionIdx(hashcode) ((hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS)
 #define WSTablePartitionLock(hashcode) (&(ws_table->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS]))
@@ -365,19 +368,19 @@ bcdb_table_tuple_delete_step1(Relation relation,
 static void
 WSTableLockAllPartitions(WSTable *table)
 {
-	int i;
+    int i;
 
-	for (i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
-		SpinLockAcquire(&table->map_locks[i]);
+    for (i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
+        SpinLockAcquire(&table->map_locks[i]);
 }
 
 static void
 WSTableUnlockAllPartitions(WSTable *table)
 {
-	int i;
+    int i;
 
-	for (i = WRITE_CONFLICT_MAP_NUM_PARTITIONS - 1; i >= 0; i--)
-		SpinLockRelease(&table->map_locks[i]);
+    for (i = WRITE_CONFLICT_MAP_NUM_PARTITIONS - 1; i >= 0; i--)
+        SpinLockRelease(&table->map_locks[i]);
 }
 
 /*
@@ -391,11 +394,11 @@ WSTableUnlockAllPartitions(WSTable *table)
 static void
 WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b)
 {
-	WSTableLockAllPartitions(table);
-	shm_hash_clear(map, MAX_WRITE_CONFLICT);
-	if (clears_map_b)
-		pg_atomic_write_u32(&table->mapB_nonempty, 0);
-	WSTableUnlockAllPartitions(table);
+    WSTableLockAllPartitions(table);
+    shm_hash_clear(map, MAX_WRITE_CONFLICT);
+    if (clears_map_b)
+        pg_atomic_write_u32(&table->mapB_nonempty, 0);
+    WSTableUnlockAllPartitions(table);
 }
 
 /*
@@ -409,7 +412,7 @@ WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b)
 uint32
 dummy_hash(const void *key, Size key_size)
 {
-    return *(uint32*)key;
+    return *(uint32 *)key;
 }
 
 BCDBShmXact *
@@ -423,7 +426,7 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
 
     MemSet(&info, 0, sizeof(info));
     Assert(tx_pool != NULL);
-    //printf("safeDB %s : %s: %d txid %d hash %s \n", __FILE__, __FUNCTION__, __LINE__ , tx_id, hash);
+    // printf("safeDB %s : %s: %d txid %d hash %s \n", __FILE__, __FUNCTION__, __LINE__ , tx_id, hash);
     if (hash == NULL)
         ereport(ERROR, (errmsg("[ZL] cannot create transaction with NULL hash")));
     hash_len = strlen(hash);
@@ -431,7 +434,7 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("[ZL] transaction hash too long (%zu, max %d): \"%s\"",
-                        (size_t) hash_len, TX_HASH_SIZE - 1, hash)));
+                        (size_t)hash_len, TX_HASH_SIZE - 1, hash)));
 
     /*
      * tx_pool uses fixed-size keys (TX_HASH_SIZE) with default memcmp
@@ -449,7 +452,7 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
         printf("safeDB %s : %s: %d duplicate hash %s\n", __FILE__, __FUNCTION__, __LINE__, hash);
 #endif
         ereport(DEBUG3,
-            (errmsg("[ZL] transaction (%s) exists", hash)));
+                (errmsg("[ZL] transaction (%s) exists", hash)));
         SpinLockRelease(tx_pool_lock);
         return NULL;
     }
@@ -482,7 +485,7 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     ConditionVariableInit(&tx->cond);
     // mapTxToShm[ MAP_TX(tx_id) ] = tx;
 #if SAFEDBG2
-    printf("safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+    printf("safeDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__);
 #endif
     LWLockRelease(&tx->lock);
     return tx;
@@ -498,16 +501,15 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
  *
  * Safe to call with tx==NULL (no-op).
  */
-void
-delete_tx(BCDBShmXact *tx)
+void delete_tx(BCDBShmXact *tx)
 {
     bool found;
     if (!tx)
         return;
 
     BCDB_XIDMAP_LOG("[BCDB_XIDMAP] delete_tx enter pid=%d tx_ptr=%p txid=%d xid=%u status=%d hash=%s",
-                    (int) getpid(), (void *) tx, (int) tx->tx_id, (unsigned int) tx->xid,
-                    (int) tx->status, tx->hash);
+                    (int)getpid(), (void *)tx, (int)tx->tx_id, (unsigned int)tx->xid,
+                    (int)tx->status, tx->hash);
     DEBUGNOCHECK("[ZL] deleting tx %s", tx->hash);
     remove_tx_xid_map(tx->xid);
 
@@ -515,7 +517,7 @@ delete_tx(BCDBShmXact *tx)
     hash_search(tx_pool, tx->hash, HASH_REMOVE, &found);
     SpinLockRelease(tx_pool_lock);
     BCDB_XIDMAP_LOG("[BCDB_XIDMAP] delete_tx pool_remove pid=%d tx_ptr=%p txid=%d xid=%u found=%d",
-                    (int) getpid(), (void *) tx, (int) tx->tx_id, (unsigned int) tx->xid,
+                    (int)getpid(), (void *)tx, (int)tx->tx_id, (unsigned int)tx->xid,
                     found ? 1 : 0);
     if (found)
         DEBUGNOCHECK("[ZL] removed tx %s", tx->hash);
@@ -540,48 +542,47 @@ delete_tx(BCDBShmXact *tx)
  *                             uses the Deterministic Execution (DT) scheme;
  *                             rs_table has one shard)
  */
-void
-create_tx_pool(void)
+void create_tx_pool(void)
 {
     HASHCTL info;
     slock_t *tx_pool_lock_array;
-    bool    found;
+    bool found;
 
-    restart_counter_lock = ShmemInitStruct("restart_counter_lock", sizeof(slock_t) , &found);
-    //nexec_lock = ShmemInitStruct("nexec_lock", sizeof(slock_t) , &found);
+    restart_counter_lock = ShmemInitStruct("restart_counter_lock", sizeof(slock_t), &found);
+    // nexec_lock = ShmemInitStruct("nexec_lock", sizeof(slock_t) , &found);
 #if SAFEDBG
     DEBUGNOCHECK("[BCDB] create_tx_pool (%s:%s:%d)", __FILE__, __FUNCTION__, __LINE__);
 #endif
     tx_pool_lock_array = ShmemInitStruct("tx_pool_lock", sizeof(slock_t) * 2, &found);
     tx_pool_lock = tx_pool_lock_array;
     xid_map_lock = tx_pool_lock + 1;
-    numExecPt = (int  *) ShmemAlloc( sizeof(int ));
+    numExecPt = (int *)ShmemAlloc(sizeof(int));
     *numExecPt = 0;
 
     if (!found)
     {
         SpinLockInit(tx_pool_lock);
         SpinLockInit(restart_counter_lock);
-        //SpinLockInit(nexec_lock);
+        // SpinLockInit(nexec_lock);
         SpinLockInit(xid_map_lock);
     }
 
     MemSet(&info, 0, sizeof(info));
-	info.keysize = TX_HASH_SIZE;
-	info.entrysize = sizeof(BCDBShmXact);
-	info.hash = string_hash;
-    tx_pool = ShmemInitHash("bcdb_tx_pool", 
-                   MAX_SHM_TX,
-                   MAX_SHM_TX,
-                   &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE);
-    
+    info.keysize = TX_HASH_SIZE;
+    info.entrysize = sizeof(BCDBShmXact);
+    info.hash = string_hash;
+    tx_pool = ShmemInitHash("bcdb_tx_pool",
+                            MAX_SHM_TX,
+                            MAX_SHM_TX,
+                            &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE);
+
     info.keysize = sizeof(TransactionId);
     info.entrysize = sizeof(XidMapEntry);
     info.hash = uint32_hash;
     xid_map = ShmemInitHash("bcdb_xid_map",
-                   MAX_SHM_TX,
-                   MAX_SHM_TX,
-                   &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE);
+                            MAX_SHM_TX,
+                            MAX_SHM_TX,
+                            &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE);
 
     tx_queues = ShmemInitStruct("bcdb_tx_queue", sizeof(TxQueue) * NUM_TX_QUEUE_PARTITION, &found);
     for (int i = 0; i < NUM_TX_QUEUE_PARTITION; i++)
@@ -591,39 +592,39 @@ create_tx_pool(void)
         tx_queues[i].size = 0;
         ConditionVariableInit(&tx_queues[i].empty_cond);
         ConditionVariableInit(&tx_queues[i].full_cond);
-    } 
+    }
 
     ws_table = ShmemInitStruct("bcdb_tx_ws_table", sizeof(WSTable), &found);
     if (!found)
     {
 #if SAFEDBG
         DEBUGNOCHECK("[BCDB] init ws_table pid=%d (%s:%s:%d)",
-                     (int) getpid(), __FILE__, __FUNCTION__, __LINE__);
+                     (int)getpid(), __FILE__, __FUNCTION__, __LINE__);
 #endif
         info.keysize = sizeof(PREDICATELOCKTARGETTAG);
         info.entrysize = sizeof(WSTableEntry);
         info.hash = dummy_hash;
         info.num_partitions = WRITE_CONFLICT_MAP_NUM_PARTITIONS;
         ws_table->map = ShmemInitHash("bcdb_write_conflict_map",
-                                     MAX_WRITE_CONFLICT,
-                                     MAX_WRITE_CONFLICT,
-                                     &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE | HASH_PARTITION);
+                                      MAX_WRITE_CONFLICT,
+                                      MAX_WRITE_CONFLICT,
+                                      &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE | HASH_PARTITION);
         ws_table->mapB = ShmemInitHash("bcdb_write_conflict_mapDT",
-									MAX_WRITE_CONFLICT,
-									MAX_WRITE_CONFLICT,
-									&info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE | HASH_PARTITION);
+                                       MAX_WRITE_CONFLICT,
+                                       MAX_WRITE_CONFLICT,
+                                       &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE | HASH_PARTITION);
         ws_table->mapActive = ws_table->map;
         pg_atomic_init_u32(&ws_table->mapB_nonempty, 0);
-        for (int i=0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
+        for (int i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
             SpinLockInit(&(ws_table->map_locks[i]));
-	    }
-	    else
-        {
+    }
+    else
+    {
 #if SAFEDBG
-            DEBUGNOCHECK("[BCDB] ws_table already exists (%s:%s:%d)",
-                         __FILE__, __FUNCTION__, __LINE__);
+        DEBUGNOCHECK("[BCDB] ws_table already exists (%s:%s:%d)",
+                     __FILE__, __FUNCTION__, __LINE__);
 #endif
-        }
+    }
 
     rs_table = ShmemInitStruct("bcdb_tx_rs_table", sizeof(WSTable), &found);
     if (!found)
@@ -633,19 +634,18 @@ create_tx_pool(void)
         info.hash = dummy_hash;
         info.num_partitions = WRITE_CONFLICT_MAP_NUM_PARTITIONS;
         rs_table->map = ShmemInitHash("bcdb_read_conflict_map",
-                                     MAX_WRITE_CONFLICT,
-                                     MAX_WRITE_CONFLICT,
-                                     &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE | HASH_PARTITION);
+                                      MAX_WRITE_CONFLICT,
+                                      MAX_WRITE_CONFLICT,
+                                      &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE | HASH_PARTITION);
         rs_table->mapB = NULL;
         rs_table->mapActive = rs_table->map;
         pg_atomic_init_u32(&rs_table->mapB_nonempty, 0);
-        for (int i=0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
+        for (int i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
             SpinLockInit(&(rs_table->map_locks[i]));
     }
 }
 
-Size
-tx_pool_size(void)
+Size tx_pool_size(void)
 {
     Size ret = hash_estimate_size(MAX_SHM_TX, sizeof(BCDBShmXact));
     ret = add_size(ret, hash_estimate_size(MAX_SHM_TX, sizeof(XidMapEntry)));
@@ -653,17 +653,16 @@ tx_pool_size(void)
     ret = add_size(ret, sizeof(TxQueue) * NUM_TX_QUEUE_PARTITION);
     ret = add_size(ret, sizeof(WSTable));
     ret = add_size(ret, hash_estimate_size(MAX_WRITE_CONFLICT, sizeof(WSTableEntry)));
-    return ret; 
+    return ret;
 }
 
-void
-clear_tx_pool(void)
+void clear_tx_pool(void)
 {
 #if SAFEDBG
     DEBUGNOCHECK("[BCDB] clear_tx_pool (%s:%s:%d)", __FILE__, __FUNCTION__, __LINE__);
 #endif
     shm_hash_clear(tx_pool, MAX_SHM_TX);
-    shm_hash_clear(xid_map, MAX_SHM_TX); 
+    shm_hash_clear(xid_map, MAX_SHM_TX);
     for (int i = 0; i < NUM_TX_QUEUE_PARTITION; i++)
         TAILQ_INIT(&tx_queues[i].list);
 }
@@ -684,12 +683,11 @@ clear_tx_pool(void)
  * rs_table->map) has been removed — all its call sites were replaced by
  * this function.
  */
-void
-rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
+void rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 {
     if (!bcdb_dt_conflict_tracking)
     {
-        (void) tag;
+        (void)tag;
         return;
     }
 
@@ -717,12 +715,11 @@ rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
  * ws_table->map) has been removed — all its call sites were replaced by
  * this function.
  */
-void
-ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
+void ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
 {
     if (!bcdb_dt_conflict_tracking)
     {
-        (void) tag;
+        (void)tag;
         return;
     }
 
@@ -756,11 +753,11 @@ ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
 static bool
 bcdb_xid_preceded_snapshot(BCTxID cand_id)
 {
-    BCBlock       *blk;
-    int            slots;
-    int            slot;
-    BCTxID         published;
-    TransactionId  cxid;
+    BCBlock *blk;
+    int slots;
+    int slot;
+    BCTxID published;
+    TransactionId cxid;
 
     if (!TransactionIdIsValid(activeTx->snap_xmin))
         return false;
@@ -778,7 +775,7 @@ bcdb_xid_preceded_snapshot(BCTxID cand_id)
 
     published = __atomic_load_n(&blk->result_committed_txid[slot], __ATOMIC_ACQUIRE);
     if (published != cand_id)
-        return false;   /* not yet committed or slot is for a different tx_id */
+        return false; /* not yet committed or slot is for a different tx_id */
 
     cxid = __atomic_load_n(&blk->result_commit_xid[slot], __ATOMIC_ACQUIRE);
     if (!TransactionIdIsValid(cxid))
@@ -793,12 +790,12 @@ bcdb_log_dt_conflict_detail(const char *source,
                             uint32 tuple_hash,
                             BCTxID cand_id)
 {
-    BCBlock       *blk;
-    int            slots = 0;
-    int            slot = -1;
-    BCTxID         published = -1;
-    TransactionId  cxid = InvalidTransactionId;
-    bool           committed_before_snapshot = false;
+    BCBlock *blk;
+    int slots = 0;
+    int slot = -1;
+    BCTxID published = -1;
+    TransactionId cxid = InvalidTransactionId;
+    bool committed_before_snapshot = false;
 
     bcdb_last_conflict_txid = cand_id;
 
@@ -812,7 +809,7 @@ bcdb_log_dt_conflict_detail(const char *source,
         if (slots < 1)
             slots = 1;
 
-        slot = (int) (cand_id % (BCTxID) slots);
+        slot = (int)(cand_id % (BCTxID)slots);
         if (slot < 0)
             slot += slots;
 
@@ -829,21 +826,21 @@ bcdb_log_dt_conflict_detail(const char *source,
 
     BCDB_FLOW_LOG("[BCDB_FLOW] dt_conflict map=%s pid=%d txid=%d cand_txid=%d baseline=%d snap_xmin=%u cand_slot=%d cand_published=%d cand_cxid=%u cand_before_snapshot=%d hash=%u tag_type=%d db=%u rel=%u page=%u off=%u",
                   source,
-                  (int) getpid(),
-                  activeTx ? (int) activeTx->tx_id : -1,
-                  (int) cand_id,
-                  activeTx ? (int) activeTx->tx_id_committed : -1,
-                  (unsigned int) (activeTx ? activeTx->snap_xmin : InvalidTransactionId),
+                  (int)getpid(),
+                  activeTx ? (int)activeTx->tx_id : -1,
+                  (int)cand_id,
+                  activeTx ? (int)activeTx->tx_id_committed : -1,
+                  (unsigned int)(activeTx ? activeTx->snap_xmin : InvalidTransactionId),
                   slot,
-                  (int) published,
-                  (unsigned int) cxid,
+                  (int)published,
+                  (unsigned int)cxid,
                   committed_before_snapshot ? 1 : 0,
                   tuple_hash,
-                  (int) GET_PREDICATELOCKTARGETTAG_TYPE(*tag),
-                  (unsigned int) GET_PREDICATELOCKTARGETTAG_DB(*tag),
-                  (unsigned int) GET_PREDICATELOCKTARGETTAG_RELATION(*tag),
-                  (unsigned int) GET_PREDICATELOCKTARGETTAG_PAGE(*tag),
-                  (unsigned int) GET_PREDICATELOCKTARGETTAG_OFFSET(*tag));
+                  (int)GET_PREDICATELOCKTARGETTAG_TYPE(*tag),
+                  (unsigned int)GET_PREDICATELOCKTARGETTAG_DB(*tag),
+                  (unsigned int)GET_PREDICATELOCKTARGETTAG_RELATION(*tag),
+                  (unsigned int)GET_PREDICATELOCKTARGETTAG_PAGE(*tag),
+                  (unsigned int)GET_PREDICATELOCKTARGETTAG_OFFSET(*tag));
 }
 
 /*
@@ -865,17 +862,17 @@ bcdb_log_dt_conflict_detail(const char *source,
  *
  * Used by ws_table_checkDT() and indirectly by conflict_checkDT().
  */
-bool
-table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
+bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
 {
-    uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
+    uint32 tuple_hash = PredicateLockTargetTagHashCode(tag);
     static int once_out = false;
 
-    if(!once_out) {
+    if (!once_out)
+    {
         once_out = true;
 #if SAFEDBG2
         printf("\nsafeDB %s : %s: %d  getpid %d tx_id %d\n",
-                __FILE__, __FUNCTION__, __LINE__ , getpid(), activeTx->tx_id);
+               __FILE__, __FUNCTION__, __LINE__, getpid(), activeTx->tx_id);
 #endif
     }
 
@@ -889,12 +886,34 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         entry = hash_search_with_hash_value(table->map, tag,
                                             tuple_hash, HASH_FIND, &found);
         if (found && (entry->tx_id < activeTx->tx_id) &&
-                    (entry->tx_id > activeTx->tx_id_committed))
+            (entry->tx_id > activeTx->tx_id_committed))
         {
             bool cand_before_snapshot;
 
             cand_id = entry->tx_id;
             SpinLockRelease(partition_lock);
+
+            {
+                HASH_SEQ_STATUS seq;
+                BCDBShmXact *t;
+                BCDBShmXact *cand_tx = NULL;
+
+                SpinLockAcquire(tx_pool_lock);
+                hash_seq_init(&seq, tx_pool);
+                while ((t = hash_seq_search(&seq)) != NULL)
+                {
+                    if (t->tx_id == cand_id)
+                    {
+                        cand_tx = t;
+                        hash_seq_term(&seq);
+                        break;
+                    }
+                }
+                SpinLockRelease(tx_pool_lock);
+                /* cand_tx is NULL if the tx already committed and was deleted */
+                (void) cand_tx;
+            }
+
             /* T3-v2: skip if candidate committed before our snapshot xmin.
              * bcdb_xid_preceded_snapshot() is conservative: returns false if
              * snap_xmin is unset, slot is recycled, or xid is invalid. */
@@ -929,7 +948,7 @@ table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         entry = hash_search_with_hash_value(table->mapB, tag,
                                             tuple_hash, HASH_FIND, &found);
         if (found && (entry->tx_id < activeTx->tx_id) &&
-                    (entry->tx_id > activeTx->tx_id_committed))
+            (entry->tx_id > activeTx->tx_id_committed))
         {
             bool cand_before_snapshot;
 
@@ -963,8 +982,7 @@ check_done:;
  * for the given tag.  Returns true if a waw (write-after-write) conflict
  * is detected.
  */
-bool
-ws_table_checkDT(PREDICATELOCKTARGETTAG *tag)
+bool ws_table_checkDT(PREDICATELOCKTARGETTAG *tag)
 {
     return table_checkDT(tag, ws_table);
 }
@@ -981,16 +999,15 @@ ws_table_checkDT(PREDICATELOCKTARGETTAG *tag)
  * conflict_check() a no-op for conflict detection.  Kept to avoid
  * breaking the non-DT code path structure.
  */
-bool
-ws_table_check(PREDICATELOCKTARGETTAG *tag)
+bool ws_table_check(PREDICATELOCKTARGETTAG *tag)
 {
     bool found;
-    WSTableEntry* entry;
-    uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
+    WSTableEntry *entry;
+    uint32 tuple_hash = PredicateLockTargetTagHashCode(tag);
     slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
 
 #if SAFEDBG
-    printf("\nariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+    printf("\nariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__);
 #endif
 
     SpinLockAcquire(partition_lock);
@@ -1015,16 +1032,15 @@ ws_table_check(PREDICATELOCKTARGETTAG *tag)
  * Same caveat as ws_table_check: rs_table_reserve() (which wrote
  * rs_table->map) has been removed, so this function always returns false.
  */
-bool
-rs_table_check(PREDICATELOCKTARGETTAG *tag)
+bool rs_table_check(PREDICATELOCKTARGETTAG *tag)
 {
     bool found;
-    WSTableEntry* entry;
-    uint32  tuple_hash = PredicateLockTargetTagHashCode(tag);
+    WSTableEntry *entry;
+    uint32 tuple_hash = PredicateLockTargetTagHashCode(tag);
     slock_t *partition_lock = RSTablePartitionLock(tuple_hash);
 
 #if SAFEDBG
-    printf("ariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+    printf("ariaDB %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__);
 #endif
 
     SpinLockAcquire(partition_lock);
@@ -1064,12 +1080,12 @@ rs_table_check(PREDICATELOCKTARGETTAG *tag)
  * Callers (frontend backends) hold no locks when they call this — the queue's
  * own spinlock serialises all enqueue/dequeue operations.
  */
-void
-tx_queue_insert(BCDBShmXact *tx, int32 partition)
+void tx_queue_insert(BCDBShmXact *tx, int32 partition)
 {
     struct timeval tv1;
-    tv1.tv_sec = 0; tv1.tv_usec = 0;
-    bool    found;
+    tv1.tv_sec = 0;
+    tv1.tv_usec = 0;
+    bool found;
 
     int num_queue = OEP_mode ? blocksize * 2 : blocksize;
     num_queue = get_blksz(); // get_block_by_id(1, false)->blksize; ==nWorker
@@ -1089,33 +1105,33 @@ tx_queue_insert(BCDBShmXact *tx, int32 partition)
     }
     ConditionVariableCancelSleep();
     TAILQ_INSERT_TAIL(&queue->list, tx, queue_link);
-/* #define TAILQ_INSERT_TAIL(head, elm, field) do {			\
-	(elm)->field.tqe_next = NULL;					\
-	(elm)->field.tqe_prev = (head)->tqh_last;			\
-	*(head)->tqh_last = (elm);					\
-	(head)->tqh_last = &(elm)->field.tqe_next;			\
-	printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
-fflush(0);
-	//(tx)->queue_link.tqe_next = NULL;					
-	printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
-fflush(0);
-	(tx)->queue_link.tqe_prev = (&queue->list)->tqh_last;			
-	printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
-fflush(0);
-	*(&queue->list)->tqh_last = (tx);					
-	printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
-	(&queue->list)->tqh_last = NULL; // &(tx)->queue_link.tqe_next;			
-	printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
-*/
+    /* #define TAILQ_INSERT_TAIL(head, elm, field) do {			\
+        (elm)->field.tqe_next = NULL;					\
+        (elm)->field.tqe_prev = (head)->tqh_last;			\
+        *(head)->tqh_last = (elm);					\
+        (head)->tqh_last = &(elm)->field.tqe_next;			\
+        printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
+    fflush(0);
+        //(tx)->queue_link.tqe_next = NULL;
+        printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
+    fflush(0);
+        (tx)->queue_link.tqe_prev = (&queue->list)->tqh_last;
+        printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
+    fflush(0);
+        *(&queue->list)->tqh_last = (tx);
+        printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
+        (&queue->list)->tqh_last = NULL; // &(tx)->queue_link.tqe_next;
+        printf("safeDB %s : %s: %d  \n", __FILE__, __FUNCTION__, __LINE__  );
+    */
 
     tx->queue_partition = partition;
     queue->size += 1;
-        //SpinLockAcquire(nexec_lock);
+    // SpinLockAcquire(nexec_lock);
     gettimeofday(&tv1, NULL);
 #if SAFEDBG
     printf(" safeDB func %s hash %s time= %ld.%ld\n", __FUNCTION__, tx->hash, tv1.tv_sec, tv1.tv_usec);
 #endif
-        //SpinLockRelease(nexec_lock);
+    // SpinLockRelease(nexec_lock);
     SpinLockRelease(&queue->lock);
     ConditionVariableSignal(&queue->empty_cond);
 }
@@ -1134,7 +1150,7 @@ fflush(0);
  * Signals full_cond after dequeue to unblock any producer held in
  * tx_queue_insert due to back-pressure.
  */
-BCDBShmXact*
+BCDBShmXact *
 tx_queue_next(int32 partition)
 {
     struct timeval tv1;
@@ -1143,24 +1159,25 @@ tx_queue_next(int32 partition)
     TxQueue *queue;
     uint64 queue_wait_start;
 
-    tv1.tv_sec = 0; tv1.tv_usec = 0;
+    tv1.tv_sec = 0;
+    tv1.tv_usec = 0;
     num_queue = get_blksz(); // get_block_by_id(1, false)->blksize; ==nWorker
     queue = tx_queues + (partition % num_queue);
     queue_wait_start = bcdb_ptrace_timer_start();
     ConditionVariablePrepareToSleep(&queue->empty_cond);
     SpinLockAcquire(&queue->lock);
 #if SAFEDBG
-	printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
+    printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__, partition, num_queue);
 #endif
     /*
-	//SpinLockAcquire(nexec_lock);
+    //SpinLockAcquire(nexec_lock);
     *numExecPt -= 1;
     //SpinLockRelease(nexec_lock);
     */
     gettimeofday(&tv1, NULL);
     // printf("\n safeDB func %s time= %ld.%ld\n", __FUNCTION__, tv1.tv_sec, tv1.tv_usec);
-	    //printf("safeDB %s : %s: %d nExec= %d \n\n", __FILE__, __FUNCTION__, __LINE__ ,  *numExecPt);
-//	}
+    // printf("safeDB %s : %s: %d nExec= %d \n\n", __FILE__, __FUNCTION__, __LINE__ ,  *numExecPt);
+    //	}
     while (queue->size <= 0)
     {
 
@@ -1175,39 +1192,39 @@ tx_queue_next(int32 partition)
     TAILQ_REMOVE(&queue->list, tx, queue_link);
     tx->queue_link.tqe_prev = NULL;
     /*
-	if (((tx)->queue_link.tqe_next) == NULL)	{
-	printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
-	printf("safeDB ** next NULL ** %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue); }
-	printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
+    if (((tx)->queue_link.tqe_next) == NULL)	{
+    printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
+    printf("safeDB ** next NULL ** %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue); }
+    printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
 #define TAILQ_REMOVE(head, elm, field) do {				\
-	if (((elm)->field.tqe_next) != NULL)				\
-	if (((tx)->queue_link.tqe_next) != NULL)				\
-	SpinLockAcquire(nexec_lock);
-    if( ( *numExecPt + blocksize) ==0) 
-	{
-	shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
-	shm_hash_clear(ws_table->mapB, MAX_WRITE_CONFLICT);
-	printf(" safeDB %s : %s: %d nExec= 0 !!! reset htab \n\n", __FILE__, __FUNCTION__, __LINE__ );
-	}
-	*numExecPt += 1;
-	SpinLockRelease(nexec_lock);
-	printf("safeDB %s : %s: %d nExec= %d tx %d\n\n", __FILE__, __FUNCTION__, __LINE__ ,  *numExecPt , tx->tx_id);
+    if (((elm)->field.tqe_next) != NULL)				\
+    if (((tx)->queue_link.tqe_next) != NULL)				\
+    SpinLockAcquire(nexec_lock);
+    if( ( *numExecPt + blocksize) ==0)
+    {
+    shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
+    shm_hash_clear(ws_table->mapB, MAX_WRITE_CONFLICT);
+    printf(" safeDB %s : %s: %d nExec= 0 !!! reset htab \n\n", __FILE__, __FUNCTION__, __LINE__ );
+    }
+    *numExecPt += 1;
+    SpinLockRelease(nexec_lock);
+    printf("safeDB %s : %s: %d nExec= %d tx %d\n\n", __FILE__, __FUNCTION__, __LINE__ ,  *numExecPt , tx->tx_id);
     */
     gettimeofday(&tv1, NULL);
 #if SAFEDBG
     printf("\n func %s hash %s time= %ld.%ld", __FUNCTION__, tx->hash, tv1.tv_sec, tv1.tv_usec);
-	printf("safeDB %s : %s: %d pid %d tx %d\n", __FILE__, __FUNCTION__, __LINE__ ,  getpid() , tx->tx_id);
+    printf("safeDB %s : %s: %d pid %d tx %d\n", __FILE__, __FUNCTION__, __LINE__, getpid(), tx->tx_id);
 #endif
     queue->size -= 1;
     SpinLockRelease(&queue->lock);
     ConditionVariableSignal(&queue->full_cond);
-    return tx; 
+    return tx;
 }
 
-static TupleTableSlot*
-clone_slot(TupleTableSlot* slot)
+static TupleTableSlot *
+clone_slot(TupleTableSlot *slot)
 {
-    TupleTableSlot* ret;
+    TupleTableSlot *ret;
     TupleDesc newdesc;
 
     /*
@@ -1251,7 +1268,7 @@ clone_slot(TupleTableSlot* slot)
  * Does NOT acquire the per-tx LWLock; callers that need to mutate the entry
  * must acquire tx->lock themselves.
  */
-BCDBShmXact*
+BCDBShmXact *
 get_tx_by_hash(const char *hash)
 {
     BCDBShmXact *ret;
@@ -1283,11 +1300,10 @@ get_tx_by_hash(const char *hash)
  *
  * Calls ereport(FATAL) if the XID is already mapped (indicates a bug).
  */
-void
-add_tx_xid_map(TransactionId xid, BCDBShmXact *tx)
+void add_tx_xid_map(TransactionId xid, BCDBShmXact *tx)
 {
     XidMapEntry *entry;
-    bool    found;
+    bool found;
     uint64 lock_wait_us = 0;
     uint64 lock_t0 = 0;
 
@@ -1314,8 +1330,8 @@ add_tx_xid_map(TransactionId xid, BCDBShmXact *tx)
     if (bcdb_xidmap_debug_enabled() && (lock_wait_us >= 500 || found))
         ereport(LOG,
                 (errmsg("[BCDB_XIDMAP] add xid=%u pid=%d tx_ptr=%p txid=%d found=%d spin_wait_us=%lu",
-                        (unsigned int) xid, (int) getpid(), (void *) tx, (int) tx->tx_id,
-                        found ? 1 : 0, (unsigned long) lock_wait_us)));
+                        (unsigned int)xid, (int)getpid(), (void *)tx, (int)tx->tx_id,
+                        found ? 1 : 0, (unsigned long)lock_wait_us)));
 }
 
 /*
@@ -1331,8 +1347,7 @@ add_tx_xid_map(TransactionId xid, BCDBShmXact *tx)
  *
  * Safe to call with InvalidTransactionId (no-op).
  */
-void
-remove_tx_xid_map(TransactionId xid)
+void remove_tx_xid_map(TransactionId xid)
 {
     bool found;
     XidMapEntry *entry;
@@ -1353,8 +1368,8 @@ remove_tx_xid_map(TransactionId xid)
     entry = hash_search(xid_map, &xid, HASH_FIND, &found);
 
     BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove enter pid=%d xid=%u found=%d entry_ptr=%p spin_wait_us=%lu",
-                    (int) getpid(), (unsigned int) xid, found ? 1 : 0, (void *) entry,
-                    (unsigned long) spin_wait_us);
+                    (int)getpid(), (unsigned int)xid, found ? 1 : 0, (void *)entry,
+                    (unsigned long)spin_wait_us);
 
     if (entry)
     {
@@ -1365,7 +1380,7 @@ remove_tx_xid_map(TransactionId xid)
             lw_t0 = bcdb_get_time();
 
         BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove pre_lwlock pid=%d xid=%u tx_ptr=%p",
-                        (int) getpid(), (unsigned int) xid, (void *) entry->tx);
+                        (int)getpid(), (unsigned int)xid, (void *)entry->tx);
         LWLockAcquire(&entry->tx->lock, LW_EXCLUSIVE);
         if (bcdb_xidmap_debug_enabled())
             lw_wait_us = bcdb_get_time() - lw_t0;
@@ -1373,24 +1388,24 @@ remove_tx_xid_map(TransactionId xid)
         if (bcdb_xidmap_debug_enabled() && lw_wait_us >= 1000)
             ereport(LOG,
                     (errmsg("[BCDB_XIDMAP] remove lwlock_wait pid=%d xid=%u tx_ptr=%p wait_us=%lu",
-                            (int) getpid(), (unsigned int) xid, (void *) entry->tx,
-                            (unsigned long) lw_wait_us)));
+                            (int)getpid(), (unsigned int)xid, (void *)entry->tx,
+                            (unsigned long)lw_wait_us)));
 
         hash_search(xid_map, &xid, HASH_REMOVE, &found);
         LWLockRelease(&entry->tx->lock);
 
         BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove post_remove pid=%d xid=%u removed=%d",
-                        (int) getpid(), (unsigned int) xid, found ? 1 : 0);
+                        (int)getpid(), (unsigned int)xid, found ? 1 : 0);
     }
     SpinLockRelease(xid_map_lock);
 
     BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove exit pid=%d xid=%u found=%d",
-                    (int) getpid(), (unsigned int) xid, found ? 1 : 0);
+                    (int)getpid(), (unsigned int)xid, found ? 1 : 0);
 
     if (!found)
     {
         BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove missing_entry pid=%d xid=%u",
-                        (int) getpid(), (unsigned int) xid);
+                        (int)getpid(), (unsigned int)xid);
         ereport(FATAL, (errmsg("[ZL] xid map %d is already deleted!", (int)xid)));
     }
 }
@@ -1435,12 +1450,11 @@ bcdb_dirty_xid_is_ordered_predecessor(TransactionId xid)
     return mapped_txid >= 0 && mapped_txid < activeTx->tx_id;
 }
 
-void
-store_optim_update(TupleTableSlot* slot, ItemPointer old_tid)
+void store_optim_update(TupleTableSlot *slot, ItemPointer old_tid)
 {
     OptimWriteEntry *write_entry;
-    MemoryContext    old_context;
-    DEBUGMSG("[ZL] tx %s storing update to (%d %d %d)", activeTx->hash, slot->tts_tableOid, *(int*)&old_tid->ip_blkid, (int)old_tid->ip_posid);
+    MemoryContext old_context;
+    DEBUGMSG("[ZL] tx %s storing update to (%d %d %d)", activeTx->hash, slot->tts_tableOid, *(int *)&old_tid->ip_blkid, (int)old_tid->ip_posid);
     old_context = MemoryContextSwitchTo(bcdb_tx_context);
     write_entry = palloc(sizeof(OptimWriteEntry));
     write_entry->operation = CMD_UPDATE;
@@ -1453,16 +1467,15 @@ store_optim_update(TupleTableSlot* slot, ItemPointer old_tid)
     MemoryContextSwitchTo(old_context);
 #if SAFEDBG1
     printf("safeDB %s : %s: %d tx %d cid %d\n",
-            __FILE__, __FUNCTION__, __LINE__ , activeTx->tx_id, write_entry->cid );
+           __FILE__, __FUNCTION__, __LINE__, activeTx->tx_id, write_entry->cid);
 #endif
-    //debugtup(slot, NULL);
+    // debugtup(slot, NULL);
 }
 
-void
-store_optim_insert(TupleTableSlot* slot)
+void store_optim_insert(TupleTableSlot *slot)
 {
     OptimWriteEntry *write_entry;
-    MemoryContext    old_context;
+    MemoryContext old_context;
     bool key_is_null = true;
     int32 key_val = 0;
 
@@ -1477,8 +1490,8 @@ store_optim_insert(TupleTableSlot* slot)
         ereport(LOG,
                 (errmsg("[BCDB_FLOW] store_insert_enter pid=%d txid=%d xid=%u rel=%u key_is_null=%d key=%d",
                         getpid(),
-                        activeTx ? (int) activeTx->tx_id : -1,
-                        (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
+                        activeTx ? (int)activeTx->tx_id : -1,
+                        (unsigned int)(activeTx ? activeTx->xid : InvalidTransactionId),
                         slot ? slot->tts_tableOid : InvalidOid,
                         key_is_null ? 1 : 0,
                         key_val)));
@@ -1499,16 +1512,15 @@ store_optim_insert(TupleTableSlot* slot)
         ereport(LOG,
                 (errmsg("[BCDB_FLOW] store_insert_done pid=%d txid=%d xid=%u rel=%u",
                         getpid(),
-                        activeTx ? (int) activeTx->tx_id : -1,
-                        (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
+                        activeTx ? (int)activeTx->tx_id : -1,
+                        (unsigned int)(activeTx ? activeTx->xid : InvalidTransactionId),
                         slot ? slot->tts_tableOid : InvalidOid)));
 }
 
-void
-store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot)
+void store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot)
 {
     OptimWriteEntry *write_entry;
-    MemoryContext    old_context;
+    MemoryContext old_context;
     DEBUGMSG("[ZL] tx %s storing delete (rel: %d)", activeTx->hash, relOid);
     old_context = MemoryContextSwitchTo(bcdb_tx_context);
     write_entry = palloc(sizeof(OptimWriteEntry));
@@ -1522,11 +1534,10 @@ store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot)
     MemoryContextSwitchTo(old_context);
 }
 
-void
-store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid)
+void store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid)
 {
     OptimWriteEntry *write_entry;
-    MemoryContext    old_context;
+    MemoryContext old_context;
 
     DEBUGMSG("[ZL] tx %s storing deferred delete-by-key (rel: %d key: %d)",
              activeTx->hash, relOid, keyval);
@@ -1543,8 +1554,7 @@ store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid)
     MemoryContextSwitchTo(old_context);
 }
 
-bool
-apply_optim_insert(TupleTableSlot* slot, CommandId cid)
+bool apply_optim_insert(TupleTableSlot *slot, CommandId cid)
 {
     uint64 apply_insert_start = bcdb_ptrace_timer_start();
     Relation relation = RelationIdGetRelation(slot->tts_tableOid);
@@ -1608,8 +1618,8 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
 
             BCDB_FLOW_LOG("[BCDB_FLOW] apply_insert_unique_violation pid=%d txid=%d xid=%u rel=%u key_is_null=%d key=%d",
                           getpid(),
-                          activeTx ? (int) activeTx->tx_id : -1,
-                          (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
+                          activeTx ? (int)activeTx->tx_id : -1,
+                          (unsigned int)(activeTx ? activeTx->xid : InvalidTransactionId),
                           slot ? slot->tts_tableOid : InvalidOid,
                           key_is_null ? 1 : 0,
                           key_val);
@@ -1628,8 +1638,7 @@ apply_optim_insert(TupleTableSlot* slot, CommandId cid)
     return insert_ok;
 }
 
-bool
-apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
+bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
 {
     uint64 apply_update_start = bcdb_ptrace_timer_start();
     uint64 merkle_prep_start = 0;
@@ -1655,13 +1664,13 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
     } PendingMerkleUpdate;
     PendingMerkleUpdate *pending = NULL;
 
-    DEBUGMSG("[ZL] tx %s applying optim update (%d %d %d)", activeTx->hash, relation->rd_id, *(int*)&tid->ip_blkid, (int)tid->ip_posid);
+    DEBUGMSG("[ZL] tx %s applying optim update (%d %d %d)", activeTx->hash, relation->rd_id, *(int *)&tid->ip_blkid, (int)tid->ip_posid);
     bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_UPDATE_COUNT, 1);
 #if SAFEDBG1
     printf("safeDB %s : %s: %d tm-ok %d tx %d cid %d\n",
-            __FILE__, __FUNCTION__, __LINE__ , TM_Ok, activeTx->tx_id, cid );
+           __FILE__, __FUNCTION__, __LINE__, TM_Ok, activeTx->tx_id, cid);
 #endif
-    
+
     if (enable_merkle_index && ItemPointerIsValid(tid) &&
         ItemPointerGetBlockNumberNoCheck(tid) != InvalidBlockNumber)
     {
@@ -1696,17 +1705,17 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
             if (pendingCapacity > 0)
                 pending = palloc0(sizeof(PendingMerkleUpdate) * pendingCapacity);
 
-            foreach(lc, indexList)
+            foreach (lc, indexList)
             {
                 Oid indexOid = lfirst_oid(lc);
                 Relation indexRel = index_open(indexOid, RowExclusiveLock);
 
                 if (indexRel->rd_rel->relam == MERKLE_AM_OID)
                 {
-                    IndexInfo  *indexInfo;
-                    Datum       values[INDEX_MAX_KEYS];
-                    bool        isnull[INDEX_MAX_KEYS];
-                    int         totalLeaves;
+                    IndexInfo *indexInfo;
+                    Datum values[INDEX_MAX_KEYS];
+                    bool isnull[INDEX_MAX_KEYS];
+                    int totalLeaves;
 
                     indexInfo = BuildIndexInfo(indexRel);
                     FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
@@ -1727,7 +1736,7 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
         bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_MERKLE_PREP_US,
                                merkle_prep_start);
     }
-    
+
     /*
      * HANG DEBUG: time the table_tuple_update call so we can see when
      * wait=true actually blocks on a hot row (district, customer, stock).
@@ -1749,11 +1758,11 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
             apply_update_elapsed >= 1000) /* log if blocked > 1 ms */
             ereport(LOG,
                     (errmsg("[BCDB_HANG] apply_update_wait pid=%d txid=%d rel=%u waited_us=%lu result=%d",
-                            (int) getpid(),
-                            activeTx ? (int) activeTx->tx_id : -1,
-                            (unsigned int) (relation ? relation->rd_id : 0),
-                            (unsigned long) apply_update_elapsed,
-                            (int) result)));
+                            (int)getpid(),
+                            activeTx ? (int)activeTx->tx_id : -1,
+                            (unsigned int)(relation ? relation->rd_id : 0),
+                            (unsigned long)apply_update_elapsed,
+                            (int)result)));
     }
 
     if (result != TM_Ok)
@@ -1771,11 +1780,11 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
                                apply_update_start);
 #if SAFEDBG1
         printf("safeDB %s : %s: %d ret %d tx %d tx %s doomed because of ww-conflict \n",
-               __FILE__, __FUNCTION__, __LINE__ , result, activeTx->tx_id, activeTx->hash );
+               __FILE__, __FUNCTION__, __LINE__, result, activeTx->tx_id, activeTx->hash);
         printf("safeDB %s : %s: %d   tmfd.xmax %d, tmfd.cmax %d  ww-conflict \n",
-               __FILE__, __FUNCTION__, __LINE__ , tmfd.xmax, tmfd.cmax  );
+               __FILE__, __FUNCTION__, __LINE__, tmfd.xmax, tmfd.cmax);
 #endif
-    return false;
+        return false;
     }
 
     if (update_indexes)
@@ -1841,9 +1850,9 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
                     FormIndexDatum(indexInfo, newSlot, NULL, values, isnull);
                     merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
                     newLeafId = merkle_compute_partition_id(values, isnull,
-                                                           indexInfo->ii_NumIndexKeyAttrs,
-                                                           RelationGetDescr(indexRel),
-                                                           totalLeaves);
+                                                            indexInfo->ii_NumIndexKeyAttrs,
+                                                            RelationGetDescr(indexRel),
+                                                            totalLeaves);
 
                     if (newLeafId == pending[i].oldLeafId)
                     {
@@ -1882,8 +1891,7 @@ apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid)
     return true;
 }
 
-bool
-apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid)
+bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid)
 {
     uint64 apply_delete_start = bcdb_ptrace_timer_start();
     uint64 merkle_prep_start = 0;
@@ -1974,42 +1982,42 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
         d_key = slot_getattr(oldSlot, 1, &d_isnull);
     }
 
-        if (hasOldHash)
+    if (hasOldHash)
+    {
+        indexList = RelationGetIndexList(relation);
+        pendingCapacity = list_length(indexList);
+        if (pendingCapacity > 0)
+            pending = palloc0(sizeof(PendingMerkleDelete) * pendingCapacity);
+
+        foreach (lc, indexList)
         {
-            indexList = RelationGetIndexList(relation);
-            pendingCapacity = list_length(indexList);
-            if (pendingCapacity > 0)
-                pending = palloc0(sizeof(PendingMerkleDelete) * pendingCapacity);
+            Oid indexOid = lfirst_oid(lc);
+            Relation indexRel = index_open(indexOid, RowExclusiveLock);
 
-            foreach(lc, indexList)
+            if (indexRel->rd_rel->relam == MERKLE_AM_OID)
             {
-                Oid indexOid = lfirst_oid(lc);
-                Relation indexRel = index_open(indexOid, RowExclusiveLock);
+                IndexInfo *indexInfo;
+                Datum values[INDEX_MAX_KEYS];
+                bool isnull[INDEX_MAX_KEYS];
+                int totalLeaves;
 
-                if (indexRel->rd_rel->relam == MERKLE_AM_OID)
-                {
-                    IndexInfo  *indexInfo;
-                    Datum       values[INDEX_MAX_KEYS];
-                    bool        isnull[INDEX_MAX_KEYS];
-                    int         totalLeaves;
+                indexInfo = BuildIndexInfo(indexRel);
+                FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
+                merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
 
-                    indexInfo = BuildIndexInfo(indexRel);
-                    FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
-                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
+                pending[pendingCount].indexOid = indexOid;
+                pending[pendingCount].partitionId =
+                    merkle_compute_partition_id(values, isnull,
+                                                indexInfo->ii_NumIndexKeyAttrs,
+                                                RelationGetDescr(indexRel),
+                                                totalLeaves);
 
-                    pending[pendingCount].indexOid = indexOid;
-                    pending[pendingCount].partitionId =
-                        merkle_compute_partition_id(values, isnull,
-                                                    indexInfo->ii_NumIndexKeyAttrs,
-                                                    RelationGetDescr(indexRel),
-                                                    totalLeaves);
-
-                    pendingCount++;
-                }
-
-                index_close(indexRel, RowExclusiveLock);
+                pendingCount++;
             }
+
+            index_close(indexRel, RowExclusiveLock);
         }
+    }
     bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_MERKLE_PREP_US,
                            merkle_prep_start);
 
@@ -2078,8 +2086,7 @@ apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, 
  * This duplicates the core logic of apply_optim_delete but starts from a
  * primary-key value instead of a stored TupleTableSlot.
  */
-bool
-apply_deferred_delete_by_key(Oid relOid, int keyval)
+bool apply_deferred_delete_by_key(Oid relOid, int keyval)
 {
     uint64 apply_delete_start = bcdb_ptrace_timer_start();
     uint64 delete_lookup_start = bcdb_ptrace_timer_start();
@@ -2107,9 +2114,9 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
     oldSlot = table_slot_create(relation, NULL);
     BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_lookup_enter pid=%d txid=%d xid=%u rel=%u key=%d",
                   getpid(),
-                  activeTx ? (int) activeTx->tx_id : -1,
-                  (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
-                  (unsigned int) relOid,
+                  activeTx ? (int)activeTx->tx_id : -1,
+                  (unsigned int)(activeTx ? activeTx->xid : InvalidTransactionId),
+                  (unsigned int)relOid,
                   keyval);
 
     /*
@@ -2134,7 +2141,7 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
             retry_lookup = false;
             ExecClearTuple(oldSlot);
 
-            foreach(blc, btreeIndexList)
+            foreach (blc, btreeIndexList)
             {
                 Oid btreeOid = lfirst_oid(blc);
                 Relation btreeRel = index_open(btreeOid, AccessShareLock);
@@ -2176,14 +2183,14 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
                                 bcdb_dirty_xid_is_ordered_predecessor(candidate_wait_xid);
                             BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_dirty_candidate pid=%d txid=%d rel=%u key=%d tid_block=%u tid_off=%u xmin=%u xmax=%u wait_xid=%u predecessor=%d",
                                           getpid(),
-                                          activeTx ? (int) activeTx->tx_id : -1,
-                                          (unsigned int) relOid,
+                                          activeTx ? (int)activeTx->tx_id : -1,
+                                          (unsigned int)relOid,
                                           keyval,
                                           ItemPointerGetBlockNumberNoCheck(&currentTid),
                                           ItemPointerGetOffsetNumberNoCheck(&currentTid),
-                                          (unsigned int) dirty_snapshot.xmin,
-                                          (unsigned int) dirty_snapshot.xmax,
-                                          (unsigned int) candidate_wait_xid,
+                                          (unsigned int)dirty_snapshot.xmin,
+                                          (unsigned int)dirty_snapshot.xmax,
+                                          (unsigned int)candidate_wait_xid,
                                           candidate_is_predecessor ? 1 : 0);
                             if (candidate_is_predecessor)
                             {
@@ -2205,8 +2212,8 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
 
                         BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_stable_candidate pid=%d txid=%d rel=%u key=%d tid_block=%u tid_off=%u",
                                       getpid(),
-                                      activeTx ? (int) activeTx->tx_id : -1,
-                                      (unsigned int) relOid,
+                                      activeTx ? (int)activeTx->tx_id : -1,
+                                      (unsigned int)relOid,
                                       keyval,
                                       ItemPointerGetBlockNumberNoCheck(&currentTid),
                                       ItemPointerGetOffsetNumberNoCheck(&currentTid));
@@ -2227,10 +2234,10 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
             {
                 BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_wait_predecessor pid=%d txid=%d rel=%u key=%d wait_xid=%u tid_block=%u tid_off=%u",
                               getpid(),
-                              activeTx ? (int) activeTx->tx_id : -1,
-                              (unsigned int) relOid,
+                              activeTx ? (int)activeTx->tx_id : -1,
+                              (unsigned int)relOid,
                               keyval,
-                              (unsigned int) wait_xid,
+                              (unsigned int)wait_xid,
                               ItemPointerGetBlockNumberNoCheck(&currentTid),
                               ItemPointerGetOffsetNumberNoCheck(&currentTid));
                 XactLockTableWait(wait_xid, relation, &currentTid, XLTW_Delete);
@@ -2247,9 +2254,9 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
     {
         BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_lookup_miss pid=%d txid=%d xid=%u rel=%u key=%d",
                       getpid(),
-                      activeTx ? (int) activeTx->tx_id : -1,
-                      (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
-                      (unsigned int) relOid,
+                      activeTx ? (int)activeTx->tx_id : -1,
+                      (unsigned int)(activeTx ? activeTx->xid : InvalidTransactionId),
+                      (unsigned int)relOid,
                       keyval);
         /*
          * Row genuinely doesn't exist (e.g., first DELETE of this key
@@ -2277,17 +2284,17 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
         if (pendingCapacity > 0)
             pending = palloc0(sizeof(PendingMerkleDelete) * pendingCapacity);
 
-        foreach(lc, indexList)
+        foreach (lc, indexList)
         {
             Oid indexOid = lfirst_oid(lc);
             Relation indexRel = index_open(indexOid, RowExclusiveLock);
 
             if (indexRel->rd_rel->relam == MERKLE_AM_OID)
             {
-                IndexInfo  *indexInfo;
-                Datum       values[INDEX_MAX_KEYS];
-                bool        isnull[INDEX_MAX_KEYS];
-                int         totalLeaves;
+                IndexInfo *indexInfo;
+                Datum values[INDEX_MAX_KEYS];
+                bool isnull[INDEX_MAX_KEYS];
+                int totalLeaves;
 
                 indexInfo = BuildIndexInfo(indexRel);
                 FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
@@ -2318,13 +2325,13 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
                                            NULL);
     BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_heap_result pid=%d txid=%d xid=%u rel=%u key=%d tid_block=%u tid_off=%u result=%d",
                   getpid(),
-                  activeTx ? (int) activeTx->tx_id : -1,
-                  (unsigned int) (activeTx ? activeTx->xid : InvalidTransactionId),
-                  (unsigned int) relOid,
+                  activeTx ? (int)activeTx->tx_id : -1,
+                  (unsigned int)(activeTx ? activeTx->xid : InvalidTransactionId),
+                  (unsigned int)relOid,
                   keyval,
                   ItemPointerGetBlockNumberNoCheck(&currentTid),
                   ItemPointerGetOffsetNumberNoCheck(&currentTid),
-                  (int) result);
+                  (int)result);
 
     /* Apply Merkle XOR-outs after successful heap delete */
     if (result == TM_Ok && hasOldHash)
@@ -2357,8 +2364,7 @@ apply_deferred_delete_by_key(Oid relOid, int keyval)
     return (result == TM_Ok);
 }
 
-bool
-apply_optim_writes(void)
+bool apply_optim_writes(void)
 {
     /*
      * Non-destructive traversal: caller owns queue cleanup.
@@ -2371,39 +2377,39 @@ apply_optim_writes(void)
     {
         switch (write_entry->operation)
         {
-            case CMD_UPDATE:
-                if (!apply_optim_update(&write_entry->old_tid, write_entry->slot, write_entry->cid))
+        case CMD_UPDATE:
+            if (!apply_optim_update(&write_entry->old_tid, write_entry->slot, write_entry->cid))
+                return false;
+            break;
+        case CMD_INSERT:
+            if (!apply_optim_insert(write_entry->slot, write_entry->cid))
+            {
+                /*
+                 * INSERT failed (duplicate key).  This happens when
+                 * tx_id assignment doesn't preserve workload line order:
+                 * a DELETE-INSERT pair for the same key gets swapped so
+                 * the INSERT runs first and finds the original row still
+                 * present.  Signal failure so the worker retries the
+                 * apply stage in Lever D v2.
+                 */
+                return false;
+            }
+            break;
+        case CMD_DELETE:
+            if (ItemPointerIsValid(&write_entry->old_tid))
+            {
+                if (!apply_optim_delete(write_entry->relOid, &write_entry->old_tid,
+                                        write_entry->slot, write_entry->cid))
                     return false;
-                break;
-            case CMD_INSERT:
-                if (!apply_optim_insert(write_entry->slot, write_entry->cid))
-                {
-                    /*
-                     * INSERT failed (duplicate key).  This happens when
-                     * tx_id assignment doesn't preserve workload line order:
-                     * a DELETE-INSERT pair for the same key gets swapped so
-                     * the INSERT runs first and finds the original row still
-                     * present.  Signal failure so the worker retries the
-                     * apply stage in Lever D v2.
-                     */
+            }
+            else
+            {
+                if (!apply_deferred_delete_by_key(write_entry->relOid, write_entry->keyval))
                     return false;
-                }
-                break;
-            case CMD_DELETE:
-                if (ItemPointerIsValid(&write_entry->old_tid))
-                {
-                    if (!apply_optim_delete(write_entry->relOid, &write_entry->old_tid,
-                                            write_entry->slot, write_entry->cid))
-                        return false;
-                }
-                else
-                {
-                    if (!apply_deferred_delete_by_key(write_entry->relOid, write_entry->keyval))
-                        return false;
-                }
-                break;
-            default:
-                ereport(ERROR, (errmsg("[ZL] tx %s applying unknown operation", activeTx->hash)));
+            }
+            break;
+        default:
+            ereport(ERROR, (errmsg("[ZL] tx %s applying unknown operation", activeTx->hash)));
         }
     }
     return true;
@@ -2436,8 +2442,7 @@ apply_optim_writes(void)
  * check sees BOTH the "old" shard and the "new" shard for the current
  * epoch, so no conflicts are missed across a hash-table rotation boundary.
  */
-int
-conflict_checkDT()
+int conflict_checkDT()
 {
     uint64 ws_check_start;
     uint64 rs_check_start;
@@ -2453,9 +2458,10 @@ conflict_checkDT()
     static int ccCount = 0;
     static int cc2Count = 0;
 
-    if(ccCount++ == ccMax) {
+    if (ccCount++ == ccMax)
+    {
         ccCount = 0;
-        printf("safeDB %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__ );
+        printf("safeDB %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__);
     }
 #endif
 
@@ -2464,20 +2470,21 @@ conflict_checkDT()
     {
         bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_WS_CONFLICT_CHECKS, 1);
         // ws_table_check
-        if (ws_table_checkDT( &record->tag)) {
+        if (ws_table_checkDT(&record->tag))
+        {
             BCDB_FLOW_LOG("[BCDB_FLOW] conflict_check_ws_hit pid=%d txid=%d cand_txid=%d",
-                          (int) getpid(),
-                          activeTx ? (int) activeTx->tx_id : -1,
-                          (int) bcdb_get_last_conflict_txid());
+                          (int)getpid(),
+                          activeTx ? (int)activeTx->tx_id : -1,
+                          (int)bcdb_get_last_conflict_txid());
             bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_CONFLICT_WS_US,
                                    ws_check_start);
-	    // printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n", 
-		// __FILE__, __FUNCTION__, __LINE__ ,  activeTx->hash, activeTx->tx_id);
-	    return 1;
-		}
-    		//ereport(ERROR,
- 		//		(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-   		//		 errmsg("tx %s aborted due to waw", activeTx->hash)));
+            // printf("safeDB %s : %s: %d tx %s %d conflict due to waw \n",
+            // __FILE__, __FUNCTION__, __LINE__ ,  activeTx->hash, activeTx->tx_id);
+            return 1;
+        }
+        // ereport(ERROR,
+        //		(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+        //		 errmsg("tx %s aborted due to waw", activeTx->hash)));
     }
 
     bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_CONFLICT_WS_US, ws_check_start);
@@ -2486,31 +2493,31 @@ conflict_checkDT()
     LIST_FOREACH(record, &rs_table_record, link)
     {
         bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_RS_CONFLICT_CHECKS, 1);
-        //ws_table_check
-        if (ws_table_checkDT( &record->tag))
+        // ws_table_check
+        if (ws_table_checkDT(&record->tag))
         {
             BCDB_FLOW_LOG("[BCDB_FLOW] conflict_check_rs_hit pid=%d txid=%d cand_txid=%d",
-                          (int) getpid(),
-                          activeTx ? (int) activeTx->tx_id : -1,
-                          (int) bcdb_get_last_conflict_txid());
+                          (int)getpid(),
+                          activeTx ? (int)activeTx->tx_id : -1,
+                          (int)bcdb_get_last_conflict_txid());
             bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_CONFLICT_RS_US,
                                    rs_check_start);
-		    return 1;
+            return 1;
         }
-	    		//ereport(ERROR,
-	 				//(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-	   				 //errmsg("tx %s aborted due to raw", activeTx->hash)));
+        // ereport(ERROR,
+        //(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+        // errmsg("tx %s aborted due to raw", activeTx->hash)));
     }
     bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_CONFLICT_RS_US, rs_check_start);
 
 #if SAFEDBG2
-    if(cc2Count++ == ccMax) {
+    if (cc2Count++ == ccMax)
+    {
         cc2Count = 0;
-        printf("safeDB %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__ );
+        printf("safeDB %s : %s: %d -- one in 20\n", __FILE__, __FUNCTION__, __LINE__);
     }
 #endif
     return 0;
-
 }
 
 /*
@@ -2528,17 +2535,16 @@ conflict_checkDT()
  * in worker.c.  If the non-DT path needs to be made functional again,
  * ws_table_reserve() and rs_table_reserve() should be re-introduced.
  */
-void
-conflict_check(void)
+void conflict_check(void)
 {
     WSTableEntryRecord *record;
 
     LIST_FOREACH(record, &ws_table_record, link)
     {
         if (ws_table_check(&record->tag))
-    		ereport(ERROR,
- 				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-   				 errmsg("tx %s aborted due to waw", activeTx->hash)));           
+            ereport(ERROR,
+                    (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                     errmsg("tx %s aborted due to waw", activeTx->hash)));
     }
 
     LIST_FOREACH(record, &ws_table_record, link)
@@ -2549,14 +2555,13 @@ conflict_check(void)
             LIST_FOREACH(raw_record, &rs_table_record, link)
             {
                 if (ws_table_check(&raw_record->tag))
-            		ereport(ERROR,
-         				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-           				 errmsg("tx %s aborted due to raw and war", activeTx->hash)));
+                    ereport(ERROR,
+                            (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                             errmsg("tx %s aborted due to raw and war", activeTx->hash)));
             }
-				break;
+            break;
         }
     }
-
 }
 
 /*
@@ -2582,8 +2587,7 @@ conflict_check(void)
  *
  * Called from worker.c after conflict_checkDT() returns clean.
  */
-void
-publish_ws_tableDT(int id)
+void publish_ws_tableDT(int id)
 {
     uint64 publish_start = bcdb_ptrace_timer_start();
     int threshold;
@@ -2592,9 +2596,9 @@ publish_ws_tableDT(int id)
     bool using_map_b = false;
     bool published_any = false;
     bool found;
-    WSTableEntry* entry;
+    WSTableEntry *entry;
     PREDICATELOCKTARGETTAG *tag;
-    uint32  tuple_hash = 0;
+    uint32 tuple_hash = 0;
     WSTableEntryRecord *record;
     slock_t *partition_lock;
     int x = 0;
@@ -2610,57 +2614,62 @@ publish_ws_tableDT(int id)
 
     threshold = bcdb_dt_hashtab_switch_threshold;
     min_threshold = 2 * workers - 1;
-    if (threshold < min_threshold) {
+    if (threshold < min_threshold)
+    {
         ereport(ERROR,
                 (errmsg("HASHTAB_SWITCH_THRESHOLD (%d) must be >= %d",
                         threshold, min_threshold)));
     }
 
     x = id / threshold; // min 2* num_w -1
-    if(x % 2 == 0) {
-	    ws_table->mapActive = ws_table->map;
-	    if(id % threshold == 0 ) {
-                uint64 hash_clear_start = bcdb_ptrace_timer_start();
-			WSTableClearShard(ws_table, ws_table->map, false);
-                bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
-                                       hash_clear_start);
-                bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
-		    //shm_hash_clear(rs_table->map, MAX_WRITE_CONFLICT);
-	    }
+    if (x % 2 == 0)
+    {
+        ws_table->mapActive = ws_table->map;
+        if (id % threshold == 0)
+        {
+            uint64 hash_clear_start = bcdb_ptrace_timer_start();
+            WSTableClearShard(ws_table, ws_table->map, false);
+            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
+                                   hash_clear_start);
+            bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
+            // shm_hash_clear(rs_table->map, MAX_WRITE_CONFLICT);
+        }
     }
-    else {
-	    ws_table->mapActive = ws_table->mapB;
-	        using_map_b = true;
-	    if(id % threshold == 0 ) {
-                uint64 hash_clear_start = bcdb_ptrace_timer_start();
-			WSTableClearShard(ws_table, ws_table->mapB, true);
-                bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
-                                       hash_clear_start);
-                bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
-		    // shm_hash_clear(rs_table->mapB, MAX_WRITE_CONFLICT);
-	    }
+    else
+    {
+        ws_table->mapActive = ws_table->mapB;
+        using_map_b = true;
+        if (id % threshold == 0)
+        {
+            uint64 hash_clear_start = bcdb_ptrace_timer_start();
+            WSTableClearShard(ws_table, ws_table->mapB, true);
+            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
+                                   hash_clear_start);
+            bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
+            // shm_hash_clear(rs_table->mapB, MAX_WRITE_CONFLICT);
+        }
     } // clean_rs_ws_table(id); // reset before HASH_ENTER get-write-set !!!
 
     LIST_FOREACH(record, &ws_table_record, link)
     {
-	    tag = &(record->tag);
-	    tuple_hash = PredicateLockTargetTagHashCode(tag);
+        tag = &(record->tag);
+        tuple_hash = PredicateLockTargetTagHashCode(tag);
         partition_lock = WSTablePartitionLock(tuple_hash);
         SpinLockAcquire(partition_lock);
-        entry = (WSTableEntry *) hash_search_with_hash_value(ws_table->mapActive,
-                                                                                 tag,
-                                                                                 tuple_hash,
-                                                                                 HASH_ENTER,
-                                                                                 &found);
-	        if (!found || entry->tx_id < activeTx->tx_id)
-	            entry->tx_id = activeTx->tx_id;
-	        SpinLockRelease(partition_lock);
-	        published_any = true;
-            bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_WS_PUBLISH_ENTRIES, 1);
-	    }
+        entry = (WSTableEntry *)hash_search_with_hash_value(ws_table->mapActive,
+                                                            tag,
+                                                            tuple_hash,
+                                                            HASH_ENTER,
+                                                            &found);
+        if (!found || entry->tx_id < activeTx->tx_id)
+            entry->tx_id = activeTx->tx_id;
+        SpinLockRelease(partition_lock);
+        published_any = true;
+        bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_WS_PUBLISH_ENTRIES, 1);
+    }
 
-	    if (using_map_b && published_any)
-	        pg_atomic_write_u32(&ws_table->mapB_nonempty, 1);
+    if (using_map_b && published_any)
+        pg_atomic_write_u32(&ws_table->mapB_nonempty, 1);
     bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_WS_US, publish_start);
 }
 
@@ -2674,8 +2683,7 @@ publish_ws_tableDT(int id)
  * Note: only ws_table->map is cleared here (not mapB), because the DT
  * path manages mapB rotation inside publish_ws_tableDT().
  */
-void
-clean_rs_ws_table(void)
+void clean_rs_ws_table(void)
 {
     shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
     shm_hash_clear(rs_table->map, MAX_WRITE_CONFLICT);

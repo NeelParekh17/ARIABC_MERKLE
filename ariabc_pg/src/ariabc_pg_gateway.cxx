@@ -130,6 +130,28 @@ struct gateway_options {
     // gateway itself (sequential broadcast) rather than Raft consensus.
     int broadcast_to_all = 0;
 
+    // In broadcast + async validation mode, allow the gateway to pipeline
+    // after N accept replies, while still draining every late replica accept
+    // before the process exits. 0 preserves the legacy majority accept.
+    int broadcast_accept_quorum = 0;
+
+    // In broadcast + direct completion mode, optionally wait for N accepted
+    // replicas to finish executing the batch before counting it completed.
+    // 0 preserves the legacy accept-quorum completion surface.
+    int broadcast_result_quorum = 0;
+
+    // 1: include the final blocking late-replica accept drain in the reported
+    // workload time. 0: report client-visible accept-quorum completion time,
+    // then drain late accepts before exit so the harness can still verify all
+    // replicas with the post-workload marker/Merkle gate.
+    int broadcast_drain_in_timed_run = 1;
+
+    // In non-broadcast direct-completion mode, wait for this many replicas to
+    // apply the submitted Raft log entry before reporting completion. The
+    // benchmark workload keeps the default single-node wait; correctness
+    // markers can raise this to all nodes as a catch-up barrier.
+    int direct_completion_quorum = 1;
+
     // Number of parallel TCP connections to open per logical node. >1 gives
     // the gateway multiple concurrent write paths into a single server and
     // forces the server to spawn that many per-connection handler threads,
@@ -147,7 +169,7 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--connFanout <N>]\n";
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>]\n";
 }
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
@@ -230,6 +252,14 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.vote_store_max_entries = static_cast<size_t>(std::stoull(need("--voteStoreMax")));
             } else if (a == "--broadcastToAll") {
                 opt.broadcast_to_all = std::stoi(need("--broadcastToAll"));
+            } else if (a == "--broadcastAcceptQuorum") {
+                opt.broadcast_accept_quorum = std::stoi(need("--broadcastAcceptQuorum"));
+            } else if (a == "--broadcastResultQuorum") {
+                opt.broadcast_result_quorum = std::stoi(need("--broadcastResultQuorum"));
+            } else if (a == "--broadcastDrainInTimedRun") {
+                opt.broadcast_drain_in_timed_run = std::stoi(need("--broadcastDrainInTimedRun"));
+            } else if (a == "--directCompletionQuorum") {
+                opt.direct_completion_quorum = std::stoi(need("--directCompletionQuorum"));
             } else if (a == "--connFanout") {
                 opt.conn_fanout = std::stoi(need("--connFanout"));
                 if (opt.conn_fanout < 1) opt.conn_fanout = 1;
@@ -290,7 +320,6 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     if (completion_path_explicit) {
         if (opt.completion_path == "direct") {
             opt.wait_majority = 0;
-            opt.broadcast_to_all = 0;
         } else if (opt.completion_path == "kafka_majority") {
             opt.wait_majority = 1;
         }
@@ -339,6 +368,22 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     }
     if (opt.vote_store_max_entries == 0) {
         err = "invalid --voteStoreMax (expected > 0)";
+        return false;
+    }
+    if (opt.broadcast_accept_quorum < 0) {
+        err = "invalid --broadcastAcceptQuorum (expected >= 0)";
+        return false;
+    }
+    if (opt.broadcast_result_quorum < 0) {
+        err = "invalid --broadcastResultQuorum (expected >= 0)";
+        return false;
+    }
+    if (opt.broadcast_drain_in_timed_run != 0 && opt.broadcast_drain_in_timed_run != 1) {
+        err = "invalid --broadcastDrainInTimedRun (expected 0|1)";
+        return false;
+    }
+    if (opt.direct_completion_quorum <= 0) {
+        err = "invalid --directCompletionQuorum (expected > 0)";
         return false;
     }
     if (opt.query_sign != 0 && opt.query_sign != 1) {
@@ -2308,6 +2353,13 @@ int main(int argc, char** argv) {
         std::cerr << "no nodes given" << std::endl;
         return 1;
     }
+    if (opt.direct_completion_quorum > static_cast<int>(nodes.size())) {
+        std::cerr << "invalid --directCompletionQuorum ("
+                  << opt.direct_completion_quorum
+                  << ") exceeds configured nodes (" << nodes.size() << ")"
+                  << std::endl;
+        return 1;
+    }
 
     const int total_nodes = (opt.total_nodes > 0) ? opt.total_nodes : static_cast<int>(nodes.size());
     const int majority = (total_nodes / 2) + 1;
@@ -2396,6 +2448,10 @@ int main(int argc, char** argv) {
               << " validation_mode=" << opt.validation_mode
               << " waitMajority=" << (majority_wait_enabled ? 1 : 0)
               << " broadcastToAll=" << (opt.broadcast_to_all ? 1 : 0)
+              << " broadcastAcceptQuorum=" << opt.broadcast_accept_quorum
+              << " broadcastResultQuorum=" << opt.broadcast_result_quorum
+              << " broadcastDrainInTimedRun=" << opt.broadcast_drain_in_timed_run
+              << " directCompletionQuorum=" << opt.direct_completion_quorum
               << std::endl;
 
     if (!majority_wait_enabled) {
@@ -2652,6 +2708,47 @@ int main(int argc, char** argv) {
         return true;
     };
 
+    auto wait_direct_completion_quorum =
+        [&](size_t submit_node_idx,
+            const ariabc_pg::client_api_response& submit_resp,
+            const std::string& req_label) -> bool {
+            if (majority_wait_enabled) return true;
+            if (opt.completion_path != "direct") return true;
+
+            const size_t quorum =
+                std::min(nodes.size(),
+                         static_cast<size_t>(std::max(1, opt.direct_completion_quorum)));
+            if (quorum <= 1) {
+                return wait_direct_completion(submit_node_idx, submit_resp, req_label);
+            }
+            if (submit_node_idx >= nodes.size()) {
+                std::cerr << "direct completion quorum wait missing submit node idx for "
+                          << req_label << std::endl;
+                permanent_failures.fetch_add(1);
+                return false;
+            }
+
+            std::vector<size_t> wait_nodes;
+            wait_nodes.reserve(quorum);
+            wait_nodes.push_back(submit_node_idx);
+            for (size_t node_idx = 0;
+                 node_idx < nodes.size() && wait_nodes.size() < quorum;
+                 ++node_idx) {
+                if (node_idx == submit_node_idx) continue;
+                wait_nodes.push_back(node_idx);
+            }
+
+            for (const size_t node_idx : wait_nodes) {
+                if (!wait_direct_completion(
+                        node_idx,
+                        submit_resp,
+                        req_label + "/node" + std::to_string(node_idx))) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
     std::unordered_set<uint64_t> reset_pending_reqs;
     auto track_reset_req = [&](uint64_t req_num, const std::string& sql_text) {
         if (ariabc_pg::is_reset_barrier_sql(sql_text)) {
@@ -2794,6 +2891,9 @@ int main(int argc, char** argv) {
         std::cout << "loaded " << queries.size() << " queries" << std::endl;
 
         const auto t_start = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point client_completion_end;
+        bool client_completion_end_set = false;
+        uint64_t background_accept_drain_ns = 0;
         if (majority_wait_enabled && kafka_enabled) {
             consumer.set_busy_hint(true);
         }
@@ -3174,6 +3274,19 @@ int main(int argc, char** argv) {
                     size_t submit_node_idx = 0;
                     std::chrono::steady_clock::time_point submit_started_at;
                 };
+                struct late_accept_group {
+                    std::string label;
+                    struct item {
+                        size_t node_idx = 0;
+                        std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> ctx;
+                    };
+                    std::vector<item> ctxs;
+                };
+                struct background_completion_wait {
+                    size_t node_idx = 0;
+                    ariabc_pg::client_api_response resp;
+                    std::string label;
+                };
 
                 const size_t configured_det_submit_limit = (opt.submit_limit > 0)
                     ? static_cast<size_t>(std::max(1, opt.submit_limit))
@@ -3184,8 +3297,83 @@ int main(int argc, char** argv) {
                     ? 0
                     : static_cast<size_t>(event_leader_idx);
                 std::deque<det_submit_ticket> pending_accepts;
+                std::deque<late_accept_group> late_accepts;
+                std::deque<background_completion_wait> background_completion_waits;
                 size_t pending_request_count = 0;
                 size_t next_idx = 0;
+
+                auto enqueue_background_completion_wait =
+                    [&](size_t node_idx,
+                        const ariabc_pg::client_api_response& resp_in,
+                        const std::string& label) {
+                        if (!opt.broadcast_to_all ||
+                            majority_wait_enabled ||
+                            opt.completion_path != "direct") {
+                            return;
+                        }
+                        background_completion_wait wait;
+                        wait.node_idx = node_idx;
+                        wait.resp = resp_in;
+                        wait.label = label;
+                        background_completion_waits.push_back(std::move(wait));
+                    };
+
+                auto drain_late_accepts = [&](bool block) -> bool {
+                    for (auto it = late_accepts.begin(); it != late_accepts.end();) {
+                        std::vector<late_accept_group::item> remaining;
+                        remaining.reserve(it->ctxs.size());
+                        for (const auto& late_item : it->ctxs) {
+                            ariabc_pg::client_api_response node_resp;
+                            std::string node_err;
+                            bool done = false;
+                            bool ok_node = false;
+                            if (block) {
+                                ok_node = submitter->wait_submit(late_item.ctx, node_resp, node_err);
+                                done = true;
+                            } else {
+                                ok_node = submitter->try_collect_submit(
+                                    late_item.ctx, node_resp, node_err, done);
+                            }
+                            if (!done) {
+                                remaining.push_back(late_item);
+                                continue;
+                            }
+                            if (!ok_node || node_resp.status != 0) {
+                                std::cerr << "late broadcast accept failed for " << it->label
+                                          << " err="
+                                          << (!ok_node
+                                                  ? (node_err.empty() ? std::string("io_failed") : node_err)
+                                                  : node_resp.msg)
+                                          << std::endl;
+                                permanent_failures.fetch_add(1);
+                                return false;
+                            }
+                            enqueue_background_completion_wait(
+                                late_item.node_idx,
+                                node_resp,
+                                it->label + "/node" + std::to_string(late_item.node_idx));
+                        }
+                        if (remaining.empty()) {
+                            it = late_accepts.erase(it);
+                        } else {
+                            it->ctxs = std::move(remaining);
+                            ++it;
+                        }
+                    }
+                    return true;
+                };
+
+                auto drain_background_completions = [&]() -> bool {
+                    while (!background_completion_waits.empty()) {
+                        background_completion_wait wait =
+                            std::move(background_completion_waits.front());
+                        background_completion_waits.pop_front();
+                        if (!wait_direct_completion(wait.node_idx, wait.resp, wait.label)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
 
                 auto drain_one_accept = [&]() -> bool {
                     if (pending_accepts.empty()) return true;
@@ -3203,29 +3391,122 @@ int main(int argc, char** argv) {
                     ariabc_pg::client_api_response resp;
                     std::string submit_err;
                     bool ok_submit = true;
-                    for (size_t ctx_idx = 0; ctx_idx < ticket.ctxs.size(); ++ctx_idx) {
-                        ariabc_pg::client_api_response node_resp;
-                        std::string node_err;
-                        const bool ok_node =
-                            submitter->wait_submit(ticket.ctxs[ctx_idx], node_resp, node_err);
-                        if (!ok_node) {
-                            if (ok_submit) {
-                                submit_err = node_err.empty()
-                                    ? std::string("io_failed")
-                                    : node_err;
+                    std::string batch_label = ticket.items.empty()
+                        ? std::string("det_pipeline_batch")
+                        : ticket.items.front().req_id;
+                    std::vector<std::pair<size_t, ariabc_pg::client_api_response>>
+                        broadcast_result_waits;
+                    if (opt.broadcast_to_all && !majority_wait_enabled) {
+                        // Keep the same prefix quorum caught up for every batch; a rotating
+                        // quorum can strand later deterministic sequences behind different
+                        // missing replicas.
+                        const size_t configured_accept_quorum =
+                            (opt.broadcast_accept_quorum > 0)
+                                ? static_cast<size_t>(opt.broadcast_accept_quorum)
+                                : static_cast<size_t>(std::max(1, majority));
+                        const size_t accept_quorum =
+                            std::min(ticket.ctxs.size(),
+                                     std::max<size_t>(1, configured_accept_quorum));
+                        const size_t configured_result_quorum =
+                            (opt.broadcast_result_quorum > 0)
+                                ? static_cast<size_t>(opt.broadcast_result_quorum)
+                                : 0;
+                        const size_t result_quorum =
+                            std::min(ticket.ctxs.size(), configured_result_quorum);
+                        const size_t required_quorum =
+                            std::min(ticket.ctxs.size(), std::max(accept_quorum, result_quorum));
+                        std::vector<uint8_t> collected(ticket.ctxs.size(), 0);
+                        std::vector<ariabc_pg::client_api_response> collected_resp(ticket.ctxs.size());
+                        size_t accepted = 0;
+                        while (accepted < required_quorum &&
+                               !stop.load(std::memory_order_relaxed)) {
+                            bool progressed = false;
+                            for (size_t ctx_idx = 0; ctx_idx < required_quorum; ++ctx_idx) {
+                                if (collected[ctx_idx]) continue;
+                                ariabc_pg::client_api_response node_resp;
+                                std::string node_err;
+                                bool done = false;
+                                const bool ok_node = submitter->try_collect_submit(
+                                    ticket.ctxs[ctx_idx], node_resp, node_err, done);
+                                if (!done) continue;
+                                progressed = true;
+                                collected[ctx_idx] = 1;
+                                if (!ok_node) {
+                                    submit_err = node_err.empty()
+                                        ? std::string("io_failed")
+                                        : node_err;
+                                    ok_submit = false;
+                                    break;
+                                }
+                                if (node_resp.status != 0) {
+                                    submit_err = node_resp.msg;
+                                    ok_submit = false;
+                                    break;
+                                }
+                                if (accepted == 0) {
+                                    resp = node_resp;
+                                }
+                                collected_resp[ctx_idx] = node_resp;
+                                ++accepted;
                             }
-                            ok_submit = false;
-                            continue;
-                        }
-                        if (node_resp.status != 0) {
-                            if (ok_submit) {
-                                submit_err = node_resp.msg;
+                            if (!ok_submit) break;
+                            if (accepted < required_quorum && !progressed) {
+                                std::this_thread::sleep_for(std::chrono::microseconds(100));
                             }
-                            ok_submit = false;
-                            continue;
                         }
-                        if (ctx_idx == 0) {
-                            resp = node_resp;
+                        if (ok_submit && accepted < required_quorum) {
+                            submit_err = "broadcast_required_accepts_not_reached";
+                            ok_submit = false;
+                        }
+                        if (ok_submit) {
+                            late_accept_group late;
+                            late.label = batch_label;
+                            for (size_t ctx_idx = required_quorum; ctx_idx < ticket.ctxs.size(); ++ctx_idx) {
+                                late_accept_group::item late_item;
+                                late_item.node_idx = ctx_idx;
+                                late_item.ctx = ticket.ctxs[ctx_idx];
+                                late.ctxs.push_back(std::move(late_item));
+                            }
+                            if (!late.ctxs.empty()) {
+                                late_accepts.push_back(std::move(late));
+                            }
+                            for (size_t ctx_idx = 0; ctx_idx < result_quorum; ++ctx_idx) {
+                                broadcast_result_waits.emplace_back(ctx_idx, collected_resp[ctx_idx]);
+                            }
+                            for (size_t ctx_idx = result_quorum;
+                                 ctx_idx < required_quorum;
+                                 ++ctx_idx) {
+                                enqueue_background_completion_wait(
+                                    ctx_idx,
+                                    collected_resp[ctx_idx],
+                                    batch_label + "/node" + std::to_string(ctx_idx));
+                            }
+                        }
+                    } else {
+                        for (size_t ctx_idx = 0; ctx_idx < ticket.ctxs.size(); ++ctx_idx) {
+                            ariabc_pg::client_api_response node_resp;
+                            std::string node_err;
+                            const bool ok_node =
+                                submitter->wait_submit(ticket.ctxs[ctx_idx], node_resp, node_err);
+                            if (!ok_node) {
+                                if (ok_submit) {
+                                    submit_err = node_err.empty()
+                                        ? std::string("io_failed")
+                                        : node_err;
+                                }
+                                ok_submit = false;
+                                continue;
+                            }
+                            if (node_resp.status != 0) {
+                                if (ok_submit) {
+                                    submit_err = node_resp.msg;
+                                }
+                                ok_submit = false;
+                                continue;
+                            }
+                            if (ctx_idx == 0) {
+                                resp = node_resp;
+                            }
                         }
                     }
                     const auto submit_done_at = std::chrono::steady_clock::now();
@@ -3240,12 +3521,20 @@ int main(int argc, char** argv) {
                         permanent_failures.fetch_add(1);
                         return false;
                     }
+                    for (const auto& result_wait : broadcast_result_waits) {
+                        if (!wait_direct_completion(
+                                result_wait.first,
+                                result_wait.second,
+                                batch_label + "/node" + std::to_string(result_wait.first))) {
+                            release_det_item_lanes(ticket.items);
+                            return false;
+                        }
+                    }
                     if (!opt.broadcast_to_all &&
-                        !wait_direct_completion(
+                        !wait_direct_completion_quorum(
                             ticket.submit_node_idx,
                             resp,
-                            ticket.items.empty() ? std::string("det_pipeline_batch")
-                                                 : ticket.items.front().req_id)) {
+                            batch_label)) {
                         release_det_item_lanes(ticket.items);
                         return false;
                     }
@@ -3301,8 +3590,8 @@ int main(int argc, char** argv) {
                             ctxs.reserve(nodes.size());
                             for (size_t node_idx = 0; node_idx < nodes.size(); ++node_idx) {
                                 std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> node_ctx;
-                                if (!submitter->submit_async_to_node_lane(
-                                        node_idx, 0, req, node_ctx, submit_err)) {
+                                if (!submitter->submit_async_to_node(
+                                        node_idx, req, node_ctx, submit_err)) {
                                     enqueue_ok = false;
                                     break;
                                 }
@@ -3350,6 +3639,10 @@ int main(int argc, char** argv) {
                             break;
                         }
                     }
+                    if (!drain_late_accepts(false)) {
+                        failed = true;
+                        break;
+                    }
 
                     if (majority_wait_enabled && next_idx < queries.size()) {
                         const size_t next_batch_slots = desired_det_batch_slots(next_idx);
@@ -3374,6 +3667,30 @@ int main(int argc, char** argv) {
                             failed = true;
                             break;
                         }
+                    }
+                }
+                if (!failed) {
+                    const bool report_client_accept_time =
+                        opt.broadcast_to_all &&
+                        !majority_wait_enabled &&
+                        opt.broadcast_drain_in_timed_run == 0;
+                    const auto before_final_accept_drain = std::chrono::steady_clock::now();
+                    if (report_client_accept_time) {
+                        client_completion_end = before_final_accept_drain;
+                        client_completion_end_set = true;
+                    }
+                    if (!drain_late_accepts(true)) {
+                        failed = true;
+                    }
+                    if (!failed && !drain_background_completions()) {
+                        failed = true;
+                    }
+                    if (report_client_accept_time) {
+                        const auto after_final_accept_drain = std::chrono::steady_clock::now();
+                        background_accept_drain_ns +=
+                            static_cast<uint64_t>(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    after_final_accept_drain - before_final_accept_drain).count());
                     }
                 }
             } else {
@@ -3447,7 +3764,10 @@ int main(int argc, char** argv) {
                     }
                     det_sent_count.fetch_add(batch_items.size(), std::memory_order_relaxed);
 
-                    if (!wait_direct_completion(
+                    const bool needs_direct_completion_wait =
+                        !(opt.broadcast_to_all && !majority_wait_enabled);
+                    if (needs_direct_completion_wait &&
+                        !wait_direct_completion_quorum(
                             submit_node_idx,
                             submit_resp,
                             batch_items.empty() ? std::string("det_batch")
@@ -3723,7 +4043,13 @@ int main(int argc, char** argv) {
         if (kafka_enabled) {
             consumer.set_busy_hint(false);
         }
+        const auto t_report_end =
+            (client_completion_end_set && permanent_failures.load() == 0)
+                ? client_completion_end
+                : t_end;
         const auto overall_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(t_report_end - t_start).count();
+        const auto overall_wall_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
         const auto wait_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3737,6 +4063,10 @@ int main(int argc, char** argv) {
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::nanoseconds(total_majority_wait_ns.load()))
                 .count();
+        const auto background_accept_drain_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::nanoseconds(background_accept_drain_ns))
+                .count();
 
         // Best-effort: give Kafka thread a moment to observe late replies for divergence detection.
         if (kafka_enabled) {
@@ -3744,9 +4074,11 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "overall time taken (millisec) = " << overall_ms << std::endl;
+        std::cout << " overall wall time including drains (millisec) = " << overall_wall_ms << std::endl;
         std::cout << " total wait time (ms) " << wait_ms << std::endl;
         std::cout << " submit time (ms) " << submit_ms << std::endl;
         std::cout << " majority wait time (ms) " << majority_wait_ms << std::endl;
+        std::cout << " background accept drain time (ms) " << background_accept_drain_ms << std::endl;
         std::cout << "duplicate_key_errors=" << duplicate_key_errors.load() << std::endl;
         std::cout << "divergence_count=" << divergence_count.load() << std::endl;
         std::cout << "permanent_failures=" << permanent_failures.load() << std::endl;
@@ -3787,6 +4119,10 @@ int main(int argc, char** argv) {
             << " completion_path=" << opt.completion_path
             << " validation_mode=" << opt.validation_mode
             << " broadcast_to_all=" << (opt.broadcast_to_all ? 1 : 0)
+            << " broadcast_accept_quorum=" << opt.broadcast_accept_quorum
+            << " broadcast_result_quorum=" << opt.broadcast_result_quorum
+            << " broadcast_drain_in_timed_run=" << opt.broadcast_drain_in_timed_run
+            << " direct_completion_quorum=" << opt.direct_completion_quorum
             << " submit_mode=" << (submitter ? "event" : "blocking")
             << " num_terminals=" << opt.num_terminals
             << " det_pipeline_depth=" << prof_det_pipeline_depth
@@ -3830,6 +4166,8 @@ int main(int argc, char** argv) {
             << " err_producev_ms=" << (ep.producev_ns / 1000000.0)
             << " err_poll_ms=" << (ep.poll_ns / 1000000.0)
             << " err_flush_ms=" << (ep.flush_ns / 1000000.0)
+            << " overall_wall_ms=" << overall_wall_ms
+            << " background_accept_drain_ms=" << background_accept_drain_ms
             << std::endl;
 
         exit_code = (permanent_failures.load() > 0) ? 1 : 0;

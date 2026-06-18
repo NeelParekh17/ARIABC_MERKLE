@@ -29,7 +29,7 @@
 #   5. Wait    — poll until Raft leader is elected (all 4 nodes respond)
 #   6. Test    — run test workload through gateway (det mode, direct or kafka_majority;
 #                --ordering-mode kafka-only bypasses Raft and broadcasts ordered
-#                requests to all replicas while still using Kafka majority)
+#                requests to all replicas while using Kafka completion/validation)
 #   7. Results — print TPS, check for divergence, collect logs
 #   8. Verify  — submit a barrier marker and compare Merkle roots/counts across nodes
 
@@ -102,6 +102,7 @@ SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
 ORDERING_MODE="${ORDERING_MODE:-${CLUSTER_ORDERING_MODE:-raft-kafka}}" # raft-kafka|kafka-only
+KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority}" # majority|async
 TEST_QUERIES="${TEST_QUERIES:-50}"  # number of test transactions
 WORKLOAD_FILE="${WORKLOAD_FILE:-$REPO_ROOT/scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt}"
 RESTORE_SQL="${RESTORE_SQL:-$REPO_ROOT/scripts/restore_usertable_small.sql}"
@@ -139,10 +140,16 @@ BCDB_DET_QUEUE_HIGH_WM="${BCDB_DET_QUEUE_HIGH_WM:-0}"  # >0 overrides determinis
 BCDB_DET_QUEUE_LOW_WM="${BCDB_DET_QUEUE_LOW_WM:-0}"    # >0 overrides deterministic server admission low watermark
 BCDB_FLOW_DEBUG="${BCDB_FLOW_DEBUG:-0}"      # 1=emit targeted worker/apply flow logs on cluster replicas
 ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-0}"  # 0=all replicas include full SQL results in Kafka
+ARIABC_RESULT_PUBLISH_REPLICA_LIMIT="${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT:-0}"  # 0=all replicas publish Kafka result records
 ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-0}"  # 0=Raft default election priority
+GATEWAY_BROADCAST_ACCEPT_QUORUM="${GATEWAY_BROADCAST_ACCEPT_QUORUM:-0}"  # 0=gateway legacy majority for broadcast accepts
+GATEWAY_BROADCAST_RESULT_QUORUM="${GATEWAY_BROADCAST_RESULT_QUORUM:-0}"  # 0=legacy accept-completion surface
+GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN:-1}"  # 1=legacy, 0=client-visible quorum time + post-run drain
+GATEWAY_DIRECT_COMPLETION_QUORUM="${GATEWAY_DIRECT_COMPLETION_QUORUM:-1}"  # non-broadcast direct completion apply quorum
 RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-2048}"
 BCDB_OVERWRITE_PROTECTION="${BCDB_OVERWRITE_PROTECTION:-0}"  # 0=off 1=Option-A 2=Option-B
 COLLECT_FINAL_SERVER_PROFILE="${COLLECT_FINAL_SERVER_PROFILE:-1}"
+SKIP_CLUSTER_LOGS="${SKIP_CLUSTER_LOGS:-0}"  # 1=skip fetching server/nuraft/postgres logs from cluster nodes
 
 usage() {
   cat <<'EOF'
@@ -163,9 +170,14 @@ Options:
   --no-kafka       Use direct completion (no Kafka majority wait)
   --ordering-mode M
                   Cluster ordering mode:
-                    raft-kafka  = normal Raft ordering + Kafka-majority completion
+                    raft-kafka  = normal Raft ordering + selected Kafka completion
                     kafka-only  = bypass Raft; gateway broadcasts preordered requests
-                                  to all replicas and still waits for Kafka majority
+                                  to all replicas using selected Kafka completion
+  --kafka-completion-mode M
+                  Kafka completion/validation mode:
+                    majority = wait per-request Kafka majority before completion
+                    async    = direct completion plus async Kafka hash validation;
+                               post-marker Merkle verification still checks all replicas
   --test-queries N Number of statements in the synthetic fallback workload (only used if --workload FILE is missing; default 50)
   --workload FILE  Workload SQL file (default: scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
   --restore-sql FILE
@@ -182,6 +194,20 @@ Options:
                   Gateway terminal count (default: 1)
   --conn-fanout N Gateway submit sockets per logical node in event submit mode
                   (default: 1)
+  --broadcast-accept-quorum N
+                  Broadcast async accept quorum before pipelining; 0=legacy
+                  majority. Late accepts are still drained before exit.
+  --broadcast-result-quorum N
+                  Broadcast direct-completion result quorum. 0 keeps the legacy
+                  accept-completion surface; N waits for N accepted replicas to
+                  execute each batch before client-visible completion.
+  --broadcast-drain-in-timed-run N
+                  Include final blocking late-replica accept drain in reported
+                  workload time: 0|1 (default: 1). With 0, the gateway reports
+                  client-visible accept-quorum time, then drains before exit.
+  --direct-completion-quorum N
+                  Non-broadcast direct completion apply quorum; default 1.
+                  The post-run Raft marker overrides this to all nodes.
   --det-pipeline-depth N
                   Per-terminal deterministic in-flight depth; 0 auto-splits
                   detWindow across terminals (default: 0)
@@ -237,6 +263,8 @@ Options:
                   the server default derived from dbConnPoolSize (default: 0)
   --full-result-replica-limit N
                   Emit full Kafka results only from replica ids <= N, hashes from all replicas; 0=all replicas (default: 0)
+  --result-publish-replica-limit N
+                  Publish Kafka result records only from replica ids <= N; 0=all replicas (default: 0)
   --preferred-leader-id N
                   Set higher Raft election priority for server id N; 0=default election (default: 0)
   --bcdb-overwrite-protection N
@@ -258,6 +286,7 @@ while [[ $# -gt 0 ]]; do
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
     --ordering-mode) ORDERING_MODE="${2:-raft-kafka}"; shift 2 ;;
+    --kafka-completion-mode) KAFKA_COMPLETION_MODE="${2:-majority}"; shift 2 ;;
     --test-queries) TEST_QUERIES="${2:-50}"; shift 2 ;;
     --workload)     WORKLOAD_FILE="${2:-}"; shift 2 ;;
     --restore-sql)  RESTORE_SQL="${2:-}"; shift 2 ;;
@@ -268,6 +297,10 @@ while [[ $# -gt 0 ]]; do
     --det-batch-size) DET_BATCH_SIZE="${2:-256}"; shift 2 ;;
     --num-terminals) NUM_TERMINALS="${2:-1}"; shift 2 ;;
     --conn-fanout) CONN_FANOUT="${2:-1}"; shift 2 ;;
+    --broadcast-accept-quorum) GATEWAY_BROADCAST_ACCEPT_QUORUM="${2:-0}"; shift 2 ;;
+    --broadcast-result-quorum) GATEWAY_BROADCAST_RESULT_QUORUM="${2:-0}"; shift 2 ;;
+    --broadcast-drain-in-timed-run) GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${2:-1}"; shift 2 ;;
+    --direct-completion-quorum) GATEWAY_DIRECT_COMPLETION_QUORUM="${2:-1}"; shift 2 ;;
     --det-pipeline-depth) DET_PIPELINE_DEPTH="${2:-0}"; shift 2 ;;
     --submit-mode)  SUBMIT_MODE="${2:-event}"; shift 2 ;;
     --pg-exec-mode) PG_EXEC_MODE="${2:-event}"; shift 2 ;;
@@ -293,6 +326,7 @@ while [[ $# -gt 0 ]]; do
     --bcdb-det-queue-high-wm) BCDB_DET_QUEUE_HIGH_WM="${2:-0}"; shift 2 ;;
     --bcdb-det-queue-low-wm) BCDB_DET_QUEUE_LOW_WM="${2:-0}"; shift 2 ;;
     --full-result-replica-limit) ARIABC_FULL_RESULT_REPLICA_LIMIT="${2:-0}"; shift 2 ;;
+    --result-publish-replica-limit) ARIABC_RESULT_PUBLISH_REPLICA_LIMIT="${2:-0}"; shift 2 ;;
     --preferred-leader-id) ARIABC_PREFERRED_LEADER_ID="${2:-0}"; shift 2 ;;
     --bcdb-overwrite-protection) BCDB_OVERWRITE_PROTECTION="${2:-0}"; shift 2 ;;
     --pool-size)    DB_CONN_POOL_SIZE="${2:-256}"; shift 2 ;;
@@ -318,9 +352,21 @@ case "$ORDERING_MODE" in
     ;;
 esac
 if [[ "$NO_KAFKA" -eq 1 && "$ORDERING_MODE" == "kafka-only" ]]; then
-  echo "ERROR: kafka-only ordering requires Kafka majority; do not combine --ordering-mode kafka-only with --no-kafka" >&2
+  echo "ERROR: kafka-only ordering requires Kafka; do not combine --ordering-mode kafka-only with --no-kafka" >&2
   exit 2
 fi
+case "$KAFKA_COMPLETION_MODE" in
+  majority|kafka-majority|kafka_majority|strict-majority|strict_majority)
+    KAFKA_COMPLETION_MODE="majority"
+    ;;
+  async|async-hash|async_hash|direct)
+    KAFKA_COMPLETION_MODE="async"
+    ;;
+  *)
+    echo "ERROR: --kafka-completion-mode must be majority or async (got $KAFKA_COMPLETION_MODE)" >&2
+    exit 2
+    ;;
+esac
 BYPASS_RAFT=0
 GATEWAY_BROADCAST_TO_ALL=0
 ORDERING_PATH="raft"
@@ -341,6 +387,22 @@ if [[ "$NUM_TERMINALS" -lt 1 || "$DET_PIPELINE_DEPTH" -lt 0 ]]; then
 fi
 if [[ "$CONN_FANOUT" -lt 1 ]]; then
   echo "ERROR: --conn-fanout must be >= 1" >&2
+  exit 2
+fi
+if [[ "$GATEWAY_BROADCAST_ACCEPT_QUORUM" -lt 0 ]]; then
+  echo "ERROR: --broadcast-accept-quorum must be >= 0" >&2
+  exit 2
+fi
+if [[ "$GATEWAY_BROADCAST_RESULT_QUORUM" -lt 0 ]]; then
+  echo "ERROR: --broadcast-result-quorum must be >= 0" >&2
+  exit 2
+fi
+if [[ "$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN" != "0" && "$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN" != "1" ]]; then
+  echo "ERROR: --broadcast-drain-in-timed-run must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$GATEWAY_DIRECT_COMPLETION_QUORUM" -lt 1 || "$GATEWAY_DIRECT_COMPLETION_QUORUM" -gt 4 ]]; then
+  echo "ERROR: --direct-completion-quorum must be between 1 and 4" >&2
   exit 2
 fi
 if [[ -z "$BCDB_WORKER_COUNT" ]]; then
@@ -389,6 +451,10 @@ if [[ "$BCDB_BLOCK_WAIT_WATERMARK" != "0" && "$BCDB_BLOCK_WAIT_WATERMARK" != "1"
 fi
 if [[ "$ARIABC_FULL_RESULT_REPLICA_LIMIT" -lt 0 || "$ARIABC_FULL_RESULT_REPLICA_LIMIT" -gt 4 ]]; then
   echo "ERROR: --full-result-replica-limit must be between 0 and 4" >&2
+  exit 2
+fi
+if [[ "$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT" -lt 0 || "$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT" -gt 4 ]]; then
+  echo "ERROR: --result-publish-replica-limit must be between 0 and 4" >&2
   exit 2
 fi
 if [[ "$ARIABC_PREFERRED_LEADER_ID" -lt 0 || "$ARIABC_PREFERRED_LEADER_ID" -gt 4 ]]; then
@@ -493,6 +559,10 @@ node_rsync_from() {
 collect_cluster_logs() {
   local label="${1:-Collecting server logs from all nodes...}"
   local log_rsync_timeout="${LOG_RSYNC_TIMEOUT:-20}"
+  if [[ "${SKIP_CLUSTER_LOGS:-0}" == "1" ]]; then
+    log "Skipping cluster log collection (SKIP_CLUSTER_LOGS=1)"
+    return 0
+  fi
   log "$label"
   for idx in "${!NODE_IDS[@]}"; do
     id="${NODE_IDS[$idx]}"
@@ -652,14 +722,23 @@ build_raft_members() {
 
 RAFT_MEMBERS="$(build_raft_members)"
 
-log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass_raft=$BYPASS_RAFT, gateway_broadcast_to_all=$GATEWAY_BROADCAST_TO_ALL)"
+if [[ "$NO_KAFKA" -eq 0 && "$KAFKA_COMPLETION_MODE" == "majority" ]]; then
+  RUN_META_COMPLETION_PATH="kafka_majority"
+else
+  RUN_META_COMPLETION_PATH="direct"
+fi
+log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass_raft=$BYPASS_RAFT, gateway_broadcast_to_all=$GATEWAY_BROADCAST_TO_ALL, kafka_completion_mode=$KAFKA_COMPLETION_MODE)"
 {
   printf 'ordering_mode=%s\n' "$ORDERING_MODE"
   printf 'ordering_path=%s\n' "$ORDERING_PATH"
   printf 'cluster_series=%s\n' "$CLUSTER_SERIES"
   printf 'bypass_raft=%s\n' "$BYPASS_RAFT"
   printf 'gateway_broadcast_to_all=%s\n' "$GATEWAY_BROADCAST_TO_ALL"
-  printf 'completion_path=%s\n' "$([[ "$NO_KAFKA" -eq 0 ]] && echo kafka_majority || echo direct)"
+  printf 'gateway_broadcast_accept_quorum=%s\n' "$GATEWAY_BROADCAST_ACCEPT_QUORUM"
+  printf 'gateway_broadcast_result_quorum=%s\n' "$GATEWAY_BROADCAST_RESULT_QUORUM"
+  printf 'gateway_broadcast_drain_in_timed_run=%s\n' "$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN"
+  printf 'completion_path=%s\n' "$RUN_META_COMPLETION_PATH"
+  printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
   printf 'kafka_bootstrap=%s\n' "$KAFKA_BOOTSTRAP"
   printf 'result_topic=%s\n' "$KAFKA_RESULT_TOPIC"
 } > "$LOG_DIR/run_meta.env"
@@ -786,7 +865,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
     if [[ -f "$RDKAFKA_LOCAL/lib/librdkafka.so" && -f "$RDKAFKA_LOCAL/include/librdkafka/rdkafka.h" ]]; then
       LOCAL_KAFKA_CMAKE_OPT="-DRDKAFKA_INCLUDE_DIR=$RDKAFKA_LOCAL/include -DRDKAFKA_LIBRARY=$RDKAFKA_LOCAL/lib/librdkafka.so"
     else
-      die "Kafka majority requested but local $RDKAFKA_LOCAL is missing; rerun without --skip-rdkafka-setup or install rdkafka_local"
+      die "Kafka requested but local $RDKAFKA_LOCAL is missing; rerun without --skip-rdkafka-setup or install rdkafka_local"
     fi
   fi
 
@@ -876,11 +955,11 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
     RDKAFKA_DESKTOP="/home/neel/Desktop/rdkafka_local"
     KAFKA_CMAKE_OPT="-DKAFKA_OPTIONAL=ON"
     if node_ssh "$idx" "test -f $RDKAFKA_DESKTOP/lib/librdkafka.so && test -f $RDKAFKA_DESKTOP/include/librdkafka/rdkafka.h" 2>/dev/null; then
-      log "  Found rdkafka_local on $name — building WITH Kafka majority support"
+      log "  Found rdkafka_local on $name — building WITH Kafka support"
       KAFKA_CMAKE_OPT="-DRDKAFKA_INCLUDE_DIR=$RDKAFKA_DESKTOP/include -DRDKAFKA_LIBRARY=$RDKAFKA_DESKTOP/lib/librdkafka.so"
     else
       if [[ "$NO_KAFKA" -eq 0 ]]; then
-        die "$RDKAFKA_DESKTOP not found on $name; Kafka majority cannot be trusted with stub binaries. Rerun without --skip-rdkafka-setup."
+        die "$RDKAFKA_DESKTOP not found on $name; Kafka cannot be trusted with stub binaries. Rerun without --skip-rdkafka-setup."
       fi
       log "  WARNING: $RDKAFKA_DESKTOP not found on $name — building with stubs for --no-kafka mode"
     fi
@@ -1318,7 +1397,24 @@ REMOTE_LOG_DIR="/tmp/ariabc_cluster"
 KAFKA_ARGS=""
 [[ "$NO_KAFKA" -eq 0 ]] && KAFKA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC"
 
-for idx in "${!NODE_IDS[@]}"; do
+START_ORDER=("${!NODE_IDS[@]}")
+if [[ "$ARIABC_PREFERRED_LEADER_ID" -gt 0 ]]; then
+  START_ORDER=()
+  for idx in "${!NODE_IDS[@]}"; do
+    if [[ "${NODE_IDS[$idx]}" == "$ARIABC_PREFERRED_LEADER_ID" ]]; then
+      START_ORDER+=("$idx")
+    fi
+  done
+  for idx in "${!NODE_IDS[@]}"; do
+    if [[ "${NODE_IDS[$idx]}" != "$ARIABC_PREFERRED_LEADER_ID" ]]; then
+      START_ORDER+=("$idx")
+    fi
+  done
+fi
+log "  Server start order indices: ${START_ORDER[*]} (preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID)"
+
+for start_pos in "${!START_ORDER[@]}"; do
+  idx="${START_ORDER[$start_pos]}"
   id="${NODE_IDS[$idx]}"
   ip="${NODE_IPS[$idx]}"
   name="${NODE_NAMES[$idx]}"
@@ -1328,7 +1424,7 @@ for idx in "${!NODE_IDS[@]}"; do
 
   log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port orderingMode=$ORDERING_MODE"
   log "    binary: $srv_bin"
-  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbDetQueueHighWm=$BCDB_DET_QUEUE_HIGH_WM bcdbDetQueueLowWm=$BCDB_DET_QUEUE_LOW_WM bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbDetQueueHighWm=$BCDB_DET_QUEUE_HIGH_WM bcdbDetQueueLowWm=$BCDB_DET_QUEUE_LOW_WM bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT resultPublishReplicaLimit=$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
 
@@ -1347,6 +1443,7 @@ for idx in "${!NODE_IDS[@]}"; do
 	    export ARIABC_DET_PARTIAL_BLOCK_MAX_WAIT_US='${DET_PARTIAL_BLOCK_MAX_WAIT_US}'
 	    export ARIABC_DET_BLOCK_SKIP_READONLY='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
+	    export ARIABC_RESULT_PUBLISH_REPLICA_LIMIT='${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT}'
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
 	    export BCDB_DT_COMPLETION_ONLY_SKIP_READS='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export BCDB_FLOW_DEBUG='${BCDB_FLOW_DEBUG}'
@@ -1370,6 +1467,9 @@ for idx in "${!NODE_IDS[@]}"; do
       >'$REMOTE_SRV_LOG' 2>&1 &
     echo \"started pid=\$!\"
   " 2>&1 | sed "s/^/  [$name] /"
+  if [[ "$ARIABC_PREFERRED_LEADER_ID" -gt 0 && "$start_pos" -eq 0 ]]; then
+    sleep 2
+  fi
 done
 
 log "  All 4 server launch commands sent"
@@ -1508,18 +1608,29 @@ fi
 
 GW_EXTRA_ARGS=""
 if [[ "$NO_KAFKA" -eq 0 ]]; then
-  GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes 4"
+  if [[ "$KAFKA_COMPLETION_MODE" == "majority" ]]; then
+    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes 4"
+  else
+    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 0 --completionPath direct --validationMode async_hash --totalNodes 4 --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
+  fi
   if [[ "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
     GW_EXTRA_ARGS="$GW_EXTRA_ARGS --broadcastToAll 1"
+    if [[ "$GATEWAY_BROADCAST_ACCEPT_QUORUM" -gt 0 ]]; then
+      GW_EXTRA_ARGS="$GW_EXTRA_ARGS --broadcastAcceptQuorum $GATEWAY_BROADCAST_ACCEPT_QUORUM"
+    fi
+    if [[ "$GATEWAY_BROADCAST_RESULT_QUORUM" -gt 0 ]]; then
+      GW_EXTRA_ARGS="$GW_EXTRA_ARGS --broadcastResultQuorum $GATEWAY_BROADCAST_RESULT_QUORUM"
+    fi
+    GW_EXTRA_ARGS="$GW_EXTRA_ARGS --broadcastDrainInTimedRun $GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN"
   fi
 else
-  GW_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes 4"
+  GW_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes 4 --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
 fi
 
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
-log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL"
-log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS connFanout=$CONN_FANOUT detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM"
+log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS connFanout=$CONN_FANOUT broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
 START_S="$(date +%s)"
 
@@ -1696,6 +1807,22 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
 
   MARKER_LOG="$LOG_DIR/post_verify_marker_gateway.log"
   log "  Submitting marker key=$VERIFY_MARKER_KEY detStartSeq=$MARKER_SEQ reqIdOffset=$MARKER_REQ"
+  MARKER_EXTRA_ARGS=()
+  if [[ "$BYPASS_RAFT" -eq 1 && "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
+    # The measured workload may use client-visible accept quorum, but the
+    # correctness marker is a barrier: every replica must accept and execute it
+    # so all prior deterministic sequence numbers are drained before Merkle.
+    MARKER_EXTRA_ARGS+=(--broadcastAcceptQuorum 4)
+    MARKER_EXTRA_ARGS+=(--broadcastResultQuorum 4)
+    MARKER_EXTRA_ARGS+=(--broadcastDrainInTimedRun 1)
+    log "  Marker barrier override: broadcastAcceptQuorum=4 broadcastResultQuorum=4 broadcastDrainInTimedRun=1"
+  elif [[ "$BYPASS_RAFT" -eq 0 && "$KAFKA_COMPLETION_MODE" == "async" ]]; then
+    # Normal raft-kafka workload completion waits for the submit node only.
+    # The marker is the correctness barrier, so require every replica to apply
+    # the marker log entry before post-run Merkle/root checks.
+    MARKER_EXTRA_ARGS+=(--directCompletionQuorum 4)
+    log "  Marker barrier override: directCompletionQuorum=4"
+  fi
   if ! "$GW_BIN" \
     --nodes "$GW_NODES" \
     --queryFrom "$MARKER_FILE" \
@@ -1710,6 +1837,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     --clientId "cluster-ycsb-marker" \
     --numTerminals 1 \
     $GW_EXTRA_ARGS \
+    "${MARKER_EXTRA_ARGS[@]}" \
     2>&1 | tee "$MARKER_LOG"; then
     log "WARNING: Marker gateway exited non-zero — check $MARKER_LOG"
   fi

@@ -112,6 +112,7 @@ def _parse_gateway_log(path: Path) -> dict[str, Any]:
     divergence = _as_int(first(r"^divergence_count=([0-9]+)"))
     permanent = _as_int(first(r"^permanent_failures=([0-9]+)"))
     completion_path = first(r"completion_path=([A-Za-z0-9_]+)")
+    validation_mode = first(r"validation_mode=([A-Za-z0-9_]+)")
     wait_majority = _as_int(first(r"waitMajority=([0-9]+)"))
     broadcast_to_all = _as_int(first(r"broadcastToAll=([0-9]+)"))
     if broadcast_to_all is None:
@@ -126,10 +127,8 @@ def _parse_gateway_log(path: Path) -> dict[str, Any]:
         and progress_completed is not None
         and progress_completed == loaded
     )
-    valid = (
-        completion_path == "kafka_majority"
-        and wait_majority == 1
-        and divergence == 0
+    correctly_completed = (
+        divergence == 0
         and permanent == 0
         and tps is not None
         and fully_completed
@@ -147,10 +146,11 @@ def _parse_gateway_log(path: Path) -> dict[str, Any]:
         "divergence_count": divergence,
         "permanent_failures": permanent,
         "completion_path": completion_path,
+        "validation_mode": validation_mode,
         "wait_majority": wait_majority,
         "broadcast_to_all": broadcast_to_all,
         "tps": tps,
-        "valid": valid,
+        "valid": correctly_completed,
         "fully_completed": fully_completed,
     }
 
@@ -258,14 +258,32 @@ def _load_full_rows(manifest: Path, *, workload: str) -> list[dict[str, str]]:
         effective_inflight = _as_int(m.get("effective_inflight"))
         if effective_inflight is None and num_terminals is not None and det_pipeline_depth is not None:
             effective_inflight = num_terminals * max(det_pipeline_depth, 1)
-        valid = parsed["valid"] and exit_ok
+        notes = m.get("notes", "")
+        majority_completion = (
+            parsed["completion_path"] == "kafka_majority"
+            and parsed["wait_majority"] == 1
+        )
+        async_kafka_completion = (
+            parsed["completion_path"] == "direct"
+            and parsed["wait_majority"] in (0, None)
+            and parsed["validation_mode"] == "async_hash"
+            and (
+                "kafka_completion_mode=async" in notes
+                or "trusted_gate=async_kafka_post_marker_merkle" in notes
+            )
+        )
+        completion_valid = majority_completion or async_kafka_completion
+        valid = parsed["valid"] and exit_ok and completion_valid
         invalid_reasons: list[str] = []
         if not exit_ok:
             invalid_reasons.append(f"runner_exit_{m.get('exit_code') or 'missing'}")
-        if parsed["completion_path"] != "kafka_majority":
-            invalid_reasons.append("not_kafka_majority")
-        if parsed["wait_majority"] != 1:
-            invalid_reasons.append("wait_majority_not_1")
+        if not completion_valid:
+            if parsed["completion_path"] == "kafka_majority" and parsed["wait_majority"] != 1:
+                invalid_reasons.append("kafka_majority_without_wait")
+            elif parsed["completion_path"] == "direct":
+                invalid_reasons.append("direct_without_async_kafka_merkle_gate")
+            else:
+                invalid_reasons.append(f"unsupported_completion_{parsed['completion_path'] or 'missing'}")
         if parsed["divergence_count"] not in (0, None):
             invalid_reasons.append(f"divergence_{parsed['divergence_count']}")
         if parsed["permanent_failures"] not in (0, None):
@@ -306,14 +324,14 @@ def _load_full_rows(manifest: Path, *, workload: str) -> list[dict[str, str]]:
                 "ordering_mode": ordering_mode,
                 "ordering_path": ordering_path,
                 "completion_path": str(parsed["completion_path"]),
-                "wait_majority": str(parsed["wait_majority"] or ""),
+                "wait_majority": str(parsed["wait_majority"] if parsed["wait_majority"] is not None else ""),
                 "server_bypass_raft": server_bypass_raft,
                 "gateway_broadcast_to_all": gateway_broadcast_to_all,
                 "divergence_count": str(parsed["divergence_count"] if parsed["divergence_count"] is not None else ""),
                 "permanent_failures": str(parsed["permanent_failures"] if parsed["permanent_failures"] is not None else ""),
                 "artifact_dir": str(artifact),
                 "invalid_reason": ";".join(invalid_reasons),
-                "notes": m.get("notes", ""),
+                "notes": notes,
             }
         )
     return out
@@ -794,49 +812,33 @@ def _plot(summary: list[dict[str, str]],
             "single_node_det": "s",
         },
     )
-    # Primary comparison: every series uses the same gateway-driven load
-    # profile (numTerminals = x-axis, same per-terminal pipeline depth, same
-    # det-batch). Single-node-gateway-direct is the baseline (no replication);
-    # cluster_kafka adds broadcast + Kafka result agreement; cluster_raft_kafka
-    # additionally adds the Raft consensus round per batch. Expected ordering:
-    #   single_node_gateway_direct >= cluster_kafka >= cluster_raft_kafka
-    # The python-client single_node_det line is plotted as a faded dashed
-    # reference for the "direct psycopg, no gateway" access pattern only — it
-    # is not apples-to-apples with the cluster series (different parallelism
-    # surface) and should not drive interpretation of cluster overhead.
+    # Headline comparison: keep gateway-direct in the CSV diagnostics, but do
+    # not plot it by default. The visible story is the four user-facing systems:
+    # PG, DET, Kafka cluster, and Raft+Kafka cluster.
     det_vs_cluster = _plot_series(
         summary,
         out_dir,
         workload,
         x_label,
         filename="ycsb_skew_det_vs_cluster.png",
-        title="YCSB skew: single-node gateway-direct vs replicated cluster paths",
+        title="YCSB skew: single-node DET vs replicated cluster paths",
         labels={
-            "single_node_gateway_direct": f"Single-node gateway-direct ({machine}) — baseline",
+            "single_node_det": f"Single-node DET ({machine})",
             "cluster_kafka": "Cluster + Kafka only (broadcast, no Raft)",
             "cluster_raft_kafka": "Cluster + Raft + Kafka (full system)",
             "full_system_kafka_raft_bcdb": "Cluster + Raft + Kafka (full system)",
-            "single_node_det": f"Single-node DET python client ({machine}) — reference",
         },
         colors={
-            "single_node_gateway_direct": "#16a34a",
+            "single_node_det": "#16a34a",
             "cluster_kafka": "#2563eb",
             "cluster_raft_kafka": "#dc2626",
             "full_system_kafka_raft_bcdb": "#dc2626",
-            "single_node_det": "#6b7280",
         },
         markers={
-            "single_node_gateway_direct": "D",
+            "single_node_det": "s",
             "cluster_kafka": "o",
             "cluster_raft_kafka": "^",
             "full_system_kafka_raft_bcdb": "^",
-            "single_node_det": "s",
-        },
-        linestyles={
-            "single_node_det": "--",
-        },
-        alphas={
-            "single_node_det": 0.55,
         },
     )
     all_systems = _plot_series(
@@ -845,11 +847,10 @@ def _plot(summary: list[dict[str, str]],
         workload,
         x_label,
         filename="ycsb_skew_all_systems.png",
-        title="YCSB skew: all measured systems",
+        title="YCSB skew: PG, DET, Kafka, and Raft+Kafka",
         labels={
             "single_node_pg": f"Single-node PG ({machine})",
             "single_node_det": f"Single-node DET ({machine})",
-            "single_node_gateway_direct": f"Direct gateway ({machine})",
             "cluster_kafka": "Kafka cluster",
             "cluster_raft_kafka": "Raft + Kafka cluster",
             "full_system_kafka_raft_bcdb": "Raft + Kafka cluster",
@@ -857,7 +858,6 @@ def _plot(summary: list[dict[str, str]],
         colors={
             "single_node_pg": "#2563eb",
             "single_node_det": "#16a34a",
-            "single_node_gateway_direct": "#0891b2",
             "cluster_kafka": "#f59e0b",
             "cluster_raft_kafka": "#dc2626",
             "full_system_kafka_raft_bcdb": "#dc2626",
@@ -865,7 +865,6 @@ def _plot(summary: list[dict[str, str]],
         markers={
             "single_node_pg": "o",
             "single_node_det": "s",
-            "single_node_gateway_direct": "D",
             "cluster_kafka": "P",
             "cluster_raft_kafka": "^",
             "full_system_kafka_raft_bcdb": "^",
