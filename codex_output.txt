@@ -1,0 +1,147 @@
+I’m going to treat this as a fresh bottleneck investigation, starting from the two artifact folders you named and separating three things carefully: single-node execution time, 4-node per-replica execution time, and Raft/ordering time per block. I’ll avoid multi-lane det submission entirely.
+
+
+Explored 2 searches, 1 list, ran 1 command
+The first pass shows something important already: the 4-node “full-system” run is not just each node doing the same work as the single-node benchmark. The single-node artifact is the Python workload driving local Postgres/BCDB with many client threads; the full-system artifact is 83 Raft blocks through one deterministic gateway stream, then each server calls BCDB block execution. I’m extracting matched metrics now so we can prove exactly how much is execution, Raft submit, queueing, and replica skew.
+
+
+Ran 3 commands
+Context automatically compacted
+I’m going to pick this up from the artifact-backed path: first I’ll quantify the full-run vs single-node gap across all runs, then I’ll test the most promising non-multilane lever: fewer Raft commits per 20k tx by increasing deterministic batch size while keeping BCDB workers fixed.
+
+
+Explored 1 search, 2 lists, ran 1 command
+The first pass already confirms the run is not doing size-1 BCDB blocks: the full-system server logs report about 247 tx/block for a 256 batch. The useful question is now whether we can lower the block count without raising worker pressure, because that attacks the suspected Raft-per-block tax without touching multilane ordering.
+
+
+Explored 5 files, 2 searches, 1 list, ran 4 commands
+The full-run evidence is tight: new-node is the 3rd-fastest node in all 27/27 runs, median pg_query_ms=3728.7, so majority cannot finish near 2s unless that node’s per-block execution improves. Single-node 10.129.148.248 is genuinely ~1.72s in local DET, but that is not the same execution model as 83 replicated deterministic blocks.
+
+
+Explored 5 files, 1 search
+I found an important implementation detail: --detBatchSize controls the Raft request batch, but the server’s BCDB block fast path cuts blocks at bcdb_block_size, which is currently --pool-size. So detBatchSize=512,pool=256 should reduce Raft commits while still executing 256-tx BCDB blocks, which is exactly the safe lever to test before blaming the network.
+
+
+Explored 1 search, ran 1 command
+No benchmark process is currently active. I’m going to run a single trusted probe with detBatchSize=512,pool=256; this does not add lanes or change BCDB worker concurrency, it only checks whether reducing Raft commits can close part of the gap.
+
+Ran env POLL_COUNT=120000 ./scripts/distributed/run_4node_raft_cluster.sh --skip-rdkafka-setup --test-queries 20512 --pool-size 256 --det-batch-size 512 --det-window 4096 --num-terminals 1 --bcdb-block-profile 1
+The run is in the build/sync phase now. One thing to watch: the runner rewrites BCDB_RESULT_RING_CAPACITY to 1024 during this path; that is okay for pool=256, but I’ll restore the source header afterward because the comment says the intended max-safe value is 2048.
+
+Still in remote build/sync, which is expected because the script keeps all machines on the same binary before it measures. I’m letting this one complete rather than interpreting partial logs; the correctness gate is the real result here.
+
+That probe finished cleanly but did not improve throughput: 3903 ms, about 5255 TPS, with Merkle PASS and zero divergence. So larger Raft batch alone is not the missing 1.7s; now I’m reading the server and BCDB block profiles from that run to see whether it reduced commit count but increased queue/block timing somewhere else.
+
+
+Explored 1 file, 3 searches, ran 1 command
+The 512 probe confirms the real bottleneck is not Kafka and not result-slot polling. For new-node, PROFILE_BCDB_BLOCK sums to 3675 ms; wait_block_ms alone is 3420 ms. Slot waits are basically zero. That means the slow part is workers making the block’s last tx committed, inside BCDB/Postgres execution, not gateway aggregation.
+
+
+Explored 2 files, 1 search, ran 1 command
+The BCDB profile numbers show the per-block cost sits almost entirely in wait_block_ms, which maps to bcdb_wait_until_committed(last_tx). To break that open, I’m going one level deeper with BCDB_PHASE_TRACE=1 on the trusted 256/256/4096 baseline; that should tell us whether time is in serial gate, apply, finish/commit, or queueing.
+
+Ran env POLL_COUNT=120000 ./scripts/distributed/run_4node_raft_cluster.sh --skip-sync --skip-build --skip-rdkafka-setup --test-queries 20512 --pool-size 256 --det-batch-size 256 --det-window 4096 --num-terminals 1 --bcdb-block-profile 1 --bcdb-phase-trace 1
+The phase-trace run is now in the workload itself. Since phase tracing can add overhead, I’ll use it for attribution, not as a headline TPS number.
+
+That trace run is invalid: permanent_failures=1 and timeout at the first window, so I’m not using it for performance claims. It did expose something useful, though: enabling BCDB_PHASE_TRACE changed behavior enough to produce early hash mismatch/timeout, so the tracing path itself is too intrusive or unsafe for the full 20k trusted run. I’m cleaning up and switching back to lower-overhead evidence.
+
+
+Explored 3 files, 2 searches, 1 list, ran 1 command
+There is a second important finding from the invalid trace run: three nodes fell back from block mode, and the gateway saw empty-result hashes from a majority. So BCDB_PHASE_TRACE is not just “slow”; it changes/perturbs the block-submit path. I’ll leave it disabled for trusted runs and use the existing low-overhead block profile plus source-level phase reasoning.
+
+
+Explored 3 files, 1 search
+I’m checking one possible code-level trap now: the block-submit path manufactures BCDB tx keys as base + block_id * 1024 + slot. If BCDB’s commit watermark expects contiguous tx ids, any artificial gaps would force waits/fallbacks or extra bookkeeping. The fact that runs pass means there is probably a reset/base detail, but this is exactly the kind of “software issue, not network” place worth proving.
+
+
+Explored 3 files, 1 search
+The artificial key gap is not the issue: parse_block_with_txs() ignores the JSON hash for the BCDB numeric tx_id and assigns contiguous ids from sentinel->num_tx_sub. The more important difference is now clear: the full-system path waits at a hard block boundary every ~256 tx (bcdb_wait_until_committed(last_tx)), while the single-node Python DET benchmark keeps a continuous stream of requests in flight across many client threads.
+
+
+Explored 1 search
+I found the likely software gap: ARIABC_DET_BLOCK_PIPELINE exists in the runner, but the server code does not consume it. So the system has a named knob for “logical BCDB blocks per backend submit call,” yet the executor still submits exactly one BCDB block and waits for it before feeding the next one. That is a real implementation gap and it matches the 4s-vs-2s shape.
+
+
+Explored 1 file, 3 searches
+A simpler, order-preserving implementation path is available: instead of multiple PG connections or multiple lanes, submit a larger single BCDB block to one backend call. parse_block_with_txs() does not require block->num_tx == bcdb_worker_count; it assigns contiguous tx ids and the worker queue can hold more txs than workers. That can remove the 83 hard wait boundaries without introducing parallel Raft lanes. I’m checking ring-slot safety before patching it.
+
+
+Explored 3 files
+Context automatically compacted
+I’m going to pick up from the concrete software gap we found: the distributed runner already exposes --det-block-pipeline, but the server executor does not consume ARIABC_DET_BLOCK_PIPELINE at all. I’ll patch that as an order-preserving larger backend block submit, not multi-lane execution.
+
+
+Explored 2 searches, ran 1 command
+The quick read confirms the runner default is still shrinking the result ring back to 1024, and the executor has a 2 ms partial-block gather window but no pipeline parsing. I’m going to make the pipeline knob real, and restore the ring default to 2048 so larger single-submit blocks have room.
+
+
+Explored 3 files
+This edit keeps one PG connection and one backend call per submitted group. The important bit is that it removes the artificial 256-tx wait boundary when the queue already has a larger ordered deterministic run available.
+
+
+Edited 3 files
+The patch is in. Before burning a full cluster run, I’m doing a small sanity check of the changed code and then I’ll run the trusted 4-node path with detBatchSize=512 and det-block-pipeline=2, because that should produce 512-tx backend submits without changing deterministic lanes.
+
+
+Explored 1 search, ran 2 commands
+The run has started and is doing the full cleanup/build/sync path, not a skip-build shortcut. I’m watching for two things first: whether the logs show det_block_batch active ... size=512, and whether the result ring readback is really 2048 on all nodes.
+
+The code built cleanly with only the repo’s existing write() warnings. The runner also confirmed the local install is being rebuilt with BCDB_RESULT_RING_CAPACITY=2048, so the larger submit blocks should have the result-ring headroom we need.
+
+Good sign: user4 and new-node rebuilt, and admin123 readback already says bcdb_result_ring_slots=2048. I’m still waiting for the benchmark phase, where we’ll learn whether the executor actually emits 512-size deterministic blocks and whether that moves the third-fastest replica.
+
+This first pipeline run is valid but slower, so the change did not solve it by itself. I’m pulling the block-size and BCDB phase profile now; the key question is whether it truly submitted 512-size backend blocks or if the 2 ms gather window still flushed at 256.
+
+
+Explored 2 files, 1 search, ran 1 command
+The 512-submit optimization is real, but it is not the win: each node ran 40 large 512-tx blocks, and the majority node still spent about 3812 ms inside BCDB block calls. That falsifies my “too many 256 wait boundaries” hypothesis; the bottleneck is inside worker execution/wait for the block itself, not just the number of submit calls. Next I’m comparing that against the single-node artifact path to see exactly what execution mode got the 2s number.
+
+
+Explored 9 files, 6 searches, 1 list, ran 1 command
+The single-node “10k” artifact is now clearly a different BCDB path: Python opens N PostgreSQL sessions and sends s <seq> SQL directly, which calls safedb_txdt() in the client backend. The distributed full-system path sends one SQL function call, bcdb_block_submit_results(json), which queues work to BCDB workers and waits. So “same machine can do 2s” is true, but it is not the same execution path. I’m checking whether the distributed executor intentionally disables its connection-pool path for deterministic mode, because that would explain why pool-size tuning never moves the number.
+
+
+Explored 2 files, 2 searches
+Since phase tracing at 20k was too invasive, I’m going to use it only as a small diagnostic run. It won’t be a throughput claim; it’s just to split the BCDB worker time into parse/portal/gate/conflict/apply/finish so we stop guessing inside the block.
+
+Ran env POLL_COUNT=120000 ./scripts/distributed/run_4node_raft_cluster.sh --skip-sync --skip-build --skip-rdkafka-setup --test-queries 2048 --pool-size 256 --det-batch-size 256 --det-window 1024 --num-terminals 1 --det-block-pipeline 1 --bcdb-block-profile 1 --bcdb-phase-trace 1
+Small diagnostic did not actually truncate the workload; the runner still loaded 20,513 queries. I’ll let this finish if it stays healthy, but if phase tracing causes another timeout I’ll treat that as diagnostic-only noise and not as a performance result.
+
+The phase-trace run is invalid exactly as expected: it produced ERROR null result / divergence and cannot be used for speed. More interestingly, it also shows the existing tracing path itself can break the block-submit path, so I’m not going to use BCDB_PHASE_TRACE for claims. I’m going to rerun the trusted baseline with tracing off and the new code at pipeline=1 to make sure the default path is still clean before any more experiments.
+
+Ran env POLL_COUNT=120000 ./scripts/distributed/run_4node_raft_cluster.sh --skip-sync --skip-build --skip-rdkafka-setup --test-queries 20512 --pool-size 256 --det-batch-size 256 --det-window 4096 --num-terminals 1 --det-block-pipeline 1 --bcdb-block-profile 1
+The default rerun is using bcdb_result_ring_slots=2048 on every node and tracing is off. This is the sanity run: if it passes, then the active bottleneck evidence remains valid and the new pipeline code is harmless when disabled.
+
+
+Explored 3 files, ran 2 commands
+The trusted baseline still passes with the patch disabled: 3981 ms, ~5152 TPS, zero divergence/failures, Merkle PASS. That preserves the current honest ceiling. The next plausible software lever is not bigger blocks; bigger blocks worsened. I’m going to test whether the 256-worker BCDB queue is actually overprovisioned for this workload by trying a smaller worker/block size. If 128/128 is faster, the gap is worker scheduling pressure, not network.
+
+Ran env POLL_COUNT=120000 ./scripts/distributed/run_4node_raft_cluster.sh --skip-sync --skip-build --skip-rdkafka-setup --test-queries 20512 --pool-size 128 --det-batch-size 128 --det-window 4096 --num-terminals 1 --det-block-pipeline 1 --bcdb-block-profile 1
+The 128-worker test is now running. It did reconfigure bcdb_worker_count=128 everywhere, so this is a real worker-pressure test rather than only a gateway knob change.
+
+128 workers is valid but worse: 4284 ms, ~4788 TPS. That points away from “too many workers” and back toward the 256-worker/block setup being the best of the safe queue path. I’m going the other direction once with 512 workers and 512-tx batches; if that is worse too, we will have bracketed the worker-count space around the current best.
+
+
+Explored 1 search, ran 1 command
+512 workers was valid but much worse: 5766 ms, ~3557 TPS. So the safe queue path is bracketed: 128 is slower, 512 is much slower, 256 remains the best trusted point. I’m going to put the cluster back on 256 with one final normal run so we don’t leave the machines in the bad 512-worker state.
+
+Ran env POLL_COUNT=120000 ./scripts/distributed/run_4node_raft_cluster.sh --skip-sync --skip-build --skip-rdkafka-setup --pool-size 256 --det-batch-size 256 --det-window 4096 --num-terminals 1 --det-block-pipeline 1 --bcdb-block-profile 1
+I did the iteration and the evidence is pretty clear now: this is not fixed by thread/config tuning, and I do not have proof that network is the hard bottleneck. The hard gap is still the BCDB/Postgres execution path used by the full system.
+
+I implemented a real --det-block-pipeline path in pg_executor.cxx, and restored the BCDB result ring default to 2048 in globals.h and run_4node_raft_cluster.sh. This is single-lane/order-preserving, not multi-lane det submission. But when tested, bigger backend blocks did not help.
+
+Measured runs:
+
+256/256/4096, final restored trusted baseline: 3858 ms, ~5317 TPS, Merkle PASS
+Artifact: scripts/bench_full_results/cluster4_20260430_103237
+
+512 detBatch + det-block-pipeline=2: 4054 ms, ~5059 TPS, Merkle PASS
+It really submitted 512-tx backend blocks, but it was slower.
+
+128 workers / 128 batch: 4284 ms, ~4788 TPS, Merkle PASS
+
+512 workers / 512 batch: 5766 ms, ~3557 TPS, Merkle PASS
+
+So 256 workers/256 block remains the best trusted point from this pass. The single-node 10k result is not the same execution path: it uses many direct PostgreSQL client sessions sending s <seq> SQL, which calls safedb_txdt() directly in backend sessions. The full distributed path uses one ordered block-submit SQL call, bcdb_block_submit_results(json), queues into BCDB workers, waits for the block, then publishes Kafka results.
+
+That means the path to 10k is not “more threads” or “larger blocks.” To make majority replicas finish in ~2s, the full-system execution path has to become closer to the single-node direct backend path, or the BCDB queued worker path needs a real internal execution optimization. I did not implement multi-lane det submission, per your instruction. The current safe software conclusion is: the bottleneck is the queued BCDB block execution path, not Kafka, not basic Raft submit count, and not result-ring size.

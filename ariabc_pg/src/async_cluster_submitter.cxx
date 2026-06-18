@@ -239,6 +239,31 @@ bool async_cluster_submitter::wait_submit(const std::shared_ptr<submit_ctx>& ctx
     return true;
 }
 
+bool async_cluster_submitter::try_collect_submit(const std::shared_ptr<submit_ctx>& ctx,
+                                                 client_api_response& out_resp,
+                                                 std::string& err,
+                                                 bool& done) {
+    err.clear();
+    done = false;
+    if (!ctx) {
+        done = true;
+        err = "invalid submit ctx";
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lk(ctx->mu);
+    if (!ctx->done) {
+        return true;
+    }
+    done = true;
+    if (!ctx->io_ok) {
+        err = ctx->err.empty() ? std::string("io_failed") : ctx->err;
+        return false;
+    }
+    out_resp = ctx->resp;
+    return true;
+}
+
 bool async_cluster_submitter::submit_to_node(size_t node_idx,
                                              const client_api_request& req,
                                              client_api_response& out_resp,

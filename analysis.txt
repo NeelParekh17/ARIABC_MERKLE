@@ -1,0 +1,78 @@
+but then in 4node path why don't we do same N postgresql sessions
+each calling safedb_txdt()?
+
+Great question — this is absolutely worth pursuing. Let me work through why the 4-node path doesn't do this already, and what the concrete fix looks like.
+
+---
+
+## Why it doesn't do N sessions today
+
+The current 4-node path (event mode, block fast path) does this:
+
+```
+pg_executor (event loop)
+    → one connection
+    → PQexec("SELECT bcdb_block_submit_results(json)")   ← 256 txs batched, blocking
+    → waits 3.4s for all 256 to finish
+```
+
+The reason it batches into one call rather than using N connections is the `det_wait_for_apply_turn` gate inside pg_executor's threaded path, plus the event-mode design that deliberately funnels all det traffic through `conns_[0]`. These were added to ensure ordered apply — but that ordering is already provided by BCDB's own serial gate.
+
+**The key insight you identified is correct**: BCDB's Lever-D v2 gate is already the ordering primitive. `det_wait_for_apply_turn` in pg_executor is redundant serialization on top of it.
+
+---
+
+## Why it's safe to remove
+
+When N connections each send `s <seq> <sql>`:
+
+- The 8-digit sequence number becomes the `tx_id` directly (it's parsed from the SQL string in `postgres.c`, not assigned by atomic increment racing)
+- Each backend calls `safedb_txdt(tx, true)` → `bcdb_worker_process_tx_dt()`
+- They run optimistic phases in parallel
+- They all hit the serial gate (`bcdb_wait_for_serial_slot`) and serialize there on `published_max_tx_id`
+- `advance_last_committed_txid()` handles out-of-order completion via CAS prefix scan
+
+This is **exactly** what the single-node benchmark does. N psql sessions, each with its own explicit seq/tx_id, running optimistic phases in parallel, serializing at the gate.
+
+---
+
+## What to change — concretely## The concrete change
+
+In `ariabc_pg/src/pg_executor.cxx`, in the threaded worker loop (Section 18 of the architecture doc), the current flow is:
+
+```
+dequeue task
+→ det_mark_tx_state(QUEUED)
+→ parse_det_prefixed_sql_parts()    ← gets seq, raw_sql
+→ det_wait_for_apply_turn(tx_seq)   ← ← ← THIS IS THE SERIALIZATION BOTTLENECK
+→ mark APPLY_READY
+→ PQexec(conn, "s <seq> <sql>")     ← only 1 conn in PQexec at a time
+→ det_finish_apply(tx_seq)
+→ wait_for_ordered_emit_turn()
+→ emit Kafka
+→ finish_ordered_emit()
+```
+
+Remove (or bypass) `det_wait_for_apply_turn` and `det_finish_apply`. Everything else stays identical. The result: all N worker threads proceed to `PQexec` immediately, each on its own connection, with its own `s <seq> <sql>`.
+
+You also need to run in threaded mode rather than event mode, so pass `--pgExecMode threaded` in the runner.
+
+## Why this is safe
+
+`det_wait_for_apply_turn` was added to ensure tx_N doesn't call `PQexec` until tx_{N-1} has finished. But BCDB's serial gate (`bcdb_wait_for_serial_slot`) already enforces exactly this — tx_N blocks at the gate until `published_max_tx_id >= tx_id - 1`. So `det_wait_for_apply_turn` is doing the same job twice, once outside PostgreSQL and once inside. Removing the outer one just means the serialization happens at the right place — inside BCDB, in shared memory, where it already belongs.
+
+`wait_for_ordered_emit_turn` is NOT removed — it stays to keep Kafka emission ordered.
+
+## Why the seq number = tx_id matters
+
+This is the subtle part that makes it work. When postgres.c receives `s 00000042 <sql>`, the `00000042` **becomes** the tx_id directly. It is not assigned by racing atomic increment — it's parsed from the string. So 256 concurrent connections each with a different seq number get distinct, correctly-ordered tx_ids with no race condition.
+
+## Implementation plan
+
+Make the pg_executor change. It's genuinely small — remove/bypass `det_wait_for_apply_turn` in the threaded path. Add a flag (`ARIABC_DET_BYPASS_APPLY_GATE=1`) so it can be toggled safely. Update the runner to use `--pgExecMode threaded`.
+
+Run on the 4-node cluster. Validate Merkle PASS. Profile with `BCDB_BLOCK_PROFILE=1` to confirm the new `wait_block_ms` numbers. Compare with the old baseline.
+
+Characterize the new ceiling — does it match single-node? If not, identify the next bottleneck (gate fan-out with 256 concurrent waiters is the likely candidate — check if `condCommit` broadcasting or the 64µs poll cap is limiting). Tune if needed.
+
+One thing to watch: with 256 backends all spinning in `bcdb_wait_for_serial_slot` simultaneously, you may see CPU pressure from the poll loop. The `BCDB_POLL_MAX_US` cap (default 64µs) controls this. If CPU becomes the bottleneck, tuning that cap (or switching the gate to condvar mode once the lost-wakeup bug is fixed) is the next lever.

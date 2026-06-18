@@ -434,6 +434,29 @@ bcdb_wait_for_block_enqueue_turn(BCBlockID block_id)
 			return;
 		if (expected > block_id)
 			return;
+		if ((block_id - expected) > MAX_NUM_BLOCKS)
+		{
+			BCBlock *expected_block = get_block_by_id(expected, false);
+
+			/*
+			 * Recovery for stale enqueue-gate state.  The normal path advances
+			 * one block at a time, but an independent reset of BCDB metadata can
+			 * leave next_enqueue_block_id back at the first submit id while the
+			 * Aria executor is still using its monotonic per-server block ids.
+			 * If the expected block is already outside the entire block-pool
+			 * retention window and no header exists for it, waiting is permanent.
+			 */
+			if (expected_block == NULL &&
+				__sync_bool_compare_and_swap(&block_meta->next_enqueue_block_id,
+											 expected,
+											 block_id))
+			{
+				ereport(LOG,
+						(errmsg("BCDB block enqueue turn recovered stale gap: block_id=%d expected_block_id=%d max_blocks=%d",
+								(int) block_id, (int) expected, (int) MAX_NUM_BLOCKS)));
+				return;
+			}
+		}
 
 		CHECK_FOR_INTERRUPTS();
 

@@ -74,7 +74,7 @@ extern int32         worker_id;
  * bcdb_get_runtime_result_ring_slots() never produces an out-of-bounds index.
  * 2048 = 2 × 1024 satisfies this for all valid GUC settings.
  */
-#define BCDB_RESULT_RING_CAPACITY 32768
+#define BCDB_RESULT_RING_CAPACITY 2048
 #define BCDB_SERIAL_GATE_MODE_POLL 0
 #define BCDB_SERIAL_GATE_MODE_CONDVAR 1
 

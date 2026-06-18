@@ -81,6 +81,11 @@ public:
                      client_api_response& out_resp,
                      std::string& err);
 
+    bool try_collect_submit(const std::shared_ptr<submit_ctx>& ctx,
+                            client_api_response& out_resp,
+                            std::string& err,
+                            bool& done);
+
     async_submitter_stats stats() const;
 
 private:

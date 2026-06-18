@@ -1,0 +1,44 @@
+neel@neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE:/work/ARIABC/AriaBC/scripts/distributed$ ./run_ycsb_skew_single_vs_full_comparison.sh --runs 1 --threads 1,2,4,6,8,10,12
+[2026-05-21 19:19:30] === YCSB skew TPS comparison ===
+[2026-05-21 19:19:30] Out root  : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930
+[2026-05-21 19:19:30] Threads   : 1,2,4,6,8,10,12
+[2026-05-21 19:19:30] Runs      : 1
+[2026-05-21 19:19:30] Workloads : ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt
+[2026-05-21 19:19:30] Target    : neel@10.129.148.236
+[2026-05-21 19:19:30] Cluster modes: kafka-only,raft-kafka
+[2026-05-21 19:19:30] Syncing source/install to neel@10.129.148.236
+[2026-05-21 19:19:31] Local install looks BCDB-capable; syncing install tree
+[2026-05-21 19:19:31] --- Workload: ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt (out=/work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq) ---
+[2026-05-21 19:19:31] Running single-node PG/DET benchmark on neel@10.129.148.236 (workload=ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
+[2026-05-21 19:21:42] Collecting single-node results from neel@10.129.148.236:/home/neel/Desktop/ariabc_cluster/scripts/bench_results/ycsb_skew_compare_20260521_191930_ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq
+[2026-05-21 19:21:43] Running cluster sweep (modes=kafka-only,raft-kafka workload=ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
+[2026-05-21 19:21:43] Full-system x-axis mapping: thread value -> --num-terminals; detPipelineDepth=80 per terminal
+[2026-05-21 19:21:43] Cluster mode: kafka-only (series=cluster_kafka ordering_path=preordered_direct_broadcast)
+[2026-05-21 19:21:43] Cluster case mode=kafka-only thread=1 run=1 (num-terminals=1 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=80 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
+[2026-05-21 19:26:10] Cluster case mode=kafka-only thread=2 run=1 (num-terminals=2 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=160 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
+[2026-05-21 19:27:27] Cluster case mode=kafka-only thread=4 run=1 (num-terminals=4 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=320 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
+[2026-05-21 19:28:39] Cluster case mode=kafka-only thread=6 run=1 (num-terminals=6 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=480 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
+[2026-05-21 19:29:51] Cluster case mode=kafka-only thread=8 run=1 (num-terminals=8 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=640 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
+[2026-05-21 19:30:59] Cluster case mode=kafka-only thread=10 run=1 (num-terminals=10 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=800 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
+[2026-05-21 19:32:11] Cluster case mode=kafka-only thread=12 run=1 (num-terminals=12 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=960 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
+[2026-05-21 19:33:20] Cluster mode: raft-kafka (series=cluster_raft_kafka ordering_path=raft)
+[2026-05-21 19:33:20] Cluster case mode=raft-kafka thread=1 run=1 (num-terminals=1 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=80 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
+[2026-05-21 19:34:46] Cluster case mode=raft-kafka thread=2 run=1 (num-terminals=2 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=160 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
+[2026-05-21 19:36:12] Cluster case mode=raft-kafka thread=4 run=1 (num-terminals=4 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=320 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
+[2026-05-21 19:37:30] Cluster case mode=raft-kafka thread=6 run=1 (num-terminals=6 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=480 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
+[2026-05-21 19:38:47] Cluster case mode=raft-kafka thread=8 run=1 (num-terminals=8 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=640 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
+[2026-05-21 19:40:06] Cluster case mode=raft-kafka thread=10 run=1 (num-terminals=10 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=800 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
+[2026-05-21 19:41:26] Cluster case mode=raft-kafka thread=12 run=1 (num-terminals=12 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=960 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
+Wrote results:  /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/results.csv
+Wrote summary:  /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/summary.csv
+Wrote overhead: /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/overhead.csv
+Wrote graph:    /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/ycsb_skew_pg_vs_det.png
+Wrote graph:    /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/ycsb_skew_det_vs_cluster.png
+[2026-05-21 19:42:49] Workload done: ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt
+[2026-05-21 19:42:49]   Results : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/results.csv
+[2026-05-21 19:42:49]   Summary : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/summary.csv
+[2026-05-21 19:42:49]   Overhead: /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/overhead.csv
+[2026-05-21 19:42:49]   Graph   : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/ycsb_skew_pg_vs_det.png
+[2026-05-21 19:42:49]   Graph   : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/ycsb_skew_det_vs_cluster.png
+[2026-05-21 19:42:49] Done
+[2026-05-21 19:42:49] Out root : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930

@@ -146,6 +146,23 @@ int full_result_replica_limit() {
     return limit;
 }
 
+int result_publish_replica_limit() {
+    static const int limit = []() -> int {
+        const char* v = std::getenv("ARIABC_RESULT_PUBLISH_REPLICA_LIMIT");
+        if (!v || !*v) return 0;
+        char* end = nullptr;
+        const long parsed = std::strtol(v, &end, 10);
+        if (end == v || parsed <= 0) return 0;
+        return static_cast<int>(std::min<long>(parsed, 1024));
+    }();
+    return limit;
+}
+
+bool should_publish_kafka_result(int node_id) {
+    const int limit = result_publish_replica_limit();
+    return limit <= 0 || node_id <= limit;
+}
+
 std::atomic<uint64_t> g_debug_exec_trace_count(0);
 
 void debug_trace_exec(const std::string& req_id,
@@ -1661,24 +1678,26 @@ void pg_executor::worker_loop() {
         }
 
         if (kafka_enabled_) {
-            debug_trace_exec(t.req_id, t.raft_log_idx, result);
-            if (batch_req_ids.empty()) {
-                batch_start = std::chrono::steady_clock::now();
-            }
-            batch_req_ids.push_back(t.req_id);
-            batch_results.push_back(result);
-            batch_raft_log_idxs.push_back(t.raft_log_idx);
-            batch_leader_hints.push_back(t.leader_node_hint);
-            batch_bytes += t.req_id.size() + result.size() + 32;
-            const size_t max_records = (q_depth_after_pop >= 64) ? 128 : kKafkaBatchMaxRecords;
-            const size_t max_bytes = (q_depth_after_pop >= 64) ? (256 * 1024) : kKafkaBatchMaxBytes;
-            const int max_delay_ms = (q_depth_after_pop >= 16) ? 0 : kKafkaBatchMaxDelayMs;
-            const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - batch_start).count();
-            if (batch_req_ids.size() >= max_records ||
-                batch_bytes >= max_bytes ||
-                age_ms >= max_delay_ms) {
-                flush_batch();
+            if (should_publish_kafka_result(node_id_)) {
+                debug_trace_exec(t.req_id, t.raft_log_idx, result);
+                if (batch_req_ids.empty()) {
+                    batch_start = std::chrono::steady_clock::now();
+                }
+                batch_req_ids.push_back(t.req_id);
+                batch_results.push_back(result);
+                batch_raft_log_idxs.push_back(t.raft_log_idx);
+                batch_leader_hints.push_back(t.leader_node_hint);
+                batch_bytes += t.req_id.size() + result.size() + 32;
+                const size_t max_records = (q_depth_after_pop >= 64) ? 128 : kKafkaBatchMaxRecords;
+                const size_t max_bytes = (q_depth_after_pop >= 64) ? (256 * 1024) : kKafkaBatchMaxBytes;
+                const int max_delay_ms = (q_depth_after_pop >= 16) ? 0 : kKafkaBatchMaxDelayMs;
+                const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - batch_start).count();
+                if (batch_req_ids.size() >= max_records ||
+                    batch_bytes >= max_bytes ||
+                    age_ms >= max_delay_ms) {
+                    flush_batch();
+                }
             }
         } else {
             const std::string msg =
@@ -1765,13 +1784,15 @@ void pg_executor::event_loop() {
     auto emit_det_result = [&](const task& done_task, const std::string& out) {
         notify_task_applied(done_task.raft_log_idx);
         if (kafka_enabled_) {
-            debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
-            if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
-            batch_req_ids.push_back(done_task.req_id);
-            batch_results.push_back(out);
-            batch_raft_log_idxs.push_back(done_task.raft_log_idx);
-            batch_leader_hints.push_back(done_task.leader_node_hint);
-            batch_bytes += done_task.req_id.size() + out.size() + 32;
+            if (should_publish_kafka_result(node_id_)) {
+                debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
+                if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
+                batch_req_ids.push_back(done_task.req_id);
+                batch_results.push_back(out);
+                batch_raft_log_idxs.push_back(done_task.raft_log_idx);
+                batch_leader_hints.push_back(done_task.leader_node_hint);
+                batch_bytes += done_task.req_id.size() + out.size() + 32;
+            }
         } else {
             std::cout << (done_task.req_id + "  " + std::to_string(node_id_) + "  " + out)
                       << std::endl;
@@ -2196,12 +2217,14 @@ void pg_executor::event_loop() {
                 }
                 // Emit result immediately (no retry).
                 if (kafka_enabled_) {
-                    if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
-                    batch_req_ids.push_back(t.req_id);
-                    batch_results.push_back(out);
-                    batch_raft_log_idxs.push_back(t.raft_log_idx);
-                    batch_leader_hints.push_back(t.leader_node_hint);
-                    batch_bytes += t.req_id.size() + out.size() + 32;
+                    if (should_publish_kafka_result(node_id_)) {
+                        if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
+                        batch_req_ids.push_back(t.req_id);
+                        batch_results.push_back(out);
+                        batch_raft_log_idxs.push_back(t.raft_log_idx);
+                        batch_leader_hints.push_back(t.leader_node_hint);
+                        batch_bytes += t.req_id.size() + out.size() + 32;
+                    }
                 } else {
                     std::cout << (t.req_id + "  " + std::to_string(node_id_) + "  " + out) << std::endl;
                 }
@@ -2531,13 +2554,15 @@ void pg_executor::event_loop() {
                 notify_task_applied(done_task.raft_log_idx);
 
                 if (kafka_enabled_) {
-                    debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
-                    if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
-                    batch_req_ids.push_back(done_task.req_id);
-                    batch_results.push_back(out);
-                    batch_raft_log_idxs.push_back(done_task.raft_log_idx);
-                    batch_leader_hints.push_back(done_task.leader_node_hint);
-                    batch_bytes += done_task.req_id.size() + out.size() + 32;
+                    if (should_publish_kafka_result(node_id_)) {
+                        debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
+                        if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
+                        batch_req_ids.push_back(done_task.req_id);
+                        batch_results.push_back(out);
+                        batch_raft_log_idxs.push_back(done_task.raft_log_idx);
+                        batch_leader_hints.push_back(done_task.leader_node_hint);
+                        batch_bytes += done_task.req_id.size() + out.size() + 32;
+                    }
                 } else {
                     std::cout << (done_task.req_id + "  " + std::to_string(node_id_) + "  " + out) << std::endl;
                 }

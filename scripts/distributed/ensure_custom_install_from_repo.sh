@@ -120,6 +120,7 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 build_log="$REPO_ROOT/.bench_tmp/build_custom_install_$(date +%Y%m%d_%H%M%S).log"
+build_dir="$REPO_ROOT/.bench_tmp/pg_build"
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)"
 if [[ -d "$REPO_ROOT/.bench_tmp/deps/include" ]]; then
   EXTRA_INCLUDE_ROOT="$REPO_ROOT/.bench_tmp/deps/include"
@@ -157,20 +158,29 @@ fi
   echo "[INFO] clean_when_rebuild=$CLEAN_WHEN_REBUILD"
   echo "[INFO] force_rebuild=$FORCE_REBUILD"
   echo "[INFO] reconfigure=1"
+  echo "[INFO] build_dir=$build_dir"
   echo "[INFO] extra_include_root=${EXTRA_INCLUDE_ROOT:-none}"
   echo "[INFO] extra_lib_root=${EXTRA_LIB_ROOT:-none}"
   cd "$REPO_ROOT"
   if [[ "$USE_EXISTING_CONFIG" == "1" ]]; then
     echo "[INFO] configured tree found; refreshing generated files via config.status"
     ./config.status
+    make -C "$REPO_ROOT" -j"$jobs" install prefix="$INSTALL_DIR"
   elif [[ "$CLEAN_WHEN_REBUILD" == "1" ]]; then
-    echo "[INFO] pre-configure clean=distclean"
-    make -C "$REPO_ROOT" distclean || make -C "$REPO_ROOT" clean || true
-    ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" ./configure --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+    echo "[INFO] clean out-of-tree build dir"
+    rm -rf "$build_dir"
+    mkdir -p "$build_dir"
+    rm -f "$REPO_ROOT"/conftest "$REPO_ROOT"/conftest.* "$REPO_ROOT"/confdefs.h "$REPO_ROOT"/a.out "$REPO_ROOT"/b.out
+    cd "$build_dir"
+    ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+    make -C "$build_dir" -j"$jobs" install prefix="$INSTALL_DIR"
   else
-    ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" ./configure --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+    mkdir -p "$build_dir"
+    rm -f "$REPO_ROOT"/conftest "$REPO_ROOT"/conftest.* "$REPO_ROOT"/confdefs.h "$REPO_ROOT"/a.out "$REPO_ROOT"/b.out
+    cd "$build_dir"
+    ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+    make -C "$build_dir" -j"$jobs" install prefix="$INSTALL_DIR"
   fi
-  make -C "$REPO_ROOT" -j"$jobs" install prefix="$INSTALL_DIR"
 } >"$build_log" 2>&1
 
 if ! verify_install "$INSTALL_DIR"; then

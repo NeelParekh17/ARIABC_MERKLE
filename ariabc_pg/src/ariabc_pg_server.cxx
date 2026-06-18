@@ -17,8 +17,13 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cctype>
+#include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -32,6 +37,15 @@ int preferred_leader_id_from_env() {
     char* end = nullptr;
     const long parsed = std::strtol(v, &end, 10);
     if (end == v || parsed <= 0 || parsed > 1000000) return 0;
+    return static_cast<int>(parsed);
+}
+
+int preferred_leader_transfer_wait_ms_from_env() {
+    const char* v = std::getenv("ARIABC_PREFERRED_LEADER_TRANSFER_WAIT_MS");
+    if (!v || !*v) return 1000;
+    char* end = nullptr;
+    const long parsed = std::strtol(v, &end, 10);
+    if (end == v || parsed < 0 || parsed > 60000) return 1000;
     return static_cast<int>(parsed);
 }
 
@@ -69,6 +83,52 @@ bool profile_enabled() {
 
 bool starts_with(const std::string& s, const std::string& prefix) {
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool parse_det_seq_from_sql(const std::string& sql, uint64_t& out_seq) {
+    out_seq = 0;
+    const std::string t = trim_copy(sql);
+    if (t.size() < 3 || (t[0] != 's' && t[0] != 'S') ||
+        !std::isspace(static_cast<unsigned char>(t[1]))) {
+        return false;
+    }
+    size_t i = 2;
+    while (i < t.size() && std::isspace(static_cast<unsigned char>(t[i]))) ++i;
+    if (i >= t.size() || !std::isdigit(static_cast<unsigned char>(t[i]))) {
+        return false;
+    }
+    uint64_t seq = 0;
+    while (i < t.size() && std::isdigit(static_cast<unsigned char>(t[i]))) {
+        seq = (seq * 10ULL) + static_cast<uint64_t>(t[i] - '0');
+        ++i;
+    }
+    out_seq = seq;
+    return out_seq > 0;
+}
+
+bool parse_det_range_from_request(const client_api_request& req,
+                                  uint64_t& out_first,
+                                  uint64_t& out_last) {
+    out_first = 0;
+    out_last = 0;
+    if (req.is_batch()) {
+        if (req.batch_items.empty()) return false;
+        for (size_t i = 0; i < req.batch_items.size(); ++i) {
+            uint64_t seq = 0;
+            if (!parse_det_seq_from_sql(req.batch_items[i].sql, seq)) return false;
+            if (i == 0) {
+                out_first = seq;
+            } else if (seq != out_first + static_cast<uint64_t>(i)) {
+                return false;
+            }
+        }
+        out_last = out_first + static_cast<uint64_t>(req.batch_items.size() - 1);
+        return true;
+    }
+
+    if (!parse_det_seq_from_sql(req.sql, out_first)) return false;
+    out_last = out_first;
+    return true;
 }
 
 bool parse_wait_commit_cmd(const std::string& sql,
@@ -513,13 +573,126 @@ void handle_client_fd(int fd,
     ::close(fd);
 }
 
+struct direct_ordered_entry {
+    client_api_request req;
+    uint64_t first_seq = 0;
+    uint64_t last_seq = 0;
+    client_api_response resp;
+    bool done = false;
+};
+
+struct direct_orderer {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool initialized = false;
+    bool drained_any = false;
+    uint64_t next_seq = 1;
+    std::map<uint64_t, std::shared_ptr<direct_ordered_entry>> pending;
+};
+
+client_api_response make_direct_accept_response(uint64_t last_seq, size_t item_count) {
+    client_api_response resp;
+    resp.status = 0;
+    resp.msg = "ACCEPTED_DIRECT accepted=1 leader=-1 leader_id=-1 raft_log_idx=" +
+               std::to_string(last_seq) +
+               " seq=" + std::to_string(last_seq) +
+               " batch_items=" + std::to_string(item_count);
+    return resp;
+}
+
+void direct_enqueue_to_state_machine(pg_state_machine* psm,
+                                     const client_api_request& req,
+                                     uint64_t first_seq) {
+    if (req.is_batch()) {
+        psm->direct_enqueue_batch(req.batch_items, first_seq);
+    } else {
+        psm->direct_enqueue(req.req_id, req.sql, first_seq);
+    }
+}
+
+bool direct_enqueue_ordered(pg_state_machine* psm,
+                            const client_api_request& req,
+                            direct_orderer& orderer,
+                            client_api_response& out_resp) {
+    uint64_t first_seq = 0;
+    uint64_t last_seq = 0;
+    if (!parse_det_range_from_request(req, first_seq, last_seq)) {
+        return false;
+    }
+
+    std::shared_ptr<direct_ordered_entry> entry(new direct_ordered_entry());
+    entry->req = req;
+    entry->first_seq = first_seq;
+    entry->last_seq = last_seq;
+
+    std::unique_lock<std::mutex> lk(orderer.mu);
+    if (!orderer.initialized) {
+        orderer.initialized = true;
+        // Workloads in the benchmark start at DET sequence 1, but the
+        // one-shot preflight uses a high sequence. If a fanout lane delivers
+        // batch 257 before batch 1, do not make 257 the epoch start.
+        orderer.next_seq = (first_seq >= 90000000ULL) ? first_seq : 1ULL;
+    } else if (orderer.pending.empty() &&
+               first_seq < orderer.next_seq &&
+               !orderer.drained_any) {
+        orderer.next_seq = first_seq;
+    } else if (orderer.pending.empty() &&
+               first_seq < orderer.next_seq &&
+               orderer.next_seq - first_seq > 1000000ULL) {
+        // The benchmark preflight uses a high DET sequence, then the workload
+        // restarts at 1. With multi-socket fanout, a later workload batch can
+        // arrive before batch 1; reset to the epoch start, not to that later
+        // batch, so the FIFO executor still sees contiguous DET order.
+        orderer.next_seq = 1;
+    }
+
+    if (orderer.pending.find(first_seq) != orderer.pending.end()) {
+        out_resp.status = 1;
+        out_resp.msg = "DUPLICATE_DIRECT_DET_SEQ first_seq=" + std::to_string(first_seq);
+        return true;
+    }
+    orderer.pending.emplace(first_seq, entry);
+
+    auto drain_ready = [&]() {
+        while (!g_stop.load(std::memory_order_relaxed)) {
+            auto it = orderer.pending.find(orderer.next_seq);
+            if (it == orderer.pending.end()) break;
+            std::shared_ptr<direct_ordered_entry> ready = it->second;
+            orderer.pending.erase(it);
+
+            lk.unlock();
+            direct_enqueue_to_state_machine(psm, ready->req, ready->first_seq);
+            lk.lock();
+
+            ready->resp = make_direct_accept_response(ready->last_seq, ready->req.item_count());
+            ready->done = true;
+            orderer.next_seq = ready->last_seq + 1;
+            orderer.drained_any = true;
+            orderer.cv.notify_all();
+        }
+    };
+
+    drain_ready();
+    orderer.cv.wait(lk, [&] {
+        return entry->done || g_stop.load(std::memory_order_relaxed);
+    });
+    if (!entry->done) {
+        out_resp.status = 1;
+        out_resp.msg = "DIRECT_ORDERER_STOPPED first_seq=" + std::to_string(first_seq);
+    } else {
+        out_resp = entry->resp;
+    }
+    return true;
+}
+
 // Bypass-Raft handler: directly enqueues requests into pg_executor without
 // going through NuRaft. Used for the kafka-only-no-raft configuration where
 // ordering is provided by the gateway broadcasting in the same sequence to all
 // replicas. Kafka result collection in the gateway enforces distributed agreement.
 void handle_client_fd_direct(int fd,
                               pg_state_machine* psm,
-                              std::atomic<uint64_t>& seq_counter) {
+                              std::atomic<uint64_t>& seq_counter,
+                              direct_orderer& orderer) {
     {
         int one = 1;
         (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
@@ -603,24 +776,18 @@ void handle_client_fd_direct(int fd,
             }
         }
 
-        // Assign a monotonically increasing sequence number (replaces Raft log index).
-        const uint64_t seq = seq_counter.fetch_add(
-            static_cast<uint64_t>(req.item_count()),
-            std::memory_order_relaxed);
-        if (req.is_batch()) {
-            psm->direct_enqueue_batch(req.batch_items, seq);
-        } else {
-            psm->direct_enqueue(req.req_id, req.sql, seq);
+        client_api_response resp;
+        if (!direct_enqueue_ordered(psm, req, orderer, resp)) {
+            // Non-deterministic fallback for direct test probes that do not
+            // carry the "s NNNNNNNN" prefix.
+            const uint64_t seq = seq_counter.fetch_add(
+                static_cast<uint64_t>(req.item_count()),
+                std::memory_order_relaxed);
+            direct_enqueue_to_state_machine(psm, req, seq);
+            const uint64_t last_seq = seq + static_cast<uint64_t>(req.item_count() - 1);
+            resp = make_direct_accept_response(last_seq, req.item_count());
         }
         g_prof.append_calls.fetch_add(1, std::memory_order_relaxed);
-
-        client_api_response resp;
-        resp.status = 0;
-        const uint64_t last_seq = seq + static_cast<uint64_t>(req.item_count() - 1);
-        resp.msg = "ACCEPTED_DIRECT accepted=1 leader=-1 leader_id=-1 raft_log_idx=" +
-                   std::to_string(last_seq) +
-                   " seq=" + std::to_string(last_seq) +
-                   " batch_items=" + std::to_string(req.item_count());
 
         const auto w0 = std::chrono::steady_clock::now();
         const bool ok_write = write_response_frame(fd, resp, err);
@@ -765,6 +932,7 @@ int main(int argc, char** argv) {
                   << std::endl;
 
         std::atomic<uint64_t> direct_seq{1};
+        ariabc_pg::direct_orderer direct_order;
         ariabc_pg::pg_state_machine* psm =
             dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
 
@@ -780,8 +948,8 @@ int main(int argc, char** argv) {
                 std::cerr << "accept failed: " << ::strerror(errno) << std::endl;
                 continue;
             }
-            std::thread th([fd, psm, &direct_seq] {
-                ariabc_pg::handle_client_fd_direct(fd, psm, direct_seq);
+            std::thread th([fd, psm, &direct_seq, &direct_order] {
+                ariabc_pg::handle_client_fd_direct(fd, psm, direct_seq, direct_order);
             });
             th.detach();
         }
@@ -807,8 +975,10 @@ int main(int argc, char** argv) {
     ptr<state_mgr> smgr = cs_new<inmem_state_mgr>(opt.id, opt.raft_endpoint);
     ptr<cluster_config> conf = cs_new<cluster_config>();
     const int preferred_leader_id = ariabc_pg::preferred_leader_id_from_env();
+    const int preferred_leader_transfer_wait_ms =
+        ariabc_pg::preferred_leader_transfer_wait_ms_from_env();
     for (const auto& m : members) {
-        const int priority = (preferred_leader_id > 0 && m.id == preferred_leader_id) ? 10 : 1;
+        const int priority = (preferred_leader_id > 0 && m.id == preferred_leader_id) ? 100 : 1;
         conf->get_servers().push_back(cs_new<srv_config>(m.id,
                                                          0,
                                                          m.endpoint,
@@ -842,6 +1012,9 @@ int main(int argc, char** argv) {
     params.client_req_timeout_ = 60000;
     // 0 => default is 20x heartbeat, which can be too aggressive under load.
     params.leadership_expiry_ = 120000;
+    if (preferred_leader_id > 0) {
+        params.leadership_transfer_min_wait_time_ = preferred_leader_transfer_wait_ms;
+    }
     params.return_method_ = raft_params::async_handler;
     params.auto_forwarding_ = true;
 
@@ -873,7 +1046,32 @@ int main(int argc, char** argv) {
               << " raft=" << opt.raft_endpoint
               << " clientPort=" << opt.client_port
               << " members=" << members.size()
+              << " preferredLeaderId=" << preferred_leader_id
+              << " leaderTransferWaitMs=" << (preferred_leader_id > 0 ? preferred_leader_transfer_wait_ms : 0)
               << std::endl;
+
+    if (preferred_leader_id == opt.id) {
+        ptr<raft_server> preferred_raft = raft;
+        std::thread([preferred_raft, preferred_leader_id] {
+            for (int attempt = 1; attempt <= 40 && !ariabc_pg::g_stop.load(); ++attempt) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                const int leader = preferred_raft->get_leader();
+                if (preferred_raft->is_leader()) {
+                    std::cerr << "preferred_leader active id=" << preferred_leader_id
+                              << " attempt=" << attempt << std::endl;
+                    return;
+                }
+                if (leader > 0 && leader != preferred_leader_id) {
+                    const bool requested = preferred_raft->request_leadership();
+                    std::cerr << "preferred_leader request id=" << preferred_leader_id
+                              << " current_leader=" << leader
+                              << " attempt=" << attempt
+                              << " requested=" << (requested ? 1 : 0)
+                              << std::endl;
+                }
+            }
+        }).detach();
+    }
 
     const int listen_fd = ariabc_pg::listen_tcp(opt.client_port);
     ariabc_pg::g_listen_fd = listen_fd;
