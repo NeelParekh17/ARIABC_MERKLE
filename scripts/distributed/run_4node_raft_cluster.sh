@@ -750,7 +750,8 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
 # fuser -k 9000/tcp avoids this entirely.
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
-  log "=== Phase 0: Cleanup stale ariabc_pg processes ==="
+  log "=== Phase 0: Cleanup stale ariabc_pg processes (parallel) ==="
+  declare -a CLEANUP_PIDS=()
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
     client_port="${NODE_CLIENT_PORTS[$idx]}"
@@ -759,7 +760,11 @@ if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
       fuser -k 9000/tcp 2>/dev/null || true
       fuser -k ${client_port}/tcp 2>/dev/null || true
       sleep 0.5
-    " || true
+    " || true &
+    CLEANUP_PIDS+=("$!")
+  done
+  for pid in "${CLEANUP_PIDS[@]}"; do
+    wait "$pid" || true
   done
   sleep 2
   log "  Cleanup done"
@@ -841,7 +846,43 @@ fi
 # source constants before rsync. This guardrail restored the 5.4k
 # Kafka-majority path after nodes 1/4 were using a stale backend.
 # ---------------------------------------------------------------------------
-if [[ "$SKIP_BUILD" -eq 0 ]]; then
+# ---------------------------------------------------------------------------
+# Source-hash auto-skip for Phases 0.8 + 1.5
+# If the relevant source tree and ring capacity constant haven't changed since
+# the last successful build, skip the ~4-minute rebuild automatically.
+# Override: FORCE_BUILD=1 to always rebuild even if hash matches.
+# Override: SKIP_BUILD=1 to skip rebuild regardless (existing flag).
+# ---------------------------------------------------------------------------
+BUILD_STAMP_DIR="$REPO_ROOT/scripts/.bench_tmp"
+BUILD_STAMP_FILE="$BUILD_STAMP_DIR/build_stamp"
+mkdir -p "$BUILD_STAMP_DIR"
+
+_compute_src_hash() {
+  # Hash C/C++ sources + key header + ring capacity value
+  {
+    find "$REPO_ROOT/src" "$REPO_ROOT/ariabc_pg" \
+      \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
+      -not -path '*/build/*' -not -path '*/.git/*' \
+      -exec sha256sum {} \; 2>/dev/null | sort
+    echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
+  } | sha256sum | awk '{print $1}'
+}
+
+if [[ "${SKIP_BUILD:-0}" -eq 0 && "${FORCE_BUILD:-0}" -eq 0 ]]; then
+  log "  Computing source hash to check if rebuild is needed..."
+  _current_hash="$(_compute_src_hash)"
+  _stamp_hash=""
+  [[ -f "$BUILD_STAMP_FILE" ]] && _stamp_hash="$(cat "$BUILD_STAMP_FILE" 2>/dev/null || true)"
+  if [[ -n "$_stamp_hash" && "$_current_hash" == "$_stamp_hash" ]]; then
+    log "  Source hash unchanged ($( echo "$_current_hash" | head -c 12)...) — skipping Phases 0.8 + 1.5 (pass FORCE_BUILD=1 to override)"
+    SKIP_BUILD=1
+  else
+    log "  Source changed or first run — will rebuild (hash: $(echo "$_current_hash" | head -c 12)...)"
+    _BUILD_HASH_TO_SAVE="$_current_hash"
+  fi
+fi
+
+if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
   log "=== Phase 0.8: Rebuild local canonical install/binaries ==="
   local_globals="$REPO_ROOT/src/include/bcdb/globals.h"
   [[ -f "$local_globals" ]] || die "missing local globals header: $local_globals"
@@ -881,6 +922,8 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   log "  Building local ariabc_pg_gateway and ariabc_pg_server"
   cmake --build "$REPO_ROOT/ariabc_pg/build" --target ariabc_pg_gateway ariabc_pg_server -j"$(nproc)" \
     2>&1 | tail -20
+  # Save build stamp so next run can auto-skip if source unchanged
+  [[ -n "${_BUILD_HASH_TO_SAVE:-}" ]] && echo "$_BUILD_HASH_TO_SAVE" > "$BUILD_STAMP_FILE"
 fi
 
 # ---------------------------------------------------------------------------
@@ -891,27 +934,40 @@ fi
 # constants and Kafka-capable server code.
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_SYNC" -eq 0 ]]; then
-  log "=== Phase 1: Sync source and binaries ==="
+  log "=== Phase 1: Sync source and binaries (parallel) ==="
 
+  declare -a SYNC_PIDS=()
+  declare -a SYNC_NAMES=()
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
     is_u22="${NODE_IS_U22[$idx]}"
-    log "  Syncing to $name (is_u22=$is_u22)"
-    node_ssh "$idx" "mkdir -p '$REMOTE_REPO_ROOT' '$REMOTE_INSTALL_DIR'" || true
-
-    node_rsync_repo "$idx"
-
-    if [[ "$is_u22" -eq 0 ]]; then
-      node_rsync_install "$idx"
-    fi
-
-    if [[ -f "$WORKLOAD_FILE" ]]; then
-      node_rsync_to "$idx" "$WORKLOAD_FILE" "$REMOTE_REPO_ROOT/scripts/cluster_test_workload.sql"
-    fi
-    if [[ -f "$RESTORE_SQL" ]]; then
-      node_rsync_to "$idx" "$RESTORE_SQL" "$REMOTE_REPO_ROOT/scripts/restore_usertable_small.sql"
+    log "  Syncing to $name in background (is_u22=$is_u22)"
+    (
+      node_ssh "$idx" "mkdir -p '$REMOTE_REPO_ROOT' '$REMOTE_INSTALL_DIR'" || true
+      node_rsync_repo "$idx"
+      if [[ "$is_u22" -eq 0 ]]; then
+        node_rsync_install "$idx"
+      fi
+      if [[ -f "$WORKLOAD_FILE" ]]; then
+        node_rsync_to "$idx" "$WORKLOAD_FILE" "$REMOTE_REPO_ROOT/scripts/cluster_test_workload.sql"
+      fi
+      if [[ -f "$RESTORE_SQL" ]]; then
+        node_rsync_to "$idx" "$RESTORE_SQL" "$REMOTE_REPO_ROOT/scripts/restore_usertable_small.sql"
+      fi
+    ) &
+    SYNC_PIDS+=("$!")
+    SYNC_NAMES+=("$name")
+  done
+  SYNC_ALL_OK=1
+  for i in "${!SYNC_PIDS[@]}"; do
+    if wait "${SYNC_PIDS[$i]}"; then
+      log "  [${SYNC_NAMES[$i]}] sync done"
+    else
+      log "  [${SYNC_NAMES[$i]}] sync FAILED"
+      SYNC_ALL_OK=0
     fi
   done
+  [[ "$SYNC_ALL_OK" -eq 1 ]] || die "Phase 1 sync failed on one or more nodes"
   log "  Sync done"
 fi
 
@@ -922,40 +978,29 @@ fi
 # have the full build tool chain installed. Phase 3 verifies the recovered
 # 1024-slot result ring before any measurement is trusted.
 # ---------------------------------------------------------------------------
-if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  log "=== Phase 1.5: Build on Ubuntu 22.04 nodes (user4, new-node) ==="
+if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
+  log "=== Phase 1.5: Build on Ubuntu 22.04 nodes (user4, new-node) — parallel ==="
+
+  # Pre-flight: resolve rdkafka cmake options PER NODE before backgrounding
+  # (node_ssh in a subshell is fine; we just can't let die() from a subshell
+  #  silently vanish — capture result and check after wait)
+  declare -a U22_BUILD_PIDS=()
+  declare -a U22_BUILD_LOGS=()
+  declare -a U22_BUILD_NAMES=()
+
+  RDKAFKA_DESKTOP="/home/neel/Desktop/rdkafka_local"
 
   for idx in "${!NODE_IDS[@]}"; do
     is_u22="${NODE_IS_U22[$idx]}"
     [[ "$is_u22" -eq 0 ]] && continue
     name="${NODE_NAMES[$idx]}"
     ip="${NODE_IPS[$idx]}"
-    log "  Building on $name ($ip)"
+    log "  Launching build on $name ($ip) in background"
 
-    log "  Rebuilding custom PostgreSQL install on $name"
-    node_ssh "$idx" "
-      chmod +x '$REMOTE_REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh'
-      sed -i -E 's/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+[0-9]+/#define BCDB_RESULT_RING_CAPACITY $RESULT_RING_CAPACITY/' '$REMOTE_REPO_ROOT/src/include/bcdb/globals.h'
-      bash '$REMOTE_REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh' \
-        --repo-root '$REMOTE_REPO_ROOT' \
-        --install-dir '$REMOTE_INSTALL_DIR' \
-        --force-rebuild \
-        --clean-when-rebuild
-    " 2>&1 | sed "s/^/[$name] /"
-
-    ensure_u22_cmake "$idx"
-
-    # Push OpenSSL headers from ASUS if not already there (needed by NuRaft TLS)
-    node_ssh "$idx" "mkdir -p '$REMOTE_OPENSSL_INCLUDE_U22/openssl'" 2>/dev/null || true
-    node_rsync_to "$idx" "/usr/include/openssl/" "$REMOTE_OPENSSL_INCLUDE_U22/openssl/"
-    node_rsync_to "$idx" "/usr/include/x86_64-linux-gnu/openssl/" "$REMOTE_OPENSSL_INCLUDE_U22/openssl/"
-
-    # Phase 0.5 (ensure_rdkafka.sh) guarantees ~/Desktop/rdkafka_local on all nodes.
-    # Just check it's present; if somehow missing, warn and fall back to stubs.
-    RDKAFKA_DESKTOP="/home/neel/Desktop/rdkafka_local"
+    # Resolve kafka cmake opt synchronously so we can fail fast before forking
     KAFKA_CMAKE_OPT="-DKAFKA_OPTIONAL=ON"
     if node_ssh "$idx" "test -f $RDKAFKA_DESKTOP/lib/librdkafka.so && test -f $RDKAFKA_DESKTOP/include/librdkafka/rdkafka.h" 2>/dev/null; then
-      log "  Found rdkafka_local on $name — building WITH Kafka support"
+      log "  Found rdkafka_local on $name — will build WITH Kafka support"
       KAFKA_CMAKE_OPT="-DRDKAFKA_INCLUDE_DIR=$RDKAFKA_DESKTOP/include -DRDKAFKA_LIBRARY=$RDKAFKA_DESKTOP/lib/librdkafka.so"
     else
       if [[ "$NO_KAFKA" -eq 0 ]]; then
@@ -964,8 +1009,30 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
       log "  WARNING: $RDKAFKA_DESKTOP not found on $name — building with stubs for --no-kafka mode"
     fi
 
-    # Build
-    node_ssh "$idx" bash -s <<BUILDSSH
+    build_log="$LOG_DIR/build_u22_${name}.log"
+    # Capture cmake opt in a local so the heredoc closure is correct per iteration
+    _kafka_opt="$KAFKA_CMAKE_OPT"
+    (
+      set -euo pipefail
+      echo "[$name] Rebuilding custom PostgreSQL install"
+      node_ssh "$idx" "
+        chmod +x '$REMOTE_REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh'
+        sed -i -E 's/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+[0-9]+/#define BCDB_RESULT_RING_CAPACITY $RESULT_RING_CAPACITY/' '$REMOTE_REPO_ROOT/src/include/bcdb/globals.h'
+        bash '$REMOTE_REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh' \
+          --repo-root '$REMOTE_REPO_ROOT' \
+          --install-dir '$REMOTE_INSTALL_DIR' \
+          --force-rebuild \
+          --clean-when-rebuild
+      " 2>&1 | sed "s/^/[$name] /"
+
+      ensure_u22_cmake "$idx"
+
+      # Push OpenSSL headers
+      node_ssh "$idx" "mkdir -p '$REMOTE_OPENSSL_INCLUDE_U22/openssl'" 2>/dev/null || true
+      node_rsync_to "$idx" "/usr/include/openssl/" "$REMOTE_OPENSSL_INCLUDE_U22/openssl/"
+      node_rsync_to "$idx" "/usr/include/x86_64-linux-gnu/openssl/" "$REMOTE_OPENSSL_INCLUDE_U22/openssl/"
+
+      node_ssh "$idx" bash -s <<BUILDSSH
 set -euo pipefail
 if command -v cmake >/dev/null 2>&1; then
   CMAKE="\$(command -v cmake)"
@@ -979,7 +1046,7 @@ REPO="$REMOTE_REPO_ROOT"
 INSTALL="$REMOTE_INSTALL_DIR"
 BUILD_DIR="/tmp/ariabc_pg_build_u22"
 DESKTOP_BIN_DIR="/home/neel/Desktop/ariabc_pg_build_u22/bin"
-EXTRA_CMAKE_ARGS="$KAFKA_CMAKE_OPT"
+EXTRA_CMAKE_ARGS="$_kafka_opt"
 
 rm -rf "\$BUILD_DIR"
 echo "[$name] cmake configure..."
@@ -1005,8 +1072,29 @@ if [[ -x "\$BUILD_DIR/bin/ariabc_pg_gateway" ]]; then
 fi
 echo "[$name] installed to \$DESKTOP_BIN_DIR: \$(ls \$DESKTOP_BIN_DIR/)"
 BUILDSSH
-    log "  Build on $name complete"
+    ) >"$build_log" 2>&1 &
+    U22_BUILD_PIDS+=("$!")
+    U22_BUILD_LOGS+=("$build_log")
+    U22_BUILD_NAMES+=("$name")
+    log "  [$name] build launched (pid $!, log: $build_log)"
   done
+
+  # Wait for all parallel U22 builds
+  U22_ALL_OK=1
+  for i in "${!U22_BUILD_PIDS[@]}"; do
+    pid="${U22_BUILD_PIDS[$i]}"
+    name="${U22_BUILD_NAMES[$i]}"
+    log_file="${U22_BUILD_LOGS[$i]}"
+    if wait "$pid"; then
+      log "  [$name] build complete"
+      tail -5 "$log_file" | sed "s/^/  [$name] /" || true
+    else
+      log "  [$name] build FAILED — see $log_file"
+      tail -20 "$log_file" | sed "s/^/  [$name] /" || true
+      U22_ALL_OK=0
+    fi
+  done
+  [[ "$U22_ALL_OK" -eq 1 ]] || die "Phase 1.5 build failed on one or more U22 nodes"
 
   log "  Ubuntu 22.04 builds complete; Ubuntu 24.04 nodes will use synced ariabc_cluster build"
 fi
@@ -1071,13 +1159,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 3: Verify BCDB postgres on all 4 nodes
+# Phase 3: Verify BCDB postgres on all 4 nodes (parallel)
+# Each node's SSH command writes a status line to a temp file so we can run
+# all four verify/restart sessions concurrently and validate results serially.
 # ---------------------------------------------------------------------------
-log "=== Phase 3: Verify BCDB postgres on all 4 nodes ==="
+log "=== Phase 3: Verify BCDB postgres on all 4 nodes (parallel) ==="
+declare -a PG3_PIDS=()
+declare -a PG3_STATUS_FILES=()
 for idx in "${!NODE_IDS[@]}"; do
   ip="${NODE_IPS[$idx]}"
   id="${NODE_IDS[$idx]}"
   log "  Checking ${NODE_NAMES[$idx]} (${ip}:${DB_PORT})"
+  pg3_status_file="$(mktemp)"
+  PG3_STATUS_FILES+=("$pg3_status_file")
+  (
   status_line="$(node_ssh "$idx" "
     INSTALL_DIR='$REMOTE_INSTALL_DIR'
     PGDATA='$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata'
@@ -1283,7 +1378,22 @@ for idx in "${!NODE_IDS[@]}"; do
       max_connections=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show max_connections;' | tr -d '[:space:]')
     fi
     echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_serial_gate_source=\$serial_gate_source bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp max_connections=\$max_connections\"
-  " 2>&1)" || die "could not verify postgres on ${NODE_NAMES[$idx]}"
+  " 2>&1)" && echo "$status_line" > "$pg3_status_file" || { echo "FAILED" > "$pg3_status_file"; exit 1; }
+  ) &
+  PG3_PIDS+=("$!")
+done
+
+# --- Wait for all Phase 3 SSH sessions then validate serially ---
+PG3_ALL_OK=1
+for i in "${!PG3_PIDS[@]}"; do
+  idx="$i"
+  wait "${PG3_PIDS[$i]}" || { log "  could not verify postgres on ${NODE_NAMES[$i]}"; PG3_ALL_OK=0; }
+done
+[[ "$PG3_ALL_OK" -eq 1 ]] || die "Phase 3 postgres verify failed on one or more nodes"
+
+for idx in "${!NODE_IDS[@]}"; do
+  status_line="$(cat "${PG3_STATUS_FILES[$idx]}" 2>/dev/null || true)"
+  rm -f "${PG3_STATUS_FILES[$idx]}"
   log "  ${NODE_NAMES[$idx]}: $status_line"
   actual_workers="$(sed -n 's/.*bcdb_worker_count=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
   if [[ -n "$actual_workers" && "$actual_workers" != "$BCDB_WORKER_COUNT" ]]; then
@@ -1328,6 +1438,7 @@ for idx in "${!NODE_IDS[@]}"; do
     die "bcdb_result_ring_slots mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_ring_slots expected=$RESULT_RING_CAPACITY"
   fi
 done
+# --- end Phase 3 parallel validation ---
 
 # ---------------------------------------------------------------------------
 # Phase 3.2: Ensure the local OS login role exists in Postgres
@@ -1335,7 +1446,9 @@ done
 # overriding the role, so they fall back to the service account (`neel` on the
 # benchmark nodes). Create that role if it is missing so bcdb_init can start.
 # ---------------------------------------------------------------------------
-log "=== Phase 3.2: Ensure local benchmark role exists on all 4 nodes ==="
+
+log "=== Phase 3.2: Ensure local benchmark role exists on all 4 nodes (parallel) ==="
+declare -a ROLE_PIDS=(); declare -a ROLE_NAMES=()
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
   log "  Ensuring role neel exists on $name"
@@ -1351,7 +1464,11 @@ for idx in "${!NODE_IDS[@]}"; do
       END
       \\\$\\\$
     \"
-  " >/dev/null || die "failed to ensure role neel on $name"
+  " >/dev/null &
+  ROLE_PIDS+=("$!"); ROLE_NAMES+=("$name")
+done
+for i in "${!ROLE_PIDS[@]}"; do
+  wait "${ROLE_PIDS[$i]}" || die "failed to ensure role neel on ${ROLE_NAMES[$i]}"
 done
 
 # ---------------------------------------------------------------------------
@@ -1360,13 +1477,14 @@ done
 # table contents and Merkle index.  The restore SQL also calls bcdb_reset().
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_RESTORE" -eq 0 ]]; then
-  log "=== Phase 3.5: Restore $VERIFY_TABLE on all 4 nodes ==="
+  log "=== Phase 3.5: Restore $VERIFY_TABLE on all 4 nodes (parallel) ==="
   [[ -f "$RESTORE_SQL" ]] || die "restore SQL not found: $RESTORE_SQL"
 
+  declare -a RESTORE_PIDS=(); declare -a RESTORE_NAMES=()
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
     remote_restore="$REMOTE_REPO_ROOT/scripts/restore_usertable_small.sql"
-    log "  Restoring $VERIFY_TABLE on $name"
+    log "  Restoring $VERIFY_TABLE on $name (background)"
     node_ssh "$idx" "
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
@@ -1376,8 +1494,14 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
       root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
       verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
       echo \"count=\$cnt root=\$root verify=\$verify\"
-    " 2>&1 | sed "s/^/  [$name] /" || die "restore failed on $name"
+    " 2>&1 | sed "s/^/  [$name] /" &
+    RESTORE_PIDS+=("$!"); RESTORE_NAMES+=("$name")
   done
+  RESTORE_ALL_OK=1
+  for i in "${!RESTORE_PIDS[@]}"; do
+    wait "${RESTORE_PIDS[$i]}" || { log "  restore FAILED on ${RESTORE_NAMES[$i]}"; RESTORE_ALL_OK=0; }
+  done
+  [[ "$RESTORE_ALL_OK" -eq 1 ]] || die "Phase 3.5 restore failed on one or more nodes"
 else
   log "=== Phase 3.5: Restore skipped (--skip-restore) ==="
 fi
