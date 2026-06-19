@@ -426,13 +426,25 @@ else
         done
       " >> "$slog" 2>&1
 
-      # Sync source tree (excludes .git, .venv, .bench_tmp, bench results)
+      # Sync source tree (excludes .git, .venv, .bench_tmp, bench results, and compiled binaries/configs)
       _rsync_allow_vanished -az --delete \
         --exclude='.git' \
         --exclude='.venv' \
         --exclude='.bench_tmp' \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
+        --exclude='*.o' \
+        --exclude='*.a' \
+        --exclude='*.so' \
+        --exclude='*.so.*' \
+        --exclude='config.status' \
+        --exclude='config.log' \
+        --exclude='config.cache' \
+        --exclude='GNUmakefile' \
+        --exclude='src/Makefile.global' \
+        --exclude='src/include/pg_config.h' \
+        --exclude='src/include/pg_config_ext.h' \
+        --exclude='src/interfaces/ecpg/include/ecpg_config.h' \
         --exclude='scripts/big_usertable.sql' \
         --exclude='scripts/bench_full_results' \
         --exclude='scripts/bench_results' \
