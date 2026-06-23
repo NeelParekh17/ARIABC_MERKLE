@@ -139,6 +139,7 @@ typedef struct _BCDBShmXact
     SHA256_CTX      state_hash;
     bool            has_war;
     bool            has_raw;
+	char            select_result[1024];
 
     uint64          create_time;
     uint64          start_simulation_time;

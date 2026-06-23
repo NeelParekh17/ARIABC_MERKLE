@@ -2032,14 +2032,16 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
             tx->status = TX_COMMITTING;
             bcdb_wait_for_slot_consumable(block, tx->tx_id, mem_txid);
+			memset(tx->select_result, 0, sizeof(tx->select_result));
             memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
             pg_write_barrier();
             __atomic_store_n(&block->result_commit_xid[mem_txid],
                              tx->xid, __ATOMIC_RELEASE);
             __atomic_store_n(&block->result_committed_txid[mem_txid],
                              tx->tx_id, __ATOMIC_RELEASE);
-            __atomic_store_n(&block->result_consumed_txid[mem_txid],
-                             (int32)tx->tx_id, __ATOMIC_RELEASE);
+			if (tx->block_id_committed == BCDBMaxBid)
+				__atomic_store_n(&block->result_consumed_txid[mem_txid],
+								 (int32)tx->tx_id, __ATOMIC_RELEASE);
 
             if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED)
                 set_published_max_txid(tx);
@@ -2233,10 +2235,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 else
                     bcdb_wait_for_serial_slot(tx, block); /* Lever D: gate on published_max */
                 PTRACE_END(BCDB_PHASE_GATE);
-                {
-                    int read_idx = bcdb_result_slot_for_txid(tx->tx_id);
-                    strlcpy(tx_result, block->result[read_idx], sizeof(tx_result));
-                }
+				strlcpy(tx_result, tx->select_result, sizeof(tx_result));
 
 #if SAFEDBG2
                 printf("safeDbg blk read result = %s\n", tx_result);
@@ -2507,6 +2506,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
              * can then run behind the result watermark without changing tx-id order.
              */
             bcdb_wait_for_slot_consumable(block, tx->tx_id, mem_txid);
+			memset(tx->select_result, 0, sizeof(tx->select_result));
             memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
 #if SAFEDBG3
             printf("safeDbg txid= %d mem-txid = %d \n", tx->tx_id, mem_txid);
@@ -2579,12 +2579,16 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                                  tx->tx_id, __ATOMIC_RELEASE);
 
                 /*
-                 * Self-consume: in direct psycopg mode the middleware never runs,
-                 * so mark consumed immediately after publishing.  In gateway mode
-                 * the middleware will also mark it; the idempotent store is harmless.
+				 * Self-consume only for direct psycopg transactions.  For
+				 * bcdb_block_submit_results(), the middleware owns the slot until
+				 * it has formatted the gateway response and publishes
+				 * result_consumed_txid itself.  Marking a block-submit result
+				 * consumed here lets a later tx reuse the ring slot before the
+				 * gateway-side reader has observed it.
                  */
-                __atomic_store_n(&block->result_consumed_txid[mem_txid],
-                                 (int32)tx->tx_id, __ATOMIC_RELEASE);
+				if (tx->block_id_committed == BCDBMaxBid)
+					__atomic_store_n(&block->result_consumed_txid[mem_txid],
+									 (int32)tx->tx_id, __ATOMIC_RELEASE);
 
                 bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_RESULT_US,
                                        finish_result_start);
