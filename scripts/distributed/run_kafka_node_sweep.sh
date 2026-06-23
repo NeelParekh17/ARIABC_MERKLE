@@ -28,14 +28,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # ---------------------------------------------------------------------------
 # Cluster topology (same as run_4node_raft_cluster.sh)
 # ---------------------------------------------------------------------------
-declare -a NODE_IDS=(1 2 3 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.179 10.129.148.248)
-declare -a NODE_NAMES=(neel-MS kartik anant-side utkarsh)
-declare -a NODE_USERS=(neel neel neel neel)
-declare -a NODE_IS_U22=(0 1 1 0)
-declare -a NODE_LABELS=("neel-MS (236)" "kartik (54)" "anant-side (179)" "utkarsh (248)")
+declare -a NODE_IDS=(1 2 4)
+declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.248)
+declare -a NODE_NAMES=(neel-MS kartik utkarsh)
+declare -a NODE_USERS=(neel neel neel)
+declare -a NODE_IS_U22=(0 1 0)
+declare -a NODE_LABELS=("neel-MS (236)" "kartik (54)" "utkarsh (248)")
 
-NODE_PASS_3="${ARIABC_PASS_NEEL_10_129_148_179:-sunil1165}"
+CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-sunil1165}"
 
 KAFKA_HOST="10.129.148.236"
 KAFKA_PORT=9092
@@ -103,11 +103,7 @@ die()  { echo "ERROR: $*" >&2; exit 1; }
 node_ssh() {
   local idx="$1"; shift
   local ip="${NODE_IPS[$idx]}" user="${NODE_USERS[$idx]}"
-  if [[ "$idx" -eq 2 ]]; then
-    sshpass -p "$NODE_PASS_3" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@"
-  else
-    ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$user@$ip" "$@"
-  fi
+  sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@"
 }
 
 # ---------------------------------------------------------------------------

@@ -31,9 +31,9 @@ namespace {
 constexpr const char* kBcdbMerkleTag = "BCDB_MERKLE_ROOTS:";
 // Majority-confirmed throughput is latency-sensitive: keep batches moderate so
 // reply visibility is not delayed too long.
-constexpr size_t kKafkaBatchMaxBytes = 128 * 1024;
-constexpr size_t kKafkaBatchMaxRecords = 64;
-constexpr int kKafkaBatchMaxDelayMs = 1;
+constexpr size_t kKafkaBatchMaxBytes = 512 * 1024;
+constexpr size_t kKafkaBatchMaxRecords = 256;
+constexpr int kKafkaBatchMaxDelayMs = 0;
 // Admission control watermarks are for the *queue depth* (ready+delayed), not
 // queue+inflight. In deterministic mode, inflight work is expected; excessive
 // queued work is what drives tail latency and straggler behavior.
@@ -1688,8 +1688,8 @@ void pg_executor::worker_loop() {
                 batch_raft_log_idxs.push_back(t.raft_log_idx);
                 batch_leader_hints.push_back(t.leader_node_hint);
                 batch_bytes += t.req_id.size() + result.size() + 32;
-                const size_t max_records = (q_depth_after_pop >= 64) ? 128 : kKafkaBatchMaxRecords;
-                const size_t max_bytes = (q_depth_after_pop >= 64) ? (256 * 1024) : kKafkaBatchMaxBytes;
+                const size_t max_records = (q_depth_after_pop >= 64) ? 512 : kKafkaBatchMaxRecords;
+                const size_t max_bytes = (q_depth_after_pop >= 64) ? (1024 * 1024) : kKafkaBatchMaxBytes;
                 const int max_delay_ms = (q_depth_after_pop >= 16) ? 0 : kKafkaBatchMaxDelayMs;
                 const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - batch_start).count();
@@ -2255,8 +2255,8 @@ void pg_executor::event_loop() {
         if (kafka_enabled_ && !batch_req_ids.empty()) {
             const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - batch_start).count();
-            const size_t max_records = (backlog >= 64) ? 128 : kKafkaBatchMaxRecords;
-            const size_t max_bytes = (backlog >= 64) ? (256 * 1024) : kKafkaBatchMaxBytes;
+            const size_t max_records = (backlog >= 64) ? 512 : kKafkaBatchMaxRecords;
+            const size_t max_bytes = (backlog >= 64) ? (1024 * 1024) : kKafkaBatchMaxBytes;
             const int max_delay_ms = (backlog >= 16) ? 0 : kKafkaBatchMaxDelayMs;
             if (batch_req_ids.size() >= max_records ||
                 batch_bytes >= max_bytes ||
