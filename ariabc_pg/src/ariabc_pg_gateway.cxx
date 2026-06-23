@@ -2543,7 +2543,7 @@ int main(int argc, char** argv) {
                     }
                     break;
                 }
-                poll_timeout_ms = 0; // Got data, poll aggressively next time
+                poll_timeout_ms = 1;
 
                 kafka_messages.fetch_add(static_cast<uint64_t>(kafka_batch.size()), std::memory_order_relaxed);
 

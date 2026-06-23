@@ -366,7 +366,7 @@ bool kafka_console_consumer::start_latest_multi(const std::string& bootstrap,
     }
 
     rk_ = reinterpret_cast<rd_kafka_s*>(rk);
-    busy_hint_ = false;
+    busy_hint_.store(false, std::memory_order_relaxed);
     return true;
 }
 
@@ -459,7 +459,7 @@ bool kafka_console_consumer::poll_message(std::string& payload_out,
     payload_out.clear();
     topic_out.clear();
     std::vector<kafka_consumed_message> out;
-    const int timeout = busy_hint_ ? 5 : 50;
+    const int timeout = busy_hint_.load(std::memory_order_relaxed) ? 5 : 50;
     if (!poll_batch_messages(out, 1, timeout, err)) {
         return false;
     }
@@ -473,7 +473,7 @@ bool kafka_console_consumer::poll_message(std::string& payload_out,
 }
 
 void kafka_console_consumer::set_busy_hint(bool busy) {
-    busy_hint_ = busy;
+    busy_hint_.store(busy, std::memory_order_relaxed);
 }
 
 kafka_consumer_stats kafka_console_consumer::stats() const {
@@ -487,7 +487,7 @@ void kafka_console_consumer::stop() {
         rd_kafka_destroy(rk);
         rk_ = nullptr;
     }
-    busy_hint_ = false;
+    busy_hint_.store(false, std::memory_order_relaxed);
 }
 
 } // namespace ariabc_pg
@@ -540,7 +540,7 @@ bool kafka_console_consumer::poll_message(std::string&, std::string&,
     err = "timeout";
     return false;
 }
-void kafka_console_consumer::set_busy_hint(bool busy) { busy_hint_ = busy; }
+void kafka_console_consumer::set_busy_hint(bool busy) { busy_hint_.store(busy, std::memory_order_relaxed); }
 kafka_consumer_stats kafka_console_consumer::stats() const { return stats_; }
 void kafka_console_consumer::stop() {}
 
