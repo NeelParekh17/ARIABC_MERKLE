@@ -544,21 +544,13 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 
 	if (is_bcdb_worker)
 	{
-		BCBlock *blk = get_block_by_id(1, false);
-		if (blk != NULL && activeTx != NULL)
+		if (activeTx != NULL)
 		{
-			int ring_slots = bcdb_get_runtime_result_ring_slots();
-			int slot_idx;
-
-			slot_idx = activeTx->tx_id % ring_slots;
-			if (slot_idx < 0)
-				slot_idx += ring_slots;
-
-			strlcpy(blk->result[slot_idx], rowStr, sizeof(blk->result[slot_idx]));
+			strlcpy(activeTx->select_result, rowStr, sizeof(activeTx->select_result));
 #if SAFEDBG2
-        printf("bcdb-worker blk id %d blksz %d myID %d !!! \n", blk->id, blk->blksize, activeTx->tx_id);
+		printf("bcdb-worker myID %d !!! \n", activeTx->tx_id);
         printf("bcdb-worker %s !!! \n", rowStr);
-        printf("blk printup result at %d= %s\n", slot_idx, blk->result[slot_idx]);
+		printf("activeTx select_result = %s\n", activeTx->select_result);
 #endif
 		}
 		//print_trace();
