@@ -69,7 +69,7 @@ bool debug_req_trace_enabled() {
 bool det_event_block_fastpath_enabled() {
     static const bool enabled = []() -> bool {
         const char* v = std::getenv("ARIABC_DET_EVENT_BLOCK_FASTPATH");
-        if (!v) return true;   // on by default; set =0 to disable
+        if (!v) return false;
         const std::string s = trim_copy(v);
         return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
     }();
@@ -2257,10 +2257,10 @@ void pg_executor::event_loop() {
                 std::chrono::steady_clock::now() - batch_start).count();
             const size_t max_records = (backlog >= 64) ? 512 : kKafkaBatchMaxRecords;
             const size_t max_bytes = (backlog >= 64) ? (1024 * 1024) : kKafkaBatchMaxBytes;
-            const int max_delay_ms = (backlog >= 16) ? 0 : kKafkaBatchMaxDelayMs;
+            const int max_delay_ms = (backlog >= 16) ? -1 : kKafkaBatchMaxDelayMs;
             if (batch_req_ids.size() >= max_records ||
                 batch_bytes >= max_bytes ||
-                age_ms >= max_delay_ms) {
+                (max_delay_ms >= 0 && age_ms >= max_delay_ms)) {
                 flush_batch();
             }
         }

@@ -102,7 +102,7 @@ public:
 
 private:
     rd_kafka_s* rk_;
-    bool busy_hint_;
+    std::atomic<bool> busy_hint_;
 
     kafka_consumer_stats stats_;
 };
