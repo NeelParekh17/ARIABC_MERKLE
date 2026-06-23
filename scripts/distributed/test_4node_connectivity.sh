@@ -15,11 +15,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-declare -a NODE_IDS=(1 2 3 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.179 10.129.148.248)
-declare -a NODE_NAMES=(admin123 user4 new-node utkarsh)
-declare -a NODE_USERS=(neel neel neel neel)
-NODE_PASS_3="${ARIABC_PASS_NEEL_10_129_148_179:-sunil1165}"
+declare -a NODE_IDS=(1 2 4)
+declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.248)
+declare -a NODE_NAMES=(admin123 user4 utkarsh)
+declare -a NODE_USERS=(neel neel neel)
+CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-sunil1165}"
 
 KAFKA_HOST="10.129.148.236"
 KAFKA_PORT=9092
@@ -51,11 +51,7 @@ node_ssh() {
   local idx="$1"; shift
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  if [[ "$idx" -eq 2 ]]; then
-    sshpass -p "$NODE_PASS_3" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "$user@$ip" "$@"
-  else
-    ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 "$user@$ip" "$@"
-  fi
+  sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "$user@$ip" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -188,7 +184,7 @@ WEOF
       --numTerminals 1 \
       --waitMajority 0 \
       --completionPath direct \
-      --totalNodes 4 \
+      --totalNodes ${#NODE_IDS[@]} \
       >"$GW_SMOKE_LOG" 2>&1; then
       ok "Gateway smoke test — 5 transactions submitted successfully"
       SUBMITTED="$(grep -o 'total_submitted=[0-9]*' "$GW_SMOKE_LOG" | tail -1 || echo '')"

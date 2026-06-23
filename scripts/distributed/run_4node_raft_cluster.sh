@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# run_4node_raft_cluster.sh — Bootstrap and test the full 4-node AriaBC distributed cluster.
+# run_4node_raft_cluster.sh — Bootstrap and test the AriaBC distributed cluster.
 #
 # Topology (from plan.txt):
 #   Node 1 (RAFT ID 1): admin123   10.129.148.236  neel  [Kafka host]  Ubuntu 24.04
 #   Node 2 (RAFT ID 2): user4      10.129.27.54    neel               Ubuntu 22.04
-#   Node 3 (RAFT ID 3): new-node   10.129.148.179  neel  [password]   Ubuntu 22.04
 #   Node 4 (RAFT ID 4): utkarsh    10.129.148.248  neel               Ubuntu 24.04
 #   Gateway            : ASUS laptop (this machine, local)
 #   Kafka broker       : 10.129.148.236:9092
@@ -24,9 +23,9 @@
 #   0. Cleanup — kill stale ariabc_pg_server via fuser (avoids pkill self-kill bug)
 #   1. Sync    — push source files + build on Ubuntu 22.04 nodes if binary missing
 #   2. Kafka   — ensure KRaft Kafka broker running on admin123
-#   3. Postgres — verify BCDB postgres on :5438 on all 4 nodes
+#   3. Postgres — verify BCDB postgres on :5438 on all configured nodes
 #   4. Servers  — start ariabc_pg_server on each node (background nohup)
-#   5. Wait    — poll until Raft leader is elected (all 4 nodes respond)
+#   5. Wait    — poll until Raft leader is elected (all configured nodes respond)
 #   6. Test    — run test workload through gateway (det mode, direct or kafka_majority;
 #                --ordering-mode kafka-only bypasses Raft and broadcasts ordered
 #                requests to all replicas while using Kafka completion/validation)
@@ -41,16 +40,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # ---------------------------------------------------------------------------
 # Cluster topology
 # ---------------------------------------------------------------------------
-declare -a NODE_IDS=(1 2 3 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.179 10.129.148.248)
-declare -a NODE_NAMES=(admin123 user4 new-node utkarsh)
-declare -a NODE_USERS=(neel neel neel neel)
+declare -a NODE_IDS=(1 2 4)
+declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.248)
+declare -a NODE_NAMES=(admin123 user4 utkarsh)
+declare -a NODE_USERS=(neel neel neel)
 # Ubuntu 22.04 nodes need locally-built binary (GLIBC 2.35, rdkafka from ~/Desktop/rdkafka_local)
-declare -a NODE_IS_U22=(0 1 1 0)
+declare -a NODE_IS_U22=(0 1 0)
 # utkarsh port 8000 is taken by HP printer snap; use 8001 instead
-declare -a NODE_CLIENT_PORTS=(8000 8000 8000 8001)
+declare -a NODE_CLIENT_PORTS=(8000 8000 8001)
 
-NODE_PASS_3="${ARIABC_PASS_NEEL_10_129_148_179:-sunil1165}"  # new-node password
+CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-sunil1165}"
 
 KAFKA_HOST="10.129.148.236"
 KAFKA_PORT=9092
@@ -113,20 +112,38 @@ REQ_ID_OFFSET="${REQ_ID_OFFSET:-1}"
 DET_WINDOW="${DET_WINDOW:-4096}"
 DET_BATCH_SIZE="${DET_BATCH_SIZE:-256}"
 NUM_TERMINALS="${NUM_TERMINALS:-1}"
+THREADS_ARG=""
+PER_THREAD_WINDOW="${PER_THREAD_WINDOW:-1024}"
+DET_WINDOW_EXPLICIT=0
+DET_BATCH_SIZE_EXPLICIT=0
+DET_PIPELINE_DEPTH_EXPLICIT=0
 CONN_FANOUT="${CONN_FANOUT:-1}"
+CONN_FANOUT_EXPLICIT=0
 SUBMIT_MODE="${SUBMIT_MODE:-event}"
 DET_SUBMIT_PIPELINE="${DET_SUBMIT_PIPELINE:-1}"
 DET_PIPELINE_DEPTH="${DET_PIPELINE_DEPTH:-0}"
 PG_EXEC_MODE="${PG_EXEC_MODE:-event}"
-DET_BLOCK_PARALLEL="${DET_BLOCK_PARALLEL:-1}"  # parallel PG conns per det block (1=legacy, 4-8=Lever1)
+DET_BLOCK_PARALLEL="${DET_BLOCK_PARALLEL:-16}"  # parallel PG conns per det block (1=legacy, 4-8=Lever1, 16=full core)
 DET_BLOCK_PIPELINE="${DET_BLOCK_PIPELINE:-1}"  # logical BCDB blocks per backend submit call
 DET_BLOCK_MAX="${DET_BLOCK_MAX:-2048}"         # max txs per backend deterministic block submit
 DET_PARTIAL_BLOCK_MAX_WAIT_US="${DET_PARTIAL_BLOCK_MAX_WAIT_US:-0}"  # low-latency partial deterministic blocks; 0=dispatch immediately
+# ---------------------------------------------------------------------------
+# Parallelism mode — mirrors how the single-node Python benchmark uses real
+# OS threads vs pipeline depth.
+#   pipeline   = current behaviour: one gateway process, N terminal lanes,
+#                deepening the DET window (pipeline depth scaling only).
+#   os-threads = split the workload into N equal sequential shards and launch
+#                N independent gateway processes in parallel (background &),
+#                each with its own detStartSeq range.  Like the Python script's
+#                ThreadPoolExecutor(max_workers=N) where each thread owns its
+#                own DB connection and a strided slice of the workload.
+# ---------------------------------------------------------------------------
+PARALLELISM_MODE="${PARALLELISM_MODE:-pipeline}"  # pipeline|os-threads
 BCDB_BLOCK_PROFILE="${BCDB_BLOCK_PROFILE:-0}"  # postgres-side bcdb_block_submit_results phase logging
 BCDB_BLOCK_WAIT_WATERMARK="${BCDB_BLOCK_WAIT_WATERMARK:-0}"  # 1=wait on block commit watermark instead of scanning every slot
 BCDB_PHASE_TRACE_ON="${BCDB_PHASE_TRACE_ON:-0}"  # postgres-side per-worker CSV phase traces
 BCDB_POLL_MAX_US="${BCDB_POLL_MAX_US:-8}"      # last known good 4-node run used 8us
-BCDB_SERIAL_GATE_MODE="${BCDB_SERIAL_GATE_MODE:-0}"  # 0=poll, 1=condvar published-max wakeups
+BCDB_SERIAL_GATE_MODE="${BCDB_SERIAL_GATE_MODE:-1}"  # 0=poll, 1=condvar published-max wakeups
 BCDB_SERIAL_GATE_SOURCE="${BCDB_SERIAL_GATE_SOURCE:-0}"  # 0=published-max handoff, 1=last-committed predecessor
 BCDB_DT_PARSE_BARRIER="${BCDB_DT_PARSE_BARRIER:-1}"  # 1 enables pre-gate parse barrier when block_txs <= workers
 BCDB_BLOCK_ENQUEUE_YIELD_EVERY="${BCDB_BLOCK_ENQUEUE_YIELD_EVERY:-0}"  # 0=off; tiny yield every N block enqueues
@@ -141,7 +158,7 @@ BCDB_DET_QUEUE_LOW_WM="${BCDB_DET_QUEUE_LOW_WM:-0}"    # >0 overrides determinis
 BCDB_FLOW_DEBUG="${BCDB_FLOW_DEBUG:-0}"      # 1=emit targeted worker/apply flow logs on cluster replicas
 ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-0}"  # 0=all replicas include full SQL results in Kafka
 ARIABC_RESULT_PUBLISH_REPLICA_LIMIT="${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT:-0}"  # 0=all replicas publish Kafka result records
-ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-0}"  # 0=Raft default election priority
+ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-0}"  # 0=Raft default election priority; 1=pin leader to admin123 (Kafka host)
 GATEWAY_BROADCAST_ACCEPT_QUORUM="${GATEWAY_BROADCAST_ACCEPT_QUORUM:-0}"  # 0=gateway legacy majority for broadcast accepts
 GATEWAY_BROADCAST_RESULT_QUORUM="${GATEWAY_BROADCAST_RESULT_QUORUM:-0}"  # 0=legacy accept-completion surface
 GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN:-1}"  # 1=legacy, 0=client-visible quorum time + post-run drain
@@ -151,6 +168,10 @@ BCDB_OVERWRITE_PROTECTION="${BCDB_OVERWRITE_PROTECTION:-0}"  # 0=off 1=Option-A 
 COLLECT_FINAL_SERVER_PROFILE="${COLLECT_FINAL_SERVER_PROFILE:-1}"
 SKIP_CLUSTER_LOGS="${SKIP_CLUSTER_LOGS:-0}"  # 1=skip fetching server/nuraft/postgres logs from cluster nodes
 
+# ===========================================================================
+# Function: usage
+# Description: Prints the command-line options and usage manual to stdout.
+# ===========================================================================
 usage() {
   cat <<'EOF'
 Usage: run_4node_raft_cluster.sh [options]
@@ -190,10 +211,34 @@ Options:
   --det-window N   Gateway deterministic in-flight window (default: 4096)
   --det-batch-size N
                   Gateway deterministic Raft batch size (default: 256)
+  --parallelism-mode M
+                  How N --threads/--num-terminals maps to actual concurrency:
+                    pipeline   (default) = one gateway process with N terminal
+                                lanes sharing one reactor; deepens DET window.
+                                Only pipeline depth scales, NOT OS-level
+                                parallelism (same as before).
+                    os-threads = mirrors the single-node Python script's
+                                ThreadPoolExecutor(max_workers=N).  Splits the
+                                workload into N equal sequential shards and
+                                launches N independent gateway processes in
+                                parallel (background &), each with its own
+                                socket+detStartSeq range.  Wall time = max
+                                across all workers.  True OS-level parallelism.
+  --threads N      Alias for --num-terminals N. In deterministic mode this
+                  models N client worker lanes, matching the single-machine
+                  traffic loader's worker-stride shape.
   --num-terminals N
-                  Gateway terminal count (default: 1)
+                  Gateway terminal/client-lane count (default: 1)
+  --per-thread-window N
+                  Per client-lane deterministic pipeline depth used with
+                  --threads when --det-window/--det-pipeline-depth are not
+                  explicitly set (default: 512). Effective detWindow becomes
+                  threads * per-thread-window.
   --conn-fanout N Gateway submit sockets per logical node in event submit mode
-                  (default: 1)
+                  (default: 1). Normal raft-kafka mode keeps one ordered
+                  submit stream unless this is explicitly overridden; kafka-only
+                  can auto-scale this with --threads because bypass-raft
+                  servers reorder deterministic ranges before enqueue.
   --broadcast-accept-quorum N
                   Broadcast async accept quorum before pipelining; 0=legacy
                   majority. Late accepts are still drained before exit.
@@ -293,15 +338,18 @@ while [[ $# -gt 0 ]]; do
     --verify-table) VERIFY_TABLE="${2:-}"; shift 2 ;;
     --det-start-seq) DET_START_SEQ="${2:-1}"; shift 2 ;;
     --req-id-offset) REQ_ID_OFFSET="${2:-1}"; shift 2 ;;
-    --det-window)   DET_WINDOW="${2:-4096}"; shift 2 ;;
-    --det-batch-size) DET_BATCH_SIZE="${2:-256}"; shift 2 ;;
+    --det-window)   DET_WINDOW="${2:-4096}"; DET_WINDOW_EXPLICIT=1; shift 2 ;;
+    --det-batch-size) DET_BATCH_SIZE="${2:-256}"; DET_BATCH_SIZE_EXPLICIT=1; shift 2 ;;
+    --threads) THREADS_ARG="${2:-1}"; NUM_TERMINALS="${2:-1}"; shift 2 ;;
     --num-terminals) NUM_TERMINALS="${2:-1}"; shift 2 ;;
-    --conn-fanout) CONN_FANOUT="${2:-1}"; shift 2 ;;
+    --per-thread-window) PER_THREAD_WINDOW="${2:-512}"; shift 2 ;;
+    --conn-fanout) CONN_FANOUT="${2:-1}"; CONN_FANOUT_EXPLICIT=1; shift 2 ;;
     --broadcast-accept-quorum) GATEWAY_BROADCAST_ACCEPT_QUORUM="${2:-0}"; shift 2 ;;
     --broadcast-result-quorum) GATEWAY_BROADCAST_RESULT_QUORUM="${2:-0}"; shift 2 ;;
     --broadcast-drain-in-timed-run) GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${2:-1}"; shift 2 ;;
     --direct-completion-quorum) GATEWAY_DIRECT_COMPLETION_QUORUM="${2:-1}"; shift 2 ;;
-    --det-pipeline-depth) DET_PIPELINE_DEPTH="${2:-0}"; shift 2 ;;
+    --det-pipeline-depth) DET_PIPELINE_DEPTH="${2:-0}"; DET_PIPELINE_DEPTH_EXPLICIT=1; shift 2 ;;
+    --parallelism-mode) PARALLELISM_MODE="${2:-pipeline}"; shift 2 ;;
     --submit-mode)  SUBMIT_MODE="${2:-event}"; shift 2 ;;
     --pg-exec-mode) PG_EXEC_MODE="${2:-event}"; shift 2 ;;
     --det-block-parallel) DET_BLOCK_PARALLEL="${2:-1}"; shift 2 ;;
@@ -381,14 +429,46 @@ if [[ "$DET_BATCH_SIZE" -lt 1 ]]; then
   echo "ERROR: --det-batch-size must be >= 1" >&2
   exit 2
 fi
-if [[ "$NUM_TERMINALS" -lt 1 || "$DET_PIPELINE_DEPTH" -lt 0 ]]; then
-  echo "ERROR: --num-terminals must be >= 1 and --det-pipeline-depth must be >= 0" >&2
+if [[ "$NUM_TERMINALS" -lt 1 || "$DET_PIPELINE_DEPTH" -lt 0 || "$PER_THREAD_WINDOW" -lt 1 ]]; then
+  echo "ERROR: --num-terminals/--threads and --per-thread-window must be >= 1; --det-pipeline-depth must be >= 0" >&2
   exit 2
+fi
+if [[ -n "$THREADS_ARG" ]]; then
+  if [[ "$DET_WINDOW_EXPLICIT" -eq 0 ]]; then
+    DET_WINDOW=$(( NUM_TERMINALS * PER_THREAD_WINDOW ))
+  fi
+  if [[ "$DET_PIPELINE_DEPTH_EXPLICIT" -eq 0 || "$DET_PIPELINE_DEPTH" -eq 0 ]]; then
+    DET_PIPELINE_DEPTH="$PER_THREAD_WINDOW"
+  fi
+  if [[ "$CONN_FANOUT_EXPLICIT" -eq 0 && "$ORDERING_MODE" == "kafka-only" ]]; then
+    CONN_FANOUT="$NUM_TERMINALS"
+  fi
 fi
 if [[ "$CONN_FANOUT" -lt 1 ]]; then
   echo "ERROR: --conn-fanout must be >= 1" >&2
   exit 2
 fi
+# os-threads mode does NOT need connFanout > 1 — each gateway subprocess has its
+# own single socket.  Only validate the fanout restriction in pipeline mode.
+if [[ "$PARALLELISM_MODE" != "os-threads" ]]; then
+  if [[ "$ORDERING_MODE" == "raft-kafka" && "$CONN_FANOUT" -gt 1 && "${ARIABC_ALLOW_RAFT_FANOUT:-0}" != "1" ]]; then
+    echo "ERROR: --conn-fanout > 1 is disabled for raft-kafka deterministic runs." >&2
+    echo "       The current Raft leader appends directly from each client socket without" >&2
+    echo "       a deterministic range reorderer, so multi-socket fanout can reorder batches" >&2
+    echo "       and stall majority completion. Use --threads with ordered fanout=1, switch" >&2
+    echo "       to --ordering-mode kafka-only, --parallelism-mode os-threads, or set" >&2
+    echo "       ARIABC_ALLOW_RAFT_FANOUT=1 for an explicit unsafe experiment." >&2
+    exit 2
+  fi
+fi
+case "$PARALLELISM_MODE" in
+  pipeline|pipe) PARALLELISM_MODE="pipeline" ;;
+  os-threads|os_threads|threads|parallel) PARALLELISM_MODE="os-threads" ;;
+  *)
+    echo "ERROR: --parallelism-mode must be pipeline or os-threads (got $PARALLELISM_MODE)" >&2
+    exit 2
+    ;;
+esac
 if [[ "$GATEWAY_BROADCAST_ACCEPT_QUORUM" -lt 0 ]]; then
   echo "ERROR: --broadcast-accept-quorum must be >= 0" >&2
   exit 2
@@ -513,16 +593,21 @@ fi
 # ---------------------------------------------------------------------------
 # SSH helpers (handles new-node password auth transparently)
 # ---------------------------------------------------------------------------
+# ===========================================================================
+# Function: node_ssh
+# Description: Executes a command on a remote node via SSH using sshpass.
+# Arguments:
+#   $1 (idx)  - Index of the target node (0..3).
+#   $@ (rest) - Command to execute.
+# Behavior:
+#   - Uses sshpass with CLUSTER_PASSWORD.
+#   - Optional timeout can be set via NODE_SSH_COMMAND_TIMEOUT.
+# ===========================================================================
 node_ssh() {
   local idx="$1"; shift
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  local cmd=()
-  if [[ "$idx" -eq 2 ]]; then
-    cmd=(sshpass -p "$NODE_PASS_3" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@")
-  else
-    cmd=(ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$user@$ip" "$@")
-  fi
+  local cmd=(sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@")
   if [[ -n "${NODE_SSH_COMMAND_TIMEOUT:-}" && "${NODE_SSH_COMMAND_TIMEOUT:-0}" != "0" ]]; then
     timeout "$NODE_SSH_COMMAND_TIMEOUT" "${cmd[@]}"
   else
@@ -530,32 +615,47 @@ node_ssh() {
   fi
 }
 
+# ===========================================================================
+# Function: node_rsync_to
+# Description: Synchronously syncs a file or directory from the gateway to
+#              a remote node using sshpass.
+# Arguments:
+#   $1 (idx) - Index of the remote node.
+#   $2 (src) - Source path on the local gateway.
+#   $3 (dst) - Destination path on the remote node.
+# ===========================================================================
 node_rsync_to() {
   local idx="$1"; local src="$2"; local dst="$3"
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  if [[ "$idx" -eq 2 ]]; then
-    sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$src" "$user@$ip:$dst"
-  else
-    rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$src" "$user@$ip:$dst"
-  fi
+  sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    "$src" "$user@$ip:$dst"
 }
 
+# ===========================================================================
+# Function: node_rsync_from
+# Description: Synchronously syncs a file or directory from a remote node
+#              to the local gateway using sshpass.
+# Arguments:
+#   $1 (idx) - Index of the remote node.
+#   $2 (src) - Source path on the remote node.
+#   $3 (dst) - Destination path on the local gateway.
+# ===========================================================================
 node_rsync_from() {
   local idx="$1"; local src="$2"; local dst="$3"
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  if [[ "$idx" -eq 2 ]]; then
-    sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$user@$ip:$src" "$dst"
-  else
-    rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$user@$ip:$src" "$dst"
-  fi
+  sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    "$user@$ip:$src" "$dst"
 }
 
+# ===========================================================================
+# Function: collect_cluster_logs
+# Description: Downloads server, NuRaft, PostgreSQL, and optional phase
+#              trace logs from all configured remote nodes in the cluster.
+# Arguments:
+#   $1 (label) - Output header text (optional).
+# ===========================================================================
 collect_cluster_logs() {
   local label="${1:-Collecting server logs from all nodes...}"
   local log_rsync_timeout="${LOG_RSYNC_TIMEOUT:-20}"
@@ -572,83 +672,80 @@ collect_cluster_logs() {
     REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
     REMOTE_NURAFT_LOG="/home/neel/ariabc_pg_srv${id}.log"
     REMOTE_PG_LOG="$REMOTE_REPO_ROOT/server.log"
-    if [[ "$idx" -eq 2 ]]; then
-      timeout "$log_rsync_timeout" sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
-      timeout "$log_rsync_timeout" sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
-      timeout "$log_rsync_timeout" sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
-      if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
-        timeout "$log_rsync_timeout" sshpass -p "$NODE_PASS_3" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-          "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
-          "$LOG_DIR/" 2>/dev/null || true
-      fi
-    else
-      timeout "$log_rsync_timeout" rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
-      timeout "$log_rsync_timeout" rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
-      timeout "$log_rsync_timeout" rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
-      if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
-        timeout "$log_rsync_timeout" rsync -az -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-          "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
-          "$LOG_DIR/" 2>/dev/null || true
-      fi
+    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+      "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
+    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+      "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
+    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+      "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
+    if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
+      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+        "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
+        "$LOG_DIR/" 2>/dev/null || true
     fi
   done
 }
 
+# ===========================================================================
+# Function: node_rsync_repo
+# Description: Syncs the local codebase to the remote node using sshpass,
+#              omitting git, venv, caches, and test result directories.
+# Arguments:
+#   $1 (idx) - Index of the remote node.
+# ===========================================================================
 node_rsync_repo() {
   local idx="$1"
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  if [[ "$idx" -eq 2 ]]; then
-    sshpass -p "$NODE_PASS_3" rsync -az --delete \
-      --exclude='.git' \
-      --exclude='.venv' \
-      --exclude='.bench_tmp' \
-      --exclude='__pycache__' \
-      --exclude='*.pyc' \
-      --exclude='conftest*' \
-      --exclude='scripts/bench_full_results' \
-      --exclude='scripts/bench_results' \
-      -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$REPO_ROOT/" "$user@$ip:$REMOTE_REPO_ROOT/"
-  else
-    rsync -az --delete \
-      --exclude='.git' \
-      --exclude='.venv' \
-      --exclude='.bench_tmp' \
-      --exclude='__pycache__' \
-      --exclude='*.pyc' \
-      --exclude='conftest*' \
-      --exclude='scripts/bench_full_results' \
-      --exclude='scripts/bench_results' \
-      -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$REPO_ROOT/" "$user@$ip:$REMOTE_REPO_ROOT/"
-  fi
+  sshpass -p "$CLUSTER_PASSWORD" rsync -az --delete \
+    --exclude='.git' \
+    --exclude='.venv' \
+    --exclude='.bench_tmp' \
+    --exclude='__pycache__' \
+    --exclude='*.pyc' \
+    --exclude='conftest*' \
+    --exclude='scripts/bench_full_results' \
+    --exclude='scripts/bench_results' \
+    -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    "$REPO_ROOT/" "$user@$ip:$REMOTE_REPO_ROOT/"
 }
 
+# ===========================================================================
+# Function: node_rsync_install
+# Description: Syncs the compiled local PostgreSQL installation binaries and
+#              library files to the remote node using sshpass.
+# Arguments:
+#   $1 (idx) - Index of the remote node.
+# ===========================================================================
 node_rsync_install() {
   local idx="$1"
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  if [[ "$idx" -eq 2 ]]; then
-    sshpass -p "$NODE_PASS_3" rsync -az --delete \
-      -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$LOCAL_INSTALL_DIR/" "$user@$ip:$REMOTE_INSTALL_DIR/"
-  else
-    rsync -az --delete \
-      -e "ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$LOCAL_INSTALL_DIR/" "$user@$ip:$REMOTE_INSTALL_DIR/"
-  fi
+  sshpass -p "$CLUSTER_PASSWORD" rsync -az --delete \
+    -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    "$LOCAL_INSTALL_DIR/" "$user@$ip:$REMOTE_INSTALL_DIR/"
 }
 
+# ===========================================================================
+# Function: log
+# Description: Prints a message to stdout prefixed by [HH:MM:SS].
+# ===========================================================================
 log() { echo "[$(date +'%H:%M:%S')] $*"; }
+
+# ===========================================================================
+# Function: die
+# Description: Prints an error message to stderr and terminates execution with
+#              status code 1.
+# ===========================================================================
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# ===========================================================================
+# Function: collect_final_profiles_before_fail
+# Description: Terminated servers on SIGTERM to flush performance profiles,
+#              then fetches all logs from nodes before terminating in a failure path.
+# Arguments:
+#   $1 (reason) - Reason for failure.
+# ===========================================================================
 collect_final_profiles_before_fail() {
   local reason="${1:-failure}"
   if [[ "$COLLECT_FINAL_SERVER_PROFILE" == "0" ]]; then
@@ -666,6 +763,13 @@ collect_final_profiles_before_fail() {
   collect_cluster_logs "  Collecting failure-path server logs with PROFILE_SERVER lines..."
 }
 
+# ===========================================================================
+# Function: find_local_cmake_tarball
+# Description: Checks locally cached locations for a portable CMake tarball
+#              to avoid duplicate downloads.
+# Returns:
+#   Outputs path to stdout and returns 0 if found; returns 1 if not found.
+# ===========================================================================
 find_local_cmake_tarball() {
   local candidate
   for candidate in /tmp/cmake-3.28.3-linux-x86_64.tar.gz "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
@@ -677,6 +781,13 @@ find_local_cmake_tarball() {
   return 1
 }
 
+# ===========================================================================
+# Function: ensure_u22_cmake
+# Description: Checks for cmake on the remote Ubuntu 22.04 node, staging and
+#              extracting a portable build if missing.
+# Arguments:
+#   $1 (idx) - Node index.
+# ===========================================================================
 ensure_u22_cmake() {
   local idx="$1"
   local name="${NODE_NAMES[$idx]}"
@@ -711,6 +822,12 @@ ensure_u22_cmake() {
   " 2>&1 | sed "s/^/[$name] /" || die "failed to stage portable CMake on $name"
 }
 
+# ===========================================================================
+# Function: build_raft_members
+# Description: Constructs the list of endpoints to boot the Raft cluster.
+# Returns:
+#   Outputs a comma-separated list of "id=ip:port" mappings.
+# ===========================================================================
 build_raft_members() {
   local members=""
   for i in "${!NODE_IDS[@]}"; do
@@ -857,11 +974,18 @@ BUILD_STAMP_DIR="$REPO_ROOT/scripts/.bench_tmp"
 BUILD_STAMP_FILE="$BUILD_STAMP_DIR/build_stamp"
 mkdir -p "$BUILD_STAMP_DIR"
 
+# ===========================================================================
+# Function: _compute_src_hash
+# Description: Computes a SHA256 checksum of code and parameters to determine
+#              if remote/local builds can be skipped.
+# Returns:
+#   Outputs a SHA256 string representing the source tree state.
+# ===========================================================================
 _compute_src_hash() {
   # Hash C/C++ sources + key header + ring capacity value
   {
     find "$REPO_ROOT/src" "$REPO_ROOT/ariabc_pg" \
-      \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
+      \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
       -not -path '*/build/*' -not -path '*/.git/*' \
       -exec sha256sum {} \; 2>/dev/null | sort
     echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
@@ -1148,22 +1272,61 @@ else
 fi
 
 "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" \
-  --create --topic "$KAFKA_RESULT_TOPIC" --partitions 4 --replication-factor 1 \
+  --create --topic "$KAFKA_RESULT_TOPIC" --partitions ${#NODE_IDS[@]} --replication-factor 1 \
   --if-not-exists >/dev/null 2>&1 || true
 echo "Topic '$KAFKA_RESULT_TOPIC' ready"
 KAFKA_EOF
   log "  Kafka ready"
+
+  # --- Kafka consumer-lag preflight (detects stale broker state) ----------
+  # After repeated benchmark runs the broker may accumulate old log segments
+  # and high-water-mark offsets from prior consumer groups.  A warm broker
+  # with 80k+ stale records can add 400-700ms of end-to-end consume latency
+  # (vs ~100ms on a clean broker), costing ~1000 TPS in a kafka_majority
+  # completion path.  Resetting the topic before each workload eliminates
+  # this source of non-determinism.
+  log "  Preflight: resetting topic $KAFKA_RESULT_TOPIC to flush stale offsets..."
+  node_ssh 0 bash <<KAFKA_FLUSH_EOF
+set -euo pipefail
+KAFKA_HOME="$KAFKA_HOME_REMOTE"
+TOPICS_SH="\$KAFKA_HOME/bin/kafka-topics.sh"
+CONSUMER_SH="\$KAFKA_HOME/bin/kafka-console-consumer.sh"
+PRODUCER_SH="\$KAFKA_HOME/bin/kafka-console-producer.sh"
+BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
+TOPIC="$KAFKA_RESULT_TOPIC"
+if ! command -v java >/dev/null 2>&1; then
+  export JAVA_HOME="/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64"
+  export PATH="\$JAVA_HOME/bin:\$PATH"
+fi
+
+# Delete and recreate the topic to zero out all offsets and log segments.
+"\$TOPICS_SH" --bootstrap-server "\$BOOTSTRAP" --delete --topic "\$TOPIC" >/dev/null 2>&1 || true
+sleep 1
+"\$TOPICS_SH" --bootstrap-server "\$BOOTSTRAP" --create --topic "\$TOPIC" --partitions ${#NODE_IDS[@]} --replication-factor 1 --if-not-exists >/dev/null 2>&1
+sleep 1
+
+# Quick smoke check: produce+consume a test record to confirm broker is responsive.
+TEST_MSG="kafka_preflight_\$(date +%s)"
+echo "\$TEST_MSG" | "\$PRODUCER_SH" --bootstrap-server "\$BOOTSTRAP" --topic "\$TOPIC" 2>/dev/null
+RESULT="\$("\$CONSUMER_SH" --bootstrap-server "\$BOOTSTRAP" --topic "\$TOPIC" --from-beginning --timeout-ms 5000 2>/dev/null | head -1)"
+if [[ "\$RESULT" == *"\$TEST_MSG"* ]]; then
+  echo "Kafka preflight PASS (broker responsive, topic fresh)"
+else
+  echo "Kafka preflight WARN: smoke test message not confirmed (broker may be slow)" >&2
+fi
+KAFKA_FLUSH_EOF
+  log "  Kafka preflight complete"
 else
   [[ "$NO_KAFKA" -eq 1 ]] && log "  Skipping Kafka (--no-kafka mode)"
   [[ "$SKIP_KAFKA" -eq 1 ]] && log "  Skipping Kafka setup (--skip-kafka)"
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 3: Verify BCDB postgres on all 4 nodes (parallel)
+# Phase 3: Verify BCDB postgres on all configured nodes (parallel)
 # Each node's SSH command writes a status line to a temp file so we can run
 # all four verify/restart sessions concurrently and validate results serially.
 # ---------------------------------------------------------------------------
-log "=== Phase 3: Verify BCDB postgres on all 4 nodes (parallel) ==="
+log "=== Phase 3: Verify BCDB postgres on all ${#NODE_IDS[@]} nodes (parallel) ==="
 declare -a PG3_PIDS=()
 declare -a PG3_STATUS_FILES=()
 for idx in "${!NODE_IDS[@]}"; do
@@ -1187,6 +1350,7 @@ for idx in "${!NODE_IDS[@]}"; do
     export BCDB_DECOUPLE_WORKERS='$BCDB_DECOUPLE_WORKERS'
     export BCDB_DT_LIGHT_SNAPSHOT='$BCDB_DT_LIGHT_SNAPSHOT'
     export BCDB_DT_SKIP_READONLY_GATE='$BCDB_DT_SKIP_READONLY_GATE'
+    > '$REMOTE_REPO_ROOT/server.log'
     if [[ -f \"\$PGDATA/postgresql.auto.conf\" ]]; then
       sed -i -E \"s/^(bcdb_result_ring_slots[[:space:]]*=[[:space:]]*)'?[0-9]+'?/\\1'$RESULT_RING_CAPACITY'/\" \"\$PGDATA/postgresql.auto.conf\"
       if [[ '$BCDB_OVERWRITE_PROTECTION' == '0' ]]; then
@@ -1200,6 +1364,12 @@ for idx in "${!NODE_IDS[@]}"; do
     else
       unset BCDB_PHASE_TRACE
     fi
+    # -----------------------------------------------------------------------
+    # Function: hard_stop_benchmark_postgres (Executed on remote node)
+    # Description: Forcibly kills any running PostgreSQL processes associated with
+    #              the benchmark user. Cleans up stale postmaster.pid files
+    #              and detaches lingering shared memory segments.
+    # -----------------------------------------------------------------------
     hard_stop_benchmark_postgres() {
       echo '  hard-stopping stale benchmark postgres if needed'
       old_pid=''
@@ -1257,6 +1427,11 @@ for idx in "${!NODE_IDS[@]}"; do
         fi
       fi
     }
+    # -----------------------------------------------------------------------
+    # Function: ensure_ready (Executed on remote node)
+    # Description: Verifies if Postgres is running on DB_PORT. If not, calls
+    #              hard_stop_benchmark_postgres and attempts starting it.
+    # -----------------------------------------------------------------------
     ensure_ready() {
       if \$BIN/pg_isready -h 127.0.0.1 -p $DB_PORT -U $DB_USER >/dev/null 2>&1; then
         return 0
@@ -1447,7 +1622,7 @@ done
 # benchmark nodes). Create that role if it is missing so bcdb_init can start.
 # ---------------------------------------------------------------------------
 
-log "=== Phase 3.2: Ensure local benchmark role exists on all 4 nodes (parallel) ==="
+log "=== Phase 3.2: Ensure local benchmark role exists on all ${#NODE_IDS[@]} nodes (parallel) ==="
 declare -a ROLE_PIDS=(); declare -a ROLE_NAMES=()
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
@@ -1472,12 +1647,12 @@ for i in "${!ROLE_PIDS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Phase 3.5: Restore benchmark table state on all 4 nodes
+# Phase 3.5: Restore benchmark table state on all configured nodes
 # The distributed run is meaningful only if every replica starts from the same
 # table contents and Merkle index.  The restore SQL also calls bcdb_reset().
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_RESTORE" -eq 0 ]]; then
-  log "=== Phase 3.5: Restore $VERIFY_TABLE on all 4 nodes (parallel) ==="
+  log "=== Phase 3.5: Restore $VERIFY_TABLE on all ${#NODE_IDS[@]} nodes (parallel) ==="
   [[ -f "$RESTORE_SQL" ]] || die "restore SQL not found: $RESTORE_SQL"
 
   declare -a RESTORE_PIDS=(); declare -a RESTORE_NAMES=()
@@ -1515,7 +1690,7 @@ fi
 #   - Nodes 1-3: clientPort=8000
 #   - Node 4 (utkarsh): clientPort=8001 (8000 taken by HP printer snap)
 # ---------------------------------------------------------------------------
-log "=== Phase 4: Starting ariabc_pg_server on all 4 nodes ==="
+log "=== Phase 4: Starting ariabc_pg_server on all ${#NODE_IDS[@]} nodes ==="
 
 REMOTE_LOG_DIR="/tmp/ariabc_cluster"
 KAFKA_ARGS=""
@@ -1559,6 +1734,7 @@ for start_pos in "${!START_ORDER[@]}"; do
   node_ssh "$idx" "
 	    mkdir -p '$REMOTE_LOG_DIR'
 	    rm -f '$REMOTE_SRV_LOG'
+	    rm -f '/home/neel/ariabc_pg_srv${id}.log'
 	    export LD_LIBRARY_PATH='${NODE_LIB_PATH}:\${LD_LIBRARY_PATH:-}'
 	    export ARIABC_PROFILE='${ARIABC_PROFILE:-1}'
 	    export ARIABC_DET_BLOCK_PARALLEL='${DET_BLOCK_PARALLEL}'
@@ -1596,7 +1772,7 @@ for start_pos in "${!START_ORDER[@]}"; do
   fi
 done
 
-log "  All 4 server launch commands sent"
+log "  All ${#NODE_IDS[@]} server launch commands sent"
 
 # ---------------------------------------------------------------------------
 # Phase 5: Wait for Raft cluster to stabilize
@@ -1618,8 +1794,8 @@ for attempt in $(seq 1 "$MAX_WAIT"); do
     fi
   done
 
-  if [[ "$UP" -ge 4 ]]; then
-    log "  All 4 server client ports responding (attempt $attempt)"
+  if [[ "$UP" -ge ${#NODE_IDS[@]} ]]; then
+    log "  All ${#NODE_IDS[@]} server client ports responding (attempt $attempt)"
     ALL_UP=1
     break
   fi
@@ -1630,7 +1806,7 @@ for attempt in $(seq 1 "$MAX_WAIT"); do
   sleep 1
 done
 
-[[ "$ALL_UP" -eq 0 ]] && log "WARNING: Not all 4 nodes responded within ${MAX_WAIT}s"
+[[ "$ALL_UP" -eq 0 ]] && log "WARNING: Not all ${#NODE_IDS[@]} nodes responded within ${MAX_WAIT}s"
 
 if [[ "$BYPASS_RAFT" -eq 1 ]]; then
   sleep 2
@@ -1671,6 +1847,13 @@ if [[ ! -x "$GW_BIN" ]]; then
   die "ariabc_pg_gateway not found at $GW_BIN — build it: cmake --build ariabc_pg/build -j\$(nproc)"
 fi
 log "  Gateway binary: $GW_BIN"
+# Skip per-record HMAC signature verification in trusted cluster runs.
+# verify_result_signature() is called for every single Kafka reply record
+# (N nodes x 20k tx = many HMAC-SHA256 calls per run). In a trusted cluster
+# the hash-based majority check is sufficient; full sig verification is only
+# needed when running against potentially Byzantine nodes.
+export ARIABC_TRUSTED_RESULT_SIG_FASTPATH=1
+
 
 if [[ ! -f "$WORKLOAD_FILE" ]]; then
   log "  Workload file not found at $WORKLOAD_FILE — using minimal inline test"
@@ -1684,9 +1867,9 @@ log "  Running bcdb_init preflight probe before workload..."
 PRECHECK_SQL="$LOG_DIR/bcdb_init_probe.sql"
 PRECHECK_LOG="$LOG_DIR/bcdb_init_probe.log"
 printf 'SELECT 1;\n' > "$PRECHECK_SQL"
-GW_PRECHECK_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes 4"
+GW_PRECHECK_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes ${#NODE_IDS[@]}"
 if [[ "$BYPASS_RAFT" -eq 1 ]]; then
-  GW_PRECHECK_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes 4 --broadcastToAll 1"
+  GW_PRECHECK_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes ${#NODE_IDS[@]} --broadcastToAll 1"
 fi
 if ! "$GW_BIN" \
   --nodes "$GW_NODES" \
@@ -1726,16 +1909,16 @@ for idx in "${!NODE_IDS[@]}"; do
   log "  [$name] bcdb_init: ${status_line:-missing}"
 done
 
-if [[ "$BCDB_ENABLED" -ne 4 || "$BCDB_SKIPPED" -ne 0 || "$BCDB_MISSING" -ne 0 ]]; then
-  die "bcdb_init is not uniformly enabled across all 4 nodes (enabled=$BCDB_ENABLED skipped=$BCDB_SKIPPED missing=$BCDB_MISSING)"
+if [[ "$BCDB_ENABLED" -ne ${#NODE_IDS[@]} || "$BCDB_SKIPPED" -ne 0 || "$BCDB_MISSING" -ne 0 ]]; then
+  die "bcdb_init is not uniformly enabled across all ${#NODE_IDS[@]} nodes (enabled=$BCDB_ENABLED skipped=$BCDB_SKIPPED missing=$BCDB_MISSING)"
 fi
 
 GW_EXTRA_ARGS=""
 if [[ "$NO_KAFKA" -eq 0 ]]; then
   if [[ "$KAFKA_COMPLETION_MODE" == "majority" ]]; then
-    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes 4"
+    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes ${#NODE_IDS[@]}"
   else
-    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 0 --completionPath direct --validationMode async_hash --totalNodes 4 --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
+    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 0 --completionPath direct --validationMode async_hash --totalNodes ${#NODE_IDS[@]} --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
   fi
   if [[ "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
     GW_EXTRA_ARGS="$GW_EXTRA_ARGS --broadcastToAll 1"
@@ -1748,36 +1931,241 @@ if [[ "$NO_KAFKA" -eq 0 ]]; then
     GW_EXTRA_ARGS="$GW_EXTRA_ARGS --broadcastDrainInTimedRun $GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN"
   fi
 else
-  GW_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes 4 --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
+  GW_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes ${#NODE_IDS[@]} --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
 fi
 
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM"
 log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS connFanout=$CONN_FANOUT broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+# Print a clear banner that distinguishes pipeline-depth from real OS parallelism
+# so this output can be compared honestly against the single-node Python script:
+#   pipeline   → N terminal lanes / single reactor (DET window grows, not OS threads)
+#   os-threads → N independent gateway subprocesses (real OS-level parallelism)
+if [[ "$PARALLELISM_MODE" == "os-threads" ]]; then
+  log "  Parallelism:   os-threads (${NUM_TERMINALS} independent gateway procs in parallel, each owns 1/${NUM_TERMINALS} of workload — mirrors Python ThreadPoolExecutor(max_workers=${NUM_TERMINALS}))"
+else
+  log "  Parallelism:   pipeline (${NUM_TERMINALS} terminal lanes / 1 reactor — pipeline depth scaling only; NOT comparable to OS thread count)"
+  log "  NOTE: submit_time in gateway output is the CUMULATIVE sum across async submissions, NOT wall-clock; actual wall time = overall_wall_ms"
+fi
 
 START_S="$(date +%s)"
 
-if ! "$GW_BIN" \
-  --nodes "$GW_NODES" \
-  --queryFrom "$WORKLOAD_FILE" \
-  --dbType 1 \
-  --detStartSeq "$DET_START_SEQ" \
-  --reqIdOffset "$REQ_ID_OFFSET" \
-  --detWindow "$DET_WINDOW" \
-  --detBatchSize "$DET_BATCH_SIZE" \
-  --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
-  --submitMode "$SUBMIT_MODE" \
-  --detSubmitPipeline "$DET_SUBMIT_PIPELINE" \
-  --detPipelineDepth "$DET_PIPELINE_DEPTH" \
-  ${POLL_COUNT:+--pollCount $POLL_COUNT} \
-  ${POLL_INTERVAL_US:+--pollIntervalUs $POLL_INTERVAL_US} \
-  --clientId "cluster-ycsb" \
-  --numTerminals "$NUM_TERMINALS" \
-  --connFanout "$CONN_FANOUT" \
-  $GW_EXTRA_ARGS \
-  2>&1 | tee "$GW_LOG"; then
-  log "WARNING: Gateway exited with non-zero status — check $GW_LOG"
+# ---------------------------------------------------------------------------
+# Helper: build common gateway args array (shared by both modes)
+# ---------------------------------------------------------------------------
+_gw_common_args() {
+  local det_start="$1"
+  local req_offset="$2"
+  local num_terms="$3"
+  local det_win="$4"
+  local client_id="$5"
+  printf '%s\n' \
+    --nodes "$GW_NODES" \
+    --dbType 1 \
+    --detStartSeq "$det_start" \
+    --reqIdOffset "$req_offset" \
+    --detWindow "$det_win" \
+    --detBatchSize "$DET_BATCH_SIZE" \
+    --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
+    --submitMode "$SUBMIT_MODE" \
+    --detSubmitPipeline "$DET_SUBMIT_PIPELINE" \
+    --detPipelineDepth "$DET_PIPELINE_DEPTH" \
+    --clientId "$client_id" \
+    --numTerminals "$num_terms" \
+    --connFanout "$CONN_FANOUT"
+  [[ -n "${POLL_COUNT:-}" ]] && printf '%s\n' --pollCount "$POLL_COUNT"
+  [[ -n "${POLL_INTERVAL_US:-}" ]] && printf '%s\n' --pollIntervalUs "$POLL_INTERVAL_US"
+  # Append extra args word-by-word
+  for _ga in $GW_EXTRA_ARGS; do printf '%s\n' "$_ga"; done
+}
+
+# ---------------------------------------------------------------------------
+# Phase 6 execution: pipeline mode (original — one gateway process)
+# ---------------------------------------------------------------------------
+if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
+  if ! "$GW_BIN" \
+    --nodes "$GW_NODES" \
+    --queryFrom "$WORKLOAD_FILE" \
+    --dbType 1 \
+    --detStartSeq "$DET_START_SEQ" \
+    --reqIdOffset "$REQ_ID_OFFSET" \
+    --detWindow "$DET_WINDOW" \
+    --detBatchSize "$DET_BATCH_SIZE" \
+    --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
+    --submitMode "$SUBMIT_MODE" \
+    --detSubmitPipeline "$DET_SUBMIT_PIPELINE" \
+    --detPipelineDepth "$DET_PIPELINE_DEPTH" \
+    ${POLL_COUNT:+--pollCount $POLL_COUNT} \
+    ${POLL_INTERVAL_US:+--pollIntervalUs $POLL_INTERVAL_US} \
+    --clientId "cluster-ycsb" \
+    --numTerminals "$NUM_TERMINALS" \
+    --connFanout "$CONN_FANOUT" \
+    $GW_EXTRA_ARGS \
+    2>&1 | tee "$GW_LOG"; then
+    log "WARNING: Gateway exited with non-zero status — check $GW_LOG"
+  fi
+
+# ---------------------------------------------------------------------------
+# Phase 6 execution: os-threads mode — N independent gateway processes
+#
+# IMPORTANT ARCHITECTURE NOTE — WHY STRIDED SEQUENCES MATTER:
+#   The BCDB deterministic serial gate publishes results in strict ascending
+#   DET sequence order across ALL clients simultaneously.
+#
+#   CONTIGUOUS shards (shard0: seq 1-5k, shard1: 5k-10k) CANNOT provide
+#   parallelism: shard1 blocks waiting for shard0's entire range to complete
+#   before any of shard1's results are published.  Wall time ≈ sum of shard
+#   times → zero speedup.
+#
+#   STRIDED sequences (shard0: 1,N+1,2N+1,...; shard1: 2,N+2,2N+2,...) would
+#   work — all shards contribute to every consecutive window of N seqs, so
+#   the gate fills in continuously.  BUT the gateway binary has no --detSeqStep
+#   flag; it always increments by 1.  We cannot implement strided submission
+#   with multiple independent gateway processes.
+#
+#   The single-gateway --numTerminals N ALREADY implements strided DET sequence
+#   assignment internally (terminal i → seqs i, N+i, 2N+i, ...), which is
+#   EXACTLY what the Python ThreadPoolExecutor worker stride does.  Pipeline
+#   mode IS the correct multi-thread equivalent for raft-kafka.
+#
+#   For kafka-only (bypass-raft) mode, individual replicas execute and publish
+#   results independently without enforcing the cross-client serial gate, so
+#   multiple gateway processes with contiguous ranges CAN run in parallel.
+# ---------------------------------------------------------------------------
+else
+  # -------------------------------------------------------------------------
+  # Guard: os-threads + raft-kafka serializes at the BCDB serial gate.
+  # Redirect to pipeline mode which already implements strided multi-terminal.
+  # -------------------------------------------------------------------------
+  if [[ "$ORDERING_MODE" == "raft-kafka" ]]; then
+    log ""
+    log "ERROR: --parallelism-mode os-threads is incompatible with --ordering-mode raft-kafka."
+    log ""
+    log "  Root cause: The BCDB deterministic serial gate publishes results in strict"
+    log "  ascending DET sequence order across ALL clients. Multiple gateway processes"
+    log "  with independent sequence ranges cannot receive completions in parallel —"
+    log "  each waits for ALL preceding sequences (from other shards) to be published"
+    log "  first. Wall time with N shards ≈ N × single-shard time (WORSE than 1 shard)."
+    log ""
+    log "  The gateway binary does not support --detSeqStep, so strided multi-process"
+    log "  sharding (the only approach that would work) cannot be implemented externally."
+    log ""
+    log "  SOLUTION: --parallelism-mode pipeline already implements strided DET"
+    log "  sequence assignment across --numTerminals N inside a single gateway process."
+    log "  This is structurally identical to the Python benchmark's ThreadPoolExecutor:"
+    log "    Python:   procSeqNum + worker_idx + next_local × N  (strided per thread)"
+    log "    Pipeline: terminal_i → seqs i, N+i, 2N+i, ...      (strided per lane)"
+    log "  Both fill the serial gate continuously → no blocking → true N× submission."
+    log ""
+    log "  To test throughput at higher load: use --parallelism-mode pipeline --threads N"
+    log "  To test with actual separate processes: use --ordering-mode kafka-only"
+    log ""
+    echo "FATAL: os-threads is not supported for raft-kafka ordering (see explanation above)" >&2
+    exit 2
+  fi
+
+  # -------------------------------------------------------------------------
+  # kafka-only + os-threads: contiguous shards DO work because bypass-raft
+  # servers execute and publish results per-shard independently.
+  # -------------------------------------------------------------------------
+  log "  [os-threads] Splitting workload into $NUM_TERMINALS contiguous shards (kafka-only mode)..."
+
+  TOTAL_QUERIES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
+  if [[ "$TOTAL_QUERIES" -lt "$NUM_TERMINALS" ]]; then
+    log "  WARNING: workload has $TOTAL_QUERIES statements but NUM_TERMINALS=$NUM_TERMINALS; reducing to 1 shard"
+    NUM_TERMINALS=1
+  fi
+
+  ACTUAL_SHARDS="$NUM_TERMINALS"
+  SHARD_DIR="$LOG_DIR/shards"
+  mkdir -p "$SHARD_DIR"
+  SHARD_SIZE=$(( (TOTAL_QUERIES + NUM_TERMINALS - 1) / NUM_TERMINALS ))
+
+  for s in $(seq 0 $(( ACTUAL_SHARDS - 1 ))); do > "$SHARD_DIR/shard_${s}.sql"; done
+
+  shard_idx=0; line_count=0
+  while IFS= read -r wline; do
+    stripped="${wline#"${wline%%[! ]*}"}"
+    [[ -z "$stripped" ]] && continue
+    [[ "$stripped" == --* ]] && continue
+    [[ "$stripped" == /*  ]] && continue
+    [[ "$stripped" == \\* ]] && continue
+    echo "$wline" >> "$SHARD_DIR/shard_${shard_idx}.sql"
+    (( line_count++ )) || true
+    if (( line_count >= SHARD_SIZE )) && (( shard_idx + 1 < ACTUAL_SHARDS )); then
+      (( shard_idx++ )) || true
+      line_count=0
+    fi
+  done < "$WORKLOAD_FILE"
+
+  for s in $(seq 0 $(( ACTUAL_SHARDS - 1 ))); do
+    sc="$(wc -l < "$SHARD_DIR/shard_${s}.sql")"
+    log "  [os-threads]   shard_${s}.sql: $sc statements, detStartSeq=$(( DET_START_SEQ + s * SHARD_SIZE ))"
+  done
+
+  declare -a OSTH_PIDS=()
+  declare -a OSTH_LOGS=()
+
+  for s in $(seq 0 $(( ACTUAL_SHARDS - 1 ))); do
+    shard_start_seq=$(( DET_START_SEQ + s * SHARD_SIZE ))
+    shard_req_offset=$(( REQ_ID_OFFSET + s * SHARD_SIZE ))
+    shard_log="$LOG_DIR/gateway_shard${s}.log"
+    OSTH_LOGS+=("$shard_log")
+    log "  [os-threads] Launching shard $s (detStartSeq=$shard_start_seq)"
+
+    "$GW_BIN" \
+      --nodes "$GW_NODES" \
+      --queryFrom "$SHARD_DIR/shard_${s}.sql" \
+      --dbType 1 \
+      --detStartSeq "$shard_start_seq" \
+      --reqIdOffset "$shard_req_offset" \
+      --detWindow "$DET_WINDOW" \
+      --detBatchSize "$DET_BATCH_SIZE" \
+      --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
+      --submitMode "$SUBMIT_MODE" \
+      --detSubmitPipeline "$DET_SUBMIT_PIPELINE" \
+      --detPipelineDepth "$DET_PIPELINE_DEPTH" \
+      ${POLL_COUNT:+--pollCount $POLL_COUNT} \
+      ${POLL_INTERVAL_US:+--pollIntervalUs $POLL_INTERVAL_US} \
+      --clientId "cluster-ycsb-shard${s}" \
+      --numTerminals 1 \
+      --connFanout 1 \
+      $GW_EXTRA_ARGS \
+      >"$shard_log" 2>&1 &
+    OSTH_PIDS+=("$!")
+    log "  [os-threads]   shard $s pid=$!"
+  done
+
+  OSTH_MAX_MS=0; OSTH_TOTAL_QUERIES=0; OSTH_ANY_FAILED=0
+
+  for s in $(seq 0 $(( ACTUAL_SHARDS - 1 ))); do
+    pid="${OSTH_PIDS[$s]}"
+    shard_log="${OSTH_LOGS[$s]}"
+    if wait "$pid"; then shard_status="ok"; else shard_status="failed"; OSTH_ANY_FAILED=1; fi
+    shard_ms="$(grep -oP 'overall time taken \(millisec\) = \K[0-9]+' "$shard_log" 2>/dev/null | head -1 || echo 0)"
+    shard_q="$(grep -oP 'loaded \K[0-9]+(?= queries)' "$shard_log" 2>/dev/null | head -1 || echo 0)"
+    (( OSTH_TOTAL_QUERIES += shard_q )) || true
+    if [[ "$shard_ms" -gt "$OSTH_MAX_MS" ]]; then OSTH_MAX_MS="$shard_ms"; fi
+    log "  [os-threads] shard $s done: status=$shard_status wall_ms=$shard_ms queries=$shard_q"
+    grep -E '^PROGRESS_GATEWAY_DET|^overall|^duplicate_key|^permanent_failures|^divergence_count' \
+      "$shard_log" 2>/dev/null | sed "s/^/  [shard${s}] /" || true
+  done
+
+  cat "${OSTH_LOGS[@]}" > "$GW_LOG" 2>/dev/null || true
+
+  log "  [os-threads] All $ACTUAL_SHARDS shard processes finished"
+  log "  [os-threads] Aggregate queries : $OSTH_TOTAL_QUERIES"
+  log "  [os-threads] Max shard wall_ms : $OSTH_MAX_MS"
+  if [[ "$OSTH_MAX_MS" -gt 0 && "$OSTH_TOTAL_QUERIES" -gt 0 ]]; then
+    OSTH_AGG_TPS=$(( OSTH_TOTAL_QUERIES * 1000 / OSTH_MAX_MS ))
+    log "  [os-threads] Aggregate TPS     : ~${OSTH_AGG_TPS} tx/s (total_queries/max_shard_ms)"
+    {
+      echo "OS_THREADS_AGGREGATE queries=$OSTH_TOTAL_QUERIES max_shard_wall_ms=$OSTH_MAX_MS aggregate_tps=$OSTH_AGG_TPS shards=$ACTUAL_SHARDS"
+      echo "overall time taken (millisec) = $OSTH_MAX_MS"
+    } >> "$GW_LOG"
+  fi
+  [[ "$OSTH_ANY_FAILED" -ne 0 ]] && log "WARNING: One or more shard gateway processes failed — check $LOG_DIR/gateway_shard*.log"
 fi
 
 END_S="$(date +%s)"
@@ -1792,7 +2180,15 @@ WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}
 
 # Prefer gateway's own reported time (excludes restore, file load, and leader probe).
 # Falls back to shell wall-clock only when gateway log lacks the line.
+# NOTE: In pipeline mode, "submit time (ms)" in the gateway output is CUMULATIVE
+# across async operations, not wall-clock. The correct wall-clock is overall_wall_ms.
 GW_MS="$(grep -oP 'overall time taken \(millisec\) = \K[0-9]+' "$GW_LOG" 2>/dev/null | head -1 || echo '')"
+# In os-threads mode the concatenated log contains one 'overall time' per shard;
+# head -1 would pick only shard 0's (shortest) time, yielding inflated TPS.
+# Use the already-computed OSTH_MAX_MS which is the true wall clock.
+if [[ "$PARALLELISM_MODE" == "os-threads" && "${OSTH_MAX_MS:-0}" -gt 0 ]]; then
+  GW_MS="$OSTH_MAX_MS"
+fi
 if [[ -n "$GW_MS" && "$GW_MS" -gt 0 ]]; then
   TPS=$(( WORKLOAD_LINES * 1000 / GW_MS ))
   log "  GW time (ms)  : ${GW_MS}"
@@ -1966,7 +2362,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     log "WARNING: Marker gateway exited non-zero — check $MARKER_LOG"
   fi
 
-  log "  Waiting until marker is visible on all 4 nodes"
+  log "  Waiting until marker is visible on all ${#NODE_IDS[@]} nodes"
   VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-180}"
   VERIFY_START="$(date +%s)"
   declare -a NODE_MARKER_READY=()

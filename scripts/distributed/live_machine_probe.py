@@ -11,7 +11,7 @@ Typical usage:
   python3 scripts/distributed/live_machine_probe.py
 
   python3 scripts/distributed/live_machine_probe.py \
-    --nodes local,neel@10.129.148.248,neel@10.129.27.54,neel@10.129.148.236,neel@10.129.148.179
+    --nodes local,neel@10.129.148.248,neel@10.129.27.54,neel@10.129.148.236
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ DEFAULT_NODES = [
     "neel@10.129.148.215",
     "neel@10.129.27.54",
     "neel@10.129.148.236",
-    "neel@10.129.148.179",
 ]
 
 

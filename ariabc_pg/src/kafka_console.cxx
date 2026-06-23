@@ -344,7 +344,7 @@ bool kafka_console_consumer::start_latest_multi(const std::string& bootstrap,
         // Majority-completion waits on these replies synchronously. Favor
         // low-latency fetch return over large broker-side batching.
         !conf_set(conf, "fetch.min.bytes", "1", err) ||
-        !conf_set(conf, "fetch.wait.max.ms", "2", err) ||
+        !conf_set(conf, "fetch.wait.max.ms", "0", err) ||
         !conf_set(conf, "max.partition.fetch.bytes", "1048576", err) ||
         !conf_set(conf, "socket.nagle.disable", "true", err)) {
         rd_kafka_conf_destroy(conf);

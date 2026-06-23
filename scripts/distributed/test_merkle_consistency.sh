@@ -30,12 +30,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # ---------------------------------------------------------------------------
 # Cluster topology (must match run_4node_raft_cluster.sh)
 # ---------------------------------------------------------------------------
-declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.179 10.129.148.248)
-declare -a NODE_NAMES=(admin123 user4 new-node utkarsh)
-declare -a NODE_USERS=(neel neel neel neel)
-declare -a NODE_CLIENT_PORTS=(8000 8000 8000 8001)
+declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.248)
+declare -a NODE_NAMES=(admin123 user4 utkarsh)
+declare -a NODE_USERS=(neel neel neel)
+declare -a NODE_CLIENT_PORTS=(8000 8000 8001)
 
-NODE_PASS_3="${ARIABC_PASS_NEEL_10_129_148_179:-sunil1165}"
+CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-sunil1165}"
 
 INSTALL_DIR="/home/neel/Desktop/ariabc_install"
 DB_PORT=5438
@@ -87,12 +87,8 @@ node_ssh() {
     local idx="$1"; shift
     local ip="${NODE_IPS[$idx]}"
     local user="${NODE_USERS[$idx]}"
-    if [[ "$idx" -eq 2 ]]; then
-        sshpass -p "$NODE_PASS_3" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-            "$user@$ip" "$@"
-    else
-        ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$user@$ip" "$@"
-    fi
+    sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "$user@$ip" "$@"
 }
 
 node_psql() {
@@ -149,7 +145,7 @@ for idx in "${!NODE_IPS[@]}"; do
 done
 
 EMPTY_PASS=1
-for idx in 1 2 3; do
+for idx in 1 2; do
     if [[ "${EMPTY_ROOTS[$idx]}" != "${EMPTY_ROOTS[0]}" ]]; then
         log "  MISMATCH: ${NODE_NAMES[$idx]}=${EMPTY_ROOTS[$idx]} vs ${NODE_NAMES[0]}=${EMPTY_ROOTS[0]}"
         EMPTY_PASS=0

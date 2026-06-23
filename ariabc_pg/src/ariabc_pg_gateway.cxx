@@ -1285,6 +1285,31 @@ struct vote_store {
     {
         out_recovery_note.clear();
         std::lock_guard<std::mutex> lk(mu_);
+        add_reply_inner_locked(rec, out_recovery_note);
+        cv_.notify_all();
+    }
+
+    // Batch add: process all records under a single mutex lock and
+    // notify waiters once at the end. This replaces N individual
+    // mutex + cv_.notify_all() cycles with a single pair.
+    void add_replies_batch(const std::vector<kafka_reply_record>& recs,
+                           std::vector<std::string>& out_recovery_notes)
+    {
+        out_recovery_notes.resize(recs.size());
+        std::lock_guard<std::mutex> lk(mu_);
+        for (size_t i = 0; i < recs.size(); ++i) {
+            add_reply_inner_locked(recs[i], out_recovery_notes[i]);
+        }
+        if (!recs.empty()) {
+            cv_.notify_all();
+        }
+    }
+
+private:
+    void add_reply_inner_locked(const kafka_reply_record& rec,
+                                std::string& out_recovery_note)
+    {
+        out_recovery_note.clear();
         const uint64_t add_ns = steady_now_ns();
         vote_entry& e = m_[rec.req_num];
         if (seen_reqs_.insert(rec.req_num).second) {
@@ -1308,15 +1333,11 @@ struct vote_store {
         auto it_seen = e.seen_reply_keys.find(reply_identity);
         if (it_seen != e.seen_reply_keys.end()) {
             if (it_seen->second == reply_fingerprint) {
-                // Duplicate of an already-observed reply identity+payload; ignore.
                 return;
             }
-            // Same logical reply identity but conflicting payload.
             e.terminal_set = true;
             e.terminal_result.clear();
             e.terminal_error = "duplicate_identity_conflict";
-            // Ensure the ready_reqs_ fast path picks this up without relying
-            // on any O(N) fallback scan in wait_any_majority().
             enqueue_ready_locked(rec.req_num);
             std::ostringstream oss;
             const std::string req_id = rec.req_id.empty() ? first_req_id_locked(e) : rec.req_id;
@@ -1327,7 +1348,6 @@ struct vote_store {
                 << ",\"raft_log_idx\":" << rec.raft_log_idx
                 << "}";
             out_recovery_note = oss.str();
-            cv_.notify_all();
             return;
         }
         e.seen_reply_keys[reply_identity] = reply_fingerprint;
@@ -1356,8 +1376,6 @@ struct vote_store {
             e.hash_to_nodes_valid[rec.result_hash] |= node_bit(rec.node_id);
         }
         refresh_majority_locked(rec.req_num, e, add_ns);
-
-        cv_.notify_all();
 
         if (!e.all_reported && e.nodes_seen_count >= total_nodes_) {
             e.all_reported = true;
@@ -1400,6 +1418,8 @@ struct vote_store {
             }
         }
     }
+
+public:
 
     bool wait_majority(uint64_t req_num,
                        int poll_interval_us,
@@ -1656,10 +1676,9 @@ private:
 
     void enqueue_ready_locked(uint64_t req_num) {
         if (ready_seen_.insert(req_num).second) {
-            ready_reqs_.push_back(req_num);
-            ready_queue_depth_sum_ += static_cast<uint64_t>(ready_reqs_.size());
+            ready_queue_depth_sum_ += static_cast<uint64_t>(ready_seen_.size());
             ++ready_queue_depth_obs_;
-            ready_queue_depth_max_ = std::max<size_t>(ready_queue_depth_max_, ready_reqs_.size());
+            ready_queue_depth_max_ = std::max<size_t>(ready_queue_depth_max_, ready_seen_.size());
         }
     }
 
@@ -1801,26 +1820,20 @@ private:
                                       std::string& out_result,
                                       std::string& out_error)
     {
-        while (!ready_reqs_.empty()) {
-            const uint64_t req_num = ready_reqs_.front();
-            ready_reqs_.pop_front();
-            ready_seen_.erase(req_num);
-
-            auto it_req = std::find(inflight.begin(), inflight.end(), req_num);
-            if (it_req == inflight.end()) {
-                continue;
+        for (auto it_req = inflight.begin(); it_req != inflight.end(); ++it_req) {
+            const uint64_t req_num = *it_req;
+            if (ready_seen_.find(req_num) != ready_seen_.end()) {
+                std::string err;
+                std::string result;
+                if (resolve_terminal_locked(req_num, result, err)) {
+                    out_req_num = req_num;
+                    out_result = std::move(result);
+                    out_error = std::move(err);
+                    inflight.erase(it_req);
+                    ready_seen_.erase(req_num);
+                    return true;
+                }
             }
-            std::string err;
-            std::string result;
-            if (!resolve_terminal_locked(req_num, result, err)) {
-                continue;
-            }
-
-            out_req_num = req_num;
-            out_result = std::move(result);
-            out_error = std::move(err);
-            inflight.erase(it_req);
-            return true;
         }
 
         // A Kafka reply can occasionally win the race against the submitter
@@ -1839,6 +1852,7 @@ private:
             out_result = std::move(result);
             out_error = std::move(err);
             inflight.erase(it_req);
+            ready_seen_.erase(out_req_num);
             return true;
         }
         return false;
@@ -1908,7 +1922,6 @@ private:
     std::unordered_map<uint64_t, vote_entry> m_;
     std::deque<uint64_t> req_order_;
     std::unordered_set<uint64_t> seen_reqs_;
-    std::deque<uint64_t> ready_reqs_;
     std::unordered_set<uint64_t> ready_seen_;
     uint64_t consume_to_ready_sum_ns_ = 0;
     std::vector<uint64_t> consume_to_ready_samples_;
@@ -2465,6 +2478,10 @@ int main(int argc, char** argv) {
 
     std::atomic<bool> stop(false);
     std::thread kafka_thread;
+    std::thread dispatch_thread;
+    std::mutex dispatch_mu;
+    std::condition_variable dispatch_cv;
+    std::deque<std::vector<ariabc_pg::kafka_reply_record>> dispatch_queue;
     std::atomic<int> divergence_count(0);
     std::atomic<uint64_t> kafka_messages(0);
     std::atomic<uint64_t> kafka_records(0);
@@ -2474,12 +2491,51 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> kafka_consume_lag_count(0);
     std::atomic<uint64_t> kafka_consume_lag_ns_max(0);
     if (kafka_enabled) {
+        dispatch_thread = std::thread([&] {
+            while (true) {
+                std::vector<ariabc_pg::kafka_reply_record> batch;
+                {
+                    std::unique_lock<std::mutex> lk(dispatch_mu);
+                    dispatch_cv.wait(lk, [&] { return !dispatch_queue.empty() || stop.load(); });
+                    if (dispatch_queue.empty() && stop.load()) break;
+                    batch = std::move(dispatch_queue.front());
+                    dispatch_queue.pop_front();
+                }
+
+                std::vector<std::string> recoveries;
+                const auto a0 = std::chrono::steady_clock::now();
+                votes.add_replies_batch(batch, recoveries);
+                const auto a1 = std::chrono::steady_clock::now();
+                kafka_add_reply_ns.fetch_add(
+                    static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(a1 - a0).count()),
+                    std::memory_order_relaxed);
+
+                for (size_t i = 0; i < recoveries.size(); ++i) {
+                    if (!recoveries[i].empty()) {
+                        divergence_count.fetch_add(1);
+                        std::cerr << recoveries[i] << std::endl;
+                        if (!opt.kafka_bootstrap.empty()) {
+                            std::string perr;
+                            if (!err_prod.send_line(recoveries[i], perr)) {
+                                std::cerr << "errTopic send failed: " << perr << std::endl;
+                            }
+                        } else {
+                            std::cerr << recoveries[i] << std::endl;
+                        }
+                    }
+                }
+            }
+        });
+
         kafka_thread = std::thread([&] {
+            int poll_timeout_ms = 1;
             while (!stop.load()) {
                 std::string kerr;
                 std::vector<ariabc_pg::kafka_consumed_message> kafka_batch;
-                if (!consumer.poll_batch_messages(kafka_batch, 1000, 2, kerr)) {
+                if (!consumer.poll_batch_messages(kafka_batch, 5000, poll_timeout_ms, kerr)) {
                     if (kerr == "timeout") {
+                        poll_timeout_ms = 1;
                         continue;
                     }
                     if (!stop.load()) {
@@ -2487,57 +2543,50 @@ int main(int argc, char** argv) {
                     }
                     break;
                 }
+                poll_timeout_ms = 0; // Got data, poll aggressively next time
 
                 kafka_messages.fetch_add(static_cast<uint64_t>(kafka_batch.size()), std::memory_order_relaxed);
 
+                std::vector<ariabc_pg::kafka_reply_record> all_recs;
+                const auto p0 = std::chrono::steady_clock::now();
                 for (size_t b = 0; b < kafka_batch.size(); ++b) {
                     std::vector<ariabc_pg::kafka_reply_record> recs;
-                    const auto p0 = std::chrono::steady_clock::now();
-                    const bool ok_parse = ariabc_pg::parse_kafka_payload_records(kafka_batch[b].payload, recs);
-                    const auto p1 = std::chrono::steady_clock::now();
-                    kafka_parse_ns.fetch_add(
-                        static_cast<uint64_t>(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count()),
-                        std::memory_order_relaxed);
-                    if (!ok_parse) {
-                        continue;
-                    }
-
-                    kafka_records.fetch_add(static_cast<uint64_t>(recs.size()), std::memory_order_relaxed);
-
-                    for (size_t i = 0; i < recs.size(); ++i) {
-                        if (recs[i].timestamp_ms != 0) {
-                            const uint64_t now_ms = ariabc_pg::now_epoch_ms();
-                            if (now_ms >= recs[i].timestamp_ms) {
-                                const uint64_t lag_ns = (now_ms - recs[i].timestamp_ms) * 1000000ULL;
-                                kafka_consume_lag_ns.fetch_add(lag_ns, std::memory_order_relaxed);
-                                kafka_consume_lag_count.fetch_add(1, std::memory_order_relaxed);
-                                ariabc_pg::atomic_max_u64(kafka_consume_lag_ns_max, lag_ns);
-                            }
-                        }
-
-                        std::string recovery;
-                        const auto a0 = std::chrono::steady_clock::now();
-                        votes.add_reply(recs[i], recovery);
-                        const auto a1 = std::chrono::steady_clock::now();
-                        kafka_add_reply_ns.fetch_add(
-                            static_cast<uint64_t>(
-                                std::chrono::duration_cast<std::chrono::nanoseconds>(a1 - a0).count()),
-                            std::memory_order_relaxed);
-                        if (!recovery.empty()) {
-                            divergence_count.fetch_add(1);
-                            std::cerr << recovery << std::endl;
-                            if (!opt.kafka_bootstrap.empty()) {
-                                std::string perr;
-                                if (!err_prod.send_line(recovery, perr)) {
-                                    std::cerr << "errTopic send failed: " << perr << std::endl;
-                                }
-                            } else {
-                                std::cerr << recovery << std::endl;
-                            }
+                    if (ariabc_pg::parse_kafka_payload_records(kafka_batch[b].payload, recs)) {
+                        for (auto& r : recs) {
+                            all_recs.push_back(std::move(r));
                         }
                     }
                 }
+                const auto p1 = std::chrono::steady_clock::now();
+                kafka_parse_ns.fetch_add(
+                    static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count()),
+                    std::memory_order_relaxed);
+
+                if (all_recs.empty()) {
+                    continue;
+                }
+
+                kafka_records.fetch_add(static_cast<uint64_t>(all_recs.size()), std::memory_order_relaxed);
+
+                // Process lag timing
+                for (size_t i = 0; i < all_recs.size(); ++i) {
+                    if (all_recs[i].timestamp_ms != 0) {
+                        const uint64_t now_ms = ariabc_pg::now_epoch_ms();
+                        if (now_ms >= all_recs[i].timestamp_ms) {
+                            const uint64_t lag_ns = (now_ms - all_recs[i].timestamp_ms) * 1000000ULL;
+                            kafka_consume_lag_ns.fetch_add(lag_ns, std::memory_order_relaxed);
+                            kafka_consume_lag_count.fetch_add(1, std::memory_order_relaxed);
+                            ariabc_pg::atomic_max_u64(kafka_consume_lag_ns_max, lag_ns);
+                        }
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(dispatch_mu);
+                    dispatch_queue.push_back(std::move(all_recs));
+                }
+                dispatch_cv.notify_one();
             }
         });
     }
@@ -2738,15 +2787,38 @@ int main(int argc, char** argv) {
                 wait_nodes.push_back(node_idx);
             }
 
+            // Wait on all quorum nodes concurrently so the gateway
+            // returns as soon as the fastest `quorum` nodes confirm
+            // instead of blocking sequentially on a slow node.
+            std::mutex qmu;
+            std::condition_variable qcv;
+            int ok_count = 0;
+            int fail_count = 0;
+            std::vector<std::thread> waiters;
+            waiters.reserve(wait_nodes.size());
+
             for (const size_t node_idx : wait_nodes) {
-                if (!wait_direct_completion(
+                waiters.emplace_back([&, node_idx]() {
+                    bool ok = wait_direct_completion(
                         node_idx,
                         submit_resp,
-                        req_label + "/node" + std::to_string(node_idx))) {
-                    return false;
-                }
+                        req_label + "/node" + std::to_string(node_idx));
+                    std::lock_guard<std::mutex> lk(qmu);
+                    if (ok) ++ok_count; else ++fail_count;
+                    qcv.notify_one();
+                });
             }
-            return true;
+
+            {
+                std::unique_lock<std::mutex> lk(qmu);
+                qcv.wait(lk, [&] {
+                    return ok_count >= static_cast<int>(quorum) ||
+                           fail_count > static_cast<int>(wait_nodes.size() - quorum);
+                });
+            }
+
+            for (auto& t : waiters) { if (t.joinable()) t.join(); }
+            return ok_count >= static_cast<int>(quorum);
         };
 
     std::unordered_set<uint64_t> reset_pending_reqs;
@@ -4376,6 +4448,8 @@ int main(int argc, char** argv) {
     }
 
     stop = true;
+    dispatch_cv.notify_all();
+    if (dispatch_thread.joinable()) dispatch_thread.join();
     if (kafka_thread.joinable()) kafka_thread.join();
     consumer.stop();
     err_prod.stop();

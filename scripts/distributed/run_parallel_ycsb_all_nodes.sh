@@ -12,7 +12,6 @@ set -euo pipefail
 #   neel@10.129.148.248    utkarsh-MS-7C96
 #   neel@10.129.27.54      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
 #   neel@10.129.148.236    neel-MS-7C96
-#   neel@10.129.148.179    anant-side       (Ubuntu 22.04 – passwordless key auth)
 #
 # Default benchmark profiles (runs 3 × modes in this order):
 #   1. pg mode             – plain PostgreSQL baseline (no BCDB)
@@ -54,7 +53,6 @@ NEEL_NODES=(
   "neel@10.129.148.248"
   "neel@10.129.27.54"
   "neel@10.129.148.236"
-  "neel@10.129.148.179"
 )
 NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"
 NEEL_REMOTE_INSTALL="/home/neel/Desktop/ariabc_install"
