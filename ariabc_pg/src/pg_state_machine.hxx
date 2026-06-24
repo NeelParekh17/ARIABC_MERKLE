@@ -18,6 +18,7 @@ public:
     pg_state_machine(int node_id, const db_options& db_opt, const kafka_options& k_opt);
     ~pg_state_machine();
 
+    bool ensure_bcdb_initialized() { return executor_.ensure_bcdb_initialized(); }
     pg_executor_stats executor_stats() const { return executor_.stats(); }
     kafka_producer_stats kafka_stats() const { return executor_.kafka_stats(); }
     bool admission_control_blocked() const { return executor_.admission_control_blocked(); }

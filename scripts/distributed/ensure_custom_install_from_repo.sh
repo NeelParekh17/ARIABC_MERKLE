@@ -91,13 +91,16 @@ install_is_stale() {
   [[ -n "$stale_path" ]]
 }
 
-if [[ "$FORCE_REBUILD" != "1" ]] && verify_install "$INSTALL_DIR"; then
-  if [[ "$TRUST_INSTALL" == "1" ]] || ! install_is_stale "$INSTALL_DIR"; then
-    echo "INSTALL_READY=1"
-    echo "INSTALL_DIR=$INSTALL_DIR"
-    [[ "$TRUST_INSTALL" == "1" ]] && echo "TRUST_INSTALL=1"
-    exit 0
+if [[ "$FORCE_REBUILD" != "1" ]]; then
+  if verify_install "$INSTALL_DIR"; then
+    if [[ "$TRUST_INSTALL" == "1" ]] || ! install_is_stale "$INSTALL_DIR"; then
+      echo "INSTALL_READY=1"
+      echo "INSTALL_DIR=$INSTALL_DIR"
+      [[ "$TRUST_INSTALL" == "1" ]] && echo "TRUST_INSTALL=1"
+      exit 0
+    fi
   fi
+  # If we reach here, either the install didn't verify, or it's stale
   FORCE_REBUILD=1
 fi
 

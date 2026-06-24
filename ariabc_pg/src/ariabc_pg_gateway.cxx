@@ -2972,12 +2972,27 @@ int main(int argc, char** argv) {
 
         auto warm_leader_route = [&]() -> bool {
             if (opt.db_type != 1 || opt.det_raw_sql == 1) return true;
-            const std::string probe_req_id = opt.client_id + "_leader_probe";
-            std::string probe_err;
             std::chrono::milliseconds backoff(2);
             for (int tries = 0; tries < 20; ++tries) {
-                if (submit_only_quiet(probe_req_id, "SELECT 1;", probe_err)) {
-                    return true;
+                for (size_t i = 0; i < nodes.size(); ++i) {
+                    ariabc_pg::client_api_response resp;
+                    std::string ctrl_err;
+                    if (!ariabc_pg::send_control_req_to_node(
+                            nodes[i], "__ARIABC_CTRL_GET_LEADER", resp, ctrl_err)) {
+                        continue;
+                    }
+                    if (resp.status != 0) {
+                        continue;
+                    }
+                    int leader_id = -1;
+                    try {
+                        leader_id = std::stoi(ariabc_pg::trim_copy(resp.msg));
+                    } catch (...) {
+                        leader_id = -1;
+                    }
+                    if (leader_id > 0) {
+                        return true;
+                    }
                 }
                 std::this_thread::sleep_for(backoff);
                 if (backoff < std::chrono::milliseconds(20)) {
@@ -2987,7 +3002,8 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            std::cerr << "leader warmup failed: " << probe_err << std::endl;
+            std::cerr << "leader warmup failed: no elected leader reported by control plane"
+                      << std::endl;
             return false;
         };
 
