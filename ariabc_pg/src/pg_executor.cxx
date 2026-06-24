@@ -86,6 +86,26 @@ bool det_allow_raw_compat_mode() {
     return enabled;
 }
 
+bool det_prefixed_direct_parallel_enabled() {
+    static const bool enabled = []() -> bool {
+        const char* v = std::getenv("ARIABC_DET_PREFIXED_DIRECT_PARALLEL");
+        if (!v) return false;
+        const std::string s = trim_copy(v);
+        return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+    }();
+    return enabled;
+}
+
+bool det_completion_only_success_enabled() {
+    static const bool enabled = []() -> bool {
+        const char* v = std::getenv("ARIABC_DET_COMPLETION_ONLY_SUCCESS");
+        if (!v) return false;
+        const std::string s = trim_copy(v);
+        return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+    }();
+    return enabled;
+}
+
 uint64_t det_partial_block_max_wait_ns() {
     static const uint64_t wait_ns = []() -> uint64_t {
         const char* v = std::getenv("ARIABC_DET_PARTIAL_BLOCK_MAX_WAIT_US");
@@ -773,6 +793,17 @@ pg_executor::pg_executor(int node_id,
         }
     }
     det_allow_raw_compat_ = det_allow_raw_compat_mode();
+    det_prefixed_direct_parallel_ =
+        (db_opt_.db_type == 1) && det_prefixed_direct_parallel_enabled();
+    det_completion_only_success_ =
+        (db_opt_.db_type == 1) && det_completion_only_success_enabled();
+    if (det_prefixed_direct_parallel_ && det_event_block_fastpath_enabled()) {
+        std::cerr << "ARIABC_DET_PREFIXED_DIRECT_PARALLEL requested on node "
+                  << node_id_
+                  << " but ARIABC_DET_EVENT_BLOCK_FASTPATH is enabled; "
+                     "block-submit fast path remains active"
+                  << std::endl;
+    }
     if (event_mode_ && det_parallel_workers_) {
         std::cerr << "event-mode deterministic server execution does not support parallel worker coordination; "
                      "forcing ARIABC_DET_PARALLEL_WORKERS=0 on node "
@@ -1142,6 +1173,8 @@ pg_executor_stats pg_executor::stats() const {
     out.ready_det_results_max = st_ready_det_results_max_.load(std::memory_order_relaxed);
     out.ordered_emit_wait_ns = st_ordered_emit_wait_ns_.load(std::memory_order_relaxed);
     out.det_raw_compat_mode = det_raw_compat_mode_ ? 1 : 0;
+    out.det_prefixed_direct_parallel = det_prefixed_direct_parallel_ ? 1 : 0;
+    out.det_completion_only_success = det_completion_only_success_ ? 1 : 0;
     out.det_raw_compat_activations =
         st_det_raw_compat_activations_.load(std::memory_order_relaxed);
     out.det_raw_compat_first_req_id = det_raw_compat_first_req_id_;
@@ -2268,7 +2301,9 @@ void pg_executor::event_loop() {
         const bool cap_det_event_inflight =
             db_opt_.db_type == 1 && !det_event_block_fastpath_enabled();
         const bool strict_det_per_tx_event =
-            cap_det_event_inflight && !det_allow_raw_compat_;
+            cap_det_event_inflight &&
+            !det_allow_raw_compat_ &&
+            !det_prefixed_direct_parallel_;
         const size_t det_event_exec_limit = cap_det_event_inflight
             ? (strict_det_per_tx_event
                    ? 1
@@ -2692,7 +2727,13 @@ void pg_executor::event_loop() {
                 const ExecStatusType st = last ? PQresultStatus(last) : PGRES_FATAL_ERROR;
                 if (st == PGRES_TUPLES_OK || st == PGRES_COMMAND_OK) {
                     const auto f0 = std::chrono::steady_clock::now();
-                    out = format_result(last);
+                    if (det_completion_only_success_ &&
+                        db_opt_.db_type == 1 &&
+                        is_det_prefixed_sql(cs.cur.sql)) {
+                        out.clear();
+                    } else {
+                        out = format_result(last);
+                    }
                     const auto f1 = std::chrono::steady_clock::now();
                     st_result_format_ns_.fetch_add(
                         static_cast<uint64_t>(
@@ -2788,7 +2829,8 @@ void pg_executor::event_loop() {
             const bool strict_det_per_tx_event =
                 db_opt_.db_type == 1 &&
                 !det_event_block_fastpath_enabled() &&
-                !det_allow_raw_compat_;
+                !det_allow_raw_compat_ &&
+                !det_prefixed_direct_parallel_;
             const size_t cap = det_event_block_fastpath_enabled()
                 ? conns_.size()
                 : (strict_det_per_tx_event

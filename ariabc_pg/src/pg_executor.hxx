@@ -82,6 +82,8 @@ struct pg_executor_stats {
     uint64_t ready_det_results_max = 0;
     uint64_t ordered_emit_wait_ns = 0;
     int det_raw_compat_mode = 0;
+    int det_prefixed_direct_parallel = 0;
+    int det_completion_only_success = 0;
     uint64_t det_raw_compat_activations = 0;
     std::string det_raw_compat_first_req_id;
     std::string det_raw_compat_first_sql_prefix;
@@ -251,6 +253,8 @@ private:
     bool det_parallel_workers_ = false;
     bool det_raw_compat_mode_ = false;
     bool det_allow_raw_compat_ = false;
+    bool det_prefixed_direct_parallel_ = false;
+    bool det_completion_only_success_ = false;
     uint64_t det_next_block_id_ = 2;
     uint64_t det_block_tx_key_base_ = 0;
     uint64_t det_block_next_tx_key_ = 0;

@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <condition_variable>
@@ -117,7 +118,7 @@ bool parse_det_seq_from_sql(const std::string& sql, uint64_t& out_seq) {
         ++i;
     }
     out_seq = seq;
-    return out_seq > 0;
+    return true;
 }
 
 bool parse_det_range_from_request(const client_api_request& req,
@@ -183,6 +184,27 @@ bool debug_req_trace_enabled() {
     if (!env || !*env) return false;
     const std::string s(env);
     return !(s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+}
+
+bool env_flag_enabled(const char* name, bool default_value) {
+    const char* env = ::getenv(name);
+    if (!env || !*env) return default_value;
+    const std::string s(env);
+    return !(s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+}
+
+bool raft_ordered_fanout_enabled() {
+    return env_flag_enabled("ARIABC_RAFT_ORDERED_FANOUT", false);
+}
+
+uint64_t det_order_start_seq() {
+    const char* env = ::getenv("ARIABC_DET_ORDER_START_SEQ");
+    if (!env || !*env) return 0;
+    try {
+        return static_cast<uint64_t>(std::stoull(env));
+    } catch (...) {
+        return 0;
+    }
 }
 
 uint64_t debug_req_trace_limit() {
@@ -413,9 +435,205 @@ int listen_tcp(int port) {
     return fd;
 }
 
+void wait_for_admission_drain(pg_state_machine* psm) {
+    if (!psm) return;
+
+    const auto s0 = std::chrono::steady_clock::now();
+    bool stalled = false;
+    while (psm->admission_control_blocked() && !g_stop.load(std::memory_order_relaxed)) {
+        stalled = true;
+        // Cap a single wait so we re-check g_stop periodically.
+        (void)psm->wait_for_admission_drain(50ULL * 1000ULL * 1000ULL); // 50ms
+    }
+    if (stalled) {
+        const auto s1 = std::chrono::steady_clock::now();
+        g_prof.append_stall_calls.fetch_add(1, std::memory_order_relaxed);
+        g_prof.append_stall_ns.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
+            std::memory_order_relaxed);
+    }
+}
+
+void append_request_to_raft(nuraft::ptr<nuraft::raft_server> raft,
+                            pg_state_machine* psm,
+                            const client_api_request& req,
+                            client_api_response& resp) {
+    resp = client_api_response();
+    if (!raft) {
+        resp.status = 1;
+        resp.msg = "NO_RAFT_SERVER";
+        return;
+    }
+
+    wait_for_admission_drain(psm);
+
+    std::string err;
+    const int leader_hint = raft->get_leader();
+    nuraft::ptr<nuraft::buffer> log =
+        build_raft_request_log(req, leader_hint, err);
+    if (!log) {
+        resp.status = 2;
+        resp.msg = err.empty() ? std::string("LOG_BUILD_FAILED") : err;
+        return;
+    }
+
+    g_prof.append_calls.fetch_add(1, std::memory_order_relaxed);
+    const auto a0 = std::chrono::steady_clock::now();
+    nuraft::ptr<nuraft::cmd_result<nuraft::ptr<nuraft::buffer>>> r =
+        raft->append_entries({log});
+    const auto a1 = std::chrono::steady_clock::now();
+    g_prof.append_ns.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(a1 - a0).count()),
+        std::memory_order_relaxed);
+
+    const bool accepted = r && r->get_accepted();
+    const int result_code = r ? static_cast<int>(r->get_result_code()) : -1;
+    debug_trace_server_append(req, accepted, result_code, raft->get_leader());
+
+    if (!accepted) {
+        g_prof.append_not_accepted.fetch_add(1, std::memory_order_relaxed);
+        resp.status = 1;
+        resp.msg =
+            "NOT_ACCEPTED code=" + std::to_string(result_code) +
+            " accepted=0 leader=" + std::to_string(raft->get_leader()) +
+            " leader_id=" + std::to_string(raft->get_leader()) +
+            " raft_log_idx=0";
+        return;
+    }
+
+    // Fast path: once accepted by current leader, return immediately.
+    // Correctness is enforced in gateway by waiting for majority result
+    // replies from all nodes (via vote_store), not by this immediate ACK.
+    const uint64_t raft_log_idx = static_cast<uint64_t>(raft->get_last_log_idx());
+    resp.status = 0;
+    resp.msg = "ACCEPTED accepted=1 leader=" + std::to_string(raft->get_leader()) +
+               " leader_id=" + std::to_string(raft->get_leader()) +
+               " raft_log_idx=" + std::to_string(raft_log_idx) +
+               " batch_items=" + std::to_string(req.item_count());
+}
+
+struct raft_ordered_entry {
+    client_api_request req;
+    uint64_t first_seq = 0;
+    uint64_t last_seq = 0;
+    client_api_response resp;
+    bool done = false;
+};
+
+struct raft_orderer {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool initialized = false;
+    bool drained_any = false;
+    uint64_t next_seq = 1;
+    std::map<uint64_t, std::shared_ptr<raft_ordered_entry>> pending;
+};
+
+bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
+                         pg_state_machine* psm,
+                         const client_api_request& req,
+                         raft_orderer& orderer,
+                         client_api_response& out_resp) {
+    if (!raft_ordered_fanout_enabled()) {
+        return false;
+    }
+
+    uint64_t first_seq = 0;
+    uint64_t last_seq = 0;
+    if (!parse_det_range_from_request(req, first_seq, last_seq)) {
+        return false;
+    }
+
+    std::shared_ptr<raft_ordered_entry> entry(new raft_ordered_entry());
+    entry->req = req;
+    entry->first_seq = first_seq;
+    entry->last_seq = last_seq;
+
+    std::unique_lock<std::mutex> lk(orderer.mu);
+    const uint64_t order_start_seq = det_order_start_seq();
+    if (!orderer.initialized) {
+        orderer.initialized = true;
+        // Preflight probes can use high DET ids before the workload restarts.
+        // Do not let an early fanout lane make a later batch the epoch start.
+        orderer.next_seq = (first_seq >= 90000000ULL) ? first_seq : order_start_seq;
+    } else if (orderer.pending.empty() &&
+               first_seq < orderer.next_seq &&
+               !orderer.drained_any) {
+        orderer.next_seq = first_seq;
+    } else if (orderer.pending.empty() &&
+               first_seq < orderer.next_seq &&
+               orderer.next_seq - first_seq > 1000000ULL) {
+        orderer.next_seq = order_start_seq;
+    }
+
+    if (first_seq < orderer.next_seq) {
+        out_resp.status = 1;
+        out_resp.msg = "STALE_RAFT_DET_SEQ first_seq=" + std::to_string(first_seq) +
+                       " next_seq=" + std::to_string(orderer.next_seq);
+        return true;
+    }
+    if (orderer.pending.find(first_seq) != orderer.pending.end()) {
+        out_resp.status = 1;
+        out_resp.msg = "DUPLICATE_RAFT_DET_SEQ first_seq=" + std::to_string(first_seq);
+        return true;
+    }
+    orderer.pending.emplace(first_seq, entry);
+
+    auto fail_pending_after = [&](uint64_t blocker_seq) {
+        for (auto& kv : orderer.pending) {
+            std::shared_ptr<raft_ordered_entry> blocked = kv.second;
+            blocked->resp.status = 1;
+            blocked->resp.msg = "RAFT_ORDERER_BLOCKED first_seq=" +
+                                std::to_string(blocked->first_seq) +
+                                " blocked_by=" + std::to_string(blocker_seq);
+            blocked->done = true;
+        }
+        orderer.pending.clear();
+        orderer.cv.notify_all();
+    };
+
+    auto drain_ready = [&]() {
+        while (!g_stop.load(std::memory_order_relaxed)) {
+            auto it = orderer.pending.find(orderer.next_seq);
+            if (it == orderer.pending.end()) break;
+            std::shared_ptr<raft_ordered_entry> ready = it->second;
+            orderer.pending.erase(it);
+
+            lk.unlock();
+            append_request_to_raft(raft, psm, ready->req, ready->resp);
+            lk.lock();
+
+            ready->done = true;
+            if (ready->resp.status != 0) {
+                fail_pending_after(ready->first_seq);
+                break;
+            }
+
+            orderer.next_seq = ready->last_seq + 1;
+            orderer.drained_any = true;
+            orderer.cv.notify_all();
+        }
+    };
+
+    drain_ready();
+    orderer.cv.wait(lk, [&] {
+        return entry->done || g_stop.load(std::memory_order_relaxed);
+    });
+    if (!entry->done) {
+        out_resp.status = 1;
+        out_resp.msg = "RAFT_ORDERER_STOPPED first_seq=" + std::to_string(first_seq);
+    } else {
+        out_resp = entry->resp;
+    }
+    return true;
+}
+
 void handle_client_fd(int fd,
                       nuraft::ptr<nuraft::raft_server> raft,
-                      nuraft::ptr<nuraft::state_machine> sm) {
+                      nuraft::ptr<nuraft::state_machine> sm,
+                      std::shared_ptr<raft_orderer> orderer) {
     // Low-latency request/response: avoid Nagle delays on small frames.
     {
         int one = 1;
@@ -513,71 +731,9 @@ void handle_client_fd(int fd,
             continue;
         }
 
-        // Admission control: backpressure via condvar-backed wait so the queue
-        // drain wakes us exactly, instead of 1ms sleep-polling.
-        if (psm) {
-            const auto s0 = std::chrono::steady_clock::now();
-            bool stalled = false;
-            while (psm->admission_control_blocked() && !g_stop.load(std::memory_order_relaxed)) {
-                stalled = true;
-                // Cap a single wait so we re-check g_stop periodically.
-                (void)psm->wait_for_admission_drain(50ULL * 1000ULL * 1000ULL); // 50ms
-            }
-            if (stalled) {
-                const auto s1 = std::chrono::steady_clock::now();
-                g_prof.append_stall_calls.fetch_add(1, std::memory_order_relaxed);
-                g_prof.append_stall_ns.fetch_add(
-                    static_cast<uint64_t>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
-                    std::memory_order_relaxed);
-            }
-        }
-
-        const int leader_hint = raft ? raft->get_leader() : -1;
-        nuraft::ptr<nuraft::buffer> log =
-            build_raft_request_log(req, leader_hint, err);
-
         client_api_response resp;
-        if (!log) {
-            resp.status = 2;
-            resp.msg = err.empty() ? std::string("LOG_BUILD_FAILED") : err;
-            const bool ok_write = write_response_frame(fd, resp, err);
-            if (!ok_write) break;
-            continue;
-        }
-        g_prof.append_calls.fetch_add(1, std::memory_order_relaxed);
-        const auto a0 = std::chrono::steady_clock::now();
-        nuraft::ptr<nuraft::cmd_result<nuraft::ptr<nuraft::buffer>>> r =
-            raft->append_entries({log});
-        const auto a1 = std::chrono::steady_clock::now();
-        g_prof.append_ns.fetch_add(
-            static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(a1 - a0).count()),
-            std::memory_order_relaxed);
-        debug_trace_server_append(
-            req,
-            r->get_accepted(),
-            static_cast<int>(r->get_result_code()),
-            raft ? raft->get_leader() : -1);
-
-        if (!r->get_accepted()) {
-            g_prof.append_not_accepted.fetch_add(1, std::memory_order_relaxed);
-            resp.status = 1;
-            resp.msg =
-                "NOT_ACCEPTED code=" + std::to_string(static_cast<int>(r->get_result_code())) +
-                " accepted=0 leader=" + std::to_string(raft->get_leader()) +
-                " leader_id=" + std::to_string(raft ? raft->get_leader() : -1) +
-                " raft_log_idx=0";
-        } else {
-            // Fast path: once accepted by current leader, return immediately.
-            // Correctness is enforced in gateway by waiting for majority result
-            // replies from all nodes (via vote_store), not by this immediate ACK.
-            const uint64_t raft_log_idx = raft ? static_cast<uint64_t>(raft->get_last_log_idx()) : 0ULL;
-            resp.status = 0;
-            resp.msg = "ACCEPTED accepted=1 leader=" + std::to_string(raft ? raft->get_leader() : -1) +
-                       " leader_id=" + std::to_string(raft ? raft->get_leader() : -1) +
-                       " raft_log_idx=" + std::to_string(raft_log_idx) +
-                       " batch_items=" + std::to_string(req.item_count());
+        if (!orderer || !append_raft_ordered(raft, psm, req, *orderer, resp)) {
+            append_request_to_raft(raft, psm, req, resp);
         }
 
         const auto w0 = std::chrono::steady_clock::now();
@@ -648,12 +804,13 @@ bool direct_enqueue_ordered(pg_state_machine* psm,
     entry->last_seq = last_seq;
 
     std::unique_lock<std::mutex> lk(orderer.mu);
+    const uint64_t order_start_seq = det_order_start_seq();
     if (!orderer.initialized) {
         orderer.initialized = true;
-        // Workloads in the benchmark start at DET sequence 1, but the
-        // one-shot preflight uses a high sequence. If a fanout lane delivers
-        // batch 257 before batch 1, do not make 257 the epoch start.
-        orderer.next_seq = (first_seq >= 90000000ULL) ? first_seq : 1ULL;
+        // Workloads in the benchmark start at the configured DET epoch, but
+        // the one-shot preflight uses a high sequence. If a fanout lane
+        // delivers a later batch first, do not make that batch the epoch start.
+        orderer.next_seq = (first_seq >= 90000000ULL) ? first_seq : order_start_seq;
     } else if (orderer.pending.empty() &&
                first_seq < orderer.next_seq &&
                !orderer.drained_any) {
@@ -662,10 +819,11 @@ bool direct_enqueue_ordered(pg_state_machine* psm,
                first_seq < orderer.next_seq &&
                orderer.next_seq - first_seq > 1000000ULL) {
         // The benchmark preflight uses a high DET sequence, then the workload
-        // restarts at 1. With multi-socket fanout, a later workload batch can
-        // arrive before batch 1; reset to the epoch start, not to that later
-        // batch, so the FIFO executor still sees contiguous DET order.
-        orderer.next_seq = 1;
+        // restarts at the configured epoch. With multi-socket fanout, a later
+        // workload batch can arrive before the first batch; reset to the epoch
+        // start, not to that later batch, so the FIFO executor still sees
+        // contiguous DET order.
+        orderer.next_seq = order_start_seq;
     }
 
     if (orderer.pending.find(first_seq) != orderer.pending.end()) {
@@ -920,6 +1078,8 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " ready_det_results_max=" << exec.ready_det_results_max
         << " ordered_emit_wait_ms=" << (exec.ordered_emit_wait_ns / 1000000.0)
         << " det_raw_compat_mode=" << exec.det_raw_compat_mode
+        << " det_prefixed_direct_parallel=" << exec.det_prefixed_direct_parallel
+        << " det_completion_only_success=" << exec.det_completion_only_success
         << " det_raw_compat_activations=" << exec.det_raw_compat_activations
         << " det_raw_compat_first_req_id=" << profile_token(exec.det_raw_compat_first_req_id)
         << " det_raw_compat_first_sql_prefix=" << profile_token(exec.det_raw_compat_first_sql_prefix)
@@ -1124,6 +1284,7 @@ int main(int argc, char** argv) {
 
     const int listen_fd = ariabc_pg::listen_tcp(opt.client_port);
     ariabc_pg::g_listen_fd = listen_fd;
+    std::shared_ptr<ariabc_pg::raft_orderer> raft_order(new ariabc_pg::raft_orderer());
     while (!ariabc_pg::g_stop.load()) {
         sockaddr_in cli;
         socklen_t len = sizeof(cli);
@@ -1134,7 +1295,9 @@ int main(int argc, char** argv) {
             std::cerr << "accept failed: " << ::strerror(errno) << std::endl;
             continue;
         }
-        std::thread th([fd, raft, sm] { ariabc_pg::handle_client_fd(fd, raft, sm); });
+        std::thread th([fd, raft, sm, raft_order] {
+            ariabc_pg::handle_client_fd(fd, raft, sm, raft_order);
+        });
         th.detach();
     }
 
