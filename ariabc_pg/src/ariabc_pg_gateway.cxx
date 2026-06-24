@@ -2485,6 +2485,7 @@ int main(int argc, char** argv) {
     std::atomic<int> divergence_count(0);
     std::atomic<uint64_t> kafka_messages(0);
     std::atomic<uint64_t> kafka_records(0);
+    std::atomic<uint64_t> kafka_parse_failures(0);
     std::atomic<uint64_t> kafka_parse_ns(0);
     std::atomic<uint64_t> kafka_add_reply_ns(0);
     std::atomic<uint64_t> kafka_consume_lag_ns(0);
@@ -2555,6 +2556,8 @@ int main(int argc, char** argv) {
                         for (auto& r : recs) {
                             all_recs.push_back(std::move(r));
                         }
+                    } else {
+                        kafka_parse_failures.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
                 const auto p1 = std::chrono::steady_clock::now();
@@ -3062,6 +3065,7 @@ int main(int argc, char** argv) {
                         now - det_progress_start).count();
                 const size_t completed =
                     det_completed_count.load(std::memory_order_relaxed);
+                const ariabc_pg::kafka_consumer_stats kc_prog = consumer.stats();
                 const double completed_tps = (elapsed_s > 0.0)
                     ? (static_cast<double>(completed) / elapsed_s)
                     : 0.0;
@@ -3079,6 +3083,11 @@ int main(int argc, char** argv) {
                     << " pipeline_outstanding=" << det_pipeline_outstanding_count.load(std::memory_order_relaxed)
                     << " majority_inflight=" << det_inflight_count.load(std::memory_order_relaxed)
                     << " pending_accept=" << det_pending_accept_count.load(std::memory_order_relaxed)
+                    << " kafka_msgs=" << kafka_messages.load(std::memory_order_relaxed)
+                    << " kafka_recs=" << kafka_records.load(std::memory_order_relaxed)
+                    << " kafka_parse_failures=" << kafka_parse_failures.load(std::memory_order_relaxed)
+                    << " kc_msgs=" << kc_prog.message_count
+                    << " kc_timeouts=" << kc_prog.poll_timeouts
                     << " permanent_failures=" << permanent_failures.load(std::memory_order_relaxed)
                     << " divergence_count=" << divergence_count.load(std::memory_order_relaxed);
                 if (final) oss << " final=1";
@@ -4227,6 +4236,7 @@ int main(int argc, char** argv) {
             << " not_accepted=" << sub_not_acc
             << " kafka_msgs=" << kafka_messages.load(std::memory_order_relaxed)
             << " kafka_recs=" << kafka_records.load(std::memory_order_relaxed)
+            << " kafka_parse_failures=" << kafka_parse_failures.load(std::memory_order_relaxed)
             << " kafka_parse_ms=" << (kafka_parse_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " kafka_add_reply_ms=" << (kafka_add_reply_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " consume_lag_ms_mean=" << lag_ms_mean

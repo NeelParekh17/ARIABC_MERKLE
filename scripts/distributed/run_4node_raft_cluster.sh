@@ -132,6 +132,7 @@ DET_BATCH_SIZE_EXPLICIT=0
 DET_PIPELINE_DEPTH_EXPLICIT=0
 CONN_FANOUT="${CONN_FANOUT:-1}"
 CONN_FANOUT_EXPLICIT=0
+RAFT_ORDERED_FANOUT="${RAFT_ORDERED_FANOUT:-${ARIABC_RAFT_ORDERED_FANOUT:-1}}"
 SUBMIT_MODE="${SUBMIT_MODE:-event}"
 DET_SUBMIT_PIPELINE="${DET_SUBMIT_PIPELINE:-1}"
 DET_PIPELINE_DEPTH="${DET_PIPELINE_DEPTH:-0}"
@@ -142,6 +143,9 @@ DET_BLOCK_PIPELINE="${DET_BLOCK_PIPELINE:-1}"  # logical BCDB blocks per backend
 DET_BLOCK_MAX="${DET_BLOCK_MAX:-2048}"         # max txs per backend deterministic block submit
 DET_PARTIAL_BLOCK_MAX_WAIT_US="${DET_PARTIAL_BLOCK_MAX_WAIT_US:-0}"  # low-latency partial deterministic blocks; 0=dispatch immediately
 DET_EVENT_BLOCK_FASTPATH="${DET_EVENT_BLOCK_FASTPATH:-1}"  # 1=enable BCDB block-submit fast path in event mode
+DET_PREFIXED_DIRECT_PARALLEL="${DET_PREFIXED_DIRECT_PARALLEL:-0}"  # 1=execute s<seq> SQL directly on multiple PG sockets
+DET_COMPLETION_ONLY_SUCCESS="${DET_COMPLETION_ONLY_SUCCESS:-}"
+DET_COMPLETION_ONLY_SUCCESS_EXPLICIT=0
 # ---------------------------------------------------------------------------
 # Parallelism mode — mirrors how the single-node Python benchmark uses real
 # OS threads vs pipeline depth.
@@ -250,10 +254,24 @@ Options:
                   explicitly set (default: 512). Effective detWindow becomes
                   threads * per-thread-window.
   --conn-fanout N Gateway submit sockets per logical node in event submit mode
-                  (default: 1). Normal raft-kafka mode keeps one ordered
-                  submit stream unless this is explicitly overridden; kafka-only
-                  can auto-scale this with --threads because bypass-raft
-                  servers reorder deterministic ranges before enqueue.
+                  (default: 1). In raft-kafka mode, multi-socket fanout is safe
+                  only with --raft-ordered-fanout 1 because the leader reorders
+                  DET ranges before Raft append. kafka-only can auto-scale this
+                  with --threads because bypass-raft servers reorder
+                  deterministic ranges before enqueue.
+  --raft-ordered-fanout N
+                  Enable the server-side deterministic range reorderer before
+                  Raft append, allowing raft-kafka connFanout > 1 without
+                  reordering batches: 0|1 (default: 1)
+  --det-prefixed-direct-parallel N
+                  Execute deterministic "s <seq> SQL" directly on multiple PG
+                  sockets instead of bcdb_block_submit_results(): 0|1
+                  (default: 0). When enabled, the runner disables the block
+                  fast path and requires completion-only success receipts.
+  --det-completion-only-success N
+                  For deterministic per-tx SQL, publish empty success receipts
+                  to Kafka and keep errors verbatim: 0|1 (default: follows
+                  --det-prefixed-direct-parallel).
   --broadcast-accept-quorum N
                   Broadcast async accept quorum before pipelining; 0=legacy
                   majority. Late accepts are still drained before exit.
@@ -366,6 +384,7 @@ while [[ $# -gt 0 ]]; do
     --num-terminals) NUM_TERMINALS="${2:-1}"; shift 2 ;;
     --per-thread-window) PER_THREAD_WINDOW="${2:-512}"; shift 2 ;;
     --conn-fanout) CONN_FANOUT="${2:-1}"; CONN_FANOUT_EXPLICIT=1; shift 2 ;;
+    --raft-ordered-fanout) RAFT_ORDERED_FANOUT="${2:-1}"; shift 2 ;;
     --broadcast-accept-quorum) GATEWAY_BROADCAST_ACCEPT_QUORUM="${2:-0}"; shift 2 ;;
     --broadcast-result-quorum) GATEWAY_BROADCAST_RESULT_QUORUM="${2:-0}"; shift 2 ;;
     --broadcast-drain-in-timed-run) GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${2:-1}"; shift 2 ;;
@@ -380,6 +399,8 @@ while [[ $# -gt 0 ]]; do
     --det-block-max) DET_BLOCK_MAX="${2:-2048}"; shift 2 ;;
     --det-partial-block-max-wait-us) DET_PARTIAL_BLOCK_MAX_WAIT_US="${2:-0}"; shift 2 ;;
     --det-event-block-fastpath) DET_EVENT_BLOCK_FASTPATH="${2:-0}"; shift 2 ;;
+    --det-prefixed-direct-parallel) DET_PREFIXED_DIRECT_PARALLEL="${2:-1}"; shift 2 ;;
+    --det-completion-only-success) DET_COMPLETION_ONLY_SUCCESS="${2:-1}"; DET_COMPLETION_ONLY_SUCCESS_EXPLICIT=1; shift 2 ;;
     --bcdb-block-profile) BCDB_BLOCK_PROFILE="${2:-0}"; shift 2 ;;
     --bcdb-block-wait-watermark) BCDB_BLOCK_WAIT_WATERMARK="${2:-0}"; shift 2 ;;
     --bcdb-phase-trace) BCDB_PHASE_TRACE_ON="${2:-0}"; shift 2 ;;
@@ -423,6 +444,33 @@ fi
 if [[ "$DET_EVENT_BLOCK_FASTPATH" != "0" && "$DET_EVENT_BLOCK_FASTPATH" != "1" ]]; then
   echo "ERROR: --det-event-block-fastpath must be 0 or 1" >&2
   exit 2
+fi
+if [[ "$DET_PREFIXED_DIRECT_PARALLEL" != "0" && "$DET_PREFIXED_DIRECT_PARALLEL" != "1" ]]; then
+  echo "ERROR: --det-prefixed-direct-parallel must be 0 or 1" >&2
+  exit 2
+fi
+if [[ -z "$DET_COMPLETION_ONLY_SUCCESS" ]]; then
+  DET_COMPLETION_ONLY_SUCCESS="$DET_PREFIXED_DIRECT_PARALLEL"
+fi
+if [[ "$DET_COMPLETION_ONLY_SUCCESS" != "0" && "$DET_COMPLETION_ONLY_SUCCESS" != "1" ]]; then
+  echo "ERROR: --det-completion-only-success must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$DET_PREFIXED_DIRECT_PARALLEL" == "1" ]]; then
+  if [[ "$PG_EXEC_MODE" != "event" ]]; then
+    echo "ERROR: --det-prefixed-direct-parallel requires --pg-exec-mode event" >&2
+    exit 2
+  fi
+  if [[ "$DET_RAW_SQL" != "0" ]]; then
+    echo "ERROR: --det-prefixed-direct-parallel requires --det-raw-sql 0 so Raft-ordered DET prefixes are preserved" >&2
+    exit 2
+  fi
+  if [[ "$DET_COMPLETION_ONLY_SUCCESS_EXPLICIT" -eq 1 && "$DET_COMPLETION_ONLY_SUCCESS" != "1" ]]; then
+    echo "ERROR: --det-prefixed-direct-parallel requires --det-completion-only-success 1" >&2
+    exit 2
+  fi
+  DET_EVENT_BLOCK_FASTPATH=0
+  DET_COMPLETION_ONLY_SUCCESS=1
 fi
 case "$ORDERING_MODE" in
   raft|raft-kafka|raft_kafka)
@@ -477,23 +525,31 @@ if [[ -n "$THREADS_ARG" ]]; then
   if [[ "$DET_PIPELINE_DEPTH_EXPLICIT" -eq 0 || "$DET_PIPELINE_DEPTH" -eq 0 ]]; then
     DET_PIPELINE_DEPTH="$PER_THREAD_WINDOW"
   fi
-  if [[ "$CONN_FANOUT_EXPLICIT" -eq 0 && "$ORDERING_MODE" == "kafka-only" ]]; then
-    CONN_FANOUT="$NUM_TERMINALS"
+  if [[ "$CONN_FANOUT_EXPLICIT" -eq 0 ]]; then
+    if [[ "$ORDERING_MODE" == "kafka-only" ]]; then
+      CONN_FANOUT="$NUM_TERMINALS"
+    fi
   fi
 fi
 if [[ "$CONN_FANOUT" -lt 1 ]]; then
   echo "ERROR: --conn-fanout must be >= 1" >&2
   exit 2
 fi
+if [[ "$RAFT_ORDERED_FANOUT" != "0" && "$RAFT_ORDERED_FANOUT" != "1" ]]; then
+  echo "ERROR: --raft-ordered-fanout must be 0 or 1" >&2
+  exit 2
+fi
 # os-threads mode does NOT need connFanout > 1 — each gateway subprocess has its
 # own single socket.  Only validate the fanout restriction in pipeline mode.
 if [[ "$PARALLELISM_MODE" != "os-threads" ]]; then
-  if [[ "$ORDERING_MODE" == "raft-kafka" && "$CONN_FANOUT" -gt 1 && "${ARIABC_ALLOW_RAFT_FANOUT:-0}" != "1" ]]; then
+  if [[ "$ORDERING_MODE" == "raft-kafka" &&
+        "$CONN_FANOUT" -gt 1 &&
+        "$RAFT_ORDERED_FANOUT" != "1" &&
+        "${ARIABC_ALLOW_RAFT_FANOUT:-0}" != "1" ]]; then
     echo "ERROR: --conn-fanout > 1 is disabled for raft-kafka deterministic runs." >&2
-    echo "       The current Raft leader appends directly from each client socket without" >&2
-    echo "       a deterministic range reorderer, so multi-socket fanout can reorder batches" >&2
-    echo "       and stall majority completion. Use --threads with ordered fanout=1, switch" >&2
-    echo "       to --ordering-mode kafka-only, --parallelism-mode os-threads, or set" >&2
+    echo "       Enable --raft-ordered-fanout 1 so the leader reorders DET ranges before" >&2
+    echo "       Raft append, switch to --ordering-mode kafka-only, --parallelism-mode" >&2
+    echo "       os-threads, or set" >&2
     echo "       ARIABC_ALLOW_RAFT_FANOUT=1 for an explicit unsafe experiment." >&2
     exit 2
   fi
@@ -892,6 +948,10 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'gateway_broadcast_accept_quorum=%s\n' "$GATEWAY_BROADCAST_ACCEPT_QUORUM"
   printf 'gateway_broadcast_result_quorum=%s\n' "$GATEWAY_BROADCAST_RESULT_QUORUM"
   printf 'gateway_broadcast_drain_in_timed_run=%s\n' "$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN"
+  printf 'raft_ordered_fanout=%s\n' "$RAFT_ORDERED_FANOUT"
+  printf 'det_event_block_fastpath=%s\n' "$DET_EVENT_BLOCK_FASTPATH"
+  printf 'det_prefixed_direct_parallel=%s\n' "$DET_PREFIXED_DIRECT_PARALLEL"
+  printf 'det_completion_only_success=%s\n' "$DET_COMPLETION_ONLY_SUCCESS"
   printf 'completion_path=%s\n' "$RUN_META_COMPLETION_PATH"
   printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
   printf 'kafka_bootstrap=%s\n' "$KAFKA_BOOTSTRAP"
@@ -1801,7 +1861,7 @@ for start_pos in "${!START_ORDER[@]}"; do
 
   log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port orderingMode=$ORDERING_MODE"
   log "    binary: $srv_bin"
-  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbDetQueueHighWm=$BCDB_DET_QUEUE_HIGH_WM bcdbDetQueueLowWm=$BCDB_DET_QUEUE_LOW_WM bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT resultPublishReplicaLimit=$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbDetQueueHighWm=$BCDB_DET_QUEUE_HIGH_WM bcdbDetQueueLowWm=$BCDB_DET_QUEUE_LOW_WM bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT resultPublishReplicaLimit=$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE raftOrderedFanout=$RAFT_ORDERED_FANOUT detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
 
@@ -1820,11 +1880,15 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    export ARIABC_DET_BLOCK_MAX='${DET_BLOCK_MAX}'
 	    export ARIABC_DET_PARTIAL_BLOCK_MAX_WAIT_US='${DET_PARTIAL_BLOCK_MAX_WAIT_US}'
 	    export ARIABC_DET_EVENT_BLOCK_FASTPATH='${DET_EVENT_BLOCK_FASTPATH}'
+	    export ARIABC_DET_PREFIXED_DIRECT_PARALLEL='${DET_PREFIXED_DIRECT_PARALLEL}'
+	    export ARIABC_DET_COMPLETION_ONLY_SUCCESS='${DET_COMPLETION_ONLY_SUCCESS}'
 	    export ARIABC_DET_ALLOW_RAW_COMPAT='${DET_RAW_SQL}'
 	    export ARIABC_DET_BLOCK_SKIP_READONLY='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
 	    export ARIABC_RESULT_PUBLISH_REPLICA_LIMIT='${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT}'
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
+	    export ARIABC_RAFT_ORDERED_FANOUT='${RAFT_ORDERED_FANOUT}'
+	    export ARIABC_DET_ORDER_START_SEQ='${DET_START_SEQ}'
 	    export BCDB_DT_COMPLETION_ONLY_SKIP_READS='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export BCDB_FLOW_DEBUG='${BCDB_FLOW_DEBUG}'
 	    export BCDB_DET_QUEUE_HIGH_WM='${BCDB_DET_QUEUE_HIGH_WM}'
@@ -1990,7 +2054,7 @@ fi
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM"
-log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS connFanout=$CONN_FANOUT broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS connFanout=$CONN_FANOUT raftOrderedFanout=$RAFT_ORDERED_FANOUT broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 # Print a clear banner that distinguishes pipeline-depth from real OS parallelism
 # so this output can be compared honestly against the single-node Python script:
 #   pipeline   → N terminal lanes / single reactor (DET window grows, not OS threads)
@@ -2384,20 +2448,21 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   MARKER_LOG="$LOG_DIR/post_verify_marker_gateway.log"
   log "  Submitting marker key=$VERIFY_MARKER_KEY detStartSeq=$MARKER_SEQ reqIdOffset=$MARKER_REQ"
   MARKER_EXTRA_ARGS=()
+  MARKER_ALL_NODES="${#NODE_IDS[@]}"
   if [[ "$BYPASS_RAFT" -eq 1 && "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
     # The measured workload may use client-visible accept quorum, but the
     # correctness marker is a barrier: every replica must accept and execute it
     # so all prior deterministic sequence numbers are drained before Merkle.
-    MARKER_EXTRA_ARGS+=(--broadcastAcceptQuorum 4)
-    MARKER_EXTRA_ARGS+=(--broadcastResultQuorum 4)
+    MARKER_EXTRA_ARGS+=(--broadcastAcceptQuorum "$MARKER_ALL_NODES")
+    MARKER_EXTRA_ARGS+=(--broadcastResultQuorum "$MARKER_ALL_NODES")
     MARKER_EXTRA_ARGS+=(--broadcastDrainInTimedRun 1)
-    log "  Marker barrier override: broadcastAcceptQuorum=4 broadcastResultQuorum=4 broadcastDrainInTimedRun=1"
+    log "  Marker barrier override: broadcastAcceptQuorum=$MARKER_ALL_NODES broadcastResultQuorum=$MARKER_ALL_NODES broadcastDrainInTimedRun=1"
   elif [[ "$BYPASS_RAFT" -eq 0 && "$KAFKA_COMPLETION_MODE" == "async" ]]; then
     # Normal raft-kafka workload completion waits for the submit node only.
     # The marker is the correctness barrier, so require every replica to apply
     # the marker log entry before post-run Merkle/root checks.
-    MARKER_EXTRA_ARGS+=(--directCompletionQuorum 4)
-    log "  Marker barrier override: directCompletionQuorum=4"
+    MARKER_EXTRA_ARGS+=(--directCompletionQuorum "$MARKER_ALL_NODES")
+    log "  Marker barrier override: directCompletionQuorum=$MARKER_ALL_NODES"
   fi
   if ! "$GW_BIN" \
     --nodes "$GW_NODES" \
