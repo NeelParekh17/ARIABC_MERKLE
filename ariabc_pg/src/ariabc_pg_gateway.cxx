@@ -2412,6 +2412,7 @@ int main(int argc, char** argv) {
 
     const bool majority_wait_enabled = (opt.wait_majority == 1);
     const bool async_hash_validation = (opt.validation_mode == "async_hash");
+    const bool strict_hash_validation = (opt.validation_mode == "strict_majority");
 
     const std::string submit_mode = ariabc_pg::trim_copy(opt.submit_mode);
     std::unique_ptr<ariabc_pg::async_cluster_submitter> submitter;
@@ -2608,6 +2609,9 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> term_leader_signature_invalid(0);
     std::atomic<uint64_t> term_majority_timeout(0);
     std::atomic<uint64_t> term_other_failure(0);
+    std::atomic<uint64_t> strict_all_nodes_checks(0);
+    std::atomic<uint64_t> strict_all_nodes_failures(0);
+    std::atomic<uint64_t> strict_all_nodes_wait_ns(0);
 
     auto req_id_for_idx = [&](size_t idx) -> std::string {
         const uint64_t id_num = opt.req_id_offset + static_cast<uint64_t>(idx);
@@ -3295,6 +3299,31 @@ int main(int argc, char** argv) {
                 return true;
             };
 
+            auto wait_strict_all_nodes_for_req = [&](uint64_t rid) -> bool {
+                if (!strict_hash_validation) {
+                    return true;
+                }
+                std::string all_err;
+                const auto all0 = std::chrono::steady_clock::now();
+                strict_all_nodes_checks.fetch_add(1, std::memory_order_relaxed);
+                const bool all_ok = votes.wait_all_nodes_consistent(
+                    rid, opt.poll_interval_us, opt.poll_count, all_err);
+                const auto all1 = std::chrono::steady_clock::now();
+                const uint64_t all_wait_ns = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(all1 - all0).count());
+                total_majority_wait_ns.fetch_add(all_wait_ns);
+                strict_all_nodes_wait_ns.fetch_add(all_wait_ns, std::memory_order_relaxed);
+                if (!all_ok) {
+                    strict_all_nodes_failures.fetch_add(1, std::memory_order_relaxed);
+                    if (all_err.empty()) all_err = "all_nodes_timeout";
+                    bump_terminal_reason(all_err);
+                    emit_recovery_event(rid, all_err);
+                    permanent_failures.fetch_add(1);
+                    return false;
+                }
+                return true;
+            };
+
             auto wait_det_majority_window = [&](size_t max_outstanding) -> bool {
                 while (majority_wait_enabled && inflight.size() > max_outstanding) {
                     std::string maj;
@@ -3311,6 +3340,9 @@ int main(int argc, char** argv) {
                         bump_terminal_reason(wait_err);
                         emit_recovery_event(rid, wait_err);
                         permanent_failures.fetch_add(1);
+                        return false;
+                    }
+                    if (!wait_strict_all_nodes_for_req(rid)) {
                         return false;
                     }
                     det_completed_count.fetch_add(1, std::memory_order_relaxed);
@@ -3929,6 +3961,10 @@ int main(int argc, char** argv) {
                         failed = true;
                         break;
                     }
+                    if (!wait_strict_all_nodes_for_req(rid)) {
+                        failed = true;
+                        break;
+                    }
                     det_completed_count.fetch_add(1, std::memory_order_relaxed);
                     det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
                     release_det_req_lane(rid);
@@ -4259,6 +4295,9 @@ int main(int argc, char** argv) {
             << " term_leader_signature_invalid=" << term_leader_signature_invalid.load(std::memory_order_relaxed)
             << " term_majority_timeout=" << term_majority_timeout.load(std::memory_order_relaxed)
             << " term_other_failure=" << term_other_failure.load(std::memory_order_relaxed)
+            << " strict_all_nodes_checks=" << strict_all_nodes_checks.load(std::memory_order_relaxed)
+            << " strict_all_nodes_failures=" << strict_all_nodes_failures.load(std::memory_order_relaxed)
+            << " strict_all_nodes_wait_ms=" << (strict_all_nodes_wait_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " err_send_calls=" << ep.send_calls
             << " err_send_ok=" << ep.send_ok
             << " err_producev_ms=" << (ep.producev_ns / 1000000.0)

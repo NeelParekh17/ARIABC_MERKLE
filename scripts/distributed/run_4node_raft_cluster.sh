@@ -138,13 +138,13 @@ DET_SUBMIT_PIPELINE="${DET_SUBMIT_PIPELINE:-1}"
 DET_PIPELINE_DEPTH="${DET_PIPELINE_DEPTH:-0}"
 PG_EXEC_MODE="${PG_EXEC_MODE:-event}"
 DET_RAW_SQL="${DET_RAW_SQL:-0}"  # 0=require "s <seq> <SQL>" deterministic path, 1=raw compatibility mode
-DET_BLOCK_PARALLEL="${DET_BLOCK_PARALLEL:-16}"  # parallel PG conns per det block (1=legacy, 4-8=Lever1, 16=full core)
-DET_BLOCK_PIPELINE="${DET_BLOCK_PIPELINE:-1}"  # logical BCDB blocks per backend submit call
+DET_BLOCK_PARALLEL="${DET_BLOCK_PARALLEL:-64}"  # active per-tx/event PG conns or parallel det blocks
+DET_BLOCK_PIPELINE="${DET_BLOCK_PIPELINE:-4}"  # logical BCDB blocks per backend submit call when block fastpath is enabled
 DET_BLOCK_MAX="${DET_BLOCK_MAX:-2048}"         # max txs per backend deterministic block submit
 DET_PARTIAL_BLOCK_MAX_WAIT_US="${DET_PARTIAL_BLOCK_MAX_WAIT_US:-0}"  # low-latency partial deterministic blocks; 0=dispatch immediately
 DET_EVENT_BLOCK_FASTPATH="${DET_EVENT_BLOCK_FASTPATH:-1}"  # 1=enable BCDB block-submit fast path in event mode
-DET_PREFIXED_DIRECT_PARALLEL="${DET_PREFIXED_DIRECT_PARALLEL:-0}"  # 1=execute s<seq> SQL directly on multiple PG sockets
-DET_COMPLETION_ONLY_SUCCESS="${DET_COMPLETION_ONLY_SUCCESS:-}"
+DET_PREFIXED_DIRECT_PARALLEL="${DET_PREFIXED_DIRECT_PARALLEL:-1}"  # 1=execute s<seq> SQL directly on multiple PG sockets
+DET_COMPLETION_ONLY_SUCCESS="${DET_COMPLETION_ONLY_SUCCESS:-0}"
 DET_COMPLETION_ONLY_SUCCESS_EXPLICIT=0
 # ---------------------------------------------------------------------------
 # Parallelism mode — mirrors how the single-node Python benchmark uses real
@@ -296,10 +296,13 @@ Options:
                   "s <seq> <SQL>", 1=send raw SQL in deterministic order
                   (default: 0)
   --det-block-parallel N
-                  Parallel PG connections per det block on each server (default: 1,
-                  set to 4-8 to enable Lever1 parallel block execution)
+                  Active deterministic PG connections per server. In
+                  prefixed-direct mode this caps per-tx in-flight SQL; in
+                  block-fastpath mode this caps concurrent block submits
+                  (default: 64)
   --det-block-pipeline N
-                  Logical BCDB blocks per backend submit call (default: 1)
+                  Logical BCDB blocks per backend submit call when block fastpath
+                  is enabled (default: 4)
   --det-block-max N
                   Max transactions per backend deterministic block submit (default: 2048)
   --det-partial-block-max-wait-us N
@@ -307,7 +310,11 @@ Options:
                   before dispatch; 0 dispatches immediately (default: 0)
   --det-event-block-fastpath N
                   Enable BCDB event-mode block fast path on every server:
-                  0|1 (default: 0)
+                  0|1 (default: 1, auto-disabled by prefixed-direct mode)
+  --det-prefixed-direct-parallel N
+                  Execute deterministic "s <seq>" SQL directly on multiple PG
+                  sockets instead of waiting on whole bcdb_block_submit_results
+                  calls: 0|1 (default: 1)
   --bcdb-block-profile N
                   Enable PROFILE_BCDB_BLOCK lines inside PostgreSQL backends (default: 0)
   --bcdb-block-wait-watermark N
@@ -449,9 +456,6 @@ if [[ "$DET_PREFIXED_DIRECT_PARALLEL" != "0" && "$DET_PREFIXED_DIRECT_PARALLEL" 
   echo "ERROR: --det-prefixed-direct-parallel must be 0 or 1" >&2
   exit 2
 fi
-if [[ -z "$DET_COMPLETION_ONLY_SUCCESS" ]]; then
-  DET_COMPLETION_ONLY_SUCCESS="$DET_PREFIXED_DIRECT_PARALLEL"
-fi
 if [[ "$DET_COMPLETION_ONLY_SUCCESS" != "0" && "$DET_COMPLETION_ONLY_SUCCESS" != "1" ]]; then
   echo "ERROR: --det-completion-only-success must be 0 or 1" >&2
   exit 2
@@ -465,12 +469,7 @@ if [[ "$DET_PREFIXED_DIRECT_PARALLEL" == "1" ]]; then
     echo "ERROR: --det-prefixed-direct-parallel requires --det-raw-sql 0 so Raft-ordered DET prefixes are preserved" >&2
     exit 2
   fi
-  if [[ "$DET_COMPLETION_ONLY_SUCCESS_EXPLICIT" -eq 1 && "$DET_COMPLETION_ONLY_SUCCESS" != "1" ]]; then
-    echo "ERROR: --det-prefixed-direct-parallel requires --det-completion-only-success 1" >&2
-    exit 2
-  fi
   DET_EVENT_BLOCK_FASTPATH=0
-  DET_COMPLETION_ONLY_SUCCESS=1
 fi
 case "$ORDERING_MODE" in
   raft|raft-kafka|raft_kafka)
@@ -1597,6 +1596,10 @@ for idx in "${!NODE_IDS[@]}"; do
     hashtab_threshold=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_hashtab_switch_threshold;' | tr -d '[:space:]')
     ring_slots=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_result_ring_slots;' | tr -d '[:space:]')
     owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || true)
+    synchronous_commit=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show synchronous_commit;' | tr -d '[:space:]')
+    fsync_guc=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show fsync;' | tr -d '[:space:]')
+    full_page_writes=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show full_page_writes;' | tr -d '[:space:]')
+    wal_level=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show wal_level;' | tr -d '[:space:]')
     if [[ -z \"\$owp\" && '$BCDB_OVERWRITE_PROTECTION' != '0' ]]; then
       echo \"ERROR: --bcdb-overwrite-protection was requested, but this PostgreSQL build does not expose bcdb_overwrite_protection\" >&2
       exit 1
@@ -1689,8 +1692,12 @@ for idx in "${!NODE_IDS[@]}"; do
       owp_display=\"\$owp\"
       [[ -z \"\$owp_display\" ]] && owp_display=unsupported
       max_connections=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show max_connections;' | tr -d '[:space:]')
+      synchronous_commit=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show synchronous_commit;' | tr -d '[:space:]')
+      fsync_guc=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show fsync;' | tr -d '[:space:]')
+      full_page_writes=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show full_page_writes;' | tr -d '[:space:]')
+      wal_level=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show wal_level;' | tr -d '[:space:]')
     fi
-    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_serial_gate_source=\$serial_gate_source bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp_display max_connections=\$max_connections\"
+    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_serial_gate_source=\$serial_gate_source bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp_display max_connections=\$max_connections synchronous_commit=\$synchronous_commit fsync=\$fsync_guc full_page_writes=\$full_page_writes wal_level=\$wal_level\"
   " 2>&1)" && echo "$status_line" > "$pg3_status_file" || { echo "FAILED" > "$pg3_status_file"; exit 1; }
   ) &
   PG3_PIDS+=("$!")
@@ -2033,7 +2040,7 @@ fi
 GW_EXTRA_ARGS=""
 if [[ "$NO_KAFKA" -eq 0 ]]; then
   if [[ "$KAFKA_COMPLETION_MODE" == "majority" ]]; then
-    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --totalNodes ${#NODE_IDS[@]}"
+    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --validationMode strict_majority --totalNodes ${#NODE_IDS[@]}"
   else
     GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 0 --completionPath direct --validationMode async_hash --totalNodes ${#NODE_IDS[@]} --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
   fi
