@@ -1893,16 +1893,9 @@ void pg_executor::event_loop() {
         std::vector<std::string> results;
         uint64_t ready_ns = 0;
     };
-    struct ready_det_result {
-        task done_task;
-        std::string result;
-        uint64_t ready_ns = 0;
-    };
     std::map<uint64_t, ready_det_block> ready_det_blocks;
-    std::map<uint64_t, ready_det_result> ready_det_results;
     uint64_t next_det_block_submit_seq = 0;
     uint64_t next_det_block_emit_seq = 0;
-    uint64_t next_det_result_emit_seq = 1;
     uint64_t last_inflight_sample_ns = now_steady_ns();
     size_t last_inflight_level = 0;
 
@@ -1955,47 +1948,8 @@ void pg_executor::event_loop() {
         }
     };
 
-    auto drain_ready_det_results = [&]() {
-        for (;;) {
-            auto it = ready_det_results.find(next_det_result_emit_seq);
-            if (it == ready_det_results.end()) break;
-
-            ready_det_result ready = std::move(it->second);
-            ready_det_results.erase(it);
-            if (ready.ready_ns != 0) {
-                const uint64_t now_ns = now_steady_ns();
-                if (now_ns >= ready.ready_ns) {
-                    st_ordered_emit_wait_ns_.fetch_add(now_ns - ready.ready_ns,
-                                                       std::memory_order_relaxed);
-                }
-            }
-            emit_det_result(ready.done_task, ready.result);
-            ++next_det_result_emit_seq;
-        }
-    };
-
     auto mark_det_result_ready = [&](task done_task, const std::string& out) {
-        if (db_opt_.db_type == 1 &&
-            !det_event_block_fastpath_enabled() &&
-            done_task.dispatch_seq != 0) {
-            const uint64_t seq = done_task.dispatch_seq;
-            ready_det_result ready;
-            ready.done_task = std::move(done_task);
-            ready.result = out;
-            ready.ready_ns = now_steady_ns();
-            ready_det_results.emplace(seq, std::move(ready));
-            uint64_t cur_max = st_ready_det_results_max_.load(std::memory_order_relaxed);
-            while (ready_det_results.size() > cur_max &&
-                   !st_ready_det_results_max_.compare_exchange_weak(
-                       cur_max,
-                       static_cast<uint64_t>(ready_det_results.size()),
-                       std::memory_order_relaxed,
-                       std::memory_order_relaxed)) {
-            }
-            drain_ready_det_results();
-        } else {
-            emit_det_result(done_task, out);
-        }
+        emit_det_result(done_task, out);
     };
 
     auto update_overload_state = [&](size_t backlog, size_t queued) {
@@ -2297,7 +2251,6 @@ void pg_executor::event_loop() {
             }
         }
         drain_ready_det_blocks();
-        drain_ready_det_results();
 
         // Assign ready work to idle connections.
         size_t inflight = 0;
