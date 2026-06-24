@@ -822,7 +822,7 @@ pg_executor::pg_executor(int node_id,
                  * tx order; the event loop emits completed block results in
                  * submission order.
                  */
-                det_block_parallel_ = static_cast<int>(std::min<long>(parsed, 64));
+                det_block_parallel_ = static_cast<int>(std::min<long>(parsed, 256));
             }
         }
         const char* v = ::getenv("ARIABC_DET_BLOCK_PIPELINE");
@@ -2080,16 +2080,19 @@ void pg_executor::event_loop() {
                         candidate.reserve(block_cap);
                         while (!q_.empty() && candidate.size() < block_cap) {
                             /*
-                             * Keep one BCDB block inside the request batch that
-                             * the gateway or Raft state machine accepted.
-                             * Kafka-only bypass replicas receive those batches
-                             * in the same order, but their executor queues can
-                             * drain at different rates; merging adjacent queue
-                             * batches here would make replica-local timing pick
-                             * BCDB block boundaries.
+                             * In Kafka-only/bypass mode raft_log_idx is 0, so
+                             * each replica must keep the gateway batch boundary:
+                             * merging adjacent local queue batches would let
+                             * replica scheduling choose different BCDB block
+                             * boundaries.  In raft-kafka mode every item has a
+                             * non-zero Raft log index and the global req_id
+                             * order below is authoritative, so a logical BCDB
+                             * block may span several committed Raft batches.
                              */
                             if (!candidate.empty() &&
-                                q_.front().raft_log_idx != candidate.front().raft_log_idx) {
+                                q_.front().raft_log_idx != candidate.front().raft_log_idx &&
+                                (candidate.front().raft_log_idx == 0 ||
+                                 q_.front().raft_log_idx == 0)) {
                                 break;
                             }
                             candidate.push_back(std::move(q_.front()));
