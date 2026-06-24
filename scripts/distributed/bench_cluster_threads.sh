@@ -41,11 +41,14 @@
 #   --conn-fanout N         Submit sockets per node (default: raft-kafka=1,
 #                           kafka-only=threads)
 #   --det-pipeline-depth N  Per-terminal DET pipeline depth; 0=auto (default: 0)
-#   --det-block-parallel N  Parallel PG conns per det block on database nodes (default: 8)
-#                           1=serial legacy, 4-8=parallel block execution for higher TPS.
+#   --det-block-parallel N  Parallel PG conns per det block on database nodes (default: 16)
+#                           1=serial legacy, 4-16=parallel block execution for higher TPS.
 #                           IMPORTANT: set >= 4 to unlock multi-threaded execution on each
 #                           cluster node (otherwise raft-kafka connFanout=1 limits each node
 #                           to its 1-thread performance, ~4k TPS instead of ~9k TPS).
+#   --det-event-block-fastpath N
+#                           1=use BCDB block-submit fast path for deterministic event-mode
+#                           scaling (default: 1). 0 is a diagnostic per-statement path.
 #   --submit-mode M         blocking|event (default: event)
 #   --ordering-mode M       raft-kafka|kafka-only (default: raft-kafka)
 #   --kafka-completion-mode M majority|async (default: majority)
@@ -82,7 +85,8 @@ DET_BATCH_SIZE="256"
 POOL_SIZE="256"
 CONN_FANOUT=""
 DET_PIPELINE_DEPTH="0"
-DET_BLOCK_PARALLEL="8"        # default 8 — enables parallel block execution on db nodes
+DET_BLOCK_PARALLEL="16"       # default 16 — enables parallel block execution on db nodes
+DET_EVENT_BLOCK_FASTPATH="1"
 SUBMIT_MODE="event"
 ORDERING_MODE_ARG=""
 KAFKA_COMPLETION_MODE_ARG=""
@@ -114,7 +118,8 @@ while [[ $# -gt 0 ]]; do
     --pool-size)        POOL_SIZE="${2:-256}";                shift 2 ;;
     --conn-fanout)      CONN_FANOUT="${2:-1}";                shift 2 ;;
     --det-pipeline-depth) DET_PIPELINE_DEPTH="${2:-0}";      shift 2 ;;
-    --det-block-parallel) DET_BLOCK_PARALLEL="${2:-8}";      shift 2 ;;
+    --det-block-parallel) DET_BLOCK_PARALLEL="${2:-16}";     shift 2 ;;
+    --det-event-block-fastpath) DET_EVENT_BLOCK_FASTPATH="${2:-1}"; shift 2 ;;
     --submit-mode)      SUBMIT_MODE="${2:-event}";            shift 2 ;;
     --ordering-mode)    ORDERING_MODE_ARG="${2:-}";           shift 2 ;;
     --kafka-completion-mode) KAFKA_COMPLETION_MODE_ARG="${2:-}"; shift 2 ;;
@@ -169,6 +174,7 @@ build_common_args() {
     --pool-size       "$POOL_SIZE"
     --det-pipeline-depth "$DET_PIPELINE_DEPTH"
     --det-block-parallel "$DET_BLOCK_PARALLEL"
+    --det-event-block-fastpath "$DET_EVENT_BLOCK_FASTPATH"
     --submit-mode     "$SUBMIT_MODE"
     --parallelism-mode "$PARALLELISM_MODE"
   )
@@ -352,7 +358,7 @@ else
   log "  *** pipeline: N terminal lanes / 1 reactor (strided DET assignment internally) ***"
   log "  *** This is the correct multi-thread model for raft-kafka deterministic ordering ***"
 fi
-log "  Common args   : (base) --per-thread-window $PER_THREAD_WINDOW --det-batch-size $DET_BATCH_SIZE --pool-size $POOL_SIZE --conn-fanout $CONN_FANOUT_LABEL --det-pipeline-depth $DET_PIPELINE_DEPTH --det-block-parallel $DET_BLOCK_PARALLEL --submit-mode $SUBMIT_MODE ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}"
+log "  Common args   : (base) --per-thread-window $PER_THREAD_WINDOW --det-batch-size $DET_BATCH_SIZE --pool-size $POOL_SIZE --conn-fanout $CONN_FANOUT_LABEL --det-pipeline-depth $DET_PIPELINE_DEPTH --det-block-parallel $DET_BLOCK_PARALLEL --det-event-block-fastpath $DET_EVENT_BLOCK_FASTPATH --submit-mode $SUBMIT_MODE ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}"
 log ""
 
 

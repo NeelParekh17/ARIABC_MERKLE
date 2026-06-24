@@ -328,8 +328,8 @@ _kill_on_node() {
 
   for pat in "${_KILL_PATTERNS[@]}"; do
     local result
-    result=$(ssh_run "$node" "pkill -f '$pat' 2>/dev/null && echo KILLED || true" 2>/dev/null || true)
-    if [[ "$result" == "KILLED" ]]; then
+    result=$(ssh_run "$node" "pkill -9 -f '$pat' 2>/dev/null && echo KILLED || true" 2>/dev/null || true)
+    if [[ "$result" == *"KILLED"* ]]; then
       lmsg "  [KILL] $node – terminated processes matching '$pat'"
       killed=1
     fi
@@ -1025,5 +1025,122 @@ for node in "${!NODE_STATUS[@]}"; do
   printf "%-52s %-8s %s\n" "$node" "$status" "$local_node_dir"
 done
 echo
+
+# ============================================================
+# PHASE 5: COMBINED GRAPHS
+# ============================================================
+lmsg "=== Phase 5: Generating combined graphs ==="
+python3 - "$LOCAL_RESULT_ROOT" <<'PYEOF'
+import csv
+import sys
+import re
+from pathlib import Path
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except Exception:
+    print("  [GRAPH] matplotlib not found, skipping combined graphs.")
+    sys.exit(0)
+
+result_root = Path(sys.argv[1])
+node_dirs = [d for d in result_root.iterdir() if d.is_dir() and d.name != "_run_logs"]
+
+def as_int(v):
+    try: return int((v or "").strip())
+    except: return None
+
+def as_float(v):
+    try: return float((v or "").strip())
+    except: return None
+
+groups = {}
+for ndir in node_dirs:
+    node_name = ndir.name
+    summary_csv = ndir / "summary.csv"
+    if not summary_csv.exists():
+        continue
+    with summary_csv.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            wl = (row.get("workload") or "").strip()
+            if not wl: continue
+            rate = as_int(row.get("rate", "")) or 0
+            groups.setdefault((wl, rate), []).append((node_name, row))
+
+if not groups:
+    sys.exit(0)
+
+mode_norm = {"postgres": "pg", "pg": "pg", "safedb": "det", "det": "det", "aria": "nondet", "nondet": "nondet"}
+
+for (workload, rate), items in groups.items():
+    series = {}
+    for node_name, r in items:
+        raw_mode = (r.get("mode") or "").strip().lower()
+        mode = mode_norm.get(raw_mode, raw_mode)
+        
+        if mode != "det":
+            continue
+        
+        label = f"{node_name}_det"
+        
+        th = as_int(r.get("threads", ""))
+        tps = as_float(r.get("median_throughput_tps", ""))
+        if tps is None:
+            tps = as_float(r.get("mean_throughput_tps", ""))
+        if th is None or tps is None:
+            continue
+            
+        series.setdefault(label, []).append((th, tps))
+        
+    if not any(series.values()):
+        continue
+        
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=130)
+    
+    # Sort labels for consistent coloring
+    for label in sorted(series.keys()):
+        points = sorted(series[label], key=lambda x: x[0])
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        
+        # simple heuristic for line style
+        ls = "-"
+        if "_det" in label: ls = "--"
+        if "_nondet" in label: ls = ":"
+        
+        ax.plot(xs, ys, marker="o", linewidth=1.5, markersize=4.0, linestyle=ls, label=label)
+
+    ax.set_xlabel("Threads")
+    ax.set_ylabel("TPS")
+    title = f"Combined TPS vs Threads - {workload}"
+    if rate > 0:
+        title += f" - rate={rate}"
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.6)
+    
+    if len(series) > 6:
+        ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
+    else:
+        ax.legend()
+        
+    def safe_name(s):
+        s = s.replace('@', '_at_')
+        return re.sub(r'[^A-Za-z0-9_.-]', '_', s)
+        
+    stem = safe_name(workload)
+    out_name = f"combined_tps_{stem}"
+    if rate > 0:
+        out_name += f"_rate-{rate}"
+    out_name += ".png"
+    
+    out_path = result_root / out_name
+    fig.savefig(out_path, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  [GRAPH] Generated combined graph: {out_name}")
+PYEOF
+echo
+
 lmsg "Logs:    $LOG_DIR"
 lmsg "Results: $LOCAL_RESULT_ROOT"

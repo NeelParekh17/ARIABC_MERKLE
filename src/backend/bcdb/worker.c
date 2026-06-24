@@ -760,6 +760,10 @@ bcdb_publish_error_result(BCBlock *block, BCDBShmXact *tx, const char *sqlstate)
                      tx->xid, __ATOMIC_RELEASE);
     __atomic_store_n(&block->result_committed_txid[mem_txid],
                      tx->tx_id, __ATOMIC_RELEASE);
+
+	if (tx->block_id_committed == BCDBMaxBid)
+		__atomic_store_n(&block->result_consumed_txid[mem_txid],
+						 (int32) tx->tx_id, __ATOMIC_RELEASE);
 }
 
 static inline void
@@ -2497,15 +2501,14 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
             PTRACE_BEGIN(BCDB_PHASE_FINISH);
 
-            /*
-             * Keep the gateway-visible BCDB result path off PostgreSQL's transaction
-             * finish cost.  At this point deterministic conflict-check and apply have
-             * completed for this tx, and the result string is fully determined.  The
-             * BCDB middleware waits on result_committed_txid / last_committed_tx_id,
-             * so publish those before finish_xact_command(); finish_xact_command()
-             * can then run behind the result watermark without changing tx-id order.
-             */
-            bcdb_wait_for_slot_consumable(block, tx->tx_id, mem_txid);
+			/*
+			 * Build the gateway-visible result before PostgreSQL transaction finish,
+			 * but do not publish the committed marker yet.  last_committed_tx_id is
+			 * used as a snapshot-visibility baseline by conflict_checkDT(), so it
+			 * must not advance until finish_xact_command() has made this tx visible
+			 * to later PostgreSQL snapshots.
+			 */
+			bcdb_wait_for_slot_consumable(block, tx->tx_id, mem_txid);
 			memset(tx->select_result, 0, sizeof(tx->select_result));
             memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
 #if SAFEDBG3
@@ -2563,36 +2566,34 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                              "\n\t*%s* %s\n", tx->hash, completionTag);
                 }
 
-                /*
-                 * Publish result before advertising tx as committed to middleware waiters.
-                 * Ensure visibility ordering across CPUs.
-                 */
-                pg_write_barrier();
-                /*
-                 * T3-v2: store commit XID before committed marker for release-acquire
-                 * ordering.  When a reader observes result_committed_txid[slot]==tx_id,
-                 * result_commit_xid[slot] is guaranteed visible.
-                 */
-                __atomic_store_n(&block->result_commit_xid[mem_txid],
-                                 tx->xid, __ATOMIC_RELEASE);
-                __atomic_store_n(&block->result_committed_txid[mem_txid],
-                                 tx->tx_id, __ATOMIC_RELEASE);
-
-                /*
-				 * Self-consume only for direct psycopg transactions.  For
-				 * bcdb_block_submit_results(), the middleware owns the slot until
-				 * it has formatted the gateway response and publishes
-				 * result_consumed_txid itself.  Marking a block-submit result
-				 * consumed here lets a later tx reuse the ring slot before the
-				 * gateway-side reader has observed it.
-                 */
-				if (tx->block_id_committed == BCDBMaxBid)
-					__atomic_store_n(&block->result_consumed_txid[mem_txid],
-									 (int32)tx->tx_id, __ATOMIC_RELEASE);
-
                 bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_RESULT_US,
                                        finish_result_start);
             }
+
+			finish_xact_command();
+
+			/*
+			 * Publish result and commit markers only after PostgreSQL commit.  The
+			 * release-store pair makes result_commit_xid visible before the tx-id
+			 * marker; last_committed_tx_id is advanced below from these markers.
+			 */
+			pg_write_barrier();
+			__atomic_store_n(&block->result_commit_xid[mem_txid],
+							 tx->xid, __ATOMIC_RELEASE);
+			__atomic_store_n(&block->result_committed_txid[mem_txid],
+							 tx->tx_id, __ATOMIC_RELEASE);
+
+			/*
+			 * Self-consume only for direct psycopg transactions.  For
+			 * bcdb_block_submit_results(), the middleware owns the slot until
+			 * it has formatted the gateway response and publishes
+			 * result_consumed_txid itself.  Marking a block-submit result
+			 * consumed here lets a later tx reuse the ring slot before the
+			 * gateway-side reader has observed it.
+			 */
+			if (tx->block_id_committed == BCDBMaxBid)
+				__atomic_store_n(&block->result_consumed_txid[mem_txid],
+								 (int32)tx->tx_id, __ATOMIC_RELEASE);
 
             {
                 uint64 finish_publish_start = bcdb_ptrace_timer_start();
@@ -2608,7 +2609,6 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_PUBLISH_US,
                                        finish_publish_start);
             }
-            finish_xact_command();
             {
                 BCBlock *committed_block = get_block_by_id(tx->block_id_committed, false);
 
@@ -2699,6 +2699,12 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                                       edata != NULL
                                           ? unpack_sql_state(edata->sqlerrcode)
                                           : "XX000");
+			if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
+				!published_max_advanced)
+			{
+				mark_published_ready_txid(tx);
+				published_max_advanced = true;
+			}
             if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
                 set_last_committed_txid(tx);
             else if (bcdb_advance_commit_watermark)

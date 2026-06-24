@@ -49,8 +49,9 @@ typedef struct
     /*
      * T3 (2026-04-19): per-slot commit marker for decoupled middleware readback.
      *
-     * result_committed_txid[slot] is set to tx->tx_id by the worker
-     * immediately after writing block->result[slot] (release store).
+	 * result_committed_txid[slot] is set to tx->tx_id by the worker after
+	 * writing block->result[slot] and after finish_xact_command() has made
+	 * the PostgreSQL transaction visible to later snapshots (release store).
      * Middleware and advance_last_committed_txid() check this slot-specific
      * value instead of the contiguous last_committed_tx_id watermark, so
      * each tx's result is readable as soon as that tx publishes — without
@@ -70,9 +71,10 @@ typedef struct
      * conflict skip.
      *
      * Set to the committing backend's TransactionId (tx->xid) immediately
-     * BEFORE result_committed_txid, so the release-acquire pair guarantees
-     * visibility: when a reader observes result_committed_txid[slot]==tx_id,
-     * result_commit_xid[slot] is already visible.
+	 * AFTER finish_xact_command() and BEFORE result_committed_txid, so the
+	 * release-acquire pair guarantees visibility: when a reader observes
+	 * result_committed_txid[slot]==tx_id, result_commit_xid[slot] is already
+	 * visible and the PostgreSQL commit has completed.
      *
      * conflict_checkDT (via table_checkDT) uses this to skip candidates that
      * committed before our GetTransactionSnapshot() xmin — those txs' writes

@@ -30,6 +30,9 @@ struct pg_executor_stats {
     uint64_t queue_delay_exec_start_ns = 0;
     uint64_t backlog_cur = 0;
     uint64_t inflight_cur = 0;
+    uint64_t inflight_max = 0;
+    double inflight_avg = 0.0;
+    uint64_t inflight_at_cap_ns = 0;
     uint64_t delayed_cur = 0;
 
     uint64_t conn_acquire_calls = 0;
@@ -76,6 +79,12 @@ struct pg_executor_stats {
     uint64_t det_block_bin_128_plus = 0;
     uint64_t det_block_fallbacks = 0;
     uint64_t det_block_skipped_readonly = 0;
+    uint64_t ready_det_results_max = 0;
+    uint64_t ordered_emit_wait_ns = 0;
+    int det_raw_compat_mode = 0;
+    uint64_t det_raw_compat_activations = 0;
+    std::string det_raw_compat_first_req_id;
+    std::string det_raw_compat_first_sql_prefix;
 };
 
 struct db_options {
@@ -138,6 +147,7 @@ public:
     // before the deadline. This replaces the 1ms sleep-poll on RPC threads and
     // lets the executor notify exactly when the queue drains.
     bool wait_for_admission_drain(uint64_t max_wait_ns);
+    bool ensure_bcdb_initialized();
 
 private:
     struct notice_state;
@@ -172,6 +182,7 @@ private:
                               uint64_t tx_key_start,
                               const std::vector<task>& tasks,
                               std::vector<std::string>& out_results);
+    bool initialize_bcdb();
     void ensure_bcdb_initialized_for_sql(const std::string& sql);
     uint64_t get_det_tx_seq(const task& t) const;
     void det_mark_tx_state(uint64_t tx_seq, det_tx_state st);
@@ -239,6 +250,7 @@ private:
     bool event_mode_ = false;
     bool det_parallel_workers_ = false;
     bool det_raw_compat_mode_ = false;
+    bool det_allow_raw_compat_ = false;
     uint64_t det_next_block_id_ = 2;
     uint64_t det_block_tx_key_base_ = 0;
     uint64_t det_block_next_tx_key_ = 0;
@@ -257,6 +269,10 @@ private:
     int wakeup_wfd_ = -1;
     std::atomic<uint64_t> st_backlog_cur_{0};
     std::atomic<uint64_t> st_inflight_cur_{0};
+    std::atomic<uint64_t> st_inflight_max_{0};
+    std::atomic<uint64_t> st_inflight_area_ns_{0};
+    std::atomic<uint64_t> st_inflight_time_ns_{0};
+    std::atomic<uint64_t> st_inflight_at_cap_ns_{0};
     std::atomic<uint64_t> st_delayed_cur_{0};
 
     std::atomic<uint64_t> st_enqueued_{0};
@@ -303,6 +319,9 @@ private:
     std::atomic<uint64_t> st_det_block_bin_128_plus_{0};
     std::atomic<uint64_t> st_det_block_fallbacks_{0};
     std::atomic<uint64_t> st_det_block_skipped_readonly_{0};
+    std::atomic<uint64_t> st_ready_det_results_max_{0};
+    std::atomic<uint64_t> st_ordered_emit_wait_ns_{0};
+    std::atomic<uint64_t> st_det_raw_compat_activations_{0};
     std::atomic<uint64_t> st_queue_depth_cur_{0};
     std::atomic<bool> queue_overloaded_{false};
     std::mutex admission_mu_;
@@ -316,6 +335,8 @@ private:
     std::mutex det_compat_mu_;
     std::condition_variable det_compat_cv_;
     bool det_compat_inflight_ = false;
+    std::string det_raw_compat_first_req_id_;
+    std::string det_raw_compat_first_sql_prefix_;
     std::mutex det_apply_mu_;
     std::condition_variable det_apply_cv_;
     uint64_t det_next_apply_seq_ = 1;
@@ -323,6 +344,8 @@ private:
     std::unordered_map<uint64_t, det_tx_state> det_tx_states_;
 
     bool is_det_prefixed_sql(const std::string& sql) const;
+    void note_det_raw_compat_activation(const task& t);
+    std::string det_unprefixed_sql_error(const task& t) const;
 };
 
 } // namespace ariabc_pg

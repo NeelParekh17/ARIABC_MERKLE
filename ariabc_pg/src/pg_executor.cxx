@@ -33,7 +33,7 @@ constexpr const char* kBcdbMerkleTag = "BCDB_MERKLE_ROOTS:";
 // reply visibility is not delayed too long.
 constexpr size_t kKafkaBatchMaxBytes = 512 * 1024;
 constexpr size_t kKafkaBatchMaxRecords = 256;
-constexpr int kKafkaBatchMaxDelayMs = 0;
+constexpr int kKafkaBatchMaxDelayMs = 1;
 // Admission control watermarks are for the *queue depth* (ready+delayed), not
 // queue+inflight. In deterministic mode, inflight work is expected; excessive
 // queued work is what drives tail latency and straggler behavior.
@@ -69,6 +69,16 @@ bool debug_req_trace_enabled() {
 bool det_event_block_fastpath_enabled() {
     static const bool enabled = []() -> bool {
         const char* v = std::getenv("ARIABC_DET_EVENT_BLOCK_FASTPATH");
+        if (!v) return false;
+        const std::string s = trim_copy(v);
+        return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+    }();
+    return enabled;
+}
+
+bool det_allow_raw_compat_mode() {
+    static const bool enabled = []() -> bool {
+        const char* v = std::getenv("ARIABC_DET_ALLOW_RAW_COMPAT");
         if (!v) return false;
         const std::string s = trim_copy(v);
         return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
@@ -312,6 +322,14 @@ std::string maybe_strip_det_prefix_for_compat(const std::string& sql,
         return sql;
     }
     return raw_sql;
+}
+
+std::string det_sql_prefix_for_profile(const std::string& sql) {
+    std::string head = trim_copy(sql);
+    if (head.size() > 64) {
+        head.resize(64);
+    }
+    return head;
 }
 
 void json_escape_append(std::string& out, const std::string& in) {
@@ -648,17 +666,38 @@ bool pg_executor::is_det_prefixed_sql(const std::string& sql) const {
     //   "s <SQL>" or "s <8digit-seq> <SQL>"
     // If this prefix is absent in safedb deterministic mode, executing many
     // queued requests concurrently can reorder conflicting writes and break
-    // Merkle consistency. We detect that case and fall back to serial dispatch.
+    // Merkle consistency.
     return (t[0] == 's' || t[0] == 'S') && std::isspace(static_cast<unsigned char>(t[1]));
 }
 
-void pg_executor::ensure_bcdb_initialized_for_sql(const std::string& sql) {
-    if (db_opt_.db_type != 1) return;
-    if (!is_det_prefixed_sql(sql)) return;
-    if (bcdb_init_done_ || bcdb_init_failed_) return;
+void pg_executor::note_det_raw_compat_activation(const task& t) {
+    const uint64_t prev =
+        st_det_raw_compat_activations_.fetch_add(1, std::memory_order_relaxed);
+    det_raw_compat_mode_ = true;
+    if (prev == 0) {
+        det_raw_compat_first_req_id_ = t.req_id;
+        det_raw_compat_first_sql_prefix_ = det_sql_prefix_for_profile(t.sql);
+    }
+}
+
+std::string pg_executor::det_unprefixed_sql_error(const task& t) const {
+    std::ostringstream oss;
+    oss << "ERROR det_prefixed_sql_required req_id=" << t.req_id;
+    const std::string prefix = det_sql_prefix_for_profile(t.sql);
+    if (!prefix.empty()) {
+        oss << " sql=\"" << prefix << "\"";
+    }
+    return oss.str();
+}
+
+bool pg_executor::initialize_bcdb() {
+    if (db_opt_.db_type != 1) return true;
+    if (bcdb_init_done_) return true;
+    if (bcdb_init_failed_) return false;
 
     std::lock_guard<std::mutex> lk(bcdb_init_mu_);
-    if (bcdb_init_done_ || bcdb_init_failed_) return;
+    if (bcdb_init_done_) return true;
+    if (bcdb_init_failed_) return false;
 
     PGconn* c = PQconnectdb(conninfo_.c_str());
     if (!c || PQstatus(c) != CONNECTION_OK) {
@@ -668,12 +707,7 @@ void pg_executor::ensure_bcdb_initialized_for_sql(const std::string& sql) {
                   << std::endl;
         if (c) PQfinish(c);
         bcdb_init_failed_ = true;
-        if (event_mode_) {
-            det_raw_compat_mode_ = true;
-            std::cerr << "bcdb_init fallback: enabling serialized deterministic compatibility mode on node "
-                      << node_id_ << std::endl;
-        }
-        return;
+        return false;
     }
 
     const int block_size = std::max(2, db_opt_.conn_pool_size);
@@ -688,12 +722,7 @@ void pg_executor::ensure_bcdb_initialized_for_sql(const std::string& sql) {
         if (res) PQclear(res);
         PQfinish(c);
         bcdb_init_failed_ = true;
-        if (event_mode_) {
-            det_raw_compat_mode_ = true;
-            std::cerr << "bcdb_init fallback: enabling serialized deterministic compatibility mode on node "
-                      << node_id_ << std::endl;
-        }
-        return;
+        return false;
     }
 
     if (res) PQclear(res);
@@ -703,6 +732,17 @@ void pg_executor::ensure_bcdb_initialized_for_sql(const std::string& sql) {
     std::cerr << "bcdb_init enabled on node " << node_id_
               << " with block_size=" << block_size
               << std::endl;
+    return true;
+}
+
+bool pg_executor::ensure_bcdb_initialized() {
+    return initialize_bcdb();
+}
+
+void pg_executor::ensure_bcdb_initialized_for_sql(const std::string& sql) {
+    if (db_opt_.db_type != 1) return;
+    if (!is_det_prefixed_sql(sql)) return;
+    (void)initialize_bcdb();
 }
 
 pg_executor::pg_executor(int node_id,
@@ -732,6 +772,7 @@ pg_executor::pg_executor(int node_id,
                 !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
         }
     }
+    det_allow_raw_compat_ = det_allow_raw_compat_mode();
     if (event_mode_ && det_parallel_workers_) {
         std::cerr << "event-mode deterministic server execution does not support parallel worker coordination; "
                      "forcing ARIABC_DET_PARALLEL_WORKERS=0 on node "
@@ -1048,6 +1089,14 @@ pg_executor_stats pg_executor::stats() const {
     out.queue_delay_exec_start_ns = st_queue_delay_exec_start_ns_.load(std::memory_order_relaxed);
     out.backlog_cur = st_backlog_cur_.load(std::memory_order_relaxed);
     out.inflight_cur = st_inflight_cur_.load(std::memory_order_relaxed);
+    out.inflight_max = st_inflight_max_.load(std::memory_order_relaxed);
+    out.inflight_at_cap_ns = st_inflight_at_cap_ns_.load(std::memory_order_relaxed);
+    {
+        const uint64_t time_ns = st_inflight_time_ns_.load(std::memory_order_relaxed);
+        const uint64_t area_ns = st_inflight_area_ns_.load(std::memory_order_relaxed);
+        out.inflight_avg =
+            (time_ns > 0) ? (static_cast<double>(area_ns) / static_cast<double>(time_ns)) : 0.0;
+    }
     out.delayed_cur = st_delayed_cur_.load(std::memory_order_relaxed);
     out.conn_acquire_calls = st_conn_acquire_calls_.load(std::memory_order_relaxed);
     out.conn_acquire_wait_ns = st_conn_acquire_wait_ns_.load(std::memory_order_relaxed);
@@ -1090,6 +1139,13 @@ pg_executor_stats pg_executor::stats() const {
     out.det_block_bin_128_plus = st_det_block_bin_128_plus_.load(std::memory_order_relaxed);
     out.det_block_fallbacks = st_det_block_fallbacks_.load(std::memory_order_relaxed);
     out.det_block_skipped_readonly = st_det_block_skipped_readonly_.load(std::memory_order_relaxed);
+    out.ready_det_results_max = st_ready_det_results_max_.load(std::memory_order_relaxed);
+    out.ordered_emit_wait_ns = st_ordered_emit_wait_ns_.load(std::memory_order_relaxed);
+    out.det_raw_compat_mode = det_raw_compat_mode_ ? 1 : 0;
+    out.det_raw_compat_activations =
+        st_det_raw_compat_activations_.load(std::memory_order_relaxed);
+    out.det_raw_compat_first_req_id = det_raw_compat_first_req_id_;
+    out.det_raw_compat_first_sql_prefix = det_raw_compat_first_sql_prefix_;
     return out;
 }
 
@@ -1612,11 +1668,37 @@ void pg_executor::worker_loop() {
         st_dequeued_.fetch_add(1, std::memory_order_relaxed);
         t.dispatch_seq = next_dispatch_seq_.fetch_add(1, std::memory_order_relaxed);
 
-        const bool det_raw_compat =
+        const bool det_unprefixed_det_sql =
             det_parallel_workers_ &&
             (db_opt_.db_type == 1) && !is_det_prefixed_sql(t.sql);
+        if (det_unprefixed_det_sql && !det_allow_raw_compat_) {
+            const std::string result = det_unprefixed_sql_error(t);
+            if (!wait_for_ordered_emit_turn(t.dispatch_seq)) {
+                break;
+            }
+            if (kafka_enabled_) {
+                if (should_publish_kafka_result(node_id_)) {
+                    debug_trace_exec(t.req_id, t.raft_log_idx, result);
+                    if (batch_req_ids.empty()) {
+                        batch_start = std::chrono::steady_clock::now();
+                    }
+                    batch_req_ids.push_back(t.req_id);
+                    batch_results.push_back(result);
+                    batch_raft_log_idxs.push_back(t.raft_log_idx);
+                    batch_leader_hints.push_back(t.leader_node_hint);
+                    batch_bytes += t.req_id.size() + result.size() + 32;
+                }
+            } else {
+                std::cout << (t.req_id + "  " + std::to_string(node_id_) + "  " + result)
+                          << std::endl;
+            }
+            finish_ordered_emit(t.dispatch_seq);
+            continue;
+        }
+
+        const bool det_raw_compat = det_unprefixed_det_sql && det_allow_raw_compat_;
         if (det_raw_compat) {
-            det_raw_compat_mode_ = true;
+            note_det_raw_compat_activation(t);
         }
 
         bool det_raw_compat_serial_turn = false;
@@ -1776,10 +1858,20 @@ void pg_executor::event_loop() {
     struct ready_det_block {
         std::vector<task> tasks;
         std::vector<std::string> results;
+        uint64_t ready_ns = 0;
+    };
+    struct ready_det_result {
+        task done_task;
+        std::string result;
+        uint64_t ready_ns = 0;
     };
     std::map<uint64_t, ready_det_block> ready_det_blocks;
+    std::map<uint64_t, ready_det_result> ready_det_results;
     uint64_t next_det_block_submit_seq = 0;
     uint64_t next_det_block_emit_seq = 0;
+    uint64_t next_det_result_emit_seq = 1;
+    uint64_t last_inflight_sample_ns = now_steady_ns();
+    size_t last_inflight_level = 0;
 
     auto emit_det_result = [&](const task& done_task, const std::string& out) {
         notify_task_applied(done_task.raft_log_idx);
@@ -1806,6 +1898,13 @@ void pg_executor::event_loop() {
 
             ready_det_block ready = std::move(it->second);
             ready_det_blocks.erase(it);
+            if (ready.ready_ns != 0) {
+                const uint64_t now_ns = now_steady_ns();
+                if (now_ns >= ready.ready_ns) {
+                    st_ordered_emit_wait_ns_.fetch_add(now_ns - ready.ready_ns,
+                                                       std::memory_order_relaxed);
+                }
+            }
             const size_t n = std::min(ready.tasks.size(), ready.results.size());
             for (size_t i = 0; i < n; ++i) {
                 emit_det_result(ready.tasks[i], ready.results[i]);
@@ -1820,6 +1919,49 @@ void pg_executor::event_loop() {
                 }
             }
             ++next_det_block_emit_seq;
+        }
+    };
+
+    auto drain_ready_det_results = [&]() {
+        for (;;) {
+            auto it = ready_det_results.find(next_det_result_emit_seq);
+            if (it == ready_det_results.end()) break;
+
+            ready_det_result ready = std::move(it->second);
+            ready_det_results.erase(it);
+            if (ready.ready_ns != 0) {
+                const uint64_t now_ns = now_steady_ns();
+                if (now_ns >= ready.ready_ns) {
+                    st_ordered_emit_wait_ns_.fetch_add(now_ns - ready.ready_ns,
+                                                       std::memory_order_relaxed);
+                }
+            }
+            emit_det_result(ready.done_task, ready.result);
+            ++next_det_result_emit_seq;
+        }
+    };
+
+    auto mark_det_result_ready = [&](task done_task, const std::string& out) {
+        if (db_opt_.db_type == 1 &&
+            !det_event_block_fastpath_enabled() &&
+            done_task.dispatch_seq != 0) {
+            const uint64_t seq = done_task.dispatch_seq;
+            ready_det_result ready;
+            ready.done_task = std::move(done_task);
+            ready.result = out;
+            ready.ready_ns = now_steady_ns();
+            ready_det_results.emplace(seq, std::move(ready));
+            uint64_t cur_max = st_ready_det_results_max_.load(std::memory_order_relaxed);
+            while (ready_det_results.size() > cur_max &&
+                   !st_ready_det_results_max_.compare_exchange_weak(
+                       cur_max,
+                       static_cast<uint64_t>(ready_det_results.size()),
+                       std::memory_order_relaxed,
+                       std::memory_order_relaxed)) {
+            }
+            drain_ready_det_results();
+        } else {
+            emit_det_result(done_task, out);
         }
     };
 
@@ -2022,6 +2164,7 @@ void pg_executor::event_loop() {
                     ready_det_block ready;
                     ready.tasks = std::move(det_batch);
                     ready.results.assign(ready.tasks.size(), "ERROR det_block_build_failed");
+                    ready.ready_ns = now_steady_ns();
                     record_det_block_batch(ready.tasks.size(), true);
                     ready_det_blocks.emplace(block_seq, std::move(ready));
                     continue;
@@ -2030,6 +2173,7 @@ void pg_executor::event_loop() {
                     ready_det_block ready;
                     ready.tasks = std::move(det_batch);
                     ready.results.assign(ready.tasks.size(), "");
+                    ready.ready_ns = now_steady_ns();
                     record_det_block_batch(ready.tasks.size(), false);
                     ready_det_blocks.emplace(block_seq, std::move(ready));
                     continue;
@@ -2098,6 +2242,7 @@ void pg_executor::event_loop() {
                     ready_det_block ready;
                     ready.tasks = std::move(det_batch);
                     ready.results.assign(ready.tasks.size(), "ERROR det_block_send_failed");
+                    ready.ready_ns = now_steady_ns();
                     record_det_block_batch(ready.tasks.size(), true);
                     ready_det_blocks.emplace(block_seq, std::move(ready));
                     continue;
@@ -2116,13 +2261,28 @@ void pg_executor::event_loop() {
             }
         }
         drain_ready_det_blocks();
+        drain_ready_det_results();
 
         // Assign ready work to idle connections.
         size_t inflight = 0;
+        const bool cap_det_event_inflight =
+            db_opt_.db_type == 1 && !det_event_block_fastpath_enabled();
+        const bool strict_det_per_tx_event =
+            cap_det_event_inflight && !det_allow_raw_compat_;
+        const size_t det_event_exec_limit = cap_det_event_inflight
+            ? (strict_det_per_tx_event
+                   ? 1
+                   : std::min<size_t>(
+                         static_cast<size_t>(std::max(1, det_block_parallel_)),
+                         conns_.empty() ? 1 : conns_.size()))
+            : conns_.size();
         for (auto& cs : conns_) {
             if (cs.st != conn_state::state::IDLE) {
                 ++inflight;
                 continue;
+            }
+            if (cap_det_event_inflight && inflight >= det_event_exec_limit) {
+                break;
             }
 
             task t;
@@ -2132,12 +2292,30 @@ void pg_executor::event_loop() {
                 std::lock_guard<std::mutex> lk(q_mu_);
                 if (!q_.empty()) {
                     const task& front = q_.front();
-                    if (!det_raw_compat_mode_ &&
-                        db_opt_.db_type == 1 &&
-                        !is_det_prefixed_sql(front.sql)) {
-                        det_raw_compat_mode_ = true;
+                    if (db_opt_.db_type == 1 &&
+                        !is_det_prefixed_sql(front.sql) &&
+                        !det_allow_raw_compat_) {
+                        task bad = std::move(q_.front());
+                        q_.pop();
+                        depth_after_pop = q_.size();
+                        have = true;
+                        st_queue_depth_cur_.store(static_cast<uint64_t>(depth_after_pop),
+                                                  std::memory_order_relaxed);
+                        st_queue_depth_samples_.fetch_add(1, std::memory_order_relaxed);
+                        st_queue_depth_sum_.fetch_add(static_cast<uint64_t>(depth_after_pop),
+                                                      std::memory_order_relaxed);
+                        t = std::move(bad);
+                    } else if (!det_raw_compat_mode_ &&
+                               db_opt_.db_type == 1 &&
+                               !is_det_prefixed_sql(front.sql) &&
+                               det_allow_raw_compat_) {
+                        note_det_raw_compat_activation(front);
                     }
-                    if (!det_parallel_workers_ &&
+                    if (have) {
+                        // Raw deterministic SQL reached a strict prefixed-SQL
+                        // executor. Surface the error instead of silently
+                        // switching the whole run into compatibility mode.
+                    } else if (!det_parallel_workers_ &&
                         det_event_block_fastpath_enabled() &&
                         db_opt_.db_type == 1 &&
                         bcdb_init_done_ &&
@@ -2168,16 +2346,21 @@ void pg_executor::event_loop() {
                         }();
                         if (k_compat_lockstep) break;
                     }
-                    t = std::move(q_.front());
-                    q_.pop();
-                    depth_after_pop = q_.size();
-                    have = true;
-                    st_queue_depth_cur_.store(static_cast<uint64_t>(depth_after_pop), std::memory_order_relaxed);
-                    st_queue_depth_samples_.fetch_add(1, std::memory_order_relaxed);
-                    st_queue_depth_sum_.fetch_add(static_cast<uint64_t>(depth_after_pop), std::memory_order_relaxed);
+                    if (!have) {
+                        t = std::move(q_.front());
+                        q_.pop();
+                        depth_after_pop = q_.size();
+                        have = true;
+                        st_queue_depth_cur_.store(static_cast<uint64_t>(depth_after_pop), std::memory_order_relaxed);
+                        st_queue_depth_samples_.fetch_add(1, std::memory_order_relaxed);
+                        st_queue_depth_sum_.fetch_add(static_cast<uint64_t>(depth_after_pop), std::memory_order_relaxed);
+                    }
                 }
             }
             if (!have) break;
+            if (t.dispatch_seq == 0) {
+                t.dispatch_seq = next_dispatch_seq_.fetch_add(1, std::memory_order_relaxed);
+            }
 
             const bool first_attempt = (t.attempt == 0 && t.exec_begin_ns == 0);
             if (t.exec_begin_ns == 0) {
@@ -2207,6 +2390,14 @@ void pg_executor::event_loop() {
             notice_state* ns = (it != notice_state_by_conn_.end()) ? it->second : nullptr;
             if (ns) ns->last_merkle_roots.clear();
 
+            if (db_opt_.db_type == 1 &&
+                !is_det_prefixed_sql(t.sql) &&
+                !det_allow_raw_compat_) {
+                const std::string out = det_unprefixed_sql_error(t);
+                mark_det_result_ready(std::move(t), out);
+                continue;
+            }
+
             const std::string sql_exec =
                 maybe_strip_det_prefix_for_compat(t.sql, det_raw_compat_mode_, db_opt_.db_type);
             if (PQsendQuery(cs.c, sql_exec.c_str()) != 1) {
@@ -2215,19 +2406,7 @@ void pg_executor::event_loop() {
                 if (t.exec_begin_ns != 0 && now_ns >= t.exec_begin_ns) {
                     st_exec_ns_.fetch_add(now_ns - t.exec_begin_ns, std::memory_order_relaxed);
                 }
-                // Emit result immediately (no retry).
-                if (kafka_enabled_) {
-                    if (should_publish_kafka_result(node_id_)) {
-                        if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
-                        batch_req_ids.push_back(t.req_id);
-                        batch_results.push_back(out);
-                        batch_raft_log_idxs.push_back(t.raft_log_idx);
-                        batch_leader_hints.push_back(t.leader_node_hint);
-                        batch_bytes += t.req_id.size() + out.size() + 32;
-                    }
-                } else {
-                    std::cout << (t.req_id + "  " + std::to_string(node_id_) + "  " + out) << std::endl;
-                }
+                mark_det_result_ready(std::move(t), out);
                 continue;
             }
 
@@ -2239,6 +2418,29 @@ void pg_executor::event_loop() {
         }
 
         st_inflight_cur_.store(static_cast<uint64_t>(inflight), std::memory_order_relaxed);
+        {
+            const uint64_t sample_ns = now_steady_ns();
+            if (sample_ns >= last_inflight_sample_ns) {
+                const uint64_t delta_ns = sample_ns - last_inflight_sample_ns;
+                st_inflight_area_ns_.fetch_add(
+                    static_cast<uint64_t>(last_inflight_level) * delta_ns,
+                    std::memory_order_relaxed);
+                st_inflight_time_ns_.fetch_add(delta_ns, std::memory_order_relaxed);
+                if (last_inflight_level >= det_event_exec_limit && det_event_exec_limit > 0) {
+                    st_inflight_at_cap_ns_.fetch_add(delta_ns, std::memory_order_relaxed);
+                }
+            }
+            last_inflight_sample_ns = sample_ns;
+            last_inflight_level = inflight;
+        }
+        uint64_t cur_inflight_max = st_inflight_max_.load(std::memory_order_relaxed);
+        while (inflight > cur_inflight_max &&
+               !st_inflight_max_.compare_exchange_weak(
+                   cur_inflight_max,
+                   static_cast<uint64_t>(inflight),
+                   std::memory_order_relaxed,
+                   std::memory_order_relaxed)) {
+        }
 
         // Backlog is for observability; overload control uses queued depth.
         size_t backlog = 0;
@@ -2320,8 +2522,11 @@ void pg_executor::event_loop() {
         if (kafka_enabled_ && !batch_req_ids.empty()) {
             const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - batch_start).count();
-            const int remaining_ms = std::max(0, kKafkaBatchMaxDelayMs - static_cast<int>(age_ms));
-            timeout_ms = std::min(timeout_ms, remaining_ms);
+            const int max_delay_ms = (backlog >= 16) ? -1 : kKafkaBatchMaxDelayMs;
+            if (max_delay_ms >= 0) {
+                const int remaining_ms = std::max(0, max_delay_ms - static_cast<int>(age_ms));
+                timeout_ms = std::min(timeout_ms, remaining_ms);
+            }
         }
 
         int rc = 0;
@@ -2435,6 +2640,7 @@ void pg_executor::event_loop() {
                     }
 
                     record_det_block_batch(ready.tasks.size(), !batch_ok);
+                    ready.ready_ns = now_steady_ns();
                     if (batch_ok) {
                         bool expected = false;
                         if (st_det_block_seen_.compare_exchange_strong(expected, true)) {
@@ -2551,21 +2757,7 @@ void pg_executor::event_loop() {
                 if (done_task.exec_begin_ns != 0 && finish_ns >= done_task.exec_begin_ns) {
                     st_exec_ns_.fetch_add(finish_ns - done_task.exec_begin_ns, std::memory_order_relaxed);
                 }
-                notify_task_applied(done_task.raft_log_idx);
-
-                if (kafka_enabled_) {
-                    if (should_publish_kafka_result(node_id_)) {
-                        debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
-                        if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
-                        batch_req_ids.push_back(done_task.req_id);
-                        batch_results.push_back(out);
-                        batch_raft_log_idxs.push_back(done_task.raft_log_idx);
-                        batch_leader_hints.push_back(done_task.leader_node_hint);
-                        batch_bytes += done_task.req_id.size() + out.size() + 32;
-                    }
-                } else {
-                    std::cout << (done_task.req_id + "  " + std::to_string(node_id_) + "  " + out) << std::endl;
-                }
+                mark_det_result_ready(std::move(done_task), out);
             }
         }
 
@@ -2585,6 +2777,30 @@ void pg_executor::event_loop() {
         }
     }
 
+    {
+        const uint64_t sample_ns = now_steady_ns();
+        if (sample_ns >= last_inflight_sample_ns) {
+            const uint64_t delta_ns = sample_ns - last_inflight_sample_ns;
+            st_inflight_area_ns_.fetch_add(
+                static_cast<uint64_t>(last_inflight_level) * delta_ns,
+                std::memory_order_relaxed);
+            st_inflight_time_ns_.fetch_add(delta_ns, std::memory_order_relaxed);
+            const bool strict_det_per_tx_event =
+                db_opt_.db_type == 1 &&
+                !det_event_block_fastpath_enabled() &&
+                !det_allow_raw_compat_;
+            const size_t cap = det_event_block_fastpath_enabled()
+                ? conns_.size()
+                : (strict_det_per_tx_event
+                       ? 1
+                       : std::min<size_t>(
+                             static_cast<size_t>(std::max(1, det_block_parallel_)),
+                             conns_.empty() ? 1 : conns_.size()));
+            if (last_inflight_level >= cap && cap > 0) {
+                st_inflight_at_cap_ns_.fetch_add(delta_ns, std::memory_order_relaxed);
+            }
+        }
+    }
     flush_batch();
 }
 

@@ -132,6 +132,20 @@ if [[ -n "${port_pids// }" ]]; then
   fi
 fi
 
+# Also forcibly kill any stray postgres processes running from this exact PGDATA_DIR
+# to prevent "pre-existing shared memory block" errors if postmaster.pid was deleted but
+# the process is still alive.
+stray_pids=$(pgrep -f "postgres.*-D $PGDATA_DIR" || true)
+if [[ -n "$stray_pids" ]]; then
+  kill -TERM $stray_pids >/dev/null 2>&1 || true
+  sleep 2
+  stray_pids=$(pgrep -f "postgres.*-D $PGDATA_DIR" || true)
+  if [[ -n "$stray_pids" ]]; then
+    kill -KILL $stray_pids >/dev/null 2>&1 || true
+    sleep 1
+  fi
+fi
+
 _try_start_postgres() {
   "$BIN_DIR/pg_ctl" -D "$PGDATA_DIR" -w -t 120 start -l "$REPO_ROOT/server.log" 2>&1
 }

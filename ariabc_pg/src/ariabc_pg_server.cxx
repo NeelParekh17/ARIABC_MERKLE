@@ -85,6 +85,20 @@ bool starts_with(const std::string& s, const std::string& prefix) {
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
+std::string profile_token(const std::string& s) {
+    if (s.empty()) return "-";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char ch : s) {
+        if (std::isspace(ch)) {
+            out.push_back('_');
+        } else {
+            out.push_back(static_cast<char>(ch));
+        }
+    }
+    return out;
+}
+
 bool parse_det_seq_from_sql(const std::string& sql, uint64_t& out_seq) {
     out_seq = 0;
     const std::string t = trim_copy(sql);
@@ -426,6 +440,14 @@ void handle_client_fd(int fd,
         pg_state_machine* psm = sm ? dynamic_cast<pg_state_machine*>(sm.get()) : nullptr;
 
         // Local control-plane commands used by gateway barriers.
+        if (req.sql == "__ARIABC_CTRL_GET_LEADER") {
+            client_api_response resp;
+            resp.status = 0;
+            resp.msg = std::to_string(raft ? raft->get_leader() : -1);
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
         if (psm && req.sql == "__ARIABC_CTRL_GET_COMMIT_INDEX") {
             client_api_response resp;
             resp.status = 0;
@@ -720,6 +742,14 @@ void handle_client_fd_direct(int fd,
             break;
         }
 
+        if (req.sql == "__ARIABC_CTRL_GET_LEADER") {
+            client_api_response resp;
+            resp.status = 0;
+            resp.msg = "-1";
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
         // Control-plane: return seq counter as proxy for commit index.
         if (req.sql == "__ARIABC_CTRL_GET_COMMIT_INDEX") {
             client_api_response resp;
@@ -850,6 +880,9 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " queue_delay_exec_start_ms=" << (exec.queue_delay_exec_start_ns / 1000000.0)
         << " backlog_cur=" << exec.backlog_cur
         << " inflight_cur=" << exec.inflight_cur
+        << " inflight_max=" << exec.inflight_max
+        << " inflight_avg=" << exec.inflight_avg
+        << " inflight_at_cap_ms=" << (exec.inflight_at_cap_ns / 1000000.0)
         << " delayed_cur=" << exec.delayed_cur
         << " queue_depth_cur=" << exec.queue_depth_cur
         << " queue_depth_max=" << exec.queue_depth_max
@@ -884,6 +917,12 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " det_block_bin_128_plus=" << exec.det_block_bin_128_plus
         << " det_block_fallbacks=" << exec.det_block_fallbacks
         << " det_block_skipped_readonly=" << exec.det_block_skipped_readonly
+        << " ready_det_results_max=" << exec.ready_det_results_max
+        << " ordered_emit_wait_ms=" << (exec.ordered_emit_wait_ns / 1000000.0)
+        << " det_raw_compat_mode=" << exec.det_raw_compat_mode
+        << " det_raw_compat_activations=" << exec.det_raw_compat_activations
+        << " det_raw_compat_first_req_id=" << profile_token(exec.det_raw_compat_first_req_id)
+        << " det_raw_compat_first_sql_prefix=" << profile_token(exec.det_raw_compat_first_sql_prefix)
         << " conn_wait_ms=" << (exec.conn_acquire_wait_ns / 1000000.0)
         << " kafka_flush_calls=" << exec.kafka_flush_calls
         << " kafka_payload_kb=" << (exec.kafka_payload_bytes / 1024.0)
@@ -920,6 +959,16 @@ int main(int argc, char** argv) {
     // State machine (always needed: owns pg_executor + Kafka publisher).
     ptr<state_machine> sm =
         cs_new<ariabc_pg::pg_state_machine>(opt.id, opt.db, opt.kafka);
+
+    if (opt.db.db_type == 1) {
+        std::thread([sm] {
+            ariabc_pg::pg_state_machine* psm =
+                dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
+            if (psm) {
+                psm->ensure_bcdb_initialized();
+            }
+        }).detach();
+    }
 
     if (opt.bypass_raft) {
         // ---- Bypass-Raft mode (kafka-only-no-raft profile) ----
