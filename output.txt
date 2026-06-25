@@ -1,44 +1,407 @@
-neel@neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE:/work/ARIABC/AriaBC/scripts/distributed$ ./run_ycsb_skew_single_vs_full_comparison.sh --runs 1 --threads 1,2,4,6,8,10,12
-[2026-05-21 19:19:30] === YCSB skew TPS comparison ===
-[2026-05-21 19:19:30] Out root  : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930
-[2026-05-21 19:19:30] Threads   : 1,2,4,6,8,10,12
-[2026-05-21 19:19:30] Runs      : 1
-[2026-05-21 19:19:30] Workloads : ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt
-[2026-05-21 19:19:30] Target    : neel@10.129.148.236
-[2026-05-21 19:19:30] Cluster modes: kafka-only,raft-kafka
-[2026-05-21 19:19:30] Syncing source/install to neel@10.129.148.236
-[2026-05-21 19:19:31] Local install looks BCDB-capable; syncing install tree
-[2026-05-21 19:19:31] --- Workload: ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt (out=/work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq) ---
-[2026-05-21 19:19:31] Running single-node PG/DET benchmark on neel@10.129.148.236 (workload=ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
-[2026-05-21 19:21:42] Collecting single-node results from neel@10.129.148.236:/home/neel/Desktop/ariabc_cluster/scripts/bench_results/ycsb_skew_compare_20260521_191930_ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq
-[2026-05-21 19:21:43] Running cluster sweep (modes=kafka-only,raft-kafka workload=ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
-[2026-05-21 19:21:43] Full-system x-axis mapping: thread value -> --num-terminals; detPipelineDepth=80 per terminal
-[2026-05-21 19:21:43] Cluster mode: kafka-only (series=cluster_kafka ordering_path=preordered_direct_broadcast)
-[2026-05-21 19:21:43] Cluster case mode=kafka-only thread=1 run=1 (num-terminals=1 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=80 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
-[2026-05-21 19:26:10] Cluster case mode=kafka-only thread=2 run=1 (num-terminals=2 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=160 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
-[2026-05-21 19:27:27] Cluster case mode=kafka-only thread=4 run=1 (num-terminals=4 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=320 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
-[2026-05-21 19:28:39] Cluster case mode=kafka-only thread=6 run=1 (num-terminals=6 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=480 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
-[2026-05-21 19:29:51] Cluster case mode=kafka-only thread=8 run=1 (num-terminals=8 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=640 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
-[2026-05-21 19:30:59] Cluster case mode=kafka-only thread=10 run=1 (num-terminals=10 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=800 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
-[2026-05-21 19:32:11] Cluster case mode=kafka-only thread=12 run=1 (num-terminals=12 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=960 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=preordered_direct_broadcast)
-[2026-05-21 19:33:20] Cluster mode: raft-kafka (series=cluster_raft_kafka ordering_path=raft)
-[2026-05-21 19:33:20] Cluster case mode=raft-kafka thread=1 run=1 (num-terminals=1 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=80 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
-[2026-05-21 19:34:46] Cluster case mode=raft-kafka thread=2 run=1 (num-terminals=2 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=160 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
-[2026-05-21 19:36:12] Cluster case mode=raft-kafka thread=4 run=1 (num-terminals=4 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=320 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
-[2026-05-21 19:37:30] Cluster case mode=raft-kafka thread=6 run=1 (num-terminals=6 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=480 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
-[2026-05-21 19:38:47] Cluster case mode=raft-kafka thread=8 run=1 (num-terminals=8 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=640 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
-[2026-05-21 19:40:06] Cluster case mode=raft-kafka thread=10 run=1 (num-terminals=10 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=800 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
-[2026-05-21 19:41:26] Cluster case mode=raft-kafka thread=12 run=1 (num-terminals=12 det-pipeline-depth=80 pool-size=256 worker-count=512 det-batch=80 det-window=960 det-block-parallel=1 det-block-pipeline=8 det-block-max=256 det-partial-block-max-wait-us=0 serial-gate=1 completion-only-skip-reads=1 full-result-replica-limit=1 ordering_path=raft)
-Wrote results:  /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/results.csv
-Wrote summary:  /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/summary.csv
-Wrote overhead: /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/overhead.csv
-Wrote graph:    /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/ycsb_skew_pg_vs_det.png
-Wrote graph:    /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/ycsb_skew_det_vs_cluster.png
-[2026-05-21 19:42:49] Workload done: ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt
-[2026-05-21 19:42:49]   Results : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/results.csv
-[2026-05-21 19:42:49]   Summary : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/summary.csv
-[2026-05-21 19:42:49]   Overhead: /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/overhead.csv
-[2026-05-21 19:42:49]   Graph   : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/ycsb_skew_pg_vs_det.png
-[2026-05-21 19:42:49]   Graph   : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930/ycsb_skew0_99_tx_20k_point_safedb_intkey_insert12k_uniq/ycsb_skew_det_vs_cluster.png
-[2026-05-21 19:42:49] Done
-[2026-05-21 19:42:49] Out root : /work/ARIABC/AriaBC/scripts/bench_full_results/ycsb_skew_compare_20260521_191930
+neel@neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE:/work/ARIABC/AriaBC/scripts/distributed$ ./run_4node_raft_cluster.sh --threads 8 --bcdb-block-profile 1 --preferred-leader-id 1
+[23:32:12] Cluster ordering mode: raft-kafka (ordering_path=raft, bypass_raft=0, gateway_broadcast_to_all=0, kafka_completion_mode=majority)
+[23:32:12] === Phase 0: Cleanup stale ariabc_pg processes (parallel) ===
+[23:32:12]   Killing server on admin123 (ports 9000, 8000)
+[23:32:12]   Killing server on user4 (ports 9000, 8000)
+[23:32:12]   Killing server on utkarsh (ports 9000, 8001)
+ 1299764 75116 595294[23:32:15]   Cleanup done
+[23:32:15] === Phase 0.5: Ensure librdkafka v2.3.0 on all nodes ===
+[23:32:15]   Local machine...
+  [local] [ensure_rdkafka] librdkafka v2.3.0 already at /home/neel/Desktop/rdkafka_local — nothing to do
+[23:32:15]   cmake-3.28.3 tarball not found locally — will attempt apt-get on remote nodes
+[23:32:15]     (pre-download: wget -P /tmp https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz)
+[23:32:15]   Pushing ensure_rdkafka.sh to admin123...
+[23:32:16]   [admin123] building rdkafka in background (pid 2196193)
+[23:32:16]   Pushing ensure_rdkafka.sh to user4...
+[23:32:17]   [user4] building rdkafka in background (pid 2196212)
+[23:32:17]   Pushing ensure_rdkafka.sh to utkarsh...
+[23:32:17]   [utkarsh] building rdkafka in background (pid 2196220)
+[23:32:17]   [admin123] rdkafka ready
+[23:32:17]   [user4] rdkafka ready
+[23:32:17]   [utkarsh] rdkafka ready
+[23:32:17]   librdkafka v2.3.0 ready on all nodes
+[23:32:18]   Computing source hash to check if rebuild is needed...
+[23:32:21]   Source hash unchanged (754ce12f68a7...) — skipping Phases 0.8 + 1.5 (pass FORCE_BUILD=1 to override)
+[23:32:21] === Phase 1: Sync source and binaries (parallel) ===
+[23:32:21]   Syncing to admin123 in background (is_u22=0)
+[23:32:21]   Syncing to user4 in background (is_u22=1)
+[23:32:21]   Syncing to utkarsh in background (is_u22=0)
+[23:32:30]   [admin123] sync done
+[23:32:30]   [user4] sync done
+[23:32:30]   [utkarsh] sync done
+[23:32:30]   Sync done
+[23:32:30] === Phase 1.6: Source and binary provenance ===
+[23:32:30]   local git_head=3bc99671096007a9e42146b0cf5d257fb5d75812
+[23:32:30]   local ariabc_pg_gateway_sha256=18be90fd126aceaa1a4aee3990e50e374373bdaf83c7e36defae3e5d33d9056d path=/work/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_gateway
+[23:32:30]   local ariabc_pg_server_sha256=b22e064d8a66a125ad4fcfede6bfa3432033dc803c4f0687eb1b044beca61a8c path=/work/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_server
+[23:32:30]   local postgres_sha256=1a3b7ddad85520051ea894f29eaec75e41b17f7a215fdaa9164a51e271b208d6 path=/work/ARIABC/install/bin/postgres
+[23:32:30]   [admin123] provenance:
+    git_head=unknown
+    ariabc_pg_server_sha256=b22e064d8a66a125ad4fcfede6bfa3432033dc803c4f0687eb1b044beca61a8c path=/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+    ariabc_pg_gateway_sha256=18be90fd126aceaa1a4aee3990e50e374373bdaf83c7e36defae3e5d33d9056d path=/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_gateway
+    postgres_sha256=1a3b7ddad85520051ea894f29eaec75e41b17f7a215fdaa9164a51e271b208d6 path=/home/neel/Desktop/ariabc_install/bin/postgres
+[23:32:30]   [user4] provenance:
+    git_head=unknown
+    ariabc_pg_server_sha256=0a39281ad9ee494022937760123ccf0ccd1ddfb4a40df3fe8b2fe7bdb77f8041 path=/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server
+    ariabc_pg_gateway_sha256=cd9f7410562a9c3c1c2c689aab3aed72c2942d385f85ca03930b775db1c2b962 path=/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_gateway
+    postgres_sha256=2fee70065dbee4e87a04b5111fc00c8c03d5265a73af0ee588766d12b0fb733a path=/home/neel/Desktop/ariabc_install/bin/postgres
+[23:32:31]   [utkarsh] provenance:
+    git_head=unknown
+    ariabc_pg_server_sha256=b22e064d8a66a125ad4fcfede6bfa3432033dc803c4f0687eb1b044beca61a8c path=/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+    ariabc_pg_gateway_sha256=18be90fd126aceaa1a4aee3990e50e374373bdaf83c7e36defae3e5d33d9056d path=/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_gateway
+    postgres_sha256=1a3b7ddad85520051ea894f29eaec75e41b17f7a215fdaa9164a51e271b208d6 path=/home/neel/Desktop/ariabc_install/bin/postgres
+[23:32:31] === Phase 2: Ensure Kafka (KRaft) running on admin123 (10.129.148.236) ===
+Kafka already running at 10.129.148.236:9092
+Topic 'ariabc_results' ready
+[23:32:34]   Kafka ready
+[23:32:34]   Preflight: resetting topic ariabc_results to flush stale offsets...
+Kafka preflight PASS (broker responsive, topic fresh)
+[23:32:48]   Kafka preflight complete
+[23:32:48] === Phase 3: Verify BCDB postgres on all 3 nodes (parallel) ===
+[23:32:48]   Checking admin123 (10.129.148.236:5438)
+[23:32:48]   Checking user4 (10.129.27.54:5438)
+[23:32:48]   Checking utkarsh (10.129.148.248:5438)
+[23:32:54]   admin123:   restarting postgres to clear stale benchmark backends
+waiting for server to shut down..... done
+server stopped
+waiting for server to start....... done
+server started
+postgres OK bcdb_worker_count=256 bcdb_serial_gate_mode=1 bcdb_serial_gate_source=0 bcdb_dt_conflict_tracking=on bcdb_dt_completion_only_skip_reads=off bcdb_dt_hashtab_switch_threshold=1500 bcdb_result_ring_slots=2048 bcdb_overwrite_protection=unsupported max_connections=832
+[23:32:54]   user4:   restarting postgres to clear stale benchmark backends
+waiting for server to shut down..... done
+server stopped
+waiting for server to start....... done
+server started
+postgres OK bcdb_worker_count=256 bcdb_serial_gate_mode=1 bcdb_serial_gate_source=0 bcdb_dt_conflict_tracking=on bcdb_dt_completion_only_skip_reads=off bcdb_dt_hashtab_switch_threshold=1500 bcdb_result_ring_slots=2048 bcdb_overwrite_protection=unsupported max_connections=832
+[23:32:54]   utkarsh:   restarting postgres to clear stale benchmark backends
+waiting for server to shut down..... done
+server stopped
+waiting for server to start....... done
+server started
+postgres OK bcdb_worker_count=256 bcdb_serial_gate_mode=1 bcdb_serial_gate_source=0 bcdb_dt_conflict_tracking=on bcdb_dt_completion_only_skip_reads=off bcdb_dt_hashtab_switch_threshold=1500 bcdb_result_ring_slots=2048 bcdb_overwrite_protection=unsupported max_connections=832
+[23:32:54] === Phase 3.2: Ensure local benchmark role exists on all 3 nodes (parallel) ===
+[23:32:54]   Ensuring role neel exists on admin123
+[23:32:54]   Ensuring role neel exists on user4
+[23:32:54]   Ensuring role neel exists on utkarsh
+[23:32:54] === Phase 3.5: Restore usertable_small on all 3 nodes (parallel) ===
+[23:32:54]   Restoring usertable_small on admin123 (background)
+[23:32:54]   Restoring usertable_small on user4 (background)
+[23:32:54]   Restoring usertable_small on utkarsh (background)
+  [utkarsh] count=11994 root=2427e027e7f70c469e10d5c494ac7420e3e64de76781ee84ac097067449ef91a verify=t
+  [user4] count=11994 root=2427e027e7f70c469e10d5c494ac7420e3e64de76781ee84ac097067449ef91a verify=t
+  [admin123] count=11994 root=2427e027e7f70c469e10d5c494ac7420e3e64de76781ee84ac097067449ef91a verify=t
+[23:32:55] === Phase 4: Starting ariabc_pg_server on all 3 nodes ===
+[23:32:55]   Server start order indices: 0 1 2 (preferredLeaderId=1)
+[23:32:55]   Starting server on admin123 (10.129.148.236) — RAFT ID 1, clientPort=8000 orderingMode=raft-kafka
+[23:32:55]     binary: /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+[23:32:55]     dbConnPoolSize=256 bcdbWorkerCount=256 bcdbDecoupleWorkers=0 bcdbDtConflictTracking=1 bcdbDtLightSnapshot=0 bcdbDtSkipReadonlyGate=0 bcdbDtCompletionOnlySkipReads=0 detBlockSkipReadonly=0 bcdbDtHashtabSwitchThreshold=1500 bcdbDetQueueHighWm=0 bcdbDetQueueLowWm=0 bcdbFlowDebug=0 fullResultReplicaLimit=0 resultPublishReplicaLimit=0 preferredLeaderId=1 pgExecMode=event raftOrderedFanout=1 detRawSql=0 detBlockParallel=16 detBlockPipeline=1 detBlockMax=2048 detPartialBlockMaxWaitUs=0 detEventBlockFastpath=1 detPrefixedDirectParallel=0 detCompletionOnlySuccess=0 bcdbBlockProfile=1 bcdbBlockWaitWatermark=0 bcdbPhaseTrace=0 bcdbPollMaxUs=8 bcdbSerialGateMode=1 bcdbSerialGateSource=0 bcdbDtParseBarrier=1 bcdbBlockEnqueueYieldEvery=0
+  [admin123] started pid=1304234
+[23:32:57]   Starting server on user4 (10.129.27.54) — RAFT ID 2, clientPort=8000 orderingMode=raft-kafka
+[23:32:57]     binary: /home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server
+[23:32:57]     dbConnPoolSize=256 bcdbWorkerCount=256 bcdbDecoupleWorkers=0 bcdbDtConflictTracking=1 bcdbDtLightSnapshot=0 bcdbDtSkipReadonlyGate=0 bcdbDtCompletionOnlySkipReads=0 detBlockSkipReadonly=0 bcdbDtHashtabSwitchThreshold=1500 bcdbDetQueueHighWm=0 bcdbDetQueueLowWm=0 bcdbFlowDebug=0 fullResultReplicaLimit=0 resultPublishReplicaLimit=0 preferredLeaderId=1 pgExecMode=event raftOrderedFanout=1 detRawSql=0 detBlockParallel=16 detBlockPipeline=1 detBlockMax=2048 detPartialBlockMaxWaitUs=0 detEventBlockFastpath=1 detPrefixedDirectParallel=0 detCompletionOnlySuccess=0 bcdbBlockProfile=1 bcdbBlockWaitWatermark=0 bcdbPhaseTrace=0 bcdbPollMaxUs=8 bcdbSerialGateMode=1 bcdbSerialGateSource=0 bcdbDtParseBarrier=1 bcdbBlockEnqueueYieldEvery=0
+  [user4] started pid=598694
+[23:32:58]   Starting server on utkarsh (10.129.148.248) — RAFT ID 4, clientPort=8001 orderingMode=raft-kafka
+[23:32:58]     binary: /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+[23:32:58]     dbConnPoolSize=256 bcdbWorkerCount=256 bcdbDecoupleWorkers=0 bcdbDtConflictTracking=1 bcdbDtLightSnapshot=0 bcdbDtSkipReadonlyGate=0 bcdbDtCompletionOnlySkipReads=0 detBlockSkipReadonly=0 bcdbDtHashtabSwitchThreshold=1500 bcdbDetQueueHighWm=0 bcdbDetQueueLowWm=0 bcdbFlowDebug=0 fullResultReplicaLimit=0 resultPublishReplicaLimit=0 preferredLeaderId=1 pgExecMode=event raftOrderedFanout=1 detRawSql=0 detBlockParallel=16 detBlockPipeline=1 detBlockMax=2048 detPartialBlockMaxWaitUs=0 detEventBlockFastpath=1 detPrefixedDirectParallel=0 detCompletionOnlySuccess=0 bcdbBlockProfile=1 bcdbBlockWaitWatermark=0 bcdbPhaseTrace=0 bcdbPollMaxUs=8 bcdbSerialGateMode=1 bcdbSerialGateSource=0 bcdbDtParseBarrier=1 bcdbBlockEnqueueYieldEvery=0
+  [utkarsh] started pid=77067
+[23:32:58]   All 3 server launch commands sent
+[23:32:58] === Phase 5: Waiting for Raft cluster (up to 60s) ===
+[23:33:04]   All 3 server client ports responding (attempt 3)
+[23:33:09]   Checking BCDB init and leader status...
+[23:33:10]   [admin123] bcdb_init enabled on node 1 with block_size=256
+ariabc_pg_server ready: id=1 raft=10.129.148.236:9000 clientPort=8000 members=3 preferredLeaderId=1 leaderTransferWaitMs=1000
+[23:33:10]   [user4] bcdb_init enabled on node 2 with block_size=256
+ariabc_pg_server ready: id=2 raft=10.129.27.54:9000 clientPort=8000 members=3 preferredLeaderId=1 leaderTransferWaitMs=1000
+[23:33:11]   [utkarsh] bcdb_init enabled on node 4 with block_size=256
+ariabc_pg_server ready: id=4 raft=10.129.148.248:9000 clientPort=8001 members=3 preferredLeaderId=1 leaderTransferWaitMs=1000
+[23:33:11] === Phase 6: Gateway test (det mode) ===
+[23:33:11]   Gateway binary: /work/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_gateway
+[23:33:11]   Checking server-startup bcdb_init status...
+[23:33:11]   [admin123] bcdb_init: bcdb_init enabled on node 1 with block_size=256
+[23:33:12]   [user4] bcdb_init: bcdb_init enabled on node 2 with block_size=256
+[23:33:12]   [utkarsh] bcdb_init: bcdb_init enabled on node 4 with block_size=256
+[23:33:12]   Gateway nodes: 10.129.148.236:8000,10.129.27.54:8000,10.129.148.248:8001
+[23:33:12]   Workload:      /work/ARIABC/AriaBC/scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt (20513 statements)
+[23:33:12]   Mode:          dbType=1 (det) | orderingMode=raft-kafka | orderingPath=raft | kafkaCompletion=majority | completionPath=kafka_majority | broadcastToAll=0 | broadcastAcceptQuorum=0 | broadcastResultQuorum=0 | broadcastDrainInTimedRun=1 | directCompletionQuorum=1
+[23:33:12]   DET ids:       detStartSeq=0 reqIdOffset=1 detWindow=8192 detBatchSize=256 terminals=8 connFanout=1 raftOrderedFanout=1 broadcastAcceptQuorum=0 broadcastResultQuorum=0 broadcastDrainInTimedRun=1 directCompletionQuorum=1 detPipelineDepth=1024 submitMode=event poolSize=256 bcdbWorkerCount=256 bcdbDecoupleWorkers=0 bcdbDtConflictTracking=1 bcdbDtLightSnapshot=0 bcdbDtSkipReadonlyGate=0 bcdbDtCompletionOnlySkipReads=0 bcdbDtHashtabSwitchThreshold=1500 detRawSql=0 detBlockParallel=16 detBlockPipeline=1 detBlockMax=2048 detPartialBlockMaxWaitUs=0 detEventBlockFastpath=1 detPrefixedDirectParallel=0 detCompletionOnlySuccess=0 bcdbBlockProfile=1 bcdbBlockWaitWatermark=0 bcdbPhaseTrace=0 bcdbPollMaxUs=8 bcdbSerialGateMode=1 bcdbSerialGateSource=0 bcdbDtParseBarrier=1 bcdbBlockEnqueueYieldEvery=0
+[23:33:12]   Parallelism:   pipeline (8 terminal lanes / 1 reactor — pipeline depth scaling only; NOT comparable to OS thread count)
+[23:33:12]   NOTE: submit_time in gateway output is the CUMULATIVE sum across async submissions, NOT wall-clock; actual wall time = overall_wall_ms
+submitMode=event: shared nonblocking submit reactor enabled (connFanout=1)
+Kafka result topic: ariabc_results
+completion_path=kafka_majority validation_mode=async_hash waitMajority=1 broadcastToAll=0 broadcastAcceptQuorum=0 broadcastResultQuorum=0 broadcastDrainInTimedRun=1 directCompletionQuorum=1
+loaded 20513 queries
+det mode: ordered submission (window=8192, configured_det_window=8192, detBatchSize=256, numTerminals=8, detPipelineDepth=1024, detPipelineCap=8192, dbConnPoolSize=256, detRawSql=0)
+PROGRESS_GATEWAY_DET elapsed_s=4.1 total=20513 sent=20513 accepted=20513 completed=20513 completed_tps=5031.83 terminal_lanes=8 terminal_depth=1024 pipeline_outstanding=0 majority_inflight=0 pending_accept=0 kafka_msgs=235 kafka_recs=59714 kafka_parse_failures=0 kc_msgs=235 kc_timeouts=3796 permanent_failures=0 divergence_count=0 final=1
+overall time taken (millisec) = 4110
+ overall wall time including drains (millisec) = 4110
+ total wait time (ms) 0
+ submit time (ms) 3208
+ majority wait time (ms) 762
+ background accept drain time (ms) 0
+duplicate_key_errors=0
+divergence_count=0
+permanent_failures=0
+PROFILE_GATEWAY  completion_path=kafka_majority validation_mode=async_hash broadcast_to_all=0 broadcast_accept_quorum=0 broadcast_result_quorum=0 broadcast_drain_in_timed_run=1 direct_completion_quorum=1 submit_mode=event num_terminals=8 det_pipeline_depth=1024 det_batch_size=256 effective_det_window=8192 configured_det_window=8192 submit_attempts=81 conn_calls=1 conn_ms=15.7539 write_calls=81 write_ms=9.66132 read_calls=176 read_ms=2.02811 not_accepted=0 kafka_msgs=240 kafka_recs=60994 kafka_parse_failures=0 kafka_parse_ms=19.1909 kafka_add_reply_ms=135.49 consume_lag_ms_mean=55.4142 consume_lag_ms_max=708 consume_to_ready_ms_mean=38.9883 consume_to_ready_ms_p95=84.5504 wait_cv_sleep_ms_mean=24.3213 wait_cv_sleep_ms_p95=52.9153 ready_queue_depth_mean=2182.46 ready_queue_depth_max=3584 kc_poll_calls=4193 kc_poll_ms=4340.63 kc_msgs=240 kc_timeouts=4027 kc_errors=0 kc_kb=11048.3 term_leader_unknown=0 term_leader_reply_missing=0 term_leader_full_result_hash_mismatch=0 term_leader_signature_invalid=0 term_majority_timeout=0 term_other_failure=0 err_send_calls=0 err_send_ok=0 err_producev_ms=0 err_poll_ms=0 err_flush_ms=0 overall_wall_ms=4110 background_accept_drain_ms=0
+[23:33:17] === Phase 7: Results ===
+[23:33:17]   GW time (ms)  : 4110
+[23:33:17]   Queries       : 20513
+[23:33:17]   TPS (gateway) : ~4990 tx/s
+[23:33:17]   divergence_count : 0
+[23:33:17]   permanent_failures: 0
+[23:33:17]   Collecting server logs from all nodes...
+[23:33:23] 
+[23:33:23] === Cluster logs ===
+[23:33:23]   Server stdout : /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/server_node*.log
+[23:33:23]   Postgres logs  : /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/postgres_node*.log
+[23:33:23]   NuRaft logs   : /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/nuraft_node*.log
+[23:33:23]   Gateway log   : /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/gateway_test.log
+[23:33:23] 
+[23:33:23] === Quick diagnostics ===
+[23:33:23]   Raft leader      : grep -i 'leader' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/nuraft_node*.log | grep 'my id'
+[23:33:23]   BCDB init status : grep 'bcdb_init' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/server_node*.log
+[23:33:23]   BCDB block profile: grep 'PROFILE_BCDB_BLOCK' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/postgres_node*.log
+[23:33:23]   Divergences      : grep 'divergence' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/gateway_test.log
+[23:33:23] 
+[23:33:23] === Phase 8: Post-workload usertable_small Merkle verification ===
+[23:33:23]   Pre-marker row count + Merkle root check...
+[23:33:23]   [admin123] pre-marker attempt=1: rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd
+[23:33:23]   [user4] pre-marker attempt=1: rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd
+[23:33:24]   [utkarsh] pre-marker attempt=1: rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd
+[23:33:24]   Pre-marker consistency: PASS rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd (matches expected rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd)
+[23:33:24]   Submitting marker key=99999999 detStartSeq=20513 reqIdOffset=20514
+Kafka result topic: ariabc_results
+completion_path=kafka_majority validation_mode=async_hash waitMajority=1 broadcastToAll=0 broadcastAcceptQuorum=0 broadcastResultQuorum=0 broadcastDrainInTimedRun=1 directCompletionQuorum=1
+loaded 1 queries
+det mode: ordered submission (window=1, configured_det_window=1, detBatchSize=16, numTerminals=1, detPipelineDepth=1, detPipelineCap=1, dbConnPoolSize=256, detRawSql=0)
+PROGRESS_GATEWAY_DET elapsed_s=0.0 total=1 sent=1 accepted=1 completed=1 completed_tps=20.35 terminal_lanes=1 terminal_depth=1 pipeline_outstanding=0 majority_inflight=0 pending_accept=0 kafka_msgs=3 kafka_recs=3 kafka_parse_failures=0 kc_msgs=3 kc_timeouts=75 permanent_failures=0 divergence_count=0 final=1
+overall time taken (millisec) = 81
+ overall wall time including drains (millisec) = 81
+ total wait time (ms) 0
+ submit time (ms) 30
+ majority wait time (ms) 17
+ background accept drain time (ms) 0
+duplicate_key_errors=0
+divergence_count=0
+permanent_failures=0
+PROFILE_GATEWAY  completion_path=kafka_majority validation_mode=async_hash broadcast_to_all=0 broadcast_accept_quorum=0 broadcast_result_quorum=0 broadcast_drain_in_timed_run=1 direct_completion_quorum=1 submit_mode=blocking num_terminals=1 det_pipeline_depth=1 det_batch_size=16 effective_det_window=1 configured_det_window=1 submit_attempts=1 conn_calls=1 conn_ms=15.5247 write_calls=1 write_ms=0.066503 read_calls=1 read_ms=15.3865 not_accepted=0 kafka_msgs=3 kafka_recs=3 kafka_parse_failures=0 kafka_parse_ms=0.024816 kafka_add_reply_ms=0.08115 consume_lag_ms_mean=19 consume_lag_ms_max=19 consume_to_ready_ms_mean=0.010169 consume_to_ready_ms_p95=0.010169 wait_cv_sleep_ms_mean=16.1497 wait_cv_sleep_ms_p95=16.1497 ready_queue_depth_mean=1 ready_queue_depth_max=1 kc_poll_calls=312 kc_poll_ms=330.828 kc_msgs=3 kc_timeouts=310 kc_errors=0 kc_kb=0.588867 term_leader_unknown=0 term_leader_reply_missing=0 term_leader_full_result_hash_mismatch=0 term_leader_signature_invalid=0 term_majority_timeout=0 term_other_failure=0 err_send_calls=0 err_send_ok=0 err_producev_ms=0 err_poll_ms=0 err_flush_ms=0 overall_wall_ms=81 background_accept_drain_ms=0
+[23:33:24]   Waiting until marker is visible on all 3 nodes
+[23:33:25]   [admin123] marker visible (0s)
+[23:33:25]   [user4] marker visible (0s)
+[23:33:26]   [utkarsh] marker visible (0s)
+[23:33:26]   [admin123] rows=12499 root=d00ab0bf17166f3130676990af004dd547c978f30d17bf99f6fd2c3b7e9b04a5 merkle_verify=t
+[23:33:27]   [user4] rows=12499 root=d00ab0bf17166f3130676990af004dd547c978f30d17bf99f6fd2c3b7e9b04a5 merkle_verify=t
+[23:33:28]   [utkarsh] rows=12499 root=d00ab0bf17166f3130676990af004dd547c978f30d17bf99f6fd2c3b7e9b04a5 merkle_verify=t
+[23:33:28]   usertable_small consistency: PASS rows=12499 root=d00ab0bf17166f3130676990af004dd547c978f30d17bf99f6fd2c3b7e9b04a5
+[23:33:28] === Final server profile collection ===
+[23:33:28]   Sending SIGTERM to ariabc_pg_server on all nodes so PROFILE_SERVER is flushed
+[23:33:28]   [admin123] stop signal sent
+[23:33:29]   [user4] stop signal sent
+[23:33:29]   [utkarsh] stop signal sent
+[23:33:31]   Collecting final server logs with PROFILE_SERVER lines...
+[23:33:36]   Server profiles: grep 'PROFILE_SERVER' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/server_node*.log
+[23:33:36]   BCDB profiles: grep 'PROFILE_BCDB_BLOCK' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233212/postgres_node*.log
+[23:33:36] === 4-node cluster test complete ===
+neel@neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE:/work/ARIABC/AriaBC/scripts/distributed$ ./run_4node_raft_cluster.sh --threads 8 --bcdb-block-profile 1 --preferred-leader-id 1
+[23:33:44] Cluster ordering mode: raft-kafka (ordering_path=raft, bypass_raft=0, gateway_broadcast_to_all=0, kafka_completion_mode=majority)
+[23:33:44] === Phase 0: Cleanup stale ariabc_pg processes (parallel) ===
+[23:33:44]   Killing server on admin123 (ports 9000, 8000)
+[23:33:44]   Killing server on user4 (ports 9000, 8000)
+[23:33:44]   Killing server on utkarsh (ports 9000, 8001)
+[23:33:47]   Cleanup done
+[23:33:47] === Phase 0.5: Ensure librdkafka v2.3.0 on all nodes ===
+[23:33:47]   Local machine...
+  [local] [ensure_rdkafka] librdkafka v2.3.0 already at /home/neel/Desktop/rdkafka_local — nothing to do
+[23:33:47]   cmake-3.28.3 tarball not found locally — will attempt apt-get on remote nodes
+[23:33:47]     (pre-download: wget -P /tmp https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz)
+[23:33:47]   Pushing ensure_rdkafka.sh to admin123...
+[23:33:47]   [admin123] building rdkafka in background (pid 2199734)
+[23:33:47]   Pushing ensure_rdkafka.sh to user4...
+[23:33:48]   [user4] building rdkafka in background (pid 2199743)
+[23:33:48]   Pushing ensure_rdkafka.sh to utkarsh...
+[23:33:49]   [utkarsh] building rdkafka in background (pid 2199751)
+[23:33:49]   [admin123] rdkafka ready
+[23:33:49]   [user4] rdkafka ready
+[23:33:49]   [utkarsh] rdkafka ready
+[23:33:49]   librdkafka v2.3.0 ready on all nodes
+[23:33:49]   Computing source hash to check if rebuild is needed...
+[23:33:52]   Source hash unchanged (754ce12f68a7...) — skipping Phases 0.8 + 1.5 (pass FORCE_BUILD=1 to override)
+[23:33:52] === Phase 1: Sync source and binaries (parallel) ===
+[23:33:52]   Syncing to admin123 in background (is_u22=0)
+[23:33:52]   Syncing to user4 in background (is_u22=1)
+[23:33:52]   Syncing to utkarsh in background (is_u22=0)
+[23:33:56]   [admin123] sync done
+[23:33:56]   [user4] sync done
+[23:33:56]   [utkarsh] sync done
+[23:33:56]   Sync done
+[23:33:56] === Phase 1.6: Source and binary provenance ===
+[23:33:56]   local git_head=3bc99671096007a9e42146b0cf5d257fb5d75812
+[23:33:56]   local ariabc_pg_gateway_sha256=18be90fd126aceaa1a4aee3990e50e374373bdaf83c7e36defae3e5d33d9056d path=/work/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_gateway
+[23:33:56]   local ariabc_pg_server_sha256=b22e064d8a66a125ad4fcfede6bfa3432033dc803c4f0687eb1b044beca61a8c path=/work/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_server
+[23:33:56]   local postgres_sha256=1a3b7ddad85520051ea894f29eaec75e41b17f7a215fdaa9164a51e271b208d6 path=/work/ARIABC/install/bin/postgres
+[23:33:56]   [admin123] provenance:
+    git_head=unknown
+    ariabc_pg_server_sha256=b22e064d8a66a125ad4fcfede6bfa3432033dc803c4f0687eb1b044beca61a8c path=/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+    ariabc_pg_gateway_sha256=18be90fd126aceaa1a4aee3990e50e374373bdaf83c7e36defae3e5d33d9056d path=/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_gateway
+    postgres_sha256=1a3b7ddad85520051ea894f29eaec75e41b17f7a215fdaa9164a51e271b208d6 path=/home/neel/Desktop/ariabc_install/bin/postgres
+[23:33:56]   [user4] provenance:
+    git_head=unknown
+    ariabc_pg_server_sha256=0a39281ad9ee494022937760123ccf0ccd1ddfb4a40df3fe8b2fe7bdb77f8041 path=/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server
+    ariabc_pg_gateway_sha256=cd9f7410562a9c3c1c2c689aab3aed72c2942d385f85ca03930b775db1c2b962 path=/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_gateway
+    postgres_sha256=2fee70065dbee4e87a04b5111fc00c8c03d5265a73af0ee588766d12b0fb733a path=/home/neel/Desktop/ariabc_install/bin/postgres
+[23:33:57]   [utkarsh] provenance:
+    git_head=unknown
+    ariabc_pg_server_sha256=b22e064d8a66a125ad4fcfede6bfa3432033dc803c4f0687eb1b044beca61a8c path=/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+    ariabc_pg_gateway_sha256=18be90fd126aceaa1a4aee3990e50e374373bdaf83c7e36defae3e5d33d9056d path=/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_gateway
+    postgres_sha256=1a3b7ddad85520051ea894f29eaec75e41b17f7a215fdaa9164a51e271b208d6 path=/home/neel/Desktop/ariabc_install/bin/postgres
+[23:33:57] === Phase 2: Ensure Kafka (KRaft) running on admin123 (10.129.148.236) ===
+Kafka already running at 10.129.148.236:9092
+Topic 'ariabc_results' ready
+[23:34:00]   Kafka ready
+[23:34:00]   Preflight: resetting topic ariabc_results to flush stale offsets...
+Kafka preflight PASS (broker responsive, topic fresh)
+[23:34:14]   Kafka preflight complete
+[23:34:14] === Phase 3: Verify BCDB postgres on all 3 nodes (parallel) ===
+[23:34:14]   Checking admin123 (10.129.148.236:5438)
+[23:34:14]   Checking user4 (10.129.27.54:5438)
+[23:34:14]   Checking utkarsh (10.129.148.248:5438)
+[23:34:20]   admin123:   restarting postgres to clear stale benchmark backends
+waiting for server to shut down..... done
+server stopped
+waiting for server to start....... done
+server started
+postgres OK bcdb_worker_count=256 bcdb_serial_gate_mode=1 bcdb_serial_gate_source=0 bcdb_dt_conflict_tracking=on bcdb_dt_completion_only_skip_reads=off bcdb_dt_hashtab_switch_threshold=1500 bcdb_result_ring_slots=2048 bcdb_overwrite_protection=unsupported max_connections=832
+[23:34:20]   user4:   restarting postgres to clear stale benchmark backends
+waiting for server to shut down..... done
+server stopped
+waiting for server to start....... done
+server started
+postgres OK bcdb_worker_count=256 bcdb_serial_gate_mode=1 bcdb_serial_gate_source=0 bcdb_dt_conflict_tracking=on bcdb_dt_completion_only_skip_reads=off bcdb_dt_hashtab_switch_threshold=1500 bcdb_result_ring_slots=2048 bcdb_overwrite_protection=unsupported max_connections=832
+[23:34:20]   utkarsh:   restarting postgres to clear stale benchmark backends
+waiting for server to shut down..... done
+server stopped
+waiting for server to start....... done
+server started
+postgres OK bcdb_worker_count=256 bcdb_serial_gate_mode=1 bcdb_serial_gate_source=0 bcdb_dt_conflict_tracking=on bcdb_dt_completion_only_skip_reads=off bcdb_dt_hashtab_switch_threshold=1500 bcdb_result_ring_slots=2048 bcdb_overwrite_protection=unsupported max_connections=832
+[23:34:20] === Phase 3.2: Ensure local benchmark role exists on all 3 nodes (parallel) ===
+[23:34:20]   Ensuring role neel exists on admin123
+[23:34:20]   Ensuring role neel exists on user4
+[23:34:20]   Ensuring role neel exists on utkarsh
+[23:34:20] === Phase 3.5: Restore usertable_small on all 3 nodes (parallel) ===
+[23:34:20]   Restoring usertable_small on admin123 (background)
+[23:34:20]   Restoring usertable_small on user4 (background)
+[23:34:20]   Restoring usertable_small on utkarsh (background)
+  [utkarsh] count=11994 root=2427e027e7f70c469e10d5c494ac7420e3e64de76781ee84ac097067449ef91a verify=t
+  [admin123] count=11994 root=2427e027e7f70c469e10d5c494ac7420e3e64de76781ee84ac097067449ef91a verify=t
+  [user4] count=11994 root=2427e027e7f70c469e10d5c494ac7420e3e64de76781ee84ac097067449ef91a verify=t
+[23:34:21] === Phase 4: Starting ariabc_pg_server on all 3 nodes ===
+[23:34:21]   Server start order indices: 0 1 2 (preferredLeaderId=1)
+[23:34:21]   Starting server on admin123 (10.129.148.236) — RAFT ID 1, clientPort=8000 orderingMode=raft-kafka
+[23:34:21]     binary: /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+[23:34:21]     dbConnPoolSize=256 bcdbWorkerCount=256 bcdbDecoupleWorkers=0 bcdbDtConflictTracking=1 bcdbDtLightSnapshot=0 bcdbDtSkipReadonlyGate=0 bcdbDtCompletionOnlySkipReads=0 detBlockSkipReadonly=0 bcdbDtHashtabSwitchThreshold=1500 bcdbDetQueueHighWm=0 bcdbDetQueueLowWm=0 bcdbFlowDebug=0 fullResultReplicaLimit=0 resultPublishReplicaLimit=0 preferredLeaderId=1 pgExecMode=event raftOrderedFanout=1 detRawSql=0 detBlockParallel=16 detBlockPipeline=1 detBlockMax=2048 detPartialBlockMaxWaitUs=0 detEventBlockFastpath=1 detPrefixedDirectParallel=0 detCompletionOnlySuccess=0 bcdbBlockProfile=1 bcdbBlockWaitWatermark=0 bcdbPhaseTrace=0 bcdbPollMaxUs=8 bcdbSerialGateMode=1 bcdbSerialGateSource=0 bcdbDtParseBarrier=1 bcdbBlockEnqueueYieldEvery=0
+  [admin123] started pid=1308991
+[23:34:24]   Starting server on user4 (10.129.27.54) — RAFT ID 2, clientPort=8000 orderingMode=raft-kafka
+[23:34:24]     binary: /home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server
+[23:34:24]     dbConnPoolSize=256 bcdbWorkerCount=256 bcdbDecoupleWorkers=0 bcdbDtConflictTracking=1 bcdbDtLightSnapshot=0 bcdbDtSkipReadonlyGate=0 bcdbDtCompletionOnlySkipReads=0 detBlockSkipReadonly=0 bcdbDtHashtabSwitchThreshold=1500 bcdbDetQueueHighWm=0 bcdbDetQueueLowWm=0 bcdbFlowDebug=0 fullResultReplicaLimit=0 resultPublishReplicaLimit=0 preferredLeaderId=1 pgExecMode=event raftOrderedFanout=1 detRawSql=0 detBlockParallel=16 detBlockPipeline=1 detBlockMax=2048 detPartialBlockMaxWaitUs=0 detEventBlockFastpath=1 detPrefixedDirectParallel=0 detCompletionOnlySuccess=0 bcdbBlockProfile=1 bcdbBlockWaitWatermark=0 bcdbPhaseTrace=0 bcdbPollMaxUs=8 bcdbSerialGateMode=1 bcdbSerialGateSource=0 bcdbDtParseBarrier=1 bcdbBlockEnqueueYieldEvery=0
+  [user4] started pid=601439
+[23:34:24]   Starting server on utkarsh (10.129.148.248) — RAFT ID 4, clientPort=8001 orderingMode=raft-kafka
+[23:34:24]     binary: /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+[23:34:24]     dbConnPoolSize=256 bcdbWorkerCount=256 bcdbDecoupleWorkers=0 bcdbDtConflictTracking=1 bcdbDtLightSnapshot=0 bcdbDtSkipReadonlyGate=0 bcdbDtCompletionOnlySkipReads=0 detBlockSkipReadonly=0 bcdbDtHashtabSwitchThreshold=1500 bcdbDetQueueHighWm=0 bcdbDetQueueLowWm=0 bcdbFlowDebug=0 fullResultReplicaLimit=0 resultPublishReplicaLimit=0 preferredLeaderId=1 pgExecMode=event raftOrderedFanout=1 detRawSql=0 detBlockParallel=16 detBlockPipeline=1 detBlockMax=2048 detPartialBlockMaxWaitUs=0 detEventBlockFastpath=1 detPrefixedDirectParallel=0 detCompletionOnlySuccess=0 bcdbBlockProfile=1 bcdbBlockWaitWatermark=0 bcdbPhaseTrace=0 bcdbPollMaxUs=8 bcdbSerialGateMode=1 bcdbSerialGateSource=0 bcdbDtParseBarrier=1 bcdbBlockEnqueueYieldEvery=0
+  [utkarsh] started pid=79306
+[23:34:24]   All 3 server launch commands sent
+[23:34:24] === Phase 5: Waiting for Raft cluster (up to 60s) ===
+[23:34:31]   All 3 server client ports responding (attempt 3)
+[23:34:36]   Checking BCDB init and leader status...
+[23:34:36]   [admin123] bcdb_init enabled on node 1 with block_size=256
+ariabc_pg_server ready: id=1 raft=10.129.148.236:9000 clientPort=8000 members=3 preferredLeaderId=1 leaderTransferWaitMs=1000
+[23:34:37]   [user4] bcdb_init enabled on node 2 with block_size=256
+ariabc_pg_server ready: id=2 raft=10.129.27.54:9000 clientPort=8000 members=3 preferredLeaderId=1 leaderTransferWaitMs=1000
+[23:34:37]   [utkarsh] bcdb_init enabled on node 4 with block_size=256
+ariabc_pg_server ready: id=4 raft=10.129.148.248:9000 clientPort=8001 members=3 preferredLeaderId=1 leaderTransferWaitMs=1000
+[23:34:37] === Phase 6: Gateway test (det mode) ===
+[23:34:37]   Gateway binary: /work/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_gateway
+[23:34:37]   Checking server-startup bcdb_init status...
+[23:34:37]   [admin123] bcdb_init: bcdb_init enabled on node 1 with block_size=256
+[23:34:38]   [user4] bcdb_init: bcdb_init enabled on node 2 with block_size=256
+[23:34:38]   [utkarsh] bcdb_init: bcdb_init enabled on node 4 with block_size=256
+[23:34:38]   Gateway nodes: 10.129.148.236:8000,10.129.27.54:8000,10.129.148.248:8001
+[23:34:38]   Workload:      /work/ARIABC/AriaBC/scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt (20513 statements)
+[23:34:38]   Mode:          dbType=1 (det) | orderingMode=raft-kafka | orderingPath=raft | kafkaCompletion=majority | completionPath=kafka_majority | broadcastToAll=0 | broadcastAcceptQuorum=0 | broadcastResultQuorum=0 | broadcastDrainInTimedRun=1 | directCompletionQuorum=1
+[23:34:38]   DET ids:       detStartSeq=0 reqIdOffset=1 detWindow=8192 detBatchSize=256 terminals=8 connFanout=1 raftOrderedFanout=1 broadcastAcceptQuorum=0 broadcastResultQuorum=0 broadcastDrainInTimedRun=1 directCompletionQuorum=1 detPipelineDepth=1024 submitMode=event poolSize=256 bcdbWorkerCount=256 bcdbDecoupleWorkers=0 bcdbDtConflictTracking=1 bcdbDtLightSnapshot=0 bcdbDtSkipReadonlyGate=0 bcdbDtCompletionOnlySkipReads=0 bcdbDtHashtabSwitchThreshold=1500 detRawSql=0 detBlockParallel=16 detBlockPipeline=1 detBlockMax=2048 detPartialBlockMaxWaitUs=0 detEventBlockFastpath=1 detPrefixedDirectParallel=0 detCompletionOnlySuccess=0 bcdbBlockProfile=1 bcdbBlockWaitWatermark=0 bcdbPhaseTrace=0 bcdbPollMaxUs=8 bcdbSerialGateMode=1 bcdbSerialGateSource=0 bcdbDtParseBarrier=1 bcdbBlockEnqueueYieldEvery=0
+[23:34:38]   Parallelism:   pipeline (8 terminal lanes / 1 reactor — pipeline depth scaling only; NOT comparable to OS thread count)
+[23:34:38]   NOTE: submit_time in gateway output is the CUMULATIVE sum across async submissions, NOT wall-clock; actual wall time = overall_wall_ms
+submitMode=event: shared nonblocking submit reactor enabled (connFanout=1)
+Kafka result topic: ariabc_results
+completion_path=kafka_majority validation_mode=async_hash waitMajority=1 broadcastToAll=0 broadcastAcceptQuorum=0 broadcastResultQuorum=0 broadcastDrainInTimedRun=1 directCompletionQuorum=1
+loaded 20513 queries
+det mode: ordered submission (window=8192, configured_det_window=8192, detBatchSize=256, numTerminals=8, detPipelineDepth=1024, detPipelineCap=8192, dbConnPoolSize=256, detRawSql=0)
+PROGRESS_GATEWAY_DET elapsed_s=4.2 total=20513 sent=20513 accepted=20513 completed=20513 completed_tps=4891.95 terminal_lanes=8 terminal_depth=1024 pipeline_outstanding=0 majority_inflight=0 pending_accept=0 kafka_msgs=238 kafka_recs=60482 kafka_parse_failures=0 kc_msgs=238 kc_timeouts=3901 permanent_failures=0 divergence_count=0 final=1
+overall time taken (millisec) = 4226
+ overall wall time including drains (millisec) = 4226
+ total wait time (ms) 0
+ submit time (ms) 3223
+ majority wait time (ms) 876
+ background accept drain time (ms) 0
+duplicate_key_errors=0
+divergence_count=0
+permanent_failures=0
+PROFILE_GATEWAY  completion_path=kafka_majority validation_mode=async_hash broadcast_to_all=0 broadcast_accept_quorum=0 broadcast_result_quorum=0 broadcast_drain_in_timed_run=1 direct_completion_quorum=1 submit_mode=event num_terminals=8 det_pipeline_depth=1024 det_batch_size=256 effective_det_window=8192 configured_det_window=8192 submit_attempts=81 conn_calls=1 conn_ms=15.3958 write_calls=81 write_ms=7.52951 read_calls=181 read_ms=1.91548 not_accepted=0 kafka_msgs=243 kafka_recs=61539 kafka_parse_failures=0 kafka_parse_ms=17.095 kafka_add_reply_ms=123.771 consume_lag_ms_mean=57.3313 consume_lag_ms_max=974 consume_to_ready_ms_mean=92.6138 consume_to_ready_ms_p95=180.52 wait_cv_sleep_ms_mean=19.5702 wait_cv_sleep_ms_p95=35.5128 ready_queue_depth_mean=1688.64 ready_queue_depth_max=3072 kc_poll_calls=4299 kc_poll_ms=4457.44 kc_msgs=243 kc_timeouts=4134 kc_errors=0 kc_kb=11147.3 term_leader_unknown=0 term_leader_reply_missing=0 term_leader_full_result_hash_mismatch=0 term_leader_signature_invalid=0 term_majority_timeout=0 term_other_failure=0 err_send_calls=0 err_send_ok=0 err_producev_ms=0 err_poll_ms=0 err_flush_ms=0 overall_wall_ms=4226 background_accept_drain_ms=0
+[23:34:43] === Phase 7: Results ===
+[23:34:43]   GW time (ms)  : 4226
+[23:34:43]   Queries       : 20513
+[23:34:43]   TPS (gateway) : ~4853 tx/s
+[23:34:43]   divergence_count : 0
+[23:34:43]   permanent_failures: 0
+[23:34:43]   Collecting server logs from all nodes...
+[23:34:49] 
+[23:34:49] === Cluster logs ===
+[23:34:49]   Server stdout : /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/server_node*.log
+[23:34:49]   Postgres logs  : /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/postgres_node*.log
+[23:34:49]   NuRaft logs   : /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/nuraft_node*.log
+[23:34:49]   Gateway log   : /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/gateway_test.log
+[23:34:49] 
+[23:34:49] === Quick diagnostics ===
+[23:34:49]   Raft leader      : grep -i 'leader' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/nuraft_node*.log | grep 'my id'
+[23:34:49]   BCDB init status : grep 'bcdb_init' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/server_node*.log
+[23:34:49]   BCDB block profile: grep 'PROFILE_BCDB_BLOCK' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/postgres_node*.log
+[23:34:49]   Divergences      : grep 'divergence' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/gateway_test.log
+[23:34:49] 
+[23:34:49] === Phase 8: Post-workload usertable_small Merkle verification ===
+[23:34:49]   Pre-marker row count + Merkle root check...
+[23:34:49]   [admin123] pre-marker attempt=1: rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd
+[23:34:50]   [user4] pre-marker attempt=1: rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd
+[23:34:50]   [utkarsh] pre-marker attempt=1: rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd
+[23:34:50]   Pre-marker consistency: PASS rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd (matches expected rows=12498 root=125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd)
+[23:34:50]   Submitting marker key=99999999 detStartSeq=20513 reqIdOffset=20514
+Kafka result topic: ariabc_results
+completion_path=kafka_majority validation_mode=async_hash waitMajority=1 broadcastToAll=0 broadcastAcceptQuorum=0 broadcastResultQuorum=0 broadcastDrainInTimedRun=1 directCompletionQuorum=1
+loaded 1 queries
+det mode: ordered submission (window=1, configured_det_window=1, detBatchSize=16, numTerminals=1, detPipelineDepth=1, detPipelineCap=1, dbConnPoolSize=256, detRawSql=0)
+PROGRESS_GATEWAY_DET elapsed_s=0.0 total=1 sent=1 accepted=1 completed=1 completed_tps=21.15 terminal_lanes=1 terminal_depth=1 pipeline_outstanding=0 majority_inflight=0 pending_accept=0 kafka_msgs=3 kafka_recs=3 kafka_parse_failures=0 kc_msgs=3 kc_timeouts=74 permanent_failures=0 divergence_count=0 final=1
+overall time taken (millisec) = 79
+ overall wall time including drains (millisec) = 79
+ total wait time (ms) 0
+ submit time (ms) 31
+ majority wait time (ms) 15
+ background accept drain time (ms) 0
+duplicate_key_errors=0
+divergence_count=0
+permanent_failures=0
+PROFILE_GATEWAY  completion_path=kafka_majority validation_mode=async_hash broadcast_to_all=0 broadcast_accept_quorum=0 broadcast_result_quorum=0 broadcast_drain_in_timed_run=1 direct_completion_quorum=1 submit_mode=blocking num_terminals=1 det_pipeline_depth=1 det_batch_size=16 effective_det_window=1 configured_det_window=1 submit_attempts=1 conn_calls=1 conn_ms=15.8075 write_calls=1 write_ms=0.07046 read_calls=1 read_ms=15.8237 not_accepted=0 kafka_msgs=3 kafka_recs=3 kafka_parse_failures=0 kafka_parse_ms=0.018685 kafka_add_reply_ms=0.07629 consume_lag_ms_mean=16.6667 consume_lag_ms_max=18 consume_to_ready_ms_mean=0.009708 consume_to_ready_ms_p95=0.009708 wait_cv_sleep_ms_mean=14.0649 wait_cv_sleep_ms_p95=14.0649 ready_queue_depth_mean=1 ready_queue_depth_max=1 kc_poll_calls=312 kc_poll_ms=329.475 kc_msgs=3 kc_timeouts=310 kc_errors=0 kc_kb=0.588867 term_leader_unknown=0 term_leader_reply_missing=0 term_leader_full_result_hash_mismatch=0 term_leader_signature_invalid=0 term_majority_timeout=0 term_other_failure=0 err_send_calls=0 err_send_ok=0 err_producev_ms=0 err_poll_ms=0 err_flush_ms=0 overall_wall_ms=79 background_accept_drain_ms=0
+[23:34:50]   Waiting until marker is visible on all 3 nodes
+[23:34:51]   [admin123] marker visible (0s)
+[23:34:51]   [user4] marker visible (0s)
+[23:34:52]   [utkarsh] marker visible (0s)
+[23:34:52]   [admin123] rows=12499 root=8bc01ed9fa277ae2e083842bb5a24f9987b65f94cb8432901f034059e0a44b3a merkle_verify=t
+[23:34:53]   [user4] rows=12499 root=8bc01ed9fa277ae2e083842bb5a24f9987b65f94cb8432901f034059e0a44b3a merkle_verify=t
+[23:34:53]   [utkarsh] rows=12499 root=8bc01ed9fa277ae2e083842bb5a24f9987b65f94cb8432901f034059e0a44b3a merkle_verify=t
+[23:34:53]   usertable_small consistency: PASS rows=12499 root=8bc01ed9fa277ae2e083842bb5a24f9987b65f94cb8432901f034059e0a44b3a
+[23:34:54] === Final server profile collection ===
+[23:34:54]   Sending SIGTERM to ariabc_pg_server on all nodes so PROFILE_SERVER is flushed
+[23:34:54]   [admin123] stop signal sent
+[23:34:55]   [user4] stop signal sent
+[23:34:55]   [utkarsh] stop signal sent
+[23:34:57]   Collecting final server logs with PROFILE_SERVER lines...
+[23:35:02]   Server profiles: grep 'PROFILE_SERVER' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/server_node*.log
+[23:35:02]   BCDB profiles: grep 'PROFILE_BCDB_BLOCK' /work/ARIABC/AriaBC/scripts/bench_full_results/cluster4_20260624_233344/postgres_node*.log
+[23:35:02] === 4-node cluster test complete ===
+neel@neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE:/work/ARIABC/AriaBC/scripts/distributed$ 

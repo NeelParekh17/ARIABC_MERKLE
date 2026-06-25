@@ -1077,6 +1077,9 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " det_block_skipped_readonly=" << exec.det_block_skipped_readonly
         << " ready_det_results_max=" << exec.ready_det_results_max
         << " ordered_emit_wait_ms=" << (exec.ordered_emit_wait_ns / 1000000.0)
+        << " kafka_immediate_records=" << exec.kafka_immediate_records
+        << " ordered_apply_wait_ms=" << (exec.ordered_apply_wait_ns / 1000000.0)
+        << " ordered_apply_pending_max=" << exec.ordered_apply_pending_max
         << " det_raw_compat_mode=" << exec.det_raw_compat_mode
         << " det_prefixed_direct_parallel=" << exec.det_prefixed_direct_parallel
         << " det_completion_only_success=" << exec.det_completion_only_success

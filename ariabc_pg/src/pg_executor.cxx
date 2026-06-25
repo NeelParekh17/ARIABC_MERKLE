@@ -1172,6 +1172,9 @@ pg_executor_stats pg_executor::stats() const {
     out.det_block_skipped_readonly = st_det_block_skipped_readonly_.load(std::memory_order_relaxed);
     out.ready_det_results_max = st_ready_det_results_max_.load(std::memory_order_relaxed);
     out.ordered_emit_wait_ns = st_ordered_emit_wait_ns_.load(std::memory_order_relaxed);
+    out.kafka_immediate_records = st_kafka_immediate_records_.load(std::memory_order_relaxed);
+    out.ordered_apply_wait_ns = st_ordered_apply_wait_ns_.load(std::memory_order_relaxed);
+    out.ordered_apply_pending_max = st_ordered_apply_pending_max_.load(std::memory_order_relaxed);
     out.det_raw_compat_mode = det_raw_compat_mode_ ? 1 : 0;
     out.det_prefixed_direct_parallel = det_prefixed_direct_parallel_ ? 1 : 0;
     out.det_completion_only_success = det_completion_only_success_ ? 1 : 0;
@@ -1293,6 +1296,50 @@ void pg_executor::notify_task_applied(uint64_t raft_log_idx) {
     if (raft_log_idx == 0) return;
     if (on_task_applied_) {
         on_task_applied_(raft_log_idx);
+    }
+}
+
+void pg_executor::mark_task_applied_ordered(uint64_t dispatch_seq,
+                                            uint64_t raft_log_idx,
+                                            uint64_t ready_ns) {
+    if (raft_log_idx == 0) return;
+    if (dispatch_seq == 0) {
+        notify_task_applied(raft_log_idx);
+        return;
+    }
+
+    std::vector<uint64_t> ready_to_notify;
+    {
+        std::lock_guard<std::mutex> lk(det_ordered_apply_mu_);
+        if (dispatch_seq < det_next_ordered_apply_seq_) {
+            return;
+        }
+        det_ordered_apply_ready_[dispatch_seq] = raft_log_idx;
+        const uint64_t pending = static_cast<uint64_t>(det_ordered_apply_ready_.size());
+        uint64_t cur_max = st_ordered_apply_pending_max_.load(std::memory_order_relaxed);
+        while (pending > cur_max &&
+               !st_ordered_apply_pending_max_.compare_exchange_weak(
+                   cur_max, pending, std::memory_order_relaxed)) {
+        }
+
+        for (;;) {
+            auto it = det_ordered_apply_ready_.find(det_next_ordered_apply_seq_);
+            if (it == det_ordered_apply_ready_.end()) break;
+            ready_to_notify.push_back(it->second);
+            det_ordered_apply_ready_.erase(it);
+            ++det_next_ordered_apply_seq_;
+        }
+    }
+
+    if (!ready_to_notify.empty() && ready_ns != 0) {
+        const uint64_t now_ns = now_steady_ns();
+        if (now_ns >= ready_ns) {
+            st_ordered_apply_wait_ns_.fetch_add(now_ns - ready_ns,
+                                                std::memory_order_relaxed);
+        }
+    }
+    for (uint64_t ready_raft_idx : ready_to_notify) {
+        notify_task_applied(ready_raft_idx);
     }
 }
 
@@ -1900,7 +1947,6 @@ void pg_executor::event_loop() {
     size_t last_inflight_level = 0;
 
     auto emit_det_result = [&](const task& done_task, const std::string& out) {
-        notify_task_applied(done_task.raft_log_idx);
         if (kafka_enabled_) {
             if (should_publish_kafka_result(node_id_)) {
                 debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
@@ -1910,6 +1956,7 @@ void pg_executor::event_loop() {
                 batch_raft_log_idxs.push_back(done_task.raft_log_idx);
                 batch_leader_hints.push_back(done_task.leader_node_hint);
                 batch_bytes += done_task.req_id.size() + out.size() + 32;
+                st_kafka_immediate_records_.fetch_add(1, std::memory_order_relaxed);
             }
         } else {
             std::cout << (done_task.req_id + "  " + std::to_string(node_id_) + "  " + out)
@@ -1949,7 +1996,9 @@ void pg_executor::event_loop() {
     };
 
     auto mark_det_result_ready = [&](task done_task, const std::string& out) {
+        const uint64_t ready_ns = now_steady_ns();
         emit_det_result(done_task, out);
+        mark_task_applied_ordered(done_task.dispatch_seq, done_task.raft_log_idx, ready_ns);
     };
 
     auto update_overload_state = [&](size_t backlog, size_t queued) {
