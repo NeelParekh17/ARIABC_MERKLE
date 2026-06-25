@@ -9,7 +9,7 @@ SSH criteria: BatchMode=yes, ConnectTimeout=5s, port=22
 | Node | SSH | Error |
 |---|---|---|
 | neel@10.129.148.236 | OK |  |
-| neel@10.129.27.54 | OK |  |
+| neel@10.129.148.246 | OK |  |
 | neel@10.129.148.179 | OK |  |
 | neel@10.129.148.248 | OK |  |
 
@@ -18,7 +18,7 @@ SSH criteria: BatchMode=yes, ConnectTimeout=5s, port=22
 | Host | Target | OS | Kernel | Threads | RAM | Swap | Root avail | Root use% | Disks |
 |---|---|---|---|---:|---:|---:|---:|---:|---|
 | Neel | neel@10.129.148.236 | Ubuntu 24.04.3 LTS | 6.17.0-22-generic | 16 | 15.0 GB | 4.0 GB | 424G | 5% | nvme0n1 INTEL SSDPEKNW512G8 476.9G |
-| user4-MS-7C96 | neel@10.129.27.54 | Ubuntu 22.04.2 LTS | 6.8.0-101-generic | 16 | 15.0 GB | 46.6 GB | 111G | 37% | nvme0n1 INTEL SSDPEKNW512G8 476.9G |
+| user4-MS-7C96 | neel@10.129.148.246 | Ubuntu 22.04.2 LTS | 6.8.0-101-generic | 16 | 15.0 GB | 46.6 GB | 111G | 37% | nvme0n1 INTEL SSDPEKNW512G8 476.9G |
 | desk14-179 | neel@10.129.148.179 | Ubuntu 22.04.5 LTS | 6.8.0-111-generic | 16 | 15.0 GB | 14.9 GB | 300G | 31% | nvme0n1 INTEL SSDPEKNW512G8 476.9G |
 | utkarsh-MS-7C96 | neel@10.129.148.248 | Ubuntu 24.04.3 LTS | 6.17.0-19-generic | 16 | 15.0 GB | 4.0 GB | 129G | 67% | sda Samsung SSD 840 EVO 500GB 465.8G; nvme0n1 INTEL SSDPEKNW512G8 476.9G |
 
@@ -49,7 +49,7 @@ lsblk -d (disks/md):
 NAME=nvme0n1 MODEL=INTEL SSDPEKNW512G8 SIZE=476.9G ROTA=0 TYPE=disk
 ```
 
-### user4-MS-7C96 (neel@10.129.27.54)
+### user4-MS-7C96 (neel@10.129.148.246)
 
 - fqdn: user4-MS-7C96
 - os: Ubuntu 22.04.2 LTS
@@ -59,7 +59,7 @@ NAME=nvme0n1 MODEL=INTEL SSDPEKNW512G8 SIZE=476.9G ROTA=0 TYPE=disk
 - cpu_threads: 16
 - mem_total_kb: 15742564
 - swap_total_kb: 48828412
-- ip4: 10.129.27.54 172.19.0.1 172.21.0.1 172.17.0.1 172.18.0.1
+- ip4: 10.129.148.246 172.19.0.1 172.21.0.1 172.17.0.1 172.18.0.1
 - root_df: /dev/nvme0n1p4 ext4  183G   63G  111G  37% /
 
 df -hT (selected paths):

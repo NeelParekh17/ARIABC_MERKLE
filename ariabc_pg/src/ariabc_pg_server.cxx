@@ -1138,6 +1138,30 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " kafka_flush_reason_age=" << exec.kafka_flush_reason_age
         << " kafka_flush_reason_idle=" << exec.kafka_flush_reason_idle
         << " kafka_flush_reason_final=" << exec.kafka_flush_reason_final
+        << " kafka_batch_records_bin_1=" << exec.kafka_batch_records_bin_1
+        << " kafka_batch_records_bin_2_15=" << exec.kafka_batch_records_bin_2_15
+        << " kafka_batch_records_bin_16_63=" << exec.kafka_batch_records_bin_16_63
+        << " kafka_batch_records_bin_64_255=" << exec.kafka_batch_records_bin_64_255
+        << " kafka_batch_records_bin_256_plus=" << exec.kafka_batch_records_bin_256_plus
+        << " kafka_batch_bytes_bin_le_1k=" << exec.kafka_batch_bytes_bin_le_1k
+        << " kafka_batch_bytes_bin_1k_10k=" << exec.kafka_batch_bytes_bin_1k_10k
+        << " kafka_batch_bytes_bin_10k_100k=" << exec.kafka_batch_bytes_bin_10k_100k
+        << " kafka_batch_bytes_bin_100k_plus=" << exec.kafka_batch_bytes_bin_100k_plus
+        << " kafka_batch_dwell_bin_le_1ms=" << exec.kafka_batch_dwell_bin_le_1ms
+        << " kafka_batch_dwell_bin_1_5ms=" << exec.kafka_batch_dwell_bin_1_5ms
+        << " kafka_batch_dwell_bin_5_20ms=" << exec.kafka_batch_dwell_bin_5_20ms
+        << " kafka_batch_dwell_bin_20_100ms=" << exec.kafka_batch_dwell_bin_20_100ms
+        << " kafka_batch_dwell_bin_100ms_plus=" << exec.kafka_batch_dwell_bin_100ms_plus
+        << " kafka_flush_backlog_bin_0=" << exec.kafka_flush_backlog_bin_0
+        << " kafka_flush_backlog_bin_1_15=" << exec.kafka_flush_backlog_bin_1_15
+        << " kafka_flush_backlog_bin_16_63=" << exec.kafka_flush_backlog_bin_16_63
+        << " kafka_flush_backlog_bin_64_255=" << exec.kafka_flush_backlog_bin_64_255
+        << " kafka_flush_backlog_bin_256_plus=" << exec.kafka_flush_backlog_bin_256_plus
+        << " kafka_flush_inflight_bin_0=" << exec.kafka_flush_inflight_bin_0
+        << " kafka_flush_inflight_bin_1_15=" << exec.kafka_flush_inflight_bin_1_15
+        << " kafka_flush_inflight_bin_16_63=" << exec.kafka_flush_inflight_bin_16_63
+        << " kafka_flush_inflight_bin_64_255=" << exec.kafka_flush_inflight_bin_64_255
+        << " kafka_flush_inflight_bin_256_plus=" << exec.kafka_flush_inflight_bin_256_plus
         << " kafka_build_ms=" << (exec.kafka_build_payload_ns / 1000000.0)
         << " kafka_send_ms=" << (exec.kafka_send_ns / 1000000.0)
         << " kafka_send_calls=" << kprod.send_calls
@@ -1155,6 +1179,14 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " kafka_poll_ms=" << (kprod.poll_ns / 1000000.0)
         << " kafka_backoff_ms=" << (kprod.backoff_sleep_ns / 1000000.0)
         << " kafka_flush_ms=" << (kprod.flush_ns / 1000000.0)
+        << " kafka_callback_poll_calls=" << kprod.producer_callback_poll_calls
+        << " kafka_callback_poll_ms=" << (kprod.producer_callback_poll_ns / 1000000.0)
+        << " kafka_delivery_pending_max=" << kprod.delivery_pending_max
+        << " kafka_result_batch_delay_override_us=" << ariabc_pg::pg_executor::override_batch_delay_us()
+        << " kafka_worker_low_backlog_delay_us=1000"
+        << " kafka_worker_high_backlog_delay_us=-1"
+        << " kafka_event_loop_default_delay_us=1000"
+        << " kafka_event_loop_high_backlog_delay_us=-1"
         << std::endl;
 }
 

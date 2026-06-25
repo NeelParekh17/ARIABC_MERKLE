@@ -29,7 +29,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # Cluster topology (same as run_4node_raft_cluster.sh)
 # ---------------------------------------------------------------------------
 declare -a NODE_IDS=(1 2 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.248)
+declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(neel-MS kartik utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 declare -a NODE_IS_U22=(0 1 0)

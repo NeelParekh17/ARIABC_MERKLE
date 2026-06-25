@@ -388,6 +388,9 @@ bcdb_ptrace_open(void)
             "apply_update_wait_us,apply_delete_wait_us,"
             "apply_delete_lookup_us,apply_merkle_prep_us,apply_merkle_update_us,"
             "finish_result_us,finish_prev_commit_wait_us,finish_publish_us,"
+            "publish_partition_lock_us,publish_rotation_lock_us,"
+            "ws_probe_mapA_lock_wait_us,ws_probe_mapA_hash_lookup_us,"
+            "ws_probe_mapB_lock_wait_us,ws_probe_mapB_hash_lookup_us,"
             "ws_publish_entries,ws_conflict_checks,rs_conflict_checks,"
             "apply_insert_count,apply_update_count,apply_delete_count,"
             "apply_update_tm_being_modified_count,apply_delete_tm_being_modified_count,"
@@ -448,8 +451,8 @@ bcdb_ptrace_emit(int tx_id, int restarts)
     fprintf(bcdb_ptrace_fp,
             "%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
             tx_id, restarts,
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PARSE_PLAN],
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PORTAL_RUN],
@@ -477,6 +480,12 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_FINISH_RESULT_US],
             (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_FINISH_PREV_COMMIT_WAIT_US],
             (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_FINISH_PUBLISH_US],
+            (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_PUBLISH_PARTITION_LOCK_US],
+            (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_PUBLISH_ROTATION_LOCK_US],
+            (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_WS_PROBE_MAPA_LOCK_WAIT_US],
+            (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_WS_PROBE_MAPA_HASH_LOOKUP_US],
+            (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_WS_PROBE_MAPB_LOCK_WAIT_US],
+            (unsigned long long)bcdb_ptrace_metric_us[BCDB_PTRACE_METRIC_WS_PROBE_MAPB_HASH_LOOKUP_US],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_WS_PUBLISH_ENTRIES],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_WS_CONFLICT_CHECKS],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_RS_CONFLICT_CHECKS],

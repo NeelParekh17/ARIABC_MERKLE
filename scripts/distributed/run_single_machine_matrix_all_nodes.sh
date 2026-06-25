@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Typical use:
 # scripts/distributed/run_single_machine_matrix_all_nodes.sh \
-#   --nodes local,neel@10.129.148.248,neel@10.129.27.54,neel@10.129.148.236 \
+#   --nodes local,neel@10.129.148.248,neel@10.129.148.246,neel@10.129.148.236 \
 #   --ssh-key /home/neel/.ssh/id_rsa \
 #   --remote-repo-root /home/neel/Desktop/ariabc_cluster \
 #   --remote-install-dir /home/neel/Desktop/ariabc_install \

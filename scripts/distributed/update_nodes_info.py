@@ -16,7 +16,7 @@ import sys
 # Define cluster details
 NODES = [
     {"id": 1, "name": "admin123", "user": "neel", "ip": "10.129.148.236", "client_port": 8000},
-    {"id": 2, "name": "user4", "user": "neel", "ip": "10.129.27.54", "client_port": 8000},
+    {"id": 2, "name": "user4", "user": "neel", "ip": "10.129.148.246", "client_port": 8000},
     {"id": 4, "name": "utkarsh", "user": "neel", "ip": "10.129.148.248", "client_port": 8001},
 ]
 

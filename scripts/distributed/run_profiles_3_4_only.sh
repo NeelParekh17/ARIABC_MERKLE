@@ -9,7 +9,7 @@ cd "$ROOT"
 # --------------------------------------------------------------------------
 # Reachable topology (same as run_overhead_full_profiles_reachable.sh)
 # --------------------------------------------------------------------------
-PG_HOSTS="10.129.148.236,10.129.27.54,10.129.148.236"
+PG_HOSTS="10.129.148.236,10.129.148.246,10.129.148.236"
 RAFT_HOSTS="$PG_HOSTS"
 RAFT_MEMBER_HOSTS="$PG_HOSTS"
 RAFT_CLIENT_HOSTS="$PG_HOSTS"
@@ -45,7 +45,7 @@ if [[ "$BENCH_PRESET" != "canonical" && "$BENCH_PRESET" != "tuned" ]]; then
   echo "ERROR: PROFILE_BENCH_PRESET must be canonical or tuned (got '$BENCH_PRESET')" >&2
   exit 2
 fi
-export ARIABC_SSH_USER_MAP="10.129.27.54=neel"
+export ARIABC_SSH_USER_MAP="10.129.148.246=neel"
 export PROFILE_PG_CONFIG_MODE="${PROFILE_PG_CONFIG_MODE:-$BENCH_PRESET}"
 export PROFILE_AUTO_DET_MODE="${PROFILE_AUTO_DET_MODE:-1}"
 export PROFILE_DET_RUNTIME_MODE="${PROFILE_DET_RUNTIME_MODE:-throughput}"

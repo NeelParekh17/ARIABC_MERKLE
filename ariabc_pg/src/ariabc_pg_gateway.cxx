@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <deque>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -1210,6 +1211,19 @@ bool sign_sha256_rsa(EVP_PKEY* priv,
 }
 #endif
 
+enum class audit_status {
+    READY,
+    MISMATCH,
+    MISSING,
+    TIMEOUT
+};
+
+enum class audit_mark_status {
+    PINNED,
+    MISSING,
+    CAPACITY_EXHAUSTED
+};
+
 struct vote_entry {
     struct node_obs {
         kafka_reply_record rec;
@@ -1275,6 +1289,13 @@ struct vote_entry {
     uint64_t majority_nodes_mask = 0;
     int third_reply_node = 0;
     bool ready_recorded = false;
+    bool audit_pending = false;
+    bool all3_ready_queued = false;
+    bool audit_timed_out = false;
+    uint64_t audit_pending_ns = 0;
+    uint32_t audit_generation = 0;
+    uint64_t audit_deadline_ns = 0;
+    uint64_t all3_ready_ns = 0;
 };
 
 struct vote_store_profile {
@@ -1288,14 +1309,29 @@ struct vote_store_profile {
     double wait_cv_sleep_ms_p95 = 0.0;
     double mutex_hold_us_mean = 0.0;
     double mutex_hold_us_p95 = 0.0;
+    uint64_t node1_reply_records = 0;
+    uint64_t node2_reply_records = 0;
+    uint64_t node4_reply_records = 0;
     uint64_t node1_first_valid = 0;
     uint64_t node2_first_valid = 0;
     uint64_t node4_first_valid = 0;
+    uint64_t node1_second_quorum = 0;
+    uint64_t node2_second_quorum = 0;
+    uint64_t node4_second_quorum = 0;
     uint64_t node1_third_reply = 0;
     uint64_t node2_third_reply = 0;
     uint64_t node4_third_reply = 0;
+    uint64_t majority_pair_1_2 = 0;
+    uint64_t majority_pair_1_4 = 0;
+    uint64_t majority_pair_2_4 = 0;
     double ready_queue_depth_mean = 0.0;
     size_t ready_queue_depth_max = 0;
+    uint64_t audit_pending_current = 0;
+    uint64_t audit_pending_max = 0;
+    uint64_t all3_ready_queue_depth_max = 0;
+    uint64_t audit_deadline_heap_size = 0;
+    uint64_t audit_deadline_heap_stale_pops = 0;
+    uint64_t audit_deadline_heap_timeout_pops = 0;
 };
 
 struct vote_store {
@@ -1305,7 +1341,7 @@ struct vote_store {
                         std::string sig_key)
         : total_nodes_(total_nodes)
         , majority_(majority)
-        , max_entries_(std::max<size_t>(1024, max_entries))
+        , max_entries_(std::max<size_t>(1, max_entries))
         , sig_key_(std::move(sig_key))
         {}
 
@@ -1352,11 +1388,22 @@ private:
     {
         out_recovery_note.clear();
         const uint64_t add_ns = steady_now_ns();
-        vote_entry& e = m_[rec.req_num];
+        auto emplace_res = m_.insert(std::make_pair(rec.req_num, vote_entry()));
         if (seen_reqs_.insert(rec.req_num).second) {
             req_order_.push_back(rec.req_num);
         }
-        evict_if_needed_locked();
+        if (!evict_if_needed_locked(rec.req_num)) {
+            out_recovery_note = "vote_store_capacity_exhausted: req_num=" + std::to_string(rec.req_num);
+            if (emplace_res.second) {
+                m_.erase(emplace_res.first);
+                seen_reqs_.erase(rec.req_num);
+                if (!req_order_.empty() && req_order_.back() == rec.req_num) {
+                    req_order_.pop_back();
+                }
+            }
+            return;
+        }
+        vote_entry& e = emplace_res.first->second;
         if (e.first_reply_ns == 0) {
             e.first_reply_ns = add_ns;
         }
@@ -1425,7 +1472,22 @@ private:
         if (obs.sig_valid && !rec.result_hash.empty()) {
             e.hash_to_nodes_valid[rec.result_hash] |= node_bit(rec.node_id);
         }
-        refresh_majority_locked(rec.req_num, e, add_ns);
+        increment_node_counter_locked(reply_records_by_node_, rec.node_id);
+        refresh_majority_locked(rec.req_num, e, add_ns, rec.node_id);
+
+        std::string all_err;
+        if (!e.all3_ready_queued && e.audit_pending && resolve_all_nodes_consistent_locked(rec.req_num, all_err)) {
+            e.all3_ready_ns = add_ns;
+            if (e.audit_deadline_ns != 0 && add_ns >= e.audit_deadline_ns) {
+                e.audit_timed_out = true;
+            }
+            e.all3_ready_queued = true;
+            all3_ready_queue_.push_back(rec.req_num);
+            if (all3_ready_queue_.size() > all3_ready_queue_depth_max_) {
+                all3_ready_queue_depth_max_ = all3_ready_queue_.size();
+            }
+            cv_.notify_all();
+        }
 
         if (!e.all_reported && e.nodes_seen_count >= total_nodes_) {
             e.all_reported = true;
@@ -1640,32 +1702,37 @@ public:
 
     // Wait until all nodes have reported this request and all valid signatures
     // agree on a single result hash across the full replica set.
-    bool wait_all_nodes_consistent(uint64_t req_num,
-                                   int poll_interval_us,
-                                   int poll_count,
-                                   std::string& out_error)
+    audit_status wait_all_nodes_consistent(uint64_t req_num,
+                                           int poll_interval_us,
+                                           int poll_count,
+                                           std::string& out_error)
     {
         out_error.clear();
         std::unique_lock<std::mutex> lk(mu_);
 
         auto all_nodes_ready = [&]() -> bool {
+            auto it = m_.find(req_num);
+            if (it == m_.end()) {
+                out_error = "audit_entry_evicted";
+                return true; // Stop waiting if missing
+            }
             return resolve_all_nodes_consistent_locked(req_num, out_error);
         };
 
-        if (all_nodes_ready()) return out_error.empty();
-        if (poll_count <= 0) {
-            while (!all_nodes_ready()) {
-                const auto wait_t0 = std::chrono::steady_clock::now();
-                cv_.wait(lk);
-                const auto wait_t1 = std::chrono::steady_clock::now();
-                record_wait_sleep_locked(static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
-            }
-            return out_error.empty();
+        if (all_nodes_ready()) {
+            if (out_error == "audit_entry_evicted") return audit_status::MISSING;
+            return out_error.empty() ? audit_status::READY : audit_status::MISMATCH;
+        }
+
+        // poll_count <= 0 must not allow an invisible infinite audit wait.
+        // We cap it at 30 seconds if poll_count <= 0.
+        int actual_poll_count = poll_count;
+        if (actual_poll_count <= 0) {
+            actual_poll_count = 30000000 / std::max(1, poll_interval_us); // 30 seconds max
         }
 
         const long long total_us =
-            static_cast<long long>(poll_interval_us) * static_cast<long long>(poll_count);
+            static_cast<long long>(poll_interval_us) * static_cast<long long>(actual_poll_count);
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::microseconds(std::max<long long>(1, total_us));
         while (!all_nodes_ready()) {
@@ -1679,10 +1746,146 @@ public:
                           << " detail=" << describe_req_locked(req_num)
                           << std::endl;
                 out_error = "all_nodes_timeout";
-                return false;
+                return audit_status::TIMEOUT;
             }
         }
-        return out_error.empty();
+        if (out_error == "audit_entry_evicted") return audit_status::MISSING;
+        return out_error.empty() ? audit_status::READY : audit_status::MISMATCH;
+    }
+
+    audit_mark_status mark_audit_pending(uint64_t req_num, int poll_interval_us, int poll_count) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (capacity_exhausted_.load(std::memory_order_relaxed)) {
+            return audit_mark_status::CAPACITY_EXHAUSTED;
+        }
+        auto it = m_.find(req_num);
+        if (it == m_.end()) {
+            return audit_mark_status::MISSING;
+        }
+        if (!it->second.audit_pending) {
+            it->second.audit_pending = true;
+            it->second.audit_pending_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            it->second.audit_generation++;
+            audit_pending_current_++;
+            if (audit_pending_current_ > audit_pending_max_) {
+                audit_pending_max_ = audit_pending_current_;
+            }
+
+            int actual_poll_count = poll_count;
+            if (actual_poll_count <= 0) {
+                actual_poll_count = 30000000 / std::max(1, poll_interval_us); // 30 seconds max
+            }
+            const uint64_t total_us = static_cast<uint64_t>(poll_interval_us) * static_cast<uint64_t>(actual_poll_count);
+            const uint64_t timeout_ns = total_us * 1000;
+            uint64_t deadline_ns = it->second.audit_pending_ns + timeout_ns;
+            it->second.audit_deadline_ns = deadline_ns;
+
+            audit_deadline_heap_.push(audit_deadline_entry{deadline_ns, req_num, it->second.audit_generation});
+            cv_.notify_all();
+        }
+        if (!it->second.all3_ready_queued) {
+            std::string err;
+            if (resolve_all_nodes_consistent_locked(req_num, err)) {
+                it->second.all3_ready_ns = it->second.audit_pending_ns;
+                it->second.all3_ready_queued = true;
+                all3_ready_queue_.push_back(req_num);
+                if (all3_ready_queue_.size() > all3_ready_queue_depth_max_) {
+                    all3_ready_queue_depth_max_ = all3_ready_queue_.size();
+                }
+                cv_.notify_all();
+            }
+        }
+        return audit_mark_status::PINNED;
+    }
+
+    void unpin_audit(uint64_t req_num) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = m_.find(req_num);
+        if (it != m_.end()) {
+            if (it->second.audit_pending) {
+                it->second.audit_pending = false;
+                it->second.audit_generation++;
+                if (audit_pending_current_ > 0) {
+                    audit_pending_current_--;
+                }
+            }
+        }
+    }
+
+    bool wait_next_all3_ready(uint64_t& out_req_num, std::string& out_error, int poll_interval_us, int poll_count) {
+        out_error.clear();
+        std::unique_lock<std::mutex> lk(mu_);
+
+        int actual_poll_count = poll_count;
+        if (actual_poll_count <= 0) {
+            actual_poll_count = 30000000 / std::max(1, poll_interval_us); // 30 seconds max
+        }
+        const uint64_t total_us = static_cast<uint64_t>(poll_interval_us) * static_cast<uint64_t>(actual_poll_count);
+        const uint64_t timeout_ns = total_us * 1000;
+
+        while (all3_ready_queue_.empty() && !audit_stopped_) {
+            uint64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+
+            if (!audit_deadline_heap_.empty() && audit_deadline_heap_.top().deadline_ns <= now_ns) {
+                auto top_entry = audit_deadline_heap_.top();
+                audit_deadline_heap_.pop();
+
+                auto map_it = m_.find(top_entry.req_num);
+                if (map_it != m_.end() && map_it->second.audit_pending &&
+                    map_it->second.audit_generation == top_entry.generation) {
+
+                    if (!map_it->second.all3_ready_queued) {
+                        map_it->second.all3_ready_queued = true;
+                        map_it->second.audit_timed_out = true;
+                        all3_ready_queue_.push_back(top_entry.req_num);
+                        audit_deadline_heap_timeout_pops_++;
+                        if (all3_ready_queue_.size() > all3_ready_queue_depth_max_) {
+                            all3_ready_queue_depth_max_ = all3_ready_queue_.size();
+                        }
+                    } else {
+                        audit_deadline_heap_stale_pops_++;
+                    }
+                } else {
+                    audit_deadline_heap_stale_pops_++;
+                }
+                continue;
+            }
+
+            if (!audit_deadline_heap_.empty()) {
+                uint64_t wait_ns = audit_deadline_heap_.top().deadline_ns - now_ns;
+                wait_ns = std::min<uint64_t>(wait_ns, 100000000ULL); // 100 ms max wait
+                cv_.wait_for(lk, std::chrono::nanoseconds(wait_ns));
+            } else {
+                cv_.wait_for(lk, std::chrono::milliseconds(100));
+            }
+        }
+
+        if (all3_ready_queue_.empty() && audit_stopped_) {
+            return false;
+        }
+
+        out_req_num = all3_ready_queue_.front();
+        all3_ready_queue_.pop_front();
+
+        auto it = m_.find(out_req_num);
+        if (it != m_.end()) {
+            if (it->second.audit_timed_out) {
+                out_error = "all_nodes_timeout";
+            } else {
+                resolve_all_nodes_consistent_locked(out_req_num, out_error);
+            }
+        } else {
+            out_error = "audit_entry_evicted";
+        }
+        return true;
+    }
+
+    void stop_audit() {
+        std::lock_guard<std::mutex> lk(mu_);
+        audit_stopped_ = true;
+        cv_.notify_all();
     }
 
     vote_store_profile profile() {
@@ -1702,14 +1905,29 @@ public:
         out.node1_first_valid = node_counter_locked(first_valid_by_node_, 1);
         out.node2_first_valid = node_counter_locked(first_valid_by_node_, 2);
         out.node4_first_valid = node_counter_locked(first_valid_by_node_, 4);
+        out.node1_second_quorum = node_counter_locked(second_quorum_by_node_, 1);
+        out.node2_second_quorum = node_counter_locked(second_quorum_by_node_, 2);
+        out.node4_second_quorum = node_counter_locked(second_quorum_by_node_, 4);
         out.node1_third_reply = node_counter_locked(third_reply_by_node_, 1);
         out.node2_third_reply = node_counter_locked(third_reply_by_node_, 2);
         out.node4_third_reply = node_counter_locked(third_reply_by_node_, 4);
+        out.node1_reply_records = node_counter_locked(reply_records_by_node_, 1);
+        out.node2_reply_records = node_counter_locked(reply_records_by_node_, 2);
+        out.node4_reply_records = node_counter_locked(reply_records_by_node_, 4);
+        out.majority_pair_1_2 = majority_pair_1_2_;
+        out.majority_pair_1_4 = majority_pair_1_4_;
+        out.majority_pair_2_4 = majority_pair_2_4_;
         if (ready_queue_depth_obs_ > 0) {
             out.ready_queue_depth_mean =
                 static_cast<double>(ready_queue_depth_sum_) / static_cast<double>(ready_queue_depth_obs_);
         }
         out.ready_queue_depth_max = ready_queue_depth_max_;
+        out.audit_pending_current = audit_pending_current_;
+        out.audit_pending_max = audit_pending_max_;
+        out.all3_ready_queue_depth_max = all3_ready_queue_depth_max_;
+        out.audit_deadline_heap_size = audit_deadline_heap_.size();
+        out.audit_deadline_heap_stale_pops = audit_deadline_heap_stale_pops_;
+        out.audit_deadline_heap_timeout_pops = audit_deadline_heap_timeout_pops_;
         return out;
     }
 
@@ -1881,7 +2099,7 @@ private:
         return static_cast<double>(samples[std::min(idx, samples.size() - 1)]) / 1000.0;
     }
 
-    void refresh_majority_locked(uint64_t req_num, vote_entry& e, uint64_t now_ns) {
+    void refresh_majority_locked(uint64_t req_num, vote_entry& e, uint64_t now_ns, int trigger_node_id) {
         const bool had_majority = !e.majority_hash.empty();
         e.majority_hash = compute_majority_hash_locked(e);
         if (!had_majority && !e.terminal_set && !e.majority_hash.empty() && !e.ready_recorded) {
@@ -1890,6 +2108,10 @@ private:
             auto it_maj = e.hash_to_nodes_valid.find(e.majority_hash);
             if (it_maj != e.hash_to_nodes_valid.end()) {
                 e.majority_nodes_mask = it_maj->second;
+                increment_node_counter_locked(second_quorum_by_node_, trigger_node_id);
+                if ((e.majority_nodes_mask & node_bit(1)) && (e.majority_nodes_mask & node_bit(2))) ++majority_pair_1_2_;
+                else if ((e.majority_nodes_mask & node_bit(1)) && (e.majority_nodes_mask & node_bit(4))) ++majority_pair_1_4_;
+                else if ((e.majority_nodes_mask & node_bit(2)) && (e.majority_nodes_mask & node_bit(4))) ++majority_pair_2_4_;
             }
             if (e.first_reply_ns > 0 && now_ns >= e.first_reply_ns) {
                 record_consume_to_ready_locked(now_ns - e.first_reply_ns);
@@ -1900,14 +2122,41 @@ private:
         }
     }
 
-    void evict_if_needed_locked() {
+    bool evict_if_needed_locked(uint64_t protected_req) {
         while (m_.size() > max_entries_ && !req_order_.empty()) {
-            const uint64_t old_req = req_order_.front();
-            req_order_.pop_front();
-            seen_reqs_.erase(old_req);
-            m_.erase(old_req);
-            ready_members_.erase(old_req);
+            bool evicted_any = false;
+            for (auto it = req_order_.begin(); it != req_order_.end(); ) {
+                const uint64_t old_req = *it;
+                if (old_req == protected_req) {
+                    ++it;
+                    continue;
+                }
+                auto map_it = m_.find(old_req);
+                if (map_it != m_.end() && map_it->second.audit_pending) {
+                    ++it;
+                    continue;
+                }
+                it = req_order_.erase(it);
+                seen_reqs_.erase(old_req);
+                if (map_it != m_.end()) {
+                    m_.erase(map_it);
+                }
+                ready_members_.erase(old_req);
+                evicted_any = true;
+                if (m_.size() <= max_entries_) {
+                    break;
+                }
+            }
+            if (!evicted_any && m_.size() > max_entries_) {
+                // Cannot safely throw from background thread (would call terminate).
+                // Signal the gateway-wide error via the atomic capacity_exhausted_ flag
+                // which is checked in record_async_all3_pending and the client loop.
+                capacity_exhausted_.store(true, std::memory_order_release);
+                cv_.notify_all();
+                return false;
+            }
         }
+        return true;
     }
 
     bool resolve_terminal_locked(uint64_t req_num,
@@ -2158,7 +2407,7 @@ private:
     std::mutex mu_;
     std::condition_variable cv_;
     std::unordered_map<uint64_t, vote_entry> m_;
-    std::deque<uint64_t> req_order_;
+    std::list<uint64_t> req_order_;
     std::unordered_set<uint64_t> seen_reqs_;
     std::deque<uint64_t> ready_reqs_;
     std::unordered_set<uint64_t> ready_members_;
@@ -2171,10 +2420,41 @@ private:
     uint64_t mutex_hold_sum_ns_ = 0;
     std::vector<uint64_t> mutex_hold_samples_;
     std::unordered_map<int, uint64_t> first_valid_by_node_;
+    std::unordered_map<int, uint64_t> second_quorum_by_node_;
     std::unordered_map<int, uint64_t> third_reply_by_node_;
+    std::unordered_map<int, uint64_t> reply_records_by_node_;
+    uint64_t majority_pair_1_2_ = 0;
+    uint64_t majority_pair_1_4_ = 0;
+    uint64_t majority_pair_2_4_ = 0;
     uint64_t ready_queue_depth_sum_ = 0;
     uint64_t ready_queue_depth_obs_ = 0;
     size_t ready_queue_depth_max_ = 0;
+    struct audit_deadline_entry {
+        uint64_t deadline_ns;
+        uint64_t req_num;
+        uint32_t generation;
+
+        bool operator>(const audit_deadline_entry& other) const {
+            return deadline_ns > other.deadline_ns;
+        }
+    };
+    std::priority_queue<audit_deadline_entry, std::vector<audit_deadline_entry>, std::greater<audit_deadline_entry>> audit_deadline_heap_;
+
+    std::deque<uint64_t> all3_ready_queue_;
+    bool audit_stopped_ = false;
+    uint64_t audit_pending_current_ = 0;
+    uint64_t audit_pending_max_ = 0;
+    uint64_t all3_ready_queue_depth_max_ = 0;
+    uint64_t audit_deadline_heap_stale_pops_ = 0;
+    uint64_t audit_deadline_heap_timeout_pops_ = 0;
+    // Set when eviction fails because all entries are audit-pinned.
+    // Readable via capacity_exhausted() without holding mu_.
+    std::atomic<bool> capacity_exhausted_{false};
+
+public:
+    bool capacity_exhausted() const {
+        return capacity_exhausted_.load(std::memory_order_acquire);
+    }
 };
 
 bool run_early_ready_race_self_test()
@@ -2185,11 +2465,10 @@ bool run_early_ready_race_self_test()
     const std::string full_result = "selftest-result";
     const std::string result_hash = canonical_result_hash(full_result);
 
-    vote_store votes(3, 2, 8, sig_key);
-    auto make_rec = [&](int node_id, bool full) {
+    auto make_rec_for = [&](uint64_t rnum, int node_id, bool full) {
         kafka_reply_record rec;
-        rec.req_num = req_num;
-        rec.req_id = req_id;
+        rec.req_num = rnum;
+        rec.req_id = "selftest-" + std::to_string(rnum);
         rec.node_id = node_id;
         rec.leader_node_id = 1;
         rec.result_hash = result_hash;
@@ -2212,41 +2491,205 @@ bool run_early_ready_race_self_test()
     };
 
     std::string recovery;
-    votes.add_reply(make_rec(1, true), recovery);
-    votes.add_reply(make_rec(2, false), recovery);
 
-    std::list<uint64_t> empty_inflight;
-    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> empty_pos;
-    uint64_t rid = 0;
-    std::string result;
-    std::string err;
-    (void)votes.try_pop_any_terminal(empty_inflight, empty_pos, rid, result, err);
+    // Existing test
+    {
+        vote_store votes(3, 2, 8, sig_key);
+        votes.add_reply(make_rec_for(req_num, 1, true), recovery);
+        votes.add_reply(make_rec_for(req_num, 2, false), recovery);
 
-    std::list<uint64_t> inflight;
-    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> inflight_pos;
-    inflight.push_back(req_num);
-    auto it_pos = inflight.end();
-    --it_pos;
-    inflight_pos[req_num] = it_pos;
-    votes.note_inflight_registered(req_num);
+        std::list<uint64_t> empty_inflight;
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> empty_pos;
+        uint64_t rid = 0;
+        std::string result;
+        std::string err;
+        (void)votes.try_pop_any_terminal(empty_inflight, empty_pos, rid, result, err);
 
-    rid = 0;
-    result.clear();
-    err.clear();
-    const bool ok = votes.wait_any_majority(inflight,
-                                            inflight_pos,
-                                            1000,
-                                            100,
-                                            rid,
-                                            result,
-                                            err);
-    if (!ok || rid != req_num || result != full_result || !err.empty()) {
-        std::cerr << "early-ready self-test failed ok=" << ok
-                  << " rid=" << rid
-                  << " err=" << err
-                  << std::endl;
-        return false;
+        std::list<uint64_t> inflight;
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> inflight_pos;
+        inflight.push_back(req_num);
+        auto it_pos = inflight.end();
+        --it_pos;
+        inflight_pos[req_num] = it_pos;
+        votes.note_inflight_registered(req_num);
+
+        rid = 0;
+        result.clear();
+        err.clear();
+        const bool ok = votes.wait_any_majority(inflight,
+                                                inflight_pos,
+                                                1000,
+                                                100,
+                                                rid,
+                                                result,
+                                                err);
+        if (!ok || rid != req_num || result != full_result || !err.empty()) {
+            std::cerr << "early-ready self-test failed ok=" << ok
+                      << " rid=" << rid
+                      << " err=" << err
+                      << std::endl;
+            return false;
+        }
     }
+
+    // Scenario A: Quorum completion followed by entry eviction prior to audit pin (returns MISSING, no hang).
+    {
+        vote_store votes_a(3, 2, 1, sig_key); // max capacity = 1
+        
+        votes_a.note_inflight_registered(1);
+        std::string rec1_1, rec1_2, rec2_2;
+        votes_a.add_reply(make_rec_for(1, 1, true), rec1_1);
+        votes_a.add_reply(make_rec_for(1, 2, false), rec1_2);
+        
+        votes_a.note_inflight_registered(2);
+        votes_a.add_reply(make_rec_for(2, 2, true), rec2_2); // evicts req 1
+        
+        audit_mark_status status = votes_a.mark_audit_pending(1, 1000, 100);
+        if (status != audit_mark_status::MISSING) {
+            std::cerr << "Scenario A failed: expected MISSING, got " << (int)status << std::endl;
+            return false;
+        }
+        std::cout << "Scenario A PASS" << std::endl;
+    }
+
+    // Scenario B: Quorum completed but the third node reply never arrives (returns TIMEOUT after deadline).
+    {
+        vote_store votes_b(3, 2, 10, sig_key);
+        votes_b.note_inflight_registered(3);
+        votes_b.add_reply(make_rec_for(3, 1, true), recovery);
+        votes_b.add_reply(make_rec_for(3, 2, false), recovery);
+
+        audit_mark_status status = votes_b.mark_audit_pending(3, 1000, 10); // 10ms timeout
+        if (status != audit_mark_status::PINNED) {
+            std::cerr << "Scenario B failed to pin: " << (int)status << std::endl;
+            return false;
+        }
+
+        uint64_t out_req = 0;
+        std::string out_err;
+        bool ok_wait = votes_b.wait_next_all3_ready(out_req, out_err, 1000, 10);
+        if (!ok_wait || out_req != 3 || out_err != "all_nodes_timeout") {
+            std::cerr << "Scenario B failed: ok_wait=" << ok_wait << " out_req=" << out_req << " out_err=" << out_err << std::endl;
+            return false;
+        }
+        std::cout << "Scenario B PASS" << std::endl;
+    }
+
+    // Scenario C: Third node reply arrives right before the timeout deadline (returns READY exactly once).
+    {
+        vote_store votes_c(3, 2, 10, sig_key);
+        votes_c.note_inflight_registered(4);
+        votes_c.add_reply(make_rec_for(4, 1, true), recovery);
+        votes_c.add_reply(make_rec_for(4, 2, false), recovery);
+
+        audit_mark_status status = votes_c.mark_audit_pending(4, 1000000, 10); // 10s timeout
+        if (status != audit_mark_status::PINNED) {
+            std::cerr << "Scenario C failed to pin: " << (int)status << std::endl;
+            return false;
+        }
+
+        votes_c.add_reply(make_rec_for(4, 3, false), recovery);
+
+        uint64_t out_req = 0;
+        std::string out_err;
+        bool ok_wait = votes_c.wait_next_all3_ready(out_req, out_err, 1000000, 10);
+        if (!ok_wait || out_req != 4 || !out_err.empty()) {
+            std::cerr << "Scenario C failed: ok_wait=" << ok_wait << " out_req=" << out_req << " out_err=" << out_err << std::endl;
+            return false;
+        }
+        std::cout << "Scenario C PASS" << std::endl;
+    }
+
+    // Scenario D: All entries are audit-pinned and a new result arrives (triggering capacity error).
+    {
+        vote_store votes_d(3, 2, 2, sig_key); // capacity = 2
+
+        votes_d.note_inflight_registered(5);
+        votes_d.add_reply(make_rec_for(5, 1, true), recovery);
+        votes_d.add_reply(make_rec_for(5, 2, false), recovery);
+        votes_d.mark_audit_pending(5, 1000, 10);
+
+        votes_d.note_inflight_registered(6);
+        votes_d.add_reply(make_rec_for(6, 1, true), recovery);
+        votes_d.add_reply(make_rec_for(6, 2, false), recovery);
+        votes_d.mark_audit_pending(6, 1000, 10);
+
+        votes_d.note_inflight_registered(7);
+        std::string recovery_note;
+        votes_d.add_reply(make_rec_for(7, 1, true), recovery_note);
+
+        if (recovery_note.find("vote_store_capacity_exhausted") == std::string::npos) {
+            std::cerr << "Scenario D failed: expected capacity exhaustion, got: " << recovery_note << std::endl;
+            return false;
+        }
+        std::cout << "Scenario D PASS" << std::endl;
+    }
+
+    // Scenario E: 10k pending audits with varied deadlines are processed.
+    {
+        const int num_reqs = 10000;
+        vote_store votes_e(3, 2, num_reqs + 10, sig_key);
+
+        for (int i = 0; i < num_reqs; ++i) {
+            uint64_t r = 100 + i;
+            votes_e.note_inflight_registered(r);
+            votes_e.add_reply(make_rec_for(r, 1, true), recovery);
+            votes_e.add_reply(make_rec_for(r, 2, false), recovery);
+        }
+
+        const auto start_pin = std::chrono::steady_clock::now();
+        for (int i = 0; i < num_reqs; ++i) {
+            uint64_t r = 100 + i;
+            votes_e.mark_audit_pending(r, 1 + (i % 10), 10);
+        }
+        const auto end_pin = std::chrono::steady_clock::now();
+        std::cout << "Scenario E: Pinned " << num_reqs << " in "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(end_pin - start_pin).count()
+                  << " ms" << std::endl;
+
+        uint64_t out_req = 0;
+        std::string out_err;
+        for (int i = 0; i < 5; ++i) {
+            bool ok_wait = votes_e.wait_next_all3_ready(out_req, out_err, 1, 10);
+            if (!ok_wait || out_err != "all_nodes_timeout") {
+                std::cerr << "Scenario E failed: ok_wait=" << ok_wait << " out_err=" << out_err << std::endl;
+                return false;
+            }
+        }
+        std::cout << "Scenario E PASS" << std::endl;
+    }
+
+    // Scenario F: Quorum completed but the third node reply arrives after deadline (returns TIMEOUT).
+    {
+        vote_store votes_f(3, 2, 10, sig_key);
+        uint64_t req = 20000;
+        votes_f.note_inflight_registered(req);
+        votes_f.add_reply(make_rec_for(req, 1, true), recovery);
+        votes_f.add_reply(make_rec_for(req, 2, false), recovery);
+
+        // Mark with 10 ms deadline
+        audit_mark_status status = votes_f.mark_audit_pending(req, 1000, 10);
+        if (status != audit_mark_status::PINNED) {
+            std::cerr << "Scenario F failed to pin: " << (int)status << std::endl;
+            return false;
+        }
+
+        // Intentionally exceed deadline before third reply.
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+        // Add third matching reply
+        votes_f.add_reply(make_rec_for(req, 4, false), recovery);
+
+        uint64_t rid = 0;
+        std::string err;
+        bool ok_wait = votes_f.wait_next_all3_ready(rid, err, 1000, 10);
+        if (!ok_wait || rid != req || err != "all_nodes_timeout") {
+            std::cerr << "Scenario F failed: ok_wait=" << ok_wait << " rid=" << rid << " err=" << err << std::endl;
+            return false;
+        }
+        std::cout << "Scenario F PASS" << std::endl;
+    }
+
     std::cout << "early-ready self-test PASS" << std::endl;
     return true;
 }
@@ -2800,6 +3243,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::atomic<int> permanent_failures(0);
+    std::atomic<uint64_t> term_other_failure(0);
+    std::atomic<bool>     fatal_gateway_error(false);
+    std::string           fatal_gateway_error_message;
+    std::mutex            fatal_gateway_error_mu;
+    std::atomic<uint64_t> async_all3_capacity_exhausted_count(0);
+    std::atomic<bool>     async_audit_stop(false);
+    std::thread async_audit_thread;
+
     std::atomic<bool> stop(false);
     std::thread kafka_thread;
     std::thread dispatch_thread;
@@ -2821,6 +3273,21 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> kafka_consume_lag_ns(0);
     std::atomic<uint64_t> kafka_consume_lag_count(0);
     std::atomic<uint64_t> kafka_consume_lag_ns_max(0);
+
+    std::atomic<uint64_t> dispatch_messages_bin_1(0);
+    std::atomic<uint64_t> dispatch_messages_bin_2_15(0);
+    std::atomic<uint64_t> dispatch_messages_bin_16_63(0);
+    std::atomic<uint64_t> dispatch_messages_bin_64_255(0);
+    std::atomic<uint64_t> dispatch_messages_bin_256_plus(0);
+
+    std::atomic<uint64_t> dispatch_records_bin_1(0);
+    std::atomic<uint64_t> dispatch_records_bin_2_15(0);
+    std::atomic<uint64_t> dispatch_records_bin_16_63(0);
+    std::atomic<uint64_t> dispatch_records_bin_64_255(0);
+    std::atomic<uint64_t> dispatch_records_bin_256_plus(0);
+
+    std::atomic<uint64_t> dispatch_queue_depth_max(0);
+
     if (kafka_enabled) {
         dispatch_thread = std::thread([&] {
             while (true) {
@@ -2850,7 +3317,31 @@ int main(int argc, char** argv) {
                 for (size_t i = 0; i < recoveries.size(); ++i) {
                     if (!recoveries[i].empty()) {
                         divergence_count.fetch_add(1);
-                        std::cerr << recoveries[i] << std::endl;
+                        if (recoveries[i].find("vote_store_capacity_exhausted") != std::string::npos) {
+                            std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
+                            if (!fatal_gateway_error.load(std::memory_order_relaxed)) {
+                                fatal_gateway_error_message = "audit_capacity_exhausted: vote_store capacity exhausted";
+                                fatal_gateway_error.store(true, std::memory_order_release);
+                                term_other_failure.fetch_add(1, std::memory_order_relaxed);
+                                {
+                                    std::ostringstream oss;
+                                    oss << "{\"type\":\"majority_failure\""
+                                        << ",\"req_num\":" << batch.records[i].req_num
+                                        << ",\"reason\":\"" << ariabc_pg::json_escape(fatal_gateway_error_message) << "\"}";
+                                    const std::string msg = oss.str();
+                                    if (!opt.kafka_bootstrap.empty()) {
+                                        std::string perr;
+                                        if (!err_prod.send_line(msg, perr)) {
+                                            std::cerr << "errTopic send failed: " << perr << std::endl;
+                                        }
+                                    } else {
+                                        std::cerr << msg << std::endl;
+                                    }
+                                }
+                                permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                                async_all3_capacity_exhausted_count.fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
                         if (!opt.kafka_bootstrap.empty()) {
                             std::string perr;
                             if (!err_prod.send_line(recoveries[i], perr)) {
@@ -2926,13 +3417,28 @@ int main(int argc, char** argv) {
                     }
                 }
 
+                uint64_t records_count = all_recs.size();
                 {
                     std::lock_guard<std::mutex> lk(dispatch_mu);
                     gateway_dispatch_batch dispatch_batch;
                     dispatch_batch.records = std::move(all_recs);
                     dispatch_batch.parse_done_ns = parse_done_ns;
                     dispatch_queue.push_back(std::move(dispatch_batch));
+                    ariabc_pg::atomic_max_u64(dispatch_queue_depth_max, static_cast<uint64_t>(dispatch_queue.size()));
                 }
+
+                uint64_t messages_count = kafka_batch.size();
+                if (messages_count == 1) dispatch_messages_bin_1.fetch_add(1, std::memory_order_relaxed);
+                else if (messages_count <= 15) dispatch_messages_bin_2_15.fetch_add(1, std::memory_order_relaxed);
+                else if (messages_count <= 63) dispatch_messages_bin_16_63.fetch_add(1, std::memory_order_relaxed);
+                else if (messages_count <= 255) dispatch_messages_bin_64_255.fetch_add(1, std::memory_order_relaxed);
+                else if (messages_count > 0) dispatch_messages_bin_256_plus.fetch_add(1, std::memory_order_relaxed);
+
+                if (records_count == 1) dispatch_records_bin_1.fetch_add(1, std::memory_order_relaxed);
+                else if (records_count <= 15) dispatch_records_bin_2_15.fetch_add(1, std::memory_order_relaxed);
+                else if (records_count <= 63) dispatch_records_bin_16_63.fetch_add(1, std::memory_order_relaxed);
+                else if (records_count <= 255) dispatch_records_bin_64_255.fetch_add(1, std::memory_order_relaxed);
+                else if (records_count > 0) dispatch_records_bin_256_plus.fetch_add(1, std::memory_order_relaxed);
                 dispatch_cv.notify_one();
             }
         });
@@ -2945,13 +3451,11 @@ int main(int argc, char** argv) {
     std::atomic<long long> total_submit_ns(0);
     std::atomic<long long> total_majority_wait_ns(0);
     std::atomic<int> duplicate_key_errors(0);
-    std::atomic<int> permanent_failures(0);
     std::atomic<uint64_t> term_leader_unknown(0);
     std::atomic<uint64_t> term_leader_reply_missing(0);
     std::atomic<uint64_t> term_leader_full_result_hash_mismatch(0);
     std::atomic<uint64_t> term_leader_signature_invalid(0);
     std::atomic<uint64_t> term_majority_timeout(0);
-    std::atomic<uint64_t> term_other_failure(0);
     std::atomic<uint64_t> strict_all_nodes_checks(0);
     std::atomic<uint64_t> strict_all_nodes_failures(0);
     std::atomic<uint64_t> strict_all_nodes_wait_ns(0);
@@ -2959,12 +3463,10 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> async_all3_verified_count(0);
     std::atomic<uint64_t> async_all3_failure_count(0);
     std::atomic<uint64_t> async_all3_timeout_count(0);
-    std::atomic<uint64_t> async_all3_pending_max(0);
+    std::atomic<uint64_t> async_all3_missing_count(0);
     std::atomic<uint64_t> async_all3_audit_drain_ns(0);
     std::atomic<uint64_t> det_total_outstanding_max(0);
     std::atomic<uint64_t> det_lane_outstanding_max(0);
-    std::mutex async_audit_mu;
-    std::vector<uint64_t> async_audit_pending;
 
     auto req_id_for_idx = [&](size_t idx) -> std::string {
         const uint64_t id_num = opt.req_id_offset + static_cast<uint64_t>(idx);
@@ -3196,10 +3698,10 @@ int main(int argc, char** argv) {
         }
 
         std::string all_err;
-        if (!votes.wait_all_nodes_consistent(req_num,
+        if (votes.wait_all_nodes_consistent(req_num,
                                              opt.poll_interval_us,
                                              opt.poll_count,
-                                             all_err)) {
+                                             all_err) != ariabc_pg::audit_status::READY) {
             if (all_err.empty()) all_err = "all_nodes_timeout";
             bump_terminal_reason(all_err);
             emit_recovery_event(req_num, all_err);
@@ -3669,8 +4171,8 @@ int main(int argc, char** argv) {
                 std::string all_err;
                 const auto all0 = std::chrono::steady_clock::now();
                 strict_all_nodes_checks.fetch_add(1, std::memory_order_relaxed);
-                const bool all_ok = votes.wait_all_nodes_consistent(
-                    rid, opt.poll_interval_us, opt.poll_count, all_err);
+                const bool all_ok = (votes.wait_all_nodes_consistent(
+                    rid, opt.poll_interval_us, opt.poll_count, all_err) == ariabc_pg::audit_status::READY);
                 const auto all1 = std::chrono::steady_clock::now();
                 const uint64_t all_wait_ns = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(all1 - all0).count());
@@ -3687,62 +4189,118 @@ int main(int argc, char** argv) {
                 return true;
             };
 
+            auto start_async_audit_thread = [&]() {
+                if (!majority_async_all3_validation) return;
+                async_audit_thread = std::thread([&]() {
+                    while (!async_audit_stop.load(std::memory_order_relaxed)) {
+                        uint64_t rid = 0;
+                        std::string all_err;
+                        if (!votes.wait_next_all3_ready(rid, all_err, opt.poll_interval_us, opt.poll_count)) {
+                            break;
+                        }
+
+                        votes.unpin_audit(rid);
+
+                        if (all_err == "all_nodes_timeout") {
+                            async_all3_timeout_count.fetch_add(1, std::memory_order_relaxed);
+                            bump_terminal_reason(all_err);
+                            emit_recovery_event(rid, all_err);
+                            permanent_failures.fetch_add(1);
+                        } else if (all_err == "audit_entry_evicted") {
+                            async_all3_missing_count.fetch_add(1, std::memory_order_relaxed);
+                            bump_terminal_reason(all_err);
+                            emit_recovery_event(rid, all_err);
+                            permanent_failures.fetch_add(1);
+                        } else if (!all_err.empty()) {
+                            async_all3_failure_count.fetch_add(1, std::memory_order_relaxed);
+                            bump_terminal_reason(all_err);
+                            emit_recovery_event(rid, all_err);
+                            permanent_failures.fetch_add(1);
+                        } else {
+                            async_all3_verified_count.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                });
+            };
+            start_async_audit_thread();
+
             auto record_async_all3_pending = [&](uint64_t rid) {
                 if (!majority_async_all3_validation) {
                     return;
                 }
-                std::lock_guard<std::mutex> lk(async_audit_mu);
-                async_audit_pending.push_back(rid);
-                ariabc_pg::atomic_max_u64(
-                    async_all3_pending_max,
-                    static_cast<uint64_t>(async_audit_pending.size()));
+                ariabc_pg::audit_mark_status status = votes.mark_audit_pending(rid, opt.poll_interval_us, opt.poll_count);
+                if (status == ariabc_pg::audit_mark_status::MISSING) {
+                    async_all3_missing_count.fetch_add(1, std::memory_order_relaxed);
+                    bump_terminal_reason("audit_entry_evicted");
+                    emit_recovery_event(rid, "audit_entry_evicted");
+                    permanent_failures.fetch_add(1);
+                    return;
+                }
+                if (status == ariabc_pg::audit_mark_status::CAPACITY_EXHAUSTED || votes.capacity_exhausted()) {
+                    std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
+                    if (!fatal_gateway_error.load(std::memory_order_relaxed)) {
+                        fatal_gateway_error_message = "audit_capacity_exhausted: all vote_store entries pinned";
+                        fatal_gateway_error.store(true, std::memory_order_release);
+                        bump_terminal_reason("audit_capacity_exhausted");
+                        emit_recovery_event(rid, fatal_gateway_error_message);
+                        permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                        async_all3_capacity_exhausted_count.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    return;
+                }
             };
 
             auto drain_async_all3_audit = [&]() -> bool {
+                if (fatal_gateway_error.load(std::memory_order_relaxed)) {
+                    std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
+                    std::cerr << "fatal_gateway_error: " << fatal_gateway_error_message << std::endl;
+                    return false;
+                }
                 if (!majority_async_all3_validation) {
                     return true;
                 }
-                std::vector<uint64_t> pending;
-                {
-                    std::lock_guard<std::mutex> lk(async_audit_mu);
-                    pending.swap(async_audit_pending);
-                }
-                const auto audit0 = std::chrono::steady_clock::now();
-                bool ok = true;
-                for (uint64_t rid : pending) {
-                    std::string all_err;
-                    const bool all_ok = votes.wait_all_nodes_consistent(
-                        rid, opt.poll_interval_us, opt.poll_count, all_err);
-                    if (!all_ok) {
-                        async_all3_timeout_count.fetch_add(1, std::memory_order_relaxed);
-                        if (all_err.empty()) all_err = "all_nodes_timeout";
-                        bump_terminal_reason(all_err);
-                        emit_recovery_event(rid, all_err);
-                        ok = false;
-                        continue;
+                // Measure only the actual drain phase, not the full thread lifetime.
+                const auto drain_start = std::chrono::steady_clock::now();
+
+                uint64_t completed = client_quorum_complete_count.load(std::memory_order_relaxed);
+                while (true) {
+                    uint64_t processed = async_all3_verified_count.load(std::memory_order_relaxed) +
+                                         async_all3_failure_count.load(std::memory_order_relaxed) +
+                                         async_all3_timeout_count.load(std::memory_order_relaxed) +
+                                         async_all3_missing_count.load(std::memory_order_relaxed);
+                    if (processed >= completed) {
+                        break;
                     }
-                    if (!all_err.empty()) {
-                        async_all3_failure_count.fetch_add(1, std::memory_order_relaxed);
-                        bump_terminal_reason(all_err);
-                        emit_recovery_event(rid, all_err);
-                        ok = false;
-                        continue;
+                    if (fatal_gateway_error.load(std::memory_order_relaxed)) {
+                        break;
                     }
-                    async_all3_verified_count.fetch_add(1, std::memory_order_relaxed);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
-                const auto audit1 = std::chrono::steady_clock::now();
+
+                async_audit_stop = true;
+                votes.stop_audit();
+                if (async_audit_thread.joinable()) {
+                    async_audit_thread.join();
+                }
+                const auto drain_end = std::chrono::steady_clock::now();
                 async_all3_audit_drain_ns.fetch_add(
-                    static_cast<uint64_t>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(audit1 - audit0).count()),
-                    std::memory_order_relaxed);
-                if (!ok) {
-                    permanent_failures.fetch_add(1);
-                }
-                return ok;
+                     static_cast<uint64_t>(
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(drain_end - drain_start).count()),
+                     std::memory_order_relaxed);
+                return !fatal_gateway_error.load(std::memory_order_acquire) &&
+                       async_all3_failure_count.load() == 0 &&
+                       async_all3_timeout_count.load() == 0 &&
+                       async_all3_missing_count.load() == 0 &&
+                       async_all3_capacity_exhausted_count.load() == 0;
             };
 
             auto wait_det_majority_window = [&](size_t max_outstanding) -> bool {
                 while (majority_wait_enabled && inflight.size() > max_outstanding) {
+                    if (fatal_gateway_error.load(std::memory_order_relaxed)) {
+                        std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
+                        std::cerr << "fatal_gateway_error: " << fatal_gateway_error_message << std::endl;
+                        return false;
+                    }
                     std::string maj;
                     std::string wait_err;
                     uint64_t rid = 0;
@@ -4271,6 +4829,12 @@ int main(int argc, char** argv) {
                             if (failed) break;
                         }
                     }
+                    if (fatal_gateway_error.load(std::memory_order_relaxed)) {
+                        std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
+                        std::cerr << "fatal_gateway_error: " << fatal_gateway_error_message << std::endl;
+                        failed = true;
+                        break;
+                    }
 
                     ariabc_pg::client_api_request req;
                     std::vector<det_shaped_request> batch_items;
@@ -4659,6 +5223,10 @@ int main(int argc, char** argv) {
                       << async_all3_failure_count.load(std::memory_order_relaxed)
                       << " async_all3_timeout_count="
                       << async_all3_timeout_count.load(std::memory_order_relaxed)
+                      << " async_all3_missing_count="
+                      << async_all3_missing_count.load(std::memory_order_relaxed)
+                      << " async_all3_capacity_exhausted_count="
+                      << async_all3_capacity_exhausted_count.load(std::memory_order_relaxed)
                       << " audit_drain_ms="
                       << (async_all3_audit_drain_ns.load(std::memory_order_relaxed) / 1000000.0)
                       << std::endl;
@@ -4725,8 +5293,19 @@ int main(int argc, char** argv) {
             << " consumer_poll_to_parse_ms=" << (kafka_consumer_poll_to_parse_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " parse_to_vote_store_ms=" << (kafka_parse_to_vote_store_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " kafka_add_reply_ms=" << (kafka_add_reply_ns.load(std::memory_order_relaxed) / 1000000.0)
-            << " consume_lag_ms_mean=" << lag_ms_mean
-            << " consume_lag_ms_max=" << lag_ms_max
+            << " consume_lag_ms_mean_cross_host_clock_unverified=" << lag_ms_mean
+            << " consume_lag_ms_max_cross_host_clock_unverified=" << lag_ms_max
+            << " dispatch_messages_bin_1=" << dispatch_messages_bin_1.load(std::memory_order_relaxed)
+            << " dispatch_messages_bin_2_15=" << dispatch_messages_bin_2_15.load(std::memory_order_relaxed)
+            << " dispatch_messages_bin_16_63=" << dispatch_messages_bin_16_63.load(std::memory_order_relaxed)
+            << " dispatch_messages_bin_64_255=" << dispatch_messages_bin_64_255.load(std::memory_order_relaxed)
+            << " dispatch_messages_bin_256_plus=" << dispatch_messages_bin_256_plus.load(std::memory_order_relaxed)
+            << " dispatch_records_bin_1=" << dispatch_records_bin_1.load(std::memory_order_relaxed)
+            << " dispatch_records_bin_2_15=" << dispatch_records_bin_2_15.load(std::memory_order_relaxed)
+            << " dispatch_records_bin_16_63=" << dispatch_records_bin_16_63.load(std::memory_order_relaxed)
+            << " dispatch_records_bin_64_255=" << dispatch_records_bin_64_255.load(std::memory_order_relaxed)
+            << " dispatch_records_bin_256_plus=" << dispatch_records_bin_256_plus.load(std::memory_order_relaxed)
+            << " dispatch_queue_depth_max=" << dispatch_queue_depth_max.load(std::memory_order_relaxed)
             << " consume_to_ready_ms_mean=" << vote_prof.consume_to_ready_ms_mean
             << " consume_to_ready_ms_p95=" << vote_prof.consume_to_ready_ms_p95
             << " first_reply_to_majority_ms_mean=" << vote_prof.first_reply_to_majority_ms_mean
@@ -4738,9 +5317,18 @@ int main(int argc, char** argv) {
             << " first_valid_node1=" << vote_prof.node1_first_valid
             << " first_valid_node2=" << vote_prof.node2_first_valid
             << " first_valid_node4=" << vote_prof.node4_first_valid
+            << " second_quorum_node1=" << vote_prof.node1_second_quorum
+            << " second_quorum_node2=" << vote_prof.node2_second_quorum
+            << " second_quorum_node4=" << vote_prof.node4_second_quorum
             << " third_reply_node1=" << vote_prof.node1_third_reply
             << " third_reply_node2=" << vote_prof.node2_third_reply
             << " third_reply_node4=" << vote_prof.node4_third_reply
+            << " reply_records_from_node1=" << vote_prof.node1_reply_records
+            << " reply_records_from_node2=" << vote_prof.node2_reply_records
+            << " reply_records_from_node4=" << vote_prof.node4_reply_records
+            << " majority_pair_1_2=" << vote_prof.majority_pair_1_2
+            << " majority_pair_1_4=" << vote_prof.majority_pair_1_4
+            << " majority_pair_2_4=" << vote_prof.majority_pair_2_4
             << " wait_cv_sleep_ms_mean=" << vote_prof.wait_cv_sleep_ms_mean
             << " wait_cv_sleep_ms_p95=" << vote_prof.wait_cv_sleep_ms_p95
             << " ready_queue_depth_mean=" << vote_prof.ready_queue_depth_mean
@@ -4766,8 +5354,16 @@ int main(int argc, char** argv) {
             << " async_all3_verified_count=" << async_all3_verified_count.load(std::memory_order_relaxed)
             << " async_all3_failure_count=" << async_all3_failure_count.load(std::memory_order_relaxed)
             << " async_all3_timeout_count=" << async_all3_timeout_count.load(std::memory_order_relaxed)
-            << " async_all3_pending_max=" << async_all3_pending_max.load(std::memory_order_relaxed)
+            << " async_all3_missing_count=" << async_all3_missing_count.load(std::memory_order_relaxed)
+            << " async_all3_capacity_exhausted_count=" << async_all3_capacity_exhausted_count.load(std::memory_order_relaxed)
+            << " audit_pending_current=" << vote_prof.audit_pending_current
+            << " audit_pending_max=" << vote_prof.audit_pending_max
+            << " all3_ready_queue_depth_max=" << vote_prof.all3_ready_queue_depth_max
+            << " audit_deadline_heap_size=" << vote_prof.audit_deadline_heap_size
+            << " audit_deadline_heap_stale_pops=" << vote_prof.audit_deadline_heap_stale_pops
+            << " audit_deadline_heap_timeout_pops=" << vote_prof.audit_deadline_heap_timeout_pops
             << " audit_drain_ms=" << (async_all3_audit_drain_ns.load(std::memory_order_relaxed) / 1000000.0)
+            << " audit_capacity_exhausted=" << (fatal_gateway_error.load(std::memory_order_relaxed) ? 1 : 0)
             << " err_send_calls=" << ep.send_calls
             << " err_send_ok=" << ep.send_ok
             << " err_producev_ms=" << (ep.producev_ns / 1000000.0)
@@ -4984,6 +5580,12 @@ int main(int argc, char** argv) {
 
     stop = true;
     dispatch_cv.notify_all();
+    if (async_audit_thread.joinable()) {
+        async_audit_stop.store(true, std::memory_order_relaxed);
+        votes.stop_audit();
+        async_audit_thread.join();
+    }
+    
     if (dispatch_thread.joinable()) dispatch_thread.join();
     if (kafka_thread.joinable()) kafka_thread.join();
     consumer.stop();

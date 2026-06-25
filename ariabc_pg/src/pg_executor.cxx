@@ -66,6 +66,15 @@ bool debug_req_trace_enabled() {
     return enabled;
 }
 
+static const int kConfiguredDelayUs = []() -> int {
+    const char* e = ::getenv("ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US");
+    if (e) {
+        int v = std::atoi(e);
+        if (v > 0) return v;
+    }
+    return -1;
+}();
+
 bool det_event_block_fastpath_enabled() {
     static const bool enabled = []() -> bool {
         const char* v = std::getenv("ARIABC_DET_EVENT_BLOCK_FASTPATH");
@@ -661,6 +670,14 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
 
 } // namespace
 
+int pg_executor::configured_batch_delay_us() {
+    return kConfiguredDelayUs;
+}
+
+int pg_executor::override_batch_delay_us() {
+    return kConfiguredDelayUs > 0 ? kConfiguredDelayUs : -1;
+}
+
 struct pg_executor::notice_state {
     std::string last_merkle_roots;
 };
@@ -1160,6 +1177,36 @@ pg_executor_stats pg_executor::stats() const {
     out.queue_depth_bin_17_64 = st_queue_depth_bin_17_64_.load(std::memory_order_relaxed);
     out.queue_depth_bin_65_256 = st_queue_depth_bin_65_256_.load(std::memory_order_relaxed);
     out.queue_depth_bin_gt_256 = st_queue_depth_bin_gt_256_.load(std::memory_order_relaxed);
+
+    out.kafka_batch_records_bin_1 = st_kafka_batch_records_bin_1_.load(std::memory_order_relaxed);
+    out.kafka_batch_records_bin_2_15 = st_kafka_batch_records_bin_2_15_.load(std::memory_order_relaxed);
+    out.kafka_batch_records_bin_16_63 = st_kafka_batch_records_bin_16_63_.load(std::memory_order_relaxed);
+    out.kafka_batch_records_bin_64_255 = st_kafka_batch_records_bin_64_255_.load(std::memory_order_relaxed);
+    out.kafka_batch_records_bin_256_plus = st_kafka_batch_records_bin_256_plus_.load(std::memory_order_relaxed);
+
+    out.kafka_batch_bytes_bin_le_1k = st_kafka_batch_bytes_bin_le_1k_.load(std::memory_order_relaxed);
+    out.kafka_batch_bytes_bin_1k_10k = st_kafka_batch_bytes_bin_1k_10k_.load(std::memory_order_relaxed);
+    out.kafka_batch_bytes_bin_10k_100k = st_kafka_batch_bytes_bin_10k_100k_.load(std::memory_order_relaxed);
+    out.kafka_batch_bytes_bin_100k_plus = st_kafka_batch_bytes_bin_100k_plus_.load(std::memory_order_relaxed);
+
+    out.kafka_batch_dwell_bin_le_1ms = st_kafka_batch_dwell_bin_le_1ms_.load(std::memory_order_relaxed);
+    out.kafka_batch_dwell_bin_1_5ms = st_kafka_batch_dwell_bin_1_5ms_.load(std::memory_order_relaxed);
+    out.kafka_batch_dwell_bin_5_20ms = st_kafka_batch_dwell_bin_5_20ms_.load(std::memory_order_relaxed);
+    out.kafka_batch_dwell_bin_20_100ms = st_kafka_batch_dwell_bin_20_100ms_.load(std::memory_order_relaxed);
+    out.kafka_batch_dwell_bin_100ms_plus = st_kafka_batch_dwell_bin_100ms_plus_.load(std::memory_order_relaxed);
+
+    out.kafka_flush_backlog_bin_0 = st_kafka_flush_backlog_bin_0_.load(std::memory_order_relaxed);
+    out.kafka_flush_backlog_bin_1_15 = st_kafka_flush_backlog_bin_1_15_.load(std::memory_order_relaxed);
+    out.kafka_flush_backlog_bin_16_63 = st_kafka_flush_backlog_bin_16_63_.load(std::memory_order_relaxed);
+    out.kafka_flush_backlog_bin_64_255 = st_kafka_flush_backlog_bin_64_255_.load(std::memory_order_relaxed);
+    out.kafka_flush_backlog_bin_256_plus = st_kafka_flush_backlog_bin_256_plus_.load(std::memory_order_relaxed);
+
+    out.kafka_flush_inflight_bin_0 = st_kafka_flush_inflight_bin_0_.load(std::memory_order_relaxed);
+    out.kafka_flush_inflight_bin_1_15 = st_kafka_flush_inflight_bin_1_15_.load(std::memory_order_relaxed);
+    out.kafka_flush_inflight_bin_16_63 = st_kafka_flush_inflight_bin_16_63_.load(std::memory_order_relaxed);
+    out.kafka_flush_inflight_bin_64_255 = st_kafka_flush_inflight_bin_64_255_.load(std::memory_order_relaxed);
+    out.kafka_flush_inflight_bin_256_plus = st_kafka_flush_inflight_bin_256_plus_.load(std::memory_order_relaxed);
+
     out.queue_overload_enter = st_queue_overload_enter_.load(std::memory_order_relaxed);
     out.queue_overload_exit = st_queue_overload_exit_.load(std::memory_order_relaxed);
     out.queue_high_watermark = static_cast<uint64_t>(queue_high_wm_);
@@ -1682,13 +1729,48 @@ void pg_executor::worker_loop() {
         const uint64_t batch_records = static_cast<uint64_t>(batch_req_ids.size());
         st_kafka_batch_records_.fetch_add(batch_records, std::memory_order_relaxed);
         update_atomic_max(st_kafka_batch_records_max_, batch_records);
+        
+        uint64_t total_dwell_ns = 0;
         for (uint64_t append_ns : batch_append_ns) {
             if (flush_ns >= append_ns) {
                 const uint64_t dwell_ns = flush_ns - append_ns;
                 st_kafka_batch_dwell_ns_.fetch_add(dwell_ns, std::memory_order_relaxed);
                 update_atomic_max(st_kafka_batch_dwell_max_ns_, dwell_ns);
+                total_dwell_ns += dwell_ns;
             }
         }
+        
+        const uint64_t backlog = st_backlog_cur_.load(std::memory_order_relaxed);
+        if (backlog == 0) st_kafka_flush_backlog_bin_0_.fetch_add(1, std::memory_order_relaxed);
+        else if (backlog <= 15) st_kafka_flush_backlog_bin_1_15_.fetch_add(1, std::memory_order_relaxed);
+        else if (backlog <= 63) st_kafka_flush_backlog_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+        else if (backlog <= 255) st_kafka_flush_backlog_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_flush_backlog_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+        const uint64_t inflight = st_inflight_cur_.load(std::memory_order_relaxed);
+        if (inflight == 0) st_kafka_flush_inflight_bin_0_.fetch_add(1, std::memory_order_relaxed);
+        else if (inflight <= 15) st_kafka_flush_inflight_bin_1_15_.fetch_add(1, std::memory_order_relaxed);
+        else if (inflight <= 63) st_kafka_flush_inflight_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+        else if (inflight <= 255) st_kafka_flush_inflight_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_flush_inflight_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+        if (batch_records == 1) st_kafka_batch_records_bin_1_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_records <= 15) st_kafka_batch_records_bin_2_15_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_records <= 63) st_kafka_batch_records_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_records <= 255) st_kafka_batch_records_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_batch_records_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+        if (batch_bytes <= 1024) st_kafka_batch_bytes_bin_le_1k_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_bytes <= 10240) st_kafka_batch_bytes_bin_1k_10k_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_bytes <= 102400) st_kafka_batch_bytes_bin_10k_100k_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_batch_bytes_bin_100k_plus_.fetch_add(1, std::memory_order_relaxed);
+
+        uint64_t mean_dwell_ns = batch_records > 0 ? (total_dwell_ns / batch_records) : 0;
+        if (mean_dwell_ns <= 1000000ULL) st_kafka_batch_dwell_bin_le_1ms_.fetch_add(1, std::memory_order_relaxed);
+        else if (mean_dwell_ns <= 5000000ULL) st_kafka_batch_dwell_bin_1_5ms_.fetch_add(1, std::memory_order_relaxed);
+        else if (mean_dwell_ns <= 20000000ULL) st_kafka_batch_dwell_bin_5_20ms_.fetch_add(1, std::memory_order_relaxed);
+        else if (mean_dwell_ns <= 100000000ULL) st_kafka_batch_dwell_bin_20_100ms_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_batch_dwell_bin_100ms_plus_.fetch_add(1, std::memory_order_relaxed);
         switch (reason) {
             case FLUSH_REASON_RECORDS:
                 st_kafka_flush_reason_records_.fetch_add(1, std::memory_order_relaxed);
@@ -1912,12 +1994,17 @@ void pg_executor::worker_loop() {
                 batch_bytes += t.req_id.size() + result.size() + 32;
                 const size_t max_records = (q_depth_after_pop >= 64) ? 512 : kKafkaBatchMaxRecords;
                 const size_t max_bytes = (q_depth_after_pop >= 64) ? (1024 * 1024) : kKafkaBatchMaxBytes;
-                const int max_delay_ms = (q_depth_after_pop >= 16) ? 0 : kKafkaBatchMaxDelayMs;
-                const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                int max_delay_us = -1;
+                if (kConfiguredDelayUs > 0) {
+                    max_delay_us = kConfiguredDelayUs;
+                } else if (q_depth_after_pop < 16) {
+                    max_delay_us = kKafkaBatchMaxDelayMs * 1000;
+                }
+                const auto age_us = std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - batch_start).count();
                 if (batch_req_ids.size() >= max_records ||
                     batch_bytes >= max_bytes ||
-                    age_ms >= max_delay_ms) {
+                    (max_delay_us >= 0 && age_us >= max_delay_us)) {
                     flush_batch(batch_req_ids.size() >= max_records
                                     ? FLUSH_REASON_RECORDS
                                     : (batch_bytes >= max_bytes
@@ -1987,13 +2074,48 @@ void pg_executor::event_loop() {
         const uint64_t batch_records = static_cast<uint64_t>(batch_req_ids.size());
         st_kafka_batch_records_.fetch_add(batch_records, std::memory_order_relaxed);
         update_atomic_max(st_kafka_batch_records_max_, batch_records);
+        
+        uint64_t total_dwell_ns = 0;
         for (uint64_t append_ns : batch_append_ns) {
             if (flush_ns >= append_ns) {
                 const uint64_t dwell_ns = flush_ns - append_ns;
                 st_kafka_batch_dwell_ns_.fetch_add(dwell_ns, std::memory_order_relaxed);
                 update_atomic_max(st_kafka_batch_dwell_max_ns_, dwell_ns);
+                total_dwell_ns += dwell_ns;
             }
         }
+
+        const uint64_t backlog = st_backlog_cur_.load(std::memory_order_relaxed);
+        if (backlog == 0) st_kafka_flush_backlog_bin_0_.fetch_add(1, std::memory_order_relaxed);
+        else if (backlog <= 15) st_kafka_flush_backlog_bin_1_15_.fetch_add(1, std::memory_order_relaxed);
+        else if (backlog <= 63) st_kafka_flush_backlog_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+        else if (backlog <= 255) st_kafka_flush_backlog_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_flush_backlog_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+        const uint64_t inflight = st_inflight_cur_.load(std::memory_order_relaxed);
+        if (inflight == 0) st_kafka_flush_inflight_bin_0_.fetch_add(1, std::memory_order_relaxed);
+        else if (inflight <= 15) st_kafka_flush_inflight_bin_1_15_.fetch_add(1, std::memory_order_relaxed);
+        else if (inflight <= 63) st_kafka_flush_inflight_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+        else if (inflight <= 255) st_kafka_flush_inflight_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_flush_inflight_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+        if (batch_records == 1) st_kafka_batch_records_bin_1_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_records <= 15) st_kafka_batch_records_bin_2_15_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_records <= 63) st_kafka_batch_records_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_records <= 255) st_kafka_batch_records_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_batch_records_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+        if (batch_bytes <= 1024) st_kafka_batch_bytes_bin_le_1k_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_bytes <= 10240) st_kafka_batch_bytes_bin_1k_10k_.fetch_add(1, std::memory_order_relaxed);
+        else if (batch_bytes <= 102400) st_kafka_batch_bytes_bin_10k_100k_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_batch_bytes_bin_100k_plus_.fetch_add(1, std::memory_order_relaxed);
+
+        uint64_t mean_dwell_ns = batch_records > 0 ? (total_dwell_ns / batch_records) : 0;
+        if (mean_dwell_ns <= 1000000ULL) st_kafka_batch_dwell_bin_le_1ms_.fetch_add(1, std::memory_order_relaxed);
+        else if (mean_dwell_ns <= 5000000ULL) st_kafka_batch_dwell_bin_1_5ms_.fetch_add(1, std::memory_order_relaxed);
+        else if (mean_dwell_ns <= 20000000ULL) st_kafka_batch_dwell_bin_5_20ms_.fetch_add(1, std::memory_order_relaxed);
+        else if (mean_dwell_ns <= 100000000ULL) st_kafka_batch_dwell_bin_20_100ms_.fetch_add(1, std::memory_order_relaxed);
+        else st_kafka_batch_dwell_bin_100ms_plus_.fetch_add(1, std::memory_order_relaxed);
         switch (reason) {
             case FLUSH_REASON_RECORDS:
                 st_kafka_flush_reason_records_.fetch_add(1, std::memory_order_relaxed);
@@ -2097,11 +2219,18 @@ void pg_executor::event_loop() {
                 emit_det_result(ready.tasks[i], ready.results[i]);
             }
             if (kafka_enabled_) {
-                const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                int max_delay_us = -1;
+                if (kConfiguredDelayUs > 0) {
+                    max_delay_us = kConfiguredDelayUs;
+                } else {
+                    // No backlog context here directly, default to 1ms
+                    max_delay_us = kKafkaBatchMaxDelayMs * 1000;
+                }
+                const auto age_us = std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - batch_start).count();
                 if (batch_req_ids.size() >= kKafkaBatchMaxRecords ||
                     batch_bytes >= kKafkaBatchMaxBytes ||
-                    age_ms >= kKafkaBatchMaxDelayMs) {
+                    (max_delay_us >= 0 && age_us >= max_delay_us)) {
                     flush_batch(batch_req_ids.size() >= kKafkaBatchMaxRecords
                                     ? FLUSH_REASON_RECORDS
                                     : (batch_bytes >= kKafkaBatchMaxBytes
@@ -2613,14 +2742,19 @@ void pg_executor::event_loop() {
 
         // Batch flushing policy: adapt to backlog and age.
         if (kafka_enabled_ && !batch_req_ids.empty()) {
-            const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            int max_delay_us = -1;
+            if (kConfiguredDelayUs > 0) {
+                max_delay_us = kConfiguredDelayUs;
+            } else if (backlog < 16) {
+                max_delay_us = kKafkaBatchMaxDelayMs * 1000;
+            }
+            const auto age_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - batch_start).count();
             const size_t max_records = (backlog >= 64) ? 512 : kKafkaBatchMaxRecords;
             const size_t max_bytes = (backlog >= 64) ? (1024 * 1024) : kKafkaBatchMaxBytes;
-            const int max_delay_ms = (backlog >= 16) ? -1 : kKafkaBatchMaxDelayMs;
             if (batch_req_ids.size() >= max_records ||
                 batch_bytes >= max_bytes ||
-                (max_delay_ms >= 0 && age_ms >= max_delay_ms)) {
+                (max_delay_us >= 0 && age_us >= max_delay_us)) {
                 flush_batch(batch_req_ids.size() >= max_records
                                 ? FLUSH_REASON_RECORDS
                                 : (batch_bytes >= max_bytes
@@ -2682,11 +2816,17 @@ void pg_executor::event_loop() {
             }
         }
         if (kafka_enabled_ && !batch_req_ids.empty()) {
-            const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            int max_delay_us = -1;
+            if (kConfiguredDelayUs > 0) {
+                max_delay_us = kConfiguredDelayUs;
+            } else if (backlog < 16) {
+                max_delay_us = kKafkaBatchMaxDelayMs * 1000;
+            }
+            const auto age_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - batch_start).count();
-            const int max_delay_ms = (backlog >= 16) ? -1 : kKafkaBatchMaxDelayMs;
-            if (max_delay_ms >= 0) {
-                const int remaining_ms = std::max(0, max_delay_ms - static_cast<int>(age_ms));
+            if (max_delay_us >= 0) {
+                const int remaining_us = std::max(0, max_delay_us - static_cast<int>(age_us));
+                const int remaining_ms = std::max<int>(1, (remaining_us + 999) / 1000);
                 timeout_ms = std::min(timeout_ms, remaining_ms);
             }
         }

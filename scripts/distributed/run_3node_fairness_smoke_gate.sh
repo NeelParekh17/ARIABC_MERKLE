@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RUNNER="$SCRIPT_DIR/run_single_machine_matrix_all_nodes.sh"
 
-NODES_CSV="neel@10.129.148.248,neel@10.129.148.248,neel@10.129.27.54"
+NODES_CSV="neel@10.129.148.248,neel@10.129.148.248,neel@10.129.148.246"
 SSH_KEY="/home/neel/.ssh/id_rsa"
 SSH_PORT=22
 REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"

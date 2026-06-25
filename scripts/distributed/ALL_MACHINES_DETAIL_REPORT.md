@@ -15,7 +15,7 @@ history, but they are **not** the current benchmark procedure in this checkout.
 |---|---|---|---|
 | ASUS Laptop | local | Ubuntu 24.04.4 LTS | Controller, local build source, optional single-node participant |
 | neel-MS-7C96 | 10.129.148.236 | Ubuntu 24.04.3 LTS | Raft node 1, Kafka host |
-| kartik-MS-7C96 | 10.129.27.54 | Ubuntu 22.04.2 LTS | Raft node 2, on-host rebuild |
+| kartik-MS-7C96 | 10.129.148.246 | Ubuntu 22.04.2 LTS | Raft node 2, on-host rebuild |
 | anant-side | 10.129.148.179 | Ubuntu 22.04.5 LTS | Raft node 3, on-host rebuild |
 | utkarsh-MS-7C96 | 10.129.148.248 | Ubuntu 24.04.3 LTS | Raft node 4 |
 
@@ -115,7 +115,7 @@ env POLL_COUNT=120000 ./scripts/distributed/run_4node_raft_cluster.sh \
 | Raft ID | Host | Client Port | Raft Port | Build source |
 |---:|---|---:|---:|---|
 | 1 | `10.129.148.236` | 8000 | 9000 | synced local U24 build |
-| 2 | `10.129.27.54` | 8000 | 9000 | U22 on-host build |
+| 2 | `10.129.148.246` | 8000 | 9000 | U22 on-host build |
 | 3 | `10.129.148.179` | 8000 | 9000 | U22 on-host build |
 | 4 | `10.129.148.248` | 8001 | 9000 | synced local U24 build |
 

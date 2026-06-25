@@ -32,7 +32,7 @@ TEMPLATE_CONF="/work/ARIABC/pgdata/postgresql.conf"
 
 NEEL_NODES=(
   "neel@10.129.148.236"
-  "neel@10.129.27.54"
+  "neel@10.129.148.246"
   "neel@10.129.148.248"
 )
 

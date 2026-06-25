@@ -9,7 +9,7 @@
 | Node | Name | IP Address | Status | OS | CPU | RAM (Total/Avail) | Root Storage (Avail/Use%) | Disk Read MB/s | Disk Write MB/s | Disk Util % | Await | PostgreSQL | AriaBC Server |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **Node 1** | admin123 | `10.129.148.236` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 7.13 GB (52.5% used) | 424G / 468G (5%) | 0.00 | 0.25 | 0.90% | 0.33 ms | 🟢 Running | 🔴 Stopped |
-| **Node 2** | user4 | `10.129.27.54` | 🟢 Online | Ubuntu 22.04.2 LTS | 16 Cores | 15.01 GB / 1.11 GB (92.6% used) | 111G / 183G (37%) | 0.02 | 0.11 | 0.40% | 0.83 ms | 🟢 Running | 🔴 Stopped |
+| **Node 2** | user4 | `10.129.148.246` | 🟢 Online | Ubuntu 22.04.2 LTS | 16 Cores | 15.01 GB / 1.11 GB (92.6% used) | 111G / 183G (37%) | 0.02 | 0.11 | 0.40% | 0.83 ms | 🟢 Running | 🔴 Stopped |
 | **Node 4** | utkarsh | `10.129.148.248` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 2.47 GB (83.6% used) | 129G / 404G (67%) | 0.00 | 0.01 | 0.00% | 0.00 ms | 🟢 Running | 🔴 Stopped |
 
 ## 🌐 Network Latency Matrix (RTT)
@@ -68,7 +68,7 @@ tmpfs          tmpfs     1.6G   80K  1.6G   1% /run/user/1003
 - **PostgreSQL DB Server (Port `5438`):** 🟢 Running (Accepting connections)
 - **AriaBC Raft Client Server (Port `8000`):** 🔴 Stopped
 
-### 🖥️ Node 2: user4 (`10.129.27.54`)
+### 🖥️ Node 2: user4 (`10.129.148.246`)
 
 #### ⚙️ System Specifications
 - **Host/FQDN:** `user4-MS-7C96`
@@ -76,7 +76,7 @@ tmpfs          tmpfs     1.6G   80K  1.6G   1% /run/user/1003
 - **Kernel Version:** `6.8.0-101-generic`
 - **CPU Model:** `AMD Ryzen 7 5700G with Radeon Graphics`
 - **CPU Logical Cores (Threads):** `16`
-- **IPv4 Addresses:** `10.129.27.54 172.19.0.1 172.21.0.1 172.17.0.1 172.18.0.1`
+- **IPv4 Addresses:** `10.129.148.246 172.19.0.1 172.21.0.1 172.17.0.1 172.18.0.1`
 
 #### 🧠 Memory (RAM) Allocation
 - **Total RAM:** 15.01 GB

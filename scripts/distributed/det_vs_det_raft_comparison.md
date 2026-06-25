@@ -28,5 +28,5 @@ The strict `Det-Aria+Raft` run completed its launcher flow, but all 6 benchmark 
 
 ## Notes
 
-- The gateway-side tunnel setup was forced because `10.129.27.54` and `10.129.148.248` require local-forwarded client ports in this lab topology.
-- The runbook remains updated to use `10.129.27.54` as Raft voter and `10.129.148.236` as the gateway.
+- The gateway-side tunnel setup was forced because `10.129.148.246` and `10.129.148.248` require local-forwarded client ports in this lab topology.
+- The runbook remains updated to use `10.129.148.246` as Raft voter and `10.129.148.236` as the gateway.

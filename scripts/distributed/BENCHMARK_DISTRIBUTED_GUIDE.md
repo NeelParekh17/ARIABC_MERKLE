@@ -24,7 +24,7 @@ Each profile runs 102 test cases (17 thread counts × 2 workloads × 3 repetitio
 ```
 Node 1:  10.129.148.236          (user: neel)       — Ubuntu 24.04, BCDB postgres port 5438
 Node 2:  10.129.148.248          (user: neel)       — Ubuntu 24.04, BCDB postgres port 5439
-Node 3:  10.129.27.54  (user: neel)  — Ubuntu 24.04, BCDB postgres port 5440
+Node 3:  10.129.148.246  (user: neel)  — Ubuntu 24.04, BCDB postgres port 5440
 
 Gateway: 10.129.148.236          (user: neel)       — also runs Kafka (port 9092) + ariabc_pg_gateway
 ```
@@ -46,7 +46,7 @@ All 3 Raft nodes are on **physically distinct machines**, and the gateway (240) 
 - SSH key authentication must work from the control machine to all three nodes:
   - `neel@10.129.148.236`
   - `neel@10.129.148.248`
-  - `neel@10.129.27.54`
+  - `neel@10.129.148.246`
 
 ---
 
@@ -74,7 +74,7 @@ From the control machine, passwordless SSH must work to all nodes:
 SSH_KEY=/home/neel/.ssh/id_rsa
 ssh -i $SSH_KEY neel@10.129.148.236 'echo ok'
 ssh -i $SSH_KEY neel@10.129.148.248 'echo ok'
-ssh -i $SSH_KEY neel@10.129.27.54 'echo ok'
+ssh -i $SSH_KEY neel@10.129.148.246 'echo ok'
 ```
 
 ### 2. Bootstrapping nodes (binaries + scripts)
@@ -104,7 +104,7 @@ Or to manually sync after rebuilding:
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
 
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.27.54"; do
+for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
   # Sync install dir (bin + lib + share + include — all required for initdb)
   rsync -az -e "ssh -i $SSH_KEY" /work/ARIABC/install/ "${NODE}:~/Desktop/ariabc_install/"
 
@@ -129,7 +129,7 @@ Verify on each node:
 
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.27.54"; do
+for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE \
     'LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib /home/neel/Desktop/ariabc_install/bin/postgres --version'
 done
@@ -154,7 +154,7 @@ Python 3.8+ and `psycopg2` must be available on every node.
 
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.27.54"; do
+for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE 'python3 -c "import psycopg2; print(psycopg2.__version__)"'
 done
 ```
@@ -170,7 +170,7 @@ ssh -i ~/.ssh/id_rsa neel@10.129.148.248 '
 '
 
 # If pip itself is missing:
-ssh -i ~/.ssh/id_rsa neel@10.129.27.54 '
+ssh -i ~/.ssh/id_rsa neel@10.129.148.246 '
   cd ~/Desktop
   curl -sS https://bootstrap.pypa.io/get-pip.py -o get-pip.py
   python3 get-pip.py --user --quiet --break-system-packages
@@ -204,7 +204,7 @@ Kafka requires Java. On 236, Java is at the system PATH (`/usr/bin/java`). The `
 The env var `ARIABC_SSH_USER_MAP` tells the benchmark python script which SSH user to use for each non-default host:
 
 ```bash
-export ARIABC_SSH_USER_MAP="10.129.27.54=neel"
+export ARIABC_SSH_USER_MAP="10.129.148.246=neel"
 ```
 
 This is set automatically by `run_overhead_distributed_4node.sh`.
@@ -249,7 +249,7 @@ To run a single profile manually for debugging:
 ```bash
 cd /work/ARIABC/AriaBC
 
-export ARIABC_SSH_USER_MAP="10.129.27.54=neel"
+export ARIABC_SSH_USER_MAP="10.129.148.246=neel"
 export PROFILE_COMPARISON_PROFILE="vanilla-pg"
 export PROFILE_NO_KAFKA=1
 export PROFILE_KAFKA_HOME=""
@@ -269,9 +269,9 @@ export PROFILE_DET_WINDOW=16
 export PROFILE_SKIP_SMOKE=1
 
 ./scripts/distributed/preflight_then_run_full.sh \
-  --pg-hosts "10.129.148.236,10.129.148.248,10.129.27.54" \
+  --pg-hosts "10.129.148.236,10.129.148.248,10.129.148.246" \
   --pg-users "neel,neel,neel" \
-  --raft-hosts "10.129.148.236,10.129.148.248,10.129.27.54" \
+  --raft-hosts "10.129.148.236,10.129.148.248,10.129.148.246" \
   --raft-users "neel,neel,neel" \
   --gateway-host "10.129.148.236" \
   --gateway-user "neel" \
@@ -378,7 +378,7 @@ Top-level orchestrator for the 3-distinct-machine topology. Runs all 4 profiles 
 
 **Topology section:**
 ```bash
-PG_HOSTS="10.129.148.236,10.129.148.248,10.129.27.54"
+PG_HOSTS="10.129.148.236,10.129.148.248,10.129.148.246"
 PG_USERS="neel,neel,neel"
 GW_HOST="10.129.148.236"
 GW_USER="neel"
@@ -387,7 +387,7 @@ REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"
 REMOTE_INSTALL_DIR="/home/neel/Desktop/ariabc_install"
 KAFKA_HOME="/home/neel/Desktop/kafka_2.13-3.7.0"
 KAFKA_BOOTSTRAP="10.129.148.236:9092"
-export ARIABC_SSH_USER_MAP="10.129.27.54=neel"
+export ARIABC_SSH_USER_MAP="10.129.148.246=neel"
 ```
 
 **`bootstrap_nodes()` function:**
@@ -544,12 +544,12 @@ The innermost benchmark runner. SSHes to the gateway and runs `bench_nuraft_kafk
 ```bash
 ssh neel@10.129.148.236 "
   cd ~/Desktop/ariabc_cluster
-  export ARIABC_SSH_USER_MAP='10.129.27.54=neel'
+  export ARIABC_SSH_USER_MAP='10.129.148.246=neel'
   python3 scripts/bench_nuraft_kafka_matrix.py \
     --distributed \
     --nodes 3 \
-    --pg-hosts 10.129.148.236:5438,10.129.148.248:5439,10.129.27.54:5440 \
-    --raft-hosts 10.129.148.236:5430,10.129.148.248:5431,10.129.27.54:5432 \
+    --pg-hosts 10.129.148.236:5438,10.129.148.248:5439,10.129.148.246:5440 \
+    --raft-hosts 10.129.148.236:5430,10.129.148.248:5431,10.129.148.246:5432 \
     --gateway-host 10.129.148.236 \
     --remote-repo-root /home/neel/Desktop/ariabc_cluster \
     --installDir /home/neel/Desktop/ariabc_install \
@@ -694,7 +694,7 @@ SSH_KEY=/home/neel/.ssh/id_rsa
 rsync -az -e "ssh -i $SSH_KEY" \
   /work/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_server \
   /work/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_gateway \
-  "neel@10.129.27.54:~/Desktop/ariabc_cluster/ariabc_pg/build/bin/"
+  "neel@10.129.148.246:~/Desktop/ariabc_cluster/ariabc_pg/build/bin/"
 ```
 
 ### `initdb` fails: `"file postgres.bki does not exist"`
@@ -731,7 +731,7 @@ ssh -i ~/.ssh/id_rsa neel@10.129.148.248 \
 
 For Ubuntu 22.04 nodes (may need pip installed first):
 ```bash
-ssh -i ~/.ssh/id_rsa neel@10.129.27.54 '
+ssh -i ~/.ssh/id_rsa neel@10.129.148.246 '
   cd ~/Desktop
   curl -sS https://bootstrap.pypa.io/get-pip.py -o get-pip.py
   python3 get-pip.py --user --quiet --break-system-packages
@@ -785,7 +785,7 @@ cp /home/neel/Desktop/rdkafka_extract/usr/lib/x86_64-linux-gnu/librdkafka.so.1 /
 SSH_KEY=/home/neel/.ssh/id_rsa
 ssh -i $SSH_KEY neel@10.129.148.236 'pkill -f postgres || true; sleep 2'
 ssh -i $SSH_KEY neel@10.129.148.248 'pkill -f postgres || true; sleep 2'
-ssh -i $SSH_KEY neel@10.129.27.54 'pkill -f postgres || true; sleep 2'
+ssh -i $SSH_KEY neel@10.129.148.246 'pkill -f postgres || true; sleep 2'
 ```
 
 ### Profile reports 0 valid runs or `divergence_count > 0`
@@ -810,7 +810,7 @@ ssh -i $SSH_KEY neel@10.129.148.236 \
   'pgrep -a -f "ariabc_pg_server|ariabc_pg_gateway|bench_nuraft" || echo none'
 ssh -i $SSH_KEY neel@10.129.148.248 \
   'pgrep -a -f "ariabc_pg_server|ariabc_pg_gateway|bench_nuraft" || echo none'
-ssh -i $SSH_KEY neel@10.129.27.54 \
+ssh -i $SSH_KEY neel@10.129.148.246 \
   'pgrep -a -f "ariabc_pg_server|bench_nuraft" || echo none'
 
 # On control machine
@@ -826,7 +826,7 @@ ssh -i $SSH_KEY neel@10.129.148.236 \
   'pkill -f "ariabc_pg_server|ariabc_pg_gateway|bench_nuraft" || true; pkill -f postgres || true'
 ssh -i $SSH_KEY neel@10.129.148.248 \
   'pkill -f "ariabc_pg_server|ariabc_pg_gateway|bench_nuraft" || true; pkill -f postgres || true'
-ssh -i $SSH_KEY neel@10.129.27.54 \
+ssh -i $SSH_KEY neel@10.129.148.246 \
   'pkill -f "ariabc_pg_server|bench_nuraft" || true; pkill -f postgres || true'
 
 # On control machine
@@ -847,9 +847,9 @@ cd /work/ARIABC/AriaBC && ./scripts/distributed/run_overhead_distributed_4node.s
 ```bash
 cd /work/ARIABC/AriaBC
 ./scripts/distributed/preflight_cluster_checks.sh \
-  --pg-hosts "10.129.148.236,10.129.148.248,10.129.27.54" \
+  --pg-hosts "10.129.148.236,10.129.148.248,10.129.148.246" \
   --pg-users "neel,neel,neel" \
-  --raft-hosts "10.129.148.236,10.129.148.248,10.129.27.54" \
+  --raft-hosts "10.129.148.236,10.129.148.248,10.129.148.246" \
   --raft-users "neel,neel,neel" \
   --gateway-host "10.129.148.236" --gateway-user "neel" \
   --ssh-key "/home/neel/.ssh/id_rsa" \
@@ -866,28 +866,28 @@ SSH_KEY=/home/neel/.ssh/id_rsa
 # SSH reachability
 ssh -i $SSH_KEY neel@10.129.148.236 'echo ok'
 ssh -i $SSH_KEY neel@10.129.148.248 'echo ok'
-ssh -i $SSH_KEY neel@10.129.27.54 'echo ok'
+ssh -i $SSH_KEY neel@10.129.148.246 'echo ok'
 
 # Postgres version (needs LD_LIBRARY_PATH)
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.27.54"; do
+for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE \
     'LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib /home/neel/Desktop/ariabc_install/bin/postgres --version'
 done
 
 # Both binaries present on each node
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.27.54"; do
+for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE \
     'ls /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/{ariabc_pg_server,ariabc_pg_gateway} && echo binaries: OK'
 done
 
 # --bypassRaft supported
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.27.54"; do
+for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE \
     'LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server --help 2>&1 | grep bypassRaft'
 done
 
 # psycopg2 present
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.27.54"; do
+for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE 'python3 -c "import psycopg2; print(psycopg2.__version__)"'
 done
 
