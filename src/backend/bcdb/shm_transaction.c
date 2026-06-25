@@ -179,6 +179,45 @@ bcdb_flow_debug_enabled(void)
     return cached == 1;
 }
 
+static bool
+bcdb_ws_rotation_profile_enabled(void)
+{
+	static int enabled = -1;
+
+	if (enabled < 0)
+	{
+		const char *v = getenv("BCDB_BLOCK_PROFILE");
+
+		enabled = (v != NULL && v[0] != '\0' &&
+				   strcmp(v, "0") != 0 &&
+				   strcmp(v, "false") != 0 &&
+				   strcmp(v, "FALSE") != 0 &&
+				   strcmp(v, "no") != 0 &&
+				   strcmp(v, "NO") != 0);
+	}
+	return enabled != 0;
+}
+
+static uint64 bcdb_ws_rotation_count = 0;
+static uint64 bcdb_ws_rotation_lock_acquire_us = 0;
+static uint64 bcdb_ws_rotation_clear_us = 0;
+static uint64 bcdb_ws_rotation_total_us = 0;
+static uint64 bcdb_ws_rotation_max_us = 0;
+static uint64 bcdb_ws_rotation_stalled_publish_count = 0;
+
+static void
+bcdb_ws_rotation_note(uint64 lock_us, uint64 clear_us, uint64 total_us)
+{
+	bcdb_ws_rotation_count++;
+	bcdb_ws_rotation_lock_acquire_us += lock_us;
+	bcdb_ws_rotation_clear_us += clear_us;
+	bcdb_ws_rotation_total_us += total_us;
+	if (total_us > bcdb_ws_rotation_max_us)
+		bcdb_ws_rotation_max_us = total_us;
+	if (total_us > 1000)
+		bcdb_ws_rotation_stalled_publish_count++;
+}
+
 static BCTxID bcdb_last_conflict_txid = -1;
 
 void bcdb_reset_last_conflict_txid(void)
@@ -392,13 +431,28 @@ WSTableUnlockAllPartitions(WSTable *table)
  * later readers cannot skip/scan based on stale state.
  */
 static void
-WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b)
+WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b,
+				  uint64 *lock_acquire_us, uint64 *clear_us)
 {
-    WSTableLockAllPartitions(table);
-    shm_hash_clear(map, MAX_WRITE_CONFLICT);
-    if (clears_map_b)
-        pg_atomic_write_u32(&table->mapB_nonempty, 0);
-    WSTableUnlockAllPartitions(table);
+	uint64 lock_start;
+	uint64 clear_start;
+
+	if (lock_acquire_us != NULL)
+		*lock_acquire_us = 0;
+	if (clear_us != NULL)
+		*clear_us = 0;
+
+	lock_start = bcdb_get_time();
+	WSTableLockAllPartitions(table);
+	if (lock_acquire_us != NULL)
+		*lock_acquire_us = bcdb_get_time() - lock_start;
+	clear_start = bcdb_get_time();
+	shm_hash_clear(map, MAX_WRITE_CONFLICT);
+	if (clears_map_b)
+		pg_atomic_write_u32(&table->mapB_nonempty, 0);
+	if (clear_us != NULL)
+		*clear_us = bcdb_get_time() - clear_start;
+	WSTableUnlockAllPartitions(table);
 }
 
 /*
@@ -2627,11 +2681,29 @@ void publish_ws_tableDT(int id)
         ws_table->mapActive = ws_table->map;
         if (id % threshold == 0)
         {
-            uint64 hash_clear_start = bcdb_ptrace_timer_start();
-            WSTableClearShard(ws_table, ws_table->map, false);
-            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
-                                   hash_clear_start);
-            bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
+			uint64 hash_clear_start = bcdb_ptrace_timer_start();
+			uint64 profile_clear_start = bcdb_get_time();
+			uint64 lock_acquire_us = 0;
+			uint64 clear_us = 0;
+			WSTableClearShard(ws_table, ws_table->map, false,
+							  &lock_acquire_us, &clear_us);
+			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
+								   hash_clear_start);
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
+			if (bcdb_ws_rotation_profile_enabled())
+			{
+				uint64 total_us = bcdb_get_time() - profile_clear_start;
+				bcdb_ws_rotation_note(lock_acquire_us, clear_us, total_us);
+				ereport(LOG,
+						(errmsg("PROFILE_BCDB_WS_ROTATION pid=%d tx_id=%d shard=map rotation_count=%llu ws_rotation_lock_acquire_us=%llu ws_rotation_clear_us=%llu ws_rotation_total_us=%llu ws_rotation_max_us=%llu ws_rotation_stalled_publish_count=%llu",
+								MyProcPid, id,
+								(unsigned long long) bcdb_ws_rotation_count,
+								(unsigned long long) lock_acquire_us,
+								(unsigned long long) clear_us,
+								(unsigned long long) total_us,
+								(unsigned long long) bcdb_ws_rotation_max_us,
+								(unsigned long long) bcdb_ws_rotation_stalled_publish_count)));
+			}
             // shm_hash_clear(rs_table->map, MAX_WRITE_CONFLICT);
         }
     }
@@ -2641,11 +2713,29 @@ void publish_ws_tableDT(int id)
         using_map_b = true;
         if (id % threshold == 0)
         {
-            uint64 hash_clear_start = bcdb_ptrace_timer_start();
-            WSTableClearShard(ws_table, ws_table->mapB, true);
-            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
-                                   hash_clear_start);
-            bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
+			uint64 hash_clear_start = bcdb_ptrace_timer_start();
+			uint64 profile_clear_start = bcdb_get_time();
+			uint64 lock_acquire_us = 0;
+			uint64 clear_us = 0;
+			WSTableClearShard(ws_table, ws_table->mapB, true,
+							  &lock_acquire_us, &clear_us);
+			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
+								   hash_clear_start);
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
+			if (bcdb_ws_rotation_profile_enabled())
+			{
+				uint64 total_us = bcdb_get_time() - profile_clear_start;
+				bcdb_ws_rotation_note(lock_acquire_us, clear_us, total_us);
+				ereport(LOG,
+						(errmsg("PROFILE_BCDB_WS_ROTATION pid=%d tx_id=%d shard=mapB rotation_count=%llu ws_rotation_lock_acquire_us=%llu ws_rotation_clear_us=%llu ws_rotation_total_us=%llu ws_rotation_max_us=%llu ws_rotation_stalled_publish_count=%llu",
+								MyProcPid, id,
+								(unsigned long long) bcdb_ws_rotation_count,
+								(unsigned long long) lock_acquire_us,
+								(unsigned long long) clear_us,
+								(unsigned long long) total_us,
+								(unsigned long long) bcdb_ws_rotation_max_us,
+								(unsigned long long) bcdb_ws_rotation_stalled_publish_count)));
+			}
             // shm_hash_clear(rs_table->mapB, MAX_WRITE_CONFLICT);
         }
     } // clean_rs_ws_table(id); // reset before HASH_ENTER get-write-set !!!

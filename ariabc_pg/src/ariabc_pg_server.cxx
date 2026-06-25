@@ -62,12 +62,35 @@ struct server_profile_stats {
     std::atomic<uint64_t> append_not_accepted_busy{0};
     std::atomic<uint64_t> append_stall_calls{0};
     std::atomic<uint64_t> append_stall_ns{0};
+    std::atomic<uint64_t> append_stall_max_ns{0};
+    std::atomic<uint64_t> append_stall_admission{0};
+    std::atomic<uint64_t> append_stall_queue_depth_sum{0};
+    std::atomic<uint64_t> append_stall_queue_depth_max{0};
 };
 
 server_profile_stats g_prof;
 std::atomic<bool> g_stop{false};
 int g_listen_fd = -1;
 std::atomic<uint64_t> g_debug_server_trace_count{0};
+
+void atomic_max_u64(std::atomic<uint64_t>& target, uint64_t value) {
+    uint64_t cur = target.load(std::memory_order_relaxed);
+    while (value > cur &&
+           !target.compare_exchange_weak(cur,
+                                         value,
+                                         std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+void note_append_stall(uint64_t stall_ns, uint64_t queue_depth) {
+    g_prof.append_stall_calls.fetch_add(1, std::memory_order_relaxed);
+    g_prof.append_stall_ns.fetch_add(stall_ns, std::memory_order_relaxed);
+    g_prof.append_stall_admission.fetch_add(1, std::memory_order_relaxed);
+    g_prof.append_stall_queue_depth_sum.fetch_add(queue_depth, std::memory_order_relaxed);
+    atomic_max_u64(g_prof.append_stall_max_ns, stall_ns);
+    atomic_max_u64(g_prof.append_stall_queue_depth_max, queue_depth);
+}
 
 void on_term(int /*signum*/) {
     g_stop.store(true);
@@ -447,11 +470,11 @@ void wait_for_admission_drain(pg_state_machine* psm) {
     }
     if (stalled) {
         const auto s1 = std::chrono::steady_clock::now();
-        g_prof.append_stall_calls.fetch_add(1, std::memory_order_relaxed);
-        g_prof.append_stall_ns.fetch_add(
+        const pg_executor_stats exec = psm->executor_stats();
+        note_append_stall(
             static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
-            std::memory_order_relaxed);
+            exec.queue_depth_cur);
     }
 }
 
@@ -956,11 +979,11 @@ void handle_client_fd_direct(int fd,
             }
             if (stalled) {
                 const auto s1 = std::chrono::steady_clock::now();
-                g_prof.append_stall_calls.fetch_add(1, std::memory_order_relaxed);
-                g_prof.append_stall_ns.fetch_add(
+                const pg_executor_stats exec = psm->executor_stats();
+                note_append_stall(
                     static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
-                    std::memory_order_relaxed);
+                    exec.queue_depth_cur);
             }
         }
 
@@ -1022,6 +1045,14 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " append_not_accepted_busy=" << g_prof.append_not_accepted_busy.load(std::memory_order_relaxed)
         << " append_stall_calls=" << g_prof.append_stall_calls.load(std::memory_order_relaxed)
         << " append_stall_ms=" << (g_prof.append_stall_ns.load(std::memory_order_relaxed) / 1000000.0)
+        << " append_stall_max_ms=" << (g_prof.append_stall_max_ns.load(std::memory_order_relaxed) / 1000000.0)
+        << " append_stall_reason_admission=" << g_prof.append_stall_admission.load(std::memory_order_relaxed)
+        << " append_stall_queue_depth_avg="
+        << ((g_prof.append_stall_calls.load(std::memory_order_relaxed) > 0)
+                ? (static_cast<double>(g_prof.append_stall_queue_depth_sum.load(std::memory_order_relaxed)) /
+                   static_cast<double>(g_prof.append_stall_calls.load(std::memory_order_relaxed)))
+                : 0.0)
+        << " append_stall_queue_depth_max=" << g_prof.append_stall_queue_depth_max.load(std::memory_order_relaxed)
         << " raft_leader=" << (raft ? raft->get_leader() : -1)
         << " exec_calls=" << exec.exec_calls
         << " exec_ms=" << (exec.exec_ns / 1000000.0)
@@ -1089,11 +1120,38 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " conn_wait_ms=" << (exec.conn_acquire_wait_ns / 1000000.0)
         << " kafka_flush_calls=" << exec.kafka_flush_calls
         << " kafka_payload_kb=" << (exec.kafka_payload_bytes / 1024.0)
+        << " kafka_batch_records=" << exec.kafka_batch_records
+        << " kafka_batch_records_avg="
+        << ((exec.kafka_flush_calls > 0)
+                ? (static_cast<double>(exec.kafka_batch_records) /
+                   static_cast<double>(exec.kafka_flush_calls))
+                : 0.0)
+        << " kafka_batch_records_max=" << exec.kafka_batch_records_max
+        << " kafka_batch_dwell_ms_avg="
+        << ((exec.kafka_batch_records > 0)
+                ? ((exec.kafka_batch_dwell_ns / 1000000.0) /
+                   static_cast<double>(exec.kafka_batch_records))
+                : 0.0)
+        << " kafka_batch_dwell_ms_max=" << (exec.kafka_batch_dwell_max_ns / 1000000.0)
+        << " kafka_flush_reason_records=" << exec.kafka_flush_reason_records
+        << " kafka_flush_reason_bytes=" << exec.kafka_flush_reason_bytes
+        << " kafka_flush_reason_age=" << exec.kafka_flush_reason_age
+        << " kafka_flush_reason_idle=" << exec.kafka_flush_reason_idle
+        << " kafka_flush_reason_final=" << exec.kafka_flush_reason_final
         << " kafka_build_ms=" << (exec.kafka_build_payload_ns / 1000000.0)
         << " kafka_send_ms=" << (exec.kafka_send_ns / 1000000.0)
         << " kafka_send_calls=" << kprod.send_calls
         << " kafka_send_ok=" << kprod.send_ok
         << " kafka_producev_ms=" << (kprod.producev_ns / 1000000.0)
+        << " kafka_delivery_calls=" << kprod.delivery_calls
+        << " kafka_delivery_errors=" << kprod.delivery_errors
+        << " kafka_delivery_ms=" << (kprod.delivery_ns / 1000000.0)
+        << " kafka_delivery_ms_avg="
+        << ((kprod.delivery_calls > 0)
+                ? ((kprod.delivery_ns / 1000000.0) /
+                   static_cast<double>(kprod.delivery_calls))
+                : 0.0)
+        << " kafka_delivery_ms_max=" << (kprod.delivery_max_ns / 1000000.0)
         << " kafka_poll_ms=" << (kprod.poll_ns / 1000000.0)
         << " kafka_backoff_ms=" << (kprod.backoff_sleep_ns / 1000000.0)
         << " kafka_flush_ms=" << (kprod.flush_ns / 1000000.0)

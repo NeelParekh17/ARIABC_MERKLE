@@ -114,7 +114,7 @@ SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
 ORDERING_MODE="${ORDERING_MODE:-${CLUSTER_ORDERING_MODE:-raft-kafka}}" # raft-kafka|kafka-only
-KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority}" # majority|async
+KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority}" # majority|async|majority-async-all3
 TEST_QUERIES="${TEST_QUERIES:-50}"  # number of test transactions
 WORKLOAD_FILE="${WORKLOAD_FILE:-$REPO_ROOT/scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt}"
 RESTORE_SQL="${RESTORE_SQL:-$REPO_ROOT/scripts/restore_usertable_small.sql}"
@@ -215,7 +215,9 @@ Options:
                                   to all replicas using selected Kafka completion
   --kafka-completion-mode M
                   Kafka completion/validation mode:
-                    majority = wait per-request Kafka majority before completion
+                    majority = strict all-3 audit-grade completion
+                    majority-async-all3 = client completes at Kafka majority,
+                               then drains all-3 audit before marker/Merkle
                     async    = direct completion plus async Kafka hash validation;
                                post-marker Merkle verification still checks all replicas
   --test-queries N Number of statements in the synthetic fallback workload (only used if --workload FILE is missing; default 50)
@@ -491,11 +493,14 @@ case "$KAFKA_COMPLETION_MODE" in
   majority|kafka-majority|kafka_majority|strict-majority|strict_majority)
     KAFKA_COMPLETION_MODE="majority"
     ;;
+  majority-async-all3|majority_async_all3|async-all3|async_all3|quorum)
+    KAFKA_COMPLETION_MODE="majority_async_all3"
+    ;;
   async|async-hash|async_hash|direct)
     KAFKA_COMPLETION_MODE="async"
     ;;
   *)
-    echo "ERROR: --kafka-completion-mode must be majority or async (got $KAFKA_COMPLETION_MODE)" >&2
+    echo "ERROR: --kafka-completion-mode must be majority, majority-async-all3, or async (got $KAFKA_COMPLETION_MODE)" >&2
     exit 2
     ;;
 esac
@@ -2041,6 +2046,8 @@ GW_EXTRA_ARGS=""
 if [[ "$NO_KAFKA" -eq 0 ]]; then
   if [[ "$KAFKA_COMPLETION_MODE" == "majority" ]]; then
     GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --validationMode strict_majority --totalNodes ${#NODE_IDS[@]}"
+  elif [[ "$KAFKA_COMPLETION_MODE" == "majority_async_all3" ]]; then
+    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --validationMode majority_async_all3 --totalNodes ${#NODE_IDS[@]}"
   else
     GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 0 --completionPath direct --validationMode async_hash --totalNodes ${#NODE_IDS[@]} --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
   fi

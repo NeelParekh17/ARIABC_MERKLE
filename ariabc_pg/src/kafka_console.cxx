@@ -4,12 +4,37 @@
 #include <librdkafka/rdkafka.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <string.h>
 #include <thread>
 #include <vector>
 
 namespace ariabc_pg {
 namespace {
+
+uint64_t steady_now_ns() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void update_max_u64(uint64_t& target, uint64_t value) {
+    if (value > target) target = value;
+}
+
+struct delivery_opaque {
+    kafka_console_producer* producer;
+    uint64_t enqueue_ns;
+};
+
+void producer_delivery_cb(rd_kafka_t*, const rd_kafka_message_t* msg, void*) {
+    delivery_opaque* d = msg ? static_cast<delivery_opaque*>(msg->_private) : nullptr;
+    if (!d) return;
+    const uint64_t now_ns = steady_now_ns();
+    const uint64_t delta_ns = (now_ns >= d->enqueue_ns) ? (now_ns - d->enqueue_ns) : 0;
+    d->producer->note_delivery(delta_ns, msg && msg->err);
+    delete d;
+}
 
 std::string rd_errstr(rd_kafka_resp_err_t e) {
     const char* s = rd_kafka_err2str(e);
@@ -179,6 +204,7 @@ bool kafka_console_producer::start(const std::string& bootstrap,
     }
 
     rd_kafka_conf_t* conf = rd_kafka_conf_new();
+    rd_kafka_conf_set_dr_msg_cb(conf, producer_delivery_cb);
     if (!conf_set(conf, "bootstrap.servers", bootstrap, err)) {
         rd_kafka_conf_destroy(conf);
         return false;
@@ -235,6 +261,9 @@ bool kafka_console_producer::send_payload(const std::string& payload,
     stats_.payload_bytes += static_cast<uint64_t>(payload.size());
 
     for (int attempt = 0; attempt < 6; ++attempt) {
+        delivery_opaque* opaque = new delivery_opaque;
+        opaque->producer = this;
+        opaque->enqueue_ns = steady_now_ns();
         const auto p0 = std::chrono::steady_clock::now();
         const rd_kafka_resp_err_t e = rd_kafka_producev(
             rk,
@@ -243,6 +272,7 @@ bool kafka_console_producer::send_payload(const std::string& payload,
             RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
             RD_KAFKA_V_KEY(key.empty() ? nullptr : key.data(), key.size()),
             RD_KAFKA_V_VALUE(const_cast<char*>(payload.data()), payload.size()),
+            RD_KAFKA_V_OPAQUE(opaque),
             RD_KAFKA_V_END);
         const auto p1 = std::chrono::steady_clock::now();
         stats_.producev_ns += static_cast<uint64_t>(
@@ -253,6 +283,7 @@ bool kafka_console_producer::send_payload(const std::string& payload,
             return true;
         }
 
+        delete opaque;
         if (e == RD_KAFKA_RESP_ERR__QUEUE_FULL) {
             ++stats_.queue_full_retries;
             const auto q0 = std::chrono::steady_clock::now();
@@ -269,6 +300,13 @@ bool kafka_console_producer::send_payload(const std::string& payload,
 
     err = "rd_kafka_producev failed: queue full";
     return false;
+}
+
+void kafka_console_producer::note_delivery(uint64_t delivery_ns, bool error) {
+    ++stats_.delivery_calls;
+    if (error) ++stats_.delivery_errors;
+    stats_.delivery_ns += delivery_ns;
+    update_max_u64(stats_.delivery_max_ns, delivery_ns);
 }
 
 kafka_producer_stats kafka_console_producer::stats() const {
@@ -513,6 +551,7 @@ bool kafka_console_producer::send_payload(const std::string&, const std::string&
     err = "Kafka disabled";
     return false;
 }
+void kafka_console_producer::note_delivery(uint64_t, bool) {}
 kafka_producer_stats kafka_console_producer::stats() const { return stats_; }
 void kafka_console_producer::stop() {}
 
