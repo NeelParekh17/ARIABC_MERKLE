@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -81,6 +82,9 @@ struct pg_executor_stats {
     uint64_t det_block_skipped_readonly = 0;
     uint64_t ready_det_results_max = 0;
     uint64_t ordered_emit_wait_ns = 0;
+    uint64_t kafka_immediate_records = 0;
+    uint64_t ordered_apply_wait_ns = 0;
+    uint64_t ordered_apply_pending_max = 0;
     int det_raw_compat_mode = 0;
     int det_prefixed_direct_parallel = 0;
     int det_completion_only_success = 0;
@@ -191,6 +195,7 @@ private:
     bool det_wait_for_apply_turn(uint64_t tx_seq);
     void det_finish_apply(uint64_t tx_seq);
     void notify_task_applied(uint64_t raft_log_idx);
+    void mark_task_applied_ordered(uint64_t dispatch_seq, uint64_t raft_log_idx, uint64_t ready_ns);
     void record_det_block_batch(size_t size, bool fallback);
     bool wait_for_ordered_emit_turn(uint64_t dispatch_seq);
     void finish_ordered_emit(uint64_t dispatch_seq);
@@ -325,6 +330,9 @@ private:
     std::atomic<uint64_t> st_det_block_skipped_readonly_{0};
     std::atomic<uint64_t> st_ready_det_results_max_{0};
     std::atomic<uint64_t> st_ordered_emit_wait_ns_{0};
+    std::atomic<uint64_t> st_kafka_immediate_records_{0};
+    std::atomic<uint64_t> st_ordered_apply_wait_ns_{0};
+    std::atomic<uint64_t> st_ordered_apply_pending_max_{0};
     std::atomic<uint64_t> st_det_raw_compat_activations_{0};
     std::atomic<uint64_t> st_queue_depth_cur_{0};
     std::atomic<bool> queue_overloaded_{false};
@@ -333,6 +341,9 @@ private:
     std::atomic<bool> st_det_block_seen_{false};
     std::atomic<bool> st_det_block_fallback_seen_{false};
     std::atomic<uint64_t> next_dispatch_seq_{1};
+    std::mutex det_ordered_apply_mu_;
+    uint64_t det_next_ordered_apply_seq_ = 1;
+    std::map<uint64_t, uint64_t> det_ordered_apply_ready_;
     std::mutex det_emit_mu_;
     std::condition_variable det_emit_cv_;
     uint64_t det_next_emit_seq_ = 1;

@@ -23,6 +23,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <deque>
@@ -1339,6 +1340,7 @@ private:
             e.terminal_result.clear();
             e.terminal_error = "duplicate_identity_conflict";
             enqueue_ready_locked(rec.req_num);
+            enqueue_strict_ready_locked(rec.req_num);
             std::ostringstream oss;
             const std::string req_id = rec.req_id.empty() ? first_req_id_locked(e) : rec.req_id;
             oss << "{\"type\":\"duplicate_identity_conflict\""
@@ -1416,6 +1418,7 @@ private:
             if (e.majority_hash.empty() || has_invalid_sig_locked(e)) {
                 enqueue_ready_locked(rec.req_num);
             }
+            enqueue_strict_ready_locked(rec.req_num);
         }
     }
 
@@ -1516,6 +1519,110 @@ public:
                           << describe_inflight_locked(inflight)
                           << std::endl;
                 out_error = "majority_timeout";
+                return false;
+            }
+        }
+        return out_error.empty();
+    }
+
+    bool wait_any_majority(
+        std::list<uint64_t>& inflight,
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
+        int poll_interval_us,
+        int poll_count,
+        uint64_t& out_req_num,
+        std::string& out_result,
+        std::string& out_error)
+    {
+        out_req_num = 0;
+        out_result.clear();
+        out_error.clear();
+        std::unique_lock<std::mutex> lk(mu_);
+
+        auto terminal = [&]() -> bool {
+            return pop_terminal_inflight_locked(
+                inflight, inflight_pos, out_req_num, out_result, out_error);
+        };
+
+        if (terminal()) return out_error.empty();
+        if (poll_count <= 0) {
+            while (!terminal()) {
+                const auto wait_t0 = std::chrono::steady_clock::now();
+                cv_.wait(lk);
+                const auto wait_t1 = std::chrono::steady_clock::now();
+                record_wait_sleep_locked(static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            }
+            return out_error.empty();
+        }
+
+        const long long total_us =
+            static_cast<long long>(poll_interval_us) * static_cast<long long>(poll_count);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::microseconds(std::max<long long>(1, total_us));
+        while (!terminal()) {
+            const auto wait_t0 = std::chrono::steady_clock::now();
+            const std::cv_status st = cv_.wait_until(lk, deadline);
+            const auto wait_t1 = std::chrono::steady_clock::now();
+            record_wait_sleep_locked(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            if (st == std::cv_status::timeout && !terminal()) {
+                std::cerr << "vote_store timeout inflight="
+                          << describe_inflight_locked(inflight)
+                          << std::endl;
+                out_error = "majority_timeout";
+                return false;
+            }
+        }
+        return out_error.empty();
+    }
+
+    bool wait_any_strict_terminal(
+        std::list<uint64_t>& inflight,
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
+        int poll_interval_us,
+        int poll_count,
+        uint64_t& out_req_num,
+        std::string& out_result,
+        std::string& out_error)
+    {
+        out_req_num = 0;
+        out_result.clear();
+        out_error.clear();
+        std::unique_lock<std::mutex> lk(mu_);
+
+        auto terminal = [&]() -> bool {
+            return pop_strict_terminal_inflight_locked(
+                inflight, inflight_pos, out_req_num, out_result, out_error);
+        };
+
+        if (terminal()) return out_error.empty();
+        if (poll_count <= 0) {
+            while (!terminal()) {
+                const auto wait_t0 = std::chrono::steady_clock::now();
+                cv_.wait(lk);
+                const auto wait_t1 = std::chrono::steady_clock::now();
+                record_wait_sleep_locked(static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            }
+            return out_error.empty();
+        }
+
+        const long long total_us =
+            static_cast<long long>(poll_interval_us) * static_cast<long long>(poll_count);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::microseconds(std::max<long long>(1, total_us));
+        while (!terminal()) {
+            const auto wait_t0 = std::chrono::steady_clock::now();
+            const std::cv_status st = cv_.wait_until(lk, deadline);
+            const auto wait_t1 = std::chrono::steady_clock::now();
+            record_wait_sleep_locked(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            if (st == std::cv_status::timeout && !terminal()) {
+                std::cerr << "vote_store strict timeout inflight="
+                          << describe_inflight_locked(inflight)
+                          << std::endl;
+                out_error = "all_nodes_timeout";
                 return false;
             }
         }
@@ -1675,10 +1782,17 @@ private:
     }
 
     void enqueue_ready_locked(uint64_t req_num) {
-        if (ready_seen_.insert(req_num).second) {
-            ready_queue_depth_sum_ += static_cast<uint64_t>(ready_seen_.size());
+        if (ready_members_.insert(req_num).second) {
+            ready_reqs_.push_back(req_num);
+            ready_queue_depth_sum_ += static_cast<uint64_t>(ready_members_.size());
             ++ready_queue_depth_obs_;
-            ready_queue_depth_max_ = std::max<size_t>(ready_queue_depth_max_, ready_seen_.size());
+            ready_queue_depth_max_ = std::max<size_t>(ready_queue_depth_max_, ready_members_.size());
+        }
+    }
+
+    void enqueue_strict_ready_locked(uint64_t req_num) {
+        if (strict_ready_members_.insert(req_num).second) {
+            strict_ready_reqs_.push_back(req_num);
         }
     }
 
@@ -1717,7 +1831,8 @@ private:
             req_order_.pop_front();
             seen_reqs_.erase(old_req);
             m_.erase(old_req);
-            ready_seen_.erase(old_req);
+            ready_members_.erase(old_req);
+            strict_ready_members_.erase(old_req);
         }
     }
 
@@ -1820,20 +1935,25 @@ private:
                                       std::string& out_result,
                                       std::string& out_error)
     {
-        for (auto it_req = inflight.begin(); it_req != inflight.end(); ++it_req) {
-            const uint64_t req_num = *it_req;
-            if (ready_seen_.find(req_num) != ready_seen_.end()) {
-                std::string err;
-                std::string result;
-                if (resolve_terminal_locked(req_num, result, err)) {
-                    out_req_num = req_num;
-                    out_result = std::move(result);
-                    out_error = std::move(err);
-                    inflight.erase(it_req);
-                    ready_seen_.erase(req_num);
-                    return true;
-                }
+        while (!ready_reqs_.empty()) {
+            const uint64_t req_num = ready_reqs_.front();
+            ready_reqs_.pop_front();
+            ready_members_.erase(req_num);
+
+            auto it_req = std::find(inflight.begin(), inflight.end(), req_num);
+            if (it_req == inflight.end()) continue;
+
+            std::string err;
+            std::string result;
+            if (!resolve_terminal_locked(req_num, result, err)) {
+                continue;
             }
+
+            out_req_num = req_num;
+            out_result = std::move(result);
+            out_error = std::move(err);
+            inflight.erase(it_req);
+            return true;
         }
 
         // A Kafka reply can occasionally win the race against the submitter
@@ -1852,7 +1972,89 @@ private:
             out_result = std::move(result);
             out_error = std::move(err);
             inflight.erase(it_req);
-            ready_seen_.erase(out_req_num);
+            ready_members_.erase(out_req_num);
+            return true;
+        }
+        return false;
+    }
+
+    bool pop_terminal_inflight_locked(
+        std::list<uint64_t>& inflight,
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
+        uint64_t& out_req_num,
+        std::string& out_result,
+        std::string& out_error)
+    {
+        while (!ready_reqs_.empty()) {
+            const uint64_t req_num = ready_reqs_.front();
+            ready_reqs_.pop_front();
+            ready_members_.erase(req_num);
+
+            auto it_pos = inflight_pos.find(req_num);
+            if (it_pos == inflight_pos.end()) continue;
+
+            std::string err;
+            std::string result;
+            if (!resolve_terminal_locked(req_num, result, err)) {
+                continue;
+            }
+
+            out_req_num = req_num;
+            out_result = std::move(result);
+            out_error = std::move(err);
+            inflight.erase(it_pos->second);
+            inflight_pos.erase(it_pos);
+            return true;
+        }
+        return false;
+    }
+
+    bool pop_strict_terminal_inflight_locked(
+        std::list<uint64_t>& inflight,
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
+        uint64_t& out_req_num,
+        std::string& out_result,
+        std::string& out_error)
+    {
+        while (!strict_ready_reqs_.empty()) {
+            const uint64_t req_num = strict_ready_reqs_.front();
+            strict_ready_reqs_.pop_front();
+            strict_ready_members_.erase(req_num);
+
+            auto it_pos = inflight_pos.find(req_num);
+            if (it_pos == inflight_pos.end()) continue;
+
+            auto it_entry = m_.find(req_num);
+            if (it_entry != m_.end() && it_entry->second.terminal_set) {
+                out_req_num = req_num;
+                out_result = it_entry->second.terminal_result;
+                out_error = it_entry->second.terminal_error;
+                inflight.erase(it_pos->second);
+                inflight_pos.erase(it_pos);
+                return true;
+            }
+
+            std::string err;
+            if (!resolve_all_nodes_consistent_locked(req_num, err)) {
+                continue;
+            }
+            if (!err.empty()) {
+                out_req_num = req_num;
+                out_error = std::move(err);
+                inflight.erase(it_pos->second);
+                inflight_pos.erase(it_pos);
+                return true;
+            }
+
+            std::string result;
+            if (!resolve_terminal_locked(req_num, result, err)) {
+                continue;
+            }
+            out_req_num = req_num;
+            out_result = std::move(result);
+            out_error = std::move(err);
+            inflight.erase(it_pos->second);
+            inflight_pos.erase(it_pos);
             return true;
         }
         return false;
@@ -1913,6 +2115,19 @@ private:
         return oss.str();
     }
 
+    std::string describe_inflight_locked(const std::list<uint64_t>& inflight) const
+    {
+        std::ostringstream oss;
+        bool first = true;
+        for (uint64_t req_num : inflight) {
+            if (!first) oss << " || ";
+            first = false;
+            oss << describe_req_locked(req_num);
+        }
+        if (first) oss << "<empty>";
+        return oss.str();
+    }
+
     int total_nodes_;
     int majority_;
     size_t max_entries_;
@@ -1922,7 +2137,10 @@ private:
     std::unordered_map<uint64_t, vote_entry> m_;
     std::deque<uint64_t> req_order_;
     std::unordered_set<uint64_t> seen_reqs_;
-    std::unordered_set<uint64_t> ready_seen_;
+    std::deque<uint64_t> ready_reqs_;
+    std::unordered_set<uint64_t> ready_members_;
+    std::deque<uint64_t> strict_ready_reqs_;
+    std::unordered_set<uint64_t> strict_ready_members_;
     uint64_t consume_to_ready_sum_ns_ = 0;
     std::vector<uint64_t> consume_to_ready_samples_;
     uint64_t wait_cv_sleep_sum_ns_ = 0;
@@ -3051,7 +3269,8 @@ int main(int argc, char** argv) {
                       << ", dbConnPoolSize=" << opt.db_conn_pool_size
                       << ", detRawSql=" << opt.det_raw_sql
                       << ")" << std::endl;
-            std::deque<uint64_t> inflight;
+            std::list<uint64_t> inflight;
+            std::unordered_map<uint64_t, std::list<uint64_t>::iterator> inflight_pos;
             std::atomic<bool> det_progress_stop(false);
             std::atomic<size_t> det_sent_count(0);
             std::atomic<size_t> det_accepted_count(0);
@@ -3289,6 +3508,9 @@ int main(int argc, char** argv) {
                     det_accepted_count.fetch_add(1, std::memory_order_relaxed);
                     if (majority_wait_enabled) {
                         inflight.push_back(items[i].req_num);
+                        auto it_pos = inflight.end();
+                        --it_pos;
+                        inflight_pos[items[i].req_num] = it_pos;
                         det_inflight_count.fetch_add(1, std::memory_order_relaxed);
                         track_reset_req(items[i].req_num, items[i].sql);
                     } else {
@@ -3331,7 +3553,8 @@ int main(int argc, char** argv) {
                     uint64_t rid = 0;
                     const auto w0 = std::chrono::steady_clock::now();
                     const bool ok_wait = votes.wait_any_majority(
-                        inflight, opt.poll_interval_us, opt.poll_count, rid, maj, wait_err);
+                        inflight, inflight_pos, opt.poll_interval_us, opt.poll_count,
+                        rid, maj, wait_err);
                     const auto w1 = std::chrono::steady_clock::now();
                     total_majority_wait_ns.fetch_add(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
@@ -3949,7 +4172,8 @@ int main(int argc, char** argv) {
                     uint64_t rid = 0;
                     const auto w0 = std::chrono::steady_clock::now();
                     const bool ok_wait = votes.wait_any_majority(
-                        inflight, opt.poll_interval_us, opt.poll_count, rid, maj, wait_err);
+                        inflight, inflight_pos, opt.poll_interval_us, opt.poll_count,
+                        rid, maj, wait_err);
                     const auto w1 = std::chrono::steady_clock::now();
                     total_majority_wait_ns.fetch_add(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
