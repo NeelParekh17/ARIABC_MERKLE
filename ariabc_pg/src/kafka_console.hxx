@@ -16,6 +16,10 @@ struct kafka_producer_stats {
     uint64_t queue_full_retries = 0;
     uint64_t payload_bytes = 0;
     uint64_t producev_ns = 0;
+    uint64_t delivery_calls = 0;
+    uint64_t delivery_errors = 0;
+    uint64_t delivery_ns = 0;
+    uint64_t delivery_max_ns = 0;
     uint64_t poll_ns = 0;
     uint64_t backoff_sleep_ns = 0;
     uint64_t flush_ns = 0;
@@ -58,6 +62,8 @@ public:
     kafka_producer_stats stats() const;
 
     void stop();
+
+    void note_delivery(uint64_t delivery_ns, bool error);
 
 private:
     rd_kafka_s* rk_;

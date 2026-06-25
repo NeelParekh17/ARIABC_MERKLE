@@ -91,6 +91,8 @@ struct gateway_options {
     // Validation mode:
     //   - async_hash: follower divergence is observed asynchronously via Kafka.
     //   - strict_majority: legacy strict majority validation semantics.
+    //   - majority_async_all3: client completes at verified majority, then
+    //     drains all-node audit before marker/Merkle verification.
     std::string validation_mode = "async_hash";
 
     // Optional override for deterministic mode in-flight window.
@@ -158,6 +160,7 @@ struct gateway_options {
     // forces the server to spawn that many per-connection handler threads,
     // which is essential for single-node gateway-direct throughput to scale.
     int conn_fanout = 1;
+    int self_test_early_ready_race = 0;
 };
 
 void usage(const char* argv0) {
@@ -170,7 +173,7 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>]\n";
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1]\n";
 }
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
@@ -264,6 +267,8 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
             } else if (a == "--connFanout") {
                 opt.conn_fanout = std::stoi(need("--connFanout"));
                 if (opt.conn_fanout < 1) opt.conn_fanout = 1;
+            } else if (a == "--selfTestEarlyReadyRace") {
+                opt.self_test_early_ready_race = std::stoi(need("--selfTestEarlyReadyRace"));
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -273,6 +278,9 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
         }
     }
 
+    if (opt.self_test_early_ready_race != 0) {
+        return true;
+    }
     if (opt.query_from.empty()) {
         err = "missing --queryFrom";
         return false;
@@ -313,8 +321,10 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
         err = "invalid --completionPath (expected direct|kafka_majority)";
         return false;
     }
-    if (opt.validation_mode != "async_hash" && opt.validation_mode != "strict_majority") {
-        err = "invalid --validationMode (expected async_hash|strict_majority)";
+    if (opt.validation_mode != "async_hash" &&
+        opt.validation_mode != "strict_majority" &&
+        opt.validation_mode != "majority_async_all3") {
+        err = "invalid --validationMode (expected async_hash|strict_majority|majority_async_all3)";
         return false;
     }
     // completion_path is authoritative when explicitly provided.
@@ -328,7 +338,9 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
         // Keep completion_path/legacy waitMajority coherent for profile/reporting.
         opt.completion_path = (opt.wait_majority == 1) ? "kafka_majority" : "direct";
     }
-    if (opt.validation_mode == "strict_majority" && opt.wait_majority == 0) {
+    if ((opt.validation_mode == "strict_majority" ||
+         opt.validation_mode == "majority_async_all3") &&
+        opt.wait_majority == 0) {
         opt.wait_majority = 1;
         opt.completion_path = "kafka_majority";
     }
@@ -1258,14 +1270,30 @@ struct vote_entry {
     std::string terminal_result;
     std::string terminal_error;
     uint64_t first_reply_ns = 0;
+    uint64_t majority_ready_ns = 0;
+    int first_valid_reply_node = 0;
+    uint64_t majority_nodes_mask = 0;
+    int third_reply_node = 0;
     bool ready_recorded = false;
 };
 
 struct vote_store_profile {
     double consume_to_ready_ms_mean = 0.0;
     double consume_to_ready_ms_p95 = 0.0;
+    double first_reply_to_majority_ms_mean = 0.0;
+    double first_reply_to_majority_ms_p95 = 0.0;
+    double majority_to_all3_ms_mean = 0.0;
+    double majority_to_all3_ms_p95 = 0.0;
     double wait_cv_sleep_ms_mean = 0.0;
     double wait_cv_sleep_ms_p95 = 0.0;
+    double mutex_hold_us_mean = 0.0;
+    double mutex_hold_us_p95 = 0.0;
+    uint64_t node1_first_valid = 0;
+    uint64_t node2_first_valid = 0;
+    uint64_t node4_first_valid = 0;
+    uint64_t node1_third_reply = 0;
+    uint64_t node2_third_reply = 0;
+    uint64_t node4_third_reply = 0;
     double ready_queue_depth_mean = 0.0;
     size_t ready_queue_depth_max = 0;
 };
@@ -1285,8 +1313,11 @@ struct vote_store {
                    std::string& out_recovery_note)
     {
         out_recovery_note.clear();
+        const bool sig_valid = verify_result_signature(rec, sig_key_);
         std::lock_guard<std::mutex> lk(mu_);
-        add_reply_inner_locked(rec, out_recovery_note);
+        const uint64_t hold_start_ns = steady_now_ns();
+        add_reply_inner_locked(rec, sig_valid, out_recovery_note);
+        record_mutex_hold_locked(steady_now_ns() - hold_start_ns);
         cv_.notify_all();
     }
 
@@ -1296,11 +1327,19 @@ struct vote_store {
     void add_replies_batch(const std::vector<kafka_reply_record>& recs,
                            std::vector<std::string>& out_recovery_notes)
     {
+        std::vector<bool> sig_valid;
+
+        sig_valid.reserve(recs.size());
+        for (const kafka_reply_record& rec : recs) {
+            sig_valid.push_back(verify_result_signature(rec, sig_key_));
+        }
         out_recovery_notes.resize(recs.size());
         std::lock_guard<std::mutex> lk(mu_);
+        const uint64_t hold_start_ns = steady_now_ns();
         for (size_t i = 0; i < recs.size(); ++i) {
-            add_reply_inner_locked(recs[i], out_recovery_notes[i]);
+            add_reply_inner_locked(recs[i], sig_valid[i], out_recovery_notes[i]);
         }
+        record_mutex_hold_locked(steady_now_ns() - hold_start_ns);
         if (!recs.empty()) {
             cv_.notify_all();
         }
@@ -1308,6 +1347,7 @@ struct vote_store {
 
 private:
     void add_reply_inner_locked(const kafka_reply_record& rec,
+                                bool sig_valid,
                                 std::string& out_recovery_note)
     {
         out_recovery_note.clear();
@@ -1321,7 +1361,12 @@ private:
             e.first_reply_ns = add_ns;
         }
 
+        const int nodes_seen_before = e.nodes_seen_count;
         note_node_seen_locked(e, rec.node_id);
+        if (nodes_seen_before < total_nodes_ && e.nodes_seen_count == total_nodes_) {
+            e.third_reply_node = rec.node_id;
+            increment_node_counter_locked(third_reply_by_node_, rec.node_id);
+        }
         if (rec.leader_node_id > 0) {
             e.leader_node_id = rec.leader_node_id;
         }
@@ -1340,7 +1385,6 @@ private:
             e.terminal_result.clear();
             e.terminal_error = "duplicate_identity_conflict";
             enqueue_ready_locked(rec.req_num);
-            enqueue_strict_ready_locked(rec.req_num);
             std::ostringstream oss;
             const std::string req_id = rec.req_id.empty() ? first_req_id_locked(e) : rec.req_id;
             oss << "{\"type\":\"duplicate_identity_conflict\""
@@ -1356,7 +1400,11 @@ private:
 
         vote_entry::node_obs obs;
         obs.rec = rec;
-        obs.sig_valid = verify_result_signature(rec, sig_key_);
+        obs.sig_valid = sig_valid;
+        if (obs.sig_valid && e.first_valid_reply_node == 0) {
+            e.first_valid_reply_node = rec.node_id;
+            increment_node_counter_locked(first_valid_by_node_, rec.node_id);
+        }
         debug_trace_kafka(rec, obs.sig_valid);
 
         auto prev_it = e.by_node.find(rec.node_id);
@@ -1418,7 +1466,9 @@ private:
             if (e.majority_hash.empty() || has_invalid_sig_locked(e)) {
                 enqueue_ready_locked(rec.req_num);
             }
-            enqueue_strict_ready_locked(rec.req_num);
+            if (e.majority_ready_ns > 0 && add_ns >= e.majority_ready_ns) {
+                record_majority_to_all3_locked(add_ns - e.majority_ready_ns);
+            }
         }
     }
 
@@ -1525,6 +1575,17 @@ public:
         return out_error.empty();
     }
 
+    void note_inflight_registered(uint64_t req_num)
+    {
+        std::string ignored_result;
+        std::string ignored_error;
+        std::lock_guard<std::mutex> lk(mu_);
+        if (resolve_terminal_locked(req_num, ignored_result, ignored_error)) {
+            enqueue_ready_locked(req_num);
+            cv_.notify_all();
+        }
+    }
+
     bool wait_any_majority(
         std::list<uint64_t>& inflight,
         std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
@@ -1571,58 +1632,6 @@ public:
                           << describe_inflight_locked(inflight)
                           << std::endl;
                 out_error = "majority_timeout";
-                return false;
-            }
-        }
-        return out_error.empty();
-    }
-
-    bool wait_any_strict_terminal(
-        std::list<uint64_t>& inflight,
-        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
-        int poll_interval_us,
-        int poll_count,
-        uint64_t& out_req_num,
-        std::string& out_result,
-        std::string& out_error)
-    {
-        out_req_num = 0;
-        out_result.clear();
-        out_error.clear();
-        std::unique_lock<std::mutex> lk(mu_);
-
-        auto terminal = [&]() -> bool {
-            return pop_strict_terminal_inflight_locked(
-                inflight, inflight_pos, out_req_num, out_result, out_error);
-        };
-
-        if (terminal()) return out_error.empty();
-        if (poll_count <= 0) {
-            while (!terminal()) {
-                const auto wait_t0 = std::chrono::steady_clock::now();
-                cv_.wait(lk);
-                const auto wait_t1 = std::chrono::steady_clock::now();
-                record_wait_sleep_locked(static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
-            }
-            return out_error.empty();
-        }
-
-        const long long total_us =
-            static_cast<long long>(poll_interval_us) * static_cast<long long>(poll_count);
-        const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::microseconds(std::max<long long>(1, total_us));
-        while (!terminal()) {
-            const auto wait_t0 = std::chrono::steady_clock::now();
-            const std::cv_status st = cv_.wait_until(lk, deadline);
-            const auto wait_t1 = std::chrono::steady_clock::now();
-            record_wait_sleep_locked(static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
-            if (st == std::cv_status::timeout && !terminal()) {
-                std::cerr << "vote_store strict timeout inflight="
-                          << describe_inflight_locked(inflight)
-                          << std::endl;
-                out_error = "all_nodes_timeout";
                 return false;
             }
         }
@@ -1681,8 +1690,21 @@ public:
         vote_store_profile out;
         out.consume_to_ready_ms_mean = mean_ms_locked(consume_to_ready_samples_, consume_to_ready_sum_ns_);
         out.consume_to_ready_ms_p95 = p95_ms_locked(consume_to_ready_samples_);
+        out.first_reply_to_majority_ms_mean = out.consume_to_ready_ms_mean;
+        out.first_reply_to_majority_ms_p95 = out.consume_to_ready_ms_p95;
+        out.majority_to_all3_ms_mean =
+            mean_ms_locked(majority_to_all3_samples_, majority_to_all3_sum_ns_);
+        out.majority_to_all3_ms_p95 = p95_ms_locked(majority_to_all3_samples_);
         out.wait_cv_sleep_ms_mean = mean_ms_locked(wait_cv_sleep_samples_, wait_cv_sleep_sum_ns_);
         out.wait_cv_sleep_ms_p95 = p95_ms_locked(wait_cv_sleep_samples_);
+        out.mutex_hold_us_mean = mean_us_locked(mutex_hold_samples_, mutex_hold_sum_ns_);
+        out.mutex_hold_us_p95 = p95_us_locked(mutex_hold_samples_);
+        out.node1_first_valid = node_counter_locked(first_valid_by_node_, 1);
+        out.node2_first_valid = node_counter_locked(first_valid_by_node_, 2);
+        out.node4_first_valid = node_counter_locked(first_valid_by_node_, 4);
+        out.node1_third_reply = node_counter_locked(third_reply_by_node_, 1);
+        out.node2_third_reply = node_counter_locked(third_reply_by_node_, 2);
+        out.node4_third_reply = node_counter_locked(third_reply_by_node_, 4);
         if (ready_queue_depth_obs_ > 0) {
             out.ready_queue_depth_mean =
                 static_cast<double>(ready_queue_depth_sum_) / static_cast<double>(ready_queue_depth_obs_);
@@ -1701,6 +1723,24 @@ public:
         out_error.clear();
         std::lock_guard<std::mutex> lk(mu_);
         return pop_terminal_inflight_locked(inflight, out_req_num, out_result, out_error);
+    }
+
+    bool try_pop_any_terminal(
+        std::list<uint64_t>& inflight,
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
+        uint64_t& out_req_num,
+        std::string& out_result,
+        std::string& out_error)
+    {
+        out_req_num = 0;
+        out_result.clear();
+        out_error.clear();
+        std::lock_guard<std::mutex> lk(mu_);
+        return pop_terminal_inflight_locked(inflight,
+                                            inflight_pos,
+                                            out_req_num,
+                                            out_result,
+                                            out_error);
     }
 
 private:
@@ -1776,9 +1816,30 @@ private:
         consume_to_ready_samples_.push_back(delta_ns);
     }
 
+    void record_majority_to_all3_locked(uint64_t delta_ns) {
+        majority_to_all3_sum_ns_ += delta_ns;
+        majority_to_all3_samples_.push_back(delta_ns);
+    }
+
     void record_wait_sleep_locked(uint64_t delta_ns) {
         wait_cv_sleep_sum_ns_ += delta_ns;
         wait_cv_sleep_samples_.push_back(delta_ns);
+    }
+
+    void record_mutex_hold_locked(uint64_t delta_ns) {
+        mutex_hold_sum_ns_ += delta_ns;
+        mutex_hold_samples_.push_back(delta_ns);
+    }
+
+    void increment_node_counter_locked(std::unordered_map<int, uint64_t>& counters,
+                                       int node_id) {
+        counters[node_id] += 1;
+    }
+
+    static uint64_t node_counter_locked(const std::unordered_map<int, uint64_t>& counters,
+                                        int node_id) {
+        auto it = counters.find(node_id);
+        return it == counters.end() ? 0 : it->second;
     }
 
     void enqueue_ready_locked(uint64_t req_num) {
@@ -1790,15 +1851,14 @@ private:
         }
     }
 
-    void enqueue_strict_ready_locked(uint64_t req_num) {
-        if (strict_ready_members_.insert(req_num).second) {
-            strict_ready_reqs_.push_back(req_num);
-        }
-    }
-
     static double mean_ms_locked(const std::vector<uint64_t>& samples, uint64_t sum_ns) {
         if (samples.empty()) return 0.0;
         return (static_cast<double>(sum_ns) / static_cast<double>(samples.size())) / 1000000.0;
+    }
+
+    static double mean_us_locked(const std::vector<uint64_t>& samples, uint64_t sum_ns) {
+        if (samples.empty()) return 0.0;
+        return (static_cast<double>(sum_ns) / static_cast<double>(samples.size())) / 1000.0;
     }
 
     static double p95_ms_locked(std::vector<uint64_t> samples) {
@@ -1811,11 +1871,26 @@ private:
         return static_cast<double>(samples[std::min(idx, samples.size() - 1)]) / 1000000.0;
     }
 
+    static double p95_us_locked(std::vector<uint64_t> samples) {
+        if (samples.empty()) return 0.0;
+        const size_t idx = static_cast<size_t>(
+            std::ceil(0.95 * static_cast<double>(samples.size()))) - 1;
+        std::nth_element(samples.begin(),
+                         samples.begin() + std::min(idx, samples.size() - 1),
+                         samples.end());
+        return static_cast<double>(samples[std::min(idx, samples.size() - 1)]) / 1000.0;
+    }
+
     void refresh_majority_locked(uint64_t req_num, vote_entry& e, uint64_t now_ns) {
         const bool had_majority = !e.majority_hash.empty();
         e.majority_hash = compute_majority_hash_locked(e);
         if (!had_majority && !e.terminal_set && !e.majority_hash.empty() && !e.ready_recorded) {
             e.ready_recorded = true;
+            e.majority_ready_ns = now_ns;
+            auto it_maj = e.hash_to_nodes_valid.find(e.majority_hash);
+            if (it_maj != e.hash_to_nodes_valid.end()) {
+                e.majority_nodes_mask = it_maj->second;
+            }
             if (e.first_reply_ns > 0 && now_ns >= e.first_reply_ns) {
                 record_consume_to_ready_locked(now_ns - e.first_reply_ns);
             }
@@ -1832,7 +1907,6 @@ private:
             seen_reqs_.erase(old_req);
             m_.erase(old_req);
             ready_members_.erase(old_req);
-            strict_ready_members_.erase(old_req);
         }
     }
 
@@ -2009,57 +2083,6 @@ private:
         return false;
     }
 
-    bool pop_strict_terminal_inflight_locked(
-        std::list<uint64_t>& inflight,
-        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
-        uint64_t& out_req_num,
-        std::string& out_result,
-        std::string& out_error)
-    {
-        while (!strict_ready_reqs_.empty()) {
-            const uint64_t req_num = strict_ready_reqs_.front();
-            strict_ready_reqs_.pop_front();
-            strict_ready_members_.erase(req_num);
-
-            auto it_pos = inflight_pos.find(req_num);
-            if (it_pos == inflight_pos.end()) continue;
-
-            auto it_entry = m_.find(req_num);
-            if (it_entry != m_.end() && it_entry->second.terminal_set) {
-                out_req_num = req_num;
-                out_result = it_entry->second.terminal_result;
-                out_error = it_entry->second.terminal_error;
-                inflight.erase(it_pos->second);
-                inflight_pos.erase(it_pos);
-                return true;
-            }
-
-            std::string err;
-            if (!resolve_all_nodes_consistent_locked(req_num, err)) {
-                continue;
-            }
-            if (!err.empty()) {
-                out_req_num = req_num;
-                out_error = std::move(err);
-                inflight.erase(it_pos->second);
-                inflight_pos.erase(it_pos);
-                return true;
-            }
-
-            std::string result;
-            if (!resolve_terminal_locked(req_num, result, err)) {
-                continue;
-            }
-            out_req_num = req_num;
-            out_result = std::move(result);
-            out_error = std::move(err);
-            inflight.erase(it_pos->second);
-            inflight_pos.erase(it_pos);
-            return true;
-        }
-        return false;
-    }
-
     std::string describe_req_locked(uint64_t req_num) const
     {
         std::ostringstream oss;
@@ -2139,16 +2162,94 @@ private:
     std::unordered_set<uint64_t> seen_reqs_;
     std::deque<uint64_t> ready_reqs_;
     std::unordered_set<uint64_t> ready_members_;
-    std::deque<uint64_t> strict_ready_reqs_;
-    std::unordered_set<uint64_t> strict_ready_members_;
     uint64_t consume_to_ready_sum_ns_ = 0;
     std::vector<uint64_t> consume_to_ready_samples_;
+    uint64_t majority_to_all3_sum_ns_ = 0;
+    std::vector<uint64_t> majority_to_all3_samples_;
     uint64_t wait_cv_sleep_sum_ns_ = 0;
     std::vector<uint64_t> wait_cv_sleep_samples_;
+    uint64_t mutex_hold_sum_ns_ = 0;
+    std::vector<uint64_t> mutex_hold_samples_;
+    std::unordered_map<int, uint64_t> first_valid_by_node_;
+    std::unordered_map<int, uint64_t> third_reply_by_node_;
     uint64_t ready_queue_depth_sum_ = 0;
     uint64_t ready_queue_depth_obs_ = 0;
     size_t ready_queue_depth_max_ = 0;
 };
+
+bool run_early_ready_race_self_test()
+{
+    const std::string sig_key = "selftest-key";
+    const uint64_t req_num = 42;
+    const std::string req_id = "selftest-42";
+    const std::string full_result = "selftest-result";
+    const std::string result_hash = canonical_result_hash(full_result);
+
+    vote_store votes(3, 2, 8, sig_key);
+    auto make_rec = [&](int node_id, bool full) {
+        kafka_reply_record rec;
+        rec.req_num = req_num;
+        rec.req_id = req_id;
+        rec.node_id = node_id;
+        rec.leader_node_id = 1;
+        rec.result_hash = result_hash;
+        rec.hash_algo = kHashAlgo;
+        rec.timestamp_ms = now_epoch_ms();
+        rec.has_full_result = full;
+        rec.full_result = full ? full_result : std::string();
+        rec.raft_log_idx = 7;
+        rec.server_sig = sign_payload(
+            sig_key,
+            make_sig_payload(rec.req_num,
+                             rec.raft_log_idx,
+                             rec.req_id,
+                             rec.node_id,
+                             rec.leader_node_id,
+                             rec.result_hash,
+                             rec.timestamp_ms,
+                             rec.has_full_result));
+        return rec;
+    };
+
+    std::string recovery;
+    votes.add_reply(make_rec(1, true), recovery);
+    votes.add_reply(make_rec(2, false), recovery);
+
+    std::list<uint64_t> empty_inflight;
+    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> empty_pos;
+    uint64_t rid = 0;
+    std::string result;
+    std::string err;
+    (void)votes.try_pop_any_terminal(empty_inflight, empty_pos, rid, result, err);
+
+    std::list<uint64_t> inflight;
+    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> inflight_pos;
+    inflight.push_back(req_num);
+    auto it_pos = inflight.end();
+    --it_pos;
+    inflight_pos[req_num] = it_pos;
+    votes.note_inflight_registered(req_num);
+
+    rid = 0;
+    result.clear();
+    err.clear();
+    const bool ok = votes.wait_any_majority(inflight,
+                                            inflight_pos,
+                                            1000,
+                                            100,
+                                            rid,
+                                            result,
+                                            err);
+    if (!ok || rid != req_num || result != full_result || !err.empty()) {
+        std::cerr << "early-ready self-test failed ok=" << ok
+                  << " rid=" << rid
+                  << " err=" << err
+                  << std::endl;
+        return false;
+    }
+    std::cout << "early-ready self-test PASS" << std::endl;
+    return true;
+}
 
 struct cluster_client {
     int fd = -1;
@@ -2567,6 +2668,9 @@ int main(int argc, char** argv) {
         ariabc_pg::usage(argv[0]);
         return 1;
     }
+    if (opt.self_test_early_ready_race != 0) {
+        return ariabc_pg::run_early_ready_race_self_test() ? 0 : 1;
+    }
 
     // Ignore SIGPIPE so broken sockets don't kill the process.
     ::signal(SIGPIPE, SIG_IGN);
@@ -2631,6 +2735,7 @@ int main(int argc, char** argv) {
     const bool majority_wait_enabled = (opt.wait_majority == 1);
     const bool async_hash_validation = (opt.validation_mode == "async_hash");
     const bool strict_hash_validation = (opt.validation_mode == "strict_majority");
+    const bool majority_async_all3_validation = (opt.validation_mode == "majority_async_all3");
 
     const std::string submit_mode = ariabc_pg::trim_copy(opt.submit_mode);
     std::unique_ptr<ariabc_pg::async_cluster_submitter> submitter;
@@ -2700,12 +2805,18 @@ int main(int argc, char** argv) {
     std::thread dispatch_thread;
     std::mutex dispatch_mu;
     std::condition_variable dispatch_cv;
-    std::deque<std::vector<ariabc_pg::kafka_reply_record>> dispatch_queue;
+    struct gateway_dispatch_batch {
+        std::vector<ariabc_pg::kafka_reply_record> records;
+        uint64_t parse_done_ns = 0;
+    };
+    std::deque<gateway_dispatch_batch> dispatch_queue;
     std::atomic<int> divergence_count(0);
     std::atomic<uint64_t> kafka_messages(0);
     std::atomic<uint64_t> kafka_records(0);
     std::atomic<uint64_t> kafka_parse_failures(0);
     std::atomic<uint64_t> kafka_parse_ns(0);
+    std::atomic<uint64_t> kafka_consumer_poll_to_parse_ns(0);
+    std::atomic<uint64_t> kafka_parse_to_vote_store_ns(0);
     std::atomic<uint64_t> kafka_add_reply_ns(0);
     std::atomic<uint64_t> kafka_consume_lag_ns(0);
     std::atomic<uint64_t> kafka_consume_lag_count(0);
@@ -2713,7 +2824,7 @@ int main(int argc, char** argv) {
     if (kafka_enabled) {
         dispatch_thread = std::thread([&] {
             while (true) {
-                std::vector<ariabc_pg::kafka_reply_record> batch;
+                gateway_dispatch_batch batch;
                 {
                     std::unique_lock<std::mutex> lk(dispatch_mu);
                     dispatch_cv.wait(lk, [&] { return !dispatch_queue.empty() || stop.load(); });
@@ -2723,8 +2834,13 @@ int main(int argc, char** argv) {
                 }
 
                 std::vector<std::string> recoveries;
+                const uint64_t add_start_ns = ariabc_pg::steady_now_ns();
+                if (batch.parse_done_ns > 0 && add_start_ns >= batch.parse_done_ns) {
+                    kafka_parse_to_vote_store_ns.fetch_add(add_start_ns - batch.parse_done_ns,
+                                                           std::memory_order_relaxed);
+                }
                 const auto a0 = std::chrono::steady_clock::now();
-                votes.add_replies_batch(batch, recoveries);
+                votes.add_replies_batch(batch.records, recoveries);
                 const auto a1 = std::chrono::steady_clock::now();
                 kafka_add_reply_ns.fetch_add(
                     static_cast<uint64_t>(
@@ -2768,6 +2884,7 @@ int main(int argc, char** argv) {
                 kafka_messages.fetch_add(static_cast<uint64_t>(kafka_batch.size()), std::memory_order_relaxed);
 
                 std::vector<ariabc_pg::kafka_reply_record> all_recs;
+                const uint64_t poll_done_ns = ariabc_pg::steady_now_ns();
                 const auto p0 = std::chrono::steady_clock::now();
                 for (size_t b = 0; b < kafka_batch.size(); ++b) {
                     std::vector<ariabc_pg::kafka_reply_record> recs;
@@ -2780,6 +2897,11 @@ int main(int argc, char** argv) {
                     }
                 }
                 const auto p1 = std::chrono::steady_clock::now();
+                const uint64_t parse_done_ns = ariabc_pg::steady_now_ns();
+                if (parse_done_ns >= poll_done_ns) {
+                    kafka_consumer_poll_to_parse_ns.fetch_add(parse_done_ns - poll_done_ns,
+                                                              std::memory_order_relaxed);
+                }
                 kafka_parse_ns.fetch_add(
                     static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count()),
@@ -2806,7 +2928,10 @@ int main(int argc, char** argv) {
 
                 {
                     std::lock_guard<std::mutex> lk(dispatch_mu);
-                    dispatch_queue.push_back(std::move(all_recs));
+                    gateway_dispatch_batch dispatch_batch;
+                    dispatch_batch.records = std::move(all_recs);
+                    dispatch_batch.parse_done_ns = parse_done_ns;
+                    dispatch_queue.push_back(std::move(dispatch_batch));
                 }
                 dispatch_cv.notify_one();
             }
@@ -2830,6 +2955,16 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> strict_all_nodes_checks(0);
     std::atomic<uint64_t> strict_all_nodes_failures(0);
     std::atomic<uint64_t> strict_all_nodes_wait_ns(0);
+    std::atomic<uint64_t> client_quorum_complete_count(0);
+    std::atomic<uint64_t> async_all3_verified_count(0);
+    std::atomic<uint64_t> async_all3_failure_count(0);
+    std::atomic<uint64_t> async_all3_timeout_count(0);
+    std::atomic<uint64_t> async_all3_pending_max(0);
+    std::atomic<uint64_t> async_all3_audit_drain_ns(0);
+    std::atomic<uint64_t> det_total_outstanding_max(0);
+    std::atomic<uint64_t> det_lane_outstanding_max(0);
+    std::mutex async_audit_mu;
+    std::vector<uint64_t> async_audit_pending;
 
     auto req_id_for_idx = [&](size_t idx) -> std::string {
         const uint64_t id_num = opt.req_id_offset + static_cast<uint64_t>(idx);
@@ -3395,8 +3530,13 @@ int main(int argc, char** argv) {
                     ++det_lane_outstanding[lane];
                     ++det_total_outstanding;
                     det_req_lane[item.req_num] = lane;
+                    ariabc_pg::atomic_max_u64(
+                        det_lane_outstanding_max,
+                        static_cast<uint64_t>(det_lane_outstanding[lane]));
                 }
                 det_pipeline_outstanding_count.store(det_total_outstanding, std::memory_order_relaxed);
+                ariabc_pg::atomic_max_u64(det_total_outstanding_max,
+                                          static_cast<uint64_t>(det_total_outstanding));
                 return true;
             };
 
@@ -3511,6 +3651,7 @@ int main(int argc, char** argv) {
                         auto it_pos = inflight.end();
                         --it_pos;
                         inflight_pos[items[i].req_num] = it_pos;
+                        votes.note_inflight_registered(items[i].req_num);
                         det_inflight_count.fetch_add(1, std::memory_order_relaxed);
                         track_reset_req(items[i].req_num, items[i].sql);
                     } else {
@@ -3546,6 +3687,60 @@ int main(int argc, char** argv) {
                 return true;
             };
 
+            auto record_async_all3_pending = [&](uint64_t rid) {
+                if (!majority_async_all3_validation) {
+                    return;
+                }
+                std::lock_guard<std::mutex> lk(async_audit_mu);
+                async_audit_pending.push_back(rid);
+                ariabc_pg::atomic_max_u64(
+                    async_all3_pending_max,
+                    static_cast<uint64_t>(async_audit_pending.size()));
+            };
+
+            auto drain_async_all3_audit = [&]() -> bool {
+                if (!majority_async_all3_validation) {
+                    return true;
+                }
+                std::vector<uint64_t> pending;
+                {
+                    std::lock_guard<std::mutex> lk(async_audit_mu);
+                    pending.swap(async_audit_pending);
+                }
+                const auto audit0 = std::chrono::steady_clock::now();
+                bool ok = true;
+                for (uint64_t rid : pending) {
+                    std::string all_err;
+                    const bool all_ok = votes.wait_all_nodes_consistent(
+                        rid, opt.poll_interval_us, opt.poll_count, all_err);
+                    if (!all_ok) {
+                        async_all3_timeout_count.fetch_add(1, std::memory_order_relaxed);
+                        if (all_err.empty()) all_err = "all_nodes_timeout";
+                        bump_terminal_reason(all_err);
+                        emit_recovery_event(rid, all_err);
+                        ok = false;
+                        continue;
+                    }
+                    if (!all_err.empty()) {
+                        async_all3_failure_count.fetch_add(1, std::memory_order_relaxed);
+                        bump_terminal_reason(all_err);
+                        emit_recovery_event(rid, all_err);
+                        ok = false;
+                        continue;
+                    }
+                    async_all3_verified_count.fetch_add(1, std::memory_order_relaxed);
+                }
+                const auto audit1 = std::chrono::steady_clock::now();
+                async_all3_audit_drain_ns.fetch_add(
+                    static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(audit1 - audit0).count()),
+                    std::memory_order_relaxed);
+                if (!ok) {
+                    permanent_failures.fetch_add(1);
+                }
+                return ok;
+            };
+
             auto wait_det_majority_window = [&](size_t max_outstanding) -> bool {
                 while (majority_wait_enabled && inflight.size() > max_outstanding) {
                     std::string maj;
@@ -3564,6 +3759,10 @@ int main(int argc, char** argv) {
                         emit_recovery_event(rid, wait_err);
                         permanent_failures.fetch_add(1);
                         return false;
+                    }
+                    if (majority_async_all3_validation) {
+                        client_quorum_complete_count.fetch_add(1, std::memory_order_relaxed);
+                        record_async_all3_pending(rid);
                     }
                     if (!wait_strict_all_nodes_for_req(rid)) {
                         return false;
@@ -4185,6 +4384,10 @@ int main(int argc, char** argv) {
                         failed = true;
                         break;
                     }
+                    if (majority_async_all3_validation) {
+                        client_quorum_complete_count.fetch_add(1, std::memory_order_relaxed);
+                        record_async_all3_pending(rid);
+                    }
                     if (!wait_strict_all_nodes_for_req(rid)) {
                         failed = true;
                         break;
@@ -4198,6 +4401,14 @@ int main(int argc, char** argv) {
                         break;
                     }
                 }
+            }
+
+            if (!failed && majority_async_all3_validation) {
+                client_completion_end = std::chrono::steady_clock::now();
+                client_completion_end_set = true;
+            }
+            if (!failed && !drain_async_all3_audit()) {
+                failed = true;
             }
 
             det_progress_stop.store(true, std::memory_order_relaxed);
@@ -4439,6 +4650,19 @@ int main(int argc, char** argv) {
         std::cout << "duplicate_key_errors=" << duplicate_key_errors.load() << std::endl;
         std::cout << "divergence_count=" << divergence_count.load() << std::endl;
         std::cout << "permanent_failures=" << permanent_failures.load() << std::endl;
+        if (majority_async_all3_validation) {
+            std::cout << "majority_async_all3 client_quorum_complete_count="
+                      << client_quorum_complete_count.load(std::memory_order_relaxed)
+                      << " async_all3_verified_count="
+                      << async_all3_verified_count.load(std::memory_order_relaxed)
+                      << " async_all3_failure_count="
+                      << async_all3_failure_count.load(std::memory_order_relaxed)
+                      << " async_all3_timeout_count="
+                      << async_all3_timeout_count.load(std::memory_order_relaxed)
+                      << " audit_drain_ms="
+                      << (async_all3_audit_drain_ns.load(std::memory_order_relaxed) / 1000000.0)
+                      << std::endl;
+        }
 
         uint64_t sub_attempts = ariabc_pg::g_submit_prof.attempts.load(std::memory_order_relaxed);
         uint64_t sub_conn_calls = ariabc_pg::g_submit_prof.connect_calls.load(std::memory_order_relaxed);
@@ -4498,15 +4722,31 @@ int main(int argc, char** argv) {
             << " kafka_recs=" << kafka_records.load(std::memory_order_relaxed)
             << " kafka_parse_failures=" << kafka_parse_failures.load(std::memory_order_relaxed)
             << " kafka_parse_ms=" << (kafka_parse_ns.load(std::memory_order_relaxed) / 1000000.0)
+            << " consumer_poll_to_parse_ms=" << (kafka_consumer_poll_to_parse_ns.load(std::memory_order_relaxed) / 1000000.0)
+            << " parse_to_vote_store_ms=" << (kafka_parse_to_vote_store_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " kafka_add_reply_ms=" << (kafka_add_reply_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " consume_lag_ms_mean=" << lag_ms_mean
             << " consume_lag_ms_max=" << lag_ms_max
             << " consume_to_ready_ms_mean=" << vote_prof.consume_to_ready_ms_mean
             << " consume_to_ready_ms_p95=" << vote_prof.consume_to_ready_ms_p95
+            << " first_reply_to_majority_ms_mean=" << vote_prof.first_reply_to_majority_ms_mean
+            << " first_reply_to_majority_ms_p95=" << vote_prof.first_reply_to_majority_ms_p95
+            << " majority_to_all3_ms_mean=" << vote_prof.majority_to_all3_ms_mean
+            << " majority_to_all3_ms_p95=" << vote_prof.majority_to_all3_ms_p95
+            << " vote_store_mutex_hold_us_mean=" << vote_prof.mutex_hold_us_mean
+            << " vote_store_mutex_hold_us_p95=" << vote_prof.mutex_hold_us_p95
+            << " first_valid_node1=" << vote_prof.node1_first_valid
+            << " first_valid_node2=" << vote_prof.node2_first_valid
+            << " first_valid_node4=" << vote_prof.node4_first_valid
+            << " third_reply_node1=" << vote_prof.node1_third_reply
+            << " third_reply_node2=" << vote_prof.node2_third_reply
+            << " third_reply_node4=" << vote_prof.node4_third_reply
             << " wait_cv_sleep_ms_mean=" << vote_prof.wait_cv_sleep_ms_mean
             << " wait_cv_sleep_ms_p95=" << vote_prof.wait_cv_sleep_ms_p95
             << " ready_queue_depth_mean=" << vote_prof.ready_queue_depth_mean
             << " ready_queue_depth_max=" << vote_prof.ready_queue_depth_max
+            << " det_total_outstanding_max=" << det_total_outstanding_max.load(std::memory_order_relaxed)
+            << " det_lane_outstanding_max=" << det_lane_outstanding_max.load(std::memory_order_relaxed)
             << " kc_poll_calls=" << kc.poll_calls
             << " kc_poll_ms=" << (kc.poll_ns / 1000000.0)
             << " kc_msgs=" << kc.message_count
@@ -4522,6 +4762,12 @@ int main(int argc, char** argv) {
             << " strict_all_nodes_checks=" << strict_all_nodes_checks.load(std::memory_order_relaxed)
             << " strict_all_nodes_failures=" << strict_all_nodes_failures.load(std::memory_order_relaxed)
             << " strict_all_nodes_wait_ms=" << (strict_all_nodes_wait_ns.load(std::memory_order_relaxed) / 1000000.0)
+            << " client_quorum_complete_count=" << client_quorum_complete_count.load(std::memory_order_relaxed)
+            << " async_all3_verified_count=" << async_all3_verified_count.load(std::memory_order_relaxed)
+            << " async_all3_failure_count=" << async_all3_failure_count.load(std::memory_order_relaxed)
+            << " async_all3_timeout_count=" << async_all3_timeout_count.load(std::memory_order_relaxed)
+            << " async_all3_pending_max=" << async_all3_pending_max.load(std::memory_order_relaxed)
+            << " audit_drain_ms=" << (async_all3_audit_drain_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " err_send_calls=" << ep.send_calls
             << " err_send_ok=" << ep.send_ok
             << " err_producev_ms=" << (ep.producev_ns / 1000000.0)

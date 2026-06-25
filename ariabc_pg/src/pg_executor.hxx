@@ -53,6 +53,15 @@ struct pg_executor_stats {
     uint64_t kafka_payload_bytes = 0;
     uint64_t kafka_build_payload_ns = 0;
     uint64_t kafka_send_ns = 0;
+    uint64_t kafka_batch_records = 0;
+    uint64_t kafka_batch_records_max = 0;
+    uint64_t kafka_batch_dwell_ns = 0;
+    uint64_t kafka_batch_dwell_max_ns = 0;
+    uint64_t kafka_flush_reason_records = 0;
+    uint64_t kafka_flush_reason_bytes = 0;
+    uint64_t kafka_flush_reason_age = 0;
+    uint64_t kafka_flush_reason_idle = 0;
+    uint64_t kafka_flush_reason_final = 0;
 
     uint64_t queue_depth_samples = 0;
     uint64_t queue_depth_sum = 0;
@@ -305,6 +314,15 @@ private:
     std::atomic<uint64_t> st_kafka_payload_bytes_{0};
     std::atomic<uint64_t> st_kafka_build_payload_ns_{0};
     std::atomic<uint64_t> st_kafka_send_ns_{0};
+    std::atomic<uint64_t> st_kafka_batch_records_{0};
+    std::atomic<uint64_t> st_kafka_batch_records_max_{0};
+    std::atomic<uint64_t> st_kafka_batch_dwell_ns_{0};
+    std::atomic<uint64_t> st_kafka_batch_dwell_max_ns_{0};
+    std::atomic<uint64_t> st_kafka_flush_reason_records_{0};
+    std::atomic<uint64_t> st_kafka_flush_reason_bytes_{0};
+    std::atomic<uint64_t> st_kafka_flush_reason_age_{0};
+    std::atomic<uint64_t> st_kafka_flush_reason_idle_{0};
+    std::atomic<uint64_t> st_kafka_flush_reason_final_{0};
 
     size_t queue_high_wm_ = 0;
     size_t queue_low_wm_ = 0;

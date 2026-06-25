@@ -1144,6 +1144,15 @@ pg_executor_stats pg_executor::stats() const {
     out.kafka_payload_bytes = st_kafka_payload_bytes_.load(std::memory_order_relaxed);
     out.kafka_build_payload_ns = st_kafka_build_payload_ns_.load(std::memory_order_relaxed);
     out.kafka_send_ns = st_kafka_send_ns_.load(std::memory_order_relaxed);
+    out.kafka_batch_records = st_kafka_batch_records_.load(std::memory_order_relaxed);
+    out.kafka_batch_records_max = st_kafka_batch_records_max_.load(std::memory_order_relaxed);
+    out.kafka_batch_dwell_ns = st_kafka_batch_dwell_ns_.load(std::memory_order_relaxed);
+    out.kafka_batch_dwell_max_ns = st_kafka_batch_dwell_max_ns_.load(std::memory_order_relaxed);
+    out.kafka_flush_reason_records = st_kafka_flush_reason_records_.load(std::memory_order_relaxed);
+    out.kafka_flush_reason_bytes = st_kafka_flush_reason_bytes_.load(std::memory_order_relaxed);
+    out.kafka_flush_reason_age = st_kafka_flush_reason_age_.load(std::memory_order_relaxed);
+    out.kafka_flush_reason_idle = st_kafka_flush_reason_idle_.load(std::memory_order_relaxed);
+    out.kafka_flush_reason_final = st_kafka_flush_reason_final_.load(std::memory_order_relaxed);
     out.queue_depth_samples = st_queue_depth_samples_.load(std::memory_order_relaxed);
     out.queue_depth_sum = st_queue_depth_sum_.load(std::memory_order_relaxed);
     out.queue_depth_max = st_queue_depth_max_.load(std::memory_order_relaxed);
@@ -1634,21 +1643,69 @@ void pg_executor::worker_loop() {
     std::vector<std::string> batch_results;
     std::vector<uint64_t> batch_raft_log_idxs;
     std::vector<int> batch_leader_hints;
+    std::vector<uint64_t> batch_append_ns;
     size_t batch_bytes = 0;
     auto batch_start = std::chrono::steady_clock::now();
 
-    auto flush_batch = [&]() {
+    enum event_flush_reason {
+        FLUSH_REASON_RECORDS,
+        FLUSH_REASON_BYTES,
+        FLUSH_REASON_AGE,
+        FLUSH_REASON_IDLE,
+        FLUSH_REASON_FINAL
+    };
+
+    auto update_atomic_max = [](std::atomic<uint64_t>& target, uint64_t value) {
+        uint64_t cur = target.load(std::memory_order_relaxed);
+        while (value > cur &&
+               !target.compare_exchange_weak(cur,
+                                             value,
+                                             std::memory_order_relaxed,
+                                             std::memory_order_relaxed)) {
+        }
+    };
+
+    auto flush_batch = [&](event_flush_reason reason = FLUSH_REASON_FINAL) {
         if (!kafka_enabled_ || batch_req_ids.empty()) {
             batch_req_ids.clear();
             batch_results.clear();
             batch_raft_log_idxs.clear();
             batch_leader_hints.clear();
+            batch_append_ns.clear();
             batch_bytes = 0;
             batch_start = std::chrono::steady_clock::now();
             return;
         }
 
         st_kafka_flush_calls_.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t flush_ns = now_steady_ns();
+        const uint64_t batch_records = static_cast<uint64_t>(batch_req_ids.size());
+        st_kafka_batch_records_.fetch_add(batch_records, std::memory_order_relaxed);
+        update_atomic_max(st_kafka_batch_records_max_, batch_records);
+        for (uint64_t append_ns : batch_append_ns) {
+            if (flush_ns >= append_ns) {
+                const uint64_t dwell_ns = flush_ns - append_ns;
+                st_kafka_batch_dwell_ns_.fetch_add(dwell_ns, std::memory_order_relaxed);
+                update_atomic_max(st_kafka_batch_dwell_max_ns_, dwell_ns);
+            }
+        }
+        switch (reason) {
+            case FLUSH_REASON_RECORDS:
+                st_kafka_flush_reason_records_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case FLUSH_REASON_BYTES:
+                st_kafka_flush_reason_bytes_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case FLUSH_REASON_AGE:
+                st_kafka_flush_reason_age_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case FLUSH_REASON_IDLE:
+                st_kafka_flush_reason_idle_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case FLUSH_REASON_FINAL:
+                st_kafka_flush_reason_final_.fetch_add(1, std::memory_order_relaxed);
+                break;
+        }
 
         std::string err;
         // True batching: build ONE multi-record payload for the whole batch,
@@ -1683,6 +1740,7 @@ void pg_executor::worker_loop() {
         batch_results.clear();
         batch_raft_log_idxs.clear();
         batch_leader_hints.clear();
+        batch_append_ns.clear();
         batch_bytes = 0;
         batch_start = std::chrono::steady_clock::now();
     };
@@ -1766,6 +1824,7 @@ void pg_executor::worker_loop() {
                     batch_results.push_back(result);
                     batch_raft_log_idxs.push_back(t.raft_log_idx);
                     batch_leader_hints.push_back(t.leader_node_hint);
+                    batch_append_ns.push_back(now_steady_ns());
                     batch_bytes += t.req_id.size() + result.size() + 32;
                 }
             } else {
@@ -1849,6 +1908,7 @@ void pg_executor::worker_loop() {
                 batch_results.push_back(result);
                 batch_raft_log_idxs.push_back(t.raft_log_idx);
                 batch_leader_hints.push_back(t.leader_node_hint);
+                batch_append_ns.push_back(now_steady_ns());
                 batch_bytes += t.req_id.size() + result.size() + 32;
                 const size_t max_records = (q_depth_after_pop >= 64) ? 512 : kKafkaBatchMaxRecords;
                 const size_t max_bytes = (q_depth_after_pop >= 64) ? (1024 * 1024) : kKafkaBatchMaxBytes;
@@ -1858,7 +1918,11 @@ void pg_executor::worker_loop() {
                 if (batch_req_ids.size() >= max_records ||
                     batch_bytes >= max_bytes ||
                     age_ms >= max_delay_ms) {
-                    flush_batch();
+                    flush_batch(batch_req_ids.size() >= max_records
+                                    ? FLUSH_REASON_RECORDS
+                                    : (batch_bytes >= max_bytes
+                                           ? FLUSH_REASON_BYTES
+                                           : FLUSH_REASON_AGE));
                 }
             }
         } else {
@@ -1871,12 +1935,12 @@ void pg_executor::worker_loop() {
         {
             std::lock_guard<std::mutex> lk(q_mu_);
             if (q_.empty()) {
-                flush_batch();
+                flush_batch(FLUSH_REASON_IDLE);
             }
         }
     }
 
-    flush_batch();
+    flush_batch(FLUSH_REASON_FINAL);
 }
 
 void pg_executor::event_loop() {
@@ -1884,21 +1948,69 @@ void pg_executor::event_loop() {
     std::vector<std::string> batch_results;
     std::vector<uint64_t> batch_raft_log_idxs;
     std::vector<int> batch_leader_hints;
+    std::vector<uint64_t> batch_append_ns;
     size_t batch_bytes = 0;
     auto batch_start = std::chrono::steady_clock::now();
 
-    auto flush_batch = [&]() {
+    enum event_flush_reason {
+        FLUSH_REASON_RECORDS,
+        FLUSH_REASON_BYTES,
+        FLUSH_REASON_AGE,
+        FLUSH_REASON_IDLE,
+        FLUSH_REASON_FINAL
+    };
+
+    auto update_atomic_max = [](std::atomic<uint64_t>& target, uint64_t value) {
+        uint64_t cur = target.load(std::memory_order_relaxed);
+        while (value > cur &&
+               !target.compare_exchange_weak(cur,
+                                             value,
+                                             std::memory_order_relaxed,
+                                             std::memory_order_relaxed)) {
+        }
+    };
+
+    auto flush_batch = [&](event_flush_reason reason = FLUSH_REASON_FINAL) {
         if (!kafka_enabled_ || batch_req_ids.empty()) {
             batch_req_ids.clear();
             batch_results.clear();
             batch_raft_log_idxs.clear();
             batch_leader_hints.clear();
+            batch_append_ns.clear();
             batch_bytes = 0;
             batch_start = std::chrono::steady_clock::now();
             return;
         }
 
         st_kafka_flush_calls_.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t flush_ns = now_steady_ns();
+        const uint64_t batch_records = static_cast<uint64_t>(batch_req_ids.size());
+        st_kafka_batch_records_.fetch_add(batch_records, std::memory_order_relaxed);
+        update_atomic_max(st_kafka_batch_records_max_, batch_records);
+        for (uint64_t append_ns : batch_append_ns) {
+            if (flush_ns >= append_ns) {
+                const uint64_t dwell_ns = flush_ns - append_ns;
+                st_kafka_batch_dwell_ns_.fetch_add(dwell_ns, std::memory_order_relaxed);
+                update_atomic_max(st_kafka_batch_dwell_max_ns_, dwell_ns);
+            }
+        }
+        switch (reason) {
+            case FLUSH_REASON_RECORDS:
+                st_kafka_flush_reason_records_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case FLUSH_REASON_BYTES:
+                st_kafka_flush_reason_bytes_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case FLUSH_REASON_AGE:
+                st_kafka_flush_reason_age_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case FLUSH_REASON_IDLE:
+                st_kafka_flush_reason_idle_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case FLUSH_REASON_FINAL:
+                st_kafka_flush_reason_final_.fetch_add(1, std::memory_order_relaxed);
+                break;
+        }
 
         std::string err;
         // True batching: build ONE multi-record payload, send ONCE.
@@ -1931,6 +2043,7 @@ void pg_executor::event_loop() {
         batch_results.clear();
         batch_raft_log_idxs.clear();
         batch_leader_hints.clear();
+        batch_append_ns.clear();
         batch_bytes = 0;
         batch_start = std::chrono::steady_clock::now();
     };
@@ -1955,6 +2068,7 @@ void pg_executor::event_loop() {
                 batch_results.push_back(out);
                 batch_raft_log_idxs.push_back(done_task.raft_log_idx);
                 batch_leader_hints.push_back(done_task.leader_node_hint);
+                batch_append_ns.push_back(now_steady_ns());
                 batch_bytes += done_task.req_id.size() + out.size() + 32;
                 st_kafka_immediate_records_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -1988,7 +2102,11 @@ void pg_executor::event_loop() {
                 if (batch_req_ids.size() >= kKafkaBatchMaxRecords ||
                     batch_bytes >= kKafkaBatchMaxBytes ||
                     age_ms >= kKafkaBatchMaxDelayMs) {
-                    flush_batch();
+                    flush_batch(batch_req_ids.size() >= kKafkaBatchMaxRecords
+                                    ? FLUSH_REASON_RECORDS
+                                    : (batch_bytes >= kKafkaBatchMaxBytes
+                                           ? FLUSH_REASON_BYTES
+                                           : FLUSH_REASON_AGE));
                 }
             }
             ++next_det_block_emit_seq;
@@ -2503,7 +2621,11 @@ void pg_executor::event_loop() {
             if (batch_req_ids.size() >= max_records ||
                 batch_bytes >= max_bytes ||
                 (max_delay_ms >= 0 && age_ms >= max_delay_ms)) {
-                flush_batch();
+                flush_batch(batch_req_ids.size() >= max_records
+                                ? FLUSH_REASON_RECORDS
+                                : (batch_bytes >= max_bytes
+                                       ? FLUSH_REASON_BYTES
+                                       : FLUSH_REASON_AGE));
             }
         }
 
@@ -2818,7 +2940,7 @@ void pg_executor::event_loop() {
         if (idle) {
             std::lock_guard<std::mutex> lk(q_mu_);
             if (q_.empty() && delayed_.empty()) {
-                flush_batch();
+                flush_batch(FLUSH_REASON_IDLE);
             }
         }
     }
@@ -2848,7 +2970,7 @@ void pg_executor::event_loop() {
             }
         }
     }
-    flush_batch();
+    flush_batch(FLUSH_REASON_FINAL);
 }
 
 } // namespace ariabc_pg
