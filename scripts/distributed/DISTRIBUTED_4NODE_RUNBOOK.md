@@ -18,17 +18,17 @@ It covers both:
 ### 2.1 Strict 4-node topology
 
 1. `PG1 + Raft1`: `neel@10.129.148.248`
-2. `PG2 + Raft2`: `neel@10.129.27.54`
-3. `PG3 + Raft3`: `neel@10.129.27.54`
+2. `PG2 + Raft2`: `neel@10.129.148.246`
+3. `PG3 + Raft3`: `neel@10.129.148.246`
 4. `Gateway`: `neel@10.129.148.236`
 5. `Control`: local machine at `/work/ARIABC/AriaBC`
 
 ### 2.2 Temporary fallback topology (if node3 has toolchain mismatch)
 
-If `10.129.27.54` fails with errors like `GLIBC_2.38 not found` / `GLIBCXX_3.4.32`, use:
+If `10.129.148.246` fails with errors like `GLIBC_2.38 not found` / `GLIBCXX_3.4.32`, use:
 
 1. `PG1 + Raft1`: `neel@10.129.148.248`
-2. `PG2 + Raft2`: `neel@10.129.27.54`
+2. `PG2 + Raft2`: `neel@10.129.148.246`
 3. `PG3 + Raft3`: `neel@10.129.148.236`
 4. `Gateway`: `neel@10.129.148.236` (co-located)
 
@@ -41,7 +41,7 @@ Use fallback only until node3 binaries are rebuilt compatibly.
    1. `--remote-repo-root /home/neel/Desktop/ariabc_cluster`
    2. `--remote-install-dir /home/neel/Desktop/ariabc_install`
 3. Before trusting a fix, sync script/binaries to remote hosts. Stale remote files can silently run old behavior.
-4. Keep host/user mapping correct (`10.129.27.54` uses `neel`).
+4. Keep host/user mapping correct (`10.129.148.246` uses `neel`).
 5. Ensure Python dependency availability (`psycopg`) on all remote hosts.
 
 ## 4. Mandatory Reset Before Session
@@ -51,9 +51,9 @@ Run before every distributed session.
 ```bash
 cd /work/ARIABC/AriaBC
 
-for h in 10.129.148.248 10.129.27.54 10.129.27.54 10.129.148.236; do
+for h in 10.129.148.248 10.129.148.246 10.129.148.246 10.129.148.236; do
   u="neel"
-  [[ "$h" == "10.129.27.54" ]] && u="neel"
+  [[ "$h" == "10.129.148.246" ]] && u="neel"
   ssh -i ~/.ssh/id_rsa -o BatchMode=yes -o StrictHostKeyChecking=no "$u@$h" '
     pkill -f "ariabc_pg_gateway|ariabc_pg_server|bench_nuraft_kafka_matrix.py|bench_threads_matrix.py" || true
     pkill -f "postgres .*5438|postgres .*5439|postgres .*5440" || true
@@ -80,11 +80,11 @@ PROFILE_CASE_TIMEOUT_S=240 \
 PROFILE_GATEWAY_TIMEOUT_S=60 \
 PROFILE_ABORT_ON_INVALID_CASE=1 \
 scripts/distributed/preflight_then_run_full.sh \
-  --pg-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
-  --pg-client-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
-  --raft-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
-  --raft-member-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
-  --raft-client-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
+  --pg-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
+  --pg-client-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
+  --raft-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
+  --raft-member-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
+  --raft-client-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
   --pg-users neel,neel,neel \
   --raft-users neel,neel,neel \
   --gateway-host 10.129.148.236 \
@@ -119,11 +119,11 @@ PROFILE_CASE_TIMEOUT_S=240 \
 PROFILE_GATEWAY_TIMEOUT_S=60 \
 PROFILE_ABORT_ON_INVALID_CASE=0 \
 scripts/distributed/preflight_then_run_full.sh \
-  --pg-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
-  --pg-client-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
-  --raft-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
-  --raft-member-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
-  --raft-client-hosts 10.129.148.248,10.129.27.54,10.129.27.54 \
+  --pg-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
+  --pg-client-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
+  --raft-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
+  --raft-member-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
+  --raft-client-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
   --pg-users neel,neel,neel \
   --raft-users neel,neel,neel \
   --gateway-host 10.129.148.236 \

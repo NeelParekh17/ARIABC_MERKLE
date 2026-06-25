@@ -10,7 +10,7 @@ set -euo pipefail
 #
 # Active nodes:
 #   neel@10.129.148.248    utkarsh-MS-7C96
-#   neel@10.129.27.54      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
+#   neel@10.129.148.246      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
 #   neel@10.129.148.236    neel-MS-7C96
 #
 # Default benchmark profiles (runs 3 × modes in this order):
@@ -51,7 +51,7 @@ source "$SCRIPT_DIR/benchmark_defaults.sh"
 # ---- Static node config ----
 NEEL_NODES=(
   "neel@10.129.148.248"
-  "neel@10.129.27.54"
+  "neel@10.129.148.246"
   "neel@10.129.148.236"
 )
 NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"

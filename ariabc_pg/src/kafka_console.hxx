@@ -5,6 +5,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <mutex>
 
 struct rd_kafka_s;
 
@@ -23,6 +24,10 @@ struct kafka_producer_stats {
     uint64_t poll_ns = 0;
     uint64_t backoff_sleep_ns = 0;
     uint64_t flush_ns = 0;
+    uint64_t producer_callback_poll_calls = 0;
+    uint64_t producer_callback_poll_ns = 0;
+    uint64_t delivery_pending_max = 0;
+    uint64_t delivery_callback_count = 0;
 };
 
 struct kafka_consumer_stats {
@@ -71,7 +76,9 @@ private:
     std::atomic<bool> poll_thread_stop_;
     std::thread poll_thread_;
 
+    mutable std::mutex stats_mutex_;
     kafka_producer_stats stats_;
+    uint64_t delivery_pending_ = 0;
 };
 
 class kafka_console_consumer {

@@ -15,7 +15,7 @@
 | Raft ID | Hostname | IP | OS | Role | Auth | Client Port | Raft Port |
 |---|---|---|---|---|---|---|---|
 | 1 | admin123-MS-7C96 | 10.129.148.236 | Ubuntu 24.04.3 | Raft node + Kafka broker | SSH key | 8000 | 9000 |
-| 2 | user4-MS-7C96 | 10.129.27.54 | Ubuntu 22.04.2 | Raft node | SSH key | 8000 | 9000 |
+| 2 | user4-MS-7C96 | 10.129.148.246 | Ubuntu 22.04.2 | Raft node | SSH key | 8000 | 9000 |
 | 3 | new-node | 10.129.148.179 | Ubuntu 22.04.5 | Raft node | sshpass | 8000 | 9000 |
 | 4 | utkarsh-MS-7C96 | 10.129.148.248 | Ubuntu 24.04.3 | Raft node | SSH key | **8001** | 9000 |
 | — | ASUS Laptop | local | Ubuntu 24.04.4 | Gateway + controller | — | — | — |
@@ -26,13 +26,13 @@
 ### 1.2 Raft Member String
 
 ```
-10.129.148.236:9000,10.129.27.54:9000,10.129.148.179:9000,10.129.148.248:9000
+10.129.148.236:9000,10.129.148.246:9000,10.129.148.179:9000,10.129.148.248:9000
 ```
 
 ### 1.3 Gateway Node Connections
 
 ```
-10.129.148.236:8000,10.129.27.54:8000,10.129.148.179:8000,10.129.148.248:8001
+10.129.148.236:8000,10.129.148.246:8000,10.129.148.179:8000,10.129.148.248:8001
 ```
 
 ---
@@ -255,7 +255,7 @@ This is the full distributed integrity guarantee as specified in the paper — a
 ```
 [17:46:41]   All 4 server client ports responding (attempt 4)  ← ~7s from start
 [17:46:46]   [admin123] ariabc_pg_server ready: id=1 raft=10.129.148.236:9000 clientPort=8000 members=4
-[17:46:47]   [user4]    ariabc_pg_server ready: id=2 raft=10.129.27.54:9000   clientPort=8000 members=4
+[17:46:47]   [user4]    ariabc_pg_server ready: id=2 raft=10.129.148.246:9000   clientPort=8000 members=4
 [17:46:47]   [new-node] ariabc_pg_server ready: id=3 raft=10.129.148.179:9000  clientPort=8000 members=4
 [17:46:47]   [utkarsh]  ariabc_pg_server ready: id=4 raft=10.129.148.248:9000  clientPort=8001 members=4
 ```

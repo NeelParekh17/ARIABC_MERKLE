@@ -935,8 +935,12 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         WSTableEntry *entry;
         BCTxID cand_id;
         slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
+        uint64 probe_lock_start = bcdb_ptrace_timer_start();
 
         SpinLockAcquire(partition_lock);
+        bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPA_LOCK_WAIT_US, probe_lock_start);
+        
+        uint64 probe_hash_start = bcdb_ptrace_timer_start();
         entry = hash_search_with_hash_value(table->map, tag,
                                             tuple_hash, HASH_FIND, &found);
         if (found && (entry->tx_id < activeTx->tx_id) &&
@@ -946,6 +950,7 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
 
             cand_id = entry->tx_id;
             SpinLockRelease(partition_lock);
+            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPA_HASH_LOOKUP_US, probe_hash_start);
 
             {
                 HASH_SEQ_STATUS seq;
@@ -983,6 +988,7 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
             return true;
         }
         SpinLockRelease(partition_lock);
+        bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPA_HASH_LOOKUP_US, probe_hash_start);
     }
 
     /*
@@ -997,8 +1003,12 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         WSTableEntry *entry;
         BCTxID cand_id;
         slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
+        uint64 probe_lock_start = bcdb_ptrace_timer_start();
 
         SpinLockAcquire(partition_lock);
+        bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPB_LOCK_WAIT_US, probe_lock_start);
+        
+        uint64 probe_hash_start = bcdb_ptrace_timer_start();
         entry = hash_search_with_hash_value(table->mapB, tag,
                                             tuple_hash, HASH_FIND, &found);
         if (found && (entry->tx_id < activeTx->tx_id) &&
@@ -1008,6 +1018,7 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
 
             cand_id = entry->tx_id;
             SpinLockRelease(partition_lock);
+            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPB_HASH_LOOKUP_US, probe_hash_start);
             /* T3-v2: same snapshot-based skip for mapB candidates. */
             cand_before_snapshot = bcdb_xid_preceded_snapshot(cand_id);
             if (cand_before_snapshot)
@@ -1021,6 +1032,7 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
             return true;
         }
         SpinLockRelease(partition_lock);
+        bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPB_HASH_LOOKUP_US, probe_hash_start);
     }
 
 check_done:;
@@ -2687,6 +2699,7 @@ void publish_ws_tableDT(int id)
 			uint64 clear_us = 0;
 			WSTableClearShard(ws_table, ws_table->map, false,
 							  &lock_acquire_us, &clear_us);
+			bcdb_ptrace_add_us(BCDB_PTRACE_METRIC_PUBLISH_ROTATION_LOCK_US, lock_acquire_us);
 			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
 								   hash_clear_start);
 			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
@@ -2719,6 +2732,7 @@ void publish_ws_tableDT(int id)
 			uint64 clear_us = 0;
 			WSTableClearShard(ws_table, ws_table->mapB, true,
 							  &lock_acquire_us, &clear_us);
+			bcdb_ptrace_add_us(BCDB_PTRACE_METRIC_PUBLISH_ROTATION_LOCK_US, lock_acquire_us);
 			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US,
 								   hash_clear_start);
 			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
@@ -2742,10 +2756,14 @@ void publish_ws_tableDT(int id)
 
     LIST_FOREACH(record, &ws_table_record, link)
     {
+        uint64 lock_start;
         tag = &(record->tag);
         tuple_hash = PredicateLockTargetTagHashCode(tag);
         partition_lock = WSTablePartitionLock(tuple_hash);
+        
+        lock_start = bcdb_ptrace_timer_start();
         SpinLockAcquire(partition_lock);
+        bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_PARTITION_LOCK_US, lock_start);
         entry = (WSTableEntry *)hash_search_with_hash_value(ws_table->mapActive,
                                                             tag,
                                                             tuple_hash,

@@ -63,6 +63,35 @@ struct pg_executor_stats {
     uint64_t kafka_flush_reason_idle = 0;
     uint64_t kafka_flush_reason_final = 0;
 
+    uint64_t kafka_batch_records_bin_1 = 0;
+    uint64_t kafka_batch_records_bin_2_15 = 0;
+    uint64_t kafka_batch_records_bin_16_63 = 0;
+    uint64_t kafka_batch_records_bin_64_255 = 0;
+    uint64_t kafka_batch_records_bin_256_plus = 0;
+
+    uint64_t kafka_batch_bytes_bin_le_1k = 0;
+    uint64_t kafka_batch_bytes_bin_1k_10k = 0;
+    uint64_t kafka_batch_bytes_bin_10k_100k = 0;
+    uint64_t kafka_batch_bytes_bin_100k_plus = 0;
+
+    uint64_t kafka_batch_dwell_bin_le_1ms = 0;
+    uint64_t kafka_batch_dwell_bin_1_5ms = 0;
+    uint64_t kafka_batch_dwell_bin_5_20ms = 0;
+    uint64_t kafka_batch_dwell_bin_20_100ms = 0;
+    uint64_t kafka_batch_dwell_bin_100ms_plus = 0;
+
+    uint64_t kafka_flush_backlog_bin_0 = 0;
+    uint64_t kafka_flush_backlog_bin_1_15 = 0;
+    uint64_t kafka_flush_backlog_bin_16_63 = 0;
+    uint64_t kafka_flush_backlog_bin_64_255 = 0;
+    uint64_t kafka_flush_backlog_bin_256_plus = 0;
+
+    uint64_t kafka_flush_inflight_bin_0 = 0;
+    uint64_t kafka_flush_inflight_bin_1_15 = 0;
+    uint64_t kafka_flush_inflight_bin_16_63 = 0;
+    uint64_t kafka_flush_inflight_bin_64_255 = 0;
+    uint64_t kafka_flush_inflight_bin_256_plus = 0;
+
     uint64_t queue_depth_samples = 0;
     uint64_t queue_depth_sum = 0;
     uint64_t queue_depth_max = 0;
@@ -132,6 +161,9 @@ struct kafka_options {
 
 class pg_executor {
 public:
+    static int configured_batch_delay_us();
+    static int override_batch_delay_us();
+
     using completion_callback = std::function<void(uint64_t)>;
 
     pg_executor(int node_id,
@@ -323,6 +355,35 @@ private:
     std::atomic<uint64_t> st_kafka_flush_reason_age_{0};
     std::atomic<uint64_t> st_kafka_flush_reason_idle_{0};
     std::atomic<uint64_t> st_kafka_flush_reason_final_{0};
+
+    std::atomic<uint64_t> st_kafka_batch_records_bin_1_{0};
+    std::atomic<uint64_t> st_kafka_batch_records_bin_2_15_{0};
+    std::atomic<uint64_t> st_kafka_batch_records_bin_16_63_{0};
+    std::atomic<uint64_t> st_kafka_batch_records_bin_64_255_{0};
+    std::atomic<uint64_t> st_kafka_batch_records_bin_256_plus_{0};
+
+    std::atomic<uint64_t> st_kafka_batch_bytes_bin_le_1k_{0};
+    std::atomic<uint64_t> st_kafka_batch_bytes_bin_1k_10k_{0};
+    std::atomic<uint64_t> st_kafka_batch_bytes_bin_10k_100k_{0};
+    std::atomic<uint64_t> st_kafka_batch_bytes_bin_100k_plus_{0};
+
+    std::atomic<uint64_t> st_kafka_batch_dwell_bin_le_1ms_{0};
+    std::atomic<uint64_t> st_kafka_batch_dwell_bin_1_5ms_{0};
+    std::atomic<uint64_t> st_kafka_batch_dwell_bin_5_20ms_{0};
+    std::atomic<uint64_t> st_kafka_batch_dwell_bin_20_100ms_{0};
+    std::atomic<uint64_t> st_kafka_batch_dwell_bin_100ms_plus_{0};
+
+    std::atomic<uint64_t> st_kafka_flush_backlog_bin_0_{0};
+    std::atomic<uint64_t> st_kafka_flush_backlog_bin_1_15_{0};
+    std::atomic<uint64_t> st_kafka_flush_backlog_bin_16_63_{0};
+    std::atomic<uint64_t> st_kafka_flush_backlog_bin_64_255_{0};
+    std::atomic<uint64_t> st_kafka_flush_backlog_bin_256_plus_{0};
+
+    std::atomic<uint64_t> st_kafka_flush_inflight_bin_0_{0};
+    std::atomic<uint64_t> st_kafka_flush_inflight_bin_1_15_{0};
+    std::atomic<uint64_t> st_kafka_flush_inflight_bin_16_63_{0};
+    std::atomic<uint64_t> st_kafka_flush_inflight_bin_64_255_{0};
+    std::atomic<uint64_t> st_kafka_flush_inflight_bin_256_plus_{0};
 
     size_t queue_high_wm_ = 0;
     size_t queue_low_wm_ = 0;

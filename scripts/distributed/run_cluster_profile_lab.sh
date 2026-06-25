@@ -4,14 +4,14 @@ set -euo pipefail
 # Fixed cluster profile for current 4-node lab setup.
 # Default role split:
 # - PG1+RAFT1: 10.129.148.248 (neel)               - utkarsh-MS-7C96 (Intel SSD on /)
-# - PG2+RAFT2: 10.129.27.54 (neel)  - user4-MS-7C96
+# - PG2+RAFT2: 10.129.148.246 (neel)  - user4-MS-7C96
 # - PG3+RAFT3: 10.129.148.236 (neel)               - admin123 (Ubuntu 24.04, co-located with GW)
 # - GW only  : 10.129.148.236 (neel)               - admin123
-# NOTE: 10.129.27.54 (user4-MS-7C96) is Ubuntu 22.04 (glibc 2.35) and cannot run prebuilt
+# NOTE: 10.129.148.246 (user4-MS-7C96) is Ubuntu 22.04 (glibc 2.35) and cannot run prebuilt
 #       ariabc_pg binaries (require glibc 2.38). Use admin123 (Ubuntu 24.04) as PG3 instead.
 #
-# NOTE: 10.129.148.248 (utkarsh-MS-7C96) is RETIRED; use 10.129.27.54 (user4-MS-7C96) for PG3.
-# NOTE: user4 (10.129.27.54) is Ubuntu 22.04; runner rebuilds postgres on-host automatically.
+# NOTE: 10.129.148.248 (utkarsh-MS-7C96) is RETIRED; use 10.129.148.246 (user4-MS-7C96) for PG3.
+# NOTE: user4 (10.129.148.246) is Ubuntu 22.04; runner rebuilds postgres on-host automatically.
 #       explicitly (for example under /home/bibrank/project/data/ariabc_bench).
 #
 # Rationale:
@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-PG_HOSTS="${PROFILE_PG_HOSTS:-10.129.148.248,10.129.27.54,10.129.148.236}"
+PG_HOSTS="${PROFILE_PG_HOSTS:-10.129.148.248,10.129.148.246,10.129.148.236}"
 PG_USERS="${PROFILE_PG_USERS:-neel,neel,neel}"
 
 # New preferred vars:

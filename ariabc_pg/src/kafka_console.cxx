@@ -238,7 +238,16 @@ bool kafka_console_producer::start(const std::string& bootstrap,
     poll_thread_ = std::thread([this]() {
         rd_kafka_t* rk_local = reinterpret_cast<rd_kafka_t*>(rk_);
         while (!poll_thread_stop_.load(std::memory_order_relaxed)) {
+            const auto p0 = std::chrono::steady_clock::now();
             rd_kafka_poll(rk_local, 1);
+            const auto p1 = std::chrono::steady_clock::now();
+            uint64_t poll_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count());
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                ++stats_.producer_callback_poll_calls;
+                stats_.producer_callback_poll_ns += poll_ns;
+            }
         }
         rd_kafka_poll(rk_local, 0);
     });
@@ -257,8 +266,11 @@ bool kafka_console_producer::send_payload(const std::string& payload,
         return false;
     }
     rd_kafka_t* rk = reinterpret_cast<rd_kafka_t*>(rk_);
-    ++stats_.send_calls;
-    stats_.payload_bytes += static_cast<uint64_t>(payload.size());
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        ++stats_.send_calls;
+        stats_.payload_bytes += static_cast<uint64_t>(payload.size());
+    }
 
     for (int attempt = 0; attempt < 6; ++attempt) {
         delivery_opaque* opaque = new delivery_opaque;
@@ -275,22 +287,34 @@ bool kafka_console_producer::send_payload(const std::string& payload,
             RD_KAFKA_V_OPAQUE(opaque),
             RD_KAFKA_V_END);
         const auto p1 = std::chrono::steady_clock::now();
-        stats_.producev_ns += static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count());
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.producev_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count());
+        }
 
         if (e == RD_KAFKA_RESP_ERR_NO_ERROR) {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
             ++stats_.send_ok;
+            ++delivery_pending_;
+            update_max_u64(stats_.delivery_pending_max, delivery_pending_);
             return true;
         }
 
         delete opaque;
         if (e == RD_KAFKA_RESP_ERR__QUEUE_FULL) {
-            ++stats_.queue_full_retries;
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                ++stats_.queue_full_retries;
+            }
             const auto q0 = std::chrono::steady_clock::now();
             rd_kafka_poll(rk, 1);
             const auto q1 = std::chrono::steady_clock::now();
-            stats_.poll_ns += static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(q1 - q0).count());
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.poll_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(q1 - q0).count());
+            }
             continue;
         }
 
@@ -303,13 +327,19 @@ bool kafka_console_producer::send_payload(const std::string& payload,
 }
 
 void kafka_console_producer::note_delivery(uint64_t delivery_ns, bool error) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.delivery_callback_count;
     ++stats_.delivery_calls;
     if (error) ++stats_.delivery_errors;
     stats_.delivery_ns += delivery_ns;
     update_max_u64(stats_.delivery_max_ns, delivery_ns);
+    if (delivery_pending_ > 0) {
+        --delivery_pending_;
+    }
 }
 
 kafka_producer_stats kafka_console_producer::stats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_;
 }
 
@@ -323,8 +353,11 @@ void kafka_console_producer::stop() {
         const auto f0 = std::chrono::steady_clock::now();
         rd_kafka_flush(rk, 2000);
         const auto f1 = std::chrono::steady_clock::now();
-        stats_.flush_ns += static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(f1 - f0).count());
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.flush_ns += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(f1 - f0).count());
+        }
         rd_kafka_destroy(rk);
         rk_ = nullptr;
     }

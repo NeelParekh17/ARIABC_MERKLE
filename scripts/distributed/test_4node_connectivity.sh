@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 declare -a NODE_IDS=(1 2 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.248)
+declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-sunil1165}"

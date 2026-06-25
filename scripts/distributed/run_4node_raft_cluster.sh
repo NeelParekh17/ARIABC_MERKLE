@@ -3,7 +3,7 @@
 #
 # Topology (from plan.txt):
 #   Node 1 (RAFT ID 1): admin123   10.129.148.236  neel  [Kafka host]  Ubuntu 24.04
-#   Node 2 (RAFT ID 2): user4      10.129.27.54    neel               Ubuntu 22.04
+#   Node 2 (RAFT ID 2): user4      10.129.148.246    neel               Ubuntu 22.04
 #   Node 4 (RAFT ID 4): utkarsh    10.129.148.248  neel               Ubuntu 24.04
 #   Gateway            : ASUS laptop (this machine, local)
 #   Kafka broker       : 10.129.148.236:9092
@@ -34,6 +34,25 @@
 
 set -euo pipefail
 
+cleanup_os_profile() {
+  [[ "${ARIABC_OS_PROFILE:-0}" -eq 1 ]] || return 0
+  [[ -n "${CLUSTER_PASSWORD:-}" ]] || return 0
+  [[ -n "${NODE_IDS[@]+has_nodes}" ]] || return 0
+
+  echo "  Stopping OS profiling..."
+  for idx in "${!NODE_IDS[@]}"; do
+    node_ssh "$idx" "
+      for cmd in mpstat iostat sar pidstat; do
+        pidfile='$REMOTE_LOG_DIR/os_'\${cmd}'.pid'
+        if [[ -f \"\$pidfile\" ]]; then
+          kill \"\$(cat \"\$pidfile\")\" 2>/dev/null || true
+          rm -f \"\$pidfile\"
+        fi
+      done
+    " || true
+  done
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -41,7 +60,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # Cluster topology
 # ---------------------------------------------------------------------------
 declare -a NODE_IDS=(1 2 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.27.54 10.129.148.248)
+declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 # Ubuntu 22.04 nodes need locally-built binary (GLIBC 2.35, rdkafka from ~/Desktop/rdkafka_local)
@@ -87,6 +106,8 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10)
 
 LOG_DIR="$REPO_ROOT/scripts/bench_full_results/cluster4_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/runner.log"
+REMOTE_LOG_DIR="/tmp/ariabc_cluster"
 
 # ===========================================================================
 # Function: log
@@ -792,6 +813,11 @@ collect_cluster_logs() {
         "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
         "$LOG_DIR/" 2>/dev/null || true
     fi
+    if [[ "${ARIABC_OS_PROFILE:-0}" -eq 1 ]]; then
+      mkdir -p "$LOG_DIR/os_node${id}_${name}"
+      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+        "$user@$ip:$REMOTE_LOG_DIR/os_*.log" "$LOG_DIR/os_node${id}_${name}/" 2>/dev/null || true
+    fi
   done
 }
 
@@ -937,7 +963,9 @@ build_raft_members() {
 
 RAFT_MEMBERS="$(build_raft_members)"
 
-if [[ "$NO_KAFKA" -eq 0 && "$KAFKA_COMPLETION_MODE" == "majority" ]]; then
+if [[ "$NO_KAFKA" -eq 0 &&
+      ( "$KAFKA_COMPLETION_MODE" == "majority" ||
+        "$KAFKA_COMPLETION_MODE" == "majority_async_all3" ) ]]; then
   RUN_META_COMPLETION_PATH="kafka_majority"
 else
   RUN_META_COMPLETION_PATH="direct"
@@ -961,6 +989,8 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'kafka_bootstrap=%s\n' "$KAFKA_BOOTSTRAP"
   printf 'result_topic=%s\n' "$KAFKA_RESULT_TOPIC"
 } > "$LOG_DIR/run_meta.env"
+
+trap cleanup_os_profile EXIT INT TERM
 
 # ---------------------------------------------------------------------------
 # Phase 0: Cleanup
@@ -1359,6 +1389,27 @@ for idx in "${!NODE_IDS[@]}"; do
     echo \"ariabc_pg_gateway_sha256=\$gw_sha path=\$gw_path\"
     echo \"postgres_sha256=\$pg_sha path=$REMOTE_INSTALL_DIR/bin/postgres\"
   " 2>&1 | sed "s/^/    /"
+done
+
+# ---------------------------------------------------------------------------
+# Phase 1.8: Clock Validity Preflight
+# ---------------------------------------------------------------------------
+log "=== Phase 1.8: Clock Validity Preflight ==="
+log "  [local] (gateway) clock metrics:"
+(
+  date +%s%3N
+  timedatectl status || true
+  chronyc tracking || true
+) 2>&1 | sed "s/^/    /" | tee -a "$LOG_FILE"
+
+for idx in "${!NODE_IDS[@]}"; do
+  name="${NODE_NAMES[$idx]}"
+  log "  [$name] (server) clock metrics:"
+  node_ssh "$idx" "
+    date +%s%3N
+    timedatectl status || true
+    chronyc tracking || true
+  " 2>&1 | sed "s/^/    /" | tee -a "$LOG_FILE"
 done
 
 # ---------------------------------------------------------------------------
@@ -1896,6 +1947,7 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    export ARIABC_DET_COMPLETION_ONLY_SUCCESS='${DET_COMPLETION_ONLY_SUCCESS}'
 	    export ARIABC_DET_ALLOW_RAW_COMPAT='${DET_RAW_SQL}'
 	    export ARIABC_DET_BLOCK_SKIP_READONLY='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
+	    export ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US='${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-}'
 	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
 	    export ARIABC_RESULT_PUBLISH_REPLICA_LIMIT='${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT}'
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
@@ -2113,6 +2165,25 @@ _gw_common_args() {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 6 execution: OS Profiling setup
+# ---------------------------------------------------------------------------
+if [[ "${ARIABC_OS_PROFILE:-0}" -eq 1 ]]; then
+  log "  Starting OS profiling across servers (mpstat, iostat, sar, pidstat)..."
+  for idx in "${!NODE_IDS[@]}"; do
+    node_ssh "$idx" "
+      mkdir -p '$REMOTE_LOG_DIR'
+      nohup mpstat -P ALL 1 > '$REMOTE_LOG_DIR/os_mpstat.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_mpstat.pid'
+      nohup iostat -xz 1 > '$REMOTE_LOG_DIR/os_iostat.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_iostat.pid'
+      nohup sar -n DEV 1 > '$REMOTE_LOG_DIR/os_sar.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_sar.pid'
+      SPID=\$(pgrep -x ariabc_pg_server | head -1 || true)
+      if [[ -n \"\$SPID\" ]]; then
+        nohup pidstat -dur -p \"\$SPID\" 1 > '$REMOTE_LOG_DIR/os_pidstat.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_pidstat.pid'
+      fi
+    "
+  done
+fi
+
+# ---------------------------------------------------------------------------
 # Phase 6 execution: pipeline mode (original — one gateway process)
 # ---------------------------------------------------------------------------
 if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
@@ -2304,6 +2375,11 @@ fi
 
 END_S="$(date +%s)"
 ELAPSED=$(( END_S - START_S ))
+
+# OS profiling cleanup is now handled by trap on exit, but we trigger it early here
+# so it finishes exactly when the test finishes.
+cleanup_os_profile
+
 
 # ---------------------------------------------------------------------------
 # Phase 7: Results

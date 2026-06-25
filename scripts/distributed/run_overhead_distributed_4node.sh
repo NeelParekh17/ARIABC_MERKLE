@@ -4,7 +4,7 @@
 # Topology (3 distinct PG machines, all different from old 3-node where 240 appeared twice):
 #   PG Node 1 : 10.129.148.236  (neel)    — also hosts gateway + Kafka
 #   PG Node 2 : 10.129.148.248  (neel)    — new machine, no firewall issues
-#   PG Node 3 : 10.129.27.54  (neel)
+#   PG Node 3 : 10.129.148.246  (neel)
 #   Gateway + Kafka : 10.129.148.236  (neel)
 #
 # Note: 10.129.148.248 is firewalled (inbound DROP on all ports except SSH port 22),
@@ -20,7 +20,7 @@ source "$ROOT/scripts/distributed/benchmark_defaults.sh"
 # --------------------------------------------------------------------------
 # Topology — 3 distinct PG machines + gateway
 # --------------------------------------------------------------------------
-PG_HOSTS="10.129.148.236,10.129.148.248,10.129.27.54"
+PG_HOSTS="10.129.148.236,10.129.148.248,10.129.148.246"
 RAFT_HOSTS="$PG_HOSTS"
 RAFT_MEMBER_HOSTS="$PG_HOSTS"
 RAFT_CLIENT_HOSTS="$PG_HOSTS"
@@ -55,7 +55,7 @@ if [[ "$BENCH_PRESET" != "canonical" && "$BENCH_PRESET" != "tuned" ]]; then
   exit 2
 fi
 
-export ARIABC_SSH_USER_MAP="10.129.27.54=neel"
+export ARIABC_SSH_USER_MAP="10.129.148.246=neel"
 export PROFILE_PG_CONFIG_MODE="${PROFILE_PG_CONFIG_MODE:-$BENCH_PRESET}"
 export PROFILE_AUTO_DET_MODE="${PROFILE_AUTO_DET_MODE:-1}"
 export PROFILE_DET_RUNTIME_MODE="${PROFILE_DET_RUNTIME_MODE:-throughput}"
@@ -106,7 +106,7 @@ bootstrap_nodes() {
   echo "--- Bootstrapping persistent dirs on all nodes ---"
 
   # PG nodes: create dirs + sync install dir + sync scripts
-  for node_user_host in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.27.54"; do
+  for node_user_host in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
     local user_host="$node_user_host"
     echo "  Bootstrap: $user_host"
     "${ssh_base[@]}" "$user_host" "mkdir -p $REMOTE_REPO_ROOT/scripts $REMOTE_REPO_ROOT/NuRaft $REMOTE_REPO_ROOT/ariabc_pg/build/bin $REMOTE_INSTALL_DIR"

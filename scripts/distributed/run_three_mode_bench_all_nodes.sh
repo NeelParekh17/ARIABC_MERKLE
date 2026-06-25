@@ -36,7 +36,7 @@ source "$SCRIPT_DIR/benchmark_defaults.sh"
 # ---- Static node config (same as run_parallel_ycsb_all_nodes.sh) ----
 NEEL_NODES=(
   "neel@10.129.148.248"
-  "neel@10.129.27.54"
+  "neel@10.129.148.246"
   "neel@10.129.148.236"
 )
 NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"
