@@ -19,13 +19,15 @@ declare -a NODE_IDS=(1 2 4)
 declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
-CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-sunil1165}"
+declare -a NODE_CLIENT_PORTS=(8000 8000 8001)
+ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
+CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 
 KAFKA_HOST="10.129.148.236"
 KAFKA_PORT=9092
+KAFKA_HOME_REMOTE="/home/neel/Desktop/kafka_2.13-3.7.0"
 KAFKA_RESULT_TOPIC="ariabc_results"
 RAFT_PORT=9000
-CLIENT_PORT=8000
 DB_PORT=5438
 DB_USER=postgres
 
@@ -94,16 +96,17 @@ for idx in "${!NODE_IDS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Check 3: ariabc_pg_server on :8000
+# Check 3: ariabc_pg_server
 # ---------------------------------------------------------------------------
-log "=== Check 3: ariabc_pg_server on :$CLIENT_PORT ==="
+log "=== Check 3: ariabc_pg_server ==="
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
   ip="${NODE_IPS[$idx]}"
-  if node_ssh "$idx" "ss -tlnp 2>/dev/null | grep -q ':$CLIENT_PORT'" 2>/dev/null; then
-    ok "ariabc_pg_server $name ($ip) port :$CLIENT_PORT listening"
+  cport="${NODE_CLIENT_PORTS[$idx]}"
+  if node_ssh "$idx" "ss -tlnp 2>/dev/null | grep -q ':$cport'" 2>/dev/null; then
+    ok "ariabc_pg_server $name ($ip) port :$cport listening"
   else
-    fail "ariabc_pg_server $name ($ip) — port :$CLIENT_PORT NOT listening"
+    fail "ariabc_pg_server $name ($ip) — port :$cport NOT listening"
   fi
 done
 
@@ -152,7 +155,7 @@ fi
 GW_NODES=""
 for idx in "${!NODE_IDS[@]}"; do
   [[ -n "$GW_NODES" ]] && GW_NODES+=","
-  GW_NODES+="${NODE_IPS[$idx]}:${CLIENT_PORT}"
+  GW_NODES+="${NODE_IPS[$idx]}:${NODE_CLIENT_PORTS[$idx]}"
 done
 
 # ---------------------------------------------------------------------------

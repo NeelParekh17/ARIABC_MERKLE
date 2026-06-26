@@ -143,6 +143,7 @@ extern BlockMeta     *block_meta;
 extern Size     block_pool_size(void);
 extern void     create_block_pool(void);
 extern void     bcdb_reset_block_pool_state(void);
+extern void     bcdb_reset_gate_stats(void);
 extern int      get_commited(int id);
 extern void     set_commited(int id,  BCDBShmXact* tx);
 extern BCBlock* get_block_by_id(BCBlockID id, bool create_if_not_found);

@@ -35,7 +35,8 @@ declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 declare -a NODE_CLIENT_PORTS=(8000 8000 8001)
 
-CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-sunil1165}"
+ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
+CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 
 INSTALL_DIR="/home/neel/Desktop/ariabc_install"
 DB_PORT=5438
@@ -145,7 +146,7 @@ for idx in "${!NODE_IPS[@]}"; do
 done
 
 EMPTY_PASS=1
-for idx in 1 2; do
+for ((idx=1; idx<${#NODE_IPS[@]}; idx++)); do
     if [[ "${EMPTY_ROOTS[$idx]}" != "${EMPTY_ROOTS[0]}" ]]; then
         log "  MISMATCH: ${NODE_NAMES[$idx]}=${EMPTY_ROOTS[$idx]} vs ${NODE_NAMES[0]}=${EMPTY_ROOTS[0]}"
         EMPTY_PASS=0
@@ -323,9 +324,9 @@ echo ""
 if [[ "$PASS" -eq 1 && "$ALL_ROWS_OK" -eq 1 ]]; then
     echo "======================================================"
     echo "  MERKLE CONSISTENCY TEST: PASS"
-    echo "  Merkle root (all 4 nodes): $REFERENCE"
-    echo "  Table: $TEST_TABLE | Rows: $N_EXPECTED_ROWS | Nodes: 4"
-    echo "  All 4 nodes independently computed identical Merkle"
+    echo "  Merkle root (all ${#NODE_IPS[@]} nodes): $REFERENCE"
+    echo "  Table: $TEST_TABLE | Rows: $N_EXPECTED_ROWS | Nodes: ${#NODE_IPS[@]}"
+    echo "  All ${#NODE_IPS[@]} nodes independently computed identical Merkle"
     echo "  root hashes after deterministic distributed execution."
     echo "======================================================"
     exit 0

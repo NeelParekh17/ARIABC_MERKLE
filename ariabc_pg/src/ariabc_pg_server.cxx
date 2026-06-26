@@ -1181,12 +1181,39 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " kafka_flush_ms=" << (kprod.flush_ns / 1000000.0)
         << " kafka_callback_poll_calls=" << kprod.producer_callback_poll_calls
         << " kafka_callback_poll_ms=" << (kprod.producer_callback_poll_ns / 1000000.0)
-        << " kafka_delivery_pending_max=" << kprod.delivery_pending_max
+        << " kafka_producer_delivery_pending_max=" << kprod.delivery_pending_max
         << " kafka_result_batch_delay_override_us=" << ariabc_pg::pg_executor::override_batch_delay_us()
         << " kafka_worker_low_backlog_delay_us=1000"
         << " kafka_worker_high_backlog_delay_us=-1"
         << " kafka_event_loop_default_delay_us=1000"
         << " kafka_event_loop_high_backlog_delay_us=-1"
+        << " det_fastpath_blocks_submitted=" << exec.det_fastpath_blocks_submitted
+        << " det_fastpath_blocks_returned=" << exec.det_fastpath_blocks_returned
+        << " det_fastpath_blocks_emitted=" << exec.det_fastpath_blocks_emitted
+        << " det_fastpath_ready_blocks_max=" << exec.det_fastpath_ready_blocks_max
+        << " det_fastpath_last_submitted_block_id=" << exec.det_fastpath_last_submitted_block_id
+        << " det_fastpath_last_returned_block_id=" << exec.det_fastpath_last_returned_block_id
+        << " det_fastpath_last_returned_block_seq=" << exec.det_fastpath_last_returned_block_seq
+        << " det_fastpath_last_emitted_seq=" << exec.det_fastpath_last_emitted_seq
+        << " det_fastpath_submit_to_return_max_us=" << exec.det_fastpath_submit_to_return_max_us
+        << " det_fastpath_send_failures=" << exec.det_fastpath_send_failures
+        << " det_fastpath_requeues=" << exec.det_fastpath_requeues
+        << " det_fastpath_reconnect_failures=" << exec.det_fastpath_reconnect_failures
+        << " result_flush_count=" << exec.result_flush_count
+        << " result_flush_records_total=" << exec.result_flush_records_total
+        << " result_flush_records_max=" << exec.result_flush_records_max
+        << " result_flush_due_to_record_cap=" << exec.result_flush_due_to_record_cap
+        << " result_flush_due_to_byte_cap=" << exec.result_flush_due_to_byte_cap
+        << " result_flush_due_to_age=" << exec.result_flush_due_to_age
+        << " result_flush_due_to_idle=" << exec.result_flush_due_to_idle
+        << " result_flush_due_to_error=" << exec.result_flush_due_to_error
+        << " result_flush_due_to_shutdown=" << exec.result_flush_due_to_shutdown
+        << " result_flush_while_delivery_pending_gt_8=" << exec.result_flush_while_delivery_pending_gt_8
+        << " result_flush_while_delivery_pending_gt_32=" << exec.result_flush_while_delivery_pending_gt_32
+        << " kafka_delivery_pending_current=" << exec.kafka_delivery_pending_current
+        << " kafka_delivery_pending_max=" << exec.kafka_delivery_pending_max
+        << " kafka_delivery_pending_over_8_events=" << exec.kafka_delivery_pending_over_8_events
+        << " kafka_delivery_pending_over_32_events=" << exec.kafka_delivery_pending_over_32_events
         << std::endl;
 }
 

@@ -129,6 +129,37 @@ struct pg_executor_stats {
     uint64_t det_raw_compat_activations = 0;
     std::string det_raw_compat_first_req_id;
     std::string det_raw_compat_first_sql_prefix;
+
+    /* Block fastpath visibility (distinguish PG vs server vs gateway stalls). */
+    uint64_t det_fastpath_blocks_submitted = 0;   /* blocks handed to PG */
+    uint64_t det_fastpath_blocks_returned = 0;    /* blocks PG responded to */
+    uint64_t det_fastpath_blocks_emitted = 0;     /* blocks emitted to Kafka */
+    uint64_t det_fastpath_ready_blocks_max = 0;   /* peak in-flight ready blocks */
+    uint64_t det_fastpath_last_submitted_block_id = 0;
+    uint64_t det_fastpath_last_returned_block_id = 0;
+    uint64_t det_fastpath_last_returned_block_seq = 0;
+    uint64_t det_fastpath_last_emitted_seq = 0;
+    uint64_t det_fastpath_submit_to_return_max_us = 0; /* max round-trip µs PG->response */
+    uint64_t det_fastpath_send_failures = 0;
+    uint64_t det_fastpath_requeues = 0;
+    uint64_t det_fastpath_reconnect_failures = 0;
+
+    // Telemetry fields for result flush and delivery pending
+    uint64_t result_flush_count = 0;
+    uint64_t result_flush_records_total = 0;
+    uint64_t result_flush_records_max = 0;
+    uint64_t result_flush_due_to_record_cap = 0;
+    uint64_t result_flush_due_to_byte_cap = 0;
+    uint64_t result_flush_due_to_age = 0;
+    uint64_t result_flush_due_to_idle = 0;
+    uint64_t result_flush_due_to_error = 0;
+    uint64_t result_flush_due_to_shutdown = 0;
+    uint64_t result_flush_while_delivery_pending_gt_8 = 0;
+    uint64_t result_flush_while_delivery_pending_gt_32 = 0;
+    uint64_t kafka_delivery_pending_current = 0;
+    uint64_t kafka_delivery_pending_max = 0;
+    uint64_t kafka_delivery_pending_over_8_events = 0;
+    uint64_t kafka_delivery_pending_over_32_events = 0;
 };
 
 struct db_options {
@@ -224,7 +255,7 @@ private:
     PGconn* acquire_conn();
     void release_conn(PGconn* c);
 
-    std::string exec_sql(PGconn* c, const std::string& sql);
+    std::string exec_sql(PGconn* c, const std::string& sql, bool* is_error = nullptr);
     bool exec_det_block_batch(PGconn* c,
                               uint64_t tx_key_start,
                               const std::vector<task>& tasks,
@@ -286,6 +317,7 @@ private:
         task cur;
         bool has_task = false;
         bool has_det_block = false;
+        uint64_t det_block_id = 0;
         uint64_t det_block_seq = 0;
         uint64_t det_block_tx_key_start = 0;
         std::vector<task> det_block_tasks;
@@ -420,6 +452,37 @@ private:
     std::atomic<bool> st_det_block_seen_{false};
     std::atomic<bool> st_det_block_fallback_seen_{false};
     std::atomic<uint64_t> next_dispatch_seq_{1};
+
+    /* Block fastpath visibility counters. */
+    std::atomic<uint64_t> st_fastpath_blocks_submitted_{0};
+    std::atomic<uint64_t> st_fastpath_blocks_returned_{0};
+    std::atomic<uint64_t> st_fastpath_blocks_emitted_{0};
+    std::atomic<uint64_t> st_fastpath_ready_blocks_max_{0};
+    std::atomic<uint64_t> st_fastpath_last_submitted_block_id_{0};
+    std::atomic<uint64_t> st_fastpath_last_returned_block_id_{0};
+    std::atomic<uint64_t> st_fastpath_last_returned_block_seq_{0};
+    std::atomic<uint64_t> st_fastpath_last_emitted_seq_{0};
+    std::atomic<uint64_t> st_fastpath_submit_to_return_max_us_{0};
+    std::atomic<uint64_t> st_fastpath_send_failures_{0};
+    std::atomic<uint64_t> st_fastpath_requeues_{0};
+    std::atomic<uint64_t> st_fastpath_reconnect_failures_{0};
+
+    // Atomic telemetry counters for result flush and delivery pending
+    std::atomic<uint64_t> st_result_flush_count_{0};
+    std::atomic<uint64_t> st_result_flush_records_total_{0};
+    std::atomic<uint64_t> st_result_flush_records_max_{0};
+    std::atomic<uint64_t> st_result_flush_due_to_record_cap_{0};
+    std::atomic<uint64_t> st_result_flush_due_to_byte_cap_{0};
+    std::atomic<uint64_t> st_result_flush_due_to_age_{0};
+    std::atomic<uint64_t> st_result_flush_due_to_idle_{0};
+    std::atomic<uint64_t> st_result_flush_due_to_error_{0};
+    std::atomic<uint64_t> st_result_flush_due_to_shutdown_{0};
+    std::atomic<uint64_t> st_result_flush_while_delivery_pending_gt_8_{0};
+    std::atomic<uint64_t> st_result_flush_while_delivery_pending_gt_32_{0};
+    std::atomic<uint64_t> st_kafka_delivery_pending_max_{0};
+    std::atomic<uint64_t> st_kafka_delivery_pending_over_8_events_{0};
+    std::atomic<uint64_t> st_kafka_delivery_pending_over_32_events_{0};
+
     std::mutex det_ordered_apply_mu_;
     uint64_t det_next_ordered_apply_seq_ = 1;
     std::map<uint64_t, uint64_t> det_ordered_apply_ready_;

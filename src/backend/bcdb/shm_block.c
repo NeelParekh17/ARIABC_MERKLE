@@ -1,5 +1,6 @@
 #include "bcdb/shm_block.h"
 #include "postgres.h"
+#include "miscadmin.h"
 #include "storage/shmem.h"
 #include "utils/hsearch.h"
 #include <sys/queue.h>
@@ -10,6 +11,246 @@
  */
 #undef printf
 #define printf(...) ((void) 0)
+
+/*
+ * Shared-memory sharded gate statistics array.
+ */
+BCDBGatesStatsShard *bcdb_gate_stats_shards = NULL;
+
+/* --------------------------------------------------------------------------
+ * bcdb_log_gate_snapshot
+ *
+ * Emits a PROFILE_BCDB_GATE log line with a point-in-time snapshot of every
+ * gate counter and the current watermark state.  All reads are atomic with
+ * RELAXED ordering (acceptable for diagnostic purposes).
+ *
+ * Called:
+ *   - after each completed block (middleware.c)
+ *   - on every watchdog interval
+ *   - before bcdb_reset_block_pool_state (debug only)
+ * --------------------------------------------------------------------------
+ */
+void
+bcdb_log_gate_snapshot(const char *reason,
+						BCBlockID block_id,
+						BCTxID first_txid,
+						BCTxID last_txid)
+{
+	BCBlock *blk = get_block_by_id(1, false);
+	BCTxID   published     = blk ? (BCTxID)__atomic_load_n(&blk->published_max_tx_id, __ATOMIC_RELAXED) : -1;
+	BCTxID   last_committed = blk ? (BCTxID)__atomic_load_n(&blk->last_committed_tx_id, __ATOMIC_RELAXED) : -1;
+	BCBlockID next_enqueue  = block_meta ?
+		(BCBlockID)__atomic_load_n(&block_meta->next_enqueue_block_id, __ATOMIC_RELAXED) : -1;
+
+	uint64 agg_serial_gate_calls = 0;
+	uint64 agg_serial_gate_wait_total_us = 0;
+	uint64 agg_serial_gate_wait_max_us = 0;
+	uint64 agg_serial_gate_cv_sleep_count = 0;
+	uint64 agg_serial_gate_spin_iterations = 0;
+
+	uint64 agg_commit_advance_calls = 0;
+	uint64 agg_commit_initial_cas_failures = 0;
+	uint64 agg_commit_prefix_steps = 0;
+	uint64 agg_commit_broadcast_count = 0;
+
+	uint64 agg_published_ready_calls = 0;
+	uint64 agg_published_ready_prefix_steps = 0;
+	uint64 agg_published_ready_cas_failures = 0;
+
+	uint64 agg_block_enqueue_turn_calls = 0;
+	uint64 agg_block_enqueue_turn_wait_total_us = 0;
+	uint64 agg_block_enqueue_turn_max_us = 0;
+
+	uint64 agg_block_watermark_wait_calls = 0;
+	uint64 agg_block_watermark_wait_total_us = 0;
+	uint64 agg_block_watermark_wait_max_us = 0;
+
+	uint64 agg_block_slot_wait_calls = 0;
+	uint64 agg_block_slot_wait_total_us = 0;
+	uint64 agg_block_slot_wait_max_us = 0;
+
+	uint64 agg_result_slot_consumable_wait_calls = 0;
+	uint64 agg_result_slot_consumable_wait_total_us = 0;
+	uint64 agg_result_slot_consumable_wait_max_us = 0;
+
+	uint64 agg_slot_fallback_wait_calls = 0;
+	uint64 agg_slot_fallback_wait_total_us = 0;
+	uint64 agg_slot_fallback_wait_max_us = 0;
+
+	uint64 agg_prev_commit_wait_calls = 0;
+	uint64 agg_prev_commit_wait_total_us = 0;
+	uint64 agg_prev_commit_wait_max_us = 0;
+
+	uint64 agg_target_commit_wait_calls = 0;
+	uint64 agg_target_commit_wait_total_us = 0;
+	uint64 agg_target_commit_wait_max_us = 0;
+
+	int active_serial_waiters = 0;
+	uint64 oldest_active_wait_us = 0;
+	int64 oldest_active_txid = -1;
+	int64 oldest_active_block_id = -1;
+	int oldest_active_phase = 0;
+
+	if (bcdb_gate_stats_shards != NULL)
+	{
+		uint64 now_us = bcdb_get_time();
+		int num_shards = bcdb_worker_count + MaxBackends;
+		for (int i = 0; i < num_shards; i++)
+		{
+			BCDBGatesStatsShard *shard = &bcdb_gate_stats_shards[i];
+			int phase;
+
+			agg_serial_gate_calls += __atomic_load_n(&shard->serial_gate_calls, __ATOMIC_RELAXED);
+			agg_serial_gate_wait_total_us += __atomic_load_n(&shard->serial_gate_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 s_max = __atomic_load_n(&shard->serial_gate_wait_max_us, __ATOMIC_RELAXED);
+				if (s_max > agg_serial_gate_wait_max_us) agg_serial_gate_wait_max_us = s_max;
+			}
+			agg_serial_gate_cv_sleep_count += __atomic_load_n(&shard->serial_gate_cv_sleep_count, __ATOMIC_RELAXED);
+			agg_serial_gate_spin_iterations += __atomic_load_n(&shard->serial_gate_spin_iterations, __ATOMIC_RELAXED);
+
+			agg_commit_advance_calls += __atomic_load_n(&shard->commit_advance_calls, __ATOMIC_RELAXED);
+			agg_commit_initial_cas_failures += __atomic_load_n(&shard->commit_initial_cas_failures, __ATOMIC_RELAXED);
+			agg_commit_prefix_steps += __atomic_load_n(&shard->commit_prefix_steps, __ATOMIC_RELAXED);
+			agg_commit_broadcast_count += __atomic_load_n(&shard->commit_broadcast_count, __ATOMIC_RELAXED);
+
+			agg_published_ready_calls += __atomic_load_n(&shard->published_ready_calls, __ATOMIC_RELAXED);
+			agg_published_ready_prefix_steps += __atomic_load_n(&shard->published_ready_prefix_steps, __ATOMIC_RELAXED);
+			agg_published_ready_cas_failures += __atomic_load_n(&shard->published_ready_cas_failures, __ATOMIC_RELAXED);
+
+			agg_block_enqueue_turn_calls += __atomic_load_n(&shard->block_enqueue_turn_calls, __ATOMIC_RELAXED);
+			agg_block_enqueue_turn_wait_total_us += __atomic_load_n(&shard->block_enqueue_turn_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 e_max = __atomic_load_n(&shard->block_enqueue_turn_wait_max_us, __ATOMIC_RELAXED);
+				if (e_max > agg_block_enqueue_turn_max_us) agg_block_enqueue_turn_max_us = e_max;
+			}
+
+			agg_block_watermark_wait_calls += __atomic_load_n(&shard->block_watermark_wait_calls, __ATOMIC_RELAXED);
+			agg_block_watermark_wait_total_us += __atomic_load_n(&shard->block_watermark_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 w_max = __atomic_load_n(&shard->block_watermark_wait_max_us, __ATOMIC_RELAXED);
+				if (w_max > agg_block_watermark_wait_max_us) agg_block_watermark_wait_max_us = w_max;
+			}
+
+			agg_block_slot_wait_calls += __atomic_load_n(&shard->block_slot_wait_calls, __ATOMIC_RELAXED);
+			agg_block_slot_wait_total_us += __atomic_load_n(&shard->block_slot_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 sl_max = __atomic_load_n(&shard->block_slot_wait_max_us, __ATOMIC_RELAXED);
+				if (sl_max > agg_block_slot_wait_max_us) agg_block_slot_wait_max_us = sl_max;
+			}
+
+			agg_result_slot_consumable_wait_calls += __atomic_load_n(&shard->result_slot_consumable_wait_calls, __ATOMIC_RELAXED);
+			agg_result_slot_consumable_wait_total_us += __atomic_load_n(&shard->result_slot_consumable_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 c_max = __atomic_load_n(&shard->result_slot_consumable_wait_max_us, __ATOMIC_RELAXED);
+				if (c_max > agg_result_slot_consumable_wait_max_us) agg_result_slot_consumable_wait_max_us = c_max;
+			}
+
+			agg_slot_fallback_wait_calls += __atomic_load_n(&shard->slot_fallback_wait_calls, __ATOMIC_RELAXED);
+			agg_slot_fallback_wait_total_us += __atomic_load_n(&shard->slot_fallback_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 max = __atomic_load_n(&shard->slot_fallback_wait_max_us, __ATOMIC_RELAXED);
+				if (max > agg_slot_fallback_wait_max_us) agg_slot_fallback_wait_max_us = max;
+			}
+
+			agg_prev_commit_wait_calls += __atomic_load_n(&shard->prev_commit_wait_calls, __ATOMIC_RELAXED);
+			agg_prev_commit_wait_total_us += __atomic_load_n(&shard->prev_commit_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 max = __atomic_load_n(&shard->prev_commit_wait_max_us, __ATOMIC_RELAXED);
+				if (max > agg_prev_commit_wait_max_us) agg_prev_commit_wait_max_us = max;
+			}
+
+			agg_target_commit_wait_calls += __atomic_load_n(&shard->target_commit_wait_calls, __ATOMIC_RELAXED);
+			agg_target_commit_wait_total_us += __atomic_load_n(&shard->target_commit_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 max = __atomic_load_n(&shard->target_commit_wait_max_us, __ATOMIC_RELAXED);
+				if (max > agg_target_commit_wait_max_us) agg_target_commit_wait_max_us = max;
+			}
+
+			phase = __atomic_load_n(&shard->active_wait_phase, __ATOMIC_ACQUIRE);
+			if (phase == BCDB_GATE_PHASE_SERIAL)
+			{
+				active_serial_waiters++;
+			}
+			if (phase != BCDB_GATE_PHASE_NONE)
+			{
+				uint64 start = __atomic_load_n(&shard->active_wait_start_us, __ATOMIC_ACQUIRE);
+				if (start > 0 && now_us >= start)
+				{
+					uint64 wait_dur = now_us - start;
+					if (wait_dur > oldest_active_wait_us)
+					{
+						oldest_active_wait_us = wait_dur;
+						oldest_active_txid = __atomic_load_n(&shard->active_wait_txid, __ATOMIC_RELAXED);
+						oldest_active_block_id = __atomic_load_n(&shard->active_wait_block_id, __ATOMIC_RELAXED);
+						oldest_active_phase = phase;
+					}
+				}
+			}
+		}
+	}
+
+	ereport(LOG,
+		(errmsg("PROFILE_BCDB_GATE reason=%s"
+				" block_id=%d first_txid=%d last_txid=%d"
+				" published_max=%d last_committed=%d next_enqueue_block=%d"
+				" serial_gate_calls=%lu serial_gate_wait_total_us=%lu"
+				" serial_gate_wait_max_us=%lu serial_gate_cv_sleep_count=%lu"
+				" serial_gate_spin_iters=%lu"
+				" commit_advance_calls=%lu commit_cas_failures=%lu"
+				" commit_prefix_steps=%lu commit_broadcast_count=%lu"
+				" published_ready_calls=%lu published_ready_prefix_steps=%lu"
+				" published_ready_cas_failures=%lu"
+				" enqueue_turn_calls=%lu enqueue_turn_wait_us=%lu enqueue_turn_max_us=%lu"
+				" watermark_wait_calls=%lu watermark_wait_us=%lu watermark_wait_max_us=%lu"
+				" slot_wait_calls=%lu slot_wait_us=%lu slot_wait_max_us=%lu"
+				" consumable_wait_calls=%lu consumable_wait_us=%lu consumable_wait_max_us=%lu"
+				" slot_fallback_wait_calls=%lu slot_fallback_wait_us=%lu slot_fallback_wait_max_us=%lu"
+				" prev_commit_wait_calls=%lu prev_commit_wait_us=%lu prev_commit_wait_max_us=%lu"
+				" target_commit_wait_calls=%lu target_commit_wait_us=%lu target_commit_wait_max_us=%lu"
+				" active_serial_waiters=%d oldest_active_wait_us=%lu oldest_active_txid=%ld oldest_active_block_id=%ld oldest_active_phase=%d",
+				reason ? reason : "?",
+				(int)block_id, (int)first_txid, (int)last_txid,
+				(int)published, (int)last_committed, (int)next_enqueue,
+				(unsigned long)agg_serial_gate_calls,
+				(unsigned long)agg_serial_gate_wait_total_us,
+				(unsigned long)agg_serial_gate_wait_max_us,
+				(unsigned long)agg_serial_gate_cv_sleep_count,
+				(unsigned long)agg_serial_gate_spin_iterations,
+				(unsigned long)agg_commit_advance_calls,
+				(unsigned long)agg_commit_initial_cas_failures,
+				(unsigned long)agg_commit_prefix_steps,
+				(unsigned long)agg_commit_broadcast_count,
+				(unsigned long)agg_published_ready_calls,
+				(unsigned long)agg_published_ready_prefix_steps,
+				(unsigned long)agg_published_ready_cas_failures,
+				(unsigned long)agg_block_enqueue_turn_calls,
+				(unsigned long)agg_block_enqueue_turn_wait_total_us,
+				(unsigned long)agg_block_enqueue_turn_max_us,
+				(unsigned long)agg_block_watermark_wait_calls,
+				(unsigned long)agg_block_watermark_wait_total_us,
+				(unsigned long)agg_block_watermark_wait_max_us,
+				(unsigned long)agg_block_slot_wait_calls,
+				(unsigned long)agg_block_slot_wait_total_us,
+				(unsigned long)agg_block_slot_wait_max_us,
+				(unsigned long)agg_result_slot_consumable_wait_calls,
+				(unsigned long)agg_result_slot_consumable_wait_total_us,
+				(unsigned long)agg_result_slot_consumable_wait_max_us,
+				(unsigned long)agg_slot_fallback_wait_calls,
+				(unsigned long)agg_slot_fallback_wait_total_us,
+				(unsigned long)agg_slot_fallback_wait_max_us,
+				(unsigned long)agg_prev_commit_wait_calls,
+				(unsigned long)agg_prev_commit_wait_total_us,
+				(unsigned long)agg_prev_commit_wait_max_us,
+				(unsigned long)agg_target_commit_wait_calls,
+				(unsigned long)agg_target_commit_wait_total_us,
+				(unsigned long)agg_target_commit_wait_max_us,
+				active_serial_waiters,
+				(unsigned long)oldest_active_wait_us,
+				(long)oldest_active_txid,
+				(long)oldest_active_block_id,
+				oldest_active_phase)));
+}
 
 /*
  * Shared-memory block pool and associated metadata.
@@ -28,9 +269,9 @@
  *                   window, commit/abort counts, condition variables for
  *                   bmin advancement, and an optional debug log.
  */
-HTAB          *block_pool;
-slock_t       *block_pool_lock;
-BlockMeta     *block_meta;
+HTAB     	 *block_pool;
+slock_t  	 *block_pool_lock;
+BlockMeta	 *block_meta;
 /*
  * Per-process cache of the sentinel BCBlock (id=1). Avoids a hash_search()
  * + spinlock acquisition on every hot-path accessor (set/get_blksz,
@@ -69,18 +310,18 @@ bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
     block->blksize = (id == 1) ? bcdb_worker_count : 0;
     block->snapTid = 0;
 
-    /* Clear the per-transaction slot array and its per-slot done CVs. */
+	/* Clear the per-transaction slot array and its per-slot done CVs. */
     for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
     {
         block->txs[i] = NULL;
         ConditionVariableInit(&block->done_conds[i]);
     }
 
-    /*
-     * Result ring buffer: result[] holds the produced tuples, the parallel
-     * *_txid arrays track which txid owns each slot. Sentinel value -1 means
-     * "slot empty"; InvalidTransactionId means "no PG xid bound yet".
-     */
+	/*
+	 * Result ring buffer: result[] holds the produced tuples, the parallel
+	 * *_txid arrays track which txid owns each slot. Sentinel value -1 means
+	 * "slot empty"; InvalidTransactionId means "no PG xid bound yet".
+	 */
     for (int i = 0; i < BCDB_RESULT_RING_CAPACITY; i++)
     {
         memset(&block->result[i], 0, sizeof(block->result[i]));
@@ -89,7 +330,7 @@ bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
         block->result_consumed_txid[i] = -1;
     }
 
-    /* Lever D publish-phase ready-bitset; -1 = txid not yet published. */
+	/* Lever D publish-phase ready-bitset; -1 = txid not yet published. */
     for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
         block->published_ready_txid[i] = -1;
 }
@@ -140,6 +381,8 @@ block_pool_size()
     Size ret = sizeof(BlockMeta);
     ret = add_size(ret, sizeof(slock_t));
     ret = add_size(ret, hash_estimate_size(MAX_NUM_BLOCKS, sizeof(BCBlock)));
+	/* Add sizing for sharded stats: (bcdb_worker_count + MaxBackends) shards */
+	ret = add_size(ret, (bcdb_worker_count + MaxBackends) * sizeof(BCDBGatesStatsShard));
     return ret;
 }
 
@@ -165,11 +408,11 @@ block_pool_size()
 void
 create_block_pool(void)
 {
-    /* HASHCTL must outlive the ShmemInitHash call -- declared on stack here. */
+	/* HASHCTL must outlive the ShmemInitHash call -- declared on stack here. */
     HASHCTL info;
     bool    found;
 
-    /* (1) Singleton BlockMeta: global watermarks, commit/abort counters. */
+	/* (1) Singleton BlockMeta: global watermarks, commit/abort counters. */
 	block_meta = ShmemInitStruct("BCDB_BLOCK_META", sizeof(BlockMeta), &found);
     block_meta->global_bmin = 1;
     block_meta->global_bmax = 0;
@@ -184,20 +427,20 @@ create_block_pool(void)
     block_meta->log_counter = 0;
 #endif
 
-    /*
-     * (2) Bucketed CV array used to wake backends waiting for global_bmin
-     * to advance. Sharding by bucket reduces wakeup storms when many
-     * backends wait on different bmin values concurrently.
-     */
+	/*
+	 * (2) Bucketed CV array used to wake backends waiting for global_bmin
+	 * to advance. Sharding by bucket reduces wakeup storms when many
+	 * backends wait on different bmin values concurrently.
+	 */
     for (int i = 0; i < NUM_BMIN_COND; i++)
         ConditionVariableInit(&block_meta->conds[i]);
 
-    /* (3) Spinlock guarding structural mutations of the block_pool hash. */
+	/* (3) Spinlock guarding structural mutations of the block_pool hash. */
     block_pool_lock = ShmemInitStruct("block_pool_lock", sizeof(slock_t), &found);
     if (!found)
         SpinLockInit(block_pool_lock);
 
-    /* (4) Fixed-size shared hash table, keyed by BCBlockID (uint32). */
+	/* (4) Fixed-size shared hash table, keyed by BCBlockID (uint32). */
     MemSet(&info, 0, sizeof(info));
 	info.keysize = sizeof(BCBlockID);
 	info.entrysize = sizeof(BCBlock);
@@ -206,6 +449,15 @@ create_block_pool(void)
                    MAX_NUM_BLOCKS,
                    MAX_NUM_BLOCKS,
                    &info, HASH_ELEM | HASH_FUNCTION | HASH_FIXED_SIZE);
+
+	/* (5) Shared-memory gate stats shards */
+	bcdb_gate_stats_shards = ShmemInitStruct("BCDB_GATE_STATS_SHARDS",
+											 (bcdb_worker_count + MaxBackends) * sizeof(BCDBGatesStatsShard),
+											 &found);
+	if (!found)
+	{
+		memset(bcdb_gate_stats_shards, 0, (bcdb_worker_count + MaxBackends) * sizeof(BCDBGatesStatsShard));
+	}
 }
 
 /*
@@ -222,19 +474,34 @@ create_block_pool(void)
  * to be reset under the lock anyway) or the freshly-reset block.
  */
 void
+bcdb_reset_gate_stats(void)
+{
+	if (bcdb_gate_stats_shards != NULL)
+		memset(bcdb_gate_stats_shards, 0,
+			   (bcdb_worker_count + MaxBackends) *
+			   sizeof(BCDBGatesStatsShard));
+}
+
+void
 bcdb_reset_block_pool_state(void)
 {
     BCBlockID id = 1;
     BCBlock  *block;
     bool      found;
 
+	if (bcdb_gate_telemetry_enabled)
+		bcdb_log_gate_snapshot("before_reset", -1, -1, -1);
+
+	bcdb_reset_gate_stats();
+
     block1_cache = NULL;
     SpinLockAcquire(block_pool_lock);
-    /* HASH_ENTER acts as upsert: returns existing entry if present. */
+	/* HASH_ENTER acts as upsert: returns existing entry if present. */
     block = hash_search(block_pool, &id, HASH_ENTER, &found);
     bcdb_reset_block_entry(block, id);
     SpinLockRelease(block_pool_lock);
     block1_cache = block;
+
 }
 
 /*
@@ -257,12 +524,12 @@ void set_last_committed_txid( BCDBShmXact *tx)
     //BCBlock* blk = get_block_by_id( tx->block_id_committed, false);
     BCBlock* blk = get_block1_cached(true);
 
-    /* Release-store: any reader that acquires this value sees all prior
-     * writes performed by the committing tx (its result tuple, etc.). */
+	/* Release-store: any reader that acquires this value sees all prior
+	 * writes performed by the committing tx (its result tuple, etc.). */
     __atomic_store_n(&blk->last_committed_tx_id, tx->tx_id, __ATOMIC_RELEASE);
     __atomic_store_n(&block_meta->num_committed, tx->tx_id, __ATOMIC_RELEASE);
 
-    /* CV gate mode parks waiters; spin/yield modes re-read the watermark. */
+	/* CV gate mode parks waiters; spin/yield modes re-read the watermark. */
     if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
         ConditionVariableBroadcast(&blk->condCommit);
 #if SAFEDBG2
@@ -308,55 +575,96 @@ bcdb_get_block1(void)
 void
 advance_last_committed_txid(BCDBShmXact *tx)
 {
-    BCBlock *blk   = get_block1_cached(true);
-    int      slots = bcdb_get_runtime_result_ring_slots();
-    BCTxID   my_id = tx->tx_id;
-    BCTxID   prev  = my_id - 1;
-    BCTxID   cur;
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	BCBlock *blk   = get_block1_cached(true);
+	int      slots = bcdb_get_runtime_result_ring_slots();
+	BCTxID   my_id = tx->tx_id;
+	BCTxID   prev  = my_id - 1;
+	BCTxID   cur;
+	bool     watermark_advanced = false;
 
     if (slots < 1)
         slots = 1;
 
-    /*
-     * Step 1: Try to claim "I am the next to commit". CAS succeeds iff our
-     * immediate predecessor has already published; otherwise bail and let
-     * the predecessor's eventual scan pick up our slot.
-     */
-    if (!__sync_bool_compare_and_swap(&blk->last_committed_tx_id, prev, my_id))
-        return;
+	if (collect_gate_stats)
+		SHARD_INC(commit_advance_calls);
 
-    /* Step 2: Mirror the watermark on block_meta and wake CV waiters. */
-    __atomic_store_n(&block_meta->num_committed, my_id, __ATOMIC_RELEASE);
-    if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
-        ConditionVariableBroadcast(&blk->condCommit);
+	/*
+	 * Step 1: Try to claim "I am the next to commit". CAS succeeds iff our
+	 * immediate predecessor has already published; otherwise bail and let
+	 * the predecessor's eventual scan pick up our slot.
+	 */
+	if (!__sync_bool_compare_and_swap(&blk->last_committed_tx_id, prev, my_id))
+	{
+		/* Telemetry: CAS lost — predecessor not yet committed. */
+		if (collect_gate_stats)
+			SHARD_INC(commit_initial_cas_failures);
+		return;
+	}
 
-    /*
-     * Step 3: Opportunistically carry the watermark forward through any
-     * already-published successor slots. Each iteration:
-     *   - locate the ring slot owned by the next contiguous txid;
-     *   - load it with ACQUIRE so a successful match also synchronises
-     *     with the successor's RELEASE store of its result tuple;
-     *   - CAS our watermark forward (paranoia: another scanner may race).
-     */
-    cur = my_id;
-    for (int step = 0; step < slots; step++)
-    {
-        BCTxID next_id   = cur + 1;
-        int    next_slot = (int)(next_id % (BCTxID)slots);
-        BCTxID published;
+	watermark_advanced = true;
 
-        if (next_slot < 0)
-            next_slot += slots;
+	/* Step 2: Mirror the watermark on block_meta. Broadcast deferred to end. */
+	__atomic_store_n(&block_meta->num_committed, my_id, __ATOMIC_RELEASE);
 
-        published = __atomic_load_n(&blk->result_committed_txid[next_slot],
-                                    __ATOMIC_ACQUIRE);
-        if (published != next_id)
-            break;                  /* gap: successor not yet ready */
-        if (!__sync_bool_compare_and_swap(&blk->last_committed_tx_id, cur, next_id))
-            break;                  /* another scanner advanced past us */
-        __atomic_store_n(&block_meta->num_committed, next_id, __ATOMIC_RELEASE);
-        cur = next_id;
-    }
+	/*
+	 * Step 3: Opportunistically carry the watermark forward through any
+	 * already-published successor slots. Each iteration:
+	 *   - locate the ring slot owned by the next contiguous txid;
+	 *   - load it with ACQUIRE so a successful match also synchronises
+	 *     with the successor's RELEASE store of its result tuple;
+	 *   - CAS our watermark forward (paranoia: another scanner may race).
+	 *
+	 * CORRECTNESS FIX: the broadcast is intentionally deferred until AFTER
+	 * the full prefix scan (Step 4).  Broadcasting only after the initial CAS
+	 * created a race: a waiter could wake, observe its target not yet reached,
+	 * go back to sleep, and then miss the final watermark advance that happens
+	 * within this very loop.  A single broadcast at the end of the scan covers
+	 * all advances atomically from the waiter's perspective.
+	 */
+	cur = my_id;
+	int advanced_steps = 0;
+	for (int step = 0; step < slots; step++)
+	{
+		BCTxID next_id   = cur + 1;
+		int    next_slot = (int)(next_id % (BCTxID)slots);
+		BCTxID published;
+
+		if (next_slot < 0)
+			next_slot += slots;
+
+		published = __atomic_load_n(&blk->result_committed_txid[next_slot],
+									__ATOMIC_ACQUIRE);
+		if (published != next_id)
+			break;              	/* gap: successor not yet ready */
+		if (!__sync_bool_compare_and_swap(&blk->last_committed_tx_id, cur, next_id))
+			break;              	/* another scanner advanced past us */
+
+		__atomic_store_n(&block_meta->num_committed, next_id, __ATOMIC_RELEASE);
+		if (collect_gate_stats)
+			advanced_steps++;
+		cur = next_id;
+	}
+
+	if (collect_gate_stats && advanced_steps > 0)
+	{
+		for (int i = 0; i < advanced_steps; i++)
+			SHARD_INC(commit_prefix_steps);
+	}
+
+	/*
+	 * Step 4: Single broadcast AFTER the full contiguous prefix has been
+	 * advanced.  Any waiter in bcdb_wait_until_committed() or
+	 * bcdb_wait_for_prev_committed() that parked on condCommit will now
+	 * re-check the watermark and observe the final value.
+	 */
+	if (watermark_advanced &&
+		bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
+	{
+		if (collect_gate_stats)
+			SHARD_INC(commit_broadcast_count);
+		ConditionVariableBroadcast(&blk->condCommit);
+	}
 }
 
 /*
@@ -585,42 +893,60 @@ bcdb_signal_serial_successor(BCBlock *blk, BCTxID published_txid)
 static void
 bcdb_advance_published_ready_prefix(BCBlock *blk)
 {
-    BCTxID current;
-    int steps = 0;
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	BCTxID current;
+	int steps = 0;
+	int prefix_steps = 0;
+	int cas_failures = 0;
 
-    Assert(blk != NULL);
+	Assert(blk != NULL);
 
-    while (steps++ < MAX_TX_PER_BLOCK)
-    {
-        BCTxID next_id;
-        int next_slot;
-        BCTxID ready;
+	while (steps++ < MAX_TX_PER_BLOCK)
+	{
+		BCTxID next_id;
+		int next_slot;
+		BCTxID ready;
 
-        /* Re-read watermark each iter: another scanner may have moved it. */
-        current = (BCTxID) __atomic_load_n(&blk->published_max_tx_id,
-                                           __ATOMIC_ACQUIRE);
-        next_id = current + 1;
-        next_slot = bcdb_published_ready_slot_for_txid(next_id);
-        ready = (BCTxID) __atomic_load_n(&blk->published_ready_txid[next_slot],
-                                         __ATOMIC_ACQUIRE);
-        if (ready != next_id)
-            break;                          /* gap: stop scanning */
+		/* Re-read watermark each iter: another scanner may have moved it. */
+		current = (BCTxID) __atomic_load_n(&blk->published_max_tx_id,
+										   __ATOMIC_ACQUIRE);
+		next_id = current + 1;
+		next_slot = bcdb_published_ready_slot_for_txid(next_id);
+		ready = (BCTxID) __atomic_load_n(&blk->published_ready_txid[next_slot],
+										 __ATOMIC_ACQUIRE);
+		if (ready != next_id)
+			break;                      	/* gap: stop scanning */
 
-        /*
-         * CAS to claim the advance. On success, wake the new successor
-         * (now next_id+1). On failure, another scanner won the race and
-         * is responsible for the wake — we just exit.
-         */
-        if (__atomic_compare_exchange_n(&blk->published_max_tx_id,
-                                        &current,
-                                        next_id,
-                                        false,
-                                        __ATOMIC_RELEASE,
-                                        __ATOMIC_ACQUIRE))
-        {
-            bcdb_signal_serial_successor(blk, next_id);
-        }
-    }
+		/*
+		 * CAS to claim the advance. On success, wake the new successor
+		 * (now next_id+1). On failure, another scanner won the race and
+		 * is responsible for the wake — we just exit.
+		 */
+		if (__atomic_compare_exchange_n(&blk->published_max_tx_id,
+										&current,
+										next_id,
+										false,
+										__ATOMIC_RELEASE,
+										__ATOMIC_ACQUIRE))
+		{
+			if (collect_gate_stats)
+				prefix_steps++;
+			bcdb_signal_serial_successor(blk, next_id);
+		}
+		else
+		{
+			if (collect_gate_stats)
+				cas_failures++;
+		}
+	}
+
+	if (collect_gate_stats)
+	{
+		for (int i = 0; i < prefix_steps; i++)
+			SHARD_INC(published_ready_prefix_steps);
+		for (int i = 0; i < cas_failures; i++)
+			SHARD_INC(published_ready_cas_failures);
+	}
 }
 
 /*
@@ -634,17 +960,21 @@ bcdb_advance_published_ready_prefix(BCBlock *blk)
 void
 mark_published_ready_txid(BCDBShmXact *tx)
 {
-    BCBlock *blk = get_block1_cached(true);
-    int slot;
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	BCBlock *blk = get_block1_cached(true);
+	int slot;
 
-    Assert(tx != NULL);
-    Assert(blk != NULL);
+	Assert(tx != NULL);
+	Assert(blk != NULL);
 
-    slot = bcdb_published_ready_slot_for_txid(tx->tx_id);
-    __atomic_store_n(&blk->published_ready_txid[slot],
-                     tx->tx_id,
-                     __ATOMIC_RELEASE);
-    bcdb_advance_published_ready_prefix(blk);
+	if (collect_gate_stats)
+		SHARD_INC(published_ready_calls);
+
+	slot = bcdb_published_ready_slot_for_txid(tx->tx_id);
+	__atomic_store_n(&blk->published_ready_txid[slot],
+					 tx->tx_id,
+					 __ATOMIC_RELEASE);
+	bcdb_advance_published_ready_prefix(blk);
 }
 
 /*

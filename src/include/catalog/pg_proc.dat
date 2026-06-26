@@ -10833,6 +10833,11 @@ proargtypes => '', prosrc => 'bcdb_last_committed_txid' }
 # bcdb function
 { oid => '7014', descr => 'BCDB block submit with per-tx results',
 proname => 'bcdb_block_submit_results', prorettype => 'text',
-proargtypes => 'cstring', prosrc => 'bcdb_block_submit_results' }
+proargtypes => 'cstring', prosrc => 'bcdb_block_submit_results' },
+
+# bcdb function
+{ oid => '7015', descr => 'BCDB diagnostic stats snapshot',
+proname => 'bcdb_gate_diagnostics', prorettype => 'text',
+proargtypes => '', prosrc => 'bcdb_gate_diagnostics' }
 
 ]

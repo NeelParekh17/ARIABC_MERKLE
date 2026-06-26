@@ -984,6 +984,24 @@ static struct config_bool ConfigureNamesBool[] =
 			NULL, NULL, NULL
 		},
 		{
+			{"bcdb_gate_snapshot_each_block", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+				gettext_noop("Log shared-memory gate snapshot after each deterministic block completion."),
+				NULL
+			},
+			&bcdb_gate_snapshot_each_block,
+			false,
+			NULL, NULL, NULL
+		},
+		{
+			{"bcdb_gate_telemetry", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+				gettext_noop("Enable aggregate BCDB gate diagnostics."),
+				NULL
+			},
+			&bcdb_gate_telemetry_enabled,
+			false,
+			NULL, NULL, NULL
+		},
+		{
 			{"enable_seqscan", PGC_USERSET, QUERY_TUNING_METHOD,
 				gettext_noop("Enables the planner's use of sequential-scan plans."),
 			NULL,
