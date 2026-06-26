@@ -20,7 +20,7 @@ NODES = [
     {"id": 4, "name": "utkarsh", "user": "neel", "ip": "10.129.148.248", "client_port": 8001},
 ]
 
-DEFAULT_PASSWORD = "sunil1165"
+DEFAULT_PASSWORD = "clusterinfolab123"
 DEFAULT_MD_PATH = "CLUSTER_NODES_INFO.md"
 
 # Remote payload to gather all details in a single JSON output
@@ -331,7 +331,9 @@ def main():
     parser.add_argument("--timeout", type=int, default=8, help="Connect timeout per node")
     args = parser.parse_args()
 
-    password = args.password or os.environ.get("ARIABC_CLUSTER_PASSWORD", DEFAULT_PASSWORD)
+    password = args.password or os.environ.get("ARIABC_CLUSTER_PASSWORD")
+    if not password:
+        sys.exit("ERROR: ARIABC_CLUSTER_PASSWORD must be set in the environment.")
     ssh_key = args.ssh_key.strip() or None
 
     print(f"Starting parallel probe on 4 cluster nodes...")

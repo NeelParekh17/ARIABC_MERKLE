@@ -42,7 +42,7 @@ cleanup_os_profile() {
   echo "  Stopping OS profiling..."
   for idx in "${!NODE_IDS[@]}"; do
     node_ssh "$idx" "
-      for cmd in mpstat iostat sar pidstat; do
+      for cmd in mpstat iostat sar vmstat pidstat; do
         pidfile='$REMOTE_LOG_DIR/os_'\${cmd}'.pid'
         if [[ -f \"\$pidfile\" ]]; then
           kill \"\$(cat \"\$pidfile\")\" 2>/dev/null || true
@@ -51,6 +51,21 @@ cleanup_os_profile() {
       done
     " || true
   done
+}
+
+cleanup_all() {
+  if [[ -n "${WATCHDOG_PID:-}" ]]; then
+    echo "  Stopping fastpath hang-detection watchdog (pid $WATCHDOG_PID)..."
+    kill "$WATCHDOG_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${GW_PID:-}" ]]; then
+    echo "  Terminating gateway (pid $GW_PID)..."
+    kill -TERM "$GW_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${TAIL_PID:-}" ]]; then
+    kill "$TAIL_PID" 2>/dev/null || true
+  fi
+  cleanup_os_profile
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,7 +83,8 @@ declare -a NODE_IS_U22=(0 1 0)
 # utkarsh port 8000 is taken by HP printer snap; use 8001 instead
 declare -a NODE_CLIENT_PORTS=(8000 8000 8001)
 
-CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-sunil1165}"
+ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
+CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 
 KAFKA_HOST="10.129.148.236"
 KAFKA_PORT=9092
@@ -205,6 +221,8 @@ GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN:-1}
 GATEWAY_DIRECT_COMPLETION_QUORUM="${GATEWAY_DIRECT_COMPLETION_QUORUM:-1}"  # non-broadcast direct completion apply quorum
 RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-2048}"
 BCDB_OVERWRITE_PROTECTION="${BCDB_OVERWRITE_PROTECTION:-0}"  # 0=off 1=Option-A 2=Option-B
+BCDB_GATE_TELEMETRY="${BCDB_GATE_TELEMETRY:-0}"              # 1=enable gate telemetry GUC
+BCDB_GATE_SNAPSHOT_EACH_BLOCK="${BCDB_GATE_SNAPSHOT_EACH_BLOCK:-0}" # 1=enable gate snapshot GUC
 COLLECT_FINAL_SERVER_PROFILE="${COLLECT_FINAL_SERVER_PROFILE:-1}"
 SKIP_CLUSTER_LOGS="${SKIP_CLUSTER_LOGS:-0}"  # 1=skip fetching server/nuraft/postgres logs from cluster nodes
 
@@ -746,6 +764,130 @@ node_ssh() {
 }
 
 # ===========================================================================
+# Function: watchdog_query_node
+# Description: Queries postgres on a remote node via local psql execution
+# ===========================================================================
+watchdog_query_node() {
+  local idx="$1" sql="$2"
+  node_ssh "$idx" "
+    export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+    '$REMOTE_INSTALL_DIR/bin/psql' -X -q -h 127.0.0.1 -p '$DB_PORT' \
+      -U '$DB_USER' '$DB_NAME' -At -c \"$sql\"
+  "
+}
+
+
+# ===========================================================================
+# Function: start_fastpath_watchdog
+# Description: Starts the background watchdog process for hang detection
+# ===========================================================================
+start_fastpath_watchdog() {
+  local gw_pid="$1"
+  local tail_pid="$2"
+
+  if [[ "$DET_EVENT_BLOCK_FASTPATH" == "1" && "$ENABLE_FASTPATH_WATCHDOG" == "1" ]]; then
+    log "  Starting cluster fastpath hang-detection watchdog (10s poll, 60s timeout)..."
+    (
+      last_watchdog_completed_val="0"
+      declare -a last_nodes_committed
+      for idx in "${!NODE_IDS[@]}"; do
+        last_nodes_committed[$idx]="-1"
+      done
+      stuck_cycles=0
+
+      while true; do
+        sleep 10
+
+        # Check if gateway process is still alive. If it exited, watchdog should exit.
+        if ! kill -0 "$gw_pid" 2>/dev/null; then
+          break
+        fi
+
+        # 1. Poll gateway completed progress from log
+        current_completed_val=$(grep 'completed=' "$GW_LOG" 2>/dev/null | tail -1 | sed -E 's/.*completed=([0-9]+).*/\1/' || echo "0")
+        if [[ ! "$current_completed_val" =~ ^[0-9]+$ ]]; then
+          current_completed_val="0"
+        fi
+
+        # 2. Poll all nodes for their last_committed_txid
+        declare -a current_nodes_committed
+        for idx in "${!NODE_IDS[@]}"; do
+          val=$(watchdog_query_node "$idx" "SELECT bcdb_last_committed_txid();" 2>/dev/null | xargs || echo "error")
+          current_nodes_committed[$idx]="$val"
+        done
+
+        # Check if progress occurred in gateway completion
+        progress_made=0
+
+        if [[ "$current_completed_val" -gt "$last_watchdog_completed_val" ]]; then
+          progress_made=1
+        fi
+
+        if [[ "$progress_made" -eq 0 ]]; then
+          (( stuck_cycles++ )) || true
+          status_str=""
+          for idx in "${!NODE_IDS[@]}"; do
+            status_str+="${NODE_NAMES[$idx]}:${current_nodes_committed[$idx]} "
+          done
+          log "WATCHDOG: No progress in 10s (GW completed: $current_completed_val, nodes: $status_str, cycle $stuck_cycles)."
+          if [[ "$stuck_cycles" -ge 6 ]]; then
+            log "WATCHDOG: System stalled for 60s. Triggering bcdb_gate_diagnostics()...."
+
+            # Save diagnostics SQL output to files under log directory
+            for idx in "${!NODE_IDS[@]}"; do
+              nip="${NODE_IPS[$idx]}"
+              watchdog_query_node "$idx" "SELECT bcdb_gate_diagnostics();" > "$LOG_DIR/gate_diagnostics_${nip}.txt" 2>&1 || true
+            done
+
+            # Save last progress line
+            if [[ -f "$GW_LOG" ]]; then
+              last_progress=$(grep 'completed=' "$GW_LOG" 2>/dev/null | tail -1 || echo "")
+              echo "$last_progress" > "$LOG_DIR/last_progress_line.txt"
+            else
+              echo "No gateway log found" > "$LOG_DIR/last_progress_line.txt"
+            fi
+
+            # Gracefully terminate local gateway if running using PID
+            log "WATCHDOG: Sending SIGTERM to gateway PID $gw_pid..."
+            kill -TERM "$gw_pid" 2>/dev/null || true
+            # Wait for it to exit
+            for w in {1..10}; do
+              kill -0 "$gw_pid" 2>/dev/null || break
+              sleep 0.5
+            done
+            kill -KILL "$gw_pid" 2>/dev/null || true
+
+            # Kill tail process if running
+            kill "$tail_pid" 2>/dev/null || true
+
+            # Collect logs and profiles
+            collect_final_profiles_before_fail "watchdog_stuck"
+
+            # Sentinel file
+            touch "$LOG_DIR/WATCHDOG_TRIGGERED"
+
+            log "WATCHDOG: Diagnostics triggered. Exiting parent run to prevent infinite hang."
+            kill -TERM "$MAIN_PID"
+            exit 124
+          fi
+        else
+          last_watchdog_completed_val="$current_completed_val"
+          for idx in "${!NODE_IDS[@]}"; do
+            val="${current_nodes_committed[$idx]}"
+            if [[ "$val" != "error" && -n "$val" ]]; then
+              last_nodes_committed[$idx]="$val"
+            fi
+          done
+          stuck_cycles=0
+        fi
+      done
+    ) &
+    WATCHDOG_PID=$!
+  fi
+}
+
+
+# ===========================================================================
 # Function: node_rsync_to
 # Description: Synchronously syncs a file or directory from the gateway to
 #              a remote node using sshpass.
@@ -990,7 +1132,37 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'result_topic=%s\n' "$KAFKA_RESULT_TOPIC"
 } > "$LOG_DIR/run_meta.env"
 
-trap cleanup_os_profile EXIT INT TERM
+# ---------------------------------------------------------------------------
+# Part 1.2: Binary/source provenance — uncommitted diff + status.
+# Capture these immediately after run_meta.env so that if the run aborts
+# before Phase 1.6 we still have a record of what source was in use.
+# ---------------------------------------------------------------------------
+git -C "$REPO_ROOT" diff -- src ariabc_pg scripts/distributed \
+  > "$LOG_DIR/uncommitted_diff.patch" 2>/dev/null || true
+
+git -C "$REPO_ROOT" status --short \
+  > "$LOG_DIR/git_status.txt" 2>/dev/null || true
+
+# Append git HEAD and SHA256 checksums of the key local binaries to run_meta.env
+{
+  printf 'git_head=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  printf 'git_dirty=%s\n' "$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
+  printf 'ariabc_pg_gateway_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
+  printf 'ariabc_pg_server_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
+  printf 'postgres_sha256=%s\n' "$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
+  printf 'ariabc_os_profile=%s\n' "${ARIABC_OS_PROFILE:-0}"
+  printf 'bcdb_gate_telemetry=%s\n' "${BCDB_GATE_TELEMETRY:-0}"
+} >> "$LOG_DIR/run_meta.env"
+
+
+on_signal() {
+  cleanup_all
+  trap - EXIT
+  exit 124
+}
+
+trap cleanup_all EXIT
+trap on_signal INT TERM
 
 # ---------------------------------------------------------------------------
 # Phase 0: Cleanup
@@ -1370,12 +1542,19 @@ log "  local ariabc_pg_gateway_sha256=$local_gateway_sha path=$LOCAL_BIN/ariabc_
 log "  local ariabc_pg_server_sha256=$local_server_sha path=$LOCAL_BIN/ariabc_pg_server"
 log "  local postgres_sha256=$local_postgres_sha path=$LOCAL_INSTALL_DIR/bin/postgres"
 
+{
+  printf 'local_git_head=%s\n' "$local_git_head"
+  printf 'local_ariabc_pg_gateway_sha256=%s\n' "$local_gateway_sha"
+  printf 'local_ariabc_pg_server_sha256=%s\n' "$local_server_sha"
+  printf 'local_postgres_sha256=%s\n' "$local_postgres_sha"
+} > "$LOG_DIR/build_provenance.env"
+
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
   is_u22="${NODE_IS_U22[$idx]}"
   [[ "$is_u22" -eq 1 ]] && srv_bin="$REMOTE_BIN_U22" || srv_bin="$REMOTE_BIN_U24"
   log "  [$name] provenance:"
-  node_ssh "$idx" "
+  prov_output=$(node_ssh "$idx" "
     git_head=\$(git -C '$REMOTE_REPO_ROOT' rev-parse HEAD 2>/dev/null || echo unknown)
     srv_sha=\$(sha256sum '$srv_bin' 2>/dev/null | awk '{print \$1}' || echo missing)
     gw_path='$REMOTE_REPO_ROOT/ariabc_pg/build/bin/ariabc_pg_gateway'
@@ -1385,10 +1564,20 @@ for idx in "${!NODE_IDS[@]}"; do
     gw_sha=\$(sha256sum \"\$gw_path\" 2>/dev/null | awk '{print \$1}' || echo missing)
     pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
     echo \"git_head=\$git_head\"
-    echo \"ariabc_pg_server_sha256=\$srv_sha path=$srv_bin\"
-    echo \"ariabc_pg_gateway_sha256=\$gw_sha path=\$gw_path\"
-    echo \"postgres_sha256=\$pg_sha path=$REMOTE_INSTALL_DIR/bin/postgres\"
-  " 2>&1 | sed "s/^/    /"
+    echo \"ariabc_pg_server_sha256=\$srv_sha\"
+    echo \"ariabc_pg_gateway_sha256=\$gw_sha\"
+    echo \"postgres_sha256=\$pg_sha\"
+  " 2>/dev/null)
+
+  echo "$prov_output" | sed "s/^/    /"
+
+  {
+    echo "$prov_output" | while read -r line; do
+      if [[ -n "$line" ]]; then
+        echo "node${idx}_${line}"
+      fi
+    done
+  } >> "$LOG_DIR/build_provenance.env"
 done
 
 # ---------------------------------------------------------------------------
@@ -1652,6 +1841,8 @@ for idx in "${!NODE_IDS[@]}"; do
     hashtab_threshold=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_hashtab_switch_threshold;' | tr -d '[:space:]')
     ring_slots=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_result_ring_slots;' | tr -d '[:space:]')
     owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || true)
+    gate_telemetry=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_gate_telemetry;' | tr -d '[:space:]')
+    gate_snapshot=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_gate_snapshot_each_block;' | tr -d '[:space:]')
     synchronous_commit=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show synchronous_commit;' | tr -d '[:space:]')
     fsync_guc=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show fsync;' | tr -d '[:space:]')
     full_page_writes=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show full_page_writes;' | tr -d '[:space:]')
@@ -1700,11 +1891,19 @@ for idx in "${!NODE_IDS[@]}"; do
     if [[ -n \"\$owp\" && \"\$owp\" != \"\$target_owp\" ]]; then
       needs_restart=1
     fi
+    target_telemetry=\"$([[ "$BCDB_GATE_TELEMETRY" == "1" ]] && echo on || echo off)\"
+    if [[ \"\$gate_telemetry\" != \"\$target_telemetry\" ]]; then
+      needs_restart=1
+    fi
+    target_snapshot=\"$([[ "$BCDB_GATE_SNAPSHOT_EACH_BLOCK" == "1" ]] && echo on || echo off)\"
+    if [[ \"\$gate_snapshot\" != \"\$target_snapshot\" ]]; then
+      needs_restart=1
+    fi
     if [[ -z \"\$max_connections\" || \"\$max_connections\" -lt \"\$min_max_connections\" ]]; then
       needs_restart=1
     fi
     if [[ \"\$needs_restart\" -eq 1 ]]; then
-      echo \"reconfiguring bcdb_worker_count=\$worker_count -> $BCDB_WORKER_COUNT bcdb_serial_gate_mode=\$serial_gate -> $BCDB_SERIAL_GATE_MODE bcdb_serial_gate_source=\$serial_gate_source -> $BCDB_SERIAL_GATE_SOURCE bcdb_dt_conflict_tracking=\$dt_conflict -> \$target_dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads -> \$target_dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold -> $BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdb_result_ring_slots=\$ring_slots -> \$target_ring_slots bcdb_overwrite_protection=\$owp_display -> \$target_owp max_connections=\$max_connections -> >=\$min_max_connections\"
+      echo \"reconfiguring bcdb_worker_count=\$worker_count -> $BCDB_WORKER_COUNT bcdb_serial_gate_mode=\$serial_gate -> $BCDB_SERIAL_GATE_MODE bcdb_serial_gate_source=\$serial_gate_source -> $BCDB_SERIAL_GATE_SOURCE bcdb_dt_conflict_tracking=\$dt_conflict -> \$target_dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads -> \$target_dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold -> $BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdb_result_ring_slots=\$ring_slots -> \$target_ring_slots bcdb_overwrite_protection=\$owp_display -> \$target_owp bcdb_gate_telemetry=\$gate_telemetry -> \$target_telemetry bcdb_gate_snapshot_each_block=\$gate_snapshot -> \$target_snapshot max_connections=\$max_connections -> >=\$min_max_connections\"
       if [[ \"\$worker_count\" != \"$BCDB_WORKER_COUNT\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_worker_count = '$BCDB_WORKER_COUNT';\"
       fi
@@ -1729,6 +1928,12 @@ for idx in "${!NODE_IDS[@]}"; do
       if [[ -n \"\$owp\" && \"\$owp\" != \"\$target_owp\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_overwrite_protection = '\$target_owp';\"
       fi
+      if [[ \"\$gate_telemetry\" != \"\$target_telemetry\" ]]; then
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_gate_telemetry = '\$target_telemetry';\"
+      fi
+      if [[ \"\$gate_snapshot\" != \"\$target_snapshot\" ]]; then
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET bcdb_gate_snapshot_each_block = '\$target_snapshot';\"
+      fi
       if [[ -z \"\$max_connections\" || \"\$max_connections\" -lt \"\$min_max_connections\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET max_connections = '\$min_max_connections';\"
       fi
@@ -1747,13 +1952,15 @@ for idx in "${!NODE_IDS[@]}"; do
       owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || true)
       owp_display=\"\$owp\"
       [[ -z \"\$owp_display\" ]] && owp_display=unsupported
+      gate_telemetry=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_gate_telemetry;' | tr -d '[:space:]')
+      gate_snapshot=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_gate_snapshot_each_block;' | tr -d '[:space:]')
       max_connections=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show max_connections;' | tr -d '[:space:]')
       synchronous_commit=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show synchronous_commit;' | tr -d '[:space:]')
       fsync_guc=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show fsync;' | tr -d '[:space:]')
       full_page_writes=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show full_page_writes;' | tr -d '[:space:]')
       wal_level=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show wal_level;' | tr -d '[:space:]')
     fi
-    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_serial_gate_source=\$serial_gate_source bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp_display max_connections=\$max_connections synchronous_commit=\$synchronous_commit fsync=\$fsync_guc full_page_writes=\$full_page_writes wal_level=\$wal_level\"
+    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_serial_gate_source=\$serial_gate_source bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp_display bcdb_gate_telemetry=\$gate_telemetry bcdb_gate_snapshot_each_block=\$gate_snapshot max_connections=\$max_connections synchronous_commit=\$synchronous_commit fsync=\$fsync_guc full_page_writes=\$full_page_writes wal_level=\$wal_level\"
   " 2>&1)" && echo "$status_line" > "$pg3_status_file" || { echo "FAILED" > "$pg3_status_file"; exit 1; }
   ) &
   PG3_PIDS+=("$!")
@@ -1816,6 +2023,31 @@ for idx in "${!NODE_IDS[@]}"; do
 done
 # --- end Phase 3 parallel validation ---
 
+# ---------------------------------------------------------------------------
+# Phase 3.1: Ensure bcdb_gate_diagnostics function exists on all nodes
+# Reusing existing PGDATA does not automatically pick up pg_proc.dat changes.
+# ---------------------------------------------------------------------------
+log "=== Phase 3.1: Ensure bcdb_gate_diagnostics function exists on all ${#NODE_IDS[@]} nodes (parallel) ==="
+declare -a DIAG_PIDS=()
+for idx in "${!NODE_IDS[@]}"; do
+  name="${NODE_NAMES[$idx]}"
+  log "  Ensuring bcdb_gate_diagnostics exists on $name"
+  node_ssh "$idx" "
+    INSTALL_DIR='$REMOTE_INSTALL_DIR'
+    export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+    \"\$INSTALL_DIR/bin/psql\" -X -q -h 127.0.0.1 -p '$DB_PORT' -U postgres postgres -v ON_ERROR_STOP=1 -c \"
+CREATE OR REPLACE FUNCTION bcdb_gate_diagnostics()
+RETURNS text
+LANGUAGE internal
+AS 'bcdb_gate_diagnostics';
+\" >/dev/null && \\
+    \"\$INSTALL_DIR/bin/psql\" -X -q -h 127.0.0.1 -p '$DB_PORT' -U postgres postgres -Atc 'SELECT left(bcdb_gate_diagnostics(), 40);' >/dev/null
+  " &
+  DIAG_PIDS+=("$!")
+done
+for pid in "${DIAG_PIDS[@]}"; do
+  wait "$pid"
+done
 # ---------------------------------------------------------------------------
 # Phase 3.2: Ensure the local OS login role exists in Postgres
 # Current BCDB worker bootstrap still opens internal libpq connections without
@@ -1926,6 +2158,11 @@ for start_pos in "${!START_ORDER[@]}"; do
   log "    binary: $srv_bin"
   log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbDetQueueHighWm=$BCDB_DET_QUEUE_HIGH_WM bcdbDetQueueLowWm=$BCDB_DET_QUEUE_LOW_WM bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT resultPublishReplicaLimit=$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE raftOrderedFanout=$RAFT_ORDERED_FANOUT detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
+  TEST_FAIL_ONCE=0
+  if [[ "${ARIABC_TEST_FAIL_DET_BLOCK_SEND_NODE:-}" == "$id" ]]; then
+    TEST_FAIL_ONCE=1
+  fi
+
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
 
   # rdkafka_local must precede system/install lib paths on ALL nodes so that
@@ -1938,6 +2175,11 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    rm -f '/home/neel/ariabc_pg_srv${id}.log'
 	    export LD_LIBRARY_PATH='${NODE_LIB_PATH}:\${LD_LIBRARY_PATH:-}'
 	    export ARIABC_PROFILE='${ARIABC_PROFILE:-1}'
+	    if [[ \"$TEST_FAIL_ONCE\" == \"1\" ]]; then
+	      export ARIABC_TEST_FAIL_DET_BLOCK_SEND_ONCE=1
+	    else
+	      unset ARIABC_TEST_FAIL_DET_BLOCK_SEND_ONCE
+	    fi
 	    export ARIABC_DET_BLOCK_PARALLEL='${DET_BLOCK_PARALLEL}'
 	    export ARIABC_DET_BLOCK_PIPELINE='${DET_BLOCK_PIPELINE}'
 	    export ARIABC_DET_BLOCK_MAX='${DET_BLOCK_MAX}'
@@ -1947,7 +2189,11 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    export ARIABC_DET_COMPLETION_ONLY_SUCCESS='${DET_COMPLETION_ONLY_SUCCESS}'
 	    export ARIABC_DET_ALLOW_RAW_COMPAT='${DET_RAW_SQL}'
 	    export ARIABC_DET_BLOCK_SKIP_READONLY='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
-	    export ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US='${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-}'
+	    if [[ -n "${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-}" ]]; then
+	      export ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US='${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US}'
+	    else
+	      unset ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US
+	    fi
 	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
 	    export ARIABC_RESULT_PUBLISH_REPLICA_LIMIT='${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT}'
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
@@ -2168,16 +2414,31 @@ _gw_common_args() {
 # Phase 6 execution: OS Profiling setup
 # ---------------------------------------------------------------------------
 if [[ "${ARIABC_OS_PROFILE:-0}" -eq 1 ]]; then
-  log "  Starting OS profiling across servers (mpstat, iostat, sar, pidstat)..."
+  log "  Starting OS profiling across servers (mpstat, iostat, sar, vmstat, pidstat)..."
   for idx in "${!NODE_IDS[@]}"; do
+    node_id="${NODE_IDS[$idx]}"
     node_ssh "$idx" "
       mkdir -p '$REMOTE_LOG_DIR'
       nohup mpstat -P ALL 1 > '$REMOTE_LOG_DIR/os_mpstat.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_mpstat.pid'
       nohup iostat -xz 1 > '$REMOTE_LOG_DIR/os_iostat.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_iostat.pid'
       nohup sar -n DEV 1 > '$REMOTE_LOG_DIR/os_sar.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_sar.pid'
-      SPID=\$(pgrep -x ariabc_pg_server | head -1 || true)
-      if [[ -n \"\$SPID\" ]]; then
-        nohup pidstat -dur -p \"\$SPID\" 1 > '$REMOTE_LOG_DIR/os_pidstat.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_pidstat.pid'
+      nohup vmstat 1 > '$REMOTE_LOG_DIR/os_vmstat.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_vmstat.pid'
+      PGDATA_OWNER=\$(stat -c '%U' \"\$PGDATA\" 2>/dev/null || whoami)
+      SERVER_PIDS=\$(pgrep -u \"\$PGDATA_OWNER\" -d ',' -x \"ariabc_pg_server\" || pgrep -d ',' -x \"ariabc_pg_server\" || true)
+      POSTGRES_PIDS=\$(pgrep -u \"\$PGDATA_OWNER\" -d ',' -x \"postgres\" || pgrep -d ',' -x \"postgres\" || true)
+      CLEANED_PIDS=\"\"
+      if [[ -n \"\$SERVER_PIDS\" ]]; then CLEANED_PIDS=\"\$SERVER_PIDS\"; fi
+      if [[ -n \"\$POSTGRES_PIDS\" ]]; then
+        if [[ -n \"\$CLEANED_PIDS\" ]]; then CLEANED_PIDS=\"\$CLEANED_PIDS,\$POSTGRES_PIDS\"; else CLEANED_PIDS=\"\$POSTGRES_PIDS\"; fi
+      fi
+      if [[ \"$node_id\" -eq 1 ]]; then
+        KAFKA_PIDS=\$(pgrep -u \"\$PGDATA_OWNER\" -d ',' -f \"kafka\.Kafka\" || pgrep -d ',' -f \"kafka\.Kafka\" || true)
+        if [[ -n \"\$KAFKA_PIDS\" ]]; then
+          if [[ -n \"\$CLEANED_PIDS\" ]]; then CLEANED_PIDS=\"\$CLEANED_PIDS,\$KAFKA_PIDS\"; else CLEANED_PIDS=\"\$KAFKA_PIDS\"; fi
+        fi
+      fi
+      if [[ -n \"\$CLEANED_PIDS\" ]]; then
+        nohup pidstat -dur -p \"\$CLEANED_PIDS\" 1 > '$REMOTE_LOG_DIR/os_pidstat.log' 2>&1 & echo \$! > '$REMOTE_LOG_DIR/os_pidstat.pid'
       fi
     "
   done
@@ -2186,8 +2447,13 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 6 execution: pipeline mode (original — one gateway process)
 # ---------------------------------------------------------------------------
+MAIN_PID=$$
+WATCHDOG_PID=""
+ENABLE_FASTPATH_WATCHDOG="${ENABLE_FASTPATH_WATCHDOG:-0}"
+
 if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
-  if ! "$GW_BIN" \
+  # Run gateway in the background and capture its PID
+  "$GW_BIN" \
     --nodes "$GW_NODES" \
     --queryFrom "$WORKLOAD_FILE" \
     --dbType 1 \
@@ -2206,8 +2472,35 @@ if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
     --numTerminals "$NUM_TERMINALS" \
     --connFanout "$CONN_FANOUT" \
     $GW_EXTRA_ARGS \
-    2>&1 | tee "$GW_LOG"; then
-    log "WARNING: Gateway exited with non-zero status — check $GW_LOG"
+    > "$GW_LOG" 2>&1 &
+  GW_PID=$!
+  echo "$GW_PID" > "$LOG_DIR/gateway.pid"
+
+  # Tail the log in the background so output appears in real-time
+  tail --pid="$GW_PID" -f "$GW_LOG" &
+  TAIL_PID=$!
+  echo "$TAIL_PID" > "$LOG_DIR/tail.pid"
+
+  # Start the watchdog now that GW_PID and TAIL_PID are assigned
+  start_fastpath_watchdog "$GW_PID" "$TAIL_PID"
+
+  # Wait for the gateway process to complete
+  GW_RC=0
+  wait "$GW_PID" || GW_RC=$?
+  GW_PID=""
+
+  # Stop tailing
+  kill "$TAIL_PID" 2>/dev/null || true
+  wait "$TAIL_PID" 2>/dev/null || true
+  TAIL_PID=""
+
+  kill "$WATCHDOG_PID" 2>/dev/null || true
+  wait "$WATCHDOG_PID" 2>/dev/null || true
+  WATCHDOG_PID=""
+
+  if [[ "$GW_RC" -ne 0 ]]; then
+    log "WARNING: Gateway exited with status $GW_RC — check $GW_LOG"
+    exit "$GW_RC"
   fi
 
 # ---------------------------------------------------------------------------
@@ -2371,6 +2664,12 @@ else
     } >> "$GW_LOG"
   fi
   [[ "$OSTH_ANY_FAILED" -ne 0 ]] && log "WARNING: One or more shard gateway processes failed — check $LOG_DIR/gateway_shard*.log"
+fi
+
+if [[ -n "${WATCHDOG_PID:-}" ]]; then
+  log "  Stopping fastpath hang-detection watchdog (pid $WATCHDOG_PID)..."
+  kill "$WATCHDOG_PID" 2>/dev/null || true
+  wait "$WATCHDOG_PID" 2>/dev/null || true
 fi
 
 END_S="$(date +%s)"

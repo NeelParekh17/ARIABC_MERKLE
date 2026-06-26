@@ -21,7 +21,6 @@ extern Datum bcdb_wait_to_finish(PG_FUNCTION_ARGS);
 extern Datum bcdb_num_committed(PG_FUNCTION_ARGS);
 extern Datum bcdb_last_committed_txid(PG_FUNCTION_ARGS);
 extern Datum bcdb_verify(PG_FUNCTION_ARGS);
-
-
+extern Datum bcdb_gate_diagnostics(PG_FUNCTION_ARGS);
 
 #endif //BLOCKCHAIN_DATABASE_FUNC_H

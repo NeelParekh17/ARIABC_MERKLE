@@ -16,7 +16,6 @@
 |---|---|---|---|---|---|---|---|
 | 1 | admin123-MS-7C96 | 10.129.148.236 | Ubuntu 24.04.3 | Raft node + Kafka broker | SSH key | 8000 | 9000 |
 | 2 | user4-MS-7C96 | 10.129.148.246 | Ubuntu 22.04.2 | Raft node | SSH key | 8000 | 9000 |
-| 3 | new-node | 10.129.148.179 | Ubuntu 22.04.5 | Raft node | sshpass | 8000 | 9000 |
 | 4 | utkarsh-MS-7C96 | 10.129.148.248 | Ubuntu 24.04.3 | Raft node | SSH key | **8001** | 9000 |
 | — | ASUS Laptop | local | Ubuntu 24.04.4 | Gateway + controller | — | — | — |
 | — | admin123-MS-7C96 | 10.129.148.236:9092 | — | Kafka KRaft broker | — | — | — |
@@ -25,14 +24,12 @@
 
 ### 1.2 Raft Member String
 
-```
-10.129.148.236:9000,10.129.148.246:9000,10.129.148.179:9000,10.129.148.248:9000
-```
+10.129.148.236:9000,10.129.148.246:9000,10.129.148.248:9000
 
 ### 1.3 Gateway Node Connections
 
 ```
-10.129.148.236:8000,10.129.148.246:8000,10.129.148.179:8000,10.129.148.248:8001
+10.129.148.236:8000,10.129.148.246:8000,10.129.148.248:8001
 ```
 
 ---
@@ -45,14 +42,12 @@
 |---|---|---:|---:|---:|---|---|
 | admin123-MS-7C96 | AMD Ryzen 7 5700G (Zen 3, 7 nm) | 16 | 15.0 GB | 4.0 GB | 36G / 409G / 8% | Intel SSDPEKNW512G8 (NVMe) |
 | user4-MS-7C96 | AMD Ryzen 7 5700G (Zen 3, 7 nm) | 16 | 15.0 GB | 46.6 GB | 65G / 109G / 38% | Intel SSDPEKNW512G8 (NVMe) |
-| new-node | AMD Ryzen 7 5700G (Zen 3, 7 nm) | 16 | 15.0 GB | 14.9 GB | 123G / 308G / 29% | Intel SSDPEKNW512G8 (NVMe) |
 | utkarsh-MS-7C96 | AMD Ryzen 7 5700G (Zen 3, 7 nm) | 16 | 15.0 GB | 4.0 GB | 268G / 116G / 70% | Intel SSDPEKNW512G8 (NVMe, root) + Samsung 840 EVO 500GB (SATA, `/data`) |
 | ASUS Laptop (GW) | AMD Ryzen 7 6800H (Zen 3+, 6 nm) | 16 | 14.9 GB | 3.8 GB | 102G / 54G / 66% | Intel SSDPEKNU512GZ (NVMe) |
 
 **Kernel versions:**
 - admin123: `6.17.0-20-generic`
 - user4: `6.8.0-101-generic` (Ubuntu 22.04, HWE kernel)
-- new-node: `6.8.0-107-generic` (Ubuntu 22.04, HWE kernel)
 - utkarsh: `6.17.0-19-generic` (hardware clock stuck in March 2026 — functionally OK, does not affect timestamps in benchmarks)
 - ASUS Laptop: `6.8.0-110-generic`
 
@@ -92,7 +87,6 @@
 | admin123 (U24.04) | Pre-installed in `ariabc_install/lib` | `~/Desktop/ariabc_install/lib/librdkafka.so.1` | GLIBC 2.38 |
 | utkarsh (U24.04) | Pre-installed in `ariabc_install/lib` | `~/Desktop/ariabc_install/lib/librdkafka.so.1` | GLIBC 2.38 |
 | user4 (U22.04) | Built from source (librdkafka 1.8.0) | `~/Desktop/rdkafka_local/lib/librdkafka.so.1` | GLIBC 2.35 ✓ |
-| new-node (U22.04) | Built from source (librdkafka 1.8.0) | `~/Desktop/rdkafka_local/lib/librdkafka.so.1` | GLIBC 2.35 ✓ |
 
 **Why source-built on U22.04:** Ubuntu 22.04's libc (glibc 2.35) does not provide `GLIBC_2.38` symbols. The system or apt-installed librdkafka.so from a Ubuntu 24.04 build (as distributed in `ariabc_install/lib`) uses those symbols and fails to load on U22.04 with:
 ```
@@ -254,10 +248,9 @@ This is the full distributed integrity guarantee as specified in the paper — a
 
 ```
 [17:46:41]   All 4 server client ports responding (attempt 4)  ← ~7s from start
-[17:46:46]   [admin123] ariabc_pg_server ready: id=1 raft=10.129.148.236:9000 clientPort=8000 members=4
-[17:46:47]   [user4]    ariabc_pg_server ready: id=2 raft=10.129.148.246:9000   clientPort=8000 members=4
-[17:46:47]   [new-node] ariabc_pg_server ready: id=3 raft=10.129.148.179:9000  clientPort=8000 members=4
-[17:46:47]   [utkarsh]  ariabc_pg_server ready: id=4 raft=10.129.148.248:9000  clientPort=8001 members=4
+[17:46:46]   [admin123] ariabc_pg_server ready: id=1 raft=10.129.148.236:9000 clientPort=8000 members=3
+[17:46:47]   [user4]    ariabc_pg_server ready: id=2 raft=10.129.148.246:9000   clientPort=8000 members=3
+[17:46:47]   [utkarsh]  ariabc_pg_server ready: id=4 raft=10.129.148.248:9000  clientPort=8001 members=3
 ```
 
 Raft leader election completed in **~7 seconds** (well within the 60s timeout).
@@ -340,7 +333,6 @@ Collected from all 4 nodes **before** the post-workload sentinel marker was inse
 |---|---|---|---|
 | admin123 | 12,498 | `125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd` | ✓ |
 | user4 | 12,498 | `125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd` | ✓ |
-| new-node | 12,498 | `125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd` | ✓ |
 | utkarsh | 12,498 | `125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd` | ✓ |
 
 **Expected:** rows=12498, root=`125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd`  
@@ -354,7 +346,6 @@ After inserting sentinel marker key=99999999 (1 additional row):
 |---|---|---|---|
 | admin123 | 12,499 | `8f7b153049132f0d37517f7ac312ff2af6c85bd5e66f36cd5b6e38ccdd87a133` | t |
 | user4 | 12,499 | `8f7b153049132f0d37517f7ac312ff2af6c85bd5e66f36cd5b6e38ccdd87a133` | t |
-| new-node | 12,499 | `8f7b153049132f0d37517f7ac312ff2af6c85bd5e66f36cd5b6e38ccdd87a133` | t |
 | utkarsh | 12,499 | `8f7b153049132f0d37517f7ac312ff2af6c85bd5e66f36cd5b6e38ccdd87a133` | t |
 
 Marker visible on all 4 nodes within **0 seconds** of insertion (immediate replication).
@@ -367,7 +358,6 @@ A synthetic DML workload of 70 SQL statements (INSERT + UPDATE + DELETE on `aria
 |---|---|---|
 | admin123 | 50 | `0f98d7ae6a083e59f4425213bd4e1662b3887ec27fa030f1c58918515fa46a6c` |
 | user4 | 50 | `0f98d7ae6a083e59f4425213bd4e1662b3887ec27fa030f1c58918515fa46a6c` |
-| new-node | 50 | `0f98d7ae6a083e59f4425213bd4e1662b3887ec27fa030f1c58918515fa46a6c` |
 | utkarsh | 50 | `0f98d7ae6a083e59f4425213bd4e1662b3887ec27fa030f1c58918515fa46a6c` |
 
 ```
@@ -548,8 +538,6 @@ All critical files are on `~/Desktop/` or system directories — nothing in `/tm
 | admin123 | `~/Desktop/ariabc_cluster/ariabc_pg/build/bin/` | ariabc_pg_server (U24 binary) |
 | user4 | `~/Desktop/rdkafka_local/lib/librdkafka.so.1` | librdkafka 1.8.0 (source-built, GLIBC 2.35) |
 | user4 | `~/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server` | ariabc_pg_server (U22 native build) |
-| new-node | `~/Desktop/rdkafka_local/lib/librdkafka.so.1` | librdkafka 1.8.0 (source-built, GLIBC 2.35) |
-| new-node | `~/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server` | ariabc_pg_server (U22 native build) |
 | utkarsh | `~/Desktop/ariabc_install/lib/` | librdkafka, libpq (system librdkafka already present) |
 | utkarsh | `~/Desktop/ariabc_cluster/ariabc_pg/build/bin/` | ariabc_pg_server (U24 binary from ASUS) |
 

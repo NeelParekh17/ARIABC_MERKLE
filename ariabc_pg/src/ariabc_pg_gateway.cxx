@@ -1326,6 +1326,11 @@ struct vote_store_profile {
     uint64_t majority_pair_2_4 = 0;
     double ready_queue_depth_mean = 0.0;
     size_t ready_queue_depth_max = 0;
+    uint64_t ready_queue_enqueue_count = 0;
+    double mutex_wait_us_mean = 0.0;
+    double mutex_wait_us_p95 = 0.0;
+    uint64_t mutex_wait_us_total = 0;
+    uint64_t mutex_wait_us_max = 0;
     uint64_t audit_pending_current = 0;
     uint64_t audit_pending_max = 0;
     uint64_t all3_ready_queue_depth_max = 0;
@@ -1350,8 +1355,11 @@ struct vote_store {
     {
         out_recovery_note.clear();
         const bool sig_valid = verify_result_signature(rec, sig_key_);
+        /* Part 5: measure time waiting for the mutex lock (wait vs hold). */
+        const uint64_t wait_start_ns = steady_now_ns();
         std::lock_guard<std::mutex> lk(mu_);
         const uint64_t hold_start_ns = steady_now_ns();
+        record_mutex_wait_locked(hold_start_ns > wait_start_ns ? (hold_start_ns - wait_start_ns) : 0);
         add_reply_inner_locked(rec, sig_valid, out_recovery_note);
         record_mutex_hold_locked(steady_now_ns() - hold_start_ns);
         cv_.notify_all();
@@ -1370,8 +1378,11 @@ struct vote_store {
             sig_valid.push_back(verify_result_signature(rec, sig_key_));
         }
         out_recovery_notes.resize(recs.size());
+        /* Part 5: measure time waiting for the mutex lock (wait vs hold). */
+        const uint64_t wait_start_ns = steady_now_ns();
         std::lock_guard<std::mutex> lk(mu_);
         const uint64_t hold_start_ns = steady_now_ns();
+        record_mutex_wait_locked(hold_start_ns > wait_start_ns ? (hold_start_ns - wait_start_ns) : 0);
         for (size_t i = 0; i < recs.size(); ++i) {
             add_reply_inner_locked(recs[i], sig_valid[i], out_recovery_notes[i]);
         }
@@ -1922,6 +1933,11 @@ public:
                 static_cast<double>(ready_queue_depth_sum_) / static_cast<double>(ready_queue_depth_obs_);
         }
         out.ready_queue_depth_max = ready_queue_depth_max_;
+        out.ready_queue_enqueue_count = ready_queue_enqueue_count_;   /* Part 5 */
+        out.mutex_wait_us_mean = mean_us_locked(mutex_wait_samples_, mutex_wait_sum_ns_); /* Part 5 */
+        out.mutex_wait_us_p95  = p95_us_locked(mutex_wait_samples_);                     /* Part 5 */
+        out.mutex_wait_us_total = mutex_wait_sum_ns_ / 1000;                              /* Part 5 */
+        out.mutex_wait_us_max   = mutex_wait_max_ns_ / 1000;                              /* Part 5 */
         out.audit_pending_current = audit_pending_current_;
         out.audit_pending_max = audit_pending_max_;
         out.all3_ready_queue_depth_max = all3_ready_queue_depth_max_;
@@ -2049,6 +2065,19 @@ private:
         mutex_hold_samples_.push_back(delta_ns);
     }
 
+    /* Part 5: track mutex-wait time (time to acquire, not time held). */
+    void record_mutex_wait_locked(uint64_t delta_ns) {
+        mutex_wait_sum_ns_ += delta_ns;
+        mutex_wait_samples_.push_back(delta_ns);
+        if (delta_ns > mutex_wait_max_ns_)
+            mutex_wait_max_ns_ = delta_ns;
+    }
+
+    /* Part 5: track items entering the ready set. */
+    void record_ready_enqueue_locked() {
+        ++ready_queue_enqueue_count_;
+    }
+
     void increment_node_counter_locked(std::unordered_map<int, uint64_t>& counters,
                                        int node_id) {
         counters[node_id] += 1;
@@ -2066,6 +2095,7 @@ private:
             ready_queue_depth_sum_ += static_cast<uint64_t>(ready_members_.size());
             ++ready_queue_depth_obs_;
             ready_queue_depth_max_ = std::max<size_t>(ready_queue_depth_max_, ready_members_.size());
+            record_ready_enqueue_locked(); /* Part 5 */
         }
     }
 
@@ -2429,6 +2459,12 @@ private:
     uint64_t ready_queue_depth_sum_ = 0;
     uint64_t ready_queue_depth_obs_ = 0;
     size_t ready_queue_depth_max_ = 0;
+    /* Part 5: mutex-wait tracking (separate from hold). */
+    uint64_t mutex_wait_sum_ns_ = 0;
+    std::vector<uint64_t> mutex_wait_samples_;
+    uint64_t mutex_wait_max_ns_ = 0;
+    /* Part 5: ready-queue enqueue count. */
+    uint64_t ready_queue_enqueue_count_ = 0;
     struct audit_deadline_entry {
         uint64_t deadline_ns;
         uint64_t req_num;
@@ -2688,6 +2724,43 @@ bool run_early_ready_race_self_test()
             return false;
         }
         std::cout << "Scenario F PASS" << std::endl;
+    }
+
+    // Scenario G: 4-node gateway self-test (majority 3)
+    {
+        vote_store votes_g(4, 3, 10, sig_key);
+
+        votes_g.note_inflight_registered(8);
+        votes_g.add_reply(make_rec_for(8, 1, true), recovery);
+        votes_g.add_reply(make_rec_for(8, 2, false), recovery);
+        votes_g.add_reply(make_rec_for(8, 3, false), recovery);
+
+        // At this point we have a majority (3) but not all nodes (4).
+        // It should NOT be ready for all-nodes.
+        uint64_t out_req = 0;
+        std::string out_err;
+        bool ok_wait = votes_g.wait_next_all3_ready(out_req, out_err, 1, 10);
+        if (ok_wait) {
+            std::cerr << "Scenario G failed: should not be all-nodes ready yet" << std::endl;
+            return false;
+        }
+
+        audit_mark_status status = votes_g.mark_audit_pending(8, 1000, 10);
+        if (status != audit_mark_status::PINNED) {
+            std::cerr << "Scenario G failed to pin: " << (int)status << std::endl;
+            return false;
+        }
+
+        // Add 4th node reply -> all nodes.
+        votes_g.add_reply(make_rec_for(8, 4, false), recovery);
+
+        ok_wait = votes_g.wait_next_all3_ready(out_req, out_err, 1000, 10);
+        if (!ok_wait || out_req != 8 || !out_err.empty()) {
+            std::cerr << "Scenario G failed: ok_wait=" << ok_wait << " out_req=" << out_req << " err=" << out_err << std::endl;
+            return false;
+        }
+
+        std::cout << "Scenario G PASS" << std::endl;
     }
 
     std::cout << "early-ready self-test PASS" << std::endl;
@@ -3288,6 +3361,11 @@ int main(int argc, char** argv) {
 
     std::atomic<uint64_t> dispatch_queue_depth_max(0);
 
+    /* Part 5: consumer dispatch aggregate counters (Plan §5). */
+    std::atomic<uint64_t> consumer_dispatch_batches(0);         /* total dispatch invocations */
+    std::atomic<uint64_t> consumer_dispatch_records_total(0);   /* sum of records per dispatch */
+    std::atomic<uint64_t> consumer_dispatch_records_max(0);     /* max records in one dispatch */
+
     if (kafka_enabled) {
         dispatch_thread = std::thread([&] {
             while (true) {
@@ -3306,6 +3384,13 @@ int main(int argc, char** argv) {
                     kafka_parse_to_vote_store_ns.fetch_add(add_start_ns - batch.parse_done_ns,
                                                            std::memory_order_relaxed);
                 }
+
+                /* Part 5: consumer dispatch aggregate counters. */
+                const uint64_t batch_recs = static_cast<uint64_t>(batch.records.size());
+                consumer_dispatch_batches.fetch_add(1, std::memory_order_relaxed);
+                consumer_dispatch_records_total.fetch_add(batch_recs, std::memory_order_relaxed);
+                ariabc_pg::atomic_max_u64(consumer_dispatch_records_max, batch_recs);
+
                 const auto a0 = std::chrono::steady_clock::now();
                 votes.add_replies_batch(batch.records, recoveries);
                 const auto a1 = std::chrono::steady_clock::now();
@@ -5333,6 +5418,21 @@ int main(int argc, char** argv) {
             << " wait_cv_sleep_ms_p95=" << vote_prof.wait_cv_sleep_ms_p95
             << " ready_queue_depth_mean=" << vote_prof.ready_queue_depth_mean
             << " ready_queue_depth_max=" << vote_prof.ready_queue_depth_max
+            /* Part 5: consumer dispatch aggregate counters */
+            << " consumer_dispatch_batches=" << consumer_dispatch_batches.load(std::memory_order_relaxed)
+            << " consumer_dispatch_records_total=" << consumer_dispatch_records_total.load(std::memory_order_relaxed)
+            << " consumer_dispatch_records_max=" << consumer_dispatch_records_max.load(std::memory_order_relaxed)
+            << " consumer_dispatch_records_mean=" << (consumer_dispatch_batches.load(std::memory_order_relaxed) > 0
+                    ? (static_cast<double>(consumer_dispatch_records_total.load(std::memory_order_relaxed))
+                       / static_cast<double>(consumer_dispatch_batches.load(std::memory_order_relaxed)))
+                    : 0.0)
+            /* Part 5: vote_store mutex-wait stats (wait = time to acquire; hold = time while locked) */
+            << " vote_store_mutex_wait_us_mean=" << vote_prof.mutex_wait_us_mean
+            << " vote_store_mutex_wait_us_p95=" << vote_prof.mutex_wait_us_p95
+            << " vote_store_mutex_wait_us_total=" << vote_prof.mutex_wait_us_total
+            << " vote_store_mutex_wait_us_max=" << vote_prof.mutex_wait_us_max
+            /* Part 5: ready queue entry count */
+            << " ready_queue_enqueue_count=" << vote_prof.ready_queue_enqueue_count
             << " det_total_outstanding_max=" << det_total_outstanding_max.load(std::memory_order_relaxed)
             << " det_lane_outstanding_max=" << det_lane_outstanding_max.load(std::memory_order_relaxed)
             << " kc_poll_calls=" << kc.poll_calls

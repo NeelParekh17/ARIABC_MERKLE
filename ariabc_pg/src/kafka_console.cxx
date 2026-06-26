@@ -296,8 +296,15 @@ bool kafka_console_producer::send_payload(const std::string& payload,
         if (e == RD_KAFKA_RESP_ERR_NO_ERROR) {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             ++stats_.send_ok;
-            ++delivery_pending_;
-            update_max_u64(stats_.delivery_pending_max, delivery_pending_);
+            uint64_t before = delivery_pending_.fetch_add(1, std::memory_order_relaxed);
+            uint64_t dp = before + 1;
+            update_max_u64(stats_.delivery_pending_max, dp);
+            if (before == 8) {
+                pending_crossed_above_8_.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (before == 32) {
+                pending_crossed_above_32_.fetch_add(1, std::memory_order_relaxed);
+            }
             return true;
         }
 
@@ -333,14 +340,27 @@ void kafka_console_producer::note_delivery(uint64_t delivery_ns, bool error) {
     if (error) ++stats_.delivery_errors;
     stats_.delivery_ns += delivery_ns;
     update_max_u64(stats_.delivery_max_ns, delivery_ns);
-    if (delivery_pending_ > 0) {
-        --delivery_pending_;
+    if (delivery_pending_.load(std::memory_order_relaxed) > 0) {
+        delivery_pending_.fetch_sub(1, std::memory_order_relaxed);
     }
 }
 
 kafka_producer_stats kafka_console_producer::stats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
-    return stats_;
+    kafka_producer_stats s = stats_;
+    s.delivery_pending_current = delivery_pending_.load(std::memory_order_relaxed);
+    s.pending_crossed_above_8 = pending_crossed_above_8_.load(std::memory_order_relaxed);
+    s.pending_crossed_above_32 = pending_crossed_above_32_.load(std::memory_order_relaxed);
+    return s;
+}
+
+uint64_t kafka_console_producer::delivery_pending() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return delivery_pending_.load(std::memory_order_relaxed);
+}
+
+uint64_t kafka_console_producer::delivery_pending_relaxed() const {
+    return delivery_pending_.load(std::memory_order_relaxed);
 }
 
 void kafka_console_producer::stop() {
@@ -586,6 +606,8 @@ bool kafka_console_producer::send_payload(const std::string&, const std::string&
 }
 void kafka_console_producer::note_delivery(uint64_t, bool) {}
 kafka_producer_stats kafka_console_producer::stats() const { return stats_; }
+uint64_t kafka_console_producer::delivery_pending() const { return 0; }
+uint64_t kafka_console_producer::delivery_pending_relaxed() const { return 0; }
 void kafka_console_producer::stop() {}
 
 kafka_console_consumer::kafka_console_consumer() : rk_(nullptr), busy_hint_(false) {}

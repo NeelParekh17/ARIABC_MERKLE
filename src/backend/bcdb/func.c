@@ -555,3 +555,234 @@ bcdb_init2(PG_FUNCTION_ARGS)
     bcdb_middleware_init2(is_oep_mode, block_size, numTx, timeSlot);
     PG_RETURN_BOOL(true);
 }
+
+PG_FUNCTION_INFO_V1(bcdb_gate_diagnostics);
+
+/*
+ * Emit a full diagnostic snapshot of the BCDB fastpath telemetry.
+ * Intended for use by the external hang-detection watchdog.
+ */
+Datum
+bcdb_gate_diagnostics(PG_FUNCTION_ARGS)
+{
+#if SAFEDBG
+	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
+#endif
+
+	BCBlock *blk = get_block_by_id(1, false);
+	BCTxID   published     = blk ? (BCTxID)__atomic_load_n(&blk->published_max_tx_id, __ATOMIC_RELAXED) : -1;
+	BCTxID   last_committed = blk ? (BCTxID)__atomic_load_n(&blk->last_committed_tx_id, __ATOMIC_RELAXED) : -1;
+	BCBlockID next_enqueue  = block_meta ?
+		(BCBlockID)__atomic_load_n(&block_meta->next_enqueue_block_id, __ATOMIC_RELAXED) : -1;
+
+	uint64 agg_serial_gate_calls = 0;
+	uint64 agg_serial_gate_wait_total_us = 0;
+	uint64 agg_serial_gate_wait_max_us = 0;
+	uint64 agg_serial_gate_cv_sleep_count = 0;
+	uint64 agg_serial_gate_spin_iterations = 0;
+
+	uint64 agg_commit_advance_calls = 0;
+	uint64 agg_commit_initial_cas_failures = 0;
+	uint64 agg_commit_prefix_steps = 0;
+	uint64 agg_commit_broadcast_count = 0;
+
+	uint64 agg_published_ready_calls = 0;
+	uint64 agg_published_ready_prefix_steps = 0;
+	uint64 agg_published_ready_cas_failures = 0;
+
+	uint64 agg_block_enqueue_turn_calls = 0;
+	uint64 agg_block_enqueue_turn_wait_total_us = 0;
+	uint64 agg_block_enqueue_turn_max_us = 0;
+
+	uint64 agg_block_watermark_wait_calls = 0;
+	uint64 agg_block_watermark_wait_total_us = 0;
+	uint64 agg_block_watermark_wait_max_us = 0;
+
+	uint64 agg_block_slot_wait_calls = 0;
+	uint64 agg_block_slot_wait_total_us = 0;
+	uint64 agg_block_slot_wait_max_us = 0;
+
+	uint64 agg_result_slot_consumable_wait_calls = 0;
+	uint64 agg_result_slot_consumable_wait_total_us = 0;
+	uint64 agg_result_slot_consumable_wait_max_us = 0;
+
+	uint64 agg_slot_fallback_wait_calls = 0;
+	uint64 agg_slot_fallback_wait_total_us = 0;
+	uint64 agg_slot_fallback_wait_max_us = 0;
+
+	uint64 agg_prev_commit_wait_calls = 0;
+	uint64 agg_prev_commit_wait_total_us = 0;
+	uint64 agg_prev_commit_wait_max_us = 0;
+
+	uint64 agg_target_commit_wait_calls = 0;
+	uint64 agg_target_commit_wait_total_us = 0;
+	uint64 agg_target_commit_wait_max_us = 0;
+
+	StringInfoData str;
+
+	/* Emit to pg_log first */
+	bcdb_log_gate_snapshot("watchdog_sql", -1, -1, -1);
+
+	initStringInfo(&str);
+
+	appendStringInfo(&str, "BCDB GATE DIAGNOSTICS SNAPSHOT\n");
+	appendStringInfo(&str, "--------------------------------------------------\n");
+	appendStringInfo(&str, "Watermarks:\n");
+	appendStringInfo(&str, "  published_max_tx_id: %ld\n", (long)published);
+	appendStringInfo(&str, "  last_committed_tx_id: %ld\n", (long)last_committed);
+	appendStringInfo(&str, "  next_enqueue_block_id: %d\n\n", (int)next_enqueue);
+
+	if (bcdb_gate_stats_shards != NULL)
+	{
+		uint64 now_us = bcdb_get_time();
+		int num_shards = bcdb_worker_count + MaxBackends;
+
+		for (int i = 0; i < num_shards; i++)
+		{
+			BCDBGatesStatsShard *shard = &bcdb_gate_stats_shards[i];
+
+			agg_serial_gate_calls += __atomic_load_n(&shard->serial_gate_calls, __ATOMIC_RELAXED);
+			agg_serial_gate_wait_total_us += __atomic_load_n(&shard->serial_gate_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 s_max = __atomic_load_n(&shard->serial_gate_wait_max_us, __ATOMIC_RELAXED);
+				if (s_max > agg_serial_gate_wait_max_us) agg_serial_gate_wait_max_us = s_max;
+			}
+			agg_serial_gate_cv_sleep_count += __atomic_load_n(&shard->serial_gate_cv_sleep_count, __ATOMIC_RELAXED);
+			agg_serial_gate_spin_iterations += __atomic_load_n(&shard->serial_gate_spin_iterations, __ATOMIC_RELAXED);
+
+			agg_commit_advance_calls += __atomic_load_n(&shard->commit_advance_calls, __ATOMIC_RELAXED);
+			agg_commit_initial_cas_failures += __atomic_load_n(&shard->commit_initial_cas_failures, __ATOMIC_RELAXED);
+			agg_commit_prefix_steps += __atomic_load_n(&shard->commit_prefix_steps, __ATOMIC_RELAXED);
+			agg_commit_broadcast_count += __atomic_load_n(&shard->commit_broadcast_count, __ATOMIC_RELAXED);
+
+			agg_published_ready_calls += __atomic_load_n(&shard->published_ready_calls, __ATOMIC_RELAXED);
+			agg_published_ready_prefix_steps += __atomic_load_n(&shard->published_ready_prefix_steps, __ATOMIC_RELAXED);
+			agg_published_ready_cas_failures += __atomic_load_n(&shard->published_ready_cas_failures, __ATOMIC_RELAXED);
+
+			agg_block_enqueue_turn_calls += __atomic_load_n(&shard->block_enqueue_turn_calls, __ATOMIC_RELAXED);
+			agg_block_enqueue_turn_wait_total_us += __atomic_load_n(&shard->block_enqueue_turn_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 e_max = __atomic_load_n(&shard->block_enqueue_turn_wait_max_us, __ATOMIC_RELAXED);
+				if (e_max > agg_block_enqueue_turn_max_us) agg_block_enqueue_turn_max_us = e_max;
+			}
+
+			agg_block_watermark_wait_calls += __atomic_load_n(&shard->block_watermark_wait_calls, __ATOMIC_RELAXED);
+			agg_block_watermark_wait_total_us += __atomic_load_n(&shard->block_watermark_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 w_max = __atomic_load_n(&shard->block_watermark_wait_max_us, __ATOMIC_RELAXED);
+				if (w_max > agg_block_watermark_wait_max_us) agg_block_watermark_wait_max_us = w_max;
+			}
+
+			agg_block_slot_wait_calls += __atomic_load_n(&shard->block_slot_wait_calls, __ATOMIC_RELAXED);
+			agg_block_slot_wait_total_us += __atomic_load_n(&shard->block_slot_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 sl_max = __atomic_load_n(&shard->block_slot_wait_max_us, __ATOMIC_RELAXED);
+				if (sl_max > agg_block_slot_wait_max_us) agg_block_slot_wait_max_us = sl_max;
+			}
+
+			agg_result_slot_consumable_wait_calls += __atomic_load_n(&shard->result_slot_consumable_wait_calls, __ATOMIC_RELAXED);
+			agg_result_slot_consumable_wait_total_us += __atomic_load_n(&shard->result_slot_consumable_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 c_max = __atomic_load_n(&shard->result_slot_consumable_wait_max_us, __ATOMIC_RELAXED);
+				if (c_max > agg_result_slot_consumable_wait_max_us) agg_result_slot_consumable_wait_max_us = c_max;
+			}
+
+			agg_slot_fallback_wait_calls += __atomic_load_n(&shard->slot_fallback_wait_calls, __ATOMIC_RELAXED);
+			agg_slot_fallback_wait_total_us += __atomic_load_n(&shard->slot_fallback_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 sf_max = __atomic_load_n(&shard->slot_fallback_wait_max_us, __ATOMIC_RELAXED);
+				if (sf_max > agg_slot_fallback_wait_max_us) agg_slot_fallback_wait_max_us = sf_max;
+			}
+
+			agg_prev_commit_wait_calls += __atomic_load_n(&shard->prev_commit_wait_calls, __ATOMIC_RELAXED);
+			agg_prev_commit_wait_total_us += __atomic_load_n(&shard->prev_commit_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 pc_max = __atomic_load_n(&shard->prev_commit_wait_max_us, __ATOMIC_RELAXED);
+				if (pc_max > agg_prev_commit_wait_max_us) agg_prev_commit_wait_max_us = pc_max;
+			}
+
+			agg_target_commit_wait_calls += __atomic_load_n(&shard->target_commit_wait_calls, __ATOMIC_RELAXED);
+			agg_target_commit_wait_total_us += __atomic_load_n(&shard->target_commit_wait_total_us, __ATOMIC_RELAXED);
+			{
+				uint64 tc_max = __atomic_load_n(&shard->target_commit_wait_max_us, __ATOMIC_RELAXED);
+				if (tc_max > agg_target_commit_wait_max_us) agg_target_commit_wait_max_us = tc_max;
+			}
+		}
+
+		appendStringInfo(&str, "Aggregated Statistics Across Shards:\n");
+		appendStringInfo(&str, "  serial_gate_calls: %lu, total_us: %lu, max_us: %lu, cv_sleeps: %lu, spin_iters: %lu\n",
+						 (unsigned long)agg_serial_gate_calls, (unsigned long)agg_serial_gate_wait_total_us,
+						 (unsigned long)agg_serial_gate_wait_max_us, (unsigned long)agg_serial_gate_cv_sleep_count,
+						 (unsigned long)agg_serial_gate_spin_iterations);
+		appendStringInfo(&str, "  commit_advance_calls: %lu, cas_failures: %lu, prefix_steps: %lu, broadcast_count: %lu\n",
+						 (unsigned long)agg_commit_advance_calls, (unsigned long)agg_commit_initial_cas_failures,
+						 (unsigned long)agg_commit_prefix_steps, (unsigned long)agg_commit_broadcast_count);
+		appendStringInfo(&str, "  published_ready_calls: %lu, prefix_steps: %lu, cas_failures: %lu\n",
+						 (unsigned long)agg_published_ready_calls, (unsigned long)agg_published_ready_prefix_steps,
+						 (unsigned long)agg_published_ready_cas_failures);
+		appendStringInfo(&str, "  block_enqueue_turn_calls: %lu, total_us: %lu, max_us: %lu\n",
+						 (unsigned long)agg_block_enqueue_turn_calls, (unsigned long)agg_block_enqueue_turn_wait_total_us,
+						 (unsigned long)agg_block_enqueue_turn_max_us);
+		appendStringInfo(&str, "  block_watermark_wait_calls: %lu, total_us: %lu, max_us: %lu\n",
+						 (unsigned long)agg_block_watermark_wait_calls, (unsigned long)agg_block_watermark_wait_total_us,
+						 (unsigned long)agg_block_watermark_wait_max_us);
+		appendStringInfo(&str, "  block_slot_wait_calls: %lu, total_us: %lu, max_us: %lu\n",
+						 (unsigned long)agg_block_slot_wait_calls, (unsigned long)agg_block_slot_wait_total_us,
+						 (unsigned long)agg_block_slot_wait_max_us);
+		appendStringInfo(&str, "  result_slot_consumable_wait_calls: %lu, total_us: %lu, max_us: %lu\n",
+						 (unsigned long)agg_result_slot_consumable_wait_calls, (unsigned long)agg_result_slot_consumable_wait_total_us,
+						 (unsigned long)agg_result_slot_consumable_wait_max_us);
+		appendStringInfo(&str, "  slot_fallback_wait_calls: %lu, total_us: %lu, max_us: %lu\n",
+						 (unsigned long)agg_slot_fallback_wait_calls, (unsigned long)agg_slot_fallback_wait_total_us,
+						 (unsigned long)agg_slot_fallback_wait_max_us);
+		appendStringInfo(&str, "  prev_commit_wait_calls: %lu, total_us: %lu, max_us: %lu\n",
+						 (unsigned long)agg_prev_commit_wait_calls, (unsigned long)agg_prev_commit_wait_total_us,
+						 (unsigned long)agg_prev_commit_wait_max_us);
+		appendStringInfo(&str, "  target_commit_wait_calls: %lu, total_us: %lu, max_us: %lu\n\n",
+						 (unsigned long)agg_target_commit_wait_calls, (unsigned long)agg_target_commit_wait_total_us,
+						 (unsigned long)agg_target_commit_wait_max_us);
+
+		appendStringInfo(&str, "Active Wait States:\n");
+		appendStringInfo(&str, "  %-8s %-10s %-12s %-12s %-12s %-12s\n", "pid", "shard_idx", "wait_txid", "block_id", "phase", "elapsed_us");
+		appendStringInfo(&str, "  ----------------------------------------------------------------------------\n");
+
+		for (int i = 0; i < num_shards; i++)
+		{
+			BCDBGatesStatsShard *shard = &bcdb_gate_stats_shards[i];
+			int phase = __atomic_load_n(&shard->active_wait_phase, __ATOMIC_RELAXED);
+			if (phase != BCDB_GATE_PHASE_NONE)
+			{
+				int pid = __atomic_load_n(&shard->pid, __ATOMIC_RELAXED);
+				int64 txid = __atomic_load_n(&shard->active_wait_txid, __ATOMIC_RELAXED);
+				int32 block_id = __atomic_load_n(&shard->active_wait_block_id, __ATOMIC_RELAXED);
+				uint64 start = __atomic_load_n(&shard->active_wait_start_us, __ATOMIC_RELAXED);
+				uint64 elapsed = 0;
+				const char *phase_str = "UNKNOWN";
+
+				if (start > 0 && now_us >= start)
+					elapsed = now_us - start;
+
+				switch (phase)
+				{
+					case BCDB_GATE_PHASE_SERIAL: phase_str = "SERIAL"; break;
+					case BCDB_GATE_PHASE_ENQUEUE: phase_str = "ENQUEUE"; break;
+					case BCDB_GATE_PHASE_WATERMARK: phase_str = "WATERMARK"; break;
+					case BCDB_GATE_PHASE_SLOT: phase_str = "SLOT"; break;
+					case BCDB_GATE_PHASE_CONSUMABLE: phase_str = "CONSUMABLE"; break;
+					case BCDB_GATE_PHASE_SLOT_FALLBACK: phase_str = "SLOT_FALLBACK"; break;
+					case BCDB_GATE_PHASE_PREV_COMMIT: phase_str = "PREV_COMMIT"; break;
+					case BCDB_GATE_PHASE_TARGET_COMMIT: phase_str = "TARGET_COMMIT"; break;
+				}
+
+				appendStringInfo(&str, "  %-8d %-10d %-12ld %-12d %-12s %-12lu\n",
+								 pid, i, (long)txid, (int)block_id, phase_str, (unsigned long)elapsed);
+			}
+		}
+	}
+	else
+	{
+		appendStringInfo(&str, "Shared memory gate stats shards not initialized.\n");
+	}
+
+	PG_RETURN_TEXT_P(cstring_to_text(str.data));
+}

@@ -293,7 +293,7 @@ extract_tps() {
 # ---------------------------------------------------------------------------
 # Initialize results CSV
 # ---------------------------------------------------------------------------
-echo "threads,run,tps,workload_lines,gateway_ms,elapsed_s,run_dir,status" > "$RESULTS_CSV"
+echo "threads,parallelism_mode,det_batch_size,per_thread_window,ordering_mode,run,tps,workload_lines,gateway_ms,elapsed_s,run_dir,status" > "$RESULTS_CSV"
 
 # ---------------------------------------------------------------------------
 # Accumulate per-thread TPS for the summary table
@@ -442,7 +442,7 @@ for t in "${THREADS[@]}"; do
     log "  [t=$t run=$run_idx] TPS=$TPS workload_lines=$WORKLOAD_LINES gw_ms=${GW_MS} elapsed=${ELAPSED_S}s status=$STATUS"
 
     # Append to CSV
-    echo "$t,$run_idx,$TPS,$WORKLOAD_LINES,$GW_MS,$ELAPSED_S,$RUN_DIR,$STATUS" >> "$RESULTS_CSV"
+    echo "$t,$PARALLELISM_MODE,$DET_BATCH_SIZE,$PER_THREAD_WINDOW,${EFFECTIVE_ORDERING},$run_idx,$TPS,$WORKLOAD_LINES,$GW_MS,$ELAPSED_S,$RUN_DIR,$STATUS" >> "$RESULTS_CSV"
 
     # Accumulate for summary
     if [[ "$STATUS" == "ok" && "$TPS" -gt 0 ]]; then
@@ -562,37 +562,74 @@ try:
     if df.empty:
         sys.exit(0)
 
-    # Group by threads and calculate mean TPS
-    grouped = df.groupby('threads')['tps'].agg(['mean', 'std']).reset_index()
-    # Fill NaN std dev with 0 (if only 1 run per thread count)
-    grouped['std'] = grouped['std'].fillna(0)
+    # Detect which columns have multiple unique values to determine grouping
+    potential_groupers = ['parallelism_mode', 'det_batch_size', 'per_thread_window', 'ordering_mode']
+    group_cols = []
+    for col in potential_groupers:
+        if col in df.columns and df[col].nunique() > 1:
+            group_cols.append(col)
 
     plt.figure(figsize=(10, 6))
-    
-    if (grouped['std'] > 0).any():
-        plt.errorbar(grouped['threads'], grouped['mean'], yerr=grouped['std'], 
-                     fmt='-o', capsize=5, capthick=2, color='blue', markersize=8)
+
+    if not group_cols:
+        # Standard single line plot
+        grouped = df.groupby('threads')['tps'].agg(['mean', 'std']).reset_index()
+        grouped['std'] = grouped['std'].fillna(0)
+
+        if (grouped['std'] > 0).any():
+            plt.errorbar(grouped['threads'], grouped['mean'], yerr=grouped['std'],
+                         fmt='-o', capsize=5, capthick=2, color='blue', markersize=8, label='TPS')
+        else:
+            plt.plot(grouped['threads'], grouped['mean'], '-o', color='blue', markersize=8, label='TPS')
+
+        for i, row in grouped.iterrows():
+            plt.annotate(f"{int(row['mean'])}",
+                         (row['threads'], row['mean']),
+                         textcoords="offset points",
+                         xytext=(0,10),
+                         ha='center')
     else:
-        plt.plot(grouped['threads'], grouped['mean'], '-o', color='blue', markersize=8)
-    
+        # Multi-line plot grouped by the variables
+        all_groups = df.groupby(group_cols)
+        colormap = plt.cm.get_cmap('tab10')
+        color_idx = 0
+        for name, group_df in all_groups:
+            label_parts = []
+            if isinstance(name, tuple):
+                for col, val in zip(group_cols, name):
+                    label_parts.append(f"{col}={val}")
+            else:
+                label_parts.append(f"{group_cols[0]}={name}")
+            label = ", ".join(label_parts)
+
+            grouped = group_df.groupby('threads')['tps'].agg(['mean', 'std']).reset_index()
+            grouped['std'] = grouped['std'].fillna(0)
+
+            color = colormap(color_idx % 10)
+            color_idx += 1
+
+            if (grouped['std'] > 0).any():
+                plt.errorbar(grouped['threads'], grouped['mean'], yerr=grouped['std'],
+                             fmt='-o', capsize=5, capthick=2, color=color, markersize=8, label=label)
+            else:
+                plt.plot(grouped['threads'], grouped['mean'], '-o', color=color, markersize=8, label=label)
+
+            for i, row in grouped.iterrows():
+                plt.annotate(f"{int(row['mean'])}",
+                             (row['threads'], row['mean']),
+                             textcoords="offset points",
+                             xytext=(0,10),
+                             ha='center', fontsize=9, alpha=0.8)
+        plt.legend(loc='best')
+
     plt.title('Cluster Throughput: TPS vs Threads', fontsize=16)
     plt.xlabel('Number of Threads', fontsize=14)
     plt.ylabel('Throughput (TPS)', fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.7)
-    plt.xticks(grouped['threads'])
     
-    # Annotate points
-    for i, row in grouped.iterrows():
-        plt.annotate(f"{int(row['mean'])}", 
-                     (row['threads'], row['mean']),
-                     textcoords="offset points", 
-                     xytext=(0,10), 
-                     ha='center')
-
-    # Start Y-axis at 0 for proper scaling visualization
+    plt.xticks(sorted(df['threads'].unique()))
     plt.ylim(bottom=0)
-    # Add some top margin so annotations aren't cut off
-    plt.ylim(top=max(grouped['mean']) * 1.15)
+    plt.ylim(top=df['tps'].max() * 1.2)
 
     plt.tight_layout()
     plt.savefig(out_file)
@@ -600,10 +637,35 @@ try:
 except Exception as e:
     print(f"Failed to generate graph: {e}")
 EOF
-  log "Generating graph..."
-  python3 "$OUT_DIR/plot.py" "$RESULTS_CSV" "$GRAPH_FILE" || log "Failed to generate graph."
+  log "Generating Python graph..."
+  python3 "$OUT_DIR/plot.py" "$RESULTS_CSV" "$GRAPH_FILE" || log "Failed to generate Python graph."
 else
-  log "python3 not found, skipping graph generation."
+  log "python3 not found, skipping Python graph generation."
+fi
+
+# Gnuplot generator
+if command -v gnuplot >/dev/null 2>&1; then
+  log "Generating gnuplot graph..."
+  GNUPLOT_SCRIPT="$OUT_DIR/plot.plt"
+  GNUPLOT_GRAPH="$OUT_DIR/tps_vs_threads_gnuplot.png"
+  cat << EOF > "$GNUPLOT_SCRIPT"
+set datafile separator ","
+set terminal pngcairo size 1024,768 enhanced font "sans,12"
+set output "$GNUPLOT_GRAPH"
+set title "Cluster Throughput: TPS vs Threads" font "sans,16"
+set xlabel "Number of Threads" font "sans,14"
+set ylabel "Throughput (TPS)" font "sans,14"
+set grid xtics ytics ls 12 lc rgb '#dddddd' lt 1 lw 1
+set style line 12 lc rgb '#dddddd' lt 0 lw 1
+set style line 1 lc rgb '#0060ad' lt 1 lw 2 pt 7 ps 1.5
+set style fill transparent solid 0.2 noborder
+set yrange [0:*]
+set xtics 1
+plot "$RESULTS_CSV" using 1:7:xtic(1) with points ls 1 title "TPS Runs"
+EOF
+  gnuplot "$GNUPLOT_SCRIPT" || log "Failed to generate gnuplot graph."
+else
+  log "gnuplot not found, skipping gnuplot graph generation."
 fi
 
 exit 0

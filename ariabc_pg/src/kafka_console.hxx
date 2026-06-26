@@ -28,6 +28,9 @@ struct kafka_producer_stats {
     uint64_t producer_callback_poll_ns = 0;
     uint64_t delivery_pending_max = 0;
     uint64_t delivery_callback_count = 0;
+    uint64_t delivery_pending_current = 0;
+    uint64_t pending_crossed_above_8 = 0;
+    uint64_t pending_crossed_above_32 = 0;
 };
 
 struct kafka_consumer_stats {
@@ -65,6 +68,8 @@ public:
                       std::string& err);
 
     kafka_producer_stats stats() const;
+    uint64_t delivery_pending() const;
+    uint64_t delivery_pending_relaxed() const;
 
     void stop();
 
@@ -78,7 +83,9 @@ private:
 
     mutable std::mutex stats_mutex_;
     kafka_producer_stats stats_;
-    uint64_t delivery_pending_ = 0;
+    std::atomic<uint64_t> delivery_pending_{0};
+    std::atomic<uint64_t> pending_crossed_above_8_{0};
+    std::atomic<uint64_t> pending_crossed_above_32_{0};
 };
 
 class kafka_console_consumer {

@@ -134,6 +134,9 @@ bcdb_gate_debug_enabled(void)
     return cached == 1;
 }
 
+
+
+
 /*
  * Broad execution-flow diagnostics for pinpointing where a transaction stalls.
  * Keep this OFF by default; enable temporarily with BCDB_FLOW_DEBUG=1.
@@ -695,17 +698,36 @@ bcdb_wait_for_slot_consumable(BCBlock *block, BCTxID tx_id, int slot)
         return;
 
     {
+		const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+		bool active_wait_registered = false;
         int spins = 0;
         int poll_us = 0;
         uint64 wait_start = bcdb_get_time();
         uint64 next_warn = wait_start + 5000000; /* 5 s */
+
+		if (collect_gate_stats)
+		{
+			SHARD_INC(result_slot_consumable_wait_calls);
+			gate_stats_begin_wait(BCDB_GATE_PHASE_CONSUMABLE, tx_id, block->id);
+			active_wait_registered = true;
+		}
 
         for (;;)
         {
             BCTxID consumed = __atomic_load_n(&block->result_consumed_txid[slot],
                                               __ATOMIC_ACQUIRE);
             if (consumed == old_txid)
+			{
+				uint64 elapsed = bcdb_get_time() - wait_start;
+				if (collect_gate_stats)
+				{
+					SHARD_ADD(result_slot_consumable_wait_total_us, elapsed);
+					SHARD_UPDATE_MAX(result_slot_consumable_wait_max_us, elapsed);
+				}
+				if (active_wait_registered)
+					gate_stats_finish_wait();
                 return;
+			}
 
             /* Guard against slot advancing beyond us (shouldn't happen in
              * single-producer-per-slot model, but be defensive). */
@@ -713,7 +735,17 @@ bcdb_wait_for_slot_consumable(BCBlock *block, BCTxID tx_id, int slot)
                 BCTxID cur = __atomic_load_n(&block->result_committed_txid[slot],
                                              __ATOMIC_ACQUIRE);
                 if (cur < 0 || cur == tx_id)
+				{
+					uint64 elapsed = bcdb_get_time() - wait_start;
+					if (collect_gate_stats)
+					{
+						SHARD_ADD(result_slot_consumable_wait_total_us, elapsed);
+						SHARD_UPDATE_MAX(result_slot_consumable_wait_max_us, elapsed);
+					}
+					if (active_wait_registered)
+						gate_stats_finish_wait();
                     return;
+				}
             }
 
             {
@@ -851,6 +883,8 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
     uint64 next_log_us = 0;
     uint64 next_warn_us = wait_start_us + 5000000; /* 5 s always-on watchdog */
     bool gate_debug = bcdb_gate_debug_enabled();
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	bool active_wait_registered = false;
 
     if (gate_debug)
         next_log_us = wait_start_us + 1000000;
@@ -886,10 +920,20 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
             fresh_guard_start_us = wait_start_us;
     }
 
+	if (collect_gate_stats && (get_published_max_txid(tx) + 1) < tx->tx_id)
+	{
+		gate_stats_begin_wait(BCDB_GATE_PHASE_SERIAL, tx->tx_id, block->id);
+		active_wait_registered = true;
+	}
+
     for (;;)
     {
         if ((get_published_max_txid(tx) + 1) >= tx->tx_id)
+		{
+			if (active_wait_registered)
+				gate_stats_finish_wait();
             break;
+		}
 
         if (fresh_guard_start_us != 0)
         {
@@ -924,6 +968,8 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 
                 if (fresh_guard_start_us != 0 && (now_us - fresh_guard_start_us) >= fresh_guard_grace_us)
                 {
+					if (active_wait_registered)
+						gate_stats_finish_wait();
                     ereport(ERROR,
                             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                              errmsg("BCDB deterministic serial gate cannot start at txid=%d on a fresh server (published_max=%d last_committed=%d)",
@@ -986,7 +1032,11 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 
                 ConditionVariablePrepareToSleep(cv);
                 if ((get_published_max_txid(tx) + 1) < tx->tx_id)
+				{
+					if (collect_gate_stats)
+						SHARD_INC(serial_gate_cv_sleep_count);
                     ConditionVariableSleep(cv, WAIT_EVENT_BLOCK_COMMIT);
+				}
                 ConditionVariableCancelSleep();
             }
             else
@@ -1013,6 +1063,20 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
     }
     bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_SERIAL_SLOT_WAIT_US,
                            trace_start_us);
+
+	/* ---------- telemetry ------------------------------------------------
+	 * Accumulate per-process gate stats.  All ops are RELAXED atomics so
+	 * there is no ordering overhead on the critical path.
+	 * -------------------------------------------------------------------- */
+	if (collect_gate_stats)
+	{
+		uint64 total_us = bcdb_get_time() - wait_start_us;
+
+		SHARD_INC(serial_gate_calls);
+		SHARD_ADD(serial_gate_wait_total_us, total_us);
+		SHARD_UPDATE_MAX(serial_gate_wait_max_us, total_us);
+		SHARD_ADD(serial_gate_spin_iterations, (uint64)spins);
+	}
 }
 
 /*
@@ -1043,9 +1107,22 @@ bcdb_wait_for_prev_committed(BCDBShmXact *tx)
     uint64 next_log_us = 0;
     uint64 next_warn_us = wait_start_us + 5000000; /* 5 s always-on */
     bool gate_debug = bcdb_gate_debug_enabled();
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	bool active_wait_registered = false;
+
+	if (collect_gate_stats)
+	{
+		SHARD_INC(prev_commit_wait_calls);
+	}
 
     if (gate_debug)
         next_log_us = wait_start_us + 1000000;
+
+	if (collect_gate_stats && get_last_committed_txid(tx) < tx->tx_id - 1)
+	{
+		gate_stats_begin_wait(BCDB_GATE_PHASE_PREV_COMMIT, tx->tx_id, tx->block_id_committed);
+		active_wait_registered = true;
+	}
 
     while (get_last_committed_txid(tx) < tx->tx_id - 1)
     {
@@ -1104,6 +1181,15 @@ bcdb_wait_for_prev_committed(BCDBShmXact *tx)
                     (errmsg("[BCDB_GATE] prev_commit_done pid=%d txid=%d waited_us=%lu",
                             (int)getpid(), (int)tx->tx_id, (unsigned long)total_wait_us)));
     }
+
+	if (collect_gate_stats)
+	{
+		uint64 elapsed = bcdb_get_time() - wait_start_us;
+		SHARD_ADD(prev_commit_wait_total_us, elapsed);
+		SHARD_UPDATE_MAX(prev_commit_wait_max_us, elapsed);
+	}
+	if (active_wait_registered)
+		gate_stats_finish_wait();
 }
 
 static inline void
@@ -1115,11 +1201,18 @@ bcdb_wait_for_target_committed(BCDBShmXact *tx, BCTxID target_txid)
     uint64 next_log_us = 0;
     uint64 next_warn_us;
     bool gate_debug;
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	bool active_wait_registered = false;
 
     if (target_txid < 0)
         return;
     if (get_last_committed_txid(tx) >= target_txid)
         return;
+
+	if (collect_gate_stats)
+	{
+		SHARD_INC(target_commit_wait_calls);
+	}
 
     wait_start_us = bcdb_get_time();
     next_warn_us = wait_start_us + 5000000;
@@ -1127,6 +1220,12 @@ bcdb_wait_for_target_committed(BCDBShmXact *tx, BCTxID target_txid)
 
     if (gate_debug)
         next_log_us = wait_start_us + 1000000;
+
+	if (collect_gate_stats && get_last_committed_txid(tx) < target_txid)
+	{
+		gate_stats_begin_wait(BCDB_GATE_PHASE_TARGET_COMMIT, tx->tx_id, tx->block_id_committed);
+		active_wait_registered = true;
+	}
 
     while (get_last_committed_txid(tx) < target_txid)
     {
@@ -1185,6 +1284,15 @@ bcdb_wait_for_target_committed(BCDBShmXact *tx, BCTxID target_txid)
                             (int)getpid(), (int)tx->tx_id, (int)target_txid,
                             (unsigned long)total_wait_us)));
     }
+
+	if (collect_gate_stats)
+	{
+		uint64 elapsed = bcdb_get_time() - wait_start_us;
+		SHARD_ADD(target_commit_wait_total_us, elapsed);
+		SHARD_UPDATE_MAX(target_commit_wait_max_us, elapsed);
+	}
+	if (active_wait_registered)
+		gate_stats_finish_wait();
 }
 
 static bool
@@ -1486,6 +1594,9 @@ bool bcdb_worker_init(void)
     srand(pid);
     if (OEP_mode)
         DEBUGNOCHECK("[ZL] worker runing is OEP mode");
+
+
+
     return true;
 }
 

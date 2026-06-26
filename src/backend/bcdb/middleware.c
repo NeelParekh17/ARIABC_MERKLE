@@ -420,9 +420,28 @@ bcdb_wait_for_block_enqueue_turn(BCBlockID block_id)
 	int poll_us = 0;
 	uint64 wait_start_us = bcdb_get_time();
 	uint64 next_warn_us = wait_start_us + 5000000; /* first warning at +5 s */
+	bool   active_wait_registered = false;
+	bool   did_wait = false;
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+
+	if (collect_gate_stats)
+	{
+		SHARD_INC(block_enqueue_turn_calls);
+	}
 
 	if (block_id < BCDB_FIRST_SUBMIT_BLOCK_ID)
 		return;
+
+	if (collect_gate_stats)
+	{
+		BCBlockID expected = __atomic_load_n(&block_meta->next_enqueue_block_id,
+											 __ATOMIC_ACQUIRE);
+		if (expected < block_id)
+		{
+			gate_stats_begin_wait(BCDB_GATE_PHASE_ENQUEUE, -1, block_id);
+			active_wait_registered = true;
+		}
+	}
 
 	for (;;)
 	{
@@ -431,9 +450,9 @@ bcdb_wait_for_block_enqueue_turn(BCBlockID block_id)
 		expected = __atomic_load_n(&block_meta->next_enqueue_block_id,
 								   __ATOMIC_ACQUIRE);
 		if (expected == block_id)
-			return;
+			break;
 		if (expected > block_id)
-			return;
+			break;
 		if ((block_id - expected) > MAX_NUM_BLOCKS)
 		{
 			BCBlock *expected_block = get_block_by_id(expected, false);
@@ -454,7 +473,7 @@ bcdb_wait_for_block_enqueue_turn(BCBlockID block_id)
 				ereport(LOG,
 						(errmsg("BCDB block enqueue turn recovered stale gap: block_id=%d expected_block_id=%d max_blocks=%d",
 								(int) block_id, (int) expected, (int) MAX_NUM_BLOCKS)));
-				return;
+				break;
 			}
 		}
 
@@ -474,6 +493,7 @@ bcdb_wait_for_block_enqueue_turn(BCBlockID block_id)
 			}
 		}
 
+		did_wait = true;
 		if (spins < 128)
 		{
 			spins++;
@@ -489,6 +509,21 @@ bcdb_wait_for_block_enqueue_turn(BCBlockID block_id)
 				poll_us = 1000;
 			pg_usleep((long) poll_us);
 		}
+	}
+
+	if (collect_gate_stats)
+	{
+		if (did_wait)
+		{
+			uint64 elapsed = bcdb_get_time() - wait_start_us;
+
+			SHARD_ADD(block_enqueue_turn_wait_total_us, elapsed);
+			SHARD_UPDATE_MAX(block_enqueue_turn_wait_max_us, elapsed);
+		}
+	}
+	if (active_wait_registered)
+	{
+		gate_stats_finish_wait();
 	}
 }
 
@@ -557,14 +592,39 @@ bcdb_wait_until_committed(BCTxID target_tx_id)
 	int poll_us = 0;
 	uint64 wait_start_us = bcdb_get_time();
 	uint64 next_warn_us  = wait_start_us + 5000000; /* first warning at +5 s */
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	bool active_wait_registered = false;
+
+	if (collect_gate_stats)
+	{
+		SHARD_INC(block_watermark_wait_calls);
+	}
 
 	Assert(blk != NULL);
+
+	if (collect_gate_stats && get_last_committed_txid(NULL) < target_tx_id)
+	{
+		gate_stats_begin_wait(BCDB_GATE_PHASE_WATERMARK, target_tx_id, -1);
+		active_wait_registered = true;
+	}
+
 	for (;;)
 	{
 		/* Fast path: a worker may already have caught the watermark up. */
 		BCTxID committed = get_last_committed_txid(NULL);
 		if (committed >= target_tx_id)
-			return bcdb_get_time() - wait_start_us;
+		{
+			uint64 elapsed = bcdb_get_time() - wait_start_us;
+
+			if (collect_gate_stats)
+			{
+				SHARD_ADD(block_watermark_wait_total_us, elapsed);
+				SHARD_UPDATE_MAX(block_watermark_wait_max_us, elapsed);
+			}
+			if (active_wait_registered)
+				gate_stats_finish_wait();
+			return elapsed;
+		}
 
 		/* Respect SIGINT/SIGTERM/SIGUSR while we wait. */
 		CHECK_FOR_INTERRUPTS();
@@ -580,6 +640,7 @@ bcdb_wait_until_committed(BCTxID target_tx_id)
 								(int) committed,
 								(unsigned long) (now_us - wait_start_us),
 								poll_us, spins)));
+				bcdb_log_gate_snapshot("committed_wait_stuck", -1, target_tx_id, -1);
 				next_warn_us = now_us + 5000000;
 			}
 		}
@@ -654,8 +715,22 @@ bcdb_wait_until_slot_ready(BCTxID target_tx_id)
 	int      poll_us = 0;
 	uint64   wait_start_us = bcdb_get_time();
 	uint64   next_warn_us  = wait_start_us + 5000000; /* first warning at +5 s */
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	bool   active_wait_registered = false;
+
+	if (collect_gate_stats)
+	{
+		SHARD_INC(slot_fallback_wait_calls);
+	}
 
 	Assert(blk != NULL);
+
+	if (collect_gate_stats && __atomic_load_n(&blk->result_committed_txid[slot], __ATOMIC_ACQUIRE) < target_tx_id)
+	{
+		gate_stats_begin_wait(BCDB_GATE_PHASE_SLOT_FALLBACK, target_tx_id, -1);
+		active_wait_registered = true;
+	}
+
 	for (;;)
 	{
 		/* ACQUIRE so any payload write done before the release-store
@@ -663,7 +738,17 @@ bcdb_wait_until_slot_ready(BCTxID target_tx_id)
 		BCTxID published = __atomic_load_n(&blk->result_committed_txid[slot],
 										   __ATOMIC_ACQUIRE);
 		if (published == target_tx_id)
-			return bcdb_get_time() - wait_start_us;
+		{
+			uint64 elapsed = bcdb_get_time() - wait_start_us;
+			if (collect_gate_stats)
+			{
+				SHARD_ADD(slot_fallback_wait_total_us, elapsed);
+				SHARD_UPDATE_MAX(slot_fallback_wait_max_us, elapsed);
+			}
+			if (active_wait_registered)
+				gate_stats_finish_wait();
+			return elapsed;
+		}
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -739,9 +824,38 @@ bcdb_wait_until_block_slots_ready(const BCDBBlockResultRef *refs,
 	int    poll_us = 0;
 	uint64 wait_start_us = bcdb_get_time();
 	uint64 next_warn_us = wait_start_us + 5000000; /* first warning at +5 s */
+	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
+	bool   active_wait_registered = false;
+
+	if (collect_gate_stats)
+	{
+		SHARD_INC(block_slot_wait_calls);
+	}
 
 	Assert(refs != NULL || num_tx == 0);
 	Assert(result_block != NULL);
+
+	if (collect_gate_stats)
+	{
+		bool all_ready = true;
+		for (int i = 0; i < num_tx; ++i)
+		{
+			const BCTxID tx_id = refs[i].tx_id;
+			const int slot = bcdb_result_slot_for_txid(tx_id);
+			if (__atomic_load_n(&result_block->result_committed_txid[slot], __ATOMIC_ACQUIRE) != tx_id)
+			{
+				all_ready = false;
+				break;
+			}
+		}
+		if (!all_ready)
+		{
+			BCTxID tx_id = num_tx > 0 ? refs[0].tx_id : -1;
+			gate_stats_begin_wait(BCDB_GATE_PHASE_SLOT, tx_id, block_id);
+			active_wait_registered = true;
+		}
+	}
+
 	for (;;)
 	{
 		bool all_ready = true;
@@ -771,7 +885,18 @@ bcdb_wait_until_block_slots_ready(const BCDBBlockResultRef *refs,
 			}
 		}
 		if (all_ready)
-			return bcdb_get_time() - wait_start_us;
+		{
+			uint64 elapsed = bcdb_get_time() - wait_start_us;
+
+			if (collect_gate_stats)
+			{
+				SHARD_ADD(block_slot_wait_total_us, elapsed);
+				SHARD_UPDATE_MAX(block_slot_wait_max_us, elapsed);
+			}
+			if (active_wait_registered)
+				gate_stats_finish_wait();
+			return elapsed;
+		}
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -1646,7 +1771,16 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			pfree(slot_wait_us);
 	}
 	if (tx_refs != NULL)
+	{
+		if (bcdb_gate_snapshot_each_block)
+			bcdb_log_gate_snapshot("completed_block", block_id, tx_refs[0].tx_id, tx_refs[num_tx - 1].tx_id);
 		pfree(tx_refs);
+	}
+	else
+	{
+		if (bcdb_gate_snapshot_each_block)
+			bcdb_log_gate_snapshot("completed_block", block_id, -1, -1);
+	}
 
 	return out.data;
 }
