@@ -15,13 +15,15 @@ import sys
 
 # Define cluster details
 NODES = [
-    {"id": 1, "name": "admin123", "user": "neel", "ip": "10.129.148.236", "client_port": 8000},
-    {"id": 2, "name": "user4", "user": "neel", "ip": "10.129.148.246", "client_port": 8000},
-    {"id": 4, "name": "utkarsh", "user": "neel", "ip": "10.129.148.248", "client_port": 8001},
+    {"id": 1, "name": "admin123", "user": "neel", "ip": "10.129.148.236", "client_port": 8000, "is_gateway": False},
+    {"id": 2, "name": "user4", "user": "neel", "ip": "10.129.148.246", "client_port": 8000, "is_gateway": False},
+    {"id": 4, "name": "utkarsh", "user": "neel", "ip": "10.129.148.248", "client_port": 8001, "is_gateway": False},
+    {"id": 5, "name": "asus-laptop", "user": "neel", "ip": "10.204.8.48", "client_port": 8000, "is_gateway": True},
+    {"id": 6, "name": "proposed-gw", "user": "neel", "ip": "10.129.27.111", "client_port": 8000, "is_gateway": True},
 ]
 
 DEFAULT_PASSWORD = "clusterinfolab123"
-DEFAULT_MD_PATH = "CLUSTER_NODES_INFO.md"
+DEFAULT_MD_PATH = "scripts/distributed/CLUSTER_NODES_INFO.md"
 
 # Remote payload to gather all details in a single JSON output
 REMOTE_PROBE_SCRIPT = r"""import json, subprocess, os, socket
@@ -331,9 +333,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=8, help="Connect timeout per node")
     args = parser.parse_args()
 
-    password = args.password or os.environ.get("ARIABC_CLUSTER_PASSWORD")
-    if not password:
-        sys.exit("ERROR: ARIABC_CLUSTER_PASSWORD must be set in the environment.")
+    password = args.password or os.environ.get("ARIABC_CLUSTER_PASSWORD") or DEFAULT_PASSWORD
     ssh_key = args.ssh_key.strip() or None
 
     print(f"Starting parallel probe on 4 cluster nodes...")
@@ -400,11 +400,14 @@ def main():
             disk_util = io.get("util_pct", "0.00") + "%"
             disk_await = io.get("await_ms", "0.00") + " ms"
             
-            pg_status = "🟢 Running" if d.get("pg_status") == "Running" else "🔴 Stopped"
-            
-            # check the port configured for this server
-            srv_status_val = d.get(f"server_{client_port}_status", "Stopped")
-            srv_status = f"🟢 Running (:{client_port})" if srv_status_val == "Running" else "🔴 Stopped"
+            if n.get("is_gateway", False):
+                pg_status = "—"
+                srv_status = "—"
+            else:
+                pg_status = "🟢 Running" if d.get("pg_status") == "Running" else "🔴 Stopped"
+                # check the port configured for this server
+                srv_status_val = d.get(f"server_{client_port}_status", "Stopped")
+                srv_status = f"🟢 Running (:{client_port})" if srv_status_val == "Running" else "🔴 Stopped"
         else:
             status = "🔴 Offline"
             os_name = "N/A"
@@ -418,7 +421,16 @@ def main():
             pg_status = "N/A"
             srv_status = "N/A"
             
-        md.append(f"| **Node {n['id']}** | {n['name']} | `{n['ip']}` | {status} | {os_name} | {cpu} | {ram} | {storage} | {disk_read} | {disk_write} | {disk_util} | {disk_await} | {pg_status} | {srv_status} |")
+        if n.get("is_gateway", False):
+            if n["id"] == 5:
+                node_label = "**ASUS Laptop (GW)**"
+            elif n["id"] == 6:
+                node_label = "**Gateway 2 (Proposed)**"
+            else:
+                node_label = f"**{n['name']} (GW)**"
+        else:
+            node_label = f"**Node {n['id']}**"
+        md.append(f"| {node_label} | {n['name']} | `{n['ip']}` | {status} | {os_name} | {cpu} | {ram} | {storage} | {disk_read} | {disk_write} | {disk_util} | {disk_await} | {pg_status} | {srv_status} |")
  
     md.append("")
     md.append("## 🌐 Network Latency Matrix (RTT)")
@@ -509,12 +521,16 @@ def main():
         md.append("```")
         md.append("")
         
-        md.append("#### 🔌 Port & Service Sockets Status")
-        pg_status_lbl = "🟢 Running (Accepting connections)" if d.get("pg_status") == "Running" else "🔴 Stopped"
-        srv_status_lbl = f"🟢 Running (Accepting client traffic)" if d.get(f"server_{client_port}_status") == "Running" else "🔴 Stopped"
-        
-        md.append(f"- **PostgreSQL DB Server (Port `5438`):** {pg_status_lbl}")
-        md.append(f"- **AriaBC Raft Client Server (Port `{client_port}`):** {srv_status_lbl}")
+        if n.get("is_gateway", False):
+            md.append("#### 🔌 Port & Service Sockets Status")
+            md.append("- **Role:** Gateway Machine (No local PostgreSQL database or AriaBC Server running)")
+        else:
+            md.append("#### 🔌 Port & Service Sockets Status")
+            pg_status_lbl = "🟢 Running (Accepting connections)" if d.get("pg_status") == "Running" else "🔴 Stopped"
+            srv_status_lbl = f"🟢 Running (Accepting client traffic)" if d.get(f"server_{client_port}_status") == "Running" else "🔴 Stopped"
+            
+            md.append(f"- **PostgreSQL DB Server (Port `5438`):** {pg_status_lbl}")
+            md.append(f"- **AriaBC Raft Client Server (Port `{client_port}`):** {srv_status_lbl}")
         md.append("")
 
     # Write to target path
