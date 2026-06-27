@@ -5,7 +5,7 @@
 #   Node 1 (RAFT ID 1): admin123   10.129.148.236  neel  [Kafka host]  Ubuntu 24.04
 #   Node 2 (RAFT ID 2): user4      10.129.148.246    neel               Ubuntu 22.04
 #   Node 4 (RAFT ID 4): utkarsh    10.129.148.248  neel               Ubuntu 24.04
-#   Gateway            : ASUS laptop (this machine, local)
+#   Gateway            : proposed-gw 10.129.27.111 (this machine, local)
 #   Kafka broker       : 10.129.148.236:9092
 #
 # IMPORTANT KNOWN CONSTRAINTS (confirmed 2026-04-24):
@@ -120,9 +120,86 @@ LOCAL_BIN="$REPO_ROOT/ariabc_pg/build/bin"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10)
 
+# ---------------------------------------------------------------------------
+# Gateway delegation
+# ---------------------------------------------------------------------------
+GATEWAY_HOST="${GATEWAY_HOST:-10.129.27.111}"
+GATEWAY_USER="${GATEWAY_USER:-neel}"
+GATEWAY_HOSTNAME="${GATEWAY_HOSTNAME:-myubuntu}"
+GATEWAY_REPO="${GATEWAY_REPO:-/home/neel/ARIABC/AriaBC}"
+GATEWAY_INSTALL="${GATEWAY_INSTALL:-/home/neel/ARIABC/install}"
+
+if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
+      "$(hostname -s)" != "$GATEWAY_HOSTNAME" ]]; then
+  echo "=== Delegating execution to gateway machine $GATEWAY_HOST ==="
+
+  # Record originating commit before syncing (since .git is excluded)
+  CALLER_GIT_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+
+  echo "Syncing workspace to gateway machine..."
+  rsync -az --delete \
+    --exclude='.git' \
+    --exclude='.venv' \
+    --exclude='.bench_tmp' \
+    --exclude='__pycache__' \
+    --exclude='ariabc_pg/build' \
+    --exclude='scripts/bench_full_results' \
+    --exclude='scripts/bench_results' \
+    "$REPO_ROOT/" \
+    "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/"
+
+  # Forward benchmark-relevant environment values.
+  delegate_env=(
+    "BYPASS_DELEGATION=1"
+    "LOCAL_INSTALL_DIR=$GATEWAY_INSTALL"
+    "CALLER_GIT_HEAD=$CALLER_GIT_HEAD"
+  )
+
+  for var in \
+    FORCE_BUILD \
+    SKIP_SYNC SKIP_BUILD SKIP_KAFKA SKIP_CLEANUP \
+    SKIP_RDKAFKA_SETUP SKIP_RESTORE SKIP_POST_VERIFY \
+    NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
+    KAFKA_COMPLETION_MODE \
+    ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US \
+    ARIABC_FULL_RESULT_REPLICA_LIMIT \
+    ARIABC_RESULT_PUBLISH_REPLICA_LIMIT \
+    ARIABC_PREFERRED_LEADER_ID \
+    ARIABC_OS_PROFILE \
+    BCDB_WORKER_COUNT DB_CONN_POOL_SIZE \
+    BCDB_DECOUPLE_WORKERS \
+    BCDB_DET_QUEUE_HIGH_WM BCDB_DET_QUEUE_LOW_WM \
+    EXPECTED_ROWS EXPECTED_ROOT
+  do
+    if [[ -v "$var" ]]; then
+      delegate_env+=("$var=${!var}")
+    fi
+  done
+
+  printf -v quoted_env '%q ' "${delegate_env[@]}"
+  printf -v quoted_args '%q ' "$@"
+
+  echo "Running benchmark remotely on gateway..."
+  ssh "$GATEWAY_USER@$GATEWAY_HOST" \
+    "export PATH=\$HOME/bin:\$PATH && cd '$GATEWAY_REPO' && env $quoted_env \
+     ./scripts/distributed/run_4node_raft_cluster.sh $quoted_args" \
+    || ssh_exit_code=$?
+
+  ssh_exit_code=${ssh_exit_code:-0}
+
+  echo "Fetching logs back from gateway..."
+  rsync -az \
+    "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/scripts/bench_full_results/" \
+    "$REPO_ROOT/scripts/bench_full_results/"
+
+  echo "=== Delegation complete (exit code: $ssh_exit_code) ==="
+  exit "$ssh_exit_code"
+fi
+
 LOG_DIR="$REPO_ROOT/scripts/bench_full_results/cluster4_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/runner.log"
+exec > >(tee -ia "$LOG_FILE") 2>&1
 REMOTE_LOG_DIR="/tmp/ariabc_cluster"
 
 # ===========================================================================
@@ -1145,7 +1222,8 @@ git -C "$REPO_ROOT" status --short \
 
 # Append git HEAD and SHA256 checksums of the key local binaries to run_meta.env
 {
-  printf 'git_head=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  printf 'git_head=%s\n' "${CALLER_GIT_HEAD:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+  printf 'caller_git_head=%s\n' "${CALLER_GIT_HEAD:-unknown}"
   printf 'git_dirty=%s\n' "$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
   printf 'ariabc_pg_gateway_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'ariabc_pg_server_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
@@ -1588,8 +1666,12 @@ log "  [local] (gateway) clock metrics:"
 (
   date +%s%3N
   timedatectl status || true
-  chronyc tracking || true
-) 2>&1 | sed "s/^/    /" | tee -a "$LOG_FILE"
+  if command -v chronyc >/dev/null 2>&1; then
+    chronyc tracking || true
+  else
+    echo "chronyc not installed; skipping Chrony details"
+  fi
+) 2>&1 | sed "s/^/    /"
 
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
@@ -1597,8 +1679,12 @@ for idx in "${!NODE_IDS[@]}"; do
   node_ssh "$idx" "
     date +%s%3N
     timedatectl status || true
-    chronyc tracking || true
-  " 2>&1 | sed "s/^/    /" | tee -a "$LOG_FILE"
+    if command -v chronyc >/dev/null 2>&1; then
+      chronyc tracking || true
+    else
+      echo 'chronyc not installed; skipping Chrony details'
+    fi
+  " 2>&1 | sed "s/^/    /"
 done
 
 # ---------------------------------------------------------------------------
@@ -2189,8 +2275,8 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    export ARIABC_DET_COMPLETION_ONLY_SUCCESS='${DET_COMPLETION_ONLY_SUCCESS}'
 	    export ARIABC_DET_ALLOW_RAW_COMPAT='${DET_RAW_SQL}'
 	    export ARIABC_DET_BLOCK_SKIP_READONLY='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
-	    if [[ -n "${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-}" ]]; then
-	      export ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US='${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US}'
+	    if [[ -n \"${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-}\" ]]; then
+	      export ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US='${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-}'
 	    else
 	      unset ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US
 	    fi
