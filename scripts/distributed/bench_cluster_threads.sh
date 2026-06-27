@@ -209,6 +209,37 @@ extract_tps() {
     return
   fi
 
+  # Attempt to parse from run_summary.env first
+  local env_file="$(dirname "$gw_log")/run_summary.env"
+  if [[ -f "$env_file" ]]; then
+    local tps_maj="" tps_all3="" q="" ms="" mode=""
+    tps_maj="$(grep -E '^tps_majority_visible=' "$env_file" | cut -d= -f2 || true)"
+    tps_all3="$(grep -E '^tps_all3_audit_drained=' "$env_file" | cut -d= -f2 || true)"
+    q="$(grep -E '^workload_transactions=' "$env_file" | cut -d= -f2 || true)"
+    ms="$(grep -E '^majority_visible_ms=' "$env_file" | cut -d= -f2 || true)"
+    mode="$(grep -E '^validation_mode=' "$env_file" | cut -d= -f2 || true)"
+
+    if [[ "$tps_maj" != "N/A" && -n "$tps_maj" ]]; then
+      local tps_int
+      tps_int="$(printf "%.0f" "$tps_maj" 2>/dev/null || echo "${tps_maj%.*}")"
+      echo "$tps_int ${q:-0} ${ms:-0}"
+      return
+    fi
+    if [[ "$tps_all3" != "N/A" && "$tps_all3" != "INVALID" && -n "$tps_all3" ]]; then
+      local tps_int
+      tps_int="$(printf "%.0f" "$tps_all3" 2>/dev/null || echo "${tps_all3%.*}")"
+      echo "$tps_int ${q:-0} ${ms:-0}"
+      return
+    fi
+    if [[ -n "$ms" && "$ms" -gt 0 && -n "$q" && "$q" -gt 0 ]]; then
+      if [[ "$mode" != "async_hash" && "$mode" != "async" ]]; then
+        local tps_int=$(( q * 1000 / ms ))
+        echo "$tps_int $q $ms"
+        return
+      fi
+    fi
+  fi
+
   local gw_ms="" workload_lines="" tps
 
   # 0. os-threads aggregate line — most accurate for os-threads mode.
@@ -262,8 +293,13 @@ extract_tps() {
   #    Format: "[HH:MM:SS]   TPS (gateway) : ~NNN tx/s"
   local reported_tps=""
   if [[ -f "$stdout_log" ]]; then
+    # Try the new TPS formats first
+    reported_tps="$(grep -oP '(TPS_majority_visible|TPS_strict_majority|TPS_direct)\s*:\s*\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
+    if [[ -z "$reported_tps" ]]; then
+      reported_tps="$(grep -oP 'TPS_all3_audit_drained\s*:\s*\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
+    fi
     # For os-threads mode, prefer the aggregate TPS reported by run_4node
-    if [[ "$PARALLELISM_MODE" == "os-threads" ]]; then
+    if [[ -z "$reported_tps" && "$PARALLELISM_MODE" == "os-threads" ]]; then
       reported_tps="$(grep -oP '\[os-threads\] Aggregate TPS\s*:\s*~\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
     fi
     if [[ -z "$reported_tps" ]]; then
@@ -626,7 +662,7 @@ try:
     plt.xlabel('Number of Threads', fontsize=14)
     plt.ylabel('Throughput (TPS)', fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.7)
-    
+
     plt.xticks(sorted(df['threads'].unique()))
     plt.ylim(bottom=0)
     plt.ylim(top=df['tps'].max() * 1.2)

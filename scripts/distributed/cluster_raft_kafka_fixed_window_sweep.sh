@@ -161,15 +161,43 @@ EOF
   fi
 
   local tps merkle all3 status
-  tps="$(grep -E 'TPS \(gateway\)[[:space:]]*:' "$console" | tail -1 | sed -nE 's/.*~([0-9]+(\.[0-9]+)?).*/\1/p')"
+  local env_file="$case_dir/cluster4_result/run_summary.env"
+
+  # Try to parse TPS from summary file
+  if [[ -f "$env_file" ]]; then
+    tps="$(grep -E '^tps_majority_visible=' "$env_file" | cut -d= -f2 || true)"
+    if [[ "$tps" == "N/A" || -z "$tps" ]]; then
+      tps="$(grep -E '^tps_all3_audit_drained=' "$env_file" | cut -d= -f2 || true)"
+    fi
+  fi
+  # Fallback to console parsing
+  if [[ -z "$tps" || "$tps" == "N/A" || "$tps" == "INVALID" ]]; then
+    tps="$(grep -oP '(TPS_majority_visible|TPS_strict_majority|TPS_direct|TPS_all3_audit_drained)\s*:\s*\K[0-9]+(\.[0-9]+)?' "$console" | tail -1 || true)"
+  fi
+  if [[ -z "$tps" || "$tps" == "N/A" || "$tps" == "INVALID" ]]; then
+    tps="$(grep -E 'TPS \(gateway\)[[:space:]]*:' "$console" | tail -1 | sed -nE 's/.*~([0-9]+(\.[0-9]+)?).*/\1/p')"
+  fi
   [[ -n "$tps" ]] || tps="NA"
 
   merkle="FAIL"
   grep -q 'usertable_small consistency: PASS' "$console" && merkle="PASS"
 
   all3="FAIL"
-  grep -Eq 'async_all3_verified_count=20513.*async_all3_failure_count=0.*async_all3_timeout_count=0.*async_all3_missing_count=0' \
-    "$console" && all3="PASS"
+  if [[ -f "$env_file" ]]; then
+    local verified="" failures="" timeouts="" missing="" permanent="" divergence=""
+    verified="$(grep -E '^async_all3_verified_count=' "$env_file" | cut -d= -f2 || true)"
+    failures="$(grep -E '^async_all3_failure_count=' "$env_file" | cut -d= -f2 || true)"
+    timeouts="$(grep -E '^async_all3_timeout_count=' "$env_file" | cut -d= -f2 || true)"
+    missing="$(grep -E '^async_all3_missing_count=' "$env_file" | cut -d= -f2 || true)"
+    permanent="$(grep -E '^permanent_failures=' "$env_file" | cut -d= -f2 || true)"
+    divergence="$(grep -E '^divergence_count=' "$env_file" | cut -d= -f2 || true)"
+    if [[ "$verified" == "20513" && "$failures" == "0" && "$timeouts" == "0" && "$missing" == "0" && "$permanent" == "0" && "$divergence" == "0" ]]; then
+      all3="PASS"
+    fi
+  else
+    grep -Eq 'async_all3_verified_count=20513.*async_all3_failure_count=0.*async_all3_timeout_count=0.*async_all3_missing_count=0' \
+      "$console" && all3="PASS"
+  fi
 
   status="PASS"
   (( rc == 0 )) || status="EXIT_${rc}"
