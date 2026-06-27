@@ -70,3 +70,6 @@ lib*.pc
 # Local AI/tooling metadata (do not commit)
 /.claude/
 /.codex
+
+# CMake build output
+/ariabc_pg/build/

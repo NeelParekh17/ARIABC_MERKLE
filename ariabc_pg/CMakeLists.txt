@@ -100,6 +100,9 @@ if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
                    src/pg_executor.cxx
                    src/kafka_console.cxx
                    src/wire_protocol.cxx
+                   src/raft_storage_common.cxx
+                   src/durable_state_mgr.cxx
+                   src/durable_log_store.cxx
                    ${ARIABC_COMMON_SRC})
 
     target_include_directories(ariabc_pg_server
@@ -163,3 +166,63 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/wire_protocol_test.cxx")
 else()
     message(STATUS "Skipping ariabc_pg_wire_protocol_test: src/wire_protocol_test.cxx not present in this checkout")
 endif()
+
+# Durable Storage Unit Tests
+add_executable(durable_state_mgr_test
+               tests/durable_state_mgr_test.cxx
+               src/raft_storage_common.cxx
+               src/durable_state_mgr.cxx
+               src/durable_log_store.cxx)
+
+target_include_directories(durable_state_mgr_test
+                           PRIVATE
+                             ${ARIABC_COMMON_INC}
+                             ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
+
+target_compile_definitions(durable_state_mgr_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
+
+target_link_libraries(durable_state_mgr_test
+                      NuRaft::static_lib
+                      z
+                      dl)
+
+add_executable(durable_log_store_test
+               tests/durable_log_store_test.cxx
+               src/raft_storage_common.cxx
+               src/durable_log_store.cxx)
+
+target_include_directories(durable_log_store_test
+                           PRIVATE
+                             ${ARIABC_COMMON_INC}
+                             ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
+
+target_compile_definitions(durable_log_store_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
+
+target_link_libraries(durable_log_store_test
+                      NuRaft::static_lib
+                      z
+                      dl)
+
+add_executable(durable_raft_cluster_smoke_test
+               tests/durable_raft_cluster_smoke_test.cxx
+               src/raft_storage_common.cxx
+               src/durable_state_mgr.cxx
+               src/durable_log_store.cxx
+               src/logger.cc)
+
+target_include_directories(durable_raft_cluster_smoke_test
+                            PRIVATE
+                              ${ARIABC_COMMON_INC}
+                              ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
+
+target_compile_definitions(durable_raft_cluster_smoke_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
+
+target_link_libraries(durable_raft_cluster_smoke_test
+                       NuRaft::static_lib
+                       z
+                       dl)
+
+enable_testing()
+add_test(NAME durable_state_mgr_test COMMAND durable_state_mgr_test)
+add_test(NAME durable_log_store_test COMMAND durable_log_store_test)
+add_test(NAME durable_raft_cluster_smoke_test COMMAND durable_raft_cluster_smoke_test)

@@ -169,7 +169,8 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     BCDB_WORKER_COUNT DB_CONN_POOL_SIZE \
     BCDB_DECOUPLE_WORKERS \
     BCDB_DET_QUEUE_HIGH_WM BCDB_DET_QUEUE_LOW_WM \
-    EXPECTED_ROWS EXPECTED_ROOT
+    EXPECTED_ROWS EXPECTED_ROOT \
+    RAFT_STORAGE_MODE RAFT_STORAGE_DIR RAFT_STORAGE_ACTION RAFT_STORAGE_ROOT RAFT_CLUSTER_ID
   do
     if [[ -v "$var" ]]; then
       delegate_env+=("$var=${!var}")
@@ -218,6 +219,14 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # Flags
 # ---------------------------------------------------------------------------
+RAFT_STORAGE_MODE="${RAFT_STORAGE_MODE:-in_memory}"
+RAFT_STORAGE_ACTION="${RAFT_STORAGE_ACTION:-fresh}"
+RAFT_STORAGE_ROOT="${RAFT_STORAGE_ROOT:-}"
+RAFT_STORAGE_DIR="${RAFT_STORAGE_DIR:-/home/neel/ariabc_raft_data}"
+if [[ -n "$RAFT_STORAGE_ROOT" ]]; then
+  RAFT_STORAGE_DIR="$RAFT_STORAGE_ROOT"
+fi
+RAFT_CLUSTER_ID="${RAFT_CLUSTER_ID:-ariabc_cluster}"
 SKIP_SYNC="${SKIP_SYNC:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_KAFKA="${SKIP_KAFKA:-0}"
@@ -548,10 +557,39 @@ while [[ $# -gt 0 ]]; do
     --preferred-leader-id) ARIABC_PREFERRED_LEADER_ID="${2:-0}"; shift 2 ;;
     --bcdb-overwrite-protection) BCDB_OVERWRITE_PROTECTION="${2:-0}"; shift 2 ;;
     --pool-size)    DB_CONN_POOL_SIZE="${2:-256}"; shift 2 ;;
+    --raft-storage-mode) RAFT_STORAGE_MODE="${2:-in_memory}"; shift 2 ;;
+    --raft-storage-dir) RAFT_STORAGE_DIR="${2:-./.raft_storage_data}"; shift 2 ;;
+    --raft-storage-action) RAFT_STORAGE_ACTION="${2:-fresh}"; shift 2 ;;
+    --raft-storage-root) RAFT_STORAGE_ROOT="${2:-}"; RAFT_STORAGE_DIR="$RAFT_STORAGE_ROOT"; shift 2 ;;
+    --raft-cluster-id) RAFT_CLUSTER_ID="${2:-ariabc_cluster}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+if [[ "$RAFT_STORAGE_MODE" != "durable" && "$RAFT_STORAGE_MODE" != "in_memory" ]]; then
+  die "ERROR: --raft-storage-mode must be 'durable' or 'in_memory' (got: $RAFT_STORAGE_MODE)"
+fi
+
+if [[ "$RAFT_STORAGE_MODE" == "durable" ]]; then
+  if [[ ! "$RAFT_STORAGE_DIR" =~ ^/ ]]; then
+    die "ERROR: --raft-storage-dir ($RAFT_STORAGE_DIR) must be an absolute path when --raft-storage-mode=durable"
+  fi
+  if [[ "$RAFT_STORAGE_ACTION" != "fresh" && "$RAFT_STORAGE_ACTION" != "preserve" ]]; then
+    die "ERROR: --raft-storage-action must be 'fresh' or 'preserve' (got: $RAFT_STORAGE_ACTION)"
+  fi
+  if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
+    if [[ "$RAFT_CLUSTER_ID" == "ariabc_cluster" ]]; then
+      RAFT_CLUSTER_ID="cluster_$(date +%Y%m%d_%H%M%S)_$((RANDOM % 10000))"
+    fi
+  fi
+  if [[ -z "$RAFT_CLUSTER_ID" ]]; then
+    die "ERROR: --raft-cluster-id cannot be empty when --raft-storage-mode=durable"
+  fi
+  if [[ ! "$RAFT_CLUSTER_ID" =~ ^[A-Za-z0-9_-]{1,80}$ ]]; then
+    die "ERROR: --raft-cluster-id must contain only alphanumeric characters, underscores, or hyphens (1-80 chars) (got: $RAFT_CLUSTER_ID)"
+  fi
+fi
 
 if [[ "$DET_START_SEQ" -lt 0 || "$REQ_ID_OFFSET" -lt 1 ]]; then
   echo "ERROR: --det-start-seq must be >= 0 and --req-id-offset must be >= 1 for deterministic cluster runs" >&2
@@ -1207,6 +1245,10 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
   printf 'kafka_bootstrap=%s\n' "$KAFKA_BOOTSTRAP"
   printf 'result_topic=%s\n' "$KAFKA_RESULT_TOPIC"
+  printf 'raft_storage_mode=%s\n' "$RAFT_STORAGE_MODE"
+  printf 'raft_storage_action=%s\n' "$RAFT_STORAGE_ACTION"
+  printf 'raft_storage_dir=%s\n' "$RAFT_STORAGE_DIR"
+  printf 'raft_cluster_id=%s\n' "$RAFT_CLUSTER_ID"
 } > "$LOG_DIR/run_meta.env"
 
 # ---------------------------------------------------------------------------
@@ -1251,22 +1293,69 @@ trap on_signal INT TERM
 if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
   log "=== Phase 0: Cleanup stale ariabc_pg processes (parallel) ==="
   declare -a CLEANUP_PIDS=()
+  declare -a CLEANUP_IDS=()
   for idx in "${!NODE_IDS[@]}"; do
+    id="${NODE_IDS[$idx]}"
     name="${NODE_NAMES[$idx]}"
     client_port="${NODE_CLIENT_PORTS[$idx]}"
     log "  Killing server on $name (ports 9000, $client_port)"
     node_ssh "$idx" "
       fuser -k 9000/tcp 2>/dev/null || true
       fuser -k ${client_port}/tcp 2>/dev/null || true
+      ROOT_DIR=\"\$(readlink -f \"$RAFT_STORAGE_DIR\" 2>/dev/null || echo \"$RAFT_STORAGE_DIR\")\"
+      TARGET_DIR=\"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\"
+      TARGET_DIR=\"\$(readlink -f \"\$TARGET_DIR\" 2>/dev/null || echo \"\$TARGET_DIR\")\"
+      if [[ \"$RAFT_STORAGE_MODE\" == \"durable\" && \"$RAFT_STORAGE_ACTION\" == \"fresh\" ]]; then
+        # Safety validation: target path must start exactly with canonical ROOT_DIR/RAFT_CLUSTER_ID/nodeID
+        if [[ \"\$TARGET_DIR\" == \"\$ROOT_DIR/$RAFT_CLUSTER_ID/node$id\" && \"\$TARGET_DIR\" != \"/\" && \"\$TARGET_DIR\" != \"\$HOME\"* ]]; then
+          echo \"[Cleanup] Removing storage directory \$TARGET_DIR\"
+          rm -rf \"\$TARGET_DIR\"
+        else
+          echo \"CRITICAL ERROR: unsafe storage path validation failed: TARGET_DIR=\$TARGET_DIR, expectedPrefix=\$ROOT_DIR/$RAFT_CLUSTER_ID/node$id\" >&2
+          exit 1
+        fi
+      fi
       sleep 0.5
-    " || true &
+    " &
     CLEANUP_PIDS+=("$!")
+    CLEANUP_IDS+=("$id")
   done
-  for pid in "${CLEANUP_PIDS[@]}"; do
-    wait "$pid" || true
+  cleanup_ok=0
+  for i in "${!CLEANUP_PIDS[@]}"; do
+    pid="${CLEANUP_PIDS[$i]}"
+    nid="${CLEANUP_IDS[$i]}"
+    if ! wait "$pid"; then
+      log "ERROR: Cleanup failed for node $nid (pid $pid)"
+      cleanup_ok=1
+    fi
   done
-  sleep 2
-  log "  Cleanup done"
+  if [[ "$cleanup_ok" -ne 0 ]]; then
+    die "Cleanup phase failed on one or more nodes — aborting to prevent unsafe state"
+  fi
+fi
+
+# --- preserve-mode prerequisite check ---
+# When RAFT_STORAGE_ACTION=preserve we must verify that each node already has
+# a complete durable storage directory. Without this check a missing or wiped
+# directory would silently start a fresh node while the operator believes they
+# are testing recovery.
+if [[ "$RAFT_STORAGE_MODE" == "durable" && "$RAFT_STORAGE_ACTION" == "preserve" ]]; then
+  log "=== Phase 0 (preserve check): Verifying recovery prerequisites on all nodes ==="
+  for idx in "${!NODE_IDS[@]}"; do
+    id="${NODE_IDS[$idx]}"
+    name="${NODE_NAMES[$idx]}"
+    node_ssh "$idx" "
+      TARGET_DIR=\"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\"
+      for f in identity.bin srv_state.bin cluster_config.bin log/manifest.bin; do
+        if [[ ! -f \"\$TARGET_DIR/\$f\" ]]; then
+          echo \"PRESERVE_PREREQ_FAIL: \$TARGET_DIR/\$f is missing on $name\" >&2
+          exit 1
+        fi
+      done
+      echo \"[Preserve check] node$id prerequisites OK at \$TARGET_DIR\"
+    " || die "Preserve prerequisite check failed for node $id on $name — use RAFT_STORAGE_ACTION=fresh for a new cluster"
+  done
+  log "  Preserve prerequisites verified on all nodes"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2303,6 +2392,9 @@ for start_pos in "${!START_ORDER[@]}"; do
       --dbConnPoolSize $DB_CONN_POOL_SIZE \
       --pgExecMode $PG_EXEC_MODE \
       --bypassRaft $BYPASS_RAFT \
+      --raft-storage-mode $RAFT_STORAGE_MODE \
+      --raft-storage-dir \"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\" \
+      --raft-cluster-id $RAFT_CLUSTER_ID \
       $KAFKA_ARGS \
       >'$REMOTE_SRV_LOG' 2>&1 &
     echo \"started pid=\$!\"
@@ -2771,33 +2863,24 @@ cleanup_os_profile
 # ---------------------------------------------------------------------------
 log "=== Phase 7: Results ==="
 
-WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
+  # Execute the python metrics parsing helper script
+  python3 "$SCRIPT_DIR/parse_tps_metrics.py" \
+    --gw-log "$GW_LOG" \
+    --log-dir "$LOG_DIR" \
+    --workload-file "$WORKLOAD_FILE" \
+    --ordering-mode "$ORDERING_MODE" \
+    --no-kafka "$NO_KAFKA" \
+    --parallelism-mode "$PARALLELISM_MODE" | while read -r line; do
+      log "  $line"
+    done
 
-# Prefer gateway's own reported time (excludes restore, file load, and leader probe).
-# Falls back to shell wall-clock only when gateway log lacks the line.
-# NOTE: In pipeline mode, "submit time (ms)" in the gateway output is CUMULATIVE
-# across async operations, not wall-clock. The correct wall-clock is overall_wall_ms.
-GW_MS="$(grep -oP 'overall time taken \(millisec\) = \K[0-9]+' "$GW_LOG" 2>/dev/null | head -1 || echo '')"
-# In os-threads mode the concatenated log contains one 'overall time' per shard;
-# head -1 would pick only shard 0's (shortest) time, yielding inflated TPS.
-# Use the already-computed OSTH_MAX_MS which is the true wall clock.
-if [[ "$PARALLELISM_MODE" == "os-threads" && "${OSTH_MAX_MS:-0}" -gt 0 ]]; then
-  GW_MS="$OSTH_MAX_MS"
-fi
-if [[ -n "$GW_MS" && "$GW_MS" -gt 0 ]]; then
-  TPS=$(( WORKLOAD_LINES * 1000 / GW_MS ))
-  log "  GW time (ms)  : ${GW_MS}"
-  log "  Queries       : ${WORKLOAD_LINES}"
-  log "  TPS (gateway) : ~${TPS} tx/s"
-elif [[ "$ELAPSED" -gt 0 ]]; then
-  TPS=$(( WORKLOAD_LINES / ELAPSED ))
-  log "  Wall time     : ${ELAPSED}s (fallback — gateway ms not found in log)"
-  log "  Queries       : ${WORKLOAD_LINES}"
-  log "  Est TPS       : ~${TPS} tx/s"
-fi
-
-DIVERGENCE="$(grep -E '^divergence_count=[0-9]+$' "$GW_LOG" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
-FAILURES="$(grep -E '^permanent_failures=[0-9]+$' "$GW_LOG" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  if [[ -f "$LOG_DIR/run_summary.env" ]]; then
+    DIVERGENCE="$(grep -E '^divergence_count=' "$LOG_DIR/run_summary.env" | cut -d= -f2 || true)"
+    FAILURES="$(grep -E '^permanent_failures=' "$LOG_DIR/run_summary.env" | cut -d= -f2 || true)"
+  else
+    DIVERGENCE="$(grep -E '^divergence_count=[0-9]+$' "$GW_LOG" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+    FAILURES="$(grep -E '^permanent_failures=[0-9]+$' "$GW_LOG" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  fi
 [[ -n "$DIVERGENCE" ]] || DIVERGENCE="?"
 [[ -n "$FAILURES" ]] || FAILURES="?"
 log "  divergence_count : $DIVERGENCE"

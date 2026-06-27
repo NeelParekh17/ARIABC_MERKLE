@@ -3,6 +3,8 @@
 
 #include "ariabc_pg_util.hxx"
 #include "in_memory_state_mgr.hxx"
+#include "durable_state_mgr.hxx"
+#include "durable_log_store.hxx"
 #include "logger_wrapper.hxx"
 
 #include "nuraft.hxx"
@@ -283,6 +285,11 @@ struct server_options {
     // When true: skip Raft entirely and directly enqueue to pg_executor.
     bool bypass_raft = false;
 
+    // Raft storage configuration
+    std::string raft_storage_mode = "in_memory";
+    std::string raft_storage_dir = "./raft_storage";
+    std::string raft_cluster_id = "ariabc_cluster";
+
     db_options db;
     kafka_options kafka;
 };
@@ -296,7 +303,9 @@ void usage(const char* argv0) {
         << "    --dbName <name> --dbPort <port> [--dbHost <host>] [--dbUser <user>] [--dbPass <pass>] \\\n"
         << "    [--dbType <0|1|2>] [--safedb <0|1|2>] [--dbConnPoolSize <N>] [--pgExecMode threaded|event] \\\n"
         << "    [--kafkaBootstrap <host:port>] [--resultTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--bypassRaft 0|1]  # skip Raft, direct-enqueue to executor (kafka-only profile)\n";
+        << "    [--bypassRaft 0|1]  # skip Raft, direct-enqueue to executor (kafka-only profile)\n"
+        << "    [--raft-storage-mode <in_memory|durable>]\n"
+        << "    [--raft-storage-dir <path>]\n";
 }
 
 bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
@@ -345,6 +354,12 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.kafka.result_sig_key = need("--resultSigKey");
             } else if (a == "--bypassRaft") {
                 opt.bypass_raft = (std::stoi(need("--bypassRaft")) != 0);
+            } else if (a == "--raft-storage-mode") {
+                opt.raft_storage_mode = need("--raft-storage-mode");
+            } else if (a == "--raft-storage-dir") {
+                opt.raft_storage_dir = need("--raft-storage-dir");
+            } else if (a == "--raft-cluster-id") {
+                opt.raft_cluster_id = need("--raft-cluster-id");
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -379,6 +394,26 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
             m != "threaded" && m != "event" && m != "reactor" && m != "async") {
             err = "invalid --pgExecMode (expected threaded|event)";
             return false;
+        }
+    }
+    // Validate storage mode: must be exactly "durable" or "in_memory".
+    // An unrecognised value (e.g. a typo) must never silently fall back to
+    // in-memory, because the caller would believe they launched a durable node.
+    {
+        const std::string& sm = opt.raft_storage_mode;
+        if (sm != "durable" && sm != "in_memory") {
+            err = "invalid --raft-storage-mode '" + sm + "' (expected 'durable' or 'in_memory')";
+            return false;
+        }
+        if (sm == "durable") {
+            if (opt.raft_storage_dir.empty()) {
+                err = "--raft-storage-dir is required when --raft-storage-mode=durable";
+                return false;
+            }
+            if (opt.raft_cluster_id.empty()) {
+                err = "--raft-cluster-id is required when --raft-storage-mode=durable";
+                return false;
+            }
         }
     }
     return true;
@@ -1014,7 +1049,8 @@ void handle_client_fd_direct(int fd,
 }
 
 void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
-                  nuraft::ptr<nuraft::state_machine> sm)
+                  nuraft::ptr<nuraft::state_machine> sm,
+                  nuraft::ptr<nuraft::state_mgr> smgr = nullptr)
 {
     if (!profile_enabled()) return;
 
@@ -1215,6 +1251,27 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " kafka_delivery_pending_over_8_events=" << exec.kafka_delivery_pending_over_8_events
         << " kafka_delivery_pending_over_32_events=" << exec.kafka_delivery_pending_over_32_events
         << std::endl;
+
+    if (smgr) {
+        auto d_smgr = std::dynamic_pointer_cast<ariabc_raft::durable_state_mgr>(smgr);
+        if (d_smgr) {
+            auto lstore = std::dynamic_pointer_cast<ariabc_raft::durable_log_store>(d_smgr->load_log_store());
+            if (lstore) {
+                const auto& p = lstore->profile();
+                std::cout << "PROFILE_RAFT_STORAGE "
+                          << "append_calls=" << p.append_calls.load()
+                          << " append_batches=" << p.append_batches.load()
+                          << " bytes_appended=" << p.bytes_appended.load()
+                          << " fdatasync_calls=" << p.fdatasync_calls.load()
+                          << " fdatasync_total_ms=" << (p.fdatasync_total_ns.load() / 1000000.0)
+                          << " fdatasync_max_ms=" << (p.fdatasync_max_ns.load() / 1000000.0)
+                          << " append_batch_entries_max=" << p.append_batch_entries_max.load()
+                          << " append_batch_entries_total=" << p.append_batch_entries_total.load()
+                          << " last_durable_index=" << lstore->last_durable_index()
+                          << std::endl;
+            }
+        }
+    }
 }
 
 } // namespace ariabc_pg
@@ -1301,21 +1358,100 @@ int main(int argc, char** argv) {
     ptr<logger> raft_logger = cs_new<logger_wrapper>(log_file, 4);
 
     // State manager + initial config.
-    ptr<state_mgr> smgr = cs_new<inmem_state_mgr>(opt.id, opt.raft_endpoint);
-    ptr<cluster_config> conf = cs_new<cluster_config>();
+    ptr<state_mgr> smgr;
     const int preferred_leader_id = ariabc_pg::preferred_leader_id_from_env();
     const int preferred_leader_transfer_wait_ms =
         ariabc_pg::preferred_leader_transfer_wait_ms_from_env();
-    for (const auto& m : members) {
-        const int priority = (preferred_leader_id > 0 && m.id == preferred_leader_id) ? 100 : 1;
-        conf->get_servers().push_back(cs_new<srv_config>(m.id,
-                                                         0,
-                                                         m.endpoint,
-                                                         "",
-                                                         false,
-                                                         priority));
+
+    try {
+        if (opt.raft_storage_mode == "durable") {
+            ariabc_raft::durable_state_mgr_config ds_cfg;
+            ds_cfg.storage_dir = opt.raft_storage_dir;
+            ds_cfg.node_id = opt.id;
+            ds_cfg.endpoint = opt.raft_endpoint;
+            ds_cfg.cluster_id = opt.raft_cluster_id;
+
+            std::cout << "[Raft Storage] Reopening durable storage at " << opt.raft_storage_dir << std::endl;
+            auto start_recover = std::chrono::high_resolution_clock::now();
+            auto d_smgr = cs_new<ariabc_raft::durable_state_mgr>(ds_cfg);
+            auto end_recover = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(end_recover - start_recover).count();
+
+            smgr = d_smgr;
+
+            if (!d_smgr->is_recovered()) {
+                std::cout << "[Raft Storage] Fresh storage initialized. Initializing fresh cluster." << std::endl;
+                ptr<cluster_config> conf = cs_new<cluster_config>();
+                for (const auto& m : members) {
+                    const int priority = (preferred_leader_id > 0 && m.id == preferred_leader_id) ? 100 : 1;
+                    conf->get_servers().push_back(cs_new<srv_config>(m.id,
+                                                                     0,
+                                                                     m.endpoint,
+                                                                     "",
+                                                                     false,
+                                                                     priority));
+                }
+                d_smgr->initialize_fresh(*conf);
+            } else {
+                // Verify stored membership matches CLI --raftMembers
+                auto saved_conf = d_smgr->load_config();
+                if (!saved_conf) {
+                    throw std::runtime_error("RAFT_STORAGE_MEMBERSHIP_MISMATCH: recovered config is null");
+                }
+                auto& saved_servers = saved_conf->get_servers();
+                if (saved_servers.size() != members.size()) {
+                    throw std::runtime_error("RAFT_STORAGE_MEMBERSHIP_MISMATCH: stored config has " +
+                                             std::to_string(saved_servers.size()) + " members, but CLI specifies " +
+                                             std::to_string(members.size()));
+                }
+                for (const auto& m : members) {
+                    bool found = false;
+                    for (const auto& s : saved_servers) {
+                        if (s->get_id() == m.id) {
+                            if (s->get_endpoint() != m.endpoint) {
+                                throw std::runtime_error("RAFT_STORAGE_MEMBERSHIP_MISMATCH: member ID " +
+                                                         std::to_string(m.id) + " has stored endpoint " +
+                                                         s->get_endpoint() + " but CLI specifies " + m.endpoint);
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        throw std::runtime_error("RAFT_STORAGE_MEMBERSHIP_MISMATCH: member ID " +
+                                                 std::to_string(m.id) + " present in CLI but not in stored config");
+                    }
+                }
+
+                auto lstore = std::dynamic_pointer_cast<ariabc_raft::durable_log_store>(d_smgr->load_log_store());
+                if (lstore) {
+                    std::cout << "[Raft Storage] Recovery scan complete in " << ms << " ms. "
+                              << "Start index: " << lstore->start_index()
+                              << ", Next index: " << lstore->next_slot()
+                              << ", Last entry term: " << lstore->last_entry()->get_term()
+                              << ", Last durable index: " << lstore->last_durable_index()
+                              << std::endl;
+                }
+            }
+        } else {
+            std::cout << "WARNING: RAFT STORAGE MODE = in_memory; Raft state is not crash durable." << std::endl;
+            smgr = cs_new<inmem_state_mgr>(opt.id, opt.raft_endpoint);
+            ptr<cluster_config> conf = cs_new<cluster_config>();
+            for (const auto& m : members) {
+                const int priority = (preferred_leader_id > 0 && m.id == preferred_leader_id) ? 100 : 1;
+                conf->get_servers().push_back(cs_new<srv_config>(m.id,
+                                                                 0,
+                                                                 m.endpoint,
+                                                                 "",
+                                                                 false,
+                                                                 priority));
+            }
+            smgr->save_config(*conf);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "RAFT_STORAGE_FATAL: " << e.what() << std::endl;
+        return 1;
     }
-    smgr->save_config(*conf);
 
     // ASIO options.
     asio_service::options asio_opt;
@@ -1346,6 +1482,9 @@ int main(int argc, char** argv) {
     }
     params.return_method_ = raft_params::async_handler;
     params.auto_forwarding_ = true;
+    if (opt.raft_storage_mode == "durable") {
+        params.parallel_log_appending_ = false;
+    }
 
     // Initialize Raft server listening on raftEndpoint port.
     const ariabc_pg::host_port raft_hp = ariabc_pg::parse_host_port(opt.raft_endpoint);
@@ -1421,7 +1560,7 @@ int main(int argc, char** argv) {
         th.detach();
     }
 
-    ariabc_pg::dump_profile(raft, sm);
+    ariabc_pg::dump_profile(raft, sm, smgr);
 
     return 0;
 }
