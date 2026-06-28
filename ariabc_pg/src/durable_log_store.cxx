@@ -3,6 +3,7 @@
 
 #include "durable_log_store.hxx"
 #include "nuraft.hxx"
+#include <csignal>
 
 #include <algorithm>
 #include <cassert>
@@ -17,6 +18,54 @@
 #include <unistd.h>
 
 namespace ariabc_raft {
+
+static bool parse_segment_filename(const std::string& name, uint64_t& fidx, uint64_t& gen) {
+    if (name.find("segment_") != 0) return false;
+    if (name.length() < 4 || name.compare(name.length() - 4, 4, ".log") != 0) return false;
+    unsigned long long parsed_fidx = 0;
+    unsigned long long parsed_gen = 0;
+    int parsed = ::sscanf(name.c_str(), "segment_%llu_g%llu.log", &parsed_fidx, &parsed_gen);
+    if (parsed != 2) return false;
+    char expected_name[128];
+    snprintf(expected_name, sizeof(expected_name), "segment_%020llu_g%020llu.log", parsed_fidx, parsed_gen);
+    if (name != expected_name) return false;
+    fidx = parsed_fidx;
+    gen = parsed_gen;
+    return true;
+}
+
+enum class FilenameType {
+    VALID_V2_SEGMENT,
+    VALID_V1_SEGMENT,
+    MALFORMED_SEGMENT,
+    OTHER
+};
+
+static FilenameType classify_filename(const std::string& name, uint64_t& fidx, uint64_t& gen) {
+    if (name.find("segment_") != 0) {
+        return FilenameType::OTHER;
+    }
+    if (name.length() < 4 || name.compare(name.length() - 4, 4, ".log") != 0) {
+        return FilenameType::OTHER;
+    }
+    // Attempt V2 parse
+    if (parse_segment_filename(name, fidx, gen)) {
+        return FilenameType::VALID_V2_SEGMENT;
+    }
+    // Attempt V1 parse: segment_%020llu.log
+    unsigned long long parsed_fidx = 0;
+    int parsed = ::sscanf(name.c_str(), "segment_%llu.log", &parsed_fidx);
+    if (parsed == 1) {
+        char expected_name[128];
+        snprintf(expected_name, sizeof(expected_name), "segment_%020llu.log", parsed_fidx);
+        if (name == expected_name) {
+            fidx = parsed_fidx;
+            gen = 0;
+            return FilenameType::VALID_V1_SEGMENT;
+        }
+    }
+    return FilenameType::MALFORMED_SEGMENT;
+}
 
 durable_log_store::durable_log_store(const std::string& log_dir, uint64_t max_segment_size)
     : log_dir_(log_dir)
@@ -79,7 +128,16 @@ nuraft::ptr<nuraft::log_entry> durable_log_store::last_entry() const {
     return make_clone(logs_.rbegin()->second);
 }
 
-std::string durable_log_store::segment_path(uint64_t first_index) const {
+// New format: segment_<first_index>_g<gen_id>.log
+std::string durable_log_store::segment_path(uint64_t first_index, uint64_t gen_id) const {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "/segment_%020llu_g%020llu.log",
+             (unsigned long long)first_index, (unsigned long long)gen_id);
+    return log_dir_ + buf;
+}
+
+// Legacy: segment_<first_index>.log (manifest v1 backward compat, read-only)
+std::string durable_log_store::segment_path_legacy(uint64_t first_index) const {
     char buf[64];
     snprintf(buf, sizeof(buf), "/segment_%020llu.log", (unsigned long long)first_index);
     return log_dir_ + buf;
@@ -87,7 +145,8 @@ std::string durable_log_store::segment_path(uint64_t first_index) const {
 
 int durable_log_store::segment_fd(size_t seg_idx) {
     if (segments_[seg_idx].fd < 0) {
-        int fd = ::open(segments_[seg_idx].path.c_str(), O_RDWR | O_CREAT, 0600);
+        // Open existing segment file for append; do NOT use O_CREAT|O_TRUNC.
+        int fd = ::open(segments_[seg_idx].path.c_str(), O_RDWR, 0600);
         if (fd < 0) {
             throw storage_io_error("Failed to open segment file: " + segments_[seg_idx].path + " error: " + strerror(errno));
         }
@@ -101,11 +160,18 @@ int durable_log_store::segment_fd(size_t seg_idx) {
     return segments_[seg_idx].fd;
 }
 
-void durable_log_store::create_segment(uint64_t first_index) {
+void durable_log_store::create_segment(uint64_t first_index, bool persist_manifest) {
+    // Allocate a unique generation ID and build the new segment filename.
+    // Using O_CREAT|O_EXCL means we NEVER silently overwrite an existing file.
+    // If two segments ever produced the same name (which cannot happen given the
+    // monotonically increasing gen_id) the open would fail with EEXIST rather
+    // than truncating durable history.
+    const uint64_t gen = next_gen_id_++;
     Segment seg;
     seg.first_index = first_index;
-    seg.path = segment_path(first_index);
-    seg.fd = ::open(seg.path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0600);
+    seg.gen_id      = gen;
+    seg.path = segment_path(first_index, gen);
+    seg.fd = ::open(seg.path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
     if (seg.fd < 0) {
         throw storage_io_error("Failed to create segment file: " + seg.path + " error: " + strerror(errno));
     }
@@ -140,9 +206,17 @@ void durable_log_store::create_segment(uint64_t first_index) {
         }
     }
     segments_.push_back(seg);
-    save_manifest();
-    fsync_directory_or_throw(log_dir_);
+
+    // Only persist the manifest immediately when requested.
+    // For the truncate/rollback path, the caller writes the TRUNCATE_FROM marker
+    // first, syncs it, and then calls save_manifest() to preserve the ordering:
+    //   segment file durable → marker durable → manifest durable → unlinks.
+    if (persist_manifest) {
+        save_manifest();
+        fsync_directory_and_profile(log_dir_);
+    }
 }
+
 
 void durable_log_store::rotate_segment_if_needed(uint64_t first_record_index) {
     if (segments_.empty()) {
@@ -213,26 +287,52 @@ void durable_log_store::write_truncate_record(uint64_t from_index) {
         segments_.pop_back();
     }
 
-    // 2. Ensure we have an active segment and write the TRUNCATE marker to it
-    rotate_segment_if_needed(from_index);
+    // 2. Ensure we have an active segment for the marker.
+    //    CRITICAL: do NOT persist the manifest yet. The new segment must be
+    //    durable on disk before the manifest is updated, and the TRUNCATE_FROM
+    //    marker must be durable before the manifest excludes old segments.
+    //    If we saved the manifest here, a crash before the marker is written
+    //    would leave the recovered log empty/incomplete.
+    if (segments_.empty() || segments_.back().size >= max_segment_size_) {
+        // Need a new segment. Create it WITHOUT persisting the manifest.
+        create_segment(from_index, /*persist_manifest=*/false);
+    }
     size_t active_idx = segments_.size() - 1;
     int fd = segment_fd(active_idx);
 
+    // FAILPOINT: crash after segment is created but before the marker is written.
+    // This validates that recovery handles an orphaned new segment header.
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_NEW_TRUNCATE_SEGMENT_BEFORE_MARKER")) {
+        if (!obsolete_segments.empty()) {
+            std::cerr << "FAILPOINT: crashing after new truncate segment created, before TRUNCATE_FROM marker" << std::endl;
+            ::kill(::getpid(), SIGKILL);
+            ::_exit(124);
+        }
+    }
+
+    // 3. Write TRUNCATE_FROM marker record
     std::vector<uint8_t> hdr = build_header(RT_TRUNCATE, from_index, 0, 0, 0);
     write_full(fd, hdr.data(), hdr.size(), segments_[active_idx].path);
     segments_[active_idx].size += HEADER_SIZE;
     dirty_segments_.insert(active_idx);
+    profile_.truncate_records_written.fetch_add(1, std::memory_order_relaxed);
 
-    // 3. fdatasync the marker's segment
+    // 4. fdatasync the marker's segment
+    //    The marker is now durable: it is safe to persist the manifest.
     fdatasync_and_profile(fd, "truncate marker sync");
 
-    // 4. Update the manifest file on disk
+    // 5. Update the manifest file on disk (now safe: marker is durable)
     save_manifest();
 
-    // 5. fsync log directory to commit the manifest update
-    fsync_directory_or_throw(log_dir_);
+    // 6. fsync log directory to commit the manifest update
+    fsync_directory_and_profile(log_dir_);
 
-    // 6. Physically unlink the obsolete segments
+    // 7. Physically unlink the obsolete segments
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_BEFORE_UNLINK")) {
+        std::cerr << "FAILPOINT: crashing before obsolete segment unlink" << std::endl;
+        ::kill(::getpid(), SIGKILL);
+        ::_exit(124);
+    }
     for (auto& o_seg : obsolete_segments) {
         if (o_seg.fd >= 0) {
             ::close(o_seg.fd);
@@ -240,19 +340,22 @@ void durable_log_store::write_truncate_record(uint64_t from_index) {
         }
         bool keep = false;
         for (auto& seg : segments_) {
-            if (seg.first_index == o_seg.first_index) {
+            if (seg.first_index == o_seg.first_index && seg.gen_id == o_seg.gen_id) {
                 keep = true;
                 break;
             }
         }
         if (!keep) {
-            ::unlink(o_seg.path.c_str());
+            if (::unlink(o_seg.path.c_str()) != 0 && errno != ENOENT) {
+                throw storage_io_error("Failed to unlink obsolete segment file: " + o_seg.path + " error: " + strerror(errno));
+            }
         }
     }
 
-    // 7. fsync log directory again to commit the unlinks
-    fsync_directory_or_throw(log_dir_);
+    // 8. fsync log directory again to commit the unlinks
+    fsync_directory_and_profile(log_dir_);
 }
+
 
 nuraft::ulong durable_log_store::append(nuraft::ptr<nuraft::log_entry>& entry) {
     std::lock_guard<std::mutex> l(mu_);
@@ -286,6 +389,12 @@ void durable_log_store::write_at(nuraft::ulong index, nuraft::ptr<nuraft::log_en
     while (it != logs_.end()) {
         index_locations_.erase(it->first);
         it = logs_.erase(it);
+    }
+
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_TRUNCATE_MARKER_BEFORE_REPLACEMENT")) {
+        std::cerr << "FAILPOINT: crashing after truncate marker, before replacement in write_at" << std::endl;
+        ::kill(::getpid(), SIGKILL);
+        ::_exit(124);
     }
 
     nuraft::ptr<nuraft::buffer> buf = entry->serialize();
@@ -433,6 +542,12 @@ void durable_log_store::apply_pack(nuraft::ulong index, nuraft::buffer& pack) {
         it = logs_.erase(it);
     }
 
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_TRUNCATE_MARKER_BEFORE_REPLACEMENT")) {
+        std::cerr << "FAILPOINT: crashing after truncate marker, before replacement in apply_pack" << std::endl;
+        ::kill(::getpid(), SIGKILL);
+        ::_exit(124);
+    }
+
     // Write entries to segment
     for (int32_t ii = 0; ii < num_logs; ++ii) {
         uint64_t cur_idx = index + ii;
@@ -523,25 +638,31 @@ void durable_log_store::open_or_create() {
 
 void durable_log_store::load_manifest() {
     struct stat st;
-    DIR* dir = ::opendir(log_dir_.c_str());
-    if (dir) {
-        struct dirent* entry;
-        bool has_segments = false;
-        while ((entry = ::readdir(dir)) != nullptr) {
-            std::string name = entry->d_name;
-            if (name.find("segment_") == 0 && name.find(".log") != std::string::npos) {
-                has_segments = true;
-                break;
+    if (::stat(manifest_path_.c_str(), &st) != 0) {
+        // Manifest doesn't exist, check if there are segments on disk (lost manifest case)
+        DIR* dir = ::opendir(log_dir_.c_str());
+        if (dir) {
+            struct dirent* entry;
+            bool has_segments = false;
+            while ((entry = ::readdir(dir)) != nullptr) {
+                std::string name = entry->d_name;
+                uint64_t dummy_fidx = 0;
+                uint64_t dummy_gen = 0;
+                FilenameType type = classify_filename(name, dummy_fidx, dummy_gen);
+                if (type == FilenameType::VALID_V2_SEGMENT || type == FilenameType::VALID_V1_SEGMENT) {
+                    has_segments = true;
+                    break;
+                } else if (type == FilenameType::MALFORMED_SEGMENT) {
+                    ::closedir(dir);
+                    throw storage_corruption_error("Malformed segment filename in log directory: " + name);
+                }
+            }
+            ::closedir(dir);
+            if (has_segments) {
+                throw storage_corruption_error("Missing manifest file in non-empty log directory");
             }
         }
-        ::closedir(dir);
-        if (has_segments && ::stat(manifest_path_.c_str(), &st) != 0) {
-            throw storage_corruption_error("Missing manifest file in non-empty log directory");
-        }
-    }
-
-    if (::stat(manifest_path_.c_str(), &st) != 0) {
-        // Manifest doesn't exist, create it empty
+        // Manifest doesn't exist and log directory is clean/empty, create it empty
         save_manifest();
         return;
     }
@@ -561,55 +682,109 @@ void durable_log_store::load_manifest() {
     uint32_t magic = get_le32(raw.data());
     uint32_t ver = get_le32(raw.data() + 4);
     uint32_t num_segs = get_le32(raw.data() + 8);
-    if (magic != MAGIC || ver != FORMAT_VER) {
-        throw storage_corruption_error("Manifest file corrupt or unknown version");
+    if (magic != MAGIC) {
+        throw storage_corruption_error("Manifest file corrupt (bad magic)");
     }
 
-    // Exact length check
-    if (raw.size() != 16 + num_segs * 8) {
-        throw storage_corruption_error("Manifest size does not match segment count");
-    }
-
-    const uint8_t* p = raw.data() + 12;
-    uint64_t prev_first_idx = 0;
-    for (uint32_t i = 0; i < num_segs; ++i) {
-        uint64_t fidx = get_le64(p);
-        p += 8;
-
-        // segment-order validation & duplicate detection
-        if (fidx == 0) {
-            throw storage_corruption_error("Manifest contains invalid segment first_index=0");
+    if (ver == FORMAT_VER_V1) {
+        throw storage_corruption_error("legacy durable Raft storage format is unsupported; start with fresh storage.");
+    } else if (ver == FORMAT_VER) {
+        // v2 format: 16-byte header + 8 next_gen_id + num_segs*(8 first_index + 8 gen_id) + 4 CRC
+        const size_t expected_sz = 16 + 8 + (size_t)num_segs * 16 + 4;
+        if (raw.size() != expected_sz) {
+            throw storage_corruption_error("Manifest v2 size does not match segment count");
         }
-        if (i > 0 && fidx <= prev_first_idx) {
-            throw storage_corruption_error("Manifest segments are out of order or duplicate first_index");
+        const uint8_t* p = raw.data() + 16;   // skip magic(4)+ver(4)+num_segs(4)+reserved(4)
+        next_gen_id_ = get_le64(p); p += 8;
+        uint64_t prev_first_idx = 0;
+        for (uint32_t i = 0; i < num_segs; ++i) {
+            uint64_t fidx = get_le64(p); p += 8;
+            uint64_t gen  = get_le64(p); p += 8;
+            if (fidx == 0) throw storage_corruption_error("Manifest v2: invalid segment first_index=0");
+            if (i > 0 && fidx <= prev_first_idx) throw storage_corruption_error("Manifest v2: segments out of order");
+            prev_first_idx = fidx;
+            Segment seg;
+            seg.first_index = fidx;
+            seg.gen_id      = gen;
+            seg.path = segment_path(fidx, gen);
+            seg.fd = -1; seg.size = 0; seg.is_active = false;
+            segments_.push_back(seg);
         }
-        prev_first_idx = fidx;
-
-        Segment seg;
-        seg.first_index = fidx;
-        seg.path = segment_path(fidx);
-        seg.fd = -1;
-        seg.size = 0;
-        seg.is_active = false;
-        segments_.push_back(seg);
+        if (!segments_.empty()) segments_.back().is_active = true;
+    } else {
+        throw storage_corruption_error("Manifest file: unknown version " + std::to_string(ver));
     }
-    if (!segments_.empty()) {
-        segments_.back().is_active = true;
+
+    // Scan for orphan segment files and adjust next_gen_id_ to avoid EEXIST collisions
+    uint64_t max_gen = 0;
+    std::set<std::string> active_paths;
+    for (const auto& seg : segments_) {
+        active_paths.insert(seg.path);
+    }
+
+    DIR* d = ::opendir(log_dir_.c_str());
+    if (d) {
+        struct dirent* entry;
+        std::vector<std::string> orphans_to_delete;
+        while ((entry = ::readdir(d)) != nullptr) {
+            std::string name = entry->d_name;
+            uint64_t fidx = 0;
+            uint64_t gen = 0;
+            FilenameType type = classify_filename(name, fidx, gen);
+            if (type == FilenameType::VALID_V2_SEGMENT) {
+                if (gen > max_gen) {
+                    max_gen = gen;
+                }
+                std::string full_path = log_dir_ + "/" + name;
+                if (!log_dir_.empty() && log_dir_.back() == '/') {
+                    full_path = log_dir_ + name;
+                }
+                if (active_paths.count(full_path) == 0) {
+                    orphans_to_delete.push_back(full_path);
+                }
+            } else if (type == FilenameType::VALID_V1_SEGMENT) {
+                ::closedir(d);
+                throw storage_corruption_error("legacy durable Raft storage format is unsupported; start with fresh storage.");
+            } else if (type == FilenameType::MALFORMED_SEGMENT) {
+                ::closedir(d);
+                throw storage_corruption_error("Malformed segment filename in log directory: " + name);
+            }
+        }
+        ::closedir(d);
+
+        // Delete orphan segment files only after validating manifest is loaded
+        for (const auto& path : orphans_to_delete) {
+            if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
+                throw storage_io_error("Failed to unlink orphan segment file: " + path + " error: " + strerror(errno));
+            }
+        }
+        if (!orphans_to_delete.empty()) {
+            fsync_directory_and_profile(log_dir_);
+        }
+    }
+    if (max_gen >= next_gen_id_) {
+        next_gen_id_ = max_gen + 1;
     }
 }
 
 void durable_log_store::save_manifest() {
+    // v2 format: magic(4) + ver(4) + num_segs(4) + reserved(4) +
+    //            next_gen_id(8) + [first_index(8) + gen_id(8)] * num_segs + CRC(4)
     std::vector<uint8_t> raw;
     put_le32(raw, MAGIC);
-    put_le32(raw, FORMAT_VER);
+    put_le32(raw, FORMAT_VER);          // v2
     put_le32(raw, (uint32_t)segments_.size());
+    put_le32(raw, 0);                   // reserved (was the 4th word of the 16-byte header)
+    put_le64(raw, next_gen_id_);
     for (auto& seg : segments_) {
         put_le64(raw, seg.first_index);
+        put_le64(raw, seg.gen_id);
     }
     uint32_t mcrc = crc32_bytes(raw.data(), raw.size());
     put_le32(raw, mcrc);
     atomic_write_file(manifest_path_, raw);
 }
+
 
 void durable_log_store::process_record_on_recovery(
     const uint8_t* header, const std::vector<uint8_t>& payload, uint64_t file_offset, size_t seg_idx)
@@ -631,6 +806,7 @@ void durable_log_store::process_record_on_recovery(
             throw storage_corruption_error("Raft term mismatch between header (" + std::to_string(raft_term) + ") and payload (" + std::to_string(le->get_term()) + ") at index " + std::to_string(raft_idx));
         }
         logs_[raft_idx] = le;
+        profile_.recovery_entries_loaded.fetch_add(1, std::memory_order_relaxed);
 
         log_location loc;
         loc.segment_seq = segments_[seg_idx].first_index;
@@ -683,10 +859,12 @@ void durable_log_store::scan_and_recover() {
             // Unusable segment header, delete it if it is the final segment
             if (i == segments_.size() - 1) {
                 ::close(fd);
-                ::unlink(path.c_str());
+                if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
+                    throw storage_io_error("Failed to unlink unusable tail segment file: " + path + " error: " + strerror(errno));
+                }
                 segments_.pop_back();
                 save_manifest();
-                fsync_directory_or_throw(log_dir_);
+                fsync_directory_and_profile(log_dir_);
                 uint64_t next_idx = (expected_next_idx == 0) ? 1 : expected_next_idx;
                 create_segment(next_idx);
                 break;
@@ -697,7 +875,7 @@ void durable_log_store::scan_and_recover() {
         }
 
         uint8_t seg_hdr[16];
-        if (::read(fd, seg_hdr, 16) != 16) {
+        if (!read_full(fd, seg_hdr, 16, path)) {
             ::close(fd);
             throw storage_corruption_error("Failed to read segment header: " + path);
         }
@@ -729,6 +907,7 @@ void durable_log_store::scan_and_recover() {
                     }
                     try {
                         fdatasync_and_profile(write_fd, "tail header repair: " + path);
+                        profile_.tail_repairs.fetch_add(1, std::memory_order_relaxed);
                     } catch (...) {
                         ::close(write_fd);
                         throw;
@@ -743,7 +922,7 @@ void durable_log_store::scan_and_recover() {
             }
 
             uint8_t header[HEADER_SIZE];
-            if (::lseek(fd, offset, SEEK_SET) < 0 || ::read(fd, header, HEADER_SIZE) != (ssize_t)HEADER_SIZE) {
+            if (::lseek(fd, offset, SEEK_SET) < 0 || !read_full(fd, header, HEADER_SIZE, path)) {
                 ::close(fd);
                 throw storage_io_error("Failed to read record header at offset " + std::to_string(offset));
             }
@@ -845,6 +1024,7 @@ void durable_log_store::scan_and_recover() {
                     }
                     try {
                         fdatasync_and_profile(write_fd, "tail payload repair: " + path);
+                        profile_.tail_repairs.fetch_add(1, std::memory_order_relaxed);
                     } catch (...) {
                         ::close(write_fd);
                         throw;
@@ -860,7 +1040,7 @@ void durable_log_store::scan_and_recover() {
 
             std::vector<uint8_t> payload(payload_len);
             if (payload_len > 0) {
-                if (::read(fd, payload.data(), payload_len) != (ssize_t)payload_len) {
+                if (!read_full(fd, payload.data(), payload_len, path)) {
                     ::close(fd);
                     throw storage_io_error("Failed to read record payload at offset " + std::to_string(offset + HEADER_SIZE));
                 }
@@ -913,6 +1093,15 @@ void durable_log_store::sync_dirty_segments_unlocked(const std::string& context)
 }
 
 void durable_log_store::fdatasync_and_profile(int fd, const std::string& context) {
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_BEFORE_FDATASYNC")) {
+        std::string fp_val(fp);
+        if (fp_val == "1" || context.find(fp_val) != std::string::npos) {
+            std::cerr << "FAILPOINT: crashing before fdatasync in context '" << context << "'" << std::endl;
+            ::kill(::getpid(), SIGKILL);
+            ::_exit(123);
+        }
+    }
+
     auto s0 = std::chrono::steady_clock::now();
     if (::fdatasync(fd) != 0) {
         throw storage_io_error("fdatasync failed in " + context + " error: " + strerror(errno));
@@ -921,98 +1110,25 @@ void durable_log_store::fdatasync_and_profile(int fd, const std::string& context
     uint64_t elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count();
     profile_.fdatasync_total_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
     profile_.fdatasync_calls.fetch_add(1, std::memory_order_relaxed);
+    profile_.segment_fdatasync_calls.fetch_add(1, std::memory_order_relaxed);
 
     uint64_t cur_max = profile_.fdatasync_max_ns.load(std::memory_order_relaxed);
     while (elapsed_ns > cur_max && !profile_.fdatasync_max_ns.compare_exchange_weak(cur_max, elapsed_ns)) {}
 }
 
+void durable_log_store::fsync_directory_and_profile(const std::string& path) {
+    fsync_directory_or_throw(path);
+    profile_.directory_fsync_calls.fetch_add(1, std::memory_order_relaxed);
+}
+
 void durable_log_store::save_durable_watermark_unlocked() {
-    uint64_t watermark = last_durable_idx_;
-    std::string path = log_dir_ + "/durable_watermark.bin";
-    std::string tmp_path = path + ".tmp";
-
-    std::vector<uint8_t> buf(20);
-    uint32_t magic = 0xAB1C0D0B;
-    uint32_t version = 1;
-    
-    ::memcpy(buf.data(), &magic, 4);
-    ::memcpy(buf.data() + 4, &version, 4);
-    ::memcpy(buf.data() + 8, &watermark, 8);
-    
-    uint32_t crc = crc32_bytes(buf.data(), 16);
-    ::memcpy(buf.data() + 16, &crc, 4);
-
-    int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        throw storage_io_error("Failed to open watermark tmp file: " + tmp_path);
-    }
-    if (::write(fd, buf.data(), buf.size()) != (ssize_t)buf.size()) {
-        ::close(fd);
-        throw storage_io_error("Failed to write watermark tmp file: " + tmp_path);
-    }
-    if (::fdatasync(fd) != 0) {
-        ::close(fd);
-        throw storage_io_error("fdatasync failed for watermark tmp file: " + tmp_path);
-    }
-    ::close(fd);
-
-    if (::rename(tmp_path.c_str(), path.c_str()) != 0) {
-        throw storage_io_error("Rename failed for watermark: " + tmp_path + " -> " + path);
-    }
-    fsync_directory_or_throw(log_dir_);
+    // No-op in synchronous mode (parallel_log_appending_ = false).
+    // Durability watermark is not needed as all written records are in-order.
 }
 
 void durable_log_store::load_durable_watermark_unlocked() {
-    std::string path = log_dir_ + "/durable_watermark.bin";
-    struct stat st;
-    if (::stat(path.c_str(), &st) != 0) {
-        last_durable_idx_ = next_slot_unlocked() - 1;
-        return;
-    }
-
-    if (st.st_size != 20) {
-        throw storage_corruption_error("durable_watermark.bin size mismatch: expected 20, got " + std::to_string(st.st_size));
-    }
-
-    std::vector<uint8_t> buf(20);
-    int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        throw storage_io_error("Failed to open durable_watermark.bin: " + path);
-    }
-    if (::read(fd, buf.data(), buf.size()) != 20) {
-        ::close(fd);
-        throw storage_io_error("Failed to read durable_watermark.bin: " + path);
-    }
-    ::close(fd);
-
-    uint32_t magic;
-    uint32_t version;
-    uint64_t watermark;
-    uint32_t expected_crc;
-
-    ::memcpy(&magic, buf.data(), 4);
-    ::memcpy(&version, buf.data() + 4, 4);
-    ::memcpy(&watermark, buf.data() + 8, 8);
-    ::memcpy(&expected_crc, buf.data() + 16, 4);
-
-    if (magic != 0xAB1C0D0B) {
-        throw storage_corruption_error("durable_watermark.bin magic mismatch");
-    }
-    if (version != 1) {
-        throw storage_corruption_error("durable_watermark.bin version mismatch");
-    }
-
-    uint32_t actual_crc = crc32_bytes(buf.data(), 16);
-    if (actual_crc != expected_crc) {
-        throw storage_corruption_error("durable_watermark.bin CRC mismatch");
-    }
-
-    uint64_t max_idx = next_slot_unlocked() - 1;
-    if (watermark > max_idx) {
-        last_durable_idx_ = max_idx;
-    } else {
-        last_durable_idx_ = watermark;
-    }
+    // In synchronous mode, the last durable index is the index of the last valid record.
+    last_durable_idx_ = next_slot_unlocked() - 1;
 }
 
 void durable_log_store::simulate_crash_close() {

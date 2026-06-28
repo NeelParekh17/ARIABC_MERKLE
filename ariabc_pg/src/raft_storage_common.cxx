@@ -243,8 +243,10 @@ int acquire_exclusive_lock(const std::string& dir_path) {
     // Write our PID for diagnostic purposes.
     const std::string pid_str = std::to_string(static_cast<long>(::getpid())) + "\n";
     // Truncate first (ignore errors — the lock is what matters).
-    (void)::ftruncate(fd, 0);
-    (void)::write(fd, pid_str.c_str(), pid_str.size());
+    int tr_res = ::ftruncate(fd, 0);
+    (void)tr_res;
+    ssize_t wr_res = ::write(fd, pid_str.c_str(), pid_str.size());
+    (void)wr_res;
 
     return fd;
 }

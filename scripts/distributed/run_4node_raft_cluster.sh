@@ -165,6 +165,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     ARIABC_FULL_RESULT_REPLICA_LIMIT \
     ARIABC_RESULT_PUBLISH_REPLICA_LIMIT \
     ARIABC_PREFERRED_LEADER_ID \
+    ARIABC_ALLOW_DET_RESUME \
     ARIABC_OS_PROFILE \
     BCDB_WORKER_COUNT DB_CONN_POOL_SIZE \
     BCDB_DECOUPLE_WORKERS \
@@ -219,7 +220,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # Flags
 # ---------------------------------------------------------------------------
-RAFT_STORAGE_MODE="${RAFT_STORAGE_MODE:-in_memory}"
+RAFT_STORAGE_MODE="${RAFT_STORAGE_MODE:-durable}"
 RAFT_STORAGE_ACTION="${RAFT_STORAGE_ACTION:-fresh}"
 RAFT_STORAGE_ROOT="${RAFT_STORAGE_ROOT:-}"
 RAFT_STORAGE_DIR="${RAFT_STORAGE_DIR:-/home/neel/ariabc_raft_data}"
@@ -557,7 +558,7 @@ while [[ $# -gt 0 ]]; do
     --preferred-leader-id) ARIABC_PREFERRED_LEADER_ID="${2:-0}"; shift 2 ;;
     --bcdb-overwrite-protection) BCDB_OVERWRITE_PROTECTION="${2:-0}"; shift 2 ;;
     --pool-size)    DB_CONN_POOL_SIZE="${2:-256}"; shift 2 ;;
-    --raft-storage-mode) RAFT_STORAGE_MODE="${2:-in_memory}"; shift 2 ;;
+    --raft-storage-mode) RAFT_STORAGE_MODE="${2:-durable}"; shift 2 ;;
     --raft-storage-dir) RAFT_STORAGE_DIR="${2:-./.raft_storage_data}"; shift 2 ;;
     --raft-storage-action) RAFT_STORAGE_ACTION="${2:-fresh}"; shift 2 ;;
     --raft-storage-root) RAFT_STORAGE_ROOT="${2:-}"; RAFT_STORAGE_DIR="$RAFT_STORAGE_ROOT"; shift 2 ;;
@@ -578,7 +579,14 @@ if [[ "$RAFT_STORAGE_MODE" == "durable" ]]; then
   if [[ "$RAFT_STORAGE_ACTION" != "fresh" && "$RAFT_STORAGE_ACTION" != "preserve" ]]; then
     die "ERROR: --raft-storage-action must be 'fresh' or 'preserve' (got: $RAFT_STORAGE_ACTION)"
   fi
+  if [[ "$RAFT_STORAGE_ACTION" == "preserve" ]]; then
+    die "RAFT_STORAGE_ACTION=preserve is not supported by the SQL workload runner yet.
+Durable Raft log recovery is implemented, but PostgreSQL replay/idempotency recovery is not."
+  fi
   if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
+    if [[ "$SKIP_CLEANUP" == "1" ]]; then
+      die "fresh durable storage cannot be used with SKIP_CLEANUP=1"
+    fi
     if [[ "$RAFT_CLUSTER_ID" == "ariabc_cluster" ]]; then
       RAFT_CLUSTER_ID="cluster_$(date +%Y%m%d_%H%M%S)_$((RANDOM % 10000))"
     fi
@@ -1307,7 +1315,7 @@ if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
       TARGET_DIR=\"\$(readlink -f \"\$TARGET_DIR\" 2>/dev/null || echo \"\$TARGET_DIR\")\"
       if [[ \"$RAFT_STORAGE_MODE\" == \"durable\" && \"$RAFT_STORAGE_ACTION\" == \"fresh\" ]]; then
         # Safety validation: target path must start exactly with canonical ROOT_DIR/RAFT_CLUSTER_ID/nodeID
-        if [[ \"\$TARGET_DIR\" == \"\$ROOT_DIR/$RAFT_CLUSTER_ID/node$id\" && \"\$TARGET_DIR\" != \"/\" && \"\$TARGET_DIR\" != \"\$HOME\"* ]]; then
+        if [[ \"\$TARGET_DIR\" == \"\$ROOT_DIR/$RAFT_CLUSTER_ID/node$id\" && \"\$TARGET_DIR\" != \"/\" && \"\$TARGET_DIR\" != \"\$HOME\" && \"\$TARGET_DIR\" != \"$REMOTE_REPO_ROOT\" ]]; then
           echo \"[Cleanup] Removing storage directory \$TARGET_DIR\"
           rm -rf \"\$TARGET_DIR\"
         else
@@ -1335,28 +1343,27 @@ if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
 fi
 
 # --- preserve-mode prerequisite check ---
-# When RAFT_STORAGE_ACTION=preserve we must verify that each node already has
-# a complete durable storage directory. Without this check a missing or wiped
-# directory would silently start a fresh node while the operator believes they
-# are testing recovery.
-if [[ "$RAFT_STORAGE_MODE" == "durable" && "$RAFT_STORAGE_ACTION" == "preserve" ]]; then
-  log "=== Phase 0 (preserve check): Verifying recovery prerequisites on all nodes ==="
-  for idx in "${!NODE_IDS[@]}"; do
-    id="${NODE_IDS[$idx]}"
-    name="${NODE_NAMES[$idx]}"
-    node_ssh "$idx" "
-      TARGET_DIR=\"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\"
-      for f in identity.bin srv_state.bin cluster_config.bin log/manifest.bin; do
-        if [[ ! -f \"\$TARGET_DIR/\$f\" ]]; then
-          echo \"PRESERVE_PREREQ_FAIL: \$TARGET_DIR/\$f is missing on $name\" >&2
-          exit 1
-        fi
-      done
-      echo \"[Preserve check] node$id prerequisites OK at \$TARGET_DIR\"
-    " || die "Preserve prerequisite check failed for node $id on $name — use RAFT_STORAGE_ACTION=fresh for a new cluster"
-  done
-  log "  Preserve prerequisites verified on all nodes"
-fi
+# Note: commented out since RAFT_STORAGE_ACTION=preserve is strictly blocked
+# at the start of this script (until PostgreSQL replay/idempotency is implemented).
+#
+# if [[ "$RAFT_STORAGE_MODE" == "durable" && "$RAFT_STORAGE_ACTION" == "preserve" ]]; then
+#   log "=== Phase 0 (preserve check): Verifying recovery prerequisites on all nodes ==="
+#   for idx in "${!NODE_IDS[@]}"; do
+#     id="${NODE_IDS[$idx]}"
+#     name="${NODE_NAMES[$idx]}"
+#     node_ssh "$idx" "
+#       TARGET_DIR=\"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\"
+#       for f in identity.bin srv_state.bin cluster_config.bin log/manifest.bin; do
+#         if [[ ! -f \"\$TARGET_DIR/\$f\" ]]; then
+#           echo \"PRESERVE_PREREQ_FAIL: \$TARGET_DIR/\$f is missing on $name\" >&2
+#           exit 1
+#         fi
+#       done
+#       echo \"[Preserve check] node$id prerequisites OK at \$TARGET_DIR\"
+#     " || die "Preserve prerequisite check failed for node $id on $name — use RAFT_STORAGE_ACTION=fresh for a new cluster"
+#   done
+#   log "  Preserve prerequisites verified on all nodes"
+# fi
 
 # ---------------------------------------------------------------------------
 # Phase 0.5: Ensure librdkafka v2.3.0 on all nodes (source-built, no root needed)
@@ -2450,7 +2457,7 @@ fi
 if [[ "$BYPASS_RAFT" -eq 1 ]]; then
   log "  Checking BCDB init and bypass-server readiness..."
 else
-  log "  Checking BCDB init and leader status..."
+  log "  Checking BCDB init; gateway will wait for a real Raft leader before submitting."
 fi
 for idx in "${!NODE_IDS[@]}"; do
   id="${NODE_IDS[$idx]}"
@@ -2467,9 +2474,12 @@ log "=== Phase 6: Gateway test (det mode) ==="
 
 # Build node list with per-node client ports
 GW_NODES=""
+RAFT_NODE_IDS_CSV=""
 for idx in "${!NODE_IDS[@]}"; do
   [[ -n "$GW_NODES" ]] && GW_NODES+=","
   GW_NODES+="${NODE_IPS[$idx]}:${NODE_CLIENT_PORTS[$idx]}"
+  [[ -n "$RAFT_NODE_IDS_CSV" ]] && RAFT_NODE_IDS_CSV+=","
+  RAFT_NODE_IDS_CSV+="${NODE_IDS[$idx]}"
 done
 
 GW_BIN="$LOCAL_BIN/ariabc_pg_gateway"
@@ -2633,6 +2643,7 @@ if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
   # Run gateway in the background and capture its PID
   "$GW_BIN" \
     --nodes "$GW_NODES" \
+    --raft-node-ids "$RAFT_NODE_IDS_CSV" \
     --queryFrom "$WORKLOAD_FILE" \
     --dbType 1 \
     --detRawSql "$DET_RAW_SQL" \
@@ -2791,6 +2802,7 @@ else
 
     "$GW_BIN" \
       --nodes "$GW_NODES" \
+      --raft-node-ids "$RAFT_NODE_IDS_CSV" \
       --queryFrom "$SHARD_DIR/shard_${s}.sql" \
       --dbType 1 \
       --detRawSql "$DET_RAW_SQL" \
@@ -2877,9 +2889,13 @@ log "=== Phase 7: Results ==="
   if [[ -f "$LOG_DIR/run_summary.env" ]]; then
     DIVERGENCE="$(grep -E '^divergence_count=' "$LOG_DIR/run_summary.env" | cut -d= -f2 || true)"
     FAILURES="$(grep -E '^permanent_failures=' "$LOG_DIR/run_summary.env" | cut -d= -f2 || true)"
+    AUDIT_VALID="$(grep -E '^all3_audit_valid=' "$LOG_DIR/run_summary.env" | cut -d= -f2 || true)"
+    PARSER_ERROR="$(grep -E '^parser_error=' "$LOG_DIR/run_summary.env" | cut -d= -f2 || true)"
   else
     DIVERGENCE="$(grep -E '^divergence_count=[0-9]+$' "$GW_LOG" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
     FAILURES="$(grep -E '^permanent_failures=[0-9]+$' "$GW_LOG" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+    AUDIT_VALID=""
+    PARSER_ERROR=""
   fi
 [[ -n "$DIVERGENCE" ]] || DIVERGENCE="?"
 [[ -n "$FAILURES" ]] || FAILURES="?"
@@ -2905,6 +2921,12 @@ log "  BCDB init status : grep 'bcdb_init' $LOG_DIR/server_node*.log"
 log "  BCDB block profile: grep 'PROFILE_BCDB_BLOCK' $LOG_DIR/postgres_node*.log"
 log "  Divergences      : grep 'divergence' $GW_LOG"
 log ""
+
+if [[ "$KAFKA_COMPLETION_MODE" == "majority_async_all3" ]]; then
+  if [[ "$AUDIT_VALID" != "yes" || -n "$PARSER_ERROR" ]]; then
+    die "All-three audit invalid: audit_valid=$AUDIT_VALID parser_error=$PARSER_ERROR"
+  fi
+fi
 
 if [[ "$DIVERGENCE" != "0" && "$DIVERGENCE" != "?" ]] || [[ "$FAILURES" != "0" && "$FAILURES" != "?" ]]; then
   log "WARNING: Cluster correctness issues detected (divergence=$DIVERGENCE failures=$FAILURES)"
@@ -2997,8 +3019,12 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     log "  Pre-marker consistency: DIAGNOSTIC MISMATCH — continuing to marker barrier"
   fi
 
+  WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
   MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
   MARKER_FILE="$LOG_DIR/post_verify_marker.sql"
+  # Gateway deterministic sequence for workload item idx is:
+  # detStartSeq + idx. Therefore the marker follows N workload items at:
+  # detStartSeq + N.
   MARKER_SEQ=$(( DET_START_SEQ + WORKLOAD_LINES ))
   MARKER_REQ=$(( REQ_ID_OFFSET + WORKLOAD_LINES ))
   printf "%s\n" "INSERT INTO $VERIFY_TABLE (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10) VALUES ($VERIFY_MARKER_KEY, '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL') ON CONFLICT (ycsb_key) DO UPDATE SET field1 = EXCLUDED.field1, field2 = EXCLUDED.field2, field3 = EXCLUDED.field3, field4 = EXCLUDED.field4, field5 = EXCLUDED.field5, field6 = EXCLUDED.field6, field7 = EXCLUDED.field7, field8 = EXCLUDED.field8, field9 = EXCLUDED.field9, field10 = EXCLUDED.field10;" > "$MARKER_FILE"
@@ -3024,14 +3050,16 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   fi
   if ! "$GW_BIN" \
     --nodes "$GW_NODES" \
+    --raft-node-ids "$RAFT_NODE_IDS_CSV" \
     --queryFrom "$MARKER_FILE" \
     --dbType 1 \
     --detRawSql "$DET_RAW_SQL" \
     --detStartSeq "$MARKER_SEQ" \
     --reqIdOffset "$MARKER_REQ" \
     --detWindow 1 \
+    --detBatchSize "$DET_BATCH_SIZE" \
     --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
-    --submitMode blocking \
+    --submitMode event \
     --detSubmitPipeline 0 \
     --detPipelineDepth 1 \
     --clientId "cluster-ycsb-marker" \
@@ -3133,6 +3161,11 @@ if [[ "$COLLECT_FINAL_SERVER_PROFILE" != "0" ]]; then
   collect_cluster_logs "  Collecting final server logs with PROFILE_SERVER lines..."
   log "  Server profiles: grep 'PROFILE_SERVER' $LOG_DIR/server_node*.log"
   log "  BCDB profiles: grep 'PROFILE_BCDB_BLOCK' $LOG_DIR/postgres_node*.log"
+fi
+
+if [[ -d "$REPO_ROOT/scripts/bench_full_results/durable_storage_test_results" ]]; then
+  log "=== Copying durable storage test results to cluster run archive ==="
+  cp -r "$REPO_ROOT/scripts/bench_full_results/durable_storage_test_results" "$LOG_DIR/"
 fi
 
 log "=== 4-node cluster test complete ==="

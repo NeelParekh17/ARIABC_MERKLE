@@ -1,0 +1,2 @@
+SELECT 10;
+SELECT 20;

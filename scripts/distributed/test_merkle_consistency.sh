@@ -181,6 +181,7 @@ if [[ "$SKIP_WORKLOAD" -eq 0 ]]; then
 
     "$GW_BIN" \
         --nodes "$GW_NODES" \
+        --raft-node-ids 1,2,4 \
         --queryFrom "$WORKLOAD_FILE" \
         --dbType 1 \
         --detStartSeq "$DET_START_SEQ" \
