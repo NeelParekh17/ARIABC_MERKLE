@@ -286,7 +286,7 @@ struct server_options {
     bool bypass_raft = false;
 
     // Raft storage configuration
-    std::string raft_storage_mode = "in_memory";
+    std::string raft_storage_mode = "durable";
     std::string raft_storage_dir = "./raft_storage";
     std::string raft_cluster_id = "ariabc_cluster";
 
@@ -724,6 +724,14 @@ void handle_client_fd(int fd,
             if (!ok_write) break;
             continue;
         }
+        if (req.sql == "__ARIABC_CTRL_IS_LEADER") {
+            client_api_response resp;
+            resp.status = 0;
+            resp.msg = (raft && raft->is_leader()) ? "1" : "0";
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
         if (psm && req.sql == "__ARIABC_CTRL_GET_COMMIT_INDEX") {
             client_api_response resp;
             resp.status = 0;
@@ -962,6 +970,14 @@ void handle_client_fd_direct(int fd,
             client_api_response resp;
             resp.status = 0;
             resp.msg = "-1";
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
+        if (req.sql == "__ARIABC_CTRL_IS_LEADER") {
+            client_api_response resp;
+            resp.status = 0;
+            resp.msg = "0";
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
             continue;
@@ -1267,6 +1283,11 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
                           << " fdatasync_max_ms=" << (p.fdatasync_max_ns.load() / 1000000.0)
                           << " append_batch_entries_max=" << p.append_batch_entries_max.load()
                           << " append_batch_entries_total=" << p.append_batch_entries_total.load()
+                          << " segment_fdatasync_calls=" << p.segment_fdatasync_calls.load()
+                          << " directory_fsync_calls=" << p.directory_fsync_calls.load()
+                          << " truncate_records_written=" << p.truncate_records_written.load()
+                          << " tail_repairs=" << p.tail_repairs.load()
+                          << " recovery_entries_loaded=" << p.recovery_entries_loaded.load()
                           << " last_durable_index=" << lstore->last_durable_index()
                           << std::endl;
             }
@@ -1380,6 +1401,10 @@ int main(int argc, char** argv) {
             smgr = d_smgr;
 
             if (!d_smgr->is_recovered()) {
+                char* strict_preserve_env = ::getenv("ARIABC_STRICT_PRESERVE");
+                if (strict_preserve_env && std::string(strict_preserve_env) == "1") {
+                    throw std::runtime_error("ARIABC_STRICT_PRESERVE_FAILED: Storage directory is not recovered, but strict preserve mode is enabled.");
+                }
                 std::cout << "[Raft Storage] Fresh storage initialized. Initializing fresh cluster." << std::endl;
                 ptr<cluster_config> conf = cs_new<cluster_config>();
                 for (const auto& m : members) {

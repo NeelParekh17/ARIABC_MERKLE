@@ -19,8 +19,8 @@
 //     header_crc32 : uint32  (CRC of first 40 bytes of header)
 //     payload bytes: [payload_len]
 //
-// Segment files: segment_<first_index_18digits>.log
-// Manifest: log/manifest.bin  – stores active segment first-index
+// Segment files: segment_<first_index_20digits>_g<gen_id_20digits>.log
+// Manifest: log/manifest.bin  – stores active segment list (first-index, gen_id)
 //
 // Durability model:
 //   - append() writes to segment file; does NOT fdatasync.
@@ -60,6 +60,12 @@ struct log_store_profile {
     std::atomic<uint64_t> fdatasync_max_ns{0};
     std::atomic<uint64_t> append_batch_entries_max{0};
     std::atomic<uint64_t> append_batch_entries_total{0};
+
+    std::atomic<uint64_t> segment_fdatasync_calls{0};
+    std::atomic<uint64_t> directory_fsync_calls{0};
+    std::atomic<uint64_t> truncate_records_written{0};
+    std::atomic<uint64_t> tail_repairs{0};
+    std::atomic<uint64_t> recovery_entries_loaded{0};
 
     // Non-atomic, only read after shutdown.
     uint64_t last_durable_index = 0;
@@ -110,7 +116,12 @@ public:
 private:
     // ---- Record types --------------------------------------------------
     static constexpr uint32_t MAGIC         = 0xAB1CFACE;
-    static constexpr uint32_t FORMAT_VER    = 1;
+    // Manifest v1: 16-byte header + num_segs*(8 first_index) + 4 CRC
+    // Manifest v2: 16-byte header + 8 next_gen_id + num_segs*(8 first_index + 8 gen_id)
+    //              + 4 CRC
+    // FORMAT_VER is incremented to 2 to distinguish the two.
+    static constexpr uint32_t FORMAT_VER    = 2;
+    static constexpr uint32_t FORMAT_VER_V1 = 1;   // legacy, read-only
     static constexpr uint32_t RT_ENTRY      = 1;
     static constexpr uint32_t RT_TRUNCATE   = 2;
 
@@ -130,6 +141,7 @@ private:
     // ---- Internal segment representation --------------------------------
     struct Segment {
         uint64_t    first_index = 0;   // first Raft log index in this segment
+        uint64_t    gen_id      = 0;   // unique generation counter (never reused)
         std::string path;
         int         fd   = -1;
         uint64_t    size = 0;          // bytes written
@@ -147,7 +159,18 @@ private:
                                     size_t seg_idx);
 
     // ---- Segment management --------------------------------------------
-    void create_segment(uint64_t first_index);
+    // When persist_manifest=false, the segment header is written and synced
+    // but the manifest is NOT saved to disk. The caller is responsible for
+    // saving the manifest later, after any durable marker records are synced.
+    // This ordering is required by the truncate/rollback flow:
+    //   1. create_segment(persist_manifest=false)
+    //   2. write TRUNCATE_FROM marker
+    //   3. fdatasync marker segment
+    //   4. save_manifest()
+    //   5. fsync directory
+    //   6. unlink obsolete files
+    //   7. fsync directory again
+    void create_segment(uint64_t first_index, bool persist_manifest = true);
     // Rotate to a new segment if the current one is full, using
     // first_record_index as the first_index of the new segment.
     // This must be the actual Raft index of the record about to be written,
@@ -167,8 +190,10 @@ private:
                                       uint32_t payload_len,
                                       uint32_t payload_crc) const;
 
+    // segment_path: legacy (first_index only) kept for manifest v1 backward compat.
+    std::string segment_path(uint64_t first_index, uint64_t gen_id) const;
+    std::string segment_path_legacy(uint64_t first_index) const;
     int segment_fd(size_t seg_idx);
-    std::string segment_path(uint64_t first_index) const;
 
     // ---- Helpers -------------------------------------------------------
     static nuraft::ptr<nuraft::log_entry> make_clone(const nuraft::ptr<nuraft::log_entry>& e);
@@ -193,8 +218,14 @@ private:
     bool     dirty_             = false;
     std::set<size_t> dirty_segments_;
 
+    // Monotonically increasing counter; each new segment gets the current value
+    // and the counter is incremented. Stored in manifest so recovery always
+    // issues higher IDs than any previously created file.
+    uint64_t next_gen_id_ = 1;
+
     void sync_dirty_segments_unlocked(const std::string& context);
     void fdatasync_and_profile(int fd, const std::string& context);
+    void fsync_directory_and_profile(const std::string& path);
     void save_durable_watermark_unlocked();
     void load_durable_watermark_unlocked();
 

@@ -246,6 +246,19 @@ void durable_state_mgr::open_or_create() {
 
         // Create the log store only if recovered.
         if (recovered_) {
+            // SAFETY: on recovery, the log manifest MUST exist. If it is
+            // absent, the log directory was lost or never initialized. Starting
+            // with an empty Raft log in this state would silently discard all
+            // committed entries and break linearizability. Fail closed instead.
+            const std::string manifest_check_path = log_dir_ + "/manifest.bin";
+            struct stat mst;
+            if (::stat(manifest_check_path.c_str(), &mst) != 0) {
+                throw storage_corruption_error(
+                    "Recovered storage directory is missing log/manifest.bin. "
+                    "The Raft log directory may have been deleted or was never properly "
+                    "initialized. Cannot safely start with an empty log. "
+                    "Please investigate or clean the directory before retrying.");
+            }
             log_store_ = nuraft::cs_new<durable_log_store>(log_dir_);
         }
     } catch (...) {
@@ -285,6 +298,7 @@ durable_state_mgr::~durable_state_mgr() {
 // load_config
 // -------------------------------------------------------------------------
 nuraft::ptr<nuraft::cluster_config> durable_state_mgr::load_config() {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     return saved_config_;
 }
 
@@ -292,6 +306,7 @@ nuraft::ptr<nuraft::cluster_config> durable_state_mgr::load_config() {
 // save_config
 // -------------------------------------------------------------------------
 void durable_state_mgr::save_config(const nuraft::cluster_config& config) {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     nuraft::ptr<nuraft::buffer> buf = config.serialize();
     std::vector<uint8_t> raw(buf->size());
     buf->pos(0);
@@ -309,6 +324,7 @@ void durable_state_mgr::save_config(const nuraft::cluster_config& config) {
 // save_state
 // -------------------------------------------------------------------------
 void durable_state_mgr::save_state(const nuraft::srv_state& state) {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     nuraft::ptr<nuraft::buffer> buf = state.serialize();
     std::vector<uint8_t> raw(buf->size());
     buf->pos(0);
@@ -326,6 +342,7 @@ void durable_state_mgr::save_state(const nuraft::srv_state& state) {
 // read_state
 // -------------------------------------------------------------------------
 nuraft::ptr<nuraft::srv_state> durable_state_mgr::read_state() {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     return saved_state_;
 }
 
@@ -333,6 +350,7 @@ nuraft::ptr<nuraft::srv_state> durable_state_mgr::read_state() {
 // load_log_store
 // -------------------------------------------------------------------------
 nuraft::ptr<nuraft::log_store> durable_state_mgr::load_log_store() {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     if (!log_store_) {
         throw std::runtime_error("load_log_store called but state manager is not initialized (call initialize_fresh first)");
     }
@@ -340,6 +358,7 @@ nuraft::ptr<nuraft::log_store> durable_state_mgr::load_log_store() {
 }
 
 void durable_state_mgr::initialize_fresh(const nuraft::cluster_config& config) {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     if (recovered_) {
         throw std::runtime_error("initialize_fresh called on an already recovered/initialized state manager");
     }
@@ -353,6 +372,7 @@ void durable_state_mgr::initialize_fresh(const nuraft::cluster_config& config) {
 }
 
 void durable_state_mgr::simulate_crash() {
+    std::lock_guard<std::recursive_mutex> l(mu_);
     if (log_store_) {
         auto d_store = std::dynamic_pointer_cast<durable_log_store>(log_store_);
         if (d_store) {

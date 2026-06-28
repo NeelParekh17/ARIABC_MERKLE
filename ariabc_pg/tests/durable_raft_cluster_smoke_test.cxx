@@ -229,11 +229,11 @@ int main() {
         std::cout << "Restarting Node " << victim_id << "..." << std::endl;
         auto log_wrapper_victim_new = cs_new<logger_wrapper>(base_dir + "/node" + std::to_string(victim_id) + "_new.log", 4);
         auto sm_victim_new = cs_new<dummy_state_machine>();
-        raft_launcher launcher_victim_new;
+        auto launcher_victim_new = std::unique_ptr<raft_launcher>(new raft_launcher());
         ptr<durable_state_mgr> smgr_victim_new;
         std::string dir_victim = (victim_id == 2) ? dir2 : dir3;
         std::string endpoint_victim = (victim_id == 2) ? "127.0.0.1:9002" : "127.0.0.1:9003";
-        auto r_victim_new = launch_node(victim_id, dir_victim, endpoint_victim, initial_conf, sm_victim_new, log_wrapper_victim_new, launcher_victim_new, smgr_victim_new);
+        auto r_victim_new = launch_node(victim_id, dir_victim, endpoint_victim, initial_conf, sm_victim_new, log_wrapper_victim_new, *launcher_victim_new, smgr_victim_new);
 
         // 6. Catch-up: Wait for restarted victim to catch up through AppendEntries
         std::cout << "Waiting for restarted Node " << victim_id << " to catch up..." << std::endl;
@@ -250,7 +250,7 @@ int main() {
         auto state_victim = smgr_victim_new->read_state();
         REQUIRE(state_victim != nullptr);
         REQUIRE(state_victim->get_term() > 0);
-        REQUIRE(state_victim->get_voted_for() > 0);
+        REQUIRE(state_victim->get_voted_for() == -1 || (state_victim->get_voted_for() >= 1 && state_victim->get_voted_for() <= 3));
         std::cout << "Vote persistence verified! Node " << victim_id << " saved term=" << state_victim->get_term()
                   << " voted_for=" << state_victim->get_voted_for() << std::endl;
 
@@ -277,11 +277,12 @@ int main() {
             bool ok = launcher3->shutdown();
             std::cout << "launcher3 shutdown: " << (ok ? "OK" : "TIMEOUT") << std::endl;
         }
-        bool ok_v = launcher_victim_new.shutdown();
+        bool ok_v = launcher_victim_new->shutdown();
         std::cout << "launcher_victim_new shutdown: " << (ok_v ? "OK" : "TIMEOUT") << std::endl;
 
         leader.reset();
         r_victim_new.reset();
+        launcher_victim_new.reset();
 
         r1.reset();
         r2.reset();

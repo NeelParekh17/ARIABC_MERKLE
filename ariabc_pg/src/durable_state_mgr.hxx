@@ -19,6 +19,7 @@
 
 #include <string>
 #include <memory>
+#include <mutex>
 
 namespace ariabc_raft {
 
@@ -55,7 +56,10 @@ public:
 
     // Extra introspection -----------------------------------------------
 
-    bool is_recovered() const { return recovered_; }
+    bool is_recovered() const {
+        std::lock_guard<std::recursive_mutex> l(mu_);
+        return recovered_;
+    }
     void initialize_fresh(const nuraft::cluster_config& config);
     void simulate_crash();
     const std::string& storage_dir() const { return cfg_.storage_dir; }
@@ -82,6 +86,7 @@ private:
 
     // Log store instance (created once).
     nuraft::ptr<nuraft::log_store> log_store_;
+    mutable std::recursive_mutex mu_;
 };
 
 } // namespace ariabc_raft

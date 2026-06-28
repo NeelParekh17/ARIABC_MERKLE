@@ -149,6 +149,27 @@ void test_apply_pack() {
     std::cout << "test_apply_pack passed" << std::endl;
 }
 
+#include <dirent.h>
+#include <string.h>
+
+std::string find_segment_file(const std::string& test_dir, uint64_t first_index) {
+    DIR* dir = ::opendir(test_dir.c_str());
+    if (!dir) return "";
+    char target[64];
+    snprintf(target, sizeof(target), "segment_%020llu", (unsigned long long)first_index);
+    std::string result = "";
+    struct dirent* entry;
+    while ((entry = ::readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name.find(target) == 0 && name.find(".log") != std::string::npos) {
+            result = test_dir + "/" + name;
+            break;
+        }
+    }
+    ::closedir(dir);
+    return result;
+}
+
 void test_incomplete_tail_truncation() {
     std::string test_dir = "./test_log_store_dir";
     ::system(("rm -rf " + test_dir).c_str());
@@ -162,7 +183,8 @@ void test_incomplete_tail_truncation() {
 
     // Corrupt/truncate the segment file by appending random garbage at the end
     // (a partial write scenario)
-    std::string seg_path = test_dir + "/segment_00000000000000000001.log";
+    std::string seg_path = find_segment_file(test_dir, 1);
+    REQUIRE(!seg_path.empty());
     std::ofstream f(seg_path, std::ios::binary | std::ios::app);
     f << "garb"; // incomplete record
     f.close();
@@ -191,7 +213,8 @@ void test_corrupt_non_tail_record() {
     }
 
     // Corrupt the header of the first record (offset 16)
-    std::string seg_path = test_dir + "/segment_00000000000000000001.log";
+    std::string seg_path = find_segment_file(test_dir, 1);
+    REQUIRE(!seg_path.empty());
     int fd = ::open(seg_path.c_str(), O_WRONLY);
     REQUIRE(fd >= 0);
     ::lseek(fd, 20, SEEK_SET);
@@ -220,7 +243,8 @@ void test_broken_tail_segment_header() {
         store.end_of_append_batch(1, 1);
     }
 
-    std::string seg_path = test_dir + "/segment_00000000000000000001.log";
+    std::string seg_path = find_segment_file(test_dir, 1);
+    REQUIRE(!seg_path.empty());
     int fd = ::open(seg_path.c_str(), O_WRONLY);
     REQUIRE(fd >= 0);
     REQUIRE(::ftruncate(fd, 8) == 0);
@@ -317,7 +341,8 @@ void test_complete_record_bad_crc_fails() {
         store.end_of_append_batch(idx, 1);
     }
 
-    std::string seg_path = test_dir + "/segment_00000000000000000001.log";
+    std::string seg_path = find_segment_file(test_dir, 1);
+    REQUIRE(!seg_path.empty());
     
     // Corrupt the last byte of the file (which is the last byte of "B" payload)
     std::fstream fs(seg_path, std::ios::in | std::ios::out | std::ios::binary);
@@ -351,7 +376,8 @@ void test_partial_payload_at_eof_truncates() {
         store.end_of_append_batch(idx, 1);
     }
 
-    std::string seg_path = test_dir + "/segment_00000000000000000001.log";
+    std::string seg_path = find_segment_file(test_dir, 1);
+    REQUIRE(!seg_path.empty());
     
     // Get file size
     struct stat st;
@@ -445,6 +471,145 @@ void test_rollback_after_double_segment_rotation() {
     std::cout << "test_rollback_after_double_segment_rotation passed" << std::endl;
 }
 
+void test_rejects_v1_manifest() {
+    std::string test_dir = "./test_log_store_dir";
+    ::system(("rm -rf " + test_dir).c_str());
+    ::mkdir(test_dir.c_str(), 0755);
+
+    // Create a minimal V1 manifest.bin
+    // Header V1 format: magic (4) + version (4) + num_segs (4) + [first_index (8)] * num_segs + CRC (4)
+    std::vector<uint8_t> raw;
+    put_le32(raw, 0xAB1CFACE); // MAGIC
+    put_le32(raw, 1);          // FORMAT_VER_V1
+    put_le32(raw, 1); // 1 segment
+    put_le64(raw, 1); // first_index of segment = 1
+
+    uint32_t mcrc = crc32_bytes(raw.data(), raw.size());
+    put_le32(raw, mcrc);
+
+    // Write to manifest.bin
+    std::string manifest_path = test_dir + "/manifest.bin";
+    int fd = ::open(manifest_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    REQUIRE(fd >= 0);
+    write_full(fd, raw.data(), raw.size(), manifest_path);
+    ::close(fd);
+
+    // Try to open log store, expect exception
+    bool caught = false;
+    try {
+        durable_log_store store(test_dir);
+    } catch (const storage_corruption_error& ex) {
+        std::string msg = ex.what();
+        if (msg.find("legacy durable Raft storage format is unsupported") != std::string::npos) {
+            caught = true;
+        } else {
+            std::cerr << "Unexpected error message: " << msg << std::endl;
+        }
+    }
+
+    REQUIRE(caught);
+    ::system(("rm -rf " + test_dir).c_str());
+    std::cout << "test_rejects_v1_manifest passed" << std::endl;
+}
+
+void test_stricter_orphan_matching() {
+    std::string test_dir = "./test_log_store_dir";
+    ::system(("rm -rf " + test_dir).c_str());
+    ::mkdir(test_dir.c_str(), 0755);
+
+    // 1. Create a valid store, write one segment, save manifest.
+    {
+        durable_log_store store(test_dir);
+        auto e1 = create_test_entry(1, "A");
+        store.append(e1);
+        store.end_of_append_batch(1, 1);
+    }
+
+    // 2. Put an OTHER file (e.g. segment_notes.txt) - should be ignored.
+    {
+        std::ofstream f(test_dir + "/segment_notes.txt");
+        f << "notes";
+        f.close();
+    }
+
+    // 3. Put a malformed segment log file (e.g. segment_notes.log) - should fail load.
+    {
+        std::ofstream f(test_dir + "/segment_notes.log");
+        f << "malformed";
+        f.close();
+    }
+
+    bool caught_malformed = false;
+    try {
+        durable_log_store store(test_dir);
+    } catch (const storage_corruption_error& ex) {
+        std::string msg = ex.what();
+        if (msg.find("Malformed segment filename") != std::string::npos) {
+            caught_malformed = true;
+        } else {
+            std::cerr << "Unexpected error: " << msg << std::endl;
+        }
+    }
+    REQUIRE(caught_malformed);
+
+    // 4. Remove malformed file, place a valid orphan V2 segment - should be deleted on load.
+    ::unlink((test_dir + "/segment_notes.log").c_str());
+
+    std::string orphan_path = test_dir + "/segment_00000000000000000099_g00000000000000000099.log";
+    {
+        std::ofstream f(orphan_path);
+        f << "orphan log";
+        f.close();
+    }
+
+    // Load store. It should load successfully, and delete the orphan log.
+    {
+        durable_log_store store(test_dir);
+        // Verify orphan path no longer exists
+        struct stat st;
+        REQUIRE(::stat(orphan_path.c_str(), &st) != 0); // Must be deleted
+        // Verify segment_notes.txt still exists
+        REQUIRE(::stat((test_dir + "/segment_notes.txt").c_str(), &st) == 0); // Must not be deleted
+    }
+
+    ::system(("rm -rf " + test_dir).c_str());
+    std::cout << "test_stricter_orphan_matching passed" << std::endl;
+}
+
+void test_watermark_behavior() {
+    std::string test_dir = "./test_log_store_dir";
+    ::system(("rm -rf " + test_dir).c_str());
+
+    {
+        durable_log_store store(test_dir);
+        auto e1 = create_test_entry(1, "hello");
+        store.append(e1);
+        store.end_of_append_batch(1, 1);
+
+        // 1. Verify no durable_watermark.bin is created in synchronous mode.
+        struct stat st;
+        REQUIRE(::stat((test_dir + "/durable_watermark.bin").c_str(), &st) != 0);
+    }
+
+    // 2. Test that a stale old watermark file is ignored safely.
+    {
+        std::ofstream f(test_dir + "/durable_watermark.bin", std::ios::binary);
+        uint64_t fake_watermark = 9999;
+        f.write((char*)&fake_watermark, sizeof(fake_watermark));
+        f.close();
+    }
+
+    {
+        durable_log_store store(test_dir);
+        // Stale watermark file should be ignored; last_durable_index should still match the last valid entry index (1).
+        REQUIRE(store.last_durable_index() == 1);
+        REQUIRE(store.next_slot() == 2);
+    }
+
+    ::system(("rm -rf " + test_dir).c_str());
+    std::cout << "test_watermark_behavior passed" << std::endl;
+}
+
 int main() {
     try {
         test_append_and_reopen();
@@ -458,6 +623,9 @@ int main() {
         test_partial_payload_at_eof_truncates();
         test_segment_rollover_during_append_batch();
         test_rollback_after_double_segment_rotation();
+        test_rejects_v1_manifest();
+        test_stricter_orphan_matching();
+        test_watermark_behavior();
         std::cout << "ALL durable_log_store tests PASSED" << std::endl;
         return 0;
     } catch (const std::exception& e) {

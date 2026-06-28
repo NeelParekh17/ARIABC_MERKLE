@@ -222,7 +222,27 @@ target_link_libraries(durable_raft_cluster_smoke_test
                        z
                        dl)
 
+add_executable(durable_raft_external_sigkill_test
+               tests/durable_raft_external_sigkill_test.cxx
+               src/raft_storage_common.cxx
+               src/durable_state_mgr.cxx
+               src/durable_log_store.cxx
+               src/logger.cc)
+
+target_include_directories(durable_raft_external_sigkill_test
+                            PRIVATE
+                              ${ARIABC_COMMON_INC}
+                              ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
+
+target_compile_definitions(durable_raft_external_sigkill_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
+
+target_link_libraries(durable_raft_external_sigkill_test
+                       NuRaft::static_lib
+                       z
+                       dl)
+
 enable_testing()
 add_test(NAME durable_state_mgr_test COMMAND durable_state_mgr_test)
 add_test(NAME durable_log_store_test COMMAND durable_log_store_test)
 add_test(NAME durable_raft_cluster_smoke_test COMMAND durable_raft_cluster_smoke_test)
+add_test(NAME durable_raft_external_sigkill_test COMMAND durable_raft_external_sigkill_test)

@@ -70,6 +70,7 @@ struct gateway_options {
     uint64_t req_id_offset = 0;
 
     std::string nodes_csv;
+    std::string raft_node_ids_csv;
 
     std::string kafka_bootstrap;
     std::string result_topic = "topic2";
@@ -168,7 +169,7 @@ void usage(const char* argv0) {
     std::cout
         << "Usage:\n"
         << "  " << argv0 << " \\\n"
-        << "    --queryFrom <file|port> --nodes <host:port,host:port,...> \\\n"
+        << "    --queryFrom <file|port> --nodes <host:port,host:port,...> [--raft-node-ids <id,id,...>] \\\n"
         << "    [--querySign 0|1] [--pubKeyFile <path>] [--privKeyFile <path>] \\\n"
         << "    [--dbType 0|1|2] [--detStartSeq <n>] [--detRawSql 0|1] [--qrate <n>] [--txIntervalMs <ms>] \\\n"
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
@@ -216,6 +217,8 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.req_id_offset = static_cast<uint64_t>(std::stoull(need("--reqIdOffset")));
             } else if (a == "--nodes") {
                 opt.nodes_csv = need("--nodes");
+            } else if (a == "--raft-node-ids") {
+                opt.raft_node_ids_csv = need("--raft-node-ids");
             } else if (a == "--kafkaBootstrap") {
                 opt.kafka_bootstrap = need("--kafkaBootstrap");
             } else if (a == "--resultTopic") {
@@ -2796,6 +2799,7 @@ struct submit_profile_stats {
 
 submit_profile_stats g_submit_prof;
 std::atomic<int> g_event_submit_leader_idx(-1);
+std::vector<int> g_raft_node_ids;
 
 static bool parse_leader_hint_from_msg(const std::string& msg, int& out_leader_id) {
     out_leader_id = -1;
@@ -2839,7 +2843,14 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
     }
 
     size_t start = 0;
-    if (cli.leader_known && cli.leader_idx < n) {
+
+    const int elected_leader_idx =
+        g_event_submit_leader_idx.load(std::memory_order_relaxed);
+
+    if (elected_leader_idx >= 0 &&
+        static_cast<size_t>(elected_leader_idx) < n) {
+        start = static_cast<size_t>(elected_leader_idx);
+    } else if (cli.leader_known && cli.leader_idx < n) {
         start = cli.leader_idx;
     } else if (cli.fd >= 0 && cli.node_idx < n) {
         start = cli.node_idx;
@@ -2911,10 +2922,24 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
             err = resp.msg;
 
             int leader_id = -1;
-            if (parse_leader_hint_from_msg(resp.msg, leader_id) && leader_id > 0 &&
-                static_cast<size_t>(leader_id) <= n) {
-                cli.leader_known = true;
-                cli.leader_idx = static_cast<size_t>(leader_id - 1);
+            if (parse_leader_hint_from_msg(resp.msg, leader_id) && leader_id > 0) {
+                int target_idx = -1;
+                if (!g_raft_node_ids.empty()) {
+                    for (size_t i = 0; i < g_raft_node_ids.size(); ++i) {
+                        if (g_raft_node_ids[i] == leader_id) {
+                            target_idx = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                }
+                if (target_idx >= 0 && static_cast<size_t>(target_idx) < n) {
+                    cli.leader_known = true;
+                    cli.leader_idx = static_cast<size_t>(target_idx);
+                } else {
+                    // Do not translate Raft IDs to endpoint-array indices here.
+                    // IDs are 1,2,4 in the deployed cluster, not 1,2,3.
+                    cli.leader_known = false;
+                }
             }
 
             const bool is_busy = resp.msg.rfind("NOT_ACCEPTED_BUSY", 0) == 0;
@@ -3086,9 +3111,23 @@ bool submit_to_cluster_event(async_cluster_submitter& submitter,
             err = resp.msg;
 
             int leader_id = -1;
-            if (parse_leader_hint_from_msg(resp.msg, leader_id) && leader_id > 0 &&
-                static_cast<size_t>(leader_id) <= n) {
-                g_event_submit_leader_idx.store(static_cast<int>(leader_id - 1), std::memory_order_relaxed);
+            if (parse_leader_hint_from_msg(resp.msg, leader_id) && leader_id > 0) {
+                int target_idx = -1;
+                if (!g_raft_node_ids.empty()) {
+                    for (size_t i = 0; i < g_raft_node_ids.size(); ++i) {
+                        if (g_raft_node_ids[i] == leader_id) {
+                            target_idx = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                }
+                if (target_idx >= 0 && static_cast<size_t>(target_idx) < n) {
+                    g_event_submit_leader_idx.store(target_idx, std::memory_order_relaxed);
+                } else {
+                    // Do not translate Raft IDs to endpoint-array indices here.
+                    // IDs are 1,2,4 in the deployed cluster, not 1,2,3.
+                    g_event_submit_leader_idx.store(-1, std::memory_order_relaxed);
+                }
             }
 
             const bool is_busy = resp.msg.rfind("NOT_ACCEPTED_BUSY", 0) == 0;
@@ -3204,6 +3243,25 @@ int main(int argc, char** argv) {
         std::cerr << "no nodes given" << std::endl;
         return 1;
     }
+
+    // Parse raft-node-ids if provided.
+    if (!opt.raft_node_ids_csv.empty()) {
+        try {
+            const std::vector<std::string> parts = ariabc_pg::split_csv_trim(opt.raft_node_ids_csv);
+            for (const auto& p : parts) {
+                ariabc_pg::g_raft_node_ids.push_back(std::stoi(p));
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "raft-node-ids parse error: " << e.what() << std::endl;
+            return 1;
+        }
+        if (ariabc_pg::g_raft_node_ids.size() != nodes.size()) {
+            std::cerr << "raft-node-ids size mismatch: got " << ariabc_pg::g_raft_node_ids.size()
+                      << " ids for " << nodes.size() << " nodes" << std::endl;
+            return 1;
+        }
+    }
+
     if (opt.direct_completion_quorum > static_cast<int>(nodes.size())) {
         std::cerr << "invalid --directCompletionQuorum ("
                   << opt.direct_completion_quorum
@@ -3919,37 +3977,56 @@ int main(int argc, char** argv) {
 
         auto warm_leader_route = [&]() -> bool {
             if (opt.db_type != 1 || opt.det_raw_sql == 1) return true;
+
+            const auto start_time = std::chrono::steady_clock::now();
             std::chrono::milliseconds backoff(2);
-            for (int tries = 0; tries < 20; ++tries) {
+
+            while (true) {
+                int leader_count = 0;
+                int elected_node_idx = -1;
+
                 for (size_t i = 0; i < nodes.size(); ++i) {
                     ariabc_pg::client_api_response resp;
                     std::string ctrl_err;
+
                     if (!ariabc_pg::send_control_req_to_node(
-                            nodes[i], "__ARIABC_CTRL_GET_LEADER", resp, ctrl_err)) {
+                            nodes[i], "__ARIABC_CTRL_IS_LEADER", resp, ctrl_err)) {
                         continue;
                     }
-                    if (resp.status != 0) {
-                        continue;
-                    }
-                    int leader_id = -1;
-                    try {
-                        leader_id = std::stoi(ariabc_pg::trim_copy(resp.msg));
-                    } catch (...) {
-                        leader_id = -1;
-                    }
-                    if (leader_id > 0) {
-                        return true;
+
+                    if (resp.status == 0 && ariabc_pg::trim_copy(resp.msg) == "1") {
+                        ++leader_count;
+                        elected_node_idx = static_cast<int>(i);
                     }
                 }
+
+                if (leader_count == 1 && elected_node_idx >= 0) {
+                    ariabc_pg::g_event_submit_leader_idx.store(
+                        elected_node_idx, std::memory_order_relaxed);
+
+                    std::cout << "real Raft leader confirmed: node_endpoint_index="
+                              << elected_node_idx
+                              << " endpoint=" << nodes[elected_node_idx].host
+                              << ":" << nodes[elected_node_idx].port
+                              << std::endl;
+                    return true;
+                }
+
+                const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - start_time).count();
+                if (elapsed >= 30) break;
+
                 std::this_thread::sleep_for(backoff);
-                if (backoff < std::chrono::milliseconds(20)) {
+                if (backoff < std::chrono::milliseconds(500)) {
                     backoff *= 2;
-                    if (backoff > std::chrono::milliseconds(20)) {
-                        backoff = std::chrono::milliseconds(20);
+                    if (backoff > std::chrono::milliseconds(500)) {
+                        backoff = std::chrono::milliseconds(500);
                     }
                 }
             }
-            std::cerr << "leader warmup failed: no elected leader reported by control plane"
+
+            std::cerr << "leader warmup failed: no single elected leader reported "
+                         "by control plane within 30 seconds"
                       << std::endl;
             return false;
         };
