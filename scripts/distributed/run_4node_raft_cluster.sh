@@ -1233,10 +1233,14 @@ node_rsync_ariabc_bins() {
   [[ -x "$LOCAL_BIN/ariabc_pg_server" ]] || die "local server binary missing: $LOCAL_BIN/ariabc_pg_server"
   [[ -x "$LOCAL_BIN/ariabc_pg_gateway" ]] || die "local gateway binary missing: $LOCAL_BIN/ariabc_pg_gateway"
   node_ssh "$idx" "mkdir -p '$REMOTE_REPO_ROOT/ariabc_pg/build/bin'"
+
+  local files_to_sync=("$LOCAL_BIN/ariabc_pg_server" "$LOCAL_BIN/ariabc_pg_gateway")
+  [[ -f "$LOCAL_BIN/ariabc_pg_server.manifest" ]] && files_to_sync+=("$LOCAL_BIN/ariabc_pg_server.manifest")
+  [[ -f "$LOCAL_BIN/ariabc_pg_gateway.manifest" ]] && files_to_sync+=("$LOCAL_BIN/ariabc_pg_gateway.manifest")
+
   sshpass -p "$CLUSTER_PASSWORD" rsync -az --delete \
     -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-    "$LOCAL_BIN/ariabc_pg_server" \
-    "$LOCAL_BIN/ariabc_pg_gateway" \
+    "${files_to_sync[@]}" \
     "$user@$ip:$REMOTE_REPO_ROOT/ariabc_pg/build/bin/"
 }
 
@@ -1340,6 +1344,37 @@ build_raft_members() {
   echo "$members"
 }
 
+# ===========================================================================
+# Function: _compute_src_hash
+# Description: Computes a SHA256 checksum of code and parameters to determine
+#              if remote/local builds can be skipped.
+# Returns:
+#   Outputs a SHA256 string representing the source tree state.
+# ===========================================================================
+_compute_src_hash() {
+  # Hash C/C++ sources + key header + ring capacity value
+  {
+    find "$REPO_ROOT/src" "$REPO_ROOT/ariabc_pg" \
+      \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
+      -not -path '*/build/*' -not -path '*/.git/*' \
+      -exec sha256sum {} \; 2>/dev/null | sort
+    echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
+  } | sha256sum | awk '{print $1}'
+}
+
+_compute_src_fingerprint() {
+  (
+    cd "$REPO_ROOT"
+    {
+      find src ariabc_pg \
+        \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
+        -not -path '*/build/*' -not -path '*/.git/*' \
+        -exec sha256sum {} \; 2>/dev/null | sort
+      echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
+    } | sha256sum | awk '{print $1}'
+  )
+}
+
 RAFT_MEMBERS="$(build_raft_members)"
 
 if [[ "$NO_KAFKA" -eq 0 &&
@@ -1384,14 +1419,20 @@ git -C "$REPO_ROOT" diff -- src ariabc_pg scripts/distributed \
 git -C "$REPO_ROOT" status --short \
   > "$LOG_DIR/git_status.txt" 2>/dev/null || true
 
+local_git_head="${CALLER_GIT_HEAD:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+local_git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
+
 # Append git HEAD and SHA256 checksums of the key local binaries to run_meta.env
 {
-  printf 'git_head=%s\n' "${CALLER_GIT_HEAD:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+  printf 'git_head=%s\n' "$local_git_head"
   printf 'caller_git_head=%s\n' "${CALLER_GIT_HEAD:-unknown}"
-  printf 'git_dirty=%s\n' "$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
+  printf 'git_dirty=%s\n' "$local_git_dirty"
   printf 'ariabc_pg_gateway_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'ariabc_pg_server_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'postgres_sha256=%s\n' "$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
+  printf 'prebuild_gateway_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
+  printf 'prebuild_server_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
+  printf 'prebuild_postgres_sha256=%s\n' "$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'ariabc_os_profile=%s\n' "${ARIABC_OS_PROFILE:-0}"
   printf 'bcdb_gate_telemetry=%s\n' "${BCDB_GATE_TELEMETRY:-0}"
   printf 'ariabc_safe_postcommit_witness=%s\n' "${ARIABC_SAFE_POSTCOMMIT_WITNESS:-}"
@@ -1572,36 +1613,7 @@ BUILD_STAMP_DIR="$REPO_ROOT/scripts/.bench_tmp"
 BUILD_STAMP_FILE="$BUILD_STAMP_DIR/build_stamp"
 mkdir -p "$BUILD_STAMP_DIR"
 
-# ===========================================================================
-# Function: _compute_src_hash
-# Description: Computes a SHA256 checksum of code and parameters to determine
-#              if remote/local builds can be skipped.
-# Returns:
-#   Outputs a SHA256 string representing the source tree state.
-# ===========================================================================
-_compute_src_hash() {
-  # Hash C/C++ sources + key header + ring capacity value
-  {
-    find "$REPO_ROOT/src" "$REPO_ROOT/ariabc_pg" \
-      \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
-      -not -path '*/build/*' -not -path '*/.git/*' \
-      -exec sha256sum {} \; 2>/dev/null | sort
-    echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
-  } | sha256sum | awk '{print $1}'
-}
 
-_compute_src_fingerprint() {
-  (
-    cd "$REPO_ROOT"
-    {
-      find src ariabc_pg \
-        \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
-        -not -path '*/build/*' -not -path '*/.git/*' \
-        -exec sha256sum {} \; 2>/dev/null | sort
-      echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
-    } | sha256sum | awk '{print $1}'
-  )
-}
 
 if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
   log "  Computing source hash to check if rebuild is needed..."
@@ -1660,6 +1672,33 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
     log "  Building local ariabc_pg_gateway and ariabc_pg_server"
     cmake --build "$REPO_ROOT/ariabc_pg/build" --target ariabc_pg_gateway ariabc_pg_server -j"$(nproc)" \
       2>&1 | tail -20
+
+    # Generate local manifests
+    for bin_path in "$LOCAL_INSTALL_DIR/bin/postgres" "$LOCAL_BIN/ariabc_pg_server" "$LOCAL_BIN/ariabc_pg_gateway"; do
+      if [[ -f "$bin_path" ]]; then
+        dir_path="$(dirname "$bin_path")"
+        bin_name="$(basename "$bin_path")"
+        manifest_path="$dir_path/${bin_name}.manifest"
+        rm -f "$manifest_path"
+
+        bin_sha="$(sha256sum "$bin_path" 2>/dev/null | awk '{print $1}' || echo missing)"
+        git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+        git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
+        src_fp="$(cd "$REPO_ROOT" && { find src ariabc_pg \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \; 2>/dev/null | sort; echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"; } | sha256sum | awk '{print $1}')"
+        build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+        {
+          printf 'binary_name=%s\n' "$bin_name"
+          printf 'binary_sha256=%s\n' "$bin_sha"
+          printf 'build_time=%s\n' "$build_time"
+          printf 'git_head=%s\n' "$git_head"
+          printf 'git_dirty=%s\n' "$git_dirty"
+          printf 'source_fingerprint=%s\n' "$src_fp"
+        } > "$manifest_path"
+        chmod 444 "$manifest_path"
+      fi
+    done
+
     # Save build stamp so next run can auto-skip if source unchanged
     [[ -n "${_BUILD_HASH_TO_SAVE:-}" ]] && echo "$_BUILD_HASH_TO_SAVE" > "$BUILD_STAMP_FILE"
   ) >"$LOCAL_BUILD_LOG" 2>&1 &
@@ -1806,6 +1845,17 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
           --install-dir '$REMOTE_INSTALL_DIR' \
           --force-rebuild \
           --clean-when-rebuild
+
+        # Generate postgres.manifest on U22 remote node
+        pg_sha=\\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \\\$1}' || echo missing)
+        rm -f '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
+        echo \"binary_name=postgres\" > '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
+        echo \"binary_sha256=\\\$pg_sha\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
+        echo \"build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
+        echo \"git_head=$local_git_head\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
+        echo \"git_dirty=$local_git_dirty\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
+        echo \"source_fingerprint=$local_src_fingerprint\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
+        chmod 444 '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
       " 2>&1 | sed "s/^/[$name] /"
 
       ensure_u22_cmake "$idx"
@@ -1854,6 +1904,29 @@ if [[ -x "\$BUILD_DIR/bin/ariabc_pg_gateway" ]]; then
   cp -f "\$BUILD_DIR/bin/ariabc_pg_gateway" "\$DESKTOP_BIN_DIR/ariabc_pg_gateway"
 fi
 echo "[$name] installed to \$DESKTOP_BIN_DIR: \$(ls \$DESKTOP_BIN_DIR/)"
+
+# Generate manifests for ariabc_pg_server and ariabc_pg_gateway on U22 remote node
+srv_sha=\$(sha256sum "\$DESKTOP_BIN_DIR/ariabc_pg_server" 2>/dev/null | awk '{print \$1}' || echo missing)
+rm -f "\$DESKTOP_BIN_DIR/ariabc_pg_server.manifest"
+echo "binary_name=ariabc_pg_server" > "\$DESKTOP_BIN_DIR/ariabc_pg_server.manifest"
+echo "binary_sha256=\$srv_sha" >> "\$DESKTOP_BIN_DIR/ariabc_pg_server.manifest"
+echo "build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "\$DESKTOP_BIN_DIR/ariabc_pg_server.manifest"
+echo "git_head=$local_git_head" >> "\$DESKTOP_BIN_DIR/ariabc_pg_server.manifest"
+echo "git_dirty=$local_git_dirty" >> "\$DESKTOP_BIN_DIR/ariabc_pg_server.manifest"
+echo "source_fingerprint=$local_src_fingerprint" >> "\$DESKTOP_BIN_DIR/ariabc_pg_server.manifest"
+chmod 444 "\$DESKTOP_BIN_DIR/ariabc_pg_server.manifest"
+
+if [[ -x "\$DESKTOP_BIN_DIR/ariabc_pg_gateway" ]]; then
+  gw_sha=\$(sha256sum "\$DESKTOP_BIN_DIR/ariabc_pg_gateway" 2>/dev/null | awk '{print \$1}' || echo missing)
+  rm -f "\$DESKTOP_BIN_DIR/ariabc_pg_gateway.manifest"
+  echo "binary_name=ariabc_pg_gateway" > "\$DESKTOP_BIN_DIR/ariabc_pg_gateway.manifest"
+  echo "binary_sha256=\$gw_sha" >> "\$DESKTOP_BIN_DIR/ariabc_pg_gateway.manifest"
+  echo "build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "\$DESKTOP_BIN_DIR/ariabc_pg_gateway.manifest"
+  echo "git_head=$local_git_head" >> "\$DESKTOP_BIN_DIR/ariabc_pg_gateway.manifest"
+  echo "git_dirty=$local_git_dirty" >> "\$DESKTOP_BIN_DIR/ariabc_pg_gateway.manifest"
+  echo "source_fingerprint=$local_src_fingerprint" >> "\$DESKTOP_BIN_DIR/ariabc_pg_gateway.manifest"
+  chmod 444 "\$DESKTOP_BIN_DIR/ariabc_pg_gateway.manifest"
+fi
 BUILDSSH
     ) >"$build_log" 2>&1 &
     U22_BUILD_PIDS+=("$!")
@@ -1891,11 +1964,34 @@ fi
 # enough to trust a benchmark. Record executable identities before measurement.
 # ---------------------------------------------------------------------------
 log "=== Phase 1.6: Source and binary provenance ==="
-local_git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+# Ensure local manifests are present (e.g. if build was skipped)
+for bin_path in "$LOCAL_INSTALL_DIR/bin/postgres" "$LOCAL_BIN/ariabc_pg_server" "$LOCAL_BIN/ariabc_pg_gateway"; do
+  if [[ -f "$bin_path" ]]; then
+    dir_path="$(dirname "$bin_path")"
+    bin_name="$(basename "$bin_path")"
+    manifest_path="$dir_path/${bin_name}.manifest"
+    if [[ ! -f "$manifest_path" ]]; then
+      bin_sha="$(sha256sum "$bin_path" 2>/dev/null | awk '{print $1}' || echo missing)"
+      git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+      git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
+      src_fp="$local_src_fingerprint"
+      build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+      {
+        printf 'binary_name=%s\n' "$bin_name"
+        printf 'binary_sha256=%s\n' "$bin_sha"
+        printf 'build_time=%s\n' "$build_time"
+        printf 'git_head=%s\n' "$git_head"
+        printf 'git_dirty=%s\n' "$git_dirty"
+        printf 'source_fingerprint=%s\n' "$src_fp"
+      } > "$manifest_path"
+      chmod 444 "$manifest_path"
+    fi
+  fi
+done
+
 local_gateway_sha="$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
 local_server_sha="$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
 local_postgres_sha="$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
-local_src_fingerprint="$(_compute_src_fingerprint)"
 log "  local git_head=$local_git_head"
 log "  local ariabc_pg_gateway_sha256=$local_gateway_sha path=$LOCAL_BIN/ariabc_pg_gateway"
 log "  local ariabc_pg_server_sha256=$local_server_sha path=$LOCAL_BIN/ariabc_pg_server"
@@ -1914,6 +2010,19 @@ fi
   printf 'local_source_fingerprint=%s\n' "$local_src_fingerprint"
 } > "$LOG_DIR/build_provenance.env"
 
+# Update run_meta.env with runtime values
+if [[ -f "$LOG_DIR/run_meta.env" ]]; then
+  sed -i -E "s/^ariabc_pg_gateway_sha256=.*/ariabc_pg_gateway_sha256=$local_gateway_sha/" "$LOG_DIR/run_meta.env"
+  sed -i -E "s/^ariabc_pg_server_sha256=.*/ariabc_pg_server_sha256=$local_server_sha/" "$LOG_DIR/run_meta.env"
+  sed -i -E "s/^postgres_sha256=.*/postgres_sha256=$local_postgres_sha/" "$LOG_DIR/run_meta.env"
+fi
+
+{
+  printf 'runtime_gateway_sha256=%s\n' "$local_gateway_sha"
+  printf 'runtime_server_sha256=%s\n' "$local_server_sha"
+  printf 'runtime_postgres_sha256=%s\n' "$local_postgres_sha"
+} >> "$LOG_DIR/run_meta.env"
+
 binary_provenance_ok=1
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
@@ -1931,7 +2040,11 @@ for idx in "${!NODE_IDS[@]}"; do
     srv_sha=\$(sha256sum '$srv_bin' 2>/dev/null | awk '{print \$1}' || echo missing)
     gw_sha=\$(sha256sum '$gw_path' 2>/dev/null | awk '{print \$1}' || echo missing)
     pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
-    src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
+    if [[ -f '${srv_bin}.manifest' ]]; then
+      src_fp=\$(grep '^source_fingerprint=' '${srv_bin}.manifest' | cut -d= -f2)
+    else
+      src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
+    fi
     echo \"git_head=\$git_head\"
     echo \"ariabc_pg_server_path=$srv_bin\"
     echo \"ariabc_pg_server_sha256=\$srv_sha\"
@@ -2274,7 +2387,7 @@ for idx in "${!NODE_IDS[@]}"; do
     dt_skip_reads=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_completion_only_skip_reads;' | tr -d '[:space:]')
     hashtab_threshold=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_hashtab_switch_threshold;' | tr -d '[:space:]')
     ring_slots=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_result_ring_slots;' | tr -d '[:space:]')
-    owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || true)
+    owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c \"select current_setting('bcdb_overwrite_protection', true);\" 2>/dev/null | tr -d '[:space:]' || true)
     gate_telemetry=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_gate_telemetry;' | tr -d '[:space:]')
     gate_snapshot=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_gate_snapshot_each_block;' | tr -d '[:space:]')
     synchronous_commit=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show synchronous_commit;' | tr -d '[:space:]')
@@ -2385,7 +2498,7 @@ for idx in "${!NODE_IDS[@]}"; do
       dt_skip_reads=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_completion_only_skip_reads;' | tr -d '[:space:]')
       hashtab_threshold=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_dt_hashtab_switch_threshold;' | tr -d '[:space:]')
       ring_slots=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_result_ring_slots;' | tr -d '[:space:]')
-      owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_overwrite_protection;' 2>/dev/null | tr -d '[:space:]' || true)
+      owp=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c \"select current_setting('bcdb_overwrite_protection', true);\" 2>/dev/null | tr -d '[:space:]' || true)
       owp_display=\"\$owp\"
       [[ -z \"\$owp_display\" ]] && owp_display=unsupported
       gate_telemetry=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_gate_telemetry;' | tr -d '[:space:]')
