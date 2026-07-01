@@ -73,3 +73,20 @@ lib*.pc
 
 # CMake build output
 /ariabc_pg/build/
+
+# Local analysis, scratch outputs, and accidental pasted command fragments
+/docs/
+/2026-04-21-154054-analysis_issues.txt
+/2026-04-22-053752-important_inf0.txt
+/2026-04-22-215511-this-session-is-being-continued-from-a-previous-c.txt
+/ACM_arxiv-3.pdf
+/BCDB_ARCHITECTURE.md.bak
+/codex_output.txt
+/analysis.txt
+/git_diff_worker.txt
+/output.txt
+/phase0_probe.py
+/phase0_probe_autocommit.py
+/phase0_probe_simple.py
+/EXC:*
+/rc={rc})*
