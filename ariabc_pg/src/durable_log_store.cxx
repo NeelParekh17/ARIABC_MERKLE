@@ -275,6 +275,14 @@ void durable_log_store::write_entry_record(
 
     profile_.bytes_appended += loc.record_size;
     dirty_segments_.insert(active_idx);
+    std::cerr << "RAFT_DURABLE_LOG_WRITE"
+              << " idx=" << raft_idx
+              << " term=" << raft_term
+              << " payload=" << payload.size()
+              << " path=" << segments_[active_idx].path
+              << " offset=" << offset
+              << " segment_size=" << segments_[active_idx].size
+              << std::endl;
 }
 
 void durable_log_store::write_truncate_record(uint64_t from_index) {
@@ -302,7 +310,7 @@ void durable_log_store::write_truncate_record(uint64_t from_index) {
 
     // FAILPOINT: crash after segment is created but before the marker is written.
     // This validates that recovery handles an orphaned new segment header.
-    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_NEW_TRUNCATE_SEGMENT_BEFORE_MARKER")) {
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_NEW_TRUNCATE_SEGMENT_BEFORE_MARKER"); fp && fp[0] != '\0') {
         if (!obsolete_segments.empty()) {
             std::cerr << "FAILPOINT: crashing after new truncate segment created, before TRUNCATE_FROM marker" << std::endl;
             ::kill(::getpid(), SIGKILL);
@@ -328,7 +336,7 @@ void durable_log_store::write_truncate_record(uint64_t from_index) {
     fsync_directory_and_profile(log_dir_);
 
     // 7. Physically unlink the obsolete segments
-    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_BEFORE_UNLINK")) {
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_BEFORE_UNLINK"); fp && fp[0] != '\0') {
         std::cerr << "FAILPOINT: crashing before obsolete segment unlink" << std::endl;
         ::kill(::getpid(), SIGKILL);
         ::_exit(124);
@@ -377,6 +385,12 @@ nuraft::ulong durable_log_store::append(nuraft::ptr<nuraft::log_entry>& entry) {
     batch_last_ = idx;
 
     profile_.append_calls.fetch_add(1, std::memory_order_relaxed);
+    std::cerr << "RAFT_DURABLE_APPEND"
+              << " idx=" << idx
+              << " term=" << entry->get_term()
+              << " next_slot=" << next_slot_unlocked()
+              << " dirty_segments=" << dirty_segments_.size()
+              << std::endl;
     return idx;
 }
 
@@ -391,7 +405,7 @@ void durable_log_store::write_at(nuraft::ulong index, nuraft::ptr<nuraft::log_en
         it = logs_.erase(it);
     }
 
-    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_TRUNCATE_MARKER_BEFORE_REPLACEMENT")) {
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_TRUNCATE_MARKER_BEFORE_REPLACEMENT"); fp && fp[0] != '\0') {
         std::cerr << "FAILPOINT: crashing after truncate marker, before replacement in write_at" << std::endl;
         ::kill(::getpid(), SIGKILL);
         ::_exit(124);
@@ -407,6 +421,12 @@ void durable_log_store::write_at(nuraft::ulong index, nuraft::ptr<nuraft::log_en
     dirty_ = true;
 
     sync_dirty_segments_unlocked("write_at sync");
+    std::cerr << "RAFT_DURABLE_WRITE_AT"
+              << " idx=" << index
+              << " term=" << entry->get_term()
+              << " next_slot=" << next_slot_unlocked()
+              << " last_durable=" << last_durable_idx_
+              << std::endl;
 }
 
 nuraft::ptr<std::vector<nuraft::ptr<nuraft::log_entry>>>
@@ -542,7 +562,7 @@ void durable_log_store::apply_pack(nuraft::ulong index, nuraft::buffer& pack) {
         it = logs_.erase(it);
     }
 
-    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_TRUNCATE_MARKER_BEFORE_REPLACEMENT")) {
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_AFTER_TRUNCATE_MARKER_BEFORE_REPLACEMENT"); fp && fp[0] != '\0') {
         std::cerr << "FAILPOINT: crashing after truncate marker, before replacement in apply_pack" << std::endl;
         ::kill(::getpid(), SIGKILL);
         ::_exit(124);
@@ -628,6 +648,12 @@ void durable_log_store::end_of_append_batch(nuraft::ulong start, nuraft::ulong c
 
     batch_first_ = 0;
     batch_last_ = 0;
+    std::cerr << "RAFT_DURABLE_APPEND_BATCH"
+              << " start=" << start
+              << " cnt=" << cnt
+              << " next_slot=" << next_slot_unlocked()
+              << " last_durable=" << last_durable_idx_
+              << std::endl;
 }
 
 void durable_log_store::open_or_create() {
@@ -1093,7 +1119,7 @@ void durable_log_store::sync_dirty_segments_unlocked(const std::string& context)
 }
 
 void durable_log_store::fdatasync_and_profile(int fd, const std::string& context) {
-    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_BEFORE_FDATASYNC")) {
+    if (const char* fp = std::getenv("ARIABC_FAILPOINT_CRASH_BEFORE_FDATASYNC"); fp && fp[0] != '\0') {
         std::string fp_val(fp);
         if (fp_val == "1" || context.find(fp_val) != std::string::npos) {
             std::cerr << "FAILPOINT: crashing before fdatasync in context '" << context << "'" << std::endl;

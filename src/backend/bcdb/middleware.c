@@ -58,6 +58,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>		/* for errno = 0 / ERANGE in strict strtoull parsing */
 
 /*
  * Silence ad-hoc stdout debug prints in deterministic middleware.
@@ -99,6 +100,52 @@ int32         burstTime = 0;
 uint64        start_time;
 static int  tx_id_counter = 0; /* legacy: not used by deterministic path */
 
+static uint8
+hex_val(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+	if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+	return 0;
+}
+
+static void
+decode_hex(const char *hex, uint8 *out, int out_len)
+{
+	int i;
+	if (!hex)
+	{
+		memset(out, 0, out_len);
+		return;
+	}
+	for (i = 0; i < out_len; ++i)
+	{
+		if (hex[2 * i] == '\0' || hex[2 * i + 1] == '\0')
+		{
+			memset(out + i, 0, out_len - i);
+			break;
+		}
+		out[i] = (hex_val(hex[2 * i]) << 4) | hex_val(hex[2 * i + 1]);
+	}
+}
+
+static bool
+is_valid_hex_64(const char *str)
+{
+	int i;
+	if (str == NULL || strlen(str) != 64)
+		return false;
+	for (i = 0; i < 64; i++)
+	{
+		char c = str[i];
+		/* Require strictly lowercase hex: uppercase is rejected so that
+		 * the server epoch check (which requires lowercase) is consistent. */
+		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+			return false;
+	}
+	return true;
+}
+
 /*
  * Backend-local copy of the immutable per-tx fields needed after enqueue.
  *
@@ -111,6 +158,7 @@ typedef struct BCDBBlockResultRef
 {
 	BCTxID tx_id;
 	char   hash[TX_HASH_SIZE];
+	bool   raft_ledger_enabled;
 } BCDBBlockResultRef;
 
 /* ----------------------------------------------------------------------
@@ -1359,6 +1407,150 @@ parse_block_with_txs(const char *json)
 			tx->create_time = strtoll(create_time->valuestring, &endpt, 10);
 		}
 
+		/* Parse Raft apply ledger metadata (Commit D2) */
+		{
+			/*
+			 * raft_log_index is transmitted as a JSON *string* (decimal digits) to
+			 * preserve exact uint64 precision above 2^53 — JSON "number" uses
+			 * IEEE-754 double which loses the low bits of very large indices.
+			 *
+			 * P0-D strict validation rules:
+			 *   raft_log_index   — JSON string, decimal digits only, no sign,
+			 *                      no whitespace, no overflow, value > 0
+			 *   raft_item_count  — exact integer 1..UINT32_MAX (not fractional,
+			 *                      not negative, not zero)
+			 *   raft_item_ordinal — exact integer 0 <= ordinal < item_count
+			 *   epoch / entry_digest / item_digest — exactly 64 lowercase hex chars
+			 *
+			 * All safe metadata fields must be present together or absent together.
+			 * Partial metadata is rejected.
+			 */
+			cJSON *raft_ledger_required = cJSON_GetObjectItemCaseSensitive(tx_json, "raft_ledger_required");
+			cJSON *raft_log_index = cJSON_GetObjectItemCaseSensitive(tx_json, "raft_log_index");
+			cJSON *raft_item_ordinal = cJSON_GetObjectItemCaseSensitive(tx_json, "raft_item_ordinal");
+			cJSON *raft_item_count = cJSON_GetObjectItemCaseSensitive(tx_json, "raft_item_count");
+			cJSON *raft_epoch_id = cJSON_GetObjectItemCaseSensitive(tx_json, "raft_epoch_id");
+			cJSON *entry_digest = cJSON_GetObjectItemCaseSensitive(tx_json, "entry_digest");
+			cJSON *item_digest = cJSON_GetObjectItemCaseSensitive(tx_json, "item_digest");
+			bool required = false;
+			bool has_any_raft_metadata = false;
+
+			if (raft_ledger_required != NULL)
+			{
+				if (cJSON_IsTrue(raft_ledger_required))
+					required = true;
+				else if (!cJSON_IsFalse(raft_ledger_required))
+					goto error;
+			}
+
+			has_any_raft_metadata =
+				raft_log_index != NULL ||
+				raft_item_ordinal != NULL ||
+				raft_item_count != NULL ||
+				raft_epoch_id != NULL ||
+				entry_digest != NULL ||
+				item_digest != NULL;
+
+			if (required || has_any_raft_metadata)
+			{
+				/* All six fields must be present and of the correct type.  Any
+				 * missing or malformed field is a hard error — reject the block. */
+				if (!cJSON_IsString(raft_log_index) ||
+					!raft_item_ordinal || !cJSON_IsNumber(raft_item_ordinal) ||
+					!raft_item_count || !cJSON_IsNumber(raft_item_count) ||
+					!raft_epoch_id || !cJSON_IsString(raft_epoch_id) || !is_valid_hex_64(raft_epoch_id->valuestring) ||
+					!entry_digest || !cJSON_IsString(entry_digest) || !is_valid_hex_64(entry_digest->valuestring) ||
+					!item_digest || !cJSON_IsString(item_digest) || !is_valid_hex_64(item_digest->valuestring))
+				{
+					goto error;
+				}
+
+				/* Parse log index as decimal string to avoid double precision loss.
+				 * Strict rules: decimal digits only, no sign, no whitespace, > 0. */
+				{
+					const char *idx_str = raft_log_index->valuestring;
+					char *endptr = NULL;
+					unsigned long long parsed_idx;
+
+					/* Reject leading sign, whitespace, or empty string */
+					if (!idx_str || idx_str[0] == '\0' ||
+						idx_str[0] == '+' || idx_str[0] == '-' ||
+						idx_str[0] == ' ' || idx_str[0] == '\t')
+						goto error;
+
+					errno = 0;
+					parsed_idx = strtoull(idx_str, &endptr, 10);
+					if (errno != 0 || !endptr || *endptr != '\0' || parsed_idx == 0)
+						goto error; /* overflow, trailing garbage, or zero */
+
+					tx->raft_log_index = (uint64) parsed_idx;
+				}
+
+				/*
+				 * Strict integer validation for raft_item_count:
+				 *   - must be a whole number (no fractional part)
+				 *   - must be in [1, UINT32_MAX]
+				 */
+				{
+					double count_d = raft_item_count->valuedouble;
+					double count_floor = (double)(unsigned long long) count_d;
+
+					/* Reject fractional, negative, zero, or overflowed counts */
+					if (count_d < 1.0 || count_d != count_floor ||
+						count_d > (double) 0xFFFFFFFFULL)
+						goto error;
+
+					tx->raft_item_count = (uint32) (unsigned long long) count_d;
+				}
+
+				/*
+				 * Strict integer validation for raft_item_ordinal:
+				 *   - must be a whole number (no fractional part)
+				 *   - must be in [0, item_count - 1]
+				 */
+				{
+					double ord_d = raft_item_ordinal->valuedouble;
+					double ord_floor = (double)(unsigned long long) ord_d;
+					uint32 item_count = tx->raft_item_count;
+
+					/* Reject fractional, negative, or out-of-range ordinals */
+					if (ord_d < 0.0 || ord_d != ord_floor ||
+						ord_d > (double) 0xFFFFFFFFULL)
+						goto error;
+
+					{
+						uint32 ordinal = (uint32) (unsigned long long) ord_d;
+
+						if (ordinal >= item_count)
+							goto error; /* ordinal must be < count */
+
+						tx->raft_item_ordinal = ordinal;
+					}
+				}
+
+				tx->raft_ledger_enabled = true;
+				tx->raft_terminal_state = 0;
+				tx->raft_terminal_format_version = 0;
+
+				decode_hex(raft_epoch_id->valuestring, tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES);
+				decode_hex(entry_digest->valuestring, tx->raft_entry_digest, BCDB_RAFT_DIGEST_BYTES);
+				decode_hex(item_digest->valuestring, tx->raft_item_digest, BCDB_RAFT_DIGEST_BYTES);
+			}
+			else
+			{
+				tx->raft_ledger_enabled = false;
+				tx->raft_log_index = 0;
+				tx->raft_item_ordinal = 0;
+				tx->raft_item_count = 0;
+				tx->raft_terminal_state = 0;
+				tx->raft_terminal_format_version = 0;
+				memset(tx->raft_epoch_id, 0, BCDB_RAFT_DIGEST_BYTES);
+				memset(tx->raft_entry_digest, 0, BCDB_RAFT_DIGEST_BYTES);
+				memset(tx->raft_item_digest, 0, BCDB_RAFT_DIGEST_BYTES);
+				memset(tx->raft_terminal_digest, 0, BCDB_RAFT_DIGEST_BYTES);
+			}
+		}
+
 		/* Stamp the assigned ids and slot into the block's tx array.  Order
 		 * here defines deterministic execution order within the block. */
 		tx->tx_id = use_explicit_txids
@@ -1595,6 +1787,8 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	uint64      slot_wait_p50_us = 0;
 	uint64      slot_wait_p95_us = 0;
 	uint64      slot_wait_max_us = 0;
+	bool        force_actual_results = false;
+	bool        return_actual_results = false;
 
 	if (profile)
 		t_start_us = bcdb_get_time();
@@ -1631,6 +1825,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			Assert(tx != NULL);
 			tx_refs[i].tx_id = tx->tx_id;
 			strlcpy(tx_refs[i].hash, tx->hash, sizeof(tx_refs[i].hash));
+			tx_refs[i].raft_ledger_enabled = tx->raft_ledger_enabled;
 		}
 	}
 	if (profile)
@@ -1681,6 +1876,22 @@ bcdb_middleware_submit_block_results(const char* block_json)
 
 	/* Phase 4: format the completion payload and mark slots consumed. */
 	initStringInfo(&out);
+
+	/* Determine whether any tx in this block requires safe-ledger actual
+	 * results.  Use the pre-enqueue snapshot in tx_refs[] — block->txs[]
+	 * must not be accessed after tx_queue_insert() because workers can
+	 * free transactions and reclaim blocks at any point after enqueue. */
+	for (int i = 0; i < num_tx; ++i)
+	{
+		if (tx_refs[i].raft_ledger_enabled)
+		{
+			force_actual_results = true;
+			break;
+		}
+	}
+	return_actual_results =
+		force_actual_results || bcdb_block_return_actual_results_enabled();
+
 	for (int i = 0; i < num_tx; ++i)
 	{
 		const BCTxID tx_id = tx_refs[i].tx_id;
@@ -1709,12 +1920,24 @@ bcdb_middleware_submit_block_results(const char* block_json)
 				slot_wait_us[i] = wait_us;
 		}
 
-		/* Always emit the hash; emit the row payload only when explicitly
-		 * requested via BCDB_BLOCK_RETURN_ACTUAL_RESULTS. */
+		/* Always emit the hash; emit the row payload when forced by a
+		 * safe-ledger transaction or when explicitly requested via
+		 * BCDB_BLOCK_RETURN_ACTUAL_RESULTS. */
 		appendStringInfoString(&out, tx_refs[i].hash);
 		appendStringInfoChar(&out, '\t');
-		if (bcdb_block_return_actual_results_enabled())
-			append_hex_encoded(&out, result_block->result[mem_txid]);
+		if (return_actual_results)
+		{
+			const char *result_text = result_block->result[mem_txid];
+
+			if (tx_refs[i].raft_ledger_enabled && result_text[0] == '\0')
+				elog(ERROR,
+					 "safe-ledger result missing after committed slot "
+					 "tx_id=%d slot=%d",
+					 (int) tx_id,
+					 mem_txid);
+
+			append_hex_encoded(&out, result_text);
+		}
 		appendStringInfoChar(&out, '\n');
 
 		/* Hand the slot back: publish result_consumed_txid = tx_id with
@@ -1782,6 +2005,12 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			bcdb_log_gate_snapshot("completed_block", block_id, -1, -1);
 	}
 
+	elog(LOG,
+		 "SAFE_BLOCK_RETURN block=%d safe=%d actual=%d bytes=%d",
+		 (int) block_id,
+		 force_actual_results ? 1 : 0,
+		 return_actual_results ? 1 : 0,
+		 out.len);
 	return out.data;
 }
 

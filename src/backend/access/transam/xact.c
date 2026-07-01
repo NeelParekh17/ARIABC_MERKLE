@@ -19,6 +19,7 @@
 
 #include <time.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "access/commit_ts.h"
 #include "access/multixact.h"
@@ -68,6 +69,21 @@
 #include "utils/timestamp.h"
 #include "bcdb/shm_transaction.h"
 #include "bcdb/shm_block.h"
+#include "bcdb/raft_apply_ledger.h"
+
+#define EMIT_SAFE_XACT_LOG(tx, _phase) \
+	elog(LOG, "SAFE_LEDGER_XACT phase=%s\n" \
+			  "log=%llu ord=%u\n" \
+			  "top_xid=%u\n" \
+			  "nest_level=%d\n" \
+			  "subxid=%u", \
+		 (_phase), \
+		 (unsigned long long) (tx)->raft_log_index, \
+		 (unsigned) (tx)->raft_item_ordinal, \
+		 (unsigned) GetTopTransactionIdIfAny(), \
+		 GetCurrentTransactionNestLevel(), \
+		 (unsigned) GetCurrentSubTransactionId())
+
 /*
  *	User-tweakable parameters
  */
@@ -2158,7 +2174,33 @@ CommitTransaction(void)
 		 * We need to mark our XIDs as committed in pg_xact.  This is where we
 		 * durably commit.
 		 */
+		if (is_bcdb_worker)
+		{
+			bcdb_maybe_trigger_safe_failpoint(
+				"ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT",
+				activeTx,
+				"before_worker_toplevel_commit");
+			if (activeTx && activeTx->raft_ledger_enabled)
+				EMIT_SAFE_XACT_LOG(activeTx, "SAFE_XACT_TOP_COMMIT_BEGIN");
+		}
 		latestXid = RecordTransactionCommit();
+		if (is_bcdb_worker)
+		{
+			if (activeTx && activeTx->raft_ledger_enabled)
+				elog(LOG,
+					 "SAFE_XACT_TOP_COMMIT_RECORDED "
+					 "log=%llu ord=%u top_xid=%u nest_level=%d subxid=%u committed_xid=%u",
+					 (unsigned long long) activeTx->raft_log_index,
+					 (unsigned) activeTx->raft_item_ordinal,
+					 (unsigned) GetTopTransactionIdIfAny(),
+					 GetCurrentTransactionNestLevel(),
+					 (unsigned) GetCurrentSubTransactionId(),
+					 (unsigned) latestXid);
+			bcdb_maybe_trigger_safe_failpoint(
+				"ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT",
+				activeTx,
+				"after_worker_toplevel_commit_before_result_ring");
+		}
 	}
 	else
 	{
@@ -2923,6 +2965,8 @@ CommitTransactionCommand(void)
 {
 	TransactionState s = CurrentTransactionState;
 
+	// bcdb_emit_ledger_boundary("commit");
+
 	if (s->chain)
 		SaveTransactionCharacteristics();
 
@@ -3186,6 +3230,11 @@ void
 AbortCurrentTransaction(void)
 {
 	TransactionState s = CurrentTransactionState;
+
+	if (is_bcdb_worker && activeTx && activeTx->raft_ledger_enabled)
+		EMIT_SAFE_XACT_LOG(activeTx, "SAFE_XACT_TOP_ABORT");
+
+	// bcdb_emit_ledger_boundary("abort");
 
 	switch (s->blockState)
 	{
@@ -4384,6 +4433,8 @@ BeginInternalSubTransaction(const char *name)
 {
 	TransactionState s = CurrentTransactionState;
 
+	// bcdb_emit_ledger_boundary("claim");
+
 	/*
 	 * Workers synchronize transaction state at the beginning of each parallel
 	 * operation, so we can't account for new subtransactions after that
@@ -4455,6 +4506,11 @@ ReleaseCurrentSubTransaction(void)
 {
 	TransactionState s = CurrentTransactionState;
 
+	if (is_bcdb_worker && activeTx && activeTx->raft_ledger_enabled)
+		EMIT_SAFE_XACT_LOG(activeTx, "SAFE_XACT_SUBRELEASE");
+
+	// bcdb_emit_ledger_boundary("finalize");
+
 	/*
 	 * Workers synchronize transaction state at the beginning of each parallel
 	 * operation, so we can't account for commit of subtransactions after that
@@ -4488,6 +4544,11 @@ void
 RollbackAndReleaseCurrentSubTransaction(void)
 {
 	TransactionState s = CurrentTransactionState;
+
+	if (is_bcdb_worker && activeTx && activeTx->raft_ledger_enabled)
+		EMIT_SAFE_XACT_LOG(activeTx, "SAFE_XACT_SUBROLLBACK");
+
+	// bcdb_emit_ledger_boundary("abort");
 
 	/*
 	 * Unlike ReleaseCurrentSubTransaction(), this is nominally permitted

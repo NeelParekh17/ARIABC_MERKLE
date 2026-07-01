@@ -446,6 +446,7 @@ if [[ -n "\${stale_pids// }" ]]; then
   fi
 fi
 
+ulimit -c unlimited
 if ! timeout 140 "\$PG_CTL" -D "\$PGDATA" -l "\$LOG_FILE" -w -t 120 start; then
   echo "ERROR: pg_ctl start failed for node${node_idx} ($host:$port)" >&2
   tail -n 80 "\$LOG_FILE" >&2 || true

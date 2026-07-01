@@ -182,6 +182,9 @@ struct db_options {
     int conn_pool_size = 20;
     int max_retries = 10;
     int retry_backoff_ms = 100;
+
+    std::string raft_apply_ledger_mode = "off";
+    std::string raft_epoch_hex;
 };
 
 struct kafka_options {
@@ -195,13 +198,41 @@ public:
     static int configured_batch_delay_us();
     static int override_batch_delay_us();
 
-    using completion_callback = std::function<void(uint64_t)>;
+    using completion_callback = std::function<void(uint64_t, uint32_t)>;
+    using failure_callback = std::function<void(uint64_t, uint32_t, const std::string&)>;
 
     pg_executor(int node_id,
                 const db_options& db_opt,
                 const kafka_options& k_opt,
-                completion_callback on_task_applied = completion_callback());
+                completion_callback on_task_applied = completion_callback(),
+                failure_callback on_task_failed = failure_callback());
     ~pg_executor();
+
+    struct task {
+        std::string req_id;
+        std::string sql;
+        int leader_node_hint = -1;
+        uint64_t raft_log_idx = 0;
+        uint64_t dispatch_seq = 0;
+        uint64_t enqueue_ns = 0;
+        uint64_t exec_begin_ns = 0; // set on first attempt start; preserved across retries (event mode)
+        int attempt = 0;
+        uint32_t raft_item_ordinal = 0;
+        uint32_t raft_item_count = 0;
+        std::string entry_digest;
+        std::string item_digest;
+    };
+
+    struct ConfirmedResult {
+        uint64_t raft_log_index = 0;
+        uint32_t raft_item_ordinal = 0;
+        std::string terminal_digest;
+        std::string terminal_state;
+        std::string payload;
+        int format_version = 1;
+    };
+
+    ConfirmedResult accept_safe_confirmed_result(const task& t, const std::string& raw_backend_result);
 
     void enqueue(const std::string& req_id,
                  const std::string& sql,
@@ -210,7 +241,11 @@ public:
     void enqueue_batch(const std::vector<std::string>& req_ids,
                        const std::vector<std::string>& sqls,
                        int leader_node_hint,
-                       uint64_t raft_log_idx);
+                       uint64_t raft_log_idx,
+                       const std::string& entry_digest_hex = "",
+                       const std::vector<std::string>& item_digests_hex = {});
+
+    bool verify_and_register_entry_manifest(uint64_t log_idx, const std::string& entry_digest_hex, const std::vector<std::string>& item_digests_hex);
 
     pg_executor_stats stats() const;
 
@@ -226,21 +261,11 @@ public:
     // lets the executor notify exactly when the queue drains.
     bool wait_for_admission_drain(uint64_t max_wait_ns);
     bool ensure_bcdb_initialized();
+    int bcdb_block_size() const { return bcdb_block_size_; }
 
 private:
     struct notice_state;
     static void notice_processor(void* arg, const char* message);
-
-    struct task {
-        std::string req_id;
-        std::string sql;
-        int leader_node_hint = -1;
-        uint64_t raft_log_idx = 0;
-        uint64_t dispatch_seq = 0;
-        uint64_t enqueue_ns = 0;
-        uint64_t exec_begin_ns = 0; // set on first attempt start; preserved across retries (event mode)
-        int attempt = 0;
-    };
 
     enum class det_tx_state : uint8_t {
         QUEUED = 0,
@@ -266,8 +291,11 @@ private:
     void det_mark_tx_state(uint64_t tx_seq, det_tx_state st);
     bool det_wait_for_apply_turn(uint64_t tx_seq);
     void det_finish_apply(uint64_t tx_seq);
-    void notify_task_applied(uint64_t raft_log_idx);
-    void mark_task_applied_ordered(uint64_t dispatch_seq, uint64_t raft_log_idx, uint64_t ready_ns);
+    void notify_task_applied(uint64_t raft_log_idx, uint32_t item_ordinal);
+    void notify_task_failed(uint64_t raft_log_idx, uint32_t item_ordinal, const std::string& reason);
+    void mark_task_applied_ordered(uint64_t dispatch_seq, uint64_t raft_log_idx, uint32_t item_ordinal, uint64_t ready_ns);
+    bool ensure_safe_ledger_terminal(PGconn* c, const task& t, const ConfirmedResult& confirmed);
+
     void record_det_block_batch(size_t size, bool fallback);
     bool wait_for_ordered_emit_turn(uint64_t dispatch_seq);
     void finish_ordered_emit(uint64_t dispatch_seq);
@@ -290,6 +318,7 @@ private:
     kafka_console_producer kafka_prod_;
     bool kafka_enabled_;
     completion_callback on_task_applied_;
+    failure_callback on_task_failed_;
 
     std::atomic<bool> stop_{false};
     std::mutex q_mu_;
@@ -340,6 +369,8 @@ private:
     bool det_block_backend_txid_delta_set_ = false;
     int64_t det_block_backend_txid_delta_ = 0;
     PGconn* bcdb_ctrl_conn_ = nullptr;
+    PGconn* manifest_conn_ = nullptr;
+    std::mutex manifest_mu_;
     std::mutex bcdb_init_mu_;
     bool bcdb_init_done_ = false;
     bool bcdb_init_failed_ = false;
@@ -485,7 +516,7 @@ private:
 
     std::mutex det_ordered_apply_mu_;
     uint64_t det_next_ordered_apply_seq_ = 1;
-    std::map<uint64_t, uint64_t> det_ordered_apply_ready_;
+    std::map<uint64_t, std::pair<uint64_t, uint32_t>> det_ordered_apply_ready_; /* dispatch_seq → {raft_log_idx, item_ordinal} */
     std::mutex det_emit_mu_;
     std::condition_variable det_emit_cv_;
     uint64_t det_next_emit_seq_ = 1;

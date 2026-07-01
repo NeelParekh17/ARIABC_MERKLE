@@ -54,8 +54,12 @@ cleanup_os_profile() {
 }
 
 cleanup_all() {
+  if [[ -n "${LOCAL_BUILD_PID:-}" ]]; then
+    echo "  Terminating local build (pid $LOCAL_BUILD_PID)..."
+    kill "$LOCAL_BUILD_PID" 2>/dev/null || true
+  fi
   if [[ -n "${WATCHDOG_PID:-}" ]]; then
-    echo "  Stopping fastpath hang-detection watchdog (pid $WATCHDOG_PID)..."
+    echo "  Stopping gateway progress watchdog (pid $WATCHDOG_PID)..."
     kill "$WATCHDOG_PID" 2>/dev/null || true
   fi
   if [[ -n "${GW_PID:-}" ]]; then
@@ -74,14 +78,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # ---------------------------------------------------------------------------
 # Cluster topology
 # ---------------------------------------------------------------------------
-declare -a NODE_IDS=(1 2 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
-declare -a NODE_NAMES=(admin123 user4 utkarsh)
-declare -a NODE_USERS=(neel neel neel)
-# Ubuntu 22.04 nodes need locally-built binary (GLIBC 2.35, rdkafka from ~/Desktop/rdkafka_local)
-declare -a NODE_IS_U22=(0 1 0)
-# utkarsh port 8000 is taken by HP printer snap; use 8001 instead
-declare -a NODE_CLIENT_PORTS=(8000 8000 8001)
+source "${SCRIPT_DIR}/cluster_topology.sh"
 
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
@@ -92,10 +89,6 @@ KAFKA_RESULT_TOPIC="ariabc_results"
 KAFKA_HOME_REMOTE="/home/neel/Desktop/kafka_2.13-3.7.0"
 KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
 
-RAFT_PORT=9000
-DB_PORT=5438
-DB_USER=postgres
-DB_NAME=postgres
 DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Gateway dbConnPoolSize and bcdb_init block size
 BCDB_WORKER_COUNT="${BCDB_WORKER_COUNT:-}"    # Defaults to DB_CONN_POOL_SIZE after args are parsed
 
@@ -106,8 +99,10 @@ LOCAL_INSTALL_DIR="${LOCAL_INSTALL_DIR:-/work/ARIABC/install}"
 # ASUS/local build from the remote repo. This matches the last known good
 # 4-node Kafka-majority run (nodes 1/4 used ariabc_cluster/ariabc_pg/build).
 REMOTE_BIN_U24="/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server"
+REMOTE_GATEWAY_BIN_U24="/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_gateway"
 # Binary path for Ubuntu 22.04 nodes (user4, new-node): built locally with rdkafka from Desktop
 REMOTE_BIN_U22="/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server"
+REMOTE_GATEWAY_BIN_U22="/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_gateway"
 # Static cmake for Ubuntu 22.04 nodes (no system cmake 3.16+) — stays in /tmp (only needed at build time)
 REMOTE_CMAKE_U22="/tmp/cmake-3.28.3-linux-x86_64/bin/cmake"
 REMOTE_CMAKE_TARBALL_U22="/tmp/cmake-3.28.3-linux-x86_64.tar.gz"
@@ -169,17 +164,41 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     ARIABC_OS_PROFILE \
     BCDB_WORKER_COUNT DB_CONN_POOL_SIZE \
     BCDB_DECOUPLE_WORKERS \
+    BCDB_BLOCK_RETURN_ACTUAL_RESULTS \
     BCDB_DET_QUEUE_HIGH_WM BCDB_DET_QUEUE_LOW_WM \
+    GATEWAY_STALL_WATCHDOG GATEWAY_STALL_POLL_SECONDS GATEWAY_STALL_MAX_CYCLES \
     EXPECTED_ROWS EXPECTED_ROOT \
-    RAFT_STORAGE_MODE RAFT_STORAGE_DIR RAFT_STORAGE_ACTION RAFT_STORAGE_ROOT RAFT_CLUSTER_ID
+    RAFT_STORAGE_MODE RAFT_STORAGE_DIR RAFT_STORAGE_ACTION RAFT_STORAGE_ROOT RAFT_CLUSTER_ID \
+    FAILPOINT_NODE_ID FAILPOINT_ENV FAILPOINT_RAFT_LOG_INDEX FAILPOINT_ITEM_ORDINAL \
+    ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE
   do
     if [[ -v "$var" ]]; then
       delegate_env+=("$var=${!var}")
     fi
   done
 
+  # Rewrite any --workload <path> that lives under REPO_ROOT to the equivalent
+  # GATEWAY_REPO path.  After rsync the file will be at that location.
+  rewritten_args=()
+  _next_is_workload=0
+  for _arg in "$@"; do
+    if [[ $_next_is_workload -eq 1 ]]; then
+      _next_is_workload=0
+      if [[ "$_arg" == "${REPO_ROOT}/"* ]]; then
+        _rel="${_arg#${REPO_ROOT}/}"
+        _arg="${GATEWAY_REPO}/${_rel}"
+      fi
+      rewritten_args+=("$_arg")
+    elif [[ "$_arg" == "--workload" ]]; then
+      _next_is_workload=1
+      rewritten_args+=("$_arg")
+    else
+      rewritten_args+=("$_arg")
+    fi
+  done
+
   printf -v quoted_env '%q ' "${delegate_env[@]}"
-  printf -v quoted_args '%q ' "$@"
+  printf -v quoted_args '%q ' "${rewritten_args[@]}"
 
   echo "Running benchmark remotely on gateway..."
   ssh "$GATEWAY_USER@$GATEWAY_HOST" \
@@ -203,6 +222,16 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/runner.log"
 exec > >(tee -ia "$LOG_FILE") 2>&1
 REMOTE_LOG_DIR="/tmp/ariabc_cluster"
+RUN_ID="$(basename "$LOG_DIR")"
+RUN_START_EPOCH="$(date +%s)"
+
+phase_marker() {
+  local phase="$1"
+  local ts
+  ts="$(date -Is)"
+  log "$phase"
+  printf '%s=%s\n' "$phase" "$ts" >> "$LOG_DIR/phase_markers.env"
+}
 
 # ===========================================================================
 # Function: log
@@ -228,6 +257,15 @@ if [[ -n "$RAFT_STORAGE_ROOT" ]]; then
   RAFT_STORAGE_DIR="$RAFT_STORAGE_ROOT"
 fi
 RAFT_CLUSTER_ID="${RAFT_CLUSTER_ID:-ariabc_cluster}"
+RAFT_APPLY_LEDGER_MODE="${RAFT_APPLY_LEDGER_MODE:-off}"
+RAFT_EPOCH_HEX="${RAFT_EPOCH_HEX:-}"
+FAILPOINT_NODE_ID="${FAILPOINT_NODE_ID:-}"
+FAILPOINT_ENV="${FAILPOINT_ENV:-}"
+FAILPOINT_RAFT_LOG_INDEX="${FAILPOINT_RAFT_LOG_INDEX:-}"
+FAILPOINT_ITEM_ORDINAL="${FAILPOINT_ITEM_ORDINAL:-}"
+ARIABC_SAFE_POSTCOMMIT_WITNESS="${ARIABC_SAFE_POSTCOMMIT_WITNESS:-}"
+ARIABC_SAFE_EXTERNAL_PROBE="${ARIABC_SAFE_EXTERNAL_PROBE:-}"
+ARIABC_SAFE_TRACE="${ARIABC_SAFE_TRACE:-}"
 SKIP_SYNC="${SKIP_SYNC:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_KAFKA="${SKIP_KAFKA:-0}"
@@ -235,6 +273,7 @@ SKIP_CLEANUP="${SKIP_CLEANUP:-0}"
 SKIP_RDKAFKA_SETUP="${SKIP_RDKAFKA_SETUP:-0}"
 SKIP_RESTORE="${SKIP_RESTORE:-0}"
 SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
+STOP_ONLY="${STOP_ONLY:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
 ORDERING_MODE="${ORDERING_MODE:-${CLUSTER_ORDERING_MODE:-raft-kafka}}" # raft-kafka|kafka-only
@@ -284,6 +323,7 @@ DET_COMPLETION_ONLY_SUCCESS_EXPLICIT=0
 PARALLELISM_MODE="${PARALLELISM_MODE:-pipeline}"  # pipeline|os-threads
 BCDB_BLOCK_PROFILE="${BCDB_BLOCK_PROFILE:-0}"  # postgres-side bcdb_block_submit_results phase logging
 BCDB_BLOCK_WAIT_WATERMARK="${BCDB_BLOCK_WAIT_WATERMARK:-0}"  # 1=wait on block commit watermark instead of scanning every slot
+BCDB_BLOCK_RETURN_ACTUAL_RESULTS="${BCDB_BLOCK_RETURN_ACTUAL_RESULTS:-0}"  # 1=return per-tx result payloads from block submit
 BCDB_PHASE_TRACE_ON="${BCDB_PHASE_TRACE_ON:-0}"  # postgres-side per-worker CSV phase traces
 BCDB_POLL_MAX_US="${BCDB_POLL_MAX_US:-8}"      # last known good 4-node run used 8us
 BCDB_SERIAL_GATE_MODE="${BCDB_SERIAL_GATE_MODE:-1}"  # 0=poll, 1=condvar published-max wakeups
@@ -312,6 +352,9 @@ BCDB_GATE_TELEMETRY="${BCDB_GATE_TELEMETRY:-0}"              # 1=enable gate tel
 BCDB_GATE_SNAPSHOT_EACH_BLOCK="${BCDB_GATE_SNAPSHOT_EACH_BLOCK:-0}" # 1=enable gate snapshot GUC
 COLLECT_FINAL_SERVER_PROFILE="${COLLECT_FINAL_SERVER_PROFILE:-1}"
 SKIP_CLUSTER_LOGS="${SKIP_CLUSTER_LOGS:-0}"  # 1=skip fetching server/nuraft/postgres logs from cluster nodes
+GATEWAY_STALL_WATCHDOG="${GATEWAY_STALL_WATCHDOG:-${ENABLE_FASTPATH_WATCHDOG:-1}}" # 1=terminate gateway if completed= stalls
+GATEWAY_STALL_POLL_SECONDS="${GATEWAY_STALL_POLL_SECONDS:-5}"
+GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-3}"
 
 # ===========================================================================
 # Function: usage
@@ -331,6 +374,7 @@ Options:
   --skip-restore   Skip restoring the verification table before cluster start
   --skip-post-verify
                   Skip post-workload marker + Merkle root comparison
+  --stop-only      Stop stale cluster server processes and exit after cleanup
   --skip-pg-restart
                   Do not restart PostgreSQL before restore (default restarts)
   --no-kafka       Use direct completion (no Kafka majority wait)
@@ -503,6 +547,7 @@ while [[ $# -gt 0 ]]; do
     --skip-rdkafka-setup) SKIP_RDKAFKA_SETUP=1; shift ;;
     --skip-restore) SKIP_RESTORE=1; shift ;;
     --skip-post-verify) SKIP_POST_VERIFY=1; shift ;;
+    --stop-only) STOP_ONLY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
     --ordering-mode) ORDERING_MODE="${2:-raft-kafka}"; shift 2 ;;
@@ -563,10 +608,30 @@ while [[ $# -gt 0 ]]; do
     --raft-storage-action) RAFT_STORAGE_ACTION="${2:-fresh}"; shift 2 ;;
     --raft-storage-root) RAFT_STORAGE_ROOT="${2:-}"; RAFT_STORAGE_DIR="$RAFT_STORAGE_ROOT"; shift 2 ;;
     --raft-cluster-id) RAFT_CLUSTER_ID="${2:-ariabc_cluster}"; shift 2 ;;
+    --raft-apply-ledger-mode) RAFT_APPLY_LEDGER_MODE="${2:-off}"; shift 2 ;;
+    --raft-epoch-hex) RAFT_EPOCH_HEX="${2:-}"; shift 2 ;;
+    --failpoint-node-id) FAILPOINT_NODE_ID="${2:-}"; shift 2 ;;
+    --failpoint-env) FAILPOINT_ENV="${2:-}"; shift 2 ;;
+    --failpoint-raft-log-index) FAILPOINT_RAFT_LOG_INDEX="${2:-}"; shift 2 ;;
+    --failpoint-item-ordinal) FAILPOINT_ITEM_ORDINAL="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
+  if [[ "$DET_PREFIXED_DIRECT_PARALLEL" == "1" ]]; then
+    log "Safe-mode apply ledger requires block submit path; auto-disabling --det-prefixed-direct-parallel"
+    DET_PREFIXED_DIRECT_PARALLEL=0
+  fi
+  if [[ "$DET_EVENT_BLOCK_FASTPATH" != "1" ]]; then
+    log "Safe-mode apply ledger requires bcdb_block_submit_results metadata; auto-enabling --det-event-block-fastpath"
+    DET_EVENT_BLOCK_FASTPATH=1
+  fi
+  # Runner-level redundancy: force actual results for safe-ledger runs so
+  # the PostgreSQL layer never returns an empty string as a completion.
+  BCDB_BLOCK_RETURN_ACTUAL_RESULTS=1
+fi
 
 if [[ "$RAFT_STORAGE_MODE" != "durable" && "$RAFT_STORAGE_MODE" != "in_memory" ]]; then
   die "ERROR: --raft-storage-mode must be 'durable' or 'in_memory' (got: $RAFT_STORAGE_MODE)"
@@ -580,8 +645,10 @@ if [[ "$RAFT_STORAGE_MODE" == "durable" ]]; then
     die "ERROR: --raft-storage-action must be 'fresh' or 'preserve' (got: $RAFT_STORAGE_ACTION)"
   fi
   if [[ "$RAFT_STORAGE_ACTION" == "preserve" ]]; then
-    die "RAFT_STORAGE_ACTION=preserve is not supported by the SQL workload runner yet.
-Durable Raft log recovery is implemented, but PostgreSQL replay/idempotency recovery is not."
+    if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" && "$SKIP_RESTORE" -eq 0 ]]; then
+      die "ERROR: --raft-storage-action=preserve cannot be used with --raft-apply-ledger-mode=safe unless --skip-restore is specified"
+    fi
+    echo "Note: RAFT_STORAGE_ACTION=preserve is active. PostgreSQL idempotency is expected to handle replay."
   fi
   if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
     if [[ "$SKIP_CLEANUP" == "1" ]]; then
@@ -614,6 +681,18 @@ if [[ "$DET_RAW_SQL" != "0" && "$DET_RAW_SQL" != "1" ]]; then
 fi
 if [[ "$DET_EVENT_BLOCK_FASTPATH" != "0" && "$DET_EVENT_BLOCK_FASTPATH" != "1" ]]; then
   echo "ERROR: --det-event-block-fastpath must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$GATEWAY_STALL_WATCHDOG" != "0" && "$GATEWAY_STALL_WATCHDOG" != "1" ]]; then
+  echo "ERROR: GATEWAY_STALL_WATCHDOG must be 0 or 1" >&2
+  exit 2
+fi
+if [[ ! "$GATEWAY_STALL_POLL_SECONDS" =~ ^[0-9]+$ || "$GATEWAY_STALL_POLL_SECONDS" -lt 1 ]]; then
+  echo "ERROR: GATEWAY_STALL_POLL_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "$GATEWAY_STALL_MAX_CYCLES" =~ ^[0-9]+$ || "$GATEWAY_STALL_MAX_CYCLES" -lt 1 ]]; then
+  echo "ERROR: GATEWAY_STALL_MAX_CYCLES must be a positive integer" >&2
   exit 2
 fi
 if [[ "$DET_PREFIXED_DIRECT_PARALLEL" != "0" && "$DET_PREFIXED_DIRECT_PARALLEL" != "1" ]]; then
@@ -902,14 +981,14 @@ watchdog_query_node() {
 
 # ===========================================================================
 # Function: start_fastpath_watchdog
-# Description: Starts the background watchdog process for hang detection
+# Description: Starts the background gateway progress watchdog.
 # ===========================================================================
 start_fastpath_watchdog() {
   local gw_pid="$1"
   local tail_pid="$2"
 
-  if [[ "$DET_EVENT_BLOCK_FASTPATH" == "1" && "$ENABLE_FASTPATH_WATCHDOG" == "1" ]]; then
-    log "  Starting cluster fastpath hang-detection watchdog (10s poll, 60s timeout)..."
+  if [[ "$GATEWAY_STALL_WATCHDOG" == "1" ]]; then
+    log "  Starting gateway progress watchdog (${GATEWAY_STALL_POLL_SECONDS}s poll, ${GATEWAY_STALL_MAX_CYCLES} stalled samples max)..."
     (
       last_watchdog_completed_val="0"
       declare -a last_nodes_committed
@@ -919,7 +998,7 @@ start_fastpath_watchdog() {
       stuck_cycles=0
 
       while true; do
-        sleep 10
+        sleep "$GATEWAY_STALL_POLL_SECONDS"
 
         # Check if gateway process is still alive. If it exited, watchdog should exit.
         if ! kill -0 "$gw_pid" 2>/dev/null; then
@@ -952,14 +1031,34 @@ start_fastpath_watchdog() {
           for idx in "${!NODE_IDS[@]}"; do
             status_str+="${NODE_NAMES[$idx]}:${current_nodes_committed[$idx]} "
           done
-          log "WATCHDOG: No progress in 10s (GW completed: $current_completed_val, nodes: $status_str, cycle $stuck_cycles)."
-          if [[ "$stuck_cycles" -ge 6 ]]; then
-            log "WATCHDOG: System stalled for 60s. Triggering bcdb_gate_diagnostics()...."
+          log "WATCHDOG: No completed progress in ${GATEWAY_STALL_POLL_SECONDS}s (GW completed: $current_completed_val, nodes: $status_str, cycle $stuck_cycles/$GATEWAY_STALL_MAX_CYCLES)."
+          if [[ "$stuck_cycles" -ge "$GATEWAY_STALL_MAX_CYCLES" ]]; then
+            stall_seconds=$(( GATEWAY_STALL_POLL_SECONDS * GATEWAY_STALL_MAX_CYCLES ))
+            log "WATCHDOG: Gateway completion stalled for ${stall_seconds}s. Triggering bcdb_gate_diagnostics() and terminating run."
 
-            # Save diagnostics SQL output to files under log directory
+            # Collect current diagnostic logs from every node before sending SIGTERM
+            log "WATCHDOG: Collecting diagnostics from all nodes before SIGTERM..."
             for idx in "${!NODE_IDS[@]}"; do
               nip="${NODE_IPS[$idx]}"
+              id="${NODE_IDS[$idx]}"
+
               watchdog_query_node "$idx" "SELECT bcdb_gate_diagnostics();" > "$LOG_DIR/gate_diagnostics_${nip}.txt" 2>&1 || true
+              watchdog_query_node "$idx" "SELECT * FROM pg_stat_activity;" > "$LOG_DIR/pg_stat_activity_${nip}.txt" 2>&1 || true
+              watchdog_query_node "$idx" "SELECT * FROM pg_locks;" > "$LOG_DIR/pg_locks_${nip}.txt" 2>&1 || true
+
+              node_ssh "$idx" "
+                awk '/RUN_MARKER/{flag=1} flag' '$REMOTE_LOG_DIR/server_node${id}.log' > '/tmp/server_node${id}_marker.log' 2>/dev/null || true
+                awk '/RUN_MARKER/{flag=1} flag' '$REMOTE_REPO_ROOT/server.log' > '/tmp/postgres_node${id}_marker.log' 2>/dev/null || true
+                echo '=== Active ariabc_pg_server PIDs ===' > '/tmp/server_node${id}_pids.txt'
+                pgrep -a -f 'ariabc_pg_server' >> '/tmp/server_node${id}_pids.txt' || true
+              " >/dev/null 2>&1 || true
+
+              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+                "${NODE_USERS[$idx]}@$nip:/tmp/server_node${id}_marker.log" "$LOG_DIR/server_node${id}_${nip}_from_marker.log" 2>/dev/null || true
+              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+                "${NODE_USERS[$idx]}@$nip:/tmp/postgres_node${id}_marker.log" "$LOG_DIR/postgres_node${id}_${nip}_from_marker.log" 2>/dev/null || true
+              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+                "${NODE_USERS[$idx]}@$nip:/tmp/server_node${id}_pids.txt" "$LOG_DIR/server_node${id}_${nip}_pids.txt" 2>/dev/null || true
             done
 
             # Save last progress line
@@ -994,6 +1093,7 @@ start_fastpath_watchdog() {
             exit 124
           fi
         else
+          log "WATCHDOG: Completed progress advanced $last_watchdog_completed_val -> $current_completed_val; resetting stall timer."
           last_watchdog_completed_val="$current_completed_val"
           for idx in "${!NODE_IDS[@]}"; do
             val="${current_nodes_committed[$idx]}"
@@ -1124,6 +1224,20 @@ node_rsync_install() {
   sshpass -p "$CLUSTER_PASSWORD" rsync -az --delete \
     -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
     "$LOCAL_INSTALL_DIR/" "$user@$ip:$REMOTE_INSTALL_DIR/"
+}
+
+node_rsync_ariabc_bins() {
+  local idx="$1"
+  local ip="${NODE_IPS[$idx]}"
+  local user="${NODE_USERS[$idx]}"
+  [[ -x "$LOCAL_BIN/ariabc_pg_server" ]] || die "local server binary missing: $LOCAL_BIN/ariabc_pg_server"
+  [[ -x "$LOCAL_BIN/ariabc_pg_gateway" ]] || die "local gateway binary missing: $LOCAL_BIN/ariabc_pg_gateway"
+  node_ssh "$idx" "mkdir -p '$REMOTE_REPO_ROOT/ariabc_pg/build/bin'"
+  sshpass -p "$CLUSTER_PASSWORD" rsync -az --delete \
+    -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    "$LOCAL_BIN/ariabc_pg_server" \
+    "$LOCAL_BIN/ariabc_pg_gateway" \
+    "$user@$ip:$REMOTE_REPO_ROOT/ariabc_pg/build/bin/"
 }
 
 
@@ -1280,6 +1394,9 @@ git -C "$REPO_ROOT" status --short \
   printf 'postgres_sha256=%s\n' "$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'ariabc_os_profile=%s\n' "${ARIABC_OS_PROFILE:-0}"
   printf 'bcdb_gate_telemetry=%s\n' "${BCDB_GATE_TELEMETRY:-0}"
+  printf 'ariabc_safe_postcommit_witness=%s\n' "${ARIABC_SAFE_POSTCOMMIT_WITNESS:-}"
+  printf 'ariabc_safe_external_probe=%s\n' "${ARIABC_SAFE_EXTERNAL_PROBE:-}"
+  printf 'ariabc_safe_trace=%s\n' "${ARIABC_SAFE_TRACE:-}"
 } >> "$LOG_DIR/run_meta.env"
 
 
@@ -1342,28 +1459,31 @@ if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
   fi
 fi
 
+if [[ "$STOP_ONLY" -eq 1 ]]; then
+  log "=== Stop-only cleanup complete ==="
+  trap - EXIT
+  exit 0
+fi
+
 # --- preserve-mode prerequisite check ---
-# Note: commented out since RAFT_STORAGE_ACTION=preserve is strictly blocked
-# at the start of this script (until PostgreSQL replay/idempotency is implemented).
-#
-# if [[ "$RAFT_STORAGE_MODE" == "durable" && "$RAFT_STORAGE_ACTION" == "preserve" ]]; then
-#   log "=== Phase 0 (preserve check): Verifying recovery prerequisites on all nodes ==="
-#   for idx in "${!NODE_IDS[@]}"; do
-#     id="${NODE_IDS[$idx]}"
-#     name="${NODE_NAMES[$idx]}"
-#     node_ssh "$idx" "
-#       TARGET_DIR=\"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\"
-#       for f in identity.bin srv_state.bin cluster_config.bin log/manifest.bin; do
-#         if [[ ! -f \"\$TARGET_DIR/\$f\" ]]; then
-#           echo \"PRESERVE_PREREQ_FAIL: \$TARGET_DIR/\$f is missing on $name\" >&2
-#           exit 1
-#         fi
-#       done
-#       echo \"[Preserve check] node$id prerequisites OK at \$TARGET_DIR\"
-#     " || die "Preserve prerequisite check failed for node $id on $name — use RAFT_STORAGE_ACTION=fresh for a new cluster"
-#   done
-#   log "  Preserve prerequisites verified on all nodes"
-# fi
+if [[ "$RAFT_STORAGE_MODE" == "durable" && "$RAFT_STORAGE_ACTION" == "preserve" ]]; then
+  log "=== Phase 0 (preserve check): Verifying recovery prerequisites on all nodes ==="
+  for idx in "${!NODE_IDS[@]}"; do
+    id="${NODE_IDS[$idx]}"
+    name="${NODE_NAMES[$idx]}"
+    node_ssh "$idx" "
+      TARGET_DIR=\"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\"
+      for f in identity.bin srv_state.bin cluster_config.bin log/manifest.bin; do
+        if [[ ! -f \"\$TARGET_DIR/\$f\" ]]; then
+          echo \"PRESERVE_PREREQ_FAIL: \$TARGET_DIR/\$f is missing on $name\" >&2
+          exit 1
+        fi
+      done
+      echo \"[Preserve check] node$id prerequisites OK at \$TARGET_DIR\"
+    " || die "Preserve prerequisite check failed for node $id on $name — use RAFT_STORAGE_ACTION=fresh for a new cluster"
+  done
+  log "  Preserve prerequisites verified on all nodes"
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 0.5: Ensure librdkafka v2.3.0 on all nodes (source-built, no root needed)
@@ -1470,6 +1590,19 @@ _compute_src_hash() {
   } | sha256sum | awk '{print $1}'
 }
 
+_compute_src_fingerprint() {
+  (
+    cd "$REPO_ROOT"
+    {
+      find src ariabc_pg \
+        \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
+        -not -path '*/build/*' -not -path '*/.git/*' \
+        -exec sha256sum {} \; 2>/dev/null | sort
+      echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
+    } | sha256sum | awk '{print $1}'
+  )
+}
+
 if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
   log "  Computing source hash to check if rebuild is needed..."
   _current_hash="$(_compute_src_hash)"
@@ -1486,57 +1619,104 @@ fi
 
 if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
   log "=== Phase 0.8: Rebuild local canonical install/binaries ==="
-  local_globals="$REPO_ROOT/src/include/bcdb/globals.h"
-  [[ -f "$local_globals" ]] || die "missing local globals header: $local_globals"
-  current_ring_capacity="$(sed -n -E 's/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+([0-9]+).*/\1/p' "$local_globals" | head -n 1)"
-  if [[ "$current_ring_capacity" != "$RESULT_RING_CAPACITY" ]]; then
-    sed -i -E "s/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+[0-9]+/#define BCDB_RESULT_RING_CAPACITY $RESULT_RING_CAPACITY/" "$local_globals"
-  fi
-
-  log "  Rebuilding local PostgreSQL install at $LOCAL_INSTALL_DIR with BCDB_RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
-  chmod +x "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh"
-  bash "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh" \
-    --repo-root "$REPO_ROOT" \
-    --install-dir "$LOCAL_INSTALL_DIR" \
-    --force-rebuild \
-    --clean-when-rebuild \
-    2>&1 | sed 's/^/[local-install] /'
-
-  RDKAFKA_LOCAL="$HOME/Desktop/rdkafka_local"
-  LOCAL_KAFKA_CMAKE_OPT="-DKAFKA_OPTIONAL=ON"
-  if [[ "$NO_KAFKA" -eq 0 ]]; then
-    if [[ -f "$RDKAFKA_LOCAL/lib/librdkafka.so" && -f "$RDKAFKA_LOCAL/include/librdkafka/rdkafka.h" ]]; then
-      LOCAL_KAFKA_CMAKE_OPT="-DRDKAFKA_INCLUDE_DIR=$RDKAFKA_LOCAL/include -DRDKAFKA_LIBRARY=$RDKAFKA_LOCAL/lib/librdkafka.so"
-    else
-      die "Kafka requested but local $RDKAFKA_LOCAL is missing; rerun without --skip-rdkafka-setup or install rdkafka_local"
+  LOCAL_BUILD_LOG="$LOG_DIR/build_local_gateway.log"
+  (
+    set -euo pipefail
+    local_globals="$REPO_ROOT/src/include/bcdb/globals.h"
+    [[ -f "$local_globals" ]] || die "missing local globals header: $local_globals"
+    current_ring_capacity="$(sed -n -E 's/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+([0-9]+).*/\1/p' "$local_globals" | head -n 1)"
+    if [[ "$current_ring_capacity" != "$RESULT_RING_CAPACITY" ]]; then
+      sed -i -E "s/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+[0-9]+/#define BCDB_RESULT_RING_CAPACITY $RESULT_RING_CAPACITY/" "$local_globals"
     fi
-  fi
 
-  log "  Configuring local ariabc_pg build against $LOCAL_INSTALL_DIR"
-  cmake -S "$REPO_ROOT/ariabc_pg" -B "$REPO_ROOT/ariabc_pg/build" \
-    -DCMAKE_BUILD_TYPE=Release \
-    $LOCAL_KAFKA_CMAKE_OPT \
-    -DLIBPQ_INCLUDE_DIR="$LOCAL_INSTALL_DIR/include" \
-    -DPOSTGRES_INCLUDE_DIR="$LOCAL_INSTALL_DIR/include/postgresql/server" \
-    -DLIBPQ_LIBRARY="$LOCAL_INSTALL_DIR/lib/libpq.so" \
-    >/dev/null
+    log "  Rebuilding local PostgreSQL install at $LOCAL_INSTALL_DIR with BCDB_RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
+    chmod +x "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh"
+    bash "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh" \
+      --repo-root "$REPO_ROOT" \
+      --install-dir "$LOCAL_INSTALL_DIR" \
+      --force-rebuild \
+      --clean-when-rebuild \
+      2>&1 | sed 's/^/[local-install] /'
 
-  log "  Building local ariabc_pg_gateway and ariabc_pg_server"
-  cmake --build "$REPO_ROOT/ariabc_pg/build" --target ariabc_pg_gateway ariabc_pg_server -j"$(nproc)" \
-    2>&1 | tail -20
-  # Save build stamp so next run can auto-skip if source unchanged
-  [[ -n "${_BUILD_HASH_TO_SAVE:-}" ]] && echo "$_BUILD_HASH_TO_SAVE" > "$BUILD_STAMP_FILE"
+    RDKAFKA_LOCAL="$HOME/Desktop/rdkafka_local"
+    LOCAL_KAFKA_CMAKE_OPT="-DKAFKA_OPTIONAL=ON"
+    if [[ "$NO_KAFKA" -eq 0 ]]; then
+      if [[ -f "$RDKAFKA_LOCAL/lib/librdkafka.so" && -f "$RDKAFKA_LOCAL/include/librdkafka/rdkafka.h" ]]; then
+        LOCAL_KAFKA_CMAKE_OPT="-DRDKAFKA_INCLUDE_DIR=$RDKAFKA_LOCAL/include -DRDKAFKA_LIBRARY=$RDKAFKA_LOCAL/lib/librdkafka.so"
+      else
+        die "Kafka requested but local $RDKAFKA_LOCAL is missing; rerun without --skip-rdkafka-setup or install rdkafka_local"
+      fi
+    fi
+
+    log "  Configuring local ariabc_pg build against $LOCAL_INSTALL_DIR"
+    cmake -S "$REPO_ROOT/ariabc_pg" -B "$REPO_ROOT/ariabc_pg/build" \
+      -DCMAKE_BUILD_TYPE=Release \
+      $LOCAL_KAFKA_CMAKE_OPT \
+      -DLIBPQ_INCLUDE_DIR="$LOCAL_INSTALL_DIR/include" \
+      -DPOSTGRES_INCLUDE_DIR="$LOCAL_INSTALL_DIR/include/postgresql/server" \
+      -DLIBPQ_LIBRARY="$LOCAL_INSTALL_DIR/lib/libpq.so" \
+      >/dev/null
+
+    log "  Building local ariabc_pg_gateway and ariabc_pg_server"
+    cmake --build "$REPO_ROOT/ariabc_pg/build" --target ariabc_pg_gateway ariabc_pg_server -j"$(nproc)" \
+      2>&1 | tail -20
+    # Save build stamp so next run can auto-skip if source unchanged
+    [[ -n "${_BUILD_HASH_TO_SAVE:-}" ]] && echo "$_BUILD_HASH_TO_SAVE" > "$BUILD_STAMP_FILE"
+  ) >"$LOCAL_BUILD_LOG" 2>&1 &
+  LOCAL_BUILD_PID=$!
+  log "  [local] build launched in background (pid $LOCAL_BUILD_PID, log: $LOCAL_BUILD_LOG)"
 fi
+
+wait_local_canonical_build() {
+  [[ -n "${LOCAL_BUILD_PID:-}" ]] || return 0
+  local pid="$LOCAL_BUILD_PID"
+  local log_file="${LOCAL_BUILD_LOG:-$LOG_DIR/build_local_gateway.log}"
+  LOCAL_BUILD_PID=""
+  log "  Waiting for local gateway/install build (pid $pid)..."
+  if wait "$pid"; then
+    log "  [local] build complete"
+    tail -20 "$log_file" | sed 's/^/  [local] /' || true
+  else
+    log "  [local] build FAILED — see $log_file"
+    tail -60 "$log_file" | sed 's/^/  [local] /' || true
+    die "Phase 0.8 local build failed"
+  fi
+}
+
+sync_u24_installs() {
+  [[ "$SKIP_SYNC" -eq 0 ]] || return 0
+  declare -a U24_INSTALL_PIDS=()
+  declare -a U24_INSTALL_NAMES=()
+  for idx in "${!NODE_IDS[@]}"; do
+    is_u22="${NODE_IS_U22[$idx]}"
+    [[ "$is_u22" -eq 1 ]] && continue
+    name="${NODE_NAMES[$idx]}"
+    log "  Syncing rebuilt local install and C++ binaries to $name in background"
+    ( node_rsync_install "$idx"; node_rsync_ariabc_bins "$idx" ) &
+    U24_INSTALL_PIDS+=("$!")
+    U24_INSTALL_NAMES+=("$name")
+  done
+  local install_ok=1
+  for i in "${!U24_INSTALL_PIDS[@]}"; do
+    if wait "${U24_INSTALL_PIDS[$i]}"; then
+      log "  [${U24_INSTALL_NAMES[$i]}] install/binary sync done"
+    else
+      log "  [${U24_INSTALL_NAMES[$i]}] install sync FAILED"
+      install_ok=0
+    fi
+  done
+  [[ "$install_ok" -eq 1 ]] || die "U24 install/binary sync failed on one or more nodes"
+}
 
 # ---------------------------------------------------------------------------
 # Phase 1: Sync source files
 # Sync the full working tree so BCDB/PostgreSQL backend changes are not lost.
-# Phase 0.8 rebuilds the local U24-consumed install/binaries; Phase 1.5
-# rebuilds U22 nodes on-host so all replicas run the same PostgreSQL-side
-# constants and Kafka-capable server code.
+# Phase 0.8 starts the local U24-consumed install/binary build in the
+# background; Phase 1.5 waits for that artifact only when it is time to publish
+# it to U24 nodes, while U22 nodes build on-host in parallel.
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_SYNC" -eq 0 ]]; then
-  log "=== Phase 1: Sync source and binaries (parallel) ==="
+  log "=== Phase 1: Sync source and workload files (parallel) ==="
 
   declare -a SYNC_PIDS=()
   declare -a SYNC_NAMES=()
@@ -1547,8 +1727,9 @@ if [[ "$SKIP_SYNC" -eq 0 ]]; then
     (
       node_ssh "$idx" "mkdir -p '$REMOTE_REPO_ROOT' '$REMOTE_INSTALL_DIR'" || true
       node_rsync_repo "$idx"
-      if [[ "$is_u22" -eq 0 ]]; then
+      if [[ "$is_u22" -eq 0 && -z "${LOCAL_BUILD_PID:-}" ]]; then
         node_rsync_install "$idx"
+        node_rsync_ariabc_bins "$idx"
       fi
       if [[ -f "$WORKLOAD_FILE" ]]; then
         node_rsync_to "$idx" "$WORKLOAD_FILE" "$REMOTE_REPO_ROOT/scripts/cluster_test_workload.sql"
@@ -1574,14 +1755,14 @@ if [[ "$SKIP_SYNC" -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 1.5: Rebuild Ubuntu 22.04 nodes on-host.
+# Phase 1.5: Rebuild Ubuntu 22.04 nodes on-host and publish U24 artifacts.
 # Ubuntu 24.04 nodes use the synced local install/binary rebuilt in Phase 0.8.
 # They intentionally do not rebuild on-host because at least admin123 does not
 # have the full build tool chain installed. Phase 3 verifies the recovered
 # 1024-slot result ring before any measurement is trusted.
 # ---------------------------------------------------------------------------
 if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
-  log "=== Phase 1.5: Build on Ubuntu 22.04 nodes (user4, new-node) — parallel ==="
+  log "=== Phase 1.5: Build U22 nodes and sync U24 install artifacts (parallel) ==="
 
   # Pre-flight: resolve rdkafka cmake options PER NODE before backgrounding
   # (node_ssh in a subshell is fine; we just can't let die() from a subshell
@@ -1681,6 +1862,9 @@ BUILDSSH
     log "  [$name] build launched (pid $!, log: $build_log)"
   done
 
+  wait_local_canonical_build
+  sync_u24_installs
+
   # Wait for all parallel U22 builds
   U22_ALL_OK=1
   for i in "${!U22_BUILD_PIDS[@]}"; do
@@ -1711,39 +1895,73 @@ local_git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown
 local_gateway_sha="$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
 local_server_sha="$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
 local_postgres_sha="$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
+local_src_fingerprint="$(_compute_src_fingerprint)"
 log "  local git_head=$local_git_head"
 log "  local ariabc_pg_gateway_sha256=$local_gateway_sha path=$LOCAL_BIN/ariabc_pg_gateway"
 log "  local ariabc_pg_server_sha256=$local_server_sha path=$LOCAL_BIN/ariabc_pg_server"
 log "  local postgres_sha256=$local_postgres_sha path=$LOCAL_INSTALL_DIR/bin/postgres"
+log "  local source_fingerprint=$local_src_fingerprint"
+
+if [[ "$local_gateway_sha" == "missing" || "$local_server_sha" == "missing" ]]; then
+  die "local ariabc_pg binaries are missing; cannot prove binary provenance"
+fi
 
 {
   printf 'local_git_head=%s\n' "$local_git_head"
   printf 'local_ariabc_pg_gateway_sha256=%s\n' "$local_gateway_sha"
   printf 'local_ariabc_pg_server_sha256=%s\n' "$local_server_sha"
   printf 'local_postgres_sha256=%s\n' "$local_postgres_sha"
+  printf 'local_source_fingerprint=%s\n' "$local_src_fingerprint"
 } > "$LOG_DIR/build_provenance.env"
 
+binary_provenance_ok=1
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
   is_u22="${NODE_IS_U22[$idx]}"
-  [[ "$is_u22" -eq 1 ]] && srv_bin="$REMOTE_BIN_U22" || srv_bin="$REMOTE_BIN_U24"
+  if [[ "$is_u22" -eq 1 ]]; then
+    srv_bin="$REMOTE_BIN_U22"
+    gw_path="$REMOTE_GATEWAY_BIN_U22"
+  else
+    srv_bin="$REMOTE_BIN_U24"
+    gw_path="$REMOTE_GATEWAY_BIN_U24"
+  fi
   log "  [$name] provenance:"
   prov_output=$(node_ssh "$idx" "
     git_head=\$(git -C '$REMOTE_REPO_ROOT' rev-parse HEAD 2>/dev/null || echo unknown)
     srv_sha=\$(sha256sum '$srv_bin' 2>/dev/null | awk '{print \$1}' || echo missing)
-    gw_path='$REMOTE_REPO_ROOT/ariabc_pg/build/bin/ariabc_pg_gateway'
-    if [[ '$is_u22' -eq 1 ]]; then
-      gw_path='/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_gateway'
-    fi
-    gw_sha=\$(sha256sum \"\$gw_path\" 2>/dev/null | awk '{print \$1}' || echo missing)
+    gw_sha=\$(sha256sum '$gw_path' 2>/dev/null | awk '{print \$1}' || echo missing)
     pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
+    src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
     echo \"git_head=\$git_head\"
+    echo \"ariabc_pg_server_path=$srv_bin\"
     echo \"ariabc_pg_server_sha256=\$srv_sha\"
+    echo \"ariabc_pg_gateway_path=$gw_path\"
     echo \"ariabc_pg_gateway_sha256=\$gw_sha\"
     echo \"postgres_sha256=\$pg_sha\"
+    echo \"source_fingerprint=\$src_fp\"
   " 2>/dev/null)
 
   echo "$prov_output" | sed "s/^/    /"
+  node_server_sha="$(echo "$prov_output" | sed -n 's/^ariabc_pg_server_sha256=//p' | tail -1)"
+  node_gateway_sha="$(echo "$prov_output" | sed -n 's/^ariabc_pg_gateway_sha256=//p' | tail -1)"
+  node_src_fingerprint="$(echo "$prov_output" | sed -n 's/^source_fingerprint=//p' | tail -1)"
+
+  if [[ "$is_u22" -eq 0 ]]; then
+    if [[ "$node_server_sha" != "$local_server_sha" ||
+          "$node_gateway_sha" != "$local_gateway_sha" ]]; then
+      log "  [${name}] BINARY_PROVENANCE_FAIL: U24 executable SHA mismatch"
+      binary_provenance_ok=0
+    fi
+  else
+    if [[ "$node_src_fingerprint" != "$local_src_fingerprint" ]]; then
+      log "  [${name}] BINARY_PROVENANCE_FAIL: U22 source fingerprint mismatch"
+      binary_provenance_ok=0
+    fi
+    if [[ "$node_server_sha" == "missing" || "$node_gateway_sha" == "missing" ]]; then
+      log "  [${name}] BINARY_PROVENANCE_FAIL: U22 executable missing"
+      binary_provenance_ok=0
+    fi
+  fi
 
   {
     echo "$prov_output" | while read -r line; do
@@ -1753,6 +1971,16 @@ for idx in "${!NODE_IDS[@]}"; do
     done
   } >> "$LOG_DIR/build_provenance.env"
 done
+
+if [[ "$binary_provenance_ok" -eq 1 ]]; then
+  log "BINARY_PROVENANCE_PASS=1"
+  printf 'BINARY_PROVENANCE_PASS=1\n' >> "$LOG_DIR/build_provenance.env"
+  printf 'BINARY_PROVENANCE_PASS=1\n' >> "$LOG_DIR/run_meta.env"
+else
+  printf 'BINARY_PROVENANCE_PASS=0\n' >> "$LOG_DIR/build_provenance.env"
+  printf 'BINARY_PROVENANCE_PASS=0\n' >> "$LOG_DIR/run_meta.env"
+  die "binary provenance check failed before Phase 4"
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 1.8: Clock Validity Preflight
@@ -1897,12 +2125,14 @@ for idx in "${!NODE_IDS[@]}"; do
   PG3_STATUS_FILES+=("$pg3_status_file")
   (
   status_line="$(node_ssh "$idx" "
+    ulimit -c unlimited || true
     INSTALL_DIR='$REMOTE_INSTALL_DIR'
     PGDATA='$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata'
     BIN=\$INSTALL_DIR/bin
     export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
     export BCDB_BLOCK_PROFILE='$BCDB_BLOCK_PROFILE'
     export BCDB_BLOCK_WAIT_WATERMARK='$BCDB_BLOCK_WAIT_WATERMARK'
+    export BCDB_BLOCK_RETURN_ACTUAL_RESULTS='$BCDB_BLOCK_RETURN_ACTUAL_RESULTS'
     export BCDB_POLL_MAX_US='$BCDB_POLL_MAX_US'
     export BCDB_DT_PARSE_BARRIER='$BCDB_DT_PARSE_BARRIER'
     export BCDB_FLOW_DEBUG='$BCDB_FLOW_DEBUG'
@@ -1910,6 +2140,25 @@ for idx in "${!NODE_IDS[@]}"; do
     export BCDB_DECOUPLE_WORKERS='$BCDB_DECOUPLE_WORKERS'
     export BCDB_DT_LIGHT_SNAPSHOT='$BCDB_DT_LIGHT_SNAPSHOT'
     export BCDB_DT_SKIP_READONLY_GATE='$BCDB_DT_SKIP_READONLY_GATE'
+    export ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT:-}'
+    export ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT:-}'
+    export ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL='${ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL:-}'
+    export ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT:-}'
+    export ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE='${ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE:-}'
+    export ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH='${ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH:-}'
+    export ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK='${ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK:-}'
+    export ARIABC_SAFE_POSTCOMMIT_WITNESS='${ARIABC_SAFE_POSTCOMMIT_WITNESS:-}'
+    export ARIABC_SAFE_TRACE='${ARIABC_SAFE_TRACE:-}'
+    export ARIABC_RAFT_NODE_ID=\"${id}\"
+    export ARIABC_RAFT_CLUSTER_ID=\"$RAFT_CLUSTER_ID\"
+    export ARIABC_RAFT_EPOCH_HEX=\"$RAFT_EPOCH_HEX\"
+    if [[ -n \"$FAILPOINT_NODE_ID\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" && -n \"$FAILPOINT_ENV\" ]]; then
+      export \"$FAILPOINT_ENV=1\"
+      export ARIABC_FAILPOINT_NODE_ID=\"${id}\"
+      export ARIABC_FAILPOINT_RAFT_LOG_INDEX=\"$FAILPOINT_RAFT_LOG_INDEX\"
+      export ARIABC_FAILPOINT_ITEM_ORDINAL=\"$FAILPOINT_ITEM_ORDINAL\"
+      echo \"PG_FAILPOINT_ACTIVE: node ${id}: $FAILPOINT_ENV=1\"
+    fi
     > '$REMOTE_REPO_ROOT/server.log'
     if [[ -f \"\$PGDATA/postgresql.auto.conf\" ]]; then
       sed -i -E \"s/^(bcdb_result_ring_slots[[:space:]]*=[[:space:]]*)'?[0-9]+'?/\\1'$RESULT_RING_CAPACITY'/\" \"\$PGDATA/postgresql.auto.conf\"
@@ -1999,6 +2248,7 @@ for idx in "${!NODE_IDS[@]}"; do
       echo '  postgres not ready — clearing stale benchmark postmaster before start'
       hard_stop_benchmark_postgres
       echo '  attempting postgres start'
+      ulimit -c unlimited
       \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log' 2>&1 || echo 'start attempted'
       sleep 3
       \$BIN/pg_isready -h 127.0.0.1 -p $DB_PORT -U $DB_USER >/dev/null 2>&1 || {
@@ -2009,8 +2259,10 @@ for idx in "${!NODE_IDS[@]}"; do
     ensure_ready
     if [[ "$FORCE_PG_RESTART" -eq 1 ]]; then
       echo '  restarting postgres to clear stale benchmark backends'
+      ulimit -c unlimited
       if ! \$BIN/pg_ctl -D \$PGDATA -w -t 60 restart -l '$REMOTE_REPO_ROOT/server.log'; then
         hard_stop_benchmark_postgres
+        ulimit -c unlimited
         \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log'
       fi
       ensure_ready
@@ -2119,8 +2371,10 @@ for idx in "${!NODE_IDS[@]}"; do
       if [[ -z \"\$max_connections\" || \"\$max_connections\" -lt \"\$min_max_connections\" ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET max_connections = '\$min_max_connections';\"
       fi
+      ulimit -c unlimited
       if ! \$BIN/pg_ctl -D \$PGDATA -w -t 60 restart -l '$REMOTE_REPO_ROOT/server.log'; then
         hard_stop_benchmark_postgres
+        ulimit -c unlimited
         \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log'
       fi
       ensure_ready
@@ -2261,6 +2515,17 @@ for i in "${!ROLE_PIDS[@]}"; do
   wait "${ROLE_PIDS[$i]}" || die "failed to ensure role neel on ${ROLE_NAMES[$i]}"
 done
 
+log "  Writing PostgreSQL run markers on all nodes"
+for idx in "${!NODE_IDS[@]}"; do
+  id="${NODE_IDS[$idx]}"
+  name="${NODE_NAMES[$idx]}"
+  node_ssh "$idx" "
+    mkdir -p '$REMOTE_REPO_ROOT'
+    echo 'RUN_MARKER run_id=$RUN_ID cluster_id=$RAFT_CLUSTER_ID phase=postgres_ready node_id=$id started_at='\"\$(date -Is)\" >> '$REMOTE_REPO_ROOT/server.log'
+    echo 'RUN_MARKER run_start_epoch=$RUN_START_EPOCH' >> '$REMOTE_REPO_ROOT/server.log'
+  " >/dev/null || log "  WARNING: failed to write PostgreSQL run marker on $name"
+done
+
 # ---------------------------------------------------------------------------
 # Phase 3.5: Restore benchmark table state on all configured nodes
 # The distributed run is meaningful only if every replica starts from the same
@@ -2294,6 +2559,35 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
   [[ "$RESTORE_ALL_OK" -eq 1 ]] || die "Phase 3.5 restore failed on one or more nodes"
 else
   log "=== Phase 3.5: Restore skipped (--skip-restore) ==="
+fi
+
+# ---------------------------------------------------------------------------
+# Phase 3.8: Bootstrap AriaBC Apply Ledger Schema and Epoch on all nodes
+# ---------------------------------------------------------------------------
+if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
+  log "=== Phase 3.8: Bootstrapping AriaBC Apply Ledger Schema and Epoch on all ${#NODE_IDS[@]} nodes (parallel) ==="
+  [[ -n "$RAFT_EPOCH_HEX" ]] || die "RAFT_EPOCH_HEX must be provided when RAFT_APPLY_LEDGER_MODE=safe"
+  declare -a BOOTSTRAP_PIDS=()
+  for idx in "${!NODE_IDS[@]}"; do
+    name="${NODE_NAMES[$idx]}"
+    log "  Bootstrapping apply ledger on $name"
+    EXTRA_CLEAN_ARG=""
+    if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
+      EXTRA_CLEAN_ARG="--clean"
+    fi
+    node_ssh "$idx" "
+      export PATH=\"$REMOTE_INSTALL_DIR/bin:\$PATH\"
+      export LD_LIBRARY_PATH=\"$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+      bash '$REMOTE_REPO_ROOT/scripts/distributed/bootstrap_raft_apply_ledger.sh' \
+        --db '$DB_NAME' --port '$DB_PORT' --epoch '$RAFT_EPOCH_HEX' --user '$DB_USER' $EXTRA_CLEAN_ARG
+    " &
+    BOOTSTRAP_PIDS+=("$!")
+  done
+  BOOTSTRAP_ALL_OK=1
+  for i in "${!BOOTSTRAP_PIDS[@]}"; do
+    wait "${BOOTSTRAP_PIDS[$i]}" || { log "  bootstrap FAILED on ${NODE_NAMES[$i]}"; BOOTSTRAP_ALL_OK=0; }
+  done
+  [[ "$BOOTSTRAP_ALL_OK" -eq 1 ]] || die "Phase 3.8 bootstrap failed on one or more nodes"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2355,6 +2649,10 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    mkdir -p '$REMOTE_LOG_DIR'
 	    rm -f '$REMOTE_SRV_LOG'
 	    rm -f '/home/neel/ariabc_pg_srv${id}.log'
+	    {
+	      echo 'RUN_MARKER run_id=$RUN_ID cluster_id=$RAFT_CLUSTER_ID phase=server_start node_id=$id started_at='\"\$(date -Is)\"
+	      echo 'RUN_MARKER run_start_epoch=$RUN_START_EPOCH'
+	    } > '$REMOTE_SRV_LOG'
 	    export LD_LIBRARY_PATH='${NODE_LIB_PATH}:\${LD_LIBRARY_PATH:-}'
 	    export ARIABC_PROFILE='${ARIABC_PROFILE:-1}'
 	    if [[ \"$TEST_FAIL_ONCE\" == \"1\" ]]; then
@@ -2381,10 +2679,43 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    export ARIABC_PREFERRED_LEADER_ID='${ARIABC_PREFERRED_LEADER_ID}'
 	    export ARIABC_RAFT_ORDERED_FANOUT='${RAFT_ORDERED_FANOUT}'
 	    export ARIABC_DET_ORDER_START_SEQ='${DET_START_SEQ}'
+	    export ARIABC_RAFT_CLUSTER_ID='${RAFT_CLUSTER_ID}'
+	    export ARIABC_RAFT_EPOCH_HEX='${RAFT_EPOCH_HEX}'
+	    export ARIABC_RAFT_NODE_ID="\${id}"
 	    export BCDB_DT_COMPLETION_ONLY_SKIP_READS='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export BCDB_FLOW_DEBUG='${BCDB_FLOW_DEBUG}'
 	    export BCDB_DET_QUEUE_HIGH_WM='${BCDB_DET_QUEUE_HIGH_WM}'
 	    export BCDB_DET_QUEUE_LOW_WM='${BCDB_DET_QUEUE_LOW_WM}'
+	    # Failpoint injection: FAILPOINT_NODE_ID and FAILPOINT_ENV are baked in
+	    # from the local shell (like TEST_FAIL_ONCE) so they are always the literal
+	    # values, not remote shell variables.  The comparison is against \$id which
+	    # is a remote shell variable (the current node's Raft ID).
+	    if [[ -n \"$FAILPOINT_NODE_ID\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" && -n \"$FAILPOINT_ENV\" ]]; then
+	      export \"$FAILPOINT_ENV=1\"
+	      export ARIABC_FAILPOINT_NODE_ID=\"\${id}\"
+	      export ARIABC_RAFT_NODE_ID=\"\${id}\"
+	      export ARIABC_FAILPOINT_RAFT_LOG_INDEX=\"$FAILPOINT_RAFT_LOG_INDEX\"
+	      export ARIABC_FAILPOINT_ITEM_ORDINAL=\"$FAILPOINT_ITEM_ORDINAL\"
+	      echo \"FAILPOINT_ACTIVE: node \${id}: $FAILPOINT_ENV=1\"
+	    fi
+	    # Export each named failpoint — but only if it is NOT the injected one
+	    # (so the injection above is not overwritten to empty).
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	      export ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT:-}'
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	      export ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT:-}'
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	      export ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE='${ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE:-}'
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	      export ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL='${ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL:-}'
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	      export ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT:-}'
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	      export ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH='${ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH:-}'
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	      export ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK='${ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK:-}'
+	    export ARIABC_SAFE_EXTERNAL_PROBE='${ARIABC_SAFE_EXTERNAL_PROBE:-}'
+	    export ARIABC_SAFE_TRACE='${ARIABC_SAFE_TRACE:-}'
 	    nohup '$srv_bin' \
       --id $id \
       --raftEndpoint ${ip}:${RAFT_PORT} \
@@ -2402,8 +2733,10 @@ for start_pos in "${!START_ORDER[@]}"; do
       --raft-storage-mode $RAFT_STORAGE_MODE \
       --raft-storage-dir \"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\" \
       --raft-cluster-id $RAFT_CLUSTER_ID \
+      --raft-apply-ledger $RAFT_APPLY_LEDGER_MODE \
+      --raft-epoch-hex \"$RAFT_EPOCH_HEX\" \
       $KAFKA_ARGS \
-      >'$REMOTE_SRV_LOG' 2>&1 &
+      >>'$REMOTE_SRV_LOG' 2>&1 &
     echo \"started pid=\$!\"
   " 2>&1 | sed "s/^/  [$name] /"
   if [[ "$ARIABC_PREFERRED_LEADER_ID" -gt 0 && "$start_pos" -eq 0 ]]; then
@@ -2412,6 +2745,7 @@ for start_pos in "${!START_ORDER[@]}"; do
 done
 
 log "  All ${#NODE_IDS[@]} server launch commands sent"
+phase_marker "PHASE_4_SERVERS_STARTED"
 
 # ---------------------------------------------------------------------------
 # Phase 5: Wait for Raft cluster to stabilize
@@ -2451,6 +2785,10 @@ if [[ "$BYPASS_RAFT" -eq 1 ]]; then
   sleep 2
 else
   sleep 5  # Let Raft elect a leader and stabilize
+fi
+
+if [[ "$ALL_UP" -eq 1 ]]; then
+  phase_marker "PHASE_5_CLUSTER_READY"
 fi
 
 # Check for bcdb_init success on the leader node (any node that started)
@@ -2555,6 +2893,7 @@ log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM"
 log "  DET ids:       detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS connFanout=$CONN_FANOUT raftOrderedFanout=$RAFT_ORDERED_FANOUT broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+phase_marker "PHASE_6_WORKLOAD_STARTED"
 # Print a clear banner that distinguishes pipeline-depth from real OS parallelism
 # so this output can be compared honestly against the single-node Python script:
 #   pipeline   → N terminal lanes / single reactor (DET window grows, not OS threads)
@@ -2637,7 +2976,6 @@ fi
 # ---------------------------------------------------------------------------
 MAIN_PID=$$
 WATCHDOG_PID=""
-ENABLE_FASTPATH_WATCHDOG="${ENABLE_FASTPATH_WATCHDOG:-0}"
 
 if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
   # Run gateway in the background and capture its PID
@@ -2660,6 +2998,8 @@ if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
     --clientId "cluster-ycsb" \
     --numTerminals "$NUM_TERMINALS" \
     --connFanout "$CONN_FANOUT" \
+    --raft-epoch-hex "$RAFT_EPOCH_HEX" \
+    --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
     $GW_EXTRA_ARGS \
     > "$GW_LOG" 2>&1 &
   GW_PID=$!
@@ -2819,6 +3159,8 @@ else
       --clientId "cluster-ycsb-shard${s}" \
       --numTerminals 1 \
       --connFanout 1 \
+      --raft-epoch-hex "$RAFT_EPOCH_HEX" \
+      --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
       $GW_EXTRA_ARGS \
       >"$shard_log" 2>&1 &
     OSTH_PIDS+=("$!")
@@ -2857,7 +3199,7 @@ else
 fi
 
 if [[ -n "${WATCHDOG_PID:-}" ]]; then
-  log "  Stopping fastpath hang-detection watchdog (pid $WATCHDOG_PID)..."
+  log "  Stopping gateway progress watchdog (pid $WATCHDOG_PID)..."
   kill "$WATCHDOG_PID" 2>/dev/null || true
   wait "$WATCHDOG_PID" 2>/dev/null || true
 fi
@@ -2869,11 +3211,13 @@ ELAPSED=$(( END_S - START_S ))
 # so it finishes exactly when the test finishes.
 cleanup_os_profile
 
+phase_marker "PHASE_6_WORKLOAD_FINISHED"
 
 # ---------------------------------------------------------------------------
 # Phase 7: Results
 # ---------------------------------------------------------------------------
 log "=== Phase 7: Results ==="
+log "EXECUTION_PROFILE ledger_mode=${RAFT_APPLY_LEDGER_MODE} executor=${PG_EXEC_MODE} fastpath=${DET_EVENT_BLOCK_FASTPATH} prefixed_direct_parallel=${DET_PREFIXED_DIRECT_PARALLEL} ordering=${ORDERING_MODE} completion=kafka_${KAFKA_COMPLETION_MODE}"
 
   # Execute the python metrics parsing helper script
   python3 "$SCRIPT_DIR/parse_tps_metrics.py" \
@@ -3064,6 +3408,8 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     --detPipelineDepth 1 \
     --clientId "cluster-ycsb-marker" \
     --numTerminals 1 \
+    --raft-epoch-hex "$RAFT_EPOCH_HEX" \
+    --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
     $GW_EXTRA_ARGS \
     "${MARKER_EXTRA_ARGS[@]}" \
     2>&1 | tee "$MARKER_LOG"; then

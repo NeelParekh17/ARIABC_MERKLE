@@ -66,6 +66,7 @@ public:
     bool send_payload(const std::string& payload,
                       const std::string& key,
                       std::string& err);
+    bool wait_for_delivery(int timeout_ms, std::string& err);
 
     kafka_producer_stats stats() const;
     uint64_t delivery_pending() const;

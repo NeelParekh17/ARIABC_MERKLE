@@ -147,6 +147,7 @@ if [[ -n "$stray_pids" ]]; then
 fi
 
 _try_start_postgres() {
+  ulimit -c unlimited
   "$BIN_DIR/pg_ctl" -D "$PGDATA_DIR" -w -t 120 start -l "$REPO_ROOT/server.log" 2>&1
 }
 

@@ -241,8 +241,130 @@ target_link_libraries(durable_raft_external_sigkill_test
                        z
                        dl)
 
+add_executable(b4_codec_sig_test
+               tests/b4_codec_sig_test.cxx
+               src/pg_executor.cxx
+               src/ariabc_pg_gateway.cxx
+               src/async_cluster_submitter.cxx
+               src/kafka_console.cxx
+               src/wire_protocol.cxx
+               src/wire_protocol_async.cxx
+               src/raft_storage_common.cxx
+               src/durable_state_mgr.cxx
+               src/durable_log_store.cxx
+               src/logger.cc
+               src/in_memory_log_store.cxx)
+
+target_include_directories(b4_codec_sig_test
+                            PRIVATE
+                              ${ARIABC_COMMON_INC}
+                              ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
+                              ${LIBPQ_INCLUDE_DIR}
+                              ${POSTGRES_INCLUDE_DIR}
+                              ${RDKAFKA_INCLUDE_DIR})
+
+target_compile_definitions(b4_codec_sig_test PRIVATE ${ARIABC_TRANSPORT_DEFS} BUILDING_UNIT_TESTS)
+
+target_link_libraries(b4_codec_sig_test
+                      NuRaft::static_lib
+                      ${LIBPQ_LIBRARY}
+                      ${ARIABC_PG_KAFKA_LIBS}
+                      z
+                      dl)
+
 enable_testing()
 add_test(NAME durable_state_mgr_test COMMAND durable_state_mgr_test)
 add_test(NAME durable_log_store_test COMMAND durable_log_store_test)
 add_test(NAME durable_raft_cluster_smoke_test COMMAND durable_raft_cluster_smoke_test)
 add_test(NAME durable_raft_external_sigkill_test COMMAND durable_raft_external_sigkill_test)
+add_test(NAME b4_codec_sig_test COMMAND b4_codec_sig_test)
+
+add_executable(pg_state_machine_test
+               tests/pg_state_machine_test.cxx
+               src/pg_state_machine.cxx
+               src/pg_executor.cxx
+               src/kafka_console.cxx
+               src/wire_protocol.cxx)
+
+target_include_directories(pg_state_machine_test
+                            PRIVATE
+                              ${ARIABC_COMMON_INC}
+                              ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
+                              ${LIBPQ_INCLUDE_DIR}
+                              ${POSTGRES_INCLUDE_DIR}
+                              ${RDKAFKA_INCLUDE_DIR})
+
+target_compile_definitions(pg_state_machine_test PRIVATE ${ARIABC_TRANSPORT_DEFS} BUILDING_UNIT_TESTS)
+
+target_link_libraries(pg_state_machine_test
+                      NuRaft::static_lib
+                      ${LIBPQ_LIBRARY}
+                      ${ARIABC_PG_KAFKA_LIBS}
+                      z
+                      dl)
+add_test(NAME pg_state_machine_test COMMAND pg_state_machine_test)
+
+# P0-B: NuRaft durable apply contract test.
+# Proves the restart delivery guarantee that AriaBC relies on:
+#   - committed entries re-delivered after zero-prefix restart
+#   - uncommitted suffix never delivered
+#   - no-op/config entries advance prefix without application data
+#   - multi-entry ordered delivery maintained on restart
+#   - applied prefix cannot jump over a gap
+add_executable(durable_raft_pg_apply_contract_test
+               tests/durable_raft_pg_apply_contract_test.cxx
+               src/pg_state_machine.cxx
+               src/pg_executor.cxx
+               src/kafka_console.cxx
+               src/wire_protocol.cxx
+               src/raft_storage_common.cxx
+               src/durable_state_mgr.cxx
+               src/durable_log_store.cxx
+               src/logger.cc
+               src/in_memory_log_store.cxx)
+
+target_include_directories(durable_raft_pg_apply_contract_test
+                            PRIVATE
+                              ${ARIABC_COMMON_INC}
+                              ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
+                              ${LIBPQ_INCLUDE_DIR}
+                              ${POSTGRES_INCLUDE_DIR}
+                              ${RDKAFKA_INCLUDE_DIR})
+
+target_compile_definitions(durable_raft_pg_apply_contract_test PRIVATE ${ARIABC_TRANSPORT_DEFS} BUILDING_UNIT_TESTS)
+
+target_link_libraries(durable_raft_pg_apply_contract_test
+                      NuRaft::static_lib
+                      ${LIBPQ_LIBRARY}
+                      ${ARIABC_PG_KAFKA_LIBS}
+                      z
+                      dl)
+
+add_test(NAME durable_raft_pg_apply_contract_test COMMAND durable_raft_pg_apply_contract_test)
+
+# ============================================================================
+# durable_raft_restart_contract_test
+# P0-B (Real): proves NuRaft re-delivers committed entries after restart
+# using actual durable log storage.
+# ============================================================================
+add_executable(durable_raft_restart_contract_test
+               tests/durable_raft_restart_contract_test.cxx
+               src/raft_storage_common.cxx
+               src/durable_state_mgr.cxx
+               src/durable_log_store.cxx
+               src/logger.cc
+               src/in_memory_log_store.cxx)
+
+target_include_directories(durable_raft_restart_contract_test
+                            PRIVATE
+                              ${ARIABC_COMMON_INC}
+                              ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
+
+target_compile_definitions(durable_raft_restart_contract_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
+
+target_link_libraries(durable_raft_restart_contract_test
+                      NuRaft::static_lib
+                      z
+                      dl)
+
+add_test(NAME durable_raft_restart_contract_test COMMAND durable_raft_restart_contract_test)

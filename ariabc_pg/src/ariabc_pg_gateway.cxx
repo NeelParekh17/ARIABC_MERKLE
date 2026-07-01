@@ -71,6 +71,8 @@ struct gateway_options {
 
     std::string nodes_csv;
     std::string raft_node_ids_csv;
+    std::string raft_epoch_hex;
+    std::string raft_apply_ledger_mode = "off";
 
     std::string kafka_bootstrap;
     std::string result_topic = "topic2";
@@ -175,7 +177,7 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1]\n";
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>]\n";
 }
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
@@ -219,6 +221,10 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.nodes_csv = need("--nodes");
             } else if (a == "--raft-node-ids") {
                 opt.raft_node_ids_csv = need("--raft-node-ids");
+            } else if (a == "--raft-epoch-hex") {
+                opt.raft_epoch_hex = need("--raft-epoch-hex");
+            } else if (a == "--raft-apply-ledger") {
+                opt.raft_apply_ledger_mode = need("--raft-apply-ledger");
             } else if (a == "--kafkaBootstrap") {
                 opt.kafka_bootstrap = need("--kafkaBootstrap");
             } else if (a == "--resultTopic") {
@@ -410,6 +416,38 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     if (opt.query_sign == 1 && opt.pub_key_file.empty()) {
         err = "--pubKeyFile is required when --querySign=1";
         return false;
+    }
+    // P0-C: safe-mode epoch validation.
+    // raft_apply_ledger_mode must be exactly "off" or "safe".
+    if (opt.raft_apply_ledger_mode != "off" && opt.raft_apply_ledger_mode != "safe") {
+        err = "invalid --raft-apply-ledger (expected off|safe)";
+        return false;
+    }
+    // In safe mode, the epoch must be present and strictly valid:
+    //   - exactly 64 characters
+    //   - all lowercase hexadecimal (0-9, a-f)
+    //   - no uppercase letters
+    if (opt.raft_apply_ledger_mode == "safe") {
+        const std::string& ep = opt.raft_epoch_hex;
+        if (ep.empty()) {
+            err = "safe mode requires --raft-epoch-hex (missing)";
+            return false;
+        }
+        if (ep.size() != 64) {
+            err = "safe mode --raft-epoch-hex must be exactly 64 characters (got "
+                  + std::to_string(ep.size()) + ")";
+            return false;
+        }
+        for (size_t i = 0; i < ep.size(); ++i) {
+            const char c = ep[i];
+            const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!ok) {
+                err = "safe mode --raft-epoch-hex contains invalid character '"
+                      + std::string(1, c) + "' at position "
+                      + std::to_string(i) + " (must be lowercase hex 0-9a-f)";
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -609,6 +647,13 @@ struct kafka_reply_record {
     uint64_t timestamp_ms = 0;
     std::string full_result;
     bool has_full_result = false;
+
+    // B4 / Epoch fields
+    uint32_t raft_item_ordinal = 0;
+    std::string terminal_state;
+    int format_version = 0;
+    std::string epoch_hex;
+    int wire_version = 3;
 };
 
 constexpr const char* kHashAlgo = "sha256";
@@ -747,6 +792,35 @@ std::string make_sig_payload(uint64_t req_num,
     return oss.str();
 }
 
+std::string make_sig_payload_v4(uint64_t req_num,
+                                 uint64_t raft_log_idx,
+                                 uint32_t raft_item_ordinal,
+                                 const std::string& req_id,
+                                 int node_id,
+                                 int leader_node_id,
+                                 const std::string& epoch_hex,
+                                 const std::string& terminal_state,
+                                 const std::string& terminal_digest,
+                                 int format_version,
+                                 uint64_t timestamp_ms,
+                                 bool has_full_result)
+{
+    std::ostringstream oss;
+    oss << req_num << "|"
+        << raft_log_idx << "|"
+        << raft_item_ordinal << "|"
+        << req_id << "|"
+        << node_id << "|"
+        << leader_node_id << "|"
+        << epoch_hex << "|"
+        << terminal_state << "|"
+        << terminal_digest << "|"
+        << format_version << "|"
+        << timestamp_ms << "|"
+        << (has_full_result ? 1 : 0);
+    return oss.str();
+}
+
 std::string make_sig_payload_legacy(uint64_t req_num,
                                     const std::string& req_id,
                                     int node_id,
@@ -774,40 +848,123 @@ bool verify_result_signature(const kafka_reply_record& rec, const std::string& s
         return !rec.result_hash.empty();
     }
     if (rec.server_sig.empty()) return false;
-    const bool has_full = rec.has_full_result;
-    const std::string payload = make_sig_payload(rec.req_num,
-                                                 rec.raft_log_idx,
-                                                 rec.req_id,
-                                                 rec.node_id,
-                                                 rec.leader_node_id,
-                                                 rec.result_hash,
-                                                 rec.timestamp_ms,
-                                                 has_full);
-    const std::string expected = sign_payload(sig_key, payload);
-    if (!expected.empty() && expected == rec.server_sig) {
-        return true;
-    }
-    // Backward compatibility: accept pre-raft_log_idx signature shape.
-    if (rec.raft_log_idx == 0) {
-        const std::string legacy = make_sig_payload_legacy(rec.req_num,
-                                                           rec.req_id,
-                                                           rec.node_id,
-                                                           rec.leader_node_id,
-                                                           rec.result_hash,
-                                                           rec.timestamp_ms,
-                                                           has_full);
-        const std::string expected_legacy = sign_payload(sig_key, legacy);
-        if (!expected_legacy.empty() && expected_legacy == rec.server_sig) {
+
+    if (rec.wire_version == 4) {
+        // B4 signature verification only
+        const bool has_full = rec.has_full_result;
+        const std::string payload = make_sig_payload_v4(rec.req_num,
+                                                        rec.raft_log_idx,
+                                                        rec.raft_item_ordinal,
+                                                        rec.req_id,
+                                                        rec.node_id,
+                                                        rec.leader_node_id,
+                                                        rec.epoch_hex,
+                                                        rec.terminal_state,
+                                                        rec.result_hash,
+                                                        rec.format_version,
+                                                        rec.timestamp_ms,
+                                                        has_full);
+        const std::string expected = sign_payload(sig_key, payload);
+        return (!expected.empty() && expected == rec.server_sig);
+    } else {
+        // B3 / legacy signature verification only
+        const bool has_full = rec.has_full_result;
+        const std::string payload = make_sig_payload(rec.req_num,
+                                                     rec.raft_log_idx,
+                                                     rec.req_id,
+                                                     rec.node_id,
+                                                     rec.leader_node_id,
+                                                     rec.result_hash,
+                                                     rec.timestamp_ms,
+                                                     has_full);
+        const std::string expected = sign_payload(sig_key, payload);
+        if (!expected.empty() && expected == rec.server_sig) {
             return true;
         }
+        // Backward compatibility: accept pre-raft_log_idx signature shape.
+        if (rec.raft_log_idx == 0) {
+            const std::string legacy = make_sig_payload_legacy(rec.req_num,
+                                                               rec.req_id,
+                                                               rec.node_id,
+                                                               rec.leader_node_id,
+                                                               rec.result_hash,
+                                                               rec.timestamp_ms,
+                                                               has_full);
+            const std::string expected_legacy = sign_payload(sig_key, legacy);
+            if (!expected_legacy.empty() && expected_legacy == rec.server_sig) {
+                return true;
+            }
+        }
+        return false;
     }
-    return false;
 }
 
 bool parse_kafka_payload_records(const std::string& payload,
                                  std::vector<kafka_reply_record>& out)
 {
     out.clear();
+    if (payload.size() >= 8 && payload[0] == 'B' && payload[1] == '4') {
+        const char* p = payload.data();
+        const uint16_t nrec = read_u16_le(p + 2);
+        size_t pos = 8; // magic + count + reserved
+        out.reserve(nrec);
+        for (uint16_t i = 0; i < nrec; ++i) {
+            if (pos + 47 > payload.size()) return false;
+            kafka_reply_record r;
+            r.wire_version = 4;
+            r.req_num = read_u64_le(p + pos);
+            r.raft_log_idx = read_u64_le(p + pos + 8);
+            r.raft_item_ordinal = read_u32_le(p + pos + 16);
+            r.node_id = static_cast<int>(read_u16_le(p + pos + 20));
+            r.leader_node_id = static_cast<int>(read_u16_le(p + pos + 22));
+            if (r.leader_node_id == 0) r.leader_node_id = -1;
+            r.timestamp_ms = read_u64_le(p + pos + 24);
+            const uint8_t flags = read_u8(p + pos + 32);
+            const uint8_t hash_algo_id = read_u8(p + pos + 33);
+            const uint8_t term_state_code = read_u8(p + pos + 34);
+            r.format_version = static_cast<int>(read_u32_le(p + pos + 35));
+            const uint16_t req_id_len = read_u16_le(p + pos + 39);
+            const uint16_t sig_len = read_u16_le(p + pos + 41);
+            const uint32_t full_len = read_u32_le(p + pos + 43);
+
+            // Reject invalid flags, unknown terminal-state codes, unsupported format versions, etc.
+            if (flags > 1) return false;
+            if (hash_algo_id != 1) return false;
+            if (term_state_code == 1) {
+                r.terminal_state = "OK";
+            } else if (term_state_code == 2) {
+                r.terminal_state = "ERROR";
+            } else {
+                return false; // unknown terminal-state code
+            }
+            if (r.format_version != 1) return false; // unsupported format version
+
+            pos += 47;
+            if (pos + 64 > payload.size()) return false;
+            const unsigned char* raw_epoch = reinterpret_cast<const unsigned char*>(p + pos);
+            const unsigned char* raw_digest = reinterpret_cast<const unsigned char*>(p + pos + 32);
+            pos += 64;
+
+            if (pos + req_id_len + sig_len + full_len > payload.size()) return false;
+            r.req_id.assign(p + pos, p + pos + req_id_len);
+            pos += req_id_len;
+            r.server_sig.assign(p + pos, p + pos + sig_len);
+            pos += sig_len;
+            r.has_full_result = ((flags & 0x1u) != 0u);
+            if (r.has_full_result) {
+                r.full_result.assign(p + pos, p + pos + full_len);
+            }
+            pos += full_len;
+
+            r.epoch_hex = hex_encode(raw_epoch, 32);
+            r.result_hash = hex_encode(raw_digest, 32);
+            r.hash_algo = kHashAlgo;
+            out.push_back(std::move(r));
+        }
+        if (pos != payload.size()) return false; // reject trailing bytes
+        return true;
+    }
+
     if (payload.size() >= 8 && payload[0] == 'B' && payload[1] == '3') {
         const char* p = payload.data();
         size_t pos = 0;
@@ -1214,6 +1371,23 @@ bool sign_sha256_rsa(EVP_PKEY* priv,
 }
 #endif
 
+struct vote_key {
+    std::string epoch_hex;
+    uint64_t req_num;
+
+    bool operator==(const vote_key& other) const {
+        return req_num == other.req_num && epoch_hex == other.epoch_hex;
+    }
+};
+
+struct vote_key_hash {
+    size_t operator()(const vote_key& key) const {
+        size_t h = std::hash<uint64_t>{}(key.req_num);
+        h ^= std::hash<std::string>{}(key.epoch_hex) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
 enum class audit_status {
     READY,
     MISMATCH,
@@ -1236,15 +1410,22 @@ struct vote_entry {
     struct reply_identity {
         int node_id = 0;
         uint64_t raft_log_idx = 0;
+        uint32_t raft_item_ordinal = 0;
+        std::string epoch_hex;
 
         reply_identity() = default;
-        reply_identity(int node_id_in, uint64_t raft_log_idx_in)
+        reply_identity(int node_id_in, uint64_t raft_log_idx_in, uint32_t raft_item_ordinal_in, std::string epoch_hex_in)
             : node_id(node_id_in)
             , raft_log_idx(raft_log_idx_in)
+            , raft_item_ordinal(raft_item_ordinal_in)
+            , epoch_hex(std::move(epoch_hex_in))
             {}
 
         bool operator==(const reply_identity& other) const {
-            return node_id == other.node_id && raft_log_idx == other.raft_log_idx;
+            return node_id == other.node_id &&
+                   raft_log_idx == other.raft_log_idx &&
+                   raft_item_ordinal == other.raft_item_ordinal &&
+                   epoch_hex == other.epoch_hex;
         }
     };
 
@@ -1252,7 +1433,11 @@ struct vote_entry {
         size_t operator()(const reply_identity& key) const {
             const uint64_t a = static_cast<uint64_t>(static_cast<uint32_t>(key.node_id));
             const uint64_t b = key.raft_log_idx;
-            return std::hash<uint64_t>{}((a << 32) ^ (b + 0x9e3779b97f4a7c15ULL + (a << 6) + (a >> 2)));
+            const uint64_t c = static_cast<uint64_t>(key.raft_item_ordinal);
+            size_t h = std::hash<uint64_t>{}((a << 32) ^ (b + 0x9e3779b97f4a7c15ULL + (a << 6) + (a >> 2)));
+            h ^= std::hash<uint64_t>{}(c) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<std::string>{}(key.epoch_hex) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            return h;
         }
     };
 
@@ -1286,6 +1471,11 @@ struct vote_entry {
     bool terminal_set = false;
     std::string terminal_result;
     std::string terminal_error;
+    bool identity_pinned = false;
+    uint64_t pinned_raft_log_idx = 0;
+    uint32_t pinned_raft_item_ordinal = 0;
+    std::string pinned_epoch_hex;
+    std::string pinned_req_id;
     uint64_t first_reply_ns = 0;
     uint64_t majority_ready_ns = 0;
     int first_valid_reply_node = 0;
@@ -1346,11 +1536,15 @@ struct vote_store {
     explicit vote_store(int total_nodes,
                         int majority,
                         size_t max_entries,
-                        std::string sig_key)
+                        std::string sig_key,
+                        std::string expected_epoch_hex = "",
+                        bool safe_ledger_mode = true)
         : total_nodes_(total_nodes)
         , majority_(majority)
         , max_entries_(std::max<size_t>(1, max_entries))
         , sig_key_(std::move(sig_key))
+        , expected_epoch_hex_(std::move(expected_epoch_hex))
+        , safe_ledger_mode_(safe_ledger_mode)
         {}
 
     void add_reply(const kafka_reply_record& rec,
@@ -1401,17 +1595,31 @@ private:
                                 std::string& out_recovery_note)
     {
         out_recovery_note.clear();
-        const uint64_t add_ns = steady_now_ns();
-        auto emplace_res = m_.insert(std::make_pair(rec.req_num, vote_entry()));
-        if (seen_reqs_.insert(rec.req_num).second) {
-            req_order_.push_back(rec.req_num);
+        if (safe_ledger_mode_ && !expected_epoch_hex_.empty()) {
+            if (rec.wire_version != 4) {
+                // Safe mode only accepts B4 wire format; silently drop B3/legacy.
+                // Undo the speculative insertion we haven't done yet (we're before m_.insert).
+                return;
+            }
+            if (rec.epoch_hex != expected_epoch_hex_) {
+                // Epoch mismatch: quarantine before map insertion.
+                return;
+            }
         }
-        if (!evict_if_needed_locked(rec.req_num)) {
+
+        const uint64_t add_ns = steady_now_ns();
+        vote_key key{safe_ledger_mode_ ? rec.epoch_hex : expected_epoch_hex_, rec.req_num};
+
+        auto emplace_res = m_.insert(std::make_pair(key, vote_entry()));
+        if (seen_reqs_.insert(key).second) {
+            req_order_.push_back(key);
+        }
+        if (!evict_if_needed_locked(key)) {
             out_recovery_note = "vote_store_capacity_exhausted: req_num=" + std::to_string(rec.req_num);
             if (emplace_res.second) {
                 m_.erase(emplace_res.first);
-                seen_reqs_.erase(rec.req_num);
-                if (!req_order_.empty() && req_order_.back() == rec.req_num) {
+                seen_reqs_.erase(key);
+                if (!req_order_.empty() && req_order_.back() == key) {
                     req_order_.pop_back();
                 }
             }
@@ -1420,6 +1628,25 @@ private:
         vote_entry& e = emplace_res.first->second;
         if (e.first_reply_ns == 0) {
             e.first_reply_ns = add_ns;
+        }
+
+        if (!e.identity_pinned) {
+            e.identity_pinned = true;
+            e.pinned_raft_log_idx = rec.raft_log_idx;
+            e.pinned_raft_item_ordinal = rec.raft_item_ordinal;
+            e.pinned_epoch_hex = rec.epoch_hex;
+            e.pinned_req_id = rec.req_id;
+        } else {
+            if (e.pinned_raft_log_idx != rec.raft_log_idx ||
+                e.pinned_raft_item_ordinal != rec.raft_item_ordinal ||
+                e.pinned_epoch_hex != rec.epoch_hex ||
+                e.pinned_req_id != rec.req_id) {
+                e.terminal_set = true;
+                e.terminal_result.clear();
+                e.terminal_error = "duplicate_identity_conflict";
+                enqueue_ready_locked(key);
+                return;
+            }
         }
 
         const int nodes_seen_before = e.nodes_seen_count;
@@ -1432,7 +1659,7 @@ private:
             e.leader_node_id = rec.leader_node_id;
         }
 
-        const vote_entry::reply_identity reply_identity{rec.node_id, rec.raft_log_idx};
+        const vote_entry::reply_identity reply_identity{rec.node_id, rec.raft_log_idx, rec.raft_item_ordinal, rec.epoch_hex};
         const vote_entry::reply_payload_fingerprint reply_fingerprint{
             rec.result_hash,
             rec.has_full_result
@@ -1445,7 +1672,7 @@ private:
             e.terminal_set = true;
             e.terminal_result.clear();
             e.terminal_error = "duplicate_identity_conflict";
-            enqueue_ready_locked(rec.req_num);
+            enqueue_ready_locked(key);
             std::ostringstream oss;
             const std::string req_id = rec.req_id.empty() ? first_req_id_locked(e) : rec.req_id;
             oss << "{\"type\":\"duplicate_identity_conflict\""
@@ -1487,16 +1714,16 @@ private:
             e.hash_to_nodes_valid[rec.result_hash] |= node_bit(rec.node_id);
         }
         increment_node_counter_locked(reply_records_by_node_, rec.node_id);
-        refresh_majority_locked(rec.req_num, e, add_ns, rec.node_id);
+        refresh_majority_locked(key, e, add_ns, rec.node_id);
 
         std::string all_err;
-        if (!e.all3_ready_queued && e.audit_pending && resolve_all_nodes_consistent_locked(rec.req_num, all_err)) {
+        if (!e.all3_ready_queued && e.audit_pending && resolve_all_nodes_consistent_locked(key, all_err)) {
             e.all3_ready_ns = add_ns;
             if (e.audit_deadline_ns != 0 && add_ns >= e.audit_deadline_ns) {
                 e.audit_timed_out = true;
             }
             e.all3_ready_queued = true;
-            all3_ready_queue_.push_back(rec.req_num);
+            all3_ready_queue_.push_back(key);
             if (all3_ready_queue_.size() > all3_ready_queue_depth_max_) {
                 all3_ready_queue_depth_max_ = all3_ready_queue_.size();
             }
@@ -1540,9 +1767,9 @@ private:
                 out_recovery_note = oss.str();
             }
             if (e.majority_hash.empty() || has_invalid_sig_locked(e)) {
-                enqueue_ready_locked(rec.req_num);
+                enqueue_ready_locked(key);
             }
-            if (e.majority_ready_ns > 0 && add_ns >= e.majority_ready_ns) {
+            if (e.majority_ready_ns > 0 && add_ns >= e.first_reply_ns) {
                 record_majority_to_all3_locked(add_ns - e.majority_ready_ns);
             }
         }
@@ -1559,9 +1786,10 @@ public:
         std::unique_lock<std::mutex> lk(mu_);
         out_result.clear();
         out_error.clear();
+        vote_key key{expected_epoch_hex_, req_num};
 
         auto terminal = [&]() -> bool {
-            return resolve_terminal_locked(req_num, out_result, out_error);
+            return resolve_terminal_locked(key, out_result, out_error);
         };
 
         if (terminal()) return out_error.empty();
@@ -1588,7 +1816,7 @@ public:
                 std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
             if (st == std::cv_status::timeout && !terminal()) {
                 std::cerr << "vote_store timeout req=" << req_num
-                          << " detail=" << describe_req_locked(req_num)
+                          << " detail=" << describe_req_locked(key)
                           << std::endl;
                 out_error = "majority_timeout";
                 return false;
@@ -1656,8 +1884,9 @@ public:
         std::string ignored_result;
         std::string ignored_error;
         std::lock_guard<std::mutex> lk(mu_);
-        if (resolve_terminal_locked(req_num, ignored_result, ignored_error)) {
-            enqueue_ready_locked(req_num);
+        vote_key key{expected_epoch_hex_, req_num};
+        if (resolve_terminal_locked(key, ignored_result, ignored_error)) {
+            enqueue_ready_locked(key);
             cv_.notify_all();
         }
     }
@@ -1723,14 +1952,15 @@ public:
     {
         out_error.clear();
         std::unique_lock<std::mutex> lk(mu_);
+        vote_key key{expected_epoch_hex_, req_num};
 
         auto all_nodes_ready = [&]() -> bool {
-            auto it = m_.find(req_num);
+            auto it = m_.find(key);
             if (it == m_.end()) {
                 out_error = "audit_entry_evicted";
                 return true; // Stop waiting if missing
             }
-            return resolve_all_nodes_consistent_locked(req_num, out_error);
+            return resolve_all_nodes_consistent_locked(key, out_error);
         };
 
         if (all_nodes_ready()) {
@@ -1757,7 +1987,7 @@ public:
                 std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
             if (st == std::cv_status::timeout && !all_nodes_ready()) {
                 std::cerr << "vote_store all-nodes timeout req=" << req_num
-                          << " detail=" << describe_req_locked(req_num)
+                          << " detail=" << describe_req_locked(key)
                           << std::endl;
                 out_error = "all_nodes_timeout";
                 return audit_status::TIMEOUT;
@@ -1772,7 +2002,8 @@ public:
         if (capacity_exhausted_.load(std::memory_order_relaxed)) {
             return audit_mark_status::CAPACITY_EXHAUSTED;
         }
-        auto it = m_.find(req_num);
+        vote_key key{expected_epoch_hex_, req_num};
+        auto it = m_.find(key);
         if (it == m_.end()) {
             return audit_mark_status::MISSING;
         }
@@ -1795,15 +2026,15 @@ public:
             uint64_t deadline_ns = it->second.audit_pending_ns + timeout_ns;
             it->second.audit_deadline_ns = deadline_ns;
 
-            audit_deadline_heap_.push(audit_deadline_entry{deadline_ns, req_num, it->second.audit_generation});
+            audit_deadline_heap_.push(audit_deadline_entry{deadline_ns, key, it->second.audit_generation});
             cv_.notify_all();
         }
         if (!it->second.all3_ready_queued) {
             std::string err;
-            if (resolve_all_nodes_consistent_locked(req_num, err)) {
+            if (resolve_all_nodes_consistent_locked(key, err)) {
                 it->second.all3_ready_ns = it->second.audit_pending_ns;
                 it->second.all3_ready_queued = true;
-                all3_ready_queue_.push_back(req_num);
+                all3_ready_queue_.push_back(key);
                 if (all3_ready_queue_.size() > all3_ready_queue_depth_max_) {
                     all3_ready_queue_depth_max_ = all3_ready_queue_.size();
                 }
@@ -1815,7 +2046,8 @@ public:
 
     void unpin_audit(uint64_t req_num) {
         std::lock_guard<std::mutex> lk(mu_);
-        auto it = m_.find(req_num);
+        vote_key key{expected_epoch_hex_, req_num};
+        auto it = m_.find(key);
         if (it != m_.end()) {
             if (it->second.audit_pending) {
                 it->second.audit_pending = false;
@@ -1846,14 +2078,14 @@ public:
                 auto top_entry = audit_deadline_heap_.top();
                 audit_deadline_heap_.pop();
 
-                auto map_it = m_.find(top_entry.req_num);
+                auto map_it = m_.find(top_entry.key);
                 if (map_it != m_.end() && map_it->second.audit_pending &&
                     map_it->second.audit_generation == top_entry.generation) {
 
                     if (!map_it->second.all3_ready_queued) {
                         map_it->second.all3_ready_queued = true;
                         map_it->second.audit_timed_out = true;
-                        all3_ready_queue_.push_back(top_entry.req_num);
+                        all3_ready_queue_.push_back(top_entry.key);
                         audit_deadline_heap_timeout_pops_++;
                         if (all3_ready_queue_.size() > all3_ready_queue_depth_max_) {
                             all3_ready_queue_depth_max_ = all3_ready_queue_.size();
@@ -1880,15 +2112,16 @@ public:
             return false;
         }
 
-        out_req_num = all3_ready_queue_.front();
+        const vote_key key = all3_ready_queue_.front();
         all3_ready_queue_.pop_front();
+        out_req_num = key.req_num;
 
-        auto it = m_.find(out_req_num);
+        auto it = m_.find(key);
         if (it != m_.end()) {
             if (it->second.audit_timed_out) {
                 out_error = "all_nodes_timeout";
             } else {
-                resolve_all_nodes_consistent_locked(out_req_num, out_error);
+                resolve_all_nodes_consistent_locked(key, out_error);
             }
         } else {
             out_error = "audit_entry_evicted";
@@ -2092,9 +2325,9 @@ private:
         return it == counters.end() ? 0 : it->second;
     }
 
-    void enqueue_ready_locked(uint64_t req_num) {
-        if (ready_members_.insert(req_num).second) {
-            ready_reqs_.push_back(req_num);
+    void enqueue_ready_locked(const vote_key& key) {
+        if (ready_members_.insert(key).second) {
+            ready_reqs_.push_back(key);
             ready_queue_depth_sum_ += static_cast<uint64_t>(ready_members_.size());
             ++ready_queue_depth_obs_;
             ready_queue_depth_max_ = std::max<size_t>(ready_queue_depth_max_, ready_members_.size());
@@ -2132,7 +2365,7 @@ private:
         return static_cast<double>(samples[std::min(idx, samples.size() - 1)]) / 1000.0;
     }
 
-    void refresh_majority_locked(uint64_t req_num, vote_entry& e, uint64_t now_ns, int trigger_node_id) {
+    void refresh_majority_locked(const vote_key& key, vote_entry& e, uint64_t now_ns, int trigger_node_id) {
         const bool had_majority = !e.majority_hash.empty();
         e.majority_hash = compute_majority_hash_locked(e);
         if (!had_majority && !e.terminal_set && !e.majority_hash.empty() && !e.ready_recorded) {
@@ -2151,15 +2384,15 @@ private:
             }
         }
         if (!e.terminal_set && !e.majority_hash.empty()) {
-            enqueue_ready_locked(req_num);
+            enqueue_ready_locked(key);
         }
     }
 
-    bool evict_if_needed_locked(uint64_t protected_req) {
+    bool evict_if_needed_locked(const vote_key& protected_req) {
         while (m_.size() > max_entries_ && !req_order_.empty()) {
             bool evicted_any = false;
             for (auto it = req_order_.begin(); it != req_order_.end(); ) {
-                const uint64_t old_req = *it;
+                const vote_key old_req = *it;
                 if (old_req == protected_req) {
                     ++it;
                     continue;
@@ -2192,13 +2425,13 @@ private:
         return true;
     }
 
-    bool resolve_terminal_locked(uint64_t req_num,
+    bool resolve_terminal_locked(const vote_key& key,
                                  std::string& out_result,
                                  std::string& out_error)
     {
         out_result.clear();
         out_error.clear();
-        auto it = m_.find(req_num);
+        auto it = m_.find(key);
         if (it == m_.end()) return false;
         vote_entry& e = it->second;
         if (e.terminal_set) {
@@ -2240,6 +2473,19 @@ private:
             if (!obs.sig_valid) continue;
             if (obs.rec.result_hash != e.majority_hash) continue;
             if (!obs.rec.has_full_result) continue;
+            if (safe_ledger_mode_ && obs.rec.wire_version == 4) {
+                /*
+                 * B4 safe-ledger result_hash is the terminal ledger digest,
+                 * not canonical_hash(full_result). Signature verification
+                 * already covers that digest and whether full_result is
+                 * present, so returning this majority payload is valid.
+                 */
+                out_result = obs.rec.full_result;
+                e.terminal_set = true;
+                e.terminal_result = out_result;
+                e.terminal_error.clear();
+                return true;
+            }
             const std::string full_hash = canonical_result_hash(obs.rec.full_result);
             if (full_hash != e.majority_hash) continue;
             out_result = obs.rec.full_result;
@@ -2257,11 +2503,11 @@ private:
         return true;
     }
 
-    bool resolve_all_nodes_consistent_locked(uint64_t req_num,
+    bool resolve_all_nodes_consistent_locked(const vote_key& key,
                                              std::string& out_error) const
     {
         out_error.clear();
-        auto it = m_.find(req_num);
+        auto it = m_.find(key);
         if (it == m_.end()) return false;
         const vote_entry& e = it->second;
 
@@ -2292,20 +2538,22 @@ private:
                                       std::string& out_error)
     {
         while (!ready_reqs_.empty()) {
-            const uint64_t req_num = ready_reqs_.front();
+            const vote_key key = ready_reqs_.front();
             ready_reqs_.pop_front();
-            ready_members_.erase(req_num);
+            ready_members_.erase(key);
 
-            auto it_req = std::find(inflight.begin(), inflight.end(), req_num);
+            if (key.epoch_hex != expected_epoch_hex_) continue;
+
+            auto it_req = std::find(inflight.begin(), inflight.end(), key.req_num);
             if (it_req == inflight.end()) continue;
 
             std::string err;
             std::string result;
-            if (!resolve_terminal_locked(req_num, result, err)) {
+            if (!resolve_terminal_locked(key, result, err)) {
                 continue;
             }
 
-            out_req_num = req_num;
+            out_req_num = key.req_num;
             out_result = std::move(result);
             out_error = std::move(err);
             inflight.erase(it_req);
@@ -2320,7 +2568,8 @@ private:
         for (auto it_req = inflight.begin(); it_req != inflight.end(); ++it_req) {
             std::string err;
             std::string result;
-            if (!resolve_terminal_locked(*it_req, result, err)) {
+            vote_key key{expected_epoch_hex_, *it_req};
+            if (!resolve_terminal_locked(key, result, err)) {
                 continue;
             }
 
@@ -2328,7 +2577,7 @@ private:
             out_result = std::move(result);
             out_error = std::move(err);
             inflight.erase(it_req);
-            ready_members_.erase(out_req_num);
+            ready_members_.erase(key);
             return true;
         }
         return false;
@@ -2342,20 +2591,22 @@ private:
         std::string& out_error)
     {
         while (!ready_reqs_.empty()) {
-            const uint64_t req_num = ready_reqs_.front();
+            const vote_key key = ready_reqs_.front();
             ready_reqs_.pop_front();
-            ready_members_.erase(req_num);
+            ready_members_.erase(key);
 
-            auto it_pos = inflight_pos.find(req_num);
+            if (key.epoch_hex != expected_epoch_hex_) continue;
+
+            auto it_pos = inflight_pos.find(key.req_num);
             if (it_pos == inflight_pos.end()) continue;
 
             std::string err;
             std::string result;
-            if (!resolve_terminal_locked(req_num, result, err)) {
+            if (!resolve_terminal_locked(key, result, err)) {
                 continue;
             }
 
-            out_req_num = req_num;
+            out_req_num = key.req_num;
             out_result = std::move(result);
             out_error = std::move(err);
             inflight.erase(it_pos->second);
@@ -2365,17 +2616,17 @@ private:
         return false;
     }
 
-    std::string describe_req_locked(uint64_t req_num) const
+    std::string describe_req_locked(const vote_key& key) const
     {
         std::ostringstream oss;
-        auto it = m_.find(req_num);
+        auto it = m_.find(key);
         if (it == m_.end()) {
-            oss << "missing(req=" << req_num << ")";
+            oss << "missing(req=" << key.req_num << ")";
             return oss.str();
         }
 
         const vote_entry& e = it->second;
-        oss << "req=" << req_num
+        oss << "req=" << key.req_num
             << ",nodes_seen=" << e.nodes_seen_count
             << ",by_node=" << e.by_node.size()
             << ",leader=" << e.leader_node_id
@@ -2414,7 +2665,8 @@ private:
         for (uint64_t req_num : inflight) {
             if (!first) oss << " || ";
             first = false;
-            oss << describe_req_locked(req_num);
+            vote_key key{expected_epoch_hex_, req_num};
+            oss << describe_req_locked(key);
         }
         if (first) oss << "<empty>";
         return oss.str();
@@ -2427,7 +2679,8 @@ private:
         for (uint64_t req_num : inflight) {
             if (!first) oss << " || ";
             first = false;
-            oss << describe_req_locked(req_num);
+            vote_key key{expected_epoch_hex_, req_num};
+            oss << describe_req_locked(key);
         }
         if (first) oss << "<empty>";
         return oss.str();
@@ -2437,13 +2690,15 @@ private:
     int majority_;
     size_t max_entries_;
     std::string sig_key_;
+    std::string expected_epoch_hex_;
+    bool safe_ledger_mode_;
     std::mutex mu_;
     std::condition_variable cv_;
-    std::unordered_map<uint64_t, vote_entry> m_;
-    std::list<uint64_t> req_order_;
-    std::unordered_set<uint64_t> seen_reqs_;
-    std::deque<uint64_t> ready_reqs_;
-    std::unordered_set<uint64_t> ready_members_;
+    std::unordered_map<vote_key, vote_entry, vote_key_hash> m_;
+    std::list<vote_key> req_order_;
+    std::unordered_set<vote_key, vote_key_hash> seen_reqs_;
+    std::deque<vote_key> ready_reqs_;
+    std::unordered_set<vote_key, vote_key_hash> ready_members_;
     uint64_t consume_to_ready_sum_ns_ = 0;
     std::vector<uint64_t> consume_to_ready_samples_;
     uint64_t majority_to_all3_sum_ns_ = 0;
@@ -2470,7 +2725,7 @@ private:
     uint64_t ready_queue_enqueue_count_ = 0;
     struct audit_deadline_entry {
         uint64_t deadline_ns;
-        uint64_t req_num;
+        vote_key key;
         uint32_t generation;
 
         bool operator>(const audit_deadline_entry& other) const {
@@ -2479,7 +2734,7 @@ private:
     };
     std::priority_queue<audit_deadline_entry, std::vector<audit_deadline_entry>, std::greater<audit_deadline_entry>> audit_deadline_heap_;
 
-    std::deque<uint64_t> all3_ready_queue_;
+    std::deque<vote_key> all3_ready_queue_;
     bool audit_stopped_ = false;
     uint64_t audit_pending_current_ = 0;
     uint64_t audit_pending_max_ = 0;
@@ -3213,6 +3468,7 @@ int listen_tcp(int port) {
 
 } // namespace ariabc_pg
 
+#ifndef BUILDING_UNIT_TESTS
 int main(int argc, char** argv) {
     using ariabc_pg::gateway_options;
 
@@ -3281,7 +3537,7 @@ int main(int argc, char** argv) {
             result_sig_key = ariabc_pg::kDefaultResultSigKey;
         }
     }
-    ariabc_pg::vote_store votes(total_nodes, majority, opt.vote_store_max_entries, result_sig_key);
+    ariabc_pg::vote_store votes(total_nodes, majority, opt.vote_store_max_entries, result_sig_key, opt.raft_epoch_hex, opt.raft_apply_ledger_mode == "safe");
 
 #ifndef SSL_LIBRARY_NOT_FOUND
     ariabc_pg::openssl_keypair keys;
@@ -5769,3 +6025,139 @@ int main(int argc, char** argv) {
     err_prod.stop();
     return exit_code;
 }
+#endif
+
+#ifdef BUILDING_UNIT_TESTS
+namespace ariabc_pg {
+bool test_vote_store_b4_logic() {
+    const std::string sig_key = "selftest-key";
+    std::string recovery;
+
+    const std::string ep1 = "1111111111111111111111111111111111111111111111111111111111111111";
+    const std::string ep2 = "2222222222222222222222222222222222222222222222222222222222222222";
+    const std::string dig1 = canonical_result_hash("result");
+    const std::string dig2 = canonical_result_hash("different_result");
+
+    // Helper to make records
+    auto make_rec = [&](uint64_t req_num, int node_id, const std::string& epoch_hex, uint64_t log_idx, uint32_t ordinal, const std::string& digest) {
+        kafka_reply_record rec;
+        rec.wire_version = 4;
+        rec.format_version = 1;
+        rec.req_num = req_num;
+        rec.req_id = "req-" + std::to_string(req_num);
+        rec.node_id = node_id;
+        rec.leader_node_id = 1;
+        rec.epoch_hex = epoch_hex;
+        rec.raft_log_idx = log_idx;
+        rec.raft_item_ordinal = ordinal;
+        rec.result_hash = digest;
+        rec.hash_algo = kHashAlgo;
+        rec.timestamp_ms = 12345;
+        rec.has_full_result = true;
+        rec.full_result = digest == dig1 ? "result" : "different_result";
+        rec.terminal_state = "OK";
+        rec.server_sig = sign_payload(
+            sig_key,
+            make_sig_payload_v4(rec.req_num, rec.raft_log_idx, rec.raft_item_ordinal, rec.req_id,
+                                rec.node_id, rec.leader_node_id, rec.epoch_hex, rec.terminal_state,
+                                rec.result_hash, rec.format_version, rec.timestamp_ms, rec.has_full_result));
+        return rec;
+    };
+
+    // 1. Three B4 replies, same epoch/index/ordinal/digest -> majority succeeds.
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(1, 1, ep1, 100, 0, dig1), recovery);
+        votes.add_reply(make_rec(1, 2, ep1, 100, 0, dig1), recovery);
+        std::list<uint64_t> in = {1};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos;
+        pos[1] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        if (!votes.wait_any_majority(in, pos, 0, 1, r, res, err) || r != 1) return false;
+    }
+
+    // 2. Same node + same identity + same digest -> ignored harmless duplicate.
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(2, 1, ep1, 100, 0, dig1), recovery);
+        votes.add_reply(make_rec(2, 1, ep1, 100, 0, dig1), recovery); // duplicate
+        votes.add_reply(make_rec(2, 2, ep1, 100, 0, dig1), recovery);
+        std::list<uint64_t> in = {2};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[2] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        if (!votes.wait_any_majority(in, pos, 0, 1, r, res, err) || r != 2) return false;
+    }
+
+    // 3. Same node + same identity + different digest -> duplicate_identity_conflict.
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(3, 1, ep1, 100, 0, dig1), recovery);
+        votes.add_reply(make_rec(3, 1, ep1, 100, 0, dig2), recovery); // conflict
+        std::list<uint64_t> in = {3};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[3] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        votes.wait_any_majority(in, pos, 0, 1, r, res, err);
+        if (err != "duplicate_identity_conflict") return false;
+    }
+
+    // 4. Same req_num + different epoch -> never joins the same vote entry (filtered out).
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(4, 1, ep1, 100, 0, dig1), recovery);
+        votes.add_reply(make_rec(4, 2, ep2, 100, 0, dig1), recovery); // should be dropped
+        std::list<uint64_t> in = {4};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[4] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        bool ok = votes.wait_any_majority(in, pos, 0, 1, r, res, err);
+        if (ok) return false; // Not a majority yet!
+    }
+
+    // 5. Same epoch + same req_num + different Raft index/ordinal -> protocol violation.
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(5, 1, ep1, 100, 0, dig1), recovery);
+        votes.add_reply(make_rec(5, 2, ep1, 101, 0, dig1), recovery); // conflict
+        std::list<uint64_t> in = {5};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[5] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        votes.wait_any_majority(in, pos, 0, 1, r, res, err);
+        if (err != "duplicate_identity_conflict") return false;
+    }
+
+    // 6. Same epoch + same req_num + changed request ID -> protocol violation.
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        kafka_reply_record rec1 = make_rec(6, 1, ep1, 100, 0, dig1);
+        kafka_reply_record rec2 = make_rec(6, 2, ep1, 100, 0, dig1);
+        rec2.req_id = "req-6-different";
+        rec2.server_sig = sign_payload(
+            sig_key,
+            make_sig_payload_v4(rec2.req_num, rec2.raft_log_idx, rec2.raft_item_ordinal, rec2.req_id,
+                                rec2.node_id, rec2.leader_node_id, rec2.epoch_hex, rec2.terminal_state,
+                                rec2.result_hash, rec2.format_version, rec2.timestamp_ms, rec2.has_full_result));
+        votes.add_reply(rec1, recovery);
+        votes.add_reply(rec2, recovery);
+        std::list<uint64_t> in = {6};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[6] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        votes.wait_any_majority(in, pos, 0, 1, r, res, err);
+        if (err != "duplicate_identity_conflict") return false;
+    }
+
+    // 7. B3/legacy records are rejected in safe mode.
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        kafka_reply_record rec = make_rec(7, 1, ep1, 100, 0, dig1);
+        rec.wire_version = 3;
+        votes.add_reply(rec, recovery);
+        std::list<uint64_t> in = {7};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[7] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        bool ok = votes.wait_any_majority(in, pos, 0, 1, r, res, err);
+        if (ok) return false;
+    }
+
+    return true;
+}
+} // namespace ariabc_pg
+#endif

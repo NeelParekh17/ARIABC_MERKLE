@@ -22,10 +22,12 @@
 #include <access/printtup.h>
 #include <storage/ipc.h>
 #include <executor/executor.h>
+#include <executor/spi.h>
 #include <assert.h>
 #include <storage/predicate.h>
 #include "bcdb/middleware.h"
 #include "bcdb/globals.h"
+#include "bcdb/raft_apply_ledger.h"
 #include "bcdb/bcdb_dsa.h"
 #include "bcdb/shm_block.h"
 #include "storage/condition_variable.h"
@@ -54,6 +56,19 @@
 #include "access/xact.h"
 #include "utils/resowner.h"
 
+#define EMIT_SAFE_LEDGER_XACT(tx, _phase) \
+	elog(LOG, "SAFE_LEDGER_XACT phase=%s\n" \
+			  "log=%llu ord=%u\n" \
+			  "top_xid=%u\n" \
+			  "nest_level=%d\n" \
+			  "subxid=%u", \
+		 (_phase), \
+		 (unsigned long long) (tx)->raft_log_index, \
+		 (unsigned) (tx)->raft_item_ordinal, \
+		 (unsigned) GetTopTransactionIdIfAny(), \
+		 GetCurrentTransactionNestLevel(), \
+		 (unsigned) GetCurrentSubTransactionId())
+
 int current_block_id;
 int total_num_restarts = 0; // worker specific -- move to shm for global
 int t_sinceTx1 = 0;
@@ -78,6 +93,194 @@ bcdb_trace_timestamps_enabled(void)
         cached = (v && *v && *v != '0' && *v != 'n' && *v != 'N' && *v != 'f' && *v != 'F') ? 1 : 0;
     }
     return cached == 1;
+}
+
+static bool
+bcdb_safe_postcommit_witness_enabled(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("ARIABC_SAFE_POSTCOMMIT_WITNESS");
+
+		cached = (v && *v && *v != '0' && *v != 'n' && *v != 'N' &&
+				  *v != 'f' && *v != 'F') ? 1 : 0;
+	}
+
+	return cached == 1;
+}
+
+static void
+bcdb_emit_apply_attempt_end(unsigned long long log_id,
+							unsigned ord,
+							int attempt,
+							int apply_ok,
+							int unique_violation,
+							int will_retry)
+{
+	elog(LOG,
+		 "SAFE_APPLY_ATTEMPT_END log=%llu ord=%u attempt=%d apply_ok=%d unique_violation=%d will_retry=%d",
+		 log_id,
+		 ord,
+		 attempt,
+		 apply_ok,
+		 unique_violation,
+		 will_retry);
+}
+
+static bool
+bcdb_safe_postcommit_witness(const uint8 *epoch_id,
+							 uint64 raft_log_index,
+							 uint32 raft_item_ordinal,
+							 const uint8 *expected_digest,
+							 int expected_state,
+							 int expected_format_version)
+{
+	bool pushed_snapshot = false;
+	const char *sql =
+		"SELECT state,"
+		"       encode(terminal_digest, 'hex'),"
+		"       CASE"
+		"         WHEN state = 2 THEN result_format_version"
+		"         WHEN state = 3 THEN error_format_version"
+		"         ELSE NULL"
+		"       END,"
+		"       committed_at IS NOT NULL,"
+		"       result_payload IS NOT NULL,"
+		"       error_payload IS NOT NULL"
+		"  FROM ariabc_internal.raft_apply_item"
+		" WHERE epoch_id = $1"
+		"   AND raft_log_index = $2"
+		"   AND item_ordinal = $3";
+	Oid argtypes[3];
+	Datum values[3];
+	char nulls[3];
+	HeapTuple tuple;
+	int spi_rc;
+	int observed_state = -1;
+	int observed_format = -1;
+	int observed_committed = 0;
+	int observed_result_present = 0;
+	int observed_error_present = 0;
+	int observed_digest_present = 0;
+	char digest_prefix[17] = "null";
+	char expected_digest_hex[BCDB_RAFT_DIGEST_BYTES * 2 + 1];
+	char *state_txt = NULL;
+	char *digest_txt = NULL;
+	char *format_txt = NULL;
+	char *committed_txt = NULL;
+	char *result_txt = NULL;
+	char *error_txt = NULL;
+	bool visible = false;
+	int i;
+	bytea *epoch_copy;
+
+	if (!bcdb_safe_postcommit_witness_enabled())
+		return false;
+
+	elog(LOG, "SAFE_POSTCOMMIT_WITNESS_BEGIN log=%llu ord=%u",
+		 (unsigned long long) raft_log_index,
+		 (unsigned) raft_item_ordinal);
+
+	for (i = 0; i < BCDB_RAFT_DIGEST_BYTES; i++)
+		sprintf(expected_digest_hex + (i * 2), "%02x", expected_digest[i]);
+	expected_digest_hex[BCDB_RAFT_DIGEST_BYTES * 2] = '\0';
+
+	start_xact_command();
+	if (!ActiveSnapshotSet())
+	{
+		PushActiveSnapshot(GetTransactionSnapshot());
+		pushed_snapshot = true;
+	}
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SAFE_POSTCOMMIT_WITNESS SPI_connect failed");
+
+	argtypes[0] = BYTEAOID;
+	argtypes[1] = INT8OID;
+	argtypes[2] = INT4OID;
+	epoch_copy = (bytea *) palloc(VARHDRSZ + BCDB_RAFT_DIGEST_BYTES);
+	values[0] = PointerGetDatum(epoch_copy);
+	SET_VARSIZE(epoch_copy, VARHDRSZ + BCDB_RAFT_DIGEST_BYTES);
+	memcpy(VARDATA(epoch_copy), epoch_id, BCDB_RAFT_DIGEST_BYTES);
+	values[1] = Int64GetDatum((int64) raft_log_index);
+	values[2] = Int32GetDatum((int32) raft_item_ordinal);
+	memset(nulls, ' ', sizeof(nulls));
+
+	spi_rc = SPI_execute_with_args(sql, 3, argtypes, values, nulls, true, 1);
+	if (spi_rc == SPI_OK_SELECT && SPI_processed == 1)
+	{
+		tuple = SPI_tuptable->vals[0];
+		state_txt = SPI_getvalue(tuple, SPI_tuptable->tupdesc, 1);
+		digest_txt = SPI_getvalue(tuple, SPI_tuptable->tupdesc, 2);
+		format_txt = SPI_getvalue(tuple, SPI_tuptable->tupdesc, 3);
+		committed_txt = SPI_getvalue(tuple, SPI_tuptable->tupdesc, 4);
+		result_txt = SPI_getvalue(tuple, SPI_tuptable->tupdesc, 5);
+		error_txt = SPI_getvalue(tuple, SPI_tuptable->tupdesc, 6);
+
+		if (state_txt)
+			observed_state = atoi(state_txt);
+		if (digest_txt && digest_txt[0] != '\0')
+		{
+			observed_digest_present = 1;
+			strlcpy(digest_prefix, digest_txt, sizeof(digest_prefix));
+		}
+		if (format_txt)
+			observed_format = atoi(format_txt);
+		if (committed_txt && committed_txt[0] == 't')
+			observed_committed = 1;
+		if (result_txt && result_txt[0] == 't')
+			observed_result_present = 1;
+		if (error_txt && error_txt[0] == 't')
+			observed_error_present = 1;
+
+		visible = (observed_state == expected_state &&
+				   observed_format == expected_format_version &&
+				   observed_committed == 1 &&
+				   observed_digest_present == 1 &&
+				   strcmp(digest_txt, expected_digest_hex) == 0 &&
+				   ((expected_state == RAFT_ITEM_STATE_APPLIED_OK && observed_result_present == 1) ||
+					(expected_state == RAFT_ITEM_STATE_APPLIED_ERROR && observed_error_present == 1)));
+	}
+
+	if (state_txt) pfree(state_txt);
+	if (digest_txt) pfree(digest_txt);
+	if (format_txt) pfree(format_txt);
+	if (committed_txt) pfree(committed_txt);
+	if (result_txt) pfree(result_txt);
+	if (error_txt) pfree(error_txt);
+	pfree(epoch_copy);
+	SPI_finish();
+	if (pushed_snapshot)
+		PopActiveSnapshot();
+	finish_xact_command();
+
+	if (visible)
+	{
+		elog(LOG,
+			 "SAFE_POSTCOMMIT_WITNESS_VISIBLE log=%llu ord=%u state=%d digest_prefix=%s format=%d committed=%d",
+			 (unsigned long long) raft_log_index,
+			 (unsigned) raft_item_ordinal,
+			 observed_state,
+			 digest_prefix,
+			 observed_format,
+			 observed_committed);
+		return true;
+	}
+
+	elog(LOG,
+		 "SAFE_POSTCOMMIT_WITNESS_MISMATCH log=%llu ord=%u observed_state=%d digest_present=%d format=%d committed=%d result_present=%d error_present=%d",
+		 (unsigned long long) raft_log_index,
+		 (unsigned) raft_item_ordinal,
+		 observed_state,
+		 observed_digest_present,
+		 observed_format,
+		 observed_committed,
+		 observed_result_present,
+		 observed_error_present);
+
+	return false;
 }
 
 /*
@@ -538,6 +741,57 @@ bcdb_drain_optim_write_list(BCDBShmXact *tx)
     bcdb_cleanup_optim_write_list(tx, false);
 }
 
+typedef enum {
+	BCDB_OUTCOME_OK,
+	BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR,
+	BCDB_OUTCOME_RETRYABLE,
+	BCDB_OUTCOME_FATAL
+} bcdb_apply_outcome;
+
+static const char *skip_sql_whitespace_and_comments(const char *p);
+
+static bool
+is_whitelisted_deterministic(const char *state_str)
+{
+	if (!state_str)
+		return false;
+	return (strcmp(state_str, "42P01") == 0 ||
+			strcmp(state_str, "42703") == 0 ||
+			strcmp(state_str, "42601") == 0 ||
+			strcmp(state_str, "0A000") == 0);
+}
+
+static bool
+bcdb_sql_has_ci_token(const char *sql, const char *token)
+{
+	size_t token_len;
+
+	if (sql == NULL || token == NULL)
+		return false;
+
+	token_len = strlen(token);
+	if (token_len == 0)
+		return false;
+
+	for (; *sql; sql++)
+	{
+		if (pg_strncasecmp(sql, token, token_len) == 0)
+			return true;
+	}
+	return false;
+}
+
+static bool
+bcdb_sql_is_insert_on_conflict_do_nothing(const char *sql)
+{
+	const char *p = skip_sql_whitespace_and_comments(sql);
+
+	return p != NULL &&
+		pg_strncasecmp(p, "insert", 6) == 0 &&
+		bcdb_sql_has_ci_token(p, "on conflict") &&
+		bcdb_sql_has_ci_token(p, "do nothing");
+}
+
 /*
  * Lever D v2 apply stage.
  *
@@ -548,95 +802,163 @@ bcdb_drain_optim_write_list(BCDBShmXact *tx)
 static bool
 bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
                                    int *num_apply_retries,
-                                   bool *nonretryable_error)
+									bool *nonretryable_error,
+									char *out_sqlstate,
+									char *out_errmsg)
 {
-    int retries = 0;
-    int backoff_us = 1;
+	int retries = 0;
+	int backoff_us = 1;
+	int attempt = 1;
 
-    if (num_apply_retries)
-        *num_apply_retries = 0;
-    if (nonretryable_error)
-        *nonretryable_error = false;
+	bcdb_emit_ledger_boundary("ledger_apply_stage_begin");
 
-    for (;;)
-    {
-        MemoryContext old_context = CurrentMemoryContext;
-        ResourceOwner old_owner = CurrentResourceOwner;
-        bool apply_ok = false;
-        bool apply_failed_unique = false;
+	if (num_apply_retries)
+		*num_apply_retries = 0;
+	if (nonretryable_error)
+		*nonretryable_error = false;
 
-        BeginInternalSubTransaction("bcdb_apply_retry");
-        PG_TRY();
-        {
-            bcdb_reset_apply_error_flags();
-            BCDB_FLOW_LOG("[BCDB_FLOW] apply_attempt_enter pid=%d txid=%d xid=%u attempt=%d",
-                          getpid(),
-                          tx ? (int)tx->tx_id : -1,
-                          (unsigned int)(tx ? tx->xid : InvalidTransactionId),
-                          retries + 1);
-            apply_ok = apply_optim_writes();
-            apply_failed_unique = (!apply_ok && bcdb_apply_had_unique_violation());
-            if (apply_ok)
-                ReleaseCurrentSubTransaction();
-            else
-                RollbackAndReleaseCurrentSubTransaction();
+	for (;;)
+	{
+		MemoryContext old_context = CurrentMemoryContext;
+		ResourceOwner old_owner = CurrentResourceOwner;
+		bool apply_ok = false;
+		bool apply_failed_unique = false;
+		bool attempt_end_logged = false;
+		char caught_sqlstate[6] = "";
 
-            BCDB_FLOW_LOG("[BCDB_FLOW] apply_attempt_exit pid=%d txid=%d xid=%u attempt=%d ok=%d",
-                          getpid(),
-                          tx ? (int)tx->tx_id : -1,
-                          (unsigned int)(tx ? tx->xid : InvalidTransactionId),
-                          retries + 1,
-                          apply_ok ? 1 : 0);
+		BeginInternalSubTransaction("bcdb_apply_retry");
+		PG_TRY();
+		{
+			bcdb_reset_apply_error_flags();
+			elog(LOG,
+				 "SAFE_APPLY_ATTEMPT_BEGIN log=%llu ord=%u attempt=%d nest_level=%d",
+				 (unsigned long long) (tx ? tx->raft_log_index : 0),
+				 (unsigned) (tx ? tx->raft_item_ordinal : 0),
+				 attempt,
+				 GetCurrentTransactionNestLevel());
+			apply_ok = apply_optim_writes();
+			apply_failed_unique = (!apply_ok && bcdb_apply_had_unique_violation());
+			if (apply_ok)
+				ReleaseCurrentSubTransaction();
+			else
+				RollbackAndReleaseCurrentSubTransaction();
 
-            MemoryContextSwitchTo(old_context);
-            CurrentResourceOwner = old_owner;
-        }
-        PG_CATCH();
-        {
-            MemoryContextSwitchTo(old_context);
-            RollbackAndReleaseCurrentSubTransaction();
-            MemoryContextSwitchTo(old_context);
-            CurrentResourceOwner = old_owner;
-            PG_RE_THROW();
-        }
-        PG_END_TRY();
+			MemoryContextSwitchTo(old_context);
+			CurrentResourceOwner = old_owner;
+		}
+		PG_CATCH();
+		{
+			ErrorData *edata;
+			char *state_str;
+			bool is_deterministic;
 
-        if (apply_ok)
-        {
-            if (num_apply_retries)
-                *num_apply_retries = retries;
-            return true;
-        }
+			MemoryContextSwitchTo(old_context);
+			edata = CopyErrorData();
+			state_str = unpack_sql_state(edata->sqlerrcode);
+			is_deterministic = is_whitelisted_deterministic(state_str);
+			if (state_str)
+				strlcpy(caught_sqlstate, state_str, sizeof(caught_sqlstate));
+			elog(LOG,
+				 "SAFE_APPLY_EXCEPTION log=%llu ord=%u attempt=%d sqlstate=%s",
+				 (unsigned long long) (tx ? tx->raft_log_index : 0),
+				 (unsigned) (tx ? tx->raft_item_ordinal : 0),
+				 attempt,
+				 caught_sqlstate[0] ? caught_sqlstate : "XXXXXX");
+			FlushErrorState();
+			MemoryContextSwitchTo(old_context);
+			RollbackAndReleaseCurrentSubTransaction();
+			MemoryContextSwitchTo(old_context);
+			CurrentResourceOwner = old_owner;
 
-        retries++;
-        if (retries > BCDB_APPLY_RETRY_MAX)
-        {
-            if (num_apply_retries)
-                *num_apply_retries = retries;
-            BCDB_FLOW_LOG("[BCDB_FLOW] apply_retry_exhausted pid=%d txid=%d xid=%u retries=%d",
-                          getpid(),
-                          tx ? (int)tx->tx_id : -1,
-                          (unsigned int)(tx ? tx->xid : InvalidTransactionId),
-                          retries);
+			if (is_deterministic)
+			{
+				const char *err_class = "unknown_error_class";
+				if (strcmp(state_str, "42P01") == 0) err_class = "undefined_table";
+				else if (strcmp(state_str, "42703") == 0) err_class = "undefined_column";
+				else if (strcmp(state_str, "42601") == 0) err_class = "syntax_error";
+				else if (strcmp(state_str, "0A000") == 0) err_class = "feature_not_supported";
 
-            if (apply_failed_unique)
-            {
-                BCDB_FLOW_LOG("[BCDB_FLOW] apply_retry_exhausted_nonretryable_unique pid=%d txid=%d xid=%u retries=%d",
-                              getpid(),
-                              tx ? (int)tx->tx_id : -1,
-                              (unsigned int)(tx ? tx->xid : InvalidTransactionId),
-                              retries);
-                if (nonretryable_error)
-                    *nonretryable_error = true;
-            }
-            return false;
-        }
+				if (out_sqlstate)
+				{
+					strncpy(out_sqlstate, state_str, 5);
+					out_sqlstate[5] = '\0';
+				}
+				if (out_errmsg)
+				{
+					snprintf(out_errmsg, 512,
+							 "format_version=1\nsqlstate=%s\nerror_class=%s\n",
+							 state_str, err_class);
+				}
 
-        CHECK_FOR_INTERRUPTS();
-        pg_usleep((long)backoff_us);
-        if (backoff_us < BCDB_APPLY_RETRY_BACKOFF_MAX_US)
-            backoff_us <<= 1;
-    }
+				apply_ok = false;
+				apply_failed_unique = false;
+				FreeErrorData(edata);
+			}
+			else
+			{
+				int will_retry = 0;
+				bcdb_emit_apply_attempt_end(
+					(unsigned long long) (tx ? tx->raft_log_index : 0),
+					tx ? (unsigned) tx->raft_item_ordinal : 0,
+					attempt,
+					0,
+					0,
+					will_retry);
+				attempt_end_logged = true;
+				ReThrowError(edata);
+			}
+		}
+		PG_END_TRY();
+
+		if (!attempt_end_logged)
+		{
+			int will_retry = (!apply_ok && (retries < BCDB_APPLY_RETRY_MAX));
+			bcdb_emit_apply_attempt_end(
+				(unsigned long long) (tx ? tx->raft_log_index : 0),
+				tx ? (unsigned) tx->raft_item_ordinal : 0,
+				attempt,
+				apply_ok ? 1 : 0,
+				apply_failed_unique ? 1 : 0,
+				will_retry);
+		}
+
+		if (apply_ok)
+		{
+			if (num_apply_retries)
+				*num_apply_retries = retries;
+			return true;
+		}
+
+		retries++;
+		if (retries > BCDB_APPLY_RETRY_MAX)
+		{
+			if (num_apply_retries)
+				*num_apply_retries = retries;
+			BCDB_FLOW_LOG("[BCDB_FLOW] apply_retry_exhausted pid=%d txid=%d xid=%u retries=%d",
+						  getpid(),
+						  tx ? (int)tx->tx_id : -1,
+						  (unsigned int)(tx ? tx->xid : InvalidTransactionId),
+						  retries);
+
+			if (apply_failed_unique)
+			{
+				BCDB_FLOW_LOG("[BCDB_FLOW] apply_retry_exhausted_nonretryable_unique pid=%d txid=%d xid=%u retries=%d",
+							  getpid(),
+							  tx ? (int)tx->tx_id : -1,
+							  (unsigned int)(tx ? tx->xid : InvalidTransactionId),
+							  retries);
+				if (nonretryable_error)
+					*nonretryable_error = true;
+			}
+			return false;
+		}
+
+		CHECK_FOR_INTERRUPTS();
+		pg_usleep((long) backoff_us);
+		if (backoff_us < BCDB_APPLY_RETRY_BACKOFF_MAX_US)
+			backoff_us <<= 1;
+		attempt++;
+	}
 }
 
 static inline const char *
@@ -1094,7 +1416,7 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
  *     not yet in apply" from "predecessor stuck in serial gate".
  *  2. Opt-in per-second trace at 1 s: BCDB_GATE_DEBUG=1 (existing).
  */
-static inline void
+void
 bcdb_wait_for_prev_committed(BCDBShmXact *tx)
 {
     /* tx_id 0 has no predecessor; tx_id-1 would underflow to UINT32_MAX. */
@@ -2101,15 +2423,21 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     int apply_retries = 0;
     bool apply_nonretryable = false;
     bool apply_terminal_noop = false;
+	bool apply_idempotent_noop = false;
     bool published_max_advanced = false;
     bool parse_barrier_done = false;
     BCTxID retry_wait_committed_txid = -1;
+	bcdb_apply_outcome apply_outcome = BCDB_OUTCOME_OK;
+	char det_err_sqlstate[6] = "XX000";
+	char det_err_msg[512] = "";
+	int mem_txid = 0;
 
     is_bcdb_worker = true;
 
     Assert(tx != NULL);
     tx->worker_pid = pid;
     activeTx = tx;
+	bcdb_emit_ledger_boundary("ledger_begin");
     tx->block_id_snapshot = tx->block_id_committed - 1;
 
     LIST_INIT(&ws_table_record);
@@ -2211,6 +2539,9 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             {
                 // retry:
                 num_restarts++;
+				apply_outcome = BCDB_OUTCOME_OK;
+				apply_terminal_noop = false;
+				apply_idempotent_noop = false;
                 LIST_INIT(&ws_table_record);
                 LIST_INIT(&rs_table_record);
 
@@ -2278,6 +2609,10 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 else
                     XactIsoLevel = tx->isolation;
                 PTRACE_BEGIN(BCDB_PHASE_PARSE_PLAN);
+				elog(LOG, "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=before_tx_start",
+						MyProcPid, (int) tx->tx_id,
+						(unsigned long long) tx->raft_log_index,
+						(unsigned) tx->raft_item_ordinal);
                 start_xact_command();
                 tx->status = TX_EXECUTING;
 
@@ -2290,12 +2625,169 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 if (IsolationIsSerializable())
                 {
                     tx->sxact = ShareSerializableXact();
-                    tx->sxact->bcdb_tx = tx;
+					if (tx->sxact != NULL)
+						tx->sxact->bcdb_tx = tx;
                 }
                 else
-                    tx->sxact = NULL;
-                get_write_set(tx, snapshot); //  does CreatePortal
-                bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
+					tx->sxact = NULL;
+
+				/* D2: Raft apply ledger claim */
+				{
+					RaftClaimResult claim_res = RAFT_CLAIM_DISABLED;
+					char *res_payload = NULL;
+					int res_fmtver = 1;
+					char *err_payload = NULL;
+					int err_fmtver = 1;
+					char *sqlstate_claim = NULL;
+
+					if (tx->raft_ledger_enabled)
+					{
+						elog(LOG, "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=before_claim",
+								MyProcPid, (int) tx->tx_id,
+								(unsigned long long) tx->raft_log_index,
+								(unsigned) tx->raft_item_ordinal);
+
+						claim_res = bcdb_raft_ledger_claim(tx,
+															&res_payload, &res_fmtver,
+															&err_payload, &err_fmtver,
+															&sqlstate_claim);
+
+						elog(LOG, "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=after_claim result=%d",
+								MyProcPid, (int) tx->tx_id,
+								(unsigned long long) tx->raft_log_index,
+								(unsigned) tx->raft_item_ordinal,
+								(int) claim_res);
+						if (claim_res == RAFT_CLAIM_REPLAY_OK)
+						{
+							/*
+								* pstrdup into local context before SPI memory is
+								* released by finish_xact_command().
+								*/
+							char *local_payload = res_payload
+								? MemoryContextStrdup(bcdb_tx_context, res_payload)
+								: NULL;
+							TransactionId replay_xid;
+
+							if (activeTx->portal != NULL)
+							{
+								PortalDrop(activeTx->portal, false);
+								activeTx->portal = NULL;
+							}
+
+							/* Force a new lookup transaction XID during replay */
+							replay_xid = GetCurrentTransactionId();
+
+							/* Close the lookup transaction cleanly. */
+							finish_xact_command();
+							bcdb_complete_replayed_item(tx, local_payload, false, replay_xid);
+							bcdb_cleanup_optim_write_list(activeTx, true);
+							delete_tx(tx);
+							MemoryContextReset(bcdb_tx_context);
+							PTRACE_END(BCDB_PHASE_PARSE_PLAN);
+							PTRACE_END(BCDB_PHASE_TOTAL);
+							return;
+						}
+						else if (claim_res == RAFT_CLAIM_REPLAY_ERROR)
+						{
+							char *local_payload = err_payload
+								? MemoryContextStrdup(bcdb_tx_context, err_payload)
+								: NULL;
+							TransactionId replay_xid;
+
+							if (activeTx->portal != NULL)
+							{
+								PortalDrop(activeTx->portal, false);
+								activeTx->portal = NULL;
+							}
+
+							/* Force a new lookup transaction XID during replay */
+							replay_xid = GetCurrentTransactionId();
+
+							/* Close the lookup transaction cleanly. */
+							finish_xact_command();
+							bcdb_complete_replayed_item(tx, local_payload, true, replay_xid);
+							bcdb_cleanup_optim_write_list(activeTx, true);
+							delete_tx(tx);
+							MemoryContextReset(bcdb_tx_context);
+							PTRACE_END(BCDB_PHASE_PARSE_PLAN);
+							PTRACE_END(BCDB_PHASE_TOTAL);
+							return;
+						}
+					}
+				}
+
+				bcdb_maybe_trigger_safe_failpoint(
+					"ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL",
+					tx,
+					"after_ledger_claim_before_user_sql");
+
+				bcdb_emit_ledger_boundary("ledger_business_sql");
+
+				/* Run business SQL in a subtransaction if ledger is enabled to catch deterministic errors */
+				if (tx->raft_ledger_enabled)
+				{
+					MemoryContext old_context = CurrentMemoryContext;
+					ResourceOwner old_owner = CurrentResourceOwner;
+
+					BeginInternalSubTransaction("bcdb_business_run");
+					PG_TRY();
+					{
+						get_write_set(tx, snapshot);
+						bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
+						ReleaseCurrentSubTransaction();
+						MemoryContextSwitchTo(old_context);
+						CurrentResourceOwner = old_owner;
+					}
+					PG_CATCH();
+					{
+						ErrorData *edata;
+						char *state_str;
+						bool is_deterministic = false;
+
+						MemoryContextSwitchTo(old_context);
+						edata = CopyErrorData();
+						FlushErrorState();
+						RollbackAndReleaseCurrentSubTransaction();
+						MemoryContextSwitchTo(old_context);
+						CurrentResourceOwner = old_owner;
+
+						MemoryContextSwitchTo(bcdb_tx_context);
+						state_str = unpack_sql_state(edata->sqlerrcode);
+						if (is_whitelisted_deterministic(state_str)) {
+							is_deterministic = true;
+						}
+
+						if (is_deterministic)
+						{
+							const char *err_class = "unknown_error_class";
+							if (strcmp(state_str, "42P01") == 0) err_class = "undefined_table";
+							else if (strcmp(state_str, "42703") == 0) err_class = "undefined_column";
+							else if (strcmp(state_str, "42601") == 0) err_class = "syntax_error";
+							else if (strcmp(state_str, "0A000") == 0) err_class = "feature_not_supported";
+
+							apply_outcome = BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR;
+							strncpy(det_err_sqlstate, state_str, 5);
+							det_err_sqlstate[5] = '\0';
+							snprintf(det_err_msg, sizeof(det_err_msg),
+										"format_version=1\nsqlstate=%s\nerror_class=%s\n",
+										det_err_sqlstate,
+										err_class);
+							FreeErrorData(edata);
+						}
+						else
+						{
+							FreeErrorData(edata);
+							PG_RE_THROW();
+						}
+					}
+					PG_END_TRY();
+				}
+				else
+				{
+					get_write_set(tx, snapshot);
+					bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
+				}
+
                 PTRACE_END(BCDB_PHASE_PARSE_PLAN);
 #if SAFEDBG1
                 printf("safeDbg pid %d %s : %s: %d \n",
@@ -2313,12 +2805,20 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                     activeTx->portal = NULL;
                 }
                 hold_portal_snapshot = false;
-                if (bcdb_dt_skip_readonly_gate_enabled() &&
-                    bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
-                    LIST_EMPTY(&ws_table_record))
+
+				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
                 {
-                    mark_published_ready_txid(tx);
-                    published_max_advanced = true;
+					apply_terminal_noop = true;
+				}
+				else
+				{
+					if (bcdb_dt_skip_readonly_gate_enabled() &&
+						bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
+						LIST_EMPTY(&ws_table_record))
+					{
+						mark_published_ready_txid(tx);
+						published_max_advanced = true;
+					}
                 }
 #if SAFEDBG1
                 printf("safeDbg pid %d %s : %s: %d \n",
@@ -2366,7 +2866,10 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 printf("safeDbg worker read result at %d= %s\n", ((tx->tx_id) % (2 * block->blksize)), block->result[(tx->tx_id) % (2 * block->blksize)]);
 #endif
                 PTRACE_BEGIN(BCDB_PHASE_CONFLICT);
-                rw_conflicts = conflict_checkDT();
+				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
+					rw_conflicts = 0;
+				else
+					rw_conflicts = conflict_checkDT();
                 PTRACE_END(BCDB_PHASE_CONFLICT);
                 // conflict_check();
             }
@@ -2422,8 +2925,10 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             PTRACE_BEGIN(BCDB_PHASE_APPLY);
             apply_nonretryable = false;
             apply_terminal_noop = false;
+			apply_idempotent_noop = false;
             if (!bcdb_apply_optim_writes_with_retry(tx, &apply_retries,
-                                                    &apply_nonretryable))
+													&apply_nonretryable,
+													det_err_sqlstate, det_err_msg))
             {
                 PTRACE_END(BCDB_PHASE_APPLY);
 
@@ -2455,7 +2960,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                         PTRACE_BEGIN(BCDB_PHASE_APPLY);
                         if (bcdb_apply_optim_writes_with_retry(tx,
                                                                &settled_apply_retries,
-                                                               &settled_nonretryable))
+																&settled_nonretryable,
+																det_err_sqlstate, det_err_msg))
                         {
                             PTRACE_END(BCDB_PHASE_APPLY);
                             apply_retries += settled_apply_retries;
@@ -2488,11 +2994,22 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
                     if (apply_nonretryable)
                     {
-                        BCDB_FLOW_LOG("[BCDB_FLOW] apply_nonretryable_finalize_noop pid=%d txid=%d xid=%u",
-                                      getpid(),
-                                      tx ? (int)tx->tx_id : -1,
-                                      (unsigned int)(tx ? tx->xid : InvalidTransactionId));
-                        apply_terminal_noop = true;
+						if (bcdb_sql_is_insert_on_conflict_do_nothing(tx->sql))
+						{
+							apply_terminal_noop = true;
+							apply_idempotent_noop = true;
+						}
+						else if (is_whitelisted_deterministic(det_err_sqlstate))
+						{
+							apply_outcome = BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR;
+							apply_terminal_noop = true;
+						}
+						else
+						{
+							ereport(ERROR,
+									(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+										errmsg("BCDB apply unique/non-deterministic constraint conflict, retrying transaction")));
+						}
                     }
                 }
                 else
@@ -2609,7 +3126,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                     }
                 }
             }
-            int mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
+			mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
 
             /* Portal was dropped right after PortalRun; keep this as a safety net. */
             if (hold_portal_snapshot && activeTx && activeTx->portal)
@@ -2649,8 +3166,11 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 uint64 finish_result_start = bcdb_ptrace_timer_start();
                 int read_cmd = chk_query_type(tx->sql, "select", "SELECT");
 
-                if (read_cmd == 1)
-                    strlcpy(block->result[mem_txid], tx_result, sizeof(block->result[mem_txid]));
+				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
+				{
+					snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+								"\n\t*%s* ERROR %s %s\n", tx->hash, det_err_sqlstate, det_err_msg);
+				}
                 else if (apply_terminal_noop)
                 {
                     /*
@@ -2674,6 +3194,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                         snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
                                  "\n\t*%s* ERROR\n", tx->hash);
                 }
+				else if (read_cmd == 1)
+					strlcpy(block->result[mem_txid], tx_result, sizeof(block->result[mem_txid]));
                 else
                 {
                     /*
@@ -2686,66 +3208,83 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                              "\n\t*%s* %s\n", tx->hash, completionTag);
                 }
 
+				if (tx->raft_ledger_enabled)
+				{
+					if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
+					{
+						bcdb_raft_ledger_finalize_error(tx, det_err_sqlstate, det_err_msg, 1);
+					}
+					else if (apply_terminal_noop && !apply_idempotent_noop)
+					{
+						bcdb_raft_ledger_finalize_error(tx, det_err_sqlstate, det_err_msg, 1);
+					}
+					else
+					{
+						bcdb_raft_ledger_finalize_ok(tx, block->result[mem_txid], 1);
+					}
+
+					bcdb_maybe_trigger_safe_failpoint(
+						"ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT",
+						tx,
+						"after_ledger_finalize_before_toplevel_commit");
+				}
+
                 bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_RESULT_US,
                                        finish_result_start);
             }
 
+			if (tx->raft_ledger_enabled)
+			{
+				EMIT_SAFE_LEDGER_XACT(tx, "worker_assert_terminal_before");
+				bcdb_raft_ledger_assert_terminal(tx);
+				EMIT_SAFE_LEDGER_XACT(tx, "worker_finish_xact_before");
+			}
+
+			uint8 postcommit_digest[BCDB_RAFT_DIGEST_BYTES];
+			uint8 postcommit_epoch_id[BCDB_RAFT_DIGEST_BYTES];
+			uint64 postcommit_log_index = 0;
+			uint32 postcommit_item_ordinal = 0;
+			int postcommit_state = 0;
+			int postcommit_fmtver = 0;
+			bool do_postcommit_witness =
+				(tx->raft_ledger_enabled && bcdb_safe_postcommit_witness_enabled());
+
+			if (do_postcommit_witness)
+			{
+				memcpy(postcommit_epoch_id, tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES);
+				memcpy(postcommit_digest, tx->raft_terminal_digest, BCDB_RAFT_DIGEST_BYTES);
+				postcommit_log_index = tx->raft_log_index;
+				postcommit_item_ordinal = tx->raft_item_ordinal;
+				postcommit_state = tx->raft_terminal_state;
+				postcommit_fmtver = tx->raft_terminal_format_version;
+			}
+
 			finish_xact_command();
 
-			/*
-			 * Publish result and commit markers only after PostgreSQL commit.  The
-			 * release-store pair makes result_commit_xid visible before the tx-id
-			 * marker; last_committed_tx_id is advanced below from these markers.
-			 */
-			pg_write_barrier();
-			__atomic_store_n(&block->result_commit_xid[mem_txid],
-							 tx->xid, __ATOMIC_RELEASE);
-			__atomic_store_n(&block->result_committed_txid[mem_txid],
-							 tx->tx_id, __ATOMIC_RELEASE);
+			if (do_postcommit_witness)
+			{
+				(void) bcdb_safe_postcommit_witness(postcommit_epoch_id,
+													postcommit_log_index,
+													postcommit_item_ordinal,
+													postcommit_digest,
+													postcommit_state,
+													postcommit_fmtver);
+			}
 
-			/*
-			 * Self-consume only for direct psycopg transactions.  For
-			 * bcdb_block_submit_results(), the middleware owns the slot until
-			 * it has formatted the gateway response and publishes
-			 * result_consumed_txid itself.  Marking a block-submit result
-			 * consumed here lets a later tx reuse the ring slot before the
-			 * gateway-side reader has observed it.
-			 */
-			if (tx->block_id_committed == BCDBMaxBid)
-				__atomic_store_n(&block->result_consumed_txid[mem_txid],
-								 (int32)tx->tx_id, __ATOMIC_RELEASE);
-
-            {
-                uint64 finish_publish_start = bcdb_ptrace_timer_start();
-                if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
-                    set_last_committed_txid(tx); /* paper-style: already serialized at gate */
-                else if (bcdb_advance_commit_watermark)
-                    advance_last_committed_txid(tx); /* Lever D + T3: lock-free CAS */
-                else
-                {
-                    bcdb_wait_for_prev_committed(tx); /* Lever D only: blocking finish */
-                    set_last_committed_txid(tx);
-                }
-                bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_FINISH_PUBLISH_US,
-                                       finish_publish_start);
+			if (tx->raft_ledger_enabled)
+			{
+				EMIT_SAFE_LEDGER_XACT(tx, "worker_finish_xact_after");
+				bcdb_maybe_trigger_safe_failpoint(
+					"ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT_BEFORE_RESULT_RING",
+					tx,
+					"after_worker_toplevel_commit_before_result_ring");
             }
-            {
-                BCBlock *committed_block = get_block_by_id(tx->block_id_committed, false);
 
-                if (committed_block != NULL)
-                {
-                    int32 num_finished = __sync_add_and_fetch(&committed_block->num_finished, 1);
-
-                    if (num_finished == committed_block->num_tx)
-                    {
-                        uint32 global_bmin = __sync_add_and_fetch(&block_meta->global_bmin, 1);
-
-                        ConditionVariableBroadcast(&block_meta->conds[global_bmin % NUM_BMIN_COND]);
-                        block_cleaning_dt(committed_block->id);
-                    }
-                }
-            }
-            condSig = 1;
+			bcdb_finish_terminal_item(tx, block->result[mem_txid],
+									  (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR ||
+									   (apply_terminal_noop && !apply_idempotent_noop)),
+									  false, tx->xid);
+			condSig = 1;
 
 #if SAFEDBG3
             // printf("blkmid read result at %d= %s\n", ((tx->tx_id)%(2*block->blksize)), block->result[(tx->tx_id)%(2*block->blksize)]); // does it get overwritten
@@ -2771,27 +3310,53 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     }
     PG_CATCH();
     {
-        ErrorData *edata = NULL;
+		ErrorData *edata;
+		char       sqlstate[6] = "XX000";
+		char      *message_copy = NULL;
+
         ConditionVariableCancelSleep();
 
-        if (bcdb_flow_debug_enabled())
-        {
-            const char *msg;
-            const char *sqlstate;
+		/*
+			* Always preserve the original PostgreSQL error.  Safe-ledger failures
+			* must never collapse into the generic XX000 completion receipt.
+			*/
+		MemoryContextSwitchTo(TopMemoryContext);
+		edata = CopyErrorData();
 
-            edata = CopyErrorData();
-            msg = (edata && edata->message) ? edata->message : "<null>";
-            sqlstate = (edata != NULL) ? unpack_sql_state(edata->sqlerrcode) : "00000";
-            ereport(LOG,
-                    (errmsg("[BCDB_FLOW] tx_error pid=%d txid=%d xid=%u sqlstate=%s status=%d msg=%s",
-                            getpid(),
-                            tx ? (int)tx->tx_id : -1,
-                            (unsigned int)(tx ? tx->xid : InvalidTransactionId),
-                            sqlstate,
-                            tx ? (int)tx->status : -1,
-                            msg)));
-            FlushErrorState();
+		if (edata != NULL)
+        {
+			const char *state = unpack_sql_state(edata->sqlerrcode);
+
+			if (state != NULL)
+				strlcpy(sqlstate, state, sizeof(sqlstate));
+
+			message_copy = pstrdup(
+				edata->message != NULL ? edata->message : "<null>");
         }
+		else
+		{
+			message_copy = pstrdup("<CopyErrorData returned NULL>");
+		}
+
+		/*
+			* Clear the active error before issuing ereport(LOG). `edata` remains
+			* valid and will be rethrown after result-ring cleanup.
+			*/
+		FlushErrorState();
+
+		ereport(LOG,
+				(errmsg("[BCDB_FATAL] worker_tx_error "
+						"pid=%d txid=%d raft_log=%llu ordinal=%u "
+						"sqlstate=%s status=%d message=%s",
+						getpid(),
+						tx ? (int) tx->tx_id : -1,
+						(unsigned long long)
+							(tx ? tx->raft_log_index : 0),
+						(unsigned)
+							(tx ? tx->raft_item_ordinal : 0),
+						sqlstate,
+						tx ? (int) tx->status : -1,
+						message_copy)));
 
 #if SAFEDBG1
         printf("safeDbg pg-catch() pid %d %s : %s: %d  tx %d %s \n",
@@ -2812,41 +3377,59 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
              * error result before advancing; otherwise one failed worker
              * can leave bcdb_block_submit_results() asleep forever.
              */
-            if (block == NULL)
-                block = get_block_by_id(1, false);
-            bcdb_publish_error_result(block,
-                                      tx,
-                                      edata != NULL
-                                          ? unpack_sql_state(edata->sqlerrcode)
-                                          : "XX000");
-			if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
-				!published_max_advanced)
-			{
-				mark_published_ready_txid(tx);
-				published_max_advanced = true;
-			}
-            if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
-                set_last_committed_txid(tx);
-            else if (bcdb_advance_commit_watermark)
-                advance_last_committed_txid(tx);
-            else
+			if (tx->raft_ledger_enabled)
             {
-                bcdb_wait_for_prev_committed(tx);
-                set_last_committed_txid(tx);
+				ereport(LOG,
+						(errmsg("[BCDB_FATAL] safe ledger infrastructure "
+								"failure left tx retryable without terminal "
+								"envelope txid=%d raft_log=%llu ordinal=%u "
+								"sqlstate=%s",
+								(int) tx->tx_id,
+								(unsigned long long) tx->raft_log_index,
+								(unsigned) tx->raft_item_ordinal,
+								sqlstate)));
             }
+
+			if (tx->raft_ledger_enabled)
             {
-                BCBlock *committed_block = get_block_by_id(tx->block_id_committed, false);
+				BCBlock *error_block = get_block_by_id(1, false);
 
-                if (committed_block != NULL)
+				bcdb_publish_error_result(error_block, tx, sqlstate);
+			}
+			else
+			{
+				if (block == NULL)
+					block = get_block_by_id(1, false);
+				bcdb_publish_error_result(block, tx, sqlstate);
+				if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
+					!published_max_advanced)
                 {
-                    int32 num_finished = __sync_add_and_fetch(&committed_block->num_finished, 1);
+					mark_published_ready_txid(tx);
+					published_max_advanced = true;
+				}
+				if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
+					set_last_committed_txid(tx);
+				else if (bcdb_advance_commit_watermark)
+					advance_last_committed_txid(tx);
+				else
+				{
+					bcdb_wait_for_prev_committed(tx);
+					set_last_committed_txid(tx);
+				}
+				{
+					BCBlock *committed_block = get_block_by_id(tx->block_id_committed, false);
 
-                    if (num_finished == committed_block->num_tx)
+					if (committed_block != NULL)
                     {
-                        uint32 global_bmin = __sync_add_and_fetch(&block_meta->global_bmin, 1);
+						int32 num_finished = __sync_add_and_fetch(&committed_block->num_finished, 1);
 
-                        ConditionVariableBroadcast(&block_meta->conds[global_bmin % NUM_BMIN_COND]);
-                        block_cleaning_dt(committed_block->id);
+						if (num_finished == committed_block->num_tx)
+						{
+							uint32 global_bmin = __sync_add_and_fetch(&block_meta->global_bmin, 1);
+
+							ConditionVariableBroadcast(&block_meta->conds[global_bmin % NUM_BMIN_COND]);
+							block_cleaning_dt(committed_block->id);
+						}
                     }
                 }
             }
@@ -2865,7 +3448,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
         if (edata != NULL)
             ReThrowError(edata);
-        PG_RE_THROW();
+
+		elog(ERROR, "BCDB worker PG_CATCH had no ErrorData");
     }
     PG_END_TRY();
 }
@@ -2900,7 +3484,8 @@ void bcdb_worker_process_tx(BCDBShmXact *tx)
         start_xact_command();
         snapshot = GetTransactionSnapshot();
         tx->sxact = ShareSerializableXact();
-        tx->sxact->bcdb_tx = tx;
+		if (tx->sxact != NULL)
+			tx->sxact->bcdb_tx = tx;
         get_write_set(tx, snapshot);
         old_owner = CurrentResourceOwner;
         CurrentResourceOwner = activeTx->portal->resowner;
@@ -2950,7 +3535,8 @@ void bcdb_worker_process_tx(BCDBShmXact *tx)
         apply_optim_writes();
         if (timing)
             tx->end_local_copy_time = bcdb_get_time();
-        tx->sxact->flags |= SXACT_FLAG_PREPARED;
+		if (tx->sxact != NULL)
+			tx->sxact->flags |= SXACT_FLAG_PREPARED;
         finish_xact_command();
 
         DEBUGMSG("[ZL] worker(%d) commiting tx(%s)", getpid(), tx->hash);

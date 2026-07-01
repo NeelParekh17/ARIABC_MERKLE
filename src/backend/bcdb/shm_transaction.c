@@ -122,6 +122,7 @@
  */
 BCDBShmXact *activeTx;
 slock_t *restart_counter_lock;
+pg_atomic_uint32 *bcdb_safe_failpoint_fired;
 int *numExecPt;
 HTAB *tx_pool;
 slock_t *tx_pool_lock;
@@ -533,6 +534,10 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     tx->create_time = 0;
     tx->has_raw = false;
     tx->has_war = false;
+	tx->raft_terminal_update_confirmed = false;
+	tx->raft_terminal_returning_verified = false;
+	tx->raft_terminal_verified_top_xid = InvalidTransactionId;
+	tx->raft_terminal_verified_nest_level = -1;
     SHA256_Init(&tx->state_hash);
     SIMPLEQ_INIT(&tx->optim_write_list);
 
@@ -601,19 +606,26 @@ void create_tx_pool(void)
     HASHCTL info;
     slock_t *tx_pool_lock_array;
     bool found;
+	bool locks_found;
+	bool failpoint_found;
 
     restart_counter_lock = ShmemInitStruct("restart_counter_lock", sizeof(slock_t), &found);
     // nexec_lock = ShmemInitStruct("nexec_lock", sizeof(slock_t) , &found);
 #if SAFEDBG
     DEBUGNOCHECK("[BCDB] create_tx_pool (%s:%s:%d)", __FILE__, __FUNCTION__, __LINE__);
 #endif
-    tx_pool_lock_array = ShmemInitStruct("tx_pool_lock", sizeof(slock_t) * 2, &found);
+	tx_pool_lock_array = ShmemInitStruct("tx_pool_lock", sizeof(slock_t) * 2, &locks_found);
     tx_pool_lock = tx_pool_lock_array;
     xid_map_lock = tx_pool_lock + 1;
+	bcdb_safe_failpoint_fired = ShmemInitStruct("bcdb_safe_failpoint_fired",
+												sizeof(pg_atomic_uint32),
+												&failpoint_found);
+	if (!failpoint_found)
+		pg_atomic_init_u32(bcdb_safe_failpoint_fired, 0);
     numExecPt = (int *)ShmemAlloc(sizeof(int));
     *numExecPt = 0;
 
-    if (!found)
+	if (!locks_found)
     {
         SpinLockInit(tx_pool_lock);
         SpinLockInit(restart_counter_lock);
@@ -704,6 +716,7 @@ Size tx_pool_size(void)
     Size ret = hash_estimate_size(MAX_SHM_TX, sizeof(BCDBShmXact));
     ret = add_size(ret, hash_estimate_size(MAX_SHM_TX, sizeof(XidMapEntry)));
     ret = add_size(ret, sizeof(slock_t) * 2);
+	ret = add_size(ret, sizeof(pg_atomic_uint32));
     ret = add_size(ret, sizeof(TxQueue) * NUM_TX_QUEUE_PARTITION);
     ret = add_size(ret, sizeof(WSTable));
     ret = add_size(ret, hash_estimate_size(MAX_WRITE_CONFLICT, sizeof(WSTableEntry)));
@@ -1345,16 +1358,27 @@ get_tx_by_hash(const char *hash)
 }
 
 /*
- * get_tx_by_xid and get_tx_by_xid_locked have been removed.
- *
- * get_tx_by_xid: looked up xid_map without acquiring the per-tx LWLock.
- *   It had no callers in the live codebase.
- *
- * get_tx_by_xid_locked: looked up xid_map AND acquired tx->lock before
- *   returning (for safe mutation of the entry).  Also had no callers; it
- *   was intended for SSI predicate-lock conflict callbacks but was never
- *   wired up.  If SSI callbacks need this in future, re-introduce it here.
+ * get_tx_by_xid and get_tx_by_xid_locked have been restored.
  */
+BCDBShmXact *
+get_tx_by_xid(TransactionId xid)
+{
+	XidMapEntry *entry;
+	bool found;
+	BCDBShmXact *tx = NULL;
+
+	if (!TransactionIdIsValid(xid))
+		return NULL;
+
+	SpinLockAcquire(xid_map_lock);
+	entry = hash_search(xid_map, &xid, HASH_FIND, &found);
+	if (found && entry != NULL)
+		tx = entry->tx;
+	SpinLockRelease(xid_map_lock);
+
+	return tx;
+}
+
 
 /*
  * add_tx_xid_map
@@ -2795,4 +2819,43 @@ void clean_rs_ws_table(void)
 {
     shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
     shm_hash_clear(rs_table->map, MAX_WRITE_CONFLICT);
+}
+
+void
+bcdb_emit_ledger_boundary(const char *phase)
+{
+	if (is_bcdb_worker && activeTx != NULL)
+	{
+		/*
+		 * Use the D1 struct fields directly when ledger is enabled;
+		 * fall back to SQL-string parsing for legacy/debug mode.
+		 */
+		uint64 raft_log_index = 0;
+		uint32 item_ordinal = 0;
+
+		if (activeTx->raft_ledger_enabled)
+		{
+			raft_log_index = activeTx->raft_log_index;
+			item_ordinal   = activeTx->raft_item_ordinal;
+		}
+		else if (activeTx->sql[0] != '\0')
+		{
+			const char *p = strstr(activeTx->sql, "raft_log_index=");
+			if (p)
+				raft_log_index = strtoull(p + 15, NULL, 10);
+			p = strstr(activeTx->sql, "item_ordinal=");
+			if (p)
+				item_ordinal = (uint32) atoi(p + 13);
+		}
+
+		ereport(LOG,
+				(errmsg("RAFT_LEDGER_BOUNDARY backend_pid=%d bcdb_tx_id=%ld raft_log_index=%llu item_ordinal=%u top_level_xid=%u subxact_depth=%d phase=%s",
+						getpid(),
+						(long)activeTx->tx_id,
+						(unsigned long long)raft_log_index,
+						(unsigned)item_ordinal,
+						GetTopTransactionIdIfAny(),
+						GetCurrentTransactionNestLevel(),
+						phase)));
+	}
 }

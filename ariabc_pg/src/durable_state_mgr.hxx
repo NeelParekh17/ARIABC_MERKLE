@@ -28,6 +28,7 @@ struct durable_state_mgr_config {
     int         node_id   = 0;
     std::string endpoint;      // host:port used by NuRaft transport
     std::string cluster_id;    // cluster identity string (mismatch → abort)
+    std::string raft_epoch_hex; // Commit B2: cluster epoch identifier
 };
 
 class durable_state_mgr : public nuraft::state_mgr {
@@ -60,6 +61,10 @@ public:
         std::lock_guard<std::recursive_mutex> l(mu_);
         return recovered_;
     }
+    const std::string& recovered_epoch_hex() const {
+        std::lock_guard<std::recursive_mutex> l(mu_);
+        return recovered_epoch_hex_;
+    }
     void initialize_fresh(const nuraft::cluster_config& config);
     void simulate_crash();
     const std::string& storage_dir() const { return cfg_.storage_dir; }
@@ -80,6 +85,7 @@ private:
 
     int lock_fd_ = -1;
     bool recovered_ = false;   // true if directory pre-existed
+    std::string recovered_epoch_hex_;
 
     nuraft::ptr<nuraft::cluster_config>  saved_config_;
     nuraft::ptr<nuraft::srv_state>       saved_state_;

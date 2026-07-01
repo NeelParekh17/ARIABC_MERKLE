@@ -28,6 +28,9 @@
 #include "openssl/sha.h"
 #include "access/merkle.h"
 
+/* Raft ledger metadata constants (D1) */
+#define BCDB_RAFT_DIGEST_BYTES 32
+
 typedef enum 
 {
     TX_SCHEDULING,
@@ -151,6 +154,26 @@ typedef struct _BCDBShmXact
     uint64          start_local_copy_time;
     uint64          end_local_copy_time;
     uint64          commit_time;
+
+	/* Raft apply ledger metadata (Commit D1).
+		* Populated by the executor before enqueuing the transaction.
+		* Workers use these to write ledger rows atomically with business SQL.
+		* All fields are zero/false when raft_ledger_enabled is false (legacy mode).
+		*/
+	bool            raft_ledger_enabled;
+	uint64          raft_log_index;            /* NuRaft log index of containing entry */
+	uint32          raft_item_ordinal;         /* 0-based position within the entry */
+	uint32          raft_item_count;           /* total items in the entry */
+	uint8           raft_epoch_id[BCDB_RAFT_DIGEST_BYTES];     /* cluster epoch (32 bytes) */
+	uint8           raft_entry_digest[BCDB_RAFT_DIGEST_BYTES]; /* SHA-256 of raw entry bytes */
+	uint8           raft_item_digest[BCDB_RAFT_DIGEST_BYTES];  /* SHA-256 of item sql+req_id */
+	uint8           raft_terminal_digest[BCDB_RAFT_DIGEST_BYTES]; /* SHA-256 of the terminal result/error payload */
+	int             raft_terminal_format_version;   /* format version stored in ledger row; propagated to result-ring envelope */
+	int             raft_terminal_state;            /* RAFT_ITEM_STATE_APPLIED_* once finalize/replay reaches a terminal row */
+	bool            raft_terminal_update_confirmed; /* true only after terminal ledger row update/replay validation succeeds */
+	bool            raft_terminal_returning_verified; /* true only after UPDATE ... RETURNING validation succeeds */
+	TransactionId   raft_terminal_verified_top_xid; /* top-level xid observed during terminal verification */
+	int             raft_terminal_verified_nest_level; /* nest level observed during terminal verification */
 } BCDBShmXact;
 
 typedef struct _TxQueue
@@ -206,6 +229,7 @@ typedef LIST_HEAD(_MerkleChangeSet, _PendingMerkleUpdate) MerkleChangeSet;
 
 extern BCDBShmXact  *activeTx;
 extern slock_t      *restart_counter_lock;
+extern pg_atomic_uint32 *bcdb_safe_failpoint_fired;
 
 extern HTAB         *tx_pool;
 extern TxQueue      *tx_queues;
@@ -220,8 +244,10 @@ extern void         clear_tx_pool(void);
 extern Size         tx_pool_size(void);
 extern BCDBShmXact* get_tx_by_hash(const char *hash);
 /* get_tx_by_xid and get_tx_by_xid_locked removed — no callers; see shm_transaction.c */
+extern BCDBShmXact* get_tx_by_xid(TransactionId xid);
 extern void         add_tx_xid_map(TransactionId id, BCDBShmXact *tx);
 extern void         remove_tx_xid_map(TransactionId id);
+extern void         bcdb_emit_ledger_boundary(const char *phase);
 extern BCDBShmXact* create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int isolation, bool pred_lock);
 extern void         delete_tx(BCDBShmXact* tx);
 
