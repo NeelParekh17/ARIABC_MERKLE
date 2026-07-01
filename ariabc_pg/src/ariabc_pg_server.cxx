@@ -4,6 +4,7 @@
 #include "ariabc_pg_util.hxx"
 #include "in_memory_state_mgr.hxx"
 #include "durable_state_mgr.hxx"
+#include <openssl/sha.h>
 #include "durable_log_store.hxx"
 #include "logger_wrapper.hxx"
 
@@ -16,6 +17,7 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -290,6 +292,12 @@ struct server_options {
     std::string raft_storage_dir = "./raft_storage";
     std::string raft_cluster_id = "ariabc_cluster";
 
+    // Commit B1: safe-mode ledger gate: "off" or "safe"
+    std::string raft_apply_ledger_mode = "off";
+
+    // Commit B2: cluster epoch as 64-char lowercase hex (32 bytes)
+    std::string raft_epoch_hex;
+
     db_options db;
     kafka_options kafka;
 };
@@ -305,7 +313,9 @@ void usage(const char* argv0) {
         << "    [--kafkaBootstrap <host:port>] [--resultTopic <t>] [--resultSigKey <k>] \\\n"
         << "    [--bypassRaft 0|1]  # skip Raft, direct-enqueue to executor (kafka-only profile)\n"
         << "    [--raft-storage-mode <in_memory|durable>]\n"
-        << "    [--raft-storage-dir <path>]\n";
+        << "    [--raft-storage-dir <path>]\n"
+        << "    [--raft-apply-ledger off|safe]   # B1: safe-mode ledger gate\n"
+        << "    [--raft-epoch-hex <64-hex-chars>] # B2: cluster epoch identifier\n";
 }
 
 bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
@@ -360,6 +370,10 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.raft_storage_dir = need("--raft-storage-dir");
             } else if (a == "--raft-cluster-id") {
                 opt.raft_cluster_id = need("--raft-cluster-id");
+            } else if (a == "--raft-apply-ledger") {
+                opt.raft_apply_ledger_mode = need("--raft-apply-ledger");
+            } else if (a == "--raft-epoch-hex") {
+                opt.raft_epoch_hex = need("--raft-epoch-hex");
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -416,6 +430,30 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
             }
         }
     }
+    // B1: validate --raft-apply-ledger
+    {
+        const std::string& lm = opt.raft_apply_ledger_mode;
+        if (lm != "off" && lm != "safe") {
+            err = "invalid --raft-apply-ledger '" + lm + "' (expected 'off' or 'safe')";
+            return false;
+        }
+        // B2: safe mode requires a valid 64-char lowercase hex epoch
+        if (lm == "safe") {
+            const std::string& hex = opt.raft_epoch_hex;
+            if (hex.size() != 64) {
+                err = "--raft-epoch-hex must be exactly 64 lowercase hex chars when --raft-apply-ledger=safe";
+                return false;
+            }
+            for (char c : hex) {
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                    err = "--raft-epoch-hex contains non-lowercase-hex character '" + std::string(1, c) + "'";
+                    return false;
+                }
+            }
+        }
+    }
+    opt.db.raft_apply_ledger_mode = opt.raft_apply_ledger_mode;
+    opt.db.raft_epoch_hex = opt.raft_epoch_hex;
     return true;
 }
 
@@ -498,10 +536,21 @@ void wait_for_admission_drain(pg_state_machine* psm) {
 
     const auto s0 = std::chrono::steady_clock::now();
     bool stalled = false;
+    uint64_t waits = 0;
     while (psm->admission_control_blocked() && !g_stop.load(std::memory_order_relaxed)) {
         stalled = true;
         // Cap a single wait so we re-check g_stop periodically.
         (void)psm->wait_for_admission_drain(50ULL * 1000ULL * 1000ULL); // 50ms
+        ++waits;
+        if (waits == 20 || (waits > 20 && waits % 100 == 0)) {
+            const pg_executor_stats exec = psm->executor_stats();
+            std::cerr << "SAFE_RAFT_APPEND_ADMISSION_WAIT"
+                      << " waits=" << waits
+                      << " queue_depth=" << exec.queue_depth_cur
+                      << " backlog=" << exec.backlog_cur
+                      << " inflight=" << exec.inflight_cur
+                      << std::endl;
+        }
     }
     if (stalled) {
         const auto s1 = std::chrono::steady_clock::now();
@@ -549,6 +598,15 @@ void append_request_to_raft(nuraft::ptr<nuraft::raft_server> raft,
     const bool accepted = r && r->get_accepted();
     const int result_code = r ? static_cast<int>(r->get_result_code()) : -1;
     debug_trace_server_append(req, accepted, result_code, raft->get_leader());
+    if (psm) {
+        std::cerr << "SAFE_RAFT_APPEND_RESULT"
+                  << " accepted=" << (accepted ? 1 : 0)
+                  << " code=" << result_code
+                  << " leader=" << raft->get_leader()
+                  << " last_log_idx=" << raft->get_last_log_idx()
+                  << " items=" << req.item_count()
+                  << std::endl;
+    }
 
     if (!accepted) {
         g_prof.append_not_accepted.fetch_add(1, std::memory_order_relaxed);
@@ -638,6 +696,12 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
         return true;
     }
     orderer.pending.emplace(first_seq, entry);
+    std::cerr << "SAFE_RAFT_ORDERER_ENQUEUE"
+              << " first_seq=" << first_seq
+              << " last_seq=" << last_seq
+              << " next_seq=" << orderer.next_seq
+              << " pending=" << orderer.pending.size()
+              << std::endl;
 
     auto fail_pending_after = [&](uint64_t blocker_seq) {
         for (auto& kv : orderer.pending) {
@@ -659,6 +723,11 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
             std::shared_ptr<raft_ordered_entry> ready = it->second;
             orderer.pending.erase(it);
 
+            std::cerr << "SAFE_RAFT_ORDERER_DRAIN"
+                      << " first_seq=" << ready->first_seq
+                      << " last_seq=" << ready->last_seq
+                      << " next_seq=" << orderer.next_seq
+                      << std::endl;
             lk.unlock();
             append_request_to_raft(raft, psm, ready->req, ready->resp);
             lk.lock();
@@ -670,6 +739,9 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
             }
 
             orderer.next_seq = ready->last_seq + 1;
+            std::cerr << "SAFE_RAFT_ORDERER_ADVANCE"
+                      << " next_seq=" << orderer.next_seq
+                      << std::endl;
             orderer.drained_any = true;
             orderer.cv.notify_all();
         }
@@ -751,11 +823,17 @@ void handle_client_fd(int fd,
                 resp.msg = "INVALID_WAIT_COMMIT_COMMAND";
             } else {
                 if (wait_result_mode) {
-                    if (psm->wait_for_result(target_idx, timeout_ms)) {
+                    std::string failure_reason;
+                    if (psm->wait_for_result(target_idx, timeout_ms, &failure_reason)) {
                         resp.status = 0;
                         resp.msg = "WAIT_RESULT_OK completion_source=apply_complete raft_log_idx=" +
                                    std::to_string(target_idx) +
                                    " result_payload=NA result_hash=NA";
+                    } else if (!failure_reason.empty()) {
+                        resp.status = 1;
+                        resp.msg = "WAIT_RESULT_FAILED cur=" + std::to_string(static_cast<uint64_t>(psm->last_commit_index())) +
+                                   " target=" + std::to_string(target_idx) +
+                                   " reason=" + failure_reason;
                     } else {
                         const uint64_t cur = static_cast<uint64_t>(psm->last_commit_index());
                         resp.status = 1;
@@ -1000,11 +1078,17 @@ void handle_client_fd_direct(int fd,
                 resp.status = 1;
                 resp.msg = "INVALID_WAIT_COMMIT_COMMAND";
             } else if (wait_result_mode) {
-                if (psm->wait_for_result(target_idx, timeout_ms)) {
+                std::string failure_reason;
+                if (psm->wait_for_result(target_idx, timeout_ms, &failure_reason)) {
                     resp.status = 0;
                     resp.msg = "WAIT_RESULT_OK completion_source=direct_apply raft_log_idx=" +
                                std::to_string(target_idx) +
                                " result_payload=NA result_hash=NA";
+                } else if (!failure_reason.empty()) {
+                    resp.status = 1;
+                    resp.msg = "WAIT_RESULT_FAILED cur=" + std::to_string(seq_counter.load(std::memory_order_relaxed)) +
+                               " target=" + std::to_string(target_idx) +
+                               " reason=" + failure_reason;
                 } else {
                     const uint64_t cur = seq_counter.load(std::memory_order_relaxed);
                     resp.status = 1;
@@ -1309,6 +1393,30 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // B1: Verify SHA-256 is functional at program startup.
+    {
+        unsigned char hash[SHA256_DIGEST_LENGTH];
+        const char* test_data = "ariabc_test_hash";
+        SHA256(reinterpret_cast<const unsigned char*>(test_data), strlen(test_data), hash);
+        std::cout << "SHA-256 test: ";
+        for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+            printf("%02x", hash[i]);
+        }
+        std::cout << std::endl;
+    }
+
+    // B1: Recovered durable storage + off: reject startup.
+    if (opt.raft_apply_ledger_mode == "off" && !opt.raft_storage_dir.empty()) {
+        struct stat st;
+        std::string identity_p = opt.raft_storage_dir + "/identity.bin";
+        if (::stat(identity_p.c_str(), &st) == 0) {
+            std::cerr << "Startup rejected: Recovered durable storage found at "
+                      << opt.raft_storage_dir << " but --raft-apply-ledger is set to 'off'."
+                      << std::endl;
+            return 1;
+        }
+    }
+
     // Ignore SIGPIPE so a broken client connection doesn't kill the server.
     ::signal(SIGPIPE, SIG_IGN);
     ::signal(SIGTERM, ariabc_pg::on_term);
@@ -1318,7 +1426,8 @@ int main(int argc, char** argv) {
     ptr<state_machine> sm =
         cs_new<ariabc_pg::pg_state_machine>(opt.id, opt.db, opt.kafka);
 
-    if (opt.db.db_type == 1) {
+    if (opt.db.db_type == 1 && opt.db.raft_apply_ledger_mode != "safe") {
+        // Legacy/non-safe mode: initialize BCDB in background to not block startup
         std::thread([sm] {
             ariabc_pg::pg_state_machine* psm =
                 dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
@@ -1391,6 +1500,7 @@ int main(int argc, char** argv) {
             ds_cfg.node_id = opt.id;
             ds_cfg.endpoint = opt.raft_endpoint;
             ds_cfg.cluster_id = opt.raft_cluster_id;
+            ds_cfg.raft_epoch_hex = opt.raft_epoch_hex;
 
             std::cout << "[Raft Storage] Reopening durable storage at " << opt.raft_storage_dir << std::endl;
             auto start_recover = std::chrono::high_resolution_clock::now();
@@ -1505,10 +1615,59 @@ int main(int argc, char** argv) {
     if (preferred_leader_id > 0) {
         params.leadership_transfer_min_wait_time_ = preferred_leader_transfer_wait_ms;
     }
-    params.return_method_ = raft_params::async_handler;
+    /*
+     * Safe ledger mode must not ACK a client request from NuRaft's async
+     * placeholder result.  In async_handler mode append_entries() can return
+     * RESULT_NOT_EXIST_YET before the log is durably stored/committed; the
+     * gateway then waits forever on a raft_log_idx that was only observed from
+     * leader-local state.  Blocking mode preserves the safe contract: ACCEPTED
+     * means the leader committed the entry and the durable store flushed it.
+     */
+    params.return_method_ =
+        (opt.db.db_type == 1 && opt.db.raft_apply_ledger_mode == "safe")
+            ? raft_params::blocking
+            : raft_params::async_handler;
     params.auto_forwarding_ = true;
     if (opt.raft_storage_mode == "durable") {
         params.parallel_log_appending_ = false;
+    }
+
+    // P0 #14: In safe mode, run synchronous startup validation and prefix recovery
+    // AFTER durable Raft state manager is open and validated,
+    // BEFORE Raft server starts delivering commit()s.
+    if (opt.db.db_type == 1 && opt.db.raft_apply_ledger_mode == "safe") {
+        ariabc_pg::pg_state_machine* psm =
+            dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
+        if (!psm) {
+            std::cerr << "SAFE_STARTUP_FAILED: sm is not a pg_state_machine" << std::endl;
+            return 1;
+        }
+
+        // Determine the start index from durable log store (if available)
+        uint64_t durable_log_start = 0;
+        if (opt.raft_storage_mode == "durable") {
+            auto d_smgr = std::dynamic_pointer_cast<ariabc_raft::durable_state_mgr>(smgr);
+            if (d_smgr) {
+                auto lstore = std::dynamic_pointer_cast<ariabc_raft::durable_log_store>(
+                    d_smgr->load_log_store());
+                if (lstore) {
+                    durable_log_start = lstore->start_index();
+                }
+            }
+        }
+
+        try {
+            const uint64_t seeded = psm->safe_sync_startup(durable_log_start);
+            std::cout << "[safe startup] prefix seeded at " << seeded
+                      << ", durable_log_start=" << durable_log_start << std::endl;
+            if (!psm->ensure_bcdb_initialized()) {
+                std::cerr << "SAFE_STARTUP_FAILED: bcdb_init failed\n";
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "FATAL: " << e.what() << std::endl;
+            return 1;
+        }
     }
 
     // Initialize Raft server listening on raftEndpoint port.

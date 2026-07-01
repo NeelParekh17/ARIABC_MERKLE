@@ -7,11 +7,47 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace ariabc_pg {
+
+/*
+ * F1: per-Raft-entry completion tracker.
+ *
+ * Tracks how many items within each committed application entry have reached
+ * a terminal PostgreSQL commit.  The contiguous durable applied prefix advances
+ * only when every item of every earlier entry is terminal (no gaps allowed).
+ *
+ * All accesses are protected by pg_state_machine::tracker_mu_.
+ */
+struct entry_tracker_record {
+    uint32_t total_items    = 0;  /* expected item count (from commit()) */
+    uint32_t terminal_count = 0;  /* distinct ordinals that have reached PG commit */
+    std::vector<bool> terminal_item; /* indexed by item_ordinal; true when that ordinal is done */
+
+    /*
+     * Mark ordinal @ord as terminal.  Returns true iff this was the first time
+     * this ordinal was marked (i.e. we actually incremented terminal_count).
+     * Silently ignores out-of-range ordinals to be safe.
+     */
+    bool mark_ordinal(uint32_t ord) {
+        if (total_items == 0 || ord >= total_items) return false;
+        if (static_cast<size_t>(ord) >= terminal_item.size()) {
+            terminal_item.resize(total_items, false);
+        }
+        if (terminal_item[ord]) return false; /* already marked */
+        terminal_item[ord] = true;
+        ++terminal_count;
+        return true;
+    }
+
+    bool is_complete() const {
+        return total_items > 0 && terminal_count >= total_items;
+    }
+};
 
 class pg_state_machine : public nuraft::state_machine {
 public:
@@ -19,6 +55,26 @@ public:
     ~pg_state_machine();
 
     bool ensure_bcdb_initialized() { return executor_.ensure_bcdb_initialized(); }
+
+    /*
+     * P0 #14: Safe synchronous startup sequencing.
+     *
+     * Must be called AFTER durable Raft state manager is opened and validated,
+     * and BEFORE the raft_launcher starts delivering commit()s.
+     *
+     * This function:
+     *   1. Validates that PostgreSQL schema version and epoch anchor match the
+     *      Raft identity (same epoch hex stored in durable Raft state).
+     *   2. Queries raft_apply_item to find the conservative contiguous applied
+     *      prefix (largest log_index N s.t. every item ordinal 0..K-1 is
+     *      APPLIED_OK or APPLIED_ERROR, with no CLAIMED gaps).
+     *   3. Calls seed_durable_prefix(N) to initialize the tracker before any
+     *      Raft commit() is replayed.
+     *
+     * Returns the seeded prefix (0 if none found or safe mode is not enabled).
+     * Throws std::runtime_error on any validation failure in safe mode.
+     */
+    uint64_t safe_sync_startup(uint64_t durable_log_start_index = 0);
     pg_executor_stats executor_stats() const { return executor_.stats(); }
     kafka_producer_stats kafka_stats() const { return executor_.kafka_stats(); }
     bool admission_control_blocked() const { return executor_.admission_control_blocked(); }
@@ -31,7 +87,6 @@ public:
     void direct_enqueue(const std::string& req_id, const std::string& sql, uint64_t seq) {
         register_result_batch(seq, 1);
         executor_.enqueue(req_id, sql, -1, seq);
-        last_committed_idx_.store(seq, std::memory_order_relaxed);
     }
     void direct_enqueue_batch(const std::vector<client_api_request_item>& items, uint64_t first_seq) {
         if (items.empty()) return;
@@ -46,33 +101,83 @@ public:
             sqls.push_back(item.sql);
         }
         executor_.enqueue_batch(req_ids, sqls, -1, last_seq);
-        last_committed_idx_.store(last_seq, std::memory_order_relaxed);
     }
 
     nuraft::ptr<nuraft::buffer> commit(const nuraft::ulong log_idx,
                                        nuraft::buffer& data) override;
 
+    void commit_config(const nuraft::ulong log_idx,
+                       nuraft::ptr<nuraft::cluster_config>& new_conf) override;
+
     bool apply_snapshot(nuraft::snapshot& s) override;
     nuraft::ptr<nuraft::snapshot> last_snapshot() override;
+
+    /*
+     * F1: last_commit_index() returns the contiguous durable applied prefix:
+     * the largest log_idx N such that every application entry <= N has had
+     * all its items reach a top-level PostgreSQL commit.
+     *
+     * This differs from the Raft committed index; it trails until workers finish.
+     */
     nuraft::ulong last_commit_index() override;
+
     void create_snapshot(nuraft::snapshot& s,
                          nuraft::async_result<bool>::handler_type& when_done) override;
-    bool wait_for_result(uint64_t result_token, int timeout_ms);
+    bool wait_for_result(uint64_t result_token,
+                         int timeout_ms,
+                         std::string* failure_reason = nullptr);
+
+    /*
+     * F1: Called by worker after its top-level PostgreSQL commit succeeds
+     * (or after replay completes).  Marks the item_ordinal for log_idx as
+     * terminal.  A given (log_idx, item_ordinal) pair is counted at most once;
+     * duplicate calls are safe no-ops.  Advances durable_applied_prefix_ if
+     * all items for log_idx are now terminal.
+     */
+    void note_item_applied(uint64_t log_idx, uint32_t item_ordinal);
+    void note_item_failed(uint64_t log_idx, uint32_t item_ordinal, const std::string& reason);
+
+    /*
+     * F1: Seed the tracker with a known durable prefix (from ledger scan on
+     * startup).  Must be called before NuRaft starts delivering commit()s.
+     */
+    void seed_durable_prefix(uint64_t prefix);
 
 private:
     void register_result_batch(uint64_t result_token, size_t item_count);
     void note_result_applied(uint64_t result_token);
+    void note_result_failed(uint64_t result_token, const std::string& reason);
+
+    /*
+     * F1: try to advance durable_applied_prefix_ over any newly-complete entries.
+     * Caller must hold tracker_mu_.
+     */
+    void maybe_advance_prefix_locked();
 
     pg_executor executor_;
-    std::atomic<uint64_t> last_committed_idx_;
+
+    /*
+     * last_committed_idx_ is the Raft-committed log index (set in commit()).
+     * durable_applied_prefix_ is the contiguous applied index (set by workers).
+     * NuRaft queries last_commit_index() → we return durable_applied_prefix_.
+     */
+
+    std::atomic<uint64_t> durable_applied_prefix_{0};
+
+    /* F1: per-entry tracker map, ordered by log_idx. */
+    std::mutex tracker_mu_;
+    std::map<uint64_t, entry_tracker_record> entry_tracker_;
 
     nuraft::ptr<nuraft::snapshot> last_snapshot_;
     std::mutex last_snapshot_lock_;
+    db_options db_opt_;
+    int node_id_;
 
     std::mutex result_mu_;
     std::condition_variable result_cv_;
     std::unordered_map<uint64_t, size_t> pending_result_counts_;
     std::unordered_set<uint64_t> completed_result_tokens_;
+    std::unordered_map<uint64_t, std::string> failed_result_tokens_;
 };
 
 } // namespace ariabc_pg

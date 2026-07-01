@@ -363,6 +363,32 @@ uint64_t kafka_console_producer::delivery_pending_relaxed() const {
     return delivery_pending_.load(std::memory_order_relaxed);
 }
 
+bool kafka_console_producer::wait_for_delivery(int timeout_ms, std::string& err) {
+    if (!rk_) {
+        err = "producer not started";
+        return false;
+    }
+
+    rd_kafka_t* rk = reinterpret_cast<rd_kafka_t*>(rk_);
+    const auto f0 = std::chrono::steady_clock::now();
+    const rd_kafka_resp_err_t rc = rd_kafka_flush(rk, timeout_ms);
+    const auto f1 = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.flush_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(f1 - f0).count());
+    }
+    if (rc != RD_KAFKA_RESP_ERR_NO_ERROR) {
+        err = std::string("rd_kafka_flush failed: ") + rd_kafka_err2str(rc);
+        return false;
+    }
+    if (delivery_pending_.load(std::memory_order_relaxed) != 0) {
+        err = "rd_kafka_flush returned with pending deliveries";
+        return false;
+    }
+    return true;
+}
+
 void kafka_console_producer::stop() {
     if (poll_thread_.joinable()) {
         poll_thread_stop_.store(true, std::memory_order_relaxed);
@@ -601,6 +627,10 @@ bool kafka_console_producer::send_line(const std::string&, std::string& err) {
 }
 bool kafka_console_producer::send_payload(const std::string&, const std::string&,
                                           std::string& err) {
+    err = "Kafka disabled";
+    return false;
+}
+bool kafka_console_producer::wait_for_delivery(int, std::string& err) {
     err = "Kafka disabled";
     return false;
 }

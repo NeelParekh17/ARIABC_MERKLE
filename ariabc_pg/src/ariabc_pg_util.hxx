@@ -19,6 +19,32 @@ inline std::string trim_copy(const std::string& s) {
     return s.substr(b, e - b);
 }
 
+inline std::string to_hex_string(const unsigned char* hash, size_t len) {
+    char buf[256];
+    for (size_t i = 0; i < len; ++i) {
+        sprintf(buf + 2 * i, "%02x", hash[i]);
+    }
+    return std::string(buf, 2 * len);
+}
+
+inline std::vector<uint8_t> decode_hex_string(const std::string& hex) {
+    if (hex.size() % 2 != 0) return {};
+    std::vector<uint8_t> bytes;
+    bytes.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        char c1 = hex[i];
+        char c2 = hex[i + 1];
+        if (!std::isxdigit(static_cast<unsigned char>(c1)) ||
+            !std::isxdigit(static_cast<unsigned char>(c2))) {
+            return {};
+        }
+        std::string byteString = hex.substr(i, 2);
+        uint8_t byte = static_cast<uint8_t>(strtol(byteString.c_str(), nullptr, 16));
+        bytes.push_back(byte);
+    }
+    return bytes;
+}
+
 inline bool is_number(const std::string& s) {
     if (s.empty()) return false;
     for (char c : s) {

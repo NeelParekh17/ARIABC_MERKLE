@@ -102,10 +102,17 @@ std::string durable_state_mgr::ready_path() const {
 // -------------------------------------------------------------------------
 void durable_state_mgr::write_identity() {
     std::vector<uint8_t> buf;
-    put_le32(buf, IDENTITY_FORMAT_VER);
+    if (!cfg_.raft_epoch_hex.empty()) {
+        put_le32(buf, 2); // IDENTITY_FORMAT_VER = 2 when epoch is present
+    } else {
+        put_le32(buf, 1); // Legacy format version 1
+    }
     put_le32(buf, static_cast<uint32_t>(cfg_.node_id));
     put_string(buf, cfg_.endpoint);
     put_string(buf, cfg_.cluster_id);
+    if (!cfg_.raft_epoch_hex.empty()) {
+        put_string(buf, cfg_.raft_epoch_hex);
+    }
     // CRC of the body.
     const uint32_t crc = crc32_bytes(buf.data(), buf.size());
     put_le32(buf, crc);
@@ -135,7 +142,7 @@ void durable_state_mgr::verify_identity() {
     end -= 4; // exclude CRC field from parsing.
 
     const uint32_t ver = get_le32(p); p += 4;
-    if (ver != IDENTITY_FORMAT_VER) {
+    if (ver != 1 && ver != 2) {
         throw storage_corruption_error(
             "identity.bin unknown format version: " + std::to_string(ver));
     }
@@ -143,6 +150,12 @@ void durable_state_mgr::verify_identity() {
     const uint32_t stored_node_id = get_le32(p); p += 4;
     const std::string stored_endpoint   = get_string(p, end);
     const std::string stored_cluster_id = get_string(p, end);
+
+    std::string stored_epoch_hex;
+    if (ver == 2) {
+        stored_epoch_hex = get_string(p, end);
+        recovered_epoch_hex_ = stored_epoch_hex;
+    }
 
     if (static_cast<int>(stored_node_id) != cfg_.node_id) {
         throw std::runtime_error(
@@ -159,6 +172,19 @@ void durable_state_mgr::verify_identity() {
         throw std::runtime_error(
             "RAFT_STORAGE_IDENTITY_MISMATCH: stored cluster_id=" + stored_cluster_id +
             " command-line cluster_id=" + cfg_.cluster_id + " [" + cfg_.storage_dir + "]");
+    }
+
+    // CLI epoch ID = persisted Raft epoch ID verification
+    if (!cfg_.raft_epoch_hex.empty()) {
+        if (ver < 2) {
+            throw std::runtime_error(
+                "RAFT_STORAGE_EPOCH_MISMATCH: recovered storage does not support epoch, but safe mode is enabled.");
+        }
+        if (stored_epoch_hex != cfg_.raft_epoch_hex) {
+            throw std::runtime_error(
+                "RAFT_STORAGE_EPOCH_MISMATCH: stored epoch_hex=" + stored_epoch_hex +
+                " command-line epoch_hex=" + cfg_.raft_epoch_hex + " [" + cfg_.storage_dir + "]");
+        }
     }
 }
 

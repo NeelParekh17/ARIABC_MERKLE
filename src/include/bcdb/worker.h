@@ -95,6 +95,7 @@ bool bcdb_worker_init(void);
 void bcdb_worker_process_tx(BCDBShmXact *tx);
 void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dual_table);
 void bcdb_on_worker_exit(int code, Datum arg);
+void bcdb_wait_for_prev_committed(BCDBShmXact *tx);
 BCBlockID GetCurrentTxBlockId(void);
 BCBlockID GetCurrentTxBlockIdSnapshot(void);
 

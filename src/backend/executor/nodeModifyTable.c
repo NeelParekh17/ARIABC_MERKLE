@@ -44,6 +44,7 @@
 #include "access/xact.h"
 #include "access/merkle.h"
 #include "catalog/catalog.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_am_d.h"
 #include "commands/trigger.h"
 #include "executor/execPartition.h"
@@ -57,6 +58,7 @@
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "catalog/index.h"
@@ -107,6 +109,60 @@ bcdb_compute_key_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid,
     SET_PREDICATELOCKTARGETTAG_TUPLE(*tag, 0, relOid,
                                      (BlockNumber)(h >> 16),
                                      (OffsetNumber)((h & 0xFFFF) | 1));
+}
+
+static bool
+bcdb_is_safe_ledger_relation(Relation relation)
+{
+	Oid			internal_namespace;
+	const char *relname;
+
+	if (relation == NULL)
+		return false;
+
+	internal_namespace = get_namespace_oid("ariabc_internal", true);
+	if (!OidIsValid(internal_namespace))
+		return false;
+
+	if (RelationGetNamespace(relation) != internal_namespace)
+		return false;
+
+	relname = RelationGetRelationName(relation);
+
+	return strcmp(relname, "raft_apply_schema_meta") == 0 ||
+		   strcmp(relname, "raft_apply_epoch") == 0 ||
+		   strcmp(relname, "raft_apply_entry") == 0 ||
+		   strcmp(relname, "raft_apply_entry_item") == 0 ||
+		   strcmp(relname, "raft_apply_item") == 0;
+}
+
+static bool
+bcdb_should_defer_dml(Relation relation)
+{
+	return is_bcdb_worker && !bcdb_is_safe_ledger_relation(relation);
+}
+
+static void
+bcdb_log_dml_route(const char *operation,
+				   Relation relation,
+				   bool defer_bcdb_dml)
+{
+	const char *trace = getenv("ARIABC_SAFE_TRACE");
+	char	   *nspname;
+
+	if (trace == NULL || trace[0] == '\0' || trace[0] == '0' || relation == NULL)
+		return;
+
+	nspname = get_namespace_name(RelationGetNamespace(relation));
+	elog(LOG,
+		 "BCDB_DML_ROUTE op=%s relation=%s.%s mode=%s is_bcdb_worker=%d",
+		 operation,
+		 nspname ? nspname : "<unknown>",
+		 RelationGetRelationName(relation),
+		 defer_bcdb_dml ? "deferred" : "direct",
+		 is_bcdb_worker ? 1 : 0);
+	if (nspname)
+		pfree(nspname);
 }
 
 static bool ExecOnConflictUpdate(ModifyTableState *mtstate,
@@ -709,6 +765,7 @@ ExecInsert(ModifyTableState *mtstate,
 	TransitionCaptureState *ar_insert_trig_tcs;
 	ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
 	OnConflictAction onconflict = node->onConflictAction;
+	bool		defer_bcdb_dml;
 
 	ExecMaterializeSlot(slot);
 
@@ -717,6 +774,8 @@ ExecInsert(ModifyTableState *mtstate,
 	 */
 	resultRelInfo = estate->es_result_relation_info;
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
+	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
+	bcdb_log_dml_route("INSERT", resultRelationDesc, defer_bcdb_dml);
 	/*
 	 * BEFORE ROW INSERT Triggers.
 	 *
@@ -937,7 +996,7 @@ ExecInsert(ModifyTableState *mtstate,
 		}
 		else
 		{
-			if (is_bcdb_worker)
+			if (defer_bcdb_dml)
 			{
 				/*
 				 * BCDB WORKER: Register INSERT in the write-set using a
@@ -1064,6 +1123,7 @@ ExecDelete(ModifyTableState *mtstate,
 	TM_FailureData tmfd;
 	TupleTableSlot *slot = NULL;
 	TransitionCaptureState *ar_delete_trig_tcs;
+	bool		defer_bcdb_dml;
 
 	if (tupleDeleted)
 		*tupleDeleted = false;
@@ -1073,6 +1133,8 @@ ExecDelete(ModifyTableState *mtstate,
 	 */
 	resultRelInfo = estate->es_result_relation_info;
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
+	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
+	bcdb_log_dml_route("DELETE", resultRelationDesc, defer_bcdb_dml);
 
 	/* BEFORE ROW DELETE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -1144,7 +1206,7 @@ ldelete:;
 		 * XOR-out from happening during the parallel phase, which would
 		 * cause hash corruption due to concurrent unprotected access.
 		 */
-		if (is_bcdb_worker)
+		if (defer_bcdb_dml)
 		{
 			PREDICATELOCKTARGETTAG tag;
 			PREDICATELOCKTARGETTAG tid_tag;
@@ -1502,6 +1564,7 @@ ExecUpdate(ModifyTableState *mtstate,
 	TM_FailureData tmfd;
 	List	   *recheckIndexes = NIL;
 	TupleConversionMap *saved_tcs_map = NULL;
+	bool		defer_bcdb_dml;
 
 	/*
 	 * abort the operation if not running transactions
@@ -1516,6 +1579,8 @@ ExecUpdate(ModifyTableState *mtstate,
 	 */
 	resultRelInfo = estate->es_result_relation_info;
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
+	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
+	bcdb_log_dml_route("UPDATE", resultRelationDesc, defer_bcdb_dml);
 
 	/* BEFORE ROW UPDATE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -1773,7 +1838,7 @@ lreplace:;
   	       * needed for referential integrity updates in transaction-snapshot
   	       * mode transactions.
   	       */
-			if (is_bcdb_worker)
+			if (defer_bcdb_dml)
 			{
 			//print_trace();
 			//debugtup(slot, NULL);
@@ -1994,7 +2059,7 @@ lreplace:;
 			 * Merkle insert path uniformly, then apply ExecInsertMerkleIndexes()
 			 * exactly once below.
 			 */
-			if (!is_bcdb_worker && update_indexes && saved_enable_merkle_index)
+			if (!defer_bcdb_dml && update_indexes && saved_enable_merkle_index)
 				enable_merkle_index = false;
 			PG_TRY();
 			{
@@ -2010,7 +2075,7 @@ lreplace:;
 			PG_END_TRY();
 			enable_merkle_index = saved_enable_merkle_index;
 
-			need_exec_update_merkle_insert = (!is_bcdb_worker && saved_enable_merkle_index);
+			need_exec_update_merkle_insert = (!defer_bcdb_dml && saved_enable_merkle_index);
 			if (need_exec_update_merkle_insert)
 				ExecInsertMerkleIndexes(resultRelationDesc, slot);
 		}
