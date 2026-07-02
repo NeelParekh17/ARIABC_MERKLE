@@ -22,9 +22,26 @@
 /*
  * Ledger item state constants — must match the SQL schema CHECK constraint.
  */
-#define RAFT_ITEM_STATE_CLAIMED       1
-#define RAFT_ITEM_STATE_APPLIED_OK    2
-#define RAFT_ITEM_STATE_APPLIED_ERROR 3
+#define RAFT_APPLY_STATE_CLAIMED                 1
+#define RAFT_APPLY_STATE_APPLIED_OK              2
+#define RAFT_APPLY_STATE_APPLIED_ERROR           3
+#define RAFT_APPLY_STATE_NONTERMINAL_FAILURE     4
+
+#define RAFT_ITEM_STATE_CLAIMED       RAFT_APPLY_STATE_CLAIMED
+#define RAFT_ITEM_STATE_APPLIED_OK    RAFT_APPLY_STATE_APPLIED_OK
+#define RAFT_ITEM_STATE_APPLIED_ERROR RAFT_APPLY_STATE_APPLIED_ERROR
+#define RAFT_ITEM_STATE_NONTERMINAL_FAILURE RAFT_APPLY_STATE_NONTERMINAL_FAILURE
+
+#define BCDB_FAILURE_CLASS_MAX 64
+
+typedef struct BCDBNonterminalFailure
+{
+	uint8       digest[32];
+	char        sqlstate[6];
+	char        failure_class[BCDB_FAILURE_CLASS_MAX];
+	bool        retryable;
+	int         format_version;
+} BCDBNonterminalFailure;
 
 /*
  * Result of bcdb_raft_ledger_claim().
@@ -34,6 +51,7 @@ typedef enum
 	RAFT_CLAIM_OWNED,        /* new row; worker owns first execution */
 	RAFT_CLAIM_REPLAY_OK,    /* pre-existing APPLIED_OK; skip SQL, replay result */
 	RAFT_CLAIM_REPLAY_ERROR, /* pre-existing APPLIED_ERROR; skip SQL, replay error */
+	RAFT_CLAIM_REPLAY_NONTERMINAL_FAILURE,
 	RAFT_CLAIM_DISABLED,     /* raft_ledger_enabled = false; legacy mode */
 } RaftClaimResult;
 
@@ -57,8 +75,21 @@ extern RaftClaimResult bcdb_raft_ledger_claim(
 		int          *out_result_fmtver,
 		char        **out_error_payload,    /* set on REPLAY_ERROR */
 		int          *out_error_fmtver,
-		char        **out_sqlstate          /* set on REPLAY_ERROR */
+		char        **out_sqlstate,         /* set on REPLAY_ERROR */
+		BCDBNonterminalFailure *out_failure /* set on REPLAY_NONTERMINAL_FAILURE */
 );
+
+extern void bcdb_prepare_nonterminal_failure(
+		BCDBShmXact *tx,
+		const char *sqlstate,
+		const char *failure_class,
+		bool retryable,
+		BCDBNonterminalFailure *failure);
+
+extern bool bcdb_safe_finalize_nonterminal_failure(
+		BCDBShmXact *tx,
+		const BCDBNonterminalFailure *failure,
+		BCDBNonterminalFailure *stored_failure);
 
 /*
  * bcdb_raft_ledger_finalize_ok
@@ -118,6 +149,12 @@ extern void bcdb_finish_terminal_item(
 		bool          is_error,
 		bool          is_replay,
 		TransactionId committed_xid
+);
+
+extern void bcdb_complete_nonterminal_failure_item(
+		BCDBShmXact  *tx,
+		const BCDBNonterminalFailure *failure,
+		bool          is_replay
 );
 
 extern void bcdb_maybe_trigger_safe_failpoint(

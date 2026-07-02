@@ -66,6 +66,7 @@ lib*.pc
 
 # Python bytecode under the distributed/ folder is still build output.
 /scripts/distributed/__pycache__/
+/scripts/distributed/.safe_recovery_probe_*.sql
 
 # Local AI/tooling metadata (do not commit)
 /.claude/
@@ -90,3 +91,30 @@ lib*.pc
 /phase0_probe_simple.py
 /EXC:*
 /rc={rc})*
+
+# Local-only analysis, build, and test artifacts
+/.safe_phase3_artifact_root
+/AI_analysis.txt
+/Continual_AI_analysis.txt
+/ariabc_pg.zip
+/build_err.txt
+/claude.txt
+/diff.txt
+/diff_plan_left.txt
+/dump_*.txt
+/error.txt
+/gpt.txt
+/in.txt
+/test.out
+/src/backend.zip
+/src/bin/bcsql/bcsql
+/src/test/regress/regression.diffs
+/src/test/regress/regression.out
+
+/scripts/distributed/det-block-parallel.txt
+/scripts/distributed/good_run.txt
+/scripts/distributed/latest_run.txt
+/scripts/distributed/single_node_good_run.txt
+/scripts/distributed/output*.txt
+/scripts/distributed/*.log
+/scripts/distributed/recovery_artifacts/

@@ -187,6 +187,16 @@ bcdb_maybe_trigger_safe_failpoint(const char *name,
 		tx->raft_log_index != filter)
 		return;
 
+	if (bcdb_parse_uint64_env("ARIABC_FAILPOINT_MIN_RAFT_LOG_INDEX", &filter))
+	{
+		if (filter == 0)
+			elog(ERROR,
+				 "ARIABC_FAILPOINT_MIN_RAFT_LOG_INDEX must be greater than zero");
+
+		if (tx->raft_log_index < filter)
+			return;
+	}
+
 	if (bcdb_parse_uint64_env("ARIABC_FAILPOINT_ITEM_ORDINAL", &filter) &&
 		tx->raft_item_ordinal != (uint32) filter)
 		return;
@@ -370,6 +380,90 @@ compute_terminal_digest(bool is_error,
 	EVP_MD_CTX_free(ctx);
 }
 
+static void
+digest_to_hex(const uint8 digest[BCDB_RAFT_DIGEST_BYTES], char out[BCDB_RAFT_DIGEST_BYTES * 2 + 1])
+{
+	int i;
+
+	for (i = 0; i < BCDB_RAFT_DIGEST_BYTES; i++)
+		sprintf(out + (i * 2), "%02x", digest[i]);
+	out[BCDB_RAFT_DIGEST_BYTES * 2] = '\0';
+}
+
+void
+bcdb_prepare_nonterminal_failure(BCDBShmXact *tx,
+								 const char *sqlstate,
+								 const char *failure_class,
+								 bool retryable,
+								 BCDBNonterminalFailure *failure)
+{
+	EVP_MD_CTX  *ctx;
+	uint64       log_be;
+	uint32       ord_be;
+	uint32       retry_be;
+	uint32       fmt_be;
+	unsigned int digest_len = BCDB_RAFT_DIGEST_BYTES;
+	const char  *prefix = "ARIABC_SAFE_NONTERMINAL_FAILURE_V1";
+	const char  *state_to_hash = sqlstate ? sqlstate : "XX000";
+	const char  *class_to_hash = failure_class ? failure_class : "UNKNOWN";
+
+	if (tx == NULL || failure == NULL)
+		elog(ERROR, "raft_apply_ledger: cannot prepare nonterminal failure without tx/failure");
+	if (strlen(state_to_hash) != 5)
+		elog(ERROR, "raft_apply_ledger: invalid nonterminal SQLSTATE '%s'", state_to_hash);
+	if (failure_class == NULL || failure_class[0] == '\0' ||
+		strlen(failure_class) >= BCDB_FAILURE_CLASS_MAX)
+		elog(ERROR, "raft_apply_ledger: invalid nonterminal failure class '%s'",
+			 failure_class ? failure_class : "<null>");
+
+	memset(failure, 0, sizeof(*failure));
+	memcpy(failure->sqlstate, state_to_hash, 5);
+	failure->sqlstate[5] = '\0';
+	strlcpy(failure->failure_class, class_to_hash, sizeof(failure->failure_class));
+	failure->retryable = retryable;
+	failure->format_version = 1;
+
+	log_be = pg_hton64(tx->raft_log_index);
+	ord_be = pg_hton32(tx->raft_item_ordinal);
+	retry_be = pg_hton32(retryable ? 1 : 0);
+	fmt_be = pg_hton32((uint32) failure->format_version);
+
+	ctx = EVP_MD_CTX_new();
+	if (!ctx)
+		elog(ERROR, "raft_apply_ledger: EVP_MD_CTX_new failed");
+
+	if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
+		EVP_DigestUpdate(ctx, prefix, strlen(prefix)) != 1 ||
+		EVP_DigestUpdate(ctx, tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES) != 1 ||
+		EVP_DigestUpdate(ctx, &log_be, sizeof(log_be)) != 1 ||
+		EVP_DigestUpdate(ctx, &ord_be, sizeof(ord_be)) != 1 ||
+		EVP_DigestUpdate(ctx, state_to_hash, 5) != 1 ||
+		EVP_DigestUpdate(ctx, class_to_hash, strlen(class_to_hash)) != 1 ||
+		EVP_DigestUpdate(ctx, &retry_be, sizeof(retry_be)) != 1 ||
+		EVP_DigestUpdate(ctx, &fmt_be, sizeof(fmt_be)) != 1 ||
+		EVP_DigestFinal_ex(ctx, failure->digest, &digest_len) != 1)
+	{
+		EVP_MD_CTX_free(ctx);
+		elog(ERROR, "raft_apply_ledger: SHA-256 nonterminal digest failed");
+	}
+	EVP_MD_CTX_free(ctx);
+}
+
+static bool
+nonterminal_failure_matches(const BCDBNonterminalFailure *a,
+							const BCDBNonterminalFailure *b)
+{
+	if (a == NULL || b == NULL)
+		return false;
+	return memcmp(a->digest, b->digest, BCDB_RAFT_DIGEST_BYTES) == 0 &&
+		strncmp(a->sqlstate, b->sqlstate, 5) == 0 &&
+		a->failure_class[0] != '\0' &&
+		b->failure_class[0] != '\0' &&
+		strcmp(a->failure_class, b->failure_class) == 0 &&
+		a->retryable == b->retryable &&
+		a->format_version == b->format_version;
+}
+
 /* --------------------------------------------------------------------------
  * D2: bcdb_raft_ledger_claim
  * -------------------------------------------------------------------------- */
@@ -380,7 +474,8 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 					   int          *out_result_fmtver,
 					   char        **out_error_payload,
 					   int          *out_error_fmtver,
-					   char        **out_sqlstate)
+					   char        **out_sqlstate,
+					   BCDBNonterminalFailure *out_failure)
 {
 	int          spi_rc;
 	char         sql_buf[2048];
@@ -390,7 +485,6 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 	Datum        values[6];
 	char         nulls[6];
 	uint64       existing_state = 0;
-	bool         isnull;
 	MemoryContext caller_context = CurrentMemoryContext;
 
 	/* Legacy/direct mode — no ledger */
@@ -558,7 +652,10 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 	snprintf(sql_buf, sizeof(sql_buf),
 		"SELECT state, result_format_version, result_payload,"
 		"       error_format_version, sqlstate_code, error_payload,"
-		"       terminal_digest, entry_digest, item_digest"
+		"       terminal_digest, entry_digest, item_digest,"
+		"       failure_digest, failure_sqlstate, failure_class,"
+		"       failure_retryable, failure_format_version,"
+		"       failure_recorded_at IS NOT NULL"
 		"  FROM ariabc_internal.raft_apply_item"
 		" WHERE epoch_id = $1"
 		"   AND raft_log_index = $2"
@@ -636,6 +733,12 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 		bool        term_digest_isnull = false;
 		bool        entry_digest_isnull = false;
 		bool        item_digest_isnull = false;
+		bool        failure_digest_isnull = false;
+		bool        failure_sqlstate_isnull = false;
+		bool        failure_class_isnull = false;
+		bool        failure_retryable_isnull = false;
+		bool        failure_fmtver_isnull = false;
+		bool        failure_recorded_isnull = false;
 
 		existing_state = DatumGetInt16(
 			SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &state_isnull));
@@ -656,6 +759,18 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 											 SPI_tuptable->tupdesc, 8, &entry_digest_isnull);
 		Datum item_digest_d = SPI_getbinval(SPI_tuptable->vals[0],
 											SPI_tuptable->tupdesc, 9, &item_digest_isnull);
+		Datum failure_digest_d = SPI_getbinval(SPI_tuptable->vals[0],
+											   SPI_tuptable->tupdesc, 10, &failure_digest_isnull);
+		Datum failure_sqlstate_d = SPI_getbinval(SPI_tuptable->vals[0],
+												 SPI_tuptable->tupdesc, 11, &failure_sqlstate_isnull);
+		Datum failure_class_d = SPI_getbinval(SPI_tuptable->vals[0],
+											  SPI_tuptable->tupdesc, 12, &failure_class_isnull);
+		Datum failure_retryable_d = SPI_getbinval(SPI_tuptable->vals[0],
+												  SPI_tuptable->tupdesc, 13, &failure_retryable_isnull);
+		Datum failure_fmtver_d = SPI_getbinval(SPI_tuptable->vals[0],
+											   SPI_tuptable->tupdesc, 14, &failure_fmtver_isnull);
+		Datum failure_recorded_d = SPI_getbinval(SPI_tuptable->vals[0],
+												 SPI_tuptable->tupdesc, 15, &failure_recorded_isnull);
 
 		/* Validate entry_digest and item_digest invariants first */
 		if (entry_digest_isnull)
@@ -791,6 +906,75 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 				 (unsigned long long) tx->raft_log_index,
 				 (unsigned) tx->raft_item_ordinal);
 			return RAFT_CLAIM_REPLAY_ERROR;
+		}
+
+		if (existing_state == RAFT_ITEM_STATE_NONTERMINAL_FAILURE)
+		{
+			BCDBNonterminalFailure stored;
+			BCDBNonterminalFailure expected;
+			bytea *failure_digest_ba;
+			char *sqlstate_str;
+			char *failure_class_str;
+			bool recorded_present;
+
+			if (failure_digest_isnull || failure_sqlstate_isnull ||
+				failure_class_isnull || failure_retryable_isnull ||
+				failure_fmtver_isnull || failure_recorded_isnull)
+			{
+				ledger_spi_end(&spi_scope);
+				elog(ERROR, "AriaBC ledger corruption: incomplete state=4 failure row");
+			}
+
+			memset(&stored, 0, sizeof(stored));
+			failure_digest_ba = DatumGetByteaPP(failure_digest_d);
+			if (VARSIZE_ANY_EXHDR(failure_digest_ba) != BCDB_RAFT_DIGEST_BYTES)
+			{
+				ledger_spi_end(&spi_scope);
+				elog(ERROR, "AriaBC ledger corruption: invalid state=4 failure_digest length");
+			}
+			memcpy(stored.digest, VARDATA_ANY(failure_digest_ba), BCDB_RAFT_DIGEST_BYTES);
+
+			sqlstate_str = text_to_cstring(DatumGetTextPP(failure_sqlstate_d));
+			failure_class_str = text_to_cstring(DatumGetTextPP(failure_class_d));
+			recorded_present = DatumGetBool(failure_recorded_d);
+			if (strlen(sqlstate_str) != 5 || !recorded_present ||
+				DatumGetInt32(failure_fmtver_d) != 1)
+			{
+				ledger_spi_end(&spi_scope);
+				elog(ERROR, "AriaBC ledger corruption: invalid state=4 failure metadata");
+			}
+
+			strlcpy(stored.sqlstate, sqlstate_str, sizeof(stored.sqlstate));
+			strlcpy(stored.failure_class, failure_class_str, sizeof(stored.failure_class));
+			stored.retryable = DatumGetBool(failure_retryable_d);
+			stored.format_version = DatumGetInt32(failure_fmtver_d);
+
+			bcdb_prepare_nonterminal_failure(tx,
+											 stored.sqlstate,
+											 stored.failure_class,
+											 stored.retryable,
+											 &expected);
+			if (!nonterminal_failure_matches(&stored, &expected))
+			{
+				ledger_spi_end(&spi_scope);
+				elog(ERROR, "AriaBC ledger corruption: state=4 canonical failure mismatch during replay");
+			}
+
+			memcpy(tx->raft_terminal_digest, stored.digest, BCDB_RAFT_DIGEST_BYTES);
+			tx->raft_terminal_format_version = stored.format_version;
+			tx->raft_terminal_state = RAFT_ITEM_STATE_NONTERMINAL_FAILURE;
+			tx->raft_terminal_update_confirmed = true;
+
+			if (out_failure)
+				*out_failure = stored;
+
+			ledger_spi_end(&spi_scope);
+			elog(LOG,
+				 "SAFE_NONTERMINAL_FAILURE_REPLAY log_index=%llu ordinal=%u sqlstate=%s",
+				 (unsigned long long) tx->raft_log_index,
+				 (unsigned) tx->raft_item_ordinal,
+				 stored.sqlstate);
+			return RAFT_CLAIM_REPLAY_NONTERMINAL_FAILURE;
 		}
 	}
 
@@ -1192,6 +1376,285 @@ bcdb_raft_ledger_finalize_error(BCDBShmXact *tx,
 	bcdb_emit_ledger_boundary("ledger_finalize_error");
 }
 
+bool
+bcdb_safe_finalize_nonterminal_failure(BCDBShmXact *tx,
+									   const BCDBNonterminalFailure *failure,
+									   BCDBNonterminalFailure *stored_failure)
+{
+	LedgerSpiScope spi_scope;
+	int    spi_rc;
+	Oid    argtypes[8];
+	Datum  values[8];
+	char   nulls[8];
+	char   sql_buf[4096];
+
+	if (!tx || !tx->raft_ledger_enabled || failure == NULL)
+		return false;
+	if (failure->format_version != 1 ||
+		strlen(failure->sqlstate) != 5 ||
+		failure->failure_class[0] == '\0' ||
+		strnlen(failure->failure_class, BCDB_FAILURE_CLASS_MAX) >= BCDB_FAILURE_CLASS_MAX)
+		elog(ERROR, "raft_apply_ledger: invalid nonterminal failure input");
+
+	spi_scope = ledger_spi_begin();
+
+	argtypes[0] = BYTEAOID;
+	argtypes[1] = INT8OID;
+	argtypes[2] = INT4OID;
+	argtypes[3] = BYTEAOID;
+	argtypes[4] = BYTEAOID;
+	argtypes[5] = INT2OID;
+	values[0] = PointerGetDatum(make_bytea(tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES));
+	values[1] = Int64GetDatum((int64) tx->raft_log_index);
+	values[2] = Int32GetDatum((int32) tx->raft_item_ordinal);
+	values[3] = PointerGetDatum(make_bytea(tx->raft_entry_digest, BCDB_RAFT_DIGEST_BYTES));
+	values[4] = PointerGetDatum(make_bytea(tx->raft_item_digest, BCDB_RAFT_DIGEST_BYTES));
+	values[5] = Int16GetDatum((int16) RAFT_ITEM_STATE_CLAIMED);
+	memset(nulls, ' ', sizeof(nulls));
+
+	snprintf(sql_buf, sizeof(sql_buf),
+		"INSERT INTO ariabc_internal.raft_apply_item"
+		" (epoch_id, raft_log_index, item_ordinal, entry_digest, item_digest, state)"
+		" SELECT e.epoch_id, e.raft_log_index, i.item_ordinal,"
+		"        e.entry_digest, i.item_digest, $6"
+		"   FROM ariabc_internal.raft_apply_entry e"
+		"   JOIN ariabc_internal.raft_apply_entry_item i"
+		"     ON e.epoch_id = i.epoch_id"
+		"    AND e.raft_log_index = i.raft_log_index"
+		"  WHERE e.epoch_id = $1"
+		"    AND e.raft_log_index = $2"
+		"    AND i.item_ordinal = $3"
+		"    AND e.entry_digest = $4"
+		"    AND i.item_digest = $5"
+		"    AND $3 < e.expected_items"
+		" ON CONFLICT (epoch_id, raft_log_index, item_ordinal) DO NOTHING");
+	spi_rc = SPI_execute_with_args(sql_buf, 6, argtypes, values, nulls, false, 1);
+	if (spi_rc != SPI_OK_INSERT)
+	{
+		ledger_spi_end(&spi_scope);
+		elog(ERROR, "raft_apply_ledger: state=4 CLAIMED insert failed rc=%d", spi_rc);
+	}
+	CommandCounterIncrement();
+
+	argtypes[0] = BYTEAOID;
+	argtypes[1] = INT8OID;
+	argtypes[2] = INT4OID;
+	values[0] = PointerGetDatum(make_bytea(tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES));
+	values[1] = Int64GetDatum((int64) tx->raft_log_index);
+	values[2] = Int32GetDatum((int32) tx->raft_item_ordinal);
+	memset(nulls, ' ', 3);
+	snprintf(sql_buf, sizeof(sql_buf),
+		"SELECT state,"
+		"       failure_digest, failure_sqlstate, failure_class,"
+		"       failure_retryable, failure_format_version,"
+		"       failure_recorded_at IS NOT NULL"
+		"  FROM ariabc_internal.raft_apply_item"
+		" WHERE epoch_id = $1"
+		"   AND raft_log_index = $2"
+		"   AND item_ordinal = $3"
+		" FOR UPDATE");
+	spi_rc = SPI_execute_with_args(sql_buf, 3, argtypes, values, nulls, false, 1);
+	if (spi_rc != SPI_OK_SELECT || SPI_processed != 1)
+	{
+		ledger_spi_end(&spi_scope);
+		elog(ERROR,
+			 "raft_apply_ledger: state=4 finalizer could not lock one row for log_index=%llu ordinal=%u",
+			 (unsigned long long) tx->raft_log_index,
+			 (unsigned) tx->raft_item_ordinal);
+	}
+
+	{
+		bool state_isnull = false;
+		int16 state = DatumGetInt16(SPI_getbinval(SPI_tuptable->vals[0],
+												  SPI_tuptable->tupdesc,
+												  1,
+												  &state_isnull));
+		if (state_isnull)
+		{
+			ledger_spi_end(&spi_scope);
+			elog(ERROR, "raft_apply_ledger: state=4 finalizer saw NULL state");
+		}
+		if (state == RAFT_ITEM_STATE_APPLIED_OK ||
+			state == RAFT_ITEM_STATE_APPLIED_ERROR)
+		{
+			ledger_spi_end(&spi_scope);
+			elog(ERROR,
+				 "raft_apply_ledger: refusing to overwrite terminal state=%d with state=4 for log_index=%llu ordinal=%u",
+				 (int) state,
+				 (unsigned long long) tx->raft_log_index,
+				 (unsigned) tx->raft_item_ordinal);
+		}
+		if (state != RAFT_ITEM_STATE_CLAIMED &&
+			state != RAFT_ITEM_STATE_NONTERMINAL_FAILURE)
+		{
+			ledger_spi_end(&spi_scope);
+			elog(ERROR, "raft_apply_ledger: unexpected state=%d in state=4 finalizer", (int) state);
+		}
+		if (state == RAFT_ITEM_STATE_CLAIMED)
+		{
+			Oid upd_argtypes[8];
+			Datum upd_values[8];
+			char upd_nulls[8];
+
+			upd_argtypes[0] = BYTEAOID;
+			upd_argtypes[1] = INT8OID;
+			upd_argtypes[2] = INT4OID;
+			upd_argtypes[3] = BYTEAOID;
+			upd_argtypes[4] = TEXTOID;
+			upd_argtypes[5] = TEXTOID;
+			upd_argtypes[6] = BOOLOID;
+			upd_argtypes[7] = INT4OID;
+			upd_values[0] = PointerGetDatum(make_bytea(tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES));
+			upd_values[1] = Int64GetDatum((int64) tx->raft_log_index);
+			upd_values[2] = Int32GetDatum((int32) tx->raft_item_ordinal);
+			upd_values[3] = PointerGetDatum(make_bytea(failure->digest, BCDB_RAFT_DIGEST_BYTES));
+			upd_values[4] = PointerGetDatum(cstring_to_text(failure->sqlstate));
+			upd_values[5] = PointerGetDatum(cstring_to_text(failure->failure_class));
+			upd_values[6] = BoolGetDatum(failure->retryable);
+			upd_values[7] = Int32GetDatum(failure->format_version);
+			memset(upd_nulls, ' ', sizeof(upd_nulls));
+
+			snprintf(sql_buf, sizeof(sql_buf),
+				"UPDATE ariabc_internal.raft_apply_item"
+				"   SET state = %d,"
+				"       failure_digest = $4,"
+				"       failure_sqlstate = $5::char(5),"
+				"       failure_class = $6,"
+				"       failure_retryable = $7,"
+				"       failure_format_version = $8,"
+				"       failure_recorded_at = clock_timestamp(),"
+				"       sqlstate_code = NULL,"
+				"       terminal_digest = NULL,"
+				"       result_payload = NULL,"
+				"       error_payload = NULL,"
+				"       result_format_version = NULL,"
+				"       error_format_version = NULL,"
+				"       committed_at = NULL"
+				" WHERE epoch_id = $1"
+				"   AND raft_log_index = $2"
+				"   AND item_ordinal = $3"
+				"   AND state = %d",
+				RAFT_ITEM_STATE_NONTERMINAL_FAILURE,
+				RAFT_ITEM_STATE_CLAIMED);
+			spi_rc = SPI_execute_with_args(sql_buf, 8, upd_argtypes, upd_values, upd_nulls, false, 1);
+			if (spi_rc != SPI_OK_UPDATE || SPI_processed != 1)
+			{
+				ledger_spi_end(&spi_scope);
+				elog(ERROR, "raft_apply_ledger: state=4 update did not affect exactly one CLAIMED row");
+			}
+			CommandCounterIncrement();
+		}
+	}
+
+	argtypes[0] = BYTEAOID;
+	argtypes[1] = INT8OID;
+	argtypes[2] = INT4OID;
+	values[0] = PointerGetDatum(make_bytea(tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES));
+	values[1] = Int64GetDatum((int64) tx->raft_log_index);
+	values[2] = Int32GetDatum((int32) tx->raft_item_ordinal);
+	memset(nulls, ' ', 3);
+	snprintf(sql_buf, sizeof(sql_buf),
+		"SELECT failure_digest, failure_sqlstate, failure_class,"
+		"       failure_retryable, failure_format_version,"
+		"       failure_recorded_at IS NOT NULL,"
+		"       sqlstate_code IS NULL,"
+		"       terminal_digest IS NULL,"
+		"       result_payload IS NULL,"
+		"       error_payload IS NULL,"
+		"       result_format_version IS NULL,"
+		"       error_format_version IS NULL,"
+		"       committed_at IS NULL"
+		"  FROM ariabc_internal.raft_apply_item"
+		" WHERE epoch_id = $1"
+		"   AND raft_log_index = $2"
+		"   AND item_ordinal = $3"
+		"   AND state = %d",
+		RAFT_ITEM_STATE_NONTERMINAL_FAILURE);
+	spi_rc = SPI_execute_with_args(sql_buf, 3, argtypes, values, nulls, false, 1);
+	if (spi_rc != SPI_OK_SELECT || SPI_processed != 1)
+	{
+		ledger_spi_end(&spi_scope);
+		elog(ERROR, "raft_apply_ledger: state=4 verification did not find exactly one row");
+	}
+	{
+		bool isnull[13];
+		Datum retryable_d;
+		Datum fmtver_d;
+		Datum recorded_d;
+		Datum sqlstate_null_d;
+		Datum term_null_d;
+		Datum result_null_d;
+		Datum error_null_d;
+		Datum result_fmt_null_d;
+		Datum error_fmt_null_d;
+		Datum committed_null_d;
+		bytea *digest_ba;
+		char *sqlstate_str;
+		char *class_str;
+		int i;
+
+		for (i = 0; i < 13; i++)
+			isnull[i] = false;
+		digest_ba = DatumGetByteaPP(SPI_getbinval(SPI_tuptable->vals[0],
+												  SPI_tuptable->tupdesc,
+												  1,
+												  &isnull[0]));
+		sqlstate_str = text_to_cstring(DatumGetTextPP(SPI_getbinval(SPI_tuptable->vals[0],
+																	SPI_tuptable->tupdesc,
+																	2,
+																	&isnull[1])));
+		class_str = text_to_cstring(DatumGetTextPP(SPI_getbinval(SPI_tuptable->vals[0],
+																SPI_tuptable->tupdesc,
+																3,
+																&isnull[2])));
+		retryable_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 4, &isnull[3]);
+		fmtver_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 5, &isnull[4]);
+		recorded_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull[5]);
+		sqlstate_null_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 7, &isnull[6]);
+		term_null_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 8, &isnull[7]);
+		result_null_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 9, &isnull[8]);
+		error_null_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 10, &isnull[9]);
+		result_fmt_null_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 11, &isnull[10]);
+		error_fmt_null_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull[11]);
+		committed_null_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 13, &isnull[12]);
+		if (isnull[0] || isnull[1] || isnull[2] || isnull[3] || isnull[4] ||
+			isnull[5] || isnull[6] || isnull[7] || isnull[8] || isnull[9] ||
+			isnull[10] || isnull[11] || isnull[12] ||
+			VARSIZE_ANY_EXHDR(digest_ba) != BCDB_RAFT_DIGEST_BYTES ||
+			memcmp(VARDATA_ANY(digest_ba), failure->digest, BCDB_RAFT_DIGEST_BYTES) != 0 ||
+			strncmp(sqlstate_str, failure->sqlstate, 5) != 0 ||
+			strcmp(class_str, failure->failure_class) != 0 ||
+			DatumGetBool(retryable_d) != failure->retryable ||
+			DatumGetInt32(fmtver_d) != failure->format_version ||
+			!DatumGetBool(recorded_d) ||
+			!DatumGetBool(sqlstate_null_d) ||
+			!DatumGetBool(term_null_d) ||
+			!DatumGetBool(result_null_d) ||
+			!DatumGetBool(error_null_d) ||
+			!DatumGetBool(result_fmt_null_d) ||
+			!DatumGetBool(error_fmt_null_d) ||
+			!DatumGetBool(committed_null_d))
+		{
+			ledger_spi_end(&spi_scope);
+			elog(ERROR, "raft_apply_ledger: state=4 verification mismatch");
+		}
+	}
+
+	if (stored_failure)
+		*stored_failure = *failure;
+	memcpy(tx->raft_terminal_digest, failure->digest, BCDB_RAFT_DIGEST_BYTES);
+	tx->raft_terminal_format_version = failure->format_version;
+	tx->raft_terminal_state = RAFT_ITEM_STATE_NONTERMINAL_FAILURE;
+	tx->raft_terminal_update_confirmed = true;
+	tx->raft_terminal_returning_verified = true;
+	tx->raft_terminal_verified_top_xid = GetTopTransactionIdIfAny();
+	tx->raft_terminal_verified_nest_level = GetCurrentTransactionNestLevel();
+
+	ledger_spi_end(&spi_scope);
+	bcdb_emit_ledger_boundary("ledger_finalize_nonterminal_failure");
+	return true;
+}
+
 /* --------------------------------------------------------------------------
  * D5: bcdb_raft_ledger_assert_terminal
  * -------------------------------------------------------------------------- */
@@ -1521,4 +1984,135 @@ bcdb_finish_terminal_item(BCDBShmXact *tx,
 		 (int) is_error,
 		 (int) is_replay,
 		 tx->raft_terminal_format_version);
+}
+
+void
+bcdb_complete_nonterminal_failure_item(BCDBShmXact *tx,
+									   const BCDBNonterminalFailure *failure,
+									   bool is_replay)
+{
+	BCBlock *result_block = NULL;
+	BCBlock *committed_block = NULL;
+	int      mem_txid;
+	int      slots;
+	char    *allocated_payload = NULL;
+	size_t   slot_capacity;
+	int      formatted_len;
+	char     digest_hex[BCDB_RAFT_DIGEST_BYTES * 2 + 1];
+
+	if (!tx || failure == NULL)
+		return;
+	if (failure->failure_class[0] == '\0' ||
+		strnlen(failure->failure_class, BCDB_FAILURE_CLASS_MAX) >= BCDB_FAILURE_CLASS_MAX)
+		elog(ERROR, "raft_apply_ledger: invalid nonterminal failure class payload");
+
+	result_block = bcdb_result_ring_owner_block();
+	if (tx->block_id_committed != BCDBMaxBid)
+		committed_block = get_block_by_id(tx->block_id_committed, false);
+
+	slots = bcdb_get_runtime_result_ring_slots();
+	if (slots < 1) slots = 1;
+	mem_txid = (int)(tx->tx_id % (BCTxID) slots);
+	if (mem_txid < 0) mem_txid += slots;
+
+	slot_capacity = (result_block != NULL)
+		? sizeof(result_block->result[mem_txid])
+		: 1024;
+
+	allocated_payload = (char *) palloc(slot_capacity);
+	digest_to_hex(failure->digest, digest_hex);
+
+	formatted_len = snprintf(allocated_payload, slot_capacity,
+			 "[BCDB_RAFT_FAILURE_NOTICE]\n"
+			 "raft_log_index=%llu\n"
+			 "raft_item_ordinal=%u\n"
+			 "failure_digest=%s\n"
+			 "outcome_state=NONTERMINAL_FAILURE\n"
+			 "failure_format_version=%d\n"
+			 "failure_notice_committed=1\n"
+			 "postgres_commit_confirmed=0\n"
+			 "[PAYLOAD]\n"
+			 "sqlstate=%s\n"
+			 "failure_class=%s\n"
+			 "retryable=%d\n",
+			 (unsigned long long) tx->raft_log_index,
+			 (unsigned) tx->raft_item_ordinal,
+			 digest_hex,
+			 failure->format_version,
+			 failure->sqlstate,
+			 failure->failure_class[0] ? failure->failure_class : "UNKNOWN",
+			 failure->retryable ? 1 : 0);
+
+	if (formatted_len < 0 || (size_t) formatted_len >= slot_capacity)
+	{
+		pfree(allocated_payload);
+		elog(ERROR,
+			 "raft_apply_ledger: non-terminal failure envelope for log_index=%llu "
+			 "ordinal=%u is %d bytes, which exceeds ring slot capacity of %zu bytes",
+			 (unsigned long long) tx->raft_log_index,
+			 (unsigned) tx->raft_item_ordinal,
+			 formatted_len,
+			 slot_capacity);
+	}
+
+	elog(LOG,
+		 "SAFE_NONTERMINAL_FAILURE_ENVELOPE_BUILT log=%llu ord=%u bytes=%d",
+		 (unsigned long long) tx->raft_log_index,
+		 (unsigned) tx->raft_item_ordinal,
+		 formatted_len);
+
+	if (result_block != NULL)
+	{
+		strlcpy(result_block->result[mem_txid], allocated_payload,
+				sizeof(result_block->result[mem_txid]));
+
+		pg_write_barrier();
+		__atomic_store_n(&result_block->result_commit_xid[mem_txid],
+						 InvalidTransactionId, __ATOMIC_RELEASE);
+		__atomic_store_n(&result_block->result_committed_txid[mem_txid],
+						 tx->tx_id, __ATOMIC_RELEASE);
+
+		if (tx->block_id_committed == BCDBMaxBid)
+			__atomic_store_n(&result_block->result_consumed_txid[mem_txid],
+							 (int32)tx->tx_id, __ATOMIC_RELEASE);
+	}
+
+	pfree(allocated_payload);
+
+	if (tx->raft_ledger_enabled)
+		mark_published_ready_txid(tx);
+
+	if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
+		set_last_committed_txid(tx);
+	else if (bcdb_advance_commit_watermark)
+		advance_last_committed_txid(tx);
+	else
+	{
+		bcdb_wait_for_prev_committed(tx);
+		set_last_committed_txid(tx);
+	}
+
+	if (committed_block != NULL)
+	{
+		int32 num_finished =
+			__sync_add_and_fetch(&committed_block->num_finished, 1);
+
+		if (num_finished == committed_block->num_tx)
+		{
+			uint32 global_bmin = __sync_add_and_fetch(&block_meta->global_bmin, 1);
+			ConditionVariableBroadcast(&block_meta->conds[global_bmin % NUM_BMIN_COND]);
+			block_cleaning_dt(committed_block->id);
+		}
+	}
+
+	if (result_block != NULL)
+		ConditionVariableBroadcast(&result_block->condCommit);
+
+	bcdb_emit_ledger_boundary(is_replay ? "ledger_nonterminal_replay_complete" : "ledger_finalize_nonterminal");
+
+	elog(LOG,
+		 "raft_apply_ledger: published non-terminal failure log_index=%llu ordinal=%u sqlstate=%s",
+		 (unsigned long long) tx->raft_log_index,
+		 (unsigned) tx->raft_item_ordinal,
+		 failure->sqlstate);
 }

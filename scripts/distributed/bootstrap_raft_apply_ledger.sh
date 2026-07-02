@@ -83,7 +83,7 @@ if [[ "$CLEAN" -eq 1 ]]; then
     "
 fi
 
-# Step 2: Validate schema_meta has exactly one row with version = 1.
+# Step 2: Validate schema_meta has exactly one row with version = 2.
 echo "Validating schema version..."
 SCHEMA_CHECK=$(psql "${PSQL_ARGS[@]}" -t -A -c "
 SELECT count(*), min(schema_version), max(schema_version)
@@ -92,11 +92,11 @@ FROM ariabc_internal.raft_apply_schema_meta;
 SCHEMA_COUNT=$(echo "$SCHEMA_CHECK" | cut -d'|' -f1)
 SCHEMA_MIN=$(echo "$SCHEMA_CHECK"   | cut -d'|' -f2)
 SCHEMA_MAX=$(echo "$SCHEMA_CHECK"   | cut -d'|' -f3)
-if [[ "$SCHEMA_COUNT" -ne 1 || "$SCHEMA_MIN" -ne 1 || "$SCHEMA_MAX" -ne 1 ]]; then
-    echo "Error: schema_meta must have exactly one row with schema_version=1; got count=$SCHEMA_COUNT min=$SCHEMA_MIN max=$SCHEMA_MAX" >&2
+if [[ "$SCHEMA_COUNT" -ne 1 || "$SCHEMA_MIN" -ne 2 || "$SCHEMA_MAX" -ne 2 ]]; then
+    echo "Error: schema_meta must have exactly one row with schema_version=2; got count=$SCHEMA_COUNT min=$SCHEMA_MIN max=$SCHEMA_MAX" >&2
     exit 1
 fi
-echo "Schema version OK (version=1)."
+echo "Schema version OK (version=2)."
 
 # Step 3: Insert epoch anchor (idempotent).
 echo "Registering epoch anchor..."

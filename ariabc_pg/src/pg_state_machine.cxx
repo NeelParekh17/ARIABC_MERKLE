@@ -96,6 +96,15 @@ bool state_machine_failpoint_matches(const char* name,
         }
     }
 
+    const char* min_log_filter = std::getenv("ARIABC_FAILPOINT_MIN_RAFT_LOG_INDEX");
+    if (min_log_filter && min_log_filter[0] != '\0') {
+        char* end = nullptr;
+        const unsigned long long wanted = std::strtoull(min_log_filter, &end, 10);
+        if (end == min_log_filter || *end != '\0' || wanted == 0ULL || raft_log_idx < wanted) {
+            return false;
+        }
+    }
+
     const char* ordinal_filter = std::getenv("ARIABC_FAILPOINT_ITEM_ORDINAL");
     if (ordinal_filter && ordinal_filter[0] != '\0') {
         char* end = nullptr;
@@ -311,12 +320,23 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit(const nuraft::ulong log_idx
                 node_id_,
                 static_cast<uint64_t>(log_idx),
                 0)) {
-            const char* run_marker = std::getenv("RUN_MARKER");
-            std::cerr << "FAILPOINT: ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE"
-                      << " triggered run_marker=" << (run_marker ? run_marker : "")
-                      << " node_id=" << node_id_
-                      << " raft_log_index=" << static_cast<uint64_t>(log_idx)
-                      << " item_ordinal=0 single_fire=1 sending SIGKILL"
+            const char* cluster_id = std::getenv("ARIABC_RAFT_CLUSTER_ID");
+            if (!cluster_id || cluster_id[0] == '\0') {
+                cluster_id = "unknown_cluster";
+            }
+            const char* epoch_hex = std::getenv("ARIABC_RAFT_EPOCH_HEX");
+            if (!epoch_hex || epoch_hex[0] == '\0') {
+                epoch_hex = "unknown_epoch";
+            }
+            std::cerr << "SAFE_FAILPOINT_TRIGGERED"
+                      << " name=ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE"
+                      << " phase=after_manifest_register_before_enqueue"
+                      << " node=" << node_id_
+                      << " log=" << static_cast<uint64_t>(log_idx)
+                      << " ordinal=0"
+                      << " pid=" << ::getpid()
+                      << " epoch=" << epoch_hex
+                      << " cluster_id=" << cluster_id
                       << std::endl;
             ::kill(::getpid(), SIGKILL);
         }
@@ -542,7 +562,7 @@ uint64_t pg_state_machine::safe_sync_startup(uint64_t durable_log_start_index) {
         throw std::runtime_error("SAFE_STARTUP_FAILED: cannot connect to PostgreSQL: " + err);
     }
 
-    // Step 1: Validate schema version (must be exactly 1 row, version=1)
+    // Step 1: Validate schema version (must be exactly 1 row, version=2)
     {
         PGresult* res = PQexec(c,
             "SELECT count(*), min(schema_version), max(schema_version) "
@@ -557,10 +577,10 @@ uint64_t pg_state_machine::safe_sync_startup(uint64_t durable_log_start_index) {
         const int minv = std::stoi(PQgetvalue(res, 0, 1));
         const int maxv = std::stoi(PQgetvalue(res, 0, 2));
         PQclear(res);
-        if (cnt != 1 || minv != 1 || maxv != 1) {
+        if (cnt != 1 || minv != 2 || maxv != 2) {
             PQfinish(c);
             throw std::runtime_error(
-                "SAFE_STARTUP_FAILED: schema version must be exactly one row with version=1 "
+                "SAFE_STARTUP_FAILED: schema version must be exactly one row with version=2 "
                 "(got count=" + std::to_string(cnt) +
                 " min=" + std::to_string(minv) +
                 " max=" + std::to_string(maxv) + ")");

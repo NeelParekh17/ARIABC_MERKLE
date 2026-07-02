@@ -1,0 +1,1 @@
+UPDATE public.safe_phase3_probe SET n = n + 1, token = '@RUN_TOKEN@' WHERE k = 1;

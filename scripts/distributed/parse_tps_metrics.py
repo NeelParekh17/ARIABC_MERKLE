@@ -285,7 +285,7 @@ def main():
 
     # Fields to write
     summary_fields = [
-        ("schema_version", "1"),
+        ("schema_version", "2"),
         ("workload_transactions", str(workload_transactions)),
         ("ordering_mode", args.ordering_mode),
         ("completion_path", completion_path),

@@ -137,6 +137,12 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     --exclude='.venv' \
     --exclude='.bench_tmp' \
     --exclude='__pycache__' \
+    --exclude='*.o' \
+    --exclude='*.a' \
+    --exclude='*.so' \
+    --exclude='*.so.*' \
+    --exclude='*.d' \
+    --exclude='*.manifest' \
     --exclude='ariabc_pg/build' \
     --exclude='scripts/bench_full_results' \
     --exclude='scripts/bench_results' \
@@ -170,7 +176,8 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     EXPECTED_ROWS EXPECTED_ROOT \
     RAFT_STORAGE_MODE RAFT_STORAGE_DIR RAFT_STORAGE_ACTION RAFT_STORAGE_ROOT RAFT_CLUSTER_ID \
     FAILPOINT_NODE_ID FAILPOINT_ENV FAILPOINT_RAFT_LOG_INDEX FAILPOINT_ITEM_ORDINAL \
-    ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE
+    ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE \
+    ARIABC_PHASE3_INVOCATION_ID
   do
     if [[ -v "$var" ]]; then
       delegate_env+=("$var=${!var}")
@@ -262,6 +269,7 @@ RAFT_EPOCH_HEX="${RAFT_EPOCH_HEX:-}"
 FAILPOINT_NODE_ID="${FAILPOINT_NODE_ID:-}"
 FAILPOINT_ENV="${FAILPOINT_ENV:-}"
 FAILPOINT_RAFT_LOG_INDEX="${FAILPOINT_RAFT_LOG_INDEX:-}"
+FAILPOINT_MIN_RAFT_LOG_INDEX="${FAILPOINT_MIN_RAFT_LOG_INDEX:-}"
 FAILPOINT_ITEM_ORDINAL="${FAILPOINT_ITEM_ORDINAL:-}"
 ARIABC_SAFE_POSTCOMMIT_WITNESS="${ARIABC_SAFE_POSTCOMMIT_WITNESS:-}"
 ARIABC_SAFE_EXTERNAL_PROBE="${ARIABC_SAFE_EXTERNAL_PROBE:-}"
@@ -355,6 +363,7 @@ SKIP_CLUSTER_LOGS="${SKIP_CLUSTER_LOGS:-0}"  # 1=skip fetching server/nuraft/pos
 GATEWAY_STALL_WATCHDOG="${GATEWAY_STALL_WATCHDOG:-${ENABLE_FASTPATH_WATCHDOG:-1}}" # 1=terminate gateway if completed= stalls
 GATEWAY_STALL_POLL_SECONDS="${GATEWAY_STALL_POLL_SECONDS:-5}"
 GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-3}"
+SKIP_WORKLOAD="${SKIP_WORKLOAD:-0}"          # 1=start cluster and leader only; do not start gateway or submit SQL
 
 # ===========================================================================
 # Function: usage
@@ -374,6 +383,9 @@ Options:
   --skip-restore   Skip restoring the verification table before cluster start
   --skip-post-verify
                   Skip post-workload marker + Merkle root comparison
+  --skip-workload Start PostgreSQL/Raft servers, wait for a leader, collect logs,
+                  and exit without starting the gateway, submitting SQL, or
+                  sending the post-run marker
   --stop-only      Stop stale cluster server processes and exit after cleanup
   --skip-pg-restart
                   Do not restart PostgreSQL before restore (default restarts)
@@ -547,6 +559,7 @@ while [[ $# -gt 0 ]]; do
     --skip-rdkafka-setup) SKIP_RDKAFKA_SETUP=1; shift ;;
     --skip-restore) SKIP_RESTORE=1; shift ;;
     --skip-post-verify) SKIP_POST_VERIFY=1; shift ;;
+    --skip-workload) SKIP_WORKLOAD=1; SKIP_POST_VERIFY=1; shift ;;
     --stop-only) STOP_ONLY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
@@ -613,6 +626,7 @@ while [[ $# -gt 0 ]]; do
     --failpoint-node-id) FAILPOINT_NODE_ID="${2:-}"; shift 2 ;;
     --failpoint-env) FAILPOINT_ENV="${2:-}"; shift 2 ;;
     --failpoint-raft-log-index) FAILPOINT_RAFT_LOG_INDEX="${2:-}"; shift 2 ;;
+    --failpoint-min-raft-log-index) FAILPOINT_MIN_RAFT_LOG_INDEX="${2:-}"; shift 2 ;;
     --failpoint-item-ordinal) FAILPOINT_ITEM_ORDINAL="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
@@ -1406,6 +1420,9 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'raft_storage_action=%s\n' "$RAFT_STORAGE_ACTION"
   printf 'raft_storage_dir=%s\n' "$RAFT_STORAGE_DIR"
   printf 'raft_cluster_id=%s\n' "$RAFT_CLUSTER_ID"
+  printf 'raft_epoch_hex=%s\n' "$RAFT_EPOCH_HEX"
+  printf 'skip_workload=%s\n' "$SKIP_WORKLOAD"
+  printf 'phase3_invocation_id=%s\n' "${ARIABC_PHASE3_INVOCATION_ID:-}"
 } > "$LOG_DIR/run_meta.env"
 
 # ---------------------------------------------------------------------------
@@ -1413,20 +1430,22 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
 # Capture these immediately after run_meta.env so that if the run aborts
 # before Phase 1.6 we still have a record of what source was in use.
 # ---------------------------------------------------------------------------
-git -C "$REPO_ROOT" diff -- src ariabc_pg scripts/distributed \
+git -C "$REPO_ROOT" diff HEAD -- src ariabc_pg scripts/distributed \
   > "$LOG_DIR/uncommitted_diff.patch" 2>/dev/null || true
 
 git -C "$REPO_ROOT" status --short \
   > "$LOG_DIR/git_status.txt" 2>/dev/null || true
 
 local_git_head="${CALLER_GIT_HEAD:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
-local_git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
+local_git_dirty="$(git -C "$REPO_ROOT" diff HEAD --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
+local_src_fingerprint="$(_compute_src_fingerprint)"
 
 # Append git HEAD and SHA256 checksums of the key local binaries to run_meta.env
 {
   printf 'git_head=%s\n' "$local_git_head"
   printf 'caller_git_head=%s\n' "${CALLER_GIT_HEAD:-unknown}"
   printf 'git_dirty=%s\n' "$local_git_dirty"
+  printf 'source_fingerprint=%s\n' "$local_src_fingerprint"
   printf 'ariabc_pg_gateway_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'ariabc_pg_server_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'postgres_sha256=%s\n' "$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
@@ -1757,6 +1776,11 @@ sync_u24_installs() {
 if [[ "$SKIP_SYNC" -eq 0 ]]; then
   log "=== Phase 1: Sync source and workload files (parallel) ==="
 
+  # The local canonical build modifies the tree in place when SKIP_BUILD=0.
+  # Wait for it before rsync starts, otherwise the sync can race the build and
+  # observe disappearing object files.
+  wait_local_canonical_build
+
   declare -a SYNC_PIDS=()
   declare -a SYNC_NAMES=()
   for idx in "${!NODE_IDS[@]}"; do
@@ -1847,10 +1871,10 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
           --clean-when-rebuild
 
         # Generate postgres.manifest on U22 remote node
-        pg_sha=\\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \\\$1}' || echo missing)
+        pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
         rm -f '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
         echo \"binary_name=postgres\" > '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
-        echo \"binary_sha256=\\\$pg_sha\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
+        echo \"binary_sha256=\$pg_sha\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
         echo \"build_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
         echo \"git_head=$local_git_head\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
         echo \"git_dirty=$local_git_dirty\" >> '$REMOTE_INSTALL_DIR/bin/postgres.manifest'
@@ -2269,6 +2293,7 @@ for idx in "${!NODE_IDS[@]}"; do
       export \"$FAILPOINT_ENV=1\"
       export ARIABC_FAILPOINT_NODE_ID=\"${id}\"
       export ARIABC_FAILPOINT_RAFT_LOG_INDEX=\"$FAILPOINT_RAFT_LOG_INDEX\"
+      export ARIABC_FAILPOINT_MIN_RAFT_LOG_INDEX=\"$FAILPOINT_MIN_RAFT_LOG_INDEX\"
       export ARIABC_FAILPOINT_ITEM_ORDINAL=\"$FAILPOINT_ITEM_ORDINAL\"
       echo \"PG_FAILPOINT_ACTIVE: node ${id}: $FAILPOINT_ENV=1\"
     fi
@@ -2794,38 +2819,39 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    export ARIABC_DET_ORDER_START_SEQ='${DET_START_SEQ}'
 	    export ARIABC_RAFT_CLUSTER_ID='${RAFT_CLUSTER_ID}'
 	    export ARIABC_RAFT_EPOCH_HEX='${RAFT_EPOCH_HEX}'
-	    export ARIABC_RAFT_NODE_ID="\${id}"
+	    export ARIABC_RAFT_NODE_ID="${id}"
 	    export BCDB_DT_COMPLETION_ONLY_SKIP_READS='${BCDB_DT_COMPLETION_ONLY_SKIP_READS}'
 	    export BCDB_FLOW_DEBUG='${BCDB_FLOW_DEBUG}'
 	    export BCDB_DET_QUEUE_HIGH_WM='${BCDB_DET_QUEUE_HIGH_WM}'
 	    export BCDB_DET_QUEUE_LOW_WM='${BCDB_DET_QUEUE_LOW_WM}'
 	    # Failpoint injection: FAILPOINT_NODE_ID and FAILPOINT_ENV are baked in
 	    # from the local shell (like TEST_FAIL_ONCE) so they are always the literal
-	    # values, not remote shell variables.  The comparison is against \$id which
-	    # is a remote shell variable (the current node's Raft ID).
-	    if [[ -n \"$FAILPOINT_NODE_ID\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" && -n \"$FAILPOINT_ENV\" ]]; then
+	    # values, not remote shell variables.  Compare against the local node id
+	    # baked into this remote command; there is no remote id shell variable.
+	    if [[ -n \"$FAILPOINT_NODE_ID\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" && -n \"$FAILPOINT_ENV\" ]]; then
 	      export \"$FAILPOINT_ENV=1\"
-	      export ARIABC_FAILPOINT_NODE_ID=\"\${id}\"
-	      export ARIABC_RAFT_NODE_ID=\"\${id}\"
+	      export ARIABC_FAILPOINT_NODE_ID=\"${id}\"
+	      export ARIABC_RAFT_NODE_ID=\"${id}\"
 	      export ARIABC_FAILPOINT_RAFT_LOG_INDEX=\"$FAILPOINT_RAFT_LOG_INDEX\"
+	      export ARIABC_FAILPOINT_MIN_RAFT_LOG_INDEX=\"$FAILPOINT_MIN_RAFT_LOG_INDEX\"
 	      export ARIABC_FAILPOINT_ITEM_ORDINAL=\"$FAILPOINT_ITEM_ORDINAL\"
-	      echo \"FAILPOINT_ACTIVE: node \${id}: $FAILPOINT_ENV=1\"
+	      echo \"FAILPOINT_ACTIVE: node ${id}: $FAILPOINT_ENV=1\"
 	    fi
 	    # Export each named failpoint — but only if it is NOT the injected one
 	    # (so the injection above is not overwritten to empty).
-	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" ]] || \
 	      export ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_BEFORE_WORKER_TOPLEVEL_COMMIT:-}'
-	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" ]] || \
 	      export ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT:-}'
-	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" ]] || \
 	      export ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE='${ARIABC_FAILPOINT_AFTER_MANIFEST_REGISTER_BEFORE_ENQUEUE:-}'
-	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" ]] || \
 	      export ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL='${ARIABC_FAILPOINT_AFTER_LEDGER_CLAIM_BEFORE_USER_SQL:-}'
-	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" ]] || \
 	      export ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT='${ARIABC_FAILPOINT_AFTER_LEDGER_FINALIZE_BEFORE_TOPLEVEL_COMMIT:-}'
-	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" ]] || \
 	      export ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH='${ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH:-}'
-	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK\" && \"$FAILPOINT_NODE_ID\" == \"\${id}\" ]] || \
+	    [[ \"$FAILPOINT_ENV\" == \"ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK\" && \"$FAILPOINT_NODE_ID\" == \"${id}\" ]] || \
 	      export ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK='${ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK:-}'
 	    export ARIABC_SAFE_EXTERNAL_PROBE='${ARIABC_SAFE_EXTERNAL_PROBE:-}'
 	    export ARIABC_SAFE_TRACE='${ARIABC_SAFE_TRACE:-}'
@@ -2936,26 +2962,6 @@ done
 GW_BIN="$LOCAL_BIN/ariabc_pg_gateway"
 GW_LOG="$LOG_DIR/gateway_test.log"
 
-if [[ ! -x "$GW_BIN" ]]; then
-  die "ariabc_pg_gateway not found at $GW_BIN — build it: cmake --build ariabc_pg/build -j\$(nproc)"
-fi
-log "  Gateway binary: $GW_BIN"
-# Skip per-record HMAC signature verification in trusted cluster runs.
-# verify_result_signature() is called for every single Kafka reply record
-# (N nodes x 20k tx = many HMAC-SHA256 calls per run). In a trusted cluster
-# the hash-based majority check is sufficient; full sig verification is only
-# needed when running against potentially Byzantine nodes.
-export ARIABC_TRUSTED_RESULT_SIG_FASTPATH=1
-
-
-if [[ ! -f "$WORKLOAD_FILE" ]]; then
-  log "  Workload file not found at $WORKLOAD_FILE — using minimal inline test"
-  WORKLOAD_FILE="$LOG_DIR/test_workload.sql"
-  for i in $(seq 1 "$TEST_QUERIES"); do
-    echo "SELECT $i;"
-  done > "$WORKLOAD_FILE"
-fi
-
 log "  Checking server-startup bcdb_init status..."
 BCDB_ENABLED=0
 BCDB_SKIPPED=0
@@ -2977,6 +2983,48 @@ done
 
 if [[ "$BCDB_ENABLED" -ne ${#NODE_IDS[@]} || "$BCDB_SKIPPED" -ne 0 || "$BCDB_MISSING" -ne 0 ]]; then
   die "bcdb_init is not uniformly enabled across all ${#NODE_IDS[@]} nodes (enabled=$BCDB_ENABLED skipped=$BCDB_SKIPPED missing=$BCDB_MISSING)"
+fi
+
+if [[ "$SKIP_WORKLOAD" -eq 1 ]]; then
+  phase_marker "PHASE_6_WORKLOAD_SKIPPED"
+  log "  --skip-workload set: Raft leader/startup verified; gateway submission and post-run marker are intentionally skipped."
+  {
+    printf 'schema_version=2\n'
+    printf 'workload_transactions=0\n'
+    printf 'ordering_mode=%s\n' "$ORDERING_MODE"
+    printf 'completion_path=not_applicable\n'
+    printf 'validation_mode=not_applicable\n'
+    printf 'gateway_completed=not_applicable\n'
+    printf 'divergence_count=0\n'
+    printf 'permanent_failures=0\n'
+  } > "$LOG_DIR/run_summary.env"
+  collect_cluster_logs "  Collecting server logs from all nodes..."
+  log "=== Skip-workload recovery startup complete ==="
+  log "  Run dir        : $LOG_DIR"
+  log "  Server stdout  : $LOG_DIR/server_node*.log"
+  log "  Postgres logs  : $LOG_DIR/postgres_node*.log"
+  log "  NuRaft logs    : $LOG_DIR/nuraft_node*.log"
+  exit 0
+fi
+
+if [[ ! -x "$GW_BIN" ]]; then
+  die "ariabc_pg_gateway not found at $GW_BIN — build it: cmake --build ariabc_pg/build -j\$(nproc)"
+fi
+log "  Gateway binary: $GW_BIN"
+# Skip per-record HMAC signature verification in trusted cluster runs.
+# verify_result_signature() is called for every single Kafka reply record
+# (N nodes x 20k tx = many HMAC-SHA256 calls per run). In a trusted cluster
+# the hash-based majority check is sufficient; full sig verification is only
+# needed when running against potentially Byzantine nodes.
+export ARIABC_TRUSTED_RESULT_SIG_FASTPATH=1
+
+
+if [[ ! -f "$WORKLOAD_FILE" ]]; then
+  log "  Workload file not found at $WORKLOAD_FILE — using minimal inline test"
+  WORKLOAD_FILE="$LOG_DIR/test_workload.sql"
+  for i in $(seq 1 "$TEST_QUERIES"); do
+    echo "SELECT $i;"
+  done > "$WORKLOAD_FILE"
 fi
 
 GW_EXTRA_ARGS=""
@@ -3142,6 +3190,7 @@ if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
 
   if [[ "$GW_RC" -ne 0 ]]; then
     log "WARNING: Gateway exited with status $GW_RC — check $GW_LOG"
+    collect_cluster_logs "  Collecting server logs from all nodes after gateway failure..."
     exit "$GW_RC"
   fi
 

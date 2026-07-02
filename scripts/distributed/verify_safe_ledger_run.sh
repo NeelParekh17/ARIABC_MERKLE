@@ -11,6 +11,7 @@ EPOCH_HEX=""
 EXPECT_OK=""
 EXPECT_ERROR=""
 EXPECT_PROBE_VALUE=""
+EXPECT_MARKER="auto"
 
 usage() {
   cat <<'EOF'
@@ -20,6 +21,7 @@ Usage:
     --epoch <64-hex> \
     --expect-ok <count> \
     --expect-error <count> \
+    [--expect-marker 0|1|auto] \
     [--expect-probe-value <integer>]
 EOF
 }
@@ -30,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     --epoch) EPOCH_HEX="${2:?missing value for --epoch}"; shift 2 ;;
     --expect-ok) EXPECT_OK="${2:?missing value for --expect-ok}"; shift 2 ;;
     --expect-error) EXPECT_ERROR="${2:?missing value for --expect-error}"; shift 2 ;;
+    --expect-marker) EXPECT_MARKER="${2:?missing value for --expect-marker}"; shift 2 ;;
     --expect-probe-value) EXPECT_PROBE_VALUE="${2:?missing value for --expect-probe-value}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -56,9 +59,25 @@ require_int "--expect-error" "$EXPECT_ERROR"
 if [[ -n "$EXPECT_PROBE_VALUE" ]]; then
   require_int "--expect-probe-value" "$EXPECT_PROBE_VALUE"
 fi
+case "$EXPECT_MARKER" in
+  0|1|auto) ;;
+  *) fail "--expect-marker must be 0, 1, or auto" ;;
+esac
 
 SUMMARY_DIR="$ARTIFACT_DIR/safe_ledger_verify"
 mkdir -p "$SUMMARY_DIR"
+
+marker_count=0
+case "$EXPECT_MARKER" in
+  0) marker_count=0 ;;
+  1) marker_count=1 ;;
+  auto)
+    if [[ -f "$ARTIFACT_DIR/post_verify_marker.sql" ]]; then
+      marker_count=1
+    fi
+    ;;
+esac
+expected_ok_total=$((EXPECT_OK + marker_count))
 
 psql_node() {
   local idx="$1" sql="$2"
@@ -161,7 +180,7 @@ SELECT CASE WHEN to_regclass('public.recovery_probe') IS NULL THEN 'missing'
   bad_state="$(sed -E 's/.*bad_state=([0-9]+).*/\1/' <<<"$ledger_line")"
 
   [[ "$claimed" == "0" ]] || fail "node $node_id has persistent CLAIMED rows: $claimed"
-  [[ "$ok" == "$EXPECT_OK" ]] || fail "node $node_id APPLIED_OK=$ok expected $EXPECT_OK"
+  [[ "$ok" == "$expected_ok_total" ]] || fail "node $node_id APPLIED_OK=$ok expected $expected_ok_total"
   [[ "$error" == "$EXPECT_ERROR" ]] || fail "node $node_id APPLIED_ERROR=$error expected $EXPECT_ERROR"
   [[ "$bad_digest" == "0" ]] || fail "node $node_id has terminal digest length errors: $bad_digest"
   [[ "$bad_state" == "0" ]] || fail "node $node_id has unknown ledger states: $bad_state"
@@ -187,9 +206,9 @@ if [[ -n "$EXPECT_PROBE_VALUE" && "${#PROBE_VALUES[@]}" -gt 1 ]]; then
   done
 fi
 
-if compgen -G "$ARTIFACT_DIR/server_node*.log" >/dev/null; then
-  grep -H "SAFE_RING_WRITE" "$ARTIFACT_DIR"/server_node*.log > "$SUMMARY_DIR/safe_ring_write_markers.txt" \
-    || fail "SAFE_RING_WRITE marker missing from server logs"
+if compgen -G "$ARTIFACT_DIR/postgres_node*.log" >/dev/null; then
+  grep -H "SAFE_RING_WRITE" "$ARTIFACT_DIR"/postgres_node*.log > "$SUMMARY_DIR/safe_ring_write_markers.txt" \
+    || fail "SAFE_RING_WRITE marker missing from postgres logs"
 fi
 
 grep -H "SAFE_KAFKA_PUBLISH_DELIVERED" "$ARTIFACT_DIR"/*.log > "$SUMMARY_DIR/safe_kafka_delivered_markers.txt" \

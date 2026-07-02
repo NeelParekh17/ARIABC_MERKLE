@@ -607,17 +607,23 @@ bool parse_bcdb_block_results_text(
 bool parse_confirmed_result_strict(const std::string& raw_result, pg_executor::ConfirmedResult* out) {
     if (out) *out = pg_executor::ConfirmedResult();
 
-    const std::string header = "[BCDB_RAFT_COMMIT_CONFIRMED]\n";
-    if (raw_result.compare(0, header.size(), header) != 0) {
+    const std::string commit_header = "[BCDB_RAFT_COMMIT_CONFIRMED]\n";
+    const std::string failure_header = "[BCDB_RAFT_FAILURE_NOTICE]\n";
+    const bool is_commit = raw_result.compare(0, commit_header.size(), commit_header) == 0;
+    const bool is_failure = raw_result.compare(0, failure_header.size(), failure_header) == 0;
+    const std::string header = is_commit ? commit_header : failure_header;
+    if (!is_commit && !is_failure) {
         return false;
     }
 
+    const size_t payload_marker_len = std::string("\n[PAYLOAD]\n").size();
     size_t payload_pos = raw_result.find("\n[PAYLOAD]\n", header.size());
     if (payload_pos == std::string::npos) {
         return false;
     }
 
     std::string metadata = raw_result.substr(header.size(), payload_pos - header.size() + 1);
+    std::string payload = raw_result.substr(payload_pos + payload_marker_len);
 
     std::vector<std::string> lines;
     size_t start = 0;
@@ -633,18 +639,7 @@ bool parse_confirmed_result_strict(const std::string& raw_result, pg_executor::C
         start = next_nl + 1;
     }
 
-    int count_confirmed = 0;
-    int count_log_index = 0;
-    int count_ordinal = 0;
-    int count_digest = 0;
-    int count_state = 0;
-    int count_format_version = 0;
-
-    uint64_t log_idx = 0;
-    uint32_t ordinal = 0;
-    std::string digest;
-    std::string state;
-    int format_ver = 1;
+    std::map<std::string, std::string> meta;
 
     for (const auto& line : lines) {
         size_t eq = line.find('=');
@@ -653,69 +648,128 @@ bool parse_confirmed_result_strict(const std::string& raw_result, pg_executor::C
         }
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
+        if (!meta.emplace(key, val).second) return false;
+    }
 
-        if (key == "postgres_commit_confirmed") {
-            count_confirmed++;
-            if (val != "1") return false;
-        } else if (key == "raft_log_index") {
-            count_log_index++;
-            if (val.empty()) return false;
-            for (char c : val) if (!std::isdigit((unsigned char)c)) return false;
-            try {
-                log_idx = std::stoull(val);
-            } catch (...) {
-                return false;
-            }
-        } else if (key == "raft_item_ordinal") {
-            count_ordinal++;
-            if (val.empty()) return false;
-            for (char c : val) if (!std::isdigit((unsigned char)c)) return false;
-            try {
-                unsigned long temp = std::stoul(val);
-                if (temp > 0xFFFFFFFFUL) return false;
-                ordinal = static_cast<uint32_t>(temp);
-            } catch (...) {
-                return false;
-            }
-        } else if (key == "terminal_digest") {
-            count_digest++;
-            if (val.size() != 64) return false;
-            for (char c : val) {
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-                    return false;
-                }
-            }
-            digest = val;
-        } else if (key == "terminal_state") {
-            count_state++;
-            if (val != "OK" && val != "ERROR") return false;
-            state = val;
-        } else if (key == "terminal_format_version") {
-            count_format_version++;
-            if (val.empty()) return false;
-            for (char c : val) if (!std::isdigit((unsigned char)c)) return false;
-            try {
-                format_ver = std::stoi(val);
-            } catch (...) {
-                return false;
-            }
-            if (format_ver != 1) return false;
-        } else {
+    auto is_uint = [](const std::string& s) -> bool {
+        if (s.empty()) return false;
+        for (char c : s) if (!std::isdigit((unsigned char)c)) return false;
+        return true;
+    };
+    auto is_hex64 = [](const std::string& s) -> bool {
+        if (s.size() != 64) return false;
+        for (char c : s) {
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        }
+        return true;
+    };
+    auto get_required = [&](const std::string& key, std::string& out_val) -> bool {
+        auto it = meta.find(key);
+        if (it == meta.end()) return false;
+        out_val = it->second;
+        return true;
+    };
+    auto parse_common_identity = [&](uint64_t& log_idx, uint32_t& ordinal) -> bool {
+        std::string v;
+        if (!get_required("raft_log_index", v) || !is_uint(v)) return false;
+        try {
+            log_idx = std::stoull(v);
+        } catch (...) {
             return false;
         }
+        if (!get_required("raft_item_ordinal", v) || !is_uint(v)) return false;
+        try {
+            unsigned long temp = std::stoul(v);
+            if (temp > 0xFFFFFFFFUL) return false;
+            ordinal = static_cast<uint32_t>(temp);
+        } catch (...) {
+            return false;
+        }
+        return true;
+    };
+    auto parse_payload_kv = [&](std::map<std::string, std::string>& kv) -> bool {
+        size_t p = 0;
+        while (p < payload.size()) {
+            const size_t nl = payload.find('\n', p);
+            const size_t end = (nl == std::string::npos) ? payload.size() : nl;
+            if (end > p) {
+                std::string line = payload.substr(p, end - p);
+                const size_t eq = line.find('=');
+                if (eq == std::string::npos) return false;
+                if (!kv.emplace(line.substr(0, eq), line.substr(eq + 1)).second) return false;
+            }
+            if (nl == std::string::npos) break;
+            p = nl + 1;
+        }
+        return true;
+    };
+
+    uint64_t log_idx = 0;
+    uint32_t ordinal = 0;
+    if (!parse_common_identity(log_idx, ordinal)) return false;
+
+    if (is_commit) {
+        std::string confirmed;
+        std::string digest;
+        std::string state;
+        std::string fmt;
+        if (meta.size() != 6) return false;
+        if (!get_required("postgres_commit_confirmed", confirmed) || confirmed != "1") return false;
+        if (!get_required("terminal_digest", digest) || !is_hex64(digest)) return false;
+        if (!get_required("terminal_state", state)) return false;
+        if (state != "OK" && state != "ERROR") return false;
+        if (!get_required("terminal_format_version", fmt) || fmt != "1") return false;
+
+        if (out) {
+            out->raft_log_index = log_idx;
+            out->raft_item_ordinal = ordinal;
+            out->terminal_digest = digest;
+            out->terminal_state = state;
+            out->payload = payload;
+            out->format_version = 1;
+        }
+        return true;
     }
 
-    if (count_confirmed != 1 || count_log_index != 1 || count_ordinal != 1 || count_digest != 1 || count_state != 1 || count_format_version != 1) {
-        return false;
+    std::string digest;
+    std::string state;
+    std::string fmt;
+    std::string notice_committed;
+    std::string pg_confirmed;
+    if (meta.size() != 7) return false;
+    if (meta.find("terminal_digest") != meta.end() ||
+        meta.find("terminal_state") != meta.end() ||
+        meta.find("terminal_format_version") != meta.end()) return false;
+    if (!get_required("failure_digest", digest) || !is_hex64(digest)) return false;
+    if (!get_required("outcome_state", state) || state != "NONTERMINAL_FAILURE") return false;
+    if (!get_required("failure_format_version", fmt) || fmt != "1") return false;
+    if (!get_required("failure_notice_committed", notice_committed) || notice_committed != "1") return false;
+    if (!get_required("postgres_commit_confirmed", pg_confirmed) || pg_confirmed != "0") return false;
+
+    std::map<std::string, std::string> payload_kv;
+    if (!parse_payload_kv(payload_kv) || payload_kv.size() != 3) return false;
+    auto p_sqlstate = payload_kv.find("sqlstate");
+    auto p_class = payload_kv.find("failure_class");
+    auto p_retryable = payload_kv.find("retryable");
+    if (p_sqlstate == payload_kv.end() || p_class == payload_kv.end() ||
+        p_retryable == payload_kv.end()) return false;
+    if (p_sqlstate->second.size() != 5) return false;
+    for (char c : p_sqlstate->second) {
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'))) return false;
     }
+    if (p_class->second.empty()) return false;
+    if (p_retryable->second != "0" && p_retryable->second != "1") return false;
 
     if (out) {
         out->raft_log_index = log_idx;
         out->raft_item_ordinal = ordinal;
         out->terminal_digest = digest;
-        out->terminal_state = state;
-        out->payload = raw_result.substr(payload_pos + 11);
-        out->format_version = format_ver;
+        out->terminal_state = "NONTERMINAL_FAILURE";
+        out->failure_sqlstate = p_sqlstate->second;
+        out->failure_class = p_class->second;
+        out->failure_retryable = (p_retryable->second == "1");
+        out->payload = payload;
+        out->format_version = 1;
     }
     return true;
 }
@@ -954,7 +1008,7 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
             const std::string& term_state = (i < terminal_states.size()) ? terminal_states[i] : "OK";
             const int format_ver = (i < format_versions.size()) ? format_versions[i] : 1;
 
-            if (term_state != "OK" && term_state != "ERROR") {
+            if (term_state != "OK" && term_state != "ERROR" && term_state != "NONTERMINAL_FAILURE") {
                 std::cerr << "build_bin_batch_payload_v2: FATAL: invalid terminal_state='"
                           << term_state << "' in safe mode for req_id="
                           << req_ids[i] << " log_idx=" << raft_log_idx
@@ -1021,7 +1075,13 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
             append_u64_le(out, ts_ms);
             append_u8(out, flags);
             append_u8(out, kHashAlgoId);
-            append_u8(out, (term_state == "ERROR" ? 2u : 1u));
+            uint8_t state_code = 1u;
+            if (term_state == "ERROR") {
+                state_code = 2u;
+            } else if (term_state == "NONTERMINAL_FAILURE") {
+                state_code = 3u;
+            }
+            append_u8(out, state_code);
             append_u32_le(out, static_cast<uint32_t>(format_ver));
             append_u16_le(out, static_cast<uint16_t>(req_ids[i].size()));
             append_u16_le(out, static_cast<uint16_t>(sig.size()));
@@ -1146,6 +1206,15 @@ bool safe_failpoint_matches(const char* name,
         char* end = nullptr;
         const unsigned long long wanted = std::strtoull(log_filter, &end, 10);
         if (end == log_filter || *end != '\0' || wanted != raft_log_idx) {
+            return false;
+        }
+    }
+
+    const char* min_log_filter = std::getenv("ARIABC_FAILPOINT_MIN_RAFT_LOG_INDEX");
+    if (min_log_filter && min_log_filter[0] != '\0') {
+        char* end = nullptr;
+        const unsigned long long wanted = std::strtoull(min_log_filter, &end, 10);
+        if (end == min_log_filter || *end != '\0' || wanted == 0ULL || raft_log_idx < wanted) {
             return false;
         }
     }
@@ -1374,6 +1443,161 @@ bool pg_executor::ensure_safe_ledger_terminal(PGconn* c,
     return true;
 }
 
+bool pg_executor::ensure_safe_nonterminal_failure(const pg_executor::task& t,
+                                                  const pg_executor::ConfirmedResult& confirmed) {
+    if (db_opt_.raft_apply_ledger_mode != "safe" || t.raft_log_idx == 0) {
+        return true;
+    }
+    if (db_opt_.raft_epoch_hex.size() != 64 ||
+        confirmed.terminal_digest.size() != 64 ||
+        confirmed.terminal_state != "NONTERMINAL_FAILURE" ||
+        confirmed.failure_sqlstate.size() != 5 ||
+        confirmed.failure_class.empty() ||
+        confirmed.format_version != 1 ||
+        confirmed.raft_log_index != t.raft_log_idx ||
+        confirmed.raft_item_ordinal != t.raft_item_ordinal) {
+        std::cerr << "SAFE_LEDGER_NONTERMINAL_VERIFY_FAILED"
+                  << " log=" << t.raft_log_idx
+                  << " ord=" << t.raft_item_ordinal
+                  << " reason=invalid_failure_metadata"
+                  << std::endl;
+        return false;
+    }
+
+    PGconn* fresh = PQconnectdb(conninfo_.c_str());
+    if (!fresh || PQstatus(fresh) != CONNECTION_OK) {
+        std::cerr << "SAFE_LEDGER_NONTERMINAL_VERIFY_FAILED"
+                  << " log=" << t.raft_log_idx
+                  << " ord=" << t.raft_item_ordinal
+                  << " reason=fresh_connect_failed"
+                  << " pgerror=" << (fresh ? PQerrorMessage(fresh) : "PQconnectdb returned null")
+                  << std::endl;
+        if (fresh) PQfinish(fresh);
+        return false;
+    }
+
+    const std::string log_s = std::to_string(confirmed.raft_log_index);
+    const std::string ord_s = std::to_string(confirmed.raft_item_ordinal);
+    const char* params[3] = {
+        db_opt_.raft_epoch_hex.c_str(),
+        log_s.c_str(),
+        ord_s.c_str()
+    };
+    PGresult* sel = PQexecParams(
+        fresh,
+        "SELECT state,"
+        "       encode(failure_digest, 'hex'),"
+        "       failure_sqlstate,"
+        "       failure_class,"
+        "       failure_retryable,"
+        "       failure_format_version,"
+        "       failure_recorded_at IS NOT NULL,"
+        "       sqlstate_code IS NULL,"
+        "       terminal_digest IS NULL,"
+        "       result_payload IS NULL,"
+        "       error_payload IS NULL,"
+        "       committed_at IS NULL,"
+        "       result_format_version IS NULL,"
+        "       error_format_version IS NULL"
+        "  FROM ariabc_internal.raft_apply_item"
+        " WHERE epoch_id = decode($1, 'hex')"
+        "   AND raft_log_index = $2::bigint"
+        "   AND item_ordinal = $3::integer",
+        3,
+        nullptr,
+        params,
+        nullptr,
+        nullptr,
+        0);
+    if (!sel || PQresultStatus(sel) != PGRES_TUPLES_OK || PQntuples(sel) != 1) {
+        std::cerr << "SAFE_LEDGER_NONTERMINAL_VERIFY_FAILED"
+                  << " log=" << t.raft_log_idx
+                  << " ord=" << t.raft_item_ordinal
+                  << " reason=select_failed"
+                  << " pgerror=" << (sel ? PQresultErrorMessage(sel) : PQerrorMessage(fresh))
+                  << std::endl;
+        if (sel) PQclear(sel);
+        PQfinish(fresh);
+        return false;
+    }
+
+    const int state = std::atoi(PQgetvalue(sel, 0, 0));
+    const std::string digest = PQgetisnull(sel, 0, 1) ? "" : PQgetvalue(sel, 0, 1);
+    const std::string sqlstate = PQgetisnull(sel, 0, 2) ? "" : PQgetvalue(sel, 0, 2);
+    const std::string failure_class = PQgetisnull(sel, 0, 3) ? "" : PQgetvalue(sel, 0, 3);
+    const bool retryable = !PQgetisnull(sel, 0, 4) && PQgetvalue(sel, 0, 4)[0] == 't';
+    const int fmtver = PQgetisnull(sel, 0, 5) ? 0 : std::atoi(PQgetvalue(sel, 0, 5));
+    const bool recorded = !PQgetisnull(sel, 0, 6) && PQgetvalue(sel, 0, 6)[0] == 't';
+    const bool sqlstate_code_null = !PQgetisnull(sel, 0, 7) && PQgetvalue(sel, 0, 7)[0] == 't';
+    const bool terminal_null = !PQgetisnull(sel, 0, 8) && PQgetvalue(sel, 0, 8)[0] == 't';
+    const bool result_null = !PQgetisnull(sel, 0, 9) && PQgetvalue(sel, 0, 9)[0] == 't';
+    const bool error_null = !PQgetisnull(sel, 0, 10) && PQgetvalue(sel, 0, 10)[0] == 't';
+    const bool committed_null = !PQgetisnull(sel, 0, 11) && PQgetvalue(sel, 0, 11)[0] == 't';
+    const bool result_fmt_null = !PQgetisnull(sel, 0, 12) && PQgetvalue(sel, 0, 12)[0] == 't';
+    const bool error_fmt_null = !PQgetisnull(sel, 0, 13) && PQgetvalue(sel, 0, 13)[0] == 't';
+    PQclear(sel);
+    PQfinish(fresh);
+
+    if (state != 4 ||
+        digest != confirmed.terminal_digest ||
+        sqlstate != confirmed.failure_sqlstate ||
+        failure_class != confirmed.failure_class ||
+        retryable != confirmed.failure_retryable ||
+        fmtver != 1 ||
+        !recorded ||
+        !sqlstate_code_null ||
+        !terminal_null ||
+        !result_null ||
+        !error_null ||
+        !committed_null ||
+        !result_fmt_null ||
+        !error_fmt_null) {
+        std::cerr << "SAFE_LEDGER_NONTERMINAL_VERIFY_FAILED"
+                  << " log=" << t.raft_log_idx
+                  << " ord=" << t.raft_item_ordinal
+                  << " reason=nonmatching_state4"
+                  << " state=" << state
+                  << " sqlstate=" << sqlstate
+                  << " failure_class=" << failure_class
+                  << std::endl;
+        return false;
+    }
+
+    std::cerr << "SAFE_VERIFY_NONTERMINAL_FAILURE"
+              << " epoch=" << db_opt_.raft_epoch_hex
+              << " log=" << t.raft_log_idx
+              << " ord=" << t.raft_item_ordinal
+              << " sqlstate=" << sqlstate
+              << " failure_digest=" << digest
+              << std::endl;
+    std::cerr << "SAFE_VERIFY_NONTERMINAL_FAILURE_FRESH_CONN"
+              << " log=" << t.raft_log_idx
+              << " ord=" << t.raft_item_ordinal
+              << " sqlstate=" << sqlstate
+              << " failure_class=" << failure_class
+              << " retryable=" << (retryable ? 1 : 0)
+              << " sqlstate_code_null=" << (sqlstate_code_null ? 1 : 0)
+              << std::endl;
+    return true;
+}
+
+bool pg_executor::ensure_safe_outcome(PGconn* c,
+                                      const pg_executor::task& t,
+                                      const pg_executor::ConfirmedResult& confirmed) {
+    if (confirmed.terminal_state == "OK" || confirmed.terminal_state == "ERROR") {
+        return ensure_safe_ledger_terminal(c, t, confirmed);
+    }
+    if (confirmed.terminal_state == "NONTERMINAL_FAILURE") {
+        return ensure_safe_nonterminal_failure(t, confirmed);
+    }
+    std::cerr << "SAFE_LEDGER_DURABLE_VERIFY_FAILED"
+              << " log=" << t.raft_log_idx
+              << " ord=" << t.raft_item_ordinal
+              << " reason=unknown_outcome_state"
+              << std::endl;
+    return false;
+}
+
 namespace {
 
 bool safe_external_probe_enabled() {
@@ -1483,6 +1707,110 @@ void probe_safe_ledger_terminal_visibility(PGconn* submit_conn,
               << std::endl;
 
     if (fresh) PQfinish(fresh);
+}
+
+void probe_safe_ledger_nonterminal_failure_visibility(PGconn* submit_conn,
+                                                       const std::string& conninfo,
+                                                       const std::string& epoch_hex,
+                                                       const pg_executor::task& t,
+                                                       const pg_executor::ConfirmedResult& confirmed) {
+    if (!safe_external_probe_enabled()) return;
+
+    log_safe_verify_submit_conn(submit_conn, t.raft_log_idx, t.raft_item_ordinal);
+
+    std::string probe_conninfo = conninfo;
+    if (probe_conninfo.find("application_name=") == std::string::npos) {
+        probe_conninfo += " application_name=ariabc_safe_external_probe";
+    }
+
+    PGconn* fresh = PQconnectdb(probe_conninfo.c_str());
+    int pq_status = fresh ? static_cast<int>(PQstatus(fresh)) : -1;
+    int tx_status = fresh ? static_cast<int>(PQtransactionStatus(fresh)) : -1;
+    int backend_pid = fresh ? PQbackendPID(fresh) : -1;
+    int observed_state = -1;
+    int digest_present = 0;
+    int committed = 0;
+    int sqlstate_null = 0;
+    bool query_ok = false;
+    std::string error_detail;
+
+    if (fresh && PQstatus(fresh) == CONNECTION_OK &&
+        PQtransactionStatus(fresh) == PQTRANS_IDLE) {
+        const std::string log_s = std::to_string(t.raft_log_idx);
+        const std::string ord_s = std::to_string(t.raft_item_ordinal);
+        const char* params[3] = {
+            epoch_hex.c_str(),
+            log_s.c_str(),
+            ord_s.c_str()
+        };
+        PGresult* sel = PQexecParams(
+            fresh,
+            "SELECT state, encode(failure_digest, 'hex'), committed_at IS NOT NULL, sqlstate_code IS NULL"
+            "  FROM ariabc_internal.raft_apply_item"
+            " WHERE epoch_id = decode($1, 'hex')"
+            "   AND raft_log_index = $2::bigint"
+            "   AND item_ordinal = $3::integer",
+            3,
+            nullptr,
+            params,
+            nullptr,
+            nullptr,
+            0);
+
+        if (sel && PQresultStatus(sel) == PGRES_TUPLES_OK && PQntuples(sel) == 1) {
+            query_ok = true;
+            if (!PQgetisnull(sel, 0, 0)) {
+                observed_state = std::atoi(PQgetvalue(sel, 0, 0));
+            }
+            digest_present = !PQgetisnull(sel, 0, 1) && PQgetvalue(sel, 0, 1)[0] != '\0';
+            committed = (!PQgetisnull(sel, 0, 2) && PQgetvalue(sel, 0, 2)[0] == 't') ? 1 : 0;
+            sqlstate_null = (!PQgetisnull(sel, 0, 3) && PQgetvalue(sel, 0, 3)[0] == 't') ? 1 : 0;
+        } else {
+            error_detail = sel ? PQresultErrorMessage(sel) : PQerrorMessage(fresh);
+        }
+        if (sel) PQclear(sel);
+    } else {
+        error_detail = fresh ? PQerrorMessage(fresh) : "PQconnectdb returned null";
+    }
+
+    if (!query_ok) {
+        std::cerr << "SAFE_VERIFY_NONTERMINAL_FAILURE_FRESH_CONN_ERROR"
+                  << " log=" << t.raft_log_idx
+                  << " ord=" << t.raft_item_ordinal
+                  << " pq_status=" << pq_status
+                  << " tx_status=" << tx_status
+                  << " backend_pid=" << backend_pid
+                  << " error=" << trim_copy(error_detail)
+                  << std::endl;
+    }
+
+    std::cerr << "SAFE_VERIFY_NONTERMINAL_FAILURE_FRESH_CONN"
+              << " log=" << t.raft_log_idx
+              << " ord=" << t.raft_item_ordinal
+              << " pq_status=" << pq_status
+              << " tx_status=" << tx_status
+              << " backend_pid=" << backend_pid
+              << " state=" << observed_state
+              << " digest_present=" << digest_present
+              << " committed=" << committed
+              << " sqlstate_null=" << sqlstate_null
+              << " failure_class=" << confirmed.failure_class
+              << " sqlstate=" << confirmed.failure_sqlstate
+              << std::endl;
+
+    if (fresh) PQfinish(fresh);
+}
+
+void probe_safe_ledger_outcome_visibility(PGconn* submit_conn,
+                                          const std::string& conninfo,
+                                          const std::string& epoch_hex,
+                                          const pg_executor::task& t,
+                                          const pg_executor::ConfirmedResult& confirmed) {
+    if (confirmed.terminal_state == "NONTERMINAL_FAILURE") {
+        probe_safe_ledger_nonterminal_failure_visibility(submit_conn, conninfo, epoch_hex, t, confirmed);
+        return;
+    }
+    probe_safe_ledger_terminal_visibility(submit_conn, conninfo, epoch_hex, t);
 }
 
 } // namespace
@@ -1599,7 +1927,7 @@ bool pg_executor::initialize_bcdb() {
             schema_version = std::stoi(PQgetvalue(res, 0, 0));
             PQclear(res);
         }
-        if (schema_version != 1) {
+        if (schema_version != 2) {
             std::cerr << "Safe mode validation failed: unsupported schema version " << schema_version << std::endl;
             PQfinish(c);
             bcdb_init_failed_ = true;
@@ -3266,11 +3594,12 @@ void pg_executor::worker_loop() {
                           << std::endl;
             }
         }
-        const bool durable_ok = ensure_safe_ledger_terminal(c, t, confirmed);
-        probe_safe_ledger_terminal_visibility(c,
-                                              conninfo_,
-                                              db_opt_.raft_epoch_hex,
-                                              t);
+        const bool durable_ok = ensure_safe_outcome(c, t, confirmed);
+        probe_safe_ledger_outcome_visibility(c,
+                                             conninfo_,
+                                             db_opt_.raft_epoch_hex,
+                                             t,
+                                             confirmed);
         if (!durable_ok) {
             notify_task_failed(t.raft_log_idx,
                                t.raft_item_ordinal,
@@ -3782,11 +4111,12 @@ void pg_executor::event_loop() {
                                "safe_protocol_failure_retryable");
             return;
         }
-        const bool durable_ok = ensure_safe_ledger_terminal(durable_conn, done_task, conf);
-        probe_safe_ledger_terminal_visibility(durable_conn,
-                                              conninfo_,
-                                              db_opt_.raft_epoch_hex,
-                                              done_task);
+        const bool durable_ok = ensure_safe_outcome(durable_conn, done_task, conf);
+        probe_safe_ledger_outcome_visibility(durable_conn,
+                                             conninfo_,
+                                             db_opt_.raft_epoch_hex,
+                                             done_task,
+                                             conf);
         if (!durable_ok) {
             notify_task_failed(done_task.raft_log_idx,
                                done_task.raft_item_ordinal,
@@ -4628,11 +4958,12 @@ void pg_executor::event_loop() {
                             ConfirmedResult conf = accept_safe_confirmed_result(ready.tasks[i], ready.results[i]);
                             bool durable_ok = false;
                             if (conf.raft_log_index != static_cast<uint64_t>(-1)) {
-                                durable_ok = ensure_safe_ledger_terminal(cs.c, ready.tasks[i], conf);
-                                probe_safe_ledger_terminal_visibility(cs.c,
-                                                                      conninfo_,
-                                                                      db_opt_.raft_epoch_hex,
-                                                                      ready.tasks[i]);
+                                durable_ok = ensure_safe_outcome(cs.c, ready.tasks[i], conf);
+                                probe_safe_ledger_outcome_visibility(cs.c,
+                                                                     conninfo_,
+                                                                     db_opt_.raft_epoch_hex,
+                                                                     ready.tasks[i],
+                                                                     conf);
                             }
                             if (conf.raft_log_index == static_cast<uint64_t>(-1) ||
                                 !durable_ok) {

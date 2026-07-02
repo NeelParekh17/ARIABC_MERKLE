@@ -897,6 +897,14 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 			else
 			{
 				int will_retry = 0;
+				const char *message = (edata->message != NULL) ? edata->message : "<no message>";
+
+				elog(LOG,
+					 "SAFE_NONDETERMINISTIC_SQL_ERROR log=%llu ord=%u sqlstate=%s message=%s",
+					 (unsigned long long) (tx ? tx->raft_log_index : 0),
+					 (unsigned) (tx ? tx->raft_item_ordinal : 0),
+					 caught_sqlstate[0] ? caught_sqlstate : "XXXXX",
+					 message);
 				bcdb_emit_apply_attempt_end(
 					(unsigned long long) (tx ? tx->raft_log_index : 0),
 					tx ? (unsigned) tx->raft_item_ordinal : 0,
@@ -2426,6 +2434,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	bool apply_idempotent_noop = false;
     bool published_max_advanced = false;
     bool parse_barrier_done = false;
+	bool in_business_sql_execution = false;
     BCTxID retry_wait_committed_txid = -1;
 	bcdb_apply_outcome apply_outcome = BCDB_OUTCOME_OK;
 	char det_err_sqlstate[6] = "XX000";
@@ -2639,6 +2648,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 					char *err_payload = NULL;
 					int err_fmtver = 1;
 					char *sqlstate_claim = NULL;
+					BCDBNonterminalFailure replay_failure;
 
 					if (tx->raft_ledger_enabled)
 					{
@@ -2650,7 +2660,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 						claim_res = bcdb_raft_ledger_claim(tx,
 															&res_payload, &res_fmtver,
 															&err_payload, &err_fmtver,
-															&sqlstate_claim);
+															&sqlstate_claim,
+															&replay_failure);
 
 						elog(LOG, "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=after_claim result=%d",
 								MyProcPid, (int) tx->tx_id,
@@ -2713,6 +2724,44 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 							PTRACE_END(BCDB_PHASE_TOTAL);
 							return;
 						}
+						else if (claim_res == RAFT_CLAIM_REPLAY_NONTERMINAL_FAILURE)
+						{
+							TransactionId replay_xid;
+
+							if (activeTx->portal != NULL)
+							{
+								PortalDrop(activeTx->portal, false);
+								activeTx->portal = NULL;
+							}
+
+							replay_xid = GetCurrentTransactionId();
+							elog(LOG,
+								 "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=replay_nonterminal_finish_xact xid=%u",
+								 MyProcPid, (int) tx->tx_id,
+								 (unsigned long long) tx->raft_log_index,
+								 (unsigned) tx->raft_item_ordinal,
+								 (unsigned) replay_xid);
+							finish_xact_command();
+							elog(LOG,
+								 "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=replay_nonterminal_publish xid=%u",
+								 MyProcPid, (int) tx->tx_id,
+								 (unsigned long long) tx->raft_log_index,
+								 (unsigned) tx->raft_item_ordinal,
+								 (unsigned) replay_xid);
+							bcdb_complete_nonterminal_failure_item(tx, &replay_failure, true);
+							elog(LOG,
+								 "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=replay_nonterminal_cleanup xid=%u",
+								 MyProcPid, (int) tx->tx_id,
+								 (unsigned long long) tx->raft_log_index,
+								 (unsigned) tx->raft_item_ordinal,
+								 (unsigned) replay_xid);
+							bcdb_cleanup_optim_write_list(activeTx, true);
+							delete_tx(tx);
+							MemoryContextReset(bcdb_tx_context);
+							PTRACE_END(BCDB_PHASE_PARSE_PLAN);
+							PTRACE_END(BCDB_PHASE_TOTAL);
+							return;
+						}
 					}
 				}
 
@@ -2724,6 +2773,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				bcdb_emit_ledger_boundary("ledger_business_sql");
 
 				/* Run business SQL in a subtransaction if ledger is enabled to catch deterministic errors */
+				in_business_sql_execution = true;
 				if (tx->raft_ledger_enabled)
 				{
 					MemoryContext old_context = CurrentMemoryContext;
@@ -2776,8 +2826,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 						}
 						else
 						{
-							FreeErrorData(edata);
-							PG_RE_THROW();
+							ReThrowError(edata);
 						}
 					}
 					PG_END_TRY();
@@ -2787,6 +2836,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 					get_write_set(tx, snapshot);
 					bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
 				}
+				in_business_sql_execution = false;
 
                 PTRACE_END(BCDB_PHASE_PARSE_PLAN);
 #if SAFEDBG1
@@ -3263,21 +3313,23 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
 			if (do_postcommit_witness)
 			{
-				(void) bcdb_safe_postcommit_witness(postcommit_epoch_id,
-													postcommit_log_index,
-													postcommit_item_ordinal,
-													postcommit_digest,
-													postcommit_state,
-													postcommit_fmtver);
+				if (!bcdb_safe_postcommit_witness(postcommit_epoch_id,
+												  postcommit_log_index,
+												  postcommit_item_ordinal,
+												  postcommit_digest,
+												  postcommit_state,
+												  postcommit_fmtver))
+				{
+					elog(FATAL,
+						 "SAFE_POSTCOMMIT_WITNESS_FATAL log=%llu ord=%u",
+						 (unsigned long long) postcommit_log_index,
+						 (unsigned) postcommit_item_ordinal);
+				}
 			}
 
 			if (tx->raft_ledger_enabled)
 			{
 				EMIT_SAFE_LEDGER_XACT(tx, "worker_finish_xact_after");
-				bcdb_maybe_trigger_safe_failpoint(
-					"ARIABC_FAILPOINT_AFTER_WORKER_TOPLEVEL_COMMIT_BEFORE_RESULT_RING",
-					tx,
-					"after_worker_toplevel_commit_before_result_ring");
             }
 
 			bcdb_finish_terminal_item(tx, block->result[mem_txid],
@@ -3369,32 +3421,55 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
          * a transaction in error state, causing cascading warnings.
          * After PG_RE_THROW(), PostgresMain's sigsetjmp handler will call
          * AbortCurrentTransaction() which properly cleans up all resources. */
-        if (condSig == 0 && tx != NULL)
-        {
-            /*
-             * Block-submit callers wait on result_committed_txid[slot],
-             * not just the contiguous watermark.  Publish a canonical
-             * error result before advancing; otherwise one failed worker
-             * can leave bcdb_block_submit_results() asleep forever.
-             */
-			if (tx->raft_ledger_enabled)
-            {
-				ereport(LOG,
-						(errmsg("[BCDB_FATAL] safe ledger infrastructure "
-								"failure left tx retryable without terminal "
-								"envelope txid=%d raft_log=%llu ordinal=%u "
-								"sqlstate=%s",
-								(int) tx->tx_id,
-								(unsigned long long) tx->raft_log_index,
-								(unsigned) tx->raft_item_ordinal,
-								sqlstate)));
-            }
+		bool ledger_enabled = (tx != NULL && tx->raft_ledger_enabled);
+		bool handled_ledger_nonterminal_failure = false;
 
-			if (tx->raft_ledger_enabled)
-            {
-				BCBlock *error_block = get_block_by_id(1, false);
+		if (condSig == 0 && tx != NULL)
+		{
+			/*
+			 * Block-submit callers wait on result_committed_txid[slot],
+			 * not just the contiguous watermark.  Publish a canonical
+			 * error result before advancing; otherwise one failed worker
+			 * can leave bcdb_block_submit_results() asleep forever.
+			 */
+			if (ledger_enabled && in_business_sql_execution)
+			{
+				if (strcmp(sqlstate, "22012") == 0)
+				{
+					BCDBNonterminalFailure expected_failure;
+					BCDBNonterminalFailure stored_failure;
 
-				bcdb_publish_error_result(error_block, tx, sqlstate);
+					AbortCurrentTransaction();
+					reset_xact_command();
+					start_xact_command();
+
+					bcdb_prepare_nonterminal_failure(tx,
+													 sqlstate,
+													 "SQL_EXECUTION_ABORTED",
+													 false,
+													 &expected_failure);
+					if (!bcdb_safe_finalize_nonterminal_failure(tx,
+																&expected_failure,
+																&stored_failure))
+					{
+						elog(ERROR,
+							 "raft_apply_ledger: failed to finalize nonterminal failure for log_index=%llu ordinal=%u",
+							 (unsigned long long) tx->raft_log_index,
+							 (unsigned) tx->raft_item_ordinal);
+					}
+					finish_xact_command();
+
+					bcdb_complete_nonterminal_failure_item(tx, &stored_failure, false);
+					handled_ledger_nonterminal_failure = true;
+				}
+				else
+				{
+					elog(LOG,
+						 "SAFE_NONTERMINAL_FAILURE_UNSUPPORTED log=%llu ord=%u sqlstate=%s",
+						 (unsigned long long) tx->raft_log_index,
+						 (unsigned) tx->raft_item_ordinal,
+						 sqlstate);
+				}
 			}
 			else
 			{
@@ -3403,7 +3478,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				bcdb_publish_error_result(block, tx, sqlstate);
 				if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
 					!published_max_advanced)
-                {
+				{
 					mark_published_ready_txid(tx);
 					published_max_advanced = true;
 				}
@@ -3420,7 +3495,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 					BCBlock *committed_block = get_block_by_id(tx->block_id_committed, false);
 
 					if (committed_block != NULL)
-                    {
+					{
 						int32 num_finished = __sync_add_and_fetch(&committed_block->num_finished, 1);
 
 						if (num_finished == committed_block->num_tx)
@@ -3430,28 +3505,46 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 							ConditionVariableBroadcast(&block_meta->conds[global_bmin % NUM_BMIN_COND]);
 							block_cleaning_dt(committed_block->id);
 						}
-                    }
-                }
-            }
-            condSig = 1;
-        }
-        /* Let AbortCurrentTransaction() perform portal/resource-owner cleanup. */
-        hold_portal_snapshot = false;
-        if (activeTx)
-            activeTx->portal = NULL;
+					}
+				}
+			}
+			if (!ledger_enabled || handled_ledger_nonterminal_failure)
+				condSig = 1;
+		}
+		/* Let AbortCurrentTransaction() perform portal/resource-owner cleanup. */
+		hold_portal_snapshot = false;
+		if (activeTx)
+			activeTx->portal = NULL;
 
-        bcdb_drain_optim_write_list(activeTx);
+		bcdb_drain_optim_write_list(activeTx);
 
-        MemoryContextReset(bcdb_tx_context);
-        delete_tx(tx);
-        activeTx = NULL;
+		if (ledger_enabled && !handled_ledger_nonterminal_failure)
+		{
+			AbortCurrentTransaction();
+			reset_xact_command();
+		}
 
-        if (edata != NULL)
-            ReThrowError(edata);
+		MemoryContextReset(bcdb_tx_context);
+		delete_tx(tx);
+		activeTx = NULL;
 
-		elog(ERROR, "BCDB worker PG_CATCH had no ErrorData");
-    }
-    PG_END_TRY();
+		if (edata != NULL)
+		{
+			if (ledger_enabled && handled_ledger_nonterminal_failure)
+				FreeErrorData(edata);
+			else
+				ReThrowError(edata);
+		}
+		else
+		{
+			if (!ledger_enabled)
+				elog(ERROR, "BCDB worker PG_CATCH had no ErrorData");
+		}
+
+		if (message_copy != NULL)
+			pfree(message_copy);
+	}
+	PG_END_TRY();
 }
 
 void bcdb_worker_process_tx(BCDBShmXact *tx)

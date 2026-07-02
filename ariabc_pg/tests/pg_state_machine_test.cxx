@@ -149,7 +149,7 @@ PGresult* PQexec(PGconn* conn, const char* query) {
     res->status = PGRES_TUPLES_OK;
 
     if (q.find("raft_apply_schema_meta") != std::string::npos) {
-        res->rows.push_back({"1", "1", "1"}); // count = 1, min = 1, max = 1
+        res->rows.push_back({"1", "2", "2"}); // count = 1, min = 2, max = 2
     } else if (q.find("raft_apply_epoch") != std::string::npos) {
         res->rows.push_back({"1"}); // protocol_version = 1
     } else if (q.find("raft_apply_item") != std::string::npos && q.find("state = 1") != std::string::npos) {

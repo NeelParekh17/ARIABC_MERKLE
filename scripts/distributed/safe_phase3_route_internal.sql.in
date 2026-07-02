@@ -1,0 +1,3 @@
+INSERT INTO ariabc_internal.raft_apply_epoch (epoch_id, epoch_label, protocol_version) VALUES (decode('@TEST_EPOCH@', 'hex'), 'phase3_route_internal', 1);
+UPDATE ariabc_internal.raft_apply_epoch SET protocol_version = protocol_version WHERE epoch_id = decode('@TEST_EPOCH@', 'hex');
+DELETE FROM ariabc_internal.raft_apply_epoch WHERE epoch_id = decode('@TEST_EPOCH@', 'hex');
