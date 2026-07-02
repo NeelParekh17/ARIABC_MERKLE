@@ -1,0 +1,1 @@
+UPDATE public.safe_recovery_probe SET n = n + 1, token = '@RECOVERY_TOKEN@' WHERE k = 1;

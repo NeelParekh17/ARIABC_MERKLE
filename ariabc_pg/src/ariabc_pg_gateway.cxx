@@ -934,6 +934,8 @@ bool parse_kafka_payload_records(const std::string& payload,
                 r.terminal_state = "OK";
             } else if (term_state_code == 2) {
                 r.terminal_state = "ERROR";
+            } else if (term_state_code == 3) {
+                r.terminal_state = "NONTERMINAL_FAILURE";
             } else {
                 return false; // unknown terminal-state code
             }
@@ -1471,6 +1473,7 @@ struct vote_entry {
     bool terminal_set = false;
     std::string terminal_result;
     std::string terminal_error;
+    std::string terminal_state;
     bool identity_pinned = false;
     uint64_t pinned_raft_log_idx = 0;
     uint32_t pinned_raft_item_ordinal = 0;
@@ -1823,6 +1826,140 @@ public:
             }
         }
         return out_error.empty();
+    }
+
+    bool get_resolved_nonterminal_failure_details(uint64_t req_num,
+                                                  std::string& out_epoch_hex,
+                                                  uint64_t& out_raft_log_idx,
+                                                  uint32_t& out_raft_item_ordinal,
+                                                  std::string& out_sqlstate,
+                                                  std::string& out_failure_class,
+                                                  int& out_retryable,
+                                                  std::string& out_failure_digest)
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        vote_key key{expected_epoch_hex_, req_num};
+        auto it = m_.find(key);
+        if (it == m_.end()) return false;
+        const vote_entry& e = it->second;
+        if (!e.terminal_set || e.terminal_state != "NONTERMINAL_FAILURE") return false;
+        auto it_maj = e.hash_to_nodes_valid.find(e.majority_hash);
+        if (it_maj == e.hash_to_nodes_valid.end()) return false;
+        for (const auto& kv : e.by_node) {
+            if ((it_maj->second & node_bit(kv.first)) == 0) continue;
+            if (!kv.second.sig_valid) continue;
+            const auto& rec = kv.second.rec;
+            out_epoch_hex = rec.epoch_hex;
+            out_raft_log_idx = rec.raft_log_idx;
+            out_raft_item_ordinal = rec.raft_item_ordinal;
+            out_sqlstate.clear();
+            out_failure_class.clear();
+            out_retryable = 0;
+            out_failure_digest.clear();
+            size_t p = 0;
+            while (p < rec.full_result.size()) {
+                const size_t nl = rec.full_result.find('\n', p);
+                const size_t end = (nl == std::string::npos) ? rec.full_result.size() : nl;
+                if (end > p) {
+                    const std::string line = rec.full_result.substr(p, end - p);
+                    const size_t eq = line.find('=');
+                    if (eq != std::string::npos) {
+                        const std::string key = line.substr(0, eq);
+                        const std::string val = line.substr(eq + 1);
+                        if (key == "sqlstate") out_sqlstate = val;
+                        else if (key == "failure_class") out_failure_class = val;
+                        else if (key == "retryable") out_retryable = (val == "1") ? 1 : 0;
+                        else if (key == "failure_digest") out_failure_digest = val;
+                    }
+                }
+                if (nl == std::string::npos) break;
+                p = nl + 1;
+            }
+            return out_sqlstate.size() == 5 && !out_failure_class.empty() &&
+                   out_failure_digest.size() == 64;
+        }
+        return false;
+    }
+
+    void print_nonterminal_failure_marker(uint64_t req_num) {
+        std::string epoch_hex;
+        uint64_t raft_log_idx = 0;
+        uint32_t raft_item_ordinal = 0;
+        std::string sqlstate;
+        std::string failure_class;
+        int retryable = 0;
+        std::string failure_digest;
+        if (get_resolved_nonterminal_failure_details(req_num, epoch_hex, raft_log_idx, raft_item_ordinal,
+                                                     sqlstate, failure_class, retryable, failure_digest)) {
+            std::cout << "SAFE_GATEWAY_NONTERMINAL_FAILURE"
+                      << " epoch=" << epoch_hex
+                      << " log=" << raft_log_idx
+                      << " ord=" << raft_item_ordinal
+                      << " sqlstate=" << sqlstate
+                      << " failure_class=" << failure_class
+                      << " retryable=" << retryable
+                      << " failure_digest=" << failure_digest
+                      << std::endl;
+        }
+    }
+
+    bool get_resolved_terminal_state(uint64_t req_num, std::string& out_state)
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        vote_key key{expected_epoch_hex_, req_num};
+        auto it = m_.find(key);
+        if (it == m_.end()) return false;
+        const vote_entry& e = it->second;
+        if (!e.terminal_set || !e.terminal_error.empty()) return false;
+        out_state = e.terminal_state;
+        return !out_state.empty();
+    }
+
+    bool get_resolved_deterministic_error_details(uint64_t req_num,
+                                                  std::string& out_epoch_hex,
+                                                  uint64_t& out_raft_log_idx,
+                                                  uint32_t& out_raft_item_ordinal,
+                                                  std::string& out_sqlstate)
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        vote_key key{expected_epoch_hex_, req_num};
+        auto it = m_.find(key);
+        if (it == m_.end()) return false;
+        const vote_entry& e = it->second;
+        if (!e.terminal_set || e.terminal_state != "ERROR") return false;
+        auto it_maj = e.hash_to_nodes_valid.find(e.majority_hash);
+        if (it_maj == e.hash_to_nodes_valid.end()) return false;
+        for (const auto& kv : e.by_node) {
+            if ((it_maj->second & node_bit(kv.first)) == 0) continue;
+            if (!kv.second.sig_valid) continue;
+            const auto& rec = kv.second.rec;
+            out_epoch_hex = rec.epoch_hex;
+            out_raft_log_idx = rec.raft_log_idx;
+            out_raft_item_ordinal = rec.raft_item_ordinal;
+            out_sqlstate = "42P01";
+            size_t pos = rec.full_result.find("SQLSTATE ");
+            if (pos != std::string::npos) {
+                out_sqlstate = rec.full_result.substr(pos + 9, 5);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    void print_deterministic_error_marker(uint64_t req_num) {
+        std::string epoch_hex;
+        uint64_t raft_log_idx = 0;
+        uint32_t raft_item_ordinal = 0;
+        std::string sqlstate;
+        if (get_resolved_deterministic_error_details(req_num, epoch_hex, raft_log_idx, raft_item_ordinal, sqlstate)) {
+            std::cout << "SAFE_GATEWAY_DETERMINISTIC_ERROR"
+                      << " epoch=" << epoch_hex
+                      << " log=" << raft_log_idx
+                      << " ord=" << raft_item_ordinal
+                      << " sqlstate=" << sqlstate
+                      << " result_kind=deterministic_error"
+                      << std::endl;
+        }
     }
 
     // Wait until any req_id in `inflight` reaches majority, remove it from
@@ -2480,10 +2617,40 @@ private:
                  * already covers that digest and whether full_result is
                  * present, so returning this majority payload is valid.
                  */
+                // Cross-check all nodes in the majority to ensure they agree on terminal_state and full_result
+                std::string first_state;
+                std::string first_full;
+                bool mismatch = false;
+                for (const auto& kv2 : e.by_node) {
+                    if ((it_maj->second & node_bit(kv2.first)) == 0) continue;
+                    if (!kv2.second.sig_valid) continue;
+                    if (kv2.second.rec.result_hash != e.majority_hash) continue;
+                    if (first_state.empty()) {
+                        first_state = kv2.second.rec.terminal_state;
+                    } else if (first_state != kv2.second.rec.terminal_state) {
+                        mismatch = true;
+                    }
+                    if (kv2.second.rec.has_full_result) {
+                        if (first_full.empty()) {
+                            first_full = kv2.second.rec.full_result;
+                        } else if (first_full != kv2.second.rec.full_result) {
+                            mismatch = true;
+                        }
+                    }
+                }
+                if (mismatch) {
+                    out_error = "majority_mismatch";
+                    e.terminal_set = true;
+                    e.terminal_result.clear();
+                    e.terminal_error = out_error;
+                    e.terminal_state.clear();
+                    return true;
+                }
                 out_result = obs.rec.full_result;
                 e.terminal_set = true;
                 e.terminal_result = out_result;
                 e.terminal_error.clear();
+                e.terminal_state = obs.rec.terminal_state;
                 return true;
             }
             const std::string full_hash = canonical_result_hash(obs.rec.full_result);
@@ -2492,6 +2659,7 @@ private:
             e.terminal_set = true;
             e.terminal_result = out_result;
             e.terminal_error.clear();
+            e.terminal_state = obs.rec.terminal_state;
             return true;
         }
 
@@ -2500,6 +2668,7 @@ private:
         out_error = "majority_full_result_missing";
         e.terminal_set = true;
         e.terminal_error = out_error;
+        e.terminal_state.clear();
         return true;
     }
 
@@ -3843,6 +4012,14 @@ int main(int argc, char** argv) {
         });
     }
 
+    enum class ResolvedOutcome
+    {
+        Ok,
+        DeterministicError,
+        NonterminalFailure,
+        ProtocolFailure,
+    };
+
     std::atomic<size_t> rr_idx(0);
     std::atomic<uint64_t> req_seq(0);
     std::atomic<uint64_t> det_seq(opt.det_start_seq);
@@ -3859,11 +4036,16 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> strict_all_nodes_failures(0);
     std::atomic<uint64_t> strict_all_nodes_wait_ns(0);
     std::atomic<uint64_t> client_quorum_complete_count(0);
+    std::atomic<uint64_t> success_count(0);
+    std::atomic<uint64_t> deterministic_error_count(0);
+    std::atomic<uint64_t> nonterminal_failure_count(0);
     std::atomic<uint64_t> async_all3_verified_count(0);
     std::atomic<uint64_t> async_all3_failure_count(0);
     std::atomic<uint64_t> async_all3_timeout_count(0);
     std::atomic<uint64_t> async_all3_missing_count(0);
     std::atomic<uint64_t> async_all3_audit_drain_ns(0);
+    std::mutex resolved_outcome_mu;
+    std::unordered_map<uint64_t, ResolvedOutcome> resolved_outcome_accounting;
     std::atomic<uint64_t> det_total_outstanding_max(0);
     std::atomic<uint64_t> det_lane_outstanding_max(0);
 
@@ -3962,6 +4144,61 @@ int main(int argc, char** argv) {
         }
     };
 
+    auto get_resolved_outcome = [&](uint64_t req_num) -> ResolvedOutcome {
+        std::string state;
+        if (!votes.get_resolved_terminal_state(req_num, state)) {
+            return ResolvedOutcome::ProtocolFailure;
+        }
+        if (state == "NONTERMINAL_FAILURE") {
+            return ResolvedOutcome::NonterminalFailure;
+        } else if (state == "ERROR") {
+            return ResolvedOutcome::DeterministicError;
+        } else if (state == "OK") {
+            return ResolvedOutcome::Ok;
+        }
+        return ResolvedOutcome::ProtocolFailure;
+    };
+
+    auto record_resolved_outcome_once = [&](uint64_t req_num, ResolvedOutcome outcome) -> bool {
+        std::lock_guard<std::mutex> lk(resolved_outcome_mu);
+        std::unordered_map<uint64_t, ResolvedOutcome>::iterator it = resolved_outcome_accounting.find(req_num);
+        if (it != resolved_outcome_accounting.end()) {
+            if (it->second != outcome) {
+                std::cerr << "resolved outcome mismatch for req_num=" << req_num
+                          << " existing=" << static_cast<int>(it->second)
+                          << " new=" << static_cast<int>(outcome) << std::endl;
+                {
+                    std::lock_guard<std::mutex> fatal_lk(fatal_gateway_error_mu);
+                    if (!fatal_gateway_error.load(std::memory_order_relaxed)) {
+                        permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                        fatal_gateway_error_message =
+                            "resolved outcome mismatch for req_num=" + std::to_string(req_num);
+                    }
+                    fatal_gateway_error.store(true, std::memory_order_release);
+                }
+                return false;
+            }
+            return false;
+        }
+        resolved_outcome_accounting.insert(std::make_pair(req_num, outcome));
+        client_quorum_complete_count.fetch_add(1, std::memory_order_relaxed);
+        switch (outcome) {
+            case ResolvedOutcome::Ok:
+                success_count.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case ResolvedOutcome::DeterministicError:
+                deterministic_error_count.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case ResolvedOutcome::NonterminalFailure:
+                nonterminal_failure_count.fetch_add(1, std::memory_order_relaxed);
+                break;
+            case ResolvedOutcome::ProtocolFailure:
+                permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                break;
+        }
+        return true;
+    };
+
     auto wait_majority = [&](uint64_t req_num, std::string& out_majority) -> bool {
         out_majority.clear();
         if (!majority_wait_enabled) return true;
@@ -3972,6 +4209,12 @@ int main(int argc, char** argv) {
             bump_terminal_reason(wait_err);
             std::cerr << "majority wait failed for req_num=" << req_num << " err=" << wait_err << std::endl;
             emit_recovery_event(req_num, wait_err);
+            return false;
+        }
+        votes.print_nonterminal_failure_marker(req_num);
+        votes.print_deterministic_error_marker(req_num);
+        if (!record_resolved_outcome_once(req_num, get_resolved_outcome(req_num)) &&
+            fatal_gateway_error.load(std::memory_order_acquire)) {
             return false;
         }
         return true;
@@ -4736,8 +4979,13 @@ int main(int argc, char** argv) {
                         permanent_failures.fetch_add(1);
                         return false;
                     }
+                    votes.print_nonterminal_failure_marker(rid);
+                    votes.print_deterministic_error_marker(rid);
+                    if (!record_resolved_outcome_once(rid, get_resolved_outcome(rid)) &&
+                        fatal_gateway_error.load(std::memory_order_acquire)) {
+                        return false;
+                    }
                     if (majority_async_all3_validation) {
-                        client_quorum_complete_count.fetch_add(1, std::memory_order_relaxed);
                         record_async_all3_pending(rid);
                     }
                     if (!wait_strict_all_nodes_for_req(rid)) {
@@ -5366,8 +5614,14 @@ int main(int argc, char** argv) {
                         failed = true;
                         break;
                     }
+                    votes.print_nonterminal_failure_marker(rid);
+                    votes.print_deterministic_error_marker(rid);
+                    if (!record_resolved_outcome_once(rid, get_resolved_outcome(rid)) &&
+                        fatal_gateway_error.load(std::memory_order_acquire)) {
+                        failed = true;
+                        break;
+                    }
                     if (majority_async_all3_validation) {
-                        client_quorum_complete_count.fetch_add(1, std::memory_order_relaxed);
                         record_async_all3_pending(rid);
                     }
                     if (!wait_strict_all_nodes_for_req(rid)) {
@@ -5632,6 +5886,12 @@ int main(int argc, char** argv) {
         std::cout << "duplicate_key_errors=" << duplicate_key_errors.load() << std::endl;
         std::cout << "divergence_count=" << divergence_count.load() << std::endl;
         std::cout << "permanent_failures=" << permanent_failures.load() << std::endl;
+        std::cout << "client_quorum_complete_count=" << client_quorum_complete_count.load(std::memory_order_relaxed)
+                  << " success_count=" << success_count.load(std::memory_order_relaxed)
+                  << " deterministic_error_count=" << deterministic_error_count.load(std::memory_order_relaxed)
+                  << " nonterminal_failure_count=" << nonterminal_failure_count.load(std::memory_order_relaxed)
+                  << " permanent_failures=" << permanent_failures.load(std::memory_order_relaxed)
+                  << std::endl;
         if (majority_async_all3_validation) {
             std::cout << "majority_async_all3 client_quorum_complete_count="
                       << client_quorum_complete_count.load(std::memory_order_relaxed)
@@ -5784,6 +6044,10 @@ int main(int argc, char** argv) {
             << " strict_all_nodes_failures=" << strict_all_nodes_failures.load(std::memory_order_relaxed)
             << " strict_all_nodes_wait_ms=" << (strict_all_nodes_wait_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " client_quorum_complete_count=" << client_quorum_complete_count.load(std::memory_order_relaxed)
+            << " success_count=" << success_count.load(std::memory_order_relaxed)
+            << " deterministic_error_count=" << deterministic_error_count.load(std::memory_order_relaxed)
+            << " nonterminal_failure_count=" << nonterminal_failure_count.load(std::memory_order_relaxed)
+            << " permanent_failures=" << permanent_failures.load(std::memory_order_relaxed)
             << " async_all3_verified_count=" << async_all3_verified_count.load(std::memory_order_relaxed)
             << " async_all3_failure_count=" << async_all3_failure_count.load(std::memory_order_relaxed)
             << " async_all3_timeout_count=" << async_all3_timeout_count.load(std::memory_order_relaxed)

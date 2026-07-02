@@ -228,6 +228,9 @@ public:
         uint32_t raft_item_ordinal = 0;
         std::string terminal_digest;
         std::string terminal_state;
+        std::string failure_sqlstate;
+        std::string failure_class;
+        bool failure_retryable = false;
         std::string payload;
         int format_version = 1;
     };
@@ -295,6 +298,8 @@ private:
     void notify_task_failed(uint64_t raft_log_idx, uint32_t item_ordinal, const std::string& reason);
     void mark_task_applied_ordered(uint64_t dispatch_seq, uint64_t raft_log_idx, uint32_t item_ordinal, uint64_t ready_ns);
     bool ensure_safe_ledger_terminal(PGconn* c, const task& t, const ConfirmedResult& confirmed);
+    bool ensure_safe_nonterminal_failure(const task& t, const ConfirmedResult& confirmed);
+    bool ensure_safe_outcome(PGconn* c, const task& t, const ConfirmedResult& confirmed);
 
     void record_det_block_batch(size_t size, bool fallback);
     bool wait_for_ordered_emit_turn(uint64_t dispatch_seq);
