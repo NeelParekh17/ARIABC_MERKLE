@@ -43,6 +43,11 @@ PG_FUNCTION_INFO_V1(merkle_root_hash);
 PG_FUNCTION_INFO_V1(merkle_tree_stats);
 PG_FUNCTION_INFO_V1(merkle_node_hash);
 PG_FUNCTION_INFO_V1(merkle_leaf_tuples);
+PG_FUNCTION_INFO_V1(merkle_bucket_for_key);
+PG_FUNCTION_INFO_V1(merkle_get_node_hash);
+PG_FUNCTION_INFO_V1(merkle_get_child_hashes);
+PG_FUNCTION_INFO_V1(merkle_get_partition_root_hash);
+PG_FUNCTION_INFO_V1(merkle_get_partition_root_hashes);
 
 /*
  * find_merkle_index() - Find the Merkle index on a table
@@ -101,6 +106,88 @@ find_merkle_index(Oid relid)
     table_close(rel, AccessShareLock);
     
     return result;
+}
+
+static Oid
+resolve_merkle_index_arg(Oid relid)
+{
+    char relkind = get_rel_relkind(relid);
+
+    if (relkind == '\0')
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_TABLE),
+                 errmsg("relation with OID %u does not exist", relid)));
+
+    if (relkind == RELKIND_INDEX)
+    {
+        Relation indexRel;
+        Oid      result;
+
+        indexRel = index_open(relid, AccessShareLock);
+        if (indexRel->rd_rel->relam != MERKLE_AM_OID)
+        {
+            index_close(indexRel, AccessShareLock);
+            ereport(ERROR,
+                    (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+                     errmsg("\"%.128s\" is not a merkle index",
+                            get_rel_name(relid))));
+        }
+        result = RelationGetRelid(indexRel);
+        index_close(indexRel, AccessShareLock);
+        return result;
+    }
+
+    return find_merkle_index(relid);
+}
+
+static void
+read_merkle_node_hash_with_meta(Relation indexRel, int nodeIdx,
+                                int totalNodes, int nodesPerPage,
+                                int numTreePages, MerkleHash *hash)
+{
+    int          pageNum;
+    int          offset;
+    Buffer       buf;
+    Page         page;
+    MerkleNode  *nodes;
+
+    if (nodeIdx < 0 || nodeIdx >= totalNodes)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("merkle node index %d is out of range [0, %d)",
+                        nodeIdx, totalNodes)));
+
+    pageNum = nodeIdx / nodesPerPage;
+    offset = nodeIdx % nodesPerPage;
+    if (pageNum >= numTreePages)
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("merkle node index maps past tree page count")));
+
+    buf = ReadBuffer(indexRel, MERKLE_TREE_START_BLKNO + pageNum);
+    LockBuffer(buf, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+    nodes = (MerkleNode *) PageGetContents(page);
+    memcpy(hash->data, nodes[offset].hash.data, MERKLE_HASH_BYTES);
+    UnlockReleaseBuffer(buf);
+}
+
+static int
+global_node_index(int partition, int nodeInPartition, int numPartitions,
+                  int nodesPerPartition)
+{
+    if (partition < 0 || partition >= numPartitions)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("merkle partition %d is out of range [0, %d)",
+                        partition, numPartitions)));
+    if (nodeInPartition < 1 || nodeInPartition > nodesPerPartition)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("merkle node_in_partition %d is out of range [1, %d]",
+                        nodeInPartition, nodesPerPartition)));
+
+    return partition * nodesPerPartition + (nodeInPartition - 1);
 }
 
 /*
@@ -1152,4 +1239,398 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
         
         PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
     }
+}
+
+/*
+ * merkle_bucket_for_key() - Scalar leaf bucket helper for expression indexes.
+ *
+ * This mirrors merkle_leaf_id(), but returns only the global leaf ID. It is
+ * suitable for a functional B-tree index used by selective recovery.
+ */
+Datum
+merkle_bucket_for_key(PG_FUNCTION_ARGS)
+{
+    Oid             relid;
+    Oid             indexOid;
+    Relation        indexRel;
+    TupleDesc       indexTupdesc;
+    int             totalLeaves;
+    int             nkeys;
+    int             nargs;
+    Datum          *keyValues;
+    bool           *keyNulls;
+    int             i;
+    int             leafId;
+
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("table or merkle index name cannot be null")));
+
+    relid = PG_GETARG_OID(0);
+    indexOid = resolve_merkle_index_arg(relid);
+    if (!OidIsValid(indexOid))
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_OBJECT),
+                 errmsg("no merkle index found on relation %s",
+                        get_rel_name(relid))));
+
+    indexRel = index_open(indexOid, AccessShareLock);
+    indexTupdesc = RelationGetDescr(indexRel);
+    nkeys = indexRel->rd_index->indnkeyatts;
+    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves,
+                     NULL, NULL, NULL);
+
+    nargs = PG_NARGS() - 1;
+    if (nargs != nkeys)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("merkle_bucket_for_key expects %d key argument(s), got %d",
+                        nkeys, nargs)));
+
+    keyValues = palloc(nkeys * sizeof(Datum));
+    keyNulls = palloc(nkeys * sizeof(bool));
+
+    for (i = 0; i < nkeys; i++)
+    {
+        keyNulls[i] = PG_ARGISNULL(i + 1);
+        if (!keyNulls[i])
+        {
+            Datum argValue = PG_GETARG_DATUM(i + 1);
+            Oid argType = get_fn_expr_argtype(fcinfo->flinfo, i + 1);
+            Oid expectedType = TupleDescAttr(indexTupdesc, i)->atttypid;
+
+            if (argType == UNKNOWNOID)
+            {
+                Oid typInput;
+                Oid typIOParam;
+
+                getTypeInputInfo(expectedType, &typInput, &typIOParam);
+                keyValues[i] = OidInputFunctionCall(typInput,
+                                                    DatumGetCString(argValue),
+                                                    typIOParam, -1);
+            }
+            else if (argType != expectedType)
+            {
+                Oid castFunc;
+                CoercionPathType pathtype;
+
+                pathtype = find_coercion_pathway(expectedType, argType,
+                                                 COERCION_IMPLICIT, &castFunc);
+                if (pathtype == COERCION_PATH_FUNC && OidIsValid(castFunc))
+                    keyValues[i] = OidFunctionCall1(castFunc, argValue);
+                else if (pathtype == COERCION_PATH_RELABELTYPE)
+                    keyValues[i] = argValue;
+                else
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATATYPE_MISMATCH),
+                             errmsg("argument %d has type %s, expected %s",
+                                    i + 1, format_type_be(argType),
+                                    format_type_be(expectedType))));
+            }
+            else
+                keyValues[i] = argValue;
+        }
+        else
+            keyValues[i] = (Datum) 0;
+    }
+
+    leafId = merkle_compute_partition_id(keyValues, keyNulls, nkeys,
+                                         indexTupdesc, totalLeaves);
+
+    pfree(keyValues);
+    pfree(keyNulls);
+    index_close(indexRel, AccessShareLock);
+
+    PG_RETURN_INT64((int64) leafId);
+}
+
+Datum
+merkle_get_node_hash(PG_FUNCTION_ARGS)
+{
+    Oid         relid = PG_GETARG_OID(0);
+    int32       partition = PG_GETARG_INT32(1);
+    int32       nodeInPartition = PG_GETARG_INT32(2);
+    Oid         indexOid;
+    Relation    indexRel;
+    int         numPartitions;
+    int         nodesPerPartition;
+    int         totalNodes;
+    int         nodesPerPage;
+    int         numTreePages;
+    int         nodeIdx;
+    MerkleHash  hash;
+
+    indexOid = resolve_merkle_index_arg(relid);
+    if (!OidIsValid(indexOid))
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_OBJECT),
+                 errmsg("no merkle index found on relation %s",
+                        get_rel_name(relid))));
+
+    indexRel = index_open(indexOid, AccessShareLock);
+    merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
+                     &totalNodes, NULL, &nodesPerPage, &numTreePages, NULL);
+    nodeIdx = global_node_index(partition, nodeInPartition, numPartitions,
+                                nodesPerPartition);
+    read_merkle_node_hash_with_meta(indexRel, nodeIdx, totalNodes,
+                                    nodesPerPage, numTreePages, &hash);
+    index_close(indexRel, AccessShareLock);
+
+    PG_RETURN_TEXT_P(cstring_to_text(merkle_hash_to_hex(&hash)));
+}
+
+Datum
+merkle_get_partition_root_hash(PG_FUNCTION_ARGS)
+{
+    Oid         relid = PG_GETARG_OID(0);
+    int32       partition = PG_GETARG_INT32(1);
+    Oid         indexOid;
+    Relation    indexRel;
+    int         numPartitions;
+    int         nodesPerPartition;
+    int         totalNodes;
+    int         nodesPerPage;
+    int         numTreePages;
+    int         nodeIdx;
+    MerkleHash  hash;
+
+    indexOid = resolve_merkle_index_arg(relid);
+    if (!OidIsValid(indexOid))
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_OBJECT),
+                 errmsg("no merkle index found on relation %s",
+                        get_rel_name(relid))));
+
+    indexRel = index_open(indexOid, AccessShareLock);
+    merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
+                     &totalNodes, NULL, &nodesPerPage, &numTreePages, NULL);
+    nodeIdx = global_node_index(partition, 1, numPartitions, nodesPerPartition);
+    read_merkle_node_hash_with_meta(indexRel, nodeIdx, totalNodes,
+                                    nodesPerPage, numTreePages, &hash);
+    index_close(indexRel, AccessShareLock);
+
+    PG_RETURN_TEXT_P(cstring_to_text(merkle_hash_to_hex(&hash)));
+}
+
+Datum
+merkle_get_partition_root_hashes(PG_FUNCTION_ARGS)
+{
+    FuncCallContext *funcctx;
+    MemoryContext    oldcontext;
+
+    if (SRF_IS_FIRSTCALL())
+    {
+        Oid       relid = PG_GETARG_OID(0);
+        Oid       indexOid;
+        Relation  indexRel;
+        TupleDesc tupdesc;
+        int       numPartitions;
+        int       nodesPerPartition;
+        int       totalNodes;
+        int       nodesPerPage;
+        int       numTreePages;
+        Datum    *partitions;
+        Datum    *hashes;
+        int       partition;
+
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+        indexOid = resolve_merkle_index_arg(relid);
+        if (!OidIsValid(indexOid))
+            ereport(ERROR,
+                    (errcode(ERRCODE_UNDEFINED_OBJECT),
+                     errmsg("no merkle index found on relation %s",
+                            get_rel_name(relid))));
+
+        indexRel = index_open(indexOid, AccessShareLock);
+        merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
+                         &totalNodes, NULL, &nodesPerPage, &numTreePages,
+                         NULL);
+
+        partitions = palloc(numPartitions * sizeof(Datum));
+        hashes = palloc(numPartitions * sizeof(Datum));
+
+        for (partition = 0; partition < numPartitions; partition++)
+        {
+            MerkleHash hash;
+            int        nodeIdx;
+
+            nodeIdx = global_node_index(partition, 1, numPartitions,
+                                        nodesPerPartition);
+            read_merkle_node_hash_with_meta(indexRel, nodeIdx, totalNodes,
+                                            nodesPerPage, numTreePages, &hash);
+            partitions[partition] = Int32GetDatum(partition);
+            hashes[partition] = CStringGetTextDatum(merkle_hash_to_hex(&hash));
+        }
+
+        index_close(indexRel, AccessShareLock);
+
+        tupdesc = CreateTemplateTupleDesc(2);
+        TupleDescInitEntry(tupdesc, 1, "partition", INT4OID, -1, 0);
+        TupleDescInitEntry(tupdesc, 2, "hash", TEXTOID, -1, 0);
+        funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+        funcctx->max_calls = numPartitions;
+
+        {
+            typedef struct {
+                Datum *partitions;
+                Datum *hashes;
+            } PartitionRootData;
+
+            PartitionRootData *data = palloc(sizeof(PartitionRootData));
+            data->partitions = partitions;
+            data->hashes = hashes;
+            funcctx->user_fctx = data;
+        }
+
+        MemoryContextSwitchTo(oldcontext);
+    }
+
+    funcctx = SRF_PERCALL_SETUP();
+
+    if (funcctx->call_cntr < funcctx->max_calls)
+    {
+        typedef struct {
+            Datum *partitions;
+            Datum *hashes;
+        } PartitionRootData;
+
+        PartitionRootData *data = (PartitionRootData *) funcctx->user_fctx;
+        Datum values[2];
+        bool nulls[2] = {false, false};
+        HeapTuple tuple;
+        int idx = funcctx->call_cntr;
+
+        values[0] = data->partitions[idx];
+        values[1] = data->hashes[idx];
+        tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+    }
+
+    SRF_RETURN_DONE(funcctx);
+}
+
+Datum
+merkle_get_child_hashes(PG_FUNCTION_ARGS)
+{
+    FuncCallContext *funcctx;
+    MemoryContext    oldcontext;
+
+    if (SRF_IS_FIRSTCALL())
+    {
+        Oid       relid = PG_GETARG_OID(0);
+        int32     partition = PG_GETARG_INT32(1);
+        int32     nodeInPartition = PG_GETARG_INT32(2);
+        Oid       indexOid;
+        Relation  indexRel;
+        TupleDesc tupdesc;
+        int       numPartitions;
+        int       nodesPerPartition;
+        int       leavesPerPartition;
+        int       totalNodes;
+        int       nodesPerPage;
+        int       numTreePages;
+        int       fanout;
+        int       internalNodes;
+        int       maxChildren;
+        int       childCount = 0;
+        int       child;
+        Datum    *childNodes;
+        Datum    *childHashes;
+
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+        indexOid = resolve_merkle_index_arg(relid);
+        if (!OidIsValid(indexOid))
+            ereport(ERROR,
+                    (errcode(ERRCODE_UNDEFINED_OBJECT),
+                     errmsg("no merkle index found on relation %s",
+                            get_rel_name(relid))));
+
+        indexRel = index_open(indexOid, AccessShareLock);
+        merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition,
+                         &nodesPerPartition, &totalNodes, NULL,
+                         &nodesPerPage, &numTreePages, &fanout);
+        (void) global_node_index(partition, nodeInPartition, numPartitions,
+                                 nodesPerPartition);
+
+        internalNodes = nodesPerPartition - leavesPerPartition;
+        if (nodeInPartition > internalNodes)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("merkle node_in_partition %d is a leaf and has no children",
+                            nodeInPartition)));
+
+        maxChildren = fanout;
+        childNodes = palloc(maxChildren * sizeof(Datum));
+        childHashes = palloc(maxChildren * sizeof(Datum));
+
+        for (child = 1; child <= fanout; child++)
+        {
+            int childNode = fanout * (nodeInPartition - 1) + child + 1;
+
+            if (childNode <= nodesPerPartition)
+            {
+                MerkleHash hash;
+                int        childIdx;
+
+                childIdx = global_node_index(partition, childNode,
+                                             numPartitions, nodesPerPartition);
+                read_merkle_node_hash_with_meta(indexRel, childIdx, totalNodes,
+                                                nodesPerPage, numTreePages,
+                                                &hash);
+                childNodes[childCount] = Int32GetDatum(childNode);
+                childHashes[childCount] = CStringGetTextDatum(merkle_hash_to_hex(&hash));
+                childCount++;
+            }
+        }
+
+        index_close(indexRel, AccessShareLock);
+
+        tupdesc = CreateTemplateTupleDesc(2);
+        TupleDescInitEntry(tupdesc, 1, "child_node_in_partition", INT4OID, -1, 0);
+        TupleDescInitEntry(tupdesc, 2, "hash", TEXTOID, -1, 0);
+        funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+        funcctx->max_calls = childCount;
+
+        {
+            typedef struct {
+                Datum *childNodes;
+                Datum *childHashes;
+            } ChildHashData;
+
+            ChildHashData *data = palloc(sizeof(ChildHashData));
+            data->childNodes = childNodes;
+            data->childHashes = childHashes;
+            funcctx->user_fctx = data;
+        }
+
+        MemoryContextSwitchTo(oldcontext);
+    }
+
+    funcctx = SRF_PERCALL_SETUP();
+
+    if (funcctx->call_cntr < funcctx->max_calls)
+    {
+        typedef struct {
+            Datum *childNodes;
+            Datum *childHashes;
+        } ChildHashData;
+
+        ChildHashData *data = (ChildHashData *) funcctx->user_fctx;
+        Datum values[2];
+        bool nulls[2] = {false, false};
+        HeapTuple tuple;
+        int idx = funcctx->call_cntr;
+
+        values[0] = data->childNodes[idx];
+        values[1] = data->childHashes[idx];
+        tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+    }
+
+    SRF_RETURN_DONE(funcctx);
 }

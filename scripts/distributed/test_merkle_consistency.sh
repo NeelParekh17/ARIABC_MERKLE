@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # test_merkle_consistency.sh
 #
-# Verifies that all 4 AriaBC cluster nodes produce identical Merkle root hashes
+# Verifies that the configured AriaBC cluster nodes produce identical Merkle root hashes
 # after executing the same deterministic workload via ariabc_pg_gateway.
 #
 # End-to-end flow:
-#   1. Create ariabc_kv_test + USING merkle index on all 4 nodes via direct psql
+#   1. Create ariabc_kv_test + USING merkle index on configured nodes via direct psql
 #   2. Verify empty Merkle roots are identical (all zeros expected)
 #   3. Run merkle_test_workload.sql through gateway (dbType=1, direct, 1 terminal)
 #   4. Poll all nodes until quiescence (final updated value visible on all)
 #   5. Collect merkle_root_hash('ariabc_kv_test') from each node
-#   6. Compare — PASS if all 4 match, FAIL otherwise
+#   6. Compare — PASS if all configured nodes match, FAIL otherwise
 #
 # Prerequisites:
-#   - All 4 ariabc_pg_server processes running (use run_4node_raft_cluster.sh first)
+#   - Configured ariabc_pg_server processes running (use run_4node_raft_cluster.sh first)
 #   - BCDB PostgreSQL running on port 5438 on each node
 #   - ariabc_pg_gateway built locally at ariabc_pg/build/bin/ariabc_pg_gateway
 #
@@ -34,6 +34,7 @@ declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 declare -a NODE_CLIENT_PORTS=(8000 8000 8001)
+NODE_COUNT="${#NODE_IPS[@]}"
 
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
@@ -102,10 +103,10 @@ node_psql() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 1: Create table + Merkle index on all 4 nodes via direct psql
+# Phase 1: Create table + Merkle index on configured nodes via direct psql
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_SETUP" -eq 0 ]]; then
-    log "=== Phase 1: Create $TEST_TABLE + Merkle index on all 4 nodes ==="
+    log "=== Phase 1: Create $TEST_TABLE + Merkle index on $NODE_COUNT configured nodes ==="
     for idx in "${!NODE_IPS[@]}"; do
         name="${NODE_NAMES[$idx]}"
         log "  Setting up on $name..."
@@ -130,7 +131,7 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 2: Verify empty Merkle roots are identical
 # ---------------------------------------------------------------------------
-log "=== Phase 2: Verify empty Merkle roots (should be all-zeros on all nodes) ==="
+log "=== Phase 2: Verify empty Merkle roots (should be all-zeros on configured nodes) ==="
 
 declare -a EMPTY_ROOTS=()
 for idx in "${!NODE_IPS[@]}"; do
@@ -238,7 +239,7 @@ while true; do
     done
 
     if [[ "$all_ready" -eq 1 ]]; then
-        log "  All 4 nodes quiesced (${elapsed}s)"
+        log "  All $NODE_COUNT configured nodes quiesced (${elapsed}s)"
         break
     fi
 
@@ -262,9 +263,9 @@ while true; do
 done
 
 # ---------------------------------------------------------------------------
-# Phase 5: Collect Merkle root hashes from all 4 nodes
+# Phase 5: Collect Merkle root hashes from configured nodes
 # ---------------------------------------------------------------------------
-log "=== Phase 5: Collect Merkle root hashes from all 4 nodes ==="
+log "=== Phase 5: Collect Merkle root hashes from $NODE_COUNT configured nodes ==="
 
 declare -a ROOTS=()
 declare -a ROW_COUNTS=()

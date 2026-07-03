@@ -228,5 +228,10 @@ extern Datum merkle_tree_stats(PG_FUNCTION_ARGS);
 extern Datum merkle_node_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_leaf_tuples(PG_FUNCTION_ARGS);
 extern Datum merkle_leaf_id(PG_FUNCTION_ARGS);
+extern Datum merkle_bucket_for_key(PG_FUNCTION_ARGS);
+extern Datum merkle_get_node_hash(PG_FUNCTION_ARGS);
+extern Datum merkle_get_child_hashes(PG_FUNCTION_ARGS);
+extern Datum merkle_get_partition_root_hash(PG_FUNCTION_ARGS);
+extern Datum merkle_get_partition_root_hashes(PG_FUNCTION_ARGS);
 
 #endif /* MERKLE_H */
