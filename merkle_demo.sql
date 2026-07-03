@@ -31,8 +31,9 @@ select * from merkle_leaf_tuples('usertable_small');
 
 select * from merkle_leaf_id('usertable_small', 1199);
 
+select * from merkle_get_partition_root_hashes('usertable_small');
+
 
 -- for testing on usertable_small_merkle_multikey index:
 insert into usertable_small values (120000, 'field1', 'field2', 'field3', 'field4', 'field5', 'field6', 'field7', 'field8', 'field9', 'field10');
 select * from merkle_leaf_id('usertable_small', 120000, 'field1');
-

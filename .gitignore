@@ -68,6 +68,14 @@ lib*.pc
 /scripts/distributed/__pycache__/
 /scripts/distributed/.safe_recovery_probe_*.sql
 
+# Paper-style Merkle recovery benchmark source files.
+!/scripts/benchmark/
+!/scripts/benchmark/recovery/
+!/scripts/benchmark/recovery/**
+!/scripts/benchmark/recovery/README.md
+/scripts/benchmark/recovery/__pycache__/
+/scripts/benchmark/recovery/results/
+
 # Local AI/tooling metadata (do not commit)
 /.claude/
 /.codex
@@ -118,3 +126,6 @@ lib*.pc
 /scripts/distributed/output*.txt
 /scripts/distributed/*.log
 /scripts/distributed/recovery_artifacts/
+/scripts/benchmark/recovery/fetched/
+/scripts/benchmark/recovery/results/scratch_*/
+/scripts/benchmark/recovery/results/*.copybin

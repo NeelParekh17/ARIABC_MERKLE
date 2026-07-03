@@ -1,0 +1,13 @@
+# Source roots required to build and run the synced remote recovery benchmark.
+configure
+configure.in
+GNUmakefile.in
+GNUmakefile
+Makefile
+config
+src
+src/backend/utils/probes.d
+contrib
+scripts/benchmark/recovery
+scripts/distributed/ensure_custom_install_from_repo.sh
+merkle_demo.sql

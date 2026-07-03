@@ -1,0 +1,6 @@
+{
+  "python_min_version": "3.10",
+  "required_modules": [
+    "psycopg"
+  ]
+}
