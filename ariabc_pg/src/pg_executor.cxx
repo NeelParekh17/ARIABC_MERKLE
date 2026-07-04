@@ -129,6 +129,16 @@ bool det_completion_only_success_enabled() {
     return enabled;
 }
 
+bool det_threaded_direct_no_preapply_wait_enabled() {
+    static const bool enabled = []() -> bool {
+        const char* v = std::getenv("ARIABC_DET_THREADED_DIRECT_NO_PREAPPLY_WAIT");
+        if (!v) return false;
+        const std::string s = trim_copy(v);
+        return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+    }();
+    return enabled;
+}
+
 uint64_t det_partial_block_max_wait_ns() {
     static const uint64_t wait_ns = []() -> uint64_t {
         const char* v = std::getenv("ARIABC_DET_PARTIAL_BLOCK_MAX_WAIT_US");
@@ -1813,6 +1823,16 @@ void probe_safe_ledger_outcome_visibility(PGconn* submit_conn,
     probe_safe_ledger_terminal_visibility(submit_conn, conninfo, epoch_hex, t);
 }
 
+void update_atomic_max_u64(std::atomic<uint64_t>& target, uint64_t value) {
+    uint64_t cur = target.load(std::memory_order_relaxed);
+    while (value > cur &&
+           !target.compare_exchange_weak(cur,
+                                         value,
+                                         std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
 } // namespace
 
 int pg_executor::configured_batch_delay_us() {
@@ -2039,11 +2059,22 @@ pg_executor::pg_executor(int node_id,
         (db_opt_.db_type == 1) && det_prefixed_direct_parallel_enabled();
     det_completion_only_success_ =
         (db_opt_.db_type == 1) && det_completion_only_success_enabled();
+    det_threaded_direct_no_preapply_wait_ =
+        (db_opt_.db_type == 1) &&
+        !event_mode_ &&
+        db_opt_.raft_apply_ledger_mode != "safe" &&
+        det_threaded_direct_no_preapply_wait_enabled();
     if (det_prefixed_direct_parallel_ && det_event_block_fastpath_enabled()) {
         std::cerr << "ARIABC_DET_PREFIXED_DIRECT_PARALLEL requested on node "
                   << node_id_
                   << " but ARIABC_DET_EVENT_BLOCK_FASTPATH is enabled; "
                      "block-submit fast path remains active"
+                  << std::endl;
+    }
+    if (det_threaded_direct_no_preapply_wait_) {
+        std::cerr << "ARIABC_DET_THREADED_DIRECT_NO_PREAPPLY_WAIT enabled on node "
+                  << node_id_
+                  << ": worker threads enter PQexec concurrently and publish results in dispatch order"
                   << std::endl;
     }
     if (event_mode_ && det_parallel_workers_) {
@@ -2244,6 +2275,8 @@ pg_executor::pg_executor(int node_id,
         // outside the per-connection pool, with an explicitly chosen block size.
 
         all_conns_.push_back(c);
+        st_owned_pg_connections_.store(static_cast<uint64_t>(all_conns_.size()),
+                                       std::memory_order_relaxed);
         if (!event_mode_) {
             pool_.push(c);
         }
@@ -2267,9 +2300,12 @@ pg_executor::pg_executor(int node_id,
             (db_opt_.db_type == 1 && !det_parallel_workers_)
                 ? 1
                 : db_opt_.conn_pool_size;
+        st_threaded_workers_configured_.store(static_cast<uint64_t>(n_threads),
+                                              std::memory_order_relaxed);
         threads_.reserve(n_threads);
         for (int i = 0; i < n_threads; ++i) {
             threads_.emplace_back([this] { worker_loop(); });
+            st_threaded_workers_created_.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }
@@ -2551,6 +2587,12 @@ pg_executor_stats pg_executor::stats() const {
     out.exec_calls = st_exec_calls_.load(std::memory_order_relaxed);
     out.exec_ns = st_exec_ns_.load(std::memory_order_relaxed);
     out.pg_query_ns = st_pg_query_ns_.load(std::memory_order_relaxed);
+    out.threaded_workers_configured = st_threaded_workers_configured_.load(std::memory_order_relaxed);
+    out.threaded_workers_created = st_threaded_workers_created_.load(std::memory_order_relaxed);
+    out.owned_pg_connections = st_owned_pg_connections_.load(std::memory_order_relaxed);
+    out.concurrent_pqexec_cur = st_concurrent_pqexec_cur_.load(std::memory_order_relaxed);
+    out.concurrent_pqexec_max = st_concurrent_pqexec_max_.load(std::memory_order_relaxed);
+    out.overlapping_pqexec_intervals = st_overlapping_pqexec_intervals_.load(std::memory_order_relaxed);
     out.result_format_ns = st_result_format_ns_.load(std::memory_order_relaxed);
     out.retryable_sqlstate_40001 = st_retryable_sqlstate_40001_.load(std::memory_order_relaxed);
     out.retryable_sqlstate_40P01 = st_retryable_sqlstate_40P01_.load(std::memory_order_relaxed);
@@ -2980,7 +3022,14 @@ std::string pg_executor::exec_sql(PGconn* c, const std::string& sql, bool* is_er
     for (int attempt = 0; attempt <= db_opt_.max_retries; ++attempt) {
         if (ns) ns->last_merkle_roots.clear();
         const auto q0 = std::chrono::steady_clock::now();
+        const uint64_t concurrent_now =
+            st_concurrent_pqexec_cur_.fetch_add(1, std::memory_order_relaxed) + 1;
+        update_atomic_max_u64(st_concurrent_pqexec_max_, concurrent_now);
+        if (concurrent_now > 1) {
+            st_overlapping_pqexec_intervals_.fetch_add(1, std::memory_order_relaxed);
+        }
         PGresult* res = PQexec(c, sql.c_str());
+        st_concurrent_pqexec_cur_.fetch_sub(1, std::memory_order_relaxed);
         const auto q1 = std::chrono::steady_clock::now();
         st_pg_query_ns_.fetch_add(
             static_cast<uint64_t>(
@@ -3352,7 +3401,7 @@ void pg_executor::worker_loop() {
                           << std::endl;
             }
         }
-        if (kafka_delivered_ok) {
+        if (kafka_delivered_ok && db_opt_.raft_apply_ledger_mode == "safe") {
             trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK",
                                    node_id_,
                                    batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
@@ -3524,8 +3573,10 @@ void pg_executor::worker_loop() {
         const bool det_prefixed_parallel =
             det_parallel_workers_ &&
             (db_opt_.db_type == 1) && is_det_prefixed_sql(t.sql);
+        const bool det_prefixed_requires_apply_turn =
+            det_prefixed_parallel && !det_threaded_direct_no_preapply_wait_;
         uint64_t det_tx_seq = 0;
-        if (det_prefixed_parallel) {
+        if (det_prefixed_requires_apply_turn) {
             det_tx_seq = get_det_tx_seq(t);
             det_mark_tx_state(det_tx_seq, det_tx_state::QUEUED);
 
@@ -3562,7 +3613,7 @@ void pg_executor::worker_loop() {
                   << " ord=" << t.raft_item_ordinal
                   << " bytes=" << result.size()
                   << std::endl;
-        if (det_prefixed_parallel) {
+        if (det_prefixed_requires_apply_turn) {
             det_finish_apply(det_tx_seq);
         }
         ConfirmedResult confirmed = accept_safe_confirmed_result(t, result);
@@ -3627,6 +3678,25 @@ void pg_executor::worker_loop() {
         if (!det_raw_compat_serial_turn) {
             if (!wait_for_ordered_emit_turn(t.dispatch_seq)) {
                 break;
+            }
+        }
+
+        /*
+         * Non-safe threaded direct completion waits for the top-level
+         * PostgreSQL commit, not for Kafka producer batching. Safe mode keeps
+         * the stronger existing order in flush_batch(): publish first, then
+         * mark the Raft item applied.
+         */
+        if (kafka_enabled_ &&
+            should_publish_kafka_result(node_id_) &&
+            db_opt_.raft_apply_ledger_mode != "safe") {
+            if (t.dispatch_seq == 0) {
+                notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
+            } else {
+                mark_task_applied_ordered(t.dispatch_seq,
+                                          t.raft_log_idx,
+                                          t.raft_item_ordinal,
+                                          now_steady_ns());
             }
         }
 

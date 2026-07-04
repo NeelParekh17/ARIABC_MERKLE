@@ -42,6 +42,12 @@ struct pg_executor_stats {
     uint64_t exec_calls = 0;
     uint64_t exec_ns = 0;
     uint64_t pg_query_ns = 0;
+    uint64_t threaded_workers_configured = 0;
+    uint64_t threaded_workers_created = 0;
+    uint64_t owned_pg_connections = 0;
+    uint64_t concurrent_pqexec_cur = 0;
+    uint64_t concurrent_pqexec_max = 0;
+    uint64_t overlapping_pqexec_intervals = 0;
     uint64_t result_format_ns = 0;
     uint64_t retryable_sqlstate_40001 = 0;
     uint64_t retryable_sqlstate_40P01 = 0;
@@ -367,6 +373,7 @@ private:
     bool det_allow_raw_compat_ = false;
     bool det_prefixed_direct_parallel_ = false;
     bool det_completion_only_success_ = false;
+    bool det_threaded_direct_no_preapply_wait_ = false;
     uint64_t det_next_block_id_ = 2;
     uint64_t det_block_tx_key_base_ = 0;
     uint64_t det_block_next_tx_key_ = 0;
@@ -404,6 +411,12 @@ private:
     std::atomic<uint64_t> st_exec_calls_{0};
     std::atomic<uint64_t> st_exec_ns_{0};
     std::atomic<uint64_t> st_pg_query_ns_{0};
+    std::atomic<uint64_t> st_threaded_workers_configured_{0};
+    std::atomic<uint64_t> st_threaded_workers_created_{0};
+    std::atomic<uint64_t> st_owned_pg_connections_{0};
+    std::atomic<uint64_t> st_concurrent_pqexec_cur_{0};
+    std::atomic<uint64_t> st_concurrent_pqexec_max_{0};
+    std::atomic<uint64_t> st_overlapping_pqexec_intervals_{0};
     std::atomic<uint64_t> st_result_format_ns_{0};
     std::atomic<uint64_t> st_retryable_sqlstate_40001_{0};
     std::atomic<uint64_t> st_retryable_sqlstate_40P01_{0};

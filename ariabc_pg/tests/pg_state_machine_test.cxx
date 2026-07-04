@@ -1,6 +1,9 @@
 #include "../src/pg_state_machine.hxx"
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <cstring>
+#include <thread>
 #include <vector>
 #include <string>
 #include <openssl/sha.h>
@@ -246,6 +249,19 @@ PGresult* PQexec(PGconn* conn, const char* query) {
 
 } // extern "C"
 
+static std::vector<client_api_request_item>
+make_request_items(uint64_t token, int count) {
+    std::vector<client_api_request_item> items;
+    items.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        client_api_request_item item;
+        item.req_id = "req_" + std::to_string(token) + "_" + std::to_string(i);
+        item.sql = "SELECT " + std::to_string(i);
+        items.push_back(item);
+    }
+    return items;
+}
+
 int main() {
     std::cout << "Running pg_state_machine contract tests..." << std::endl;
 
@@ -265,6 +281,119 @@ int main() {
         REQUIRE(ack->size() == 0);
         REQUIRE(sm.last_commit_index() >= 100);
         std::cout << "Zero-byte no-op commit test passed." << std::endl;
+    }
+
+    // 1b. Result-token cleanup: one request succeeds, waits once, all maps empty.
+    {
+        const uint64_t token = 1000;
+        std::vector<client_api_request_item> items = make_request_items(token, 1);
+        sm.test_register_result_batch(token, items);
+        sm.test_note_result_applied(token);
+        std::string failure_reason = "stale";
+        REQUIRE(sm.wait_for_result_id(items[0].req_id, 100, &failure_reason));
+        REQUIRE(failure_reason.empty());
+        auto counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 0);
+        REQUIRE(counts.result_token_by_req_id == 0);
+        REQUIRE(counts.completed_result_tokens == 0);
+        REQUIRE(counts.failed_result_tokens == 0);
+        REQUIRE(counts.outstanding_waiters == 0);
+        REQUIRE(counts.completed_at_ns == 0);
+        std::cout << "Result-token single-wait cleanup test passed." << std::endl;
+    }
+
+    // 1c. Two request IDs share one token; first wait keeps token, second removes it.
+    {
+        const uint64_t token = 1001;
+        std::vector<client_api_request_item> items = make_request_items(token, 2);
+        sm.test_register_result_batch(token, items);
+        sm.test_note_result_applied(token);
+        sm.test_note_result_applied(token);
+        std::string failure_reason;
+        REQUIRE(sm.wait_for_result_id(items[0].req_id, 100, &failure_reason));
+        auto counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 0);
+        REQUIRE(counts.result_token_by_req_id == 1);
+        REQUIRE(counts.completed_result_tokens == 1);
+        REQUIRE(counts.outstanding_waiters == 1);
+        REQUIRE(counts.completed_at_ns == 1);
+        REQUIRE(sm.wait_for_result_id(items[1].req_id, 100, &failure_reason));
+        counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 0);
+        REQUIRE(counts.result_token_by_req_id == 0);
+        REQUIRE(counts.completed_result_tokens == 0);
+        REQUIRE(counts.failed_result_tokens == 0);
+        REQUIRE(counts.outstanding_waiters == 0);
+        REQUIRE(counts.completed_at_ns == 0);
+        std::cout << "Result-token shared-wait cleanup test passed." << std::endl;
+    }
+
+    // 1d. Timeout must not consume the request ID or pending token.
+    {
+        const uint64_t token = 1002;
+        std::vector<client_api_request_item> items = make_request_items(token, 1);
+        sm.test_register_result_batch(token, items);
+        std::string failure_reason;
+        REQUIRE(!sm.wait_for_result_id(items[0].req_id, 1, &failure_reason));
+        auto counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 1);
+        REQUIRE(counts.result_token_by_req_id == 1);
+        REQUIRE(counts.completed_result_tokens == 0);
+        REQUIRE(counts.failed_result_tokens == 0);
+        REQUIRE(counts.outstanding_waiters == 1);
+        REQUIRE(counts.completed_at_ns == 0);
+        sm.test_note_result_applied(token);
+        REQUIRE(sm.wait_for_result_id(items[0].req_id, 100, &failure_reason));
+        std::cout << "Result-token timeout preservation test passed." << std::endl;
+    }
+
+    // 1e. Terminal failure remains visible until every mapped request consumes it.
+    {
+        const uint64_t token = 1003;
+        std::vector<client_api_request_item> items = make_request_items(token, 2);
+        sm.test_register_result_batch(token, items);
+        sm.test_note_result_failed(token, "boom");
+        std::string failure_reason;
+        REQUIRE(!sm.wait_for_result_id(items[0].req_id, 100, &failure_reason));
+        REQUIRE(failure_reason == "boom");
+        auto counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.result_token_by_req_id == 1);
+        REQUIRE(counts.failed_result_tokens == 1);
+        REQUIRE(counts.outstanding_waiters == 1);
+        REQUIRE(counts.completed_at_ns == 1);
+        failure_reason.clear();
+        REQUIRE(!sm.wait_for_result_id(items[1].req_id, 100, &failure_reason));
+        REQUIRE(failure_reason == "boom");
+        counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 0);
+        REQUIRE(counts.result_token_by_req_id == 0);
+        REQUIRE(counts.completed_result_tokens == 0);
+        REQUIRE(counts.failed_result_tokens == 0);
+        REQUIRE(counts.outstanding_waiters == 0);
+        REQUIRE(counts.completed_at_ns == 0);
+        std::cout << "Result-token failure cleanup test passed." << std::endl;
+    }
+
+    // 1f. Abandoned terminal waits are TTL-cleaned, keeping long runs bounded.
+    {
+        setenv("ARIABC_RESULT_TOKEN_TTL_MS", "1", 1);
+        for (uint64_t i = 0; i < 100000; ++i) {
+            const uint64_t token = 200000 + i;
+            std::vector<client_api_request_item> items = make_request_items(token, 1);
+            sm.test_register_result_batch(token, items);
+            sm.test_note_result_applied(token);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        sm.test_force_result_cleanup();
+        unsetenv("ARIABC_RESULT_TOKEN_TTL_MS");
+        auto counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 0);
+        REQUIRE(counts.result_token_by_req_id == 0);
+        REQUIRE(counts.completed_result_tokens == 0);
+        REQUIRE(counts.failed_result_tokens == 0);
+        REQUIRE(counts.outstanding_waiters == 0);
+        REQUIRE(counts.completed_at_ns == 0);
+        std::cout << "Result-token TTL cleanup boundedness test passed." << std::endl;
     }
 
     // 2. Test commit_config (configuration change entries advance prefix)
