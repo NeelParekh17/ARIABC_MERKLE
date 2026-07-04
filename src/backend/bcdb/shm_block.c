@@ -208,6 +208,8 @@ bcdb_log_gate_snapshot(const char *reason,
 				" slot_fallback_wait_calls=%lu slot_fallback_wait_us=%lu slot_fallback_wait_max_us=%lu"
 				" prev_commit_wait_calls=%lu prev_commit_wait_us=%lu prev_commit_wait_max_us=%lu"
 				" target_commit_wait_calls=%lu target_commit_wait_us=%lu target_commit_wait_max_us=%lu"
+				" active_BCDB_workers_current=%lu active_BCDB_workers_max=%lu"
+				" overlapping_BCDB_optimistic_execution=%lu"
 				" active_serial_waiters=%d oldest_active_wait_us=%lu oldest_active_txid=%ld oldest_active_block_id=%ld oldest_active_phase=%d",
 				reason ? reason : "?",
 				(int)block_id, (int)first_txid, (int)last_txid,
@@ -245,6 +247,18 @@ bcdb_log_gate_snapshot(const char *reason,
 				(unsigned long)agg_target_commit_wait_calls,
 				(unsigned long)agg_target_commit_wait_total_us,
 				(unsigned long)agg_target_commit_wait_max_us,
+				(unsigned long) (block_meta
+					? __atomic_load_n(&block_meta->active_bcdb_workers,
+									   __ATOMIC_RELAXED)
+					: 0),
+				(unsigned long) (block_meta
+					? __atomic_load_n(&block_meta->active_bcdb_workers_max,
+									   __ATOMIC_RELAXED)
+					: 0),
+				(unsigned long) (block_meta
+					? __atomic_load_n(&block_meta->overlapping_bcdb_optimistic_execution,
+									   __ATOMIC_RELAXED)
+					: 0),
 				active_serial_waiters,
 				(unsigned long)oldest_active_wait_us,
 				(long)oldest_active_txid,
@@ -419,9 +433,12 @@ create_block_pool(void)
     block_meta->debug_seq = 0;
     block_meta->num_committed = 0;
     block_meta->num_aborted = 0;
-    block_meta->previous_report_commit = 0;
-    block_meta->previous_report_ts = 0;
+	block_meta->previous_report_commit = 0;
+	block_meta->previous_report_ts = 0;
 	block_meta->next_enqueue_block_id = BCDB_FIRST_SUBMIT_BLOCK_ID;
+	block_meta->active_bcdb_workers = 0;
+	block_meta->active_bcdb_workers_max = 0;
+	block_meta->overlapping_bcdb_optimistic_execution = 0;
 #ifdef LOG_STATUS
     block_meta->log[0] = '\0';
     block_meta->log_counter = 0;
@@ -493,6 +510,9 @@ bcdb_reset_block_pool_state(void)
 		bcdb_log_gate_snapshot("before_reset", -1, -1, -1);
 
 	bcdb_reset_gate_stats();
+	block_meta->active_bcdb_workers = 0;
+	block_meta->active_bcdb_workers_max = 0;
+	block_meta->overlapping_bcdb_optimistic_execution = 0;
 
     block1_cache = NULL;
     SpinLockAcquire(block_pool_lock);

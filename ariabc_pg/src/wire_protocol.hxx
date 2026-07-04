@@ -18,6 +18,8 @@ struct client_api_request {
     std::string req_id;
     std::string sql;
     std::vector<client_api_request_item> batch_items;
+    bool wait_for_terminal = false;
+    uint32_t terminal_timeout_ms = 30000;
 
     bool is_batch() const { return !batch_items.empty(); }
     size_t item_count() const { return is_batch() ? batch_items.size() : 1u; }
