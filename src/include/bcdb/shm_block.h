@@ -133,6 +133,9 @@ typedef struct
 	 * enqueue order monotonic while allowing later completion waits to overlap.
 	 */
 	BCBlockID volatile next_enqueue_block_id;
+	uint64 volatile    active_bcdb_workers;
+	uint64 volatile    active_bcdb_workers_max;
+	uint64 volatile    overlapping_bcdb_optimistic_execution;
 } BlockMeta;
 
 /* todo: change it to HTAB */

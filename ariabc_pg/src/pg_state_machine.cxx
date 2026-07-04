@@ -5,8 +5,10 @@
 #include <libpq-fe.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <cstring>
@@ -70,6 +72,33 @@ uint64_t debug_req_trace_limit() {
 
 std::atomic<uint64_t> g_debug_commit_trace_count{0};
 std::atomic<bool> g_manifest_failpoint_fired{false};
+
+uint64_t steady_now_ns() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+uint64_t result_token_ttl_ns() {
+    const char* env = std::getenv("ARIABC_RESULT_TOKEN_TTL_MS");
+    uint64_t ttl_ms = 60000;
+    if (env && env[0] != '\0') {
+        try {
+            ttl_ms = std::stoull(env);
+        } catch (...) {
+            ttl_ms = 60000;
+        }
+    }
+    if (ttl_ms == 0) ttl_ms = 1;
+    return ttl_ms * 1000000ULL;
+}
+
+uint32_t result_waiter_count(size_t item_count) {
+    if (item_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    return static_cast<uint32_t>(item_count);
+}
 
 bool state_machine_failpoint_matches(const char* name,
                                      int node_id,
@@ -241,7 +270,7 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit(const nuraft::ulong log_idx
     } else {
         debug_trace_batch_commit(batch, log_idx);
     }
-    register_result_batch(static_cast<uint64_t>(log_idx), batch.items.size());
+    register_result_batch(static_cast<uint64_t>(log_idx), batch.items);
 
     // Safe-mode flow trace: SAFE_BLOCK_PARSED after successful parse.
     {
@@ -457,23 +486,116 @@ bool pg_state_machine::wait_for_result(uint64_t result_token,
         if (failure_reason != nullptr) {
             *failure_reason = failed->second;
         }
-        failed_result_tokens_.erase(failed);
-        completed_result_tokens_.erase(result_token);
+        if (outstanding_waiters_.find(result_token) == outstanding_waiters_.end()) {
+            failed_result_tokens_.erase(failed);
+            completed_result_tokens_.erase(result_token);
+            completed_at_ns_.erase(result_token);
+        }
         return false;
     }
     if (failure_reason != nullptr) {
         failure_reason->clear();
     }
-    completed_result_tokens_.erase(result_token);
+    if (outstanding_waiters_.find(result_token) == outstanding_waiters_.end()) {
+        completed_result_tokens_.erase(result_token);
+        completed_at_ns_.erase(result_token);
+    }
     return true;
+}
+
+bool pg_state_machine::wait_for_result_id(const std::string& req_id,
+                                          int timeout_ms,
+                                          std::string* failure_reason) {
+    if (req_id.empty()) return false;
+    if (timeout_ms <= 0) timeout_ms = 1;
+
+    std::unique_lock<std::mutex> lk(result_mu_);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    uint64_t result_token = 0;
+    const bool ready = result_cv_.wait_until(lk, deadline, [&] {
+        auto mapped = result_token_by_req_id_.find(req_id);
+        if (mapped == result_token_by_req_id_.end()) {
+            return false;
+        }
+        result_token = mapped->second;
+        return completed_result_tokens_.find(result_token) != completed_result_tokens_.end() ||
+               failed_result_tokens_.find(result_token) != failed_result_tokens_.end();
+    });
+    if (!ready || result_token == 0) return false;
+
+    auto failed = failed_result_tokens_.find(result_token);
+    if (failed != failed_result_tokens_.end()) {
+        if (failure_reason != nullptr) {
+            *failure_reason = failed->second;
+        }
+        consume_result_waiter_locked(req_id, result_token);
+        return false;
+    }
+    if (failure_reason != nullptr) {
+        failure_reason->clear();
+    }
+    consume_result_waiter_locked(req_id, result_token);
+    return true;
+}
+
+pg_state_machine::result_tracker_profile pg_state_machine::result_profile() const {
+    std::lock_guard<std::mutex> lk(result_mu_);
+    result_tracker_profile p;
+    p.req_id_map_size_current = result_token_by_req_id_.size();
+    p.req_id_map_size_max = req_id_map_size_max_;
+    p.result_token_map_size_current = req_ids_by_result_token_.size();
+    p.result_token_map_size_max = result_token_map_size_max_;
+    return p;
 }
 
 void pg_state_machine::register_result_batch(uint64_t result_token, size_t item_count) {
     if (result_token == 0 || item_count == 0) return;
     std::lock_guard<std::mutex> lk(result_mu_);
+    maybe_cleanup_result_tokens_locked(steady_now_ns());
+    auto old_req_ids = req_ids_by_result_token_.find(result_token);
+    if (old_req_ids != req_ids_by_result_token_.end()) {
+        for (const std::string& req_id : old_req_ids->second) {
+            result_token_by_req_id_.erase(req_id);
+        }
+        req_ids_by_result_token_.erase(old_req_ids);
+    }
     pending_result_counts_[result_token] = item_count;
+    outstanding_waiters_[result_token] = result_waiter_count(item_count);
     completed_result_tokens_.erase(result_token);
     failed_result_tokens_.erase(result_token);
+    completed_at_ns_.erase(result_token);
+    update_result_tracker_highwater_locked();
+}
+
+void pg_state_machine::register_result_batch(
+        uint64_t result_token,
+        const std::vector<client_api_request_item>& items) {
+    if (result_token == 0 || items.empty()) return;
+    std::lock_guard<std::mutex> lk(result_mu_);
+    maybe_cleanup_result_tokens_locked(steady_now_ns());
+    auto old_req_ids = req_ids_by_result_token_.find(result_token);
+    if (old_req_ids != req_ids_by_result_token_.end()) {
+        for (const std::string& req_id : old_req_ids->second) {
+            result_token_by_req_id_.erase(req_id);
+        }
+        req_ids_by_result_token_.erase(old_req_ids);
+    }
+    pending_result_counts_[result_token] = items.size();
+    outstanding_waiters_[result_token] = result_waiter_count(items.size());
+    completed_result_tokens_.erase(result_token);
+    failed_result_tokens_.erase(result_token);
+    completed_at_ns_.erase(result_token);
+    std::vector<std::string>& req_ids = req_ids_by_result_token_[result_token];
+    req_ids.reserve(items.size());
+    for (const client_api_request_item& item : items) {
+        if (!item.req_id.empty()) {
+            result_token_by_req_id_[item.req_id] = result_token;
+            req_ids.push_back(item.req_id);
+        }
+    }
+    update_result_tracker_highwater_locked();
+    result_cv_.notify_all();
 }
 
 void pg_state_machine::note_result_applied(uint64_t result_token) {
@@ -487,6 +609,9 @@ void pg_state_machine::note_result_applied(uint64_t result_token) {
     }
     pending_result_counts_.erase(it);
     completed_result_tokens_.insert(result_token);
+    const uint64_t now_ns = steady_now_ns();
+    completed_at_ns_[result_token] = now_ns;
+    maybe_cleanup_result_tokens_locked(now_ns);
     result_cv_.notify_all();
 }
 
@@ -496,8 +621,94 @@ void pg_state_machine::note_result_failed(uint64_t result_token, const std::stri
     pending_result_counts_.erase(result_token);
     completed_result_tokens_.erase(result_token);
     failed_result_tokens_[result_token] = reason.empty() ? "safe_protocol_failure_retryable" : reason;
+    const uint64_t now_ns = steady_now_ns();
+    completed_at_ns_[result_token] = now_ns;
+    maybe_cleanup_result_tokens_locked(now_ns);
     result_cv_.notify_all();
 }
+
+void pg_state_machine::consume_result_waiter_locked(const std::string& req_id,
+                                                    uint64_t result_token) {
+    result_token_by_req_id_.erase(req_id);
+
+    auto waiter = outstanding_waiters_.find(result_token);
+    if (waiter == outstanding_waiters_.end()) return;
+    if (waiter->second > 1) {
+        --(waiter->second);
+        return;
+    }
+
+    pending_result_counts_.erase(result_token);
+    completed_result_tokens_.erase(result_token);
+    failed_result_tokens_.erase(result_token);
+    outstanding_waiters_.erase(waiter);
+    completed_at_ns_.erase(result_token);
+    req_ids_by_result_token_.erase(result_token);
+}
+
+void pg_state_machine::update_result_tracker_highwater_locked() {
+    req_id_map_size_max_ = std::max(req_id_map_size_max_, result_token_by_req_id_.size());
+    result_token_map_size_max_ =
+        std::max(result_token_map_size_max_, req_ids_by_result_token_.size());
+}
+
+void pg_state_machine::cleanup_result_tokens_locked(uint64_t now_ns, bool force) {
+    const uint64_t ttl_ns = result_token_ttl_ns();
+    for (auto it = completed_at_ns_.begin(); it != completed_at_ns_.end(); ) {
+        const uint64_t result_token = it->first;
+        const uint64_t completed_ns = it->second;
+        if (pending_result_counts_.find(result_token) != pending_result_counts_.end()) {
+            ++it;
+            continue;
+        }
+        if (!force && now_ns < completed_ns + ttl_ns) {
+            ++it;
+            continue;
+        }
+
+        auto req_ids = req_ids_by_result_token_.find(result_token);
+        if (req_ids != req_ids_by_result_token_.end()) {
+            for (const std::string& req_id : req_ids->second) {
+                result_token_by_req_id_.erase(req_id);
+            }
+            req_ids_by_result_token_.erase(req_ids);
+        }
+        completed_result_tokens_.erase(result_token);
+        failed_result_tokens_.erase(result_token);
+        outstanding_waiters_.erase(result_token);
+        it = completed_at_ns_.erase(it);
+    }
+}
+
+void pg_state_machine::maybe_cleanup_result_tokens_locked(uint64_t now_ns) {
+    const uint64_t cleanup_interval_ns = 1000000000ULL;
+    if (last_result_cleanup_ns_ == 0 ||
+        now_ns - last_result_cleanup_ns_ >= cleanup_interval_ns ||
+        completed_at_ns_.size() >= 65536) {
+        cleanup_result_tokens_locked(now_ns, false);
+        last_result_cleanup_ns_ = now_ns;
+    }
+}
+
+#ifdef BUILDING_UNIT_TESTS
+void pg_state_machine::test_force_result_cleanup() {
+    std::lock_guard<std::mutex> lk(result_mu_);
+    cleanup_result_tokens_locked(steady_now_ns(), false);
+}
+
+pg_state_machine::result_tracker_debug_counts
+pg_state_machine::test_result_tracker_counts() const {
+    std::lock_guard<std::mutex> lk(result_mu_);
+    result_tracker_debug_counts counts;
+    counts.pending_result_counts = pending_result_counts_.size();
+    counts.result_token_by_req_id = result_token_by_req_id_.size();
+    counts.completed_result_tokens = completed_result_tokens_.size();
+    counts.failed_result_tokens = failed_result_tokens_.size();
+    counts.outstanding_waiters = outstanding_waiters_.size();
+    counts.completed_at_ns = completed_at_ns_.size();
+    return counts;
+}
+#endif
 
 void pg_state_machine::create_snapshot(nuraft::snapshot& s,
                                        nuraft::async_result<bool>::handler_type& when_done)

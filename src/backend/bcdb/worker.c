@@ -111,6 +111,45 @@ bcdb_safe_postcommit_witness_enabled(void)
 	return cached == 1;
 }
 
+static inline void
+bcdb_update_shared_u64_max(uint64 volatile *field, uint64 value)
+{
+	uint64 cur = __atomic_load_n(field, __ATOMIC_RELAXED);
+
+	while (value > cur &&
+		   !__atomic_compare_exchange_n(field, &cur, value, false,
+										__ATOMIC_RELAXED,
+										__ATOMIC_RELAXED))
+	{
+	}
+}
+
+static inline void
+bcdb_optimistic_worker_begin(void)
+{
+	uint64 active;
+
+	if (block_meta == NULL)
+		return;
+
+	active = __atomic_add_fetch(&block_meta->active_bcdb_workers, 1,
+								__ATOMIC_RELAXED);
+	bcdb_update_shared_u64_max(&block_meta->active_bcdb_workers_max, active);
+	if (active > 1)
+		__atomic_add_fetch(&block_meta->overlapping_bcdb_optimistic_execution, 1,
+						   __ATOMIC_RELAXED);
+}
+
+static inline void
+bcdb_optimistic_worker_end(void)
+{
+	if (block_meta == NULL)
+		return;
+
+	__atomic_sub_fetch(&block_meta->active_bcdb_workers, 1,
+					   __ATOMIC_RELAXED);
+}
+
 static void
 bcdb_emit_apply_attempt_end(unsigned long long log_id,
 							unsigned ord,
@@ -2430,11 +2469,12 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     int condSig = 0;
     int apply_retries = 0;
     bool apply_nonretryable = false;
-    bool apply_terminal_noop = false;
+	bool apply_terminal_noop = false;
 	bool apply_idempotent_noop = false;
     bool published_max_advanced = false;
     bool parse_barrier_done = false;
 	bool in_business_sql_execution = false;
+	bool optimistic_worker_active = false;
     BCTxID retry_wait_committed_txid = -1;
 	bcdb_apply_outcome apply_outcome = BCDB_OUTCOME_OK;
 	char det_err_sqlstate[6] = "XX000";
@@ -2773,6 +2813,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				bcdb_emit_ledger_boundary("ledger_business_sql");
 
 				/* Run business SQL in a subtransaction if ledger is enabled to catch deterministic errors */
+				bcdb_optimistic_worker_begin();
+				optimistic_worker_active = true;
 				in_business_sql_execution = true;
 				if (tx->raft_ledger_enabled)
 				{
@@ -2836,6 +2878,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 					get_write_set(tx, snapshot);
 					bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
 				}
+				bcdb_optimistic_worker_end();
+				optimistic_worker_active = false;
 				in_business_sql_execution = false;
 
                 PTRACE_END(BCDB_PHASE_PARSE_PLAN);
@@ -3367,6 +3411,11 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		char      *message_copy = NULL;
 
         ConditionVariableCancelSleep();
+		if (optimistic_worker_active)
+		{
+			bcdb_optimistic_worker_end();
+			optimistic_worker_active = false;
+		}
 
 		/*
 			* Always preserve the original PostgreSQL error.  Safe-ledger failures
