@@ -1975,7 +1975,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
 		total_us = t_done_us - t_start_us;
 
 		ereport(LOG,
-				(errmsg("PROFILE_BCDB_BLOCK pid=%d block_txs=%d total_ms=%.3f parse_ms=%.3f enqueue_ms=%.3f wait_block_ms=%.3f wait_slot_ms=%.3f format_ms=%.3f slot_wait_avg_us=%.3f slot_wait_p50_us=%lu slot_wait_p95_us=%lu slot_wait_max_us=%lu",
+				(errmsg("PROFILE_BCDB_BLOCK pid=%d block_txs=%d total_ms=%.3f parse_ms=%.3f enqueue_ms=%.3f wait_block_ms=%.3f wait_slot_ms=%.3f format_ms=%.3f slot_wait_avg_us=%.3f slot_wait_p50_us=%lu slot_wait_p95_us=%lu slot_wait_max_us=%lu active_BCDB_workers_current=%lu active_BCDB_workers_max=%lu overlapping_BCDB_optimistic_execution=%lu",
 						(int) getpid(),
 						num_tx,
 						total_us / 1000.0,
@@ -1989,7 +1989,13 @@ bcdb_middleware_submit_block_results(const char* block_json)
 							: 0.0,
 						(unsigned long) slot_wait_p50_us,
 						(unsigned long) slot_wait_p95_us,
-						(unsigned long) slot_wait_max_us)));
+						(unsigned long) slot_wait_max_us,
+						(unsigned long) __atomic_load_n(&block_meta->active_bcdb_workers,
+														 __ATOMIC_RELAXED),
+						(unsigned long) __atomic_load_n(&block_meta->active_bcdb_workers_max,
+														 __ATOMIC_RELAXED),
+						(unsigned long) __atomic_load_n(&block_meta->overlapping_bcdb_optimistic_execution,
+														 __ATOMIC_RELAXED))));
 		if (slot_wait_us != NULL)
 			pfree(slot_wait_us);
 	}
@@ -2475,6 +2481,9 @@ bcdb_clear_block_txs_store()
 	block_meta->previous_report_commit = 0;
 	block_meta->previous_report_ts = 0;
 	block_meta->next_enqueue_block_id = BCDB_FIRST_SUBMIT_BLOCK_ID;
+	block_meta->active_bcdb_workers = 0;
+	block_meta->active_bcdb_workers_max = 0;
+	block_meta->overlapping_bcdb_optimistic_execution = 0;
 	start_time = bcdb_get_time();
 	set_num_tx_sub(0);
 	set_num_txqd(0);

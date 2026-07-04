@@ -19,6 +19,28 @@
 
 namespace ariabc_raft {
 
+namespace {
+
+void profile_atomic_max(std::atomic<uint64_t>& target, uint64_t value) {
+    uint64_t cur = target.load(std::memory_order_relaxed);
+    while (value > cur &&
+           !target.compare_exchange_weak(cur,
+                                         value,
+                                         std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+uint64_t percentile_ns(std::vector<uint64_t> samples, double pct) {
+    if (samples.empty()) return 0;
+    std::sort(samples.begin(), samples.end());
+    const double raw_idx = (pct / 100.0) * static_cast<double>(samples.size() - 1);
+    const size_t idx = static_cast<size_t>(raw_idx + 0.5);
+    return samples[idx >= samples.size() ? samples.size() - 1 : idx];
+}
+
+} // namespace
+
 static bool parse_segment_filename(const std::string& name, uint64_t& fidx, uint64_t& gen) {
     if (name.find("segment_") != 0) return false;
     if (name.length() < 4 || name.compare(name.length() - 4, 4, ".log") != 0) return false;
@@ -224,6 +246,7 @@ void durable_log_store::rotate_segment_if_needed(uint64_t first_record_index) {
         return;
     }
     if (segments_.back().size >= max_segment_size_) {
+        profile_.segment_rollovers.fetch_add(1, std::memory_order_relaxed);
         create_segment(first_record_index);
     }
 }
@@ -374,7 +397,18 @@ nuraft::ulong durable_log_store::append(nuraft::ptr<nuraft::log_entry>& entry) {
     buf->pos(0);
     ::memcpy(payload.data(), buf->data(), buf->size());
 
+    const auto w0 = std::chrono::steady_clock::now();
     write_entry_record(idx, entry->get_term(), payload);
+    const auto w1 = std::chrono::steady_clock::now();
+    const uint64_t write_ns =
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
+    profile_.append_write_total_ns.fetch_add(write_ns, std::memory_order_relaxed);
+    profile_atomic_max(profile_.append_write_max_ns, write_ns);
+    {
+        std::lock_guard<std::mutex> sample_lk(latency_samples_mu_);
+        append_write_samples_ns_.push_back(write_ns);
+    }
 
     logs_[idx] = make_clone(entry);
     dirty_ = true;
@@ -626,6 +660,30 @@ void durable_log_store::close() {
 nuraft::ulong durable_log_store::last_durable_index() {
     std::lock_guard<std::mutex> l(mu_);
     return last_durable_idx_;
+}
+
+log_store_latency_profile durable_log_store::latency_profile() const {
+    std::vector<uint64_t> append_write_samples;
+    std::vector<uint64_t> fdatasync_samples;
+    std::vector<uint64_t> directory_fsync_samples;
+    {
+        std::lock_guard<std::mutex> l(latency_samples_mu_);
+        append_write_samples = append_write_samples_ns_;
+        fdatasync_samples = fdatasync_samples_ns_;
+        directory_fsync_samples = directory_fsync_samples_ns_;
+    }
+
+    log_store_latency_profile out;
+    out.append_write_p50_ns = percentile_ns(append_write_samples, 50.0);
+    out.append_write_p95_ns = percentile_ns(append_write_samples, 95.0);
+    out.append_write_p99_ns = percentile_ns(append_write_samples, 99.0);
+    out.fdatasync_p50_ns = percentile_ns(fdatasync_samples, 50.0);
+    out.fdatasync_p95_ns = percentile_ns(fdatasync_samples, 95.0);
+    out.fdatasync_p99_ns = percentile_ns(fdatasync_samples, 99.0);
+    out.directory_fsync_p50_ns = percentile_ns(directory_fsync_samples, 50.0);
+    out.directory_fsync_p95_ns = percentile_ns(directory_fsync_samples, 95.0);
+    out.directory_fsync_p99_ns = percentile_ns(directory_fsync_samples, 99.0);
+    return out;
 }
 
 void durable_log_store::end_of_append_batch(nuraft::ulong start, nuraft::ulong cnt) {
@@ -1137,14 +1195,27 @@ void durable_log_store::fdatasync_and_profile(int fd, const std::string& context
     profile_.fdatasync_total_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
     profile_.fdatasync_calls.fetch_add(1, std::memory_order_relaxed);
     profile_.segment_fdatasync_calls.fetch_add(1, std::memory_order_relaxed);
-
-    uint64_t cur_max = profile_.fdatasync_max_ns.load(std::memory_order_relaxed);
-    while (elapsed_ns > cur_max && !profile_.fdatasync_max_ns.compare_exchange_weak(cur_max, elapsed_ns)) {}
+    profile_atomic_max(profile_.fdatasync_max_ns, elapsed_ns);
+    {
+        std::lock_guard<std::mutex> sample_lk(latency_samples_mu_);
+        fdatasync_samples_ns_.push_back(elapsed_ns);
+    }
 }
 
 void durable_log_store::fsync_directory_and_profile(const std::string& path) {
+    const auto d0 = std::chrono::steady_clock::now();
     fsync_directory_or_throw(path);
+    const auto d1 = std::chrono::steady_clock::now();
+    const uint64_t elapsed_ns =
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(d1 - d0).count());
     profile_.directory_fsync_calls.fetch_add(1, std::memory_order_relaxed);
+    profile_.directory_fsync_total_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+    profile_atomic_max(profile_.directory_fsync_max_ns, elapsed_ns);
+    {
+        std::lock_guard<std::mutex> sample_lk(latency_samples_mu_);
+        directory_fsync_samples_ns_.push_back(elapsed_ns);
+    }
 }
 
 void durable_log_store::save_durable_watermark_unlocked() {

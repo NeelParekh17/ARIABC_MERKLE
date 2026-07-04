@@ -70,6 +70,18 @@ struct server_profile_stats {
     std::atomic<uint64_t> append_stall_admission{0};
     std::atomic<uint64_t> append_stall_queue_depth_sum{0};
     std::atomic<uint64_t> append_stall_queue_depth_max{0};
+
+    std::atomic<uint64_t> orderer_arrivals{0};
+    std::atomic<uint64_t> orderer_drains{0};
+    std::atomic<uint64_t> orderer_pending_depth_max{0};
+    std::atomic<uint64_t> orderer_gap_wait_count{0};
+    std::atomic<uint64_t> orderer_gap_wait_ns{0};
+    std::atomic<uint64_t> append_vector_calls{0};
+    std::atomic<uint64_t> append_vector_entries_total{0};
+    std::atomic<uint64_t> append_vector_entries_max{0};
+    std::atomic<uint64_t> orderer_flush_reason_target{0};
+    std::atomic<uint64_t> orderer_flush_reason_linger{0};
+    std::atomic<uint64_t> orderer_flush_reason_idle{0};
 };
 
 server_profile_stats g_prof;
@@ -206,6 +218,27 @@ bool parse_wait_commit_cmd(const std::string& sql,
     return true;
 }
 
+bool parse_wait_result_id_cmd(const std::string& sql,
+                              std::string& out_req_id,
+                              int& out_timeout_ms) {
+    out_req_id.clear();
+    out_timeout_ms = 30000;
+    const std::string prefix = "WAIT_RESULT_ID";
+    if (!starts_with(sql, prefix)) {
+        return false;
+    }
+    std::istringstream iss(sql.substr(prefix.size()));
+    long long timeout = 30000;
+    if (!(iss >> out_req_id)) return false;
+    if (iss >> timeout) {
+        // optional timeout parsed
+    }
+    if (out_req_id.empty()) return false;
+    if (timeout <= 0) timeout = 1;
+    out_timeout_ms = static_cast<int>(timeout);
+    return true;
+}
+
 bool debug_req_trace_enabled() {
     const char* env = ::getenv("ARIABC_DEBUG_REQ_TRACE");
     if (!env || !*env) return false;
@@ -222,6 +255,32 @@ bool env_flag_enabled(const char* name, bool default_value) {
 
 bool raft_ordered_fanout_enabled() {
     return env_flag_enabled("ARIABC_RAFT_ORDERED_FANOUT", false);
+}
+
+bool raft_ordered_batch_append_enabled() {
+    return env_flag_enabled("ARIABC_RAFT_ORDERED_BATCH_APPEND", false);
+}
+
+bool raft_ordered_coalesce_log_enabled() {
+    return env_flag_enabled("ARIABC_RAFT_ORDERED_COALESCE_LOG", false);
+}
+
+uint64_t env_u64(const char* name, uint64_t default_value) {
+    const char* env = ::getenv(name);
+    if (!env || !*env) return default_value;
+    try {
+        return static_cast<uint64_t>(std::stoull(env));
+    } catch (...) {
+        return default_value;
+    }
+}
+
+uint64_t raft_ordered_batch_target_entries() {
+    return env_u64("ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES", 1);
+}
+
+uint64_t raft_ordered_batch_linger_us() {
+    return env_u64("ARIABC_RAFT_ORDERED_BATCH_LINGER_US", 0);
 }
 
 uint64_t det_order_start_seq() {
@@ -586,6 +645,9 @@ void append_request_to_raft(nuraft::ptr<nuraft::raft_server> raft,
     }
 
     g_prof.append_calls.fetch_add(1, std::memory_order_relaxed);
+    g_prof.append_vector_calls.fetch_add(1, std::memory_order_relaxed);
+    g_prof.append_vector_entries_total.fetch_add(1, std::memory_order_relaxed);
+    atomic_max_u64(g_prof.append_vector_entries_max, 1);
     const auto a0 = std::chrono::steady_clock::now();
     nuraft::ptr<nuraft::cmd_result<nuraft::ptr<nuraft::buffer>>> r =
         raft->append_entries({log});
@@ -619,14 +681,12 @@ void append_request_to_raft(nuraft::ptr<nuraft::raft_server> raft,
         return;
     }
 
-    // Fast path: once accepted by current leader, return immediately.
-    // Correctness is enforced in gateway by waiting for majority result
-    // replies from all nodes (via vote_store), not by this immediate ACK.
-    const uint64_t raft_log_idx = static_cast<uint64_t>(raft->get_last_log_idx());
+    const uint64_t raft_log_idx_hint =
+        static_cast<uint64_t>(raft->get_last_log_idx());
     resp.status = 0;
     resp.msg = "ACCEPTED accepted=1 leader=" + std::to_string(raft->get_leader()) +
                " leader_id=" + std::to_string(raft->get_leader()) +
-               " raft_log_idx=" + std::to_string(raft_log_idx) +
+               " raft_log_idx=" + std::to_string(raft_log_idx_hint) +
                " batch_items=" + std::to_string(req.item_count());
 }
 
@@ -637,6 +697,200 @@ struct raft_ordered_entry {
     client_api_response resp;
     bool done = false;
 };
+
+client_api_request coalesce_raft_ordered_entries(
+    const std::vector<std::shared_ptr<raft_ordered_entry>>& entries) {
+    client_api_request out;
+    size_t item_count = 0;
+    for (const std::shared_ptr<raft_ordered_entry>& entry : entries) {
+        item_count += entry->req.item_count();
+    }
+    out.batch_items.reserve(item_count);
+    for (const std::shared_ptr<raft_ordered_entry>& entry : entries) {
+        if (entry->req.is_batch()) {
+            out.batch_items.insert(out.batch_items.end(),
+                                   entry->req.batch_items.begin(),
+                                   entry->req.batch_items.end());
+        } else {
+            client_api_request_item item;
+            item.req_id = entry->req.req_id;
+            item.sql = entry->req.sql;
+            out.batch_items.push_back(std::move(item));
+        }
+    }
+    return out;
+}
+
+void append_requests_to_raft_batch(
+    nuraft::ptr<nuraft::raft_server> raft,
+    pg_state_machine* psm,
+    const std::vector<std::shared_ptr<raft_ordered_entry>>& entries) {
+    if (entries.empty()) {
+        return;
+    }
+    if (entries.size() == 1) {
+        append_request_to_raft(raft, psm, entries.front()->req, entries.front()->resp);
+        return;
+    }
+    if (raft_ordered_coalesce_log_enabled()) {
+        client_api_request coalesced = coalesce_raft_ordered_entries(entries);
+        client_api_response batch_resp;
+        append_request_to_raft(raft, psm, coalesced, batch_resp);
+        std::cerr << "SAFE_RAFT_ORDERER_COALESCE_LOG"
+                  << " status=" << static_cast<int>(batch_resp.status)
+                  << " entries=" << entries.size()
+                  << " items=" << coalesced.item_count()
+                  << " first_seq=" << entries.front()->first_seq
+                  << " last_seq=" << entries.back()->last_seq
+                  << std::endl;
+        for (std::shared_ptr<raft_ordered_entry> entry : entries) {
+            entry->resp = batch_resp;
+            if (entry->resp.status == 0) {
+                entry->resp.msg +=
+                    " raft_coalesced_entries=" + std::to_string(entries.size()) +
+                    " raft_coalesced_items=" + std::to_string(coalesced.item_count());
+            }
+        }
+        return;
+    }
+
+    for (std::shared_ptr<raft_ordered_entry> entry : entries) {
+        entry->resp = client_api_response();
+    }
+    if (!raft) {
+        for (std::shared_ptr<raft_ordered_entry> entry : entries) {
+            entry->resp.status = 1;
+            entry->resp.msg = "NO_RAFT_SERVER";
+        }
+        return;
+    }
+
+    wait_for_admission_drain(psm);
+
+    std::vector<nuraft::ptr<nuraft::buffer>> logs;
+    logs.reserve(entries.size());
+    const int leader_hint = raft->get_leader();
+    for (std::shared_ptr<raft_ordered_entry> entry : entries) {
+        std::string err;
+        nuraft::ptr<nuraft::buffer> log =
+            build_raft_request_log(entry->req, leader_hint, err);
+        if (!log) {
+            entry->resp.status = 2;
+            entry->resp.msg = err.empty() ? std::string("LOG_BUILD_FAILED") : err;
+            for (std::shared_ptr<raft_ordered_entry> blocked : entries) {
+                if (blocked.get() != entry.get()) {
+                    blocked->resp.status = 1;
+                    blocked->resp.msg = "RAFT_BATCH_BUILD_BLOCKED first_seq=" +
+                                        std::to_string(blocked->first_seq) +
+                                        " blocked_by=" +
+                                        std::to_string(entry->first_seq);
+                }
+            }
+            return;
+        }
+        logs.push_back(log);
+    }
+
+    g_prof.append_calls.fetch_add(static_cast<uint64_t>(logs.size()),
+                                  std::memory_order_relaxed);
+    g_prof.append_vector_calls.fetch_add(1, std::memory_order_relaxed);
+    g_prof.append_vector_entries_total.fetch_add(static_cast<uint64_t>(logs.size()),
+                                                 std::memory_order_relaxed);
+    atomic_max_u64(g_prof.append_vector_entries_max,
+                   static_cast<uint64_t>(logs.size()));
+    const auto a0 = std::chrono::steady_clock::now();
+    nuraft::ptr<nuraft::cmd_result<nuraft::ptr<nuraft::buffer>>> r =
+        raft->append_entries(logs);
+    const auto a1 = std::chrono::steady_clock::now();
+    g_prof.append_ns.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(a1 - a0).count()),
+        std::memory_order_relaxed);
+
+    const bool accepted = r && r->get_accepted();
+    const int result_code = r ? static_cast<int>(r->get_result_code()) : -1;
+    const uint64_t raft_log_idx_hint =
+        static_cast<uint64_t>(raft->get_last_log_idx());
+    std::cerr << "SAFE_RAFT_APPEND_BATCH_RESULT"
+              << " accepted=" << (accepted ? 1 : 0)
+              << " code=" << result_code
+              << " leader=" << raft->get_leader()
+              << " last_log_idx=" << raft_log_idx_hint
+              << " entries=" << entries.size()
+              << " first_seq=" << entries.front()->first_seq
+              << " last_seq=" << entries.back()->last_seq
+              << std::endl;
+
+    if (!accepted) {
+        g_prof.append_not_accepted.fetch_add(static_cast<uint64_t>(entries.size()),
+                                             std::memory_order_relaxed);
+        for (std::shared_ptr<raft_ordered_entry> entry : entries) {
+            entry->resp.status = 1;
+            entry->resp.msg =
+                "NOT_ACCEPTED code=" + std::to_string(result_code) +
+                " accepted=0 leader=" + std::to_string(raft->get_leader()) +
+                " leader_id=" + std::to_string(raft->get_leader()) +
+                " raft_log_idx=0";
+        }
+        return;
+    }
+
+    for (std::shared_ptr<raft_ordered_entry> entry : entries) {
+        entry->resp.status = 0;
+        entry->resp.msg =
+            "ACCEPTED accepted=1 leader=" + std::to_string(raft->get_leader()) +
+            " leader_id=" + std::to_string(raft->get_leader()) +
+            " raft_log_idx=" + std::to_string(raft_log_idx_hint) +
+            " batch_items=" + std::to_string(entry->req.item_count()) +
+            " raft_append_batch_entries=" + std::to_string(entries.size());
+    }
+}
+
+void maybe_wait_for_terminal_result(pg_state_machine* psm,
+                                    const client_api_request& req,
+                                    client_api_response& resp,
+                                    const char* completion_source) {
+    if (!psm || !req.wait_for_terminal || resp.status != 0) {
+        return;
+    }
+    if (req.is_batch()) {
+        resp.status = 1;
+        resp.msg = "FUSED_WAIT_UNSUPPORTED_BATCH";
+        return;
+    }
+    if (req.req_id.empty()) {
+        resp.status = 1;
+        resp.msg = "FUSED_WAIT_MISSING_REQ_ID";
+        return;
+    }
+
+    uint32_t timeout_ms_u32 = req.terminal_timeout_ms;
+    if (timeout_ms_u32 == 0) {
+        timeout_ms_u32 = 30000;
+    }
+    if (timeout_ms_u32 > 600000) {
+        timeout_ms_u32 = 600000;
+    }
+
+    std::string failure_reason;
+    if (psm->wait_for_result_id(req.req_id,
+                                static_cast<int>(timeout_ms_u32),
+                                &failure_reason)) {
+        resp.status = 0;
+        resp.msg = "WAIT_RESULT_ID_OK state=COMPLETED completion_source=" +
+                   std::string(completion_source) +
+                   " req_id=" + req.req_id;
+    } else if (!failure_reason.empty()) {
+        resp.status = 1;
+        resp.msg = "WAIT_RESULT_ID_FAILED req_id=" + req.req_id +
+                   " reason=" + failure_reason;
+    } else {
+        const uint64_t cur = static_cast<uint64_t>(psm->last_commit_index());
+        resp.status = 1;
+        resp.msg = "WAIT_RESULT_ID_TIMEOUT cur=" + std::to_string(cur) +
+                   " req_id=" + req.req_id;
+    }
+}
 
 struct raft_orderer {
     std::mutex mu;
@@ -696,6 +950,9 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
         return true;
     }
     orderer.pending.emplace(first_seq, entry);
+    g_prof.orderer_arrivals.fetch_add(1, std::memory_order_relaxed);
+    atomic_max_u64(g_prof.orderer_pending_depth_max,
+                   static_cast<uint64_t>(orderer.pending.size()));
     std::cerr << "SAFE_RAFT_ORDERER_ENQUEUE"
               << " first_seq=" << first_seq
               << " last_seq=" << last_seq
@@ -720,25 +977,88 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
         while (!g_stop.load(std::memory_order_relaxed)) {
             auto it = orderer.pending.find(orderer.next_seq);
             if (it == orderer.pending.end()) break;
-            std::shared_ptr<raft_ordered_entry> ready = it->second;
+            std::vector<std::shared_ptr<raft_ordered_entry>> ready_batch;
+            ready_batch.push_back(it->second);
             orderer.pending.erase(it);
+            bool hit_target = false;
+            bool hit_linger = false;
+            if (raft_ordered_batch_append_enabled()) {
+                auto collect_contiguous = [&]() {
+                    uint64_t want_seq = ready_batch.back()->last_seq + 1;
+                    while (!g_stop.load(std::memory_order_relaxed)) {
+                        auto next_it = orderer.pending.find(want_seq);
+                        if (next_it == orderer.pending.end()) {
+                            break;
+                        }
+                        ready_batch.push_back(next_it->second);
+                        orderer.pending.erase(next_it);
+                        want_seq = ready_batch.back()->last_seq + 1;
+                    }
+                };
+                collect_contiguous();
+
+                const uint64_t target_entries =
+                    std::max<uint64_t>(1, raft_ordered_batch_target_entries());
+                const uint64_t linger_us = raft_ordered_batch_linger_us();
+                hit_target = ready_batch.size() >= target_entries;
+                if (target_entries > 1 &&
+                    linger_us > 0 &&
+                    ready_batch.size() < target_entries) {
+                    const auto deadline =
+                        std::chrono::steady_clock::now() +
+                        std::chrono::microseconds(linger_us);
+                    while (!g_stop.load(std::memory_order_relaxed) &&
+                           ready_batch.size() < target_entries) {
+                        const uint64_t want_seq = ready_batch.back()->last_seq + 1;
+                        if (orderer.pending.find(want_seq) != orderer.pending.end()) {
+                            collect_contiguous();
+                            hit_target = ready_batch.size() >= target_entries;
+                            continue;
+                        }
+                        if (orderer.cv.wait_until(lk, deadline) == std::cv_status::timeout) {
+                            collect_contiguous();
+                            hit_target = ready_batch.size() >= target_entries;
+                            hit_linger = !hit_target;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (hit_target) {
+                g_prof.orderer_flush_reason_target.fetch_add(1, std::memory_order_relaxed);
+            } else if (hit_linger) {
+                g_prof.orderer_flush_reason_linger.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                g_prof.orderer_flush_reason_idle.fetch_add(1, std::memory_order_relaxed);
+            }
 
             std::cerr << "SAFE_RAFT_ORDERER_DRAIN"
-                      << " first_seq=" << ready->first_seq
-                      << " last_seq=" << ready->last_seq
+                      << " first_seq=" << ready_batch.front()->first_seq
+                      << " last_seq=" << ready_batch.back()->last_seq
                       << " next_seq=" << orderer.next_seq
+                      << " entries=" << ready_batch.size()
                       << std::endl;
+            g_prof.orderer_drains.fetch_add(1, std::memory_order_relaxed);
             lk.unlock();
-            append_request_to_raft(raft, psm, ready->req, ready->resp);
+            append_requests_to_raft_batch(raft, psm, ready_batch);
             lk.lock();
 
-            ready->done = true;
-            if (ready->resp.status != 0) {
-                fail_pending_after(ready->first_seq);
+            bool failed = false;
+            uint64_t blocker_seq = ready_batch.front()->first_seq;
+            for (std::shared_ptr<raft_ordered_entry> ready : ready_batch) {
+                ready->done = true;
+                if (ready->resp.status != 0 && !failed) {
+                    failed = true;
+                    blocker_seq = ready->first_seq;
+                }
+            }
+            if (failed) {
+                fail_pending_after(blocker_seq);
+                orderer.cv.notify_all();
                 break;
             }
 
-            orderer.next_seq = ready->last_seq + 1;
+            orderer.next_seq = ready_batch.back()->last_seq + 1;
             std::cerr << "SAFE_RAFT_ORDERER_ADVANCE"
                       << " next_seq=" << orderer.next_seq
                       << std::endl;
@@ -748,9 +1068,24 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
     };
 
     drain_ready();
+    bool gap_wait = false;
+    std::chrono::steady_clock::time_point gap_wait_start;
+    if (!entry->done && orderer.pending.find(orderer.next_seq) == orderer.pending.end()) {
+        gap_wait = true;
+        gap_wait_start = std::chrono::steady_clock::now();
+        g_prof.orderer_gap_wait_count.fetch_add(1, std::memory_order_relaxed);
+    }
     orderer.cv.wait(lk, [&] {
         return entry->done || g_stop.load(std::memory_order_relaxed);
     });
+    if (gap_wait) {
+        const auto gap_wait_end = std::chrono::steady_clock::now();
+        g_prof.orderer_gap_wait_ns.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    gap_wait_end - gap_wait_start).count()),
+            std::memory_order_relaxed);
+    }
     if (!entry->done) {
         out_resp.status = 1;
         out_resp.msg = "RAFT_ORDERER_STOPPED first_seq=" + std::to_string(first_seq);
@@ -808,6 +1143,34 @@ void handle_client_fd(int fd,
             client_api_response resp;
             resp.status = 0;
             resp.msg = std::to_string(static_cast<uint64_t>(psm->last_commit_index()));
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
+        if (psm && starts_with(req.sql, "WAIT_RESULT_ID")) {
+            std::string wait_req_id;
+            int timeout_ms = 30000;
+            client_api_response resp;
+            if (!parse_wait_result_id_cmd(req.sql, wait_req_id, timeout_ms)) {
+                resp.status = 1;
+                resp.msg = "INVALID_WAIT_RESULT_ID_COMMAND";
+            } else {
+                std::string failure_reason;
+                if (psm->wait_for_result_id(wait_req_id, timeout_ms, &failure_reason)) {
+                    resp.status = 0;
+                    resp.msg = "WAIT_RESULT_ID_OK state=COMPLETED completion_source=apply_complete req_id=" +
+                               wait_req_id;
+                } else if (!failure_reason.empty()) {
+                    resp.status = 1;
+                    resp.msg = "WAIT_RESULT_ID_FAILED req_id=" + wait_req_id +
+                               " reason=" + failure_reason;
+                } else {
+                    const uint64_t cur = static_cast<uint64_t>(psm->last_commit_index());
+                    resp.status = 1;
+                    resp.msg = "WAIT_RESULT_ID_TIMEOUT cur=" + std::to_string(cur) +
+                               " req_id=" + wait_req_id;
+                }
+            }
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
             continue;
@@ -879,6 +1242,7 @@ void handle_client_fd(int fd,
         if (!orderer || !append_raft_ordered(raft, psm, req, *orderer, resp)) {
             append_request_to_raft(raft, psm, req, resp);
         }
+        maybe_wait_for_terminal_result(psm, req, resp, "fused_apply_complete");
 
         const auto w0 = std::chrono::steady_clock::now();
         const bool ok_write = write_response_frame(fd, resp, err);
@@ -1069,6 +1433,34 @@ void handle_client_fd_direct(int fd,
             if (!ok_write) break;
             continue;
         }
+        if (starts_with(req.sql, "WAIT_RESULT_ID")) {
+            std::string wait_req_id;
+            int timeout_ms = 30000;
+            client_api_response resp;
+            if (!parse_wait_result_id_cmd(req.sql, wait_req_id, timeout_ms)) {
+                resp.status = 1;
+                resp.msg = "INVALID_WAIT_RESULT_ID_COMMAND";
+            } else {
+                std::string failure_reason;
+                if (psm->wait_for_result_id(wait_req_id, timeout_ms, &failure_reason)) {
+                    resp.status = 0;
+                    resp.msg = "WAIT_RESULT_ID_OK state=COMPLETED completion_source=direct_apply req_id=" +
+                               wait_req_id;
+                } else if (!failure_reason.empty()) {
+                    resp.status = 1;
+                    resp.msg = "WAIT_RESULT_ID_FAILED req_id=" + wait_req_id +
+                               " reason=" + failure_reason;
+                } else {
+                    const uint64_t cur = seq_counter.load(std::memory_order_relaxed);
+                    resp.status = 1;
+                    resp.msg = "WAIT_RESULT_ID_TIMEOUT cur=" + std::to_string(cur) +
+                               " req_id=" + wait_req_id;
+                }
+            }
+            const bool ok_write = write_response_frame(fd, resp, err);
+            if (!ok_write) break;
+            continue;
+        }
         if (starts_with(req.sql, "__ARIABC_CTRL_WAIT_COMMIT_INDEX") || starts_with(req.sql, "WAIT_RESULT")) {
             uint64_t target_idx = 0;
             int timeout_ms = 30000;
@@ -1156,12 +1548,14 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
 
     pg_executor_stats exec;
     kafka_producer_stats kprod;
+    pg_state_machine::result_tracker_profile result_prof;
     if (sm) {
         // Safe in this example: we construct this concrete state machine.
         pg_state_machine* psm = dynamic_cast<pg_state_machine*>(sm.get());
         if (psm) {
             exec = psm->executor_stats();
             kprod = psm->kafka_stats();
+            result_prof = psm->result_profile();
         }
     }
 
@@ -1183,6 +1577,10 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " append_stall_ms=" << (g_prof.append_stall_ns.load(std::memory_order_relaxed) / 1000000.0)
         << " append_stall_max_ms=" << (g_prof.append_stall_max_ns.load(std::memory_order_relaxed) / 1000000.0)
         << " append_stall_reason_admission=" << g_prof.append_stall_admission.load(std::memory_order_relaxed)
+        << " req_id_map_size_current=" << result_prof.req_id_map_size_current
+        << " req_id_map_size_max=" << result_prof.req_id_map_size_max
+        << " result_token_map_size_current=" << result_prof.result_token_map_size_current
+        << " result_token_map_size_max=" << result_prof.result_token_map_size_max
         << " append_stall_queue_depth_avg="
         << ((g_prof.append_stall_calls.load(std::memory_order_relaxed) > 0)
                 ? (static_cast<double>(g_prof.append_stall_queue_depth_sum.load(std::memory_order_relaxed)) /
@@ -1193,12 +1591,22 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " exec_calls=" << exec.exec_calls
         << " exec_ms=" << (exec.exec_ns / 1000000.0)
         << " pg_query_ms=" << (exec.pg_query_ns / 1000000.0)
+        << " configured_server_workers=" << exec.threaded_workers_configured
+        << " created_server_workers=" << exec.threaded_workers_created
+        << " unique_owned_pg_connections=" << exec.owned_pg_connections
+        << " concurrent_pqexec_cur=" << exec.concurrent_pqexec_cur
+        << " max_concurrent_PQexec=" << exec.concurrent_pqexec_max
+        << " overlapping_PQexec_intervals=" << exec.overlapping_pqexec_intervals
         << " result_format_ms=" << (exec.result_format_ns / 1000000.0)
         << " retryable_sqlstate_40001=" << exec.retryable_sqlstate_40001
         << " retryable_sqlstate_40P01=" << exec.retryable_sqlstate_40P01
         << " retryable_sqlstate_57014=" << exec.retryable_sqlstate_57014
         << " retry_attempts_total=" << exec.retry_attempts_total
         << " retry_exhausted_total=" << exec.retry_exhausted_total
+        << " enqueue_to_pickup_us=" << (exec.queue_delay_dequeue_ns / 1000.0)
+        << " pickup_to_PQexec_start_us=" << (exec.queue_delay_exec_start_ns / 1000.0)
+        << " PQexec_us=" << (exec.pg_query_ns / 1000.0)
+        << " PQexec_to_completion_notify_us=" << (exec.result_format_ns / 1000.0)
         << " q_wait_ms=" << (exec.q_wait_ns / 1000000.0)
         << " queue_delay_ms=" << (exec.queue_delay_ns / 1000000.0)
         << " queue_delay_dequeue_ms=" << (exec.queue_delay_dequeue_ns / 1000000.0)
@@ -1352,23 +1760,79 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " kafka_delivery_pending_over_32_events=" << exec.kafka_delivery_pending_over_32_events
         << std::endl;
 
+    const uint64_t append_vector_calls =
+        g_prof.append_vector_calls.load(std::memory_order_relaxed);
+    const uint64_t append_vector_entries_total =
+        g_prof.append_vector_entries_total.load(std::memory_order_relaxed);
+    std::cout
+        << "PROFILE_RAFT_ORDERER "
+        << "arrivals=" << g_prof.orderer_arrivals.load(std::memory_order_relaxed)
+        << " ordered_drains=" << g_prof.orderer_drains.load(std::memory_order_relaxed)
+        << " pending_depth_max=" << g_prof.orderer_pending_depth_max.load(std::memory_order_relaxed)
+        << " gap_wait_count=" << g_prof.orderer_gap_wait_count.load(std::memory_order_relaxed)
+        << " gap_wait_ms=" << (g_prof.orderer_gap_wait_ns.load(std::memory_order_relaxed) / 1000000.0)
+        << " append_vector_calls=" << append_vector_calls
+        << " append_vector_entries_total=" << append_vector_entries_total
+        << " append_vector_entries_max=" << g_prof.append_vector_entries_max.load(std::memory_order_relaxed)
+        << " append_vector_entries_avg="
+        << ((append_vector_calls > 0)
+                ? (static_cast<double>(append_vector_entries_total) /
+                   static_cast<double>(append_vector_calls))
+                : 0.0)
+        << " batch_target_entries=" << raft_ordered_batch_target_entries()
+        << " batch_linger_us=" << raft_ordered_batch_linger_us()
+        << " flush_reason_target=" << g_prof.orderer_flush_reason_target.load(std::memory_order_relaxed)
+        << " flush_reason_linger=" << g_prof.orderer_flush_reason_linger.load(std::memory_order_relaxed)
+        << " flush_reason_idle=" << g_prof.orderer_flush_reason_idle.load(std::memory_order_relaxed)
+        << std::endl;
+
     if (smgr) {
         auto d_smgr = std::dynamic_pointer_cast<ariabc_raft::durable_state_mgr>(smgr);
         if (d_smgr) {
             auto lstore = std::dynamic_pointer_cast<ariabc_raft::durable_log_store>(d_smgr->load_log_store());
             if (lstore) {
                 const auto& p = lstore->profile();
+                const auto latency = lstore->latency_profile();
+                const uint64_t fdatasync_calls = p.fdatasync_calls.load();
+                const uint64_t append_batches = p.append_batches.load();
+                const uint64_t append_batch_entries_total = p.append_batch_entries_total.load();
+                const uint64_t bytes_appended = p.bytes_appended.load();
                 std::cout << "PROFILE_RAFT_STORAGE "
                           << "append_calls=" << p.append_calls.load()
-                          << " append_batches=" << p.append_batches.load()
-                          << " bytes_appended=" << p.bytes_appended.load()
-                          << " fdatasync_calls=" << p.fdatasync_calls.load()
+                          << " append_batches=" << append_batches
+                          << " bytes_appended=" << bytes_appended
+                          << " fdatasync_calls=" << fdatasync_calls
                           << " fdatasync_total_ms=" << (p.fdatasync_total_ns.load() / 1000000.0)
                           << " fdatasync_max_ms=" << (p.fdatasync_max_ns.load() / 1000000.0)
+                          << " fdatasync_p50_ms=" << (latency.fdatasync_p50_ns / 1000000.0)
+                          << " fdatasync_p95_ms=" << (latency.fdatasync_p95_ns / 1000000.0)
+                          << " fdatasync_p99_ms=" << (latency.fdatasync_p99_ns / 1000000.0)
+                          << " entries_per_fsync_avg="
+                          << ((fdatasync_calls > 0)
+                                  ? (static_cast<double>(append_batch_entries_total) /
+                                     static_cast<double>(fdatasync_calls))
+                                  : 0.0)
+                          << " bytes_per_fsync_avg="
+                          << ((fdatasync_calls > 0)
+                                  ? (static_cast<double>(bytes_appended) /
+                                     static_cast<double>(fdatasync_calls))
+                                  : 0.0)
+                          << " append_write_ms=" << (p.append_write_total_ns.load() / 1000000.0)
+                          << " append_write_max_ms=" << (p.append_write_max_ns.load() / 1000000.0)
+                          << " append_write_p50_ms=" << (latency.append_write_p50_ns / 1000000.0)
+                          << " append_write_p95_ms=" << (latency.append_write_p95_ns / 1000000.0)
+                          << " append_write_p99_ms=" << (latency.append_write_p99_ns / 1000000.0)
+                          << " append_fsync_ms=" << (p.fdatasync_total_ns.load() / 1000000.0)
+                          << " directory_fsync_ms=" << (p.directory_fsync_total_ns.load() / 1000000.0)
+                          << " directory_fsync_max_ms=" << (p.directory_fsync_max_ns.load() / 1000000.0)
+                          << " directory_fsync_p50_ms=" << (latency.directory_fsync_p50_ns / 1000000.0)
+                          << " directory_fsync_p95_ms=" << (latency.directory_fsync_p95_ns / 1000000.0)
+                          << " directory_fsync_p99_ms=" << (latency.directory_fsync_p99_ns / 1000000.0)
                           << " append_batch_entries_max=" << p.append_batch_entries_max.load()
-                          << " append_batch_entries_total=" << p.append_batch_entries_total.load()
+                          << " append_batch_entries_total=" << append_batch_entries_total
                           << " segment_fdatasync_calls=" << p.segment_fdatasync_calls.load()
                           << " directory_fsync_calls=" << p.directory_fsync_calls.load()
+                          << " segment_rollovers=" << p.segment_rollovers.load()
                           << " truncate_records_written=" << p.truncate_records_written.load()
                           << " tail_repairs=" << p.tail_repairs.load()
                           << " recovery_entries_loaded=" << p.recovery_entries_loaded.load()

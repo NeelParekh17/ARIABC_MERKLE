@@ -55,20 +55,37 @@ struct log_store_profile {
     std::atomic<uint64_t> append_calls{0};
     std::atomic<uint64_t> append_batches{0};
     std::atomic<uint64_t> bytes_appended{0};
+    std::atomic<uint64_t> append_write_total_ns{0};
+    std::atomic<uint64_t> append_write_max_ns{0};
     std::atomic<uint64_t> fdatasync_calls{0};
     std::atomic<uint64_t> fdatasync_total_ns{0};
     std::atomic<uint64_t> fdatasync_max_ns{0};
+    std::atomic<uint64_t> directory_fsync_total_ns{0};
+    std::atomic<uint64_t> directory_fsync_max_ns{0};
     std::atomic<uint64_t> append_batch_entries_max{0};
     std::atomic<uint64_t> append_batch_entries_total{0};
 
     std::atomic<uint64_t> segment_fdatasync_calls{0};
     std::atomic<uint64_t> directory_fsync_calls{0};
+    std::atomic<uint64_t> segment_rollovers{0};
     std::atomic<uint64_t> truncate_records_written{0};
     std::atomic<uint64_t> tail_repairs{0};
     std::atomic<uint64_t> recovery_entries_loaded{0};
 
     // Non-atomic, only read after shutdown.
     uint64_t last_durable_index = 0;
+};
+
+struct log_store_latency_profile {
+    uint64_t append_write_p50_ns = 0;
+    uint64_t append_write_p95_ns = 0;
+    uint64_t append_write_p99_ns = 0;
+    uint64_t fdatasync_p50_ns = 0;
+    uint64_t fdatasync_p95_ns = 0;
+    uint64_t fdatasync_p99_ns = 0;
+    uint64_t directory_fsync_p50_ns = 0;
+    uint64_t directory_fsync_p95_ns = 0;
+    uint64_t directory_fsync_p99_ns = 0;
 };
 
 class durable_log_store : public nuraft::log_store {
@@ -112,6 +129,7 @@ public:
 
     // Profiling access ---------------------------------------------------
     const log_store_profile& profile() const { return profile_; }
+    log_store_latency_profile latency_profile() const;
 
 private:
     // ---- Record types --------------------------------------------------
@@ -234,6 +252,10 @@ private:
 
     // Durability profile.
     log_store_profile profile_;
+    mutable std::mutex latency_samples_mu_;
+    std::vector<uint64_t> append_write_samples_ns_;
+    std::vector<uint64_t> fdatasync_samples_ns_;
+    std::vector<uint64_t> directory_fsync_samples_ns_;
 
     // Track appended range for end_of_append_batch validation.
     uint64_t batch_first_  = 0;

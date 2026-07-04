@@ -85,13 +85,16 @@ public:
     // Bypass-Raft path: directly enqueue a request with a caller-provided
     // monotonic sequence number, skipping Raft log deserialization.
     void direct_enqueue(const std::string& req_id, const std::string& sql, uint64_t seq) {
-        register_result_batch(seq, 1);
+        client_api_request_item item;
+        item.req_id = req_id;
+        item.sql = sql;
+        register_result_batch(seq, std::vector<client_api_request_item>{item});
         executor_.enqueue(req_id, sql, -1, seq);
     }
     void direct_enqueue_batch(const std::vector<client_api_request_item>& items, uint64_t first_seq) {
         if (items.empty()) return;
         const uint64_t last_seq = first_seq + static_cast<uint64_t>(items.size() - 1);
-        register_result_batch(last_seq, items.size());
+        register_result_batch(last_seq, items);
         std::vector<std::string> req_ids;
         std::vector<std::string> sqls;
         req_ids.reserve(items.size());
@@ -126,6 +129,16 @@ public:
     bool wait_for_result(uint64_t result_token,
                          int timeout_ms,
                          std::string* failure_reason = nullptr);
+    bool wait_for_result_id(const std::string& req_id,
+                            int timeout_ms,
+                            std::string* failure_reason = nullptr);
+    struct result_tracker_profile {
+        size_t req_id_map_size_current = 0;
+        size_t req_id_map_size_max = 0;
+        size_t result_token_map_size_current = 0;
+        size_t result_token_map_size_max = 0;
+    };
+    result_tracker_profile result_profile() const;
 
     /*
      * F1: Called by worker after its top-level PostgreSQL commit succeeds
@@ -143,10 +156,40 @@ public:
      */
     void seed_durable_prefix(uint64_t prefix);
 
+#ifdef BUILDING_UNIT_TESTS
+    struct result_tracker_debug_counts {
+        size_t pending_result_counts = 0;
+        size_t result_token_by_req_id = 0;
+        size_t completed_result_tokens = 0;
+        size_t failed_result_tokens = 0;
+        size_t outstanding_waiters = 0;
+        size_t completed_at_ns = 0;
+    };
+
+    void test_register_result_batch(uint64_t result_token,
+                                    const std::vector<client_api_request_item>& items) {
+        register_result_batch(result_token, items);
+    }
+    void test_note_result_applied(uint64_t result_token) {
+        note_result_applied(result_token);
+    }
+    void test_note_result_failed(uint64_t result_token, const std::string& reason) {
+        note_result_failed(result_token, reason);
+    }
+    void test_force_result_cleanup();
+    result_tracker_debug_counts test_result_tracker_counts() const;
+#endif
+
 private:
     void register_result_batch(uint64_t result_token, size_t item_count);
+    void register_result_batch(uint64_t result_token,
+                               const std::vector<client_api_request_item>& items);
     void note_result_applied(uint64_t result_token);
     void note_result_failed(uint64_t result_token, const std::string& reason);
+    void consume_result_waiter_locked(const std::string& req_id, uint64_t result_token);
+    void cleanup_result_tokens_locked(uint64_t now_ns, bool force);
+    void maybe_cleanup_result_tokens_locked(uint64_t now_ns);
+    void update_result_tracker_highwater_locked();
 
     /*
      * F1: try to advance durable_applied_prefix_ over any newly-complete entries.
@@ -173,11 +216,18 @@ private:
     db_options db_opt_;
     int node_id_;
 
-    std::mutex result_mu_;
+    mutable std::mutex result_mu_;
     std::condition_variable result_cv_;
     std::unordered_map<uint64_t, size_t> pending_result_counts_;
+    std::unordered_map<std::string, uint64_t> result_token_by_req_id_;
+    std::unordered_map<uint64_t, std::vector<std::string>> req_ids_by_result_token_;
     std::unordered_set<uint64_t> completed_result_tokens_;
     std::unordered_map<uint64_t, std::string> failed_result_tokens_;
+    std::unordered_map<uint64_t, uint32_t> outstanding_waiters_;
+    std::unordered_map<uint64_t, uint64_t> completed_at_ns_;
+    uint64_t last_result_cleanup_ns_ = 0;
+    size_t req_id_map_size_max_ = 0;
+    size_t result_token_map_size_max_ = 0;
 };
 
 } // namespace ariabc_pg

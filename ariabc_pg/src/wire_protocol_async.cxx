@@ -11,7 +11,9 @@ const uint32_t kMaxReqIdBytes = 16u * 1024u * 1024u;
 const uint32_t kMaxSqlBytes = 64u * 1024u * 1024u;
 const uint32_t kMaxMsgBytes = 16u * 1024u * 1024u;
 const uint32_t kBatchFrameTag = 0xFFFFFFFFu;
+const uint32_t kSingleRequestFrameV2Tag = 0xFFFFFFFEu;
 const uint32_t kMaxBatchItems = 4096u;
+const uint32_t kRequestFlagWaitForTerminal = 0x1u;
 
 bool read_u32_be(const char* p, uint32_t& out) {
     if (!p) return false;
@@ -37,6 +39,17 @@ bool encode_request_frame(const client_api_request& req, std::string& out, std::
             err = "request too large";
             return false;
         }
+        if (req.wait_for_terminal) {
+            out.reserve(20 + req.req_id.size() + req.sql.size());
+            append_u32_be(out, kSingleRequestFrameV2Tag);
+            append_u32_be(out, kRequestFlagWaitForTerminal);
+            append_u32_be(out, req.terminal_timeout_ms);
+            append_u32_be(out, static_cast<uint32_t>(req.req_id.size()));
+            append_u32_be(out, static_cast<uint32_t>(req.sql.size()));
+            if (!req.req_id.empty()) out.append(req.req_id);
+            if (!req.sql.empty()) out.append(req.sql);
+            return true;
+        }
         out.reserve(8 + req.req_id.size() + req.sql.size());
         append_u32_be(out, static_cast<uint32_t>(req.req_id.size()));
         append_u32_be(out, static_cast<uint32_t>(req.sql.size()));
@@ -47,6 +60,10 @@ bool encode_request_frame(const client_api_request& req, std::string& out, std::
 
     if (req.batch_items.empty() || req.batch_items.size() > kMaxBatchItems) {
         err = "invalid batch item count";
+        return false;
+    }
+    if (req.wait_for_terminal) {
+        err = "terminal wait flag is only supported for single-request frames";
         return false;
     }
 
@@ -99,6 +116,36 @@ decode_status try_decode_request_frame(io_buffer& buf, client_api_request& out_r
     out_req.req_id.clear();
     out_req.sql.clear();
     out_req.batch_items.clear();
+    out_req.wait_for_terminal = false;
+    out_req.terminal_timeout_ms = 30000;
+
+    if (header == kSingleRequestFrameV2Tag) {
+        if (avail < 20) return decode_status::NEED_MORE;
+        uint32_t flags = 0;
+        uint32_t timeout_ms = 0;
+        uint32_t req_len = 0;
+        uint32_t sql_len = 0;
+        if (!read_u32_be(p + 4, flags) ||
+            !read_u32_be(p + 8, timeout_ms) ||
+            !read_u32_be(p + 12, req_len) ||
+            !read_u32_be(p + 16, sql_len)) {
+            err = "bad header";
+            return decode_status::ERROR;
+        }
+        if (req_len > kMaxReqIdBytes || sql_len > kMaxSqlBytes) {
+            err = "frame too large";
+            return decode_status::ERROR;
+        }
+        const size_t total = 20ull + static_cast<size_t>(req_len) +
+                             static_cast<size_t>(sql_len);
+        if (avail < total) return decode_status::NEED_MORE;
+        out_req.req_id.assign(p + 20, p + 20 + req_len);
+        out_req.sql.assign(p + 20 + req_len, p + total);
+        out_req.wait_for_terminal = (flags & kRequestFlagWaitForTerminal) != 0;
+        out_req.terminal_timeout_ms = timeout_ms;
+        buf.consume(total);
+        return decode_status::OK;
+    }
 
     if (header != kBatchFrameTag) {
         uint32_t sql_len = 0;

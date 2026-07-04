@@ -11,8 +11,10 @@ namespace {
 const uint32_t kMaxReqIdBytes = 16u * 1024u * 1024u;
 const uint32_t kMaxSqlBytes = 64u * 1024u * 1024u;
 const uint32_t kBatchFrameTag = 0xFFFFFFFFu;
+const uint32_t kSingleRequestFrameV2Tag = 0xFFFFFFFEu;
 const uint32_t kMaxBatchItems = 4096u;
 const char kRaftBatchMarker[] = "__ARIABC_RAFT_BATCH_V1__";
+const uint32_t kRequestFlagWaitForTerminal = 0x1u;
 
 bool read_exact(int fd, void* buf, size_t n, std::string& err) {
     uint8_t* p = reinterpret_cast<uint8_t*>(buf);
@@ -85,9 +87,30 @@ bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
     out_req.req_id.clear();
     out_req.sql.clear();
     out_req.batch_items.clear();
+    out_req.wait_for_terminal = false;
+    out_req.terminal_timeout_ms = 30000;
 
     uint32_t header = 0;
     if (!read_u32(fd, header, err)) return false;
+    if (header == kSingleRequestFrameV2Tag) {
+        uint32_t flags = 0;
+        uint32_t timeout_ms = 0;
+        uint32_t req_len = 0;
+        uint32_t sql_len = 0;
+        if (!read_u32(fd, flags, err)) return false;
+        if (!read_u32(fd, timeout_ms, err)) return false;
+        if (!read_u32(fd, req_len, err)) return false;
+        if (!read_u32(fd, sql_len, err)) return false;
+        if (req_len > kMaxReqIdBytes || sql_len > kMaxSqlBytes) {
+            err = "frame too large";
+            return false;
+        }
+        if (!read_bytes(fd, req_len, out_req.req_id, err)) return false;
+        if (!read_bytes(fd, sql_len, out_req.sql, err)) return false;
+        out_req.wait_for_terminal = (flags & kRequestFlagWaitForTerminal) != 0;
+        out_req.terminal_timeout_ms = timeout_ms;
+        return true;
+    }
     if (header != kBatchFrameTag) {
         uint32_t sql_len = 0;
         const uint32_t req_len = header;
@@ -144,6 +167,17 @@ bool write_request_frame(int fd, const client_api_request& req, std::string& err
             err = "request too large";
             return false;
         }
+        if (req.wait_for_terminal) {
+            const uint32_t flags = kRequestFlagWaitForTerminal;
+            if (!write_u32(fd, kSingleRequestFrameV2Tag, err)) return false;
+            if (!write_u32(fd, flags, err)) return false;
+            if (!write_u32(fd, req.terminal_timeout_ms, err)) return false;
+            if (!write_u32(fd, static_cast<uint32_t>(req.req_id.size()), err)) return false;
+            if (!write_u32(fd, static_cast<uint32_t>(req.sql.size()), err)) return false;
+            if (!req.req_id.empty() && !write_exact(fd, req.req_id.data(), req.req_id.size(), err)) return false;
+            if (!req.sql.empty() && !write_exact(fd, req.sql.data(), req.sql.size(), err)) return false;
+            return true;
+        }
         if (!write_u32(fd, static_cast<uint32_t>(req.req_id.size()), err)) return false;
         if (!write_u32(fd, static_cast<uint32_t>(req.sql.size()), err)) return false;
         if (!req.req_id.empty() && !write_exact(fd, req.req_id.data(), req.req_id.size(), err)) return false;
@@ -151,6 +185,10 @@ bool write_request_frame(int fd, const client_api_request& req, std::string& err
         return true;
     }
 
+    if (req.wait_for_terminal) {
+        err = "terminal wait flag is only supported for single-request frames";
+        return false;
+    }
     if (req.batch_items.empty() || req.batch_items.size() > kMaxBatchItems) {
         err = "invalid batch item count";
         return false;

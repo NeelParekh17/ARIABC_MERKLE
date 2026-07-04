@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -129,6 +130,14 @@ struct gateway_options {
     // 0 => auto (scales to keep total in-flight bounded).
     int nondet_window = 0;
 
+    // Deterministic client mode:
+    //   - event: existing single-process ordered reactor/pipeline.
+    //   - threadpool: N std::thread workers, one persistent blocking socket per
+    //     worker thread, one request outstanding per worker.
+    std::string det_client_mode = "event";
+    int det_client_workers = 0;  // 0 => num_terminals
+    int det_client_inflight = 1;
+
     int total_nodes = 0; // 0 => use nodes.size()
     size_t vote_store_max_entries = 300000;
 
@@ -177,7 +186,7 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>]\n";
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--detClientMode event|threadpool] [--detClientWorkers <n>] [--detClientInflight <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>]\n";
 }
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
@@ -258,6 +267,12 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.det_submit_pipeline = std::stoi(need("--detSubmitPipeline"));
             } else if (a == "--detPipelineDepth") {
                 opt.det_pipeline_depth = std::stoi(need("--detPipelineDepth"));
+            } else if (a == "--detClientMode") {
+                opt.det_client_mode = ariabc_pg::trim_copy(need("--detClientMode"));
+            } else if (a == "--detClientWorkers") {
+                opt.det_client_workers = std::stoi(need("--detClientWorkers"));
+            } else if (a == "--detClientInflight") {
+                opt.det_client_inflight = std::stoi(need("--detClientInflight"));
             } else if (a == "--nondetWindow") {
                 opt.nondet_window = std::stoi(need("--nondetWindow"));
             } else if (a == "--totalNodes") {
@@ -378,6 +393,32 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
         err = "invalid --detPipelineDepth (expected >= 0)";
         return false;
     }
+    if (opt.det_client_mode != "event" && opt.det_client_mode != "threadpool") {
+        err = "invalid --detClientMode (expected event|threadpool)";
+        return false;
+    }
+    if (opt.det_client_workers < 0) {
+        err = "invalid --detClientWorkers (expected >= 0)";
+        return false;
+    }
+    if (opt.det_client_inflight <= 0) {
+        err = "invalid --detClientInflight (expected > 0)";
+        return false;
+    }
+    if (opt.det_client_mode == "threadpool") {
+        if (opt.det_client_inflight != 1) {
+            err = "--detClientMode threadpool requires --detClientInflight 1";
+            return false;
+        }
+        if (opt.submit_mode != "blocking") {
+            err = "--detClientMode threadpool requires --submitMode blocking";
+            return false;
+        }
+        if (opt.det_batch_size != 1) {
+            err = "--detClientMode threadpool requires --detBatchSize 1";
+            return false;
+        }
+    }
     if (opt.nondet_window < 0) {
         err = "invalid --nondetWindow (expected >= 0)";
         return false;
@@ -489,6 +530,13 @@ int connect_tcp(const std::string& host, int port, std::string& err) {
             // Low-latency request/response: avoid Nagle delays on small frames.
             int one = 1;
             (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            struct timeval io_timeout;
+            io_timeout.tv_sec = 35;
+            io_timeout.tv_usec = 0;
+            (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                               &io_timeout, sizeof(io_timeout));
+            (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
+                               &io_timeout, sizeof(io_timeout));
             ::freeaddrinfo(res);
             return fd;
         }
@@ -1016,6 +1064,7 @@ bool parse_kafka_payload_records(const std::string& payload,
             } else {
                 r.hash_algo = "unknown";
             }
+            r.terminal_state = "OK";
             out.push_back(std::move(r));
         }
         return true;
@@ -1069,6 +1118,7 @@ bool parse_kafka_payload_records(const std::string& payload,
             } else {
                 r.hash_algo = "unknown";
             }
+            r.terminal_state = "OK";
             out.push_back(std::move(r));
         }
         return true;
@@ -3219,6 +3269,13 @@ struct submit_profile_stats {
     std::atomic<uint64_t> read_calls{0};
     std::atomic<uint64_t> read_ns{0};
     std::atomic<uint64_t> not_accepted{0};
+    std::atomic<uint64_t> fused_wait_requests{0};
+    std::atomic<uint64_t> submit_to_accept_ns{0};
+    std::atomic<uint64_t> accept_to_terminal_ns{0};
+    std::atomic<uint64_t> terminal_rpc_ns{0};
+    std::atomic<uint64_t> leader_hint_hits{0};
+    std::atomic<uint64_t> leader_redirects{0};
+    std::atomic<uint64_t> follower_forward_attempts{0};
 };
 
 submit_profile_stats g_submit_prof;
@@ -3253,7 +3310,10 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
                        const client_api_request& req,
                        std::string& err,
                        client_api_response* out_resp = nullptr,
-                       size_t* out_node_idx = nullptr)
+                       size_t* out_node_idx = nullptr,
+                       bool wait_result_on_success = false,
+                       int wait_result_timeout_ms = 30000,
+                       bool* out_wait_result_success = nullptr)
 {
     // Reuse one TCP connection per gateway worker thread to avoid:
     // - 20k connect()/close() calls per run.
@@ -3265,6 +3325,9 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
         err = "no nodes";
         return false;
     }
+    if (out_wait_result_success) {
+        *out_wait_result_success = false;
+    }
 
     size_t start = 0;
 
@@ -3274,8 +3337,10 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
     if (elected_leader_idx >= 0 &&
         static_cast<size_t>(elected_leader_idx) < n) {
         start = static_cast<size_t>(elected_leader_idx);
+        g_submit_prof.leader_hint_hits.fetch_add(1, std::memory_order_relaxed);
     } else if (cli.leader_known && cli.leader_idx < n) {
         start = cli.leader_idx;
+        g_submit_prof.leader_hint_hits.fetch_add(1, std::memory_order_relaxed);
     } else if (cli.fd >= 0 && cli.node_idx < n) {
         start = cli.node_idx;
     } else {
@@ -3302,10 +3367,20 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
             cli.node_idx = idx;
         }
 
+        client_api_request send_req = req;
+        const bool fused_terminal_wait =
+            wait_result_on_success && !send_req.is_batch();
+        if (fused_terminal_wait) {
+            send_req.wait_for_terminal = true;
+            send_req.terminal_timeout_ms =
+                static_cast<uint32_t>(std::max(1, wait_result_timeout_ms));
+            g_submit_prof.fused_wait_requests.fetch_add(1, std::memory_order_relaxed);
+        }
+
         std::string werr;
         g_submit_prof.write_calls.fetch_add(1, std::memory_order_relaxed);
         const auto w0 = std::chrono::steady_clock::now();
-        const bool ok_write = write_request_frame(cli.fd, req, werr);
+        const bool ok_write = write_request_frame(cli.fd, send_req, werr);
         const auto w1 = std::chrono::steady_clock::now();
         g_submit_prof.write_ns.fetch_add(
             static_cast<uint64_t>(
@@ -3331,8 +3406,96 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
             err = werr;
             continue;
         }
+        const uint64_t first_rpc_ns =
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(r1 - w0).count());
 
         if (resp.status == 0) {
+            if (wait_result_on_success) {
+                if (fused_terminal_wait &&
+                    resp.msg.rfind("WAIT_RESULT_ID_OK", 0) == 0) {
+                    g_submit_prof.terminal_rpc_ns.fetch_add(first_rpc_ns,
+                                                            std::memory_order_relaxed);
+                    if (out_wait_result_success) {
+                        *out_wait_result_success = true;
+                    }
+                } else {
+                    g_submit_prof.submit_to_accept_ns.fetch_add(first_rpc_ns,
+                                                                std::memory_order_relaxed);
+                    if (req.req_id.empty()) {
+                        err = "direct same-socket wait missing req_id";
+                        cli.close_fd();
+                        if (out_resp) *out_resp = resp;
+                        if (out_node_idx) *out_node_idx = idx;
+                        return out_wait_result_success != nullptr;
+                    }
+
+                    client_api_request wait_req;
+                    wait_req.req_id = req.req_id + "-wait";
+                    wait_req.sql = "WAIT_RESULT_ID " + req.req_id +
+                                   " " + std::to_string(wait_result_timeout_ms);
+
+                    std::string wait_err;
+                    g_submit_prof.write_calls.fetch_add(1, std::memory_order_relaxed);
+                    const auto ww0 = std::chrono::steady_clock::now();
+                    const bool ok_wait_write = write_request_frame(cli.fd, wait_req, wait_err);
+                    const auto ww1 = std::chrono::steady_clock::now();
+                    g_submit_prof.write_ns.fetch_add(
+                        static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                ww1 - ww0).count()),
+                        std::memory_order_relaxed);
+                    if (!ok_wait_write) {
+                        err = "direct same-socket wait write failed: " + wait_err;
+                        cli.close_fd();
+                        if (out_resp) *out_resp = resp;
+                        if (out_node_idx) *out_node_idx = idx;
+                        return out_wait_result_success != nullptr;
+                    }
+
+                    client_api_response wait_resp;
+                    g_submit_prof.read_calls.fetch_add(1, std::memory_order_relaxed);
+                    const auto wr0 = std::chrono::steady_clock::now();
+                    const bool ok_wait_read = read_response_frame(cli.fd, wait_resp, wait_err);
+                    const auto wr1 = std::chrono::steady_clock::now();
+                    g_submit_prof.read_ns.fetch_add(
+                        static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                wr1 - wr0).count()),
+                        std::memory_order_relaxed);
+                    g_submit_prof.terminal_rpc_ns.fetch_add(
+                        static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                wr1 - ww0).count()),
+                        std::memory_order_relaxed);
+                    g_submit_prof.accept_to_terminal_ns.fetch_add(
+                        static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                wr1 - r1).count()),
+                        std::memory_order_relaxed);
+                    if (!ok_wait_read) {
+                        err = "direct same-socket wait read failed: " + wait_err;
+                        cli.close_fd();
+                        if (out_resp) *out_resp = resp;
+                        if (out_node_idx) *out_node_idx = idx;
+                        return out_wait_result_success != nullptr;
+                    }
+                    if (wait_resp.status != 0) {
+                        err = "direct same-socket wait rejected: " + wait_resp.msg;
+                        if (out_resp) *out_resp = resp;
+                        if (out_node_idx) *out_node_idx = idx;
+                        return out_wait_result_success != nullptr;
+                    }
+                    if (out_wait_result_success) {
+                        *out_wait_result_success = true;
+                    }
+                }
+            }
+            if (!wait_result_on_success) {
+                g_submit_prof.submit_to_accept_ns.fetch_add(first_rpc_ns,
+                                                            std::memory_order_relaxed);
+            }
+
             // Sticky leader hint: most requests should go to the leader.
             cli.leader_known = true;
             cli.leader_idx = idx;
@@ -3341,6 +3504,19 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
             return true;
         }
         if (resp.status == 1) {
+            if (wait_result_on_success &&
+                (resp.msg.rfind("WAIT_RESULT_ID_FAILED", 0) == 0 ||
+                 resp.msg.rfind("WAIT_RESULT_ID_TIMEOUT", 0) == 0 ||
+                 resp.msg.rfind("FUSED_WAIT_", 0) == 0)) {
+                if (fused_terminal_wait) {
+                    g_submit_prof.terminal_rpc_ns.fetch_add(first_rpc_ns,
+                                                            std::memory_order_relaxed);
+                }
+                err = "direct fused wait rejected: " + resp.msg;
+                if (out_resp) *out_resp = resp;
+                if (out_node_idx) *out_node_idx = idx;
+                return out_wait_result_success != nullptr;
+            }
             // Not accepted: follower redirect, Raft transient, or admission-control backpressure.
             g_submit_prof.not_accepted.fetch_add(1, std::memory_order_relaxed);
             err = resp.msg;
@@ -3357,6 +3533,11 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
                     }
                 }
                 if (target_idx >= 0 && static_cast<size_t>(target_idx) < n) {
+                    g_submit_prof.leader_redirects.fetch_add(1, std::memory_order_relaxed);
+                    if (static_cast<size_t>(target_idx) != idx) {
+                        g_submit_prof.follower_forward_attempts.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
                     cli.leader_known = true;
                     cli.leader_idx = static_cast<size_t>(target_idx);
                 } else {
@@ -3510,6 +3691,7 @@ bool submit_to_cluster_event(async_cluster_submitter& submitter,
     const int li = g_event_submit_leader_idx.load(std::memory_order_relaxed);
     if (li >= 0 && static_cast<size_t>(li) < n) {
         start = static_cast<size_t>(li);
+        g_submit_prof.leader_hint_hits.fetch_add(1, std::memory_order_relaxed);
     } else {
         start = rr_idx.fetch_add(1) % n;
     }
@@ -3546,6 +3728,11 @@ bool submit_to_cluster_event(async_cluster_submitter& submitter,
                     }
                 }
                 if (target_idx >= 0 && static_cast<size_t>(target_idx) < n) {
+                    g_submit_prof.leader_redirects.fetch_add(1, std::memory_order_relaxed);
+                    if (static_cast<size_t>(target_idx) != idx) {
+                        g_submit_prof.follower_forward_attempts.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
                     g_event_submit_leader_idx.store(target_idx, std::memory_order_relaxed);
                 } else {
                     // Do not translate Raft IDs to endpoint-array indices here.
@@ -4077,10 +4264,13 @@ int main(int argc, char** argv) {
     auto submit_request_quiet = [&](const ariabc_pg::client_api_request& req,
                                     std::string& out_err,
                                     ariabc_pg::client_api_response* out_resp = nullptr,
-                                    size_t* out_node_idx = nullptr) -> bool {
+                                    size_t* out_node_idx = nullptr,
+                                    bool wait_result_on_success = false,
+                                    bool* out_wait_result_success = nullptr) -> bool {
         out_err.clear();
         if (out_resp) *out_resp = ariabc_pg::client_api_response();
         if (out_node_idx) *out_node_idx = 0;
+        if (out_wait_result_success) *out_wait_result_success = false;
         if (opt.broadcast_to_all) {
             // kafka-only-no-raft: broadcast to every node.
             // When the async submitter is available, fan out in parallel
@@ -4096,7 +4286,8 @@ int main(int argc, char** argv) {
                 *submitter, nodes, rr_idx, req, out_err, out_resp, out_node_idx);
         }
         return ariabc_pg::submit_to_cluster(
-            nodes, rr_idx, req, out_err, out_resp, out_node_idx);
+            nodes, rr_idx, req, out_err, out_resp, out_node_idx,
+            wait_result_on_success, 30000, out_wait_result_success);
     };
 
     auto submit_only_quiet = [&](const std::string& req_id,
@@ -4119,9 +4310,13 @@ int main(int argc, char** argv) {
 
     auto submit_request = [&](const ariabc_pg::client_api_request& req,
                               ariabc_pg::client_api_response* out_resp = nullptr,
-                              size_t* out_node_idx = nullptr) -> bool {
+                              size_t* out_node_idx = nullptr,
+                              bool wait_result_on_success = false,
+                              bool* out_wait_result_success = nullptr) -> bool {
         std::string sub_err;
-        if (!submit_request_quiet(req, sub_err, out_resp, out_node_idx)) {
+        if (!submit_request_quiet(req, sub_err, out_resp, out_node_idx,
+                                  wait_result_on_success,
+                                  out_wait_result_success)) {
             std::cerr << "submit failed: " << sub_err << std::endl;
             return false;
         }
@@ -4231,29 +4426,44 @@ int main(int argc, char** argv) {
             return false;
         }
 
-        uint64_t raft_log_idx = 0;
-        if (!ariabc_pg::parse_named_u64_field(submit_resp.msg, "raft_log_idx=", raft_log_idx) ||
-            raft_log_idx == 0) {
-            std::cerr << "direct completion wait missing raft_log_idx for " << req_label
-                      << " msg=" << submit_resp.msg << std::endl;
-            permanent_failures.fetch_add(1);
-            return false;
+        std::string wait_req_id = req_label;
+        const size_t node_suffix = wait_req_id.find("/node");
+        if (node_suffix != std::string::npos) {
+            wait_req_id.resize(node_suffix);
         }
+        const bool can_wait_by_req_id =
+            !wait_req_id.empty() &&
+            wait_req_id != "det_batch" &&
+            wait_req_id != "det_pipeline_batch" &&
+            wait_req_id.find('[') == std::string::npos &&
+            wait_req_id.find(' ') == std::string::npos;
 
-        const std::string wait_cmd =
-            "WAIT_RESULT " + std::to_string(raft_log_idx) + " 30000";
+        uint64_t raft_log_idx = 0;
+        std::string wait_cmd;
+        if (can_wait_by_req_id) {
+            wait_cmd = "WAIT_RESULT_ID " + wait_req_id + " 30000";
+        } else {
+            if (!ariabc_pg::parse_named_u64_field(submit_resp.msg, "raft_log_idx=", raft_log_idx) ||
+                raft_log_idx == 0) {
+                std::cerr << "direct completion wait missing raft_log_idx for " << req_label
+                          << " msg=" << submit_resp.msg << std::endl;
+                permanent_failures.fetch_add(1);
+                return false;
+            }
+            wait_cmd = "WAIT_RESULT " + std::to_string(raft_log_idx) + " 30000";
+        }
         ariabc_pg::client_api_response wait_resp;
         std::string cerr;
         if (!ariabc_pg::send_control_req_to_node(nodes[node_idx], wait_cmd, wait_resp, cerr)) {
             std::cerr << "direct completion wait failed for " << req_label
-                      << " log_idx=" << raft_log_idx
+                      << " wait_cmd=" << wait_cmd
                       << " err=" << cerr << std::endl;
             permanent_failures.fetch_add(1);
             return false;
         }
         if (wait_resp.status != 0) {
             std::cerr << "direct completion wait rejected for " << req_label
-                      << " log_idx=" << raft_log_idx
+                      << " wait_cmd=" << wait_cmd
                       << " msg=" << wait_resp.msg << std::endl;
             permanent_failures.fetch_add(1);
             return false;
@@ -4325,17 +4535,22 @@ int main(int argc, char** argv) {
             return ok_count >= static_cast<int>(quorum);
         };
 
+    std::mutex reset_pending_mu;
     std::unordered_set<uint64_t> reset_pending_reqs;
     auto track_reset_req = [&](uint64_t req_num, const std::string& sql_text) {
         if (ariabc_pg::is_reset_barrier_sql(sql_text)) {
+            std::lock_guard<std::mutex> lk(reset_pending_mu);
             reset_pending_reqs.insert(req_num);
         }
     };
     auto maybe_wait_reset_all_nodes = [&](uint64_t req_num) -> bool {
-        auto it = reset_pending_reqs.find(req_num);
-        if (it == reset_pending_reqs.end()) return true;
+        {
+            std::lock_guard<std::mutex> lk(reset_pending_mu);
+            if (reset_pending_reqs.find(req_num) == reset_pending_reqs.end()) return true;
+        }
         if (!majority_wait_enabled || !kafka_enabled) {
-            reset_pending_reqs.erase(it);
+            std::lock_guard<std::mutex> lk(reset_pending_mu);
+            reset_pending_reqs.erase(req_num);
             return true;
         }
 
@@ -4360,7 +4575,10 @@ int main(int argc, char** argv) {
             return false;
         }
 
-        reset_pending_reqs.erase(it);
+        {
+            std::lock_guard<std::mutex> lk(reset_pending_mu);
+            reset_pending_reqs.erase(req_num);
+        }
         return true;
     };
 
@@ -5042,7 +5260,219 @@ int main(int argc, char** argv) {
                   (event_leader_idx >= 0 &&
                    static_cast<size_t>(event_leader_idx) < nodes.size())));
 
-            if (det_event_pipeline) {
+            const bool det_client_threadpool = (opt.det_client_mode == "threadpool");
+            const size_t det_threadpool_workers =
+                det_client_threadpool
+                    ? std::max<size_t>(
+                          1,
+                          static_cast<size_t>(
+                              opt.det_client_workers > 0
+                                  ? opt.det_client_workers
+                                  : opt.num_terminals))
+                    : 0;
+            std::atomic<size_t> det_gateway_workers_created(0);
+            std::atomic<size_t> det_gateway_active_submits(0);
+            std::atomic<size_t> det_gateway_active_submits_max(0);
+            auto update_size_max = [](std::atomic<size_t>& target, size_t value) {
+                size_t cur = target.load(std::memory_order_relaxed);
+                while (value > cur &&
+                       !target.compare_exchange_weak(cur,
+                                                     value,
+                                                     std::memory_order_relaxed,
+                                                     std::memory_order_relaxed)) {
+                }
+            };
+
+            if (det_client_threadpool) {
+                const bool direct_wait_on_submit_socket =
+                    (!majority_wait_enabled &&
+                     opt.completion_path == "direct" &&
+                     !opt.broadcast_to_all &&
+                     opt.direct_completion_quorum <= 1);
+
+                std::cout << "DET_CLIENT_THREADPOOL_CONFIG"
+                          << " configured_gateway_workers=" << det_threadpool_workers
+                          << " det_client_inflight=" << opt.det_client_inflight
+                          << " unique_gateway_connections=" << det_threadpool_workers
+                          << " det_batch_size=" << opt.det_batch_size
+                          << " submit_mode=" << submit_mode
+                          << std::endl;
+
+                std::atomic<bool> threadpool_failed(false);
+                std::vector<std::thread> client_workers;
+                client_workers.reserve(det_threadpool_workers);
+                for (size_t worker_id = 0; worker_id < det_threadpool_workers; ++worker_id) {
+                    client_workers.emplace_back([&, worker_id] {
+                        det_gateway_workers_created.fetch_add(1, std::memory_order_relaxed);
+                        for (size_t idx = worker_id;
+                             idx < queries.size() &&
+                             !threadpool_failed.load(std::memory_order_acquire);
+                             idx += det_threadpool_workers) {
+                            det_shaped_request item;
+                            item.idx = idx;
+                            if (!shape_det_request(idx, item.req_id, item.req_num, item.sql)) {
+                                threadpool_failed.store(true, std::memory_order_release);
+                                break;
+                            }
+                            ariabc_pg::debug_trace_submit(item.req_num, item.req_id, item.sql);
+
+                            ariabc_pg::client_api_request req;
+                            req.req_id = item.req_id;
+                            req.sql = item.sql;
+
+                            const auto tx_t0 = std::chrono::steady_clock::now();
+                            int tries = 0;
+                            std::chrono::milliseconds backoff(2);
+                            ariabc_pg::client_api_response submit_resp;
+                            size_t submit_node_idx = 0;
+                            while (!threadpool_failed.load(std::memory_order_acquire)) {
+                                const auto submit_t0 = std::chrono::steady_clock::now();
+                                const size_t active_now =
+                                    det_gateway_active_submits.fetch_add(
+                                        1, std::memory_order_relaxed) + 1;
+                                update_size_max(det_gateway_active_submits_max, active_now);
+                                bool same_socket_wait_ok = !direct_wait_on_submit_socket;
+                                std::string submit_err;
+                                const bool ok_submit =
+                                    submit_request_quiet(req, submit_err,
+                                                         &submit_resp,
+                                                         &submit_node_idx,
+                                                         direct_wait_on_submit_socket,
+                                                         &same_socket_wait_ok);
+                                det_gateway_active_submits.fetch_sub(1, std::memory_order_relaxed);
+                                const auto submit_t1 = std::chrono::steady_clock::now();
+                                total_submit_ns.fetch_add(
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        submit_t1 - submit_t0).count());
+                                if (ok_submit) {
+                                    if (direct_wait_on_submit_socket && !same_socket_wait_ok) {
+                                        std::cerr << "det threadpool direct wait failed"
+                                                  << " worker=" << worker_id
+                                                  << " idx=" << idx
+                                                  << " err=" << submit_err
+                                                  << std::endl;
+                                        permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                                        threadpool_failed.store(true, std::memory_order_release);
+                                    }
+                                    break;
+                                }
+                                ++tries;
+                                if (tries % 50 == 0) {
+                                    std::cerr << "det threadpool submit retry"
+                                              << " worker=" << worker_id
+                                              << " idx=" << idx
+                                              << " tries=" << tries
+                                              << std::endl;
+                                }
+                                std::this_thread::sleep_for(backoff);
+                                if (backoff < std::chrono::milliseconds(20)) {
+                                    backoff *= 2;
+                                    if (backoff > std::chrono::milliseconds(20)) {
+                                        backoff = std::chrono::milliseconds(20);
+                                    }
+                                }
+                            }
+                            if (threadpool_failed.load(std::memory_order_acquire)) break;
+
+                            det_sent_count.fetch_add(1, std::memory_order_relaxed);
+                            if (!reset_commit_barrier(item.sql)) {
+                                permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                                threadpool_failed.store(true, std::memory_order_release);
+                                break;
+                            }
+                            det_accepted_count.fetch_add(1, std::memory_order_relaxed);
+
+                            if (majority_wait_enabled) {
+                                votes.note_inflight_registered(item.req_num);
+                                det_inflight_count.fetch_add(1, std::memory_order_relaxed);
+                                track_reset_req(item.req_num, item.sql);
+
+                                std::string maj;
+                                const auto w0 = std::chrono::steady_clock::now();
+                                const bool ok_wait = wait_majority(item.req_num, maj);
+                                const auto w1 = std::chrono::steady_clock::now();
+                                total_majority_wait_ns.fetch_add(
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        w1 - w0).count());
+                                if (!ok_wait) {
+                                    permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                                    det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                                    threadpool_failed.store(true, std::memory_order_release);
+                                    break;
+                                }
+                                if (majority_async_all3_validation) {
+                                    record_async_all3_pending(item.req_num);
+                                    if (fatal_gateway_error.load(std::memory_order_acquire)) {
+                                        det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                                        threadpool_failed.store(true, std::memory_order_release);
+                                        break;
+                                    }
+                                }
+                                if (!wait_strict_all_nodes_for_req(item.req_num)) {
+                                    det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                                    threadpool_failed.store(true, std::memory_order_release);
+                                    break;
+                                }
+                                det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                                det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                                if (!maybe_wait_reset_all_nodes(item.req_num)) {
+                                    permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                                    threadpool_failed.store(true, std::memory_order_release);
+                                    break;
+                                }
+                            } else {
+                                const bool needs_direct_completion_wait =
+                                    !(opt.broadcast_to_all && !majority_wait_enabled) &&
+                                    !direct_wait_on_submit_socket;
+                                if (needs_direct_completion_wait &&
+                                    !wait_direct_completion_quorum(
+                                        submit_node_idx,
+                                        submit_resp,
+                                        item.req_id)) {
+                                    permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                                    threadpool_failed.store(true, std::memory_order_release);
+                                    break;
+                                }
+                                det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                            }
+
+                            const auto tx_t1 = std::chrono::steady_clock::now();
+                            if (opt.qrate > 0) {
+                                const std::chrono::duration<double> target_interval(
+                                    1.0 / static_cast<double>(opt.qrate));
+                                const std::chrono::duration<double> elapsed = tx_t1 - tx_t0;
+                                if (elapsed < target_interval) {
+                                    const auto wait_d = target_interval - elapsed;
+                                    total_wait_ns.fetch_add(
+                                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            wait_d).count());
+                                    std::this_thread::sleep_for(wait_d);
+                                }
+                            } else if (opt.tx_interval_ms > 0) {
+                                std::this_thread::sleep_for(
+                                    std::chrono::milliseconds(opt.tx_interval_ms));
+                            }
+                        }
+                    });
+                }
+                for (auto& th : client_workers) {
+                    if (th.joinable()) th.join();
+                }
+                std::cout << "DET_CLIENT_THREADPOOL_PROFILE"
+                          << " configured_gateway_workers=" << det_threadpool_workers
+                          << " created_gateway_workers="
+                          << det_gateway_workers_created.load(std::memory_order_relaxed)
+                          << " unique_gateway_connections=" << det_threadpool_workers
+                          << " max_active_submits="
+                          << det_gateway_active_submits_max.load(std::memory_order_relaxed)
+                          << std::endl;
+                if (threadpool_failed.load(std::memory_order_acquire)) {
+                    failed = true;
+                } else {
+                    client_completion_end = std::chrono::steady_clock::now();
+                    client_completion_end_set = true;
+                }
+            } else if (det_event_pipeline) {
                 struct det_submit_ticket {
                     std::vector<det_shaped_request> items;
                     std::vector<std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx>> ctxs;
@@ -5915,9 +6345,19 @@ int main(int argc, char** argv) {
         uint64_t sub_write_calls = ariabc_pg::g_submit_prof.write_calls.load(std::memory_order_relaxed);
         uint64_t sub_read_calls = ariabc_pg::g_submit_prof.read_calls.load(std::memory_order_relaxed);
         uint64_t sub_not_acc = ariabc_pg::g_submit_prof.not_accepted.load(std::memory_order_relaxed);
+        uint64_t sub_fused_waits = ariabc_pg::g_submit_prof.fused_wait_requests.load(std::memory_order_relaxed);
+        uint64_t sub_leader_hint_hits = ariabc_pg::g_submit_prof.leader_hint_hits.load(std::memory_order_relaxed);
+        uint64_t sub_leader_redirects = ariabc_pg::g_submit_prof.leader_redirects.load(std::memory_order_relaxed);
+        uint64_t sub_follower_forward_attempts = ariabc_pg::g_submit_prof.follower_forward_attempts.load(std::memory_order_relaxed);
         double sub_conn_ms = ariabc_pg::g_submit_prof.connect_ns.load(std::memory_order_relaxed) / 1000000.0;
         double sub_write_ms = ariabc_pg::g_submit_prof.write_ns.load(std::memory_order_relaxed) / 1000000.0;
         double sub_read_ms = ariabc_pg::g_submit_prof.read_ns.load(std::memory_order_relaxed) / 1000000.0;
+        double sub_submit_to_accept_ms =
+            ariabc_pg::g_submit_prof.submit_to_accept_ns.load(std::memory_order_relaxed) / 1000000.0;
+        double sub_accept_to_terminal_ms =
+            ariabc_pg::g_submit_prof.accept_to_terminal_ns.load(std::memory_order_relaxed) / 1000000.0;
+        double sub_terminal_rpc_ms =
+            ariabc_pg::g_submit_prof.terminal_rpc_ns.load(std::memory_order_relaxed) / 1000000.0;
         if (submitter) {
             const ariabc_pg::async_submitter_stats s = submitter->stats();
             sub_attempts = s.attempts;
@@ -5951,6 +6391,12 @@ int main(int argc, char** argv) {
             << " broadcast_drain_in_timed_run=" << opt.broadcast_drain_in_timed_run
             << " direct_completion_quorum=" << opt.direct_completion_quorum
             << " submit_mode=" << (submitter ? "event" : "blocking")
+            << " det_client_mode=" << opt.det_client_mode
+            << " configured_gateway_workers="
+            << ((opt.det_client_mode == "threadpool")
+                    ? (opt.det_client_workers > 0 ? opt.det_client_workers : opt.num_terminals)
+                    : opt.num_terminals)
+            << " det_client_inflight=" << opt.det_client_inflight
             << " num_terminals=" << opt.num_terminals
             << " det_pipeline_depth=" << prof_det_pipeline_depth
             << " det_batch_size=" << opt.det_batch_size
@@ -5964,6 +6410,14 @@ int main(int argc, char** argv) {
             << " read_calls=" << sub_read_calls
             << " read_ms=" << sub_read_ms
             << " not_accepted=" << sub_not_acc
+            << " fused_wait_requests=" << sub_fused_waits
+            << " submit_mode_detail=" << (sub_fused_waits > 0 ? "fused" : "split")
+            << " submit_to_accept_ms=" << sub_submit_to_accept_ms
+            << " accept_to_terminal_ms=" << sub_accept_to_terminal_ms
+            << " terminal_rpc_ms=" << sub_terminal_rpc_ms
+            << " leader_hint_hits=" << sub_leader_hint_hits
+            << " leader_redirects=" << sub_leader_redirects
+            << " follower_forward_attempts=" << sub_follower_forward_attempts
             << " kafka_msgs=" << kafka_messages.load(std::memory_order_relaxed)
             << " kafka_recs=" << kafka_records.load(std::memory_order_relaxed)
             << " kafka_parse_failures=" << kafka_parse_failures.load(std::memory_order_relaxed)
