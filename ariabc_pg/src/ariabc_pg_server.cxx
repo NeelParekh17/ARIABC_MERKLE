@@ -82,6 +82,8 @@ struct server_profile_stats {
     std::atomic<uint64_t> orderer_flush_reason_target{0};
     std::atomic<uint64_t> orderer_flush_reason_linger{0};
     std::atomic<uint64_t> orderer_flush_reason_idle{0};
+    std::atomic<uint64_t> orderer_leader_assigned_requests{0};
+    std::atomic<uint64_t> orderer_leader_assigned_items{0};
 };
 
 server_profile_stats g_prof;
@@ -283,6 +285,18 @@ uint64_t raft_ordered_batch_linger_us() {
     return env_u64("ARIABC_RAFT_ORDERED_BATCH_LINGER_US", 0);
 }
 
+std::string raft_ordering_policy() {
+    const char* env = ::getenv("ARIABC_RAFT_ORDERING_POLICY");
+    if (!env || !*env) return "preassigned";
+    const std::string policy = trim_copy(env);
+    if (policy.empty()) return "preassigned";
+    return policy;
+}
+
+bool raft_leader_assigned_ordering_enabled() {
+    return raft_ordering_policy() == "leader-assigned";
+}
+
 uint64_t det_order_start_seq() {
     const char* env = ::getenv("ARIABC_DET_ORDER_START_SEQ");
     if (!env || !*env) return 0;
@@ -368,7 +382,7 @@ void usage(const char* argv0) {
         << "    --id <int> --raftEndpoint <host:port> --clientPort <port> \\\n"
         << "    --raftMembers <id=host:port,id=host:port,...> \\\n"
         << "    --dbName <name> --dbPort <port> [--dbHost <host>] [--dbUser <user>] [--dbPass <pass>] \\\n"
-        << "    [--dbType <0|1|2>] [--safedb <0|1|2>] [--dbConnPoolSize <N>] [--pgExecMode threaded|event] \\\n"
+        << "    [--dbType <0|1|2>] [--safedb <0|1|2>] [--dbConnPoolSize <N>] [--bcdbInitBlockSize <legacy-init-arg>] [--pgExecMode threaded|event] \\\n"
         << "    [--kafkaBootstrap <host:port>] [--resultTopic <t>] [--resultSigKey <k>] \\\n"
         << "    [--bypassRaft 0|1]  # skip Raft, direct-enqueue to executor (kafka-only profile)\n"
         << "    [--raft-storage-mode <in_memory|durable>]\n"
@@ -413,6 +427,8 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.db.password = need("--dbPass");
             } else if (a == "--dbConnPoolSize") {
                 opt.db.conn_pool_size = std::stoi(need("--dbConnPoolSize"));
+            } else if (a == "--bcdbInitBlockSize") {
+                opt.db.bcdb_init_block_size = std::stoi(need("--bcdbInitBlockSize"));
             } else if (a == "--pgExecMode") {
                 opt.db.exec_mode = need("--pgExecMode");
             } else if (a == "--kafkaBootstrap") {
@@ -459,6 +475,14 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
     }
     if (opt.db.db_type < 0 || opt.db.db_type > 2) {
         err = "invalid --dbType";
+        return false;
+    }
+    if (opt.db.conn_pool_size <= 0) {
+        err = "invalid --dbConnPoolSize";
+        return false;
+    }
+    if (opt.db.bcdb_init_block_size < 0) {
+        err = "invalid --bcdbInitBlockSize";
         return false;
     }
     {
@@ -715,6 +739,8 @@ client_api_request coalesce_raft_ordered_entries(
             client_api_request_item item;
             item.req_id = entry->req.req_id;
             item.sql = entry->req.sql;
+            item.has_assigned_det_seq = entry->req.has_assigned_det_seq;
+            item.assigned_det_seq = entry->req.assigned_det_seq;
             out.batch_items.push_back(std::move(item));
         }
     }
@@ -898,6 +924,7 @@ struct raft_orderer {
     bool initialized = false;
     bool drained_any = false;
     uint64_t next_seq = 1;
+    uint64_t next_assigned_seq = 1;
     std::map<uint64_t, std::shared_ptr<raft_ordered_entry>> pending;
 };
 
@@ -910,33 +937,49 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
         return false;
     }
 
-    uint64_t first_seq = 0;
-    uint64_t last_seq = 0;
-    if (!parse_det_range_from_request(req, first_seq, last_seq)) {
-        return false;
-    }
-
     std::shared_ptr<raft_ordered_entry> entry(new raft_ordered_entry());
-    entry->req = req;
-    entry->first_seq = first_seq;
-    entry->last_seq = last_seq;
+    const bool leader_assigned = raft_leader_assigned_ordering_enabled();
 
     std::unique_lock<std::mutex> lk(orderer.mu);
     const uint64_t order_start_seq = det_order_start_seq();
-    if (!orderer.initialized) {
-        orderer.initialized = true;
-        // Preflight probes can use high DET ids before the workload restarts.
-        // Do not let an early fanout lane make a later batch the epoch start.
-        orderer.next_seq = (first_seq >= 90000000ULL) ? first_seq : order_start_seq;
-    } else if (orderer.pending.empty() &&
-               first_seq < orderer.next_seq &&
-               !orderer.drained_any) {
-        orderer.next_seq = first_seq;
-    } else if (orderer.pending.empty() &&
-               first_seq < orderer.next_seq &&
-               orderer.next_seq - first_seq > 1000000ULL) {
-        orderer.next_seq = order_start_seq;
+    uint64_t first_seq = 0;
+    uint64_t last_seq = 0;
+    if (leader_assigned) {
+        if (!orderer.initialized) {
+            orderer.initialized = true;
+            orderer.next_seq = order_start_seq;
+            orderer.next_assigned_seq = order_start_seq;
+        }
+        first_seq = orderer.next_assigned_seq;
+        last_seq = first_seq + static_cast<uint64_t>(req.item_count() - 1);
+        entry->req = req;
+        orderer.next_assigned_seq = last_seq + 1;
+        g_prof.orderer_leader_assigned_requests.fetch_add(1, std::memory_order_relaxed);
+        g_prof.orderer_leader_assigned_items.fetch_add(entry->req.item_count(),
+                                                       std::memory_order_relaxed);
+    } else {
+        if (!parse_det_range_from_request(req, first_seq, last_seq)) {
+            return false;
+        }
+        entry->req = req;
+
+        if (!orderer.initialized) {
+            orderer.initialized = true;
+            // Preflight probes can use high DET ids before the workload restarts.
+            // Do not let an early fanout lane make a later batch the epoch start.
+            orderer.next_seq = (first_seq >= 90000000ULL) ? first_seq : order_start_seq;
+        } else if (orderer.pending.empty() &&
+                   first_seq < orderer.next_seq &&
+                   !orderer.drained_any) {
+            orderer.next_seq = first_seq;
+        } else if (orderer.pending.empty() &&
+                   first_seq < orderer.next_seq &&
+                   orderer.next_seq - first_seq > 1000000ULL) {
+            orderer.next_seq = order_start_seq;
+        }
     }
+    entry->first_seq = first_seq;
+    entry->last_seq = last_seq;
 
     if (first_seq < orderer.next_seq) {
         out_resp.status = 1;
@@ -1070,7 +1113,9 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
     drain_ready();
     bool gap_wait = false;
     std::chrono::steady_clock::time_point gap_wait_start;
-    if (!entry->done && orderer.pending.find(orderer.next_seq) == orderer.pending.end()) {
+    if (!leader_assigned &&
+        !entry->done &&
+        orderer.pending.find(orderer.next_seq) == orderer.pending.end()) {
         gap_wait = true;
         gap_wait_start = std::chrono::steady_clock::now();
         g_prof.orderer_gap_wait_count.fetch_add(1, std::memory_order_relaxed);
@@ -1635,6 +1680,7 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " queue_overload_exit=" << exec.queue_overload_exit
         << " bcdb_init_enabled=" << exec.bcdb_init_enabled
         << " bcdb_block_size=" << exec.bcdb_block_size
+        << " bcdb_init_arg_size_configured=" << exec.bcdb_init_arg_size_configured
         << " det_block_batches=" << exec.det_block_batches
         << " det_block_items=" << exec.det_block_items
         << " det_block_avg="
@@ -1758,6 +1804,8 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " kafka_delivery_pending_max=" << exec.kafka_delivery_pending_max
         << " kafka_delivery_pending_over_8_events=" << exec.kafka_delivery_pending_over_8_events
         << " kafka_delivery_pending_over_32_events=" << exec.kafka_delivery_pending_over_32_events
+        << " kafka_async_publisher_enabled=" << exec.kafka_async_publisher_enabled
+        << " kafka_async_publisher_queue_max=" << exec.kafka_async_publisher_queue_max
         << std::endl;
 
     const uint64_t append_vector_calls =
@@ -1767,6 +1815,9 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
     std::cout
         << "PROFILE_RAFT_ORDERER "
         << "arrivals=" << g_prof.orderer_arrivals.load(std::memory_order_relaxed)
+        << " policy=" << profile_token(raft_ordering_policy())
+        << " leader_assigned_requests=" << g_prof.orderer_leader_assigned_requests.load(std::memory_order_relaxed)
+        << " leader_assigned_items=" << g_prof.orderer_leader_assigned_items.load(std::memory_order_relaxed)
         << " ordered_drains=" << g_prof.orderer_drains.load(std::memory_order_relaxed)
         << " pending_depth_max=" << g_prof.orderer_pending_depth_max.load(std::memory_order_relaxed)
         << " gap_wait_count=" << g_prof.orderer_gap_wait_count.load(std::memory_order_relaxed)
@@ -1836,6 +1887,12 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
                           << " truncate_records_written=" << p.truncate_records_written.load()
                           << " tail_repairs=" << p.tail_repairs.load()
                           << " recovery_entries_loaded=" << p.recovery_entries_loaded.load()
+                          << " async_flush_enabled=" << (lstore->async_flush_enabled() ? 1 : 0)
+                          << " async_flush_jobs=" << p.async_flush_jobs.load()
+                          << " async_flush_coalesced_jobs=" << p.async_flush_coalesced_jobs.load()
+                          << " async_flush_notifications=" << p.async_flush_notifications.load()
+                          << " async_flush_queue_max=" << p.async_flush_queue_max.load()
+                          << " async_flush_waits=" << p.async_flush_waits.load()
                           << " last_durable_index=" << lstore->last_durable_index()
                           << std::endl;
             }
@@ -2092,8 +2149,21 @@ int main(int argc, char** argv) {
             ? raft_params::blocking
             : raft_params::async_handler;
     params.auto_forwarding_ = true;
+    const bool durable_async_flush =
+        (opt.raft_storage_mode == "durable") &&
+        ariabc_pg::env_flag_enabled("ARIABC_RAFT_DURABLE_ASYNC_FLUSH", true);
     if (opt.raft_storage_mode == "durable") {
-        params.parallel_log_appending_ = false;
+        params.parallel_log_appending_ = durable_async_flush;
+    }
+    const uint64_t configured_stream_gap =
+        ariabc_pg::env_u64("ARIABC_RAFT_STREAM_GAP",
+                           durable_async_flush ? 512 : 0);
+    if (configured_stream_gap > 0) {
+        params.max_log_gap_in_stream_ =
+            static_cast<int32>(std::min<uint64_t>(configured_stream_gap, 1000000ULL));
+        params.max_bytes_in_flight_in_stream_ =
+            static_cast<int64_t>(ariabc_pg::env_u64("ARIABC_RAFT_STREAM_BYTES", 0));
+        asio_opt.streaming_mode_ = true;
     }
 
     // P0 #14: In safe mode, run synchronous startup validation and prefix recovery
@@ -2142,6 +2212,16 @@ int main(int argc, char** argv) {
     if (!raft) {
         std::cerr << "Failed to init raft server (see log: " << log_file << ")" << std::endl;
         return 1;
+    }
+    if (durable_async_flush) {
+        auto d_smgr = std::dynamic_pointer_cast<ariabc_raft::durable_state_mgr>(smgr);
+        if (d_smgr) {
+            auto lstore = std::dynamic_pointer_cast<ariabc_raft::durable_log_store>(
+                d_smgr->load_log_store());
+            if (lstore) {
+                lstore->enable_async_flush(raft.get());
+            }
+        }
     }
 
     // Wait for initialization.

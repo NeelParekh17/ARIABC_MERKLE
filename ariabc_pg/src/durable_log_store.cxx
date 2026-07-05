@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 namespace ariabc_raft {
@@ -37,6 +38,28 @@ uint64_t percentile_ns(std::vector<uint64_t> samples, double pct) {
     const double raw_idx = (pct / 100.0) * static_cast<double>(samples.size() - 1);
     const size_t idx = static_cast<size_t>(raw_idx + 0.5);
     return samples[idx >= samples.size() ? samples.size() - 1 : idx];
+}
+
+bool env_flag_enabled(const char* name, bool default_value) {
+    const char* env = ::getenv(name);
+    if (!env || !*env) return default_value;
+    const std::string s(env);
+    return !(s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+}
+
+uint64_t env_u64(const char* name, uint64_t default_value) {
+    const char* env = ::getenv(name);
+    if (!env || !*env) return default_value;
+    try {
+        return static_cast<uint64_t>(std::stoull(env));
+    } catch (...) {
+        return default_value;
+    }
+}
+
+bool durable_trace_enabled() {
+    static const bool enabled = env_flag_enabled("ARIABC_RAFT_DURABLE_TRACE", false);
+    return enabled;
 }
 
 } // namespace
@@ -97,6 +120,11 @@ durable_log_store::durable_log_store(const std::string& log_dir, uint64_t max_se
     , max_segment_size_(max_segment_size)
 {
     manifest_path_ = log_dir_ + "/manifest.bin";
+    async_flush_max_jobs_ =
+        static_cast<size_t>(env_u64("ARIABC_RAFT_ASYNC_FLUSH_MAX_JOBS", 128));
+    if (async_flush_max_jobs_ == 0) {
+        async_flush_max_jobs_ = 1;
+    }
     open_or_create();
 }
 
@@ -283,9 +311,42 @@ void durable_log_store::write_entry_record(
     uint32_t pcrc = crc32_bytes(payload.data(), payload.size());
     std::vector<uint8_t> hdr = build_header(RT_ENTRY, raft_idx, raft_term, payload.size(), pcrc);
 
-    write_full(fd, hdr.data(), hdr.size(), segments_[active_idx].path);
-    if (!payload.empty()) {
-        write_full(fd, payload.data(), payload.size(), segments_[active_idx].path);
+    if (payload.empty()) {
+        write_full(fd, hdr.data(), hdr.size(), segments_[active_idx].path);
+    } else {
+        struct iovec iov[2];
+        iov[0].iov_base = hdr.data();
+        iov[0].iov_len = hdr.size();
+        iov[1].iov_base = const_cast<uint8_t*>(payload.data());
+        iov[1].iov_len = payload.size();
+        size_t remaining = hdr.size() + payload.size();
+        int iovcnt = 2;
+        struct iovec* cur_iov = iov;
+        while (remaining > 0) {
+            ssize_t written = ::writev(fd, cur_iov, iovcnt);
+            if (written < 0) {
+                if (errno == EINTR) continue;
+                throw storage_io_error("writev failed [" + segments_[active_idx].path +
+                                       "]: " + strerror(errno));
+            }
+            if (written == 0) {
+                throw storage_io_error("writev: unexpected zero-length write [" +
+                                       segments_[active_idx].path + "]");
+            }
+            remaining -= static_cast<size_t>(written);
+            while (written > 0 && iovcnt > 0) {
+                if (static_cast<size_t>(written) >= cur_iov[0].iov_len) {
+                    written -= static_cast<ssize_t>(cur_iov[0].iov_len);
+                    ++cur_iov;
+                    --iovcnt;
+                } else {
+                    cur_iov[0].iov_base =
+                        static_cast<uint8_t*>(cur_iov[0].iov_base) + written;
+                    cur_iov[0].iov_len -= static_cast<size_t>(written);
+                    written = 0;
+                }
+            }
+        }
     }
 
     segments_[active_idx].size += HEADER_SIZE + payload.size();
@@ -298,14 +359,16 @@ void durable_log_store::write_entry_record(
 
     profile_.bytes_appended += loc.record_size;
     dirty_segments_.insert(active_idx);
-    std::cerr << "RAFT_DURABLE_LOG_WRITE"
-              << " idx=" << raft_idx
-              << " term=" << raft_term
-              << " payload=" << payload.size()
-              << " path=" << segments_[active_idx].path
-              << " offset=" << offset
-              << " segment_size=" << segments_[active_idx].size
-              << std::endl;
+    if (durable_trace_enabled()) {
+        std::cerr << "RAFT_DURABLE_LOG_WRITE"
+                  << " idx=" << raft_idx
+                  << " term=" << raft_term
+                  << " payload=" << payload.size()
+                  << " path=" << segments_[active_idx].path
+                  << " offset=" << offset
+                  << " segment_size=" << segments_[active_idx].size
+                  << std::endl;
+    }
 }
 
 void durable_log_store::write_truncate_record(uint64_t from_index) {
@@ -390,6 +453,7 @@ void durable_log_store::write_truncate_record(uint64_t from_index) {
 
 nuraft::ulong durable_log_store::append(nuraft::ptr<nuraft::log_entry>& entry) {
     std::lock_guard<std::mutex> l(mu_);
+    throw_if_async_flush_failed_unlocked();
     uint64_t idx = next_slot_unlocked();
     
     nuraft::ptr<nuraft::buffer> buf = entry->serialize();
@@ -419,17 +483,21 @@ nuraft::ulong durable_log_store::append(nuraft::ptr<nuraft::log_entry>& entry) {
     batch_last_ = idx;
 
     profile_.append_calls.fetch_add(1, std::memory_order_relaxed);
-    std::cerr << "RAFT_DURABLE_APPEND"
-              << " idx=" << idx
-              << " term=" << entry->get_term()
-              << " next_slot=" << next_slot_unlocked()
-              << " dirty_segments=" << dirty_segments_.size()
-              << std::endl;
+    if (durable_trace_enabled()) {
+        std::cerr << "RAFT_DURABLE_APPEND"
+                  << " idx=" << idx
+                  << " term=" << entry->get_term()
+                  << " next_slot=" << next_slot_unlocked()
+                  << " dirty_segments=" << dirty_segments_.size()
+                  << std::endl;
+    }
     return idx;
 }
 
 void durable_log_store::write_at(nuraft::ulong index, nuraft::ptr<nuraft::log_entry>& entry) {
-    std::lock_guard<std::mutex> l(mu_);
+    std::unique_lock<std::mutex> l(mu_);
+    wait_for_async_flush_idle_locked(l);
+    throw_if_async_flush_failed_unlocked();
     write_truncate_record(index);
 
     // Truncate in memory cache
@@ -455,12 +523,14 @@ void durable_log_store::write_at(nuraft::ulong index, nuraft::ptr<nuraft::log_en
     dirty_ = true;
 
     sync_dirty_segments_unlocked("write_at sync");
-    std::cerr << "RAFT_DURABLE_WRITE_AT"
-              << " idx=" << index
-              << " term=" << entry->get_term()
-              << " next_slot=" << next_slot_unlocked()
-              << " last_durable=" << last_durable_idx_
-              << std::endl;
+    if (durable_trace_enabled()) {
+        std::cerr << "RAFT_DURABLE_WRITE_AT"
+                  << " idx=" << index
+                  << " term=" << entry->get_term()
+                  << " next_slot=" << next_slot_unlocked()
+                  << " last_durable=" << last_durable_idx_
+                  << std::endl;
+    }
 }
 
 nuraft::ptr<std::vector<nuraft::ptr<nuraft::log_entry>>>
@@ -548,7 +618,9 @@ nuraft::ptr<nuraft::buffer> durable_log_store::pack(nuraft::ulong index, nuraft:
 }
 
 void durable_log_store::apply_pack(nuraft::ulong index, nuraft::buffer& pack) {
-    std::lock_guard<std::mutex> l(mu_);
+    std::unique_lock<std::mutex> l(mu_);
+    wait_for_async_flush_idle_locked(l);
+    throw_if_async_flush_failed_unlocked();
     if (pack.size() < sizeof(int32_t)) {
         throw std::runtime_error("apply_pack: missing entry count");
     }
@@ -633,27 +705,38 @@ bool durable_log_store::compact(nuraft::ulong last_log_index) {
 }
 
 bool durable_log_store::flush() {
-    std::lock_guard<std::mutex> l(mu_);
+    std::unique_lock<std::mutex> l(mu_);
+    wait_for_async_flush_idle_locked(l);
+    throw_if_async_flush_failed_unlocked();
     if (!dirty_) return true;
     sync_dirty_segments_unlocked("flush sync");
     return true;
 }
 
 void durable_log_store::close() {
-    std::lock_guard<std::mutex> l(mu_);
-    if (dirty_) {
+    {
+        std::unique_lock<std::mutex> l(mu_);
         try {
-            sync_dirty_segments_unlocked("close sync");
+            wait_for_async_flush_idle_locked(l);
+            throw_if_async_flush_failed_unlocked();
+            if (dirty_) {
+                sync_dirty_segments_unlocked("close sync");
+            }
         } catch (const std::exception& e) {
             std::cerr << "RAFT_STORAGE_FATAL: failed to flush log store on close: " << e.what() << std::endl;
             std::terminate();
         }
-    }
-    for (auto& seg : segments_) {
-        if (seg.fd >= 0) {
-            ::close(seg.fd);
-            seg.fd = -1;
+        async_flush_stop_ = true;
+        async_flush_cv_.notify_all();
+        for (auto& seg : segments_) {
+            if (seg.fd >= 0) {
+                ::close(seg.fd);
+                seg.fd = -1;
+            }
         }
+    }
+    if (async_flush_thread_.joinable()) {
+        async_flush_thread_.join();
     }
 }
 
@@ -687,15 +770,26 @@ log_store_latency_profile durable_log_store::latency_profile() const {
 }
 
 void durable_log_store::end_of_append_batch(nuraft::ulong start, nuraft::ulong cnt) {
-    std::lock_guard<std::mutex> l(mu_);
+    std::unique_lock<std::mutex> l(mu_);
+    throw_if_async_flush_failed_unlocked();
     if (cnt == 0) return;
 
     if (batch_first_ != start || batch_last_ != start + cnt - 1) {
         // Tolerantly handle range mismatch or out-of-order batches.
         // We sync whatever is dirty to maintain durability of all written records.
-        sync_dirty_segments_unlocked("end_of_append_batch sync (range mismatch fallback)");
+        if (async_flush_enabled_) {
+            enqueue_async_flush_locked(l,
+                                       next_slot_unlocked() - 1,
+                                       "end_of_append_batch async (range mismatch fallback)");
+        } else {
+            sync_dirty_segments_unlocked("end_of_append_batch sync (range mismatch fallback)");
+        }
     } else {
-        sync_dirty_segments_unlocked("end_of_append_batch sync");
+        if (async_flush_enabled_) {
+            enqueue_async_flush_locked(l, start + cnt - 1, "end_of_append_batch async");
+        } else {
+            sync_dirty_segments_unlocked("end_of_append_batch sync");
+        }
     }
 
     profile_.append_batches.fetch_add(1, std::memory_order_relaxed);
@@ -706,12 +800,15 @@ void durable_log_store::end_of_append_batch(nuraft::ulong start, nuraft::ulong c
 
     batch_first_ = 0;
     batch_last_ = 0;
-    std::cerr << "RAFT_DURABLE_APPEND_BATCH"
-              << " start=" << start
-              << " cnt=" << cnt
-              << " next_slot=" << next_slot_unlocked()
-              << " last_durable=" << last_durable_idx_
-              << std::endl;
+    if (durable_trace_enabled()) {
+        std::cerr << "RAFT_DURABLE_APPEND_BATCH"
+                  << " start=" << start
+                  << " cnt=" << cnt
+                  << " next_slot=" << next_slot_unlocked()
+                  << " last_durable=" << last_durable_idx_
+                  << " async=" << (async_flush_enabled_ ? 1 : 0)
+                  << std::endl;
+    }
 }
 
 void durable_log_store::open_or_create() {
@@ -1153,6 +1250,190 @@ void durable_log_store::scan_and_recover() {
     }
 
     load_durable_watermark_unlocked();
+}
+
+void durable_log_store::enable_async_flush(nuraft::raft_server* raft) {
+    std::lock_guard<std::mutex> l(mu_);
+    raft_server_bwd_pointer_ = raft;
+    if (async_flush_enabled_) {
+        return;
+    }
+    async_flush_enabled_ = true;
+    async_flush_stop_ = false;
+    async_flush_thread_ = std::thread(&durable_log_store::async_flush_loop, this);
+    std::cerr << "RAFT_DURABLE_ASYNC_FLUSH enabled"
+              << " max_jobs=" << async_flush_max_jobs_
+              << std::endl;
+}
+
+void durable_log_store::set_raft_server(nuraft::raft_server* raft) {
+    std::lock_guard<std::mutex> l(mu_);
+    raft_server_bwd_pointer_ = raft;
+}
+
+bool durable_log_store::async_flush_enabled() const {
+    std::lock_guard<std::mutex> l(mu_);
+    return async_flush_enabled_;
+}
+
+void durable_log_store::throw_if_async_flush_failed_unlocked() const {
+    if (!async_flush_failed_) {
+        return;
+    }
+    throw storage_io_error("asynchronous durable log flush failed: " + async_flush_error_);
+}
+
+void durable_log_store::close_async_flush_segment_fds(
+    std::vector<AsyncFlushSegment>& segments)
+{
+    for (auto& seg : segments) {
+        if (seg.fd >= 0) {
+            ::close(seg.fd);
+            seg.fd = -1;
+        }
+    }
+}
+
+void durable_log_store::wait_for_async_flush_idle_locked(
+    std::unique_lock<std::mutex>& lock)
+{
+    if (!async_flush_enabled_) {
+        return;
+    }
+    while (async_flush_active_ || !async_flush_jobs_.empty()) {
+        profile_.async_flush_waits.fetch_add(1, std::memory_order_relaxed);
+        async_flush_idle_cv_.wait(lock);
+    }
+}
+
+void durable_log_store::enqueue_async_flush_locked(std::unique_lock<std::mutex>& lock,
+                                                   uint64_t target_index,
+                                                   const std::string& context)
+{
+    if (dirty_segments_.empty()) {
+        if (target_index > last_durable_idx_) {
+            last_durable_idx_ = target_index;
+        }
+        dirty_ = false;
+        return;
+    }
+
+    while (async_flush_jobs_.size() >= async_flush_max_jobs_ && !async_flush_failed_) {
+        profile_.async_flush_waits.fetch_add(1, std::memory_order_relaxed);
+        async_flush_idle_cv_.wait(lock);
+    }
+    throw_if_async_flush_failed_unlocked();
+
+    AsyncFlushJob job;
+    job.target_index = target_index;
+    job.context = context;
+    job.segments.reserve(dirty_segments_.size());
+    for (size_t seg_idx : dirty_segments_) {
+        if (seg_idx >= segments_.size()) {
+            continue;
+        }
+        int fd = segment_fd(seg_idx);
+        int dup_fd = ::dup(fd);
+        if (dup_fd < 0) {
+            throw storage_io_error("dup failed for async fdatasync [" +
+                                   segments_[seg_idx].path + "]: " + strerror(errno));
+        }
+        AsyncFlushSegment seg;
+        seg.fd = dup_fd;
+        seg.path = segments_[seg_idx].path;
+        job.segments.push_back(seg);
+    }
+
+    dirty_segments_.clear();
+    dirty_ = false;
+    async_flush_jobs_.push_back(std::move(job));
+    profile_.async_flush_jobs.fetch_add(1, std::memory_order_relaxed);
+    profile_atomic_max(profile_.async_flush_queue_max,
+                       static_cast<uint64_t>(async_flush_jobs_.size()));
+    async_flush_cv_.notify_one();
+}
+
+void durable_log_store::async_flush_loop() {
+    for (;;) {
+        AsyncFlushJob job;
+        size_t coalesced = 0;
+        {
+            std::unique_lock<std::mutex> l(mu_);
+            async_flush_cv_.wait(l, [this] {
+                return async_flush_stop_ || !async_flush_jobs_.empty();
+            });
+            if (async_flush_stop_ && async_flush_jobs_.empty()) {
+                return;
+            }
+            async_flush_active_ = true;
+            job = std::move(async_flush_jobs_.front());
+            async_flush_jobs_.pop_front();
+
+            std::map<std::string, int> merged_fds;
+            for (auto& seg : job.segments) {
+                merged_fds[seg.path] = seg.fd;
+                seg.fd = -1;
+            }
+            while (!async_flush_jobs_.empty()) {
+                AsyncFlushJob extra = std::move(async_flush_jobs_.front());
+                async_flush_jobs_.pop_front();
+                job.target_index = std::max(job.target_index, extra.target_index);
+                for (auto& seg : extra.segments) {
+                    auto existing = merged_fds.find(seg.path);
+                    if (existing != merged_fds.end()) {
+                        ::close(existing->second);
+                    }
+                    merged_fds[seg.path] = seg.fd;
+                    seg.fd = -1;
+                }
+                ++coalesced;
+            }
+            job.segments.clear();
+            job.segments.reserve(merged_fds.size());
+            for (auto& entry : merged_fds) {
+                AsyncFlushSegment seg;
+                seg.path = entry.first;
+                seg.fd = entry.second;
+                job.segments.push_back(seg);
+            }
+        }
+
+        bool ok = true;
+        std::string error;
+        try {
+            for (const auto& seg : job.segments) {
+                fdatasync_and_profile(seg.fd, job.context + " (" + seg.path + ")");
+            }
+        } catch (const std::exception& e) {
+            ok = false;
+            error = e.what();
+        }
+
+        close_async_flush_segment_fds(job.segments);
+
+        nuraft::raft_server* raft = nullptr;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            if (ok) {
+                if (job.target_index > last_durable_idx_) {
+                    last_durable_idx_ = job.target_index;
+                }
+                profile_.async_flush_coalesced_jobs.fetch_add(
+                    static_cast<uint64_t>(coalesced), std::memory_order_relaxed);
+            } else {
+                async_flush_failed_ = true;
+                async_flush_error_ = error;
+            }
+            async_flush_active_ = false;
+            raft = raft_server_bwd_pointer_;
+            async_flush_idle_cv_.notify_all();
+        }
+
+        if (raft) {
+            raft->notify_log_append_completion(ok);
+            profile_.async_flush_notifications.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 void durable_log_store::sync_dirty_segments_unlocked(const std::string& context) {

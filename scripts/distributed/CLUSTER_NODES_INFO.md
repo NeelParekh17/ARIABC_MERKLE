@@ -1,43 +1,43 @@
 # 🖥️ AriaBC 4-Node Cluster Inventory & Live Status
 
-> **Last Updated:** `2026-06-27 14:26:46 +0530`  
-> **Automatic Update:** Yes (Updated via `scripts/distributed/update_nodes_info.py`)  
-> **Service Sockets Checked:** BCDB PostgreSQL (Port `5438`), AriaBC Server (Port `8000`/`8001`)  
+> **Last Updated:** `2026-07-05 06:33:35 +0530`
+> **Automatic Update:** Yes (Updated via `scripts/distributed/update_nodes_info.py`)
+> **Service Sockets Checked:** BCDB PostgreSQL (Port `5438`), AriaBC Server (Port `8000`/`8001`)
 
 ## 📊 Cluster Summary Table
 
 | Node | Name | IP Address | Status | OS | CPU | RAM (Total/Avail) | Root Storage (Avail/Use%) | Disk Read MB/s | Disk Write MB/s | Disk Util % | Await | PostgreSQL | AriaBC Server |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **Node 1** | admin123 | `10.129.148.236` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 6.00 GB (60.0% used) | 424G / 468G (5%) | 0.00 | 0.06 | 0.30% | 0.40 ms | 🟢 Running | 🔴 Stopped |
-| **Node 2** | user4 | `10.129.148.246` | 🟢 Online | Ubuntu 22.04.2 LTS | 16 Cores | 15.01 GB / 4.53 GB (69.8% used) | 110G / 183G (37%) | 0.00 | 0.00 | 0.00% | 0.00 ms | 🟢 Running | 🔴 Stopped |
-| **Node 4** | utkarsh | `10.129.148.248` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 6.50 GB (56.7% used) | 129G / 404G (67%) | 0.00 | 0.00 | 0.00% | 0.00 ms | 🟢 Running | 🔴 Stopped |
-| **ASUS Laptop (GW)** | asus-laptop | `10.204.8.48` | 🟢 Online | Ubuntu 24.04.4 LTS | 16 Cores | 14.87 GB / 6.01 GB (59.6% used) | 22G / 164G (87%) | 0.00 | 0.12 | 1.00% | 4.50 ms | — | — |
-| **Gateway 2 (Proposed)** | proposed-gw | `10.129.27.111` | 🟢 Online | Ubuntu 24.04.2 LTS | 16 Cores | 15.02 GB / 11.04 GB (26.5% used) | 254G / 457G (42%) | 0.00 | 0.00 | 0.00% | 0.00 ms | — | — |
+| **Node 1** | admin123 | `10.129.148.236` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 13.99 GB (6.8% used) | 421G / 468G (6%) | 0.00 | 0.12 | 0.20% | 0.40 ms | 🔴 Stopped | 🔴 Stopped |
+| **Node 2** | user4 | `10.129.148.246` | 🟢 Online | Ubuntu 22.04.2 LTS | 16 Cores | 15.01 GB / 12.09 GB (19.5% used) | 109G / 183G (38%) | 0.00 | 0.00 | 0.00% | 0.00 ms | 🔴 Stopped | 🔴 Stopped |
+| **Node 4** | utkarsh | `10.129.148.248` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 13.87 GB (7.7% used) | 119G / 404G (70%) | 0.00 | 0.15 | 0.40% | 0.43 ms | 🔴 Stopped | 🔴 Stopped |
+| **ASUS Laptop (GW)** | asus-laptop | `127.0.0.1` | 🟢 Online | Ubuntu 24.04.4 LTS | 16 Cores | 14.87 GB / 4.76 GB (68.0% used) | 25G / 164G (85%) | 0.00 | 0.80 | 0.00% | 0.40 ms | — | — |
+| **Gateway 2 (Proposed)** | proposed-gw | `10.129.27.111` | 🟢 Online | Ubuntu 24.04.2 LTS | 16 Cores | 15.02 GB / 13.52 GB (10.0% used) | 211G / 457G (52%) | 0.00 | 0.13 | 0.80% | 1.40 ms | — | — |
 
 ## 🌐 Network Latency Matrix (RTT)
 
 | From | To | RTT |
 |---|---|---|
-| admin123 (Node 1) | user4 (Node 2) | 0.563 ms |
-| admin123 (Node 1) | utkarsh (Node 4) | 0.505 ms |
-| admin123 (Node 1) | asus-laptop (Node 5) | 35.305 ms |
-| admin123 (Node 1) | proposed-gw (Node 6) | 0.630 ms |
-| user4 (Node 2) | admin123 (Node 1) | 0.537 ms |
-| user4 (Node 2) | utkarsh (Node 4) | 0.383 ms |
-| user4 (Node 2) | asus-laptop (Node 5) | 38.981 ms |
-| user4 (Node 2) | proposed-gw (Node 6) | 0.648 ms |
-| utkarsh (Node 4) | admin123 (Node 1) | 0.469 ms |
-| utkarsh (Node 4) | user4 (Node 2) | 0.541 ms |
-| utkarsh (Node 4) | asus-laptop (Node 5) | 34.554 ms |
-| utkarsh (Node 4) | proposed-gw (Node 6) | 0.472 ms |
-| asus-laptop (Node 5) | admin123 (Node 1) | 30.996 ms |
-| asus-laptop (Node 5) | user4 (Node 2) | 45.741 ms |
-| asus-laptop (Node 5) | utkarsh (Node 4) | 30.273 ms |
-| asus-laptop (Node 5) | proposed-gw (Node 6) | 38.120 ms |
-| proposed-gw (Node 6) | admin123 (Node 1) | 0.716 ms |
-| proposed-gw (Node 6) | user4 (Node 2) | 0.683 ms |
-| proposed-gw (Node 6) | utkarsh (Node 4) | 0.522 ms |
-| proposed-gw (Node 6) | asus-laptop (Node 5) | 86.052 ms |
+| admin123 (Node 1) | user4 (Node 2) | 0.564 ms |
+| admin123 (Node 1) | utkarsh (Node 4) | 0.600 ms |
+| admin123 (Node 1) | asus-laptop (Node 5) | 0.049 ms |
+| admin123 (Node 1) | proposed-gw (Node 6) | 0.850 ms |
+| user4 (Node 2) | admin123 (Node 1) | 0.562 ms |
+| user4 (Node 2) | utkarsh (Node 4) | 0.475 ms |
+| user4 (Node 2) | asus-laptop (Node 5) | 0.040 ms |
+| user4 (Node 2) | proposed-gw (Node 6) | 0.518 ms |
+| utkarsh (Node 4) | admin123 (Node 1) | 0.494 ms |
+| utkarsh (Node 4) | user4 (Node 2) | 0.326 ms |
+| utkarsh (Node 4) | asus-laptop (Node 5) | 0.051 ms |
+| utkarsh (Node 4) | proposed-gw (Node 6) | 0.536 ms |
+| asus-laptop (Node 5) | admin123 (Node 1) | 15.038 ms |
+| asus-laptop (Node 5) | user4 (Node 2) | 2.299 ms |
+| asus-laptop (Node 5) | utkarsh (Node 4) | 6.064 ms |
+| asus-laptop (Node 5) | proposed-gw (Node 6) | 1.880 ms |
+| proposed-gw (Node 6) | admin123 (Node 1) | 0.780 ms |
+| proposed-gw (Node 6) | user4 (Node 2) | 0.695 ms |
+| proposed-gw (Node 6) | utkarsh (Node 4) | 0.740 ms |
+| proposed-gw (Node 6) | asus-laptop (Node 5) | 0.032 ms |
 
 ## 🔍 Detailed Node Inventory
 
@@ -53,16 +53,16 @@
 
 #### 🧠 Memory (RAM) Allocation
 - **Total RAM:** 15.02 GB
-- **Available RAM:** 6.00 GB
-- **Used RAM:** 9.01 GB (60.0%)
+- **Available RAM:** 13.99 GB
+- **Used RAM:** 1.03 GB (6.8%)
 - **Swap Space:** 0.00 GB used of 4.00 GB total
 
 #### 💾 Storage & Disks
 - **Root Mount Filesystem:** `/dev/nvme0n1p2` (ext4)
-- **Root Disk Space:** 21G used / 424G free (Total: 468G, Use%: 5%)
+- **Root Disk Space:** 24G used / 421G free (Total: 468G, Use%: 6%)
 - **Disk I/O Read Speed:** `0.00 MB/s` (Device: `nvme0n1`)
-- **Disk I/O Write Speed:** `0.06 MB/s`
-- **Disk Utilization:** `0.30%`
+- **Disk I/O Write Speed:** `0.12 MB/s`
+- **Disk Utilization:** `0.20%`
 - **Average Disk Await Time:** `0.40 ms`
 - **Physical Disks / RAID Groups:**
 - **nvme0n1**: INTEL SSDPEKNW512G8 (476.9G)
@@ -71,17 +71,17 @@
 ```text
 Filesystem     Type      Size  Used Avail Use% Mounted on
 tmpfs          tmpfs     1.6G  1.9M  1.5G   1% /run
-/dev/nvme0n1p2 ext4      468G   21G  424G   5% /
-tmpfs          tmpfs     7.6G   44K  7.6G   1% /dev/shm
+/dev/nvme0n1p2 ext4      468G   24G  421G   6% /
+tmpfs          tmpfs     7.6G     0  7.6G   0% /dev/shm
 tmpfs          tmpfs     5.0M   12K  5.0M   1% /run/lock
 efivarfs       efivarfs  128K   43K   81K  35% /sys/firmware/efi/efivars
 /dev/nvme0n1p1 vfat      1.1G  6.2M  1.1G   1% /boot/efi
-tmpfs          tmpfs     1.6G   96K  1.6G   1% /run/user/120
+tmpfs          tmpfs     1.6G   92K  1.6G   1% /run/user/120
 tmpfs          tmpfs     1.6G   80K  1.6G   1% /run/user/1003
 ```
 
 #### 🔌 Port & Service Sockets Status
-- **PostgreSQL DB Server (Port `5438`):** 🟢 Running (Accepting connections)
+- **PostgreSQL DB Server (Port `5438`):** 🔴 Stopped
 - **AriaBC Raft Client Server (Port `8000`):** 🔴 Stopped
 
 ### 🖥️ Node 2: user4 (`10.129.148.246`)
@@ -96,13 +96,13 @@ tmpfs          tmpfs     1.6G   80K  1.6G   1% /run/user/1003
 
 #### 🧠 Memory (RAM) Allocation
 - **Total RAM:** 15.01 GB
-- **Available RAM:** 4.53 GB
-- **Used RAM:** 10.49 GB (69.8%)
-- **Swap Space:** 4.56 GB used of 46.57 GB total
+- **Available RAM:** 12.09 GB
+- **Used RAM:** 2.92 GB (19.5%)
+- **Swap Space:** 0.00 GB used of 46.57 GB total
 
 #### 💾 Storage & Disks
 - **Root Mount Filesystem:** `/dev/nvme0n1p4` (ext4)
-- **Root Disk Space:** 64G used / 110G free (Total: 183G, Use%: 37%)
+- **Root Disk Space:** 65G used / 109G free (Total: 183G, Use%: 38%)
 - **Disk I/O Read Speed:** `0.00 MB/s` (Device: `nvme0n1`)
 - **Disk I/O Write Speed:** `0.00 MB/s`
 - **Disk Utilization:** `0.00%`
@@ -113,20 +113,20 @@ tmpfs          tmpfs     1.6G   80K  1.6G   1% /run/user/1003
 ##### Selected `df -hT` output:
 ```text
 Filesystem     Type      Size  Used Avail Use% Mounted on
-tmpfs          tmpfs     1.6G  2.4M  1.5G   1% /run
-/dev/nvme0n1p4 ext4      183G   64G  110G  37% /
-tmpfs          tmpfs     7.6G   93M  7.5G   2% /dev/shm
+tmpfs          tmpfs     1.6G  2.7M  1.5G   1% /run
+/dev/nvme0n1p4 ext4      183G   65G  109G  38% /
+tmpfs          tmpfs     7.6G   48K  7.6G   1% /dev/shm
 tmpfs          tmpfs     5.0M  4.0K  5.0M   1% /run/lock
 efivarfs       efivarfs  128K   33K   91K  27% /sys/firmware/efi/efivars
 /dev/nvme0n1p2 ext4      921M  302M  556M  36% /boot
-/dev/nvme0n1p5 ext4      238G  142G   84G  63% /home
 /dev/nvme0n1p1 vfat      952M  6.1M  946M   1% /boot/efi
-tmpfs          tmpfs     1.6G  152K  1.6G   1% /run/user/1001
-tmpfs          tmpfs     1.6G   60K  1.6G   1% /run/user/1004
+/dev/nvme0n1p5 ext4      238G  155G   71G  69% /home
+tmpfs          tmpfs     1.6G   92K  1.6G   1% /run/user/1004
+tmpfs          tmpfs     1.6G   76K  1.6G   1% /run/user/127
 ```
 
 #### 🔌 Port & Service Sockets Status
-- **PostgreSQL DB Server (Port `5438`):** 🟢 Running (Accepting connections)
+- **PostgreSQL DB Server (Port `5438`):** 🔴 Stopped
 - **AriaBC Raft Client Server (Port `8000`):** 🔴 Stopped
 
 ### 🖥️ Node 4: utkarsh (`10.129.148.248`)
@@ -141,17 +141,17 @@ tmpfs          tmpfs     1.6G   60K  1.6G   1% /run/user/1004
 
 #### 🧠 Memory (RAM) Allocation
 - **Total RAM:** 15.02 GB
-- **Available RAM:** 6.50 GB
-- **Used RAM:** 8.51 GB (56.7%)
+- **Available RAM:** 13.87 GB
+- **Used RAM:** 1.15 GB (7.7%)
 - **Swap Space:** 0.00 GB used of 4.00 GB total
 
 #### 💾 Storage & Disks
 - **Root Mount Filesystem:** `/dev/nvme0n1p2` (ext4)
-- **Root Disk Space:** 256G used / 129G free (Total: 404G, Use%: 67%)
+- **Root Disk Space:** 266G used / 119G free (Total: 404G, Use%: 70%)
 - **Disk I/O Read Speed:** `0.00 MB/s` (Device: `nvme0n1`)
-- **Disk I/O Write Speed:** `0.00 MB/s`
-- **Disk Utilization:** `0.00%`
-- **Average Disk Await Time:** `0.00 ms`
+- **Disk I/O Write Speed:** `0.15 MB/s`
+- **Disk Utilization:** `0.40%`
+- **Average Disk Await Time:** `0.43 ms`
 - **Physical Disks / RAID Groups:**
 - **sda**: Samsung SSD 840 EVO 500GB (465.8G)
 - **nvme0n1**: INTEL SSDPEKNW512G8 (476.9G)
@@ -159,59 +159,60 @@ tmpfs          tmpfs     1.6G   60K  1.6G   1% /run/user/1004
 ##### Selected `df -hT` output:
 ```text
 Filesystem     Type      Size  Used Avail Use% Mounted on
-tmpfs          tmpfs     1.6G  2.9M  1.5G   1% /run
-/dev/nvme0n1p2 ext4      404G  256G  129G  67% /
-tmpfs          tmpfs     7.6G  1.5M  7.6G   1% /dev/shm
+tmpfs          tmpfs     1.6G  2.5M  1.5G   1% /run
+/dev/nvme0n1p2 ext4      404G  266G  119G  70% /
+tmpfs          tmpfs     7.6G  1.3M  7.6G   1% /dev/shm
 tmpfs          tmpfs     5.0M     0  5.0M   0% /run/lock
 efivarfs       efivarfs  128K   42K   82K  34% /sys/firmware/efi/efivars
 tmpfs          tmpfs     7.6G     0  7.6G   0% /run/qemu
-/dev/sda1      ext4      458G  226G  209G  53% /data
 /dev/nvme0n1p1 vfat      1.1G  6.2M  1.1G   1% /boot/efi
-tmpfs          tmpfs     1.6G  140K  1.6G   1% /run/user/1000
+/dev/sda1      ext4      458G  226G  209G  53% /data
+tmpfs          tmpfs     1.6G  104K  1.6G   1% /run/user/120
 tmpfs          tmpfs     1.6G   92K  1.6G   1% /run/user/1003
 ```
 
 #### 🔌 Port & Service Sockets Status
-- **PostgreSQL DB Server (Port `5438`):** 🟢 Running (Accepting connections)
+- **PostgreSQL DB Server (Port `5438`):** 🔴 Stopped
 - **AriaBC Raft Client Server (Port `8001`):** 🔴 Stopped
 
-### 🖥️ Node 5: asus-laptop (`10.204.8.48`)
+### 🖥️ Node 5: asus-laptop (`127.0.0.1`)
 
 #### ⚙️ System Specifications
 - **Host/FQDN:** `neel-ASUS-TUF-Gaming-A15-FA507RE-FA577RE`
 - **Operating System:** Ubuntu 24.04.4 LTS
-- **Kernel Version:** `6.8.0-124-generic`
+- **Kernel Version:** `6.8.0-134-generic`
 - **CPU Model:** `AMD Ryzen 7 6800H with Radeon Graphics`
 - **CPU Logical Cores (Threads):** `16`
-- **IPv4 Addresses:** `192.168.0.107 172.19.0.1 172.18.0.1 172.17.0.1 10.204.8.48`
+- **IPv4 Addresses:** `192.168.0.154 172.19.0.1 172.17.0.1 172.18.0.1`
 
 #### 🧠 Memory (RAM) Allocation
 - **Total RAM:** 14.87 GB
-- **Available RAM:** 6.01 GB
-- **Used RAM:** 8.86 GB (59.6%)
-- **Swap Space:** 0.19 GB used of 3.81 GB total
+- **Available RAM:** 4.76 GB
+- **Used RAM:** 10.11 GB (68.0%)
+- **Swap Space:** 2.63 GB used of 3.81 GB total
 
 #### 💾 Storage & Disks
 - **Root Mount Filesystem:** `/dev/nvme0n1p4` (ext4)
-- **Root Disk Space:** 134G used / 22G free (Total: 164G, Use%: 87%)
+- **Root Disk Space:** 132G used / 25G free (Total: 164G, Use%: 85%)
 - **Disk I/O Read Speed:** `0.00 MB/s` (Device: `nvme0n1`)
-- **Disk I/O Write Speed:** `0.12 MB/s`
-- **Disk Utilization:** `1.00%`
-- **Average Disk Await Time:** `4.50 ms`
+- **Disk I/O Write Speed:** `0.80 MB/s`
+- **Disk Utilization:** `0.00%`
+- **Average Disk Await Time:** `0.40 ms`
 - **Physical Disks / RAID Groups:**
 - **nvme0n1**: INTEL SSDPEKNU512GZ (476.9G)
 
 ##### Selected `df -hT` output:
 ```text
 Filesystem     Type      Size  Used Avail Use% Mounted on
-tmpfs          tmpfs     1.5G  3.0M  1.5G   1% /run
-/dev/nvme0n1p4 ext4      164G  134G   22G  87% /
-tmpfs          tmpfs     7.5G   61M  7.4G   1% /dev/shm
+tmpfs          tmpfs     1.5G  3.1M  1.5G   1% /run
+/dev/nvme0n1p4 ext4      164G  132G   25G  85% /
+tmpfs          tmpfs     7.5G  126M  7.4G   2% /dev/shm
 tmpfs          tmpfs     5.0M   12K  5.0M   1% /run/lock
 efivarfs       efivarfs  128K   60K   64K  49% /sys/firmware/efi/efivars
-/dev/nvme0n1p6 ext4       49G   39G  7.5G  84% /home
+tmpfs          tmpfs     7.5G     0  7.5G   0% /run/qemu
+/dev/nvme0n1p6 ext4       49G   40G  6.9G  86% /home
 /dev/nvme0n1p1 vfat      256M   38M  219M  15% /boot/efi
-tmpfs          tmpfs     1.5G  168K  1.5G   1% /run/user/1000
+tmpfs          tmpfs     1.5G  3.8M  1.5G   1% /run/user/1000
 ```
 
 #### 🔌 Port & Service Sockets Status
@@ -229,30 +230,30 @@ tmpfs          tmpfs     1.5G  168K  1.5G   1% /run/user/1000
 
 #### 🧠 Memory (RAM) Allocation
 - **Total RAM:** 15.02 GB
-- **Available RAM:** 11.04 GB
-- **Used RAM:** 3.98 GB (26.5%)
+- **Available RAM:** 13.52 GB
+- **Used RAM:** 1.50 GB (10.0%)
 - **Swap Space:** 0.00 GB used of 4.00 GB total
 
 #### 💾 Storage & Disks
 - **Root Mount Filesystem:** `/dev/nvme0n1p2` (ext4)
-- **Root Disk Space:** 180G used / 254G free (Total: 457G, Use%: 42%)
+- **Root Disk Space:** 223G used / 211G free (Total: 457G, Use%: 52%)
 - **Disk I/O Read Speed:** `0.00 MB/s` (Device: `nvme0n1`)
-- **Disk I/O Write Speed:** `0.00 MB/s`
-- **Disk Utilization:** `0.00%`
-- **Average Disk Await Time:** `0.00 ms`
+- **Disk I/O Write Speed:** `0.13 MB/s`
+- **Disk Utilization:** `0.80%`
+- **Average Disk Await Time:** `1.40 ms`
 - **Physical Disks / RAID Groups:**
 - **nvme0n1**: CT500P2SSD8 (465.8G)
 
 ##### Selected `df -hT` output:
 ```text
 Filesystem     Type      Size  Used Avail Use% Mounted on
-tmpfs          tmpfs     1.6G  2.6M  1.5G   1% /run
-/dev/nvme0n1p2 ext4      457G  180G  254G  42% /
+tmpfs          tmpfs     1.6G  2.4M  1.5G   1% /run
+/dev/nvme0n1p2 ext4      457G  223G  211G  52% /
 tmpfs          tmpfs     7.6G  2.2M  7.6G   1% /dev/shm
 tmpfs          tmpfs     5.0M   12K  5.0M   1% /run/lock
 efivarfs       efivarfs  128K   42K   82K  34% /sys/firmware/efi/efivars
 /dev/nvme0n1p1 vfat      1.1G  6.2M  1.1G   1% /boot/efi
-tmpfs          tmpfs     1.6G  132K  1.6G   1% /run/user/1005
+tmpfs          tmpfs     1.6G  100K  1.6G   1% /run/user/121
 tmpfs          tmpfs     1.6G   88K  1.6G   1% /run/user/1006
 ```
 

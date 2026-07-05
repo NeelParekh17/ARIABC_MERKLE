@@ -89,7 +89,8 @@ KAFKA_RESULT_TOPIC="ariabc_results"
 KAFKA_HOME_REMOTE="/home/neel/Desktop/kafka_2.13-3.7.0"
 KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
 
-DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Gateway dbConnPoolSize and bcdb_init block size
+DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Gateway/server connection pool size
+BCDB_INIT_BLOCK_SIZE="${BCDB_INIT_BLOCK_SIZE:-}" # Legacy bcdb_init(True,N) argument; empty preserves DB_CONN_POOL_SIZE default
 BCDB_WORKER_COUNT="${BCDB_WORKER_COUNT:-}"    # Defaults to DB_CONN_POOL_SIZE after args are parsed
 
 REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"
@@ -149,6 +150,16 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     "$REPO_ROOT/" \
     "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/"
 
+  for _cmake_cache in /tmp/cmake-3.28.3-linux-x86_64.tar.gz "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
+    if [[ -s "$_cmake_cache" ]]; then
+      echo "Syncing cached portable CMake tarball to gateway..."
+      if ! rsync -az "$_cmake_cache" "$GATEWAY_USER@$GATEWAY_HOST:/tmp/cmake-3.28.3-linux-x86_64.tar.gz"; then
+        echo "WARNING: failed to sync cached portable CMake tarball to gateway; remote fallback may be used" >&2
+      fi
+      break
+    fi
+  done
+
   # Forward benchmark-relevant environment values.
   delegate_env=(
     "BYPASS_DELEGATION=1"
@@ -164,17 +175,19 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     KAFKA_COMPLETION_MODE \
     ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US \
     ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES ARIABC_RAFT_ORDERED_BATCH_LINGER_US \
+    ARIABC_RAFT_ORDERING_POLICY \
     ARIABC_FULL_RESULT_REPLICA_LIMIT \
     ARIABC_RESULT_PUBLISH_REPLICA_LIMIT \
     ARIABC_PREFERRED_LEADER_ID \
     ARIABC_ALLOW_DET_RESUME \
     ARIABC_OS_PROFILE \
-    BCDB_WORKER_COUNT DB_CONN_POOL_SIZE \
+    POSTGRES_LOG_MODE \
+    BCDB_WORKER_COUNT DB_CONN_POOL_SIZE BCDB_INIT_BLOCK_SIZE \
     BCDB_DECOUPLE_WORKERS \
     BCDB_BLOCK_RETURN_ACTUAL_RESULTS \
     BCDB_DET_QUEUE_HIGH_WM BCDB_DET_QUEUE_LOW_WM \
+    BCDB_GATE_TELEMETRY BCDB_GATE_SNAPSHOT_EACH_BLOCK BCDB_PHASE_TRACE_ON \
     GATEWAY_STALL_WATCHDOG GATEWAY_STALL_POLL_SECONDS GATEWAY_STALL_MAX_CYCLES \
-    EXPECTED_ROWS EXPECTED_ROOT \
     RAFT_STORAGE_MODE RAFT_STORAGE_DIR RAFT_STORAGE_ACTION RAFT_STORAGE_ROOT RAFT_CLUSTER_ID \
     FAILPOINT_NODE_ID FAILPOINT_ENV FAILPOINT_RAFT_LOG_INDEX FAILPOINT_ITEM_ORDINAL \
     ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE \
@@ -316,6 +329,7 @@ RAFT_ORDERED_COALESCE_LOG="${RAFT_ORDERED_COALESCE_LOG:-${ARIABC_RAFT_ORDERED_CO
 RAFT_ORDERED_COALESCE_LOG_EXPLICIT=0
 RAFT_ORDERED_BATCH_TARGET_ENTRIES="${RAFT_ORDERED_BATCH_TARGET_ENTRIES:-${ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES:-1}}"
 RAFT_ORDERED_BATCH_LINGER_US="${RAFT_ORDERED_BATCH_LINGER_US:-${ARIABC_RAFT_ORDERED_BATCH_LINGER_US:-0}}"
+RAFT_ORDERING_POLICY="${RAFT_ORDERING_POLICY:-${ARIABC_RAFT_ORDERING_POLICY:-preassigned}}"
 SUBMIT_MODE="${SUBMIT_MODE:-event}"
 DET_SUBMIT_PIPELINE="${DET_SUBMIT_PIPELINE:-1}"
 DET_PIPELINE_DEPTH="${DET_PIPELINE_DEPTH:-0}"
@@ -364,9 +378,10 @@ BCDB_DT_HASHTAB_SWITCH_THRESHOLD="${BCDB_DT_HASHTAB_SWITCH_THRESHOLD:-1500}"  # 
 BCDB_DET_QUEUE_HIGH_WM="${BCDB_DET_QUEUE_HIGH_WM:-0}"  # >0 overrides deterministic server admission high watermark
 BCDB_DET_QUEUE_LOW_WM="${BCDB_DET_QUEUE_LOW_WM:-0}"    # >0 overrides deterministic server admission low watermark
 BCDB_FLOW_DEBUG="${BCDB_FLOW_DEBUG:-0}"      # 1=emit targeted worker/apply flow logs on cluster replicas
+POSTGRES_LOG_MODE="${POSTGRES_LOG_MODE:-compact}"  # compact=filtered artifact, full=raw server.log
 ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-2}"  # 0=all replicas include full SQL results in Kafka; 2 keeps full results on quorum while all replicas still publish hashes
 ARIABC_RESULT_PUBLISH_REPLICA_LIMIT="${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT:-0}"  # 0=all replicas publish Kafka result records
-ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-0}"  # 0=Raft default election priority; 1=pin leader to admin123 (Kafka host)
+ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-1}"  # 0=Raft default election priority; 1=pin leader to admin123 (Kafka host)
 GATEWAY_BROADCAST_ACCEPT_QUORUM="${GATEWAY_BROADCAST_ACCEPT_QUORUM:-0}"  # 0=gateway legacy majority for broadcast accepts
 GATEWAY_BROADCAST_RESULT_QUORUM="${GATEWAY_BROADCAST_RESULT_QUORUM:-0}"  # 0=legacy accept-completion surface
 GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN:-1}"  # 1=legacy, 0=client-visible quorum time + post-run drain
@@ -478,6 +493,9 @@ Options:
                   Coalesce contiguous reordered requests into one multi-item
                   Raft log entry while preserving per-request completion IDs:
                   0|1 (default: 0)
+  --raft-ordering-policy M
+                  preassigned preserves client DET slots; leader-assigned lets
+                  the Raft leader assign DET order at admission (default: preassigned)
   --det-prefixed-direct-parallel N
                   Execute deterministic "s <seq> SQL" directly on multiple PG
                   sockets instead of bcdb_block_submit_results(): 0|1
@@ -559,6 +577,9 @@ Options:
                   Tiny pg_usleep(1) after every N queued block txs, 0 disables (default: 0)
   --bcdb-worker-count N, --bcdb-workers N
                   PostgreSQL bcdb_worker_count / BCDB worker queues (default: --pool-size)
+  --bcdb-init-block-size N
+                  Legacy value passed to bcdb_init(True, N). This is not the
+                  deterministic block size; use --bcdb-workers for worker queues.
   --bcdb-decouple-workers N
                   Use bcdb_worker_count queues independent of bcdb_init block size: 0|1 (default: 0)
   --bcdb-dt-conflict-tracking N
@@ -624,6 +645,7 @@ while [[ $# -gt 0 ]]; do
     --raft-ordered-coalesce-log) RAFT_ORDERED_COALESCE_LOG="${2:-1}"; RAFT_ORDERED_COALESCE_LOG_EXPLICIT=1; shift 2 ;;
     --raft-ordered-batch-target-entries) RAFT_ORDERED_BATCH_TARGET_ENTRIES="${2:-1}"; shift 2 ;;
     --raft-ordered-batch-linger-us) RAFT_ORDERED_BATCH_LINGER_US="${2:-0}"; shift 2 ;;
+    --raft-ordering-policy) RAFT_ORDERING_POLICY="${2:-preassigned}"; shift 2 ;;
     --broadcast-accept-quorum) GATEWAY_BROADCAST_ACCEPT_QUORUM="${2:-0}"; shift 2 ;;
     --broadcast-result-quorum) GATEWAY_BROADCAST_RESULT_QUORUM="${2:-0}"; shift 2 ;;
     --broadcast-drain-in-timed-run) GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${2:-1}"; shift 2 ;;
@@ -654,6 +676,7 @@ while [[ $# -gt 0 ]]; do
     --bcdb-dt-parse-barrier) BCDB_DT_PARSE_BARRIER="${2:-0}"; shift 2 ;;
     --bcdb-block-enqueue-yield-every) BCDB_BLOCK_ENQUEUE_YIELD_EVERY="${2:-0}"; shift 2 ;;
     --bcdb-worker-count|--bcdb-workers) BCDB_WORKER_COUNT="${2:-}"; shift 2 ;;
+    --bcdb-init-block-size) BCDB_INIT_BLOCK_SIZE="${2:-}"; shift 2 ;;
     --bcdb-decouple-workers) BCDB_DECOUPLE_WORKERS="${2:-0}"; shift 2 ;;
     --bcdb-dt-conflict-tracking) BCDB_DT_CONFLICT_TRACKING="${2:-1}"; shift 2 ;;
     --bcdb-dt-light-snapshot) BCDB_DT_LIGHT_SNAPSHOT="${2:-0}"; shift 2 ;;
@@ -730,6 +753,12 @@ case "$EXECUTION_PROFILE" in
     fi
     if [[ "$SERVER_PG_CONNECTIONS" -eq 0 ]]; then
       SERVER_PG_CONNECTIONS="$SERVER_EXEC_WORKERS"
+    fi
+    if [[ "$BCDB_DET_QUEUE_HIGH_WM" -eq 0 ]]; then
+      BCDB_DET_QUEUE_HIGH_WM=128
+    fi
+    if [[ "$BCDB_DET_QUEUE_LOW_WM" -eq 0 ]]; then
+      BCDB_DET_QUEUE_LOW_WM=64
     fi
     DB_CONN_POOL_SIZE="$SERVER_PG_CONNECTIONS"
     ;;
@@ -921,6 +950,13 @@ if [[ "$RAFT_ORDERED_COALESCE_LOG" != "0" && "$RAFT_ORDERED_COALESCE_LOG" != "1"
   echo "ERROR: --raft-ordered-coalesce-log must be 0 or 1" >&2
   exit 2
 fi
+case "$RAFT_ORDERING_POLICY" in
+  preassigned|leader-assigned) ;;
+  *)
+    echo "ERROR: --raft-ordering-policy must be preassigned or leader-assigned" >&2
+    exit 2
+    ;;
+esac
 # os-threads mode does NOT need connFanout > 1 — each gateway subprocess has its
 # own single socket.  Only validate the fanout restriction in pipeline mode.
 if [[ "$PARALLELISM_MODE" != "os-threads" ]]; then
@@ -963,20 +999,27 @@ fi
 if [[ -z "$BCDB_WORKER_COUNT" ]]; then
   BCDB_WORKER_COUNT="$DB_CONN_POOL_SIZE"
 fi
+if [[ -z "$BCDB_INIT_BLOCK_SIZE" ]]; then
+  BCDB_INIT_BLOCK_SIZE="$DB_CONN_POOL_SIZE"
+fi
 if [[ "$BCDB_WORKER_COUNT" -lt 1 || "$BCDB_WORKER_COUNT" -gt 1024 ]]; then
   echo "ERROR: --bcdb-worker-count must be between 1 and 1024" >&2
   exit 2
 fi
+if [[ "$BCDB_INIT_BLOCK_SIZE" -lt 1 || "$BCDB_INIT_BLOCK_SIZE" -gt 1024 ]]; then
+  echo "ERROR: --bcdb-init-block-size must be between 1 and 1024" >&2
+  exit 2
+fi
 
 # Per-tx event mode dispatches at most DET_BLOCK_PARALLEL queries, while
-# BCDB's parse barrier waits for every tx in a bcdb_init-sized block.
+# BCDB's parse barrier may wait for every tx implied by the legacy init arg.
 # Prevent a 16-active / 256-required circular wait.
 if [[ "$PG_EXEC_MODE" == "event" &&
       "$DET_EVENT_BLOCK_FASTPATH" == "0" &&
       "$DET_RAW_SQL" == "0" &&
       "$BCDB_DT_PARSE_BARRIER" == "1" &&
-      "$DET_BLOCK_PARALLEL" -lt "$DB_CONN_POOL_SIZE" ]]; then
-  log "Auto-disabling BCDB parse barrier: per-tx event cap=$DET_BLOCK_PARALLEL is below BCDB block size=$DB_CONN_POOL_SIZE"
+      "$DET_BLOCK_PARALLEL" -lt "$BCDB_INIT_BLOCK_SIZE" ]]; then
+  log "Auto-disabling BCDB parse barrier: per-tx event cap=$DET_BLOCK_PARALLEL is below bcdb_init arg size=$BCDB_INIT_BLOCK_SIZE"
   BCDB_DT_PARSE_BARRIER=0
 fi
 if [[ "$BCDB_DECOUPLE_WORKERS" != "0" && "$BCDB_DECOUPLE_WORKERS" != "1" ]]; then
@@ -1108,25 +1151,19 @@ if [[ "$EXECUTION_PROFILE" == "threaded-raft-direct" ]]; then
     exit 2
   fi
 fi
-
-# Auto-detect expected post-workload values from known workload files.
-# These are checked PRE-MARKER in Phase 8 to confirm the workload produced the correct result.
-# Can be overridden via env: EXPECTED_ROWS=N EXPECTED_ROOT=hash
-if [[ -z "${EXPECTED_ROWS:-}" ]]; then
-  case "$WORKLOAD_FILE" in
-    *ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq*)
-      EXPECTED_ROWS=12498
-      EXPECTED_ROOT="125a1bef020ef86d52c7f0038304d2ffde5e298dee89f71cd84703a19147d8dd"
-      ;;
-    *ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k*)
-      EXPECTED_ROWS=12595
-      EXPECTED_ROOT="e30d7e8fdfd40c0abbacf7f7a378bc73179b70e72651bc1d693adbbba045acdc"
-      ;;
-    *)
-      EXPECTED_ROWS=""
-      EXPECTED_ROOT=""
-      ;;
-  esac
+if [[ "$RAFT_ORDERING_POLICY" == "leader-assigned" ]]; then
+  if [[ "$EXECUTION_PROFILE" != "threaded-raft-direct" ||
+        "$ORDERING_MODE" != "raft-kafka" ||
+        "$BYPASS_RAFT" -ne 0 ||
+        "$RAFT_ORDERED_FANOUT" != "1" ||
+        "$RAFT_APPLY_LEDGER_MODE" != "off" ||
+        "$DET_RAW_SQL" != "0" ||
+        "$DET_CLIENT_MODE" != "threadpool" ||
+        "$DET_CLIENT_INFLIGHT" -ne 1 ||
+        "$DET_BATCH_SIZE" -ne 1 ]]; then
+    echo "ERROR: --raft-ordering-policy leader-assigned requires threaded-raft-direct, raft-kafka, bypassRaft=0, raftOrderedFanout=1, raftApplyLedger=off, detRawSql=0, detClientMode=threadpool, detClientInflight=1, detBatchSize=1" >&2
+    exit 2
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1360,8 +1397,15 @@ collect_cluster_logs() {
       "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
     timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
       "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
-    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
+    if [[ "$POSTGRES_LOG_MODE" == "full" ]]; then
+      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+        "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
+    else
+      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "$user@$ip" \
+        "grep -E '^(RUN_MARKER|.*PROFILE_BCDB_(GATE|BLOCK)|.*(ERROR|FATAL|PANIC):|.*starting PostgreSQL|.*database system was shut down|.*database system is ready to accept connections)' '$REMOTE_PG_LOG' 2>/dev/null || true" \
+        > "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
+    fi
     if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
       timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
         "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
@@ -1496,15 +1540,24 @@ ensure_u22_cmake() {
   log "  Staging portable CMake on $name"
   cmake_tarball="$(find_local_cmake_tarball || true)"
   if [[ -n "$cmake_tarball" ]]; then
-    node_rsync_to "$idx" "$cmake_tarball" "$REMOTE_CMAKE_TARBALL_U22"
+    if ! node_rsync_to "$idx" "$cmake_tarball" "$REMOTE_CMAKE_TARBALL_U22"; then
+      log "  WARNING: failed to copy portable CMake tarball to $name; trying remote download"
+    fi
   fi
 
   node_ssh "$idx" "
     set -euo pipefail
+    echo 'cmake staging: checking $REMOTE_CMAKE_TARBALL_U22'
+    if [[ -s '$REMOTE_CMAKE_TARBALL_U22' ]] && ! tar -tzf '$REMOTE_CMAKE_TARBALL_U22' >/dev/null 2>&1; then
+      echo 'WARNING: cached portable CMake tarball is invalid; removing it' >&2
+      rm -f '$REMOTE_CMAKE_TARBALL_U22'
+    fi
     if [[ ! -s '$REMOTE_CMAKE_TARBALL_U22' ]]; then
       if command -v wget >/dev/null 2>&1; then
+        echo 'cmake staging: downloading with wget'
         wget -T 30 -t 2 -q --show-progress -O '$REMOTE_CMAKE_TARBALL_U22' '$REMOTE_CMAKE_URL_U22'
       elif command -v curl >/dev/null 2>&1; then
+        echo 'cmake staging: downloading with curl'
         curl --connect-timeout 10 --max-time 120 --retry 2 -sSL -o '$REMOTE_CMAKE_TARBALL_U22' '$REMOTE_CMAKE_URL_U22'
       else
         echo 'ERROR: cmake is missing and neither wget nor curl is available to fetch portable CMake' >&2
@@ -1589,6 +1642,7 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'raft_ordered_coalesce_log=%s\n' "$RAFT_ORDERED_COALESCE_LOG"
   printf 'raft_ordered_batch_target_entries=%s\n' "$RAFT_ORDERED_BATCH_TARGET_ENTRIES"
   printf 'raft_ordered_batch_linger_us=%s\n' "$RAFT_ORDERED_BATCH_LINGER_US"
+  printf 'raft_ordering_policy=%s\n' "$RAFT_ORDERING_POLICY"
   printf 'det_event_block_fastpath=%s\n' "$DET_EVENT_BLOCK_FASTPATH"
   printf 'det_prefixed_direct_parallel=%s\n' "$DET_PREFIXED_DIRECT_PARALLEL"
   printf 'det_completion_only_success=%s\n' "$DET_COMPLETION_ONLY_SUCCESS"
@@ -1597,6 +1651,8 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'det_client_inflight=%s\n' "$DET_CLIENT_INFLIGHT"
   printf 'server_exec_workers=%s\n' "$SERVER_EXEC_WORKERS"
   printf 'server_pg_connections=%s\n' "$SERVER_PG_CONNECTIONS"
+  printf 'bcdb_init_arg_size=%s\n' "$BCDB_INIT_BLOCK_SIZE"
+  printf 'bcdb_workers=%s\n' "$BCDB_WORKER_COUNT"
   printf 'completion_path=%s\n' "$RUN_META_COMPLETION_PATH"
   printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
   printf 'kafka_bootstrap=%s\n' "$KAFKA_BOOTSTRAP"
@@ -1965,6 +2021,9 @@ if [[ "$SKIP_SYNC" -eq 0 ]]; then
   # Wait for it before rsync starts, otherwise the sync can race the build and
   # observe disappearing object files.
   wait_local_canonical_build
+  local_src_fingerprint="$(_compute_src_fingerprint)"
+  sed -i -E "s/^source_fingerprint=.*/source_fingerprint=$local_src_fingerprint/" "$LOG_DIR/run_meta.env"
+  log "  normalized source_fingerprint=$local_src_fingerprint"
 
   declare -a SYNC_PIDS=()
   declare -a SYNC_NAMES=()
@@ -1975,6 +2034,7 @@ if [[ "$SKIP_SYNC" -eq 0 ]]; then
     (
       node_ssh "$idx" "mkdir -p '$REMOTE_REPO_ROOT' '$REMOTE_INSTALL_DIR'" || true
       node_rsync_repo "$idx"
+      node_ssh "$idx" "printf '%s\n' '$local_src_fingerprint' > '$REMOTE_REPO_ROOT/.ariabc_synced_source_fingerprint'"
       if [[ "$is_u22" -eq 0 && -z "${LOCAL_BUILD_PID:-}" ]]; then
         node_rsync_install "$idx"
         node_rsync_ariabc_bins "$idx"
@@ -2078,6 +2138,8 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
 set -euo pipefail
 if command -v cmake >/dev/null 2>&1; then
   CMAKE="\$(command -v cmake)"
+elif command -v cmake3 >/dev/null 2>&1; then
+  CMAKE="\$(command -v cmake3)"
 elif [[ -x "$REMOTE_CMAKE_U22" ]]; then
   CMAKE="$REMOTE_CMAKE_U22"
 else
@@ -2173,28 +2235,29 @@ fi
 # enough to trust a benchmark. Record executable identities before measurement.
 # ---------------------------------------------------------------------------
 log "=== Phase 1.6: Source and binary provenance ==="
-# Ensure local manifests are present (e.g. if build was skipped)
+# Always recompute and update local manifests atomically
 for bin_path in "$LOCAL_INSTALL_DIR/bin/postgres" "$LOCAL_BIN/ariabc_pg_server" "$LOCAL_BIN/ariabc_pg_gateway"; do
   if [[ -f "$bin_path" ]]; then
     dir_path="$(dirname "$bin_path")"
     bin_name="$(basename "$bin_path")"
     manifest_path="$dir_path/${bin_name}.manifest"
-    if [[ ! -f "$manifest_path" ]]; then
-      bin_sha="$(sha256sum "$bin_path" 2>/dev/null | awk '{print $1}' || echo missing)"
-      git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-      git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
-      src_fp="$local_src_fingerprint"
-      build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-      {
-        printf 'binary_name=%s\n' "$bin_name"
-        printf 'binary_sha256=%s\n' "$bin_sha"
-        printf 'build_time=%s\n' "$build_time"
-        printf 'git_head=%s\n' "$git_head"
-        printf 'git_dirty=%s\n' "$git_dirty"
-        printf 'source_fingerprint=%s\n' "$src_fp"
-      } > "$manifest_path"
-      chmod 444 "$manifest_path"
-    fi
+    bin_sha="$(sha256sum "$bin_path" 2>/dev/null | awk '{print $1}' || echo missing)"
+    git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
+    src_fp="$local_src_fingerprint"
+    build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    tmp_manifest="${manifest_path}.tmp"
+    {
+      printf 'binary_name=%s\n' "$bin_name"
+      printf 'binary_sha256=%s\n' "$bin_sha"
+      printf 'build_time=%s\n' "$build_time"
+      printf 'git_head=%s\n' "$git_head"
+      printf 'git_dirty=%s\n' "$git_dirty"
+      printf 'source_fingerprint=%s\n' "$src_fp"
+    } > "$tmp_manifest"
+    chmod 644 "$manifest_path" 2>/dev/null || true
+    mv -f "$tmp_manifest" "$manifest_path"
+    chmod 444 "$manifest_path"
   fi
 done
 
@@ -2249,11 +2312,9 @@ for idx in "${!NODE_IDS[@]}"; do
     srv_sha=\$(sha256sum '$srv_bin' 2>/dev/null | awk '{print \$1}' || echo missing)
     gw_sha=\$(sha256sum '$gw_path' 2>/dev/null | awk '{print \$1}' || echo missing)
     pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
-    if [[ -f '${srv_bin}.manifest' ]]; then
-      src_fp=\$(grep '^source_fingerprint=' '${srv_bin}.manifest' | cut -d= -f2)
-    else
-      src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
-    fi
+    live_src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
+    synced_src_fp=\$(cat '$REMOTE_REPO_ROOT/.ariabc_synced_source_fingerprint' 2>/dev/null || true)
+    src_fp=\"\${synced_src_fp:-\$live_src_fp}\"
     echo \"git_head=\$git_head\"
     echo \"ariabc_pg_server_path=$srv_bin\"
     echo \"ariabc_pg_server_sha256=\$srv_sha\"
@@ -2261,6 +2322,7 @@ for idx in "${!NODE_IDS[@]}"; do
     echo \"ariabc_pg_gateway_sha256=\$gw_sha\"
     echo \"postgres_sha256=\$pg_sha\"
     echo \"source_fingerprint=\$src_fp\"
+    echo \"live_source_fingerprint=\$live_src_fp\"
   " 2>/dev/null)
 
   echo "$prov_output" | sed "s/^/    /"
@@ -2612,7 +2674,11 @@ for idx in "${!NODE_IDS[@]}"; do
     [[ -z \"\$owp_display\" ]] && owp_display=unsupported
     max_connections=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show max_connections;' | tr -d '[:space:]')
     min_max_connections=$(( $DB_CONN_POOL_SIZE * 3 + 64 ))
-    worker_min_max_connections=$(( $BCDB_WORKER_COUNT + $DB_CONN_POOL_SIZE + 64 ))
+    bcdb_connection_budget=$BCDB_WORKER_COUNT
+    if [[ "\$bcdb_connection_budget" -lt "$BCDB_INIT_BLOCK_SIZE" ]]; then
+      bcdb_connection_budget=$BCDB_INIT_BLOCK_SIZE
+    fi
+    worker_min_max_connections=\$(( bcdb_connection_budget + $DB_CONN_POOL_SIZE + 64 ))
     if [[ "\$min_max_connections" -lt "\$worker_min_max_connections" ]]; then
       min_max_connections="\$worker_min_max_connections"
     fi
@@ -2765,7 +2831,11 @@ for idx in "${!NODE_IDS[@]}"; do
   fi
   actual_max_connections="$(sed -n 's/.*max_connections=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
   required_max_connections=$(( DB_CONN_POOL_SIZE * 3 + 64 ))
-  worker_required_max_connections=$(( BCDB_WORKER_COUNT + DB_CONN_POOL_SIZE + 64 ))
+  bcdb_connection_budget="$BCDB_WORKER_COUNT"
+  if [[ "$bcdb_connection_budget" -lt "$BCDB_INIT_BLOCK_SIZE" ]]; then
+    bcdb_connection_budget="$BCDB_INIT_BLOCK_SIZE"
+  fi
+  worker_required_max_connections=$(( bcdb_connection_budget + DB_CONN_POOL_SIZE + 64 ))
   if [[ "$required_max_connections" -lt "$worker_required_max_connections" ]]; then
     required_max_connections="$worker_required_max_connections"
   fi
@@ -2955,7 +3025,7 @@ for start_pos in "${!START_ORDER[@]}"; do
 
   log "  Starting server on $name ($ip) — RAFT ID $id, clientPort=$client_port orderingMode=$ORDERING_MODE"
   log "    binary: $srv_bin"
-  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbDetQueueHighWm=$BCDB_DET_QUEUE_HIGH_WM bcdbDetQueueLowWm=$BCDB_DET_QUEUE_LOW_WM bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT resultPublishReplicaLimit=$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE raftOrderedFanout=$RAFT_ORDERED_FANOUT raftOrderedBatchAppend=$RAFT_ORDERED_BATCH_APPEND raftOrderedCoalesceLog=$RAFT_ORDERED_COALESCE_LOG detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+  log "    dbConnPoolSize=$DB_CONN_POOL_SIZE bcdbInitArgSize=$BCDB_INIT_BLOCK_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS detBlockSkipReadonly=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD bcdbDetQueueHighWm=$BCDB_DET_QUEUE_HIGH_WM bcdbDetQueueLowWm=$BCDB_DET_QUEUE_LOW_WM bcdbFlowDebug=$BCDB_FLOW_DEBUG fullResultReplicaLimit=$ARIABC_FULL_RESULT_REPLICA_LIMIT resultPublishReplicaLimit=$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID pgExecMode=$PG_EXEC_MODE raftOrderedFanout=$RAFT_ORDERED_FANOUT raftOrderedBatchAppend=$RAFT_ORDERED_BATCH_APPEND raftOrderedCoalesceLog=$RAFT_ORDERED_COALESCE_LOG raftOrderingPolicy=$RAFT_ORDERING_POLICY detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 
   TEST_FAIL_ONCE=0
   if [[ "${ARIABC_TEST_FAIL_DET_BLOCK_SEND_NODE:-}" == "$id" ]]; then
@@ -3011,6 +3081,7 @@ for start_pos in "${!START_ORDER[@]}"; do
 	    export ARIABC_RAFT_ORDERED_COALESCE_LOG='${RAFT_ORDERED_COALESCE_LOG}'
 	    export ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES='${RAFT_ORDERED_BATCH_TARGET_ENTRIES}'
 	    export ARIABC_RAFT_ORDERED_BATCH_LINGER_US='${RAFT_ORDERED_BATCH_LINGER_US}'
+	    export ARIABC_RAFT_ORDERING_POLICY='${RAFT_ORDERING_POLICY}'
 	    export ARIABC_DET_ORDER_START_SEQ='${DET_START_SEQ}'
 	    export ARIABC_RAFT_CLUSTER_ID='${RAFT_CLUSTER_ID}'
 	    export ARIABC_RAFT_EPOCH_HEX='${RAFT_EPOCH_HEX}'
@@ -3062,6 +3133,7 @@ for start_pos in "${!START_ORDER[@]}"; do
       --dbType 1 \
       --safedb 1 \
       --dbConnPoolSize $DB_CONN_POOL_SIZE \
+      --bcdbInitBlockSize $BCDB_INIT_BLOCK_SIZE \
       --pgExecMode $PG_EXEC_MODE \
       --bypassRaft $BYPASS_RAFT \
       --raft-storage-mode $RAFT_STORAGE_MODE \
@@ -3248,7 +3320,7 @@ fi
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM"
-log "  DET ids:       executionProfile=$EXECUTION_PROFILE detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detClientMode=$DET_CLIENT_MODE detClientWorkers=$DET_CLIENT_WORKERS detClientInflight=$DET_CLIENT_INFLIGHT serverExecWorkers=$SERVER_EXEC_WORKERS serverPgConnections=$SERVER_PG_CONNECTIONS connFanout=$CONN_FANOUT raftOrderedFanout=$RAFT_ORDERED_FANOUT raftOrderedBatchAppend=$RAFT_ORDERED_BATCH_APPEND raftOrderedCoalesceLog=$RAFT_ORDERED_COALESCE_LOG raftOrderedBatchTargetEntries=$RAFT_ORDERED_BATCH_TARGET_ENTRIES raftOrderedBatchLingerUs=$RAFT_ORDERED_BATCH_LINGER_US broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+log "  DET ids:       executionProfile=$EXECUTION_PROFILE detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detClientMode=$DET_CLIENT_MODE detClientWorkers=$DET_CLIENT_WORKERS detClientInflight=$DET_CLIENT_INFLIGHT serverExecWorkers=$SERVER_EXEC_WORKERS serverPgConnections=$SERVER_PG_CONNECTIONS connFanout=$CONN_FANOUT raftOrderedFanout=$RAFT_ORDERED_FANOUT raftOrderedBatchAppend=$RAFT_ORDERED_BATCH_APPEND raftOrderedCoalesceLog=$RAFT_ORDERED_COALESCE_LOG raftOrderingPolicy=$RAFT_ORDERING_POLICY raftOrderedBatchTargetEntries=$RAFT_ORDERED_BATCH_TARGET_ENTRIES raftOrderedBatchLingerUs=$RAFT_ORDERED_BATCH_LINGER_US broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbInitArgSize=$BCDB_INIT_BLOCK_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 phase_marker "PHASE_6_WORKLOAD_STARTED"
 # Print a clear banner that distinguishes pipeline-depth from real OS parallelism
 # so this output can be compared honestly against the single-node Python script:
@@ -3658,85 +3730,15 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   log "=== Phase 8: Post-workload $VERIFY_TABLE Merkle verification ==="
   VERIFY_NODE_SSH_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}"
 
-  # --- Pre-marker check: diagnostic only.
-  #     With waitMajority=1 the gateway is allowed to finish once a 3/4 quorum
-  #     has published matching Kafka results.  The fourth replica can still be
-  #     applying or publishing late here, so the correctness barrier is the
-  #     marker transaction below, not this immediate snapshot.
-  log "  Pre-marker row count + Merkle root check..."
-  declare -a PRE_COUNTS=()
-  declare -a PRE_ROOTS=()
-  PRE_PASS=0
-  pre_ref_cnt=""
-  pre_ref_root=""
-  for pre_attempt in $(seq 1 20); do
-    PRE_COUNTS=()
-    PRE_ROOTS=()
-    for idx in "${!NODE_IDS[@]}"; do
-      name="${NODE_NAMES[$idx]}"
-      readback="$(NODE_SSH_COMMAND_TIMEOUT="$VERIFY_NODE_SSH_TIMEOUT" node_ssh "$idx" "
-        INSTALL_DIR='$REMOTE_INSTALL_DIR'
-        export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
-        cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
-        root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
-        echo \"\$cnt|\$root\"
-      " 2>/dev/null | tr -d '[:space:]')" || readback="error|error"
-      IFS='|' read -r cnt root <<<"$readback"
-      PRE_COUNTS+=("$cnt")
-      PRE_ROOTS+=("$root")
-      log "  [$name] pre-marker attempt=$pre_attempt: rows=$cnt root=$root"
-    done
-
-    PRE_PASS=1
-    pre_ref_cnt="${PRE_COUNTS[0]}"
-    pre_ref_root="${PRE_ROOTS[0]}"
-
-    for idx in "${!NODE_IDS[@]}"; do
-      if [[ "${PRE_COUNTS[$idx]}" != "$pre_ref_cnt" || "${PRE_ROOTS[$idx]}" != "$pre_ref_root" ]]; then
-        PRE_PASS=0
-      fi
-    done
-
-    if [[ -n "${EXPECTED_ROWS:-}" && "$pre_ref_cnt" != "$EXPECTED_ROWS" ]]; then
-      PRE_PASS=0
-    fi
-    if [[ -n "${EXPECTED_ROOT:-}" && "$pre_ref_root" != "$EXPECTED_ROOT" ]]; then
-      PRE_PASS=0
-    fi
-    [[ "$PRE_PASS" -eq 1 ]] && break
-    sleep 1
-  done
-
-  for idx in "${!NODE_IDS[@]}"; do
-    if [[ "${PRE_COUNTS[$idx]}" != "$pre_ref_cnt" || "${PRE_ROOTS[$idx]}" != "$pre_ref_root" ]]; then
-      PRE_PASS=0
-      log "  PRE-MARKER MISMATCH on ${NODE_NAMES[$idx]}: rows=${PRE_COUNTS[$idx]} root=${PRE_ROOTS[$idx]}"
-    fi
-  done
-
-  if [[ -n "${EXPECTED_ROWS:-}" && "$pre_ref_cnt" != "$EXPECTED_ROWS" ]]; then
-    PRE_PASS=0
-    log "  EXPECTED ROWS MISMATCH: got $pre_ref_cnt expected $EXPECTED_ROWS"
-  fi
-  if [[ -n "${EXPECTED_ROOT:-}" && "$pre_ref_root" != "$EXPECTED_ROOT" ]]; then
-    PRE_PASS=0
-    log "  EXPECTED ROOT MISMATCH: got $pre_ref_root expected $EXPECTED_ROOT"
-  fi
-
-  if [[ "$PRE_PASS" -eq 1 ]]; then
-    exp_note=""
-    [[ -n "${EXPECTED_ROWS:-}" ]] && exp_note=" (matches expected rows=$EXPECTED_ROWS root=$EXPECTED_ROOT)"
-    log "  Pre-marker consistency: PASS rows=$pre_ref_cnt root=$pre_ref_root${exp_note}"
-  else
-    log "  Pre-marker consistency: DIAGNOSTIC MISMATCH — continuing to marker barrier"
-  fi
-
   WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
   MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
   MARKER_FILE="$LOG_DIR/post_verify_marker.sql"
   # Gateway deterministic sequence for workload item idx is:
-  # detStartSeq + idx. Therefore the marker follows N workload items at:
-  # detStartSeq + N.
+  # In preassigned mode, gateway DET ids are detStartSeq + idx, so the marker
+  # follows N workload items at detStartSeq + N.  In leader-assigned mode this
+  # gateway-side value is only a unique request prefix; the state machine
+  # rewrites the actual DET id after Raft commit.  The barrier property comes
+  # from submitting the marker only after workload terminal completion.
   MARKER_SEQ=$(( DET_START_SEQ + WORKLOAD_LINES ))
   MARKER_REQ=$(( REQ_ID_OFFSET + WORKLOAD_LINES ))
   printf "%s\n" "INSERT INTO $VERIFY_TABLE (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10) VALUES ($VERIFY_MARKER_KEY, '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL') ON CONFLICT (ycsb_key) DO UPDATE SET field1 = EXCLUDED.field1, field2 = EXCLUDED.field2, field3 = EXCLUDED.field3, field4 = EXCLUDED.field4, field5 = EXCLUDED.field5, field6 = EXCLUDED.field6, field7 = EXCLUDED.field7, field8 = EXCLUDED.field8, field9 = EXCLUDED.field9, field10 = EXCLUDED.field10;" > "$MARKER_FILE"

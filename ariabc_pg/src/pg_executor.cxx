@@ -70,6 +70,73 @@ bool debug_req_trace_enabled() {
     return enabled;
 }
 
+void update_atomic_max(std::atomic<uint64_t>& target, uint64_t value) {
+    uint64_t cur = target.load(std::memory_order_relaxed);
+    while (value > cur &&
+           !target.compare_exchange_weak(cur,
+                                         value,
+                                         std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+bool safe_trace_enabled(const std::string& ledger_mode) {
+    if (ledger_mode == "safe") return true;
+    const char* v = std::getenv("ARIABC_SAFE_TRACE");
+    if (!v || !*v) return false;
+    const std::string s = trim_copy(v);
+    return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+}
+
+bool kafka_async_result_publisher_env_enabled() {
+    const char* v = std::getenv("ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER");
+    if (!v || !*v) return true;
+    const std::string s = trim_copy(v);
+    return !(s.empty() || s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "NO");
+}
+
+size_t kafka_async_result_publisher_max_records() {
+    const char* v = std::getenv("ARIABC_KAFKA_ASYNC_RESULT_BATCH_RECORDS");
+    if (!v || !*v) return 512;
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(v, &end, 10);
+    if (errno != 0 || end == v || *end != '\0' || parsed == 0) return 512;
+    return static_cast<size_t>(std::min<unsigned long long>(parsed, 4096ULL));
+}
+
+size_t kafka_async_result_publisher_max_bytes() {
+    const char* v = std::getenv("ARIABC_KAFKA_ASYNC_RESULT_BATCH_BYTES");
+    if (!v || !*v) return 1024 * 1024;
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(v, &end, 10);
+    if (errno != 0 || end == v || *end != '\0' || parsed == 0) return 1024 * 1024;
+    return static_cast<size_t>(std::min<unsigned long long>(parsed, 16ULL * 1024ULL * 1024ULL));
+}
+
+int kafka_async_result_publisher_delay_us() {
+    const char* shared = std::getenv("ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US");
+    if (shared && *shared) {
+        char* end = nullptr;
+        errno = 0;
+        const long parsed = std::strtol(shared, &end, 10);
+        if (errno == 0 && end != shared && *end == '\0' && parsed > 0 && parsed <= 1000000) {
+            return static_cast<int>(parsed);
+        }
+    }
+    const char* v = std::getenv("ARIABC_KAFKA_ASYNC_RESULT_BATCH_DELAY_US");
+    if (v && *v) {
+        char* end = nullptr;
+        errno = 0;
+        const long parsed = std::strtol(v, &end, 10);
+        if (errno == 0 && end != v && *end == '\0' && parsed > 0 && parsed <= 1000000) {
+            return static_cast<int>(parsed);
+        }
+    }
+    return kKafkaBatchMaxDelayMs * 1000;
+}
+
 static const int kConfiguredDelayUs = []() -> int {
     const char* e = ::getenv("ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US");
 
@@ -1985,10 +2052,15 @@ bool pg_executor::initialize_bcdb() {
         }
     }
 
-    const int worker_queue_count = std::max(1, db_opt_.conn_pool_size);
+    const int configured_block_size =
+        (db_opt_.bcdb_init_block_size > 0)
+            ? db_opt_.bcdb_init_block_size
+            : db_opt_.conn_pool_size;
+    const int worker_queue_count = std::max(1, configured_block_size);
     std::cerr << "BCDB_INIT_CONFIG"
               << " pool_size=" << db_opt_.conn_pool_size
-              << " requested_worker_count=" << db_opt_.conn_pool_size
+              << " bcdb_init_arg_size=" << worker_queue_count
+              << " requested_worker_count=" << worker_queue_count
               << " effective_worker_queues=" << worker_queue_count
               << std::endl;
     std::ostringstream q;
@@ -2150,6 +2222,21 @@ pg_executor::pg_executor(int node_id,
         } else {
             kafka_enabled_ = true;
         }
+    }
+    kafka_async_publisher_enabled_ =
+        kafka_enabled_ &&
+        should_publish_kafka_result(node_id_) &&
+        db_opt_.raft_apply_ledger_mode != "safe" &&
+        kafka_async_result_publisher_env_enabled();
+    if (kafka_async_publisher_enabled_) {
+        kafka_pub_thread_ = std::thread([this] { kafka_publisher_loop(); });
+        std::cerr << "Kafka async result publisher enabled on node "
+                  << node_id_
+                  << " records="
+                  << kafka_async_result_publisher_max_records()
+                  << " delay_us="
+                  << kafka_async_result_publisher_delay_us()
+                  << std::endl;
     }
 
     // DB connections.
@@ -2330,7 +2417,9 @@ void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
                                 int leader_node_hint,
                                 uint64_t raft_log_idx,
                                 const std::string& entry_digest_hex,
-                                const std::vector<std::string>& item_digests_hex) {
+                                const std::vector<std::string>& item_digests_hex,
+                                const std::vector<uint64_t>& assigned_det_seqs,
+                                const std::vector<uint8_t>& assigned_det_seq_valid) {
     if (stop_.load()) return;
     if (req_ids.empty() || req_ids.size() != sqls.size()) return;
 
@@ -2348,6 +2437,12 @@ void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
             t.sql = sqls[i];
             t.leader_node_hint = leader_node_hint;
             t.raft_log_idx = raft_log_idx;
+            if (i < assigned_det_seqs.size() &&
+                i < assigned_det_seq_valid.size() &&
+                assigned_det_seq_valid[i] != 0) {
+                t.has_assigned_det_seq = true;
+                t.assigned_det_seq = assigned_det_seqs[i];
+            }
             t.enqueue_ns = now_ns;
             t.exec_begin_ns = 0;
             t.attempt = 0;
@@ -2657,6 +2752,10 @@ pg_executor_stats pg_executor::stats() const {
     out.queue_overloaded = queue_overloaded_.load(std::memory_order_relaxed) ? 1 : 0;
     out.bcdb_init_enabled = bcdb_init_done_ ? 1 : 0;
     out.bcdb_block_size = bcdb_block_size_;
+    out.bcdb_init_arg_size_configured =
+        (db_opt_.bcdb_init_block_size > 0)
+            ? db_opt_.bcdb_init_block_size
+            : db_opt_.conn_pool_size;
     out.det_block_batches = st_det_block_batches_.load(std::memory_order_relaxed);
     out.det_block_items = st_det_block_items_.load(std::memory_order_relaxed);
     out.det_block_min = st_det_block_min_.load(std::memory_order_relaxed);
@@ -2710,6 +2809,9 @@ pg_executor_stats pg_executor::stats() const {
     out.result_flush_while_delivery_pending_gt_32 = st_result_flush_while_delivery_pending_gt_32_.load(std::memory_order_relaxed);
     out.kafka_delivery_pending_over_8_events = kstats.pending_crossed_above_8;
     out.kafka_delivery_pending_over_32_events = kstats.pending_crossed_above_32;
+    out.kafka_async_publisher_enabled = kafka_async_publisher_enabled_ ? 1 : 0;
+    out.kafka_async_publisher_queue_max =
+        st_kafka_async_publisher_queue_max_.load(std::memory_order_relaxed);
 
     return out;
 }
@@ -2739,7 +2841,9 @@ bool pg_executor::wait_for_admission_drain(uint64_t max_wait_ns) {
 }
 
 bool pg_executor::wait_for_ordered_emit_turn(uint64_t dispatch_seq) {
-    if (!(db_opt_.db_type == 1 && !event_mode_ && det_parallel_workers_) || dispatch_seq == 0) {
+    if (!(db_opt_.db_type == 1 && !event_mode_ && det_parallel_workers_) ||
+        det_threaded_direct_no_preapply_wait_ ||
+        dispatch_seq == 0) {
         return true;
     }
     std::unique_lock<std::mutex> lk(det_emit_mu_);
@@ -2750,7 +2854,9 @@ bool pg_executor::wait_for_ordered_emit_turn(uint64_t dispatch_seq) {
 }
 
 void pg_executor::finish_ordered_emit(uint64_t dispatch_seq) {
-    if (!(db_opt_.db_type == 1 && !event_mode_ && det_parallel_workers_) || dispatch_seq == 0) {
+    if (!(db_opt_.db_type == 1 && !event_mode_ && det_parallel_workers_) ||
+        det_threaded_direct_no_preapply_wait_ ||
+        dispatch_seq == 0) {
         return;
     }
     {
@@ -2762,7 +2868,261 @@ void pg_executor::finish_ordered_emit(uint64_t dispatch_seq) {
     det_emit_cv_.notify_all();
 }
 
+bool pg_executor::async_kafka_publisher_active() const {
+    return kafka_async_publisher_enabled_;
+}
+
+void pg_executor::enqueue_kafka_result(const task& t, const ConfirmedResult& confirmed) {
+    if (!async_kafka_publisher_active()) return;
+
+    kafka_result_record rec;
+    rec.req_id = t.req_id;
+    rec.result = confirmed.payload;
+    rec.raft_log_idx = t.raft_log_idx;
+    rec.leader_hint = t.leader_node_hint;
+    rec.terminal_digest = confirmed.terminal_digest;
+    rec.append_ns = now_steady_ns();
+    rec.raft_item_ordinal = t.raft_item_ordinal;
+    rec.terminal_state = confirmed.terminal_state;
+    rec.format_version = confirmed.format_version;
+    rec.dispatch_seq = t.dispatch_seq;
+    rec.ready_ns = rec.append_ns;
+    rec.bytes = t.req_id.size() + confirmed.payload.size() + 32;
+
+    {
+        std::lock_guard<std::mutex> lk(kafka_pub_mu_);
+        kafka_pub_q_.push_back(std::move(rec));
+        update_atomic_max(st_kafka_async_publisher_queue_max_,
+                          static_cast<uint64_t>(kafka_pub_q_.size()));
+    }
+    kafka_pub_cv_.notify_one();
+}
+
+void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& batch,
+                                             kafka_flush_reason reason) {
+    if (!kafka_enabled_ || batch.empty()) return;
+
+    st_kafka_flush_calls_.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t flush_ns = now_steady_ns();
+    const uint64_t batch_records = static_cast<uint64_t>(batch.size());
+    st_kafka_batch_records_.fetch_add(batch_records, std::memory_order_relaxed);
+    update_atomic_max(st_kafka_batch_records_max_, batch_records);
+
+    std::vector<std::string> batch_req_ids;
+    std::vector<std::string> batch_results;
+    std::vector<uint64_t> batch_raft_log_idxs;
+    std::vector<int> batch_leader_hints;
+    std::vector<std::string> batch_terminal_digests;
+    std::vector<uint32_t> batch_raft_item_ordinals;
+    std::vector<std::string> batch_terminal_states;
+    std::vector<int> batch_format_versions;
+    batch_req_ids.reserve(batch.size());
+    batch_results.reserve(batch.size());
+    batch_raft_log_idxs.reserve(batch.size());
+    batch_leader_hints.reserve(batch.size());
+    batch_terminal_digests.reserve(batch.size());
+    batch_raft_item_ordinals.reserve(batch.size());
+    batch_terminal_states.reserve(batch.size());
+    batch_format_versions.reserve(batch.size());
+
+    uint64_t total_dwell_ns = 0;
+    size_t batch_bytes = 0;
+    for (const auto& rec : batch) {
+        batch_req_ids.push_back(rec.req_id);
+        batch_results.push_back(rec.result);
+        batch_raft_log_idxs.push_back(rec.raft_log_idx);
+        batch_leader_hints.push_back(rec.leader_hint);
+        batch_terminal_digests.push_back(rec.terminal_digest);
+        batch_raft_item_ordinals.push_back(rec.raft_item_ordinal);
+        batch_terminal_states.push_back(rec.terminal_state);
+        batch_format_versions.push_back(rec.format_version);
+        batch_bytes += rec.bytes;
+        if (flush_ns >= rec.append_ns) {
+            const uint64_t dwell_ns = flush_ns - rec.append_ns;
+            st_kafka_batch_dwell_ns_.fetch_add(dwell_ns, std::memory_order_relaxed);
+            update_atomic_max(st_kafka_batch_dwell_max_ns_, dwell_ns);
+            total_dwell_ns += dwell_ns;
+        }
+    }
+
+    const uint64_t backlog = st_backlog_cur_.load(std::memory_order_relaxed);
+    if (backlog == 0) st_kafka_flush_backlog_bin_0_.fetch_add(1, std::memory_order_relaxed);
+    else if (backlog <= 15) st_kafka_flush_backlog_bin_1_15_.fetch_add(1, std::memory_order_relaxed);
+    else if (backlog <= 63) st_kafka_flush_backlog_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+    else if (backlog <= 255) st_kafka_flush_backlog_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+    else st_kafka_flush_backlog_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+    const uint64_t inflight = st_inflight_cur_.load(std::memory_order_relaxed);
+    if (inflight == 0) st_kafka_flush_inflight_bin_0_.fetch_add(1, std::memory_order_relaxed);
+    else if (inflight <= 15) st_kafka_flush_inflight_bin_1_15_.fetch_add(1, std::memory_order_relaxed);
+    else if (inflight <= 63) st_kafka_flush_inflight_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+    else if (inflight <= 255) st_kafka_flush_inflight_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+    else st_kafka_flush_inflight_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+    if (batch_records == 1) st_kafka_batch_records_bin_1_.fetch_add(1, std::memory_order_relaxed);
+    else if (batch_records <= 15) st_kafka_batch_records_bin_2_15_.fetch_add(1, std::memory_order_relaxed);
+    else if (batch_records <= 63) st_kafka_batch_records_bin_16_63_.fetch_add(1, std::memory_order_relaxed);
+    else if (batch_records <= 255) st_kafka_batch_records_bin_64_255_.fetch_add(1, std::memory_order_relaxed);
+    else st_kafka_batch_records_bin_256_plus_.fetch_add(1, std::memory_order_relaxed);
+
+    if (batch_bytes <= 1024) st_kafka_batch_bytes_bin_le_1k_.fetch_add(1, std::memory_order_relaxed);
+    else if (batch_bytes <= 10240) st_kafka_batch_bytes_bin_1k_10k_.fetch_add(1, std::memory_order_relaxed);
+    else if (batch_bytes <= 102400) st_kafka_batch_bytes_bin_10k_100k_.fetch_add(1, std::memory_order_relaxed);
+    else st_kafka_batch_bytes_bin_100k_plus_.fetch_add(1, std::memory_order_relaxed);
+
+    uint64_t mean_dwell_ns = batch_records > 0 ? (total_dwell_ns / batch_records) : 0;
+    if (mean_dwell_ns <= 1000000ULL) st_kafka_batch_dwell_bin_le_1ms_.fetch_add(1, std::memory_order_relaxed);
+    else if (mean_dwell_ns <= 5000000ULL) st_kafka_batch_dwell_bin_1_5ms_.fetch_add(1, std::memory_order_relaxed);
+    else if (mean_dwell_ns <= 20000000ULL) st_kafka_batch_dwell_bin_5_20ms_.fetch_add(1, std::memory_order_relaxed);
+    else if (mean_dwell_ns <= 100000000ULL) st_kafka_batch_dwell_bin_20_100ms_.fetch_add(1, std::memory_order_relaxed);
+    else st_kafka_batch_dwell_bin_100ms_plus_.fetch_add(1, std::memory_order_relaxed);
+
+    st_result_flush_count_.fetch_add(1, std::memory_order_relaxed);
+    st_result_flush_records_total_.fetch_add(batch_records, std::memory_order_relaxed);
+    update_atomic_max(st_result_flush_records_max_, batch_records);
+
+    switch (reason) {
+        case kafka_flush_reason::RECORDS:
+            st_kafka_flush_reason_records_.fetch_add(1, std::memory_order_relaxed);
+            st_result_flush_due_to_record_cap_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case kafka_flush_reason::BYTES:
+            st_kafka_flush_reason_bytes_.fetch_add(1, std::memory_order_relaxed);
+            st_result_flush_due_to_byte_cap_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case kafka_flush_reason::AGE:
+            st_kafka_flush_reason_age_.fetch_add(1, std::memory_order_relaxed);
+            st_result_flush_due_to_age_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case kafka_flush_reason::IDLE:
+            st_kafka_flush_reason_idle_.fetch_add(1, std::memory_order_relaxed);
+            st_result_flush_due_to_idle_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case kafka_flush_reason::ERROR:
+            st_result_flush_due_to_error_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case kafka_flush_reason::FINAL:
+            st_kafka_flush_reason_final_.fetch_add(1, std::memory_order_relaxed);
+            st_result_flush_due_to_shutdown_.fetch_add(1, std::memory_order_relaxed);
+            break;
+    }
+
+    {
+        const uint64_t dp = kafka_prod_.delivery_pending_relaxed();
+        update_atomic_max(st_kafka_delivery_pending_max_, dp);
+        if (dp > 8) {
+            st_result_flush_while_delivery_pending_gt_8_.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (dp > 32) {
+            st_result_flush_while_delivery_pending_gt_32_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    std::string err;
+    const auto b0 = std::chrono::steady_clock::now();
+    const std::string payload = build_bin_batch_payload_v2(
+        batch_req_ids,
+        batch_results,
+        batch_raft_log_idxs,
+        batch_leader_hints,
+        batch_terminal_digests,
+        batch_raft_item_ordinals,
+        batch_terminal_states,
+        batch_format_versions,
+        static_cast<uint16_t>(node_id_),
+        result_sig_key_,
+        db_opt_.raft_epoch_hex,
+        false);
+    const auto b1 = std::chrono::steady_clock::now();
+    st_kafka_build_payload_ns_.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count()),
+        std::memory_order_relaxed);
+    st_kafka_payload_bytes_.fetch_add(static_cast<uint64_t>(payload.size()),
+                                      std::memory_order_relaxed);
+
+    const auto s0 = std::chrono::steady_clock::now();
+    const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err);
+    if (!kafka_send_ok) {
+        std::cerr << "Kafka async result send failed: " << err << std::endl;
+    }
+    const auto s1 = std::chrono::steady_clock::now();
+    st_kafka_send_ns_.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count()),
+        std::memory_order_relaxed);
+}
+
+void pg_executor::kafka_publisher_loop() {
+    const size_t max_records = kafka_async_result_publisher_max_records();
+    const size_t max_bytes = kafka_async_result_publisher_max_bytes();
+    const int max_delay_us = kafka_async_result_publisher_delay_us();
+    std::vector<kafka_result_record> batch;
+    batch.reserve(max_records);
+
+    for (;;) {
+        batch.clear();
+        size_t batch_bytes = 0;
+        kafka_flush_reason reason = kafka_flush_reason::AGE;
+        auto batch_start = std::chrono::steady_clock::now();
+
+        {
+            std::unique_lock<std::mutex> lk(kafka_pub_mu_);
+            kafka_pub_cv_.wait(lk, [this] {
+                return kafka_pub_stop_ || !kafka_pub_q_.empty();
+            });
+            if (kafka_pub_q_.empty() && kafka_pub_stop_) {
+                break;
+            }
+            if (kafka_pub_q_.empty()) {
+                continue;
+            }
+
+            batch_start = std::chrono::steady_clock::now();
+            for (;;) {
+                while (!kafka_pub_q_.empty() &&
+                       batch.size() < max_records &&
+                       batch_bytes < max_bytes) {
+                    batch_bytes += kafka_pub_q_.front().bytes;
+                    batch.push_back(std::move(kafka_pub_q_.front()));
+                    kafka_pub_q_.pop_front();
+                }
+                if (batch.size() >= max_records) {
+                    reason = kafka_flush_reason::RECORDS;
+                    break;
+                }
+                if (batch_bytes >= max_bytes) {
+                    reason = kafka_flush_reason::BYTES;
+                    break;
+                }
+                if (kafka_pub_stop_) {
+                    reason = kafka_flush_reason::FINAL;
+                    break;
+                }
+
+                const auto deadline =
+                    batch_start + std::chrono::microseconds(max_delay_us);
+                const bool woke = kafka_pub_cv_.wait_until(lk, deadline, [this] {
+                    return kafka_pub_stop_ || !kafka_pub_q_.empty();
+                });
+                if (woke) {
+                    continue;
+                }
+                reason = kafka_flush_reason::AGE;
+                break;
+            }
+        }
+
+        if (!batch.empty()) {
+            publish_kafka_result_batch(batch, reason);
+        }
+    }
+}
+
 uint64_t pg_executor::get_det_tx_seq(const task& t) const {
+    if (t.has_assigned_det_seq) {
+        return t.assigned_det_seq;
+    }
     uint64_t tx_seq = 0;
     if (parse_req_num(t.req_id, tx_seq) && tx_seq > 0) {
         return tx_seq;
@@ -2941,6 +3301,15 @@ void pg_executor::stop() {
         if (t.joinable()) t.join();
     }
     threads_.clear();
+
+    {
+        std::lock_guard<std::mutex> lk(kafka_pub_mu_);
+        kafka_pub_stop_ = true;
+    }
+    kafka_pub_cv_.notify_all();
+    if (kafka_pub_thread_.joinable()) {
+        kafka_pub_thread_.join();
+    }
 
     kafka_prod_.stop();
 
@@ -3368,20 +3737,23 @@ void pg_executor::worker_loop() {
                                           std::memory_order_relaxed);
 
         const auto s0 = std::chrono::steady_clock::now();
-        trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH",
-                               node_id_,
-                               batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
-                               batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front());
-        std::cerr << "SAFE_KAFKA_PUBLISH_BEGIN"
-                  << " records=" << batch_req_ids.size()
-                  << " first_log=" << (batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front())
-                  << " first_ord=" << (batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front())
-                  << " bytes=" << payload.size()
-                  << std::endl;
+        const bool safe_trace_on = safe_trace_enabled(db_opt_.raft_apply_ledger_mode);
+        if (safe_trace_on) {
+            trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH",
+                                   node_id_,
+                                   batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
+                                   batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front());
+            std::cerr << "SAFE_KAFKA_PUBLISH_BEGIN"
+                      << " records=" << batch_req_ids.size()
+                      << " first_log=" << (batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front())
+                      << " first_ord=" << (batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front())
+                      << " bytes=" << payload.size()
+                      << std::endl;
+        }
         const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err);
         if (!kafka_send_ok) {
             std::cerr << "Kafka send failed: " << err << std::endl;
-        } else {
+        } else if (safe_trace_on) {
             std::cerr << "SAFE_KAFKA_PUBLISH_SENT"
                       << " records=" << batch_req_ids.size()
                       << " first_log=" << (batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front())
@@ -3393,7 +3765,7 @@ void pg_executor::worker_loop() {
             kafka_delivered_ok = kafka_prod_.wait_for_delivery(5000, err);
             if (!kafka_delivered_ok) {
                 std::cerr << "Kafka delivery confirmation failed: " << err << std::endl;
-            } else {
+            } else if (safe_trace_on) {
                 std::cerr << "SAFE_KAFKA_PUBLISH_DELIVERED"
                           << " records=" << batch_req_ids.size()
                           << " first_log=" << (batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front())
@@ -3402,10 +3774,12 @@ void pg_executor::worker_loop() {
             }
         }
         if (kafka_delivered_ok && db_opt_.raft_apply_ledger_mode == "safe") {
-            trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK",
-                                   node_id_,
-                                   batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
-                                   batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front());
+            if (safe_trace_on) {
+                trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK",
+                                       node_id_,
+                                       batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
+                                       batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front());
+            }
             for (size_t i = 0; i < batch_raft_log_idxs.size(); ++i) {
                 const uint64_t dispatch_seq =
                     (i < batch_dispatch_seqs.size()) ? batch_dispatch_seqs[i] : 0;
@@ -3531,20 +3905,38 @@ void pg_executor::worker_loop() {
             }
             if (kafka_enabled_) {
                 if (should_publish_kafka_result(node_id_)) {
-                    debug_trace_exec(t.req_id, t.raft_log_idx, result);
-                    if (batch_req_ids.empty()) {
-                        batch_start = std::chrono::steady_clock::now();
+                    if (db_opt_.raft_apply_ledger_mode != "safe") {
+                        if (t.dispatch_seq == 0) {
+                            notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
+                        } else {
+                            mark_task_applied_ordered(t.dispatch_seq,
+                                                      t.raft_log_idx,
+                                                      t.raft_item_ordinal,
+                                                      now_steady_ns());
+                        }
                     }
-                    batch_req_ids.push_back(t.req_id);
-                    batch_results.push_back(result);
-                    batch_raft_log_idxs.push_back(t.raft_log_idx);
-                    batch_leader_hints.push_back(t.leader_node_hint);
-                    batch_terminal_digests.push_back(""); // non-det loop doesn't have terminal digest yet
-                    batch_append_ns.push_back(now_steady_ns());
-                    batch_raft_item_ordinals.push_back(t.raft_item_ordinal);
-                    batch_terminal_states.push_back("ERROR");
-                    batch_format_versions.push_back(1);
-                    batch_bytes += t.req_id.size() + result.size() + 32;
+                    if (async_kafka_publisher_active()) {
+                        ConfirmedResult conf;
+                        conf.payload = result;
+                        conf.terminal_state = "ERROR";
+                        conf.format_version = 1;
+                        enqueue_kafka_result(t, conf);
+                    } else {
+                        debug_trace_exec(t.req_id, t.raft_log_idx, result);
+                        if (batch_req_ids.empty()) {
+                            batch_start = std::chrono::steady_clock::now();
+                        }
+                        batch_req_ids.push_back(t.req_id);
+                        batch_results.push_back(result);
+                        batch_raft_log_idxs.push_back(t.raft_log_idx);
+                        batch_leader_hints.push_back(t.leader_node_hint);
+                        batch_terminal_digests.push_back(""); // non-det loop doesn't have terminal digest yet
+                        batch_append_ns.push_back(now_steady_ns());
+                        batch_raft_item_ordinals.push_back(t.raft_item_ordinal);
+                        batch_terminal_states.push_back("ERROR");
+                        batch_format_versions.push_back(1);
+                        batch_bytes += t.req_id.size() + result.size() + 32;
+                    }
                 }
             } else {
                 std::cout << (t.req_id + "  " + std::to_string(node_id_) + "  " + result)
@@ -3702,43 +4094,47 @@ void pg_executor::worker_loop() {
 
         if (kafka_enabled_) {
             if (should_publish_kafka_result(node_id_)) {
-                debug_trace_exec(t.req_id, t.raft_log_idx, confirmed.payload);
-                if (batch_req_ids.empty()) {
-                    batch_start = std::chrono::steady_clock::now();
-                }
-                batch_req_ids.push_back(t.req_id);
-                batch_results.push_back(confirmed.payload);
-                batch_raft_log_idxs.push_back(t.raft_log_idx);
-                batch_leader_hints.push_back(t.leader_node_hint);
-                batch_terminal_digests.push_back(confirmed.terminal_digest);
-                batch_append_ns.push_back(now_steady_ns());
-                batch_raft_item_ordinals.push_back(t.raft_item_ordinal);
-                batch_terminal_states.push_back(confirmed.terminal_state);
-                batch_format_versions.push_back(confirmed.format_version);
-                batch_dispatch_seqs.push_back(t.dispatch_seq);
-                batch_ready_ns.push_back(now_steady_ns());
-                batch_bytes += t.req_id.size() + confirmed.payload.size() + 32;
-                if (confirmed.terminal_state == "ERROR") {
-                    flush_batch(FLUSH_REASON_ERROR);
+                if (async_kafka_publisher_active()) {
+                    enqueue_kafka_result(t, confirmed);
                 } else {
-                    const size_t max_records = (q_depth_after_pop >= 64) ? 512 : kKafkaBatchMaxRecords;
-                    const size_t max_bytes = (q_depth_after_pop >= 64) ? (1024 * 1024) : kKafkaBatchMaxBytes;
-                    int max_delay_us = -1;
-                    if (kConfiguredDelayUs >= 0) {
-                        max_delay_us = kConfiguredDelayUs;
-                    } else if (q_depth_after_pop < 16) {
-                        max_delay_us = kKafkaBatchMaxDelayMs * 1000;
+                    debug_trace_exec(t.req_id, t.raft_log_idx, confirmed.payload);
+                    if (batch_req_ids.empty()) {
+                        batch_start = std::chrono::steady_clock::now();
                     }
-                    const auto age_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now() - batch_start).count();
-                    if (batch_req_ids.size() >= max_records ||
-                        batch_bytes >= max_bytes ||
-                        (max_delay_us >= 0 && age_us >= max_delay_us)) {
-                        flush_batch(batch_req_ids.size() >= max_records
-                                        ? FLUSH_REASON_RECORDS
-                                        : (batch_bytes >= max_bytes
-                                               ? FLUSH_REASON_BYTES
-                                               : FLUSH_REASON_AGE));
+                    batch_req_ids.push_back(t.req_id);
+                    batch_results.push_back(confirmed.payload);
+                    batch_raft_log_idxs.push_back(t.raft_log_idx);
+                    batch_leader_hints.push_back(t.leader_node_hint);
+                    batch_terminal_digests.push_back(confirmed.terminal_digest);
+                    batch_append_ns.push_back(now_steady_ns());
+                    batch_raft_item_ordinals.push_back(t.raft_item_ordinal);
+                    batch_terminal_states.push_back(confirmed.terminal_state);
+                    batch_format_versions.push_back(confirmed.format_version);
+                    batch_dispatch_seqs.push_back(t.dispatch_seq);
+                    batch_ready_ns.push_back(now_steady_ns());
+                    batch_bytes += t.req_id.size() + confirmed.payload.size() + 32;
+                    if (confirmed.terminal_state == "ERROR") {
+                        flush_batch(FLUSH_REASON_ERROR);
+                    } else {
+                        const size_t max_records = (q_depth_after_pop >= 64) ? 512 : kKafkaBatchMaxRecords;
+                        const size_t max_bytes = (q_depth_after_pop >= 64) ? (1024 * 1024) : kKafkaBatchMaxBytes;
+                        int max_delay_us = -1;
+                        if (kConfiguredDelayUs >= 0) {
+                            max_delay_us = kConfiguredDelayUs;
+                        } else if (q_depth_after_pop < 16) {
+                            max_delay_us = kKafkaBatchMaxDelayMs * 1000;
+                        }
+                        const auto age_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - batch_start).count();
+                        if (batch_req_ids.size() >= max_records ||
+                            batch_bytes >= max_bytes ||
+                            (max_delay_us >= 0 && age_us >= max_delay_us)) {
+                            flush_batch(batch_req_ids.size() >= max_records
+                                            ? FLUSH_REASON_RECORDS
+                                            : (batch_bytes >= max_bytes
+                                                   ? FLUSH_REASON_BYTES
+                                                   : FLUSH_REASON_AGE));
+                        }
                     }
                 }
             }
@@ -3943,20 +4339,23 @@ void pg_executor::event_loop() {
                                           std::memory_order_relaxed);
 
         const auto s0 = std::chrono::steady_clock::now();
-        trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH",
-                               node_id_,
-                               batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
-                               batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front());
-        std::cerr << "SAFE_KAFKA_PUBLISH_BEGIN"
-                  << " records=" << batch_req_ids.size()
-                  << " first_log=" << (batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front())
-                  << " first_ord=" << (batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front())
-                  << " bytes=" << payload.size()
-                  << std::endl;
+        const bool safe_trace_on = safe_trace_enabled(db_opt_.raft_apply_ledger_mode);
+        if (safe_trace_on) {
+            trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_RESULT_RING_BEFORE_KAFKA_PUBLISH",
+                                   node_id_,
+                                   batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
+                                   batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front());
+            std::cerr << "SAFE_KAFKA_PUBLISH_BEGIN"
+                      << " records=" << batch_req_ids.size()
+                      << " first_log=" << (batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front())
+                      << " first_ord=" << (batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front())
+                      << " bytes=" << payload.size()
+                      << std::endl;
+        }
         const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err);
         if (!kafka_send_ok) {
             std::cerr << "Kafka send failed: " << err << std::endl;
-        } else {
+        } else if (safe_trace_on) {
             std::cerr << "SAFE_KAFKA_PUBLISH_SENT"
                       << " records=" << batch_req_ids.size()
                       << " first_log=" << (batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front())
@@ -3968,7 +4367,7 @@ void pg_executor::event_loop() {
             kafka_delivered_ok = kafka_prod_.wait_for_delivery(5000, err);
             if (!kafka_delivered_ok) {
                 std::cerr << "Kafka delivery confirmation failed: " << err << std::endl;
-            } else {
+            } else if (safe_trace_on) {
                 std::cerr << "SAFE_KAFKA_PUBLISH_DELIVERED"
                           << " records=" << batch_req_ids.size()
                           << " first_log=" << (batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front())
@@ -3977,10 +4376,12 @@ void pg_executor::event_loop() {
             }
         }
         if (kafka_delivered_ok) {
-            trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK",
-                                   node_id_,
-                                   batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
-                                   batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front());
+            if (safe_trace_on) {
+                trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK",
+                                       node_id_,
+                                       batch_raft_log_idxs.empty() ? 0 : batch_raft_log_idxs.front(),
+                                       batch_raft_item_ordinals.empty() ? 0 : batch_raft_item_ordinals.front());
+            }
             for (size_t i = 0; i < batch_raft_log_idxs.size(); ++i) {
                 const uint64_t dispatch_seq =
                     (i < batch_dispatch_seqs.size()) ? batch_dispatch_seqs[i] : 0;
@@ -4032,23 +4433,42 @@ void pg_executor::event_loop() {
     auto emit_det_result = [&](const task& done_task, const std::string& out, bool is_error = false, const std::string& terminal_digest = "", const std::string& terminal_state = "", int format_version = 1) {
         if (kafka_enabled_) {
             if (should_publish_kafka_result(node_id_)) {
-                debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
-                if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
-                batch_req_ids.push_back(done_task.req_id);
-                batch_results.push_back(out);
-                batch_raft_log_idxs.push_back(done_task.raft_log_idx);
-                batch_leader_hints.push_back(done_task.leader_node_hint);
-                batch_terminal_digests.push_back(terminal_digest);
-                batch_append_ns.push_back(now_steady_ns());
-                batch_raft_item_ordinals.push_back(done_task.raft_item_ordinal);
-                batch_terminal_states.push_back(terminal_state.empty() ? (is_error ? "ERROR" : "OK") : terminal_state);
-                batch_format_versions.push_back(format_version);
-                batch_dispatch_seqs.push_back(done_task.dispatch_seq);
-                batch_ready_ns.push_back(now_steady_ns());
-                batch_bytes += done_task.req_id.size() + out.size() + 32;
-                st_kafka_immediate_records_.fetch_add(1, std::memory_order_relaxed);
-                if (is_error) {
-                    flush_batch(FLUSH_REASON_ERROR);
+                if (async_kafka_publisher_active()) {
+                    ConfirmedResult conf;
+                    conf.payload = out;
+                    conf.terminal_digest = terminal_digest;
+                    conf.terminal_state =
+                        terminal_state.empty() ? (is_error ? "ERROR" : "OK") : terminal_state;
+                    conf.format_version = format_version;
+                    enqueue_kafka_result(done_task, conf);
+                    if (done_task.dispatch_seq == 0) {
+                        notify_task_applied(done_task.raft_log_idx,
+                                            done_task.raft_item_ordinal);
+                    } else {
+                        mark_task_applied_ordered(done_task.dispatch_seq,
+                                                  done_task.raft_log_idx,
+                                                  done_task.raft_item_ordinal,
+                                                  now_steady_ns());
+                    }
+                } else {
+                    debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
+                    if (batch_req_ids.empty()) batch_start = std::chrono::steady_clock::now();
+                    batch_req_ids.push_back(done_task.req_id);
+                    batch_results.push_back(out);
+                    batch_raft_log_idxs.push_back(done_task.raft_log_idx);
+                    batch_leader_hints.push_back(done_task.leader_node_hint);
+                    batch_terminal_digests.push_back(terminal_digest);
+                    batch_append_ns.push_back(now_steady_ns());
+                    batch_raft_item_ordinals.push_back(done_task.raft_item_ordinal);
+                    batch_terminal_states.push_back(terminal_state.empty() ? (is_error ? "ERROR" : "OK") : terminal_state);
+                    batch_format_versions.push_back(format_version);
+                    batch_dispatch_seqs.push_back(done_task.dispatch_seq);
+                    batch_ready_ns.push_back(now_steady_ns());
+                    batch_bytes += done_task.req_id.size() + out.size() + 32;
+                    st_kafka_immediate_records_.fetch_add(1, std::memory_order_relaxed);
+                    if (is_error) {
+                        flush_batch(FLUSH_REASON_ERROR);
+                    }
                 }
             }
         } else {
@@ -4313,9 +4733,8 @@ void pg_executor::event_loop() {
                         bool eligible = !candidate.empty();
                         uint64_t first_req_num = 0;
                         for (size_t i = 0; eligible && i < candidate.size(); ++i) {
-                            uint64_t req_num = 0;
-                            if (!parse_req_num(candidate[i].req_id, req_num) ||
-                                !is_det_prefixed_sql(candidate[i].sql)) {
+                            const uint64_t req_num = get_det_tx_seq(candidate[i]);
+                            if (req_num == 0 || !is_det_prefixed_sql(candidate[i].sql)) {
                                 eligible = false;
                                 break;
                             }

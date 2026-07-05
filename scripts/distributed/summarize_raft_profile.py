@@ -25,6 +25,8 @@ PROFILE_PREFIXES = (
 
 CSV_FIELDS = [
     "run_id",
+    "orderer_policy",
+    "assigned_seq_mode",
     "tps",
     "p50",
     "p95",
@@ -32,13 +34,21 @@ CSV_FIELDS = [
     "client_workers",
     "server_workers",
     "bcdb_workers",
+    "bcdb_init_arg_size",
+    "leader_id",
+    "target_entries",
+    "linger_us",
     "entries_per_fsync",
     "fsync_p50",
     "fsync_p95",
     "append_entries_avg",
     "orderer_gap_wait_ms",
+    "executor_queue_delay_ms",
     "pqexec_avg",
     "max_pqexec",
+    "kafka_pending_max",
+    "kafka_async_publisher_enabled",
+    "kafka_async_publisher_queue_max",
     "gateway_submit_to_accept_ms",
     "gateway_accept_to_terminal_ms",
     "merkle_pass",
@@ -96,6 +106,22 @@ def last_by_prefix(root: pathlib.Path) -> Dict[str, List[Tuple[pathlib.Path, Dic
     return rows
 
 
+def read_env_file(path: pathlib.Path) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not path.exists():
+        return out
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
 def merkle_pass(root: pathlib.Path) -> int:
     runner_log = root / "runner.log"
     if not runner_log.exists():
@@ -106,9 +132,15 @@ def merkle_pass(root: pathlib.Path) -> int:
 
 def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
     rows = last_by_prefix(root)
+    meta = read_env_file(root / "run_meta.env")
     out: Dict[str, object] = {k: "" for k in CSV_FIELDS}
     out["run_id"] = root.name
     out["merkle_pass"] = merkle_pass(root)
+    out["orderer_policy"] = meta.get("raft_ordering_policy", "")
+    out["assigned_seq_mode"] = "1" if out["orderer_policy"] == "leader-assigned" else "0"
+    out["target_entries"] = meta.get("raft_ordered_batch_target_entries", "")
+    out["linger_us"] = meta.get("raft_ordered_batch_linger_us", "")
+    out["bcdb_init_arg_size"] = meta.get("bcdb_init_arg_size", meta.get("bcdb_init_block_size", ""))
     leader_path: pathlib.Path | None = None
 
     progress = rows.get("PROGRESS_GATEWAY_DET", [])
@@ -136,6 +168,15 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
         leader_path, row = leader_rows[-1] if leader_rows else server_rows[-1]
         out["server_workers"] = row.get("configured_server_workers", "")
         out["bcdb_workers"] = row.get("bcdb_block_size", "")
+        out["bcdb_init_arg_size"] = row.get(
+            "bcdb_init_arg_size_configured",
+            row.get("bcdb_init_block_size_configured", out["bcdb_init_arg_size"]),
+        )
+        out["leader_id"] = row.get("raft_leader", "")
+        out["executor_queue_delay_ms"] = f"{as_float(row, 'queue_delay_ms'):.3f}"
+        out["kafka_pending_max"] = as_int(row, "kafka_delivery_pending_max")
+        out["kafka_async_publisher_enabled"] = as_int(row, "kafka_async_publisher_enabled")
+        out["kafka_async_publisher_queue_max"] = as_int(row, "kafka_async_publisher_queue_max")
         exec_calls = as_int(row, "exec_calls")
         pg_query_ms = as_float(row, "pg_query_ms")
         out["pqexec_avg"] = f"{((pg_query_ms / exec_calls) if exec_calls else 0.0):.6f}"
@@ -144,8 +185,12 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
     orderer_rows = rows.get("PROFILE_RAFT_ORDERER", [])
     if orderer_rows:
         _, row = max(orderer_rows, key=lambda item: as_int(item[1], "arrivals"))
+        out["orderer_policy"] = row.get("policy", out["orderer_policy"])
+        out["assigned_seq_mode"] = "1" if out["orderer_policy"] == "leader-assigned" else "0"
         out["append_entries_avg"] = f"{as_float(row, 'append_vector_entries_avg'):.3f}"
         out["orderer_gap_wait_ms"] = f"{as_float(row, 'gap_wait_ms'):.3f}"
+        out["target_entries"] = row.get("batch_target_entries", out["target_entries"])
+        out["linger_us"] = row.get("batch_linger_us", out["linger_us"])
 
     storage_rows = rows.get("PROFILE_RAFT_STORAGE", [])
     if storage_rows:
@@ -167,6 +212,7 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
 
 def summarize_root(root: pathlib.Path) -> None:
     rows = last_by_prefix(root)
+    meta = read_env_file(root / "run_meta.env")
     print(f"artifact={root}")
     leader_path: pathlib.Path | None = None
 
@@ -212,7 +258,12 @@ def summarize_root(root: pathlib.Path) -> None:
             f"append_ms={as_float(row, 'append_ms'):.1f} "
             f"max_pqexec={as_int(row, 'max_concurrent_PQexec')} "
             f"owned_pg_connections={as_int(row, 'unique_owned_pg_connections')} "
+            f"bcdb_init_arg_size={row.get('bcdb_init_arg_size_configured', row.get('bcdb_init_block_size_configured', meta.get('bcdb_init_arg_size', meta.get('bcdb_init_block_size', '-'))))} "
             f"queue_depth_max={as_int(row, 'queue_depth_max')} "
+            f"queue_delay_ms={as_float(row, 'queue_delay_ms'):.1f} "
+            f"kafka_pending_max={as_int(row, 'kafka_delivery_pending_max')} "
+            f"kafka_async_pub={as_int(row, 'kafka_async_publisher_enabled')} "
+            f"kafka_async_qmax={as_int(row, 'kafka_async_publisher_queue_max')} "
             f"kafka_batch_avg={as_float(row, 'kafka_batch_records_avg'):.2f}"
         )
 
@@ -221,10 +272,14 @@ def summarize_root(root: pathlib.Path) -> None:
         _, row = max(orderer_rows, key=lambda item: as_int(item[1], "arrivals"))
         print(
             "  orderer "
+            f"policy={row.get('policy', meta.get('raft_ordering_policy', '-'))} "
             f"arrivals={as_int(row, 'arrivals')} "
+            f"leader_assigned_items={as_int(row, 'leader_assigned_items')} "
             f"drains={as_int(row, 'ordered_drains')} "
             f"pending_max={as_int(row, 'pending_depth_max')} "
             f"gap_wait_ms={as_float(row, 'gap_wait_ms'):.1f} "
+            f"target={row.get('batch_target_entries', meta.get('raft_ordered_batch_target_entries', '-'))} "
+            f"linger_us={row.get('batch_linger_us', meta.get('raft_ordered_batch_linger_us', '-'))} "
             f"append_vector_calls={as_int(row, 'append_vector_calls')} "
             f"append_vector_avg={as_float(row, 'append_vector_entries_avg'):.2f} "
             f"append_vector_max={as_int(row, 'append_vector_entries_max')}"
@@ -251,7 +306,11 @@ def summarize_root(root: pathlib.Path) -> None:
             f"fdatasync_p95_ms={as_float(row, 'fdatasync_p95_ms'):.3f} "
             f"fdatasync_p99_ms={as_float(row, 'fdatasync_p99_ms'):.3f} "
             f"append_write_ms={as_float(row, 'append_write_ms'):.1f} "
-            f"append_fsync_ms={as_float(row, 'append_fsync_ms'):.1f}"
+            f"append_fsync_ms={as_float(row, 'append_fsync_ms'):.1f} "
+            f"async_enabled={as_int(row, 'async_flush_enabled')} "
+            f"async_jobs={as_int(row, 'async_flush_jobs')} "
+            f"async_coalesced={as_int(row, 'async_flush_coalesced_jobs')} "
+            f"async_queue_max={as_int(row, 'async_flush_queue_max')}"
         )
 
     runner_log = root / "runner.log"

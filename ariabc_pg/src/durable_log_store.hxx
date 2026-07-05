@@ -35,11 +35,18 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
+
+namespace nuraft {
+class raft_server;
+}
 
 namespace ariabc_raft {
 
@@ -71,6 +78,11 @@ struct log_store_profile {
     std::atomic<uint64_t> truncate_records_written{0};
     std::atomic<uint64_t> tail_repairs{0};
     std::atomic<uint64_t> recovery_entries_loaded{0};
+    std::atomic<uint64_t> async_flush_jobs{0};
+    std::atomic<uint64_t> async_flush_coalesced_jobs{0};
+    std::atomic<uint64_t> async_flush_notifications{0};
+    std::atomic<uint64_t> async_flush_queue_max{0};
+    std::atomic<uint64_t> async_flush_waits{0};
 
     // Non-atomic, only read after shutdown.
     uint64_t last_durable_index = 0;
@@ -127,6 +139,13 @@ public:
 
     void end_of_append_batch(nuraft::ulong start, nuraft::ulong cnt) override;
 
+    // Enable NuRaft parallel log appending support. Normal append batches
+    // are fdatasync'ed by a background worker, and last_durable_index()
+    // advances only after the worker finishes.
+    void enable_async_flush(nuraft::raft_server* raft);
+    void set_raft_server(nuraft::raft_server* raft);
+    bool async_flush_enabled() const;
+
     // Profiling access ---------------------------------------------------
     const log_store_profile& profile() const { return profile_; }
     log_store_latency_profile latency_profile() const;
@@ -164,6 +183,17 @@ private:
         int         fd   = -1;
         uint64_t    size = 0;          // bytes written
         bool        is_active = false;
+    };
+
+    struct AsyncFlushSegment {
+        int fd = -1;
+        std::string path;
+    };
+
+    struct AsyncFlushJob {
+        uint64_t target_index = 0;
+        std::vector<AsyncFlushSegment> segments;
+        std::string context;
     };
 
     // ---- Initialization -------------------------------------------------
@@ -246,6 +276,13 @@ private:
     void fsync_directory_and_profile(const std::string& path);
     void save_durable_watermark_unlocked();
     void load_durable_watermark_unlocked();
+    void enqueue_async_flush_locked(std::unique_lock<std::mutex>& lock,
+                                    uint64_t target_index,
+                                    const std::string& context);
+    void wait_for_async_flush_idle_locked(std::unique_lock<std::mutex>& lock);
+    void close_async_flush_segment_fds(std::vector<AsyncFlushSegment>& segments);
+    void async_flush_loop();
+    void throw_if_async_flush_failed_unlocked() const;
 
     // Manifest: path to manifest file.
     std::string manifest_path_;
@@ -261,6 +298,18 @@ private:
     uint64_t batch_first_  = 0;
     uint64_t batch_last_   = 0;
     uint64_t max_segment_size_;
+
+    bool async_flush_enabled_ = false;
+    bool async_flush_stop_ = false;
+    bool async_flush_active_ = false;
+    bool async_flush_failed_ = false;
+    std::string async_flush_error_;
+    size_t async_flush_max_jobs_ = 128;
+    std::deque<AsyncFlushJob> async_flush_jobs_;
+    std::condition_variable async_flush_cv_;
+    std::condition_variable async_flush_idle_cv_;
+    std::thread async_flush_thread_;
+    nuraft::raft_server* raft_server_bwd_pointer_ = nullptr;
 };
 
 } // namespace ariabc_raft

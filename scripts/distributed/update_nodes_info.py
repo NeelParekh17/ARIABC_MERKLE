@@ -18,12 +18,12 @@ NODES = [
     {"id": 1, "name": "admin123", "user": "neel", "ip": "10.129.148.236", "client_port": 8000, "is_gateway": False},
     {"id": 2, "name": "user4", "user": "neel", "ip": "10.129.148.246", "client_port": 8000, "is_gateway": False},
     {"id": 4, "name": "utkarsh", "user": "neel", "ip": "10.129.148.248", "client_port": 8001, "is_gateway": False},
-    {"id": 5, "name": "asus-laptop", "user": "neel", "ip": "10.204.8.48", "client_port": 8000, "is_gateway": True},
+    {"id": 5, "name": "asus-laptop", "user": "neel", "ip": "127.0.0.1", "client_port": 8000, "is_gateway": True},
     {"id": 6, "name": "proposed-gw", "user": "neel", "ip": "10.129.27.111", "client_port": 8000, "is_gateway": True},
 ]
 
 DEFAULT_PASSWORD = "clusterinfolab123"
-DEFAULT_MD_PATH = "scripts/distributed/CLUSTER_NODES_INFO.md"
+DEFAULT_MD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CLUSTER_NODES_INFO.md")
 
 # Remote payload to gather all details in a single JSON output
 REMOTE_PROBE_SCRIPT = r"""import json, subprocess, os, socket

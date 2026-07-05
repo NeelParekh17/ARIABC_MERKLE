@@ -262,8 +262,65 @@ make_request_items(uint64_t token, int count) {
     return items;
 }
 
+static void
+test_raft_payload_assigned_det_seq_roundtrip() {
+    {
+        client_api_request req;
+        req.req_id = "req-assigned-zero";
+        req.sql = "s 00000000 SELECT 1";
+        req.has_assigned_det_seq = true;
+        req.assigned_det_seq = 0;
+
+        std::string err;
+        nuraft::ptr<nuraft::buffer> log = build_raft_request_log(req, 7, err);
+        REQUIRE(log != nullptr);
+        REQUIRE(err.empty());
+
+        raft_request_batch batch;
+        REQUIRE(parse_raft_request_log(*log, batch, err));
+        REQUIRE(batch.leader_node_hint == 7);
+        REQUIRE(batch.items.size() == 1);
+        REQUIRE(batch.items[0].req_id == req.req_id);
+        REQUIRE(batch.items[0].sql == req.sql);
+        REQUIRE(batch.items[0].has_assigned_det_seq);
+        REQUIRE(batch.items[0].assigned_det_seq == 0);
+    }
+
+    {
+        client_api_request req;
+        client_api_request_item item0;
+        item0.req_id = "req-assigned-seven";
+        item0.sql = "s 00000007 SELECT 7";
+        item0.has_assigned_det_seq = true;
+        item0.assigned_det_seq = 7;
+        client_api_request_item item1;
+        item1.req_id = "req-unassigned";
+        item1.sql = "s 00000008 SELECT 8";
+        req.batch_items.push_back(item0);
+        req.batch_items.push_back(item1);
+
+        std::string err;
+        nuraft::ptr<nuraft::buffer> log = build_raft_request_log(req, 8, err);
+        REQUIRE(log != nullptr);
+        REQUIRE(err.empty());
+
+        raft_request_batch batch;
+        REQUIRE(parse_raft_request_log(*log, batch, err));
+        REQUIRE(batch.leader_node_hint == 8);
+        REQUIRE(batch.items.size() == 2);
+        REQUIRE(batch.items[0].has_assigned_det_seq);
+        REQUIRE(batch.items[0].assigned_det_seq == 7);
+        REQUIRE(!batch.items[1].has_assigned_det_seq);
+        REQUIRE(batch.items[1].assigned_det_seq == 0);
+    }
+
+    std::cout << "Raft payload assigned DET sequence round-trip tests passed." << std::endl;
+}
+
 int main() {
     std::cout << "Running pg_state_machine contract tests..." << std::endl;
+
+    test_raft_payload_assigned_det_seq_roundtrip();
 
     db_options db_opt;
     db_opt.dbname = "dummy_test";
@@ -307,8 +364,8 @@ int main() {
         const uint64_t token = 1001;
         std::vector<client_api_request_item> items = make_request_items(token, 2);
         sm.test_register_result_batch(token, items);
-        sm.test_note_result_applied(token);
-        sm.test_note_result_applied(token);
+        sm.test_note_result_item_applied(token, 0);
+        sm.test_note_result_item_applied(token, 1);
         std::string failure_reason;
         REQUIRE(sm.wait_for_result_id(items[0].req_id, 100, &failure_reason));
         auto counts = sm.test_result_tracker_counts();
@@ -374,7 +431,61 @@ int main() {
         std::cout << "Result-token failure cleanup test passed." << std::endl;
     }
 
-    // 1f. Abandoned terminal waits are TTL-cleaned, keeping long runs bounded.
+    // 1f. Per-item completion wakes only that request ID while the peer remains pending.
+    {
+        const uint64_t token = 1004;
+        std::vector<client_api_request_item> items = make_request_items(token, 2);
+        sm.test_register_result_batch(token, items);
+        sm.test_note_result_item_applied(token, 0);
+        std::string failure_reason = "stale";
+        REQUIRE(sm.wait_for_result_id(items[0].req_id, 100, &failure_reason));
+        REQUIRE(failure_reason.empty());
+        failure_reason.clear();
+        REQUIRE(!sm.wait_for_result_id(items[1].req_id, 1, &failure_reason));
+        auto counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 1);
+        REQUIRE(counts.result_token_by_req_id == 1);
+        REQUIRE(counts.completed_result_tokens == 0);
+        REQUIRE(counts.failed_result_tokens == 0);
+        REQUIRE(counts.outstanding_waiters == 1);
+        sm.test_note_result_item_applied(token, 1);
+        REQUIRE(sm.wait_for_result_id(items[1].req_id, 100, &failure_reason));
+        REQUIRE(failure_reason.empty());
+        counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 0);
+        REQUIRE(counts.result_token_by_req_id == 0);
+        REQUIRE(counts.completed_result_tokens == 0);
+        REQUIRE(counts.failed_result_tokens == 0);
+        REQUIRE(counts.outstanding_waiters == 0);
+        std::cout << "Per-item completion isolation test passed." << std::endl;
+    }
+
+    // 1g. Item failure fails that item and the legacy token, without poisoning peer item success.
+    {
+        const uint64_t token = 1005;
+        std::vector<client_api_request_item> items = make_request_items(token, 2);
+        sm.test_register_result_batch(token, items);
+        sm.test_note_result_item_failed(token, 0, "boom");
+        std::string failure_reason;
+        REQUIRE(!sm.wait_for_result(token, 100, &failure_reason));
+        REQUIRE(failure_reason == "boom");
+        failure_reason.clear();
+        REQUIRE(!sm.wait_for_result_id(items[0].req_id, 100, &failure_reason));
+        REQUIRE(failure_reason == "boom");
+        failure_reason.clear();
+        sm.test_note_result_item_applied(token, 1);
+        REQUIRE(sm.wait_for_result_id(items[1].req_id, 100, &failure_reason));
+        REQUIRE(failure_reason.empty());
+        auto counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 0);
+        REQUIRE(counts.result_token_by_req_id == 0);
+        REQUIRE(counts.completed_result_tokens == 0);
+        REQUIRE(counts.failed_result_tokens == 0);
+        REQUIRE(counts.outstanding_waiters == 0);
+        std::cout << "Per-item failure plus legacy-token failure test passed." << std::endl;
+    }
+
+    // 1h. Abandoned terminal waits are TTL-cleaned, keeping long runs bounded.
     {
         setenv("ARIABC_RESULT_TOKEN_TTL_MS", "1", 1);
         for (uint64_t i = 0; i < 100000; ++i) {

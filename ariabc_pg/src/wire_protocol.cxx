@@ -14,6 +14,7 @@ const uint32_t kBatchFrameTag = 0xFFFFFFFFu;
 const uint32_t kSingleRequestFrameV2Tag = 0xFFFFFFFEu;
 const uint32_t kMaxBatchItems = 4096u;
 const char kRaftBatchMarker[] = "__ARIABC_RAFT_BATCH_V1__";
+const char kRaftBatchMarkerV2[] = "__ARIABC_RAFT_BATCH_V2__";
 const uint32_t kRequestFlagWaitForTerminal = 0x1u;
 
 bool read_exact(int fd, void* buf, size_t n, std::string& err) {
@@ -81,11 +82,21 @@ size_t raft_item_bytes(const client_api_request_item& item) {
            sizeof(uint32_t) + item.sql.size();
 }
 
+bool request_has_assigned_det_seq(const client_api_request& req) {
+    if (!req.is_batch()) return req.has_assigned_det_seq;
+    for (const client_api_request_item& item : req.batch_items) {
+        if (item.has_assigned_det_seq) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
     out_req.req_id.clear();
     out_req.sql.clear();
+    out_req.has_assigned_det_seq = false;
+    out_req.assigned_det_seq = 0;
     out_req.batch_items.clear();
     out_req.wait_for_terminal = false;
     out_req.terminal_timeout_ms = 30000;
@@ -231,7 +242,8 @@ nuraft::ptr<nuraft::buffer> build_raft_request_log(const client_api_request& req
                                                    std::string& err) {
     err.clear();
 
-    if (!req.is_batch() || req.batch_items.size() == 1) {
+    const bool force_v2 = request_has_assigned_det_seq(req);
+    if ((!req.is_batch() || req.batch_items.size() == 1) && !force_v2) {
         client_api_request_item item;
         if (req.is_batch()) {
             item = req.batch_items.front();
@@ -251,28 +263,50 @@ nuraft::ptr<nuraft::buffer> build_raft_request_log(const client_api_request& req
         return log;
     }
 
-    if (req.batch_items.size() > kMaxBatchItems) {
+    std::vector<client_api_request_item> items;
+    if (req.is_batch()) {
+        items = req.batch_items;
+    } else {
+        client_api_request_item item;
+        item.req_id = req.req_id;
+        item.sql = req.sql;
+        item.has_assigned_det_seq = req.has_assigned_det_seq;
+        item.assigned_det_seq = req.assigned_det_seq;
+        items.push_back(std::move(item));
+    }
+
+    if (items.empty() || items.size() > kMaxBatchItems) {
         err = "invalid batch item count";
         return nullptr;
     }
 
-    size_t sz = sizeof(uint32_t) + ::strlen(kRaftBatchMarker) +
+    const bool use_v2 = request_has_assigned_det_seq(req);
+    const char* marker = use_v2 ? kRaftBatchMarkerV2 : kRaftBatchMarker;
+    size_t sz = sizeof(uint32_t) + ::strlen(marker) +
                 sizeof(int32_t) + sizeof(uint32_t);
-    for (size_t i = 0; i < req.batch_items.size(); ++i) {
-        if (!validate_request_item(req.batch_items[i], err)) {
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (!validate_request_item(items[i], err)) {
             return nullptr;
         }
-        sz += raft_item_bytes(req.batch_items[i]);
+        sz += raft_item_bytes(items[i]);
+        if (use_v2) {
+            sz += sizeof(uint8_t);
+            sz += sizeof(uint64_t);
+        }
     }
 
     nuraft::ptr<nuraft::buffer> log = nuraft::buffer::alloc(sz);
     nuraft::buffer_serializer bs(log);
-    bs.put_str(kRaftBatchMarker);
+    bs.put_str(marker);
     bs.put_i32(leader_node_hint);
-    bs.put_u32(static_cast<uint32_t>(req.batch_items.size()));
-    for (size_t i = 0; i < req.batch_items.size(); ++i) {
-        bs.put_str(req.batch_items[i].req_id);
-        bs.put_str(req.batch_items[i].sql);
+    bs.put_u32(static_cast<uint32_t>(items.size()));
+    for (size_t i = 0; i < items.size(); ++i) {
+        bs.put_str(items[i].req_id);
+        bs.put_str(items[i].sql);
+        if (use_v2) {
+            bs.put_u8(items[i].has_assigned_det_seq ? 1 : 0);
+            bs.put_u64(items[i].assigned_det_seq);
+        }
     }
     return log;
 }
@@ -287,7 +321,8 @@ bool parse_raft_request_log(nuraft::buffer& data,
     try {
         nuraft::buffer_serializer bs(data);
         const std::string first = bs.get_str();
-        if (first == kRaftBatchMarker) {
+        if (first == kRaftBatchMarker || first == kRaftBatchMarkerV2) {
+            const bool is_v2 = (first == kRaftBatchMarkerV2);
             out.leader_node_hint = bs.get_i32();
             const uint32_t item_count = bs.get_u32();
             if (item_count == 0 || item_count > kMaxBatchItems) {
@@ -299,6 +334,10 @@ bool parse_raft_request_log(nuraft::buffer& data,
                 client_api_request_item item;
                 item.req_id = bs.get_str();
                 item.sql = bs.get_str();
+                if (is_v2) {
+                    item.has_assigned_det_seq = (bs.get_u8() != 0);
+                    item.assigned_det_seq = bs.get_u64();
+                }
                 out.items.push_back(std::move(item));
             }
             return true;
