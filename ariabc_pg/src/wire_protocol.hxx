@@ -12,11 +12,15 @@ namespace ariabc_pg {
 struct client_api_request_item {
     std::string req_id;
     std::string sql;
+    bool has_assigned_det_seq = false;
+    uint64_t assigned_det_seq = 0;
 };
 
 struct client_api_request {
     std::string req_id;
     std::string sql;
+    bool has_assigned_det_seq = false;
+    uint64_t assigned_det_seq = 0;
     std::vector<client_api_request_item> batch_items;
     bool wait_for_terminal = false;
     uint32_t terminal_timeout_ms = 30000;

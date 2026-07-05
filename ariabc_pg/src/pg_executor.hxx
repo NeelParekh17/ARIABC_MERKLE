@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -113,6 +114,7 @@ struct pg_executor_stats {
     int queue_overloaded = 0;
     int bcdb_init_enabled = 0;
     int bcdb_block_size = 0;
+    int bcdb_init_arg_size_configured = 0;
     uint64_t det_block_batches = 0;
     uint64_t det_block_items = 0;
     uint64_t det_block_min = 0;
@@ -166,6 +168,8 @@ struct pg_executor_stats {
     uint64_t kafka_delivery_pending_max = 0;
     uint64_t kafka_delivery_pending_over_8_events = 0;
     uint64_t kafka_delivery_pending_over_32_events = 0;
+    int kafka_async_publisher_enabled = 0;
+    uint64_t kafka_async_publisher_queue_max = 0;
 };
 
 struct db_options {
@@ -186,6 +190,7 @@ struct db_options {
     std::string exec_mode = "threaded";
 
     int conn_pool_size = 20;
+    int bcdb_init_block_size = 0;
     int max_retries = 10;
     int retry_backoff_ms = 100;
 
@@ -219,6 +224,8 @@ public:
         std::string sql;
         int leader_node_hint = -1;
         uint64_t raft_log_idx = 0;
+        bool has_assigned_det_seq = false;
+        uint64_t assigned_det_seq = 0;
         uint64_t dispatch_seq = 0;
         uint64_t enqueue_ns = 0;
         uint64_t exec_begin_ns = 0; // set on first attempt start; preserved across retries (event mode)
@@ -252,7 +259,9 @@ public:
                        int leader_node_hint,
                        uint64_t raft_log_idx,
                        const std::string& entry_digest_hex = "",
-                       const std::vector<std::string>& item_digests_hex = {});
+                       const std::vector<std::string>& item_digests_hex = {},
+                       const std::vector<uint64_t>& assigned_det_seqs = {},
+                       const std::vector<uint8_t>& assigned_det_seq_valid = {});
 
     bool verify_and_register_entry_manifest(uint64_t log_idx, const std::string& entry_digest_hex, const std::vector<std::string>& item_digests_hex);
 
@@ -311,6 +320,36 @@ private:
     bool wait_for_ordered_emit_turn(uint64_t dispatch_seq);
     void finish_ordered_emit(uint64_t dispatch_seq);
 
+    enum class kafka_flush_reason : uint8_t {
+        RECORDS,
+        BYTES,
+        AGE,
+        IDLE,
+        ERROR,
+        FINAL,
+    };
+
+    struct kafka_result_record {
+        std::string req_id;
+        std::string result;
+        uint64_t raft_log_idx = 0;
+        int leader_hint = -1;
+        std::string terminal_digest;
+        uint64_t append_ns = 0;
+        uint32_t raft_item_ordinal = 0;
+        std::string terminal_state;
+        int format_version = 1;
+        uint64_t dispatch_seq = 0;
+        uint64_t ready_ns = 0;
+        size_t bytes = 0;
+    };
+
+    bool async_kafka_publisher_active() const;
+    void enqueue_kafka_result(const task& t, const ConfirmedResult& confirmed);
+    void kafka_publisher_loop();
+    void publish_kafka_result_batch(std::vector<kafka_result_record>& batch,
+                                    kafka_flush_reason reason);
+
     static bool is_event_mode(const std::string& mode);
 
     int node_id_;
@@ -328,8 +367,16 @@ private:
     std::string result_sig_key_;
     kafka_console_producer kafka_prod_;
     bool kafka_enabled_;
+    bool kafka_async_publisher_enabled_ = false;
     completion_callback on_task_applied_;
     failure_callback on_task_failed_;
+
+    std::mutex kafka_pub_mu_;
+    std::condition_variable kafka_pub_cv_;
+    std::deque<kafka_result_record> kafka_pub_q_;
+    std::thread kafka_pub_thread_;
+    bool kafka_pub_stop_ = false;
+    std::atomic<uint64_t> st_kafka_async_publisher_queue_max_{0};
 
     std::atomic<bool> stop_{false};
     std::mutex q_mu_;

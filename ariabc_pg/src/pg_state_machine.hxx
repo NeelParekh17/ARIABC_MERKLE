@@ -49,6 +49,26 @@ struct entry_tracker_record {
     }
 };
 
+struct result_item_key {
+    uint64_t result_token = 0;
+    uint32_t ordinal = 0;
+
+    result_item_key() = default;
+    result_item_key(uint64_t token, uint32_t ord)
+        : result_token(token), ordinal(ord) {}
+
+    bool operator==(const result_item_key& other) const {
+        return result_token == other.result_token && ordinal == other.ordinal;
+    }
+};
+
+struct result_item_key_hash {
+    size_t operator()(const result_item_key& key) const {
+        return std::hash<uint64_t>{}(key.result_token) ^
+               (std::hash<uint32_t>{}(key.ordinal) << 1);
+    }
+};
+
 class pg_state_machine : public nuraft::state_machine {
 public:
     pg_state_machine(int node_id, const db_options& db_opt, const kafka_options& k_opt);
@@ -88,8 +108,15 @@ public:
         client_api_request_item item;
         item.req_id = req_id;
         item.sql = sql;
+        item.has_assigned_det_seq = true;
+        item.assigned_det_seq = seq;
         register_result_batch(seq, std::vector<client_api_request_item>{item});
-        executor_.enqueue(req_id, sql, -1, seq);
+        std::vector<std::string> req_ids{req_id};
+        std::vector<std::string> sqls{sql};
+        std::vector<uint64_t> assigned_det_seqs{seq};
+        std::vector<uint8_t> assigned_det_seq_valid{1};
+        executor_.enqueue_batch(req_ids, sqls, -1, seq, "", {}, assigned_det_seqs,
+                                assigned_det_seq_valid);
     }
     void direct_enqueue_batch(const std::vector<client_api_request_item>& items, uint64_t first_seq) {
         if (items.empty()) return;
@@ -97,13 +124,21 @@ public:
         register_result_batch(last_seq, items);
         std::vector<std::string> req_ids;
         std::vector<std::string> sqls;
+        std::vector<uint64_t> assigned_det_seqs;
+        std::vector<uint8_t> assigned_det_seq_valid;
         req_ids.reserve(items.size());
         sqls.reserve(items.size());
-        for (const auto& item : items) {
+        assigned_det_seqs.reserve(items.size());
+        assigned_det_seq_valid.reserve(items.size());
+        for (size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
             req_ids.push_back(item.req_id);
             sqls.push_back(item.sql);
+            assigned_det_seqs.push_back(first_seq + static_cast<uint64_t>(i));
+            assigned_det_seq_valid.push_back(1);
         }
-        executor_.enqueue_batch(req_ids, sqls, -1, last_seq);
+        executor_.enqueue_batch(req_ids, sqls, -1, last_seq, "", {}, assigned_det_seqs,
+                                assigned_det_seq_valid);
     }
 
     nuraft::ptr<nuraft::buffer> commit(const nuraft::ulong log_idx,
@@ -173,8 +208,16 @@ public:
     void test_note_result_applied(uint64_t result_token) {
         note_result_applied(result_token);
     }
+    void test_note_result_item_applied(uint64_t result_token, uint32_t ordinal) {
+        note_result_item_applied(result_token, ordinal);
+    }
     void test_note_result_failed(uint64_t result_token, const std::string& reason) {
         note_result_failed(result_token, reason);
+    }
+    void test_note_result_item_failed(uint64_t result_token,
+                                      uint32_t ordinal,
+                                      const std::string& reason) {
+        note_result_item_failed(result_token, ordinal, reason);
     }
     void test_force_result_cleanup();
     result_tracker_debug_counts test_result_tracker_counts() const;
@@ -185,8 +228,16 @@ private:
     void register_result_batch(uint64_t result_token,
                                const std::vector<client_api_request_item>& items);
     void note_result_applied(uint64_t result_token);
+    void note_result_item_applied(uint64_t result_token, uint32_t ordinal);
     void note_result_failed(uint64_t result_token, const std::string& reason);
+    void note_result_item_failed(uint64_t result_token,
+                                 uint32_t ordinal,
+                                 const std::string& reason);
     void consume_result_waiter_locked(const std::string& req_id, uint64_t result_token);
+    void consume_result_item_waiter_locked(const std::string& req_id,
+                                           const result_item_key& key);
+    uint64_t initialize_committed_det_seq_locked();
+    uint64_t next_committed_det_seq_locked();
     void cleanup_result_tokens_locked(uint64_t now_ns, bool force);
     void maybe_cleanup_result_tokens_locked(uint64_t now_ns);
     void update_result_tracker_highwater_locked();
@@ -220,14 +271,21 @@ private:
     std::condition_variable result_cv_;
     std::unordered_map<uint64_t, size_t> pending_result_counts_;
     std::unordered_map<std::string, uint64_t> result_token_by_req_id_;
+    std::unordered_map<std::string, result_item_key> result_item_by_req_id_;
     std::unordered_map<uint64_t, std::vector<std::string>> req_ids_by_result_token_;
     std::unordered_set<uint64_t> completed_result_tokens_;
+    std::unordered_map<uint64_t, std::unordered_set<uint32_t>> completed_result_ordinals_;
     std::unordered_map<uint64_t, std::string> failed_result_tokens_;
+    std::unordered_map<uint64_t, std::unordered_map<uint32_t, std::string>> failed_result_ordinals_;
     std::unordered_map<uint64_t, uint32_t> outstanding_waiters_;
     std::unordered_map<uint64_t, uint64_t> completed_at_ns_;
     uint64_t last_result_cleanup_ns_ = 0;
     size_t req_id_map_size_max_ = 0;
     size_t result_token_map_size_max_ = 0;
+
+    std::mutex committed_det_seq_mu_;
+    bool committed_det_seq_initialized_ = false;
+    uint64_t next_committed_det_seq_ = 0;
 };
 
 } // namespace ariabc_pg

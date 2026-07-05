@@ -115,6 +115,8 @@ decode_status try_decode_request_frame(io_buffer& buf, client_api_request& out_r
     }
     out_req.req_id.clear();
     out_req.sql.clear();
+    out_req.has_assigned_det_seq = false;
+    out_req.assigned_det_seq = 0;
     out_req.batch_items.clear();
     out_req.wait_for_terminal = false;
     out_req.terminal_timeout_ms = 30000;
