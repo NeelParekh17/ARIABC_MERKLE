@@ -1,93 +1,169 @@
 # AriaBC Merkle Recovery Benchmark
 
-This directory contains a self-contained benchmark for the existing static partitioned Merkle index design. It compares:
+Static partitioned-Merkle recovery experiment reproducing **Figures 12 and 13**
+from the AriaBC paper.  CTA and disk baselines have been removed to this
+Merkle-only branch; the full three-method comparison remains available in the
+`archive/recovery-three-method-v2` branch (tag `recovery-three-method-v2-baseline`).
 
-- Merkle-guided selective logical repair
-- CTA full-copy recovery
-- Binary `COPY` disk snapshot plus full restore
-
-The benchmark uses two schemas in one PostgreSQL instance:
-
-```text
-healthy.usertable
-damaged.usertable
-```
-
-Generated output is written under `scripts/benchmark/recovery/results/<timestamp>/`.
-
-For remote synced-tree validation, use:
-
-```bash
-scripts/benchmark/recovery/run_synced_remote_recovery_benchmark.sh \
-  --host admin123 \
-  --ssh-user neel \
-  --profile smoke \
-  --artifact-mode summary
-```
-
-All result directories produced before benchmark schema version 2 are invalid
-for paper plots because `paper_total_ms` included audit time for CTA and disk
-but excluded audit time for Merkle. Do not reuse or replot existing pre-v2
-CSV/SVG files.
-
-New outputs record:
+## Two schemas, one PostgreSQL instance
 
 ```text
-benchmark_schema_version = 2
-timing_contract_version = 1
+healthy.usertable   ← reference (never mutated during benchmark)
+damaged.usertable   ← replica under test (corrupted, then repaired)
 ```
 
-## One-command smoke run
-
-Use this for validation before a large paper-style run:
+## Quick start
 
 ```bash
-./.venv/bin/python3 scripts/benchmark/recovery/run_recovery_benchmark.py \
+# smoke run (~seconds, tiny row counts)
+./.venv/bin/python3 scripts/benchmark/recovery/run_merkle_recovery_benchmark.py \
   --dsn "host=127.0.0.1 port=5432 dbname=postgres user=neel" \
   --profile smoke
-```
 
-## One-command paper-style run
+# preflight — paper-shaped geometry at 1 M rows, 1 repetition
+./.venv/bin/python3 scripts/benchmark/recovery/run_merkle_recovery_benchmark.py \
+  --dsn "host=127.0.0.1 port=5432 dbname=postgres user=neel" \
+  --profile preflight
 
-This runs the 1M, 3M, and 5M Figure 12-style experiment plus the 3M Figure 13-style sweep with five repetitions:
-
-```bash
-./.venv/bin/python3 scripts/benchmark/recovery/run_recovery_benchmark.py \
+# paper run — 1 M / 3 M / 5 M (Fig 12) + 3 M sweep (Fig 13), 5 repetitions
+./.venv/bin/python3 scripts/benchmark/recovery/run_merkle_recovery_benchmark.py \
   --dsn "host=127.0.0.1 port=5432 dbname=postgres user=neel" \
   --profile paper
 ```
 
-## Output Files
+## Paper profiles
 
-Each result directory contains:
+### Figure 12 — Merkle
+
+| Parameter            | Value                    |
+|----------------------|--------------------------|
+| Tuple counts         | 1 M, 3 M, 5 M            |
+| Partitions           | 200                      |
+| Leaves per partition | 16                       |
+| Bad leaf nodes       | 10                       |
+| Repetitions          | 5                        |
+| Corruption mode      | `paper-update-only`      |
+
+### Figure 13 — Merkle
+
+| Parameter            | Value                    |
+|----------------------|--------------------------|
+| Tuple count          | 3 M                      |
+| Partitions           | 100 and 200              |
+| Leaves per partition | 16                       |
+| Corrupt tuples       | 300                      |
+| Sweep variable       | k (damaged leaf count)   |
+| Repetitions          | 5                        |
+| Corruption mode      | `paper-update-only`      |
+
+## Corruption modes
+
+The `--corruption-mode` flag selects the injection strategy.
+
+| Mode               | Description                                               |
+|--------------------|-----------------------------------------------------------|
+| `paper-update-only`| **Paper profile.** Mutates `field9` of existing rows.    |
+| `update-only`      | Same semantics; distinct label for correctness tests.     |
+| `delete-only`      | Deletes targeted rows from the damaged copy.              |
+| `insert-only`      | Inserts spurious rows (negative keys) into damaged copy.  |
+| `mixed`            | Deterministic 1/3 update, 1/3 delete, 1/3 insert split.  |
+
+Non-paper modes are correctness tests.  Do not use them for paper plots.
+
+## Source layout
 
 ```text
-config.json
-environment.txt
-python_environment.json
-host_info.json
-source_snapshot.json
-dataset_sizes.csv
-runs.csv
-phase_timings.csv
-timing_contract.csv
-planner_checks.csv
-bucket_consistency_summary.csv
-schema_fidelity.csv
-corruption_manifest.json
-verification_results.csv
-stdout.log
-stderr.log
-plots/
+scripts/benchmark/recovery/
+├── run_merkle_recovery_benchmark.py   ← main entry point
+├── merkle_recovery/
+│   ├── config.py          ← profiles, constants, paper parameters
+│   ├── db.py              ← DB connection and SQL helpers
+│   ├── dataset.py         ← schema setup, data generation, occupancy
+│   ├── manifest.py        ← corruption manifest (all five modes)
+│   ├── localisation.py    ← Merkle tree descent
+│   ├── repair.py          ← candidate fetch, planner preflight, DML
+│   ├── verification.py    ← audit, EXCEPT ALL, merkle_verify
+│   ├── metrics.py         ← Metrics dataclass, timing contract
+│   └── reporting.py       ← CSV/JSON/progress helpers
+├── tests/
+│   └── test_corruption_modes.py
+├── sql/
+│   ├── recovery_helpers.sql
+│   ├── targeted_merkle_lookup.sql
+│   └── verification.sql
+├── create_schema.sql
+├── create_merkle_indexes.sql
+└── README.md
 ```
 
-The synced remote flow packages a compact archive from an isolated run
-directory and rejects pre-v2 benchmark results, `.copybin` disk snapshots, and
-runtime/build directories such as `src/`, `install/`, `pgdata/`, and
-`scratch/`.
+## Output files
 
-The Merkle path uses two batched `merkle_get_partition_root_hashes` calls, then descends only through mismatching child hashes from `merkle_get_child_hashes`. Candidate rows are fetched through the functional B-tree indexes on `merkle_bucket_for_key(...)`.
+Each `results/<timestamp>/` directory contains:
 
-`merkle_bucket_for_key(...)` is a static-geometry benchmark helper. For the lifetime of a functional leaf-lookup index, partitions, leaves per partition, and fanout must not change. Any geometry change requires dropping the functional lookup index, dropping the Merkle index, creating the new Merkle index, creating the new functional lookup index, and running `ANALYZE`.
+```text
+config.json                    benchmark parameters
+environment.txt                git HEAD, Python version, platform
+python_environment.json
+corruption_manifest.json       exact corruption spec (reproducible)
+runs.csv                       per-run timing + all Phase 4 counters
+phase_timings.csv              per-phase breakdown
+timing_contract.csv            timing boundary assertions
+planner_checks.csv             EXPLAIN evidence for functional index use
+schema_fidelity.csv
+dataset_sizes.csv
+bucket_consistency_summary.csv
+verification_results.csv
+plots/                         auto-generated SVGs
+stdout.log / stderr.log
+```
 
-The smoke profile uses the same code path with small row counts. The preflight profile runs the paper-shaped validation at 1M rows before the paper profile. Because catalog functions from `pg_proc.dat` are initialized into the system catalog, validation after adding a new built-in function requires a freshly initialized PostgreSQL data directory, not just a server restart.
+### Extended counters (Phase 4)
+
+Every `runs.csv` row includes:
+
+| Counter                   | Meaning                                        |
+|---------------------------|------------------------------------------------|
+| `bad_partition_count`     | Partitions whose roots differed                |
+| `bad_leaf_count`          | Leaf nodes localised as corrupt                |
+| `tree_nodes_visited`      | Internal nodes descended during localisation   |
+| `healthy_candidate_rows`  | Rows fetched from healthy leaves               |
+| `damaged_candidate_rows`  | Rows fetched from damaged leaves               |
+| `total_candidate_rows`    | Sum of both                                    |
+| `rows_inserted`           | INSERT DML issued during repair                |
+| `rows_updated`            | UPDATE DML issued during repair                |
+| `rows_deleted`            | DELETE DML issued during repair                |
+| `total_rows_repaired`     | Sum of the three above                         |
+| `mean_rows_per_bad_leaf`  | Mean candidate rows per bad leaf               |
+| `p95_rows_per_bad_leaf`   | p95 candidate rows per bad leaf                |
+
+Audit time is **excluded** from `paper_style_total_ms`.
+
+## Correctness tests
+
+```bash
+pytest scripts/benchmark/recovery/tests/ \
+  --dsn "host=127.0.0.1 port=5432 dbname=postgres user=neel" -v
+```
+
+## Archival note
+
+The complete CTA / disk / Merkle three-method comparison implementation is
+preserved at:
+
+- **Tag:** `recovery-three-method-v2-baseline`
+- **Branch:** `archive/recovery-three-method-v2`
+
+To reproduce the full Figure 12 comparison (including CTA and disk baselines),
+check out that branch and use the original `run_recovery_benchmark.py`.
+
+## Benchmark schema version
+
+All results produced by this driver are:
+
+```text
+benchmark_schema_version = 2
+timing_contract_version  = 1
+```
+
+Pre-v2 result directories are invalid for paper plots because `paper_total_ms`
+in those runs included audit time for CTA/disk but excluded it for Merkle.
