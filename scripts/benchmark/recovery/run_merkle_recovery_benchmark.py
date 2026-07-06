@@ -341,8 +341,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                           tuple_count=n, partitions=200, bad_leaf_count=fig12_k,
                           completed_runs=progress_state["completed_runs"],
                           total_runs=total_runs)
+            d = 300 if args.profile in ("paper", "preflight") else fig12_k
             manifest = choose_corruption_manifest(
-                conn, "figure12", n, 200, 16, 2, fig12_k, fig12_k, args.seed,
+                conn, "figure12", n, 200, 16, 2, fig12_k, d, args.seed,
                 corruption_mode=args.corruption_mode,
             )
             validate_manifest_leaf_mapping(conn, manifest)
