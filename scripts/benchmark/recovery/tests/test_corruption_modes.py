@@ -194,8 +194,23 @@ def test_corruption_mode_correctness(conn, base_dataset, corruption_mode):
             f"[{corruption_mode}] expected {n_insert} DELs, got ins={rows_ins} upd={rows_upd} del={rows_del}"
         )
     elif corruption_mode == "mixed":
-        assert rows_ins + rows_upd + rows_del > 0, (
-            f"[{corruption_mode}] no repair DML executed"
+        # Repair semantics (from the damaged copy's perspective):
+        #   manifest op=update  → damaged has wrong value       → rows_upd
+        #   manifest op=delete  → damaged is missing the row    → rows_ins
+        #   manifest op=insert  → damaged has spurious row      → rows_del
+        assert rows_upd == n_update, (
+            f"[{corruption_mode}] expected {n_update} UPDs, got {rows_upd}"
+        )
+        assert rows_ins == n_delete, (
+            f"[{corruption_mode}] expected {n_delete} INSs (re-inserting deleted rows), got {rows_ins}"
+        )
+        assert rows_del == n_insert, (
+            f"[{corruption_mode}] expected {n_insert} DELs (removing spurious inserts), got {rows_del}"
+        )
+        # Ensure all three op types are present (requires CORRUPT_TUPLES >= 3).
+        assert n_update > 0 and n_delete > 0 and n_insert > 0, (
+            f"[{corruption_mode}] manifest did not contain all three op types: "
+            f"update={n_update} delete={n_delete} insert={n_insert}"
         )
 
     # ── assertions 6 + 7: EXCEPT ALL empty ───────────────────────────────────

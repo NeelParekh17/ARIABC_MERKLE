@@ -603,7 +603,7 @@ fi
 BENCH_DSN="host=$REMOTE_SOCKET_DIR port=55432 dbname=postgres user=$(id -un)"
 BENCH_ARGS=(
   "$REMOTE_PYTHON"
-  "$REMOTE_SRC_DIR/scripts/benchmark/recovery/run_recovery_benchmark.py"
+  "$REMOTE_SRC_DIR/scripts/benchmark/recovery/run_merkle_recovery_benchmark.py"
   --dsn "$BENCH_DSN"
   --profile "$BENCH_PROFILE"
   --result-dir "$REMOTE_RESULTS_DIR"
