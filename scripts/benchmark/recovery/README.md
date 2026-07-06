@@ -161,9 +161,10 @@ check out that branch and use the original `run_recovery_benchmark.py`.
 All results produced by this driver are:
 
 ```text
-benchmark_schema_version = 2
+benchmark_schema_version = 3
 timing_contract_version  = 1
 ```
 
-Pre-v2 result directories are invalid for paper plots because `paper_total_ms`
-in those runs included audit time for CTA/disk but excluded it for Merkle.
+Version 3 is the Merkle-only static-recovery benchmark.
+Version 2 was the archived three-method CTA/disk/Merkle benchmark.
+Do not pool v2 and v3 results in one plot.

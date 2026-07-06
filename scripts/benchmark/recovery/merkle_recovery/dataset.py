@@ -15,6 +15,33 @@ from .db import execute, run_file, scalar
 def ensure_helpers(conn) -> None:
     run_file(conn, BENCH_DIR / "sql" / "recovery_helpers.sql")
 
+    required = [
+        "merkle_bucket_for_key",
+        "merkle_get_child_hashes",
+        "merkle_get_partition_root_hashes",
+    ]
+
+    missing = execute(
+        conn,
+        """
+        SELECT wanted.name
+        FROM unnest(%s::text[]) AS wanted(name)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM pg_proc p
+            WHERE p.proname = wanted.name
+        )
+        """,
+        (required,),
+    )
+
+    if missing:
+        names = ", ".join(row["name"] for row in missing)
+        raise RuntimeError(
+            f"Missing built-in Merkle SQL functions: {names}. "
+            "Use a PostgreSQL cluster initialized from the current AriaBC build."
+        )
+
 
 def recreate_schema(conn) -> None:
     run_file(conn, BENCH_DIR / "create_schema.sql")
