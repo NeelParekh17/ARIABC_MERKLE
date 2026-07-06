@@ -22,7 +22,6 @@ Each test asserts the nine correctness conditions from the plan:
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 from typing import Any
@@ -51,14 +50,7 @@ from merkle_recovery.verification import audit_recovery
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--dsn",
-        default="host=127.0.0.1 port=5432 dbname=postgres user=neel",
-        help="PostgreSQL DSN for test database",
-    )
-
+# pytest_addoption is in conftest.py so --dsn is registered before arg parsing.
 
 @pytest.fixture(scope="session")
 def dsn(pytestconfig):
@@ -67,6 +59,7 @@ def dsn(pytestconfig):
 
 @pytest.fixture(scope="session")
 def conn(dsn):
+    import argparse
     args = argparse.Namespace(dsn=dsn)
     with connect(args) as c:
         ensure_helpers(c)

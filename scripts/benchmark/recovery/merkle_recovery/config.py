@@ -26,9 +26,16 @@ LEAF_LOOKUP_INDEXES = {
     "damaged": "usertable_leaf_lookup_idx",
 }
 
-BENCHMARK_SCHEMA_VERSION = 2
+BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only static recovery
 TIMING_CONTRACT_VERSION = 1
 ZERO_HASH = "0" * 64
+
+# Explicit scope metadata written into every config.json
+BENCHMARK_SCOPE_METADATA: dict[str, str] = {
+    "benchmark_scope": "merkle_only_static_recovery",
+    "enabled_methods": "merkle",
+    "paper_comparison_status": "merkle_series_only",
+}
 
 # ── corruption modes ────────────────────────────────────────────────────────
 # paper-update-only  - original paper profile: existing rows get field9 mutated
