@@ -1,8 +1,8 @@
 # AriaBC Merkle Recovery Benchmark
 
-Static partitioned-Merkle recovery experiment reproducing **Figures 12 and 13**
-from the AriaBC paper.  CTA and disk baselines have been removed to this
-Merkle-only branch; the full three-method comparison remains available in the
+This benchmark reproduces the paper's static Merkle-recovery configuration
+and **Merkle series** for Figures 12 and 13.  The full three-method Figure 12
+comparison (CTA + disk + Merkle) remains available in the
 `archive/recovery-three-method-v2` branch (tag `recovery-three-method-v2-baseline`).
 
 ## Two schemas, one PostgreSQL instance

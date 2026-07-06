@@ -16,6 +16,7 @@ from typing import Any
 from merkle_recovery.config import (
     BENCH_DIR, RESULT_ROOT as _DEFAULT_RESULT_ROOT,
     BENCHMARK_SCHEMA_VERSION, TIMING_CONTRACT_VERSION,
+    BENCHMARK_SCOPE_METADATA,
     profile_config,
 )
 from merkle_recovery.db import connect
@@ -288,6 +289,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
 
     cfg_dict = config.to_dict()
     cfg_dict.update(vars(args))
+    cfg_dict.update(BENCHMARK_SCOPE_METADATA)
     (result_dir / "config.json").write_text(json.dumps(cfg_dict, indent=2, default=str) + "\n")
     write_environment(result_dir, args)
     write_python_environment(result_dir)

@@ -48,27 +48,37 @@ def _find_spurious_key_for_leaf(
     rng: random.Random,
     used_keys: set[int],
     *,
-    max_attempts: int = 100_000,
+    batch_size: int = 10_000,
+    max_attempts: int = 1_000_000,
 ) -> int:
     """Return a negative key whose Merkle bucket equals *target_leaf_id*.
 
     The key is chosen deterministically via *rng* and guaranteed not to appear
     in *used_keys*.  Raises RuntimeError after *max_attempts* misses.
     """
-    for _ in range(max_attempts):
-        # Generate a candidate in the range [-2^31, -1] using the RNG so the
+    for _ in range(max_attempts // batch_size):
+        # Generate a candidate batch in the range [-2^31, -1] using the RNG so the
         # sequence is fully reproducible from the seed.
-        candidate = -(rng.randint(1, 2**31 - 1))
-        if candidate in used_keys:
+        candidates = [-(rng.randint(1, 2**31 - 1)) for _ in range(batch_size)]
+        candidates = [c for c in candidates if c not in used_keys]
+        if not candidates:
             continue
-        actual = scalar(
+            
+        rows = execute(
             conn,
-            "SELECT merkle_bucket_for_key('healthy.usertable_merkle_idx'::regclass, %s)",
-            (candidate,),
+            """
+            SELECT c AS candidate
+            FROM unnest(%s::bigint[]) AS c
+            WHERE merkle_bucket_for_key('healthy.usertable_merkle_idx'::regclass, c) = %s
+            LIMIT 1
+            """,
+            (candidates, target_leaf_id),
         )
-        if actual is not None and int(actual) == target_leaf_id:
+        if rows:
+            candidate = int(rows[0]["candidate"])
             used_keys.add(candidate)
             return candidate
+            
     raise RuntimeError(
         f"could not find a spurious key mapping to leaf {target_leaf_id} "
         f"after {max_attempts} attempts"
