@@ -19,6 +19,9 @@ def ensure_helpers(conn) -> None:
         "merkle_bucket_for_key",
         "merkle_get_child_hashes",
         "merkle_get_partition_root_hashes",
+        "merkle_leaf_id",
+        "merkle_root_hash",
+        "merkle_verify",
     ]
 
     missing = execute(

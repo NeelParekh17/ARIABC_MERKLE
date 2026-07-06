@@ -129,3 +129,10 @@ lib*.pc
 /scripts/benchmark/recovery/fetched/
 /scripts/benchmark/recovery/results/scratch_*/
 /scripts/benchmark/recovery/results/*.copybin
+
+# Merkle recovery benchmark artifacts
+scripts/benchmark/recovery/fetched/
+scripts/benchmark/recovery/results/
+**/__pycache__/
+*.py[cod]
+*.pyo
