@@ -498,7 +498,11 @@ def main(argv: list[str] | None = None) -> int:
         RESULT_ROOT = Path(args.result_dir)
 
     RESULT_ROOT.mkdir(parents=True, exist_ok=True)
-    scratch = RESULT_ROOT / ("tmp_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+    # Use --scratch-dir as the parent of the tmp_ directory when supplied,
+    # so the remote launcher's dedicated scratch volume is honoured.
+    scratch_parent = Path(args.scratch_dir) if args.scratch_dir else RESULT_ROOT
+    scratch_parent.mkdir(parents=True, exist_ok=True)
+    scratch = scratch_parent / ("tmp_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
     scratch.mkdir(parents=True, exist_ok=False)
     try:
         with (scratch / "stdout.log").open("w") as out, (scratch / "stderr.log").open("w") as err:

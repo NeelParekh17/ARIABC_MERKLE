@@ -12,10 +12,21 @@ delete-only        Each targeted row is deleted from damaged.usertable so
                    copy lacks.
 insert-only        Spurious rows that do not exist in healthy.usertable are
                    inserted into damaged.usertable.  The spurious keys are
-                   chosen from the negative range -(seed...) so they never
-                   collide with real ycsb_key values.
+                   **guaranteed** to hash to the same Merkle leaf as their
+                   reference row, so ``merkle_bucket_for_key(entry[ycsb_key])
+                   == entry[leaf_id]`` holds for every entry including inserts.
 mixed              Deterministic 1/3–1/3–1/3 split of update / delete /
-                   insert across the targeted entries.
+                   insert across **all** entries (global index, not per-leaf).
+
+Invariant
+---------
+For every manifest entry, regardless of ``op``:
+
+    merkle_bucket_for_key('healthy.usertable_merkle_idx', entry['ycsb_key'])
+    == entry['leaf_id']
+
+validate_manifest_leaf_mapping() asserts this for **all** entries,
+including inserts.
 """
 
 from __future__ import annotations
@@ -29,6 +40,39 @@ from .db import execute, scalar
 
 def row_expr(schema: str) -> str:
     return f"merkle_bucket_for_key('{schema}.usertable_merkle_idx'::regclass, ycsb_key)"
+
+
+def _find_spurious_key_for_leaf(
+    conn,
+    target_leaf_id: int,
+    rng: random.Random,
+    used_keys: set[int],
+    *,
+    max_attempts: int = 100_000,
+) -> int:
+    """Return a negative key whose Merkle bucket equals *target_leaf_id*.
+
+    The key is chosen deterministically via *rng* and guaranteed not to appear
+    in *used_keys*.  Raises RuntimeError after *max_attempts* misses.
+    """
+    for _ in range(max_attempts):
+        # Generate a candidate in the range [-2^31, -1] using the RNG so the
+        # sequence is fully reproducible from the seed.
+        candidate = -(rng.randint(1, 2**31 - 1))
+        if candidate in used_keys:
+            continue
+        actual = scalar(
+            conn,
+            "SELECT merkle_bucket_for_key('healthy.usertable_merkle_idx'::regclass, %s)",
+            (candidate,),
+        )
+        if actual is not None and int(actual) == target_leaf_id:
+            used_keys.add(candidate)
+            return candidate
+    raise RuntimeError(
+        f"could not find a spurious key mapping to leaf {target_leaf_id} "
+        f"after {max_attempts} attempts"
+    )
 
 
 def choose_corruption_manifest(
@@ -47,6 +91,8 @@ def choose_corruption_manifest(
 
     The manifest records every planned corruption with its leaf_id,
     ycsb_key, and the corruption operation type (``op``).
+
+    For every entry:  merkle_bucket_for_key(entry['ycsb_key']) == entry['leaf_id']
     """
     rng = random.Random(seed + tuple_count * 31 + partitions * 17 + bad_leaf_count)
     occ = execute(
@@ -68,9 +114,8 @@ def choose_corruption_manifest(
     rem = corrupted_tuple_count % bad_leaf_count
     entries: list[dict[str, Any]] = []
 
-    # For insert-only, we need synthetic keys that won't collide with real ones.
-    # We use a negative counter starting at -(seed + 1).
-    spurious_key_counter = -(abs(seed) + 1)
+    # Track all synthetic keys globally to prevent duplicates.
+    used_spurious_keys: set[int] = set()
 
     for pos, leaf_id in enumerate(leaves):
         want = base + (1 if pos < rem else 0)
@@ -88,8 +133,10 @@ def choose_corruption_manifest(
         if len(keys) < want:
             raise RuntimeError(f"leaf {leaf_id} has {len(keys)} rows, need {want}")
 
-        for i, row in enumerate(keys):
+        for row in keys:
             k = int(row["ycsb_key"])
+
+            # ── choose op ──────────────────────────────────────────────────
             if corruption_mode in ("paper-update-only", "update-only"):
                 op = "update"
             elif corruption_mode == "delete-only":
@@ -97,15 +144,22 @@ def choose_corruption_manifest(
             elif corruption_mode == "insert-only":
                 op = "insert"
             elif corruption_mode == "mixed":
-                bucket = i % 3
-                op = ["update", "delete", "insert"][bucket]
+                # Use the global entry count so the op assignment is
+                # independent of per-leaf position and always covers all
+                # three operation types when corrupted_tuple_count >= 3.
+                global_entry_index = len(entries)
+                op = ("update", "delete", "insert")[global_entry_index % 3]
             else:
                 raise ValueError(f"unknown corruption_mode: {corruption_mode!r}")
 
+            # ── choose ycsb_key ────────────────────────────────────────────
             if op == "insert":
-                # Use a synthetic spurious key for the damaged copy.
-                entry_key = spurious_key_counter
-                spurious_key_counter -= 1
+                # The spurious key must hash to *this* leaf so that the
+                # Merkle descent localises the correct leaf and the audit
+                # invariant holds for every entry.
+                entry_key = _find_spurious_key_for_leaf(
+                    conn, leaf_id, rng, used_spurious_keys
+                )
             else:
                 entry_key = k
 
@@ -114,8 +168,9 @@ def choose_corruption_manifest(
                     "leaf_id": leaf_id,
                     "ycsb_key": entry_key,
                     "op": op,
-                    # For mixed/insert we keep the "reference_key" so tests
-                    # can verify leaf mapping of the original healthy row.
+                    # reference_key is the healthy row whose field values are
+                    # copied into the spurious insert row.  Not used for leaf
+                    # mapping validation — entry['ycsb_key'] is used for that.
                     "reference_key": k,
                 }
             )
@@ -134,26 +189,28 @@ def choose_corruption_manifest(
 
 
 def validate_manifest_leaf_mapping(conn, manifest: dict[str, Any]) -> None:
-    """Assert that every update/delete entry maps to its intended leaf.
+    """Assert that every entry's ycsb_key maps to its intended leaf.
 
-    insert-only entries use synthetic keys that don't exist in the healthy
-    table, so we validate their reference_key instead.
+    This validates ALL entries including inserts — the invariant is:
+        merkle_bucket_for_key(entry['ycsb_key']) == entry['leaf_id']
+    for every entry regardless of op.
     """
     mismatches: list[dict[str, Any]] = []
     for entry in manifest["corruptions"]:
-        check_key = entry["reference_key"]
+        # Always validate the actual entry key, not the reference_key.
+        check_key = entry["ycsb_key"]
         actual = scalar(
             conn,
             "SELECT merkle_bucket_for_key('healthy.usertable_merkle_idx'::regclass, %s)",
             (check_key,),
         )
-        if int(actual) != int(entry["leaf_id"]):
+        if actual is None or int(actual) != int(entry["leaf_id"]):
             mismatches.append(
                 {
                     "ycsb_key": check_key,
                     "op": entry["op"],
                     "expected": entry["leaf_id"],
-                    "actual": int(actual),
+                    "actual": int(actual) if actual is not None else None,
                 }
             )
     if mismatches:
@@ -165,7 +222,6 @@ def validate_manifest_leaf_mapping(conn, manifest: dict[str, Any]) -> None:
 def apply_corruption(conn, manifest: dict[str, Any]) -> None:
     """Apply all corruptions described in *manifest* to damaged.usertable."""
     seed = manifest["seed"]
-    mode = manifest.get("corruption_mode", "paper-update-only")
 
     for entry in manifest["corruptions"]:
         op = entry["op"]
@@ -187,18 +243,16 @@ def apply_corruption(conn, manifest: dict[str, Any]) -> None:
                 (key,),
             )
         elif op == "insert":
-            # Fetch the healthy reference row to base field values on,
-            # then insert a spurious row with the synthetic key.
+            # Fetch the healthy reference row to copy field values from, then
+            # insert a spurious row with the leaf-mapped synthetic key.
             ref_row = execute(
                 conn,
-                f"SELECT * FROM healthy.usertable WHERE ycsb_key = %s",
+                "SELECT * FROM healthy.usertable WHERE ycsb_key = %s",
                 (ref,),
             )
             if not ref_row:
                 raise RuntimeError(f"reference key {ref} not found in healthy.usertable")
             vals = ref_row[0]
-            # Build a spurious row: same fields as the reference row, but
-            # with a synthetic (negative) ycsb_key.
             execute(
                 conn,
                 "INSERT INTO damaged.usertable VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
