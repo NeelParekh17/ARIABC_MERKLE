@@ -41,6 +41,7 @@ damaged.usertable   ← replica under test (corrupted, then repaired)
 | Partitions           | 200                      |
 | Leaves per partition | 16                       |
 | Bad leaf nodes       | 10                       |
+| Corrupted tuples     | 300                      |
 | Repetitions          | 5                        |
 | Corruption mode      | `paper-update-only`      |
 
