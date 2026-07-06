@@ -18,6 +18,8 @@ Options:
   --bad-leaf-count K
   --repetitions N
   --artifact-mode summary|debug  default: summary
+  --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
+                               default: paper-update-only
   --min-free-gib N             default: 40
   --ssh-timeout SECONDS        default: 15
   --keep-remote-archive
@@ -40,6 +42,7 @@ PARTITIONS=""
 BAD_LEAF_COUNT=""
 REPETITIONS=""
 ARTIFACT_MODE="summary"
+CORRUPTION_MODE="paper-update-only"
 MIN_FREE_GIB=40
 SSH_TIMEOUT="${SSH_TIMEOUT:-15}"
 KEEP_REMOTE_ARCHIVE=0
@@ -61,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --bad-leaf-count) BAD_LEAF_COUNT="${2:?}"; shift 2 ;;
     --repetitions) REPETITIONS="${2:?}"; shift 2 ;;
     --artifact-mode) ARTIFACT_MODE="${2:?}"; shift 2 ;;
+    --corruption-mode) CORRUPTION_MODE="${2:?}"; shift 2 ;;
     --min-free-gib) MIN_FREE_GIB="${2:?}"; shift 2 ;;
     --ssh-timeout) SSH_TIMEOUT="${2:?}"; shift 2 ;;
     --keep-remote-archive) KEEP_REMOTE_ARCHIVE=1; shift ;;
@@ -81,6 +85,10 @@ esac
 case "$ARTIFACT_MODE" in
   summary|debug) ;;
   *) echo "artifact-mode must be summary or debug" >&2; exit 2 ;;
+esac
+case "$CORRUPTION_MODE" in
+  paper-update-only|update-only|delete-only|insert-only|mixed) ;;
+  *) echo "corruption-mode must be paper-update-only, update-only, delete-only, insert-only, or mixed" >&2; exit 2 ;;
 esac
 case "$EXPERIMENT" in
   ""|figure12|figure13) ;;
@@ -358,8 +366,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'"
 progress "remote source and Python environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q REPETITIONS=%q ARTIFACT_MODE=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -603,12 +611,13 @@ fi
 BENCH_DSN="host=$REMOTE_SOCKET_DIR port=55432 dbname=postgres user=$(id -un)"
 BENCH_ARGS=(
   "$REMOTE_PYTHON"
-  "$REMOTE_SRC_DIR/scripts/benchmark/recovery/run_recovery_benchmark.py"
+  "$REMOTE_SRC_DIR/scripts/benchmark/recovery/run_merkle_recovery_benchmark.py"
   --dsn "$BENCH_DSN"
   --profile "$BENCH_PROFILE"
   --result-dir "$REMOTE_RESULTS_DIR"
   --scratch-dir "$REMOTE_SCRATCH_DIR"
   --artifact-mode "$ARTIFACT_MODE"
+  --corruption-mode "$CORRUPTION_MODE"
 )
 BENCH_ARGS+=("${BENCH_REPETITIONS[@]}")
 BENCH_ARGS+=("${BENCH_SELECTORS[@]}")
