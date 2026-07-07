@@ -4,22 +4,25 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import shutil
 import sys
 import time
+from statistics import median
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from merkle_recovery.config import (
-    BENCH_DIR, RESULT_ROOT as _DEFAULT_RESULT_ROOT,
+    BENCH_DIR, RESULT_ROOT as _DEFAULT_RESULT_ROOT, GEOMETRY_MATRIX_PATH,
     BENCHMARK_SCHEMA_VERSION, TIMING_CONTRACT_VERSION,
     BENCHMARK_SCOPE_METADATA,
     profile_config,
 )
-from merkle_recovery.db import connect
+from merkle_recovery.db import connect, execute, scalar, show_setting
 from merkle_recovery.dataset import (
     build_dataset, reset_damaged_from_healthy,
     leaf_occupancy, occupancy_stats, table_sizes,
@@ -30,7 +33,7 @@ from merkle_recovery.manifest import (
 )
 from merkle_recovery.localisation import detect_bad_leaves
 from merkle_recovery.repair import (
-    run_planner_preflight, repair_leaf,
+    fetch_leaf_rows, run_planner_preflight, repair_leaf,
     seq_scan_snapshot, seq_scan_delta,
     per_leaf_row_counts,
 )
@@ -40,8 +43,21 @@ from merkle_recovery.reporting import (
     emit_progress, write_environment, write_python_environment,
     write_csv, metrics_to_rows, assert_benchmark_contract,
 )
+from merkle_recovery.profiling import (
+    ProfileCollector, group_profile_rows_with_denominators,
+    group_profile_rows_with_fraction, validate_profile_invariants,
+    record_call,
+)
 
 RESULT_ROOT = _DEFAULT_RESULT_ROOT
+
+PROFILE_OPERATION_FIELDS = [
+    "run_id", "manifest_sha256", "experiment", "tuple_count", "partitions",
+    "leaves_per_partition", "fanout", "profile_label", "bad_leaf_count",
+    "corrupted_tuple_count", "repetition", "stage", "operation",
+    "schema", "partition", "node_in_partition", "leaf_id",
+    "call_ordinal", "rows_returned", "client_wall_ms", "success",
+]
 
 
 # ── timing helper ─────────────────────────────────────────────────────────────
@@ -57,6 +73,269 @@ def timer(store: dict[str, float], name: str):
     store[name] = store.get(name, 0.0) + now_ms() - start
 
 
+def tree_depth(leaves_per_partition: int, fanout: int) -> int:
+    if leaves_per_partition <= 0 or fanout <= 1:
+        return 0
+    depth = 1
+    nodes = 1
+    while nodes < leaves_per_partition:
+        nodes *= fanout
+        depth += 1
+    return depth
+
+
+def nodes_per_partition(leaves_per_partition: int, fanout: int) -> int:
+    if leaves_per_partition <= 0:
+        return 0
+    total = 0
+    level_nodes = 1
+    remaining = leaves_per_partition
+    while remaining > 0:
+        total += level_nodes
+        if remaining == 1:
+            break
+        remaining = (remaining + fanout - 1) // fanout
+        level_nodes *= fanout
+    return total
+
+
+def load_geometry_matrix() -> dict[str, dict[str, int]]:
+    if not GEOMETRY_MATRIX_PATH.exists():
+        return {}
+    data = json.loads(GEOMETRY_MATRIX_PATH.read_text())
+    return {k: {kk: int(vv) for kk, vv in v.items()} for k, v in data.items()}
+
+
+def manifest_sha256(manifest: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def recovery_run_id(manifest: dict[str, Any], repetition: int, profile_label: str) -> str:
+    label = profile_label or str(manifest.get("geometry_label", "")) or f"l{manifest['leaves_per_partition']}"
+    safe_label = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in label)
+    return (
+        f"{manifest['experiment']}-n{manifest['tuple_count']}"
+        f"-p{manifest['partitions']}"
+        f"-l{manifest['leaves_per_partition']}"
+        f"-f{manifest['fanout']}"
+        f"-k{len(manifest['bad_leaves'])}"
+        f"-c{len(manifest['corruptions'])}"
+        f"-{safe_label}-merkle-r{repetition}"
+    )
+
+
+def validate_geometry(partitions: int, leaves_per_partition: int, fanout: int) -> None:
+    if partitions <= 0:
+        raise ValueError(f"invalid Merkle geometry: partitions must be > 0, got {partitions}")
+    if fanout < 2:
+        raise ValueError(f"invalid Merkle geometry: fanout must be >= 2, got {fanout}")
+    if leaves_per_partition <= 0:
+        raise ValueError(
+            f"invalid Merkle geometry: leaves_per_partition must be > 0, got {leaves_per_partition}"
+        )
+    value = leaves_per_partition
+    while value > 1 and value % fanout == 0:
+        value //= fanout
+    if value != 1:
+        raise ValueError(
+            "invalid Merkle geometry: leaves_per_partition must be an exact power "
+            f"of fanout, got leaves_per_partition={leaves_per_partition}, fanout={fanout}"
+        )
+
+
+def _manual_geometry_label(partitions: int, leaves_per_partition: int, fanout: int) -> str:
+    return f"manual-p{partitions}-l{leaves_per_partition}-f{fanout}"
+
+
+def validate_backend_profile_stats(
+    backend: dict[str, Any],
+    cfg: dict[str, int],
+    counters: dict[str, Any],
+    post_repair_counters: dict[str, Any],
+    *,
+    rows_updated: int,
+    rows_inserted: int,
+    rows_deleted: int,
+) -> list[str]:
+    reasons: list[str] = []
+    expected_root_calls = 4
+    expected_root_nodes = expected_root_calls * cfg["partitions"]
+    expected_child_calls = int(counters.get("child_hash_sql_calls", 0)) + int(
+        post_repair_counters.get("targeted_confirmation_child_hash_sql_calls", 0)
+    )
+    expected_child_nodes = int(counters.get("child_hash_nodes_read", 0)) + int(
+        post_repair_counters.get("targeted_confirmation_child_hash_nodes_read", 0)
+    )
+    checks = [
+        ("root_hash_helper_calls", expected_root_calls),
+        ("root_hash_nodes_returned", expected_root_nodes),
+        ("child_hash_helper_calls", expected_child_calls),
+        ("child_hash_nodes_returned", expected_child_nodes),
+    ]
+    for field, expected in checks:
+        actual = int(backend.get(field, 0))
+        if actual != expected:
+            reasons.append(f"{field} expected {expected}, got {actual}")
+
+    if rows_updated > 0:
+        expected_row_hash_calls = rows_updated * 2
+        actual_row_hash_calls = int(backend.get("row_hash_compute_calls", 0))
+        if actual_row_hash_calls != expected_row_hash_calls:
+            reasons.append(
+                f"row_hash_compute_calls expected {expected_row_hash_calls}, "
+                f"got {actual_row_hash_calls}"
+            )
+
+    if rows_updated > 0 and rows_inserted == 0 and rows_deleted == 0:
+        expected_path_calls = rows_updated * 2
+        expected_nodes_touched = expected_path_calls * tree_depth(
+            cfg["leaves_per_partition"], cfg["fanout"]
+        )
+        if int(backend.get("tree_path_update_calls", 0)) != expected_path_calls:
+            reasons.append(
+                f"tree_path_update_calls expected {expected_path_calls}, "
+                f"got {backend.get('tree_path_update_calls', 0)}"
+            )
+        if int(backend.get("tree_path_nodes_touched", 0)) != expected_nodes_touched:
+            reasons.append(
+                f"tree_path_nodes_touched expected {expected_nodes_touched}, "
+                f"got {backend.get('tree_path_nodes_touched', 0)}"
+            )
+        if int(backend.get("tree_path_update_ns", 0)) <= 0:
+            reasons.append("tree_path_update_ns is zero despite tree updates")
+    return reasons
+
+
+def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str = "") -> dict[str, Any]:
+    occ = leaf_occupancy(conn)
+    sizes = table_sizes(conn)
+    leaf_count = geo["partitions"] * geo["leaves_per_partition"]
+    node_count = geo.get("nodes_per_partition")
+    if node_count is None:
+        node_count = nodes_per_partition(geo["leaves_per_partition"], geo["fanout"])
+    row = {
+        **sizes,
+        "profile_label": profile_label,
+        "tuple_count": tuple_count,
+        "partitions": geo["partitions"],
+        "leaves_per_partition": geo["leaves_per_partition"],
+        "fanout": geo["fanout"],
+        "total_leaf_count": leaf_count,
+        "tree_depth": tree_depth(geo["leaves_per_partition"], geo["fanout"]),
+        "nodes_per_partition": node_count,
+        "total_merkle_nodes": geo["partitions"] * node_count,
+        **occupancy_stats(occ),
+    }
+    return row
+
+
+def _run_deep_diagnostics(
+    conn,
+    manifest: dict[str, Any],
+    result_dir: Path,
+    *,
+    run_id: str,
+    tuple_count: int,
+    partitions: int,
+    leaves_per_partition: int,
+    fanout: int,
+    profile_label: str,
+    repetition: int,
+) -> list[dict[str, Any]]:
+    from merkle_recovery.repair import lookup_explain_plan_json
+
+    def plan_uses_index(node: Any, index_name: str) -> bool:
+        if isinstance(node, dict):
+            if node.get("Index Name") == index_name:
+                return True
+            return any(plan_uses_index(value, index_name) for value in node.values())
+        if isinstance(node, list):
+            return any(plan_uses_index(value, index_name) for value in node)
+        return False
+
+    jsonl_path = result_dir / "deep_plan_profiles.jsonl"
+    summary_rows: list[dict[str, Any]] = []
+    io_timing_available = int(str(show_setting(conn, "track_io_timing")).lower() == "on")
+    diagnostic_replay_id = f"{run_id}-deep-diagnostic"
+    manifest_digest = manifest_sha256(manifest)
+
+    def capture_plans(kind: str, plan_order: int) -> None:
+        with jsonl_path.open("a") as jsonl:
+            for leaf_id in sorted(int(v) for v in manifest["bad_leaves"]):
+                for schema in ("healthy", "damaged"):
+                    plan = lookup_explain_plan_json(conn, schema, leaf_id)
+                    if plan is None:
+                        continue
+                    payload = {
+                        "run_id": run_id,
+                        "manifest_sha256": manifest_digest,
+                        "diagnostic_replay_id": diagnostic_replay_id,
+                        "diagnostic_cache_mode": "post_recovery_warm",
+                        "tuple_count": tuple_count,
+                        "partitions": partitions,
+                        "leaves_per_partition": leaves_per_partition,
+                        "fanout": fanout,
+                        "profile_label": profile_label,
+                        "repetition": repetition,
+                        "leaf_id": leaf_id,
+                        "schema": schema,
+                        "kind": kind,
+                        "plan_order": plan_order,
+                        "io_timing_available": io_timing_available,
+                        "plan": plan,
+                    }
+                    jsonl.write(json.dumps(payload, sort_keys=True) + "\n")
+                    plan_node = plan.get("Plan", {})
+                    summary_rows.append(
+                        {
+                            "leaf_id": leaf_id,
+                            "run_id": run_id,
+                            "manifest_sha256": manifest_digest,
+                            "diagnostic_replay_id": diagnostic_replay_id,
+                            "diagnostic_cache_mode": "post_recovery_warm",
+                            "tuple_count": tuple_count,
+                            "partitions": partitions,
+                            "leaves_per_partition": leaves_per_partition,
+                            "fanout": fanout,
+                            "profile_label": profile_label,
+                            "repetition": repetition,
+                            "schema": schema,
+                            "kind": kind,
+                            "plan_order": plan_order,
+                            "planning_ms": plan.get("Planning Time", 0.0),
+                            "execution_ms": plan.get("Execution Time", 0.0),
+                            "actual_rows": plan_node.get("Actual Rows", 0),
+                            "shared_hit_blocks": plan_node.get("Shared Hit Blocks", 0),
+                            "shared_read_blocks": plan_node.get("Shared Read Blocks", 0),
+                            "shared_dirtied_blocks": plan_node.get("Shared Dirtied Blocks", 0),
+                            "shared_written_blocks": plan_node.get("Shared Written Blocks", 0),
+                            "local_hit_blocks": plan_node.get("Local Hit Blocks", 0),
+                            "local_read_blocks": plan_node.get("Local Read Blocks", 0),
+                            "temp_read_blocks": plan_node.get("Temp Read Blocks", 0),
+                            "temp_written_blocks": plan_node.get("Temp Written Blocks", 0),
+                            "wal_records": plan_node.get("WAL Records", 0),
+                            "wal_bytes": plan_node.get("WAL Bytes", 0),
+                            "plan_uses_expected_leaf_lookup_index": int(
+                                plan_uses_index(plan, f"{schema}.usertable_leaf_lookup_idx")
+                            ),
+                            "io_timing_available": io_timing_available,
+                        }
+                    )
+
+    reset_damaged_from_healthy(conn, {
+        "partitions": partitions,
+        "leaves_per_partition": leaves_per_partition,
+        "fanout": fanout,
+    })
+    apply_corruption(conn, manifest)
+    capture_plans("candidate", 1)
+    diagnostic_phase: dict[str, float] = {}
+    for leaf_id in sorted(int(v) for v in manifest["bad_leaves"]):
+        repair_leaf(conn, leaf_id, phase=diagnostic_phase, profiler=None)
+    capture_plans("confirmation", 2)
+    return summary_rows
+
+
 # ── core Merkle repair run ────────────────────────────────────────────────────
 
 def repair_merkle(
@@ -66,14 +345,16 @@ def repair_merkle(
     repetition: int,
     planner_results: dict[str, Any],
     schema_rows_out: list[dict[str, Any]],
+    *,
+    profile_label: str = "",
+    profiling_mode: str = "off",
+    profiler: ProfileCollector | None = None,
 ) -> Metrics:
     cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
-    run_base = (
-        f"{manifest['experiment']}-n{tuple_count}"
-        f"-p{cfg['partitions']}-k{len(manifest['bad_leaves'])}"
-    )
+    run_id = recovery_run_id(manifest, repetition, profile_label)
+    manifest_digest = manifest_sha256(manifest)
     m = Metrics(
-        run_id=f"{run_base}-merkle-r{repetition}",
+        run_id=run_id,
         experiment=manifest["experiment"],
         method="merkle",
         tuple_count=tuple_count,
@@ -81,6 +362,8 @@ def repair_merkle(
         corrupted_tuple_count=len(manifest["corruptions"]),
         repetition=repetition,
         corruption_mode=manifest.get("corruption_mode", "paper-update-only"),
+        profile_label=profile_label,
+        profiling_mode=profiling_mode,
         **cfg,
     )
     total_start = now_ms()
@@ -88,9 +371,10 @@ def repair_merkle(
     recovery_scan_before = seq_scan_snapshot(conn)
     counters = m.counters
     counters.update(planner_results)
+    counters["manifest_sha256"] = manifest_digest
 
     with timer(m.phase, "tree_localisation_ms"):
-        bad_leaves = detect_bad_leaves(conn, counters)
+        bad_leaves = detect_bad_leaves(conn, counters, profiler=profiler)
 
     if bad_leaves != sorted(int(v) for v in manifest["bad_leaves"]):
         add_warning(m, f"bad leaves mismatch expected={manifest['bad_leaves']} actual={bad_leaves}")
@@ -102,7 +386,12 @@ def repair_merkle(
 
     for leaf_id in bad_leaves:
         lookup_scans += 2
-        hrows, drows, ins, upd, dlt = repair_leaf(conn, leaf_id, phase=m.phase)
+        hrows, drows, ins, upd, dlt = repair_leaf(
+            conn,
+            leaf_id,
+            phase=m.phase,
+            profiler=profiler,
+        )
         healthy_rows += len(hrows)
         damaged_rows += len(drows)
         leaf_total = len(hrows) + len(drows)
@@ -114,16 +403,79 @@ def repair_merkle(
 
     with timer(m.phase, "targeted_post_repair_confirmation_ms"):
         post_repair_counters: dict[str, Any] = {}
-        remaining_bad_leaves = detect_bad_leaves(conn, post_repair_counters, prefix="targeted_confirmation_")
+        remaining_bad_leaves = detect_bad_leaves(
+            conn,
+            post_repair_counters,
+            prefix="targeted_confirmation_",
+            operation_prefix="confirmation_",
+            profiler=profiler,
+            stage_name="targeted_confirmation",
+        )
         repaired_leaf_mismatch = False
-        from merkle_recovery.repair import fetch_leaf_rows
         for leaf_id in bad_leaves:
-            if fetch_leaf_rows(conn, "healthy", leaf_id) != fetch_leaf_rows(conn, "damaged", leaf_id):
+            hrows = record_call(
+                profiler,
+                stage="targeted_confirmation",
+                operation="confirmation_leaf_fetch_healthy",
+                schema="healthy",
+                leaf_id=leaf_id,
+                fn=lambda leaf_id=leaf_id: fetch_leaf_rows(conn, "healthy", leaf_id),
+            )
+            drows = record_call(
+                profiler,
+                stage="targeted_confirmation",
+                operation="confirmation_leaf_fetch_damaged",
+                schema="damaged",
+                leaf_id=leaf_id,
+                fn=lambda leaf_id=leaf_id: fetch_leaf_rows(conn, "damaged", leaf_id),
+            )
+            if profiler is not None and profiler.enabled:
+                t0 = time.perf_counter_ns()
+                repaired_leaf_mismatch = repaired_leaf_mismatch or (hrows != drows)
+                profiler.record(
+                    stage="targeted_confirmation",
+                    operation="confirmation_compare_cpu",
+                    leaf_id=leaf_id,
+                    rows_returned=len(hrows) + len(drows),
+                    client_wall_ns=time.perf_counter_ns() - t0,
+                )
+            elif hrows != drows:
                 repaired_leaf_mismatch = True
-                break
+
+    with timer(m.phase, "recovery_observability_ms"):
+        if profiler is not None and profiler.enabled:
+            stats = scalar(conn, "SELECT merkle_recovery_profile_stats()")
+            profiler.extend_backend_profile(json.loads(stats))
+            backend = profiler.backend_profile or {}
+            backend_reasons = validate_backend_profile_stats(
+                backend,
+                cfg,
+                counters,
+                post_repair_counters,
+                rows_updated=rows_updated,
+                rows_inserted=rows_inserted,
+                rows_deleted=rows_deleted,
+            )
+            if backend_reasons:
+                add_warning(m, f"backend profile invariant failed: {backend_reasons}; {backend}")
+                raise RuntimeError(
+                    f"backend profile invariant failed for {m.run_id}: {backend_reasons}; {backend}"
+                )
 
     recovery_end = now_ms()
     paper_end = recovery_end
+
+    total_recovery_ms = recovery_end - paper_start
+    accounted_ms = (
+        m.phase.get("tree_localisation_ms", 0.0)
+        + m.phase.get("candidate_row_fetch_ms", 0.0)
+        + m.phase.get("row_comparison_ms", 0.0)
+        + m.phase.get("repair_write_ms", 0.0)
+        + m.phase.get("targeted_post_repair_confirmation_ms", 0.0)
+        + m.phase.get("recovery_observability_ms", 0.0)
+    )
+    m.phase["recovery_orchestration_ms"] = max(0.0, total_recovery_ms - accounted_ms)
+
     recovery_scan_after = seq_scan_snapshot(conn)
     recovery_full_heap_scans = seq_scan_delta(recovery_scan_before, recovery_scan_after)
 
@@ -196,23 +548,29 @@ def run_one_manifest(
     reps: int,
     planner_rows_out: list[dict[str, Any]],
     schema_rows_out: list[dict[str, Any]],
+    profile_operation_rows_out: list[dict[str, Any]],
+    backend_profile_rows_out: list[dict[str, Any]],
+    deep_plan_summary_rows_out: list[dict[str, Any]],
     result_dir: Path,
     progress_state: dict[str, int],
+    *,
+    profile_label: str = "",
+    profiling_mode: str = "off",
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
     cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
     metrics: list[Metrics] = []
     for rep in range(reps):
-        run_base = (
-            f"{manifest['experiment']}-n{tuple_count}"
-            f"-p{cfg['partitions']}-k{len(manifest['bad_leaves'])}"
-        )
-        run_id = f"{run_base}-merkle-r{rep}"
+        run_id = recovery_run_id(manifest, rep, profile_label)
+        manifest_digest = manifest_sha256(manifest)
         emit_progress(
             result_dir,
             event="method_start",
             run_id=run_id,
+            manifest_sha256=manifest_digest,
             experiment=manifest["experiment"],
+            profile_label=profile_label,
+            profiling_mode=profiling_mode,
             method="merkle",
             corruption_mode=manifest.get("corruption_mode", "paper-update-only"),
             tuple_count=tuple_count,
@@ -227,14 +585,99 @@ def run_one_manifest(
         apply_corruption(conn, manifest)
         planner_results, planner_rows = run_planner_preflight(conn, manifest, run_id)
         planner_rows_out.extend(planner_rows)
-        metric = repair_merkle(conn, manifest, tuple_count, rep, planner_results, schema_rows_out)
+        profiler = None
+        if profiling_mode in ("light", "deep"):
+            try:
+                execute(conn, "SHOW merkle_recovery_profile_enabled")
+                execute(conn, "SET merkle_recovery_profile_enabled = on")
+                execute(conn, "SELECT merkle_recovery_profile_reset()")
+                execute(conn, "SELECT merkle_recovery_profile_stats()")
+            except Exception as exc:
+                raise RuntimeError(
+                    "Profiling backend is not installed in this PGDATA. "
+                    "Use the benchmark bootstrap command to create a fresh profiling cluster."
+                ) from exc
+            profiler = ProfileCollector(
+                run_id=run_id,
+                manifest_sha256=manifest_digest,
+                experiment=manifest["experiment"],
+                tuple_count=tuple_count,
+                partitions=cfg["partitions"],
+                leaves_per_partition=cfg["leaves_per_partition"],
+                fanout=cfg["fanout"],
+                profile_label=profile_label,
+                bad_leaf_count=len(manifest["bad_leaves"]),
+                corrupted_tuple_count=len(manifest["corruptions"]),
+                repetition=rep,
+                enabled=True,
+                deep=(profiling_mode == "deep"),
+            )
+        metric = repair_merkle(
+            conn,
+            manifest,
+            tuple_count,
+            rep,
+            planner_results,
+            schema_rows_out,
+            profile_label=profile_label,
+            profiling_mode=profiling_mode,
+            profiler=profiler,
+        )
+        if profiler is not None:
+            profile_reasons = validate_profile_invariants(
+                phase=metric.phase,
+                operations=profiler.rows(),
+                bad_leaf_count=metric.bad_leaf_count,
+                run_id=metric.run_id,
+            )
+            if profile_reasons:
+                metric.valid = False
+                metric.warning = (metric.warning + "; " if metric.warning else "") + "; ".join(profile_reasons)
+                raise RuntimeError(f"profile invariant failed for {metric.run_id}: {profile_reasons}")
         metrics.append(metric)
+        if profiler is not None:
+            profile_operation_rows_out.extend(profiler.rows())
+            if profiler.backend_profile is not None:
+                backend_profile_rows_out.append(
+                    {
+                        "run_id": run_id,
+                        "manifest_sha256": manifest_digest,
+                        "experiment": manifest["experiment"],
+                        "profile_label": profile_label,
+                        "profiling_mode": profiling_mode,
+                        "tuple_count": tuple_count,
+                        "partitions": cfg["partitions"],
+                        "leaves_per_partition": cfg["leaves_per_partition"],
+                        "fanout": cfg["fanout"],
+                        "bad_leaf_count": len(manifest["bad_leaves"]),
+                        "corrupted_tuple_count": len(manifest["corruptions"]),
+                        "repetition": rep,
+                        **profiler.backend_profile,
+                    }
+                )
+            if profiling_mode == "deep" and rep == 0:
+                deep_rows = _run_deep_diagnostics(
+                    conn,
+                    manifest,
+                    result_dir,
+                    run_id=run_id,
+                    tuple_count=tuple_count,
+                    partitions=cfg["partitions"],
+                    leaves_per_partition=cfg["leaves_per_partition"],
+                    fanout=cfg["fanout"],
+                    profile_label=profile_label,
+                    repetition=rep,
+                )
+                deep_plan_summary_rows_out.extend(deep_rows)
         progress_state["completed_runs"] += 1
         emit_progress(
             result_dir,
             event="method_complete",
             run_id=metric.run_id,
+            manifest_sha256=manifest_digest,
             experiment=metric.experiment,
+            profile_label=profile_label,
+            profiling_mode=profiling_mode,
             method=metric.method,
             corruption_mode=metric.corruption_mode,
             tuple_count=metric.tuple_count,
@@ -259,19 +702,127 @@ def _selected(values, selected):
     return [v for v in out if v == selected]
 
 
-def _count_planned_runs(config, args) -> int:
-    reps = int(config.repetitions)
-    total = 0
+def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]]:
+    def case(
+        *,
+        experiment: str,
+        tuple_count: int,
+        partitions: int,
+        leaves_per_partition: int,
+        fanout: int,
+        bad_leaf_count: int,
+        corrupted_tuple_count: int,
+        geometry_label: str,
+    ) -> dict[str, Any]:
+        return {
+            "experiment": experiment,
+            "tuple_count": tuple_count,
+            "partitions": partitions,
+            "leaves_per_partition": leaves_per_partition,
+            "fanout": fanout,
+            "bad_leaf_count": bad_leaf_count,
+            "corrupted_tuple_count": corrupted_tuple_count,
+            "geometry_label": geometry_label,
+        }
+
+    override_lpp = args.leaves_per_partition
+    override_fanout = args.fanout
+    manual_geometry = (
+        args.partitions is not None
+        or args.leaves_per_partition is not None
+        or args.fanout is not None
+    )
+    geometry_matrix = load_geometry_matrix()
+    if args.profile == "recovery-scaling-diagnosis":
+        if manual_geometry and not args.geometry_label:
+            raise ValueError("manual geometry overrides require --geometry-label")
+        series: list[dict[str, Any]] = []
+        campaigns = [
+            ("baseline_l16", [1_000_000, 3_000_000, 5_000_000]),
+            ("preprovisioned_l128", [1_000_000, 3_000_000, 5_000_000]),
+            ("sensitivity_l32", [5_000_000]),
+            ("sensitivity_l64", [5_000_000]),
+        ]
+        for label, sizes in campaigns:
+            if args.geometry_label and label != args.geometry_label:
+                continue
+            geo = geometry_matrix.get(label, {})
+            if override_lpp is not None:
+                geo["leaves_per_partition"] = override_lpp
+            if override_fanout is not None:
+                geo["fanout"] = override_fanout
+            partitions = int(args.partitions or geo.get("partitions", 200))
+            leaves_per_partition = int(geo.get("leaves_per_partition", 16))
+            fanout = int(geo.get("fanout", 2))
+            out_label = (
+                _manual_geometry_label(partitions, leaves_per_partition, fanout)
+                if manual_geometry else label
+            )
+            for n in _selected(sizes, args.tuple_count):
+                series.append(
+                    case(
+                        experiment=args.profile,
+                        tuple_count=n,
+                        partitions=partitions,
+                        leaves_per_partition=leaves_per_partition,
+                        fanout=fanout,
+                        bad_leaf_count=int(args.bad_leaf_count or 10),
+                        corrupted_tuple_count=300,
+                        geometry_label=out_label,
+                    )
+                )
+        return series
+
+    series = []
     if args.experiment in (None, "figure12"):
-        total += len(_selected(config.fig12_sizes, args.tuple_count)) * reps
+        for n in _selected(config.fig12_sizes, args.tuple_count):
+            partitions = int(args.partitions or 200)
+            leaves_per_partition = int(override_lpp or 16)
+            fanout = int(override_fanout or 2)
+            series.append(
+                case(
+                    experiment="figure12",
+                    tuple_count=n,
+                    partitions=partitions,
+                    leaves_per_partition=leaves_per_partition,
+                    fanout=fanout,
+                    bad_leaf_count=(args.bad_leaf_count if args.bad_leaf_count is not None else (10 if n >= 10 else 1)),
+                    corrupted_tuple_count=300,
+                    geometry_label=(
+                        _manual_geometry_label(partitions, leaves_per_partition, fanout)
+                        if manual_geometry else f"l{leaves_per_partition}"
+                    ),
+                )
+            )
     if args.experiment in (None, "figure13"):
-        total += (
-            len(_selected([100, 200], args.partitions))
-            * len(_selected(config.fig13_sizes, args.tuple_count))
-            * len(_selected(config.fig13_k, args.bad_leaf_count))
-            * reps
-        )
-    return total
+        partitions_values = _selected([100, 200], args.partitions)
+        sizes = _selected(config.fig13_sizes, args.tuple_count)
+        bad_counts = _selected(config.fig13_k, args.bad_leaf_count)
+        for partitions in partitions_values:
+            for n in sizes:
+                for k in bad_counts:
+                    leaves_per_partition = int(override_lpp or 16)
+                    fanout = int(override_fanout or 2)
+                    series.append(
+                        case(
+                            experiment="figure13",
+                            tuple_count=n,
+                            partitions=partitions,
+                            leaves_per_partition=leaves_per_partition,
+                            fanout=fanout,
+                            bad_leaf_count=k,
+                            corrupted_tuple_count=300,
+                            geometry_label=(
+                                _manual_geometry_label(partitions, leaves_per_partition, fanout)
+                                if manual_geometry else f"p{partitions}-l{leaves_per_partition}"
+                            ),
+                        )
+                    )
+    return series
+
+
+def _count_planned_runs(config, args) -> int:
+    return len(_series_for_profile(args, config)) * int(config.repetitions)
 
 
 # ── main benchmark orchestrator ───────────────────────────────────────────────
@@ -302,6 +853,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         result_dir,
         event="benchmark_start",
         profile=args.profile,
+        profile_label=args.profile_label or "",
+        profiling_mode=args.profiling,
         repetitions=config.repetitions,
         total_runs=total_runs,
         experiment=args.experiment or "all",
@@ -315,93 +868,123 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     planner_rows: list[dict[str, Any]] = []
     schema_fidelity_rows: list[dict[str, Any]] = []
     manifests: list[dict[str, Any]] = []
+    profile_operation_rows: list[dict[str, Any]] = []
+    backend_profile_rows: list[dict[str, Any]] = []
+    deep_plan_summary_rows: list[dict[str, Any]] = []
+    io_timing_setting = ""
+    server_version = ""
+    git_head = ""
 
     with connect(args) as conn:
         ensure_helpers(conn)
+        if args.profiling in ("light", "deep"):
+            try:
+                execute(conn, "SHOW merkle_recovery_profile_enabled")
+                execute(conn, "SELECT merkle_recovery_profile_reset()")
+                execute(conn, "SELECT merkle_recovery_profile_stats()")
+            except Exception as exc:
+                raise RuntimeError(
+                    "Profiling backend is not installed in this PGDATA. "
+                    "Use the benchmark bootstrap command to create a fresh profiling cluster."
+                ) from exc
+        io_timing_setting = str(show_setting(conn, "track_io_timing"))
+        server_version = str(scalar(conn, "SHOW server_version"))
+        try:
+            import subprocess
+            git_bin = shutil.which("git") or "/usr/bin/git"
+            if Path(git_bin).exists():
+                git_head = subprocess.check_output(
+                    [git_bin, "rev-parse", "HEAD"], cwd=BENCH_DIR.parents[2], text=True
+                ).strip()
+            else:
+                git_head = "unavailable; source_snapshot.json records synced source provenance"
+        except Exception as exc:
+            git_head = f"unavailable: {exc}; source_snapshot.json records synced source provenance"
+        for spec in _series_for_profile(args, config):
+            n = int(spec["tuple_count"])
+            partitions = int(spec["partitions"])
+            leaves_per_partition = int(spec["leaves_per_partition"])
+            fanout = int(spec["fanout"])
+            bad_leaf_count = int(spec["bad_leaf_count"])
+            corrupted_tuple_count = int(spec["corrupted_tuple_count"])
+            geometry_label = str(spec["geometry_label"])
+            experiment = str(spec["experiment"])
+            validate_geometry(partitions, leaves_per_partition, fanout)
 
-        # ── Figure 12 ────────────────────────────────────────────────────────
-        fig12_sizes = _selected(config.fig12_sizes, args.tuple_count) \
-            if args.experiment in (None, "figure12") else []
-        for n in fig12_sizes:
-            fig12_k = args.bad_leaf_count if args.bad_leaf_count is not None else (10 if n >= 10 else 1)
-            emit_progress(result_dir, event="dataset_start", experiment="figure12",
-                          tuple_count=n, partitions=200, bad_leaf_count=fig12_k,
-                          completed_runs=progress_state["completed_runs"],
-                          total_runs=total_runs)
-            build_dataset(conn, n, 200, 16, 2)
-            bsum, bdebug = bucket_consistency_sample(conn, n, 200, 16, 2, args.seed)
+            emit_progress(
+                result_dir,
+                event="dataset_start",
+                experiment=experiment,
+                profile_label=geometry_label,
+                tuple_count=n,
+                partitions=partitions,
+                bad_leaf_count=bad_leaf_count,
+                completed_runs=progress_state["completed_runs"],
+                total_runs=total_runs,
+            )
+            build_dataset(conn, n, partitions, leaves_per_partition, fanout)
+            bsum, bdebug = bucket_consistency_sample(conn, n, partitions, leaves_per_partition, fanout, args.seed)
             bucket_summary_rows.append(bsum)
             if args.artifact_mode == "debug":
                 bucket_debug_rows.extend(bdebug)
-            occ = leaf_occupancy(conn)
-            dataset_rows.append({**table_sizes(conn), "partitions": 200,
-                                  "leaves_per_partition": 16, "fanout": 2,
-                                  **occupancy_stats(occ)})
-            emit_progress(result_dir, event="dataset_complete", experiment="figure12",
-                          tuple_count=n, partitions=200, bad_leaf_count=fig12_k,
-                          completed_runs=progress_state["completed_runs"],
-                          total_runs=total_runs)
-            d = 300 if args.profile in ("paper", "preflight") else fig12_k
+            dataset_rows.append(_dataset_row(conn, n, {
+                "partitions": partitions,
+                "leaves_per_partition": leaves_per_partition,
+                "fanout": fanout,
+            }, geometry_label))
+            emit_progress(
+                result_dir,
+                event="dataset_complete",
+                experiment=experiment,
+                profile_label=geometry_label,
+                tuple_count=n,
+                partitions=partitions,
+                completed_runs=progress_state["completed_runs"],
+                total_runs=total_runs,
+            )
+            d = corrupted_tuple_count if args.profile == "recovery-scaling-diagnosis" else (
+                300 if args.profile in ("paper", "preflight") else bad_leaf_count
+            )
             manifest = choose_corruption_manifest(
-                conn, "figure12", n, 200, 16, 2, fig12_k, d, args.seed,
+                conn,
+                experiment,
+                n,
+                partitions,
+                leaves_per_partition,
+                fanout,
+                bad_leaf_count,
+                d,
+                args.seed,
                 corruption_mode=args.corruption_mode,
             )
             validate_manifest_leaf_mapping(conn, manifest)
             manifests.append(manifest)
             all_metrics.extend(
-                run_one_manifest(conn, manifest, config.repetitions,
-                                 planner_rows, schema_fidelity_rows,
-                                 result_dir, progress_state)
+                run_one_manifest(
+                    conn,
+                    manifest,
+                    config.repetitions,
+                    planner_rows,
+                    schema_fidelity_rows,
+                    profile_operation_rows,
+                    backend_profile_rows,
+                    deep_plan_summary_rows,
+                    result_dir,
+                    progress_state,
+                    profile_label=geometry_label,
+                    profiling_mode=args.profiling,
+                )
             )
-
-        # ── Figure 13 ────────────────────────────────────────────────────────
-        if args.experiment in (None, "figure13"):
-            fig13_partitions = _selected([100, 200], args.partitions)
-            fig13_sizes = _selected(config.fig13_sizes, args.tuple_count)
-            fig13_k_values = _selected(config.fig13_k, args.bad_leaf_count)
-        else:
-            fig13_partitions = fig13_sizes = fig13_k_values = []
-
-        for partitions in fig13_partitions:
-            for n in fig13_sizes:
-                emit_progress(result_dir, event="dataset_start", experiment="figure13",
-                              tuple_count=n, partitions=partitions,
-                              completed_runs=progress_state["completed_runs"],
-                              total_runs=total_runs)
-                build_dataset(conn, n, partitions, 16, 2)
-                bsum, bdebug = bucket_consistency_sample(conn, n, partitions, 16, 2, args.seed)
-                bucket_summary_rows.append(bsum)
-                if args.artifact_mode == "debug":
-                    bucket_debug_rows.extend(bdebug)
-                occ = leaf_occupancy(conn)
-                dataset_rows.append({**table_sizes(conn), "partitions": partitions,
-                                      "leaves_per_partition": 16, "fanout": 2,
-                                      **occupancy_stats(occ)})
-                emit_progress(result_dir, event="dataset_complete", experiment="figure13",
-                              tuple_count=n, partitions=partitions,
-                              completed_runs=progress_state["completed_runs"],
-                              total_runs=total_runs)
-                for k in fig13_k_values:
-                    d = 300 if args.profile in ("paper", "preflight") else k
-                    manifest = choose_corruption_manifest(
-                        conn, "figure13", n, partitions, 16, 2, k, d, args.seed,
-                        corruption_mode=args.corruption_mode,
-                    )
-                    validate_manifest_leaf_mapping(conn, manifest)
-                    manifests.append(manifest)
-                    all_metrics.extend(
-                        run_one_manifest(conn, manifest, config.repetitions,
-                                         planner_rows, schema_fidelity_rows,
-                                         result_dir, progress_state)
-                    )
 
     # ── write artifacts ───────────────────────────────────────────────────────
     (result_dir / "corruption_manifest.json").write_text(json.dumps(manifests, indent=2) + "\n")
 
     write_csv(result_dir / "dataset_sizes.csv", dataset_rows, [
-        "tuple_count", "partitions", "leaves_per_partition", "fanout",
+        "profile_label", "tuple_count", "partitions", "leaves_per_partition", "fanout",
+        "total_leaf_count", "tree_depth", "nodes_per_partition", "total_merkle_nodes",
         "base_table_bytes", "primary_index_bytes", "merkle_index_bytes",
-        "leaf_lookup_index_bytes", "total_schema_bytes",
+        "leaf_lookup_index_bytes",
+        "total_schema_bytes",
         "minimum", "p50", "p95", "p99", "maximum", "mean", "stddev",
     ])
     write_csv(result_dir / "bucket_consistency_summary.csv", bucket_summary_rows, [
@@ -424,7 +1007,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     run_rows, phase_rows = metrics_to_rows(all_metrics)
     all_run_fields = sorted({k for r in run_rows for k in r})
     write_csv(result_dir / "runs.csv", run_rows, all_run_fields)
-    write_csv(result_dir / "phase_timings.csv", phase_rows, ["run_id", "method", "phase", "ms"])
+    write_csv(result_dir / "phase_timings.csv", phase_rows, ["run_id", "manifest_sha256", "method", "phase", "ms"])
     write_csv(
         result_dir / "timing_contract.csv",
         [
@@ -455,6 +1038,255 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         ["all_runs_valid"],
     )
 
+    if profile_operation_rows:
+        write_csv(
+            result_dir / "profile_operations.csv",
+            profile_operation_rows,
+            PROFILE_OPERATION_FIELDS,
+        )
+        summary_rows = group_profile_rows_with_fraction(
+            profile_operation_rows,
+            sum(m.restore_repair_ms for m in all_metrics),
+        )
+        for row in summary_rows:
+            row["fraction_of_campaign_restore_repair_ms"] = row.pop("fraction_restore_repair_ms")
+        write_csv(
+            result_dir / "profile_summary.csv",
+            summary_rows,
+            [
+                "stage", "operation", "call_count", "row_count",
+                "total_ms", "median_ms", "p95_ms", "fraction_of_campaign_restore_repair_ms",
+            ],
+        )
+        per_run_keys = (
+            "run_id", "manifest_sha256", "experiment", "tuple_count", "partitions",
+            "leaves_per_partition", "fanout", "profile_label", "bad_leaf_count",
+            "corrupted_tuple_count", "repetition",
+        )
+        per_run_denominators = {
+            (
+                m.run_id,
+                m.counters.get("manifest_sha256", ""),
+                m.experiment,
+                m.tuple_count,
+                m.partitions,
+                m.leaves_per_partition,
+                m.fanout,
+                m.profile_label,
+                m.bad_leaf_count,
+                m.corrupted_tuple_count,
+                m.repetition,
+            ): m.restore_repair_ms
+            for m in all_metrics
+        }
+        per_run_rows = group_profile_rows_with_denominators(
+            profile_operation_rows,
+            group_keys=per_run_keys,
+            denominators=per_run_denominators,
+        )
+        write_csv(
+            result_dir / "profile_summary_per_run.csv",
+            per_run_rows,
+            [
+                *per_run_keys, "stage", "operation", "call_count", "row_count",
+                "total_ms", "median_ms", "p95_ms", "fraction_restore_repair_ms",
+            ],
+        )
+        by_geometry_keys = (
+            "manifest_sha256", "experiment", "tuple_count", "partitions",
+            "leaves_per_partition", "fanout", "profile_label", "bad_leaf_count",
+            "corrupted_tuple_count",
+        )
+        by_geometry_denominators: dict[tuple[Any, ...], float] = {}
+        for m in all_metrics:
+            key = (
+                m.counters.get("manifest_sha256", ""),
+                m.experiment,
+                m.tuple_count,
+                m.partitions,
+                m.leaves_per_partition,
+                m.fanout,
+                m.profile_label,
+                m.bad_leaf_count,
+                m.corrupted_tuple_count,
+            )
+            by_geometry_denominators[key] = by_geometry_denominators.get(key, 0.0) + m.restore_repair_ms
+        by_geometry_rows = group_profile_rows_with_denominators(
+            profile_operation_rows,
+            denominators=by_geometry_denominators,
+            group_keys=by_geometry_keys,
+        )
+        write_csv(
+            result_dir / "profile_summary_by_geometry.csv",
+            by_geometry_rows,
+            [
+                *by_geometry_keys, "stage", "operation", "call_count", "row_count",
+                "total_ms", "median_ms", "p95_ms", "fraction_restore_repair_ms",
+            ],
+        )
+    if backend_profile_rows:
+        backend_fields = [
+            "run_id", "experiment", "profile_label", "profiling_mode",
+            "manifest_sha256", "tuple_count", "partitions", "leaves_per_partition", "fanout",
+            "bad_leaf_count", "corrupted_tuple_count", "repetition",
+        ]
+        extra_fields = sorted({
+            key for row in backend_profile_rows for key in row.keys()
+            if key not in backend_fields
+        })
+        write_csv(
+            result_dir / "merkle_backend_profile.csv",
+            backend_profile_rows,
+            backend_fields + extra_fields,
+        )
+
+    if deep_plan_summary_rows:
+        write_csv(
+            result_dir / "deep_plan_summary.csv",
+            deep_plan_summary_rows,
+            [
+                "leaf_id",
+                "run_id",
+                "manifest_sha256",
+                "diagnostic_replay_id",
+                "diagnostic_cache_mode",
+                "tuple_count",
+                "partitions",
+                "leaves_per_partition",
+                "fanout",
+                "profile_label",
+                "repetition",
+                "schema",
+                "kind",
+                "plan_order",
+                "planning_ms",
+                "execution_ms",
+                "actual_rows",
+                "shared_hit_blocks",
+                "shared_read_blocks",
+                "shared_dirtied_blocks",
+                "shared_written_blocks",
+                "local_hit_blocks",
+                "local_read_blocks",
+                "temp_read_blocks",
+                "temp_written_blocks",
+                "wal_records",
+                "wal_bytes",
+                "plan_uses_expected_leaf_lookup_index",
+                "io_timing_available",
+            ],
+        )
+
+    phase_names = [
+        "tree_localisation_ms",
+        "candidate_row_fetch_ms",
+        "row_comparison_ms",
+        "repair_write_ms",
+        "targeted_post_repair_confirmation_ms",
+        "recovery_observability_ms",
+        "recovery_orchestration_ms",
+        "restore_repair_ms",
+    ]
+
+    def metric_phase_value(metric: Metrics, phase_name: str) -> float:
+        if phase_name == "restore_repair_ms":
+            return metric.restore_repair_ms
+        return float(metric.phase.get(phase_name, 0.0))
+
+    def percentile95(values: list[float]) -> float:
+        ordered = sorted(values)
+        if not ordered:
+            return 0.0
+        return ordered[min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1)]
+
+    grouped_metrics: dict[tuple[Any, ...], list[Metrics]] = {}
+    for metric in all_metrics:
+        key = (
+            metric.profile_label,
+            metric.tuple_count,
+            metric.partitions,
+            metric.leaves_per_partition,
+            metric.fanout,
+            metric.bad_leaf_count,
+            metric.corrupted_tuple_count,
+        )
+        grouped_metrics.setdefault(key, []).append(metric)
+
+    phase_medians: dict[tuple[Any, ...], dict[str, float]] = {}
+    report_lines = [
+        "# Recovery Profiling Report",
+        "",
+        f"- recovery measurement boundary: `restore_repair_ms`",
+        f"- audit measurement boundary: `audit_validation_ms`",
+        "- cache_mode: `uncontrolled normal benchmark state`",
+        f"- track_io_timing: `{io_timing_setting}`",
+        f"- PostgreSQL version: `{server_version}`",
+        f"- git commit: `{git_head}`",
+        f"- I/O timing available: `{int(io_timing_setting.lower() == 'on')}`",
+    ]
+    if dataset_rows:
+        report_lines.append("- exact geometry:")
+        seen_geometry: set[tuple[Any, Any, Any, Any]] = set()
+        for row in dataset_rows:
+            key = (row["profile_label"], row["partitions"], row["leaves_per_partition"], row["fanout"])
+            if key in seen_geometry:
+                continue
+            seen_geometry.add(key)
+            report_lines.append(
+                f"  - {row['profile_label']}: partitions={row['partitions']}, "
+                f"leaves_per_partition={row['leaves_per_partition']}, fanout={row['fanout']}, "
+                f"total_leaf_count={row['total_leaf_count']}, tree_depth={row['tree_depth']}"
+            )
+    report_lines.extend([
+        "",
+        "## Phase Medians And P95",
+        "",
+        "| profile_label | tuple_count | partitions | leaves_per_partition | fanout | bad_leaf_count | corrupted_tuple_count | phase | median_ms | p95_ms |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+    ])
+    for key, items in sorted(grouped_metrics.items()):
+        phase_medians[key] = {}
+        for phase_name in phase_names:
+            vals = [metric_phase_value(m, phase_name) for m in items]
+            median_ms = median(vals) if vals else 0.0
+            phase_medians[key][phase_name] = median_ms
+            report_lines.append(
+                f"| {key[0]} | {key[1]} | {key[2]} | {key[3]} | {key[4]} | {key[5]} | {key[6]} | "
+                f"{phase_name} | {median_ms:.3f} | {percentile95(vals):.3f} |"
+            )
+
+    report_lines.extend(["", "## Growth Ratios", ""])
+    growth_rows: list[tuple[str, str, float]] = []
+    growth_labels = sorted({str(m.profile_label) for m in all_metrics})
+    for label in growth_labels:
+        label_keys = [key for key in phase_medians if key[0] == label]
+        low_keys = [key for key in label_keys if int(key[1]) == 1_000_000]
+        high_keys = [key for key in label_keys if int(key[1]) == 5_000_000]
+        if not low_keys or not high_keys:
+            report_lines.append(f"- {label}: insufficient 1M/5M data for growth ratios")
+            continue
+        low_key = sorted(low_keys)[0]
+        high_key = sorted(high_keys)[0]
+        report_lines.append(f"- {label}: 5M / 1M median ratios")
+        for phase_name in [
+            "candidate_row_fetch_ms",
+            "targeted_post_repair_confirmation_ms",
+            "repair_write_ms",
+            "tree_localisation_ms",
+        ]:
+            low = phase_medians[low_key].get(phase_name, 0.0)
+            high = phase_medians[high_key].get(phase_name, 0.0)
+            ratio = high / low if low > 0 else 0.0
+            growth_rows.append((label, phase_name, ratio))
+            report_lines.append(f"  - {phase_name}: {ratio:.3f}")
+    if growth_rows:
+        label, phase_name, ratio = max(growth_rows, key=lambda item: item[2])
+        report_lines.append("")
+        report_lines.append(
+            f"- highest-growing phase: `{phase_name}` for `{label}` at ratio `{ratio:.3f}`"
+        )
+    (result_dir / "profiling_report.md").write_text("\n".join(report_lines) + "\n")
+
     assert_benchmark_contract(args.profile, all_metrics)
 
     try:
@@ -477,11 +1309,16 @@ def main(argv: list[str] | None = None) -> int:
     global RESULT_ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsn", default="host=127.0.0.1 port=5432 dbname=postgres user=neel")
-    parser.add_argument("--profile", choices=["smoke", "preflight", "paper"], default="smoke")
+    parser.add_argument("--profile", choices=["smoke", "preflight", "paper", "recovery-scaling-diagnosis"], default="smoke")
     parser.add_argument("--experiment", choices=["figure12", "figure13"])
     parser.add_argument("--tuple-count", type=int, dest="tuple_count")
     parser.add_argument("--partitions", type=int)
     parser.add_argument("--bad-leaf-count", type=int, dest="bad_leaf_count")
+    parser.add_argument("--leaves-per-partition", type=int, dest="leaves_per_partition")
+    parser.add_argument("--fanout", type=int)
+    parser.add_argument("--profile-label", dest="profile_label")
+    parser.add_argument("--geometry-label", dest="geometry_label")
+    parser.add_argument("--profiling", choices=["off", "light", "deep"], default="off")
     parser.add_argument("--repetitions", type=int)
     parser.add_argument("--seed", type=int, default=20260703)
     parser.add_argument("--result-dir", dest="result_dir")

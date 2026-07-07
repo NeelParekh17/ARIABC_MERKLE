@@ -95,6 +95,8 @@ def metrics_to_rows(
             "experiment": m.experiment,
             "method": m.method,
             "corruption_mode": m.corruption_mode,
+            "profile_label": m.profile_label,
+            "profiling_mode": m.profiling_mode,
             "tuple_count": m.tuple_count,
             "partitions": m.partitions,
             "leaves_per_partition": m.leaves_per_partition,
@@ -118,7 +120,13 @@ def metrics_to_rows(
         run_rows.append(row)
         for phase, value in m.phase.items():
             phase_rows.append(
-                {"run_id": m.run_id, "method": m.method, "phase": phase, "ms": f"{value:.3f}"}
+                {
+                    "run_id": m.run_id,
+                    "manifest_sha256": m.counters.get("manifest_sha256", ""),
+                    "method": m.method,
+                    "phase": phase,
+                    "ms": f"{value:.3f}",
+                }
             )
     return run_rows, phase_rows
 
@@ -149,7 +157,23 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
             )
         if int(m.counters.get("planner_checks_passed", 0)) != 1:
             failures.append(f"{m.run_id}: planner checks did not pass")
-    if failures and profile in ("smoke", "preflight", "paper"):
+        if profile == "recovery-scaling-diagnosis":
+            if m.corruption_mode != "paper-update-only":
+                failures.append(f"{m.run_id}: diagnosis corruption_mode={m.corruption_mode}")
+            if int(m.corrupted_tuple_count) != 300:
+                failures.append(f"{m.run_id}: corrupted_tuple_count={m.corrupted_tuple_count}")
+            if int(m.counters.get("total_rows_repaired", -1)) != 300:
+                failures.append(f"{m.run_id}: total_rows_repaired={m.counters.get('total_rows_repaired')}")
+            if int(m.counters.get("recovery_user_table_seq_scan_delta", -1)) != 0:
+                failures.append(
+                    f"{m.run_id}: recovery_user_table_seq_scan_delta="
+                    f"{m.counters.get('recovery_user_table_seq_scan_delta')}"
+                )
+            if int(m.counters.get("planner_checks_passed", 0)) != 1:
+                failures.append(f"{m.run_id}: planner_checks_passed={m.counters.get('planner_checks_passed')}")
+            if int(m.counters.get("schema_fidelity_ok", 0)) != 1:
+                failures.append(f"{m.run_id}: schema_fidelity_ok={m.counters.get('schema_fidelity_ok')}")
+    if failures and profile in ("smoke", "preflight", "paper", "recovery-scaling-diagnosis"):
         shown = "\n".join(failures[:20])
         more = "" if len(failures) <= 20 else f"\n... {len(failures) - 20} more"
         raise RuntimeError(f"benchmark contract failed:\n{shown}{more}")

@@ -30,6 +30,7 @@
 #include "nodes/pg_list.h"
 #include "utils/memutils.h"
 #include "access/relation.h"
+#include "portability/instr_time.h"
 
 static bool
 merkle_is_power_of(int value, int base)
@@ -782,100 +783,110 @@ merkle_hash_to_hex(const MerkleHash *hash)
 void
 merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 {
-    TupleDesc       tupdesc;
-    TupleTableSlot *slot;
-    blake3_hasher   hasher;
-    int             i;
-    
-    /*
-     * CRITICAL FIX: Validate ItemPointer before attempting to fetch tuple.
-     * Invalid TIDs (offset=0 or block=Invalid) can occur during BCDB operations 
-     * and will cause fetch failures. Return zero hash for these cases.
-     */
-    if (!ItemPointerIsValid(tid) || 
-        ItemPointerGetBlockNumberNoCheck(tid) == InvalidBlockNumber)
-    {
-        /* 
-         * Changed from WARNING to DEBUG1 because these invalid TIDs are expected 
-         * during optimistic BCDB worker operations and shouldn't spam the logs.
-         */
-        elog(DEBUG1, "merkle_compute_row_hash: skipping invalid tid (blk=%u, off=%u)",
-             ItemPointerGetBlockNumberNoCheck(tid),
-             ItemPointerGetOffsetNumberNoCheck(tid));
-        merkle_hash_zero(result);
-        return;
-    }
-    
-    tupdesc = RelationGetDescr(heapRel);
-    
-    /* Create a slot to hold the tuple */
-    slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsBufferHeapTuple);
-    
-    /* Ensure resource cleanup if an error occurs during processing */
-    PG_TRY();
-    {
-        /*
-         * Use SnapshotSelf to see our own uncommitted changes.
-         * During INSERT, the tuple is in the heap but not yet committed,
-         * so GetActiveSnapshot() won't see it.
-         */
-        if (!table_tuple_fetch_row_version(heapRel, tid, SnapshotSelf, slot))
-        {
-            /* Tuple not found, return zero hash */
-            merkle_hash_zero(result);
-        }
-        else
-        {
-            /* Hash concatenated text output of all columns (deterministic) */
-            blake3_hasher_init(&hasher);
+	TupleDesc		tupdesc;
+	TupleTableSlot *slot = NULL;
+	blake3_hasher	hasher;
+	int				i;
+	bool			profile_enabled = merkle_recovery_profile_enabled;
+	instr_time		start_time;
+	instr_time		elapsed_time;
 
-            for (i = 0; i < tupdesc->natts; i++)
-            {
-                Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-                Datum       val;
-                bool        isnull;
-                Oid         typoutput;
-                bool        typIsVarlena;
-                char       *str;
-                
-                /* Skip dropped columns */
-                if (attr->attisdropped)
-                    continue;
-                
-                val = slot_getattr(slot, i + 1, &isnull);
-                
-                if (isnull)
-                {
-                    static const char null_marker[] = "*null*";
-                    blake3_hasher_update(&hasher, null_marker, sizeof(null_marker) - 1);
-                }
-                else
-                {
-                    /* Get output function for this type */
-                    getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
-                    str = OidOutputFunctionCall(typoutput, val);
-                    blake3_hasher_update(&hasher, "*", 1);
-                    blake3_hasher_update(&hasher, str, strlen(str));
-                    pfree(str);
-                }
-            }
-            
-            /*
-             * Compute BLAKE3 hash - produces 32 bytes (256 bits) directly
-             * BLAKE3 is faster than MD5 and cryptographically secure
-             */
-            blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
-        }
-    }
-    PG_CATCH();
-    {
-        /* Clean up slot even on error to prevent leaks */
-        ExecDropSingleTupleTableSlot(slot);
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
+	if (profile_enabled)
+		INSTR_TIME_SET_CURRENT(start_time);
+	if (profile_enabled)
+		merkle_recovery_profile_state.row_hash_compute_calls++;
 
-    ExecDropSingleTupleTableSlot(slot);
+	/*
+	 * CRITICAL FIX: Validate ItemPointer before attempting to fetch tuple.
+	 * Invalid TIDs (offset=0 or block=Invalid) can occur during BCDB operations
+	 * and will cause fetch failures. Return zero hash for these cases.
+	 */
+	if (!ItemPointerIsValid(tid) ||
+		ItemPointerGetBlockNumberNoCheck(tid) == InvalidBlockNumber)
+	{
+		elog(DEBUG1, "merkle_compute_row_hash: skipping invalid tid (blk=%u, off=%u)",
+			 ItemPointerGetBlockNumberNoCheck(tid),
+			 ItemPointerGetOffsetNumberNoCheck(tid));
+		merkle_hash_zero(result);
+		goto profile_done;
+	}
+
+	tupdesc = RelationGetDescr(heapRel);
+	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsBufferHeapTuple);
+
+	PG_TRY();
+	{
+		/*
+		 * Use SnapshotSelf to see our own uncommitted changes.
+		 * During INSERT, the tuple is in the heap but not yet committed,
+		 * so GetActiveSnapshot() won't see it.
+		 */
+		if (!table_tuple_fetch_row_version(heapRel, tid, SnapshotSelf, slot))
+		{
+			merkle_hash_zero(result);
+		}
+		else
+		{
+			blake3_hasher_init(&hasher);
+
+			for (i = 0; i < tupdesc->natts; i++)
+			{
+				Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+				Datum		val;
+				bool		isnull;
+				Oid			typoutput;
+				bool		typIsVarlena;
+				char	   *str;
+
+				if (attr->attisdropped)
+					continue;
+
+				val = slot_getattr(slot, i + 1, &isnull);
+
+				if (isnull)
+				{
+					static const char null_marker[] = "*null*";
+					blake3_hasher_update(&hasher, null_marker, sizeof(null_marker) - 1);
+				}
+				else
+				{
+					getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
+					str = OidOutputFunctionCall(typoutput, val);
+					blake3_hasher_update(&hasher, "*", 1);
+					blake3_hasher_update(&hasher, str, strlen(str));
+					pfree(str);
+				}
+			}
+
+			blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+		}
+	}
+	PG_CATCH();
+	{
+		if (slot != NULL)
+			ExecDropSingleTupleTableSlot(slot);
+		if (profile_enabled)
+		{
+			INSTR_TIME_SET_CURRENT(elapsed_time);
+			INSTR_TIME_SUBTRACT(elapsed_time, start_time);
+			INSTR_TIME_ADD(merkle_recovery_profile_state.row_hash_compute_time,
+						   elapsed_time);
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	if (slot != NULL)
+		ExecDropSingleTupleTableSlot(slot);
+
+profile_done:
+	if (profile_enabled)
+	{
+		INSTR_TIME_SET_CURRENT(elapsed_time);
+		INSTR_TIME_SUBTRACT(elapsed_time, start_time);
+		INSTR_TIME_ADD(merkle_recovery_profile_state.row_hash_compute_time,
+					   elapsed_time);
+	}
 }
 
 /*
@@ -888,49 +899,67 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 void
 merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *result)
 {
-    TupleDesc       tupdesc;
-    blake3_hasher   hasher;
-    int             i;
+	TupleDesc		tupdesc;
+	blake3_hasher	hasher;
+	int				i;
+	bool			profile_enabled = merkle_recovery_profile_enabled;
+	instr_time		start_time;
+	instr_time		elapsed_time;
 
-    if (slot == NULL || TTS_EMPTY(slot))
-    {
-        merkle_hash_zero(result);
-        return;
-    }
+	if (profile_enabled)
+	{
+		INSTR_TIME_SET_CURRENT(start_time);
+		merkle_recovery_profile_state.row_hash_compute_calls++;
+	}
 
-    tupdesc = RelationGetDescr(heapRel);
-    blake3_hasher_init(&hasher);
+	if (slot == NULL || TTS_EMPTY(slot))
+	{
+		merkle_hash_zero(result);
+		goto profile_done;
+	}
 
-    for (i = 0; i < tupdesc->natts; i++)
-    {
-        Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-        Datum       val;
-        bool        isnull;
-        Oid         typoutput;
-        bool        typIsVarlena;
-        char       *str;
+	tupdesc = RelationGetDescr(heapRel);
+	blake3_hasher_init(&hasher);
 
-        if (attr->attisdropped)
-            continue;
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		Datum		val;
+		bool		isnull;
+		Oid			typoutput;
+		bool		typIsVarlena;
+		char	   *str;
 
-        val = slot_getattr(slot, i + 1, &isnull);
+		if (attr->attisdropped)
+			continue;
 
-        if (isnull)
-        {
-            static const char null_marker[] = "*null*";
-            blake3_hasher_update(&hasher, null_marker, sizeof(null_marker) - 1);
-        }
-        else
-        {
-            getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
-            str = OidOutputFunctionCall(typoutput, val);
-            blake3_hasher_update(&hasher, "*", 1);
-            blake3_hasher_update(&hasher, str, strlen(str));
-            pfree(str);
-        }
-    }
+		val = slot_getattr(slot, i + 1, &isnull);
 
-    blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+		if (isnull)
+		{
+			static const char null_marker[] = "*null*";
+			blake3_hasher_update(&hasher, null_marker, sizeof(null_marker) - 1);
+		}
+		else
+		{
+			getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
+			str = OidOutputFunctionCall(typoutput, val);
+			blake3_hasher_update(&hasher, "*", 1);
+			blake3_hasher_update(&hasher, str, strlen(str));
+			pfree(str);
+		}
+	}
+
+	blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+
+profile_done:
+	if (profile_enabled)
+	{
+		INSTR_TIME_SET_CURRENT(elapsed_time);
+		INSTR_TIME_SUBTRACT(elapsed_time, start_time);
+		INSTR_TIME_ADD(merkle_recovery_profile_state.row_hash_compute_time,
+					   elapsed_time);
+	}
 }
 
 /*
@@ -1096,183 +1125,202 @@ merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
 void
 merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool isXorIn)
 {
-    int         numPartitions;
-    int         partitionId;
-    int         nodeInPartition;
-    int         nodeId;
-    int         leafStart;
-    int         leavesPerPartition;
-    int         nodesPerPartition;
-    int         fanout;
-    int         totalNodes;
-    int         totalLeaves;
-    int         nodesPerPage;
-    int         numTreePages;
-    int         currentPageBlkno = -1;
-    Buffer      buf = InvalidBuffer;
-    Page        page = NULL;
-    MerkleNode *nodes = NULL;
+	int			numPartitions;
+	int			partitionId;
+	int			nodeInPartition;
+	int			nodeId;
+	int			leafStart;
+	int			leavesPerPartition;
+	int			nodesPerPartition;
+	int			fanout;
+	int			totalNodes;
+	int			totalLeaves;
+	int			nodesPerPage;
+	int			numTreePages;
+	int			currentPageBlkno = -1;
+	Buffer		buf = InvalidBuffer;
+	Page		page = NULL;
+	MerkleNode *nodes = NULL;
+	bool		profile_enabled = merkle_recovery_profile_enabled;
+	instr_time	start_time;
+	instr_time	elapsed_time;
+	uint64		nodes_touched = 0;
 
-    (void) isXorIn;
-    
-    /* Read tree configuration from metadata */
-    merkle_read_meta(indexRel,
-                     &numPartitions,
-                     &leavesPerPartition,
-                     &nodesPerPartition,
-                     &totalNodes,
-                     &totalLeaves,
-                     &nodesPerPage,
-                     &numTreePages,
-                     &fanout);
-    
-    /* Safety check: prevent division by zero if metadata is invalid */
-    if (leavesPerPartition <= 0)
-        return;
+	(void) isXorIn;
 
-    if (leafId < 0 || leafId >= totalLeaves)
-    {
-        ereport(ERROR,
-                (errcode(ERRCODE_INDEX_CORRUPTED),
-                 errmsg("merkle_update_tree_path: leafId %d out of range [0,%d)",
-                        leafId, totalLeaves)));
-    }
+	if (profile_enabled)
+		INSTR_TIME_SET_CURRENT(start_time);
+	if (profile_enabled)
+		merkle_recovery_profile_state.tree_path_update_calls++;
 
-    if (fanout < 2)
-    {
-        ereport(ERROR,
-                (errcode(ERRCODE_INDEX_CORRUPTED),
-                 errmsg("merkle_update_tree_path: invalid fanout %d in metadata",
-                        fanout)));
-    }
+	/* Read tree configuration from metadata */
+	merkle_read_meta(indexRel,
+					 &numPartitions,
+					 &leavesPerPartition,
+					 &nodesPerPartition,
+					 &totalNodes,
+					 &totalLeaves,
+					 &nodesPerPage,
+					 &numTreePages,
+					 &fanout);
 
-    leafStart = nodesPerPartition - leavesPerPartition + 1;
-    if (leafStart < 1)
-    {
-        ereport(ERROR,
-                (errcode(ERRCODE_INDEX_CORRUPTED),
-                 errmsg("merkle_update_tree_path: invalid leafStart %d (nodesPerPartition=%d leavesPerPartition=%d)",
-                        leafStart, nodesPerPartition, leavesPerPartition)));
-    }
-    
-    if (!merkle_undo_suppress)
-    {
-        MemoryContext oldContext;
-        MerklePendingOp *op;
+	/* Safety check: prevent division by zero if metadata is invalid */
+	if (leavesPerPartition <= 0)
+		return;
 
-        /*
-         * Register transaction callback if not done yet.
-         * This ensures we can undo changes if the transaction aborts.
-         */
-        if (!xactCallbackRegistered)
-        {
-            RegisterXactCallback(merkle_xact_callback, NULL);
-            xactCallbackRegistered = true;
-        }
-        if (!subxactCallbackRegistered)
-        {
-            RegisterSubXactCallback(merkle_subxact_callback, NULL);
-            subxactCallbackRegistered = true;
-        }
+	if (leafId < 0 || leafId >= totalLeaves)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("merkle_update_tree_path: leafId %d out of range [0,%d)",
+						leafId, totalLeaves)));
+	}
 
-        /*
-         * Record this operation in the pending list for potential rollback.
-         * We use TopTransactionContext to ensure the list survives until commit/abort.
-         */
-        oldContext = MemoryContextSwitchTo(TopTransactionContext);
+	if (fanout < 2)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("merkle_update_tree_path: invalid fanout %d in metadata",
+						fanout)));
+	}
 
-        op = (MerklePendingOp *) palloc(sizeof(MerklePendingOp));
-        op->indexRel = indexRel;
-        op->relid = RelationGetRelid(indexRel);
-        op->subxid = GetCurrentSubTransactionId();
-        op->leafId = leafId;
-        op->hash = *hash;
-        op->leavesPerPartition = leavesPerPartition;
-        op->nodesPerPartition = nodesPerPartition;
-        op->fanout = fanout;
-        op->totalNodes = totalNodes;
-        op->totalLeaves = totalLeaves;
-        op->nodesPerPage = nodesPerPage;
-        op->numTreePages = numTreePages;
+	leafStart = nodesPerPartition - leavesPerPartition + 1;
+	if (leafStart < 1)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("merkle_update_tree_path: invalid leafStart %d (nodesPerPartition=%d leavesPerPartition=%d)",
+						leafStart, nodesPerPartition, leavesPerPartition)));
+	}
 
-        pendingOps = lappend(pendingOps, op);
+	if (!merkle_undo_suppress)
+	{
+		MemoryContext	oldContext;
+		MerklePendingOp *op;
 
-        MemoryContextSwitchTo(oldContext);
-    }
-    
-    /* Calculate partition and node positions using dynamic values */
-    partitionId = leafId / leavesPerPartition;
-    nodeInPartition = (leafId % leavesPerPartition) + leafStart;
-    nodeId = nodeInPartition + (partitionId * nodesPerPartition);
-    
-    /* Walk from leaf to root, XORing at each level */
-    while (nodeInPartition > 0)
-    {
-        int         actualNodeIdx = nodeId - 1;  /* 0-based index */
-        int         pageNum;
-        int         idxInPage = actualNodeIdx % nodesPerPage;
-        BlockNumber blkno;
+		/*
+		 * Register transaction callback if not done yet.
+		 * This ensures we can undo changes if the transaction aborts.
+		 */
+		if (!xactCallbackRegistered)
+		{
+			RegisterXactCallback(merkle_xact_callback, NULL);
+			xactCallbackRegistered = true;
+		}
+		if (!subxactCallbackRegistered)
+		{
+			RegisterSubXactCallback(merkle_subxact_callback, NULL);
+			subxactCallbackRegistered = true;
+		}
 
-        if (actualNodeIdx < 0 || actualNodeIdx >= totalNodes)
-        {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INDEX_CORRUPTED),
-                     errmsg("merkle_update_tree_path: node index %d out of range [0,%d)",
-                            actualNodeIdx, totalNodes)));
-        }
+		/*
+		 * Record this operation in the pending list for potential rollback.
+		 * We use TopTransactionContext to ensure the list survives until commit/abort.
+		 */
+		oldContext = MemoryContextSwitchTo(TopTransactionContext);
 
-        pageNum = actualNodeIdx / nodesPerPage;
-        if (pageNum < 0 || pageNum >= numTreePages)
-        {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INDEX_CORRUPTED),
-                     errmsg("merkle_update_tree_path: page number %d out of range [0,%d)",
-                            pageNum, numTreePages)));
-        }
+		op = (MerklePendingOp *) palloc(sizeof(MerklePendingOp));
+		op->indexRel = indexRel;
+		op->relid = RelationGetRelid(indexRel);
+		op->subxid = GetCurrentSubTransactionId();
+		op->leafId = leafId;
+		op->hash = *hash;
+		op->leavesPerPartition = leavesPerPartition;
+		op->nodesPerPartition = nodesPerPartition;
+		op->fanout = fanout;
+		op->totalNodes = totalNodes;
+		op->totalLeaves = totalLeaves;
+		op->nodesPerPage = nodesPerPage;
+		op->numTreePages = numTreePages;
 
-        blkno = MERKLE_TREE_START_BLKNO + pageNum;
-        
-        /* Switch pages if needed */
-        if ((int)blkno != currentPageBlkno)
-        {
-            /* Release previous page if held */
-            if (BufferIsValid(buf))
-            {
-                MarkBufferDirty(buf);
-                UnlockReleaseBuffer(buf);
-                buf = InvalidBuffer;
-            }
-            
-            /* Read new page */
-            buf = ReadBuffer(indexRel, blkno);
-            LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-            page = BufferGetPage(buf);
-            nodes = (MerkleNode *) PageGetContents(page);
-            currentPageBlkno = blkno;
-        }
+		pendingOps = lappend(pendingOps, op);
 
-        /* Record pre-change hash for optional commit-time reporting */
-        if (merkle_update_detection)
-            merkle_track_touched_node(indexRel, partitionId, nodeInPartition,
-                                      actualNodeIdx, pageNum, idxInPage,
-                                      nodesPerPage, numTreePages,
-                                      &nodes[idxInPage].hash);
-        
-        /* XOR hash into this node */
-        merkle_hash_xor(&nodes[idxInPage].hash, hash);
-        
-        /* Move to parent */
-        nodeInPartition = (nodeInPartition + fanout - 2) / fanout;
-        nodeId = nodeInPartition + (partitionId * nodesPerPartition);
-    }
-    
-    /* Release the last page if held */
-    if (BufferIsValid(buf))
-    {
-        MarkBufferDirty(buf);
-        UnlockReleaseBuffer(buf);
-        buf = InvalidBuffer;
-    }
+		MemoryContextSwitchTo(oldContext);
+	}
+
+	/* Calculate partition and node positions using dynamic values */
+	partitionId = leafId / leavesPerPartition;
+	nodeInPartition = (leafId % leavesPerPartition) + leafStart;
+	nodeId = nodeInPartition + (partitionId * nodesPerPartition);
+
+	/* Walk from leaf to root, XORing at each level */
+	while (nodeInPartition > 0)
+	{
+		int			actualNodeIdx = nodeId - 1;	/* 0-based index */
+		int			pageNum;
+		int			idxInPage = actualNodeIdx % nodesPerPage;
+		BlockNumber blkno;
+
+		if (actualNodeIdx < 0 || actualNodeIdx >= totalNodes)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("merkle_update_tree_path: node index %d out of range [0,%d)",
+							actualNodeIdx, totalNodes)));
+		}
+
+		pageNum = actualNodeIdx / nodesPerPage;
+		if (pageNum < 0 || pageNum >= numTreePages)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("merkle_update_tree_path: page number %d out of range [0,%d)",
+							pageNum, numTreePages)));
+		}
+
+		blkno = MERKLE_TREE_START_BLKNO + pageNum;
+
+		/* Switch pages if needed */
+		if ((int) blkno != currentPageBlkno)
+		{
+			/* Release previous page if held */
+			if (BufferIsValid(buf))
+			{
+				MarkBufferDirty(buf);
+				UnlockReleaseBuffer(buf);
+				buf = InvalidBuffer;
+			}
+
+			/* Read new page */
+			buf = ReadBuffer(indexRel, blkno);
+			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+			page = BufferGetPage(buf);
+			nodes = (MerkleNode *) PageGetContents(page);
+			currentPageBlkno = blkno;
+		}
+
+		/* Record pre-change hash for optional commit-time reporting */
+		if (merkle_update_detection)
+			merkle_track_touched_node(indexRel, partitionId, nodeInPartition,
+									  actualNodeIdx, pageNum, idxInPage,
+									  nodesPerPage, numTreePages,
+									  &nodes[idxInPage].hash);
+
+		/* XOR hash into this node */
+		merkle_hash_xor(&nodes[idxInPage].hash, hash);
+		nodes_touched++;
+
+		/* Move to parent */
+		nodeInPartition = (nodeInPartition + fanout - 2) / fanout;
+		nodeId = nodeInPartition + (partitionId * nodesPerPartition);
+	}
+
+	/* Release the last page if held */
+	if (BufferIsValid(buf))
+	{
+		MarkBufferDirty(buf);
+		UnlockReleaseBuffer(buf);
+		buf = InvalidBuffer;
+	}
+
+	if (profile_enabled)
+	{
+		INSTR_TIME_SET_CURRENT(elapsed_time);
+		INSTR_TIME_SUBTRACT(elapsed_time, start_time);
+		merkle_recovery_profile_state.tree_path_nodes_touched += nodes_touched;
+		INSTR_TIME_ADD(merkle_recovery_profile_state.tree_path_update_time,
+					   elapsed_time);
+	}
 }
 
 /*

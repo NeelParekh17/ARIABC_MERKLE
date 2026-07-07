@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper [options]
+Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper|recovery-scaling-diagnosis [options]
 
 Options:
   --ssh-user USER
@@ -16,6 +16,10 @@ Options:
   --tuple-count N
   --partitions N
   --bad-leaf-count K
+  --leaves-per-partition N
+  --fanout N
+  --geometry-label LABEL
+  --profiling off|light|deep
   --repetitions N
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
@@ -40,6 +44,10 @@ EXPERIMENT=""
 TUPLE_COUNT=""
 PARTITIONS=""
 BAD_LEAF_COUNT=""
+LEAVES_PER_PARTITION=""
+FANOUT=""
+GEOMETRY_LABEL=""
+PROFILING="off"
 REPETITIONS=""
 ARTIFACT_MODE="summary"
 CORRUPTION_MODE="paper-update-only"
@@ -62,6 +70,10 @@ while [[ $# -gt 0 ]]; do
     --tuple-count) TUPLE_COUNT="${2:?}"; shift 2 ;;
     --partitions) PARTITIONS="${2:?}"; shift 2 ;;
     --bad-leaf-count) BAD_LEAF_COUNT="${2:?}"; shift 2 ;;
+    --leaves-per-partition) LEAVES_PER_PARTITION="${2:?}"; shift 2 ;;
+    --fanout) FANOUT="${2:?}"; shift 2 ;;
+    --geometry-label) GEOMETRY_LABEL="${2:?}"; shift 2 ;;
+    --profiling) PROFILING="${2:?}"; shift 2 ;;
     --repetitions) REPETITIONS="${2:?}"; shift 2 ;;
     --artifact-mode) ARTIFACT_MODE="${2:?}"; shift 2 ;;
     --corruption-mode) CORRUPTION_MODE="${2:?}"; shift 2 ;;
@@ -79,8 +91,8 @@ case "$HOST" in
   *) echo "host must be one of: admin123, user4, utkarsh" >&2; exit 2 ;;
 esac
 case "$PROFILE" in
-  smoke|preflight|paper) ;;
-  *) echo "profile must be smoke, preflight, or paper" >&2; exit 2 ;;
+  smoke|preflight|paper|recovery-scaling-diagnosis) ;;
+  *) echo "profile must be smoke, preflight, paper, or recovery-scaling-diagnosis" >&2; exit 2 ;;
 esac
 case "$ARTIFACT_MODE" in
   summary|debug) ;;
@@ -89,6 +101,10 @@ esac
 case "$CORRUPTION_MODE" in
   paper-update-only|update-only|delete-only|insert-only|mixed) ;;
   *) echo "corruption-mode must be paper-update-only, update-only, delete-only, insert-only, or mixed" >&2; exit 2 ;;
+esac
+case "$PROFILING" in
+  off|light|deep) ;;
+  *) echo "profiling must be off, light, or deep" >&2; exit 2 ;;
 esac
 case "$EXPERIMENT" in
   ""|figure12|figure13) ;;
@@ -366,8 +382,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'"
 progress "remote source and Python environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -512,6 +528,15 @@ fi
 if [[ -n "$BAD_LEAF_COUNT" ]]; then
   BENCH_SELECTORS+=(--bad-leaf-count "$BAD_LEAF_COUNT")
 fi
+if [[ -n "$LEAVES_PER_PARTITION" ]]; then
+  BENCH_SELECTORS+=(--leaves-per-partition "$LEAVES_PER_PARTITION")
+fi
+if [[ -n "$FANOUT" ]]; then
+  BENCH_SELECTORS+=(--fanout "$FANOUT")
+fi
+if [[ -n "$GEOMETRY_LABEL" ]]; then
+  BENCH_SELECTORS+=(--geometry-label "$GEOMETRY_LABEL")
+fi
 
 # Build profile: CFLAGS must be an env assignment, not a positional configure arg.
 # Generated files (*_d.h, fmgroids.h, etc.) are excluded by the source
@@ -618,6 +643,7 @@ BENCH_ARGS=(
   --scratch-dir "$REMOTE_SCRATCH_DIR"
   --artifact-mode "$ARTIFACT_MODE"
   --corruption-mode "$CORRUPTION_MODE"
+  --profiling "$PROFILING"
 )
 BENCH_ARGS+=("${BENCH_REPETITIONS[@]}")
 BENCH_ARGS+=("${BENCH_SELECTORS[@]}")

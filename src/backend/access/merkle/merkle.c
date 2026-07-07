@@ -24,6 +24,8 @@
 bool enable_merkle_index = true;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
 bool merkle_update_detection = false;
+/* GUC: Enable backend-local Merkle recovery profiling */
+bool merkle_recovery_profile_enabled = false;
 /*
  * GUC: Suppress Merkle update-detection output during Merkle index builds
  * (CREATE INDEX / REINDEX).
@@ -34,6 +36,8 @@ bool merkle_update_detection = false;
 bool merkle_update_detection_suppress = true;
 /* Internal: suppress undo tracking in non-DML contexts (e.g. index build) */
 bool merkle_undo_suppress = false;
+uint64 merkle_recovery_profile_reset_generation = 0;
+MerkleRecoveryProfileStats merkle_recovery_profile_state = {0};
 
 /*
  * Merkle index reloption definitions using standard framework
