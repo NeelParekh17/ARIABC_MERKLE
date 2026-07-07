@@ -53,3 +53,17 @@ def geometry(conn, schema: str = "healthy") -> dict[str, int]:
         "fanout": int(data["fanout"]),
         "nodes_per_partition": int(data["nodes_per_partition"]),
     }
+
+
+def explain_json(conn, sql: str, params: tuple[Any, ...] | None = None) -> list[dict[str, Any]]:
+    """Run EXPLAIN JSON and return the JSON payload rows."""
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        try:
+            return cur.fetchall()
+        except psycopg.ProgrammingError:
+            return []
+
+
+def show_setting(conn, name: str) -> Any:
+    return scalar(conn, f"SHOW {name}")

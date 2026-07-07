@@ -27,7 +27,9 @@
 #include "catalog/pg_index.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "parser/parse_coerce.h"
+#include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -48,6 +50,8 @@ PG_FUNCTION_INFO_V1(merkle_get_node_hash);
 PG_FUNCTION_INFO_V1(merkle_get_child_hashes);
 PG_FUNCTION_INFO_V1(merkle_get_partition_root_hash);
 PG_FUNCTION_INFO_V1(merkle_get_partition_root_hashes);
+PG_FUNCTION_INFO_V1(merkle_recovery_profile_reset);
+PG_FUNCTION_INFO_V1(merkle_recovery_profile_stats);
 
 /*
  * find_merkle_index() - Find the Merkle index on a table
@@ -1416,221 +1420,318 @@ merkle_get_partition_root_hash(PG_FUNCTION_ARGS)
 Datum
 merkle_get_partition_root_hashes(PG_FUNCTION_ARGS)
 {
-    FuncCallContext *funcctx;
-    MemoryContext    oldcontext;
+	FuncCallContext *funcctx;
+	MemoryContext	oldcontext;
+	bool			profile_enabled = merkle_recovery_profile_enabled;
+	instr_time		start_time;
+	instr_time		elapsed_time;
 
-    if (SRF_IS_FIRSTCALL())
-    {
-        Oid       relid = PG_GETARG_OID(0);
-        Oid       indexOid;
-        Relation  indexRel;
-        TupleDesc tupdesc;
-        int       numPartitions;
-        int       nodesPerPartition;
-        int       totalNodes;
-        int       nodesPerPage;
-        int       numTreePages;
-        Datum    *partitions;
-        Datum    *hashes;
-        int       partition;
+	if (SRF_IS_FIRSTCALL())
+	{
+		Oid		relid = PG_GETARG_OID(0);
+		Oid		indexOid;
+		Relation	indexRel;
+		TupleDesc	tupdesc;
+		int		numPartitions;
+		int		nodesPerPartition;
+		int		totalNodes;
+		int		nodesPerPage;
+		int		numTreePages;
+		Datum   *partitions;
+		Datum   *hashes;
+		int		partition;
 
-        funcctx = SRF_FIRSTCALL_INIT();
-        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		if (profile_enabled)
+			INSTR_TIME_SET_CURRENT(start_time);
 
-        indexOid = resolve_merkle_index_arg(relid);
-        if (!OidIsValid(indexOid))
-            ereport(ERROR,
-                    (errcode(ERRCODE_UNDEFINED_OBJECT),
-                     errmsg("no merkle index found on relation %s",
-                            get_rel_name(relid))));
+		indexOid = resolve_merkle_index_arg(relid);
+		if (!OidIsValid(indexOid))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("no merkle index found on relation %s",
+							get_rel_name(relid))));
 
-        indexRel = index_open(indexOid, AccessShareLock);
-        merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
-                         &totalNodes, NULL, &nodesPerPage, &numTreePages,
-                         NULL);
+		indexRel = index_open(indexOid, AccessShareLock);
+		merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
+						 &totalNodes, NULL, &nodesPerPage, &numTreePages,
+						 NULL);
 
-        partitions = palloc(numPartitions * sizeof(Datum));
-        hashes = palloc(numPartitions * sizeof(Datum));
+		partitions = palloc(numPartitions * sizeof(Datum));
+		hashes = palloc(numPartitions * sizeof(Datum));
 
-        for (partition = 0; partition < numPartitions; partition++)
-        {
-            MerkleHash hash;
-            int        nodeIdx;
+		for (partition = 0; partition < numPartitions; partition++)
+		{
+			MerkleHash hash;
+			int		nodeIdx;
 
-            nodeIdx = global_node_index(partition, 1, numPartitions,
-                                        nodesPerPartition);
-            read_merkle_node_hash_with_meta(indexRel, nodeIdx, totalNodes,
-                                            nodesPerPage, numTreePages, &hash);
-            partitions[partition] = Int32GetDatum(partition);
-            hashes[partition] = CStringGetTextDatum(merkle_hash_to_hex(&hash));
-        }
+			nodeIdx = global_node_index(partition, 1, numPartitions,
+										nodesPerPartition);
+			read_merkle_node_hash_with_meta(indexRel, nodeIdx, totalNodes,
+											nodesPerPage, numTreePages, &hash);
+			partitions[partition] = Int32GetDatum(partition);
+			hashes[partition] = CStringGetTextDatum(merkle_hash_to_hex(&hash));
+		}
 
-        index_close(indexRel, AccessShareLock);
+		index_close(indexRel, AccessShareLock);
 
-        tupdesc = CreateTemplateTupleDesc(2);
-        TupleDescInitEntry(tupdesc, 1, "partition", INT4OID, -1, 0);
-        TupleDescInitEntry(tupdesc, 2, "hash", TEXTOID, -1, 0);
-        funcctx->tuple_desc = BlessTupleDesc(tupdesc);
-        funcctx->max_calls = numPartitions;
+		if (profile_enabled)
+		{
+			INSTR_TIME_SET_CURRENT(elapsed_time);
+			INSTR_TIME_SUBTRACT(elapsed_time, start_time);
+			merkle_recovery_profile_state.root_hash_helper_calls++;
+			merkle_recovery_profile_state.root_hash_nodes_returned += numPartitions;
+			merkle_recovery_profile_state.root_hash_helper_us +=
+				INSTR_TIME_GET_MICROSEC(elapsed_time);
+		}
 
-        {
-            typedef struct {
-                Datum *partitions;
-                Datum *hashes;
-            } PartitionRootData;
+		tupdesc = CreateTemplateTupleDesc(2);
+		TupleDescInitEntry(tupdesc, 1, "partition", INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 2, "hash", TEXTOID, -1, 0);
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+		funcctx->max_calls = numPartitions;
 
-            PartitionRootData *data = palloc(sizeof(PartitionRootData));
-            data->partitions = partitions;
-            data->hashes = hashes;
-            funcctx->user_fctx = data;
-        }
+		{
+			typedef struct {
+				Datum *partitions;
+				Datum *hashes;
+			} PartitionRootData;
 
-        MemoryContextSwitchTo(oldcontext);
-    }
+			PartitionRootData *data = palloc(sizeof(PartitionRootData));
+			data->partitions = partitions;
+			data->hashes = hashes;
+			funcctx->user_fctx = data;
+		}
 
-    funcctx = SRF_PERCALL_SETUP();
+		MemoryContextSwitchTo(oldcontext);
+	}
 
-    if (funcctx->call_cntr < funcctx->max_calls)
-    {
-        typedef struct {
-            Datum *partitions;
-            Datum *hashes;
-        } PartitionRootData;
+	funcctx = SRF_PERCALL_SETUP();
 
-        PartitionRootData *data = (PartitionRootData *) funcctx->user_fctx;
-        Datum values[2];
-        bool nulls[2] = {false, false};
-        HeapTuple tuple;
-        int idx = funcctx->call_cntr;
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		typedef struct {
+			Datum *partitions;
+			Datum *hashes;
+		} PartitionRootData;
 
-        values[0] = data->partitions[idx];
-        values[1] = data->hashes[idx];
-        tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
-        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
-    }
+		PartitionRootData *data = (PartitionRootData *) funcctx->user_fctx;
+		Datum values[2];
+		bool nulls[2] = {false, false};
+		HeapTuple tuple;
+		int idx = funcctx->call_cntr;
 
-    SRF_RETURN_DONE(funcctx);
+		values[0] = data->partitions[idx];
+		values[1] = data->hashes[idx];
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+
+	SRF_RETURN_DONE(funcctx);
 }
 
 Datum
 merkle_get_child_hashes(PG_FUNCTION_ARGS)
 {
-    FuncCallContext *funcctx;
-    MemoryContext    oldcontext;
+	FuncCallContext *funcctx;
+	MemoryContext	oldcontext;
+	bool			profile_enabled = merkle_recovery_profile_enabled;
+	instr_time		start_time;
+	instr_time		elapsed_time;
 
-    if (SRF_IS_FIRSTCALL())
-    {
-        Oid       relid = PG_GETARG_OID(0);
-        int32     partition = PG_GETARG_INT32(1);
-        int32     nodeInPartition = PG_GETARG_INT32(2);
-        Oid       indexOid;
-        Relation  indexRel;
-        TupleDesc tupdesc;
-        int       numPartitions;
-        int       nodesPerPartition;
-        int       leavesPerPartition;
-        int       totalNodes;
-        int       nodesPerPage;
-        int       numTreePages;
-        int       fanout;
-        int       internalNodes;
-        int       maxChildren;
-        int       childCount = 0;
-        int       child;
-        Datum    *childNodes;
-        Datum    *childHashes;
+	if (SRF_IS_FIRSTCALL())
+	{
+		Oid		relid = PG_GETARG_OID(0);
+		int32	partition = PG_GETARG_INT32(1);
+		int32	nodeInPartition = PG_GETARG_INT32(2);
+		Oid		indexOid;
+		Relation	indexRel;
+		TupleDesc	tupdesc;
+		int		numPartitions;
+		int		nodesPerPartition;
+		int		leavesPerPartition;
+		int		totalNodes;
+		int		nodesPerPage;
+		int		numTreePages;
+		int		fanout;
+		int		internalNodes;
+		int		maxChildren;
+		int		childCount = 0;
+		int		child;
+		Datum   *childNodes;
+		Datum   *childHashes;
 
-        funcctx = SRF_FIRSTCALL_INIT();
-        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		if (profile_enabled)
+			INSTR_TIME_SET_CURRENT(start_time);
 
-        indexOid = resolve_merkle_index_arg(relid);
-        if (!OidIsValid(indexOid))
-            ereport(ERROR,
-                    (errcode(ERRCODE_UNDEFINED_OBJECT),
-                     errmsg("no merkle index found on relation %s",
-                            get_rel_name(relid))));
+		indexOid = resolve_merkle_index_arg(relid);
+		if (!OidIsValid(indexOid))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("no merkle index found on relation %s",
+							get_rel_name(relid))));
 
-        indexRel = index_open(indexOid, AccessShareLock);
-        merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition,
-                         &nodesPerPartition, &totalNodes, NULL,
-                         &nodesPerPage, &numTreePages, &fanout);
-        (void) global_node_index(partition, nodeInPartition, numPartitions,
-                                 nodesPerPartition);
+		indexRel = index_open(indexOid, AccessShareLock);
+		merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition,
+						 &nodesPerPartition, &totalNodes, NULL,
+						 &nodesPerPage, &numTreePages, &fanout);
+		(void) global_node_index(partition, nodeInPartition, numPartitions,
+								 nodesPerPartition);
 
-        internalNodes = nodesPerPartition - leavesPerPartition;
-        if (nodeInPartition > internalNodes)
-            ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("merkle node_in_partition %d is a leaf and has no children",
-                            nodeInPartition)));
+		internalNodes = nodesPerPartition - leavesPerPartition;
+		if (nodeInPartition > internalNodes)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("merkle node_in_partition %d is a leaf and has no children",
+							nodeInPartition)));
 
-        maxChildren = fanout;
-        childNodes = palloc(maxChildren * sizeof(Datum));
-        childHashes = palloc(maxChildren * sizeof(Datum));
+		maxChildren = fanout;
+		childNodes = palloc(maxChildren * sizeof(Datum));
+		childHashes = palloc(maxChildren * sizeof(Datum));
 
-        for (child = 1; child <= fanout; child++)
-        {
-            int childNode = fanout * (nodeInPartition - 1) + child + 1;
+		for (child = 1; child <= fanout; child++)
+		{
+			int childNode = fanout * (nodeInPartition - 1) + child + 1;
 
-            if (childNode <= nodesPerPartition)
-            {
-                MerkleHash hash;
-                int        childIdx;
+			if (childNode <= nodesPerPartition)
+			{
+				MerkleHash hash;
+				int		childIdx;
 
-                childIdx = global_node_index(partition, childNode,
-                                             numPartitions, nodesPerPartition);
-                read_merkle_node_hash_with_meta(indexRel, childIdx, totalNodes,
-                                                nodesPerPage, numTreePages,
-                                                &hash);
-                childNodes[childCount] = Int32GetDatum(childNode);
-                childHashes[childCount] = CStringGetTextDatum(merkle_hash_to_hex(&hash));
-                childCount++;
-            }
-        }
+				childIdx = global_node_index(partition, childNode,
+											 numPartitions, nodesPerPartition);
+				read_merkle_node_hash_with_meta(indexRel, childIdx, totalNodes,
+												nodesPerPage, numTreePages,
+												&hash);
+				childNodes[childCount] = Int32GetDatum(childNode);
+				childHashes[childCount] = CStringGetTextDatum(merkle_hash_to_hex(&hash));
+				childCount++;
+			}
+		}
 
-        index_close(indexRel, AccessShareLock);
+		index_close(indexRel, AccessShareLock);
 
-        tupdesc = CreateTemplateTupleDesc(2);
-        TupleDescInitEntry(tupdesc, 1, "child_node_in_partition", INT4OID, -1, 0);
-        TupleDescInitEntry(tupdesc, 2, "hash", TEXTOID, -1, 0);
-        funcctx->tuple_desc = BlessTupleDesc(tupdesc);
-        funcctx->max_calls = childCount;
+		if (profile_enabled)
+		{
+			INSTR_TIME_SET_CURRENT(elapsed_time);
+			INSTR_TIME_SUBTRACT(elapsed_time, start_time);
+			merkle_recovery_profile_state.child_hash_helper_calls++;
+			merkle_recovery_profile_state.child_hash_nodes_returned += childCount;
+			merkle_recovery_profile_state.child_hash_helper_us +=
+				INSTR_TIME_GET_MICROSEC(elapsed_time);
+		}
 
-        {
-            typedef struct {
-                Datum *childNodes;
-                Datum *childHashes;
-            } ChildHashData;
+		tupdesc = CreateTemplateTupleDesc(2);
+		TupleDescInitEntry(tupdesc, 1, "child_node_in_partition", INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 2, "hash", TEXTOID, -1, 0);
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+		funcctx->max_calls = childCount;
 
-            ChildHashData *data = palloc(sizeof(ChildHashData));
-            data->childNodes = childNodes;
-            data->childHashes = childHashes;
-            funcctx->user_fctx = data;
-        }
+		{
+			typedef struct {
+				Datum *childNodes;
+				Datum *childHashes;
+			} ChildHashData;
 
-        MemoryContextSwitchTo(oldcontext);
-    }
+			ChildHashData *data = palloc(sizeof(ChildHashData));
+			data->childNodes = childNodes;
+			data->childHashes = childHashes;
+			funcctx->user_fctx = data;
+		}
 
-    funcctx = SRF_PERCALL_SETUP();
+		MemoryContextSwitchTo(oldcontext);
+	}
 
-    if (funcctx->call_cntr < funcctx->max_calls)
-    {
-        typedef struct {
-            Datum *childNodes;
-            Datum *childHashes;
-        } ChildHashData;
+	funcctx = SRF_PERCALL_SETUP();
 
-        ChildHashData *data = (ChildHashData *) funcctx->user_fctx;
-        Datum values[2];
-        bool nulls[2] = {false, false};
-        HeapTuple tuple;
-        int idx = funcctx->call_cntr;
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		typedef struct {
+			Datum *childNodes;
+			Datum *childHashes;
+		} ChildHashData;
 
-        values[0] = data->childNodes[idx];
-        values[1] = data->childHashes[idx];
-        tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
-        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
-    }
+		ChildHashData *data = (ChildHashData *) funcctx->user_fctx;
+		Datum values[2];
+		bool nulls[2] = {false, false};
+		HeapTuple tuple;
+		int idx = funcctx->call_cntr;
 
-    SRF_RETURN_DONE(funcctx);
+		values[0] = data->childNodes[idx];
+		values[1] = data->childHashes[idx];
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+
+	SRF_RETURN_DONE(funcctx);
+}
+
+Datum
+merkle_recovery_profile_reset(PG_FUNCTION_ARGS)
+{
+	MemSet(&merkle_recovery_profile_state, 0, sizeof(merkle_recovery_profile_state));
+	merkle_recovery_profile_reset_generation++;
+	PG_RETURN_VOID();
+}
+
+Datum
+merkle_recovery_profile_stats(PG_FUNCTION_ARGS)
+{
+	StringInfoData buf;
+	uint64		row_hash_compute_us;
+	uint64		tree_path_update_us;
+	uint64		row_hash_compute_ns;
+	uint64		tree_path_update_ns;
+
+	row_hash_compute_us =
+		INSTR_TIME_GET_MICROSEC(merkle_recovery_profile_state.row_hash_compute_time);
+	tree_path_update_us =
+		INSTR_TIME_GET_MICROSEC(merkle_recovery_profile_state.tree_path_update_time);
+	row_hash_compute_ns =
+		(uint64) (INSTR_TIME_GET_DOUBLE(merkle_recovery_profile_state.row_hash_compute_time) * 1000000000.0);
+	tree_path_update_ns =
+		(uint64) (INSTR_TIME_GET_DOUBLE(merkle_recovery_profile_state.tree_path_update_time) * 1000000000.0);
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+					 "{"
+					 "\"schema_version\":1,"
+					 "\"backend_pid\":%d,"
+					 "\"reset_generation\":%llu,"
+					 "\"enabled\":%s,"
+					 "\"root_hash_helper_calls\":%llu,"
+					 "\"root_hash_nodes_returned\":%llu,"
+					 "\"root_hash_helper_us\":%llu,"
+					 "\"child_hash_helper_calls\":%llu,"
+					 "\"child_hash_nodes_returned\":%llu,"
+					 "\"child_hash_helper_us\":%llu,"
+					 "\"row_hash_compute_calls\":%llu,"
+					 "\"row_hash_compute_us\":%llu,"
+					 "\"row_hash_compute_ns\":%llu,"
+					 "\"tree_path_update_calls\":%llu,"
+					 "\"tree_path_nodes_touched\":%llu,"
+					 "\"tree_path_update_us\":%llu,"
+					 "\"tree_path_update_ns\":%llu"
+					 "}",
+					 MyProcPid,
+					 (unsigned long long) merkle_recovery_profile_reset_generation,
+					 merkle_recovery_profile_enabled ? "true" : "false",
+					 (unsigned long long) merkle_recovery_profile_state.root_hash_helper_calls,
+					 (unsigned long long) merkle_recovery_profile_state.root_hash_nodes_returned,
+					 (unsigned long long) merkle_recovery_profile_state.root_hash_helper_us,
+					 (unsigned long long) merkle_recovery_profile_state.child_hash_helper_calls,
+					 (unsigned long long) merkle_recovery_profile_state.child_hash_nodes_returned,
+					 (unsigned long long) merkle_recovery_profile_state.child_hash_helper_us,
+					 (unsigned long long) merkle_recovery_profile_state.row_hash_compute_calls,
+					 (unsigned long long) row_hash_compute_us,
+					 (unsigned long long) row_hash_compute_ns,
+					 (unsigned long long) merkle_recovery_profile_state.tree_path_update_calls,
+					 (unsigned long long) merkle_recovery_profile_state.tree_path_nodes_touched,
+					 (unsigned long long) tree_path_update_us,
+					 (unsigned long long) tree_path_update_ns);
+
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }

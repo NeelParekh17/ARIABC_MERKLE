@@ -19,6 +19,8 @@ class Metrics:
     corrupted_tuple_count: int
     repetition: int
     corruption_mode: str = "paper-update-only"
+    profile_label: str = ""
+    profiling_mode: str = "off"
     valid: bool = True
     warning: str = ""
     paper_style_total_ms: float = 0.0

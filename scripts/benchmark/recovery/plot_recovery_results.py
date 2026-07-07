@@ -208,6 +208,165 @@ def plot_all(result_dir: Path):
         aggregate(fig13, "bad_leaf_count", "candidate_rows_fetched", "partitions"),
     )
 
+    run_map = {r["run_id"]: r for r in rows if "run_id" in r}
+    phase_rows = read_csv(result_dir / "phase_timings.csv")
+    dataset_rows = read_csv(result_dir / "dataset_sizes.csv")
+    backend_rows = read_csv(result_dir / "merkle_backend_profile.csv")
+    deep_rows = read_csv(result_dir / "deep_plan_summary.csv")
+
+    def median_points_from_join(
+        left_rows: list[dict[str, str]],
+        x_field: str,
+        series_field: str,
+        y_field: str,
+    ) -> list[dict[str, object]]:
+        grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
+        for row in left_rows:
+            y = as_float(row.get(y_field))
+            if y is None:
+                continue
+            grouped[(row.get(x_field, ""), row.get(series_field, ""))].append(y)
+        out = []
+        for (x, series), values in grouped.items():
+            out.append({"x": x, "series": series, "median": median(values)})
+        return out
+
+    # Recovery breakdown by dataset size.
+    breakdown = defaultdict(list)
+    phase_label_map = {
+        "tree_localisation_ms": "localisation",
+        "candidate_row_fetch_ms": "candidate fetch",
+        "row_comparison_ms": "row compare",
+        "repair_write_ms": "repair write",
+        "targeted_post_repair_confirmation_ms": "targeted confirmation",
+    }
+    for row in phase_rows:
+        run = run_map.get(row.get("run_id"))
+        if not run:
+            continue
+        phase = row.get("phase")
+        if phase in phase_label_map:
+            value = as_float(row.get("ms"))
+            if value is not None:
+                series = f"{run.get('profile_label', '')}:{phase_label_map[phase]}"
+                breakdown[(run.get("tuple_count", ""), series)].append(value)
+    breakdown_points = [
+        {"x": x, "series": series, "median": median(values)}
+        for (x, series), values in breakdown.items()
+    ]
+    if breakdown_points:
+        svg_bar_chart(
+            plots / "recovery_breakdown_vs_dataset_size.svg",
+            "Recovery breakdown vs dataset size",
+            "tuple_count",
+            "median ms",
+            breakdown_points,
+        )
+
+    candidate_points = aggregate(
+        [
+            r for r in rows
+            if r.get("profile_label") in {"baseline_l16", "preprovisioned_l128"}
+        ],
+        "tuple_count",
+        "candidate_rows_fetched",
+        "profile_label",
+    )
+    if candidate_points:
+        svg_line_chart(
+            plots / "candidate_rows_vs_dataset_size.svg",
+            "Candidate rows vs dataset size",
+            "tuple_count",
+            "median rows",
+            candidate_points,
+        )
+
+    recovery_points = aggregate(
+        [r for r in rows if r.get("profile_label")],
+        "tuple_count",
+        "restore_repair_ms",
+        "profile_label",
+    )
+    if recovery_points:
+        svg_line_chart(
+            plots / "recovery_time_vs_dataset_size_by_geometry.svg",
+            "Recovery time vs dataset size by geometry",
+            "tuple_count",
+            "median ms",
+            recovery_points,
+        )
+
+    backend_points = []
+    if backend_rows:
+        metric_map = {
+            "root helper": ("root_hash_helper_us", "us"),
+            "child helper": ("child_hash_helper_us", "us"),
+            "row hash": ("row_hash_compute_ns", "ns"),
+            "tree path": ("tree_path_update_ns", "ns"),
+        }
+        for label, (field, unit) in metric_map.items():
+            fallback_field = field.replace("_ns", "_us")
+            values = [
+                as_float(r.get(field) if r.get(field) not in (None, "") else r.get(fallback_field))
+                for r in backend_rows
+            ]
+            values = [v for v in values if v is not None]
+            if values:
+                divisor = 1_000_000.0 if unit == "ns" else 1000.0
+                backend_points.append({"x": label, "series": "backend", "median": median(values) / divisor})
+        if backend_points:
+            svg_bar_chart(
+                plots / "merkle_backend_time_breakdown.svg",
+                "Merkle backend time breakdown",
+                "metric",
+                "median ms",
+                backend_points,
+            )
+
+    lookup_points = []
+    if deep_rows:
+        lookup_rows = [
+            r for r in deep_rows
+            if r.get("kind") == "candidate" and r.get("schema") in {"healthy", "damaged"}
+        ]
+        if lookup_rows:
+            for metric in ["shared_hit_blocks", "shared_read_blocks", "actual_rows"]:
+                vals = defaultdict(list)
+                for r in lookup_rows:
+                    x = r.get("profile_label", "")
+                    v = as_float(r.get(metric))
+                    if v is not None:
+                        vals[x].append(v)
+                for x, series_vals in vals.items():
+                    lookup_points.append({"x": x, "series": metric, "median": median(series_vals)})
+    if lookup_points:
+        svg_bar_chart(
+            plots / "candidate_lookup_buffers_vs_geometry.svg",
+            "Candidate lookup buffers vs geometry",
+            "geometry",
+            "median blocks / rows",
+            lookup_points,
+        )
+
+    occupancy_points = []
+    if dataset_rows:
+        for metric in ["p50", "p95", "p99", "maximum"]:
+            vals = defaultdict(list)
+            for r in dataset_rows:
+                v = as_float(r.get(metric))
+                if v is not None:
+                    vals[r.get("profile_label", "")].append(v)
+            for x, series_vals in vals.items():
+                occupancy_points.append({"x": x, "series": metric, "median": median(series_vals)})
+    if occupancy_points:
+        svg_bar_chart(
+            plots / "leaf_occupancy_vs_geometry.svg",
+            "Leaf occupancy vs geometry",
+            "geometry",
+            "median occupancy",
+            occupancy_points,
+        )
+
     phase_rows = read_csv(result_dir / "phase_timings.csv")
     phase_points = []
     wanted = {
