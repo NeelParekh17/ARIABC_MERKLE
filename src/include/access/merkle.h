@@ -19,6 +19,7 @@
 #include "access/sdir.h"
 #include "access/tableam.h"
 #include "nodes/execnodes.h"
+#include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "utils/relcache.h"
 
@@ -26,6 +27,7 @@
 extern bool enable_merkle_index;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
 extern bool merkle_update_detection;
+extern bool merkle_recovery_profile_enabled;
 /*
  * GUC: Suppress Merkle update-detection output during Merkle index builds
  * (CREATE INDEX / REINDEX).
@@ -40,6 +42,24 @@ extern bool merkle_update_detection_suppress;
  * can exhaust memory for large tables.
  */
 extern bool merkle_undo_suppress;
+
+typedef struct MerkleRecoveryProfileStats
+{
+	uint64		root_hash_helper_calls;
+	uint64		root_hash_nodes_returned;
+	uint64		root_hash_helper_us;
+	uint64		child_hash_helper_calls;
+	uint64		child_hash_nodes_returned;
+	uint64		child_hash_helper_us;
+	uint64		row_hash_compute_calls;
+	instr_time	row_hash_compute_time;
+	uint64		tree_path_update_calls;
+	uint64		tree_path_nodes_touched;
+	instr_time	tree_path_update_time;
+} MerkleRecoveryProfileStats;
+
+extern uint64 merkle_recovery_profile_reset_generation;
+extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 
 /*
  * Merkle tree configuration constants
@@ -233,5 +253,7 @@ extern Datum merkle_get_node_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_get_child_hashes(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hashes(PG_FUNCTION_ARGS);
+extern Datum merkle_recovery_profile_reset(PG_FUNCTION_ARGS);
+extern Datum merkle_recovery_profile_stats(PG_FUNCTION_ARGS);
 
 #endif /* MERKLE_H */

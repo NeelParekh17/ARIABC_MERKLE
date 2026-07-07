@@ -17,6 +17,7 @@ from typing import Any
 BENCH_DIR: Path = Path(__file__).resolve().parents[1]
 ROOT: Path = BENCH_DIR.parents[2]
 RESULT_ROOT: Path = BENCH_DIR / "results"
+GEOMETRY_MATRIX_PATH: Path = BENCH_DIR / "recovery_geometry_matrix.json"
 
 # ── schema / column constants ───────────────────────────────────────────────
 FIELDS = [f"field{i}" for i in range(10)]
@@ -85,6 +86,14 @@ def profile_config(profile: str) -> BenchmarkConfig:
             fig13_sizes=[3_000_000],
             fig13_k=list(range(1, 11)),
             repetitions=5,
+        )
+    if profile == "recovery-scaling-diagnosis":
+        return BenchmarkConfig(
+            fig12_sizes=[1_000_000, 3_000_000, 5_000_000],
+            fig13_sizes=[],
+            fig13_k=[],
+            repetitions=5,
+            extra={"campaign": "recovery_scaling_diagnosis"},
         )
     if profile == "preflight":
         return BenchmarkConfig(
