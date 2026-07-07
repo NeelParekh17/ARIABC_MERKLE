@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import json
 import statistics
+import time
+from contextlib import contextmanager
 from typing import Any
 
 from .config import ALL_COLUMNS, FIELDS, LEAF_LOOKUP_INDEXES
 from .db import execute, scalar
+from .profiling import ProfileCollector, record_call, parse_json_plan
 
 
 # ── leaf lookup ─────────────────────────────────────────────────────────────
@@ -43,8 +46,6 @@ def _plan_node_uses_index(node: Any, index_name: str) -> bool:
 
 
 def indexed_lookup_plan_ok(conn, schema: str, leaf_id: int) -> tuple[bool, str]:
-    import hashlib
-
     plan_rows = execute(conn, leaf_lookup_sql(schema, explain=True), (leaf_id,))
     if not plan_rows:
         return False, "empty EXPLAIN output"
@@ -109,6 +110,20 @@ def run_planner_preflight(
     return out, rows
 
 
+def lookup_explain_plan_json(conn, schema: str, leaf_id: int) -> dict[str, Any] | None:
+    plan_rows = execute(
+        conn,
+        """
+        EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS, TIMING OFF, FORMAT JSON)
+        SELECT {cols}
+        FROM {schema}.usertable
+        WHERE merkle_bucket_for_key('{schema}.usertable_merkle_idx'::regclass, ycsb_key) = %s
+        """.format(cols=", ".join(ALL_COLUMNS), schema=schema),
+        (leaf_id,),
+    )
+    return parse_json_plan(plan_rows)
+
+
 # ── seq-scan counters ────────────────────────────────────────────────────────
 
 def seq_scan_snapshot(conn) -> dict[str, int]:
@@ -137,6 +152,7 @@ def repair_leaf(
     leaf_id: int,
     *,
     phase: dict[str, float],
+    profiler: ProfileCollector | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]], int, int, int]:
     """Fetch rows for *leaf_id* and apply whatever repairs are needed.
 
@@ -155,36 +171,102 @@ def repair_leaf(
     rows_inserted = rows_updated = rows_deleted = 0
 
     with _timer("candidate_row_fetch_ms"):
-        hrows = fetch_leaf_rows(conn, "healthy", leaf_id)
-        drows = fetch_leaf_rows(conn, "damaged", leaf_id)
+        hrows_raw = record_call(
+            profiler,
+            stage="candidate_fetch",
+            operation="leaf_fetch_healthy",
+            schema="healthy",
+            leaf_id=leaf_id,
+            fn=lambda: execute(conn, leaf_lookup_sql("healthy"), (leaf_id,)),
+        )
+        drows_raw = record_call(
+            profiler,
+            stage="candidate_fetch",
+            operation="leaf_fetch_damaged",
+            schema="damaged",
+            leaf_id=leaf_id,
+            fn=lambda: execute(conn, leaf_lookup_sql("damaged"), (leaf_id,)),
+        )
+        mat_start = time.perf_counter_ns()
+        hrows = {int(r["ycsb_key"]): r for r in hrows_raw}
+        drows = {int(r["ycsb_key"]): r for r in drows_raw}
+        if profiler is not None and profiler.enabled:
+            profiler.record(
+                stage="candidate_fetch",
+                operation="candidate_dict_materialisation_cpu",
+                schema="",
+                leaf_id=leaf_id,
+                client_wall_ns=time.perf_counter_ns() - mat_start,
+                rows_returned=len(hrows_raw) + len(drows_raw),
+            )
 
     with _timer("row_comparison_ms"):
+        key_start = time.perf_counter_ns()
         hkeys = set(hrows)
         dkeys = set(drows)
         inserts = sorted(hkeys - dkeys)   # present in healthy, missing from damaged → INSERT
         deletes = sorted(dkeys - hkeys)   # spurious in damaged, not in healthy    → DELETE
-        updates = sorted(k for k in hkeys & dkeys if hrows[k] != drows[k])
+        common_keys = sorted(hkeys & dkeys)
+        if profiler is not None and profiler.enabled:
+            profiler.record(
+                stage="comparison",
+                operation="key_set_build_cpu",
+                leaf_id=leaf_id,
+                client_wall_ns=time.perf_counter_ns() - key_start,
+                rows_returned=len(hrows) + len(drows),
+            )
+        payload_start = time.perf_counter_ns()
+        updates = [key for key in common_keys if hrows[key] != drows[key]]
+        if profiler is not None and profiler.enabled:
+            profiler.record(
+                stage="comparison",
+                operation="row_payload_comparison_cpu",
+                leaf_id=leaf_id,
+                client_wall_ns=time.perf_counter_ns() - payload_start,
+                rows_returned=len(hrows) + len(drows),
+            )
 
     with _timer("repair_write_ms"):
         for key in inserts:
             vals = hrows[key]
-            execute(
-                conn,
-                "INSERT INTO damaged.usertable VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                tuple(vals[c] for c in ALL_COLUMNS),
+            record_call(
+                profiler,
+                stage="repair",
+                operation="insert_dml",
+                leaf_id=leaf_id,
+                schema="damaged",
+                fn=lambda vals=vals: execute(
+                    conn,
+                    "INSERT INTO damaged.usertable VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    tuple(vals[c] for c in ALL_COLUMNS),
+                ),
             )
             rows_inserted += 1
         for key in updates:
             vals = hrows[key]
-            execute(
-                conn,
-                "UPDATE damaged.usertable SET field0=%s, field1=%s, field2=%s, field3=%s, field4=%s, "
-                "field5=%s, field6=%s, field7=%s, field8=%s, field9=%s WHERE ycsb_key=%s",
-                tuple(vals[f] for f in FIELDS) + (key,),
+            record_call(
+                profiler,
+                stage="repair",
+                operation="update_dml",
+                leaf_id=leaf_id,
+                schema="damaged",
+                fn=lambda vals=vals, key=key: execute(
+                    conn,
+                    "UPDATE damaged.usertable SET field0=%s, field1=%s, field2=%s, field3=%s, field4=%s, "
+                    "field5=%s, field6=%s, field7=%s, field8=%s, field9=%s WHERE ycsb_key=%s",
+                    tuple(vals[f] for f in FIELDS) + (key,),
+                ),
             )
             rows_updated += 1
         for key in deletes:
-            execute(conn, "DELETE FROM damaged.usertable WHERE ycsb_key = %s", (key,))
+            record_call(
+                profiler,
+                stage="repair",
+                operation="delete_dml",
+                leaf_id=leaf_id,
+                schema="damaged",
+                fn=lambda key=key: execute(conn, "DELETE FROM damaged.usertable WHERE ycsb_key = %s", (key,)),
+            )
             rows_deleted += 1
 
     return hrows, drows, rows_inserted, rows_updated, rows_deleted

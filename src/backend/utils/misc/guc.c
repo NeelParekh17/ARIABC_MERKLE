@@ -908,6 +908,15 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"merkle_recovery_profile_enabled", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Enable backend-local Merkle recovery profiling."),
+			gettext_noop("When enabled, the backend accumulates Merkle recovery helper counters for the current session only.")
+		},
+		&merkle_recovery_profile_enabled,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"merkle_update_detection_suppress", PGC_USERSET, DEVELOPER_OPTIONS,
 			gettext_noop("Suppress Merkle update-detection output during index builds."),
 			gettext_noop("When enabled, CREATE INDEX/REINDEX for Merkle indexes will not emit the touched-node NOTICE report even if merkle_update_detection is on. Set this to off to see the updated nodes during a build.")
