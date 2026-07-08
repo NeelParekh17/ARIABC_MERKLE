@@ -522,3 +522,251 @@ def test_full_recovery_phase_reconciliation():
         + m.phase["recovery_orchestration_ms"]
     )
     assert abs(total_reconciled - m.restore_repair_ms) < 1e-6
+
+
+
+# -- fanout-width-sweep tests -------------------------------------------------
+
+# Canonical 19-geometry list
+_ALL_SWEEP_LABELS = [
+    "fanout_f2_l16", "fanout_f4_l16", "fanout_f16_l16",
+    "fanout_f2_l64", "fanout_f4_l64", "fanout_f8_l64", "fanout_f64_l64",
+    "fanout_f2_l128", "fanout_f128_l128",
+    "fanout_f2_l256", "fanout_f4_l256", "fanout_f16_l256", "fanout_f256_l256",
+    "fanout_f2_l512", "fanout_f512_l512",
+    "fanout_f2_l1024", "fanout_f4_l1024", "fanout_f32_l1024", "fanout_f1024_l1024",
+]
+
+
+def _sweep_args(**overrides):
+    base = dict(
+        profile="fanout-width-sweep",
+        leaves_per_partition=None,
+        fanout=None,
+        partitions=None,
+        tuple_count=None,
+        bad_leaf_count=None,
+        geometry_label=None,
+    )
+    base.update(overrides)
+    return Namespace(**base)
+
+
+def _sweep_config():
+    from merkle_recovery.config import profile_config
+    return profile_config("fanout-width-sweep")
+
+
+def test_fanout_sweep_produces_19_unique_labels():
+    specs = _series_for_profile(_sweep_args(), _sweep_config())
+    labels = [spec["geometry_label"] for spec in specs]
+    assert len(labels) == 19, f"expected 19, got {len(labels)}: {labels}"
+    assert set(labels) == set(_ALL_SWEEP_LABELS), (
+        f"extra={set(labels)-set(_ALL_SWEEP_LABELS)}, "
+        f"missing={set(_ALL_SWEEP_LABELS)-set(labels)}"
+    )
+
+
+def test_fanout_sweep_run_ids_are_unique():
+    config = _sweep_config()
+    specs = _series_for_profile(_sweep_args(), config)
+    run_ids = []
+    for spec in specs:
+        manifest = {
+            "experiment": spec["experiment"],
+            "tuple_count": spec["tuple_count"],
+            "partitions": spec["partitions"],
+            "leaves_per_partition": spec["leaves_per_partition"],
+            "fanout": spec["fanout"],
+            "bad_leaves": list(range(spec["bad_leaf_count"])),
+            "corruptions": list(range(spec["corrupted_tuple_count"])),
+        }
+        for rep in range(config.repetitions):
+            run_ids.append(recovery_run_id(manifest, rep, spec["geometry_label"]))
+    assert len(run_ids) == len(set(run_ids)), "duplicate run_ids in fanout-width-sweep"
+
+
+def test_fanout_sweep_all_geometries_pass_validation():
+    specs = _series_for_profile(_sweep_args(), _sweep_config())
+    for spec in specs:
+        validate_geometry(spec["partitions"], spec["leaves_per_partition"], spec["fanout"])
+
+
+def test_fanout_sweep_rejects_manual_fanout_override():
+    with pytest.raises(ValueError, match="fixed geometry labels"):
+        _series_for_profile(_sweep_args(fanout=4), _sweep_config())
+
+
+def test_fanout_sweep_rejects_manual_lpp_override():
+    with pytest.raises(ValueError, match="fixed geometry labels"):
+        _series_for_profile(_sweep_args(leaves_per_partition=256), _sweep_config())
+
+
+def test_fanout_sweep_rejects_manual_partitions_override():
+    with pytest.raises(ValueError, match="fixed geometry labels"):
+        _series_for_profile(_sweep_args(partitions=100), _sweep_config())
+
+
+def test_fanout_sweep_label_filter_f16_l16():
+    specs = _series_for_profile(_sweep_args(geometry_label="fanout_f16_l16"), _sweep_config())
+    assert len(specs) == 1
+    assert specs[0]["fanout"] == 16 and specs[0]["leaves_per_partition"] == 16
+
+
+def test_fanout_sweep_label_filter_f128_l128():
+    specs = _series_for_profile(_sweep_args(geometry_label="fanout_f128_l128"), _sweep_config())
+    assert len(specs) == 1
+    assert specs[0]["fanout"] == 128 and specs[0]["leaves_per_partition"] == 128
+
+
+def test_fanout_sweep_label_filter_f256_l256():
+    specs = _series_for_profile(_sweep_args(geometry_label="fanout_f256_l256"), _sweep_config())
+    assert len(specs) == 1
+    assert specs[0]["fanout"] == 256 and specs[0]["leaves_per_partition"] == 256
+
+
+def test_fanout_sweep_label_filter_f64_l64():
+    specs = _series_for_profile(_sweep_args(geometry_label="fanout_f64_l64"), _sweep_config())
+    assert len(specs) == 1
+    assert specs[0]["fanout"] == 64 and specs[0]["leaves_per_partition"] == 64
+
+def test_fanout_sweep_label_filter_f512_l512():
+    specs = _series_for_profile(_sweep_args(geometry_label="fanout_f512_l512"), _sweep_config())
+    assert len(specs) == 1
+    assert specs[0]["fanout"] == 512 and specs[0]["leaves_per_partition"] == 512
+
+
+def test_fanout_sweep_label_filter_f1024_l1024():
+    specs = _series_for_profile(_sweep_args(geometry_label="fanout_f1024_l1024"), _sweep_config())
+    assert len(specs) == 1
+    assert specs[0]["fanout"] == 1024 and specs[0]["leaves_per_partition"] == 1024
+
+
+def test_fanout_sweep_corrupted_tuple_count_is_always_300():
+    specs = _series_for_profile(_sweep_args(), _sweep_config())
+    for spec in specs:
+        assert spec["corrupted_tuple_count"] == 300, (
+            f"{spec['geometry_label']}: got {spec['corrupted_tuple_count']}"
+        )
+
+
+def test_fanout_sweep_bad_leaf_count_default_is_20():
+    specs = _series_for_profile(_sweep_args(), _sweep_config())
+    for spec in specs:
+        assert spec["bad_leaf_count"] == 20, (
+            f"{spec['geometry_label']}: bad_leaf_count={spec['bad_leaf_count']}"
+        )
+
+
+@pytest.mark.parametrize("fanout,lpp,expected_depth", [
+    (4,    16,    3),
+    (16,   16,    2),
+    (4,    64,    4),
+    (8,    64,    3),
+    (64,   64,    2),
+    (128,  128,   2),
+    (4,    256,   5),
+    (16,   256,   3),
+    (256,  256,   2),
+    (512,  512,   2),
+    (4,    1024,  6),
+    (32,   1024,  3),
+    (1024, 1024,  2),
+])
+def test_tree_depth_for_fanout_sweep_geometries(fanout, lpp, expected_depth):
+    from run_merkle_recovery_benchmark import tree_depth
+    assert tree_depth(lpp, fanout) == expected_depth
+
+
+def test_validate_geometry_accepts_all_sweep_geometries():
+    from merkle_recovery.config import profile_config
+    import json, pathlib
+    matrix_path = pathlib.Path(__file__).resolve().parents[1] / "recovery_geometry_matrix.json"
+    matrix = json.loads(matrix_path.read_text())
+    for label in _ALL_SWEEP_LABELS:
+        geo = matrix[label]
+        validate_geometry(geo["partitions"], geo["leaves_per_partition"], geo["fanout"])
+
+
+def test_fanout_sweep_rejects_manual_tuple_count_override():
+    with pytest.raises(ValueError, match="fixed geometry labels"):
+        _series_for_profile(_sweep_args(tuple_count=1000), _sweep_config())
+
+def test_fanout_sweep_rejects_manual_bad_leaf_count_override():
+    with pytest.raises(ValueError, match="fixed geometry labels"):
+        _series_for_profile(_sweep_args(bad_leaf_count=50), _sweep_config())
+
+def test_fanout_sweep_rejects_invalid_corruption_mode():
+    from run_merkle_recovery_benchmark import main
+    import sys
+    from unittest.mock import patch
+
+    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "fanout-width-sweep", "--corruption-mode", "mixed"]
+    with patch.object(sys, 'argv', test_args):
+        with pytest.raises(ValueError, match="fanout-width-sweep requires --corruption-mode paper-update-only"):
+            main()
+
+
+def _size_scaling_args(**overrides):
+    base = dict(
+        profile="size-scaling-k75-c300",
+        leaves_per_partition=None,
+        fanout=None,
+        partitions=None,
+        tuple_count=None,
+        bad_leaf_count=None,
+        geometry_label=None,
+    )
+    base.update(overrides)
+    return Namespace(**base)
+
+
+def _size_scaling_config():
+    from merkle_recovery.config import profile_config
+    return profile_config("size-scaling-k75-c300")
+
+
+def test_size_scaling_produces_nine_runs():
+    specs = _series_for_profile(_size_scaling_args(), _size_scaling_config())
+    assert len(specs) == 9
+    geometries = [(s["geometry_label"], s["tuple_count"]) for s in specs]
+    expected = [
+        ("fanout_f2_l16", 1000000),
+        ("fanout_f2_l16", 3000000),
+        ("fanout_f2_l16", 5000000),
+        ("fanout_f2_l128", 1000000),
+        ("fanout_f2_l128", 3000000),
+        ("fanout_f2_l128", 5000000),
+        ("fanout_f32_l1024", 1000000),
+        ("fanout_f32_l1024", 3000000),
+        ("fanout_f32_l1024", 5000000),
+    ]
+    assert geometries == expected
+    for spec in specs:
+        assert spec["bad_leaf_count"] == 75
+        assert spec["corrupted_tuple_count"] == 300
+
+
+def test_size_scaling_rejects_manual_overrides():
+    config = _size_scaling_config()
+    with pytest.raises(ValueError, match="do not pass --tuple-count"):
+        _series_for_profile(_size_scaling_args(tuple_count=1000), config)
+    with pytest.raises(ValueError, match="do not override geometry"):
+        _series_for_profile(_size_scaling_args(fanout=4), config)
+    with pytest.raises(ValueError, match="do not override geometry"):
+        _series_for_profile(_size_scaling_args(leaves_per_partition=256), config)
+    with pytest.raises(ValueError, match="do not override geometry"):
+        _series_for_profile(_size_scaling_args(partitions=100), config)
+    with pytest.raises(ValueError, match="uses fixed --bad-leaf-count=75"):
+        _series_for_profile(_size_scaling_args(bad_leaf_count=50), config)
+
+
+def test_size_scaling_rejects_invalid_corruption_mode():
+    from run_merkle_recovery_benchmark import main
+    import sys
+    from unittest.mock import patch
+
+    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "size-scaling-k75-c300", "--corruption-mode", "mixed"]
+    with patch.object(sys, 'argv', test_args):
+        with pytest.raises(ValueError, match="size-scaling-k75-c300 requires --corruption-mode paper-update-only"):
+            main()

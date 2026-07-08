@@ -63,7 +63,7 @@ def _find_spurious_key_for_leaf(
         candidates = [c for c in candidates if c not in used_keys]
         if not candidates:
             continue
-            
+
         rows = execute(
             conn,
             """
@@ -78,7 +78,7 @@ def _find_spurious_key_for_leaf(
             candidate = int(rows[0]["candidate"])
             used_keys.add(candidate)
             return candidate
-            
+
     raise RuntimeError(
         f"could not find a spurious key mapping to leaf {target_leaf_id} "
         f"after {max_attempts} attempts"
@@ -96,6 +96,7 @@ def choose_corruption_manifest(
     corrupted_tuple_count: int,
     seed: int,
     corruption_mode: str = "paper-update-only",
+    forced_bad_leaves: list[int] | None = None,
 ) -> dict[str, Any]:
     """Select *bad_leaf_count* non-empty leaves and pick row keys to corrupt.
 
@@ -114,14 +115,33 @@ def choose_corruption_manifest(
         ORDER BY 1
         """,
     )
-    eligible = [int(r["leaf_id"]) for r in occ if int(r["tuple_count"]) > 0]
-    if len(eligible) < bad_leaf_count:
-        raise RuntimeError(
-            f"only {len(eligible)} non-empty leaves available, need {bad_leaf_count}"
-        )
-    leaves = sorted(rng.sample(eligible, bad_leaf_count))
     base = corrupted_tuple_count // bad_leaf_count
     rem = corrupted_tuple_count % bad_leaf_count
+    min_required_rows = base + (1 if rem > 0 else 0)
+
+    occ_map = {int(r["leaf_id"]): int(r["tuple_count"]) for r in occ}
+    eligible = [leaf_id for leaf_id, count in occ_map.items() if count >= min_required_rows]
+
+    if forced_bad_leaves is not None:
+        leaves = sorted(int(v) for v in forced_bad_leaves)
+        missing = [
+            leaf for leaf in leaves
+            if leaf not in occ_map or occ_map[leaf] < min_required_rows
+        ]
+        if missing:
+            raise RuntimeError(
+                f"forced bad leaves are not eligible: {missing[:10]} "
+                f"need >= {min_required_rows} rows per leaf"
+            )
+    else:
+        if len(eligible) < bad_leaf_count:
+            raise RuntimeError(
+                f"only {len(eligible)} leaves have >= {min_required_rows} rows, need {bad_leaf_count}"
+            )
+        leaves = sorted(rng.sample(eligible, bad_leaf_count))
+
+    selected_leaf_capacities = {leaf_id: occ_map[leaf_id] for leaf_id in leaves}
+    selected_bad_leaf_row_capacity = sum(selected_leaf_capacities.values())
     entries: list[dict[str, Any]] = []
 
     # Track all synthetic keys globally to prevent duplicates.
@@ -185,6 +205,36 @@ def choose_corruption_manifest(
                 }
             )
 
+    import hashlib
+    import json
+
+    # Blocker 4: Add fair-comparison provenance
+    selection_dict = {
+        "tuple_count": tuple_count,
+        "partitions": partitions,
+        "leaves_per_partition": leaves_per_partition,
+        "bad_leaf_count": bad_leaf_count,
+        "corrupted_tuple_count": corrupted_tuple_count,
+        "seed": seed,
+        "bad_leaves": leaves,
+        "corruptions": [{"ycsb_key": e["ycsb_key"], "op": e["op"]} for e in entries],
+    }
+    selection_json = json.dumps(selection_dict, sort_keys=True)
+    corruption_selection_sha256 = hashlib.sha256(selection_json.encode('utf-8')).hexdigest()
+
+    # bad_leaf_selection_sha256: excludes tuple_count and corruptions keys
+    leaf_selection_dict = {
+        "profile_label": experiment,
+        "partitions": partitions,
+        "leaves_per_partition": leaves_per_partition,
+        "fanout": fanout,
+        "bad_leaf_count": bad_leaf_count,
+        "bad_leaves": leaves,
+        "seed": seed,
+    }
+    leaf_selection_json = json.dumps(leaf_selection_dict, sort_keys=True)
+    bad_leaf_selection_sha256 = hashlib.sha256(leaf_selection_json.encode('utf-8')).hexdigest()
+
     return {
         "experiment": experiment,
         "corruption_mode": corruption_mode,
@@ -195,6 +245,12 @@ def choose_corruption_manifest(
         "seed": seed,
         "bad_leaves": leaves,
         "corruptions": entries,
+        "corrupted_tuple_count": corrupted_tuple_count,
+        "required_rows_per_bad_leaf": min_required_rows,
+        "selected_bad_leaf_row_capacity": selected_bad_leaf_row_capacity,
+        "selected_leaf_capacities": selected_leaf_capacities,
+        "corruption_selection_sha256": corruption_selection_sha256,
+        "bad_leaf_selection_sha256": bad_leaf_selection_sha256,
     }
 
 

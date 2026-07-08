@@ -213,6 +213,10 @@ def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str
     node_count = geo.get("nodes_per_partition")
     if node_count is None:
         node_count = nodes_per_partition(geo["leaves_per_partition"], geo["fanout"])
+    # tree_depth() returns the count of nodes on a root-to-leaf path (i.e. tree_levels).
+    # tree_edges = tree_levels - 1.
+    t_levels = tree_depth(geo["leaves_per_partition"], geo["fanout"])
+    phys_per_leaf = tuple_count / max(1, leaf_count)
     row = {
         **sizes,
         "profile_label": profile_label,
@@ -221,12 +225,19 @@ def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str
         "leaves_per_partition": geo["leaves_per_partition"],
         "fanout": geo["fanout"],
         "total_leaf_count": leaf_count,
-        "tree_depth": tree_depth(geo["leaves_per_partition"], geo["fanout"]),
+        # unambiguous tree-shape fields
+        "tree_levels": t_levels,
+        "tree_edges": t_levels - 1,
+        "tree_depth": t_levels,               # kept for backward compat of downstream tools
         "nodes_per_partition": node_count,
         "total_merkle_nodes": geo["partitions"] * node_count,
+        "total_logical_tree_nodes": geo["partitions"] * node_count,
+        "physical_rows_per_leaf_expected": round(phys_per_leaf, 2),
+        "expected_candidate_rows_per_bad_leaf": round(2 * phys_per_leaf, 2),
         **occupancy_stats(occ),
     }
     return row
+
 
 
 def _run_deep_diagnostics(
@@ -349,6 +360,7 @@ def repair_merkle(
     profile_label: str = "",
     profiling_mode: str = "off",
     profiler: ProfileCollector | None = None,
+    benchmark_profile: str = "",
 ) -> Metrics:
     cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
     run_id = recovery_run_id(manifest, repetition, profile_label)
@@ -501,6 +513,7 @@ def repair_merkle(
             "bad_leaf_count": len(bad_leaves),
             "bad_partition_count": counters.get("bad_partition_count", 0),
             "tree_nodes_visited": counters.get("tree_nodes_visited", 0),
+            "selected_bad_leaf_row_capacity": manifest.get("selected_bad_leaf_row_capacity", 0),
             **leaf_stats,
             "targeted_confirmation_root_batches": post_repair_counters.get(
                 "targeted_confirmation_partition_root_batches", 0
@@ -517,6 +530,28 @@ def repair_merkle(
         add_warning(m, "candidate rows exceed sparse threshold")
     if recovery_full_heap_scans != 0:
         add_warning(m, "recovery performed heap sequential scan")
+
+    if benchmark_profile in ("fanout-width-sweep", "size-scaling-k75-c300"):
+        expected_bad_leaf_count = 75 if benchmark_profile == "size-scaling-k75-c300" else 20
+        if m.bad_leaf_count != expected_bad_leaf_count:
+            raise RuntimeError(f"{m.run_id}: bad_leaf_count={m.bad_leaf_count}, expected {expected_bad_leaf_count}")
+        if m.corrupted_tuple_count != 300:
+            raise RuntimeError(f"{m.run_id}: corrupted_tuple_count={m.corrupted_tuple_count}, expected 300")
+        if len(bad_leaves) != expected_bad_leaf_count:
+            raise RuntimeError(f"{m.run_id}: detected_bad_leaves={len(bad_leaves)}, expected {expected_bad_leaf_count}")
+        expected_bad_leaves = sorted(int(v) for v in manifest["bad_leaves"])
+        if bad_leaves != expected_bad_leaves:
+            raise RuntimeError(
+                f"{m.run_id}: detected leaves do not match manifest: "
+                f"expected={expected_bad_leaves}, actual={bad_leaves}"
+            )
+        total_repaired = rows_inserted + rows_updated + rows_deleted
+        if total_repaired != 300:
+            raise RuntimeError(f"{m.run_id}: total_rows_repaired={total_repaired}, expected 300")
+        if m.corruption_mode != "paper-update-only":
+            raise RuntimeError(f"{m.run_id}: corruption_mode={m.corruption_mode}, expected paper-update-only")
+        if recovery_full_heap_scans != 0:
+            raise RuntimeError(f"{m.run_id}: recovery_user_table_seq_scan_delta={recovery_full_heap_scans}, expected 0")
     if remaining_bad_leaves or repaired_leaf_mismatch:
         add_warning(m, "targeted post-repair confirmation failed")
     if counters.get("partition_root_batches") != 2:
@@ -556,6 +591,7 @@ def run_one_manifest(
     *,
     profile_label: str = "",
     profiling_mode: str = "off",
+    benchmark_profile: str = "",
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
     cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
@@ -622,6 +658,7 @@ def run_one_manifest(
             profile_label=profile_label,
             profiling_mode=profiling_mode,
             profiler=profiler,
+            benchmark_profile=benchmark_profile,
         )
         if profiler is not None:
             profile_reasons = validate_profile_invariants(
@@ -629,6 +666,7 @@ def run_one_manifest(
                 operations=profiler.rows(),
                 bad_leaf_count=metric.bad_leaf_count,
                 run_id=metric.run_id,
+                tolerance_ms=15.0,
             )
             if profile_reasons:
                 metric.valid = False
@@ -746,7 +784,9 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         for label, sizes in campaigns:
             if args.geometry_label and label != args.geometry_label:
                 continue
-            geo = geometry_matrix.get(label, {})
+            geo = geometry_matrix.get(label)
+            if not geo:
+                raise RuntimeError(f"canonical geometry label '{label}' missing from recovery_geometry_matrix.json")
             if override_lpp is not None:
                 geo["leaves_per_partition"] = override_lpp
             if override_fanout is not None:
@@ -772,6 +812,141 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                     )
                 )
         return series
+
+    if args.profile == "fanout-width-sweep":
+        # fanout-width-sweep: fixed workload, no overrides permitted.
+        # All parameters are encoded in the geometry matrix labels.
+        # The only allowed user selection is --geometry-label <known label>.
+        _SWEEP_FIXED_PARAMS = (
+            "tuple_count", "partitions", "leaves_per_partition", "fanout", "bad_leaf_count",
+        )
+        _rejected = [
+            p for p in _SWEEP_FIXED_PARAMS
+            if getattr(args, p, None) is not None
+        ]
+        if _rejected:
+            raise ValueError(
+                "fanout-width-sweep uses fixed geometry labels; "
+                f"do not override: {', '.join('--' + p.replace('_', '-') for p in _rejected)}"
+            )
+
+        # Canonical 19-geometry list — 6 leaf-count tiers (L=16,64,128,256,512,1024).
+        # Within each tier L is fixed (bucket density fixed); only F varies.
+        # Fanouts covered: 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024.
+        #
+        # Tier  L    rows/leaf@5M  F values
+        # ----  ---  -----------   --------
+        # L=16  16   1,563         2, 4, 16
+        # L=64  64     391         2, 4, 8, 64
+        # L=128 128    195         2, 128
+        # L=256 256     98         2, 4, 16, 256
+        # L=512 512     49         2, 512
+        # L=1024 1024   24         2, 4, 32, 1024
+        SWEEP_CANONICAL_LABELS = [
+            # L=16
+            "fanout_f2_l16",
+            "fanout_f4_l16",
+            "fanout_f16_l16",
+            # L=64
+            "fanout_f2_l64",
+            "fanout_f4_l64",
+            "fanout_f8_l64",
+            "fanout_f64_l64",
+            # L=128
+            "fanout_f2_l128",
+            "fanout_f128_l128",
+            # L=256
+            "fanout_f2_l256",
+            "fanout_f4_l256",
+            "fanout_f16_l256",
+            "fanout_f256_l256",
+            # L=512
+            "fanout_f2_l512",
+            "fanout_f512_l512",
+            # L=1024
+            "fanout_f2_l1024",
+            "fanout_f4_l1024",
+            "fanout_f32_l1024",
+            "fanout_f1024_l1024",
+        ]
+
+        # Validate --geometry-label before touching the database
+        if args.geometry_label and args.geometry_label not in SWEEP_CANONICAL_LABELS:
+            raise ValueError(
+                f"unknown fanout-width-sweep geometry label '{args.geometry_label}'; "
+                f"valid labels: {', '.join(SWEEP_CANONICAL_LABELS)}"
+            )
+
+        sweep_series: list[dict[str, Any]] = []
+        for label in SWEEP_CANONICAL_LABELS:
+            if args.geometry_label and label != args.geometry_label:
+                continue
+            geo = geometry_matrix.get(label)
+            if geo is None:
+                raise RuntimeError(
+                    f"geometry label '{label}' not found in recovery_geometry_matrix.json"
+                )
+            partitions = int(geo["partitions"])
+            lpp = int(geo["leaves_per_partition"])
+            fanout = int(geo["fanout"])
+            sweep_series.append(
+                case(
+                    experiment=args.profile,
+                    tuple_count=5_000_000,
+                    partitions=partitions,
+                    leaves_per_partition=lpp,
+                    fanout=fanout,
+                    bad_leaf_count=20,
+                    corrupted_tuple_count=300,
+                    geometry_label=label,
+                )
+            )
+        return sweep_series
+
+    if args.profile == "size-scaling-k75-c300":
+        if args.tuple_count is not None:
+            raise ValueError("size-scaling-k75-c300 owns tuple counts 1M,3M,5M; do not pass --tuple-count")
+        if args.partitions is not None or args.leaves_per_partition is not None or args.fanout is not None:
+            raise ValueError("size-scaling-k75-c300 uses fixed canonical geometries; do not override geometry")
+        if args.bad_leaf_count is not None:
+            raise ValueError("size-scaling-k75-c300 uses fixed --bad-leaf-count=75")
+
+        labels = [
+            "fanout_f2_l16",
+            "fanout_f2_l128",
+            "fanout_f32_l1024",
+        ]
+
+        if args.geometry_label and args.geometry_label not in labels:
+            raise ValueError(
+                f"unknown size-scaling-k75-c300 geometry label '{args.geometry_label}'; "
+                f"valid labels: {', '.join(labels)}"
+            )
+
+        series = []
+        for label in labels:
+            if args.geometry_label and label != args.geometry_label:
+                continue
+            geo = geometry_matrix.get(label)
+            if geo is None:
+                raise RuntimeError(f"geometry label '{label}' missing from recovery_geometry_matrix.json")
+
+            for n in [1_000_000, 3_000_000, 5_000_000]:
+                series.append(
+                    case(
+                        experiment=args.profile,
+                        tuple_count=n,
+                        partitions=int(geo["partitions"]),
+                        leaves_per_partition=int(geo["leaves_per_partition"]),
+                        fanout=int(geo["fanout"]),
+                        bad_leaf_count=75,
+                        corrupted_tuple_count=300,
+                        geometry_label=label,
+                    )
+                )
+        return series
+
+
 
     series = []
     if args.experiment in (None, "figure12"):
@@ -943,8 +1118,16 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 total_runs=total_runs,
             )
             d = corrupted_tuple_count if args.profile == "recovery-scaling-diagnosis" else (
-                300 if args.profile in ("paper", "preflight") else bad_leaf_count
+                300 if args.profile in ("paper", "preflight", "fanout-width-sweep", "size-scaling-k75-c300") else bad_leaf_count
             )
+
+            if args.profile == "size-scaling-k75-c300":
+                forced_key = geometry_label
+                forced_map = progress_state.setdefault("forced_bad_leaves_by_geometry", {})
+                forced_bad_leaves = forced_map.get(forced_key)
+            else:
+                forced_bad_leaves = None
+
             manifest = choose_corruption_manifest(
                 conn,
                 experiment,
@@ -956,9 +1139,83 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 d,
                 args.seed,
                 corruption_mode=args.corruption_mode,
+                forced_bad_leaves=forced_bad_leaves,
             )
+            d = manifest["corrupted_tuple_count"]
             validate_manifest_leaf_mapping(conn, manifest)
+
+            if args.profile == "size-scaling-k75-c300":
+                if forced_key not in forced_map:
+                    forced_map[forced_key] = list(manifest["bad_leaves"])
+                elif list(manifest["bad_leaves"]) != list(forced_map[forced_key]):
+                    raise RuntimeError(
+                        f"bad leaf mismatch for {geometry_label}: "
+                        f"expected={forced_map[forced_key]}, actual={manifest['bad_leaves']}"
+                    )
+
+            # Capacity validation & Provenance validation
+            if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300"):
+                selected_capacity = manifest["selected_bad_leaf_row_capacity"]
+                if selected_capacity < d:
+                    raise RuntimeError(
+                        f"capacity check failed for {geometry_label}: "
+                        f"selected {bad_leaf_count} bad leaves contain only {selected_capacity} rows "
+                        f"but C={d} corruptions are required. "
+                        f"Reduce C or increase L."
+                    )
+                emit_progress(
+                    result_dir,
+                    event="capacity_check_passed",
+                    profile_label=geometry_label,
+                    selected_bad_leaf_count=bad_leaf_count,
+                    selected_bad_leaf_row_capacity=selected_capacity,
+                    required_corrupted_tuple_count=d,
+                    corruption_selection_sha256=manifest["corruption_selection_sha256"],
+                )
+
+                # Assert provenance
+                if args.profile == "size-scaling-k75-c300":
+                    tier_key = f"tier_{geometry_label}"
+                    expected_sha = progress_state.setdefault("provenance_map", {}).get(tier_key)
+                    actual_sha = manifest["bad_leaf_selection_sha256"]
+                    if expected_sha is None:
+                        progress_state["provenance_map"][tier_key] = actual_sha
+                    elif expected_sha != actual_sha:
+                        raise RuntimeError(
+                            f"provenance mismatch in tier {tier_key}: "
+                            f"expected {expected_sha} but got {actual_sha} for {geometry_label}"
+                        )
+                else:
+                    tier_key = f"tier_l{leaves_per_partition}"
+                    expected_sha = progress_state.setdefault("provenance_map", {}).get(tier_key)
+                    actual_sha = manifest["corruption_selection_sha256"]
+                    if expected_sha is None:
+                        progress_state["provenance_map"][tier_key] = actual_sha
+                    elif expected_sha != actual_sha:
+                        raise RuntimeError(
+                            f"provenance mismatch in tier {tier_key}: "
+                            f"expected {expected_sha} but got {actual_sha} for {geometry_label}"
+                        )
+
+                if "provenance_rows" not in progress_state:
+                    progress_state["provenance_rows"] = []
+                progress_state["provenance_rows"].append({
+                    "profile_label": geometry_label,
+                    "tuple_count": n,
+                    "partitions": partitions,
+                    "leaves_per_partition": leaves_per_partition,
+                    "fanout": fanout,
+                    "bad_leaf_count": bad_leaf_count,
+                    "corrupted_tuple_count": d,
+                    "required_rows_per_bad_leaf": manifest["required_rows_per_bad_leaf"],
+                    "selected_bad_leaf_row_capacity": selected_capacity,
+                    "selected_leaf_capacities_json": json.dumps(manifest["selected_leaf_capacities"]),
+                    "corruption_selection_sha256": manifest["corruption_selection_sha256"],
+                    "bad_leaf_selection_sha256": manifest["bad_leaf_selection_sha256"],
+                })
+
             manifests.append(manifest)
+
             all_metrics.extend(
                 run_one_manifest(
                     conn,
@@ -973,15 +1230,39 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     progress_state,
                     profile_label=geometry_label,
                     profiling_mode=args.profiling,
+                    benchmark_profile=args.profile,
                 )
             )
 
     # ── write artifacts ───────────────────────────────────────────────────────
     (result_dir / "corruption_manifest.json").write_text(json.dumps(manifests, indent=2) + "\n")
 
+    if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300"):
+        write_csv(
+            result_dir / "fanout_provenance.csv",
+            progress_state.get("provenance_rows", []),
+            [
+                "profile_label",
+                "tuple_count",
+                "partitions",
+                "leaves_per_partition",
+                "fanout",
+                "bad_leaf_count",
+                "corrupted_tuple_count",
+                "required_rows_per_bad_leaf",
+                "selected_bad_leaf_row_capacity",
+                "selected_leaf_capacities_json",
+                "corruption_selection_sha256",
+                "bad_leaf_selection_sha256",
+            ],
+        )
+
     write_csv(result_dir / "dataset_sizes.csv", dataset_rows, [
         "profile_label", "tuple_count", "partitions", "leaves_per_partition", "fanout",
-        "total_leaf_count", "tree_depth", "nodes_per_partition", "total_merkle_nodes",
+        "total_leaf_count",
+        "tree_levels", "tree_edges", "tree_depth",
+        "nodes_per_partition", "total_merkle_nodes", "total_logical_tree_nodes",
+        "physical_rows_per_leaf_expected", "expected_candidate_rows_per_bad_leaf",
         "base_table_bytes", "primary_index_bytes", "merkle_index_bytes",
         "leaf_lookup_index_bytes",
         "total_schema_bytes",
@@ -1309,7 +1590,8 @@ def main(argv: list[str] | None = None) -> int:
     global RESULT_ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsn", default="host=127.0.0.1 port=5432 dbname=postgres user=neel")
-    parser.add_argument("--profile", choices=["smoke", "preflight", "paper", "recovery-scaling-diagnosis"], default="smoke")
+    parser.add_argument("--profile", choices=["smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300"], default="smoke")
+
     parser.add_argument("--experiment", choices=["figure12", "figure13"])
     parser.add_argument("--tuple-count", type=int, dest="tuple_count")
     parser.add_argument("--partitions", type=int)
@@ -1333,6 +1615,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Corruption injection mode. Use paper-update-only for paper-profile runs.",
     )
     args = parser.parse_args(argv)
+
+    if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300") and args.corruption_mode != "paper-update-only":
+        raise ValueError(f"{args.profile} requires --corruption-mode paper-update-only")
 
     if args.result_dir:
         RESULT_ROOT = Path(args.result_dir)

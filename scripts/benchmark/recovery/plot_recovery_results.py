@@ -176,7 +176,10 @@ def plot_all(result_dir: Path):
     plots = result_dir / "plots"
     plots.mkdir(exist_ok=True)
 
-    fig12 = [r for r in rows if r.get("experiment") == "figure12"]
+    fig12 = [
+        r for r in rows
+        if r.get("experiment") in ("figure12", "recovery-scaling-diagnosis", "size-scaling-k75-c300")
+    ]
     svg_bar_chart(
         plots / "figure12_paper_total.svg",
         "Figure 12-style paper total",
@@ -392,6 +395,114 @@ def plot_all(result_dir: Path):
         "median ms",
         phase_points,
     )
+
+    # ── fanout-width-sweep plots (only generated when sweep data present) ─────
+    sweep_rows = [r for r in rows if r.get("experiment") == "fanout-width-sweep"]
+    if sweep_rows:
+        sweep_label_set = {r.get("profile_label") for r in sweep_rows}
+
+        # Per leaf-count tier: plot restore_repair_ms and tree_localisation_ms vs fanout.
+        # Each dict maps a human title suffix to the set of geometry labels in that tier.
+        # 6 leaf-count tiers, each with its canonical fanout-sweep labels
+        leaf_tiers = {
+            "l16":   {"fanout_f2_l16",   "fanout_f4_l16",   "fanout_f16_l16"},
+            "l64":   {"fanout_f2_l64",   "fanout_f4_l64",   "fanout_f8_l64", "fanout_f64_l64"},
+            "l128":  {"fanout_f2_l128",  "fanout_f128_l128"},
+            "l256":  {"fanout_f2_l256",  "fanout_f4_l256",  "fanout_f16_l256", "fanout_f256_l256"},
+            "l512":  {"fanout_f2_l512",  "fanout_f512_l512"},
+            "l1024": {"fanout_f2_l1024", "fanout_f4_l1024", "fanout_f32_l1024", "fanout_f1024_l1024"},
+        }
+        leaf_title = {
+            "l16":   "L=16  (1,563 rows/leaf @5M)",
+            "l64":   "L=64  (391 rows/leaf @5M)",
+            "l128":  "L=128 (195 rows/leaf @5M)",
+            "l256":  "L=256 (98 rows/leaf @5M)",
+            "l512":  "L=512 (49 rows/leaf @5M)",
+            "l1024": "L=1024 (24 rows/leaf @5M)",
+        }
+
+        for tier_key, tier_labels in leaf_tiers.items():
+            tier_rows = [r for r in sweep_rows if r.get("profile_label") in tier_labels]
+            if not tier_rows:
+                continue
+            title_suffix = leaf_title[tier_key]
+            svg_line_chart(
+                plots / f"fanout_recovery_time_{tier_key}.svg",
+                f"Recovery time vs fanout — {title_suffix}",
+                "fanout",
+                "median restore_repair_ms",
+                aggregate(tier_rows, "fanout", "restore_repair_ms", "leaves_per_partition"),
+            )
+            svg_line_chart(
+                plots / f"fanout_localisation_time_{tier_key}.svg",
+                f"Localisation time vs fanout — {title_suffix}",
+                "fanout",
+                "median tree_localisation_ms",
+                aggregate(
+                    [r for r in rows if r.get("profile_label") in tier_labels],
+                    "fanout", "tree_localisation_ms", "leaves_per_partition",
+                ),
+            )
+
+        # Merkle index size vs fanout across all sweep geometries
+        index_points = []
+        for row in dataset_rows:
+            if row.get("profile_label") in sweep_label_set:
+                v = as_float(row.get("merkle_index_bytes"))
+                if v is not None:
+                    index_points.append({
+                        "x": str(row.get("fanout", "")),
+                        "series": str(row.get("leaves_per_partition", "")),
+                        "median": v / (1024 * 1024),
+                    })
+        if index_points:
+            svg_line_chart(
+                plots / "fanout_merkle_index_size_mib.svg",
+                "Merkle index size vs fanout (MiB)",
+                "fanout",
+                "index size MiB",
+                index_points,
+            )
+
+        # Backend profile plots: child-hash calls/nodes + tree-path nodes vs fanout
+        if backend_rows:
+            sweep_backend = [r for r in backend_rows if r.get("profile_label") in sweep_label_set]
+            if sweep_backend:
+                from collections import defaultdict as _defaultdict
+
+                def _backend_line(metric_field: str, title: str, y_label: str, filename: str) -> None:
+                    grouped: dict[tuple[str, str], list[float]] = _defaultdict(list)
+                    for row in sweep_backend:
+                        v = as_float(row.get(metric_field))
+                        if v is not None:
+                            grouped[(str(row.get("fanout", "")), str(row.get("leaves_per_partition", "")))].append(v)
+                    agg = [
+                        {"x": x, "series": s, "median": median(vals)}
+                        for (x, s), vals in grouped.items()
+                    ]
+                    if agg:
+                        svg_line_chart(plots / filename, title, "fanout", y_label, agg)
+
+                _backend_line(
+                    "child_hash_helper_calls",
+                    "Child-hash helper calls vs fanout",
+                    "median call count",
+                    "fanout_child_hash_calls.svg",
+                )
+                _backend_line(
+                    "child_hash_nodes_returned",
+                    "Child-hash nodes returned vs fanout",
+                    "median node count",
+                    "fanout_child_hash_nodes_returned.svg",
+                )
+                _backend_line(
+                    "tree_path_nodes_touched",
+                    "Tree-path nodes touched vs fanout",
+                    "median node count",
+                    "fanout_tree_path_nodes_touched.svg",
+                )
+
+
 
 
 if __name__ == "__main__":
