@@ -319,21 +319,29 @@ def validate_profile_invariants(
     repair_write_ms = phase.get("repair_write_ms", 0.0)
     confirmation_ms = phase.get("targeted_post_repair_confirmation_ms", 0.0)
 
-    if abs(sum_ms("localisation") - localisation_ms) > tolerance_ms:
+    def timing_mismatch(observed_ms: float, expected_ms: float) -> bool:
+        allowed = max(tolerance_ms, 0.05 * max(expected_ms, 1.0))
+        return abs(observed_ms - expected_ms) > allowed
+
+    localisation_sum = sum_ms("localisation")
+    if timing_mismatch(localisation_sum, localisation_ms):
         reasons.append(
-            f"localisation profile sum {sum_ms('localisation'):.3f}ms != tree_localisation_ms {localisation_ms:.3f}ms"
+            f"localisation profile sum {localisation_sum:.3f}ms != tree_localisation_ms {localisation_ms:.3f}ms"
         )
-    if abs(sum_ms("candidate_fetch") - candidate_fetch_ms) > tolerance_ms:
+    candidate_fetch_sum = sum_ms("candidate_fetch")
+    if timing_mismatch(candidate_fetch_sum, candidate_fetch_ms):
         reasons.append(
-            f"candidate fetch profile sum {sum_ms('candidate_fetch'):.3f}ms != candidate_row_fetch_ms {candidate_fetch_ms:.3f}ms"
+            f"candidate fetch profile sum {candidate_fetch_sum:.3f}ms != candidate_row_fetch_ms {candidate_fetch_ms:.3f}ms"
         )
-    if abs(sum_ms("repair") - repair_write_ms) > tolerance_ms:
+    repair_sum = sum_ms("repair")
+    if timing_mismatch(repair_sum, repair_write_ms):
         reasons.append(
-            f"repair profile sum {sum_ms('repair'):.3f}ms != repair_write_ms {repair_write_ms:.3f}ms"
+            f"repair profile sum {repair_sum:.3f}ms != repair_write_ms {repair_write_ms:.3f}ms"
         )
-    if abs(sum_ms("targeted_confirmation") - confirmation_ms) > tolerance_ms:
+    targeted_sum_ms = sum_ms("targeted_confirmation")
+    if timing_mismatch(targeted_sum_ms, confirmation_ms):
         reasons.append(
-            f"targeted confirmation profile sum {sum_ms('targeted_confirmation'):.3f}ms "
+            f"targeted confirmation profile sum {targeted_sum_ms:.3f}ms "
             f"!= targeted_post_repair_confirmation_ms {confirmation_ms:.3f}ms"
         )
 

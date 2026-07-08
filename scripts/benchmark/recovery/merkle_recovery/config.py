@@ -95,6 +95,44 @@ def profile_config(profile: str) -> BenchmarkConfig:
             repetitions=5,
             extra={"campaign": "recovery_scaling_diagnosis"},
         )
+    if profile == "fanout-width-sweep":
+        return BenchmarkConfig(
+            fig12_sizes=[5_000_000],
+            fig13_sizes=[],
+            fig13_k=[],
+            repetitions=5,
+            extra={
+                "campaign": "fanout_width_sweep",
+                "description": (
+                    "Isolates fanout effect on recovery time. "
+                    "19 geometries across 6 leaf-count tiers (L=16,64,128,256,512,1024). "
+                    "Within each tier bucket density is fixed; only tree height and "
+                    "child-hash payload change as fanout increases. "
+                    "Fanouts covered: F=2,4,8,16,32,64,128,256,512,1024. "
+                    "N=5M, P=200, K=20 bad leaves, C=300 update-only corruptions, "
+                    "profiling=light, 5 repetitions. "
+                    "K=20 ensures perfectly uniform distribution (15 corruptions/leaf). "
+                    "Corruption capacity is validated before corruption and recovery."
+                ),
+            },
+        )
+
+    if profile == "size-scaling-k75-c300":
+        return BenchmarkConfig(
+            fig12_sizes=[1_000_000, 3_000_000, 5_000_000],
+            fig13_sizes=[],
+            fig13_k=[],
+            repetitions=5,
+            extra={
+                "campaign": "size_scaling_k75_c300",
+                "description": (
+                    "Compares N=1M,3M,5M for three fixed geometries: "
+                    "F=2,L=16; F=2,L=128; F=32,L=1024. "
+                    "Uses K=75 bad leaves and C=300 update-only corruptions."
+                ),
+            },
+        )
+
     if profile == "preflight":
         return BenchmarkConfig(
             fig12_sizes=[1_000_000],
