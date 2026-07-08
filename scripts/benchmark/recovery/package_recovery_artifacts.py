@@ -19,6 +19,7 @@ ALLOWED = {
     "progress.jsonl",
     "source_snapshot.json",
     "dataset_sizes.csv",
+    "fanout_provenance.csv",
     "runs.csv",
     "phase_timings.csv",
     "timing_contract.csv",

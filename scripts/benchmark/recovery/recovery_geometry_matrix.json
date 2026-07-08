@@ -9,14 +9,109 @@
     "leaves_per_partition": 128,
     "fanout": 2
   },
+  "sensitivity_l64": {
+    "partitions": 200,
+    "leaves_per_partition": 64,
+    "fanout": 2
+  },
+  "fanout_f2_l16": {
+    "partitions": 200,
+    "leaves_per_partition": 16,
+    "fanout": 2
+  },
+  "fanout_f4_l16": {
+    "partitions": 200,
+    "leaves_per_partition": 16,
+    "fanout": 4
+  },
+  "fanout_f16_l16": {
+    "partitions": 200,
+    "leaves_per_partition": 16,
+    "fanout": 16
+  },
+  "fanout_f2_l128": {
+    "partitions": 200,
+    "leaves_per_partition": 128,
+    "fanout": 2
+  },
+  "fanout_f128_l128": {
+    "partitions": 200,
+    "leaves_per_partition": 128,
+    "fanout": 128
+  },
+  "fanout_f2_l256": {
+    "partitions": 200,
+    "leaves_per_partition": 256,
+    "fanout": 2
+  },
+  "fanout_f4_l256": {
+    "partitions": 200,
+    "leaves_per_partition": 256,
+    "fanout": 4
+  },
+  "fanout_f16_l256": {
+    "partitions": 200,
+    "leaves_per_partition": 256,
+    "fanout": 16
+  },
+  "fanout_f256_l256": {
+    "partitions": 200,
+    "leaves_per_partition": 256,
+    "fanout": 256
+  },
+  "fanout_f2_l512": {
+    "partitions": 200,
+    "leaves_per_partition": 512,
+    "fanout": 2
+  },
+  "fanout_f512_l512": {
+    "partitions": 200,
+    "leaves_per_partition": 512,
+    "fanout": 512
+  },
+  "fanout_f2_l1024": {
+    "partitions": 200,
+    "leaves_per_partition": 1024,
+    "fanout": 2
+  },
+  "fanout_f4_l1024": {
+    "partitions": 200,
+    "leaves_per_partition": 1024,
+    "fanout": 4
+  },
+  "fanout_f32_l1024": {
+    "partitions": 200,
+    "leaves_per_partition": 1024,
+    "fanout": 32
+  },
+  "fanout_f1024_l1024": {
+    "partitions": 200,
+    "leaves_per_partition": 1024,
+    "fanout": 1024
+  },
   "sensitivity_l32": {
     "partitions": 200,
     "leaves_per_partition": 32,
     "fanout": 2
   },
-  "sensitivity_l64": {
+  "fanout_f2_l64": {
     "partitions": 200,
     "leaves_per_partition": 64,
     "fanout": 2
+  },
+  "fanout_f4_l64": {
+    "partitions": 200,
+    "leaves_per_partition": 64,
+    "fanout": 4
+  },
+  "fanout_f8_l64": {
+    "partitions": 200,
+    "leaves_per_partition": 64,
+    "fanout": 8
+  },
+  "fanout_f64_l64": {
+    "partitions": 200,
+    "leaves_per_partition": 64,
+    "fanout": 64
   }
 }
