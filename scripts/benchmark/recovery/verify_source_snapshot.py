@@ -42,6 +42,8 @@ def is_selected(path: Path, repo_root: Path) -> bool:
     rel = path.relative_to(repo_root)
     if any(part in IGNORED_DIR_NAMES for part in rel.parts):
         return False
+    if "openssl" in rel.parts or "openssl_compat_libs" in rel.parts:
+        return False
     if path.name in IGNORED_FILE_NAMES:
         return False
     # Shared-library files (*.so, *.so.1, libfoo.so.1.2.3, etc.)
