@@ -380,11 +380,15 @@ progress "all source roots synced"
 
 if [[ -d "/usr/include/openssl" ]]; then
   progress "uploading local OpenSSL headers to remote include directory for compatibility"
-  remote_ssh_cmd_stdinless "mkdir -p '$REMOTE_SRC_DIR/src/include/openssl'"
-  rsync_remote "/usr/include/openssl/" "$SSH_TARGET:$REMOTE_SRC_DIR/src/include/openssl/"
+  local_tmp_headers="/tmp/openssl_compat_headers_$$"
+  mkdir -p "$local_tmp_headers"
+  cp -rL /usr/include/openssl/* "$local_tmp_headers/"
   if [[ -d "/usr/include/x86_64-linux-gnu/openssl" ]]; then
-    rsync_remote "/usr/include/x86_64-linux-gnu/openssl/" "$SSH_TARGET:$REMOTE_SRC_DIR/src/include/openssl/"
+    cp -rL /usr/include/x86_64-linux-gnu/openssl/* "$local_tmp_headers/"
   fi
+  remote_ssh_cmd_stdinless "mkdir -p '$REMOTE_SRC_DIR/src/include/openssl'"
+  rsync_remote "$local_tmp_headers/" "$SSH_TARGET:$REMOTE_SRC_DIR/src/include/openssl/"
+  rm -rf "$local_tmp_headers"
 fi
 
 # Upload manifest and verify remote source — LOCAL_RUNDIR_GUARD stays 1 until
