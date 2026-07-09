@@ -88,10 +88,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-case "$HOST" in
-  admin123|user4|utkarsh) ;;
-  *) echo "host must be one of: admin123, user4, utkarsh" >&2; exit 2 ;;
-esac
+if [[ -z "$HOST" ]]; then
+  echo "host must be specified" >&2
+  exit 2
+fi
 case "$PROFILE" in
   smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300) ;;
   *) echo "profile must be smoke, preflight, paper, recovery-scaling-diagnosis, fanout-width-sweep, size-scaling-k75-c300, or best-scaling-f32-l1024-k75-c300" >&2; exit 2 ;;
@@ -143,7 +143,7 @@ resolve_host_ip() {
     admin123) printf '%s\n' "10.129.148.236" ;;
     user4) printf '%s\n' "10.129.148.246" ;;
     utkarsh) printf '%s\n' "10.129.148.248" ;;
-    *) return 1 ;;
+    *) printf '%s\n' "$1" ;;
   esac
 }
 
