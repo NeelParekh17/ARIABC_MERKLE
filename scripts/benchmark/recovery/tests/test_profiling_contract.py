@@ -770,3 +770,66 @@ def test_size_scaling_rejects_invalid_corruption_mode():
     with patch.object(sys, 'argv', test_args):
         with pytest.raises(ValueError, match="size-scaling-k75-c300 requires --corruption-mode paper-update-only"):
             main()
+
+
+def _best_scaling_args(**overrides):
+    base = dict(
+        profile="best-scaling-f32-l1024-k75-c300",
+        leaves_per_partition=None,
+        fanout=None,
+        partitions=None,
+        tuple_count=None,
+        bad_leaf_count=None,
+        geometry_label=None,
+    )
+    base.update(overrides)
+    return Namespace(**base)
+
+
+def _best_scaling_config():
+    from merkle_recovery.config import profile_config
+    return profile_config("best-scaling-f32-l1024-k75-c300")
+
+
+def test_best_scaling_produces_seven_runs():
+    specs = _series_for_profile(_best_scaling_args(), _best_scaling_config())
+    assert len(specs) == 7
+    geometries = [(s["geometry_label"], s["tuple_count"]) for s in specs]
+    expected = [
+        ("fanout_f32_l1024", 1000000),
+        ("fanout_f32_l1024", 3000000),
+        ("fanout_f32_l1024", 5000000),
+        ("fanout_f32_l1024", 7000000),
+        ("fanout_f32_l1024", 10000000),
+        ("fanout_f32_l1024", 15000000),
+        ("fanout_f32_l1024", 20000000),
+    ]
+    assert geometries == expected
+    for spec in specs:
+        assert spec["bad_leaf_count"] == 75
+        assert spec["corrupted_tuple_count"] == 300
+
+
+def test_best_scaling_rejects_manual_overrides():
+    config = _best_scaling_config()
+    with pytest.raises(ValueError, match="do not override geometry"):
+        _series_for_profile(_best_scaling_args(fanout=4), config)
+    with pytest.raises(ValueError, match="do not override geometry"):
+        _series_for_profile(_best_scaling_args(leaves_per_partition=256), config)
+    with pytest.raises(ValueError, match="do not override geometry"):
+        _series_for_profile(_best_scaling_args(partitions=100), config)
+    with pytest.raises(ValueError, match="uses fixed --bad-leaf-count=75"):
+        _series_for_profile(_best_scaling_args(bad_leaf_count=50), config)
+    with pytest.raises(ValueError, match="only supports geometry_label=fanout_f32_l1024"):
+        _series_for_profile(_best_scaling_args(geometry_label="fanout_f2_l16"), config)
+
+
+def test_best_scaling_rejects_invalid_corruption_mode():
+    from run_merkle_recovery_benchmark import main
+    import sys
+    from unittest.mock import patch
+
+    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "best-scaling-f32-l1024-k75-c300", "--corruption-mode", "mixed"]
+    with patch.object(sys, 'argv', test_args):
+        with pytest.raises(ValueError, match="best-scaling-f32-l1024-k75-c300 requires --corruption-mode paper-update-only"):
+            main()

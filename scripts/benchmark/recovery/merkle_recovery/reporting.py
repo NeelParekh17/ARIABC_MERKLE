@@ -157,7 +157,7 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
             )
         if int(m.counters.get("planner_checks_passed", 0)) != 1:
             failures.append(f"{m.run_id}: planner checks did not pass")
-        if profile in ("recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300"):
+        if profile in ("recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
             if m.corruption_mode != "paper-update-only":
                 failures.append(f"{m.run_id}: diagnosis corruption_mode={m.corruption_mode}")
             if int(m.corrupted_tuple_count) != 300:
@@ -173,13 +173,13 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
                 failures.append(f"{m.run_id}: planner_checks_passed={m.counters.get('planner_checks_passed')}")
             if int(m.counters.get("schema_fidelity_ok", 0)) != 1:
                 failures.append(f"{m.run_id}: schema_fidelity_ok={m.counters.get('schema_fidelity_ok')}")
-        if profile in ("fanout-width-sweep", "size-scaling-k75-c300"):
-            expected_bad_leaf_count = 75 if profile == "size-scaling-k75-c300" else 20
+        if profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
+            expected_bad_leaf_count = 75 if profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") else 20
             if int(m.bad_leaf_count) != expected_bad_leaf_count:
                 failures.append(f"{m.run_id}: configured bad_leaf_count={m.bad_leaf_count}, expected {expected_bad_leaf_count}")
             if int(m.counters.get("bad_leaf_count", -1)) != expected_bad_leaf_count:
                 failures.append(f"{m.run_id}: detected bad_leaf_count={m.counters.get('bad_leaf_count')}, expected {expected_bad_leaf_count}")
-    if failures and profile in ("smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300"):
+    if failures and profile in ("smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
         shown = "\n".join(failures[:20])
         more = "" if len(failures) <= 20 else f"\n... {len(failures) - 20} more"
         raise RuntimeError(f"benchmark contract failed:\n{shown}{more}")

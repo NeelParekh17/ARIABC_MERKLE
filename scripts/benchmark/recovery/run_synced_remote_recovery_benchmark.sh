@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300 [options]
+Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300 [options]
 
 Options:
   --ssh-user USER
@@ -91,8 +91,8 @@ case "$HOST" in
   *) echo "host must be one of: admin123, user4, utkarsh" >&2; exit 2 ;;
 esac
 case "$PROFILE" in
-  smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300) ;;
-  *) echo "profile must be smoke, preflight, paper, recovery-scaling-diagnosis, fanout-width-sweep, or size-scaling-k75-c300" >&2; exit 2 ;;
+  smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300) ;;
+  *) echo "profile must be smoke, preflight, paper, recovery-scaling-diagnosis, fanout-width-sweep, size-scaling-k75-c300, or best-scaling-f32-l1024-k75-c300" >&2; exit 2 ;;
 esac
 case "$ARTIFACT_MODE" in
   summary|debug) ;;

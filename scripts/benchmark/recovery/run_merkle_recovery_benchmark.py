@@ -531,8 +531,8 @@ def repair_merkle(
     if recovery_full_heap_scans != 0:
         add_warning(m, "recovery performed heap sequential scan")
 
-    if benchmark_profile in ("fanout-width-sweep", "size-scaling-k75-c300"):
-        expected_bad_leaf_count = 75 if benchmark_profile == "size-scaling-k75-c300" else 20
+    if benchmark_profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
+        expected_bad_leaf_count = 75 if benchmark_profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") else 20
         if m.bad_leaf_count != expected_bad_leaf_count:
             raise RuntimeError(f"{m.run_id}: bad_leaf_count={m.bad_leaf_count}, expected {expected_bad_leaf_count}")
         if m.corrupted_tuple_count != 300:
@@ -946,6 +946,57 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                 )
         return series
 
+    if args.profile == "best-scaling-f32-l1024-k75-c300":
+        if args.partitions is not None or args.leaves_per_partition is not None or args.fanout is not None:
+            raise ValueError(
+                "best-scaling-f32-l1024-k75-c300 uses fixed geometry F=32,L=1024; "
+                "do not override geometry"
+            )
+        if args.bad_leaf_count is not None:
+            raise ValueError(
+                "best-scaling-f32-l1024-k75-c300 uses fixed --bad-leaf-count=75"
+            )
+        if args.geometry_label and args.geometry_label != "fanout_f32_l1024":
+            raise ValueError(
+                "best-scaling-f32-l1024-k75-c300 only supports geometry_label=fanout_f32_l1024"
+            )
+
+        label = "fanout_f32_l1024"
+        geo = geometry_matrix.get(label)
+        if geo is None:
+            raise RuntimeError(
+                "geometry label 'fanout_f32_l1024' missing from recovery_geometry_matrix.json"
+            )
+
+        sizes = [
+            1_000_000,
+            3_000_000,
+            5_000_000,
+            7_000_000,
+            10_000_000,
+            15_000_000,
+            20_000_000,
+        ]
+
+        # Allows cheap smoke like --tuple-count 7000000 or --tuple-count 20000000.
+        selected_sizes = _selected(sizes, args.tuple_count)
+
+        series = []
+        for n in selected_sizes:
+            series.append(
+                case(
+                    experiment=args.profile,
+                    tuple_count=n,
+                    partitions=int(geo["partitions"]),
+                    leaves_per_partition=int(geo["leaves_per_partition"]),
+                    fanout=int(geo["fanout"]),
+                    bad_leaf_count=75,
+                    corrupted_tuple_count=300,
+                    geometry_label=label,
+                )
+            )
+        return series
+
 
 
     series = []
@@ -1118,10 +1169,10 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 total_runs=total_runs,
             )
             d = corrupted_tuple_count if args.profile == "recovery-scaling-diagnosis" else (
-                300 if args.profile in ("paper", "preflight", "fanout-width-sweep", "size-scaling-k75-c300") else bad_leaf_count
+                300 if args.profile in ("paper", "preflight", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") else bad_leaf_count
             )
 
-            if args.profile == "size-scaling-k75-c300":
+            if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
                 forced_key = geometry_label
                 forced_map = progress_state.setdefault("forced_bad_leaves_by_geometry", {})
                 forced_bad_leaves = forced_map.get(forced_key)
@@ -1144,7 +1195,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             d = manifest["corrupted_tuple_count"]
             validate_manifest_leaf_mapping(conn, manifest)
 
-            if args.profile == "size-scaling-k75-c300":
+            if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
                 if forced_key not in forced_map:
                     forced_map[forced_key] = list(manifest["bad_leaves"])
                 elif list(manifest["bad_leaves"]) != list(forced_map[forced_key]):
@@ -1154,7 +1205,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     )
 
             # Capacity validation & Provenance validation
-            if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300"):
+            if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
                 selected_capacity = manifest["selected_bad_leaf_row_capacity"]
                 if selected_capacity < d:
                     raise RuntimeError(
@@ -1174,7 +1225,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 )
 
                 # Assert provenance
-                if args.profile == "size-scaling-k75-c300":
+                if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
                     tier_key = f"tier_{geometry_label}"
                     expected_sha = progress_state.setdefault("provenance_map", {}).get(tier_key)
                     actual_sha = manifest["bad_leaf_selection_sha256"]
@@ -1237,7 +1288,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     # ── write artifacts ───────────────────────────────────────────────────────
     (result_dir / "corruption_manifest.json").write_text(json.dumps(manifests, indent=2) + "\n")
 
-    if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300"):
+    if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
         write_csv(
             result_dir / "fanout_provenance.csv",
             progress_state.get("provenance_rows", []),
@@ -1590,7 +1641,7 @@ def main(argv: list[str] | None = None) -> int:
     global RESULT_ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsn", default="host=127.0.0.1 port=5432 dbname=postgres user=neel")
-    parser.add_argument("--profile", choices=["smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300"], default="smoke")
+    parser.add_argument("--profile", choices=["smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"], default="smoke")
 
     parser.add_argument("--experiment", choices=["figure12", "figure13"])
     parser.add_argument("--tuple-count", type=int, dest="tuple_count")
@@ -1616,7 +1667,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300") and args.corruption_mode != "paper-update-only":
+    if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") and args.corruption_mode != "paper-update-only":
         raise ValueError(f"{args.profile} requires --corruption-mode paper-update-only")
 
     if args.result_dir:

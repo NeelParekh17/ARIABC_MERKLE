@@ -178,7 +178,7 @@ def plot_all(result_dir: Path):
 
     fig12 = [
         r for r in rows
-        if r.get("experiment") in ("figure12", "recovery-scaling-diagnosis", "size-scaling-k75-c300")
+        if r.get("experiment") in ("figure12", "recovery-scaling-diagnosis", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300")
     ]
     svg_bar_chart(
         plots / "figure12_paper_total.svg",
