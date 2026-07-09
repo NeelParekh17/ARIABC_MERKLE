@@ -44,7 +44,7 @@ resolve_host_ip() {
     admin123) printf '%s\n' "10.129.148.236" ;;
     user4) printf '%s\n' "10.129.148.246" ;;
     utkarsh) printf '%s\n' "10.129.148.248" ;;
-    *) return 1 ;;
+    *) printf '%s\n' "$1" ;;
   esac
 }
 
