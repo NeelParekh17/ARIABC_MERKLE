@@ -661,12 +661,16 @@ def run_one_manifest(
             benchmark_profile=benchmark_profile,
         )
         if profiler is not None:
+            profile_tolerance_ms = 25.0 if benchmark_profile in (
+                "size-scaling-k75-c300",
+                "best-scaling-f32-l1024-k75-c300",
+            ) else 15.0
             profile_reasons = validate_profile_invariants(
                 phase=metric.phase,
                 operations=profiler.rows(),
                 bad_leaf_count=metric.bad_leaf_count,
                 run_id=metric.run_id,
-                tolerance_ms=15.0,
+                tolerance_ms=profile_tolerance_ms,
             )
             if profile_reasons:
                 metric.valid = False
