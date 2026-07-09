@@ -48,6 +48,7 @@ def finalize_metrics(
     audit_start_ms: float,
     audit_end_ms: float,
     cleanup_end_ms: float,
+    audit_skipped: bool = False,
 ) -> None:
     """Populate all aggregate timing fields and timing-contract counters."""
     m.paper_style_total_ms = paper_end_ms - paper_start_ms
@@ -55,10 +56,12 @@ def finalize_metrics(
     m.audit_validation_ms = audit_end_ms - audit_start_ms
     m.end_to_end_observed_ms = cleanup_end_ms - total_start_ms
     m.cleanup_ms = max(0.0, cleanup_end_ms - audit_end_ms)
+    audit_positive = m.audit_validation_ms > 0
     m.counters.update(
         {
             "paper_end_before_audit_start": int(paper_end_ms <= audit_start_ms),
-            "audit_validation_positive": int(m.audit_validation_ms > 0),
+            "audit_validation_positive": int(audit_positive),
+            "audit_validation_skipped": int(audit_skipped),
             "end_to_end_covers_paper_and_audit": int(
                 m.end_to_end_observed_ms + 1e-6 >= m.paper_style_total_ms + m.audit_validation_ms
             ),
@@ -66,7 +69,7 @@ def finalize_metrics(
     )
     if paper_end_ms > audit_start_ms:
         add_warning(m, "paper timing overlaps audit")
-    if m.audit_validation_ms <= 0:
+    if not audit_skipped and not audit_positive:
         add_warning(m, "audit timing is not positive")
     if m.end_to_end_observed_ms + 1e-6 < m.paper_style_total_ms + m.audit_validation_ms:
         add_warning(m, "end-to-end timing does not cover paper plus audit")
