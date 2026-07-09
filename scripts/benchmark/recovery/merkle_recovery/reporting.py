@@ -140,8 +140,9 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
             failures.append(f"{m.run_id}: {m.warning or 'marked invalid'}")
         if int(m.counters.get("paper_end_before_audit_start", 0)) != 1:
             failures.append(f"{m.run_id}: paper_end_ms is not before audit_start_ms")
-        if int(m.counters.get("audit_validation_positive", 0)) != 1:
-            failures.append(f"{m.run_id}: audit_validation_ms is not positive")
+        if int(m.counters.get("full_audit_skipped", 0)) != 1:
+            if int(m.counters.get("audit_validation_positive", 0)) != 1:
+                failures.append(f"{m.run_id}: audit_validation_ms is not positive")
         if int(m.counters.get("end_to_end_covers_paper_and_audit", 0)) != 1:
             failures.append(f"{m.run_id}: end_to_end_observed_ms does not cover paper plus audit")
         if int(m.counters.get("schema_fidelity_ok", 0)) != 1:

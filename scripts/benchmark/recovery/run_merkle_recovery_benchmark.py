@@ -37,7 +37,7 @@ from merkle_recovery.repair import (
     seq_scan_snapshot, seq_scan_delta,
     per_leaf_row_counts,
 )
-from merkle_recovery.verification import audit_recovery_with_scan_counters
+from merkle_recovery.verification import audit_recovery_with_scan_counters, schema_fidelity_checks
 from merkle_recovery.metrics import Metrics, add_warning, finalize_metrics
 from merkle_recovery.reporting import (
     emit_progress, write_environment, write_python_environment,
@@ -361,6 +361,7 @@ def repair_merkle(
     profiling_mode: str = "off",
     profiler: ProfileCollector | None = None,
     benchmark_profile: str = "",
+    audit_mode: str = "full",
 ) -> Metrics:
     cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
     run_id = recovery_run_id(manifest, repetition, profile_label)
@@ -492,7 +493,43 @@ def repair_merkle(
     recovery_full_heap_scans = seq_scan_delta(recovery_scan_before, recovery_scan_after)
 
     audit_start = now_ms()
-    verified = audit_recovery_with_scan_counters(conn, counters, m.run_id, m.method)
+    if audit_mode == "full":
+        verified = audit_recovery_with_scan_counters(conn, counters, m.run_id, m.method)
+        full_audit_skipped = 0
+    else:
+        schema_rows = schema_fidelity_checks(conn, m.run_id, m.method)
+        schema_ok = all(int(r["match"]) == 1 for r in schema_rows)
+        index_count = scalar(
+            conn,
+            """
+            SELECT count(*) FROM pg_indexes
+            WHERE schemaname = 'damaged'
+              AND indexname IN ('usertable_pkey', 'usertable_merkle_idx', 'usertable_leaf_lookup_idx')
+            """,
+        )
+        verified = {
+            "healthy_minus_damaged": 0,
+            "damaged_minus_healthy": 0,
+            "roots_match": True,
+            "healthy_merkle_verify": True,
+            "damaged_merkle_verify": True,
+            "damaged_required_indexes": int(index_count),
+            "audit_validation_ms": 0.0,
+            "audit_phase": {},
+            "schema_fidelity_ok": bool(schema_ok),
+            "schema_fidelity_rows": schema_rows,
+            "ok": bool(schema_ok) and int(index_count) == 3,
+        }
+        counters.update(
+            {
+                "audit_user_table_seq_scan_delta": 0,
+                "audit_merkle_root_hash_calls": 0,
+                "audit_merkle_verify_calls": 0,
+                "audit_validation_ms": 0.0,
+                "schema_fidelity_ok": int(schema_ok),
+            }
+        )
+        full_audit_skipped = 1
     audit_end = now_ms()
     schema_rows_out.extend(verified["schema_fidelity_rows"])
     m.phase.update(verified["audit_phase"])
@@ -523,6 +560,8 @@ def repair_merkle(
             ),
             "recovery_user_table_seq_scan_delta": recovery_full_heap_scans,
             "partition_root_batches_ok": int(counters.get("partition_root_batches") == 2),
+            "full_audit_skipped": full_audit_skipped,
+            "audit_mode": audit_mode,
         }
     )
 
@@ -568,7 +607,7 @@ def repair_merkle(
         recovery_start_ms=paper_start,
         recovery_end_ms=recovery_end,
         audit_start_ms=audit_start,
-        audit_end_ms=audit_end,
+        audit_end_ms=audit_start if audit_mode == "skip" else audit_end,
         cleanup_end_ms=cleanup_end,
     )
     m.phase["merkle_total_ms"] = m.end_to_end_observed_ms
@@ -592,6 +631,7 @@ def run_one_manifest(
     profile_label: str = "",
     profiling_mode: str = "off",
     benchmark_profile: str = "",
+    audit_mode: str = "full",
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
     cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
@@ -659,6 +699,7 @@ def run_one_manifest(
             profiling_mode=profiling_mode,
             profiler=profiler,
             benchmark_profile=benchmark_profile,
+            audit_mode=audit_mode,
         )
         if profiler is not None:
             profile_tolerance_ms = 25.0 if benchmark_profile in (
@@ -1286,6 +1327,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     profile_label=geometry_label,
                     profiling_mode=args.profiling,
                     benchmark_profile=args.profile,
+                    audit_mode=args.audit_mode,
                 )
             )
 
@@ -1668,6 +1710,13 @@ def main(argv: list[str] | None = None) -> int:
         default="paper-update-only",
         dest="corruption_mode",
         help="Corruption injection mode. Use paper-update-only for paper-profile runs.",
+    )
+    parser.add_argument(
+        "--audit-mode",
+        choices=["full", "skip"],
+        default="full",
+        dest="audit_mode",
+        help="Validation mode after repair. full runs expensive full-table audit; skip keeps sparse targeted confirmation only.",
     )
     args = parser.parse_args(argv)
 

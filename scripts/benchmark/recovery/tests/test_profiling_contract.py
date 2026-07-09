@@ -833,3 +833,38 @@ def test_best_scaling_rejects_invalid_corruption_mode():
     with patch.object(sys, 'argv', test_args):
         with pytest.raises(ValueError, match="best-scaling-f32-l1024-k75-c300 requires --corruption-mode paper-update-only"):
             main()
+
+
+def test_contract_with_skipped_audit():
+    from merkle_recovery.reporting import assert_benchmark_contract
+    from merkle_recovery.metrics import Metrics
+    m = Metrics(
+        run_id="run_1",
+        experiment="figure12",
+        method="merkle",
+        tuple_count=1000000,
+        bad_leaf_count=75,
+        corrupted_tuple_count=300,
+        repetition=0,
+        corruption_mode="paper-update-only",
+        partitions=32,
+        leaves_per_partition=1024,
+        fanout=32,
+    )
+    # Set all necessary counters
+    m.counters.update({
+        "paper_end_before_audit_start": 1,
+        "end_to_end_covers_paper_and_audit": 1,
+        "schema_fidelity_ok": 1,
+        "partition_root_batches": 2,
+        "partition_root_batches_ok": 1,
+        "planner_checks_passed": 1,
+        "total_rows_repaired": 300,
+        "recovery_user_table_seq_scan_delta": 0,
+        "bad_leaf_count": 75,
+        "full_audit_skipped": 1,
+        "audit_validation_positive": 0,  # normally triggers error, but skipped
+    })
+    # This should pass without raising RuntimeError
+    assert_benchmark_contract("best-scaling-f32-l1024-k75-c300", [m])
+
