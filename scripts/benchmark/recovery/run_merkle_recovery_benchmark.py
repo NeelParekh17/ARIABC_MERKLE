@@ -609,6 +609,7 @@ def repair_merkle(
         audit_start_ms=audit_start,
         audit_end_ms=audit_start if audit_mode == "skip" else audit_end,
         cleanup_end_ms=cleanup_end,
+        audit_skipped=(audit_mode == "skip"),
     )
     m.phase["merkle_total_ms"] = m.end_to_end_observed_ms
     return m
@@ -1400,6 +1401,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 "paper_end_before_audit_start": m.counters.get("paper_end_before_audit_start", 0),
                 "audit_validation_positive": m.counters.get("audit_validation_positive", 0),
                 "end_to_end_covers_paper_and_audit": m.counters.get("end_to_end_covers_paper_and_audit", 0),
+                "full_audit_skipped": m.counters.get("full_audit_skipped", 0),
+                "audit_validation_skipped": m.counters.get("audit_validation_skipped", 0),
             }
             for m in all_metrics
         ],
@@ -1407,7 +1410,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             "run_id", "method", "paper_style_total_ms", "restore_repair_ms",
             "audit_validation_ms", "end_to_end_observed_ms", "cleanup_ms",
             "paper_end_before_audit_start", "audit_validation_positive",
-            "end_to_end_covers_paper_and_audit",
+            "end_to_end_covers_paper_and_audit", "full_audit_skipped",
+            "audit_validation_skipped",
         ],
     )
     write_csv(
