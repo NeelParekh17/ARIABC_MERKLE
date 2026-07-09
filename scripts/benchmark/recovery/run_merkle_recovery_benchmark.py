@@ -783,7 +783,13 @@ def _selected(values, selected):
     out = list(values)
     if selected is None:
         return out
-    return [v for v in out if v == selected]
+    if isinstance(selected, str):
+        selected_list = [int(x.strip()) for x in selected.split(",") if x.strip()]
+    elif isinstance(selected, list):
+        selected_list = [int(x) for x in selected]
+    else:
+        selected_list = [int(selected)]
+    return [v for v in out if v in selected_list]
 
 
 def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]]:
@@ -1686,7 +1692,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile", choices=["smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"], default="smoke")
 
     parser.add_argument("--experiment", choices=["figure12", "figure13"])
-    parser.add_argument("--tuple-count", type=int, dest="tuple_count")
+    parser.add_argument("--tuple-count", type=str, dest="tuple_count")
     parser.add_argument("--partitions", type=int)
     parser.add_argument("--bad-leaf-count", type=int, dest="bad_leaf_count")
     parser.add_argument("--leaves-per-partition", type=int, dest="leaves_per_partition")
