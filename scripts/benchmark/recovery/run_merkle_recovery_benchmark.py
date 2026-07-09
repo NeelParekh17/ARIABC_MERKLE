@@ -1014,15 +1014,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                 "geometry label 'fanout_f32_l1024' missing from recovery_geometry_matrix.json"
             )
 
-        sizes = [
-            1_000_000,
-            3_000_000,
-            5_000_000,
-            7_000_000,
-            10_000_000,
-            15_000_000,
-            20_000_000,
-        ]
+        sizes = [int(n) for n in config.fig12_sizes]
 
         # Allows cheap smoke like --tuple-count 7000000 or --tuple-count 20000000.
         selected_sizes = _selected(sizes, args.tuple_count)
