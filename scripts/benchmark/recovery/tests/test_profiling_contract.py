@@ -791,9 +791,9 @@ def _best_scaling_config():
     return profile_config("best-scaling-f32-l1024-k75-c300")
 
 
-def test_best_scaling_produces_seven_runs():
+def test_best_scaling_produces_eleven_runs():
     specs = _series_for_profile(_best_scaling_args(), _best_scaling_config())
-    assert len(specs) == 7
+    assert len(specs) == 11
     geometries = [(s["geometry_label"], s["tuple_count"]) for s in specs]
     expected = [
         ("fanout_f32_l1024", 1000000),
@@ -803,6 +803,10 @@ def test_best_scaling_produces_seven_runs():
         ("fanout_f32_l1024", 10000000),
         ("fanout_f32_l1024", 15000000),
         ("fanout_f32_l1024", 20000000),
+        ("fanout_f32_l1024", 25000000),
+        ("fanout_f32_l1024", 30000000),
+        ("fanout_f32_l1024", 40000000),
+        ("fanout_f32_l1024", 50000000),
     ]
     assert geometries == expected
     for spec in specs:
