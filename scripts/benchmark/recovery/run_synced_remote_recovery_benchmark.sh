@@ -378,6 +378,12 @@ while IFS= read -r rel; do
 done < "$ROOTS_FILE"
 progress "all source roots synced"
 
+if [[ -d "/usr/include/openssl" ]]; then
+  progress "uploading local OpenSSL headers to remote include directory for compatibility"
+  remote_ssh_cmd_stdinless "mkdir -p '$REMOTE_SRC_DIR/src/include/openssl'"
+  rsync_remote "/usr/include/openssl/" "$SSH_TARGET:$REMOTE_SRC_DIR/src/include/openssl/"
+fi
+
 # Upload manifest and verify remote source — LOCAL_RUNDIR_GUARD stays 1 until
 # the remote benchmark process takes ownership after this sequence.
 progress "uploading source snapshot manifest"
@@ -557,8 +563,21 @@ fi
 CONFIGURE_DESCRIPTION="CFLAGS=$BUILD_CFLAGS ${CONFIGURE_ARGS[*]}"
 
 cd "$REMOTE_SRC_DIR"
+
+# Set up local library directory for OpenSSL compatibility
+local_lib_dir="$REMOTE_SRC_DIR/openssl_compat_libs"
+mkdir -p "$local_lib_dir"
+ssl_so=$(find /usr/lib /lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu -name "libssl.so.*" -print -quit 2>/dev/null)
+crypto_so=$(find /usr/lib /lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu -name "libcrypto.so.*" -print -quit 2>/dev/null)
+if [[ -n "$ssl_so" ]]; then
+  ln -sf "$ssl_so" "$local_lib_dir/libssl.so"
+fi
+if [[ -n "$crypto_so" ]]; then
+  ln -sf "$crypto_so" "$local_lib_dir/libcrypto.so"
+fi
+
 remote_progress "configure started ($CONFIGURE_DESCRIPTION); log: $REMOTE_LOG_DIR/configure.log"
-if ac_cv_exeext= CPPFLAGS="${CPPFLAGS:-}" LDFLAGS="${LDFLAGS:-}" \
+if ac_cv_exeext= CPPFLAGS="${CPPFLAGS:-}" LDFLAGS="-L$local_lib_dir ${LDFLAGS:-}" \
     CFLAGS="$BUILD_CFLAGS" \
     ./configure "${CONFIGURE_ARGS[@]}" \
     >"$REMOTE_LOG_DIR/configure.log" 2>&1; then
