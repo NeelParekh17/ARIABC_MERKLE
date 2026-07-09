@@ -133,6 +133,30 @@ def profile_config(profile: str) -> BenchmarkConfig:
             },
         )
 
+    if profile == "best-scaling-f32-l1024-k75-c300":
+        return BenchmarkConfig(
+            fig12_sizes=[
+                1_000_000,
+                3_000_000,
+                5_000_000,
+                7_000_000,
+                10_000_000,
+                15_000_000,
+                20_000_000,
+            ],
+            fig13_sizes=[],
+            fig13_k=[],
+            repetitions=5,
+            extra={
+                "campaign": "best_scaling_f32_l1024_k75_c300",
+                "description": (
+                    "Extends best static Merkle geometry F=32,L=1024 from "
+                    "1M to 20M rows. Uses K=75 bad leaves and C=300 "
+                    "update-only corruptions."
+                ),
+            },
+        )
+
     if profile == "preflight":
         return BenchmarkConfig(
             fig12_sizes=[1_000_000],
