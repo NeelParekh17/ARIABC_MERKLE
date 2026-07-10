@@ -123,20 +123,16 @@ merkle_build_callback(Relation indexRel,
 {
     MerkleBuildState *buildstate = (MerkleBuildState *) state;
     MerkleHash      hash;
-    int             leafId;
-    TupleDesc       tupdesc;
+	MerkleRoute     route;
     
     /* Only process live tuples */
     if (!tupleIsAlive)
+	{
         return;
+	}
     
-    tupdesc = RelationGetDescr(indexRel);
-    
-    /* Compute leaf ID using multi-column support and dynamic leaf count */
-    leafId = merkle_compute_partition_id(values, isnull,
-                                         buildstate->nkeys,
-                                         tupdesc,
-                                         buildstate->totalLeaves);
+	/* Compute routing through the same relation-aware path used by DML. */
+	merkle_compute_route(indexRel, values, isnull, buildstate->nkeys, &route);
     
     /* Compute hash of the full row */
     merkle_compute_row_hash(buildstate->heapRel, tid, &hash);
@@ -147,8 +143,8 @@ merkle_build_callback(Relation indexRel,
      * constructing internal nodes once at the end.
      */
     {
-        int partitionId = leafId / buildstate->leavesPerPartition;
-        int leafPos = leafId % buildstate->leavesPerPartition;
+		int partitionId = route.partition_id;
+		int leafPos = route.leaf_id % buildstate->leavesPerPartition;
         int nodeInPartition = buildstate->leafStart + leafPos;
         int nodeIdx = partitionId * buildstate->nodesPerPartition + (nodeInPartition - 1);
 
@@ -406,6 +402,8 @@ merkleBuildempty(Relation indexRel)
     meta->nodesPerPage = nodesPerPage;
     meta->numTreePages = numTreePages;
     meta->fanout = fanout;
+	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
+	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 
     pfree(opts);
     

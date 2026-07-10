@@ -24,6 +24,9 @@ Options:
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
                                default: paper-update-only
+  --audit-mode full|skip       default: full
+  --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
+  --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
   --min-free-gib N             default: 40
   --ssh-timeout SECONDS        default: 15
   --keep-remote-archive
@@ -52,6 +55,8 @@ REPETITIONS=""
 ARTIFACT_MODE="summary"
 CORRUPTION_MODE="paper-update-only"
 AUDIT_MODE="full"
+LEAF_FETCH_BATCH_SIZE=64
+RUN_STATIC_MERKLE_REGRESSION=0
 MIN_FREE_GIB=40
 SSH_TIMEOUT="${SSH_TIMEOUT:-15}"
 KEEP_REMOTE_ARCHIVE=0
@@ -79,6 +84,8 @@ while [[ $# -gt 0 ]]; do
     --artifact-mode) ARTIFACT_MODE="${2:?}"; shift 2 ;;
     --corruption-mode) CORRUPTION_MODE="${2:?}"; shift 2 ;;
     --audit-mode) AUDIT_MODE="${2:?}"; shift 2 ;;
+    --leaf-fetch-batch-size) LEAF_FETCH_BATCH_SIZE="${2:?}"; shift 2 ;;
+    --run-static-merkle-regression) RUN_STATIC_MERKLE_REGRESSION=1; shift ;;
     --min-free-gib) MIN_FREE_GIB="${2:?}"; shift 2 ;;
     --ssh-timeout) SSH_TIMEOUT="${2:?}"; shift 2 ;;
     --keep-remote-archive) KEEP_REMOTE_ARCHIVE=1; shift ;;
@@ -401,8 +408,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'"
 progress "remote source and Python environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -665,6 +672,19 @@ else
   fail_with_log "pg_isready failed" "$REMOTE_LOG_DIR/pg_isready.log"
 fi
 
+# Optional: run merkle_static SQL regression gate before the benchmark.
+if [[ "$RUN_STATIC_MERKLE_REGRESSION" -eq 1 ]]; then
+  remote_progress "running merkle_static regression gate; log: $REMOTE_LOG_DIR/merkle_static.log"
+  if PGHOST="$REMOTE_SOCKET_DIR" PGPORT=55432 PGUSER="$(id -un)" \
+      make -C "$REMOTE_SRC_DIR/src/test/regress" check-tests TESTS=merkle_static \
+      >"$REMOTE_LOG_DIR/merkle_static.log" 2>&1; then
+    remote_progress "merkle_static regression PASSED"
+  else
+    tail_log "$REMOTE_LOG_DIR/merkle_static.log"
+    fail_with_log "merkle_static regression FAILED" "$REMOTE_LOG_DIR/merkle_static.log"
+  fi
+fi
+
 BENCH_DSN="host=$REMOTE_SOCKET_DIR port=55432 dbname=postgres user=$(id -un)"
 BENCH_ARGS=(
   "$REMOTE_PYTHON"
@@ -676,6 +696,7 @@ BENCH_ARGS=(
   --artifact-mode "$ARTIFACT_MODE"
   --corruption-mode "$CORRUPTION_MODE"
   --audit-mode "$AUDIT_MODE"
+  --leaf-fetch-batch-size "$LEAF_FETCH_BATCH_SIZE"
   --profiling "$PROFILING"
 )
 BENCH_ARGS+=("${BENCH_REPETITIONS[@]}")

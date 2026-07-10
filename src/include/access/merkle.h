@@ -101,7 +101,14 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
  */
 #define MERKLE_METAPAGE_BLKNO       0
 #define MERKLE_TREE_START_BLKNO     1
-#define MERKLE_VERSION              5   /* Bump version for fanout in metadata */
+#define MERKLE_VERSION              6   /* Versioned canonical row hashing */
+/*
+ * Route format 2: uniform BLAKE3-256 for ALL key types including integers.
+ * Format 1 preserved abs(int) % total_leaves for single integer keys; that
+ * was unsafe for a future dynamic prefix tree.  Rebuild all indexes.
+ */
+#define MERKLE_ROUTE_FORMAT_VERSION 2
+#define MERKLE_ROW_HASH_FORMAT_VERSION 1
 
 /*
  * Calculate how many nodes fit per page
@@ -142,6 +149,8 @@ typedef struct MerkleMetaPageData
     int32           nodesPerPage;       /* how many nodes fit per page */
     int32           numTreePages;       /* number of pages for tree nodes */
     int32           fanout;             /* branching factor (children per internal node) */
+	uint32          routeFormatVersion; /* deterministic key-routing format */
+	uint32          rowHashFormatVersion; /* canonical row serialization format */
 } MerkleMetaPageData;
 
 #define MerklePageGetMeta(page) \
@@ -158,6 +167,34 @@ typedef struct MerkleOptions
     int         leaves_per_partition;
     int         fanout;
 } MerkleOptions;
+
+/*
+ * Authoritative output of key routing.  Static trees consume leaf_id while a
+ * future dynamic tree can consume route_digest (all 32 bytes of the BLAKE3
+ * hash) without reimplementing routing.  The eight-byte static_route_value is
+ * derived from the first eight bytes of route_digest; do NOT use route_hash
+ * (that field no longer exists).
+ */
+typedef struct MerkleRoute
+{
+	uint8		route_digest[MERKLE_HASH_BYTES];
+	uint64		static_route_value;
+	int			leaf_id;
+	int			partition_id;
+	int			node_in_partition;
+} MerkleRoute;
+
+/* Arithmetic-only perfect-tree geometry shared by all Merkle code paths. */
+typedef struct MerkleGeometry
+{
+	int			num_partitions;
+	int			leaves_per_partition;
+	int			nodes_per_partition;
+	int			total_nodes;
+	int			total_leaves;
+	int			fanout;
+	int			leaf_start;
+} MerkleGeometry;
 
 /*
  * Handler function - returns IndexAmRoutine
@@ -215,17 +252,24 @@ extern void merkleCostEstimate(struct PlannerInfo *root,
                                double *indexCorrelation,
                                double *indexPages);
 
-/*
- * Core Merkle tree operations
- * (merkle_compute_partition_id handles both single and multi-column keys)
- */
+/* Core Merkle tree operations. */
 extern void merkle_compute_row_hash(Relation heapRel, ItemPointer tid,
                                     MerkleHash *result);
 extern void merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot,
                                      MerkleHash *result);
-extern int  merkle_compute_partition_id(Datum *values, bool *isnull,
-                                        int nkeys, TupleDesc tupdesc,
-                                        int numLeaves);
+extern void merkle_compute_route(Relation indexRel, Datum *values,
+								 bool *isnull, int nkeys,
+								 MerkleRoute *result);
+extern void merkle_geometry_from_index(Relation indexRel,
+								   MerkleGeometry *geometry);
+extern int merkle_geometry_global_node(const MerkleGeometry *geometry,
+								   int partition, int node_in_partition);
+extern int merkle_geometry_leaf_node(const MerkleGeometry *geometry,
+								 int leaf_id);
+extern int merkle_geometry_parent_node(const MerkleGeometry *geometry,
+								   int node_in_partition);
+extern int merkle_geometry_child_node(const MerkleGeometry *geometry,
+								  int node_in_partition, int child_ordinal);
 extern void merkle_update_tree_path(Relation indexRel, int leafId,
                                     MerkleHash *hash, bool isXorIn);
 extern void merkle_init_tree(Relation indexRel, Oid heapOid,
@@ -251,6 +295,9 @@ extern Datum merkle_leaf_id(PG_FUNCTION_ARGS);
 extern Datum merkle_bucket_for_key(PG_FUNCTION_ARGS);
 extern Datum merkle_get_node_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_get_child_hashes(PG_FUNCTION_ARGS);
+extern Datum merkle_get_node_hashes(PG_FUNCTION_ARGS);
+extern Datum merkle_get_children_batch(PG_FUNCTION_ARGS);
+extern Datum merkle_get_leaf_members(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hashes(PG_FUNCTION_ARGS);
 extern Datum merkle_recovery_profile_reset(PG_FUNCTION_ARGS);

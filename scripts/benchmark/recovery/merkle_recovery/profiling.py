@@ -298,7 +298,43 @@ def validate_profile_invariants(
     bad_leaf_count: int,
     run_id: str,
     tolerance_ms: float = 5.0,
+    leaf_fetch_chunk_size: int = 0,
 ) -> list[str]:
+    """Validate internal consistency of collected profiling rows.
+
+    Parameters
+    ----------
+    phase:
+        Timing dict from the run (keys like ``candidate_row_fetch_ms``).
+    operations:
+        Flat list of profiling operation dicts (all rows for this run).
+    bad_leaf_count:
+        Number of leaves that were corrupted (K).
+    run_id:
+        Expected run_id; rows from other runs are rejected.
+    tolerance_ms:
+        Allowed absolute timing slack between phase total and profile sum.
+    leaf_fetch_chunk_size:
+        The chunk size used for batched leaf fetching.  ``0`` or negative means
+        unbounded (one SQL call per phase per schema).  The expected batch call
+        counts are derived from this value:
+
+        Expected calls per phase = 2 * ceil(K / chunk_size)  when chunk_size > 0
+        Expected calls per phase = 2                          when chunk_size <= 0 and K > 0
+        Expected calls per phase = 0                          when K == 0
+
+        Boundary behaviour (chunk_size=64):
+            K=0   -> 0 calls
+            K=10  -> 2 calls   (ceil(10/64)=1, *2 schemas)
+            K=64  -> 2 calls   (ceil(64/64)=1, *2 schemas)
+            K=65  -> 4 calls   (ceil(65/64)=2, *2 schemas)
+            K=75  -> 4 calls   (ceil(75/64)=2, *2 schemas)
+            K=200 -> 8 calls   (ceil(200/64)=4, *2 schemas)
+        Boundary behaviour (chunk_size=0):
+            K=75  -> 2 calls   (unbounded single SQL, *2 schemas)
+    """
+    import math as _math
+
     reasons: list[str] = []
     op_rows = [row for row in operations if row.get("run_id") == run_id]
     if len(op_rows) != len(operations):
@@ -356,14 +392,73 @@ def validate_profile_invariants(
         if row.get("stage") == "targeted_confirmation"
         and row.get("operation") in {"confirmation_leaf_fetch_healthy", "confirmation_leaf_fetch_damaged"}
     )
+    candidate_batch_calls = sum(
+        1
+        for row in op_rows
+        if row.get("stage") == "candidate_fetch"
+        and row.get("operation") in {"leaf_fetch_batch_healthy", "leaf_fetch_batch_damaged"}
+    )
+    confirmation_batch_calls = sum(
+        1
+        for row in op_rows
+        if row.get("stage") == "targeted_confirmation"
+        and row.get("operation")
+        in {
+            "confirmation_leaf_fetch_batch_healthy",
+            "confirmation_leaf_fetch_batch_damaged",
+        }
+    )
+
+    # Compute the exact expected number of batch SQL calls per phase.
+    # Each phase issues one SQL call per chunk per schema (healthy + damaged = 2).
+    if bad_leaf_count == 0:
+        expected_batch_calls = 0
+    elif leaf_fetch_chunk_size <= 0:
+        # Unbounded mode: one SQL call per schema → 2 calls per phase
+        expected_batch_calls = 2
+    else:
+        chunks_per_schema = _math.ceil(bad_leaf_count / leaf_fetch_chunk_size)
+        expected_batch_calls = 2 * chunks_per_schema
+
     expected_leaf_calls = 2 * bad_leaf_count
-    if candidate_leaf_calls != expected_leaf_calls:
+    if bad_leaf_count == 0:
+        candidate_ok = (candidate_batch_calls == 0 and candidate_leaf_calls == 0)
+        candidate_detail = f"batch={candidate_batch_calls}, per_leaf={candidate_leaf_calls}"
+        confirmation_ok = (confirmation_batch_calls == 0 and confirmation_leaf_calls == 0)
+        confirmation_detail = f"batch={confirmation_batch_calls}, per_leaf={confirmation_leaf_calls}"
+    else:
+        if candidate_batch_calls:
+            # Batch mode: require the exact expected count, not just any even number.
+            candidate_ok = (candidate_batch_calls == expected_batch_calls) and candidate_leaf_calls == 0
+            candidate_detail = (
+                f"batch={candidate_batch_calls} (expected={expected_batch_calls}), "
+                f"per_leaf={candidate_leaf_calls}"
+            )
+        else:
+            candidate_ok = candidate_leaf_calls == expected_leaf_calls
+            candidate_detail = str(candidate_leaf_calls)
+        if confirmation_batch_calls:
+            confirmation_ok = (
+                confirmation_batch_calls == expected_batch_calls
+                and confirmation_leaf_calls == 0
+            )
+            confirmation_detail = (
+                f"batch={confirmation_batch_calls} (expected={expected_batch_calls}), "
+                f"per_leaf={confirmation_leaf_calls}"
+            )
+        else:
+            confirmation_ok = confirmation_leaf_calls == expected_leaf_calls
+            confirmation_detail = str(confirmation_leaf_calls)
+
+    if not candidate_ok:
         reasons.append(
-            f"candidate leaf fetch calls {candidate_leaf_calls} != 2 * bad_leaf_count {expected_leaf_calls}"
+            f"candidate leaf fetch calls {candidate_detail} do not match "
+            f"expected batch calls or per-leaf={expected_leaf_calls}"
         )
-    if confirmation_leaf_calls != expected_leaf_calls:
+    if not confirmation_ok:
         reasons.append(
-            f"confirmation leaf fetch calls {confirmation_leaf_calls} != 2 * bad_leaf_count {expected_leaf_calls}"
+            f"confirmation leaf fetch calls {confirmation_detail} do not match "
+            f"expected batch calls or per-leaf={expected_leaf_calls}"
         )
     if confirmation_ms < 0:
         reasons.append("confirmation timer is invalid")

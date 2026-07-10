@@ -1786,18 +1786,33 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
         /* Compute old hash from the same oldSlot image used for leafing */
         merkle_compute_slot_hash(relation, oldSlot, &oldHash);
 
-        hasOldHash = !merkle_hash_is_zero(&oldHash);
+		hasOldHash = !merkle_hash_is_zero(&oldHash);
 
-        if (hasOldHash)
-        {
-            indexList = RelationGetIndexList(relation);
-            pendingCapacity = list_length(indexList);
-            if (pendingCapacity > 0)
-                pending = palloc0(sizeof(PendingMerkleUpdate) * pendingCapacity);
+		if (hasOldHash)
+		{
+			indexList = RelationGetIndexList(relation);
+			pendingCapacity = list_length(indexList);
+			if (pendingCapacity > 0)
+			{
+				/*
+				 * Allocate in a short-lived child context so that this array
+				 * is not retained for the lifetime of the transaction.
+				 * Using TopTransactionContext directly would cause every
+				 * apply_optim_update() call to accumulate a small array until
+				 * commit/abort, which is wasteful in long multi-statement
+				 * transactions.  We create a dedicated context under the
+				 * current context (which is safe here since we are inside the
+				 * Merkle prep block, before the heap update), and delete it
+				 * explicitly on every exit path.
+				 */
+				pending = (PendingMerkleUpdate *) MemoryContextAllocZero(
+					TopTransactionContext,
+					sizeof(PendingMerkleUpdate) * pendingCapacity);
+			}
 
-            foreach (lc, indexList)
-            {
-                Oid indexOid = lfirst_oid(lc);
+			foreach (lc, indexList)
+			{
+				Oid indexOid = lfirst_oid(lc);
                 Relation indexRel = index_open(indexOid, RowExclusiveLock);
 
                 if (indexRel->rd_rel->relam == MERKLE_AM_OID)
@@ -1805,18 +1820,15 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
                     IndexInfo *indexInfo;
                     Datum values[INDEX_MAX_KEYS];
                     bool isnull[INDEX_MAX_KEYS];
-                    int totalLeaves;
+					MerkleRoute route;
 
                     indexInfo = BuildIndexInfo(indexRel);
                     FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
-                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
+					merkle_compute_route(indexRel, values, isnull,
+										 indexInfo->ii_NumIndexKeyAttrs, &route);
 
                     pending[pendingCount].indexOid = indexOid;
-                    pending[pendingCount].oldLeafId =
-                        merkle_compute_partition_id(values, isnull,
-                                                    indexInfo->ii_NumIndexKeyAttrs,
-                                                    RelationGetDescr(indexRel),
-                                                    totalLeaves);
+					pending[pendingCount].oldLeafId = route.leaf_id;
                     pendingCount++;
                 }
 
@@ -1860,59 +1872,65 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
         if (oldSlot)
             ExecDropSingleTupleTableSlot(oldSlot);
         if (newSlot)
-            ExecDropSingleTupleTableSlot(newSlot);
-        if (indexList)
-            list_free(indexList);
-        if (pending)
-            pfree(pending);
-        RelationClose(relation);
-        bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_UPDATE_US,
-                               apply_update_start);
+			ExecDropSingleTupleTableSlot(newSlot);
+		if (indexList)
+			list_free(indexList);
+		if (pending != NULL)
+		{
+			pfree(pending);
+			pending = NULL;
+		}
+		RelationClose(relation);
+		bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_UPDATE_US,
+							   apply_update_start);
 #if SAFEDBG1
-        printf("safeDB %s : %s: %d ret %d tx %d tx %s doomed because of ww-conflict \n",
-               __FILE__, __FUNCTION__, __LINE__, result, activeTx->tx_id, activeTx->hash);
-        printf("safeDB %s : %s: %d   tmfd.xmax %d, tmfd.cmax %d  ww-conflict \n",
-               __FILE__, __FUNCTION__, __LINE__, tmfd.xmax, tmfd.cmax);
+		printf("safeDB %s : %s: %d ret %d tx %d tx %s doomed because of ww-conflict \n",
+			   __FILE__, __FUNCTION__, __LINE__, result, activeTx->tx_id, activeTx->hash);
+		printf("safeDB %s : %s: %d   tmfd.xmax %d, tmfd.cmax %d  ww-conflict \n",
+			   __FILE__, __FUNCTION__, __LINE__, tmfd.xmax, tmfd.cmax);
 #endif
-        return false;
-    }
+		return false;
+	}
 
-    if (update_indexes)
-        heap_apply_index_phase(relation, slot, false, false, HEAP_INDEX_NO_MERKLE);
+	if (update_indexes)
+		heap_apply_index_phase(relation, slot, false, false, HEAP_INDEX_NO_MERKLE);
 
-    /*
-     * Merkle UPDATE maintenance:
-     * Always apply Merkle delta, even for HOT (heap-only) updates where
-     * update_indexes is false. Merkle indexes hash full-row contents, so any
-     * UPDATE that changes data must be reflected in the tree.
-     *
-     * Important: leafing (key→leaf) may change for multi-key Merkle indexes
-     * (e.g. (ycsb_key, field1)). We therefore compute old and new leaf IDs
-     * from the OLD and NEW heap tuple images, not from the executor slot.
-     */
-    if (enable_merkle_index && hasOldHash && ItemPointerIsValid(&slot->tts_tid) &&
-        ItemPointerGetBlockNumberNoCheck(&slot->tts_tid) != InvalidBlockNumber)
-    {
-        uint64 merkle_update_start = bcdb_ptrace_timer_start();
-        /*
-         * Fetch NEW row image from heap and hash from that image so that
-         * merkle_verify (which hashes heap tuples) matches exactly.
-         */
-        newSlot = table_slot_create(relation, NULL);
-        if (!table_tuple_fetch_row_version(relation, &slot->tts_tid, SnapshotSelf, newSlot))
-        {
-            if (oldSlot)
-                ExecDropSingleTupleTableSlot(oldSlot);
-            if (newSlot)
-                ExecDropSingleTupleTableSlot(newSlot);
-            if (indexList)
-                list_free(indexList);
-            if (pending)
-                pfree(pending);
-            RelationClose(relation);
-            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_MERKLE_UPDATE_US,
-                                   merkle_update_start);
-            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_UPDATE_US,
+	/*
+	 * Merkle UPDATE maintenance:
+	 * Always apply Merkle delta, even for HOT (heap-only) updates where
+	 * update_indexes is false. Merkle indexes hash full-row contents, so any
+	 * UPDATE that changes data must be reflected in the tree.
+	 *
+	 * Important: leafing (key→leaf) may change for multi-key Merkle indexes
+	 * (e.g. (ycsb_key, field1)). We therefore compute old and new leaf IDs
+	 * from the OLD and NEW heap tuple images, not from the executor slot.
+	 */
+	if (enable_merkle_index && hasOldHash && ItemPointerIsValid(&slot->tts_tid) &&
+		ItemPointerGetBlockNumberNoCheck(&slot->tts_tid) != InvalidBlockNumber)
+	{
+		uint64 merkle_update_start = bcdb_ptrace_timer_start();
+		/*
+		 * Fetch NEW row image from heap and hash from that image so that
+		 * merkle_verify (which hashes heap tuples) matches exactly.
+		 */
+		newSlot = table_slot_create(relation, NULL);
+		if (!table_tuple_fetch_row_version(relation, &slot->tts_tid, SnapshotSelf, newSlot))
+		{
+			if (oldSlot)
+				ExecDropSingleTupleTableSlot(oldSlot);
+			if (newSlot)
+				ExecDropSingleTupleTableSlot(newSlot);
+			if (indexList)
+				list_free(indexList);
+			if (pending != NULL)
+			{
+				pfree(pending);
+				pending = NULL;
+			}
+			RelationClose(relation);
+			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_MERKLE_UPDATE_US,
+								   merkle_update_start);
+			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_UPDATE_US,
                                    apply_update_start);
             return false;
         }
@@ -1933,18 +1951,14 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
                     IndexInfo *indexInfo;
                     Datum values[INDEX_MAX_KEYS];
                     bool isnull[INDEX_MAX_KEYS];
-                    int totalLeaves;
-                    int newLeafId;
+					MerkleRoute route;
 
                     indexInfo = BuildIndexInfo(indexRel);
                     FormIndexDatum(indexInfo, newSlot, NULL, values, isnull);
-                    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
-                    newLeafId = merkle_compute_partition_id(values, isnull,
-                                                            indexInfo->ii_NumIndexKeyAttrs,
-                                                            RelationGetDescr(indexRel),
-                                                            totalLeaves);
+					merkle_compute_route(indexRel, values, isnull,
+										 indexInfo->ii_NumIndexKeyAttrs, &route);
 
-                    if (newLeafId == pending[i].oldLeafId)
+					if (route.leaf_id == pending[i].oldLeafId)
                     {
                         MerkleHash delta = oldHash;
                         merkle_hash_xor(&delta, &newHash);
@@ -1954,7 +1968,7 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
                     else
                     {
                         merkle_update_tree_path(indexRel, pending[i].oldLeafId, &oldHash, false);
-                        merkle_update_tree_path(indexRel, newLeafId, &newHash, true);
+						merkle_update_tree_path(indexRel, route.leaf_id, &newHash, true);
                         bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT, 2);
                     }
                 }
@@ -1966,19 +1980,22 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
                                merkle_update_start);
     }
 
-    if (oldSlot)
-        ExecDropSingleTupleTableSlot(oldSlot);
-    if (newSlot)
-        ExecDropSingleTupleTableSlot(newSlot);
-    if (indexList)
-        list_free(indexList);
-    if (pending)
-        pfree(pending);
+	if (oldSlot)
+		ExecDropSingleTupleTableSlot(oldSlot);
+	if (newSlot)
+		ExecDropSingleTupleTableSlot(newSlot);
+	if (indexList)
+		list_free(indexList);
+	if (pending != NULL)
+	{
+		pfree(pending);
+		pending = NULL;
+	}
 
-    RelationClose(relation);
-    bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_UPDATE_US,
-                           apply_update_start);
-    return true;
+	RelationClose(relation);
+	bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_UPDATE_US,
+						   apply_update_start);
+	return true;
 }
 
 bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid)
@@ -1992,20 +2009,20 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
     List *indexList = NIL;
     ListCell *lc;
     MerkleHash oldHash;
-    bool hasOldHash = false;
-    int pendingCount = 0;
-    int pendingCapacity = 0;
-    typedef struct PendingMerkleDelete
-    {
-        Oid indexOid;
-        int partitionId;
-    } PendingMerkleDelete;
-    PendingMerkleDelete *pending = NULL;
-    ItemPointerData currentTid;
-    bool oldSlotOwned = false;
+	bool hasOldHash = false;
+	int pendingCount = 0;
+	int pendingCapacity = 0;
+	typedef struct PendingMerkleDelete
+	{
+		Oid indexOid;
+		int partitionId;
+	} PendingMerkleDelete;
+	PendingMerkleDelete *pending = NULL;
+	ItemPointerData currentTid;
+	bool oldSlotOwned = false;
 
-    DEBUGMSG("[ZL] tx %s applying optim delete (rel: %d)", activeTx->hash, relOid);
-    bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_DELETE_COUNT, 1);
+	DEBUGMSG("[ZL] tx %s applying optim delete (rel: %d)", activeTx->hash, relOid);
+	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_DELETE_COUNT, 1);
 
     if (!enable_merkle_index)
     {
@@ -2072,35 +2089,42 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
         d_key = slot_getattr(oldSlot, 1, &d_isnull);
     }
 
-    if (hasOldHash)
-    {
-        indexList = RelationGetIndexList(relation);
-        pendingCapacity = list_length(indexList);
-        if (pendingCapacity > 0)
-            pending = palloc0(sizeof(PendingMerkleDelete) * pendingCapacity);
+	if (hasOldHash)
+	{
+		indexList = RelationGetIndexList(relation);
+		pendingCapacity = list_length(indexList);
+		if (pendingCapacity > 0)
+		{
+			/*
+			 * Allocate in a short-lived child context so that this array is
+			 * freed as soon as apply_optim_delete() returns, rather than
+			 * accumulating in TopTransactionContext for the duration of the
+			 * transaction.
+			 */
+			pending = (PendingMerkleDelete *) MemoryContextAllocZero(
+				TopTransactionContext,
+				sizeof(PendingMerkleDelete) * pendingCapacity);
+		}
 
-        foreach (lc, indexList)
-        {
-            Oid indexOid = lfirst_oid(lc);
-            Relation indexRel = index_open(indexOid, RowExclusiveLock);
+		foreach (lc, indexList)
+		{
+			Oid indexOid = lfirst_oid(lc);
+			Relation indexRel = index_open(indexOid, RowExclusiveLock);
 
             if (indexRel->rd_rel->relam == MERKLE_AM_OID)
             {
                 IndexInfo *indexInfo;
                 Datum values[INDEX_MAX_KEYS];
                 bool isnull[INDEX_MAX_KEYS];
-                int totalLeaves;
+					MerkleRoute route;
 
                 indexInfo = BuildIndexInfo(indexRel);
                 FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
-                merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
+				merkle_compute_route(indexRel, values, isnull,
+									 indexInfo->ii_NumIndexKeyAttrs, &route);
 
                 pending[pendingCount].indexOid = indexOid;
-                pending[pendingCount].partitionId =
-                    merkle_compute_partition_id(values, isnull,
-                                                indexInfo->ii_NumIndexKeyAttrs,
-                                                RelationGetDescr(indexRel),
-                                                totalLeaves);
+				pending[pendingCount].partitionId = route.leaf_id;
 
                 pendingCount++;
             }
@@ -2115,23 +2139,26 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
     result = bcdb_table_tuple_delete_step1(relation,
                                            &currentTid,
                                            cid,
-                                           &tmfd,
-                                           false,
-                                           NULL);
+										   &tmfd,
+										   false,
+										   NULL);
 
-    if (result != TM_Ok)
-    {
-        if (oldSlotOwned && oldSlot)
-            ExecDropSingleTupleTableSlot(oldSlot);
-        if (indexList)
-            list_free(indexList);
-        if (pending)
-            pfree(pending);
-        RelationClose(relation);
-        bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_DELETE_US,
-                               apply_delete_start);
-        return false;
-    }
+	if (result != TM_Ok)
+	{
+		if (oldSlotOwned && oldSlot)
+			ExecDropSingleTupleTableSlot(oldSlot);
+		if (indexList)
+			list_free(indexList);
+		if (pending != NULL)
+		{
+			pfree(pending);
+			pending = NULL;
+		}
+		RelationClose(relation);
+		bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_DELETE_US,
+							   apply_delete_start);
+		return false;
+	}
 
     if (hasOldHash)
     {
@@ -2151,17 +2178,20 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
                                merkle_update_start);
     }
 
-    if (oldSlotOwned && oldSlot)
-        ExecDropSingleTupleTableSlot(oldSlot);
-    if (indexList)
-        list_free(indexList);
-    if (pending)
-        pfree(pending);
+	if (oldSlotOwned && oldSlot)
+		ExecDropSingleTupleTableSlot(oldSlot);
+	if (indexList)
+		list_free(indexList);
+	if (pending != NULL)
+	{
+		pfree(pending);
+		pending = NULL;
+	}
 
-    RelationClose(relation);
-    bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_DELETE_US,
-                           apply_delete_start);
-    return true;
+	RelationClose(relation);
+	bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_DELETE_US,
+						   apply_delete_start);
+	return true;
 }
 
 /*
@@ -2384,18 +2414,15 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
                 IndexInfo *indexInfo;
                 Datum values[INDEX_MAX_KEYS];
                 bool isnull[INDEX_MAX_KEYS];
-                int totalLeaves;
+				MerkleRoute route;
 
                 indexInfo = BuildIndexInfo(indexRel);
                 FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
-                merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
+				merkle_compute_route(indexRel, values, isnull,
+									 indexInfo->ii_NumIndexKeyAttrs, &route);
 
                 pending[pendingCount].indexOid = indexOid;
-                pending[pendingCount].partitionId =
-                    merkle_compute_partition_id(values, isnull,
-                                                indexInfo->ii_NumIndexKeyAttrs,
-                                                RelationGetDescr(indexRel),
-                                                totalLeaves);
+				pending[pendingCount].partitionId = route.leaf_id;
 
                 pendingCount++;
             }

@@ -22,21 +22,25 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "catalog/indexing.h"
+#include "catalog/index.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_type.h"
+#include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "parser/parse_coerce.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "utils/builtins.h"
+#include "utils/array.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tuplestore.h"
 
 
 PG_FUNCTION_INFO_V1(merkle_leaf_id);
@@ -48,6 +52,9 @@ PG_FUNCTION_INFO_V1(merkle_leaf_tuples);
 PG_FUNCTION_INFO_V1(merkle_bucket_for_key);
 PG_FUNCTION_INFO_V1(merkle_get_node_hash);
 PG_FUNCTION_INFO_V1(merkle_get_child_hashes);
+PG_FUNCTION_INFO_V1(merkle_get_node_hashes);
+PG_FUNCTION_INFO_V1(merkle_get_children_batch);
+PG_FUNCTION_INFO_V1(merkle_get_leaf_members);
 PG_FUNCTION_INFO_V1(merkle_get_partition_root_hash);
 PG_FUNCTION_INFO_V1(merkle_get_partition_root_hashes);
 PG_FUNCTION_INFO_V1(merkle_recovery_profile_reset);
@@ -219,7 +226,6 @@ merkle_verify(PG_FUNCTION_ARGS)
     MerkleHash     *computedTree;
     bool            match = true;
     int             i;
-    TupleDesc       indexTupdesc;
     int             nkeys;
     int16          *indkey;         /* Heap column numbers for indexed keys */
     Datum          *keyValues;      /* Temporary storage for key values */
@@ -228,10 +234,8 @@ merkle_verify(PG_FUNCTION_ARGS)
     int             leavesPerPartition;
     int             nodesPerPartition;
     int             totalNodes;
-    int             totalLeaves;
     int             fanout;
     int             internalNodes;
-    int             leafStart;
     
     /* Find the Merkle index on this table */
     indexOid = find_merkle_index(relid);
@@ -247,13 +251,11 @@ merkle_verify(PG_FUNCTION_ARGS)
     
     /* Read tree configuration from metadata */
     merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition, &nodesPerPartition,
-                     &totalNodes, &totalLeaves, NULL, NULL, &fanout);
+					 &totalNodes, NULL, NULL, NULL, &fanout);
 
     internalNodes = nodesPerPartition - leavesPerPartition;
-    leafStart = internalNodes + 1;
     
     /* Get index key information */
-    indexTupdesc = RelationGetDescr(indexRel);
     nkeys = indexRel->rd_index->indnkeyatts;
     indkey = indexRel->rd_index->indkey.values;
     
@@ -280,10 +282,7 @@ merkle_verify(PG_FUNCTION_ARGS)
     while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
     {
         MerkleHash  hash;
-        int         leafId;
-        int         partitionId;
-        int         leafPos;
-        int         nodeInPartition;
+		MerkleRoute route;
         int         nodeIdx;
         
         /* Extract all indexed column values from heap tuple */
@@ -293,10 +292,7 @@ merkle_verify(PG_FUNCTION_ARGS)
             keyValues[i] = slot_getattr(slot, heapAttr, &keyNulls[i]);
         }
         
-        /* Compute partition ID using multi-column function */
-        leafId = merkle_compute_partition_id(keyValues, keyNulls,
-                                             nkeys, indexTupdesc,
-                                             totalLeaves);
+		merkle_compute_route(indexRel, keyValues, keyNulls, nkeys, &route);
         
         /* Compute hash of this row using the same code path as merkleInsert:
          * merkle_compute_row_hash() fetches via SnapshotSelf to match the
@@ -314,10 +310,8 @@ merkle_verify(PG_FUNCTION_ARGS)
          * This is equivalent to XORing the row hash into every ancestor on the
          * path, but avoids O(rows * log(leaves)) updates.
          */
-        partitionId = leafId / leavesPerPartition;
-        leafPos = leafId % leavesPerPartition;
-        nodeInPartition = leafStart + leafPos; /* 1-indexed */
-        nodeIdx = partitionId * nodesPerPartition + (nodeInPartition - 1);
+		nodeIdx = route.partition_id * nodesPerPartition +
+				  (route.node_in_partition - 1);
         merkle_hash_xor(&computedTree[nodeIdx], &hash);
     }
     
@@ -530,6 +524,10 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     heapRel = table_open(relid, AccessShareLock);
     indexRel = index_open(indexOid, AccessShareLock);
     heapTupdesc = RelationGetDescr(heapRel);
+
+	/* Validate on-disk/hash formats before exposing metadata. */
+	merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, NULL,
+					 NULL, NULL, NULL);
     
     /* Read metadata page */
     metabuf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
@@ -603,6 +601,9 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
                      "\"num_pages\": %d, "
                      "\"non_zero_nodes\": %d, "
                      "\"hash_bits\": %d, "
+					 "\"route_format_version\": %u, "
+					 "\"row_hash_format_version\": %u, "
+					 "\"crash_recovery\": \"reindex_required_after_unclean_shutdown\", "
                      "\"index_keys\": %s}",
                      meta->version,
                      meta->numPartitions,
@@ -613,6 +614,8 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
                      meta->numTreePages,
                      nonZeroNodes,
                      MERKLE_HASH_BITS,
+					 meta->routeFormatVersion,
+					 meta->rowHashFormatVersion,
                      keybuf.data);
     
     UnlockReleaseBuffer(metabuf);
@@ -688,6 +691,10 @@ merkle_node_hash(PG_FUNCTION_ARGS)
         
         funcctx = SRF_FIRSTCALL_INIT();
         oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		ereport(NOTICE,
+				(errmsg("merkle_node_hash() is a debug-only full node dump"),
+				 errhint("Use merkle_get_node_hash() or batched operational helpers for recovery.")));
         
         /* Find Merkle index */
         indexOid = find_merkle_index(relid);
@@ -841,9 +848,6 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         Relation        indexRel;
         TableScanDesc   scan;
         TupleTableSlot *slot;
-        Buffer          metabuf;
-        Page            metapage;
-        MerkleMetaPageData *meta;
         TupleDesc       tupdesc;
         TupleDesc       indexTupdesc;
         int             totalLeaves;
@@ -857,6 +861,10 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         
         funcctx = SRF_FIRSTCALL_INIT();
         oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		ereport(WARNING,
+				(errmsg("merkle_leaf_tuples() is a debug-only full heap scan"),
+				 errhint("Use merkle_get_leaf_members(index, leaf_id) for selective recovery.")));
         
         /* Find Merkle index */
         indexOid = find_merkle_index(relid);
@@ -869,13 +877,8 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         heapRel = table_open(relid, AccessShareLock);
         indexRel = index_open(indexOid, AccessShareLock);
         
-        /* Read metadata */
-        metabuf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
-        LockBuffer(metabuf, BUFFER_LOCK_SHARE);
-        metapage = BufferGetPage(metabuf);
-        meta = MerklePageGetMeta(metapage);
-        totalLeaves = meta->numPartitions * meta->leavesPerPartition;
-        UnlockReleaseBuffer(metabuf);
+		merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves,
+						 NULL, NULL, NULL);
         
         /* Get index key info */
         indexTupdesc = RelationGetDescr(indexRel);
@@ -931,64 +934,21 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
                     keyValues[k] = slot_getattr(slot, heapAttr, &keyNulls[k]);
                 }
             
-                /* Build key string for this tuple and compute leaf mapping */
+				/* Build a display string; routing itself has one implementation. */
                 resetStringInfo(&keyStr);
                 if (nkeys == 1)
                 {
-                    /* Single key - just show value */
-                    int64 keyval;
-                    
                     if (keyNulls[0])
-                    {
-                        leafId = 0;
                         appendStringInfoString(&keyStr, "NULL");
-                    }
                     else
                     {
                         char *str = OutputFunctionCall(&keyoutfuncs[0], keyValues[0]);
                         appendStringInfoString(&keyStr, str);
-                        
-                        switch (keytypes[0])
-                        {
-                            case INT2OID:
-                                keyval = (int64) DatumGetInt16(keyValues[0]);
-                                break;
-                            case INT4OID:
-                                keyval = (int64) DatumGetInt32(keyValues[0]);
-                                break;
-                            case INT8OID:
-                                keyval = DatumGetInt64(keyValues[0]);
-                                break;
-                            default:
-                                {
-                                    uint32 h = 0;
-                                    const unsigned char *p = (const unsigned char *) str;
-                                    
-                                    while (*p)
-                                        h = h * 31 + *p++;
-                                    
-                                    leafId = (int) (h % totalLeaves);
-                                    keyval = 0; /* keep compiler quiet */
-                                }
-                                break;
-                        }
-                        
-                        if (keytypes[0] == INT2OID || keytypes[0] == INT4OID || keytypes[0] == INT8OID)
-                        {
-                            if (keyval < 0)
-                                keyval = -keyval;
-                            leafId = (int) (keyval % totalLeaves);
-                        }
-                        
                         pfree(str);
                     }
                 }
                 else
                 {
-                    /* Multi-key - show as tuple (val1,val2,...) */
-                    uint64 hash = 0;
-                    static const char null_marker[] = "*null*";
-                    
                     appendStringInfoChar(&keyStr, '(');
                     for (k = 0; k < nkeys; k++)
                     {
@@ -996,31 +956,23 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
                             appendStringInfoChar(&keyStr, ',');
                         
                         if (keyNulls[k])
-                        {
-                            const unsigned char *p = (const unsigned char *) null_marker;
-                            
                             appendStringInfoString(&keyStr, "NULL");
-                            while (*p)
-                                hash = hash * 33 + *p++;
-                        }
                         else
                         {
                             char *str = OutputFunctionCall(&keyoutfuncs[k], keyValues[k]);
-                            const unsigned char *p = (const unsigned char *) str;
-                            
                             appendStringInfoString(&keyStr, str);
-                            
-                            hash = hash * 33 + (unsigned char) '*';
-                            while (*p)
-                                hash = hash * 33 + *p++;
-                            hash = hash * 33 + (unsigned char) '*';
-                            
                             pfree(str);
                         }
                     }
                     appendStringInfoChar(&keyStr, ')');
-                    
-                    leafId = (int) (hash % totalLeaves);
+				}
+
+				{
+					MerkleRoute route;
+
+					merkle_compute_route(indexRel, keyValues, keyNulls,
+										 nkeys, &route);
+					leafId = route.leaf_id;
                 }
             
                 /* Add to key list - no limit, show all keys */
@@ -1116,11 +1068,8 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
     Oid             relid;
     Oid             indexOid;
     Relation        indexRel;
-    int             leavesPerPartition;
-    int             nodesPerPartition;
-    int             leafId, partition, nodeInPartition;
+	MerkleRoute     route;
     TupleDesc       indexTupdesc;
-    int             totalLeaves;
     int             nkeys;
     int             nargs;
     Datum          *keyValues;
@@ -1146,10 +1095,6 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
     indexRel = index_open(indexOid, AccessShareLock);
     indexTupdesc = RelationGetDescr(indexRel);
     nkeys = indexRel->rd_index->indnkeyatts;
-    
-    /* Read tree configuration from metadata */
-    merkle_read_meta(indexRel, NULL, &leavesPerPartition, &nodesPerPartition, NULL,
-                     &totalLeaves, NULL, NULL, NULL);
     
     /* Check number of arguments provided (fcinfo->nargs includes table) */
     nargs = PG_NARGS() - 1;  /* Subtract table arg */
@@ -1211,14 +1156,7 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
             keyValues[i] = (Datum) 0;
     }
     
-    /* Compute global leaf ID */
-    leafId = merkle_compute_partition_id(keyValues, keyNulls,
-                                                nkeys, indexTupdesc,
-                                                totalLeaves);
-    
-    /* Calculate partition components */
-    partition = leafId / leavesPerPartition;
-    nodeInPartition = (leafId % leavesPerPartition) + (nodesPerPartition - leavesPerPartition + 1);
+	merkle_compute_route(indexRel, keyValues, keyNulls, nkeys, &route);
 
     /* Build result tuple */
     {
@@ -1231,9 +1169,9 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
         /* NOTE: get_call_result_type already returns a blessed descriptor,
          * so we should NOT call BlessTupleDesc() again to avoid reference leaks */
 
-        values[0] = Int32GetDatum(leafId);
-        values[1] = Int32GetDatum(partition);
-        values[2] = Int32GetDatum(nodeInPartition);
+		values[0] = Int32GetDatum(route.leaf_id);
+		values[1] = Int32GetDatum(route.partition_id);
+		values[2] = Int32GetDatum(route.node_in_partition);
 
         tuple = heap_form_tuple(tupdesc, values, nulls);
         
@@ -1258,13 +1196,12 @@ merkle_bucket_for_key(PG_FUNCTION_ARGS)
     Oid             indexOid;
     Relation        indexRel;
     TupleDesc       indexTupdesc;
-    int             totalLeaves;
     int             nkeys;
     int             nargs;
     Datum          *keyValues;
     bool           *keyNulls;
     int             i;
-    int             leafId;
+	MerkleRoute     route;
 
     if (PG_ARGISNULL(0))
         ereport(ERROR,
@@ -1282,9 +1219,6 @@ merkle_bucket_for_key(PG_FUNCTION_ARGS)
     indexRel = index_open(indexOid, AccessShareLock);
     indexTupdesc = RelationGetDescr(indexRel);
     nkeys = indexRel->rd_index->indnkeyatts;
-    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves,
-                     NULL, NULL, NULL);
-
     nargs = PG_NARGS() - 1;
     if (nargs != nkeys)
         ereport(ERROR,
@@ -1339,14 +1273,13 @@ merkle_bucket_for_key(PG_FUNCTION_ARGS)
             keyValues[i] = (Datum) 0;
     }
 
-    leafId = merkle_compute_partition_id(keyValues, keyNulls, nkeys,
-                                         indexTupdesc, totalLeaves);
+	merkle_compute_route(indexRel, keyValues, keyNulls, nkeys, &route);
 
     pfree(keyValues);
     pfree(keyNulls);
     index_close(indexRel, AccessShareLock);
 
-    PG_RETURN_INT64((int64) leafId);
+	PG_RETURN_INT64((int64) route.leaf_id);
 }
 
 Datum
@@ -1667,6 +1600,305 @@ merkle_get_child_hashes(PG_FUNCTION_ARGS)
 	}
 
 	SRF_RETURN_DONE(funcctx);
+}
+
+static Tuplestorestate *
+merkle_begin_materialized_srf(FunctionCallInfo fcinfo, TupleDesc *tupdesc)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	MemoryContext oldcontext;
+	Tuplestorestate *tupstore;
+
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
+		!(rsinfo->allowedModes & SFRM_Materialize) || rsinfo->expectedDesc == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("materialize mode is required for this Merkle function")));
+
+	oldcontext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	*tupdesc = CreateTupleDescCopy(rsinfo->expectedDesc);
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = *tupdesc;
+	MemoryContextSwitchTo(oldcontext);
+	return tupstore;
+}
+
+static void
+merkle_deconstruct_int4_array(ArrayType *array, Datum **values, bool **nulls,
+							  int *count, const char *argument_name)
+{
+	if (ARR_NDIM(array) > 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("%s must be a one-dimensional integer array", argument_name)));
+
+	deconstruct_array(array, INT4OID, sizeof(int32), true, 'i',
+					  values, nulls, count);
+}
+
+/* Batched paired lookup: partitions[i], node_in_partitions[i]. */
+Datum
+merkle_get_node_hashes(PG_FUNCTION_ARGS)
+{
+	Oid				relid = PG_GETARG_OID(0);
+	ArrayType	   *partition_array = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType	   *node_array = PG_GETARG_ARRAYTYPE_P(2);
+	Datum		   *partitions;
+	Datum		   *nodes;
+	bool		   *partition_nulls;
+	bool		   *node_nulls;
+	int				partition_count;
+	int				node_count;
+	Oid				indexOid;
+	Relation		indexRel;
+	MerkleGeometry geometry;
+	int				nodesPerPage;
+	int				numTreePages;
+	TupleDesc		tupdesc;
+	Tuplestorestate *tupstore;
+	int				i;
+
+	merkle_deconstruct_int4_array(partition_array, &partitions,
+								&partition_nulls, &partition_count, "partitions");
+	merkle_deconstruct_int4_array(node_array, &nodes, &node_nulls,
+								&node_count, "node_in_partitions");
+	if (partition_count != node_count)
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("partitions and node_in_partitions must have equal lengths")));
+
+	indexOid = resolve_merkle_index_arg(relid);
+	indexRel = index_open(indexOid, AccessShareLock);
+	merkle_geometry_from_index(indexRel, &geometry);
+	merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, NULL,
+					 &nodesPerPage, &numTreePages, NULL);
+	tupstore = merkle_begin_materialized_srf(fcinfo, &tupdesc);
+
+	for (i = 0; i < partition_count; i++)
+	{
+		MerkleHash hash;
+		Datum		out[3];
+		bool		outnulls[3] = {false, false, false};
+		int			partition;
+		int			node;
+		int			global;
+		char	   *hex;
+
+		if (partition_nulls[i] || node_nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("batched Merkle node coordinates cannot contain nulls")));
+		partition = DatumGetInt32(partitions[i]);
+		node = DatumGetInt32(nodes[i]);
+		global = merkle_geometry_global_node(&geometry, partition, node);
+		read_merkle_node_hash_with_meta(indexRel, global, geometry.total_nodes,
+									nodesPerPage, numTreePages, &hash);
+		hex = merkle_hash_to_hex(&hash);
+		out[0] = Int32GetDatum(partition);
+		out[1] = Int32GetDatum(node);
+		out[2] = CStringGetTextDatum(hex);
+		tuplestore_putvalues(tupstore, tupdesc, out, outnulls);
+		pfree(hex);
+	}
+
+	index_close(indexRel, AccessShareLock);
+	tuplestore_donestoring(tupstore);
+	PG_RETURN_NULL();
+}
+
+/* Batched child lookup for paired parent coordinates. */
+Datum
+merkle_get_children_batch(PG_FUNCTION_ARGS)
+{
+	Oid				relid = PG_GETARG_OID(0);
+	ArrayType	   *partition_array = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType	   *node_array = PG_GETARG_ARRAYTYPE_P(2);
+	Datum		   *partitions;
+	Datum		   *nodes;
+	bool		   *partition_nulls;
+	bool		   *node_nulls;
+	int				partition_count;
+	int				node_count;
+	Oid				indexOid;
+	Relation		indexRel;
+	MerkleGeometry geometry;
+	int				nodesPerPage;
+	int				numTreePages;
+	TupleDesc		tupdesc;
+	Tuplestorestate *tupstore;
+	int				i;
+	int				children_returned = 0;
+	bool			profile_enabled = merkle_recovery_profile_enabled;
+	instr_time		start_time;
+	instr_time		elapsed_time;
+
+	if (profile_enabled)
+		INSTR_TIME_SET_CURRENT(start_time);
+
+	merkle_deconstruct_int4_array(partition_array, &partitions,
+								&partition_nulls, &partition_count, "partitions");
+	merkle_deconstruct_int4_array(node_array, &nodes, &node_nulls,
+								&node_count, "node_in_partitions");
+	if (partition_count != node_count)
+		ereport(ERROR,
+				(errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+				 errmsg("partitions and node_in_partitions must have equal lengths")));
+
+	indexOid = resolve_merkle_index_arg(relid);
+	indexRel = index_open(indexOid, AccessShareLock);
+	merkle_geometry_from_index(indexRel, &geometry);
+	merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, NULL,
+					 &nodesPerPage, &numTreePages, NULL);
+	tupstore = merkle_begin_materialized_srf(fcinfo, &tupdesc);
+
+	for (i = 0; i < partition_count; i++)
+	{
+		int partition;
+		int parent;
+		int ordinal;
+
+		if (partition_nulls[i] || node_nulls[i])
+			ereport(ERROR,
+					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+					 errmsg("batched Merkle node coordinates cannot contain nulls")));
+		partition = DatumGetInt32(partitions[i]);
+		parent = DatumGetInt32(nodes[i]);
+		(void) merkle_geometry_global_node(&geometry, partition, parent);
+
+		for (ordinal = 0; ordinal < geometry.fanout; ordinal++)
+		{
+			int child = merkle_geometry_child_node(&geometry, parent, ordinal);
+			int global;
+			MerkleHash hash;
+			Datum out[4];
+			bool outnulls[4] = {false, false, false, false};
+			char *hex;
+
+			if (child == 0)
+				continue;
+			global = merkle_geometry_global_node(&geometry, partition, child);
+			read_merkle_node_hash_with_meta(indexRel, global,
+										geometry.total_nodes, nodesPerPage,
+										numTreePages, &hash);
+			hex = merkle_hash_to_hex(&hash);
+			out[0] = Int32GetDatum(partition);
+			out[1] = Int32GetDatum(parent);
+			out[2] = Int32GetDatum(child);
+			out[3] = CStringGetTextDatum(hex);
+			tuplestore_putvalues(tupstore, tupdesc, out, outnulls);
+			pfree(hex);
+			children_returned++;
+		}
+	}
+	if (profile_enabled)
+	{
+		INSTR_TIME_SET_CURRENT(elapsed_time);
+		INSTR_TIME_SUBTRACT(elapsed_time, start_time);
+		merkle_recovery_profile_state.child_hash_helper_calls++;
+		merkle_recovery_profile_state.child_hash_nodes_returned +=
+			children_returned;
+		merkle_recovery_profile_state.child_hash_helper_us +=
+			INSTR_TIME_GET_MICROSEC(elapsed_time);
+	}
+
+	index_close(indexRel, AccessShareLock);
+	tuplestore_donestoring(tupstore);
+	PG_RETURN_NULL();
+}
+
+/*
+ * Selective leaf membership.  The generated predicate exactly matches the
+ * supported functional B-tree bucket expression, allowing an index scan.
+ */
+Datum
+merkle_get_leaf_members(PG_FUNCTION_ARGS)
+{
+	Oid				relid = PG_GETARG_OID(0);
+	int32			leaf_id = PG_GETARG_INT32(1);
+	Oid				indexOid;
+	Oid				heapOid;
+	Relation		indexRel;
+	Relation		heapRel;
+	MerkleGeometry geometry;
+	StringInfoData	columns;
+	StringInfoData	query;
+	char		   *qualified_heap;
+	TupleDesc		tupdesc;
+	Tuplestorestate *tupstore;
+	Oid				argtypes[1] = {INT4OID};
+	Datum			args[1];
+	int				i;
+	int				spi_result;
+
+	indexOid = resolve_merkle_index_arg(relid);
+	indexRel = index_open(indexOid, AccessShareLock);
+	merkle_geometry_from_index(indexRel, &geometry);
+	if (leaf_id < 0 || leaf_id >= geometry.total_leaves)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Merkle leaf ID %d is out of range [0, %d)",
+						leaf_id, geometry.total_leaves)));
+
+	heapOid = IndexGetRelation(indexOid, false);
+	heapRel = table_open(heapOid, AccessShareLock);
+	qualified_heap = quote_qualified_identifier(
+		get_namespace_name(RelationGetNamespace(heapRel)),
+		RelationGetRelationName(heapRel));
+	initStringInfo(&columns);
+	for (i = 0; i < indexRel->rd_index->indnkeyatts; i++)
+	{
+		AttrNumber attnum = indexRel->rd_index->indkey.values[i];
+
+		if (attnum <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("merkle_get_leaf_members does not support expression index keys")));
+		if (i > 0)
+			appendStringInfoString(&columns, ", ");
+		appendStringInfoString(&columns,
+			quote_identifier(NameStr(TupleDescAttr(RelationGetDescr(heapRel),
+												attnum - 1)->attname)));
+	}
+
+	initStringInfo(&query);
+	appendStringInfo(&query,
+		"SELECT ctid::text, ROW(%s)::text FROM %s "
+		"WHERE merkle_bucket_for_key(%u::regclass, %s) = $1",
+		columns.data, qualified_heap, indexOid, columns.data);
+
+	tupstore = merkle_begin_materialized_srf(fcinfo, &tupdesc);
+	args[0] = Int32GetDatum(leaf_id);
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed in merkle_get_leaf_members");
+	spi_result = SPI_execute_with_args(query.data, 1, argtypes, args, NULL,
+								   true, 0);
+	if (spi_result != SPI_OK_SELECT)
+		elog(ERROR, "selective Merkle leaf lookup failed: SPI result %d", spi_result);
+
+	for (i = 0; i < (int) SPI_processed; i++)
+	{
+		HeapTuple spi_tuple = SPI_tuptable->vals[i];
+		char *tid_text = SPI_getvalue(spi_tuple, SPI_tuptable->tupdesc, 1);
+		char *key_text = SPI_getvalue(spi_tuple, SPI_tuptable->tupdesc, 2);
+		Datum out[2];
+		bool outnulls[2] = {false, false};
+
+		out[0] = CStringGetTextDatum(tid_text);
+		out[1] = CStringGetTextDatum(key_text);
+		tuplestore_putvalues(tupstore, tupdesc, out, outnulls);
+		pfree(tid_text);
+		pfree(key_text);
+	}
+
+	SPI_finish();
+	tuplestore_donestoring(tupstore);
+	table_close(heapRel, AccessShareLock);
+	index_close(indexRel, AccessShareLock);
+	pfree(columns.data);
+	pfree(query.data);
+	PG_RETURN_NULL();
 }
 
 Datum

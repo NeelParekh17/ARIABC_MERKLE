@@ -203,6 +203,13 @@ merkle_xact_callback(XactEvent event, void *arg)
 
     (void) arg;
 
+	if (event == XACT_EVENT_PRE_PREPARE && pendingOps != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("prepared transactions are not supported after Merkle index updates"),
+				 errdetail("Merkle rollback state is backend-local and cannot be transferred to a prepared transaction."),
+				 errhint("Commit or roll back this transaction normally; use REINDEX after an unclean server shutdown.")));
+
     /*
      * IMPORTANT: We must emit the report at PRE_COMMIT, not COMMIT.
      *
@@ -246,9 +253,8 @@ merkle_xact_callback(XactEvent event, void *arg)
     else if (event == XACT_EVENT_PREPARE)
     {
         /*
-         * Two-phase commit is not currently supported for Merkle undo state.
-         * Clear any in-memory pending ops to avoid leaving a dangling pointer
-         * after TopTransactionContext is reset.
+		 * PRE_PREPARE rejected transactions with Merkle mutations, so only
+		 * read-only Merkle use can reach this event.
          */
         list_free_deep(pendingOps);
         pendingOps = NIL;
@@ -767,26 +773,95 @@ merkle_hash_to_hex(const MerkleHash *hash)
     return result;
 }
 
+static void
+merkle_hash_uint32(blake3_hasher *hasher, uint32 value)
+{
+	uint8		bytes[4];
+
+	bytes[0] = (uint8) (value >> 24);
+	bytes[1] = (uint8) (value >> 16);
+	bytes[2] = (uint8) (value >> 8);
+	bytes[3] = (uint8) value;
+	blake3_hasher_update(hasher, bytes, sizeof(bytes));
+}
+
 /*
- * merkle_compute_row_hash() - Compute the integrity hash for a single row.
- *
- * This function handles the "hashing the entire row" part of the Merkle index.
- * It iterates over every column in the heap tuple (row), converts it to its
- * text representation, concatenates them all with delimiters, and then computes
- * a BLAKE3 hash of this long string.
- *
- * The resulting 256-bit hash is what gets stored in the Merkle tree leaves.
- *
- * NOTE: This relies on the standard type output functions. If a type's output
- * logic changes, the hash will change, causing verification failures.
+ * Hash one materialized row using a versioned, length-prefixed binary format.
+ * Type send functions produce PostgreSQL's canonical wire representation and
+ * therefore do not depend on TimeZone, DateStyle, locale, or output GUCs.
+ */
+static void
+merkle_hash_slot_canonical(Relation heapRel, TupleTableSlot *slot,
+						   MerkleHash *result)
+{
+	TupleDesc		tupdesc = RelationGetDescr(heapRel);
+	blake3_hasher	hasher;
+	int				i;
+	uint32			live_attributes = 0;
+	static const uint8 magic[] = {'A', 'R', 'I', 'A', 'M', 'R', 'K', 'L'};
+
+	if (slot == NULL || TTS_EMPTY(slot))
+	{
+		merkle_hash_zero(result);
+		return;
+	}
+
+	for (i = 0; i < tupdesc->natts; i++)
+		if (!TupleDescAttr(tupdesc, i)->attisdropped)
+			live_attributes++;
+
+	blake3_hasher_init(&hasher);
+	blake3_hasher_update(&hasher, magic, sizeof(magic));
+	merkle_hash_uint32(&hasher, MERKLE_ROW_HASH_FORMAT_VERSION);
+	merkle_hash_uint32(&hasher, live_attributes);
+
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		Datum		val;
+		bool		isnull;
+		uint8		null_flag;
+
+		if (attr->attisdropped)
+			continue;
+
+		/* Schema descriptor: physical attribute, type identity, and typmod. */
+		merkle_hash_uint32(&hasher, (uint32) attr->attnum);
+		merkle_hash_uint32(&hasher, (uint32) attr->atttypid);
+		merkle_hash_uint32(&hasher, (uint32) attr->atttypmod);
+
+		val = slot_getattr(slot, i + 1, &isnull);
+		null_flag = isnull ? 1 : 0;
+		blake3_hasher_update(&hasher, &null_flag, sizeof(null_flag));
+
+		if (!isnull)
+		{
+			Oid			typsend;
+			bool		typisvarlena;
+			bytea	   *encoded;
+			uint32		length;
+
+			getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+			encoded = OidSendFunctionCall(typsend, val);
+			length = (uint32) VARSIZE_ANY_EXHDR(encoded);
+			merkle_hash_uint32(&hasher, length);
+			if (length > 0)
+				blake3_hasher_update(&hasher, VARDATA_ANY(encoded), length);
+			pfree(encoded);
+		}
+	}
+
+	blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+}
+
+/*
+ * merkle_compute_row_hash() - Fetch and canonically hash one heap row.
  */
 void
 merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 {
 	TupleDesc		tupdesc;
 	TupleTableSlot *slot = NULL;
-	blake3_hasher	hasher;
-	int				i;
 	bool			profile_enabled = merkle_recovery_profile_enabled;
 	instr_time		start_time;
 	instr_time		elapsed_time;
@@ -826,40 +901,7 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 			merkle_hash_zero(result);
 		}
 		else
-		{
-			blake3_hasher_init(&hasher);
-
-			for (i = 0; i < tupdesc->natts; i++)
-			{
-				Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-				Datum		val;
-				bool		isnull;
-				Oid			typoutput;
-				bool		typIsVarlena;
-				char	   *str;
-
-				if (attr->attisdropped)
-					continue;
-
-				val = slot_getattr(slot, i + 1, &isnull);
-
-				if (isnull)
-				{
-					static const char null_marker[] = "*null*";
-					blake3_hasher_update(&hasher, null_marker, sizeof(null_marker) - 1);
-				}
-				else
-				{
-					getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
-					str = OidOutputFunctionCall(typoutput, val);
-					blake3_hasher_update(&hasher, "*", 1);
-					blake3_hasher_update(&hasher, str, strlen(str));
-					pfree(str);
-				}
-			}
-
-			blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
-		}
+			merkle_hash_slot_canonical(heapRel, slot, result);
 	}
 	PG_CATCH();
 	{
@@ -899,9 +941,6 @@ profile_done:
 void
 merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *result)
 {
-	TupleDesc		tupdesc;
-	blake3_hasher	hasher;
-	int				i;
 	bool			profile_enabled = merkle_recovery_profile_enabled;
 	instr_time		start_time;
 	instr_time		elapsed_time;
@@ -912,47 +951,8 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
 		merkle_recovery_profile_state.row_hash_compute_calls++;
 	}
 
-	if (slot == NULL || TTS_EMPTY(slot))
-	{
-		merkle_hash_zero(result);
-		goto profile_done;
-	}
+	merkle_hash_slot_canonical(heapRel, slot, result);
 
-	tupdesc = RelationGetDescr(heapRel);
-	blake3_hasher_init(&hasher);
-
-	for (i = 0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-		Datum		val;
-		bool		isnull;
-		Oid			typoutput;
-		bool		typIsVarlena;
-		char	   *str;
-
-		if (attr->attisdropped)
-			continue;
-
-		val = slot_getattr(slot, i + 1, &isnull);
-
-		if (isnull)
-		{
-			static const char null_marker[] = "*null*";
-			blake3_hasher_update(&hasher, null_marker, sizeof(null_marker) - 1);
-		}
-		else
-		{
-			getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
-			str = OidOutputFunctionCall(typoutput, val);
-			blake3_hasher_update(&hasher, "*", 1);
-			blake3_hasher_update(&hasher, str, strlen(str));
-			pfree(str);
-		}
-	}
-
-	blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
-
-profile_done:
 	if (profile_enabled)
 	{
 		INSTR_TIME_SET_CURRENT(elapsed_time);
@@ -963,143 +963,169 @@ profile_done:
 }
 
 /*
- * merkle_compute_partition_id_single() - Internal helper for single-key partition
+ * merkle_compute_canonical_route_digest() - Uniform BLAKE3-256 routing digest.
  *
- * Uses modular arithmetic to distribute keys across leaves:
- * pid = (key * TREE_BASE) % TOTAL_LEAVES
+ * All key types (integers, text, composite, NULL) are routed through a
+ * versioned, length-prefixed binary-send stream hashed with BLAKE3.  This
+ * produces a uniform 256-bit digest from which:
+ *
+ *   static leaf  = uint64(first 8 digest bytes) % total_leaves
+ *   dynamic bits = full 256-bit digest consumed in fixed groups
+ *
+ * INTEGER KEYS: earlier versions used abs(key) % total_leaves directly, which
+ * was incompatible with a future dynamic prefix tree (sequential keys share
+ * high bits).  Route format version 2 removes that special path.
  */
-static int
-merkle_compute_partition_id_single(Datum key, Oid keytype, int numLeaves)
+static void
+merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
+									  TupleDesc tupdesc, uint8 digest[MERKLE_HASH_BYTES])
 {
-    int64   keyval;
-    int     pid;
-    
-    /* Safety check: prevent division by zero */
-    if (numLeaves <= 0)
-        return 0;
-    
-    /*
-     * Convert key to integer for partition calculation.
-     * For non-integer types, we hash the key value.
-     */
-    switch (keytype)
-    {
-        case INT2OID:
-            keyval = DatumGetInt16(key);
-            break;
-        case INT4OID:
-            keyval = DatumGetInt32(key);
-            break;
-        case INT8OID:
-            keyval = DatumGetInt64(key);
-            break;
-        default:
-            {
-                /*
-                 * For other types, compute a hash of the output string
-                 * and use that as the key value.
-                 */
-                Oid         typoutput;
-                bool        typIsVarlena;
-                char       *str;
-                uint32      hash = 0;
-                char       *p;
-                
-                getTypeOutputInfo(keytype, &typoutput, &typIsVarlena);
-                str = OidOutputFunctionCall(typoutput, key);
-                
-                /* Simple string hash */
-                for (p = str; *p != '\0'; p++)
-                    hash = hash * 31 + (unsigned char) *p;
-                
-                pfree(str);
-                keyval = (int64) hash;
-            }
-            break;
-    }
-    
-    /* Ensure positive value */
-    if (keyval < 0)
-        keyval = -keyval;
-    
-    /* Compute partition ID */
-    pid = (int) (keyval % numLeaves);
-    
-    return pid;
+	blake3_hasher hasher;
+	int			i;
+	static const uint8 magic[] = {'A', 'R', 'I', 'A', 'R', 'O', 'U', 'T'};
+
+	blake3_hasher_init(&hasher);
+	blake3_hasher_update(&hasher, magic, sizeof(magic));
+	merkle_hash_uint32(&hasher, MERKLE_ROUTE_FORMAT_VERSION);
+	merkle_hash_uint32(&hasher, (uint32) nkeys);
+
+	for (i = 0; i < nkeys; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		uint8		null_flag = isnull[i] ? 1 : 0;
+
+		merkle_hash_uint32(&hasher, (uint32) (i + 1));
+		merkle_hash_uint32(&hasher, (uint32) attr->atttypid);
+		merkle_hash_uint32(&hasher, (uint32) attr->atttypmod);
+		blake3_hasher_update(&hasher, &null_flag, sizeof(null_flag));
+
+		if (!isnull[i])
+		{
+			Oid			typsend;
+			bool		typisvarlena;
+			bytea	   *encoded;
+			uint32		length;
+
+			getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+			encoded = OidSendFunctionCall(typsend, values[i]);
+			length = (uint32) VARSIZE_ANY_EXHDR(encoded);
+			merkle_hash_uint32(&hasher, length);
+			if (length > 0)
+			{
+				blake3_hasher_update(&hasher, VARDATA_ANY(encoded), length);
+			}
+			pfree(encoded);
+		}
+	}
+
+	blake3_hasher_finalize(&hasher, digest, MERKLE_HASH_BYTES);
 }
 
 /*
- * merkle_compute_partition_id() - Determine which leaf a row maps to.
- *
- * This logic decides the "position" of a row in the Merkle tree.
- * The index key(s) are hashed (modulo total_leaves) to pick a leaf index.
- * 
- * - Single-key optimization: If the key is an integer, we use modular arithmetic directly
- *   for better distribution.
- * - Multi-key/Non-integer: We stringify the keys, hash them, and then modulo.
- *
- * Important: This mapping must be deterministic!
+ * merkle_geometry_from_index() - Load and validate one authoritative geometry.
  */
-int
-merkle_compute_partition_id(Datum *values, bool *isnull, int nkeys,
-                            TupleDesc tupdesc, int numLeaves)
+void
+merkle_geometry_from_index(Relation indexRel, MerkleGeometry *geometry)
 {
-    uint64      hash = 0;
-    int         i;
-    
-    /* Safety check: prevent division by zero */
-    if (numLeaves <= 0)
-        return 0;
-    
-    /* If only one key, use the optimized single-key path */
-    if (nkeys == 1)
-    {
-        if (isnull[0])
-            return 0;
-        return merkle_compute_partition_id_single(values[0], 
-                   TupleDescAttr(tupdesc, 0)->atttypid, numLeaves);
-    }
+	if (geometry == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("merkle geometry output cannot be null")));
 
-    /*
-     * Multi-key: hash deterministically using djb2 over the same byte stream
-     * that the previous implementation built via StringInfo:
-     *   NULL   -> "*null*"
-     *   value  -> "*" + typoutput(value) + "*"
-     *
-     * Avoid building the concatenated string to reduce allocations and a
-     * second pass over the bytes.
-     */
-    for (i = 0; i < nkeys; i++)
-    {
-        if (isnull[i])
-        {
-            static const char null_marker[] = "*null*";
-            const unsigned char *p = (const unsigned char *) null_marker;
+	merkle_read_meta(indexRel, &geometry->num_partitions,
+					 &geometry->leaves_per_partition,
+					 &geometry->nodes_per_partition,
+					 &geometry->total_nodes, &geometry->total_leaves,
+					 NULL, NULL, &geometry->fanout);
+	geometry->leaf_start = geometry->nodes_per_partition -
+		geometry->leaves_per_partition + 1;
+}
 
-            while (*p)
-                hash = hash * 33 + *p++;
-        }
-        else
-        {
-            Oid typoutput;
-            bool typIsVarlena;
-            char *str;
-            Oid atttypid = TupleDescAttr(tupdesc, i)->atttypid;
-            const unsigned char *p;
+int
+merkle_geometry_global_node(const MerkleGeometry *geometry, int partition,
+							int node_in_partition)
+{
+	if (geometry == NULL || partition < 0 ||
+		partition >= geometry->num_partitions || node_in_partition < 1 ||
+		node_in_partition > geometry->nodes_per_partition)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid Merkle node coordinates (%d, %d)",
+						partition, node_in_partition)));
 
-            getTypeOutputInfo(atttypid, &typoutput, &typIsVarlena);
-            str = OidOutputFunctionCall(typoutput, values[i]);
+	return partition * geometry->nodes_per_partition + node_in_partition - 1;
+}
 
-            hash = hash * 33 + (unsigned char) '*';
-            for (p = (const unsigned char *) str; *p != '\0'; p++)
-                hash = hash * 33 + *p;
-            hash = hash * 33 + (unsigned char) '*';
+int
+merkle_geometry_leaf_node(const MerkleGeometry *geometry, int leaf_id)
+{
+	if (geometry == NULL || leaf_id < 0 || leaf_id >= geometry->total_leaves)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Merkle leaf ID %d is out of range", leaf_id)));
 
-            pfree(str);
-        }
-    }
+	return geometry->leaf_start + (leaf_id % geometry->leaves_per_partition);
+}
 
-    return (int)(hash % numLeaves);
+int
+merkle_geometry_parent_node(const MerkleGeometry *geometry,
+							int node_in_partition)
+{
+	if (geometry == NULL || node_in_partition <= 1 ||
+		node_in_partition > geometry->nodes_per_partition)
+		return 0;
+	return (node_in_partition + geometry->fanout - 2) / geometry->fanout;
+}
+
+int
+merkle_geometry_child_node(const MerkleGeometry *geometry,
+						   int node_in_partition, int child_ordinal)
+{
+	int child;
+
+	if (geometry == NULL || node_in_partition < 1 ||
+		node_in_partition >= geometry->leaf_start || child_ordinal < 0 ||
+		child_ordinal >= geometry->fanout)
+		return 0;
+	child = geometry->fanout * (node_in_partition - 1) + child_ordinal + 2;
+	return child <= geometry->nodes_per_partition ? child : 0;
+}
+
+/*
+ * merkle_compute_route() - Single relation-aware routing entry point.
+ *
+ * All key types use uniform BLAKE3-256 routing (route format version 2).
+ * The 64-bit static_route_value is derived from the first 8 bytes of the digest;
+ * the full 256-bit digest is available for future dynamic tree traversal.
+ */
+void
+merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
+					 MerkleRoute *result)
+{
+	MerkleGeometry geometry;
+	TupleDesc		tupdesc;
+	uint64			static_route_value = 0;
+	int				i;
+
+	if (result == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("merkle route output cannot be null")));
+
+	merkle_geometry_from_index(indexRel, &geometry);
+	tupdesc = RelationGetDescr(indexRel);
+
+	/* Uniform BLAKE3 routing for all key types including integers. */
+	merkle_compute_canonical_route_digest(values, isnull, nkeys, tupdesc, result->route_digest);
+
+	for (i = 0; i < 8; i++)
+		static_route_value = (static_route_value << 8) | result->route_digest[i];
+
+	result->static_route_value = static_route_value;
+	result->leaf_id = (int) (static_route_value % (uint64) geometry.total_leaves);
+	result->partition_id = result->leaf_id / geometry.leaves_per_partition;
+	result->node_in_partition = merkle_geometry_leaf_node(&geometry,
+													 result->leaf_id);
 }
 
 /*
@@ -1363,6 +1389,26 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
     LockBuffer(buf, BUFFER_LOCK_SHARE);
     page = BufferGetPage(buf);
     meta = MerklePageGetMeta(page);
+
+	if (meta->version != MERKLE_VERSION ||
+		meta->routeFormatVersion != MERKLE_ROUTE_FORMAT_VERSION ||
+		meta->rowHashFormatVersion != MERKLE_ROW_HASH_FORMAT_VERSION)
+	{
+		uint32 stored_version = meta->version;
+		uint32 stored_route = meta->routeFormatVersion;
+		uint32 stored_row_hash = meta->rowHashFormatVersion;
+
+		UnlockReleaseBuffer(buf);
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("Merkle index \"%s\" uses an incompatible format",
+						RelationGetRelationName(indexRel)),
+				 errdetail("index version=%u route format=%u row-hash format=%u; server requires version=%u route format=%u row-hash format=%u",
+						   stored_version, stored_route, stored_row_hash,
+						   MERKLE_VERSION, MERKLE_ROUTE_FORMAT_VERSION,
+						   MERKLE_ROW_HASH_FORMAT_VERSION),
+				 errhint("REINDEX the Merkle index before using it.")));
+	}
     
     /* Validate metadata integrity - corrupted/uninitialized values cause crashes */
     if (meta->numPartitions <= 0 || meta->leavesPerPartition <= 0 ||
@@ -1531,6 +1577,8 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
     meta->nodesPerPage = nodesPerPage;
     meta->numTreePages = numTreePages;
     meta->fanout = fanout;
+	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
+	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
     
     MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);
