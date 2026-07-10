@@ -205,6 +205,8 @@ CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)
 	ListCell   *lc;
 	TupleTableSlot *slot;
 	MerkleHash  hash;
+	bool		hash_ready = false;
+	bool		has_merkle_index = false;
 	int			maxItems;
 
 	plan.count = 0;
@@ -221,6 +223,24 @@ CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)
 		ItemPointerGetBlockNumberNoCheck(tupleid) == InvalidBlockNumber)
 		return plan;
 
+	/* Avoid fetching and hashing rows for ordinary PostgreSQL tables. */
+	indexList = RelationGetIndexList(heapRel);
+	foreach(lc, indexList)
+	{
+		Relation indexRel = index_open(lfirst_oid(lc), AccessShareLock);
+
+		has_merkle_index = (indexRel->rd_rel->relam == MERKLE_AM_OID);
+		index_close(indexRel, AccessShareLock);
+		if (has_merkle_index)
+			break;
+	}
+	if (!has_merkle_index)
+	{
+		list_free(indexList);
+		plan.ready = true;
+		return plan;
+	}
+
 	slot = table_slot_create(heapRel, NULL);
 	if (!table_tuple_fetch_row_version(heapRel, tupleid, SnapshotSelf, slot))
 	{
@@ -228,15 +248,6 @@ CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)
 		return plan;
 	}
 
-	merkle_compute_slot_hash(heapRel, slot, &hash);
-	if (merkle_hash_is_zero(&hash))
-	{
-		ExecDropSingleTupleTableSlot(slot);
-		plan.ready = true;
-		return plan;
-	}
-
-	indexList = RelationGetIndexList(heapRel);
 	maxItems = list_length(indexList);
 	if (maxItems > 0)
 		plan.items = (MerkleDeleteDelta *) palloc0(sizeof(MerkleDeleteDelta) * maxItems);
@@ -252,19 +263,26 @@ CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)
 			IndexInfo  *indexInfo;
 			Datum       values[INDEX_MAX_KEYS];
 			bool        isnull[INDEX_MAX_KEYS];
-			int         totalLeaves;
-			int         partitionId;
+			MerkleRoute route;
+
+			if (!hash_ready)
+			{
+				merkle_compute_slot_hash(heapRel, slot, &hash);
+				if (merkle_hash_is_zero(&hash))
+				{
+					index_close(indexRel, RowExclusiveLock);
+					break;
+				}
+				hash_ready = true;
+			}
 
 			indexInfo = BuildIndexInfo(indexRel);
 			FormIndexDatum(indexInfo, slot, NULL, values, isnull);
-			merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
-			partitionId = merkle_compute_partition_id(values, isnull,
-											 indexInfo->ii_NumIndexKeyAttrs,
-											 RelationGetDescr(indexRel),
-											 totalLeaves);
+			merkle_compute_route(indexRel, values, isnull,
+							 indexInfo->ii_NumIndexKeyAttrs, &route);
 
 			plan.items[plan.count].indexOid = indexOid;
-			plan.items[plan.count].partitionId = partitionId;
+			plan.items[plan.count].partitionId = route.leaf_id;
 			plan.items[plan.count].hash = hash;
 			plan.count++;
 		}
@@ -339,23 +357,17 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
         if (indexRel->rd_rel->relam == MERKLE_AM_OID)
         {
             MerkleHash      hash;
-            TupleDesc       indexTupdesc;
-            int             partitionId;
             TupleTableSlot *slot;
             int             nkeys;
             int16          *indkey;
             Datum          *keyValues;
             bool           *keyNulls;
             int             i;
-            int             totalLeaves;
+			MerkleRoute	 route;
             
             /* Get index structure info */
-            indexTupdesc = RelationGetDescr(indexRel);
             nkeys = indexRel->rd_index->indnkeyatts;
             indkey = indexRel->rd_index->indkey.values;
-            
-            /* Read tree configuration from metadata */
-            merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
             
             /* Allocate key value arrays */
             keyValues = (Datum *) palloc(nkeys * sizeof(Datum));
@@ -401,13 +413,11 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
                             keyValues[i] = slot_getattr(slot, heapAttr, &keyNulls[i]);
                         }
                         
-                        /* Compute partition ID using multi-column function */
-                        partitionId = merkle_compute_partition_id(keyValues, keyNulls,
-                                                                         nkeys, indexTupdesc,
-                                                                         totalLeaves);
+						merkle_compute_route(indexRel, keyValues, keyNulls,
+											 nkeys, &route);
                         
                         /* XOR the hash OUT of the tree (same as XOR in, since XOR is its own inverse) */
-                        merkle_update_tree_path(indexRel, partitionId, &hash, false);
+						merkle_update_tree_path(indexRel, route.leaf_id, &hash, false);
                     }
                 }
                 PG_CATCH();
@@ -443,15 +453,12 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
     List       *indexList;
     ListCell   *lc;
 	MerkleHash  hash;
+	bool		hash_ready = false;
 
 	if (slot == NULL || TTS_EMPTY(slot))
-        return;
+		return;
 
-    if (!enable_merkle_index)
-        return;
-
-	merkle_compute_slot_hash(heapRel, slot, &hash);
-	if (merkle_hash_is_zero(&hash))
+	if (!enable_merkle_index)
 		return;
 
     indexList = RelationGetIndexList(heapRel);
@@ -468,18 +475,25 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
             IndexInfo  *indexInfo;
             Datum       values[INDEX_MAX_KEYS];
             bool        isnull[INDEX_MAX_KEYS];
-			int         totalLeaves;
-			int         partitionId;
+			MerkleRoute route;
+
+			if (!hash_ready)
+			{
+				merkle_compute_slot_hash(heapRel, slot, &hash);
+				if (merkle_hash_is_zero(&hash))
+				{
+					index_close(indexRel, RowExclusiveLock);
+					break;
+				}
+				hash_ready = true;
+			}
 
             indexInfo = BuildIndexInfo(indexRel);
 
             FormIndexDatum(indexInfo, slot, NULL, values, isnull);
-			merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
-			partitionId = merkle_compute_partition_id(values, isnull,
-													 indexInfo->ii_NumIndexKeyAttrs,
-													 RelationGetDescr(indexRel),
-													 totalLeaves);
-			merkle_update_tree_path(indexRel, partitionId, &hash, true);
+			merkle_compute_route(indexRel, values, isnull,
+							 indexInfo->ii_NumIndexKeyAttrs, &route);
+			merkle_update_tree_path(indexRel, route.leaf_id, &hash, true);
         }
 
         index_close(indexRel, RowExclusiveLock);

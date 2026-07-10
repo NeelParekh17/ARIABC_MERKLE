@@ -43,27 +43,15 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
              struct IndexInfo *indexInfo)
 {
     MerkleHash  hash;
-    int         partitionId;
-    TupleDesc   tupdesc;
+	MerkleRoute route;
     int         nkeys;
-    int         totalLeaves;
     
     /* GUC: Check if Merkle index updates are enabled */
     if (!enable_merkle_index)
         return false;
 
-    tupdesc = RelationGetDescr(indexRel);
     nkeys = indexInfo->ii_NumIndexKeyAttrs;
-
-    /* Read tree configuration from metadata */
-    merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves, NULL, NULL, NULL);
-    
-    /*
-     * Compute partition ID from the indexed key values (supports multi-column)
-     */
-    partitionId = merkle_compute_partition_id(values, isnull,
-                                                     nkeys, tupdesc,
-                                                     totalLeaves);
+	merkle_compute_route(indexRel, values, isnull, nkeys, &route);
     
     /*
      * Compute hash of the full row data
@@ -85,7 +73,7 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
     /*
      * Update the Merkle tree path from leaf to root
      */
-    merkle_update_tree_path(indexRel, partitionId, &hash, true);
+	merkle_update_tree_path(indexRel, route.leaf_id, &hash, true);
     
     /*
      * We don't detect duplicates - merkle index doesn't enforce uniqueness

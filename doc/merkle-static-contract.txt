@@ -1,0 +1,104 @@
+AriaBC static Merkle index contract
+===================================
+
+Format
+------
+
+Format version 6 stores a metapage followed by fixed-geometry node pages.
+The metapage records the heap relation, partition count, leaves per partition,
+fanout, derived node/page counts, route format version, and row-hash format
+version.  Node pages contain only a global node ID and a 256-bit XOR aggregate.
+
+The heap remains the authoritative row store.  The Merkle index does not store
+per-row hashes, leaf membership lists, parent/child pointers, or tuple counts.
+Those values are either derived from perfect-tree geometry or reconstructed by
+an explicitly documented audit/debug operation.  An index with an incompatible
+format is rejected and must be rebuilt with REINDEX.
+
+Routing
+-------
+
+merkle_compute_route() is the only key-routing implementation.  CREATE INDEX,
+INSERT, UPDATE, DELETE, BCDB apply, verification, and SQL helpers all call it.
+It emits a route hash, global leaf ID, partition ID, and node-in-partition.
+Static routing format 2 uses a uniform, versioned, length-prefixed BLAKE3-256
+digest for ALL key types, including single integers.  Format 1 (deprecated)
+preserved an abs(int) % total_leaves fast path for single integer keys, which
+would skew distribution under a future dynamic prefix tree.  Format 2 routes
+every key identically: the full 256-bit digest is derived by BLAKE3 over the
+binary-send encoding, and the 64-bit route_hash is the first 8 bytes of that
+digest.  A future dynamic tree can consume the remaining digest bits without
+reimplementing routing logic.
+
+Row hashing
+-----------
+
+Row-hash format 1 hashes a versioned, length-prefixed stream with BLAKE3-256:
+
+  magic, format version, live attribute count
+  for each non-dropped attribute:
+    attribute number, type OID, typmod, null flag
+    for non-null values: byte length and PostgreSQL binary-send bytes
+
+Binary-send encoding avoids TimeZone, DateStyle, locale, and text-output GUC
+dependence.  NULL, an empty value, and marker-looking text have distinct byte
+streams.  Changing this encoding requires a format-version bump and REINDEX.
+
+Aggregation and transactions
+----------------------------
+
+A leaf is the XOR of its row hashes.  Every internal node is the XOR of its
+children.  DML XORs the row hash through the leaf-to-root path.  PostgreSQL
+transaction and subtransaction abort callbacks apply the same XOR again, so
+normal rollback and rollback-to-savepoint restore the prior tree.
+
+Merkle page mutations do not yet have a native WAL resource manager.  The
+supported crash contract is therefore rebuildable derived state: after an
+unclean postmaster, operating-system, or machine shutdown, REINDEX every Merkle
+index before trusting roots or serving recovery.  Prepared transactions that
+mutated a Merkle index are rejected because backend-local undo state cannot be
+transferred safely into two-phase state.  This is a deliberate fail-closed
+contract, not a WAL-durability claim.
+
+SQL API and complexity
+----------------------
+
+Operational, index-only helpers:
+
+  merkle_root_hash                         O(partitions)
+  merkle_get_partition_root_hashes         O(partitions)
+  merkle_get_node_hash                     O(1)
+  merkle_get_child_hashes                  O(fanout)
+  merkle_get_node_hashes                   O(requested nodes)
+  merkle_get_children_batch                O(requested nodes * fanout)
+  merkle_leaf_id / merkle_bucket_for_key   O(number of key attributes)
+
+merkle_get_leaf_members(index, leaf_id) is selective.  It issues the canonical
+bucket predicate so the companion functional B-tree index can serve the lookup.
+Deployments must create that B-tree expression index and verify its use with
+EXPLAIN before treating the call as bounded sparse recovery.
+
+merkle_verify() is a definitive O(heap rows + tree nodes) audit.  It must
+recompute row hashes and all aggregates rather than trusting stored summaries.
+merkle_leaf_tuples() scans the full heap and materialises all key descriptions;
+merkle_node_hash() dumps all nodes.  Both are debug-only and emit a warning or
+notice.  Sparse recovery must not call either function or call merkle_verify()
+inside its timed localisation/repair path.
+
+Maintenance and recovery
+------------------------
+
+INSERT, DELETE, payload UPDATE, routing-key UPDATE, rollback, and savepoint
+rollback maintain the tree incrementally.  CREATE INDEX, REINDEX, TRUNCATE,
+CLUSTER, and table rewrites rebuild index state through PostgreSQL index
+infrastructure.  VACUUM does not reconstruct hashes: logical DELETE/UPDATE must
+remove the old hash while the old row image is still available.
+
+Sparse recovery compares partition roots, descends mismatching nodes with the
+batched child API, fetches all bad static leaves per replica in one indexed
+query, repairs rows, and repeats targeted localisation.  Full merkle_verify()
+belongs only to the final audit gate.
+
+Before a dynamic tree is accepted, preserve the static correctness, recovery,
+write-overhead, storage-size, warm-cache, and cold-cache artifacts as its frozen
+comparison baseline.

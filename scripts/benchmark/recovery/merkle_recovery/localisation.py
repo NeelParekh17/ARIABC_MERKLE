@@ -41,60 +41,6 @@ def detect_bad_leaves(
     counters[f"{prefix}tree_nodes_visited"] = 0
     leaf_start = geo["nodes_per_partition"] - geo["leaves_per_partition"] + 1
 
-    def compare_node(partition: int, node: int) -> None:
-        if node >= leaf_start:
-            leaf_id = partition * geo["leaves_per_partition"] + (node - leaf_start)
-            bad.append(leaf_id)
-            counters[f"{prefix}leaf_nodes_found"] += 1
-            return
-        counters[f"{prefix}tree_nodes_visited"] += 1
-        healthy_children = record_call(
-            profiler,
-            stage=stage_name,
-            operation=f"{operation_prefix}child_hashes_healthy",
-            schema="healthy",
-            partition=partition,
-            node_in_partition=node,
-            fn=lambda: execute(
-                conn,
-                "SELECT child_node_in_partition, hash FROM merkle_get_child_hashes('healthy.usertable_merkle_idx'::regclass, %s, %s)",
-                (partition, node),
-            ),
-        )
-        damaged_rows = record_call(
-            profiler,
-            stage=stage_name,
-            operation=f"{operation_prefix}child_hashes_damaged",
-            schema="damaged",
-            partition=partition,
-            node_in_partition=node,
-            fn=lambda: execute(
-                conn,
-                "SELECT child_node_in_partition, hash FROM merkle_get_child_hashes('damaged.usertable_merkle_idx'::regclass, %s, %s)",
-                (partition, node),
-            ),
-        )
-        damaged_children = {int(r["child_node_in_partition"]): r["hash"] for r in damaged_rows}
-        counters[f"{prefix}child_hash_sql_calls"] += 2
-        counters[f"{prefix}child_hash_nodes_read"] += len(healthy_children) + len(damaged_rows)
-        compare_start = time.perf_counter_ns()
-        mismatched_children: list[int] = []
-        for child in healthy_children:
-            child_node = int(child["child_node_in_partition"])
-            if child["hash"] != damaged_children.get(child_node):
-                mismatched_children.append(child_node)
-        if profiler is not None and profiler.enabled:
-            profiler.record(
-                stage=stage_name,
-                operation=f"{operation_prefix}child_hash_compare_cpu",
-                partition=partition,
-                node_in_partition=node,
-                client_wall_ns=time.perf_counter_ns() - compare_start,
-                rows_returned=len(healthy_children) + len(damaged_rows),
-            )
-        for child_node in mismatched_children:
-            compare_node(partition, child_node)
-
     healthy_root_rows = record_call(
         profiler,
         stage=stage_name,
@@ -118,6 +64,7 @@ def detect_bad_leaves(
     healthy_roots = {int(r["partition"]): r["hash"] for r in healthy_root_rows}
     damaged_roots = {int(r["partition"]): r["hash"] for r in damaged_root_rows}
     bad_partitions = 0
+    frontier: list[tuple[int, int]] = []
     for partition, healthy_hash in healthy_roots.items():
         root_compare_start = time.perf_counter_ns()
         damaged_hash = damaged_roots.get(partition)
@@ -133,6 +80,82 @@ def detect_bad_leaves(
             )
         if mismatch:
             bad_partitions += 1
-            compare_node(partition, 1)
+            frontier.append((partition, 1))
     counters[f"{prefix}bad_partition_count"] = bad_partitions
+
+    # Descend breadth-first.  Each level costs two SQL round trips regardless
+    # of how many mismatching nodes it contains.
+    while frontier:
+        parents: list[tuple[int, int]] = []
+        for partition, node in frontier:
+            if node >= leaf_start:
+                bad.append(
+                    partition * geo["leaves_per_partition"] + (node - leaf_start)
+                )
+                counters[f"{prefix}leaf_nodes_found"] += 1
+            else:
+                parents.append((partition, node))
+        if not parents:
+            break
+
+        counters[f"{prefix}tree_nodes_visited"] += len(parents)
+        partitions = [partition for partition, _ in parents]
+        nodes = [node for _, node in parents]
+        batch_sql = (
+            "SELECT partition, parent_node_in_partition, "
+            "child_node_in_partition, hash "
+            "FROM merkle_get_children_batch(%s::regclass, %s::int4[], %s::int4[])"
+        )
+        healthy_rows = record_call(
+            profiler,
+            stage=stage_name,
+            operation=f"{operation_prefix}child_hashes_batch_healthy",
+            schema="healthy",
+            fn=lambda: execute(
+                conn,
+                batch_sql,
+                ("healthy.usertable_merkle_idx", partitions, nodes),
+            ),
+        )
+        damaged_rows = record_call(
+            profiler,
+            stage=stage_name,
+            operation=f"{operation_prefix}child_hashes_batch_damaged",
+            schema="damaged",
+            fn=lambda: execute(
+                conn,
+                batch_sql,
+                ("damaged.usertable_merkle_idx", partitions, nodes),
+            ),
+        )
+        counters[f"{prefix}child_hash_sql_calls"] += 2
+        counters[f"{prefix}child_hash_nodes_read"] += len(healthy_rows) + len(damaged_rows)
+
+        damaged_children = {
+            (
+                int(row["partition"]),
+                int(row["parent_node_in_partition"]),
+                int(row["child_node_in_partition"]),
+            ): row["hash"]
+            for row in damaged_rows
+        }
+        compare_start = time.perf_counter_ns()
+        next_frontier: list[tuple[int, int]] = []
+        for row in healthy_rows:
+            key = (
+                int(row["partition"]),
+                int(row["parent_node_in_partition"]),
+                int(row["child_node_in_partition"]),
+            )
+            if row["hash"] != damaged_children.get(key):
+                next_frontier.append((key[0], key[2]))
+        if profiler is not None and profiler.enabled:
+            profiler.record(
+                stage=stage_name,
+                operation=f"{operation_prefix}child_hash_batch_compare_cpu",
+                client_wall_ns=time.perf_counter_ns() - compare_start,
+                rows_returned=len(healthy_rows) + len(damaged_rows),
+            )
+        frontier = next_frontier
+
     return sorted(bad)

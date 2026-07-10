@@ -1,0 +1,212 @@
+-- Static Merkle routing, canonical hashing, transaction, and batched API tests.
+CREATE TABLE merkle_static_test (
+    id bigint,
+    payload text,
+    nullable text,
+    raw bytea,
+    ts timestamptz,
+    f float8
+);
+CREATE INDEX merkle_static_test_idx ON merkle_static_test
+USING merkle (id) WITH (partitions=2, leaves_per_partition=4, fanout=2);
+CREATE INDEX merkle_static_test_leaf_idx ON merkle_static_test
+((merkle_bucket_for_key('merkle_static_test_idx'::regclass, id)));
+INSERT INTO merkle_static_test VALUES
+    ('-9223372036854775808', '*null*', NULL, '\x00ff',
+     '2026-01-02 03:04:05+00', '-Infinity'),
+    (0, '', '*null*', '\x', '2026-01-02 03:04:05+05:30', 'NaN'),
+    (1, 'a*b', '', '\x0102', '2026-07-10 12:00:00+00', 'Infinity');
+SELECT merkle_verify('merkle_static_test') AS initial_verify;
+ initial_verify 
+----------------
+ t
+(1 row)
+
+SELECT bool_and(
+           merkle_bucket_for_key('merkle_static_test_idx', id) =
+           (merkle_leaf_id('merkle_static_test', id)).leaf_id
+       ) AS routing_agrees
+FROM merkle_static_test;
+ routing_agrees 
+----------------
+ t
+(1 row)
+
+CREATE TEMP TABLE merkle_root_before AS
+SELECT merkle_root_hash('merkle_static_test') AS root;
+SET timezone = 'Asia/Kolkata';
+SET datestyle = 'SQL, DMY';
+SELECT merkle_verify('merkle_static_test') AS guc_independent_verify,
+       merkle_root_hash('merkle_static_test') =
+       (SELECT root FROM merkle_root_before) AS root_unchanged;
+ guc_independent_verify | root_unchanged 
+------------------------+----------------
+ t                      | t
+(1 row)
+
+RESET timezone;
+RESET datestyle;
+BEGIN;
+INSERT INTO merkle_static_test VALUES
+    (9, 'rollback', NULL, '\x09', now(), 9);
+ROLLBACK;
+SELECT merkle_verify('merkle_static_test') AS rollback_verify,
+       merkle_root_hash('merkle_static_test') =
+       (SELECT root FROM merkle_root_before) AS rollback_root;
+ rollback_verify | rollback_root 
+-----------------+---------------
+ t               | t
+(1 row)
+
+BEGIN;
+SAVEPOINT merkle_savepoint;
+UPDATE merkle_static_test SET payload = 'savepoint' WHERE id = 1;
+ROLLBACK TO merkle_savepoint;
+COMMIT;
+SELECT merkle_verify('merkle_static_test') AS savepoint_verify,
+       merkle_root_hash('merkle_static_test') =
+       (SELECT root FROM merkle_root_before) AS savepoint_root;
+ savepoint_verify | savepoint_root 
+------------------+----------------
+ t                | t
+(1 row)
+
+UPDATE merkle_static_test SET payload = 'updated' WHERE id = 1;
+UPDATE merkle_static_test SET id = 7 WHERE id = 0;
+DELETE FROM merkle_static_test WHERE id = '-9223372036854775808';
+SELECT merkle_verify('merkle_static_test') AS dml_verify;
+ dml_verify 
+------------
+ t
+(1 row)
+
+SELECT bool_and(hash = merkle_get_node_hash(
+                    'merkle_static_test_idx', partition, node_in_partition))
+       AS batch_nodes_agree
+FROM merkle_get_node_hashes('merkle_static_test_idx',
+                            ARRAY[0, 1], ARRAY[1, 1]);
+ batch_nodes_agree 
+-------------------
+ t
+(1 row)
+
+SELECT count(*) = 4 AS batch_children_complete
+FROM merkle_get_children_batch('merkle_static_test_idx',
+                               ARRAY[0, 1], ARRAY[1, 1]);
+ batch_children_complete 
+-------------------------
+ t
+(1 row)
+
+SELECT count(*) = 1 AS selective_leaf_members
+FROM merkle_get_leaf_members(
+    'merkle_static_test_idx',
+    merkle_bucket_for_key('merkle_static_test_idx', 1)::int4);
+ selective_leaf_members 
+------------------------
+ t
+(1 row)
+
+CREATE TABLE merkle_route_test (ts timestamptz, key_text text);
+CREATE INDEX merkle_route_test_idx ON merkle_route_test
+USING merkle (ts, key_text) WITH (partitions=2, leaves_per_partition=4, fanout=2);
+INSERT INTO merkle_route_test VALUES ('2026-07-10 12:00:00+00', '*null*');
+CREATE TEMP TABLE merkle_route_before AS
+SELECT merkle_bucket_for_key('merkle_route_test_idx', ts, key_text) AS leaf
+FROM merkle_route_test;
+SET timezone = 'America/Los_Angeles';
+SET datestyle = 'German, DMY';
+SELECT merkle_verify('merkle_route_test') AS canonical_route_verify,
+       merkle_bucket_for_key('merkle_route_test_idx', ts, key_text) =
+       (SELECT leaf FROM merkle_route_before) AS canonical_route_unchanged
+FROM merkle_route_test;
+ canonical_route_verify | canonical_route_unchanged 
+------------------------+---------------------------
+ t                      | t
+(1 row)
+
+RESET timezone;
+RESET datestyle;
+DROP TABLE merkle_route_test;
+-- Multi-column routing: UPDATE (payload only), UPDATE (routing key change),
+-- DELETE, and NULL routing key.  After each mutation merkle_verify() must pass
+-- and the route for the surviving row must be stable under GUC changes.
+CREATE TABLE merkle_mc_test (ts timestamptz, tag text, val int);
+CREATE INDEX merkle_mc_idx ON merkle_mc_test
+USING merkle (ts, tag) WITH (partitions=4, leaves_per_partition=4, fanout=2);
+-- Insert: three rows with distinct composite keys.
+INSERT INTO merkle_mc_test VALUES
+    ('2026-01-01 00:00:00+00', 'alpha', 1),
+    ('2026-06-15 12:00:00+00', NULL,    2),
+    ('2026-07-10 12:00:00+00', 'beta',  3);
+SELECT merkle_verify('merkle_mc_test') AS mc_initial_verify;
+ mc_initial_verify 
+-------------------
+ t
+(1 row)
+
+-- Capture routes before mutations.
+CREATE TEMP TABLE mc_routes_before AS
+SELECT
+    ts, tag,
+    merkle_bucket_for_key('merkle_mc_idx', ts, tag) AS leaf
+FROM merkle_mc_test;
+-- Payload-only UPDATE must not change any row's leaf.
+UPDATE merkle_mc_test SET val = val * 10 WHERE tag = 'alpha';
+SELECT merkle_verify('merkle_mc_test') AS mc_payload_update_verify,
+       merkle_bucket_for_key('merkle_mc_idx', ts, tag) =
+           (SELECT leaf FROM mc_routes_before WHERE mc_routes_before.ts = merkle_mc_test.ts
+                AND (mc_routes_before.tag IS NOT DISTINCT FROM merkle_mc_test.tag))
+           AS mc_payload_route_unchanged
+FROM merkle_mc_test WHERE tag = 'alpha';
+ mc_payload_update_verify | mc_payload_route_unchanged 
+--------------------------+----------------------------
+ t                        | t
+(1 row)
+
+-- Routing-key UPDATE: change the 'beta' tag to 'gamma'.
+-- The old leaf must be zeroed out, the new leaf must carry the row hash.
+UPDATE merkle_mc_test SET tag = 'gamma' WHERE tag = 'beta';
+SELECT merkle_verify('merkle_mc_test') AS mc_rk_update_verify;
+ mc_rk_update_verify 
+---------------------
+ t
+(1 row)
+
+-- NULL routing key: verify NULL-keyed row has a stable leaf under GUC changes.
+CREATE TEMP TABLE mc_null_leaf AS
+SELECT merkle_bucket_for_key('merkle_mc_idx', ts, tag) AS null_leaf
+FROM merkle_mc_test WHERE tag IS NULL;
+SET timezone = 'America/New_York';
+SELECT
+    merkle_bucket_for_key('merkle_mc_idx', ts, tag) IS NOT NULL
+        AS null_key_has_concrete_leaf,
+    (merkle_bucket_for_key('merkle_mc_idx', ts, tag) IS NOT DISTINCT FROM
+        (SELECT null_leaf FROM mc_null_leaf))
+        AS null_key_leaf_stable,
+    merkle_verify('merkle_mc_test')
+        AS null_key_tree_valid
+FROM merkle_mc_test WHERE tag IS NULL;
+ null_key_has_concrete_leaf | null_key_leaf_stable | null_key_tree_valid 
+----------------------------+----------------------+---------------------
+ t                          | t                    | t
+(1 row)
+
+RESET timezone;
+-- DELETE all rows and verify tree returns to zero.
+DELETE FROM merkle_mc_test;
+SELECT merkle_verify('merkle_mc_test') AS mc_delete_verify;
+ mc_delete_verify 
+------------------
+ t
+(1 row)
+
+DROP TABLE merkle_mc_test;
+TRUNCATE merkle_static_test;
+SELECT merkle_verify('merkle_static_test') AS truncate_verify;
+ truncate_verify 
+-----------------
+ t
+(1 row)
+
+DROP TABLE merkle_static_test;

@@ -33,9 +33,9 @@ from merkle_recovery.manifest import (
 )
 from merkle_recovery.localisation import detect_bad_leaves
 from merkle_recovery.repair import (
-    fetch_leaf_rows, run_planner_preflight, repair_leaf,
+    fetch_leaf_rows, fetch_leaf_rows_batch, run_planner_preflight, repair_leaf,
     seq_scan_snapshot, seq_scan_delta,
-    per_leaf_row_counts,
+    per_leaf_row_counts, FetchResult,
 )
 from merkle_recovery.verification import audit_recovery_with_scan_counters, schema_fidelity_checks
 from merkle_recovery.metrics import Metrics, add_warning, finalize_metrics
@@ -362,6 +362,7 @@ def repair_merkle(
     profiler: ProfileCollector | None = None,
     benchmark_profile: str = "",
     audit_mode: str = "full",
+    leaf_fetch_chunk_size: int = 64,
 ) -> Metrics:
     cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
     run_id = recovery_run_id(manifest, repetition, profile_label)
@@ -397,22 +398,68 @@ def repair_merkle(
     lookup_scans = 0
     per_leaf_candidates: list[int] = []
 
-    for leaf_id in bad_leaves:
-        lookup_scans += 2
-        hrows, drows, ins, upd, dlt = repair_leaf(
-            conn,
-            leaf_id,
-            phase=m.phase,
-            profiler=profiler,
-        )
-        healthy_rows += len(hrows)
-        damaged_rows += len(drows)
-        leaf_total = len(hrows) + len(drows)
-        candidate_rows += leaf_total
-        per_leaf_candidates.append(leaf_total)
-        rows_inserted += ins
-        rows_updated += upd
-        rows_deleted += dlt
+    # Split bad_leaves into chunks to bound peak memory.
+    if leaf_fetch_chunk_size <= 0:
+        bad_leaf_chunks = [bad_leaves]
+    else:
+        bad_leaf_chunks = [bad_leaves[i:i + leaf_fetch_chunk_size] for i in range(0, len(bad_leaves), leaf_fetch_chunk_size)]
+
+    candidate_fetch_sql_calls = 0
+    candidate_fetch_batches = 0
+    candidate_leaf_buckets_requested = 0
+
+    for chunk in bad_leaf_chunks:
+        if not chunk:
+            continue
+
+        with timer(m.phase, "candidate_row_fetch_ms"):
+            healthy_by_leaf: FetchResult = record_call(
+                profiler,
+                stage="candidate_fetch",
+                operation="leaf_fetch_batch_healthy",
+                schema="healthy",
+                fn=lambda: fetch_leaf_rows_batch(conn, "healthy", chunk,
+                                                 chunk_size=0),
+            )
+            damaged_by_leaf: FetchResult = record_call(
+                profiler,
+                stage="candidate_fetch",
+                operation="leaf_fetch_batch_damaged",
+                schema="damaged",
+                fn=lambda: fetch_leaf_rows_batch(conn, "damaged", chunk,
+                                                 chunk_size=0),
+            )
+
+        candidate_fetch_sql_calls += healthy_by_leaf.sql_calls + damaged_by_leaf.sql_calls
+        candidate_fetch_batches += healthy_by_leaf.batches + damaged_by_leaf.batches
+        candidate_leaf_buckets_requested += healthy_by_leaf.leaf_buckets_requested + damaged_by_leaf.leaf_buckets_requested
+
+        for leaf_id in chunk:
+            hrows, drows, ins, upd, dlt = repair_leaf(
+                conn,
+                leaf_id,
+                phase=m.phase,
+                profiler=profiler,
+                prefetched=(
+                    healthy_by_leaf.get(leaf_id, {}),
+                    damaged_by_leaf.get(leaf_id, {}),
+                ),
+            )
+            healthy_rows += len(hrows)
+            damaged_rows += len(drows)
+            leaf_total = len(hrows) + len(drows)
+            candidate_rows += leaf_total
+            per_leaf_candidates.append(leaf_total)
+            rows_inserted += ins
+            rows_updated += upd
+            rows_deleted += dlt
+
+        # Discard chunk from memory
+        del healthy_by_leaf
+        del damaged_by_leaf
+
+    if bad_leaves:
+        lookup_scans = candidate_fetch_sql_calls
 
     with timer(m.phase, "targeted_post_repair_confirmation_ms"):
         post_repair_counters: dict[str, Any] = {}
@@ -425,35 +472,55 @@ def repair_merkle(
             stage_name="targeted_confirmation",
         )
         repaired_leaf_mismatch = False
-        for leaf_id in bad_leaves:
-            hrows = record_call(
+        confirmation_fetch_sql_calls = 0
+        confirmation_fetch_batches = 0
+        confirmation_leaf_buckets_requested = 0
+        confirmation_rows_fetched = 0
+
+        for chunk in bad_leaf_chunks:
+            if not chunk:
+                continue
+
+            confirmed_healthy: FetchResult = record_call(
                 profiler,
                 stage="targeted_confirmation",
-                operation="confirmation_leaf_fetch_healthy",
+                operation="confirmation_leaf_fetch_batch_healthy",
                 schema="healthy",
-                leaf_id=leaf_id,
-                fn=lambda leaf_id=leaf_id: fetch_leaf_rows(conn, "healthy", leaf_id),
+                fn=lambda: fetch_leaf_rows_batch(conn, "healthy", chunk,
+                                                 chunk_size=0),
             )
-            drows = record_call(
+            confirmed_damaged: FetchResult = record_call(
                 profiler,
                 stage="targeted_confirmation",
-                operation="confirmation_leaf_fetch_damaged",
+                operation="confirmation_leaf_fetch_batch_damaged",
                 schema="damaged",
-                leaf_id=leaf_id,
-                fn=lambda leaf_id=leaf_id: fetch_leaf_rows(conn, "damaged", leaf_id),
+                fn=lambda: fetch_leaf_rows_batch(conn, "damaged", chunk,
+                                                 chunk_size=0),
             )
-            if profiler is not None and profiler.enabled:
-                t0 = time.perf_counter_ns()
-                repaired_leaf_mismatch = repaired_leaf_mismatch or (hrows != drows)
-                profiler.record(
-                    stage="targeted_confirmation",
-                    operation="confirmation_compare_cpu",
-                    leaf_id=leaf_id,
-                    rows_returned=len(hrows) + len(drows),
-                    client_wall_ns=time.perf_counter_ns() - t0,
-                )
-            elif hrows != drows:
-                repaired_leaf_mismatch = True
+
+            confirmation_fetch_sql_calls += confirmed_healthy.sql_calls + confirmed_damaged.sql_calls
+            confirmation_fetch_batches += confirmed_healthy.batches + confirmed_damaged.batches
+            confirmation_leaf_buckets_requested += confirmed_healthy.leaf_buckets_requested + confirmed_damaged.leaf_buckets_requested
+            confirmation_rows_fetched += confirmed_healthy.rows_fetched + confirmed_damaged.rows_fetched
+
+            for leaf_id in chunk:
+                hrows = confirmed_healthy.get(leaf_id, {})
+                drows = confirmed_damaged.get(leaf_id, {})
+                if profiler is not None and profiler.enabled:
+                    t0 = time.perf_counter_ns()
+                    repaired_leaf_mismatch = repaired_leaf_mismatch or (hrows != drows)
+                    profiler.record(
+                        stage="targeted_confirmation",
+                        operation="confirmation_compare_cpu",
+                        leaf_id=leaf_id,
+                        rows_returned=len(hrows) + len(drows),
+                        client_wall_ns=time.perf_counter_ns() - t0,
+                    )
+                elif hrows != drows:
+                    repaired_leaf_mismatch = True
+
+            del confirmed_healthy
+            del confirmed_damaged
 
     with timer(m.phase, "recovery_observability_ms"):
         if profiler is not None and profiler.enabled:
@@ -538,8 +605,18 @@ def repair_merkle(
     leaf_stats = per_leaf_row_counts(bad_leaves, per_leaf_candidates)
     counters.update(
         {
+            # Candidate fetch: SQL-call granularity vs. rows-returned granularity.
             "leaf_lookup_sql_calls": lookup_scans,
+            "candidate_fetch_sql_calls": candidate_fetch_sql_calls,
+            "candidate_fetch_batches": candidate_fetch_batches,
+            "candidate_leaf_buckets_requested": candidate_leaf_buckets_requested,
             "candidate_rows_fetched": candidate_rows,
+            "confirmation_fetch_sql_calls": confirmation_fetch_sql_calls,
+            "confirmation_fetch_batches": confirmation_fetch_batches,
+            "confirmation_leaf_buckets_requested": confirmation_leaf_buckets_requested,
+            "confirmation_rows_fetched": confirmation_rows_fetched,
+            # Legacy alias kept for downstream tooling.
+            "candidate_rows_fetched_alias": candidate_rows,
             "healthy_candidate_rows": healthy_rows,
             "damaged_candidate_rows": damaged_rows,
             "total_candidate_rows": candidate_rows,
@@ -562,6 +639,7 @@ def repair_merkle(
             "partition_root_batches_ok": int(counters.get("partition_root_batches") == 2),
             "full_audit_skipped": full_audit_skipped,
             "audit_mode": audit_mode,
+            "leaf_fetch_chunk_size": leaf_fetch_chunk_size,
         }
     )
 
@@ -633,6 +711,7 @@ def run_one_manifest(
     profiling_mode: str = "off",
     benchmark_profile: str = "",
     audit_mode: str = "full",
+    leaf_fetch_chunk_size: int = 64,
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
     cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
@@ -701,6 +780,7 @@ def run_one_manifest(
             profiler=profiler,
             benchmark_profile=benchmark_profile,
             audit_mode=audit_mode,
+            leaf_fetch_chunk_size=leaf_fetch_chunk_size,
         )
         if profiler is not None:
             profile_tolerance_ms = 25.0 if benchmark_profile in (
@@ -713,6 +793,7 @@ def run_one_manifest(
                 bad_leaf_count=metric.bad_leaf_count,
                 run_id=metric.run_id,
                 tolerance_ms=profile_tolerance_ms,
+                leaf_fetch_chunk_size=leaf_fetch_chunk_size,
             )
             if profile_reasons:
                 metric.valid = False
@@ -1327,6 +1408,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     profiling_mode=args.profiling,
                     benchmark_profile=args.profile,
                     audit_mode=args.audit_mode,
+                    leaf_fetch_chunk_size=args.leaf_fetch_batch_size,
                 )
             )
 
@@ -1712,6 +1794,17 @@ def main(argv: list[str] | None = None) -> int:
         default="paper-update-only",
         dest="corruption_mode",
         help="Corruption injection mode. Use paper-update-only for paper-profile runs.",
+    )
+    parser.add_argument(
+        "--leaf-fetch-batch-size",
+        type=int,
+        default=64,
+        dest="leaf_fetch_batch_size",
+        help=(
+            "Maximum number of leaf IDs per SQL statement during candidate fetch. "
+            "Set to a positive value (default 64) to bound peak memory when K is large. "
+            "Set to 0 to disable bounding and send all IDs in a single statement."
+        ),
     )
     parser.add_argument(
         "--audit-mode",

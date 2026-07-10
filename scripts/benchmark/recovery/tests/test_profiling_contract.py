@@ -61,6 +61,28 @@ def test_profile_invariants_and_summary():
     assert all("fraction_restore_repair_ms" in row for row in summary)
 
 
+def test_profile_invariants_accept_two_batched_leaf_fetches():
+    phase = {
+        "tree_localisation_ms": 0.0,
+        "candidate_row_fetch_ms": 4.0,
+        "repair_write_ms": 0.0,
+        "targeted_post_repair_confirmation_ms": 2.0,
+    }
+    ops = [
+        {"run_id": "r1", "stage": "candidate_fetch", "operation": "leaf_fetch_batch_healthy", "client_wall_ms": "2.0"},
+        {"run_id": "r1", "stage": "candidate_fetch", "operation": "leaf_fetch_batch_damaged", "client_wall_ms": "2.0"},
+        {"run_id": "r1", "stage": "targeted_confirmation", "operation": "confirmation_leaf_fetch_batch_healthy", "client_wall_ms": "1.0"},
+        {"run_id": "r1", "stage": "targeted_confirmation", "operation": "confirmation_leaf_fetch_batch_damaged", "client_wall_ms": "1.0"},
+    ]
+    assert validate_profile_invariants(
+        phase=phase,
+        operations=ops,
+        bad_leaf_count=10,
+        run_id="r1",
+        tolerance_ms=0.1,
+    ) == []
+
+
 def test_confirmation_profile_sum_is_validated():
     phase = {
         "tree_localisation_ms": 0.0,
@@ -872,3 +894,68 @@ def test_contract_with_skipped_audit():
     # This should pass without raising RuntimeError
     assert_benchmark_contract("best-scaling-f32-l1024-k75-c300", [m])
 
+
+@pytest.mark.parametrize(
+    ("k", "chunk", "expected"),
+    [
+        (0,   64, 0),
+        (10,  64, 2),
+        (64,  64, 2),
+        (65,  64, 4),
+        (75,  64, 4),
+        (200, 64, 8),
+        (75,   0, 2),
+    ],
+)
+def test_profile_invariants_chunk_boundaries(k, chunk, expected):
+    phase = {
+        "tree_localisation_ms": 0.0,
+        "candidate_row_fetch_ms": 1.0,
+        "repair_write_ms": 0.0,
+        "targeted_post_repair_confirmation_ms": 1.0,
+    }
+    ops = []
+    for _ in range(expected // 2):
+        ops.append({"run_id": "r1", "stage": "candidate_fetch", "operation": "leaf_fetch_batch_healthy", "client_wall_ms": "1.0"})
+        ops.append({"run_id": "r1", "stage": "candidate_fetch", "operation": "leaf_fetch_batch_damaged", "client_wall_ms": "1.0"})
+        ops.append({"run_id": "r1", "stage": "targeted_confirmation", "operation": "confirmation_leaf_fetch_batch_healthy", "client_wall_ms": "1.0"})
+        ops.append({"run_id": "r1", "stage": "targeted_confirmation", "operation": "confirmation_leaf_fetch_batch_damaged", "client_wall_ms": "1.0"})
+    
+    assert validate_profile_invariants(
+        phase=phase,
+        operations=ops,
+        bad_leaf_count=k,
+        run_id="r1",
+        tolerance_ms=10.0,
+        leaf_fetch_chunk_size=chunk,
+    ) == []
+
+
+def test_profile_invariants_rejects_wrong_call_count():
+    phase = {
+        "tree_localisation_ms": 0.0,
+        "candidate_row_fetch_ms": 1.0,
+        "repair_write_ms": 0.0,
+        "targeted_post_repair_confirmation_ms": 1.0,
+    }
+    ops = [
+        {"run_id": "r1", "stage": "candidate_fetch", "operation": "leaf_fetch_batch_healthy", "client_wall_ms": "2.0"},
+        {"run_id": "r1", "stage": "candidate_fetch", "operation": "leaf_fetch_batch_damaged", "client_wall_ms": "2.0"},
+        {"run_id": "r1", "stage": "targeted_confirmation", "operation": "confirmation_leaf_fetch_batch_healthy", "client_wall_ms": "2.0"},
+        {"run_id": "r1", "stage": "targeted_confirmation", "operation": "confirmation_leaf_fetch_batch_damaged", "client_wall_ms": "2.0"},
+    ]
+    reasons = validate_profile_invariants(
+        phase=phase,
+        operations=ops,
+        bad_leaf_count=75,
+        run_id="r1",
+        tolerance_ms=10.0,
+        leaf_fetch_chunk_size=64,
+    )
+    assert any("expected=4" in reason for reason in reasons)
+
+
+def test_representative_leaf_ids_coverage():
+    from merkle_recovery.repair import representative_leaf_ids
+    assert representative_leaf_ids(16, 200) == list(range(16))
+    assert len(representative_leaf_ids(204800, 75)) == 75
