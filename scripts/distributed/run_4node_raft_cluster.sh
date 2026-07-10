@@ -83,10 +83,10 @@ source "${SCRIPT_DIR}/cluster_topology.sh"
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 
-KAFKA_HOST="10.129.148.236"
-KAFKA_PORT=9092
-KAFKA_RESULT_TOPIC="ariabc_results"
-KAFKA_HOME_REMOTE="/home/neel/Desktop/kafka_2.13-3.7.0"
+KAFKA_HOST="${KAFKA_HOST:-10.129.148.236}"
+KAFKA_PORT="${KAFKA_PORT:-9092}"
+KAFKA_RESULT_TOPIC="${KAFKA_RESULT_TOPIC:-ariabc_results}"
+KAFKA_HOME_REMOTE="${KAFKA_HOME_REMOTE:-/home/neel/Desktop/kafka_2.13-3.7.0}"
 KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
 
 DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Gateway/server connection pool size
@@ -124,6 +124,13 @@ GATEWAY_USER="${GATEWAY_USER:-neel}"
 GATEWAY_HOSTNAME="${GATEWAY_HOSTNAME:-myubuntu}"
 GATEWAY_REPO="${GATEWAY_REPO:-/home/neel/ARIABC/AriaBC}"
 GATEWAY_INSTALL="${GATEWAY_INSTALL:-/home/neel/ARIABC/install}"
+
+for _arg in "$@"; do
+  if [[ "$_arg" == "-h" || "$_arg" == "--help" ]]; then
+    BYPASS_DELEGATION=1
+    break
+  fi
+done
 
 if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
       "$(hostname -s)" != "$GATEWAY_HOSTNAME" ]]; then
@@ -172,6 +179,10 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     SKIP_SYNC SKIP_BUILD SKIP_KAFKA SKIP_CLEANUP \
     SKIP_RDKAFKA_SETUP SKIP_RESTORE SKIP_POST_VERIFY \
     NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
+    NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
+    NODE_IS_U22_CSV NODE_CLIENT_PORTS_CSV \
+    RAFT_PORT DB_PORT DB_USER DB_NAME \
+    KAFKA_HOST KAFKA_PORT KAFKA_RESULT_TOPIC KAFKA_HOME_REMOTE \
     KAFKA_COMPLETION_MODE \
     ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US \
     ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES ARIABC_RAFT_ORDERED_BATCH_LINGER_US \
@@ -266,6 +277,57 @@ log() { echo "[$(date +'%H:%M:%S')] $*"; }
 #              status code 1.
 # ===========================================================================
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+split_csv_array() {
+  local csv="$1"
+  local -n out_arr="$2"
+  local item
+
+  out_arr=()
+  IFS=',' read -r -a out_arr <<< "$csv"
+  for item in "${out_arr[@]}"; do
+    if [[ -z "$item" ]]; then
+      die "empty value in CSV argument: $csv"
+    fi
+  done
+}
+
+apply_topology_overrides() {
+  local expected_len="${#NODE_IDS[@]}"
+  local idx
+
+  [[ -z "${NODE_IDS_CSV:-}" ]] || split_csv_array "$NODE_IDS_CSV" NODE_IDS
+  expected_len="${#NODE_IDS[@]}"
+  [[ "$expected_len" -gt 0 ]] || die "cluster topology must contain at least one node"
+
+  [[ -z "${NODE_IPS_CSV:-}" ]] || split_csv_array "$NODE_IPS_CSV" NODE_IPS
+  [[ -z "${NODE_NAMES_CSV:-}" ]] || split_csv_array "$NODE_NAMES_CSV" NODE_NAMES
+  [[ -z "${NODE_USERS_CSV:-}" ]] || split_csv_array "$NODE_USERS_CSV" NODE_USERS
+  [[ -z "${NODE_IS_U22_CSV:-}" ]] || split_csv_array "$NODE_IS_U22_CSV" NODE_IS_U22
+  [[ -z "${NODE_CLIENT_PORTS_CSV:-}" ]] || split_csv_array "$NODE_CLIENT_PORTS_CSV" NODE_CLIENT_PORTS
+
+  for _topo_name in NODE_IPS NODE_NAMES NODE_USERS NODE_IS_U22 NODE_CLIENT_PORTS; do
+    local -n _topo_arr="$_topo_name"
+    if [[ "${#_topo_arr[@]}" -ne "$expected_len" ]]; then
+      die "$_topo_name length (${#_topo_arr[@]}) must match NODE_IDS length ($expected_len)"
+    fi
+  done
+
+  for idx in "${!NODE_IDS[@]}"; do
+    [[ "${NODE_IDS[$idx]}" =~ ^[0-9]+$ ]] || die "NODE_IDS[$idx] must be numeric: ${NODE_IDS[$idx]}"
+    [[ "${NODE_IS_U22[$idx]}" =~ ^[01]$ ]] || die "NODE_IS_U22[$idx] must be 0 or 1: ${NODE_IS_U22[$idx]}"
+    [[ "${NODE_CLIENT_PORTS[$idx]}" =~ ^[0-9]+$ ]] || die "NODE_CLIENT_PORTS[$idx] must be numeric: ${NODE_CLIENT_PORTS[$idx]}"
+    [[ -n "${NODE_IPS[$idx]}" ]] || die "NODE_IPS[$idx] cannot be empty"
+    [[ -n "${NODE_NAMES[$idx]}" ]] || die "NODE_NAMES[$idx] cannot be empty"
+    [[ -n "${NODE_USERS[$idx]}" ]] || die "NODE_USERS[$idx] cannot be empty"
+  done
+
+  [[ "$RAFT_PORT" =~ ^[0-9]+$ ]] || die "RAFT_PORT must be numeric: $RAFT_PORT"
+  [[ "$DB_PORT" =~ ^[0-9]+$ ]] || die "DB_PORT must be numeric: $DB_PORT"
+  [[ "$KAFKA_PORT" =~ ^[0-9]+$ ]] || die "KAFKA_PORT must be numeric: $KAFKA_PORT"
+  [[ -n "$KAFKA_HOST" ]] || die "KAFKA_HOST cannot be empty"
+  KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
+}
 
 # ---------------------------------------------------------------------------
 # Flags
@@ -422,6 +484,23 @@ Options:
   --skip-pg-restart
                   Do not restart PostgreSQL before restore (default restarts)
   --no-kafka       Use direct completion (no Kafka majority wait)
+  --node-ids CSV   Override Raft node ids, e.g. 1,2,4
+  --node-ips CSV   Override node IPs/hosts, aligned with --node-ids
+  --node-names CSV Override node labels, aligned with --node-ids
+  --node-users CSV Override SSH users, aligned with --node-ids
+  --node-is-u22 CSV
+                  Override Ubuntu 22.04 flags, 0|1 per node. U22 nodes use
+                  /home/neel/Desktop/ariabc_pg_build_u22 binaries.
+  --node-client-ports CSV
+                  Override gateway-facing ariabc_pg_server client ports.
+  --raft-port N    Override Raft peer port (default from cluster_topology.sh)
+  --db-port N      Override PostgreSQL port (default from cluster_topology.sh)
+  --db-user USER   Override PostgreSQL user (default from cluster_topology.sh)
+  --db-name NAME   Override PostgreSQL database (default from cluster_topology.sh)
+  --kafka-host H   Override Kafka broker host (default: 10.129.148.236)
+  --kafka-port N   Override Kafka broker port (default: 9092)
+  --kafka-home-remote DIR
+                  Override remote Kafka installation directory.
   --ordering-mode M
                   Cluster ordering mode:
                     raft-kafka  = normal Raft ordering + selected Kafka completion
@@ -625,6 +704,19 @@ while [[ $# -gt 0 ]]; do
     --stop-only) STOP_ONLY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
+    --node-ids) NODE_IDS_CSV="${2:-}"; shift 2 ;;
+    --node-ips) NODE_IPS_CSV="${2:-}"; shift 2 ;;
+    --node-names) NODE_NAMES_CSV="${2:-}"; shift 2 ;;
+    --node-users) NODE_USERS_CSV="${2:-}"; shift 2 ;;
+    --node-is-u22) NODE_IS_U22_CSV="${2:-}"; shift 2 ;;
+    --node-client-ports) NODE_CLIENT_PORTS_CSV="${2:-}"; shift 2 ;;
+    --raft-port) RAFT_PORT="${2:-}"; shift 2 ;;
+    --db-port) DB_PORT="${2:-}"; shift 2 ;;
+    --db-user) DB_USER="${2:-}"; shift 2 ;;
+    --db-name) DB_NAME="${2:-}"; shift 2 ;;
+    --kafka-host) KAFKA_HOST="${2:-}"; shift 2 ;;
+    --kafka-port) KAFKA_PORT="${2:-}"; shift 2 ;;
+    --kafka-home-remote) KAFKA_HOME_REMOTE="${2:-}"; shift 2 ;;
     --ordering-mode) ORDERING_MODE="${2:-raft-kafka}"; shift 2 ;;
     --kafka-completion-mode) KAFKA_COMPLETION_MODE="${2:-majority}"; KAFKA_COMPLETION_MODE_EXPLICIT=1; shift 2 ;;
     --execution-profile) EXECUTION_PROFILE="${2:-event-direct}"; shift 2 ;;
@@ -706,6 +798,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+apply_topology_overrides
 
 for _num_pair in \
   "det-client-workers:$DET_CLIENT_WORKERS" \

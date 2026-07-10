@@ -2,6 +2,103 @@
 cd /work/ARIABC/AriaBC
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+Usage: run_sweep.sh [options]
+
+Sweep options:
+  --threads N              Client deterministic lanes and det client workers
+                           unless --det-client-workers is also set.
+  --det-client-workers N   Gateway deterministic threadpool workers.
+  --executor-workers LIST  Server executor worker counts to sweep.
+                           Accepts comma-separated or quoted space-separated values.
+                           Default: "1 2 4 8 12 16"
+  --reps LIST              Repetition labels to run for each executor worker.
+                           Accepts comma-separated or quoted space-separated values.
+                           Default: "1 2 3"
+
+Cluster topology options forwarded to run_4node_raft_cluster.sh:
+  --node-ids CSV
+  --node-ips CSV
+  --node-names CSV
+  --node-users CSV
+  --node-is-u22 CSV
+  --node-client-ports CSV
+  --raft-port N
+  --db-port N
+  --db-user USER
+  --db-name NAME
+  --kafka-host HOST
+  --kafka-port N
+  --kafka-home-remote DIR
+
+Other:
+  -h, --help
+
+Example:
+  ./scripts/distributed/run_sweep.sh \
+    --threads 96 \
+    --executor-workers 4,8,16 \
+    --reps 1,2 \
+    --node-ids 1,2,3 \
+    --node-ips 10.10.0.11,10.10.0.12,10.10.0.13 \
+    --node-names node-a,node-b,node-c \
+    --node-users neel,neel,neel \
+    --node-is-u22 0,0,1 \
+    --node-client-ports 8000,8000,8001 \
+    --kafka-host 10.10.0.11
+EOF
+}
+
+normalize_list() {
+  printf '%s\n' "${1//,/ }"
+}
+
+THREADS=96
+DET_CLIENT_WORKERS=""
+EXECUTOR_WORKERS="1 2 4 8 12 16"
+REPS="1 2 3"
+CLUSTER_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --threads)
+      THREADS="${2:?missing value for --threads}"
+      shift 2
+      ;;
+    --det-client-workers)
+      DET_CLIENT_WORKERS="${2:?missing value for --det-client-workers}"
+      shift 2
+      ;;
+    --executor-workers)
+      EXECUTOR_WORKERS="$(normalize_list "${2:?missing value for --executor-workers}")"
+      shift 2
+      ;;
+    --reps)
+      REPS="$(normalize_list "${2:?missing value for --reps}")"
+      shift 2
+      ;;
+    --node-ids|--node-ips|--node-names|--node-users|--node-is-u22|--node-client-ports|\
+    --raft-port|--db-port|--db-user|--db-name|--kafka-host|--kafka-port|--kafka-home-remote)
+      CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$DET_CLIENT_WORKERS" ]]; then
+  DET_CLIENT_WORKERS="$THREADS"
+fi
+
 echo "=== Building targets ==="
 cmake --build ariabc_pg/build \
   --target ariabc_pg_gateway ariabc_pg_server \
@@ -21,11 +118,27 @@ mkdir -p "$OUT"
 : > "$OUT/summary.csv"
 
 printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
+{
+  printf 'threads=%s\n' "$THREADS"
+  printf 'det_client_workers=%s\n' "$DET_CLIENT_WORKERS"
+  printf 'executor_workers=%s\n' "$EXECUTOR_WORKERS"
+  printf 'reps=%s\n' "$REPS"
+  printf 'cluster_args='
+  printf '%q ' "${CLUSTER_ARGS[@]}"
+  printf '\n'
+} > "$OUT/campaign.env"
 
 # Wrapped execution sequence to funnel into out.txt
 {
-  for E in 1 2 4 8 12 16; do
-    for REP in 1 2 3; do
+  echo "Campaign: threads=$THREADS det_client_workers=$DET_CLIENT_WORKERS executor_workers=[$EXECUTOR_WORKERS] reps=[$REPS]"
+  if [[ "${#CLUSTER_ARGS[@]}" -gt 0 ]]; then
+    printf 'Cluster args: '
+    printf '%q ' "${CLUSTER_ARGS[@]}"
+    printf '\n'
+  fi
+
+  for E in $EXECUTOR_WORKERS; do
+    for REP in $REPS; do
       echo
       echo "=============================================================="
       echo "PG/EXECUTOR WORKERS=$E | REP=$REP"
@@ -45,10 +158,11 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
         BCDB_DET_QUEUE_HIGH_WM=128 \
         BCDB_DET_QUEUE_LOW_WM=64 \
         ./scripts/distributed/run_4node_raft_cluster.sh \
+          "${CLUSTER_ARGS[@]}" \
           --ordering-mode raft-kafka \
           --execution-profile threaded-raft-direct \
-          --threads 96 \
-          --det-client-workers 96 \
+          --threads "$THREADS" \
+          --det-client-workers "$DET_CLIENT_WORKERS" \
           --det-client-inflight 1 \
           --server-exec-workers "$E" \
           --server-pg-connections "$E" \
