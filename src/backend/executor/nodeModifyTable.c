@@ -130,6 +130,9 @@ bcdb_is_safe_ledger_relation(Relation relation)
 	relname = RelationGetRelationName(relation);
 
 	return strcmp(relname, "raft_apply_schema_meta") == 0 ||
+		   strcmp(relname, "merkle_apply_counter") == 0 ||
+		   strcmp(relname, "merkle_apply_state") == 0 ||
+		   strcmp(relname, "merkle_local_delta") == 0 ||
 		   strcmp(relname, "raft_apply_epoch") == 0 ||
 		   strcmp(relname, "raft_apply_entry") == 0 ||
 		   strcmp(relname, "raft_apply_entry_item") == 0 ||
@@ -339,9 +342,17 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
         return;
     }
 
-    /* GUC: Check if Merkle index updates are enabled */
-    if (!enable_merkle_index)
-        return;
+	/* Never silently create a stale tree when a Merkle index exists. */
+	if (!enable_merkle_index)
+	{
+		if (merkle_relation_has_index(heapRel))
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("Merkle maintenance is disabled for table \"%s\"",
+							RelationGetRelationName(heapRel)),
+					 errhint("Set enable_merkle_index=on before modifying a Merkle-indexed table.")));
+		return;
+	}
     
     /* Get list of indexes on this table */
     indexList = RelationGetIndexList(heapRel);
@@ -459,7 +470,15 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
 		return;
 
 	if (!enable_merkle_index)
+	{
+		if (merkle_relation_has_index(heapRel))
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("Merkle maintenance is disabled for table \"%s\"",
+							RelationGetRelationName(heapRel)),
+					 errhint("Set enable_merkle_index=on before modifying a Merkle-indexed table.")));
 		return;
+	}
 
     indexList = RelationGetIndexList(heapRel);
 
@@ -1647,6 +1666,8 @@ ExecUpdate(ModifyTableState *mtstate,
 		bool		update_indexes;
 		MerkleDeletePlan merkleDeletePlan;
 		bool		saved_enable_merkle_index = enable_merkle_index;
+		bool		saved_merkle_index_maintenance_suppress =
+			merkle_index_maintenance_suppress;
 		bool		need_exec_update_merkle_insert = false;
 		merkleDeletePlan.count = 0;
 		merkleDeletePlan.items = NULL;
@@ -2074,7 +2095,10 @@ lreplace:;
 			 * exactly once below.
 			 */
 			if (!defer_bcdb_dml && update_indexes && saved_enable_merkle_index)
+			{
 				enable_merkle_index = false;
+				merkle_index_maintenance_suppress = true;
+			}
 			PG_TRY();
 			{
 				/* insert non-Merkle index entries for tuple if necessary */
@@ -2084,10 +2108,14 @@ lreplace:;
 			PG_CATCH();
 			{
 				enable_merkle_index = saved_enable_merkle_index;
+				merkle_index_maintenance_suppress =
+					saved_merkle_index_maintenance_suppress;
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
 			enable_merkle_index = saved_enable_merkle_index;
+			merkle_index_maintenance_suppress =
+				saved_merkle_index_maintenance_suppress;
 
 			need_exec_update_merkle_insert = (!defer_bcdb_dml && saved_enable_merkle_index);
 			if (need_exec_update_merkle_insert)

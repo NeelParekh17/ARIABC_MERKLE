@@ -77,13 +77,28 @@ psql "${PSQL_ARGS[@]}" -f "$SQL_FILE"
 if [[ "$CLEAN" -eq 1 ]]; then
     echo "Cleaning existing rows for epoch $EPOCH..."
     psql "${PSQL_ARGS[@]}" -c "
+    SELECT merkle_apply_pending();
+    DO \$\$
+    DECLARE
+      applied bigint;
+      pending bigint;
+    BEGIN
+      SELECT applied_seq INTO applied
+        FROM ariabc_internal.merkle_apply_state WHERE singleton;
+      SELECT COALESCE(max(merkle_apply_seq), 0) INTO pending
+        FROM ariabc_internal.raft_apply_item
+       WHERE epoch_id = decode('$EPOCH', 'hex');
+      IF pending > applied THEN
+        RAISE EXCEPTION '--clean cannot remove an unapplied epoch prefix (max_seq=% applied_seq=%)', pending, applied;
+      END IF;
+    END \$\$;
     DELETE FROM ariabc_internal.raft_apply_item WHERE epoch_id = decode('$EPOCH', 'hex');
     DELETE FROM ariabc_internal.raft_apply_entry_item WHERE epoch_id = decode('$EPOCH', 'hex');
     DELETE FROM ariabc_internal.raft_apply_entry WHERE epoch_id = decode('$EPOCH', 'hex');
     "
 fi
 
-# Step 2: Validate schema_meta has exactly one row with version = 2.
+# Step 2: Validate schema_meta has exactly one row with version = 3.
 echo "Validating schema version..."
 SCHEMA_CHECK=$(psql "${PSQL_ARGS[@]}" -t -A -c "
 SELECT count(*), min(schema_version), max(schema_version)
@@ -92,11 +107,11 @@ FROM ariabc_internal.raft_apply_schema_meta;
 SCHEMA_COUNT=$(echo "$SCHEMA_CHECK" | cut -d'|' -f1)
 SCHEMA_MIN=$(echo "$SCHEMA_CHECK"   | cut -d'|' -f2)
 SCHEMA_MAX=$(echo "$SCHEMA_CHECK"   | cut -d'|' -f3)
-if [[ "$SCHEMA_COUNT" -ne 1 || "$SCHEMA_MIN" -ne 2 || "$SCHEMA_MAX" -ne 2 ]]; then
-    echo "Error: schema_meta must have exactly one row with schema_version=2; got count=$SCHEMA_COUNT min=$SCHEMA_MIN max=$SCHEMA_MAX" >&2
+if [[ "$SCHEMA_COUNT" -ne 1 || "$SCHEMA_MIN" -ne 4 || "$SCHEMA_MAX" -ne 4 ]]; then
+    echo "Error: schema_meta must have exactly one row with schema_version=4; got count=$SCHEMA_COUNT min=$SCHEMA_MIN max=$SCHEMA_MAX" >&2
     exit 1
 fi
-echo "Schema version OK (version=2)."
+echo "Schema version OK (version=4)."
 
 # Step 3: Insert epoch anchor (idempotent).
 echo "Registering epoch anchor..."
@@ -124,4 +139,32 @@ if [[ "$PROTO_VER_VAL" -ne 1 ]]; then
 fi
 
 echo "Ledger schema and epoch registration complete (epoch=$EPOCH protocol_version=1)."
+
+# Upgrade any pre-v7 tree before the Raft server is allowed to serve this
+# database, then apply the committed prefix left by a prior crash.  Both calls
+# are privileged internal operations; the final DO block is the hard gate.
+echo "Rebuilding legacy Merkle indexes and applying committed recovery prefix..."
+psql "${PSQL_ARGS[@]}" -c "SELECT merkle_apply_pending(); SELECT merkle_rebuild_legacy_indexes(); SELECT merkle_apply_pending();"
+psql "${PSQL_ARGS[@]}" -v ON_ERROR_STOP=1 -c "
+DO \$\$
+DECLARE
+  s jsonb;
+BEGIN
+  s := pg_catalog.merkle_recovery_status()::jsonb;
+  IF s->>'state' <> 'READY' THEN
+    RAISE EXCEPTION 'Merkle recovery is not READY after bootstrap: %', s;
+  END IF;
+  IF NOT COALESCE((
+    SELECT bool_and(pg_catalog.merkle_verify_index(i.indexrelid))
+      FROM pg_catalog.pg_index i
+      JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+      JOIN pg_catalog.pg_am am ON am.oid = c.relam
+     WHERE am.amname = 'merkle'
+  ), true) THEN
+    RAISE EXCEPTION 'Merkle verification failed after bootstrap';
+  END IF;
+END
+\$\$;
+"
+
 exit 0

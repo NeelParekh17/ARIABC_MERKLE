@@ -1,0 +1,325 @@
+Here is the detailed, structured transcription of the discussion, organized by thematic sections for clarity.
+
+## Transcript: Dynamic Tree Structure and Hashing Optimization
+
+### Memory Limits and Performance Scaling
+
+**Speaker 1:** Sir, so last time we only did for 1 million, 3 million, and 5 million rows. So I thought to extend it and see, like, is it ever becoming linear. So first of all I tried with up to—from 7 million, 10 millions, 15, and 20. The thing was here, from here 7 million it was still around the same, 10 million around the same, 15 million around the same, but at 20 million it became this much.
+
+**Speaker 2:** One second. That may be because it went out of memory.
+
+**Speaker 1:** Yes, that is the thing.
+
+**Speaker 2:** That has nothing to do with what you are doing. It is a database, because this is a lot of—this is the database part.
+
+**Speaker 1:** So actually, yeah, exactly that is the reason. At 20 million rows it was overall about 10 GB, and in that machine the RAM itself was 15 GB, so from here it was getting exponential only. But I did...
+
+**Speaker 2:** Not exponential.
+
+**Speaker 1:** Yeah, not exponential. But I did...
+
+**Speaker 2:** Don't report numbers like that which are going beyond because of out of memory. That is not a correct way to look at it.
+
+**Speaker 1:** But yeah, so I did that.
+
+**Speaker 2:** It's good to do the numbers, but when we report it we should not go into that space.
+
+**Speaker 1:** So then I did with another machine, that ranking server.
+
+**Speaker 2:** Well that has some 200 GB or something. So obviously it is not going to run out of memory.
+
+**Speaker 1:** Yeah. That's the only difference here. Here it has hit its memory limit 15 million, yes. And here it is not hitting it.
+
+**Speaker 2:** It will not hit.
+
+**Speaker 1:** So it's getting...
+
+**Speaker 2:** The time is increasing slowly. Yeah, it's not a multiple of the size and the total time, but that is—it is still linear, but some smaller factor. That will happen because you are using—the leaf node is fixed, right? So it's time to search in the leaf node... Not just search in the leaf node, because you are doing database actions for everything in the leaf node, right? When you find an error, what do you do? You rehash all the—you go to all the tuples and find the hash, right? So you are going to the tuples in the database. So that is also showing that is where the time is going. So if you did the dynamic structure which will keep the leaf size the same, then you will not see this impact.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** So then whatever is the thing, it will grow and let you look at a smaller number of tuples. The cost of looking at a tuple is large because it is in a database. And if you have 100 tuples there, it's a 100 tuple lookup for one error. And if you have 200 tuples, it's a 200 tuple lookup. So that's why it is scaling linearly there.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** So now the focus can... Okay, whatever we have seen, it is clear what is going on. Now let's switch focus to the dynamic structure.
+
+---
+
+### Designing the Dynamic Structure
+
+**Speaker 1:** I had one more point. So is it like even if we do dynamic, we'll still hit the same issue like after 10 million hits it will go linearly?
+
+**Speaker 2:** See, what happens is if you have too many nodes, it will split, right? So you will go one more level down in the tree. So that's the tradeoff. You have one extra level in the tree, but that is not as high a cost as fetching 100 tuples... not 100, how many ever tuples were there at the upper end? How many tuples were there per leaf? What is this range?
+
+**Speaker 1:** For 20 million it was 7,000 around.
+
+**Speaker 2:** No, no, no. How many candidates per leaf?
+
+**Speaker 1:** Yeah, per leaf node, yes. 7,000.
+
+**Speaker 2:** 7,000 per leaf node? Yes. That's ridiculously large. You should not be doing that. So that is where the dynamic structure will save the day. It will never go to 7,000; you will set it to a much smaller number.
+
+**Speaker 1:** Yeah.
+
+**Speaker 2:** It should not even be hundreds. It should be probably not more than 50, or 32 or something. So that is some threshold that we should set.
+
+**Speaker 1:** Yeah, so once you implement the structure, there will be a parameter so we can play with the parameter.
+
+**Speaker 2:** But we should try to keep it below 32 because for each one we're doing an I/O there. So all 32 tuples potentially that are there, you're doing I/O. So have you thought through that structure or worked out the details?
+
+**Speaker 1:** You're working on this. Now focus on that. Yeah.
+
+**Speaker 2:** Good, at least we are progressing. We are understanding what is going on. It is not a black box.
+
+---
+
+### Tree Hierarchy and Node Management
+
+**Speaker 1:** So here like it was for that ranking server, here it was 1 million 32 millisecond, everything was—here it was increasing.
+
+**Speaker 2:** Because the number of tuples which you are fetching is increasing. Yes, for every one error you are fetching so many tuples, so how will it not increase then? Yeah, that's a problem. Yes. If you really want to check, you can increase the height of the tree immediately by something to bring that number down drastically. Just run one experiment. It will increase this number locally... like you have to find if I increase the depth then I have to go one level down. But what is the fanout you have set? 32, right?
+
+**Speaker 1:** Yeah, 32.
+
+**Speaker 2:** So it will be one extra level. Yeah. If you do 32 from what is the number there? 50 million rows?
+
+**Speaker 1:** Yeah, 50 million.
+
+**Speaker 2:** It is for searching for... what?
+
+**Speaker 1:** Yeah, how many tuples is it searching for? 73... where is the number of tuples?
+
+**Speaker 2:** It's a different one. Yeah. So if you add one more level, that will come down to 1,000. Which is that end. Okay. So don't run all the experiments, just increase the height of the tree to one more thing and run just on that server.
+
+**Speaker 1:** Yeah, okay. Yes.
+
+---
+
+### Restructuring the Database Tables
+
+**Speaker 1:** So I mean, so do you want to go back and think about how to do it? Because I have some plan, but if you want to think about it I will not spoil your fun of coming up with a plan.
+
+**Speaker 2:** You can tell your plan, I will again think of my plan.
+
+**Speaker 1:** Yeah, devise. Okay. So basically I have thought of doing it as a simple extension of what we had. We can do a simple extension of the scheme that we had so far. So right now we have this already: leaf ID, tuple count, key. Which is—which has one row per leaf. Yeah. And we have this also, which has partition, node in partition, is leaf, leaf ID, parent. Which is one row per internal node in each partition. So if you have like this kind of tree...
+
+**Speaker 2:** Yeah. But why do we need two things? Why not the same...
+
+**Speaker 1:** Well we are keeping A for keeping track of all the keys. And only for the leaf nodes, which are at the bottom of the internal tree.
+
+**Speaker 2:** But then this is a denormalized structure. Keys is an array, yes. That causes other problems. How are you managing with 70,000 nodes in a list? What is it, some array is it? PostgreSQL array?
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** That will in fact get split across multiple nodes, that will add overhead. In fact, we should not be doing it like this. We should be having that as a third attribute: key, not keys. Key. Instead of clustered relation.
+
+**Speaker 1:** You got it? No.
+
+**Speaker 2:** So, okay. Postgres per se does not support clustered relations, that's another problem. But the thing is... yeah, okay let it be keys, but we will bound the number of things there. So then it's okay. If you have 32 things in a leaf, that is okay. Even if the key is 32 bytes or whatever, it is still only 1,000 bytes, which is not a big deal.
+
+**Speaker 1:** Yes. But the thing is if we go to something like 36,000 keys for 50 million...
+
+**Speaker 2:** No, that will cause problems. Yes, yes. But what I am saying is because we are now going to bound it to 32 or something, this is okay. Let it be. Sure, yes. So now this is for one row per leaf. Yeah. So leaf node only at the bottom of the internal tree structure. Yeah. This is for each node, whether internal or leaf node, both. And this is one row for each of the... okay, I will come back to part C. This is a new one that we want to add. So now the key idea of doing all this is that so far what we have been doing is we use the hash, and we do a percent with num leaf... num count of leaf.
+
+---
+
+### Hash Prefixing and Node Splitting
+
+**Speaker 1:** Now so what that does is now this is constant right now. Once the internal tree is made, we have like whatever, say number of partitions, say how much you had partitions?
+
+**Speaker 2:** 1,000.
+
+**Speaker 1:** Say 1,000 partitions. And you had say 1024 leaves. So this is a constant number right now. So now what we do is this is suppose—now this hash itself is a big one. Say what, 256 byte?
+
+**Speaker 2:** Yes.
+
+**Speaker 1:** So what we can do is out of this 256 byte, we are checking if effectively this section is the same with this doing a percentage. We are checking if this section is the same and then we map it to the same leaf.
+
+**Speaker 2:** Hmm.
+
+**Speaker 1:** Right. So now what we do is now once all these nodes which map to the same leaf node are coming to this leaf node, now there are too many tuples in this, we use some more extension.
+
+**Speaker 2:** That is the basic idea. Prefix.
+
+**Speaker 1:** Yeah. So that is that we maintain in h-mod offset. So now if we split this... now this split... now suppose we insert a node and that node has too many tuples, we want to split it. So we can split it—say initially we split with four... four-way. Four child nodes we create. And the more the better because we need to recompute hash of all of these... all these new child nodes. So we will only fetch all of them once, compute the hash and populate the hash in this whatever the hash structure we have. So that the hash is computed only once. Otherwise if we split into just two, and then we again have to split into four, then we need to re-fetch all of them, recompute the hashes.
+
+**Speaker 2:** You can store it together but... Yes. Store it in one node, but compute the hashes explicitly.
+
+**Speaker 1:** Yes. So we compute—say we have four nodes. Now what happens is... so now again, so first when we split we are taking a uniform split. So say this is 00, 01, 10, 11. Now suppose what can happen is this child gets too many tuples. Now we want to split this further. So now we have split this four ways, but we can go up to 32 ways. Our maximum fanout is 32. Now we will create a split within this node without affecting the other nodes which is say 000 and 001. And other nodes will remain the same because they have not yet exceeded the threshold, max threshold. Only this node has exceeded the threshold, so we split only that node. And that could again be done four-way also. I mean, right now I'm doing it two ways by taking one more hash bit here. But this could be done four-way also.
+
+**Speaker 2:** But question is how do you do that split exactly? The data structure detail. Conceptually it's fine.
+
+**Speaker 1:** So data structure is... what do you mean? We will just take the hash offset, right? We are doing percent with...
+
+**Speaker 2:** What do you store here? This is your data structure.
+
+**Speaker 1:** Yeah, so now that is where it comes. So now when you are splitting, you need to create a new entry in each of these leaf nodes. Because this is for per... one row per leaf. So you will remove the previous node entry in this A.
+
+**Speaker 2:** But you need something to tell you that this particular one is split further. Whereas the other one is still a leaf. Like here, this is some hash, right? You came here with some hash. Yes. Some other hash is as it was. This hash has got split further. So that will have to be in this somewhere in here.
+
+**Speaker 1:** No, I didn't get it. So all of this is one leaf node, right? This is common for one leaf node.
+
+**Speaker 2:** Like here, this structure, let's say node in partition. This is let's say you initially decided to hash to some number. Initially maybe it was a leaf. Now it becomes not a leaf.
+
+**Speaker 1:** Yes. So that is leaf changes.
+
+**Speaker 2:** From... yeah. And whatever was here in that leaf ID will get split.
+
+**Speaker 1:** Yeah, so leaf ID matters only if is_leaf is true or false. That's what the current structure is also. If is_leaf is false...
+
+**Speaker 2:** Then we don't even check the leaf ID because it is not assigned.
+
+**Speaker 1:** Right. But what we have is we have a large number of bits. We are going to look at a prefix of those bits. And look up in this table. And if that has actually got split further, that prefix will tell us it is not a leaf. Then we grow the number of bits and look up in the same table.
+
+**Speaker 2:** Let's say in this case. Node in part is the node number. So initially let's say we took 5 bits, 32. So those 5 we would have looked up here and it will say it's not a leaf. Now we will take 10 bits instead of 5, so we will—for that particular one we are splitting because it's full. So we will add 32 entries into this one for the children. And we can optimize this, but as a first cut...
+
+**Speaker 1:** First cut, we add all the 32. And every one of them says its leaf.
+
+**Speaker 2:** Yes, exactly. And their hash will have to be computed here. This part. From the original content. Yes. Yeah, and the one which is not split will stay as it was. We are only splitting that one. Yes, exactly. So other... yeah, so we are not touching the other ones. Only the one that is splitting, that one gets removed from is_leaf and the other rows get added. So this is... so again, so coming back to this. But the other problem is recombining these when it goes down. So you may want to keep...
+
+**Speaker 1:** What do you mean go down? Here there's a hash also, right? Why is the hash not here?
+
+**Speaker 2:** Yeah, I think hash is also there. Hash is there. It is there. So all of them have hash. Hash and count. This has a count, right?
+
+**Speaker 1:** Yeah, it has a tuple count. Yes.
+
+**Speaker 2:** Yeah, so this will also have a tuple count. Yes. So all of them have a tuple count. No, actually these I am adding that now, it was not there before, it was not needed before. I am telling you why we need it now. This is an internal node. Its tuple count is whatever is below it. When you add a tuple below it, it goes up. When you delete a tuple below, it goes down. Yes. But the key point is this. If for an internal node the tuple count goes low, there's a lower threshold, let's say it goes below 32, sure, then you have to merge backwards.
+
+**Speaker 1:** Sure, yes. Right? But that is only if this node and its peer node both have gone below the threshold. So the combined will not...
+
+**Speaker 2:** No, no. I'm looking at the parent. Exactly. So if this node's children together have less than 32, you will merge them back.
+
+**Speaker 1:** Yes, correct. Yes. So that is actually the part of the first one. If there is a delete operation and if the tuple count is less than the minimum tuple threshold, then merge them. Merge all the children similar to this—I mean merge children into this node. Yes. So for that this tuple count will be required. Yes, correct. Okay. And what is this one?
+
+---
+
+### Formalizing Internal Nodes and Leaves
+
+**Speaker 2:** So this is for each—so I mean, so now what we will do initially is whatever structure we have of the leaf node right now, we keep initialized with that. And we treat the basic leaf nodes as of today as the starting point. So because what we are doing we will do hash of modulo number of leaf nodes, we will land on that leaf. We start with that leaf. You know, that's just one more parameter which we have to deal with. I think let us simplify it. Let us start with only one node. Or 32 nodes. Okay. A root and 32 leaves, whatever that branch is.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** That is actually the same thing as what we are doing by where we set the number of leaf as one. Not one, that whatever that number. Yes, so I mean that is fine. But keep that fixed. It's not a configuration parameter. One less parameter to deal with. The structure... because anyway what is the big deal? You look it up, you will see that it is not a leaf. Exactly. And you will immediately add another 5 bits and look up in the same table. Yes, correct. Which is what you would have done anyway if you had a larger thing.
+
+**Speaker 1:** Sure. So basically whatever starting point we have, from that point onwards we consider the splits. And then merges. So that's what we update. I mean update A, B, C similarly. If there is a merge then we update A, B, C similarly. Remove all the child node rows and insert one for the parent, saying that now this parent is the leaf instead of the children. So that's what this... this is a pseudo-code just for the same purpose. So first thing is if is_leaf is true—so at the very beginning, if it is a leaf node and the tuple count has exceeded the threshold, then split. How do we do the split? Do these, these bookkeeping operations. And if it is... if is_leaf is false, then take additional bits from the hash and then from C find the child node that you want.
+
+**Speaker 2:** That is just a fanout parameter, like keep it simple. Well, so the thing is... let's see, we can optimize this, but for now when we split we create 32 children. Can we optimize this? We will discuss. The reason I did not do the complete full 32 fanout is maybe one of the leaf nodes gets more. So we may have a skew, that's why I mentioned somewhere here. Maybe skewed here. So we may have a leaf node 00 having too many tuples, but others may not. So we will split only this one, we don't want to split all these.
+
+**Speaker 1:** No, no. The point is this. Let's say our tree's fanout is 32. Here you're doing four, and then going up to 32. So this is an optimization. Yes. I want to start with a basic scheme. Okay. Where fanout is 32. Okay. If a leaf is full, we split it 32 ways. Okay, sure. It may not be very efficient, sure, but it is simple. Sure. Yes. Okay. Now let us see how to optimize this. Okay. Then your H mod, whatever that number of bits used, can be...
+
+**Speaker 2:** Yeah, basically what we will do is the problem is we will have to shuffle more things around. Yes. And if we are doing 32 split, the size will also drop significantly, and too many entries will come and too many internal nodes will appear.
+
+**Speaker 1:** But the internal node is nothing, it's just an entry here. Sure, yes. There is no major overhead, it's just one tuple. Yes. It's not like a B-tree where the node becomes under-full. Yes, sure. So I think that I am not too worried. Okay. I mean, it is slightly under-full in the sense that if you have a 32 array of keys, yes, only one is there, so there is wasted space there. Yes, yes.
+
+**Speaker 2:** If you want to avoid that, we will have to do more bookkeeping. Basically this could have got split 32 ways, but it is split fewer, so here we have to track how many bits are used for the children. Correct. But the problem is this: Let's say we do binary, as an extreme case. We split it into two. So we will say this—when you want to traverse this and go to the child, just use one extra bit. To get the child node number. Yes. Not the five extra bits. One extra bit. Yes. But the problem is when this child again fills up and splits, you have to modify the parent and say now use two bits. Yes. And that—yeah, that will have some its own overhead. Yes, and the bigger overhead is now you need to compute hashes for these four nodes. For that you have to fetch everything again and again compute hashes.
+
+**Speaker 1:** That is crazy. Exactly, that's why I said not too much, not too less, so you have to balance on both the sides.
+
+**Speaker 2:** No, no, but supposing this... No, the other way is this. This leaf ID is anyway a separate thing. So this one says... yeah, so here is what will happen. You split into two. When you split again, what you can do is here we'll have one more thing: num... shall we call it num pointers. So the idea is this. Even if we did 32 things, 16 of them will point to one, 16 will point to the other leaf ID. We'll split 32 ways, so there are now 32 children. But when we are searching here, we will see that it has only one pointer. Sure, sorry, one bit extra. So we will compute that much only and look it up here. Sure. But supposing this now splits again. So this has let's say 16 pointers initially. If this splits, what we will have to do is these two nodes at this point will all have to be—yeah, that's the problem, they all have to split. And then the hash has to be recomputed. Yes, that is the problem. Yes.
+
+**Speaker 1:** So that's a parameter. What is the fanout? Yes, whatever. We can make that call. Sure. Yeah. We can do that experimentally also.
+
+**Speaker 2:** Yeah, there is some space overhead if you split 32 ways. Yes. 16 ways will be cheaper. That point, but then the problem is when you are doing the hash, you are transferring more data. Yes. And that will be for many transactions. Every time you split, you have that many transactions. And all the traversals have to update that entire... the problem is every update updates every level of the tree. So we cannot have such a narrow tree. Yes, yes. It has to be a fat tree. Yes.
+
+**Speaker 1:** So what parameter is configured? That we can actually tune based on what we see.
+
+---
+
+### Optimizing the Global Hash Size
+
+**Speaker 2:** No, the other way is this. We know that this is not a final leaf. We will have a node array. In that case, we will not have a single hash, we will have—like here, key is one, hash one, key is two, hash two, as long as the number of keys is small. But then how many, I mean we don't know how much fanout we want to keep, how many children we'll have, how many entries we'll have in that.
+
+**Speaker 1:** So yeah, that we have to figure out, but let's take this case, right? Supposing we say that at most... let's say 32 fanout. We split. So this will get at least 16 keys. Yes. Right? But those 16 keys might map to 16 nodes or to two nodes or three nodes, three children whatever, right? We'll keep those alone here. For—for let's say we have split 32 ways, so this will be the—what do you—you called it something here right? H-mod or whatever? Offset. I'll just call it offset. Sure. Offset, keys, hash. So we don't put it in 32 or 16 nodes. We'll keep it in one node, but we will keep the hashes separate. So if we have to split this further, we don't have to recompute the hash. The hashes are already there. Yeah, the hash will happen only once when you actually split, the main split. This is a minor split, because it's already divided, we just put it in two leaves. Sure. And in the parent, we'll have to increase that. Yes. But all the children, let's say we used one bit, now there are two bits. So both the children have to have this split done. So they will get split. Yes. Then yeah, whatever that number is. Yes, okay.
+
+**Speaker 2:** So let's say we have an even larger fanout. Let's say instead of 32 we had, let's say 64-way fanout, and then we do 8-way split, let's say, or 4-way split, whatever. So 64 array, each will get 16. Sure. And then when they grow, keep track of how many how many are there also, right? Yeah, yeah. That's a number. Count. Okay.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** So here there will be actually—this is the total count. And this each of these will have its own count. Yes. So offset, count, keys, hash. So we have the same structure like here, right? Okay, tuple count is already there here. What is that num pointers, I'm not sure. Forget that, we already have the count, and you have the keys and the hash. Yes. And now you will say for this offset, this is the count, these are the keys and hash. So this actually encapsulates multiple nodes stored together. Sure. And the ID for that will be here. So if any of these has to split, this will—it will create new entries in this, yeah.
+
+**Speaker 1:** Yeah, that's right. So this doesn't track which are its children right now, because we're just using the hash to find its children. Unlike a B-tree where it stores the pointers to children. Yes. But now we have to use num bits somewhere.
+
+**Speaker 2:** So for that, this is the third one created. For a given partition, for a given node ID, what is the child leaf node ID and what is the offset? So for...
+
+**Speaker 1:** There will be many child...
+
+**Speaker 2:** Sure, so there will be multiple entries, one entry per child. So that's what it says. One row for each offset of an internal node. So if you have a 000, you will have an offset 000 child, what? This will grow too big. We should keep it here only. So the num bits for child, right? So this can go from anywhere from two to let's say if you do 64... that will be 6 bits. Ah yes, say 2 to 6. Yes. So if it is six, that means all the children are there. Yes. If it is two, only two children are there. But when one of these children splits, we have to take the other children at this level and split. We don't have to go to the actual tuples. That will be extremely expensive as you said. But this is not so expensive because it's a smaller number of things. Sure, sure, fair enough.
+
+**Speaker 1:** Just that if we keep that single number 2 to 6, it's creating a uniform split. So even if we split this node we will end up splitting all these nodes also, even if only one child node is fat, others will also get split.
+
+**Speaker 2:** But I think that is also unnecessary. Instead what we can do here is have a child node IDs. Okay? So this is an array of whatever, 64. And potentially all of them are different node IDs. Right, because take the next whatever number of bits. Yes. But initially we will not do that. So let's say the first 32 and then the second 32 are the same, so that these are leaves. They're all going to be leaves. Yes. Well no, they may get one of them may get split further. They may not be leaves.
+
+**Speaker 1:** So in the future whenever they... in fact we should try to merge these two, just like you have in some it'll be very similar structure. Here you will have the actual keys for the records. Here you will have the child node IDs. So actually that is what this is doing. It has the child node ID for a part... this is normalized.
+
+**Speaker 2:** But that will increase the cost too much, so I'm denormalizing and storing that array here. Okay. So right now if you split two ways, there will be only two children. Yes. But now if one of these leaves has to split again, so this is a parent, you will come back here and we will know how many things point to it, right? Yes, so maybe yeah, here we are maintaining these separately anyway. Yes. So if this splits, only that part will get updated. So let's say there were 8 pointers to it, we're now splitting four and four, so four pointers will point to one, four will point to the other when you split. Yes. And no hashes are recomputed, so it's a very local thing, like a B-tree. Yes. It will not cascade, it will not involve too many nodes. Yes.
+
+**Speaker 1:** But then we need to define how many such partitions will compute hash for? Because when we come here and we have a leaf we want to...
+
+**Speaker 2:** Do it for the maximum number. Whatever is the maximum, we will compute for that many. Okay. That will make it uniform. Yes. Do you understand what I'm saying? You may not have understood it fully, but anyway at least he has understood. So work out the details and draw up some pictures.
+
+**Speaker 1:** Yeah, I think I'll put that as an algorithm also this thing. So...
+
+**Speaker 2:** Yeah, but draw some pictures. Sure. It will really help understand what is going on. So like B-tree, you don't learn from the algorithm, you see the picture. Draw a proper picture, I think it's worth it. It will get used in the paper somewhere. Definitely. Yes. Okay.
+
+**Speaker 1:** So this last part is not required then.
+
+**Speaker 2:** Yeah, so I'm trying to extend this so that the amount of effort to redo for dynamic will be reduced, that's all. So we can use as much as existing. Yeah, but the other part, see if it is a leaf, then what are they... this array is not used right? Yes, correct. But can we somehow use that array for this part? Because many of the things are similar, right? We have the ID, we have the tuple count, we have the hash. The only difference is we just have the node IDs here. If you want these to be uniform sized, we can keep fewer... see, this has more information because it has multiple keys and hashes. Yes, yes. Whereas this has just one hash. Correct. So if you want to use a fixed size structure, there will be less fanout here. So let's say this is a 64-way split, or even larger, I don't care. We want 128 also. We can split there, but the leaf will have fewer. Let's say 128 fanout for internal nodes. Leaf may be smaller. 32 or something, whatever it is we can decide. Because it's going to have more information.
+
+---
+
+### Final Considerations on Hash Collisions
+
+**Speaker 1:** So when you say leaf has 32, so it will have individual keys, you're saying?
+
+**Speaker 2:** Yeah. And 128, so this is not for leaf, right? So because otherwise this keys will explode. Because as the tree under it grows, having 128 of this will go very high. That's what I'm saying, for leaf I'm making it smaller, say 32. Leaf can have only 32 keys. And this is a multi-leaf. So the structure will be similar, but the multi-leaf stores the actual keys and the hash, the tuple (these are actual tuples, right? Yes). So actually we can store the tuple hash here. We don't have to go to the tuple. How big is the hash?
+
+**Speaker 1:** 256 bytes. Oh, that is too big. You can't store that here. That will explode here. It will be slightly more difficult. Why do you need 256 bytes? We are not doing security. We are only doing checking. So why not 32 bits? 32 bits already gives a lot of protection. You can't—actually we are not targeting protection here. That's why I said in the very beginning, it's not even necessary. We said we want to use the latest algorithm, so we took SHA-3, but even MD5 does it just fine because I mean all we need is...
+
+**Speaker 2:** Yeah, if somebody says MD5 is broken.
+
+**Speaker 1:** But we're not doing security, we're just trying to hash it to map to something, set of leaves.
+
+**Speaker 2:** Yeah, you're right, you're right. No harm in using either of them, but yeah. But we can use it literally whatever with fewer bits. Yeah, sure. We can just take instead of all 256 bits, we will take 32 bits. Yes. Then we can store the hash exactly. Yes. Then it's not a problem. Sure. That is 256 bits, which is 32 bytes. But if we want to identify if there is a change in the tuple, then we need all 256. Because if we are taking just 32 bits out of that 256, then we need to have the entire hash to find if there is a change.
+
+**Speaker 1:** Basically we hash it down to 32 bits. So very unlikely two different things will hash to the same 32. And we are only looking for corruption changes. Yes, yes. See, does anything support output of 32 bits? You can always hash 32 bits using any hash function. Yeah, sure. Two fifty-six bits can be hashed to 32 bits. Using any hash function. Yeah, I mean if it does it automatically. Maybe not 32, maybe 64 bits. Yeah, sure. 256 is a lot. Yes. Okay.
+
+**Speaker 2:** So then if we can keep the hash for the tuple here, then we don't have to go and fetch the tuple. Unless you are comparing that tuple. If you're checking if the tuple is corrupted, that is different. Yes. But we are assuming the hash is maintained, so the tuple should match the hash. Because we are assuming the code is not corrupted. Yes. So there's no need to actually fetch the tuple. It will all be a local operation here. Sure. So then this will require that overhead because we're storing multiple hashes. So what we will do here is simply store the keys with their hash. But even then, I mean now we are increasing both dimensions. Here we are increasing for each tuple we are storing the key, if we have like 10 to 50 million rows, that is going to expose the size of the Merkle structure.
+
+**Speaker 1:** So what? Per tuple we are storing the key and the hash. Key is anyway already likely to be more than 8 bytes. Yeah, key is fine. So it is not adding a huge overhead storing the hash. Okay. So it might as well store the hash and avoid going to the tuple. That reduces the cost tremendously. Your times will speed up drastically with that. Yes, sure.
+
+**Speaker 2:** So we just store in the leaf, we will store all the things which map to it: key, hash array of these, however many fit. Some K, let us say. Key-hash values. So now if the leaf is full, we are going to split into two, but then we look at the parent. And if this has multiple things pointing to this one, then we split it that way. We create two things by taking two entries here, splitting them, and giving a corresponding leaf ID. But if only one pointer is pointing to this, then we have to create one more level. Yes.
+
+**Speaker 1:** If we cannot increase the fanout. Yeah, in this case we're taking max fanout anywhere, so yes, we have to split.
+
+**Speaker 2:** Yeah. So then we'll create a child for it. This one will itself become a non-leaf node.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** So there is no such thing as leaf ID. What is supposed to be a leaf ID? It is already here. For a non-leaf entry.
+
+**Speaker 1:** Yeah, now I am splitting it like a B-tree, leaf structure and non-leaf are different. So similarly here we're doing this. This is a non-leaf, this is a leaf.
+
+**Speaker 2:** So non-leaf will have parent is also not required. For a non-leaf, you need to update the parent. That is just to remove some bits from your ID and it will be the parent. Well yeah, okay. So why store it? Just compute it. Sure. So hash will have to be stored, and then the child node IDs. So these are the children, tuple count also is there, and how many ever children fanout we allow, that many child node IDs are stored here. Yes. And leaf ID, we are doing slightly different because here we have to store parent. In this one you don't need a parent, in the child leaf you'll have to know which is the parent because leaf ID is not simply the hash. Many things hash to it. And then the key-hash pairs and the final hash is also stored here. Fine.
+
+**Speaker 1:** Yeah. If a leaf is already having only one parent pointing to it, the split is not possible by creating one more sibling leaf. Then this will become a non-leaf and one extra level. So when you make it non-leaf, you will add a new entry here with that hash as the node ID. Node ID in partition. Yes. So when a leaf becomes a non-leaf, you will add a new entry.
+
+**Speaker 2:** Correct. And create new leaves. Yes. Okay. I think this is better because splitting 32 ways is very expensive. And because we have the hash here, the problem was that recomputing all hashes is a pain. But now it is all local, no I/O, it's just right here. So this optimization is easy to handle. So this will—only thing is you have to track this: child node IDs and this link has to be there. And we have to track how many—for a particular child, how many things from here point to it. And the other limitation is an 8-byte hash may not always represent a change in a tuple accurately.
+
+**Speaker 1:** See, these are hashes. The probability of two things matching is one in $2^{64}$. That is less than the probability of a bit error which is not detected. Sure. So that means it's fine. It's an extremely small value. For all practical purposes, it's zero. Sure.
+
+**Speaker 2:** Okay. So just for your hash function, just do it with 64 bits instead of 256 bits. If you are trying to attack it by creating a value with the same hash, then of course 64 is more vulnerable than 256. But as you said, we are not targeting that use case.
+
+**Speaker 1:** I mean, an attacker could give a different value which hashes to the same. But in our case, if you return that as an answer, there you're sending the proper hash for the answer. You're not sending a 64-bit hash. 64-bit hash is only for the Merkle diff comparison.
+
+**Speaker 2:** But then any update to the database which doesn't reflect in a change in the Merkle tree will not be detected. That is a given. It will not be detected in what sense? If you're comparing the root hashes, it'll still match. Yes. Yes. But the point is, so what? It is an undetected corruption of the database. But the good part is that when you give the answer, you're not just giving the answer from one node. The answer itself is hashed. So even if one node fakes it, it may be an undetected corruption. But as long as detected plus undetected corruption is still a minority, the majority will still give the right answer, you will get the right answer. So it just increases the chance that there is an undetected corruption. It doesn't mean that it will give a wrong answer immediately. I was just thinking if we could maybe add a nonce to reduce that error further.
+
+**Speaker 1:** I think that you can use a tuple... some, some id... like hashing the whole tuple. So two tuples will not have the same value that way. Nonce is to prevent attacks where you have the same password and it leaks. That is not a problem here. We are not leaking information through the hash. The information is already there. We are only comparing. Nonce is for avoiding this kind of leakage, where you do a dictionary attack. Dictionary attack is a non-issue here. So why do you worry about nonces?
+
+**Speaker 2:** No, so I was thinking suppose the attacker knows that 100 and 10,000 would hash to the same, then he can corrupt the data, update the data so that it is corrupted and still matches the root hash. That I agree. But the point I was saying is, first of all, that chance of getting a meaningful value like that is very difficult because it's a huge... and second, even if the attacker is able to do that, it is not the end of the world. It means there is one corruption which you did not detect. That's all.
+
+**Speaker 1:** So the point is, as long as the known plus unknown corruptions are a minority, the final answer will not get corrupted. If you say the attacker can corrupt three out of five things with this, then yes, it can return a wrong value with the same hash which will not get detected. Sure. But it's a very unlikely combination of things.
+
+**Speaker 2:** Okay. Don't worry about everything, focus on this data structure. Work out the details, we'll meet again and discuss it.
+
+**Speaker 1:** Okay, sounds good.

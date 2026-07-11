@@ -46,9 +46,20 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
 	MerkleRoute route;
     int         nkeys;
     
-    /* GUC: Check if Merkle index updates are enabled */
+	/* The executor briefly suppresses the generic AM callback for UPDATE so
+	 * it can apply the full-row Merkle delta exactly once below.  A normal
+	 * INSERT/DELETE with maintenance disabled must fail closed instead of
+	 * silently leaving the aggregate stale. */
     if (!enable_merkle_index)
-        return false;
+	{
+		if (merkle_index_maintenance_suppress)
+			return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("Merkle maintenance is disabled for index \"%s\"",
+						RelationGetRelationName(indexRel)),
+				 errhint("Set enable_merkle_index=on before modifying a Merkle-indexed table.")));
+	}
 
     nkeys = indexInfo->ii_NumIndexKeyAttrs;
 	merkle_compute_route(indexRel, values, isnull, nkeys, &route);

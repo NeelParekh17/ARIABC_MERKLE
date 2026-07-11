@@ -22,6 +22,7 @@
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "storage/condition_variable.h"
+#include "access/merkle.h"
 #include "access/xact.h"
 #include "fmgr.h"
 #include "port/pg_bswap.h"
@@ -580,8 +581,19 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 
 	snprintf(sql_buf, sizeof(sql_buf),
 		"INSERT INTO ariabc_internal.raft_apply_item"
-		" (epoch_id, raft_log_index, item_ordinal, entry_digest, item_digest, state)"
-		" VALUES ($1, $2, $3, $4, $5, $6)"
+		" (epoch_id, raft_log_index, item_ordinal, entry_digest, item_digest, state, merkle_apply_seq)"
+		" SELECT e.epoch_id, e.raft_log_index, i.item_ordinal,"
+		"        e.entry_digest, i.item_digest, $6,"
+		"        e.merkle_apply_seq_base + i.item_ordinal::bigint"
+		"   FROM ariabc_internal.raft_apply_entry e"
+		"   JOIN ariabc_internal.raft_apply_entry_item i"
+		"     ON i.epoch_id = e.epoch_id"
+		"    AND i.raft_log_index = e.raft_log_index"
+		"  WHERE e.epoch_id = $1"
+		"    AND e.raft_log_index = $2"
+		"    AND i.item_ordinal = $3"
+		"    AND e.entry_digest = $4"
+		"    AND i.item_digest = $5"
 		" ON CONFLICT (epoch_id, raft_log_index, item_ordinal) DO NOTHING");
 
 	EMIT_SAFE_LEDGER_XACT(tx, "claim_insert_before");
@@ -1003,6 +1015,8 @@ validate_terminal_update_returning(BCDBShmXact *tx,
 								  int expected_fmtver,
 								  const char *expected_payload,
 								  const char *expected_sqlstate,
+								  int expected_delta_version,
+								  const bytea *expected_delta_blob,
 								  int spi_rc,
 								  uint64 processed)
 {
@@ -1013,6 +1027,8 @@ validate_terminal_update_returning(BCDBShmXact *tx,
 	Datum result_payload_d;
 	Datum error_sqlstate_d;
 	Datum error_payload_d;
+	Datum delta_version_d;
+	Datum delta_blob_d;
 	bool state_isnull = false;
 	bool digest_isnull = false;
 	bool result_fmtver_isnull = false;
@@ -1020,6 +1036,8 @@ validate_terminal_update_returning(BCDBShmXact *tx,
 	bool result_payload_isnull = false;
 	bool error_sqlstate_isnull = false;
 	bool error_payload_isnull = false;
+	bool delta_version_isnull = false;
+	bool delta_blob_isnull = false;
 	int16 state;
 	bytea *digest_ba;
 	int digest_len;
@@ -1067,6 +1085,14 @@ validate_terminal_update_returning(BCDBShmXact *tx,
 								   SPI_tuptable->tupdesc,
 								   7,
 								   &error_fmtver_isnull);
+	delta_version_d = SPI_getbinval(SPI_tuptable->vals[0],
+									SPI_tuptable->tupdesc,
+									8,
+									&delta_version_isnull);
+	delta_blob_d = SPI_getbinval(SPI_tuptable->vals[0],
+								 SPI_tuptable->tupdesc,
+								 9,
+								 &delta_blob_isnull);
 
 	if (state_isnull)
 		elog(ERROR,
@@ -1174,6 +1200,38 @@ validate_terminal_update_returning(BCDBShmXact *tx,
 			 (unsigned long long) tx->raft_log_index,
 			 (unsigned) tx->raft_item_ordinal);
 
+	if (delta_version_isnull || DatumGetInt32(delta_version_d) != expected_delta_version)
+		elog(ERROR,
+			 "raft_apply_ledger: terminal finalizer Merkle delta version mismatch for log_index=%llu ordinal=%u",
+			 (unsigned long long) tx->raft_log_index,
+			 (unsigned) tx->raft_item_ordinal);
+	if (expected_delta_version == 0)
+	{
+		if (!delta_blob_isnull)
+			elog(ERROR,
+				 "raft_apply_ledger: empty Merkle delta unexpectedly stored a blob for log_index=%llu ordinal=%u",
+				 (unsigned long long) tx->raft_log_index,
+				 (unsigned) tx->raft_item_ordinal);
+	}
+	else
+	{
+		bytea *stored_delta;
+
+		if (delta_blob_isnull || expected_delta_blob == NULL)
+			elog(ERROR,
+				 "raft_apply_ledger: missing Merkle delta blob for log_index=%llu ordinal=%u",
+				 (unsigned long long) tx->raft_log_index,
+				 (unsigned) tx->raft_item_ordinal);
+		stored_delta = DatumGetByteaPP(delta_blob_d);
+		if (VARSIZE_ANY_EXHDR(stored_delta) != VARSIZE_ANY_EXHDR(expected_delta_blob) ||
+			memcmp(VARDATA_ANY(stored_delta), VARDATA_ANY(expected_delta_blob),
+				   VARSIZE_ANY_EXHDR(stored_delta)) != 0)
+			elog(ERROR,
+				 "raft_apply_ledger: Merkle delta blob mismatch for log_index=%llu ordinal=%u",
+				 (unsigned long long) tx->raft_log_index,
+				 (unsigned) tx->raft_item_ordinal);
+	}
+
 	tx->raft_terminal_update_confirmed = true;
 	tx->raft_terminal_returning_verified = true;
 	verified_top_xid = GetTopTransactionIdIfAny();
@@ -1218,11 +1276,13 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 	int    spi_rc;
 	char   sql_buf[2048];
 	uint8  terminal_digest[BCDB_RAFT_DIGEST_BYTES];
-	Oid    argtypes[6];
-	Datum  values[6];
-	char   nulls[6];
+	Oid    argtypes[8];
+	Datum  values[8];
+	char   nulls[8];
 	int    payload_len = result_payload ? strlen(result_payload) : 0;
 	uint64 processed_ok;
+	bytea *merkle_delta_blob;
+	int    merkle_delta_version;
 
 	if (!tx || !tx->raft_ledger_enabled)
 		return;
@@ -1234,6 +1294,9 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 
 	/* Validate early inside transaction before database state is finalized */
 	validate_terminal_payload(tx, result_payload, result_fmtver, false, NULL, terminal_digest);
+	merkle_delta_blob = merkle_serialize_staged_delta(tx->raft_log_index,
+											 tx->raft_item_ordinal);
+	merkle_delta_version = merkle_delta_blob != NULL ? MERKLE_DELTA_VERSION : 0;
 
 	/*
 	 * Keep terminalization in a later command ID than the CLAIMED insert even
@@ -1252,6 +1315,8 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 		"       sqlstate_code         = NULL,"
 		"       error_payload         = NULL,"
 		"       terminal_digest       = $5,"
+		"       merkle_delta_version  = $7,"
+		"       merkle_delta_blob     = $8,"
 		"       committed_at          = clock_timestamp()"
 		" WHERE epoch_id = $1"
 		"   AND raft_log_index = $2"
@@ -1259,7 +1324,8 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 		"   AND state = %d"
 		" RETURNING state, terminal_digest, result_format_version,"
 		"           result_payload, sqlstate_code, error_payload,"
-		"           error_format_version",
+		"           error_format_version, merkle_delta_version,"
+		"           merkle_delta_blob",
 		RAFT_ITEM_STATE_APPLIED_OK, RAFT_ITEM_STATE_CLAIMED);
 
 	argtypes[0] = BYTEAOID;
@@ -1268,21 +1334,37 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 	argtypes[3] = BYTEAOID;
 	argtypes[4] = BYTEAOID;
 	argtypes[5] = INT4OID;
+	argtypes[6] = INT4OID;
+	argtypes[7] = BYTEAOID;
 	values[0] = PointerGetDatum(make_bytea(tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES));
 	values[1] = Int64GetDatum((int64) tx->raft_log_index);
 	values[2] = Int32GetDatum(result_fmtver);
 	values[3] = PointerGetDatum(make_bytea((const uint8 *)(result_payload ? result_payload : ""), payload_len));
 	values[4] = PointerGetDatum(make_bytea(terminal_digest, BCDB_RAFT_DIGEST_BYTES));
 	values[5] = Int32GetDatum((int32) tx->raft_item_ordinal);
-	memset(nulls, ' ', 6);
+	values[6] = Int32GetDatum(merkle_delta_version);
+	if (merkle_delta_blob != NULL)
+		values[7] = PointerGetDatum(merkle_delta_blob);
+	else
+		values[7] = (Datum) 0;
+	memset(nulls, ' ', 8);
+	if (merkle_delta_blob == NULL)
+		nulls[7] = 'n';
 
 	EMIT_SAFE_LEDGER_XACT(tx, "finalize_ok_before");
-	spi_rc = SPI_execute_with_args(sql_buf, 6, argtypes, values, nulls,
+	spi_rc = SPI_execute_with_args(sql_buf, 8, argtypes, values, nulls,
 								   false, 1);
 	EMIT_SAFE_LEDGER_XACT(tx, "finalize_ok_after");
 	processed_ok = SPI_processed;
-	validate_terminal_update_returning(tx, false, result_fmtver, result_payload, NULL, spi_rc, processed_ok);
+	validate_terminal_update_returning(tx, false, result_fmtver, result_payload,
+									NULL, merkle_delta_version,
+									merkle_delta_blob, spi_rc, processed_ok);
 	ledger_spi_end(&spi_scope);
+	if (merkle_delta_blob != NULL)
+		merkle_mark_staged_delta_persisted();
+	merkle_crash_failpoint("after_merkle_delta_ledger_written");
+	bcdb_maybe_trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_MERKLE_DELTA_LEDGER_WRITTEN",
+								 tx, "after_merkle_delta_ledger_written");
 
 	/*
 	 * SPI mutation is complete, but this worker stays inside an internal
@@ -1315,6 +1397,11 @@ bcdb_raft_ledger_finalize_error(BCDBShmXact *tx,
 
 	if (!tx || !tx->raft_ledger_enabled)
 		return;
+	if (merkle_has_staged_delta())
+		elog(ERROR,
+			 "raft_apply_ledger: failed transaction retained staged Merkle deltas for log_index=%llu ordinal=%u",
+			 (unsigned long long) tx->raft_log_index,
+			 (unsigned) tx->raft_item_ordinal);
 
 	compute_terminal_digest(true, error_fmtver, sqlstate, error_payload, terminal_digest);
 	memcpy(tx->raft_terminal_digest, terminal_digest, BCDB_RAFT_DIGEST_BYTES);
@@ -1337,6 +1424,8 @@ bcdb_raft_ledger_finalize_error(BCDBShmXact *tx,
 		"       sqlstate_code         = $4,"
 		"       error_payload         = $5,"
 		"       terminal_digest       = $6,"
+		"       merkle_delta_version  = 0,"
+		"       merkle_delta_blob     = NULL,"
 		"       committed_at          = clock_timestamp()"
 		" WHERE epoch_id = $1"
 		"   AND raft_log_index = $2"
@@ -1344,7 +1433,8 @@ bcdb_raft_ledger_finalize_error(BCDBShmXact *tx,
 		"   AND state = %d"
 		" RETURNING state, terminal_digest, result_format_version,"
 		"           result_payload, sqlstate_code, error_payload,"
-		"           error_format_version",
+		"           error_format_version, merkle_delta_version,"
+		"           merkle_delta_blob",
 		RAFT_ITEM_STATE_APPLIED_ERROR, RAFT_ITEM_STATE_CLAIMED);
 
 	argtypes[0] = BYTEAOID;
@@ -1368,8 +1458,11 @@ bcdb_raft_ledger_finalize_error(BCDBShmXact *tx,
 								   false, 1);
 	EMIT_SAFE_LEDGER_XACT(tx, "finalize_error_after");
 	processed_err = SPI_processed;
-	validate_terminal_update_returning(tx, true, error_fmtver, error_payload, sqlstate ? sqlstate : "XX000", spi_rc, processed_err);
+	validate_terminal_update_returning(tx, true, error_fmtver, error_payload,
+									sqlstate ? sqlstate : "XX000",
+									0, NULL, spi_rc, processed_err);
 	ledger_spi_end(&spi_scope);
+	merkle_crash_failpoint("after_merkle_delta_ledger_written");
 
 	CommandCounterIncrement();
 
@@ -1414,9 +1507,10 @@ bcdb_safe_finalize_nonterminal_failure(BCDBShmXact *tx,
 
 	snprintf(sql_buf, sizeof(sql_buf),
 		"INSERT INTO ariabc_internal.raft_apply_item"
-		" (epoch_id, raft_log_index, item_ordinal, entry_digest, item_digest, state)"
+		" (epoch_id, raft_log_index, item_ordinal, entry_digest, item_digest, state, merkle_apply_seq)"
 		" SELECT e.epoch_id, e.raft_log_index, i.item_ordinal,"
-		"        e.entry_digest, i.item_digest, $6"
+		"        e.entry_digest, i.item_digest, $6,"
+		"        e.merkle_apply_seq_base + i.item_ordinal::bigint"
 		"   FROM ariabc_internal.raft_apply_entry e"
 		"   JOIN ariabc_internal.raft_apply_entry_item i"
 		"     ON e.epoch_id = i.epoch_id"

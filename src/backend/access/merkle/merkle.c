@@ -16,16 +16,24 @@
 #include "access/amapi.h"
 #include "access/merkle.h"
 #include "access/reloptions.h"
+#include "catalog/pg_am_d.h"
 #include "optimizer/cost.h"
 #include "utils/builtins.h"
 #include "utils/index_selfuncs.h"
 
 /* GUC: Enable/disable Merkle index updates */
 bool enable_merkle_index = true;
+bool merkle_index_maintenance_suppress = false;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
 bool merkle_update_detection = false;
 /* GUC: Enable backend-local Merkle recovery profiling */
 bool merkle_recovery_profile_enabled = false;
+/* GUC: fail stale Merkle reads by default; optionally catch up synchronously. */
+int merkle_read_lag_policy = MERKLE_READ_LAG_ERROR;
+int merkle_apply_batch_items = MERKLE_APPLY_DEFAULT_BATCH_ITEMS;
+int merkle_apply_batch_bytes = MERKLE_APPLY_DEFAULT_BATCH_BYTES;
+int merkle_apply_batch_pages = MERKLE_APPLY_DEFAULT_BATCH_PAGES;
+int merkle_apply_batch_time_ms = MERKLE_APPLY_DEFAULT_BATCH_TIME_MS;
 /*
  * GUC: Suppress Merkle update-detection output during Merkle index builds
  * (CREATE INDEX / REINDEX).
@@ -34,8 +42,6 @@ bool merkle_recovery_profile_enabled = false;
  * if merkle_update_detection is on. Default is enabled to avoid noisy output.
  */
 bool merkle_update_detection_suppress = true;
-/* Internal: suppress undo tracking in non-DML contexts (e.g. index build) */
-bool merkle_undo_suppress = false;
 uint64 merkle_recovery_profile_reset_generation = 0;
 MerkleRecoveryProfileStats merkle_recovery_profile_state = {0};
 
@@ -55,6 +61,99 @@ merkle_is_power_of(int value, int base)
         value /= base;
 
     return (value == 1);
+}
+
+bool
+merkle_relation_has_index(Relation rel)
+{
+	List *index_list;
+	ListCell *lc;
+	bool found = false;
+
+	if (rel == NULL)
+		return false;
+	if (rel->rd_rel->relkind == RELKIND_INDEX ||
+		rel->rd_rel->relkind == RELKIND_PARTITIONED_INDEX)
+		return rel->rd_rel->relam == MERKLE_AM_OID;
+	if (rel->rd_rel->relkind != RELKIND_RELATION &&
+		rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+		return false;
+
+	index_list = RelationGetIndexList(rel);
+	foreach(lc, index_list)
+	{
+		Relation index_rel = index_open(lfirst_oid(lc), AccessShareLock);
+
+		if (index_rel->rd_rel->relam == MERKLE_AM_OID)
+			found = true;
+		index_close(index_rel, AccessShareLock);
+		if (found)
+			break;
+	}
+	list_free(index_list);
+	return found;
+}
+
+void
+merkle_reject_ddl(Relation rel, const char *command)
+{
+	MerkleRecoveryStatusData status;
+
+	if (!merkle_relation_has_index(rel))
+		return;
+	/* Row hashes include the complete heap row and routing metadata.  Until a
+	 * rewrite-aware Merkle rebuild protocol exists, any ALTER TABLE that can
+	 * change the row descriptor or relfilenode is fail-closed even when the
+	 * committed delta prefix is currently caught up. */
+	if (command != NULL && strncmp(command, "alter ", 6) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot %s while a table has a Merkle index", command),
+				 errhint("Drop or rebuild the Merkle index before altering the table.")));
+	if (merkle_has_staged_delta())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot %s while this transaction has staged Merkle deltas",
+						command),
+				 errhint("Commit or roll back the table changes before DDL.")));
+	merkle_get_recovery_status(&status);
+	if (status.state != MERKLE_STATE_READY)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot %s while committed Merkle deltas are pending",
+						command),
+				 errdetail("applied_seq=%llu target_seq=%llu",
+						   (unsigned long long) status.applied_seq,
+						   (unsigned long long) status.target_seq),
+				 errhint("Run SELECT merkle_apply_pending() before changing or dropping the relation.")));
+}
+
+/*
+ * merkle_reject_concurrent_ddl() - P0.4: unconditionally reject concurrent
+ * DDL operations that the queued-delta format cannot safely support.
+ *
+ * REINDEX CONCURRENTLY, CREATE INDEX CONCURRENTLY, and DROP INDEX CONCURRENTLY
+ * change the relfilenode while DML may continue.  The Merkle delta format
+ * cannot handle this safely.  Do NOT route through merkle_reject_ddl() because
+ * that function is conditional on recovery state; these commands must always
+ * be rejected regardless of current recovery readiness.
+ */
+void
+merkle_reject_concurrent_ddl(Oid index_oid, const char *command)
+{
+	Relation	irel;
+	bool		is_merkle;
+
+	if (!OidIsValid(index_oid))
+		return;
+	irel = index_open(index_oid, AccessShareLock);
+	is_merkle = (irel->rd_rel->relam == MERKLE_AM_OID);
+	index_close(irel, AccessShareLock);
+	if (is_merkle)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("%s is not supported for Merkle indexes", command),
+				 errhint("Use non-concurrent REINDEX instead.")));
 }
 
 /*

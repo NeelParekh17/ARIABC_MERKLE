@@ -1,4 +1,14 @@
 -- Static Merkle routing, canonical hashing, transaction, and batched API tests.
+-- Crash-safe v7 DML requires the durable ordered-delta ledger.  Keep its DDL
+-- out of the expected file; the assertions below exercise it through the
+-- public wait policy and verification APIs.
+\set ECHO none
+SET client_min_messages = warning;
+\i ../../../scripts/distributed/sql/raft_apply_ledger_schema.sql
+SET merkle_read_lag_policy = apply;
+RESET client_min_messages;
+\set ECHO all
+
 CREATE TABLE merkle_static_test (
     id bigint,
     payload text,
@@ -79,6 +89,7 @@ SELECT merkle_bucket_for_key('merkle_route_test_idx', ts, key_text) AS leaf
 FROM merkle_route_test;
 SET timezone = 'America/Los_Angeles';
 SET datestyle = 'German, DMY';
+SELECT merkle_apply_pending();
 SELECT merkle_verify('merkle_route_test') AS canonical_route_verify,
        merkle_bucket_for_key('merkle_route_test_idx', ts, key_text) =
        (SELECT leaf FROM merkle_route_before) AS canonical_route_unchanged
@@ -110,6 +121,7 @@ FROM merkle_mc_test;
 
 -- Payload-only UPDATE must not change any row's leaf.
 UPDATE merkle_mc_test SET val = val * 10 WHERE tag = 'alpha';
+SELECT merkle_apply_pending();
 SELECT merkle_verify('merkle_mc_test') AS mc_payload_update_verify,
        merkle_bucket_for_key('merkle_mc_idx', ts, tag) =
            (SELECT leaf FROM mc_routes_before WHERE mc_routes_before.ts = merkle_mc_test.ts
