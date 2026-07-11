@@ -21,28 +21,34 @@
 #include "nodes/execnodes.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
+#include "storage/relfilenode.h"
 #include "utils/relcache.h"
 
 /* GUC: Enable/disable Merkle index updates */
 extern bool enable_merkle_index;
-/* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
+/* Internal executor guard while generic UPDATE index insertion is running. */
+extern bool merkle_index_maintenance_suppress;
+/* GUC: Emit NOTICE lines for Merkle build roots */
 extern bool merkle_update_detection;
 extern bool merkle_recovery_profile_enabled;
+/* GUC: reject stale reads (error) or synchronously catch up (wait). */
+extern int merkle_read_lag_policy;
+#define MERKLE_APPLY_DEFAULT_BATCH_ITEMS 256
+#define MERKLE_APPLY_DEFAULT_BATCH_BYTES (1024 * 1024)
+#define MERKLE_APPLY_DEFAULT_BATCH_PAGES 128
+#define MERKLE_APPLY_DEFAULT_BATCH_TIME_MS 1
+extern int merkle_apply_batch_items;
+extern int merkle_apply_batch_bytes;
+extern int merkle_apply_batch_pages;
+extern int merkle_apply_batch_time_ms;
+#define MERKLE_READ_LAG_ERROR 0
+#define MERKLE_READ_LAG_WAIT  1
+#define MERKLE_READ_LAG_APPLY 2
 /*
  * GUC: Suppress Merkle update-detection output during Merkle index builds
  * (CREATE INDEX / REINDEX).
  */
 extern bool merkle_update_detection_suppress;
-/*
- * Internal: temporarily suppress per-tuple undo tracking in non-DML contexts
- * where the Merkle index relation is being built (CREATE INDEX / REINDEX).
- *
- * During an index build, the Merkle index is new and will be dropped on error
- * or transaction abort, so recording per-row undo state is unnecessary and
- * can exhaust memory for large tables.
- */
-extern bool merkle_undo_suppress;
-
 typedef struct MerkleRecoveryProfileStats
 {
 	uint64		root_hash_helper_calls;
@@ -101,7 +107,7 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
  */
 #define MERKLE_METAPAGE_BLKNO       0
 #define MERKLE_TREE_START_BLKNO     1
-#define MERKLE_VERSION              6   /* Versioned canonical row hashing */
+#define MERKLE_VERSION              7   /* WAL-safe committed-delta format */
 /*
  * Route format 2: uniform BLAKE3-256 for ALL key types including integers.
  * Format 1 preserved abs(int) % total_leaves for single integer keys; that
@@ -110,13 +116,40 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 #define MERKLE_ROUTE_FORMAT_VERSION 2
 #define MERKLE_ROW_HASH_FORMAT_VERSION 1
 
+/* Versioned, endian-stable durable transaction-delta encoding. */
+#define MERKLE_DELTA_MAGIC          ((uint32) 0x4D444C54) /* "MDLT" */
+#define MERKLE_DELTA_VERSION        1
+#define MERKLE_DELTA_HEADER_BYTES   40
+#define MERKLE_DELTA_ENTRY_BYTES    56
+
 /*
  * Calculate how many nodes fit per page
  * Each node: 4 bytes (nodeId) + 32 bytes (hash) = 36 bytes
  * Page size 8192, minus header ~24 bytes = ~8168 usable
  * Max ~226 nodes per page.
  */
-#define MERKLE_MAX_NODES_PER_PAGE   ((BLCKSZ - MAXALIGN(SizeOfPageHeaderData)) / sizeof(MerkleNode))
+#define MERKLE_PAGE_OPAQUE_MAGIC     ((uint32) 0x4D504147) /* "MPAG" */
+#define MERKLE_PAGE_OPAQUE_VERSION   1
+
+/*
+ * Every v7 tree page records the exact globally ordered delta sequence that
+ * it has consumed.  The hash changes and this position are emitted in the
+ * same Generic WAL record.
+ */
+typedef struct MerklePageOpaqueData
+{
+	uint32		magic;
+	uint16		version;
+	uint16		flags;
+	uint64		last_applied_seq;
+} MerklePageOpaqueData;
+
+#define MerklePageGetOpaque(page) \
+	((MerklePageOpaqueData *) PageGetSpecialPointer(page))
+
+#define MERKLE_PAGE_SPECIAL_SIZE MAXALIGN(sizeof(MerklePageOpaqueData))
+#define MERKLE_MAX_NODES_PER_PAGE \
+	((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MERKLE_PAGE_SPECIAL_SIZE) / sizeof(MerkleNode))
 
 /*
  * MerkleHash - 256-bit hash value stored in 32 bytes
@@ -151,6 +184,7 @@ typedef struct MerkleMetaPageData
     int32           fanout;             /* branching factor (children per internal node) */
 	uint32          routeFormatVersion; /* deterministic key-routing format */
 	uint32          rowHashFormatVersion; /* canonical row serialization format */
+	uint64          baselineApplySeq;   /* heap snapshot represented at build */
 } MerkleMetaPageData;
 
 #define MerklePageGetMeta(page) \
@@ -195,6 +229,27 @@ typedef struct MerkleGeometry
 	int			fanout;
 	int			leaf_start;
 } MerkleGeometry;
+
+typedef enum MerkleRecoveryState
+{
+	MERKLE_STATE_READY = 0,
+	MERKLE_STATE_CATCHING_UP,
+	MERKLE_STATE_REBUILD_REQUIRED,
+	MERKLE_STATE_INVALID,
+	MERKLE_STATE_BLOCKED_ON_GAP
+} MerkleRecoveryState;
+
+typedef struct MerkleRecoveryStatusData
+{
+	MerkleRecoveryState state;
+	uint64		applied_seq;
+	uint64		target_seq;
+	uint64		terminal_prefix_seq;
+	uint64		highest_terminal_seq;
+	uint64		blocked_seq;
+	bool		managed;
+	char		error_text[256];
+} MerkleRecoveryStatusData;
 
 /*
  * Handler function - returns IndexAmRoutine
@@ -260,6 +315,9 @@ extern void merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot,
 extern void merkle_compute_route(Relation indexRel, Datum *values,
 								 bool *isnull, int nkeys,
 								 MerkleRoute *result);
+extern bool merkle_relation_has_index(Relation rel);
+extern void merkle_reject_ddl(Relation rel, const char *command);
+extern void merkle_reject_concurrent_ddl(Oid index_oid, const char *command);
 extern void merkle_geometry_from_index(Relation indexRel,
 								   MerkleGeometry *geometry);
 extern int merkle_geometry_global_node(const MerkleGeometry *geometry,
@@ -272,8 +330,28 @@ extern int merkle_geometry_child_node(const MerkleGeometry *geometry,
 								  int node_in_partition, int child_ordinal);
 extern void merkle_update_tree_path(Relation indexRel, int leafId,
                                     MerkleHash *hash, bool isXorIn);
+extern void merkle_stage_delta(Relation indexRel, int leafId,
+								 const MerkleHash *hash);
+extern bytea *merkle_serialize_staged_delta(uint64 raft_log_index,
+										 uint32 item_ordinal);
+extern void merkle_mark_staged_delta_persisted(void);
+extern bool merkle_has_staged_delta(void);
+extern void merkle_crash_failpoint(const char *name);
 extern void merkle_init_tree(Relation indexRel, Oid heapOid,
-                             MerkleOptions *opts);
+							 MerkleOptions *opts, uint64 baseline_apply_seq);
+
+/* Ordered committed-delta applier and freshness gates. */
+extern uint64 merkle_apply_pending_internal(void);
+extern uint64 merkle_apply_until_internal(uint64 required_seq);
+extern uint64 merkle_raft_apply_target(const uint8 *epoch_id,
+									   uint64 raft_log_index,
+									   uint32 item_ordinal);
+extern void merkle_get_recovery_status(MerkleRecoveryStatusData *status);
+extern void merkle_require_fresh(void);
+extern void merkle_mark_recovery_state(MerkleRecoveryState state,
+									 const char *reason);
+extern uint64 merkle_advance_terminal_prefix_spi(void);
+extern Datum merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS);
 
 /*
  * XOR operations on hashes
@@ -287,7 +365,9 @@ extern char *merkle_hash_to_hex(const MerkleHash *hash);
  * SQL-callable verification functions
  */
 extern Datum merkle_verify(PG_FUNCTION_ARGS);
+extern Datum merkle_verify_index(PG_FUNCTION_ARGS);
 extern Datum merkle_root_hash(PG_FUNCTION_ARGS);
+extern Datum merkle_root_hash_index(PG_FUNCTION_ARGS);
 extern Datum merkle_tree_stats(PG_FUNCTION_ARGS);
 extern Datum merkle_node_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_leaf_tuples(PG_FUNCTION_ARGS);
@@ -302,5 +382,8 @@ extern Datum merkle_get_partition_root_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hashes(PG_FUNCTION_ARGS);
 extern Datum merkle_recovery_profile_reset(PG_FUNCTION_ARGS);
 extern Datum merkle_recovery_profile_stats(PG_FUNCTION_ARGS);
+extern Datum merkle_recovery_status(PG_FUNCTION_ARGS);
+extern Datum merkle_apply_pending_sql(PG_FUNCTION_ARGS);
+extern Datum merkle_apply_until_sql(PG_FUNCTION_ARGS);
 
 #endif /* MERKLE_H */

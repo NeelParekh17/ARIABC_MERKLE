@@ -2014,8 +2014,8 @@ bool pg_executor::initialize_bcdb() {
             schema_version = std::stoi(PQgetvalue(res, 0, 0));
             PQclear(res);
         }
-        if (schema_version != 2) {
-            std::cerr << "Safe mode validation failed: unsupported schema version " << schema_version << std::endl;
+        if (schema_version != 4) {
+            std::cerr << "Safe mode validation failed: unsupported schema version " << schema_version << " (expected 4)" << std::endl;
             PQfinish(c);
             bcdb_init_failed_ = true;
             return false;
@@ -2049,6 +2049,54 @@ bool pg_executor::initialize_bcdb() {
                 return false;
             }
             PQclear(res);
+        }
+
+        // Enforce the Merkle recovery gate before workers are exposed.  The
+        // rebuild/apply calls are idempotent and use the control session's
+        // READ COMMITTED isolation; a non-READY result is a startup failure,
+        // not a condition to defer until the first client request.
+        {
+            PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_apply_pending();");
+            if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+                std::cerr << "Safe mode validation failed: Merkle committed-prefix apply failed: "
+                          << (res ? PQerrorMessage(c) : "null result") << std::endl;
+                if (res) PQclear(res);
+                PQfinish(c);
+                bcdb_init_failed_ = true;
+                return false;
+            }
+            PQclear(res);
+
+            res = PQexec(c, "SELECT pg_catalog.merkle_rebuild_legacy_indexes();");
+            if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+                std::cerr << "Safe mode validation failed: Merkle legacy-index rebuild failed: "
+                          << (res ? PQerrorMessage(c) : "null result") << std::endl;
+                if (res) PQclear(res);
+                PQfinish(c);
+                bcdb_init_failed_ = true;
+                return false;
+            }
+            PQclear(res);
+
+            res = PQexec(c, "SELECT pg_catalog.merkle_recovery_status();");
+            if (!res || PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1) {
+                std::cerr << "Safe mode validation failed: cannot read Merkle recovery status"
+                          << std::endl;
+                if (res) PQclear(res);
+                PQfinish(c);
+                bcdb_init_failed_ = true;
+                return false;
+            }
+            const std::string status_json = PQgetvalue(res, 0, 0);
+            PQclear(res);
+            if (status_json.find("\"state\":\"READY\"") == std::string::npos) {
+                std::cerr << "Safe mode validation failed: Merkle recovery is not READY: "
+                          << status_json << std::endl;
+                PQfinish(c);
+                bcdb_init_failed_ = true;
+                return false;
+            }
+
         }
     }
 
@@ -2325,6 +2373,29 @@ pg_executor::pg_executor(int node_id,
             if (c) PQfinish(c);
             throw std::runtime_error("PQconnectdb failed: " + trim_copy(msg));
         }
+
+        /*
+         * These pooled sessions are the deterministic control plane: they
+         * submit a block and consume committed worker results.  They must not
+         * run the synchronous Merkle applier under the workload's
+         * SERIALIZABLE default, because concurrent result sessions would
+         * conflict on the singleton apply watermark even though the workers
+         * themselves remain serializable.  Keep durability explicit here.
+         */
+        {
+            PGresult* session_res = PQexec(
+                c,
+                "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED; "
+                "SET synchronous_commit = on;");
+            if (!session_res || PQresultStatus(session_res) != PGRES_COMMAND_OK) {
+                std::string msg = PQerrorMessage(c);
+                if (session_res) PQclear(session_res);
+                PQfinish(c);
+                throw std::runtime_error("failed to configure control-plane session: " +
+                                         trim_copy(msg));
+            }
+            PQclear(session_res);
+        }
 #ifdef BUILDING_UNIT_TESTS
         }
 #endif
@@ -2564,10 +2635,23 @@ bool pg_executor::verify_and_register_entry_manifest(uint64_t log_idx, const std
         exp_items_s.c_str()
     };
     const char* ins_sql =
-        "INSERT INTO ariabc_internal.raft_apply_entry"
-        " (epoch_id, raft_log_index, entry_digest, expected_items)"
-        " VALUES (decode($1,'hex'), $2::bigint, decode($3,'hex'), $4::integer)"
-        " ON CONFLICT (epoch_id, raft_log_index) DO NOTHING";
+        "WITH locked AS ("
+        "  SELECT next_seq"
+        "    FROM ariabc_internal.merkle_apply_counter"
+        "   WHERE singleton"
+        "   FOR UPDATE"
+        "), inserted AS ("
+        "  INSERT INTO ariabc_internal.raft_apply_entry"
+        "    (epoch_id, raft_log_index, entry_digest, expected_items, merkle_apply_seq_base)"
+        "  SELECT decode($1,'hex'), $2::bigint, decode($3,'hex'), $4::integer, next_seq + 1"
+        "    FROM locked"
+        "  ON CONFLICT (epoch_id, raft_log_index) DO NOTHING"
+        "  RETURNING 1"
+        ")"
+        " UPDATE ariabc_internal.merkle_apply_counter"
+        "    SET next_seq = next_seq + $4::bigint"
+        "  WHERE singleton"
+        "    AND EXISTS (SELECT 1 FROM inserted)";
     res = PQexecParams(c, ins_sql, 4, nullptr, ins_params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "verify_and_register_entry_manifest: FATAL INSERT failed: " << PQerrorMessage(c) << std::endl;
@@ -2577,7 +2661,7 @@ bool pg_executor::verify_and_register_entry_manifest(uint64_t log_idx, const std
 
     const char* sel_params[2] = { epoch_hex.c_str(), log_idx_s.c_str() };
     const char* sel_sql =
-        "SELECT encode(entry_digest, 'hex'), expected_items"
+        "SELECT encode(entry_digest, 'hex'), expected_items, merkle_apply_seq_base"
         "  FROM ariabc_internal.raft_apply_entry"
         " WHERE epoch_id = decode($1, 'hex')"
         "   AND raft_log_index = $2::bigint FOR UPDATE";
@@ -2588,11 +2672,14 @@ bool pg_executor::verify_and_register_entry_manifest(uint64_t log_idx, const std
     }
     std::string db_digest = PQgetvalue(res, 0, 0);
     int db_expected = std::atoi(PQgetvalue(res, 0, 1));
+    uint64_t db_merkle_seq_base = std::strtoull(PQgetvalue(res, 0, 2), nullptr, 10);
     PQclear(res);
-    if (db_digest != entry_digest_hex || db_expected != static_cast<int>(expected_items)) {
+    if (db_digest != entry_digest_hex || db_expected != static_cast<int>(expected_items) ||
+        db_merkle_seq_base == 0) {
         std::cerr << "FATAL: log corruption or split-brain at log_idx=" << log_idx
                   << " incoming digest=" << entry_digest_hex << " count=" << expected_items
-                  << " db digest=" << db_digest << " db count=" << db_expected << std::endl;
+                  << " db digest=" << db_digest << " db count=" << db_expected
+                  << " merkle_seq_base=" << db_merkle_seq_base << std::endl;
         std::abort();
     }
 

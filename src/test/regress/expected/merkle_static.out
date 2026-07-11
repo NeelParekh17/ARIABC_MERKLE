@@ -1,4 +1,8 @@
 -- Static Merkle routing, canonical hashing, transaction, and batched API tests.
+-- Crash-safe v7 DML requires the durable ordered-delta ledger.  Keep its DDL
+-- out of the expected file; the assertions below exercise it through the
+-- public wait policy and verification APIs.
+\set ECHO none
 CREATE TABLE merkle_static_test (
     id bigint,
     payload text,
@@ -116,6 +120,12 @@ SELECT merkle_bucket_for_key('merkle_route_test_idx', ts, key_text) AS leaf
 FROM merkle_route_test;
 SET timezone = 'America/Los_Angeles';
 SET datestyle = 'German, DMY';
+SELECT merkle_apply_pending();
+ merkle_apply_pending 
+----------------------
+                    5
+(1 row)
+
 SELECT merkle_verify('merkle_route_test') AS canonical_route_verify,
        merkle_bucket_for_key('merkle_route_test_idx', ts, key_text) =
        (SELECT leaf FROM merkle_route_before) AS canonical_route_unchanged
@@ -153,6 +163,12 @@ SELECT
 FROM merkle_mc_test;
 -- Payload-only UPDATE must not change any row's leaf.
 UPDATE merkle_mc_test SET val = val * 10 WHERE tag = 'alpha';
+SELECT merkle_apply_pending();
+ merkle_apply_pending 
+----------------------
+                    7
+(1 row)
+
 SELECT merkle_verify('merkle_mc_test') AS mc_payload_update_verify,
        merkle_bucket_for_key('merkle_mc_idx', ts, tag) =
            (SELECT leaf FROM mc_routes_before WHERE mc_routes_before.ts = merkle_mc_test.ts

@@ -178,6 +178,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     FORCE_BUILD \
     SKIP_SYNC SKIP_BUILD SKIP_KAFKA SKIP_CLEANUP \
     SKIP_RDKAFKA_SETUP SKIP_RESTORE SKIP_POST_VERIFY \
+    ENABLE_MERKLE_INDEX \
     NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
     NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
     NODE_IS_U22_CSV NODE_CLIENT_PORTS_CSV \
@@ -357,6 +358,7 @@ SKIP_CLEANUP="${SKIP_CLEANUP:-0}"
 SKIP_RDKAFKA_SETUP="${SKIP_RDKAFKA_SETUP:-0}"
 SKIP_RESTORE="${SKIP_RESTORE:-0}"
 SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
+ENABLE_MERKLE_INDEX="${ENABLE_MERKLE_INDEX:-1}"
 STOP_ONLY="${STOP_ONLY:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
@@ -477,6 +479,9 @@ Options:
   --skip-restore   Skip restoring the verification table before cluster start
   --skip-post-verify
                   Skip post-workload marker + Merkle root comparison
+  --enable-merkle-index N
+                  Set the server default for Merkle maintenance: 0|1
+                  (default: 1). Use 0 only for explicit overhead controls.
   --skip-workload Start PostgreSQL/Raft servers, wait for a leader, collect logs,
                   and exit without starting the gateway, submitting SQL, or
                   sending the post-run marker
@@ -700,6 +705,7 @@ while [[ $# -gt 0 ]]; do
     --skip-rdkafka-setup) SKIP_RDKAFKA_SETUP=1; shift ;;
     --skip-restore) SKIP_RESTORE=1; shift ;;
     --skip-post-verify) SKIP_POST_VERIFY=1; shift ;;
+    --enable-merkle-index) ENABLE_MERKLE_INDEX="${2:-}"; shift 2 ;;
     --skip-workload) SKIP_WORKLOAD=1; SKIP_POST_VERIFY=1; shift ;;
     --stop-only) STOP_ONLY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
@@ -883,6 +889,10 @@ if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
   # Runner-level redundancy: force actual results for safe-ledger runs so
   # the PostgreSQL layer never returns an empty string as a completion.
   BCDB_BLOCK_RETURN_ACTUAL_RESULTS=1
+fi
+
+if [[ "$ENABLE_MERKLE_INDEX" != 0 && "$ENABLE_MERKLE_INDEX" != 1 ]]; then
+  die "ERROR: --enable-merkle-index must be 0 or 1 (got: $ENABLE_MERKLE_INDEX)"
 fi
 
 if [[ "$RAFT_STORAGE_MODE" != "durable" && "$RAFT_STORAGE_MODE" != "in_memory" ]]; then
@@ -1724,6 +1734,7 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
 {
   printf 'ordering_mode=%s\n' "$ORDERING_MODE"
   printf 'execution_profile=%s\n' "$EXECUTION_PROFILE"
+  printf 'enable_merkle_index=%s\n' "$ENABLE_MERKLE_INDEX"
   printf 'ordering_path=%s\n' "$ORDERING_PATH"
   printf 'cluster_series=%s\n' "$CLUSTER_SERIES"
   printf 'bypass_raft=%s\n' "$BYPASS_RAFT"
@@ -3002,6 +3013,32 @@ for i in "${!ROLE_PIDS[@]}"; do
   wait "${ROLE_PIDS[$i]}" || die "failed to ensure role neel on ${ROLE_NAMES[$i]}"
 done
 
+MERKLE_GUC_VALUE=off
+[[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && MERKLE_GUC_VALUE=on
+log "=== Phase 3.3: Set enable_merkle_index=$MERKLE_GUC_VALUE on all ${#NODE_IDS[@]} nodes (parallel) ==="
+declare -a MERKLE_GUC_PIDS=(); declare -a MERKLE_GUC_NAMES=()
+for idx in "${!NODE_IDS[@]}"; do
+  name="${NODE_NAMES[$idx]}"
+  node_ssh "$idx" "
+    INSTALL_DIR='$REMOTE_INSTALL_DIR'
+    export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET enable_merkle_index = '$MERKLE_GUC_VALUE'\"
+    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -v ON_ERROR_STOP=1 -c \"SELECT pg_reload_conf()\" >/dev/null
+    actual=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -tAc \"SHOW enable_merkle_index\" | tr -d '[:space:]')
+    [[ \"\$actual\" == '$MERKLE_GUC_VALUE' ]] || {
+      echo \"enable_merkle_index expected $MERKLE_GUC_VALUE, got \$actual\" >&2
+      exit 1
+    }
+  " >/dev/null &
+  MERKLE_GUC_PIDS+=("$!"); MERKLE_GUC_NAMES+=("$name")
+done
+for i in "${!MERKLE_GUC_PIDS[@]}"; do
+  wait "${MERKLE_GUC_PIDS[$i]}" || die "failed to set enable_merkle_index on ${MERKLE_GUC_NAMES[$i]}"
+done
+
 log "  Writing PostgreSQL run markers on all nodes"
 for idx in "${!NODE_IDS[@]}"; do
   id="${NODE_IDS[$idx]}"
@@ -3012,6 +3049,41 @@ for idx in "${!NODE_IDS[@]}"; do
     echo 'RUN_MARKER run_start_epoch=$RUN_START_EPOCH' >> '$REMOTE_REPO_ROOT/server.log'
   " >/dev/null || log "  WARNING: failed to write PostgreSQL run marker on $name"
 done
+
+# ---------------------------------------------------------------------------
+# Phase 3.4: Install/upgrade the ledger and replay the committed Merkle prefix
+# before any restore can replace a referenced relfilenode.
+# ---------------------------------------------------------------------------
+LEDGER_BOOTSTRAPPED=0
+if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
+  log "=== Phase 3.4: Bootstrapping apply ledger and Merkle recovery on all ${#NODE_IDS[@]} nodes (parallel) ==="
+  [[ -n "$RAFT_EPOCH_HEX" ]] || die "RAFT_EPOCH_HEX must be provided when RAFT_APPLY_LEDGER_MODE=safe"
+  declare -a EARLY_BOOTSTRAP_PIDS=()
+  for idx in "${!NODE_IDS[@]}"; do
+    name="${NODE_NAMES[$idx]}"
+    EXTRA_CLEAN_ARG=""
+    if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
+      EXTRA_CLEAN_ARG="--clean"
+    fi
+    log "  Bootstrapping apply ledger on $name"
+    node_ssh "$idx" "
+      export PATH=\"$REMOTE_INSTALL_DIR/bin:\$PATH\"
+      export LD_LIBRARY_PATH=\"$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+      bash '$REMOTE_REPO_ROOT/scripts/distributed/bootstrap_raft_apply_ledger.sh' \
+        --db '$DB_NAME' --port '$DB_PORT' --epoch '$RAFT_EPOCH_HEX' --user '$DB_USER' $EXTRA_CLEAN_ARG
+    " &
+    EARLY_BOOTSTRAP_PIDS+=("$!")
+  done
+  EARLY_BOOTSTRAP_ALL_OK=1
+  for i in "${!EARLY_BOOTSTRAP_PIDS[@]}"; do
+    wait "${EARLY_BOOTSTRAP_PIDS[$i]}" || {
+      log "  bootstrap FAILED on ${NODE_NAMES[$i]}"
+      EARLY_BOOTSTRAP_ALL_OK=0
+    }
+  done
+  [[ "$EARLY_BOOTSTRAP_ALL_OK" -eq 1 ]] || die "Phase 3.4 bootstrap failed on one or more nodes"
+  LEDGER_BOOTSTRAPPED=1
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 3.5: Restore benchmark table state on all configured nodes
@@ -3032,9 +3104,35 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       test -f '$remote_restore' || { echo 'missing restore SQL: $remote_restore' >&2; exit 1; }
       \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -f '$remote_restore'
+      if [[ '$ENABLE_MERKLE_INDEX' -eq 0 ]]; then
+        \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$\
+          DECLARE r record;
+          BEGIN
+            FOR r IN
+              SELECT c.oid
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_index i ON i.indexrelid = c.oid
+                JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+                JOIN pg_catalog.pg_am am ON am.oid = c.relam
+               WHERE t.relnamespace = 'public'::regnamespace
+                 AND t.relname = '$VERIFY_TABLE'
+                 AND am.amname = 'merkle'
+            LOOP
+              EXECUTE format('DROP INDEX %s', r.oid::regclass);
+            END LOOP;
+          END
+        \\\$\\\$;\"
+        merkle_count=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT count(*) FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_am am ON am.oid=c.relam WHERE t.relname='$VERIFY_TABLE' AND am.amname='merkle'\" | tr -d '[:space:]')
+        [[ \"\$merkle_count\" == 0 ]] || { echo \"Merkle control run still has \$merkle_count index(es)\" >&2; exit 1; }
+      fi
       cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
-      root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
-      verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
+      if [[ '$ENABLE_MERKLE_INDEX' -eq 1 ]]; then
+        root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
+        verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
+      else
+        root=disabled
+        verify=disabled
+      fi
       echo \"count=\$cnt root=\$root verify=\$verify\"
     " 2>&1 | sed "s/^/  [$name] /" &
     RESTORE_PIDS+=("$!"); RESTORE_NAMES+=("$name")
@@ -3051,7 +3149,7 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 3.8: Bootstrap AriaBC Apply Ledger Schema and Epoch on all nodes
 # ---------------------------------------------------------------------------
-if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
+if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" && "$LEDGER_BOOTSTRAPPED" -eq 0 ]]; then
   log "=== Phase 3.8: Bootstrapping AriaBC Apply Ledger Schema and Epoch on all ${#NODE_IDS[@]} nodes (parallel) ==="
   [[ -n "$RAFT_EPOCH_HEX" ]] || die "RAFT_EPOCH_HEX must be provided when RAFT_APPLY_LEDGER_MODE=safe"
   declare -a BOOTSTRAP_PIDS=()
@@ -3350,7 +3448,7 @@ if [[ "$SKIP_WORKLOAD" -eq 1 ]]; then
   phase_marker "PHASE_6_WORKLOAD_SKIPPED"
   log "  --skip-workload set: Raft leader/startup verified; gateway submission and post-run marker are intentionally skipped."
   {
-    printf 'schema_version=2\n'
+    printf 'schema_version=4\n'
     printf 'workload_transactions=0\n'
     printf 'ordering_mode=%s\n' "$ORDERING_MODE"
     printf 'completion_path=not_applicable\n'
@@ -3922,8 +4020,13 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
-      root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
-      verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
+      if [[ '$ENABLE_MERKLE_INDEX' -eq 1 ]]; then
+        root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
+        verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
+      else
+        root=disabled
+        verify=disabled
+      fi
       echo \"\$cnt|\$root|\$verify\"
     " 2>/dev/null | tr -d '[:space:]')" || readback="error|error|error"
     IFS='|' read -r cnt root verify <<<"$readback"
@@ -3938,8 +4041,9 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   POST_PASS=1
   for idx in "${!NODE_IDS[@]}"; do
     if [[ "${POST_COUNTS[$idx]}" != "$reference_count" ||
-          "${POST_ROOTS[$idx]}" != "$reference_root" ||
-          "${POST_VERIFY[$idx]}" != "t" ]]; then
+          ( "$ENABLE_MERKLE_INDEX" -eq 1 &&
+            ( "${POST_ROOTS[$idx]}" != "$reference_root" ||
+              "${POST_VERIFY[$idx]}" != "t" ) ) ]]; then
       POST_PASS=0
       log "  MISMATCH on ${NODE_NAMES[$idx]} expected rows=$reference_count root=$reference_root verify=t"
     fi
@@ -3950,7 +4054,11 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     collect_final_profiles_before_fail "post-marker Merkle mismatch"
     exit 1
   fi
-  log "  $VERIFY_TABLE consistency: PASS rows=$reference_count root=$reference_root"
+  if [[ "$ENABLE_MERKLE_INDEX" -eq 1 ]]; then
+    log "  $VERIFY_TABLE consistency: PASS rows=$reference_count root=$reference_root"
+  else
+    log "  $VERIFY_TABLE row consistency: PASS rows=$reference_count (Merkle disabled control run)"
+  fi
 else
   log "=== Phase 8: Post-workload verification skipped (--skip-post-verify) ==="
 fi

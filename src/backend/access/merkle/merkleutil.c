@@ -26,10 +26,6 @@
 #include "utils/snapmgr.h"
 #include "utils/snapshot.h"
 #include "access/xact.h"
-#include "lib/stringinfo.h"
-#include "nodes/pg_list.h"
-#include "utils/memutils.h"
-#include "access/relation.h"
 #include "portability/instr_time.h"
 
 static bool
@@ -43,29 +39,6 @@ merkle_is_power_of(int value, int base)
 
     return (value == 1);
 }
-
-/*
- * Pending operation for transaction rollback
- */
-typedef struct MerklePendingOp
-{
-    Relation            indexRel;
-    Oid                 relid;
-    SubTransactionId    subxid;
-    int                 leafId;
-    MerkleHash          hash;
-    int                 leavesPerPartition;
-    int                 nodesPerPartition;
-    int                 fanout;
-    int                 totalNodes;
-    int                 totalLeaves;
-    int                 nodesPerPage;
-    int                 numTreePages;
-} MerklePendingOp;
-
-static List *pendingOps = NIL;
-static bool xactCallbackRegistered = false;
-static bool subxactCallbackRegistered = false;
 
 /*
  * Per-backend, per-transaction cache of merkle metapage values.
@@ -153,566 +126,6 @@ merkle_meta_cache_store(Oid relid,
     merkle_meta_cache[target].nodesPerPage       = nodesPerPage;
     merkle_meta_cache[target].numTreePages       = numTreePages;
     merkle_meta_cache[target].fanout             = fanout;
-}
-
-/*
- * Optional per-transaction reporting of touched nodes (GUC-controlled).
- * We record the pre-change hash for each touched node and, at PRE_COMMIT,
- * emit a NOTICE table of nodes whose final hash differs from the initial.
- */
-typedef struct MerkleTouchedNode
-{
-    Oid                 indexRelid;
-    SubTransactionId    subxid;
-    int                 partition;       /* subtree/partition id */
-    int                 nodeInPartition; /* 1-indexed */
-    int                 actualNodeIdx;   /* 0-based global node index */
-    int                 pageNum;
-    int                 idxInPage;
-    int                 nodesPerPage;
-    int                 numTreePages;
-    MerkleHash          initialHash;
-    MerkleHash          finalHash;
-    bool                finalValid;
-    bool                changed;
-} MerkleTouchedNode;
-
-static List *touchedNodes = NIL;
-
-static void merkle_undo_pending_op(MerklePendingOp *op);
-static void merkle_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
-                                    SubTransactionId parentSubid, void *arg);
-static void merkle_track_touched_node(Relation indexRel, int partition,
-                                      int nodeInPartition, int actualNodeIdx,
-                                      int pageNum, int idxInPage,
-                                      int nodesPerPage, int numTreePages,
-                                      const MerkleHash *oldHash);
-static void merkle_emit_touched_nodes_report(void);
-
-/*
- * merkle_xact_callback() - Handle transaction commit/abort
- *
- * If the transaction aborts, we must UNDO all changes made to the Merkle tree
- * because we updated the shared buffers directly without WAL-based rollback.
- * Since XOR is its own inverse (A ^ B ^ B = A), we simply re-apply the XORs.
- */
-static void
-merkle_xact_callback(XactEvent event, void *arg)
-{
-    ListCell *lc;
-
-    (void) arg;
-
-	if (event == XACT_EVENT_PRE_PREPARE && pendingOps != NIL)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("prepared transactions are not supported after Merkle index updates"),
-				 errdetail("Merkle rollback state is backend-local and cannot be transferred to a prepared transaction."),
-				 errhint("Commit or roll back this transaction normally; use REINDEX after an unclean server shutdown.")));
-
-    /*
-     * IMPORTANT: We must emit the report at PRE_COMMIT, not COMMIT.
-     *
-     * At XACT_EVENT_COMMIT, PostgreSQL has already ended the transaction
-     * from the relcache perspective (ProcArrayEndTransaction ran), and
-     * opening relations can trip IsTransactionState() assertions.
-     *
-     * Also, do not emit from parallel workers (PARALLEL_PRE_COMMIT), since
-     * they may not hold the relevant relation locks and shouldn't be doing
-     * extra I/O/NOTICE output during leader commit.
-     */
-    if (event == XACT_EVENT_PRE_COMMIT)
-    {
-        merkle_emit_touched_nodes_report();
-        return;
-    }
-
-    if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_PARALLEL_COMMIT)
-    {
-
-        list_free_deep(pendingOps);
-        pendingOps = NIL;
-
-        list_free_deep(touchedNodes);
-        touchedNodes = NIL;
-    }
-    else if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
-    {
-        foreach(lc, pendingOps)
-        {
-            MerklePendingOp *op = (MerklePendingOp *) lfirst(lc);
-            merkle_undo_pending_op(op);
-        }
-        
-        list_free_deep(pendingOps);
-        pendingOps = NIL;
-
-        list_free_deep(touchedNodes);
-        touchedNodes = NIL;
-    }
-    else if (event == XACT_EVENT_PREPARE)
-    {
-        /*
-		 * PRE_PREPARE rejected transactions with Merkle mutations, so only
-		 * read-only Merkle use can reach this event.
-         */
-        list_free_deep(pendingOps);
-        pendingOps = NIL;
-
-        list_free_deep(touchedNodes);
-        touchedNodes = NIL;
-    }
-}
-
-static void
-merkle_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
-                        SubTransactionId parentSubid, void *arg)
-{
-    ListCell *lc;
-
-    (void) parentSubid;
-    (void) arg;
-
-    if (event != SUBXACT_EVENT_ABORT_SUB)
-        return;
-
-    /*
-     * Rollback-to-savepoint: undo all operations done in this subxact and
-     * any nested subxacts created after it (subxid is monotonically increasing
-     * within a top-level xact).
-     */
-    foreach(lc, pendingOps)
-    {
-        MerklePendingOp *op = (MerklePendingOp *) lfirst(lc);
-
-        if (op->subxid < mySubid)
-            continue;
-
-        merkle_undo_pending_op(op);
-        pfree(op);
-        pendingOps = foreach_delete_current(pendingOps, lc);
-    }
-
-    foreach(lc, touchedNodes)
-    {
-        MerkleTouchedNode *entry = (MerkleTouchedNode *) lfirst(lc);
-
-        if (entry->subxid < mySubid)
-            continue;
-
-        pfree(entry);
-        touchedNodes = foreach_delete_current(touchedNodes, lc);
-    }
-}
-
-static void
-merkle_undo_pending_op(MerklePendingOp *op)
-{
-    Relation    indexRel;
-    int         leavesPerPartition;
-    int         nodesPerPartition;
-    int         fanout;
-    int         totalNodes;
-    int         totalLeaves;
-    int         nodesPerPage;
-    int         numTreePages;
-    int         partitionId;
-    int         nodeInPartition;
-    int         nodeId;
-    int         leafStart;
-    int         currentPageBlkno = -1;
-    Buffer      buf = InvalidBuffer;
-    Page        page = NULL;
-    MerkleNode *nodes = NULL;
-
-    if (op == NULL)
-        return;
-
-    indexRel = op->indexRel;
-    if (indexRel == NULL)
-    {
-        ereport(DEBUG5,
-                (errmsg("merkle_xact_callback: missing relation for undo (relid=%u)", op->relid)));
-        return;
-    }
-
-    leavesPerPartition = op->leavesPerPartition;
-    nodesPerPartition = op->nodesPerPartition;
-    fanout = op->fanout;
-    totalNodes = op->totalNodes;
-    totalLeaves = op->totalLeaves;
-    nodesPerPage = op->nodesPerPage;
-    numTreePages = op->numTreePages;
-
-    if (leavesPerPartition <= 0 || nodesPerPartition <= 0 || fanout < 2 ||
-        totalNodes <= 0 || totalLeaves <= 0 ||
-        nodesPerPage <= 0 || numTreePages <= 0)
-    {
-        ereport(DEBUG5,
-                (errmsg("merkle_xact_callback: skipping undo due to invalid metadata "
-                        "(leavesPerPartition=%d nodesPerPartition=%d fanout=%d totalNodes=%d totalLeaves=%d nodesPerPage=%d numTreePages=%d)",
-                        leavesPerPartition, nodesPerPartition, fanout, totalNodes, totalLeaves, nodesPerPage, numTreePages)));
-        return;
-    }
-
-    if (op->leafId < 0 || op->leafId >= totalLeaves)
-    {
-        ereport(DEBUG5,
-                (errmsg("merkle_xact_callback: skipping invalid undo leafId %d (totalLeaves=%d)",
-                        op->leafId, totalLeaves)));
-        return;
-    }
-
-    leafStart = nodesPerPartition - leavesPerPartition + 1;
-    if (leafStart < 1)
-    {
-        ereport(DEBUG5,
-                (errmsg("merkle_xact_callback: skipping undo due to invalid leafStart %d", leafStart)));
-        return;
-    }
-
-    /* Calculate partition and node positions using cached dynamic values */
-    partitionId = op->leafId / leavesPerPartition;
-    nodeInPartition = (op->leafId % leavesPerPartition) + leafStart;
-    nodeId = nodeInPartition + (partitionId * nodesPerPartition);
-
-    /*
-     * This runs during transaction abort and must not throw errors, or we'd
-     * risk crashing the backend (and potentially corrupting the index further).
-     */
-    PG_TRY();
-    {
-        while (nodeInPartition > 0)
-        {
-            int         actualNodeIdx = nodeId - 1;
-            int         pageNum;
-            int         idxInPage = actualNodeIdx % nodesPerPage;
-            BlockNumber blkno;
-
-            if (actualNodeIdx < 0 || actualNodeIdx >= totalNodes)
-            {
-                ereport(DEBUG5,
-                        (errmsg("merkle_xact_callback: invalid node index %d during undo", actualNodeIdx)));
-                break;
-            }
-
-            pageNum = actualNodeIdx / nodesPerPage;
-            if (pageNum < 0 || pageNum >= numTreePages)
-            {
-                ereport(DEBUG5,
-                        (errmsg("merkle_xact_callback: invalid page number %d during undo", pageNum)));
-                break;
-            }
-
-            blkno = MERKLE_TREE_START_BLKNO + pageNum;
-
-            /* Switch pages if needed */
-            if ((int)blkno != currentPageBlkno)
-            {
-                if (BufferIsValid(buf))
-                {
-                    MarkBufferDirty(buf);
-                    UnlockReleaseBuffer(buf);
-                    buf = InvalidBuffer;
-                }
-
-                buf = ReadBuffer(indexRel, blkno);
-                LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-                page = BufferGetPage(buf);
-                nodes = (MerkleNode *) PageGetContents(page);
-                currentPageBlkno = blkno;
-            }
-
-            merkle_hash_xor(&nodes[idxInPage].hash, &op->hash);
-
-            /* Move to parent */
-            nodeInPartition = (nodeInPartition + fanout - 2) / fanout;
-            nodeId = nodeInPartition + (partitionId * nodesPerPartition);
-        }
-
-        if (BufferIsValid(buf))
-        {
-            MarkBufferDirty(buf);
-            UnlockReleaseBuffer(buf);
-            buf = InvalidBuffer;
-        }
-    }
-    PG_CATCH();
-    {
-        if (BufferIsValid(buf))
-        {
-            MarkBufferDirty(buf);
-            UnlockReleaseBuffer(buf);
-            buf = InvalidBuffer;
-        }
-
-        FlushErrorState();
-        ereport(DEBUG5,
-                (errmsg("merkle_xact_callback: failed to undo op (relid=%u leafId=%d)",
-                        op->relid, op->leafId)));
-    }
-    PG_END_TRY();
-}
-
-static void
-merkle_track_touched_node(Relation indexRel, int partition,
-                          int nodeInPartition, int actualNodeIdx,
-                          int pageNum, int idxInPage,
-                          int nodesPerPage, int numTreePages,
-                          const MerkleHash *oldHash)
-{
-    ListCell   *lc;
-    MemoryContext oldContext;
-    MerkleTouchedNode *entry;
-    Oid relid;
-
-    if (indexRel == NULL || oldHash == NULL)
-        return;
-
-    relid = RelationGetRelid(indexRel);
-
-    foreach(lc, touchedNodes)
-    {
-        entry = (MerkleTouchedNode *) lfirst(lc);
-        if (entry->indexRelid == relid && entry->actualNodeIdx == actualNodeIdx)
-            return; /* already tracked */
-    }
-
-    oldContext = MemoryContextSwitchTo(TopTransactionContext);
-
-    entry = (MerkleTouchedNode *) palloc(sizeof(MerkleTouchedNode));
-    entry->indexRelid = relid;
-    entry->subxid = GetCurrentSubTransactionId();
-    entry->partition = partition;
-    entry->nodeInPartition = nodeInPartition;
-    entry->actualNodeIdx = actualNodeIdx;
-    entry->pageNum = pageNum;
-    entry->idxInPage = idxInPage;
-    entry->nodesPerPage = nodesPerPage;
-    entry->numTreePages = numTreePages;
-    entry->initialHash = *oldHash;
-    merkle_hash_zero(&entry->finalHash);
-    entry->finalValid = false;
-    entry->changed = false;
-
-    touchedNodes = lappend(touchedNodes, entry);
-
-    MemoryContextSwitchTo(oldContext);
-}
-
-static int
-merkle_cmp_touch_read_order(const void *a, const void *b)
-{
-    const MerkleTouchedNode *ea = *(const MerkleTouchedNode * const *) a;
-    const MerkleTouchedNode *eb = *(const MerkleTouchedNode * const *) b;
-
-    if (ea->indexRelid != eb->indexRelid)
-        return (ea->indexRelid < eb->indexRelid) ? -1 : 1;
-    if (ea->pageNum != eb->pageNum)
-        return (ea->pageNum < eb->pageNum) ? -1 : 1;
-    if (ea->idxInPage != eb->idxInPage)
-        return (ea->idxInPage < eb->idxInPage) ? -1 : 1;
-    return 0;
-}
-
-static int
-merkle_cmp_touch_output_order(const void *a, const void *b)
-{
-    const MerkleTouchedNode *ea = *(const MerkleTouchedNode * const *) a;
-    const MerkleTouchedNode *eb = *(const MerkleTouchedNode * const *) b;
-
-    if (ea->indexRelid != eb->indexRelid)
-        return (ea->indexRelid < eb->indexRelid) ? -1 : 1;
-    if (ea->partition != eb->partition)
-        return (ea->partition < eb->partition) ? -1 : 1;
-    if (ea->nodeInPartition != eb->nodeInPartition)
-        return (ea->nodeInPartition < eb->nodeInPartition) ? -1 : 1;
-    return 0;
-}
-
-static void
-merkle_emit_touched_nodes_report(void)
-{
-    int         nentries;
-    int         i;
-    MerkleTouchedNode **entries;
-    MerkleTouchedNode **changed;
-    int         nchanged = 0;
-    ListCell   *lc;
-    Oid         currentRelid = InvalidOid;
-    Relation    indexRel = NULL;
-    int         currentPageNum = -1;
-    Buffer      buf = InvalidBuffer;
-    Page        page = NULL;
-    MerkleNode *nodes = NULL;
-    bool        saved_is_bcdb_worker = false;
-
-    if (!merkle_update_detection)
-        return;
-
-    nentries = list_length(touchedNodes);
-    if (nentries <= 0)
-        return;
-
-    entries = (MerkleTouchedNode **) palloc(sizeof(MerkleTouchedNode *) * nentries);
-    i = 0;
-    foreach(lc, touchedNodes)
-        entries[i++] = (MerkleTouchedNode *) lfirst(lc);
-
-    qsort(entries, nentries, sizeof(MerkleTouchedNode *), merkle_cmp_touch_read_order);
-
-    PG_TRY();
-    {
-        for (i = 0; i < nentries; i++)
-        {
-            MerkleTouchedNode *e = entries[i];
-            BlockNumber blkno;
-
-            if (e->pageNum < 0 || e->pageNum >= e->numTreePages)
-                continue;
-
-            if (e->idxInPage < 0 || e->idxInPage >= e->nodesPerPage)
-                continue;
-
-            if (e->indexRelid != currentRelid)
-            {
-                if (BufferIsValid(buf))
-                {
-                    UnlockReleaseBuffer(buf);
-                    buf = InvalidBuffer;
-                }
-                if (indexRel != NULL)
-                {
-                    relation_close(indexRel, AccessShareLock);
-                    indexRel = NULL;
-                }
-
-                indexRel = relation_open(e->indexRelid, AccessShareLock);
-                currentRelid = e->indexRelid;
-                currentPageNum = -1;
-            }
-
-            if (e->pageNum != currentPageNum)
-            {
-                if (BufferIsValid(buf))
-                {
-                    UnlockReleaseBuffer(buf);
-                    buf = InvalidBuffer;
-                }
-
-                blkno = MERKLE_TREE_START_BLKNO + e->pageNum;
-                buf = ReadBuffer(indexRel, blkno);
-                LockBuffer(buf, BUFFER_LOCK_SHARE);
-                page = BufferGetPage(buf);
-                nodes = (MerkleNode *) PageGetContents(page);
-                currentPageNum = e->pageNum;
-            }
-
-            e->finalHash = nodes[e->idxInPage].hash;
-            e->finalValid = true;
-            e->changed = (memcmp(&e->initialHash, &e->finalHash, sizeof(MerkleHash)) != 0);
-        }
-
-        if (BufferIsValid(buf))
-        {
-            UnlockReleaseBuffer(buf);
-            buf = InvalidBuffer;
-        }
-        if (indexRel != NULL)
-        {
-            relation_close(indexRel, AccessShareLock);
-            indexRel = NULL;
-        }
-    }
-    PG_CATCH();
-    {
-        if (BufferIsValid(buf))
-        {
-            UnlockReleaseBuffer(buf);
-            buf = InvalidBuffer;
-        }
-        if (indexRel != NULL)
-        {
-            relation_close(indexRel, AccessShareLock);
-            indexRel = NULL;
-        }
-
-        pfree(entries);
-        FlushErrorState();
-        return;
-    }
-    PG_END_TRY();
-
-    /*
-     * Collect the root node (node_in_partition=1) for each touched partition.
-     * This is the partition "root hash" users typically care about.
-     */
-    changed = (MerkleTouchedNode **) palloc(sizeof(MerkleTouchedNode *) * nentries);
-    for (i = 0; i < nentries; i++)
-    {
-        MerkleTouchedNode *e = entries[i];
-        if (e->finalValid && e->nodeInPartition == 1 && e->changed)
-            changed[nchanged++] = e;
-    }
-
-    if (nchanged <= 0)
-    {
-        pfree(entries);
-        pfree(changed);
-        return;
-    }
-
-    qsort(changed, nchanged, sizeof(MerkleTouchedNode *), merkle_cmp_touch_output_order);
-
-    PG_TRY();
-    {
-        StringInfoData out;
-
-        /*
-         * BCDB deterministic transactions (triggered via "s <seq> ...") set
-         * is_bcdb_worker=true in the session backend, which suppresses all
-         * client-visible NOTICE output in EmitErrorReport().
-         *
-         * We only want to bypass that suppression for this Merkle report so
-         * users can see which partitions/nodes were touched. Preserve the old
-         * value and restore it on all paths.
-         */
-        saved_is_bcdb_worker = is_bcdb_worker;
-        is_bcdb_worker = false;
-
-        initStringInfo(&out);
-
-        for (i = 0; i < nchanged; i++)
-        {
-            MerkleTouchedNode *e = changed[i];
-            char *hex = merkle_hash_to_hex(&e->finalHash);
-
-            if (i > 0)
-                appendStringInfoString(&out, " ");
-            appendStringInfo(&out, "(%d, %s)", e->partition, hex);
-            pfree(hex);
-        }
-
-        ereport(NOTICE,
-                (errmsg("BCDB_MERKLE_ROOTS: %s", out.data)));
-
-        pfree(out.data);
-
-        is_bcdb_worker = saved_is_bcdb_worker;
-    }
-    PG_CATCH();
-    {
-        is_bcdb_worker = saved_is_bcdb_worker;
-
-        pfree(entries);
-        pfree(changed);
-        FlushErrorState();
-        return;
-    }
-    PG_END_TRY();
-
-    pfree(entries);
-    pfree(changed);
 }
 
 /*
@@ -1129,215 +542,56 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 }
 
 /*
- * merkle_update_tree_path() - Propagate a hash change up the tree.
+ * merkle_update_tree_path() - Stage one committed-delta leaf change.
  *
- * This function is the core tree maintenance routine. When a row is inserted or deleted:
- * 1. We identify which leaf it affects (`leafId`).
- * 2. We find the node corresponding to that leaf.
- * 3. We XOR the row's hash into that leaf node.
- * 4. We then move up to the parent node and XOR the hash there too.
- * 5. We repeat until we reach the root of the partition.
- *
- * XOR Property:
- *   Tree_Hash_New = Tree_Hash_Old XOR Row_Hash
- *   This works for both INSERT (adding the hash) and DELETE (removing the hash),
- *   because A XOR B XOR B = A.
- *
- * Multi-page support:
- *   The tree structure is flattened into an array of nodes spread across multiple
- *   database pages. This function handles the logic of calculating which page and offset
- *   a node resides in.
+ * User transactions never mutate Merkle pages.  The transaction-local delta
+ * map is serialized atomically with the heap/ledger change, and the ordered
+ * applier is the only normal-runtime page mutator.
  */
 void
 merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool isXorIn)
 {
-	int			numPartitions;
-	int			partitionId;
-	int			nodeInPartition;
-	int			nodeId;
-	int			leafStart;
-	int			leavesPerPartition;
-	int			nodesPerPartition;
-	int			fanout;
-	int			totalNodes;
-	int			totalLeaves;
-	int			nodesPerPage;
-	int			numTreePages;
-	int			currentPageBlkno = -1;
-	Buffer		buf = InvalidBuffer;
-	Page		page = NULL;
-	MerkleNode *nodes = NULL;
-	bool		profile_enabled = merkle_recovery_profile_enabled;
+	MerkleGeometry geometry;
+	bool			profile_enabled = merkle_recovery_profile_enabled;
 	instr_time	start_time;
 	instr_time	elapsed_time;
 	uint64		nodes_touched = 0;
+	int			node_in_partition;
 
 	(void) isXorIn;
 
 	if (profile_enabled)
+	{
 		INSTR_TIME_SET_CURRENT(start_time);
-	if (profile_enabled)
 		merkle_recovery_profile_state.tree_path_update_calls++;
-
-	/* Read tree configuration from metadata */
-	merkle_read_meta(indexRel,
-					 &numPartitions,
-					 &leavesPerPartition,
-					 &nodesPerPartition,
-					 &totalNodes,
-					 &totalLeaves,
-					 &nodesPerPage,
-					 &numTreePages,
-					 &fanout);
-
-	/* Safety check: prevent division by zero if metadata is invalid */
-	if (leavesPerPartition <= 0)
+	}
+	if (indexRel == NULL || hash == NULL || merkle_hash_is_zero(hash))
 		return;
 
-	if (leafId < 0 || leafId >= totalLeaves)
-	{
+	/* Route computation already loaded this geometry, so this is a cache hit in
+	 * the normal insert path.  Keep the validation here for direct AM callers. */
+	merkle_geometry_from_index(indexRel, &geometry);
+	if (leafId < 0 || leafId >= geometry.total_leaves)
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				 errmsg("merkle_update_tree_path: leafId %d out of range [0,%d)",
-						leafId, totalLeaves)));
-	}
+						leafId, geometry.total_leaves)));
 
-	if (fanout < 2)
+	/* Preserve the profiler's logical path metric without touching buffers.
+	 * Keep this traversal out of the normal synchronous DML path when profiling
+	 * is disabled; the staged delta itself is the only required work here. */
+	if (profile_enabled)
 	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INDEX_CORRUPTED),
-				 errmsg("merkle_update_tree_path: invalid fanout %d in metadata",
-						fanout)));
+		node_in_partition = merkle_geometry_leaf_node(&geometry, leafId);
+		while (node_in_partition > 0)
+		{
+			nodes_touched++;
+			node_in_partition = merkle_geometry_parent_node(&geometry,
+											 node_in_partition);
+		}
 	}
 
-	leafStart = nodesPerPartition - leavesPerPartition + 1;
-	if (leafStart < 1)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INDEX_CORRUPTED),
-				 errmsg("merkle_update_tree_path: invalid leafStart %d (nodesPerPartition=%d leavesPerPartition=%d)",
-						leafStart, nodesPerPartition, leavesPerPartition)));
-	}
-
-	if (!merkle_undo_suppress)
-	{
-		MemoryContext	oldContext;
-		MerklePendingOp *op;
-
-		/*
-		 * Register transaction callback if not done yet.
-		 * This ensures we can undo changes if the transaction aborts.
-		 */
-		if (!xactCallbackRegistered)
-		{
-			RegisterXactCallback(merkle_xact_callback, NULL);
-			xactCallbackRegistered = true;
-		}
-		if (!subxactCallbackRegistered)
-		{
-			RegisterSubXactCallback(merkle_subxact_callback, NULL);
-			subxactCallbackRegistered = true;
-		}
-
-		/*
-		 * Record this operation in the pending list for potential rollback.
-		 * We use TopTransactionContext to ensure the list survives until commit/abort.
-		 */
-		oldContext = MemoryContextSwitchTo(TopTransactionContext);
-
-		op = (MerklePendingOp *) palloc(sizeof(MerklePendingOp));
-		op->indexRel = indexRel;
-		op->relid = RelationGetRelid(indexRel);
-		op->subxid = GetCurrentSubTransactionId();
-		op->leafId = leafId;
-		op->hash = *hash;
-		op->leavesPerPartition = leavesPerPartition;
-		op->nodesPerPartition = nodesPerPartition;
-		op->fanout = fanout;
-		op->totalNodes = totalNodes;
-		op->totalLeaves = totalLeaves;
-		op->nodesPerPage = nodesPerPage;
-		op->numTreePages = numTreePages;
-
-		pendingOps = lappend(pendingOps, op);
-
-		MemoryContextSwitchTo(oldContext);
-	}
-
-	/* Calculate partition and node positions using dynamic values */
-	partitionId = leafId / leavesPerPartition;
-	nodeInPartition = (leafId % leavesPerPartition) + leafStart;
-	nodeId = nodeInPartition + (partitionId * nodesPerPartition);
-
-	/* Walk from leaf to root, XORing at each level */
-	while (nodeInPartition > 0)
-	{
-		int			actualNodeIdx = nodeId - 1;	/* 0-based index */
-		int			pageNum;
-		int			idxInPage = actualNodeIdx % nodesPerPage;
-		BlockNumber blkno;
-
-		if (actualNodeIdx < 0 || actualNodeIdx >= totalNodes)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INDEX_CORRUPTED),
-					 errmsg("merkle_update_tree_path: node index %d out of range [0,%d)",
-							actualNodeIdx, totalNodes)));
-		}
-
-		pageNum = actualNodeIdx / nodesPerPage;
-		if (pageNum < 0 || pageNum >= numTreePages)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INDEX_CORRUPTED),
-					 errmsg("merkle_update_tree_path: page number %d out of range [0,%d)",
-							pageNum, numTreePages)));
-		}
-
-		blkno = MERKLE_TREE_START_BLKNO + pageNum;
-
-		/* Switch pages if needed */
-		if ((int) blkno != currentPageBlkno)
-		{
-			/* Release previous page if held */
-			if (BufferIsValid(buf))
-			{
-				MarkBufferDirty(buf);
-				UnlockReleaseBuffer(buf);
-				buf = InvalidBuffer;
-			}
-
-			/* Read new page */
-			buf = ReadBuffer(indexRel, blkno);
-			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-			page = BufferGetPage(buf);
-			nodes = (MerkleNode *) PageGetContents(page);
-			currentPageBlkno = blkno;
-		}
-
-		/* Record pre-change hash for optional commit-time reporting */
-		if (merkle_update_detection)
-			merkle_track_touched_node(indexRel, partitionId, nodeInPartition,
-									  actualNodeIdx, pageNum, idxInPage,
-									  nodesPerPage, numTreePages,
-									  &nodes[idxInPage].hash);
-
-		/* XOR hash into this node */
-		merkle_hash_xor(&nodes[idxInPage].hash, hash);
-		nodes_touched++;
-
-		/* Move to parent */
-		nodeInPartition = (nodeInPartition + fanout - 2) / fanout;
-		nodeId = nodeInPartition + (partitionId * nodesPerPartition);
-	}
-
-	/* Release the last page if held */
-	if (BufferIsValid(buf))
-	{
-		MarkBufferDirty(buf);
-		UnlockReleaseBuffer(buf);
-		buf = InvalidBuffer;
-	}
+	merkle_stage_delta(indexRel, leafId, hash);
 
 	if (profile_enabled)
 	{
@@ -1345,7 +599,7 @@ merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool is
 		INSTR_TIME_SUBTRACT(elapsed_time, start_time);
 		merkle_recovery_profile_state.tree_path_nodes_touched += nodes_touched;
 		INSTR_TIME_ADD(merkle_recovery_profile_state.tree_path_update_time,
-					   elapsed_time);
+						   elapsed_time);
 	}
 }
 
@@ -1509,7 +763,8 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
  * and freed after this call if needed.
  */
 void
-merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
+merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
+				 uint64 baseline_apply_seq)
 {
     Buffer          metabuf;
     Page            metapage;
@@ -1579,6 +834,7 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
     meta->fanout = fanout;
 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
+	meta->baselineApplySeq = baseline_apply_seq;
     
     MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);
@@ -1596,11 +852,25 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts)
         treebuf = ReadBuffer(indexRel, P_NEW);
         LockBuffer(treebuf, BUFFER_LOCK_EXCLUSIVE);
         treepage = BufferGetPage(treebuf);
-        PageInit(treepage, BLCKSZ, 0);
+		PageInit(treepage, BLCKSZ, MERKLE_PAGE_SPECIAL_SIZE);
+		{
+			MerklePageOpaqueData *opaque = MerklePageGetOpaque(treepage);
+
+			opaque->magic = MERKLE_PAGE_OPAQUE_MAGIC;
+			opaque->version = MERKLE_PAGE_OPAQUE_VERSION;
+			opaque->flags = 0;
+			opaque->last_applied_seq = baseline_apply_seq;
+		}
         
         /* Zero the entire page content area */
         nodes = (MerkleNode *) PageGetContents(treepage);
-        memset(nodes, 0, BLCKSZ - MAXALIGN(SizeOfPageHeaderData));
+		memset(nodes, 0, (char *) PageGetSpecialPointer(treepage) -
+						 (char *) nodes);
+		/* Generic WAL compares only the page's used lower/upper regions. */
+		((PageHeader) treepage)->pd_lower =
+			(LocationIndex) ((char *) nodes +
+							 nodesPerPage * sizeof(MerkleNode) -
+							 (char *) treepage);
         
         /* Calculate how many nodes go on this page */
         nodesThisPage = Min(nodesPerPage, totalNodes - nodeIdx);

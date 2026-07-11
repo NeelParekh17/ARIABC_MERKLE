@@ -33,6 +33,8 @@ typedef struct
 {
     Relation    indexRel;
     Relation    heapRel;
+	IndexFetchTableData *heapFetch;
+	TupleTableSlot *heapSlot;
     double      indtuples;
     int         nkeys;          /* Number of index key columns */
     int         numPartitions;
@@ -124,7 +126,7 @@ merkle_build_callback(Relation indexRel,
     MerkleBuildState *buildstate = (MerkleBuildState *) state;
     MerkleHash      hash;
 	MerkleRoute     route;
-    
+
     /* Only process live tuples */
     if (!tupleIsAlive)
 	{
@@ -134,8 +136,33 @@ merkle_build_callback(Relation indexRel,
 	/* Compute routing through the same relation-aware path used by DML. */
 	merkle_compute_route(indexRel, values, isnull, buildstate->nkeys, &route);
     
-    /* Compute hash of the full row */
-    merkle_compute_row_hash(buildstate->heapRel, tid, &hash);
+	/*
+	 * The heap index-build scan rewrites the TID of a live heap-only tuple to
+	 * the root TID of its HOT chain.  Fetching that exact row version with
+	 * table_tuple_fetch_row_version() therefore sees the dead root (and used
+	 * to hash zero), even though values/isnull describe the live successor.
+	 * Follow the HOT chain exactly as a normal index lookup does and hash the
+	 * visible row image already selected by the build snapshot.
+	 */
+	{
+		bool call_again = false;
+		bool all_dead = false;
+
+		ExecClearTuple(buildstate->heapSlot);
+		if (!table_index_fetch_tuple(buildstate->heapFetch, tid, SnapshotSelf,
+									 buildstate->heapSlot, &call_again,
+									 &all_dead))
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("could not fetch live heap row while building Merkle index"),
+					 errdetail("Heap TID (%u,%u) did not resolve to a visible HOT-chain member.",
+							   ItemPointerGetBlockNumber(tid),
+							   ItemPointerGetOffsetNumber(tid))));
+
+		merkle_compute_slot_hash(buildstate->heapRel, buildstate->heapSlot,
+								 &hash);
+		table_index_fetch_reset(buildstate->heapFetch);
+	}
     
     /*
      * Build optimization: during CREATE INDEX/REINDEX, avoid per-tuple buffer
@@ -168,18 +195,57 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     double              reltuples;
     MerkleOptions      *opts;
     int                 totalLeaves;
-    bool                saved_undo_suppress;
-    
-    /*
-     * During an index build, the Merkle index is new and will be dropped on
-     * error or transaction abort. Recording per-tuple undo state is unnecessary
-     * and can consume large amounts of memory for big tables.
-     */
-    saved_undo_suppress = merkle_undo_suppress;
-    merkle_undo_suppress = true;
+	MerkleRecoveryStatusData recovery_status;
+
+	buildstate.heapFetch = NULL;
+	buildstate.heapSlot = NULL;
+	MemSet(&recovery_status, 0, sizeof(recovery_status));
 
     PG_TRY();
     {
+	if (heapRel->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT ||
+		indexRel->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("crash-safe Merkle indexes require a permanent logged table"),
+				 errhint("Use a logged table; TEMP and UNLOGGED Merkle indexes are not supported.")));
+
+	/*
+	 * A rebuild scans the already-committed heap state.  Rebuilding while the
+	 * ordered delta stream is behind would include those rows here and then
+	 * XOR them a second time when the old backlog is replayed.  The same risk
+	 * exists if this transaction staged DML against the pre-REINDEX relfilenode.
+	 */
+	if (merkle_has_staged_delta())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot build or reindex a Merkle index after table changes in the same transaction"),
+				 errhint("Commit the table changes and synchronize Merkle recovery before rebuilding the index.")));
+	merkle_get_recovery_status(&recovery_status);
+	if (recovery_status.state != MERKLE_STATE_READY)
+	{
+		/* A failed/mismatched existing tree is repaired by an explicit
+		 * non-concurrent REINDEX.  Do not allow CREATE INDEX to bypass a
+		 * database-wide INVALID/REBUILD_REQUIRED gate, and never rebuild while
+		 * the committed prefix is behind the heap. */
+		if ((recovery_status.state == MERKLE_STATE_INVALID ||
+			 recovery_status.state == MERKLE_STATE_REBUILD_REQUIRED) &&
+			recovery_status.applied_seq == recovery_status.target_seq &&
+			indexRel->rd_createSubid == InvalidSubTransactionId)
+		{
+			merkle_mark_recovery_state(MERKLE_STATE_READY, NULL);
+			recovery_status.state = MERKLE_STATE_READY;
+		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("cannot build or reindex a Merkle index while committed deltas are pending"),
+					 errdetail("state=%d applied_seq=%llu target_seq=%llu",
+							   (int) recovery_status.state,
+							   (unsigned long long) recovery_status.applied_seq,
+							   (unsigned long long) recovery_status.target_seq),
+					 errhint("Run REINDEX on the existing Merkle index after the committed prefix is caught up.")));
+	}
     /* Get user-specified options or defaults */
     opts = merkle_get_options(indexRel);
     totalLeaves = opts->partitions * opts->leaves_per_partition;
@@ -221,7 +287,8 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     /*
      * Initialize the index storage with user-specified tree dimensions
      */
-    merkle_init_tree(indexRel, RelationGetRelid(heapRel), opts);
+	merkle_init_tree(indexRel, RelationGetRelid(heapRel), opts,
+					 recovery_status.applied_seq);
     
     /*
      * Prepare in-memory node hash array for build accumulation.
@@ -249,6 +316,8 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     buildstate.heapRel = heapRel;
     buildstate.indtuples = 0;
     buildstate.nkeys = indexInfo->ii_NumIndexKeyAttrs;
+	buildstate.heapFetch = table_index_fetch_begin(heapRel);
+	buildstate.heapSlot = table_slot_create(heapRel, NULL);
     
     /*
      * Scan the heap and build the index
@@ -259,6 +328,11 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
                                        merkle_build_callback,
                                        (void *) &buildstate,
                                        NULL);  /* use heap scan */
+
+	table_index_fetch_end(buildstate.heapFetch);
+	buildstate.heapFetch = NULL;
+	ExecDropSingleTupleTableSlot(buildstate.heapSlot);
+	buildstate.heapSlot = NULL;
 
     /*
      * Finalize: compute internal nodes from leaves, then write the completed
@@ -294,9 +368,10 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
             Buffer      buf;
             Page        page;
             MerkleNode *nodes;
+			MerklePageOpaqueData *opaque;
             int         nodesThisPage;
             int         i;
-            int         pageContentBytes = BLCKSZ - MAXALIGN(SizeOfPageHeaderData);
+			int         pageContentBytes;
 
             nodesThisPage = Min(buildstate.nodesPerPage, buildstate.totalNodes - nodeIdx);
 
@@ -304,6 +379,15 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
             LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
             page = BufferGetPage(buf);
             nodes = (MerkleNode *) PageGetContents(page);
+			opaque = MerklePageGetOpaque(page);
+			if (opaque->magic != MERKLE_PAGE_OPAQUE_MAGIC ||
+				opaque->version != MERKLE_PAGE_OPAQUE_VERSION)
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("invalid Merkle page opaque data during index build")));
+			opaque->last_applied_seq = recovery_status.applied_seq;
+			pageContentBytes = (int) ((char *) PageGetSpecialPointer(page) -
+									  (char *) PageGetContents(page));
 
             for (i = 0; i < nodesThisPage; i++)
             {
@@ -335,25 +419,23 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     }
     PG_CATCH();
     {
-        merkle_undo_suppress = saved_undo_suppress;
+		if (buildstate.heapFetch != NULL)
+			table_index_fetch_end(buildstate.heapFetch);
+		if (buildstate.heapSlot != NULL)
+			ExecDropSingleTupleTableSlot(buildstate.heapSlot);
         PG_RE_THROW();
     }
     PG_END_TRY();
 
-    merkle_undo_suppress = saved_undo_suppress;
     return result;
 }
 
 /*
  * merkleBuildempty() - Build an empty Merkle index
  *
- * This function is part of the PostgreSQL Index AM interface. It is specifically
- * called for UNLOGGED tables to create the 'initial fork' (INIT_FORKNUM).
- *
- * Unlogged tables do not write WAL, so on a crash/restart, PostgreSQL truncates
- * the index to the state created by this function. While AriaBC (blockchain) 
- * typically uses logged durable tables, this function is required for completeness
- * and to support UNLOGGED relations.
+ * PostgreSQL may call this AM hook while preparing an INIT fork.  v7 rejects
+ * temporary and unlogged relations before reaching this path, but keeping the
+ * initializer defensive makes an accidental non-permanent call fail closed.
  */
 void
 merkleBuildempty(Relation indexRel)
@@ -370,14 +452,36 @@ merkleBuildempty(Relation indexRel)
     int         numTreePages;
     int         nodeIdx;
     int         pageNum;
+	MerkleRecoveryStatusData recovery_status;
 
-    /*
+	if (indexRel->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("crash-safe Merkle indexes cannot be created for TEMP or UNLOGGED relations"),
+				 errhint("Use a permanent logged table.")));
+
+	/* TRUNCATE/INIT-fork creation starts with an empty tree.  Its page
+	 * watermarks must begin at the already-applied committed prefix; zero would
+	 * make the applier replay historical deltas into the new empty relfilenode. */
+	MemSet(&recovery_status, 0, sizeof(recovery_status));
+	merkle_get_recovery_status(&recovery_status);
+	if (recovery_status.managed &&
+		recovery_status.state != MERKLE_STATE_READY)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot initialize a Merkle index while recovery is not READY"),
+				 errdetail("state=%d applied_seq=%llu target_seq=%llu",
+						   (int) recovery_status.state,
+						   (unsigned long long) recovery_status.applied_seq,
+						   (unsigned long long) recovery_status.target_seq)));
+
+	/*
      * Construct metadata page using defaults
      */
     metapage = (Page) palloc(BLCKSZ);
     PageInit(metapage, BLCKSZ, 0);
     
-    /* Respect reloptions for INIT_FORKNUM on UNLOGGED relations */
+	/* Respect reloptions for the defensive INIT-fork path. */
     opts = merkle_get_options(indexRel);
     numPartitions = opts->partitions;
     leavesPerPartition = opts->leaves_per_partition;
@@ -404,6 +508,8 @@ merkleBuildempty(Relation indexRel)
     meta->fanout = fanout;
 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
+	meta->baselineApplySeq = recovery_status.managed ?
+		recovery_status.applied_seq : 0;
 
     pfree(opts);
     
@@ -433,10 +539,24 @@ merkleBuildempty(Relation indexRel)
         int         i;
 
         treepage = (Page) palloc(BLCKSZ);
-        PageInit(treepage, BLCKSZ, 0);
+		PageInit(treepage, BLCKSZ, MERKLE_PAGE_SPECIAL_SIZE);
+		{
+			MerklePageOpaqueData *opaque = MerklePageGetOpaque(treepage);
+
+			opaque->magic = MERKLE_PAGE_OPAQUE_MAGIC;
+			opaque->version = MERKLE_PAGE_OPAQUE_VERSION;
+			opaque->flags = 0;
+		opaque->last_applied_seq = recovery_status.managed ?
+				recovery_status.applied_seq : 0;
+		}
         
         nodes = (MerkleNode *) PageGetContents(treepage);
-        memset(nodes, 0, BLCKSZ - MAXALIGN(SizeOfPageHeaderData));
+		memset(nodes, 0, (char *) PageGetSpecialPointer(treepage) -
+						 (char *) nodes);
+		((PageHeader) treepage)->pd_lower =
+			(LocationIndex) ((char *) nodes +
+							 nodesPerPage * sizeof(MerkleNode) -
+							 (char *) treepage);
         
         nodesThisPage = Min(nodesPerPage, totalNodes - nodeIdx);
         

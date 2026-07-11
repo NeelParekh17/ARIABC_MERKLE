@@ -1095,7 +1095,24 @@ uint64_t pg_state_machine::safe_sync_startup(uint64_t durable_log_start_index) {
         throw std::runtime_error("SAFE_STARTUP_FAILED: cannot connect to PostgreSQL: " + err);
     }
 
-    // Step 1: Validate schema version (must be exactly 1 row, version=2)
+    // Startup control statements must not inherit the workload's SERIALIZABLE
+    // default: the singleton Merkle watermark is intentionally serialized by
+    // row locking, and these checks are durable control-plane work.
+    {
+        PGresult* res = PQexec(c,
+            "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED; "
+            "SET synchronous_commit = on;");
+        if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
+            const std::string msg = PQerrorMessage(c);
+            if (res) PQclear(res);
+            PQfinish(c);
+            throw std::runtime_error(
+                "SAFE_STARTUP_FAILED: cannot configure control-plane session: " + msg);
+        }
+        PQclear(res);
+    }
+
+    // Step 1: Validate schema version (must be exactly 1 row, version=4)
     {
         PGresult* res = PQexec(c,
             "SELECT count(*), min(schema_version), max(schema_version) "
@@ -1110,14 +1127,58 @@ uint64_t pg_state_machine::safe_sync_startup(uint64_t durable_log_start_index) {
         const int minv = std::stoi(PQgetvalue(res, 0, 1));
         const int maxv = std::stoi(PQgetvalue(res, 0, 2));
         PQclear(res);
-        if (cnt != 1 || minv != 2 || maxv != 2) {
+        if (cnt != 1 || minv != 4 || maxv != 4) {
             PQfinish(c);
             throw std::runtime_error(
-                "SAFE_STARTUP_FAILED: schema version must be exactly one row with version=2 "
+                "SAFE_STARTUP_FAILED: schema version must be exactly one row with version=4 "
                 "(got count=" + std::to_string(cnt) +
                 " min=" + std::to_string(minv) +
                 " max=" + std::to_string(maxv) + ")");
         }
+    }
+
+    // The server must never start safe mode with a legacy/invalid Merkle
+    // format or an unapplied committed prefix.  Rebuild is idempotent and is
+    // a no-op when no Merkle index exists yet (bootstrap creates the index
+    // later), while the final status query is the hard READY gate.
+    {
+        PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_apply_pending();");
+        if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+            const std::string msg = PQerrorMessage(c);
+            if (res) PQclear(res);
+            PQfinish(c);
+            throw std::runtime_error(
+                "SAFE_STARTUP_FAILED: Merkle committed-prefix apply failed: " + msg);
+        }
+        PQclear(res);
+
+        res = PQexec(c, "SELECT pg_catalog.merkle_rebuild_legacy_indexes();");
+        if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+            const std::string msg = PQerrorMessage(c);
+            if (res) PQclear(res);
+            PQfinish(c);
+            throw std::runtime_error(
+                "SAFE_STARTUP_FAILED: Merkle legacy-index rebuild failed: " + msg);
+        }
+        PQclear(res);
+
+        res = PQexec(c, "SELECT pg_catalog.merkle_recovery_status();");
+        if (!res || PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1) {
+            const std::string msg = PQerrorMessage(c);
+            if (res) PQclear(res);
+            PQfinish(c);
+            throw std::runtime_error(
+                "SAFE_STARTUP_FAILED: cannot read Merkle recovery status: " + msg);
+        }
+        const std::string status_json = PQgetvalue(res, 0, 0);
+        PQclear(res);
+        if (status_json.find("\"state\":\"READY\"") == std::string::npos) {
+            PQfinish(c);
+            throw std::runtime_error(
+                "SAFE_STARTUP_FAILED: Merkle recovery is not READY: " + status_json);
+        }
+
+        std::cout << "[safe_sync_startup] Merkle recovery READY: " << status_json << std::endl;
     }
 
     // Step 2: Validate epoch anchor (exactly one matching row)

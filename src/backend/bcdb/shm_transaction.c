@@ -1653,6 +1653,16 @@ bool apply_optim_insert(TupleTableSlot *slot, CommandId cid)
     bool insert_ok = false;
     ErrorData *edata = NULL;
 
+	if (!enable_merkle_index && merkle_relation_has_index(relation))
+	{
+		RelationClose(relation);
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("Merkle maintenance is disabled for relation %u",
+						slot->tts_tableOid),
+				 errhint("Set enable_merkle_index=on before modifying a Merkle-indexed table.")));
+	}
+
     DEBUGMSG("[ZL] tx %s applying optim insert (rel: %d)", activeTx->hash, relation->rd_id);
     bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_INSERT_COUNT, 1);
 
@@ -1661,9 +1671,9 @@ bool apply_optim_insert(TupleTableSlot *slot, CommandId cid)
      * duplicate-key ERROR (or any ERROR) without aborting the caller's serial
      * transaction.
      *
-     * Note: Merkle indexes mutate shared buffers directly, so they rely on the
-     * explicit (sub)xact undo mechanism in merkleutil.c to rollback XOR writes
-     * on subtransaction abort.
+	 * Merkle DML stages a transaction-local delta.  The staged map follows the
+	 * enclosing subtransaction and is serialized only when the terminal
+	 * ledger row commits, so no page undo is needed here.
      */
 
     BeginInternalSubTransaction("bcdb_insert");
@@ -1753,6 +1763,16 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
         int oldLeafId;
     } PendingMerkleUpdate;
     PendingMerkleUpdate *pending = NULL;
+
+	if (!enable_merkle_index && merkle_relation_has_index(relation))
+	{
+		RelationClose(relation);
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("Merkle maintenance is disabled for relation %u",
+						slot->tts_tableOid),
+				 errhint("Set enable_merkle_index=on before modifying a Merkle-indexed table.")));
+	}
 
     DEBUGMSG("[ZL] tx %s applying optim update (%d %d %d)", activeTx->hash, relation->rd_id, *(int *)&tid->ip_blkid, (int)tid->ip_posid);
     bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_UPDATE_COUNT, 1);
@@ -2020,6 +2040,15 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
 	PendingMerkleDelete *pending = NULL;
 	ItemPointerData currentTid;
 	bool oldSlotOwned = false;
+
+	if (!enable_merkle_index && merkle_relation_has_index(relation))
+	{
+		RelationClose(relation);
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("Merkle maintenance is disabled for relation %u", relOid),
+				 errhint("Set enable_merkle_index=on before modifying a Merkle-indexed table.")));
+	}
 
 	DEBUGMSG("[ZL] tx %s applying optim delete (rel: %d)", activeTx->hash, relOid);
 	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_DELETE_COUNT, 1);
