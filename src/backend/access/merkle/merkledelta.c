@@ -396,6 +396,7 @@ merkle_persist_local_delta_impl(void)
 	bool		isnull;
 	Datum		seq_datum;
 	uint64		apply_seq;
+	bool		deterministic_bcdb_seq;
 	Oid			argtypes[3] = {INT8OID, INT4OID, BYTEAOID};
 	Datum		values[3];
 	char		nulls[3] = {' ', ' ', ' '};
@@ -411,6 +412,9 @@ merkle_persist_local_delta_impl(void)
 				 errdetail("raft_log_index=%llu item_ordinal=%u",
 						   (unsigned long long) activeTx->raft_log_index,
 						   (unsigned) activeTx->raft_item_ordinal)));
+	deterministic_bcdb_seq = enable_merkle_index && is_bcdb_worker &&
+		activeTx != NULL && !activeTx->raft_ledger_enabled &&
+		activeTx->tx_id != BCDBInvalidTid;
 
 	if (!ActiveSnapshotSet())
 	{
@@ -422,23 +426,35 @@ merkle_persist_local_delta_impl(void)
 	if (spi_rc != SPI_OK_CONNECT)
 		elog(ERROR, "Merkle local delta SPI_connect failed: %d", spi_rc);
 
-	spi_rc = SPI_execute(
-		"UPDATE ariabc_internal.merkle_apply_counter"
-		"   SET next_seq = next_seq + 1"
-		" WHERE singleton"
-		" RETURNING next_seq",
-		false, 1);
-	if (spi_rc != SPI_OK_UPDATE_RETURNING || SPI_processed != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_TABLE),
-				 errmsg("Merkle crash-safety state is not initialized"),
-				 errhint("Run scripts/distributed/bootstrap_raft_apply_ledger.sh for this database.")));
+	if (deterministic_bcdb_seq)
+	{
+		/* Direct BCDB transactions already have a replica-agreed contiguous
+		 * sequence.  Reuse it so concurrent SERIALIZABLE workers insert distinct
+		 * queue keys instead of conflicting on the singleton allocator row. */
+		if (activeTx->tx_id < 0 || activeTx->tx_id == PG_INT32_MAX)
+			elog(ERROR, "BCDB transaction id cannot be represented as a Merkle sequence");
+		apply_seq = (uint64) activeTx->tx_id + 1;
+	}
+	else
+	{
+		spi_rc = SPI_execute(
+			"UPDATE ariabc_internal.merkle_apply_counter"
+			"   SET next_seq = next_seq + 1"
+			" WHERE singleton"
+			" RETURNING next_seq",
+			false, 1);
+		if (spi_rc != SPI_OK_UPDATE_RETURNING || SPI_processed != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("Merkle crash-safety state is not initialized"),
+					 errhint("Run scripts/distributed/bootstrap_raft_apply_ledger.sh for this database.")));
 
-	seq_datum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
-							  1, &isnull);
-	if (isnull || DatumGetInt64(seq_datum) <= 0)
-		elog(ERROR, "Merkle apply counter returned an invalid sequence");
-	apply_seq = (uint64) DatumGetInt64(seq_datum);
+		seq_datum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+								  1, &isnull);
+		if (isnull || DatumGetInt64(seq_datum) <= 0)
+			elog(ERROR, "Merkle apply counter returned an invalid sequence");
+		apply_seq = (uint64) DatumGetInt64(seq_datum);
+	}
 
 	blob = merkle_serialize_staged_delta(0, 0);
 	if (blob == NULL)
@@ -462,7 +478,8 @@ merkle_persist_local_delta_impl(void)
 	 * committed by this transaction), so as soon as next_seq moves to
 	 * apply_seq, the prefix can advance to include it.
 	 */
-	(void) merkle_advance_terminal_prefix_spi();
+	if (!deterministic_bcdb_seq)
+		(void) merkle_advance_terminal_prefix_spi();
 
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "Merkle local delta SPI_finish failed");

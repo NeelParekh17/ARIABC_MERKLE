@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_apply_counter (
     terminal_prefix_seq bigint NOT NULL DEFAULT 0 CHECK (terminal_prefix_seq >= 0)
 );
 
+-- Upgrade v3 before any v4 statement references the new column.
+ALTER TABLE ariabc_internal.merkle_apply_counter
+    ADD COLUMN IF NOT EXISTS terminal_prefix_seq
+        bigint NOT NULL DEFAULT 0 CHECK (terminal_prefix_seq >= 0);
+
 INSERT INTO ariabc_internal.merkle_apply_counter(singleton, next_seq, terminal_prefix_seq)
 VALUES (true, 0, 0)
 ON CONFLICT (singleton) DO NOTHING;
@@ -70,9 +75,13 @@ ON CONFLICT (singleton) DO NOTHING;
 -- one compact transaction batch here.  The row and heap DML commit atomically.
 CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_local_delta (
     apply_seq      bigint PRIMARY KEY CHECK (apply_seq > 0),
-    delta_version  integer NOT NULL CHECK (delta_version = 1),
-    delta_blob     bytea NOT NULL,
-    committed_at   timestamptz NOT NULL DEFAULT clock_timestamp()
+    delta_version  integer NOT NULL,
+    delta_blob     bytea,
+    committed_at   timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT merkle_local_delta_payload_check CHECK (
+        (delta_version = 0 AND delta_blob IS NULL) OR
+        (delta_version = 1 AND delta_blob IS NOT NULL)
+    )
 );
 
 -- Schema version tracking metadata
@@ -227,14 +236,22 @@ LOCK TABLE ariabc_internal.raft_apply_schema_meta,
            ariabc_internal.merkle_local_delta
     IN ACCESS EXCLUSIVE MODE;
 
--- P0.1 fix: add terminal_prefix_seq column if upgrading from schema v3.
-ALTER TABLE ariabc_internal.merkle_apply_counter
-    ADD COLUMN IF NOT EXISTS terminal_prefix_seq bigint NOT NULL DEFAULT 0 CHECK (terminal_prefix_seq >= 0);
-
 ALTER TABLE ariabc_internal.merkle_apply_state
     DROP CONSTRAINT IF EXISTS merkle_apply_state_state_check;
 ALTER TABLE ariabc_internal.merkle_apply_state
     ADD CONSTRAINT merkle_apply_state_state_check CHECK (state IN (0, 1, 2, 3, 4));
+
+ALTER TABLE ariabc_internal.merkle_local_delta
+    ALTER COLUMN delta_blob DROP NOT NULL;
+ALTER TABLE ariabc_internal.merkle_local_delta
+    DROP CONSTRAINT IF EXISTS merkle_local_delta_delta_version_check;
+ALTER TABLE ariabc_internal.merkle_local_delta
+    DROP CONSTRAINT IF EXISTS merkle_local_delta_payload_check;
+ALTER TABLE ariabc_internal.merkle_local_delta
+    ADD CONSTRAINT merkle_local_delta_payload_check CHECK (
+        (delta_version = 0 AND delta_blob IS NULL) OR
+        (delta_version = 1 AND delta_blob IS NOT NULL)
+    );
 
 ALTER TABLE ariabc_internal.raft_apply_entry
     ADD COLUMN IF NOT EXISTS merkle_apply_seq_base bigint;

@@ -6,6 +6,9 @@
 #   ./bootstrap_raft_apply_ledger.sh \
 #       --db <dbname> --port <port> --epoch <64-lowercase-hex> \
 #       [--host <host>] [--user <user>]
+#   ./bootstrap_raft_apply_ledger.sh \
+#       --db <dbname> --port <port> --schema-only [--reset-for-restore] \
+#       [--host <host>] [--user <user>]
 #
 # Requirements:
 #   - epoch must be exactly 64 lowercase hex characters (no uppercase).
@@ -15,7 +18,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --db <dbname> --port <port> --epoch <64-lowercase-hex-epoch> [--host <host>] [--user <user>]"
+    echo "Usage: $0 --db <dbname> --port <port> (--epoch <64-lowercase-hex-epoch> | --schema-only [--reset-for-restore]) [--host <host>] [--user <user>] [--clean]"
     exit 1
 }
 
@@ -26,6 +29,8 @@ HOST="localhost"
 USER=""
 
 CLEAN="0"
+SCHEMA_ONLY="0"
+RESET_FOR_RESTORE="0"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,27 +40,48 @@ while [[ $# -gt 0 ]]; do
         --host)  HOST="$2";   shift 2 ;;
         --user)  USER="$2";   shift 2 ;;
         --clean) CLEAN="1";   shift ;;
+        --schema-only) SCHEMA_ONLY="1"; shift ;;
+        --reset-for-restore) RESET_FOR_RESTORE="1"; shift ;;
         *)       usage ;;
     esac
 done
 
-if [[ -z "$DBNAME" || -z "$PORT" || -z "$EPOCH" ]]; then
+if [[ -z "$DBNAME" || -z "$PORT" ]]; then
+    usage
+fi
+if [[ "$SCHEMA_ONLY" -eq 1 && -n "$EPOCH" ]]; then
+    echo "Error: --schema-only and --epoch are mutually exclusive." >&2
+    exit 1
+fi
+if [[ "$SCHEMA_ONLY" -eq 1 && "$CLEAN" -eq 1 ]]; then
+    echo "Error: --clean requires --epoch and cannot be used with --schema-only." >&2
+    exit 1
+fi
+if [[ "$RESET_FOR_RESTORE" -eq 1 && "$SCHEMA_ONLY" -eq 0 ]]; then
+    echo "Error: --reset-for-restore requires --schema-only." >&2
+    exit 1
+fi
+if [[ "$SCHEMA_ONLY" -eq 0 && -z "$EPOCH" ]]; then
     usage
 fi
 
 # Require exactly 64 strictly lowercase hex characters.
 # The server safe-mode epoch check requires lowercase; uppercase is rejected.
-if [[ ! "$EPOCH" =~ ^[0-9a-f]{64}$ ]]; then
+if [[ "$SCHEMA_ONLY" -eq 0 && ! "$EPOCH" =~ ^[0-9a-f]{64}$ ]]; then
     echo "Error: Epoch must be exactly 64 lowercase hex characters (no uppercase)." >&2
     exit 1
 fi
 
-echo "=== Bootstrapping AriaBC Apply Ledger Schema and Epoch ==="
+echo "=== Bootstrapping AriaBC Apply Ledger Schema and Merkle Recovery ==="
 echo "Database: $DBNAME"
 echo "Port:     $PORT"
 echo "Host:     $HOST"
-echo "Epoch:    $EPOCH"
+echo "Mode:     $([[ "$SCHEMA_ONLY" -eq 1 ]] && echo schema-only || echo ledger-epoch)"
+if [[ "$SCHEMA_ONLY" -eq 0 ]]; then
+    echo "Epoch:    $EPOCH"
+fi
 echo "Clean:    $CLEAN"
+echo "Reset:    $RESET_FOR_RESTORE"
 
 # Build psql base arguments.  ON_ERROR_STOP=1 causes psql to exit non-zero on
 # any SQL error so the script aborts rather than silently continuing.
@@ -98,7 +124,7 @@ if [[ "$CLEAN" -eq 1 ]]; then
     "
 fi
 
-# Step 2: Validate schema_meta has exactly one row with version = 3.
+# Step 2: Validate schema_meta has exactly one row with version = 4.
 echo "Validating schema version..."
 SCHEMA_CHECK=$(psql "${PSQL_ARGS[@]}" -t -A -c "
 SELECT count(*), min(schema_version), max(schema_version)
@@ -113,32 +139,75 @@ if [[ "$SCHEMA_COUNT" -ne 1 || "$SCHEMA_MIN" -ne 4 || "$SCHEMA_MAX" -ne 4 ]]; th
 fi
 echo "Schema version OK (version=4)."
 
-# Step 3: Insert epoch anchor (idempotent).
-echo "Registering epoch anchor..."
-psql "${PSQL_ARGS[@]}" -c "
+# A benchmark restore replaces the complete user table and Merkle index. Old
+# direct/raft delta rows therefore refer to state that is intentionally being
+# discarded and may contain relation OIDs from a previous table incarnation.
+if [[ "$RESET_FOR_RESTORE" -eq 1 ]]; then
+    echo "Resetting Merkle recovery queues before full table restore..."
+    psql "${PSQL_ARGS[@]}" -c "
+BEGIN;
+DELETE FROM ariabc_internal.raft_apply_item;
+DELETE FROM ariabc_internal.raft_apply_entry_item;
+DELETE FROM ariabc_internal.raft_apply_entry;
+TRUNCATE ariabc_internal.merkle_local_delta;
+UPDATE ariabc_internal.merkle_apply_counter
+   SET next_seq = 0,
+       terminal_prefix_seq = 0
+ WHERE singleton;
+UPDATE ariabc_internal.merkle_apply_state
+   SET applied_seq = 0,
+       state = 0,
+       error_text = NULL,
+       updated_at = clock_timestamp()
+ WHERE singleton;
+COMMIT;
+"
+    psql "${PSQL_ARGS[@]}" -c "
+DO \$\$
+DECLARE
+  s jsonb;
+BEGIN
+  s := pg_catalog.merkle_recovery_status()::jsonb;
+  IF s->>'state' <> 'READY' OR (s->>'applied_seq')::bigint <> 0 OR
+     (s->>'target_seq')::bigint <> 0 THEN
+    RAISE EXCEPTION 'Merkle recovery reset is not READY at sequence zero: %', s;
+  END IF;
+END
+\$\$;
+"
+    echo "Merkle recovery reset complete; table restore may proceed."
+    exit 0
+fi
+
+# Step 3: Insert and validate the epoch anchor for safe-ledger mode.
+if [[ "$SCHEMA_ONLY" -eq 0 ]]; then
+    echo "Registering epoch anchor..."
+    psql "${PSQL_ARGS[@]}" -c "
 INSERT INTO ariabc_internal.raft_apply_epoch (epoch_id, epoch_label, protocol_version)
 VALUES (decode('$EPOCH', 'hex'), 'raft-safe-recovery-epoch', 1)
 ON CONFLICT (epoch_id) DO NOTHING;
 "
 
-# Step 4: Validate exactly one matching epoch row with exact protocol_version.
-PROTO_VER=$(psql "${PSQL_ARGS[@]}" -t -A -c "
+    PROTO_VER=$(psql "${PSQL_ARGS[@]}" -t -A -c "
 SELECT protocol_version
 FROM ariabc_internal.raft_apply_epoch
 WHERE epoch_id = decode('$EPOCH', 'hex');
 ")
-ROW_COUNT=$(echo "$PROTO_VER" | grep -c '^[0-9]' || true)
-if [[ "$ROW_COUNT" -ne 1 ]]; then
-    echo "Error: Epoch verification failed; expected exactly 1 matching row, got $ROW_COUNT" >&2
-    exit 1
-fi
-PROTO_VER_VAL=$(echo "$PROTO_VER" | head -1 | tr -d '[:space:]')
-if [[ "$PROTO_VER_VAL" -ne 1 ]]; then
-    echo "Error: Epoch row has unexpected protocol_version=$PROTO_VER_VAL (expected 1)" >&2
-    exit 1
-fi
+    ROW_COUNT=$(echo "$PROTO_VER" | grep -c '^[0-9]' || true)
+    if [[ "$ROW_COUNT" -ne 1 ]]; then
+        echo "Error: Epoch verification failed; expected exactly 1 matching row, got $ROW_COUNT" >&2
+        exit 1
+    fi
+    PROTO_VER_VAL=$(echo "$PROTO_VER" | head -1 | tr -d '[:space:]')
+    if [[ "$PROTO_VER_VAL" -ne 1 ]]; then
+        echo "Error: Epoch row has unexpected protocol_version=$PROTO_VER_VAL (expected 1)" >&2
+        exit 1
+    fi
 
-echo "Ledger schema and epoch registration complete (epoch=$EPOCH protocol_version=1)."
+    echo "Ledger schema and epoch registration complete (epoch=$EPOCH protocol_version=1)."
+else
+    echo "Ledger schema installation complete (schema-only mode)."
+fi
 
 # Upgrade any pre-v7 tree before the Raft server is allowed to serve this
 # database, then apply the committed prefix left by a prior crash.  Both calls

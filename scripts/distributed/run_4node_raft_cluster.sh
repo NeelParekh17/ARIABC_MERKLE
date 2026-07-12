@@ -3051,26 +3051,34 @@ for idx in "${!NODE_IDS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Phase 3.4: Install/upgrade the ledger and replay the committed Merkle prefix
-# before any restore can replace a referenced relfilenode.
+# Phase 3.4: Install/upgrade the Merkle state schema and replay the committed
+# prefix before any restore can replace a referenced relfilenode. Direct mode
+# needs the schema even though it does not use the Raft apply ledger.
 # ---------------------------------------------------------------------------
 LEDGER_BOOTSTRAPPED=0
-if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
-  log "=== Phase 3.4: Bootstrapping apply ledger and Merkle recovery on all ${#NODE_IDS[@]} nodes (parallel) ==="
-  [[ -n "$RAFT_EPOCH_HEX" ]] || die "RAFT_EPOCH_HEX must be provided when RAFT_APPLY_LEDGER_MODE=safe"
+if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" || "$ENABLE_MERKLE_INDEX" -eq 1 ]]; then
+  log "=== Phase 3.4: Bootstrapping Merkle schema/recovery on all ${#NODE_IDS[@]} nodes (parallel) ==="
+  if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
+    [[ -n "$RAFT_EPOCH_HEX" ]] || die "RAFT_EPOCH_HEX must be provided when RAFT_APPLY_LEDGER_MODE=safe"
+  fi
   declare -a EARLY_BOOTSTRAP_PIDS=()
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
-    EXTRA_CLEAN_ARG=""
-    if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
-      EXTRA_CLEAN_ARG="--clean"
+    BOOTSTRAP_MODE_ARGS="--schema-only"
+    if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
+      BOOTSTRAP_MODE_ARGS="--epoch '$RAFT_EPOCH_HEX'"
+      if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
+        BOOTSTRAP_MODE_ARGS+=" --clean"
+      fi
+    elif [[ "$SKIP_RESTORE" -eq 0 ]]; then
+      BOOTSTRAP_MODE_ARGS+=" --reset-for-restore"
     fi
-    log "  Bootstrapping apply ledger on $name"
+    log "  Bootstrapping Merkle schema/recovery on $name"
     node_ssh "$idx" "
       export PATH=\"$REMOTE_INSTALL_DIR/bin:\$PATH\"
       export LD_LIBRARY_PATH=\"$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       bash '$REMOTE_REPO_ROOT/scripts/distributed/bootstrap_raft_apply_ledger.sh' \
-        --db '$DB_NAME' --port '$DB_PORT' --epoch '$RAFT_EPOCH_HEX' --user '$DB_USER' $EXTRA_CLEAN_ARG
+        --db '$DB_NAME' --port '$DB_PORT' --user '$DB_USER' $BOOTSTRAP_MODE_ARGS
     " &
     EARLY_BOOTSTRAP_PIDS+=("$!")
   done
@@ -3081,7 +3089,7 @@ if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
       EARLY_BOOTSTRAP_ALL_OK=0
     }
   done
-  [[ "$EARLY_BOOTSTRAP_ALL_OK" -eq 1 ]] || die "Phase 3.4 bootstrap failed on one or more nodes"
+  [[ "$EARLY_BOOTSTRAP_ALL_OK" -eq 1 ]] || die "Phase 3.4 Merkle bootstrap failed on one or more nodes"
   LEDGER_BOOTSTRAPPED=1
 fi
 
@@ -3103,7 +3111,8 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       test -f '$remote_restore' || { echo 'missing restore SQL: $remote_restore' >&2; exit 1; }
-      \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -f '$remote_restore'
+      \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+        -v ON_ERROR_STOP=1 -f '$remote_restore'
       if [[ '$ENABLE_MERKLE_INDEX' -eq 0 ]]; then
         \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$\
           DECLARE r record;
@@ -3921,6 +3930,7 @@ fi
 if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   log "=== Phase 8: Post-workload $VERIFY_TABLE Merkle verification ==="
   VERIFY_NODE_SSH_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}"
+  MERKLE_DRAIN_SSH_TIMEOUT="${MERKLE_DRAIN_SSH_TIMEOUT:-30}"
 
   WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
   MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
@@ -4014,13 +4024,39 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   declare -a POST_ROOTS=()
   declare -a POST_COUNTS=()
   declare -a POST_VERIFY=()
+  declare -a POST_READBACK_PIDS=()
+  declare -a POST_READBACK_FILES=()
+  declare -a POST_READBACK_STDERR_FILES=()
   for idx in "${!NODE_IDS[@]}"; do
+    id="${NODE_IDS[$idx]}"
     name="${NODE_NAMES[$idx]}"
-    readback="$(NODE_SSH_COMMAND_TIMEOUT="$VERIFY_NODE_SSH_TIMEOUT" node_ssh "$idx" "
+    readback_file="$LOG_DIR/post_verify_readback_node${id}_${name}.out"
+    readback_stderr_file="$LOG_DIR/post_verify_readback_node${id}_${name}.stderr.log"
+    POST_READBACK_FILES[$idx]="$readback_file"
+    POST_READBACK_STDERR_FILES[$idx]="$readback_stderr_file"
+    NODE_SSH_COMMAND_TIMEOUT="$MERKLE_DRAIN_SSH_TIMEOUT" node_ssh "$idx" "
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
       if [[ '$ENABLE_MERKLE_INDEX' -eq 1 ]]; then
+        if [[ '$RAFT_APPLY_LEDGER_MODE' == off ]]; then
+          filled=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
+            WITH inserted AS (
+              INSERT INTO ariabc_internal.merkle_local_delta
+                     (apply_seq, delta_version, delta_blob)
+              SELECT seq, 0, NULL
+                FROM generate_series(1::bigint, $((MARKER_SEQ + 1))::bigint) AS seq
+              ON CONFLICT (apply_seq) DO NOTHING
+              RETURNING 1
+            )
+            SELECT count(*) FROM inserted\")
+        fi
+        applied=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT merkle_apply_pending()')
+        recovery_state=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT (merkle_recovery_status()::jsonb)->>'state'\")
+        if [[ \"\$recovery_state\" != READY ]]; then
+          echo \"Merkle recovery did not reach READY after applying \$applied entries: \$recovery_state\" >&2
+          exit 1
+        fi
         root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
         verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
       else
@@ -4028,11 +4064,29 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
         verify=disabled
       fi
       echo \"\$cnt|\$root|\$verify\"
-    " 2>/dev/null | tr -d '[:space:]')" || readback="error|error|error"
+    " >"$readback_file" 2>"$readback_stderr_file" &
+    POST_READBACK_PIDS[$idx]="$!"
+    log "  [$name] post-marker Merkle drain started (pid $!)"
+  done
+
+  for idx in "${!NODE_IDS[@]}"; do
+    name="${NODE_NAMES[$idx]}"
+    readback_file="${POST_READBACK_FILES[$idx]}"
+    readback_stderr_file="${POST_READBACK_STDERR_FILES[$idx]}"
+    if wait "${POST_READBACK_PIDS[$idx]}"; then
+      readback="$(tr -d '[:space:]' < "$readback_file")"
+    else
+      readback="error|error|error"
+      log "  WARNING: [$name] post-marker readback failed; see $readback_stderr_file"
+    fi
+    if [[ -s "$readback_stderr_file" ]]; then
+      log "  [$name] post-marker readback stderr (saved in $readback_stderr_file):"
+      cat "$readback_stderr_file" >&2
+    fi
     IFS='|' read -r cnt root verify <<<"$readback"
-    POST_COUNTS+=("$cnt")
-    POST_ROOTS+=("$root")
-    POST_VERIFY+=("$verify")
+    POST_COUNTS[$idx]="$cnt"
+    POST_ROOTS[$idx]="$root"
+    POST_VERIFY[$idx]="$verify"
     log "  [$name] rows=$cnt root=$root merkle_verify=$verify"
   done
 

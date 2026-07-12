@@ -1095,13 +1095,16 @@ merkle_apply_until_impl(uint64 required_seq)
 		values[1] = Int64GetDatum(upper_bound);
 		values[2] = Int32GetDatum(merkle_apply_batch_items);
 		MemSet(&events, 0, sizeof(events));
-		INSTR_TIME_SET_CURRENT(batch_start);
 		spi_rc = SPI_execute_with_args(source_sql, 3, argtypes, values, nulls,
 									   true, merkle_apply_batch_items);
 		if (spi_rc != SPI_OK_SELECT)
 			elog(ERROR, "Merkle applier source query failed: %d", spi_rc);
 		if (SPI_processed == 0)
 			break;
+		/* The time budget bounds batch parsing/application work.  Charging the
+		 * source query against a 1ms default made every query consume its own
+		 * budget and reduced large catch-up runs to one row per SPI round trip. */
+		INSTR_TIME_SET_CURRENT(batch_start);
 
 		for (row = 0; row < SPI_processed; row++)
 		{
@@ -1247,7 +1250,8 @@ merkle_apply_until_impl(uint64 required_seq)
 		 */
 		spi_rc = SPI_execute_with_args(
 			"UPDATE ariabc_internal.merkle_apply_counter"
-			"   SET terminal_prefix_seq = GREATEST(terminal_prefix_seq, $1)"
+			"   SET next_seq = GREATEST(next_seq, $1),"
+			"       terminal_prefix_seq = GREATEST(terminal_prefix_seq, $1)"
 			" WHERE singleton",
 			1, argtypes, values, nulls, false, 0);
 		if (spi_rc != SPI_OK_UPDATE || SPI_processed != 1)
