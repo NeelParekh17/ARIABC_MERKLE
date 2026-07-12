@@ -197,6 +197,13 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
   done
 
   echo
+  echo "Generating TPS graph..."
+  python3 scripts/distributed/plot_executor_sweep.py \
+    --input-csv "$OUT/summary.csv" \
+    --output-img "$OUT/executor_sweep_tps.png" \
+    --title "Executor Worker Sweep: TPS vs Executor Workers (Threads=$THREADS)"
+
+  echo
   echo "Done."
   echo "Artifacts: $OUT"
 
