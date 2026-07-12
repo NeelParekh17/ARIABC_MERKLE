@@ -2374,18 +2374,12 @@ pg_executor::pg_executor(int node_id,
             throw std::runtime_error("PQconnectdb failed: " + trim_copy(msg));
         }
 
-        /*
-         * These pooled sessions are the deterministic control plane: they
-         * submit a block and consume committed worker results.  They must not
-         * run the synchronous Merkle applier under the workload's
-         * SERIALIZABLE default, because concurrent result sessions would
-         * conflict on the singleton apply watermark even though the workers
-         * themselves remain serializable.  Keep durability explicit here.
-         */
+        /* These pooled sessions execute deterministic BCDB work.  Preserve
+         * the server's SERIALIZABLE default: BCDB's worker snapshot path
+         * requires it.  Only make the durability contract explicit here. */
         {
             PGresult* session_res = PQexec(
                 c,
-                "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED; "
                 "SET synchronous_commit = on;");
             if (!session_res || PQresultStatus(session_res) != PGRES_COMMAND_OK) {
                 std::string msg = PQerrorMessage(c);
