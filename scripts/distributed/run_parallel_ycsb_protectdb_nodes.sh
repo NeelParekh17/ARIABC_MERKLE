@@ -13,12 +13,12 @@ set -euo pipefail
 # Usage:
 #   scripts/distributed/run_parallel_ycsb_protectdb_nodes.sh [options]
 #
-#   --modes <det>           Benchmark mode (det|pg|det,pg)
+#   --modes <pg,det>        Benchmark mode (det|pg|det,pg)
 #   --threads <csv>         Thread counts  [default: 1,2,4,8,16]
 #   --runs <3>              Runs per workload/thread combination
 #   --workloads <csv>       Workload filenames (default: bench_threads_matrix.py defaults)
 #   --poll-interval <60>    Seconds between monitoring polls
-#   --hang-timeout <1200>   Seconds of no log change before hang warning
+#   --hang-timeout <60>     Seconds of no log change before hang warning
 #   --skip-sync             Skip rsync phase (reuse last-synced source)
 #   --nodes <csv>           Comma-separated IPs to restrict (default: all 7)
 #
@@ -39,7 +39,7 @@ TEMPLATE_CONF_LOCAL="/work/ARIABC/pgdata/postgresql.conf"
 
 # ---- Tunable defaults ----
 SSH_PORT=22
-MODES="det"
+MODES="pg,det"
 THREADS="1,2,4,8,16"
 RUNS=3
 WORKLOADS=""
@@ -48,19 +48,19 @@ DB_NAME="postgres"
 DB_USER="postgres"
 DB_PORT=5438
 POLL_INTERVAL_S=60
-HANG_TIMEOUT_S=1200
+HANG_TIMEOUT_S=60
 SKIP_SYNC=0
 FILTER_IPS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --modes)         MODES="${2:-det}"; shift 2 ;;
+    --modes)         MODES="${2:-pg,det}"; shift 2 ;;
     --threads)       THREADS="${2:-}"; shift 2 ;;
     --runs)          RUNS="${2:-3}"; shift 2 ;;
     --workloads)     WORKLOADS="${2:-}"; shift 2 ;;
     --rates)         RATES="${2:-}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
-    --hang-timeout)  HANG_TIMEOUT_S="${2:-1200}"; shift 2 ;;
+    --hang-timeout)  HANG_TIMEOUT_S="${2:-60}"; shift 2 ;;
     --skip-sync)     SKIP_SYNC=1; shift 1 ;;
     --nodes)         FILTER_IPS="${2:-}"; shift 2 ;;
     -h|--help)
@@ -291,7 +291,7 @@ pgdata_line=\$(bash '$repo/scripts/distributed/ensure_single_node_postgres.sh' \
   --repo-root '$repo' --install-dir '$inst' \
   --db-port '$DB_PORT' --db-user '$DB_USER' --db-name '$DB_NAME' \
   --template-config '$repo/.bench_tmp/shared_postgresql.conf' \
-  --require-custom | tail -n 1)
+  --require-custom --fresh-pgdata | tail -n 1)
 [[ \$pgdata_line == PGDATA=* ]] && export ARIABC_PGDATA=\${pgdata_line#PGDATA=}
 WHEELS_DIR='$repo/.bench_tmp/psycopg_wheels'
 if ! python3 -c 'import psycopg' >/dev/null 2>&1; then

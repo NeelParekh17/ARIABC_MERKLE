@@ -672,6 +672,25 @@ else
   fail_with_log "pg_isready failed" "$REMOTE_LOG_DIR/pg_isready.log"
 fi
 
+# The benchmark uses the crash-safe Merkle DDL guards, so the fresh temporary
+# cluster must have the current Raft/Merkle ledger schema before any table or
+# Merkle index is created.  Do this after PostgreSQL starts and before the
+# benchmark Python process opens its connection.
+LEDGER_SCHEMA_SQL="$REMOTE_SRC_DIR/scripts/distributed/sql/raft_apply_ledger_schema.sql"
+if [[ ! -f "$LEDGER_SCHEMA_SQL" ]]; then
+  failure_reason="missing Raft/Merkle ledger schema SQL"
+  fail_with_log "ledger schema file missing" "$REMOTE_LOG_DIR/ledger_schema.log"
+fi
+remote_progress "bootstrapping Raft/Merkle ledger schema; log: $REMOTE_LOG_DIR/ledger_schema.log"
+if "$REMOTE_INSTALL_DIR/bin/psql" -X -v ON_ERROR_STOP=1 \
+    -h "$REMOTE_SOCKET_DIR" -p 55432 -d postgres -U "$(id -un)" \
+    -f "$LEDGER_SCHEMA_SQL" >"$REMOTE_LOG_DIR/ledger_schema.log" 2>&1; then
+  remote_progress "Raft/Merkle ledger schema bootstrap completed"
+else
+  tail_log "$REMOTE_LOG_DIR/ledger_schema.log"
+  fail_with_log "Raft/Merkle ledger schema bootstrap failed" "$REMOTE_LOG_DIR/ledger_schema.log"
+fi
+
 # Optional: run merkle_static SQL regression gate before the benchmark.
 if [[ "$RUN_STATIC_MERKLE_REGRESSION" -eq 1 ]]; then
   remote_progress "running merkle_static regression gate; log: $REMOTE_LOG_DIR/merkle_static.log"

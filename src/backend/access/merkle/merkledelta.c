@@ -415,7 +415,6 @@ merkle_persist_local_delta_impl(void)
 	deterministic_bcdb_seq = enable_merkle_index && is_bcdb_worker &&
 		activeTx != NULL && !activeTx->raft_ledger_enabled &&
 		activeTx->tx_id != BCDBInvalidTid;
-
 	if (!ActiveSnapshotSet())
 	{
 		PushActiveSnapshot(GetTransactionSnapshot());
@@ -428,9 +427,13 @@ merkle_persist_local_delta_impl(void)
 
 	if (deterministic_bcdb_seq)
 	{
-		/* Direct BCDB transactions already have a replica-agreed contiguous
-		 * sequence.  Reuse it so concurrent SERIALIZABLE workers insert distinct
-		 * queue keys instead of conflicting on the singleton allocator row. */
+		/*
+		 * Direct DET workers must never contend on the singleton SQL allocator
+		 * while holding user-row locks.  Their transaction id is already a
+		 * replica-agreed total order and gives every writer a distinct key.
+		 * Read-only txids intentionally leave holes; merkle_apply_until_impl()
+		 * may cross only holes proven terminal by last_committed_tx_id.
+		 */
 		if (activeTx->tx_id < 0 || activeTx->tx_id == PG_INT32_MAX)
 			elog(ERROR, "BCDB transaction id cannot be represented as a Merkle sequence");
 		apply_seq = (uint64) activeTx->tx_id + 1;

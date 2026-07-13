@@ -8,6 +8,7 @@ DB_USER="postgres"
 DB_NAME="postgres"
 TEMPLATE_CONFIG=""
 REQUIRE_CUSTOM=0
+FRESH_PGDATA=0
 
 usage() {
   cat <<'EOF'
@@ -17,7 +18,7 @@ Usage:
     --install-dir </home/neel/Desktop/ariabc_install> \
     [--db-port <5438>] [--db-user <postgres>] [--db-name <postgres>] \
     --template-config </home/neel/Desktop/ariabc_cluster/.bench_tmp/shared_postgresql.conf> \
-    [--require-custom]
+    [--require-custom] [--fresh-pgdata]
 
 Ensures a local single-node postgres cluster exists and is running on given port.
 Prints: PGDATA=<path>
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --db-name) DB_NAME="${2:-postgres}"; shift 2 ;;
     --template-config) TEMPLATE_CONFIG="${2:-}"; shift 2 ;;
     --require-custom) REQUIRE_CUSTOM=1; shift 1 ;;
+    --fresh-pgdata) FRESH_PGDATA=1; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -78,6 +80,18 @@ if [[ "$BIN_DIR" == "$INSTALL_DIR/bin" && -d "$INSTALL_DIR/lib" ]]; then
 fi
 
 PGDATA_DIR="$REPO_ROOT/.bench_tmp/single_node_pgdata"
+
+if [[ "$FRESH_PGDATA" == "1" && -f "$PGDATA_DIR/PG_VERSION" ]]; then
+  echo "[ensure_pg] Reinitializing benchmark PGDATA for a clean campaign..."
+  "$BIN_DIR/pg_ctl" -D "$PGDATA_DIR" stop -m immediate -w -t 30 >/dev/null 2>&1 || true
+  stray_pids=$(pgrep -f "postgres.*-D $PGDATA_DIR" || true)
+  if [[ -n "$stray_pids" ]]; then
+    kill -TERM $stray_pids >/dev/null 2>&1 || true
+    sleep 2
+  fi
+  rm -rf "$PGDATA_DIR"
+fi
+
 mkdir -p "$PGDATA_DIR"
 
 if [[ ! -f "$PGDATA_DIR/PG_VERSION" ]]; then
@@ -189,5 +203,16 @@ if ! _try_start_postgres; then
   fi
 fi
 "$BIN_DIR/pg_isready" -h 127.0.0.1 -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t 5 >/dev/null
+
+if [[ "$FRESH_PGDATA" == "1" ]]; then
+  BOOTSTRAP_SCRIPT="$REPO_ROOT/scripts/distributed/bootstrap_raft_apply_ledger.sh"
+  if [[ ! -f "$BOOTSTRAP_SCRIPT" ]]; then
+    echo "ERROR: missing Merkle bootstrap script: $BOOTSTRAP_SCRIPT" >&2
+    exit 1
+  fi
+  PATH="$BIN_DIR:$PATH" bash "$BOOTSTRAP_SCRIPT" \
+    --db "$DB_NAME" --port "$DB_PORT" --host 127.0.0.1 --user "$DB_USER" \
+    --schema-only --reset-for-restore >/dev/null
+fi
 
 echo "PGDATA=$PGDATA_DIR"

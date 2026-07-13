@@ -1544,6 +1544,11 @@ def main() -> int:
                                         "data_directory_mismatch=1\n"
                                     )
                                 else:
+                                    print(
+                                        f"  [restore] mode={mode} workload={workload} "
+                                        f"threads={th} run={run_idx}",
+                                        flush=True,
+                                    )
                                     restore_exit = _run(
                                         [
                                             psql_path,
@@ -1555,6 +1560,8 @@ def main() -> int:
                                             args.user,
                                             "-d",
                                             args.db,
+                                            "-v",
+                                            "ON_ERROR_STOP=1",
                                             "-f",
                                             str(restore_sql),
                                         ],
@@ -1639,6 +1646,11 @@ def main() -> int:
                                                 timeout_s=timeout_for_run,
                                             )
                                         _warmup_done = True
+                                        print(
+                                            f"  [restore-after-warmup] mode={mode} workload={workload} "
+                                            f"threads={th} run={run_idx}",
+                                            flush=True,
+                                        )
                                         restore_exit = _run(
                                             [
                                                 psql_path,
@@ -1650,6 +1662,8 @@ def main() -> int:
                                                 args.user,
                                                 "-d",
                                                 args.db,
+                                                "-v",
+                                                "ON_ERROR_STOP=1",
                                                 "-f",
                                                 str(restore_sql),
                                             ],
@@ -1695,22 +1709,39 @@ def main() -> int:
                                 count_s = None
                                 root_hash = None
                                 verify = None
+                                verification_error = ""
                                 timeout_diag_path: Optional[Path] = None
-                                if restore_exit == 0:
-                                    count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=env)
-                                    root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=env)
-                                    verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=env)
-                                    if workload_exit == 124:
-                                        timeout_diag_path = _capture_timeout_diagnostics(
-                                            case_dir=case_dir,
-                                            psql=psql_path,
-                                            db=args.db,
-                                            port=args.port,
-                                            user=args.user,
-                                            cwd=scripts_dir,
-                                            env=env,
-                                            server_log=server_log_path,
-                                        )
+                                if restore_exit == 0 and workload_exit == 0:
+                                    apply_ok, apply_msg = _psql_exec(
+                                        psql_path,
+                                        db=args.db,
+                                        port=args.port,
+                                        user=args.user,
+                                        query="select merkle_apply_pending();",
+                                        cwd=scripts_dir,
+                                        env=env,
+                                    )
+                                    if not apply_ok:
+                                        verification_error = "merkle_apply_pending_failed: " + apply_msg
+                                    else:
+                                        count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=env)
+                                        root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=env)
+                                        verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=env)
+                                        if count_s is None or root_hash is None or verify is None:
+                                            verification_error = "post_workload_verification_query_failed"
+                                    if verification_error:
+                                        (case_dir / "verification.err").write_text(verification_error + "\n")
+                                if restore_exit == 0 and workload_exit == 124:
+                                    timeout_diag_path = _capture_timeout_diagnostics(
+                                        case_dir=case_dir,
+                                        psql=psql_path,
+                                        db=args.db,
+                                        port=args.port,
+                                        user=args.user,
+                                        cwd=scripts_dir,
+                                        env=env,
+                                        server_log=server_log_path,
+                                    )
 
                                 row_count = None
                                 if count_s is not None and count_s.strip().isdigit():
@@ -1750,6 +1781,8 @@ def main() -> int:
                                             notes_parts.append(f"timeout_diag={timeout_diag_path.name}")
                                 elif verify is not None and verify.strip().lower() not in ("t", "f", ""):
                                     notes_parts.append(f"unexpected_verify={verify!r}")
+                                if verification_error:
+                                    notes_parts.append("verification_error=1")
                                 notes = ";".join(notes_parts)
 
                                 result = RunResult(
@@ -1788,6 +1821,32 @@ def main() -> int:
 
                                 done += 1
                                 print(f"[{done}/{total}] {mode} workload={workload} rate={rate} signing={signing} enforce={args.enforce_signatures} threads={th} run={run_idx} exit={workload_exit} verify={verify}")
+
+                                if restore_exit != 0:
+                                    print(
+                                        f"ERROR: restore failed for mode={mode} workload={workload} "
+                                        f"threads={th} run={run_idx} exit={restore_exit}; aborting matrix",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
+                                    return 1
+                                if workload_exit != 0 or permanent_failures not in (None, 0):
+                                    print(
+                                        f"ERROR: workload failed for mode={mode} workload={workload} "
+                                        f"threads={th} run={run_idx} exit={workload_exit} "
+                                        f"permanent_failures={permanent_failures}; aborting matrix",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
+                                    return 1
+                                if verification_error or verify != "t":
+                                    print(
+                                        f"ERROR: Merkle verification failed for mode={mode} workload={workload} "
+                                        f"threads={th} run={run_idx} verify={verify!r}; aborting matrix",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
+                                    return 1
 
     try:
         _write_summary(raw_csv, summary_csv)

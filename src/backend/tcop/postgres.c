@@ -4613,6 +4613,7 @@ void PostgresMain(int argc, char *argv[],
 		case 'Q': /* simple query */
 		{
 			const char *query_string;
+			const char *sig_sep = NULL;
 			char pfx_str[9] = "";
 			int pfx_id;
 			int bid = 1;
@@ -4633,25 +4634,28 @@ void PostgresMain(int argc, char *argv[],
 			printf("\n pg13Dbg %s : %s: %d q= %s\n", __FILE__, __FUNCTION__, __LINE__, query_string);
 #endif
 			pq_getmsgend(&input_message);
-			// ssl
-			int i = 0;
-			int maxlen = (&input_message)->len;
+			/*
+			 * Signed DET commands use:
+			 *   s <8-digit-hash> <base64-signature>##<sql>
+			 * Do not scan input_message.len for '#'.  query_string is
+			 * NUL-terminated, and bytes beyond it may contain an accidental
+			 * marker under concurrent backends, falsely signing plain PG SQL.
+			 */
+			int qlen = strlen(query_string);
+			int i = qlen;
 			int sign = 0;
 			char qsig[1024] = {};
-			for (; ((i < maxlen) && (query_string[i] != '#')); i++)
-				;
-			// printf("msg sig i= %d qschar=%c %c\n", i, query_string[i], query_string[i+1]);
-			// printf("msg sig i= %d qs=%s\n",i, query_string);
-			// printf("msg sig ipmsg=%s\n", input_message);
-			if (query_string[i + 1] == '#')
+			if (qlen >= 13 && query_string[0] == 's' && query_string[1] == ' ')
+				sig_sep = strstr(query_string + 11, "##");
+			if (sig_sep != NULL)
+			{
+				i = sig_sep - query_string;
 				sign = 1;
-			// sign = 0; // TODO for initdb
+			}
 			char query_string2[1024] = {};
 			int valid = -1;
-			// int qOfst = i;
-			// printf("msg sig : %d\n", sign);
 			if (sign == 1)
-				strcpy(query_string2, (const char *)(&query_string[i + 2]));
+				strlcpy(query_string2, sig_sep + 2, sizeof(query_string2));
 
 			/*valid = verify_signature_b64key( publicKey2, msg2, signature2);
 			printf("msg %s sig valid: %d\n", msg2, valid);
@@ -4660,7 +4664,6 @@ void PostgresMain(int argc, char *argv[],
 		*/
 
 			bool is_bcdb_hashed_det = false;
-			int qlen = strlen(query_string);
 			if (qlen >= 11 && query_string[0] == 's' && query_string[1] == ' ')
 			{
 				is_bcdb_hashed_det = true;
@@ -4686,9 +4689,15 @@ void PostgresMain(int argc, char *argv[],
 				pfx_id = atoi(pfx_str);
 				if (sign == 1)
 				{
-					strncpy(qsig, query_string + 11, i - 11);
-					// printf("qmsg %s qsig: %s\n", query_string2, qsig);
-					valid = verify_signature_b64key(publicKey2, query_string2, qsig);
+					size_t sig_len = (size_t) (i - 11);
+					if (sig_len >= sizeof(qsig))
+						valid = 0;
+					else
+					{
+						memcpy(qsig, query_string + 11, sig_len);
+						qsig[sig_len] = '\0';
+						valid = verify_signature_b64key(publicKey2, query_string2, qsig);
+					}
 					if (valid != 1)
 						bcdb_handle_signature_failure(query_string2, valid);
 				}
