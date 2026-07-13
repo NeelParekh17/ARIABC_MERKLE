@@ -10,6 +10,7 @@
 #include "access/generic_xlog.h"
 #include "access/merkle.h"
 #include "access/xact.h"
+#include "bcdb/shm_block.h"
 #include "catalog/index.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_authid_d.h"
@@ -1166,13 +1167,24 @@ merkle_apply_until_impl(uint64 required_seq)
 			expected_item_ordinal = (uint32) DatumGetInt32(ordinal_d);
 			is_raft = DatumGetBool(raft_d);
 
-			/* A claimed item or an unmaterialized range is a normal prefix gap. */
+			/* A claimed item or an unmaterialized range is normally a prefix gap.
+			 * Direct deterministic local deltas are the one exception: apply_seq is
+			 * txid+1, so committed read-only txids deliberately have no queue row.
+			 * Cross such a gap only when BCDB's contiguous committed watermark proves
+			 * every missing txid terminal.  Raft items never use this exception. */
 			if (source_seq < expected_seq)
 				elog(ERROR, "Merkle apply source regressed from %llu to %llu",
 					 (unsigned long long) expected_seq,
 					 (unsigned long long) source_seq);
 			if (source_seq > expected_seq)
-				break;
+			{
+				BCTxID committed_txid = get_last_committed_txid(NULL);
+
+				if (is_raft || committed_txid < 0 ||
+					source_seq - 1 > (uint64) committed_txid)
+					break;
+				expected_seq = source_seq;
+			}
 			if (source_state != 2 && source_state != 3 && source_state != 4)
 				break;
 
@@ -1328,10 +1340,13 @@ merkle_apply_until_internal_impl(uint64 required_seq)
 		MerkleRecoveryState failure_state;
 		char *reason;
 
+		/* PG_CATCH executes in ErrorContext.  CopyErrorData asserts that the
+		 * destination is a different, long-lived context; old_context is the
+		 * caller context captured before opening the internal subtransaction. */
+		MemoryContextSwitchTo(old_context);
 		edata = CopyErrorData();
 		FlushErrorState();
 		RollbackAndReleaseCurrentSubTransaction();
-		MemoryContextSwitchTo(old_context);
 
 		/*
 		 * P1.3: classify errors correctly.

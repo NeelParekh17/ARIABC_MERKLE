@@ -75,18 +75,18 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
  * - LEAVES_PER_PARTITION: Leaf buckets in each partition
  * - DEFAULT_FANOUT: Branching factor (children per internal node)
  * - NODES_PER_PARTITION (default): Total nodes per partition for a perfect
- *   k-ary tree with k=DEFAULT_FANOUT (2 * leaves - 1 = 7)
+ *   k-ary tree with k=DEFAULT_FANOUT
  * - TOTAL_LEAVES (default): NUM_PARTITIONS * LEAVES_PER_PARTITION
  * - TOTAL_NODES (default): NUM_PARTITIONS * NODES_PER_PARTITION
  *
  * NOTE: With 256-bit (32-byte) hashes, the default tree spans multiple pages.
  */
 #define MERKLE_NUM_PARTITIONS       58
-#define MERKLE_LEAVES_PER_PARTITION 4
-#define MERKLE_DEFAULT_FANOUT       2   /* branching factor */
-#define MERKLE_NODES_PER_PARTITION  7   /* 2 * LEAVES_PER_PARTITION - 1 */
-#define MERKLE_TOTAL_LEAVES         232 /* NUM_PARTITIONS * LEAVES_PER_PARTITION */
-#define MERKLE_TOTAL_NODES          406 /* NUM_PARTITIONS * NODES_PER_PARTITION */
+#define MERKLE_LEAVES_PER_PARTITION 1024
+#define MERKLE_DEFAULT_FANOUT       32  /* branching factor */
+#define MERKLE_NODES_PER_PARTITION  1057 /* (32 * 1024 - 1) / (32 - 1) */
+#define MERKLE_TOTAL_LEAVES         59392 /* NUM_PARTITIONS * LEAVES_PER_PARTITION */
+#define MERKLE_TOTAL_NODES          61306 /* NUM_PARTITIONS * NODES_PER_PARTITION */
 
 /*
  * Hash configuration

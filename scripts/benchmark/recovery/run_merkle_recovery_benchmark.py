@@ -462,6 +462,10 @@ def repair_merkle(
         lookup_scans = candidate_fetch_sql_calls
 
     with timer(m.phase, "targeted_post_repair_confirmation_ms"):
+        # Repair DML commits a second Merkle delta batch.  Confirmation reads
+        # must observe the repaired roots, so drain that batch at the durable
+        # boundary before asking the backend for recovery status.
+        execute(conn, "SELECT merkle_apply_pending()")
         post_repair_counters: dict[str, Any] = {}
         remaining_bad_leaves = detect_bad_leaves(
             conn,
@@ -739,6 +743,13 @@ def run_one_manifest(
         method_start = now_ms()
         reset_damaged_from_healthy(conn, cfg)
         apply_corruption(conn, manifest)
+        # Direct corruption DML is committed into the durable Merkle delta
+        # queue.  Recovery reads require the corresponding index pages to be
+        # caught up first; otherwise the fresh cluster remains in CATCHING_UP
+        # and root localisation is rejected by the backend.  Drain only after
+        # corruption so the benchmark still measures recovery from divergent
+        # Merkle roots, not an unsynchronised index.
+        execute(conn, "SELECT merkle_apply_pending()")
         planner_results, planner_rows = run_planner_preflight(conn, manifest, run_id)
         planner_rows_out.extend(planner_rows)
         profiler = None
@@ -1080,12 +1091,14 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         return series
 
     if args.profile == "best-scaling-f32-l1024-k75-c300":
-        if args.partitions is not None or args.leaves_per_partition is not None or args.fanout is not None:
+        if (args.partitions is not None and args.partitions != 200) or \
+                (args.leaves_per_partition is not None and args.leaves_per_partition != 1024) or \
+                (args.fanout is not None and args.fanout != 32):
             raise ValueError(
-                "best-scaling-f32-l1024-k75-c300 uses fixed geometry F=32,L=1024; "
-                "do not override geometry"
+                "best-scaling-f32-l1024-k75-c300 uses fixed geometry "
+                "P=200,F=32,L=1024; supplied geometry must match exactly"
             )
-        if args.bad_leaf_count is not None:
+        if args.bad_leaf_count is not None and args.bad_leaf_count != 75:
             raise ValueError(
                 "best-scaling-f32-l1024-k75-c300 uses fixed --bad-leaf-count=75"
             )
@@ -1245,7 +1258,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             git_bin = shutil.which("git") or "/usr/bin/git"
             if Path(git_bin).exists():
                 git_head = subprocess.check_output(
-                    [git_bin, "rev-parse", "HEAD"], cwd=BENCH_DIR.parents[2], text=True
+                    [git_bin, "rev-parse", "HEAD"], cwd=BENCH_DIR.parents[2],
+                    text=True, stderr=subprocess.DEVNULL
                 ).strip()
             else:
                 git_head = "unavailable; source_snapshot.json records synced source provenance"
