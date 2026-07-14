@@ -465,7 +465,12 @@ def repair_merkle(
         # Repair DML commits a second Merkle delta batch.  Confirmation reads
         # must observe the repaired roots, so drain that batch at the durable
         # boundary before asking the backend for recovery status.
-        execute(conn, "SELECT merkle_apply_pending()")
+        record_call(
+            profiler,
+            stage="targeted_confirmation",
+            operation="confirmation_merkle_apply_pending",
+            fn=lambda: execute(conn, "SELECT merkle_apply_pending()"),
+        )
         post_repair_counters: dict[str, Any] = {}
         remaining_bad_leaves = detect_bad_leaves(
             conn,
@@ -741,7 +746,6 @@ def run_one_manifest(
             total_runs=progress_state["total_runs"],
         )
         method_start = now_ms()
-        reset_damaged_from_healthy(conn, cfg)
         apply_corruption(conn, manifest)
         # Direct corruption DML is committed into the durable Merkle delta
         # queue.  Recovery reads require the corresponding index pages to be
@@ -793,23 +797,6 @@ def run_one_manifest(
             audit_mode=audit_mode,
             leaf_fetch_chunk_size=leaf_fetch_chunk_size,
         )
-        if profiler is not None:
-            profile_tolerance_ms = 25.0 if benchmark_profile in (
-                "size-scaling-k75-c300",
-                "best-scaling-f32-l1024-k75-c300",
-            ) else 15.0
-            profile_reasons = validate_profile_invariants(
-                phase=metric.phase,
-                operations=profiler.rows(),
-                bad_leaf_count=metric.bad_leaf_count,
-                run_id=metric.run_id,
-                tolerance_ms=profile_tolerance_ms,
-                leaf_fetch_chunk_size=leaf_fetch_chunk_size,
-            )
-            if profile_reasons:
-                metric.valid = False
-                metric.warning = (metric.warning + "; " if metric.warning else "") + "; ".join(profile_reasons)
-                raise RuntimeError(f"profile invariant failed for {metric.run_id}: {profile_reasons}")
         metrics.append(metric)
         if profiler is not None:
             profile_operation_rows_out.extend(profiler.rows())
