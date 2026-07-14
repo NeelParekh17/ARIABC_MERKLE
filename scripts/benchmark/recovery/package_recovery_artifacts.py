@@ -35,6 +35,15 @@ ALLOWED = {
     "merkle_backend_profile.csv",
     "deep_plan_summary.csv",
     "deep_plan_profiles.jsonl",
+    "dynamic_logical_ranges.csv",
+    "dynamic_summary_items.csv",
+    "dynamic_exact_heap_rows.csv",
+    "dynamic_tree_stats.csv",
+    "dynamic_index_plans.csv",
+    "dynamic_crash_gate_summary.json",
+    "dynamic_crash_gate_campaign.env",
+    "dynamic_preflight.json",
+    "postgres_memory.csv",
     "profiling_report.md",
     "artifact_manifest.json",
     "stdout.log",
@@ -69,7 +78,16 @@ def main() -> int:
     parser.add_argument("result_dir", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--artifact-mode", choices=["summary", "debug"], default="summary")
-    parser.add_argument("--max-summary-mb", type=int, default=50)
+    parser.add_argument(
+        "--max-summary-mb",
+        type=int,
+        default=None,
+        help=(
+            "Maximum uncompressed summary evidence size. Defaults to 50 MiB "
+            "for static runs and 100 MiB for dynamic runs, whose per-range "
+            "plan and summary proofs are intentionally retained."
+        ),
+    )
     args = parser.parse_args()
 
     result_dir = args.result_dir.resolve()
@@ -77,6 +95,11 @@ def main() -> int:
     config = json.loads((result_dir / "config.json").read_text())
     if int(config.get("benchmark_schema_version", 0)) < 2:
         raise RuntimeError("refusing to package pre-v2 benchmark results")
+    max_summary_mb = args.max_summary_mb
+    if max_summary_mb is None:
+        max_summary_mb = 100 if config.get("merkle_mode") == "dynamic" else 50
+    if max_summary_mb <= 0:
+        raise RuntimeError("max-summary-mb must be positive")
 
     forbidden = []
     files = []
@@ -105,8 +128,8 @@ def main() -> int:
         files.append(manifest_path)
 
     total_size = sum(p.stat().st_size for p in files)
-    if args.artifact_mode == "summary" and total_size > args.max_summary_mb * 1024 * 1024:
-        raise RuntimeError(f"summary artifact size {total_size} exceeds {args.max_summary_mb} MiB")
+    if args.artifact_mode == "summary" and total_size > max_summary_mb * 1024 * 1024:
+        raise RuntimeError(f"summary artifact size {total_size} exceeds {max_summary_mb} MiB")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(output, "w:gz") as tar:

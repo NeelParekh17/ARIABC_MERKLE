@@ -178,7 +178,7 @@ def plot_all(result_dir: Path):
 
     fig12 = [
         r for r in rows
-        if r.get("experiment") in ("figure12", "recovery-scaling-diagnosis", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300")
+        if r.get("experiment") in ("figure12", "recovery-scaling-diagnosis", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300", "dynamic-size-scaling-k75-c300")
     ]
     svg_bar_chart(
         plots / "figure12_paper_total.svg",
@@ -275,12 +275,20 @@ def plot_all(result_dir: Path):
         "candidate_rows_fetched",
         "profile_label",
     )
+    candidate_points.extend(
+        aggregate(
+            [r for r in rows if r.get("method") == "merkle_dynamic"],
+            "tuple_count",
+            "dynamic_candidate_summary_items_fetched",
+            "profile_label",
+        )
+    )
     if candidate_points:
         svg_line_chart(
             plots / "candidate_rows_vs_dataset_size.svg",
-            "Candidate rows vs dataset size",
+            "Candidate rows or dynamic summary items vs dataset size",
             "tuple_count",
-            "median rows",
+            "median items",
             candidate_points,
         )
 

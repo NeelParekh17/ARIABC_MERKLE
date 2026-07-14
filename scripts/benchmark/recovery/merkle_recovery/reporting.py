@@ -16,6 +16,7 @@ from typing import Any
 import psycopg
 
 from .config import ROOT
+from .config import DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT, DYNAMIC_PROFILE
 from .metrics import Metrics
 
 
@@ -180,7 +181,76 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
                 failures.append(f"{m.run_id}: configured bad_leaf_count={m.bad_leaf_count}, expected {expected_bad_leaf_count}")
             if int(m.counters.get("bad_leaf_count", -1)) != expected_bad_leaf_count:
                 failures.append(f"{m.run_id}: detected bad_leaf_count={m.counters.get('bad_leaf_count')}, expected {expected_bad_leaf_count}")
-    if failures and profile in ("smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
+        if profile == DYNAMIC_PROFILE:
+            dynamic_checks = [
+                (m.method == "merkle_dynamic", f"method={m.method}"),
+                (m.corruption_mode in ("paper-update-only", "update-only"),
+                 f"corruption_mode={m.corruption_mode}"),
+                (m.partitions == 200, f"partitions={m.partitions}"),
+                (m.fanout == 32, f"logical_fanout={m.fanout}"),
+                (m.bad_leaf_count == 75, f"configured_bad_range_count={m.bad_leaf_count}"),
+                (m.corrupted_tuple_count == 300, f"corrupted_tuple_count={m.corrupted_tuple_count}"),
+                (int(m.counters.get("total_rows_repaired", -1)) == 300,
+                 f"total_rows_repaired={m.counters.get('total_rows_repaired')}"),
+                (
+                    int(m.counters.get(
+                        "dynamic_candidate_summary_items_fetched",
+                        DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT + 1,
+                    )) <= DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
+                    "dynamic_candidate_summary_items_fetched="
+                    f"{m.counters.get('dynamic_candidate_summary_items_fetched')}",
+                ),
+                (int(m.counters.get("candidate_summary_bound_ok", 0)) == 1,
+                 f"candidate_summary_bound_ok={m.counters.get('candidate_summary_bound_ok')}"),
+                (int(m.counters.get("dynamic_storage_seq_scan_delta", -1)) == 0,
+                 "dynamic_storage_seq_scan_delta="
+                 f"{m.counters.get('dynamic_storage_seq_scan_delta')}"),
+                (int(m.counters.get("dynamic_side_table_seq_scan_plans", -1)) == 0,
+                 "dynamic_side_table_seq_scan_plans="
+                 f"{m.counters.get('dynamic_side_table_seq_scan_plans')}"),
+                (int(m.counters.get("full_damaged_heap_rows_fetched", -1)) == 0,
+                 f"full_damaged_heap_rows_fetched={m.counters.get('full_damaged_heap_rows_fetched')}"),
+                (int(m.counters.get("exact_healthy_heap_rows_fetched", -1)) == 300,
+                 f"exact_healthy_heap_rows_fetched={m.counters.get('exact_healthy_heap_rows_fetched')}"),
+                (int(m.counters.get("rows_inserted", -1)) == 0,
+                 f"rows_inserted={m.counters.get('rows_inserted')}"),
+                (int(m.counters.get("rows_updated", -1)) == 300,
+                 f"rows_updated={m.counters.get('rows_updated')}"),
+                (int(m.counters.get("rows_deleted", -1)) == 0,
+                 f"rows_deleted={m.counters.get('rows_deleted')}"),
+                (int(m.counters.get("remaining_bad_range_count", -1)) == 0,
+                 f"remaining_bad_range_count={m.counters.get('remaining_bad_range_count')}"),
+                (int(m.counters.get("healthy_minus_damaged", -1)) == 0,
+                 f"healthy_minus_damaged={m.counters.get('healthy_minus_damaged')}"),
+                (int(m.counters.get("damaged_minus_healthy", -1)) == 0,
+                 f"damaged_minus_healthy={m.counters.get('damaged_minus_healthy')}"),
+                (int(m.counters.get("roots_match", 0)) == 1,
+                 f"roots_match={m.counters.get('roots_match')}"),
+                (int(m.counters.get("root_counts_match", 0)) == 1,
+                 f"root_counts_match={m.counters.get('root_counts_match')}"),
+                (int(m.counters.get("healthy_dynamic_verify", 0)) == 1,
+                 f"healthy_dynamic_verify={m.counters.get('healthy_dynamic_verify')}"),
+                (int(m.counters.get("damaged_dynamic_verify", 0)) == 1,
+                 f"damaged_dynamic_verify={m.counters.get('damaged_dynamic_verify')}"),
+                (m.counters.get("healthy_dynamic_state") == "READY",
+                 f"healthy_dynamic_state={m.counters.get('healthy_dynamic_state')}"),
+                (m.counters.get("damaged_dynamic_state") == "READY",
+                 f"damaged_dynamic_state={m.counters.get('damaged_dynamic_state')}"),
+                (0 <= int(m.counters.get("healthy_max_leaf_occupancy", -1)) <= 32,
+                 f"healthy_max_leaf_occupancy={m.counters.get('healthy_max_leaf_occupancy')}"),
+                (0 <= int(m.counters.get("damaged_max_leaf_occupancy", -1)) <= 32,
+                 f"damaged_max_leaf_occupancy={m.counters.get('damaged_max_leaf_occupancy')}"),
+                (int(m.counters.get("recovery_user_table_seq_scan_delta", -1)) == 0,
+                 f"recovery_user_table_seq_scan_delta={m.counters.get('recovery_user_table_seq_scan_delta')}"),
+                (int(m.counters.get("static_lookup_index_count", -1)) == 0,
+                 f"static_lookup_index_count={m.counters.get('static_lookup_index_count')}"),
+                (m.counters.get("audit_mode") == "full",
+                 f"audit_mode={m.counters.get('audit_mode')}"),
+            ]
+            for ok, detail in dynamic_checks:
+                if not ok:
+                    failures.append(f"{m.run_id}: dynamic acceptance failed: {detail}")
+    if failures and profile in ("smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300", DYNAMIC_PROFILE):
         shown = "\n".join(failures[:20])
         more = "" if len(failures) <= 20 else f"\n... {len(failures) - 20} more"
         raise RuntimeError(f"benchmark contract failed:\n{shown}{more}")

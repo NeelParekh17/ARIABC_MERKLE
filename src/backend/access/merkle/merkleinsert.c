@@ -42,9 +42,11 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
              IndexUniqueCheck checkUnique,
              struct IndexInfo *indexInfo)
 {
-    MerkleHash  hash;
-	MerkleRoute route;
-    int         nkeys;
+	MerkleHash hash;
+	MerkleItemIdentity identity;
+	int			nkeys;
+
+	MemSet(&identity, 0, sizeof(identity));
     
 	/* The executor briefly suppresses the generic AM callback for UPDATE so
 	 * it can apply the full-row Merkle delta exactly once below.  A normal
@@ -62,29 +64,34 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
 	}
 
     nkeys = indexInfo->ii_NumIndexKeyAttrs;
-	merkle_compute_route(indexRel, values, isnull, nkeys, &route);
+	merkle_compute_item_identity(indexRel, values, isnull, nkeys, &identity);
     
-    /*
-     * Compute hash of the full row data
-     * 
-     * We fetch the actual tuple from the heap because we want to hash
-     * ALL columns, not just the indexed column. This provides full row
-     * integrity verification.
-     * 
-     * CRITICAL FIX: Skip if TID is invalid to avoid warnings and failures.
-     */
-    if (!ItemPointerIsValid(ht_ctid) || 
-        ItemPointerGetBlockNumberNoCheck(ht_ctid) == InvalidBlockNumber)
-    {
-        return false;
-    }
-
-    merkle_compute_row_hash(heapRel, ht_ctid, &hash);
+	/*
+	 * Fetch and hash the actual heap row so all columns are covered.  The heap
+	 * insert has already succeeded when aminsert is called, therefore an
+	 * invalid/unfetchable TID must abort the transaction rather than silently
+	 * leave the Merkle state stale.  Hash value zero is not a failure signal.
+	 */
+	if (!merkle_compute_row_hash(heapRel, ht_ctid, &hash))
+	{
+		if (identity.key_data != NULL)
+			pfree(identity.key_data);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("could not fetch newly inserted row for Merkle maintenance"),
+				 errdetail("Heap TID is block %u, offset %u.",
+						   ItemPointerGetBlockNumberNoCheck(ht_ctid),
+						   ItemPointerGetOffsetNumberNoCheck(ht_ctid))));
+	}
     
-    /*
-     * Update the Merkle tree path from leaf to root
-     */
-	merkle_update_tree_path(indexRel, route.leaf_id, &hash, true);
+	/*
+	 * The heap insertion has succeeded before the index AM is invoked.  Stage
+	 * one semantic item delta; the wrapper preserves v7 static routing and
+	 * carries the canonical key/route needed by a dynamic index.
+	 */
+	merkle_stage_item_delta(indexRel, &identity, &hash, true);
+	if (identity.key_data != NULL)
+		pfree(identity.key_data);
     
     /*
      * We don't detect duplicates - merkle index doesn't enforce uniqueness
@@ -103,8 +110,8 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
  * because:
  *
  * 1. By the time VACUUM runs, deleted tuples may be physically gone from the heap
- * 2. We need the full row data to compute its hash and partition ID
- * 3. Synchronous deletion in the executor guarantees we always have tuple access
+ * 2. We need the full row data to compute its hash and semantic item identity
+ * 3. Two-phase executor preparation guarantees we always have tuple access
  *
  * This function only collects and reports index statistics for VACUUM's benefit.
  * The callback function tells us which heap TIDs are dead, but we cannot act on
@@ -130,17 +137,28 @@ merkleBulkdelete(IndexVacuumInfo *info,
     int             pageNum;
     
     /* Allocate stats if not provided */
-    if (stats == NULL)
-        stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
+	if (stats == NULL)
+		stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
+
+	/*
+	 * Dynamic indexes keep authoritative nodes/items in WAL-logged side
+	 * relations.  They have no static perfect-tree pages to scan and semantic
+	 * DELETE deltas, not VACUUM callbacks, own item removal.
+	 */
+	if (merkle_index_is_dynamic(indexRel))
+	{
+		merkle_dynamic_vacuum_stats(indexRel, stats);
+		return stats;
+	}
     
     /*
-     * We only collect statistics here. The actual Merkle tree updates happen in:
-     * - ExecDeleteMerkleIndexes() - called during DELETE/UPDATE to XOR out old hash
-     * - ExecInsertMerkleIndexes() - called during UPDATE to XOR in new hash
-     * Both are in src/backend/executor/nodeModifyTable.c
+	 * We only collect statistics here.  DELETE/UPDATE prepare the old semantic
+	 * item before heap mutation and stage it afterward through the executor's
+	 * CaptureMerkleDeletePlan()/ApplyMerkleDeletePlan() pair.  New UPDATE items
+	 * are staged by ExecInsertMerkleIndexes().
      *
-     * This ensures hash removal happens BEFORE the tuple is deleted from the heap,
-     * guaranteeing we can always access the full row data needed for hashing.
+	 * This ensures identity/hash preparation happens while the old tuple is
+	 * readable, but no delta is staged until the heap mutation succeeds.
      */
     
     heapRel = table_open(IndexGetRelation(RelationGetRelid(indexRel), false),
@@ -202,8 +220,14 @@ merkleVacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
     int         pageNum;
     
     /* Allocate stats if not provided (no deletions occurred) */
-    if (stats == NULL)
-        stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
+	if (stats == NULL)
+		stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
+
+	if (merkle_index_is_dynamic(indexRel))
+	{
+		merkle_dynamic_vacuum_stats(indexRel, stats);
+		return stats;
+	}
     
     /*
      * Update index statistics

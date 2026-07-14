@@ -124,7 +124,7 @@ if [[ "$CLEAN" -eq 1 ]]; then
     "
 fi
 
-# Step 2: Validate schema_meta has exactly one row with version = 4.
+# Step 2: Validate schema_meta has exactly one row with version = 5.
 echo "Validating schema version..."
 SCHEMA_CHECK=$(psql "${PSQL_ARGS[@]}" -t -A -c "
 SELECT count(*), min(schema_version), max(schema_version)
@@ -133,11 +133,11 @@ FROM ariabc_internal.raft_apply_schema_meta;
 SCHEMA_COUNT=$(echo "$SCHEMA_CHECK" | cut -d'|' -f1)
 SCHEMA_MIN=$(echo "$SCHEMA_CHECK"   | cut -d'|' -f2)
 SCHEMA_MAX=$(echo "$SCHEMA_CHECK"   | cut -d'|' -f3)
-if [[ "$SCHEMA_COUNT" -ne 1 || "$SCHEMA_MIN" -ne 4 || "$SCHEMA_MAX" -ne 4 ]]; then
-    echo "Error: schema_meta must have exactly one row with schema_version=4; got count=$SCHEMA_COUNT min=$SCHEMA_MIN max=$SCHEMA_MAX" >&2
+if [[ "$SCHEMA_COUNT" -ne 1 || "$SCHEMA_MIN" -ne 5 || "$SCHEMA_MAX" -ne 5 ]]; then
+    echo "Error: schema_meta must have exactly one row with schema_version=5; got count=$SCHEMA_COUNT min=$SCHEMA_MIN max=$SCHEMA_MAX" >&2
     exit 1
 fi
-echo "Schema version OK (version=4)."
+echo "Schema version OK (version=5)."
 
 # A benchmark restore replaces the complete user table and Merkle index. Old
 # direct/raft delta rows therefore refer to state that is intentionally being

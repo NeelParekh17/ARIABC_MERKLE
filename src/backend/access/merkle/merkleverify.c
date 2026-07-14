@@ -204,6 +204,25 @@ merkle_open_consistent_index(Oid index_oid)
 	return index_rel;
 }
 
+/*
+ * Fixed node numbers and leaf buckets only exist in the static v7 layout.
+ * Fail explicitly when an old recovery/debug helper is used against a
+ * dynamic prefix tree; silently mapping a prefix to a static node number
+ * would localize and repair the wrong key range.
+ */
+static void
+merkle_require_static_api(Relation index_rel, const char *function_name)
+{
+	if (!merkle_index_is_dynamic(index_rel))
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("%s does not support dynamic Merkle indexes",
+					function_name),
+			 errhint("Use merkle_dynamic_get_partition_roots(), merkle_dynamic_get_ranges(), or merkle_dynamic_get_range_items().")));
+}
+
 static void
 read_merkle_node_hash_with_meta(Relation indexRel, int nodeIdx,
                                 int totalNodes, int nodesPerPage,
@@ -308,6 +327,23 @@ merkle_verify(PG_FUNCTION_ARGS)
     
 	/* Establish verification snapshot after locks are held */
 	verifysnap = RegisterSnapshot(GetLatestSnapshot());
+
+	if (merkle_index_is_dynamic(indexRel))
+	{
+		match = merkle_dynamic_verify_relations(heapRel, indexRel, verifysnap);
+		if (!match)
+		{
+			char *reason = psprintf("Dynamic Merkle verification mismatch for index %u",
+								indexOid);
+
+			merkle_mark_recovery_state(MERKLE_STATE_INVALID, reason);
+			pfree(reason);
+		}
+		UnregisterSnapshot(verifysnap);
+		index_close(indexRel, ShareLock);
+		table_close(heapRel, ShareLock);
+		PG_RETURN_BOOL(match);
+	}
 
 
     /* Read tree configuration from metadata */
@@ -518,6 +554,16 @@ merkle_root_hash(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("could not obtain a synchronized Merkle snapshot after 10 retries"),
 				 errhint("Retry the query or ensure the Merkle applier is catching up.")));
+
+	if (merkle_index_is_dynamic(indexRel))
+	{
+		uint64 tuple_count;
+
+		merkle_dynamic_root(indexRel, &combinedHash, &tuple_count);
+		index_close(indexRel, ShareLock);
+		result = merkle_hash_to_hex(&combinedHash);
+		PG_RETURN_TEXT_P(cstring_to_text(result));
+	}
     
     /* Read tree configuration from metadata */
     merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition, &totalNodes, NULL,
@@ -634,6 +680,23 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 
 	/* Establish snapshot after locks are held */
 	verifysnap = RegisterSnapshot(GetLatestSnapshot());
+
+	if (merkle_index_is_dynamic(indexRel))
+	{
+		match = merkle_dynamic_verify_relations(heapRel, indexRel, verifysnap);
+		if (!match)
+		{
+			char *reason = psprintf("Dynamic Merkle verification mismatch for index %u",
+								indexOid);
+
+			merkle_mark_recovery_state(MERKLE_STATE_INVALID, reason);
+			pfree(reason);
+		}
+		UnregisterSnapshot(verifysnap);
+		index_close(indexRel, ShareLock);
+		table_close(heapRel, ShareLock);
+		PG_RETURN_BOOL(match);
+	}
 
 
 	merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition,
@@ -821,6 +884,16 @@ merkle_root_hash_index(PG_FUNCTION_ARGS)
 				 errmsg("could not obtain a synchronized Merkle snapshot after 10 retries"),
 				 errhint("Retry the query or ensure the Merkle applier is catching up.")));
 
+	if (merkle_index_is_dynamic(indexRel))
+	{
+		uint64 tuple_count;
+
+		merkle_dynamic_root(indexRel, &combinedHash, &tuple_count);
+		index_close(indexRel, ShareLock);
+		result = merkle_hash_to_hex(&combinedHash);
+		PG_RETURN_TEXT_P(cstring_to_text(result));
+	}
+
 	merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
 					 &totalNodes, NULL, &nodesPerPage, &numTreePages, NULL);
 
@@ -915,8 +988,16 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     
     /* Open heap and index */
     heapRel = table_open(relid, AccessShareLock);
-    indexRel = index_open(indexOid, AccessShareLock);
-    heapTupdesc = RelationGetDescr(heapRel);
+	indexRel = index_open(indexOid, AccessShareLock);
+	heapTupdesc = RelationGetDescr(heapRel);
+	if (merkle_index_is_dynamic(indexRel))
+	{
+		char *dynamic_stats = merkle_dynamic_stats_json(indexRel);
+
+		index_close(indexRel, AccessShareLock);
+		table_close(heapRel, AccessShareLock);
+		PG_RETURN_TEXT_P(cstring_to_text(dynamic_stats));
+	}
 
 	/* Validate on-disk/hash formats before exposing metadata. */
 	merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, NULL,
@@ -1112,7 +1193,8 @@ merkle_node_hash(PG_FUNCTION_ARGS)
                             get_rel_name(relid))));
         
 		indexRel = merkle_open_consistent_index(indexOid);
-        
+		merkle_require_static_api(indexRel, "merkle_node_hash()");
+
         /* Read tree configuration from metadata */
         merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition, &nodesPerPartition,
                          &totalNodes, NULL, &nodesPerPage, &numTreePages, NULL);
@@ -1283,6 +1365,7 @@ merkle_leaf_tuples(PG_FUNCTION_ARGS)
         
         heapRel = table_open(relid, AccessShareLock);
         indexRel = index_open(indexOid, AccessShareLock);
+		merkle_require_static_api(indexRel, "merkle_leaf_tuples()");
         
 		merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, &totalLeaves,
 						 NULL, NULL, NULL);
@@ -1500,6 +1583,7 @@ merkle_leaf_id(PG_FUNCTION_ARGS)
                         get_rel_name(relid))));
     
     indexRel = index_open(indexOid, AccessShareLock);
+	merkle_require_static_api(indexRel, "merkle_leaf_id()");
     indexTupdesc = RelationGetDescr(indexRel);
     nkeys = indexRel->rd_index->indnkeyatts;
     
@@ -1624,6 +1708,7 @@ merkle_bucket_for_key(PG_FUNCTION_ARGS)
                         get_rel_name(relid))));
 
     indexRel = index_open(indexOid, AccessShareLock);
+	merkle_require_static_api(indexRel, "merkle_bucket_for_key()");
     indexTupdesc = RelationGetDescr(indexRel);
     nkeys = indexRel->rd_index->indnkeyatts;
     nargs = PG_NARGS() - 1;
@@ -1715,6 +1800,7 @@ merkle_get_node_hash(PG_FUNCTION_ARGS)
                         get_rel_name(relid))));
 
 	indexRel = merkle_open_consistent_index(indexOid);
+	merkle_require_static_api(indexRel, "merkle_get_node_hash()");
     merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
                      &totalNodes, NULL, &nodesPerPage, &numTreePages, NULL);
     nodeIdx = global_node_index(partition, nodeInPartition, numPartitions,
@@ -1751,6 +1837,7 @@ merkle_get_partition_root_hash(PG_FUNCTION_ARGS)
                         get_rel_name(relid))));
 
 	indexRel = merkle_open_consistent_index(indexOid);
+	merkle_require_static_api(indexRel, "merkle_get_partition_root_hash()");
     merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
                      &totalNodes, NULL, &nodesPerPage, &numTreePages, NULL);
     nodeIdx = global_node_index(partition, 1, numPartitions, nodesPerPartition);
@@ -1800,6 +1887,7 @@ merkle_get_partition_root_hashes(PG_FUNCTION_ARGS)
 							get_rel_name(relid))));
 
 		indexRel = merkle_open_consistent_index(indexOid);
+		merkle_require_static_api(indexRel, "merkle_get_partition_root_hashes()");
 		merkle_read_meta(indexRel, &numPartitions, NULL, &nodesPerPartition,
 						 &totalNodes, NULL, &nodesPerPage, &numTreePages,
 						 NULL);
@@ -1923,6 +2011,7 @@ merkle_get_child_hashes(PG_FUNCTION_ARGS)
 							get_rel_name(relid))));
 
 		indexRel = merkle_open_consistent_index(indexOid);
+		merkle_require_static_api(indexRel, "merkle_get_child_hashes()");
 		merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition,
 						 &nodesPerPartition, &totalNodes, NULL,
 						 &nodesPerPage, &numTreePages, &fanout);
@@ -2088,6 +2177,7 @@ merkle_get_node_hashes(PG_FUNCTION_ARGS)
 
 	indexOid = resolve_merkle_index_arg(relid);
 	indexRel = merkle_open_consistent_index(indexOid);
+	merkle_require_static_api(indexRel, "merkle_get_node_hashes()");
 	merkle_geometry_from_index(indexRel, &geometry);
 	merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, NULL,
 					 &nodesPerPage, &numTreePages, NULL);
@@ -2167,6 +2257,7 @@ merkle_get_children_batch(PG_FUNCTION_ARGS)
 
 	indexOid = resolve_merkle_index_arg(relid);
 	indexRel = merkle_open_consistent_index(indexOid);
+	merkle_require_static_api(indexRel, "merkle_get_children_batch()");
 	merkle_geometry_from_index(indexRel, &geometry);
 	merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, NULL,
 					 &nodesPerPage, &numTreePages, NULL);
@@ -2255,6 +2346,7 @@ merkle_get_leaf_members(PG_FUNCTION_ARGS)
 
 	indexOid = resolve_merkle_index_arg(relid);
 	indexRel = merkle_open_consistent_index(indexOid);
+	merkle_require_static_api(indexRel, "merkle_get_leaf_members()");
 	merkle_geometry_from_index(indexRel, &geometry);
 	if (leaf_id < 0 || leaf_id >= geometry.total_leaves)
 		ereport(ERROR,

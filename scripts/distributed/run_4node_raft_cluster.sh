@@ -3457,7 +3457,7 @@ if [[ "$SKIP_WORKLOAD" -eq 1 ]]; then
   phase_marker "PHASE_6_WORKLOAD_SKIPPED"
   log "  --skip-workload set: Raft leader/startup verified; gateway submission and post-run marker are intentionally skipped."
   {
-    printf 'schema_version=4\n'
+    printf 'schema_version=5\n'
     printf 'workload_transactions=0\n'
     printf 'ordering_mode=%s\n' "$ORDERING_MODE"
     printf 'completion_path=not_applicable\n'

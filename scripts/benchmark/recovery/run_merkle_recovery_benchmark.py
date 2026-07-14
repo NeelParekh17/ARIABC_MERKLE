@@ -19,17 +19,22 @@ from typing import Any
 from merkle_recovery.config import (
     BENCH_DIR, RESULT_ROOT as _DEFAULT_RESULT_ROOT, GEOMETRY_MATRIX_PATH,
     BENCHMARK_SCHEMA_VERSION, TIMING_CONTRACT_VERSION,
-    BENCHMARK_SCOPE_METADATA,
+    BENCHMARK_SCOPE_METADATA, DYNAMIC_SCOPE_METADATA, DYNAMIC_PROFILE,
+    DYNAMIC_PARTITIONS, DYNAMIC_LOGICAL_FANOUT, DYNAMIC_LEAF_CAPACITY,
+    DYNAMIC_MERGE_THRESHOLD, DYNAMIC_BAD_RANGE_COUNT,
+    DYNAMIC_CORRUPTED_TUPLE_COUNT,
     profile_config,
 )
 from merkle_recovery.db import connect, execute, scalar, show_setting
 from merkle_recovery.dataset import (
     build_dataset, reset_damaged_from_healthy,
-    leaf_occupancy, occupancy_stats, table_sizes,
+    leaf_occupancy, dynamic_leaf_occupancy, occupancy_stats, table_sizes,
     bucket_consistency_sample, ensure_helpers,
 )
 from merkle_recovery.manifest import (
-    choose_corruption_manifest, validate_manifest_leaf_mapping, apply_corruption,
+    choose_corruption_manifest, choose_dynamic_corruption_manifest,
+    validate_manifest_leaf_mapping, validate_dynamic_manifest_mapping,
+    apply_corruption,
 )
 from merkle_recovery.localisation import detect_bad_leaves
 from merkle_recovery.repair import (
@@ -48,6 +53,8 @@ from merkle_recovery.profiling import (
     group_profile_rows_with_fraction, validate_profile_invariants,
     record_call,
 )
+from merkle_recovery.dynamic_db import dynamic_tree_stats
+from merkle_recovery.dynamic_benchmark import run_one_dynamic_manifest
 
 RESULT_ROOT = _DEFAULT_RESULT_ROOT
 
@@ -219,6 +226,7 @@ def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str
     phys_per_leaf = tuple_count / max(1, leaf_count)
     row = {
         **sizes,
+        "merkle_mode": "static",
         "profile_label": profile_label,
         "tuple_count": tuple_count,
         "partitions": geo["partitions"],
@@ -235,6 +243,71 @@ def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str
         "physical_rows_per_leaf_expected": round(phys_per_leaf, 2),
         "expected_candidate_rows_per_bad_leaf": round(2 * phys_per_leaf, 2),
         **occupancy_stats(occ),
+    }
+    return row
+
+
+def _dynamic_dataset_row(
+    conn,
+    tuple_count: int,
+    partitions: int,
+    logical_fanout: int,
+    leaf_capacity: int,
+    merge_threshold: int,
+    profile_label: str,
+) -> dict[str, Any]:
+    occupancy = dynamic_leaf_occupancy(conn)
+    sizes = table_sizes(conn, merkle_mode="dynamic")
+    stats = dynamic_tree_stats(conn, "healthy")
+    occupancy_total = sum(int(item["tuple_count"]) for item in occupancy)
+    if int(stats.get("item_count", -1)) != tuple_count:
+        raise RuntimeError(
+            "dynamic build state item_count mismatch: "
+            f"state={stats.get('item_count')}, expected={tuple_count}"
+        )
+    if occupancy_total != tuple_count:
+        raise RuntimeError(
+            "dynamic physical leaf frontier does not conserve rows: "
+            f"frontier={occupancy_total}, expected={tuple_count}, "
+            f"leaf_count={len(occupancy)}, stats={stats}"
+        )
+    if occupancy and max(int(item["tuple_count"]) for item in occupancy) > leaf_capacity:
+        raise RuntimeError(
+            "dynamic physical leaf frontier exceeds leaf_capacity: "
+            f"maximum={max(int(item['tuple_count']) for item in occupancy)}, "
+            f"capacity={leaf_capacity}"
+        )
+    leaf_count = int(stats.get("leaf_count", len(occupancy)))
+    node_count = int(stats.get("node_count", 0))
+    max_depth = int(stats.get("max_depth", 0))
+    row = {
+        **sizes,
+        "merkle_mode": "dynamic",
+        "profile_label": profile_label,
+        "tuple_count": tuple_count,
+        "partitions": partitions,
+        "leaves_per_partition": 0,
+        "fanout": logical_fanout,
+        "total_leaf_count": leaf_count,
+        "tree_levels": max_depth + 1 if leaf_count else 0,
+        "tree_edges": max_depth,
+        "tree_depth": max_depth,
+        "nodes_per_partition": 0,
+        "total_merkle_nodes": node_count,
+        "total_logical_tree_nodes": node_count,
+        "physical_rows_per_leaf_expected": round(tuple_count / max(1, leaf_count), 2),
+        "expected_candidate_rows_per_bad_leaf": float(2 * leaf_capacity),
+        "dynamic_leaf_capacity": leaf_capacity,
+        "dynamic_merge_threshold": merge_threshold,
+        "dynamic_item_bytes": int(stats.get("item_bytes", 0)),
+        "dynamic_node_count": node_count,
+        "dynamic_leaf_count": leaf_count,
+        "dynamic_max_depth": max_depth,
+        "dynamic_max_leaf_occupancy": int(stats.get("max_leaf_items", -1)),
+        "dynamic_split_count": int(stats.get("split_count", 0)),
+        "dynamic_merge_count": int(stats.get("merge_count", 0)),
+        "dynamic_state": str(stats.get("state", "")),
+        **occupancy_stats(occupancy),
     }
     return row
 
@@ -882,6 +955,9 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         bad_leaf_count: int,
         corrupted_tuple_count: int,
         geometry_label: str,
+        merkle_mode: str = "static",
+        leaf_capacity: int = 0,
+        merge_threshold: int = 0,
     ) -> dict[str, Any]:
         return {
             "experiment": experiment,
@@ -892,6 +968,9 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
             "bad_leaf_count": bad_leaf_count,
             "corrupted_tuple_count": corrupted_tuple_count,
             "geometry_label": geometry_label,
+            "merkle_mode": merkle_mode,
+            "leaf_capacity": leaf_capacity,
+            "merge_threshold": merge_threshold,
         }
 
     override_lpp = args.leaves_per_partition
@@ -902,6 +981,49 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         or args.fanout is not None
     )
     geometry_matrix = load_geometry_matrix()
+    if args.profile == DYNAMIC_PROFILE:
+        expected = {
+            "partitions": DYNAMIC_PARTITIONS,
+            "fanout": DYNAMIC_LOGICAL_FANOUT,
+            "bad_leaf_count": DYNAMIC_BAD_RANGE_COUNT,
+            "dynamic_leaf_capacity": DYNAMIC_LEAF_CAPACITY,
+            "dynamic_merge_threshold": DYNAMIC_MERGE_THRESHOLD,
+        }
+        for name, value in expected.items():
+            supplied = getattr(args, name, None)
+            if supplied is not None and int(supplied) != value:
+                raise ValueError(
+                    f"{DYNAMIC_PROFILE} fixes --{name.replace('_', '-')}={value}, "
+                    f"got {supplied}"
+                )
+        if args.leaves_per_partition is not None:
+            raise ValueError(
+                f"{DYNAMIC_PROFILE} has no fixed leaves-per-partition; do not pass that option"
+            )
+        if args.geometry_label and args.geometry_label != "dynamic-p200-k32-cap32-merge8":
+            raise ValueError(
+                f"{DYNAMIC_PROFILE} only supports geometry-label="
+                "dynamic-p200-k32-cap32-merge8"
+            )
+        series: list[dict[str, Any]] = []
+        for tuple_count in _selected(config.fig12_sizes, args.tuple_count):
+            series.append(
+                case(
+                    experiment=DYNAMIC_PROFILE,
+                    tuple_count=tuple_count,
+                    partitions=DYNAMIC_PARTITIONS,
+                    leaves_per_partition=0,
+                    fanout=DYNAMIC_LOGICAL_FANOUT,
+                    bad_leaf_count=DYNAMIC_BAD_RANGE_COUNT,
+                    corrupted_tuple_count=DYNAMIC_CORRUPTED_TUPLE_COUNT,
+                    geometry_label="dynamic-p200-k32-cap32-merge8",
+                    merkle_mode="dynamic",
+                    leaf_capacity=DYNAMIC_LEAF_CAPACITY,
+                    merge_threshold=DYNAMIC_MERGE_THRESHOLD,
+                )
+            )
+        return series
+
     if args.profile == "recovery-scaling-diagnosis":
         if manual_geometry and not args.geometry_label:
             raise ValueError("manual geometry overrides require --geometry-label")
@@ -1083,7 +1205,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                 (args.fanout is not None and args.fanout != 32):
             raise ValueError(
                 "best-scaling-f32-l1024-k75-c300 uses fixed geometry "
-                "P=200,F=32,L=1024; supplied geometry must match exactly"
+                "P=200,F=32,L=1024; do not override geometry"
             )
         if args.bad_leaf_count is not None and args.bad_leaf_count != 75:
             raise ValueError(
@@ -1176,6 +1298,77 @@ def _count_planned_runs(config, args) -> int:
     return len(_series_for_profile(args, config)) * int(config.repetitions)
 
 
+def _assert_dynamic_preflight(conn, args, config, result_dir: Path) -> None:
+    """Abort before dataset construction if the dynamic contract is not exact."""
+    specs = _series_for_profile(args, config)
+    failures: list[str] = []
+    if args.profile != DYNAMIC_PROFILE:
+        failures.append(f"profile={args.profile}")
+    if args.merkle_mode != "dynamic":
+        failures.append(f"merkle_mode={args.merkle_mode}")
+    if int(config.benchmark_schema_version) != 5:
+        failures.append(
+            f"benchmark_schema_version={config.benchmark_schema_version}"
+        )
+    for spec in specs:
+        if spec.get("merkle_mode") != "dynamic":
+            failures.append(f"spec merkle_mode={spec.get('merkle_mode')}")
+        if int(spec.get("leaves_per_partition", -1)) != 0:
+            failures.append(
+                f"spec leaves_per_partition={spec.get('leaves_per_partition')}"
+            )
+        if int(spec.get("leaf_capacity", -1)) != DYNAMIC_LEAF_CAPACITY:
+            failures.append(f"spec leaf_capacity={spec.get('leaf_capacity')}")
+
+    required_indexes = {
+        "merkle_dynamic_node_pkey",
+        "merkle_dynamic_node_prefix_lookup_idx",
+        "merkle_dynamic_leaf_lookup_idx",
+        "merkle_dynamic_route_lookup_idx",
+        "merkle_dynamic_build_stage_route_idx",
+    }
+    rows = execute(
+        conn,
+        """
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = 'ariabc_internal'
+          AND indexname = ANY(%s::text[])
+        """,
+        (sorted(required_indexes),),
+    )
+    found_indexes = {str(row["indexname"]) for row in rows}
+    missing_indexes = sorted(required_indexes - found_indexes)
+    if missing_indexes:
+        failures.append(f"missing dynamic indexes={','.join(missing_indexes)}")
+
+    payload = {
+        "profile": args.profile,
+        "merkle_mode": args.merkle_mode,
+        "method": "merkle_dynamic",
+        "benchmark_scope": DYNAMIC_SCOPE_METADATA["benchmark_scope"],
+        "enabled_methods": DYNAMIC_SCOPE_METADATA["enabled_methods"],
+        "benchmark_schema_version": config.benchmark_schema_version,
+        "leaves_per_partition": 0,
+        "leaf_capacity": DYNAMIC_LEAF_CAPACITY,
+        "candidate_summary_item_limit": 2
+        * DYNAMIC_BAD_RANGE_COUNT
+        * DYNAMIC_LEAF_CAPACITY,
+        "required_indexes": sorted(required_indexes),
+        "found_indexes": sorted(found_indexes),
+        "ok": not failures,
+        "failures": failures,
+    }
+    (result_dir / "dynamic_preflight.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    )
+    if failures:
+        raise RuntimeError(
+            "dynamic recovery preflight failed before dataset construction: "
+            + "; ".join(failures)
+        )
+
+
 # ── main benchmark orchestrator ───────────────────────────────────────────────
 
 def run_benchmark(args: argparse.Namespace) -> Path:
@@ -1191,7 +1384,20 @@ def run_benchmark(args: argparse.Namespace) -> Path:
 
     cfg_dict = config.to_dict()
     cfg_dict.update(vars(args))
-    cfg_dict.update(BENCHMARK_SCOPE_METADATA)
+    if args.profile == DYNAMIC_PROFILE:
+        # ``None`` means "use the profile default" for these CLI overrides;
+        # do not let argparse erase the resolved dynamic geometry written by
+        # ``profile_config()``.
+        if args.dynamic_leaf_capacity is None:
+            cfg_dict["dynamic_leaf_capacity"] = DYNAMIC_LEAF_CAPACITY
+        if args.dynamic_merge_threshold is None:
+            cfg_dict["dynamic_merge_threshold"] = DYNAMIC_MERGE_THRESHOLD
+    # argparse uses None to mean "profile default".  Preserve the resolved
+    # value so config.json records the repetitions actually executed.
+    cfg_dict["repetitions"] = config.repetitions
+    cfg_dict.update(
+        DYNAMIC_SCOPE_METADATA if args.merkle_mode == "dynamic" else BENCHMARK_SCOPE_METADATA
+    )
     (result_dir / "config.json").write_text(json.dumps(cfg_dict, indent=2, default=str) + "\n")
     write_environment(result_dir, args)
     write_python_environment(result_dir)
@@ -1222,12 +1428,19 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     profile_operation_rows: list[dict[str, Any]] = []
     backend_profile_rows: list[dict[str, Any]] = []
     deep_plan_summary_rows: list[dict[str, Any]] = []
+    dynamic_range_rows: list[dict[str, Any]] = []
+    dynamic_item_rows: list[dict[str, Any]] = []
+    dynamic_heap_rows: list[dict[str, Any]] = []
+    dynamic_tree_stats_rows: list[dict[str, Any]] = []
+    dynamic_plan_rows: list[dict[str, Any]] = []
     io_timing_setting = ""
     server_version = ""
     git_head = ""
 
     with connect(args) as conn:
-        ensure_helpers(conn)
+        ensure_helpers(conn, merkle_mode=args.merkle_mode)
+        if args.profile == DYNAMIC_PROFILE:
+            _assert_dynamic_preflight(conn, args, config, result_dir)
         if args.profiling in ("light", "deep"):
             try:
                 execute(conn, "SHOW merkle_recovery_profile_enabled")
@@ -1261,7 +1474,22 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             corrupted_tuple_count = int(spec["corrupted_tuple_count"])
             geometry_label = str(spec["geometry_label"])
             experiment = str(spec["experiment"])
-            validate_geometry(partitions, leaves_per_partition, fanout)
+            merkle_mode = str(spec.get("merkle_mode", "static"))
+            leaf_capacity = int(spec.get("leaf_capacity", 0))
+            merge_threshold = int(spec.get("merge_threshold", 0))
+            if merkle_mode == "dynamic":
+                if partitions <= 0 or fanout != 32 or leaf_capacity <= 0:
+                    raise ValueError(
+                        "invalid dynamic Merkle geometry: require partitions>0, "
+                        "logical fanout=32, leaf_capacity>0"
+                    )
+                if not 0 <= merge_threshold < leaf_capacity:
+                    raise ValueError(
+                        "invalid dynamic Merkle geometry: merge_threshold must be "
+                        "in [0, leaf_capacity)"
+                    )
+            else:
+                validate_geometry(partitions, leaves_per_partition, fanout)
 
             emit_progress(
                 result_dir,
@@ -1271,19 +1499,44 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 tuple_count=n,
                 partitions=partitions,
                 bad_leaf_count=bad_leaf_count,
+                merkle_mode=merkle_mode,
                 completed_runs=progress_state["completed_runs"],
                 total_runs=total_runs,
             )
-            build_dataset(conn, n, partitions, leaves_per_partition, fanout)
-            bsum, bdebug = bucket_consistency_sample(conn, n, partitions, leaves_per_partition, fanout, args.seed)
-            bucket_summary_rows.append(bsum)
-            if args.artifact_mode == "debug":
-                bucket_debug_rows.extend(bdebug)
-            dataset_rows.append(_dataset_row(conn, n, {
-                "partitions": partitions,
-                "leaves_per_partition": leaves_per_partition,
-                "fanout": fanout,
-            }, geometry_label))
+            build_dataset(
+                conn,
+                n,
+                partitions,
+                leaves_per_partition,
+                fanout,
+                merkle_mode=merkle_mode,
+                leaf_capacity=leaf_capacity or 32,
+                merge_threshold=merge_threshold if merkle_mode == "dynamic" else 8,
+            )
+            if merkle_mode == "dynamic":
+                dataset_rows.append(
+                    _dynamic_dataset_row(
+                        conn,
+                        n,
+                        partitions,
+                        fanout,
+                        leaf_capacity,
+                        merge_threshold,
+                        geometry_label,
+                    )
+                )
+            else:
+                bsum, bdebug = bucket_consistency_sample(
+                    conn, n, partitions, leaves_per_partition, fanout, args.seed
+                )
+                bucket_summary_rows.append(bsum)
+                if args.artifact_mode == "debug":
+                    bucket_debug_rows.extend(bdebug)
+                dataset_rows.append(_dataset_row(conn, n, {
+                    "partitions": partitions,
+                    "leaves_per_partition": leaves_per_partition,
+                    "fanout": fanout,
+                }, geometry_label))
             emit_progress(
                 result_dir,
                 event="dataset_complete",
@@ -1294,34 +1547,52 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 completed_runs=progress_state["completed_runs"],
                 total_runs=total_runs,
             )
-            d = corrupted_tuple_count if args.profile == "recovery-scaling-diagnosis" else (
+            d = corrupted_tuple_count if args.profile in (
+                "recovery-scaling-diagnosis", DYNAMIC_PROFILE
+            ) else (
                 300 if args.profile in ("paper", "preflight", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") else bad_leaf_count
             )
 
-            if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
-                forced_key = geometry_label
-                forced_map = progress_state.setdefault("forced_bad_leaves_by_geometry", {})
-                forced_bad_leaves = forced_map.get(forced_key)
+            if merkle_mode == "dynamic":
+                manifest = choose_dynamic_corruption_manifest(
+                    conn,
+                    experiment,
+                    n,
+                    partitions,
+                    fanout,
+                    leaf_capacity,
+                    merge_threshold,
+                    bad_leaf_count,
+                    d,
+                    args.seed,
+                    corruption_mode=args.corruption_mode,
+                )
+                validate_dynamic_manifest_mapping(conn, manifest)
             else:
-                forced_bad_leaves = None
+                if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
+                    forced_key = geometry_label
+                    forced_map = progress_state.setdefault("forced_bad_leaves_by_geometry", {})
+                    forced_bad_leaves = forced_map.get(forced_key)
+                else:
+                    forced_bad_leaves = None
 
-            manifest = choose_corruption_manifest(
-                conn,
-                experiment,
-                n,
-                partitions,
-                leaves_per_partition,
-                fanout,
-                bad_leaf_count,
-                d,
-                args.seed,
-                corruption_mode=args.corruption_mode,
-                forced_bad_leaves=forced_bad_leaves,
-            )
+                manifest = choose_corruption_manifest(
+                    conn,
+                    experiment,
+                    n,
+                    partitions,
+                    leaves_per_partition,
+                    fanout,
+                    bad_leaf_count,
+                    d,
+                    args.seed,
+                    corruption_mode=args.corruption_mode,
+                    forced_bad_leaves=forced_bad_leaves,
+                )
+                validate_manifest_leaf_mapping(conn, manifest)
             d = manifest["corrupted_tuple_count"]
-            validate_manifest_leaf_mapping(conn, manifest)
 
-            if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
+            if merkle_mode == "static" and args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
                 if forced_key not in forced_map:
                     forced_map[forced_key] = list(manifest["bad_leaves"])
                 elif list(manifest["bad_leaves"]) != list(forced_map[forced_key]):
@@ -1331,7 +1602,38 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     )
 
             # Capacity validation & Provenance validation
-            if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
+            if merkle_mode == "dynamic":
+                selected_capacity = int(manifest["selected_bad_leaf_row_capacity"])
+                if selected_capacity < d:
+                    raise RuntimeError(
+                        f"dynamic capacity check failed: selected ranges contain "
+                        f"{selected_capacity} rows but C={d} are required"
+                    )
+                progress_state.setdefault("provenance_rows", []).append({
+                    "profile_label": geometry_label,
+                    "tuple_count": n,
+                    "partitions": partitions,
+                    "leaves_per_partition": 0,
+                    "fanout": fanout,
+                    "bad_leaf_count": bad_leaf_count,
+                    "corrupted_tuple_count": d,
+                    "required_rows_per_bad_leaf": manifest["required_rows_per_bad_leaf"],
+                    "selected_bad_leaf_row_capacity": selected_capacity,
+                    "selected_leaf_capacities_json": json.dumps(manifest["selected_leaf_capacities"]),
+                    "corruption_selection_sha256": manifest["corruption_selection_sha256"],
+                    "bad_leaf_selection_sha256": manifest["bad_leaf_selection_sha256"],
+                })
+                emit_progress(
+                    result_dir,
+                    event="capacity_check_passed",
+                    profile_label=geometry_label,
+                    merkle_mode="dynamic",
+                    selected_bad_range_count=bad_leaf_count,
+                    selected_bad_leaf_row_capacity=selected_capacity,
+                    required_corrupted_tuple_count=d,
+                    corruption_selection_sha256=manifest["corruption_selection_sha256"],
+                )
+            elif args.profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
                 selected_capacity = manifest["selected_bad_leaf_row_capacity"]
                 if selected_capacity < d:
                     raise RuntimeError(
@@ -1393,8 +1695,26 @@ def run_benchmark(args: argparse.Namespace) -> Path:
 
             manifests.append(manifest)
 
-            all_metrics.extend(
-                run_one_manifest(
+            if merkle_mode == "dynamic":
+                all_metrics.extend(
+                    run_one_dynamic_manifest(
+                        conn,
+                        manifest,
+                        config.repetitions,
+                        schema_fidelity_rows,
+                        dynamic_range_rows,
+                        dynamic_item_rows,
+                        dynamic_heap_rows,
+                        dynamic_tree_stats_rows,
+                        dynamic_plan_rows,
+                        result_dir,
+                        progress_state,
+                        profile_label=geometry_label,
+                        audit_mode=args.audit_mode,
+                    )
+                )
+            else:
+                all_metrics.extend(run_one_manifest(
                     conn,
                     manifest,
                     config.repetitions,
@@ -1410,13 +1730,15 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     benchmark_profile=args.profile,
                     audit_mode=args.audit_mode,
                     leaf_fetch_chunk_size=args.leaf_fetch_batch_size,
-                )
-            )
+                ))
 
     # ── write artifacts ───────────────────────────────────────────────────────
     (result_dir / "corruption_manifest.json").write_text(json.dumps(manifests, indent=2) + "\n")
 
-    if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
+    if args.profile in (
+        "fanout-width-sweep", "size-scaling-k75-c300",
+        "best-scaling-f32-l1024-k75-c300", DYNAMIC_PROFILE,
+    ):
         write_csv(
             result_dir / "fanout_provenance.csv",
             progress_state.get("provenance_rows", []),
@@ -1437,13 +1759,17 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         )
 
     write_csv(result_dir / "dataset_sizes.csv", dataset_rows, [
-        "profile_label", "tuple_count", "partitions", "leaves_per_partition", "fanout",
+        "merkle_mode", "profile_label", "tuple_count", "partitions", "leaves_per_partition", "fanout",
         "total_leaf_count",
         "tree_levels", "tree_edges", "tree_depth",
         "nodes_per_partition", "total_merkle_nodes", "total_logical_tree_nodes",
         "physical_rows_per_leaf_expected", "expected_candidate_rows_per_bad_leaf",
         "base_table_bytes", "primary_index_bytes", "merkle_index_bytes",
-        "leaf_lookup_index_bytes",
+        "leaf_lookup_index_bytes", "dynamic_bytes", "dynamic_item_bytes",
+        "dynamic_leaf_capacity", "dynamic_merge_threshold",
+        "dynamic_node_count", "dynamic_leaf_count", "dynamic_max_depth",
+        "dynamic_max_leaf_occupancy", "dynamic_split_count", "dynamic_merge_count",
+        "dynamic_state",
         "total_schema_bytes",
         "minimum", "p50", "p95", "p99", "maximum", "mean", "stddev",
     ])
@@ -1460,6 +1786,49 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         "run_id", "schema", "leaf_id", "index_oid", "index_relfilenode",
         "index_definition", "plan_uses_expected_leaf_lookup_index", "plan_json_sha256",
     ])
+    if args.merkle_mode == "dynamic":
+        write_csv(
+            result_dir / "dynamic_logical_ranges.csv",
+            dynamic_range_rows,
+            [
+                "run_id", "stage", "schema", "ordinal", "partition_id",
+                "prefix_length", "prefix_value", "logical_range", "tuple_count",
+                "data_xor",
+            ],
+        )
+        write_csv(
+            result_dir / "dynamic_summary_items.csv",
+            dynamic_item_rows,
+            [
+                "run_id", "schema", "logical_range", "partition_id",
+                "prefix_length", "prefix_value", "ycsb_key", "route_digest",
+                "tuple_hash", "repair_operation",
+            ],
+        )
+        write_csv(
+            result_dir / "dynamic_exact_heap_rows.csv",
+            dynamic_heap_rows,
+            ["run_id", "schema", "ycsb_key", "repair_operation", "full_row_json"],
+        )
+        write_csv(
+            result_dir / "dynamic_tree_stats.csv",
+            dynamic_tree_stats_rows,
+            [
+                "run_id", "schema", "stage", "state", "tuple_count",
+                "max_leaf_occupancy", "max_depth", "split_count", "merge_count",
+                "dynamic_bytes", "raw_stats",
+            ],
+        )
+        write_csv(
+            result_dir / "dynamic_index_plans.csv",
+            dynamic_plan_rows,
+            [
+                "run_id", "schema", "operation", "requested_key_count",
+                "ordinal", "logical_range", "expected_index", "index_used",
+                "rows_examined", "shared_hit_blocks", "shared_read_blocks",
+                "plan_json_sha256", "plan_json",
+            ],
+        )
     write_csv(result_dir / "schema_fidelity.csv", schema_fidelity_rows, [
         "run_id", "method", "check_name", "healthy_value", "damaged_value", "match",
     ])
@@ -1643,6 +2012,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     phase_names = [
         "tree_localisation_ms",
         "candidate_row_fetch_ms",
+        "candidate_summary_fetch_ms",
+        "summary_comparison_ms",
+        "exact_heap_fetch_ms",
         "row_comparison_ms",
         "repair_write_ms",
         "targeted_post_repair_confirmation_ms",
@@ -1733,6 +2105,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         report_lines.append(f"- {label}: 5M / 1M median ratios")
         for phase_name in [
             "candidate_row_fetch_ms",
+            "candidate_summary_fetch_ms",
+            "exact_heap_fetch_ms",
             "targeted_post_repair_confirmation_ms",
             "repair_write_ms",
             "tree_localisation_ms",
@@ -1772,7 +2146,25 @@ def main(argv: list[str] | None = None) -> int:
     global RESULT_ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsn", default="host=127.0.0.1 port=5432 dbname=postgres user=neel")
-    parser.add_argument("--profile", choices=["smoke", "preflight", "paper", "recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"], default="smoke")
+    parser.add_argument(
+        "--profile",
+        choices=[
+            "smoke", "preflight", "paper", "recovery-scaling-diagnosis",
+            "fanout-width-sweep", "size-scaling-k75-c300",
+            "best-scaling-f32-l1024-k75-c300", DYNAMIC_PROFILE,
+        ],
+        default="smoke",
+    )
+    parser.add_argument(
+        "--merkle-mode",
+        choices=["static", "dynamic"],
+        default=None,
+        dest="merkle_mode",
+        help=(
+            "Select static or dynamic recovery. The dynamic acceptance profile "
+            "implies --merkle-mode dynamic; all existing profiles remain static."
+        ),
+    )
 
     parser.add_argument("--experiment", choices=["figure12", "figure13"])
     parser.add_argument("--tuple-count", type=str, dest="tuple_count")
@@ -1780,6 +2172,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bad-leaf-count", type=int, dest="bad_leaf_count")
     parser.add_argument("--leaves-per-partition", type=int, dest="leaves_per_partition")
     parser.add_argument("--fanout", type=int)
+    parser.add_argument("--dynamic-leaf-capacity", type=int, dest="dynamic_leaf_capacity")
+    parser.add_argument("--dynamic-merge-threshold", type=int, dest="dynamic_merge_threshold")
     parser.add_argument("--profile-label", dest="profile_label")
     parser.add_argument("--geometry-label", dest="geometry_label")
     parser.add_argument("--profiling", choices=["off", "light", "deep"], default="off")
@@ -1815,6 +2209,26 @@ def main(argv: list[str] | None = None) -> int:
         help="Validation mode after repair. full runs expensive full-table audit; skip keeps sparse targeted confirmation only.",
     )
     args = parser.parse_args(argv)
+
+    if args.profile == DYNAMIC_PROFILE:
+        if args.merkle_mode not in (None, "dynamic"):
+            raise ValueError(f"{DYNAMIC_PROFILE} requires --merkle-mode dynamic")
+        args.merkle_mode = "dynamic"
+        if args.audit_mode != "full":
+            raise ValueError(f"{DYNAMIC_PROFILE} requires --audit-mode full")
+        if args.profiling != "off":
+            raise ValueError(
+                f"{DYNAMIC_PROFILE} records dedicated dynamic artifacts; "
+                "generic static backend profiling must remain off"
+            )
+        if args.corruption_mode not in ("paper-update-only", "update-only"):
+            raise ValueError(f"{DYNAMIC_PROFILE} requires update-only corruption")
+    else:
+        if args.merkle_mode == "dynamic":
+            raise ValueError(
+                f"--merkle-mode dynamic currently requires --profile {DYNAMIC_PROFILE}"
+            )
+        args.merkle_mode = "static"
 
     if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") and args.corruption_mode != "paper-update-only":
         raise ValueError(f"{args.profile} requires --corruption-mode paper-update-only")

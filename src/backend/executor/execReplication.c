@@ -15,10 +15,13 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/merkle.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "catalog/index.h"
+#include "catalog/pg_am_d.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/nodeModifyTable.h"
@@ -35,6 +38,159 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
+
+typedef struct ReplMerkleDeleteDelta
+{
+	Oid			index_oid;
+	MerkleItemIdentity identity;
+	MerkleHash	hash;
+} ReplMerkleDeleteDelta;
+
+typedef struct ReplMerkleDeletePlan
+{
+	int			count;
+	ReplMerkleDeleteDelta *items;
+	bool		ready;
+} ReplMerkleDeletePlan;
+
+static void
+repl_free_merkle_identity(MerkleItemIdentity *identity)
+{
+	if (identity->key_data != NULL)
+		pfree(identity->key_data);
+	identity->key_data = NULL;
+}
+
+static void
+repl_copy_merkle_identity(MerkleItemIdentity *dest,
+						  const MerkleItemIdentity *source,
+						  MemoryContext context)
+{
+	MemoryContext old_context;
+
+	MemSet(dest, 0, sizeof(*dest));
+	dest->route = source->route;
+	if (source->key_data == NULL)
+		return;
+
+	old_context = MemoryContextSwitchTo(context);
+	dest->key_data = (bytea *) datumCopy(PointerGetDatum(source->key_data),
+										 false, -1);
+	MemoryContextSwitchTo(old_context);
+}
+
+static void
+repl_free_merkle_delete_plan(ReplMerkleDeletePlan *plan)
+{
+	int			i;
+
+	if (plan == NULL)
+		return;
+	for (i = 0; i < plan->count; i++)
+		repl_free_merkle_identity(&plan->items[i].identity);
+	if (plan->items != NULL)
+		pfree(plan->items);
+	plan->items = NULL;
+	plan->count = 0;
+}
+
+/*
+ * Logical replication bypasses nodeModifyTable.c, so retain the locked old
+ * row's semantic identity/hash until simple_table_tuple_update/delete has
+ * completed successfully.
+ */
+static ReplMerkleDeletePlan
+repl_capture_merkle_delete_plan(Relation heap_rel, TupleTableSlot *old_slot)
+{
+	ReplMerkleDeletePlan plan;
+	List	   *index_list;
+	ListCell   *lc;
+	MerkleHash hash;
+	bool		hash_ready = false;
+	MemoryContext plan_context = CurrentMemoryContext;
+
+	MemSet(&plan, 0, sizeof(plan));
+	if (!enable_merkle_index)
+	{
+		if (merkle_relation_has_index(heap_rel))
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("Merkle maintenance is disabled for table \"%s\"",
+							RelationGetRelationName(heap_rel)),
+					 errhint("Set enable_merkle_index=on before modifying a Merkle-indexed table.")));
+		plan.ready = true;
+		return plan;
+	}
+	if (old_slot == NULL || TTS_EMPTY(old_slot))
+	{
+		if (merkle_relation_has_index(heap_rel))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("logical replication cannot capture the old Merkle item")));
+		plan.ready = true;
+		return plan;
+	}
+
+	index_list = RelationGetIndexList(heap_rel);
+	if (index_list != NIL)
+		plan.items = (ReplMerkleDeleteDelta *)
+			palloc0(sizeof(*plan.items) * list_length(index_list));
+
+	foreach(lc, index_list)
+	{
+		Oid			index_oid = lfirst_oid(lc);
+		Relation	index_rel = index_open(index_oid, RowExclusiveLock);
+
+		if (index_rel->rd_rel->relam == MERKLE_AM_OID)
+		{
+			IndexInfo  *index_info;
+			Datum		values[INDEX_MAX_KEYS];
+			bool		isnull[INDEX_MAX_KEYS];
+			MerkleItemIdentity identity;
+
+			MemSet(&identity, 0, sizeof(identity));
+			if (!hash_ready)
+			{
+				merkle_compute_slot_hash(heap_rel, old_slot, &hash);
+				hash_ready = true;
+			}
+			index_info = BuildIndexInfo(index_rel);
+			FormIndexDatum(index_info, old_slot, NULL, values, isnull);
+			merkle_compute_item_identity(index_rel, values, isnull,
+									 index_info->ii_NumIndexKeyAttrs,
+									 &identity);
+
+			plan.items[plan.count].index_oid = index_oid;
+			repl_copy_merkle_identity(&plan.items[plan.count].identity,
+								  &identity, plan_context);
+			plan.items[plan.count].hash = hash;
+			plan.count++;
+			repl_free_merkle_identity(&identity);
+		}
+		index_close(index_rel, RowExclusiveLock);
+	}
+	list_free(index_list);
+	plan.ready = true;
+	return plan;
+}
+
+static void
+repl_apply_merkle_delete_plan(ReplMerkleDeletePlan *plan)
+{
+	int			i;
+
+	for (i = 0; i < plan->count; i++)
+	{
+		Relation index_rel = index_open(plan->items[i].index_oid,
+									  RowExclusiveLock);
+
+		if (index_rel->rd_rel->relam == MERKLE_AM_OID)
+			merkle_stage_item_delta(index_rel, &plan->items[i].identity,
+									&plan->items[i].hash, false);
+		index_close(index_rel, RowExclusiveLock);
+	}
+	repl_free_merkle_delete_plan(plan);
+}
 
 
 /*
@@ -478,6 +634,11 @@ ExecSimpleRelationUpdate(EState *estate, EPQState *epqstate,
 	{
 		List	   *recheckIndexes = NIL;
 		bool		update_indexes;
+		ReplMerkleDeletePlan merkle_delete_plan;
+		bool		has_merkle_index;
+		bool		saved_enable_merkle_index = enable_merkle_index;
+		bool		saved_merkle_index_maintenance_suppress =
+			merkle_index_maintenance_suppress;
 
 		/* Compute stored generated columns */
 		if (rel->rd_att->constr &&
@@ -490,12 +651,50 @@ ExecSimpleRelationUpdate(EState *estate, EPQState *epqstate,
 		if (resultRelInfo->ri_PartitionCheck)
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
+		merkle_delete_plan =
+			repl_capture_merkle_delete_plan(rel, searchslot);
+		has_merkle_index = merkle_delete_plan.count > 0;
 		simple_table_tuple_update(rel, tid, slot, estate->es_snapshot,
 								  &update_indexes);
+		if (!merkle_delete_plan.ready)
+		{
+			repl_free_merkle_delete_plan(&merkle_delete_plan);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("logical replication failed to capture the old Merkle item")));
+		}
+		repl_apply_merkle_delete_plan(&merkle_delete_plan);
 
-		if (resultRelInfo->ri_NumIndices > 0 && update_indexes)
-			recheckIndexes = ExecInsertIndexTuples(slot, estate, false, NULL,
-												   NIL);
+		/*
+		 * The generic non-HOT index path would call merkleInsert(), while a
+		 * HOT update would not.  Suppress the generic Merkle AM uniformly and
+		 * stage the new semantic item exactly once below for both cases.
+		 */
+		if (has_merkle_index && saved_enable_merkle_index && update_indexes)
+		{
+			enable_merkle_index = false;
+			merkle_index_maintenance_suppress = true;
+		}
+		PG_TRY();
+		{
+			if (resultRelInfo->ri_NumIndices > 0 && update_indexes)
+				recheckIndexes = ExecInsertIndexTuples(slot, estate, false, NULL,
+											   NIL);
+		}
+		PG_CATCH();
+		{
+			enable_merkle_index = saved_enable_merkle_index;
+			merkle_index_maintenance_suppress =
+				saved_merkle_index_maintenance_suppress;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		enable_merkle_index = saved_enable_merkle_index;
+		merkle_index_maintenance_suppress =
+			saved_merkle_index_maintenance_suppress;
+
+		if (has_merkle_index)
+			ExecInsertMerkleIndexes(rel, slot);
 
 		/* AFTER ROW UPDATE Triggers */
 		ExecARUpdateTriggers(estate, resultRelInfo,
@@ -534,8 +733,21 @@ ExecSimpleRelationDelete(EState *estate, EPQState *epqstate,
 
 	if (!skip_tuple)
 	{
+		ReplMerkleDeletePlan merkle_delete_plan;
+
+		merkle_delete_plan =
+			repl_capture_merkle_delete_plan(rel, searchslot);
+
 		/* OK, delete the tuple */
 		simple_table_tuple_delete(rel, tid, estate->es_snapshot);
+		if (!merkle_delete_plan.ready)
+		{
+			repl_free_merkle_delete_plan(&merkle_delete_plan);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("logical replication failed to capture the old Merkle item")));
+		}
+		repl_apply_merkle_delete_plan(&merkle_delete_plan);
 
 		/* AFTER ROW DELETE Triggers */
 		ExecARDeleteTriggers(estate, resultRelInfo,

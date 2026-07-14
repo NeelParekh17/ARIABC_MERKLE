@@ -180,6 +180,26 @@ merkle_register_relopts(void)
     add_int_reloption(merkle_relopt_kind, "fanout",
                       "Branching factor (children per internal node)",
                       MERKLE_DEFAULT_FANOUT, 2, 1024, AccessExclusiveLock);
+
+	add_bool_reloption(merkle_relopt_kind, "dynamic",
+					   "Use the bounded dynamic Merkle layout",
+					   false, AccessExclusiveLock);
+	add_int_reloption(merkle_relopt_kind, "leaf_capacity",
+					  "Maximum item count in a dynamic Merkle leaf",
+					  MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY,
+					  1, 1024, AccessExclusiveLock);
+	add_int_reloption(merkle_relopt_kind, "merge_threshold",
+					  "Maximum subtree item count eligible for a dynamic merge",
+					  MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD,
+					  0, 1023, AccessExclusiveLock);
+	add_int_reloption(merkle_relopt_kind, "leaf_byte_capacity",
+					  "Maximum canonical summary bytes in a dynamic Merkle leaf",
+					  MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY,
+					  1024, 16 * 1024 * 1024, AccessExclusiveLock);
+	add_int_reloption(merkle_relopt_kind, "max_key_bytes",
+					  "Maximum canonical dynamic Merkle key size",
+					  MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES,
+					  64, MERKLE_DYNAMIC_MAX_KEY_BYTES, AccessExclusiveLock);
     
     merkle_relopts_registered = true;
 }
@@ -188,7 +208,12 @@ merkle_register_relopts(void)
 static relopt_parse_elt merkle_relopt_tab[] = {
     {"partitions", RELOPT_TYPE_INT, offsetof(MerkleOptions, partitions)},
     {"leaves_per_partition", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaves_per_partition)},
-    {"fanout", RELOPT_TYPE_INT, offsetof(MerkleOptions, fanout)}
+	{"fanout", RELOPT_TYPE_INT, offsetof(MerkleOptions, fanout)},
+	{"dynamic", RELOPT_TYPE_BOOL, offsetof(MerkleOptions, dynamic)},
+	{"leaf_capacity", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaf_capacity)},
+	{"merge_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, merge_threshold)},
+	{"leaf_byte_capacity", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaf_byte_capacity)},
+	{"max_key_bytes", RELOPT_TYPE_INT, offsetof(MerkleOptions, max_key_bytes)}
 };
 
 /*
@@ -211,7 +236,7 @@ merkle_options(Datum reloptions, bool validate)
                                                lengthof(merkle_relopt_tab));
     
     if (validate && opts != NULL)
-    {
+	{
         if (opts->fanout < 2 || opts->fanout > 1024)
         {
             ereport(ERROR,
@@ -231,6 +256,19 @@ merkle_options(Datum reloptions, bool validate)
                              opts->fanout * opts->fanout,
                              opts->fanout * opts->fanout * opts->fanout)));
         }
+
+		if (opts->dynamic && opts->fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("dynamic Merkle indexes require fanout=32")));
+		if (opts->dynamic && opts->merge_threshold >= opts->leaf_capacity)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("dynamic Merkle merge_threshold must be less than leaf_capacity")));
+		if (opts->dynamic && opts->max_key_bytes > opts->leaf_byte_capacity)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("dynamic Merkle max_key_bytes cannot exceed leaf_byte_capacity")));
     }
     
     return (bytea *) opts;
@@ -256,6 +294,11 @@ merkle_get_options(Relation indexRel)
         opts->partitions = MERKLE_NUM_PARTITIONS;
         opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
         opts->fanout = MERKLE_DEFAULT_FANOUT;
+		opts->dynamic = false;
+		opts->leaf_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY;
+		opts->merge_threshold = MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD;
+		opts->leaf_byte_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY;
+		opts->max_key_bytes = MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES;
         return opts;
     }
     
@@ -270,17 +313,48 @@ merkle_get_options(Relation indexRel)
 
     /* Backward compatibility: older rd_options blobs won't have fanout */
     if (VARSIZE(relopts) < (offsetof(MerkleOptions, fanout) + sizeof(int)))
-        opts->fanout = MERKLE_DEFAULT_FANOUT;
+	{
+		opts->fanout = MERKLE_DEFAULT_FANOUT;
+	}
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, dynamic) + sizeof(bool)))
+		opts->dynamic = false;
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, leaf_capacity) + sizeof(int)))
+		opts->leaf_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY;
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, merge_threshold) + sizeof(int)))
+		opts->merge_threshold = MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD;
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, leaf_byte_capacity) + sizeof(int)))
+		opts->leaf_byte_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY;
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, max_key_bytes) + sizeof(int)))
+		opts->max_key_bytes = MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES;
     
-    /* Validate options - if values look corrupt, use defaults */
+	/* Legacy static blobs may fall back; dynamic corruption must fail closed. */
     if (opts->partitions <= 0 || opts->partitions > 10000 ||
         opts->leaves_per_partition <= 0 || opts->leaves_per_partition > 1024 ||
         opts->fanout < 2 || opts->fanout > 1024 ||
-        !merkle_is_power_of(opts->leaves_per_partition, opts->fanout))
+		!merkle_is_power_of(opts->leaves_per_partition, opts->fanout) ||
+		opts->leaf_capacity < 1 || opts->leaf_capacity > 1024 ||
+		opts->merge_threshold < 0 ||
+		opts->merge_threshold >= opts->leaf_capacity ||
+		opts->leaf_byte_capacity < 1024 ||
+		opts->leaf_byte_capacity > 16 * 1024 * 1024 ||
+		opts->max_key_bytes < 64 ||
+		opts->max_key_bytes > MERKLE_DYNAMIC_MAX_KEY_BYTES ||
+		(opts->dynamic && opts->max_key_bytes > opts->leaf_byte_capacity) ||
+		(opts->dynamic && opts->fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT))
     {
+		if (opts->dynamic)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("dynamic Merkle index has invalid reloptions"),
+					 errhint("REINDEX the dynamic Merkle index after correcting its options.")));
         opts->partitions = MERKLE_NUM_PARTITIONS;
         opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
         opts->fanout = MERKLE_DEFAULT_FANOUT;
+		opts->dynamic = false;
+		opts->leaf_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY;
+		opts->merge_threshold = MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD;
+		opts->leaf_byte_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY;
+		opts->max_key_bytes = MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES;
     }
     
     return opts;

@@ -18,7 +18,9 @@
 #include "access/htup_details.h"
 #include "access/tableam.h"
 #include "catalog/pg_type.h"
+#include "catalog/pg_am_d.h"
 #include "common/blake3.h"
+#include "lib/stringinfo.h"
 #include "storage/bufmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -198,6 +200,18 @@ merkle_hash_uint32(blake3_hasher *hasher, uint32 value)
 	blake3_hasher_update(hasher, bytes, sizeof(bytes));
 }
 
+static void
+merkle_append_uint32(StringInfo buffer, uint32 value)
+{
+	uint8 bytes[4];
+
+	bytes[0] = (uint8) (value >> 24);
+	bytes[1] = (uint8) (value >> 16);
+	bytes[2] = (uint8) (value >> 8);
+	bytes[3] = (uint8) value;
+	appendBinaryStringInfo(buffer, (const char *) bytes, sizeof(bytes));
+}
+
 /*
  * Hash one materialized row using a versioned, length-prefixed binary format.
  * Type send functions produce PostgreSQL's canonical wire representation and
@@ -270,11 +284,12 @@ merkle_hash_slot_canonical(Relation heapRel, TupleTableSlot *slot,
 /*
  * merkle_compute_row_hash() - Fetch and canonically hash one heap row.
  */
-void
+bool
 merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 {
 	TupleDesc		tupdesc;
 	TupleTableSlot *slot = NULL;
+	bool			success = false;
 	bool			profile_enabled = merkle_recovery_profile_enabled;
 	instr_time		start_time;
 	instr_time		elapsed_time;
@@ -287,7 +302,8 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 	/*
 	 * CRITICAL FIX: Validate ItemPointer before attempting to fetch tuple.
 	 * Invalid TIDs (offset=0 or block=Invalid) can occur during BCDB operations
-	 * and will cause fetch failures. Return zero hash for these cases.
+	 * and will cause fetch failures.  The boolean result distinguishes this
+	 * failure from a successfully computed, legitimate all-zero digest.
 	 */
 	if (!ItemPointerIsValid(tid) ||
 		ItemPointerGetBlockNumberNoCheck(tid) == InvalidBlockNumber)
@@ -310,11 +326,12 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 		 * so GetActiveSnapshot() won't see it.
 		 */
 		if (!table_tuple_fetch_row_version(heapRel, tid, SnapshotSelf, slot))
-		{
 			merkle_hash_zero(result);
-		}
 		else
+		{
 			merkle_hash_slot_canonical(heapRel, slot, result);
+			success = true;
+		}
 	}
 	PG_CATCH();
 	{
@@ -342,6 +359,7 @@ profile_done:
 		INSTR_TIME_ADD(merkle_recovery_profile_state.row_hash_compute_time,
 					   elapsed_time);
 	}
+	return success;
 }
 
 /*
@@ -383,34 +401,42 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
  * produces a uniform 256-bit digest from which:
  *
  *   static leaf  = uint64(first 8 digest bytes) % total_leaves
- *   dynamic bits = full 256-bit digest consumed in fixed groups
+ *   dynamic bits = full 256-bit digest consumed one bit at a time;
+ *                  public logical ranges may group five bits (fanout 32)
  *
  * INTEGER KEYS: earlier versions used abs(key) % total_leaves directly, which
  * was incompatible with a future dynamic prefix tree (sequential keys share
  * high bits).  Route format version 2 removes that special path.
  */
-static void
-merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
-									  TupleDesc tupdesc, uint8 digest[MERKLE_HASH_BYTES])
+static bytea *
+merkle_serialize_canonical_key(Datum *values, bool *isnull, int nkeys,
+							   TupleDesc tupdesc)
 {
-	blake3_hasher hasher;
+	StringInfoData buffer;
+	bytea	   *result;
 	int			i;
 	static const uint8 magic[] = {'A', 'R', 'I', 'A', 'R', 'O', 'U', 'T'};
 
-	blake3_hasher_init(&hasher);
-	blake3_hasher_update(&hasher, magic, sizeof(magic));
-	merkle_hash_uint32(&hasher, MERKLE_ROUTE_FORMAT_VERSION);
-	merkle_hash_uint32(&hasher, (uint32) nkeys);
+	if (nkeys <= 0 || nkeys > tupdesc->natts)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid Merkle key count %d", nkeys)));
+
+	initStringInfo(&buffer);
+	appendBinaryStringInfo(&buffer, (const char *) magic, sizeof(magic));
+	merkle_append_uint32(&buffer, MERKLE_ROUTE_FORMAT_VERSION);
+	merkle_append_uint32(&buffer, (uint32) nkeys);
 
 	for (i = 0; i < nkeys; i++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
 		uint8		null_flag = isnull[i] ? 1 : 0;
 
-		merkle_hash_uint32(&hasher, (uint32) (i + 1));
-		merkle_hash_uint32(&hasher, (uint32) attr->atttypid);
-		merkle_hash_uint32(&hasher, (uint32) attr->atttypmod);
-		blake3_hasher_update(&hasher, &null_flag, sizeof(null_flag));
+		merkle_append_uint32(&buffer, (uint32) (i + 1));
+		merkle_append_uint32(&buffer, (uint32) attr->atttypid);
+		merkle_append_uint32(&buffer, (uint32) attr->atttypmod);
+		appendBinaryStringInfo(&buffer, (const char *) &null_flag,
+							   sizeof(null_flag));
 
 		if (!isnull[i])
 		{
@@ -422,15 +448,29 @@ merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
 			getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
 			encoded = OidSendFunctionCall(typsend, values[i]);
 			length = (uint32) VARSIZE_ANY_EXHDR(encoded);
-			merkle_hash_uint32(&hasher, length);
+			merkle_append_uint32(&buffer, length);
 			if (length > 0)
-			{
-				blake3_hasher_update(&hasher, VARDATA_ANY(encoded), length);
-			}
+				appendBinaryStringInfo(&buffer, VARDATA_ANY(encoded), length);
 			pfree(encoded);
 		}
 	}
 
+	result = (bytea *) palloc(VARHDRSZ + buffer.len);
+	SET_VARSIZE(result, VARHDRSZ + buffer.len);
+	memcpy(VARDATA(result), buffer.data, buffer.len);
+	pfree(buffer.data);
+	return result;
+}
+
+static void
+merkle_digest_canonical_key(const bytea *key_data,
+							uint8 digest[MERKLE_HASH_BYTES])
+{
+	blake3_hasher hasher;
+
+	blake3_hasher_init(&hasher);
+	blake3_hasher_update(&hasher, VARDATA_ANY(key_data),
+						 VARSIZE_ANY_EXHDR(key_data));
 	blake3_hasher_finalize(&hasher, digest, MERKLE_HASH_BYTES);
 }
 
@@ -517,6 +557,7 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 {
 	MerkleGeometry geometry;
 	TupleDesc		tupdesc;
+	bytea		   *key_data;
 	uint64			static_route_value = 0;
 	int				i;
 
@@ -529,7 +570,9 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 	tupdesc = RelationGetDescr(indexRel);
 
 	/* Uniform BLAKE3 routing for all key types including integers. */
-	merkle_compute_canonical_route_digest(values, isnull, nkeys, tupdesc, result->route_digest);
+	key_data = merkle_serialize_canonical_key(values, isnull, nkeys, tupdesc);
+	merkle_digest_canonical_key(key_data, result->route_digest);
+	pfree(key_data);
 
 	for (i = 0; i < 8; i++)
 		static_route_value = (static_route_value << 8) | result->route_digest[i];
@@ -539,6 +582,105 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 	result->partition_id = result->leaf_id / geometry.leaves_per_partition;
 	result->node_in_partition = merkle_geometry_leaf_node(&geometry,
 													 result->leaf_id);
+}
+
+void
+merkle_compute_dynamic_item_identity(Relation indexRel, Datum *values,
+									 bool *isnull, int nkeys,
+									 int partitions, int max_key_bytes,
+									 MerkleItemIdentity *result)
+{
+	TupleDesc tupdesc;
+	uint64 route_value = 0;
+	int i;
+
+	if (result == NULL || indexRel == NULL || partitions <= 0 ||
+		max_key_bytes <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("invalid dynamic Merkle item identity arguments")));
+	MemSet(result, 0, sizeof(*result));
+	tupdesc = RelationGetDescr(indexRel);
+	result->key_data = merkle_serialize_canonical_key(values, isnull, nkeys,
+												tupdesc);
+	if (VARSIZE_ANY_EXHDR(result->key_data) > (Size) max_key_bytes)
+	{
+		Size key_bytes = VARSIZE_ANY_EXHDR(result->key_data);
+
+		pfree(result->key_data);
+		result->key_data = NULL;
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("canonical dynamic Merkle key is too large"),
+				 errdetail("Key is %zu bytes; index maximum is %d bytes.",
+						(size_t) key_bytes, max_key_bytes)));
+	}
+	merkle_digest_canonical_key(result->key_data,
+								result->route.route_digest);
+	for (i = 0; i < 8; i++)
+		route_value = (route_value << 8) | result->route.route_digest[i];
+	result->route.static_route_value = route_value;
+	result->route.partition_id = (int) (route_value %
+		(uint64) partitions);
+	result->route.leaf_id = result->route.partition_id;
+	result->route.node_in_partition = 1;
+}
+
+void
+merkle_compute_item_identity(Relation indexRel, Datum *values, bool *isnull,
+							 int nkeys, MerkleItemIdentity *result)
+{
+	MerkleOptions *opts;
+
+	if (result == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("Merkle item identity output cannot be null")));
+	MemSet(result, 0, sizeof(*result));
+	if (!merkle_index_is_dynamic(indexRel))
+	{
+		merkle_compute_route(indexRel, values, isnull, nkeys, &result->route);
+		return;
+	}
+	opts = merkle_get_options(indexRel);
+	merkle_compute_dynamic_item_identity(indexRel, values, isnull, nkeys,
+		opts->partitions, opts->max_key_bytes, result);
+	pfree(opts);
+}
+
+bool
+merkle_index_is_dynamic(Relation indexRel)
+{
+	MerkleOptions *opts;
+	bool option_dynamic;
+	BlockNumber blocks;
+
+	if (indexRel == NULL || indexRel->rd_rel->relam != MERKLE_AM_OID)
+		return false;
+	opts = merkle_get_options(indexRel);
+	option_dynamic = opts->dynamic;
+	pfree(opts);
+	blocks = RelationGetNumberOfBlocks(indexRel);
+	if (blocks > MERKLE_METAPAGE_BLKNO)
+	{
+		Buffer buffer = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
+		Page page;
+		MerkleMetaPageData *meta;
+		bool marker_dynamic;
+
+		LockBuffer(buffer, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buffer);
+		meta = MerklePageGetMeta(page);
+		marker_dynamic = meta->dynamicMagic == MERKLE_DYNAMIC_META_MAGIC;
+		UnlockReleaseBuffer(buffer);
+		if (marker_dynamic != option_dynamic)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("Merkle index dynamic reloption and layout marker disagree"),
+					 errhint("REINDEX the Merkle index.")));
+		return marker_dynamic;
+	}
+	return option_dynamic;
 }
 
 /*
@@ -783,8 +925,11 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
     if (opts != NULL)
     {
         numPartitions = opts->partitions;
-        leavesPerPartition = opts->leaves_per_partition;
-        fanout = opts->fanout;
+		/* Dynamic indexes retain a minimal v7 compatibility tree: one root
+		 * placeholder per fixed partition.  Authoritative nodes live in the
+		 * WAL-logged dynamic side relations. */
+		leavesPerPartition = opts->dynamic ? 1 : opts->leaves_per_partition;
+		fanout = opts->dynamic ? MERKLE_DYNAMIC_LOGICAL_FANOUT : opts->fanout;
     }
     else
     {
@@ -835,6 +980,17 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = baseline_apply_seq;
+	if (opts != NULL && opts->dynamic)
+	{
+		meta->dynamicMagic = MERKLE_DYNAMIC_META_MAGIC;
+		meta->dynamicLayoutVersion = MERKLE_DYNAMIC_LAYOUT_VERSION;
+		meta->dynamicFlags = 1;
+		meta->dynamicLogicalFanout = MERKLE_DYNAMIC_LOGICAL_FANOUT;
+		meta->dynamicLeafCapacity = opts->leaf_capacity;
+		meta->dynamicMergeThreshold = opts->merge_threshold;
+		meta->dynamicLeafByteCapacity = opts->leaf_byte_capacity;
+		meta->dynamicMaxKeyBytes = opts->max_key_bytes;
+	}
     
     MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);

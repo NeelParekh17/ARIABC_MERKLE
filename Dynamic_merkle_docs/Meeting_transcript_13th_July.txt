@@ -1,0 +1,715 @@
+**Speaker 1:** So, um... what did we discuss? The only thing is that... I mean... The only thing remaining, or rather, we have options how do we want to split. Meaning, do we want to... how much fanout to create every time we split.
+
+**Speaker 2:** Yeah. So, I'm assuming you want minimum occupancy, two is good.
+
+**Speaker 1:** Yes. So, let's start with two.
+
+**Speaker 2:** Okay.
+
+**Speaker 1:** I mean, right now all the description that is given, that is generic. I mean, that... that algorithm description, everything is generic, so it's just only for the purpose of, uh, example or something it is given. But actually mutation we can, you want to keep it configurable, or how? I mean, from a...
+
+**Speaker 2:** From implementation it should be configurable because we will have to make some study of different options.
+
+**Speaker 1:** Okay, sure. Without having to compile it. Fine. So actually update created the figure, uh, for this on the overleaf. And algorithm also. The fourth one.
+
+**Speaker 2:** This?
+
+**Speaker 1:** Yeah.
+
+**Speaker 2:** Give it a bit time, node quality is see not great.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** Half-formed things are in see not great.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Okay, let it turn it bigger. Go up, up.
+
+**Speaker 1:** Yeah.
+
+**Speaker 2:** This, this...
+
+**Speaker 1:** Attributes. User relation attributes.
+
+**Speaker 2:** Oh, this is the index and this is the data?
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** It's normally flipped the other way.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** The index is above or to the left of the data. That's... that's normal.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** This is because first you see the data, then you see the index. Whereas what you're seeing is the index.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Oh, now let's look at this. So what is this 22, 23?
+
+**Speaker 1:** That's the count. So initially it was 45 tuples in that, in the big leaf, that is split now in 22 and 23.
+
+**Speaker 2:** And this, uh, this is... what are these?
+
+**Speaker 1:** They are just representative keys from the...
+
+**Speaker 2:** No, then there should be dot dot dot. No?
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Yeah, because there are 45. Put a middle dot dot dot, and let the last one be something bigger.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** So that the range is clear.
+
+**Speaker 1:** Okay, sure.
+
+**Speaker 2:** And then, uh, some subset will come here, some subset will come here.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** And this part, um, uh, is just looking at one extra bit.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Um, yeah. But then if you need to split more...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Well, missing something still. Um, sorry. Physically it should be a binary split, logically it is a K-ary split.
+
+**Speaker 1:** Hmm, okay.
+
+**Speaker 2:** That is not shown here. When you split, what is the original is not contained. Now it is a non-leaf node.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** It... it was a leaf, it's now a non-leaf.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So it has pointers to the leaves.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Uh, but of course most of those pointers are going to point to the same leaf, the other half of the pointers are going to point to the other. That should be there in the figure.
+
+**Speaker 1:** Okay, sure.
+
+**Speaker 2:** And, um, this doesn't actually help.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Because, um, what you're saying here is that this is the key and this is the hash value, you have to use. This is a separate thing, it's not required. What is more important is you show the tree before the split, show the tree after the split.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** So, uh, this will be a leaf node, hm, and, uh, after the split there will be a parent now.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** It whatever was pointing, um, there's no pointing, it's just based on the identifier here. Hm, it's just the... Yeah, so...
+
+**Speaker 2:** No, I think we should think of it as a record only. So, uh, this record will contain pointers to this and this. So you cannot do it just based on this prefix.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Because after this you split again, what do you do? How do you know what are the height? Th-this doesn't have that information.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So it, logically it's a K-ary split, physically it's a binary split. That is not coming out in this figure.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So will you please redraw the figure to show this whole logical physical thing?
+
+**Speaker 1:** Okay, sure.
+
+**Speaker 2:** Until you do that, uh, this figure doesn't help us even in implementation.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So data structure have you written down?
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Where is that? Further down. Um... Oh, it's on the right column. So...
+
+**Speaker 1:** Yeah, further down. It's actually in the implementation section. Yeah.
+
+**Speaker 2:** Here?
+
+**Speaker 1:** Yeah, in the item, itemized.
+
+**Speaker 2:** Make it big, you can make it full screen.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** And this is per relation, right? So if the original relation had, hm, rel Merkle leaf or whatever, right?
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So, uh, let's say that is R. R_m_l or something because these are separate relations.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** You don't want all the indices in one database relation.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** This one is internal node. This is okay, hash tuple count. This part, um, *<cough>* how do you define a bitmask? Actually, we could think of it as a bit range perhaps.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** And when you split, um... But the most efficient is, uh, it's not a mask but a bit count. There is a prefix length.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** For the next level. So this one has a, um... Node... node ID is is the binary value.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Right? So this is not the leaf ID.
+
+**Speaker 1:** Yes, it's different.
+
+**Speaker 2:** Right, leaf ID is a local ID. This one is a, um, hash prefix.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** And so here what you'll have is, um... Not the hash prefix. Hash is a diff separate thing, no? Node ID. It's not the actual hash, it's the part that... it's a binary number denoting this node, it's a part of the hash, right? It's the first few bits of the hash function.
+
+**Speaker 1:** No, that is actually the node ID in the Merkle tree, the internal node ID and the leaf ID, they are one one single this thing, sequence.
+
+**Speaker 2:** That's fine, then it's a prefix of the hash value.
+
+**Speaker 1:** Um, no, why hash value?
+
+**Speaker 2:** What else will you have? What is the Merkle tree? Merkle tree you first do a hash and then decide which leaf it goes to, in the one static Merkle tree we saw, which is based on the prefix of the bits. Or suffix, I don't care, suffix.
+
+**Speaker 1:** Yeah, yeah, bu-but that is the mapping is done based on the key, key of the, not the hash. Because the hash will be different.
+
+**Speaker 2:** That is separate, that is data. Ha, this is a Merkle tree, right?
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** So, um, uh... Where is the key then?
+
+**Speaker 1:** No, the individual keys are there in A.
+
+**Speaker 2:** Yeah, so it's still a Merkle tree, it's not indexed on the key.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** It's indexed on the hash value basically. Node ID is the hash value. And then to go to upper levels, you take a prefix of it.
+
+**Speaker 1:** Um, what are you talking? This is a basic Merkle tree, right? What is the Merkle tree in our context?
+
+**Speaker 1:** So, yeah, we store the hash value of...
+
+**Speaker 2:** Of what? How do you decide in a leaf, what maps there? For right now it's an array, the index of the array is the thing. But now it will not be an array.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** So you have to store the ID, which is the node ID, you have it there.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** If whatever is the index into the array, if this was still an array, the node ID would be that index.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** But in reality what we want now is a, um, the, uh, it's a certain number of bits.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Prefix length.
+
+**Speaker 2:** Prefix to some length.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** And then for the children, the prefix will be that plus some number. Let's say if this is a 32-way branching, this prefix was 10, now it will be 15.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** So there will be 32 things here.
+
+**Speaker 1:** So should I rename it to like bit length or suffix length or something?
+
+**Speaker 2:** Uh, no, if you have, uh, 32 here, um, simplest thing is, uh, what is the result?
+
+**Speaker 1:** I mean, that is in case you want to, so, if you want the hash... if it's, so when you do a mask, you're, you're actually ANDing with bit of ones. So then what is the result that you expect?
+
+**Speaker 2:** No, the prefix should be, prefix should be enough, you don't need the mask. Why do you need a mask?
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** All you need is prefix length.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** So there are two possible things. You just have a 32-way array here.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So you don't have to worry about, uh, mask and result and all that. Whatever is the hash...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...uh, this is, uh, that plus so many bits are here.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** And you'll have to store the hash from then because in in general, right?
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Uh, because you have to recompute the hash. No one has to store the hash. That's part of the Merkle tree, so that is missing from... Ah, it's here. So this is fine. Uh, for the children nodes, do we need the hash? As long as we are doing the XOR, we don't.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** So... Then what we need is, uh, basically, uh... Yeah, just the node IDs of all its children.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Right? But then we should know whether that is a child or not, I mean it's a leaf or not.
+
+**Speaker 1:** That can be just found by the lookup on the same table. Or do you want to store it?
+
+**Speaker 2:** Then you have to keep, if you want it on the same table, same ID, then we'll have to have a type. Hmm, leaf or not leaf, which you had initially. Hm. Or here we say that, uh, the children of these are, um, leaves or they are not.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So, we we, but we can't say that because it's a dynamic thing.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So we cannot say it at the parent level. So, yeah, I think you have to, uh, merge it into one table basically, logically, hm, and, uh, have a thing in the beginning which says, uh, part node ID in both cases. And then is leaf.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** That will be a common thing.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** And then it will branch off. If it is a leaf, the remaining things will be this.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** If it is a non-leaf, the remaining things will be that. So, present it that way.
+
+**Speaker 1:** Okay, sure.
+
+**Speaker 2:** So the common part you put up front.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** That is partition, node ID, hash tuple count...
+
+**Speaker 1:** Yeah.
+
+**Speaker 2:** ...and is leaf.
+
+**Speaker 1:** Yeah.
+
+**Speaker 2:** Will be the common part. After that here you will have key tuple hash...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...pairs. As many as fit. And here you will have, um, 32, uh, node IDs for the children.
+
+**Speaker 1:** Or, or whatever max fanout.
+
+**Speaker 2:** Yeah, whatever that is. And, uh, the point when you split, um, there may be 16, uh, uh, things which all have one physical node.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So for the leaf we may want to keep also track of, um, bits left or something like that. When when, when you split a leaf, hm, if it's, uh, had it logically has two logical leaves inside the physical leaf...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...then we just have to update the parent pointer here. Otherwise we have to do that, uh, uh, thing where it becomes an internal node and you get a child node. So that depends on how many pointers point to it from here. Right?
+
+**Speaker 1:** Uh, I didn't get it.
+
+**Speaker 2:** See, how many pointers, so, uh, let's say we do a binary physical split. 16 pointers point to the first one, 16 point to the second one. Pointer meaning node IDs.
+
+**Speaker 1:** Yeah.
+
+**Speaker 2:** Hmm.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** So now if that node splits again, maybe it becomes 8 8. If it splits again, eventually 4 4, 2 2, 1. And the one splits, that is when the that becomes a non-leaf and it will create children to for it again. So you have to track how many, uh, things are po- essentially, um, the prefix length we need to track for a leaf. Meaning how many bits are being used for the prefix then. When it hits the 35 or whatever is the thing, that then we have to split.
+
+**Speaker 1:** Um...
+
+**Speaker 2:** It it also will be we can be figured out from the ID here. So if this...
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** ...yeah. So we if we know how many bits to look for, uh, then what are the last few bits. So we can keep track of, uh, we can have a prefix length in any case.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Yeah.
+
+**Speaker 1:** Mmhmm.
+
+**Speaker 2:** But when that prefix length, uh, is a multiple of the max fanout...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...then it's you have to, uh, split it into K children and make this a non-leaf. Otherwise, that means there are two things pointing to it.
+
+**Speaker 1:** You mean for this one?
+
+**Speaker 2:** No, for this. This is when this is a leaf.
+
+**Speaker 1:** Oh, the leaf node, yes, okay.
+
+**Speaker 2:** When you split a leaf, if it is logically holding two logical leaves, one physical leaf holding two logical leaves...
+
+**Speaker 1:** Yeah.
+
+**Speaker 2:** ...then we split right there and update the parent. The prefix will change, the hash will change.
+
+**Speaker 1:** But we said, uh, based we will do that based on tuple count, right?
+
+**Speaker 2:** That is a different point.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** See, you have misunderstood. The logical and physical do you understand? If not, please tell me. Then I'll explain that again because without understanding that we are wasting our time.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** So did you understand what is the difference between logical node and physical node?
+
+**Speaker 1:** Yes, I mean, one physical node can house house multiple logical leaves.
+
+**Speaker 2:** Correct. So if a physical leaf now has two logical leaves and you have to split the physical leaf...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...we create two leaves, hm, and move some of the logical leaves into this, some of the logical leaves into that.
+
+**Speaker 1:** Hmm, mmhmm.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** That is a one type of split.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** But if the physical leaf now has only one logical leaf, and it still needs to split...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...then we have to make it a non-leaf and create a bunch of leaves.
+
+**Speaker 1:** Okay.
+
+**Speaker 1:** Uh, okay. So, so the split using tuple count is the, um, logical split.
+
+**Speaker 2:** Yeah.
+
+**Speaker 2:** And...
+
+**Speaker 1:** Yeah. So if we tuple count is exceeded, we first check if it is a, uh, physical node with only one logical node. Then we do one kind of split where the height of the tree increases. Otherwise, we do a split where the height doesn't, as long as, we may have to do it again because all the values may hash to one of the...
+
+**Speaker 2:** Okay, fine. But modulo that.
+
+**Speaker 1:** Yes, okay.
+
+**Speaker 2:** Right?
+
+**Speaker 1:** Uh, in that case...
+
+**Speaker 2:** We have to do some corner cases. For example, we add one bit, and all the pointers stay on one side. The other one is has nothing. Um, so we can, uh, store a special, uh, node ID zero or something, which says that right now this is empty, nothing has been allocated to it, so don't look for it.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** And if it gets something, then we create the leaf for it.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** That will, that's a corner case, you put up on for it or not, doesn't matter.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** I it's unlikely to happen much because this is a hash function after all.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Very unlikely to hash to all to one place. So maybe we shouldn't worry about it. We just split it, create two nodes. And, uh, then take the special case where all the hashes have fallen into one node, then we will look at it.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** That can happen with duplicate keys. If it won't happen because we won't have duplicates. That's a separate thing.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** But if we have duplicates, this could happen.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** And it with, you have very bad luck, it can happen. All the hashes going to one side.
+
+**Speaker 3:** Sir, we are also looking to it like all the keys are going in this half only, and this half only has one leaf. And only this half is getting split, split, split.
+
+**Speaker 2:** Yeah.
+
+**Speaker 3:** And from, from this half will get again split.
+
+**Speaker 2:** That can happen, then the other one will be empty.
+
+**Speaker 3:** So should we like redistribute or something?
+
+**Speaker 2:** No, we can't. It's based on the prefix. Prefix we can't. See, we're not losing much because that is a thing which doesn't grow further, it stays as is. Worst case, what will happen is one node there which has no, nothing in it.
+
+**Speaker 3:** But this will become skewed, right?
+
+**Speaker 2:** Yes, of course. Of course it can become skewed. This is a very un- un- unusual case, but yes, it can become skewed. That's the price you're paying. If you want to balance it, it becomes a different kind of structure.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Um, then you can use a B-tree also. And as long as it's deterministic, all of them will have exactly the same B-tree, then the hash. But then, uh, recomputing the hash, all that, will have to be done. So then the internal node also will store all the child hashes. So if you split an internal node, um, then we will recompute the hash there. That's also possible. So, yeah, what about, should we consider that? Because it's deterministic. In general you can't do this in a database which may have slightly out of order, you can't do this. But if you are strictly in order... I'm still a bit worried though, because the way we allow transactions to run concurrently, they don't have read-write conflicts. At the tree level they may conflict. And one of them may insert A first then B, the other may insert B first then A. So it will become non-deterministic. The tree will differ a little bit.
+
+**Speaker 1:** No, why? I didn't get that.
+
+**Speaker 2:** Because the tree structure depends on the order of insertions, in general.
+
+**Speaker 1:** Yes, but the insertion is deterministic, right?
+
+**Speaker 2:** I just told you the problem. We are looking for conflicts between transactions, if there's no conflict, we'd allow them to run concurrently.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** The problem is the conflicts you're detecting at the level of the actual tuples.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Two tuples which don't conflict may wind up with the same leaf, or adjacent leaves or whatever, you know. So depending on which came first, the split will be different. So you will land up with different B+ trees in different places. So the, it's order dependent. So the important thing is this structure is not order dependent.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** Okay, fair enough, yes.
+
+**Speaker 1:** So, yeah, the only one thing, uh, yeah, even the, um, then on deletion, merge should also be done in a deterministic way. We haven't discussed it much. If you don't do merging at all, yeah, it will be deterministic. If you do merge also, it should be deterministic, based on the counts. I think it will be.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** It will be order independent, that is our goal, and we should explain what I just told you, should be in the paper.
+
+**Speaker 1:** Sure.
+
+**Speaker 1:** Sure.
+
+**Speaker 3:** Can we discuss merging once, I didn't quite get that idea because that's... Can we discuss merging once?
+
+**Speaker 2:** Well, uh, merging will happen when, uh, a non-leaf's tuple count is less than the number of things in a leaf.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** So, then you will look at its children, check that they are all leaves.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** If, uh, it should happen because if if one of its children is a non-leaf...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...it would have an even lower count, so as long as you're coming up the tree...
+
+**Speaker 3:** Yeah.
+
+**Speaker 2:** ...from the bottom...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...this will already be taken care of.
+
+**Speaker 1:** Hmm, mmmhmm.
+
+**Speaker 2:** So now all its children will be leaves if its count is less than that number.
+
+**Speaker 3:** Summation is less than threshold.
+
+**Speaker 2:** Whatever is the fanout, whatever is the maximum number of children for a leaf.
+
+**Speaker 3:** Yeah.
+
+**Speaker 2:** If it is below that, then we take all the children and merge it back and create a new leaf node.
+
+**Speaker 3:** And join to grandparent.
+
+**Speaker 2:** Uh, we don't have to do anything, grandparent will still point to this only. Grandparent continues to point to the same node. It's just a a child node, right? Grandparent is already an internal node. This is merged.
+
+**Speaker 1:** Hmm.
+
+**Speaker 3:** Hmm.
+
+**Speaker 2:** This was a non-leaf node, it has become a leaf node.
+
+**Speaker 1:** Hmm.
+
+**Speaker 3:** Achha, okay. Yeah. Okay.
+
+**Speaker 2:** But the parent of it doesn't matter, nothing will change.
+
+**Speaker 3:** Yeah, yeah.
+
+**Speaker 2:** Okay.
+
+**Speaker 3:** Got it?
+
+**Speaker 1:** Hmm, yes, got it.
+
+**Speaker 1:** The only thing is, uh, the structure of A needs to change to include the logical leaf count and their prefixes also.
+
+**Speaker 2:** Prefix length.
+
+**Speaker 1:** Yeah.
+
+**Speaker 2:** Okay.
+
+**Speaker 1:** Sure.
+
+**Speaker 2:** So, redo this and let's discuss again.
+
+**Speaker 3:** Are we merging relation A and relation B? Because like...
+
+**Speaker 2:** It's not merging, it's just there's only one relation.
+
+**Speaker 3:** Okay, we are matching.
+
+**Speaker 2:** But we will have a indicator whether this is a leaf or not.
+
+**Speaker 3:** That can be done like as you said, like multiple of, uh, phi, let's suppose it's multiple of phi then it will be leaf node.
+
+**Speaker 2:** It's, uh, yeah, if the prefix is multiple of that.
+
+**Speaker 3:** Yeah, length. Yeah. Uh, wait, wait, wait. I'm not sure. No, no, no, it's not, it's not correct. Um, yeah, I mean, it could after you split also...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...you will still have the same node ID.
+
+**Speaker 3:** Yeah, that will be...
+
+**Speaker 2:** So node ID cannot tell you whether it's a leaf or not.
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** So you have to have a separate, uh, indicator is leaf.
+
+**Speaker 1:** Yes, hmm.
+
+**Speaker 2:** Now, when I said prefix, I didn't, I meant we keep track of how many bits are used. So, that prefix...
+
+**Speaker 1:** Yes.
+
+**Speaker 3:** Yeah, talking about that only, length, prefix length.
+
+**Speaker 2:** What about the prefix length?
+
+**Speaker 3:** Like, we are storing prefix length there.
+
+**Speaker 2:** No, but we still need to do this only if it is a leaf. For a non-leaf, we are not looking at, the prefix length will be the full thing.
+
+**Speaker 3:** No, like if it's parent node...
+
+**Speaker 2:** Oh yeah, even there it could be the...
+
+**Speaker 3:** No, actually, yeah, no, we can't do it because parent can have prefix length of 10 and child can have prefix length of like 15.
+
+**Speaker 2:** Yes.
+
+**Speaker 3:** So, parent is 10, which is multiple of 5, but it is still not a leaf node.
+
+**Speaker 2:** That's right, that's right.
+
+**Speaker 3:** Yeah, okay, yeah.
+
+**Speaker 2:** So we need a is leaf.
+
+**Speaker 3:** Okay, okay. Okay, sure. Okay.
+
+**Speaker 1:** But it will continue to be two different relations, right? One for leaf and one for internal. Because here you are storing the key and tuple hash, and here you have to store the...
+
+**Speaker 2:** You can merge it actually because see, when we see these are your children, we don't know whether the child is a leaf or a non-leaf.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** Only when you go to the child you know because initially it may have been a leaf, later it splits and it becomes a non-leaf. So here we don't know.
+
+**Speaker 1:** So the interpretation of the last column will depend on whether it is a leaf or not? If that's the...
+
+**Speaker 2:** Exactly. Exactly. It will be either an array of key tuple hash...
+
+**Speaker 1:** Hmm.
+
+**Speaker 2:** ...or it will be a Array of prefixes and, uh, node ID. Node IDs. Array of node IDs. It can just repeat the node ID, right? What's the big deal? You don't lose anything.
+
+**Speaker 1:** Yeah, no, but not just node ID, it also needs to keep what is the, uh, prefix that maps to this node ID.
+
+**Speaker 2:** No, we are splitting 32 ways.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** So there'll be 32 pointers.
+
+**Speaker 1:** Ah.
+
+**Speaker 2:** 16 of them will have one node ID, 16 will have another node ID.
+
+**Speaker 1:** Oh, so, um... Okay, so, we anyway split it all the way to the max fanout here? Yes, logically. Yeah, logically, but physically they're all together.
+
+**Speaker 1:** Yes, got it.
+
+**Speaker 2:** So you will store that physical node ID here.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** Okay. That physical node ID corresponds to many logical ones, depending on its prefix length.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** That tells you how many, um... should we call it prefix length or should we flip it the other way? Should we say, um...
+
+**Speaker 1:** Suffix length.
+
+**Speaker 2:** Yeah, suffix length maybe. Because that will come down, when the suffix is zero, it is it cannot be split further.
+
+**Speaker 1:** Hmm.
+
+**Speaker 3:** We can have another field instead of node ID. And that is... For whatever sir is saying, because node ID is not what node ID sir is saying.
+
+**Speaker 2:** No, node ID is still the same.
+
+**Speaker 3:** Like, no, no, actually in our implementation node ID is this like inside a partition is 1, 2, 3...
+
+**Speaker 2:** Yeah, it's the same thing. I'm telling you implementation. You are saying like we can have this as a hash...
+
+**Speaker 2:** No, no, no, it's the same thing. See, what is zero? It is root is zero, but, um, the, and the this is the first bit of the hash, the next one. Then it's a next two bits of the hash. It's the same.
+
+**Speaker 3:** Okay, okay.
+
+**Speaker 2:** Node ID is still the same, no change.
+
+**Speaker 3:** Okay.
+
+**Speaker 2:** Except here you have a really fixed structure, here it grows.
+
+**Speaker 3:** Yeah, sure.
+
+**Speaker 2:** Okay, sounds good.
+
+**Speaker 1:** Thanks.

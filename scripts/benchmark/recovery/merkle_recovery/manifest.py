@@ -36,6 +36,7 @@ from typing import Any
 
 from .config import ALL_COLUMNS, FIELDS
 from .db import execute, scalar
+from .dynamic import LogicalRange
 
 
 def row_expr(schema: str) -> str:
@@ -252,6 +253,163 @@ def choose_corruption_manifest(
         "corruption_selection_sha256": corruption_selection_sha256,
         "bad_leaf_selection_sha256": bad_leaf_selection_sha256,
     }
+
+
+def choose_dynamic_corruption_manifest(
+    conn,
+    experiment: str,
+    tuple_count: int,
+    partitions: int,
+    logical_fanout: int,
+    leaf_capacity: int,
+    merge_threshold: int,
+    bad_range_count: int,
+    corrupted_tuple_count: int,
+    seed: int,
+    corruption_mode: str = "paper-update-only",
+) -> dict[str, Any]:
+    """Select bounded healthy physical leaves and exact keys for dynamic tests.
+
+    The acceptance campaign is update-only so its corruption does not alter
+    route digests.  The recovery implementation itself supports insert/update/
+    delete differences, but synthetic insert targeting is intentionally not
+    guessed here: it would need a backend route-to-logical-range API.
+    """
+    if corruption_mode not in ("paper-update-only", "update-only", "delete-only"):
+        raise ValueError(
+            "dynamic corruption manifest currently supports update-only and "
+            "delete-only selection; the acceptance profile is update-only"
+        )
+    if bad_range_count <= 0 or corrupted_tuple_count <= 0:
+        raise ValueError("dynamic bad_range_count and corrupted_tuple_count must be positive")
+
+    from .dynamic_db import physical_leaf_summaries, range_items
+
+    rng = random.Random(seed + tuple_count * 31 + partitions * 17 + bad_range_count)
+    base = corrupted_tuple_count // bad_range_count
+    remainder = corrupted_tuple_count % bad_range_count
+    minimum = base + (1 if remainder else 0)
+    leaves = [
+        summary
+        for summary in physical_leaf_summaries(conn, "healthy")
+        if minimum <= summary.tuple_count <= leaf_capacity
+    ]
+    if len(leaves) < bad_range_count:
+        raise RuntimeError(
+            f"only {len(leaves)} bounded dynamic leaves contain >= {minimum} rows; "
+            f"need {bad_range_count}"
+        )
+    selected = sorted(rng.sample(leaves, bad_range_count), key=lambda row: row.logical_range)
+    selected_ranges = [row.logical_range for row in selected]
+    summaries = range_items(conn, "healthy", selected_ranges)
+    by_range: dict[LogicalRange, list[int]] = {logical_range: [] for logical_range in selected_ranges}
+    for item in summaries:
+        by_range[item.logical_range].append(item.key)
+
+    entries: list[dict[str, Any]] = []
+    selected_capacities: dict[str, int] = {}
+    for position, summary in enumerate(selected):
+        logical_range = summary.logical_range
+        want = base + (1 if position < remainder else 0)
+        keys = sorted(by_range[logical_range])[:want]
+        if len(keys) != want:
+            raise RuntimeError(
+                f"dynamic range {logical_range.label} returned {len(keys)} keys, need {want}"
+            )
+        selected_capacities[logical_range.label] = summary.tuple_count
+        op = "delete" if corruption_mode == "delete-only" else "update"
+        for key in keys:
+            entries.append(
+                {
+                    "logical_range": logical_range.to_request(),
+                    "leaf_id": logical_range.label,
+                    "ycsb_key": key,
+                    "reference_key": key,
+                    "op": op,
+                }
+            )
+
+    import hashlib
+    import json
+
+    bad_ranges = [logical_range.to_request() for logical_range in selected_ranges]
+    selection = {
+        "tuple_count": tuple_count,
+        "partitions": partitions,
+        "logical_fanout": logical_fanout,
+        "leaf_capacity": leaf_capacity,
+        "merge_threshold": merge_threshold,
+        "bad_range_count": bad_range_count,
+        "corrupted_tuple_count": corrupted_tuple_count,
+        "seed": seed,
+        "bad_ranges": bad_ranges,
+        "corruptions": [{"ycsb_key": row["ycsb_key"], "op": row["op"]} for row in entries],
+    }
+    digest = hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest()
+    return {
+        "experiment": experiment,
+        "merkle_mode": "dynamic",
+        "corruption_mode": corruption_mode,
+        "tuple_count": tuple_count,
+        "partitions": partitions,
+        # Static-shape compatibility fields are explicit sentinels, not an
+        # assertion that a dynamic partition has a fixed leaf geometry.
+        "leaves_per_partition": 0,
+        "fanout": logical_fanout,
+        "leaf_capacity": leaf_capacity,
+        "split_threshold": leaf_capacity,
+        "merge_threshold": merge_threshold,
+        "seed": seed,
+        "bad_ranges": bad_ranges,
+        "bad_leaves": [logical_range.label for logical_range in selected_ranges],
+        "corruptions": entries,
+        "corrupted_tuple_count": len(entries),
+        "required_rows_per_bad_leaf": minimum,
+        "selected_bad_leaf_row_capacity": sum(selected_capacities.values()),
+        "selected_leaf_capacities": selected_capacities,
+        "corruption_selection_sha256": digest,
+        "bad_leaf_selection_sha256": hashlib.sha256(
+            json.dumps(bad_ranges, sort_keys=True).encode()
+        ).hexdigest(),
+    }
+
+
+def logical_ranges_from_manifest(manifest: dict[str, Any]) -> list[LogicalRange]:
+    ranges: list[LogicalRange] = []
+    for item in manifest.get("bad_ranges", []):
+        prefix = item["prefix_value"]
+        if isinstance(prefix, str):
+            prefix = bytes.fromhex(prefix.removeprefix("\\x").removeprefix("0x"))
+        ranges.append(
+            LogicalRange.from_prefix_bytes(
+                int(item["partition_id"]), int(item["prefix_length"]), prefix
+            )
+        )
+    return sorted(ranges)
+
+
+def validate_dynamic_manifest_mapping(conn, manifest: dict[str, Any]) -> None:
+    """Prove every update/delete key was selected from its recorded range."""
+    from .dynamic_db import range_items
+
+    ranges = logical_ranges_from_manifest(manifest)
+    items = range_items(conn, "healthy", ranges)
+    actual = {(item.logical_range, item.key) for item in items}
+    mismatches: list[dict[str, Any]] = []
+    for entry in manifest["corruptions"]:
+        encoded = entry["logical_range"]
+        logical_range = LogicalRange.from_prefix_bytes(
+            int(encoded["partition_id"]),
+            int(encoded["prefix_length"]),
+            bytes.fromhex(str(encoded["prefix_value"])),
+        )
+        key = int(entry["ycsb_key"])
+        if (logical_range, key) not in actual:
+            mismatches.append({"logical_range": logical_range.label, "ycsb_key": key})
+    if mismatches:
+        raise RuntimeError(
+            f"dynamic corruption keys do not belong to recorded ranges: {mismatches[:5]}"
+        )
 
 
 def validate_manifest_leaf_mapping(conn, manifest: dict[str, Any]) -> None:

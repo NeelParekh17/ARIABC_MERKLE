@@ -118,9 +118,22 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 
 /* Versioned, endian-stable durable transaction-delta encoding. */
 #define MERKLE_DELTA_MAGIC          ((uint32) 0x4D444C54) /* "MDLT" */
-#define MERKLE_DELTA_VERSION        1
+#define MERKLE_DELTA_LEGACY_VERSION 1
+#define MERKLE_DELTA_VERSION        2
 #define MERKLE_DELTA_HEADER_BYTES   40
 #define MERKLE_DELTA_ENTRY_BYTES    56
+#define MERKLE_DELTA_V2_HEADER_BYTES 40
+#define MERKLE_DELTA_V2_ENTRY_FIXED_BYTES 168
+
+/* Dynamic Merkle format.  The static v7 page layout remains unchanged. */
+#define MERKLE_DYNAMIC_META_MAGIC          ((uint32) 0x44594E4D) /* "DYNM" */
+#define MERKLE_DYNAMIC_LAYOUT_VERSION      1
+#define MERKLE_DYNAMIC_LOGICAL_FANOUT      32
+#define MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY 32
+#define MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD 8
+#define MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY (64 * 1024)
+#define MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES 1024
+#define MERKLE_DYNAMIC_MAX_KEY_BYTES       2000
 
 /*
  * Calculate how many nodes fit per page
@@ -185,6 +198,15 @@ typedef struct MerkleMetaPageData
 	uint32          routeFormatVersion; /* deterministic key-routing format */
 	uint32          rowHashFormatVersion; /* canonical row serialization format */
 	uint64          baselineApplySeq;   /* heap snapshot represented at build */
+	/* Appended extension: zero for every static v7 index. */
+	uint32          dynamicMagic;
+	uint16          dynamicLayoutVersion;
+	uint16          dynamicFlags;
+	uint32          dynamicLogicalFanout;
+	uint32          dynamicLeafCapacity;
+	uint32          dynamicMergeThreshold;
+	uint32          dynamicLeafByteCapacity;
+	uint32          dynamicMaxKeyBytes;
 } MerkleMetaPageData;
 
 #define MerklePageGetMeta(page) \
@@ -200,6 +222,11 @@ typedef struct MerkleOptions
     int         partitions;
     int         leaves_per_partition;
     int         fanout;
+	bool        dynamic;
+	int         leaf_capacity;
+	int         merge_threshold;
+	int         leaf_byte_capacity;
+	int         max_key_bytes;
 } MerkleOptions;
 
 /*
@@ -217,6 +244,33 @@ typedef struct MerkleRoute
 	int			partition_id;
 	int			node_in_partition;
 } MerkleRoute;
+
+/*
+ * Canonical identity of one indexed item.  key_data is a versioned varlena
+ * allocated in the caller's CurrentMemoryContext.  Staging functions must
+ * deep-copy it before returning; callers may pfree it immediately afterward.
+ */
+typedef struct MerkleItemIdentity
+{
+	MerkleRoute route;
+	bytea      *key_data;
+} MerkleItemIdentity;
+
+typedef struct MerkleDynamicTransition
+{
+	uint64      seq;
+	Oid         index_oid;
+	RelFileNode index_rnode;
+	int32       partition_id;
+	uint8       route_digest[MERKLE_HASH_BYTES];
+	bytea      *key_data;
+	bool        has_old;
+	bool        has_new;
+	MerkleHash  old_hash;
+	MerkleHash  new_hash;
+} MerkleDynamicTransition;
+
+typedef struct MerkleDynamicBuildState MerkleDynamicBuildState;
 
 /* Arithmetic-only perfect-tree geometry shared by all Merkle code paths. */
 typedef struct MerkleGeometry
@@ -308,13 +362,47 @@ extern void merkleCostEstimate(struct PlannerInfo *root,
                                double *indexPages);
 
 /* Core Merkle tree operations. */
-extern void merkle_compute_row_hash(Relation heapRel, ItemPointer tid,
+extern bool merkle_compute_row_hash(Relation heapRel, ItemPointer tid,
                                     MerkleHash *result);
 extern void merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot,
                                      MerkleHash *result);
 extern void merkle_compute_route(Relation indexRel, Datum *values,
 								 bool *isnull, int nkeys,
 								 MerkleRoute *result);
+extern void merkle_compute_item_identity(Relation indexRel, Datum *values,
+									 bool *isnull, int nkeys,
+									 MerkleItemIdentity *result);
+extern void merkle_compute_dynamic_item_identity(Relation indexRel,
+										 Datum *values, bool *isnull,
+										 int nkeys, int partitions,
+										 int max_key_bytes,
+										 MerkleItemIdentity *result);
+extern bool merkle_index_is_dynamic(Relation indexRel);
+extern void merkle_stage_item_delta(Relation indexRel,
+									const MerkleItemIdentity *identity,
+									const MerkleHash *hash, bool is_insert);
+extern void merkle_dynamic_apply_transition(const MerkleDynamicTransition *transition);
+extern MerkleDynamicBuildState *merkle_dynamic_build_begin(Relation indexRel,
+														 Relation heapRel,
+														 int nkeys,
+														 uint64 baseline_seq);
+extern void merkle_dynamic_build_add(MerkleDynamicBuildState *state,
+									 const MerkleItemIdentity *identity,
+									 const MerkleHash *hash);
+extern void merkle_dynamic_build_finish(MerkleDynamicBuildState *state);
+extern void merkle_dynamic_validate_key_index(Relation heapRel,
+											  Relation merkleIndexRel,
+											  int nkeys);
+extern bool merkle_dynamic_verify_relations(Relation heapRel,
+											Relation indexRel,
+											Snapshot snapshot);
+extern void merkle_dynamic_root(Relation indexRel, MerkleHash *hash,
+								uint64 *tuple_count);
+extern char *merkle_dynamic_stats_json(Relation indexRel);
+extern void merkle_dynamic_vacuum_stats(Relation indexRel,
+									IndexBulkDeleteResult *stats);
+extern void merkle_dynamic_drop_state(Oid index_oid,
+								  RelFileNode index_rnode);
 extern bool merkle_relation_has_index(Relation rel);
 extern void merkle_reject_ddl(Relation rel, const char *command);
 extern void merkle_reject_concurrent_ddl(Oid index_oid, const char *command);
@@ -333,7 +421,8 @@ extern void merkle_update_tree_path(Relation indexRel, int leafId,
 extern void merkle_stage_delta(Relation indexRel, int leafId,
 								 const MerkleHash *hash);
 extern bytea *merkle_serialize_staged_delta(uint64 raft_log_index,
-										 uint32 item_ordinal);
+										 uint32 item_ordinal,
+										 int *delta_version);
 extern void merkle_mark_staged_delta_persisted(void);
 extern bool merkle_has_staged_delta(void);
 extern void merkle_crash_failpoint(const char *name);
@@ -385,5 +474,10 @@ extern Datum merkle_recovery_profile_stats(PG_FUNCTION_ARGS);
 extern Datum merkle_recovery_status(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_pending_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_until_sql(PG_FUNCTION_ARGS);
+extern Datum merkle_dynamic_verify(PG_FUNCTION_ARGS);
+extern Datum merkle_dynamic_get_partition_roots(PG_FUNCTION_ARGS);
+extern Datum merkle_dynamic_get_ranges(PG_FUNCTION_ARGS);
+extern Datum merkle_dynamic_get_range_items(PG_FUNCTION_ARGS);
+extern Datum merkle_dynamic_tree_stats(PG_FUNCTION_ARGS);
 
 #endif /* MERKLE_H */

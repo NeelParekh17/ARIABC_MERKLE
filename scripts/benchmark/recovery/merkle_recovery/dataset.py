@@ -12,17 +12,23 @@ from .db import execute, run_file, scalar
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-def ensure_helpers(conn) -> None:
+def ensure_helpers(conn, merkle_mode: str = "static") -> None:
     run_file(conn, BENCH_DIR / "sql" / "recovery_helpers.sql")
 
-    required = [
-        "merkle_bucket_for_key",
-        "merkle_get_child_hashes",
-        "merkle_get_partition_root_hashes",
-        "merkle_leaf_id",
-        "merkle_root_hash",
-        "merkle_verify",
-    ]
+    if merkle_mode == "dynamic":
+        from .dynamic_db import DYNAMIC_API_FUNCTIONS, ensure_dynamic_api
+
+        ensure_dynamic_api(conn)
+        required = ["merkle_apply_pending", *DYNAMIC_API_FUNCTIONS]
+    else:
+        required = [
+            "merkle_bucket_for_key",
+            "merkle_get_child_hashes",
+            "merkle_get_partition_root_hashes",
+            "merkle_leaf_id",
+            "merkle_root_hash",
+            "merkle_verify",
+        ]
 
     missing = execute(
         conn,
@@ -50,6 +56,28 @@ def recreate_schema(conn) -> None:
     run_file(conn, BENCH_DIR / "create_schema.sql")
 
 
+def cleanup_dynamic_benchmark_generations(conn) -> None:
+    """Remove only stale or benchmark-owned dynamic side-table generations."""
+    execute(
+        conn,
+        """
+        DELETE FROM ariabc_internal.merkle_dynamic_state AS state
+        WHERE NOT EXISTS (
+                  SELECT 1 FROM pg_class AS live_index
+                  WHERE live_index.oid = state.index_oid
+              )
+           OR state.index_oid IN (
+                  SELECT index_class.oid
+                  FROM pg_class AS index_class
+                  JOIN pg_namespace AS namespace
+                    ON namespace.oid = index_class.relnamespace
+                  WHERE namespace.nspname IN ('healthy', 'damaged')
+                    AND index_class.relname = 'usertable_merkle_idx'
+              )
+        """,
+    )
+
+
 def create_merkle_indexes(conn, partitions: int, leaves_per_partition: int, fanout: int) -> None:
     sql = (BENCH_DIR / "create_merkle_indexes.sql").read_text()
     sql = sql.replace(":partitions", str(partitions))
@@ -57,6 +85,41 @@ def create_merkle_indexes(conn, partitions: int, leaves_per_partition: int, fano
     sql = sql.replace(":fanout", str(fanout))
     with conn.cursor() as cur:
         cur.execute(sql)
+
+
+def create_dynamic_merkle_indexes(
+    conn,
+    partitions: int,
+    logical_fanout: int,
+    leaf_capacity: int,
+    merge_threshold: int,
+) -> None:
+    """Create dynamic indexes without the invalid static bucket expression index."""
+    execute(conn, "SET enable_merkle_index = on")
+    execute(conn, "DROP INDEX IF EXISTS healthy.usertable_leaf_lookup_idx")
+    execute(conn, "DROP INDEX IF EXISTS damaged.usertable_leaf_lookup_idx")
+    execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_idx")
+    execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_idx")
+    if logical_fanout != 32:
+        raise ValueError("dynamic Merkle currently requires logical fanout 32")
+    if not 0 <= merge_threshold < leaf_capacity:
+        raise ValueError("dynamic merge_threshold must be in [0, leaf_capacity)")
+    for schema in ("healthy", "damaged"):
+        execute(
+            conn,
+            f"""
+            CREATE INDEX usertable_merkle_idx
+            ON {schema}.usertable USING merkle (ycsb_key)
+            WITH (
+                partitions = {partitions},
+                fanout = {logical_fanout},
+                dynamic = on,
+                leaf_capacity = {leaf_capacity},
+                merge_threshold = {merge_threshold}
+            )
+            """,
+        )
+        execute(conn, f"ANALYZE {schema}.usertable")
 
 
 def create_damaged_indexes(conn, partitions: int, leaves_per_partition: int, fanout: int) -> None:
@@ -79,10 +142,52 @@ def create_damaged_indexes(conn, partitions: int, leaves_per_partition: int, fan
     execute(conn, "ANALYZE damaged.usertable")
 
 
+def create_damaged_dynamic_index(
+    conn,
+    partitions: int,
+    logical_fanout: int,
+    leaf_capacity: int,
+    merge_threshold: int,
+) -> None:
+    execute(conn, "DROP INDEX IF EXISTS damaged.usertable_leaf_lookup_idx")
+    execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_idx")
+    execute(conn, "ALTER TABLE damaged.usertable ADD PRIMARY KEY (ycsb_key)")
+    execute(
+        conn,
+        f"""
+        CREATE INDEX usertable_merkle_idx
+        ON damaged.usertable USING merkle (ycsb_key)
+        WITH (
+            partitions = {partitions},
+            fanout = {logical_fanout},
+            dynamic = on,
+            leaf_capacity = {leaf_capacity},
+            merge_threshold = {merge_threshold}
+        )
+        """,
+    )
+    execute(conn, "ANALYZE damaged.usertable")
+
+
 # ── dataset ──────────────────────────────────────────────────────────────────
 
-def build_dataset(conn, tuple_count: int, partitions: int, leaves_per_partition: int, fanout: int) -> None:
+def build_dataset(
+    conn,
+    tuple_count: int,
+    partitions: int,
+    leaves_per_partition: int,
+    fanout: int,
+    *,
+    merkle_mode: str = "static",
+    leaf_capacity: int = 32,
+    merge_threshold: int = 8,
+) -> None:
     """Create both schemas from scratch and populate healthy.usertable."""
+    if merkle_mode == "dynamic":
+        # Side-table rows are keyed by full index generation rather than a
+        # catalog FK.  Prune the previous benchmark generation before DROP
+        # SCHEMA so 1M/3M/5M cases do not accumulate stale rows or index bloat.
+        cleanup_dynamic_benchmark_generations(conn)
     recreate_schema(conn)
     execute(
         conn,
@@ -104,15 +209,29 @@ def build_dataset(conn, tuple_count: int, partitions: int, leaves_per_partition:
         (tuple_count,),
     )
     execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")
-    create_merkle_indexes(conn, partitions, leaves_per_partition, fanout)
+    if merkle_mode == "dynamic":
+        create_dynamic_merkle_indexes(
+            conn, partitions, fanout, leaf_capacity, merge_threshold
+        )
+    else:
+        create_merkle_indexes(conn, partitions, leaves_per_partition, fanout)
 
 
-def reset_damaged_from_healthy(conn, cfg: dict[str, int]) -> None:
+def reset_damaged_from_healthy(conn, cfg: dict[str, int], merkle_mode: str = "static") -> None:
     """Restore damaged.usertable to a clean copy of healthy; rebuild all indexes."""
     execute(conn, "DROP TABLE IF EXISTS damaged.usertable CASCADE")
     execute(conn, "CREATE TABLE damaged.usertable (LIKE healthy.usertable INCLUDING DEFAULTS)")
     execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")
-    create_damaged_indexes(conn, cfg["partitions"], cfg["leaves_per_partition"], cfg["fanout"])
+    if merkle_mode == "dynamic":
+        create_damaged_dynamic_index(
+            conn,
+            cfg["partitions"],
+            cfg["fanout"],
+            cfg.get("leaf_capacity", 32),
+            cfg.get("merge_threshold", 8),
+        )
+    else:
+        create_damaged_indexes(conn, cfg["partitions"], cfg["leaves_per_partition"], cfg["fanout"])
 
 
 # ── occupancy helpers ────────────────────────────────────────────────────────
@@ -128,6 +247,18 @@ def leaf_occupancy(conn) -> list[dict[str, Any]]:
         ORDER BY 1
         """,
     )
+
+
+def dynamic_leaf_occupancy(conn) -> list[dict[str, Any]]:
+    from .dynamic_db import physical_leaf_summaries
+
+    return [
+        {
+            "logical_range": summary.logical_range.label,
+            "tuple_count": summary.tuple_count,
+        }
+        for summary in physical_leaf_summaries(conn, "healthy")
+    ]
 
 
 def occupancy_stats(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -151,15 +282,31 @@ def occupancy_stats(rows: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def table_sizes(conn) -> dict[str, int]:
-    return {
+def table_sizes(conn, merkle_mode: str = "static") -> dict[str, int]:
+    result = {
         "tuple_count": int(scalar(conn, "SELECT count(*) FROM healthy.usertable")),
         "base_table_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable'::regclass)")),
         "primary_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_pkey'::regclass)")),
         "merkle_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_merkle_idx'::regclass)")),
-        "leaf_lookup_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_leaf_lookup_idx'::regclass)")),
         "total_schema_bytes": int(scalar(conn, "SELECT pg_total_relation_size('healthy.usertable'::regclass)")),
     }
+    if merkle_mode == "dynamic":
+        from .dynamic_db import dynamic_tree_stats
+
+        stats = dynamic_tree_stats(conn, "healthy")
+        result["leaf_lookup_index_bytes"] = 0
+        result["dynamic_bytes"] = int(
+            stats.get(
+                "dynamic_bytes",
+                stats.get("total_dynamic_bytes", stats.get("item_bytes", result["merkle_index_bytes"])),
+            )
+        )
+    else:
+        result["leaf_lookup_index_bytes"] = int(
+            scalar(conn, "SELECT pg_relation_size('healthy.usertable_leaf_lookup_idx'::regclass)")
+        )
+        result["dynamic_bytes"] = 0
+    return result
 
 
 def bucket_consistency_sample(
