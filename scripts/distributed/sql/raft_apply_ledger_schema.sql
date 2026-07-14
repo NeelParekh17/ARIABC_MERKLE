@@ -41,6 +41,40 @@ RETURNS text
 AS 'merkle_root_hash_index'
 LANGUAGE internal VOLATILE PARALLEL UNSAFE;
 
+-- Dynamic Merkle inspection/recovery APIs.  Existing clusters acquire these
+-- wrappers without initdb; access is revoked below because item summaries
+-- contain canonical primary-key material.
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_dynamic_verify(index_oid regclass)
+RETURNS boolean
+AS 'merkle_dynamic_verify'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_dynamic_get_partition_roots(index_oid regclass)
+RETURNS TABLE(partition_id integer, prefix_len integer, prefix bytea,
+              tuple_count bigint, data_xor bytea, is_leaf boolean)
+AS 'merkle_dynamic_get_partition_roots'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_dynamic_get_ranges(index_oid regclass,
+                                                                 ranges jsonb)
+RETURNS TABLE(partition_id integer, prefix_len integer, prefix bytea,
+              tuple_count bigint, data_xor bytea, is_leaf boolean)
+AS 'merkle_dynamic_get_ranges'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_dynamic_get_range_items(index_oid regclass,
+                                                                      ranges jsonb)
+RETURNS TABLE(partition_id integer, prefix_len integer, prefix bytea,
+              key_data bytea, key_text text, route_digest bytea,
+              tuple_hash bytea)
+AS 'merkle_dynamic_get_range_items'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_dynamic_tree_stats(index_oid regclass)
+RETURNS jsonb
+AS 'merkle_dynamic_tree_stats'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
 -- Global ordering for crash-safe Merkle delta application.  Raft positions
 -- are epoch-scoped; this counter supplies a database-wide, non-repeating
 -- sequence.  Raft manifests reserve a range once per multi-item entry.
@@ -71,6 +105,213 @@ INSERT INTO ariabc_internal.merkle_apply_state(singleton, applied_seq)
 VALUES (true, 0)
 ON CONFLICT (singleton) DO NOTHING;
 
+-- WAL-logged dynamic-Merkle state.  A generation is the complete physical
+-- RelFileNode identity, so REINDEX cannot attach queued transitions to stale
+-- side-table rows even when the catalog OID remains unchanged.
+CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_state (
+    index_oid           oid NOT NULL,
+    rnode_spc           oid NOT NULL,
+    rnode_db            oid NOT NULL,
+    rnode_rel           oid NOT NULL,
+    heap_oid            oid NOT NULL,
+    partitions          integer NOT NULL CHECK (partitions > 0),
+    logical_fanout      integer NOT NULL CHECK (logical_fanout = 32),
+    leaf_capacity       integer NOT NULL CHECK (leaf_capacity > 0),
+    merge_threshold     integer NOT NULL CHECK (merge_threshold >= 0 AND merge_threshold < leaf_capacity),
+    leaf_byte_capacity  integer NOT NULL CHECK (leaf_byte_capacity > 0),
+    max_key_bytes       integer NOT NULL CHECK (max_key_bytes > 0 AND max_key_bytes <= 2000),
+    build_complete      boolean NOT NULL DEFAULT false,
+    applied_seq         bigint NOT NULL DEFAULT 0 CHECK (applied_seq >= 0),
+    seen_pruned_seq     bigint NOT NULL DEFAULT 0 CHECK (seen_pruned_seq >= 0),
+    item_count          bigint NOT NULL DEFAULT 0 CHECK (item_count >= 0),
+    item_bytes          bigint NOT NULL DEFAULT 0 CHECK (item_bytes >= 0),
+    node_count          bigint NOT NULL DEFAULT 0 CHECK (node_count >= 0),
+    leaf_count          bigint NOT NULL DEFAULT 0 CHECK (leaf_count >= 0),
+    max_depth           integer NOT NULL DEFAULT 0 CHECK (max_depth BETWEEN 0 AND 256),
+    max_leaf_items      integer NOT NULL DEFAULT 0 CHECK (max_leaf_items >= 0),
+    split_count         bigint NOT NULL DEFAULT 0 CHECK (split_count >= 0),
+    merge_count         bigint NOT NULL DEFAULT 0 CHECK (merge_count >= 0),
+    structure_failures  bigint NOT NULL DEFAULT 0 CHECK (structure_failures >= 0),
+    stats_dirty         boolean NOT NULL DEFAULT false,
+    updated_at          timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (index_oid, rnode_spc, rnode_db, rnode_rel)
+);
+
+ALTER TABLE ariabc_internal.merkle_dynamic_state
+    ADD COLUMN IF NOT EXISTS seen_pruned_seq bigint NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS stats_dirty boolean NOT NULL DEFAULT false;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ariabc_internal.merkle_dynamic_state'::regclass
+          AND conname = 'merkle_dynamic_state_seen_pruned_seq_check'
+    ) THEN
+        ALTER TABLE ariabc_internal.merkle_dynamic_state
+            ADD CONSTRAINT merkle_dynamic_state_seen_pruned_seq_check
+            CHECK (seen_pruned_seq >= 0);
+    END IF;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_node (
+    index_oid       oid NOT NULL,
+    rnode_spc       oid NOT NULL,
+    rnode_db        oid NOT NULL,
+    rnode_rel       oid NOT NULL,
+    partition_id    integer NOT NULL CHECK (partition_id >= 0),
+    prefix_len      smallint NOT NULL CHECK (prefix_len BETWEEN 0 AND 256),
+    prefix_bytes    bytea NOT NULL CHECK (octet_length(prefix_bytes) = 32),
+    is_leaf         boolean NOT NULL,
+    tuple_count     bigint NOT NULL CHECK (tuple_count >= 0),
+    subtree_bytes   bigint NOT NULL CHECK (subtree_bytes >= 0),
+    data_xor        bytea NOT NULL CHECK (octet_length(data_xor) = 32),
+    structure_hash  bytea NOT NULL CHECK (octet_length(structure_hash) = 32),
+    last_seq        bigint NOT NULL CHECK (last_seq >= 0),
+    PRIMARY KEY (index_oid, rnode_spc, rnode_db, rnode_rel,
+                 partition_id, prefix_len, prefix_bytes)
+);
+
+CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_leaf_item (
+    index_oid       oid NOT NULL,
+    rnode_spc       oid NOT NULL,
+    rnode_db        oid NOT NULL,
+    rnode_rel       oid NOT NULL,
+    partition_id    integer NOT NULL CHECK (partition_id >= 0),
+    prefix_len      smallint NOT NULL CHECK (prefix_len BETWEEN 0 AND 256),
+    prefix_bytes    bytea NOT NULL CHECK (octet_length(prefix_bytes) = 32),
+    key_data        bytea NOT NULL CHECK (octet_length(key_data) <= 2000),
+    route_digest    bytea NOT NULL CHECK (octet_length(route_digest) = 32),
+    tuple_hash      bytea NOT NULL CHECK (octet_length(tuple_hash) = 32),
+    last_seq        bigint NOT NULL CHECK (last_seq >= 0),
+    PRIMARY KEY (index_oid, rnode_spc, rnode_db, rnode_rel, key_data)
+);
+
+CREATE INDEX IF NOT EXISTS merkle_dynamic_node_prefix_lookup_idx
+    ON ariabc_internal.merkle_dynamic_node
+       (index_oid, rnode_spc, rnode_db, rnode_rel,
+        partition_id, prefix_bytes, prefix_len);
+
+CREATE INDEX IF NOT EXISTS merkle_dynamic_leaf_lookup_idx
+    ON ariabc_internal.merkle_dynamic_leaf_item
+       (index_oid, rnode_spc, rnode_db, rnode_rel,
+        partition_id, prefix_len, prefix_bytes, route_digest);
+
+CREATE INDEX IF NOT EXISTS merkle_dynamic_route_lookup_idx
+    ON ariabc_internal.merkle_dynamic_leaf_item
+       (index_oid, rnode_spc, rnode_db, rnode_rel,
+        partition_id, route_digest, key_data);
+
+-- CREATE INDEX executes its access-method build callback in a security-
+-- restricted context, where creating a per-build temporary table is forbidden.
+-- This shared UNLOGGED relation is therefore the bounded build spool.  Every
+-- row is generation-keyed, transactionally removed at build completion, and
+-- never participates in recovery reads or durable tree state.
+CREATE UNLOGGED TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_build_stage (
+    index_oid       oid NOT NULL,
+    rnode_spc       oid NOT NULL,
+    rnode_db        oid NOT NULL,
+    rnode_rel       oid NOT NULL,
+    partition_id    integer NOT NULL CHECK (partition_id >= 0),
+    key_data        bytea NOT NULL CHECK (octet_length(key_data) <= 2000),
+    route_digest    bytea NOT NULL CHECK (octet_length(route_digest) = 32),
+    tuple_hash      bytea NOT NULL CHECK (octet_length(tuple_hash) = 32)
+);
+
+CREATE INDEX IF NOT EXISTS merkle_dynamic_build_stage_route_idx
+    ON ariabc_internal.merkle_dynamic_build_stage
+       (index_oid, rnode_spc, rnode_db, rnode_rel,
+        partition_id, route_digest, key_data);
+
+CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_seen (
+    index_oid       oid NOT NULL,
+    rnode_spc       oid NOT NULL,
+    rnode_db        oid NOT NULL,
+    rnode_rel       oid NOT NULL,
+    apply_seq       bigint NOT NULL CHECK (apply_seq > 0),
+    key_data        bytea NOT NULL CHECK (octet_length(key_data) <= 2000),
+    PRIMARY KEY (index_oid, rnode_spc, rnode_db, rnode_rel,
+                 apply_seq, key_data)
+);
+
+-- Generation existence is checked by every backend mutation/API path.  Use
+-- one parent-row trigger for set-based cleanup rather than invoking a foreign-
+-- key constraint trigger for each node/item mutation.  This preserves atomic
+-- cascade semantics and keeps lifecycle cleanup independent of item count.
+DO $$
+DECLARE
+    constraint_row record;
+BEGIN
+    FOR constraint_row IN
+        SELECT namespace.nspname, child.relname, constraint_entry.conname
+          FROM pg_constraint AS constraint_entry
+          JOIN pg_class AS child
+            ON child.oid = constraint_entry.conrelid
+          JOIN pg_namespace AS namespace
+            ON namespace.oid = child.relnamespace
+         WHERE constraint_entry.contype = 'f'
+           AND constraint_entry.confrelid =
+               'ariabc_internal.merkle_dynamic_state'::regclass
+           AND constraint_entry.conrelid IN (
+               'ariabc_internal.merkle_dynamic_node'::regclass,
+               'ariabc_internal.merkle_dynamic_leaf_item'::regclass,
+               'ariabc_internal.merkle_dynamic_build_stage'::regclass,
+               'ariabc_internal.merkle_dynamic_seen'::regclass
+           )
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE %I.%I DROP CONSTRAINT %I',
+            constraint_row.nspname,
+            constraint_row.relname,
+            constraint_row.conname
+        );
+    END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ariabc_internal.merkle_dynamic_state_cascade()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, ariabc_internal
+AS $$
+BEGIN
+    DELETE FROM ariabc_internal.merkle_dynamic_build_stage
+     WHERE index_oid = OLD.index_oid
+       AND rnode_spc = OLD.rnode_spc
+       AND rnode_db = OLD.rnode_db
+       AND rnode_rel = OLD.rnode_rel;
+    DELETE FROM ariabc_internal.merkle_dynamic_seen
+     WHERE index_oid = OLD.index_oid
+       AND rnode_spc = OLD.rnode_spc
+       AND rnode_db = OLD.rnode_db
+       AND rnode_rel = OLD.rnode_rel;
+    DELETE FROM ariabc_internal.merkle_dynamic_leaf_item
+     WHERE index_oid = OLD.index_oid
+       AND rnode_spc = OLD.rnode_spc
+       AND rnode_db = OLD.rnode_db
+       AND rnode_rel = OLD.rnode_rel;
+    DELETE FROM ariabc_internal.merkle_dynamic_node
+     WHERE index_oid = OLD.index_oid
+       AND rnode_spc = OLD.rnode_spc
+       AND rnode_db = OLD.rnode_db
+       AND rnode_rel = OLD.rnode_rel;
+    RETURN OLD;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION ariabc_internal.merkle_dynamic_state_cascade()
+FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS merkle_dynamic_state_cascade_before_delete
+ON ariabc_internal.merkle_dynamic_state;
+
+CREATE TRIGGER merkle_dynamic_state_cascade_before_delete
+BEFORE DELETE ON ariabc_internal.merkle_dynamic_state
+FOR EACH ROW
+EXECUTE FUNCTION ariabc_internal.merkle_dynamic_state_cascade();
+
 -- Direct PostgreSQL transactions (outside the Raft safe-ledger path) store
 -- one compact transaction batch here.  The row and heap DML commit atomically.
 CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_local_delta (
@@ -80,7 +321,7 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_local_delta (
     committed_at   timestamptz NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT merkle_local_delta_payload_check CHECK (
         (delta_version = 0 AND delta_blob IS NULL) OR
-        (delta_version = 1 AND delta_blob IS NOT NULL)
+        (delta_version IN (1, 2) AND delta_blob IS NOT NULL)
     )
 );
 
@@ -177,7 +418,7 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.raft_apply_item (
     CHECK (
         (merkle_delta_version = 0 AND merkle_delta_blob IS NULL)
         OR
-        (merkle_delta_version = 1 AND merkle_delta_blob IS NOT NULL)
+        (merkle_delta_version IN (1, 2) AND merkle_delta_blob IS NOT NULL)
     ),
     CHECK (
         failure_digest IS NULL
@@ -233,7 +474,12 @@ LOCK TABLE ariabc_internal.raft_apply_schema_meta,
            ariabc_internal.raft_apply_item,
            ariabc_internal.merkle_apply_counter,
            ariabc_internal.merkle_apply_state,
-           ariabc_internal.merkle_local_delta
+           ariabc_internal.merkle_local_delta,
+           ariabc_internal.merkle_dynamic_state,
+           ariabc_internal.merkle_dynamic_node,
+           ariabc_internal.merkle_dynamic_leaf_item,
+           ariabc_internal.merkle_dynamic_build_stage,
+           ariabc_internal.merkle_dynamic_seen
     IN ACCESS EXCLUSIVE MODE;
 
 ALTER TABLE ariabc_internal.merkle_apply_state
@@ -250,7 +496,7 @@ ALTER TABLE ariabc_internal.merkle_local_delta
 ALTER TABLE ariabc_internal.merkle_local_delta
     ADD CONSTRAINT merkle_local_delta_payload_check CHECK (
         (delta_version = 0 AND delta_blob IS NULL) OR
-        (delta_version = 1 AND delta_blob IS NOT NULL)
+        (delta_version IN (1, 2) AND delta_blob IS NOT NULL)
     );
 
 ALTER TABLE ariabc_internal.raft_apply_entry
@@ -385,7 +631,7 @@ ALTER TABLE ariabc_internal.raft_apply_item
     ADD CONSTRAINT raft_apply_item_merkle_delta_contract CHECK (
         (merkle_delta_version = 0 AND merkle_delta_blob IS NULL)
         OR
-        (merkle_delta_version = 1 AND merkle_delta_blob IS NOT NULL)
+        (merkle_delta_version IN (1, 2) AND merkle_delta_blob IS NOT NULL)
     );
 
 ALTER TABLE ariabc_internal.raft_apply_item
@@ -451,10 +697,10 @@ BEGIN
 
     IF NOT FOUND THEN
         INSERT INTO ariabc_internal.raft_apply_schema_meta (schema_version)
-        VALUES (4);
+        VALUES (5);
     ELSIF current_version IN (1, 2) THEN
         UPDATE ariabc_internal.raft_apply_schema_meta
-           SET schema_version = 4
+           SET schema_version = 5
          WHERE schema_version = current_version;
         UPDATE ariabc_internal.merkle_apply_state
            SET applied_seq = (SELECT next_seq
@@ -503,10 +749,14 @@ BEGIN
              WHERE singleton;
         END;
         UPDATE ariabc_internal.raft_apply_schema_meta
-           SET schema_version = 4
+           SET schema_version = 5
          WHERE schema_version = 3;
     ELSIF current_version = 4 THEN
-        NULL;
+        UPDATE ariabc_internal.raft_apply_schema_meta
+           SET schema_version = 5
+         WHERE schema_version = 4;
+    ELSIF current_version = 5 THEN
+		NULL;
     ELSE
         RAISE EXCEPTION 'unsupported raft_apply schema_version %', current_version;
     END IF;
@@ -524,7 +774,12 @@ DROP FUNCTION IF EXISTS ariabc_internal.check_claimed_rows_trigger();
 
 REVOKE ALL ON ariabc_internal.merkle_apply_counter,
                     ariabc_internal.merkle_apply_state,
-                    ariabc_internal.merkle_local_delta
+                    ariabc_internal.merkle_local_delta,
+                    ariabc_internal.merkle_dynamic_state,
+                    ariabc_internal.merkle_dynamic_node,
+                    ariabc_internal.merkle_dynamic_leaf_item,
+                    ariabc_internal.merkle_dynamic_build_stage,
+                    ariabc_internal.merkle_dynamic_seen
 FROM PUBLIC;
 -- Status and freshness checks are safe to expose read-only.  Mutation paths
 -- execute inside trusted backend code and the applier functions remain
@@ -537,4 +792,10 @@ REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_rebuild_legacy_indexes() FROM PUBLI
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_apply_until(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_verify(regclass) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_verify_index(regclass) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_verify(regclass) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_get_partition_roots(regclass) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_get_ranges(regclass, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_get_range_items(regclass, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_get_leaf_frontier(regclass) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_tree_stats(regclass) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_catalog.merkle_recovery_status() TO PUBLIC;

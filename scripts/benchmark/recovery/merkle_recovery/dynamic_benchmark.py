@@ -1,0 +1,704 @@
+"""End-to-end dynamic Merkle recovery benchmark path."""
+
+from __future__ import annotations
+
+import json
+import time
+from contextlib import contextmanager
+from typing import Any, Mapping, Sequence
+
+from .db import execute, scalar
+from .dynamic import (
+    LocalisationTrace,
+    LogicalRange,
+    RangeItem,
+    RangeSummary,
+    enforce_candidate_summary_bound,
+    compare_range_items,
+    localise_bad_ranges,
+)
+from .dynamic_db import (
+    apply_set_based_repairs,
+    dynamic_apply_pending,
+    dynamic_side_table_plan_checks,
+    dynamic_storage_scan_snapshot,
+    dynamic_tree_stats,
+    dynamic_verify,
+    exact_heap_fetch_plan,
+    fetch_exact_healthy_rows,
+    partition_roots,
+    range_items,
+    range_summaries,
+)
+from .config import DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT
+from .metrics import Metrics, add_warning, finalize_metrics
+from .repair import seq_scan_delta, seq_scan_snapshot
+from .verification import schema_fidelity_checks
+
+
+def _now_ms() -> float:
+    return time.perf_counter() * 1000.0
+
+
+@contextmanager
+def _timer(store: dict[str, float], name: str):
+    start = _now_ms()
+    yield
+    store[name] = store.get(name, 0.0) + _now_ms() - start
+
+
+def dynamic_recovery_run_id(
+    manifest: Mapping[str, Any], repetition: int, profile_label: str
+) -> str:
+    label = profile_label or "dynamic"
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in label)
+    return (
+        f"{manifest['experiment']}-n{manifest['tuple_count']}"
+        f"-p{manifest['partitions']}-k{manifest['fanout']}"
+        f"-cap{manifest['leaf_capacity']}-merge{manifest['merge_threshold']}"
+        f"-bad{len(manifest['bad_ranges'])}-c{len(manifest['corruptions'])}"
+        f"-{safe}-merkle-dynamic-r{repetition}"
+    )
+
+
+def _canonical_stats(stats: Mapping[str, Any]) -> dict[str, Any]:
+    def first(*names: str, default: Any = 0) -> Any:
+        for name in names:
+            if name in stats:
+                return stats[name]
+        return default
+
+    state_value = first("state", "readiness_state", "status", default="")
+    if not state_value and "ready" in stats:
+        state_value = "READY" if bool(stats["ready"]) else "CATCHING_UP"
+    return {
+        "state": str(state_value).upper(),
+        "tuple_count": int(first("tuple_count", "item_count", "total_items", default=0)),
+        "max_leaf_occupancy": int(
+            first("max_leaf_occupancy", "max_leaf_items", "maximum_leaf_count", default=-1)
+        ),
+        "max_depth": int(first("max_depth", "tree_depth", "maximum_depth", default=-1)),
+        "split_count": int(first("split_count", "splits", "total_splits", default=0)),
+        "merge_count": int(first("merge_count", "merges", "total_merges", default=0)),
+        "dynamic_bytes": int(
+            first(
+                "dynamic_bytes", "total_dynamic_bytes", "storage_bytes", "item_bytes",
+                default=0,
+            )
+        ),
+        "raw_stats": dict(stats),
+    }
+
+
+def _root_tuple_count(roots: Mapping[int, RangeSummary]) -> int:
+    return sum(summary.tuple_count for summary in roots.values())
+
+
+def _storage_scan_delta(before: Mapping[str, int], after: Mapping[str, int]) -> int:
+    return sum(
+        max(0, int(after.get(relation, 0)) - int(before.get(relation, 0)))
+        for relation in set(before) | set(after)
+    )
+
+
+def _roots_equal(
+    healthy: Mapping[int, RangeSummary], damaged: Mapping[int, RangeSummary]
+) -> bool:
+    partitions = set(healthy) | set(damaged)
+    for partition_id in partitions:
+        h = healthy.get(partition_id)
+        d = damaged.get(partition_id)
+        if h is None or d is None or h.signature != d.signature:
+            return False
+    return True
+
+
+def _localise(
+    conn,
+    leaf_capacity: int,
+    logical_fanout: int,
+) -> tuple[list[LogicalRange], LocalisationTrace]:
+    trace = LocalisationTrace()
+    healthy = partition_roots(conn, "healthy")
+    damaged = partition_roots(conn, "damaged")
+
+    def fetch(schema: str, ranges: Sequence[LogicalRange]):
+        return range_summaries(conn, schema, ranges)
+
+    bad = localise_bad_ranges(
+        healthy,
+        damaged,
+        fetch,
+        leaf_capacity=leaf_capacity,
+        logical_fanout=logical_fanout,
+        trace=trace,
+    )
+    return bad, trace
+
+
+def _append_trace_rows(
+    rows_out: list[dict[str, Any]],
+    run_id: str,
+    stage: str,
+    trace: LocalisationTrace,
+) -> None:
+    for schema, summaries in (
+        ("healthy", trace.healthy_summary_rows),
+        ("damaged", trace.damaged_summary_rows),
+    ):
+        for ordinal, summary in enumerate(summaries):
+            logical_range = summary.logical_range
+            rows_out.append(
+                {
+                    "run_id": run_id,
+                    "stage": stage,
+                    "schema": schema,
+                    "ordinal": ordinal,
+                    "partition_id": logical_range.partition_id,
+                    "prefix_length": logical_range.prefix_length,
+                    "prefix_value": logical_range.prefix_hex,
+                    "logical_range": logical_range.label,
+                    "tuple_count": summary.tuple_count,
+                    "data_xor": summary.data_xor.hex(),
+                }
+            )
+
+
+def _append_item_rows(
+    rows_out: list[dict[str, Any]],
+    run_id: str,
+    schema: str,
+    items: Sequence[RangeItem],
+    repair_operations: Mapping[int, str],
+) -> None:
+    for item in items:
+        rows_out.append(
+            {
+                "run_id": run_id,
+                "schema": schema,
+                "logical_range": item.logical_range.label,
+                "partition_id": item.logical_range.partition_id,
+                "prefix_length": item.logical_range.prefix_length,
+                "prefix_value": item.logical_range.prefix_hex,
+                "ycsb_key": item.key,
+                "route_digest": item.route_digest.hex(),
+                "tuple_hash": item.tuple_hash.hex(),
+                "repair_operation": repair_operations.get(item.key, "none"),
+            }
+        )
+
+
+def _audit_dynamic(
+    conn,
+    run_id: str,
+    leaf_capacity: int,
+) -> dict[str, Any]:
+    phase: dict[str, float] = {}
+    with _timer(phase, "audit_exact_table_compare_ms"):
+        healthy_table_count = int(scalar(conn, "SELECT count(*) FROM healthy.usertable"))
+        damaged_table_count = int(scalar(conn, "SELECT count(*) FROM damaged.usertable"))
+        healthy_minus_damaged = int(
+            scalar(
+                conn,
+                """
+                SELECT count(*) FROM (
+                    SELECT * FROM healthy.usertable
+                    EXCEPT ALL
+                    SELECT * FROM damaged.usertable
+                ) AS diff
+                """,
+            )
+        )
+        damaged_minus_healthy = int(
+            scalar(
+                conn,
+                """
+                SELECT count(*) FROM (
+                    SELECT * FROM damaged.usertable
+                    EXCEPT ALL
+                    SELECT * FROM healthy.usertable
+                ) AS diff
+                """,
+            )
+        )
+    with _timer(phase, "audit_dynamic_roots_ms"):
+        healthy_roots = partition_roots(conn, "healthy")
+        damaged_roots = partition_roots(conn, "damaged")
+        roots_equal = _roots_equal(healthy_roots, damaged_roots)
+        healthy_count = _root_tuple_count(healthy_roots)
+        damaged_count = _root_tuple_count(damaged_roots)
+    with _timer(phase, "audit_dynamic_verify_ms"):
+        healthy_verify = dynamic_verify(conn, "healthy")
+        damaged_verify = dynamic_verify(conn, "damaged")
+    with _timer(phase, "audit_dynamic_stats_ms"):
+        healthy_stats = _canonical_stats(dynamic_tree_stats(conn, "healthy"))
+        damaged_stats = _canonical_stats(dynamic_tree_stats(conn, "damaged"))
+    with _timer(phase, "audit_schema_fidelity_ms"):
+        schema_rows = schema_fidelity_checks(
+            conn, run_id, "merkle_dynamic", merkle_mode="dynamic"
+        )
+        schema_ok = all(int(row["match"]) == 1 for row in schema_rows)
+    index_count = int(
+        scalar(
+            conn,
+            """
+            SELECT count(*) FROM pg_indexes
+            WHERE schemaname = 'damaged'
+              AND indexname IN ('usertable_pkey', 'usertable_merkle_idx')
+            """,
+        )
+    )
+    static_lookup_index_count = int(
+        scalar(
+            conn,
+            """
+            SELECT count(*) FROM pg_indexes
+            WHERE schemaname IN ('healthy', 'damaged')
+              AND (
+                    indexname = 'usertable_leaf_lookup_idx'
+                 OR indexdef LIKE '%merkle_bucket_for_key%'
+              )
+            """,
+        )
+    )
+    ok = (
+        healthy_minus_damaged == 0
+        and damaged_minus_healthy == 0
+        and roots_equal
+        and healthy_count == damaged_count
+        and healthy_count == healthy_table_count
+        and damaged_count == damaged_table_count
+        and healthy_verify
+        and damaged_verify
+        and healthy_stats["state"] == "READY"
+        and damaged_stats["state"] == "READY"
+        and 0 <= healthy_stats["max_leaf_occupancy"] <= leaf_capacity
+        and 0 <= damaged_stats["max_leaf_occupancy"] <= leaf_capacity
+        and schema_ok
+        and index_count == 2
+        and static_lookup_index_count == 0
+    )
+    return {
+        "healthy_minus_damaged": healthy_minus_damaged,
+        "damaged_minus_healthy": damaged_minus_healthy,
+        "roots_match": roots_equal,
+        "healthy_root_tuple_count": healthy_count,
+        "damaged_root_tuple_count": damaged_count,
+        "healthy_table_tuple_count": healthy_table_count,
+        "damaged_table_tuple_count": damaged_table_count,
+        "root_counts_match": (
+            healthy_count == damaged_count
+            and healthy_count == healthy_table_count
+            and damaged_count == damaged_table_count
+        ),
+        "healthy_dynamic_verify": healthy_verify,
+        "damaged_dynamic_verify": damaged_verify,
+        "healthy_stats": healthy_stats,
+        "damaged_stats": damaged_stats,
+        "schema_fidelity_ok": schema_ok,
+        "schema_fidelity_rows": schema_rows,
+        "damaged_required_indexes": index_count,
+        "static_lookup_index_count": static_lookup_index_count,
+        "audit_phase": phase,
+        "audit_validation_ms": sum(phase.values()),
+        "ok": ok,
+    }
+
+
+def repair_dynamic_merkle(
+    conn,
+    manifest: dict[str, Any],
+    repetition: int,
+    schema_rows_out: list[dict[str, Any]],
+    range_rows_out: list[dict[str, Any]],
+    item_rows_out: list[dict[str, Any]],
+    heap_rows_out: list[dict[str, Any]],
+    tree_stats_rows_out: list[dict[str, Any]],
+    planner_rows_out: list[dict[str, Any]],
+    *,
+    profile_label: str,
+    audit_mode: str,
+) -> Metrics:
+    if audit_mode != "full":
+        raise ValueError("dynamic Merkle acceptance requires --audit-mode full")
+    leaf_capacity = int(manifest["leaf_capacity"])
+    logical_fanout = int(manifest["fanout"])
+    run_id = dynamic_recovery_run_id(manifest, repetition, profile_label)
+    m = Metrics(
+        run_id=run_id,
+        experiment=str(manifest["experiment"]),
+        method="merkle_dynamic",
+        tuple_count=int(manifest["tuple_count"]),
+        partitions=int(manifest["partitions"]),
+        leaves_per_partition=0,
+        fanout=int(manifest["fanout"]),
+        bad_leaf_count=len(manifest["bad_ranges"]),
+        corrupted_tuple_count=len(manifest["corruptions"]),
+        repetition=repetition,
+        corruption_mode=str(manifest.get("corruption_mode", "paper-update-only")),
+        profile_label=profile_label,
+    )
+    m.counters["manifest_sha256"] = __import__("hashlib").sha256(
+        json.dumps(manifest, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    m.counters["merkle_mode"] = "dynamic"
+
+    total_start = _now_ms()
+    paper_start = total_start
+    recovery_scan_before = seq_scan_snapshot(conn)
+    before_stats = {
+        schema: _canonical_stats(dynamic_tree_stats(conn, schema))
+        for schema in ("healthy", "damaged")
+    }
+    dynamic_scan_before = dynamic_storage_scan_snapshot(conn)
+
+    with _timer(m.phase, "tree_localisation_ms"):
+        bad_ranges, trace = _localise(conn, leaf_capacity, logical_fanout)
+    _append_trace_rows(range_rows_out, run_id, "initial", trace)
+
+    with _timer(m.phase, "candidate_summary_fetch_ms"):
+        healthy_items = range_items(conn, "healthy", bad_ranges)
+        damaged_items = range_items(conn, "damaged", bad_ranges)
+    for schema, items in (("healthy", healthy_items), ("damaged", damaged_items)):
+        counts: dict[LogicalRange, int] = {}
+        for item in items:
+            counts[item.logical_range] = counts.get(item.logical_range, 0) + 1
+        oversized = {
+            logical_range.label: count
+            for logical_range, count in counts.items()
+            if count > leaf_capacity
+        }
+        if oversized:
+            raise RuntimeError(f"{schema} bounded dynamic range overflow: {oversized}")
+
+    candidate_summary_limit = enforce_candidate_summary_bound(
+        len(healthy_items),
+        len(damaged_items),
+        bad_range_count=len(manifest["bad_ranges"]),
+        leaf_capacity=leaf_capacity,
+    )
+    summary_items = len(healthy_items) + len(damaged_items)
+    if candidate_summary_limit != DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT:
+        raise RuntimeError(
+            "dynamic candidate-summary contract drift: "
+            f"computed_limit={candidate_summary_limit}, "
+            f"acceptance_limit={DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT}"
+        )
+
+    with _timer(m.phase, "summary_comparison_ms"):
+        repairs = compare_range_items(healthy_items, damaged_items)
+    operations = {
+        **{key: "insert" for key in repairs.inserts},
+        **{key: "update" for key in repairs.updates},
+        **{key: "delete" for key in repairs.deletes},
+    }
+    _append_item_rows(item_rows_out, run_id, "healthy", healthy_items, operations)
+    _append_item_rows(item_rows_out, run_id, "damaged", damaged_items, operations)
+
+    with _timer(m.phase, "exact_heap_fetch_ms"):
+        plan = exact_heap_fetch_plan(conn, repairs.healthy_heap_keys)
+        plan.update({"run_id": run_id, "schema": "healthy"})
+        planner_rows_out.append(plan)
+        healthy_rows = fetch_exact_healthy_rows(conn, repairs.healthy_heap_keys)
+    for row in healthy_rows:
+        key = int(row["ycsb_key"])
+        heap_rows_out.append(
+            {
+                "run_id": run_id,
+                "schema": "healthy",
+                "ycsb_key": key,
+                "repair_operation": operations[key],
+                "full_row_json": json.dumps(dict(row), sort_keys=True, default=str),
+            }
+        )
+
+    with _timer(m.phase, "repair_write_ms"):
+        repair_result = apply_set_based_repairs(conn, repairs, healthy_rows)
+
+    with _timer(m.phase, "targeted_post_repair_confirmation_ms"):
+        dynamic_apply_pending(conn)
+        remaining_bad_ranges, confirmation_trace = _localise(
+            conn, leaf_capacity, logical_fanout
+        )
+    _append_trace_rows(range_rows_out, run_id, "confirmation", confirmation_trace)
+    recovery_end = _now_ms()
+    paper_end = recovery_end
+
+    recovery_scan_after = seq_scan_snapshot(conn)
+    recovery_seq_scans = seq_scan_delta(recovery_scan_before, recovery_scan_after)
+    dynamic_scan_after = dynamic_storage_scan_snapshot(conn)
+    dynamic_storage_seq_scans = _storage_scan_delta(
+        dynamic_scan_before, dynamic_scan_after
+    )
+
+    audit_scan_before = seq_scan_snapshot(conn)
+    audit_start = _now_ms()
+    with _timer(m.phase, "audit_dynamic_side_table_plans_ms"):
+        side_table_plans: list[dict[str, Any]] = []
+        for schema in ("healthy", "damaged"):
+            side_table_plans.extend(
+                dynamic_side_table_plan_checks(conn, schema, bad_ranges)
+            )
+        for side_plan in side_table_plans:
+            side_plan["run_id"] = run_id
+            planner_rows_out.append(side_plan)
+    audit = _audit_dynamic(conn, run_id, leaf_capacity)
+    audit_end = _now_ms()
+    audit_scan_after = seq_scan_snapshot(conn)
+    audit_seq_scans = seq_scan_delta(audit_scan_before, audit_scan_after)
+    schema_rows_out.extend(audit["schema_fidelity_rows"])
+    m.phase.update(audit["audit_phase"])
+
+    for schema in ("healthy", "damaged"):
+        tree_stats_rows_out.append(
+            {
+                "run_id": run_id,
+                "schema": schema,
+                "stage": "pre_recovery",
+                **before_stats[schema],
+                "raw_stats": json.dumps(before_stats[schema]["raw_stats"], sort_keys=True, default=str),
+            }
+        )
+        final_stats = audit[f"{schema}_stats"]
+        tree_stats_rows_out.append(
+            {
+                "run_id": run_id,
+                "schema": schema,
+                "stage": "post_audit",
+                **final_stats,
+                "raw_stats": json.dumps(final_stats["raw_stats"], sort_keys=True, default=str),
+            }
+        )
+
+    summary_items = len(healthy_items) + len(damaged_items)
+    candidate_summary_bytes = sum(
+        item.encoded_bytes for item in (*healthy_items, *damaged_items)
+    )
+    exact_heap_payload_bytes = sum(
+        len(json.dumps(dict(row), sort_keys=True, default=str).encode("utf-8"))
+        for row in healthy_rows
+    )
+    total_repairs = repair_result.total
+    healthy_stats = audit["healthy_stats"]
+    damaged_stats = audit["damaged_stats"]
+    m.counters.update(
+        {
+            "partition_root_batches": 2,
+            "partition_root_batches_ok": 1,
+            "targeted_confirmation_root_batches": 2,
+            "bad_partition_count": trace.bad_partitions,
+            "bad_range_count": len(bad_ranges),
+            "bad_leaf_count": len(bad_ranges),
+            "logical_ranges_compared": trace.logical_ranges_compared,
+            "range_summary_rows_read": trace.range_summary_rows,
+            "localisation_levels_visited": trace.levels_visited,
+            "healthy_candidate_summary_items_fetched": len(healthy_items),
+            "damaged_candidate_summary_items_fetched": len(damaged_items),
+            "dynamic_candidate_summary_items_fetched": summary_items,
+            "dynamic_candidate_summary_item_limit": candidate_summary_limit,
+            "candidate_summary_bound_ok": int(summary_items <= candidate_summary_limit),
+            "candidate_summary_bytes": candidate_summary_bytes,
+            "exact_healthy_heap_rows_fetched": len(healthy_rows),
+            "exact_heap_payload_bytes": exact_heap_payload_bytes,
+            "full_damaged_heap_rows_fetched": 0,
+            "rows_inserted": repair_result.rows_inserted,
+            "rows_updated": repair_result.rows_updated,
+            "rows_deleted": repair_result.rows_deleted,
+            "total_rows_repaired": total_repairs,
+            "remaining_bad_range_count": len(remaining_bad_ranges),
+            "planner_checks_passed": int(
+                bool(plan["index_used"])
+                and all(bool(row["index_used"]) for row in side_table_plans)
+            ),
+            "dynamic_side_table_plan_count": len(side_table_plans),
+            "dynamic_side_table_seq_scan_plans": sum(
+                1 for row in side_table_plans if not bool(row["index_used"])
+            ),
+            "dynamic_side_table_rows_examined": sum(
+                int(row["rows_examined"]) for row in side_table_plans
+            ),
+            "dynamic_side_table_shared_hit_blocks": sum(
+                int(row["shared_hit_blocks"]) for row in side_table_plans
+            ),
+            "dynamic_side_table_shared_read_blocks": sum(
+                int(row["shared_read_blocks"]) for row in side_table_plans
+            ),
+            "dynamic_storage_seq_scan_delta": dynamic_storage_seq_scans,
+            "recovery_user_table_seq_scan_delta": recovery_seq_scans,
+            "audit_mode": "full",
+            "full_audit_skipped": 0,
+            "audit_user_table_seq_scan_delta": audit_seq_scans,
+            "audit_validation_ms": audit["audit_validation_ms"],
+            "schema_fidelity_ok": int(audit["schema_fidelity_ok"]),
+            "static_lookup_index_count": audit["static_lookup_index_count"],
+            "healthy_minus_damaged": audit["healthy_minus_damaged"],
+            "damaged_minus_healthy": audit["damaged_minus_healthy"],
+            "roots_match": int(audit["roots_match"]),
+            "root_counts_match": int(audit["root_counts_match"]),
+            "healthy_root_tuple_count": audit["healthy_root_tuple_count"],
+            "damaged_root_tuple_count": audit["damaged_root_tuple_count"],
+            "healthy_table_tuple_count": audit["healthy_table_tuple_count"],
+            "damaged_table_tuple_count": audit["damaged_table_tuple_count"],
+            "healthy_dynamic_verify": int(audit["healthy_dynamic_verify"]),
+            "damaged_dynamic_verify": int(audit["damaged_dynamic_verify"]),
+            "healthy_dynamic_state": healthy_stats["state"],
+            "damaged_dynamic_state": damaged_stats["state"],
+            "healthy_max_leaf_occupancy": healthy_stats["max_leaf_occupancy"],
+            "damaged_max_leaf_occupancy": damaged_stats["max_leaf_occupancy"],
+            "healthy_max_depth": healthy_stats["max_depth"],
+            "damaged_max_depth": damaged_stats["max_depth"],
+            "healthy_split_count": healthy_stats["split_count"],
+            "damaged_split_count": damaged_stats["split_count"],
+            "healthy_merge_count": healthy_stats["merge_count"],
+            "damaged_merge_count": damaged_stats["merge_count"],
+            "healthy_dynamic_bytes": healthy_stats["dynamic_bytes"],
+            "damaged_dynamic_bytes": damaged_stats["dynamic_bytes"],
+        }
+    )
+
+    acceptance_failures: list[str] = []
+    checks = [
+        (audit["healthy_minus_damaged"] == 0, "healthy EXCEPT damaged is nonzero"),
+        (audit["damaged_minus_healthy"] == 0, "damaged EXCEPT healthy is nonzero"),
+        (audit["roots_match"], "dynamic roots differ"),
+        (audit["root_counts_match"], "dynamic root counts differ"),
+        (audit["healthy_dynamic_verify"], "healthy dynamic verify failed"),
+        (audit["damaged_dynamic_verify"], "damaged dynamic verify failed"),
+        (not remaining_bad_ranges, "post-repair logical ranges still differ"),
+        (healthy_stats["state"] == "READY", "healthy dynamic state is not READY"),
+        (damaged_stats["state"] == "READY", "damaged dynamic state is not READY"),
+        (
+            0 <= healthy_stats["max_leaf_occupancy"] <= leaf_capacity,
+            "healthy max leaf occupancy exceeds capacity",
+        ),
+        (
+            0 <= damaged_stats["max_leaf_occupancy"] <= leaf_capacity,
+            "damaged max leaf occupancy exceeds capacity",
+        ),
+        (total_repairs == len(manifest["corruptions"]), "repair count differs from manifest"),
+        (recovery_seq_scans == 0, "timed recovery performed user-table sequential scan"),
+        (
+            dynamic_storage_seq_scans == 0,
+            "timed recovery performed dynamic side-table sequential scan",
+        ),
+        (bool(plan["index_used"]), "exact healthy heap fetch did not use primary index"),
+        (
+            all(bool(row["index_used"]) for row in side_table_plans),
+            "dynamic side-table planner proof failed",
+        ),
+        (audit["static_lookup_index_count"] == 0, "static bucket lookup index exists"),
+        (audit["schema_fidelity_ok"], "dynamic schema fidelity failed"),
+        (audit["ok"], "full dynamic audit failed"),
+    ]
+    if manifest.get("corruption_mode") in ("paper-update-only", "update-only"):
+        checks.extend(
+            [
+                (total_repairs == 300, "dynamic acceptance requires exactly 300 repairs"),
+                (
+                    summary_items <= DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
+                    "dynamic candidate summary items exceed 4800",
+                ),
+                (len(healthy_rows) == len(repairs.updates), "update-only heap rows are not exact"),
+            ]
+        )
+    for ok, reason in checks:
+        if not ok:
+            acceptance_failures.append(reason)
+    if acceptance_failures:
+        add_warning(m, "; ".join(acceptance_failures))
+
+    cleanup_end = _now_ms()
+    finalize_metrics(
+        m,
+        total_start_ms=total_start,
+        paper_start_ms=paper_start,
+        paper_end_ms=paper_end,
+        recovery_start_ms=paper_start,
+        recovery_end_ms=recovery_end,
+        audit_start_ms=audit_start,
+        audit_end_ms=audit_end,
+        cleanup_end_ms=cleanup_end,
+        audit_skipped=False,
+    )
+    m.phase["merkle_total_ms"] = m.end_to_end_observed_ms
+    return m
+
+
+def run_one_dynamic_manifest(
+    conn,
+    manifest: dict[str, Any],
+    repetitions: int,
+    schema_rows_out: list[dict[str, Any]],
+    range_rows_out: list[dict[str, Any]],
+    item_rows_out: list[dict[str, Any]],
+    heap_rows_out: list[dict[str, Any]],
+    tree_stats_rows_out: list[dict[str, Any]],
+    planner_rows_out: list[dict[str, Any]],
+    result_dir,
+    progress_state: dict[str, Any],
+    *,
+    profile_label: str,
+    audit_mode: str,
+) -> list[Metrics]:
+    """Corrupt, catch up, recover, and audit one dynamic dataset repeatedly."""
+    from .manifest import apply_corruption
+    from .reporting import emit_progress
+
+    metrics: list[Metrics] = []
+    for repetition in range(repetitions):
+        run_id = dynamic_recovery_run_id(manifest, repetition, profile_label)
+        emit_progress(
+            result_dir,
+            event="method_start",
+            run_id=run_id,
+            experiment=manifest["experiment"],
+            profile_label=profile_label,
+            method="merkle_dynamic",
+            merkle_mode="dynamic",
+            corruption_mode=manifest.get("corruption_mode", "paper-update-only"),
+            tuple_count=manifest["tuple_count"],
+            partitions=manifest["partitions"],
+            bad_range_count=len(manifest["bad_ranges"]),
+            repetition=repetition,
+            completed_runs=progress_state["completed_runs"],
+            total_runs=progress_state["total_runs"],
+        )
+        started = _now_ms()
+        apply_corruption(conn, manifest)
+        # The corruption must be durably represented in the damaged dynamic
+        # tree before recovery localisation begins.
+        dynamic_apply_pending(conn)
+        metric = repair_dynamic_merkle(
+            conn,
+            manifest,
+            repetition,
+            schema_rows_out,
+            range_rows_out,
+            item_rows_out,
+            heap_rows_out,
+            tree_stats_rows_out,
+            planner_rows_out,
+            profile_label=profile_label,
+            audit_mode=audit_mode,
+        )
+        metrics.append(metric)
+        progress_state["completed_runs"] += 1
+        emit_progress(
+            result_dir,
+            event="method_complete",
+            run_id=run_id,
+            experiment=metric.experiment,
+            profile_label=profile_label,
+            method=metric.method,
+            merkle_mode="dynamic",
+            tuple_count=metric.tuple_count,
+            partitions=metric.partitions,
+            bad_range_count=metric.counters.get("bad_range_count", 0),
+            repetition=repetition,
+            valid=metric.valid,
+            warning=metric.warning,
+            method_elapsed_ms=round(_now_ms() - started, 3),
+            completed_runs=progress_state["completed_runs"],
+            total_runs=progress_state["total_runs"],
+        )
+    return metrics

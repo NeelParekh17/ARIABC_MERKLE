@@ -10,7 +10,12 @@ from .localisation import detect_bad_leaves
 from .repair import fetch_leaf_rows, seq_scan_delta, seq_scan_snapshot
 
 
-def schema_fidelity_checks(conn, run_id: str, method: str) -> list[dict[str, Any]]:
+def schema_fidelity_checks(
+    conn,
+    run_id: str,
+    method: str,
+    merkle_mode: str = "static",
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
     def add(check_name: str, healthy_value: Any, damaged_value: Any) -> None:
@@ -62,7 +67,10 @@ def schema_fidelity_checks(conn, run_id: str, method: str) -> list[dict[str, Any
         )
     add("constraints", constraints["healthy"], constraints["damaged"])
 
-    for index_name in ("usertable_pkey", "usertable_merkle_idx", "usertable_leaf_lookup_idx"):
+    index_names = ["usertable_pkey", "usertable_merkle_idx"]
+    if merkle_mode == "static":
+        index_names.append("usertable_leaf_lookup_idx")
+    for index_name in index_names:
         definitions: dict[str, Any] = {}
         for schema in ("healthy", "damaged"):
             definition = scalar(

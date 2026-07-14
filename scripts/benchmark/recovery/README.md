@@ -29,7 +29,32 @@ damaged.usertable   ← replica under test (corrupted, then repaired)
 ./.venv/bin/python3 scripts/benchmark/recovery/run_merkle_recovery_benchmark.py \
   --dsn "host=127.0.0.1 port=5432 dbname=postgres user=neel" \
   --profile paper
+
+# dynamic acceptance — 1 M / 3 M / 5 M, 5 repetitions, full audit
+./.venv/bin/python3 scripts/benchmark/recovery/run_merkle_recovery_benchmark.py \
+  --dsn "host=127.0.0.1 port=5432 dbname=postgres user=neel" \
+  --profile dynamic-size-scaling-k75-c300 \
+  --audit-mode full
 ```
+
+## Dynamic Merkle acceptance profile
+
+`dynamic-size-scaling-k75-c300` is separate from every static paper profile.
+It creates Merkle indexes with `dynamic=on`, P=200, logical fanout 32, leaf
+capacity/split threshold 32, and merge threshold 8. It never creates the
+static `merkle_bucket_for_key(...)` expression indexes.
+
+The default campaign runs 1 M, 3 M, and 5 M tuples with 75 corrupted bounded
+ranges, 300 update corruptions, five repetitions, and mandatory full audit.
+Recovery compares shape-independent logical prefix summaries
+`(tuple_count,data_xor)`, descends MSB-first, fetches at most 4,800 key/hash
+summary rows, fetches full healthy heap rows only for exact insert/update keys,
+uses set-based repair DML, drains the durable applier, relocalises, and audits.
+
+Dynamic acceptance additionally requires both table differences to be zero,
+matching root hashes and counts, `merkle_dynamic_verify()` true on both sides,
+no remaining bad logical range, both indexes `READY`, maximum leaf occupancy
+at most 32, exactly 300 repairs, and no timed user-table sequential scan.
 
 ## Paper profiles
 
@@ -114,6 +139,14 @@ schema_fidelity.csv
 dataset_sizes.csv
 bucket_consistency_summary.csv
 verification_results.csv
+dynamic_logical_ranges.csv     every logical summary request/result
+dynamic_summary_items.csv      bounded key/route/hash summaries
+dynamic_exact_heap_rows.csv    exact full healthy rows fetched for repair
+dynamic_tree_stats.csv         state/depth/occupancy/split/merge/byte evidence
+dynamic_index_plans.csv        heap and dynamic side-table EXPLAIN/BUFFERS proof
+dynamic_preflight.json         resolved mode/geometry/API/index fail-fast proof
+dynamic_crash_gate_summary.json destructive crash/lifecycle acceptance summary
+postgres_memory.csv            remote PostgreSQL RSS/private-PSS samples
 plots/                         auto-generated SVGs
 stdout.log / stderr.log
 ```
@@ -137,6 +170,19 @@ Every `runs.csv` row includes:
 | `mean_rows_per_bad_leaf`  | Mean candidate rows per bad leaf               |
 | `p95_rows_per_bad_leaf`   | p95 candidate rows per bad leaf                |
 
+Dynamic schema-v5 runs use separate, unambiguous counters.  The candidate
+payload is canonical key/route/tuple-hash summaries, not full heap rows:
+
+| Counter | Dynamic acceptance meaning |
+|---|---|
+| `dynamic_candidate_summary_items_fetched` | Both replicas combined; hard limit `2 * 75 * 32 = 4800` |
+| `candidate_summary_bound_ok` | Must be `1` before comparison or repair starts |
+| `candidate_summary_bytes` | Encoded key plus two 32-byte digests |
+| `exact_healthy_heap_rows_fetched` | Full healthy heap rows; exactly 300 for update-only acceptance |
+| `full_damaged_heap_rows_fetched` | Must remain `0` |
+| `dynamic_storage_seq_scan_delta` | Timed node/leaf-item side-table scans; must remain `0` |
+| `dynamic_side_table_seq_scan_plans` | Post-timing EXPLAIN/BUFFERS failures; must remain `0` |
+
 Audit time is **excluded** from `paper_style_total_ms`.
 
 ## Correctness tests
@@ -159,7 +205,7 @@ check out that branch and use the original `run_recovery_benchmark.py`.
 
 ## Benchmark schema version
 
-All results produced by this driver are:
+Static results produced by this driver use:
 
 ```text
 benchmark_schema_version = 3
@@ -167,5 +213,8 @@ timing_contract_version  = 1
 ```
 
 Version 3 is the Merkle-only static-recovery benchmark.
+Version 4 was the initial dynamic-recovery benchmark.
+Version 5 is the fail-closed dynamic benchmark with the explicit 4,800-summary
+bound and node/leaf-item side-table plan evidence.
 Version 2 was the archived three-method CTA/disk/Merkle benchmark.
-Do not pool v2 and v3 results in one plot.
+Do not pool v2, v3, v4, and v5 results without an explicit comparison design.

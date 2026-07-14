@@ -2014,8 +2014,8 @@ bool pg_executor::initialize_bcdb() {
             schema_version = std::stoi(PQgetvalue(res, 0, 0));
             PQclear(res);
         }
-        if (schema_version != 4) {
-            std::cerr << "Safe mode validation failed: unsupported schema version " << schema_version << " (expected 4)" << std::endl;
+        if (schema_version != 5) {
+            std::cerr << "Safe mode validation failed: unsupported schema version " << schema_version << " (expected 5)" << std::endl;
             PQfinish(c);
             bcdb_init_failed_ = true;
             return false;

@@ -60,10 +60,18 @@ typedef struct MerkleEventArray
 	MerkleLeafEvent *leaf;
 	int			nleaf;
 	int			leaf_capacity;
+	MerkleDynamicTransition *dynamic;
+	int			ndynamic;
+	int			dynamic_capacity;
 	MerkleNodeEvent *node;
 	int			nnode;
 	int			node_capacity;
 } MerkleEventArray;
+
+#define MERKLE_DELTA_V2_KIND_STATIC        1U
+#define MERKLE_DELTA_V2_KIND_DYNAMIC       2U
+#define MERKLE_DELTA_V2_FLAG_HAS_OLD       (1U << 0)
+#define MERKLE_DELTA_V2_FLAG_HAS_NEW       (1U << 1)
 
 static bool merkle_state_relations_exist(void);
 static void merkle_parse_delta_blob(bytea *blob, uint64 seq,
@@ -111,6 +119,17 @@ merkle_get_u64(const char *src)
 	return pg_ntoh64(value);
 }
 
+static bool
+merkle_bytes_are_zero(const char *src, Size length)
+{
+	Size i;
+
+	for (i = 0; i < length; i++)
+		if ((unsigned char) src[i] != 0)
+			return false;
+	return true;
+}
+
 static void
 merkle_append_leaf_event(MerkleEventArray *events,
 						  const MerkleLeafEvent *event)
@@ -124,6 +143,22 @@ merkle_append_leaf_event(MerkleEventArray *events,
 			repalloc(events->leaf, sizeof(*events->leaf) * events->leaf_capacity);
 	}
 	events->leaf[events->nleaf++] = *event;
+}
+
+static void
+merkle_append_dynamic_event(MerkleEventArray *events,
+							const MerkleDynamicTransition *event)
+{
+	if (events->ndynamic >= events->dynamic_capacity)
+	{
+		events->dynamic_capacity = events->dynamic_capacity == 0 ? 64 :
+			events->dynamic_capacity * 2;
+		events->dynamic = events->dynamic == NULL ?
+			palloc(sizeof(*events->dynamic) * events->dynamic_capacity) :
+			repalloc(events->dynamic,
+					   sizeof(*events->dynamic) * events->dynamic_capacity);
+	}
+	events->dynamic[events->ndynamic++] = *event;
 }
 
 static void
@@ -565,13 +600,9 @@ merkle_parse_delta_blob(bytea *blob, uint64 seq, uint64 expected_log_index,
 	uint32		i;
 	pg_crc32c	crc;
 	char		crc_header[MERKLE_DELTA_HEADER_BYTES];
-	Oid		previous_oid = InvalidOid;
-	RelFileNode previous_rnode;
-	int32		previous_leaf = 0;
-	bool		have_previous_key = false;
 
 	if (blob == NULL)
-		elog(ERROR, "Merkle delta sequence %llu has a NULL v1 blob",
+		elog(ERROR, "Merkle delta sequence %llu has a NULL blob",
 			 (unsigned long long) seq);
 
 	blob = DatumGetByteaPP(PointerGetDatum(blob));
@@ -590,17 +621,20 @@ merkle_parse_delta_blob(bytea *blob, uint64 seq, uint64 expected_log_index,
 	item_ordinal = merkle_get_u32(header + 32);
 	flags = merkle_get_u32(header + 8);
 
-	if (magic != MERKLE_DELTA_MAGIC || version != MERKLE_DELTA_VERSION)
+	if (magic != MERKLE_DELTA_MAGIC ||
+		(version != MERKLE_DELTA_LEGACY_VERSION &&
+		 version != MERKLE_DELTA_VERSION))
 		elog(ERROR,
 			 "Merkle delta sequence %llu has unsupported magic/version 0x%08x/%u",
 			 (unsigned long long) seq, magic, version);
-	if ((uint64) entry_count * MERKLE_DELTA_ENTRY_BYTES != payload_len ||
-		(uint64) MERKLE_DELTA_HEADER_BYTES + payload_len != (uint64) blob_len)
+	if ((uint64) MERKLE_DELTA_HEADER_BYTES + payload_len != (uint64) blob_len ||
+		(version == MERKLE_DELTA_LEGACY_VERSION &&
+		 (uint64) entry_count * MERKLE_DELTA_ENTRY_BYTES != payload_len))
 		elog(ERROR,
 			 "Merkle delta sequence %llu has invalid length/count metadata",
 			 (unsigned long long) seq);
 	if (entry_count == 0)
-		elog(ERROR, "Merkle delta sequence %llu stores an empty v1 batch",
+		elog(ERROR, "Merkle delta sequence %llu stores an empty batch",
 			 (unsigned long long) seq);
 
 	if (merkle_get_u32(header + 36) != 0 || (flags & ~1U) != 0)
@@ -630,62 +664,252 @@ merkle_parse_delta_blob(bytea *blob, uint64 seq, uint64 expected_log_index,
 			 "Merkle delta sequence %llu failed CRC32C validation",
 			 (unsigned long long) seq);
 
-	for (i = 0; i < entry_count; i++)
+	if (version == MERKLE_DELTA_LEGACY_VERSION)
 	{
-		const char *src = payload + ((Size) i * MERKLE_DELTA_ENTRY_BYTES);
-		MerkleLeafEvent event;
-		uint32 format_version;
+		Oid previous_oid = InvalidOid;
+		RelFileNode previous_rnode;
+		int32 previous_leaf = 0;
+		bool have_previous_key = false;
 
-		MemSet(&event, 0, sizeof(event));
-		event.seq = seq;
-		event.index_oid = (Oid) merkle_get_u32(src + 0);
-		event.index_rnode.spcNode = (Oid) merkle_get_u32(src + 4);
-		event.index_rnode.dbNode = (Oid) merkle_get_u32(src + 8);
-		event.index_rnode.relNode = (Oid) merkle_get_u32(src + 12);
-		event.leaf_id = (int32) merkle_get_u32(src + 16);
-		format_version = merkle_get_u32(src + 20);
-		memcpy(event.delta.data, src + 24, MERKLE_HASH_BYTES);
-
-		if (!OidIsValid(event.index_oid) || format_version != MERKLE_VERSION)
-			elog(ERROR,
-				 "Merkle delta sequence %llu references invalid index %u or format %u",
-				 (unsigned long long) seq, event.index_oid, format_version);
-		if (have_previous_key)
+		for (i = 0; i < entry_count; i++)
 		{
+			const char *src = payload + ((Size) i * MERKLE_DELTA_ENTRY_BYTES);
+			MerkleLeafEvent event;
+			uint32 format_version;
+
+			MemSet(&event, 0, sizeof(event));
+			event.seq = seq;
+			event.index_oid = (Oid) merkle_get_u32(src + 0);
+			event.index_rnode.spcNode = (Oid) merkle_get_u32(src + 4);
+			event.index_rnode.dbNode = (Oid) merkle_get_u32(src + 8);
+			event.index_rnode.relNode = (Oid) merkle_get_u32(src + 12);
+			event.leaf_id = (int32) merkle_get_u32(src + 16);
+			format_version = merkle_get_u32(src + 20);
+			memcpy(event.delta.data, src + 24, MERKLE_HASH_BYTES);
+
+			if (!OidIsValid(event.index_oid) || format_version != MERKLE_VERSION)
+				elog(ERROR,
+					 "Merkle delta sequence %llu references invalid index %u or format %u",
+					 (unsigned long long) seq, event.index_oid, format_version);
+			if (have_previous_key)
+			{
+				bool out_of_order = false;
+
+				if (event.index_oid < previous_oid)
+					out_of_order = true;
+				else if (event.index_oid == previous_oid &&
+						 event.index_rnode.spcNode < previous_rnode.spcNode)
+					out_of_order = true;
+				else if (event.index_oid == previous_oid &&
+						 event.index_rnode.spcNode == previous_rnode.spcNode &&
+						 event.index_rnode.dbNode < previous_rnode.dbNode)
+					out_of_order = true;
+				else if (event.index_oid == previous_oid &&
+						 event.index_rnode.spcNode == previous_rnode.spcNode &&
+						 event.index_rnode.dbNode == previous_rnode.dbNode &&
+						 event.index_rnode.relNode < previous_rnode.relNode)
+					out_of_order = true;
+				else if (event.index_oid == previous_oid &&
+						 event.index_rnode.spcNode == previous_rnode.spcNode &&
+						 event.index_rnode.dbNode == previous_rnode.dbNode &&
+						 event.index_rnode.relNode == previous_rnode.relNode &&
+						 event.leaf_id <= previous_leaf)
+					out_of_order = true;
+
+				if (out_of_order)
+					ereport(ERROR,
+							(errmsg("Merkle delta sequence %llu has non-canonical or duplicate entries",
+									(unsigned long long) seq)));
+			}
+			previous_oid = event.index_oid;
+			previous_rnode = event.index_rnode;
+			previous_leaf = event.leaf_id;
+			have_previous_key = true;
+			if (!merkle_hash_is_zero(&event.delta))
+				merkle_append_leaf_event(events, &event);
+		}
+	}
+	else
+	{
+		Size offset = 0;
+		Oid previous_oid = InvalidOid;
+		RelFileNode previous_rnode;
+		uint32 previous_kind = 0;
+		uint32 previous_target = 0;
+		const char *previous_route = NULL;
+		const char *previous_key = NULL;
+		uint32 previous_key_len = 0;
+		bool have_previous_key = false;
+
+		MemSet(&previous_rnode, 0, sizeof(previous_rnode));
+
+		for (i = 0; i < entry_count; i++)
+		{
+			const char *src;
+			uint32 entry_bytes;
+			uint32 kind;
+			Oid index_oid;
+			RelFileNode index_rnode;
+			uint32 format_version;
+			uint32 target;
+			uint32 entry_flags;
+			uint32 key_len;
+			const char *route;
+			const char *key;
 			bool out_of_order = false;
 
-			if (event.index_oid < previous_oid)
-				out_of_order = true;
-			else if (event.index_oid == previous_oid &&
-					 event.index_rnode.spcNode < previous_rnode.spcNode)
-				out_of_order = true;
-			else if (event.index_oid == previous_oid &&
-					 event.index_rnode.spcNode == previous_rnode.spcNode &&
-					 event.index_rnode.dbNode < previous_rnode.dbNode)
-				out_of_order = true;
-			else if (event.index_oid == previous_oid &&
-					 event.index_rnode.spcNode == previous_rnode.spcNode &&
-					 event.index_rnode.dbNode == previous_rnode.dbNode &&
-					 event.index_rnode.relNode < previous_rnode.relNode)
-				out_of_order = true;
-			else if (event.index_oid == previous_oid &&
-					 event.index_rnode.spcNode == previous_rnode.spcNode &&
-					 event.index_rnode.dbNode == previous_rnode.dbNode &&
-					 event.index_rnode.relNode == previous_rnode.relNode &&
-					 event.leaf_id <= previous_leaf)
-				out_of_order = true;
+			if (payload_len - offset < MERKLE_DELTA_V2_ENTRY_FIXED_BYTES)
+				elog(ERROR, "Merkle delta sequence %llu has a truncated v2 entry",
+					 (unsigned long long) seq);
+			src = payload + offset;
+			entry_bytes = merkle_get_u32(src + 0);
+			kind = merkle_get_u32(src + 4);
+			index_oid = (Oid) merkle_get_u32(src + 8);
+			index_rnode.spcNode = (Oid) merkle_get_u32(src + 12);
+			index_rnode.dbNode = (Oid) merkle_get_u32(src + 16);
+			index_rnode.relNode = (Oid) merkle_get_u32(src + 20);
+			format_version = merkle_get_u32(src + 24);
+			target = merkle_get_u32(src + 28);
+			entry_flags = merkle_get_u32(src + 32);
+			key_len = merkle_get_u32(src + 36);
+			route = src + 40;
+			key = src + MERKLE_DELTA_V2_ENTRY_FIXED_BYTES;
 
-			if (out_of_order)
-				ereport(ERROR,
-						(errmsg("Merkle delta sequence %llu has non-canonical or duplicate entries",
-								(unsigned long long) seq)));
+			if ((uint64) entry_bytes !=
+				(uint64) MERKLE_DELTA_V2_ENTRY_FIXED_BYTES + key_len ||
+				entry_bytes > payload_len - offset)
+				elog(ERROR, "Merkle delta sequence %llu has invalid v2 entry length",
+					 (unsigned long long) seq);
+			if (!OidIsValid(index_oid) || format_version != MERKLE_VERSION ||
+				(kind != MERKLE_DELTA_V2_KIND_STATIC &&
+				 kind != MERKLE_DELTA_V2_KIND_DYNAMIC))
+				elog(ERROR,
+					 "Merkle delta sequence %llu references invalid v2 index, format, or kind",
+					 (unsigned long long) seq);
+			if (target > PG_INT32_MAX ||
+				(kind == MERKLE_DELTA_V2_KIND_STATIC &&
+				 (key_len != 0 || entry_flags != 0 ||
+				  !merkle_bytes_are_zero(src + 40, 96))) ||
+				(kind == MERKLE_DELTA_V2_KIND_DYNAMIC &&
+				 (key_len == 0 || key_len > MERKLE_DYNAMIC_MAX_KEY_BYTES ||
+				  entry_flags == 0 ||
+				  (entry_flags & ~(MERKLE_DELTA_V2_FLAG_HAS_OLD |
+								 MERKLE_DELTA_V2_FLAG_HAS_NEW)) != 0 ||
+				  (!(entry_flags & MERKLE_DELTA_V2_FLAG_HAS_OLD) &&
+				   !merkle_bytes_are_zero(src + 72, MERKLE_HASH_BYTES)) ||
+				  (!(entry_flags & MERKLE_DELTA_V2_FLAG_HAS_NEW) &&
+				   !merkle_bytes_are_zero(src + 104, MERKLE_HASH_BYTES)) ||
+				  !merkle_bytes_are_zero(src + 136,
+								MERKLE_HASH_BYTES))))
+				elog(ERROR, "Merkle delta sequence %llu violates the v2 entry contract",
+					 (unsigned long long) seq);
+
+			if (have_previous_key)
+			{
+				if (index_oid < previous_oid)
+					out_of_order = true;
+				else if (index_oid == previous_oid &&
+						 index_rnode.spcNode < previous_rnode.spcNode)
+					out_of_order = true;
+				else if (index_oid == previous_oid &&
+						 index_rnode.spcNode == previous_rnode.spcNode &&
+						 index_rnode.dbNode < previous_rnode.dbNode)
+					out_of_order = true;
+				else if (index_oid == previous_oid &&
+						 index_rnode.spcNode == previous_rnode.spcNode &&
+						 index_rnode.dbNode == previous_rnode.dbNode &&
+						 index_rnode.relNode < previous_rnode.relNode)
+					out_of_order = true;
+				else if (index_oid == previous_oid &&
+						 RelFileNodeEquals(index_rnode, previous_rnode))
+				{
+					if (kind < previous_kind)
+						out_of_order = true;
+					else if (kind == previous_kind)
+					{
+						if (target < previous_target)
+							out_of_order = true;
+						else if (target == previous_target)
+						{
+							int cmp = kind == MERKLE_DELTA_V2_KIND_STATIC ? 0 :
+								memcmp(route, previous_route, MERKLE_HASH_BYTES);
+
+							if (cmp < 0)
+								out_of_order = true;
+							else if (cmp == 0)
+							{
+								uint32 common = Min(key_len, previous_key_len);
+
+								cmp = common == 0 ? 0 :
+									memcmp(key, previous_key, common);
+								if (cmp < 0 || (cmp == 0 && key_len <= previous_key_len))
+									out_of_order = true;
+							}
+						}
+					}
+				}
+				if (out_of_order)
+					ereport(ERROR,
+							(errmsg("Merkle delta sequence %llu has non-canonical or duplicate v2 entries",
+									(unsigned long long) seq)));
+			}
+
+			if (kind == MERKLE_DELTA_V2_KIND_STATIC)
+			{
+				MerkleLeafEvent event;
+
+				MemSet(&event, 0, sizeof(event));
+				event.seq = seq;
+				event.index_oid = index_oid;
+				event.index_rnode = index_rnode;
+				event.leaf_id = (int32) target;
+				memcpy(event.delta.data, src + 136, MERKLE_HASH_BYTES);
+				if (!merkle_hash_is_zero(&event.delta))
+					merkle_append_leaf_event(events, &event);
+			}
+			else
+			{
+				MerkleDynamicTransition event;
+				bytea *key_data;
+
+				MemSet(&event, 0, sizeof(event));
+				event.seq = seq;
+				event.index_oid = index_oid;
+				event.index_rnode = index_rnode;
+				event.partition_id = (int32) target;
+				memcpy(event.route_digest, route, MERKLE_HASH_BYTES);
+				event.has_old =
+					(entry_flags & MERKLE_DELTA_V2_FLAG_HAS_OLD) != 0;
+				event.has_new =
+					(entry_flags & MERKLE_DELTA_V2_FLAG_HAS_NEW) != 0;
+				if (event.has_old)
+					memcpy(event.old_hash.data, src + 72, MERKLE_HASH_BYTES);
+				if (event.has_new)
+					memcpy(event.new_hash.data, src + 104, MERKLE_HASH_BYTES);
+				if (!AllocSizeIsValid((Size) VARHDRSZ + key_len))
+					ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("dynamic Merkle key in delta is too large")));
+				key_data = palloc(VARHDRSZ + key_len);
+				SET_VARSIZE(key_data, VARHDRSZ + key_len);
+				memcpy(VARDATA(key_data), key, key_len);
+				event.key_data = key_data;
+				merkle_append_dynamic_event(events, &event);
+			}
+
+			previous_oid = index_oid;
+			previous_rnode = index_rnode;
+			previous_kind = kind;
+			previous_target = target;
+			previous_route = route;
+			previous_key = key;
+			previous_key_len = key_len;
+			have_previous_key = true;
+			offset += entry_bytes;
 		}
-		previous_oid = event.index_oid;
-		previous_rnode = event.index_rnode;
-		previous_leaf = event.leaf_id;
-		have_previous_key = true;
-		if (!merkle_hash_is_zero(&event.delta))
-			merkle_append_leaf_event(events, &event);
+		if (offset != payload_len)
+			elog(ERROR, "Merkle delta sequence %llu has trailing v2 payload bytes",
+				 (unsigned long long) seq);
 	}
 }
 
@@ -727,6 +951,60 @@ merkle_node_event_cmp(const void *left, const void *right)
 	if (a->index_in_page != b->index_in_page)
 		return a->index_in_page < b->index_in_page ? -1 : 1;
 	return 0;
+}
+
+static int
+merkle_dynamic_event_cmp(const void *left, const void *right)
+{
+	const MerkleDynamicTransition *a =
+		(const MerkleDynamicTransition *) left;
+	const MerkleDynamicTransition *b =
+		(const MerkleDynamicTransition *) right;
+	int cmp;
+	Size a_len;
+	Size b_len;
+
+	if (a->seq != b->seq)
+		return a->seq < b->seq ? -1 : 1;
+	if (a->index_oid != b->index_oid)
+		return a->index_oid < b->index_oid ? -1 : 1;
+	if (a->index_rnode.spcNode != b->index_rnode.spcNode)
+		return a->index_rnode.spcNode < b->index_rnode.spcNode ? -1 : 1;
+	if (a->index_rnode.dbNode != b->index_rnode.dbNode)
+		return a->index_rnode.dbNode < b->index_rnode.dbNode ? -1 : 1;
+	if (a->index_rnode.relNode != b->index_rnode.relNode)
+		return a->index_rnode.relNode < b->index_rnode.relNode ? -1 : 1;
+	if (a->partition_id != b->partition_id)
+		return a->partition_id < b->partition_id ? -1 : 1;
+	cmp = memcmp(a->route_digest, b->route_digest, MERKLE_HASH_BYTES);
+	if (cmp != 0)
+		return cmp;
+	a_len = VARSIZE_ANY_EXHDR(a->key_data);
+	b_len = VARSIZE_ANY_EXHDR(b->key_data);
+	cmp = memcmp(VARDATA_ANY(a->key_data), VARDATA_ANY(b->key_data),
+				 Min(a_len, b_len));
+	if (cmp != 0)
+		return cmp;
+	if (a_len != b_len)
+		return a_len < b_len ? -1 : 1;
+	return 0;
+}
+
+static void
+merkle_apply_dynamic_events(MerkleEventArray *events)
+{
+	int i;
+
+	if (events->ndynamic == 0)
+		return;
+	qsort(events->dynamic, events->ndynamic, sizeof(*events->dynamic),
+		  merkle_dynamic_event_cmp);
+	for (i = 0; i < events->ndynamic; i++)
+	{
+		merkle_crash_failpoint("before_dynamic_transition");
+		merkle_dynamic_apply_transition(&events->dynamic[i]);
+		merkle_crash_failpoint("after_dynamic_transition");
+	}
 }
 
 static void
@@ -948,8 +1226,17 @@ merkle_apply_leaf_events(MerkleEventArray *events, uint64 batch_end)
 static void
 merkle_free_events(MerkleEventArray *events)
 {
+	int i;
+
 	if (events->leaf != NULL)
 		pfree(events->leaf);
+	if (events->dynamic != NULL)
+	{
+		for (i = 0; i < events->ndynamic; i++)
+			if (events->dynamic[i].key_data != NULL)
+				pfree(events->dynamic[i].key_data);
+		pfree(events->dynamic);
+	}
 	if (events->node != NULL)
 		pfree(events->node);
 	MemSet(events, 0, sizeof(*events));
@@ -1111,21 +1398,6 @@ merkle_apply_until_impl(uint64 required_seq)
 		{
 			HeapTuple tuple;
 			TupleDesc tupdesc;
-
-			if (batch_end != applied_seq)
-			{
-				instr_time now;
-				instr_time elapsed;
-
-				INSTR_TIME_SET_CURRENT(now);
-				elapsed = now;
-				INSTR_TIME_SUBTRACT(elapsed, batch_start);
-				if (INSTR_TIME_GET_MICROSEC(elapsed) >=
-					(uint64) merkle_apply_batch_time_ms * 1000)
-					break;
-			}
-			tuple = SPI_tuptable->vals[row];
-			tupdesc = SPI_tuptable->tupdesc;
 			Datum seq_d;
 			Datum state_d;
 			Datum version_d;
@@ -1148,6 +1420,21 @@ merkle_apply_until_impl(uint64 required_seq)
 			bool is_raft;
 			Size blob_bytes = 0;
 			uint32 delta_entry_count = 0;
+
+			if (batch_end != applied_seq)
+			{
+				instr_time now;
+				instr_time elapsed;
+
+				INSTR_TIME_SET_CURRENT(now);
+				elapsed = now;
+				INSTR_TIME_SUBTRACT(elapsed, batch_start);
+				if (INSTR_TIME_GET_MICROSEC(elapsed) >=
+					(uint64) merkle_apply_batch_time_ms * 1000)
+					break;
+			}
+			tuple = SPI_tuptable->vals[row];
+			tupdesc = SPI_tuptable->tupdesc;
 
 			seq_d = SPI_getbinval(tuple, tupdesc, 1, &seq_null);
 			state_d = SPI_getbinval(tuple, tupdesc, 2, &state_null);
@@ -1195,15 +1482,26 @@ merkle_apply_until_impl(uint64 required_seq)
 						 "Merkle no-op sequence %llu unexpectedly has a blob",
 						 (unsigned long long) source_seq);
 			}
-			else if (delta_version == MERKLE_DELTA_VERSION)
+			else if (delta_version == MERKLE_DELTA_LEGACY_VERSION ||
+					 delta_version == MERKLE_DELTA_VERSION)
 			{
 				if (blob_null)
 					elog(ERROR, "Merkle delta sequence %llu has no blob",
 						 (unsigned long long) source_seq);
 				blob_bytes = VARSIZE_ANY_EXHDR(DatumGetByteaPP(blob_d));
 				if (blob_bytes >= MERKLE_DELTA_HEADER_BYTES)
+				{
+					uint32 blob_version = merkle_get_u32(
+						VARDATA_ANY(DatumGetByteaPP(blob_d)) + 4);
+
+					if ((int) blob_version != delta_version)
+						elog(ERROR,
+							 "Merkle delta sequence %llu row/blob version mismatch (%d/%u)",
+							 (unsigned long long) source_seq,
+							 delta_version, blob_version);
 					delta_entry_count = merkle_get_u32(
 						VARDATA_ANY(DatumGetByteaPP(blob_d)) + 12);
+				}
 				/* A leaf touches multiple ancestors; use the entry count as a
 				 * conservative page budget so one transaction cannot grow without
 				 * bound.  It avoids a second geometry traversal in the hot path. */
@@ -1234,6 +1532,7 @@ merkle_apply_until_impl(uint64 required_seq)
 			break;
 		}
 
+		merkle_apply_dynamic_events(&events);
 		merkle_apply_leaf_events(&events, batch_end);
 		merkle_free_events(&events);
 		applied_seq = batch_end;
@@ -1377,8 +1676,13 @@ merkle_apply_until_internal_impl(uint64 required_seq)
 				failure_state = MERKLE_STATE_INVALID;
 				break;
 		}
-		reason = psprintf("Merkle applier failed: %s",
-						edata->message ? edata->message : "unknown error");
+		if (edata->detail != NULL && edata->detail[0] != '\0')
+			reason = psprintf("Merkle applier failed: %s; detail: %s",
+						edata->message ? edata->message : "unknown error",
+						edata->detail);
+		else
+			reason = psprintf("Merkle applier failed: %s",
+							edata->message ? edata->message : "unknown error");
 		merkle_mark_recovery_state(failure_state, reason);
 		pfree(reason);
 		FreeErrorData(edata);

@@ -28,14 +28,32 @@ LEAF_LOOKUP_INDEXES = {
 }
 
 BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only static recovery
+DYNAMIC_BENCHMARK_SCHEMA_VERSION = 5
 TIMING_CONTRACT_VERSION = 1
 ZERO_HASH = "0" * 64
+MERKLE_MODES = ("static", "dynamic")
+DYNAMIC_PROFILE = "dynamic-size-scaling-k75-c300"
+DYNAMIC_PARTITIONS = 200
+DYNAMIC_LOGICAL_FANOUT = 32
+DYNAMIC_LEAF_CAPACITY = 32
+DYNAMIC_MERGE_THRESHOLD = 8
+DYNAMIC_BAD_RANGE_COUNT = 75
+DYNAMIC_CORRUPTED_TUPLE_COUNT = 300
+DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT = (
+    2 * DYNAMIC_BAD_RANGE_COUNT * DYNAMIC_LEAF_CAPACITY
+)
 
 # Explicit scope metadata written into every config.json
 BENCHMARK_SCOPE_METADATA: dict[str, str] = {
     "benchmark_scope": "merkle_only_static_recovery",
     "enabled_methods": "merkle",
     "paper_comparison_status": "merkle_series_only",
+}
+
+DYNAMIC_SCOPE_METADATA: dict[str, str] = {
+    "benchmark_scope": "merkle_only_dynamic_recovery",
+    "enabled_methods": "merkle_dynamic",
+    "paper_comparison_status": "dynamic_recovery_series",
 }
 
 # ── corruption modes ────────────────────────────────────────────────────────
@@ -157,6 +175,32 @@ def profile_config(profile: str) -> BenchmarkConfig:
                     "Extends best static Merkle geometry F=32,L=1024 from "
                     "1M to 20M rows. Uses K=75 bad leaves and C=300 "
                     "update-only corruptions."
+                ),
+            },
+        )
+
+    if profile == DYNAMIC_PROFILE:
+        return BenchmarkConfig(
+            fig12_sizes=[1_000_000, 3_000_000, 5_000_000],
+            fig13_sizes=[],
+            fig13_k=[],
+            repetitions=5,
+            benchmark_schema_version=DYNAMIC_BENCHMARK_SCHEMA_VERSION,
+            extra={
+                "campaign": "dynamic_size_scaling_k75_c300",
+                "merkle_mode": "dynamic",
+                "dynamic_partitions": DYNAMIC_PARTITIONS,
+                "dynamic_logical_fanout": DYNAMIC_LOGICAL_FANOUT,
+                "dynamic_leaf_capacity": DYNAMIC_LEAF_CAPACITY,
+                "dynamic_split_threshold": DYNAMIC_LEAF_CAPACITY,
+                "dynamic_merge_threshold": DYNAMIC_MERGE_THRESHOLD,
+                "bad_range_count": DYNAMIC_BAD_RANGE_COUNT,
+                "corrupted_tuple_count": DYNAMIC_CORRUPTED_TUPLE_COUNT,
+                "candidate_summary_item_limit": DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
+                "description": (
+                    "Dynamic Merkle recovery acceptance campaign at N=1M,3M,5M; "
+                    "P=200, logical K=32, leaf/split capacity=32, merge=8, "
+                    "75 corrupted leaf ranges, 300 update corruptions, five repetitions."
                 ),
             },
         )

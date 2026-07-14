@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300 [options]
+Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300|dynamic-size-scaling-k75-c300 [options]
 
 Options:
   --ssh-user USER
@@ -100,8 +100,8 @@ if [[ -z "$HOST" ]]; then
   exit 2
 fi
 case "$PROFILE" in
-  smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300) ;;
-  *) echo "profile must be smoke, preflight, paper, recovery-scaling-diagnosis, fanout-width-sweep, size-scaling-k75-c300, or best-scaling-f32-l1024-k75-c300" >&2; exit 2 ;;
+  smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300|dynamic-size-scaling-k75-c300) ;;
+  *) echo "profile must be smoke, preflight, paper, recovery-scaling-diagnosis, fanout-width-sweep, size-scaling-k75-c300, best-scaling-f32-l1024-k75-c300, or dynamic-size-scaling-k75-c300" >&2; exit 2 ;;
 esac
 case "$ARTIFACT_MODE" in
   summary|debug) ;;
@@ -123,6 +123,20 @@ case "$EXPERIMENT" in
   ""|figure12|figure13) ;;
   *) echo "experiment must be figure12 or figure13" >&2; exit 2 ;;
 esac
+if [[ "$PROFILE" == "dynamic-size-scaling-k75-c300" ]]; then
+  if [[ "$AUDIT_MODE" != "full" ]]; then
+    echo "dynamic-size-scaling-k75-c300 requires --audit-mode full" >&2
+    exit 2
+  fi
+  if [[ "$PROFILING" != "off" ]]; then
+    echo "dynamic-size-scaling-k75-c300 requires --profiling off" >&2
+    exit 2
+  fi
+  if [[ "$CORRUPTION_MODE" != "paper-update-only" && "$CORRUPTION_MODE" != "update-only" ]]; then
+    echo "dynamic-size-scaling-k75-c300 requires update-only corruption" >&2
+    exit 2
+  fi
+fi
 case "$SSH_TIMEOUT" in
   ''|*[!0-9]*) echo "ssh-timeout must be a positive integer number of seconds" >&2; exit 2 ;;
   0) echo "ssh-timeout must be greater than 0" >&2; exit 2 ;;
@@ -454,7 +468,60 @@ remote_progress "acquired recovery benchmark lock for $RUN_ID"
 cleanup_success=0
 failure_reason="unknown"
 postgres_started=0
+memory_monitor_pid=0
+benchmark_completed=0
 REMOTE_SOCKET_DIR=""
+
+monitor_private_postgres_memory() {
+  local postmaster_pid process_pid metrics
+  local process_count rss_sum_kib pss_anon_sum_kib pss_anon_max_kib pss_shmem_sum_kib
+  local rss_kib anon_kib shmem_kib
+
+  printf '%s\n' \
+    'timestamp_utc,process_count,rss_sum_kib,pss_anon_sum_kib,pss_anon_max_kib,pss_shmem_sum_kib'
+  while [[ -r "$REMOTE_PGDATA/postmaster.pid" ]]; do
+    postmaster_pid="$(sed -n '1p' "$REMOTE_PGDATA/postmaster.pid" 2>/dev/null || true)"
+    if [[ -z "$postmaster_pid" ]] || ! kill -0 "$postmaster_pid" 2>/dev/null; then
+      break
+    fi
+    process_count=0
+    rss_sum_kib=0
+    pss_anon_sum_kib=0
+    pss_anon_max_kib=0
+    pss_shmem_sum_kib=0
+    while read -r process_pid; do
+      [[ -n "$process_pid" && -r "/proc/$process_pid/smaps_rollup" ]] || continue
+      metrics="$(awk '
+        /^Rss:/ { rss = $2 }
+        /^Pss_Anon:/ { anon = $2 }
+        /^Pss_Shmem:/ { shmem = $2 }
+        END { printf "%d %d %d", rss, anon, shmem }
+      ' "/proc/$process_pid/smaps_rollup" 2>/dev/null || true)"
+      [[ -n "$metrics" ]] || continue
+      read -r rss_kib anon_kib shmem_kib <<<"$metrics"
+      process_count=$((process_count + 1))
+      rss_sum_kib=$((rss_sum_kib + rss_kib))
+      pss_anon_sum_kib=$((pss_anon_sum_kib + anon_kib))
+      pss_shmem_sum_kib=$((pss_shmem_sum_kib + shmem_kib))
+      if (( anon_kib > pss_anon_max_kib )); then
+        pss_anon_max_kib="$anon_kib"
+      fi
+    done < <(ps -o pid= -p "$postmaster_pid" --ppid "$postmaster_pid" 2>/dev/null || true)
+    printf '%s,%d,%d,%d,%d,%d\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "$process_count" "$rss_sum_kib" "$pss_anon_sum_kib" \
+      "$pss_anon_max_kib" "$pss_shmem_sum_kib"
+    sleep 5
+  done
+}
+
+stop_memory_monitor() {
+  if [[ "$memory_monitor_pid" -gt 0 ]]; then
+    kill "$memory_monitor_pid" >/dev/null 2>&1 || true
+    wait "$memory_monitor_pid" >/dev/null 2>&1 || true
+    memory_monitor_pid=0
+  fi
+}
 
 stop_postgres() {
   if [[ "$postgres_started" -eq 1 && -x "$REMOTE_INSTALL_DIR/bin/pg_ctl" && -d "$REMOTE_PGDATA" ]]; then
@@ -469,6 +536,7 @@ cleanup() {
   else
     remote_progress "run exiting with rc=$rc reason=$failure_reason"
   fi
+  stop_memory_monitor
   stop_postgres
   # Always remove the short socket directory (lives in /tmp, outside RUN_DIR).
   if [[ -n "${REMOTE_SOCKET_DIR:-}" ]]; then
@@ -489,12 +557,22 @@ cleanup() {
   cp -f "$REMOTE_RUN_DIR/source_snapshot.json" "$REMOTE_FAILURES_ROOT/$RUN_ID/source_snapshot.json" 2>/dev/null || true
   for name in configure.log generated_headers.log build.log install.log initdb.log \
               pg_ctl_start.log pg_isready.log postgres.log \
-              benchmark.stdout benchmark.stderr package.log; do
+              postgres_memory.csv dynamic_crash_gate.log benchmark.stdout benchmark.stderr package.log; do
     if [[ -f "$REMOTE_LOG_DIR/$name" ]]; then
       cp -f "$REMOTE_LOG_DIR/$name" "$REMOTE_FAILURES_ROOT/$RUN_ID/$name"
     fi
   done
-  if [[ -d "$REMOTE_RESULTS_DIR" ]]; then
+  if [[ -d "$REMOTE_LOG_DIR/dynamic_merkle_crash_gate" ]]; then
+    cp -a "$REMOTE_LOG_DIR/dynamic_merkle_crash_gate" \
+      "$REMOTE_FAILURES_ROOT/$RUN_ID/dynamic_merkle_crash_gate"
+  fi
+  if [[ "$benchmark_completed" -eq 1 && -d "$REMOTE_RESULTS_DIR" ]]; then
+    # A post-benchmark failure (for example packaging) must not discard a
+    # complete, expensive acceptance result.  Moving within the same remote
+    # filesystem is atomic and avoids duplicating a large result tree.
+    mv "$REMOTE_RESULTS_DIR" \
+      "$REMOTE_FAILURES_ROOT/$RUN_ID/completed_results"
+  elif [[ -d "$REMOTE_RESULTS_DIR" ]]; then
     mkdir -p "$REMOTE_FAILURES_ROOT/$RUN_ID/partial_results"
     find "$REMOTE_RESULTS_DIR" -maxdepth 2 -type f \
       \( -name 'config.json' \
@@ -632,6 +710,22 @@ fi
 export LD_LIBRARY_PATH="$REMOTE_INSTALL_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 remote_progress "using installed shared libraries from $REMOTE_INSTALL_DIR/lib"
 
+# Dynamic recovery acceptance includes a destructive durability gate on the
+# target host.  Each case owns a private fresh cluster and exercises a real
+# postmaster SIGKILL at the dynamic-delta and apply-watermark boundaries.
+if [[ "$BENCH_PROFILE" == "dynamic-size-scaling-k75-c300" ]]; then
+  DYNAMIC_GATE_DIR="$REMOTE_LOG_DIR/dynamic_merkle_crash_gate"
+  remote_progress "dynamic Merkle crash/lifecycle gate started; log: $REMOTE_LOG_DIR/dynamic_crash_gate.log"
+  if PG_BIN="$REMOTE_INSTALL_DIR/bin" \
+      "$REMOTE_SRC_DIR/scripts/test/merkle_crash_atomicity/run_dynamic_smoke.sh" \
+      --result-root "$DYNAMIC_GATE_DIR" \
+      >"$REMOTE_LOG_DIR/dynamic_crash_gate.log" 2>&1; then
+    remote_progress "dynamic Merkle crash/lifecycle gate PASSED"
+  else
+    fail_with_log "dynamic Merkle crash/lifecycle gate failed" "$REMOTE_LOG_DIR/dynamic_crash_gate.log"
+  fi
+fi
+
 remote_progress "initdb started; log: $REMOTE_LOG_DIR/initdb.log"
 if "$REMOTE_INSTALL_DIR/bin/initdb" -D "$REMOTE_PGDATA" >"$REMOTE_LOG_DIR/initdb.log" 2>&1; then
   remote_progress "initdb completed"
@@ -671,6 +765,9 @@ else
   tail_log "$REMOTE_LOG_DIR/postgres.log"
   fail_with_log "pg_isready failed" "$REMOTE_LOG_DIR/pg_isready.log"
 fi
+monitor_private_postgres_memory >"$REMOTE_LOG_DIR/postgres_memory.csv" &
+memory_monitor_pid=$!
+remote_progress "private PostgreSQL memory monitor started; log: $REMOTE_LOG_DIR/postgres_memory.csv"
 
 # The benchmark uses the crash-safe Merkle DDL guards, so the fresh temporary
 # cluster must have the current Raft/Merkle ledger schema before any table or
@@ -718,6 +815,9 @@ BENCH_ARGS=(
   --leaf-fetch-batch-size "$LEAF_FETCH_BATCH_SIZE"
   --profiling "$PROFILING"
 )
+if [[ "$BENCH_PROFILE" == "dynamic-size-scaling-k75-c300" ]]; then
+  BENCH_ARGS+=(--merkle-mode dynamic)
+fi
 BENCH_ARGS+=("${BENCH_REPETITIONS[@]}")
 BENCH_ARGS+=("${BENCH_SELECTORS[@]}")
 
@@ -739,17 +839,30 @@ if [[ $bench_rc -ne 0 ]]; then
   exit "$bench_rc"
 fi
 remote_progress "benchmark completed"
+stop_memory_monitor
 
 RESULT_DIR="$(tail -n 1 "$REMOTE_LOG_DIR/benchmark.stdout")"
 if [[ ! -d "$RESULT_DIR" ]]; then
   failure_reason="benchmark result dir missing"
   exit 1
 fi
+benchmark_completed=1
 remote_progress "benchmark result directory: $RESULT_DIR"
 
 remote_progress "writing host info and source snapshot into result directory"
 "$REMOTE_PYTHON" "$REMOTE_SRC_DIR/scripts/benchmark/recovery/write_host_info.py" --output "$RESULT_DIR/host_info.json" --filesystem-path "$REMOTE_RUN_DIR" >/dev/null
 cp "$REMOTE_RUN_DIR/source_snapshot.json" "$RESULT_DIR/source_snapshot.json"
+if [[ -f "$REMOTE_LOG_DIR/dynamic_merkle_crash_gate/summary.json" ]]; then
+  cp "$REMOTE_LOG_DIR/dynamic_merkle_crash_gate/summary.json" \
+     "$RESULT_DIR/dynamic_crash_gate_summary.json"
+fi
+if [[ -f "$REMOTE_LOG_DIR/dynamic_merkle_crash_gate/campaign.env" ]]; then
+  cp "$REMOTE_LOG_DIR/dynamic_merkle_crash_gate/campaign.env" \
+     "$RESULT_DIR/dynamic_crash_gate_campaign.env"
+fi
+if [[ -f "$REMOTE_LOG_DIR/postgres_memory.csv" ]]; then
+  cp "$REMOTE_LOG_DIR/postgres_memory.csv" "$RESULT_DIR/postgres_memory.csv"
+fi
 
 # Append build provenance to config.json
 remote_progress "patching config.json with build provenance"

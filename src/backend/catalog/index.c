@@ -25,6 +25,7 @@
 
 #include "access/amapi.h"
 #include "access/heapam.h"
+#include "access/merkle.h"
 #include "access/multixact.h"
 #include "access/relscan.h"
 #include "access/sysattr.h"
@@ -41,6 +42,7 @@
 #include "catalog/objectaccess.h"
 #include "catalog/partition.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_depend.h"
@@ -2191,7 +2193,19 @@ index_drop(Oid indexId, bool concurrent, bool concurrent_lock_mode)
 	 * Schedule physical removal of the files (if any)
 	 */
 	if (userIndexRelation->rd_rel->relkind != RELKIND_PARTITIONED_INDEX)
+	{
+		/*
+		 * Dynamic Merkle contents live in WAL-logged side relations rather
+		 * than the index fork itself.  Delete the exact physical generation in
+		 * the same transaction as catalog/storage removal.  Calling this for a
+		 * static Merkle index is harmless and also cleans a stale dynamic row
+		 * if the index fork is damaged badly enough that its marker cannot be
+		 * read during DROP.
+		 */
+		if (userIndexRelation->rd_rel->relam == MERKLE_AM_OID)
+			merkle_dynamic_drop_state(indexId, userIndexRelation->rd_node);
 		RelationDropStorage(userIndexRelation);
+	}
 
 	/*
 	 * Close and flush the index's relcache entry, to ensure relcache doesn't

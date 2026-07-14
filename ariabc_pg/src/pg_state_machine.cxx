@@ -1112,7 +1112,7 @@ uint64_t pg_state_machine::safe_sync_startup(uint64_t durable_log_start_index) {
         PQclear(res);
     }
 
-    // Step 1: Validate schema version (must be exactly 1 row, version=4)
+    // Step 1: Validate schema version (must be exactly 1 row, version=5)
     {
         PGresult* res = PQexec(c,
             "SELECT count(*), min(schema_version), max(schema_version) "
@@ -1127,10 +1127,10 @@ uint64_t pg_state_machine::safe_sync_startup(uint64_t durable_log_start_index) {
         const int minv = std::stoi(PQgetvalue(res, 0, 1));
         const int maxv = std::stoi(PQgetvalue(res, 0, 2));
         PQclear(res);
-        if (cnt != 1 || minv != 4 || maxv != 4) {
+        if (cnt != 1 || minv != 5 || maxv != 5) {
             PQfinish(c);
             throw std::runtime_error(
-                "SAFE_STARTUP_FAILED: schema version must be exactly one row with version=4 "
+                "SAFE_STARTUP_FAILED: schema version must be exactly one row with version=5 "
                 "(got count=" + std::to_string(cnt) +
                 " min=" + std::to_string(minv) +
                 " max=" + std::to_string(maxv) + ")");

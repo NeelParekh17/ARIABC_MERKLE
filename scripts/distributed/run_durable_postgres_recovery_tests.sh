@@ -164,7 +164,7 @@ echo "  The recovery runner must be rerun with --epoch-hex=$EPOCH_HEX to use the
 echo ""
 echo "=== STEP 8: Restart verification ==="
 echo "  After restart, verify the following on each node:"
-echo "    1. ariabc_internal.raft_apply_schema_meta has schema_version = 4"
+echo "    1. ariabc_internal.raft_apply_schema_meta has schema_version = 5"
 echo "    2. ariabc_internal.raft_apply_epoch has epoch_id = \\\\x${EPOCH_HEX}"
 echo "    3. All raft_apply_item rows are in state 2 (APPLIED_OK) or 3 (APPLIED_ERROR)"
 echo "    4. No rows are in state 1 (CLAIMED) — that would indicate corruption"

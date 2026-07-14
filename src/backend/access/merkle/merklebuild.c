@@ -48,6 +48,9 @@ typedef struct
     int         nodesPerPage;
     int         numTreePages;
     MerkleHash *nodeHashes;     /* per-node accumulated hashes (0-based) */
+	bool        dynamic;
+	int         dynamicMaxKeyBytes;
+	MerkleDynamicBuildState *dynamicBuild;
 } MerkleBuildState;
 
 static void merkle_emit_build_nodes_report(Relation indexRel,
@@ -126,6 +129,7 @@ merkle_build_callback(Relation indexRel,
     MerkleBuildState *buildstate = (MerkleBuildState *) state;
     MerkleHash      hash;
 	MerkleRoute     route;
+	MerkleItemIdentity identity;
 
     /* Only process live tuples */
     if (!tupleIsAlive)
@@ -133,8 +137,19 @@ merkle_build_callback(Relation indexRel,
         return;
 	}
     
+	MemSet(&identity, 0, sizeof(identity));
 	/* Compute routing through the same relation-aware path used by DML. */
-	merkle_compute_route(indexRel, values, isnull, buildstate->nkeys, &route);
+	if (buildstate->dynamic)
+	{
+		merkle_compute_dynamic_item_identity(indexRel, values, isnull,
+										 buildstate->nkeys,
+										 buildstate->numPartitions,
+										 buildstate->dynamicMaxKeyBytes,
+										 &identity);
+		route = identity.route;
+	}
+	else
+		merkle_compute_route(indexRel, values, isnull, buildstate->nkeys, &route);
     
 	/*
 	 * The heap index-build scan rewrites the TID of a live heap-only tuple to
@@ -169,7 +184,13 @@ merkle_build_callback(Relation indexRel,
      * traffic by accumulating XOR only at the leaf node in memory, then
      * constructing internal nodes once at the end.
      */
-    {
+	if (buildstate->dynamic)
+	{
+		merkle_dynamic_build_add(buildstate->dynamicBuild, &identity, &hash);
+		pfree(identity.key_data);
+	}
+	else
+	{
 		int partitionId = route.partition_id;
 		int leafPos = route.leaf_id % buildstate->leavesPerPartition;
         int nodeInPartition = buildstate->leafStart + leafPos;
@@ -199,6 +220,9 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 
 	buildstate.heapFetch = NULL;
 	buildstate.heapSlot = NULL;
+	buildstate.dynamic = false;
+	buildstate.dynamicMaxKeyBytes = MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES;
+	buildstate.dynamicBuild = NULL;
 	MemSet(&recovery_status, 0, sizeof(recovery_status));
 
     PG_TRY();
@@ -209,6 +233,12 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("crash-safe Merkle indexes require a permanent logged table"),
 				 errhint("Use a logged table; TEMP and UNLOGGED Merkle indexes are not supported.")));
+	if (RelationGetIndexPredicate(indexRel) != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("partial Merkle indexes are not supported"),
+				 errdetail("Merkle integrity maintenance covers every live heap row and cannot safely skip predicate-false UPDATE or DELETE transitions."),
+				 errhint("Create a non-partial Merkle index and REINDEX any legacy partial Merkle index.")));
 
 	/*
 	 * A rebuild scans the already-committed heap state.  Rebuilding while the
@@ -248,6 +278,8 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	}
     /* Get user-specified options or defaults */
     opts = merkle_get_options(indexRel);
+	buildstate.dynamic = opts->dynamic;
+	buildstate.dynamicMaxKeyBytes = opts->max_key_bytes;
     totalLeaves = opts->partitions * opts->leaves_per_partition;
     
     /*
@@ -304,7 +336,8 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     buildstate.totalNodes = buildstate.numPartitions * buildstate.nodesPerPartition;
     buildstate.nodesPerPage = (int) MERKLE_MAX_NODES_PER_PAGE;
     buildstate.numTreePages = (buildstate.totalNodes + buildstate.nodesPerPage - 1) / buildstate.nodesPerPage;
-    buildstate.nodeHashes = (MerkleHash *) palloc0(sizeof(MerkleHash) * buildstate.totalNodes);
+	buildstate.nodeHashes = buildstate.dynamic ? NULL :
+		(MerkleHash *) palloc0(sizeof(MerkleHash) * buildstate.totalNodes);
 
     /* Free options after use */
     pfree(opts);
@@ -316,6 +349,9 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     buildstate.heapRel = heapRel;
     buildstate.indtuples = 0;
     buildstate.nkeys = indexInfo->ii_NumIndexKeyAttrs;
+	if (buildstate.dynamic)
+		buildstate.dynamicBuild = merkle_dynamic_build_begin(indexRel, heapRel,
+			buildstate.nkeys, recovery_status.applied_seq);
 	buildstate.heapFetch = table_index_fetch_begin(heapRel);
 	buildstate.heapSlot = table_slot_create(heapRel, NULL);
     
@@ -338,7 +374,13 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
      * Finalize: compute internal nodes from leaves, then write the completed
      * Merkle tree to the index pages.
      */
-    {
+	if (buildstate.dynamic)
+	{
+		merkle_dynamic_build_finish(buildstate.dynamicBuild);
+		buildstate.dynamicBuild = NULL;
+	}
+	else
+	{
         int partition;
         int nodeIdx = 0;
         int pageNum;
@@ -415,7 +457,8 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     result->heap_tuples = reltuples;
     result->index_tuples = buildstate.indtuples;
     
-    merkle_emit_build_nodes_report(indexRel, &buildstate);
+	if (!buildstate.dynamic)
+		merkle_emit_build_nodes_report(indexRel, &buildstate);
     }
     PG_CATCH();
     {
@@ -484,8 +527,8 @@ merkleBuildempty(Relation indexRel)
 	/* Respect reloptions for the defensive INIT-fork path. */
     opts = merkle_get_options(indexRel);
     numPartitions = opts->partitions;
-    leavesPerPartition = opts->leaves_per_partition;
-    fanout = opts->fanout;
+	leavesPerPartition = opts->dynamic ? 1 : opts->leaves_per_partition;
+	fanout = opts->dynamic ? MERKLE_DYNAMIC_LOGICAL_FANOUT : opts->fanout;
 
     if (fanout < 2 || fanout > 1024)
         fanout = MERKLE_DEFAULT_FANOUT;
@@ -510,6 +553,17 @@ merkleBuildempty(Relation indexRel)
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = recovery_status.managed ?
 		recovery_status.applied_seq : 0;
+	if (opts->dynamic)
+	{
+		meta->dynamicMagic = MERKLE_DYNAMIC_META_MAGIC;
+		meta->dynamicLayoutVersion = MERKLE_DYNAMIC_LAYOUT_VERSION;
+		meta->dynamicFlags = 1;
+		meta->dynamicLogicalFanout = MERKLE_DYNAMIC_LOGICAL_FANOUT;
+		meta->dynamicLeafCapacity = opts->leaf_capacity;
+		meta->dynamicMergeThreshold = opts->merge_threshold;
+		meta->dynamicLeafByteCapacity = opts->leaf_byte_capacity;
+		meta->dynamicMaxKeyBytes = opts->max_key_bytes;
+	}
 
     pfree(opts);
     

@@ -9,6 +9,7 @@ src
 src/backend/utils/probes.d
 contrib
 scripts/benchmark/recovery
+scripts/test/merkle_crash_atomicity
 scripts/distributed/sql
 scripts/distributed/ensure_custom_install_from_repo.sh
 merkle_demo.sql

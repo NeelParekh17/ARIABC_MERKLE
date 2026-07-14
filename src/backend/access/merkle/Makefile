@@ -7,6 +7,7 @@ OBJS = \
 	merklebuild.o \
 	merkledelta.o \
 	merkleapply.o \
+	merkledynamic.o \
 	merkleinsert.o \
 	merkleverify.o \
 	merkleutil.o

@@ -1295,8 +1295,13 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 	/* Validate early inside transaction before database state is finalized */
 	validate_terminal_payload(tx, result_payload, result_fmtver, false, NULL, terminal_digest);
 	merkle_delta_blob = merkle_serialize_staged_delta(tx->raft_log_index,
-											 tx->raft_item_ordinal);
-	merkle_delta_version = merkle_delta_blob != NULL ? MERKLE_DELTA_VERSION : 0;
+											 tx->raft_item_ordinal,
+											 &merkle_delta_version);
+	if (merkle_delta_blob != NULL &&
+		merkle_delta_version != MERKLE_DELTA_LEGACY_VERSION &&
+		merkle_delta_version != MERKLE_DELTA_VERSION)
+		elog(ERROR, "Merkle serialization returned invalid version %d",
+			 merkle_delta_version);
 
 	/*
 	 * Keep terminalization in a later command ID than the CLAIMED insert even
