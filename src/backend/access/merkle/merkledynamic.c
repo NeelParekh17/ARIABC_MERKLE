@@ -30,9 +30,11 @@
 #include "funcapi.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "portability/instr_time.h"
 #include "storage/bufmgr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/hsearch.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
@@ -173,6 +175,21 @@ typedef struct MerkleDynamicVerifyNode
 	uint64 last_seq;
 } MerkleDynamicVerifyNode;
 
+typedef struct MerkleDynamicBatchNode
+{
+	MerkleDynamicVerifyNodeKey key;
+	ItemPointerData tid;
+	MerkleHash xor_delta;
+	MerkleHash data_xor;
+	MerkleHash structure_hash;
+	uint64 tuple_count;
+	uint64 subtree_bytes;
+	bool affected;
+	bool found;
+	bool is_leaf;
+	bool structure_computed;
+} MerkleDynamicBatchNode;
+
 static bytea *dynamic_bytea(const uint8 *data, Size len);
 static void dynamic_read_meta(Relation indexRel, MerkleDynamicGeneration *gen);
 static void dynamic_require_relations(void);
@@ -184,6 +201,7 @@ static bool dynamic_prefix_matches(const uint8 digest[MERKLE_HASH_BYTES],
 static int dynamic_route_bit(const uint8 digest[MERKLE_HASH_BYTES], int bit);
 static uint64 dynamic_route_value(const uint8 digest[MERKLE_HASH_BYTES]);
 static uint64 dynamic_item_bytes(const bytea *key_data);
+static char *dynamic_single_key_text(Relation indexRel, const bytea *key_data);
 
 static bool
 dynamic_bytes_are_zero(const uint8 *data, Size length)
@@ -2038,6 +2056,7 @@ dynamic_merge_after_delete_spi(const MerkleDynamicGeneration *gen,
 typedef struct MerkleDynamicExistingItem
 {
 	bool found;
+	ItemPointerData tid;
 	int partition_id;
 	int prefix_len;
 	uint8 prefix[MERKLE_HASH_BYTES];
@@ -2583,6 +2602,647 @@ dynamic_apply_transition_impl(const MerkleDynamicTransition *transition)
 	index_close(indexRel,RowExclusiveLock);
 }
 
+static bool
+dynamic_seen_insert_batch_spi(const MerkleDynamicGeneration *gen,
+						  const MerkleDynamicTransition *transitions, int count)
+{
+	Oid marker_types[5] = {OIDOID,OIDOID,OIDOID,OIDOID,INT8OID};
+	Oid insert_types[6] = {OIDOID,OIDOID,OIDOID,OIDOID,INT8OID,BYTEAARRAYOID};
+	Datum args[6];
+	Datum *keys = palloc(sizeof(*keys) * count);
+	char nulls[6] = {' ',' ',' ',' ',' ',' '};
+	int rc;
+	int i;
+
+	dynamic_generation_args(gen,args);
+	args[4] = Int64GetDatum((int64) transitions[0].seq);
+	for (i = 0; i < count; i++)
+		keys[i] = PointerGetDatum(transitions[i].key_data);
+	args[5] = PointerGetDatum(dynamic_construct_array(keys,count,BYTEAOID));
+	rc = SPI_execute_with_args(
+		"UPDATE ariabc_internal.merkle_dynamic_state SET seen_pruned_seq=$5 "
+		"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4 "
+		"AND seen_pruned_seq < $5",
+		5,marker_types,args,nulls,false,0);
+	if (rc != SPI_OK_UPDATE)
+		elog(ERROR, "dynamic Merkle batch prune marker failed");
+	if (SPI_processed == 1)
+	{
+		rc = SPI_execute_with_args(
+			"DELETE FROM ariabc_internal.merkle_dynamic_seen "
+			"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4 "
+			"AND apply_seq < $5",
+			5,marker_types,args,nulls,false,0);
+		if (rc != SPI_OK_DELETE)
+			elog(ERROR, "dynamic Merkle batch idempotence pruning failed");
+	}
+	rc = SPI_execute_with_args(
+		"INSERT INTO ariabc_internal.merkle_dynamic_seen "
+		"(index_oid,rnode_spc,rnode_db,rnode_rel,apply_seq,key_data) "
+		"SELECT $1,$2,$3,$4,$5,u.key_data FROM unnest($6::bytea[]) u(key_data) "
+		"ON CONFLICT DO NOTHING RETURNING 1",
+		6,insert_types,args,nulls,false,0);
+	if (rc != SPI_OK_INSERT_RETURNING)
+		elog(ERROR, "dynamic Merkle batch idempotence insert failed");
+	if (SPI_processed == 0)
+		return false;
+	if (SPI_processed != (uint64) count)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("dynamic Merkle batch is only partially idempotent")));
+	return true;
+}
+
+static MerkleDynamicExistingItem *
+dynamic_load_existing_items_batch_spi(const MerkleDynamicGeneration *gen,
+								  const MerkleDynamicTransition *transitions,
+								  int count)
+{
+	Oid types[8] = {OIDOID,OIDOID,OIDOID,OIDOID,INT4ARRAYOID,
+		INT4ARRAYOID,BYTEAARRAYOID,BYTEAARRAYOID};
+	Datum args[8];
+	Datum *ordinals = palloc(sizeof(*ordinals) * count);
+	Datum *partitions = palloc(sizeof(*partitions) * count);
+	Datum *routes = palloc(sizeof(*routes) * count);
+	Datum *keys = palloc(sizeof(*keys) * count);
+	char nulls[8] = {' ',' ',' ',' ',' ',' ',' ',' '};
+	MerkleDynamicExistingItem *items = palloc0(sizeof(*items) * count);
+	int rc;
+	int i;
+
+	for (i = 0; i < count; i++)
+	{
+		ordinals[i] = Int32GetDatum(i);
+		partitions[i] = Int32GetDatum(transitions[i].partition_id);
+		routes[i] = PointerGetDatum(dynamic_bytea(
+			transitions[i].route_digest,MERKLE_HASH_BYTES));
+		keys[i] = PointerGetDatum(transitions[i].key_data);
+	}
+	dynamic_generation_args(gen,args);
+	args[4] = PointerGetDatum(dynamic_construct_array(ordinals,count,INT4OID));
+	args[5] = PointerGetDatum(dynamic_construct_array(partitions,count,INT4OID));
+	args[6] = PointerGetDatum(dynamic_construct_array(routes,count,BYTEAOID));
+	args[7] = PointerGetDatum(dynamic_construct_array(keys,count,BYTEAOID));
+	rc = SPI_execute_with_args(
+		"WITH request(ordinal,partition_id,route_digest,key_data) AS ("
+		" SELECT * FROM unnest($5::int4[],$6::int4[],$7::bytea[],$8::bytea[])"
+		") SELECT r.ordinal,i.partition_id,i.prefix_len,i.prefix_bytes,"
+		" i.route_digest,i.tuple_hash,i.last_seq,i.ctid FROM request r"
+		" CROSS JOIN LATERAL ("
+		"  SELECT partition_id,prefix_len,prefix_bytes,route_digest,tuple_hash,last_seq,ctid"
+		"  FROM ariabc_internal.merkle_dynamic_leaf_item i"
+		"  WHERE i.index_oid=$1 AND i.rnode_spc=$2 AND i.rnode_db=$3"
+		"  AND i.rnode_rel=$4 AND i.partition_id=r.partition_id"
+		"  AND i.route_digest=r.route_digest AND i.key_data=r.key_data FOR UPDATE"
+		" ) i ORDER BY r.ordinal",
+		8,types,args,nulls,false,0);
+	if (rc != SPI_OK_SELECT || SPI_processed != (uint64) count)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("dynamic Merkle batch item identity set is incomplete")));
+	for (i = 0; i < count; i++)
+	{
+		HeapTuple tuple = SPI_tuptable->vals[i];
+		TupleDesc desc = SPI_tuptable->tupdesc;
+		MerkleDynamicExistingItem *item;
+		bytea *value;
+		bool isnull;
+		int ordinal = DatumGetInt32(SPI_getbinval(tuple,desc,1,&isnull));
+
+		if (isnull || ordinal < 0 || ordinal >= count || items[ordinal].found)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("dynamic Merkle batch item ordinal is invalid")));
+		item = &items[ordinal];
+		item->found = true;
+		item->partition_id = DatumGetInt32(SPI_getbinval(tuple,desc,2,&isnull));
+		item->prefix_len = DatumGetInt16(SPI_getbinval(tuple,desc,3,&isnull));
+		value = DatumGetByteaPP(SPI_getbinval(tuple,desc,4,&isnull));
+		if (isnull || VARSIZE_ANY_EXHDR(value) != MERKLE_HASH_BYTES)
+			elog(ERROR, "invalid dynamic Merkle batch item prefix");
+		memcpy(item->prefix,VARDATA_ANY(value),MERKLE_HASH_BYTES);
+		value = DatumGetByteaPP(SPI_getbinval(tuple,desc,5,&isnull));
+		if (isnull || VARSIZE_ANY_EXHDR(value) != MERKLE_HASH_BYTES)
+			elog(ERROR, "invalid dynamic Merkle batch item route");
+		memcpy(item->route_digest,VARDATA_ANY(value),MERKLE_HASH_BYTES);
+		dynamic_hash_from_datum(SPI_getbinval(tuple,desc,6,&isnull),
+			&item->tuple_hash,"stored tuple_hash");
+		item->last_seq = (uint64) DatumGetInt64(
+			SPI_getbinval(tuple,desc,7,&isnull));
+		{
+			Datum tid_datum = SPI_getbinval(tuple,desc,8,&isnull);
+
+			if (isnull)
+				elog(ERROR, "invalid dynamic Merkle batch item ctid");
+			ItemPointerCopy((ItemPointer) DatumGetPointer(tid_datum),
+							&item->tid);
+		}
+		if (!ItemPointerIsValid(&item->tid))
+			elog(ERROR, "invalid dynamic Merkle batch item ctid");
+	}
+	return items;
+}
+
+static void
+dynamic_update_items_batch_spi(const MerkleDynamicGeneration *gen,
+						   const MerkleDynamicTransition *transitions,
+						   const MerkleDynamicExistingItem *existing, int count)
+{
+	Oid types[8] = {OIDOID,OIDOID,OIDOID,OIDOID,INT8OID,TIDOID,
+		BYTEAOID,BYTEAOID};
+	Datum args[8];
+	char nulls[8] = {' ',' ',' ',' ',' ',' ',' ',' '};
+	SPIPlanPtr plan;
+	int rc;
+	int i;
+
+	dynamic_generation_args(gen,args);
+	args[4] = Int64GetDatum((int64) transitions[0].seq);
+	plan = SPI_prepare(
+		"UPDATE ariabc_internal.merkle_dynamic_leaf_item i "
+		"SET tuple_hash=$8,last_seq=$5 "
+		"WHERE i.index_oid=$1 AND i.rnode_spc=$2 AND i.rnode_db=$3"
+		" AND i.rnode_rel=$4 AND i.ctid=$6 AND i.tuple_hash=$7",
+		8,types);
+	if (plan == NULL)
+		elog(ERROR, "dynamic Merkle batch item update prepare failed");
+	for (i = 0; i < count; i++)
+	{
+		bytea *old_hash = dynamic_bytea(
+			transitions[i].old_hash.data,MERKLE_HASH_BYTES);
+		bytea *new_hash = dynamic_bytea(
+			transitions[i].new_hash.data,MERKLE_HASH_BYTES);
+
+		args[5] = PointerGetDatum(&existing[i].tid);
+		args[6] = PointerGetDatum(old_hash);
+		args[7] = PointerGetDatum(new_hash);
+		rc = SPI_execute_plan(plan,args,nulls,false,0);
+		pfree(old_hash);
+		pfree(new_hash);
+		if (rc != SPI_OK_UPDATE || SPI_processed != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("dynamic Merkle batch old tuple hash does not match stored state")));
+	}
+	SPI_freeplan(plan);
+}
+
+static int
+dynamic_batch_node_ptr_cmp(const void *left, const void *right)
+{
+	const MerkleDynamicBatchNode *a = *(MerkleDynamicBatchNode *const *) left;
+	const MerkleDynamicBatchNode *b = *(MerkleDynamicBatchNode *const *) right;
+	int cmp;
+
+	if (a->key.prefix_len != b->key.prefix_len)
+		return a->key.prefix_len > b->key.prefix_len ? -1 : 1;
+	if (a->key.partition_id != b->key.partition_id)
+		return a->key.partition_id < b->key.partition_id ? -1 : 1;
+	cmp = memcmp(a->key.prefix,b->key.prefix,MERKLE_HASH_BYTES);
+	return cmp < 0 ? -1 : cmp > 0 ? 1 : 0;
+}
+
+static int
+dynamic_batch_node_lookup_cmp(const void *left, const void *right)
+{
+	const MerkleDynamicBatchNode *a = *(MerkleDynamicBatchNode *const *) left;
+	const MerkleDynamicBatchNode *b = *(MerkleDynamicBatchNode *const *) right;
+	int cmp;
+
+	if (a->key.partition_id != b->key.partition_id)
+		return a->key.partition_id < b->key.partition_id ? -1 : 1;
+	if (a->key.prefix_len != b->key.prefix_len)
+		return a->key.prefix_len < b->key.prefix_len ? -1 : 1;
+	cmp = memcmp(a->key.prefix,b->key.prefix,MERKLE_HASH_BYTES);
+	return cmp < 0 ? -1 : cmp > 0 ? 1 : 0;
+}
+
+static void
+dynamic_update_batch_nodes_spi(const MerkleDynamicGeneration *gen, HTAB *nodes,
+						   uint64 seq, MerkleDynamicBatchNode ***ordered_out,
+						   int *count_out)
+{
+	HASH_SEQ_STATUS scan;
+	MerkleDynamicBatchNode *entry;
+	MerkleDynamicBatchNode **all_entries;
+	MerkleDynamicBatchNode **ordered;
+	Oid select_types[7] = {OIDOID,OIDOID,OIDOID,OIDOID,INT4OID,
+		INT4OID,BYTEAOID};
+	Oid update_types[8] = {OIDOID,OIDOID,OIDOID,OIDOID,INT8OID,TIDOID,
+		BYTEAOID,BYTEAOID};
+	Datum args[10];
+	char nulls[10] = {' ',' ',' ',' ',' ',' ',' ',' ',' ',' '};
+	SPIPlanPtr select_plan;
+	SPIPlanPtr update_plan;
+	int total_count = (int) hash_get_num_entries(nodes);
+	int count = 0;
+	int rc;
+	int i = 0;
+
+	all_entries = palloc(sizeof(*all_entries) * total_count);
+	ordered = palloc(sizeof(*ordered) * total_count);
+	hash_seq_init(&scan,nodes);
+	while ((entry = hash_seq_search(&scan)) != NULL)
+		all_entries[i++] = entry;
+	Assert(i == total_count);
+	qsort(all_entries,total_count,sizeof(*all_entries),
+		dynamic_batch_node_lookup_cmp);
+	dynamic_generation_args(gen,args);
+	select_plan = SPI_prepare(
+		"SELECT is_leaf,tuple_count,subtree_bytes,data_xor,structure_hash,ctid "
+		"FROM ariabc_internal.merkle_dynamic_node "
+		"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4 "
+		"AND partition_id=$5 AND prefix_len=$6 AND prefix_bytes=$7 FOR UPDATE",
+		7,select_types);
+	if (select_plan == NULL)
+		elog(ERROR, "dynamic Merkle batch node lookup prepare failed");
+	for (i = 0; i < total_count; i++)
+	{
+		bytea *prefix;
+
+		entry = all_entries[i];
+		args[4] = Int32GetDatum(entry->key.partition_id);
+		args[5] = Int32GetDatum(entry->key.prefix_len);
+		prefix = dynamic_bytea(entry->key.prefix,MERKLE_HASH_BYTES);
+		args[6] = PointerGetDatum(prefix);
+		rc = SPI_execute_plan(select_plan,args,nulls,false,1);
+		pfree(prefix);
+		if (rc != SPI_OK_SELECT || SPI_processed > 1)
+			elog(ERROR, "dynamic Merkle batch node lookup failed: %d", rc);
+		if (SPI_processed == 0)
+		{
+			entry->found = false;
+			if (entry->affected)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("dynamic Merkle batch update path is incomplete")));
+			continue;
+		}
+		{
+			HeapTuple tuple = SPI_tuptable->vals[0];
+			TupleDesc desc = SPI_tuptable->tupdesc;
+			MerkleHash current;
+			bool isnull;
+			Datum tid_datum;
+
+			entry->found = true;
+			entry->is_leaf = DatumGetBool(
+				SPI_getbinval(tuple,desc,1,&isnull));
+			if (isnull)
+				elog(ERROR, "null dynamic Merkle batch node kind");
+			entry->tuple_count = (uint64) DatumGetInt64(
+				SPI_getbinval(tuple,desc,2,&isnull));
+			entry->subtree_bytes = (uint64) DatumGetInt64(
+				SPI_getbinval(tuple,desc,3,&isnull));
+			dynamic_hash_from_datum(SPI_getbinval(tuple,desc,4,&isnull),
+				&current,"node data_xor");
+			entry->data_xor = current;
+			dynamic_hash_from_datum(SPI_getbinval(tuple,desc,5,&isnull),
+				&entry->structure_hash,"node structure_hash");
+			tid_datum = SPI_getbinval(tuple,desc,6,&isnull);
+
+			if (isnull)
+				elog(ERROR, "invalid dynamic Merkle batch node ctid");
+			ItemPointerCopy((ItemPointer) DatumGetPointer(tid_datum),&entry->tid);
+		}
+		if (entry->affected)
+		{
+			merkle_hash_xor(&entry->data_xor,&entry->xor_delta);
+			ordered[count++] = entry;
+		}
+		else
+			entry->structure_computed = true;
+	}
+	SPI_freeplan(select_plan);
+	qsort(ordered,count,sizeof(*ordered),dynamic_batch_node_ptr_cmp);
+	for (i = 0; i < count; i++)
+	{
+		MerkleDynamicBatchNode *node = ordered[i];
+
+		if (node->is_leaf)
+		{
+			MerkleDynamicLoadedItem *items;
+			MerkleHash data_xor;
+			uint64 bytes = 0;
+			int item_count;
+			int item;
+
+			items = dynamic_load_items_spi(gen,node->key.partition_id,
+				node->key.prefix_len,node->key.prefix,true,&item_count);
+			merkle_hash_zero(&data_xor);
+			for (item = 0; item < item_count; item++)
+			{
+				if (!dynamic_prefix_matches(items[item].route_digest,
+					node->key.prefix,node->key.prefix_len))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("dynamic Merkle batch item is outside its leaf prefix")));
+				bytes += items[item].item_bytes;
+				merkle_hash_xor(&data_xor,&items[item].tuple_hash);
+			}
+			if ((uint64) item_count != node->tuple_count ||
+				bytes != node->subtree_bytes ||
+				!dynamic_hash_equal(&data_xor,&node->data_xor))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("dynamic Merkle batch leaf summary is inconsistent")));
+			dynamic_leaf_structure_hash(node->key.partition_id,
+				node->key.prefix_len,node->key.prefix,items,0,item_count,
+				&node->data_xor,&node->structure_hash);
+		}
+		else
+		{
+			MerkleDynamicBuildNode children[2];
+			MerkleHash data_xor;
+			uint64 tuple_count = 0;
+			uint64 subtree_bytes = 0;
+			int child_count = 0;
+			int ordinal;
+			int child_depth = dynamic_child_depth(node->key.prefix_len);
+
+			if (child_depth < 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("dynamic Merkle batch internal node has invalid depth")));
+			merkle_hash_zero(&data_xor);
+			for (ordinal = 0; ordinal < 2; ordinal++)
+			{
+				MerkleDynamicVerifyNodeKey child_key;
+				MerkleDynamicBatchNode *batch_child;
+				MerkleHash child_data_xor;
+				MerkleHash child_structure;
+				uint64 child_count_value;
+				uint64 child_bytes;
+				bool child_leaf;
+				bool found;
+
+				MemSet(&child_key,0,sizeof(child_key));
+				child_key.partition_id = node->key.partition_id;
+				child_key.prefix_len = (uint16) child_depth;
+				dynamic_child_prefix(node->key.prefix,node->key.prefix_len,
+					ordinal,1,child_key.prefix);
+				batch_child = hash_search(nodes,&child_key,HASH_FIND,&found);
+				if (found && batch_child != NULL && batch_child->found)
+				{
+					if (!batch_child->structure_computed)
+						elog(ERROR, "dynamic Merkle batch child ordering is invalid");
+					child_data_xor = batch_child->data_xor;
+					child_structure = batch_child->structure_hash;
+					child_count_value = batch_child->tuple_count;
+					child_bytes = batch_child->subtree_bytes;
+					child_leaf = batch_child->is_leaf;
+				}
+				else
+					continue;
+				MemSet(&children[child_count],0,sizeof(children[child_count]));
+				children[child_count].partition_id = node->key.partition_id;
+				children[child_count].prefix_len = (uint16) child_depth;
+				memcpy(children[child_count].prefix,child_key.prefix,
+					MERKLE_HASH_BYTES);
+				children[child_count].is_leaf = child_leaf;
+				children[child_count].tuple_count = child_count_value;
+				children[child_count].subtree_bytes = child_bytes;
+				children[child_count].data_xor = child_data_xor;
+				children[child_count].structure_hash = child_structure;
+				child_count++;
+				tuple_count += child_count_value;
+				subtree_bytes += child_bytes;
+				merkle_hash_xor(&data_xor,&child_data_xor);
+			}
+			if (child_count == 0 || tuple_count != node->tuple_count ||
+				subtree_bytes != node->subtree_bytes ||
+				!dynamic_hash_equal(&data_xor,&node->data_xor))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("dynamic Merkle batch internal summary is inconsistent")));
+			dynamic_internal_structure_hash(node->key.partition_id,
+				node->key.prefix_len,node->key.prefix,children,child_count,
+				node->tuple_count,node->subtree_bytes,&node->data_xor,
+				&node->structure_hash);
+		}
+		node->structure_computed = true;
+	}
+	dynamic_generation_args(gen,args);
+	args[4] = Int64GetDatum((int64) seq);
+	update_plan = SPI_prepare(
+		"UPDATE ariabc_internal.merkle_dynamic_node n "
+		"SET data_xor=$7,structure_hash=$8,last_seq=$5 "
+		"WHERE n.index_oid=$1 AND n.rnode_spc=$2 AND n.rnode_db=$3"
+		" AND n.rnode_rel=$4 AND n.ctid=$6",
+		8,update_types);
+	if (update_plan == NULL)
+		elog(ERROR, "dynamic Merkle batch node update prepare failed");
+	for (i = 0; i < count; i++)
+	{
+		bytea *data_xor = dynamic_bytea(ordered[i]->data_xor.data,
+			MERKLE_HASH_BYTES);
+		bytea *structure = dynamic_bytea(ordered[i]->structure_hash.data,
+			MERKLE_HASH_BYTES);
+
+		args[5] = PointerGetDatum(&ordered[i]->tid);
+		args[6] = PointerGetDatum(data_xor);
+		args[7] = PointerGetDatum(structure);
+		rc = SPI_execute_plan(update_plan,args,nulls,false,0);
+		pfree(data_xor);
+		pfree(structure);
+		if (rc != SPI_OK_UPDATE || SPI_processed != 1)
+			elog(ERROR, "dynamic Merkle batch node summary update failed");
+	}
+	SPI_freeplan(update_plan);
+	*ordered_out = ordered;
+	*count_out = count;
+}
+
+static void
+dynamic_apply_update_batch_impl(const MerkleDynamicTransition *transitions,
+								int count)
+{
+	Relation indexRel;
+	MerkleDynamicGeneration gen;
+	MerkleDynamicExistingItem *existing;
+	HASHCTL ctl;
+	HTAB *nodes;
+	MerkleDynamicBatchNode **ordered;
+	MerkleDynamicStructureDelta structure_delta;
+	uint64 applied_seq;
+	instr_time profile_start;
+	instr_time profile_end;
+	double seen_ms;
+	double existing_ms;
+	double item_ms;
+	double node_ms;
+	int node_count;
+	int rc;
+	int i;
+
+	if (count <= 0)
+		return;
+	indexRel = index_open(transitions[0].index_oid,RowExclusiveLock);
+	dynamic_read_meta(indexRel,&gen);
+	for (i = 0; i < count; i++)
+	{
+		uint8 route[MERKLE_HASH_BYTES];
+		blake3_hasher hasher;
+
+		if (!transitions[i].has_old || !transitions[i].has_new ||
+			transitions[i].seq != transitions[0].seq ||
+			transitions[i].index_oid != gen.index_oid ||
+			!RelFileNodeEquals(transitions[i].index_rnode,gen.rnode))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid dynamic Merkle update batch")));
+		blake3_hasher_init(&hasher);
+		blake3_hasher_update(&hasher,VARDATA_ANY(transitions[i].key_data),
+			VARSIZE_ANY_EXHDR(transitions[i].key_data));
+		blake3_hasher_finalize(&hasher,route,MERKLE_HASH_BYTES);
+		if (memcmp(route,transitions[i].route_digest,MERKLE_HASH_BYTES) != 0 ||
+			transitions[i].partition_id < 0 ||
+			transitions[i].partition_id >= gen.config.partitions ||
+			transitions[i].partition_id != (int32) (dynamic_route_value(route) %
+				(uint64) gen.config.partitions))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("dynamic Merkle batch item routing is invalid")));
+	}
+	dynamic_require_relations();
+	if (SPI_connect() != SPI_OK_CONNECT)
+		elog(ERROR, "dynamic Merkle batch apply SPI_connect failed");
+	applied_seq = dynamic_validate_state_spi(&gen);
+	if (transitions[0].seq < applied_seq)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("stale dynamic Merkle update batch sequence")));
+	INSTR_TIME_SET_CURRENT(profile_start);
+	if (!dynamic_seen_insert_batch_spi(&gen,transitions,count))
+	{
+		SPI_finish();
+		index_close(indexRel,RowExclusiveLock);
+		return;
+	}
+	INSTR_TIME_SET_CURRENT(profile_end);
+	INSTR_TIME_SUBTRACT(profile_end,profile_start);
+	seen_ms = INSTR_TIME_GET_MILLISEC(profile_end);
+	INSTR_TIME_SET_CURRENT(profile_start);
+	existing = dynamic_load_existing_items_batch_spi(&gen,transitions,count);
+	INSTR_TIME_SET_CURRENT(profile_end);
+	INSTR_TIME_SUBTRACT(profile_end,profile_start);
+	existing_ms = INSTR_TIME_GET_MILLISEC(profile_end);
+	MemSet(&ctl,0,sizeof(ctl));
+	ctl.keysize = sizeof(MerkleDynamicVerifyNodeKey);
+	ctl.entrysize = sizeof(MerkleDynamicBatchNode);
+	ctl.hcxt = CurrentMemoryContext;
+	nodes = hash_create("dynamic Merkle batch nodes",count * 8,&ctl,
+		HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	for (i = 0; i < count; i++)
+	{
+		MerkleHash delta;
+		int depth;
+
+		if (!existing[i].found ||
+			existing[i].partition_id != transitions[i].partition_id ||
+			memcmp(existing[i].route_digest,transitions[i].route_digest,
+				MERKLE_HASH_BYTES) != 0 ||
+			!dynamic_hash_equal(&existing[i].tuple_hash,&transitions[i].old_hash))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("dynamic Merkle batch old item state does not match")));
+		delta = transitions[i].old_hash;
+		merkle_hash_xor(&delta,&transitions[i].new_hash);
+		for (depth = existing[i].prefix_len; depth >= 0; depth--)
+		{
+			MerkleDynamicVerifyNodeKey key;
+			MerkleDynamicBatchNode *node;
+			bool found;
+
+			MemSet(&key,0,sizeof(key));
+			key.partition_id = transitions[i].partition_id;
+			key.prefix_len = (uint16) depth;
+			dynamic_prefix(transitions[i].route_digest,depth,key.prefix);
+			node = hash_search(nodes,&key,HASH_ENTER,&found);
+			if (!found)
+				merkle_hash_zero(&node->xor_delta);
+			node->affected = true;
+			merkle_hash_xor(&node->xor_delta,&delta);
+		}
+	}
+	{
+		HASH_SEQ_STATUS scan;
+		MerkleDynamicBatchNode *node;
+		MerkleDynamicVerifyNodeKey *parents;
+		int parent_count = 0;
+		int parent_capacity = (int) hash_get_num_entries(nodes);
+
+		parents = palloc(sizeof(*parents) * Max(parent_capacity,1));
+		hash_seq_init(&scan,nodes);
+		while ((node = hash_seq_search(&scan)) != NULL)
+			if (node->affected && node->key.prefix_len < MERKLE_HASH_BITS)
+				parents[parent_count++] = node->key;
+		for (i = 0; i < parent_count; i++)
+		{
+			int ordinal;
+
+			for (ordinal = 0; ordinal < 2; ordinal++)
+			{
+				MerkleDynamicVerifyNodeKey child_key;
+				MerkleDynamicBatchNode *child;
+				bool found;
+
+				MemSet(&child_key,0,sizeof(child_key));
+				child_key.partition_id = parents[i].partition_id;
+				child_key.prefix_len = parents[i].prefix_len + 1;
+				dynamic_child_prefix(parents[i].prefix,parents[i].prefix_len,
+					ordinal,1,child_key.prefix);
+				child = hash_search(nodes,&child_key,HASH_ENTER,&found);
+				if (!found)
+				{
+					merkle_hash_zero(&child->xor_delta);
+					child->affected = false;
+				}
+			}
+		}
+	}
+	INSTR_TIME_SET_CURRENT(profile_start);
+	dynamic_update_items_batch_spi(&gen,transitions,existing,count);
+	dynamic_advance_command_counter();
+	INSTR_TIME_SET_CURRENT(profile_end);
+	INSTR_TIME_SUBTRACT(profile_end,profile_start);
+	item_ms = INSTR_TIME_GET_MILLISEC(profile_end);
+	INSTR_TIME_SET_CURRENT(profile_start);
+	dynamic_update_batch_nodes_spi(&gen,nodes,transitions[0].seq,
+		&ordered,&node_count);
+	dynamic_advance_command_counter();
+	INSTR_TIME_SET_CURRENT(profile_end);
+	INSTR_TIME_SUBTRACT(profile_end,profile_start);
+	node_ms = INSTR_TIME_GET_MILLISEC(profile_end);
+	for (i = 0; i < count; i++)
+	{
+		MerkleDynamicVerifyNodeKey key;
+		MerkleDynamicBatchNode *leaf;
+		bool found;
+
+		MemSet(&key,0,sizeof(key));
+		key.partition_id = transitions[i].partition_id;
+		key.prefix_len = (uint16) existing[i].prefix_len;
+		memcpy(key.prefix,existing[i].prefix,MERKLE_HASH_BYTES);
+		leaf = hash_search(nodes,&key,HASH_FIND,&found);
+		if (!found || leaf == NULL || !leaf->is_leaf)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("dynamic Merkle batch item leaf assignment is invalid")));
+	}
+	MemSet(&structure_delta,0,sizeof(structure_delta));
+	dynamic_update_state_stats_spi(&gen,&transitions[0],0,0,&structure_delta);
+	dynamic_advance_command_counter();
+	ereport(LOG,
+			(errmsg("dynamic Merkle update batch profile"),
+			 errdetail("items=%d affected_nodes=%d seen_ms=%.3f existing_ms=%.3f item_ms=%.3f node_ms=%.3f",
+				count,node_count,seen_ms,existing_ms,item_ms,node_ms)));
+	rc = SPI_finish();
+	if (rc != SPI_OK_FINISH)
+		elog(ERROR, "dynamic Merkle batch apply SPI_finish failed: %d", rc);
+	index_close(indexRel,RowExclusiveLock);
+}
+
 void
 merkle_dynamic_apply_transition(const MerkleDynamicTransition *transition)
 {
@@ -2595,6 +3255,29 @@ merkle_dynamic_apply_transition(const MerkleDynamicTransition *transition)
 	PG_TRY();
 	{
 		dynamic_apply_transition_impl(transition);
+	}
+	PG_CATCH();
+	{
+		SetUserIdAndSecContext(saved_userid,saved_sec_context);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SetUserIdAndSecContext(saved_userid,saved_sec_context);
+}
+
+void
+merkle_dynamic_apply_update_batch(const MerkleDynamicTransition *transitions,
+								  int count)
+{
+	Oid saved_userid;
+	int saved_sec_context;
+
+	GetUserIdAndSecContext(&saved_userid,&saved_sec_context);
+	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
+		saved_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+	PG_TRY();
+	{
+		dynamic_apply_update_batch_impl(transitions,count);
 	}
 	PG_CATCH();
 	{
@@ -3602,56 +4285,162 @@ dynamic_parse_requests_spi(Jsonb *json, int *count_out)
 	return requests;
 }
 
-static MerkleDynamicNodeData
-dynamic_range_summary_spi(const MerkleDynamicGeneration *gen,
-					  const MerkleDynamicRequest *request)
+static int
+dynamic_request_ptr_cmp(const void *left, const void *right)
 {
-	MerkleDynamicNodeData result;
-	int depth = 0;
-	uint8 prefix[MERKLE_HASH_BYTES] = {0};
+	const MerkleDynamicRequest *a = *(MerkleDynamicRequest *const *) left;
+	const MerkleDynamicRequest *b = *(MerkleDynamicRequest *const *) right;
+	int cmp;
 
-	MemSet(&result,0,sizeof(result));
-	if (request->partition_id < 0 ||
-		request->partition_id >= gen->config.partitions)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("dynamic Merkle range partition %d is out of bounds",
-						request->partition_id)));
-	for (;;)
+	if (a->partition_id != b->partition_id)
+		return a->partition_id < b->partition_id ? -1 : 1;
+	if (a->prefix_len != b->prefix_len)
+		return a->prefix_len < b->prefix_len ? -1 : 1;
+	cmp = memcmp(a->prefix,b->prefix,MERKLE_HASH_BYTES);
+	return cmp < 0 ? -1 : cmp > 0 ? 1 : 0;
+}
+
+/*
+ * Resolve exact physical nodes through the primary-key index.  A single
+ * Native B-tree probes make the access path independent of planner estimates.
+ * A batched SQL/LATERAL lookup was faster than scalar SPI calls at small sizes,
+ * but PostgreSQL still selected a side-table sequential scan at 5M rows.
+ *
+ * Because the physical tree splits one bit at a time, an absent exact node
+ * cannot have a descendant: the requested logical range is empty or is
+ * contained by a physical leaf.  In that case the route index can derive the
+ * summary from at most leaf_capacity items.
+ */
+static MerkleDynamicNodeData *
+dynamic_range_summaries_spi(const MerkleDynamicGeneration *gen,
+							const MerkleDynamicRequest *requests, int count)
+{
+	Oid namespace_oid;
+	Oid node_oid;
+	Oid node_index_oid;
+	Relation node_rel;
+	Relation node_index_rel;
+	MerkleDynamicRequest **ordered;
+	MerkleDynamicNodeData *results;
+	bool *exact_found;
+	int i;
+
+	results = palloc0(Max(count,1) * sizeof(*results));
+	if (count == 0)
+		return results;
+	for (i = 0; i < count; i++)
 	{
-		MerkleDynamicNodeData node = dynamic_load_node_spi(gen,
-			request->partition_id,depth,prefix,false);
+		if (requests[i].partition_id < 0 ||
+			requests[i].partition_id >= gen->config.partitions)
+				ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("dynamic Merkle range partition %d is out of bounds",
+							requests[i].partition_id)));
+	}
+	exact_found = palloc0(sizeof(*exact_found) * count);
+	ordered = palloc(sizeof(*ordered) * count);
+	for (i = 0; i < count; i++)
+		ordered[i] = (MerkleDynamicRequest *) &requests[i];
+	qsort(ordered,count,sizeof(*ordered),dynamic_request_ptr_cmp);
+	namespace_oid = get_namespace_oid("ariabc_internal",false);
+	node_oid = get_relname_relid("merkle_dynamic_node",namespace_oid);
+	node_index_oid = get_relname_relid("merkle_dynamic_node_pkey",namespace_oid);
+	if (!OidIsValid(node_oid) || !OidIsValid(node_index_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_TABLE),
+				 errmsg("dynamic Merkle node identity index is missing")));
+	node_rel = table_open(node_oid,AccessShareLock);
+	node_index_rel = index_open(node_index_oid,AccessShareLock);
+	for (i = 0; i < count; i++)
+	{
+		MerkleDynamicRequest *request = ordered[i];
+		int ordinal = (int) (request - requests);
+		ScanKeyData keys[7];
+		SysScanDesc scan;
+		HeapTuple tuple;
+		bytea *prefix = dynamic_bytea(request->prefix,MERKLE_HASH_BYTES);
+		bool isnull;
 
-		if (!node.found)
+		ScanKeyInit(&keys[0],1,BTEqualStrategyNumber,F_OIDEQ,
+			ObjectIdGetDatum(gen->index_oid));
+		ScanKeyInit(&keys[1],2,BTEqualStrategyNumber,F_OIDEQ,
+			ObjectIdGetDatum(gen->rnode.spcNode));
+		ScanKeyInit(&keys[2],3,BTEqualStrategyNumber,F_OIDEQ,
+			ObjectIdGetDatum(gen->rnode.dbNode));
+		ScanKeyInit(&keys[3],4,BTEqualStrategyNumber,F_OIDEQ,
+			ObjectIdGetDatum(gen->rnode.relNode));
+		ScanKeyInit(&keys[4],5,BTEqualStrategyNumber,F_INT4EQ,
+			Int32GetDatum(request->partition_id));
+		ScanKeyInit(&keys[5],6,BTEqualStrategyNumber,F_INT2EQ,
+			Int16GetDatum((int16) request->prefix_len));
+		ScanKeyInit(&keys[6],7,BTEqualStrategyNumber,F_BYTEAEQ,
+			PointerGetDatum(prefix));
+		scan = systable_beginscan_ordered(node_rel,node_index_rel,
+			GetActiveSnapshot(),lengthof(keys),keys);
+		tuple = systable_getnext_ordered(scan,ForwardScanDirection);
+		if (HeapTupleIsValid(tuple))
 		{
-			result.found = true;
-			result.is_leaf = true;
-			return result;
+			TupleDesc desc = RelationGetDescr(node_rel);
+
+			results[ordinal].found = true;
+			exact_found[ordinal] = true;
+			results[ordinal].is_leaf = DatumGetBool(
+				heap_getattr(tuple,8,desc,&isnull));
+			if (isnull)
+				elog(ERROR, "null dynamic Merkle range node kind");
+			results[ordinal].tuple_count = (uint64) DatumGetInt64(
+				heap_getattr(tuple,9,desc,&isnull));
+			results[ordinal].subtree_bytes = (uint64) DatumGetInt64(
+				heap_getattr(tuple,10,desc,&isnull));
+			dynamic_hash_from_datum(heap_getattr(tuple,11,desc,&isnull),
+				&results[ordinal].data_xor,"range node data_xor");
+			dynamic_hash_from_datum(heap_getattr(tuple,12,desc,&isnull),
+				&results[ordinal].structure_hash,"range node structure_hash");
+			results[ordinal].last_seq = (uint64) DatumGetInt64(
+				heap_getattr(tuple,13,desc,&isnull));
+			if (HeapTupleIsValid(systable_getnext_ordered(scan,
+				ForwardScanDirection)))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("duplicate dynamic Merkle node identity")));
 		}
-		if (depth == request->prefix_len)
-			return node;
-		if (node.is_leaf)
+		systable_endscan_ordered(scan);
+		pfree(prefix);
+		if (!results[ordinal].found)
+		{
+			results[ordinal].found = true;
+			results[ordinal].is_leaf = true;
+		}
+	}
+	index_close(node_index_rel,AccessShareLock);
+	table_close(node_rel,AccessShareLock);
+	for (i = 0; i < count; i++)
+		if (!exact_found[i])
 		{
 			MerkleDynamicLoadedItem *items;
-			int count;
-			int i;
+			int item_count;
+			int item;
 
-			items = dynamic_load_range_items_spi(gen,request->partition_id,
-				request->prefix_len,request->prefix,&count);
-			result.found = true;
-			result.is_leaf = true;
-			result.tuple_count = count;
-			merkle_hash_zero(&result.data_xor);
-			for (i = 0; i < count; i++)
+			items = dynamic_load_range_items_spi(gen,
+				requests[i].partition_id,
+				requests[i].prefix_len,requests[i].prefix,&item_count);
+			if (item_count > gen->config.leaf_capacity)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("absent dynamic Merkle node contains an unbounded item range")));
+			for (item = 0; item < item_count; item++)
 			{
-				result.subtree_bytes += items[i].item_bytes;
-				merkle_hash_xor(&result.data_xor,&items[i].tuple_hash);
+				results[i].tuple_count++;
+				results[i].subtree_bytes += items[item].item_bytes;
+				merkle_hash_xor(&results[i].data_xor,&items[item].tuple_hash);
 			}
-			return result;
 		}
-		depth++;
-		dynamic_prefix(request->prefix,depth,prefix);
+	/* Every absent exact node was materialized as an empty bounded leaf above. */
+	for (i = 0; i < count; i++)
+	{
+		Assert(results[i].found);
 	}
+	return results;
 }
 
 static uint32
@@ -3935,14 +4724,14 @@ merkle_dynamic_get_ranges(PG_FUNCTION_ARGS)
 		else
 		{
 			MerkleDynamicRequest *requests;
+			MerkleDynamicNodeData *summaries;
 			int count;
 			int i;
 
 			requests = dynamic_parse_requests_spi(json,&count);
+			summaries = dynamic_range_summaries_spi(&gen,requests,count);
 			for (i = 0; i < count; i++)
 			{
-				MerkleDynamicNodeData summary = dynamic_range_summary_spi(&gen,
-					&requests[i]);
 				Datum out[6];
 				bool outnulls[6] = {false,false,false,false,false,false};
 
@@ -3950,10 +4739,10 @@ merkle_dynamic_get_ranges(PG_FUNCTION_ARGS)
 				out[1] = Int32GetDatum(requests[i].prefix_len);
 				out[2] = PointerGetDatum(dynamic_bytea(requests[i].prefix,
 					MERKLE_HASH_BYTES));
-				out[3] = Int64GetDatum((int64) summary.tuple_count);
-				out[4] = PointerGetDatum(dynamic_bytea(summary.data_xor.data,
+				out[3] = Int64GetDatum((int64) summaries[i].tuple_count);
+				out[4] = PointerGetDatum(dynamic_bytea(summaries[i].data_xor.data,
 					MERKLE_HASH_BYTES));
-				out[5] = BoolGetDatum(summary.is_leaf);
+				out[5] = BoolGetDatum(summaries[i].is_leaf);
 				tuplestore_putvalues(tupstore,tupdesc,out,outnulls);
 			}
 		}
@@ -3996,6 +4785,7 @@ merkle_dynamic_get_range_items(PG_FUNCTION_ARGS)
 	{
 		MerkleDynamicGeneration gen;
 		MerkleDynamicRequest *requests;
+		MerkleDynamicNodeData *summaries;
 		int request_count;
 		int r;
 
@@ -4006,24 +4796,24 @@ merkle_dynamic_get_range_items(PG_FUNCTION_ARGS)
 			elog(ERROR, "dynamic Merkle range-items SPI_connect failed");
 		dynamic_validate_state_spi(&gen);
 		requests = dynamic_parse_requests_spi(json,&request_count);
+		summaries = dynamic_range_summaries_spi(&gen,requests,request_count);
 		for (r = 0; r < request_count; r++)
 		{
-			MerkleDynamicNodeData summary = dynamic_range_summary_spi(&gen,
-				&requests[r]);
 			MerkleDynamicLoadedItem *items;
 			int item_count;
 			uint64 bytes = 0;
 			int i;
 
-			if (summary.tuple_count > (uint64) gen.config.leaf_capacity ||
-				summary.subtree_bytes > (uint64) gen.config.leaf_byte_capacity)
+			if (summaries[r].tuple_count > (uint64) gen.config.leaf_capacity ||
+				summaries[r].subtree_bytes > (uint64) gen.config.leaf_byte_capacity)
 				ereport(ERROR,
 						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 						 errmsg("requested dynamic Merkle range is not bounded"),
 						 errhint("Descend the logical range before requesting item summaries.")));
-			items = dynamic_load_range_items_spi(&gen,requests[r].partition_id,
+			items = dynamic_load_range_items_spi(&gen,
+				requests[r].partition_id,
 				requests[r].prefix_len,requests[r].prefix,&item_count);
-			if ((uint64) item_count != summary.tuple_count)
+			if ((uint64) item_count != summaries[r].tuple_count)
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
 						 errmsg("dynamic Merkle range item count changed during read")));
@@ -4052,7 +4842,7 @@ merkle_dynamic_get_range_items(PG_FUNCTION_ARGS)
 					MERKLE_HASH_BYTES));
 				tuplestore_putvalues(tupstore,tupdesc,out,outnulls);
 			}
-			if (bytes != summary.subtree_bytes)
+			if (bytes != summaries[r].subtree_bytes)
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
 						 errmsg("dynamic Merkle range byte summary is inconsistent")));

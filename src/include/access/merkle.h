@@ -382,6 +382,8 @@ extern void merkle_stage_item_delta(Relation indexRel,
 									const MerkleItemIdentity *identity,
 									const MerkleHash *hash, bool is_insert);
 extern void merkle_dynamic_apply_transition(const MerkleDynamicTransition *transition);
+extern void merkle_dynamic_apply_update_batch(const MerkleDynamicTransition *transitions,
+										  int count);
 extern MerkleDynamicBuildState *merkle_dynamic_build_begin(Relation indexRel,
 														 Relation heapRel,
 														 int nkeys,

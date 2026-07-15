@@ -446,41 +446,53 @@ def validate_manifest_leaf_mapping(conn, manifest: dict[str, Any]) -> None:
 def apply_corruption(conn, manifest: dict[str, Any]) -> None:
     """Apply all corruptions described in *manifest* to damaged.usertable."""
     seed = manifest["seed"]
+    entries = list(manifest["corruptions"])
+    unknown = sorted({entry["op"] for entry in entries} - {"update", "delete", "insert"})
+    if unknown:
+        raise ValueError(f"unknown corruption operations: {unknown}")
 
-    for entry in manifest["corruptions"]:
-        op = entry["op"]
-        key = entry["ycsb_key"]
-        ref = entry["reference_key"]
+    update_keys = [int(entry["ycsb_key"]) for entry in entries if entry["op"] == "update"]
+    if update_keys:
+        rows = execute(
+            conn,
+            "UPDATE damaged.usertable "
+            "SET field9 = public.recovery_corrupted_value(ycsb_key, %s) "
+            "WHERE ycsb_key = ANY(%s::bigint[]) RETURNING ycsb_key",
+            (seed, update_keys),
+        )
+        if len(rows) != len(update_keys):
+            raise RuntimeError("set-based update corruption did not affect every key")
 
-        if op == "update":
-            execute(
-                conn,
-                "UPDATE damaged.usertable "
-                "SET field9 = public.recovery_corrupted_value(ycsb_key, %s) "
-                "WHERE ycsb_key = %s",
-                (seed, key),
+    delete_keys = [int(entry["ycsb_key"]) for entry in entries if entry["op"] == "delete"]
+    if delete_keys:
+        rows = execute(
+            conn,
+            "DELETE FROM damaged.usertable "
+            "WHERE ycsb_key = ANY(%s::bigint[]) RETURNING ycsb_key",
+            (delete_keys,),
+        )
+        if len(rows) != len(delete_keys):
+            raise RuntimeError("set-based delete corruption did not affect every key")
+
+    inserts = [entry for entry in entries if entry["op"] == "insert"]
+    if inserts:
+        insert_keys = [int(entry["ycsb_key"]) for entry in inserts]
+        reference_keys = [int(entry["reference_key"]) for entry in inserts]
+        field_list = ", ".join(FIELDS)
+        rows = execute(
+            conn,
+            f"""
+            WITH wanted(ycsb_key, reference_key) AS (
+                SELECT * FROM unnest(%s::bigint[], %s::bigint[])
             )
-        elif op == "delete":
-            execute(
-                conn,
-                "DELETE FROM damaged.usertable WHERE ycsb_key = %s",
-                (key,),
-            )
-        elif op == "insert":
-            # Fetch the healthy reference row to copy field values from, then
-            # insert a spurious row with the leaf-mapped synthetic key.
-            ref_row = execute(
-                conn,
-                "SELECT * FROM healthy.usertable WHERE ycsb_key = %s",
-                (ref,),
-            )
-            if not ref_row:
-                raise RuntimeError(f"reference key {ref} not found in healthy.usertable")
-            vals = ref_row[0]
-            execute(
-                conn,
-                "INSERT INTO damaged.usertable VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                tuple([key] + [vals[f] for f in FIELDS]),
-            )
-        else:
-            raise ValueError(f"unknown op {op!r} in manifest entry")
+            INSERT INTO damaged.usertable (ycsb_key, {field_list})
+            SELECT wanted.ycsb_key, {', '.join(f'healthy.{field}' for field in FIELDS)}
+            FROM wanted
+            JOIN healthy.usertable AS healthy
+              ON healthy.ycsb_key = wanted.reference_key
+            RETURNING ycsb_key
+            """,
+            (insert_keys, reference_keys),
+        )
+        if len(rows) != len(inserts):
+            raise RuntimeError("set-based insert corruption lacked a healthy reference row")

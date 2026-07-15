@@ -25,6 +25,8 @@ Options:
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
                                default: paper-update-only
   --audit-mode full|skip       default: full
+  --fast-diagnostic           dynamic only: one repetition, targeted audit,
+                              and no repeated crash/lifecycle gate
   --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
   --min-free-gib N             default: 40
@@ -61,6 +63,7 @@ MIN_FREE_GIB=40
 SSH_TIMEOUT="${SSH_TIMEOUT:-15}"
 KEEP_REMOTE_ARCHIVE=0
 KEEP_FAILURE_LOGS=0
+FAST_DIAGNOSTIC=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -84,6 +87,7 @@ while [[ $# -gt 0 ]]; do
     --artifact-mode) ARTIFACT_MODE="${2:?}"; shift 2 ;;
     --corruption-mode) CORRUPTION_MODE="${2:?}"; shift 2 ;;
     --audit-mode) AUDIT_MODE="${2:?}"; shift 2 ;;
+    --fast-diagnostic) FAST_DIAGNOSTIC=1; shift ;;
     --leaf-fetch-batch-size) LEAF_FETCH_BATCH_SIZE="${2:?}"; shift 2 ;;
     --run-static-merkle-regression) RUN_STATIC_MERKLE_REGRESSION=1; shift ;;
     --min-free-gib) MIN_FREE_GIB="${2:?}"; shift 2 ;;
@@ -98,6 +102,16 @@ done
 if [[ -z "$HOST" ]]; then
   echo "host must be specified" >&2
   exit 2
+fi
+if [[ "$FAST_DIAGNOSTIC" -eq 1 ]]; then
+  if [[ "$PROFILE" != "dynamic-size-scaling-k75-c300" ]]; then
+    echo "--fast-diagnostic requires --profile dynamic-size-scaling-k75-c300" >&2
+    exit 2
+  fi
+  AUDIT_MODE="skip"
+  if [[ -z "$REPETITIONS" ]]; then
+    REPETITIONS=1
+  fi
 fi
 case "$PROFILE" in
   smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300|dynamic-size-scaling-k75-c300) ;;
@@ -124,10 +138,6 @@ case "$EXPERIMENT" in
   *) echo "experiment must be figure12 or figure13" >&2; exit 2 ;;
 esac
 if [[ "$PROFILE" == "dynamic-size-scaling-k75-c300" ]]; then
-  if [[ "$AUDIT_MODE" != "full" ]]; then
-    echo "dynamic-size-scaling-k75-c300 requires --audit-mode full" >&2
-    exit 2
-  fi
   if [[ "$PROFILING" != "off" ]]; then
     echo "dynamic-size-scaling-k75-c300 requires --profiling off" >&2
     exit 2
@@ -422,8 +432,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'"
 progress "remote source and Python environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q FAST_DIAGNOSTIC=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS" "$FAST_DIAGNOSTIC")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -713,7 +723,7 @@ remote_progress "using installed shared libraries from $REMOTE_INSTALL_DIR/lib"
 # Dynamic recovery acceptance includes a destructive durability gate on the
 # target host.  Each case owns a private fresh cluster and exercises a real
 # postmaster SIGKILL at the dynamic-delta and apply-watermark boundaries.
-if [[ "$BENCH_PROFILE" == "dynamic-size-scaling-k75-c300" ]]; then
+if [[ "$BENCH_PROFILE" == "dynamic-size-scaling-k75-c300" && "$FAST_DIAGNOSTIC" -eq 0 ]]; then
   DYNAMIC_GATE_DIR="$REMOTE_LOG_DIR/dynamic_merkle_crash_gate"
   remote_progress "dynamic Merkle crash/lifecycle gate started; log: $REMOTE_LOG_DIR/dynamic_crash_gate.log"
   if PG_BIN="$REMOTE_INSTALL_DIR/bin" \
@@ -748,7 +758,7 @@ fi
 remote_progress "temporary socket directory ready: $REMOTE_SOCKET_DIR"
 remote_progress "PostgreSQL start requested; logs: $REMOTE_LOG_DIR/pg_ctl_start.log and $REMOTE_LOG_DIR/postgres.log"
 if "$REMOTE_INSTALL_DIR/bin/pg_ctl" -D "$REMOTE_PGDATA" -l "$REMOTE_LOG_DIR/postgres.log" \
-    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses=''" \
+    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c max_wal_size=16GB -c min_wal_size=2GB -c checkpoint_timeout=30min -c checkpoint_completion_target=0.9" \
     -w start >"$REMOTE_LOG_DIR/pg_ctl_start.log" 2>&1; then
   remote_progress "PostgreSQL started"
 else
@@ -862,6 +872,9 @@ if [[ -f "$REMOTE_LOG_DIR/dynamic_merkle_crash_gate/campaign.env" ]]; then
 fi
 if [[ -f "$REMOTE_LOG_DIR/postgres_memory.csv" ]]; then
   cp "$REMOTE_LOG_DIR/postgres_memory.csv" "$RESULT_DIR/postgres_memory.csv"
+fi
+if [[ -f "$REMOTE_LOG_DIR/postgres.log" ]]; then
+  cp "$REMOTE_LOG_DIR/postgres.log" "$RESULT_DIR/postgres.log"
 fi
 
 # Append build provenance to config.json

@@ -2017,6 +2017,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         "exact_heap_fetch_ms",
         "row_comparison_ms",
         "repair_write_ms",
+        "post_repair_apply_pending_ms",
+        "post_repair_relocalisation_ms",
         "targeted_post_repair_confirmation_ms",
         "recovery_observability_ms",
         "recovery_orchestration_ms",
@@ -2214,8 +2216,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.merkle_mode not in (None, "dynamic"):
             raise ValueError(f"{DYNAMIC_PROFILE} requires --merkle-mode dynamic")
         args.merkle_mode = "dynamic"
-        if args.audit_mode != "full":
-            raise ValueError(f"{DYNAMIC_PROFILE} requires --audit-mode full")
         if args.profiling != "off":
             raise ValueError(
                 f"{DYNAMIC_PROFILE} records dedicated dynamic artifacts; "
