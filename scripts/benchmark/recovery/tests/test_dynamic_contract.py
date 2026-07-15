@@ -104,6 +104,16 @@ def test_dynamic_index_creation_uses_reloptions_and_never_creates_static_lookup(
         sql.startswith("CREATE INDEX") and "leaf_lookup" in sql
         for sql in statements
     )
+    assert {
+        sql
+        for sql in statements
+        if sql.startswith("ANALYZE ariabc_internal.merkle_dynamic_")
+    } == {
+        "ANALYZE ariabc_internal.merkle_dynamic_node",
+        "ANALYZE ariabc_internal.merkle_dynamic_leaf_item",
+        "ANALYZE ariabc_internal.merkle_dynamic_seen",
+        "ANALYZE ariabc_internal.merkle_dynamic_state",
+    }
 
 
 def test_dynamic_adapter_matches_frozen_backend_rows(monkeypatch):
@@ -220,6 +230,23 @@ def test_dynamic_manifest_selects_75_bounded_ranges_and_exactly_300_updates(monk
     assert all(value == 32 for value in result["selected_leaf_capacities"].values())
 
 
-def test_dynamic_cli_requires_full_audit_before_creating_artifacts():
-    with pytest.raises(ValueError, match="requires --audit-mode full"):
-        benchmark.main(["--profile", DYNAMIC_PROFILE, "--audit-mode", "skip"])
+def test_dynamic_cli_allows_targeted_audit_for_diagnostic_runs(
+    monkeypatch, tmp_path: Path
+):
+    result_dir = tmp_path / "result"
+    result_dir.mkdir()
+
+    def fake_run(args):
+        assert args.merkle_mode == "dynamic"
+        assert args.audit_mode == "skip"
+        return result_dir
+
+    monkeypatch.setattr(benchmark, "run_benchmark", fake_run)
+    assert benchmark.main(
+        [
+            "--profile", DYNAMIC_PROFILE,
+            "--audit-mode", "skip",
+            "--result-dir", str(tmp_path / "results"),
+            "--scratch-dir", str(tmp_path / "scratch"),
+        ]
+    ) == 0

@@ -993,17 +993,38 @@ merkle_dynamic_event_cmp(const void *left, const void *right)
 static void
 merkle_apply_dynamic_events(MerkleEventArray *events)
 {
-	int i;
+	int i = 0;
 
 	if (events->ndynamic == 0)
 		return;
 	qsort(events->dynamic, events->ndynamic, sizeof(*events->dynamic),
 		  merkle_dynamic_event_cmp);
-	for (i = 0; i < events->ndynamic; i++)
+	while (i < events->ndynamic)
 	{
+		int group_end = i + 1;
+
+		if (events->dynamic[i].has_old && events->dynamic[i].has_new)
+			while (group_end < events->ndynamic &&
+				events->dynamic[group_end].has_old &&
+				events->dynamic[group_end].has_new &&
+				events->dynamic[group_end].seq == events->dynamic[i].seq &&
+				events->dynamic[group_end].index_oid ==
+					events->dynamic[i].index_oid &&
+				RelFileNodeEquals(events->dynamic[group_end].index_rnode,
+					events->dynamic[i].index_rnode))
+				group_end++;
+		if (group_end - i > 1)
+		{
+			merkle_crash_failpoint("before_dynamic_transition");
+			merkle_dynamic_apply_update_batch(&events->dynamic[i],group_end - i);
+			merkle_crash_failpoint("after_dynamic_transition");
+			i = group_end;
+			continue;
+		}
 		merkle_crash_failpoint("before_dynamic_transition");
 		merkle_dynamic_apply_transition(&events->dynamic[i]);
 		merkle_crash_failpoint("after_dynamic_transition");
+		i++;
 	}
 }
 

@@ -44,6 +44,7 @@ ALLOWED = {
     "dynamic_crash_gate_campaign.env",
     "dynamic_preflight.json",
     "postgres_memory.csv",
+    "postgres.log",
     "profiling_report.md",
     "artifact_manifest.json",
     "stdout.log",

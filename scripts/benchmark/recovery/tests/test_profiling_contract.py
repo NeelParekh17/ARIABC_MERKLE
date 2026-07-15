@@ -959,3 +959,122 @@ def test_representative_leaf_ids_coverage():
     from merkle_recovery.repair import representative_leaf_ids
     assert representative_leaf_ids(16, 200) == list(range(16))
     assert len(representative_leaf_ids(204800, 75)) == 75
+
+
+# -- analyze placement tests --------------------------------------------------
+
+def test_static_path_does_not_call_analyze_dynamic_side_tables(monkeypatch):
+    """create_damaged_indexes must not touch any ariabc_internal.merkle_dynamic_* relation."""
+    import merkle_recovery.dataset as ds
+
+    executed_sql: list[str] = []
+    dynamic_calls: list[str] = []
+
+    def fake_execute(conn, sql, *args, **kwargs):
+        executed_sql.append(sql.strip())
+        return []
+
+    def fake_analyze_dynamic(conn):
+        dynamic_calls.append("called")
+
+    monkeypatch.setattr(ds, "execute", fake_execute)
+    monkeypatch.setattr(ds, "analyze_dynamic_side_tables", fake_analyze_dynamic)
+
+    ds.create_damaged_indexes(object(), partitions=10, leaves_per_partition=16, fanout=2)
+
+    # ANALYZE damaged.usertable must be present
+    assert any("ANALYZE damaged.usertable" in sql for sql in executed_sql), (
+        "ANALYZE damaged.usertable was not executed in the static path"
+    )
+    # analyze_dynamic_side_tables must never be called
+    assert dynamic_calls == [], (
+        "analyze_dynamic_side_tables was called from the static path; it must not be"
+    )
+    # No SQL should reference dynamic internal tables
+    for sql in executed_sql:
+        assert "merkle_dynamic" not in sql, (
+            f"Static path issued SQL touching dynamic internal tables: {sql!r}"
+        )
+
+
+def test_dynamic_path_calls_analyze_dynamic_side_tables_exactly_once(monkeypatch):
+    """create_damaged_dynamic_index must call analyze_dynamic_side_tables exactly once,
+    after both CREATE INDEX and ANALYZE damaged.usertable."""
+    import merkle_recovery.dataset as ds
+
+    call_order: list[str] = []
+
+    def fake_execute(conn, sql, *args, **kwargs):
+        sql_stripped = sql.strip()
+        if "CREATE INDEX" in sql_stripped and "dynamic = on" in sql_stripped:
+            call_order.append("CREATE INDEX dynamic=on")
+        elif "ANALYZE damaged.usertable" in sql_stripped:
+            call_order.append("ANALYZE usertable")
+        return []
+
+    def fake_analyze_dynamic(conn):
+        call_order.append("analyze_dynamic_side_tables")
+
+    monkeypatch.setattr(ds, "execute", fake_execute)
+    monkeypatch.setattr(ds, "analyze_dynamic_side_tables", fake_analyze_dynamic)
+
+    ds.create_damaged_dynamic_index(
+        object(),
+        partitions=10,
+        logical_fanout=32,
+        leaf_capacity=32,
+        merge_threshold=8,
+    )
+
+    # analyze_dynamic_side_tables must be called exactly once
+    dynamic_calls = [e for e in call_order if e == "analyze_dynamic_side_tables"]
+    assert len(dynamic_calls) == 1, (
+        f"analyze_dynamic_side_tables called {len(dynamic_calls)} times; expected 1"
+    )
+
+    # ORDER: CREATE INDEX -> ANALYZE usertable -> analyze_dynamic_side_tables
+    assert call_order == [
+        "CREATE INDEX dynamic=on",
+        "ANALYZE usertable",
+        "analyze_dynamic_side_tables",
+    ], f"Unexpected call order: {call_order}"
+
+
+def test_dynamic_path_analyze_ordering_create_before_internal_tables(monkeypatch):
+    """Verify the required ordering: CREATE INDEX dynamic=on, then ANALYZE usertable,
+    then ANALYZE ariabc_internal.merkle_dynamic_* tables."""
+    import merkle_recovery.dataset as ds
+
+    call_order: list[str] = []
+
+    def fake_execute(conn, sql, *args, **kwargs):
+        sql_stripped = sql.strip()
+        if "CREATE INDEX" in sql_stripped and "dynamic = on" in sql_stripped:
+            call_order.append("CREATE INDEX")
+        elif "ANALYZE damaged.usertable" in sql_stripped:
+            call_order.append("ANALYZE usertable")
+        elif sql_stripped.startswith("ANALYZE ariabc_internal."):
+            call_order.append(sql_stripped)
+        return []
+
+    # Let analyze_dynamic_side_tables run its real body (which calls execute)
+    monkeypatch.setattr(ds, "execute", fake_execute)
+
+    ds.create_damaged_dynamic_index(
+        object(),
+        partitions=10,
+        logical_fanout=32,
+        leaf_capacity=32,
+        merge_threshold=8,
+    )
+
+    expected_internal = [
+        "ANALYZE ariabc_internal.merkle_dynamic_node",
+        "ANALYZE ariabc_internal.merkle_dynamic_leaf_item",
+        "ANALYZE ariabc_internal.merkle_dynamic_seen",
+        "ANALYZE ariabc_internal.merkle_dynamic_state",
+    ]
+    full_expected = ["CREATE INDEX", "ANALYZE usertable"] + expected_internal
+    assert call_order == full_expected, (
+        f"Ordering violation.\nExpected: {full_expected}\nGot:      {call_order}"
+    )

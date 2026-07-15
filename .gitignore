@@ -136,3 +136,6 @@ scripts/benchmark/recovery/results/
 **/__pycache__/
 *.py[cod]
 *.pyo
+
+__pycache__/
+*.py[cod]

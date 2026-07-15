@@ -121,6 +121,22 @@ def create_dynamic_merkle_indexes(
         )
         execute(conn, f"ANALYZE {schema}.usertable")
 
+    # CREATE INDEX bulk-loads the shared dynamic relations.  Without fresh
+    # statistics PostgreSQL estimates those tables as tiny and may sequentially
+    # scan them for sparse point/range probes once the dataset reaches 3M.
+    analyze_dynamic_side_tables(conn)
+
+
+def analyze_dynamic_side_tables(conn) -> None:
+    """Refresh planner statistics after a dynamic generation is bulk-built."""
+    for relation in (
+        "merkle_dynamic_node",
+        "merkle_dynamic_leaf_item",
+        "merkle_dynamic_seen",
+        "merkle_dynamic_state",
+    ):
+        execute(conn, f"ANALYZE ariabc_internal.{relation}")
+
 
 def create_damaged_indexes(conn, partitions: int, leaves_per_partition: int, fanout: int) -> None:
     execute(conn, "DROP INDEX IF EXISTS damaged.usertable_leaf_lookup_idx")
@@ -167,6 +183,10 @@ def create_damaged_dynamic_index(
         """,
     )
     execute(conn, "ANALYZE damaged.usertable")
+    # CREATE INDEX above bulk-loaded the shared dynamic relations; refresh their
+    # planner statistics so sparse node/range probes continue to use B-tree
+    # index scans rather than misestimating the relations at 1M/3M/5M rows.
+    analyze_dynamic_side_tables(conn)
 
 
 # ── dataset ──────────────────────────────────────────────────────────────────

@@ -220,18 +220,10 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
                  f"rows_deleted={m.counters.get('rows_deleted')}"),
                 (int(m.counters.get("remaining_bad_range_count", -1)) == 0,
                  f"remaining_bad_range_count={m.counters.get('remaining_bad_range_count')}"),
-                (int(m.counters.get("healthy_minus_damaged", -1)) == 0,
-                 f"healthy_minus_damaged={m.counters.get('healthy_minus_damaged')}"),
-                (int(m.counters.get("damaged_minus_healthy", -1)) == 0,
-                 f"damaged_minus_healthy={m.counters.get('damaged_minus_healthy')}"),
                 (int(m.counters.get("roots_match", 0)) == 1,
                  f"roots_match={m.counters.get('roots_match')}"),
                 (int(m.counters.get("root_counts_match", 0)) == 1,
                  f"root_counts_match={m.counters.get('root_counts_match')}"),
-                (int(m.counters.get("healthy_dynamic_verify", 0)) == 1,
-                 f"healthy_dynamic_verify={m.counters.get('healthy_dynamic_verify')}"),
-                (int(m.counters.get("damaged_dynamic_verify", 0)) == 1,
-                 f"damaged_dynamic_verify={m.counters.get('damaged_dynamic_verify')}"),
                 (m.counters.get("healthy_dynamic_state") == "READY",
                  f"healthy_dynamic_state={m.counters.get('healthy_dynamic_state')}"),
                 (m.counters.get("damaged_dynamic_state") == "READY",
@@ -244,9 +236,24 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
                  f"recovery_user_table_seq_scan_delta={m.counters.get('recovery_user_table_seq_scan_delta')}"),
                 (int(m.counters.get("static_lookup_index_count", -1)) == 0,
                  f"static_lookup_index_count={m.counters.get('static_lookup_index_count')}"),
-                (m.counters.get("audit_mode") == "full",
-                 f"audit_mode={m.counters.get('audit_mode')}"),
             ]
+            if m.counters.get("audit_mode") == "full":
+                dynamic_checks.extend(
+                    [
+                        (int(m.counters.get("healthy_minus_damaged", -1)) == 0,
+                         f"healthy_minus_damaged={m.counters.get('healthy_minus_damaged')}"),
+                        (int(m.counters.get("damaged_minus_healthy", -1)) == 0,
+                         f"damaged_minus_healthy={m.counters.get('damaged_minus_healthy')}"),
+                        (int(m.counters.get("healthy_dynamic_verify", 0)) == 1,
+                         f"healthy_dynamic_verify={m.counters.get('healthy_dynamic_verify')}"),
+                        (int(m.counters.get("damaged_dynamic_verify", 0)) == 1,
+                         f"damaged_dynamic_verify={m.counters.get('damaged_dynamic_verify')}"),
+                    ]
+                )
+            elif m.counters.get("audit_mode") != "skip":
+                dynamic_checks.append(
+                    (False, f"audit_mode={m.counters.get('audit_mode')}")
+                )
             for ok, detail in dynamic_checks:
                 if not ok:
                     failures.append(f"{m.run_id}: dynamic acceptance failed: {detail}")

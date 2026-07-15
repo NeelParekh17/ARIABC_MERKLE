@@ -173,6 +173,11 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_node (
                  partition_id, prefix_len, prefix_bytes)
 );
 
+-- Node summaries are mutable.  Reserving one HOT-update slot per build tuple
+-- prevents the first sparse recovery after a bulk build from relocating every
+-- touched ancestor and maintaining both identity indexes.
+ALTER TABLE ariabc_internal.merkle_dynamic_node SET (fillfactor = 50);
+
 CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_leaf_item (
     index_oid       oid NOT NULL,
     rnode_spc       oid NOT NULL,
@@ -187,6 +192,8 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_leaf_item (
     last_seq        bigint NOT NULL CHECK (last_seq >= 0),
     PRIMARY KEY (index_oid, rnode_spc, rnode_db, rnode_rel, key_data)
 );
+
+ALTER TABLE ariabc_internal.merkle_dynamic_leaf_item SET (fillfactor = 90);
 
 CREATE INDEX IF NOT EXISTS merkle_dynamic_node_prefix_lookup_idx
     ON ariabc_internal.merkle_dynamic_node
