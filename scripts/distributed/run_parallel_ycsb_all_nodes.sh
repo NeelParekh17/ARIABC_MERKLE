@@ -13,7 +13,7 @@ set -euo pipefail
 #   neel@10.129.148.246      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
 #   neel@10.129.148.236    neel-MS-7C96
 #
-# Default benchmark profiles (runs 3 × modes in this order):
+# Default benchmark profiles (one run × modes in this order):
 #   1. pg mode             – plain PostgreSQL baseline (no BCDB)
 #   2. det mode sign=0     – deterministic, unsigned, enforce_signatures=1
 #
@@ -31,9 +31,10 @@ set -euo pipefail
 #   --ssh-key <path>        SSH private key (optional if key-auth is default)
 #   --ssh-port <22>         SSH port
 #   --modes <pg,det>        Comma-separated modes: pg, det, nondet  [default: pg,det]
-#   --threads <csv>         Thread counts csv  [default: 1,2,3,4,5,6,8,10,12,16]
-#   --runs <3>              Runs per workload/thread combination
-#   --workloads <csv>       Workload filenames (default: bench_threads_matrix.py defaults)
+#   --threads <csv>         Thread counts csv  [default: 1,2,4,8,12,16]
+#   --runs <1>              Runs per workload/thread combination
+#   --transaction-isolation <level>  Client isolation for both modes [default: serializable]
+#   --workloads <csv>       Workload filenames (default: ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
 #   --rates <csv>           Rate limits csv (optional)
 #   --signing-modes <0,1>   Signing modes for det runs: 0=unsigned, 1=signed  [default: 0,1]
 #   --signing-privkey <p>   Signing key path (relative to repo root)  [default: scripts/bench_signing_privkey.pem]
@@ -66,8 +67,9 @@ SSH_KEY=""
 SSH_PORT=22
 MODES="pg,det"
 THREADS="${ARIABC_DEFAULT_FULL_THREADS}"
-RUNS=3
-WORKLOADS=""
+RUNS=1
+TRANSACTION_ISOLATION="serializable"
+WORKLOADS="ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt"
 RATES=""
 SIGNING_MODES="0"
 SIGNING_PRIVKEY="scripts/bench_signing_privkey.pem"
@@ -85,7 +87,8 @@ while [[ $# -gt 0 ]]; do
     --ssh-port)      SSH_PORT="${2:-22}"; shift 2 ;;
     --modes)         MODES="${2:-pg,det}"; shift 2 ;;
     --threads)       THREADS="${2:-}"; shift 2 ;;
-    --runs)          RUNS="${2:-3}"; shift 2 ;;
+    --runs)          RUNS="${2:-1}"; shift 2 ;;
+    --transaction-isolation) TRANSACTION_ISOLATION="${2:-}"; shift 2 ;;
     --workloads)     WORKLOADS="${2:-}"; shift 2 ;;
     --rates)         RATES="${2:-}"; shift 2 ;;
     --signing-modes) SIGNING_MODES="${2:-}"; shift 2 ;;
@@ -100,6 +103,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$TRANSACTION_ISOLATION" in
+  "read committed"|"repeatable read"|"serializable") ;;
+  *) echo "ERROR: unsupported --transaction-isolation: $TRANSACTION_ISOLATION" >&2; exit 2 ;;
+esac
 
 SIGNING_PRIVKEY_LOCAL=""
 if [[ -n "$SIGNING_PRIVKEY" ]]; then
@@ -263,6 +271,7 @@ lmsg "Timestamp    : $ts"
 lmsg "Modes        : $MODES"
 lmsg "Threads      : $THREADS"
 lmsg "Runs         : $RUNS"
+lmsg "Tx isolation : $TRANSACTION_ISOLATION"
 lmsg "Workloads    : ${WORKLOADS:-<bench_threads_matrix.py defaults>}"
 lmsg "SigningModes : ${SIGNING_MODES:-<default>}"
 lmsg "SigningKey   : ${SIGNING_PRIVKEY_LOCAL:-<not set>}"
@@ -449,11 +458,17 @@ else
         -e "$(_rsync_e_for_node "$node")" \
         "$REPO_ROOT/" "$node:$repo/" >> "$slog" 2>&1
 
-      # Sync compiled install tree (Ubuntu 24.04 nodes may use it directly;
-      # ensure_custom_install_from_repo.sh will rebuild on Ubuntu 22.04 if glibc differs)
-      _rsync_allow_vanished -az --delete \
-        -e "$(_rsync_e_for_node "$node")" \
-        /work/ARIABC/install/ "$node:$inst/" >> "$slog" 2>&1
+      # Ubuntu 24.04 nodes can use the orchestrator's install directly.  The
+      # Ubuntu 22.04 host is ABI-incompatible, so preserve its already verified
+      # on-host release build instead of overwriting it and rebuilding on every
+      # campaign.
+      if [[ "$node" == "neel@10.129.148.246" ]]; then
+        echo "[INFO] preserving host-native release install on $node" >> "$slog"
+      else
+        _rsync_allow_vanished -az --delete \
+          -e "$(_rsync_e_for_node "$node")" \
+          /work/ARIABC/install/ "$node:$inst/" >> "$slog" 2>&1
+      fi
 
       # Copy canonical postgresql.conf template
       _rsync_allow_vanished -az \
@@ -521,7 +536,7 @@ for entry in "${ALL_NODES[@]}"; do
       echo '[INFO] source/install were just synced; trusting synced install if it verifies'
       if bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
         --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-        --trust-install; then
+        --build-profile release --trust-install; then
         exit 0
       fi
       echo '[INFO] synced install did not verify on this host; attempting local rebuild'
@@ -530,15 +545,17 @@ for entry in "${ALL_NODES[@]}"; do
         exit 1
       fi
       bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
-        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
+        --build-profile release
     elif ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
       echo '[INFO] make/gcc missing; trusting existing install if it verifies'
       bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
         --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-        --trust-install
+        --build-profile release --trust-install
     else
       bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
-        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
+        --build-profile release
     fi
   " >"$ilog" 2>&1; then
     INSTALL_STATUS["$node"]="OK"
@@ -598,6 +615,7 @@ _build_bench_flags() {
     fi
   fi
   [[ -n "$ENFORCE_SIGNATURES" ]] && extra+=" --enforce-signatures '$ENFORCE_SIGNATURES'"
+  extra+=" --transaction-isolation '$TRANSACTION_ISOLATION'"
   printf '%s' "$extra"
 }
 
@@ -640,22 +658,24 @@ ensure_install_args=()
 if [[ '$SKIP_SYNC' == '0' ]]; then
   if ! bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
     --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-    --trust-install; then
+    --build-profile release --trust-install; then
     if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
       echo 'ERROR: synced install did not verify and make/gcc are unavailable for rebuild' >&2
       exit 1
     fi
     bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
-      --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+      --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
+      --build-profile release
   fi
 elif ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
   ensure_install_args+=(--trust-install)
   bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
     --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-    \"\${ensure_install_args[@]}\"
+    --build-profile release \"\${ensure_install_args[@]}\"
 else
   bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
-    --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild
+    --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
+    --build-profile release
 fi
 export ARIABC_REQUIRE_CUSTOM_PG=1
 export ARIABC_PSQL='$inst/bin/psql'
@@ -779,6 +799,9 @@ fi
 lmsg "All benchmarks launched ($running_at_start running). Monitoring every ${POLL_INTERVAL_S}s."
 lmsg "Hang detection threshold: ${HANG_TIMEOUT_S}s of no log change."
 echo
+
+# Nounset-safe state for the optional failed-node log-tail report.
+local_bench_log=""
 
 # ============================================================
 # PHASE 2.5: VERIFY synchronous_commit = on ON ALL NODES
@@ -925,6 +948,10 @@ _check_node() {
   if [[ "$alive" == "1" ]]; then
     local tail_out=""
     tail_out=$(ssh_run "$node" "tail -10 '$bench_log' 2>/dev/null || true" 2>/dev/null || true)
+    # Keep poll output focused on benchmark progress.  PostgreSQL emits
+    # harmless idempotent bootstrap notices for dropped constraints/triggers;
+    # retain them in the remote log but omit them from the live dashboard.
+    tail_out="$(printf '%s\n' "$tail_out" | grep -vE '^psql:.*NOTICE:.*skipping$' || true)"
 
     # Hang detection
     local hash; hash=$(printf '%s' "$tail_out" | md5sum | cut -d' ' -f1)

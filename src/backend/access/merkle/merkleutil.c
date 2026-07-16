@@ -991,6 +991,14 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 		meta->dynamicLeafByteCapacity = opts->leaf_byte_capacity;
 		meta->dynamicMaxKeyBytes = opts->max_key_bytes;
 	}
+	/*
+	 * Merkle metadata lives directly in the page content area rather than in
+	 * line pointers.  Tell standard-page WAL where that initialized content
+	 * ends; otherwise a full-page image is allowed to omit it as the page
+	 * "hole", leaving a zero metapage after crash recovery.
+	 */
+	((PageHeader) metapage)->pd_lower =
+		(LocationIndex) ((char *) meta + sizeof(*meta) - (char *) metapage);
     
     MarkBufferDirty(metabuf);
     UnlockReleaseBuffer(metabuf);
@@ -1040,9 +1048,10 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
         
         nodeIdx += nodesThisPage;
         
-        MarkBufferDirty(treebuf);
-        UnlockReleaseBuffer(treebuf);
-    }
+		MarkBufferDirty(treebuf);
+		UnlockReleaseBuffer(treebuf);
+	}
+
 }
 
 /* End of file */

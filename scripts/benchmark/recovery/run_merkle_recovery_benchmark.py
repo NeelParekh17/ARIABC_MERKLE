@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import shutil
 import sys
 import time
@@ -1387,6 +1388,12 @@ def _assert_dynamic_preflight(conn, args, config, result_dir: Path) -> None:
 
 def run_benchmark(args: argparse.Namespace) -> Path:
     global RESULT_ROOT
+    if os.environ.get("ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET") != "1":
+        raise RuntimeError(
+            "recovery benchmark resets shared Merkle state; set "
+            "ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1 only for a dedicated "
+            "benchmark database"
+        )
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_dir = RESULT_ROOT / ts
     result_dir.mkdir(parents=True, exist_ok=False)

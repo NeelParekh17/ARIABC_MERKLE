@@ -80,7 +80,7 @@ def cleanup_dynamic_benchmark_generations(conn) -> None:
 
 
 def truncate_dynamic_side_tables(conn) -> None:
-    """TRUNCATE all four shared dynamic side tables to reclaim heap space.
+    """TRUNCATE all five shared dynamic side tables to reclaim heap space.
 
     Unlike DELETE, TRUNCATE immediately resets per-relation statistics and
     returns allocated pages, so the planner sees accurate row counts for the
@@ -93,6 +93,7 @@ def truncate_dynamic_side_tables(conn) -> None:
         conn,
         """
         TRUNCATE TABLE
+            ariabc_internal.merkle_dynamic_build_stage,
             ariabc_internal.merkle_dynamic_seen,
             ariabc_internal.merkle_dynamic_leaf_item,
             ariabc_internal.merkle_dynamic_node,

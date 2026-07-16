@@ -82,6 +82,7 @@ source "${SCRIPT_DIR}/cluster_topology.sh"
 
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
+ARIABC_KNOWN_HOSTS_FILE="${ARIABC_KNOWN_HOSTS_FILE:-$HOME/.ssh/known_hosts}"
 
 KAFKA_HOST="${KAFKA_HOST:-10.129.148.236}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
@@ -114,7 +115,7 @@ REMOTE_OPENSSL_INCLUDE_U22="/tmp/openssl_include"
 LOCAL_BIN="$REPO_ROOT/ariabc_pg/build/bin"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
-SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10)
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ARIABC_KNOWN_HOSTS_FILE" -o ConnectTimeout=10)
 
 # ---------------------------------------------------------------------------
 # Gateway delegation
@@ -189,9 +190,12 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
 
   for var in \
     FORCE_BUILD \
+    ARIABC_CLUSTER_PASSWORD ARIABC_KNOWN_HOSTS_FILE \
+    ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET \
     SKIP_SYNC SKIP_BUILD SKIP_KAFKA SKIP_CLEANUP \
     SKIP_RDKAFKA_SETUP SKIP_RESTORE SKIP_POST_VERIFY \
     ENABLE_MERKLE_INDEX \
+    WARMUP_QUERIES \
     MERKLE_VERIFY_MODE DYNAMIC_INDEX_NAME \
     NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
     NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
@@ -224,8 +228,8 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     fi
   done
 
-  # Rewrite any --workload <path> that lives under REPO_ROOT to the equivalent
-  # GATEWAY_REPO path.  After rsync the file will be at that location.
+  # Rewrite workload paths that live under REPO_ROOT to the equivalent
+  # GATEWAY_REPO path. After rsync the files will be at that location.
   rewritten_args=()
   _next_is_workload=0
   for _arg in "$@"; do
@@ -234,9 +238,11 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
       if [[ "$_arg" == "${REPO_ROOT}/"* ]]; then
         _rel="${_arg#${REPO_ROOT}/}"
         _arg="${GATEWAY_REPO}/${_rel}"
+      elif [[ "$_arg" != /* && -f "$REPO_ROOT/$_arg" ]]; then
+        _arg="${GATEWAY_REPO}/${_arg}"
       fi
       rewritten_args+=("$_arg")
-    elif [[ "$_arg" == "--workload" ]]; then
+    elif [[ "$_arg" == "--workload" || "$_arg" == "--warmup-workload" || "$_arg" == "--restore-sql" ]]; then
       _next_is_workload=1
       rewritten_args+=("$_arg")
     else
@@ -385,6 +391,8 @@ KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority}" # majority|async|majo
 EXECUTION_PROFILE="${EXECUTION_PROFILE:-event-direct}" # event-direct|threaded-raft-direct|event-safe-block
 TEST_QUERIES="${TEST_QUERIES:-50}"  # number of test transactions
 WORKLOAD_FILE="${WORKLOAD_FILE:-$REPO_ROOT/scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt}"
+WARMUP_QUERIES="${WARMUP_QUERIES:-1000}" # separate untimed state-preserving workload; 0 disables
+WARMUP_WORKLOAD_FILE="${WARMUP_WORKLOAD_FILE:-}" # optional explicit warm-up SQL file
 RESTORE_SQL="${RESTORE_SQL:-$REPO_ROOT/scripts/restore_usertable_small.sql}"
 VERIFY_TABLE="${VERIFY_TABLE:-usertable_small}"
 VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
@@ -392,6 +400,8 @@ VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
 # In auto mode the runner detects whether the restored index is dynamic.
 MERKLE_VERIFY_MODE="${MERKLE_VERIFY_MODE:-auto}"
 DYNAMIC_INDEX_NAME="${DYNAMIC_INDEX_NAME:-}"
+DYNAMIC_STRUCTURE_GATE="${DYNAMIC_STRUCTURE_GATE:-0}"
+DYNAMIC_STRUCTURE_CRASH_GATE="${DYNAMIC_STRUCTURE_CRASH_GATE:-0}"
 DET_START_SEQ="${DET_START_SEQ:-0}"
 REQ_ID_OFFSET="${REQ_ID_OFFSET:-1}"
 DET_WINDOW="${DET_WINDOW:-4096}"
@@ -544,9 +554,21 @@ Options:
                     event-safe-block      = existing safe-ledger block profile
   --test-queries N Number of statements in the synthetic fallback workload (only used if --workload FILE is missing; default 50)
   --workload FILE  Workload SQL file (default: scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
+  --warmup-queries N
+                  Number of untimed state-preserving UPDATEs run before the
+                  measured workload (default: 1000; 0 disables warm-up)
+  --warmup-workload FILE
+                  Explicit untimed warm-up SQL file. When set, all statements
+                  in FILE are used and --warmup-queries is ignored.
   --restore-sql FILE
                   SQL used to restore table state before the run
   --verify-table T Table used for post-run root comparison (default: usertable_small)
+  --dynamic-structure-gate N
+                  Run untimed distributed delete/merge, reinsert/re-split, and
+                  primary-key route-change coverage before final equality: 0|1
+  --dynamic-structure-crash-gate N
+                  During the structure gate, immediate-stop and restart one
+                  replica while committed Merkle deltas are pending: 0|1
   --det-start-seq N
                   First 8-digit DET sequence sent to BCDB (default: 0 for fresh strict runs)
   --req-id-offset N
@@ -746,10 +768,14 @@ while [[ $# -gt 0 ]]; do
     --execution-profile) EXECUTION_PROFILE="${2:-event-direct}"; shift 2 ;;
     --test-queries) TEST_QUERIES="${2:-50}"; shift 2 ;;
     --workload)     WORKLOAD_FILE="${2:-}"; shift 2 ;;
+    --warmup-queries) WARMUP_QUERIES="${2:-1000}"; shift 2 ;;
+    --warmup-workload) WARMUP_WORKLOAD_FILE="${2:-}"; shift 2 ;;
     --restore-sql)  RESTORE_SQL="${2:-}"; shift 2 ;;
     --verify-table) VERIFY_TABLE="${2:-}"; shift 2 ;;
     --merkle-verify-mode) MERKLE_VERIFY_MODE="${2:-auto}"; shift 2 ;;
     --dynamic-index) DYNAMIC_INDEX_NAME="${2:-}"; shift 2 ;;
+    --dynamic-structure-gate) DYNAMIC_STRUCTURE_GATE="${2:-0}"; shift 2 ;;
+    --dynamic-structure-crash-gate) DYNAMIC_STRUCTURE_CRASH_GATE="${2:-0}"; shift 2 ;;
     --det-start-seq) DET_START_SEQ="${2:-0}"; shift 2 ;;
     --req-id-offset) REQ_ID_OFFSET="${2:-1}"; shift 2 ;;
     --det-window)   DET_WINDOW="${2:-4096}"; DET_WINDOW_EXPLICIT=1; shift 2 ;;
@@ -826,6 +852,37 @@ while [[ $# -gt 0 ]]; do
 done
 
 apply_topology_overrides
+
+# Resolve repository-relative inputs before classifying/syncing them. This is
+# required for psql \ir restore wrappers: copying such a wrapper to .bench_tmp
+# changes its include base and can silently restore stale state.
+if [[ "$RESTORE_SQL" != /* && -f "$REPO_ROOT/$RESTORE_SQL" ]]; then
+  RESTORE_SQL="$REPO_ROOT/$RESTORE_SQL"
+fi
+if [[ "$WORKLOAD_FILE" != /* && -f "$REPO_ROOT/$WORKLOAD_FILE" ]]; then
+  WORKLOAD_FILE="$REPO_ROOT/$WORKLOAD_FILE"
+fi
+if [[ -n "$WARMUP_WORKLOAD_FILE" && "$WARMUP_WORKLOAD_FILE" != /* &&
+      -f "$REPO_ROOT/$WARMUP_WORKLOAD_FILE" ]]; then
+  WARMUP_WORKLOAD_FILE="$REPO_ROOT/$WARMUP_WORKLOAD_FILE"
+fi
+
+[[ -n "$ARIABC_CLUSTER_PASSWORD" ]] || die "resolved ARIABC_CLUSTER_PASSWORD must not be empty"
+[[ -r "$ARIABC_KNOWN_HOSTS_FILE" ]] || die "managed known_hosts file is not readable: $ARIABC_KNOWN_HOSTS_FILE"
+[[ "$ARIABC_KNOWN_HOSTS_FILE" != *[[:space:]]* ]] || die "known_hosts path must not contain whitespace: $ARIABC_KNOWN_HOSTS_FILE"
+NODE_RSYNC_SSH="ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ARIABC_KNOWN_HOSTS_FILE -o ConnectTimeout=10"
+
+if [[ "$SKIP_RESTORE" -eq 0 && "${ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET:-0}" != "1" ]]; then
+  die "restore resets benchmark-global state; export ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1 only for a dedicated benchmark database"
+fi
+
+if [[ "$RESTORE_SQL" == "$REPO_ROOT/"* ]]; then
+  RESTORE_SQL_REL="${RESTORE_SQL#${REPO_ROOT}/}"
+  REMOTE_RESTORE_SQL="$REMOTE_REPO_ROOT/$RESTORE_SQL_REL"
+else
+  RESTORE_SQL_REL="external"
+  REMOTE_RESTORE_SQL="$REMOTE_REPO_ROOT/.bench_tmp/selected_restore.sql"
+fi
 
 for _num_pair in \
   "det-client-workers:$DET_CLIENT_WORKERS" \
@@ -914,6 +971,15 @@ fi
 if [[ "$ENABLE_MERKLE_INDEX" != 0 && "$ENABLE_MERKLE_INDEX" != 1 ]]; then
   die "ERROR: --enable-merkle-index must be 0 or 1 (got: $ENABLE_MERKLE_INDEX)"
 fi
+if [[ "$DYNAMIC_STRUCTURE_GATE" != 0 && "$DYNAMIC_STRUCTURE_GATE" != 1 ]]; then
+  die "ERROR: --dynamic-structure-gate must be 0 or 1 (got: $DYNAMIC_STRUCTURE_GATE)"
+fi
+if [[ "$DYNAMIC_STRUCTURE_CRASH_GATE" != 0 && "$DYNAMIC_STRUCTURE_CRASH_GATE" != 1 ]]; then
+  die "ERROR: --dynamic-structure-crash-gate must be 0 or 1 (got: $DYNAMIC_STRUCTURE_CRASH_GATE)"
+fi
+if [[ "$DYNAMIC_STRUCTURE_CRASH_GATE" -eq 1 && "$DYNAMIC_STRUCTURE_GATE" -ne 1 ]]; then
+  die "ERROR: --dynamic-structure-crash-gate requires --dynamic-structure-gate 1"
+fi
 
 if [[ "$RAFT_STORAGE_MODE" != "durable" && "$RAFT_STORAGE_MODE" != "in_memory" ]]; then
   die "ERROR: --raft-storage-mode must be 'durable' or 'in_memory' (got: $RAFT_STORAGE_MODE)"
@@ -950,6 +1016,10 @@ fi
 
 if [[ "$DET_START_SEQ" -lt 0 || "$REQ_ID_OFFSET" -lt 1 ]]; then
   echo "ERROR: --det-start-seq must be >= 0 and --req-id-offset must be >= 1 for deterministic cluster runs" >&2
+  exit 2
+fi
+if [[ ! "$WARMUP_QUERIES" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: --warmup-queries must be a non-negative integer (got: $WARMUP_QUERIES)" >&2
   exit 2
 fi
 if [[ "$DET_RAW_SQL" == "0" &&
@@ -1307,7 +1377,7 @@ node_ssh() {
   local idx="$1"; shift
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  local cmd=(sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@")
+  local cmd=(sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ARIABC_KNOWN_HOSTS_FILE" -o ConnectTimeout=10 "$user@$ip" "$@")
   if [[ -n "${NODE_SSH_COMMAND_TIMEOUT:-}" && "${NODE_SSH_COMMAND_TIMEOUT:-0}" != "0" ]]; then
     timeout "$NODE_SSH_COMMAND_TIMEOUT" "${cmd[@]}"
   else
@@ -1368,12 +1438,25 @@ start_fastpath_watchdog() {
           current_nodes_committed[$idx]="$val"
         done
 
-        # Check if progress occurred in gateway completion
+        # A quiet client-completion sample is not a stall while replicas are
+        # monotonically committing. Treat either surface as real progress.
         progress_made=0
+        progress_sources=""
 
         if [[ "$current_completed_val" -gt "$last_watchdog_completed_val" ]]; then
           progress_made=1
+          progress_sources="gateway"
         fi
+        for idx in "${!NODE_IDS[@]}"; do
+          val="${current_nodes_committed[$idx]}"
+          previous="${last_nodes_committed[$idx]}"
+          if [[ "$val" =~ ^[0-9]+$ ]]; then
+            if [[ "$previous" == "-1" || ( "$previous" =~ ^[0-9]+$ && "$val" -gt "$previous" ) ]]; then
+              progress_made=1
+              progress_sources+=" node:${NODE_NAMES[$idx]}"
+            fi
+          fi
+        done
 
         if [[ "$progress_made" -eq 0 ]]; then
           (( stuck_cycles++ )) || true
@@ -1403,11 +1486,11 @@ start_fastpath_watchdog() {
                 pgrep -a -f 'ariabc_pg_server' >> '/tmp/server_node${id}_pids.txt' || true
               " >/dev/null 2>&1 || true
 
-              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
                 "${NODE_USERS[$idx]}@$nip:/tmp/server_node${id}_marker.log" "$LOG_DIR/server_node${id}_${nip}_from_marker.log" 2>/dev/null || true
-              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
                 "${NODE_USERS[$idx]}@$nip:/tmp/postgres_node${id}_marker.log" "$LOG_DIR/postgres_node${id}_${nip}_from_marker.log" 2>/dev/null || true
-              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+              timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
                 "${NODE_USERS[$idx]}@$nip:/tmp/server_node${id}_pids.txt" "$LOG_DIR/server_node${id}_${nip}_pids.txt" 2>/dev/null || true
             done
 
@@ -1443,16 +1526,16 @@ start_fastpath_watchdog() {
             exit 124
           fi
         else
-          log "WATCHDOG: Completed progress advanced $last_watchdog_completed_val -> $current_completed_val; resetting stall timer."
+          log "WATCHDOG: Monotonic progress observed (${progress_sources:-counter initialization}); gateway=$last_watchdog_completed_val->$current_completed_val; resetting stall timer."
           last_watchdog_completed_val="$current_completed_val"
-          for idx in "${!NODE_IDS[@]}"; do
-            val="${current_nodes_committed[$idx]}"
-            if [[ "$val" != "error" && -n "$val" ]]; then
-              last_nodes_committed[$idx]="$val"
-            fi
-          done
           stuck_cycles=0
         fi
+        for idx in "${!NODE_IDS[@]}"; do
+          val="${current_nodes_committed[$idx]}"
+          if [[ "$val" =~ ^[0-9]+$ ]]; then
+            last_nodes_committed[$idx]="$val"
+          fi
+        done
       done
     ) &
     WATCHDOG_PID=$!
@@ -1473,7 +1556,7 @@ node_rsync_to() {
   local idx="$1"; local src="$2"; local dst="$3"
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+  sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
     "$src" "$user@$ip:$dst"
 }
 
@@ -1490,7 +1573,7 @@ node_rsync_from() {
   local idx="$1"; local src="$2"; local dst="$3"
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+  sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
     "$user@$ip:$src" "$dst"
 }
 
@@ -1517,27 +1600,27 @@ collect_cluster_logs() {
     REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
     REMOTE_NURAFT_LOG="/home/neel/ariabc_pg_srv${id}.log"
     REMOTE_PG_LOG="$REMOTE_REPO_ROOT/server.log"
-    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
       "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
-    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
       "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
     if [[ "$POSTGRES_LOG_MODE" == "full" ]]; then
-      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
         "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
     else
-      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ARIABC_KNOWN_HOSTS_FILE" -o ConnectTimeout=10 \
         "$user@$ip" \
         "grep -E '^(RUN_MARKER|.*PROFILE_BCDB_(GATE|BLOCK)|.*(ERROR|FATAL|PANIC):|.*starting PostgreSQL|.*database system was shut down|.*database system is ready to accept connections)' '$REMOTE_PG_LOG' 2>/dev/null || true" \
         > "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
     fi
     if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
-      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
         "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
         "$LOG_DIR/" 2>/dev/null || true
     fi
     if [[ "${ARIABC_OS_PROFILE:-0}" -eq 1 ]]; then
       mkdir -p "$LOG_DIR/os_node${id}_${name}"
-      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "$NODE_RSYNC_SSH" \
         "$user@$ip:$REMOTE_LOG_DIR/os_*.log" "$LOG_DIR/os_node${id}_${name}/" 2>/dev/null || true
     fi
   done
@@ -1563,7 +1646,7 @@ node_rsync_repo() {
     --exclude='conftest*' \
     --exclude='scripts/bench_full_results' \
     --exclude='scripts/bench_results' \
-    -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    -e "$NODE_RSYNC_SSH" \
     "$REPO_ROOT/" "$user@$ip:$REMOTE_REPO_ROOT/"
 }
 
@@ -1579,7 +1662,7 @@ node_rsync_install() {
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
   sshpass -p "$CLUSTER_PASSWORD" rsync -az --delete \
-    -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    -e "$NODE_RSYNC_SSH" \
     "$LOCAL_INSTALL_DIR/" "$user@$ip:$REMOTE_INSTALL_DIR/"
 }
 
@@ -1596,7 +1679,7 @@ node_rsync_ariabc_bins() {
   [[ -f "$LOCAL_BIN/ariabc_pg_gateway.manifest" ]] && files_to_sync+=("$LOCAL_BIN/ariabc_pg_gateway.manifest")
 
   sshpass -p "$CLUSTER_PASSWORD" rsync -az --delete \
-    -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+    -e "$NODE_RSYNC_SSH" \
     "${files_to_sync[@]}" \
     "$user@$ip:$REMOTE_REPO_ROOT/ariabc_pg/build/bin/"
 }
@@ -1787,6 +1870,8 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'raft_storage_dir=%s\n' "$RAFT_STORAGE_DIR"
   printf 'raft_cluster_id=%s\n' "$RAFT_CLUSTER_ID"
   printf 'raft_epoch_hex=%s\n' "$RAFT_EPOCH_HEX"
+  printf 'warmup_queries=%s\n' "$WARMUP_QUERIES"
+  printf 'warmup_workload_file=%s\n' "$WARMUP_WORKLOAD_FILE"
   printf 'skip_workload=%s\n' "$SKIP_WORKLOAD"
   printf 'phase3_invocation_id=%s\n' "${ARIABC_PHASE3_INVOCATION_ID:-}"
 } > "$LOG_DIR/run_meta.env"
@@ -1813,6 +1898,11 @@ fi
 local_git_head="${CALLER_GIT_HEAD:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
 local_git_dirty="$(git -C "$REPO_ROOT" diff HEAD --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
 local_src_fingerprint="$(_compute_src_fingerprint)"
+restore_sql_sha256="$(sha256sum "$RESTORE_SQL" 2>/dev/null | awk '{print $1}' || echo missing)"
+restore_base_sha256="$(sha256sum "$REPO_ROOT/scripts/restore_usertable_small.sql" 2>/dev/null | awk '{print $1}' || echo missing)"
+dynamic_index_sql_sha256="$(sha256sum "$SCRIPT_DIR/sql/create_usertable_small_dynamic_index.sql" 2>/dev/null | awk '{print $1}' || echo missing)"
+workload_sha256="$(sha256sum "$WORKLOAD_FILE" 2>/dev/null | awk '{print $1}' || echo missing)"
+runner_sha256="$(sha256sum "$SCRIPT_DIR/run_4node_raft_cluster.sh" | awk '{print $1}')"
 
 # Append git HEAD and SHA256 checksums of the key local binaries to run_meta.env
 {
@@ -1820,6 +1910,13 @@ local_src_fingerprint="$(_compute_src_fingerprint)"
   printf 'caller_git_head=%s\n' "${CALLER_GIT_HEAD:-unknown}"
   printf 'git_dirty=%s\n' "$local_git_dirty"
   printf 'source_fingerprint=%s\n' "$local_src_fingerprint"
+  printf 'restore_sql=%s\n' "$RESTORE_SQL"
+  printf 'restore_sql_sha256=%s\n' "$restore_sql_sha256"
+  printf 'restore_base_sha256=%s\n' "$restore_base_sha256"
+  printf 'dynamic_index_sql_sha256=%s\n' "$dynamic_index_sql_sha256"
+  printf 'workload_file=%s\n' "$WORKLOAD_FILE"
+  printf 'workload_sha256=%s\n' "$workload_sha256"
+  printf 'runner_sha256=%s\n' "$runner_sha256"
   printf 'ariabc_pg_gateway_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'ariabc_pg_server_sha256=%s\n' "$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
   printf 'postgres_sha256=%s\n' "$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
@@ -2175,8 +2272,9 @@ if [[ "$SKIP_SYNC" -eq 0 ]]; then
       if [[ -f "$WORKLOAD_FILE" ]]; then
         node_rsync_to "$idx" "$WORKLOAD_FILE" "$REMOTE_REPO_ROOT/scripts/cluster_test_workload.sql"
       fi
-      if [[ -f "$RESTORE_SQL" ]]; then
-        node_rsync_to "$idx" "$RESTORE_SQL" "$REMOTE_REPO_ROOT/scripts/restore_usertable_small.sql"
+      if [[ "$RESTORE_SQL_REL" == "external" && -f "$RESTORE_SQL" ]]; then
+        node_ssh "$idx" "mkdir -p '$REMOTE_REPO_ROOT/.bench_tmp'"
+        node_rsync_to "$idx" "$RESTORE_SQL" "$REMOTE_RESTORE_SQL"
       fi
     ) &
     SYNC_PIDS+=("$!")
@@ -2397,6 +2495,15 @@ done
 local_gateway_sha="$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
 local_server_sha="$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
 local_postgres_sha="$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
+FROZEN_SOURCE_FINGERPRINT="$local_src_fingerprint"
+FROZEN_GATEWAY_SHA256="$local_gateway_sha"
+FROZEN_SERVER_SHA256="$local_server_sha"
+FROZEN_POSTGRES_SHA256="$local_postgres_sha"
+FROZEN_RESTORE_SHA256="$restore_sql_sha256"
+FROZEN_RESTORE_BASE_SHA256="$restore_base_sha256"
+FROZEN_DYNAMIC_INDEX_SQL_SHA256="$dynamic_index_sql_sha256"
+FROZEN_WORKLOAD_SHA256="$workload_sha256"
+FROZEN_RUNNER_SHA256="$runner_sha256"
 log "  local git_head=$local_git_head"
 log "  local ariabc_pg_gateway_sha256=$local_gateway_sha path=$LOCAL_BIN/ariabc_pg_gateway"
 log "  local ariabc_pg_server_sha256=$local_server_sha path=$LOCAL_BIN/ariabc_pg_server"
@@ -2503,7 +2610,8 @@ fi
 # Phase 1.8: Clock Validity Preflight
 # ---------------------------------------------------------------------------
 log "=== Phase 1.8: Clock Validity Preflight ==="
-log "  [local] (gateway) clock metrics:"
+CLOCK_LOG="$LOG_DIR/clock_preflight.log"
+log "  Clock metrics captured in $CLOCK_LOG"
 (
   date +%s%3N
   timedatectl status || true
@@ -2512,11 +2620,11 @@ log "  [local] (gateway) clock metrics:"
   else
     echo "chronyc not installed; skipping Chrony details"
   fi
-) 2>&1 | sed "s/^/    /"
+) >"$CLOCK_LOG" 2>&1
 
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
-  log "  [$name] (server) clock metrics:"
+  printf '\n[%s]\n' "$name" >>"$CLOCK_LOG"
   node_ssh "$idx" "
     date +%s%3N
     timedatectl status || true
@@ -2525,7 +2633,7 @@ for idx in "${!NODE_IDS[@]}"; do
     else
       echo 'chronyc not installed; skipping Chrony details'
     fi
-  " 2>&1 | sed "s/^/    /"
+  " >>"$CLOCK_LOG" 2>&1
 done
 
 # ---------------------------------------------------------------------------
@@ -3107,13 +3215,13 @@ if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" || "$ENABLE_MERKLE_INDEX" -eq 1 ]]; th
       export LD_LIBRARY_PATH=\"$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       bash '$REMOTE_REPO_ROOT/scripts/distributed/bootstrap_raft_apply_ledger.sh' \
         --db '$DB_NAME' --port '$DB_PORT' --user '$DB_USER' $BOOTSTRAP_MODE_ARGS
-    " &
+    " >"$LOG_DIR/bootstrap_node${NODE_IDS[$idx]}_${name}.log" 2>&1 &
     EARLY_BOOTSTRAP_PIDS+=("$!")
   done
   EARLY_BOOTSTRAP_ALL_OK=1
   for i in "${!EARLY_BOOTSTRAP_PIDS[@]}"; do
     wait "${EARLY_BOOTSTRAP_PIDS[$i]}" || {
-      log "  bootstrap FAILED on ${NODE_NAMES[$i]}"
+      log "  bootstrap FAILED on ${NODE_NAMES[$i]} (see $LOG_DIR/bootstrap_node${NODE_IDS[$i]}_${NODE_NAMES[$i]}.log)"
       EARLY_BOOTSTRAP_ALL_OK=0
     }
   done
@@ -3133,14 +3241,15 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
   declare -a RESTORE_PIDS=(); declare -a RESTORE_NAMES=()
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
-    remote_restore="$REMOTE_REPO_ROOT/scripts/restore_usertable_small.sql"
+    remote_restore="$REMOTE_RESTORE_SQL"
     log "  Restoring $VERIFY_TABLE on $name (background)"
     node_ssh "$idx" "
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       test -f '$remote_restore' || { echo 'missing restore SQL: $remote_restore' >&2; exit 1; }
-      \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
-        -v ON_ERROR_STOP=1 -f '$remote_restore'
+      PGOPTIONS='-c ariabc.allow_destructive_benchmark_reset=on' \
+        \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+          -v ON_ERROR_STOP=1 -f '$remote_restore'
       if [[ '$ENABLE_MERKLE_INDEX' -eq 0 ]]; then
         \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$\
           DECLARE r record;
@@ -3549,7 +3658,86 @@ fi
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM"
-log "  DET ids:       executionProfile=$EXECUTION_PROFILE detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detClientMode=$DET_CLIENT_MODE detClientWorkers=$DET_CLIENT_WORKERS detClientInflight=$DET_CLIENT_INFLIGHT serverExecWorkers=$SERVER_EXEC_WORKERS serverPgConnections=$SERVER_PG_CONNECTIONS connFanout=$CONN_FANOUT raftOrderedFanout=$RAFT_ORDERED_FANOUT raftOrderedBatchAppend=$RAFT_ORDERED_BATCH_APPEND raftOrderedCoalesceLog=$RAFT_ORDERED_COALESCE_LOG raftOrderingPolicy=$RAFT_ORDERING_POLICY raftOrderedBatchTargetEntries=$RAFT_ORDERED_BATCH_TARGET_ENTRIES raftOrderedBatchLingerUs=$RAFT_ORDERED_BATCH_LINGER_US broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbInitArgSize=$BCDB_INIT_BLOCK_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+
+# Warm-up is deliberately a separate gateway invocation. The default no-op
+# UPDATE workload warms gateway threads, sockets, Raft/Kafka, PostgreSQL,
+# deterministic execution, and Merkle maintenance without changing logical row
+# values. Users can supply a representative state-safe workload explicitly.
+if [[ -n "$WARMUP_WORKLOAD_FILE" ]]; then
+  [[ -f "$WARMUP_WORKLOAD_FILE" ]] || die "Warm-up workload not found: $WARMUP_WORKLOAD_FILE"
+  EFFECTIVE_WARMUP_FILE="$WARMUP_WORKLOAD_FILE"
+else
+  EFFECTIVE_WARMUP_FILE="$LOG_DIR/warmup_workload.sql"
+  : >"$EFFECTIVE_WARMUP_FILE"
+  for ((warmup_i = 0; warmup_i < WARMUP_QUERIES; warmup_i++)); do
+    printf 'UPDATE %s SET field1 = field1 WHERE ycsb_key = %d;\n' \
+      "$VERIFY_TABLE" "$(( warmup_i % 10000 + 1 ))" >>"$EFFECTIVE_WARMUP_FILE"
+  done
+fi
+
+WARMUP_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$EFFECTIVE_WARMUP_FILE")"
+TIMED_DET_START_SEQ=$(( DET_START_SEQ + WARMUP_LINES ))
+TIMED_REQ_ID_OFFSET=$(( REQ_ID_OFFSET + WARMUP_LINES ))
+WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
+
+if [[ "$WARMUP_LINES" -gt 0 ]]; then
+  log "=== Phase 6a: Warm-up workload (excluded from TPS) ==="
+  log "  Warm-up:       $EFFECTIVE_WARMUP_FILE ($WARMUP_LINES statements)"
+  log "  Warm-up IDs:   detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET"
+  phase_marker "PHASE_6_WARMUP_STARTED"
+  WARMUP_LOG="$LOG_DIR/gateway_warmup.log"
+  WARMUP_EXTRA_ARGS=()
+  WARMUP_ALL_NODES="${#NODE_IDS[@]}"
+  if [[ "$BYPASS_RAFT" -eq 1 && "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
+    WARMUP_EXTRA_ARGS+=(--broadcastAcceptQuorum "$WARMUP_ALL_NODES")
+    WARMUP_EXTRA_ARGS+=(--broadcastResultQuorum "$WARMUP_ALL_NODES")
+    WARMUP_EXTRA_ARGS+=(--broadcastDrainInTimedRun 1)
+  elif [[ "$NO_KAFKA" -eq 1 || "$KAFKA_COMPLETION_MODE" == "async" ]]; then
+    WARMUP_EXTRA_ARGS+=(--directCompletionQuorum "$WARMUP_ALL_NODES")
+  fi
+  if ! "$GW_BIN" \
+    --nodes "$GW_NODES" \
+    --raft-node-ids "$RAFT_NODE_IDS_CSV" \
+    --queryFrom "$EFFECTIVE_WARMUP_FILE" \
+    --dbType 1 \
+    --detRawSql "$DET_RAW_SQL" \
+    --detStartSeq "$DET_START_SEQ" \
+    --reqIdOffset "$REQ_ID_OFFSET" \
+    --detWindow "$DET_WINDOW" \
+    --detBatchSize "$DET_BATCH_SIZE" \
+    --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
+    --submitMode "$SUBMIT_MODE" \
+    --detSubmitPipeline "$DET_SUBMIT_PIPELINE" \
+    --detPipelineDepth "$DET_PIPELINE_DEPTH" \
+    --detClientMode "$DET_CLIENT_MODE" \
+    --detClientWorkers "$DET_CLIENT_WORKERS" \
+    --detClientInflight "$DET_CLIENT_INFLIGHT" \
+    ${POLL_COUNT:+--pollCount $POLL_COUNT} \
+    ${POLL_INTERVAL_US:+--pollIntervalUs $POLL_INTERVAL_US} \
+    --clientId "cluster-ycsb-warmup" \
+    --numTerminals "$NUM_TERMINALS" \
+    --connFanout "$CONN_FANOUT" \
+    --raft-epoch-hex "$RAFT_EPOCH_HEX" \
+    --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
+    $GW_EXTRA_ARGS \
+    "${WARMUP_EXTRA_ARGS[@]}" \
+    >"$WARMUP_LOG" 2>&1; then
+    log "ERROR: Warm-up gateway failed — check $WARMUP_LOG"
+    tail -n 40 "$WARMUP_LOG" >&2 || true
+    collect_cluster_logs "  Collecting server logs after warm-up failure..."
+    exit 1
+  fi
+  phase_marker "PHASE_6_WARMUP_FINISHED"
+  log "  Warm-up complete; its $WARMUP_LINES transactions and wall time are not parsed for TPS."
+else
+  phase_marker "PHASE_6_WARMUP_SKIPPED"
+  log "=== Phase 6a: Warm-up workload skipped (0 statements) ==="
+fi
+
+log "=== Phase 6b: Timed workload (TPS measurement) ==="
+log "  Timed IDs:     detStartSeq=$TIMED_DET_START_SEQ reqIdOffset=$TIMED_REQ_ID_OFFSET"
+log "  DET config:    executionProfile=$EXECUTION_PROFILE detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detClientMode=$DET_CLIENT_MODE detClientWorkers=$DET_CLIENT_WORKERS detClientInflight=$DET_CLIENT_INFLIGHT serverExecWorkers=$SERVER_EXEC_WORKERS serverPgConnections=$SERVER_PG_CONNECTIONS connFanout=$CONN_FANOUT raftOrderedFanout=$RAFT_ORDERED_FANOUT raftOrderedBatchAppend=$RAFT_ORDERED_BATCH_APPEND raftOrderedCoalesceLog=$RAFT_ORDERED_COALESCE_LOG raftOrderingPolicy=$RAFT_ORDERING_POLICY raftOrderedBatchTargetEntries=$RAFT_ORDERED_BATCH_TARGET_ENTRIES raftOrderedBatchLingerUs=$RAFT_ORDERED_BATCH_LINGER_US broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbInitArgSize=$BCDB_INIT_BLOCK_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+phase_marker "PHASE_6_TIMED_WORKLOAD_STARTED"
 phase_marker "PHASE_6_WORKLOAD_STARTED"
 # Print a clear banner that distinguishes pipeline-depth from real OS parallelism
 # so this output can be compared honestly against the single-node Python script:
@@ -3647,8 +3835,8 @@ if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
     --queryFrom "$WORKLOAD_FILE" \
     --dbType 1 \
     --detRawSql "$DET_RAW_SQL" \
-    --detStartSeq "$DET_START_SEQ" \
-    --reqIdOffset "$REQ_ID_OFFSET" \
+    --detStartSeq "$TIMED_DET_START_SEQ" \
+    --reqIdOffset "$TIMED_REQ_ID_OFFSET" \
     --detWindow "$DET_WINDOW" \
     --detBatchSize "$DET_BATCH_SIZE" \
     --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
@@ -3793,15 +3981,15 @@ else
 
   for s in $(seq 0 $(( ACTUAL_SHARDS - 1 ))); do
     sc="$(wc -l < "$SHARD_DIR/shard_${s}.sql")"
-    log "  [os-threads]   shard_${s}.sql: $sc statements, detStartSeq=$(( DET_START_SEQ + s * SHARD_SIZE ))"
+    log "  [os-threads]   shard_${s}.sql: $sc statements, detStartSeq=$(( TIMED_DET_START_SEQ + s * SHARD_SIZE ))"
   done
 
   declare -a OSTH_PIDS=()
   declare -a OSTH_LOGS=()
 
   for s in $(seq 0 $(( ACTUAL_SHARDS - 1 ))); do
-    shard_start_seq=$(( DET_START_SEQ + s * SHARD_SIZE ))
-    shard_req_offset=$(( REQ_ID_OFFSET + s * SHARD_SIZE ))
+    shard_start_seq=$(( TIMED_DET_START_SEQ + s * SHARD_SIZE ))
+    shard_req_offset=$(( TIMED_REQ_ID_OFFSET + s * SHARD_SIZE ))
     shard_log="$LOG_DIR/gateway_shard${s}.log"
     OSTH_LOGS+=("$shard_log")
     log "  [os-threads] Launching shard $s (detStartSeq=$shard_start_seq)"
@@ -3881,6 +4069,7 @@ ELAPSED=$(( END_S - START_S ))
 cleanup_os_profile
 
 phase_marker "PHASE_6_WORKLOAD_FINISHED"
+phase_marker "PHASE_6_TIMED_WORKLOAD_FINISHED"
 
 # ---------------------------------------------------------------------------
 # Phase 7: Results
@@ -3898,6 +4087,16 @@ log "EXECUTION_PROFILE profile=${EXECUTION_PROFILE} ledger_mode=${RAFT_APPLY_LED
     --parallelism-mode "$PARALLELISM_MODE" | while read -r line; do
       log "  $line"
     done
+
+  {
+    printf 'warmup_transactions=%s\n' "$WARMUP_LINES"
+    printf 'warmup_completed=%s\n' "$([[ "$WARMUP_LINES" -gt 0 ]] && printf yes || printf skipped)"
+    printf 'warmup_included_in_tps=0\n'
+    printf 'timed_transactions=%s\n' "$WORKLOAD_LINES"
+    printf 'timed_det_start_seq=%s\n' "$TIMED_DET_START_SEQ"
+    printf 'timed_req_id_offset=%s\n' "$TIMED_REQ_ID_OFFSET"
+    printf 'post_run_verification_included_in_tps=0\n'
+  } >>"$LOG_DIR/run_summary.env"
 
   if [[ -f "$LOG_DIR/run_summary.env" ]]; then
     DIVERGENCE="$(grep -E '^divergence_count=' "$LOG_DIR/run_summary.env" | cut -d= -f2 || true)"
@@ -3948,30 +4147,180 @@ if [[ "$DIVERGENCE" != "0" && "$DIVERGENCE" != "?" ]] || [[ "$FAILURES" != "0" &
 fi
 
 # ---------------------------------------------------------------------------
+# Untimed distributed dynamic-structure gate. This deliberately runs after
+# TPS has stopped and before the final equality marker. It forces leaves down
+# through merge thresholds, repopulates them to force re-splits, then changes
+# 1000 primary keys and proves that at least one key crossed a hash partition.
+# ---------------------------------------------------------------------------
+POST_TIMED_GATEWAY_STATEMENTS=0
+if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
+  [[ "$MERKLE_VERIFY_MODE" == "dynamic" ]] || die "dynamic structure gate requires --merkle-verify-mode dynamic"
+  [[ -n "$DYNAMIC_INDEX_NAME" ]] || die "dynamic structure gate requires --dynamic-index"
+  log "=== Phase 7.5: Untimed distributed dynamic-structure coverage ==="
+  STRUCTURE_START_MS="$(date +%s%3N)"
+  STRUCTURE_SEQ=$(( TIMED_DET_START_SEQ + WORKLOAD_LINES ))
+  STRUCTURE_REQ=$(( TIMED_REQ_ID_OFFSET + WORKLOAD_LINES ))
+  declare -a STRUCT_BASE_SPLITS=() STRUCT_BASE_MERGES=()
+  for idx in "${!NODE_IDS[@]}"; do
+    stats="$(node_ssh "$idx" "
+      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+        INSERT INTO ariabc_internal.merkle_local_delta (apply_seq, delta_version, delta_blob)
+          SELECT seq, 0, NULL FROM generate_series(1::bigint, $STRUCTURE_SEQ::bigint) AS seq
+          ON CONFLICT (apply_seq) DO NOTHING;
+        SELECT merkle_apply_pending();
+        SELECT split_count || '|' || merge_count
+          FROM ariabc_internal.merkle_dynamic_state
+         WHERE index_oid='$DYNAMIC_INDEX_NAME'::regclass\" | tail -1
+    " | tr -d '[:space:]')"
+    IFS='|' read -r STRUCT_BASE_SPLITS[$idx] STRUCT_BASE_MERGES[$idx] <<<"$stats"
+    [[ "${STRUCT_BASE_SPLITS[$idx]}" =~ ^[0-9]+$ && "${STRUCT_BASE_MERGES[$idx]}" =~ ^[0-9]+$ ]] ||
+      die "could not read baseline dynamic counters from ${NODE_NAMES[$idx]}: $stats"
+  done
+
+  dynamic_key_partition_snapshot() {
+    local key_min="$1" key_max="$2" destination="$3"
+    node_ssh 0 "
+      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAF '|' -c \"
+        WITH requests AS (
+          SELECT jsonb_agg(jsonb_build_object(
+                   'partition_id', partition_id,
+                   'prefix_length', prefix_len,
+                   'prefix_value', encode(prefix, 'hex'))) AS ranges
+            FROM merkle_dynamic_get_leaf_frontier('$DYNAMIC_INDEX_NAME'::regclass)
+        )
+        SELECT item.key_text, item.partition_id
+          FROM requests
+          CROSS JOIN LATERAL merkle_dynamic_get_range_items(
+            '$DYNAMIC_INDEX_NAME'::regclass, requests.ranges) AS item
+         WHERE item.key_text::bigint BETWEEN $key_min AND $key_max
+         ORDER BY item.key_text::bigint\"
+    " >"$destination"
+  }
+  dynamic_key_partition_snapshot 0 999 "$LOG_DIR/dynamic_key_partitions_before.tsv"
+
+  STRUCTURE_FILE="$LOG_DIR/dynamic_structure_gate.sql"
+  {
+    printf '%s\n' "DELETE FROM $VERIFY_TABLE WHERE ycsb_key BETWEEN 0 AND 11799;"
+    printf '%s\n' "INSERT INTO $VERIFY_TABLE (ycsb_key,field1,field2,field3,field4,field5,field6,field7,field8,field9,field10) SELECT g,'structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate' FROM generate_series(0,11799) AS g;"
+    printf '%s\n' "UPDATE $VERIFY_TABLE SET ycsb_key=ycsb_key+20000000 WHERE ycsb_key BETWEEN 0 AND 999;"
+  } >"$STRUCTURE_FILE"
+  STRUCTURE_EXTRA_ARGS=()
+  if [[ "$BYPASS_RAFT" -eq 1 && "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
+    STRUCTURE_EXTRA_ARGS+=(--broadcastAcceptQuorum "${#NODE_IDS[@]}")
+    STRUCTURE_EXTRA_ARGS+=(--broadcastResultQuorum "${#NODE_IDS[@]}")
+    STRUCTURE_EXTRA_ARGS+=(--broadcastDrainInTimedRun 1)
+  else
+    STRUCTURE_EXTRA_ARGS+=(--directCompletionQuorum "${#NODE_IDS[@]}")
+  fi
+  "$GW_BIN" \
+    --nodes "$GW_NODES" --raft-node-ids "$RAFT_NODE_IDS_CSV" \
+    --queryFrom "$STRUCTURE_FILE" --dbType 1 --detRawSql "$DET_RAW_SQL" \
+    --detStartSeq "$STRUCTURE_SEQ" --reqIdOffset "$STRUCTURE_REQ" \
+    --detWindow 1 --detBatchSize 1 --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
+    --submitMode event --detSubmitPipeline 0 --detPipelineDepth 1 \
+    --clientId cluster-dynamic-structure-gate --numTerminals 1 \
+    --raft-epoch-hex "$RAFT_EPOCH_HEX" --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
+    $GW_EXTRA_ARGS "${STRUCTURE_EXTRA_ARGS[@]}" \
+    2>&1 | tee "$LOG_DIR/dynamic_structure_gateway.log"
+	POST_TIMED_GATEWAY_STATEMENTS=3
+	crash_idx=-1
+
+	if [[ "$DYNAMIC_STRUCTURE_CRASH_GATE" -eq 1 ]]; then
+		crash_idx=$((${#NODE_IDS[@]} - 1))
+    crash_name="${NODE_NAMES[$crash_idx]}"
+    pending_before_crash="$(node_ssh "$crash_idx" "
+      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+        SELECT count(*)
+          FROM ariabc_internal.merkle_local_delta AS delta
+          CROSS JOIN ariabc_internal.merkle_apply_state AS state
+         WHERE delta.apply_seq > state.applied_seq
+           AND delta.delta_blob IS NOT NULL\"" | tr -d '[:space:]')"
+    [[ "$pending_before_crash" =~ ^[1-9][0-9]*$ ]] ||
+      die "crash gate found no committed pending Merkle transitions on $crash_name"
+    log "  [$crash_name] immediate PostgreSQL stop with $pending_before_crash pending transition batches"
+    node_ssh "$crash_idx" "
+      set -Eeuo pipefail
+      BIN='$REMOTE_INSTALL_DIR/bin'
+      PGDATA='$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata'
+      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+      \$BIN/pg_ctl -D \$PGDATA -m immediate -w -t 60 stop
+      ulimit -c unlimited
+      \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log'
+      \$BIN/pg_isready -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER'
+    "
+	fi
+
+  for idx in "${!NODE_IDS[@]}"; do
+    stats="$(node_ssh "$idx" "
+      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+        INSERT INTO ariabc_internal.merkle_local_delta (apply_seq, delta_version, delta_blob)
+          SELECT seq, 0, NULL FROM generate_series(1::bigint, $(( STRUCTURE_SEQ + 3 ))::bigint) AS seq
+          ON CONFLICT (apply_seq) DO NOTHING;
+        SELECT merkle_apply_pending();
+        SELECT split_count || '|' || merge_count || '|' || merkle_dynamic_verify('$DYNAMIC_INDEX_NAME'::regclass)
+          FROM ariabc_internal.merkle_dynamic_state
+         WHERE index_oid='$DYNAMIC_INDEX_NAME'::regclass\" | tail -1
+    " | tr -d '[:space:]')"
+    IFS='|' read -r splits merges verified <<<"$stats"
+    [[ "$splits" =~ ^[0-9]+$ && "$merges" =~ ^[0-9]+$ && ( "$verified" == "t" || "$verified" == "true" ) ]] ||
+      die "dynamic structure verification failed on ${NODE_NAMES[$idx]}: $stats"
+		[[ "$splits" -gt "${STRUCT_BASE_SPLITS[$idx]}" ]] || die "re-split counter did not advance on ${NODE_NAMES[$idx]}"
+		[[ "$merges" -gt "${STRUCT_BASE_MERGES[$idx]}" ]] || die "merge counter did not advance on ${NODE_NAMES[$idx]}"
+		if [[ "$idx" -eq "$crash_idx" ]]; then
+			printf 'DYNAMIC_DISTRIBUTED_PENDING_CRASH_RESTART_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+			log "  DYNAMIC_DISTRIBUTED_PENDING_CRASH_RESTART_PASS=1 node=${NODE_NAMES[$idx]} replayed_through=$(( STRUCTURE_SEQ + 3 )) verify=$verified"
+		fi
+	done
+  dynamic_key_partition_snapshot 20000000 20000999 "$LOG_DIR/dynamic_key_partitions_after.tsv"
+  MOVED_KEYS="$(awk -F'|' 'NR==FNR { before[$1]=$2; next } { old=$1-20000000; if (old in before && before[old] != $2) moved++ } END { print moved+0 }' \
+    "$LOG_DIR/dynamic_key_partitions_before.tsv" "$LOG_DIR/dynamic_key_partitions_after.tsv")"
+  [[ "$MOVED_KEYS" -gt 0 ]] || die "primary-key update did not prove a cross-partition move"
+  STRUCTURE_GATE_MS=$(( $(date +%s%3N) - STRUCTURE_START_MS ))
+  {
+    printf 'DYNAMIC_DISTRIBUTED_STRUCTURE_GATE_PASS=1\n'
+    printf 'dynamic_cross_partition_keys=%s\n' "$MOVED_KEYS"
+    printf 'dynamic_structure_gate_ms=%s\n' "$STRUCTURE_GATE_MS"
+  } >>"$LOG_DIR/run_summary.env"
+  log "  DYNAMIC_DISTRIBUTED_STRUCTURE_GATE_PASS=1 cross_partition_keys=$MOVED_KEYS duration_ms=$STRUCTURE_GATE_MS (excluded from TPS)"
+fi
+
+# ---------------------------------------------------------------------------
 # Phase 8: Post-workload table consistency verification
-# Submit one final marker transaction through the same ordering path.  In
-# raft-kafka mode this goes through Raft; in kafka-only mode the gateway
-# broadcasts the preordered marker directly to every replica.  When every node
-# can read the marker, every previous workload entry has been applied before
-# the Merkle root sample.
+# Submit one final marker transaction through the same ordering path unless
+# the dynamic crash gate has restarted PostgreSQL.  BCDB's in-memory serial
+# watermark intentionally cannot resume at a high deterministic txid after a
+# postmaster restart.  In that case the preceding structure workload already
+# required all-three direct completion, and successful crash replay on every
+# replica is the barrier before the direct root/equality sample.
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   log "=== Phase 8: Post-workload $VERIFY_TABLE Merkle verification ==="
+  POST_VERIFY_START_MS="$(date +%s%3N)"
   VERIFY_NODE_SSH_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}"
   MERKLE_DRAIN_SSH_TIMEOUT="${MERKLE_DRAIN_SSH_TIMEOUT:-300}"
 
-  WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
-  MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
-  MARKER_FILE="$LOG_DIR/post_verify_marker.sql"
   # Gateway deterministic sequence for workload item idx is:
   # In preassigned mode, gateway DET ids are detStartSeq + idx, so the marker
   # follows N workload items at detStartSeq + N.  In leader-assigned mode this
   # gateway-side value is only a unique request prefix; the state machine
   # rewrites the actual DET id after Raft commit.  The barrier property comes
   # from submitting the marker only after workload terminal completion.
-  MARKER_SEQ=$(( DET_START_SEQ + WORKLOAD_LINES ))
-  MARKER_REQ=$(( REQ_ID_OFFSET + WORKLOAD_LINES ))
-  printf "%s\n" "INSERT INTO $VERIFY_TABLE (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10) VALUES ($VERIFY_MARKER_KEY, '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL') ON CONFLICT (ycsb_key) DO UPDATE SET field1 = EXCLUDED.field1, field2 = EXCLUDED.field2, field3 = EXCLUDED.field3, field4 = EXCLUDED.field4, field5 = EXCLUDED.field5, field6 = EXCLUDED.field6, field7 = EXCLUDED.field7, field8 = EXCLUDED.field8, field9 = EXCLUDED.field9, field10 = EXCLUDED.field10;" > "$MARKER_FILE"
+  MARKER_SEQ=$(( TIMED_DET_START_SEQ + WORKLOAD_LINES + POST_TIMED_GATEWAY_STATEMENTS ))
+  MARKER_REQ=$(( TIMED_REQ_ID_OFFSET + WORKLOAD_LINES + POST_TIMED_GATEWAY_STATEMENTS ))
+  if [[ "$DYNAMIC_STRUCTURE_CRASH_GATE" -eq 1 ]]; then
+    MARKER_VISIBLE_MS=0
+    POST_VERIFY_APPLY_TARGET="$MARKER_SEQ"
+    printf 'post_run_barrier=all3_structure_then_crash_replay\n' >>"$LOG_DIR/run_summary.env"
+    log "  Post-crash barrier: all-three structure completion plus replay/verify through sequence $MARKER_SEQ; no post-restart BCDB transaction submitted"
+  else
+    POST_VERIFY_APPLY_TARGET=$(( MARKER_SEQ + 1 ))
+    MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
+    MARKER_FILE="$LOG_DIR/post_verify_marker.sql"
+    printf "%s\n" "INSERT INTO $VERIFY_TABLE (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10) VALUES ($VERIFY_MARKER_KEY, '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL', '$MARKER_VAL') ON CONFLICT (ycsb_key) DO UPDATE SET field1 = EXCLUDED.field1, field2 = EXCLUDED.field2, field3 = EXCLUDED.field3, field4 = EXCLUDED.field4, field5 = EXCLUDED.field5, field6 = EXCLUDED.field6, field7 = EXCLUDED.field7, field8 = EXCLUDED.field8, field9 = EXCLUDED.field9, field10 = EXCLUDED.field10;" > "$MARKER_FILE"
 
   MARKER_LOG="$LOG_DIR/post_verify_marker_gateway.log"
   log "  Submitting marker key=$VERIFY_MARKER_KEY detStartSeq=$MARKER_SEQ reqIdOffset=$MARKER_REQ"
@@ -4048,6 +4397,9 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     fi
     sleep 2
   done
+    MARKER_VISIBLE_MS=$(( $(date +%s%3N) - POST_VERIFY_START_MS ))
+    printf 'post_run_barrier=all3_ordered_marker\n' >>"$LOG_DIR/run_summary.env"
+  fi
 
   # ---------------------------------------------------------------------------
   # Resolve effective verify mode.  In "auto" mode: dynamic if the restore SQL
@@ -4055,7 +4407,8 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   # ---------------------------------------------------------------------------
   _EFFECTIVE_VERIFY_MODE="$MERKLE_VERIFY_MODE"
   if [[ "$_EFFECTIVE_VERIFY_MODE" == "auto" ]]; then
-    if grep -qiE 'dynamic\s*=\s*true' "$RESTORE_SQL" 2>/dev/null; then
+    if [[ -n "$DYNAMIC_INDEX_NAME" ]] ||
+       grep -qiE 'dynamic\s*=\s*true|restore_usertable_small_dynamic|create_usertable_small_dynamic' "$RESTORE_SQL" 2>/dev/null; then
       _EFFECTIVE_VERIFY_MODE="dynamic"
     else
       _EFFECTIVE_VERIFY_MODE="legacy"
@@ -4094,6 +4447,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   declare -a POST_STRUCTURE_FAILURES=()
   declare -a POST_STATS_DIRTY=()
   declare -a POST_DYN_VERIFY=()
+  MERKLE_DRAIN_START_MS="$(date +%s%3N)"
 
   for idx in "${!NODE_IDS[@]}"; do
     id="${NODE_IDS[$idx]}"
@@ -4104,7 +4458,6 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     POST_READBACK_STDERR_FILES[$idx]="$readback_stderr_file"
     NODE_SSH_COMMAND_TIMEOUT="$MERKLE_DRAIN_SSH_TIMEOUT" node_ssh "$idx" "
       set -Ee -o pipefail
-      set -x
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
@@ -4115,7 +4468,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
               INSERT INTO ariabc_internal.merkle_local_delta
                      (apply_seq, delta_version, delta_blob)
               SELECT seq, 0, NULL
-                FROM generate_series(1::bigint, $(( MARKER_SEQ + 1 ))::bigint) AS seq
+                FROM generate_series(1::bigint, $POST_VERIFY_APPLY_TARGET::bigint) AS seq
               ON CONFLICT (apply_seq) DO NOTHING
               RETURNING 1
             )
@@ -4321,6 +4674,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
       log "  [$name] rows=$cnt root=$root merkle_verify=$verify"
     fi
   done
+  MERKLE_DRAIN_MS=$(( $(date +%s%3N) - MERKLE_DRAIN_START_MS ))
 
   reference_count="${POST_COUNTS[0]}"
   reference_root="${POST_ROOTS[0]}"
@@ -4378,6 +4732,13 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   else
     log "  $VERIFY_TABLE row consistency: PASS rows=$reference_count (Merkle disabled control run)"
   fi
+  POST_VERIFY_TOTAL_MS=$(( $(date +%s%3N) - POST_VERIFY_START_MS ))
+  {
+    printf 'post_marker_visibility_ms=%s\n' "$MARKER_VISIBLE_MS"
+    printf 'merkle_apply_and_equality_ms=%s\n' "$MERKLE_DRAIN_MS"
+    printf 'post_run_equality_verification_ms=%s\n' "$POST_VERIFY_TOTAL_MS"
+  } >>"$LOG_DIR/run_summary.env"
+  log "  post-run equality timing: marker_visibility_ms=$MARKER_VISIBLE_MS merkle_apply_and_equality_ms=$MERKLE_DRAIN_MS total_ms=$POST_VERIFY_TOTAL_MS"
 else
   log "=== Phase 8: Post-workload verification skipped (--skip-post-verify) ==="
 fi
@@ -4414,5 +4775,42 @@ if [[ -d "$REPO_ROOT/scripts/bench_full_results/durable_storage_test_results" ]]
   log "=== Copying durable storage test results to cluster run archive ==="
   cp -r "$REPO_ROOT/scripts/bench_full_results/durable_storage_test_results" "$LOG_DIR/"
 fi
+
+log "=== Final campaign-input freeze check ==="
+FINAL_SOURCE_FINGERPRINT="$(_compute_src_fingerprint)"
+FINAL_GATEWAY_SHA256="$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
+FINAL_SERVER_SHA256="$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
+FINAL_POSTGRES_SHA256="$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
+FINAL_RESTORE_SHA256="$(sha256sum "$RESTORE_SQL" 2>/dev/null | awk '{print $1}' || echo missing)"
+FINAL_RESTORE_BASE_SHA256="$(sha256sum "$REPO_ROOT/scripts/restore_usertable_small.sql" 2>/dev/null | awk '{print $1}' || echo missing)"
+FINAL_DYNAMIC_INDEX_SQL_SHA256="$(sha256sum "$SCRIPT_DIR/sql/create_usertable_small_dynamic_index.sql" 2>/dev/null | awk '{print $1}' || echo missing)"
+FINAL_WORKLOAD_SHA256="$(sha256sum "$WORKLOAD_FILE" 2>/dev/null | awk '{print $1}' || echo missing)"
+FINAL_RUNNER_SHA256="$(sha256sum "$SCRIPT_DIR/run_4node_raft_cluster.sh" | awk '{print $1}')"
+{
+  printf 'final_source_fingerprint=%s\n' "$FINAL_SOURCE_FINGERPRINT"
+  printf 'final_gateway_sha256=%s\n' "$FINAL_GATEWAY_SHA256"
+  printf 'final_server_sha256=%s\n' "$FINAL_SERVER_SHA256"
+  printf 'final_postgres_sha256=%s\n' "$FINAL_POSTGRES_SHA256"
+  printf 'final_restore_sha256=%s\n' "$FINAL_RESTORE_SHA256"
+  printf 'final_restore_base_sha256=%s\n' "$FINAL_RESTORE_BASE_SHA256"
+  printf 'final_dynamic_index_sql_sha256=%s\n' "$FINAL_DYNAMIC_INDEX_SQL_SHA256"
+  printf 'final_workload_sha256=%s\n' "$FINAL_WORKLOAD_SHA256"
+  printf 'final_runner_sha256=%s\n' "$FINAL_RUNNER_SHA256"
+} >>"$LOG_DIR/build_provenance.env"
+if [[ "$FINAL_SOURCE_FINGERPRINT" != "$FROZEN_SOURCE_FINGERPRINT" ||
+      "$FINAL_GATEWAY_SHA256" != "$FROZEN_GATEWAY_SHA256" ||
+      "$FINAL_SERVER_SHA256" != "$FROZEN_SERVER_SHA256" ||
+      "$FINAL_POSTGRES_SHA256" != "$FROZEN_POSTGRES_SHA256" ||
+      "$FINAL_RESTORE_SHA256" != "$FROZEN_RESTORE_SHA256" ||
+      "$FINAL_RESTORE_BASE_SHA256" != "$FROZEN_RESTORE_BASE_SHA256" ||
+      "$FINAL_DYNAMIC_INDEX_SQL_SHA256" != "$FROZEN_DYNAMIC_INDEX_SQL_SHA256" ||
+      "$FINAL_WORKLOAD_SHA256" != "$FROZEN_WORKLOAD_SHA256" ||
+      "$FINAL_RUNNER_SHA256" != "$FROZEN_RUNNER_SHA256" ]]; then
+  printf 'CAMPAIGN_INPUT_FREEZE_PASS=0\n' >>"$LOG_DIR/build_provenance.env"
+  die "source, binaries, restore, workload, or runner changed during benchmark"
+fi
+printf 'CAMPAIGN_INPUT_FREEZE_PASS=1\n' >>"$LOG_DIR/build_provenance.env"
+printf 'CAMPAIGN_INPUT_FREEZE_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+log "  CAMPAIGN_INPUT_FREEZE_PASS=1"
 
 log "=== 4-node cluster test complete ==="

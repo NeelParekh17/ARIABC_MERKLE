@@ -51,6 +51,13 @@ CSV_FIELDS = [
     "kafka_async_publisher_queue_max",
     "gateway_submit_to_accept_ms",
     "gateway_accept_to_terminal_ms",
+    "all_three_agreement_p95_ms",
+    "post_marker_visibility_ms",
+    "merkle_apply_and_equality_ms",
+    "post_run_equality_verification_ms",
+    "dynamic_structure_gate_pass",
+    "dynamic_pending_crash_restart_pass",
+    "dynamic_cross_partition_keys",
     "merkle_pass",
     "divergence_count",
     "permanent_failures",
@@ -141,11 +148,18 @@ def merkle_pass(root: pathlib.Path) -> int:
 def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
     rows = last_by_prefix(root)
     meta = read_env_file(root / "run_meta.env")
+    summary = read_env_file(root / "run_summary.env")
     out: Dict[str, object] = {k: "" for k in CSV_FIELDS}
     out["run_id"] = root.name
     out["merkle_pass"] = merkle_pass(root)
     out["orderer_policy"] = meta.get("raft_ordering_policy", "")
     out["assigned_seq_mode"] = "1" if out["orderer_policy"] == "leader-assigned" else "0"
+    out["post_marker_visibility_ms"] = summary.get("post_marker_visibility_ms", "")
+    out["merkle_apply_and_equality_ms"] = summary.get("merkle_apply_and_equality_ms", "")
+    out["post_run_equality_verification_ms"] = summary.get("post_run_equality_verification_ms", "")
+    out["dynamic_structure_gate_pass"] = summary.get("DYNAMIC_DISTRIBUTED_STRUCTURE_GATE_PASS", "")
+    out["dynamic_pending_crash_restart_pass"] = summary.get("DYNAMIC_DISTRIBUTED_PENDING_CRASH_RESTART_PASS", "")
+    out["dynamic_cross_partition_keys"] = summary.get("dynamic_cross_partition_keys", "")
     out["target_entries"] = meta.get("raft_ordered_batch_target_entries", "")
     out["linger_us"] = meta.get("raft_ordered_batch_linger_us", "")
     out["bcdb_init_arg_size"] = meta.get("bcdb_init_arg_size", meta.get("bcdb_init_block_size", ""))
@@ -162,8 +176,13 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
     if gateways:
         _, row = max(gateways, key=lambda item: as_int(item[1], "submit_attempts"))
         out["client_workers"] = row.get("configured_gateway_workers", "")
+        if as_int(row, "request_latency_count") > 0:
+            out["p50"] = f"{as_float(row, 'request_latency_p50_ms'):.3f}"
+            out["p95"] = f"{as_float(row, 'request_latency_p95_ms'):.3f}"
+            out["p99"] = f"{as_float(row, 'request_latency_p99_ms'):.3f}"
         out["gateway_submit_to_accept_ms"] = f"{as_float(row, 'submit_to_accept_ms'):.3f}"
         out["gateway_accept_to_terminal_ms"] = f"{as_float(row, 'accept_to_terminal_ms'):.3f}"
+        out["all_three_agreement_p95_ms"] = f"{as_float(row, 'majority_to_all3_ms_p95'):.3f}"
         if out["permanent_failures"] == "":
             out["permanent_failures"] = as_int(row, "permanent_failures")
 
@@ -321,11 +340,14 @@ def summarize_root(root: pathlib.Path) -> None:
             f"async_queue_max={as_int(row, 'async_flush_queue_max')}"
         )
 
-    runner_log = root / "runner.log"
-    if runner_log.exists():
-        text = runner_log.read_text(errors="replace")
-        post_pass = bool(re.search(r"post-marker .*PASS|consistency: PASS", text))
-        print(f"  correctness post_marker_or_consistency_pass={1 if post_pass else 0}")
+    summary = read_env_file(root / "run_summary.env")
+    print(
+        "  correctness "
+        f"merkle_equality_pass={merkle_pass(root)} "
+        f"barrier={summary.get('post_run_barrier', '-')} "
+        f"dynamic_structure_gate={summary.get('DYNAMIC_DISTRIBUTED_STRUCTURE_GATE_PASS', '-')} "
+        f"dynamic_crash_restart_gate={summary.get('DYNAMIC_DISTRIBUTED_PENDING_CRASH_RESTART_PASS', '-')}"
+    )
     print()
 
 

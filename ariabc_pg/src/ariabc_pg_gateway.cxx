@@ -4684,6 +4684,11 @@ int main(int argc, char** argv) {
 
         std::cout << "loaded " << queries.size() << " queries" << std::endl;
 
+        // Each threadpool worker owns a disjoint strided set of indexes, so
+        // request completion latency can be recorded without a shared lock.
+        // The interval ends at client-visible completion and excludes qrate
+        // pacing performed after tx_t1.
+        std::vector<double> request_latency_ms(queries.size(), -1.0);
         const auto t_start = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point client_completion_end;
         bool client_completion_end_set = false;
@@ -5437,6 +5442,8 @@ int main(int argc, char** argv) {
                             }
 
                             const auto tx_t1 = std::chrono::steady_clock::now();
+                            request_latency_ms[idx] =
+                                std::chrono::duration<double, std::milli>(tx_t1 - tx_t0).count();
                             if (opt.qrate > 0) {
                                 const std::chrono::duration<double> target_interval(
                                     1.0 / static_cast<double>(opt.qrate));
@@ -6381,6 +6388,30 @@ int main(int argc, char** argv) {
             (opt.db_type == 1) ? std::max<size_t>(1, static_cast<size_t>(opt.num_terminals)) : 0;
         const size_t prof_det_pipeline_depth =
             (opt.db_type == 1) ? effective_det_pipeline_depth(prof_det_terminals, prof_det_window) : 0;
+        std::vector<double> request_latency_valid;
+        request_latency_valid.reserve(request_latency_ms.size());
+        for (double latency : request_latency_ms) {
+            if (latency >= 0.0) request_latency_valid.push_back(latency);
+        }
+        std::sort(request_latency_valid.begin(), request_latency_valid.end());
+        const auto request_latency_percentile = [&](double q) -> double {
+            if (request_latency_valid.empty()) return 0.0;
+            const double pos = q * static_cast<double>(request_latency_valid.size() - 1);
+            const size_t lo = static_cast<size_t>(std::floor(pos));
+            const size_t hi = static_cast<size_t>(std::ceil(pos));
+            const double fraction = pos - static_cast<double>(lo);
+            return request_latency_valid[lo] +
+                   (request_latency_valid[hi] - request_latency_valid[lo]) * fraction;
+        };
+        const double request_latency_p50_ms = request_latency_percentile(0.50);
+        const double request_latency_p95_ms = request_latency_percentile(0.95);
+        const double request_latency_p99_ms = request_latency_percentile(0.99);
+        std::cout << "REQUEST_LATENCY"
+                  << " count=" << request_latency_valid.size()
+                  << " p50_ms=" << request_latency_p50_ms
+                  << " p95_ms=" << request_latency_p95_ms
+                  << " p99_ms=" << request_latency_p99_ms
+                  << std::endl;
         std::cout
             << "PROFILE_GATEWAY "
             << " completion_path=" << opt.completion_path
@@ -6401,6 +6432,10 @@ int main(int argc, char** argv) {
             << " det_pipeline_depth=" << prof_det_pipeline_depth
             << " det_batch_size=" << opt.det_batch_size
             << " effective_det_window=" << prof_det_window
+            << " request_latency_count=" << request_latency_valid.size()
+            << " request_latency_p50_ms=" << request_latency_p50_ms
+            << " request_latency_p95_ms=" << request_latency_p95_ms
+            << " request_latency_p99_ms=" << request_latency_p99_ms
             << " configured_det_window=" << ((opt.db_type == 1) ? std::max(1, opt.det_window > 0 ? opt.det_window : 32) : 0)
             << " submit_attempts=" << sub_attempts
             << " conn_calls=" << sub_conn_calls

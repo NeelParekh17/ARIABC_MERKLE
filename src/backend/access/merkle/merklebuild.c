@@ -14,6 +14,7 @@
 #include "postgres.h"
 
 #include "access/merkle.h"
+#include "access/xloginsert.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/tableam.h"
@@ -401,8 +402,8 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
                     merkle_hash_xor(&h, &buildstate.nodeHashes[base + buildstate.fanout * (i - 1) + child]);
 
                 buildstate.nodeHashes[base + (i - 1)] = h;
-            }
-        }
+		}
+	}
 
         /* Write nodes to index pages in on-disk layout order. */
         for (pageNum = 0; pageNum < buildstate.numTreePages; pageNum++)
@@ -449,6 +450,15 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
             nodeIdx += nodesThisPage;
         }
     }
+
+	/*
+	 * The bulk build dirties index pages without per-page WAL.  Log the final
+	 * main-fork image, as the built-in GIN/GiST builders do, so an immediate
+	 * crash after CREATE INDEX cannot recover an empty relation fork.
+	 */
+	if (RelationNeedsWAL(indexRel))
+		log_newpage_range(indexRel, MAIN_FORKNUM, 0,
+						  RelationGetNumberOfBlocks(indexRel), true);
     
     /*
      * Return statistics
@@ -564,6 +574,8 @@ merkleBuildempty(Relation indexRel)
 		meta->dynamicLeafByteCapacity = opts->leaf_byte_capacity;
 		meta->dynamicMaxKeyBytes = opts->max_key_bytes;
 	}
+	((PageHeader) metapage)->pd_lower =
+		(LocationIndex) ((char *) meta + sizeof(*meta) - (char *) metapage);
 
     pfree(opts);
     
