@@ -138,6 +138,11 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
 
   # Record originating commit before syncing (since .git is excluded)
   CALLER_GIT_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  CALLER_GIT_STATUS_TMP="$(mktemp)"
+  CALLER_GIT_DIFF_TMP="$(mktemp)"
+  trap 'rm -f "$CALLER_GIT_STATUS_TMP" "$CALLER_GIT_DIFF_TMP"' EXIT
+  git -C "$REPO_ROOT" status --short >"$CALLER_GIT_STATUS_TMP" 2>/dev/null || true
+  git -C "$REPO_ROOT" diff HEAD --binary >"$CALLER_GIT_DIFF_TMP" 2>/dev/null || true
 
   echo "Syncing workspace to gateway machine..."
   rsync -az --delete \
@@ -157,6 +162,12 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     "$REPO_ROOT/" \
     "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/"
 
+  ssh "$GATEWAY_USER@$GATEWAY_HOST" "mkdir -p '$GATEWAY_REPO/.bench_tmp'"
+  rsync -az "$CALLER_GIT_STATUS_TMP" \
+    "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/.bench_tmp/caller_git_status.txt"
+  rsync -az "$CALLER_GIT_DIFF_TMP" \
+    "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/.bench_tmp/caller_uncommitted_diff.patch"
+
   for _cmake_cache in /tmp/cmake-3.28.3-linux-x86_64.tar.gz "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
     if [[ -s "$_cmake_cache" ]]; then
       echo "Syncing cached portable CMake tarball to gateway..."
@@ -172,6 +183,8 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     "BYPASS_DELEGATION=1"
     "LOCAL_INSTALL_DIR=$GATEWAY_INSTALL"
     "CALLER_GIT_HEAD=$CALLER_GIT_HEAD"
+    "CALLER_GIT_STATUS_FILE=$GATEWAY_REPO/.bench_tmp/caller_git_status.txt"
+    "CALLER_GIT_DIFF_FILE=$GATEWAY_REPO/.bench_tmp/caller_uncommitted_diff.patch"
   )
 
   for var in \
@@ -179,6 +192,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     SKIP_SYNC SKIP_BUILD SKIP_KAFKA SKIP_CLEANUP \
     SKIP_RDKAFKA_SETUP SKIP_RESTORE SKIP_POST_VERIFY \
     ENABLE_MERKLE_INDEX \
+    MERKLE_VERIFY_MODE DYNAMIC_INDEX_NAME \
     NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
     NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
     NODE_IS_U22_CSV NODE_CLIENT_PORTS_CSV \
@@ -374,6 +388,10 @@ WORKLOAD_FILE="${WORKLOAD_FILE:-$REPO_ROOT/scripts/ycsb-skew0-99-tx-20k-point-sa
 RESTORE_SQL="${RESTORE_SQL:-$REPO_ROOT/scripts/restore_usertable_small.sql}"
 VERIFY_TABLE="${VERIFY_TABLE:-usertable_small}"
 VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
+# dynamic Merkle verification mode: legacy|dynamic|auto (default: auto)
+# In auto mode the runner detects whether the restored index is dynamic.
+MERKLE_VERIFY_MODE="${MERKLE_VERIFY_MODE:-auto}"
+DYNAMIC_INDEX_NAME="${DYNAMIC_INDEX_NAME:-}"
 DET_START_SEQ="${DET_START_SEQ:-0}"
 REQ_ID_OFFSET="${REQ_ID_OFFSET:-1}"
 DET_WINDOW="${DET_WINDOW:-4096}"
@@ -730,6 +748,8 @@ while [[ $# -gt 0 ]]; do
     --workload)     WORKLOAD_FILE="${2:-}"; shift 2 ;;
     --restore-sql)  RESTORE_SQL="${2:-}"; shift 2 ;;
     --verify-table) VERIFY_TABLE="${2:-}"; shift 2 ;;
+    --merkle-verify-mode) MERKLE_VERIFY_MODE="${2:-auto}"; shift 2 ;;
+    --dynamic-index) DYNAMIC_INDEX_NAME="${2:-}"; shift 2 ;;
     --det-start-seq) DET_START_SEQ="${2:-0}"; shift 2 ;;
     --req-id-offset) REQ_ID_OFFSET="${2:-1}"; shift 2 ;;
     --det-window)   DET_WINDOW="${2:-4096}"; DET_WINDOW_EXPLICIT=1; shift 2 ;;
@@ -1776,11 +1796,19 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
 # Capture these immediately after run_meta.env so that if the run aborts
 # before Phase 1.6 we still have a record of what source was in use.
 # ---------------------------------------------------------------------------
-git -C "$REPO_ROOT" diff HEAD -- src ariabc_pg scripts/distributed \
-  > "$LOG_DIR/uncommitted_diff.patch" 2>/dev/null || true
+if [[ -n "${CALLER_GIT_DIFF_FILE:-}" && -f "$CALLER_GIT_DIFF_FILE" ]]; then
+  cp "$CALLER_GIT_DIFF_FILE" "$LOG_DIR/uncommitted_diff.patch"
+else
+  git -C "$REPO_ROOT" diff HEAD --binary \
+    > "$LOG_DIR/uncommitted_diff.patch" 2>/dev/null || true
+fi
 
-git -C "$REPO_ROOT" status --short \
-  > "$LOG_DIR/git_status.txt" 2>/dev/null || true
+if [[ -n "${CALLER_GIT_STATUS_FILE:-}" && -f "$CALLER_GIT_STATUS_FILE" ]]; then
+  cp "$CALLER_GIT_STATUS_FILE" "$LOG_DIR/git_status.txt"
+else
+  git -C "$REPO_ROOT" status --short \
+    > "$LOG_DIR/git_status.txt" 2>/dev/null || true
+fi
 
 local_git_head="${CALLER_GIT_HEAD:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
 local_git_dirty="$(git -C "$REPO_ROOT" diff HEAD --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
@@ -3930,7 +3958,7 @@ fi
 if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   log "=== Phase 8: Post-workload $VERIFY_TABLE Merkle verification ==="
   VERIFY_NODE_SSH_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}"
-  MERKLE_DRAIN_SSH_TIMEOUT="${MERKLE_DRAIN_SSH_TIMEOUT:-30}"
+  MERKLE_DRAIN_SSH_TIMEOUT="${MERKLE_DRAIN_SSH_TIMEOUT:-300}"
 
   WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
   MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
@@ -4021,12 +4049,52 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     sleep 2
   done
 
+  # ---------------------------------------------------------------------------
+  # Resolve effective verify mode.  In "auto" mode: dynamic if the restore SQL
+  # contains CREATE INDEX ... dynamic = true; otherwise legacy.
+  # ---------------------------------------------------------------------------
+  _EFFECTIVE_VERIFY_MODE="$MERKLE_VERIFY_MODE"
+  if [[ "$_EFFECTIVE_VERIFY_MODE" == "auto" ]]; then
+    if grep -qiE 'dynamic\s*=\s*true' "$RESTORE_SQL" 2>/dev/null; then
+      _EFFECTIVE_VERIFY_MODE="dynamic"
+    else
+      _EFFECTIVE_VERIFY_MODE="legacy"
+    fi
+    log "  merkle-verify-mode=auto resolved to: $_EFFECTIVE_VERIFY_MODE"
+  fi
+
+  # In dynamic mode, resolve the index name: prefer --dynamic-index, else scan
+  # the restore SQL for the first dynamic USING merkle index name.
+  if [[ "$_EFFECTIVE_VERIFY_MODE" == "dynamic" ]]; then
+    if [[ -z "$DYNAMIC_INDEX_NAME" ]]; then
+      DYNAMIC_INDEX_NAME="$(grep -iE 'CREATE INDEX\s+\S+\s+ON' "$RESTORE_SQL" \
+        | grep -i 'dynamic' | head -1 \
+        | sed -E 's/.*CREATE INDEX\s+(\S+)\s+ON.*/public.\1/' || true)"
+    fi
+    if [[ -z "$DYNAMIC_INDEX_NAME" ]]; then
+      log "ERROR: --merkle-verify-mode dynamic requires a dynamic index name; use --dynamic-index or embed one in --restore-sql"
+      exit 1
+    fi
+    log "  dynamic index for verification: $DYNAMIC_INDEX_NAME"
+  fi
+
   declare -a POST_ROOTS=()
   declare -a POST_COUNTS=()
   declare -a POST_VERIFY=()
   declare -a POST_READBACK_PIDS=()
   declare -a POST_READBACK_FILES=()
   declare -a POST_READBACK_STDERR_FILES=()
+  declare -a POST_ROOT_SHA=()
+  declare -a POST_TOPO_SHA=()
+  declare -a POST_ITEM_SHA=()
+  declare -a POST_ITEM_COUNTS=()
+  declare -a POST_LEAF_COUNTS=()
+  declare -a POST_NODE_COUNTS=()
+  declare -a POST_PARTITIONS=()
+  declare -a POST_STRUCTURE_FAILURES=()
+  declare -a POST_STATS_DIRTY=()
+  declare -a POST_DYN_VERIFY=()
+
   for idx in "${!NODE_IDS[@]}"; do
     id="${NODE_IDS[$idx]}"
     name="${NODE_NAMES[$idx]}"
@@ -4035,6 +4103,8 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     POST_READBACK_FILES[$idx]="$readback_file"
     POST_READBACK_STDERR_FILES[$idx]="$readback_stderr_file"
     NODE_SSH_COMMAND_TIMEOUT="$MERKLE_DRAIN_SSH_TIMEOUT" node_ssh "$idx" "
+      set -Ee -o pipefail
+      set -x
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
@@ -4045,7 +4115,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
               INSERT INTO ariabc_internal.merkle_local_delta
                      (apply_seq, delta_version, delta_blob)
               SELECT seq, 0, NULL
-                FROM generate_series(1::bigint, $((MARKER_SEQ + 1))::bigint) AS seq
+                FROM generate_series(1::bigint, $(( MARKER_SEQ + 1 ))::bigint) AS seq
               ON CONFLICT (apply_seq) DO NOTHING
               RETURNING 1
             )
@@ -4057,13 +4127,161 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
           echo \"Merkle recovery did not reach READY after applying \$applied entries: \$recovery_state\" >&2
           exit 1
         fi
-        root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
-        verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
+        root=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
+        verify=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
       else
         root=disabled
         verify=disabled
       fi
-      echo \"\$cnt|\$root|\$verify\"
+
+      # --- Dynamic Merkle equality digests ---
+      if [[ '$_EFFECTIVE_VERIFY_MODE' == dynamic && '$ENABLE_MERKLE_INDEX' -eq 1 ]]; then
+        dyn_index='$DYNAMIC_INDEX_NAME'
+
+        # Refresh stats cache (merges may leave stats_dirty=true until a stats call)
+        tree_stats=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_dynamic_tree_stats('\${dyn_index}'::regclass)\")
+        if [[ -z \"\$tree_stats\" ]]; then
+          echo \"merkle_dynamic_tree_stats returned empty output\" >&2
+          exit 1
+        fi
+
+        # Structural verify
+        dyn_verify=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_dynamic_verify('\${dyn_index}'::regclass)\")
+        if [[ \"\$dyn_verify\" != t ]]; then
+          echo \"merkle_dynamic_verify returned \$dyn_verify\" >&2
+          exit 1
+        fi
+
+        # Pull invariant stats from dynamic_state
+        stats_row=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
+          SELECT item_count, leaf_count, node_count, partitions, structure_failures, stats_dirty, leaf_capacity, max_leaf_items
+            FROM ariabc_internal.merkle_dynamic_state s
+           WHERE s.index_oid = '\${dyn_index}'::regclass\" | tr '|' ' ')
+        read -r dyn_item_count dyn_leaf_count dyn_node_count dyn_partitions dyn_struct_fail dyn_stats_dirty dyn_leaf_cap dyn_max_items \
+          <<< \"\$stats_row\"
+
+        # Enforce PLAN.md invariants
+        if [[ \"\$dyn_item_count\" != \"\$cnt\" ]]; then
+          echo \"item_count=\$dyn_item_count != heap count \$cnt\" >&2; exit 1
+        fi
+        expected_nodes=\$(( 2 * dyn_leaf_count - dyn_partitions ))
+        if [[ \"\$dyn_node_count\" != \"\$expected_nodes\" ]]; then
+          echo \"forest equation failed: node_count=\$dyn_node_count expected=\$expected_nodes\" >&2; exit 1
+        fi
+        if [[ \"\$dyn_struct_fail\" != 0 ]]; then
+          echo \"structure_failures=\$dyn_struct_fail\" >&2; exit 1
+        fi
+        if [[ \"\$dyn_stats_dirty\" != f ]]; then
+          echo \"stats_dirty=\$dyn_stats_dirty after tree_stats refresh\" >&2; exit 1
+        fi
+        if [[ \"\$dyn_max_items\" -gt \"\$dyn_leaf_cap\" ]]; then
+          echo \"max_leaf_items=\$dyn_max_items exceeds leaf_capacity=\$dyn_leaf_cap\" >&2; exit 1
+        fi
+
+        # A digest of an empty stream is still syntactically valid.  Bind each
+        # source to the current generation and prove its row count before
+        # accepting any digest.
+        root_rows=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
+          SELECT count(*)
+            FROM merkle_dynamic_get_partition_roots('\${dyn_index}'::regclass)\")
+        topo_rows=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
+          WITH current_generation AS (
+            SELECT index_oid, rnode_spc, rnode_db, rnode_rel
+              FROM ariabc_internal.merkle_dynamic_state
+             WHERE index_oid = '\${dyn_index}'::regclass
+          )
+          SELECT count(*)
+            FROM ariabc_internal.merkle_dynamic_node AS node
+            JOIN current_generation AS state
+              ON state.index_oid = node.index_oid
+             AND state.rnode_spc = node.rnode_spc
+             AND state.rnode_db = node.rnode_db
+             AND state.rnode_rel = node.rnode_rel\")
+        item_rows=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
+          WITH current_generation AS (
+            SELECT index_oid, rnode_spc, rnode_db, rnode_rel
+              FROM ariabc_internal.merkle_dynamic_state
+             WHERE index_oid = '\${dyn_index}'::regclass
+          )
+          SELECT count(*)
+            FROM ariabc_internal.merkle_dynamic_leaf_item AS item
+            JOIN current_generation AS state
+              ON state.index_oid = item.index_oid
+             AND state.rnode_spc = item.rnode_spc
+             AND state.rnode_db = item.rnode_db
+             AND state.rnode_rel = item.rnode_rel\")
+        if [[ \"\$root_rows\" != \"\$dyn_partitions\" ]]; then
+          echo \"partition-root rows=\$root_rows expected=\$dyn_partitions\" >&2; exit 1
+        fi
+        if [[ \"\$topo_rows\" != \"\$dyn_node_count\" ]]; then
+          echo \"topology rows=\$topo_rows expected=\$dyn_node_count\" >&2; exit 1
+        fi
+        if [[ \"\$item_rows\" != \"\$dyn_item_count\" ]]; then
+          echo \"leaf-item rows=\$item_rows expected=\$dyn_item_count\" >&2; exit 1
+        fi
+
+        # A. Logical root digest (partition_id, tuple_count, data_xor ordered)
+        root_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
+          COPY (
+            SELECT partition_id,
+                   tuple_count,
+                   encode(data_xor,'hex') AS data_xor_hex
+              FROM merkle_dynamic_get_partition_roots('\${dyn_index}'::regclass)
+             ORDER BY partition_id
+          ) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
+
+        # B. Physical topology digest (ordered by partition_id, prefix_len, prefix_bytes)
+        topo_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
+          COPY (
+            WITH current_generation AS (
+              SELECT index_oid, rnode_spc, rnode_db, rnode_rel
+                FROM ariabc_internal.merkle_dynamic_state
+               WHERE index_oid = '\${dyn_index}'::regclass
+            )
+            SELECT node.partition_id,
+                   node.prefix_len,
+                   encode(node.prefix_bytes,'hex') AS prefix_hex,
+                   node.is_leaf,
+                   node.tuple_count,
+                   node.subtree_bytes,
+                   encode(node.data_xor,'hex') AS data_xor_hex,
+                   encode(node.structure_hash,'hex') AS structure_hash_hex
+              FROM ariabc_internal.merkle_dynamic_node AS node
+              JOIN current_generation AS state
+                ON state.index_oid = node.index_oid
+               AND state.rnode_spc = node.rnode_spc
+               AND state.rnode_db = node.rnode_db
+               AND state.rnode_rel = node.rnode_rel
+             ORDER BY node.partition_id, node.prefix_len, node.prefix_bytes
+          ) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
+
+        # C. Leaf-item digest (key_data, route_digest, tuple_hash, prefix context ordered)
+        item_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
+          COPY (
+            WITH current_generation AS (
+              SELECT index_oid, rnode_spc, rnode_db, rnode_rel
+                FROM ariabc_internal.merkle_dynamic_state
+               WHERE index_oid = '\${dyn_index}'::regclass
+            )
+            SELECT item.partition_id,
+                   encode(item.key_data,'hex') AS key_hex,
+                   encode(item.route_digest,'hex') AS route_hex,
+                   encode(item.tuple_hash,'hex') AS hash_hex,
+                   item.prefix_len,
+                   encode(item.prefix_bytes,'hex') AS prefix_hex
+              FROM ariabc_internal.merkle_dynamic_leaf_item AS item
+              JOIN current_generation AS state
+                ON state.index_oid = item.index_oid
+               AND state.rnode_spc = item.rnode_spc
+               AND state.rnode_db = item.rnode_db
+               AND state.rnode_rel = item.rnode_rel
+             ORDER BY item.partition_id, item.key_data
+          ) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
+
+        echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify\"
+      else
+        echo \"\$cnt|\$root|\$verify\"
+      fi
     " >"$readback_file" 2>"$readback_stderr_file" &
     POST_READBACK_PIDS[$idx]="$!"
     log "  [$name] post-marker Merkle drain started (pid $!)"
@@ -4074,7 +4292,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     readback_file="${POST_READBACK_FILES[$idx]}"
     readback_stderr_file="${POST_READBACK_STDERR_FILES[$idx]}"
     if wait "${POST_READBACK_PIDS[$idx]}"; then
-      readback="$(tr -d '[:space:]' < "$readback_file")"
+      readback="$(tr -d '[:space:]' <"$readback_file")"
     else
       readback="error|error|error"
       log "  WARNING: [$name] post-marker readback failed; see $readback_stderr_file"
@@ -4083,23 +4301,61 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
       log "  [$name] post-marker readback stderr (saved in $readback_stderr_file):"
       cat "$readback_stderr_file" >&2
     fi
-    IFS='|' read -r cnt root verify <<<"$readback"
+    IFS='|' read -r cnt root verify root_sha topo_sha item_sha \
+        dyn_item_count dyn_leaf_count dyn_node_count dyn_partitions dyn_verify \
+      <<< "$readback"
     POST_COUNTS[$idx]="$cnt"
     POST_ROOTS[$idx]="$root"
     POST_VERIFY[$idx]="$verify"
-    log "  [$name] rows=$cnt root=$root merkle_verify=$verify"
+    POST_ROOT_SHA[$idx]="${root_sha:-}"
+    POST_TOPO_SHA[$idx]="${topo_sha:-}"
+    POST_ITEM_SHA[$idx]="${item_sha:-}"
+    POST_ITEM_COUNTS[$idx]="${dyn_item_count:-}"
+    POST_LEAF_COUNTS[$idx]="${dyn_leaf_count:-}"
+    POST_NODE_COUNTS[$idx]="${dyn_node_count:-}"
+    POST_PARTITIONS[$idx]="${dyn_partitions:-}"
+    POST_DYN_VERIFY[$idx]="${dyn_verify:-}"
+    if [[ "$_EFFECTIVE_VERIFY_MODE" == "dynamic" ]]; then
+      log "  [$name] rows=$cnt root=$root verify=$verify root_sha256=${root_sha:-n/a} topo_sha256=${topo_sha:-n/a} item_sha256=${item_sha:-n/a} dyn_verify=${dyn_verify:-n/a}"
+    else
+      log "  [$name] rows=$cnt root=$root merkle_verify=$verify"
+    fi
   done
 
   reference_count="${POST_COUNTS[0]}"
   reference_root="${POST_ROOTS[0]}"
+  reference_root_sha="${POST_ROOT_SHA[0]:-}"
+  reference_topo_sha="${POST_TOPO_SHA[0]:-}"
+  reference_item_sha="${POST_ITEM_SHA[0]:-}"
   POST_PASS=1
   for idx in "${!NODE_IDS[@]}"; do
-    if [[ "${POST_COUNTS[$idx]}" != "$reference_count" ||
-          ( "$ENABLE_MERKLE_INDEX" -eq 1 &&
-            ( "${POST_ROOTS[$idx]}" != "$reference_root" ||
-              "${POST_VERIFY[$idx]}" != "t" ) ) ]]; then
+    name="${NODE_NAMES[$idx]}"
+    # --- heap count + legacy root equality (always checked) ---
+    if [[ "${POST_COUNTS[$idx]}" != "$reference_count" ]] || \
+       { [[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && \
+         [[ "${POST_ROOTS[$idx]}" != "$reference_root" || \
+            "${POST_VERIFY[$idx]}" != "t" ]]; }; then
       POST_PASS=0
-      log "  MISMATCH on ${NODE_NAMES[$idx]} expected rows=$reference_count root=$reference_root verify=t"
+      log "  MISMATCH on $name: expected rows=$reference_count root=$reference_root verify=t"
+    fi
+    # --- dynamic Merkle equality digests ---
+    if [[ "$_EFFECTIVE_VERIFY_MODE" == "dynamic" && "$ENABLE_MERKLE_INDEX" -eq 1 ]]; then
+      if [[ "${POST_DYN_VERIFY[$idx]}" != "t" ]]; then
+        POST_PASS=0
+        log "  [$name] DYNAMIC STRUCTURAL VERIFY FAILED: ${POST_DYN_VERIFY[$idx]}"
+      fi
+      if [[ -n "$reference_root_sha" && "${POST_ROOT_SHA[$idx]}" != "$reference_root_sha" ]]; then
+        POST_PASS=0
+        log "  [$name] LOGICAL ROOT DIGEST MISMATCH: ${POST_ROOT_SHA[$idx]} != $reference_root_sha"
+      fi
+      if [[ -n "$reference_topo_sha" && "${POST_TOPO_SHA[$idx]}" != "$reference_topo_sha" ]]; then
+        POST_PASS=0
+        log "  [$name] PHYSICAL TOPOLOGY DIGEST MISMATCH: ${POST_TOPO_SHA[$idx]} != $reference_topo_sha"
+      fi
+      if [[ -n "$reference_item_sha" && "${POST_ITEM_SHA[$idx]}" != "$reference_item_sha" ]]; then
+        POST_PASS=0
+        log "  [$name] LEAF-ITEM DIGEST MISMATCH: ${POST_ITEM_SHA[$idx]} != $reference_item_sha"
+      fi
     fi
   done
 
@@ -4108,7 +4364,16 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     collect_final_profiles_before_fail "post-marker Merkle mismatch"
     exit 1
   fi
-  if [[ "$ENABLE_MERKLE_INDEX" -eq 1 ]]; then
+
+  if [[ "$_EFFECTIVE_VERIFY_MODE" == "dynamic" && "$ENABLE_MERKLE_INDEX" -eq 1 ]]; then
+    log "  heap root equality       PASS rows=$reference_count root=$reference_root"
+    log "  logical partition roots  PASS sha256=$reference_root_sha"
+    log "  physical topology        PASS sha256=$reference_topo_sha"
+    log "  leaf-item assignments    PASS sha256=$reference_item_sha"
+    log "  full dynamic verifier    PASS"
+    log "  DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1"
+    printf 'DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+  elif [[ "$ENABLE_MERKLE_INDEX" -eq 1 ]]; then
     log "  $VERIFY_TABLE consistency: PASS rows=$reference_count root=$reference_root"
   else
     log "  $VERIFY_TABLE row consistency: PASS rows=$reference_count (Merkle disabled control run)"

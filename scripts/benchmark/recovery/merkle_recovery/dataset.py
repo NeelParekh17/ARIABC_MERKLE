@@ -53,6 +53,7 @@ def ensure_helpers(conn, merkle_mode: str = "static") -> None:
 
 
 def recreate_schema(conn) -> None:
+    execute(conn, "SELECT merkle_apply_pending()")
     run_file(conn, BENCH_DIR / "create_schema.sql")
 
 
@@ -74,6 +75,28 @@ def cleanup_dynamic_benchmark_generations(conn) -> None:
                   WHERE namespace.nspname IN ('healthy', 'damaged')
                     AND index_class.relname = 'usertable_merkle_idx'
               )
+        """,
+    )
+
+
+def truncate_dynamic_side_tables(conn) -> None:
+    """TRUNCATE all four shared dynamic side tables to reclaim heap space.
+
+    Unlike DELETE, TRUNCATE immediately resets per-relation statistics and
+    returns allocated pages, so the planner sees accurate row counts for the
+    next dataset build instead of inflated dead-tuple estimates from prior
+    1M/3M/5M builds.  This is benchmark-private: the caller must have already
+    confirmed that no live dynamic index exists (i.e. all merkle_dynamic_state
+    rows referencing healthy/damaged usertable_merkle_idx have been removed).
+    """
+    execute(
+        conn,
+        """
+        TRUNCATE TABLE
+            ariabc_internal.merkle_dynamic_seen,
+            ariabc_internal.merkle_dynamic_leaf_item,
+            ariabc_internal.merkle_dynamic_node,
+            ariabc_internal.merkle_dynamic_state
         """,
     )
 
@@ -205,9 +228,13 @@ def build_dataset(
     """Create both schemas from scratch and populate healthy.usertable."""
     if merkle_mode == "dynamic":
         # Side-table rows are keyed by full index generation rather than a
-        # catalog FK.  Prune the previous benchmark generation before DROP
-        # SCHEMA so 1M/3M/5M cases do not accumulate stale rows or index bloat.
+        # catalog FK.  Prune stale generations first, then TRUNCATE the four
+        # shared tables to reclaim heap pages and reset planner statistics.
+        # This prevents dead-tuple bloat from prior 1M/3M/5M builds from
+        # causing the planner to misestimate those relations and fall back to
+        # sequential scans during the next size's sparse recovery.
         cleanup_dynamic_benchmark_generations(conn)
+        truncate_dynamic_side_tables(conn)
     recreate_schema(conn)
     execute(
         conn,
@@ -239,6 +266,7 @@ def build_dataset(
 
 def reset_damaged_from_healthy(conn, cfg: dict[str, int], merkle_mode: str = "static") -> None:
     """Restore damaged.usertable to a clean copy of healthy; rebuild all indexes."""
+    execute(conn, "SELECT merkle_apply_pending()")
     execute(conn, "DROP TABLE IF EXISTS damaged.usertable CASCADE")
     execute(conn, "CREATE TABLE damaged.usertable (LIKE healthy.usertable INCLUDING DEFAULTS)")
     execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")

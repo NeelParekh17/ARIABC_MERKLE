@@ -55,6 +55,12 @@ RETURNS TABLE(partition_id integer, prefix_len integer, prefix bytea,
 AS 'merkle_dynamic_get_partition_roots'
 LANGUAGE internal VOLATILE PARALLEL UNSAFE;
 
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_dynamic_get_leaf_frontier(index_oid regclass)
+RETURNS TABLE(partition_id integer, prefix_len integer, prefix bytea,
+              tuple_count bigint, data_xor bytea, is_leaf boolean)
+AS 'merkle_dynamic_get_leaf_frontier'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
 CREATE OR REPLACE FUNCTION pg_catalog.merkle_dynamic_get_ranges(index_oid regclass,
                                                                  ranges jsonb)
 RETURNS TABLE(partition_id integer, prefix_len integer, prefix bytea,
