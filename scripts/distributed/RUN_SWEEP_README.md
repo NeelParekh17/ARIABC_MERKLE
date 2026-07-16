@@ -15,20 +15,29 @@ It:
 4. runs `git diff --check`;
 5. creates a campaign directory under `scripts/bench_full_results/`;
 6. runs the distributed benchmark for each server executor worker count;
-7. repeats each worker count three times;
-8. records each produced `cluster4_*` artifact and summary.
+7. runs each worker count once by default;
+8. runs an untimed warm-up before each measured workload;
+9. runs untimed distributed merge/re-split/key-move and pending-crash gates;
+10. performs post-run marker/Merkle equality after TPS measurement;
+11. records each produced `cluster4_*` artifact and summary.
 
-All stdout/stderr from the campaign is redirected to `out.txt` in the repository
-root. The script does not stream to the terminal after the initial build/check
-messages.
+All stdout/stderr streams to the terminal and is also captured in `out.txt` and
+the campaign's `console.log`.
 
 ## Basic run
 
 From the repository root:
 
 ```bash
+export ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1
 ./scripts/distributed/run_sweep.sh
 ```
+
+The lab password defaults to the configured cluster credential and can be
+overridden with `ARIABC_CLUSTER_PASSWORD`. SSH uses strict host-key checking
+and the managed file selected by `ARIABC_KNOWN_HOSTS_FILE` (default:
+`~/.ssh/known_hosts`). The destructive opt-in must only be set for a dedicated
+benchmark database.
 
 The wrapper defaults to the distributed dynamic-Merkle path:
 
@@ -38,7 +47,22 @@ The wrapper defaults to the distributed dynamic-Merkle path:
 --enable-merkle-index 1
 --merkle-verify-mode dynamic
 --dynamic-index public.usertable_small_dynamic_merkle_idx
+--dynamic-structure-gate 1
+--dynamic-structure-crash-gate 1
+--warmup-queries 1000
 ```
+
+Each run has three explicit boundaries:
+
+1. `gateway_warmup.log`: 1,000 state-preserving no-op updates by default;
+2. `gateway_test.log`: the timed workload used by `parse_tps_metrics.py`;
+3. `dynamic_structure_gateway.log`: untimed merge/re-split/key-route coverage;
+4. a pending-transition replica crash/restart gate;
+5. `post_verify_marker_gateway.log` plus dynamic Merkle equality artifacts.
+
+Warm-up and post-run verification are excluded from TPS. Set
+`--warmup-queries 0` to disable warm-up, or use `--warmup-workload FILE` for a
+custom state-safe warm-up workload.
 
 Passing any of these options explicitly overrides its default because explicit
 CLI arguments are forwarded after the default argument set.
@@ -68,7 +92,16 @@ runs.csv      maps pg_executor_workers, repetition, and cluster4_* artifact
 run_dirs.txt  one cluster4_* artifact path per line
 summary.csv   appended output from summarize_raft_profile.py
 campaign.env  sweep settings and forwarded cluster args for this campaign
+schedule.csv  recorded alternating/interleaved worker execution order
+campaign_provenance.env  frozen source, binary, restore, workload, and runner hashes
+console.log   live campaign output captured alongside out.txt
 ```
+
+The summary contains one header and includes client p50/p95/p99 latency,
+all-three agreement latency, marker visibility, Merkle drain, and total
+post-run equality time. TPS is labelled as direct client-visible completion
+with asynchronous replica validation; it is not all-three durable-completion
+TPS.
 
 Each individual distributed run still creates its own normal
 `scripts/bench_full_results/cluster4_*` artifact.

@@ -55,6 +55,7 @@ class RunResult:
     rate: int
     signing: int
     enforce_signatures: int
+    transaction_isolation: str
     start_server_exit: int
     restore_exit: int
     py_exit: int
@@ -188,7 +189,7 @@ def _force_pgoption(env: dict[str, str], key: str, value: str) -> None:
     env["PGOPTIONS"] = f"{existing} {option}".strip() if existing else option
 
 
-def _ensure_merkle_index_enabled(
+def _ensure_merkle_index_mode(
     psql: str,
     *,
     db: str,
@@ -196,44 +197,9 @@ def _ensure_merkle_index_enabled(
     user: str,
     cwd: Path,
     env: dict[str, str],
+    enabled: bool,
 ) -> tuple[bool, list[str]]:
     notes: list[str] = []
-    server_env = dict(env)
-    server_env.pop("PGOPTIONS", None)
-
-    ok, msg = _psql_exec(
-        psql,
-        db=db,
-        port=port,
-        user=user,
-        query="ALTER SYSTEM SET enable_merkle_index = 'on';",
-        cwd=cwd,
-        env=server_env,
-    )
-    if not ok:
-        notes.append("alter_system_enable_merkle_index_failed=" + msg.replace("\n", " ")[:240])
-    else:
-        reload_ok, reload_msg = _psql_exec(
-            psql,
-            db=db,
-            port=port,
-            user=user,
-            query="SELECT pg_reload_conf();",
-            cwd=cwd,
-            env=server_env,
-        )
-        if not reload_ok:
-            notes.append("reload_after_enable_merkle_index_failed=" + reload_msg.replace("\n", " ")[:240])
-
-    persistent_value = _psql_value(
-        psql,
-        db=db,
-        port=port,
-        user=user,
-        query="SHOW enable_merkle_index;",
-        cwd=cwd,
-        env=server_env,
-    )
     effective_value = _psql_value(
         psql,
         db=db,
@@ -243,14 +209,47 @@ def _ensure_merkle_index_enabled(
         cwd=cwd,
         env=env,
     )
-
-    if (persistent_value or "").strip().lower() != "on":
-        notes.append(f"persistent_enable_merkle_index={persistent_value or 'unknown'}")
-    if (effective_value or "").strip().lower() != "on":
+    expected = "on" if enabled else "off"
+    if (effective_value or "").strip().lower() != expected:
         notes.append(f"effective_enable_merkle_index={effective_value or 'unknown'}")
         return False, notes
-
+    notes.append(f"benchmark_enable_merkle_index={expected}")
     return True, notes
+
+
+def _prepare_plain_pg_baseline(
+    psql: str,
+    *,
+    db: str,
+    port: int,
+    user: str,
+    cwd: Path,
+    env: dict[str, str],
+) -> tuple[bool, str]:
+    """Prove that the PG restore did not construct an AriaBC Merkle index."""
+    return _psql_exec(
+        psql,
+        db=db,
+        port=port,
+        user=user,
+        cwd=cwd,
+        env=env,
+        query=(
+            "SET enable_merkle_index = off; "
+            "DO $plain_pg$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
+            "AND c.relname = 'usertable_merkle_multikey_variable') THEN "
+            "RAISE EXCEPTION 'plain PG restore unexpectedly created Merkle index'; "
+            "END IF; END $plain_pg$; "
+            "TRUNCATE ariabc_internal.merkle_local_delta; "
+            "UPDATE ariabc_internal.merkle_apply_counter "
+            "SET next_seq = 0, terminal_prefix_seq = 0 WHERE singleton; "
+            "UPDATE ariabc_internal.merkle_apply_state "
+            "SET applied_seq = 0, state = 0, error_text = NULL, "
+            "updated_at = clock_timestamp() WHERE singleton;"
+        ),
+    )
 
 
 def _canonical_path_str(value: Optional[str]) -> Optional[str]:
@@ -584,7 +583,11 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
             1000.0 * workload_stmt_count / x for x in overall if x and x > 0
         ]
 
-        verify = [(r.get("db_merkle_verify", "") or "").strip().lower() == "t" for r in rs]
+        verify = [
+            (r.get("db_merkle_verify", "") or "").strip().lower()
+            in ({"not_applicable"} if mode == "pg" else {"t"})
+            for r in rs
+        ]
 
         def max_or_empty(nums: list[int]) -> str:
             return str(max(nums)) if nums else ""
@@ -1218,6 +1221,12 @@ def main() -> int:
     parser.add_argument("--db", default="postgres", help="Database name.")
     parser.add_argument("--user", default="postgres", help="DB user.")
     parser.add_argument("--port", type=int, default=5438, help="DB port.")
+    parser.add_argument(
+        "--transaction-isolation",
+        choices=["read committed", "repeatable read", "serializable"],
+        default="serializable",
+        help="Isolation requested in every PG and DET workload session (default: serializable).",
+    )
     parser.add_argument("--out-dir", default="", help="Output directory. Default: scripts/bench_results/<timestamp>.")
     parser.add_argument(
         "--analyze-only",
@@ -1324,6 +1333,24 @@ def main() -> int:
         python_path = str(venv_python) if venv_python.exists() else (sys.executable or "python3")
     server_log_path = repo_root / "server.log"
 
+    pg_config_path = str(Path(psql_path).with_name("pg_config"))
+
+    def _pg_config_value(option: str) -> str:
+        try:
+            proc = subprocess.run(
+                [pg_config_path, option],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            return proc.stdout.strip() if proc.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    pg_config_configure = _pg_config_value("--configure")
+    pg_config_cflags = _pg_config_value("--cflags")
+
     env = dict(os.environ)
     env.setdefault("PGHOST", "localhost")
     env.setdefault("PGPORT", str(args.port))
@@ -1337,9 +1364,9 @@ def main() -> int:
     env.setdefault("DB_NAME", args.db)
     # Avoid client-side statement timeouts interrupting long deterministic runs.
     env.setdefault("STATEMENT_TIMEOUT", "0")
-    # Make every libpq client in the benchmark see Merkle maintenance enabled,
-    # even if a stale postgresql.auto.conf was left with enable_merkle_index=off.
-    _force_pgoption(env, "enable_merkle_index", "on")
+    env["BENCH_TX_ISOLATION"] = args.transaction_isolation
+    # Merkle is mode-specific: plain PG is the baseline without AriaBC/Merkle;
+    # deterministic modes include Merkle maintenance and verification.
 
     meta = {
         "created_utc": _now_utc_iso(),
@@ -1352,6 +1379,7 @@ def main() -> int:
         "signing_modes": signing_modes,
         "signing_privkey": args.signing_privkey,
         "enforce_signatures": args.enforce_signatures,
+        "transaction_isolation": args.transaction_isolation,
         "rate": args.rate,
         "rates": rates,
         "db": {"name": args.db, "user": args.user, "port": args.port},
@@ -1359,12 +1387,29 @@ def main() -> int:
             "workload_s": args.timeout_workload_s,
             "workload_det_s": args.timeout_workload_det_s,
         },
+        "retry_policy": {
+            "serialization_retry_backoff_s": env.get(
+                "SERIALIZATION_RETRY_BACKOFF_SEC", "0.001"
+            ),
+            "generic_retry_backoff_s": env.get("RETRY_BACKOFF_SEC", "0.1"),
+        },
         "commands": {
             "start_server": str(start_server),
             "restore_sql": str(restore_sql),
             "workload_py": str(workload_py),
             "psql": psql_path,
             "python": python_path,
+        },
+        "build_profile": {
+            "pg_config": pg_config_path,
+            "configure": pg_config_configure,
+            "cflags": pg_config_cflags,
+            "optimized_release_contract": (
+                "-O0" not in pg_config_cflags
+                and any(flag in pg_config_cflags.split() for flag in ("-O1", "-O2", "-O3", "-Os", "-Ofast"))
+                and "--enable-debug" not in pg_config_configure
+                and "--enable-cassert" not in pg_config_configure
+            ),
         },
         "env_config": {
             key: env.get(key, "")
@@ -1375,6 +1420,8 @@ def main() -> int:
                 "BCDB_DT_PARSE_BARRIER",
                 "BCDB_DT_LIGHT_SNAPSHOT",
                 "ARIABC_PSYCOPG_CLIENT_CURSOR",
+                "BENCH_TX_ISOLATION",
+                "SERIALIZATION_RETRY_BACKOFF_SEC",
                 "PGOPTIONS",
             ]
         },
@@ -1414,6 +1461,7 @@ def main() -> int:
         rate=0,
         signing=0,
         enforce_signatures=0,
+        transaction_isolation="",
         start_server_exit=0,
         restore_exit=0,
         py_exit=0,
@@ -1447,10 +1495,9 @@ def main() -> int:
             for mode in modes
         )
         # Single global warmup flag: we only need to warm the buffer pool once
-        # at the start of the entire benchmark, not before every individual run.
-        # The cold-start bias only affects the very first case (typically pg t=1)
-        # because all subsequent cases benefit from the already-warm cache.
-        _warmup_done = False
+        # Warm each mode once.  PG and DET have different indexes/execution
+        # machinery, so warming only the first mode biases the comparison.
+        warmed_modes: set[str] = set()
 
         done = 0
 
@@ -1494,6 +1541,14 @@ def main() -> int:
 
                                 t0 = time.monotonic()
 
+                                mode_env = dict(env)
+                                merkle_for_mode = db_type != 0
+                                _force_pgoption(
+                                    mode_env,
+                                    "enable_merkle_index",
+                                    "on" if merkle_for_mode else "off",
+                                )
+
                                 restart_server = (not args.no_server_restart) or (db_type == 1)
                                 start_exit = 0
                                 if restart_server:
@@ -1514,18 +1569,19 @@ def main() -> int:
                                     user=args.user,
                                     query="show data_directory;",
                                     cwd=scripts_dir,
-                                    env=env,
+                                    env=mode_env,
                                 )
                                 live_data_dir = _canonical_path_str(live_data_dir_raw)
 
                                 merkle_enable_notes: list[str] = []
-                                merkle_enabled_ok, merkle_enable_notes = _ensure_merkle_index_enabled(
+                                merkle_enabled_ok, merkle_enable_notes = _ensure_merkle_index_mode(
                                     psql_path,
                                     db=args.db,
                                     port=args.port,
                                     user=args.user,
                                     cwd=scripts_dir,
-                                    env=env,
+                                    env=mode_env,
+                                    enabled=merkle_for_mode,
                                 )
 
                                 restore_exit = 0
@@ -1562,18 +1618,36 @@ def main() -> int:
                                             args.db,
                                             "-v",
                                             "ON_ERROR_STOP=1",
+                                            "-v",
+                                            f"bench_enable_merkle={1 if merkle_for_mode else 0}",
                                             "-f",
                                             str(restore_sql),
                                         ],
                                         cwd=scripts_dir,
-                                        env=env,
+                                        env=mode_env,
                                         stdout_path=restore_log_out,
                                         stderr_path=restore_log_err,
                                     )
+                                    if restore_exit == 0 and db_type == 0:
+                                        pg_ready, pg_ready_msg = _prepare_plain_pg_baseline(
+                                            psql_path,
+                                            db=args.db,
+                                            port=args.port,
+                                            user=args.user,
+                                            cwd=scripts_dir,
+                                            env=mode_env,
+                                        )
+                                        if not pg_ready:
+                                            restore_exit = 96
+                                            restore_log_err.write_text(
+                                                "plain_pg_baseline_prepare_failed=1\n"
+                                                + pg_ready_msg
+                                                + "\n"
+                                            )
 
                                 workload_exit = -1
                                 if restore_exit == 0:
-                                    case_env = dict(env)
+                                    case_env = dict(mode_env)
                                     case_env.setdefault("PYTHONUNBUFFERED", "1")
                                     if db_type == 1:
                                         # Deterministic runs against a freshly restarted server must start at txid 0.
@@ -1627,7 +1701,7 @@ def main() -> int:
                                     # workers are hot before the first measured run, eliminating
                                     # the cold-start bias that makes pg look slower than det at
                                     # low thread counts.
-                                    if not _warmup_done and args.warmup_runs > 0:
+                                    if mode not in warmed_modes and args.warmup_runs > 0:
                                         for warmup_i in range(args.warmup_runs):
                                             warmup_env = dict(case_env)
                                             if db_type == 1:
@@ -1645,7 +1719,7 @@ def main() -> int:
                                                 stderr_path=case_dir / f"warmup_{warmup_i + 1}.err",
                                                 timeout_s=timeout_for_run,
                                             )
-                                        _warmup_done = True
+                                        warmed_modes.add(mode)
                                         print(
                                             f"  [restore-after-warmup] mode={mode} workload={workload} "
                                             f"threads={th} run={run_idx}",
@@ -1664,14 +1738,32 @@ def main() -> int:
                                                 args.db,
                                                 "-v",
                                                 "ON_ERROR_STOP=1",
+                                                "-v",
+                                                f"bench_enable_merkle={1 if merkle_for_mode else 0}",
                                                 "-f",
                                                 str(restore_sql),
                                             ],
                                             cwd=scripts_dir,
-                                            env=env,
+                                            env=mode_env,
                                             stdout_path=case_dir / "restore_after_warmup.out",
                                             stderr_path=case_dir / "restore_after_warmup.err",
                                         )
+                                        if restore_exit == 0 and db_type == 0:
+                                            pg_ready, pg_ready_msg = _prepare_plain_pg_baseline(
+                                                psql_path,
+                                                db=args.db,
+                                                port=args.port,
+                                                user=args.user,
+                                                cwd=scripts_dir,
+                                                env=mode_env,
+                                            )
+                                            if not pg_ready:
+                                                restore_exit = 96
+                                                (case_dir / "restore_after_warmup.err").write_text(
+                                                    "plain_pg_baseline_prepare_failed=1\n"
+                                                    + pg_ready_msg
+                                                    + "\n"
+                                                )
                                         # Reset DET txid counter to 0 for the actual measured run.
                                         if db_type == 1:
                                             case_env["DET_START_SEQ"] = "0"
@@ -1712,23 +1804,64 @@ def main() -> int:
                                 verification_error = ""
                                 timeout_diag_path: Optional[Path] = None
                                 if restore_exit == 0 and workload_exit == 0:
-                                    apply_ok, apply_msg = _psql_exec(
-                                        psql_path,
-                                        db=args.db,
-                                        port=args.port,
-                                        user=args.user,
-                                        query="select merkle_apply_pending();",
-                                        cwd=scripts_dir,
-                                        env=env,
-                                    )
-                                    if not apply_ok:
-                                        verification_error = "merkle_apply_pending_failed: " + apply_msg
+                                    if db_type == 0:
+                                        count_s = _psql_value(
+                                            psql_path,
+                                            db=args.db,
+                                            port=args.port,
+                                            user=args.user,
+                                            query="select count(*) from usertable_small;",
+                                            cwd=scripts_dir,
+                                            env=mode_env,
+                                        )
+                                        verify = "not_applicable"
+                                        if count_s is None:
+                                            verification_error = "post_workload_row_count_failed"
+                                        pg_merkle_indexes = _psql_value(
+                                            psql_path,
+                                            db=args.db,
+                                            port=args.port,
+                                            user=args.user,
+                                            query=(
+                                                "select count(*) from pg_class c "
+                                                "join pg_am a on a.oid = c.relam "
+                                                "where c.relname = 'usertable_merkle_multikey_variable' "
+                                                "and a.amname = 'merkle';"
+                                            ),
+                                            cwd=scripts_dir,
+                                            env=mode_env,
+                                        )
+                                        pg_pending_deltas = _psql_value(
+                                            psql_path,
+                                            db=args.db,
+                                            port=args.port,
+                                            user=args.user,
+                                            query="select count(*) from ariabc_internal.merkle_local_delta;",
+                                            cwd=scripts_dir,
+                                            env=mode_env,
+                                        )
+                                        if pg_merkle_indexes != "0":
+                                            verification_error = "pg_baseline_has_merkle_index"
+                                        elif pg_pending_deltas != "0":
+                                            verification_error = "pg_baseline_created_merkle_deltas"
                                     else:
-                                        count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=env)
-                                        root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=env)
-                                        verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=env)
-                                        if count_s is None or root_hash is None or verify is None:
-                                            verification_error = "post_workload_verification_query_failed"
+                                        apply_ok, apply_msg = _psql_exec(
+                                            psql_path,
+                                            db=args.db,
+                                            port=args.port,
+                                            user=args.user,
+                                            query="select merkle_apply_pending();",
+                                            cwd=scripts_dir,
+                                            env=mode_env,
+                                        )
+                                        if not apply_ok:
+                                            verification_error = "merkle_apply_pending_failed: " + apply_msg
+                                        else:
+                                            count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=mode_env)
+                                            root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=mode_env)
+                                            verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=mode_env)
+                                            if count_s is None or root_hash is None or verify is None:
+                                                verification_error = "post_workload_verification_query_failed"
                                     if verification_error:
                                         (case_dir / "verification.err").write_text(verification_error + "\n")
                                 if restore_exit == 0 and workload_exit == 124:
@@ -1739,7 +1872,7 @@ def main() -> int:
                                         port=args.port,
                                         user=args.user,
                                         cwd=scripts_dir,
-                                        env=env,
+                                        env=mode_env,
                                         server_log=server_log_path,
                                     )
 
@@ -1779,7 +1912,9 @@ def main() -> int:
                                         notes_parts.append("workload_timeout=1")
                                         if timeout_diag_path is not None:
                                             notes_parts.append(f"timeout_diag={timeout_diag_path.name}")
-                                elif verify is not None and verify.strip().lower() not in ("t", "f", ""):
+                                elif verify is not None and verify.strip().lower() not in (
+                                    "t", "f", "", "not_applicable"
+                                ):
                                     notes_parts.append(f"unexpected_verify={verify!r}")
                                 if verification_error:
                                     notes_parts.append("verification_error=1")
@@ -1795,6 +1930,7 @@ def main() -> int:
                                     rate=rate,
                                     signing=signing,
                                     enforce_signatures=args.enforce_signatures,
+                                    transaction_isolation=args.transaction_isolation,
                                     start_server_exit=start_exit,
                                     restore_exit=restore_exit,
                                     py_exit=workload_exit,
@@ -1839,7 +1975,8 @@ def main() -> int:
                                         flush=True,
                                     )
                                     return 1
-                                if verification_error or verify != "t":
+                                expected_verify = "not_applicable" if db_type == 0 else "t"
+                                if verification_error or verify != expected_verify:
                                     print(
                                         f"ERROR: Merkle verification failed for mode={mode} workload={workload} "
                                         f"threads={th} run={run_idx} verify={verify!r}; aborting matrix",

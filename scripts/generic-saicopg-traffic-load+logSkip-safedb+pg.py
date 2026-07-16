@@ -39,9 +39,11 @@ NUM = 4
 LOG_SKIP = 4000
 MAX_RETRIES = 10  # Increased for BCDB slot contention
 RETRY_BACKOFF_SEC = 0.1  # Increased for BCDB
+SERIALIZATION_RETRY_BACKOFF_SEC = 0.001
 # Benchmarks can legitimately have long deterministic waits/retries.
 # Keep statement timeout disabled by default; allow override via env.
 STATEMENT_TIMEOUT = "0"
+BENCH_TX_ISOLATION = "serializable"
 RATE_LIMIT_ENABLED = False
 
 # Metrics / reporting (best-effort; used to avoid failing the whole run on one worker error)
@@ -125,6 +127,10 @@ DB_PASS = os.getenv("DB_PASS", DB_PASS)
 DB_HOST = os.getenv("DB_HOST", DB_HOST)
 DB_PORT = os.getenv("DB_PORT", DB_PORT)
 STATEMENT_TIMEOUT = os.getenv("STATEMENT_TIMEOUT", STATEMENT_TIMEOUT)
+BENCH_TX_ISOLATION = os.getenv("BENCH_TX_ISOLATION", BENCH_TX_ISOLATION).strip().lower()
+if BENCH_TX_ISOLATION not in {"read committed", "repeatable read", "serializable"}:
+    print(f"Err: unsupported BENCH_TX_ISOLATION={BENCH_TX_ISOLATION!r}")
+    exit(-1)
 
 def _is_skippable_sql_line(line: str) -> bool:
     s = line.strip()
@@ -149,6 +155,12 @@ except Exception:
     pass
 try:
     RETRY_BACKOFF_SEC = float(os.getenv("RETRY_BACKOFF_SEC", str(RETRY_BACKOFF_SEC)))
+except Exception:
+    pass
+try:
+    SERIALIZATION_RETRY_BACKOFF_SEC = float(
+        os.getenv("SERIALIZATION_RETRY_BACKOFF_SEC", str(SERIALIZATION_RETRY_BACKOFF_SEC))
+    )
 except Exception:
     pass
 try:
@@ -363,13 +375,16 @@ def _presign_all_queries() -> None:
     print(f"Pre-signing done: {len(PRESIGNED_CMD_DICT)} entries in {elapsed_ms:.1f} ms")
 
 
-# Lock-free sequence dispatch (W5.20).
+# Lock-free sequence dispatch for ordinary PostgreSQL (W5.20).
 #
 # The original getSeqNum() acquired mutex_seqnum on EVERY query, which
 # serialized all NUM worker threads through a single Python lock — a
-# significant bottleneck above ~16 workers. Each worker now owns a stride
-# of the input range (worker i handles seqs base + i, base + i + NUM, ...)
-# so no lock is needed on the hot path. Preserved log-throttle behavior.
+# significant bottleneck above ~16 workers. Ordinary PG workers own strides
+# of the input range. Deterministic commands cannot use that policy: a worker
+# blocked on a future sequence number can prevent the worker owning the missing
+# sequence from advancing, producing a node/scheduler-dependent stall. DET
+# therefore uses the tiny ordered allocator below while execution stays
+# parallel after allocation.
 def getSeqNumForWorker(worker_idx: int, next_local: int):
     """Return (absolute_seq, sql) for this worker, or (-1, '') if done.
 
@@ -408,6 +423,18 @@ def getSeqNum():
     return currNum, message_dict[currNum]
 
 def _apply_worker_session_settings(cur):
+    cur.execute(
+        psycopg.sql.SQL("SET default_transaction_isolation = {}").format(
+            psycopg.sql.Literal(BENCH_TX_ISOLATION)
+        )
+    )
+    cur.execute("SHOW default_transaction_isolation")
+    effective_isolation = str(cur.fetchone()[0]).strip().lower()
+    if effective_isolation != BENCH_TX_ISOLATION:
+        raise RuntimeError(
+            f"transaction isolation mismatch: requested={BENCH_TX_ISOLATION} "
+            f"effective={effective_isolation}"
+        )
     cur.execute(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'")
     cur.execute(
         f"SET bcdb_enforce_signatures = '{'on' if ENFORCE_SIGNATURES else 'off'}'"
@@ -876,7 +903,20 @@ def execTx(conn, cur, worker_idx: int, qCount, line):
                     break
 
                 if is_retryable_error(err) and attempt + 1 < MAX_RETRIES:
-                    base_sleep_s = RETRY_BACKOFF_SEC * (2 ** attempt)
+                    if err_sqlstate == "40001":
+                        # SSI conflicts are normally resolved as soon as the
+                        # winning transaction commits.  The generic 100 ms
+                        # exponential delay was designed for connection and
+                        # BCDB capacity failures and grossly under-reported PG
+                        # throughput once crash-safe Merkle introduced a short
+                        # commit-time allocator conflict.  Use bounded jitter
+                        # here to avoid a synchronized retry storm.
+                        base_sleep_s = min(
+                            0.020,
+                            SERIALIZATION_RETRY_BACKOFF_SEC * (attempt + 1),
+                        )
+                    else:
+                        base_sleep_s = RETRY_BACKOFF_SEC * (2 ** attempt)
                     jitter = 1.0 + (random.random() * max(0.0, RETRY_JITTER_PCT))
                     sleep_s = base_sleep_s * jitter
                     if is_fast_reconnect_error(err):
@@ -985,8 +1025,11 @@ def worker_loop(worker_idx: int):
         conn, cur = open_worker_connection(worker_idx)
         local_idx = 0
         while True:
-            qCount, q = getSeqNumForWorker(worker_idx, local_idx)
-            local_idx += 1
+            if DB_TYPE == 1:
+                qCount, q = getSeqNum()
+            else:
+                qCount, q = getSeqNumForWorker(worker_idx, local_idx)
+                local_idx += 1
             if qCount == -1 or q == '':
                 return
             try:

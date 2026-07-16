@@ -6,6 +6,7 @@ INSTALL_DIR=""
 CLEAN_WHEN_REBUILD=0
 FORCE_REBUILD=0
 TRUST_INSTALL=0
+BUILD_PROFILE="release"
 EXTRA_INCLUDE_ROOT=""
 EXTRA_LIB_ROOT=""
 build_log=""
@@ -25,7 +26,8 @@ Usage:
   ensure_custom_install_from_repo.sh \
     --repo-root </path/to/ariabc_cluster> \
     --install-dir </path/to/ariabc_install> \
-    [--clean-when-rebuild] [--force-rebuild] [--trust-install]
+    [--clean-when-rebuild] [--force-rebuild] [--trust-install] \
+    [--build-profile release|debug]
 
 Ensures the custom BCDB PostgreSQL install tree is runnable. If the install tree
 is missing or not runnable on the current host, rebuilds it from the synced repo
@@ -34,7 +36,10 @@ and installs it into the requested install directory.
 --trust-install: caller guarantees the install was just synced from a known-good
   build (e.g. via rsync from the orchestrator). Skips the source-mtime staleness
   check and the make/gcc toolchain requirement; only verify_install runs. Use on
-  execution-only hosts that have no compiler.
+execution-only hosts that have no compiler.
+
+--build-profile release: require an optimized, assertion-free install (default).
+--build-profile debug: build with -O0, debug support, and assertions.
 EOF
 }
 
@@ -45,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --clean-when-rebuild) CLEAN_WHEN_REBUILD=1; shift 1 ;;
     --force-rebuild) FORCE_REBUILD=1; shift 1 ;;
     --trust-install) TRUST_INSTALL=1; shift 1 ;;
+    --build-profile) BUILD_PROFILE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -56,15 +62,40 @@ if [[ -z "$REPO_ROOT" || -z "$INSTALL_DIR" ]]; then
   exit 2
 fi
 
+case "$BUILD_PROFILE" in
+  release|debug) ;;
+  *) echo "ERROR: --build-profile must be release or debug" >&2; exit 2 ;;
+esac
+
+verify_build_profile() {
+  local dir="$1"
+  local configure_line cflags
+  configure_line="$(LD_LIBRARY_PATH="$dir/lib:${LD_LIBRARY_PATH:-}" "$dir/bin/pg_config" --configure 2>/dev/null || true)"
+  cflags="$(LD_LIBRARY_PATH="$dir/lib:${LD_LIBRARY_PATH:-}" "$dir/bin/pg_config" --cflags 2>/dev/null || true)"
+  [[ -n "$configure_line" && -n "$cflags" ]] || return 1
+  if [[ "$BUILD_PROFILE" == "release" ]]; then
+    [[ "$configure_line" != *"--enable-debug"* ]] || return 1
+    [[ "$configure_line" != *"--enable-cassert"* ]] || return 1
+    [[ " $cflags " != *" -O0 "* ]] || return 1
+    [[ " $cflags " =~ [[:space:]]-O(1|2|3|s|fast)([[:space:]]|$) ]] || return 1
+  else
+    [[ "$configure_line" == *"--enable-debug"* ]] || return 1
+    [[ "$configure_line" == *"--enable-cassert"* ]] || return 1
+    [[ " $cflags " == *" -O0 "* ]] || return 1
+  fi
+}
+
 verify_install() {
   local dir="$1"
   [[ -x "$dir/bin/postgres" ]] || return 1
   [[ -x "$dir/bin/initdb" ]] || return 1
   [[ -x "$dir/bin/pg_ctl" ]] || return 1
   [[ -x "$dir/bin/psql" ]] || return 1
+  [[ -x "$dir/bin/pg_config" ]] || return 1
   LD_LIBRARY_PATH="$dir/lib:${LD_LIBRARY_PATH:-}" "$dir/bin/postgres" --version >/dev/null 2>&1 || return 1
   LD_LIBRARY_PATH="$dir/lib:${LD_LIBRARY_PATH:-}" "$dir/bin/initdb" --version >/dev/null 2>&1 || return 1
   LD_LIBRARY_PATH="$dir/lib:${LD_LIBRARY_PATH:-}" "$dir/bin/psql" --version >/dev/null 2>&1 || return 1
+  verify_build_profile "$dir" || return 1
   return 0
 }
 
@@ -96,6 +127,7 @@ if [[ "$FORCE_REBUILD" != "1" ]]; then
     if [[ "$TRUST_INSTALL" == "1" ]] || ! install_is_stale "$INSTALL_DIR"; then
       echo "INSTALL_READY=1"
       echo "INSTALL_DIR=$INSTALL_DIR"
+      echo "BUILD_PROFILE=$BUILD_PROFILE"
       [[ "$TRUST_INSTALL" == "1" ]] && echo "TRUST_INSTALL=1"
       exit 0
     fi
@@ -149,6 +181,13 @@ combined_ldflags="${LDFLAGS:-}"
 if [[ -n "$EXTRA_LIB_ROOT" ]]; then
   combined_ldflags="-L$EXTRA_LIB_ROOT${combined_ldflags:+ $combined_ldflags}"
 fi
+if [[ "$BUILD_PROFILE" == "release" ]]; then
+  configure_profile_args=()
+  build_cflags="-O2 -g"
+else
+  configure_profile_args=(--enable-debug --enable-cassert)
+  build_cflags="-O0 -g3"
+fi
 USE_EXISTING_CONFIG=0
 if [[ -x "$REPO_ROOT/config.status" ]]; then
   USE_EXISTING_CONFIG=1
@@ -170,6 +209,8 @@ fi
   echo "[INFO] jobs=$jobs"
   echo "[INFO] clean_when_rebuild=$CLEAN_WHEN_REBUILD"
   echo "[INFO] force_rebuild=$FORCE_REBUILD"
+  echo "[INFO] build_profile=$BUILD_PROFILE"
+  echo "[INFO] build_cflags=$build_cflags"
   echo "[INFO] reconfigure=1"
   echo "[INFO] build_dir=$build_dir"
   echo "[INFO] extra_include_root=${EXTRA_INCLUDE_ROOT:-none}"
@@ -378,7 +419,7 @@ fi
       mkdir -p "$build_dir"
       rm -f "$REPO_ROOT"/conftest "$REPO_ROOT"/conftest.* "$REPO_ROOT"/confdefs.h "$REPO_ROOT"/a.out "$REPO_ROOT"/b.out
       cd "$build_dir"
-      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" CFLAGS="$build_cflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" "${configure_profile_args[@]}"
       make -C "$build_dir" -j"$jobs"
       _repair_src_include_symlinks
       _stage_vpath_generated_headers
@@ -387,7 +428,7 @@ fi
       mkdir -p "$build_dir"
       rm -f "$REPO_ROOT"/conftest "$REPO_ROOT"/conftest.* "$REPO_ROOT"/confdefs.h "$REPO_ROOT"/a.out "$REPO_ROOT"/b.out
       cd "$build_dir"
-      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" CFLAGS="$build_cflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" "${configure_profile_args[@]}"
       make -C "$build_dir" -j"$jobs"
       _repair_src_include_symlinks
       _stage_vpath_generated_headers
@@ -404,4 +445,5 @@ fi
 
 echo "INSTALL_READY=1"
 echo "INSTALL_DIR=$INSTALL_DIR"
+echo "BUILD_PROFILE=$BUILD_PROFILE"
 echo "BUILD_LOG=$build_log"
