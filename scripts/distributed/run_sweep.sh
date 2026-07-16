@@ -17,6 +17,20 @@ Sweep options:
                            Accepts comma-separated or quoted space-separated values.
                            Default: "1 2 3"
 
+Dynamic Merkle options forwarded to run_4node_raft_cluster.sh:
+  --restore-sql FILE       SQL used to restore table state before each run.
+                           Default: scripts/distributed/sql/
+                           restore_usertable_small_dynamic.sql.
+  --verify-table TABLE     Table used for post-run root comparison (default: usertable_small).
+  --enable-merkle-index N  Set Merkle index maintenance: 0|1 (default: 1).
+  --merkle-verify-mode M   Post-run equality check mode: legacy|dynamic|auto
+                           (default: dynamic).
+                           In "dynamic" mode the runner computes SHA-256 digests of
+                           partition roots, physical topology, and leaf-item assignments
+                           and requires them to match across all replicas.
+  --dynamic-index NAME     Fully-qualified index name for dynamic verification
+                           (default: public.usertable_small_dynamic_merkle_idx).
+
 Cluster topology options forwarded to run_4node_raft_cluster.sh:
   --node-ids CSV
   --node-ips CSV
@@ -35,7 +49,18 @@ Cluster topology options forwarded to run_4node_raft_cluster.sh:
 Other:
   -h, --help
 
-Example:
+Example (dynamic Merkle sweep):
+  ./scripts/distributed/run_sweep.sh \
+    --threads 96 \
+    --executor-workers 1,2,4,8,12,16 \
+    --reps 1,2,3 \
+    --restore-sql scripts/distributed/sql/restore_usertable_small_dynamic.sql \
+    --verify-table usertable_small \
+    --enable-merkle-index 1 \
+    --merkle-verify-mode dynamic \
+    --dynamic-index public.usertable_small_dynamic_merkle_idx
+
+Example (legacy sweep):
   ./scripts/distributed/run_sweep.sh \
     --threads 96 \
     --executor-workers 4,8,16 \
@@ -58,7 +83,13 @@ THREADS=96
 DET_CLIENT_WORKERS=""
 EXECUTOR_WORKERS="1 2 4 8 12 16"
 REPS="1 2 3"
-CLUSTER_ARGS=()
+CLUSTER_ARGS=(
+  --restore-sql scripts/distributed/sql/restore_usertable_small_dynamic.sql
+  --verify-table usertable_small
+  --enable-merkle-index 1
+  --merkle-verify-mode dynamic
+  --dynamic-index public.usertable_small_dynamic_merkle_idx
+)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -78,6 +109,13 @@ while [[ $# -gt 0 ]]; do
       REPS="$(normalize_list "${2:?missing value for --reps}")"
       shift 2
       ;;
+    # --- dynamic Merkle options ---
+    --restore-sql|--verify-table|--enable-merkle-index|\
+    --merkle-verify-mode|--dynamic-index)
+      CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
+      shift 2
+      ;;
+    # --- cluster topology options ---
     --node-ids|--node-ips|--node-names|--node-users|--node-is-u22|--node-client-ports|\
     --raft-port|--db-port|--db-user|--db-name|--kafka-host|--kafka-port|--kafka-home-remote)
       CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
@@ -108,16 +146,15 @@ echo "=== Checking script syntax ==="
 bash -n scripts/distributed/run_4node_raft_cluster.sh
 
 echo "=== Checking git style rules ==="
-# If this fails, the script will stop cleanly instead of killing your terminal
 git diff --check
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="scripts/bench_full_results/pg_executor_sweep_${STAMP}"
 mkdir -p "$OUT"
-: > "$OUT/run_dirs.txt"
-: > "$OUT/summary.csv"
+: >"$OUT/run_dirs.txt"
+: >"$OUT/summary.csv"
 
-printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
+printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
 {
   printf 'threads=%s\n' "$THREADS"
   printf 'det_client_workers=%s\n' "$DET_CLIENT_WORKERS"
@@ -126,9 +163,8 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
   printf 'cluster_args='
   printf '%q ' "${CLUSTER_ARGS[@]}"
   printf '\n'
-} > "$OUT/campaign.env"
+} >"$OUT/campaign.env"
 
-# Wrapped execution sequence to funnel into out.txt
 {
   echo "Campaign: threads=$THREADS det_client_workers=$DET_CLIENT_WORKERS executor_workers=[$EXECUTOR_WORKERS] reps=[$REPS]"
   if [[ "${#CLUSTER_ARGS[@]}" -gt 0 ]]; then
@@ -147,8 +183,9 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
       BEFORE="$(mktemp)"
       find scripts/bench_full_results \
         -mindepth 1 -maxdepth 1 -type d -name 'cluster4_*' \
-        -printf '%f\n' | sort > "$BEFORE"
+        -printf '%f\n' | sort >"$BEFORE"
 
+      RUN_PASS=1
       env \
         SKIP_RDKAFKA_SETUP=1 \
         ARIABC_PREFERRED_LEADER_ID=1 \
@@ -176,7 +213,7 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
           --raft-ordered-batch-linger-us 1000 \
           --raft-ordered-coalesce-log 0 \
           --kafka-completion-mode async \
-          --det-window 65536
+          --det-window 65536 || RUN_PASS=0
 
       RUN_NAME="$(
         comm -13 "$BEFORE" \
@@ -189,8 +226,26 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
       RUN="scripts/bench_full_results/$RUN_NAME"
       [[ -d "$RUN" ]] || { echo "Could not locate fresh benchmark artifact"; exit 1; }
 
-      printf '%s,%s,%s\n' "$E" "$REP" "$RUN" | tee -a "$OUT/runs.csv"
-      printf '%s\n' "$RUN" >> "$OUT/run_dirs.txt"
+      # Dynamic equality gate: TPS results without matching digest are invalid.
+      if [[ "$RUN_PASS" -eq 1 ]]; then
+        if grep -q 'DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1' \
+            "$RUN/run_summary.env" 2>/dev/null; then
+          echo "DYNAMIC_MERKLE equality gate: PASS (E=$E rep=$REP)"
+        elif grep -qE 'merkle-verify-mode.+dynamic|MERKLE_VERIFY_MODE.+dynamic' \
+            "$OUT/campaign.env" 2>/dev/null; then
+          echo "WARNING: dynamic equality gate was expected but not found — marking run INVALID"
+          RUN_PASS=0
+        fi
+      fi
+
+      if [[ "$RUN_PASS" -eq 0 ]]; then
+        echo "INVALID run (E=$E rep=$REP): equality gate or runner failed — excluded from summary"
+        printf '%s,%s,%s,INVALID\n' "$E" "$REP" "$RUN" | tee -a "$OUT/runs.csv"
+        continue
+      fi
+
+      printf '%s,%s,%s,PASS\n' "$E" "$REP" "$RUN" | tee -a "$OUT/runs.csv"
+      printf '%s\n' "$RUN" >>"$OUT/run_dirs.txt"
 
       python3 scripts/distributed/summarize_raft_profile.py "$RUN" | tee -a "$OUT/summary.csv"
     done
@@ -207,4 +262,4 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
   echo "Done."
   echo "Artifacts: $OUT"
 
-} > out.txt 2>&1
+} >out.txt 2>&1

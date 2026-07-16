@@ -3887,6 +3887,13 @@ merkle_dynamic_verify_relations(Relation heapRel, Relation indexRel,
 	Oid saved_userid;
 	int saved_sec_context;
 	bool result = false;
+	bool pushed_active = false;
+
+	if (snapshot != InvalidSnapshot)
+	{
+		PushCopiedSnapshot(snapshot);
+		pushed_active = true;
+	}
 
 	GetUserIdAndSecContext(&saved_userid,&saved_sec_context);
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
@@ -3897,10 +3904,14 @@ merkle_dynamic_verify_relations(Relation heapRel, Relation indexRel,
 	}
 	PG_CATCH();
 	{
+		if (pushed_active)
+			PopActiveSnapshot();
 		SetUserIdAndSecContext(saved_userid,saved_sec_context);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	if (pushed_active)
+		PopActiveSnapshot();
 	SetUserIdAndSecContext(saved_userid,saved_sec_context);
 	return result;
 }
@@ -4000,6 +4011,7 @@ dynamic_stats_json_impl(Relation indexRel)
 	Datum args[4];
 	char nulls[4] = {' ',' ',' ',' '};
 	char *result;
+	MemoryContext caller_context = CurrentMemoryContext;
 	int rc;
 
 	dynamic_read_meta(indexRel,&gen);
@@ -4033,10 +4045,15 @@ dynamic_stats_json_impl(Relation indexRel)
 		bool isnull;
 		char *value = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
 			SPI_tuptable->tupdesc,1,&isnull));
+		MemoryContext old_context;
 
 		if (isnull)
 			elog(ERROR, "null dynamic Merkle stats JSON");
+		/* SPI_finish() destroys SPI-owned allocations.  Copy the JSON into
+		 * the caller's context before ending the SPI session. */
+		old_context = MemoryContextSwitchTo(caller_context);
 		result = pstrdup(value);
+		MemoryContextSwitchTo(old_context);
 		pfree(value);
 	}
 	SPI_finish();
@@ -4887,7 +4904,6 @@ merkle_dynamic_verify(PG_FUNCTION_ARGS)
 	Oid heap_oid;
 	Relation heapRel;
 	Relation indexRel;
-	Snapshot snapshot;
 	bool match;
 	char relkind;
 
@@ -4949,9 +4965,7 @@ merkle_dynamic_verify(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("relation is not a dynamic Merkle index")));
-	snapshot = RegisterSnapshot(GetLatestSnapshot());
-	match = merkle_dynamic_verify_relations(heapRel,indexRel,snapshot);
-	UnregisterSnapshot(snapshot);
+	match = merkle_dynamic_verify_relations(heapRel,indexRel,GetLatestSnapshot());
 	index_close(indexRel,ShareLock);
 	table_close(heapRel,ShareLock);
 	if (!match)

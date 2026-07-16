@@ -123,11 +123,19 @@ def read_env_file(path: pathlib.Path) -> Dict[str, str]:
 
 
 def merkle_pass(root: pathlib.Path) -> int:
+    summary = read_env_file(root / "run_summary.env")
+    if summary.get("DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS") == "1":
+        return 1
+
     runner_log = root / "runner.log"
     if not runner_log.exists():
         return 0
     text = runner_log.read_text(errors="replace")
-    return 1 if re.search(r"pre-marker .*PASS|post-marker .*PASS|consistency: PASS", text) else 0
+    return 1 if re.search(
+        r"pre-marker .*PASS|post-marker .*PASS|consistency: PASS|"
+        r"DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1",
+        text,
+    ) else 0
 
 
 def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:

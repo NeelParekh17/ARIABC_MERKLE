@@ -76,6 +76,12 @@ lib*.pc
 /scripts/benchmark/recovery/__pycache__/
 /scripts/benchmark/recovery/results/
 
+# Reproducible correctness and crash-test infrastructure is source, not local
+# scratch.  Keep it visible to normal Git workflows.
+!/scripts/test/
+!/scripts/test/**
+/scripts/test/**/__pycache__/
+
 # Local AI/tooling metadata (do not commit)
 /.claude/
 /.codex

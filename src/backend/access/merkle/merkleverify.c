@@ -325,12 +325,9 @@ merkle_verify(PG_FUNCTION_ARGS)
 	heapRel = table_open(relid, ShareLock);
 	indexRel = merkle_open_consistent_index(indexOid);
     
-	/* Establish verification snapshot after locks are held */
-	verifysnap = RegisterSnapshot(GetLatestSnapshot());
-
 	if (merkle_index_is_dynamic(indexRel))
 	{
-		match = merkle_dynamic_verify_relations(heapRel, indexRel, verifysnap);
+		match = merkle_dynamic_verify_relations(heapRel, indexRel, GetLatestSnapshot());
 		if (!match)
 		{
 			char *reason = psprintf("Dynamic Merkle verification mismatch for index %u",
@@ -339,11 +336,13 @@ merkle_verify(PG_FUNCTION_ARGS)
 			merkle_mark_recovery_state(MERKLE_STATE_INVALID, reason);
 			pfree(reason);
 		}
-		UnregisterSnapshot(verifysnap);
 		index_close(indexRel, ShareLock);
 		table_close(heapRel, ShareLock);
 		PG_RETURN_BOOL(match);
 	}
+
+	/* Establish verification snapshot after locks are held */
+	verifysnap = RegisterSnapshot(GetLatestSnapshot());
 
 
     /* Read tree configuration from metadata */
@@ -678,12 +677,9 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 				 errmsg("\"%.128s\" is not a Merkle index on relation %u",
 						get_rel_name(indexOid), heapOid)));
 
-	/* Establish snapshot after locks are held */
-	verifysnap = RegisterSnapshot(GetLatestSnapshot());
-
 	if (merkle_index_is_dynamic(indexRel))
 	{
-		match = merkle_dynamic_verify_relations(heapRel, indexRel, verifysnap);
+		match = merkle_dynamic_verify_relations(heapRel, indexRel, GetLatestSnapshot());
 		if (!match)
 		{
 			char *reason = psprintf("Dynamic Merkle verification mismatch for index %u",
@@ -692,11 +688,13 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 			merkle_mark_recovery_state(MERKLE_STATE_INVALID, reason);
 			pfree(reason);
 		}
-		UnregisterSnapshot(verifysnap);
 		index_close(indexRel, ShareLock);
 		table_close(heapRel, ShareLock);
 		PG_RETURN_BOOL(match);
 	}
+
+	/* Establish snapshot after locks are held */
+	verifysnap = RegisterSnapshot(GetLatestSnapshot());
 
 
 	merkle_read_meta(indexRel, &numPartitions, &leavesPerPartition,

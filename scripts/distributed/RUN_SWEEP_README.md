@@ -30,6 +30,19 @@ From the repository root:
 ./scripts/distributed/run_sweep.sh
 ```
 
+The wrapper defaults to the distributed dynamic-Merkle path:
+
+```text
+--restore-sql scripts/distributed/sql/restore_usertable_small_dynamic.sql
+--verify-table usertable_small
+--enable-merkle-index 1
+--merkle-verify-mode dynamic
+--dynamic-index public.usertable_small_dynamic_merkle_idx
+```
+
+Passing any of these options explicitly overrides its default because explicit
+CLI arguments are forwarded after the default argument set.
+
 Show supported sweep and topology flags:
 
 ```bash

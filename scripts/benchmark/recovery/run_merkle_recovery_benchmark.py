@@ -1006,7 +1006,21 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                 "dynamic-p200-k32-cap32-merge8"
             )
         series: list[dict[str, Any]] = []
-        for tuple_count in _selected(config.fig12_sizes, args.tuple_count):
+        # When --tuple-count is given, honour those sizes directly.  The
+        # default list [1M, 3M, 5M] is only a fallback for unconstrained runs.
+        # Filtering arbitrary user-supplied counts against fig12_sizes silently
+        # drops any value (e.g. 7M, 10M) not in that list, producing zero
+        # planned runs with no error.
+        if args.tuple_count is not None:
+            if isinstance(args.tuple_count, str):
+                requested_sizes = [int(x.strip()) for x in args.tuple_count.split(",") if x.strip()]
+            elif isinstance(args.tuple_count, list):
+                requested_sizes = [int(x) for x in args.tuple_count]
+            else:
+                requested_sizes = [int(args.tuple_count)]
+        else:
+            requested_sizes = list(config.fig12_sizes)
+        for tuple_count in requested_sizes:
             series.append(
                 case(
                     experiment=DYNAMIC_PROFILE,
@@ -1404,7 +1418,38 @@ def run_benchmark(args: argparse.Namespace) -> Path:
 
     total_runs = _count_planned_runs(config, args)
     if total_runs <= 0:
+        # Provide an actionable diagnosis rather than a silent no-op, especially
+        # for the dynamic profile where unknown tuple counts are dropped by _selected.
+        if args.profile == DYNAMIC_PROFILE and args.tuple_count is not None:
+            raise RuntimeError(
+                f"selected benchmark filters match no runs for profile={args.profile} "
+                f"with --tuple-count={args.tuple_count}. "
+                "Check that the requested sizes are non-zero positive integers."
+            )
         raise RuntimeError("selected benchmark filters match no runs")
+    # Fail fast when --tuple-count is given: verify the planned series covers
+    # exactly the requested sizes with no silent omissions.
+    if args.profile == DYNAMIC_PROFILE and args.tuple_count is not None:
+        if isinstance(args.tuple_count, str):
+            requested_tc = sorted(int(x.strip()) for x in args.tuple_count.split(",") if x.strip())
+        elif isinstance(args.tuple_count, list):
+            requested_tc = sorted(int(x) for x in args.tuple_count)
+        else:
+            requested_tc = [int(args.tuple_count)]
+        if not requested_tc or any(value <= 0 for value in requested_tc):
+            raise ValueError(
+                f"{DYNAMIC_PROFILE}: tuple counts must be positive integers; "
+                f"requested {requested_tc}"
+            )
+        effective_tc = sorted(
+            int(spec["tuple_count"]) for spec in _series_for_profile(args, config)
+        )
+        if effective_tc != requested_tc:
+            raise RuntimeError(
+                f"{DYNAMIC_PROFILE}: effective tuple-count list {effective_tc} "
+                f"does not match requested {requested_tc}. "
+                "The driver is silently dropping requested sizes — fix _series_for_profile."
+            )
     progress_state = {"completed_runs": 0, "total_runs": total_runs}
     emit_progress(
         result_dir,

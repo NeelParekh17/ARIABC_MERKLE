@@ -1290,7 +1290,7 @@ merkle_raft_apply_target(const uint8 *epoch_id, uint64 raft_log_index,
 	values[1] = Int64GetDatum((int64) raft_log_index);
 	values[2] = Int32GetDatum((int32) item_ordinal);
 
-	PushActiveSnapshot(GetLatestSnapshot());
+	PushCopiedSnapshot(GetLatestSnapshot());
 	spi_rc = SPI_connect();
 	if (spi_rc != SPI_OK_CONNECT)
 		elog(ERROR, "Merkle target SPI_connect failed: %d", spi_rc);
@@ -1358,7 +1358,7 @@ merkle_apply_until_impl(uint64 required_seq)
 				 errmsg("Merkle crash-safety state is not initialized"),
 				 errhint("Run scripts/distributed/bootstrap_raft_apply_ledger.sh for this database.")));
 
-	PushActiveSnapshot(GetLatestSnapshot());
+	PushCopiedSnapshot(GetLatestSnapshot());
 	pushed_snapshot = true;
 	spi_rc = SPI_connect();
 	if (spi_rc != SPI_OK_CONNECT)
@@ -1768,7 +1768,7 @@ merkle_get_recovery_status(MerkleRecoveryStatusData *status)
 	status->managed = true;
 	status->state = MERKLE_STATE_READY;	/* may be overwritten below */
 
-	PushActiveSnapshot(GetLatestSnapshot());
+	PushCopiedSnapshot(GetLatestSnapshot());
 	pushed_snapshot = true;
 	spi_rc = SPI_connect();
 	if (spi_rc != SPI_OK_CONNECT)
