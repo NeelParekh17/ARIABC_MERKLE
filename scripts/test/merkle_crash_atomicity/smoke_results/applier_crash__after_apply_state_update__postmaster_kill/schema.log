@@ -1,0 +1,108 @@
+BEGIN
+CREATE SCHEMA
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TABLE
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:101: NOTICE:  column "terminal_prefix_seq" of relation "merkle_apply_counter" already exists, skipping
+ALTER TABLE
+INSERT 0 1
+CREATE TABLE
+INSERT 0 1
+CREATE TABLE
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:153: NOTICE:  column "seen_pruned_seq" of relation "merkle_dynamic_state" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:153: NOTICE:  column "stats_dirty" of relation "merkle_dynamic_state" already exists, skipping
+ALTER TABLE
+DO
+CREATE TABLE
+ALTER TABLE
+CREATE TABLE
+ALTER TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+CREATE TABLE
+DO
+CREATE FUNCTION
+REVOKE
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:326: NOTICE:  trigger "merkle_dynamic_state_cascade_before_delete" for relation "ariabc_internal.merkle_dynamic_state" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+LOCK TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:511: NOTICE:  constraint "merkle_local_delta_delta_version_check" of relation "merkle_local_delta" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:521: NOTICE:  column "merkle_apply_seq_base" of relation "raft_apply_entry" already exists, skipping
+ALTER TABLE
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "failure_digest" of relation "raft_apply_item" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "failure_sqlstate" of relation "raft_apply_item" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "failure_class" of relation "raft_apply_item" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "failure_retryable" of relation "raft_apply_item" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "failure_format_version" of relation "raft_apply_item" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "failure_recorded_at" of relation "raft_apply_item" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "merkle_apply_seq" of relation "raft_apply_item" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "merkle_delta_version" of relation "raft_apply_item" already exists, skipping
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:532: NOTICE:  column "merkle_delta_blob" of relation "raft_apply_item" already exists, skipping
+ALTER TABLE
+DO
+UPDATE 0
+DO
+ALTER TABLE
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:619: NOTICE:  constraint "raft_apply_item_merkle_apply_seq_check" of relation "raft_apply_item" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+CREATE INDEX
+CREATE INDEX
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+CREATE INDEX
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:646: NOTICE:  constraint "raft_apply_item_merkle_delta_contract" of relation "raft_apply_item" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:657: NOTICE:  constraint "raft_apply_item_state_contract" of relation "raft_apply_item" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+DO
+COMMIT
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:789: NOTICE:  trigger "enforce_no_claimed_on_commit" for relation "ariabc_internal.raft_apply_item" does not exist, skipping
+DROP TRIGGER
+psql:/work/ARIABC/AriaBC/scripts/distributed/sql/raft_apply_ledger_schema.sql:791: NOTICE:  function ariabc_internal.check_claimed_rows_trigger() does not exist, skipping
+DROP FUNCTION
+REVOKE
+GRANT
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+GRANT

@@ -1,0 +1,33 @@
+2026-07-17 20:54:45.971 IST [74740] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-07-17 20:54:45.978 IST [74740] LOG:  listening on Unix socket "/tmp/ariabc-merkle-precommit_crash-1Lln8u/socket/.s.PGSQL.56619"
+
+ ariaMyDbg main.c : main: 200 
+2026-07-17 20:54:45.981 IST [74765] LOG:  database system was shut down at 2026-07-17 20:54:41 IST
+2026-07-17 20:54:45.983 IST [74740] LOG:  database system is ready to accept connections
+2026-07-17 20:54:46.180 IST [74740] LOG:  received fast shutdown request
+2026-07-17 20:54:46.181 IST [74740] LOG:  aborting any active transactions
+2026-07-17 20:54:46.181 IST [74740] LOG:  background worker "logical replication launcher" (PID 74771) exited with exit code 1
+2026-07-17 20:54:46.181 IST [74766] LOG:  shutting down
+2026-07-17 20:54:47.275 IST [74740] LOG:  database system is shut down
+2026-07-17 20:54:50.948 IST [74781] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-07-17 20:54:50.954 IST [74781] LOG:  listening on Unix socket "/tmp/ariabc-merkle-precommit_crash-1Lln8u/socket/.s.PGSQL.56619"
+
+ ariaMyDbg main.c : main: 200 
+2026-07-17 20:54:50.958 IST [74805] LOG:  database system was shut down at 2026-07-17 20:54:46 IST
+2026-07-17 20:54:50.960 IST [74781] LOG:  database system is ready to accept connections
+2026-07-17 20:54:51.001 IST [74814] LOG:  MERKLE_FAILPOINT_REACHED name=after_merkle_dynamic_delta_staged pid=74814
+2026-07-17 20:54:51.001 IST [74814] STATEMENT:  INSERT INTO merkle_atomicity_test VALUES (100, 'must-abort', 1);
+2026-07-17 20:54:54.963 IST [74838] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-07-17 20:54:54.969 IST [74838] LOG:  listening on Unix socket "/tmp/ariabc-merkle-precommit_crash-1Lln8u/socket/.s.PGSQL.56619"
+
+ ariaMyDbg main.c : main: 200 
+2026-07-17 20:54:54.972 IST [74863] LOG:  database system was interrupted; last known up at 2026-07-17 20:54:50 IST
+2026-07-17 20:54:55.031 IST [74863] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-07-17 20:54:55.033 IST [74863] LOG:  invalid record length at 0/168CB18: wanted 24, got 0
+2026-07-17 20:54:55.033 IST [74863] LOG:  redo is not required
+2026-07-17 20:54:55.046 IST [74838] LOG:  database system is ready to accept connections
+2026-07-17 20:54:55.127 IST [74838] LOG:  received immediate shutdown request
+2026-07-17 20:54:55.128 IST [74867] WARNING:  terminating connection because of crash of another server process
+2026-07-17 20:54:55.128 IST [74867] DETAIL:  The postmaster has commanded this server process to roll back the current transaction and exit, because another server process exited abnormally and possibly corrupted shared memory.
+2026-07-17 20:54:55.128 IST [74867] HINT:  In a moment you should be able to reconnect to the database and repeat your command.
+2026-07-17 20:54:56.191 IST [74838] LOG:  database system is shut down

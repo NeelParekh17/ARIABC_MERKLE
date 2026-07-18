@@ -1,0 +1,16 @@
+ applied_through 
+-----------------
+               2
+(1 row)
+
+                                                                recovery_status                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------------
+ {"state":"READY","managed":true,"applied_seq":2,"target_seq":2,"terminal_prefix_seq":2,"highest_terminal_seq":2,"blocked_seq":0,"error":null}
+(1 row)
+
+REINDEX
+                       root_before_reindex                        |                        root_after_reindex                        |                                                             final_recovery_status                                                             
+------------------------------------------------------------------+------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------
+ fdfdbc092ee915024c4a95e6489c92d8baf98d06010236caa403e30a5acc7af4 | fdfdbc092ee915024c4a95e6489c92d8baf98d06010236caa403e30a5acc7af4 | {"state":"READY","managed":true,"applied_seq":2,"target_seq":2,"terminal_prefix_seq":2,"highest_terminal_seq":2,"blocked_seq":0,"error":null}
+(1 row)
+
