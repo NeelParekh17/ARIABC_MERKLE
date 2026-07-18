@@ -178,8 +178,11 @@ merkle_open_consistent_index(Oid index_oid)
 	MerkleRecoveryStatusData status;
 
 	heap_rel = table_open(heap_oid, ShareLock);
-	/* SPI must run before owning a relcache reference/buffer under the caller's
-	 * resource owner; doing it afterwards breaks CTAS and materialized SRFs. */
+	/* Retain the ShareLock but release the relcache reference before SPI creates
+	 * its own resource owner.  Closing a caller-owned relcache reference after
+	 * SPI_connect() can otherwise make static verification fail with a resource
+	 * owner mismatch (notably under CTAS and materialized SRFs). */
+	table_close(heap_rel, NoLock);
 	merkle_get_recovery_status(&status);
 	if (!status.managed || status.state != MERKLE_STATE_READY)
 	{
@@ -191,9 +194,6 @@ merkle_open_consistent_index(Oid index_oid)
 						   (unsigned long long) status.target_seq,
 						   (unsigned long long) status.blocked_seq)));
 	}
-	/* Keep the ShareLock until transaction end, but release the relcache ref
-	 * before opening/reading the index. */
-	table_close(heap_rel, NoLock);
 	index_rel = index_open(index_oid, ShareLock);
 	if (index_rel->rd_rel->relam != MERKLE_AM_OID ||
 		index_rel->rd_index->indrelid != heap_oid)
@@ -202,6 +202,22 @@ merkle_open_consistent_index(Oid index_oid)
 				 errmsg("relation %u is not a Merkle index on relation %u",
 						index_oid, heap_oid)));
 	return index_rel;
+}
+
+/* Native synchronous-COW roots are transaction-coupled and do not depend on the
+ * compatibility applier's database-wide freshness state. */
+static Relation
+merkle_open_root_index(Oid index_oid)
+{
+	Relation index_rel = index_open(index_oid, ShareLock);
+	if (merkle_get_update_mode(index_rel) == MERKLE_UPDATE_SYNCHRONOUS_COW &&
+		index_rel->rd_rel->relam == MERKLE_AM_OID &&
+		merkle_index_is_dynamic(index_rel) &&
+		merkle_native_is_ready(index_rel))
+		return index_rel;
+	index_close(index_rel, NoLock);
+	merkle_require_fresh();
+	return merkle_open_consistent_index(index_oid);
 }
 
 /*
@@ -310,20 +326,22 @@ merkle_verify(PG_FUNCTION_ARGS)
     int             internalNodes;
 	Snapshot        verifysnap;
     
-	/* Reject or catch up lag before taking a stable index read lock. */
-	merkle_require_fresh();
-
     /* Find the Merkle index on this table */
     indexOid = find_merkle_index(relid);
-    if (!OidIsValid(indexOid))
+	if (!OidIsValid(indexOid))
+	{
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_OBJECT),
                  errmsg("no merkle index found on table %s",
                         get_rel_name(relid))));
+	}
     
-	/* Lock heap first (ShareLock blocks DML), then lock index */
+	/* Lock heap first, but do not carry its relcache reference across the
+	 * compatibility applier's internal subtransaction. */
 	heapRel = table_open(relid, ShareLock);
-	indexRel = merkle_open_consistent_index(indexOid);
+	table_close(heapRel, NoLock);
+	indexRel = merkle_open_root_index(indexOid);
+	heapRel = table_open(relid, NoLock);
     
 	if (merkle_index_is_dynamic(indexRel))
 	{
@@ -537,7 +555,6 @@ merkle_root_hash(PG_FUNCTION_ARGS)
 
 	for (retry = 0; retry < 10; retry++)
 	{
-		merkle_require_fresh();
 		indexOid = find_merkle_index(relid);
 		if (!OidIsValid(indexOid))
 			ereport(ERROR,
@@ -545,7 +562,7 @@ merkle_root_hash(PG_FUNCTION_ARGS)
 					 errmsg("no merkle index found on table %s",
 							get_rel_name(relid))));
 
-		indexRel = merkle_open_consistent_index(indexOid);
+		indexRel = merkle_open_root_index(indexOid);
 		break;
 	}
 	if (retry >= 10)
@@ -646,9 +663,6 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 	int             internalNodes;
 	Snapshot        verifysnap;
 
-	/* Reject or catch up lag first. */
-	merkle_require_fresh();
-
 	/* Validate the argument is actually a Merkle index. */
 	{
 		char relkind = get_rel_relkind(indexOid);
@@ -667,9 +681,12 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 	/* Resolve through the catalog; opening an unlocked relation races DROP. */
 	heapOid = IndexGetRelation(indexOid, false);
 
-	/* Lock heap first (ShareLock blocks DML), then index */
+	/* Lock heap first, but release the relcache reference before the freshness
+	 * gate can enter an internal apply subtransaction. */
 	heapRel = table_open(heapOid, ShareLock);
-	indexRel = merkle_open_consistent_index(indexOid);
+	table_close(heapRel, NoLock);
+	indexRel = merkle_open_root_index(indexOid);
+	heapRel = table_open(heapOid, NoLock);
 	if (indexRel->rd_rel->relam != MERKLE_AM_OID ||
 		indexRel->rd_index->indrelid != heapOid)
 		ereport(ERROR,
@@ -864,8 +881,7 @@ merkle_root_hash_index(PG_FUNCTION_ARGS)
 
 	for (retry = 0; retry < 10; retry++)
 	{
-		merkle_require_fresh();
-		indexRel = merkle_open_consistent_index(indexOid);
+		indexRel = merkle_open_root_index(indexOid);
 		if (indexRel->rd_rel->relam != MERKLE_AM_OID)
 		{
 			index_close(indexRel, ShareLock);
@@ -1699,11 +1715,13 @@ merkle_bucket_for_key(PG_FUNCTION_ARGS)
 
     relid = PG_GETARG_OID(0);
     indexOid = resolve_merkle_index_arg(relid);
-    if (!OidIsValid(indexOid))
+	if (!OidIsValid(indexOid))
+	{
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_OBJECT),
                  errmsg("no merkle index found on relation %s",
                         get_rel_name(relid))));
+	}
 
     indexRel = index_open(indexOid, AccessShareLock);
 	merkle_require_static_api(indexRel, "merkle_bucket_for_key()");
@@ -1791,11 +1809,13 @@ merkle_get_node_hash(PG_FUNCTION_ARGS)
 	merkle_require_fresh();
 
     indexOid = resolve_merkle_index_arg(relid);
-    if (!OidIsValid(indexOid))
+	if (!OidIsValid(indexOid))
+	{
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_OBJECT),
                  errmsg("no merkle index found on relation %s",
                         get_rel_name(relid))));
+	}
 
 	indexRel = merkle_open_consistent_index(indexOid);
 	merkle_require_static_api(indexRel, "merkle_get_node_hash()");
@@ -1828,11 +1848,13 @@ merkle_get_partition_root_hash(PG_FUNCTION_ARGS)
 	merkle_require_fresh();
 
     indexOid = resolve_merkle_index_arg(relid);
-    if (!OidIsValid(indexOid))
+	if (!OidIsValid(indexOid))
+	{
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_OBJECT),
                  errmsg("no merkle index found on relation %s",
                         get_rel_name(relid))));
+	}
 
 	indexRel = merkle_open_consistent_index(indexOid);
 	merkle_require_static_api(indexRel, "merkle_get_partition_root_hash()");

@@ -76,6 +76,18 @@ typedef struct MerkleSubxactFrame
 	struct MerkleSubxactFrame *next;
 } MerkleSubxactFrame;
 
+/* Canonical persisted representation of a Raft epoch: the first eight
+ * bytes of the 32-byte digest interpreted as an unsigned big-endian integer.
+ * All writers therefore agree on the same value regardless of host endian. */
+static uint64
+merkle_raft_epoch_sequence(const uint8 epoch_id[BCDB_RAFT_DIGEST_BYTES])
+{
+	uint64 value;
+
+	memcpy(&value, epoch_id, sizeof(value));
+	return pg_ntoh64(value);
+}
+
 typedef enum MerkleSerializedEntryKind
 {
 	MERKLE_SERIALIZED_STATIC = 1,
@@ -98,6 +110,7 @@ typedef struct MerkleSerializedEntry
 static MerkleSubxactFrame *merkle_delta_frames = NULL;
 static bool merkle_delta_callbacks_registered = false;
 static bool merkle_staged_delta_persisted = false;
+static bool merkle_native_roots_published = false;
 static uint64 merkle_serialized_entry_count = 0;
 static uint64 merkle_delta_generation = 0;
 static uint64 merkle_serialized_generation = 0;
@@ -339,6 +352,7 @@ merkle_delta_reset(void)
 	while (merkle_delta_frames != NULL)
 		merkle_delta_unlink_frame(merkle_delta_frames);
 	merkle_staged_delta_persisted = false;
+	merkle_native_roots_published = false;
 	merkle_serialized_entry_count = 0;
 	merkle_delta_generation = 0;
 	merkle_serialized_generation = 0;
@@ -478,6 +492,56 @@ merkle_has_staged_delta(void)
 	return false;
 }
 
+bool
+merkle_has_pending_staged_delta(void)
+{
+	MerkleSubxactFrame *frame;
+
+	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
+	{
+		HASH_SEQ_STATUS status;
+		MerkleDynamicDeltaEntry *dentry;
+
+		/* Static entries are always pending_log */
+		if (hash_get_num_entries(frame->entries) > 0)
+			return true;
+
+		hash_seq_init(&status, frame->dynamic_entries);
+		while ((dentry = hash_seq_search(&status)) != NULL)
+		{
+			if (merkle_get_update_mode_by_oid(dentry->key.index_oid) == MERKLE_UPDATE_PENDING_LOG)
+			{
+				hash_seq_term(&status);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool
+merkle_has_synchronous_staged_delta(void)
+{
+	MerkleSubxactFrame *frame;
+
+	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
+	{
+		HASH_SEQ_STATUS status;
+		MerkleDynamicDeltaEntry *dentry;
+
+		hash_seq_init(&status, frame->dynamic_entries);
+		while ((dentry = hash_seq_search(&status)) != NULL)
+		{
+			if (merkle_get_update_mode_by_oid(dentry->key.index_oid) == MERKLE_UPDATE_SYNCHRONOUS_COW)
+			{
+				hash_seq_term(&status);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 static uint64
 merkle_staged_entry_count(void)
 {
@@ -485,8 +549,17 @@ merkle_staged_entry_count(void)
 	uint64 count = 0;
 
 	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
-		count += (uint64) hash_get_num_entries(frame->entries) +
-			(uint64) hash_get_num_entries(frame->dynamic_entries);
+	{
+		HASH_SEQ_STATUS status;
+		MerkleDynamicDeltaEntry *dynamic_entry;
+
+		count += (uint64) hash_get_num_entries(frame->entries);
+		hash_seq_init(&status, frame->dynamic_entries);
+		while ((dynamic_entry = hash_seq_search(&status)) != NULL)
+			if (merkle_get_update_mode_by_oid(dynamic_entry->key.index_oid) ==
+				MERKLE_UPDATE_PENDING_LOG)
+				count++;
+	}
 	return count;
 }
 
@@ -620,8 +693,15 @@ merkle_serialize_staged_delta(uint64 raft_log_index, uint32 item_ordinal,
 			merkle_delta_merge_one(combined, entry);
 		hash_seq_init(&seq, frame->dynamic_entries);
 		while ((dynamic_entry = hash_seq_search(&seq)) != NULL)
-			merkle_dynamic_delta_merge_one(dynamic_combined, dynamic_entry,
-								   serialize_context);
+		{
+			/* Strict native transitions are already published by the PRE_COMMIT
+			 * COW path.  Never put them in the compatibility queue: a later
+			 * applier must not apply the same transition a second time. */
+			if (merkle_get_update_mode_by_oid(dynamic_entry->key.index_oid) ==
+				MERKLE_UPDATE_PENDING_LOG)
+				merkle_dynamic_delta_merge_one(dynamic_combined, dynamic_entry,
+									   serialize_context);
+		}
 	}
 
 	count = hash_get_num_entries(combined) +
@@ -802,7 +882,9 @@ merkle_serialize_staged_delta(uint64 raft_log_index, uint32 item_ordinal,
 void
 merkle_mark_staged_delta_persisted(void)
 {
-	if (!merkle_has_staged_delta())
+	/* Strict native entries are published directly by the COW PRE_COMMIT path
+	 * and are intentionally absent from the compatibility serialization. */
+	if (!merkle_has_pending_staged_delta())
 		return;
 	if (merkle_serialized_entry_count == 0 ||
 		merkle_serialized_generation != merkle_delta_generation)
@@ -863,8 +945,6 @@ merkle_persist_local_delta_impl(void)
 		 * Read-only txids intentionally leave holes; merkle_apply_until_impl()
 		 * may cross only holes proven terminal by last_committed_tx_id.
 		 */
-		if (activeTx->tx_id < 0 || activeTx->tx_id == PG_INT32_MAX)
-			elog(ERROR, "BCDB transaction id cannot be represented as a Merkle sequence");
 		apply_seq = (uint64) activeTx->tx_id + 1;
 	}
 	else
@@ -953,6 +1033,117 @@ merkle_persist_local_delta(void)
 	SetUserIdAndSecContext(saved_userid, saved_sec_context);
 }
 
+/* Publish one native COW root version per affected partition before the
+ * ordinary commit record.  pending_log retains the durable queue as an
+ * explicitly lagging compatibility mode; synchronous_cow does not depend on
+ * that queue or its side-table materializer. */
+static void
+merkle_publish_native_staged_dynamic(void)
+{
+	MemoryContext context;
+	MemoryContext old_context;
+	HTAB *combined;
+	MerkleSubxactFrame *frame;
+	HASH_SEQ_STATUS seq;
+	MerkleDynamicDeltaEntry *entry;
+	MerkleSerializedEntry *ordered;
+	long count;
+	long i = 0;
+	long start;
+	uint64 apply_seq;
+	uint16 sequence_domain;
+	uint64 sequence_epoch = 0;
+
+	/* Deterministic workers expose their replica-agreed order.  Ordinary
+	 * PostgreSQL transactions use their top-level XID as local provenance. */
+	if (is_bcdb_worker && activeTx != NULL &&
+		activeTx->tx_id != BCDBInvalidTid)
+	{
+		sequence_domain = MERKLE_SEQUENCE_RAFT;
+		sequence_epoch = merkle_raft_epoch_sequence(activeTx->raft_epoch_id);
+		apply_seq = (uint64) activeTx->tx_id + 1;
+	}
+	else
+	{
+		sequence_domain = MERKLE_SEQUENCE_LOCAL_XID;
+		apply_seq = (uint64) GetTopTransactionId();
+	}
+
+	context = AllocSetContextCreate(CurrentMemoryContext,
+		"native Merkle precommit", ALLOCSET_DEFAULT_SIZES);
+	old_context = MemoryContextSwitchTo(context);
+	combined = merkle_dynamic_delta_create_map(context);
+	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
+	{
+		hash_seq_init(&seq, frame->dynamic_entries);
+		while ((entry = hash_seq_search(&seq)) != NULL)
+		{
+			if (!OidIsValid(entry->key.index_oid))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("strict Merkle delta map contains index OID 0")));
+			/* PRE_COMMIT owns only strict native transitions.  Pending-mode
+			 * entries must remain in the durable queue and be materialized by
+			 * the ordered applier exactly once. */
+			if (merkle_get_update_mode_by_oid(entry->key.index_oid) ==
+				MERKLE_UPDATE_SYNCHRONOUS_COW)
+				merkle_dynamic_delta_merge_one(combined, entry, context);
+		}
+	}
+	count = hash_get_num_entries(combined);
+	if (count == 0)
+	{
+		MemoryContextSwitchTo(old_context);
+		MemoryContextDelete(context);
+		return;
+	}
+	ordered = palloc(sizeof(*ordered) * count);
+	hash_seq_init(&seq, combined);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		ordered[i].kind = MERKLE_SERIALIZED_DYNAMIC;
+		ordered[i].value.dynamic_entry = *entry;
+		i++;
+	}
+	qsort(ordered, count, sizeof(*ordered), merkle_serialized_entry_cmp);
+	for (start = 0; start < count; )
+	{
+		long end = start + 1;
+		MerkleDynamicTransition *transitions;
+		Oid index_oid = ordered[start].value.dynamic_entry.key.index_oid;
+		long j;
+
+		while (end < count &&
+			ordered[end].value.dynamic_entry.key.index_oid == index_oid)
+			end++;
+		transitions = palloc0(sizeof(*transitions) * (end - start));
+		for (j = start; j < end; j++)
+		{
+			MerkleDynamicDeltaEntry *source =
+				&ordered[j].value.dynamic_entry;
+			MerkleDynamicTransition *target = &transitions[j - start];
+
+			target->index_oid = source->key.index_oid;
+			target->index_rnode = source->key.index_rnode;
+			target->partition_id = source->partition_id;
+			memcpy(target->route_digest, source->key.route_digest,
+				MERKLE_HASH_BYTES);
+			target->key_data = source->key_data;
+			target->has_old = source->has_old;
+			target->has_new = source->has_new;
+			target->old_hash = source->old_hash;
+			target->new_hash = source->new_hash;
+		}
+		merkle_native_publish_strict_transitions(transitions,
+			(int) (end - start), sequence_domain, sequence_epoch, apply_seq);
+		pfree(transitions);
+		start = end;
+	}
+	MemoryContextSwitchTo(old_context);
+	MemoryContextDelete(context);
+	merkle_native_roots_published = true;
+}
+
 static void
 merkle_delta_xact_callback(XactEvent event, void *arg)
 {
@@ -966,7 +1157,11 @@ merkle_delta_xact_callback(XactEvent event, void *arg)
 
 	if (event == XACT_EVENT_PRE_COMMIT)
 	{
-		if (merkle_has_staged_delta() && !merkle_staged_delta_persisted)
+		if (merkle_has_synchronous_staged_delta() &&
+			!merkle_native_roots_published)
+			merkle_publish_native_staged_dynamic();
+		if (merkle_has_pending_staged_delta() &&
+			!merkle_staged_delta_persisted)
 			merkle_persist_local_delta();
 		return;
 	}
@@ -976,7 +1171,8 @@ merkle_delta_xact_callback(XactEvent event, void *arg)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("parallel workers cannot persist Merkle deltas")));
 
-	if (event == XACT_EVENT_COMMIT && merkle_staged_delta_persisted)
+	if (event == XACT_EVENT_COMMIT &&
+		(merkle_staged_delta_persisted || merkle_native_roots_published))
 		merkle_crash_failpoint("after_user_transaction_commit");
 
 	if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT ||

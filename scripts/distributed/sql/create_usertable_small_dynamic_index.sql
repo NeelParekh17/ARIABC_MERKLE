@@ -38,7 +38,8 @@ CREATE INDEX usertable_small_dynamic_merkle_idx
         leaf_capacity        = 32,
         merge_threshold      = 8,
         leaf_byte_capacity   = 65536,
-        max_key_bytes        = 1024
+        max_key_bytes        = 1024,
+        update_mode          = 'synchronous_cow'
     );
 
 SELECT merkle_dynamic_verify(

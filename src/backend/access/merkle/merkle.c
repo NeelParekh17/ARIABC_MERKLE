@@ -17,9 +17,12 @@
 #include "access/merkle.h"
 #include "access/reloptions.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_type.h"
 #include "optimizer/cost.h"
 #include "utils/builtins.h"
 #include "utils/index_selfuncs.h"
+#include "access/generic_xlog.h"
+#include "storage/bufmgr.h"
 
 /* GUC: Enable/disable Merkle index updates */
 bool enable_merkle_index = true;
@@ -98,6 +101,8 @@ void
 merkle_reject_ddl(Relation rel, const char *command)
 {
 	MerkleRecoveryStatusData status;
+	bool all_native_synchronous = true;
+	bool found_merkle = false;
 
 	if (!merkle_relation_has_index(rel))
 		return;
@@ -115,7 +120,43 @@ merkle_reject_ddl(Relation rel, const char *command)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot %s while this transaction has staged Merkle deltas",
 						command),
-				 errhint("Commit or roll back the table changes before DDL.")));
+					 errhint("Commit or roll back the table changes before DDL.")));
+	{
+		List *indexes;
+		ListCell *cell;
+
+		if (rel->rd_rel->relkind == RELKIND_INDEX)
+		{
+			found_merkle = rel->rd_rel->relam == MERKLE_AM_OID;
+			all_native_synchronous = found_merkle &&
+				merkle_index_is_dynamic(rel) &&
+				merkle_get_update_mode(rel) == MERKLE_UPDATE_SYNCHRONOUS_COW &&
+				merkle_native_is_ready(rel);
+			indexes = NIL;
+		}
+		else
+		{
+			indexes = RelationGetIndexList(rel);
+		}
+
+		foreach(cell, indexes)
+		{
+			Relation indexRel = index_open(lfirst_oid(cell), AccessShareLock);
+
+			if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+			{
+				found_merkle = true;
+				if (!(merkle_index_is_dynamic(indexRel) &&
+					  merkle_get_update_mode(indexRel) == MERKLE_UPDATE_SYNCHRONOUS_COW &&
+					  merkle_native_is_ready(indexRel)))
+					all_native_synchronous = false;
+			}
+			index_close(indexRel, AccessShareLock);
+		}
+		list_free(indexes);
+	}
+	if (found_merkle && all_native_synchronous)
+		return;
 	merkle_get_recovery_status(&status);
 	if (status.state != MERKLE_STATE_READY)
 		ereport(ERROR,
@@ -155,6 +196,13 @@ merkle_reject_concurrent_ddl(Oid index_oid, const char *command)
 				 errmsg("%s is not supported for Merkle indexes", command),
 				 errhint("Use non-concurrent REINDEX instead.")));
 }
+
+static relopt_enum_elt_def merkleUpdateModeValues[] =
+{
+	{"synchronous_cow", MERKLE_UPDATE_SYNCHRONOUS_COW},
+	{"pending_log", MERKLE_UPDATE_PENDING_LOG},
+	{(const char *) NULL}
+};
 
 /*
  * merkle_register_relopts() - Register merkle reloptions with PostgreSQL
@@ -200,6 +248,12 @@ merkle_register_relopts(void)
 					  "Maximum canonical dynamic Merkle key size",
 					  MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES,
 					  64, MERKLE_DYNAMIC_MAX_KEY_BYTES, AccessExclusiveLock);
+	add_enum_reloption(merkle_relopt_kind, "update_mode",
+					   "Chooses exact native COW or lagging pending-log Merkle updates",
+					   merkleUpdateModeValues,
+					   MERKLE_UPDATE_SYNCHRONOUS_COW,
+					   "Valid values are \"synchronous_cow\" and \"pending_log\".",
+					   AccessExclusiveLock);
     
     merkle_relopts_registered = true;
 }
@@ -213,7 +267,8 @@ static relopt_parse_elt merkle_relopt_tab[] = {
 	{"leaf_capacity", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaf_capacity)},
 	{"merge_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, merge_threshold)},
 	{"leaf_byte_capacity", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaf_byte_capacity)},
-	{"max_key_bytes", RELOPT_TYPE_INT, offsetof(MerkleOptions, max_key_bytes)}
+	{"max_key_bytes", RELOPT_TYPE_INT, offsetof(MerkleOptions, max_key_bytes)},
+	{"update_mode", RELOPT_TYPE_ENUM, offsetof(MerkleOptions, update_mode)}
 };
 
 /*
@@ -235,6 +290,39 @@ merkle_options(Datum reloptions, bool validate)
                                                merkle_relopt_tab,
                                                lengthof(merkle_relopt_tab));
     
+	if (opts != NULL)
+	{
+		bool update_mode_specified = false;
+		if (PointerIsValid(DatumGetPointer(reloptions)))
+		{
+			ArrayType *array = DatumGetArrayTypeP(reloptions);
+			Datum *optiondatums;
+			int noptions;
+			int i;
+
+			deconstruct_array(array, TEXTOID, -1, false, 'i', &optiondatums, NULL, &noptions);
+			for (i = 0; i < noptions; i++)
+			{
+				char *text_str = VARDATA(optiondatums[i]);
+				int text_len = VARSIZE(optiondatums[i]) - VARHDRSZ;
+
+				if (text_len > 12 && strncmp(text_str, "update_mode=", 12) == 0)
+				{
+					update_mode_specified = true;
+					break;
+				}
+			}
+			pfree(optiondatums);
+		}
+
+		/* The reloption, not the session GUC, is the durable authority.  A
+		 * missing option always means the production-safe native default;
+		 * this prevents a later REINDEX from changing mode because a session
+		 * or postmaster GUC changed.  Compatibility mode must be explicit. */
+		if (!update_mode_specified)
+			opts->update_mode = MERKLE_UPDATE_SYNCHRONOUS_COW;
+	}
+
     if (validate && opts != NULL)
 	{
         if (opts->fanout < 2 || opts->fanout > 1024)
@@ -299,6 +387,7 @@ merkle_get_options(Relation indexRel)
 		opts->merge_threshold = MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD;
 		opts->leaf_byte_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY;
 		opts->max_key_bytes = MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES;
+		opts->update_mode = MERKLE_UPDATE_SYNCHRONOUS_COW;
         return opts;
     }
     
@@ -326,6 +415,8 @@ merkle_get_options(Relation indexRel)
 		opts->leaf_byte_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY;
 	if (VARSIZE(relopts) < (offsetof(MerkleOptions, max_key_bytes) + sizeof(int)))
 		opts->max_key_bytes = MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES;
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, update_mode) + sizeof(int)))
+		opts->update_mode = MERKLE_UPDATE_SYNCHRONOUS_COW;
     
 	/* Legacy static blobs may fall back; dynamic corruption must fail closed. */
     if (opts->partitions <= 0 || opts->partitions > 10000 ||
@@ -340,7 +431,9 @@ merkle_get_options(Relation indexRel)
 		opts->max_key_bytes < 64 ||
 		opts->max_key_bytes > MERKLE_DYNAMIC_MAX_KEY_BYTES ||
 		(opts->dynamic && opts->max_key_bytes > opts->leaf_byte_capacity) ||
-		(opts->dynamic && opts->fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT))
+		(opts->dynamic && opts->fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT) ||
+		(opts->update_mode != MERKLE_UPDATE_SYNCHRONOUS_COW &&
+		 opts->update_mode != MERKLE_UPDATE_PENDING_LOG))
     {
 		if (opts->dynamic)
 			ereport(ERROR,
@@ -355,6 +448,7 @@ merkle_get_options(Relation indexRel)
 		opts->merge_threshold = MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD;
 		opts->leaf_byte_capacity = MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY;
 		opts->max_key_bytes = MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES;
+		opts->update_mode = MERKLE_UPDATE_SYNCHRONOUS_COW;
     }
     
     return opts;

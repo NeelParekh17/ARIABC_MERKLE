@@ -172,7 +172,7 @@ EOF
   fi
   # Fallback to console parsing
   if [[ -z "$tps" || "$tps" == "N/A" || "$tps" == "INVALID" ]]; then
-    tps="$(grep -oP '(TPS_majority_visible|TPS_strict_majority|TPS_direct|TPS_all3_audit_drained)\s*:\s*\K[0-9]+(\.[0-9]+)?' "$console" | tail -1 || true)"
+    tps="$(grep -oP '(TPS_majority_visible|TPS_kafka_majority_visible|TPS_strict_majority|TPS_direct|TPS_all3_audit_drained)\s*:\s*\K[0-9]+(\.[0-9]+)?' "$console" | tail -1 || true)"
   fi
   if [[ -z "$tps" || "$tps" == "N/A" || "$tps" == "INVALID" ]]; then
     tps="$(grep -E 'TPS \(gateway\)[[:space:]]*:' "$console" | tail -1 | sed -nE 's/.*~([0-9]+(\.[0-9]+)?).*/\1/p')"

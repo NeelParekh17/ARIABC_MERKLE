@@ -239,7 +239,8 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("partial Merkle indexes are not supported"),
 				 errdetail("Merkle integrity maintenance covers every live heap row and cannot safely skip predicate-false UPDATE or DELETE transitions."),
-				 errhint("Create a non-partial Merkle index and REINDEX any legacy partial Merkle index.")));
+					 errhint("Create a non-partial Merkle index and REINDEX any legacy partial Merkle index.")));
+	opts = merkle_get_options(indexRel);
 
 	/*
 	 * A rebuild scans the already-committed heap state.  Rebuilding while the
@@ -253,7 +254,9 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 				 errmsg("cannot build or reindex a Merkle index after table changes in the same transaction"),
 				 errhint("Commit the table changes and synchronize Merkle recovery before rebuilding the index.")));
 	merkle_get_recovery_status(&recovery_status);
-	if (recovery_status.state != MERKLE_STATE_READY)
+	if (recovery_status.state != MERKLE_STATE_READY &&
+		!(opts->dynamic &&
+		  opts->update_mode == MERKLE_UPDATE_SYNCHRONOUS_COW))
 	{
 		/* A failed/mismatched existing tree is repaired by an explicit
 		 * non-concurrent REINDEX.  Do not allow CREATE INDEX to bypass a
@@ -278,7 +281,6 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 					 errhint("Run REINDEX on the existing Merkle index after the committed prefix is caught up.")));
 	}
     /* Get user-specified options or defaults */
-    opts = merkle_get_options(indexRel);
 	buildstate.dynamic = opts->dynamic;
 	buildstate.dynamicMaxKeyBytes = opts->max_key_bytes;
     totalLeaves = opts->partitions * opts->leaves_per_partition;
@@ -573,6 +575,12 @@ merkleBuildempty(Relation indexRel)
 		meta->dynamicMergeThreshold = opts->merge_threshold;
 		meta->dynamicLeafByteCapacity = opts->leaf_byte_capacity;
 		meta->dynamicMaxKeyBytes = opts->max_key_bytes;
+		meta->nativeDirectoryStart = MERKLE_TREE_START_BLKNO;
+		meta->nativeDirectoryPages = numTreePages;
+		if (opts->update_mode == MERKLE_UPDATE_SYNCHRONOUS_COW)
+			meta->nativeFormatFlags = MERKLE_NATIVE_MODE_SYNCHRONOUS_COW;
+		else
+			meta->nativeFormatFlags = MERKLE_NATIVE_MODE_PENDING_LOG;
 	}
 	((PageHeader) metapage)->pd_lower =
 		(LocationIndex) ((char *) meta + sizeof(*meta) - (char *) metapage);

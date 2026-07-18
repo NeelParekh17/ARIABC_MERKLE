@@ -91,6 +91,7 @@ struct MerkleDynamicBuildState
 	int batch_count;
 	uint64 item_count;
 	uint64 item_bytes;
+	MerkleNativeBuildState *native;
 	MerkleDynamicBuildBufferedItem batch[MERKLE_DYNAMIC_BUILD_BATCH];
 };
 
@@ -201,7 +202,9 @@ static bool dynamic_prefix_matches(const uint8 digest[MERKLE_HASH_BYTES],
 static int dynamic_route_bit(const uint8 digest[MERKLE_HASH_BYTES], int bit);
 static uint64 dynamic_route_value(const uint8 digest[MERKLE_HASH_BYTES]);
 static uint64 dynamic_item_bytes(const bytea *key_data);
-static char *dynamic_single_key_text(Relation indexRel, const bytea *key_data);
+char *merkle_dynamic_single_key_text(Relation indexRel, const bytea *key_data);
+static void dynamic_generation_args(const MerkleDynamicGeneration *gen,
+								Datum args[4]);
 
 static bool
 dynamic_bytes_are_zero(const uint8 *data, Size length)
@@ -1192,6 +1195,14 @@ dynamic_build_finish_impl(MerkleDynamicBuildState *state)
 			elog(ERROR, "dynamic Merkle staging-table cleanup failed: %d", rc);
 		SPI_finish();
 	}
+	{
+		Relation indexRel = index_open(state->generation.index_oid,
+			RowExclusiveLock);
+
+		merkle_native_build_from_oracle(indexRel,
+			state->generation.config.baseline_seq);
+		index_close(indexRel, RowExclusiveLock);
+	}
 	MemoryContextDelete(state->context);
 }
 
@@ -1202,6 +1213,21 @@ merkle_dynamic_build_begin(Relation indexRel, Relation heapRel, int nkeys,
 	Oid saved_userid;
 	int saved_sec_context;
 	MerkleDynamicBuildState *result = NULL;
+
+	merkle_dynamic_validate_key_index(heapRel, indexRel, nkeys);
+	if (merkle_get_update_mode(indexRel) == MERKLE_UPDATE_SYNCHRONOUS_COW)
+	{
+		MemoryContext context = AllocSetContextCreate(CurrentMemoryContext,
+			"native dynamic Merkle build", ALLOCSET_DEFAULT_SIZES);
+		MemoryContext old = MemoryContextSwitchTo(context);
+
+		result = palloc0(sizeof(*result));
+		result->context = context;
+		result->nkeys = nkeys;
+		result->native = merkle_native_build_begin(indexRel, baseline_seq);
+		MemoryContextSwitchTo(old);
+		return result;
+	}
 
 	GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
@@ -1229,6 +1255,12 @@ merkle_dynamic_build_add(MerkleDynamicBuildState *state,
 	Oid saved_userid;
 	int saved_sec_context;
 
+	if (state->native != NULL)
+	{
+		merkle_native_build_add(state->native, identity, hash);
+		return;
+	}
+
 	GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
 		saved_sec_context | SECURITY_LOCAL_USERID_CHANGE);
@@ -1250,6 +1282,13 @@ merkle_dynamic_build_finish(MerkleDynamicBuildState *state)
 {
 	Oid saved_userid;
 	int saved_sec_context;
+
+	if (state->native != NULL)
+	{
+		merkle_native_build_finish(state->native);
+		MemoryContextDelete(state->context);
+		return;
+	}
 
 	GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
@@ -3255,6 +3294,13 @@ merkle_dynamic_apply_transition(const MerkleDynamicTransition *transition)
 	PG_TRY();
 	{
 		dynamic_apply_transition_impl(transition);
+		/* Keep the native image synchronized when pending_log materializes its
+		 * compatibility oracle.  This makes a later mode change safe and keeps
+		 * side tables non-authoritative even in lagging mode. */
+		merkle_native_materialize_pending_transitions(transition, 1,
+			transition->sequence_domain == 0 ? MERKLE_SEQUENCE_RAFT :
+			transition->sequence_domain,
+			transition->sequence_epoch, transition->seq);
 	}
 	PG_CATCH();
 	{
@@ -3278,6 +3324,10 @@ merkle_dynamic_apply_update_batch(const MerkleDynamicTransition *transitions,
 	PG_TRY();
 	{
 		dynamic_apply_update_batch_impl(transitions,count);
+		merkle_native_materialize_pending_transitions(transitions, count,
+			transitions[0].sequence_domain == 0 ? MERKLE_SEQUENCE_RAFT :
+			transitions[0].sequence_domain,
+			transitions[0].sequence_epoch, transitions[0].seq);
 	}
 	PG_CATCH();
 	{
@@ -3889,6 +3939,10 @@ merkle_dynamic_verify_relations(Relation heapRel, Relation indexRel,
 	bool result = false;
 	bool pushed_active = false;
 
+	if (merkle_get_update_mode(indexRel) == MERKLE_UPDATE_SYNCHRONOUS_COW &&
+		merkle_native_is_ready(indexRel))
+		return merkle_native_verify_relations(heapRel, indexRel, snapshot);
+
 	if (snapshot != InvalidSnapshot)
 	{
 		PushCopiedSnapshot(snapshot);
@@ -3987,6 +4041,12 @@ merkle_dynamic_root(Relation indexRel, MerkleHash *hash, uint64 *tuple_count)
 		ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("dynamic Merkle root output cannot be null")));
+	if (merkle_get_update_mode(indexRel) == MERKLE_UPDATE_SYNCHRONOUS_COW &&
+		merkle_native_is_ready(indexRel))
+	{
+		merkle_native_root(indexRel, hash, tuple_count);
+		return;
+	}
 	GetUserIdAndSecContext(&saved_userid,&saved_sec_context);
 	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
 		saved_sec_context | SECURITY_LOCAL_USERID_CHANGE);
@@ -4007,16 +4067,19 @@ static char *
 dynamic_stats_json_impl(Relation indexRel)
 {
 	MerkleDynamicGeneration gen;
-	Oid types[4] = {OIDOID,OIDOID,OIDOID,OIDOID};
-	Datum args[4];
-	char nulls[4] = {' ',' ',' ',' '};
+	Oid types[5] = {OIDOID,OIDOID,OIDOID,OIDOID,TEXTOID};
+	Datum args[5];
+	char nulls[5] = {' ',' ',' ',' ',' '};
 	char *result;
 	MemoryContext caller_context = CurrentMemoryContext;
 	int rc;
+	int mode = merkle_get_update_mode(indexRel);
+	const char *mode_str = (mode == MERKLE_UPDATE_SYNCHRONOUS_COW) ? "synchronous_cow" : "pending_log";
 
 	dynamic_read_meta(indexRel,&gen);
 	dynamic_require_relations();
 	dynamic_generation_args(&gen,args);
+	args[4] = CStringGetTextDatum(mode_str);
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "dynamic Merkle stats SPI_connect failed");
 	dynamic_validate_state_spi(&gen);
@@ -4033,10 +4096,12 @@ dynamic_stats_json_impl(Relation indexRel)
 		" 'leaf_count',leaf_count,'max_depth',max_depth,"
 		" 'max_leaf_items',max_leaf_items,'split_count',split_count,"
 		" 'merge_count',merge_count,'structure_failures',structure_failures,"
-		" 'stats_dirty',stats_dirty)::text "
+		" 'stats_dirty',stats_dirty,"
+		" 'authority','compatibility_side_tables',"
+		" 'update_mode',$5)::text "
 		"FROM ariabc_internal.merkle_dynamic_state "
 		"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4",
-		4,types,args,nulls,true,1);
+		5,types,args,nulls,true,1);
 	if (rc != SPI_OK_SELECT || SPI_processed != 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -4222,6 +4287,17 @@ dynamic_open_index_arg(Oid relid, LOCKMODE lockmode)
 					 errmsg("relation has no dynamic Merkle index")));
 		return index_open(found,lockmode);
 	}
+}
+
+static bool
+dynamic_use_native_arg(Oid relid)
+{
+	Relation indexRel = dynamic_open_index_arg(relid, AccessShareLock);
+	bool native = merkle_get_update_mode(indexRel) == MERKLE_UPDATE_SYNCHRONOUS_COW &&
+		merkle_native_is_ready(indexRel);
+
+	index_close(indexRel, AccessShareLock);
+	return native;
 }
 
 static Tuplestorestate *
@@ -4476,8 +4552,8 @@ dynamic_read_u32(const uint8 **cursor, const uint8 *end)
 	return value;
 }
 
-static char *
-dynamic_single_key_text(Relation indexRel, const bytea *key_data)
+char *
+merkle_dynamic_single_key_text(Relation indexRel, const bytea *key_data)
 {
 	const uint8 *cursor = (const uint8 *) VARDATA_ANY(key_data);
 	const uint8 *end = cursor + VARSIZE_ANY_EXHDR(key_data);
@@ -4585,7 +4661,11 @@ merkle_dynamic_get_partition_roots(PG_FUNCTION_ARGS)
 	int saved_sec_context;
 	Relation indexRel = NULL;
 	TupleDesc tupdesc;
-	Tuplestorestate *tupstore = dynamic_begin_materialized_srf(fcinfo,&tupdesc);
+	Tuplestorestate *tupstore;
+
+	if (dynamic_use_native_arg(relid))
+		return merkle_native_get_partition_roots(fcinfo);
+	tupstore = dynamic_begin_materialized_srf(fcinfo,&tupdesc);
 
 	merkle_require_fresh();
 	GetUserIdAndSecContext(&saved_userid,&saved_sec_context);
@@ -4678,7 +4758,11 @@ merkle_dynamic_get_leaf_frontier(PG_FUNCTION_ARGS)
 	int saved_sec_context;
 	Relation indexRel = NULL;
 	TupleDesc tupdesc;
-	Tuplestorestate *tupstore = dynamic_begin_materialized_srf(fcinfo,&tupdesc);
+	Tuplestorestate *tupstore;
+
+	if (dynamic_use_native_arg(relid))
+		return merkle_native_get_leaf_frontier(fcinfo);
+	tupstore = dynamic_begin_materialized_srf(fcinfo,&tupdesc);
 
 	merkle_require_fresh();
 	GetUserIdAndSecContext(&saved_userid,&saved_sec_context);
@@ -4720,7 +4804,11 @@ merkle_dynamic_get_ranges(PG_FUNCTION_ARGS)
 	int saved_sec_context;
 	Relation indexRel = NULL;
 	TupleDesc tupdesc;
-	Tuplestorestate *tupstore = dynamic_begin_materialized_srf(fcinfo,&tupdesc);
+	Tuplestorestate *tupstore;
+
+	if (dynamic_use_native_arg(relid))
+		return merkle_native_get_ranges(fcinfo);
+	tupstore = dynamic_begin_materialized_srf(fcinfo,&tupdesc);
 
 	merkle_require_fresh();
 	GetUserIdAndSecContext(&saved_userid,&saved_sec_context);
@@ -4787,7 +4875,11 @@ merkle_dynamic_get_range_items(PG_FUNCTION_ARGS)
 	int saved_sec_context;
 	Relation indexRel = NULL;
 	TupleDesc tupdesc;
-	Tuplestorestate *tupstore = dynamic_begin_materialized_srf(fcinfo,&tupdesc);
+	Tuplestorestate *tupstore;
+
+	if (dynamic_use_native_arg(relid))
+		return merkle_native_get_range_items(fcinfo);
+	tupstore = dynamic_begin_materialized_srf(fcinfo,&tupdesc);
 
 	if (PG_ARGISNULL(1))
 		ereport(ERROR,
@@ -4838,7 +4930,7 @@ merkle_dynamic_get_range_items(PG_FUNCTION_ARGS)
 			{
 				Datum out[7];
 				bool outnulls[7] = {false,false,false,false,false,false,false};
-				char *key_text = dynamic_single_key_text(indexRel,items[i].key_data);
+				char *key_text = merkle_dynamic_single_key_text(indexRel,items[i].key_data);
 
 				bytes += items[i].item_bytes;
 				out[0] = Int32GetDatum(requests[r].partition_id);
@@ -4887,6 +4979,8 @@ merkle_dynamic_tree_stats(PG_FUNCTION_ARGS)
 	char *json;
 	Datum result;
 
+	if (dynamic_use_native_arg(relid))
+		return merkle_native_tree_stats(fcinfo);
 	merkle_require_fresh();
 	indexRel = dynamic_open_index_arg(relid,ShareLock);
 	json = merkle_dynamic_stats_json(indexRel);
@@ -4907,7 +5001,8 @@ merkle_dynamic_verify(PG_FUNCTION_ARGS)
 	bool match;
 	char relkind;
 
-	merkle_require_fresh();
+	if (!dynamic_use_native_arg(relid))
+		merkle_require_fresh();
 	relkind = get_rel_relkind(relid);
 	if (relkind == RELKIND_INDEX)
 	{

@@ -683,6 +683,67 @@ merkle_index_is_dynamic(Relation indexRel)
 	return option_dynamic;
 }
 
+int
+merkle_get_update_mode(Relation indexRel)
+{
+	BlockNumber blocks;
+
+	/* Non-dynamic indexes only support pending_log */
+	if (!merkle_index_is_dynamic(indexRel))
+		return MERKLE_UPDATE_PENDING_LOG;
+
+	blocks = RelationGetNumberOfBlocks(indexRel);
+	if (blocks > MERKLE_METAPAGE_BLKNO)
+	{
+		Buffer buf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
+		Page page;
+		MerkleMetaPageData *meta;
+		int mode = MERKLE_UPDATE_PENDING_LOG;
+		uint32 flags;
+
+		LockBuffer(buf, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buf);
+		meta = MerklePageGetMeta(page);
+
+		if (meta->version >= 7)
+		{
+			flags = meta->nativeFormatFlags & MERKLE_NATIVE_MODE_MASK;
+			if (flags == MERKLE_NATIVE_MODE_SYNCHRONOUS_COW)
+				mode = MERKLE_UPDATE_SYNCHRONOUS_COW;
+			else if (flags == MERKLE_NATIVE_MODE_PENDING_LOG)
+				mode = MERKLE_UPDATE_PENDING_LOG;
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_INDEX_CORRUPTED),
+						 errmsg("Merkle index has unknown native update-mode flags 0x%08x",
+								flags),
+						 errhint("REINDEX the dynamic Merkle index.")));
+		}
+		UnlockReleaseBuffer(buf);
+		return mode;
+	}
+	else
+	{
+		/* Metapage not written yet (e.g. index build).  The reloption is the
+		 * durable authority; never consult the session GUC here because that
+		 * would let REINDEX silently change an existing index's mode. */
+		MerkleOptions *opts = merkle_get_options(indexRel);
+		int mode = opts ? opts->update_mode : MERKLE_UPDATE_SYNCHRONOUS_COW;
+		if (opts)
+			pfree(opts);
+		return mode;
+	}
+}
+
+int
+merkle_get_update_mode_by_oid(Oid index_oid)
+{
+	Relation indexRel = index_open(index_oid, AccessShareLock);
+	int mode = merkle_get_update_mode(indexRel);
+	index_close(indexRel, AccessShareLock);
+	return mode;
+}
+
 /*
  * merkle_update_tree_path() - Stage one committed-delta leaf change.
  *
@@ -925,9 +986,9 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
     if (opts != NULL)
     {
         numPartitions = opts->partitions;
-		/* Dynamic indexes retain a minimal v7 compatibility tree: one root
-		 * placeholder per fixed partition.  Authoritative nodes live in the
-		 * WAL-logged dynamic side relations. */
+		/* Dynamic indexes reserve this region for the native partition
+		 * directory.  Immutable nodes and XID-visible roots appended after it
+		 * are the authoritative tree; side relations are compatibility-only. */
 		leavesPerPartition = opts->dynamic ? 1 : opts->leaves_per_partition;
 		fanout = opts->dynamic ? MERKLE_DYNAMIC_LOGICAL_FANOUT : opts->fanout;
     }
@@ -958,7 +1019,13 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
     nodesPerPartition = (int) (((int64) fanout * (int64) leavesPerPartition - 1) / (fanout - 1));
     totalNodes = numPartitions * nodesPerPartition;
     nodesPerPage = (int)MERKLE_MAX_NODES_PER_PAGE;
-    numTreePages = (totalNodes + nodesPerPage - 1) / nodesPerPage;  /* ceiling division */
+	if (opts != NULL && opts->dynamic)
+	{
+		/* Native layout v4 uses one directory page per partition. */
+		numTreePages = numPartitions;
+	}
+	else
+		numTreePages = (totalNodes + nodesPerPage - 1) / nodesPerPage;  /* ceiling division */
     
     /* Initialize metadata page */
     metabuf = ReadBuffer(indexRel, P_NEW);
@@ -990,6 +1057,12 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 		meta->dynamicMergeThreshold = opts->merge_threshold;
 		meta->dynamicLeafByteCapacity = opts->leaf_byte_capacity;
 		meta->dynamicMaxKeyBytes = opts->max_key_bytes;
+		meta->nativeDirectoryStart = MERKLE_TREE_START_BLKNO;
+		meta->nativeDirectoryPages = numTreePages;
+		if (opts->update_mode == MERKLE_UPDATE_SYNCHRONOUS_COW)
+			meta->nativeFormatFlags = MERKLE_NATIVE_MODE_SYNCHRONOUS_COW;
+		else
+			meta->nativeFormatFlags = MERKLE_NATIVE_MODE_PENDING_LOG;
 	}
 	/*
 	 * Merkle metadata lives directly in the page content area rather than in
@@ -1051,6 +1124,9 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 		MarkBufferDirty(treebuf);
 		UnlockReleaseBuffer(treebuf);
 	}
+
+	if (opts != NULL && opts->dynamic)
+		merkle_native_init(indexRel, numPartitions, baseline_apply_seq);
 
 }
 

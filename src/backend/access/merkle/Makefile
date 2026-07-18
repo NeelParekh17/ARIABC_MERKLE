@@ -8,6 +8,7 @@ OBJS = \
 	merkledelta.o \
 	merkleapply.o \
 	merkledynamic.o \
+	merklenative.o \
 	merkleinsert.o \
 	merkleverify.o \
 	merkleutil.o
