@@ -1,0 +1,6 @@
+2026-07-17 20:58:05.760 IST [76257] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-07-17 20:58:05.766 IST [76257] LOG:  listening on Unix socket "/tmp/ariabc-merkle-applier_crash-g61rDR/socket/.s.PGSQL.56160"
+
+ ariaMyDbg main.c : main: 200 
+2026-07-17 20:58:05.770 IST [76281] LOG:  database system was shut down at 2026-07-17 20:58:01 IST
+2026-07-17 20:58:05.772 IST [76257] LOG:  database system is ready to accept connections

@@ -1,0 +1,26 @@
+2026-07-17 20:54:17.296 IST [74587] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-07-17 20:54:17.302 IST [74587] LOG:  listening on Unix socket "/tmp/ariabc-merkle-build_crash-OTzCvi/socket/.s.PGSQL.56540"
+
+ ariaMyDbg main.c : main: 200 
+2026-07-17 20:54:17.305 IST [74588] LOG:  database system was shut down at 2026-07-17 20:54:12 IST
+2026-07-17 20:54:17.307 IST [74587] LOG:  database system is ready to accept connections
+2026-07-17 20:54:17.448 IST [74587] LOG:  received immediate shutdown request
+2026-07-17 20:54:17.449 IST [74592] WARNING:  terminating connection because of crash of another server process
+2026-07-17 20:54:17.449 IST [74592] DETAIL:  The postmaster has commanded this server process to roll back the current transaction and exit, because another server process exited abnormally and possibly corrupted shared memory.
+2026-07-17 20:54:17.449 IST [74592] HINT:  In a moment you should be able to reconnect to the database and repeat your command.
+2026-07-17 20:54:18.495 IST [74587] LOG:  database system is shut down
+2026-07-17 20:54:22.227 IST [74603] LOG:  starting PostgreSQL 13devel on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-07-17 20:54:22.233 IST [74603] LOG:  listening on Unix socket "/tmp/ariabc-merkle-build_crash-OTzCvi/socket/.s.PGSQL.56540"
+
+ ariaMyDbg main.c : main: 200 
+2026-07-17 20:54:22.237 IST [74604] LOG:  database system was interrupted; last known up at 2026-07-17 20:54:17 IST
+2026-07-17 20:54:22.290 IST [74604] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-07-17 20:54:22.291 IST [74604] LOG:  redo starts at 0/15D13E0
+2026-07-17 20:54:22.297 IST [74604] LOG:  invalid record length at 0/168CA98: wanted 24, got 0
+2026-07-17 20:54:22.297 IST [74604] LOG:  redo done at 0/168CA70
+2026-07-17 20:54:22.317 IST [74603] LOG:  database system is ready to accept connections
+2026-07-17 20:54:22.408 IST [74603] LOG:  received immediate shutdown request
+2026-07-17 20:54:22.409 IST [74608] WARNING:  terminating connection because of crash of another server process
+2026-07-17 20:54:22.409 IST [74608] DETAIL:  The postmaster has commanded this server process to roll back the current transaction and exit, because another server process exited abnormally and possibly corrupted shared memory.
+2026-07-17 20:54:22.409 IST [74608] HINT:  In a moment you should be able to reconnect to the database and repeat your command.
+2026-07-17 20:54:23.457 IST [74603] LOG:  database system is shut down
