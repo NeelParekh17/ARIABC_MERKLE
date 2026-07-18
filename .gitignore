@@ -54,6 +54,11 @@ lib*.pc
 *.md
 *.diff
 
+# Native Merkle architecture and acceptance contracts are intentional source.
+!NATIVE_MERKLE_IMPLEMENTATION_CHECKLIST.md
+!Dynamic_merkle_docs/
+!Dynamic_merkle_docs/*.md
+
 # Exclude scripts by default (but allow whitelisting specific files)
 /scripts/*
 

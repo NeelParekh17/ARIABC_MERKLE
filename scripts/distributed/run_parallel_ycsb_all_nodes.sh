@@ -39,8 +39,10 @@ set -euo pipefail
 #   --signing-modes <0,1>   Signing modes for det runs: 0=unsigned, 1=signed  [default: 0,1]
 #   --signing-privkey <p>   Signing key path (relative to repo root)  [default: scripts/bench_signing_privkey.pem]
 #   --enforce-signatures <1> 0|1 — set bcdb_enforce_signatures in workload sessions  [default: 1]
+#   --legacy-merkle         Use the legacy static Merkle restore (default: native dynamic)
 #   --poll-interval <60>    Seconds between monitoring polls
 #   --hang-timeout <60>     Seconds of no log change before hang warning
+#   --stall-timeout <1800>  Abort if a live benchmark has no log progress this long
 #   --skip-sync             Skip the rsync phase (reuse last-synced remote source)
 #
 
@@ -74,11 +76,13 @@ RATES=""
 SIGNING_MODES="0"
 SIGNING_PRIVKEY="scripts/bench_signing_privkey.pem"
 ENFORCE_SIGNATURES="1"
+DYNAMIC_MERKLE=1
 DB_NAME="postgres"
 DB_USER="postgres"
 DB_PORT=5438
 POLL_INTERVAL_S=60
 HANG_TIMEOUT_S=60
+STALL_TIMEOUT_S=1800
 SKIP_SYNC=0
 
 while [[ $# -gt 0 ]]; do
@@ -94,8 +98,10 @@ while [[ $# -gt 0 ]]; do
     --signing-modes) SIGNING_MODES="${2:-}"; shift 2 ;;
     --signing-privkey) SIGNING_PRIVKEY="${2:-}"; shift 2 ;;
     --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
+    --legacy-merkle)  DYNAMIC_MERKLE=0; shift 1 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
     --hang-timeout)  HANG_TIMEOUT_S="${2:-60}"; shift 2 ;;
+    --stall-timeout) STALL_TIMEOUT_S="${2:-1800}"; shift 2 ;;
     --skip-sync)     SKIP_SYNC=1; shift 1 ;;
     -h|--help)
       sed -n '/^# Usage/,/^[^#]/p' "$0" | head -n 20
@@ -108,6 +114,18 @@ case "$TRANSACTION_ISOLATION" in
   "read committed"|"repeatable read"|"serializable") ;;
   *) echo "ERROR: unsupported --transaction-isolation: $TRANSACTION_ISOLATION" >&2; exit 2 ;;
 esac
+
+for numeric in POLL_INTERVAL_S HANG_TIMEOUT_S STALL_TIMEOUT_S; do
+  value="${!numeric}"
+  [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 )) || {
+    echo "ERROR: $numeric must be a positive integer (got: $value)" >&2
+    exit 2
+  }
+done
+if (( STALL_TIMEOUT_S < HANG_TIMEOUT_S )); then
+  echo "ERROR: --stall-timeout must be >= --hang-timeout" >&2
+  exit 2
+fi
 
 SIGNING_PRIVKEY_LOCAL=""
 if [[ -n "$SIGNING_PRIVKEY" ]]; then
@@ -252,6 +270,11 @@ for req in \
   fi
 done
 
+if [[ "$DYNAMIC_MERKLE" == "1" && ! -f "$REPO_ROOT/scripts/distributed/sql/restore_usertable_small_dynamic.sql" ]]; then
+  echo "ERROR: native dynamic Merkle restore SQL is missing" >&2
+  exit 1
+fi
+
 for node in "${!NODE_PASSWORDS[@]}"; do
   if [[ -n "${NODE_PASSWORDS[$node]}" ]]; then
     command -v sshpass >/dev/null 2>&1 || {
@@ -272,6 +295,8 @@ lmsg "Modes        : $MODES"
 lmsg "Threads      : $THREADS"
 lmsg "Runs         : $RUNS"
 lmsg "Tx isolation : $TRANSACTION_ISOLATION"
+lmsg "Merkle       : $([[ "$DYNAMIC_MERKLE" == "1" ]] && echo native-dynamic/synchronous_cow || echo legacy-static)"
+lmsg "Stall abort  : ${STALL_TIMEOUT_S}s (warning at ${HANG_TIMEOUT_S}s)"
 lmsg "Workloads    : ${WORKLOADS:-<bench_threads_matrix.py defaults>}"
 lmsg "SigningModes : ${SIGNING_MODES:-<default>}"
 lmsg "SigningKey   : ${SIGNING_PRIVKEY_LOCAL:-<not set>}"
@@ -615,6 +640,7 @@ _build_bench_flags() {
     fi
   fi
   [[ -n "$ENFORCE_SIGNATURES" ]] && extra+=" --enforce-signatures '$ENFORCE_SIGNATURES'"
+  [[ "$DYNAMIC_MERKLE" == "1" ]] && extra+=" --dynamic-merkle --dynamic-merkle-index 'public.usertable_small_dynamic_merkle_idx'"
   extra+=" --transaction-isolation '$TRANSACTION_ISOLATION'"
   printf '%s' "$extra"
 }
@@ -682,6 +708,7 @@ export ARIABC_PSQL='$inst/bin/psql'
 export ARIABC_INSTALL_DIR='$inst'
 export ARIABC_DIR='$repo'
 export ARIABC_PGPORT='$DB_PORT'
+export ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1
 export LD_LIBRARY_PATH='$inst/lib:\${LD_LIBRARY_PATH:-}'
 pgdata_line=\$(bash '$repo/scripts/distributed/ensure_single_node_postgres.sh' \
   --repo-root '$repo' --install-dir '$inst' \
@@ -804,31 +831,38 @@ echo
 local_bench_log=""
 
 # ============================================================
-# PHASE 2.5: VERIFY synchronous_commit = on ON ALL NODES
+# PHASE 2.5: VERIFY WAL DURABILITY SETTINGS ON ALL NODES
 # Query the live running Postgres on every node right now,
 # while the benchmark is active, to confirm the setting has
 # not been flipped by auto.conf, ALTER SYSTEM, or a session SET.
 # ============================================================
-lmsg "=== Phase 2.5: Verifying synchronous_commit on all nodes ==="
+lmsg "=== Phase 2.5: Verifying WAL durability settings on all nodes ==="
 declare -a _sc_bad=()
 _check_synchronous_commit() {
   local node="$1"
   local type="$2"
   local inst="${NODE_INST[$node]:-}"
   local psql_bin="$inst/bin/psql"
-  local sc_val=""
+  local settings=""
+  local attempt
+  for attempt in $(seq 1 15); do
+    settings=$(ssh_run "$node" \
+      "LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
+       -tAc \"select current_setting('synchronous_commit') || '|' || current_setting('fsync') || '|' || current_setting('full_page_writes') || '|' || current_setting('wal_level');\" 2>/dev/null || true" 2>/dev/null || true)
+    settings="${settings//[[:space:]]/}"
+    [[ -n "$settings" ]] && break
+    sleep 2
+  done
 
-  sc_val=$(ssh_run "$node" \
-    "LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
-     -tAc 'SHOW synchronous_commit;' 2>/dev/null || true" 2>/dev/null || true)
-
-  sc_val="${sc_val// /}"  # trim whitespace
-  if [[ "$sc_val" == "on" ]]; then
-    lmsg "  [OK]  $node  synchronous_commit = on"
-  elif [[ -z "$sc_val" ]]; then
-    lmsg "  [WARN] $node  could not read synchronous_commit (postgres may still be starting)"
+  local sc_val fsync_val fpw_val wal_level
+  IFS='|' read -r sc_val fsync_val fpw_val wal_level <<< "$settings"
+  if [[ "$sc_val" == "on" && "$fsync_val" == "on" && "$fpw_val" == "on" && "$wal_level" != "minimal" && -n "$wal_level" ]]; then
+    lmsg "  [OK]  $node  synchronous_commit=$sc_val fsync=$fsync_val full_page_writes=$fpw_val wal_level=$wal_level"
+  elif [[ -z "$settings" ]]; then
+    lmsg "  [FAIL] $node  could not read WAL durability settings after 30s"
+    _sc_bad+=("$node")
   else
-    lmsg "  [FAIL] $node  synchronous_commit = $sc_val  (expected: on)"
+    lmsg "  [FAIL] $node  WAL settings: synchronous_commit=$sc_val fsync=$fsync_val full_page_writes=$fpw_val wal_level=$wal_level"
     _sc_bad+=("$node")
   fi
 }
@@ -840,9 +874,9 @@ for entry in "${ALL_NODES[@]}"; do
 done
 
 if [[ "${#_sc_bad[@]}" -gt 0 ]]; then
-  _abort_run "synchronous_commit != on on ${#_sc_bad[@]} node(s)" "${_sc_bad[@]}"
+  _abort_run "WAL durability settings invalid on ${#_sc_bad[@]} node(s)" "${_sc_bad[@]}"
 fi
-lmsg "Phase 2.5 complete: synchronous_commit = on on all nodes."
+lmsg "Phase 2.5 complete: synchronous_commit/fsync/full_page_writes/WAL level validated on all nodes."
 echo
 
 # ============================================================
@@ -964,6 +998,9 @@ _check_node() {
       local stale=$(( now - NODE_LAST_CHG["$node"] ))
       if [[ "$stale" -ge "$HANG_TIMEOUT_S" ]]; then
         echo "  *** HANG WARNING: $node – no log change for ${stale}s (pid=$pid) ***"
+      fi
+      if [[ "$stale" -ge "$STALL_TIMEOUT_S" ]]; then
+        _abort_run "benchmark stalled on $node for ${stale}s with no log progress" "$node"
       fi
     fi
 

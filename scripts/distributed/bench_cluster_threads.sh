@@ -294,7 +294,7 @@ extract_tps() {
   local reported_tps=""
   if [[ -f "$stdout_log" ]]; then
     # Try the new TPS formats first
-    reported_tps="$(grep -oP '(TPS_majority_visible|TPS_strict_majority|TPS_direct)\s*:\s*\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
+    reported_tps="$(grep -oP '(TPS_majority_visible|TPS_kafka_majority_visible|TPS_strict_majority|TPS_direct)\s*:\s*\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
     if [[ -z "$reported_tps" ]]; then
       reported_tps="$(grep -oP 'TPS_all3_audit_drained\s*:\s*\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
     fi

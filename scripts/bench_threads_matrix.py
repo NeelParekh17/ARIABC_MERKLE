@@ -1208,6 +1208,19 @@ def main() -> int:
         help="Set bcdb_enforce_signatures in workload sessions.",
     )
     parser.add_argument(
+        "--dynamic-merkle",
+        action="store_true",
+        help=(
+            "Use the native dynamic-Merkle restore for deterministic modes. "
+            "Plain PostgreSQL mode continues to use the non-Merkle baseline restore."
+        ),
+    )
+    parser.add_argument(
+        "--dynamic-merkle-index",
+        default="public.usertable_small_dynamic_merkle_idx",
+        help="Dynamic Merkle index used for explicit post-run verification.",
+    )
+    parser.add_argument(
         "--rate",
         type=int,
         default=0,
@@ -1270,6 +1283,7 @@ def main() -> int:
 
     start_server = scripts_dir / "start_server.sh"
     restore_sql = scripts_dir / "restore_usertable_small.sql"
+    dynamic_restore_sql = scripts_dir / "distributed" / "sql" / "restore_usertable_small_dynamic.sql"
     workload_py = scripts_dir / "generic-saicopg-traffic-load+logSkip-safedb+pg.py"
 
     if not start_server.exists():
@@ -1277,6 +1291,9 @@ def main() -> int:
         return 2
     if not restore_sql.exists():
         print(f"ERROR: missing {restore_sql}", file=sys.stderr)
+        return 2
+    if args.dynamic_merkle and not dynamic_restore_sql.exists():
+        print(f"ERROR: missing {dynamic_restore_sql}", file=sys.stderr)
         return 2
     if not workload_py.exists():
         print(f"ERROR: missing {workload_py}", file=sys.stderr)
@@ -1396,6 +1413,9 @@ def main() -> int:
         "commands": {
             "start_server": str(start_server),
             "restore_sql": str(restore_sql),
+            "dynamic_restore_sql": str(dynamic_restore_sql) if args.dynamic_merkle else "",
+            "dynamic_merkle": bool(args.dynamic_merkle),
+            "dynamic_merkle_index": args.dynamic_merkle_index,
             "workload_py": str(workload_py),
             "psql": psql_path,
             "python": python_path,
@@ -1543,11 +1563,25 @@ def main() -> int:
 
                                 mode_env = dict(env)
                                 merkle_for_mode = db_type != 0
+                                case_restore_sql = (
+                                    dynamic_restore_sql
+                                    if args.dynamic_merkle and merkle_for_mode
+                                    else restore_sql
+                                )
                                 _force_pgoption(
                                     mode_env,
                                     "enable_merkle_index",
                                     "on" if merkle_for_mode else "off",
                                 )
+                                if args.dynamic_merkle and merkle_for_mode:
+                                    # The dynamic restore intentionally performs a destructive
+                                    # benchmark reset.  Pass the guard as a session GUC; an
+                                    # environment variable alone is not visible to PostgreSQL.
+                                    _force_pgoption(
+                                        mode_env,
+                                        "ariabc.allow_destructive_benchmark_reset",
+                                        "on",
+                                    )
 
                                 restart_server = (not args.no_server_restart) or (db_type == 1)
                                 start_exit = 0
@@ -1621,7 +1655,7 @@ def main() -> int:
                                             "-v",
                                             f"bench_enable_merkle={1 if merkle_for_mode else 0}",
                                             "-f",
-                                            str(restore_sql),
+                                            str(case_restore_sql),
                                         ],
                                         cwd=scripts_dir,
                                         env=mode_env,
@@ -1741,7 +1775,7 @@ def main() -> int:
                                                 "-v",
                                                 f"bench_enable_merkle={1 if merkle_for_mode else 0}",
                                                 "-f",
-                                                str(restore_sql),
+                                                str(case_restore_sql),
                                             ],
                                             cwd=scripts_dir,
                                             env=mode_env,
@@ -1858,8 +1892,37 @@ def main() -> int:
                                             verification_error = "merkle_apply_pending_failed: " + apply_msg
                                         else:
                                             count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=mode_env)
-                                            root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=mode_env)
-                                            verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=mode_env)
+                                            if args.dynamic_merkle:
+                                                dynamic_index = args.dynamic_merkle_index.replace("'", "''")
+                                                root_hash = _psql_value(
+                                                    psql_path,
+                                                    db=args.db,
+                                                    port=args.port,
+                                                    user=args.user,
+                                                    query=(
+                                                        "select merkle_root_hash_index('"
+                                                        + dynamic_index
+                                                        + "'::regclass);"
+                                                    ),
+                                                    cwd=scripts_dir,
+                                                    env=mode_env,
+                                                )
+                                                verify = _psql_value(
+                                                    psql_path,
+                                                    db=args.db,
+                                                    port=args.port,
+                                                    user=args.user,
+                                                    query=(
+                                                        "select merkle_dynamic_verify('"
+                                                        + dynamic_index
+                                                        + "'::regclass);"
+                                                    ),
+                                                    cwd=scripts_dir,
+                                                    env=mode_env,
+                                                )
+                                            else:
+                                                root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=mode_env)
+                                                verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=mode_env)
                                             if count_s is None or root_hash is None or verify is None:
                                                 verification_error = "post_workload_verification_query_failed"
                                     if verification_error:

@@ -18,6 +18,7 @@
 #include "access/itup.h"
 #include "access/sdir.h"
 #include "access/tableam.h"
+#include "access/transam.h"
 #include "nodes/execnodes.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
@@ -31,6 +32,11 @@ extern bool merkle_index_maintenance_suppress;
 /* GUC: Emit NOTICE lines for Merkle build roots */
 extern bool merkle_update_detection;
 extern bool merkle_recovery_profile_enabled;
+#define MERKLE_UPDATE_SYNCHRONOUS_COW 0
+#define MERKLE_UPDATE_PENDING_LOG     1
+#define MERKLE_NATIVE_MODE_SYNCHRONOUS_COW 0x0001
+#define MERKLE_NATIVE_MODE_PENDING_LOG     0x0002
+#define MERKLE_NATIVE_MODE_MASK            0x0003
 /* GUC: reject stale reads (error) or synchronously catch up (wait). */
 extern int merkle_read_lag_policy;
 #define MERKLE_APPLY_DEFAULT_BATCH_ITEMS 256
@@ -127,13 +133,49 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 
 /* Dynamic Merkle format.  The static v7 page layout remains unchanged. */
 #define MERKLE_DYNAMIC_META_MAGIC          ((uint32) 0x44594E4D) /* "DYNM" */
-#define MERKLE_DYNAMIC_LAYOUT_VERSION      1
+#define MERKLE_DYNAMIC_LAYOUT_VERSION      5
 #define MERKLE_DYNAMIC_LOGICAL_FANOUT      32
 #define MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY 32
 #define MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD 8
 #define MERKLE_DYNAMIC_DEFAULT_LEAF_BYTE_CAPACITY (64 * 1024)
 #define MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES 1024
 #define MERKLE_DYNAMIC_MAX_KEY_BYTES       2000
+
+/*
+ * Format-version tags for the combined global root commitment
+ * (plan_left.md §2).  Increment either when the corresponding hash
+ * construction changes so that historical roots remain distinguishable.
+ */
+
+
+/* Native dynamic format: authoritative XID-visible roots plus immutable
+ * internal, leaf, and canonical-item records in the index relation. */
+#define MERKLE_NATIVE_PAGE_MAGIC           ((uint32) 0x4D4E5047) /* "MNPG" */
+#define MERKLE_NATIVE_PAGE_VERSION         2
+#define MERKLE_NATIVE_ROOT_MAGIC           ((uint32) 0x4D4E5254) /* "MNRT" */
+#define MERKLE_NATIVE_ROOT_VERSION          2
+#define MERKLE_NATIVE_RECORD_MAGIC          ((uint32) 0x4D4E5243) /* "MNRC" */
+#define MERKLE_NATIVE_RECORD_VERSION        2
+#define MERKLE_NATIVE_RECORD_INTERNAL       1
+#define MERKLE_NATIVE_RECORD_LEAF           2
+#define MERKLE_NATIVE_RECORD_ITEM           3
+#define MERKLE_NATIVE_RECORD_ITEM_CHUNK     4
+#define MERKLE_NATIVE_INVALID_OFFSET        InvalidOffsetNumber
+
+typedef struct MerkleNativePageOpaqueData
+{
+	uint32      magic;
+	uint16      version;
+	uint16      page_type;
+	/* Incremented whenever a FREE page is reused for append records. */
+	uint32      page_generation;
+} MerkleNativePageOpaqueData;
+
+#define MERKLE_NATIVE_PAGE_SPECIAL_SIZE \
+	MAXALIGN(sizeof(MerkleNativePageOpaqueData))
+#define MerkleNativePageGetOpaque(page) \
+	((MerkleNativePageOpaqueData *) PageGetSpecialPointer(page))
+
 
 /*
  * Calculate how many nodes fit per page
@@ -172,6 +214,106 @@ typedef struct MerkleHash
     uint8       data[MERKLE_HASH_BYTES];
 } MerkleHash;
 
+typedef struct MerkleNativeLocator
+{
+	BlockNumber block;
+	OffsetNumber offset;
+	uint16      reserved;
+	uint32      page_generation;
+} MerkleNativeLocator;
+
+typedef struct MerkleNativePartitionEntry
+{
+	MerkleNativeLocator root_head;
+	uint64      last_allocated_version;
+} MerkleNativePartitionEntry;
+
+typedef struct MerkleNativeRootVersion
+{
+	uint32      magic;
+	uint16      version;
+	uint16      flags;
+	TransactionId creator_xid;
+	uint32      partition_id;
+	uint16      sequence_domain;
+	uint16      sequence_flags;
+	uint64      sequence_epoch;
+	uint64      sequence_value;
+	uint64      version_no;
+	uint64      tuple_count;
+	uint64      subtree_bytes;
+	MerkleHash  data_xor;
+	MerkleHash  content_xor;
+	MerkleHash  structure_hash;
+	MerkleNativeLocator root_node;
+	MerkleNativeLocator previous_version;
+	uint32      checksum;
+} MerkleNativeRootVersion;
+
+#define MERKLE_NATIVE_ROOT_FROZEN_COMMITTED (1U << 0)
+#define MERKLE_NATIVE_ROOT_ABORTED_HINT      (1U << 1)
+
+#define MERKLE_SEQUENCE_RAFT           1
+#define MERKLE_SEQUENCE_LOCAL_XID      2
+/* A baseline is an initial materialization in the same ordering domain as
+ * the index's normal sequence.  It is a flag, never a third domain. */
+#define MERKLE_SEQUENCE_FLAG_BUILD_BASELINE (1U << 0)
+
+typedef struct MerkleNativeRecordHeader
+{
+	uint32      magic;
+	uint16      version;
+	uint16      type;
+	uint32      size;
+	uint32      checksum;
+} MerkleNativeRecordHeader;
+
+typedef struct MerkleNativeNodeRecord
+{
+	MerkleNativeRecordHeader header;
+	uint32      partition_id;
+	uint16      prefix_len;
+	uint16      flags;
+	uint8       prefix[MERKLE_HASH_BYTES];
+	uint64      tuple_count;
+	uint64      subtree_bytes;
+	MerkleHash  data_xor;
+	MerkleHash  content_xor;
+	MerkleHash  structure_hash;
+	MerkleNativeLocator left;
+	MerkleNativeLocator right;
+	MerkleNativeLocator item_head;
+} MerkleNativeNodeRecord;
+
+#define MERKLE_NATIVE_NODE_LEAF (1U << 0)
+
+typedef struct MerkleNativeItemRecord
+{
+	MerkleNativeRecordHeader header;
+	MerkleNativeLocator next;
+	uint8       route_digest[MERKLE_HASH_BYTES];
+	MerkleHash  tuple_hash;
+	uint32      key_length;
+	/* canonical key bytes follow */
+} MerkleNativeItemRecord;
+
+typedef struct MerkleNativeItemChunkRecord
+{
+	MerkleNativeRecordHeader header;
+	MerkleNativeLocator next;
+	uint32      item_count;
+	uint32      payload_bytes;
+	/* packed MerkleNativePackedItem records follow */
+} MerkleNativeItemChunkRecord;
+
+typedef struct MerkleNativePackedItem
+{
+	uint8       route_digest[MERKLE_HASH_BYTES];
+	MerkleHash  tuple_hash;
+	uint32      key_length;
+	/* canonical key bytes follow */
+} MerkleNativePackedItem;
+
 /*
  * MerkleNode - A single node in the Merkle tree
  */
@@ -207,6 +349,9 @@ typedef struct MerkleMetaPageData
 	uint32          dynamicMergeThreshold;
 	uint32          dynamicLeafByteCapacity;
 	uint32          dynamicMaxKeyBytes;
+	BlockNumber     nativeDirectoryStart;
+	uint32          nativeDirectoryPages;
+	uint32          nativeFormatFlags;
 } MerkleMetaPageData;
 
 #define MerklePageGetMeta(page) \
@@ -227,6 +372,7 @@ typedef struct MerkleOptions
 	int         merge_threshold;
 	int         leaf_byte_capacity;
 	int         max_key_bytes;
+	int         update_mode;
 } MerkleOptions;
 
 /*
@@ -259,6 +405,8 @@ typedef struct MerkleItemIdentity
 typedef struct MerkleDynamicTransition
 {
 	uint64      seq;
+	uint16      sequence_domain;
+	uint64      sequence_epoch;
 	Oid         index_oid;
 	RelFileNode index_rnode;
 	int32       partition_id;
@@ -271,6 +419,7 @@ typedef struct MerkleDynamicTransition
 } MerkleDynamicTransition;
 
 typedef struct MerkleDynamicBuildState MerkleDynamicBuildState;
+typedef struct MerkleNativeBuildState MerkleNativeBuildState;
 
 /* Arithmetic-only perfect-tree geometry shared by all Merkle code paths. */
 typedef struct MerkleGeometry
@@ -315,6 +464,10 @@ extern Datum merklehandler(PG_FUNCTION_ARGS);
  */
 extern bytea *merkle_options(Datum reloptions, bool validate);
 extern MerkleOptions *merkle_get_options(Relation indexRel);
+extern int merkle_get_update_mode(Relation indexRel);
+extern int merkle_get_update_mode_by_oid(Oid index_oid);
+extern bool merkle_has_pending_staged_delta(void);
+extern bool merkle_has_synchronous_staged_delta(void);
 
 /*
  * Helper to read tree config from metadata
@@ -378,6 +531,44 @@ extern void merkle_compute_dynamic_item_identity(Relation indexRel,
 										 int max_key_bytes,
 										 MerkleItemIdentity *result);
 extern bool merkle_index_is_dynamic(Relation indexRel);
+extern void merkle_native_init(Relation indexRel, int partitions,
+							   uint64 baseline_apply_seq);
+extern void merkle_native_build_from_oracle(Relation indexRel,
+									uint64 baseline_apply_seq);
+extern MerkleNativeBuildState *merkle_native_build_begin(Relation indexRel,
+												 uint64 baseline_apply_seq);
+extern void merkle_native_build_add(MerkleNativeBuildState *state,
+									const MerkleItemIdentity *identity,
+									const MerkleHash *hash);
+extern void merkle_native_build_finish(MerkleNativeBuildState *state);
+/* Mutation entry points are deliberately split by authority.  Strict COW
+ * publication is only valid for an index configured synchronous_cow; pending
+ * materialization is only valid for pending_log.  Keeping these as separate
+ * APIs prevents a caller from accidentally publishing a root in the wrong
+ * ordering domain. */
+extern void merkle_native_publish_strict_transitions(
+									 const MerkleDynamicTransition *transitions,
+									 int count, uint16 sequence_domain,
+									 uint64 sequence_epoch,
+									 uint64 sequence_value);
+extern void merkle_native_materialize_pending_transitions(
+									 const MerkleDynamicTransition *transitions,
+									 int count, uint16 sequence_domain,
+									 uint64 sequence_epoch,
+									 uint64 sequence_value);
+extern void merkle_native_root(Relation indexRel, MerkleHash *hash,
+							   uint64 *tuple_count);
+extern bool merkle_native_verify_relations(Relation heapRel,
+									Relation indexRel, Snapshot snapshot);
+extern bool merkle_native_is_ready(Relation indexRel);
+extern void merkle_native_vacuum(Relation indexRel,
+							 IndexBulkDeleteResult *stats);
+extern Datum merkle_native_get_partition_roots(PG_FUNCTION_ARGS);
+extern Datum merkle_native_get_ranges(PG_FUNCTION_ARGS);
+extern Datum merkle_native_get_range_items(PG_FUNCTION_ARGS);
+extern Datum merkle_native_get_leaf_frontier(PG_FUNCTION_ARGS);
+extern Datum merkle_native_tree_stats(PG_FUNCTION_ARGS);
+extern Datum merkle_native_partition_roots_at(PG_FUNCTION_ARGS);
 extern void merkle_stage_item_delta(Relation indexRel,
 									const MerkleItemIdentity *identity,
 									const MerkleHash *hash, bool is_insert);
@@ -401,6 +592,8 @@ extern bool merkle_dynamic_verify_relations(Relation heapRel,
 extern void merkle_dynamic_root(Relation indexRel, MerkleHash *hash,
 								uint64 *tuple_count);
 extern char *merkle_dynamic_stats_json(Relation indexRel);
+extern char *merkle_dynamic_single_key_text(Relation indexRel,
+											const bytea *key_data);
 extern void merkle_dynamic_vacuum_stats(Relation indexRel,
 									IndexBulkDeleteResult *stats);
 extern void merkle_dynamic_drop_state(Oid index_oid,

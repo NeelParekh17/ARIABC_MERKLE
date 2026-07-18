@@ -199,6 +199,17 @@ file_sha256() {
 
 RESTORE_INPUT="$(cluster_arg_value --restore-sql scripts/distributed/sql/restore_usertable_small_dynamic.sql)"
 WORKLOAD_INPUT="$(cluster_arg_value --workload scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)"
+NODE_IDS_INPUT="$(cluster_arg_value --node-ids 1,2,4)"
+read -r -a NODE_ID_VALUES <<< "${NODE_IDS_INPUT//,/ }"
+NODE_COUNT="${#NODE_ID_VALUES[@]}"
+if (( NODE_COUNT < 1 )); then
+  echo "ERROR: topology must contain at least one node" >&2
+  exit 2
+fi
+# Majority result completion must use the Raft majority for the configured topology.
+# For the normal three-node cluster this is 2; custom topologies derive the
+# corresponding floor(N/2)+1 quorum automatically.
+RESULT_COMPLETION_QUORUM=$(( NODE_COUNT / 2 + 1 ))
 
 echo "=== Building targets ==="
 cmake --build ariabc_pg/build \
@@ -264,8 +275,10 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
   printf 'det_client_workers=%s\n' "$DET_CLIENT_WORKERS"
   printf 'executor_workers=%s\n' "$EXECUTOR_WORKERS"
   printf 'reps=%s\n' "$REPS"
+  printf 'node_count=%s\n' "$NODE_COUNT"
+  printf 'result_completion_quorum=%s\n' "$RESULT_COMPLETION_QUORUM"
   printf 'schedule=interleaved_alternating_by_rep\n'
-  printf 'tps_semantics=direct_client_visible_completion_async_replica_validation\n'
+  printf 'tps_semantics=raft_majority_result_completion_async_all3_validation\n'
   printf 'cluster_args='
   printf '%q ' "${CLUSTER_ARGS[@]}"
   printf '\n'
@@ -328,7 +341,7 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
           --raft-ordered-batch-target-entries 32 \
           --raft-ordered-batch-linger-us 1000 \
           --raft-ordered-coalesce-log 0 \
-          --kafka-completion-mode async \
+          --kafka-completion-mode majority_async_all3 \
           --det-window 65536 \
           </dev/null || RUN_PASS=0
 
@@ -422,7 +435,7 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
   python3 scripts/distributed/plot_executor_sweep.py \
     --input-csv "$OUT/summary.csv" \
     --output-img "$OUT/executor_sweep_tps.png" \
-    --title "Direct client-visible completion TPS (async validation, Threads=$THREADS)"
+    --title "Raft-majority result-completion TPS (async all-replica/Merkle validation, Threads=$THREADS)"
 
   echo
   echo "Done."

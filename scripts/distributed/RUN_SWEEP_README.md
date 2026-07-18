@@ -17,7 +17,8 @@ It:
 6. runs the distributed benchmark for each server executor worker count;
 7. runs each worker count once by default;
 8. runs an untimed warm-up before each measured workload;
-9. runs untimed distributed merge/re-split/key-move and pending-crash gates;
+9. runs optional untimed distributed merge/re-split/key-move and pending-crash
+   gates when enabled;
 10. performs post-run marker/Merkle equality after TPS measurement;
 11. records each produced `cluster4_*` artifact and summary.
 
@@ -29,15 +30,20 @@ the campaign's `console.log`.
 From the repository root:
 
 ```bash
-export ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1
-./scripts/distributed/run_sweep.sh
+./run_sweep.sh
 ```
+
+`./run_sweep.sh` is a repository-root convenience wrapper for the documented
+`scripts/distributed/run_sweep.sh` implementation. The latter can also be
+invoked directly.
 
 The lab password defaults to the configured cluster credential and can be
 overridden with `ARIABC_CLUSTER_PASSWORD`. SSH uses strict host-key checking
 and the managed file selected by `ARIABC_KNOWN_HOSTS_FILE` (default:
-`~/.ssh/known_hosts`). The destructive opt-in must only be set for a dedicated
-benchmark database.
+`~/.ssh/known_hosts`). The wrapper defaults
+`ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1` because it restores and resets a
+dedicated disposable benchmark database; set it to `0` to refuse the run. Never
+point this runner at a database containing production data.
 
 The wrapper defaults to the distributed dynamic-Merkle path:
 
@@ -47,17 +53,24 @@ The wrapper defaults to the distributed dynamic-Merkle path:
 --enable-merkle-index 1
 --merkle-verify-mode dynamic
 --dynamic-index public.usertable_small_dynamic_merkle_idx
---dynamic-structure-gate 1
---dynamic-structure-crash-gate 1
+--dynamic-structure-gate 0
+--dynamic-structure-crash-gate 0
 --warmup-queries 1000
+--kafka-completion-mode majority_async_all3
 ```
 
-Each run has three explicit boundaries:
+Structure and crash gates are available but disabled by default to keep the
+normal throughput sweep bounded. Enable them explicitly when those transition
+checks are part of the acceptance run.
+
+Each run has these boundaries:
 
 1. `gateway_warmup.log`: 1,000 state-preserving no-op updates by default;
 2. `gateway_test.log`: the timed workload used by `parse_tps_metrics.py`;
-3. `dynamic_structure_gateway.log`: untimed merge/re-split/key-route coverage;
-4. a pending-transition replica crash/restart gate;
+3. `dynamic_structure_gateway.log`: untimed merge/re-split/key-route coverage,
+   if `--dynamic-structure-gate 1` is enabled;
+4. a pending-transition replica crash/restart gate, if
+   `--dynamic-structure-crash-gate 1` is enabled;
 5. `post_verify_marker_gateway.log` plus dynamic Merkle equality artifacts.
 
 Warm-up and post-run verification are excluded from TPS. Set
@@ -77,6 +90,131 @@ Watch progress in another terminal:
 
 ```bash
 tail -f out.txt
+```
+
+## What “Raft-majority result-completion TPS” means
+
+The sweep hard-codes `--kafka-completion-mode majority_async_all3`. There are
+two different quorum boundaries:
+
+1. **Raft replication/commit quorum:** the ordered Raft entry must be replicated
+   to the Raft majority (2 of 3 in the normal cluster) before Raft considers it
+   committed and applies it to the state machine. This is still required.
+2. **Client result quorum:** the gateway's `wait_any_majority` waits for any
+   majority of replica result records. For the normal three-node cluster this
+   is 2 of 3; custom topologies use `floor(node_count/2)+1`. No particular
+   follower is preferred.
+
+Therefore the normal path is: submit to the Raft leader → Raft majority commit
+→ every healthy replica applies the committed entry → the gateway waits for any
+majority of replica result records → return the client response. The remaining
+replica result and Merkle/hash validation continues asynchronously; a lagging
+healthy replica still executes the entry and is checked by post-run validation.
+A transaction is counted as complete when the majority result boundary returns
+the client response. The measured TPS is therefore:
+
+```text
+Raft-majority result-completion TPS
+  = timed workload transaction count / (overall_wall_ms / 1000)
+```
+
+`overall_wall_ms` is the wall-clock duration of the measured workload in
+`gateway_test.log` (also reported as `overall time taken (millisec)`). Warm-up
+is excluded, and marker verification, replica drain, Kafka hash validation, and
+Merkle equality are not added to this timed interval. The campaign records the
+contract as
+`tps_semantics=raft_majority_result_completion_async_all3_validation` in
+`campaign.env`.
+
+This answers “how quickly did the client receive responses after Raft commit,
+once any replica majority had returned results?” It is not all-three-replica
+drained/audit TPS and is not measured before commit. A high TPS is accepted
+only with the required
+post-run marker/Merkle equality proof, input-freeze proof, warm-up separation,
+latency samples, and any explicitly enabled structure/crash gates. For a
+all-three synchronous timing experiment, use the lower-level
+`run_4node_raft_cluster.sh` with strict majority mode and label that result
+separately; `run_sweep.sh` intentionally fixes its mode for comparable sweeps.
+
+## Command-line options
+
+All options below are parsed by `run_sweep.sh` and forwarded to the cluster
+runner where noted. Lists accept commas or quoted spaces, for example `1,2,4`
+or `"1 2 4"`.
+
+### Sweep and client sizing
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--threads N` | `96` | Deterministic client lanes and, unless overridden, gateway deterministic workers. |
+| `--det-client-workers N` | same as `--threads` | Gateway deterministic thread-pool workers; allows lanes and workers to differ. |
+| `--executor-workers LIST` | `1 2 4 8 12 16` | Server executor values to sweep. Each value is also passed as `--server-pg-connections`; the runner requires the pair to match. |
+| `--reps LIST` | `1` | Repetition labels for every executor value. Repetitions alternate sweep order to reduce order bias. |
+
+### Dynamic Merkle and verification
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--restore-sql FILE` | `scripts/distributed/sql/restore_usertable_small_dynamic.sql` | Restore/reset SQL before each run; the default creates the native dynamic Merkle layout. |
+| `--verify-table TABLE` | `usertable_small` | Table whose replica roots are compared after the run. |
+| `--enable-merkle-index N` | `1` | Enable (`1`) or disable (`0`) Merkle index maintenance. |
+| `--merkle-verify-mode M` | `dynamic` | `dynamic` checks native topology and leaf assignments; `legacy` uses the legacy root path; `auto` lets the cluster runner choose. |
+| `--dynamic-index NAME` | `public.usertable_small_dynamic_merkle_idx` | Fully-qualified native dynamic Merkle index used by dynamic verification. |
+| `--dynamic-structure-gate N` | `0` | Enable (`1`) untimed merge/re-split/key-route transition coverage; failure invalidates the run. |
+| `--dynamic-structure-crash-gate N` | `0` | Enable (`1`) pending-transition replica crash/restart coverage; failure invalidates the run. |
+
+### Workload phases
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--warmup-queries N` | `1000` | Untimed state-preserving warm-up updates. `0` disables warm-up; warm-up is proven excluded from TPS. |
+| `--warmup-workload FILE` | runner default | Replace the default warm-up SQL with an explicit state-safe workload file. |
+
+### Cluster topology and database connection
+
+The six CSV node options are parallel arrays: element `i` in each array
+describes the same node.
+
+| Option | Default/source | Effect |
+| --- | --- | --- |
+| `--node-ids CSV` | `cluster_topology.sh` | Raft/node IDs. |
+| `--node-ips CSV` | `cluster_topology.sh` | Reachable node addresses. |
+| `--node-names CSV` | `cluster_topology.sh` | Human-readable names in logs/artifacts. |
+| `--node-users CSV` | `cluster_topology.sh` | SSH users for each node. |
+| `--node-is-u22 CSV` | `cluster_topology.sh` | `1` selects the Ubuntu 22.04 remote build; `0` selects the normal build. |
+| `--node-client-ports CSV` | `cluster_topology.sh` | Gateway client port on each node. |
+| `--raft-port N` | `9000` | Raft transport port. |
+| `--db-port N` | `5438` | PostgreSQL port. |
+| `--db-user USER` | `postgres` | PostgreSQL user. |
+| `--db-name NAME` | `postgres` | PostgreSQL database. |
+| `--kafka-host HOST` | topology default | Kafka broker host. |
+| `--kafka-port N` | `9092` | Kafka broker port. |
+| `--kafka-home-remote DIR` | topology default | Remote Kafka installation directory. |
+
+The wrapper also fixes the ordering profile, any-majority result completion
+with asynchronous all-replica validation, one direct client in-flight request,
+deterministic queue watermarks, and the executor/connection pairing so every
+point in a campaign is comparable. These are not independent sweep flags.
+
+`-h` and `--help` print the option reference and exit without building or
+starting a cluster.
+
+Useful invocations:
+
+```bash
+# Default dynamic-native campaign (six executor points, one repetition).
+./run_sweep.sh
+
+# Small smoke campaign.
+./run_sweep.sh --threads 1 --det-client-workers 1 --executor-workers 1 --reps 1
+
+# Include the optional dynamic topology and pending-crash gates.
+./run_sweep.sh --dynamic-structure-gate 1 --dynamic-structure-crash-gate 1
+
+# Explicit legacy verification (the restore SQL must match the chosen layout).
+./run_sweep.sh \
+  --restore-sql scripts/restore_usertable_small.sql \
+  --merkle-verify-mode legacy --enable-merkle-index 1
 ```
 
 The campaign directory is printed near the end of `out.txt`:
@@ -99,9 +237,12 @@ console.log   live campaign output captured alongside out.txt
 
 The summary contains one header and includes client p50/p95/p99 latency,
 all-three agreement latency, marker visibility, Merkle drain, and total
-post-run equality time. TPS is labelled as direct client-visible completion
-with asynchronous replica validation; it is not all-three durable-completion
-TPS.
+post-run equality time. Its `tps` value is Raft-majority result-completion TPS
+under asynchronous all-replica validation; it is not all-three durable-completion
+TPS. Do not substitute the gateway's `submit_time`: in an
+async run that field is a cumulative sum across submissions, not wall-clock
+duration. Use `overall_wall_ms` (and the recorded `tps_semantics`) for the
+campaign's TPS interpretation.
 
 Each individual distributed run still creates its own normal
 `scripts/bench_full_results/cluster4_*` artifact.

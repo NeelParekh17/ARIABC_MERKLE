@@ -147,7 +147,11 @@ merkleBulkdelete(IndexVacuumInfo *info,
 	 */
 	if (merkle_index_is_dynamic(indexRel))
 	{
-		merkle_dynamic_vacuum_stats(indexRel, stats);
+		if (merkle_get_update_mode(indexRel) == MERKLE_UPDATE_SYNCHRONOUS_COW &&
+			merkle_native_is_ready(indexRel))
+			merkle_native_vacuum(indexRel, stats);
+		else
+			merkle_dynamic_vacuum_stats(indexRel, stats);
 		return stats;
 	}
     
@@ -225,7 +229,11 @@ merkleVacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
 	if (merkle_index_is_dynamic(indexRel))
 	{
-		merkle_dynamic_vacuum_stats(indexRel, stats);
+		if (merkle_get_update_mode(indexRel) == MERKLE_UPDATE_SYNCHRONOUS_COW &&
+			merkle_native_is_ready(indexRel))
+			merkle_native_vacuum(indexRel, stats);
+		else
+			merkle_dynamic_vacuum_stats(indexRel, stats);
 		return stats;
 	}
     

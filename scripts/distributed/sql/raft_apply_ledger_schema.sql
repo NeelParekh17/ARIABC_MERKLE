@@ -81,6 +81,31 @@ RETURNS jsonb
 AS 'merkle_dynamic_tree_stats'
 LANGUAGE internal VOLATILE PARALLEL UNSAFE;
 
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_native_partition_roots_at(
+    index_oid regclass, sequence_domain smallint, sequence_epoch bigint,
+    sequence_value bigint)
+RETURNS TABLE(partition_id integer, visible_apply_seq bigint,
+              visible_domain smallint, sequence_flags smallint,
+              visible_epoch bigint, version_no bigint, creator_xid xid,
+              frozen boolean, tuple_count bigint, data_xor bytea,
+              structure_hash bytea)
+AS 'merkle_native_partition_roots_at'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+-- Bootstrap pg_proc functions cannot change their OUT row type in place on
+-- an existing cluster.  Keep roots_at ABI-compatible and expose the item
+-- commitment through this versioned helper.
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_native_partition_commitments_at(
+    index_oid regclass, sequence_domain smallint, sequence_epoch bigint,
+    sequence_value bigint)
+RETURNS TABLE(partition_id integer, visible_apply_seq bigint,
+              visible_domain smallint, sequence_flags smallint,
+              visible_epoch bigint, version_no bigint, creator_xid xid,
+              frozen boolean, tuple_count bigint, data_xor bytea,
+              content_xor bytea, structure_hash bytea)
+AS 'merkle_native_partition_roots_at'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
 -- Global ordering for crash-safe Merkle delta application.  Raft positions
 -- are epoch-scoped; this counter supplies a database-wide, non-repeating
 -- sequence.  Raft manifests reserve a range once per multi-item entry.
@@ -811,4 +836,6 @@ REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_get_ranges(regclass, jsonb)
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_get_range_items(regclass, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_get_leaf_frontier(regclass) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_tree_stats(regclass) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_native_partition_roots_at(regclass, smallint, bigint, bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_native_partition_commitments_at(regclass, smallint, bigint, bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_catalog.merkle_recovery_status() TO PUBLIC;

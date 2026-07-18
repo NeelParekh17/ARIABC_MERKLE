@@ -78,6 +78,7 @@ static void merkle_parse_delta_blob(bytea *blob, uint64 seq,
 									uint64 expected_log_index,
 									uint32 expected_item_ordinal,
 									bool is_raft,
+									uint64 sequence_epoch,
 									MerkleEventArray *events);
 static void merkle_apply_leaf_events(MerkleEventArray *events,
 									 uint64 batch_end);
@@ -584,6 +585,7 @@ merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS)
 static void
 merkle_parse_delta_blob(bytea *blob, uint64 seq, uint64 expected_log_index,
 						uint32 expected_item_ordinal, bool is_raft,
+						uint64 sequence_epoch,
 						MerkleEventArray *events)
 {
 	const char *header;
@@ -874,6 +876,9 @@ merkle_parse_delta_blob(bytea *blob, uint64 seq, uint64 expected_log_index,
 
 				MemSet(&event, 0, sizeof(event));
 				event.seq = seq;
+				event.sequence_domain = is_raft ? MERKLE_SEQUENCE_RAFT :
+					MERKLE_SEQUENCE_LOCAL_XID;
+				event.sequence_epoch = sequence_epoch;
 				event.index_oid = index_oid;
 				event.index_rnode = index_rnode;
 				event.partition_id = (int32) target;
@@ -1323,19 +1328,19 @@ merkle_apply_until_impl(uint64 required_seq)
 {
 	static const char *source_sql =
 		"SELECT apply_seq, source_state, delta_version, delta_blob,"
-		"       raft_log_index, item_ordinal, is_raft"
+		"       raft_log_index, item_ordinal, is_raft, epoch_id"
 		"  FROM ("
 		"    SELECT a.merkle_apply_seq AS apply_seq, a.state AS source_state,"
 		"           a.merkle_delta_version AS delta_version,"
 		"           a.merkle_delta_blob AS delta_blob,"
 		"           a.raft_log_index AS raft_log_index,"
-		"           a.item_ordinal AS item_ordinal, true AS is_raft"
+		"           a.item_ordinal AS item_ordinal, true AS is_raft, a.epoch_id"
 		"      FROM ariabc_internal.raft_apply_item a"
 		"     WHERE a.merkle_apply_seq > $1"
 		"       AND a.merkle_apply_seq <= $2"
 		"    UNION ALL"
 		"    SELECT l.apply_seq, 2::smallint, l.delta_version, l.delta_blob,"
-		"           0::bigint, 0::integer, false"
+		"           0::bigint, 0::integer, false, NULL::bytea"
 		"      FROM ariabc_internal.merkle_local_delta l"
 		"     WHERE l.apply_seq > $1"
 		"       AND l.apply_seq <= $2"
@@ -1426,6 +1431,7 @@ merkle_apply_until_impl(uint64 required_seq)
 			Datum log_d;
 			Datum ordinal_d;
 			Datum raft_d;
+			Datum epoch_d;
 			bool seq_null;
 			bool state_null;
 			bool version_null;
@@ -1433,12 +1439,14 @@ merkle_apply_until_impl(uint64 required_seq)
 			bool log_null;
 			bool ordinal_null;
 			bool raft_null;
+			bool epoch_null;
 			uint64 source_seq;
 			int16 source_state;
 			int delta_version;
 			uint64 expected_log_index;
 			uint32 expected_item_ordinal;
 			bool is_raft;
+			uint64 sequence_epoch = 0;
 			Size blob_bytes = 0;
 			uint32 delta_entry_count = 0;
 
@@ -1464,6 +1472,7 @@ merkle_apply_until_impl(uint64 required_seq)
 			log_d = SPI_getbinval(tuple, tupdesc, 5, &log_null);
 			ordinal_d = SPI_getbinval(tuple, tupdesc, 6, &ordinal_null);
 			raft_d = SPI_getbinval(tuple, tupdesc, 7, &raft_null);
+			epoch_d = SPI_getbinval(tuple, tupdesc, 8, &epoch_null);
 			if (seq_null || state_null || version_null || log_null ||
 				ordinal_null || raft_null)
 				elog(ERROR, "Merkle apply source contains NULL ordering metadata");
@@ -1474,6 +1483,18 @@ merkle_apply_until_impl(uint64 required_seq)
 			expected_log_index = (uint64) DatumGetInt64(log_d);
 			expected_item_ordinal = (uint32) DatumGetInt32(ordinal_d);
 			is_raft = DatumGetBool(raft_d);
+			if (is_raft)
+			{
+				bytea *epoch;
+
+				if (epoch_null)
+					elog(ERROR, "Merkle Raft apply source contains an invalid epoch");
+				epoch = DatumGetByteaPP(epoch_d);
+				if (VARSIZE_ANY_EXHDR(epoch) != BCDB_RAFT_DIGEST_BYTES)
+					elog(ERROR, "Merkle Raft apply source contains an invalid epoch");
+				memcpy(&sequence_epoch, VARDATA_ANY(epoch), sizeof(sequence_epoch));
+				sequence_epoch = pg_ntoh64(sequence_epoch);
+			}
 
 			/* A claimed item or an unmaterialized range is normally a prefix gap.
 			 * Direct deterministic local deltas are the one exception: apply_seq is
@@ -1535,7 +1556,7 @@ merkle_apply_until_impl(uint64 required_seq)
 					break;
 				merkle_parse_delta_blob(DatumGetByteaPP(blob_d), source_seq,
 									expected_log_index, expected_item_ordinal,
-									is_raft, &events);
+									is_raft, sequence_epoch, &events);
 				batch_bytes += blob_bytes;
 				batch_page_budget += delta_entry_count;
 			}

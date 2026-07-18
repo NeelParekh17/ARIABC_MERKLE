@@ -3244,6 +3244,7 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
     remote_restore="$REMOTE_RESTORE_SQL"
     log "  Restoring $VERIFY_TABLE on $name (background)"
     node_ssh "$idx" "
+      set -euo pipefail
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       test -f '$remote_restore' || { echo 'missing restore SQL: $remote_restore' >&2; exit 1; }
@@ -4160,22 +4161,174 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
   STRUCTURE_START_MS="$(date +%s%3N)"
   STRUCTURE_SEQ=$(( TIMED_DET_START_SEQ + WORKLOAD_LINES ))
   STRUCTURE_REQ=$(( TIMED_REQ_ID_OFFSET + WORKLOAD_LINES ))
+  wait_all_nodes_committed() {
+    local target="$1" label="$2" deadline=$((SECONDS + 120))
+    local idx value all_ready
+
+    while (( SECONDS < deadline )); do
+      all_ready=1
+      for idx in "${!NODE_IDS[@]}"; do
+        value="$(node_ssh "$idx" "
+          export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+          '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc 'SELECT bcdb_last_committed_txid()'
+        " | tr -d '[:space:]')"
+        if [[ ! "$value" =~ ^[0-9]+$ || "$value" -lt "$target" ]]; then
+          all_ready=0
+          break
+        fi
+      done
+      if [[ "$all_ready" -eq 1 ]]; then
+        log "  committed watermark barrier PASS label=$label target=$target"
+        return 0
+      fi
+      sleep 0.1
+    done
+    die "committed watermark barrier timed out label=$label target=$target"
+  }
+  wait_all_nodes_quiescent() {
+    local label="$1" deadline=$((SECONDS + 120))
+    local idx active all_ready stable_polls=0
+
+    # A gateway terminal reply can precede the backend's top-level COMMIT,
+    # and bcdb_last_committed_txid() is a maximum observed xid rather than a
+    # contiguous drain watermark.  Require every client backend except this
+    # probe to be idle before reading a cross-partition native snapshot.
+    while (( SECONDS < deadline )); do
+      all_ready=1
+      for idx in "${!NODE_IDS[@]}"; do
+        active="$(node_ssh "$idx" "
+          export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+          '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+            SELECT count(*)
+              FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND backend_type = 'client backend'
+               AND state <> 'idle'\"
+        " | tr -d '[:space:]')"
+        if [[ ! "$active" =~ ^[0-9]+$ || "$active" -ne 0 ]]; then
+          all_ready=0
+          break
+        fi
+      done
+      if [[ "$all_ready" -eq 1 ]]; then
+        stable_polls=$(( stable_polls + 1 ))
+        # The server owns a 513-connection pool and can dispatch another
+        # queued batch immediately after one zero-active sample.  Require a
+        # sustained quiet interval, not a momentary gap between batches.
+        if (( stable_polls >= 8 )); then
+          log "  client-backend quiescence PASS label=$label stable_polls=$stable_polls"
+          return 0
+        fi
+      else
+        stable_polls=0
+      fi
+      sleep 0.1
+    done
+    die "client-backend quiescence timed out label=$label"
+  }
+  declare -a STABLE_DYNAMIC_VALUES=()
+  wait_dynamic_roots_stable() {
+    local label="$1" deadline=$((SECONDS + 120))
+    local idx value first aggregate previous="" stable_polls=0 all_ready
+
+    # Result rows are published before PRE_COMMIT.  The only authoritative
+    # drain condition for native Merkle is therefore an unchanged committed
+    # root on every replica, not gateway completion or a pg_stat_activity gap.
+    while (( SECONDS < deadline )); do
+      all_ready=1
+      first=""
+      aggregate=""
+      for idx in "${!NODE_IDS[@]}"; do
+        if ! value="$(node_ssh "$idx" "
+          export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+          '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+            WITH native AS MATERIALIZED (
+              SELECT merkle_dynamic_tree_stats('$DYNAMIC_INDEX_NAME'::regclass)::jsonb AS stats
+            )
+            SELECT (stats->>'combined_root') || '|' ||
+                   (stats->>'item_count') || '|' ||
+                   (stats->>'max_apply_seq') || '|' ||
+                   (stats->>'leaf_count') || '|' ||
+                   (stats->>'max_depth')
+              FROM native\"
+        " 2>/dev/null | tr -d '[:space:]')"; then
+          all_ready=0
+          break
+        fi
+        if [[ ! "$value" =~ ^[0-9a-fA-F]{64}\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+          all_ready=0
+          break
+        fi
+        STABLE_DYNAMIC_VALUES[$idx]="$value"
+        [[ -z "$first" ]] && first="$value"
+        if [[ "$value" != "$first" ]]; then
+          all_ready=0
+          break
+        fi
+        aggregate+="${NODE_IDS[$idx]}:$value;"
+      done
+      if [[ "$all_ready" -eq 1 && "$aggregate" == "$previous" ]]; then
+        stable_polls=$(( stable_polls + 1 ))
+        if (( stable_polls >= 5 )); then
+          log "  committed native-root stability PASS label=$label stable_polls=$stable_polls signature=$first"
+          return 0
+        fi
+      else
+        stable_polls=0
+      fi
+      previous="$aggregate"
+      sleep 0.2
+    done
+    die "committed native-root stability timed out label=$label"
+  }
+  # Gateway result publication can precede PostgreSQL top-level commit.  Do
+  # not inspect an in-flight native root chain as the structure baseline.
+  wait_all_nodes_committed $(( STRUCTURE_SEQ - 1 )) timed_workload
+  wait_all_nodes_quiescent timed_workload
+  wait_dynamic_roots_stable timed_workload
+  STRUCTURE_AUTHORITY="$(node_ssh 0 "
+    export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+    '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+      SELECT merkle_dynamic_tree_stats('$DYNAMIC_INDEX_NAME'::regclass)::jsonb->>'authority'\"
+  " | tr -d '[:space:]')"
+  STRUCTURE_NATIVE=0
+  [[ "$STRUCTURE_AUTHORITY" == "native_index_pages" ]] && STRUCTURE_NATIVE=1
+  log "  dynamic structure authority=$STRUCTURE_AUTHORITY"
   declare -a STRUCT_BASE_SPLITS=() STRUCT_BASE_MERGES=()
+  declare -a STRUCT_BASE_LEAVES=() STRUCT_BASE_DEPTHS=() STRUCT_BASE_ROOTS=()
   for idx in "${!NODE_IDS[@]}"; do
-    stats="$(node_ssh "$idx" "
-      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
-      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
-        INSERT INTO ariabc_internal.merkle_local_delta (apply_seq, delta_version, delta_blob)
-          SELECT seq, 0, NULL FROM generate_series(1::bigint, $STRUCTURE_SEQ::bigint) AS seq
-          ON CONFLICT (apply_seq) DO NOTHING;
-        SELECT merkle_apply_pending();
-        SELECT split_count || '|' || merge_count
-          FROM ariabc_internal.merkle_dynamic_state
-         WHERE index_oid='$DYNAMIC_INDEX_NAME'::regclass\" | tail -1
-    " | tr -d '[:space:]')"
-    IFS='|' read -r STRUCT_BASE_SPLITS[$idx] STRUCT_BASE_MERGES[$idx] <<<"$stats"
-    [[ "${STRUCT_BASE_SPLITS[$idx]}" =~ ^[0-9]+$ && "${STRUCT_BASE_MERGES[$idx]}" =~ ^[0-9]+$ ]] ||
-      die "could not read baseline dynamic counters from ${NODE_NAMES[$idx]}: $stats"
+    if [[ "${STRUCTURE_NATIVE:-0}" -eq 1 ]]; then
+      stats="${STABLE_DYNAMIC_VALUES[$idx]}"
+      IFS='|' read -r STRUCT_BASE_ROOTS[$idx] _stable_items _stable_seq \
+        STRUCT_BASE_LEAVES[$idx] STRUCT_BASE_DEPTHS[$idx] <<<"$stats"
+      STRUCT_BASE_SPLITS[$idx]=0
+      STRUCT_BASE_MERGES[$idx]=0
+    else
+      stats="$(node_ssh "$idx" "
+        export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+        '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+          INSERT INTO ariabc_internal.merkle_local_delta (apply_seq, delta_version, delta_blob)
+            SELECT seq, 0, NULL FROM generate_series(1::bigint, $STRUCTURE_SEQ::bigint) AS seq
+            ON CONFLICT (apply_seq) DO NOTHING;
+          SELECT merkle_apply_pending();
+          SELECT split_count || '|' || merge_count
+            FROM ariabc_internal.merkle_dynamic_state
+           WHERE index_oid='$DYNAMIC_INDEX_NAME'::regclass\" | tail -1
+      " | tr -d '[:space:]')"
+      IFS='|' read -r STRUCT_BASE_SPLITS[$idx] STRUCT_BASE_MERGES[$idx] <<<"$stats"
+      STRUCT_BASE_LEAVES[$idx]=0
+      STRUCT_BASE_DEPTHS[$idx]=0
+      STRUCT_BASE_ROOTS[$idx]=pending
+    fi
+    if [[ "$STRUCTURE_NATIVE" -eq 1 ]]; then
+      [[ "${STRUCT_BASE_LEAVES[$idx]}" =~ ^[0-9]+$ && "${STRUCT_BASE_DEPTHS[$idx]}" =~ ^[0-9]+$ &&
+         "${STRUCT_BASE_ROOTS[$idx]}" =~ ^[0-9a-fA-F]+$ ]] ||
+        die "could not read baseline native topology from ${NODE_NAMES[$idx]}: $stats"
+    else
+      [[ "${STRUCT_BASE_SPLITS[$idx]}" =~ ^[0-9]+$ && "${STRUCT_BASE_MERGES[$idx]}" =~ ^[0-9]+$ ]] ||
+        die "could not read baseline dynamic counters from ${NODE_NAMES[$idx]}: $stats"
+    fi
   done
 
   dynamic_key_partition_snapshot() {
@@ -4226,21 +4379,30 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
     2>&1 | tee "$LOG_DIR/dynamic_structure_gateway.log"
 	POST_TIMED_GATEWAY_STATEMENTS=3
 	crash_idx=-1
+	# The crash gate is a durability proof, so tie it to actual all-node commit
+	# watermarks rather than early gateway result publication.
+  wait_all_nodes_committed $(( STRUCTURE_SEQ + 2 )) structure_workload
+  wait_all_nodes_quiescent structure_workload
+  wait_dynamic_roots_stable structure_workload
 
 	if [[ "$DYNAMIC_STRUCTURE_CRASH_GATE" -eq 1 ]]; then
 		crash_idx=$((${#NODE_IDS[@]} - 1))
     crash_name="${NODE_NAMES[$crash_idx]}"
-    pending_before_crash="$(node_ssh "$crash_idx" "
-      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
-      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
-        SELECT count(*)
-          FROM ariabc_internal.merkle_local_delta AS delta
-          CROSS JOIN ariabc_internal.merkle_apply_state AS state
-         WHERE delta.apply_seq > state.applied_seq
-           AND delta.delta_blob IS NOT NULL\"" | tr -d '[:space:]')"
-    [[ "$pending_before_crash" =~ ^[1-9][0-9]*$ ]] ||
-      die "crash gate found no committed pending Merkle transitions on $crash_name"
-    log "  [$crash_name] immediate PostgreSQL stop with $pending_before_crash pending transition batches"
+    if [[ "$STRUCTURE_NATIVE" -eq 1 ]]; then
+      log "  [$crash_name] immediate PostgreSQL stop after committed native COW roots (no pending drain)"
+    else
+      pending_before_crash="$(node_ssh "$crash_idx" "
+        export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+        '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+          SELECT count(*)
+            FROM ariabc_internal.merkle_local_delta AS delta
+            CROSS JOIN ariabc_internal.merkle_apply_state AS state
+           WHERE delta.apply_seq > state.applied_seq
+             AND delta.delta_blob IS NOT NULL\"" | tr -d '[:space:]')"
+      [[ "$pending_before_crash" =~ ^[1-9][0-9]*$ ]] ||
+        die "crash gate found no committed pending Merkle transitions on $crash_name"
+      log "  [$crash_name] immediate PostgreSQL stop with $pending_before_crash pending transition batches"
+    fi
     node_ssh "$crash_idx" "
       set -Eeuo pipefail
       BIN='$REMOTE_INSTALL_DIR/bin'
@@ -4254,25 +4416,49 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
 	fi
 
   for idx in "${!NODE_IDS[@]}"; do
-    stats="$(node_ssh "$idx" "
-      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
-      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
-        INSERT INTO ariabc_internal.merkle_local_delta (apply_seq, delta_version, delta_blob)
-          SELECT seq, 0, NULL FROM generate_series(1::bigint, $(( STRUCTURE_SEQ + 3 ))::bigint) AS seq
-          ON CONFLICT (apply_seq) DO NOTHING;
-        SELECT merkle_apply_pending();
-        SELECT split_count || '|' || merge_count || '|' || merkle_dynamic_verify('$DYNAMIC_INDEX_NAME'::regclass)
-          FROM ariabc_internal.merkle_dynamic_state
-         WHERE index_oid='$DYNAMIC_INDEX_NAME'::regclass\" | tail -1
-    " | tr -d '[:space:]')"
-    IFS='|' read -r splits merges verified <<<"$stats"
-    [[ "$splits" =~ ^[0-9]+$ && "$merges" =~ ^[0-9]+$ && ( "$verified" == "t" || "$verified" == "true" ) ]] ||
-      die "dynamic structure verification failed on ${NODE_NAMES[$idx]}: $stats"
-		[[ "$splits" -gt "${STRUCT_BASE_SPLITS[$idx]}" ]] || die "re-split counter did not advance on ${NODE_NAMES[$idx]}"
-		[[ "$merges" -gt "${STRUCT_BASE_MERGES[$idx]}" ]] || die "merge counter did not advance on ${NODE_NAMES[$idx]}"
+    if [[ "$STRUCTURE_NATIVE" -eq 1 ]]; then
+      stats="$(node_ssh "$idx" "
+        export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+        '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+          SELECT (stats->>'leaf_count') || '|' || (stats->>'max_depth') || '|' ||
+                 (stats->>'combined_root') || '|' ||
+                 merkle_dynamic_verify('$DYNAMIC_INDEX_NAME'::regclass)
+            FROM (SELECT merkle_dynamic_tree_stats('$DYNAMIC_INDEX_NAME'::regclass)::jsonb AS stats) AS native\"
+      " | tr -d '[:space:]')"
+    else
+      stats="$(node_ssh "$idx" "
+        export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+        '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+          INSERT INTO ariabc_internal.merkle_local_delta (apply_seq, delta_version, delta_blob)
+            SELECT seq, 0, NULL FROM generate_series(1::bigint, $(( STRUCTURE_SEQ + 3 ))::bigint) AS seq
+            ON CONFLICT (apply_seq) DO NOTHING;
+          SELECT merkle_apply_pending();
+          SELECT split_count || '|' || merge_count || '|' || merkle_dynamic_verify('$DYNAMIC_INDEX_NAME'::regclass)
+            FROM ariabc_internal.merkle_dynamic_state
+           WHERE index_oid='$DYNAMIC_INDEX_NAME'::regclass\" | tail -1
+      " | tr -d '[:space:]')"
+    fi
+		if [[ "$STRUCTURE_NATIVE" -eq 1 ]]; then
+			IFS='|' read -r leaves depth combined_root verified <<<"$stats"
+			[[ "$leaves" =~ ^[0-9]+$ && "$depth" =~ ^[0-9]+$ && "$combined_root" =~ ^[0-9a-fA-F]+$ &&
+			   ( "$verified" == "t" || "$verified" == "true" ) ]] ||
+				die "native structure verification failed on ${NODE_NAMES[$idx]}: $stats"
+			[[ "$leaves" -ne "${STRUCT_BASE_LEAVES[$idx]}" || "$depth" -ne "${STRUCT_BASE_DEPTHS[$idx]}" ]] ||
+				die "native structure mutation did not change topology on ${NODE_NAMES[$idx]}"
+			[[ "$combined_root" != "${STRUCT_BASE_ROOTS[$idx]}" ]] ||
+				die "native structure mutation did not change the combined root on ${NODE_NAMES[$idx]}"
+		else
+			IFS='|' read -r splits merges verified <<<"$stats"
+			[[ "$splits" =~ ^[0-9]+$ && "$merges" =~ ^[0-9]+$ &&
+			   ( "$verified" == "t" || "$verified" == "true" ) ]] ||
+				die "dynamic structure verification failed on ${NODE_NAMES[$idx]}: $stats"
+			[[ "$splits" -gt "${STRUCT_BASE_SPLITS[$idx]}" ]] || die "re-split counter did not advance on ${NODE_NAMES[$idx]}"
+			[[ "$merges" -gt "${STRUCT_BASE_MERGES[$idx]}" ]] || die "merge counter did not advance on ${NODE_NAMES[$idx]}"
+		fi
 		if [[ "$idx" -eq "$crash_idx" ]]; then
 			printf 'DYNAMIC_DISTRIBUTED_PENDING_CRASH_RESTART_PASS=1\n' >>"$LOG_DIR/run_summary.env"
-			log "  DYNAMIC_DISTRIBUTED_PENDING_CRASH_RESTART_PASS=1 node=${NODE_NAMES[$idx]} replayed_through=$(( STRUCTURE_SEQ + 3 )) verify=$verified"
+			[[ "$STRUCTURE_NATIVE" -eq 1 ]] && printf 'DYNAMIC_DISTRIBUTED_NATIVE_CRASH_RESTART_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+			log "  DYNAMIC_DISTRIBUTED_PENDING_CRASH_RESTART_PASS=1 node=${NODE_NAMES[$idx]} replayed_through=$(( STRUCTURE_SEQ + 3 )) verify=$verified authority=$STRUCTURE_AUTHORITY"
 		fi
 	done
   dynamic_key_partition_snapshot 20000000 20000999 "$LOG_DIR/dynamic_key_partitions_after.tsv"
@@ -4447,6 +4633,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   declare -a POST_STRUCTURE_FAILURES=()
   declare -a POST_STATS_DIRTY=()
   declare -a POST_DYN_VERIFY=()
+  declare -a POST_MIN_SEQ=() POST_MAX_SEQ=()
   MERKLE_DRAIN_START_MS="$(date +%s%3N)"
 
   for idx in "${!NODE_IDS[@]}"; do
@@ -4498,6 +4685,24 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
           exit 1
         fi
 
+        authority=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"authority\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\1/p')
+        if [[ \"\$authority\" == native_index_pages ]]; then
+          dyn_verify=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_dynamic_verify('$DYNAMIC_INDEX_NAME'::regclass)\")
+          min_seq=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"min_apply_seq\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
+          max_seq=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"max_apply_seq\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
+          sequence_domain=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"sequence_domain\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
+          sequence_epoch=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"sequence_epoch\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
+          stats_row=\"\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"item_count\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')|\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"leaf_count\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')|\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"node_count\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')|\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"partitions\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')\"
+          IFS='|' read -r dyn_item_count dyn_leaf_count dyn_node_count dyn_partitions <<< \"\$stats_row\"
+          marker_sql=\"merkle_native_partition_commitments_at('$DYNAMIC_INDEX_NAME'::regclass, \$sequence_domain::smallint, \$sequence_epoch::bigint, \$max_seq::bigint)\"
+          marker_meta=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT count(*), coalesce(sum(tuple_count),0), count(*) FILTER (WHERE (sequence_flags & 1) = 0 AND (visible_domain <> \$sequence_domain OR visible_epoch <> \$sequence_epoch)) FROM \$marker_sql\")
+          IFS='|' read -r marker_count marker_items marker_bad_lineage <<< \"\$marker_meta\"
+          item_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"COPY (SELECT partition_id,tuple_count,encode(content_xor,'hex') FROM \$marker_sql ORDER BY partition_id) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
+          topo_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"COPY (SELECT partition_id,tuple_count,encode(structure_hash,'hex') FROM \$marker_sql ORDER BY partition_id) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
+          root_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"COPY (SELECT partition_id,tuple_count,encode(content_xor,'hex'),encode(structure_hash,'hex') FROM \$marker_sql ORDER BY partition_id) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
+          [[ \"\$dyn_verify\" == t && \"\$root_sha\" =~ ^[0-9a-f]{64}$ && \"\$topo_sha\" =~ ^[0-9a-f]{64}$ && \"\$item_sha\" =~ ^[0-9a-f]{64}$ && \"\$sequence_domain\" =~ ^[1-9][0-9]*$ && \"\$sequence_epoch\" =~ ^[0-9]+$ && \"\$max_seq\" =~ ^[0-9]+$ && \"\$marker_count\" == \"\$dyn_partitions\" && \"\$marker_items\" == \"\$dyn_item_count\" && \"\$marker_bad_lineage\" == 0 ]] || { echo \"typed native Merkle marker contract failed (domain=\$sequence_domain epoch=\$sequence_epoch value=\$max_seq roots=\$marker_count partitions=\$dyn_partitions marker_items=\$marker_items current_items=\$dyn_item_count bad_lineage=\$marker_bad_lineage)\" >&2; exit 1; }
+          echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify|\$min_seq|\$max_seq|\$sequence_domain|\$sequence_epoch\"
+        else
         # Structural verify
         dyn_verify=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_dynamic_verify('\${dyn_index}'::regclass)\")
         if [[ \"\$dyn_verify\" != t ]]; then
@@ -4631,7 +4836,8 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
              ORDER BY item.partition_id, item.key_data
           ) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
 
-        echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify\"
+        echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify||||\"
+        fi
       else
         echo \"\$cnt|\$root|\$verify\"
       fi
@@ -4655,7 +4861,8 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
       cat "$readback_stderr_file" >&2
     fi
     IFS='|' read -r cnt root verify root_sha topo_sha item_sha \
-        dyn_item_count dyn_leaf_count dyn_node_count dyn_partitions dyn_verify \
+        dyn_item_count dyn_leaf_count dyn_node_count dyn_partitions dyn_verify min_seq max_seq \
+        sequence_domain sequence_epoch \
       <<< "$readback"
     POST_COUNTS[$idx]="$cnt"
     POST_ROOTS[$idx]="$root"
@@ -4668,6 +4875,10 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     POST_NODE_COUNTS[$idx]="${dyn_node_count:-}"
     POST_PARTITIONS[$idx]="${dyn_partitions:-}"
     POST_DYN_VERIFY[$idx]="${dyn_verify:-}"
+    POST_MIN_SEQ[$idx]="${min_seq:-}"
+    POST_MAX_SEQ[$idx]="${max_seq:-}"
+    POST_SEQUENCE_DOMAIN[$idx]="${sequence_domain:-}"
+    POST_SEQUENCE_EPOCH[$idx]="${sequence_epoch:-}"
     if [[ "$_EFFECTIVE_VERIFY_MODE" == "dynamic" ]]; then
       log "  [$name] rows=$cnt root=$root verify=$verify root_sha256=${root_sha:-n/a} topo_sha256=${topo_sha:-n/a} item_sha256=${item_sha:-n/a} dyn_verify=${dyn_verify:-n/a}"
     else
@@ -4681,6 +4892,10 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   reference_root_sha="${POST_ROOT_SHA[0]:-}"
   reference_topo_sha="${POST_TOPO_SHA[0]:-}"
   reference_item_sha="${POST_ITEM_SHA[0]:-}"
+  reference_min_seq="${POST_MIN_SEQ[0]:-}"
+  reference_max_seq="${POST_MAX_SEQ[0]:-}"
+  reference_sequence_domain="${POST_SEQUENCE_DOMAIN[0]:-}"
+  reference_sequence_epoch="${POST_SEQUENCE_EPOCH[0]:-}"
   POST_PASS=1
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
@@ -4710,6 +4925,16 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
         POST_PASS=0
         log "  [$name] LEAF-ITEM DIGEST MISMATCH: ${POST_ITEM_SHA[$idx]} != $reference_item_sha"
       fi
+      if [[ -n "$reference_min_seq" && "${POST_MIN_SEQ[$idx]}" != "$reference_min_seq" ]] ||
+         [[ -n "$reference_max_seq" && "${POST_MAX_SEQ[$idx]}" != "$reference_max_seq" ]]; then
+        POST_PASS=0
+        log "  [$name] ROOT_SEQUENCE_MISMATCH: ${POST_MIN_SEQ[$idx]}..${POST_MAX_SEQ[$idx]} != ${reference_min_seq}..${reference_max_seq}"
+      fi
+      if [[ -n "$reference_sequence_domain" && "${POST_SEQUENCE_DOMAIN[$idx]}" != "$reference_sequence_domain" ]] ||
+         [[ -n "$reference_sequence_epoch" && "${POST_SEQUENCE_EPOCH[$idx]}" != "$reference_sequence_epoch" ]]; then
+        POST_PASS=0
+        log "  [$name] ROOT_SEQUENCE_PROVENANCE_MISMATCH: ${POST_SEQUENCE_DOMAIN[$idx]}/${POST_SEQUENCE_EPOCH[$idx]} != ${reference_sequence_domain}/${reference_sequence_epoch}"
+      fi
     fi
   done
 
@@ -4727,6 +4952,16 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     log "  full dynamic verifier    PASS"
     log "  DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1"
     printf 'DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+    if [[ "${STRUCTURE_NATIVE:-0}" -eq 1 ]]; then
+      printf 'ROOT_SEQUENCE_MARKER_DOMAIN=%s\n' "$reference_sequence_domain" >>"$LOG_DIR/run_summary.env"
+      printf 'ROOT_SEQUENCE_MARKER_EPOCH=%s\n' "$reference_sequence_epoch" >>"$LOG_DIR/run_summary.env"
+      printf 'ROOT_SEQUENCE_MARKER_VALUE=%s\n' "$reference_max_seq" >>"$LOG_DIR/run_summary.env"
+      printf 'ROOT_SEQUENCE_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+      printf 'DATA_ROOT_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+      printf 'STRUCTURE_ROOT_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+      printf 'COMBINED_ROOT_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+      printf 'LEAF_ASSIGNMENT_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+    fi
   elif [[ "$ENABLE_MERKLE_INDEX" -eq 1 ]]; then
     log "  $VERIFY_TABLE consistency: PASS rows=$reference_count root=$reference_root"
   else

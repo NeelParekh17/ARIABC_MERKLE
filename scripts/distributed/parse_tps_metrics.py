@@ -202,6 +202,7 @@ def main():
     # 5. Determine output values
     tps_majority_visible = "N/A"
     tps_all3_audit_drained = "N/A"
+    tps_kafka_majority_visible = "N/A"
     all3_audit_valid = ""
     parser_error = ""
 
@@ -265,9 +266,14 @@ def main():
         if majority_visible_ms > 0:
             tps_strict = workload_transactions * 1000.0 / majority_visible_ms
             tps_strict_str = f"{tps_strict:.2f} tx/s"
+            tps_kafka_majority_visible = f"{tps_strict:.2f}"
+            # Keep the historical machine-readable field populated for
+            # consumers that already use tps_majority_visible.  The human
+            # label above is intentionally explicit about its boundary.
+            tps_majority_visible = f"{tps_strict:.2f}"
         else:
             tps_strict_str = "N/A"
-        print(f"TPS_strict_majority             : {tps_strict_str}")
+        print(f"TPS_kafka_majority_visible      : {tps_strict_str}")
 
     else: # direct/no-Kafka
         print(f"Completion mode                 : direct")
@@ -293,6 +299,7 @@ def main():
         ("majority_visible_ms", str(majority_visible_ms) if majority_visible_ms > 0 else ""),
         ("all3_audit_drained_ms", str(all3_audit_drained_ms) if all3_audit_drained_ms > 0 else ""),
         ("tps_majority_visible", tps_majority_visible),
+        ("tps_kafka_majority_visible", tps_kafka_majority_visible),
         ("tps_all3_audit_drained", tps_all3_audit_drained),
         ("all3_audit_valid", all3_audit_valid),
         ("parser_error", parser_error),
