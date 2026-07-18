@@ -77,6 +77,16 @@ Warm-up and post-run verification are excluded from TPS. Set
 `--warmup-queries 0` to disable warm-up, or use `--warmup-workload FILE` for a
 custom state-safe warm-up workload.
 
+With `--dynamic-structure-profile 1`, each run records
+`DYNAMIC_NATIVE_PROFILE_SPLITS`, `DYNAMIC_NATIVE_PROFILE_MERGES`,
+`DYNAMIC_NATIVE_PROFILE_NODE_COUNT`, and `DYNAMIC_NATIVE_PROFILE_PASS=1` in
+`run_summary.env`. The native mutation path emits authoritative per-apply
+counter records. The runner consumes catalog fields when available and
+otherwise aggregates those PostgreSQL log records, so profiling remains valid
+across older state-table layouts. Values must match on every replica. Per-node
+values are also emitted as
+`DYNAMIC_NATIVE_PROFILE_NODE_<index>_{ID,SPLITS,MERGES}`.
+
 Passing any of these options explicitly overrides its default because explicit
 CLI arguments are forwarded after the default argument set.
 
@@ -162,6 +172,7 @@ or `"1 2 4"`.
 | `--dynamic-index NAME` | `public.usertable_small_dynamic_merkle_idx` | Fully-qualified native dynamic Merkle index used by dynamic verification. |
 | `--dynamic-structure-gate N` | `0` | Enable (`1`) untimed merge/re-split/key-route transition coverage; failure invalidates the run. |
 | `--dynamic-structure-crash-gate N` | `0` | Enable (`1`) pending-transition replica crash/restart coverage; failure invalidates the run. |
+| `--dynamic-structure-profile N` | `1` | Enable (`1`) native split/merge counters. Counters are reset before the timed workload, reported for every replica, and the run is valid only when all replicas agree; `0` disables profiling. |
 
 ### Workload phases
 

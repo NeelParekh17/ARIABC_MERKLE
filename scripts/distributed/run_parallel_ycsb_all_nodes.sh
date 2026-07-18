@@ -40,6 +40,7 @@ set -euo pipefail
 #   --signing-privkey <p>   Signing key path (relative to repo root)  [default: scripts/bench_signing_privkey.pem]
 #   --enforce-signatures <1> 0|1 — set bcdb_enforce_signatures in workload sessions  [default: 1]
 #   --legacy-merkle         Use the legacy static Merkle restore (default: native dynamic)
+#   --dynamic-structure-profile <0|1>  Profile native DET split/merge counters  [default: 1]
 #   --poll-interval <60>    Seconds between monitoring polls
 #   --hang-timeout <60>     Seconds of no log change before hang warning
 #   --stall-timeout <1800>  Abort if a live benchmark has no log progress this long
@@ -77,6 +78,7 @@ SIGNING_MODES="0"
 SIGNING_PRIVKEY="scripts/bench_signing_privkey.pem"
 ENFORCE_SIGNATURES="1"
 DYNAMIC_MERKLE=1
+DYNAMIC_STRUCTURE_PROFILE=1
 DB_NAME="postgres"
 DB_USER="postgres"
 DB_PORT=5438
@@ -99,6 +101,7 @@ while [[ $# -gt 0 ]]; do
     --signing-privkey) SIGNING_PRIVKEY="${2:-}"; shift 2 ;;
     --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
     --legacy-merkle)  DYNAMIC_MERKLE=0; shift 1 ;;
+    --dynamic-structure-profile) DYNAMIC_STRUCTURE_PROFILE="${2:-1}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
     --hang-timeout)  HANG_TIMEOUT_S="${2:-60}"; shift 2 ;;
     --stall-timeout) STALL_TIMEOUT_S="${2:-1800}"; shift 2 ;;
@@ -109,6 +112,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+[[ "$DYNAMIC_STRUCTURE_PROFILE" =~ ^[01]$ ]] || {
+  echo "ERROR: --dynamic-structure-profile must be 0 or 1" >&2
+  exit 2
+}
 
 case "$TRANSACTION_ISOLATION" in
   "read committed"|"repeatable read"|"serializable") ;;
@@ -292,6 +300,7 @@ mkdir -p "$LOG_DIR"
 lmsg "=== Parallel YCSB benchmark – all nodes ==="
 lmsg "Timestamp    : $ts"
 lmsg "Modes        : $MODES"
+lmsg "DET profile  : $([[ "$DYNAMIC_STRUCTURE_PROFILE" == "1" && "$DYNAMIC_MERKLE" == "1" ]] && echo enabled || echo disabled)"
 lmsg "Threads      : $THREADS"
 lmsg "Runs         : $RUNS"
 lmsg "Tx isolation : $TRANSACTION_ISOLATION"
@@ -641,6 +650,9 @@ _build_bench_flags() {
   fi
   [[ -n "$ENFORCE_SIGNATURES" ]] && extra+=" --enforce-signatures '$ENFORCE_SIGNATURES'"
   [[ "$DYNAMIC_MERKLE" == "1" ]] && extra+=" --dynamic-merkle --dynamic-merkle-index 'public.usertable_small_dynamic_merkle_idx'"
+  if [[ "$DYNAMIC_MERKLE" == "1" && "$DYNAMIC_STRUCTURE_PROFILE" == "1" && ",${MODES}," == *,det,* ]]; then
+    extra+=" --dynamic-merkle-profile"
+  fi
   extra+=" --transaction-isolation '$TRANSACTION_ISOLATION'"
   printf '%s' "$extra"
 }
@@ -1077,6 +1089,51 @@ for node in "${!NODE_STATUS[@]}"; do
     _collect_node "$node"
   fi
 done
+
+if [[ "$DYNAMIC_STRUCTURE_PROFILE" == "1" && "$DYNAMIC_MERKLE" == "1" && ",${MODES}," == *,det,* ]]; then
+  lmsg "=== Native DET dynamic split/merge profile validation ==="
+  if ! python3 - "$LOCAL_RESULT_ROOT" "${!NODE_STATUS[@]}" <<'PYEOF'
+import csv, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+nodes = sys.argv[2:]
+maps = {}
+for node in nodes:
+    safe = node.replace('@', '_at_').replace('.', '_').replace('-', '_')
+    ndir = root / safe
+    summary = ndir / "summary.csv"
+    if not summary.exists():
+        raise SystemExit(f"missing summary.csv for {node}")
+    current = {}
+    with summary.open(newline="") as f:
+        for row in csv.DictReader(f):
+            if (row.get("mode") or "").strip().lower() not in {"det", "safedb"}:
+                continue
+            key = tuple((row.get(k) or "").strip() for k in
+                        ("workload", "threads", "rate", "signing", "enforce_signatures"))
+            splits = (row.get("dynamic_profile_splits") or "").strip()
+            merges = (row.get("dynamic_profile_merges") or "").strip()
+            if not splits.isdigit() or not merges.isdigit():
+                raise SystemExit(f"missing DET profile counters for {node}: {key}")
+            current[key] = (int(splits), int(merges))
+    if not current:
+        raise SystemExit(f"no DET profile rows for {node}")
+    maps[node] = current
+
+baseline_node = nodes[0]
+baseline = maps[baseline_node]
+for node, current in maps.items():
+    if current != baseline:
+        raise SystemExit(f"profile mismatch: {baseline_node}={baseline} {node}={current}")
+for key, value in sorted(baseline.items()):
+    print(f"  profile key={key} splits={value[0]} merges={value[1]}")
+print(f"DYNAMIC_NATIVE_PROFILE_PASS=1 nodes={len(maps)}")
+PYEOF
+  then
+    _abort_run "Native DET split/merge profile missing or mismatched across nodes"
+  fi
+fi
 
 echo "=== Final Status ==="
 printf "%-52s %-8s %s\n" "Node" "Status" "Local results dir"

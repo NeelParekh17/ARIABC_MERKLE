@@ -32,6 +32,8 @@ extern bool merkle_index_maintenance_suppress;
 /* GUC: Emit NOTICE lines for Merkle build roots */
 extern bool merkle_update_detection;
 extern bool merkle_recovery_profile_enabled;
+/* Opt-in durable native dynamic split/merge profiling. */
+extern bool merkle_native_profile_enabled;
 #define MERKLE_UPDATE_SYNCHRONOUS_COW 0
 #define MERKLE_UPDATE_PENDING_LOG     1
 #define MERKLE_NATIVE_MODE_SYNCHRONOUS_COW 0x0001

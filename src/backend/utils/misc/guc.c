@@ -924,6 +924,15 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"merkle_native_profile_enabled", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Enable native dynamic Merkle split/merge profiling."),
+			gettext_noop("When enabled, native dynamic Merkle split and merge counters are accumulated in the durable profiling state table." )
+		},
+		&merkle_native_profile_enabled,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"merkle_update_detection_suppress", PGC_USERSET, DEVELOPER_OPTIONS,
 			gettext_noop("Suppress Merkle update-detection output during index builds."),
 			gettext_noop("When enabled, CREATE INDEX/REINDEX for Merkle indexes will not emit the touched-node NOTICE report even if merkle_update_detection is on. Set this to off to see the updated nodes during a build.")

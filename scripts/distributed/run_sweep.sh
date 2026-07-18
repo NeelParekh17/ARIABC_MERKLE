@@ -43,6 +43,9 @@ Dynamic Merkle options forwarded to run_4node_raft_cluster.sh:
   --dynamic-structure-crash-gate N
                            Crash/restart one replica with pending transitions
                            during the untimed gate (default: 0).
+  --dynamic-structure-profile N
+                           Opt-in native split/merge counters and per-replica
+                           equality check (default: 1; use 0 to disable profiling).
 
 Workload phase options forwarded to run_4node_raft_cluster.sh:
   --warmup-queries N       Untimed state-preserving warm-up updates (default: 1000;
@@ -110,6 +113,7 @@ CLUSTER_ARGS=(
   --dynamic-index public.usertable_small_dynamic_merkle_idx
   --dynamic-structure-gate 0
   --dynamic-structure-crash-gate 0
+  --dynamic-structure-profile 1
   --warmup-queries 1000
 )
 
@@ -133,7 +137,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     # --- dynamic Merkle options ---
     --restore-sql|--verify-table|--enable-merkle-index|\
-    --merkle-verify-mode|--dynamic-index|--dynamic-structure-gate|--dynamic-structure-crash-gate)
+    --merkle-verify-mode|--dynamic-index|--dynamic-structure-gate|--dynamic-structure-crash-gate|--dynamic-structure-profile)
       CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
       shift 2
       ;;
@@ -407,6 +411,13 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
         echo "WARNING: distributed pending-transition crash/restart gate missing — marking run INVALID"
         RUN_PASS=0
       fi
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -q -- '--dynamic-structure-profile 1' \
+          "$OUT/campaign.env" 2>/dev/null &&
+          ! grep -q '^DYNAMIC_NATIVE_PROFILE_PASS=1$' \
+          "$RUN/run_summary.env" 2>/dev/null; then
+        echo "WARNING: native dynamic split/merge profile missing or failed — marking run INVALID"
+        RUN_PASS=0
+      fi
       if [[ "$RUN_PASS" -eq 1 ]] && ! grep -qE 'request_latency_count=[1-9][0-9]*' \
           "$RUN/gateway_test.log" 2>/dev/null; then
         echo "WARNING: client request latency samples missing — marking run INVALID"
@@ -435,7 +446,7 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
   python3 scripts/distributed/plot_executor_sweep.py \
     --input-csv "$OUT/summary.csv" \
     --output-img "$OUT/executor_sweep_tps.png" \
-    --title "Raft-majority result-completion TPS (async all-replica/Merkle validation, Threads=$THREADS)"
+    --title "All-replica-audit-drained TPS (Raft majority completion, Threads=$THREADS)"
 
   echo
   echo "Done."
