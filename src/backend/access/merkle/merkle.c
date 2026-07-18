@@ -31,6 +31,7 @@ bool merkle_index_maintenance_suppress = false;
 bool merkle_update_detection = false;
 /* GUC: Enable backend-local Merkle recovery profiling */
 bool merkle_recovery_profile_enabled = false;
+bool merkle_native_profile_enabled = false;
 /* GUC: fail stale Merkle reads by default; optionally catch up synchronously. */
 int merkle_read_lag_policy = MERKLE_READ_LAG_ERROR;
 int merkle_apply_batch_items = MERKLE_APPLY_DEFAULT_BATCH_ITEMS;

@@ -70,6 +70,9 @@ class RunResult:
     db_row_count: Optional[int]
     db_root_hash: Optional[str]
     db_merkle_verify: Optional[str]
+    dynamic_profile_splits: Optional[int]
+    dynamic_profile_merges: Optional[int]
+    dynamic_profile_max_leaf_items: Optional[int]
     workload_log: str
     start_server_log: str
     restore_log: str
@@ -563,6 +566,12 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         reconnects = [x for x in reconnects if x is not None]
         permanent_failures = [as_int(r.get("permanent_failures", "")) for r in rs]
         permanent_failures = [x for x in permanent_failures if x is not None]
+        dynamic_splits = [as_int(r.get("dynamic_profile_splits", "")) for r in rs]
+        dynamic_splits = [x for x in dynamic_splits if x is not None]
+        dynamic_merges = [as_int(r.get("dynamic_profile_merges", "")) for r in rs]
+        dynamic_merges = [x for x in dynamic_merges if x is not None]
+        dynamic_max_leaf = [as_int(r.get("dynamic_profile_max_leaf_items", "")) for r in rs]
+        dynamic_max_leaf = [x for x in dynamic_max_leaf if x is not None]
 
         # Per-row statement_count (from results.csv) takes precedence so a
         # different statement count per workload is reflected in TPS. Fall back
@@ -625,6 +634,9 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
                 "max_serialization_retries": max_or_empty(serialization_retries),
                 "max_reconnects": max_or_empty(reconnects),
                 "max_permanent_failures": max_or_empty(permanent_failures),
+                "dynamic_profile_splits": max_or_empty(dynamic_splits),
+                "dynamic_profile_merges": max_or_empty(dynamic_merges),
+                "dynamic_profile_max_leaf_items": max_or_empty(dynamic_max_leaf),
             }
         )
 
@@ -1221,6 +1233,11 @@ def main() -> int:
         help="Dynamic Merkle index used for explicit post-run verification.",
     )
     parser.add_argument(
+        "--dynamic-merkle-profile",
+        action="store_true",
+        help="Enable native dynamic-Merkle split/merge counters and record them per local run.",
+    )
+    parser.add_argument(
         "--rate",
         type=int,
         default=0,
@@ -1496,6 +1513,9 @@ def main() -> int:
         db_row_count=None,
         db_root_hash=None,
         db_merkle_verify=None,
+        dynamic_profile_splits=None,
+        dynamic_profile_merges=None,
+        dynamic_profile_max_leaf_items=None,
         workload_log="",
         start_server_log="",
         restore_log="",
@@ -1558,6 +1578,15 @@ def main() -> int:
                                 restore_log_err = case_dir / "restore.err"
                                 workload_log_out = case_dir / "workload.out"
                                 workload_log_err = case_dir / "workload.err"
+                                profile_log_offset = 0
+                                profile_splits = None
+                                profile_merges = None
+                                profile_max_leaf_items = None
+                                if args.dynamic_merkle_profile and server_log_path.exists():
+                                    try:
+                                        profile_log_offset = server_log_path.stat().st_size
+                                    except OSError:
+                                        profile_log_offset = 0
 
                                 t0 = time.monotonic()
 
@@ -1582,6 +1611,12 @@ def main() -> int:
                                         "ariabc.allow_destructive_benchmark_reset",
                                         "on",
                                     )
+                                    if args.dynamic_merkle_profile:
+                                        _force_pgoption(
+                                            mode_env,
+                                            "merkle_native_profile_enabled",
+                                            "on",
+                                        )
 
                                 restart_server = (not args.no_server_restart) or (db_type == 1)
                                 start_exit = 0
@@ -1804,6 +1839,15 @@ def main() -> int:
                                     # --- End warmup ---
 
                                     if restore_exit == 0:
+                                        # Profile only the measured workload.  The dynamic
+                                        # restore/index build can legitimately split leaves,
+                                        # but those transitions are setup rather than workload
+                                        # activity and must not contaminate the recorded count.
+                                        if args.dynamic_merkle_profile and server_log_path.exists():
+                                            try:
+                                                profile_log_offset = server_log_path.stat().st_size
+                                            except OSError:
+                                                profile_log_offset = 0
                                         workload_exit = _run(
                                             workload_argv,
                                             cwd=scripts_dir,
@@ -1822,6 +1866,21 @@ def main() -> int:
                                         print(f"WARNING: could not remove current_case pointer: {_e}", file=sys.stderr)
 
                                 t1 = time.monotonic()
+
+                                if args.dynamic_merkle_profile and profile_log_offset >= 0:
+                                    try:
+                                        with server_log_path.open("rb") as _profile_log:
+                                            _profile_log.seek(profile_log_offset)
+                                            profile_text = _profile_log.read().decode(errors="replace")
+                                        profile_rows = re.findall(
+                                            r"NATIVE_MERKLE_PROFILE index_oid=\d+ splits=(\d+) merges=(\d+)",
+                                            profile_text,
+                                        )
+                                        if profile_rows:
+                                            profile_splits = sum(int(s) for s, _ in profile_rows)
+                                            profile_merges = sum(int(m) for _, m in profile_rows)
+                                    except OSError:
+                                        pass
 
                                 log_text = ""
                                 try:
@@ -1920,6 +1979,30 @@ def main() -> int:
                                                     cwd=scripts_dir,
                                                     env=mode_env,
                                                 )
+                                                if args.dynamic_merkle_profile:
+                                                    profile_values = _psql_value(
+                                                        psql_path,
+                                                        db=args.db,
+                                                        port=args.port,
+                                                        user=args.user,
+                                                        query=(
+                                                            "SELECT COALESCE(s->>'split_count','0') || '|' || "
+                                                            "COALESCE(s->>'merge_count','0') || '|' || "
+                                                            "(s->>'max_leaf_items') FROM (SELECT "
+                                                            "merkle_dynamic_tree_stats('" + dynamic_index + "'::regclass)::jsonb AS s) q;"
+                                                        ),
+                                                        cwd=scripts_dir,
+                                                        env=mode_env,
+                                                    )
+                                                    parts = (profile_values or '').split('|')
+                                                    if len(parts) == 3 and all(p.isdigit() for p in parts):
+                                                        if profile_splits is None:
+                                                            profile_splits = int(parts[0])
+                                                        if profile_merges is None:
+                                                            profile_merges = int(parts[1])
+                                                        profile_max_leaf_items = int(parts[2])
+                                                    elif profile_splits is None:
+                                                        verification_error = "dynamic_profile_query_failed"
                                             else:
                                                 root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=mode_env)
                                                 verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=mode_env)
@@ -2008,6 +2091,9 @@ def main() -> int:
                                     db_row_count=row_count,
                                     db_root_hash=root_hash,
                                     db_merkle_verify=verify,
+                                    dynamic_profile_splits=profile_splits,
+                                    dynamic_profile_merges=profile_merges,
+                                    dynamic_profile_max_leaf_items=profile_max_leaf_items,
                                     workload_log=str(workload_log_out),
                                     start_server_log=str(start_log_out),
                                     restore_log=str(restore_log_out),

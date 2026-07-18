@@ -196,7 +196,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     SKIP_RDKAFKA_SETUP SKIP_RESTORE SKIP_POST_VERIFY \
     ENABLE_MERKLE_INDEX \
     WARMUP_QUERIES \
-    MERKLE_VERIFY_MODE DYNAMIC_INDEX_NAME \
+    MERKLE_VERIFY_MODE DYNAMIC_INDEX_NAME DYNAMIC_STRUCTURE_PROFILE \
     NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
     NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
     NODE_IS_U22_CSV NODE_CLIENT_PORTS_CSV \
@@ -402,6 +402,7 @@ MERKLE_VERIFY_MODE="${MERKLE_VERIFY_MODE:-auto}"
 DYNAMIC_INDEX_NAME="${DYNAMIC_INDEX_NAME:-}"
 DYNAMIC_STRUCTURE_GATE="${DYNAMIC_STRUCTURE_GATE:-0}"
 DYNAMIC_STRUCTURE_CRASH_GATE="${DYNAMIC_STRUCTURE_CRASH_GATE:-0}"
+DYNAMIC_STRUCTURE_PROFILE="${DYNAMIC_STRUCTURE_PROFILE:-1}"
 DET_START_SEQ="${DET_START_SEQ:-0}"
 REQ_ID_OFFSET="${REQ_ID_OFFSET:-1}"
 DET_WINDOW="${DET_WINDOW:-4096}"
@@ -569,6 +570,9 @@ Options:
   --dynamic-structure-crash-gate N
                   During the structure gate, immediate-stop and restart one
                   replica while committed Merkle deltas are pending: 0|1
+  --dynamic-structure-profile N
+                  Opt-in native dynamic split/merge counters and per-replica
+                  equality check: 0|1 (default: 1; use 0 to disable)
   --det-start-seq N
                   First 8-digit DET sequence sent to BCDB (default: 0 for fresh strict runs)
   --req-id-offset N
@@ -776,6 +780,7 @@ while [[ $# -gt 0 ]]; do
     --dynamic-index) DYNAMIC_INDEX_NAME="${2:-}"; shift 2 ;;
     --dynamic-structure-gate) DYNAMIC_STRUCTURE_GATE="${2:-0}"; shift 2 ;;
     --dynamic-structure-crash-gate) DYNAMIC_STRUCTURE_CRASH_GATE="${2:-0}"; shift 2 ;;
+    --dynamic-structure-profile) DYNAMIC_STRUCTURE_PROFILE="${2:-0}"; shift 2 ;;
     --det-start-seq) DET_START_SEQ="${2:-0}"; shift 2 ;;
     --req-id-offset) REQ_ID_OFFSET="${2:-1}"; shift 2 ;;
     --det-window)   DET_WINDOW="${2:-4096}"; DET_WINDOW_EXPLICIT=1; shift 2 ;;
@@ -976,6 +981,12 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" != 0 && "$DYNAMIC_STRUCTURE_GATE" != 1 ]]; then
 fi
 if [[ "$DYNAMIC_STRUCTURE_CRASH_GATE" != 0 && "$DYNAMIC_STRUCTURE_CRASH_GATE" != 1 ]]; then
   die "ERROR: --dynamic-structure-crash-gate must be 0 or 1 (got: $DYNAMIC_STRUCTURE_CRASH_GATE)"
+fi
+if [[ "$DYNAMIC_STRUCTURE_PROFILE" != 0 && "$DYNAMIC_STRUCTURE_PROFILE" != 1 ]]; then
+  die "ERROR: --dynamic-structure-profile must be 0 or 1 (got: $DYNAMIC_STRUCTURE_PROFILE)"
+fi
+if [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 && "$MERKLE_VERIFY_MODE" == "legacy" ]]; then
+  die "ERROR: --dynamic-structure-profile requires dynamic Merkle verification"
 fi
 if [[ "$DYNAMIC_STRUCTURE_CRASH_GATE" -eq 1 && "$DYNAMIC_STRUCTURE_GATE" -ne 1 ]]; then
   die "ERROR: --dynamic-structure-crash-gate requires --dynamic-structure-gate 1"
@@ -1610,7 +1621,7 @@ collect_cluster_logs() {
     else
       timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ARIABC_KNOWN_HOSTS_FILE" -o ConnectTimeout=10 \
         "$user@$ip" \
-        "grep -E '^(RUN_MARKER|.*PROFILE_BCDB_(GATE|BLOCK)|.*(ERROR|FATAL|PANIC):|.*starting PostgreSQL|.*database system was shut down|.*database system is ready to accept connections)' '$REMOTE_PG_LOG' 2>/dev/null || true" \
+        "grep -E '^(RUN_MARKER|.*PROFILE_BCDB_(GATE|BLOCK)|.*NATIVE_MERKLE_PROFILE|.*(ERROR|FATAL|PANIC):|.*starting PostgreSQL|.*database system was shut down|.*database system is ready to accept connections)' '$REMOTE_PG_LOG' 2>/dev/null || true" \
         > "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
     fi
     if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
@@ -3151,7 +3162,9 @@ done
 
 MERKLE_GUC_VALUE=off
 [[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && MERKLE_GUC_VALUE=on
-log "=== Phase 3.3: Set enable_merkle_index=$MERKLE_GUC_VALUE on all ${#NODE_IDS[@]} nodes (parallel) ==="
+NATIVE_PROFILE_GUC_VALUE=off
+[[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 ]] && NATIVE_PROFILE_GUC_VALUE=on
+log "=== Phase 3.3: Set enable_merkle_index=$MERKLE_GUC_VALUE, merkle_native_profile_enabled=$NATIVE_PROFILE_GUC_VALUE on all ${#NODE_IDS[@]} nodes (parallel) ==="
 declare -a MERKLE_GUC_PIDS=(); declare -a MERKLE_GUC_NAMES=()
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
@@ -3166,6 +3179,16 @@ for idx in "${!NODE_IDS[@]}"; do
       -tAc \"SHOW enable_merkle_index\" | tr -d '[:space:]')
     [[ \"\$actual\" == '$MERKLE_GUC_VALUE' ]] || {
       echo \"enable_merkle_index expected $MERKLE_GUC_VALUE, got \$actual\" >&2
+      exit 1
+    }
+    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET merkle_native_profile_enabled = '$NATIVE_PROFILE_GUC_VALUE'\"
+    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -v ON_ERROR_STOP=1 -c \"SELECT pg_reload_conf()\" >/dev/null
+    profile_actual=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -tAc \"SHOW merkle_native_profile_enabled\" | tr -d '[:space:]')
+    [[ \"\$profile_actual\" == '$NATIVE_PROFILE_GUC_VALUE' ]] || {
+      echo \"merkle_native_profile_enabled expected $NATIVE_PROFILE_GUC_VALUE, got \$profile_actual\" >&2
       exit 1
     }
   " >/dev/null &
@@ -3289,6 +3312,20 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
     wait "${RESTORE_PIDS[$i]}" || { log "  restore FAILED on ${RESTORE_NAMES[$i]}"; RESTORE_ALL_OK=0; }
   done
   [[ "$RESTORE_ALL_OK" -eq 1 ]] || die "Phase 3.5 restore failed on one or more nodes"
+  if [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 ]]; then
+    [[ "$MERKLE_VERIFY_MODE" != "legacy" ]] || die "native structure profiling requires dynamic Merkle mode"
+    PROFILE_INDEX_NAME="${DYNAMIC_INDEX_NAME:-public.usertable_small_dynamic_merkle_idx}"
+    log "  Resetting native dynamic split/merge counters before workload"
+    for idx in "${!NODE_IDS[@]}"; do
+      node_ssh "$idx" "
+        export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+        '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -c \"
+          UPDATE ariabc_internal.merkle_dynamic_state
+             SET split_count=0, merge_count=0, updated_at=clock_timestamp()
+           WHERE index_oid='$PROFILE_INDEX_NAME'::regclass\"
+      " >/dev/null || die "failed to reset native profile counters on ${NODE_NAMES[$idx]}"
+    done
+  fi
 else
   log "=== Phase 3.5: Restore skipped (--skip-restore) ==="
 fi
@@ -4976,6 +5013,49 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   log "  post-run equality timing: marker_visibility_ms=$MARKER_VISIBLE_MS merkle_apply_and_equality_ms=$MERKLE_DRAIN_MS total_ms=$POST_VERIFY_TOTAL_MS"
 else
   log "=== Phase 8: Post-workload verification skipped (--skip-post-verify) ==="
+fi
+
+if [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 && "$SKIP_POST_VERIFY" -eq 0 ]]; then
+  PROFILE_INDEX_NAME="${DYNAMIC_INDEX_NAME:-public.usertable_small_dynamic_merkle_idx}"
+  declare -a PROFILE_SPLITS=() PROFILE_MERGES=()
+  profile_signature=""
+  for idx in "${!NODE_IDS[@]}"; do
+    profile_stats="$(node_ssh "$idx" "
+      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+        SELECT COALESCE(stats->>'split_count', '0') || '|' ||
+               COALESCE(stats->>'merge_count', '0')
+          FROM (SELECT merkle_dynamic_tree_stats('$PROFILE_INDEX_NAME'::regclass)::jsonb AS stats) AS profile\"" | tr -d '[:space:]')"
+    # merkle_dynamic_tree_stats predates the optional native profile fields.
+    # Prefer authoritative per-apply records whenever the backend emitted
+    # them; an absent record means this workload performed zero transitions.
+    profile_log_file="$(compgen -G "$LOG_DIR/postgres_node${NODE_IDS[$idx]}_*.log" | head -1 || true)"
+    if [[ -n "$profile_log_file" ]] && grep -q 'NATIVE_MERKLE_PROFILE ' "$profile_log_file"; then
+      profile_splits="$(sed -n 's/.*NATIVE_MERKLE_PROFILE .*splits=\([0-9][0-9]*\) merges=.*/\1/p' "$profile_log_file" | awk '{sum += $1} END {print sum + 0}')"
+      profile_merges="$(sed -n 's/.*NATIVE_MERKLE_PROFILE .*merges=\([0-9][0-9]*\).*/\1/p' "$profile_log_file" | awk '{sum += $1} END {print sum + 0}')"
+      profile_stats="${profile_splits}|${profile_merges}"
+      log "  native dynamic profile node=${NODE_NAMES[$idx]} source=postgres_log"
+    fi
+    IFS='|' read -r PROFILE_SPLITS[$idx] PROFILE_MERGES[$idx] <<<"$profile_stats"
+    [[ "${PROFILE_SPLITS[$idx]}" =~ ^[0-9]+$ && "${PROFILE_MERGES[$idx]}" =~ ^[0-9]+$ ]] ||
+      die "native dynamic profile missing/invalid on ${NODE_NAMES[$idx]}: $profile_stats"
+    log "  native dynamic profile node=${NODE_NAMES[$idx]} splits=${PROFILE_SPLITS[$idx]} merges=${PROFILE_MERGES[$idx]}"
+    [[ -z "$profile_signature" ]] && profile_signature="$profile_stats"
+    [[ "$profile_stats" == "$profile_signature" ]] ||
+      die "native dynamic split/merge profile mismatch on ${NODE_NAMES[$idx]}: expected $profile_signature got $profile_stats"
+  done
+  {
+    printf 'DYNAMIC_NATIVE_PROFILE_ENABLED=1\n'
+    printf 'DYNAMIC_NATIVE_PROFILE_PASS=1\n'
+    printf 'DYNAMIC_NATIVE_PROFILE_SPLITS=%s\n' "${PROFILE_SPLITS[0]}"
+    printf 'DYNAMIC_NATIVE_PROFILE_MERGES=%s\n' "${PROFILE_MERGES[0]}"
+    printf 'DYNAMIC_NATIVE_PROFILE_NODE_COUNT=%s\n' "${#NODE_IDS[@]}"
+    for idx in "${!NODE_IDS[@]}"; do
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_ID=%s\n' "$idx" "${NODE_IDS[$idx]}"
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_SPLITS=%s\n' "$idx" "${PROFILE_SPLITS[$idx]}"
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_MERGES=%s\n' "$idx" "${PROFILE_MERGES[$idx]}"
+    done
+  } >>"$LOG_DIR/run_summary.env"
 fi
 
 if [[ "$COLLECT_FINAL_SERVER_PROFILE" != "0" ]]; then

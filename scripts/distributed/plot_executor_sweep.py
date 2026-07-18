@@ -142,7 +142,7 @@ def main() -> int:
 
     ax.set_title(args.title, fontsize=14, fontweight="bold", pad=15, color=text_color)
     ax.set_xlabel("Server Executor Workers", fontsize=11, labelpad=10, color=text_color)
-    ax.set_ylabel("Completed Transactions Per Second (TPS)", fontsize=11, labelpad=10, color=text_color)
+    ax.set_ylabel("All-Replica-Audit-Drained TPS", fontsize=11, labelpad=10, color=text_color)
     
     ax.set_xticks(xs)
     ax.set_xticklabels([str(x) for x in xs])

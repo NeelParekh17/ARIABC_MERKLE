@@ -1200,7 +1200,8 @@ native_write_leaf(Relation indexRel, int partition, int prefix_len,
 static MerkleNativeLocator
 native_build_subtree(Relation indexRel, const NativeConfig *config,
 					 int partition, NativeItem *items, int count,
-					 int minimum_prefix, MerkleNativeNodeRecord *summary)
+					 int minimum_prefix, MerkleNativeNodeRecord *summary,
+					 uint64 *split_counter)
 {
 	uint64 bytes = 0;
 	uint8 prefix[MERKLE_HASH_BYTES];
@@ -1234,9 +1235,12 @@ native_build_subtree(Relation indexRel, const NativeConfig *config,
 		MerkleNativeNodeRecord left;
 		MerkleNativeNodeRecord right;
 		MerkleNativeLocator left_locator = native_build_subtree(indexRel, config,
-			partition, items, split, branch + 1, &left);
+			partition, items, split, branch + 1, &left, split_counter);
 		MerkleNativeLocator right_locator = native_build_subtree(indexRel, config,
-			partition, items + split, count - split, branch + 1, &right);
+			partition, items + split, count - split, branch + 1, &right,
+			split_counter);
+		if (split_counter != NULL)
+			(*split_counter)++;
 
 		MemSet(summary, 0, sizeof(*summary));
 		summary->header.magic = MERKLE_NATIVE_RECORD_MAGIC;
@@ -1849,7 +1853,8 @@ static MerkleNativeLocator
 native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 						int partition, const MerkleNativeLocator *locator,
 						const MerkleDynamicTransition *transitions, int count,
-						int minimum_prefix, MerkleNativeNodeRecord *summary)
+						int minimum_prefix, MerkleNativeNodeRecord *summary,
+						uint64 *split_counter, uint64 *merge_counter)
 {
 	MerkleNativeNodeRecord *old = native_read_node(indexRel, locator);
 	int i;
@@ -1940,7 +1945,7 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 			if (old_count > 0)
 				old_side_locator = native_apply_batch_node(indexRel, config,
 					partition, locator, old_batch, old_count, diverge_bit + 1,
-					&old_side_node);
+					&old_side_node, split_counter, merge_counter);
 			else
 			{
 				old_side_node = *old;
@@ -1983,11 +1988,11 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 				if (old_side == 0)
 					branch_right_locator = native_build_subtree(indexRel, config,
 						partition, new_items.items, new_items.count,
-						diverge_bit + 1, &branch_right);
+						diverge_bit + 1, &branch_right, split_counter);
 				else
 					branch_left_locator = native_build_subtree(indexRel, config,
 						partition, new_items.items, new_items.count,
-						diverge_bit + 1, &branch_left);
+						diverge_bit + 1, &branch_left, split_counter);
 				native_vector_free(&new_items);
 			}
 
@@ -2020,7 +2025,9 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 			result_node.header.checksum = native_record_checksum(&result_node,
 				sizeof(result_node));
 			result_loc = native_append_record(indexRel, &result_node,
-				sizeof(result_node));
+												 sizeof(result_node));
+			if (split_counter != NULL)
+				(*split_counter)++;
 			*summary = result_node;
 			pfree(old);
 			pfree(old_batch);
@@ -2037,7 +2044,7 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 		native_load_leaf_items(indexRel, old, &vector);
 		native_apply_items(&vector, transitions, count);
 		result = native_build_subtree(indexRel, config, partition,
-			vector.items, vector.count, minimum_prefix, summary);
+			vector.items, vector.count, minimum_prefix, summary, split_counter);
 		native_vector_free(&vector);
 		pfree(old);
 		return result;
@@ -2057,7 +2064,8 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 			split++;
 		if (split > 0)
 			left_locator = native_apply_batch_node(indexRel, config, partition,
-				&old->left, transitions, split, old->prefix_len + 1, &left);
+				&old->left, transitions, split, old->prefix_len + 1, &left,
+				split_counter, merge_counter);
 		else
 		{
 			MerkleNativeNodeRecord *loaded = native_read_node(indexRel, &old->left);
@@ -2067,7 +2075,7 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 		if (split < count)
 			right_locator = native_apply_batch_node(indexRel, config, partition,
 				&old->right, transitions + split, count - split,
-				old->prefix_len + 1, &right);
+				old->prefix_len + 1, &right, split_counter, merge_counter);
 		else
 		{
 			MerkleNativeNodeRecord *loaded = native_read_node(indexRel, &old->right);
@@ -2105,6 +2113,8 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 			native_collect_items(indexRel, &right_locator, &vector);
 			result = native_write_leaf(indexRel, partition, old->prefix_len,
 				old->prefix, vector.items, vector.count, summary);
+			if (merge_counter != NULL)
+				(*merge_counter)++;
 			native_vector_free(&vector);
 			pfree(old);
 			return result;
@@ -2139,6 +2149,8 @@ native_apply_transitions_authorized(
 	Relation indexRel;
 	NativeConfig config;
 	int i;
+	uint64 profile_splits = 0;
+	uint64 profile_merges = 0;
 
 	if (count <= 0)
 		return;
@@ -2195,6 +2207,8 @@ native_apply_transitions_authorized(
 		MerkleNativeRootVersion root;
 		MerkleNativeNodeRecord node;
 		MerkleNativeLocator root_node;
+		uint64 split_count = 0;
+		uint64 merge_count = 0;
 
 		while (end < count && transitions[end].partition_id == partition)
 			end++;
@@ -2205,7 +2219,11 @@ native_apply_transitions_authorized(
 					 errmsg("native Merkle partition %d has no materialized visible root",
 							partition)));
 		root_node = native_apply_batch_node(indexRel, &config, partition,
-			&old_root.root_node, transitions + i, end - i, 0, &node);
+			&old_root.root_node, transitions + i, end - i, 0, &node,
+			merkle_native_profile_enabled ? &split_count : NULL,
+			merkle_native_profile_enabled ? &merge_count : NULL);
+		profile_splits += split_count;
+		profile_merges += merge_count;
 		merkle_crash_failpoint("before_native_root_publication");
 		MemSet(&root, 0, sizeof(root));
 		root.magic = MERKLE_NATIVE_ROOT_MAGIC;
@@ -2223,6 +2241,53 @@ native_apply_transitions_authorized(
 		root.root_node = root_node;
 		native_publish_one(indexRel, partition, &root);
 		i = end;
+	}
+	if (merkle_native_profile_enabled && (profile_splits > 0 || profile_merges > 0))
+	{
+		Datum args[6];
+		Oid types[6] = {OIDOID, OIDOID, OIDOID, OIDOID, INT8OID, INT8OID};
+		Oid fallback_types[3] = {OIDOID, INT8OID, INT8OID};
+		Datum fallback_args[3];
+		int rc;
+
+		args[0] = ObjectIdGetDatum(RelationGetRelid(indexRel));
+		args[1] = ObjectIdGetDatum(indexRel->rd_node.spcNode);
+		args[2] = ObjectIdGetDatum(indexRel->rd_node.dbNode);
+		args[3] = ObjectIdGetDatum(indexRel->rd_node.relNode);
+		args[4] = Int64GetDatum((int64) profile_splits);
+		args[5] = Int64GetDatum((int64) profile_merges);
+		ereport(LOG,
+			(errmsg("NATIVE_MERKLE_PROFILE index_oid=%u splits=%llu merges=%llu",
+					RelationGetRelid(indexRel),
+					(unsigned long long) profile_splits,
+					(unsigned long long) profile_merges)));
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "could not connect to SPI for native Merkle profiling");
+		rc = SPI_execute_with_args(
+			"UPDATE ariabc_internal.merkle_dynamic_state "
+			"SET split_count=split_count+$5, merge_count=merge_count+$6, "
+			"updated_at=clock_timestamp() "
+			"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4",
+			6, types, args, NULL, false, 0);
+		/* A REINDEX/build race can leave the catalog generation tuple newer
+		 * than the relation opened for this apply.  Preserve the profile
+		 * rather than dropping it; the index OID is still an unambiguous
+		 * profile owner and the state table may contain one live generation. */
+		if (rc == SPI_OK_UPDATE && SPI_processed == 0)
+		{
+			fallback_args[0] = args[0];
+			fallback_args[1] = args[4];
+			fallback_args[2] = args[5];
+			rc = SPI_execute_with_args(
+				"UPDATE ariabc_internal.merkle_dynamic_state "
+				"SET split_count=split_count+$2, merge_count=merge_count+$3, "
+				"updated_at=clock_timestamp() WHERE index_oid=$1",
+				3, fallback_types, fallback_args, NULL, false, 0);
+		}
+		if (rc != SPI_OK_UPDATE || SPI_processed < 1)
+			ereport(DEBUG1,
+				(errmsg("native Merkle profiling state update skipped: no matching dynamic state row")));
+		SPI_finish();
 	}
 	index_close(indexRel, RowExclusiveLock);
 }
