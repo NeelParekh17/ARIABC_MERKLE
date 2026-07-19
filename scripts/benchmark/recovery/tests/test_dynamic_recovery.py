@@ -207,6 +207,38 @@ def test_localisation_expands_one_fanout32_logical_level_at_a_time():
     assert trace.range_summary_rows == 66
 
 
+@pytest.mark.parametrize("logical_fanout", [2, 4, 8, 16, 32])
+def test_localisation_fanouts_preserve_the_same_corruption(logical_fanout: int):
+    """Every supported logical fanout must isolate the same damaged digest."""
+    healthy_items = [
+        (value, _digest(format(value, "06b")), _hash(value + 1))
+        for value in range(64)
+    ]
+    damaged_items = list(healthy_items)
+    damaged_digest = damaged_items[10][1]
+    damaged_items[10] = (10, damaged_digest, _hash(999))
+    root = LogicalRange.root(0)
+
+    def fetch(schema: str, ranges: Sequence[LogicalRange]):
+        items = healthy_items if schema == "healthy" else damaged_items
+        return {logical_range: _summary(logical_range, items) for logical_range in ranges}
+
+    bad = localise_bad_ranges(
+        {0: _summary(root, healthy_items)},
+        {0: _summary(root, damaged_items)},
+        fetch,
+        leaf_capacity=2,
+        logical_fanout=logical_fanout,
+    )
+
+    assert len(bad) == 1
+    assert bad[0].contains_digest(damaged_digest)
+    assert _summary(bad[0], healthy_items).tuple_count <= 2
+    assert _summary(bad[0], healthy_items).data_xor != _summary(
+        bad[0], damaged_items
+    ).data_xor
+
+
 def test_compare_range_items_returns_exact_insert_update_delete_keys():
     logical_range = LogicalRange.root(0).child(0)
     healthy = [

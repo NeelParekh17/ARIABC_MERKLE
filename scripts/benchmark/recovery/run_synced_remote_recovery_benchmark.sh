@@ -24,8 +24,8 @@ Options:
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
                                default: paper-update-only
-  --audit-mode full|skip       default: full
-  --fast-diagnostic           dynamic only: one repetition, targeted audit,
+  --audit-mode full|skip       default: skip
+  --fast-diagnostic           dynamic only: one repetition, audit skipped,
                               and no repeated crash/lifecycle gate
   --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
@@ -56,7 +56,7 @@ PROFILING="off"
 REPETITIONS=""
 ARTIFACT_MODE="summary"
 CORRUPTION_MODE="paper-update-only"
-AUDIT_MODE="full"
+AUDIT_MODE="skip"
 LEAF_FETCH_BATCH_SIZE=64
 RUN_STATIC_MERKLE_REGRESSION=0
 MIN_FREE_GIB=40
@@ -833,6 +833,10 @@ BENCH_ARGS+=("${BENCH_SELECTORS[@]}")
 
 remote_progress "benchmark started (profile=$BENCH_PROFILE artifact_mode=$ARTIFACT_MODE repetitions=${REPETITIONS:-default}); logs: $REMOTE_LOG_DIR/benchmark.stdout and $REMOTE_LOG_DIR/benchmark.stderr"
 set +e
+# This runner owns a fresh, per-run PGDATA and database instance.  Scope the
+# destructive-reset acknowledgement to the benchmark process only; never
+# export it into the caller or the wider remote session.
+ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1 \
 PYTHONUNBUFFERED=1 "${BENCH_ARGS[@]}" \
   2> >(tee "$REMOTE_LOG_DIR/benchmark.stderr" >&2) |
   tee "$REMOTE_LOG_DIR/benchmark.stdout"

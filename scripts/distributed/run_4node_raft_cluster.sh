@@ -4670,6 +4670,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   declare -a POST_STRUCTURE_FAILURES=()
   declare -a POST_STATS_DIRTY=()
   declare -a POST_DYN_VERIFY=()
+  declare -a POST_LOGICAL_FANOUT=() POST_PHYSICAL_NODE_FANOUT=()
   declare -a POST_MIN_SEQ=() POST_MAX_SEQ=()
   MERKLE_DRAIN_START_MS="$(date +%s%3N)"
 
@@ -4722,6 +4723,13 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
           exit 1
         fi
 
+        logical_fanout=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"logical_fanout\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
+        physical_node_fanout=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"physical_node_fanout\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
+        if [[ \"\$logical_fanout\" != 32 || \"\$physical_node_fanout\" != 2 ]]; then
+          echo \"dynamic fanout contract failed (logical=\$logical_fanout physical=\$physical_node_fanout expected=32/2)\" >&2
+          exit 1
+        fi
+
         authority=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"authority\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\1/p')
         if [[ \"\$authority\" == native_index_pages ]]; then
           dyn_verify=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_dynamic_verify('$DYNAMIC_INDEX_NAME'::regclass)\")
@@ -4738,7 +4746,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
           topo_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"COPY (SELECT partition_id,tuple_count,encode(structure_hash,'hex') FROM \$marker_sql ORDER BY partition_id) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
           root_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"COPY (SELECT partition_id,tuple_count,encode(content_xor,'hex'),encode(structure_hash,'hex') FROM \$marker_sql ORDER BY partition_id) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
           [[ \"\$dyn_verify\" == t && \"\$root_sha\" =~ ^[0-9a-f]{64}$ && \"\$topo_sha\" =~ ^[0-9a-f]{64}$ && \"\$item_sha\" =~ ^[0-9a-f]{64}$ && \"\$sequence_domain\" =~ ^[1-9][0-9]*$ && \"\$sequence_epoch\" =~ ^[0-9]+$ && \"\$max_seq\" =~ ^[0-9]+$ && \"\$marker_count\" == \"\$dyn_partitions\" && \"\$marker_items\" == \"\$dyn_item_count\" && \"\$marker_bad_lineage\" == 0 ]] || { echo \"typed native Merkle marker contract failed (domain=\$sequence_domain epoch=\$sequence_epoch value=\$max_seq roots=\$marker_count partitions=\$dyn_partitions marker_items=\$marker_items current_items=\$dyn_item_count bad_lineage=\$marker_bad_lineage)\" >&2; exit 1; }
-          echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify|\$min_seq|\$max_seq|\$sequence_domain|\$sequence_epoch\"
+          echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify|\$min_seq|\$max_seq|\$sequence_domain|\$sequence_epoch|\$logical_fanout|\$physical_node_fanout\"
         else
         # Structural verify
         dyn_verify=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_dynamic_verify('\${dyn_index}'::regclass)\")
@@ -4873,7 +4881,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
              ORDER BY item.partition_id, item.key_data
           ) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
 
-        echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify||||\"
+        echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify|||||\$logical_fanout|\$physical_node_fanout\"
         fi
       else
         echo \"\$cnt|\$root|\$verify\"
@@ -4899,7 +4907,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     fi
     IFS='|' read -r cnt root verify root_sha topo_sha item_sha \
         dyn_item_count dyn_leaf_count dyn_node_count dyn_partitions dyn_verify min_seq max_seq \
-        sequence_domain sequence_epoch \
+        sequence_domain sequence_epoch logical_fanout physical_node_fanout \
       <<< "$readback"
     POST_COUNTS[$idx]="$cnt"
     POST_ROOTS[$idx]="$root"
@@ -4916,6 +4924,8 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     POST_MAX_SEQ[$idx]="${max_seq:-}"
     POST_SEQUENCE_DOMAIN[$idx]="${sequence_domain:-}"
     POST_SEQUENCE_EPOCH[$idx]="${sequence_epoch:-}"
+    POST_LOGICAL_FANOUT[$idx]="${logical_fanout:-}"
+    POST_PHYSICAL_NODE_FANOUT[$idx]="${physical_node_fanout:-}"
     if [[ "$_EFFECTIVE_VERIFY_MODE" == "dynamic" ]]; then
       log "  [$name] rows=$cnt root=$root verify=$verify root_sha256=${root_sha:-n/a} topo_sha256=${topo_sha:-n/a} item_sha256=${item_sha:-n/a} dyn_verify=${dyn_verify:-n/a}"
     else
@@ -4949,6 +4959,11 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
       if [[ "${POST_DYN_VERIFY[$idx]}" != "t" ]]; then
         POST_PASS=0
         log "  [$name] DYNAMIC STRUCTURAL VERIFY FAILED: ${POST_DYN_VERIFY[$idx]}"
+      fi
+      if [[ "${POST_LOGICAL_FANOUT[$idx]}" != 32 ||
+            "${POST_PHYSICAL_NODE_FANOUT[$idx]}" != 2 ]]; then
+        POST_PASS=0
+        log "  [$name] DYNAMIC FANOUT CONTRACT FAILED: logical=${POST_LOGICAL_FANOUT[$idx]:-missing} physical=${POST_PHYSICAL_NODE_FANOUT[$idx]:-missing}"
       fi
       if [[ -n "$reference_root_sha" && "${POST_ROOT_SHA[$idx]}" != "$reference_root_sha" ]]; then
         POST_PASS=0
@@ -4985,10 +5000,14 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     log "  heap root equality       PASS rows=$reference_count root=$reference_root"
     log "  logical partition roots  PASS sha256=$reference_root_sha"
     log "  physical topology        PASS sha256=$reference_topo_sha"
+    log "  fanout contract          PASS logical=32 physical=2"
     log "  leaf-item assignments    PASS sha256=$reference_item_sha"
     log "  full dynamic verifier    PASS"
     log "  DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1"
     printf 'DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+    printf 'DYNAMIC_LOGICAL_FANOUT=32\n' >>"$LOG_DIR/run_summary.env"
+    printf 'DYNAMIC_PHYSICAL_NODE_FANOUT=2\n' >>"$LOG_DIR/run_summary.env"
+    printf 'DYNAMIC_FANOUT_CONTRACT_PASS=1\n' >>"$LOG_DIR/run_summary.env"
     if [[ "${STRUCTURE_NATIVE:-0}" -eq 1 ]]; then
       printf 'ROOT_SEQUENCE_MARKER_DOMAIN=%s\n' "$reference_sequence_domain" >>"$LOG_DIR/run_summary.env"
       printf 'ROOT_SEQUENCE_MARKER_EPOCH=%s\n' "$reference_sequence_epoch" >>"$LOG_DIR/run_summary.env"

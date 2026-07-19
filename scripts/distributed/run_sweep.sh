@@ -38,6 +38,8 @@ Dynamic Merkle options forwarded to run_4node_raft_cluster.sh:
                            and requires them to match across all replicas.
   --dynamic-index NAME     Fully-qualified index name for dynamic verification
                            (default: public.usertable_small_dynamic_merkle_idx).
+                           Default dynamic runs require logical fanout 32 and
+                           independently report physical node fanout 2.
   --dynamic-structure-gate N
                            Untimed merge/re-split/key-route gate (default: 0).
   --dynamic-structure-crash-gate N
@@ -283,6 +285,8 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
   printf 'result_completion_quorum=%s\n' "$RESULT_COMPLETION_QUORUM"
   printf 'schedule=interleaved_alternating_by_rep\n'
   printf 'tps_semantics=raft_majority_result_completion_async_all3_validation\n'
+  printf 'dynamic_logical_fanout=32\n'
+  printf 'dynamic_physical_node_fanout=2\n'
   printf 'cluster_args='
   printf '%q ' "${CLUSTER_ARGS[@]}"
   printf '\n'
@@ -395,6 +399,13 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
       if [[ "$RUN_PASS" -eq 1 ]] && ! grep -q '^post_run_equality_verification_ms=' \
           "$RUN/run_summary.env" 2>/dev/null; then
         echo "WARNING: post-run equality timing/proof missing — marking run INVALID"
+        RUN_PASS=0
+      fi
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -qE 'merkle-verify-mode.+dynamic|MERKLE_VERIFY_MODE.+dynamic' \
+          "$OUT/campaign.env" 2>/dev/null &&
+          ! grep -q '^DYNAMIC_FANOUT_CONTRACT_PASS=1$' \
+          "$RUN/run_summary.env" 2>/dev/null; then
+        echo "WARNING: logical-32/physical-2 fanout proof missing — marking run INVALID"
         RUN_PASS=0
       fi
       if [[ "$RUN_PASS" -eq 1 ]] && grep -q -- '--dynamic-structure-gate 1' \

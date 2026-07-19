@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import run_merkle_recovery_benchmark as benchmark
-from merkle_recovery import dataset, dynamic_db
+from merkle_recovery import dataset, dynamic_benchmark, dynamic_db
 from merkle_recovery import manifest as manifest_module
 from merkle_recovery.config import (
     DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
@@ -41,9 +41,10 @@ def test_dynamic_profile_is_the_exact_acceptance_matrix():
     config = profile_config(DYNAMIC_PROFILE)
     assert config.fig12_sizes == [1_000_000, 3_000_000, 5_000_000]
     assert config.repetitions == 5
-    assert config.benchmark_schema_version == 5
+    assert config.benchmark_schema_version == 6
     assert config.extra["dynamic_partitions"] == 200
     assert config.extra["dynamic_logical_fanout"] == 32
+    assert config.extra["dynamic_physical_node_fanout"] == 2
     assert config.extra["dynamic_leaf_capacity"] == 32
     assert config.extra["dynamic_merge_threshold"] == 8
     assert config.extra["bad_range_count"] == 75
@@ -66,6 +67,41 @@ def test_dynamic_profile_is_the_exact_acceptance_matrix():
             "leaf_capacity": 32,
             "merge_threshold": 8,
         }
+
+
+def test_dynamic_run_id_reports_logical_and_physical_fanout_separately():
+    manifest = {
+        "experiment": "dynamic-bounded",
+        "tuple_count": 100,
+        "partitions": 2,
+        "fanout": 32,
+        "leaf_capacity": 32,
+        "merge_threshold": 8,
+        "bad_ranges": [],
+        "corruptions": [],
+    }
+    run_id = dynamic_benchmark.dynamic_recovery_run_id(manifest, 0, "test")
+    assert "-lf32-pf2-" in run_id
+    assert "-k32-" not in run_id
+
+
+def test_dynamic_fanout_contract_binds_manifest_metadata_and_physical_shape():
+    good = {
+        "healthy": {"authority": "native_index_pages", "logical_fanout": 32, "physical_node_fanout": 2},
+        "damaged": {"authority": "native_index_pages", "logical_fanout": 32, "physical_node_fanout": 2},
+    }
+    dynamic_benchmark._validate_fanout_contract(good, 32)
+
+    bad = {
+        **good,
+        "damaged": {
+            "authority": "native_index_pages",
+            "logical_fanout": 2,
+            "physical_node_fanout": 2,
+        },
+    }
+    with pytest.raises(RuntimeError, match="index_metadata=2"):
+        dynamic_benchmark._validate_fanout_contract(bad, 32)
 
 
 @pytest.mark.parametrize(
@@ -108,12 +144,7 @@ def test_dynamic_index_creation_uses_reloptions_and_never_creates_static_lookup(
         sql
         for sql in statements
         if sql.startswith("ANALYZE ariabc_internal.merkle_dynamic_")
-    } == {
-        "ANALYZE ariabc_internal.merkle_dynamic_node",
-        "ANALYZE ariabc_internal.merkle_dynamic_leaf_item",
-        "ANALYZE ariabc_internal.merkle_dynamic_seen",
-        "ANALYZE ariabc_internal.merkle_dynamic_state",
-    }
+    } == set()
 
 
 def test_dynamic_adapter_matches_frozen_backend_rows(monkeypatch):

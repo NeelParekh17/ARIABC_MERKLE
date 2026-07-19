@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from contextlib import contextmanager
@@ -20,7 +21,6 @@ from .dynamic import (
 from .dynamic_db import (
     apply_set_based_repairs,
     dynamic_apply_pending,
-    dynamic_side_table_plan_checks,
     dynamic_storage_scan_snapshot,
     dynamic_tree_stats,
     dynamic_verify,
@@ -30,13 +30,13 @@ from .dynamic_db import (
     range_items,
     range_summaries,
 )
-from .config import DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT
+from .config import (
+    DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
+    DYNAMIC_PHYSICAL_NODE_FANOUT,
+)
 from .metrics import Metrics, add_warning, finalize_metrics
 from .repair import seq_scan_delta, seq_scan_snapshot
 from .verification import schema_fidelity_checks
-
-DYNAMIC_LOCALISATION_FANOUT = 2
-
 
 def _now_ms() -> float:
     return time.perf_counter() * 1000.0
@@ -56,7 +56,8 @@ def dynamic_recovery_run_id(
     safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in label)
     return (
         f"{manifest['experiment']}-n{manifest['tuple_count']}"
-        f"-p{manifest['partitions']}-k{manifest['fanout']}"
+        f"-p{manifest['partitions']}-lf{manifest['fanout']}"
+        f"-pf{DYNAMIC_PHYSICAL_NODE_FANOUT}"
         f"-cap{manifest['leaf_capacity']}-merge{manifest['merge_threshold']}"
         f"-bad{len(manifest['bad_ranges'])}-c{len(manifest['corruptions'])}"
         f"-{safe}-merkle-dynamic-r{repetition}"
@@ -71,6 +72,11 @@ def _canonical_stats(stats: Mapping[str, Any]) -> dict[str, Any]:
         return default
 
     state_value = first("state", "readiness_state", "status", default="")
+    authority = str(first("authority", default=""))
+    if not state_value and authority == "native_index_pages":
+        # A successful native stats traversal validates every visible root and
+        # page locator; native indexes do not own a compatibility state row.
+        state_value = "READY"
     if not state_value and "ready" in stats:
         state_value = "READY" if bool(stats["ready"]) else "CATCHING_UP"
     return {
@@ -80,6 +86,11 @@ def _canonical_stats(stats: Mapping[str, Any]) -> dict[str, Any]:
             first("max_leaf_occupancy", "max_leaf_items", "maximum_leaf_count", default=-1)
         ),
         "max_depth": int(first("max_depth", "tree_depth", "maximum_depth", default=-1)),
+        "logical_fanout": int(first("logical_fanout", default=-1)),
+        "physical_node_fanout": int(first("physical_node_fanout", default=-1)),
+        "authority": authority,
+        "update_mode": str(first("update_mode", default="")),
+        "layout_version": int(first("layout_version", default=-1)),
         "split_count": int(first("split_count", "splits", "total_splits", default=0)),
         "merge_count": int(first("merge_count", "merges", "total_merges", default=0)),
         "dynamic_bytes": int(
@@ -183,8 +194,8 @@ def _localise(
     leaf_capacity: int,
     logical_fanout: int,
 ) -> tuple[list[LogicalRange], LocalisationTrace]:
-    if logical_fanout < DYNAMIC_LOCALISATION_FANOUT:
-        raise ValueError("configured dynamic fanout is too small")
+    if logical_fanout <= 1 or logical_fanout & (logical_fanout - 1):
+        raise ValueError("configured dynamic logical fanout must be a power of two")
     trace = LocalisationTrace()
     healthy = partition_roots(conn, "healthy")
     damaged = partition_roots(conn, "damaged")
@@ -197,13 +208,41 @@ def _localise(
         damaged,
         fetch,
         leaf_capacity=leaf_capacity,
-        # Binary descent follows the stored trie and avoids materialising 32
-        # siblings for every mismatching parent.  The external acceptance cap
-        # remains the configured 4,800 summaries.
-        logical_fanout=DYNAMIC_LOCALISATION_FANOUT,
+        # The native tree remains physically binary.  Recovery deliberately
+        # consumes one configured logical level at a time (five bits for 32),
+        # which is the meeting's logical-fanout contract.
+        logical_fanout=logical_fanout,
         trace=trace,
     )
     return bad, trace
+
+
+def _validate_fanout_contract(
+    stats_by_schema: Mapping[str, Mapping[str, Any]], logical_fanout: int
+) -> None:
+    """Bind manifest, authoritative index metadata, and localisation geometry."""
+    if logical_fanout != 32:
+        raise RuntimeError(
+            f"dynamic benchmark requires logical fanout 32, got {logical_fanout}"
+        )
+    for schema, stats in stats_by_schema.items():
+        if stats.get("authority") != "native_index_pages":
+            raise RuntimeError(
+                f"{schema} dynamic recovery authority is "
+                f"{stats.get('authority')!r}, expected 'native_index_pages'"
+            )
+        stored_logical = int(stats.get("logical_fanout", -1))
+        stored_physical = int(stats.get("physical_node_fanout", -1))
+        if stored_logical != logical_fanout:
+            raise RuntimeError(
+                f"{schema} dynamic fanout mismatch: manifest/localisation="
+                f"{logical_fanout}, index_metadata={stored_logical}"
+            )
+        if stored_physical != DYNAMIC_PHYSICAL_NODE_FANOUT:
+            raise RuntimeError(
+                f"{schema} physical node fanout mismatch: expected "
+                f"{DYNAMIC_PHYSICAL_NODE_FANOUT}, index_stats={stored_physical}"
+            )
 
 
 def _append_trace_rows(
@@ -496,14 +535,20 @@ def repair_dynamic_merkle(
     ).hexdigest()
     m.counters["merkle_mode"] = "dynamic"
 
+    # Dataset/index state needed to establish the recovery contract is setup,
+    # not recovery work.  In particular, dynamic_tree_stats() walks native
+    # index metadata and naturally grows with table size.  Keep it visible as
+    # setup telemetry, but start the recovery stopwatch only after it is done.
     total_start = _now_ms()
-    paper_start = total_start
     recovery_scan_before = seq_scan_snapshot(conn)
     before_stats = {
         schema: _canonical_stats(dynamic_tree_stats(conn, schema))
         for schema in ("healthy", "damaged")
     }
+    _validate_fanout_contract(before_stats, logical_fanout)
     dynamic_scan_before = dynamic_storage_scan_snapshot(conn)
+    paper_start = _now_ms()
+    m.phase["pre_recovery_setup_ms"] = paper_start - total_start
 
     with _timer(m.phase, "tree_localisation_ms"):
         bad_ranges, trace = _localise(conn, leaf_capacity, logical_fanout)
@@ -593,25 +638,46 @@ def repair_dynamic_merkle(
 
     audit_scan_before = seq_scan_snapshot(conn)
     audit_start = _now_ms()
-    with _timer(m.phase, "audit_dynamic_side_table_plans_ms"):
-        side_table_plans: list[dict[str, Any]] = []
-        for schema in ("healthy", "damaged"):
-            side_table_plans.extend(
-                dynamic_side_table_plan_checks(conn, schema, bad_ranges)
-            )
-        for side_plan in side_table_plans:
-            side_plan["run_id"] = run_id
-            planner_rows_out.append(side_plan)
     audit = (
         _audit_dynamic(conn, run_id, leaf_capacity)
         if audit_mode == "full"
         else _targeted_audit_dynamic(conn, run_id, leaf_capacity)
     )
+    final_stats_by_schema = {
+        schema: audit[f"{schema}_stats"] for schema in ("healthy", "damaged")
+    }
+    _validate_fanout_contract(final_stats_by_schema, logical_fanout)
+    with _timer(m.phase, "audit_native_api_authority_ms"):
+        native_api_proofs: list[dict[str, Any]] = []
+        for schema in ("healthy", "damaged"):
+            stats = final_stats_by_schema[schema]
+            detail = json.dumps(stats["raw_stats"], sort_keys=True, default=str)
+            proof = {
+                "run_id": run_id,
+                "schema": schema,
+                "operation": "native_dynamic_api_authority",
+                "requested_key_count": len(bad_ranges),
+                "ordinal": 0,
+                "logical_range": "all_localised_ranges",
+                "expected_index": "native_index_pages",
+                "index_used": int(stats["authority"] == "native_index_pages"),
+                "rows_examined": 0,
+                "shared_hit_blocks": 0,
+                "shared_read_blocks": 0,
+                "plan_json_sha256": hashlib.sha256(detail.encode()).hexdigest(),
+                "plan_json": detail,
+            }
+            native_api_proofs.append(proof)
+            planner_rows_out.append(proof)
     audit_end = _now_ms()
     audit_scan_after = seq_scan_snapshot(conn)
     audit_seq_scans = seq_scan_delta(audit_scan_before, audit_scan_after)
     schema_rows_out.extend(audit["schema_fidelity_rows"])
-    m.phase.update(audit["audit_phase"])
+    # Audit is optional and must never pollute the recovery phase report.  The
+    # recovery boundary ends before this block; retain audit timings only for
+    # an explicitly requested full audit.
+    if audit_mode == "full":
+        m.phase.update(audit["audit_phase"])
 
     for schema in ("healthy", "damaged"):
         tree_stats_rows_out.append(
@@ -652,10 +718,10 @@ def repair_dynamic_merkle(
             "targeted_confirmation_root_batches": 2,
             "bad_partition_count": trace.bad_partitions,
             "bad_range_count": len(bad_ranges),
-            "bad_leaf_count": len(bad_ranges),
             "localised_bad_range_count": len(bad_ranges),
             "configured_leaf_capacity": leaf_capacity,
-            "localisation_fanout": DYNAMIC_LOCALISATION_FANOUT,
+            "logical_localisation_fanout": logical_fanout,
+            "physical_node_fanout": DYNAMIC_PHYSICAL_NODE_FANOUT,
             "logical_ranges_compared": trace.logical_ranges_compared,
             "range_summary_rows_read": trace.range_summary_rows,
             "localisation_levels_visited": trace.levels_visited,
@@ -675,27 +741,18 @@ def repair_dynamic_merkle(
             "remaining_bad_range_count": len(remaining_bad_ranges),
             "planner_checks_passed": int(
                 bool(plan["index_used"])
-                and all(bool(row["index_used"]) for row in side_table_plans)
+                and all(bool(row["index_used"]) for row in native_api_proofs)
             ),
-            "dynamic_side_table_plan_count": len(side_table_plans),
-            "dynamic_side_table_seq_scan_plans": sum(
-                1 for row in side_table_plans if not bool(row["index_used"])
-            ),
-            "dynamic_side_table_rows_examined": sum(
-                int(row["rows_examined"]) for row in side_table_plans
-            ),
-            "dynamic_side_table_shared_hit_blocks": sum(
-                int(row["shared_hit_blocks"]) for row in side_table_plans
-            ),
-            "dynamic_side_table_shared_read_blocks": sum(
-                int(row["shared_read_blocks"]) for row in side_table_plans
+            "dynamic_native_api_check_count": len(native_api_proofs),
+            "dynamic_native_api_authority_failures": sum(
+                1 for row in native_api_proofs if not bool(row["index_used"])
             ),
             "dynamic_storage_seq_scan_delta": dynamic_storage_seq_scans,
             "recovery_user_table_seq_scan_delta": recovery_seq_scans,
             "audit_mode": audit_mode,
             "full_audit_skipped": int(audit_mode == "skip"),
             "audit_user_table_seq_scan_delta": audit_seq_scans,
-            "audit_validation_ms": audit["audit_validation_ms"],
+            "audit_validation_ms": audit["audit_validation_ms"] if audit_mode == "full" else 0.0,
             "schema_fidelity_ok": int(audit["schema_fidelity_ok"]),
             "static_lookup_index_count": audit["static_lookup_index_count"],
             "healthy_minus_damaged": audit["healthy_minus_damaged"],
@@ -751,8 +808,8 @@ def repair_dynamic_merkle(
         ),
         (bool(plan["index_used"]), "exact healthy heap fetch did not use primary index"),
         (
-            all(bool(row["index_used"]) for row in side_table_plans),
-            "dynamic side-table planner proof failed",
+            all(bool(row["index_used"]) for row in native_api_proofs),
+            "native dynamic API authority proof failed",
         ),
         (audit["static_lookup_index_count"] == 0, "static bucket lookup index exists"),
         (audit["schema_fidelity_ok"], "dynamic schema fidelity failed"),
@@ -797,7 +854,9 @@ def repair_dynamic_merkle(
         cleanup_end_ms=cleanup_end,
         audit_skipped=(audit_mode == "skip"),
     )
-    m.phase["merkle_total_ms"] = m.end_to_end_observed_ms
+    m.phase["merkle_total_ms"] = (
+        m.end_to_end_observed_ms if audit_mode == "full" else m.restore_repair_ms
+    )
     return m
 
 

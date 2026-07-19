@@ -15,6 +15,9 @@ SELECT COALESCE(pg_stat_get_tuples_inserted(
 SELECT merkle_verify('merkle_native_test') AS initial_verify;
 SELECT merkle_dynamic_tree_stats('merkle_native_test_idx')->>'authority'
        AS authority;
+SELECT merkle_dynamic_tree_stats('merkle_native_test_idx')->>'logical_fanout' = '32'
+       AND merkle_dynamic_tree_stats('merkle_native_test_idx')->>'physical_node_fanout' = '2'
+       AS fanout_contract;
 SELECT (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'data_root')
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'structure_root')
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'combined_root')

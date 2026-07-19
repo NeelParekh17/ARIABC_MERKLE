@@ -87,6 +87,7 @@ typedef struct NativePartitionSpool
 typedef struct NativeConfig
 {
 	int partitions;
+	int logical_fanout;
 	int leaf_capacity;
 	int merge_threshold;
 	uint64 leaf_byte_capacity;
@@ -207,6 +208,16 @@ native_read_config(Relation indexRel, NativeConfig *config)
 						MERKLE_DYNAMIC_LAYOUT_VERSION)));
 	}
 	config->partitions = meta->numPartitions;
+	config->logical_fanout = meta->dynamicLogicalFanout;
+	if (config->logical_fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT)
+	{
+		UnlockReleaseBuffer(buffer);
+		ereport(ERROR,
+				(errcode(ERRCODE_INDEX_CORRUPTED),
+				 errmsg("dynamic Merkle logical fanout is %d, expected %d",
+						config->logical_fanout,
+						MERKLE_DYNAMIC_LOGICAL_FANOUT)));
+	}
 	config->leaf_capacity = meta->dynamicLeafCapacity;
 	config->merge_threshold = meta->dynamicMergeThreshold;
 	config->leaf_byte_capacity = meta->dynamicLeafByteCapacity;
@@ -3333,6 +3344,8 @@ merkle_native_get_ranges(PG_FUNCTION_ARGS)
 	TupleDesc desc;
 	Tuplestorestate *store;
 	NativeRangeRequest *requests;
+	MerkleNativeRootVersion *roots;
+	bool *root_loaded;
 	int count;
 	int r;
 
@@ -3342,22 +3355,28 @@ merkle_native_get_ranges(PG_FUNCTION_ARGS)
 	native_read_config(indexRel, &config);
 	store = native_begin_srf(fcinfo, &desc);
 	requests = native_parse_ranges(PG_GETARG_JSONB_P(1), &config, &count);
+	roots = palloc0(sizeof(MerkleNativeRootVersion) * config.partitions);
+	root_loaded = palloc0(sizeof(bool) * config.partitions);
 	for (r = 0; r < count; r++)
 	{
-		MerkleNativeRootVersion root;
 		MerkleHash xor;
 		uint64 bytes = 0;
 		uint64 matched = 0;
+		int partition = requests[r].partition;
 
-		if (!native_visible_root(indexRel, requests[r].partition, &root))
-			elog(ERROR, "native Merkle partition has no visible root");
+		if (!root_loaded[partition])
+		{
+			if (!native_visible_root(indexRel, partition, &roots[partition]))
+				elog(ERROR, "native Merkle partition has no visible root");
+			root_loaded[partition] = true;
+		}
 		merkle_hash_zero(&xor);
 		/*
 		 * Use the prefix-tree traversal instead of collecting all items
 		 * (plan_left.md §7).  Complexity is now O(depth + matching_frontier)
 		 * rather than O(partition_items).
 		 */
-		native_traverse_range_summary(indexRel, &root.root_node,
+		native_traverse_range_summary(indexRel, &roots[partition].root_node,
 									  requests[r].prefix, requests[r].prefix_len,
 									  &matched, &bytes, &xor);
 		native_put_summary(store, desc, requests[r].partition,
@@ -3365,6 +3384,8 @@ merkle_native_get_ranges(PG_FUNCTION_ARGS)
 			matched <= (uint64) config.leaf_capacity &&
 			bytes <= config.leaf_byte_capacity);
 	}
+	pfree(root_loaded);
+	pfree(roots);
 	index_close(indexRel, ShareLock);
 	tuplestore_donestoring(store);
 	PG_RETURN_NULL();
@@ -3378,6 +3399,8 @@ merkle_native_get_range_items(PG_FUNCTION_ARGS)
 	TupleDesc desc;
 	Tuplestorestate *store;
 	NativeRangeRequest *requests;
+	MerkleNativeRootVersion *roots;
+	bool *root_loaded;
 	int count;
 	int r;
 
@@ -3389,9 +3412,11 @@ merkle_native_get_range_items(PG_FUNCTION_ARGS)
 	native_read_config(indexRel, &config);
 	store = native_begin_srf(fcinfo, &desc);
 	requests = native_parse_ranges(PG_GETARG_JSONB_P(1), &config, &count);
+	roots = palloc0(sizeof(MerkleNativeRootVersion) * config.partitions);
+	root_loaded = palloc0(sizeof(bool) * config.partitions);
 	for (r = 0; r < count; r++)
 	{
-		MerkleNativeRootVersion root;
+		int partition = requests[r].partition;
 		/*
 		 * Validate that the requested range is leaf-bounded before streaming
 		 * items.  Use the summary traversal (O(depth)) for this check rather
@@ -3401,10 +3426,14 @@ merkle_native_get_range_items(PG_FUNCTION_ARGS)
 		uint64 matched = 0;
 		uint64 bytes = 0;
 
-		if (!native_visible_root(indexRel, requests[r].partition, &root))
-			elog(ERROR, "native Merkle partition has no visible root");
+		if (!root_loaded[partition])
+		{
+			if (!native_visible_root(indexRel, partition, &roots[partition]))
+				elog(ERROR, "native Merkle partition has no visible root");
+			root_loaded[partition] = true;
+		}
 		merkle_hash_zero(&xor);
-		native_traverse_range_summary(indexRel, &root.root_node,
+		native_traverse_range_summary(indexRel, &roots[partition].root_node,
 									  requests[r].prefix, requests[r].prefix_len,
 									  &matched, &bytes, &xor);
 		if (matched > (uint64) config.leaf_capacity ||
@@ -3417,11 +3446,13 @@ merkle_native_get_range_items(PG_FUNCTION_ARGS)
 		 * Now stream the matching items using the prefix-tree traversal
 		 * (plan_left.md §7).  Complexity is O(depth + matching_leaf_items).
 		 */
-		native_traverse_range_items(indexRel, &root.root_node,
+		native_traverse_range_items(indexRel, &roots[partition].root_node,
 									requests[r].prefix, requests[r].prefix_len,
 									requests[r].partition, requests[r].prefix_len,
 									store, desc);
 	}
+	pfree(root_loaded);
+	pfree(roots);
 	index_close(indexRel, ShareLock);
 	tuplestore_donestoring(store);
 	PG_RETURN_NULL();
@@ -3531,6 +3562,7 @@ merkle_native_tree_stats(PG_FUNCTION_ARGS)
 
 	json = psprintf("{\"authority\":\"native_index_pages\","
 		"\"update_mode\":\"%s\","
+		"\"logical_fanout\":%d,\"physical_node_fanout\":%d,"
 		"\"data_root\":\"%s\",\"structure_root\":\"%s\","
 		"\"combined_root\":\"%s\","
 		"\"layout_version\":%d,\"partitions\":%d,\"item_count\":%llu,"
@@ -3538,7 +3570,8 @@ merkle_native_tree_stats(PG_FUNCTION_ARGS)
 		"\"max_depth\":%llu,\"max_leaf_items\":%llu,\"pages\":%u,"
 		"\"min_apply_seq\":%llu,\"max_apply_seq\":%llu,"
 		"\"sequence_domain\":%u,\"sequence_flags\":%u,\"sequence_epoch\":%llu}",
-		mode_str, merkle_hash_to_hex(&data_root),
+		mode_str, config.logical_fanout, MERKLE_DYNAMIC_PHYSICAL_NODE_FANOUT,
+		merkle_hash_to_hex(&data_root),
 		merkle_hash_to_hex(&structure_root), merkle_hash_to_hex(&combined_root),
 		MERKLE_DYNAMIC_LAYOUT_VERSION, config.partitions,
 		(unsigned long long) items, (unsigned long long) bytes,
