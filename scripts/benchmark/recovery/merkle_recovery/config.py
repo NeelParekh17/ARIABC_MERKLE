@@ -28,13 +28,14 @@ LEAF_LOOKUP_INDEXES = {
 }
 
 BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only static recovery
-DYNAMIC_BENCHMARK_SCHEMA_VERSION = 5
+DYNAMIC_BENCHMARK_SCHEMA_VERSION = 6
 TIMING_CONTRACT_VERSION = 1
 ZERO_HASH = "0" * 64
 MERKLE_MODES = ("static", "dynamic")
 DYNAMIC_PROFILE = "dynamic-size-scaling-k75-c300"
 DYNAMIC_PARTITIONS = 200
 DYNAMIC_LOGICAL_FANOUT = 32
+DYNAMIC_PHYSICAL_NODE_FANOUT = 2
 DYNAMIC_LEAF_CAPACITY = 32
 DYNAMIC_MERGE_THRESHOLD = 8
 DYNAMIC_BAD_RANGE_COUNT = 75
@@ -191,6 +192,7 @@ def profile_config(profile: str) -> BenchmarkConfig:
                 "merkle_mode": "dynamic",
                 "dynamic_partitions": DYNAMIC_PARTITIONS,
                 "dynamic_logical_fanout": DYNAMIC_LOGICAL_FANOUT,
+                "dynamic_physical_node_fanout": DYNAMIC_PHYSICAL_NODE_FANOUT,
                 "dynamic_leaf_capacity": DYNAMIC_LEAF_CAPACITY,
                 "dynamic_split_threshold": DYNAMIC_LEAF_CAPACITY,
                 "dynamic_merge_threshold": DYNAMIC_MERGE_THRESHOLD,

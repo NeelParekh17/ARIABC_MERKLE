@@ -16,7 +16,12 @@ from typing import Any
 import psycopg
 
 from .config import ROOT
-from .config import DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT, DYNAMIC_PROFILE
+from .config import (
+    DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
+    DYNAMIC_LOGICAL_FANOUT,
+    DYNAMIC_PHYSICAL_NODE_FANOUT,
+    DYNAMIC_PROFILE,
+)
 from .metrics import Metrics
 
 
@@ -188,6 +193,13 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
                  f"corruption_mode={m.corruption_mode}"),
                 (m.partitions == 200, f"partitions={m.partitions}"),
                 (m.fanout == 32, f"logical_fanout={m.fanout}"),
+                (int(m.counters.get("logical_localisation_fanout", -1))
+                 == DYNAMIC_LOGICAL_FANOUT,
+                 "logical_localisation_fanout="
+                 f"{m.counters.get('logical_localisation_fanout')}"),
+                (int(m.counters.get("physical_node_fanout", -1))
+                 == DYNAMIC_PHYSICAL_NODE_FANOUT,
+                 f"physical_node_fanout={m.counters.get('physical_node_fanout')}"),
                 (m.bad_leaf_count == 75, f"configured_bad_range_count={m.bad_leaf_count}"),
                 (m.corrupted_tuple_count == 300, f"corrupted_tuple_count={m.corrupted_tuple_count}"),
                 (int(m.counters.get("total_rows_repaired", -1)) == 300,
@@ -205,9 +217,12 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
                 (int(m.counters.get("dynamic_storage_seq_scan_delta", -1)) == 0,
                  "dynamic_storage_seq_scan_delta="
                  f"{m.counters.get('dynamic_storage_seq_scan_delta')}"),
-                (int(m.counters.get("dynamic_side_table_seq_scan_plans", -1)) == 0,
-                 "dynamic_side_table_seq_scan_plans="
-                 f"{m.counters.get('dynamic_side_table_seq_scan_plans')}"),
+                (int(m.counters.get("dynamic_native_api_check_count", -1)) == 2,
+                 "dynamic_native_api_check_count="
+                 f"{m.counters.get('dynamic_native_api_check_count')}"),
+                (int(m.counters.get("dynamic_native_api_authority_failures", -1)) == 0,
+                 "dynamic_native_api_authority_failures="
+                 f"{m.counters.get('dynamic_native_api_authority_failures')}"),
                 (int(m.counters.get("full_damaged_heap_rows_fetched", -1)) == 0,
                  f"full_damaged_heap_rows_fetched={m.counters.get('full_damaged_heap_rows_fetched')}"),
                 (int(m.counters.get("exact_healthy_heap_rows_fetched", -1)) == 300,

@@ -145,10 +145,9 @@ def create_dynamic_merkle_indexes(
         )
         execute(conn, f"ANALYZE {schema}.usertable")
 
-    # CREATE INDEX bulk-loads the shared dynamic relations.  Without fresh
-    # statistics PostgreSQL estimates those tables as tiny and may sequentially
-    # scan them for sparse point/range probes once the dataset reaches 3M.
-    analyze_dynamic_side_tables(conn)
+    # Native dynamic indexes keep recovery authority in index pages.  The
+    # compatibility side tables are not part of the recovery read path and do
+    # not need ANALYZE after a native bulk build.
 
 
 def analyze_dynamic_side_tables(conn) -> None:
@@ -207,10 +206,7 @@ def create_damaged_dynamic_index(
         """,
     )
     execute(conn, "ANALYZE damaged.usertable")
-    # CREATE INDEX above bulk-loaded the shared dynamic relations; refresh their
-    # planner statistics so sparse node/range probes continue to use B-tree
-    # index scans rather than misestimating the relations at 1M/3M/5M rows.
-    analyze_dynamic_side_tables(conn)
+    # Native index pages, not compatibility side tables, own recovery reads.
 
 
 # ── dataset ──────────────────────────────────────────────────────────────────

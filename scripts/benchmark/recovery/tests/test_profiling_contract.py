@@ -997,9 +997,8 @@ def test_static_path_does_not_call_analyze_dynamic_side_tables(monkeypatch):
         )
 
 
-def test_dynamic_path_calls_analyze_dynamic_side_tables_exactly_once(monkeypatch):
-    """create_damaged_dynamic_index must call analyze_dynamic_side_tables exactly once,
-    after both CREATE INDEX and ANALYZE damaged.usertable."""
+def test_dynamic_path_does_not_analyze_compatibility_side_tables(monkeypatch):
+    """Native index pages own recovery; compatibility tables stay off-path."""
     import merkle_recovery.dataset as ds
 
     call_order: list[str] = []
@@ -1026,23 +1025,16 @@ def test_dynamic_path_calls_analyze_dynamic_side_tables_exactly_once(monkeypatch
         merge_threshold=8,
     )
 
-    # analyze_dynamic_side_tables must be called exactly once
     dynamic_calls = [e for e in call_order if e == "analyze_dynamic_side_tables"]
-    assert len(dynamic_calls) == 1, (
-        f"analyze_dynamic_side_tables called {len(dynamic_calls)} times; expected 1"
-    )
-
-    # ORDER: CREATE INDEX -> ANALYZE usertable -> analyze_dynamic_side_tables
+    assert dynamic_calls == []
     assert call_order == [
         "CREATE INDEX dynamic=on",
         "ANALYZE usertable",
-        "analyze_dynamic_side_tables",
     ], f"Unexpected call order: {call_order}"
 
 
-def test_dynamic_path_analyze_ordering_create_before_internal_tables(monkeypatch):
-    """Verify the required ordering: CREATE INDEX dynamic=on, then ANALYZE usertable,
-    then ANALYZE ariabc_internal.merkle_dynamic_* tables."""
+def test_dynamic_path_never_issues_internal_analyze(monkeypatch):
+    """Native recovery must not pay compatibility-side-table ANALYZE cost."""
     import merkle_recovery.dataset as ds
 
     call_order: list[str] = []
@@ -1068,13 +1060,4 @@ def test_dynamic_path_analyze_ordering_create_before_internal_tables(monkeypatch
         merge_threshold=8,
     )
 
-    expected_internal = [
-        "ANALYZE ariabc_internal.merkle_dynamic_node",
-        "ANALYZE ariabc_internal.merkle_dynamic_leaf_item",
-        "ANALYZE ariabc_internal.merkle_dynamic_seen",
-        "ANALYZE ariabc_internal.merkle_dynamic_state",
-    ]
-    full_expected = ["CREATE INDEX", "ANALYZE usertable"] + expected_internal
-    assert call_order == full_expected, (
-        f"Ordering violation.\nExpected: {full_expected}\nGot:      {call_order}"
-    )
+    assert call_order == ["CREATE INDEX", "ANALYZE usertable"]

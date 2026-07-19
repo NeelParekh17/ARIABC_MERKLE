@@ -36,11 +36,14 @@ set -euo pipefail
 #   --transaction-isolation <level>  Client isolation for both modes [default: serializable]
 #   --workloads <csv>       Workload filenames (default: ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)
 #   --rates <csv>           Rate limits csv (optional)
-#   --signing-modes <0,1>   Signing modes for det runs: 0=unsigned, 1=signed  [default: 0,1]
+#   --signing-modes <0,1>   Signing modes for det runs: 0=unsigned, 1=signed  [default: 0]
 #   --signing-privkey <p>   Signing key path (relative to repo root)  [default: scripts/bench_signing_privkey.pem]
 #   --enforce-signatures <1> 0|1 — set bcdb_enforce_signatures in workload sessions  [default: 1]
+#   --max-retries <50>      Per-statement retry budget for transient serialization conflicts
 #   --legacy-merkle         Use the legacy static Merkle restore (default: native dynamic)
 #   --dynamic-structure-profile <0|1>  Profile native DET split/merge counters  [default: 1]
+#                            Dynamic runs require logical fanout 32 over binary
+#                            physical nodes (fanout 2) and record both values.
 #   --poll-interval <60>    Seconds between monitoring polls
 #   --hang-timeout <60>     Seconds of no log change before hang warning
 #   --stall-timeout <1800>  Abort if a live benchmark has no log progress this long
@@ -77,6 +80,7 @@ RATES=""
 SIGNING_MODES="0"
 SIGNING_PRIVKEY="scripts/bench_signing_privkey.pem"
 ENFORCE_SIGNATURES="1"
+BENCH_MAX_RETRIES=50
 DYNAMIC_MERKLE=1
 DYNAMIC_STRUCTURE_PROFILE=1
 DB_NAME="postgres"
@@ -100,6 +104,7 @@ while [[ $# -gt 0 ]]; do
     --signing-modes) SIGNING_MODES="${2:-}"; shift 2 ;;
     --signing-privkey) SIGNING_PRIVKEY="${2:-}"; shift 2 ;;
     --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
+    --max-retries)   BENCH_MAX_RETRIES="${2:-50}"; shift 2 ;;
     --legacy-merkle)  DYNAMIC_MERKLE=0; shift 1 ;;
     --dynamic-structure-profile) DYNAMIC_STRUCTURE_PROFILE="${2:-1}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
@@ -123,7 +128,7 @@ case "$TRANSACTION_ISOLATION" in
   *) echo "ERROR: unsupported --transaction-isolation: $TRANSACTION_ISOLATION" >&2; exit 2 ;;
 esac
 
-for numeric in POLL_INTERVAL_S HANG_TIMEOUT_S STALL_TIMEOUT_S; do
+for numeric in POLL_INTERVAL_S HANG_TIMEOUT_S STALL_TIMEOUT_S BENCH_MAX_RETRIES; do
   value="${!numeric}"
   [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 )) || {
     echo "ERROR: $numeric must be a positive integer (got: $value)" >&2
@@ -310,6 +315,7 @@ lmsg "Workloads    : ${WORKLOADS:-<bench_threads_matrix.py defaults>}"
 lmsg "SigningModes : ${SIGNING_MODES:-<default>}"
 lmsg "SigningKey   : ${SIGNING_PRIVKEY_LOCAL:-<not set>}"
 lmsg "EnforceSig   : ${ENFORCE_SIGNATURES:-<default>}"
+lmsg "Max retries  : $BENCH_MAX_RETRIES"
 lmsg "Result root  : $LOCAL_RESULT_ROOT"
 echo
 
@@ -721,6 +727,7 @@ export ARIABC_INSTALL_DIR='$inst'
 export ARIABC_DIR='$repo'
 export ARIABC_PGPORT='$DB_PORT'
 export ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1
+export MAX_RETRIES='$BENCH_MAX_RETRIES'
 export LD_LIBRARY_PATH='$inst/lib:\${LD_LIBRARY_PATH:-}'
 pgdata_line=\$(bash '$repo/scripts/distributed/ensure_single_node_postgres.sh' \
   --repo-root '$repo' --install-dir '$inst' \
@@ -1114,9 +1121,16 @@ for node in nodes:
                         ("workload", "threads", "rate", "signing", "enforce_signatures"))
             splits = (row.get("dynamic_profile_splits") or "").strip()
             merges = (row.get("dynamic_profile_merges") or "").strip()
+            logical = (row.get("dynamic_logical_fanout") or "").strip()
+            physical = (row.get("dynamic_physical_node_fanout") or "").strip()
             if not splits.isdigit() or not merges.isdigit():
                 raise SystemExit(f"missing DET profile counters for {node}: {key}")
-            current[key] = (int(splits), int(merges))
+            if logical != "32" or physical != "2":
+                raise SystemExit(
+                    f"fanout contract failed for {node}: {key} "
+                    f"logical={logical or 'missing'} physical={physical or 'missing'}"
+                )
+            current[key] = (int(splits), int(merges), int(logical), int(physical))
     if not current:
         raise SystemExit(f"no DET profile rows for {node}")
     maps[node] = current
@@ -1127,12 +1141,21 @@ for node, current in maps.items():
     if current != baseline:
         raise SystemExit(f"profile mismatch: {baseline_node}={baseline} {node}={current}")
 for key, value in sorted(baseline.items()):
-    print(f"  profile key={key} splits={value[0]} merges={value[1]}")
+    print(
+        f"  profile key={key} splits={value[0]} merges={value[1]} "
+        f"logical_fanout={value[2]} physical_node_fanout={value[3]}"
+    )
 print(f"DYNAMIC_NATIVE_PROFILE_PASS=1 nodes={len(maps)}")
+print("DYNAMIC_FANOUT_CONTRACT_PASS=1 logical_fanout=32 physical_node_fanout=2")
 PYEOF
   then
     _abort_run "Native DET split/merge profile missing or mismatched across nodes"
   fi
+  {
+    printf 'DYNAMIC_LOGICAL_FANOUT=32\n'
+    printf 'DYNAMIC_PHYSICAL_NODE_FANOUT=2\n'
+    printf 'DYNAMIC_FANOUT_CONTRACT_PASS=1\n'
+  } >"$LOCAL_RESULT_ROOT/dynamic_fanout_contract.env"
 fi
 
 echo "=== Final Status ==="

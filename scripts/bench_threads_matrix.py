@@ -73,6 +73,8 @@ class RunResult:
     dynamic_profile_splits: Optional[int]
     dynamic_profile_merges: Optional[int]
     dynamic_profile_max_leaf_items: Optional[int]
+    dynamic_logical_fanout: Optional[int]
+    dynamic_physical_node_fanout: Optional[int]
     workload_log: str
     start_server_log: str
     restore_log: str
@@ -572,6 +574,10 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         dynamic_merges = [x for x in dynamic_merges if x is not None]
         dynamic_max_leaf = [as_int(r.get("dynamic_profile_max_leaf_items", "")) for r in rs]
         dynamic_max_leaf = [x for x in dynamic_max_leaf if x is not None]
+        dynamic_logical_fanout = [as_int(r.get("dynamic_logical_fanout", "")) for r in rs]
+        dynamic_logical_fanout = [x for x in dynamic_logical_fanout if x is not None]
+        dynamic_physical_fanout = [as_int(r.get("dynamic_physical_node_fanout", "")) for r in rs]
+        dynamic_physical_fanout = [x for x in dynamic_physical_fanout if x is not None]
 
         # Per-row statement_count (from results.csv) takes precedence so a
         # different statement count per workload is reflected in TPS. Fall back
@@ -637,6 +643,8 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
                 "dynamic_profile_splits": max_or_empty(dynamic_splits),
                 "dynamic_profile_merges": max_or_empty(dynamic_merges),
                 "dynamic_profile_max_leaf_items": max_or_empty(dynamic_max_leaf),
+                "dynamic_logical_fanout": max_or_empty(dynamic_logical_fanout),
+                "dynamic_physical_node_fanout": max_or_empty(dynamic_physical_fanout),
             }
         )
 
@@ -1422,6 +1430,7 @@ def main() -> int:
             "workload_det_s": args.timeout_workload_det_s,
         },
         "retry_policy": {
+            "max_retries": env.get("MAX_RETRIES", "10"),
             "serialization_retry_backoff_s": env.get(
                 "SERIALIZATION_RETRY_BACKOFF_SEC", "0.001"
             ),
@@ -1458,6 +1467,7 @@ def main() -> int:
                 "BCDB_DT_LIGHT_SNAPSHOT",
                 "ARIABC_PSYCOPG_CLIENT_CURSOR",
                 "BENCH_TX_ISOLATION",
+                "MAX_RETRIES",
                 "SERIALIZATION_RETRY_BACKOFF_SEC",
                 "PGOPTIONS",
             ]
@@ -1516,6 +1526,8 @@ def main() -> int:
         dynamic_profile_splits=None,
         dynamic_profile_merges=None,
         dynamic_profile_max_leaf_items=None,
+        dynamic_logical_fanout=None,
+        dynamic_physical_node_fanout=None,
         workload_log="",
         start_server_log="",
         restore_log="",
@@ -1534,9 +1546,10 @@ def main() -> int:
             (len(signing_modes) if MODE_NAME_TO_DB_TYPE[mode] == 1 else 1)
             for mode in modes
         )
-        # Single global warmup flag: we only need to warm the buffer pool once
         # Warm each mode once.  PG and DET have different indexes/execution
         # machinery, so warming only the first mode biases the comparison.
+        # DET is restarted after its warmup restore: that preserves the hot OS
+        # page cache while guaranteeing a clean in-memory sequence domain.
         warmed_modes: set[str] = set()
 
         done = 0
@@ -1582,6 +1595,8 @@ def main() -> int:
                                 profile_splits = None
                                 profile_merges = None
                                 profile_max_leaf_items = None
+                                dynamic_logical_fanout = None
+                                dynamic_physical_node_fanout = None
                                 if args.dynamic_merkle_profile and server_log_path.exists():
                                     try:
                                         profile_log_offset = server_log_path.stat().st_size
@@ -1833,6 +1848,25 @@ def main() -> int:
                                                     + pg_ready_msg
                                                     + "\n"
                                                 )
+                                        # A SQL restore calls bcdb_reset(), but workers from the
+                                        # completed warmup can still observe the old published
+                                        # sequence domain while that reset is being installed.
+                                        # Starting another DET stream at sequence zero in that
+                                        # state can strand its first block behind stale shared-
+                                        # memory watermarks.  Restart outside the measured interval
+                                        # to make the reset atomic from the workload's perspective.
+                                        if restore_exit == 0 and db_type == 1:
+                                            post_warmup_restart_exit = _run(
+                                                ["/usr/bin/bash", str(start_server)],
+                                                cwd=scripts_dir,
+                                                env=env,
+                                                stdout_path=case_dir / "restart_after_warmup.out",
+                                                stderr_path=case_dir / "restart_after_warmup.err",
+                                            )
+                                            if post_warmup_restart_exit != 0:
+                                                restore_exit = 95
+                                                start_exit = post_warmup_restart_exit
+
                                         # Reset DET txid counter to 0 for the actual measured run.
                                         if db_type == 1:
                                             case_env["DET_START_SEQ"] = "0"
@@ -1979,6 +2013,36 @@ def main() -> int:
                                                     cwd=scripts_dir,
                                                     env=mode_env,
                                                 )
+                                                fanout_values = _psql_value(
+                                                    psql_path,
+                                                    db=args.db,
+                                                    port=args.port,
+                                                    user=args.user,
+                                                    query=(
+                                                        "SELECT (s->>'logical_fanout') || '|' || "
+                                                        "(s->>'physical_node_fanout') FROM (SELECT "
+                                                        "merkle_dynamic_tree_stats('" + dynamic_index + "'::regclass)::jsonb AS s) q;"
+                                                    ),
+                                                    cwd=scripts_dir,
+                                                    env=mode_env,
+                                                )
+                                                fanout_parts = (fanout_values or "").split("|")
+                                                if len(fanout_parts) == 2 and all(
+                                                    part.isdigit() for part in fanout_parts
+                                                ):
+                                                    dynamic_logical_fanout = int(fanout_parts[0])
+                                                    dynamic_physical_node_fanout = int(fanout_parts[1])
+                                                    if (
+                                                        dynamic_logical_fanout != 32
+                                                        or dynamic_physical_node_fanout != 2
+                                                    ):
+                                                        verification_error = (
+                                                            "dynamic_fanout_contract_failed: "
+                                                            f"logical={dynamic_logical_fanout} "
+                                                            f"physical={dynamic_physical_node_fanout}"
+                                                        )
+                                                else:
+                                                    verification_error = "dynamic_fanout_query_failed"
                                                 if args.dynamic_merkle_profile:
                                                     profile_values = _psql_value(
                                                         psql_path,
@@ -2094,6 +2158,8 @@ def main() -> int:
                                     dynamic_profile_splits=profile_splits,
                                     dynamic_profile_merges=profile_merges,
                                     dynamic_profile_max_leaf_items=profile_max_leaf_items,
+                                    dynamic_logical_fanout=dynamic_logical_fanout,
+                                    dynamic_physical_node_fanout=dynamic_physical_node_fanout,
                                     workload_log=str(workload_log_out),
                                     start_server_log=str(start_log_out),
                                     restore_log=str(restore_log_out),

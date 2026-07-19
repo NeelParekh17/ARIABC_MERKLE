@@ -24,6 +24,14 @@ SELECT merkle_dynamic_tree_stats('merkle_native_test_idx')->>'authority'
  native_index_pages
 (1 row)
 
+SELECT merkle_dynamic_tree_stats('merkle_native_test_idx')->>'logical_fanout' = '32'
+       AND merkle_dynamic_tree_stats('merkle_native_test_idx')->>'physical_node_fanout' = '2'
+       AS fanout_contract;
+ fanout_contract 
+-----------------
+ t
+(1 row)
+
 SELECT (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'data_root')
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'structure_root')
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'combined_root')
