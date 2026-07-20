@@ -2069,6 +2069,109 @@ native_apply_items(NativeItemVector *vector,
 			vector->count--;
 		}
 	}
+	/*
+	 * Subtree construction derives occupied logical slots from the first and
+	 * last route.  Inserts are appended to this vector, so preserve the route
+	 * ordering guaranteed by the original bulk-build path before rebuilding a
+	 * touched leaf.
+	 */
+	if (vector->count > 1)
+		qsort(vector->items, vector->count, sizeof(*vector->items),
+			native_item_cmp);
+}
+
+static void
+native_load_child_summaries(Relation indexRel,
+							const MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FANOUT],
+							MerkleNativeNodeRecord summaries[MERKLE_DYNAMIC_LOGICAL_FANOUT])
+{
+	int i;
+
+	MemSet(summaries, 0,
+		sizeof(MerkleNativeNodeRecord) * MERKLE_DYNAMIC_LOGICAL_FANOUT);
+	for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
+	{
+		MerkleNativeNodeRecord *loaded;
+		int j;
+
+		if (!native_locator_valid(&children[i]))
+			continue;
+		for (j = 0; j < i; j++)
+			if (native_locator_valid(&children[j]) &&
+				native_locator_equal(&children[i], &children[j]))
+				break;
+		if (j < i)
+		{
+			summaries[i] = summaries[j];
+			continue;
+		}
+		loaded = native_read_node(indexRel, &children[i]);
+		summaries[i] = *loaded;
+		pfree(loaded);
+	}
+}
+
+static void
+native_clear_child(Relation indexRel,
+				   MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FANOUT],
+				   MerkleNativeNodeRecord summaries[MERKLE_DYNAMIC_LOGICAL_FANOUT],
+				   const MerkleNativeLocator *locator)
+{
+	int i;
+
+	(void) indexRel;
+	for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
+	{
+		if (native_locator_valid(&children[i]) &&
+			native_locator_equal(&children[i], locator))
+		{
+			native_invalid_locator(&children[i]);
+			MemSet(&summaries[i], 0, sizeof(summaries[i]));
+		}
+	}
+}
+
+static MerkleNativeLocator
+native_finish_internal_update(Relation indexRel, const NativeConfig *config,
+							  int partition,
+							  const MerkleNativeNodeRecord *old,
+							  MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FANOUT],
+							  MerkleNativeNodeRecord summaries[MERKLE_DYNAMIC_LOGICAL_FANOUT],
+							  MerkleNativeNodeRecord *summary,
+							  uint64 *merge_counter)
+{
+	MerkleNativeLocator result;
+
+	native_make_internal_summary(partition, old->prefix_len, old->prefix,
+		children, summaries, summary);
+	if (summary->tuple_count <= (uint64) config->merge_threshold &&
+		summary->tuple_count <= (uint64) config->leaf_capacity &&
+		summary->subtree_bytes <= config->leaf_byte_capacity)
+	{
+		NativeItemVector vector = {0};
+		int i;
+
+		for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
+		{
+			int j;
+
+			if (!native_locator_valid(&children[i]))
+				continue;
+			for (j = 0; j < i; j++)
+				if (native_locator_valid(&children[j]) &&
+					native_locator_equal(&children[i], &children[j]))
+					break;
+			if (j == i)
+				native_collect_items(indexRel, &children[i], &vector);
+		}
+		result = native_write_leaf(indexRel, partition, old->prefix_len,
+			old->prefix, vector.items, vector.count, summary);
+		if (merge_counter != NULL)
+			(*merge_counter)++;
+		native_vector_free(&vector);
+		return result;
+	}
+	return native_append_record(indexRel, summary, sizeof(*summary));
 }
 
 static MerkleNativeLocator
@@ -2078,18 +2181,120 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 						int minimum_prefix, MerkleNativeNodeRecord *summary,
 						uint64 *split_counter, uint64 *merge_counter)
 {
-	NativeItemVector vector = {0};
+	MerkleNativeNodeRecord *old = native_read_node(indexRel, locator);
 	MerkleNativeLocator result;
 
-	(void) minimum_prefix;
-	native_collect_items(indexRel, locator, &vector);
-	native_apply_items(&vector, transitions, count);
-	result = native_build_subtree(indexRel, config, partition, vector.items,
-		vector.count, 0, summary, split_counter);
-	if (merge_counter != NULL)
-		*merge_counter = 0;
-	native_vector_free(&vector);
-	return result;
+	if ((old->flags & MERKLE_NATIVE_NODE_LEAF) != 0)
+	{
+		NativeItemVector vector = {0};
+
+		native_load_leaf_items(indexRel, old, &vector);
+		native_apply_items(&vector, transitions, count);
+		result = native_build_subtree(indexRel, config, partition,
+			vector.items, vector.count, minimum_prefix, summary,
+			split_counter);
+		native_vector_free(&vector);
+		pfree(old);
+		return result;
+	}
+	else
+	{
+		MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FANOUT];
+		MerkleNativeNodeRecord summaries[MERKLE_DYNAMIC_LOGICAL_FANOUT];
+		MerkleDynamicTransition *batch;
+		bool *processed;
+		int i;
+
+		memcpy(children, old->children, sizeof(children));
+		native_load_child_summaries(indexRel, children, summaries);
+		batch = palloc(sizeof(*batch) * count);
+		processed = palloc0(sizeof(*processed) * count);
+		for (i = 0; i < count; i++)
+		{
+			MerkleNativeLocator old_child;
+			bool had_child;
+			int batch_count = 0;
+			int slot;
+			int j;
+
+			if (processed[i])
+				continue;
+			slot = native_route_slot(transitions[i].route_digest,
+				old->prefix_len);
+			old_child = children[slot];
+			had_child = native_locator_valid(&old_child);
+			for (j = i; j < count; j++)
+			{
+				int transition_slot;
+				bool same_group;
+
+				if (processed[j])
+					continue;
+				transition_slot = native_route_slot(
+					transitions[j].route_digest, old->prefix_len);
+				if (had_child)
+					same_group = native_locator_valid(&children[transition_slot]) &&
+						native_locator_equal(&children[transition_slot],
+							&old_child);
+				else
+					same_group = !native_locator_valid(&children[transition_slot]);
+				if (same_group)
+				{
+					batch[batch_count++] = transitions[j];
+					processed[j] = true;
+				}
+			}
+
+			if (!had_child)
+			{
+				NativeItemVector vector = {0};
+
+				native_apply_items(&vector, batch, batch_count);
+				if (vector.count > 0)
+					native_build_item_segment(indexRel, config, partition,
+						vector.items, vector.count, old->prefix_len,
+						old->prefix_len, children, summaries, split_counter);
+				native_vector_free(&vector);
+			}
+			else if ((summaries[slot].flags & MERKLE_NATIVE_NODE_LEAF) != 0)
+			{
+				NativeItemVector vector = {0};
+
+				native_load_leaf_items(indexRel, &summaries[slot], &vector);
+				native_apply_items(&vector, batch, batch_count);
+				native_clear_child(indexRel, children, summaries, &old_child);
+				if (vector.count > 0)
+					native_build_item_segment(indexRel, config, partition,
+						vector.items, vector.count, old->prefix_len,
+						old->prefix_len, children, summaries, split_counter);
+				native_vector_free(&vector);
+			}
+			else
+			{
+				MerkleNativeLocator new_child;
+				MerkleNativeNodeRecord child_summary;
+
+				new_child = native_apply_batch_node(indexRel, config, partition,
+					&old_child, batch, batch_count, old->prefix_len + 5,
+					&child_summary, split_counter, merge_counter);
+				for (j = 0; j < MERKLE_DYNAMIC_LOGICAL_FANOUT; j++)
+				{
+					if (native_locator_valid(&children[j]) &&
+						native_locator_equal(&children[j], &old_child))
+					{
+						children[j] = new_child;
+						summaries[j] = child_summary;
+					}
+				}
+			}
+		}
+		pfree(processed);
+		pfree(batch);
+		result = native_finish_internal_update(indexRel, config, partition,
+			old, children, summaries, summary, merge_counter);
+		pfree(old);
+		return result;
+	}
 }
 
 #if 0
@@ -3461,6 +3666,31 @@ merkle_native_get_leaf_frontier(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
+static void
+native_requested_slot_bounds(const uint8 prefix[MERKLE_HASH_BYTES],
+							 int prefix_len, int node_prefix_len,
+							 int *first_slot, int *last_slot)
+{
+	int known_bits = Min(5, prefix_len - node_prefix_len);
+	int slot;
+
+	Assert(known_bits > 0);
+	slot = native_route_slot(prefix, node_prefix_len);
+	if (known_bits == 5)
+	{
+		*first_slot = slot;
+		*last_slot = slot;
+	}
+	else
+	{
+		int suffix_bits = 5 - known_bits;
+		int mask = ((1 << known_bits) - 1) << suffix_bits;
+
+		*first_slot = slot & mask;
+		*last_slot = *first_slot + (1 << suffix_bits) - 1;
+	}
+}
+
 /*
  * native_traverse_range_summary
  *
@@ -3538,16 +3768,20 @@ native_traverse_range_summary(Relation indexRel,
 	}
 	else
 	{
-		/* Case 3: internal node — recurse into each distinct physical child. */
+		/* Case 3: only slots overlapping the requested prefix can contribute. */
+		int first_slot;
+		int last_slot;
 		int i;
 
-		for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
+		native_requested_slot_bounds(req_prefix, req_bits, node->prefix_len,
+			&first_slot, &last_slot);
+		for (i = first_slot; i <= last_slot; i++)
 		{
 			int j;
 
 			if (!native_locator_valid(&node->children[i]))
 				continue;
-			for (j = 0; j < i; j++)
+			for (j = first_slot; j < i; j++)
 				if (native_locator_valid(&node->children[j]) &&
 					native_locator_equal(&node->children[i], &node->children[j]))
 					break;
@@ -3626,15 +3860,19 @@ native_traverse_range_items(Relation indexRel,
 	}
 	else
 	{
+		int first_slot;
+		int last_slot;
 		int i;
 
-		for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
+		native_requested_slot_bounds(req_prefix, req_bits, node->prefix_len,
+			&first_slot, &last_slot);
+		for (i = first_slot; i <= last_slot; i++)
 		{
 			int j;
 
 			if (!native_locator_valid(&node->children[i]))
 				continue;
-			for (j = 0; j < i; j++)
+			for (j = first_slot; j < i; j++)
 				if (native_locator_valid(&node->children[j]) &&
 					native_locator_equal(&node->children[i], &node->children[j]))
 					break;

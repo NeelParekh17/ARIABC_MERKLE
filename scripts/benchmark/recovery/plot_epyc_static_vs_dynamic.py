@@ -103,9 +103,10 @@ def main() -> int:
     ax.plot(sizes_m, [static_runs[s]["restore_repair_ms"] for s in SIZES],
             marker="o", linewidth=2.2, label="Static F32/L1024 (3-run median)")
     ax.plot(sizes_m, [dynamic_runs[s]["restore_repair_ms"] for s in SIZES],
-            marker="o", linewidth=2.2, label="Native dynamic (1 run)")
-    ax.set(title="EPYC recovery latency: static vs native dynamic",
-           xlabel="Table rows (millions)", ylabel="Recovery latency (ms)")
+            marker="o", linewidth=2.2, label="Latest optimized dynamic (1 run)")
+    ax.set(title="EPYC sparse recovery: static best vs latest dynamic",
+           xlabel="Table rows (millions)", ylabel="Recovery latency (ms, log scale)",
+           yscale="log")
     ax.set_xticks(sizes_m)
     ax.legend()
     save(fig, args.output_dir / "epyc_static_vs_dynamic_recovery.png")
@@ -120,26 +121,28 @@ def main() -> int:
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15, 8.5))
     for ax, (title, static_key, dynamic_key) in zip(axes.flat, mappings):
-        ax.plot(sizes_m, [static_phases[s][static_key] for s in SIZES], marker="o", label="Static")
-        ax.plot(sizes_m, [dynamic_phases[s][dynamic_key] for s in SIZES], marker="o", label="Dynamic")
+        ax.plot(sizes_m, [static_phases[s][static_key] for s in SIZES], marker="o", label="Static best")
+        ax.plot(sizes_m, [dynamic_phases[s][dynamic_key] for s in SIZES], marker="o", label="Latest dynamic")
         ax.set_title(title)
         ax.set_xlabel("Rows (M)")
         ax.set_ylabel("ms")
         ax.set_xticks(sizes_m[::2])
+        if title == "Repair write":
+            ax.set_yscale("log")
     axes.flat[0].legend()
     axes.flat[-1].axis("off")
-    fig.suptitle("EPYC recovery phases (static medians vs dynamic single run)", fontsize=14)
+    fig.suptitle("EPYC recovery phases: static best vs latest dynamic", fontsize=14)
     save(fig, args.output_dir / "epyc_static_vs_dynamic_phases.png")
 
     # Leaf geometry and occupancy.
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.3))
-    axes[0].plot(sizes_m, [static_sizes[s]["mean"] for s in SIZES], marker="o", label="Static")
-    axes[0].plot(sizes_m, [dynamic_sizes[s]["mean"] for s in SIZES], marker="o", label="Dynamic")
+    axes[0].plot(sizes_m, [static_sizes[s]["mean"] for s in SIZES], marker="o", label="Static best")
+    axes[0].plot(sizes_m, [dynamic_sizes[s]["mean"] for s in SIZES], marker="o", label="Latest dynamic")
     axes[0].axhline(32, color="black", linestyle="--", linewidth=1, label="Dynamic leaf capacity")
     axes[0].set(title="Average physical rows per leaf", xlabel="Rows (M)", ylabel="Rows per leaf")
     axes[0].legend()
-    axes[1].plot(sizes_m, [static_sizes[s]["total_leaf_count"] for s in SIZES], marker="o", label="Static")
-    axes[1].plot(sizes_m, [dynamic_sizes[s]["total_leaf_count"] for s in SIZES], marker="o", label="Dynamic")
+    axes[1].plot(sizes_m, [static_sizes[s]["total_leaf_count"] for s in SIZES], marker="o", label="Static best")
+    axes[1].plot(sizes_m, [dynamic_sizes[s]["total_leaf_count"] for s in SIZES], marker="o", label="Latest dynamic")
     axes[1].set(title="Physical leaf count", xlabel="Rows (M)", ylabel="Leaves", yscale="log")
     axes[1].yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:,.0f}"))
     axes[1].legend()
