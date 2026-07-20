@@ -75,6 +75,8 @@ class RunResult:
     dynamic_profile_max_leaf_items: Optional[int]
     dynamic_logical_fanout: Optional[int]
     dynamic_physical_node_fanout: Optional[int]
+    dynamic_layout_version: Optional[int]
+    dynamic_max_depth: Optional[int]
     workload_log: str
     start_server_log: str
     restore_log: str
@@ -578,6 +580,10 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         dynamic_logical_fanout = [x for x in dynamic_logical_fanout if x is not None]
         dynamic_physical_fanout = [as_int(r.get("dynamic_physical_node_fanout", "")) for r in rs]
         dynamic_physical_fanout = [x for x in dynamic_physical_fanout if x is not None]
+        dynamic_layout_versions = [as_int(r.get("dynamic_layout_version", "")) for r in rs]
+        dynamic_layout_versions = [x for x in dynamic_layout_versions if x is not None]
+        dynamic_max_depths = [as_int(r.get("dynamic_max_depth", "")) for r in rs]
+        dynamic_max_depths = [x for x in dynamic_max_depths if x is not None]
 
         # Per-row statement_count (from results.csv) takes precedence so a
         # different statement count per workload is reflected in TPS. Fall back
@@ -645,6 +651,8 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
                 "dynamic_profile_max_leaf_items": max_or_empty(dynamic_max_leaf),
                 "dynamic_logical_fanout": max_or_empty(dynamic_logical_fanout),
                 "dynamic_physical_node_fanout": max_or_empty(dynamic_physical_fanout),
+                "dynamic_layout_version": max_or_empty(dynamic_layout_versions),
+                "dynamic_max_depth": max_or_empty(dynamic_max_depths),
             }
         )
 
@@ -1528,6 +1536,8 @@ def main() -> int:
         dynamic_profile_max_leaf_items=None,
         dynamic_logical_fanout=None,
         dynamic_physical_node_fanout=None,
+        dynamic_layout_version=None,
+        dynamic_max_depth=None,
         workload_log="",
         start_server_log="",
         restore_log="",
@@ -1597,6 +1607,8 @@ def main() -> int:
                                 profile_max_leaf_items = None
                                 dynamic_logical_fanout = None
                                 dynamic_physical_node_fanout = None
+                                dynamic_layout_version = None
+                                dynamic_max_depth = None
                                 if args.dynamic_merkle_profile and server_log_path.exists():
                                     try:
                                         profile_log_offset = server_log_path.stat().st_size
@@ -2013,36 +2025,42 @@ def main() -> int:
                                                     cwd=scripts_dir,
                                                     env=mode_env,
                                                 )
-                                                fanout_values = _psql_value(
+                                                layout_values = _psql_value(
                                                     psql_path,
                                                     db=args.db,
                                                     port=args.port,
                                                     user=args.user,
                                                     query=(
                                                         "SELECT (s->>'logical_fanout') || '|' || "
-                                                        "(s->>'physical_node_fanout') FROM (SELECT "
+                                                        "(s->>'physical_node_fanout') || '|' || "
+                                                        "(s->>'layout_version') || '|' || "
+                                                        "(s->>'max_depth') FROM (SELECT "
                                                         "merkle_dynamic_tree_stats('" + dynamic_index + "'::regclass)::jsonb AS s) q;"
                                                     ),
                                                     cwd=scripts_dir,
                                                     env=mode_env,
                                                 )
-                                                fanout_parts = (fanout_values or "").split("|")
-                                                if len(fanout_parts) == 2 and all(
-                                                    part.isdigit() for part in fanout_parts
+                                                layout_parts = (layout_values or "").split("|")
+                                                if len(layout_parts) == 4 and all(
+                                                    part.isdigit() for part in layout_parts
                                                 ):
-                                                    dynamic_logical_fanout = int(fanout_parts[0])
-                                                    dynamic_physical_node_fanout = int(fanout_parts[1])
+                                                    dynamic_logical_fanout = int(layout_parts[0])
+                                                    dynamic_physical_node_fanout = int(layout_parts[1])
+                                                    dynamic_layout_version = int(layout_parts[2])
+                                                    dynamic_max_depth = int(layout_parts[3])
                                                     if (
-                                                        dynamic_logical_fanout != 32
+                                                        dynamic_layout_version != 6
+                                                        or dynamic_logical_fanout != 32
                                                         or dynamic_physical_node_fanout != 2
                                                     ):
                                                         verification_error = (
-                                                            "dynamic_fanout_contract_failed: "
+                                                            "dynamic_layout_contract_failed: "
+                                                            f"layout={dynamic_layout_version} "
                                                             f"logical={dynamic_logical_fanout} "
                                                             f"physical={dynamic_physical_node_fanout}"
                                                         )
                                                 else:
-                                                    verification_error = "dynamic_fanout_query_failed"
+                                                    verification_error = "dynamic_layout_query_failed"
                                                 if args.dynamic_merkle_profile:
                                                     profile_values = _psql_value(
                                                         psql_path,
@@ -2160,6 +2178,8 @@ def main() -> int:
                                     dynamic_profile_max_leaf_items=profile_max_leaf_items,
                                     dynamic_logical_fanout=dynamic_logical_fanout,
                                     dynamic_physical_node_fanout=dynamic_physical_node_fanout,
+                                    dynamic_layout_version=dynamic_layout_version,
+                                    dynamic_max_depth=dynamic_max_depth,
                                     workload_log=str(workload_log_out),
                                     start_server_log=str(start_log_out),
                                     restore_log=str(restore_log_out),

@@ -42,8 +42,8 @@ set -euo pipefail
 #   --max-retries <50>      Per-statement retry budget for transient serialization conflicts
 #   --legacy-merkle         Use the legacy static Merkle restore (default: native dynamic)
 #   --dynamic-structure-profile <0|1>  Profile native DET split/merge counters  [default: 1]
-#                            Dynamic runs require logical fanout 32 over binary
-#                            physical nodes (fanout 2) and record both values.
+#                            Dynamic runs require native layout v6, logical fanout
+#                            32 over physical fanout 2, and record tree depth.
 #   --poll-interval <60>    Seconds between monitoring polls
 #   --hang-timeout <60>     Seconds of no log change before hang warning
 #   --stall-timeout <1800>  Abort if a live benchmark has no log progress this long
@@ -1123,14 +1123,20 @@ for node in nodes:
             merges = (row.get("dynamic_profile_merges") or "").strip()
             logical = (row.get("dynamic_logical_fanout") or "").strip()
             physical = (row.get("dynamic_physical_node_fanout") or "").strip()
+            layout = (row.get("dynamic_layout_version") or "").strip()
+            max_depth = (row.get("dynamic_max_depth") or "").strip()
             if not splits.isdigit() or not merges.isdigit():
                 raise SystemExit(f"missing DET profile counters for {node}: {key}")
-            if logical != "32" or physical != "2":
+            if layout != "6" or logical != "32" or physical != "2" or not max_depth.isdigit():
                 raise SystemExit(
-                    f"fanout contract failed for {node}: {key} "
-                    f"logical={logical or 'missing'} physical={physical or 'missing'}"
+                    f"layout contract failed for {node}: {key} "
+                    f"layout={layout or 'missing'} logical={logical or 'missing'} "
+                    f"physical={physical or 'missing'} max_depth={max_depth or 'missing'}"
                 )
-            current[key] = (int(splits), int(merges), int(logical), int(physical))
+            current[key] = (
+                int(splits), int(merges), int(layout), int(logical),
+                int(physical), int(max_depth)
+            )
     if not current:
         raise SystemExit(f"no DET profile rows for {node}")
     maps[node] = current
@@ -1143,17 +1149,21 @@ for node, current in maps.items():
 for key, value in sorted(baseline.items()):
     print(
         f"  profile key={key} splits={value[0]} merges={value[1]} "
-        f"logical_fanout={value[2]} physical_node_fanout={value[3]}"
+        f"layout_version={value[2]} logical_fanout={value[3]} "
+        f"physical_node_fanout={value[4]} max_depth={value[5]}"
     )
 print(f"DYNAMIC_NATIVE_PROFILE_PASS=1 nodes={len(maps)}")
+print("DYNAMIC_LAYOUT_CONTRACT_PASS=1 layout_version=6")
 print("DYNAMIC_FANOUT_CONTRACT_PASS=1 logical_fanout=32 physical_node_fanout=2")
 PYEOF
   then
     _abort_run "Native DET split/merge profile missing or mismatched across nodes"
   fi
   {
+    printf 'DYNAMIC_LAYOUT_VERSION=6\n'
     printf 'DYNAMIC_LOGICAL_FANOUT=32\n'
     printf 'DYNAMIC_PHYSICAL_NODE_FANOUT=2\n'
+    printf 'DYNAMIC_LAYOUT_CONTRACT_PASS=1\n'
     printf 'DYNAMIC_FANOUT_CONTRACT_PASS=1\n'
   } >"$LOCAL_RESULT_ROOT/dynamic_fanout_contract.env"
 fi

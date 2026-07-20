@@ -116,7 +116,7 @@ def main() -> int:
         ("Candidate fetch", "candidate_row_fetch_ms", "candidate_summary_fetch_ms"),
         ("Comparison", "row_comparison_ms", "summary_comparison_ms"),
         ("Repair write", "repair_write_ms", "repair_write_ms"),
-        ("Post-repair confirmation", "targeted_post_repair_confirmation_ms", "targeted_post_repair_confirmation_ms"),
+        ("Native commit visibility", "targeted_post_repair_confirmation_ms", "native_commit_visibility_ms"),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15, 8.5))
     for ax, (title, static_key, dynamic_key) in zip(axes.flat, mappings):

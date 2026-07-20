@@ -87,3 +87,11 @@ Every `runs.csv` row now includes:
 - All SQL files under `sql/`
 - `create_schema.sql`, `create_merkle_indexes.sql`
 - `benchmark_schema_version = 2`, `timing_contract_version = 1`
+# Native dynamic recovery phase schema
+
+The dynamic runner now proves native synchronous-COW visibility immediately
+after the repair commit, then reports the compatibility queue drain separately.
+The old `post_repair_apply_pending_ms` and
+`targeted_post_repair_confirmation_ms` phase names are rejected for dynamic
+artifacts rather than being silently carried into reports. Re-run any older
+artifact before plotting or publishing its phase timings.

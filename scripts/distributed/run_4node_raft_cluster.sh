@@ -400,6 +400,9 @@ VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
 # In auto mode the runner detects whether the restored index is dynamic.
 MERKLE_VERIFY_MODE="${MERKLE_VERIFY_MODE:-auto}"
 DYNAMIC_INDEX_NAME="${DYNAMIC_INDEX_NAME:-}"
+DYNAMIC_EXPECTED_LAYOUT_VERSION=6
+DYNAMIC_EXPECTED_LOGICAL_FANOUT=32
+DYNAMIC_EXPECTED_PHYSICAL_NODE_FANOUT=2
 DYNAMIC_STRUCTURE_GATE="${DYNAMIC_STRUCTURE_GATE:-0}"
 DYNAMIC_STRUCTURE_CRASH_GATE="${DYNAMIC_STRUCTURE_CRASH_GATE:-0}"
 DYNAMIC_STRUCTURE_PROFILE="${DYNAMIC_STRUCTURE_PROFILE:-1}"
@@ -4391,11 +4394,12 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
   dynamic_key_partition_snapshot 0 999 "$LOG_DIR/dynamic_key_partitions_before.tsv"
 
   STRUCTURE_FILE="$LOG_DIR/dynamic_structure_gate.sql"
-  {
-    printf '%s\n' "DELETE FROM $VERIFY_TABLE WHERE ycsb_key BETWEEN 0 AND 11799;"
-    printf '%s\n' "INSERT INTO $VERIFY_TABLE (ycsb_key,field1,field2,field3,field4,field5,field6,field7,field8,field9,field10) SELECT g,'structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate' FROM generate_series(0,11799) AS g;"
-    printf '%s\n' "UPDATE $VERIFY_TABLE SET ycsb_key=ycsb_key+20000000 WHERE ycsb_key BETWEEN 0 AND 999;"
-  } >"$STRUCTURE_FILE"
+  STRUCTURE_STATEMENTS=(
+    "DELETE FROM $VERIFY_TABLE WHERE ycsb_key BETWEEN 0 AND 11799;"
+    "INSERT INTO $VERIFY_TABLE (ycsb_key,field1,field2,field3,field4,field5,field6,field7,field8,field9,field10) SELECT g,'structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate','structure-gate' FROM generate_series(0,11799) AS g;"
+    "UPDATE $VERIFY_TABLE SET ycsb_key=ycsb_key+20000000 WHERE ycsb_key BETWEEN 0 AND 999;"
+  )
+  printf '%s\n' "${STRUCTURE_STATEMENTS[@]}" >"$STRUCTURE_FILE"
   STRUCTURE_EXTRA_ARGS=()
   if [[ "$BYPASS_RAFT" -eq 1 && "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
     STRUCTURE_EXTRA_ARGS+=(--broadcastAcceptQuorum "${#NODE_IDS[@]}")
@@ -4404,16 +4408,31 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
   else
     STRUCTURE_EXTRA_ARGS+=(--directCompletionQuorum "${#NODE_IDS[@]}")
   fi
-  "$GW_BIN" \
-    --nodes "$GW_NODES" --raft-node-ids "$RAFT_NODE_IDS_CSV" \
-    --queryFrom "$STRUCTURE_FILE" --dbType 1 --detRawSql "$DET_RAW_SQL" \
-    --detStartSeq "$STRUCTURE_SEQ" --reqIdOffset "$STRUCTURE_REQ" \
-    --detWindow 1 --detBatchSize 1 --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
-    --submitMode event --detSubmitPipeline 0 --detPipelineDepth 1 \
-    --clientId cluster-dynamic-structure-gate --numTerminals 1 \
-    --raft-epoch-hex "$RAFT_EPOCH_HEX" --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
-    $GW_EXTRA_ARGS "${STRUCTURE_EXTRA_ARGS[@]}" \
-    2>&1 | tee "$LOG_DIR/dynamic_structure_gateway.log"
+  # These statements are intentionally dependent: DELETE -> INSERT -> UPDATE.
+  # A blocking gateway submission waits for the terminal response, but the
+  # response can precede the local commit watermark becoming visible to the
+  # next statement on another node.  Run each statement as its own one-query
+  # transaction and wait for the all-node commit/quiescence barrier between
+  # statements.  This keeps the structure probe deterministic and prevents
+  # UPDATE 0 on the leader versus UPDATE 1000 on followers.
+  : >"$LOG_DIR/dynamic_structure_gateway.log"
+  for structure_idx in "${!STRUCTURE_STATEMENTS[@]}"; do
+    printf '%s\n' "${STRUCTURE_STATEMENTS[$structure_idx]}" >"$STRUCTURE_FILE"
+    structure_seq=$(( STRUCTURE_SEQ + structure_idx ))
+    structure_req=$(( STRUCTURE_REQ + structure_idx ))
+    "$GW_BIN" \
+      --nodes "$GW_NODES" --raft-node-ids "$RAFT_NODE_IDS_CSV" \
+      --queryFrom "$STRUCTURE_FILE" --dbType 1 --detRawSql "$DET_RAW_SQL" \
+      --detStartSeq "$structure_seq" --reqIdOffset "$structure_req" \
+      --detWindow 1 --detBatchSize 1 --dbConnPoolSize "$DB_CONN_POOL_SIZE" \
+      --submitMode blocking --detSubmitPipeline 0 --detPipelineDepth 1 \
+      --clientId cluster-dynamic-structure-gate --numTerminals 1 \
+      --raft-epoch-hex "$RAFT_EPOCH_HEX" --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
+      $GW_EXTRA_ARGS "${STRUCTURE_EXTRA_ARGS[@]}" \
+      2>&1 | tee -a "$LOG_DIR/dynamic_structure_gateway.log"
+    wait_all_nodes_committed "$structure_seq" "structure_statement_$((structure_idx + 1))"
+    wait_all_nodes_quiescent "structure_statement_$((structure_idx + 1))"
+  done
 	POST_TIMED_GATEWAY_STATEMENTS=3
 	crash_idx=-1
 	# The crash gate is a durability proof, so tie it to actual all-node commit
@@ -4671,6 +4690,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   declare -a POST_STATS_DIRTY=()
   declare -a POST_DYN_VERIFY=()
   declare -a POST_LOGICAL_FANOUT=() POST_PHYSICAL_NODE_FANOUT=()
+  declare -a POST_LAYOUT_VERSION=() POST_MAX_DEPTH=()
   declare -a POST_MIN_SEQ=() POST_MAX_SEQ=()
   MERKLE_DRAIN_START_MS="$(date +%s%3N)"
 
@@ -4725,8 +4745,14 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
 
         logical_fanout=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"logical_fanout\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
         physical_node_fanout=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"physical_node_fanout\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
-        if [[ \"\$logical_fanout\" != 32 || \"\$physical_node_fanout\" != 2 ]]; then
-          echo \"dynamic fanout contract failed (logical=\$logical_fanout physical=\$physical_node_fanout expected=32/2)\" >&2
+        layout_version=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"layout_version\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
+        max_depth=\$(printf '%s' \"\$tree_stats\" | sed -n -E 's/.*\"max_depth\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p')
+        if [[ \"\$layout_version\" != '$DYNAMIC_EXPECTED_LAYOUT_VERSION' ]]; then
+          echo \"dynamic layout contract failed (layout=\$layout_version expected=$DYNAMIC_EXPECTED_LAYOUT_VERSION)\" >&2
+          exit 1
+        fi
+        if [[ \"\$logical_fanout\" != '$DYNAMIC_EXPECTED_LOGICAL_FANOUT' || \"\$physical_node_fanout\" != '$DYNAMIC_EXPECTED_PHYSICAL_NODE_FANOUT' ]]; then
+          echo \"dynamic fanout contract failed (logical=\$logical_fanout physical=\$physical_node_fanout expected=$DYNAMIC_EXPECTED_LOGICAL_FANOUT/$DYNAMIC_EXPECTED_PHYSICAL_NODE_FANOUT)\" >&2
           exit 1
         fi
 
@@ -4746,7 +4772,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
           topo_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"COPY (SELECT partition_id,tuple_count,encode(structure_hash,'hex') FROM \$marker_sql ORDER BY partition_id) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
           root_sha=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"COPY (SELECT partition_id,tuple_count,encode(content_xor,'hex'),encode(structure_hash,'hex') FROM \$marker_sql ORDER BY partition_id) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
           [[ \"\$dyn_verify\" == t && \"\$root_sha\" =~ ^[0-9a-f]{64}$ && \"\$topo_sha\" =~ ^[0-9a-f]{64}$ && \"\$item_sha\" =~ ^[0-9a-f]{64}$ && \"\$sequence_domain\" =~ ^[1-9][0-9]*$ && \"\$sequence_epoch\" =~ ^[0-9]+$ && \"\$max_seq\" =~ ^[0-9]+$ && \"\$marker_count\" == \"\$dyn_partitions\" && \"\$marker_items\" == \"\$dyn_item_count\" && \"\$marker_bad_lineage\" == 0 ]] || { echo \"typed native Merkle marker contract failed (domain=\$sequence_domain epoch=\$sequence_epoch value=\$max_seq roots=\$marker_count partitions=\$dyn_partitions marker_items=\$marker_items current_items=\$dyn_item_count bad_lineage=\$marker_bad_lineage)\" >&2; exit 1; }
-          echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify|\$min_seq|\$max_seq|\$sequence_domain|\$sequence_epoch|\$logical_fanout|\$physical_node_fanout\"
+          echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify|\$min_seq|\$max_seq|\$sequence_domain|\$sequence_epoch|\$logical_fanout|\$physical_node_fanout|\$layout_version|\$max_depth\"
         else
         # Structural verify
         dyn_verify=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_dynamic_verify('\${dyn_index}'::regclass)\")
@@ -4881,7 +4907,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
              ORDER BY item.partition_id, item.key_data
           ) TO STDOUT WITH (FORMAT text)\" | sha256sum | cut -c1-64)
 
-        echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify|||||\$logical_fanout|\$physical_node_fanout\"
+        echo \"\$cnt|\$root|\$verify|\$root_sha|\$topo_sha|\$item_sha|\$dyn_item_count|\$dyn_leaf_count|\$dyn_node_count|\$dyn_partitions|\$dyn_verify|||||\$logical_fanout|\$physical_node_fanout|\$layout_version|\$max_depth\"
         fi
       else
         echo \"\$cnt|\$root|\$verify\"
@@ -4907,7 +4933,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     fi
     IFS='|' read -r cnt root verify root_sha topo_sha item_sha \
         dyn_item_count dyn_leaf_count dyn_node_count dyn_partitions dyn_verify min_seq max_seq \
-        sequence_domain sequence_epoch logical_fanout physical_node_fanout \
+        sequence_domain sequence_epoch logical_fanout physical_node_fanout layout_version max_depth \
       <<< "$readback"
     POST_COUNTS[$idx]="$cnt"
     POST_ROOTS[$idx]="$root"
@@ -4926,6 +4952,8 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     POST_SEQUENCE_EPOCH[$idx]="${sequence_epoch:-}"
     POST_LOGICAL_FANOUT[$idx]="${logical_fanout:-}"
     POST_PHYSICAL_NODE_FANOUT[$idx]="${physical_node_fanout:-}"
+    POST_LAYOUT_VERSION[$idx]="${layout_version:-}"
+    POST_MAX_DEPTH[$idx]="${max_depth:-}"
     if [[ "$_EFFECTIVE_VERIFY_MODE" == "dynamic" ]]; then
       log "  [$name] rows=$cnt root=$root verify=$verify root_sha256=${root_sha:-n/a} topo_sha256=${topo_sha:-n/a} item_sha256=${item_sha:-n/a} dyn_verify=${dyn_verify:-n/a}"
     else
@@ -4965,6 +4993,10 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
         POST_PASS=0
         log "  [$name] DYNAMIC FANOUT CONTRACT FAILED: logical=${POST_LOGICAL_FANOUT[$idx]:-missing} physical=${POST_PHYSICAL_NODE_FANOUT[$idx]:-missing}"
       fi
+      if [[ "${POST_LAYOUT_VERSION[$idx]}" != "$DYNAMIC_EXPECTED_LAYOUT_VERSION" ]]; then
+        POST_PASS=0
+        log "  [$name] DYNAMIC LAYOUT CONTRACT FAILED: layout=${POST_LAYOUT_VERSION[$idx]:-missing} expected=$DYNAMIC_EXPECTED_LAYOUT_VERSION"
+      fi
       if [[ -n "$reference_root_sha" && "${POST_ROOT_SHA[$idx]}" != "$reference_root_sha" ]]; then
         POST_PASS=0
         log "  [$name] LOGICAL ROOT DIGEST MISMATCH: ${POST_ROOT_SHA[$idx]} != $reference_root_sha"
@@ -5000,11 +5032,15 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     log "  heap root equality       PASS rows=$reference_count root=$reference_root"
     log "  logical partition roots  PASS sha256=$reference_root_sha"
     log "  physical topology        PASS sha256=$reference_topo_sha"
-    log "  fanout contract          PASS logical=32 physical=2"
+    log "  native layout            PASS version=$DYNAMIC_EXPECTED_LAYOUT_VERSION max_depth=${POST_MAX_DEPTH[0]:-unknown}"
+    log "  fanout contract          PASS logical=$DYNAMIC_EXPECTED_LOGICAL_FANOUT physical=$DYNAMIC_EXPECTED_PHYSICAL_NODE_FANOUT"
     log "  leaf-item assignments    PASS sha256=$reference_item_sha"
     log "  full dynamic verifier    PASS"
     log "  DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1"
     printf 'DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1\n' >>"$LOG_DIR/run_summary.env"
+    printf 'DYNAMIC_LAYOUT_VERSION=%s\n' "$DYNAMIC_EXPECTED_LAYOUT_VERSION" >>"$LOG_DIR/run_summary.env"
+    printf 'DYNAMIC_MAX_DEPTH=%s\n' "${POST_MAX_DEPTH[0]:-unknown}" >>"$LOG_DIR/run_summary.env"
+    printf 'DYNAMIC_LAYOUT_CONTRACT_PASS=1\n' >>"$LOG_DIR/run_summary.env"
     printf 'DYNAMIC_LOGICAL_FANOUT=32\n' >>"$LOG_DIR/run_summary.env"
     printf 'DYNAMIC_PHYSICAL_NODE_FANOUT=2\n' >>"$LOG_DIR/run_summary.env"
     printf 'DYNAMIC_FANOUT_CONTRACT_PASS=1\n' >>"$LOG_DIR/run_summary.env"
