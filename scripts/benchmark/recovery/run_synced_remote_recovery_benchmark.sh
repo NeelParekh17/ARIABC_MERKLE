@@ -3,14 +3,15 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300|dynamic-size-scaling-k75-c300 [options]
+Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh [--profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300|dynamic-size-scaling-k75-c300] [options]
 
 Options:
+  --profile NAME              default: dynamic-size-scaling-k75-c300
   --ssh-user USER
   --ssh-port PORT
   --ssh-key PATH
-  --remote-root PATH           default: /work/ARIABC/merkle_recovery_runs
-  --remote-python PATH         default: /work/ARIABC/AriaBC/.venv/bin/python3
+  --remote-root PATH           default: /home/neel/merkle_recovery_runs
+  --remote-python PATH         default: /home/neel/Desktop/ariabc_cluster/.venv/bin/python3
   --build-profile debug|release  default: debug for smoke, release for preflight/paper
   --experiment figure12|figure13
   --tuple-count N
@@ -41,9 +42,9 @@ SSH_USER=""
 SSH_PORT="22"
 SSH_KEY=""
 SSH_PASSWORD="${SSH_PASSWORD:-}"
-REMOTE_ROOT="/work/ARIABC/merkle_recovery_runs"
-REMOTE_PYTHON="/work/ARIABC/AriaBC/.venv/bin/python3"
-PROFILE=""
+REMOTE_ROOT="/home/neel/merkle_recovery_runs"
+REMOTE_PYTHON="/home/neel/Desktop/ariabc_cluster/.venv/bin/python3"
+PROFILE="dynamic-size-scaling-k75-c300"
 BUILD_PROFILE=""   # empty = auto: debug for smoke, release for preflight/paper
 EXPERIMENT=""
 TUPLE_COUNT=""

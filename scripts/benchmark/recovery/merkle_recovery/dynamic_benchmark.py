@@ -21,6 +21,7 @@ from .dynamic import (
 from .dynamic_db import (
     apply_set_based_repairs,
     dynamic_apply_pending,
+    merkle_queue_snapshot,
     dynamic_storage_scan_snapshot,
     dynamic_tree_stats,
     dynamic_verify,
@@ -32,6 +33,7 @@ from .dynamic_db import (
 )
 from .config import (
     DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
+    DYNAMIC_NATIVE_LAYOUT_VERSION,
     DYNAMIC_PHYSICAL_NODE_FANOUT,
 )
 from .metrics import Metrics, add_warning, finalize_metrics
@@ -233,6 +235,12 @@ def _validate_fanout_contract(
             )
         stored_logical = int(stats.get("logical_fanout", -1))
         stored_physical = int(stats.get("physical_node_fanout", -1))
+        stored_layout = int(stats.get("layout_version", -1))
+        if stored_layout != DYNAMIC_NATIVE_LAYOUT_VERSION:
+            raise RuntimeError(
+                f"{schema} native layout mismatch: expected "
+                f"{DYNAMIC_NATIVE_LAYOUT_VERSION}, index_stats={stored_layout}"
+            )
         if stored_logical != logical_fanout:
             raise RuntimeError(
                 f"{schema} dynamic fanout mismatch: manifest/localisation="
@@ -613,19 +621,21 @@ def repair_dynamic_merkle(
     with _timer(m.phase, "repair_write_ms"):
         repair_result = apply_set_based_repairs(conn, repairs, healthy_rows)
 
-    post_repair_io_before = _wal_checkpoint_snapshot(conn)
-    with _timer(m.phase, "post_repair_apply_pending_ms"):
-        dynamic_apply_pending(conn)
-    post_repair_io_after = _wal_checkpoint_snapshot(conn)
-    with _timer(m.phase, "post_repair_relocalisation_ms"):
-        remaining_bad_ranges, confirmation_trace = _localise(
+    # Native synchronous-COW publication is visible immediately after the
+    # repair commit.  Prove that boundary before touching the compatibility
+    # queue; merkle_apply_pending() is not part of native recovery.
+    with _timer(m.phase, "native_commit_visibility_ms"):
+        native_remaining_bad_ranges, native_confirmation_trace = _localise(
             conn, leaf_capacity, logical_fanout
         )
-    m.phase["targeted_post_repair_confirmation_ms"] = (
-        m.phase["post_repair_apply_pending_ms"]
-        + m.phase["post_repair_relocalisation_ms"]
+    _append_trace_rows(
+        range_rows_out, run_id, "native_commit_visibility", native_confirmation_trace
     )
-    _append_trace_rows(range_rows_out, run_id, "confirmation", confirmation_trace)
+    if native_remaining_bad_ranges:
+        raise RuntimeError(
+            "native synchronous-COW roots were not current at commit: "
+            f"remaining_ranges={len(native_remaining_bad_ranges)}"
+        )
     recovery_end = _now_ms()
     paper_end = recovery_end
 
@@ -635,6 +645,25 @@ def repair_dynamic_merkle(
     dynamic_storage_seq_scans = _storage_scan_delta(
         dynamic_scan_before, dynamic_scan_after
     )
+
+    queue_before = merkle_queue_snapshot(conn)
+    post_repair_io_before = _wal_checkpoint_snapshot(conn)
+    with _timer(m.phase, "global_merkle_queue_drain_ms"):
+        queue_watermark = dynamic_apply_pending(conn)
+    post_repair_io_after = _wal_checkpoint_snapshot(conn)
+    queue_after = merkle_queue_snapshot(conn)
+    with _timer(m.phase, "post_queue_relocalisation_ms"):
+        remaining_bad_ranges, post_queue_trace = _localise(
+            conn, leaf_capacity, logical_fanout
+        )
+    _append_trace_rows(
+        range_rows_out, run_id, "post_queue_relocalisation", post_queue_trace
+    )
+    if remaining_bad_ranges:
+        raise RuntimeError(
+            "native roots changed or remain divergent after compatibility queue drain: "
+            f"remaining_ranges={len(remaining_bad_ranges)}"
+        )
 
     audit_scan_before = seq_scan_snapshot(conn)
     audit_start = _now_ms()
@@ -647,28 +676,27 @@ def repair_dynamic_merkle(
         schema: audit[f"{schema}_stats"] for schema in ("healthy", "damaged")
     }
     _validate_fanout_contract(final_stats_by_schema, logical_fanout)
-    with _timer(m.phase, "audit_native_api_authority_ms"):
-        native_api_proofs: list[dict[str, Any]] = []
-        for schema in ("healthy", "damaged"):
-            stats = final_stats_by_schema[schema]
-            detail = json.dumps(stats["raw_stats"], sort_keys=True, default=str)
-            proof = {
-                "run_id": run_id,
-                "schema": schema,
-                "operation": "native_dynamic_api_authority",
-                "requested_key_count": len(bad_ranges),
-                "ordinal": 0,
-                "logical_range": "all_localised_ranges",
-                "expected_index": "native_index_pages",
-                "index_used": int(stats["authority"] == "native_index_pages"),
-                "rows_examined": 0,
-                "shared_hit_blocks": 0,
-                "shared_read_blocks": 0,
-                "plan_json_sha256": hashlib.sha256(detail.encode()).hexdigest(),
-                "plan_json": detail,
-            }
-            native_api_proofs.append(proof)
-            planner_rows_out.append(proof)
+    native_api_proofs: list[dict[str, Any]] = []
+    for schema in ("healthy", "damaged"):
+        stats = final_stats_by_schema[schema]
+        detail = json.dumps(stats["raw_stats"], sort_keys=True, default=str)
+        proof = {
+            "run_id": run_id,
+            "schema": schema,
+            "operation": "native_dynamic_api_authority",
+            "requested_key_count": len(bad_ranges),
+            "ordinal": 0,
+            "logical_range": "all_localised_ranges",
+            "expected_index": "native_index_pages",
+            "index_used": int(stats["authority"] == "native_index_pages"),
+            "rows_examined": 0,
+            "shared_hit_blocks": 0,
+            "shared_read_blocks": 0,
+            "plan_json_sha256": hashlib.sha256(detail.encode()).hexdigest(),
+            "plan_json": detail,
+        }
+        native_api_proofs.append(proof)
+        planner_rows_out.append(proof)
     audit_end = _now_ms()
     audit_scan_after = seq_scan_snapshot(conn)
     audit_seq_scans = seq_scan_delta(audit_scan_before, audit_scan_after)
@@ -720,6 +748,7 @@ def repair_dynamic_merkle(
             "bad_range_count": len(bad_ranges),
             "localised_bad_range_count": len(bad_ranges),
             "configured_leaf_capacity": leaf_capacity,
+            "dynamic_layout_version": healthy_stats["layout_version"],
             "logical_localisation_fanout": logical_fanout,
             "physical_node_fanout": DYNAMIC_PHYSICAL_NODE_FANOUT,
             "logical_ranges_compared": trace.logical_ranges_compared,
@@ -739,6 +768,16 @@ def repair_dynamic_merkle(
             "rows_deleted": repair_result.rows_deleted,
             "total_rows_repaired": total_repairs,
             "remaining_bad_range_count": len(remaining_bad_ranges),
+            "native_remaining_bad_range_count": len(native_remaining_bad_ranges),
+            "native_roots_match_before_queue_drain": int(not native_remaining_bad_ranges),
+            "native_roots_unchanged_after_queue_drain": int(
+                not remaining_bad_ranges
+            ),
+            "global_merkle_queue_return_watermark": queue_watermark,
+            "global_merkle_queue_rows_before": queue_before["local_delta_rows"],
+            "global_merkle_queue_rows_after": queue_after["local_delta_rows"],
+            "global_merkle_queue_status_before": queue_before["status"],
+            "global_merkle_queue_status_after": queue_after["status"],
             "planner_checks_passed": int(
                 bool(plan["index_used"])
                 and all(bool(row["index_used"]) for row in native_api_proofs)

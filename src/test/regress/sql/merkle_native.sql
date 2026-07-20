@@ -18,10 +18,12 @@ SELECT merkle_dynamic_tree_stats('merkle_native_test_idx')->>'authority'
 SELECT merkle_dynamic_tree_stats('merkle_native_test_idx')->>'logical_fanout' = '32'
        AND merkle_dynamic_tree_stats('merkle_native_test_idx')->>'physical_node_fanout' = '2'
        AS fanout_contract;
+SELECT (merkle_dynamic_tree_stats('merkle_native_test_idx')->>'max_depth')::int <= 2
+       AS reduced_logical_height_contract;
 SELECT (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'data_root')
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'structure_root')
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'combined_root')
-       AND merkle_dynamic_tree_stats('merkle_native_test_idx')->>'layout_version' = '5'
+       AND merkle_dynamic_tree_stats('merkle_native_test_idx')->>'layout_version' = '6'
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx')->>'data_root') <>
            (merkle_dynamic_tree_stats('merkle_native_test_idx')->>'structure_root')
        AS commitment_provenance;
@@ -95,6 +97,8 @@ FROM generate_series(1000, 1127) AS g
 SELECT count(*) = 161 AND merkle_verify('merkle_native_test')
        AS append_page_boundary_verify
 FROM merkle_native_test;
+SELECT (merkle_dynamic_tree_stats('merkle_native_test_idx')->>'max_depth')::int <= 2
+       AS append_reduced_logical_height_contract;
 
 VACUUM merkle_native_test;
 SELECT merkle_verify('merkle_native_test') AS post_vacuum_verify;

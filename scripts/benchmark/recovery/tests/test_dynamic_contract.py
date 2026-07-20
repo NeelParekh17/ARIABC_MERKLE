@@ -14,6 +14,7 @@ from merkle_recovery import dataset, dynamic_benchmark, dynamic_db
 from merkle_recovery import manifest as manifest_module
 from merkle_recovery.config import (
     DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
+    DYNAMIC_NATIVE_LAYOUT_VERSION,
     DYNAMIC_PROFILE,
     profile_config,
 )
@@ -43,6 +44,7 @@ def test_dynamic_profile_is_the_exact_acceptance_matrix():
     assert config.repetitions == 5
     assert config.benchmark_schema_version == 6
     assert config.extra["dynamic_partitions"] == 200
+    assert config.extra["dynamic_native_layout_version"] == 6
     assert config.extra["dynamic_logical_fanout"] == 32
     assert config.extra["dynamic_physical_node_fanout"] == 2
     assert config.extra["dynamic_leaf_capacity"] == 32
@@ -87,8 +89,8 @@ def test_dynamic_run_id_reports_logical_and_physical_fanout_separately():
 
 def test_dynamic_fanout_contract_binds_manifest_metadata_and_physical_shape():
     good = {
-        "healthy": {"authority": "native_index_pages", "logical_fanout": 32, "physical_node_fanout": 2},
-        "damaged": {"authority": "native_index_pages", "logical_fanout": 32, "physical_node_fanout": 2},
+        "healthy": {"authority": "native_index_pages", "layout_version": DYNAMIC_NATIVE_LAYOUT_VERSION, "logical_fanout": 32, "physical_node_fanout": 2},
+        "damaged": {"authority": "native_index_pages", "layout_version": DYNAMIC_NATIVE_LAYOUT_VERSION, "logical_fanout": 32, "physical_node_fanout": 2},
     }
     dynamic_benchmark._validate_fanout_contract(good, 32)
 
@@ -96,12 +98,20 @@ def test_dynamic_fanout_contract_binds_manifest_metadata_and_physical_shape():
         **good,
         "damaged": {
             "authority": "native_index_pages",
+            "layout_version": DYNAMIC_NATIVE_LAYOUT_VERSION,
             "logical_fanout": 2,
             "physical_node_fanout": 2,
         },
     }
     with pytest.raises(RuntimeError, match="index_metadata=2"):
         dynamic_benchmark._validate_fanout_contract(bad, 32)
+
+    stale = {
+        **good,
+        "damaged": {**good["damaged"], "layout_version": 5},
+    }
+    with pytest.raises(RuntimeError, match="native layout mismatch"):
+        dynamic_benchmark._validate_fanout_contract(stale, 32)
 
 
 @pytest.mark.parametrize(

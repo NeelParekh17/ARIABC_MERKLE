@@ -241,7 +241,9 @@ def plot_all(result_dir: Path):
         "candidate_row_fetch_ms": "candidate fetch",
         "row_comparison_ms": "row compare",
         "repair_write_ms": "repair write",
-        "targeted_post_repair_confirmation_ms": "targeted confirmation",
+        "native_commit_visibility_ms": "native visibility",
+        "global_merkle_queue_drain_ms": "compat queue drain",
+        "post_queue_relocalisation_ms": "post-queue check",
     }
     for row in phase_rows:
         run = run_map.get(row.get("run_id"))

@@ -19,6 +19,7 @@ from .config import ROOT
 from .config import (
     DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
     DYNAMIC_LOGICAL_FANOUT,
+    DYNAMIC_NATIVE_LAYOUT_VERSION,
     DYNAMIC_PHYSICAL_NODE_FANOUT,
     DYNAMIC_PROFILE,
 )
@@ -95,6 +96,10 @@ def metrics_to_rows(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     run_rows: list[dict[str, Any]] = []
     phase_rows: list[dict[str, Any]] = []
+    legacy_dynamic_phases = {
+        "post_repair_apply_pending_ms",
+        "targeted_post_repair_confirmation_ms",
+    }
     for m in metrics:
         row: dict[str, Any] = {
             "run_id": m.run_id,
@@ -125,6 +130,11 @@ def metrics_to_rows(
         row.update(m.counters)
         run_rows.append(row)
         for phase, value in m.phase.items():
+            if m.method == "merkle_dynamic" and phase in legacy_dynamic_phases:
+                raise RuntimeError(
+                    f"{m.run_id}: legacy dynamic phase {phase} is not reportable; "
+                    "rerun with the native recovery schema"
+                )
             phase_rows.append(
                 {
                     "run_id": m.run_id,
@@ -154,6 +164,18 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
         if int(m.counters.get("schema_fidelity_ok", 0)) != 1:
             failures.append(f"{m.run_id}: schema fidelity failed")
         # merkle-specific
+        if m.method == "merkle_dynamic":
+            required_phases = {
+                "tree_localisation_ms",
+                "native_commit_visibility_ms",
+                "global_merkle_queue_drain_ms",
+                "post_queue_relocalisation_ms",
+            }
+            missing = sorted(required_phases.difference(m.phase))
+            if missing:
+                failures.append(
+                    f"{m.run_id}: native dynamic report missing phases={','.join(missing)}"
+                )
         if int(m.counters.get("partition_root_batches", -1)) != 2:
             failures.append(
                 f"{m.run_id}: partition_root_batches={m.counters.get('partition_root_batches')}"
@@ -192,6 +214,9 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
                 (m.corruption_mode in ("paper-update-only", "update-only"),
                  f"corruption_mode={m.corruption_mode}"),
                 (m.partitions == 200, f"partitions={m.partitions}"),
+                (int(m.counters.get("dynamic_layout_version", -1))
+                 == DYNAMIC_NATIVE_LAYOUT_VERSION,
+                 f"dynamic_layout_version={m.counters.get('dynamic_layout_version')}"),
                 (m.fanout == 32, f"logical_fanout={m.fanout}"),
                 (int(m.counters.get("logical_localisation_fanout", -1))
                  == DYNAMIC_LOGICAL_FANOUT,
@@ -235,6 +260,10 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
                  f"rows_deleted={m.counters.get('rows_deleted')}"),
                 (int(m.counters.get("remaining_bad_range_count", -1)) == 0,
                  f"remaining_bad_range_count={m.counters.get('remaining_bad_range_count')}"),
+                (int(m.counters.get("native_roots_match_before_queue_drain", 0)) == 1,
+                 "native roots were not proven current before queue drain"),
+                (int(m.counters.get("native_roots_unchanged_after_queue_drain", 0)) == 1,
+                 "native roots changed across compatibility queue drain"),
                 (int(m.counters.get("roots_match", 0)) == 1,
                  f"roots_match={m.counters.get('roots_match')}"),
                 (int(m.counters.get("root_counts_match", 0)) == 1,

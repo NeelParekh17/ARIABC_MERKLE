@@ -4071,6 +4071,12 @@ int main(int argc, char** argv) {
 
                 for (size_t i = 0; i < recoveries.size(); ++i) {
                     if (!recoveries[i].empty()) {
+                        // Keep the recovery/divergence reason in the captured
+                        // gateway log as well as errTopic.  The sweep runner
+                        // only fetches the gateway log, so sending this solely
+                        // to Kafka made structure-gate failures impossible to
+                        // diagnose from the produced artifacts.
+                        std::cerr << "KAFKA_RECOVERY_NOTE " << recoveries[i] << std::endl;
                         divergence_count.fetch_add(1);
                         if (recoveries[i].find("vote_store_capacity_exhausted") != std::string::npos) {
                             std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);

@@ -38,10 +38,10 @@ Dynamic Merkle options forwarded to run_4node_raft_cluster.sh:
                            and requires them to match across all replicas.
   --dynamic-index NAME     Fully-qualified index name for dynamic verification
                            (default: public.usertable_small_dynamic_merkle_idx).
-                           Default dynamic runs require logical fanout 32 and
-                           independently report physical node fanout 2.
+                           Default dynamic runs require native layout v6,
+                           logical fanout 32, and physical node fanout 2.
   --dynamic-structure-gate N
-                           Untimed merge/re-split/key-route gate (default: 0).
+                           Untimed merge/re-split/key-route gate (default: 1).
   --dynamic-structure-crash-gate N
                            Crash/restart one replica with pending transitions
                            during the untimed gate (default: 0).
@@ -113,7 +113,7 @@ CLUSTER_ARGS=(
   --enable-merkle-index 1
   --merkle-verify-mode dynamic
   --dynamic-index public.usertable_small_dynamic_merkle_idx
-  --dynamic-structure-gate 0
+  --dynamic-structure-gate 1
   --dynamic-structure-crash-gate 0
   --dynamic-structure-profile 1
   --warmup-queries 1000
@@ -205,6 +205,10 @@ file_sha256() {
 
 RESTORE_INPUT="$(cluster_arg_value --restore-sql scripts/distributed/sql/restore_usertable_small_dynamic.sql)"
 WORKLOAD_INPUT="$(cluster_arg_value --workload scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt)"
+MERKLE_VERIFY_MODE_INPUT="$(cluster_arg_value --merkle-verify-mode dynamic)"
+DYNAMIC_STRUCTURE_GATE_INPUT="$(cluster_arg_value --dynamic-structure-gate 1)"
+DYNAMIC_STRUCTURE_CRASH_GATE_INPUT="$(cluster_arg_value --dynamic-structure-crash-gate 0)"
+DYNAMIC_STRUCTURE_PROFILE_INPUT="$(cluster_arg_value --dynamic-structure-profile 1)"
 NODE_IDS_INPUT="$(cluster_arg_value --node-ids 1,2,4)"
 read -r -a NODE_ID_VALUES <<< "${NODE_IDS_INPUT//,/ }"
 NODE_COUNT="${#NODE_ID_VALUES[@]}"
@@ -285,8 +289,13 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
   printf 'result_completion_quorum=%s\n' "$RESULT_COMPLETION_QUORUM"
   printf 'schedule=interleaved_alternating_by_rep\n'
   printf 'tps_semantics=raft_majority_result_completion_async_all3_validation\n'
+  printf 'dynamic_layout_version=6\n'
   printf 'dynamic_logical_fanout=32\n'
   printf 'dynamic_physical_node_fanout=2\n'
+  printf 'merkle_verify_mode=%s\n' "$MERKLE_VERIFY_MODE_INPUT"
+  printf 'dynamic_structure_gate=%s\n' "$DYNAMIC_STRUCTURE_GATE_INPUT"
+  printf 'dynamic_structure_crash_gate=%s\n' "$DYNAMIC_STRUCTURE_CRASH_GATE_INPUT"
+  printf 'dynamic_structure_profile=%s\n' "$DYNAMIC_STRUCTURE_PROFILE_INPUT"
   printf 'cluster_args='
   printf '%q ' "${CLUSTER_ARGS[@]}"
   printf '\n'
@@ -379,7 +388,7 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
         if grep -q 'DYNAMIC_MERKLE_THREE_REPLICA_EQUALITY_PASS=1' \
             "$RUN/run_summary.env" 2>/dev/null; then
           echo "DYNAMIC_MERKLE equality gate: PASS (E=$E rep=$REP)"
-        elif grep -qE 'merkle-verify-mode.+dynamic|MERKLE_VERIFY_MODE.+dynamic' \
+        elif grep -q '^merkle_verify_mode=dynamic$' \
             "$OUT/campaign.env" 2>/dev/null; then
           echo "WARNING: dynamic equality gate was expected but not found — marking run INVALID"
           RUN_PASS=0
@@ -401,28 +410,35 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
         echo "WARNING: post-run equality timing/proof missing — marking run INVALID"
         RUN_PASS=0
       fi
-      if [[ "$RUN_PASS" -eq 1 ]] && grep -qE 'merkle-verify-mode.+dynamic|MERKLE_VERIFY_MODE.+dynamic' \
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -q '^merkle_verify_mode=dynamic$' \
+          "$OUT/campaign.env" 2>/dev/null &&
+          ! grep -q '^DYNAMIC_LAYOUT_CONTRACT_PASS=1$' \
+          "$RUN/run_summary.env" 2>/dev/null; then
+        echo "WARNING: native dynamic layout-v6 proof missing — marking run INVALID"
+        RUN_PASS=0
+      fi
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -q '^merkle_verify_mode=dynamic$' \
           "$OUT/campaign.env" 2>/dev/null &&
           ! grep -q '^DYNAMIC_FANOUT_CONTRACT_PASS=1$' \
           "$RUN/run_summary.env" 2>/dev/null; then
         echo "WARNING: logical-32/physical-2 fanout proof missing — marking run INVALID"
         RUN_PASS=0
       fi
-      if [[ "$RUN_PASS" -eq 1 ]] && grep -q -- '--dynamic-structure-gate 1' \
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -q '^dynamic_structure_gate=1$' \
           "$OUT/campaign.env" 2>/dev/null &&
           ! grep -q '^DYNAMIC_DISTRIBUTED_STRUCTURE_GATE_PASS=1$' \
           "$RUN/run_summary.env" 2>/dev/null; then
         echo "WARNING: distributed dynamic structure gate missing — marking run INVALID"
         RUN_PASS=0
       fi
-      if [[ "$RUN_PASS" -eq 1 ]] && grep -q -- '--dynamic-structure-crash-gate 1' \
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -q '^dynamic_structure_crash_gate=1$' \
           "$OUT/campaign.env" 2>/dev/null &&
           ! grep -q '^DYNAMIC_DISTRIBUTED_PENDING_CRASH_RESTART_PASS=1$' \
           "$RUN/run_summary.env" 2>/dev/null; then
         echo "WARNING: distributed pending-transition crash/restart gate missing — marking run INVALID"
         RUN_PASS=0
       fi
-      if [[ "$RUN_PASS" -eq 1 ]] && grep -q -- '--dynamic-structure-profile 1' \
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -q '^dynamic_structure_profile=1$' \
           "$OUT/campaign.env" 2>/dev/null &&
           ! grep -q '^DYNAMIC_NATIVE_PROFILE_PASS=1$' \
           "$RUN/run_summary.env" 2>/dev/null; then

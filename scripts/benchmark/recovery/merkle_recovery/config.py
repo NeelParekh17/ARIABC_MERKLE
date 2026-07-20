@@ -33,6 +33,7 @@ TIMING_CONTRACT_VERSION = 1
 ZERO_HASH = "0" * 64
 MERKLE_MODES = ("static", "dynamic")
 DYNAMIC_PROFILE = "dynamic-size-scaling-k75-c300"
+DYNAMIC_NATIVE_LAYOUT_VERSION = 6
 DYNAMIC_PARTITIONS = 200
 DYNAMIC_LOGICAL_FANOUT = 32
 DYNAMIC_PHYSICAL_NODE_FANOUT = 2
@@ -190,6 +191,7 @@ def profile_config(profile: str) -> BenchmarkConfig:
             extra={
                 "campaign": "dynamic_size_scaling_k75_c300",
                 "merkle_mode": "dynamic",
+                "dynamic_native_layout_version": DYNAMIC_NATIVE_LAYOUT_VERSION,
                 "dynamic_partitions": DYNAMIC_PARTITIONS,
                 "dynamic_logical_fanout": DYNAMIC_LOGICAL_FANOUT,
                 "dynamic_physical_node_fanout": DYNAMIC_PHYSICAL_NODE_FANOUT,

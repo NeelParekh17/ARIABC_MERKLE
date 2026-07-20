@@ -281,8 +281,25 @@ def dynamic_verify(conn, schema: str) -> bool:
     )
 
 
-def dynamic_apply_pending(conn) -> None:
-    execute(conn, "SELECT merkle_apply_pending()")
+def merkle_queue_snapshot(conn) -> dict[str, Any]:
+    """Capture compatibility-queue state without conflating it with native roots."""
+    status = scalar(conn, "SELECT merkle_recovery_status()")
+    local_delta_rows = int(
+        scalar(
+            conn,
+            "SELECT count(*) FROM ariabc_internal.merkle_local_delta",
+        )
+        or 0
+    )
+    return {
+        "status": status,
+        "local_delta_rows": local_delta_rows,
+    }
+
+
+def dynamic_apply_pending(conn) -> Any:
+    """Drain the compatibility queue and return its apply watermark."""
+    return scalar(conn, "SELECT merkle_apply_pending()")
 
 
 def _plan_uses_index(node: Any, expected: str) -> bool:

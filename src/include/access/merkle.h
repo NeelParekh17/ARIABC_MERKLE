@@ -135,7 +135,7 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 
 /* Dynamic Merkle format.  The static v7 page layout remains unchanged. */
 #define MERKLE_DYNAMIC_META_MAGIC          ((uint32) 0x44594E4D) /* "DYNM" */
-#define MERKLE_DYNAMIC_LAYOUT_VERSION      5
+#define MERKLE_DYNAMIC_LAYOUT_VERSION      6
 #define MERKLE_DYNAMIC_LOGICAL_FANOUT      32
 #define MERKLE_DYNAMIC_PHYSICAL_NODE_FANOUT 2
 #define MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY 32
@@ -158,7 +158,7 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 #define MERKLE_NATIVE_ROOT_MAGIC           ((uint32) 0x4D4E5254) /* "MNRT" */
 #define MERKLE_NATIVE_ROOT_VERSION          2
 #define MERKLE_NATIVE_RECORD_MAGIC          ((uint32) 0x4D4E5243) /* "MNRC" */
-#define MERKLE_NATIVE_RECORD_VERSION        2
+#define MERKLE_NATIVE_RECORD_VERSION        3
 #define MERKLE_NATIVE_RECORD_INTERNAL       1
 #define MERKLE_NATIVE_RECORD_LEAF           2
 #define MERKLE_NATIVE_RECORD_ITEM           3
@@ -283,8 +283,13 @@ typedef struct MerkleNativeNodeRecord
 	MerkleHash  data_xor;
 	MerkleHash  content_xor;
 	MerkleHash  structure_hash;
-	MerkleNativeLocator left;
-	MerkleNativeLocator right;
+	/*
+	 * One logical node consumes five route bits.  A physical leaf may cover
+	 * more than one of those slots, so adjacent entries are intentionally
+	 * allowed to contain the same locator.  Consumers must de-duplicate
+	 * locators when aggregating or walking the tree.
+	 */
+	MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FANOUT];
 	MerkleNativeLocator item_head;
 } MerkleNativeNodeRecord;
 
