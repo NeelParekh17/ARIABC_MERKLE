@@ -26,8 +26,9 @@ Options:
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
                                default: paper-update-only
   --audit-mode full|skip       default: skip
-  --fast-diagnostic           dynamic only: one repetition, audit skipped,
-                              and no repeated crash/lifecycle gate
+  --fast-diagnostic           dynamic only: one repetition and audit skipped
+  --run-dynamic-crash-gate    opt in to the destructive dynamic crash/lifecycle
+                              gate before the recovery benchmark
   --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
   --min-free-gib N             default: 40
@@ -65,6 +66,7 @@ SSH_TIMEOUT="${SSH_TIMEOUT:-15}"
 KEEP_REMOTE_ARCHIVE=0
 KEEP_FAILURE_LOGS=0
 FAST_DIAGNOSTIC=0
+RUN_DYNAMIC_CRASH_GATE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -89,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --corruption-mode) CORRUPTION_MODE="${2:?}"; shift 2 ;;
     --audit-mode) AUDIT_MODE="${2:?}"; shift 2 ;;
     --fast-diagnostic) FAST_DIAGNOSTIC=1; shift ;;
+    --run-dynamic-crash-gate) RUN_DYNAMIC_CRASH_GATE=1; shift ;;
     --leaf-fetch-batch-size) LEAF_FETCH_BATCH_SIZE="${2:?}"; shift 2 ;;
     --run-static-merkle-regression) RUN_STATIC_MERKLE_REGRESSION=1; shift ;;
     --min-free-gib) MIN_FREE_GIB="${2:?}"; shift 2 ;;
@@ -172,7 +175,7 @@ fi
 
 resolve_host_ip() {
   case "$1" in
-    admin123) printf '%s\n' "10.129.148.236" ;;
+    admin123) printf '%s\n' "10.129.148.247" ;;
     user4) printf '%s\n' "10.129.148.246" ;;
     utkarsh) printf '%s\n' "10.129.148.248" ;;
     *) printf '%s\n' "$1" ;;
@@ -392,6 +395,14 @@ sync_root() {
       --exclude 'objfiles.txt' --exclude 'exports.list' \
       --exclude 'snowball_create.sql' \
       --exclude '*.stamp' --exclude 'bki-stamp' --exclude 'header-stamp' \
+      --exclude '*/postgres' --exclude 'bin/initdb/postgres' \
+      --exclude 'bin/pg_ctl/postgres' --exclude 'backend/postgres' \
+      --exclude 'bin/initdb/initdb' --exclude 'bin/pg_ctl/pg_ctl' \
+      --exclude 'bin/psql/psql' --exclude 'bin/pg_config/pg_config' \
+      --exclude 'bin/pg_dump/pg_dump' --exclude 'bin/pg_dump/pg_dumpall' \
+      --exclude 'bin/pg_dump/pg_restore' --exclude 'bin/pgbench/pgbench' \
+      --exclude 'test/regress/pg_regress' --exclude 'test/isolation/pg_isolation_regress' \
+      --exclude 'test/isolation/isolationtester' --exclude 'test/isolation/pg_regress.o' \
       "$src/" "$SSH_TARGET:$dest/"
   else
     remote_ssh_cmd_stdinless "mkdir -p '$(dirname "$dest")'"
@@ -433,8 +444,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'"
 progress "remote source and Python environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q FAST_DIAGNOSTIC=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS" "$FAST_DIAGNOSTIC")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q FAST_DIAGNOSTIC=%q RUN_DYNAMIC_CRASH_GATE=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS" "$FAST_DIAGNOSTIC" "$RUN_DYNAMIC_CRASH_GATE")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -721,10 +732,10 @@ fi
 export LD_LIBRARY_PATH="$REMOTE_INSTALL_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 remote_progress "using installed shared libraries from $REMOTE_INSTALL_DIR/lib"
 
-# Dynamic recovery acceptance includes a destructive durability gate on the
-# target host.  Each case owns a private fresh cluster and exercises a real
-# postmaster SIGKILL at the dynamic-delta and apply-watermark boundaries.
-if [[ "$BENCH_PROFILE" == "dynamic-size-scaling-k75-c300" && "$FAST_DIAGNOSTIC" -eq 0 ]]; then
+# The destructive durability gate is deliberately opt-in.  Recovery campaigns
+# own a private fresh cluster but should not run crash/lifecycle tests unless
+# the caller explicitly requests that separate proof tier.
+if [[ "$BENCH_PROFILE" == "dynamic-size-scaling-k75-c300" && "$RUN_DYNAMIC_CRASH_GATE" -eq 1 ]]; then
   DYNAMIC_GATE_DIR="$REMOTE_LOG_DIR/dynamic_merkle_crash_gate"
   remote_progress "dynamic Merkle crash/lifecycle gate started; log: $REMOTE_LOG_DIR/dynamic_crash_gate.log"
   if PG_BIN="$REMOTE_INSTALL_DIR/bin" \

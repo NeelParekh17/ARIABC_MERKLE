@@ -4,7 +4,7 @@
 # Common Cluster Topology for AriaBC Distributed Benchmarks and Tests
 
 declare -a NODE_IDS=(1 2 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
+declare -a NODE_IPS=(10.129.148.247 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 

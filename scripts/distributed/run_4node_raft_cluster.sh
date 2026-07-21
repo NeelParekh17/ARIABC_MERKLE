@@ -2,11 +2,11 @@
 # run_4node_raft_cluster.sh — Bootstrap and test the AriaBC distributed cluster.
 #
 # Topology (from plan.txt):
-#   Node 1 (RAFT ID 1): admin123   10.129.148.236  neel  [Kafka host]  Ubuntu 24.04
+#   Node 1 (RAFT ID 1): admin123   10.129.148.247  neel  [Kafka host]  Ubuntu 24.04
 #   Node 2 (RAFT ID 2): user4      10.129.148.246    neel               Ubuntu 22.04
 #   Node 4 (RAFT ID 4): utkarsh    10.129.148.248  neel               Ubuntu 24.04
 #   Gateway            : proposed-gw 10.129.27.111 (this machine, local)
-#   Kafka broker       : 10.129.148.236:9092
+#   Kafka broker       : 10.129.148.247:9092
 #
 # IMPORTANT KNOWN CONSTRAINTS (confirmed 2026-04-24):
 #   - Ubuntu 22.04 nodes (user4, new-node) CANNOT run ASUS-built binary (GLIBC 2.38 required).
@@ -84,7 +84,7 @@ ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 ARIABC_KNOWN_HOSTS_FILE="${ARIABC_KNOWN_HOSTS_FILE:-$HOME/.ssh/known_hosts}"
 
-KAFKA_HOST="${KAFKA_HOST:-10.129.148.236}"
+KAFKA_HOST="${KAFKA_HOST:-10.129.148.247}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
 KAFKA_RESULT_TOPIC="${KAFKA_RESULT_TOPIC:-ariabc_results}"
 KAFKA_HOME_REMOTE="${KAFKA_HOME_REMOTE:-/home/neel/Desktop/kafka_2.13-3.7.0}"
@@ -115,7 +115,7 @@ REMOTE_OPENSSL_INCLUDE_U22="/tmp/openssl_include"
 LOCAL_BIN="$REPO_ROOT/ariabc_pg/build/bin"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
-SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ARIABC_KNOWN_HOSTS_FILE" -o ConnectTimeout=10)
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ARIABC_KNOWN_HOSTS_FILE" -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)
 
 # ---------------------------------------------------------------------------
 # Gateway delegation
@@ -132,6 +132,14 @@ for _arg in "$@"; do
     break
   fi
 done
+
+if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
+      "$(hostname -s)" != "$GATEWAY_HOSTNAME" ]]; then
+  if ! ssh -o BatchMode=yes -o ConnectTimeout=2 "$GATEWAY_USER@$GATEWAY_HOST" true 2>/dev/null; then
+    echo "NOTICE: Configured gateway host $GATEWAY_HOST is unreachable via SSH; executing locally on $(hostname -s)"
+    BYPASS_DELEGATION=1
+  fi
+fi
 
 if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
       "$(hostname -s)" != "$GATEWAY_HOSTNAME" ]]; then
@@ -534,7 +542,7 @@ Options:
   --db-port N      Override PostgreSQL port (default from cluster_topology.sh)
   --db-user USER   Override PostgreSQL user (default from cluster_topology.sh)
   --db-name NAME   Override PostgreSQL database (default from cluster_topology.sh)
-  --kafka-host H   Override Kafka broker host (default: 10.129.148.236)
+  --kafka-host H   Override Kafka broker host (default: 10.129.148.247)
   --kafka-port N   Override Kafka broker port (default: 9092)
   --kafka-home-remote DIR
                   Override remote Kafka installation directory.
@@ -1391,12 +1399,45 @@ node_ssh() {
   local idx="$1"; shift
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  local cmd=(sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ARIABC_KNOWN_HOSTS_FILE" -o ConnectTimeout=10 "$user@$ip" "$@")
+  local cmd=(sshpass -p "$CLUSTER_PASSWORD" ssh \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$ARIABC_KNOWN_HOSTS_FILE" \
+    -o ConnectTimeout=10 \
+    -o ServerAliveInterval=5 \
+    -o ServerAliveCountMax=2 \
+    "$user@$ip" "$@")
   if [[ -n "${NODE_SSH_COMMAND_TIMEOUT:-}" && "${NODE_SSH_COMMAND_TIMEOUT:-0}" != "0" ]]; then
     timeout "$NODE_SSH_COMMAND_TIMEOUT" "${cmd[@]}"
   else
     "${cmd[@]}"
   fi
+}
+
+# ===========================================================================
+# Function: check_node_ssh_reachable
+# Description: Fast SSH reachability check using TCP banner probe.
+#   Distinguishes between "port closed" and "port open but sshd banner frozen".
+# Arguments:
+#   $1 (ip)   - Node IP address
+#   $2 (name) - Human-readable node name (for error messages)
+# Returns: 0 if SSH banner received, 1 if unreachable or banner timed out.
+# ===========================================================================
+check_node_ssh_reachable() {
+  local ip="$1" name="$2"
+  # First check TCP port is open at all (fast, 2s)
+  if ! timeout 2 bash -c "</dev/tcp/${ip}/22" 2>/dev/null; then
+    log "  [${name}] SSH PREFLIGHT FAIL: TCP port 22 is not open at ${ip}" >&2
+    return 1
+  fi
+  # TCP connected — now check if sshd actually sends its banner within 5s.
+  # A frozen sshd (MaxStartups exhausted / DNS-hung) connects TCP but never sends banner.
+  local banner
+  banner="$(timeout 5 bash -c "cat </dev/tcp/${ip}/22" 2>/dev/null | head -1 || true)"
+  if [[ -z "$banner" ]]; then
+    log "  [${name}] SSH PREFLIGHT FAIL: TCP port 22 open at ${ip} but sshd banner timed out (sshd frozen — node may need restart/reboot)" >&2
+    return 1
+  fi
+  return 0
 }
 
 # ===========================================================================
@@ -1817,9 +1858,21 @@ build_raft_members() {
 _compute_src_hash() {
   # Hash C/C++ sources + key header + ring capacity value
   {
-    find "$REPO_ROOT/src" "$REPO_ROOT/ariabc_pg" \
+    find "$REPO_ROOT/src" "$REPO_ROOT/ariabc_pg" -type f \
       \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
       -not -path '*/build/*' -not -path '*/.git/*' \
+      -not -path '*/src/include/catalog/*_d.h' \
+      -not -path '*/src/include/catalog/schemapg.h' \
+      -not -path '*/src/include/storage/lwlocknames.h' \
+      -not -path '*/src/include/utils/probes.h' \
+      -not -path '*/src/include/utils/fmgrprotos.h' \
+      -not -path '*/src/include/utils/errcodes.h' \
+      -not -path '*/src/include/utils/fmgroids.h' \
+      -not -path '*/src/backend/catalog/*_d.h' \
+      -not -path '*/src/backend/catalog/schemapg.h' \
+      -not -path '*/src/backend/utils/fmgrprotos.h' \
+      -not -path '*/src/backend/utils/errcodes.h' \
+      -not -path '*/src/backend/utils/fmgroids.h' \
       -exec sha256sum {} \; 2>/dev/null | sort
     echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
   } | sha256sum | awk '{print $1}'
@@ -1829,9 +1882,25 @@ _compute_src_fingerprint() {
   (
     cd "$REPO_ROOT"
     {
-      find src ariabc_pg \
+      find src ariabc_pg -type f \
         \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
         -not -path '*/build/*' -not -path '*/.git/*' \
+        -not -path 'src/include/pg_config.h' \
+        -not -path 'src/include/pg_config_ext.h' \
+        -not -path 'src/include/pg_config_os.h' \
+        -not -path 'src/interfaces/ecpg/include/ecpg_config.h' \
+        -not -path 'src/include/catalog/*_d.h' \
+        -not -path 'src/include/catalog/schemapg.h' \
+        -not -path 'src/include/storage/lwlocknames.h' \
+        -not -path 'src/include/utils/probes.h' \
+        -not -path 'src/include/utils/fmgrprotos.h' \
+        -not -path 'src/include/utils/errcodes.h' \
+        -not -path 'src/include/utils/fmgroids.h' \
+        -not -path 'src/backend/catalog/*_d.h' \
+        -not -path 'src/backend/catalog/schemapg.h' \
+        -not -path 'src/backend/utils/fmgrprotos.h' \
+        -not -path 'src/backend/utils/errcodes.h' \
+        -not -path 'src/backend/utils/fmgroids.h' \
         -exec sha256sum {} \; 2>/dev/null | sort
       echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
     } | sha256sum | awk '{print $1}'
@@ -1953,6 +2022,31 @@ on_signal() {
 
 trap cleanup_all EXIT
 trap on_signal INT TERM
+
+# ---------------------------------------------------------------------------
+# Phase -1: SSH Reachability Preflight
+# Verify all nodes send SSH banners before attempting cleanup.
+# A frozen sshd (banner timeout) means the node needs restart/reboot.
+# ---------------------------------------------------------------------------
+if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
+  log "=== Phase -1: SSH reachability preflight (banner check) ==="
+  ssh_preflight_ok=1
+  for idx in "${!NODE_IDS[@]}"; do
+    name="${NODE_NAMES[$idx]}"
+    ip="${NODE_IPS[$idx]}"
+    if ! check_node_ssh_reachable "$ip" "$name"; then
+      log "  FATAL: ${name} (${ip}) SSH is not responding correctly." >&2
+      log "  If sshd banner timed out: a runaway ariabc_pg_server may have caused MaxStartups exhaustion." >&2
+      log "  Fix: physically restart sshd (sudo systemctl restart sshd) or reboot ${name}." >&2
+      ssh_preflight_ok=0
+    else
+      log "  [${name}] SSH preflight PASS"
+    fi
+  done
+  if [[ "$ssh_preflight_ok" -eq 0 ]]; then
+    die "SSH preflight failed: one or more nodes are unreachable — fix SSH on the affected nodes and re-run"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 0: Cleanup
@@ -2188,7 +2282,9 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
         bin_sha="$(sha256sum "$bin_path" 2>/dev/null | awk '{print $1}' || echo missing)"
         git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
         git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
-        src_fp="$(cd "$REPO_ROOT" && { find src ariabc_pg \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \; 2>/dev/null | sort; echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"; } | sha256sum | awk '{print $1}')"
+        # The authoritative identity is frozen before any configure/build step
+        # mutates generated files in this checkout.
+        src_fp="$local_src_fingerprint"
         build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
         {
@@ -2265,9 +2361,7 @@ if [[ "$SKIP_SYNC" -eq 0 ]]; then
   # Wait for it before rsync starts, otherwise the sync can race the build and
   # observe disappearing object files.
   wait_local_canonical_build
-  local_src_fingerprint="$(_compute_src_fingerprint)"
-  sed -i -E "s/^source_fingerprint=.*/source_fingerprint=$local_src_fingerprint/" "$LOG_DIR/run_meta.env"
-  log "  normalized source_fingerprint=$local_src_fingerprint"
+  log "  frozen authoritative source_fingerprint=$local_src_fingerprint"
 
   declare -a SYNC_PIDS=()
   declare -a SYNC_NAMES=()
@@ -2566,23 +2660,40 @@ for idx in "${!NODE_IDS[@]}"; do
     srv_sha=\$(sha256sum '$srv_bin' 2>/dev/null | awk '{print \$1}' || echo missing)
     gw_sha=\$(sha256sum '$gw_path' 2>/dev/null | awk '{print \$1}' || echo missing)
     pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
-    live_src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
+    live_src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg -type f \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -not -path 'src/include/pg_config.h' -not -path 'src/include/pg_config_ext.h' -not -path 'src/include/pg_config_os.h' -not -path 'src/interfaces/ecpg/include/ecpg_config.h' -not -path 'src/include/catalog/*_d.h' -not -path 'src/include/catalog/schemapg.h' -not -path 'src/include/storage/lwlocknames.h' -not -path 'src/include/utils/probes.h' -not -path 'src/include/utils/fmgrprotos.h' -not -path 'src/include/utils/errcodes.h' -not -path 'src/include/utils/fmgroids.h' -not -path 'src/backend/catalog/*_d.h' -not -path 'src/backend/catalog/schemapg.h' -not -path 'src/backend/utils/fmgrprotos.h' -not -path 'src/backend/utils/errcodes.h' -not -path 'src/backend/utils/fmgroids.h' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
     synced_src_fp=\$(cat '$REMOTE_REPO_ROOT/.ariabc_synced_source_fingerprint' 2>/dev/null || true)
-    src_fp=\"\${synced_src_fp:-\$live_src_fp}\"
+    pg_manifest_fp=\$(sed -n 's/^source_fingerprint=//p' '$REMOTE_INSTALL_DIR/bin/postgres.manifest' 2>/dev/null | tail -1)
+    srv_manifest_fp=\$(sed -n 's/^source_fingerprint=//p' '$srv_bin.manifest' 2>/dev/null | tail -1)
+    gw_manifest_fp=\$(sed -n 's/^source_fingerprint=//p' '$gw_path.manifest' 2>/dev/null | tail -1)
     echo \"git_head=\$git_head\"
     echo \"ariabc_pg_server_path=$srv_bin\"
     echo \"ariabc_pg_server_sha256=\$srv_sha\"
     echo \"ariabc_pg_gateway_path=$gw_path\"
     echo \"ariabc_pg_gateway_sha256=\$gw_sha\"
     echo \"postgres_sha256=\$pg_sha\"
-    echo \"source_fingerprint=\$src_fp\"
+    echo \"source_fingerprint=\$synced_src_fp\"
     echo \"live_source_fingerprint=\$live_src_fp\"
+    echo \"postgres_manifest_source_fingerprint=\$pg_manifest_fp\"
+    echo \"server_manifest_source_fingerprint=\$srv_manifest_fp\"
+    echo \"gateway_manifest_source_fingerprint=\$gw_manifest_fp\"
   " 2>/dev/null)
 
   echo "$prov_output" | sed "s/^/    /"
   node_server_sha="$(echo "$prov_output" | sed -n 's/^ariabc_pg_server_sha256=//p' | tail -1)"
   node_gateway_sha="$(echo "$prov_output" | sed -n 's/^ariabc_pg_gateway_sha256=//p' | tail -1)"
   node_src_fingerprint="$(echo "$prov_output" | sed -n 's/^source_fingerprint=//p' | tail -1)"
+  node_live_src_fingerprint="$(echo "$prov_output" | sed -n 's/^live_source_fingerprint=//p' | tail -1)"
+  node_pg_manifest_fingerprint="$(echo "$prov_output" | sed -n 's/^postgres_manifest_source_fingerprint=//p' | tail -1)"
+  node_srv_manifest_fingerprint="$(echo "$prov_output" | sed -n 's/^server_manifest_source_fingerprint=//p' | tail -1)"
+  node_gw_manifest_fingerprint="$(echo "$prov_output" | sed -n 's/^gateway_manifest_source_fingerprint=//p' | tail -1)"
+
+  if [[ "$node_src_fingerprint" != "$local_src_fingerprint" ||
+        "$node_pg_manifest_fingerprint" != "$local_src_fingerprint" ||
+        "$node_srv_manifest_fingerprint" != "$local_src_fingerprint" ||
+        "$node_gw_manifest_fingerprint" != "$local_src_fingerprint" ]]; then
+    log "  [${name}] BINARY_PROVENANCE_FAIL: synchronized source or build manifest fingerprint mismatch"
+    binary_provenance_ok=0
+  fi
 
   if [[ "$is_u22" -eq 0 ]]; then
     if [[ "$node_server_sha" != "$local_server_sha" ||
@@ -2591,10 +2702,6 @@ for idx in "${!NODE_IDS[@]}"; do
       binary_provenance_ok=0
     fi
   else
-    if [[ "$node_src_fingerprint" != "$local_src_fingerprint" ]]; then
-      log "  [${name}] BINARY_PROVENANCE_FAIL: U22 source fingerprint mismatch"
-      binary_provenance_ok=0
-    fi
     if [[ "$node_server_sha" == "missing" || "$node_gateway_sha" == "missing" ]]; then
       log "  [${name}] BINARY_PROVENANCE_FAIL: U22 executable missing"
       binary_provenance_ok=0

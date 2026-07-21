@@ -14,22 +14,22 @@
 
 | Raft ID | Hostname | IP | OS | Role | Auth | Client Port | Raft Port |
 |---|---|---|---|---|---|---|---|
-| 1 | admin123-MS-7C96 | 10.129.148.236 | Ubuntu 24.04.3 | Raft node + Kafka broker | SSH key | 8000 | 9000 |
+| 1 | admin123-MS-7C96 | 10.129.148.247 | Ubuntu 24.04.3 | Raft node + Kafka broker | SSH key | 8000 | 9000 |
 | 2 | user4-MS-7C96 | 10.129.148.246 | Ubuntu 22.04.2 | Raft node | SSH key | 8000 | 9000 |
 | 4 | utkarsh-MS-7C96 | 10.129.148.248 | Ubuntu 24.04.3 | Raft node | SSH key | **8001** | 9000 |
 | — | ASUS Laptop | local | Ubuntu 24.04.4 | Gateway + controller | — | — | — |
-| — | admin123-MS-7C96 | 10.129.148.236:9092 | — | Kafka KRaft broker | — | — | — |
+| — | admin123-MS-7C96 | 10.129.148.247:9092 | — | Kafka KRaft broker | — | — | — |
 
 **Note on utkarsh port 8001:** System HP printer snap service permanently occupies port 8000 on utkarsh. Client port 8001 is used exclusively for this node throughout all cluster runs.
 
 ### 1.2 Raft Member String
 
-10.129.148.236:9000,10.129.148.246:9000,10.129.148.248:9000
+10.129.148.247:9000,10.129.148.246:9000,10.129.148.248:9000
 
 ### 1.3 Gateway Node Connections
 
 ```
-10.129.148.236:8000,10.129.148.246:8000,10.129.148.248:8001
+10.129.148.247:8000,10.129.148.246:8000,10.129.148.248:8001
 ```
 
 ---
@@ -76,7 +76,7 @@
 | Distribution | `kafka_2.13-3.7.0` |
 | Location on admin123 | `~/Desktop/kafka_2.13-3.7.0/` |
 | Mode | KRaft (single-node, no Zookeeper) |
-| Broker address | `10.129.148.236:9092` |
+| Broker address | `10.129.148.247:9092` |
 | Result topic | `ariabc_results` (4 partitions, replication-factor 1) |
 | Java runtime | OpenJDK 21 (transferred from ASUS, at `~/Desktop/usr/lib/jvm/java-21-openjdk-amd64`) |
 
@@ -170,7 +170,7 @@ admin123 had no Java installed, and the internet was not reachable from any clus
    ```bash
    tar czf /tmp/jdk21.tar.gz /usr/lib/jvm/java-21-openjdk-amd64/
    # Compressed size: 147 MB
-   scp /tmp/jdk21.tar.gz neel@10.129.148.236:~/Desktop/
+   scp /tmp/jdk21.tar.gz neel@10.129.148.247:~/Desktop/
    ```
 2. **Extracted on admin123:**
    ```bash
@@ -248,7 +248,7 @@ This is the full distributed integrity guarantee as specified in the paper — a
 
 ```
 [17:46:41]   All 4 server client ports responding (attempt 4)  ← ~7s from start
-[17:46:46]   [admin123] ariabc_pg_server ready: id=1 raft=10.129.148.236:9000 clientPort=8000 members=3
+[17:46:46]   [admin123] ariabc_pg_server ready: id=1 raft=10.129.148.247:9000 clientPort=8000 members=3
 [17:46:47]   [user4]    ariabc_pg_server ready: id=2 raft=10.129.148.246:9000   clientPort=8000 members=3
 [17:46:47]   [utkarsh]  ariabc_pg_server ready: id=4 raft=10.129.148.248:9000  clientPort=8001 members=3
 ```

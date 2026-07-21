@@ -41,6 +41,19 @@ DYNAMIC_LEAF_CAPACITY = 32
 DYNAMIC_MERGE_THRESHOLD = 8
 DYNAMIC_BAD_RANGE_COUNT = 75
 DYNAMIC_CORRUPTED_TUPLE_COUNT = 300
+DYNAMIC_SIZE_SERIES = [
+    1_000_000,
+    3_000_000,
+    5_000_000,
+    7_000_000,
+    10_000_000,
+    15_000_000,
+    20_000_000,
+    25_000_000,
+    30_000_000,
+    40_000_000,
+    50_000_000,
+]
 DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT = (
     2 * DYNAMIC_BAD_RANGE_COUNT * DYNAMIC_LEAF_CAPACITY
 )
@@ -183,7 +196,7 @@ def profile_config(profile: str) -> BenchmarkConfig:
 
     if profile == DYNAMIC_PROFILE:
         return BenchmarkConfig(
-            fig12_sizes=[1_000_000, 3_000_000, 5_000_000],
+            fig12_sizes=list(DYNAMIC_SIZE_SERIES),
             fig13_sizes=[],
             fig13_k=[],
             repetitions=5,
@@ -202,7 +215,8 @@ def profile_config(profile: str) -> BenchmarkConfig:
                 "corrupted_tuple_count": DYNAMIC_CORRUPTED_TUPLE_COUNT,
                 "candidate_summary_item_limit": DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
                 "description": (
-                    "Dynamic Merkle recovery acceptance campaign at N=1M,3M,5M; "
+                    "Dynamic Merkle recovery acceptance campaign at "
+                    "N=1M,3M,5M,7M,10M,15M,20M,25M,30M,40M,50M; "
                     "P=200, logical K=32, leaf/split capacity=32, merge=8, "
                     "75 corrupted leaf ranges, 300 update corruptions, five repetitions."
                 ),

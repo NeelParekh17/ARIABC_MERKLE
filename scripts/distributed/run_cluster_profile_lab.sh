@@ -5,8 +5,8 @@ set -euo pipefail
 # Default role split:
 # - PG1+RAFT1: 10.129.148.248 (neel)               - utkarsh-MS-7C96 (Intel SSD on /)
 # - PG2+RAFT2: 10.129.148.246 (neel)  - user4-MS-7C96
-# - PG3+RAFT3: 10.129.148.236 (neel)               - admin123 (Ubuntu 24.04, co-located with GW)
-# - GW only  : 10.129.148.236 (neel)               - admin123
+# - PG3+RAFT3: 10.129.148.247 (neel)               - admin123 (Ubuntu 24.04, co-located with GW)
+# - GW only  : 10.129.148.247 (neel)               - admin123
 # NOTE: 10.129.148.246 (user4-MS-7C96) is Ubuntu 22.04 (glibc 2.35) and cannot run prebuilt
 #       ariabc_pg binaries (require glibc 2.38). Use admin123 (Ubuntu 24.04) as PG3 instead.
 #
@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-PG_HOSTS="${PROFILE_PG_HOSTS:-10.129.148.248,10.129.148.246,10.129.148.236}"
+PG_HOSTS="${PROFILE_PG_HOSTS:-10.129.148.248,10.129.148.246,10.129.148.247}"
 PG_USERS="${PROFILE_PG_USERS:-neel,neel,neel}"
 
 # New preferred vars:
@@ -42,7 +42,7 @@ if [[ -z "${PROFILE_RAFT_USERS:-}" && -n "${PROFILE_RAFT_USER:-}" ]]; then
   RAFT_USERS="${PROFILE_RAFT_USER},${PROFILE_RAFT_USER},${PROFILE_RAFT_USER}"
 fi
 
-GATEWAY_HOST="${PROFILE_GATEWAY_HOST:-10.129.148.236}"
+GATEWAY_HOST="${PROFILE_GATEWAY_HOST:-10.129.148.247}"
 GATEWAY_USER="${PROFILE_GATEWAY_USER:-neel}"
 
 SSH_USER="neel"    # default fallback

@@ -271,7 +271,7 @@ The current topology in that file is:
 
 ```bash
 declare -a NODE_IDS=(1 2 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
+declare -a NODE_IPS=(10.129.148.247 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 declare -a NODE_IS_U22=(0 1 0)
@@ -344,7 +344,7 @@ Checklist when replacing a node:
 The default Kafka broker is:
 
 ```bash
-KAFKA_HOST="10.129.148.236"
+KAFKA_HOST="10.129.148.247"
 KAFKA_PORT=9092
 KAFKA_HOME_REMOTE="/home/neel/Desktop/kafka_2.13-3.7.0"
 ```

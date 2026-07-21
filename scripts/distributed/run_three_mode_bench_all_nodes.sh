@@ -37,7 +37,7 @@ source "$SCRIPT_DIR/benchmark_defaults.sh"
 NEEL_NODES=(
   "neel@10.129.148.248"
   "neel@10.129.148.246"
-  "neel@10.129.148.236"
+  "neel@10.129.148.247"
 )
 NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"
 NEEL_REMOTE_INSTALL="/home/neel/Desktop/ariabc_install"

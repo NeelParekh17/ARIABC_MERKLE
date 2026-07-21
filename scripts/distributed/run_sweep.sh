@@ -232,6 +232,41 @@ bash -n scripts/distributed/run_4node_raft_cluster.sh
 echo "=== Checking git style rules ==="
 git diff --check
 
+# ---------------------------------------------------------------------------
+# Node SSH reachability preflight (banner check)
+# Run before starting the campaign so a frozen sshd (utkarsh / any node)
+# is caught immediately with a clear diagnostic instead of failing every run.
+# ---------------------------------------------------------------------------
+echo "=== Checking node SSH reachability (banner preflight) ==="
+_ssh_preflight_ok=1
+read -r -a _sweep_node_ips <<< "$(cluster_arg_value --node-ips 10.129.148.247,10.129.148.246,10.129.148.248 | tr ',' ' ')"
+read -r -a _sweep_node_names <<< "$(cluster_arg_value --node-names admin123,user4,utkarsh | tr ',' ' ')"
+for _i in "${!_sweep_node_ips[@]}"; do
+  _ip="${_sweep_node_ips[$_i]}"
+  _name="${_sweep_node_names[$_i]:-node$_i}"
+  # TCP open?
+  if ! timeout 2 bash -c "</dev/tcp/${_ip}/22" 2>/dev/null; then
+    echo "  FAIL [${_name}] SSH port 22 is closed at ${_ip}" >&2
+    _ssh_preflight_ok=0
+    continue
+  fi
+  # Banner received within 5s?
+  _banner="$(timeout 5 bash -c "cat </dev/tcp/${_ip}/22 2>/dev/null | head -1" 2>/dev/null || true)"
+  if [[ -z "$_banner" ]]; then
+    echo "  FAIL [${_name}] SSH TCP connects at ${_ip} but sshd banner timed out." >&2
+    echo "       sshd is frozen (MaxStartups exhaustion or DNS lookup hang)." >&2
+    echo "       Fix: run  ssh ${_ip}  then  sudo systemctl restart sshd  or reboot ${_name}." >&2
+    _ssh_preflight_ok=0
+  else
+    echo "  OK   [${_name}] ${_ip} — $(echo "$_banner" | tr -d '\r')"
+  fi
+done
+unset _ip _name _banner _i _sweep_node_ips _sweep_node_names
+if [[ "$_ssh_preflight_ok" -eq 0 ]]; then
+  echo "ERROR: SSH preflight failed. Fix the affected nodes and re-run." >&2
+  exit 1
+fi
+
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="scripts/bench_full_results/pg_executor_sweep_${STAMP}"
 mkdir -p "$OUT"

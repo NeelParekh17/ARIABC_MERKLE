@@ -38,6 +38,23 @@ IGNORED_FILE_NAMES = {
     "exports.list",
     "snowball_create.sql",
 }
+IGNORED_RELATIVE_PATHS = {
+    "src/backend/postgres",
+    "src/bin/initdb/postgres",
+    "src/bin/pg_ctl/postgres",
+    "src/bin/initdb/initdb",
+    "src/bin/pg_ctl/pg_ctl",
+    "src/bin/psql/psql",
+    "src/bin/pg_config/pg_config",
+    "src/bin/pg_dump/pg_dump",
+    "src/bin/pg_dump/pg_dumpall",
+    "src/bin/pg_dump/pg_restore",
+    "src/bin/pgbench/pgbench",
+    "src/test/regress/pg_regress",
+    "src/test/isolation/pg_isolation_regress",
+    "src/test/isolation/isolationtester",
+    "src/test/isolation/pg_regress.o",
+}
 
 
 def read_roots(path: Path) -> list[str]:
@@ -51,8 +68,17 @@ def read_roots(path: Path) -> list[str]:
 
 
 def is_selected(path: Path, repo_root: Path) -> bool:
+    if path.is_symlink() and not path.exists():
+        return False
+    if not path.is_file():
+        return False
     rel = path.relative_to(repo_root)
+    rel_str = rel.as_posix()
+    if rel_str in IGNORED_RELATIVE_PATHS:
+        return False
     if any(part in IGNORED_DIR_NAMES for part in rel.parts):
+        return False
+    if "openssl" in rel.parts or "openssl_compat_libs" in rel.parts:
         return False
     if path.name in IGNORED_FILE_NAMES:
         return False
@@ -65,6 +91,13 @@ def is_selected(path: Path, repo_root: Path) -> bool:
     name = path.name
     if name.endswith("_d.h") or name.endswith("_d.dat"):
         return False
+    if path.is_symlink():
+        try:
+            target = path.resolve()
+            if not target.exists() or not is_selected(target, repo_root):
+                return False
+        except Exception:
+            return False
     return True
 
 

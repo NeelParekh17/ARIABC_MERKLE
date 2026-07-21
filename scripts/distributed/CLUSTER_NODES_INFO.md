@@ -8,7 +8,7 @@
 
 | Node | Name | IP Address | Status | OS | CPU | RAM (Total/Avail) | Root Storage (Avail/Use%) | Disk Read MB/s | Disk Write MB/s | Disk Util % | Await | PostgreSQL | AriaBC Server |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **Node 1** | admin123 | `10.129.148.236` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 13.99 GB (6.8% used) | 421G / 468G (6%) | 0.00 | 0.12 | 0.20% | 0.40 ms | 🔴 Stopped | 🔴 Stopped |
+| **Node 1** | admin123 | `10.129.148.247` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 13.99 GB (6.8% used) | 421G / 468G (6%) | 0.00 | 0.12 | 0.20% | 0.40 ms | 🔴 Stopped | 🔴 Stopped |
 | **Node 2** | user4 | `10.129.148.246` | 🟢 Online | Ubuntu 22.04.2 LTS | 16 Cores | 15.01 GB / 12.09 GB (19.5% used) | 109G / 183G (38%) | 0.00 | 0.00 | 0.00% | 0.00 ms | 🔴 Stopped | 🔴 Stopped |
 | **Node 4** | utkarsh | `10.129.148.248` | 🟢 Online | Ubuntu 24.04.3 LTS | 16 Cores | 15.02 GB / 13.87 GB (7.7% used) | 119G / 404G (70%) | 0.00 | 0.15 | 0.40% | 0.43 ms | 🔴 Stopped | 🔴 Stopped |
 | **ASUS Laptop (GW)** | asus-laptop | `127.0.0.1` | 🟢 Online | Ubuntu 24.04.4 LTS | 16 Cores | 14.87 GB / 4.76 GB (68.0% used) | 25G / 164G (85%) | 0.00 | 0.80 | 0.00% | 0.40 ms | — | — |
@@ -41,7 +41,7 @@
 
 ## 🔍 Detailed Node Inventory
 
-### 🖥️ Node 1: admin123 (`10.129.148.236`)
+### 🖥️ Node 1: admin123 (`10.129.148.247`)
 
 #### ⚙️ System Specifications
 - **Host/FQDN:** `Neel`
@@ -49,7 +49,7 @@
 - **Kernel Version:** `6.17.0-22-generic`
 - **CPU Model:** `AMD Ryzen 7 5700G with Radeon Graphics`
 - **CPU Logical Cores (Threads):** `16`
-- **IPv4 Addresses:** `10.129.148.236 172.17.0.1`
+- **IPv4 Addresses:** `10.129.148.247 172.17.0.1`
 
 #### 🧠 Memory (RAM) Allocation
 - **Total RAM:** 15.02 GB

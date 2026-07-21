@@ -16,6 +16,8 @@ endif()
 find_path(LIBPQ_INCLUDE_DIR
           NAMES libpq-fe.h
           HINTS
+            /work/ARIABC/install/include
+            ${CMAKE_CURRENT_LIST_DIR}/../../install/include
             ${CMAKE_CURRENT_LIST_DIR}/../src/interfaces/libpq
             /usr/include
             /usr/local/include
@@ -25,6 +27,8 @@ find_path(LIBPQ_INCLUDE_DIR
 find_path(POSTGRES_INCLUDE_DIR
           NAMES postgres_ext.h
           HINTS
+            /work/ARIABC/install/include
+            ${CMAKE_CURRENT_LIST_DIR}/../../install/include
             ${CMAKE_CURRENT_LIST_DIR}/../src/include
             /usr/include/postgresql
             /usr/local/include/postgresql
@@ -34,6 +38,8 @@ find_path(POSTGRES_INCLUDE_DIR
 find_library(LIBPQ_LIBRARY
              NAMES pq libpq
              HINTS
+               /work/ARIABC/install/lib
+               ${CMAKE_CURRENT_LIST_DIR}/../../install/lib
                ${CMAKE_CURRENT_LIST_DIR}/../src/interfaces/libpq
                /usr/lib
                /usr/local/lib

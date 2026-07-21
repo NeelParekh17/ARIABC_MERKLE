@@ -9,13 +9,13 @@ cd "$ROOT"
 # --------------------------------------------------------------------------
 # Reachable topology (same as run_overhead_full_profiles_reachable.sh)
 # --------------------------------------------------------------------------
-PG_HOSTS="10.129.148.236,10.129.148.246,10.129.148.236"
+PG_HOSTS="10.129.148.247,10.129.148.246,10.129.148.247"
 RAFT_HOSTS="$PG_HOSTS"
 RAFT_MEMBER_HOSTS="$PG_HOSTS"
 RAFT_CLIENT_HOSTS="$PG_HOSTS"
 PG_USERS="neel,neel,neel"
 RAFT_USERS="neel,neel,neel"
-GW_HOST="10.129.148.236"
+GW_HOST="10.129.148.247"
 GW_USER="neel"
 SSH_USER="neel"
 SSH_KEY="/home/neel/.ssh/id_rsa"

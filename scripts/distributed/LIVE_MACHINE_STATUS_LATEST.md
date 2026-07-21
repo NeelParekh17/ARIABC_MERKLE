@@ -8,7 +8,7 @@ SSH criteria: BatchMode=yes, ConnectTimeout=5s, port=22
 
 | Node | SSH | Error |
 |---|---|---|
-| neel@10.129.148.236 | OK |  |
+| neel@10.129.148.247 | OK |  |
 | neel@10.129.148.246 | OK |  |
 | neel@10.129.148.179 | OK |  |
 | neel@10.129.148.248 | OK |  |
@@ -17,14 +17,14 @@ SSH criteria: BatchMode=yes, ConnectTimeout=5s, port=22
 
 | Host | Target | OS | Kernel | Threads | RAM | Swap | Root avail | Root use% | Disks |
 |---|---|---|---|---:|---:|---:|---:|---:|---|
-| Neel | neel@10.129.148.236 | Ubuntu 24.04.3 LTS | 6.17.0-22-generic | 16 | 15.0 GB | 4.0 GB | 424G | 5% | nvme0n1 INTEL SSDPEKNW512G8 476.9G |
+| Neel | neel@10.129.148.247 | Ubuntu 24.04.3 LTS | 6.17.0-22-generic | 16 | 15.0 GB | 4.0 GB | 424G | 5% | nvme0n1 INTEL SSDPEKNW512G8 476.9G |
 | user4-MS-7C96 | neel@10.129.148.246 | Ubuntu 22.04.2 LTS | 6.8.0-101-generic | 16 | 15.0 GB | 46.6 GB | 111G | 37% | nvme0n1 INTEL SSDPEKNW512G8 476.9G |
 | desk14-179 | neel@10.129.148.179 | Ubuntu 22.04.5 LTS | 6.8.0-111-generic | 16 | 15.0 GB | 14.9 GB | 300G | 31% | nvme0n1 INTEL SSDPEKNW512G8 476.9G |
 | utkarsh-MS-7C96 | neel@10.129.148.248 | Ubuntu 24.04.3 LTS | 6.17.0-19-generic | 16 | 15.0 GB | 4.0 GB | 129G | 67% | sda Samsung SSD 840 EVO 500GB 465.8G; nvme0n1 INTEL SSDPEKNW512G8 476.9G |
 
 ## Per-Host Details (Reachable Only)
 
-### Neel (neel@10.129.148.236)
+### Neel (neel@10.129.148.247)
 
 - fqdn: Neel
 - os: Ubuntu 24.04.3 LTS
@@ -34,7 +34,7 @@ SSH criteria: BatchMode=yes, ConnectTimeout=5s, port=22
 - cpu_threads: 16
 - mem_total_kb: 15746684
 - swap_total_kb: 4194300
-- ip4: 10.129.148.236 172.17.0.1
+- ip4: 10.129.148.247 172.17.0.1
 - root_df: /dev/nvme0n1p2 ext4  468G   20G  424G   5% /
 
 df -hT (selected paths):
