@@ -1013,7 +1013,8 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
             )
         series: list[dict[str, Any]] = []
         # When --tuple-count is given, honour those sizes directly.  The
-        # default list [1M, 3M, 5M] is only a fallback for unconstrained runs.
+        # The profile's complete size series is the fallback for unconstrained
+        # runs.
         # Filtering arbitrary user-supplied counts against fig12_sizes silently
         # drops any value (e.g. 7M, 10M) not in that list, producing zero
         # planned runs with no error.

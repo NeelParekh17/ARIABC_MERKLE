@@ -100,6 +100,28 @@ FROM merkle_native_test;
 SELECT (merkle_dynamic_tree_stats('merkle_native_test_idx')->>'max_depth')::int <= 2
        AS append_reduced_logical_height_contract;
 
+-- A single statement produces one large transition batch.  Its new keys land
+-- in multiple empty logical-slot runs separated by existing compressed
+-- children.  Batch application must not bridge those runs and disconnect the
+-- occupied children between them.
+INSERT INTO merkle_native_test
+SELECT g, 'batch-' || g FROM generate_series(2000, 2255) AS g;
+SELECT count(*) = 417 AND merkle_verify('merkle_native_test')
+       AS disjoint_empty_slot_batch_verify
+FROM merkle_native_test;
+WITH requests AS (
+  SELECT jsonb_agg(jsonb_build_object(
+           'partition_id', partition_id,
+           'prefix_length', prefix_len,
+           'prefix_value', encode(prefix, 'hex'))) AS ranges
+    FROM merkle_dynamic_get_leaf_frontier('merkle_native_test_idx')
+)
+SELECT count(*) = (SELECT count(*) FROM merkle_native_test)
+       AS batch_frontier_range_roundtrip
+  FROM requests
+ CROSS JOIN LATERAL merkle_dynamic_get_range_items(
+   'merkle_native_test_idx', requests.ranges) AS item;
+
 VACUUM merkle_native_test;
 SELECT merkle_verify('merkle_native_test') AS post_vacuum_verify;
 TRUNCATE merkle_native_test;

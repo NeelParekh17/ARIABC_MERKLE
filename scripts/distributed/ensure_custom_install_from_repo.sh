@@ -7,6 +7,8 @@ CLEAN_WHEN_REBUILD=0
 FORCE_REBUILD=0
 TRUST_INSTALL=0
 BUILD_PROFILE="release"
+EXPECTED_SOURCE_FINGERPRINT=""
+PRINT_SOURCE_FINGERPRINT=0
 EXTRA_INCLUDE_ROOT=""
 EXTRA_LIB_ROOT=""
 build_log=""
@@ -27,6 +29,7 @@ Usage:
     --repo-root </path/to/ariabc_cluster> \
     --install-dir </path/to/ariabc_install> \
     [--clean-when-rebuild] [--force-rebuild] [--trust-install] \
+    [--require-source-fingerprint <sha256>] [--print-source-fingerprint] \
     [--build-profile release|debug]
 
 Ensures the custom BCDB PostgreSQL install tree is runnable. If the install tree
@@ -37,6 +40,13 @@ and installs it into the requested install directory.
   build (e.g. via rsync from the orchestrator). Skips the source-mtime staleness
   check and the make/gcc toolchain requirement; only verify_install runs. Use on
 execution-only hosts that have no compiler.
+
+--require-source-fingerprint: require both the synchronized source and the
+  installed build-provenance stamp to match this fingerprint. A runnable but
+  stale install is rebuilt instead of being trusted.
+
+--print-source-fingerprint: print the deterministic PostgreSQL/BCDB source
+  fingerprint and exit.
 
 --build-profile release: require an optimized, assertion-free install (default).
 --build-profile debug: build with -O0, debug support, and assertions.
@@ -50,6 +60,8 @@ while [[ $# -gt 0 ]]; do
     --clean-when-rebuild) CLEAN_WHEN_REBUILD=1; shift 1 ;;
     --force-rebuild) FORCE_REBUILD=1; shift 1 ;;
     --trust-install) TRUST_INSTALL=1; shift 1 ;;
+    --require-source-fingerprint) EXPECTED_SOURCE_FINGERPRINT="${2:-}"; shift 2 ;;
+    --print-source-fingerprint) PRINT_SOURCE_FINGERPRINT=1; shift 1 ;;
     --build-profile) BUILD_PROFILE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
@@ -66,6 +78,78 @@ case "$BUILD_PROFILE" in
   release|debug) ;;
   *) echo "ERROR: --build-profile must be release or debug" >&2; exit 2 ;;
 esac
+
+compute_source_fingerprint() {
+  (
+    cd "$REPO_ROOT"
+    {
+      find src -type f \
+        \( -name '*.c' -o -name '*.h' -o -name '*.l' -o -name '*.y' -o \
+           -name 'Makefile' -o -name 'GNUmakefile' \) \
+        -not -path 'src/include/pg_config.h' \
+        -not -path 'src/include/pg_config_ext.h' \
+        -not -path 'src/include/pg_config_os.h' \
+        -not -path 'src/interfaces/ecpg/include/ecpg_config.h' \
+        -not -path 'src/include/catalog/*_d.h' \
+        -not -path 'src/include/catalog/schemapg.h' \
+        -not -path 'src/include/parser/gram.h' \
+        -not -path 'src/include/storage/lwlocknames.h' \
+        -not -path 'src/include/utils/probes.h' \
+        -not -path 'src/include/utils/fmgrprotos.h' \
+        -not -path 'src/include/utils/errcodes.h' \
+        -not -path 'src/include/utils/fmgroids.h' \
+        -not -path 'src/backend/catalog/*_d.h' \
+        -not -path 'src/backend/catalog/schemapg.h' \
+        -not -path 'src/backend/utils/fmgrprotos.h' \
+        -not -path 'src/backend/utils/errcodes.h' \
+        -not -path 'src/backend/utils/fmgroids.h' \
+        -exec sha256sum {} \; 2>/dev/null
+      for build_input in configure configure.ac GNUmakefile.in; do
+        [[ -f "$build_input" ]] && sha256sum "$build_input"
+      done
+    } | LC_ALL=C sort | sha256sum | awk '{print $1}'
+  )
+}
+
+COMPUTED_SOURCE_FINGERPRINT="$(compute_source_fingerprint)"
+SOURCE_FINGERPRINT="$COMPUTED_SOURCE_FINGERPRINT"
+SOURCE_FINGERPRINT_FILE="$INSTALL_DIR/.ariabc_postgres_source_fingerprint"
+SYNCED_SOURCE_FINGERPRINT_FILE="$REPO_ROOT/.ariabc_synced_source_fingerprint"
+
+if [[ "$PRINT_SOURCE_FINGERPRINT" == "1" ]]; then
+  printf '%s\n' "$COMPUTED_SOURCE_FINGERPRINT"
+  exit 0
+fi
+
+if [[ -n "$EXPECTED_SOURCE_FINGERPRINT" ]]; then
+  SOURCE_FINGERPRINT="$EXPECTED_SOURCE_FINGERPRINT"
+  if [[ "$COMPUTED_SOURCE_FINGERPRINT" != "$EXPECTED_SOURCE_FINGERPRINT" ]]; then
+    echo "ERROR: live source fingerprint mismatch" >&2
+    echo "       expected: $EXPECTED_SOURCE_FINGERPRINT" >&2
+    echo "       actual:   $COMPUTED_SOURCE_FINGERPRINT" >&2
+    exit 1
+  fi
+  if [[ -f "$SYNCED_SOURCE_FINGERPRINT_FILE" ]]; then
+    SYNCED_SOURCE_FINGERPRINT="$(tr -d '[:space:]' < "$SYNCED_SOURCE_FINGERPRINT_FILE")"
+    if [[ "$SYNCED_SOURCE_FINGERPRINT" != "$EXPECTED_SOURCE_FINGERPRINT" ]]; then
+      echo "ERROR: synchronized source marker mismatch" >&2
+      echo "       expected: $EXPECTED_SOURCE_FINGERPRINT" >&2
+      echo "       actual:   $SYNCED_SOURCE_FINGERPRINT" >&2
+      exit 1
+    fi
+  fi
+fi
+
+install_fingerprint_matches() {
+  local installed=""
+  [[ -f "$SOURCE_FINGERPRINT_FILE" ]] || return 1
+  installed="$(tr -d '[:space:]' < "$SOURCE_FINGERPRINT_FILE")"
+  [[ "$installed" == "$SOURCE_FINGERPRINT" ]]
+}
+
+record_source_fingerprint() {
+  printf '%s\n' "$SOURCE_FINGERPRINT" > "$SOURCE_FINGERPRINT_FILE"
+}
 
 verify_build_profile() {
   local dir="$1"
@@ -124,19 +208,39 @@ install_is_stale() {
 
 if [[ "$FORCE_REBUILD" != "1" ]]; then
   if verify_install "$INSTALL_DIR"; then
-    if [[ "$TRUST_INSTALL" == "1" ]] || ! install_is_stale "$INSTALL_DIR"; then
+    if [[ -n "$EXPECTED_SOURCE_FINGERPRINT" ]] && install_fingerprint_matches; then
       echo "INSTALL_READY=1"
       echo "INSTALL_DIR=$INSTALL_DIR"
       echo "BUILD_PROFILE=$BUILD_PROFILE"
-      [[ "$TRUST_INSTALL" == "1" ]] && echo "TRUST_INSTALL=1"
+      echo "SOURCE_FINGERPRINT=$SOURCE_FINGERPRINT"
+      echo "SOURCE_FINGERPRINT_VERIFIED=1"
       exit 0
+    elif [[ -z "$EXPECTED_SOURCE_FINGERPRINT" ]]; then
+      if install_fingerprint_matches; then
+        echo "INSTALL_READY=1"
+        echo "INSTALL_DIR=$INSTALL_DIR"
+        echo "BUILD_PROFILE=$BUILD_PROFILE"
+        echo "SOURCE_FINGERPRINT=$SOURCE_FINGERPRINT"
+        echo "SOURCE_FINGERPRINT_VERIFIED=1"
+        [[ "$TRUST_INSTALL" == "1" ]] && echo "TRUST_INSTALL=1"
+        exit 0
+      elif [[ ! -f "$SOURCE_FINGERPRINT_FILE" ]] &&
+           { [[ "$TRUST_INSTALL" == "1" ]] || ! install_is_stale "$INSTALL_DIR"; }; then
+        record_source_fingerprint
+        echo "INSTALL_READY=1"
+        echo "INSTALL_DIR=$INSTALL_DIR"
+        echo "BUILD_PROFILE=$BUILD_PROFILE"
+        echo "SOURCE_FINGERPRINT=$SOURCE_FINGERPRINT"
+        [[ "$TRUST_INSTALL" == "1" ]] && echo "TRUST_INSTALL=1"
+        exit 0
+      fi
     fi
   fi
   # If we reach here, either the install didn't verify, or it's stale
   FORCE_REBUILD=1
 fi
 
-if [[ "$TRUST_INSTALL" == "1" ]]; then
+if [[ "$TRUST_INSTALL" == "1" && -z "$EXPECTED_SOURCE_FINGERPRINT" ]]; then
   echo "ERROR: --trust-install passed but install at $INSTALL_DIR did not verify" >&2
   echo "       (binaries missing, not executable, or fail --version on this host)" >&2
   exit 1
@@ -443,7 +547,11 @@ if ! verify_install "$INSTALL_DIR"; then
   exit 1
 fi
 
+record_source_fingerprint
+
 echo "INSTALL_READY=1"
 echo "INSTALL_DIR=$INSTALL_DIR"
 echo "BUILD_PROFILE=$BUILD_PROFILE"
+echo "SOURCE_FINGERPRINT=$SOURCE_FINGERPRINT"
+echo "SOURCE_FINGERPRINT_VERIFIED=1"
 echo "BUILD_LOG=$build_log"

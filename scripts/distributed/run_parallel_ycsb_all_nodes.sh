@@ -11,7 +11,7 @@ set -euo pipefail
 # Active nodes:
 #   neel@10.129.148.248    utkarsh-MS-7C96
 #   neel@10.129.148.246      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
-#   neel@10.129.148.236    neel-MS-7C96
+#   neel@10.129.148.247    neel-MS-7C96
 #
 # Default benchmark profiles (one run × modes in this order):
 #   1. pg mode             – plain PostgreSQL baseline (no BCDB)
@@ -58,7 +58,7 @@ source "$SCRIPT_DIR/benchmark_defaults.sh"
 NEEL_NODES=(
   "neel@10.129.148.248"
   "neel@10.129.148.246"
-  "neel@10.129.148.236"
+  "neel@10.129.148.247"
 )
 NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"
 NEEL_REMOTE_INSTALL="/home/neel/Desktop/ariabc_install"
@@ -297,10 +297,24 @@ for node in "${!NODE_PASSWORDS[@]}"; do
   fi
 done
 
+LOCAL_SOURCE_FINGERPRINT="$(
+  bash "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh" \
+    --repo-root "$REPO_ROOT" --install-dir /work/ARIABC/install \
+    --build-profile release --print-source-fingerprint
+)"
+[[ "$LOCAL_SOURCE_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "ERROR: failed to compute local PostgreSQL/BCDB source fingerprint" >&2
+  exit 1
+}
+
 ts="$(date +%Y%m%d_%H%M%S)"
 LOCAL_RESULT_ROOT="$REPO_ROOT/scripts/bench_full_results/parallel_ycsb_${ts}"
 LOG_DIR="$LOCAL_RESULT_ROOT/_run_logs"
 mkdir -p "$LOG_DIR"
+{
+  printf 'source_fingerprint=%s\n' "$LOCAL_SOURCE_FINGERPRINT"
+  printf 'source_fingerprint_contract=source_and_install_stamp_match\n'
+} > "$LOCAL_RESULT_ROOT/source_provenance.env"
 
 lmsg "=== Parallel YCSB benchmark – all nodes ==="
 lmsg "Timestamp    : $ts"
@@ -316,6 +330,7 @@ lmsg "SigningModes : ${SIGNING_MODES:-<default>}"
 lmsg "SigningKey   : ${SIGNING_PRIVKEY_LOCAL:-<not set>}"
 lmsg "EnforceSig   : ${ENFORCE_SIGNATURES:-<default>}"
 lmsg "Max retries  : $BENCH_MAX_RETRIES"
+lmsg "Source FP    : $LOCAL_SOURCE_FINGERPRINT"
 lmsg "Result root  : $LOCAL_RESULT_ROOT"
 echo
 
@@ -355,6 +370,18 @@ if [[ "${#_unreachable[@]}" -gt 0 ]]; then
 fi
 lmsg "Preflight: all nodes reachable."
 echo
+
+if [[ "$SKIP_SYNC" == "0" ]]; then
+  lmsg "=== Preflight: Verifying canonical local install provenance ==="
+  if ! bash "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh" \
+      --repo-root "$REPO_ROOT" --install-dir /work/ARIABC/install \
+      --clean-when-rebuild --build-profile release \
+      --require-source-fingerprint "$LOCAL_SOURCE_FINGERPRINT"; then
+    _abort_run "Canonical local PostgreSQL install is stale or failed to rebuild"
+  fi
+  lmsg "  [OK] local install matches source fingerprint $LOCAL_SOURCE_FINGERPRINT"
+  echo
+fi
 
 # ============================================================
 # PHASE 0: KILL STALE BENCHMARK PROCESSES ON ALL NODES
@@ -498,10 +525,17 @@ else
         -e "$(_rsync_e_for_node "$node")" \
         "$REPO_ROOT/" "$node:$repo/" >> "$slog" 2>&1
 
+      # rsync success freezes the exact orchestrator source identity for this
+      # node. The host-native install must carry the same fingerprint before
+      # any benchmark process is allowed to launch.
+      ssh_run "$node" \
+        "printf '%s\\n' '$LOCAL_SOURCE_FINGERPRINT' > '$repo/.ariabc_synced_source_fingerprint'" \
+        >> "$slog" 2>&1
+
       # Ubuntu 24.04 nodes can use the orchestrator's install directly.  The
-      # Ubuntu 22.04 host is ABI-incompatible, so preserve its already verified
-      # on-host release build instead of overwriting it and rebuilding on every
-      # campaign.
+      # Ubuntu 22.04 host is ABI-incompatible, so preserve its host-native
+      # install here. Phase 1.5 compares its build stamp with the synchronized
+      # source fingerprint and rebuilds on-host whenever they differ.
       if [[ "$node" == "neel@10.129.148.246" ]]; then
         echo "[INFO] preserving host-native release install on $node" >> "$slog"
       else
@@ -576,7 +610,8 @@ for entry in "${ALL_NODES[@]}"; do
       echo '[INFO] source/install were just synced; trusting synced install if it verifies'
       if bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
         --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-        --build-profile release --trust-install; then
+        --build-profile release --trust-install \
+        --require-source-fingerprint '$LOCAL_SOURCE_FINGERPRINT'; then
         exit 0
       fi
       echo '[INFO] synced install did not verify on this host; attempting local rebuild'
@@ -586,16 +621,19 @@ for entry in "${ALL_NODES[@]}"; do
       fi
       bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
         --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-        --build-profile release
+        --build-profile release \
+        --require-source-fingerprint '$LOCAL_SOURCE_FINGERPRINT'
     elif ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
       echo '[INFO] make/gcc missing; trusting existing install if it verifies'
       bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
         --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-        --build-profile release --trust-install
+        --build-profile release --trust-install \
+        --require-source-fingerprint '$LOCAL_SOURCE_FINGERPRINT'
     else
       bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
         --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-        --build-profile release
+        --build-profile release \
+        --require-source-fingerprint '$LOCAL_SOURCE_FINGERPRINT'
     fi
   " >"$ilog" 2>&1; then
     INSTALL_STATUS["$node"]="OK"
@@ -702,24 +740,28 @@ ensure_install_args=()
 if [[ '$SKIP_SYNC' == '0' ]]; then
   if ! bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
     --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-    --build-profile release --trust-install; then
+    --build-profile release --trust-install \
+    --require-source-fingerprint '$LOCAL_SOURCE_FINGERPRINT'; then
     if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
       echo 'ERROR: synced install did not verify and make/gcc are unavailable for rebuild' >&2
       exit 1
     fi
     bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
       --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-      --build-profile release
+      --build-profile release \
+      --require-source-fingerprint '$LOCAL_SOURCE_FINGERPRINT'
   fi
 elif ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
   ensure_install_args+=(--trust-install)
   bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
     --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-    --build-profile release \"\${ensure_install_args[@]}\"
+    --build-profile release --require-source-fingerprint '$LOCAL_SOURCE_FINGERPRINT' \
+    \"\${ensure_install_args[@]}\"
 else
   bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
     --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-    --build-profile release
+    --build-profile release \
+    --require-source-fingerprint '$LOCAL_SOURCE_FINGERPRINT'
 fi
 export ARIABC_REQUIRE_CUSTOM_PG=1
 export ARIABC_PSQL='$inst/bin/psql'

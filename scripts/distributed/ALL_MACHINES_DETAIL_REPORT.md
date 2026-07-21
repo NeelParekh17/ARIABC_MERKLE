@@ -14,7 +14,7 @@ history, but they are **not** the current benchmark procedure in this checkout.
 | Node | IP | OS | Role |
 |---|---|---|---|
 | ASUS Laptop | local | Ubuntu 24.04.4 LTS | Controller, local build source, optional single-node participant |
-| neel-MS-7C96 | 10.129.148.236 | Ubuntu 24.04.3 LTS | Raft node 1, Kafka host |
+| neel-MS-7C96 | 10.129.148.247 | Ubuntu 24.04.3 LTS | Raft node 1, Kafka host |
 | kartik-MS-7C96 | 10.129.148.246 | Ubuntu 22.04.2 LTS | Raft node 2, on-host rebuild |
 | utkarsh-MS-7C96 | 10.129.148.248 | Ubuntu 24.04.3 LTS | Raft node 4 |
 
@@ -37,7 +37,7 @@ The current trusted 3-node full-system path is:
 - `waitMajority=1`
 - 3 Raft nodes
 - 3 PostgreSQL/BCDB replicas
-- Kafka result topic on `10.129.148.236:9092`
+- Kafka result topic on `10.129.148.247:9092`
 - deterministic YCSB workload:
   `scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt`
 - post-run row-count and Merkle-root verification on all four replicas
@@ -113,11 +113,11 @@ env POLL_COUNT=120000 ./scripts/distributed/run_4node_raft_cluster.sh \
 
 | Raft ID | Host | Client Port | Raft Port | Build source |
 |---:|---|---:|---:|---|
-| 1 | `10.129.148.236` | 8000 | 9000 | synced local U24 build |
+| 1 | `10.129.148.247` | 8000 | 9000 | synced local U24 build |
 | 2 | `10.129.148.246` | 8000 | 9000 | U22 on-host build |
 | 4 | `10.129.148.248` | 8001 | 9000 | synced local U24 build |
 
-Kafka runs on node 1 at `10.129.148.236:9092`, topic `ariabc_results`.
+Kafka runs on node 1 at `10.129.148.247:9092`, topic `ariabc_results`.
 
 ### Main Runtime Knobs
 

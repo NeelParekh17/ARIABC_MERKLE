@@ -22,11 +22,11 @@ Each profile runs 102 test cases (17 thread counts × 2 workloads × 3 repetitio
 ### Current (working) topology — 3 distinct machines
 
 ```
-Node 1:  10.129.148.236          (user: neel)       — Ubuntu 24.04, BCDB postgres port 5438
+Node 1:  10.129.148.247          (user: neel)       — Ubuntu 24.04, BCDB postgres port 5438
 Node 2:  10.129.148.248          (user: neel)       — Ubuntu 24.04, BCDB postgres port 5439
 Node 3:  10.129.148.246  (user: neel)  — Ubuntu 24.04, BCDB postgres port 5440
 
-Gateway: 10.129.148.236          (user: neel)       — also runs Kafka (port 9092) + ariabc_pg_gateway
+Gateway: 10.129.148.247          (user: neel)       — also runs Kafka (port 9092) + ariabc_pg_gateway
 ```
 
 All 3 Raft nodes are on **physically distinct machines**, and the gateway (240) also hosts Kafka. This gives clean performance isolation — no CPU contention between gateway+Kafka and PG node processes.
@@ -42,9 +42,9 @@ All 3 Raft nodes are on **physically distinct machines**, and the gateway (240) 
 ### Network constraints
 
 - All inter-node Raft and Postgres traffic goes over the campus network.
-- Kafka must advertise `10.129.148.236:9092` (not `localhost`) so 27.54 and 248 can consume from it.
+- Kafka must advertise `10.129.148.247:9092` (not `localhost`) so 27.54 and 248 can consume from it.
 - SSH key authentication must work from the control machine to all three nodes:
-  - `neel@10.129.148.236`
+  - `neel@10.129.148.247`
   - `neel@10.129.148.248`
   - `neel@10.129.148.246`
 
@@ -72,7 +72,7 @@ From the control machine, passwordless SSH must work to all nodes:
 
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
-ssh -i $SSH_KEY neel@10.129.148.236 'echo ok'
+ssh -i $SSH_KEY neel@10.129.148.247 'echo ok'
 ssh -i $SSH_KEY neel@10.129.148.248 'echo ok'
 ssh -i $SSH_KEY neel@10.129.148.246 'echo ok'
 ```
@@ -104,7 +104,7 @@ Or to manually sync after rebuilding:
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
 
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
+for NODE in "neel@10.129.148.247" "neel@10.129.148.248" "neel@10.129.148.246"; do
   # Sync install dir (bin + lib + share + include — all required for initdb)
   rsync -az -e "ssh -i $SSH_KEY" /work/ARIABC/install/ "${NODE}:~/Desktop/ariabc_install/"
 
@@ -129,7 +129,7 @@ Verify on each node:
 
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
+for NODE in "neel@10.129.148.247" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE \
     'LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib /home/neel/Desktop/ariabc_install/bin/postgres --version'
 done
@@ -154,7 +154,7 @@ Python 3.8+ and `psycopg2` must be available on every node.
 
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
+for NODE in "neel@10.129.148.247" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE 'python3 -c "import psycopg2; print(psycopg2.__version__)"'
 done
 ```
@@ -185,10 +185,10 @@ Required for profiles 3 and 4. `bootstrap_nodes()` downloads it automatically if
 
 ```bash
 # Check if present
-ssh neel@10.129.148.236 'ls /home/neel/Desktop/kafka_2.13-3.7.0/bin/kafka-server-start.sh && echo ok'
+ssh neel@10.129.148.247 'ls /home/neel/Desktop/kafka_2.13-3.7.0/bin/kafka-server-start.sh && echo ok'
 
 # Manual download if needed
-ssh neel@10.129.148.236 '
+ssh neel@10.129.148.247 '
   cd ~/Desktop
   wget -q https://archive.apache.org/dist/kafka/3.7.0/kafka_2.13-3.7.0.tgz \
     || curl -sSL https://archive.apache.org/dist/kafka/3.7.0/kafka_2.13-3.7.0.tgz -o kafka_2.13-3.7.0.tgz
@@ -197,7 +197,7 @@ ssh neel@10.129.148.236 '
 '
 ```
 
-Kafka requires Java. On 236, Java is at the system PATH (`/usr/bin/java`). The `ensure_kafka_ready()` function in the orchestrator script also patches `server.properties` to set `advertised.listeners=PLAINTEXT://10.129.148.236:9092` (required so 248 and 27.54 can connect).
+Kafka requires Java. On 236, Java is at the system PATH (`/usr/bin/java`). The `ensure_kafka_ready()` function in the orchestrator script also patches `server.properties` to set `advertised.listeners=PLAINTEXT://10.129.148.247:9092` (required so 248 and 27.54 can connect).
 
 ### 6. SSH user map
 
@@ -269,11 +269,11 @@ export PROFILE_DET_WINDOW=16
 export PROFILE_SKIP_SMOKE=1
 
 ./scripts/distributed/preflight_then_run_full.sh \
-  --pg-hosts "10.129.148.236,10.129.148.248,10.129.148.246" \
+  --pg-hosts "10.129.148.247,10.129.148.248,10.129.148.246" \
   --pg-users "neel,neel,neel" \
-  --raft-hosts "10.129.148.236,10.129.148.248,10.129.148.246" \
+  --raft-hosts "10.129.148.247,10.129.148.248,10.129.148.246" \
   --raft-users "neel,neel,neel" \
-  --gateway-host "10.129.148.236" \
+  --gateway-host "10.129.148.247" \
   --gateway-user "neel" \
   --ssh-user "neel" \
   --ssh-key "/home/neel/.ssh/id_rsa" \
@@ -378,15 +378,15 @@ Top-level orchestrator for the 3-distinct-machine topology. Runs all 4 profiles 
 
 **Topology section:**
 ```bash
-PG_HOSTS="10.129.148.236,10.129.148.248,10.129.148.246"
+PG_HOSTS="10.129.148.247,10.129.148.248,10.129.148.246"
 PG_USERS="neel,neel,neel"
-GW_HOST="10.129.148.236"
+GW_HOST="10.129.148.247"
 GW_USER="neel"
 SSH_KEY="/home/neel/.ssh/id_rsa"
 REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"
 REMOTE_INSTALL_DIR="/home/neel/Desktop/ariabc_install"
 KAFKA_HOME="/home/neel/Desktop/kafka_2.13-3.7.0"
-KAFKA_BOOTSTRAP="10.129.148.236:9092"
+KAFKA_BOOTSTRAP="10.129.148.247:9092"
 export ARIABC_SSH_USER_MAP="10.129.148.246=neel"
 ```
 
@@ -401,7 +401,7 @@ Loops over all 3 PG nodes and syncs:
 
 **`ensure_kafka_ready()` function:**
 SSHes to the gateway and:
-1. Patches `server.properties` to set `advertised.listeners=PLAINTEXT://10.129.148.236:9092`
+1. Patches `server.properties` to set `advertised.listeners=PLAINTEXT://10.129.148.247:9092`
 2. Checks if Kafka is already running via `kafka-topics.sh --list`
 3. If not: generates cluster UUID, formats KRaft storage, starts in daemon mode
 4. Polls up to 60 seconds for the broker to become ready
@@ -447,7 +447,7 @@ Step 4/4: run_distributed_benchmark.sh    — full benchmark across all thread c
 | `PROFILE_DB_CONN_POOL_SIZE` | `4` | Gateway connection pool size |
 | `PROFILE_DET_WINDOW` | `16` | Deterministic execution window (concurrent txns) |
 | `PROFILE_KAFKA_HOME` | varies by profile | Path to Kafka on gateway |
-| `PROFILE_KAFKA_BOOTSTRAP` | `10.129.148.236:9092` | Kafka bootstrap address |
+| `PROFILE_KAFKA_BOOTSTRAP` | `10.129.148.247:9092` | Kafka bootstrap address |
 | `PROFILE_NO_KAFKA` | `1` or `0` | Skip Kafka (1=no Kafka, 0=use Kafka) |
 | `PROFILE_WAIT_MAJORITY` | `0` or `1` | Gateway waits for Kafka majority |
 | `PROFILE_SERVER_BYPASS_RAFT` | `0` or `1` | Server skips NuRaft |
@@ -542,18 +542,18 @@ The innermost benchmark runner. SSHes to the gateway and runs `bench_nuraft_kafk
 2. SSHes to gateway and runs the python script with all parameters:
 
 ```bash
-ssh neel@10.129.148.236 "
+ssh neel@10.129.148.247 "
   cd ~/Desktop/ariabc_cluster
   export ARIABC_SSH_USER_MAP='10.129.148.246=neel'
   python3 scripts/bench_nuraft_kafka_matrix.py \
     --distributed \
     --nodes 3 \
-    --pg-hosts 10.129.148.236:5438,10.129.148.248:5439,10.129.148.246:5440 \
-    --raft-hosts 10.129.148.236:5430,10.129.148.248:5431,10.129.148.246:5432 \
-    --gateway-host 10.129.148.236 \
+    --pg-hosts 10.129.148.247:5438,10.129.148.248:5439,10.129.148.246:5440 \
+    --raft-hosts 10.129.148.247:5430,10.129.148.248:5431,10.129.148.246:5432 \
+    --gateway-host 10.129.148.247 \
     --remote-repo-root /home/neel/Desktop/ariabc_cluster \
     --installDir /home/neel/Desktop/ariabc_install \
-    --kafkaBootstrap 10.129.148.236:9092 \
+    --kafkaBootstrap 10.129.148.247:9092 \
     --kafkaHome /home/neel/Desktop/kafka_2.13-3.7.0 \
     --no-kafka 0 \
     --waitMajority 1 \
@@ -704,7 +704,7 @@ rsync -az -e "ssh -i $SSH_KEY" \
 **Fix:**
 ```bash
 rsync -az -e "ssh -i ~/.ssh/id_rsa" /work/ARIABC/install/ \
-  neel@10.129.148.236:~/Desktop/ariabc_install/
+  neel@10.129.148.247:~/Desktop/ariabc_install/
 ```
 
 Always sync the full `/work/ARIABC/install/` directory.
@@ -746,9 +746,9 @@ ssh -i ~/.ssh/id_rsa neel@10.129.148.246 '
 **Cause:** `java` not in PATH for non-login SSH session.
 
 ```bash
-ssh neel@10.129.148.236 'java -version'
+ssh neel@10.129.148.247 'java -version'
 # If not found, check:
-ssh neel@10.129.148.236 'which java || ls /usr/bin/java'
+ssh neel@10.129.148.247 'which java || ls /usr/bin/java'
 ```
 
 ### `_wait_nuraft_accepting` hangs / NuRaft never elects leader
@@ -783,7 +783,7 @@ cp /home/neel/Desktop/rdkafka_extract/usr/lib/x86_64-linux-gnu/librdkafka.so.1 /
 
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
-ssh -i $SSH_KEY neel@10.129.148.236 'pkill -f postgres || true; sleep 2'
+ssh -i $SSH_KEY neel@10.129.148.247 'pkill -f postgres || true; sleep 2'
 ssh -i $SSH_KEY neel@10.129.148.248 'pkill -f postgres || true; sleep 2'
 ssh -i $SSH_KEY neel@10.129.148.246 'pkill -f postgres || true; sleep 2'
 ```
@@ -806,7 +806,7 @@ Check the individual run log in `scripts/bench_full_results/overhead_4node_<ts>/
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
 
-ssh -i $SSH_KEY neel@10.129.148.236 \
+ssh -i $SSH_KEY neel@10.129.148.247 \
   'pgrep -a -f "ariabc_pg_server|ariabc_pg_gateway|bench_nuraft" || echo none'
 ssh -i $SSH_KEY neel@10.129.148.248 \
   'pgrep -a -f "ariabc_pg_server|ariabc_pg_gateway|bench_nuraft" || echo none'
@@ -822,7 +822,7 @@ pgrep -a -f "preflight_then_run|run_distributed|bench_nuraft|run_overhead_distri
 ```bash
 SSH_KEY=/home/neel/.ssh/id_rsa
 
-ssh -i $SSH_KEY neel@10.129.148.236 \
+ssh -i $SSH_KEY neel@10.129.148.247 \
   'pkill -f "ariabc_pg_server|ariabc_pg_gateway|bench_nuraft" || true; pkill -f postgres || true'
 ssh -i $SSH_KEY neel@10.129.148.248 \
   'pkill -f "ariabc_pg_server|ariabc_pg_gateway|bench_nuraft" || true; pkill -f postgres || true'
@@ -847,11 +847,11 @@ cd /work/ARIABC/AriaBC && ./scripts/distributed/run_overhead_distributed_4node.s
 ```bash
 cd /work/ARIABC/AriaBC
 ./scripts/distributed/preflight_cluster_checks.sh \
-  --pg-hosts "10.129.148.236,10.129.148.248,10.129.148.246" \
+  --pg-hosts "10.129.148.247,10.129.148.248,10.129.148.246" \
   --pg-users "neel,neel,neel" \
-  --raft-hosts "10.129.148.236,10.129.148.248,10.129.148.246" \
+  --raft-hosts "10.129.148.247,10.129.148.248,10.129.148.246" \
   --raft-users "neel,neel,neel" \
-  --gateway-host "10.129.148.236" --gateway-user "neel" \
+  --gateway-host "10.129.148.247" --gateway-user "neel" \
   --ssh-key "/home/neel/.ssh/id_rsa" \
   --remote-repo-root "/home/neel/Desktop/ariabc_cluster" \
   --remote-install-dir "/home/neel/Desktop/ariabc_install"
@@ -864,34 +864,34 @@ cd /work/ARIABC/AriaBC
 SSH_KEY=/home/neel/.ssh/id_rsa
 
 # SSH reachability
-ssh -i $SSH_KEY neel@10.129.148.236 'echo ok'
+ssh -i $SSH_KEY neel@10.129.148.247 'echo ok'
 ssh -i $SSH_KEY neel@10.129.148.248 'echo ok'
 ssh -i $SSH_KEY neel@10.129.148.246 'echo ok'
 
 # Postgres version (needs LD_LIBRARY_PATH)
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
+for NODE in "neel@10.129.148.247" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE \
     'LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib /home/neel/Desktop/ariabc_install/bin/postgres --version'
 done
 
 # Both binaries present on each node
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
+for NODE in "neel@10.129.148.247" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE \
     'ls /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/{ariabc_pg_server,ariabc_pg_gateway} && echo binaries: OK'
 done
 
 # --bypassRaft supported
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
+for NODE in "neel@10.129.148.247" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE \
     'LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server --help 2>&1 | grep bypassRaft'
 done
 
 # psycopg2 present
-for NODE in "neel@10.129.148.236" "neel@10.129.148.248" "neel@10.129.148.246"; do
+for NODE in "neel@10.129.148.247" "neel@10.129.148.248" "neel@10.129.148.246"; do
   ssh -i $SSH_KEY $NODE 'python3 -c "import psycopg2; print(psycopg2.__version__)"'
 done
 
 # Kafka on gateway
-ssh -i $SSH_KEY neel@10.129.148.236 \
-  '/home/neel/Desktop/kafka_2.13-3.7.0/bin/kafka-topics.sh --bootstrap-server 10.129.148.236:9092 --list'
+ssh -i $SSH_KEY neel@10.129.148.247 \
+  '/home/neel/Desktop/kafka_2.13-3.7.0/bin/kafka-topics.sh --bootstrap-server 10.129.148.247:9092 --list'
 ```

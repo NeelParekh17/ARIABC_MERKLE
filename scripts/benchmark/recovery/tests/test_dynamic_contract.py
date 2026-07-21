@@ -16,6 +16,7 @@ from merkle_recovery.config import (
     DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT,
     DYNAMIC_NATIVE_LAYOUT_VERSION,
     DYNAMIC_PROFILE,
+    DYNAMIC_SIZE_SERIES,
     profile_config,
 )
 from merkle_recovery.dynamic import LogicalRange, RangeItem, RangeSummary, RepairKeys
@@ -40,7 +41,7 @@ def _args(**overrides):
 
 def test_dynamic_profile_is_the_exact_acceptance_matrix():
     config = profile_config(DYNAMIC_PROFILE)
-    assert config.fig12_sizes == [1_000_000, 3_000_000, 5_000_000]
+    assert config.fig12_sizes == DYNAMIC_SIZE_SERIES
     assert config.repetitions == 5
     assert config.benchmark_schema_version == 6
     assert config.extra["dynamic_partitions"] == 200
@@ -54,7 +55,7 @@ def test_dynamic_profile_is_the_exact_acceptance_matrix():
     assert DYNAMIC_CANDIDATE_SUMMARY_ITEM_LIMIT == 4_800
 
     specs = benchmark._series_for_profile(_args(), config)
-    assert [row["tuple_count"] for row in specs] == [1_000_000, 3_000_000, 5_000_000]
+    assert [row["tuple_count"] for row in specs] == DYNAMIC_SIZE_SERIES
     for row in specs:
         assert row == {
             "experiment": DYNAMIC_PROFILE,

@@ -15,9 +15,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-TARGET_NODE="${TARGET_NODE:-neel@10.129.148.236}"
+TARGET_NODE="${TARGET_NODE:-neel@10.129.148.247}"
 TARGET_MACHINE_LABEL="${TARGET_MACHINE_LABEL:-}"
-TARGETS_DEFAULT="neel@10.129.148.236,neel@10.129.148.246,neel@10.129.148.248"
+TARGETS_DEFAULT="neel@10.129.148.247,neel@10.129.148.246,neel@10.129.148.248"
 TARGETS="${TARGETS:-}"
 REMOTE_REPO="${REMOTE_REPO:-/home/neel/Desktop/ariabc_cluster}"
 REMOTE_INSTALL="${REMOTE_INSTALL:-/home/neel/Desktop/ariabc_install}"

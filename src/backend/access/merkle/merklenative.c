@@ -1328,9 +1328,57 @@ native_assign_child_range(MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FA
 		elog(ERROR, "invalid native Merkle logical child range");
 	for (slot = first_slot; slot <= last_slot; slot++)
 	{
+		/*
+		 * A compressed child may own several adjacent logical slots, but a
+		 * newly built segment must never bridge across a different child.
+		 * Such an overwrite silently disconnects the existing subtree from
+		 * the new COW root.
+		 */
+		if (native_locator_valid(&children[slot]) &&
+			!native_locator_equal(&children[slot], locator))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("native Merkle child range overlaps an occupied logical slot"),
+					 errdetail("logical slot %d is already owned by another child", slot)));
 		children[slot] = *locator;
 		summaries[slot] = *summary;
 	}
+}
+
+static void
+native_prefix_child_range(const uint8 route[MERKLE_HASH_BYTES], int prefix_len,
+						  int logical_prefix, int *first_slot, int *last_slot)
+{
+	int known_bits = Min(5, prefix_len - logical_prefix);
+	int slot;
+
+	Assert(known_bits > 0);
+	slot = native_route_slot(route, logical_prefix);
+	if (known_bits == 5)
+	{
+		*first_slot = slot;
+		*last_slot = slot;
+	}
+	else
+	{
+		int suffix_bits = 5 - known_bits;
+		int mask = ((1 << known_bits) - 1) << suffix_bits;
+
+		*first_slot = slot & mask;
+		*last_slot = *first_slot + (1 << suffix_bits) - 1;
+	}
+}
+
+static bool
+native_child_range_available(const MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FANOUT],
+							 int first_slot, int last_slot)
+{
+	int slot;
+
+	for (slot = first_slot; slot <= last_slot; slot++)
+		if (native_locator_valid(&children[slot]))
+			return false;
+	return true;
 }
 
 static void
@@ -1356,17 +1404,37 @@ native_build_item_segment(Relation indexRel, const NativeConfig *config,
 	{
 		int leaf_prefix = native_common_prefix(items[0].route,
 			items[count - 1].route, bit);
-		MerkleNativeNodeRecord leaf;
-		MerkleNativeLocator locator;
 
-		native_canonical_prefix(items[0].route, leaf_prefix, prefix);
-		locator = native_write_leaf(indexRel, partition, leaf_prefix, prefix,
-			items, count, &leaf);
-		native_assign_child_range(children, summaries, first_slot, last_slot,
-			&locator, &leaf);
-		return;
+		/*
+		 * A child below this logical directory must consume at least one
+		 * additional routing bit.  A small batch can fit in one leaf while
+		 * spanning both halves of the directory, yielding leaf_prefix equal
+		 * to logical_prefix; attaching that leaf to selected child slots makes
+		 * the directory mapping invalid.  Refine by routing bit in that case.
+		 */
+		if (leaf_prefix > logical_prefix)
+		{
+			MerkleNativeNodeRecord leaf;
+			MerkleNativeLocator locator;
+			int leaf_first_slot;
+			int leaf_last_slot;
+
+			native_prefix_child_range(items[0].route, leaf_prefix,
+				logical_prefix, &leaf_first_slot, &leaf_last_slot);
+			if (!native_child_range_available(children, leaf_first_slot,
+					leaf_last_slot))
+				goto refine_segment;
+
+			native_canonical_prefix(items[0].route, leaf_prefix, prefix);
+			locator = native_write_leaf(indexRel, partition, leaf_prefix, prefix,
+				items, count, &leaf);
+			native_assign_child_range(children, summaries, leaf_first_slot,
+				leaf_last_slot, &locator, &leaf);
+			return;
+		}
 	}
 
+refine_segment:
 	if (bit >= logical_prefix + 5)
 	{
 		MerkleNativeNodeRecord nested;
@@ -2214,6 +2282,8 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 			MerkleNativeLocator old_child;
 			bool had_child;
 			int batch_count = 0;
+			int empty_run_first = -1;
+			int empty_run_last = -1;
 			int slot;
 			int j;
 
@@ -2223,6 +2293,24 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 				old->prefix_len);
 			old_child = children[slot];
 			had_child = native_locator_valid(&old_child);
+			if (!had_child)
+			{
+				/*
+				 * Empty logical slots may be compressed into one physical leaf,
+				 * but only while they form one contiguous run.  Grouping every
+				 * empty slot in the directory can span an occupied slot; the
+				 * segment builder would then replace that occupied child when it
+				 * assigns the first-to-last slot range.
+				 */
+				empty_run_first = slot;
+				while (empty_run_first > 0 &&
+					   !native_locator_valid(&children[empty_run_first - 1]))
+					empty_run_first--;
+				empty_run_last = slot;
+				while (empty_run_last + 1 < MERKLE_DYNAMIC_LOGICAL_FANOUT &&
+					   !native_locator_valid(&children[empty_run_last + 1]))
+					empty_run_last++;
+			}
 			for (j = i; j < count; j++)
 			{
 				int transition_slot;
@@ -2237,7 +2325,9 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 						native_locator_equal(&children[transition_slot],
 							&old_child);
 				else
-					same_group = !native_locator_valid(&children[transition_slot]);
+					same_group = transition_slot >= empty_run_first &&
+						transition_slot <= empty_run_last &&
+						!native_locator_valid(&children[transition_slot]);
 				if (same_group)
 				{
 					batch[batch_count++] = transitions[j];
@@ -2915,6 +3005,7 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 {
 	MerkleNativeNodeRecord *node;
 	uint8 canonical[MERKLE_HASH_BYTES];
+	uint32 failure_mask = 0;
 	bool match;
 
 	if (depth > MERKLE_HASH_BITS + 1)
@@ -2923,14 +3014,22 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 				 errmsg("native Merkle verification exceeded maximum tree depth")));
 	node = native_read_node(indexRel, locator);
 	match = node->partition_id == (uint32) partition;
+	if (!match)
+		failure_mask |= 1U;
 	if (node->prefix_len > MERKLE_HASH_BITS)
+	{
 		match = false;
+		failure_mask |= 2U;
+	}
 	else
 		native_canonical_prefix(node->prefix, node->prefix_len, canonical);
 	if (node->prefix_len > MERKLE_HASH_BITS ||
 		memcmp(canonical, node->prefix, MERKLE_HASH_BYTES) != 0 ||
 		(node->flags & ~MERKLE_NATIVE_NODE_LEAF) != 0)
+	{
 		match = false;
+		failure_mask |= 2U;
+	}
 
 	if ((node->flags & MERKLE_NATIVE_NODE_LEAF) != 0)
 	{
@@ -2952,7 +3051,10 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 			native_canonical_prefix(leaf.items[i].route, node->prefix_len,
 				prefix);
 			if (memcmp(prefix, node->prefix, MERKLE_HASH_BYTES) != 0)
+			{
 				match = false;
+				failure_mask |= 4U;
+			}
 			merkle_hash_xor(&xor, &leaf.items[i].hash);
 			native_hash_item_content(&leaf.items[i], &item_content);
 			merkle_hash_xor(&content, &item_content);
@@ -2974,7 +3076,10 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 			memcmp(node->content_xor.data, content.data, MERKLE_HASH_BYTES) != 0 ||
 			memcmp(node->structure_hash.data, structure.data,
 				MERKLE_HASH_BYTES) != 0)
+		{
 			match = false;
+			failure_mask |= 8U;
+		}
 		native_vector_free(&leaf);
 	}
 	else
@@ -2985,7 +3090,10 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 
 		if (node->prefix_len % 5 != 0 ||
 			node->prefix_len > MERKLE_HASH_BITS - 5)
+		{
 			match = false;
+			failure_mask |= 16U;
+		}
 		for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
 		{
 			int j;
@@ -3000,12 +3108,18 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 			{
 				if (!native_verify_node(indexRel, config, partition,
 					&node->children[i], native_sort, &children[i], depth + 1))
+				{
 					match = false;
+					failure_mask |= 32U;
+				}
 			}
 			else
 				children[i] = children[j];
 			if (!native_slot_matches_child(node, i, &children[i]))
+			{
 				match = false;
+				failure_mask |= 64U;
+			}
 		}
 		MemSet(&expected, 0, sizeof(expected));
 		native_make_internal_summary(partition, node->prefix_len, node->prefix,
@@ -3018,8 +3132,17 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 				MERKLE_HASH_BYTES) != 0 ||
 			memcmp(node->structure_hash.data, expected.structure_hash.data,
 				MERKLE_HASH_BYTES) != 0)
+		{
 			match = false;
+			failure_mask |= 128U;
+		}
 	}
+	if (!match)
+		ereport(LOG,
+				(errmsg("native Merkle verification node mismatch"),
+				 errdetail("partition=%d block=%u offset=%u depth=%d prefix_len=%u flags=%u failure_mask=%u",
+					partition, locator->block, locator->offset, depth,
+					node->prefix_len, node->flags, failure_mask)));
 	*summary = *node;
 	pfree(node);
 	return match;

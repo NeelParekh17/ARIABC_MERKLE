@@ -20,7 +20,7 @@ It covers both:
 1. `PG1 + Raft1`: `neel@10.129.148.248`
 2. `PG2 + Raft2`: `neel@10.129.148.246`
 3. `PG3 + Raft3`: `neel@10.129.148.246`
-4. `Gateway`: `neel@10.129.148.236`
+4. `Gateway`: `neel@10.129.148.247`
 5. `Control`: local machine at `/work/ARIABC/AriaBC`
 
 ### 2.2 Temporary fallback topology (if node3 has toolchain mismatch)
@@ -29,8 +29,8 @@ If `10.129.148.246` fails with errors like `GLIBC_2.38 not found` / `GLIBCXX_3.4
 
 1. `PG1 + Raft1`: `neel@10.129.148.248`
 2. `PG2 + Raft2`: `neel@10.129.148.246`
-3. `PG3 + Raft3`: `neel@10.129.148.236`
-4. `Gateway`: `neel@10.129.148.236` (co-located)
+3. `PG3 + Raft3`: `neel@10.129.148.247`
+4. `Gateway`: `neel@10.129.148.247` (co-located)
 
 Use fallback only until node3 binaries are rebuilt compatibly.
 
@@ -51,7 +51,7 @@ Run before every distributed session.
 ```bash
 cd /work/ARIABC/AriaBC
 
-for h in 10.129.148.248 10.129.148.246 10.129.148.246 10.129.148.236; do
+for h in 10.129.148.248 10.129.148.246 10.129.148.246 10.129.148.247; do
   u="neel"
   [[ "$h" == "10.129.148.246" ]] && u="neel"
   ssh -i ~/.ssh/id_rsa -o BatchMode=yes -o StrictHostKeyChecking=no "$u@$h" '
@@ -87,7 +87,7 @@ scripts/distributed/preflight_then_run_full.sh \
   --raft-client-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
   --pg-users neel,neel,neel \
   --raft-users neel,neel,neel \
-  --gateway-host 10.129.148.236 \
+  --gateway-host 10.129.148.247 \
   --gateway-user neel \
   --ssh-user neel \
   --ssh-key ~/.ssh/id_rsa \
@@ -126,7 +126,7 @@ scripts/distributed/preflight_then_run_full.sh \
   --raft-client-hosts 10.129.148.248,10.129.148.246,10.129.148.246 \
   --pg-users neel,neel,neel \
   --raft-users neel,neel,neel \
-  --gateway-host 10.129.148.236 \
+  --gateway-host 10.129.148.247 \
   --gateway-user neel \
   --ssh-user neel \
   --ssh-key ~/.ssh/id_rsa \

@@ -6,16 +6,16 @@ cd "$ROOT"
 source "$ROOT/scripts/distributed/benchmark_defaults.sh"
 
 # Reachable topology: 10.129.148.248 is down.
-# Node1=10.129.148.236 is LAN-local to gateway for fast nondet connections.
-# Node2=10.129.148.246, Node3=10.129.148.236 (co-located).
-# Gateway=10.129.148.236.
-PG_HOSTS="10.129.148.236,10.129.148.246,10.129.148.236"
+# Node1=10.129.148.247 is LAN-local to gateway for fast nondet connections.
+# Node2=10.129.148.246, Node3=10.129.148.247 (co-located).
+# Gateway=10.129.148.247.
+PG_HOSTS="10.129.148.247,10.129.148.246,10.129.148.247"
 RAFT_HOSTS="$PG_HOSTS"
 RAFT_MEMBER_HOSTS="$PG_HOSTS"
 RAFT_CLIENT_HOSTS="$PG_HOSTS"
 PG_USERS="neel,neel,neel"
 RAFT_USERS="neel,neel,neel"
-GW_HOST="10.129.148.236"
+GW_HOST="10.129.148.247"
 GW_USER="neel"
 SSH_USER="neel"
 SSH_KEY="/home/neel/.ssh/id_rsa"
