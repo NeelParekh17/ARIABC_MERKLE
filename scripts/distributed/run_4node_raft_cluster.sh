@@ -408,7 +408,7 @@ VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
 # In auto mode the runner detects whether the restored index is dynamic.
 MERKLE_VERIFY_MODE="${MERKLE_VERIFY_MODE:-auto}"
 DYNAMIC_INDEX_NAME="${DYNAMIC_INDEX_NAME:-}"
-DYNAMIC_EXPECTED_LAYOUT_VERSION=6
+DYNAMIC_EXPECTED_LAYOUT_VERSION=8
 DYNAMIC_EXPECTED_LOGICAL_FANOUT=32
 DYNAMIC_EXPECTED_PHYSICAL_NODE_FANOUT=2
 DYNAMIC_STRUCTURE_GATE="${DYNAMIC_STRUCTURE_GATE:-0}"
@@ -3367,6 +3367,44 @@ fi
 # The distributed run is meaningful only if every replica starts from the same
 # table contents and Merkle index.  The restore SQL also calls bcdb_reset().
 # ---------------------------------------------------------------------------
+declare -a PROFILE_BUILD_SPLITS=() PROFILE_BUILD_MERGES=()
+declare -a PROFILE_BASE_SPLITS=() PROFILE_BASE_MERGES=()
+declare -a PROFILE_EXEC_SPLITS=() PROFILE_EXEC_MERGES=()
+DYNAMIC_EXEC_PROFILE_CAPTURED=0
+
+capture_dynamic_execution_profile() {
+  [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 ]] || return 0
+  local profile_index="${DYNAMIC_INDEX_NAME:-public.usertable_small_dynamic_merkle_idx}"
+  local idx stats signature=""
+  for idx in "${!NODE_IDS[@]}"; do
+    stats="$(node_ssh "$idx" "
+      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+        SELECT COALESCE(stats->>'split_count','0') || '|' ||
+               COALESCE(stats->>'merge_count','0')
+          FROM (SELECT merkle_dynamic_tree_stats('$profile_index'::regclass)::jsonb AS stats) AS profile\"" | tr -d '[:space:]')"
+    IFS='|' read -r cumulative_splits cumulative_merges <<<"$stats"
+    [[ "$cumulative_splits" =~ ^[0-9]+$ && "$cumulative_merges" =~ ^[0-9]+$ &&
+       "${PROFILE_BASE_SPLITS[$idx]:-}" =~ ^[0-9]+$ && "${PROFILE_BASE_MERGES[$idx]:-}" =~ ^[0-9]+$ ]] ||
+      die "benchmark-execution cumulative profile missing/invalid on ${NODE_NAMES[$idx]}: $stats"
+    PROFILE_EXEC_SPLITS[$idx]=$(( cumulative_splits - PROFILE_BASE_SPLITS[$idx] ))
+    PROFILE_EXEC_MERGES[$idx]=$(( cumulative_merges - PROFILE_BASE_MERGES[$idx] ))
+    profile_log_file="$(compgen -G "$LOG_DIR/postgres_node${NODE_IDS[$idx]}_*.log" | head -1 || true)"
+    if [[ -n "$profile_log_file" ]] && grep -q 'NATIVE_MERKLE_PROFILE ' "$profile_log_file"; then
+      PROFILE_EXEC_SPLITS[$idx]="$(sed -n 's/.*NATIVE_MERKLE_PROFILE .*splits=\([0-9][0-9]*\) merges=.*/\1/p' "$profile_log_file" | awk '{sum += $1} END {print sum + 0}')"
+      PROFILE_EXEC_MERGES[$idx]="$(sed -n 's/.*NATIVE_MERKLE_PROFILE .*merges=\([0-9][0-9]*\).*/\1/p' "$profile_log_file" | awk '{sum += $1} END {print sum + 0}')"
+      log "  benchmark-execution native profile node=${NODE_NAMES[$idx]} source=pre_gate_postgres_log"
+    fi
+    [[ "${PROFILE_EXEC_SPLITS[$idx]}" =~ ^[0-9]+$ && "${PROFILE_EXEC_MERGES[$idx]}" =~ ^[0-9]+$ ]] ||
+      die "benchmark-execution dynamic profile missing/invalid on ${NODE_NAMES[$idx]}: $stats"
+    phase_stats="${PROFILE_EXEC_SPLITS[$idx]}|${PROFILE_EXEC_MERGES[$idx]}"
+    [[ -z "$signature" ]] && signature="$phase_stats"
+    [[ "$phase_stats" == "$signature" ]] ||
+      die "benchmark-execution dynamic profile mismatch on ${NODE_NAMES[$idx]}: expected $signature got $phase_stats"
+  done
+  DYNAMIC_EXEC_PROFILE_CAPTURED=1
+}
+
 if [[ "$SKIP_RESTORE" -eq 0 ]]; then
   log "=== Phase 3.5: Restore $VERIFY_TABLE on all ${#NODE_IDS[@]} nodes (parallel) ==="
   [[ -f "$RESTORE_SQL" ]] || die "restore SQL not found: $RESTORE_SQL"
@@ -3425,19 +3463,42 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
   if [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 ]]; then
     [[ "$MERKLE_VERIFY_MODE" != "legacy" ]] || die "native structure profiling requires dynamic Merkle mode"
     PROFILE_INDEX_NAME="${DYNAMIC_INDEX_NAME:-public.usertable_small_dynamic_merkle_idx}"
-    log "  Resetting native dynamic split/merge counters before workload"
+    log "  Capturing cumulative index-build counters as the benchmark phase baseline"
+    build_signature=""
     for idx in "${!NODE_IDS[@]}"; do
-      node_ssh "$idx" "
+      build_stats="$(node_ssh "$idx" "
         export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
-        '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -c \"
-          UPDATE ariabc_internal.merkle_dynamic_state
-             SET split_count=0, merge_count=0, updated_at=clock_timestamp()
-           WHERE index_oid='$PROFILE_INDEX_NAME'::regclass\"
-      " >/dev/null || die "failed to reset native profile counters on ${NODE_NAMES[$idx]}"
+        '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+          SELECT COALESCE(stats->>'split_count','0') || '|' ||
+                 COALESCE(stats->>'merge_count','0')
+            FROM (SELECT merkle_dynamic_tree_stats('$PROFILE_INDEX_NAME'::regclass)::jsonb AS stats) AS profile\"" | tr -d '[:space:]')"
+      IFS='|' read -r PROFILE_BUILD_SPLITS[$idx] PROFILE_BUILD_MERGES[$idx] <<<"$build_stats"
+      PROFILE_BASE_SPLITS[$idx]="${PROFILE_BUILD_SPLITS[$idx]}"
+      PROFILE_BASE_MERGES[$idx]="${PROFILE_BUILD_MERGES[$idx]}"
+      [[ "${PROFILE_BUILD_SPLITS[$idx]}" =~ ^[0-9]+$ && "${PROFILE_BUILD_MERGES[$idx]}" =~ ^[0-9]+$ ]] ||
+        die "index-build dynamic profile missing/invalid on ${NODE_NAMES[$idx]}: $build_stats"
+      [[ -z "$build_signature" ]] && build_signature="$build_stats"
+      [[ "$build_stats" == "$build_signature" ]] ||
+        die "index-build dynamic profile mismatch on ${NODE_NAMES[$idx]}: expected $build_signature got $build_stats"
     done
   fi
 else
   log "=== Phase 3.5: Restore skipped (--skip-restore) ==="
+  if [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 ]]; then
+    PROFILE_INDEX_NAME="${DYNAMIC_INDEX_NAME:-public.usertable_small_dynamic_merkle_idx}"
+    log "  No index build in this run; recording zero build phase and snapshotting execution baselines"
+    for idx in "${!NODE_IDS[@]}"; do
+      PROFILE_BUILD_SPLITS[$idx]=0
+      PROFILE_BUILD_MERGES[$idx]=0
+      baseline_stats="$(node_ssh "$idx" "
+        export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
+        '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
+          SELECT COALESCE(stats->>'split_count','0') || '|' ||
+                 COALESCE(stats->>'merge_count','0')
+            FROM (SELECT merkle_dynamic_tree_stats('$PROFILE_INDEX_NAME'::regclass)::jsonb AS stats) AS profile\"" | tr -d '[:space:]')"
+      IFS='|' read -r PROFILE_BASE_SPLITS[$idx] PROFILE_BASE_MERGES[$idx] <<<"$baseline_stats"
+    done
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -4434,6 +4495,7 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
   wait_all_nodes_committed $(( STRUCTURE_SEQ - 1 )) timed_workload
   wait_all_nodes_quiescent timed_workload
   wait_dynamic_roots_stable timed_workload
+  capture_dynamic_execution_profile
   STRUCTURE_AUTHORITY="$(node_ssh 0 "
     export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
     '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
@@ -5178,44 +5240,34 @@ else
 fi
 
 if [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 && "$SKIP_POST_VERIFY" -eq 0 ]]; then
-  PROFILE_INDEX_NAME="${DYNAMIC_INDEX_NAME:-public.usertable_small_dynamic_merkle_idx}"
-  declare -a PROFILE_SPLITS=() PROFILE_MERGES=()
-  profile_signature=""
+  # With the untimed structure gate enabled this snapshot was taken after the
+  # timed workload reached a stable committed root and before gate mutations.
+  # Otherwise Phase 8 has just drained and verified the workload, so capture it
+  # here.  Never sum the full PostgreSQL log: it also contains index-build and
+  # untimed-gate transitions.
+  [[ "$DYNAMIC_EXEC_PROFILE_CAPTURED" -eq 1 ]] || capture_dynamic_execution_profile
   for idx in "${!NODE_IDS[@]}"; do
-    profile_stats="$(node_ssh "$idx" "
-      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
-      '$REMOTE_INSTALL_DIR/bin/psql' -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' '$DB_NAME' -tAc \"
-        SELECT COALESCE(stats->>'split_count', '0') || '|' ||
-               COALESCE(stats->>'merge_count', '0')
-          FROM (SELECT merkle_dynamic_tree_stats('$PROFILE_INDEX_NAME'::regclass)::jsonb AS stats) AS profile\"" | tr -d '[:space:]')"
-    # merkle_dynamic_tree_stats predates the optional native profile fields.
-    # Prefer authoritative per-apply records whenever the backend emitted
-    # them; an absent record means this workload performed zero transitions.
-    profile_log_file="$(compgen -G "$LOG_DIR/postgres_node${NODE_IDS[$idx]}_*.log" | head -1 || true)"
-    if [[ -n "$profile_log_file" ]] && grep -q 'NATIVE_MERKLE_PROFILE ' "$profile_log_file"; then
-      profile_splits="$(sed -n 's/.*NATIVE_MERKLE_PROFILE .*splits=\([0-9][0-9]*\) merges=.*/\1/p' "$profile_log_file" | awk '{sum += $1} END {print sum + 0}')"
-      profile_merges="$(sed -n 's/.*NATIVE_MERKLE_PROFILE .*merges=\([0-9][0-9]*\).*/\1/p' "$profile_log_file" | awk '{sum += $1} END {print sum + 0}')"
-      profile_stats="${profile_splits}|${profile_merges}"
-      log "  native dynamic profile node=${NODE_NAMES[$idx]} source=postgres_log"
-    fi
-    IFS='|' read -r PROFILE_SPLITS[$idx] PROFILE_MERGES[$idx] <<<"$profile_stats"
-    [[ "${PROFILE_SPLITS[$idx]}" =~ ^[0-9]+$ && "${PROFILE_MERGES[$idx]}" =~ ^[0-9]+$ ]] ||
-      die "native dynamic profile missing/invalid on ${NODE_NAMES[$idx]}: $profile_stats"
-    log "  native dynamic profile node=${NODE_NAMES[$idx]} splits=${PROFILE_SPLITS[$idx]} merges=${PROFILE_MERGES[$idx]}"
-    [[ -z "$profile_signature" ]] && profile_signature="$profile_stats"
-    [[ "$profile_stats" == "$profile_signature" ]] ||
-      die "native dynamic split/merge profile mismatch on ${NODE_NAMES[$idx]}: expected $profile_signature got $profile_stats"
+    log "  native dynamic profile node=${NODE_NAMES[$idx]} index_build_splits=${PROFILE_BUILD_SPLITS[$idx]} index_build_merges=${PROFILE_BUILD_MERGES[$idx]} benchmark_splits=${PROFILE_EXEC_SPLITS[$idx]} benchmark_merges=${PROFILE_EXEC_MERGES[$idx]}"
   done
   {
     printf 'DYNAMIC_NATIVE_PROFILE_ENABLED=1\n'
     printf 'DYNAMIC_NATIVE_PROFILE_PASS=1\n'
-    printf 'DYNAMIC_NATIVE_PROFILE_SPLITS=%s\n' "${PROFILE_SPLITS[0]}"
-    printf 'DYNAMIC_NATIVE_PROFILE_MERGES=%s\n' "${PROFILE_MERGES[0]}"
+    # Backward-compatible aliases now unambiguously mean benchmark execution.
+    printf 'DYNAMIC_NATIVE_PROFILE_SPLITS=%s\n' "${PROFILE_EXEC_SPLITS[0]}"
+    printf 'DYNAMIC_NATIVE_PROFILE_MERGES=%s\n' "${PROFILE_EXEC_MERGES[0]}"
+    printf 'DYNAMIC_NATIVE_PROFILE_INDEX_BUILD_SPLITS=%s\n' "${PROFILE_BUILD_SPLITS[0]}"
+    printf 'DYNAMIC_NATIVE_PROFILE_INDEX_BUILD_MERGES=%s\n' "${PROFILE_BUILD_MERGES[0]}"
+    printf 'DYNAMIC_NATIVE_PROFILE_BENCHMARK_SPLITS=%s\n' "${PROFILE_EXEC_SPLITS[0]}"
+    printf 'DYNAMIC_NATIVE_PROFILE_BENCHMARK_MERGES=%s\n' "${PROFILE_EXEC_MERGES[0]}"
     printf 'DYNAMIC_NATIVE_PROFILE_NODE_COUNT=%s\n' "${#NODE_IDS[@]}"
     for idx in "${!NODE_IDS[@]}"; do
       printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_ID=%s\n' "$idx" "${NODE_IDS[$idx]}"
-      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_SPLITS=%s\n' "$idx" "${PROFILE_SPLITS[$idx]}"
-      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_MERGES=%s\n' "$idx" "${PROFILE_MERGES[$idx]}"
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_INDEX_BUILD_SPLITS=%s\n' "$idx" "${PROFILE_BUILD_SPLITS[$idx]}"
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_INDEX_BUILD_MERGES=%s\n' "$idx" "${PROFILE_BUILD_MERGES[$idx]}"
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_BENCHMARK_SPLITS=%s\n' "$idx" "${PROFILE_EXEC_SPLITS[$idx]}"
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_BENCHMARK_MERGES=%s\n' "$idx" "${PROFILE_EXEC_MERGES[$idx]}"
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_SPLITS=%s\n' "$idx" "${PROFILE_EXEC_SPLITS[$idx]}"
+      printf 'DYNAMIC_NATIVE_PROFILE_NODE_%s_MERGES=%s\n' "$idx" "${PROFILE_EXEC_MERGES[$idx]}"
     done
   } >>"$LOG_DIR/run_summary.env"
 fi

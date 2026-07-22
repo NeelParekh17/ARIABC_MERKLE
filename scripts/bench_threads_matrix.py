@@ -70,6 +70,8 @@ class RunResult:
     db_row_count: Optional[int]
     db_root_hash: Optional[str]
     db_merkle_verify: Optional[str]
+    dynamic_build_profile_splits: Optional[int]
+    dynamic_build_profile_merges: Optional[int]
     dynamic_profile_splits: Optional[int]
     dynamic_profile_merges: Optional[int]
     dynamic_profile_max_leaf_items: Optional[int]
@@ -574,6 +576,10 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         dynamic_splits = [x for x in dynamic_splits if x is not None]
         dynamic_merges = [as_int(r.get("dynamic_profile_merges", "")) for r in rs]
         dynamic_merges = [x for x in dynamic_merges if x is not None]
+        dynamic_build_splits = [as_int(r.get("dynamic_build_profile_splits", "")) for r in rs]
+        dynamic_build_splits = [x for x in dynamic_build_splits if x is not None]
+        dynamic_build_merges = [as_int(r.get("dynamic_build_profile_merges", "")) for r in rs]
+        dynamic_build_merges = [x for x in dynamic_build_merges if x is not None]
         dynamic_max_leaf = [as_int(r.get("dynamic_profile_max_leaf_items", "")) for r in rs]
         dynamic_max_leaf = [x for x in dynamic_max_leaf if x is not None]
         dynamic_logical_fanout = [as_int(r.get("dynamic_logical_fanout", "")) for r in rs]
@@ -646,6 +652,8 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
                 "max_serialization_retries": max_or_empty(serialization_retries),
                 "max_reconnects": max_or_empty(reconnects),
                 "max_permanent_failures": max_or_empty(permanent_failures),
+                "dynamic_build_profile_splits": max_or_empty(dynamic_build_splits),
+                "dynamic_build_profile_merges": max_or_empty(dynamic_build_merges),
                 "dynamic_profile_splits": max_or_empty(dynamic_splits),
                 "dynamic_profile_merges": max_or_empty(dynamic_merges),
                 "dynamic_profile_max_leaf_items": max_or_empty(dynamic_max_leaf),
@@ -1251,7 +1259,10 @@ def main() -> int:
     parser.add_argument(
         "--dynamic-merkle-profile",
         action="store_true",
-        help="Enable native dynamic-Merkle split/merge counters and record them per local run.",
+        help=(
+            "Enable native dynamic-Merkle split/merge counters and record "
+            "index-build and measured-workload phases separately per local run."
+        ),
     )
     parser.add_argument(
         "--rate",
@@ -1531,6 +1542,8 @@ def main() -> int:
         db_row_count=None,
         db_root_hash=None,
         db_merkle_verify=None,
+        dynamic_build_profile_splits=None,
+        dynamic_build_profile_merges=None,
         dynamic_profile_splits=None,
         dynamic_profile_merges=None,
         dynamic_profile_max_leaf_items=None,
@@ -1602,6 +1615,8 @@ def main() -> int:
                                 workload_log_out = case_dir / "workload.out"
                                 workload_log_err = case_dir / "workload.err"
                                 profile_log_offset = 0
+                                build_profile_splits = None
+                                build_profile_merges = None
                                 profile_splits = None
                                 profile_merges = None
                                 profile_max_leaf_items = None
@@ -1885,23 +1900,49 @@ def main() -> int:
                                     # --- End warmup ---
 
                                     if restore_exit == 0:
-                                        # Profile only the measured workload.  The dynamic
-                                        # restore/index build can legitimately split leaves,
-                                        # but those transitions are setup rather than workload
-                                        # activity and must not contaminate the recorded count.
+                                        # Snapshot cumulative native counters after the final
+                                        # restore.  Workload-only values are obtained from the
+                                        # post-run delta (or the workload log slice), because
+                                        # native v6 counters cannot be reset through side tables.
+                                        if args.dynamic_merkle_profile and args.dynamic_merkle and merkle_for_mode:
+                                            dynamic_index = args.dynamic_merkle_index.replace("'", "''")
+                                            build_profile_values = _psql_value(
+                                                psql_path,
+                                                db=args.db,
+                                                port=args.port,
+                                                user=args.user,
+                                                query=(
+                                                    "SELECT COALESCE(s->>'split_count','0') || '|' || "
+                                                    "COALESCE(s->>'merge_count','0') FROM (SELECT "
+                                                    "merkle_dynamic_tree_stats('" + dynamic_index
+                                                    + "'::regclass)::jsonb AS s) q;"
+                                                ),
+                                                cwd=scripts_dir,
+                                                env=mode_env,
+                                            )
+                                            build_parts = (build_profile_values or "").split("|")
+                                            if len(build_parts) == 2 and all(p.isdigit() for p in build_parts):
+                                                build_profile_splits = int(build_parts[0])
+                                                build_profile_merges = int(build_parts[1])
+                                            else:
+                                                restore_exit = 94
+                                                (case_dir / "dynamic_profile.err").write_text(
+                                                    "dynamic_build_profile_query_failed=1\n"
+                                                )
                                         if args.dynamic_merkle_profile and server_log_path.exists():
                                             try:
                                                 profile_log_offset = server_log_path.stat().st_size
                                             except OSError:
                                                 profile_log_offset = 0
-                                        workload_exit = _run(
-                                            workload_argv,
-                                            cwd=scripts_dir,
-                                            env=case_env,
-                                            stdout_path=workload_log_out,
-                                            stderr_path=workload_log_err,
-                                            timeout_s=timeout_for_run,
-                                        )
+                                        if restore_exit == 0:
+                                            workload_exit = _run(
+                                                workload_argv,
+                                                cwd=scripts_dir,
+                                                env=case_env,
+                                                stdout_path=workload_log_out,
+                                                stderr_path=workload_log_err,
+                                                timeout_s=timeout_for_run,
+                                            )
 
                                     # Remove the pointer after the workload process completes so
                                     # the monitor knows we're idle.
@@ -2049,7 +2090,7 @@ def main() -> int:
                                                     dynamic_layout_version = int(layout_parts[2])
                                                     dynamic_max_depth = int(layout_parts[3])
                                                     if (
-                                                        dynamic_layout_version != 6
+                                                        dynamic_layout_version != 7
                                                         or dynamic_logical_fanout != 32
                                                         or dynamic_physical_node_fanout != 2
                                                     ):
@@ -2079,10 +2120,12 @@ def main() -> int:
                                                     parts = (profile_values or '').split('|')
                                                     if len(parts) == 3 and all(p.isdigit() for p in parts):
                                                         if profile_splits is None:
-                                                            profile_splits = int(parts[0])
+                                                            profile_splits = int(parts[0]) - int(build_profile_splits or 0)
                                                         if profile_merges is None:
-                                                            profile_merges = int(parts[1])
+                                                            profile_merges = int(parts[1]) - int(build_profile_merges or 0)
                                                         profile_max_leaf_items = int(parts[2])
+                                                        if profile_splits < 0 or profile_merges < 0:
+                                                            verification_error = "dynamic_profile_counter_moved_backwards"
                                                     elif profile_splits is None:
                                                         verification_error = "dynamic_profile_query_failed"
                                             else:
@@ -2173,6 +2216,8 @@ def main() -> int:
                                     db_row_count=row_count,
                                     db_root_hash=root_hash,
                                     db_merkle_verify=verify,
+                                    dynamic_build_profile_splits=build_profile_splits,
+                                    dynamic_build_profile_merges=build_profile_merges,
                                     dynamic_profile_splits=profile_splits,
                                     dynamic_profile_merges=profile_merges,
                                     dynamic_profile_max_leaf_items=profile_max_leaf_items,

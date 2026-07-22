@@ -42,7 +42,7 @@ SELECT (merkle_dynamic_tree_stats('merkle_native_test_idx')->>'max_depth')::int 
 SELECT (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'data_root')
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'structure_root')
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx') ? 'combined_root')
-       AND merkle_dynamic_tree_stats('merkle_native_test_idx')->>'layout_version' = '6'
+       AND merkle_dynamic_tree_stats('merkle_native_test_idx')->>'layout_version' = '8'
        AND (merkle_dynamic_tree_stats('merkle_native_test_idx')->>'data_root') <>
            (merkle_dynamic_tree_stats('merkle_native_test_idx')->>'structure_root')
        AS commitment_provenance;
