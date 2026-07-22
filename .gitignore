@@ -86,6 +86,7 @@ lib*.pc
 !/scripts/test/
 !/scripts/test/**
 /scripts/test/**/__pycache__/
+/dynamic_merkle_visualizer/
 
 # Local AI/tooling metadata (do not commit)
 /.claude/
