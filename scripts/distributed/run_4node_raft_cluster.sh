@@ -404,9 +404,8 @@ WARMUP_WORKLOAD_FILE="${WARMUP_WORKLOAD_FILE:-}" # optional explicit warm-up SQL
 RESTORE_SQL="${RESTORE_SQL:-$REPO_ROOT/scripts/restore_usertable_small.sql}"
 VERIFY_TABLE="${VERIFY_TABLE:-usertable_small}"
 VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
-# dynamic Merkle verification mode: legacy|dynamic|auto (default: auto)
-# In auto mode the runner detects whether the restored index is dynamic.
-MERKLE_VERIFY_MODE="${MERKLE_VERIFY_MODE:-auto}"
+# Native Merkle v8 verification is mandatory.
+MERKLE_VERIFY_MODE="${MERKLE_VERIFY_MODE:-dynamic}"
 DYNAMIC_INDEX_NAME="${DYNAMIC_INDEX_NAME:-}"
 DYNAMIC_EXPECTED_LAYOUT_VERSION=8
 DYNAMIC_EXPECTED_LOGICAL_FANOUT=32
@@ -997,8 +996,10 @@ if [[ "$DYNAMIC_STRUCTURE_PROFILE" != 0 && "$DYNAMIC_STRUCTURE_PROFILE" != 1 ]];
   die "ERROR: --dynamic-structure-profile must be 0 or 1 (got: $DYNAMIC_STRUCTURE_PROFILE)"
 fi
 if [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 && "$MERKLE_VERIFY_MODE" == "legacy" ]]; then
-  die "ERROR: --dynamic-structure-profile requires dynamic Merkle verification"
+  die "ERROR: legacy Merkle verification is removed; use the native dynamic index"
 fi
+[[ "$MERKLE_VERIFY_MODE" == "dynamic" ]] ||
+  die "ERROR: --merkle-verify-mode only accepts dynamic; legacy/auto verification is removed"
 if [[ "$DYNAMIC_STRUCTURE_CRASH_GATE" -eq 1 && "$DYNAMIC_STRUCTURE_GATE" -ne 1 ]]; then
   die "ERROR: --dynamic-structure-crash-gate requires --dynamic-structure-gate 1"
 fi
@@ -1882,26 +1883,23 @@ _compute_src_fingerprint() {
   (
     cd "$REPO_ROOT"
     {
-      find src ariabc_pg -type f \
-        \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
-        -not -path '*/build/*' -not -path '*/.git/*' \
-        -not -path 'src/include/pg_config.h' \
-        -not -path 'src/include/pg_config_ext.h' \
-        -not -path 'src/include/pg_config_os.h' \
-        -not -path 'src/interfaces/ecpg/include/ecpg_config.h' \
-        -not -path 'src/include/catalog/*_d.h' \
-        -not -path 'src/include/catalog/schemapg.h' \
-        -not -path 'src/include/storage/lwlocknames.h' \
-        -not -path 'src/include/utils/probes.h' \
-        -not -path 'src/include/utils/fmgrprotos.h' \
-        -not -path 'src/include/utils/errcodes.h' \
-        -not -path 'src/include/utils/fmgroids.h' \
-        -not -path 'src/backend/catalog/*_d.h' \
-        -not -path 'src/backend/catalog/schemapg.h' \
-        -not -path 'src/backend/utils/fmgrprotos.h' \
-        -not -path 'src/backend/utils/errcodes.h' \
-        -not -path 'src/backend/utils/fmgroids.h' \
-        -exec sha256sum {} \; 2>/dev/null | sort
+      git ls-files -z -- src ariabc_pg |
+        while IFS= read -r -d '' path; do
+          [[ -f "$path" ]] || continue
+          case "$path" in
+            src/include/pg_config.h|src/include/pg_config_ext.h|src/include/pg_config_os.h|\
+            src/interfaces/ecpg/include/ecpg_config.h|src/include/catalog/*_d.h|\
+            src/include/catalog/schemapg.h|src/include/storage/lwlocknames.h|\
+            src/include/utils/probes.h|src/include/utils/fmgrprotos.h|\
+            src/include/utils/errcodes.h|src/include/utils/fmgroids.h|\
+            src/backend/catalog/*_d.h|src/backend/catalog/schemapg.h|\
+            src/backend/utils/fmgrprotos.h|src/backend/utils/errcodes.h|\
+            src/backend/utils/fmgroids.h)
+              continue
+              ;;
+          esac
+          sha256sum "$path"
+        done | sort
       echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
     } | sha256sum | awk '{print $1}'
   )
@@ -4503,6 +4501,8 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
   " | tr -d '[:space:]')"
   STRUCTURE_NATIVE=0
   [[ "$STRUCTURE_AUTHORITY" == "native_index_pages" ]] && STRUCTURE_NATIVE=1
+  [[ "$STRUCTURE_NATIVE" -eq 1 ]] ||
+    die "native Merkle v8 structure authority missing on the preferred node: $STRUCTURE_AUTHORITY"
   log "  dynamic structure authority=$STRUCTURE_AUTHORITY"
   declare -a STRUCT_BASE_SPLITS=() STRUCT_BASE_MERGES=()
   declare -a STRUCT_BASE_LEAVES=() STRUCT_BASE_DEPTHS=() STRUCT_BASE_ROOTS=()
@@ -4520,7 +4520,7 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
           INSERT INTO ariabc_internal.merkle_local_delta (apply_seq, delta_version, delta_blob)
             SELECT seq, 0, NULL FROM generate_series(1::bigint, $STRUCTURE_SEQ::bigint) AS seq
             ON CONFLICT (apply_seq) DO NOTHING;
-          SELECT merkle_apply_pending();
+          SELECT merkle_recovery_status();
           SELECT split_count || '|' || merge_count
             FROM ariabc_internal.merkle_dynamic_state
            WHERE index_oid='$DYNAMIC_INDEX_NAME'::regclass\" | tail -1
@@ -4657,7 +4657,7 @@ if [[ "$DYNAMIC_STRUCTURE_GATE" -eq 1 ]]; then
           INSERT INTO ariabc_internal.merkle_local_delta (apply_seq, delta_version, delta_blob)
             SELECT seq, 0, NULL FROM generate_series(1::bigint, $(( STRUCTURE_SEQ + 3 ))::bigint) AS seq
             ON CONFLICT (apply_seq) DO NOTHING;
-          SELECT merkle_apply_pending();
+          SELECT merkle_recovery_status();
           SELECT split_count || '|' || merge_count || '|' || merkle_dynamic_verify('$DYNAMIC_INDEX_NAME'::regclass)
             FROM ariabc_internal.merkle_dynamic_state
            WHERE index_oid='$DYNAMIC_INDEX_NAME'::regclass\" | tail -1
@@ -4812,20 +4812,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     printf 'post_run_barrier=all3_ordered_marker\n' >>"$LOG_DIR/run_summary.env"
   fi
 
-  # ---------------------------------------------------------------------------
-  # Resolve effective verify mode.  In "auto" mode: dynamic if the restore SQL
-  # contains CREATE INDEX ... dynamic = true; otherwise legacy.
-  # ---------------------------------------------------------------------------
-  _EFFECTIVE_VERIFY_MODE="$MERKLE_VERIFY_MODE"
-  if [[ "$_EFFECTIVE_VERIFY_MODE" == "auto" ]]; then
-    if [[ -n "$DYNAMIC_INDEX_NAME" ]] ||
-       grep -qiE 'dynamic\s*=\s*true|restore_usertable_small_dynamic|create_usertable_small_dynamic' "$RESTORE_SQL" 2>/dev/null; then
-      _EFFECTIVE_VERIFY_MODE="dynamic"
-    else
-      _EFFECTIVE_VERIFY_MODE="legacy"
-    fi
-    log "  merkle-verify-mode=auto resolved to: $_EFFECTIVE_VERIFY_MODE"
-  fi
+  _EFFECTIVE_VERIFY_MODE="dynamic"
 
   # In dynamic mode, resolve the index name: prefer --dynamic-index, else scan
   # the restore SQL for the first dynamic USING merkle index name.
@@ -4888,10 +4875,9 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
             )
             SELECT count(*) FROM inserted\")
         fi
-        applied=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT merkle_apply_pending()')
         recovery_state=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT (merkle_recovery_status()::jsonb)->>'state'\")
         if [[ \"\$recovery_state\" != READY ]]; then
-          echo \"Merkle recovery did not reach READY after applying \$applied entries: \$recovery_state\" >&2
+          echo \"Merkle recovery did not reach READY: \$recovery_state\" >&2
           exit 1
         fi
         root=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")

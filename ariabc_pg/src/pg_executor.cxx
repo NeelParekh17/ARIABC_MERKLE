@@ -2051,34 +2051,11 @@ bool pg_executor::initialize_bcdb() {
             PQclear(res);
         }
 
-        // Enforce the Merkle recovery gate before workers are exposed.  The
-        // rebuild/apply calls are idempotent and use the control session's
-        // READ COMMITTED isolation; a non-READY result is a startup failure,
-        // not a condition to defer until the first client request.
+        // Enforce the native Merkle v8 recovery gate before workers are
+        // exposed. Native roots are transaction-coupled; no pending-log
+        // drain or legacy-index rebuild is performed here.
         {
-            PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_apply_pending();");
-            if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-                std::cerr << "Safe mode validation failed: Merkle committed-prefix apply failed: "
-                          << (res ? PQerrorMessage(c) : "null result") << std::endl;
-                if (res) PQclear(res);
-                PQfinish(c);
-                bcdb_init_failed_ = true;
-                return false;
-            }
-            PQclear(res);
-
-            res = PQexec(c, "SELECT pg_catalog.merkle_rebuild_legacy_indexes();");
-            if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-                std::cerr << "Safe mode validation failed: Merkle legacy-index rebuild failed: "
-                          << (res ? PQerrorMessage(c) : "null result") << std::endl;
-                if (res) PQclear(res);
-                PQfinish(c);
-                bcdb_init_failed_ = true;
-                return false;
-            }
-            PQclear(res);
-
-            res = PQexec(c, "SELECT pg_catalog.merkle_recovery_status();");
+            PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_recovery_status();");
             if (!res || PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1) {
                 std::cerr << "Safe mode validation failed: cannot read Merkle recovery status"
                           << std::endl;

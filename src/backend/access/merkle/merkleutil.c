@@ -695,9 +695,11 @@ merkle_get_update_mode(Relation indexRel)
 {
 	BlockNumber blocks;
 
-	/* Non-dynamic indexes only support pending_log */
 	if (!merkle_index_is_dynamic(indexRel))
-		return MERKLE_UPDATE_PENDING_LOG;
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("native v8 Merkle indexes must use dynamic=true"),
+				 errhint("REINDEX the index with the native dynamic Merkle options.")));
 
 	blocks = RelationGetNumberOfBlocks(indexRel);
 	if (blocks > MERKLE_METAPAGE_BLKNO)
@@ -705,7 +707,7 @@ merkle_get_update_mode(Relation indexRel)
 		Buffer buf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
 		Page page;
 		MerkleMetaPageData *meta;
-		int mode = MERKLE_UPDATE_PENDING_LOG;
+		int mode = MERKLE_UPDATE_SYNCHRONOUS_COW;
 		uint32 flags;
 
 		LockBuffer(buf, BUFFER_LOCK_SHARE);
@@ -717,9 +719,7 @@ merkle_get_update_mode(Relation indexRel)
 			flags = meta->nativeFormatFlags & MERKLE_NATIVE_MODE_MASK;
 			if (flags == MERKLE_NATIVE_MODE_SYNCHRONOUS_COW)
 				mode = MERKLE_UPDATE_SYNCHRONOUS_COW;
-			else if (flags == MERKLE_NATIVE_MODE_PENDING_LOG)
-				mode = MERKLE_UPDATE_PENDING_LOG;
-			else
+			else if (flags != MERKLE_NATIVE_MODE_SYNCHRONOUS_COW)
 				ereport(ERROR,
 						(errcode(ERRCODE_INDEX_CORRUPTED),
 						 errmsg("Merkle index has unknown native update-mode flags 0x%08x",
@@ -738,6 +738,11 @@ merkle_get_update_mode(Relation indexRel)
 		int mode = opts ? opts->update_mode : MERKLE_UPDATE_SYNCHRONOUS_COW;
 		if (opts)
 			pfree(opts);
+		if (mode != MERKLE_UPDATE_SYNCHRONOUS_COW)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("pending-log Merkle updates are removed"),
+					 errhint("Rebuild the index with update_mode=synchronous_cow.")));
 		return mode;
 	}
 }
@@ -1066,10 +1071,7 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 		meta->dynamicMaxKeyBytes = opts->max_key_bytes;
 		meta->nativeDirectoryStart = MERKLE_TREE_START_BLKNO;
 		meta->nativeDirectoryPages = numTreePages;
-		if (opts->update_mode == MERKLE_UPDATE_SYNCHRONOUS_COW)
-			meta->nativeFormatFlags = MERKLE_NATIVE_MODE_SYNCHRONOUS_COW;
-		else
-			meta->nativeFormatFlags = MERKLE_NATIVE_MODE_PENDING_LOG;
+		meta->nativeFormatFlags = MERKLE_NATIVE_MODE_SYNCHRONOUS_COW;
 	}
 	/*
 	 * Merkle metadata lives directly in the page content area rather than in

@@ -95,7 +95,6 @@ for action in "${ACTIONS[@]}"; do
             run_one postcommit_crash "$failpoint" "$action" "$repetition"
         done
         for failpoint in "${APPLIER_FAILPOINTS[@]}"; do
-            run_one applier_crash "$failpoint" "$action" "$repetition"
         done
     done
 done

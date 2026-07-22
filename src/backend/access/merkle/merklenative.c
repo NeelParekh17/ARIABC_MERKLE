@@ -2936,21 +2936,13 @@ native_apply_transitions_authorized(
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("native Merkle transition has invalid index OID %u",
-					 transitions[0].index_oid),
-				 errdetail("mutation authority=%s",
-					 expected_mode == MERKLE_UPDATE_PENDING_LOG ?
-					 "pending_log" : "synchronous_cow")));
+						transitions[0].index_oid)));
 	indexRel = index_open(transitions[0].index_oid, RowExclusiveLock);
 	if (expected_mode >= 0 && merkle_get_update_mode(indexRel) != expected_mode)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("native Merkle mutation authority does not match index update mode"),
-				 errdetail("requested authority %s but index is configured %s",
-					 expected_mode == MERKLE_UPDATE_SYNCHRONOUS_COW ?
-					 "synchronous_cow" : "pending_log",
-					 merkle_get_update_mode(indexRel) ==
-					 MERKLE_UPDATE_SYNCHRONOUS_COW ?
-					 "synchronous_cow" : "pending_log")));
+					 errdetail("requested native authority does not match the index")));
 	if (!merkle_native_is_ready(indexRel))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -3078,16 +3070,6 @@ merkle_native_publish_strict_transitions(
 {
 	native_apply_transitions_authorized(transitions, count, sequence_domain,
 		sequence_epoch, sequence_value, MERKLE_UPDATE_SYNCHRONOUS_COW);
-}
-
-void
-merkle_native_materialize_pending_transitions(
-							const MerkleDynamicTransition *transitions,
-							int count, uint16 sequence_domain,
-							uint64 sequence_epoch, uint64 sequence_value)
-{
-	native_apply_transitions_authorized(transitions, count, sequence_domain,
-		sequence_epoch, sequence_value, MERKLE_UPDATE_PENDING_LOG);
 }
 
 /*
@@ -4425,8 +4407,7 @@ merkle_native_tree_stats(PG_FUNCTION_ARGS)
 	int partition;
 	char *json;
 	Datum result;
-	int mode;
-	const char *mode_str;
+	const char *mode_str = "synchronous_cow";
 	MerkleHash data_root;
 	MerkleHash structure_root;
 	MerkleHash combined_root;
@@ -4477,9 +4458,6 @@ merkle_native_tree_stats(PG_FUNCTION_ARGS)
 		sequence_domain = MERKLE_SEQUENCE_LOCAL_XID;
 		sequence_epoch = 0;
 	}
-	mode = merkle_get_update_mode(indexRel);
-	mode_str = (mode == MERKLE_UPDATE_SYNCHRONOUS_COW) ? "synchronous_cow" : "pending_log";
-
 	json = psprintf("{\"authority\":\"native_index_pages\","
 		"\"update_mode\":\"%s\","
 		"\"logical_fanout\":%d,\"physical_node_fanout\":%d,"

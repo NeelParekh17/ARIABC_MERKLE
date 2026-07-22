@@ -31,11 +31,10 @@ Dynamic Merkle options forwarded to run_4node_raft_cluster.sh:
                            restore_usertable_small_dynamic.sql.
   --verify-table TABLE     Table used for post-run root comparison (default: usertable_small).
   --enable-merkle-index N  Set Merkle index maintenance: 0|1 (default: 1).
-  --merkle-verify-mode M   Post-run equality check mode: legacy|dynamic|auto
-                           (default: dynamic).
-                           In "dynamic" mode the runner computes SHA-256 digests of
-                           partition roots, physical topology, and leaf-item assignments
-                           and requires them to match across all replicas.
+  --merkle-verify-mode M   Native post-run equality mode: dynamic only.
+                           The runner computes SHA-256 digests of partition roots,
+                           physical topology, and leaf-item assignments and requires
+                           them to match across all three replicas.
   --dynamic-index NAME     Fully-qualified index name for dynamic verification
                            (default: public.usertable_small_dynamic_merkle_idx).
                            Default dynamic runs require native layout v8,
@@ -89,18 +88,6 @@ Example (dynamic Merkle sweep):
     --dynamic-index public.usertable_small_dynamic_merkle_idx \
     --warmup-queries 1000
 
-Example (legacy sweep):
-  ./scripts/distributed/run_sweep.sh \
-    --threads 96 \
-    --executor-workers 4,8,16 \
-    --reps 1,2 \
-    --node-ids 1,2,3 \
-    --node-ips 10.10.0.11,10.10.0.12,10.10.0.13 \
-    --node-names node-a,node-b,node-c \
-    --node-users neel,neel,neel \
-    --node-is-u22 0,0,1 \
-    --node-client-ports 8000,8000,8001 \
-    --kafka-host 10.10.0.11
 EOF
 }
 
@@ -123,6 +110,12 @@ CLUSTER_ARGS=(
   --dynamic-structure-profile 1
   --warmup-queries 1000
   --kafka-completion-mode majority_async_all3
+  --node-ids 1,2,4
+  --node-ips 10.129.148.247,10.129.148.246,10.129.148.248
+  --node-names admin123,user4,utkarsh
+  --node-users neel,neel,neel
+  --node-is-u22 0,1,0
+  --node-client-ports 8000,8000,8001
 )
 
 while [[ $# -gt 0 ]]; do
@@ -145,8 +138,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     # --- dynamic Merkle options ---
     --restore-sql|--verify-table|--enable-merkle-index|\
-    --merkle-verify-mode|--dynamic-index|--dynamic-structure-gate|--dynamic-structure-crash-gate|--dynamic-structure-profile)
+    --dynamic-index|--dynamic-structure-gate|--dynamic-structure-crash-gate|--dynamic-structure-profile)
       CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
+      shift 2
+      ;;
+    --merkle-verify-mode)
+      [[ "${2:?missing value for --merkle-verify-mode}" == "dynamic" ]] || {
+        echo "ERROR: --merkle-verify-mode only accepts dynamic; legacy/auto Merkle verification is removed" >&2
+        exit 2
+      }
       shift 2
       ;;
     # --- workload phase options ---
@@ -201,10 +201,11 @@ cluster_arg_value() {
 
 source_fingerprint() {
   {
-    find src ariabc_pg \
-      \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
-      -not -path '*/build/*' -not -path '*/.git/*' \
-      -exec sha256sum {} \; 2>/dev/null | sort
+    git -C "$REPO_ROOT" ls-files -z -- src ariabc_pg |
+      while IFS= read -r -d '' path; do
+        [[ -f "$REPO_ROOT/$path" ]] || continue
+        sha256sum "$REPO_ROOT/$path"
+      done | sort
     echo 'RESULT_RING_CAPACITY=2048'
   } | sha256sum | awk '{print $1}'
 }
@@ -222,8 +223,8 @@ DYNAMIC_STRUCTURE_PROFILE_INPUT="$(cluster_arg_value --dynamic-structure-profile
 NODE_IDS_INPUT="$(cluster_arg_value --node-ids 1,2,4)"
 read -r -a NODE_ID_VALUES <<< "${NODE_IDS_INPUT//,/ }"
 NODE_COUNT="${#NODE_ID_VALUES[@]}"
-if (( NODE_COUNT < 1 )); then
-  echo "ERROR: topology must contain at least one node" >&2
+if (( NODE_COUNT != 3 )); then
+  echo "ERROR: native Merkle sweep requires exactly 3 nodes, including admin123" >&2
   exit 2
 fi
 # Majority result completion must use the Raft majority for the configured topology.
@@ -286,7 +287,7 @@ mkdir -p "$OUT"
 campaign_snapshot() {
   local destination="$1"
   {
-    printf 'git_head=%s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf 'git_head=%s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
     printf 'source_fingerprint=%s\n' "$(source_fingerprint)"
     printf 'gateway_sha256=%s\n' "$(file_sha256 ariabc_pg/build/bin/ariabc_pg_gateway)"
     printf 'server_sha256=%s\n' "$(file_sha256 ariabc_pg/build/bin/ariabc_pg_server)"

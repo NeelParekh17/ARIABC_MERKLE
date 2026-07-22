@@ -3294,13 +3294,6 @@ merkle_dynamic_apply_transition(const MerkleDynamicTransition *transition)
 	PG_TRY();
 	{
 		dynamic_apply_transition_impl(transition);
-		/* Keep the native image synchronized when pending_log materializes its
-		 * compatibility oracle.  This makes a later mode change safe and keeps
-		 * side tables non-authoritative even in lagging mode. */
-		merkle_native_materialize_pending_transitions(transition, 1,
-			transition->sequence_domain == 0 ? MERKLE_SEQUENCE_RAFT :
-			transition->sequence_domain,
-			transition->sequence_epoch, transition->seq);
 	}
 	PG_CATCH();
 	{
@@ -3324,10 +3317,6 @@ merkle_dynamic_apply_update_batch(const MerkleDynamicTransition *transitions,
 	PG_TRY();
 	{
 		dynamic_apply_update_batch_impl(transitions,count);
-		merkle_native_materialize_pending_transitions(transitions, count,
-			transitions[0].sequence_domain == 0 ? MERKLE_SEQUENCE_RAFT :
-			transitions[0].sequence_domain,
-			transitions[0].sequence_epoch, transitions[0].seq);
 	}
 	PG_CATCH();
 	{
@@ -4073,8 +4062,7 @@ dynamic_stats_json_impl(Relation indexRel)
 	char *result;
 	MemoryContext caller_context = CurrentMemoryContext;
 	int rc;
-	int mode = merkle_get_update_mode(indexRel);
-	const char *mode_str = (mode == MERKLE_UPDATE_SYNCHRONOUS_COW) ? "synchronous_cow" : "pending_log";
+	const char *mode_str = "synchronous_cow";
 
 	dynamic_read_meta(indexRel,&gen);
 	dynamic_require_relations();

@@ -22,8 +22,6 @@ from .dynamic import (
 )
 from .dynamic_db import (
     apply_set_based_repairs,
-    dynamic_apply_pending,
-    merkle_queue_snapshot,
     dynamic_storage_scan_snapshot,
     dynamic_tree_stats,
     dynamic_verify,
@@ -661,7 +659,7 @@ def repair_dynamic_merkle(
 
     # Native synchronous-COW publication is visible immediately after the
     # repair commit.  Prove that boundary before touching the compatibility
-    # queue; merkle_apply_pending() is not part of native recovery.
+    # Native v8 recovery has no pending queue to drain.
     with _timer(m.phase, "native_commit_visibility_ms"):
         native_remaining_bad_ranges, native_confirmation_trace = _localise(
             conn, leaf_capacity, logical_fanout
@@ -684,18 +682,14 @@ def repair_dynamic_merkle(
         dynamic_scan_before, dynamic_scan_after
     )
 
-    queue_before = merkle_queue_snapshot(conn)
     post_repair_io_before = _wal_checkpoint_snapshot(conn)
-    with _timer(m.phase, "global_merkle_queue_drain_ms"):
-        queue_watermark = dynamic_apply_pending(conn)
     post_repair_io_after = _wal_checkpoint_snapshot(conn)
-    queue_after = merkle_queue_snapshot(conn)
-    with _timer(m.phase, "post_queue_relocalisation_ms"):
+    with _timer(m.phase, "post_commit_relocalisation_ms"):
         remaining_bad_ranges, post_queue_trace = _localise(
             conn, leaf_capacity, logical_fanout
         )
     _append_trace_rows(
-        range_rows_out, run_id, "post_queue_relocalisation", post_queue_trace
+        range_rows_out, run_id, "post_commit_relocalisation", post_queue_trace
     )
     if remaining_bad_ranges:
         raise RuntimeError(
@@ -830,15 +824,10 @@ def repair_dynamic_merkle(
             "total_rows_repaired": total_repairs,
             "remaining_bad_range_count": len(remaining_bad_ranges),
             "native_remaining_bad_range_count": len(native_remaining_bad_ranges),
-            "native_roots_match_before_queue_drain": int(not native_remaining_bad_ranges),
-            "native_roots_unchanged_after_queue_drain": int(
+            "native_roots_match_after_commit": int(not native_remaining_bad_ranges),
+            "native_roots_unchanged_after_commit": int(
                 not remaining_bad_ranges
             ),
-            "global_merkle_queue_return_watermark": queue_watermark,
-            "global_merkle_queue_rows_before": queue_before["local_delta_rows"],
-            "global_merkle_queue_rows_after": queue_after["local_delta_rows"],
-            "global_merkle_queue_status_before": queue_before["status"],
-            "global_merkle_queue_status_after": queue_after["status"],
             "planner_checks_passed": int(
                 bool(plan["index_used"])
                 and all(bool(row["index_used"]) for row in native_api_proofs)
@@ -1017,9 +1006,8 @@ def run_one_dynamic_manifest(
         )
         started = _now_ms()
         apply_corruption(conn, manifest)
-        # The corruption must be durably represented in the damaged dynamic
-        # tree before recovery localisation begins.
-        dynamic_apply_pending(conn)
+        # Native synchronous-COW commits publish the damaged dynamic root
+        # before the transaction becomes visible to the recovery query.
         if audit_mode == "skip":
             # Fast diagnostics use one repetition, whereas the published
             # static medians came from repeated recovery on one built dataset.

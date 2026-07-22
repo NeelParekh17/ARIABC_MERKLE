@@ -6,27 +6,12 @@ BEGIN;
 CREATE SCHEMA IF NOT EXISTS ariabc_internal;
 
 -- Existing clusters keep their old pg_proc rows across binary upgrades.
--- Register SQL wrappers for the v7 built-ins so bootstrap/recovery works
+-- Register SQL wrappers for the native v8 recovery built-ins so bootstrap/recovery works
 -- without requiring a destructive initdb.  On fresh clusters this is an
 -- idempotent CREATE OR REPLACE of the catalog-defined functions.
-CREATE OR REPLACE FUNCTION pg_catalog.merkle_apply_pending()
-RETURNS bigint
-AS 'merkle_apply_pending_sql'
-LANGUAGE internal VOLATILE PARALLEL UNSAFE;
-
 CREATE OR REPLACE FUNCTION pg_catalog.merkle_recovery_status()
 RETURNS text
 AS 'merkle_recovery_status'
-LANGUAGE internal VOLATILE PARALLEL UNSAFE;
-
-CREATE OR REPLACE FUNCTION pg_catalog.merkle_rebuild_legacy_indexes()
-RETURNS bigint
-AS 'merkle_rebuild_legacy_indexes'
-LANGUAGE internal VOLATILE PARALLEL UNSAFE;
-
-CREATE OR REPLACE FUNCTION pg_catalog.merkle_apply_until(required_seq bigint)
-RETURNS bigint
-AS 'merkle_apply_until_sql'
 LANGUAGE internal VOLATILE PARALLEL UNSAFE;
 
 -- Index-specific verify API (P0.6 fix: multi-Merkle-index verification).
@@ -825,9 +810,6 @@ FROM PUBLIC;
 GRANT SELECT ON ariabc_internal.merkle_apply_counter,
                     ariabc_internal.merkle_apply_state
 TO PUBLIC;
-REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_apply_pending() FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_rebuild_legacy_indexes() FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_apply_until(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_verify(regclass) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_verify_index(regclass) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_dynamic_verify(regclass) FROM PUBLIC;

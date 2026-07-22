@@ -297,11 +297,6 @@ def merkle_queue_snapshot(conn) -> dict[str, Any]:
     }
 
 
-def dynamic_apply_pending(conn) -> Any:
-    """Drain the compatibility queue and return its apply watermark."""
-    return scalar(conn, "SELECT merkle_apply_pending()")
-
-
 def _plan_uses_index(node: Any, expected: str) -> bool:
     if isinstance(node, Mapping):
         if node.get("Index Name") == expected:

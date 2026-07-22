@@ -10,7 +10,7 @@ CREATE TABLE merkle_atomicity_test (
 SELECT :'merkle_mode' = 'dynamic' AS use_dynamic_merkle \gset
 \if :{?update_mode}
 \else
-\set update_mode pending_log
+\set update_mode synchronous_cow
 \endif
 \if :use_dynamic_merkle
 CREATE INDEX merkle_atomicity_test_idx ON merkle_atomicity_test
@@ -28,7 +28,7 @@ INSERT INTO merkle_atomicity_test
 SELECT g, 'seed-' || g, 1
 FROM generate_series(1, 8) AS g;
 
-SELECT merkle_apply_pending();
+SELECT merkle_recovery_status();
 SELECT merkle_verify('merkle_atomicity_test'::regclass) AS setup_verified;
 
 \if :use_dynamic_merkle

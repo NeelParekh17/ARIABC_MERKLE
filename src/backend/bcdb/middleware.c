@@ -166,13 +166,6 @@ typedef struct BCDBBlockResultRef
 	uint8  raft_epoch_id[BCDB_RAFT_DIGEST_BYTES];
 } BCDBBlockResultRef;
 
-typedef struct MerkleRaftTargetRef
-{
-	uint8  epoch_id[BCDB_RAFT_DIGEST_BYTES];
-	uint64 raft_log_index;
-	uint32 max_item_ordinal;
-} MerkleRaftTargetRef;
-
 /* ----------------------------------------------------------------------
  *  Forward declarations for file-local helpers.
  *
@@ -1801,9 +1794,6 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	uint64      slot_wait_max_us = 0;
 	bool        force_actual_results = false;
 	bool        return_actual_results = false;
-	bool        apply_merkle_synchronously = false;
-	MerkleRaftTargetRef *merkle_targets = NULL;
-	int         merkle_target_count = 0;
 
 	if (profile)
 		t_start_us = bcdb_get_time();
@@ -1843,7 +1833,6 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			tx_refs[i].raft_ledger_enabled = tx->raft_ledger_enabled;
 			if (tx->raft_ledger_enabled)
 			{
-				apply_merkle_synchronously = true;
 				tx_refs[i].raft_log_index = tx->raft_log_index;
 				tx_refs[i].raft_item_ordinal = tx->raft_item_ordinal;
 				memcpy(tx_refs[i].raft_epoch_id, tx->raft_epoch_id,
@@ -1851,11 +1840,6 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			}
 		}
 	}
-	if (apply_merkle_synchronously && synchronous_commit == SYNCHRONOUS_COMMIT_OFF)
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("safe-ledger Merkle results require synchronous_commit=on"),
-				 errhint("Commit the block with synchronous_commit enabled.")));
 	if (profile)
 		t_parse_us = bcdb_get_time();
 
@@ -1900,73 +1884,6 @@ bcdb_middleware_submit_block_results(const char* block_json)
 			 * per backoff iteration. */
 			block_wait_us = bcdb_wait_until_block_slots_ready(tx_refs, num_tx, block_id);
 		}
-	}
-
-	/*
-	 * Worker result publication happens only after the heap change and its
-	 * terminal delta blob commit together.  Apply the now-visible contiguous
-	 * prefix once for the whole submitted block before this SQL function can
-	 * return to the gateway.  The outer PostgreSQL commit therefore makes the
-	 * Generic WAL pages and durable apply watermark synchronous with the
-	 * externally visible block result while retaining page-level batching.
-	 */
-	if (apply_merkle_synchronously && enable_merkle_index)
-	{
-		uint64 required_seq = 0;
-		uint64 applied_seq;
-
-		merkle_targets = palloc0(sizeof(*merkle_targets) * num_tx);
-		for (int i = 0; i < num_tx; i++)
-		{
-			int target_index;
-
-			if (!tx_refs[i].raft_ledger_enabled)
-				continue;
-			for (target_index = 0; target_index < merkle_target_count;
-				 target_index++)
-				if (merkle_targets[target_index].raft_log_index ==
-					tx_refs[i].raft_log_index &&
-					memcmp(merkle_targets[target_index].epoch_id,
-						   tx_refs[i].raft_epoch_id,
-						   BCDB_RAFT_DIGEST_BYTES) == 0)
-					break;
-			if (target_index == merkle_target_count)
-			{
-				memcpy(merkle_targets[target_index].epoch_id,
-					   tx_refs[i].raft_epoch_id, BCDB_RAFT_DIGEST_BYTES);
-				merkle_targets[target_index].raft_log_index =
-					tx_refs[i].raft_log_index;
-				merkle_targets[target_index].max_item_ordinal =
-					tx_refs[i].raft_item_ordinal;
-				merkle_target_count++;
-			}
-			else if (tx_refs[i].raft_item_ordinal >
-					 merkle_targets[target_index].max_item_ordinal)
-				merkle_targets[target_index].max_item_ordinal =
-					tx_refs[i].raft_item_ordinal;
-		}
-
-		for (int i = 0; i < merkle_target_count; i++)
-		{
-			uint64 target = merkle_raft_apply_target(
-				merkle_targets[i].epoch_id,
-				merkle_targets[i].raft_log_index,
-				merkle_targets[i].max_item_ordinal);
-
-			if (target > required_seq)
-				required_seq = target;
-		}
-		applied_seq = merkle_apply_until_internal(required_seq);
-		if (applied_seq < required_seq)
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("Merkle synchronous apply stopped before this block's committed position"),
-					 errdetail("applied_seq=%llu required_seq=%llu",
-							   (unsigned long long) applied_seq,
-							   (unsigned long long) required_seq),
-					 errhint("An earlier Raft item is not terminal; retry the block after recovery catches up.")));
-		pfree(merkle_targets);
-		merkle_targets = NULL;
 	}
 
 	/* Phase 4: format the completion payload and mark slots consumed. */

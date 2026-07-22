@@ -56,11 +56,6 @@ run_one() {
 run_one build_crash ""
 run_one precommit_crash after_merkle_dynamic_delta_staged
 run_one postcommit_crash after_user_transaction_commit
-run_one applier_crash before_dynamic_transition
-run_one applier_crash after_dynamic_transition
-run_one applier_crash before_apply_state_update
-run_one applier_crash after_apply_state_update
-run_one applier_crash after_apply_state_commit
 
 # Logical transaction and lifecycle guards exercise the dynamic index itself.
 run_one sql_failure ""

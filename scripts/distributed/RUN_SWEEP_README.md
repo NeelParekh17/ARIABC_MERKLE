@@ -219,13 +219,13 @@ Useful invocations:
 # Small smoke campaign.
 ./run_sweep.sh --threads 1 --det-client-workers 1 --executor-workers 1 --reps 1
 
-# Include the optional dynamic topology and pending-crash gates.
+# Include the optional dynamic topology and crash gate.
 ./run_sweep.sh --dynamic-structure-gate 1 --dynamic-structure-crash-gate 1
 
-# Explicit legacy verification (the restore SQL must match the chosen layout).
+# Explicit native-v8 verification (the restore SQL must match the chosen layout).
 ./run_sweep.sh \
   --restore-sql scripts/restore_usertable_small.sql \
-  --merkle-verify-mode legacy --enable-merkle-index 1
+  --merkle-verify-mode dynamic --enable-merkle-index 1
 ```
 
 The campaign directory is printed near the end of `out.txt`:

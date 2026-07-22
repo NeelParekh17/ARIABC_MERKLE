@@ -8,13 +8,13 @@ FAILPOINT=
 ACTION=postmaster_kill
 CASE_NAME=
 RESULT_DIR=
-MERKLE_MODE=static
-UPDATE_MODE=
+MERKLE_MODE=dynamic
+UPDATE_MODE=synchronous_cow
 KEEP_DATA=${KEEP_DATA:-0}
 PORT=${PORT:-$((56000 + ($$ % 1000)))}
 
 usage() {
-    echo "Usage: $0 --case NAME [--failpoint NAME] [--action backend_kill|postmaster_kill] [--merkle-mode static|dynamic] [--update-mode synchronous_cow|pending_log] --result-dir DIR" >&2
+    echo "Usage: $0 --case NAME [--failpoint NAME] [--action backend_kill|postmaster_kill] --merkle-mode dynamic --update-mode synchronous_cow --result-dir DIR" >&2
 }
 
 while (($#)); do
@@ -36,20 +36,14 @@ done
     echo "Invalid action: $ACTION" >&2
     exit 2
 }
-[[ "$MERKLE_MODE" == static || "$MERKLE_MODE" == dynamic ]] || {
-    echo "Invalid Merkle mode: $MERKLE_MODE" >&2
+[[ "$MERKLE_MODE" == dynamic ]] || {
+    echo "Only native dynamic Merkle mode is supported" >&2
     exit 2
 }
-if [[ -n "$UPDATE_MODE" ]]; then
-    [[ "$MERKLE_MODE" == dynamic ]] || {
-        echo "--update-mode is only valid with --merkle-mode dynamic" >&2
-        exit 2
-    }
-    [[ "$UPDATE_MODE" == synchronous_cow || "$UPDATE_MODE" == pending_log ]] || {
-        echo "Invalid update mode: $UPDATE_MODE" >&2
-        exit 2
-    }
-fi
+[[ "$UPDATE_MODE" == synchronous_cow ]] || {
+    echo "Only native synchronous_cow update mode is supported" >&2
+    exit 2
+}
 [[ ! -e "$RESULT_DIR" ]] || {
     echo "Refusing to overwrite result directory: $RESULT_DIR" >&2
     exit 2
@@ -268,7 +262,7 @@ run_applier_crash() {
         "SELECT applied_seq FROM ariabc_internal.merkle_apply_state WHERE singleton")
     stop_server
     start_server "$FAILPOINT" "$ACTION"
-    expect_connection_loss "SELECT merkle_apply_pending();"
+    expect_connection_loss "SELECT merkle_recovery_status();"
     if [[ "$ACTION" == postmaster_kill ]]; then
         wait_for_crash
     fi
@@ -338,7 +332,7 @@ VALUES (decode(repeat('f', 64), 'hex'), 1, 0,
         0, NULL);
 COMMIT;
 SQL
-    "$PSQL" "${PSQL_ARGS[@]}" -c "SELECT merkle_apply_pending();" \
+    "$PSQL" "${PSQL_ARGS[@]}" -c "SELECT merkle_recovery_status();" \
         >>"$RESULT_DIR/case.log"
 }
 
@@ -359,7 +353,7 @@ run_route_change() {
     "$PSQL" "${PSQL_ARGS[@]}" -c \
         "INSERT INTO merkle_atomicity_test VALUES (300, 'old-route', 1);" \
         >>"$RESULT_DIR/case.log"
-    "$PSQL" "${PSQL_ARGS[@]}" -c "SELECT merkle_apply_pending();" \
+    "$PSQL" "${PSQL_ARGS[@]}" -c "SELECT merkle_recovery_status();" \
         >>"$RESULT_DIR/case.log"
     "$PSQL" "${PSQL_ARGS[@]}" -c \
         "UPDATE merkle_atomicity_test
@@ -405,7 +399,7 @@ SQL
     local unlogged_options=""
 
     if [[ "$MERKLE_MODE" == dynamic ]]; then
-		concurrent_options="WITH (partitions=2, fanout=32, dynamic=on, leaf_capacity=4, merge_threshold=2, update_mode='pending_log')"
+		concurrent_options="WITH (partitions=2, fanout=32, dynamic=on, leaf_capacity=4, merge_threshold=2, update_mode='synchronous_cow')"
         unlogged_options="$concurrent_options"
     fi
     "$PSQL" "${PSQL_ARGS[@]}" -c \
@@ -482,7 +476,7 @@ CREATE TABLE merkle_atomicity_lifecycle (
 CREATE INDEX merkle_atomicity_lifecycle_idx
 ON merkle_atomicity_lifecycle USING merkle (id) $concurrent_options;
 INSERT INTO merkle_atomicity_lifecycle VALUES (1, 'before-truncate');
-SELECT merkle_apply_pending();
+SELECT merkle_recovery_status();
 SQL
         local lifecycle_oid
         lifecycle_oid=$(scalar "SELECT 'merkle_atomicity_lifecycle_idx'::regclass::oid")
@@ -498,7 +492,7 @@ SQL
             "INSERT INTO merkle_atomicity_lifecycle VALUES (2, 'after-truncate');" \
             >>"$RESULT_DIR/case.log"
         "$PSQL" "${PSQL_ARGS[@]}" -c \
-            "SELECT merkle_apply_pending();" >>"$RESULT_DIR/case.log"
+            "SELECT merkle_recovery_status();" >>"$RESULT_DIR/case.log"
         assert_scalar \
             "SELECT merkle_dynamic_verify('merkle_atomicity_lifecycle_idx'::regclass)" t
         "$PSQL" "${PSQL_ARGS[@]}" -c \
@@ -563,7 +557,7 @@ case "$CASE_NAME" in
 	build_crash) run_build_crash ;;
     precommit_crash) [[ -n "$FAILPOINT" ]] || exit 2; run_precommit_crash ;;
     postcommit_crash) [[ -n "$FAILPOINT" ]] || exit 2; run_postcommit_crash ;;
-    applier_crash) [[ -n "$FAILPOINT" ]] || exit 2; run_applier_crash ;;
+    applier_crash) echo "applier_crash is removed with the pending-log architecture" >&2; exit 2 ;;
     sql_failure) run_sql_failure ;;
     savepoint) run_savepoint ;;
     route_change) run_route_change ;;

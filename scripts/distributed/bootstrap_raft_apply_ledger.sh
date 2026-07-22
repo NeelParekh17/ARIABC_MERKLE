@@ -103,7 +103,6 @@ psql "${PSQL_ARGS[@]}" -f "$SQL_FILE"
 if [[ "$CLEAN" -eq 1 ]]; then
     echo "Cleaning existing rows for epoch $EPOCH..."
     psql "${PSQL_ARGS[@]}" -c "
-    SELECT merkle_apply_pending();
     DO \$\$
     DECLARE
       applied bigint;
@@ -209,11 +208,9 @@ else
     echo "Ledger schema installation complete (schema-only mode)."
 fi
 
-# Upgrade any pre-v7 tree before the Raft server is allowed to serve this
-# database, then apply the committed prefix left by a prior crash.  Both calls
-# are privileged internal operations; the final DO block is the hard gate.
-echo "Rebuilding legacy Merkle indexes and applying committed recovery prefix..."
-psql "${PSQL_ARGS[@]}" -c "SELECT merkle_apply_pending(); SELECT merkle_rebuild_legacy_indexes(); SELECT merkle_apply_pending();"
+# Native v8 indexes publish their committed roots in the originating
+# transaction. There is no deferred Merkle queue or legacy-index rebuild step.
+echo "Validating native Merkle v8 recovery state..."
 psql "${PSQL_ARGS[@]}" -v ON_ERROR_STOP=1 -c "
 DO \$\$
 DECLARE

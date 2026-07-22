@@ -1,11 +1,9 @@
 # Native Merkle operations
 
-`synchronous_cow` is the authoritative native-page mode.  `pending_log` uses
-the durable compatibility queue and materializes native pages exactly once in
-the ordered applier.  The mode is persisted in the metapage; the session GUC
-is not consulted for REINDEX/build fallback.  Missing reloptions default to
-synchronous COW, explicit pending mode must be stored in reloptions, and
-online migration is disabled until a drain-and-compare protocol exists.
+`synchronous_cow` is the only supported native-v8 update mode. The former
+`pending_log` compatibility queue and legacy static mode are removed. The mode
+is persisted in the metapage, and indexes using an older layout must be
+reindexed with the native dynamic-v8 options.
 
 The public commitment has three values: `data_root`, `structure_root`, and
 `combined_root`.  Tree statistics expose all three, together with topology and

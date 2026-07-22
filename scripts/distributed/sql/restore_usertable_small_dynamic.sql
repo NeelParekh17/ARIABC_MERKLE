@@ -1,5 +1,5 @@
 -- Compatibility entry point. Keep the 12k-row dataset in one canonical file.
--- Suppress the legacy static Merkle index: the dynamic setup below is the
+-- Suppress the obsolete static Merkle index: the dynamic setup below is the
 -- sole authoritative index for this acceptance workload.
 \set bench_enable_merkle 0
 -- This entry point is guarded by ariabc.allow_destructive_benchmark_reset in
@@ -7,7 +7,7 @@
 -- state directly instead of asking that old index to drain successfully.
 \set bench_skip_pending_drain 1
 
--- A pre-v5 or interrupted benchmark index may be too corrupt for the DDL
+-- An interrupted benchmark index may be too corrupt for the DDL
 -- guard to inspect, and PostgreSQL intentionally refuses to DROP it in that
 -- state.  REINDEX is the supported recovery operation and restores enough
 -- metadata for the canonical DROP TABLE below to proceed safely.

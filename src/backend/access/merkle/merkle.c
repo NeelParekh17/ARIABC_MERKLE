@@ -167,7 +167,7 @@ merkle_reject_ddl(Relation rel, const char *command)
 				 errdetail("applied_seq=%llu target_seq=%llu",
 						   (unsigned long long) status.applied_seq,
 						   (unsigned long long) status.target_seq),
-				 errhint("Run SELECT merkle_apply_pending() before changing or dropping the relation.")));
+					 errhint("Use the native v8 Merkle index lifecycle before changing or dropping the relation.")));
 }
 
 /*
@@ -201,7 +201,6 @@ merkle_reject_concurrent_ddl(Oid index_oid, const char *command)
 static relopt_enum_elt_def merkleUpdateModeValues[] =
 {
 	{"synchronous_cow", MERKLE_UPDATE_SYNCHRONOUS_COW},
-	{"pending_log", MERKLE_UPDATE_PENDING_LOG},
 	{(const char *) NULL}
 };
 
@@ -250,10 +249,10 @@ merkle_register_relopts(void)
 					  MERKLE_DYNAMIC_DEFAULT_MAX_KEY_BYTES,
 					  64, MERKLE_DYNAMIC_MAX_KEY_BYTES, AccessExclusiveLock);
 	add_enum_reloption(merkle_relopt_kind, "update_mode",
-					   "Chooses exact native COW or lagging pending-log Merkle updates",
+					   "Selects the native v8 copy-on-write update mode",
 					   merkleUpdateModeValues,
 					   MERKLE_UPDATE_SYNCHRONOUS_COW,
-					   "Valid values are \"synchronous_cow\" and \"pending_log\".",
+					   "The only valid value is \"synchronous_cow\".",
 					   AccessExclusiveLock);
     
     merkle_relopts_registered = true;
@@ -433,8 +432,7 @@ merkle_get_options(Relation indexRel)
 		opts->max_key_bytes > MERKLE_DYNAMIC_MAX_KEY_BYTES ||
 		(opts->dynamic && opts->max_key_bytes > opts->leaf_byte_capacity) ||
 		(opts->dynamic && opts->fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT) ||
-		(opts->update_mode != MERKLE_UPDATE_SYNCHRONOUS_COW &&
-		 opts->update_mode != MERKLE_UPDATE_PENDING_LOG))
+		(opts->update_mode != MERKLE_UPDATE_SYNCHRONOUS_COW))
     {
 		if (opts->dynamic)
 			ereport(ERROR,

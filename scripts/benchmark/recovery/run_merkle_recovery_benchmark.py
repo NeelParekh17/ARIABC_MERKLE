@@ -548,15 +548,8 @@ def repair_merkle(
         lookup_scans = candidate_fetch_sql_calls
 
     with timer(m.phase, "targeted_post_repair_confirmation_ms"):
-        # Repair DML commits a second Merkle delta batch.  Confirmation reads
-        # must observe the repaired roots, so drain that batch at the durable
-        # boundary before asking the backend for recovery status.
-        record_call(
-            profiler,
-            stage="targeted_confirmation",
-            operation="confirmation_merkle_apply_pending",
-            fn=lambda: execute(conn, "SELECT merkle_apply_pending()"),
-        )
+        # Native v8 publishes the repaired root in the repair transaction.
+        # Confirmation reads therefore begin directly at the commit boundary.
         post_repair_counters: dict[str, Any] = {}
         remaining_bad_leaves = detect_bad_leaves(
             conn,
@@ -826,13 +819,8 @@ def run_one_manifest(
         )
         method_start = now_ms()
         apply_corruption(conn, manifest)
-        # Direct corruption DML is committed into the durable Merkle delta
-        # queue.  Recovery reads require the corresponding index pages to be
-        # caught up first; otherwise the fresh cluster remains in CATCHING_UP
-        # and root localisation is rejected by the backend.  Drain only after
-        # corruption so the benchmark still measures recovery from divergent
-        # Merkle roots, not an unsynchronised index.
-        execute(conn, "SELECT merkle_apply_pending()")
+        # Native v8 publishes the corruption root in the committing
+        # transaction; recovery starts from that committed divergent root.
         planner_results, planner_rows = run_planner_preflight(conn, manifest, run_id)
         planner_rows_out.extend(planner_rows)
         profiler = None
