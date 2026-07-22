@@ -1294,14 +1294,10 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 
 	/* Validate early inside transaction before database state is finalized */
 	validate_terminal_payload(tx, result_payload, result_fmtver, false, NULL, terminal_digest);
-	merkle_delta_blob = merkle_serialize_staged_delta(tx->raft_log_index,
-											 tx->raft_item_ordinal,
-											 &merkle_delta_version);
-	if (merkle_delta_blob != NULL &&
-		merkle_delta_version != MERKLE_DELTA_LEGACY_VERSION &&
-		merkle_delta_version != MERKLE_DELTA_VERSION)
-		elog(ERROR, "Merkle serialization returned invalid version %d",
-			 merkle_delta_version);
+	/* Native v8 publishes roots in PRE_COMMIT; the ledger carries no
+	 * compatibility delta blob. */
+	merkle_delta_blob = NULL;
+	merkle_delta_version = 0;
 
 	/*
 	 * Keep terminalization in a later command ID than the CLAIMED insert even
@@ -1365,8 +1361,6 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 									NULL, merkle_delta_version,
 									merkle_delta_blob, spi_rc, processed_ok);
 	ledger_spi_end(&spi_scope);
-	if (merkle_delta_blob != NULL)
-		merkle_mark_staged_delta_persisted();
 	merkle_crash_failpoint("after_merkle_delta_ledger_written");
 	bcdb_maybe_trigger_safe_failpoint("ARIABC_FAILPOINT_AFTER_MERKLE_DELTA_LEDGER_WRITTEN",
 								 tx, "after_merkle_delta_ledger_written");

@@ -14,6 +14,20 @@ damaged.usertable   ← replica under test (corrupted, then repaired)
 
 ## Quick start
 
+The synced remote wrapper has an EPYC default campaign. From the repository
+root, run it with no arguments:
+
+```bash
+./scripts/benchmark/recovery/run_synced_remote_recovery_benchmark.sh
+```
+
+This defaults to `protectdr@ranking.cse.iitb.ac.in`, remote root
+`/home/protectdr/merkle_recovery_runs`, `/usr/bin/python3`, the release build,
+the native `dynamic-size-scaling-k75-c300` profile, tuple counts 1M/3M/5M,
+one repetition, profiling off, audit skipped, summary artifacts, and a kept
+remote archive. Any of these can still be overridden with the corresponding
+option.
+
 ```bash
 # smoke run (~seconds, tiny row counts)
 ./.venv/bin/python3 scripts/benchmark/recovery/run_merkle_recovery_benchmark.py \

@@ -16,8 +16,8 @@ campaigns, not missing PLAN correctness.
 
 - [x] Use normal PostgreSQL WAL/commit flush as the heap + Merkle durability boundary; no page fsync at every commit.
 - [x] Emit native node, leaf, item, and root WAL before the ordinary transaction commit record.
-- [x] Make layout-v5 dynamic index pages the authoritative production state.
-- [x] Keep `ariabc_internal.merkle_dynamic_*` as pending-mode compatibility/differential state only.
+- [x] Make native dynamic layout-v8 index pages the authoritative production state.
+- [x] Remove pending-mode compatibility/differential state from the production path.
 - [x] Select the exact committed root immediately in `synchronous_cow`; no applier or schema dependency.
 - [x] Publish immutable XID-visible partition-root versions, never overwrite the committed root in place.
 - [x] Derive the global root from ordered partition roots; no mutable global-root hotspot.
@@ -40,7 +40,7 @@ campaigns, not missing PLAN correctness.
 
 ## C. Native page format and algorithms
 
-- [x] Version layout as dynamic layout v5 and fail legacy layouts closed with a REINDEX requirement.
+- [x] Version layout as dynamic layout v8 and fail older layouts closed with a REINDEX requirement.
 - [x] Store immutable configuration and native directory location on the metapage without a per-commit global root/count update.
 - [x] Add one native partition-directory page per partition to avoid shared root-head hotspots.
 - [x] Add checksummed root records with creator XID, sequence domain/flags/epoch/value, version, root locator, summaries, and previous-version link.
@@ -98,12 +98,12 @@ campaigns, not missing PLAN correctness.
 ## G. Modes and compatibility
 
 - [x] Store `update_mode` as a persistent index reloption; the obsolete session GUC and online setter API are removed.
-- [x] Retain `pending_log` as an explicitly lagging compatibility mode.
+- [x] Remove the obsolete `pending_log` compatibility mode; native v8 uses synchronous COW only.
 - [x] Keep pending materialization and native page images internally consistent; online authority changes are fail-closed and require REINDEX rather than attempting an unsafe migration.
-- [x] Preserve static-v7 behavior and regression coverage.
+- [x] Require native dynamic-v8 indexes for production Merkle maintenance.
 - [x] Fix a static verification resource-owner mismatch exposed by the compatibility regression.
 - [x] Keep ALTER/rewrite operations fail-closed; allow native-safe DROP/TRUNCATE/REINDEX lifecycle paths.
-- [x] Add user-facing layout-v5, WAL/crash, operations, and upgrade/downgrade documents under `Dynamic_merkle_docs/`.
+- [x] Add user-facing native-v8, WAL/crash, operations, and upgrade documents under `Dynamic_merkle_docs/`.
 
 ## I. Hardening (plan_left.md — completed in this pass)
 
@@ -111,7 +111,7 @@ campaigns, not missing PLAN correctness.
 - [x] **Global root commitments** (plan_left.md §2): `merkle_native_root()` now derives independent topology-independent data and topology-sensitive structure commitments and hashes them into a combined root with layout/route/row format tags.
 - [x] **Extension lock eliminated from hot path** (plan_left.md §5): `native_append_record()` takes `LockRelationForExtension(ExclusiveLock)` only on the P_NEW slow path and releases it immediately after the new buffer is obtained. All three fast paths (hint, FSM recycle, last-block reuse) operate under the buffer lock alone, allowing concurrent writers in different partitions to proceed in parallel.
 - [x] **Root publication lock scope** (plan_left.md §5): root publication follows the same existing-page fast path and takes the extension lock only for physical allocation.
-- [x] **Exactly-once routing** (plan_left.md §4): strict native transitions are filtered out of compatibility-queue serialization, so a mixed static/pending/strict transaction cannot replay strict transitions through `merkle_apply_pending()`.
+- [x] **Exactly-once routing** (plan_left.md §4): strict native transitions publish through the native v8 commit path and are not serialized into a compatibility queue.
 - [x] **Persistent mode guard** (plan_left.md §3): mode is read from the native metapage, missing reloptions default to synchronous COW, and mode changes require an explicit reloption plus REINDEX.
 - [x] **Byte-aware merge** (plan_left.md §9): merge check now requires `left.subtree_bytes + right.subtree_bytes <= leaf_byte_capacity` in addition to the count threshold.
 - [x] **O(depth)-range traversal helpers** (plan_left.md §7): `native_traverse_range_summary` and `native_traverse_range_items` implement correct prefix-tree descent (disjoint -> stop, covered -> return summary, internal -> recurse). Both `merkle_native_get_ranges` and `merkle_native_get_range_items` use these helpers.
@@ -122,7 +122,7 @@ campaigns, not missing PLAN correctness.
 ## H. Verification completed
 
 - [x] `make -j4` full PostgreSQL tree build passes.
-- [x] Installed final PostgreSQL backend binary passes clean `merkle_static` and `merkle_native` regressions together; the final native-only rerun also passes after the spill verifier fix.
+- [x] Installed final PostgreSQL backend binary passes the native-only `merkle_native` regression after the spill verifier fix.
 - [x] `git diff --check` passes.
 - [x] Fresh database without `ariabc_internal` supports strict native build/DML/root/verify.
 - [x] Focused DML covers insert/update/delete, coalescing, key change, savepoint rollback, abort, split, merge, and contraction.
@@ -137,7 +137,7 @@ campaigns, not missing PLAN correctness.
 - [x] Repeated four-statement distributed workloads completed with `divergence_count=0` and `permanent_failures=0`.
 - [x] **[hardening]** `make -j$(nproc)` full tree build passes with all plan_left.md fixes applied.
 - [x] **[hardening]** `merkle_native` regression passes cleanly against installed server.
-- [x] **[hardening]** Final focused schedule (`merkle_static` + `merkle_native`) passes after layout-v5, spill-verifier, runner, and documentation changes; `bash -n scripts/distributed/run_4node_raft_cluster.sh` passes.
+- [x] **[hardening]** Final focused native schedule (`merkle_native`) passes after layout-v8, spill-verifier, runner, and documentation changes; `bash -n scripts/distributed/run_4node_raft_cluster.sh` passes.
 - [x] Benchmark proof tooling is bounded and machine-readable: native WAL cases are runnable via `scripts/test/merkle_crash_atomicity/run_native_wal_boundaries.sh`, memory builds via `scripts/benchmark/run_native_merkle_memory_curve.sh`, and the parser self-test passes after the Kafka-majority-visible label change.
 - [x] Full PostgreSQL regression schedule was attempted after the final install; Merkle-focused tests remain green, while the broader baseline still fails unrelated existing tests and lacks `sql/expected/security_label.out`. It remains an environment/repository baseline blocker, not a native Merkle failure.
 - [x] Final distributed artifact `scripts/bench_full_results/cluster4_20260718_110847` passes provenance/input freeze, 11,741.84 Kafka-majority-visible TPS, `divergence_count=0`, `permanent_failures=0`, native structure mutation, immediate replica crash/restart, exact typed-marker content/topology/combined commitments, full verifier, and three-replica equality.
@@ -165,7 +165,7 @@ campaigns, not missing PLAN correctness.
 
 6. [x] Replace largest-partition and full-SPI materialization with disk-backed per-partition spools, bounded leaf reads, and an SPI cursor. See the measured 10M RSS caveat above.
 
-7. [x] Add user-facing layout-v5 REINDEX/upgrade/downgrade and WAL/operations documents, including `Dynamic_merkle_docs/NATIVE_MERKLE_LAYOUT_V5.md`.
+7. [x] Add user-facing native-v8 REINDEX/upgrade and WAL/operations documents.
 
 8. [ ] Run the full regression schedule in an environment with enough memory; the repository schedule still contains unrelated missing/failed baseline tests, so only focused Merkle evidence is currently usable.
 

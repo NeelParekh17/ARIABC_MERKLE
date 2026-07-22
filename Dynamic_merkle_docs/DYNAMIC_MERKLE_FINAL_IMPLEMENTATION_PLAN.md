@@ -321,9 +321,6 @@ The latest analysis reports 33 valid runs for each large-machine campaign under 
                   commit corrupted rows
                            |
                            v
-                  merkle_apply_pending()
-                           |
-                           v
        +-----------------------------------------+
        | Compare all partition root hashes      |
        +--------------------+--------------------+
@@ -357,9 +354,6 @@ The latest analysis reports 33 valid runs for each large-machine campaign under 
                             |
                             v
                   commit repaired rows
-                            |
-                            v
-                  merkle_apply_pending()
                             |
                             v
                   targeted confirmation

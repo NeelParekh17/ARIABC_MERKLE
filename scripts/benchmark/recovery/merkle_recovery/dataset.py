@@ -19,7 +19,7 @@ def ensure_helpers(conn, merkle_mode: str = "static") -> None:
         from .dynamic_db import DYNAMIC_API_FUNCTIONS, ensure_dynamic_api
 
         ensure_dynamic_api(conn)
-        required = ["merkle_apply_pending", *DYNAMIC_API_FUNCTIONS]
+        required = [*DYNAMIC_API_FUNCTIONS]
     else:
         required = [
             "merkle_bucket_for_key",
@@ -53,7 +53,6 @@ def ensure_helpers(conn, merkle_mode: str = "static") -> None:
 
 
 def recreate_schema(conn) -> None:
-    execute(conn, "SELECT merkle_apply_pending()")
     run_file(conn, BENCH_DIR / "create_schema.sql")
 
 
@@ -263,7 +262,6 @@ def build_dataset(
 
 def reset_damaged_from_healthy(conn, cfg: dict[str, int], merkle_mode: str = "static") -> None:
     """Restore damaged.usertable to a clean copy of healthy; rebuild all indexes."""
-    execute(conn, "SELECT merkle_apply_pending()")
     execute(conn, "DROP TABLE IF EXISTS damaged.usertable CASCADE")
     execute(conn, "CREATE TABLE damaged.usertable (LIKE healthy.usertable INCLUDING DEFAULTS)")
     execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")

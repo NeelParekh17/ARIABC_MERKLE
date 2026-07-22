@@ -2025,20 +2025,8 @@ def main() -> int:
                                         elif pg_pending_deltas != "0":
                                             verification_error = "pg_baseline_created_merkle_deltas"
                                     else:
-                                        apply_ok, apply_msg = _psql_exec(
-                                            psql_path,
-                                            db=args.db,
-                                            port=args.port,
-                                            user=args.user,
-                                            query="select merkle_apply_pending();",
-                                            cwd=scripts_dir,
-                                            env=mode_env,
-                                        )
-                                        if not apply_ok:
-                                            verification_error = "merkle_apply_pending_failed: " + apply_msg
-                                        else:
-                                            count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=mode_env)
-                                            if args.dynamic_merkle:
+                                        count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=mode_env)
+                                        if args.dynamic_merkle:
                                                 dynamic_index = args.dynamic_merkle_index.replace("'", "''")
                                                 root_hash = _psql_value(
                                                     psql_path,
@@ -2090,7 +2078,7 @@ def main() -> int:
                                                     dynamic_layout_version = int(layout_parts[2])
                                                     dynamic_max_depth = int(layout_parts[3])
                                                     if (
-                                                        dynamic_layout_version != 7
+                                                        dynamic_layout_version != 8
                                                         or dynamic_logical_fanout != 32
                                                         or dynamic_physical_node_fanout != 2
                                                     ):
@@ -2128,11 +2116,11 @@ def main() -> int:
                                                             verification_error = "dynamic_profile_counter_moved_backwards"
                                                     elif profile_splits is None:
                                                         verification_error = "dynamic_profile_query_failed"
-                                            else:
-                                                root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=mode_env)
-                                                verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=mode_env)
-                                            if count_s is None or root_hash is None or verify is None:
-                                                verification_error = "post_workload_verification_query_failed"
+                                        else:
+                                            root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=mode_env)
+                                            verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=mode_env)
+                                        if count_s is None or root_hash is None or verify is None:
+                                            verification_error = "post_workload_verification_query_failed"
                                     if verification_error:
                                         (case_dir / "verification.err").write_text(verification_error + "\n")
                                 if restore_exit == 0 and workload_exit == 124:

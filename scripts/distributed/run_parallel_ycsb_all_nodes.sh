@@ -11,7 +11,7 @@ set -euo pipefail
 # Active nodes:
 #   neel@10.129.148.248    utkarsh-MS-7C96
 #   neel@10.129.148.246      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
-#   neel@10.129.148.247    neel-MS-7C96
+#   neel@10.129.148.247    admin123 (Kafka host)
 #
 # Default benchmark profiles (one run × modes in this order):
 #   1. pg mode             – plain PostgreSQL baseline (no BCDB)
@@ -42,7 +42,6 @@ set -euo pipefail
 #   --max-retries <50>      Per-statement retry budget for transient serialization conflicts
 #   --nodes <csv>           Node aliases or SSH targets to run. Aliases: admin123,
 #                            user4,utkarsh [default: all configured nodes]
-#   --legacy-merkle         Use the legacy static Merkle restore (default: native dynamic)
 #   --dynamic-structure-profile <0|1>  Profile native DET split/merge counters in
 #                            separate index-build and benchmark phases [default: 1]
 #                            Dynamic runs require native layout v8, logical fanout
@@ -110,7 +109,6 @@ while [[ $# -gt 0 ]]; do
     --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
     --max-retries)   BENCH_MAX_RETRIES="${2:-50}"; shift 2 ;;
     --nodes)         SELECTED_NODES="${2:-}"; shift 2 ;;
-    --legacy-merkle)  DYNAMIC_MERKLE=0; shift 1 ;;
     --dynamic-structure-profile) DYNAMIC_STRUCTURE_PROFILE="${2:-1}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
     --hang-timeout)  HANG_TIMEOUT_S="${2:-60}"; shift 2 ;;
@@ -151,6 +149,12 @@ if [[ -n "$SELECTED_NODES" ]]; then
     exit 2
   }
   NEEL_NODES=("${FILTERED_NODES[@]}")
+fi
+
+if [[ "${#NEEL_NODES[@]}" -ne 3 ]]; then
+  echo "ERROR: native Merkle YCSB requires all 3 configured nodes, including admin123" >&2
+  echo "       selected: $(IFS=,; echo "${NEEL_NODES[*]}")" >&2
+  exit 2
 fi
 
 [[ "$DYNAMIC_STRUCTURE_PROFILE" =~ ^[01]$ ]] || {
@@ -553,7 +557,6 @@ else
         --exclude='config.status' \
         --exclude='config.log' \
         --exclude='config.cache' \
-        --exclude='/GNUmakefile' \
         --exclude='src/Makefile.global' \
         --exclude='src/include/pg_config.h' \
         --exclude='src/include/pg_config_ext.h' \
@@ -1212,7 +1215,7 @@ for node in nodes:
             if not all(value.isdigit() for value in
                        (build_splits, build_merges, splits, merges)):
                 raise SystemExit(f"missing phase-separated DET profile counters for {node}: {key}")
-            if layout != "6" or logical != "32" or physical != "2" or not max_depth.isdigit():
+            if layout != "8" or logical != "32" or physical != "2" or not max_depth.isdigit():
                 raise SystemExit(
                     f"layout contract failed for {node}: {key} "
                     f"layout={layout or 'missing'} logical={logical or 'missing'} "

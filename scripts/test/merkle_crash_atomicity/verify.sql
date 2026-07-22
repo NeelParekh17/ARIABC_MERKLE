@@ -1,6 +1,5 @@
 \set ON_ERROR_STOP on
 
-SELECT merkle_apply_pending() AS applied_through;
 SELECT merkle_recovery_status() AS recovery_status;
 SELECT merkle_recovery_status() LIKE '%"state":"READY"%'
        AS recovery_ready \gset

@@ -1137,32 +1137,11 @@ uint64_t pg_state_machine::safe_sync_startup(uint64_t durable_log_start_index) {
         }
     }
 
-    // The server must never start safe mode with a legacy/invalid Merkle
-    // format or an unapplied committed prefix.  Rebuild is idempotent and is
-    // a no-op when no Merkle index exists yet (bootstrap creates the index
-    // later), while the final status query is the hard READY gate.
+    // The server must never start safe mode without valid native Merkle v8
+    // state. Native roots are transaction-coupled; no pending-log apply or
+    // legacy-index rebuild is performed here.
     {
-        PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_apply_pending();");
-        if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-            const std::string msg = PQerrorMessage(c);
-            if (res) PQclear(res);
-            PQfinish(c);
-            throw std::runtime_error(
-                "SAFE_STARTUP_FAILED: Merkle committed-prefix apply failed: " + msg);
-        }
-        PQclear(res);
-
-        res = PQexec(c, "SELECT pg_catalog.merkle_rebuild_legacy_indexes();");
-        if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-            const std::string msg = PQerrorMessage(c);
-            if (res) PQclear(res);
-            PQfinish(c);
-            throw std::runtime_error(
-                "SAFE_STARTUP_FAILED: Merkle legacy-index rebuild failed: " + msg);
-        }
-        PQclear(res);
-
-        res = PQexec(c, "SELECT pg_catalog.merkle_recovery_status();");
+        PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_recovery_status();");
         if (!res || PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1) {
             const std::string msg = PQerrorMessage(c);
             if (res) PQclear(res);

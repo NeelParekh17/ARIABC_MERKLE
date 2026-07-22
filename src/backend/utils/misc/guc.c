@@ -404,7 +404,6 @@ static const struct config_enum_entry synchronous_commit_options[] = {
 static const struct config_enum_entry merkle_read_lag_policy_options[] = {
 	{"error", MERKLE_READ_LAG_ERROR, false},
 	{"wait", MERKLE_READ_LAG_WAIT, false},
-	{"apply", MERKLE_READ_LAG_APPLY, false},
 	{NULL, 0, false}
 };
 
@@ -4513,8 +4512,8 @@ static struct config_enum ConfigureNamesEnum[] =
 {
 	{
 		{"merkle_read_lag_policy", PGC_SUSET, DEVELOPER_OPTIONS,
-			gettext_noop("Controls reads while committed Merkle deltas are pending."),
-			gettext_noop("error rejects stale roots; wait catches up the committed prefix; apply runs privileged catch-up inline.")
+			gettext_noop("Controls reads while native Merkle state is not ready."),
+			gettext_noop("error rejects unavailable roots; wait waits for the native commit boundary.")
 		},
 		&merkle_read_lag_policy,
 		MERKLE_READ_LAG_ERROR, merkle_read_lag_policy_options,

@@ -241,6 +241,16 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 				 errdetail("Merkle integrity maintenance covers every live heap row and cannot safely skip predicate-false UPDATE or DELETE transitions."),
 					 errhint("Create a non-partial Merkle index and REINDEX any legacy partial Merkle index.")));
 	opts = merkle_get_options(indexRel);
+	if (!opts->dynamic)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("native v8 Merkle indexes require dynamic=true"),
+				 errhint("Create the index with the native dynamic Merkle options.")));
+	if (opts->update_mode != MERKLE_UPDATE_SYNCHRONOUS_COW)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pending-log Merkle indexes are no longer supported"),
+				 errhint("REINDEX with update_mode=synchronous_cow.")));
 
 	/*
 	 * A rebuild scans the already-committed heap state.  Rebuilding while the
@@ -577,10 +587,7 @@ merkleBuildempty(Relation indexRel)
 		meta->dynamicMaxKeyBytes = opts->max_key_bytes;
 		meta->nativeDirectoryStart = MERKLE_TREE_START_BLKNO;
 		meta->nativeDirectoryPages = numTreePages;
-		if (opts->update_mode == MERKLE_UPDATE_SYNCHRONOUS_COW)
-			meta->nativeFormatFlags = MERKLE_NATIVE_MODE_SYNCHRONOUS_COW;
-		else
-			meta->nativeFormatFlags = MERKLE_NATIVE_MODE_PENDING_LOG;
+		meta->nativeFormatFlags = MERKLE_NATIVE_MODE_SYNCHRONOUS_COW;
 	}
 	((PageHeader) metapage)->pd_lower =
 		(LocationIndex) ((char *) meta + sizeof(*meta) - (char *) metapage);
