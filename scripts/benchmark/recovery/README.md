@@ -147,7 +147,8 @@ verification_results.csv
 dynamic_logical_ranges.csv     every logical summary request/result
 dynamic_summary_items.csv      bounded key/route/hash summaries
 dynamic_exact_heap_rows.csv    exact full healthy rows fetched for repair
-dynamic_tree_stats.csv         state/depth/occupancy/split/merge/byte evidence
+dynamic_tree_stats.csv         state/depth/occupancy/byte evidence plus distinct
+                               index_build and recovery_execution split/merge stages
 dynamic_index_plans.csv        heap EXPLAIN plus native-API authority proof
 dynamic_preflight.json         resolved mode/geometry/API/index fail-fast proof
 dynamic_crash_gate_summary.json destructive crash/lifecycle acceptance summary

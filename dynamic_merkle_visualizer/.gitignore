@@ -1,0 +1,4 @@
+.pgdata/
+postgres.log
+__pycache__/
+*.pyc

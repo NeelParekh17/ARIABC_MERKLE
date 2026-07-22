@@ -38,7 +38,7 @@ Dynamic Merkle options forwarded to run_4node_raft_cluster.sh:
                            and requires them to match across all replicas.
   --dynamic-index NAME     Fully-qualified index name for dynamic verification
                            (default: public.usertable_small_dynamic_merkle_idx).
-                           Default dynamic runs require native layout v6,
+                           Default dynamic runs require native layout v8,
                            logical fanout 32, and physical node fanout 2.
   --dynamic-structure-gate N
                            Untimed merge/re-split/key-route gate (default: 1).
@@ -46,8 +46,9 @@ Dynamic Merkle options forwarded to run_4node_raft_cluster.sh:
                            Crash/restart one replica with pending transitions
                            during the untimed gate (default: 0).
   --dynamic-structure-profile N
-                           Opt-in native split/merge counters and per-replica
-                           equality check (default: 1; use 0 to disable profiling).
+                           Opt-in native split/merge counters, captured separately
+                           for index build and benchmark execution, with per-replica
+                           equality checks (default: 1; use 0 to disable profiling).
 
 Workload phase options forwarded to run_4node_raft_cluster.sh:
   --warmup-queries N       Untimed state-preserving warm-up updates (default: 1000;
@@ -68,8 +69,12 @@ Cluster topology options forwarded to run_4node_raft_cluster.sh:
   --kafka-host HOST
   --kafka-port N
   --kafka-home-remote DIR
+  --kafka-completion-mode MODE
+  --preferred-leader-id N
 
 Other:
+  --no-kafka               Run Raft ordering with direct result completion when
+                           the selected topology has no Kafka host.
   -h, --help
 
 Example (dynamic Merkle sweep):
@@ -117,6 +122,7 @@ CLUSTER_ARGS=(
   --dynamic-structure-crash-gate 0
   --dynamic-structure-profile 1
   --warmup-queries 1000
+  --kafka-completion-mode majority_async_all3
 )
 
 while [[ $# -gt 0 ]]; do
@@ -148,9 +154,13 @@ while [[ $# -gt 0 ]]; do
       CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
       shift 2
       ;;
+    --no-kafka)
+      CLUSTER_ARGS+=("$1")
+      shift
+      ;;
     # --- cluster topology options ---
     --node-ids|--node-ips|--node-names|--node-users|--node-is-u22|--node-client-ports|\
-    --raft-port|--db-port|--db-user|--db-name|--kafka-host|--kafka-port|--kafka-home-remote)
+    --raft-port|--db-port|--db-user|--db-name|--kafka-host|--kafka-port|--kafka-home-remote|--kafka-completion-mode|--preferred-leader-id)
       CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
       shift 2
       ;;
@@ -324,7 +334,7 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
   printf 'result_completion_quorum=%s\n' "$RESULT_COMPLETION_QUORUM"
   printf 'schedule=interleaved_alternating_by_rep\n'
   printf 'tps_semantics=raft_majority_result_completion_async_all3_validation\n'
-  printf 'dynamic_layout_version=6\n'
+  printf 'dynamic_layout_version=8\n'
   printf 'dynamic_logical_fanout=32\n'
   printf 'dynamic_physical_node_fanout=2\n'
   printf 'merkle_verify_mode=%s\n' "$MERKLE_VERIFY_MODE_INPUT"
@@ -393,7 +403,6 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
           --raft-ordered-batch-target-entries 32 \
           --raft-ordered-batch-linger-us 1000 \
           --raft-ordered-coalesce-log 0 \
-          --kafka-completion-mode majority_async_all3 \
           --det-window 65536 \
           </dev/null || RUN_PASS=0
 
@@ -449,7 +458,7 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
           "$OUT/campaign.env" 2>/dev/null &&
           ! grep -q '^DYNAMIC_LAYOUT_CONTRACT_PASS=1$' \
           "$RUN/run_summary.env" 2>/dev/null; then
-        echo "WARNING: native dynamic layout-v6 proof missing — marking run INVALID"
+        echo "WARNING: native dynamic layout-v8 proof missing — marking run INVALID"
         RUN_PASS=0
       fi
       if [[ "$RUN_PASS" -eq 1 ]] && grep -q '^merkle_verify_mode=dynamic$' \
@@ -478,6 +487,15 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
           ! grep -q '^DYNAMIC_NATIVE_PROFILE_PASS=1$' \
           "$RUN/run_summary.env" 2>/dev/null; then
         echo "WARNING: native dynamic split/merge profile missing or failed — marking run INVALID"
+        RUN_PASS=0
+      fi
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -q '^dynamic_structure_profile=1$' \
+          "$OUT/campaign.env" 2>/dev/null &&
+          { ! grep -qE '^DYNAMIC_NATIVE_PROFILE_INDEX_BUILD_SPLITS=[0-9]+$' "$RUN/run_summary.env" 2>/dev/null ||
+            ! grep -qE '^DYNAMIC_NATIVE_PROFILE_INDEX_BUILD_MERGES=[0-9]+$' "$RUN/run_summary.env" 2>/dev/null ||
+            ! grep -qE '^DYNAMIC_NATIVE_PROFILE_BENCHMARK_SPLITS=[0-9]+$' "$RUN/run_summary.env" 2>/dev/null ||
+            ! grep -qE '^DYNAMIC_NATIVE_PROFILE_BENCHMARK_MERGES=[0-9]+$' "$RUN/run_summary.env" 2>/dev/null; }; then
+        echo "WARNING: phase-separated index-build/benchmark profile missing — marking run INVALID"
         RUN_PASS=0
       fi
       if [[ "$RUN_PASS" -eq 1 ]] && ! grep -qE 'request_latency_count=[1-9][0-9]*' \

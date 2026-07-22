@@ -40,9 +40,12 @@ set -euo pipefail
 #   --signing-privkey <p>   Signing key path (relative to repo root)  [default: scripts/bench_signing_privkey.pem]
 #   --enforce-signatures <1> 0|1 — set bcdb_enforce_signatures in workload sessions  [default: 1]
 #   --max-retries <50>      Per-statement retry budget for transient serialization conflicts
+#   --nodes <csv>           Node aliases or SSH targets to run. Aliases: admin123,
+#                            user4,utkarsh [default: all configured nodes]
 #   --legacy-merkle         Use the legacy static Merkle restore (default: native dynamic)
-#   --dynamic-structure-profile <0|1>  Profile native DET split/merge counters  [default: 1]
-#                            Dynamic runs require native layout v6, logical fanout
+#   --dynamic-structure-profile <0|1>  Profile native DET split/merge counters in
+#                            separate index-build and benchmark phases [default: 1]
+#                            Dynamic runs require native layout v8, logical fanout
 #                            32 over physical fanout 2, and record tree depth.
 #   --poll-interval <60>    Seconds between monitoring polls
 #   --hang-timeout <60>     Seconds of no log change before hang warning
@@ -90,6 +93,7 @@ POLL_INTERVAL_S=60
 HANG_TIMEOUT_S=60
 STALL_TIMEOUT_S=1800
 SKIP_SYNC=0
+SELECTED_NODES=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -105,6 +109,7 @@ while [[ $# -gt 0 ]]; do
     --signing-privkey) SIGNING_PRIVKEY="${2:-}"; shift 2 ;;
     --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
     --max-retries)   BENCH_MAX_RETRIES="${2:-50}"; shift 2 ;;
+    --nodes)         SELECTED_NODES="${2:-}"; shift 2 ;;
     --legacy-merkle)  DYNAMIC_MERKLE=0; shift 1 ;;
     --dynamic-structure-profile) DYNAMIC_STRUCTURE_PROFILE="${2:-1}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
@@ -117,6 +122,36 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "$SELECTED_NODES" ]]; then
+  declare -a FILTERED_NODES=()
+  IFS=',' read -r -a requested_nodes <<< "$SELECTED_NODES"
+  for requested in "${requested_nodes[@]}"; do
+    requested="${requested//[[:space:]]/}"
+    case "$requested" in
+      admin123) requested="neel@10.129.148.247" ;;
+      user4) requested="neel@10.129.148.246" ;;
+      utkarsh) requested="neel@10.129.148.248" ;;
+    esac
+    found=0
+    for configured in "${NEEL_NODES[@]}"; do
+      if [[ "$requested" == "$configured" ]]; then
+        FILTERED_NODES+=("$configured")
+        found=1
+        break
+      fi
+    done
+    [[ "$found" -eq 1 ]] || {
+      echo "ERROR: --nodes contains unknown node: $requested" >&2
+      exit 2
+    }
+  done
+  [[ "${#FILTERED_NODES[@]}" -gt 0 ]] || {
+    echo "ERROR: --nodes selected no nodes" >&2
+    exit 2
+  }
+  NEEL_NODES=("${FILTERED_NODES[@]}")
+fi
 
 [[ "$DYNAMIC_STRUCTURE_PROFILE" =~ ^[01]$ ]] || {
   echo "ERROR: --dynamic-structure-profile must be 0 or 1" >&2
@@ -314,10 +349,12 @@ mkdir -p "$LOG_DIR"
 {
   printf 'source_fingerprint=%s\n' "$LOCAL_SOURCE_FINGERPRINT"
   printf 'source_fingerprint_contract=source_and_install_stamp_match\n'
+  printf 'selected_nodes=%s\n' "$(IFS=,; echo "${NEEL_NODES[*]}")"
 } > "$LOCAL_RESULT_ROOT/source_provenance.env"
 
-lmsg "=== Parallel YCSB benchmark – all nodes ==="
+lmsg "=== Parallel YCSB benchmark – selected nodes ==="
 lmsg "Timestamp    : $ts"
+lmsg "Nodes        : $(IFS=,; echo "${NEEL_NODES[*]}")"
 lmsg "Modes        : $MODES"
 lmsg "DET profile  : $([[ "$DYNAMIC_STRUCTURE_PROFILE" == "1" && "$DYNAMIC_MERKLE" == "1" ]] && echo enabled || echo disabled)"
 lmsg "Threads      : $THREADS"
@@ -500,6 +537,9 @@ else
       " >> "$slog" 2>&1
 
       # Sync source tree (excludes .git, .venv, .bench_tmp, bench results, and compiled binaries/configs)
+      # Only the configured top-level GNUmakefile is generated.  Keep the
+      # tracked src/**/GNUmakefile inputs because they participate in the
+      # source fingerprint computed by ensure_custom_install_from_repo.sh.
       _rsync_allow_vanished -az --delete \
         --exclude='.git' \
         --exclude='.venv' \
@@ -513,7 +553,7 @@ else
         --exclude='config.status' \
         --exclude='config.log' \
         --exclude='config.cache' \
-        --exclude='GNUmakefile' \
+        --exclude='/GNUmakefile' \
         --exclude='src/Makefile.global' \
         --exclude='src/include/pg_config.h' \
         --exclude='src/include/pg_config_ext.h' \
@@ -1163,12 +1203,15 @@ for node in nodes:
                         ("workload", "threads", "rate", "signing", "enforce_signatures"))
             splits = (row.get("dynamic_profile_splits") or "").strip()
             merges = (row.get("dynamic_profile_merges") or "").strip()
+            build_splits = (row.get("dynamic_build_profile_splits") or "").strip()
+            build_merges = (row.get("dynamic_build_profile_merges") or "").strip()
             logical = (row.get("dynamic_logical_fanout") or "").strip()
             physical = (row.get("dynamic_physical_node_fanout") or "").strip()
             layout = (row.get("dynamic_layout_version") or "").strip()
             max_depth = (row.get("dynamic_max_depth") or "").strip()
-            if not splits.isdigit() or not merges.isdigit():
-                raise SystemExit(f"missing DET profile counters for {node}: {key}")
+            if not all(value.isdigit() for value in
+                       (build_splits, build_merges, splits, merges)):
+                raise SystemExit(f"missing phase-separated DET profile counters for {node}: {key}")
             if layout != "6" or logical != "32" or physical != "2" or not max_depth.isdigit():
                 raise SystemExit(
                     f"layout contract failed for {node}: {key} "
@@ -1176,8 +1219,8 @@ for node in nodes:
                     f"physical={physical or 'missing'} max_depth={max_depth or 'missing'}"
                 )
             current[key] = (
-                int(splits), int(merges), int(layout), int(logical),
-                int(physical), int(max_depth)
+                int(build_splits), int(build_merges), int(splits), int(merges),
+                int(layout), int(logical), int(physical), int(max_depth)
             )
     if not current:
         raise SystemExit(f"no DET profile rows for {node}")
@@ -1190,19 +1233,21 @@ for node, current in maps.items():
         raise SystemExit(f"profile mismatch: {baseline_node}={baseline} {node}={current}")
 for key, value in sorted(baseline.items()):
     print(
-        f"  profile key={key} splits={value[0]} merges={value[1]} "
-        f"layout_version={value[2]} logical_fanout={value[3]} "
-        f"physical_node_fanout={value[4]} max_depth={value[5]}"
+        f"  profile key={key} index_build_splits={value[0]} "
+        f"index_build_merges={value[1]} benchmark_splits={value[2]} "
+        f"benchmark_merges={value[3]} layout_version={value[4]} "
+        f"logical_fanout={value[5]} physical_node_fanout={value[6]} "
+        f"max_depth={value[7]}"
     )
 print(f"DYNAMIC_NATIVE_PROFILE_PASS=1 nodes={len(maps)}")
-print("DYNAMIC_LAYOUT_CONTRACT_PASS=1 layout_version=6")
+print("DYNAMIC_LAYOUT_CONTRACT_PASS=1 layout_version=8")
 print("DYNAMIC_FANOUT_CONTRACT_PASS=1 logical_fanout=32 physical_node_fanout=2")
 PYEOF
   then
     _abort_run "Native DET split/merge profile missing or mismatched across nodes"
   fi
   {
-    printf 'DYNAMIC_LAYOUT_VERSION=6\n'
+    printf 'DYNAMIC_LAYOUT_VERSION=8\n'
     printf 'DYNAMIC_LOGICAL_FANOUT=32\n'
     printf 'DYNAMIC_PHYSICAL_NODE_FANOUT=2\n'
     printf 'DYNAMIC_LAYOUT_CONTRACT_PASS=1\n'

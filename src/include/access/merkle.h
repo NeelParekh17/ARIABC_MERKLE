@@ -135,7 +135,7 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 
 /* Dynamic Merkle format.  The static v7 page layout remains unchanged. */
 #define MERKLE_DYNAMIC_META_MAGIC          ((uint32) 0x44594E4D) /* "DYNM" */
-#define MERKLE_DYNAMIC_LAYOUT_VERSION      6
+#define MERKLE_DYNAMIC_LAYOUT_VERSION      8
 #define MERKLE_DYNAMIC_LOGICAL_FANOUT      32
 #define MERKLE_DYNAMIC_PHYSICAL_NODE_FANOUT 2
 #define MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY 32
@@ -293,6 +293,27 @@ typedef struct MerkleNativeNodeRecord
 	MerkleNativeLocator item_head;
 } MerkleNativeNodeRecord;
 
+/*
+ * Persisted v7 leaf envelope.  Leaves do not have child locators; keeping
+ * the full internal-node array in every leaf wasted 384 bytes per leaf.
+ * Readers expand this compact envelope into MerkleNativeNodeRecord in memory
+ * so the logical fanout-32 and physical fanout-2 APIs remain unchanged.
+ */
+typedef struct MerkleNativeLeafRecord
+{
+	MerkleNativeRecordHeader header;
+	uint32      partition_id;
+	uint16      prefix_len;
+	uint16      flags;
+	uint8       prefix[MERKLE_HASH_BYTES];
+	uint64      tuple_count;
+	uint64      subtree_bytes;
+	MerkleHash  data_xor;
+	MerkleHash  content_xor;
+	MerkleHash  structure_hash;
+	MerkleNativeLocator item_head;
+} MerkleNativeLeafRecord;
+
 #define MERKLE_NATIVE_NODE_LEAF (1U << 0)
 
 typedef struct MerkleNativeItemRecord
@@ -321,6 +342,32 @@ typedef struct MerkleNativePackedItem
 	uint32      key_length;
 	/* canonical key bytes follow */
 } MerkleNativePackedItem;
+
+/* v8 persisted item chunk.  Route bytes are derived from canonical keys. */
+typedef struct MerkleNativePackedItemV8
+{
+	MerkleHash  tuple_hash;
+	/* fixed-width compact key bytes follow */
+} MerkleNativePackedItemV8;
+
+typedef struct MerkleNativeItemChunkRecordV8
+{
+	MerkleNativeRecordHeader header;
+	MerkleNativeLocator next;
+	uint32      item_count;
+	uint32      payload_bytes;
+	uint16      codec;
+	uint16      key_width;
+	uint16      key_flags;
+	uint32      key_type_oid;
+	int32       key_typmod;
+	uint32      key_attno;
+	/* packed v8 items follow */
+} MerkleNativeItemChunkRecordV8;
+
+#define MERKLE_NATIVE_ITEM_CODEC_CANONICAL 0
+#define MERKLE_NATIVE_ITEM_CODEC_SINGLE_KEY 1
+#define MERKLE_NATIVE_ITEM_KEY_NULL         (1U << 0)
 
 /*
  * MerkleNode - A single node in the Merkle tree
@@ -538,6 +585,9 @@ extern void merkle_compute_dynamic_item_identity(Relation indexRel,
 										 int nkeys, int partitions,
 										 int max_key_bytes,
 										 MerkleItemIdentity *result);
+extern void merkle_digest_canonical_key_data(const uint8 *key_data,
+										 Size key_length,
+										 uint8 digest[MERKLE_HASH_BYTES]);
 extern bool merkle_index_is_dynamic(Relation indexRel);
 extern void merkle_native_init(Relation indexRel, int partitions,
 							   uint64 baseline_apply_seq);

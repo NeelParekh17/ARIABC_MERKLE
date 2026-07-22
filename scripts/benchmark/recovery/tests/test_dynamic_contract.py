@@ -45,7 +45,7 @@ def test_dynamic_profile_is_the_exact_acceptance_matrix():
     assert config.repetitions == 5
     assert config.benchmark_schema_version == 6
     assert config.extra["dynamic_partitions"] == 200
-    assert config.extra["dynamic_native_layout_version"] == 6
+    assert config.extra["dynamic_native_layout_version"] == 8
     assert config.extra["dynamic_logical_fanout"] == 32
     assert config.extra["dynamic_physical_node_fanout"] == 2
     assert config.extra["dynamic_leaf_capacity"] == 32

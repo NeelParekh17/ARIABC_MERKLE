@@ -94,6 +94,16 @@ typedef struct NativeConfig
 	int max_key_bytes;
 } NativeConfig;
 
+typedef struct NativeCompactKey
+{
+	bool compact;
+	uint16 width;
+	uint32 type_oid;
+	int32 typmod;
+	uint32 attno;
+	const uint8 *payload;
+} NativeCompactKey;
+
 struct MerkleNativeBuildState
 {
 	MemoryContext context;
@@ -113,6 +123,10 @@ static bool native_route_has_prefix(
 	const uint8 prefix[MERKLE_HASH_BYTES], int bits);
 static int native_route_bit(const uint8 route[MERKLE_HASH_BYTES], int bit);
 static uint64 native_item_bytes(const NativeItem *item);
+static bool native_compact_key_info(const char *key, uint32 key_length,
+								NativeCompactKey *info);
+static Size native_build_compact_key(const MerkleNativeItemChunkRecordV8 *chunk,
+									 const uint8 *payload, char **key_out);
 static MerkleNativeLocator native_build_subtree(
 	Relation indexRel, const NativeConfig *config, int partition,
 	NativeItem *items, int count, int minimum_prefix,
@@ -190,6 +204,103 @@ native_hash_u64(blake3_hasher *hasher, uint64 value)
 {
 	value = pg_hton64(value);
 	blake3_hasher_update(hasher, &value, sizeof(value));
+}
+
+static uint32
+native_key_u32(const uint8 *cursor)
+{
+	return ((uint32) cursor[0] << 24) |
+		((uint32) cursor[1] << 16) |
+		((uint32) cursor[2] << 8) |
+		(uint32) cursor[3];
+}
+
+/* The common benchmark key is a single canonical datum.  Keep a generic
+ * canonical-key fallback for composite, nullable, or otherwise variable
+ * encodings so v8 remains correct for every supported key shape. */
+static bool
+native_compact_key_info(const char *key, uint32 key_length,
+						NativeCompactKey *info)
+{
+	const uint8 *bytes = (const uint8 *) key;
+	uint32 nkeys;
+	uint32 payload_length;
+	uint8 null_flag;
+
+	MemSet(info, 0, sizeof(*info));
+	if (key_length < 29 ||
+		memcmp(bytes, "ARIAROUT", 8) != 0 ||
+		native_key_u32(bytes + 8) != MERKLE_ROUTE_FORMAT_VERSION)
+		return false;
+	nkeys = native_key_u32(bytes + 12);
+	if (nkeys != 1)
+		return false;
+	info->attno = native_key_u32(bytes + 16);
+	info->type_oid = native_key_u32(bytes + 20);
+	info->typmod = (int32) native_key_u32(bytes + 24);
+	null_flag = bytes[28];
+	if (null_flag != 0 && null_flag != 1)
+		return false;
+	if (null_flag)
+	{
+		if (key_length != 29)
+			return false;
+		info->compact = true;
+		info->width = 0;
+		info->payload = NULL;
+		return true;
+	}
+	if (key_length < 33)
+		return false;
+	payload_length = native_key_u32(bytes + 29);
+	if (payload_length > UINT16_MAX || key_length != 33 + payload_length)
+		return false;
+	info->compact = true;
+	info->width = (uint16) payload_length;
+	info->payload = bytes + 33;
+	return true;
+}
+
+static Size
+native_build_compact_key(const MerkleNativeItemChunkRecordV8 *chunk,
+						 const uint8 *payload, char **key_out)
+{
+	Size length = 29 + ((chunk->key_flags & MERKLE_NATIVE_ITEM_KEY_NULL) != 0 ?
+		0 : 4 + chunk->key_width);
+	uint8 *key = palloc(length);
+
+	memcpy(key, "ARIAROUT", 8);
+	key[8] = (uint8) (MERKLE_ROUTE_FORMAT_VERSION >> 24);
+	key[9] = (uint8) (MERKLE_ROUTE_FORMAT_VERSION >> 16);
+	key[10] = (uint8) (MERKLE_ROUTE_FORMAT_VERSION >> 8);
+	key[11] = (uint8) MERKLE_ROUTE_FORMAT_VERSION;
+	key[12] = 0;
+	key[13] = 0;
+	key[14] = 0;
+	key[15] = 1;
+	key[16] = (uint8) (chunk->key_attno >> 24);
+	key[17] = (uint8) (chunk->key_attno >> 16);
+	key[18] = (uint8) (chunk->key_attno >> 8);
+	key[19] = (uint8) chunk->key_attno;
+	key[20] = (uint8) (chunk->key_type_oid >> 24);
+	key[21] = (uint8) (chunk->key_type_oid >> 16);
+	key[22] = (uint8) (chunk->key_type_oid >> 8);
+	key[23] = (uint8) chunk->key_type_oid;
+	key[24] = (uint8) ((uint32) chunk->key_typmod >> 24);
+	key[25] = (uint8) ((uint32) chunk->key_typmod >> 16);
+	key[26] = (uint8) ((uint32) chunk->key_typmod >> 8);
+	key[27] = (uint8) (uint32) chunk->key_typmod;
+	key[28] = (chunk->key_flags & MERKLE_NATIVE_ITEM_KEY_NULL) != 0 ? 1 : 0;
+	if ((chunk->key_flags & MERKLE_NATIVE_ITEM_KEY_NULL) == 0)
+	{
+		key[29] = (uint8) (chunk->key_width >> 24);
+		key[30] = (uint8) (chunk->key_width >> 16);
+		key[31] = (uint8) (chunk->key_width >> 8);
+		key[32] = (uint8) chunk->key_width;
+		memcpy(key + 33, payload, chunk->key_width);
+	}
+	*key_out = (char *) key;
+	return length;
 }
 
 static void
@@ -971,17 +1082,44 @@ native_read_node(Relation indexRel, const MerkleNativeLocator *locator)
 {
 	Size size;
 	MerkleNativeNodeRecord *node = native_read_record(indexRel, locator,
-		0, sizeof(*node), &size);
+		0, sizeof(MerkleNativeRecordHeader), &size);
 
-	if (size != sizeof(*node) ||
-		(node->header.type != MERKLE_NATIVE_RECORD_INTERNAL &&
-		 node->header.type != MERKLE_NATIVE_RECORD_LEAF) ||
-		(node->header.type == MERKLE_NATIVE_RECORD_LEAF &&
-		 (node->flags & MERKLE_NATIVE_NODE_LEAF) == 0))
-		ereport(ERROR,
+	if (node->header.type == MERKLE_NATIVE_RECORD_INTERNAL)
+	{
+		if (size != sizeof(*node))
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("native Merkle internal node has invalid size")));
+		return node;
+	}
+	else if (node->header.type == MERKLE_NATIVE_RECORD_LEAF)
+	{
+		MerkleNativeLeafRecord *leaf = (MerkleNativeLeafRecord *) node;
+		MerkleNativeLocator item_head;
+		int i;
+
+		if (size != sizeof(*leaf) ||
+			(leaf->flags & MERKLE_NATIVE_NODE_LEAF) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("native Merkle leaf has invalid compact size")));
+		/* Grow the already allocated validated record instead of allocating a
+		 * second buffer and copying the common prefix.  This keeps the compact
+		 * on-disk format from adding an allocation/copy pair to recovery. */
+		item_head = leaf->item_head;
+		node = repalloc(node, sizeof(*node));
+		node->header.size = sizeof(*node);
+		for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
+			native_invalid_locator(&node->children[i]);
+		node->item_head = item_head;
+		return node;
+	}
+
+	pfree(node);
+	ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
-				 errmsg("native Merkle node has invalid size")));
-	return node;
+				 errmsg("native Merkle node has invalid record type")));
+	return NULL;
 }
 
 static void
@@ -1025,38 +1163,72 @@ native_load_leaf_items(Relation indexRel, const MerkleNativeNodeRecord *leaf,
 		}
 		else if (header->type == MERKLE_NATIVE_RECORD_ITEM_CHUNK)
 		{
-			MerkleNativeItemChunkRecord *chunk =
-				(MerkleNativeItemChunkRecord *) header;
+			MerkleNativeItemChunkRecordV8 *chunk =
+				(MerkleNativeItemChunkRecordV8 *) header;
 			char *cursor;
 			char *end;
 			uint32 i;
 
 			if (size < sizeof(*chunk) ||
-				chunk->payload_bytes != size - sizeof(*chunk))
+				chunk->payload_bytes != size - sizeof(*chunk) ||
+				(chunk->codec != MERKLE_NATIVE_ITEM_CODEC_CANONICAL &&
+				 chunk->codec != MERKLE_NATIVE_ITEM_CODEC_SINGLE_KEY))
 				elog(ERROR, "native Merkle item chunk size is invalid");
+			if (chunk->codec == MERKLE_NATIVE_ITEM_CODEC_SINGLE_KEY &&
+				(chunk->key_width > (uint16) MERKLE_DYNAMIC_MAX_KEY_BYTES ||
+				 chunk->key_type_oid == InvalidOid || chunk->key_attno == 0 ||
+				 (chunk->key_flags & ~MERKLE_NATIVE_ITEM_KEY_NULL) != 0))
+				elog(ERROR, "native Merkle compact item descriptor is invalid");
 			cursor = ((char *) chunk) + sizeof(*chunk);
 			end = ((char *) chunk) + size;
 			for (i = 0; i < chunk->item_count; i++)
 			{
-				MerkleNativePackedItem *packed;
+				MerkleNativePackedItemV8 *packed;
 				NativeItem item;
+				Size item_size;
 
+				item_size = chunk->codec == MERKLE_NATIVE_ITEM_CODEC_SINGLE_KEY ?
+					MAXALIGN(sizeof(*packed) + chunk->key_width) :
+					MAXALIGN(MERKLE_HASH_BYTES + sizeof(uint32));
 				if (end - cursor < (int) sizeof(*packed))
 					elog(ERROR, "native Merkle item chunk is truncated");
-				packed = (MerkleNativePackedItem *) cursor;
-				if (packed->key_length > (uint32) (end - cursor - sizeof(*packed)))
-					elog(ERROR, "native Merkle packed key length is invalid");
-				memcpy(item.route, packed->route_digest, MERKLE_HASH_BYTES);
+				packed = (MerkleNativePackedItemV8 *) cursor;
 				item.hash = packed->tuple_hash;
-				item.key_length = packed->key_length;
-				item.key = palloc(item.key_length);
-				memcpy(item.key, cursor + sizeof(*packed), item.key_length);
+				if (chunk->codec == MERKLE_NATIVE_ITEM_CODEC_SINGLE_KEY)
+				{
+					item.key_length = native_build_compact_key(chunk,
+						(const uint8 *) cursor + sizeof(*packed), &item.key);
+					item_size = MAXALIGN(sizeof(*packed) + chunk->key_width);
+				}
+				else
+				{
+					uint32 key_length;
+
+					if (end - cursor < (int) (MERKLE_HASH_BYTES +
+						sizeof(key_length)))
+						elog(ERROR, "native Merkle packed key is truncated");
+					memcpy(&key_length, cursor + MERKLE_HASH_BYTES,
+						sizeof(key_length));
+					if (key_length > (uint32) (end - cursor -
+						(MERKLE_HASH_BYTES + sizeof(key_length))))
+						elog(ERROR, "native Merkle packed key length is invalid");
+					item.key_length = key_length;
+					item.key = palloc(item.key_length);
+					memcpy(item.key, cursor + MERKLE_HASH_BYTES +
+						sizeof(key_length), item.key_length);
+					item_size = MAXALIGN(MERKLE_HASH_BYTES +
+						sizeof(key_length) + item.key_length);
+				}
+				merkle_digest_canonical_key_data((const uint8 *) item.key,
+					item.key_length, item.route);
 				if (have_previous && native_item_cmp(&previous, &item) >= 0)
 					elog(ERROR, "native Merkle leaf items are not in canonical order");
 				native_vector_push(vector, &item);
 				previous = item;
 				have_previous = true;
-				cursor += MAXALIGN(sizeof(*packed) + item.key_length);
+				if (cursor + item_size > end)
+					elog(ERROR, "native Merkle packed item exceeds chunk");
+				cursor += item_size;
 				seen++;
 			}
 			if (cursor != end)
@@ -1240,22 +1412,55 @@ native_write_leaf(Relation indexRel, int partition, int prefix_len,
 		int start = end;
 		Size payload = 0;
 		Size size;
-		MerkleNativeItemChunkRecord *chunk;
+		MerkleNativeItemChunkRecordV8 *chunk;
+		NativeCompactKey compact;
 		char *cursor;
 
 		while (start > 0)
 		{
-			Size item_size = MAXALIGN(sizeof(MerkleNativePackedItem) +
-				items[start - 1].key_length);
+			Size item_size;
+
+			if (!native_compact_key_info(items[start - 1].key,
+				items[start - 1].key_length, &compact))
+			{
+				compact.compact = false;
+				compact.width = 0;
+			}
+			item_size = compact.compact ?
+				MAXALIGN(sizeof(MerkleNativePackedItemV8) + compact.width) :
+				MAXALIGN(sizeof(MerkleNativePackedItem) +
+					items[start - 1].key_length - MERKLE_HASH_BYTES);
 
 			if (sizeof(*chunk) + payload + item_size >
 				MERKLE_NATIVE_MAX_RECORD_SIZE)
 				break;
+			/* A chunk has one compact-key descriptor.  All index items in a
+			 * normal leaf share it; stop before mixing codecs. */
+			if (start != end)
+			{
+				NativeCompactKey first;
+
+				native_compact_key_info(items[end - 1].key,
+					items[end - 1].key_length, &first);
+				if (first.compact != compact.compact ||
+					(first.compact && ((first.payload == NULL) !=
+					 (compact.payload == NULL) || first.width != compact.width ||
+					 first.type_oid != compact.type_oid ||
+					 first.typmod != compact.typmod ||
+					 first.attno != compact.attno)))
+					break;
+			}
 			payload += item_size;
 			start--;
 		}
 		if (start == end)
 			elog(ERROR, "one native Merkle item cannot fit in a packed chunk");
+		if (!native_compact_key_info(items[end - 1].key,
+			items[end - 1].key_length, &compact))
+		{
+			compact.compact = false;
+			compact.width = 0;
+		}
 		size = sizeof(*chunk) + payload;
 		chunk = palloc0(size);
 		chunk->header.magic = MERKLE_NATIVE_RECORD_MAGIC;
@@ -1265,18 +1470,41 @@ native_write_leaf(Relation indexRel, int partition, int prefix_len,
 		chunk->next = head;
 		chunk->item_count = end - start;
 		chunk->payload_bytes = payload;
+		chunk->codec = compact.compact ? MERKLE_NATIVE_ITEM_CODEC_SINGLE_KEY :
+			MERKLE_NATIVE_ITEM_CODEC_CANONICAL;
+		chunk->key_width = compact.compact ? compact.width : 0;
+		chunk->key_flags = compact.compact && compact.payload == NULL ?
+			MERKLE_NATIVE_ITEM_KEY_NULL : 0;
+		chunk->key_type_oid = compact.compact ? compact.type_oid : 0;
+		chunk->key_typmod = compact.compact ? compact.typmod : 0;
+		chunk->key_attno = compact.compact ? compact.attno : 0;
 		cursor = ((char *) chunk) + sizeof(*chunk);
 		for (i = start; i < end; i++)
 		{
-			MerkleNativePackedItem *packed =
-				(MerkleNativePackedItem *) cursor;
+			if (chunk->codec == MERKLE_NATIVE_ITEM_CODEC_SINGLE_KEY)
+			{
+				MerkleNativePackedItemV8 *packed =
+					(MerkleNativePackedItemV8 *) cursor;
 
-			memcpy(packed->route_digest, items[i].route, MERKLE_HASH_BYTES);
-			packed->tuple_hash = items[i].hash;
-			packed->key_length = items[i].key_length;
-			memcpy(cursor + sizeof(*packed), items[i].key,
-				items[i].key_length);
-			cursor += MAXALIGN(sizeof(*packed) + items[i].key_length);
+				packed->tuple_hash = items[i].hash;
+				memcpy(cursor + sizeof(*packed),
+					items[i].key + 33, chunk->key_width);
+				cursor += MAXALIGN(sizeof(*packed) + chunk->key_width);
+			}
+			else
+			{
+				MerkleNativePackedItemV8 *packed =
+					(MerkleNativePackedItemV8 *) cursor;
+				uint32 key_length = items[i].key_length;
+
+				packed->tuple_hash = items[i].hash;
+				memcpy(cursor + MERKLE_HASH_BYTES, &key_length,
+					sizeof(key_length));
+				memcpy(cursor + MERKLE_HASH_BYTES + sizeof(key_length), items[i].key,
+					items[i].key_length);
+				cursor += MAXALIGN(MERKLE_HASH_BYTES + sizeof(key_length) +
+					items[i].key_length);
+			}
 		}
 		chunk->header.checksum = native_record_checksum(chunk, size);
 		head = native_append_record(indexRel, chunk, size);
@@ -1310,8 +1538,17 @@ native_write_leaf(Relation indexRel, int partition, int prefix_len,
 	for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
 		native_invalid_locator(&summary->children[i]);
 	summary->item_head = head;
-	summary->header.checksum = native_record_checksum(summary, sizeof(*summary));
-	return native_append_record(indexRel, summary, sizeof(*summary));
+	{
+		MerkleNativeLeafRecord leaf;
+
+		MemSet(&leaf, 0, sizeof(leaf));
+		memcpy(&leaf, summary,
+			   offsetof(MerkleNativeNodeRecord, children));
+		leaf.header.size = sizeof(leaf);
+		leaf.item_head = head;
+		leaf.header.checksum = native_record_checksum(&leaf, sizeof(leaf));
+		return native_append_record(indexRel, &leaf, sizeof(leaf));
+	}
 }
 
 static void

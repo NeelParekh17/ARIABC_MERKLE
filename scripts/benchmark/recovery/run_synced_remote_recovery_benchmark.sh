@@ -849,6 +849,8 @@ set +e
 # destructive-reset acknowledgement to the benchmark process only; never
 # export it into the caller or the wider remote session.
 ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1 \
+ARIABC_NATIVE_PROFILE_LOG="$REMOTE_LOG_DIR/postgres.log" \
+PGOPTIONS='-c merkle_native_profile_enabled=on' \
 PYTHONUNBUFFERED=1 "${BENCH_ARGS[@]}" \
   2> >(tee "$REMOTE_LOG_DIR/benchmark.stderr" >&2) |
   tee "$REMOTE_LOG_DIR/benchmark.stdout"

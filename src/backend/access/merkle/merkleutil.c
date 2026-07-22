@@ -462,16 +462,23 @@ merkle_serialize_canonical_key(Datum *values, bool *isnull, int nkeys,
 	return result;
 }
 
-static void
-merkle_digest_canonical_key(const bytea *key_data,
-							uint8 digest[MERKLE_HASH_BYTES])
+void
+merkle_digest_canonical_key_data(const uint8 *key_data, Size key_length,
+								 uint8 digest[MERKLE_HASH_BYTES])
 {
 	blake3_hasher hasher;
 
 	blake3_hasher_init(&hasher);
-	blake3_hasher_update(&hasher, VARDATA_ANY(key_data),
-						 VARSIZE_ANY_EXHDR(key_data));
+	blake3_hasher_update(&hasher, key_data, key_length);
 	blake3_hasher_finalize(&hasher, digest, MERKLE_HASH_BYTES);
+}
+
+static void
+merkle_digest_canonical_key(const bytea *key_data,
+							uint8 digest[MERKLE_HASH_BYTES])
+{
+	merkle_digest_canonical_key_data((const uint8 *) VARDATA_ANY(key_data),
+									VARSIZE_ANY_EXHDR(key_data), digest);
 }
 
 /*

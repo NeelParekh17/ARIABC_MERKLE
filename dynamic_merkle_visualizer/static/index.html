@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AriaBC Dynamic Merkle Lab</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header><div><span class="eyebrow">AriaBC · Native PostgreSQL index</span><h1>Dynamic Merkle Lab</h1></div><div id="health" class="pill">Not built</div></header>
+  <main>
+    <aside>
+      <section><h2>1. Build index</h2>
+        <label>Dataset CSV or JSONL<input id="dataset" type="file" accept=".csv,.jsonl"></label>
+        <div class="actions"><button id="canonical">Use canonical 12k base</button><button id="clone">Clone current table</button></div>
+        <div class="grid2">
+          <label>Partitions<input id="partitions" type="number" min="1" max="10000" value="150"></label>
+          <label>Leaf capacity<input id="leafCapacity" type="number" min="1" max="1024" value="32"></label>
+          <label>Merge threshold<input id="mergeThreshold" type="number" min="0" max="1023" value="8"></label>
+          <label>Logical fanout<input value="32" disabled title="Fixed by native layout"></label>
+          <label>Initial leaves / partition<select id="initialLeaves"><option value="32">32</option><option value="1024" selected>1024</option></select></label>
+          <label>Leaf bytes<input id="leafBytes" type="number" min="1024" max="16777216" value="65536"></label>
+          <label>Maximum key bytes<input id="maxKeyBytes" type="number" min="64" max="2000" value="1024"></label>
+          <label>Physical node fanout<input value="2" disabled title="Stored native trie nodes are binary"></label>
+        </div><button class="primary" id="build">Build native index</button>
+      </section>
+      <section><h2>2. Workload</h2>
+        <label>SQL workload<input id="workload" type="file" accept=".txt,.sql"></label>
+        <div class="actions"><button id="loadWorkload">Load</button><button id="step">Step</button><button id="run">Run all</button></div>
+        <progress id="progress" value="0" max="1"></progress><small id="workloadStatus">No workload loaded</small>
+        <div id="nextStep" style="margin-top:9px;padding:8px;border-radius:7px;background:#12263a;color:#39d9cf;font-size:12px">Next step: —</div>
+      </section>
+      <section><h2>3. Manual mutation</h2>
+        <div class="actions"><select id="operation"><option>insert</option><option>update</option><option>delete</option></select><input id="key" type="number" placeholder="YCSB key"></div>
+        <label>Fields JSON<textarea id="fields" rows="3">{"field1":"visual edit"}</textarea></label>
+        <button id="mutate">Apply mutation</button>
+      </section>
+    </aside>
+    <div class="workspace">
+      <section class="metrics" id="metrics"></section>
+      <section class="contract" id="contract"></section>
+      <section class="root-hashes" id="rootHashes"></section>
+      <section class="toolbar"><label>Tree view<select id="treeView"><option value="physical">Physical storage trie</option><option value="logical">Logical localisation ranges</option></select></label><label>Partition<select id="partition"></select></label><label>Node hash display<select id="hashMode"><option value="data_xor">Data XOR</option><option value="structure_hash">Structure hash (when exposed)</option></select></label><label>Zoom<input id="zoom" type="range" min="45" max="150" value="85"></label><label class="toggle"><input id="showEmptyLogical" type="checkbox"> Show empty logical slots</label><button id="refresh">Refresh</button><button id="resetCounters">Reset counters</button></section>
+      <section class="view-summary" id="viewSummary">Physical storage nodes from the authoritative leaf frontier.</section>
+      <section class="playback-panel">
+        <div class="playback-head">
+          <div><h2>Native transition playback</h2><small>Committed PostgreSQL states; no simulated intermediate tree data.</small></div>
+          <label class="toggle"><input id="slowStructural" type="checkbox" checked> Slow split/merge playback</label>
+          <label>Stage delay<select id="stageDelay"><option value="350">Fast</option><option value="700" selected>Normal</option><option value="1200">Detailed</option></select></label>
+          <button id="replayTransition" disabled>Replay last transition</button>
+        </div>
+        <div id="transitionSummary" class="transition-summary">Make a mutation to inspect its native transition.</div>
+        <div id="transitionStages" class="transition-stages"></div>
+      </section>
+      <section class="canvas"><div id="tree"></div></section>
+      <section class="details"><div><h2>Selected node or range</h2><pre id="nodeDetails">Click a physical node or logical range to inspect native metadata.</pre></div><div><h2>Range items</h2><div id="leafItems" class="items">Select a physical leaf or bounded logical range.</div></div></section>
+      <section><h2>Mutation timeline</h2><div id="timeline" class="timeline"></div></section>
+    </div>
+  </main>
+  <div id="toast"></div><script src="app.js"></script>
+</body></html>

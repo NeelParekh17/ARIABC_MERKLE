@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Mapping, Sequence
@@ -38,6 +40,41 @@ from .config import (
 )
 from .metrics import Metrics, add_warning, finalize_metrics
 from .repair import seq_scan_delta, seq_scan_snapshot
+
+
+_NATIVE_PROFILE_RE = re.compile(
+    r"NATIVE_MERKLE_PROFILE index_oid=(\d+) splits=(\d+) merges=(\d+)"
+)
+
+
+def _profile_log_offset() -> int:
+    path = os.environ.get("ARIABC_NATIVE_PROFILE_LOG", "")
+    if not path:
+        return -1
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _profile_log_counts(offset: int, index_oids: Mapping[str, int]) -> dict[str, tuple[int, int]]:
+    counts = {schema: [0, 0] for schema in index_oids}
+    path = os.environ.get("ARIABC_NATIVE_PROFILE_LOG", "")
+    if offset < 0 or not path:
+        return {schema: (0, 0) for schema in index_oids}
+    oid_to_schema = {oid: schema for schema, oid in index_oids.items()}
+    try:
+        with open(path, "rb") as profile_log:
+            profile_log.seek(offset)
+            text = profile_log.read().decode(errors="replace")
+    except OSError:
+        return {schema: (0, 0) for schema in index_oids}
+    for oid_text, splits_text, merges_text in _NATIVE_PROFILE_RE.findall(text):
+        schema = oid_to_schema.get(int(oid_text))
+        if schema is not None:
+            counts[schema][0] += int(splits_text)
+            counts[schema][1] += int(merges_text)
+    return {schema: (values[0], values[1]) for schema, values in counts.items()}
 from .verification import schema_fidelity_checks
 
 def _now_ms() -> float:
@@ -516,6 +553,7 @@ def repair_dynamic_merkle(
     tree_stats_rows_out: list[dict[str, Any]],
     planner_rows_out: list[dict[str, Any]],
     *,
+    build_stats: dict[str, dict[str, Any]],
     profile_label: str,
     audit_mode: str,
 ) -> Metrics:
@@ -712,8 +750,19 @@ def repair_dynamic_merkle(
             {
                 "run_id": run_id,
                 "schema": schema,
-                "stage": "pre_recovery",
+                "stage": "index_build",
+                **build_stats[schema],
+                "raw_stats": json.dumps(build_stats[schema]["raw_stats"], sort_keys=True, default=str),
+            }
+        )
+        tree_stats_rows_out.append(
+            {
+                "run_id": run_id,
+                "schema": schema,
+                "stage": "recovery_execution_pre_recovery",
                 **before_stats[schema],
+                "split_count": 0,
+                "merge_count": 0,
                 "raw_stats": json.dumps(before_stats[schema]["raw_stats"], sort_keys=True, default=str),
             }
         )
@@ -722,8 +771,10 @@ def repair_dynamic_merkle(
             {
                 "run_id": run_id,
                 "schema": schema,
-                "stage": "post_audit",
+                "stage": "recovery_execution_post_audit",
                 **final_stats,
+                "split_count": final_stats["split_count"] - before_stats[schema]["split_count"],
+                "merge_count": final_stats["merge_count"] - before_stats[schema]["merge_count"],
                 "raw_stats": json.dumps(final_stats["raw_stats"], sort_keys=True, default=str),
             }
         )
@@ -739,6 +790,16 @@ def repair_dynamic_merkle(
     total_repairs = repair_result.total
     healthy_stats = audit["healthy_stats"]
     damaged_stats = audit["damaged_stats"]
+    execution_split_counts = {
+        schema: audit[f"{schema}_stats"]["split_count"] - before_stats[schema]["split_count"]
+        for schema in ("healthy", "damaged")
+    }
+    execution_merge_counts = {
+        schema: audit[f"{schema}_stats"]["merge_count"] - before_stats[schema]["merge_count"]
+        for schema in ("healthy", "damaged")
+    }
+    if any(value < 0 for value in (*execution_split_counts.values(), *execution_merge_counts.values())):
+        raise RuntimeError("native dynamic split/merge counters moved backwards during recovery")
     m.counters.update(
         {
             "partition_root_batches": 2,
@@ -811,10 +872,18 @@ def repair_dynamic_merkle(
             "damaged_max_leaf_occupancy": damaged_stats["max_leaf_occupancy"],
             "healthy_max_depth": healthy_stats["max_depth"],
             "damaged_max_depth": damaged_stats["max_depth"],
-            "healthy_split_count": healthy_stats["split_count"],
-            "damaged_split_count": damaged_stats["split_count"],
-            "healthy_merge_count": healthy_stats["merge_count"],
-            "damaged_merge_count": damaged_stats["merge_count"],
+            "healthy_split_count": execution_split_counts["healthy"],
+            "damaged_split_count": execution_split_counts["damaged"],
+            "healthy_merge_count": execution_merge_counts["healthy"],
+            "damaged_merge_count": execution_merge_counts["damaged"],
+            "index_build_healthy_split_count": build_stats["healthy"]["split_count"],
+            "index_build_damaged_split_count": build_stats["damaged"]["split_count"],
+            "index_build_healthy_merge_count": build_stats["healthy"]["merge_count"],
+            "index_build_damaged_merge_count": build_stats["damaged"]["merge_count"],
+            "recovery_execution_healthy_split_count": execution_split_counts["healthy"],
+            "recovery_execution_damaged_split_count": execution_split_counts["damaged"],
+            "recovery_execution_healthy_merge_count": execution_merge_counts["healthy"],
+            "recovery_execution_damaged_merge_count": execution_merge_counts["damaged"],
             "healthy_dynamic_bytes": healthy_stats["dynamic_bytes"],
             "damaged_dynamic_bytes": damaged_stats["dynamic_bytes"],
             "healthy_logical_item_bytes": healthy_stats["dynamic_bytes"],
@@ -920,6 +989,14 @@ def run_one_dynamic_manifest(
     from .reporting import emit_progress
 
     metrics: list[Metrics] = []
+    build_stats = {
+        schema: _canonical_stats(dynamic_tree_stats(conn, schema))
+        for schema in ("healthy", "damaged")
+    }
+    index_oids = {
+        schema: int(scalar(conn, f"SELECT '{schema}.usertable_merkle_idx'::regclass::oid"))
+        for schema in ("healthy", "damaged")
+    }
     for repetition in range(repetitions):
         run_id = dynamic_recovery_run_id(manifest, repetition, profile_label)
         emit_progress(
@@ -957,6 +1034,7 @@ def run_one_dynamic_manifest(
             warm_damaged = range_items(conn, "damaged", warm_ranges)
             warm_repairs = compare_range_items(warm_healthy, warm_damaged)
             fetch_exact_healthy_rows(conn, warm_repairs.healthy_heap_keys)
+        profile_log_offset = _profile_log_offset()
         metric = repair_dynamic_merkle(
             conn,
             manifest,
@@ -967,9 +1045,23 @@ def run_one_dynamic_manifest(
             heap_rows_out,
             tree_stats_rows_out,
             planner_rows_out,
+            build_stats=build_stats,
             profile_label=profile_label,
             audit_mode=audit_mode,
         )
+        if profile_log_offset >= 0:
+            log_counts = _profile_log_counts(profile_log_offset, index_oids)
+            for schema in ("healthy", "damaged"):
+                splits, merges = log_counts[schema]
+                metric.counters[f"{schema}_split_count"] = splits
+                metric.counters[f"{schema}_merge_count"] = merges
+                metric.counters[f"recovery_execution_{schema}_split_count"] = splits
+                metric.counters[f"recovery_execution_{schema}_merge_count"] = merges
+                for row in tree_stats_rows_out:
+                    if (row.get("run_id") == run_id and row.get("schema") == schema and
+                            row.get("stage") == "recovery_execution_post_audit"):
+                        row["split_count"] = splits
+                        row["merge_count"] = merges
         metrics.append(metric)
         progress_state["completed_runs"] += 1
         emit_progress(
