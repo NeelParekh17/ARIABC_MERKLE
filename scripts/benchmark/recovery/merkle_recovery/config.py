@@ -28,7 +28,7 @@ LEAF_LOOKUP_INDEXES = {
 }
 
 BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only static recovery
-DYNAMIC_BENCHMARK_SCHEMA_VERSION = 6
+DYNAMIC_BENCHMARK_SCHEMA_VERSION = 7
 TIMING_CONTRACT_VERSION = 1
 ZERO_HASH = "0" * 64
 MERKLE_MODES = ("static", "dynamic")
@@ -217,7 +217,8 @@ def profile_config(profile: str) -> BenchmarkConfig:
                 "description": (
                     "Dynamic Merkle recovery acceptance campaign at "
                     "N=1M,3M,5M,7M,10M,15M,20M,25M,30M,40M,50M; "
-                    "P=200, logical K=32, leaf/split capacity=32, merge=8, "
+                    "P=200, configurable power-of-two logical K (default 32), "
+                    "leaf/split capacity=32, merge=8, "
                     "75 corrupted leaf ranges, 300 update corruptions, five repetitions."
                 ),
             },

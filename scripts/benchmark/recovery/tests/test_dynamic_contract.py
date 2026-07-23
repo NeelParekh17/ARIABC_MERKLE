@@ -43,7 +43,7 @@ def test_dynamic_profile_is_the_exact_acceptance_matrix():
     config = profile_config(DYNAMIC_PROFILE)
     assert config.fig12_sizes == DYNAMIC_SIZE_SERIES
     assert config.repetitions == 5
-    assert config.benchmark_schema_version == 6
+    assert config.benchmark_schema_version == 7
     assert config.extra["dynamic_partitions"] == 200
     assert config.extra["dynamic_native_layout_version"] == 8
     assert config.extra["dynamic_logical_fanout"] == 32
@@ -119,7 +119,7 @@ def test_dynamic_fanout_contract_binds_manifest_metadata_and_physical_shape():
     "override,match",
     [
         ({"partitions": 100}, "partitions=200"),
-        ({"fanout": 16}, "fanout=32"),
+        ({"fanout": 3}, "one of 2,4,8,16,32"),
         ({"bad_leaf_count": 74}, "bad-leaf-count=75"),
         ({"dynamic_leaf_capacity": 64}, "dynamic-leaf-capacity=32"),
         ({"dynamic_merge_threshold": 9}, "dynamic-merge-threshold=8"),
@@ -129,6 +129,37 @@ def test_dynamic_fanout_contract_binds_manifest_metadata_and_physical_shape():
 def test_dynamic_profile_rejects_contract_drift(override, match):
     with pytest.raises(ValueError, match=match):
         benchmark._series_for_profile(_args(**override), profile_config(DYNAMIC_PROFILE))
+
+
+def test_dynamic_profile_accepts_configurable_logical_fanout():
+    specs = benchmark._series_for_profile(
+        _args(fanout=4, tuple_count="1000000"), profile_config(DYNAMIC_PROFILE)
+    )
+    assert len(specs) == 1
+    assert specs[0]["fanout"] == 4
+    assert specs[0]["geometry_label"] == "dynamic-p200-k4-cap32-merge8"
+
+
+def test_network_probe_records_distinct_database_endpoints(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        benchmark,
+        "execute",
+        lambda conn, sql, params=None: [{
+            "server_addr": "10.0.0.20",
+            "server_port": 5432,
+            "client_addr": "10.0.0.10",
+            "client_port": 42000,
+            "backend_pid": 123,
+            "ssl_enabled": "on",
+        }],
+    )
+    monkeypatch.setattr(benchmark, "scalar", lambda conn, sql: 1)
+    probe = benchmark.write_network_probe(object(), tmp_path, 3)
+    stored = json.loads((tmp_path / "network_probe.json").read_text())
+    assert probe["samples"] == 3
+    assert stored["server_addr"] == "10.0.0.20"
+    assert stored["client_addr_seen_by_server"] == "10.0.0.10"
+    assert len(stored["round_trip_ms"]) == 3
 
 
 def test_dynamic_index_creation_uses_reloptions_and_never_creates_static_lookup(monkeypatch):
@@ -156,6 +187,20 @@ def test_dynamic_index_creation_uses_reloptions_and_never_creates_static_lookup(
         for sql in statements
         if sql.startswith("ANALYZE ariabc_internal.merkle_dynamic_")
     } == set()
+
+
+def test_dynamic_index_creation_uses_requested_smaller_fanout(monkeypatch):
+    statements: list[str] = []
+
+    monkeypatch.setattr(
+        dataset,
+        "execute",
+        lambda conn, sql, params=None: statements.append(" ".join(sql.split())) or [],
+    )
+    dataset.create_dynamic_merkle_indexes(None, 200, 4, 32, 8)
+    creates = [sql for sql in statements if sql.startswith("CREATE INDEX")]
+    assert len(creates) == 2
+    assert all("fanout = 4" in sql for sql in creates)
 
 
 def test_dynamic_adapter_matches_frozen_backend_rows(monkeypatch):

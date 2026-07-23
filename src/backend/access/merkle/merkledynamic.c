@@ -59,6 +59,7 @@
 typedef struct MerkleDynamicConfig
 {
 	int partitions;
+	int logical_fanout;
 	int leaf_capacity;
 	int merge_threshold;
 	int leaf_byte_capacity;
@@ -364,7 +365,9 @@ dynamic_read_meta(Relation indexRel, MerkleDynamicGeneration *gen)
 	if (meta->version != MERKLE_VERSION ||
 		meta->dynamicMagic != MERKLE_DYNAMIC_META_MAGIC ||
 		meta->dynamicLayoutVersion != MERKLE_DYNAMIC_LAYOUT_VERSION ||
-		meta->dynamicLogicalFanout != MERKLE_DYNAMIC_LOGICAL_FANOUT ||
+		meta->dynamicLogicalFanout < 2 ||
+		meta->dynamicLogicalFanout > MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT ||
+		(meta->dynamicLogicalFanout & (meta->dynamicLogicalFanout - 1)) != 0 ||
 		meta->dynamicLeafCapacity == 0 ||
 		meta->dynamicMergeThreshold >= meta->dynamicLeafCapacity ||
 		meta->dynamicMaxKeyBytes == 0 ||
@@ -383,6 +386,7 @@ dynamic_read_meta(Relation indexRel, MerkleDynamicGeneration *gen)
 	gen->heap_oid = meta->heapRelid;
 	gen->rnode = indexRel->rd_node;
 	gen->config.partitions = meta->numPartitions;
+	gen->config.logical_fanout = (int) meta->dynamicLogicalFanout;
 	gen->config.leaf_capacity = (int) meta->dynamicLeafCapacity;
 	gen->config.merge_threshold = (int) meta->dynamicMergeThreshold;
 	gen->config.leaf_byte_capacity = (int) meta->dynamicLeafByteCapacity;
@@ -393,7 +397,7 @@ dynamic_read_meta(Relation indexRel, MerkleDynamicGeneration *gen)
 	/* Reloptions and the durable marker must agree; neither silently wins. */
 	opts = merkle_get_options(indexRel);
 	if (!opts->dynamic || opts->partitions != gen->config.partitions ||
-		opts->fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT ||
+		opts->fanout != gen->config.logical_fanout ||
 		opts->leaf_capacity != gen->config.leaf_capacity ||
 		opts->merge_threshold != gen->config.merge_threshold ||
 		opts->leaf_byte_capacity != gen->config.leaf_byte_capacity ||
@@ -594,7 +598,7 @@ dynamic_build_begin_impl(Relation indexRel, Relation heapRel, int nkeys,
 	state_args[3] = ObjectIdGetDatum(state->generation.rnode.relNode);
 	state_args[4] = ObjectIdGetDatum(state->generation.heap_oid);
 	state_args[5] = Int32GetDatum(state->generation.config.partitions);
-	state_args[6] = Int32GetDatum(MERKLE_DYNAMIC_LOGICAL_FANOUT);
+	state_args[6] = Int32GetDatum(state->generation.config.logical_fanout);
 	state_args[7] = Int32GetDatum(state->generation.config.leaf_capacity);
 	state_args[8] = Int32GetDatum(state->generation.config.merge_threshold);
 	state_args[9] = Int32GetDatum(state->generation.config.leaf_byte_capacity);
@@ -2307,7 +2311,7 @@ dynamic_validate_state_spi(const MerkleDynamicGeneration *gen)
 		int max_key = DatumGetInt32(SPI_getbinval(tuple,desc,7,&isnull));
 		bool complete = DatumGetBool(SPI_getbinval(tuple,desc,8,&isnull));
 		if (heap_oid != gen->heap_oid || partitions != gen->config.partitions ||
-			fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT ||
+			fanout != gen->config.logical_fanout ||
 			leaf_capacity != gen->config.leaf_capacity ||
 			merge_threshold != gen->config.merge_threshold ||
 			byte_capacity != gen->config.leaf_byte_capacity ||

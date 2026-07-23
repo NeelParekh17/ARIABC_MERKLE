@@ -333,7 +333,8 @@ merkle_options(Datum reloptions, bool validate)
         }
 
         /* Check if leaves_per_partition is a power of fanout */
-        if (!merkle_is_power_of(opts->leaves_per_partition, opts->fanout))
+		if (!opts->dynamic &&
+			!merkle_is_power_of(opts->leaves_per_partition, opts->fanout))
         {
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -345,10 +346,13 @@ merkle_options(Datum reloptions, bool validate)
                              opts->fanout * opts->fanout * opts->fanout)));
         }
 
-		if (opts->dynamic && opts->fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT)
+		if (opts->dynamic &&
+			(opts->fanout > MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT ||
+			 !merkle_is_power_of(opts->fanout, 2)))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("dynamic Merkle indexes require fanout=32")));
+					 errmsg("dynamic Merkle fanout must be a power of two between 2 and %d",
+						MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT)));
 		if (opts->dynamic && opts->merge_threshold >= opts->leaf_capacity)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -422,7 +426,8 @@ merkle_get_options(Relation indexRel)
     if (opts->partitions <= 0 || opts->partitions > 10000 ||
         opts->leaves_per_partition <= 0 || opts->leaves_per_partition > 1024 ||
         opts->fanout < 2 || opts->fanout > 1024 ||
-		!merkle_is_power_of(opts->leaves_per_partition, opts->fanout) ||
+		(!opts->dynamic &&
+		 !merkle_is_power_of(opts->leaves_per_partition, opts->fanout)) ||
 		opts->leaf_capacity < 1 || opts->leaf_capacity > 1024 ||
 		opts->merge_threshold < 0 ||
 		opts->merge_threshold >= opts->leaf_capacity ||
@@ -431,7 +436,9 @@ merkle_get_options(Relation indexRel)
 		opts->max_key_bytes < 64 ||
 		opts->max_key_bytes > MERKLE_DYNAMIC_MAX_KEY_BYTES ||
 		(opts->dynamic && opts->max_key_bytes > opts->leaf_byte_capacity) ||
-		(opts->dynamic && opts->fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT) ||
+		(opts->dynamic &&
+		 (opts->fanout > MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT ||
+		  !merkle_is_power_of(opts->fanout, 2))) ||
 		(opts->update_mode != MERKLE_UPDATE_SYNCHRONOUS_COW))
     {
 		if (opts->dynamic)

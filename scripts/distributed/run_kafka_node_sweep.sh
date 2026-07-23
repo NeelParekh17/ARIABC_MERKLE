@@ -18,6 +18,8 @@
 #   --workload   FILE workload sql file       [default: ycsb-skew0-99-tx-20k-...]
 #   --skip-kafka      skip Kafka broker setup (assume already running)
 #   --no-kafka        measure direct mode only (no Kafka sweep)
+#   --kafka-host HOST advertised/reachable Kafka host
+#   --kafka-node-id N topology node whose SSH session manages Kafka [default: 1]
 #   --pool-size  N    dbConnPoolSize          [default: 2]
 
 set -euo pipefail
@@ -38,7 +40,10 @@ declare -a NODE_LABELS=("neel-MS (236)" "kartik (54)" "utkarsh (248)")
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 
-KAFKA_HOST="10.129.148.247"
+KAFKA_HOST_EXPLICIT=0
+[[ -v KAFKA_HOST ]] && KAFKA_HOST_EXPLICIT=1
+KAFKA_HOST="${KAFKA_HOST:-10.129.148.247}"
+KAFKA_NODE_ID="${KAFKA_NODE_ID:-1}"
 KAFKA_PORT=9092
 KAFKA_HOME_REMOTE="/home/neel/Desktop/kafka_2.13-3.7.0"
 KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
@@ -81,10 +86,28 @@ while [[ $# -gt 0 ]]; do
     --workload)   WORKLOAD_FILE="${2:-}"; shift 2 ;;
     --skip-kafka) SKIP_KAFKA=1; shift ;;
     --no-kafka)   NO_KAFKA=1; shift ;;
+    --kafka-host) KAFKA_HOST="${2:-}"; KAFKA_HOST_EXPLICIT=1; shift 2 ;;
+    --kafka-node-id) KAFKA_NODE_ID="${2:-}"; shift 2 ;;
     --pool-size)  DB_CONN_POOL_SIZE="${2:-2}"; shift 2 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+KAFKA_NODE_INDEX=-1
+for idx in "${!NODE_IDS[@]}"; do
+  if [[ "${NODE_IDS[$idx]}" == "$KAFKA_NODE_ID" ]]; then
+    KAFKA_NODE_INDEX="$idx"
+    break
+  fi
+done
+[[ "$KAFKA_NODE_INDEX" -ge 0 ]] || {
+  echo "ERROR: Kafka node id $KAFKA_NODE_ID is not in NODE_IDS" >&2
+  exit 2
+}
+if [[ "$KAFKA_HOST_EXPLICIT" -eq 0 ]]; then
+  KAFKA_HOST="${NODE_IPS[$KAFKA_NODE_INDEX]}"
+fi
+KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
 
 IFS=',' read -ra TERMINAL_ARR <<< "$TERMINALS"
 
@@ -108,11 +131,11 @@ node_ssh() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 0: Ensure Kafka running on admin123
+# Phase 0: Ensure Kafka on the configured topology node
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_KAFKA" -eq 0 && "$NO_KAFKA" -eq 0 ]]; then
   log "=== Ensuring Kafka (KRaft) on ${KAFKA_HOST} ==="
-  node_ssh 0 bash <<KAFKA_EOF
+  node_ssh "$KAFKA_NODE_INDEX" bash <<KAFKA_EOF
 set -euo pipefail
 KAFKA_HOME="$KAFKA_HOME_REMOTE"
 if ! command -v java >/dev/null 2>&1; then
@@ -200,7 +223,7 @@ run_node_sweep() {
 
   # ---- Create dedicated topic ----
   if [[ "$NO_KAFKA" -eq 0 ]]; then
-    node_ssh 0 bash -s <<TOPIC_EOF 2>/dev/null || true
+    node_ssh "$KAFKA_NODE_INDEX" bash -s <<TOPIC_EOF 2>/dev/null || true
 KAFKA_HOME="$KAFKA_HOME_REMOTE"
 if ! command -v java >/dev/null 2>&1; then
   export JAVA_HOME="/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64"

@@ -84,7 +84,11 @@ ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 ARIABC_KNOWN_HOSTS_FILE="${ARIABC_KNOWN_HOSTS_FILE:-$HOME/.ssh/known_hosts}"
 
+_KAFKA_HOST_WAS_SET=0
+[[ -v KAFKA_HOST ]] && _KAFKA_HOST_WAS_SET=1
+KAFKA_HOST_EXPLICIT="${KAFKA_HOST_EXPLICIT:-$_KAFKA_HOST_WAS_SET}"
 KAFKA_HOST="${KAFKA_HOST:-10.129.148.247}"
+KAFKA_NODE_ID="${KAFKA_NODE_ID:-}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
 KAFKA_RESULT_TOPIC="${KAFKA_RESULT_TOPIC:-ariabc_results}"
 KAFKA_HOME_REMOTE="${KAFKA_HOME_REMOTE:-/home/neel/Desktop/kafka_2.13-3.7.0}"
@@ -194,6 +198,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     "CALLER_GIT_HEAD=$CALLER_GIT_HEAD"
     "CALLER_GIT_STATUS_FILE=$GATEWAY_REPO/.bench_tmp/caller_git_status.txt"
     "CALLER_GIT_DIFF_FILE=$GATEWAY_REPO/.bench_tmp/caller_uncommitted_diff.patch"
+    "KAFKA_HOST_EXPLICIT=$KAFKA_HOST_EXPLICIT"
   )
 
   for var in \
@@ -205,11 +210,12 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     ENABLE_MERKLE_INDEX \
     WARMUP_QUERIES \
     MERKLE_VERIFY_MODE DYNAMIC_INDEX_NAME DYNAMIC_STRUCTURE_PROFILE \
+    DYNAMIC_LOGICAL_FANOUT \
     NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
     NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
     NODE_IS_U22_CSV NODE_CLIENT_PORTS_CSV \
     RAFT_PORT DB_PORT DB_USER DB_NAME \
-    KAFKA_HOST KAFKA_PORT KAFKA_RESULT_TOPIC KAFKA_HOME_REMOTE \
+    KAFKA_HOST KAFKA_NODE_ID KAFKA_PORT KAFKA_RESULT_TOPIC KAFKA_HOME_REMOTE \
     KAFKA_COMPLETION_MODE \
     ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US \
     ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES ARIABC_RAFT_ORDERED_BATCH_LINGER_US \
@@ -355,6 +361,33 @@ apply_topology_overrides() {
   [[ "$DB_PORT" =~ ^[0-9]+$ ]] || die "DB_PORT must be numeric: $DB_PORT"
   [[ "$KAFKA_PORT" =~ ^[0-9]+$ ]] || die "KAFKA_PORT must be numeric: $KAFKA_PORT"
   [[ -n "$KAFKA_HOST" ]] || die "KAFKA_HOST cannot be empty"
+
+  KAFKA_NODE_INDEX=-1
+  if [[ -n "$KAFKA_NODE_ID" ]]; then
+    [[ "$KAFKA_NODE_ID" =~ ^[0-9]+$ ]] || die "KAFKA_NODE_ID must be numeric: $KAFKA_NODE_ID"
+    for idx in "${!NODE_IDS[@]}"; do
+      if [[ "${NODE_IDS[$idx]}" == "$KAFKA_NODE_ID" ]]; then
+        KAFKA_NODE_INDEX="$idx"
+        break
+      fi
+    done
+    [[ "$KAFKA_NODE_INDEX" -ge 0 ]] || die "KAFKA_NODE_ID=$KAFKA_NODE_ID is not present in NODE_IDS"
+    if [[ "$KAFKA_HOST_EXPLICIT" -eq 0 ]]; then
+      KAFKA_HOST="${NODE_IPS[$KAFKA_NODE_INDEX]}"
+    fi
+  else
+    for idx in "${!NODE_IDS[@]}"; do
+      if [[ "${NODE_IPS[$idx]}" == "$KAFKA_HOST" ||
+            "${NODE_NAMES[$idx]}" == "$KAFKA_HOST" ]]; then
+        KAFKA_NODE_INDEX="$idx"
+        KAFKA_NODE_ID="${NODE_IDS[$idx]}"
+        break
+      fi
+    done
+  fi
+  if [[ "$NO_KAFKA" -eq 0 && "$SKIP_KAFKA" -eq 0 && "$KAFKA_NODE_INDEX" -lt 0 ]]; then
+    die "Kafka lifecycle host '$KAFKA_HOST' is outside the configured topology; pass --kafka-node-id or --skip-kafka for an externally managed broker"
+  fi
   KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
 }
 
@@ -388,6 +421,7 @@ SKIP_RESTORE="${SKIP_RESTORE:-0}"
 SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
 ENABLE_MERKLE_INDEX="${ENABLE_MERKLE_INDEX:-1}"
 STOP_ONLY="${STOP_ONLY:-0}"
+VALIDATE_CONFIG_ONLY="${VALIDATE_CONFIG_ONLY:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
 ORDERING_MODE="${ORDERING_MODE:-${CLUSTER_ORDERING_MODE:-raft-kafka}}" # raft-kafka|kafka-only
@@ -408,7 +442,7 @@ VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
 MERKLE_VERIFY_MODE="${MERKLE_VERIFY_MODE:-dynamic}"
 DYNAMIC_INDEX_NAME="${DYNAMIC_INDEX_NAME:-}"
 DYNAMIC_EXPECTED_LAYOUT_VERSION=8
-DYNAMIC_EXPECTED_LOGICAL_FANOUT=32
+DYNAMIC_EXPECTED_LOGICAL_FANOUT="${DYNAMIC_LOGICAL_FANOUT:-32}"
 DYNAMIC_EXPECTED_PHYSICAL_NODE_FANOUT=2
 DYNAMIC_STRUCTURE_GATE="${DYNAMIC_STRUCTURE_GATE:-0}"
 DYNAMIC_STRUCTURE_CRASH_GATE="${DYNAMIC_STRUCTURE_CRASH_GATE:-0}"
@@ -525,6 +559,8 @@ Options:
                   and exit without starting the gateway, submitting SQL, or
                   sending the post-run marker
   --stop-only      Stop stale cluster server processes and exit after cleanup
+  --validate-config-only
+                  Validate and print the resolved topology without SSH or changes.
   --skip-pg-restart
                   Do not restart PostgreSQL before restore (default restarts)
   --no-kafka       Use direct completion (no Kafka majority wait)
@@ -542,6 +578,9 @@ Options:
   --db-user USER   Override PostgreSQL user (default from cluster_topology.sh)
   --db-name NAME   Override PostgreSQL database (default from cluster_topology.sh)
   --kafka-host H   Override Kafka broker host (default: 10.129.148.247)
+  --kafka-node-id N
+                  Raft topology node whose SSH session manages Kafka. If
+                  --kafka-host is omitted, use that node's configured IP.
   --kafka-port N   Override Kafka broker port (default: 9092)
   --kafka-home-remote DIR
                   Override remote Kafka installation directory.
@@ -583,6 +622,9 @@ Options:
   --dynamic-structure-profile N
                   Opt-in native dynamic split/merge counters and per-replica
                   equality check: 0|1 (default: 1; use 0 to disable)
+  --dynamic-logical-fanout N
+                  Dynamic Merkle logical fanout: 2,4,8,16,32 (default: 32).
+                  Forwarded as a psql variable to dynamic restore scripts.
   --det-start-seq N
                   First 8-digit DET sequence sent to BCDB (default: 0 for fresh strict runs)
   --req-id-offset N
@@ -762,6 +804,7 @@ while [[ $# -gt 0 ]]; do
     --enable-merkle-index) ENABLE_MERKLE_INDEX="${2:-}"; shift 2 ;;
     --skip-workload) SKIP_WORKLOAD=1; SKIP_POST_VERIFY=1; shift ;;
     --stop-only) STOP_ONLY=1; shift ;;
+    --validate-config-only) VALIDATE_CONFIG_ONLY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
     --node-ids) NODE_IDS_CSV="${2:-}"; shift 2 ;;
@@ -774,7 +817,8 @@ while [[ $# -gt 0 ]]; do
     --db-port) DB_PORT="${2:-}"; shift 2 ;;
     --db-user) DB_USER="${2:-}"; shift 2 ;;
     --db-name) DB_NAME="${2:-}"; shift 2 ;;
-    --kafka-host) KAFKA_HOST="${2:-}"; shift 2 ;;
+    --kafka-host) KAFKA_HOST="${2:-}"; KAFKA_HOST_EXPLICIT=1; shift 2 ;;
+    --kafka-node-id) KAFKA_NODE_ID="${2:-}"; shift 2 ;;
     --kafka-port) KAFKA_PORT="${2:-}"; shift 2 ;;
     --kafka-home-remote) KAFKA_HOME_REMOTE="${2:-}"; shift 2 ;;
     --ordering-mode) ORDERING_MODE="${2:-raft-kafka}"; shift 2 ;;
@@ -791,6 +835,7 @@ while [[ $# -gt 0 ]]; do
     --dynamic-structure-gate) DYNAMIC_STRUCTURE_GATE="${2:-0}"; shift 2 ;;
     --dynamic-structure-crash-gate) DYNAMIC_STRUCTURE_CRASH_GATE="${2:-0}"; shift 2 ;;
     --dynamic-structure-profile) DYNAMIC_STRUCTURE_PROFILE="${2:-0}"; shift 2 ;;
+    --dynamic-logical-fanout) DYNAMIC_EXPECTED_LOGICAL_FANOUT="${2:-}"; shift 2 ;;
     --det-start-seq) DET_START_SEQ="${2:-0}"; shift 2 ;;
     --req-id-offset) REQ_ID_OFFSET="${2:-1}"; shift 2 ;;
     --det-window)   DET_WINDOW="${2:-4096}"; DET_WINDOW_EXPLICIT=1; shift 2 ;;
@@ -887,7 +932,8 @@ fi
 [[ "$ARIABC_KNOWN_HOSTS_FILE" != *[[:space:]]* ]] || die "known_hosts path must not contain whitespace: $ARIABC_KNOWN_HOSTS_FILE"
 NODE_RSYNC_SSH="ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ARIABC_KNOWN_HOSTS_FILE -o ConnectTimeout=10"
 
-if [[ "$SKIP_RESTORE" -eq 0 && "${ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET:-0}" != "1" ]]; then
+if [[ "$VALIDATE_CONFIG_ONLY" -eq 0 && "$SKIP_RESTORE" -eq 0 &&
+      "${ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET:-0}" != "1" ]]; then
   die "restore resets benchmark-global state; export ARIABC_ALLOW_DESTRUCTIVE_BENCHMARK_RESET=1 only for a dedicated benchmark database"
 fi
 
@@ -1284,8 +1330,22 @@ if [[ "$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT" -lt 0 || "$ARIABC_RESULT_PUBLISH_RE
   echo "ERROR: --result-publish-replica-limit must be between 0 and 4" >&2
   exit 2
 fi
-if [[ "$ARIABC_PREFERRED_LEADER_ID" -lt 0 || "$ARIABC_PREFERRED_LEADER_ID" -gt 4 ]]; then
-  echo "ERROR: --preferred-leader-id must be between 0 and 4" >&2
+[[ "$ARIABC_PREFERRED_LEADER_ID" =~ ^[0-9]+$ ]] || {
+  echo "ERROR: --preferred-leader-id must be a non-negative numeric node id" >&2
+  exit 2
+}
+if [[ "$ARIABC_PREFERRED_LEADER_ID" -ne 0 ]]; then
+  preferred_leader_found=0
+  for idx in "${!NODE_IDS[@]}"; do
+    [[ "${NODE_IDS[$idx]}" == "$ARIABC_PREFERRED_LEADER_ID" ]] && preferred_leader_found=1
+  done
+  [[ "$preferred_leader_found" -eq 1 ]] || {
+    echo "ERROR: --preferred-leader-id=$ARIABC_PREFERRED_LEADER_ID is not present in --node-ids" >&2
+    exit 2
+  }
+fi
+if [[ ! "$DYNAMIC_EXPECTED_LOGICAL_FANOUT" =~ ^(2|4|8|16|32)$ ]]; then
+  echo "ERROR: --dynamic-logical-fanout must be one of 2,4,8,16,32" >&2
   exit 2
 fi
 if [[ "$BCDB_DECOUPLE_WORKERS" == "0" && "$BCDB_WORKER_COUNT" != "$DB_CONN_POOL_SIZE" ]]; then
@@ -1381,6 +1441,22 @@ if [[ "$RAFT_ORDERING_POLICY" == "leader-assigned" ]]; then
     echo "ERROR: --raft-ordering-policy leader-assigned requires threaded-raft-direct, raft-kafka, bypassRaft=0, raftOrderedFanout=1, raftApplyLedger=off, detRawSql=0, detClientMode=threadpool, detClientInflight=1, detBatchSize=1" >&2
     exit 2
   fi
+fi
+
+# A non-mutating topology gate used by automation and custom deployments.
+if [[ "$VALIDATE_CONFIG_ONLY" -eq 1 ]]; then
+  validated_members=""
+  for idx in "${!NODE_IDS[@]}"; do
+    [[ -n "$validated_members" ]] && validated_members+=","
+    validated_members+="${NODE_IDS[$idx]}=${NODE_IPS[$idx]}:${RAFT_PORT}"
+  done
+  echo "CONFIG_VALIDATION_PASS=1"
+  echo "RAFT_MEMBERS=$validated_members"
+  echo "KAFKA_BOOTSTRAP=$KAFKA_BOOTSTRAP"
+  echo "KAFKA_NODE_ID=${KAFKA_NODE_ID:-external}"
+  echo "PREFERRED_LEADER_ID=$ARIABC_PREFERRED_LEADER_ID"
+  echo "DYNAMIC_LOGICAL_FANOUT=$DYNAMIC_EXPECTED_LOGICAL_FANOUT"
+  exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -1945,6 +2021,9 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'completion_path=%s\n' "$RUN_META_COMPLETION_PATH"
   printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
   printf 'kafka_bootstrap=%s\n' "$KAFKA_BOOTSTRAP"
+  printf 'kafka_node_id=%s\n' "${KAFKA_NODE_ID:-external}"
+  printf 'preferred_leader_id=%s\n' "$ARIABC_PREFERRED_LEADER_ID"
+  printf 'dynamic_logical_fanout=%s\n' "$DYNAMIC_EXPECTED_LOGICAL_FANOUT"
   printf 'result_topic=%s\n' "$KAFKA_RESULT_TOPIC"
   printf 'raft_storage_mode=%s\n' "$RAFT_STORAGE_MODE"
   printf 'raft_storage_action=%s\n' "$RAFT_STORAGE_ACTION"
@@ -2756,11 +2835,11 @@ for idx in "${!NODE_IDS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Phase 2: Kafka on admin123
+# Phase 2: Kafka on the configured lifecycle node
 # ---------------------------------------------------------------------------
 if [[ "$NO_KAFKA" -eq 0 && "$SKIP_KAFKA" -eq 0 ]]; then
-  log "=== Phase 2: Ensure Kafka (KRaft) running on admin123 (${KAFKA_HOST}) ==="
-  node_ssh 0 bash <<KAFKA_EOF
+  log "=== Phase 2: Ensure Kafka (KRaft) on node id ${KAFKA_NODE_ID} (${KAFKA_HOST}) ==="
+  node_ssh "$KAFKA_NODE_INDEX" bash <<KAFKA_EOF
 set -euo pipefail
 KAFKA_HOME="$KAFKA_HOME_REMOTE"
 KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
@@ -2773,7 +2852,7 @@ fi
 
 if [[ ! -f "\$KAFKA_HOME/bin/kafka-topics.sh" ]]; then
   echo "ERROR: Kafka not found at \$KAFKA_HOME — run setup first:" >&2
-  echo "  On admin123: wget -P ~/Desktop https://archive.apache.org/dist/kafka/3.7.0/kafka_2.13-3.7.0.tgz && tar -C ~/Desktop -xzf ~/Desktop/kafka_2.13-3.7.0.tgz" >&2
+  echo "  Install Kafka under $KAFKA_HOME on the configured Kafka node" >&2
   exit 1
 fi
 
@@ -2818,7 +2897,7 @@ KAFKA_EOF
   # completion path.  Resetting the topic before each workload eliminates
   # this source of non-determinism.
   log "  Preflight: resetting topic $KAFKA_RESULT_TOPIC to flush stale offsets..."
-  node_ssh 0 bash <<KAFKA_FLUSH_EOF
+  node_ssh "$KAFKA_NODE_INDEX" bash <<KAFKA_FLUSH_EOF
 set -euo pipefail
 KAFKA_HOME="$KAFKA_HOME_REMOTE"
 TOPICS_SH="\$KAFKA_HOME/bin/kafka-topics.sh"
@@ -3419,7 +3498,8 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
       test -f '$remote_restore' || { echo 'missing restore SQL: $remote_restore' >&2; exit 1; }
       PGOPTIONS='-c ariabc.allow_destructive_benchmark_reset=on' \
         \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
-          -v ON_ERROR_STOP=1 -f '$remote_restore'
+          -v ON_ERROR_STOP=1 -v dynamic_logical_fanout='$DYNAMIC_EXPECTED_LOGICAL_FANOUT' \
+          -f '$remote_restore'
       if [[ '$ENABLE_MERKLE_INDEX' -eq 0 ]]; then
         \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$\
           DECLARE r record;
@@ -5196,7 +5276,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     printf 'DYNAMIC_LAYOUT_VERSION=%s\n' "$DYNAMIC_EXPECTED_LAYOUT_VERSION" >>"$LOG_DIR/run_summary.env"
     printf 'DYNAMIC_MAX_DEPTH=%s\n' "${POST_MAX_DEPTH[0]:-unknown}" >>"$LOG_DIR/run_summary.env"
     printf 'DYNAMIC_LAYOUT_CONTRACT_PASS=1\n' >>"$LOG_DIR/run_summary.env"
-    printf 'DYNAMIC_LOGICAL_FANOUT=32\n' >>"$LOG_DIR/run_summary.env"
+    printf 'DYNAMIC_LOGICAL_FANOUT=%s\n' "$DYNAMIC_EXPECTED_LOGICAL_FANOUT" >>"$LOG_DIR/run_summary.env"
     printf 'DYNAMIC_PHYSICAL_NODE_FANOUT=2\n' >>"$LOG_DIR/run_summary.env"
     printf 'DYNAMIC_FANOUT_CONTRACT_PASS=1\n' >>"$LOG_DIR/run_summary.env"
     if [[ "${STRUCTURE_NATIVE:-0}" -eq 1 ]]; then

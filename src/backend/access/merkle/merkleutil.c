@@ -402,7 +402,7 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
  *
  *   static leaf  = uint64(first 8 digest bytes) % total_leaves
  *   dynamic bits = full 256-bit digest consumed one bit at a time;
- *                  public logical ranges may group five bits (fanout 32)
+ *                  public logical ranges group log2(configured fanout) bits
  *
  * INTEGER KEYS: earlier versions used abs(key) % total_leaves directly, which
  * was incompatible with a future dynamic prefix tree (sequential keys share
@@ -1002,7 +1002,7 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 		 * directory.  Immutable nodes and XID-visible roots appended after it
 		 * are the authoritative tree; side relations are compatibility-only. */
 		leavesPerPartition = opts->dynamic ? 1 : opts->leaves_per_partition;
-		fanout = opts->dynamic ? MERKLE_DYNAMIC_LOGICAL_FANOUT : opts->fanout;
+		fanout = opts->fanout;
     }
     else
     {
@@ -1064,7 +1064,7 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 		meta->dynamicMagic = MERKLE_DYNAMIC_META_MAGIC;
 		meta->dynamicLayoutVersion = MERKLE_DYNAMIC_LAYOUT_VERSION;
 		meta->dynamicFlags = 1;
-		meta->dynamicLogicalFanout = MERKLE_DYNAMIC_LOGICAL_FANOUT;
+		meta->dynamicLogicalFanout = opts->fanout;
 		meta->dynamicLeafCapacity = opts->leaf_capacity;
 		meta->dynamicMergeThreshold = opts->merge_threshold;
 		meta->dynamicLeafByteCapacity = opts->leaf_byte_capacity;

@@ -123,8 +123,9 @@ def create_dynamic_merkle_indexes(
     execute(conn, "DROP INDEX IF EXISTS damaged.usertable_leaf_lookup_idx")
     execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_idx")
     execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_idx")
-    if logical_fanout != 32:
-        raise ValueError("dynamic Merkle currently requires logical fanout 32")
+    if (logical_fanout < 2 or logical_fanout > 32 or
+            logical_fanout & (logical_fanout - 1)):
+        raise ValueError("dynamic Merkle logical fanout must be one of 2,4,8,16,32")
     if not 0 <= merge_threshold < leaf_capacity:
         raise ValueError("dynamic merge_threshold must be in [0, leaf_capacity)")
     for schema in ("healthy", "damaged"):

@@ -4,8 +4,8 @@ The dynamic tree may have a different physical split layout on the healthy and
 damaged replicas.  Recovery therefore never pairs physical node identifiers.
 It asks both indexes for summaries of the *same logical key-hash prefix* and
 compares ``(tuple_count, data_xor)``.  Mismatching prefixes are expanded by one
-logical fanout level at a time (five MSB-first bits for fanout 32), independent
-of the backend's one-bit physical splits, until both sides contain at most the
+logical fanout level at a time (``log2(fanout)`` MSB-first bits), independent of
+the backend's one-bit physical splits, until both sides contain at most the
 configured leaf capacity.  Bounded key/hash summaries then identify the exact
 repair keys.
 

@@ -54,9 +54,12 @@ option.
 ## Dynamic Merkle acceptance profile
 
 `dynamic-size-scaling-k75-c300` is separate from every static paper profile.
-It creates Merkle indexes with `dynamic=on`, P=200, logical fanout 32, leaf
-capacity/split threshold 32, and merge threshold 8. It never creates the
-static `merkle_bucket_for_key(...)` expression indexes.
+It creates Merkle indexes with `dynamic=on`, P=200, a configurable power-of-two
+logical fanout from 2 through 32 (default 32), leaf capacity/split threshold 32,
+and merge threshold 8. The physical split implementation remains binary and
+the fixed v8 node record retains capacity for 32 logical slots. It never creates
+the static `merkle_bucket_for_key(...)` expression indexes. Use `--fanout 4`
+(or 2, 8, 16, 32) to select a different logical directory width.
 
 The default campaign runs 1 M, 3 M, and 5 M tuples with 75 corrupted bounded
 ranges, 300 update corruptions, and five repetitions. Audit is disabled by
@@ -67,6 +70,42 @@ Recovery compares shape-independent logical prefix summaries
 `(tuple_count,data_xor)`, descends MSB-first, fetches at most 4,800 key/hash
 summary rows, fetches full healthy heap rows only for exact insert/update keys,
 uses set-based repair DML, drains the durable applier, relocalises, and audits.
+
+To include real network overhead, run the Python driver on a client machine
+against a dedicated PostgreSQL benchmark database on another machine:
+
+```bash
+./scripts/benchmark/recovery/run_networked_recovery_benchmark.sh \
+  --client-host recovery-client.example \
+  --db-host merkle-db.example \
+  --db-name merkle_recovery_bench \
+  --fanout 4 \
+  --allow-destructive-dataset-reset
+```
+
+All recovery phase timers then include their database round trips. The runner
+also requires PostgreSQL to report distinct TCP client/server addresses and
+stores baseline SQL RTT samples and endpoint identity in `network_probe.json`.
+It uses libpq authentication on the client (normally `~/.pgpass`) and refuses
+to run unless the destructive dedicated-database acknowledgement is present.
+
+For a true split-host recovery, where the damaged native index is on
+`admin123` and the healthy reference is on `user4`, use:
+
+```bash
+./scripts/benchmark/recovery/run_split_host_recovery_benchmark.sh \
+  --allow-destructive-dataset-reset
+```
+
+Those placements are configurable but are the current defaults. The recovery
+client runs on admin123, so damaged reads and repair writes are local while
+healthy root/range/row fetches cross the admin123-to-user4 TCP path. The default
+tuple series is `1M,3M,5M,10M`. Pass `--full-scale` for
+`1M,3M,5M,7M,10M,15M,20M,25M,30M,40M,50M`, or use `--tuple-count CSV` for an
+explicit series. By default, the wrapper starts isolated clusters on TCP port
+55432 using each host's `/home/neel/Desktop/ariabc_install`; existing PGDATA is
+reused and never deleted. Pass `--no-prepare-postgres` plus the host, port, and
+database options to use externally managed dedicated databases instead.
 
 When `--audit-mode full` is requested, dynamic acceptance additionally checks
 both table differences, matching root hashes and counts,
@@ -190,8 +229,8 @@ Every `runs.csv` row includes:
 | `mean_rows_per_bad_leaf`  | Mean candidate rows per bad leaf               |
 | `p95_rows_per_bad_leaf`   | p95 candidate rows per bad leaf                |
 
-Dynamic schema-v6 runs use separate, unambiguous counters.  Schema v6 binds
-the configured logical localisation fanout (32) to native index metadata while
+Dynamic schema-v7 runs use separate, unambiguous counters. Schema v7 binds
+the configured logical localisation fanout to native index metadata while
 reporting the binary physical node fanout (2) separately. The candidate
 payload is canonical key/route/tuple-hash summaries, not full heap rows:
 
@@ -208,7 +247,7 @@ payload is canonical key/route/tuple-hash summaries, not full heap rows:
 
 For dynamic runs, `bad_leaf_count` remains the configured 75 physical
 corruption-selection leaves. `bad_range_count` is the number of bounded
-fanout-32 logical ranges produced by shape-independent localization; the two
+configured-fanout logical ranges produced by shape-independent localization; the two
 counts need not be equal because logical boundaries may cut physical leaves.
 
 Audit time is **excluded** from `paper_style_total_ms`.
@@ -243,7 +282,9 @@ timing_contract_version  = 1
 Version 3 is the Merkle-only static-recovery benchmark.
 Version 4 was the initial dynamic-recovery benchmark.
 Version 5 introduced the fail-closed 4,800-summary bound and node/leaf-item
-side-table plan evidence. Version 6 makes recovery consume logical fanout 32
-per localisation level and records/proves physical node fanout 2 separately.
+side-table plan evidence. Version 6 made recovery consume logical fanout 32
+per localisation level and recorded physical node fanout 2 separately. Version
+7 accepts configured logical fanouts 2, 4, 8, 16, or 32 and records SQL RTT and
+client/server endpoint evidence in `network_probe.json`.
 Version 2 was the archived three-method CTA/disk/Merkle benchmark.
 Do not pool v2, v3, v4, v5, and v6 results without an explicit comparison design.

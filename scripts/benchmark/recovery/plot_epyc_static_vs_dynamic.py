@@ -87,6 +87,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--static-artifact", type=Path, required=True)
     parser.add_argument("--dynamic-artifact", type=Path, required=True)
+    parser.add_argument("--prior-dynamic-artifact", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -103,7 +104,7 @@ def main() -> int:
     ax.plot(sizes_m, [static_runs[s]["restore_repair_ms"] for s in SIZES],
             marker="o", linewidth=2.2, label="Static F32/L1024 (3-run median)")
     ax.plot(sizes_m, [dynamic_runs[s]["restore_repair_ms"] for s in SIZES],
-            marker="o", linewidth=2.2, label="Latest optimized dynamic (1 run)")
+            marker="o", linewidth=2.2, label="Latest dynamic v8 (1 run)")
     ax.set(title="EPYC sparse recovery: static best vs latest dynamic",
            xlabel="Table rows (millions)", ylabel="Recovery latency (ms, log scale)",
            yscale="log")
@@ -111,18 +112,23 @@ def main() -> int:
     ax.legend()
     save(fig, args.output_dir / "epyc_static_vs_dynamic_recovery.png")
 
-    # End-to-end recovery cost, including the queue barrier and audit contract.
+    # Dynamic lifecycle time is not directly comparable with the older static
+    # artifact: schema v6 explicitly includes pre-recovery setup and cleanup,
+    # while the schema-v3 static timer does not expose the same boundary.
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    ax.plot(sizes_m, [static_runs[s]["total_ms"] for s in SIZES],
-            marker="o", linewidth=2.2, label="Static F32/L1024")
-    ax.plot(sizes_m, [dynamic_runs[s]["total_ms"] for s in SIZES],
-            marker="o", linewidth=2.2, label="Optimized dynamic v8")
-    ax.set(title="EPYC end-to-end recovery cost",
-           xlabel="Table rows (millions)", ylabel="End-to-end time (ms, log scale)",
-           yscale="log")
+    setup = [dynamic_phases[s]["pre_recovery_setup_ms"] for s in SIZES]
+    recovery = [dynamic_runs[s]["restore_repair_ms"] for s in SIZES]
+    cleanup = [dynamic_runs[s]["cleanup_ms"] for s in SIZES]
+    residual = [max(0, dynamic_runs[s]["total_ms"] - a - b - c)
+                for s, a, b, c in zip(SIZES, setup, recovery, cleanup)]
+    ax.stackplot(sizes_m, [setup, recovery, cleanup, residual],
+                 labels=["Pre-recovery setup", "Sparse recovery", "Cleanup", "Harness overhead"],
+                 colors=["#4c78a8", "#54a24b", "#f58518", "#b8b8b8"], alpha=0.9)
+    ax.set(title="Latest dynamic v8 lifecycle cost (not a static-comparable recovery timer)",
+           xlabel="Table rows (millions)", ylabel="Observed lifecycle time (ms)")
     ax.set_xticks(sizes_m)
     ax.legend()
-    save(fig, args.output_dir / "epyc_static_vs_dynamic_end_to_end.png")
+    save(fig, args.output_dir / "epyc_dynamic_lifecycle_cost.png")
 
     # Physical storage: auxiliary static footprint versus native dynamic index,
     # and the full schema footprint including the common table/index base.
@@ -144,20 +150,34 @@ def main() -> int:
     fig.suptitle("EPYC storage cost: static best versus compact dynamic v8", fontsize=14)
     save(fig, args.output_dir / "epyc_static_vs_dynamic_storage.png")
 
-    # Storage premium and the reduction delivered by v8.
+    # Storage premium of the latest dynamic layout relative to static.
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
-    index_reduction = [(s - d) / s * 100 for s, d in zip(static_aux, dynamic_index)]
+    index_premium = [(d - s) / s * 100 for s, d in zip(static_aux, dynamic_index)]
     schema_premium = [(d - s) / s * 100 for s, d in zip(static_schema, dynamic_schema)]
-    axes[0].plot(sizes_m, index_reduction, marker="o", color="seagreen")
-    axes[0].set(title="Dynamic index reduction versus v6 baseline",
-                xlabel="Rows (M)", ylabel="Reduction (%)")
+    axes[0].plot(sizes_m, index_premium, marker="o", color="darkorange")
+    axes[0].set(title="Dynamic native-index premium versus static auxiliary",
+                xlabel="Rows (M)", ylabel="Premium (%)")
     axes[0].axhline(0, color="black", linewidth=0.8)
     axes[1].plot(sizes_m, schema_premium, marker="o", color="darkorange")
     axes[1].set(title="Dynamic total-schema premium versus static",
                 xlabel="Rows (M)", ylabel="Premium (%)")
     axes[1].axhline(0, color="black", linewidth=0.8)
-    fig.suptitle("Storage optimization and remaining architectural cost", fontsize=14)
+    fig.suptitle("Latest dynamic v8 storage cost relative to static", fontsize=14)
     save(fig, args.output_dir / "epyc_static_vs_dynamic_storage_tradeoff.png")
+
+    # Normalising by row count distinguishes a linear representation cost from
+    # a capacity-driven blow-up and makes deployment sizing directly usable.
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    axes[0].plot(sizes_m, [v / s for v, s in zip(static_aux, SIZES)], marker="o", label="Static auxiliary")
+    axes[0].plot(sizes_m, [v / s for v, s in zip(dynamic_index, SIZES)], marker="o", label="Dynamic native index v8")
+    axes[0].set(title="Merkle storage per table row", xlabel="Rows (M)", ylabel="Bytes per row")
+    axes[0].legend()
+    axes[1].plot(sizes_m, [v / s for v, s in zip(static_schema, SIZES)], marker="o", label="Static total schema")
+    axes[1].plot(sizes_m, [v / s for v, s in zip(dynamic_schema, SIZES)], marker="o", label="Dynamic total schema v8")
+    axes[1].set(title="Total schema storage per row", xlabel="Rows (M)", ylabel="Bytes per row")
+    axes[1].legend()
+    fig.suptitle("EPYC deployment storage intensity", fontsize=14)
+    save(fig, args.output_dir / "epyc_static_vs_dynamic_storage_per_row.png")
 
     # Common phase comparison.
     mappings = [
@@ -165,7 +185,7 @@ def main() -> int:
         ("Candidate fetch", "candidate_row_fetch_ms", "candidate_summary_fetch_ms"),
         ("Comparison", "row_comparison_ms", "summary_comparison_ms"),
         ("Repair write", "repair_write_ms", "repair_write_ms"),
-        ("Native commit visibility", "targeted_post_repair_confirmation_ms", "native_commit_visibility_ms"),
+        ("Post-repair confirmation / commit", "targeted_post_repair_confirmation_ms", "native_commit_visibility_ms"),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15, 8.5))
     for ax, (title, static_key, dynamic_key) in zip(axes.flat, mappings):
@@ -206,6 +226,46 @@ def main() -> int:
         ax.legend(loc="upper left", fontsize=8)
     fig.suptitle("Where recovery time is spent", fontsize=14)
     save(fig, args.output_dir / "epyc_static_vs_dynamic_phase_cost.png")
+
+    # Percentage phase composition makes the isolated 40M repair-write tail
+    # visible without letting absolute latency obscure the normal case.
+    dynamic_phase_keys = [
+        ("tree_localisation_ms", "Tree localisation"),
+        ("candidate_summary_fetch_ms", "Summary fetch"),
+        ("summary_comparison_ms", "Summary comparison"),
+        ("exact_heap_fetch_ms", "Exact heap fetch"),
+        ("repair_write_ms", "Repair write"),
+        ("native_commit_visibility_ms", "Commit visibility"),
+        ("post_commit_relocalisation_ms", "Post-commit relocalisation"),
+    ]
+    totals = [dynamic_runs[s]["restore_repair_ms"] for s in SIZES]
+    values = [[100 * dynamic_phases[s][key] / total for s, total in zip(SIZES, totals)]
+              for key, _ in dynamic_phase_keys]
+    accounted = [sum(series[i] for series in values) for i in range(len(SIZES))]
+    values.append([max(0, 100 - value) for value in accounted])
+    fig, ax = plt.subplots(figsize=(11, 6))
+    ax.stackplot(sizes_m, values,
+                 labels=[label for _, label in dynamic_phase_keys] + ["Other orchestration"],
+                 alpha=0.9)
+    ax.set(title="Latest dynamic v8 sparse-recovery phase share",
+           xlabel="Table rows (millions)", ylabel="Share of restore_repair_ms (%)",
+           ylim=(0, 100))
+    ax.set_xticks(sizes_m)
+    ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
+    save(fig, args.output_dir / "epyc_dynamic_phase_share.png")
+
+    if args.prior_dynamic_artifact:
+        prior_runs, _ = load_artifact(args.prior_dynamic_artifact)
+        fig, ax = plt.subplots(figsize=(10, 5.5))
+        ax.plot(sizes_m, [prior_runs[s]["restore_repair_ms"] for s in SIZES],
+                marker="o", linewidth=2.0, label="Prior v8 sweep (20260722T033848Z)")
+        ax.plot(sizes_m, [dynamic_runs[s]["restore_repair_ms"] for s in SIZES],
+                marker="o", linewidth=2.0, label="Latest v8 sweep (20260722T152802Z)")
+        ax.set(title="Single-repetition dynamic v8 sweep stability",
+               xlabel="Table rows (millions)", ylabel="Sparse recovery latency (ms)")
+        ax.set_xticks(sizes_m)
+        ax.legend()
+        save(fig, args.output_dir / "epyc_dynamic_run_stability.png")
 
     # Leaf geometry and occupancy.
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.3))

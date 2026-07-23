@@ -2,6 +2,11 @@
 -- The caller must execute scripts/restore_usertable_small.sql first with
 -- ariabc_skip_legacy_merkle_index defined.
 
+\if :{?dynamic_logical_fanout}
+\else
+\set dynamic_logical_fanout 32
+\endif
+
 DO $$
 BEGIN
     IF current_setting('ariabc.allow_destructive_benchmark_reset', true)
@@ -34,7 +39,7 @@ CREATE INDEX usertable_small_dynamic_merkle_idx
         dynamic              = true,
         partitions           = 150,
         leaves_per_partition = 1024,
-        fanout               = 32,
+        fanout               = :dynamic_logical_fanout,
         leaf_capacity        = 32,
         merge_threshold      = 8,
         leaf_byte_capacity   = 65536,

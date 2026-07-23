@@ -9,6 +9,7 @@ import json
 import math
 import os
 import shutil
+import socket
 import sys
 import time
 from statistics import median
@@ -68,6 +69,52 @@ PROFILE_OPERATION_FIELDS = [
     "schema", "partition", "node_in_partition", "leaf_id",
     "call_ordinal", "rows_returned", "client_wall_ms", "success",
 ]
+
+
+def write_network_probe(conn, result_dir: Path, samples: int) -> dict[str, Any]:
+    """Record DB endpoint identity and protocol round-trip latency."""
+    if samples <= 0:
+        raise ValueError("--network-probe-samples must be positive")
+    endpoint_rows = execute(
+        conn,
+        """
+        SELECT inet_server_addr()::text AS server_addr,
+               inet_server_port() AS server_port,
+               inet_client_addr()::text AS client_addr,
+               inet_client_port() AS client_port,
+               pg_backend_pid() AS backend_pid,
+               current_setting('ssl') AS ssl_enabled
+        """,
+    )
+    endpoint = endpoint_rows[0] if endpoint_rows else {}
+    timings_ms: list[float] = []
+    for _ in range(samples):
+        started = time.perf_counter_ns()
+        scalar(conn, "SELECT 1")
+        timings_ms.append((time.perf_counter_ns() - started) / 1_000_000.0)
+    ordered = sorted(timings_ms)
+    p95_index = min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1)
+    probe = {
+        "contract_version": 1,
+        "measured_at": datetime.now().astimezone().isoformat(),
+        "client_hostname": socket.gethostname(),
+        "server_addr": endpoint.get("server_addr"),
+        "server_port": endpoint.get("server_port"),
+        "client_addr_seen_by_server": endpoint.get("client_addr"),
+        "client_port_seen_by_server": endpoint.get("client_port"),
+        "backend_pid": endpoint.get("backend_pid"),
+        "ssl_enabled": endpoint.get("ssl_enabled"),
+        "samples": samples,
+        "round_trip_ms": timings_ms,
+        "round_trip_min_ms": min(timings_ms),
+        "round_trip_median_ms": median(timings_ms),
+        "round_trip_p95_ms": ordered[p95_index],
+        "round_trip_max_ms": max(timings_ms),
+    }
+    (result_dir / "network_probe.json").write_text(
+        json.dumps(probe, indent=2, default=str) + "\n"
+    )
+    return probe
 
 
 # ── timing helper ─────────────────────────────────────────────────────────────
@@ -978,7 +1025,6 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
     if args.profile == DYNAMIC_PROFILE:
         expected = {
             "partitions": DYNAMIC_PARTITIONS,
-            "fanout": DYNAMIC_LOGICAL_FANOUT,
             "bad_leaf_count": DYNAMIC_BAD_RANGE_COUNT,
             "dynamic_leaf_capacity": DYNAMIC_LEAF_CAPACITY,
             "dynamic_merge_threshold": DYNAMIC_MERGE_THRESHOLD,
@@ -994,10 +1040,15 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
             raise ValueError(
                 f"{DYNAMIC_PROFILE} has no fixed leaves-per-partition; do not pass that option"
             )
-        if args.geometry_label and args.geometry_label != "dynamic-p200-k32-cap32-merge8":
+        dynamic_fanout = int(args.fanout or DYNAMIC_LOGICAL_FANOUT)
+        if (dynamic_fanout < 2 or dynamic_fanout > 32 or
+                dynamic_fanout & (dynamic_fanout - 1)):
+            raise ValueError("dynamic --fanout must be one of 2,4,8,16,32")
+        dynamic_label = f"dynamic-p200-k{dynamic_fanout}-cap32-merge8"
+        if args.geometry_label and args.geometry_label != dynamic_label:
             raise ValueError(
                 f"{DYNAMIC_PROFILE} only supports geometry-label="
-                "dynamic-p200-k32-cap32-merge8"
+                f"{dynamic_label} for --fanout={dynamic_fanout}"
             )
         series: list[dict[str, Any]] = []
         # When --tuple-count is given, honour those sizes directly.  The
@@ -1022,10 +1073,10 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                     tuple_count=tuple_count,
                     partitions=DYNAMIC_PARTITIONS,
                     leaves_per_partition=0,
-                    fanout=DYNAMIC_LOGICAL_FANOUT,
+                    fanout=dynamic_fanout,
                     bad_leaf_count=DYNAMIC_BAD_RANGE_COUNT,
                     corrupted_tuple_count=DYNAMIC_CORRUPTED_TUPLE_COUNT,
-                    geometry_label="dynamic-p200-k32-cap32-merge8",
+                    geometry_label=dynamic_label,
                     merkle_mode="dynamic",
                     leaf_capacity=DYNAMIC_LEAF_CAPACITY,
                     merge_threshold=DYNAMIC_MERGE_THRESHOLD,
@@ -1328,8 +1379,10 @@ def _assert_dynamic_preflight(conn, args, config, result_dir: Path) -> None:
             )
         if int(spec.get("leaf_capacity", -1)) != DYNAMIC_LEAF_CAPACITY:
             failures.append(f"spec leaf_capacity={spec.get('leaf_capacity')}")
-        if int(spec.get("fanout", -1)) != 32:
-            failures.append(f"spec logical_fanout={spec.get('fanout')}")
+        logical_fanout = int(spec.get("fanout", -1))
+        if (logical_fanout < 2 or logical_fanout > 32 or
+                logical_fanout & (logical_fanout - 1)):
+            failures.append(f"spec logical_fanout={logical_fanout}")
 
     required_indexes = {
         "merkle_dynamic_node_pkey",
@@ -1362,7 +1415,7 @@ def _assert_dynamic_preflight(conn, args, config, result_dir: Path) -> None:
         "benchmark_schema_version": config.benchmark_schema_version,
         "expected_native_layout_version": DYNAMIC_NATIVE_LAYOUT_VERSION,
         "leaves_per_partition": 0,
-        "logical_localisation_fanout": DYNAMIC_LOGICAL_FANOUT,
+        "logical_localisation_fanout": int(specs[0]["fanout"]),
         "physical_node_fanout": DYNAMIC_PHYSICAL_NODE_FANOUT,
         "leaf_capacity": DYNAMIC_LEAF_CAPACITY,
         "candidate_summary_item_limit": 2
@@ -1489,6 +1542,17 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     git_head = ""
 
     with connect(args) as conn:
+        network_probe = write_network_probe(
+            conn, result_dir, getattr(args, "network_probe_samples", 20)
+        )
+        emit_progress(
+            result_dir,
+            event="network_probe_complete",
+            server_addr=network_probe.get("server_addr"),
+            client_addr=network_probe.get("client_addr_seen_by_server"),
+            round_trip_median_ms=network_probe["round_trip_median_ms"],
+            round_trip_p95_ms=network_probe["round_trip_p95_ms"],
+        )
         ensure_helpers(conn, merkle_mode=args.merkle_mode)
         if args.profile == DYNAMIC_PROFILE:
             _assert_dynamic_preflight(conn, args, config, result_dir)
@@ -1529,10 +1593,11 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             leaf_capacity = int(spec.get("leaf_capacity", 0))
             merge_threshold = int(spec.get("merge_threshold", 0))
             if merkle_mode == "dynamic":
-                if partitions <= 0 or fanout != 32 or leaf_capacity <= 0:
+                if (partitions <= 0 or fanout < 2 or fanout > 32 or
+                        (fanout & (fanout - 1)) != 0 or leaf_capacity <= 0):
                     raise ValueError(
                         "invalid dynamic Merkle geometry: require partitions>0, "
-                        "logical fanout=32, leaf_capacity>0"
+                        "power-of-two logical fanout in [2,32], leaf_capacity>0"
                     )
                 if not 0 <= merge_threshold < leaf_capacity:
                     raise ValueError(
@@ -2072,6 +2137,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         "exact_heap_fetch_ms",
         "row_comparison_ms",
         "repair_write_ms",
+        "native_commit_visibility_ms",
+        "post_commit_relocalisation_ms",
         "post_repair_apply_pending_ms",
         "post_repair_relocalisation_ms",
         "targeted_post_repair_confirmation_ms",
@@ -2238,6 +2305,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=20260703)
     parser.add_argument("--result-dir", dest="result_dir")
     parser.add_argument("--scratch-dir", dest="scratch_dir")
+    parser.add_argument(
+        "--network-probe-samples",
+        type=int,
+        default=20,
+        dest="network_probe_samples",
+        help="SQL round trips recorded in network_probe.json before recovery (default: 20)",
+    )
     parser.add_argument("--artifact-mode", choices=["summary", "debug"], default="summary",
                         dest="artifact_mode")
     parser.add_argument(

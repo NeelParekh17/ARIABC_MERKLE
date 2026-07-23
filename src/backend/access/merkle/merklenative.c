@@ -324,14 +324,16 @@ native_read_config(Relation indexRel, NativeConfig *config)
 	}
 	config->partitions = meta->numPartitions;
 	config->logical_fanout = meta->dynamicLogicalFanout;
-	if (config->logical_fanout != MERKLE_DYNAMIC_LOGICAL_FANOUT)
+	if (config->logical_fanout < 2 ||
+		config->logical_fanout > MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT ||
+		(config->logical_fanout & (config->logical_fanout - 1)) != 0)
 	{
 		UnlockReleaseBuffer(buffer);
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
-				 errmsg("dynamic Merkle logical fanout is %d, expected %d",
+				 errmsg("dynamic Merkle logical fanout %d is not a supported power of two between 2 and %d",
 						config->logical_fanout,
-						MERKLE_DYNAMIC_LOGICAL_FANOUT)));
+						MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT)));
 	}
 	config->leaf_capacity = meta->dynamicLeafCapacity;
 	config->merge_threshold = meta->dynamicMergeThreshold;
@@ -389,12 +391,30 @@ native_locator_equal(const MerkleNativeLocator *a,
 }
 
 static int
-native_route_slot(const uint8 route[MERKLE_HASH_BYTES], int prefix_len)
+native_logical_width(int logical_fanout)
+{
+	int width = 0;
+
+	Assert(logical_fanout >= 2 &&
+		logical_fanout <= MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT &&
+		(logical_fanout & (logical_fanout - 1)) == 0);
+	while (logical_fanout > 1)
+	{
+		width++;
+		logical_fanout >>= 1;
+	}
+	return width;
+}
+
+static int
+native_route_slot(const uint8 route[MERKLE_HASH_BYTES], int prefix_len,
+				  int logical_fanout)
 {
 	int slot = 0;
+	int width = native_logical_width(logical_fanout);
 	int i;
 
-	for (i = 0; i < 5; i++)
+	for (i = 0; i < width; i++)
 		slot = (slot << 1) | native_route_bit(route, prefix_len + i);
 	return slot;
 }
@@ -1584,21 +1604,23 @@ native_assign_child_range(MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FA
 
 static void
 native_prefix_child_range(const uint8 route[MERKLE_HASH_BYTES], int prefix_len,
-						  int logical_prefix, int *first_slot, int *last_slot)
+						  int logical_prefix, int logical_fanout,
+						  int *first_slot, int *last_slot)
 {
-	int known_bits = Min(5, prefix_len - logical_prefix);
+	int width = native_logical_width(logical_fanout);
+	int known_bits = Min(width, prefix_len - logical_prefix);
 	int slot;
 
 	Assert(known_bits > 0);
-	slot = native_route_slot(route, logical_prefix);
-	if (known_bits == 5)
+	slot = native_route_slot(route, logical_prefix, logical_fanout);
+	if (known_bits == width)
 	{
 		*first_slot = slot;
 		*last_slot = slot;
 	}
 	else
 	{
-		int suffix_bits = 5 - known_bits;
+		int suffix_bits = width - known_bits;
 		int mask = ((1 << known_bits) - 1) << suffix_bits;
 
 		*first_slot = slot & mask;
@@ -1635,8 +1657,10 @@ native_build_item_segment(Relation indexRel, const NativeConfig *config,
 
 	for (i = 0; i < count; i++)
 		bytes += native_item_bytes(&items[i]);
-	first_slot = native_route_slot(items[0].route, logical_prefix);
-	last_slot = native_route_slot(items[count - 1].route, logical_prefix);
+	first_slot = native_route_slot(items[0].route, logical_prefix,
+		config->logical_fanout);
+	last_slot = native_route_slot(items[count - 1].route, logical_prefix,
+		config->logical_fanout);
 	if (count <= config->leaf_capacity && bytes <= config->leaf_byte_capacity)
 	{
 		int leaf_prefix = native_common_prefix(items[0].route,
@@ -1657,7 +1681,8 @@ native_build_item_segment(Relation indexRel, const NativeConfig *config,
 			int leaf_last_slot;
 
 			native_prefix_child_range(items[0].route, leaf_prefix,
-				logical_prefix, &leaf_first_slot, &leaf_last_slot);
+				logical_prefix, config->logical_fanout,
+				&leaf_first_slot, &leaf_last_slot);
 			if (!native_child_range_available(children, leaf_first_slot,
 					leaf_last_slot))
 				goto refine_segment;
@@ -1672,17 +1697,19 @@ native_build_item_segment(Relation indexRel, const NativeConfig *config,
 	}
 
 refine_segment:
-	if (bit >= logical_prefix + 5)
+	if (bit >= logical_prefix + native_logical_width(config->logical_fanout))
 	{
 		MerkleNativeNodeRecord nested;
 		MerkleNativeLocator locator;
 
-		if (logical_prefix + 5 >= MERKLE_HASH_BITS && count > 0)
+		if (logical_prefix + native_logical_width(config->logical_fanout) >=
+			MERKLE_HASH_BITS && count > 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("distinct Merkle keys share one full route digest and exceed leaf bounds")));
 		locator = native_build_subtree(indexRel, config, partition, items, count,
-			logical_prefix + 5, &nested, split_counter);
+			logical_prefix + native_logical_width(config->logical_fanout),
+			&nested, split_counter);
 		native_assign_child_range(children, summaries, first_slot, last_slot,
 			&locator, &nested);
 		return;
@@ -1727,7 +1754,8 @@ native_build_subtree(Relation indexRel, const NativeConfig *config,
 		return native_write_leaf(indexRel, partition, minimum_prefix, prefix,
 			items, count, summary);
 	}
-	if (minimum_prefix > MERKLE_HASH_BITS - 5)
+	if (minimum_prefix > MERKLE_HASH_BITS -
+		native_logical_width(config->logical_fanout))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("distinct Merkle keys share one full route digest and exceed leaf bounds")));
@@ -1766,8 +1794,10 @@ native_build_spooled_segment(Relation indexRel, const NativeConfig *config,
 
 	native_spool_read_route(spool, first, first_route);
 	native_spool_read_route(spool, first + count - 1, last_route);
-	first_slot = native_route_slot(first_route, logical_prefix);
-	last_slot = native_route_slot(last_route, logical_prefix);
+	first_slot = native_route_slot(first_route, logical_prefix,
+		config->logical_fanout);
+	last_slot = native_route_slot(last_route, logical_prefix,
+		config->logical_fanout);
 	if (count <= (uint64) config->leaf_capacity)
 	{
 		NativeItemVector leaf = {0};
@@ -1791,13 +1821,15 @@ native_build_spooled_segment(Relation indexRel, const NativeConfig *config,
 		}
 		native_vector_free(&leaf);
 	}
-	if (bit >= logical_prefix + 5)
+	if (bit >= logical_prefix + native_logical_width(config->logical_fanout))
 	{
 		MerkleNativeNodeRecord nested;
 		MerkleNativeLocator locator;
 
 		locator = native_build_spooled_range(indexRel, config, partition, spool,
-			first, count, logical_prefix + 5, &nested);
+			first, count,
+			logical_prefix + native_logical_width(config->logical_fanout),
+			&nested);
 		native_assign_child_range(children, summaries, first_slot, last_slot,
 			&locator, &nested);
 		return;
@@ -1867,7 +1899,8 @@ native_build_spooled_range(Relation indexRel, const NativeConfig *config,
 		}
 		native_vector_free(&leaf);
 	}
-	if (minimum_prefix > MERKLE_HASH_BITS - 5)
+	if (minimum_prefix > MERKLE_HASH_BITS -
+		native_logical_width(config->logical_fanout))
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("distinct Merkle keys share one full route digest and exceed leaf bounds")));
@@ -2527,7 +2560,7 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 			if (processed[i])
 				continue;
 			slot = native_route_slot(transitions[i].route_digest,
-				old->prefix_len);
+				old->prefix_len, config->logical_fanout);
 			old_child = children[slot];
 			had_child = native_locator_valid(&old_child);
 			if (!had_child)
@@ -2544,7 +2577,7 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 					   !native_locator_valid(&children[empty_run_first - 1]))
 					empty_run_first--;
 				empty_run_last = slot;
-				while (empty_run_last + 1 < MERKLE_DYNAMIC_LOGICAL_FANOUT &&
+				while (empty_run_last + 1 < config->logical_fanout &&
 					   !native_locator_valid(&children[empty_run_last + 1]))
 					empty_run_last++;
 			}
@@ -2556,7 +2589,8 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 				if (processed[j])
 					continue;
 				transition_slot = native_route_slot(
-					transitions[j].route_digest, old->prefix_len);
+					transitions[j].route_digest, old->prefix_len,
+					config->logical_fanout);
 				if (had_child)
 					same_group = native_locator_valid(&children[transition_slot]) &&
 						native_locator_equal(&children[transition_slot],
@@ -2602,7 +2636,8 @@ native_apply_batch_node(Relation indexRel, const NativeConfig *config,
 				MerkleNativeNodeRecord child_summary;
 
 				new_child = native_apply_batch_node(indexRel, config, partition,
-					&old_child, batch, batch_count, old->prefix_len + 5,
+					&old_child, batch, batch_count,
+					old->prefix_len + native_logical_width(config->logical_fanout),
 					&child_summary, split_counter, merge_counter);
 				for (j = 0; j < MERKLE_DYNAMIC_LOGICAL_FANOUT; j++)
 				{
@@ -3191,22 +3226,25 @@ merkle_native_root(Relation indexRel, MerkleHash *hash, uint64 *tuple_count)
 
 static bool
 native_slot_matches_child(const MerkleNativeNodeRecord *node, int slot,
-						  const MerkleNativeNodeRecord *child)
+						  const MerkleNativeNodeRecord *child,
+						  int logical_fanout)
 {
 	uint8 route[MERKLE_HASH_BYTES];
+	int width = native_logical_width(logical_fanout);
 	int bit;
 
 	if (child->prefix_len <= node->prefix_len ||
 		!native_route_has_prefix(child->prefix, node->prefix,
 			node->prefix_len))
 		return false;
-	if (child->prefix_len >= node->prefix_len + 5)
-		return native_route_slot(child->prefix, node->prefix_len) == slot;
+	if (child->prefix_len >= node->prefix_len + width)
+		return native_route_slot(child->prefix, node->prefix_len,
+			logical_fanout) == slot;
 	memcpy(route, node->prefix, MERKLE_HASH_BYTES);
-	for (bit = 0; bit < 5; bit++)
+	for (bit = 0; bit < width; bit++)
 	{
 		int absolute = node->prefix_len + bit;
-		int value = (slot >> (4 - bit)) & 1;
+		int value = (slot >> (width - 1 - bit)) & 1;
 
 		route[absolute / 8] = (route[absolute / 8] &
 			(uint8) ~(1U << (7 - (absolute % 8)))) |
@@ -3307,8 +3345,9 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 		MerkleNativeNodeRecord expected;
 		int i;
 
-		if (node->prefix_len % 5 != 0 ||
-			node->prefix_len > MERKLE_HASH_BITS - 5)
+		if (node->prefix_len % native_logical_width(config->logical_fanout) != 0 ||
+			node->prefix_len > MERKLE_HASH_BITS -
+				native_logical_width(config->logical_fanout))
 		{
 			match = false;
 			failure_mask |= 16U;
@@ -3334,7 +3373,8 @@ native_verify_node(Relation indexRel, const NativeConfig *config,
 			}
 			else
 				children[i] = children[j];
-			if (!native_slot_matches_child(node, i, &children[i]))
+			if (!native_slot_matches_child(node, i, &children[i],
+					config->logical_fanout))
 			{
 				match = false;
 				failure_mask |= 64U;
@@ -4011,21 +4051,23 @@ merkle_native_get_leaf_frontier(PG_FUNCTION_ARGS)
 static void
 native_requested_slot_bounds(const uint8 prefix[MERKLE_HASH_BYTES],
 							 int prefix_len, int node_prefix_len,
+							 int logical_fanout,
 							 int *first_slot, int *last_slot)
 {
-	int known_bits = Min(5, prefix_len - node_prefix_len);
+	int width = native_logical_width(logical_fanout);
+	int known_bits = Min(width, prefix_len - node_prefix_len);
 	int slot;
 
 	Assert(known_bits > 0);
-	slot = native_route_slot(prefix, node_prefix_len);
-	if (known_bits == 5)
+	slot = native_route_slot(prefix, node_prefix_len, logical_fanout);
+	if (known_bits == width)
 	{
 		*first_slot = slot;
 		*last_slot = slot;
 	}
 	else
 	{
-		int suffix_bits = 5 - known_bits;
+		int suffix_bits = width - known_bits;
 		int mask = ((1 << known_bits) - 1) << suffix_bits;
 
 		*first_slot = slot & mask;
@@ -4052,6 +4094,7 @@ native_requested_slot_bounds(const uint8 prefix[MERKLE_HASH_BYTES],
  */
 static void
 native_traverse_range_summary(Relation indexRel,
+							  const NativeConfig *config,
 							  const MerkleNativeLocator *locator,
 							  const uint8 req_prefix[MERKLE_HASH_BYTES],
 							  int req_bits,
@@ -4116,6 +4159,7 @@ native_traverse_range_summary(Relation indexRel,
 		int i;
 
 		native_requested_slot_bounds(req_prefix, req_bits, node->prefix_len,
+			config->logical_fanout,
 			&first_slot, &last_slot);
 		for (i = first_slot; i <= last_slot; i++)
 		{
@@ -4128,7 +4172,7 @@ native_traverse_range_summary(Relation indexRel,
 					native_locator_equal(&node->children[i], &node->children[j]))
 					break;
 			if (j == i)
-				native_traverse_range_summary(indexRel, &node->children[i],
+				native_traverse_range_summary(indexRel, config, &node->children[i],
 					req_prefix, req_bits, matched, bytes, xor_accum);
 		}
 	}
@@ -4146,6 +4190,7 @@ native_traverse_range_summary(Relation indexRel,
  */
 static void
 native_traverse_range_items(Relation indexRel,
+							const NativeConfig *config,
 							const MerkleNativeLocator *locator,
 							const uint8 req_prefix[MERKLE_HASH_BYTES],
 							int req_bits, int partition, int out_prefix_len,
@@ -4207,6 +4252,7 @@ native_traverse_range_items(Relation indexRel,
 		int i;
 
 		native_requested_slot_bounds(req_prefix, req_bits, node->prefix_len,
+			config->logical_fanout,
 			&first_slot, &last_slot);
 		for (i = first_slot; i <= last_slot; i++)
 		{
@@ -4219,7 +4265,7 @@ native_traverse_range_items(Relation indexRel,
 					native_locator_equal(&node->children[i], &node->children[j]))
 					break;
 			if (j == i)
-				native_traverse_range_items(indexRel, &node->children[i],
+				native_traverse_range_items(indexRel, config, &node->children[i],
 					req_prefix, req_bits, partition, out_prefix_len, store, desc);
 		}
 	}
@@ -4266,7 +4312,8 @@ merkle_native_get_ranges(PG_FUNCTION_ARGS)
 		 * (plan_left.md §7).  Complexity is now O(depth + matching_frontier)
 		 * rather than O(partition_items).
 		 */
-		native_traverse_range_summary(indexRel, &roots[partition].root_node,
+		native_traverse_range_summary(indexRel, &config,
+			&roots[partition].root_node,
 									  requests[r].prefix, requests[r].prefix_len,
 									  &matched, &bytes, &xor);
 		native_put_summary(store, desc, requests[r].partition,
@@ -4323,7 +4370,8 @@ merkle_native_get_range_items(PG_FUNCTION_ARGS)
 			root_loaded[partition] = true;
 		}
 		merkle_hash_zero(&xor);
-		native_traverse_range_summary(indexRel, &roots[partition].root_node,
+		native_traverse_range_summary(indexRel, &config,
+			&roots[partition].root_node,
 									  requests[r].prefix, requests[r].prefix_len,
 									  &matched, &bytes, &xor);
 		if (matched > (uint64) config.leaf_capacity ||
@@ -4336,7 +4384,8 @@ merkle_native_get_range_items(PG_FUNCTION_ARGS)
 		 * Now stream the matching items using the prefix-tree traversal
 		 * (plan_left.md §7).  Complexity is O(depth + matching_leaf_items).
 		 */
-		native_traverse_range_items(indexRel, &roots[partition].root_node,
+		native_traverse_range_items(indexRel, &config,
+			&roots[partition].root_node,
 									requests[r].prefix, requests[r].prefix_len,
 									requests[r].partition, requests[r].prefix_len,
 									store, desc);
