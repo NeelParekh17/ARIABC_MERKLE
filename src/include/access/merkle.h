@@ -133,7 +133,10 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 /* Dynamic Merkle format.  The static v7 page layout remains unchanged. */
 #define MERKLE_DYNAMIC_META_MAGIC          ((uint32) 0x44594E4D) /* "DYNM" */
 #define MERKLE_DYNAMIC_LAYOUT_VERSION      8
-#define MERKLE_DYNAMIC_LOGICAL_FANOUT      32
+#define MERKLE_DYNAMIC_DEFAULT_LOGICAL_FANOUT 32
+#define MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT  32
+/* Fixed record capacity; an index may use a power-of-two prefix of the slots. */
+#define MERKLE_DYNAMIC_LOGICAL_FANOUT      MERKLE_DYNAMIC_MAX_LOGICAL_FANOUT
 #define MERKLE_DYNAMIC_PHYSICAL_NODE_FANOUT 2
 #define MERKLE_DYNAMIC_DEFAULT_LEAF_CAPACITY 32
 #define MERKLE_DYNAMIC_DEFAULT_MERGE_THRESHOLD 8

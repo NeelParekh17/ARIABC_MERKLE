@@ -44,8 +44,8 @@ set -euo pipefail
 #                            user4,utkarsh [default: all configured nodes]
 #   --dynamic-structure-profile <0|1>  Profile native DET split/merge counters in
 #                            separate index-build and benchmark phases [default: 1]
-#                            Dynamic runs require native layout v8, logical fanout
-#                            32 over physical fanout 2, and record tree depth.
+#   --dynamic-logical-fanout <2|4|8|16|32>  Native logical fanout [default: 32].
+#                            Physical fanout remains 2 and tree depth is recorded.
 #   --poll-interval <60>    Seconds between monitoring polls
 #   --hang-timeout <60>     Seconds of no log change before hang warning
 #   --stall-timeout <1800>  Abort if a live benchmark has no log progress this long
@@ -85,6 +85,7 @@ ENFORCE_SIGNATURES="1"
 BENCH_MAX_RETRIES=50
 DYNAMIC_MERKLE=1
 DYNAMIC_STRUCTURE_PROFILE=1
+DYNAMIC_LOGICAL_FANOUT="${DYNAMIC_LOGICAL_FANOUT:-32}"
 DB_NAME="postgres"
 DB_USER="postgres"
 DB_PORT=5438
@@ -110,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --max-retries)   BENCH_MAX_RETRIES="${2:-50}"; shift 2 ;;
     --nodes)         SELECTED_NODES="${2:-}"; shift 2 ;;
     --dynamic-structure-profile) DYNAMIC_STRUCTURE_PROFILE="${2:-1}"; shift 2 ;;
+    --dynamic-logical-fanout) DYNAMIC_LOGICAL_FANOUT="${2:-}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
     --hang-timeout)  HANG_TIMEOUT_S="${2:-60}"; shift 2 ;;
     --stall-timeout) STALL_TIMEOUT_S="${2:-1800}"; shift 2 ;;
@@ -159,6 +161,10 @@ fi
 
 [[ "$DYNAMIC_STRUCTURE_PROFILE" =~ ^[01]$ ]] || {
   echo "ERROR: --dynamic-structure-profile must be 0 or 1" >&2
+  exit 2
+}
+[[ "$DYNAMIC_LOGICAL_FANOUT" =~ ^(2|4|8|16|32)$ ]] || {
+  echo "ERROR: --dynamic-logical-fanout must be one of 2,4,8,16,32" >&2
   exit 2
 }
 
@@ -736,7 +742,7 @@ _build_bench_flags() {
     fi
   fi
   [[ -n "$ENFORCE_SIGNATURES" ]] && extra+=" --enforce-signatures '$ENFORCE_SIGNATURES'"
-  [[ "$DYNAMIC_MERKLE" == "1" ]] && extra+=" --dynamic-merkle --dynamic-merkle-index 'public.usertable_small_dynamic_merkle_idx'"
+  [[ "$DYNAMIC_MERKLE" == "1" ]] && extra+=" --dynamic-merkle --dynamic-merkle-index 'public.usertable_small_dynamic_merkle_idx' --dynamic-logical-fanout '$DYNAMIC_LOGICAL_FANOUT'"
   if [[ "$DYNAMIC_MERKLE" == "1" && "$DYNAMIC_STRUCTURE_PROFILE" == "1" && ",${MODES}," == *,det,* ]]; then
     extra+=" --dynamic-merkle-profile"
   fi
@@ -1184,12 +1190,13 @@ done
 
 if [[ "$DYNAMIC_STRUCTURE_PROFILE" == "1" && "$DYNAMIC_MERKLE" == "1" && ",${MODES}," == *,det,* ]]; then
   lmsg "=== Native DET dynamic split/merge profile validation ==="
-  if ! python3 - "$LOCAL_RESULT_ROOT" "${!NODE_STATUS[@]}" <<'PYEOF'
+  if ! python3 - "$LOCAL_RESULT_ROOT" "$DYNAMIC_LOGICAL_FANOUT" "${!NODE_STATUS[@]}" <<'PYEOF'
 import csv, sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-nodes = sys.argv[2:]
+expected_logical_fanout = sys.argv[2]
+nodes = sys.argv[3:]
 maps = {}
 for node in nodes:
     safe = node.replace('@', '_at_').replace('.', '_').replace('-', '_')
@@ -1215,7 +1222,8 @@ for node in nodes:
             if not all(value.isdigit() for value in
                        (build_splits, build_merges, splits, merges)):
                 raise SystemExit(f"missing phase-separated DET profile counters for {node}: {key}")
-            if layout != "8" or logical != "32" or physical != "2" or not max_depth.isdigit():
+            if (layout != "8" or logical != expected_logical_fanout or
+                    physical != "2" or not max_depth.isdigit()):
                 raise SystemExit(
                     f"layout contract failed for {node}: {key} "
                     f"layout={layout or 'missing'} logical={logical or 'missing'} "
@@ -1244,14 +1252,14 @@ for key, value in sorted(baseline.items()):
     )
 print(f"DYNAMIC_NATIVE_PROFILE_PASS=1 nodes={len(maps)}")
 print("DYNAMIC_LAYOUT_CONTRACT_PASS=1 layout_version=8")
-print("DYNAMIC_FANOUT_CONTRACT_PASS=1 logical_fanout=32 physical_node_fanout=2")
+print(f"DYNAMIC_FANOUT_CONTRACT_PASS=1 logical_fanout={expected_logical_fanout} physical_node_fanout=2")
 PYEOF
   then
     _abort_run "Native DET split/merge profile missing or mismatched across nodes"
   fi
   {
     printf 'DYNAMIC_LAYOUT_VERSION=8\n'
-    printf 'DYNAMIC_LOGICAL_FANOUT=32\n'
+    printf 'DYNAMIC_LOGICAL_FANOUT=%s\n' "$DYNAMIC_LOGICAL_FANOUT"
     printf 'DYNAMIC_PHYSICAL_NODE_FANOUT=2\n'
     printf 'DYNAMIC_LAYOUT_CONTRACT_PASS=1\n'
     printf 'DYNAMIC_FANOUT_CONTRACT_PASS=1\n'

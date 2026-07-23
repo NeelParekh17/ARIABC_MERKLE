@@ -23,12 +23,12 @@ Options:
   --fanout N
   --geometry-label LABEL
   --profiling off|light|deep    default: off
-  --repetitions N               default: 1
+  --repetitions N               default: fast-diagnostic one repetition; overrides fast-diagnostic when passed
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
                                default: paper-update-only
   --audit-mode full|skip       default: skip
-  --fast-diagnostic           dynamic only: one repetition and audit skipped
+  --fast-diagnostic           dynamic only: default; one repetition and audit skipped
   --run-dynamic-crash-gate    opt in to the destructive dynamic crash/lifecycle
                               gate before the recovery benchmark
   --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
@@ -56,7 +56,8 @@ LEAVES_PER_PARTITION=""
 FANOUT=""
 GEOMETRY_LABEL=""
 PROFILING="off"
-REPETITIONS="1"
+REPETITIONS=""
+REPETITIONS_EXPLICIT=0
 ARTIFACT_MODE="summary"
 CORRUPTION_MODE="paper-update-only"
 AUDIT_MODE="skip"
@@ -65,7 +66,8 @@ MIN_FREE_GIB=40
 SSH_TIMEOUT="${SSH_TIMEOUT:-15}"
 KEEP_REMOTE_ARCHIVE=1
 KEEP_FAILURE_LOGS=0
-FAST_DIAGNOSTIC=0
+FAST_DIAGNOSTIC=1
+FAST_DIAGNOSTIC_EXPLICIT=0
 RUN_DYNAMIC_CRASH_GATE=0
 
 while [[ $# -gt 0 ]]; do
@@ -86,11 +88,11 @@ while [[ $# -gt 0 ]]; do
     --fanout) FANOUT="${2:?}"; shift 2 ;;
     --geometry-label) GEOMETRY_LABEL="${2:?}"; shift 2 ;;
     --profiling) PROFILING="${2:?}"; shift 2 ;;
-    --repetitions) REPETITIONS="${2:?}"; shift 2 ;;
+    --repetitions) REPETITIONS="${2:?}"; REPETITIONS_EXPLICIT=1; shift 2 ;;
     --artifact-mode) ARTIFACT_MODE="${2:?}"; shift 2 ;;
     --corruption-mode) CORRUPTION_MODE="${2:?}"; shift 2 ;;
     --audit-mode) AUDIT_MODE="${2:?}"; shift 2 ;;
-    --fast-diagnostic) FAST_DIAGNOSTIC=1; shift ;;
+    --fast-diagnostic) FAST_DIAGNOSTIC=1; FAST_DIAGNOSTIC_EXPLICIT=1; shift ;;
     --run-dynamic-crash-gate) RUN_DYNAMIC_CRASH_GATE=1; shift ;;
     --leaf-fetch-batch-size) LEAF_FETCH_BATCH_SIZE="${2:?}"; shift 2 ;;
     --min-free-gib) MIN_FREE_GIB="${2:?}"; shift 2 ;;
@@ -101,6 +103,18 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ "$REPETITIONS_EXPLICIT" -eq 1 ]]; then
+  # An explicit repetition count is the caller's override of the default
+  # fast-diagnostic repetition policy.  Keep the normal audit default unless
+  # the caller also supplies --audit-mode full.
+  FAST_DIAGNOSTIC=0
+fi
+
+if [[ "$PROFILE" != "dynamic-size-scaling-k75-c300" &&
+      "$FAST_DIAGNOSTIC_EXPLICIT" -eq 0 ]]; then
+  FAST_DIAGNOSTIC=0
+fi
 
 if [[ "$FAST_DIAGNOSTIC" -eq 1 ]]; then
   if [[ "$PROFILE" != "dynamic-size-scaling-k75-c300" ]]; then

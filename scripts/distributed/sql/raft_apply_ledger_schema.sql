@@ -131,7 +131,10 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_state (
     rnode_rel           oid NOT NULL,
     heap_oid            oid NOT NULL,
     partitions          integer NOT NULL CHECK (partitions > 0),
-    logical_fanout      integer NOT NULL CHECK (logical_fanout = 32),
+    logical_fanout      integer NOT NULL CHECK (
+        logical_fanout BETWEEN 2 AND 32 AND
+        (logical_fanout & (logical_fanout - 1)) = 0
+    ),
     leaf_capacity       integer NOT NULL CHECK (leaf_capacity > 0),
     merge_threshold     integer NOT NULL CHECK (merge_threshold >= 0 AND merge_threshold < leaf_capacity),
     leaf_byte_capacity  integer NOT NULL CHECK (leaf_byte_capacity > 0),
@@ -156,6 +159,15 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_dynamic_state (
 ALTER TABLE ariabc_internal.merkle_dynamic_state
     ADD COLUMN IF NOT EXISTS seen_pruned_seq bigint NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS stats_dirty boolean NOT NULL DEFAULT false;
+
+-- Upgrade the former fanout=32-only contract in existing installations.
+ALTER TABLE ariabc_internal.merkle_dynamic_state
+    DROP CONSTRAINT IF EXISTS merkle_dynamic_state_logical_fanout_check;
+ALTER TABLE ariabc_internal.merkle_dynamic_state
+    ADD CONSTRAINT merkle_dynamic_state_logical_fanout_check CHECK (
+        logical_fanout BETWEEN 2 AND 32 AND
+        (logical_fanout & (logical_fanout - 1)) = 0
+    );
 
 DO $$
 BEGIN

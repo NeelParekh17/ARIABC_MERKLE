@@ -1257,6 +1257,13 @@ def main() -> int:
         help="Dynamic Merkle index used for explicit post-run verification.",
     )
     parser.add_argument(
+        "--dynamic-logical-fanout",
+        type=int,
+        choices=[2, 4, 8, 16, 32],
+        default=32,
+        help="Logical fanout passed to the native dynamic restore (default: 32).",
+    )
+    parser.add_argument(
         "--dynamic-merkle-profile",
         action="store_true",
         help=(
@@ -1461,6 +1468,7 @@ def main() -> int:
             "dynamic_restore_sql": str(dynamic_restore_sql) if args.dynamic_merkle else "",
             "dynamic_merkle": bool(args.dynamic_merkle),
             "dynamic_merkle_index": args.dynamic_merkle_index,
+            "dynamic_logical_fanout": args.dynamic_logical_fanout,
             "workload_py": str(workload_py),
             "psql": psql_path,
             "python": python_path,
@@ -1731,6 +1739,8 @@ def main() -> int:
                                             "ON_ERROR_STOP=1",
                                             "-v",
                                             f"bench_enable_merkle={1 if merkle_for_mode else 0}",
+                                            "-v",
+                                            f"dynamic_logical_fanout={args.dynamic_logical_fanout}",
                                             "-f",
                                             str(case_restore_sql),
                                         ],
@@ -1851,6 +1861,8 @@ def main() -> int:
                                                 "ON_ERROR_STOP=1",
                                                 "-v",
                                                 f"bench_enable_merkle={1 if merkle_for_mode else 0}",
+                                                "-v",
+                                                f"dynamic_logical_fanout={args.dynamic_logical_fanout}",
                                                 "-f",
                                                 str(case_restore_sql),
                                             ],

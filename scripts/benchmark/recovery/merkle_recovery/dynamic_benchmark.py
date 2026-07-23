@@ -245,9 +245,8 @@ def _localise(
         damaged,
         fetch,
         leaf_capacity=leaf_capacity,
-        # The native tree remains physically binary.  Recovery deliberately
-        # consumes one configured logical level at a time (five bits for 32),
-        # which is the meeting's logical-fanout contract.
+        # The native tree remains physically binary. Recovery consumes one
+        # configured logical level at a time (log2(fanout) route bits).
         logical_fanout=logical_fanout,
         trace=trace,
     )
@@ -258,9 +257,11 @@ def _validate_fanout_contract(
     stats_by_schema: Mapping[str, Mapping[str, Any]], logical_fanout: int
 ) -> None:
     """Bind manifest, authoritative index metadata, and localisation geometry."""
-    if logical_fanout != 32:
+    if (logical_fanout < 2 or logical_fanout > 32 or
+            logical_fanout & (logical_fanout - 1)):
         raise RuntimeError(
-            f"dynamic benchmark requires logical fanout 32, got {logical_fanout}"
+            "dynamic benchmark logical fanout must be one of 2,4,8,16,32; "
+            f"got {logical_fanout}"
         )
     for schema, stats in stats_by_schema.items():
         if stats.get("authority") != "native_index_pages":

@@ -550,7 +550,7 @@ merkleBuildempty(Relation indexRel)
     opts = merkle_get_options(indexRel);
     numPartitions = opts->partitions;
 	leavesPerPartition = opts->dynamic ? 1 : opts->leaves_per_partition;
-	fanout = opts->dynamic ? MERKLE_DYNAMIC_LOGICAL_FANOUT : opts->fanout;
+	fanout = opts->fanout;
 
     if (fanout < 2 || fanout > 1024)
         fanout = MERKLE_DEFAULT_FANOUT;
@@ -580,7 +580,7 @@ merkleBuildempty(Relation indexRel)
 		meta->dynamicMagic = MERKLE_DYNAMIC_META_MAGIC;
 		meta->dynamicLayoutVersion = MERKLE_DYNAMIC_LAYOUT_VERSION;
 		meta->dynamicFlags = 1;
-		meta->dynamicLogicalFanout = MERKLE_DYNAMIC_LOGICAL_FANOUT;
+		meta->dynamicLogicalFanout = opts->fanout;
 		meta->dynamicLeafCapacity = opts->leaf_capacity;
 		meta->dynamicMergeThreshold = opts->merge_threshold;
 		meta->dynamicLeafByteCapacity = opts->leaf_byte_capacity;

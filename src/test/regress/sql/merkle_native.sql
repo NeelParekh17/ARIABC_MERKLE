@@ -127,3 +127,69 @@ SELECT merkle_verify('merkle_native_test') AS post_vacuum_verify;
 TRUNCATE merkle_native_test;
 SELECT merkle_verify('merkle_native_test') AS truncate_verify;
 DROP TABLE merkle_native_test;
+
+-- A smaller logical directory consumes two route bits per public level while
+-- retaining the same binary physical split implementation and v8 record size.
+CREATE TABLE merkle_native_f4 (
+    id integer PRIMARY KEY,
+    payload text NOT NULL
+);
+INSERT INTO merkle_native_f4
+SELECT g, 'f4-' || g FROM generate_series(1, 64) AS g;
+CREATE INDEX merkle_native_f4_idx ON merkle_native_f4
+USING merkle (id) WITH (dynamic=true, partitions=4, fanout=4,
+                        leaf_capacity=4, merge_threshold=2,
+                        leaf_byte_capacity=1024, max_key_bytes=128);
+SELECT merkle_dynamic_tree_stats('merkle_native_f4_idx')->>'logical_fanout' = '4'
+       AND merkle_dynamic_tree_stats('merkle_native_f4_idx')->>'physical_node_fanout' = '2'
+       AND merkle_verify('merkle_native_f4') AS fanout4_build_verify;
+UPDATE merkle_native_f4 SET payload = 'changed' WHERE id IN (1, 17, 33);
+DELETE FROM merkle_native_f4 WHERE id BETWEEN 40 AND 45;
+INSERT INTO merkle_native_f4 VALUES (101, 'new'), (102, 'new');
+SELECT merkle_verify('merkle_native_f4') AS fanout4_dml_verify;
+WITH requests AS (
+  SELECT jsonb_agg(jsonb_build_object(
+           'partition_id', partition_id,
+           'prefix_length', prefix_len,
+           'prefix_value', encode(prefix, 'hex'))) AS ranges
+    FROM merkle_dynamic_get_leaf_frontier('merkle_native_f4_idx')
+)
+SELECT count(*) = (SELECT count(*) FROM merkle_native_f4)
+       AS fanout4_frontier_roundtrip
+  FROM requests
+ CROSS JOIN LATERAL merkle_dynamic_get_range_items(
+   'merkle_native_f4_idx', requests.ranges) AS item;
+REINDEX INDEX merkle_native_f4_idx;
+SELECT merkle_dynamic_tree_stats('merkle_native_f4_idx')->>'logical_fanout' = '4'
+       AND merkle_verify('merkle_native_f4') AS fanout4_reindex_verify;
+DROP TABLE merkle_native_f4;
+
+-- Dynamic indexes use a one-leaf native directory, so the static
+-- leaves_per_partition=1024 power-of-fanout restriction must not reject
+-- other supported logical fanouts.
+CREATE TABLE merkle_native_fanout_sweep (
+    id integer PRIMARY KEY,
+    payload text NOT NULL
+);
+INSERT INTO merkle_native_fanout_sweep
+SELECT g, 'fanout-' || g FROM generate_series(1, 32) AS g;
+CREATE INDEX merkle_native_f8_idx ON merkle_native_fanout_sweep
+USING merkle (id) WITH (dynamic=true, partitions=4, fanout=8,
+                        leaf_capacity=4, merge_threshold=2,
+                        leaf_byte_capacity=1024, max_key_bytes=128);
+SELECT merkle_dynamic_tree_stats('merkle_native_f8_idx')->>'logical_fanout' = '8'
+       AND merkle_verify('merkle_native_fanout_sweep') AS fanout8_build_verify;
+DROP TABLE merkle_native_fanout_sweep;
+CREATE TABLE merkle_native_fanout_sweep (
+    id integer PRIMARY KEY,
+    payload text NOT NULL
+);
+INSERT INTO merkle_native_fanout_sweep
+SELECT g, 'fanout-' || g FROM generate_series(1, 32) AS g;
+CREATE INDEX merkle_native_f16_idx ON merkle_native_fanout_sweep
+USING merkle (id) WITH (dynamic=true, partitions=4, fanout=16,
+                        leaf_capacity=4, merge_threshold=2,
+                        leaf_byte_capacity=1024, max_key_bytes=128);
+SELECT merkle_dynamic_tree_stats('merkle_native_f16_idx')->>'logical_fanout' = '16'
+       AND merkle_verify('merkle_native_fanout_sweep') AS fanout16_build_verify;
+DROP TABLE merkle_native_fanout_sweep;
