@@ -1042,15 +1042,16 @@ def run_one_dynamic_manifest(
             log_counts = _profile_log_counts(profile_log_offset, index_oids)
             for schema in ("healthy", "damaged"):
                 splits, merges = log_counts[schema]
-                metric.counters[f"{schema}_split_count"] = splits
-                metric.counters[f"{schema}_merge_count"] = merges
-                metric.counters[f"recovery_execution_{schema}_split_count"] = splits
-                metric.counters[f"recovery_execution_{schema}_merge_count"] = merges
-                for row in tree_stats_rows_out:
-                    if (row.get("run_id") == run_id and row.get("schema") == schema and
-                            row.get("stage") == "recovery_execution_post_audit"):
-                        row["split_count"] = splits
-                        row["merge_count"] = merges
+                if splits > 0 or merges > 0:
+                    metric.counters[f"{schema}_split_count"] = splits
+                    metric.counters[f"{schema}_merge_count"] = merges
+                    metric.counters[f"recovery_execution_{schema}_split_count"] = splits
+                    metric.counters[f"recovery_execution_{schema}_merge_count"] = merges
+                    for row in tree_stats_rows_out:
+                        if (row.get("run_id") == run_id and row.get("schema") == schema and
+                                row.get("stage") == "recovery_execution_post_audit"):
+                            row["split_count"] = splits
+                            row["merge_count"] = merges
         metrics.append(metric)
         progress_state["completed_runs"] += 1
         emit_progress(

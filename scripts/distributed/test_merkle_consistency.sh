@@ -119,7 +119,7 @@ CREATE TABLE $TEST_TABLE (
     k INT PRIMARY KEY,
     v TEXT NOT NULL
 );
-CREATE INDEX idx_merkle_kv ON $TEST_TABLE USING merkle (k);
+CREATE INDEX idx_merkle_kv ON $TEST_TABLE USING merkle (k) WITH (dynamic = true);
 SQL
         " 2>&1 | sed "s/^/  [$name] /" || die "Setup failed on $name"
     done

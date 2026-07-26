@@ -717,9 +717,9 @@ merkle_get_update_mode(Relation indexRel)
 		if (meta->version >= 7)
 		{
 			flags = meta->nativeFormatFlags & MERKLE_NATIVE_MODE_MASK;
-			if (flags == MERKLE_NATIVE_MODE_SYNCHRONOUS_COW)
+			if (flags == MERKLE_NATIVE_MODE_SYNCHRONOUS_COW || flags == 0)
 				mode = MERKLE_UPDATE_SYNCHRONOUS_COW;
-			else if (flags != MERKLE_NATIVE_MODE_SYNCHRONOUS_COW)
+			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INDEX_CORRUPTED),
 						 errmsg("Merkle index has unknown native update-mode flags 0x%08x",

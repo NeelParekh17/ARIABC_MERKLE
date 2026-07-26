@@ -2852,7 +2852,7 @@ fi
 
 if [[ ! -f "\$KAFKA_HOME/bin/kafka-topics.sh" ]]; then
   echo "ERROR: Kafka not found at \$KAFKA_HOME — run setup first:" >&2
-  echo "  Install Kafka under $KAFKA_HOME on the configured Kafka node" >&2
+  echo "  Install Kafka under \$KAFKA_HOME on the configured Kafka node" >&2
   exit 1
 fi
 
@@ -3453,6 +3453,12 @@ capture_dynamic_execution_profile() {
   [[ "$DYNAMIC_STRUCTURE_PROFILE" -eq 1 ]] || return 0
   local profile_index="${DYNAMIC_INDEX_NAME:-public.usertable_small_dynamic_merkle_idx}"
   local idx stats signature=""
+  # Use the cumulative side-table counters (split_count, merge_count) that are
+  # now included in merkle_dynamic_tree_stats() JSON for native indexes.
+  # The delta (cumulative - baseline-after-index-build) gives benchmark-only splits/merges.
+  # The former log-based override has been removed: it summed ALL NATIVE_MERKLE_PROFILE
+  # log lines including index-build emissions, producing inflated counts, and it also
+  # only fired after collect_cluster_logs which is not called at this point.
   for idx in "${!NODE_IDS[@]}"; do
     stats="$(node_ssh "$idx" "
       export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}'
@@ -3463,17 +3469,15 @@ capture_dynamic_execution_profile() {
     IFS='|' read -r cumulative_splits cumulative_merges <<<"$stats"
     [[ "$cumulative_splits" =~ ^[0-9]+$ && "$cumulative_merges" =~ ^[0-9]+$ &&
        "${PROFILE_BASE_SPLITS[$idx]:-}" =~ ^[0-9]+$ && "${PROFILE_BASE_MERGES[$idx]:-}" =~ ^[0-9]+$ ]] ||
-      die "benchmark-execution cumulative profile missing/invalid on ${NODE_NAMES[$idx]}: $stats"
+      die "benchmark-execution cumulative profile missing/invalid on ${NODE_NAMES[$idx]}: cumulative=$stats base_splits=${PROFILE_BASE_SPLITS[$idx]:-UNSET} base_merges=${PROFILE_BASE_MERGES[$idx]:-UNSET}"
     PROFILE_EXEC_SPLITS[$idx]=$(( cumulative_splits - PROFILE_BASE_SPLITS[$idx] ))
     PROFILE_EXEC_MERGES[$idx]=$(( cumulative_merges - PROFILE_BASE_MERGES[$idx] ))
-    profile_log_file="$(compgen -G "$LOG_DIR/postgres_node${NODE_IDS[$idx]}_*.log" | head -1 || true)"
-    if [[ -n "$profile_log_file" ]] && grep -q 'NATIVE_MERKLE_PROFILE ' "$profile_log_file"; then
-      PROFILE_EXEC_SPLITS[$idx]="$(sed -n 's/.*NATIVE_MERKLE_PROFILE .*splits=\([0-9][0-9]*\) merges=.*/\1/p' "$profile_log_file" | awk '{sum += $1} END {print sum + 0}')"
-      PROFILE_EXEC_MERGES[$idx]="$(sed -n 's/.*NATIVE_MERKLE_PROFILE .*merges=\([0-9][0-9]*\).*/\1/p' "$profile_log_file" | awk '{sum += $1} END {print sum + 0}')"
-      log "  benchmark-execution native profile node=${NODE_NAMES[$idx]} source=pre_gate_postgres_log"
-    fi
+    log "  capture_dynamic_execution_profile node=${NODE_NAMES[$idx]} cumulative_splits=$cumulative_splits cumulative_merges=$cumulative_merges base_splits=${PROFILE_BASE_SPLITS[$idx]} base_merges=${PROFILE_BASE_MERGES[$idx]} benchmark_splits=${PROFILE_EXEC_SPLITS[$idx]} benchmark_merges=${PROFILE_EXEC_MERGES[$idx]}"
     [[ "${PROFILE_EXEC_SPLITS[$idx]}" =~ ^[0-9]+$ && "${PROFILE_EXEC_MERGES[$idx]}" =~ ^[0-9]+$ ]] ||
       die "benchmark-execution dynamic profile missing/invalid on ${NODE_NAMES[$idx]}: $stats"
+    if [[ "${PROFILE_EXEC_SPLITS[$idx]}" -lt 0 || "${PROFILE_EXEC_MERGES[$idx]}" -lt 0 ]]; then
+      die "benchmark-execution split/merge counter moved backwards on ${NODE_NAMES[$idx]}: exec_splits=${PROFILE_EXEC_SPLITS[$idx]} exec_merges=${PROFILE_EXEC_MERGES[$idx]}"
+    fi
     phase_stats="${PROFILE_EXEC_SPLITS[$idx]}|${PROFILE_EXEC_MERGES[$idx]}"
     [[ -z "$signature" ]] && signature="$phase_stats"
     [[ "$phase_stats" == "$signature" ]] ||

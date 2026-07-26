@@ -1,5 +1,7 @@
 #!/bin/bash
-cd /work/ARIABC/AriaBC
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
 set -euo pipefail
 
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
@@ -498,6 +500,18 @@ printf 'pg_executor_workers,rep,artifact,status\n' >"$OUT/runs.csv"
             ! grep -qE '^DYNAMIC_NATIVE_PROFILE_BENCHMARK_MERGES=[0-9]+$' "$RUN/run_summary.env" 2>/dev/null; }; then
         echo "WARNING: phase-separated index-build/benchmark profile missing — marking run INVALID"
         RUN_PASS=0
+      fi
+      # Index-build always generates splits for any non-trivial dataset.
+      # If INDEX_BUILD_SPLITS=0 the counter tracking is broken (e.g. the
+      # merklenative.c fix was not compiled/deployed).
+      if [[ "$RUN_PASS" -eq 1 ]] && grep -q '^dynamic_structure_profile=1$' \
+          "$OUT/campaign.env" 2>/dev/null; then
+        build_splits_val="$(grep -E '^DYNAMIC_NATIVE_PROFILE_INDEX_BUILD_SPLITS=[0-9]+$' \
+          "$RUN/run_summary.env" 2>/dev/null | cut -d= -f2 || true)"
+        if [[ -z "$build_splits_val" || "$build_splits_val" -le 0 ]]; then
+          echo "WARNING: INDEX_BUILD_SPLITS=0 — split counter tracking appears broken (check merklenative.c fix and rebuild) — marking run INVALID"
+          RUN_PASS=0
+        fi
       fi
       if [[ "$RUN_PASS" -eq 1 ]] && ! grep -qE 'request_latency_count=[1-9][0-9]*' \
           "$RUN/gateway_test.log" 2>/dev/null; then

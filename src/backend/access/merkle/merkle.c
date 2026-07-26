@@ -28,10 +28,10 @@
 bool enable_merkle_index = true;
 bool merkle_index_maintenance_suppress = false;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
-bool merkle_update_detection = false;
+bool merkle_update_detection = true;
 /* GUC: Enable backend-local Merkle recovery profiling */
 bool merkle_recovery_profile_enabled = false;
-bool merkle_native_profile_enabled = false;
+bool merkle_native_profile_enabled = true;
 /* GUC: fail stale Merkle reads by default; optionally catch up synchronously. */
 int merkle_read_lag_policy = MERKLE_READ_LAG_ERROR;
 int merkle_apply_batch_items = MERKLE_APPLY_DEFAULT_BATCH_ITEMS;
@@ -45,7 +45,7 @@ int merkle_apply_batch_time_ms = MERKLE_APPLY_DEFAULT_BATCH_TIME_MS;
  * When enabled, Merkle index builds will not emit the touched-node report even
  * if merkle_update_detection is on. Default is enabled to avoid noisy output.
  */
-bool merkle_update_detection_suppress = true;
+bool merkle_update_detection_suppress = false;
 uint64 merkle_recovery_profile_reset_generation = 0;
 MerkleRecoveryProfileStats merkle_recovery_profile_state = {0};
 
