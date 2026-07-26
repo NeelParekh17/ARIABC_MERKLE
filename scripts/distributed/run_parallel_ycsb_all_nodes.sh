@@ -1221,7 +1221,15 @@ for node in nodes:
             max_depth = (row.get("dynamic_max_depth") or "").strip()
             if not all(value.isdigit() for value in
                        (build_splits, build_merges, splits, merges)):
-                raise SystemExit(f"missing phase-separated DET profile counters for {node}: {key}")
+                raise SystemExit(f"missing phase-separated DET profile counters for {node}: {key} "
+                                 f"build_splits={build_splits!r} build_merges={build_merges!r} "
+                                 f"splits={splits!r} merges={merges!r}")
+            if int(build_splits) <= 0:
+                raise SystemExit(
+                    f"INDEX_BUILD_SPLITS=0 for {node}: {key} — split counter tracking is broken. "
+                    f"Ensure merklenative.c fix is compiled and deployed, and "
+                    f"merkle_native_profile_enabled=on was active during the index build."
+                )
             if (layout != "8" or logical != expected_logical_fanout or
                     physical != "2" or not max_depth.isdigit()):
                 raise SystemExit(

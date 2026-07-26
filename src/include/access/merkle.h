@@ -614,7 +614,10 @@ extern void merkle_native_vacuum(Relation indexRel,
 extern Datum merkle_native_get_partition_roots(PG_FUNCTION_ARGS);
 extern Datum merkle_native_get_ranges(PG_FUNCTION_ARGS);
 extern Datum merkle_native_get_range_items(PG_FUNCTION_ARGS);
+extern Datum merkle_dynamic_get_leaf_frontier(PG_FUNCTION_ARGS);
+extern Datum merkle_dynamic_get_all_internal_nodes(PG_FUNCTION_ARGS);
 extern Datum merkle_native_get_leaf_frontier(PG_FUNCTION_ARGS);
+extern Datum merkle_native_get_all_internal_nodes(PG_FUNCTION_ARGS);
 extern Datum merkle_native_tree_stats(PG_FUNCTION_ARGS);
 extern Datum merkle_native_partition_roots_at(PG_FUNCTION_ARGS);
 extern void merkle_stage_item_delta(Relation indexRel,

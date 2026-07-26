@@ -16,7 +16,10 @@
 #include "access/merkle.h"
 #include "access/relation.h"
 #include "access/xact.h"
+#include "catalog/index.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_authid_d.h"
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_type_d.h"
 #include "common/blake3.h"
@@ -1663,8 +1666,7 @@ native_build_item_segment(Relation indexRel, const NativeConfig *config,
 		config->logical_fanout);
 	if (count <= config->leaf_capacity && bytes <= config->leaf_byte_capacity)
 	{
-		int leaf_prefix = native_common_prefix(items[0].route,
-			items[count - 1].route, bit);
+		int leaf_prefix = bit;
 
 		/*
 		 * A child below this logical directory must consume at least one
@@ -1725,6 +1727,8 @@ refine_segment:
 			logical_prefix, bit + 1, children, summaries, split_counter);
 		return;
 	}
+	if (split_counter != NULL)
+		(*split_counter)++;
 	native_build_item_segment(indexRel, config, partition, items, split,
 		logical_prefix, bit + 1, children, summaries, split_counter);
 	native_build_item_segment(indexRel, config, partition, items + split,
@@ -1766,8 +1770,6 @@ native_build_subtree(Relation indexRel, const NativeConfig *config,
 	native_canonical_prefix(items[0].route, minimum_prefix, prefix);
 	native_make_internal_summary(partition, minimum_prefix, prefix, children,
 		summaries, summary);
-	if (split_counter != NULL)
-		(*split_counter)++;
 	return native_append_record(indexRel, summary, sizeof(*summary));
 }
 
@@ -1775,7 +1777,8 @@ static MerkleNativeLocator
 native_build_spooled_range(Relation indexRel, const NativeConfig *config,
 							   int partition, NativePartitionSpool *spool,
 							   uint64 first, uint64 count, int minimum_prefix,
-							   MerkleNativeNodeRecord *summary);
+							   MerkleNativeNodeRecord *summary,
+							   uint64 *split_counter);
 
 static void
 native_build_spooled_segment(Relation indexRel, const NativeConfig *config,
@@ -1783,7 +1786,8 @@ native_build_spooled_segment(Relation indexRel, const NativeConfig *config,
 							 uint64 first, uint64 count, int logical_prefix,
 							 int bit,
 							 MerkleNativeLocator children[MERKLE_DYNAMIC_LOGICAL_FANOUT],
-							 MerkleNativeNodeRecord summaries[MERKLE_DYNAMIC_LOGICAL_FANOUT])
+							 MerkleNativeNodeRecord summaries[MERKLE_DYNAMIC_LOGICAL_FANOUT],
+							 uint64 *split_counter)
 {
 	uint8 first_route[MERKLE_HASH_BYTES];
 	uint8 last_route[MERKLE_HASH_BYTES];
@@ -1806,8 +1810,7 @@ native_build_spooled_segment(Relation indexRel, const NativeConfig *config,
 
 		if (bytes <= config->leaf_byte_capacity)
 		{
-			int leaf_prefix = native_common_prefix(leaf.items[0].route,
-				leaf.items[leaf.count - 1].route, bit);
+			int leaf_prefix = bit;
 			MerkleNativeNodeRecord leaf_summary;
 			MerkleNativeLocator locator;
 
@@ -1829,7 +1832,7 @@ native_build_spooled_segment(Relation indexRel, const NativeConfig *config,
 		locator = native_build_spooled_range(indexRel, config, partition, spool,
 			first, count,
 			logical_prefix + native_logical_width(config->logical_fanout),
-			&nested);
+			&nested, split_counter);
 		native_assign_child_range(children, summaries, first_slot, last_slot,
 			&locator, &nested);
 		return;
@@ -1856,20 +1859,21 @@ native_build_spooled_segment(Relation indexRel, const NativeConfig *config,
 	if (split == first || split == first + count)
 	{
 		native_build_spooled_segment(indexRel, config, partition, spool,
-			first, count, logical_prefix, bit + 1, children, summaries);
+			first, count, logical_prefix, bit + 1, children, summaries, split_counter);
 		return;
 	}
 	native_build_spooled_segment(indexRel, config, partition, spool, first,
-		split - first, logical_prefix, bit + 1, children, summaries);
+		split - first, logical_prefix, bit + 1, children, summaries, split_counter);
 	native_build_spooled_segment(indexRel, config, partition, spool, split,
-		first + count - split, logical_prefix, bit + 1, children, summaries);
+		first + count - split, logical_prefix, bit + 1, children, summaries, split_counter);
 }
 
 static MerkleNativeLocator
 native_build_spooled_range(Relation indexRel, const NativeConfig *config,
 							   int partition, NativePartitionSpool *spool,
 							   uint64 first, uint64 count, int minimum_prefix,
-							   MerkleNativeNodeRecord *summary)
+							   MerkleNativeNodeRecord *summary,
+							   uint64 *split_counter)
 {
 	uint8 first_route[MERKLE_HASH_BYTES];
 	uint8 prefix[MERKLE_HASH_BYTES];
@@ -1908,11 +1912,96 @@ native_build_spooled_range(Relation indexRel, const NativeConfig *config,
 	for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
 		native_invalid_locator(&children[i]);
 	native_build_spooled_segment(indexRel, config, partition, spool, first,
-		count, minimum_prefix, minimum_prefix, children, summaries);
+		count, minimum_prefix, minimum_prefix, children, summaries, split_counter);
 	native_canonical_prefix(first_route, minimum_prefix, prefix);
 	native_make_internal_summary(partition, minimum_prefix, prefix, children,
 		summaries, summary);
+	if (split_counter != NULL)
+		(*split_counter)++;
 	return native_append_record(indexRel, summary, sizeof(*summary));
+}
+
+static void
+native_register_dynamic_state(Relation indexRel, uint64 baseline_apply_seq, uint64 build_splits)
+{
+	Oid saved_userid;
+	int saved_sec_context;
+	NativeConfig config;
+	Oid types[13] = {OIDOID,OIDOID,OIDOID,OIDOID,OIDOID,
+		INT4OID,INT4OID,INT4OID,INT4OID,INT4OID,INT4OID,INT8OID,INT8OID};
+	Datum args[13];
+	char nulls[13];
+	int spi_rc;
+
+	native_read_config(indexRel, &config);
+	MemSet(nulls, ' ', sizeof(nulls));
+	args[0] = ObjectIdGetDatum(RelationGetRelid(indexRel));
+	args[1] = ObjectIdGetDatum(indexRel->rd_node.spcNode);
+	args[2] = ObjectIdGetDatum(indexRel->rd_node.dbNode);
+	args[3] = ObjectIdGetDatum(indexRel->rd_node.relNode);
+	args[4] = ObjectIdGetDatum(IndexGetRelation(RelationGetRelid(indexRel), false));
+	args[5] = Int32GetDatum(config.partitions);
+	args[6] = Int32GetDatum(config.logical_fanout);
+	args[7] = Int32GetDatum(config.leaf_capacity);
+	args[8] = Int32GetDatum(config.merge_threshold);
+	args[9] = Int32GetDatum((int32) Min(config.leaf_byte_capacity, INT32_MAX));
+	args[10] = Int32GetDatum(config.max_key_bytes);
+	args[11] = Int64GetDatum((int64) baseline_apply_seq);
+	args[12] = Int64GetDatum((int64) build_splits);
+
+	GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
+	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
+		saved_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+	PG_TRY();
+	{
+		spi_rc = SPI_connect();
+		if (spi_rc == SPI_OK_CONNECT)
+		{
+			int exec_rc = SPI_execute_with_args(
+				"INSERT INTO ariabc_internal.merkle_dynamic_state "
+				" (index_oid,rnode_spc,rnode_db,rnode_rel,heap_oid,partitions,logical_fanout,"
+				"  leaf_capacity,merge_threshold,leaf_byte_capacity,max_key_bytes,build_complete,applied_seq,split_count) "
+				"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,$13) "
+				"ON CONFLICT (index_oid, rnode_spc, rnode_db, rnode_rel) DO UPDATE "
+				"SET build_complete=true, applied_seq=EXCLUDED.applied_seq, "
+				"    split_count=ariabc_internal.merkle_dynamic_state.split_count + EXCLUDED.split_count, "
+				"    updated_at=clock_timestamp()",
+				13, types, args, nulls, false, 0);
+			if (exec_rc == SPI_OK_INSERT || exec_rc == SPI_OK_UPDATE)
+			{
+				if (SPI_processed == 0)
+				{
+					Oid fb_types[2] = {OIDOID, INT8OID};
+					Datum fb_args[2] = {args[0], args[12]};
+					SPI_execute_with_args(
+						"UPDATE ariabc_internal.merkle_dynamic_state "
+						"SET build_complete=true, applied_seq=$2, "
+						"    split_count=split_count+$2, updated_at=clock_timestamp() "
+						"WHERE index_oid=$1",
+						2, fb_types, fb_args, NULL, false, 0);
+				}
+			}
+			SPI_finish();
+			ereport(LOG,
+				(errmsg("native_register_dynamic_state index_oid=%u exec_rc=%d build_splits=%llu",
+						RelationGetRelid(indexRel), exec_rc, (unsigned long long) build_splits)));
+		}
+		else
+		{
+			ereport(WARNING,
+				(errmsg("native_register_dynamic_state SPI_connect failed: %d", spi_rc)));
+		}
+	}
+	PG_CATCH();
+	{
+		ErrorData *edata = CopyErrorData();
+		elog(WARNING, "native_register_dynamic_state failed: %s", edata->message);
+		FreeErrorData(edata);
+		SetUserIdAndSecContext(saved_userid, saved_sec_context);
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	SetUserIdAndSecContext(saved_userid, saved_sec_context);
 }
 
 void
@@ -1923,7 +2012,6 @@ merkle_native_init(Relation indexRel, int partitions,
 	int pages = (partitions + capacity - 1) / capacity;
 	int page_no;
 
-	(void) baseline_apply_seq;
 	for (page_no = 0; page_no < pages; page_no++)
 	{
 		BlockNumber block = MERKLE_TREE_START_BLKNO + page_no;
@@ -1955,6 +2043,8 @@ merkle_native_init(Relation indexRel, int partitions,
 		GenericXLogFinish(state);
 		UnlockReleaseBuffer(buffer);
 	}
+
+	native_register_dynamic_state(indexRel, baseline_apply_seq, 0);
 }
 
 bool
@@ -2028,7 +2118,7 @@ merkle_native_build_add(MerkleNativeBuildState *state,
 	MemoryContextSwitchTo(old);
 }
 
-static void
+static uint64
 native_publish_build_partition(Relation indexRel, const NativeConfig *config,
 							   int partition, NativePartitionSpool *spool,
 							   uint64 baseline_apply_seq)
@@ -2036,9 +2126,10 @@ native_publish_build_partition(Relation indexRel, const NativeConfig *config,
 	MerkleNativeNodeRecord node;
 	MerkleNativeRootVersion root;
 	MerkleNativeLocator root_node;
+	uint64 partition_splits = 0;
 
 	root_node = native_build_spooled_range(indexRel, config, partition,
-		spool, 0, spool == NULL ? 0 : spool->count, 0, &node);
+		spool, 0, spool == NULL ? 0 : spool->count, 0, &node, &partition_splits);
 	MemSet(&root, 0, sizeof(root));
 	root.magic = MERKLE_NATIVE_ROOT_MAGIC;
 	root.version = MERKLE_NATIVE_ROOT_VERSION;
@@ -2055,6 +2146,88 @@ native_publish_build_partition(Relation indexRel, const NativeConfig *config,
 	root.structure_hash = node.structure_hash;
 	root.root_node = root_node;
 	native_publish_one(indexRel, partition, &root);
+	return partition_splits;
+}
+
+static void
+native_emit_nodes_report(Relation indexRel, int total_partitions,
+						 const int *touched_partitions, int touched_count)
+{
+	bool saved_is_bcdb_worker;
+	int i;
+
+	if (!merkle_update_detection)
+		return;
+	if (merkle_update_detection_suppress)
+		return;
+
+	saved_is_bcdb_worker = is_bcdb_worker;
+
+	PG_TRY();
+	{
+		StringInfoData out;
+		bool first = true;
+
+		is_bcdb_worker = false;
+		initStringInfo(&out);
+
+		if (touched_partitions != NULL && touched_count > 0)
+		{
+			for (i = 0; i < touched_count; i++)
+			{
+				int partition = touched_partitions[i];
+				MerkleNativeRootVersion root;
+				char *hex;
+
+				if (partition < 0 || partition >= total_partitions)
+					continue;
+				if (!native_visible_root(indexRel, partition, &root))
+					continue;
+
+				hex = merkle_hash_to_hex(&root.data_xor);
+
+				if (!first)
+					appendStringInfoString(&out, " ");
+				appendStringInfo(&out, "(%d, %s)", partition, hex);
+				first = false;
+
+				pfree(hex);
+			}
+		}
+		else
+		{
+			for (i = 0; i < total_partitions; i++)
+			{
+				MerkleNativeRootVersion root;
+				char *hex;
+
+				if (!native_visible_root(indexRel, i, &root))
+					continue;
+
+				hex = merkle_hash_to_hex(&root.data_xor);
+
+				if (!first)
+					appendStringInfoString(&out, " ");
+				appendStringInfo(&out, "(%d, %s)", i, hex);
+				first = false;
+
+				pfree(hex);
+			}
+		}
+
+		if (!first)
+			ereport(NOTICE,
+					(errmsg("BCDB_MERKLE_ROOTS: %s", out.data)));
+
+		pfree(out.data);
+		is_bcdb_worker = saved_is_bcdb_worker;
+	}
+	PG_CATCH();
+	{
+		is_bcdb_worker = saved_is_bcdb_worker;
+		FlushErrorState();
+	}
+	PG_END_TRY();
 }
 
 void
@@ -2066,6 +2239,7 @@ merkle_native_build_finish(MerkleNativeBuildState *state)
 	Datum value;
 	bool isnull;
 	int next_partition;
+	uint64 total_build_splits = 0;
 
 	if (state == NULL)
 		elog(ERROR, "invalid native Merkle build state");
@@ -2092,7 +2266,7 @@ merkle_native_build_finish(MerkleNativeBuildState *state)
 		{
 			if (partition >= 0)
 			{
-				native_publish_build_partition(indexRel, &state->config,
+				total_build_splits += native_publish_build_partition(indexRel, &state->config,
 					partition, spool, state->baseline_apply_seq);
 				native_spool_close(spool);
 				spool = NULL;
@@ -2100,7 +2274,7 @@ merkle_native_build_finish(MerkleNativeBuildState *state)
 			for (next_partition = Max(partition + 1, 0);
 				next_partition < item_partition; next_partition++)
 			{
-				native_publish_build_partition(indexRel, &state->config,
+				total_build_splits += native_publish_build_partition(indexRel, &state->config,
 					next_partition, NULL, state->baseline_apply_seq);
 			}
 			partition = item_partition;
@@ -2112,15 +2286,18 @@ merkle_native_build_finish(MerkleNativeBuildState *state)
 	}
 	if (partition >= 0)
 	{
-		native_publish_build_partition(indexRel, &state->config, partition,
+		total_build_splits += native_publish_build_partition(indexRel, &state->config, partition,
 			spool, state->baseline_apply_seq);
 		native_spool_close(spool);
 		spool = NULL;
 	}
 	for (next_partition = Max(partition + 1, 0);
 		next_partition < state->config.partitions; next_partition++)
-		native_publish_build_partition(indexRel, &state->config, next_partition,
+		total_build_splits += native_publish_build_partition(indexRel, &state->config, next_partition,
 			NULL, state->baseline_apply_seq);
+
+	native_register_dynamic_state(indexRel, state->baseline_apply_seq, total_build_splits);
+	native_emit_nodes_report(indexRel, state->config.partitions, NULL, 0);
 	index_close(indexRel, RowExclusiveLock);
 	tuplesort_end(state->sort);
 	MemoryContextDelete(state->context);
@@ -2994,11 +3171,15 @@ native_apply_transitions_authorized(
 		if (i > 0 && transitions[i - 1].partition_id > p)
 			elog(ERROR, "native Merkle transitions are not partition ordered");
 	}
+	int *touched_partitions = (int *) palloc(sizeof(int) * count);
+	int touched_count = 0;
+
 	for (i = 0; i < count; )
 	{
 		int partition = transitions[i].partition_id;
 		int end = i + 1;
 
+		touched_partitions[touched_count++] = partition;
 		native_lock_partition(indexRel, partition);
 		while (end < count && transitions[end].partition_id == partition)
 			end++;
@@ -3094,6 +3275,8 @@ native_apply_transitions_authorized(
 				(errmsg("native Merkle profiling state update skipped: no matching dynamic state row")));
 		SPI_finish();
 	}
+	native_emit_nodes_report(indexRel, config.partitions, touched_partitions, touched_count);
+	pfree(touched_partitions);
 	index_close(indexRel, RowExclusiveLock);
 }
 
@@ -3995,6 +4178,67 @@ merkle_native_get_partition_roots(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
+/* Recursive helper: emit every internal (non-leaf) node in the subtree. */
+static void
+native_emit_internal_nodes(Relation indexRel, int partition,
+						   const MerkleNativeLocator *locator,
+						   Tuplestorestate *store, TupleDesc desc)
+{
+	MerkleNativeNodeRecord *node = native_read_node(indexRel, locator);
+	int i;
+
+	if ((node->flags & MERKLE_NATIVE_NODE_LEAF) != 0)
+	{
+		pfree(node);
+		return;
+	}
+
+	/* Emit this internal node. */
+	native_put_summary(store, desc, partition, node->prefix_len, node->prefix,
+					   node->tuple_count, &node->data_xor, false);
+
+	/* Recurse into each distinct child. */
+	for (i = 0; i < MERKLE_DYNAMIC_LOGICAL_FANOUT; i++)
+	{
+		int j;
+
+		if (!native_locator_valid(&node->children[i]))
+			continue;
+		for (j = 0; j < i; j++)
+			if (native_locator_valid(&node->children[j]) &&
+				native_locator_equal(&node->children[i], &node->children[j]))
+				break;
+		if (j == i)
+			native_emit_internal_nodes(indexRel, partition,
+									   &node->children[i], store, desc);
+	}
+	pfree(node);
+}
+
+Datum
+merkle_native_get_all_internal_nodes(PG_FUNCTION_ARGS)
+{
+	Relation indexRel = native_open_index_arg(PG_GETARG_OID(0), ShareLock);
+	NativeConfig config;
+	TupleDesc desc;
+	Tuplestorestate *store = native_begin_srf(fcinfo, &desc);
+	int partition;
+
+	native_read_config(indexRel, &config);
+	for (partition = 0; partition < config.partitions; partition++)
+	{
+		MerkleNativeRootVersion root;
+
+		if (!native_visible_root(indexRel, partition, &root))
+			elog(ERROR, "native Merkle partition has no visible root");
+		native_emit_internal_nodes(indexRel, partition, &root.root_node,
+								   store, desc);
+	}
+	index_close(indexRel, ShareLock);
+	tuplestore_donestoring(store);
+	PG_RETURN_NULL();
+}
+
 static void
 native_emit_frontier(Relation indexRel, const MerkleNativeLocator *locator,
 					 Tuplestorestate *store, TupleDesc desc)
@@ -4507,27 +4751,89 @@ merkle_native_tree_stats(PG_FUNCTION_ARGS)
 		sequence_domain = MERKLE_SEQUENCE_LOCAL_XID;
 		sequence_epoch = 0;
 	}
-	json = psprintf("{\"authority\":\"native_index_pages\","
-		"\"update_mode\":\"%s\","
-		"\"logical_fanout\":%d,\"physical_node_fanout\":%d,"
-		"\"data_root\":\"%s\",\"structure_root\":\"%s\","
-		"\"combined_root\":\"%s\","
-		"\"layout_version\":%d,\"partitions\":%d,\"item_count\":%llu,"
-		"\"item_bytes\":%llu,\"node_count\":%llu,\"leaf_count\":%llu,"
-		"\"max_depth\":%llu,\"max_leaf_items\":%llu,\"pages\":%u,"
-		"\"min_apply_seq\":%llu,\"max_apply_seq\":%llu,"
-		"\"sequence_domain\":%u,\"sequence_flags\":%u,\"sequence_epoch\":%llu}",
-		mode_str, config.logical_fanout, MERKLE_DYNAMIC_PHYSICAL_NODE_FANOUT,
-		merkle_hash_to_hex(&data_root),
-		merkle_hash_to_hex(&structure_root), merkle_hash_to_hex(&combined_root),
-		MERKLE_DYNAMIC_LAYOUT_VERSION, config.partitions,
-		(unsigned long long) items, (unsigned long long) bytes,
-		(unsigned long long) nodes, (unsigned long long) leaves,
-		(unsigned long long) max_depth, (unsigned long long) max_leaf_items,
-		pages, (unsigned long long) (min_seq == PG_UINT64_MAX ? 0 : min_seq),
-		(unsigned long long) max_seq,
-		(unsigned int) sequence_domain, (unsigned int) sequence_flags,
-		(unsigned long long) sequence_epoch);
+	/*
+	 * Fetch cumulative split/merge counters from the profile side-table.
+	 * These are accumulated by native_apply_transitions_authorized() whenever
+	 * merkle_native_profile_enabled=true.  The native code path did not
+	 * previously expose these in its JSON, causing all SQL-based profile
+	 * queries (COALESCE(stats->>'split_count','0')) to always return 0.
+	 *
+	 * Fail gracefully when no row exists (profiling never enabled) rather
+	 * than erroring out, so that non-profiling runs still work.
+	 */
+	{
+		uint64 split_count = 0;
+		uint64 merge_count = 0;
+		Oid types[4] = {OIDOID, OIDOID, OIDOID, OIDOID};
+		Datum args[4];
+		char nulls[4] = {' ', ' ', ' ', ' '};
+		int rc;
+
+		args[0] = ObjectIdGetDatum(RelationGetRelid(indexRel));
+		args[1] = ObjectIdGetDatum(indexRel->rd_node.spcNode);
+		args[2] = ObjectIdGetDatum(indexRel->rd_node.dbNode);
+		args[3] = ObjectIdGetDatum(indexRel->rd_node.relNode);
+
+		if (SPI_connect() == SPI_OK_CONNECT)
+		{
+			rc = SPI_execute_with_args(
+				"SELECT COALESCE(split_count,0), COALESCE(merge_count,0) "
+				"FROM ariabc_internal.merkle_dynamic_state "
+				"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4 "
+				"LIMIT 1",
+				4, types, args, nulls, true, 1);
+			if (rc == SPI_OK_SELECT && SPI_processed == 0)
+			{
+				rc = SPI_execute_with_args(
+					"SELECT COALESCE(split_count,0), COALESCE(merge_count,0) "
+					"FROM ariabc_internal.merkle_dynamic_state "
+					"WHERE index_oid=$1 "
+					"LIMIT 1",
+					1, types, args, nulls, true, 1);
+			}
+			if (rc == SPI_OK_SELECT && SPI_processed == 1)
+			{
+				bool isnull;
+				HeapTuple tup = SPI_tuptable->vals[0];
+				TupleDesc desc = SPI_tuptable->tupdesc;
+
+				split_count = (uint64) DatumGetInt64(
+					SPI_getbinval(tup, desc, 1, &isnull));
+				if (isnull) split_count = 0;
+				merge_count = (uint64) DatumGetInt64(
+					SPI_getbinval(tup, desc, 2, &isnull));
+				if (isnull) merge_count = 0;
+			}
+			SPI_finish();
+		}
+
+		json = psprintf("{\"authority\":\"native_index_pages\","
+			"\"update_mode\":\"%s\","
+			"\"logical_fanout\":%d,\"physical_node_fanout\":%d,"
+			"\"data_root\":\"%s\",\"structure_root\":\"%s\","
+			"\"combined_root\":\"%s\","
+			"\"layout_version\":%d,\"partitions\":%d,\"item_count\":%llu,"
+			"\"item_bytes\":%llu,\"node_count\":%llu,\"leaf_count\":%llu,"
+			"\"max_depth\":%llu,\"max_leaf_items\":%llu,\"pages\":%u,"
+			"\"split_count\":%llu,\"merge_count\":%llu,"
+			"\"min_apply_seq\":%llu,\"max_apply_seq\":%llu,"
+			"\"sequence_domain\":%u,\"sequence_flags\":%u,"
+			"\"sequence_epoch\":%llu}",
+			mode_str, config.logical_fanout, MERKLE_DYNAMIC_PHYSICAL_NODE_FANOUT,
+			merkle_hash_to_hex(&data_root),
+			merkle_hash_to_hex(&structure_root), merkle_hash_to_hex(&combined_root),
+			MERKLE_DYNAMIC_LAYOUT_VERSION, config.partitions,
+			(unsigned long long) items, (unsigned long long) bytes,
+			(unsigned long long) nodes, (unsigned long long) leaves,
+			(unsigned long long) max_depth, (unsigned long long) max_leaf_items,
+			pages,
+			(unsigned long long) split_count,
+			(unsigned long long) merge_count,
+			(unsigned long long) (min_seq == PG_UINT64_MAX ? 0 : min_seq),
+			(unsigned long long) max_seq,
+			(unsigned int) sequence_domain, (unsigned int) sequence_flags,
+			(unsigned long long) sequence_epoch);
+	}
 	index_close(indexRel, ShareLock);
 	result = DirectFunctionCall1(jsonb_in, CStringGetDatum(json));
 	pfree(json);

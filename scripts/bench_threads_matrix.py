@@ -1946,6 +1946,26 @@ def main() -> int:
                                                 profile_log_offset = server_log_path.stat().st_size
                                             except OSError:
                                                 profile_log_offset = 0
+                                        # Ensure merkle_native_profile_enabled is set system-wide before
+                                        # the workload starts.  PGOPTIONS via mode_env only reaches psql
+                                        # client connections; BCDB worker backends connect internally and
+                                        # do not inherit PGOPTIONS.  ALTER SYSTEM + pg_reload_conf()
+                                        # makes the GUC visible in all backends so COW transitions
+                                        # accumulate split_count/merge_count in the side-table.
+                                        if (args.dynamic_merkle_profile
+                                                and args.dynamic_merkle and merkle_for_mode):
+                                            _psql_value(
+                                                psql_path,
+                                                db=args.db,
+                                                port=args.port,
+                                                user=args.user,
+                                                query=(
+                                                    "ALTER SYSTEM SET merkle_native_profile_enabled = 'on'; "
+                                                    "SELECT pg_reload_conf();"
+                                                ),
+                                                cwd=scripts_dir,
+                                                env=mode_env,
+                                            )
                                         if restore_exit == 0:
                                             workload_exit = _run(
                                                 workload_argv,
@@ -2111,19 +2131,23 @@ def main() -> int:
                                                         query=(
                                                             "SELECT COALESCE(s->>'split_count','0') || '|' || "
                                                             "COALESCE(s->>'merge_count','0') || '|' || "
-                                                            "(s->>'max_leaf_items') FROM (SELECT "
+                                                            "COALESCE(s->>'max_leaf_items','') FROM (SELECT "
                                                             "merkle_dynamic_tree_stats('" + dynamic_index + "'::regclass)::jsonb AS s) q;"
                                                         ),
                                                         cwd=scripts_dir,
                                                         env=mode_env,
                                                     )
                                                     parts = (profile_values or '').split('|')
-                                                    if len(parts) == 3 and all(p.isdigit() for p in parts):
+                                                    # split_count and merge_count must be digits; max_leaf_items
+                                                    # may be NULL (empty string) — check them independently so a
+                                                    # NULL max_leaf_items does not silently drop the counters.
+                                                    if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
                                                         if profile_splits is None:
                                                             profile_splits = int(parts[0]) - int(build_profile_splits or 0)
                                                         if profile_merges is None:
                                                             profile_merges = int(parts[1]) - int(build_profile_merges or 0)
-                                                        profile_max_leaf_items = int(parts[2])
+                                                        if parts[2].isdigit():
+                                                            profile_max_leaf_items = int(parts[2])
                                                         if profile_splits < 0 or profile_merges < 0:
                                                             verification_error = "dynamic_profile_counter_moved_backwards"
                                                     elif profile_splits is None:

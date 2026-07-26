@@ -1782,7 +1782,16 @@ dynamic_split_leaf_spi(const MerkleDynamicGeneration *gen, int partition_id,
 	dynamic_advance_command_counter();
 	delta->node_delta += vector.count - 1;
 	delta->leaf_delta += (int64) vector.leaf_count - 1;
-	delta->split_delta += vector.count - (int) vector.leaf_count;
+	/* split_count tracks how many individual leaf-split events occurred.
+	 * One call to dynamic_split_leaf_spi() re-builds one over-capacity leaf
+	 * into a sub-tree of vector.leaf_count new leaves.  That represents
+	 * (vector.leaf_count - 1) individual splits: the original leaf was split
+	 * once to become 2 children, each overflow child was split again, etc.
+	 * Equivalently this equals the number of *new* internal branch nodes
+	 * added (vector.count - vector.leaf_count), which is the same value.
+	 * Use leaf_count - 1 for clarity: it directly counts "how many times a
+	 * leaf was divided". */
+	delta->split_delta += (int64) vector.leaf_count - 1;
 	delta->observed_max_depth = Max(delta->observed_max_depth,
 		(int) vector.max_depth);
 	delta->observed_max_leaf_items = Max(delta->observed_max_leaf_items,
@@ -4740,6 +4749,84 @@ merkle_dynamic_get_partition_roots(PG_FUNCTION_ARGS)
 	}
 	PG_END_TRY();
 	SetUserIdAndSecContext(saved_userid,saved_sec_context);
+	tuplestore_donestoring(tupstore);
+	PG_RETURN_NULL();
+}
+
+PG_FUNCTION_INFO_V1(merkle_dynamic_get_all_internal_nodes);
+
+Datum
+merkle_dynamic_get_all_internal_nodes(PG_FUNCTION_ARGS)
+{
+	Oid relid = PG_GETARG_OID(0);
+	Oid saved_userid;
+	int saved_sec_context;
+	Relation indexRel = NULL;
+	TupleDesc tupdesc;
+	Tuplestorestate *tupstore;
+
+	if (dynamic_use_native_arg(relid))
+		return merkle_native_get_all_internal_nodes(fcinfo);
+	tupstore = dynamic_begin_materialized_srf(fcinfo, &tupdesc);
+
+	merkle_require_fresh();
+	GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
+	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
+		saved_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+	PG_TRY();
+	{
+		MerkleDynamicGeneration gen;
+		Oid types[4] = {OIDOID,OIDOID,OIDOID,OIDOID};
+		Datum args[4];
+		char nulls[4] = {' ',' ',' ',' '};
+		int rc;
+		int i;
+
+		indexRel = dynamic_open_index_arg(relid, ShareLock);
+		dynamic_read_meta(indexRel, &gen);
+		dynamic_require_relations();
+		dynamic_generation_args(&gen, args);
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "dynamic Merkle all-internal-nodes SPI_connect failed");
+		dynamic_validate_state_spi(&gen);
+		rc = SPI_execute_with_args(
+			"SELECT partition_id,prefix_len,prefix_bytes,tuple_count,data_xor,is_leaf "
+			"FROM ariabc_internal.merkle_dynamic_node "
+			"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4 "
+			"AND NOT is_leaf ORDER BY partition_id,prefix_len,prefix_bytes",
+			4, types, args, nulls, true, 0);
+		if (rc != SPI_OK_SELECT)
+			elog(ERROR, "dynamic Merkle all-internal-nodes query failed: %d", rc);
+		for (i = 0; i < (int) SPI_processed; i++)
+		{
+			Datum out[6];
+			bool outnulls[6] = {false,false,false,false,false,false};
+			HeapTuple tuple = SPI_tuptable->vals[i];
+			TupleDesc desc = SPI_tuptable->tupdesc;
+			bool isnull;
+
+			out[0] = SPI_getbinval(tuple,desc,1,&isnull);
+			out[1] = Int32GetDatum(DatumGetInt16(
+				SPI_getbinval(tuple,desc,2,&isnull)));
+			out[2] = PointerGetDatum(DatumGetByteaPCopy(
+				SPI_getbinval(tuple,desc,3,&isnull)));
+			out[3] = SPI_getbinval(tuple,desc,4,&isnull);
+			out[4] = PointerGetDatum(DatumGetByteaPCopy(
+				SPI_getbinval(tuple,desc,5,&isnull)));
+			out[5] = BoolGetDatum(false);
+			tuplestore_putvalues(tupstore, tupdesc, out, outnulls);
+		}
+		SPI_finish();
+		index_close(indexRel, ShareLock);
+		indexRel = NULL;
+	}
+	PG_CATCH();
+	{
+		SetUserIdAndSecContext(saved_userid, saved_sec_context);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SetUserIdAndSecContext(saved_userid, saved_sec_context);
 	tuplestore_donestoring(tupstore);
 	PG_RETURN_NULL();
 }

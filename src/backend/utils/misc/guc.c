@@ -910,7 +910,7 @@ static struct config_bool ConfigureNamesBool[] =
 			gettext_noop("When enabled, CREATE INDEX/REINDEX emits the built partition roots; committed DML is reported through the durable applier status path.")
 		},
 		&merkle_update_detection,
-		false,
+		true,
 		NULL, NULL, NULL
 	},
 	{
@@ -928,7 +928,7 @@ static struct config_bool ConfigureNamesBool[] =
 			gettext_noop("When enabled, native dynamic Merkle split and merge counters are accumulated in the durable profiling state table." )
 		},
 		&merkle_native_profile_enabled,
-		false,
+		true,
 		NULL, NULL, NULL
 	},
 	{
@@ -937,7 +937,7 @@ static struct config_bool ConfigureNamesBool[] =
 			gettext_noop("When enabled, CREATE INDEX/REINDEX for Merkle indexes will not emit the touched-node NOTICE report even if merkle_update_detection is on. Set this to off to see the updated nodes during a build.")
 		},
 		&merkle_update_detection_suppress,
-		true,
+		false,
 		NULL, NULL, NULL
 	},
 	{
