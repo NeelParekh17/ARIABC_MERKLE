@@ -910,7 +910,7 @@ static struct config_bool ConfigureNamesBool[] =
 			gettext_noop("When enabled, CREATE INDEX/REINDEX emits the built partition roots; committed DML is reported through the durable applier status path.")
 		},
 		&merkle_update_detection,
-		true,
+		false,
 		NULL, NULL, NULL
 	},
 	{

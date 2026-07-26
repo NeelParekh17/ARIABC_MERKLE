@@ -256,6 +256,51 @@ $$ LANGUAGE sql;
 SELECT * FROM merkle_get_keys_by_prefix('usertable_small_dynamic_merkle_idx'::regclass, 1, '00%');
 
 -- -----------------------------------------------------------------------------
+-- Helper Function: Retrieve all keys of a leaf bucket given its leaf hash (data_xor hex)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION merkle_get_keys_by_leaf_hash(
+    p_index regclass,
+    p_hash_hex text
+)
+RETURNS TABLE (
+    partition_id int,
+    prefix_len int,
+    prefix_hex text,
+    key_text text,
+    route_digest_hex text,
+    tuple_hash_hex text,
+    leaf_data_xor_hex text
+) AS $$
+SELECT r.partition_id,
+       r.prefix_len::int,
+       encode(r.prefix, 'hex') AS prefix_hex,
+       items.key_text,
+       encode(items.route_digest, 'hex') AS route_digest_hex,
+       encode(items.tuple_hash, 'hex') AS tuple_hash_hex,
+       encode(r.data_xor, 'hex') AS leaf_data_xor_hex
+  FROM merkle_dynamic_get_leaf_frontier(p_index) r
+  CROSS JOIN LATERAL merkle_dynamic_get_range_items(
+         p_index,
+         jsonb_build_array(
+           jsonb_build_object(
+             'partition_id', r.partition_id,
+             'prefix_length', r.prefix_len,
+             'prefix_value', encode(r.prefix, 'hex')
+           )
+         )
+       ) items
+ WHERE encode(r.data_xor, 'hex') = lower(p_hash_hex)
+ ORDER BY items.key_text;
+$$ LANGUAGE sql;
+
+-- Simple Query: Retrieve all keys for a leaf using its hash value:
+SELECT * FROM merkle_get_keys_by_leaf_hash(
+    'usertable_small_dynamic_merkle_idx'::regclass,
+    '0ba8adcdd690d9d66443ab88935b8d0630e6e04c5ab7e81a3e4928a1319588bf'
+);
+
+
+-- -----------------------------------------------------------------------------
 -- 9. Dedicated Inspection Commands for Partition 1
 -- -----------------------------------------------------------------------------
 

@@ -1931,7 +1931,13 @@ native_register_dynamic_state(Relation indexRel, uint64 baseline_apply_seq, uint
 		INT4OID,INT4OID,INT4OID,INT4OID,INT4OID,INT4OID,INT8OID,INT8OID};
 	Datum args[13];
 	char nulls[13];
+	Oid namespace_oid;
 	int spi_rc;
+
+	namespace_oid = get_namespace_oid("ariabc_internal", true);
+	if (!OidIsValid(namespace_oid) ||
+		!OidIsValid(get_relname_relid("merkle_dynamic_state", namespace_oid)))
+		return;
 
 	native_read_config(indexRel, &config);
 	MemSet(nulls, ' ', sizeof(nulls));
@@ -1995,7 +2001,12 @@ native_register_dynamic_state(Relation indexRel, uint64 baseline_apply_seq, uint
 	PG_CATCH();
 	{
 		ErrorData *edata = CopyErrorData();
-		elog(WARNING, "native_register_dynamic_state failed: %s", edata->message);
+		if (edata->sqlerrcode == ERRCODE_UNDEFINED_TABLE ||
+			edata->sqlerrcode == ERRCODE_UNDEFINED_SCHEMA)
+			ereport(LOG,
+				(errmsg("native_register_dynamic_state side-table not present: %s", edata->message)));
+		else
+			elog(WARNING, "native_register_dynamic_state failed: %s", edata->message);
 		FreeErrorData(edata);
 		SetUserIdAndSecContext(saved_userid, saved_sec_context);
 		FlushErrorState();
@@ -3247,33 +3258,38 @@ native_apply_transitions_authorized(
 					RelationGetRelid(indexRel),
 					(unsigned long long) profile_splits,
 					(unsigned long long) profile_merges)));
-		if (SPI_connect() != SPI_OK_CONNECT)
-			elog(ERROR, "could not connect to SPI for native Merkle profiling");
-		rc = SPI_execute_with_args(
-			"UPDATE ariabc_internal.merkle_dynamic_state "
-			"SET split_count=split_count+$5, merge_count=merge_count+$6, "
-			"updated_at=clock_timestamp() "
-			"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4",
-			6, types, args, NULL, false, 0);
-		/* A REINDEX/build race can leave the catalog generation tuple newer
-		 * than the relation opened for this apply.  Preserve the profile
-		 * rather than dropping it; the index OID is still an unambiguous
-		 * profile owner and the state table may contain one live generation. */
-		if (rc == SPI_OK_UPDATE && SPI_processed == 0)
+		Oid namespace_oid = get_namespace_oid("ariabc_internal", true);
+		if (OidIsValid(namespace_oid) &&
+			OidIsValid(get_relname_relid("merkle_dynamic_state", namespace_oid)))
 		{
-			fallback_args[0] = args[0];
-			fallback_args[1] = args[4];
-			fallback_args[2] = args[5];
+			if (SPI_connect() != SPI_OK_CONNECT)
+				elog(ERROR, "could not connect to SPI for native Merkle profiling");
 			rc = SPI_execute_with_args(
 				"UPDATE ariabc_internal.merkle_dynamic_state "
-				"SET split_count=split_count+$2, merge_count=merge_count+$3, "
-				"updated_at=clock_timestamp() WHERE index_oid=$1",
-				3, fallback_types, fallback_args, NULL, false, 0);
+				"SET split_count=split_count+$5, merge_count=merge_count+$6, "
+				"updated_at=clock_timestamp() "
+				"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4",
+				6, types, args, NULL, false, 0);
+			/* A REINDEX/build race can leave the catalog generation tuple newer
+			 * than the relation opened for this apply.  Preserve the profile
+			 * rather than dropping it; the index OID is still an unambiguous
+			 * profile owner and the state table may contain one live generation. */
+			if (rc == SPI_OK_UPDATE && SPI_processed == 0)
+			{
+				fallback_args[0] = args[0];
+				fallback_args[1] = args[4];
+				fallback_args[2] = args[5];
+				rc = SPI_execute_with_args(
+					"UPDATE ariabc_internal.merkle_dynamic_state "
+					"SET split_count=split_count+$2, merge_count=merge_count+$3, "
+					"updated_at=clock_timestamp() WHERE index_oid=$1",
+					3, fallback_types, fallback_args, NULL, false, 0);
+			}
+			if (rc != SPI_OK_UPDATE || SPI_processed < 1)
+				ereport(DEBUG1,
+					(errmsg("native Merkle profiling state update skipped: no matching dynamic state row")));
+			SPI_finish();
 		}
-		if (rc != SPI_OK_UPDATE || SPI_processed < 1)
-			ereport(DEBUG1,
-				(errmsg("native Merkle profiling state update skipped: no matching dynamic state row")));
-		SPI_finish();
 	}
 	native_emit_nodes_report(indexRel, config.partitions, touched_partitions, touched_count);
 	pfree(touched_partitions);
@@ -4774,37 +4790,42 @@ merkle_native_tree_stats(PG_FUNCTION_ARGS)
 		args[2] = ObjectIdGetDatum(indexRel->rd_node.dbNode);
 		args[3] = ObjectIdGetDatum(indexRel->rd_node.relNode);
 
-		if (SPI_connect() == SPI_OK_CONNECT)
+		Oid namespace_oid = get_namespace_oid("ariabc_internal", true);
+		if (OidIsValid(namespace_oid) &&
+			OidIsValid(get_relname_relid("merkle_dynamic_state", namespace_oid)))
 		{
-			rc = SPI_execute_with_args(
-				"SELECT COALESCE(split_count,0), COALESCE(merge_count,0) "
-				"FROM ariabc_internal.merkle_dynamic_state "
-				"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4 "
-				"LIMIT 1",
-				4, types, args, nulls, true, 1);
-			if (rc == SPI_OK_SELECT && SPI_processed == 0)
+			if (SPI_connect() == SPI_OK_CONNECT)
 			{
 				rc = SPI_execute_with_args(
 					"SELECT COALESCE(split_count,0), COALESCE(merge_count,0) "
 					"FROM ariabc_internal.merkle_dynamic_state "
-					"WHERE index_oid=$1 "
+					"WHERE index_oid=$1 AND rnode_spc=$2 AND rnode_db=$3 AND rnode_rel=$4 "
 					"LIMIT 1",
-					1, types, args, nulls, true, 1);
-			}
-			if (rc == SPI_OK_SELECT && SPI_processed == 1)
-			{
-				bool isnull;
-				HeapTuple tup = SPI_tuptable->vals[0];
-				TupleDesc desc = SPI_tuptable->tupdesc;
+					4, types, args, nulls, true, 1);
+				if (rc == SPI_OK_SELECT && SPI_processed == 0)
+				{
+					rc = SPI_execute_with_args(
+						"SELECT COALESCE(split_count,0), COALESCE(merge_count,0) "
+						"FROM ariabc_internal.merkle_dynamic_state "
+						"WHERE index_oid=$1 "
+						"LIMIT 1",
+						1, types, args, nulls, true, 1);
+				}
+				if (rc == SPI_OK_SELECT && SPI_processed == 1)
+				{
+					bool isnull;
+					HeapTuple tup = SPI_tuptable->vals[0];
+					TupleDesc desc = SPI_tuptable->tupdesc;
 
-				split_count = (uint64) DatumGetInt64(
-					SPI_getbinval(tup, desc, 1, &isnull));
-				if (isnull) split_count = 0;
-				merge_count = (uint64) DatumGetInt64(
-					SPI_getbinval(tup, desc, 2, &isnull));
-				if (isnull) merge_count = 0;
+					split_count = (uint64) DatumGetInt64(
+						SPI_getbinval(tup, desc, 1, &isnull));
+					if (isnull) split_count = 0;
+					merge_count = (uint64) DatumGetInt64(
+						SPI_getbinval(tup, desc, 2, &isnull));
+					if (isnull) merge_count = 0;
+				}
+				SPI_finish();
 			}
-			SPI_finish();
 		}
 
 		json = psprintf("{\"authority\":\"native_index_pages\","

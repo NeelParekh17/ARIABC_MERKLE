@@ -28,7 +28,7 @@
 bool enable_merkle_index = true;
 bool merkle_index_maintenance_suppress = false;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
-bool merkle_update_detection = true;
+bool merkle_update_detection = false;
 /* GUC: Enable backend-local Merkle recovery profiling */
 bool merkle_recovery_profile_enabled = false;
 bool merkle_native_profile_enabled = true;
