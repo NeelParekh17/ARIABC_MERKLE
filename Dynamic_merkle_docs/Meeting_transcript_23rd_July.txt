@@ -1,0 +1,343 @@
+### Transcript
+
+---
+
+This is the simplest proof. first I told you we have to prove that even the physical structure is the same. Then I thought a bit more about it and we discussed last time that we don't actually care. Because the comparison is only on the logical structure. That is it. And that is where the consistency comes in.
+
+Yes.
+
+come much earlier
+
+where the we are assuming that the key is not updated.
+
+only the contents are updated.
+
+So the hash
+
+No, but the point is this. any update, whether it's the key or the any other field, it does result in a deletion from one place and an insertion somewhere else. So it's not just a key update. Any part of the tuple that is updated.
+
+No, but like mapping basically means same right.
+
+What do you mean?
+
+Like the hash is not a hash of the key, it's a hash of the tuple.
+
+Yeah. So any change to the tuple means the hash changes and the whole thing moves.
+
+No, the hash value stored in the node for that tuple is separate and what we have for indexing into the leaves is key hashes.
+
+No.
+
+It's not the key hash. It's a tuple hash. The you have the tuple hash and the key. The key is used to find the tuple. The index is actually an index on the tuple hash. And that tuple hash maps to the key. It's not an index on the key which maps to the tuple hash. You've got it ulta. We are comparing two replicas. The hash differs somewhere. Okay, that means the there is a tuple here which differs from a tuple there. Now, if you say this hash is on the key, then the tuple can be happily changed without changing the key, then how is the Merkle tree of any use?
+
+But hash will change, no?
+
+Why will it change? The key is the same. You are telling me the hash is on the key.
+
+How can the hash be on the key if it has to change?
+
+Earlier, the key hash, which is used to index into the tree
+
+Oh that...
+
+So okay. But the key hash is used to index into the tree.
+
+Okay.
+
+Got it. So...
+
+In the original Merkle tree also we have the same structure.
+
+Yes. Key hash.
+
+Yes. Just that the mapping was static there, now we make it dynamic.
+
+Okay. So the hash part is for the whole tuple.
+
+Yes.
+
+Okay. So...
+
+See the point is this, in the original Merkle tree, if you don't it is actually a hash on the whole thing. Each row is a hash. There's nothing about the key. So this is what I was referring to. Now, to when you find a difference, you needed to find which are the corresponding rows. So that is where we store the key with the over there. So where is that structure?
+
+First of all define what is the Merkle tree. Briefly. You have not done that. You have directly using a Merkle tree. You just referenced it right. We didn't have an example here. And the other part is that we have this other relation, right, which lets us know which tuples map to this key. That is not actually in the Merkle tree. That is a separate relation.
+
+Yes. Function index.
+
+Yes, where is that?
+
+Somewhere around, I am not seeing the section recently.
+
+Okay, do check it.
+
+Yeah, I think right side is it. Section is this, implementing using a functional index. Right column.
+
+So this is told somewhere. So this is implemented like this, but the point is conceptually we have something which maps something to something. And that is implemented by a function index.
+
+Yes.
+
+So you have to break that logically. If you jump straight into function index, then what is the logical thing will be sort of lost.
+
+Okay. So what we want is given a hash value, we want to find the corresponding tuple.
+
+So does the leaf have the hash value? No.
+
+Leaf has the hash for the tuple.
+
+Leaf where is this... because you have not defined the structure, where is the structure?
+
+Yes, we didn't have the structure before.
+
+Then you should have it, no? When you write a paper you should have a complete thing. I don't know how we missed this before. But it should be there.
+
+Sure. So what is the content of each leaf? Probably I am sure we had it somewhere. It cannot be that we never put it in.
+
+It's more than just the functional index.
+
+So since you don't have a description here, let us go to the textbook description. Because that's what you based it on.
+
+This whole thing as you can see is based on the whole tuple. There is no notion of a key here.
+
+Yes, that is the content.
+
+Yes.
+
+Yes, but the point is this, the key is actually something else. That is the extra thing to first of all we are tracking which all tuples actually map to this hash. For a fixed Merkle tree, which are the tuples whose hash value is 00. So that we do by storing it in a separate thing.
+
+That is actually not in the original Merkle tree. It is not there. I will just tell you there are differences. And this in the end tells you that this is the hash value where something is different. So implicitly you have to find all those with that hash value which is the index. So the index on that is separate from the Merkle data structure shown here. Merkle tree structure shown here is just this.
+
+Right?
+
+Yes.
+
+So that has also what you had here. It does not change. Here we are just storing the hash.
+
+And then there is a separate function which maps tuples to where they belong.
+
+So in our case we have a thing that okay this is actually one more level of complication which we had not discussed. Supposing we split. We are adding some more bits over there right for a leaf. So all the tuples that mapped to the leaf now have to have their hash mapping changed potentially immediately. So that's a lot of tuples. Because if there are 1000 tuples, there are 1000 updates to that index. Which is expensive, you generally want to avoid that.
+
+Yes.
+
+But split will have threshold will be there right.
+
+Whatever it is. You are moving so many nodes right. When you split a leaf and add a few more bits. So there are 1000 things which are on that leaf, now they are all getting extra bits. So if we set a threshold around 30...
+
+Whatever it is. Whatever it is, that many things have to be updated. And we want a larger threshold. So that means a lot of index updates.
+
+This is... But I think there is a solution to it. We could do this lazily also in the following sense. So if you want to find the tuples that map to a particular leaf...
+
+So there is okay. So we have to update it. Maybe we can do it in some way slightly lazily by keeping the old mapping, but the lookup will look at prefixes also. But that also has a cost. That means the lookup will now fetch a larger number of things. So there is a tradeoff. So we have to do that. Anyway the lookup was quite expensive. Now the split is more expensive.
+
+So we don't want extremely wide nodes. That is the other part. But the good thing is the set of things that map to a leaf is not that large. Internal nodes may have a very high fanout. But the number of things that map to a leaf will be small. So when a leaf is split the number of things that where the index has to be updated is small. So again there is no Merkle structure here does not have a key.
+
+So in the leaf also we should there is no...
+
+We are not actually storing the values there right? It's in the index.
+
+Which values... the hash values?
+
+So okay in the original thing the function index did that. Here instead of the function index we are actually putting it into the leaf itself perhaps. Maybe that is the difference.
+
+No functional index didn't have the hash value it just had which tuple is mapping to which leaf.
+
+Leaf is a hash value.
+
+Uh yeah subset of the hash value.
+
+Yes.
+
+Yes.
+
+Now you could have a functional index here also. But the other option is to so there we have a function index which maps the hash to the key. So the built-in Postgres made life easier.
+
+Yes.
+
+But the flip side is you have to update on that index also. Multiple rows to update.
+
+Yes.
+
+Here another way to do it is because we are storing the actual keys as a leaf, then the update is very local, there is no separate IO.
+
+We can do it in leaf only. That actually yeah.
+
+Yeah. There itself we are just splitting it right. So when you search for that earlier we took the leaf hash and found the tuples. Now we are fetching getting the what is the index for index to the record or whatever to the key. So physical or logical key. That's what the index part the function index effectively does. Here what we are saying is we don't need a separate function index. We will store the actual key values here. So then when we split we don't have to go update in multiple places, it will all be right here.
+
+Although even if you store it separately, if you come to think of it, it's all sorted. So it is there will all be clustered it's not like there is a lot of random IO. They are all basically the same prefix. So in the tree itself they will be adjacent to each other. And now they will get new keys which are also going to be adjacent in the ordering space. So even if we continue to use a function index it will be okay.
+
+Only we have to update all of this. So we are taking the supposing you split a leaf, that has a certain thing, we fetch all the tuples with that hash and reindex them with the longer one. So it's not a fixed function. The function depends on this thing. So it is actually not exactly a function index anymore. Earlier we could do a function index. Now we can't do a function index. We have to dynamic formula.
+
+So it's like an extra attribute. It's a computed column.
+
+I think it's easier to do it like this. Maybe store the key right here.
+
+It's easier to implement. There it was easy to implement because you just put a made it an index. Here it's how are you going to get the key and look it up? So again it depends on it's like one more level. It's a logical key. There is one more level of searching to find. It's not just a direct index.
+
+But like if there is bounded only then it's easy to... But like if it's limited like around 30-40 inside a leaf then it's fine right?
+
+Yeah, but if you want you can have a new relation. Table is for that.
+
+So this is a hash...
+
+We will have to logically add one more column to the relation itself. Which is the hash. The only then it will work. Then we just index on that column. And we update, for all the tuples there we update the hash. Then we don't have to store in the leaf. When the Merkle tree splits logically, but at the leaf node we don't actually store the...
+
+keys.
+
+Yeah, that will may make the implementation easier. It's closer to the current implementation.
+
+We have to think about this.
+
+I didn't get that point.
+
+See, we have the current implementation where we are using a function index. Because the number of bits is fixed. So in the leaf you are not actually storing the tuples. It's just the hash. That's the original Merkle tree design also. Yes. And the assumption was we can find the actual tuples using the hash. For a fixed Merkle tree, there is no issue on that. That's what we implemented. Straightforward right. Now the issue is because the hash itself changes how do you find the tuple right. So one way is we add an extra field to every tuple which stores the hash value. And that hash value can change when you add more bits. Because it no longer maps to the old leaf it's now a split logically split leaf. So we just update the hash value by adding more bits and the function is recomputed on it.
+
+Right?
+
+Yet another way is to do it as a range query. So we index on the full hash. But it's a B-tree index. Then we issue a prefix which is a range query on that index. So if we logically split, we don't even have to touch the tuples. There is no update to the tuples. It's just that we are adding one more level to the thing and when we search we have a few more bits. So we just do a range search on it.
+
+I didn't get the range search one.
+
+See, we were looking at a prefix of 8, let us say. That has become 16. Yes. So in the Merkle tree initially, the leaf had only 8 bits. So we are going to look for all tuples whose hash value is prefixed by that 8 bits. Yes. That is a range query on a B-tree ordered index which is done on the whole hash, not on the prefix. The index is not built on the prefix hash. It's built on the full hash. Okay. Let's say we use however many bits for that hash. Same function index but the function index is built with that many bits. Whatever is the maximum depth. Okay, let's say the maximum depth is 64 bits. So the thing is built on 64 bits. Okay.
+
+Now when we want to find the keys that hash to a node initially that leaf node has some key right? So let's say its bit prefix was 8 bit. So we will do a range query which starts from 8 bits all zeros to 8 bits all ones. That is the range. And that can be done efficiently because this is an ordered index. They're all going to be consecutive.
+
+When we split, we don't touch that index at all. We simply take 16 bits or whatever number of bits and do a range query with that.
+
+Okay. So then there is the structure is still the original Merkle structure. We don't store anything in the leaf, there's no key, nothing. That's a separate index. Which is a fixed index.
+
+Got it?
+
+But if you get splitting then how is it fixed index it has to Because the index is on the full hash all bits of the hash. But it's an ordered index. So for a prefix, a prefix lookup is a range query on that index.
+
+Sure, but when it maps to a new node, when it hits a new child node we need to update that index.
+
+No, we don't. Because the index is on the full hash. The new child node, see the original child node looked at 8 bit prefix. The new one looks uses 16 let us say or 12 whatever. There's a new ID for the new node. Now when we want to retrieve the tuples for this node, it is just a different range query on the same index.
+
+So how do we know which range query to do?
+
+Because we know the number of bits. The leaf in the Merkle tree is used to be 8 bits, now it is 12 or 16 bits.
+
+Right? So if we use the original Merkle tree 8 bits, the tuples that map to it, you find by saying what all tuples have this as the prefix. The prefix query is the same as a range query where you pad the bottom of the range with remaining bits as zero, end of the range is remaining bits are one. That is easy to support and it's efficient because these are in the index they are consecutive. So finding it is very cheap in index. When you split a leaf, instead of 8 bits, now it is 12 or 16 bits. Conceptually the leaf is split but the index is not touched. Because we now will do a prefix search with instead of 8 bits with 12 bits or 16 bits.
+
+And how do we know if it is split or not?
+
+That is the tree structure. That Merkle tree, part of it which are the children all that we have to keep. We are not getting away from that. Merkle tree structure is still required, the dynamic Merkle tree. It is just that we don't have to store the actual keys in the index. We just need to know how many things map to this.
+
+Okay.
+
+So let's say we had a leaf and it had 1000 whatever 1000 is too large. Say 128 things which is more than 125 whatever. So we are creating more children by adding more bits. So now when we do the diff, the point is one tuple has changed in the Merkle tree we are going one more level down and since the tuples have got split up across these nodes, the hash value for most of them will still match, only one of those is different. Now we use extra bits, we fetch a smaller number of tuples. Than we would have with the fixed tree.
+
+Makes sense?
+
+I need to think about it.
+
+Child prefix got changed, but parent prefix remains same. It's now an internal node. What was the leaf node is now an internal node. So our full tree we had before. Only the Merkle tree has dynamically changed. So in the tree we have different some nodes become a leaf becomes a non-leaf by adding more children. But that child only stores the hash value.
+
+Is it clear?
+
+What does this store? Individual hash value?
+
+This is this is its prefix and it stores the hash, full hash.
+
+Individual hashes.
+
+No, no, we don't know it stores H3 of H2 H2 H2.
+
+So combined hash. Only the combined hash.
+
+But then we said that right, if we want to split, then we have to again fetch all the tuples compute the new hashes so that we get individual hashes of the child.
+
+Yes. We cannot store completely.
+
+Yes, but here is the deal. That index has the hash. We don't have to go to the leaves. To the actual tuples. That index which we just described, the function index. We can scan the function index to find the keys. Keys are the function values. So they are going to be consecutive in the index so it will be actually leaves of a B+ tree.
+
+Right? Yes. So we don't have to again store it here. So the problem was if we go to the tuple to get the hash, tuples can be all over the place, random IO will be massive. But now we are only looking at the hash straight from there. So we are not even storing the hash twice, we are storing the hash only once in the tree, in the function index. Okay. And I like this, this is simplifying our life, it simplifies your work also. The amount of code change required will be much smaller than before. Because the function index is already there, we are reusing it. We don't have to store the tuple hashes here, because this would have been a lot of work to implement this structure.
+
+So it's actually a small change to the original thing. With this extra idea that the function index can be reused with a prefix.
+
+Hmm.
+
+Did you get the concept?
+
+Yeah, I got the concept.
+
+I think you should write it down. Leave this thing as is. Add one more section here explaining this idea as a first draft, we will refine it and do it. But put down the thoughts here, it will help you also to understand it, and then we will meet again and discuss it.
+
+Makes sense?
+
+Yeah, sure.
+
+Good. I think this has been a productive, last few meetings we've had, have been quite productive in the sense we got the dynamic tree and we've improved upon it, hopefully there's no glitch in this.
+
+Sure.
+
+So whatever the number of tuples, whatever that many, say 64 128 whatever, that many index lookups won't be that expensive. That is the thing. They are all consecutive elements in the index. It's cheap. As long as the B+ tree lets us find the hash. Find the keys. Yes. So without finding the tuples. So this is something we have to check. Can a function index let us scan and find the keys? Because a function index conceptually, you're adding one more attribute to a tuple which is the hash. And you build an index on that. And now the prefix query, which only wants the hash values in that range, which we now have to collect and regroup to find the new hash. Can be done by an index-only scan, without touching the tuples.
+
+Hmm.
+
+Because if we touch the tuple the whole point is gone. We are just bringing in too much IO.
+
+Yes, so we must be able to do an index-only scan. Which means the function index might not be the best thing. We might just have to use a generated column. Or an actual column that we maintain. If postgres index-only scans work on functional indexes then it's fine. We have to check. If not we use a generated column and index on that.
+
+So this is a base problem. Generated column. This is better. Then this will work, because this is on the user table. So this is on the yeah user table. So the point is this, right? So if we want to find all the hash values whose prefix is that 8 bit we fetch all of them and now take their 12 bit thing and get separate hashes for all of those.
+
+Right?
+
+That gives 16 children whatever number is 64 whatever it is.
+
+But we have to fetch those which are all actually in the index because it's a index column.
+
+So it's an index only scan. So if we have that generated column and we access that column hash tuple hash generated as and then that hash function we have a UDF which you have right already I think.
+
+So then what we will do is the split actually runs a small query to fetch those which is efficient because it's finding them as consecutive things in the B+ tree index. Could be across two leaves but they're consecutive. So IOs are minimal.
+
+And then we fetch those full hashes and recompute the new leaf hashes.
+
+So this is almost what you have currently you have a function index there's no need to recompute it because the function never changes now the function effectively changes but what we are doing is we are not changing the function we are changing the hash in the leaves.
+
+So now the leaf does not actually store anything. So the structure is actually simplified further.
+
+So the leaf is just a hash. All you need to do is store the full hash value for the leaf.
+
+So actually now
+
+even internal node also
+
+No, no, actually even internal node
+
+but we don't even need the pointers.
+
+Come to think of it
+
+all what this thing is a map from a prefix to a hash value. That is what the Merkle tree is. And that's what your implementation also has, right?
+
+Merkle tree is simply a relation which maps some prefix to a hash value, right? Do you store anything else?
+
+No.
+
+So now what we will do is if we have an 8-bit prefix we delete that 8-bit prefix and add a bunch of 16-bit prefixes with the recomputed hash value. So the Merkle tree is simply this.
+
+No, but we will need to have the 8-bit parent node right to know which child to go to.
+
+No, we just need to record that this is not a leaf. We can have the 8-bit node also.
+
+So we're coming in with a comparison. So we will say okay now this is not a leaf.
+
+Therefore you take more bits and compare.
+
+Oh okay.
+
+No then you don't need to even well you need the hash at the we just need to know this is not a leaf. Yeah. Earlier we knew because of a certain length it is a leaf. We knew that is a terminating condition.
+
+Now the relation which stores this simply needs to store one of two things. Either so already it stores a bit value and a hash. This is okay for currently for all nodes. Only difference now is it has one more field saying is this a leaf or not. Yes. Otherwise its structure is the same.
+
+So and it stores a count. Two changes. Is leaf count.
+
+That's okay when we are inserting deleting updating. But when we are comparing across replicas then we need to compare the hashes. We have to compare the hashes. But so the point is So we need to find out which child is actually different. Ah so what we will do is when we find a node has changed we are going to send all the child hashes to the other side to see which child hashes have changed. But what if the child is also an internal node? It has a point to hashes. But then it's not a level-wise comparison. We start at the root, see if the root is the same. If so we are done. If the root is different then one node will send to the other node all its child hashes. And compare the child hashes. But root is also an internal node. So if you are not keeping the hash for the internal node We are storing the hash. Okay, we are adding the is_leaf and this thing that's it. Okay. Tuple count. Right now whether it's a internal node or leaf doesn't matter we are storing a hash. Okay. Every node we are always storing is the key which is that prefix and the hash. Okay. That does not change. Okay. We are now adding to it is_leaf and number of children. Okay. That is leaf we already have. We just need to have number of children. Do we have it? I think we have. Yes, we had it. Because this is a fixed structure there was no need for that. If you look at the number of bits you know it's a leaf or not. We had it. So now only number of children. So very minimal changes to the existing implementation. And tuple count. Yeah, that's sorry tuple count is what I mean not number of children tuple count.
+
+So the only advantage that this scheme gives over the what we have right now is in terms of storage, right? Much simpler. Ah yes. Started with something without keeping in mind the current implementation, we started afresh. But now we have kind of best of both worlds. It's a very simple implementation, very small change to the current implementation. And it gives the benefit of dynamic. All the benefits you've listed continue to hold, but the structure is much simpler. We don't have to have that array all that is wrong. It's way simpler than what we've been discussing, all those diagrams you created, all of those were if you built a structure from scratch.
+
+But by leveraging this index on the hash our life is much simpler. We had not thought of it that way, but now it is much, much simpler.
+
+But even then this has one hit that the index in the hash will update two leaf nodes instead of one.
+
+So so if the tuple changes even in the old Merkle tree that is the same it's hash value changes so it is deleted from one and inserted into another. And as far as the index is concerned it's a update on the key. So obviously that tuple moves somewhere else. Yes. But if the in the previous case if the update was not on the key at the the key attribute, then only the hash changed and it would change only one leaf node. No. Because it would never that is not on this naturally I agree with this multiple tree but if the thing changes something has to move here it cannot be on the key. I will not find the difference. No you can still find the difference. No but the tuple is different. Okay. So okay you're proposing a dif- that is a different structure which is based on the key. Yes. But it's a different structure. Yes. But now we are back to the simpler structure. Yes. The structure is simpler but for updates I'll have a two leaf update here and there it will be one leaf update. I'm also... Well I'll have to think I'm not confident about what you're saying because the point is if the yeah I think you're right. You're right. There is a tradeoff. But this is a simpler implementation. This is on the original Merkle space. So better to stick to this. And then we will say that look this is another alternative but then we need to introduce a notion of a key and the fact that key doesn't get updated. That is a further variant of it. Maybe we should not get into it. Are you convinced? Okay, so because some things in the so what we can do as a first step is change the current implementation itself to go with this scheme. You understood right? Because right now whatever we have is a modifier I think that will go away and now you will do the based on the direct index on the hash itself. So you can do that on the existing one before you go to the dynamic part. So take things one step at a time. That is better.

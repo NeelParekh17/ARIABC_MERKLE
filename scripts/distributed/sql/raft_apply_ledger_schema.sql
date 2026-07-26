@@ -91,6 +91,43 @@ RETURNS TABLE(partition_id integer, visible_apply_seq bigint,
 AS 'merkle_native_partition_roots_at'
 LANGUAGE internal VOLATILE PARALLEL UNSAFE;
 
+-- Helper function to retrieve all keys belonging to a leaf given its leaf hash (data_xor hex)
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_get_keys_by_leaf_hash(
+    p_index regclass,
+    p_hash_hex text
+)
+RETURNS TABLE (
+    partition_id int,
+    prefix_len int,
+    prefix_hex text,
+    key_text text,
+    route_digest_hex text,
+    tuple_hash_hex text,
+    leaf_data_xor_hex text
+) AS $$
+SELECT r.partition_id,
+       r.prefix_len::int,
+       encode(r.prefix, 'hex') AS prefix_hex,
+       items.key_text,
+       encode(items.route_digest, 'hex') AS route_digest_hex,
+       encode(items.tuple_hash, 'hex') AS tuple_hash_hex,
+       encode(r.data_xor, 'hex') AS leaf_data_xor_hex
+  FROM merkle_dynamic_get_leaf_frontier(p_index) r
+  CROSS JOIN LATERAL merkle_dynamic_get_range_items(
+         p_index,
+         jsonb_build_array(
+           jsonb_build_object(
+             'partition_id', r.partition_id,
+             'prefix_length', r.prefix_len,
+             'prefix_value', encode(r.prefix, 'hex')
+           )
+         )
+       ) items
+ WHERE encode(r.data_xor, 'hex') = lower(p_hash_hex)
+ ORDER BY items.key_text;
+$$ LANGUAGE sql STABLE PARALLEL SAFE;
+
+
 -- Global ordering for crash-safe Merkle delta application.  Raft positions
 -- are epoch-scoped; this counter supplies a database-wide, non-repeating
 -- sequence.  Raft manifests reserve a range once per multi-item entry.
