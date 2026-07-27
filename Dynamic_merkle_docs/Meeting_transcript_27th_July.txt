@@ -1,0 +1,119 @@
+Here is the fully punctuated and clarified transcription of the dialogue, followed by a deep-dive technical breakdown of the database concepts using concrete numerical examples.
+
+### **Cleaned Transcription**
+
+**Speaker A:** So, the function index will not be on a small hash thing, it will be on the full hash. That is, in the Merkle tree, we are not using all the bits—we are using partial bits and extending it, right? We were only going to, let's say, 10 bits (or whatever number of bits), and that was the index. But now, because we want to dynamically grow the Merkle tree, the index will be on the full hash.
+
+**Speaker B:** Okay. Not on the prefix up to whatever bits?
+
+**Speaker A:** Yeah, we don't need a 256-bit hash. A 64-bit hash will be more than enough; there won't be too many clashes there. So, let's say we have a 64-bit hash. The tuple is indexed on its hash. Now, if you take the current Merkle tree, it is not considering the full hash—it is taking a prefix. Let's say out of the 64 bits, it is taking a prefix of 10 bits (let's say 1,000). So now, a particular node in the Merkle tree corresponds to all the tuples whose prefix is those 10 bits. And that is simply a range query on that index.
+
+**Speaker B:** Okay... How will you execute this range query?
+
+**Speaker A:** First, the prefix should match. A prefix query is trivially turned into a range query by saying: take that prefix (the 10 bits), add `000...0` to form the left end of the range, and then add `111...1` to form the right end of the range. So, all tuples that lie in between the left and right end... that is the standard way of handling prefix queries. Prefix queries are easily turned into range queries.
+
+So, that is point number one: we can find these tuples by looking at this index. Point number two, which we had discussed in the structure, is that we have to go to the tuple to find the hash, and it's going to be very expensive. But the good news is, now the index has the full hash. So, we can just get that hash. Furthermore, supposing this hash is an attribute of the relation—don't worry about the function index, let's treat it as an attribute of the relation, and we are indexing on that attribute. Then we can answer this using *only* the index, without going to the actual data. This is called an "index-only scan." This is very efficient because these values are contiguous, so you won't fetch unnecessary pages. Whereas, if you have to fetch the tuple, there's a lot of I/O, and it will be much slower.
+
+**Speaker B:** Right, from the index we are getting the attribute value. But if all the tuples are inside a leaf of that corresponding Merkle tree, then there will be only one I/O. We have to fetch only the particular...
+
+**Speaker A:** No, no, who said they are? The tuples are stored somehow; we don't have control over that. The implementation that is in the paper—that tuples and the hash are stored in the node—I'm saying now we don't need to do that. That is the change. We discussed a particular plan in the paper, but thinking it further, we have now got a simplified plan where we don't implement that. Instead, we take a B+ tree. We have this hash as an attribute. We can get the hashes via the same range query on the B+ tree. All the hash values that map to a node, we get from there.
+
+If you split the node, it is going to create two ranges. So we scan the same set of things and compute the hash for this, and the hash for that. The good thing is they are contiguous—the same property we would have got if we had stored the hash in the leaf node. But now we don't have to, because the index takes care of it.
+
+**Speaker B:** Okay, yeah.
+
+**Speaker A:** And the other good thing is we don't have to implement all of this. The index is already there (the B+ tree), everything is built-in. Furthermore, because we are leveraging on top of the index, we get snapshots for free. Otherwise, the index has to deal with snapshots. But now we are storing data and using an index on it, Postgres already provides a snapshot, so everything works very smoothly.
+
+The current implementation also has that property because we are storing it as tuples. If we had gone to a proper B+ tree implementation, then we would have had to worry about how to get snapshots on it. That's another problem which we had not discussed. The idea was that this node would become a tuple. That was the solution we had. But now it is even simpler because we don't need a separate node. We just need this B+ tree index, and on that, we run this query within a snapshot: *Find all tuples whose prefix is equal to this. Use the index and find it efficiently.* We're not fetching the actual tuples, just the hash values of the tuples.
+
+**Speaker B:** Okay, yes. So based on the hash value, you can find the keys?
+
+**Speaker A:** We don't need to get the keys. We just need the hash values. Now, there is one more issue. Ananth wanted to have the key as well—the tuple's key—to compute the hash. You can do that also, because that doesn't change. But we have to store two parts: the hash of the key, and the hash of the tuple. Both have to be in the index. And we can still do that because we can create a composite index easily. So if you want to do that, we can still do it. I think it's worth implementing both versions and seeing the benefit. There could definitely be a benefit from having the Merkle tree hash on the key, so that the tuple doesn't move—otherwise, you have to remove it from one part of the Merkle tree and add it to another on every update. I don't know how common updates are, but an update will turn into two Merkle trees getting updated, whereas with the key it is only one.
+
+**Speaker B:** For our benchmarks (YCSB and so on), how many updates are there? I'm not sure.
+
+**Speaker A:** Our current implementation is exactly that. The index has a key hash, and the tuple hash is separately stored. We could still do that, but it has to be within the same index. This is a covering index on the hash. The hash itself can be treated as a "generated column" in Postgres, which is defined as a function of the tuple.
+
+**Speaker B:** Okay, so we were discussing the generated column and...
+
+**Speaker A:** Yeah, so a generated column will actually compute it. Whenever it's updated, it will recompute it. So that is a good thing. But it also modifies the tuple structure. What I am saying is, you can manually create it, but eventually, we have to be able to declare a relation as part of this. Then automatically, all this has to be done to that relation. You have to add the generated columns, you have to build the indices on it so that we can use it, and Merkle updates also have to happen.
+
+**Speaker B:** Fine. I will revert back to that static implementation, and from there I will do this. But then, how about the recovery method? Are we changing it, or is it...
+
+**Speaker A:** Which recovery are you talking about? If there's corruption?
+
+**Speaker B:** Yes, yes, yes.
+
+**Speaker A:** That will not change. So, now the Merkle tree structure is very simple. It's really a bunch of tuples in the relation, nothing more. If you take a node and its children, what do they store? You have a node ID and a hash value. Now, the children of a node, their node IDs will be consecutive. So again, what you should do is have an index on that also, and you include the hash in the index as a covering attribute.
+
+**Speaker B:** Okay.
+
+**Speaker A:** The point is we can retrieve it easily and update it. Let me rephrase that. What we have is, for every node ID, there is a hash value. That is already there as a relation.
+
+**Speaker B:** Yes, yes.
+
+**Speaker A:** When we want to traverse the tree, you compute, recompute the hash, then update. Now, when you want to traverse downwards for recovery, we have to find all the children.
+
+**Speaker B:** Yes, yes.
+
+**Speaker A:** Which could be a larger number. And we have to find their hash values.
+
+**Speaker B:** Yes.
+
+**Speaker A:** So if these tuples are scattered all over, finding the hash values will be potentially expensive. It may be better to add the hash value to the index for the non-leaf nodes as well. Leaf nodes anyway we wanted to have it; the same thing we do for internal nodes. And a node can change from a non-leaf to a leaf...
+
+**Speaker B:** Yes.
+
+**Speaker A:** The point is all its current children will have consecutive hash values. So from that index, we can easily fetch them and recompute the hashes for the children. And now we don't have to worry so much about under-full nodes and all that. Each child is a tuple which we were anyway storing. Now it is simply storing that hash value in the same relation. If a node is no longer a leaf, it will go out of the leaf relation and go into the main relation. Maybe both can be stored together also, we will think about that. Let's assume for now they are stored separately. So this ID will be deleted from here, added there, and the children IDs (multiple of them) will all get added as new tuples here.
+
+**Speaker B:** Makes sense. Yes. And then we will look into the function index to find keys...
+
+**Speaker A:** Another thing we can do—there is a tradeoff between the width of the node (which will cost recomputing hashes) versus what we want during recovery. There is a good trick we can use. Let's say this tree has a relatively small width. Say, 4. So if you split a node, it goes into 4 parts.
+
+**Speaker B:** Yes.
+
+**Speaker A:** But we don't want to go in steps of 4 when we are doing recovery because then there are too many network round trips. So what we can do is, let's say we found a node that does not match. We have to send the children, and there are only 4 children.
+
+**Speaker B:** Yes.
+
+**Speaker A:** What we can do is send all the descendants which are either internal or leaf, which are below this mismatch. The tree might have grown even further down. We can precompute all the things at, let's say, depth 2 or 3. Let's say there are 4 children. Depth 2 will be 16, depth 3 will be 64... we will find everything which is up to 3 or 4 levels below and send all those nodes to the other side for comparison.
+
+**Speaker B:** Okay, fine.
+
+**Speaker A:** When you do this, you may find some of these are leaf nodes, some are internal nodes. On one path, the leaf didn't grow; on another path, it became an internal node. So depth 4 on one path may have stopped at depth 2, while another path went down to all 4 levels. Essentially every node—leaf or non-leaf—up to a certain depth from the current node will be sent to the other side.
+
+**Speaker B:** Won't that be a huge network overhead?
+
+**Speaker A:** That is a tradeoff we have to do: round trip latency versus the bandwidth of the network.
+
+*(A third person enters)*
+
+**Speaker A:** Yeah, come in. We were just discussing how to implement what we discussed last time.
+
+**Speaker C:** Sure.
+
+**Speaker A:** So, I hope you got the idea from last time. Have you written it up?
+
+**Speaker C:** No, I haven't. I have some idea, yes.
+
+**Speaker A:** Okay, please do it. Until you write it up, I don't know whether we are talking about the same thing. Do it and we'll meet tomorrow. But there is more for today...
+
+**Speaker A:** *(Returning to Speaker B)* So, with the simplified structure, when we split a node, we are going to insert hashes for all its children into the leaves table. The leaf table has an ID and a full hash. If you have 1,000 children, that's a lot of tuples being inserted on the split, which is too much work. So you don't want 1,000 children. We want a smaller number, like 2 or 4. Then, when we split, we just have to recompute hashes and create 4 new tuples instead of 64 or 1,000. Obviously, the work is much less. In this sense, it's better to have a smaller base split, like a 4-way split. But the tradeoff is when you do recovery, there will be more round trips because you are just looking at 4 children at a time.
+
+**Speaker A:** The solution to that problem is, for recovery, when you find a mismatch at a node, you don't just send the 4 children. You fetch 2 or 3 levels down—all the descendants up to depth 3. At a 4-way split, that is up to 64 nodes. This is just a query on the leaf relation and the internal node relation. Maybe we can merge the leaf and internal relations because they are now exactly the same, probably just one relation with a tag.
+
+**Speaker A:** So now, what we are transferring over the network is multiple levels. The cost of transmission (bandwidth) is slightly more, but the number of round trips is much less.
+
+**Speaker B:** What we can do is, if a mismatch is over at this level, we can just send all the immediate children below that level at one time only.
+
+**Speaker A:** Sending only the immediate children is what we were doing anyway!
+
+**Speaker B:** But not below the children?
+
+**Speaker A:** No, if you only send the 4 immediate children, your network round trips go up. That is the whole point I am making. From the viewpoint of splitting a node in the database, splitting into 4 is better because it's less disk I/O. But from the viewpoint of searching for a mismatch over a network, why confine ourselves to only the immediate children? We can go 2 or 3 levels down. So the round trips come down, and it will work even with the unbalanced Merkle structure.
+
+**Speaker B:** Yes, I think we can do A/B testing and see which is better.
+
+**Speaker A:** Right. One level of children is kind of the simplest thing which we are already doing; we can extend it to 2 or 3 depth and do it for the performance evaluation section. Good systems papers have these small ideas fitting well together. I am quite hopeful for this paper because more depth is there now. Do you understand it well enough to start implementing it?
+
+**Speaker B:** Yes.
