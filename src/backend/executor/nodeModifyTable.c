@@ -189,7 +189,7 @@ static TupleConversionMap *tupconv_map_for_subplan(ModifyTableState *node,
 typedef struct MerkleDeleteDelta
 {
 	Oid			indexOid;
-	int			partitionId;
+	uint8		key_hash[8];
 	MerkleHash	hash;
 } MerkleDeleteDelta;
 
@@ -285,7 +285,18 @@ CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)
 							 indexInfo->ii_NumIndexKeyAttrs, &route);
 
 			plan.items[plan.count].indexOid = indexOid;
-			plan.items[plan.count].partitionId = route.leaf_id;
+			if (merkle_is_dynamic_index(indexRel))
+			{
+				memcpy(plan.items[plan.count].key_hash, route.route_digest, 8);
+			}
+			else
+			{
+				memset(plan.items[plan.count].key_hash, 0, 8);
+				plan.items[plan.count].key_hash[0] = (uint8) (route.leaf_id & 0xFF);
+				plan.items[plan.count].key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
+				plan.items[plan.count].key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
+				plan.items[plan.count].key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
+			}
 			plan.items[plan.count].hash = hash;
 			plan.count++;
 		}
@@ -310,10 +321,11 @@ ApplyMerkleDeletePlan(MerkleDeletePlan *plan)
 	{
 		Relation indexRel = index_open(plan->items[i].indexOid, RowExclusiveLock);
 		if (indexRel->rd_rel->relam == MERKLE_AM_OID)
-			merkle_update_tree_path(indexRel,
-							plan->items[i].partitionId,
-							&plan->items[i].hash,
-							false);
+			merkle_stage_delta_event(indexRel,
+									 MERKLE_DELTA_DELETE,
+									 plan->items[i].key_hash,
+									 NULL,
+									 &plan->items[i].hash);
 		index_close(indexRel, RowExclusiveLock);
 	}
 }
@@ -427,8 +439,19 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
 						merkle_compute_route(indexRel, keyValues, keyNulls,
 											 nkeys, &route);
                         
-                        /* XOR the hash OUT of the tree (same as XOR in, since XOR is its own inverse) */
-						merkle_update_tree_path(indexRel, route.leaf_id, &hash, false);
+						if (merkle_is_dynamic_index(indexRel))
+						{
+							merkle_stage_delta_event(indexRel, MERKLE_DELTA_DELETE, route.route_digest, NULL, &hash);
+						}
+						else
+						{
+							uint8 dummy_key_hash[8] = {0};
+							dummy_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
+							dummy_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
+							dummy_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
+							dummy_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
+							merkle_stage_delta_event(indexRel, MERKLE_DELTA_DELETE, dummy_key_hash, NULL, &hash);
+						}
                     }
                 }
                 PG_CATCH();
@@ -512,7 +535,19 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
             FormIndexDatum(indexInfo, slot, NULL, values, isnull);
 			merkle_compute_route(indexRel, values, isnull,
 							 indexInfo->ii_NumIndexKeyAttrs, &route);
-			merkle_update_tree_path(indexRel, route.leaf_id, &hash, true);
+			if (merkle_is_dynamic_index(indexRel))
+			{
+				merkle_stage_delta_event(indexRel, MERKLE_DELTA_INSERT, NULL, route.route_digest, &hash);
+			}
+			else
+			{
+				uint8 dummy_key_hash[8] = {0};
+				dummy_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
+				dummy_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
+				dummy_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
+				dummy_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
+				merkle_stage_delta_event(indexRel, MERKLE_DELTA_INSERT, NULL, dummy_key_hash, &hash);
+			}
         }
 
         index_close(indexRel, RowExclusiveLock);
@@ -1157,6 +1192,7 @@ ExecDelete(ModifyTableState *mtstate,
 	TupleTableSlot *slot = NULL;
 	TransitionCaptureState *ar_delete_trig_tcs;
 	bool		defer_bcdb_dml;
+	MerkleDeletePlan merkleDeletePlan;
 
 	if (tupleDeleted)
 		*tupleDeleted = false;
@@ -1303,7 +1339,7 @@ ldelete:;
 		 * We need to do this before the tuple is gone so we can
 		 * read the row data to compute the hash to XOR out.
 		 */
-		MerkleDeletePlan merkleDeletePlan = CaptureMerkleDeletePlan(resultRelationDesc, tupleid);
+		merkleDeletePlan = CaptureMerkleDeletePlan(resultRelationDesc, tupleid);
 	
 		result = table_tuple_delete(resultRelationDesc, tupleid,
 								estate->es_output_cid,

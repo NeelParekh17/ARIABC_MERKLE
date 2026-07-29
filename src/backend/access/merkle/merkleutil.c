@@ -25,6 +25,9 @@
 #include "utils/lsyscache.h"
 #include "utils/snapmgr.h"
 #include "utils/snapshot.h"
+#include "utils/typcache.h"
+#include "parser/parse_coerce.h"
+#include "funcapi.h"
 #include "access/xact.h"
 #include "portability/instr_time.h"
 
@@ -203,11 +206,10 @@ merkle_hash_uint32(blake3_hasher *hasher, uint32 value)
  * Type send functions produce PostgreSQL's canonical wire representation and
  * therefore do not depend on TimeZone, DateStyle, locale, or output GUCs.
  */
-static void
-merkle_hash_slot_canonical(Relation heapRel, TupleTableSlot *slot,
-						   MerkleHash *result)
+void
+merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *slot,
+								MerkleHash *result)
 {
-	TupleDesc		tupdesc = RelationGetDescr(heapRel);
 	blake3_hasher	hasher;
 	int				i;
 	uint32			live_attributes = 0;
@@ -265,6 +267,14 @@ merkle_hash_slot_canonical(Relation heapRel, TupleTableSlot *slot,
 	}
 
 	blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+}
+
+static void
+merkle_hash_slot_canonical(Relation heapRel, TupleTableSlot *slot,
+						   MerkleHash *result)
+{
+	TupleDesc tupdesc = RelationGetDescr(heapRel);
+	merkle_hash_slot_canonical_desc(tupdesc, slot, result);
 }
 
 /*
@@ -887,6 +897,105 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
         MarkBufferDirty(treebuf);
         UnlockReleaseBuffer(treebuf);
     }
+}
+
+PG_FUNCTION_INFO_V1(merkle_key_hash_sql);
+
+Datum
+merkle_key_hash_sql(PG_FUNCTION_ARGS)
+{
+	Datum		val;
+	Oid			argtype;
+	uint8		digest[MERKLE_HASH_BYTES];
+	bytea	   *result;
+	TupleDesc   tupdesc;
+	bool        isnull;
+
+	if (PG_ARGISNULL(0))
+	{
+		isnull = true;
+		val = (Datum) 0;
+	}
+	else
+	{
+		isnull = false;
+		val = PG_GETARG_DATUM(0);
+	}
+
+	argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	if (!OidIsValid(argtype))
+		argtype = INT8OID;
+
+	tupdesc = CreateTemplateTupleDesc(1);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "key", argtype, -1, 0);
+
+	merkle_compute_canonical_route_digest(&val, &isnull, 1, tupdesc, digest);
+	FreeTupleDesc(tupdesc);
+
+	result = (bytea *) palloc(VARHDRSZ + 8);
+	SET_VARSIZE(result, VARHDRSZ + 8);
+	memcpy(VARDATA(result), digest, 8);
+
+	PG_RETURN_BYTEA_P(result);
+}
+
+PG_FUNCTION_INFO_V1(merkle_tuple_hash_sql);
+
+Datum
+merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
+{
+	HeapTupleHeader tuple_header;
+	Oid			tup_type;
+	int32		tup_typmod;
+	TupleDesc	tupdesc;
+	HeapTupleData tuple;
+	TupleTableSlot *slot;
+	MerkleHash	hash;
+	bytea	   *result;
+
+	if (PG_ARGISNULL(0))
+	{
+		result = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
+		SET_VARSIZE(result, VARHDRSZ + MERKLE_HASH_BYTES);
+		memset(VARDATA(result), 0, MERKLE_HASH_BYTES);
+		PG_RETURN_BYTEA_P(result);
+	}
+
+	tuple_header = PG_GETARG_HEAPTUPLEHEADER(0);
+	tup_type = HeapTupleHeaderGetTypeId(tuple_header);
+	tup_typmod = HeapTupleHeaderGetTypMod(tuple_header);
+	tupdesc = lookup_rowtype_tupdesc(tup_type, tup_typmod);
+
+	memset(&tuple, 0, sizeof(tuple));
+	tuple.t_len = HeapTupleHeaderGetDatumLength(tuple_header);
+	ItemPointerSetInvalid(&(tuple.t_self));
+	tuple.t_tableOid = InvalidOid;
+	tuple.t_data = tuple_header;
+
+	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsHeapTuple);
+	ExecStoreHeapTuple(&tuple, slot, false);
+
+	merkle_hash_slot_canonical_desc(tupdesc, slot, &hash);
+
+	ExecDropSingleTupleTableSlot(slot);
+	ReleaseTupleDesc(tupdesc);
+
+	result = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
+	SET_VARSIZE(result, VARHDRSZ + MERKLE_HASH_BYTES);
+	memcpy(VARDATA(result), hash.data, MERKLE_HASH_BYTES);
+
+	PG_RETURN_BYTEA_P(result);
+}
+
+/*
+ * merkle_is_dynamic_index() - Return true if index uses dynamic recursive partitioning
+ */
+bool
+merkle_is_dynamic_index(Relation indexRel)
+{
+	int numTreePages = 0;
+	merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, NULL, NULL, &numTreePages, NULL);
+	return numTreePages == 0;
 }
 
 /* End of file */

@@ -1757,11 +1757,11 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
     bool hasNewHash = false;
     int pendingCount = 0;
     int pendingCapacity = 0;
-    typedef struct PendingMerkleUpdate
-    {
-        Oid indexOid;
-        int oldLeafId;
-    } PendingMerkleUpdate;
+	typedef struct PendingMerkleUpdate
+	{
+		Oid indexOid;
+		uint8 old_key_hash[8];
+	} PendingMerkleUpdate;
     PendingMerkleUpdate *pending = NULL;
 
 	if (!enable_merkle_index && merkle_relation_has_index(relation))
@@ -1848,7 +1848,7 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
 										 indexInfo->ii_NumIndexKeyAttrs, &route);
 
                     pending[pendingCount].indexOid = indexOid;
-					pending[pendingCount].oldLeafId = route.leaf_id;
+					memcpy(pending[pendingCount].old_key_hash, route.route_digest, 8);
                     pendingCount++;
                 }
 
@@ -1978,19 +1978,35 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
 					merkle_compute_route(indexRel, values, isnull,
 										 indexInfo->ii_NumIndexKeyAttrs, &route);
 
-					if (route.leaf_id == pending[i].oldLeafId)
-                    {
-                        MerkleHash delta = oldHash;
-                        merkle_hash_xor(&delta, &newHash);
-                        merkle_update_tree_path(indexRel, pending[i].oldLeafId, &delta, true);
-                        bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT, 1);
-                    }
-                    else
-                    {
-                        merkle_update_tree_path(indexRel, pending[i].oldLeafId, &oldHash, false);
-						merkle_update_tree_path(indexRel, route.leaf_id, &newHash, true);
-                        bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT, 2);
-                    }
+					uint8 new_key_hash[8] = {0};
+					if (merkle_is_dynamic_index(indexRel))
+					{
+						memcpy(new_key_hash, route.route_digest, 8);
+					}
+					else
+					{
+						new_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
+						new_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
+						new_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
+						new_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
+					}
+
+					if (memcmp(pending[i].old_key_hash, new_key_hash, 8) == 0)
+					{
+						MerkleHash delta = oldHash;
+						merkle_hash_xor(&delta, &newHash);
+						merkle_stage_delta_event(indexRel, MERKLE_DELTA_UPDATE_SAME_LEAF,
+												 pending[i].old_key_hash, new_key_hash, &delta);
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT, 1);
+					}
+					else
+					{
+						merkle_stage_delta_event(indexRel, MERKLE_DELTA_DELETE,
+												 pending[i].old_key_hash, NULL, &oldHash);
+						merkle_stage_delta_event(indexRel, MERKLE_DELTA_INSERT,
+												 NULL, new_key_hash, &newHash);
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT, 2);
+					}
                 }
 
                 index_close(indexRel, RowExclusiveLock);
@@ -2035,7 +2051,7 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
 	typedef struct PendingMerkleDelete
 	{
 		Oid indexOid;
-		int partitionId;
+		uint8 old_key_hash[8];
 	} PendingMerkleDelete;
 	PendingMerkleDelete *pending = NULL;
 	ItemPointerData currentTid;
@@ -2111,13 +2127,6 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
     merkle_compute_row_hash(relation, &currentTid, &oldHash);
     hasOldHash = !merkle_hash_is_zero(&oldHash);
 
-    if (!hasOldHash)
-    {
-        bool d_isnull;
-        Datum d_key;
-        d_key = slot_getattr(oldSlot, 1, &d_isnull);
-    }
-
 	if (hasOldHash)
 	{
 		indexList = RelationGetIndexList(relation);
@@ -2153,7 +2162,18 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
 									 indexInfo->ii_NumIndexKeyAttrs, &route);
 
                 pending[pendingCount].indexOid = indexOid;
-				pending[pendingCount].partitionId = route.leaf_id;
+				if (merkle_is_dynamic_index(indexRel))
+				{
+					memcpy(pending[pendingCount].old_key_hash, route.route_digest, 8);
+				}
+				else
+				{
+					memset(pending[pendingCount].old_key_hash, 0, 8);
+					pending[pendingCount].old_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
+					pending[pendingCount].old_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
+					pending[pendingCount].old_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
+					pending[pendingCount].old_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
+				}
 
                 pendingCount++;
             }
@@ -2198,7 +2218,7 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
             Relation indexRel = index_open(pending[i].indexOid, RowExclusiveLock);
             if (indexRel->rd_rel->relam == MERKLE_AM_OID)
             {
-                merkle_update_tree_path(indexRel, pending[i].partitionId, &oldHash, false);
+				merkle_stage_delta_event(indexRel, MERKLE_DELTA_DELETE, pending[i].old_key_hash, NULL, &oldHash);
                 bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT, 1);
             }
             index_close(indexRel, RowExclusiveLock);
@@ -2252,11 +2272,11 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
     ListCell *lc;
     int pendingCount = 0;
     int pendingCapacity = 0;
-    typedef struct PendingMerkleDelete
-    {
-        Oid indexOid;
-        int partitionId;
-    } PendingMerkleDelete;
+	typedef struct PendingMerkleDelete
+	{
+		Oid indexOid;
+		uint8 old_key_hash[8];
+	} PendingMerkleDelete;
     PendingMerkleDelete *pending = NULL;
 
     bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_DELETE_COUNT, 1);
@@ -2326,73 +2346,73 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
                         else if (TransactionIdIsValid(dirty_snapshot.xmax))
                             candidate_wait_xid = dirty_snapshot.xmax;
 
-                        if (TransactionIdIsValid(candidate_wait_xid))
-                        {
-                            candidate_is_predecessor =
-                                bcdb_dirty_xid_is_ordered_predecessor(candidate_wait_xid);
-                            BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_dirty_candidate pid=%d txid=%d rel=%u key=%d tid_block=%u tid_off=%u xmin=%u xmax=%u wait_xid=%u predecessor=%d",
-                                          getpid(),
-                                          activeTx ? (int)activeTx->tx_id : -1,
-                                          (unsigned int)relOid,
-                                          keyval,
-                                          ItemPointerGetBlockNumberNoCheck(&currentTid),
-                                          ItemPointerGetOffsetNumberNoCheck(&currentTid),
-                                          (unsigned int)dirty_snapshot.xmin,
-                                          (unsigned int)dirty_snapshot.xmax,
-                                          (unsigned int)candidate_wait_xid,
-                                          candidate_is_predecessor ? 1 : 0);
-                            if (candidate_is_predecessor)
-                            {
-                                wait_xid = candidate_wait_xid;
-                                found = true;
-                                break;
-                            }
+						if (TransactionIdIsValid(candidate_wait_xid))
+						{
+							candidate_is_predecessor =
+								bcdb_dirty_xid_is_ordered_predecessor(candidate_wait_xid);
+							BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_dirty_candidate pid=%d txid=%d rel=%u key=%d tid_block=%u tid_off=%u xmin=%u xmax=%u wait_xid=%u predecessor=%d",
+										  MyProcPid,
+										  activeTx ? (int)activeTx->tx_id : -1,
+										  (unsigned int)relOid,
+										  keyval,
+										  ItemPointerGetBlockNumberNoCheck(&currentTid),
+										  ItemPointerGetOffsetNumberNoCheck(&currentTid),
+										  (unsigned int)dirty_snapshot.xmin,
+										  (unsigned int)dirty_snapshot.xmax,
+										  (unsigned int)candidate_wait_xid,
+										  candidate_is_predecessor ? 1 : 0);
+							if (candidate_is_predecessor)
+							{
+								wait_xid = candidate_wait_xid;
+								found = true;
+								break;
+							}
 
-                            /*
-                             * A later deterministic INSERT can sort before
-                             * the row this DELETE needs in the dirty btree
-                             * scan. Skip it and keep looking for an older
-                             * committed/predecessor row before preserving
-                             * the original DELETE-0 result.
-                             */
-                            ExecClearTuple(oldSlot);
-                            continue;
-                        }
+							/*
+							 * A later deterministic INSERT can sort before
+							 * the row this DELETE needs in the dirty btree
+							 * scan. Skip it and keep looking for an older
+							 * committed/predecessor row before preserving
+							 * the original DELETE-0 result.
+							 */
+							ExecClearTuple(oldSlot);
+							continue;
+						}
 
-                        BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_stable_candidate pid=%d txid=%d rel=%u key=%d tid_block=%u tid_off=%u",
-                                      getpid(),
-                                      activeTx ? (int)activeTx->tx_id : -1,
-                                      (unsigned int)relOid,
-                                      keyval,
-                                      ItemPointerGetBlockNumberNoCheck(&currentTid),
-                                      ItemPointerGetOffsetNumberNoCheck(&currentTid));
-                        found = true;
-                        break;
-                    }
+						BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_stable_candidate pid=%d txid=%d rel=%u key=%d tid_block=%u tid_off=%u",
+									  MyProcPid,
+									  activeTx ? (int)activeTx->tx_id : -1,
+									  (unsigned int)relOid,
+									  keyval,
+									  ItemPointerGetBlockNumberNoCheck(&currentTid),
+									  ItemPointerGetOffsetNumberNoCheck(&currentTid));
+						found = true;
+						break;
+					}
 
-                    index_endscan(iscan);
-                }
+					index_endscan(iscan);
+				}
 
-                index_close(btreeRel, AccessShareLock);
-                if (found)
-                    break;
-            }
+				index_close(btreeRel, AccessShareLock);
+				if (found)
+					break;
+			}
 
-            if (TransactionIdIsValid(wait_xid) &&
-                bcdb_dirty_xid_is_ordered_predecessor(wait_xid))
-            {
-                BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_wait_predecessor pid=%d txid=%d rel=%u key=%d wait_xid=%u tid_block=%u tid_off=%u",
-                              getpid(),
-                              activeTx ? (int)activeTx->tx_id : -1,
-                              (unsigned int)relOid,
-                              keyval,
-                              (unsigned int)wait_xid,
-                              ItemPointerGetBlockNumberNoCheck(&currentTid),
-                              ItemPointerGetOffsetNumberNoCheck(&currentTid));
-                XactLockTableWait(wait_xid, relation, &currentTid, XLTW_Delete);
-                retry_lookup = true;
-            }
-        } while (retry_lookup);
+			if (TransactionIdIsValid(wait_xid) &&
+				bcdb_dirty_xid_is_ordered_predecessor(wait_xid))
+			{
+				BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_wait_predecessor pid=%d txid=%d rel=%u key=%d wait_xid=%u tid_block=%u tid_off=%u",
+							  MyProcPid,
+							  activeTx ? (int)activeTx->tx_id : -1,
+							  (unsigned int)relOid,
+							  keyval,
+							  (unsigned int)wait_xid,
+							  ItemPointerGetBlockNumberNoCheck(&currentTid),
+							  ItemPointerGetOffsetNumberNoCheck(&currentTid));
+				XactLockTableWait(wait_xid, relation, &currentTid, XLTW_FetchUpdated);
+				retry_lookup = true;
+			}
+		} while (retry_lookup);
 
         list_free(btreeIndexList);
     }
@@ -2451,7 +2471,18 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
 									 indexInfo->ii_NumIndexKeyAttrs, &route);
 
                 pending[pendingCount].indexOid = indexOid;
-				pending[pendingCount].partitionId = route.leaf_id;
+				if (merkle_is_dynamic_index(indexRel))
+				{
+					memcpy(pending[pendingCount].old_key_hash, route.route_digest, 8);
+				}
+				else
+				{
+					memset(pending[pendingCount].old_key_hash, 0, 8);
+					pending[pendingCount].old_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
+					pending[pendingCount].old_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
+					pending[pendingCount].old_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
+					pending[pendingCount].old_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
+				}
 
                 pendingCount++;
             }
@@ -2488,7 +2519,7 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
             Relation indexRel = index_open(pending[i].indexOid, RowExclusiveLock);
             if (indexRel->rd_rel->relam == MERKLE_AM_OID)
             {
-                merkle_update_tree_path(indexRel, pending[i].partitionId, &oldHash, false);
+				merkle_stage_delta_event(indexRel, MERKLE_DELTA_DELETE, pending[i].old_key_hash, NULL, &oldHash);
                 bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT, 1);
             }
             index_close(indexRel, RowExclusiveLock);
