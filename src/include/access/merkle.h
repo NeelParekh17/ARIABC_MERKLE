@@ -107,20 +107,39 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
  */
 #define MERKLE_METAPAGE_BLKNO       0
 #define MERKLE_TREE_START_BLKNO     1
-#define MERKLE_VERSION              7   /* WAL-safe committed-delta format */
-/*
- * Route format 2: uniform BLAKE3-256 for ALL key types including integers.
- * Format 1 preserved abs(int) % total_leaves for single integer keys; that
- * was unsafe for a future dynamic prefix tree.  Rebuild all indexes.
- */
-#define MERKLE_ROUTE_FORMAT_VERSION 2
+#define MERKLE_VERSION              8   /* WAL-safe committed-delta format */
+#define MERKLE_ROUTE_FORMAT_VERSION 3
 #define MERKLE_ROW_HASH_FORMAT_VERSION 1
+
+/* Dynamic Merkle tree configuration constants (Plan_review.md) */
+#define DYNAMIC_MERKLE_FANOUT       4
+#define BITS_PER_SPLIT              2
+#define SPLIT_THRESHOLD             32
+#define MERKLE_MERGE_THRESHOLD      8
+#define MAX_PREFIX_LEN              60
+
+typedef enum MerkleDeltaEventType
+{
+	MERKLE_DELTA_INSERT             = 0,  /* new_key_hash valid */
+	MERKLE_DELTA_DELETE              = 1,  /* old_key_hash valid */
+	MERKLE_DELTA_UPDATE_SAME_LEAF    = 2,  /* old_key_hash == new_key_hash */
+	MERKLE_DELTA_UPDATE_KEY_CHANGED  = 3   /* old_key_hash != new_key_hash */
+} MerkleDeltaEventType;
+
+typedef struct MerkleDeltaKey
+{
+	Oid			index_oid;
+	RelFileNode index_rnode;
+	uint8		event_type;      /* MerkleDeltaEventType */
+	uint8		old_key_hash[8]; /* valid if event_type != MERKLE_DELTA_INSERT */
+	uint8		new_key_hash[8]; /* valid if event_type != MERKLE_DELTA_DELETE */
+} MerkleDeltaKey;
 
 /* Versioned, endian-stable durable transaction-delta encoding. */
 #define MERKLE_DELTA_MAGIC          ((uint32) 0x4D444C54) /* "MDLT" */
 #define MERKLE_DELTA_VERSION        1
 #define MERKLE_DELTA_HEADER_BYTES   40
-#define MERKLE_DELTA_ENTRY_BYTES    56
+#define MERKLE_DELTA_ENTRY_BYTES    72
 
 /*
  * Calculate how many nodes fit per page
@@ -266,6 +285,7 @@ extern MerkleOptions *merkle_get_options(Relation indexRel);
  * Helper to read tree config from metadata
  * (nodesPerPage and numTreePages can be NULL if not needed)
  */
+extern bool merkle_is_dynamic_index(Relation indexRel);
 extern void merkle_read_meta(Relation indexRel, int *numPartitions,
                              int *leavesPerPartition, int *nodesPerPartition,
                              int *totalNodes, int *totalLeaves,
@@ -332,6 +352,9 @@ extern void merkle_update_tree_path(Relation indexRel, int leafId,
                                     MerkleHash *hash, bool isXorIn);
 extern void merkle_stage_delta(Relation indexRel, int leafId,
 								 const MerkleHash *hash);
+extern void merkle_stage_delta_event(Relation indexRel, MerkleDeltaEventType event_type,
+									 const uint8 *old_key_hash, const uint8 *new_key_hash,
+									 const MerkleHash *hash);
 extern bytea *merkle_serialize_staged_delta(uint64 raft_log_index,
 										 uint32 item_ordinal);
 extern void merkle_mark_staged_delta_persisted(void);
@@ -361,6 +384,74 @@ extern void merkle_hash_zero(MerkleHash *hash);
 extern bool merkle_hash_is_zero(const MerkleHash *hash);
 extern char *merkle_hash_to_hex(const MerkleHash *hash);
 
+static inline int
+merkle_bits_per_split_for_fanout(int fanout)
+{
+	int bits = 0;
+	while ((1 << bits) < fanout && bits < 8)
+		bits++;
+	return bits > 0 ? bits : 2;
+}
+
+extern void merkle_require_fresh(void);
+extern void do_split(Oid index_oid, const uint8 *node_id, int prefix_len);
+
+/* Bit manipulation helpers for Dynamic Merkle tree prefix traversal */
+static inline uint8
+merkle_next_bits(const uint8 *key_hash, int prefix_len, int w)
+{
+	int byte_idx = prefix_len / 8;
+	int bit_off = prefix_len % 8;
+	int shift = 8 - bit_off - w;
+	return (key_hash[byte_idx] >> shift) & ((1 << w) - 1);
+}
+
+static inline void
+merkle_bytea_extend(uint8 *result_node_id, const uint8 *node_id, int prefix_len, uint8 bits, int w)
+{
+	int byte_idx = prefix_len / 8;
+	int bit_off = prefix_len % 8;
+	int shift = 8 - bit_off - w;
+	memcpy(result_node_id, node_id, 8);
+	result_node_id[byte_idx] |= (bits << shift);
+}
+
+static inline void
+merkle_bytea_upper_bound(uint8 *result_upper, const uint8 *node_id, int prefix_len)
+{
+	int full_bytes = prefix_len / 8;
+	int rem = prefix_len % 8;
+	int first_free;
+	int i;
+
+	memcpy(result_upper, node_id, 8);
+	if (rem > 0)
+	{
+		uint8 mask = 0xFF >> rem;
+		result_upper[full_bytes] |= mask;
+		first_free = full_bytes + 1;
+	}
+	else
+	{
+		first_free = full_bytes;
+	}
+	for (i = first_free; i < 8; i++)
+		result_upper[i] = 0xFF;
+}
+
+static inline int
+merkle_parent_of(uint8 *parent_node_id, const uint8 *node_id, int prefix_len, int w)
+{
+	int new_prefix_len = prefix_len - w;
+	int byte_idx = new_prefix_len / 8;
+	int bit_off = new_prefix_len % 8;
+	int shift = 8 - bit_off - w;
+
+	memcpy(parent_node_id, node_id, 8);
+	parent_node_id[byte_idx] &= ~((((1 << w) - 1) << shift) & 0xFF);
+	return new_prefix_len;
+}
+
 /*
  * SQL-callable verification functions
  */
@@ -383,6 +474,10 @@ extern Datum merkle_get_partition_root_hashes(PG_FUNCTION_ARGS);
 extern Datum merkle_recovery_profile_reset(PG_FUNCTION_ARGS);
 extern Datum merkle_recovery_profile_stats(PG_FUNCTION_ARGS);
 extern Datum merkle_recovery_status(PG_FUNCTION_ARGS);
+extern void merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *slot,
+											 MerkleHash *result);
+extern Datum merkle_key_hash_sql(PG_FUNCTION_ARGS);
+extern Datum merkle_tuple_hash_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_pending_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_until_sql(PG_FUNCTION_ARGS);
 

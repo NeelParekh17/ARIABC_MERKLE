@@ -81,10 +81,18 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
 
     merkle_compute_row_hash(heapRel, ht_ctid, &hash);
     
-    /*
-     * Update the Merkle tree path from leaf to root
-     */
-	merkle_update_tree_path(indexRel, route.leaf_id, &hash, true);
+	/*
+	 * Stage the Merkle delta event for this insert.
+	 * Dynamic indexes use the route digest, while static indexes use the leaf ID.
+	 */
+	if (merkle_is_dynamic_index(indexRel))
+	{
+		merkle_stage_delta_event(indexRel, MERKLE_DELTA_INSERT, NULL, route.route_digest, &hash);
+	}
+	else
+	{
+		merkle_stage_delta(indexRel, route.leaf_id, &hash);
+	}
     
     /*
      * We don't detect duplicates - merkle index doesn't enforce uniqueness
