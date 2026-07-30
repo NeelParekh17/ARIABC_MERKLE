@@ -33,6 +33,7 @@
 #include "parser/parse_coerce.h"
 #include "portability/instr_time.h"
 #include "storage/bufmgr.h"
+#include "utils/array.h"
 #include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/array.h"
@@ -803,15 +804,18 @@ merkle_get_descendants_batch(PG_FUNCTION_ARGS)
 	Oid indexOid = resolve_merkle_index_arg(relid);
 	TupleDesc tupdesc;
 	Tuplestorestate *tupstore;
-	StringInfoData query;
-	int spi_rc;
-	Oid argtypes[4] = {OIDOID, BYTEAOID, INT2OID, INT4OID};
-	Datum args[4];
-	int i;
 
 	Relation indexRel;
 	int fanout = DYNAMIC_MERKLE_FANOUT;
 	int bits_per_split;
+
+	Datum *current_nodes;
+	int num_current_nodes;
+	int current_prefix_len;
+	int depth;
+	int i;
+	MemoryContext outer_mcx = CurrentMemoryContext;
+	MemoryContext old_mcx;
 
 	indexRel = index_open(indexOid, AccessShareLock);
 	merkle_read_meta(indexRel, &fanout, NULL, NULL);
@@ -820,54 +824,122 @@ merkle_get_descendants_batch(PG_FUNCTION_ARGS)
 
 	tupstore = merkle_begin_materialized_srf(fcinfo, &tupdesc);
 
-	initStringInfo(&query);
-	appendStringInfo(&query,
-		"WITH RECURSIVE tree AS ("
-		"  SELECT node_id, prefix_len, is_leaf, tuple_count, hash, 0 AS depth"
-		"    FROM ariabc_internal.merkle_node"
-		"   WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3"
-		"  UNION ALL"
-		"  SELECT c.node_id, c.prefix_len, c.is_leaf, c.tuple_count, c.hash, p.depth + 1"
-		"    FROM ariabc_internal.merkle_node c"
-		"    JOIN tree p ON c.index_oid = $1"
-		"               AND c.prefix_len = p.prefix_len + %d"
-		"               AND (p.prefix_len = 0 OR (get_byte(c.node_id, (p.prefix_len - 1) / 8) >> (7 - ((p.prefix_len - 1) %% 8)) = get_byte(p.node_id, (p.prefix_len - 1) / 8) >> (7 - ((p.prefix_len - 1) %% 8)) AND (p.prefix_len < 8 OR substring(c.node_id from 1 for (p.prefix_len / 8)) = substring(p.node_id from 1 for (p.prefix_len / 8)))))"
-		"   WHERE p.depth < $4"
-		")"
-		"SELECT node_id, prefix_len, is_leaf, hash"
-		"  FROM tree"
-		" ORDER BY prefix_len, node_id",
-		bits_per_split);
-
-	args[0] = ObjectIdGetDatum(indexOid);
-	args[1] = PointerGetDatum(node_id);
-	args[2] = Int16GetDatum(prefix_len);
-	args[3] = Int32GetDatum(max_depth);
-
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "SPI_connect failed in merkle_get_descendants_batch");
 
-	spi_rc = SPI_execute_with_args(query.data, 4, argtypes, args, NULL, true, 0);
-	if (spi_rc != SPI_OK_SELECT)
-		elog(ERROR, "merkle_get_descendants_batch query failed: %d", spi_rc);
+	old_mcx = MemoryContextSwitchTo(outer_mcx);
 
-	for (i = 0; i < (int) SPI_processed; i++)
+	num_current_nodes = 1;
+	current_nodes = (Datum *) palloc(sizeof(Datum));
 	{
-		HeapTuple spi_tuple = SPI_tuptable->vals[i];
-		bool isnull[4];
-		Datum values[4];
+		int node_id_len = VARSIZE_ANY_EXHDR(node_id);
+		bytea *init_node = (bytea *) palloc(VARHDRSZ + node_id_len);
+		SET_VARSIZE(init_node, VARHDRSZ + node_id_len);
+		memcpy(VARDATA(init_node), VARDATA_ANY(node_id), node_id_len);
+		current_nodes[0] = PointerGetDatum(init_node);
+	}
+	current_prefix_len = prefix_len;
 
-		values[0] = SPI_getbinval(spi_tuple, SPI_tuptable->tupdesc, 1, &isnull[0]);
-		values[1] = SPI_getbinval(spi_tuple, SPI_tuptable->tupdesc, 2, &isnull[1]);
-		values[2] = SPI_getbinval(spi_tuple, SPI_tuptable->tupdesc, 3, &isnull[2]);
-		values[3] = SPI_getbinval(spi_tuple, SPI_tuptable->tupdesc, 4, &isnull[3]);
+	MemoryContextSwitchTo(old_mcx);
 
-		tuplestore_putvalues(tupstore, tupdesc, values, isnull);
+	for (depth = 0; depth <= max_depth && num_current_nodes > 0; depth++)
+	{
+		ArrayType *arr;
+		Oid argtypes[3] = {OIDOID, INT2OID, BYTEAARRAYOID};
+		Datum args[3];
+		int spi_rc;
+		Datum *next_nodes = NULL;
+		int num_next_nodes = 0;
+		int max_next_nodes = 0;
+
+		old_mcx = MemoryContextSwitchTo(outer_mcx);
+		arr = construct_array(current_nodes, num_current_nodes, BYTEAOID, -1, false, 'i');
+		MemoryContextSwitchTo(old_mcx);
+
+		args[0] = ObjectIdGetDatum(indexOid);
+		args[1] = Int16GetDatum(current_prefix_len);
+		args[2] = PointerGetDatum(arr);
+
+		spi_rc = SPI_execute_with_args(
+			"SELECT node_id, prefix_len, is_leaf, hash "
+			"  FROM ariabc_internal.merkle_node "
+			" WHERE index_oid = $1 AND prefix_len = $2 AND node_id = ANY($3::bytea[]) "
+			" ORDER BY node_id",
+			3, argtypes, args, NULL, true, 0);
+
+		if (spi_rc != SPI_OK_SELECT)
+			elog(ERROR, "merkle_get_descendants_batch query failed: %d", spi_rc);
+
+		for (i = 0; i < (int) SPI_processed; i++)
+		{
+			HeapTuple spi_tuple = SPI_tuptable->vals[i];
+			bool isnull[4];
+			Datum values[4];
+			bool is_leaf;
+
+			values[0] = SPI_getbinval(spi_tuple, SPI_tuptable->tupdesc, 1, &isnull[0]);
+			values[1] = SPI_getbinval(spi_tuple, SPI_tuptable->tupdesc, 2, &isnull[1]);
+			values[2] = SPI_getbinval(spi_tuple, SPI_tuptable->tupdesc, 3, &isnull[2]);
+			values[3] = SPI_getbinval(spi_tuple, SPI_tuptable->tupdesc, 4, &isnull[3]);
+
+			tuplestore_putvalues(tupstore, tupdesc, values, isnull);
+
+			is_leaf = DatumGetBool(values[2]);
+			if (!is_leaf && depth < max_depth)
+			{
+				bytea *found_id_datum = DatumGetByteaPP(values[0]);
+				const uint8 *found_id_bytes = (const uint8 *) VARDATA_ANY(found_id_datum);
+				int b;
+
+				old_mcx = MemoryContextSwitchTo(outer_mcx);
+				for (b = 0; b < fanout; b++)
+				{
+					bytea *child_bytea = (bytea *) palloc(VARHDRSZ + 8);
+					SET_VARSIZE(child_bytea, VARHDRSZ + 8);
+					merkle_bytea_extend((uint8 *) VARDATA(child_bytea), found_id_bytes, current_prefix_len, (uint8) b, bits_per_split);
+
+					if (num_next_nodes >= max_next_nodes)
+					{
+						max_next_nodes = (max_next_nodes == 0) ? 16 : max_next_nodes * 2;
+						if (next_nodes == NULL)
+							next_nodes = (Datum *) palloc(max_next_nodes * sizeof(Datum));
+						else
+							next_nodes = (Datum *) repalloc(next_nodes, max_next_nodes * sizeof(Datum));
+					}
+					next_nodes[num_next_nodes++] = PointerGetDatum(child_bytea);
+				}
+				MemoryContextSwitchTo(old_mcx);
+			}
+		}
+
+		old_mcx = MemoryContextSwitchTo(outer_mcx);
+		pfree(arr);
+		for (i = 0; i < num_current_nodes; i++)
+		{
+			pfree(DatumGetPointer(current_nodes[i]));
+		}
+		pfree(current_nodes);
+		current_nodes = next_nodes;
+		num_current_nodes = num_next_nodes;
+		current_prefix_len += bits_per_split;
+		MemoryContextSwitchTo(old_mcx);
+
+		SPI_freetuptable(SPI_tuptable);
+	}
+
+	if (current_nodes != NULL)
+	{
+		old_mcx = MemoryContextSwitchTo(outer_mcx);
+		for (i = 0; i < num_current_nodes; i++)
+		{
+			pfree(DatumGetPointer(current_nodes[i]));
+		}
+		pfree(current_nodes);
+		MemoryContextSwitchTo(old_mcx);
 	}
 
 	SPI_finish();
 	tuplestore_donestoring(tupstore);
-	pfree(query.data);
 
 	PG_RETURN_NULL();
 }

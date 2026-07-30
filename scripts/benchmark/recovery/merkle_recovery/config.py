@@ -119,7 +119,19 @@ def profile_config(profile: str) -> BenchmarkConfig:
 
     if profile == "size-scaling-k75-c300":
         return BenchmarkConfig(
-            fig12_sizes=[1_000_000, 3_000_000, 5_000_000],
+            fig12_sizes=[
+                1_000_000,
+                3_000_000,
+                5_000_000,
+                7_000_000,
+                10_000_000,
+                15_000_000,
+                20_000_000,
+                25_000_000,
+                30_000_000,
+                40_000_000,
+                50_000_000,
+            ],
             fig13_sizes=[],
             fig13_k=[],
             repetitions=5,

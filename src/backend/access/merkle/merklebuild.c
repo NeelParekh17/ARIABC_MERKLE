@@ -125,7 +125,9 @@ merkle_build_callback(Relation indexRel,
 	if (buildstate->num_entries >= buildstate->max_entries)
 	{
 		buildstate->max_entries *= 2;
-		buildstate->entries = (MerkleTupleHashEntry *) repalloc(buildstate->entries, buildstate->max_entries * sizeof(MerkleTupleHashEntry));
+		buildstate->entries = (MerkleTupleHashEntry *) realloc(buildstate->entries, (size_t) buildstate->max_entries * sizeof(MerkleTupleHashEntry));
+		if (!buildstate->entries)
+			elog(ERROR, "out of memory allocating Merkle entries buffer (%d entries)", buildstate->max_entries);
 	}
 
 	memcpy(buildstate->entries[buildstate->num_entries].key_hash, route.route_digest, 8);
@@ -250,7 +252,9 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	buildstate.split_threshold = opts->split_threshold;
 	buildstate.merge_threshold = opts->merge_threshold;
 	buildstate.max_entries = 1000000; /* Start with a large buffer */
-	buildstate.entries = (MerkleTupleHashEntry *) palloc(buildstate.max_entries * sizeof(MerkleTupleHashEntry));
+	buildstate.entries = (MerkleTupleHashEntry *) malloc((size_t) buildstate.max_entries * sizeof(MerkleTupleHashEntry));
+	if (!buildstate.entries)
+		elog(ERROR, "out of memory allocating Merkle entries buffer");
 	buildstate.num_entries = 0;
 	buildstate.bits_per_split = merkle_bits_per_split_for_fanout(buildstate.fanout);
 
@@ -373,7 +377,10 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	}
 
 	if (buildstate.entries)
-		pfree(buildstate.entries);
+	{
+		free(buildstate.entries);
+		buildstate.entries = NULL;
+	}
 
     /*
      * Return statistics
@@ -384,6 +391,11 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     }
     PG_CATCH();
     {
+		if (buildstate.entries != NULL)
+		{
+			free(buildstate.entries);
+			buildstate.entries = NULL;
+		}
 		if (buildstate.heapFetch != NULL)
 			table_index_fetch_end(buildstate.heapFetch);
 		if (buildstate.heapSlot != NULL)

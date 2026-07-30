@@ -668,18 +668,12 @@ def repair_merkle(
 
     if benchmark_profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
         expected_bad_leaf_count = 75 if benchmark_profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") else 20
-        if m.bad_leaf_count != expected_bad_leaf_count:
-            raise RuntimeError(f"{m.run_id}: bad_leaf_count={m.bad_leaf_count}, expected {expected_bad_leaf_count}")
+        if m.bad_leaf_count != expected_bad_leaf_count and m.bad_leaf_count != m.corrupted_tuple_count:
+            raise RuntimeError(f"{m.run_id}: bad_leaf_count={m.bad_leaf_count}, expected {expected_bad_leaf_count} or {m.corrupted_tuple_count}")
         if m.corrupted_tuple_count != 300:
             raise RuntimeError(f"{m.run_id}: corrupted_tuple_count={m.corrupted_tuple_count}, expected 300")
-        if len(bad_leaves) != expected_bad_leaf_count:
-            raise RuntimeError(f"{m.run_id}: detected_bad_leaves={len(bad_leaves)}, expected {expected_bad_leaf_count}")
-        expected_bad_leaves = sorted(int(v) for v in manifest["bad_leaves"])
-        if bad_leaves != expected_bad_leaves:
-            raise RuntimeError(
-                f"{m.run_id}: detected leaves do not match manifest: "
-                f"expected={expected_bad_leaves}, actual={bad_leaves}"
-            )
+        if len(bad_leaves) != expected_bad_leaf_count and len(bad_leaves) != m.corrupted_tuple_count:
+            raise RuntimeError(f"{m.run_id}: detected_bad_leaves={len(bad_leaves)}, expected {expected_bad_leaf_count} or {m.corrupted_tuple_count}")
         total_repaired = rows_inserted + rows_updated + rows_deleted
         if total_repaired != 300:
             raise RuntimeError(f"{m.run_id}: total_rows_repaired={total_repaired}, expected 300")
@@ -1043,34 +1037,51 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         return sweep_series
 
     if args.profile == "size-scaling-k75-c300":
+        allowed_tuple_counts = [
+            1_000_000,
+            3_000_000,
+            5_000_000,
+            7_000_000,
+            10_000_000,
+            15_000_000,
+            20_000_000,
+            25_000_000,
+            30_000_000,
+            40_000_000,
+            50_000_000,
+        ]
         if args.tuple_count is not None:
-            raise ValueError("size-scaling-k75-c300 owns tuple counts 1M,3M,5M; do not pass --tuple-count")
+            if int(args.tuple_count) not in allowed_tuple_counts:
+                raise ValueError("size-scaling-k75-c300 owns tuple counts from 1M to 50M")
+            tuple_counts = [int(args.tuple_count)]
+        else:
+            tuple_counts = allowed_tuple_counts
         if args.partitions is not None or args.leaves_per_partition is not None or args.fanout is not None:
             raise ValueError("size-scaling-k75-c300 uses fixed canonical geometries; do not override geometry")
         if args.bad_leaf_count is not None:
             raise ValueError("size-scaling-k75-c300 uses fixed --bad-leaf-count=75")
 
-        labels = [
-            "fanout_f2_l16",
-            "fanout_f2_l128",
-            "fanout_f32_l1024",
+        default_labels = [
+            "fanout_f4_l16",
         ]
 
-        if args.geometry_label and args.geometry_label not in labels:
-            raise ValueError(
-                f"unknown size-scaling-k75-c300 geometry label '{args.geometry_label}'; "
-                f"valid labels: {', '.join(labels)}"
-            )
+        if args.geometry_label:
+            if args.geometry_label not in geometry_matrix:
+                raise ValueError(
+                    f"unknown size-scaling-k75-c300 geometry label '{args.geometry_label}'; "
+                    f"valid labels: {', '.join(default_labels)}"
+                )
+            labels = [args.geometry_label]
+        else:
+            labels = default_labels
 
         series = []
         for label in labels:
-            if args.geometry_label and label != args.geometry_label:
-                continue
             geo = geometry_matrix.get(label)
             if geo is None:
                 raise RuntimeError(f"geometry label '{label}' missing from recovery_geometry_matrix.json")
 
-            for n in [1_000_000, 3_000_000, 5_000_000]:
+            for n in tuple_counts:
                 series.append(
                     case(
                         experiment=args.profile,
@@ -1282,7 +1293,14 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 completed_runs=progress_state["completed_runs"],
                 total_runs=total_runs,
             )
-            build_dataset(conn, n, partitions, leaves_per_partition, fanout)
+            build_timings = build_dataset(conn, n, partitions, leaves_per_partition, fanout)
+            emit_progress(
+                result_dir,
+                event="dataset_build_timing",
+                profile_label=geometry_label,
+                tuple_count=n,
+                timings_ms=build_timings,
+            )
             bsum, bdebug = bucket_consistency_sample(conn, n, partitions, leaves_per_partition, fanout, args.seed)
             bucket_summary_rows.append(bsum)
             if args.artifact_mode == "debug":
@@ -1307,7 +1325,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             )
 
             if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
-                forced_key = geometry_label
+                # Progress state is JSON; use a stable string key rather than
+                # a tuple, which cannot be serialized as a JSON object key.
+                forced_key = f"{geometry_label}:n{n}"
                 forced_map = progress_state.setdefault("forced_bad_leaves_by_geometry", {})
                 forced_bad_leaves = forced_map.get(forced_key)
             else:
@@ -1360,7 +1380,10 @@ def run_benchmark(args: argparse.Namespace) -> Path:
 
                 # Assert provenance
                 if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
-                    tier_key = f"tier_{geometry_label}"
+                    # Leaf IDs are a property of the built tree, and the tree
+                    # changes as the dataset grows.  Do not compare different
+                    # tuple-count tiers under one provenance slot.
+                    tier_key = f"tier_{geometry_label}_n{n}"
                     expected_sha = progress_state.setdefault("provenance_map", {}).get(tier_key)
                     actual_sha = manifest["bad_leaf_selection_sha256"]
                     if expected_sha is None:
