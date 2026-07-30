@@ -18,6 +18,8 @@
 #include "access/htup_details.h"
 #include "access/tableam.h"
 #include "catalog/index.h"
+#include "catalog/pg_type.h"
+#include "executor/spi.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/smgr.h"
@@ -37,17 +39,15 @@ typedef struct
 	TupleTableSlot *heapSlot;
     double      indtuples;
     int         nkeys;          /* Number of index key columns */
-    int         numPartitions;
-    int         leavesPerPartition;
-    int         nodesPerPartition;
     int         fanout;
-    int         internalNodes;  /* nodesPerPartition - leavesPerPartition */
-    int         leafStart;      /* 1-indexed start position of leaves */
-    int         totalLeaves;    /* numPartitions * leavesPerPartition */
-    int         totalNodes;     /* numPartitions * nodesPerPartition */
-    int         nodesPerPage;
-    int         numTreePages;
-    MerkleHash *nodeHashes;     /* per-node accumulated hashes (0-based) */
+
+	/* Dynamic index support */
+	MerkleTupleHashEntry *entries;	/* in-memory tuples for dynamic build */
+	int			max_entries;
+	int			num_entries;
+	int			bits_per_split;
+	int			split_threshold;
+	int			merge_threshold;
 } MerkleBuildState;
 
 static void merkle_emit_build_nodes_report(Relation indexRel,
@@ -56,60 +56,17 @@ static void merkle_emit_build_nodes_report(Relation indexRel,
 static void
 merkle_emit_build_nodes_report(Relation indexRel, MerkleBuildState *buildstate)
 {
-    bool saved_is_bcdb_worker;
-    int  partition;
+	/* Logging is disabled during index creation (CREATE INDEX / REINDEX) */
+	(void) indexRel;
+	(void) buildstate;
+}
 
-    if (!merkle_update_detection)
-        return;
-    if (merkle_update_detection_suppress)
-        return;
-    if (buildstate == NULL || buildstate->nodeHashes == NULL)
-        return;
-
-    saved_is_bcdb_worker = is_bcdb_worker;
-
-    PG_TRY();
-    {
-        StringInfoData out;
-        bool first = true;
-
-        is_bcdb_worker = false;
-
-        initStringInfo(&out);
-
-        for (partition = 0; partition < buildstate->numPartitions; partition++)
-        {
-            int base = partition * buildstate->nodesPerPartition;
-            MerkleHash *h = &buildstate->nodeHashes[base];
-            char       *hex;
-
-            if (merkle_hash_is_zero(h))
-                continue;
-
-            hex = merkle_hash_to_hex(h);
-
-            if (!first)
-                appendStringInfoString(&out, " ");
-            appendStringInfo(&out, "(%d, %s)", partition, hex);
-            first = false;
-
-            pfree(hex);
-        }
-
-        if (!first)
-            ereport(NOTICE,
-                    (errmsg("BCDB_MERKLE_ROOTS: %s", out.data)));
-
-        pfree(out.data);
-
-        is_bcdb_worker = saved_is_bcdb_worker;
-    }
-    PG_CATCH();
-    {
-        is_bcdb_worker = saved_is_bcdb_worker;
-        FlushErrorState();
-    }
-    PG_END_TRY();
+static int
+merkle_entry_key_cmp(const void *a, const void *b)
+{
+	const MerkleTupleHashEntry *ea = (const MerkleTupleHashEntry *) a;
+	const MerkleTupleHashEntry *eb = (const MerkleTupleHashEntry *) b;
+	return memcmp(ea->key_hash, eb->key_hash, 8);
 }
 
 /*
@@ -164,20 +121,17 @@ merkle_build_callback(Relation indexRel,
 		table_index_fetch_reset(buildstate->heapFetch);
 	}
     
-    /*
-     * Build optimization: during CREATE INDEX/REINDEX, avoid per-tuple buffer
-     * traffic by accumulating XOR only at the leaf node in memory, then
-     * constructing internal nodes once at the end.
-     */
-    {
-		int partitionId = route.partition_id;
-		int leafPos = route.leaf_id % buildstate->leavesPerPartition;
-        int nodeInPartition = buildstate->leafStart + leafPos;
-        int nodeIdx = partitionId * buildstate->nodesPerPartition + (nodeInPartition - 1);
+	/* Dynamic indexing tuple tracking */
+	if (buildstate->num_entries >= buildstate->max_entries)
+	{
+		buildstate->max_entries *= 2;
+		buildstate->entries = (MerkleTupleHashEntry *) repalloc(buildstate->entries, buildstate->max_entries * sizeof(MerkleTupleHashEntry));
+	}
 
-        merkle_hash_xor(&buildstate->nodeHashes[nodeIdx], &hash);
-    }
-    
+	memcpy(buildstate->entries[buildstate->num_entries].key_hash, route.route_digest, 8);
+	memcpy(&buildstate->entries[buildstate->num_entries].tuple_hash, &hash, sizeof(MerkleHash));
+	buildstate->num_entries++;
+
     buildstate->indtuples += 1;
 }
 
@@ -248,7 +202,6 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	}
     /* Get user-specified options or defaults */
     opts = merkle_get_options(indexRel);
-    totalLeaves = opts->partitions * opts->leaves_per_partition;
     
     /*
      * Enforce single Merkle index per table
@@ -285,26 +238,21 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     }
 
     /*
-     * Initialize the index storage with user-specified tree dimensions
+     * Initialize the index metadata page
      */
 	merkle_init_tree(indexRel, RelationGetRelid(heapRel), opts,
 					 recovery_status.applied_seq);
     
     /*
-     * Prepare in-memory node hash array for build accumulation.
+     * Prepare in-memory entry tracking for dynamic build.
      */
-    buildstate.numPartitions = opts->partitions;
-    buildstate.leavesPerPartition = opts->leaves_per_partition;
     buildstate.fanout = opts->fanout;
-    buildstate.nodesPerPartition = (int) (((int64) buildstate.fanout * (int64) buildstate.leavesPerPartition - 1) /
-                                          (buildstate.fanout - 1));
-    buildstate.internalNodes = buildstate.nodesPerPartition - buildstate.leavesPerPartition;
-    buildstate.leafStart = buildstate.internalNodes + 1;
-    buildstate.totalLeaves = totalLeaves;
-    buildstate.totalNodes = buildstate.numPartitions * buildstate.nodesPerPartition;
-    buildstate.nodesPerPage = (int) MERKLE_MAX_NODES_PER_PAGE;
-    buildstate.numTreePages = (buildstate.totalNodes + buildstate.nodesPerPage - 1) / buildstate.nodesPerPage;
-    buildstate.nodeHashes = (MerkleHash *) palloc0(sizeof(MerkleHash) * buildstate.totalNodes);
+	buildstate.split_threshold = opts->split_threshold;
+	buildstate.merge_threshold = opts->merge_threshold;
+	buildstate.max_entries = 1000000; /* Start with a large buffer */
+	buildstate.entries = (MerkleTupleHashEntry *) palloc(buildstate.max_entries * sizeof(MerkleTupleHashEntry));
+	buildstate.num_entries = 0;
+	buildstate.bits_per_split = merkle_bits_per_split_for_fanout(buildstate.fanout);
 
     /* Free options after use */
     pfree(opts);
@@ -334,88 +282,105 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	ExecDropSingleTupleTableSlot(buildstate.heapSlot);
 	buildstate.heapSlot = NULL;
 
-    /*
-     * Finalize: compute internal nodes from leaves, then write the completed
-     * Merkle tree to the index pages.
-     */
-    {
-        int partition;
-        int nodeIdx = 0;
-        int pageNum;
+	merkle_emit_build_nodes_report(indexRel, &buildstate);
 
-        /* Construct internal nodes per partition (children first). */
-        for (partition = 0; partition < buildstate.numPartitions; partition++)
-        {
-            int base = partition * buildstate.nodesPerPartition;
-            int i;
+	/*
+	 * Dynamic Merkle Tree catalog initialization.
+	 * Build the dynamic tree strictly in memory and directly insert nodes
+	 * into ariabc_internal.merkle_node.
+	 */
+	if (SPI_connect() == SPI_OK_CONNECT)
+	{
+		Oid index_oid = RelationGetRelid(indexRel);
+		uint8 zero_node_id[8];
+		MerkleHash root_hash;
+		int i;
 
-            for (i = buildstate.internalNodes; i >= 1; i--)
-            {
-                int child;
-                int firstChildIdx = base + buildstate.fanout * (i - 1) + 1;
-                MerkleHash h = buildstate.nodeHashes[firstChildIdx];
+		memset(zero_node_id, 0, 8);
+		memset(&root_hash, 0, sizeof(MerkleHash));
 
-                for (child = 2; child <= buildstate.fanout; child++)
-                    merkle_hash_xor(&h, &buildstate.nodeHashes[base + buildstate.fanout * (i - 1) + child]);
+		for (i = 0; i < buildstate.num_entries; i++)
+			merkle_hash_xor(&root_hash, &buildstate.entries[i].tuple_hash);
 
-                buildstate.nodeHashes[base + (i - 1)] = h;
-            }
-        }
+		if (buildstate.num_entries > 1)
+			qsort(buildstate.entries, buildstate.num_entries,
+				  sizeof(MerkleTupleHashEntry), merkle_entry_key_cmp);
 
-        /* Write nodes to index pages in on-disk layout order. */
-        for (pageNum = 0; pageNum < buildstate.numTreePages; pageNum++)
-        {
-            Buffer      buf;
-            Page        page;
-            MerkleNode *nodes;
-			MerklePageOpaqueData *opaque;
-            int         nodesThisPage;
-            int         i;
-			int         pageContentBytes;
+		if (buildstate.indtuples <= buildstate.split_threshold)
+		{
+			bytea *root_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
+			bytea *root_hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
+			Oid argtypes[5] = {OIDOID, BYTEAOID, INT2OID, INT8OID, BYTEAOID};
+			Datum values[5];
 
-            nodesThisPage = Min(buildstate.nodesPerPage, buildstate.totalNodes - nodeIdx);
+			SET_VARSIZE(root_id_bytea, VARHDRSZ + 8);
+			memcpy(VARDATA(root_id_bytea), zero_node_id, 8);
 
-            buf = ReadBuffer(indexRel, MERKLE_TREE_START_BLKNO + pageNum);
-            LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-            page = BufferGetPage(buf);
-            nodes = (MerkleNode *) PageGetContents(page);
-			opaque = MerklePageGetOpaque(page);
-			if (opaque->magic != MERKLE_PAGE_OPAQUE_MAGIC ||
-				opaque->version != MERKLE_PAGE_OPAQUE_VERSION)
-				ereport(ERROR,
-						(errcode(ERRCODE_INDEX_CORRUPTED),
-						 errmsg("invalid Merkle page opaque data during index build")));
-			opaque->last_applied_seq = recovery_status.applied_seq;
-			pageContentBytes = (int) ((char *) PageGetSpecialPointer(page) -
-									  (char *) PageGetContents(page));
+			SET_VARSIZE(root_hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
+			memcpy(VARDATA(root_hash_bytea), root_hash.data, MERKLE_HASH_BYTES);
 
-            for (i = 0; i < nodesThisPage; i++)
-            {
-                nodes[i].nodeId = nodeIdx + i;
-                nodes[i].hash = buildstate.nodeHashes[nodeIdx + i];
-            }
+			values[0] = ObjectIdGetDatum(index_oid);
+			values[1] = PointerGetDatum(root_id_bytea);
+			values[2] = Int16GetDatum((int16) 0);
+			values[3] = Int64GetDatum((int64) buildstate.indtuples);
+			values[4] = PointerGetDatum(root_hash_bytea);
 
-            if (nodesThisPage * (int)sizeof(MerkleNode) < pageContentBytes)
-            {
-                memset(((char *) nodes) + nodesThisPage * sizeof(MerkleNode), 0,
-                       pageContentBytes - nodesThisPage * sizeof(MerkleNode));
-            }
+			SPI_execute_with_args(
+				"INSERT INTO ariabc_internal.merkle_node"
+				" (index_oid, node_id, prefix_len, is_leaf, tuple_count, hash)"
+				" VALUES ($1, $2, $3, true, $4, $5)"
+				" ON CONFLICT (index_oid, node_id, prefix_len) DO UPDATE"
+				"   SET is_leaf = true, tuple_count = EXCLUDED.tuple_count, hash = EXCLUDED.hash",
+				5, argtypes, values, NULL, false, 1);
 
-            MarkBufferDirty(buf);
-            UnlockReleaseBuffer(buf);
+			pfree(root_id_bytea);
+			pfree(root_hash_bytea);
+		}
+		else
+		{
+			bytea *root_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
+			bytea *root_hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
+			Oid argtypes[5] = {OIDOID, BYTEAOID, INT2OID, INT8OID, BYTEAOID};
+			Datum values[5];
 
-            nodeIdx += nodesThisPage;
-        }
-    }
-    
+			SET_VARSIZE(root_id_bytea, VARHDRSZ + 8);
+			memcpy(VARDATA(root_id_bytea), zero_node_id, 8);
+
+			SET_VARSIZE(root_hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
+			memcpy(VARDATA(root_hash_bytea), root_hash.data, MERKLE_HASH_BYTES);
+
+			values[0] = ObjectIdGetDatum(index_oid);
+			values[1] = PointerGetDatum(root_id_bytea);
+			values[2] = Int16GetDatum((int16) 0);
+			values[3] = Int64GetDatum((int64) buildstate.indtuples);
+			values[4] = PointerGetDatum(root_hash_bytea);
+
+			SPI_execute_with_args(
+				"INSERT INTO ariabc_internal.merkle_node"
+				" (index_oid, node_id, prefix_len, is_leaf, tuple_count, hash)"
+				" VALUES ($1, $2, $3, true, $4, $5)"
+				" ON CONFLICT (index_oid, node_id, prefix_len) DO UPDATE"
+				"   SET tuple_count = EXCLUDED.tuple_count, hash = EXCLUDED.hash",
+				5, argtypes, values, NULL, false, 1);
+
+			pfree(root_id_bytea);
+			pfree(root_hash_bytea);
+
+			merkle_do_split_in_memory(index_oid, zero_node_id, 0, buildstate.entries, buildstate.num_entries, buildstate.fanout, buildstate.bits_per_split, buildstate.split_threshold);
+		}
+
+		SPI_finish();
+	}
+
+	if (buildstate.entries)
+		pfree(buildstate.entries);
+
     /*
      * Return statistics
      */
     result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
     result->heap_tuples = reltuples;
     result->index_tuples = buildstate.indtuples;
-    
-    merkle_emit_build_nodes_report(indexRel, &buildstate);
     }
     PG_CATCH();
     {
@@ -483,29 +448,17 @@ merkleBuildempty(Relation indexRel)
     
 	/* Respect reloptions for the defensive INIT-fork path. */
     opts = merkle_get_options(indexRel);
-    numPartitions = opts->partitions;
-    leavesPerPartition = opts->leaves_per_partition;
     fanout = opts->fanout;
 
     if (fanout < 2 || fanout > 1024)
         fanout = MERKLE_DEFAULT_FANOUT;
 
-    nodesPerPartition = (int) (((int64) fanout * (int64) leavesPerPartition - 1) / (fanout - 1));
-
-    nodesPerPage = (int)MERKLE_MAX_NODES_PER_PAGE;
-    totalNodes = numPartitions * nodesPerPartition;
-    numTreePages = (totalNodes + nodesPerPage - 1) / nodesPerPage;
-
     meta = MerklePageGetMeta(metapage);
     meta->version = MERKLE_VERSION;
     meta->heapRelid = InvalidOid;  /* Will be set on first insert */
-    meta->numPartitions = numPartitions;
-    meta->leavesPerPartition = leavesPerPartition;
-    meta->nodesPerPartition = nodesPerPartition;
-    meta->totalNodes = totalNodes;
-    meta->nodesPerPage = nodesPerPage;
-    meta->numTreePages = numTreePages;
     meta->fanout = fanout;
+    meta->split_threshold = opts->split_threshold;
+    meta->merge_threshold = opts->merge_threshold;
 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = recovery_status.managed ?
@@ -526,56 +479,6 @@ merkleBuildempty(Relation indexRel)
               (char *) metapage, true);
     log_newpage(&indexRel->rd_smgr->smgr_rnode.node, INIT_FORKNUM,
                 MERKLE_METAPAGE_BLKNO, metapage, true);
-    
-    /*
-     * Construct and write tree node pages
-     */
-    nodeIdx = 0;
-    for (pageNum = 0; pageNum < numTreePages; pageNum++)
-    {
-        Page        treepage;
-        MerkleNode *nodes;
-        int         nodesThisPage;
-        int         i;
-
-        treepage = (Page) palloc(BLCKSZ);
-		PageInit(treepage, BLCKSZ, MERKLE_PAGE_SPECIAL_SIZE);
-		{
-			MerklePageOpaqueData *opaque = MerklePageGetOpaque(treepage);
-
-			opaque->magic = MERKLE_PAGE_OPAQUE_MAGIC;
-			opaque->version = MERKLE_PAGE_OPAQUE_VERSION;
-			opaque->flags = 0;
-		opaque->last_applied_seq = recovery_status.managed ?
-				recovery_status.applied_seq : 0;
-		}
-        
-        nodes = (MerkleNode *) PageGetContents(treepage);
-		memset(nodes, 0, (char *) PageGetSpecialPointer(treepage) -
-						 (char *) nodes);
-		((PageHeader) treepage)->pd_lower =
-			(LocationIndex) ((char *) nodes +
-							 nodesPerPage * sizeof(MerkleNode) -
-							 (char *) treepage);
-        
-        nodesThisPage = Min(nodesPerPage, totalNodes - nodeIdx);
-        
-        for (i = 0; i < nodesThisPage; i++)
-        {
-            nodes[i].nodeId = nodeIdx + i;
-            merkle_hash_zero(&nodes[i].hash);
-        }
-        
-        nodeIdx += nodesThisPage;
-
-        PageSetChecksumInplace(treepage, MERKLE_TREE_START_BLKNO + pageNum);
-        smgrwrite(indexRel->rd_smgr, INIT_FORKNUM, MERKLE_TREE_START_BLKNO + pageNum,
-                  (char *) treepage, true);
-        log_newpage(&indexRel->rd_smgr->smgr_rnode.node, INIT_FORKNUM,
-                    MERKLE_TREE_START_BLKNO + pageNum, treepage, true);
-        
-        pfree(treepage);
-    }
     
     /*
      * Sync to disk

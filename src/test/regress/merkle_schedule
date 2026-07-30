@@ -1,0 +1,3 @@
+test: merkle_functional_index
+test: merkle_mc
+test: split_merge

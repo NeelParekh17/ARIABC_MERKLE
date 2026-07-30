@@ -285,18 +285,7 @@ CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)
 							 indexInfo->ii_NumIndexKeyAttrs, &route);
 
 			plan.items[plan.count].indexOid = indexOid;
-			if (merkle_is_dynamic_index(indexRel))
-			{
-				memcpy(plan.items[plan.count].key_hash, route.route_digest, 8);
-			}
-			else
-			{
-				memset(plan.items[plan.count].key_hash, 0, 8);
-				plan.items[plan.count].key_hash[0] = (uint8) (route.leaf_id & 0xFF);
-				plan.items[plan.count].key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
-				plan.items[plan.count].key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
-				plan.items[plan.count].key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
-			}
+			memcpy(plan.items[plan.count].key_hash, route.route_digest, 8);
 			plan.items[plan.count].hash = hash;
 			plan.count++;
 		}
@@ -439,19 +428,7 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
 						merkle_compute_route(indexRel, keyValues, keyNulls,
 											 nkeys, &route);
                         
-						if (merkle_is_dynamic_index(indexRel))
-						{
-							merkle_stage_delta_event(indexRel, MERKLE_DELTA_DELETE, route.route_digest, NULL, &hash);
-						}
-						else
-						{
-							uint8 dummy_key_hash[8] = {0};
-							dummy_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
-							dummy_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
-							dummy_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
-							dummy_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
-							merkle_stage_delta_event(indexRel, MERKLE_DELTA_DELETE, dummy_key_hash, NULL, &hash);
-						}
+						merkle_stage_delta_event(indexRel, MERKLE_DELTA_DELETE, route.route_digest, NULL, &hash);
                     }
                 }
                 PG_CATCH();
@@ -535,19 +512,7 @@ ExecInsertMerkleIndexes(Relation heapRel, TupleTableSlot *slot)
             FormIndexDatum(indexInfo, slot, NULL, values, isnull);
 			merkle_compute_route(indexRel, values, isnull,
 							 indexInfo->ii_NumIndexKeyAttrs, &route);
-			if (merkle_is_dynamic_index(indexRel))
-			{
-				merkle_stage_delta_event(indexRel, MERKLE_DELTA_INSERT, NULL, route.route_digest, &hash);
-			}
-			else
-			{
-				uint8 dummy_key_hash[8] = {0};
-				dummy_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
-				dummy_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
-				dummy_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
-				dummy_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
-				merkle_stage_delta_event(indexRel, MERKLE_DELTA_INSERT, NULL, dummy_key_hash, &hash);
-			}
+			merkle_stage_delta_event(indexRel, MERKLE_DELTA_INSERT, NULL, route.route_digest, &hash);
         }
 
         index_close(indexRel, RowExclusiveLock);

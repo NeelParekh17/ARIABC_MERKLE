@@ -1979,17 +1979,7 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
 										 indexInfo->ii_NumIndexKeyAttrs, &route);
 
 					uint8 new_key_hash[8] = {0};
-					if (merkle_is_dynamic_index(indexRel))
-					{
-						memcpy(new_key_hash, route.route_digest, 8);
-					}
-					else
-					{
-						new_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
-						new_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
-						new_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
-						new_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
-					}
+					memcpy(new_key_hash, route.route_digest, 8);
 
 					if (memcmp(pending[i].old_key_hash, new_key_hash, 8) == 0)
 					{
@@ -2162,18 +2152,7 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
 									 indexInfo->ii_NumIndexKeyAttrs, &route);
 
                 pending[pendingCount].indexOid = indexOid;
-				if (merkle_is_dynamic_index(indexRel))
-				{
-					memcpy(pending[pendingCount].old_key_hash, route.route_digest, 8);
-				}
-				else
-				{
-					memset(pending[pendingCount].old_key_hash, 0, 8);
-					pending[pendingCount].old_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
-					pending[pendingCount].old_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
-					pending[pendingCount].old_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
-					pending[pendingCount].old_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
-				}
+				memcpy(pending[pendingCount].old_key_hash, route.route_digest, 8);
 
                 pendingCount++;
             }
@@ -2471,18 +2450,7 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
 									 indexInfo->ii_NumIndexKeyAttrs, &route);
 
                 pending[pendingCount].indexOid = indexOid;
-				if (merkle_is_dynamic_index(indexRel))
-				{
-					memcpy(pending[pendingCount].old_key_hash, route.route_digest, 8);
-				}
-				else
-				{
-					memset(pending[pendingCount].old_key_hash, 0, 8);
-					pending[pendingCount].old_key_hash[0] = (uint8) (route.leaf_id & 0xFF);
-					pending[pendingCount].old_key_hash[1] = (uint8) ((route.leaf_id >> 8) & 0xFF);
-					pending[pendingCount].old_key_hash[2] = (uint8) ((route.leaf_id >> 16) & 0xFF);
-					pending[pendingCount].old_key_hash[3] = (uint8) ((route.leaf_id >> 24) & 0xFF);
-				}
+				memcpy(pending[pendingCount].old_key_hash, route.route_digest, 8);
 
                 pendingCount++;
             }

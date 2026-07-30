@@ -838,11 +838,11 @@ def test_best_scaling_produces_eleven_runs():
 
 def test_best_scaling_rejects_manual_overrides():
     config = _best_scaling_config()
-    with pytest.raises(ValueError, match="do not override geometry"):
+    with pytest.raises(ValueError, match="fixed geometry"):
         _series_for_profile(_best_scaling_args(fanout=4), config)
-    with pytest.raises(ValueError, match="do not override geometry"):
+    with pytest.raises(ValueError, match="fixed geometry"):
         _series_for_profile(_best_scaling_args(leaves_per_partition=256), config)
-    with pytest.raises(ValueError, match="do not override geometry"):
+    with pytest.raises(ValueError, match="fixed geometry"):
         _series_for_profile(_best_scaling_args(partitions=100), config)
     with pytest.raises(ValueError, match="uses fixed --bad-leaf-count=75"):
         _series_for_profile(_best_scaling_args(bad_leaf_count=50), config)

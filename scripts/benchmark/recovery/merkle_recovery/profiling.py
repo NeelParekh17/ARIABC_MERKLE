@@ -30,8 +30,8 @@ class ProfileOperation:
     manifest_sha256: str
     experiment: str
     tuple_count: int
-    partitions: int
-    leaves_per_partition: int
+    split_threshold: int
+    merge_threshold: int
     fanout: int
     profile_label: str
     bad_leaf_count: int
@@ -54,8 +54,8 @@ class ProfileOperation:
             "manifest_sha256": self.manifest_sha256,
             "experiment": self.experiment,
             "tuple_count": self.tuple_count,
-            "partitions": self.partitions,
-            "leaves_per_partition": self.leaves_per_partition,
+            "split_threshold": self.split_threshold,
+            "merge_threshold": self.merge_threshold,
             "fanout": self.fanout,
             "profile_label": self.profile_label,
             "bad_leaf_count": self.bad_leaf_count,
@@ -80,8 +80,8 @@ class ProfileCollector:
     manifest_sha256: str
     experiment: str
     tuple_count: int
-    partitions: int
-    leaves_per_partition: int
+    split_threshold: int
+    merge_threshold: int
     fanout: int
     profile_label: str
     bad_leaf_count: int
@@ -121,8 +121,8 @@ class ProfileCollector:
                 manifest_sha256=self.manifest_sha256,
                 experiment=self.experiment,
                 tuple_count=self.tuple_count,
-                partitions=self.partitions,
-                leaves_per_partition=self.leaves_per_partition,
+                split_threshold=self.split_threshold,
+                merge_threshold=self.merge_threshold,
                 fanout=self.fanout,
                 profile_label=self.profile_label,
                 bad_leaf_count=self.bad_leaf_count,

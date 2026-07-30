@@ -611,6 +611,8 @@ rm -f \
   src/backend/utils/header-stamp \
   src/include/catalog/*_d.h \
   src/backend/catalog/*_d.h
+remote_progress "running make clean to remove any locally-rsynced binaries"
+make clean >/dev/null 2>&1 || true
 remote_progress "generated-headers build started; log: $REMOTE_LOG_DIR/generated_headers.log"
 if make -B -C src/backend generated-headers >"$REMOTE_LOG_DIR/generated_headers.log" 2>&1; then
   remote_progress "generated-headers build completed"

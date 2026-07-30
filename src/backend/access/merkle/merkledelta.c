@@ -19,6 +19,7 @@
 #include "access/xact.h"
 #include "bcdb/globals.h"
 #include "bcdb/shm_transaction.h"
+#include "catalog/index.h"
 #include "catalog/pg_authid_d.h"
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
@@ -28,14 +29,8 @@
 #include "port/pg_crc32c.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
-
-typedef struct MerkleDeltaKey
-{
-	Oid			index_oid;
-	RelFileNode index_rnode;
-	int32		leaf_id;
-} MerkleDeltaKey;
 
 typedef struct MerkleDeltaEntry
 {
@@ -184,7 +179,9 @@ merkle_delta_register_callbacks(void)
 }
 
 void
-merkle_stage_delta(Relation indexRel, int leafId, const MerkleHash *hash)
+merkle_stage_delta_event(Relation indexRel, MerkleDeltaEventType event_type,
+						 const uint8 *old_key_hash, const uint8 *new_key_hash,
+						 const MerkleHash *hash)
 {
 	MerkleSubxactFrame *frame;
 	MerkleDeltaKey key;
@@ -197,7 +194,7 @@ merkle_stage_delta(Relation indexRel, int leafId, const MerkleHash *hash)
 		ereport(ERROR,
 				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
 				 errmsg("Merkle data changes are not allowed after durable delta finalization"),
-				errhint("Terminalize the transaction only after all table changes are complete.")));
+				 errhint("Terminalize the transaction only after all table changes are complete.")));
 	merkle_delta_generation++;
 
 	merkle_delta_register_callbacks();
@@ -206,7 +203,11 @@ merkle_stage_delta(Relation indexRel, int leafId, const MerkleHash *hash)
 	MemSet(&key, 0, sizeof(key));
 	key.index_oid = RelationGetRelid(indexRel);
 	key.index_rnode = indexRel->rd_node;
-	key.leaf_id = leafId;
+	key.event_type = (uint8) event_type;
+	if (old_key_hash != NULL)
+		memcpy(key.old_key_hash, old_key_hash, 8);
+	if (new_key_hash != NULL)
+		memcpy(key.new_key_hash, new_key_hash, 8);
 
 	entry = hash_search(frame->entries, &key, HASH_ENTER, &found);
 	if (!found)
@@ -220,6 +221,8 @@ merkle_stage_delta(Relation indexRel, int leafId, const MerkleHash *hash)
 
 	merkle_crash_failpoint("after_merkle_delta_staged");
 }
+
+
 
 bool
 merkle_has_staged_delta(void)
@@ -248,6 +251,7 @@ merkle_delta_entry_cmp(const void *left, const void *right)
 {
 	const MerkleDeltaEntry *a = (const MerkleDeltaEntry *) left;
 	const MerkleDeltaEntry *b = (const MerkleDeltaEntry *) right;
+	int cmp;
 
 	if (a->key.index_oid != b->key.index_oid)
 		return a->key.index_oid < b->key.index_oid ? -1 : 1;
@@ -257,9 +261,12 @@ merkle_delta_entry_cmp(const void *left, const void *right)
 		return a->key.index_rnode.dbNode < b->key.index_rnode.dbNode ? -1 : 1;
 	if (a->key.index_rnode.relNode != b->key.index_rnode.relNode)
 		return a->key.index_rnode.relNode < b->key.index_rnode.relNode ? -1 : 1;
-	if (a->key.leaf_id != b->key.leaf_id)
-		return a->key.leaf_id < b->key.leaf_id ? -1 : 1;
-	return 0;
+	if (a->key.event_type != b->key.event_type)
+		return a->key.event_type < b->key.event_type ? -1 : 1;
+	cmp = memcmp(a->key.old_key_hash, b->key.old_key_hash, 8);
+	if (cmp != 0)
+		return cmp;
+	return memcmp(a->key.new_key_hash, b->key.new_key_hash, 8);
 }
 
 static void
@@ -342,9 +349,12 @@ merkle_serialize_staged_delta(uint64 raft_log_index, uint32 item_ordinal)
 		merkle_delta_put_u32(dst + 4, sorted[i].key.index_rnode.spcNode);
 		merkle_delta_put_u32(dst + 8, sorted[i].key.index_rnode.dbNode);
 		merkle_delta_put_u32(dst + 12, sorted[i].key.index_rnode.relNode);
-		merkle_delta_put_u32(dst + 16, (uint32) sorted[i].key.leaf_id);
-		merkle_delta_put_u32(dst + 20, MERKLE_VERSION);
-		memcpy(dst + 24, sorted[i].xor_delta.data, MERKLE_HASH_BYTES);
+		dst[16] = (char) sorted[i].key.event_type;
+		memcpy(dst + 17, sorted[i].key.old_key_hash, 8);
+		memcpy(dst + 25, sorted[i].key.new_key_hash, 8);
+		merkle_delta_put_u32(dst + 33, MERKLE_VERSION);
+		memset(dst + 37, 0, 3); /* padding */
+		memcpy(dst + 40, sorted[i].xor_delta.data, MERKLE_HASH_BYTES);
 	}
 
 	merkle_delta_put_u32(header + 0, MERKLE_DELTA_MAGIC);
@@ -494,6 +504,121 @@ merkle_persist_local_delta_impl(void)
 	merkle_crash_failpoint("after_merkle_delta_queue_written");
 }
 
+typedef struct MerklePartNoticeKey
+{
+	Oid index_oid;
+	int partition;
+} MerklePartNoticeKey;
+
+typedef struct MerklePartNoticeEntry
+{
+	MerklePartNoticeKey key;
+	MerkleHash xor_delta;
+} MerklePartNoticeEntry;
+
+static void
+merkle_emit_staged_deltas_notice(void)
+{
+	HTAB	   *combined;
+	MerkleSubxactFrame *frame;
+	HASH_SEQ_STATUS seq;
+	MerkleDeltaEntry *entry;
+	MerklePartNoticeEntry *pentry;
+	StringInfoData out;
+	bool first = true;
+	MemoryContext old_context;
+	HTAB	   *part_map;
+	HASHCTL		ctl;
+
+	if (!merkle_update_detection || !merkle_has_staged_delta())
+		return;
+
+	old_context = MemoryContextSwitchTo(CurrentMemoryContext);
+
+	combined = merkle_delta_create_map(CurrentMemoryContext);
+	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
+	{
+		hash_seq_init(&seq, frame->entries);
+		while ((entry = hash_seq_search(&seq)) != NULL)
+			merkle_delta_merge_one(combined, entry);
+	}
+
+	if (hash_get_num_entries(combined) == 0)
+	{
+		hash_destroy(combined);
+		MemoryContextSwitchTo(old_context);
+		return;
+	}
+
+	MemSet(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(MerklePartNoticeKey);
+	ctl.entrysize = sizeof(MerklePartNoticeEntry);
+	ctl.hcxt = CurrentMemoryContext;
+	part_map = hash_create("MerklePartNoticeMap", 16, &ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	hash_seq_init(&seq, combined);
+	while ((entry = hash_seq_search(&seq)) != NULL)
+	{
+		MerklePartNoticeKey pkey;
+		bool found;
+
+		if (merkle_hash_is_zero(&entry->xor_delta))
+			continue;
+
+		if (!OidIsValid(entry->key.index_oid))
+			continue;
+
+		PG_TRY();
+		{
+			MemSet(&pkey, 0, sizeof(pkey));
+			pkey.index_oid = entry->key.index_oid;
+			pkey.partition = 0;
+
+			pentry = hash_search(part_map, &pkey, HASH_ENTER, &found);
+			if (!found)
+			{
+				pentry->key = pkey;
+				merkle_hash_zero(&pentry->xor_delta);
+			}
+			merkle_hash_xor(&pentry->xor_delta, &entry->xor_delta);
+		}
+		PG_CATCH();
+		{
+			FlushErrorState();
+		}
+		PG_END_TRY();
+	}
+
+	hash_destroy(combined);
+
+	initStringInfo(&out);
+
+	hash_seq_init(&seq, part_map);
+	while ((pentry = hash_seq_search(&seq)) != NULL)
+	{
+		char *hex;
+
+		if (merkle_hash_is_zero(&pentry->xor_delta))
+			continue;
+
+		hex = merkle_hash_to_hex(&pentry->xor_delta);
+		if (!first)
+			appendStringInfoString(&out, " ");
+		appendStringInfo(&out, "(%d, %s)", pentry->key.partition, hex);
+		first = false;
+		pfree(hex);
+	}
+
+	hash_destroy(part_map);
+	MemoryContextSwitchTo(old_context);
+
+	if (!first)
+		ereport(NOTICE,
+				(errmsg("BCDB_MERKLE_ROOTS: %s", out.data)));
+	if (out.data)
+		pfree(out.data);
+}
+
 /* The durable queue is intentionally not writable by PUBLIC.  DML against a
  * Merkle-indexed table still has to work for ordinary table owners, so run
  * this backend-internal SPI mutation under the bootstrap superuser context
@@ -533,8 +658,12 @@ merkle_delta_xact_callback(XactEvent event, void *arg)
 
 	if (event == XACT_EVENT_PRE_COMMIT)
 	{
-		if (merkle_has_staged_delta() && !merkle_staged_delta_persisted)
-			merkle_persist_local_delta();
+		if (merkle_has_staged_delta())
+		{
+			merkle_emit_staged_deltas_notice();
+			if (!merkle_staged_delta_persisted)
+				merkle_persist_local_delta();
+		}
 		return;
 	}
 

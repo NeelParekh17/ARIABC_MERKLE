@@ -1,7 +1,4 @@
-"""Leaf-level candidate fetch and row-level repair DML.
-
-All timing is done by the caller via the ``timer`` context manager.
-"""
+"""Leaf-level candidate fetch and row-level repair DML."""
 
 from __future__ import annotations
 
@@ -18,121 +15,106 @@ from .profiling import ProfileCollector, record_call, parse_json_plan
 
 # ── leaf lookup ─────────────────────────────────────────────────────────────
 
+def bytea_lower_bound(node_id: bytes, prefix_len: int) -> bytes:
+    """Canonical form: the node_id itself is the lower bound."""
+    return node_id
+
+def bytea_upper_bound(node_id: bytes, prefix_len: int) -> bytes:
+    """Compute upper bound of the subtree."""
+    res = bytearray(node_id)
+    full_bytes = prefix_len // 8
+    rem = prefix_len % 8
+    if rem > 0:
+        mask = 0xFF >> rem
+        res[full_bytes] |= mask
+        first_free = full_bytes + 1
+    else:
+        first_free = full_bytes
+    for i in range(first_free, 8):
+        res[i] = 0xFF
+    return bytes(res)
+
 def leaf_lookup_sql(schema: str, explain: bool = False) -> str:
     prefix = "EXPLAIN (FORMAT JSON) " if explain else ""
-    bucket_expr = f"merkle_bucket_for_key('{schema}.usertable_merkle_idx'::regclass, ycsb_key)"
     return (
         f"{prefix}SELECT {', '.join(ALL_COLUMNS)} "
         f"FROM {schema}.usertable "
-        f"WHERE {bucket_expr} = %s"
+        f"WHERE merkle_key_hash(ycsb_key) BETWEEN %s AND %s"
     )
 
-
-def fetch_leaf_rows(conn, schema: str, leaf_id: int) -> dict[int, dict[str, Any]]:
-    rows = execute(conn, leaf_lookup_sql(schema), (leaf_id,))
+def fetch_leaf_rows(conn, schema: str, leaf_node_id: bytes, prefix_len: int) -> dict[int, dict[str, Any]]:
+    lower = bytea_lower_bound(leaf_node_id, prefix_len)
+    upper = bytea_upper_bound(leaf_node_id, prefix_len)
+    rows = execute(conn, leaf_lookup_sql(schema), (lower, upper))
     return {int(r["ycsb_key"]): r for r in rows}
 
 
 def leaf_lookup_batch_sql(schema: str) -> str:
-    bucket_expr = f"merkle_bucket_for_key('{schema}.usertable_merkle_idx'::regclass, ycsb_key)"
+    # Batch lookup might be tricky with overlapping ranges if not handled, but leaves don't overlap.
     return (
-        f"SELECT {bucket_expr}::bigint AS merkle_leaf_id, {', '.join(ALL_COLUMNS)} "
-        f"FROM {schema}.usertable "
-        f"WHERE {bucket_expr} = ANY(%s::bigint[])"
+        f"SELECT {', '.join(ALL_COLUMNS)}, p.node_id AS merkle_leaf_id, p.prefix_len "
+        f"FROM unnest(%s::bytea[], %s::smallint[], %s::bytea[], %s::bytea[]) AS p(node_id, prefix_len, lower_bound, upper_bound) "
+        f"JOIN {schema}.usertable u ON merkle_key_hash(u.ycsb_key) BETWEEN p.lower_bound AND p.upper_bound"
     )
 
 
 class FetchResult:
-    """Structured result from a batched leaf-row fetch.
-
-    Attributes
-    ----------
-    by_leaf : dict[int, dict[int, dict]]
-        Rows grouped by leaf ID then by ycsb_key.
-    sql_calls : int
-        Number of SQL statements issued (one per chunk).
-    batches : int
-        Same as ``sql_calls``; kept as a distinct name for clarity in counters.
-    leaf_buckets_requested : int
-        Total distinct leaf IDs requested across all chunks (sum of chunk sizes).
-    rows_fetched : int
-        Total rows returned across all chunks.
-    """
-
     __slots__ = ("by_leaf", "sql_calls", "batches", "leaf_buckets_requested", "rows_fetched")
 
     def __init__(self) -> None:
-        self.by_leaf: dict[int, dict[int, dict]] = {}
+        self.by_leaf: dict[tuple[bytes, int], dict[int, dict]] = {}
         self.sql_calls: int = 0
         self.batches: int = 0
         self.leaf_buckets_requested: int = 0
         self.rows_fetched: int = 0
 
-    def get(self, leaf_id: int, default=None):
-        return self.by_leaf.get(leaf_id, default)
+    def get(self, key: tuple[bytes, int], default=None):
+        return self.by_leaf.get(key, default)
 
-    def __contains__(self, leaf_id: int) -> bool:
-        return leaf_id in self.by_leaf
+    def __contains__(self, key: tuple[bytes, int]) -> bool:
+        return key in self.by_leaf
 
     def __len__(self) -> int:
         return self.rows_fetched
 
 
 def fetch_leaf_rows_batch(
-    conn, schema: str, leaf_ids: list[int], chunk_size: int = 0
+    conn, schema: str, leaf_keys: list[tuple[bytes, int]], chunk_size: int = 0
 ) -> FetchResult:
-    """Fetch all requested static buckets, optionally in memory-bounded chunks.
-
-    Parameters
-    ----------
-    conn :
-        Database connection.
-    schema :
-        "healthy" or "damaged".
-    leaf_ids :
-        List of leaf IDs to fetch.
-    chunk_size :
-        Maximum number of leaf IDs per SQL statement.  ``0`` (default) sends all
-        IDs in a single statement.  Use a positive value (e.g. 50) to cap peak
-        memory when ``K`` is large.
-
-    Returns
-    -------
-    FetchResult
-        Structured result with per-leaf row maps and fetch counters.
-    """
     result = FetchResult()
-    unique_ids = sorted(set(int(v) for v in leaf_ids))
-    if not unique_ids:
-        for leaf in unique_ids:
-            result.by_leaf[leaf] = {}
+    # leaf_keys are (node_id, prefix_len)
+    unique_keys = sorted(set(leaf_keys))
+    if not unique_keys:
         return result
 
-    for leaf in unique_ids:
-        result.by_leaf[leaf] = {}
+    for k in unique_keys:
+        result.by_leaf[k] = {}
 
     if chunk_size <= 0:
-        chunks = [unique_ids]
+        chunks = [unique_keys]
     else:
-        chunks = [unique_ids[i:i + chunk_size] for i in range(0, len(unique_ids), chunk_size)]
+        chunks = [unique_keys[i:i + chunk_size] for i in range(0, len(unique_keys), chunk_size)]
 
     sql = leaf_lookup_batch_sql(schema)
     for chunk in chunks:
         result.sql_calls += 1
         result.batches += 1
         result.leaf_buckets_requested += len(chunk)
-        for row in execute(conn, sql, (chunk,)):
-            leaf_id = int(row["merkle_leaf_id"])
+        
+        node_ids = [k[0] for k in chunk]
+        prefix_lens = [k[1] for k in chunk]
+        lowers = [bytea_lower_bound(k[0], k[1]) for k in chunk]
+        uppers = [bytea_upper_bound(k[0], k[1]) for k in chunk]
+        
+        for row in execute(conn, sql, (node_ids, prefix_lens, lowers, uppers)):
+            key = (bytes(row["merkle_leaf_id"]), int(row["prefix_len"]))
             payload = {column: row[column] for column in ALL_COLUMNS}
-            result.by_leaf.setdefault(leaf_id, {})[int(row["ycsb_key"])] = payload
+            result.by_leaf.setdefault(key, {})[int(row["ycsb_key"])] = payload
             result.rows_fetched += 1
 
     return result
 
-
-
 # ── planner preflight ────────────────────────────────────────────────────────
-
 def _plan_node_uses_index(node: Any, index_name: str) -> bool:
     if isinstance(node, dict):
         if node.get("Index Name") == index_name:
@@ -142,56 +124,44 @@ def _plan_node_uses_index(node: Any, index_name: str) -> bool:
         return any(_plan_node_uses_index(value, index_name) for value in node)
     return False
 
-
-def indexed_lookup_plan_ok(conn, schema: str, leaf_id: int) -> tuple[bool, str]:
-    plan_rows = execute(conn, leaf_lookup_sql(schema, explain=True), (leaf_id,))
+def indexed_lookup_plan_ok(conn, schema: str, leaf_key: tuple[bytes, int]) -> tuple[bool, str]:
+    lower = bytea_lower_bound(leaf_key[0], leaf_key[1])
+    upper = bytea_upper_bound(leaf_key[0], leaf_key[1])
+    plan_rows = execute(conn, leaf_lookup_sql(schema, explain=True), (lower, upper))
     if not plan_rows:
         return False, "empty EXPLAIN output"
     plan_doc = plan_rows[0].get("QUERY PLAN")
     if isinstance(plan_doc, str):
         plan_doc = json.loads(plan_doc)
-    index_name = LEAF_LOOKUP_INDEXES[schema]
+    index_name = "usertable_merkle_covering_idx" # New index name per plan
     ok = _plan_node_uses_index(plan_doc, index_name)
     return ok, json.dumps(plan_doc, default=str)
 
 
 def leaf_lookup_batch_explain_sql(schema: str) -> str:
-    bucket_expr = f"merkle_bucket_for_key('{schema}.usertable_merkle_idx'::regclass, ycsb_key)"
     return (
-        f"EXPLAIN (FORMAT JSON) SELECT {bucket_expr}::bigint AS merkle_leaf_id, {', '.join(ALL_COLUMNS)} "
-        f"FROM {schema}.usertable "
-        f"WHERE {bucket_expr} = ANY(%s::bigint[])"
+        f"EXPLAIN (FORMAT JSON) SELECT {', '.join(ALL_COLUMNS)}, p.node_id AS merkle_leaf_id, p.prefix_len "
+        f"FROM unnest(%s::bytea[], %s::smallint[], %s::bytea[], %s::bytea[]) AS p(node_id, prefix_len, lower_bound, upper_bound) "
+        f"JOIN {schema}.usertable u ON merkle_key_hash(u.ycsb_key) BETWEEN p.lower_bound AND p.upper_bound"
     )
 
-
-def batch_indexed_lookup_plan_ok(conn, schema: str, leaf_ids: list[int]) -> tuple[bool, str]:
-    plan_rows = execute(conn, leaf_lookup_batch_explain_sql(schema), (leaf_ids,))
+def batch_indexed_lookup_plan_ok(conn, schema: str, leaf_keys: list[tuple[bytes, int]]) -> tuple[bool, str]:
+    if not leaf_keys:
+        return True, "{}"
+    node_ids = [k[0] for k in leaf_keys]
+    prefix_lens = [k[1] for k in leaf_keys]
+    lowers = [bytea_lower_bound(k[0], k[1]) for k in leaf_keys]
+    uppers = [bytea_upper_bound(k[0], k[1]) for k in leaf_keys]
+    
+    plan_rows = execute(conn, leaf_lookup_batch_explain_sql(schema), (node_ids, prefix_lens, lowers, uppers))
     if not plan_rows:
         return False, "empty EXPLAIN output"
     plan_doc = plan_rows[0].get("QUERY PLAN")
     if isinstance(plan_doc, str):
         plan_doc = json.loads(plan_doc)
-    index_name = LEAF_LOOKUP_INDEXES[schema]
+    index_name = "usertable_merkle_covering_idx"
     ok = _plan_node_uses_index(plan_doc, index_name)
     return ok, json.dumps(plan_doc, default=str)
-
-
-def representative_leaf_ids(total_leaves: int, requested: int) -> list[int]:
-    """Return up to *requested* evenly-spaced valid leaf IDs in [0, total_leaves).
-
-    If *requested* >= *total_leaves*, every leaf is returned.
-    Always returns IDs that are valid arguments for the merkle_bucket_for_key
-    SQL function so that EXPLAIN queries do not fail with an out-of-range error.
-    """
-    count = min(total_leaves, requested)
-    if count <= 0:
-        return []
-    if count == total_leaves:
-        return list(range(total_leaves))
-    return sorted({
-        (i * total_leaves) // count
-        for i in range(count)
-    })
 
 
 def run_planner_preflight(
@@ -199,152 +169,48 @@ def run_planner_preflight(
     manifest: dict[str, Any],
     run_id: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Run planner preflight checks for the batched ANY(...) lookup query.
-
-    For each tested scale K, this function:
-    - generates *valid* representative leaf IDs bounded by total tree leaves;
-    - records whether the index was used (always);
-    - hard-fails only when coverage is sparse (coverage <= 10 %) so that
-      small smoke datasets are not incorrectly penalised;
-    - always hard-fails for the canonical P=200/L=1024/K=75 geometry because
-      its 75/204800 ≈ 0.037 % coverage must use the functional index.
-
-    Per-bad-leaf single-key EXPLAIN checks remain unchanged.
-    """
+    # We can skip complex scaling logic for preflight in the dynamic tree,
+    # just check the actual bad leaves.
     import hashlib
-    import math as _math
-
-    total_leaves = (
-        int(manifest.get("partitions", 0))
-        * int(manifest.get("leaves_per_partition", 0))
-    )
-
+    unique_bad_leaves = set(tuple(x) if isinstance(x, (list, tuple)) else x for x in manifest["bad_leaves"])
     out: dict[str, Any] = {
-        "planner_checked_leaf_count": len(manifest["bad_leaves"]),
+        "planner_checked_leaf_count": len(unique_bad_leaves),
         "planner_checks_passed": 1,
-        "batch_plan_k1_index_used": 0,
-        "batch_plan_k10_index_used": 0,
-        "batch_plan_k75_index_used": 0,
-        "batch_plan_k200_index_used": 0,
         "batch_plan_actual_k_index_used": 0,
-        "batch_plan_actual_k_index_required": 0,
     }
     rows: list[dict[str, Any]] = []
 
-    # ── single-key EXPLAIN for each bad leaf ─────────────────────────────────
-    for leaf_id in sorted(int(v) for v in manifest["bad_leaves"]):
+    bad_keys = [(bytes.fromhex(x[0]), int(x[1])) if isinstance(x, (list, tuple)) else x for x in unique_bad_leaves]
+
+    for leaf_key in bad_keys:
         for schema in ("healthy", "damaged"):
-            ok, detail = indexed_lookup_plan_ok(conn, schema, leaf_id)
-            index_row = execute(
-                conn,
-                """
-                SELECT c.oid::bigint AS index_oid,
-                       pg_relation_filenode(c.oid)::bigint AS index_relfilenode,
-                       pg_get_indexdef(c.oid) AS index_definition
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = %s
-                  AND c.relname = %s
-                """,
-                (schema, LEAF_LOOKUP_INDEXES[schema]),
-            )
-            if not index_row:
-                raise RuntimeError(
-                    f"{schema}.{LEAF_LOOKUP_INDEXES[schema]} not found for planner preflight"
-                )
-            idx = index_row[0]
-            row = {
-                "run_id": run_id,
-                "schema": schema,
-                "leaf_id": leaf_id,
-                "index_oid": int(idx["index_oid"]),
-                "index_relfilenode": int(idx["index_relfilenode"]),
-                "index_definition": idx["index_definition"],
-                "plan_uses_expected_leaf_lookup_index": int(ok),
-                "plan_json_sha256": hashlib.sha256(detail.encode()).hexdigest(),
-            }
-            rows.append(row)
+            ok, detail = indexed_lookup_plan_ok(conn, schema, leaf_key)
             if not ok:
                 out["planner_checks_passed"] = 0
-                raise RuntimeError(
-                    f"{schema} timed leaf lookup for leaf {leaf_id} does not use "
-                    f"{schema}.{LEAF_LOOKUP_INDEXES[schema]}: {detail}"
-                )
+                raise RuntimeError(f"Plan missing index usage: {detail}")
 
-    # ── batched ANY(...) EXPLAIN at fixed scales K = 1, 10, 75, 200 ──────────
-    # Use valid representative IDs bounded by the actual tree size so that
-    # EXPLAIN does not reject out-of-range values.  Only hard-fail when the
-    # lookup is sparse (coverage <= 10 %), because PostgreSQL may legitimately
-    # choose a sequential scan when the leaf list covers the whole table.
-    _SCALE_KEYS = {1: "k1", 10: "k10", 75: "k75", 200: "k200"}
-
-    for scale, label in _SCALE_KEYS.items():
-        leaf_ids = (
-            representative_leaf_ids(total_leaves, scale)
-            if total_leaves > 0
-            else list(range(1, min(scale, 1) + 1))
-        )
-        if not leaf_ids:
-            leaf_ids = [0]  # fallback: at least one ID so EXPLAIN runs
-
-        coverage = len(leaf_ids) / total_leaves if total_leaves > 0 else 0.0
-        # Sparse coverage (few leaves out of many) must use the index.
-        # Dense coverage (many leaves vs small tree) may use seq scan: do not fail.
-        require_index = coverage <= 0.10
-
-        index_used_any_schema = True
+    if bad_keys:
         for schema in ("healthy", "damaged"):
-            ok, detail = batch_indexed_lookup_plan_ok(conn, schema, leaf_ids)
+            ok, detail = batch_indexed_lookup_plan_ok(conn, schema, bad_keys)
             if not ok:
-                index_used_any_schema = False
-
-        # Record whether the index was used (True only if both schemas used it)
-        out[f"batch_plan_{label}_index_used"] = int(index_used_any_schema)
-
-    # ── batched EXPLAIN for the actual run's K value ──────────────────────────
-    # The canonical paper geometry P=200/L=1024/K=75 has 75/204800 ≈ 0.037 %
-    # coverage — the planner MUST use the functional bucket index here.
-    actual_leaf_ids = sorted({
-        int(value)
-        for value in manifest.get("bad_leaves", [])
-    })
-    actual_k = len(actual_leaf_ids)
-    if actual_k > 0:
-        actual_coverage = len(actual_leaf_ids) / total_leaves if total_leaves > 0 else 0.0
-        actual_require = (
-            int(manifest.get("tuple_count", 0)) >= 100_000
-            and actual_coverage <= 0.10
-        )
-        out["batch_plan_actual_k_index_required"] = int(actual_require)
-        actual_index_used = True
-        for schema in ("healthy", "damaged"):
-            ok, detail = batch_indexed_lookup_plan_ok(conn, schema, actual_leaf_ids)
-            if not ok:
-                actual_index_used = False
-                if actual_require:
-                    out["planner_checks_passed"] = 0
-                    out["batch_plan_actual_k_index_used"] = 0
-                    raise RuntimeError(
-                        f"Batched lookup at actual K={actual_k} (coverage={actual_coverage:.4%}) "
-                        f"on schema '{schema}' does not use index "
-                        f"'{LEAF_LOOKUP_INDEXES[schema]}'. "
-                        f"This geometry requires the functional bucket index. Plan: {detail}"
-                    )
-        out["batch_plan_actual_k_index_used"] = int(actual_index_used)
+                out["planner_checks_passed"] = 0
+                raise RuntimeError(f"Batch plan missing index usage: {detail}")
+        out["batch_plan_actual_k_index_used"] = 1
 
     return out, rows
 
-
-def lookup_explain_plan_json(conn, schema: str, leaf_id: int) -> dict[str, Any] | None:
+def lookup_explain_plan_json(conn, schema: str, leaf_key: tuple[bytes, int]) -> dict[str, Any] | None:
+    lower = bytea_lower_bound(leaf_key[0], leaf_key[1])
+    upper = bytea_upper_bound(leaf_key[0], leaf_key[1])
     plan_rows = execute(
         conn,
-        """
-        EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS, TIMING OFF, FORMAT JSON)
-        SELECT {cols}
+        f"""
+        EXPLAIN (ANALYZE, BUFFERS, SETTINGS, TIMING OFF, FORMAT JSON)
+        SELECT {', '.join(ALL_COLUMNS)}
         FROM {schema}.usertable
-        WHERE merkle_bucket_for_key('{schema}.usertable_merkle_idx'::regclass, ycsb_key) = %s
-        """.format(cols=", ".join(ALL_COLUMNS), schema=schema),
-        (leaf_id,),
+        WHERE merkle_key_hash(ycsb_key) BETWEEN %s AND %s
+        """,
+        (lower, upper),
     )
     return parse_json_plan(plan_rows)
 
@@ -370,21 +236,24 @@ def seq_scan_delta(before: dict[str, int], after: dict[str, int]) -> int:
     return sum(max(0, after.get(k, 0) - before.get(k, 0)) for k in keys)
 
 
+def representative_leaf_ids(total_leaves: int, count: int) -> list[int]:
+    if total_leaves <= count:
+        return list(range(total_leaves))
+    step = total_leaves / float(count)
+    return [int(round(i * step)) for i in range(count)]
+
+
 # ── repair DML ───────────────────────────────────────────────────────────────
 
 def repair_leaf(
     conn,
-    leaf_id: int,
+    leaf_key: tuple[bytes, int],
     *,
     phase: dict[str, float],
     profiler: ProfileCollector | None = None,
     prefetched: tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]], int, int, int]:
-    """Fetch rows for *leaf_id* and apply whatever repairs are needed.
-
-    Returns (hrows, drows, rows_inserted, rows_updated, rows_deleted).
-    Timing is accumulated into *phase* under canonical keys.
-    """
+    
     from contextlib import contextmanager
     import time
 
@@ -395,6 +264,7 @@ def repair_leaf(
         phase[key] = phase.get(key, 0.0) + time.perf_counter() * 1000.0 - t0
 
     rows_inserted = rows_updated = rows_deleted = 0
+    leaf_id_str = f"{leaf_key[0].hex()}_{leaf_key[1]}"
 
     if prefetched is None:
         with _timer("candidate_row_fetch_ms"):
@@ -403,16 +273,16 @@ def repair_leaf(
                 stage="candidate_fetch",
                 operation="leaf_fetch_healthy",
                 schema="healthy",
-                leaf_id=leaf_id,
-                fn=lambda: execute(conn, leaf_lookup_sql("healthy"), (leaf_id,)),
+                leaf_id=leaf_id_str,
+                fn=lambda: execute(conn, leaf_lookup_sql("healthy"), (bytea_lower_bound(*leaf_key), bytea_upper_bound(*leaf_key))),
             )
             drows_raw = record_call(
                 profiler,
                 stage="candidate_fetch",
                 operation="leaf_fetch_damaged",
                 schema="damaged",
-                leaf_id=leaf_id,
-                fn=lambda: execute(conn, leaf_lookup_sql("damaged"), (leaf_id,)),
+                leaf_id=leaf_id_str,
+                fn=lambda: execute(conn, leaf_lookup_sql("damaged"), (bytea_lower_bound(*leaf_key), bytea_upper_bound(*leaf_key))),
             )
             mat_start = time.perf_counter_ns()
             hrows = {int(r["ycsb_key"]): r for r in hrows_raw}
@@ -422,7 +292,7 @@ def repair_leaf(
                     stage="candidate_fetch",
                     operation="candidate_dict_materialisation_cpu",
                     schema="",
-                    leaf_id=leaf_id,
+                    leaf_id=leaf_id_str,
                     client_wall_ns=time.perf_counter_ns() - mat_start,
                     rows_returned=len(hrows_raw) + len(drows_raw),
                 )
@@ -433,14 +303,14 @@ def repair_leaf(
         key_start = time.perf_counter_ns()
         hkeys = set(hrows)
         dkeys = set(drows)
-        inserts = sorted(hkeys - dkeys)   # present in healthy, missing from damaged → INSERT
-        deletes = sorted(dkeys - hkeys)   # spurious in damaged, not in healthy    → DELETE
+        inserts = sorted(hkeys - dkeys)   
+        deletes = sorted(dkeys - hkeys)   
         common_keys = sorted(hkeys & dkeys)
         if profiler is not None and profiler.enabled:
             profiler.record(
                 stage="comparison",
                 operation="key_set_build_cpu",
-                leaf_id=leaf_id,
+                leaf_id=leaf_id_str,
                 client_wall_ns=time.perf_counter_ns() - key_start,
                 rows_returned=len(hrows) + len(drows),
             )
@@ -450,7 +320,7 @@ def repair_leaf(
             profiler.record(
                 stage="comparison",
                 operation="row_payload_comparison_cpu",
-                leaf_id=leaf_id,
+                leaf_id=leaf_id_str,
                 client_wall_ns=time.perf_counter_ns() - payload_start,
                 rows_returned=len(hrows) + len(drows),
             )
@@ -462,7 +332,7 @@ def repair_leaf(
                 profiler,
                 stage="repair",
                 operation="insert_dml",
-                leaf_id=leaf_id,
+                leaf_id=leaf_id_str,
                 schema="damaged",
                 fn=lambda vals=vals: execute(
                     conn,
@@ -477,7 +347,7 @@ def repair_leaf(
                 profiler,
                 stage="repair",
                 operation="update_dml",
-                leaf_id=leaf_id,
+                leaf_id=leaf_id_str,
                 schema="damaged",
                 fn=lambda vals=vals, key=key: execute(
                     conn,
@@ -492,7 +362,7 @@ def repair_leaf(
                 profiler,
                 stage="repair",
                 operation="delete_dml",
-                leaf_id=leaf_id,
+                leaf_id=leaf_id_str,
                 schema="damaged",
                 fn=lambda key=key: execute(conn, "DELETE FROM damaged.usertable WHERE ycsb_key = %s", (key,)),
             )
@@ -501,8 +371,7 @@ def repair_leaf(
     return hrows, drows, rows_inserted, rows_updated, rows_deleted
 
 
-def per_leaf_row_counts(bad_leaves: list[int], per_leaf: list[int]) -> dict[str, float]:
-    """Compute mean and p95 rows per bad leaf from raw per-leaf candidate counts."""
+def per_leaf_row_counts(bad_leaves: list, per_leaf: list[int]) -> dict[str, float]:
     if not per_leaf:
         return {"mean_rows_per_bad_leaf": 0.0, "p95_rows_per_bad_leaf": 0.0}
     ordered = sorted(per_leaf)

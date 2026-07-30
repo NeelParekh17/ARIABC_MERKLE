@@ -31,17 +31,7 @@
 #include "access/xact.h"
 #include "portability/instr_time.h"
 
-static bool
-merkle_is_power_of(int value, int base)
-{
-    if (value < 1 || base < 2)
-        return false;
 
-    while ((value % base) == 0)
-        value /= base;
-
-    return (value == 1);
-}
 
 /*
  * Per-backend, per-transaction cache of merkle metapage values.
@@ -59,14 +49,9 @@ merkle_is_power_of(int value, int base)
 #define MERKLE_META_CACHE_SLOTS 4
 typedef struct MerkleMetaCacheEntry {
     Oid  relid;              /* InvalidOid => empty slot */
-    int  numPartitions;
-    int  leavesPerPartition;
-    int  nodesPerPartition;
-    int  totalNodes;
-    int  totalLeaves;
-    int  nodesPerPage;
-    int  numTreePages;
     int  fanout;
+    int  split_threshold;
+    int  merge_threshold;
 } MerkleMetaCacheEntry;
 static MerkleMetaCacheEntry merkle_meta_cache[MERKLE_META_CACHE_SLOTS];
 static bool merkle_meta_cache_registered = false;
@@ -102,10 +87,7 @@ merkle_meta_cache_lookup(Oid relid)
 }
 
 static void
-merkle_meta_cache_store(Oid relid,
-                        int numPartitions, int leavesPerPartition,
-                        int nodesPerPartition, int totalNodes, int totalLeaves,
-                        int nodesPerPage, int numTreePages, int fanout)
+merkle_meta_cache_store(Oid relid, int fanout, int split_threshold, int merge_threshold)
 {
     int i;
     /* LRU-ish: replace first empty slot, else replace slot 0. */
@@ -120,15 +102,10 @@ merkle_meta_cache_store(Oid relid,
         RegisterXactCallback(merkle_meta_cache_xact_callback, NULL);
         merkle_meta_cache_registered = true;
     }
-    merkle_meta_cache[target].relid              = relid;
-    merkle_meta_cache[target].numPartitions      = numPartitions;
-    merkle_meta_cache[target].leavesPerPartition = leavesPerPartition;
-    merkle_meta_cache[target].nodesPerPartition  = nodesPerPartition;
-    merkle_meta_cache[target].totalNodes         = totalNodes;
-    merkle_meta_cache[target].totalLeaves        = totalLeaves;
-    merkle_meta_cache[target].nodesPerPage       = nodesPerPage;
-    merkle_meta_cache[target].numTreePages       = numTreePages;
-    merkle_meta_cache[target].fanout             = fanout;
+    merkle_meta_cache[target].relid           = relid;
+    merkle_meta_cache[target].fanout          = fanout;
+    merkle_meta_cache[target].split_threshold = split_threshold;
+    merkle_meta_cache[target].merge_threshold = merge_threshold;
 }
 
 /*
@@ -445,87 +422,14 @@ merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
 }
 
 /*
- * merkle_geometry_from_index() - Load and validate one authoritative geometry.
- */
-void
-merkle_geometry_from_index(Relation indexRel, MerkleGeometry *geometry)
-{
-	if (geometry == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("merkle geometry output cannot be null")));
-
-	merkle_read_meta(indexRel, &geometry->num_partitions,
-					 &geometry->leaves_per_partition,
-					 &geometry->nodes_per_partition,
-					 &geometry->total_nodes, &geometry->total_leaves,
-					 NULL, NULL, &geometry->fanout);
-	geometry->leaf_start = geometry->nodes_per_partition -
-		geometry->leaves_per_partition + 1;
-}
-
-int
-merkle_geometry_global_node(const MerkleGeometry *geometry, int partition,
-							int node_in_partition)
-{
-	if (geometry == NULL || partition < 0 ||
-		partition >= geometry->num_partitions || node_in_partition < 1 ||
-		node_in_partition > geometry->nodes_per_partition)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("invalid Merkle node coordinates (%d, %d)",
-						partition, node_in_partition)));
-
-	return partition * geometry->nodes_per_partition + node_in_partition - 1;
-}
-
-int
-merkle_geometry_leaf_node(const MerkleGeometry *geometry, int leaf_id)
-{
-	if (geometry == NULL || leaf_id < 0 || leaf_id >= geometry->total_leaves)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("Merkle leaf ID %d is out of range", leaf_id)));
-
-	return geometry->leaf_start + (leaf_id % geometry->leaves_per_partition);
-}
-
-int
-merkle_geometry_parent_node(const MerkleGeometry *geometry,
-							int node_in_partition)
-{
-	if (geometry == NULL || node_in_partition <= 1 ||
-		node_in_partition > geometry->nodes_per_partition)
-		return 0;
-	return (node_in_partition + geometry->fanout - 2) / geometry->fanout;
-}
-
-int
-merkle_geometry_child_node(const MerkleGeometry *geometry,
-						   int node_in_partition, int child_ordinal)
-{
-	int child;
-
-	if (geometry == NULL || node_in_partition < 1 ||
-		node_in_partition >= geometry->leaf_start || child_ordinal < 0 ||
-		child_ordinal >= geometry->fanout)
-		return 0;
-	child = geometry->fanout * (node_in_partition - 1) + child_ordinal + 2;
-	return child <= geometry->nodes_per_partition ? child : 0;
-}
-
-/*
  * merkle_compute_route() - Single relation-aware routing entry point.
  *
- * All key types use uniform BLAKE3-256 routing (route format version 2).
- * The 64-bit static_route_value is derived from the first 8 bytes of the digest;
- * the full 256-bit digest is available for future dynamic tree traversal.
+ * All key types use uniform BLAKE3-256 routing (route format version 4).
  */
 void
 merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 					 MerkleRoute *result)
 {
-	MerkleGeometry geometry;
 	TupleDesc		tupdesc;
 	uint64			static_route_value = 0;
 	int				i;
@@ -535,7 +439,6 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("merkle route output cannot be null")));
 
-	merkle_geometry_from_index(indexRel, &geometry);
 	tupdesc = RelationGetDescr(indexRel);
 
 	/* Uniform BLAKE3 routing for all key types including integers. */
@@ -545,114 +448,25 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 		static_route_value = (static_route_value << 8) | result->route_digest[i];
 
 	result->static_route_value = static_route_value;
-	result->leaf_id = (int) (static_route_value % (uint64) geometry.total_leaves);
-	result->partition_id = result->leaf_id / geometry.leaves_per_partition;
-	result->node_in_partition = merkle_geometry_leaf_node(&geometry,
-													 result->leaf_id);
-}
-
-/*
- * merkle_update_tree_path() - Stage one committed-delta leaf change.
- *
- * User transactions never mutate Merkle pages.  The transaction-local delta
- * map is serialized atomically with the heap/ledger change, and the ordered
- * applier is the only normal-runtime page mutator.
- */
-void
-merkle_update_tree_path(Relation indexRel, int leafId, MerkleHash *hash, bool isXorIn)
-{
-	MerkleGeometry geometry;
-	bool			profile_enabled = merkle_recovery_profile_enabled;
-	instr_time	start_time;
-	instr_time	elapsed_time;
-	uint64		nodes_touched = 0;
-	int			node_in_partition;
-
-	(void) isXorIn;
-
-	if (profile_enabled)
-	{
-		INSTR_TIME_SET_CURRENT(start_time);
-		merkle_recovery_profile_state.tree_path_update_calls++;
-	}
-	if (indexRel == NULL || hash == NULL || merkle_hash_is_zero(hash))
-		return;
-
-	/* Route computation already loaded this geometry, so this is a cache hit in
-	 * the normal insert path.  Keep the validation here for direct AM callers. */
-	merkle_geometry_from_index(indexRel, &geometry);
-	if (leafId < 0 || leafId >= geometry.total_leaves)
-		ereport(ERROR,
-				(errcode(ERRCODE_INDEX_CORRUPTED),
-				 errmsg("merkle_update_tree_path: leafId %d out of range [0,%d)",
-						leafId, geometry.total_leaves)));
-
-	/* Preserve the profiler's logical path metric without touching buffers.
-	 * Keep this traversal out of the normal synchronous DML path when profiling
-	 * is disabled; the staged delta itself is the only required work here. */
-	if (profile_enabled)
-	{
-		node_in_partition = merkle_geometry_leaf_node(&geometry, leafId);
-		while (node_in_partition > 0)
-		{
-			nodes_touched++;
-			node_in_partition = merkle_geometry_parent_node(&geometry,
-											 node_in_partition);
-		}
-	}
-
-	merkle_stage_delta(indexRel, leafId, hash);
-
-	if (profile_enabled)
-	{
-		INSTR_TIME_SET_CURRENT(elapsed_time);
-		INSTR_TIME_SUBTRACT(elapsed_time, start_time);
-		merkle_recovery_profile_state.tree_path_nodes_touched += nodes_touched;
-		INSTR_TIME_ADD(merkle_recovery_profile_state.tree_path_update_time,
-						   elapsed_time);
-	}
 }
 
 /*
  * merkle_read_meta() - Read tree configuration from index metadata
- *
- * This reads the metadata page and returns the tree configuration.
- * Handles backward compatibility: if nodesPerPage is 0 (old format index),
- * we compute the values from the stored configuration.
- * 
- * Handles backward compatibility: if nodesPerPage is 0 (old format index),
- * we compute the values from the stored configuration.
  */
 void
-merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
-                 int *nodesPerPartition, int *totalNodes, int *totalLeaves,
-                 int *nodesPerPage, int *numTreePages,
-                 int *fanout)
+merkle_read_meta(Relation indexRel, int *fanout,
+				 int *split_threshold, int *merge_threshold)
 {
-    Buffer              buf;
-    Page                page;
-    MerkleMetaPageData *meta;
-    int                 effectiveFanout;
-    Oid                 cache_relid = RelationGetRelid(indexRel);
-    const MerkleMetaCacheEntry *cached = merkle_meta_cache_lookup(cache_relid);
+	Buffer              buf;
+	Page                page;
+	MerkleMetaPageData *meta;
+	Oid                 cache_relid = RelationGetRelid(indexRel);
+	/* Always read fresh metapage from relation buffer pool for 100% accuracy */
 
-    if (cached != NULL)
-    {
-        if (numPartitions)      *numPartitions      = cached->numPartitions;
-        if (leavesPerPartition) *leavesPerPartition = cached->leavesPerPartition;
-        if (nodesPerPartition)  *nodesPerPartition  = cached->nodesPerPartition;
-        if (totalNodes)         *totalNodes         = cached->totalNodes;
-        if (totalLeaves)        *totalLeaves        = cached->totalLeaves;
-        if (nodesPerPage)       *nodesPerPage       = cached->nodesPerPage;
-        if (numTreePages)       *numTreePages       = cached->numTreePages;
-        if (fanout)             *fanout             = cached->fanout;
-        return;
-    }
-
-    buf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
-    LockBuffer(buf, BUFFER_LOCK_SHARE);
-    page = BufferGetPage(buf);
-    meta = MerklePageGetMeta(page);
+	buf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
+	LockBuffer(buf, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(buf);
+	meta = MerklePageGetMeta(page);
 
 	if (meta->version != MERKLE_VERSION ||
 		meta->routeFormatVersion != MERKLE_ROUTE_FORMAT_VERSION ||
@@ -673,230 +487,61 @@ merkle_read_meta(Relation indexRel, int *numPartitions, int *leavesPerPartition,
 						   MERKLE_ROW_HASH_FORMAT_VERSION),
 				 errhint("REINDEX the Merkle index before using it.")));
 	}
-    
-    /* Validate metadata integrity - corrupted/uninitialized values cause crashes */
-    if (meta->numPartitions <= 0 || meta->leavesPerPartition <= 0 ||
-        meta->nodesPerPartition <= 0 || meta->totalNodes <= 0 ||
-        meta->nodesPerPage <= 0 || meta->numTreePages <= 0)
-    {
-        UnlockReleaseBuffer(buf);
-        ereport(ERROR,
-                (errcode(ERRCODE_INDEX_CORRUPTED),
-                 errmsg("Merkle index \"%s\" has corrupted metadata",
-                        RelationGetRelationName(indexRel)),
-                 errdetail("numPartitions=%d, leavesPerPartition=%d, nodesPerPartition=%d, totalNodes=%d, nodesPerPage=%d, numTreePages=%d",
-                           meta->numPartitions, meta->leavesPerPartition,
-                           meta->nodesPerPartition, meta->totalNodes,
-                           meta->nodesPerPage, meta->numTreePages),
-                 errhint("Try REINDEXing the Merkle index.")));
-    }
 
-    if ((int64) meta->numPartitions * (int64) meta->nodesPerPartition != (int64) meta->totalNodes)
-    {
-        UnlockReleaseBuffer(buf);
-        ereport(ERROR,
-                (errcode(ERRCODE_INDEX_CORRUPTED),
-                 errmsg("Merkle index \"%s\" has inconsistent metadata",
-                        RelationGetRelationName(indexRel)),
-                 errdetail("numPartitions=%d, nodesPerPartition=%d, totalNodes=%d",
-                           meta->numPartitions, meta->nodesPerPartition, meta->totalNodes),
-                 errhint("Try REINDEXing the Merkle index.")));
-    }
+	if (fanout)          *fanout          = meta->fanout;
+	if (split_threshold) *split_threshold = meta->split_threshold;
+	if (merge_threshold) *merge_threshold = meta->merge_threshold;
 
-    effectiveFanout = MERKLE_DEFAULT_FANOUT;
-    if (meta->version >= 5)
-        effectiveFanout = meta->fanout;
+	merkle_meta_cache_store(cache_relid, meta->fanout, meta->split_threshold, meta->merge_threshold);
 
-    if (effectiveFanout < 2 || effectiveFanout > 1024)
-    {
-        UnlockReleaseBuffer(buf);
-        ereport(ERROR,
-                (errcode(ERRCODE_INDEX_CORRUPTED),
-                 errmsg("Merkle index \"%s\" has invalid fanout %d in metadata",
-                        RelationGetRelationName(indexRel),
-                        effectiveFanout),
-                 errhint("Try REINDEXing the Merkle index.")));
-    }
-
-    if (!merkle_is_power_of(meta->leavesPerPartition, effectiveFanout))
-    {
-        UnlockReleaseBuffer(buf);
-        ereport(ERROR,
-                (errcode(ERRCODE_INDEX_CORRUPTED),
-                 errmsg("Merkle index \"%s\" has invalid leaves_per_partition %d for fanout %d in metadata",
-                        RelationGetRelationName(indexRel),
-                        meta->leavesPerPartition,
-                        effectiveFanout),
-                 errhint("Try REINDEXing the Merkle index.")));
-    }
-    
-    /* Read values from metadata */
-    if (numPartitions)
-        *numPartitions = meta->numPartitions;
-    if (leavesPerPartition)
-        *leavesPerPartition = meta->leavesPerPartition;
-    if (nodesPerPartition)
-        *nodesPerPartition = meta->nodesPerPartition;
-    if (totalNodes)
-        *totalNodes = meta->totalNodes;
-    if (totalLeaves)
-        *totalLeaves = meta->numPartitions * meta->leavesPerPartition;
-    if (nodesPerPage)
-        *nodesPerPage = meta->nodesPerPage;
-    if (numTreePages)
-        *numTreePages = meta->numTreePages;
-    if (fanout)
-        *fanout = effectiveFanout;
-
-    merkle_meta_cache_store(cache_relid,
-                            meta->numPartitions,
-                            meta->leavesPerPartition,
-                            meta->nodesPerPartition,
-                            meta->totalNodes,
-                            meta->numPartitions * meta->leavesPerPartition,
-                            meta->nodesPerPage,
-                            meta->numTreePages,
-                            effectiveFanout);
-
-    UnlockReleaseBuffer(buf);
+	UnlockReleaseBuffer(buf);
 }
 
 /*
- * merkle_init_tree() - Initialize Merkle tree structure
- *
- * Creates metadata page and as many tree node pages as needed.
- * Uses the provided options or defaults if opts is NULL.
- * 
- * The tree can span multiple pages - no size limit!
- * 
- * Memory management: Caller should ensure opts is properly allocated
- * and freed after this call if needed.
+ * merkle_init_tree() - Initialize Merkle tree metadata page
  */
 void
 merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 				 uint64 baseline_apply_seq)
 {
-    Buffer          metabuf;
-    Page            metapage;
-    MerkleMetaPageData *meta;
-    int             numPartitions;
-    int             leavesPerPartition;
-    int             fanout;
-    int             nodesPerPartition;
-    int             totalNodes;
-    int             nodesPerPage;
-    int             numTreePages;
-    int             nodeIdx;
-    int             pageNum;
-    
-    /* Use provided options or defaults */
-    if (opts != NULL)
-    {
-        numPartitions = opts->partitions;
-        leavesPerPartition = opts->leaves_per_partition;
-        fanout = opts->fanout;
-    }
-    else
-    {
-        numPartitions = MERKLE_NUM_PARTITIONS;
-        leavesPerPartition = MERKLE_LEAVES_PER_PARTITION;
-        fanout = MERKLE_DEFAULT_FANOUT;
-    }
-    
-    /* Calculate derived values */
-    if (fanout < 2 || fanout > 1024)
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("fanout must be between 2 and 1024")));
+	Buffer          metabuf;
+	Page            metapage;
+	MerkleMetaPageData *meta;
+	int             fanout;
+	int             split_threshold;
+	int             merge_threshold;
 
-    /* For a perfect k-ary tree with L leaves: nodes = (k*L - 1)/(k - 1). */
-    if (!merkle_is_power_of(leavesPerPartition, fanout))
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("leaves_per_partition must be a power of fanout")));
+	if (opts != NULL)
+	{
+		fanout = opts->fanout;
+		split_threshold = opts->split_threshold;
+		merge_threshold = opts->merge_threshold;
+	}
+	else
+	{
+		fanout = MERKLE_DEFAULT_FANOUT;
+		split_threshold = SPLIT_THRESHOLD;
+		merge_threshold = MERKLE_MERGE_THRESHOLD;
+	}
 
-    if (((int64) fanout * (int64) leavesPerPartition - 1) % (fanout - 1) != 0)
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("leaves_per_partition must be a power of fanout")));
+	metabuf = ReadBuffer(indexRel, P_NEW);
+	Assert(BufferGetBlockNumber(metabuf) == MERKLE_METAPAGE_BLKNO);
+	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+	metapage = BufferGetPage(metabuf);
+	PageInit(metapage, BLCKSZ, 0);
 
-    nodesPerPartition = (int) (((int64) fanout * (int64) leavesPerPartition - 1) / (fanout - 1));
-    totalNodes = numPartitions * nodesPerPartition;
-    nodesPerPage = (int)MERKLE_MAX_NODES_PER_PAGE;
-    numTreePages = (totalNodes + nodesPerPage - 1) / nodesPerPage;  /* ceiling division */
-    
-    /* Initialize metadata page */
-    metabuf = ReadBuffer(indexRel, P_NEW);
-    Assert(BufferGetBlockNumber(metabuf) == MERKLE_METAPAGE_BLKNO);
-    LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
-    metapage = BufferGetPage(metabuf);
-    PageInit(metapage, BLCKSZ, 0);
-    
-    meta = MerklePageGetMeta(metapage);
-    meta->version = MERKLE_VERSION;
-    meta->heapRelid = heapOid;
-    meta->numPartitions = numPartitions;
-    meta->leavesPerPartition = leavesPerPartition;
-    meta->nodesPerPartition = nodesPerPartition;
-    meta->totalNodes = totalNodes;
-    meta->nodesPerPage = nodesPerPage;
-    meta->numTreePages = numTreePages;
-    meta->fanout = fanout;
+	meta = MerklePageGetMeta(metapage);
+	meta->version = MERKLE_VERSION;
+	meta->heapRelid = heapOid;
+	meta->fanout = fanout;
+	meta->split_threshold = split_threshold;
+	meta->merge_threshold = merge_threshold;
 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = baseline_apply_seq;
-    
-    MarkBufferDirty(metabuf);
-    UnlockReleaseBuffer(metabuf);
-    
-    /* Initialize tree node pages - allocate as many as needed */
-    nodeIdx = 0;
-    for (pageNum = 0; pageNum < numTreePages; pageNum++)
-    {
-        Buffer      treebuf;
-        Page        treepage;
-        MerkleNode *nodes;
-        int         nodesThisPage;
-        int         i;
-        
-        treebuf = ReadBuffer(indexRel, P_NEW);
-        LockBuffer(treebuf, BUFFER_LOCK_EXCLUSIVE);
-        treepage = BufferGetPage(treebuf);
-		PageInit(treepage, BLCKSZ, MERKLE_PAGE_SPECIAL_SIZE);
-		{
-			MerklePageOpaqueData *opaque = MerklePageGetOpaque(treepage);
 
-			opaque->magic = MERKLE_PAGE_OPAQUE_MAGIC;
-			opaque->version = MERKLE_PAGE_OPAQUE_VERSION;
-			opaque->flags = 0;
-			opaque->last_applied_seq = baseline_apply_seq;
-		}
-        
-        /* Zero the entire page content area */
-        nodes = (MerkleNode *) PageGetContents(treepage);
-		memset(nodes, 0, (char *) PageGetSpecialPointer(treepage) -
-						 (char *) nodes);
-		/* Generic WAL compares only the page's used lower/upper regions. */
-		((PageHeader) treepage)->pd_lower =
-			(LocationIndex) ((char *) nodes +
-							 nodesPerPage * sizeof(MerkleNode) -
-							 (char *) treepage);
-        
-        /* Calculate how many nodes go on this page */
-        nodesThisPage = Min(nodesPerPage, totalNodes - nodeIdx);
-        
-        /* Initialize nodes with their IDs */
-        for (i = 0; i < nodesThisPage; i++)
-        {
-            nodes[i].nodeId = nodeIdx + i;
-            /* hash is already zero from memset */
-        }
-        
-        nodeIdx += nodesThisPage;
-        
-        MarkBufferDirty(treebuf);
-        UnlockReleaseBuffer(treebuf);
-    }
+	MarkBufferDirty(metabuf);
+	UnlockReleaseBuffer(metabuf);
 }
 
 PG_FUNCTION_INFO_V1(merkle_key_hash_sql);
@@ -985,17 +630,6 @@ merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
 	memcpy(VARDATA(result), hash.data, MERKLE_HASH_BYTES);
 
 	PG_RETURN_BYTEA_P(result);
-}
-
-/*
- * merkle_is_dynamic_index() - Return true if index uses dynamic recursive partitioning
- */
-bool
-merkle_is_dynamic_index(Relation indexRel)
-{
-	int numTreePages = 0;
-	merkle_read_meta(indexRel, NULL, NULL, NULL, NULL, NULL, NULL, &numTreePages, NULL);
-	return numTreePages == 0;
 }
 
 /* End of file */

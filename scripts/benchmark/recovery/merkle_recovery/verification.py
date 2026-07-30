@@ -62,7 +62,7 @@ def schema_fidelity_checks(conn, run_id: str, method: str) -> list[dict[str, Any
         )
     add("constraints", constraints["healthy"], constraints["damaged"])
 
-    for index_name in ("usertable_pkey", "usertable_merkle_idx", "usertable_leaf_lookup_idx"):
+    for index_name in ("usertable_pkey", "usertable_merkle_idx", "usertable_merkle_covering_idx"):
         definitions: dict[str, Any] = {}
         for schema in ("healthy", "damaged"):
             definition = scalar(
@@ -88,6 +88,12 @@ def audit_recovery(conn, run_id: str, method: str) -> dict[str, Any]:
     """Full recovery audit: EXCEPT ALL comparison, Merkle root match, merkle_verify."""
     import time
     from contextlib import contextmanager
+
+    try:
+        res = execute(conn, "SELECT merkle_apply_pending()")
+        print("[audit_recovery] merkle_apply_pending res:", res)
+    except Exception as e:
+        print("[audit_recovery] merkle_apply_pending failed:", e)
 
     phase: dict[str, float] = {}
 
@@ -135,7 +141,7 @@ def audit_recovery(conn, run_id: str, method: str) -> dict[str, Any]:
         """
         SELECT count(*) FROM pg_indexes
         WHERE schemaname = 'damaged'
-          AND indexname IN ('usertable_pkey', 'usertable_merkle_idx', 'usertable_leaf_lookup_idx')
+          AND indexname IN ('usertable_pkey', 'usertable_merkle_idx', 'usertable_merkle_covering_idx')
         """,
     )
     return {
