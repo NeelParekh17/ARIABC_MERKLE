@@ -155,7 +155,8 @@ resolve_host_ip() {
 }
 
 progress() {
-  printf '[%s] [local] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
+  printf '[%s] [local] %s\n' \
+    "$(date --iso-8601=seconds)" "$*" >&2
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -235,10 +236,7 @@ remote_ssh_cmd_stdinless() {
 remote_ssh_step() {
   local label="$1"
   shift
-  progress "$label"
-  if remote_ssh_cmd_stdinless "$@"; then
-    progress "$label: done"
-  else
+  if ! remote_ssh_cmd_stdinless "$@"; then
     local rc=$?
     progress "$label: failed with rc=$rc"
     return "$rc"
@@ -246,7 +244,7 @@ remote_ssh_step() {
 }
 
 rsync_remote() {
-  rsync -aL --delete -e "$RSYNC_RSH" "$@"
+  rsync -aL -q --delete -e "$RSYNC_RSH" "$@"
 }
 
 RUN_ID="ariabc-recovery-${PROFILE}-$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%06x' "$((RANDOM << 1 ^ RANDOM))")"
@@ -266,10 +264,7 @@ LOCAL_MANIFEST="$LOCAL_MANIFEST_DIR/source_snapshot.json"
 ROOTS_FILE="$ROOT/scripts/benchmark/recovery/sync_source_roots.txt"
 
 progress "starting recovery benchmark run $RUN_ID on $SSH_TARGET (profile=$PROFILE build=$BUILD_PROFILE artifact_mode=$ARTIFACT_MODE)"
-progress "checking SSH connectivity to $SSH_TARGET with timeout ${SSH_TIMEOUT}s"
-if remote_ssh_cmd_stdinless "printf '%s\n' ssh-ok" >/dev/null; then
-  progress "SSH connectivity check passed"
-else
+if ! remote_ssh_cmd_stdinless "printf '%s\n' ssh-ok" >/dev/null; then
   rc=$?
   progress "SSH connectivity check failed with rc=$rc"
   cat >&2 <<EOF
@@ -283,16 +278,14 @@ If password auth is required, run with SSH_PASSWORD set in the environment.
 EOF
   exit "$rc"
 fi
-progress "creating local source snapshot manifest"
 mkdir -p "$LOCAL_MANIFEST_DIR"
 "$LOCAL_PYTHON" "$ROOT/scripts/benchmark/recovery/create_source_snapshot.py" \
   --repo-root "$ROOT" \
   --roots-file "$ROOTS_FILE" \
   --output "$LOCAL_MANIFEST" \
   --run-id "$RUN_ID" >/dev/null
-progress "created local source snapshot manifest: $LOCAL_MANIFEST"
 
-remote_ssh_step "creating remote run directories under $REMOTE_RUN_DIR" \
+remote_ssh_step "creating remote run directories" \
   "mkdir -p '$REMOTE_RUN_DIR' '$REMOTE_ARTIFACTS_ROOT' '$REMOTE_FAILURES_ROOT' '$REMOTE_LOCK_DIR' '$REMOTE_LOG_DIR' '$REMOTE_SCRATCH_DIR' '$REMOTE_RESULTS_DIR'"
 
 LOCAL_OWNS_RUN_DIR=1
@@ -337,8 +330,6 @@ done
 [[ -x "$REMOTE_PYTHON" ]] || fail "remote python is not executable: $REMOTE_PYTHON"
 "$REMOTE_PYTHON" -c 'import psycopg' >/dev/null 2>&1 ||
   fail "remote python cannot import psycopg: $REMOTE_PYTHON"
-
-printf 'remote environment ok: %s GiB free under %s\n' "$((free_kib / 1024 / 1024))" "$REMOTE_ROOT" >&2
 REMOTE_ENV
 }
 
@@ -346,7 +337,6 @@ sync_root() {
   local rel="$1"
   local src="$ROOT/$rel"
   local dest="$REMOTE_SRC_DIR/$rel"
-  progress "syncing source root: $rel"
   if [[ -d "$src" && ! -L "$src" ]]; then
     remote_ssh_cmd_stdinless "mkdir -p '$(dirname "$dest")' '$dest'"
     rsync_remote \
@@ -372,21 +362,17 @@ sync_root() {
     remote_ssh_cmd_stdinless "mkdir -p '$(dirname "$dest")'"
     rsync_remote "$src" "$SSH_TARGET:$dest"
   fi
-  progress "synced source root: $rel"
 }
 
-progress "checking remote environment and free space"
-verify_remote_env
-progress "remote environment check passed"
+verify_remote_env >/dev/null
 
+progress "syncing source roots to remote"
 while IFS= read -r rel; do
   [[ -z "$rel" || "$rel" == \#* ]] && continue
   sync_root "$rel"
 done < "$ROOTS_FILE"
-progress "all source roots synced"
 
 if [[ -d "/usr/include/openssl" ]]; then
-  progress "uploading local OpenSSL headers to remote include directory for compatibility"
   local_tmp_headers="/tmp/openssl_compat_headers_$$"
   mkdir -p "$local_tmp_headers"
   cp -rL /usr/include/openssl/* "$local_tmp_headers/"
@@ -398,15 +384,13 @@ if [[ -d "/usr/include/openssl" ]]; then
   rm -rf "$local_tmp_headers"
 fi
 
-# Upload manifest and verify remote source — LOCAL_RUNDIR_GUARD stays 1 until
-# the remote benchmark process takes ownership after this sequence.
-progress "uploading source snapshot manifest"
-"${SCP_CMD[@]}" "$LOCAL_MANIFEST" "$SSH_TARGET:$REMOTE_RUN_DIR/source_snapshot.json"
+# Upload manifest and verify remote source
+"${SCP_CMD[@]}" -q "$LOCAL_MANIFEST" "$SSH_TARGET:$REMOTE_RUN_DIR/source_snapshot.json"
 remote_ssh_step "verifying remote source snapshot" \
-  "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_source_snapshot.py' --repo-root '$REMOTE_RUN_DIR/src' --manifest '$REMOTE_RUN_DIR/source_snapshot.json'"
+  "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_source_snapshot.py' --repo-root '$REMOTE_RUN_DIR/src' --manifest '$REMOTE_RUN_DIR/source_snapshot.json'" >/dev/null
 remote_ssh_step "verifying remote Python benchmark environment" \
-  "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'"
-progress "remote source and Python environment verified"
+  "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'" >/dev/null
+progress "remote source and environment verified"
 
 remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
   "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
@@ -422,7 +406,8 @@ set -Eeuo pipefail
 remote_progress() {
   local remote_host
   remote_host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || printf unknown)"
-  printf '[%s] [remote:%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$remote_host" "$*" >&2
+  printf '[%s] [remote:%s] %s\n' \
+    "$(date --iso-8601=seconds)" "$remote_host" "$*" >&2
 }
 
 tail_log() {
@@ -446,9 +431,42 @@ fail_with_log() {
 }
 
 mkdir -p "$REMOTE_ROOT"/{runs,artifacts,failures,lock}
-remote_progress "waiting for recovery benchmark lock"
-exec 9>"$REMOTE_LOCK_DIR/recovery_benchmark.lock"
-flock 9
+LOCK_FILE="$REMOTE_LOCK_DIR/recovery_benchmark.lock"
+remote_progress "checking recovery benchmark lock ($LOCK_FILE)"
+exec 9>"$LOCK_FILE"
+
+if ! flock -n 9; then
+  remote_progress "lock is currently held by existing process(es); auto-clearing stale lock holders"
+  lock_pids="$(fuser "$LOCK_FILE" 2>/dev/null || true)"
+  if [[ -n "$lock_pids" ]]; then
+    remote_progress "found process(es) holding lock file: $lock_pids"
+    for pid in $lock_pids; do
+      if [[ "$pid" -ne "$$" ]]; then
+        cmd_info="$(ps -p "$pid" -o args= 2>/dev/null || echo "unknown")"
+        remote_progress "killing lock-holder PID $pid ($cmd_info)"
+        kill -15 "$pid" 2>/dev/null || true
+      fi
+    done
+    sleep 1
+    for pid in $lock_pids; do
+      if [[ "$pid" -ne "$$" ]] && kill -0 "$pid" 2>/dev/null; then
+        remote_progress "force-killing lock-holder PID $pid"
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    done
+  fi
+
+  pg_pids="$(pgrep -u "$(id -u)" -f 'postgres.*merkle_recovery_runs' 2>/dev/null || true)"
+  if [[ -n "$pg_pids" ]]; then
+    remote_progress "killing leftover PostgreSQL recovery process(es): $pg_pids"
+    kill -9 $pg_pids 2>/dev/null || true
+  fi
+
+  if ! flock -n 9; then
+    remote_progress "waiting for recovery benchmark lock..."
+    flock 9
+  fi
+fi
 remote_progress "acquired recovery benchmark lock for $RUN_ID"
 
 cleanup_success=0
@@ -656,8 +674,8 @@ fi
 remote_progress "temporary socket directory ready: $REMOTE_SOCKET_DIR"
 remote_progress "PostgreSQL start requested; logs: $REMOTE_LOG_DIR/pg_ctl_start.log and $REMOTE_LOG_DIR/postgres.log"
 if "$REMOTE_INSTALL_DIR/bin/pg_ctl" -D "$REMOTE_PGDATA" -l "$REMOTE_LOG_DIR/postgres.log" \
-    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses=''" \
-    -w start >"$REMOTE_LOG_DIR/pg_ctl_start.log" 2>&1; then
+    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=2GB -c maintenance_work_mem=1GB -c work_mem=128MB -c max_wal_size=16GB -c checkpoint_timeout=30min -c synchronous_commit=off -c wal_buffers=64MB" \
+    -w start 9>&- >"$REMOTE_LOG_DIR/pg_ctl_start.log" 2>&1; then
   remote_progress "PostgreSQL started"
 else
   tail_log "$REMOTE_LOG_DIR/postgres.log"

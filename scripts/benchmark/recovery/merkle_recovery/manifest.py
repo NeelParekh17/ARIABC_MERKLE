@@ -202,7 +202,7 @@ def choose_corruption_manifest(
         "leaves_per_partition": leaves_per_partition,
         "fanout": fanout,
         "seed": seed,
-        "bad_leaves": [e["leaf_id"] for e in entries],
+        "bad_leaves": [[occ_map[l]["node_id"], occ_map[l]["prefix_len"]] for l in leaves],
         "corruptions": entries,
         "corrupted_tuple_count": corrupted_tuple_count,
         "required_rows_per_bad_leaf": min_required_rows,

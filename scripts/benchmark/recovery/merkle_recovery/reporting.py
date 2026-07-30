@@ -9,7 +9,7 @@ import os
 import platform
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +21,101 @@ from .metrics import Metrics
 
 # ── progress emitter ─────────────────────────────────────────────────────────
 
+def format_event_table(event: dict[str, Any]) -> str:
+    evt_type = str(event.get("event", "progress"))
+
+    def build_table(headers: list[str], row: list[str]) -> str:
+        widths = [max(len(h), len(r)) for h, r in zip(headers, row)]
+        border = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+        header_line = "| " + " | ".join(f"{h:<{w}}" for h, w in zip(headers, widths)) + " |"
+        data_line = "| " + " | ".join(f"{r:<{w}}" for r, w in zip(row, widths)) + " |"
+        return f"{border}\n{header_line}\n{border}\n{data_line}\n{border}"
+
+    if evt_type == "benchmark_start":
+        headers = ["EVENT", "PROFILE", "EXPERIMENT", "CORRUPTION", "PROFILING", "REPS", "TOTAL RUNS", "TIME (LOCAL)"]
+        row = [
+            evt_type,
+            str(event.get("profile", "")),
+            str(event.get("experiment", "")),
+            str(event.get("corruption_mode", "")),
+            str(event.get("profiling_mode", "")),
+            str(event.get("repetitions", "")),
+            str(event.get("total_runs", "")),
+            str(event.get("timestamp_local", "")),
+        ]
+        return build_table(headers, row)
+    elif evt_type == "dataset_start":
+        headers = ["EVENT", "EXPERIMENT", "LABEL", "TUPLES", "PARTITIONS", "BAD LEAVES", "PROGRESS", "TIME (LOCAL)"]
+        progress_str = f"{event.get('completed_runs', 0)}/{event.get('total_runs', 0)}"
+        row = [
+            evt_type,
+            str(event.get("experiment", "")),
+            str(event.get("profile_label", "")),
+            f"{int(event.get('tuple_count', 0)):,}",
+            str(event.get("partitions", "")),
+            str(event.get("bad_leaf_count", "")),
+            progress_str,
+            str(event.get("timestamp_local", "")),
+        ]
+        return build_table(headers, row)
+    elif evt_type == "method_start":
+        headers = ["EVENT", "RUN ID", "METHOD", "TUPLES", "BAD LEAVES", "REP", "PROGRESS", "TIME (LOCAL)"]
+        progress_str = f"{event.get('completed_runs', 0)}/{event.get('total_runs', 0)}"
+        row = [
+            evt_type,
+            str(event.get("run_id", "")),
+            str(event.get("method", "")),
+            f"{int(event.get('tuple_count', 0)):,}",
+            str(event.get("bad_leaf_count", "")),
+            str(event.get("repetition", "")),
+            progress_str,
+            str(event.get("timestamp_local", "")),
+        ]
+        return build_table(headers, row)
+    elif evt_type == "method_complete":
+        headers = ["EVENT", "RUN ID", "STATUS", "TOTAL (MS)", "RECOVERY (MS)", "AUDIT (MS)", "PROGRESS", "TIME (LOCAL)"]
+        progress_str = f"{event.get('completed_runs', 0)}/{event.get('total_runs', 0)}"
+        valid = bool(event.get("valid", True))
+        status = "PASS" if valid else f"FAIL ({event.get('warning', 'invalid')})"
+        row = [
+            evt_type,
+            str(event.get("run_id", "")),
+            status,
+            f"{float(event.get('paper_style_total_ms', 0)):.2f}",
+            f"{float(event.get('method_elapsed_ms', 0)):.2f}",
+            f"{float(event.get('audit_validation_ms', 0)):.2f}",
+            progress_str,
+            str(event.get("timestamp_local", "")),
+        ]
+        return build_table(headers, row)
+    elif evt_type == "benchmark_complete":
+        headers = ["EVENT", "COMPLETED", "TOTAL RUNS", "ELAPSED (S)", "TIME (LOCAL)"]
+        row = [
+            evt_type,
+            str(event.get("completed_runs", "")),
+            str(event.get("total_runs", "")),
+            f"{float(event.get('elapsed_ms', 0))/1000.0:.2f}",
+            str(event.get("timestamp_local", "")),
+        ]
+        return build_table(headers, row)
+    else:
+        keys = list(event.keys())
+        max_k = max((len(k) for k in keys), default=10)
+        max_v = max((len(str(event[k])) for k in keys), default=10)
+        k_w = max(max_k, len("KEY"))
+        v_w = max(max_v, len("VALUE"))
+        border = f"+{'-' * (k_w + 2)}+{'-' * (v_w + 2)}+"
+        lines = [border, f"| {'KEY':<{k_w}} | {'VALUE':<{v_w}} |", border]
+        for k in keys:
+            v = str(event[k])
+            lines.append(f"| {k:<{k_w}} | {v:<{v_w}} |")
+        lines.append(border)
+        return "\n".join(lines)
+
+
 def emit_progress(result_dir: Path, **event: object) -> None:
-    event["timestamp_utc"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    now = datetime.now()
+    event["timestamp_local"] = now.astimezone().isoformat(timespec="seconds")
     line = json.dumps(event, sort_keys=True, default=str)
     with (result_dir / "progress.jsonl").open("a") as f:
         f.write(line + "\n")
@@ -32,14 +125,15 @@ def emit_progress(result_dir: Path, **event: object) -> None:
     )
     # main() redirects normal stdout into scratch/stdout.log; use the original
     # stream so the synced remote launcher can tee live progress to the terminal.
-    print(f"[progress] {line}", file=sys.__stdout__, flush=True)
+    print(format_event_table(event), file=sys.__stdout__, flush=True)
 
 
 # ── environment capture ──────────────────────────────────────────────────────
 
 def write_environment(result_dir: Path, args) -> None:
     lines = [
-        f"timestamp={datetime.now().isoformat()}",
+        f"timestamp_utc={datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')}",
+        f"timestamp_local={datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"cwd={ROOT}",
         f"python={sys.version.replace(os.linesep, ' ')}",
         f"platform={platform.platform()}",
@@ -47,7 +141,7 @@ def write_environment(result_dir: Path, args) -> None:
     ]
     try:
         head = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL
         ).strip()
         lines.append(f"git_head={head}")
     except Exception as exc:

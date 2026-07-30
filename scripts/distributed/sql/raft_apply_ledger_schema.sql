@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_node (
     hash         bytea    NOT NULL,
     PRIMARY KEY (index_oid, node_id, prefix_len)
 );
-CREATE INDEX IF NOT EXISTS merkle_node_lookup_idx ON ariabc_internal.merkle_node (index_oid, node_id, prefix_len);
+CREATE INDEX IF NOT EXISTS merkle_node_prefix_idx ON ariabc_internal.merkle_node (index_oid, prefix_len);
 
 -- Schema version tracking metadata
 CREATE TABLE IF NOT EXISTS ariabc_internal.raft_apply_schema_meta (

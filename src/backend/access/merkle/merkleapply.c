@@ -704,6 +704,9 @@ propagate_hash_to_ancestors(Oid index_oid, const uint8 *leaf_node_id, int leaf_p
 	}
 }
 
+static SPIPlanPtr plan_split_update_nonleaf = NULL;
+static SPIPlanPtr plan_split_insert_child = NULL;
+
 void
 merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 				   MerkleTupleHashEntry *entries, int num_entries,
@@ -717,10 +720,40 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 	if (num_entries <= 0)
 		return;
 
+	/* Prepare SPI plans once for high-frequency split operations */
+	if (plan_split_update_nonleaf == NULL)
+	{
+		Oid upd_argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
+		SPIPlanPtr plan = SPI_prepare(
+			"UPDATE ariabc_internal.merkle_node"
+			"   SET is_leaf = false"
+			" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3",
+			3, upd_argtypes);
+		if (plan == NULL)
+			elog(ERROR, "SPI_prepare failed for plan_split_update_nonleaf");
+		SPI_keepplan(plan);
+		plan_split_update_nonleaf = plan;
+	}
+
+	if (plan_split_insert_child == NULL)
+	{
+		Oid ins_argtypes[5] = {OIDOID, BYTEAOID, INT2OID, INT8OID, BYTEAOID};
+		SPIPlanPtr plan = SPI_prepare(
+			"INSERT INTO ariabc_internal.merkle_node"
+			" (index_oid, node_id, prefix_len, is_leaf, tuple_count, hash)"
+			" VALUES ($1, $2, $3, true, $4, $5)"
+			" ON CONFLICT (index_oid, node_id, prefix_len) DO UPDATE"
+			"   SET is_leaf = true, tuple_count = EXCLUDED.tuple_count, hash = EXCLUDED.hash",
+			5, ins_argtypes);
+		if (plan == NULL)
+			elog(ERROR, "SPI_prepare failed for plan_split_insert_child");
+		SPI_keepplan(plan);
+		plan_split_insert_child = plan;
+	}
+
 	/* Mark the node being split as an internal non-leaf node */
 	{
 		bytea *id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-		Oid upd_argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
 		Datum upd_values[3];
 
 		SET_VARSIZE(id_bytea, VARHDRSZ + 8);
@@ -730,11 +763,7 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 		upd_values[1] = PointerGetDatum(id_bytea);
 		upd_values[2] = Int16GetDatum((int16) prefix_len);
 
-		SPI_execute_with_args(
-			"UPDATE ariabc_internal.merkle_node"
-			"   SET is_leaf = false"
-			" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3",
-			3, upd_argtypes, upd_values, NULL, false, 1);
+		SPI_execute_plan(plan_split_update_nonleaf, upd_values, NULL, false, 1);
 
 		pfree(id_bytea);
 	}
@@ -754,10 +783,13 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 
 	/* Group entries by bucket so recursive calls receive the exact subset of tuples */
 	{
-		MerkleTupleHashEntry *partitioned_entries = (MerkleTupleHashEntry *) palloc(num_entries * sizeof(MerkleTupleHashEntry));
+		MerkleTupleHashEntry *partitioned_entries = (MerkleTupleHashEntry *) malloc((size_t) num_entries * sizeof(MerkleTupleHashEntry));
 		int *bucket_offsets = (int *) palloc0(fanout * sizeof(int));
 		int *current_offsets = (int *) palloc(fanout * sizeof(int));
 		int running_offset = 0;
+
+		if (!partitioned_entries)
+			elog(ERROR, "out of memory allocating partitioned Merkle entries (%d entries)", num_entries);
 
 		for (i = 0; i < fanout; i++)
 		{
@@ -781,7 +813,6 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 			int			child_prefix_len = prefix_len + bits_per_split;
 			bytea	   *child_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
 			bytea	   *child_hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
-			Oid			ins_argtypes[5] = {OIDOID, BYTEAOID, INT2OID, INT8OID, BYTEAOID};
 			Datum		ins_values[5];
 
 			merkle_bytea_extend(child_node_id, node_id, prefix_len, (uint8) i, bits_per_split);
@@ -797,13 +828,7 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 			ins_values[3] = Int64GetDatum((int64) bucket_counts[i]);
 			ins_values[4] = PointerGetDatum(child_hash_bytea);
 
-			SPI_execute_with_args(
-				"INSERT INTO ariabc_internal.merkle_node"
-				" (index_oid, node_id, prefix_len, is_leaf, tuple_count, hash)"
-				" VALUES ($1, $2, $3, true, $4, $5)"
-				" ON CONFLICT (index_oid, node_id, prefix_len) DO UPDATE"
-				"   SET is_leaf = true, tuple_count = EXCLUDED.tuple_count, hash = EXCLUDED.hash",
-				5, ins_argtypes, ins_values, NULL, false, 1);
+			SPI_execute_plan(plan_split_insert_child, ins_values, NULL, false, 1);
 
 			pfree(child_id_bytea);
 			pfree(child_hash_bytea);
@@ -816,14 +841,13 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 			}
 		}
 
-		pfree(partitioned_entries);
+		free(partitioned_entries);
 		pfree(bucket_offsets);
 		pfree(current_offsets);
 	}
 
 	{
 		bytea	   *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-		Oid			upd_argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
 		Datum		upd_values[3];
 
 		SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
@@ -832,11 +856,7 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 		upd_values[1] = PointerGetDatum(node_id_bytea);
 		upd_values[2] = Int16GetDatum((int16) prefix_len);
 
-		SPI_execute_with_args(
-			"UPDATE ariabc_internal.merkle_node"
-			"   SET is_leaf = false"
-			" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3",
-			3, upd_argtypes, upd_values, NULL, false, 1);
+		SPI_execute_plan(plan_split_update_nonleaf, upd_values, NULL, false, 1);
 
 		pfree(node_id_bytea);
 	}
@@ -907,7 +927,10 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len)
 		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 		{
 			int						i;
-			MerkleTupleHashEntry   *entries = (MerkleTupleHashEntry *) palloc(SPI_processed * sizeof(MerkleTupleHashEntry));
+			MerkleTupleHashEntry   *entries = (MerkleTupleHashEntry *) malloc((size_t) SPI_processed * sizeof(MerkleTupleHashEntry));
+
+			if (!entries)
+				elog(ERROR, "out of memory allocating Merkle entries from catalog (%llu entries)", (unsigned long long) SPI_processed);
 
 			for (i = 0; i < SPI_processed; i++)
 			{
@@ -924,7 +947,7 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len)
 			}
 
 			merkle_do_split_in_memory(index_oid, node_id, prefix_len, entries, SPI_processed, fanout, bits_per_split, split_threshold);
-			pfree(entries);
+			free(entries);
 		}
 
 		pfree(lower_bytea);

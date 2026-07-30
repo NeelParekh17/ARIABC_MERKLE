@@ -748,20 +748,22 @@ def _size_scaling_config():
     return profile_config("size-scaling-k75-c300")
 
 
-def test_size_scaling_produces_nine_runs():
+def test_size_scaling_produces_eleven_runs():
     specs = _series_for_profile(_size_scaling_args(), _size_scaling_config())
-    assert len(specs) == 9
+    assert len(specs) == 11
     geometries = [(s["geometry_label"], s["tuple_count"]) for s in specs]
     expected = [
-        ("fanout_f2_l16", 1000000),
-        ("fanout_f2_l16", 3000000),
-        ("fanout_f2_l16", 5000000),
-        ("fanout_f2_l128", 1000000),
-        ("fanout_f2_l128", 3000000),
-        ("fanout_f2_l128", 5000000),
-        ("fanout_f32_l1024", 1000000),
-        ("fanout_f32_l1024", 3000000),
-        ("fanout_f32_l1024", 5000000),
+        ("fanout_f4_l16", 1000000),
+        ("fanout_f4_l16", 3000000),
+        ("fanout_f4_l16", 5000000),
+        ("fanout_f4_l16", 7000000),
+        ("fanout_f4_l16", 10000000),
+        ("fanout_f4_l16", 15000000),
+        ("fanout_f4_l16", 20000000),
+        ("fanout_f4_l16", 25000000),
+        ("fanout_f4_l16", 30000000),
+        ("fanout_f4_l16", 40000000),
+        ("fanout_f4_l16", 50000000),
     ]
     assert geometries == expected
     for spec in specs:
@@ -771,7 +773,7 @@ def test_size_scaling_produces_nine_runs():
 
 def test_size_scaling_rejects_manual_overrides():
     config = _size_scaling_config()
-    with pytest.raises(ValueError, match="do not pass --tuple-count"):
+    with pytest.raises(ValueError, match="owns tuple counts"):
         _series_for_profile(_size_scaling_args(tuple_count=1000), config)
     with pytest.raises(ValueError, match="do not override geometry"):
         _series_for_profile(_size_scaling_args(fanout=4), config)

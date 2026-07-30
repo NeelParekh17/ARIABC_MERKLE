@@ -104,11 +104,15 @@ def git_optional(repo_root: Path) -> tuple[str | None, str | None]:
     head = None
     status = None
     try:
-        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_root, text=True).strip()
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True, stderr=subprocess.DEVNULL
+        ).strip()
     except Exception:
         head = None
     try:
-        status = subprocess.check_output(["git", "status", "--porcelain"], cwd=repo_root, text=True)
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=repo_root, text=True, stderr=subprocess.DEVNULL
+        )
         status = status.rstrip("\n")
     except Exception:
         status = None
