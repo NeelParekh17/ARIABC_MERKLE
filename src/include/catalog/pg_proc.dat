@@ -1040,6 +1040,14 @@
   proname => 'merkle_root_hash_index', provolatile => 'v', proparallel => 'u',
   prorettype => 'text', proargtypes => 'regclass',
   prosrc => 'merkle_root_hash_index' },
+{ oid => '9936', descr => 'compute 8-byte key hash for Merkle index routing',
+  proname => 'merkle_key_hash', provolatile => 'i',
+  prorettype => 'bytea', proargtypes => 'anyelement',
+  prosrc => 'merkle_key_hash_sql' },
+{ oid => '9937', descr => 'compute 32-byte tuple integrity hash for Merkle tree',
+  proname => 'merkle_tuple_hash', provolatile => 'i',
+  prorettype => 'bytea', proargtypes => 'record',
+  prosrc => 'merkle_tuple_hash_sql' },
 
 { oid => '338', descr => 'validate an operator class',
   proname => 'amvalidate', provolatile => 'v', prorettype => 'bool',
@@ -10928,7 +10936,16 @@ proargtypes => 'cstring', prosrc => 'bcdb_block_submit_results' },
 
 # bcdb function
 { oid => '7015', descr => 'BCDB diagnostic stats snapshot',
-proname => 'bcdb_gate_diagnostics', prorettype => 'text',
-proargtypes => '', prosrc => 'bcdb_gate_diagnostics' }
+  proname => 'bcdb_gate_diagnostics', prorettype => 'text',
+  proargtypes => '', prosrc => 'bcdb_gate_diagnostics' },
+
+# merkle function
+{ oid => '7016', descr => 'Merkle dynamic tree descendants query',
+  proname => 'merkle_get_descendants_batch', prorows => '100', proretset => 't',
+  provolatile => 'v', prorettype => 'record', proargtypes => 'regclass bytea int2 int4',
+  proallargtypes => '{regclass,bytea,int2,int4,bytea,int2,bool,bytea}',
+  proargmodes => '{i,i,i,i,o,o,o,o}',
+  proargnames => '{relid,node_id,prefix_len,max_depth,node_id,prefix_len,is_leaf,hash}',
+  prosrc => 'merkle_get_descendants_batch' }
 
 ]

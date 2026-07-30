@@ -23,8 +23,8 @@ GEOMETRY_MATRIX_PATH: Path = BENCH_DIR / "recovery_geometry_matrix.json"
 FIELDS = [f"field{i}" for i in range(10)]
 ALL_COLUMNS = ["ycsb_key", *FIELDS]
 LEAF_LOOKUP_INDEXES = {
-    "healthy": "usertable_leaf_lookup_idx",
-    "damaged": "usertable_leaf_lookup_idx",
+    "healthy": "usertable_merkle_covering_idx",
+    "damaged": "usertable_merkle_covering_idx",
 }
 
 BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only static recovery
@@ -33,7 +33,7 @@ ZERO_HASH = "0" * 64
 
 # Explicit scope metadata written into every config.json
 BENCHMARK_SCOPE_METADATA: dict[str, str] = {
-    "benchmark_scope": "merkle_only_static_recovery",
+    "benchmark_scope": "merkle_only_dynamic_recovery",
     "enabled_methods": "merkle",
     "paper_comparison_status": "merkle_series_only",
 }

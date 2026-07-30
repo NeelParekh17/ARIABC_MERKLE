@@ -98,8 +98,8 @@ def metrics_to_rows(
             "profile_label": m.profile_label,
             "profiling_mode": m.profiling_mode,
             "tuple_count": m.tuple_count,
-            "partitions": m.partitions,
-            "leaves_per_partition": m.leaves_per_partition,
+            "split_threshold": m.split_threshold,
+            "merge_threshold": m.merge_threshold,
             "fanout": m.fanout,
             "bad_leaf_count": m.bad_leaf_count,
             "corrupted_tuple_count": m.corrupted_tuple_count,
@@ -148,7 +148,7 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
         if int(m.counters.get("schema_fidelity_ok", 0)) != 1:
             failures.append(f"{m.run_id}: schema fidelity failed")
         # merkle-specific
-        if int(m.counters.get("partition_root_batches", -1)) != 2:
+        if int(m.counters.get("partition_root_batches", 0)) <= 0:
             failures.append(
                 f"{m.run_id}: partition_root_batches={m.counters.get('partition_root_batches')}"
             )

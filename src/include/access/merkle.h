@@ -68,35 +68,8 @@ extern uint64 merkle_recovery_profile_reset_generation;
 extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 
 /*
- * Merkle tree configuration constants
- * 
- * The tree is organized as multiple partitions for better distribution:
- * - NUM_PARTITIONS: Number of independent partitions
- * - LEAVES_PER_PARTITION: Leaf buckets in each partition
- * - DEFAULT_FANOUT: Branching factor (children per internal node)
- * - NODES_PER_PARTITION (default): Total nodes per partition for a perfect
- *   k-ary tree with k=DEFAULT_FANOUT
- * - TOTAL_LEAVES (default): NUM_PARTITIONS * LEAVES_PER_PARTITION
- * - TOTAL_NODES (default): NUM_PARTITIONS * NODES_PER_PARTITION
- *
- * NOTE: With 256-bit (32-byte) hashes, the default tree spans multiple pages.
- */
-#define MERKLE_NUM_PARTITIONS       58
-#define MERKLE_LEAVES_PER_PARTITION 1024
-#define MERKLE_DEFAULT_FANOUT       32  /* branching factor */
-#define MERKLE_NODES_PER_PARTITION  1057 /* (32 * 1024 - 1) / (32 - 1) */
-#define MERKLE_TOTAL_LEAVES         59392 /* NUM_PARTITIONS * LEAVES_PER_PARTITION */
-#define MERKLE_TOTAL_NODES          61306 /* NUM_PARTITIONS * NODES_PER_PARTITION */
-
-/*
  * Hash configuration
  * Using 256-bit (32-byte) hashes from BLAKE3
- * 
- * NOTE: Upgraded to 256-bit for maximum security and performance.
- * Each node now takes 36 bytes (4 nodeId + 32 hash).
- * 
- * Security: Collision threshold is now 2^128 (astronomical)
- * Performance: BLAKE3 is faster than MD5 and cryptographically secure
  */
 #define MERKLE_HASH_BITS            256
 #define MERKLE_HASH_BYTES           32
@@ -106,13 +79,13 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
  * Page layout constants
  */
 #define MERKLE_METAPAGE_BLKNO       0
-#define MERKLE_TREE_START_BLKNO     1
-#define MERKLE_VERSION              8   /* WAL-safe committed-delta format */
-#define MERKLE_ROUTE_FORMAT_VERSION 3
+#define MERKLE_VERSION              9   /* Pure dynamic Merkle index format */
+#define MERKLE_ROUTE_FORMAT_VERSION 4
 #define MERKLE_ROW_HASH_FORMAT_VERSION 1
 
-/* Dynamic Merkle tree configuration constants (Plan_review.md) */
+/* Dynamic Merkle tree configuration constants */
 #define DYNAMIC_MERKLE_FANOUT       4
+#define MERKLE_DEFAULT_FANOUT       4
 #define BITS_PER_SPLIT              2
 #define SPLIT_THRESHOLD             32
 #define MERKLE_MERGE_THRESHOLD      8
@@ -122,8 +95,7 @@ typedef enum MerkleDeltaEventType
 {
 	MERKLE_DELTA_INSERT             = 0,  /* new_key_hash valid */
 	MERKLE_DELTA_DELETE              = 1,  /* old_key_hash valid */
-	MERKLE_DELTA_UPDATE_SAME_LEAF    = 2,  /* old_key_hash == new_key_hash */
-	MERKLE_DELTA_UPDATE_KEY_CHANGED  = 3   /* old_key_hash != new_key_hash */
+	MERKLE_DELTA_UPDATE_SAME_LEAF    = 2   /* old_key_hash == new_key_hash */
 } MerkleDeltaEventType;
 
 typedef struct MerkleDeltaKey
@@ -142,35 +114,6 @@ typedef struct MerkleDeltaKey
 #define MERKLE_DELTA_ENTRY_BYTES    72
 
 /*
- * Calculate how many nodes fit per page
- * Each node: 4 bytes (nodeId) + 32 bytes (hash) = 36 bytes
- * Page size 8192, minus header ~24 bytes = ~8168 usable
- * Max ~226 nodes per page.
- */
-#define MERKLE_PAGE_OPAQUE_MAGIC     ((uint32) 0x4D504147) /* "MPAG" */
-#define MERKLE_PAGE_OPAQUE_VERSION   1
-
-/*
- * Every v7 tree page records the exact globally ordered delta sequence that
- * it has consumed.  The hash changes and this position are emitted in the
- * same Generic WAL record.
- */
-typedef struct MerklePageOpaqueData
-{
-	uint32		magic;
-	uint16		version;
-	uint16		flags;
-	uint64		last_applied_seq;
-} MerklePageOpaqueData;
-
-#define MerklePageGetOpaque(page) \
-	((MerklePageOpaqueData *) PageGetSpecialPointer(page))
-
-#define MERKLE_PAGE_SPECIAL_SIZE MAXALIGN(sizeof(MerklePageOpaqueData))
-#define MERKLE_MAX_NODES_PER_PAGE \
-	((BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - MERKLE_PAGE_SPECIAL_SIZE) / sizeof(MerkleNode))
-
-/*
  * MerkleHash - 256-bit hash value stored in 32 bytes
  */
 typedef struct MerkleHash
@@ -179,28 +122,15 @@ typedef struct MerkleHash
 } MerkleHash;
 
 /*
- * MerkleNode - A single node in the Merkle tree
- */
-typedef struct MerkleNode
-{
-    int32       nodeId;     /* node identifier (1-indexed) */
-    MerkleHash  hash;       /* XOR-aggregated hash value */
-} MerkleNode;
-
-/*
  * MerkleMetaPageData - Metadata stored on page 0
  */
 typedef struct MerkleMetaPageData
 {
     uint32          version;            /* format version */
     Oid             heapRelid;          /* OID of indexed table */
-    int32           numPartitions;      /* number of partitions */
-    int32           leavesPerPartition; /* leaves per partition */
-    int32           nodesPerPartition;  /* nodes per partition */
-    int32           totalNodes;         /* total nodes in tree */
-    int32           nodesPerPage;       /* how many nodes fit per page */
-    int32           numTreePages;       /* number of pages for tree nodes */
     int32           fanout;             /* branching factor (children per internal node) */
+	int32           split_threshold;    /* max tuples before node split */
+	int32           merge_threshold;    /* min tuples before node merge */
 	uint32          routeFormatVersion; /* deterministic key-routing format */
 	uint32          rowHashFormatVersion; /* canonical row serialization format */
 	uint64          baselineApplySeq;   /* heap snapshot represented at build */
@@ -211,43 +141,24 @@ typedef struct MerkleMetaPageData
 
 /*
  * MerkleOptions - User-configurable options for Merkle index
- * Parsed from CREATE INDEX ... WITH (partitions=X, leaves_per_partition=Y, fanout=Z)
+ * Parsed from CREATE INDEX ... WITH (fanout=X, split_threshold=Y, merge_threshold=Z)
  */
 typedef struct MerkleOptions
 {
-    int32       vl_len_;        /* varlena header (required) */
-    int         partitions;
-    int         leaves_per_partition;
-    int         fanout;
+	int32		vl_len_;		/* varlena header (required) */
+	int			fanout;
+	int			split_threshold;
+	int			merge_threshold;
 } MerkleOptions;
 
 /*
- * Authoritative output of key routing.  Static trees consume leaf_id while a
- * future dynamic tree can consume route_digest (all 32 bytes of the BLAKE3
- * hash) without reimplementing routing.  The eight-byte static_route_value is
- * derived from the first eight bytes of route_digest; do NOT use route_hash
- * (that field no longer exists).
+ * Authoritative output of key routing.
  */
 typedef struct MerkleRoute
 {
 	uint8		route_digest[MERKLE_HASH_BYTES];
 	uint64		static_route_value;
-	int			leaf_id;
-	int			partition_id;
-	int			node_in_partition;
 } MerkleRoute;
-
-/* Arithmetic-only perfect-tree geometry shared by all Merkle code paths. */
-typedef struct MerkleGeometry
-{
-	int			num_partitions;
-	int			leaves_per_partition;
-	int			nodes_per_partition;
-	int			total_nodes;
-	int			total_leaves;
-	int			fanout;
-	int			leaf_start;
-} MerkleGeometry;
 
 typedef enum MerkleRecoveryState
 {
@@ -283,14 +194,9 @@ extern MerkleOptions *merkle_get_options(Relation indexRel);
 
 /*
  * Helper to read tree config from metadata
- * (nodesPerPage and numTreePages can be NULL if not needed)
  */
-extern bool merkle_is_dynamic_index(Relation indexRel);
-extern void merkle_read_meta(Relation indexRel, int *numPartitions,
-                             int *leavesPerPartition, int *nodesPerPartition,
-                             int *totalNodes, int *totalLeaves,
-                             int *nodesPerPage, int *numTreePages,
-                             int *fanout);
+extern void merkle_read_meta(Relation indexRel, int *fanout,
+                             int *split_threshold, int *merge_threshold);
 
 /*
  * Index build functions
@@ -338,20 +244,6 @@ extern void merkle_compute_route(Relation indexRel, Datum *values,
 extern bool merkle_relation_has_index(Relation rel);
 extern void merkle_reject_ddl(Relation rel, const char *command);
 extern void merkle_reject_concurrent_ddl(Oid index_oid, const char *command);
-extern void merkle_geometry_from_index(Relation indexRel,
-								   MerkleGeometry *geometry);
-extern int merkle_geometry_global_node(const MerkleGeometry *geometry,
-								   int partition, int node_in_partition);
-extern int merkle_geometry_leaf_node(const MerkleGeometry *geometry,
-								 int leaf_id);
-extern int merkle_geometry_parent_node(const MerkleGeometry *geometry,
-								   int node_in_partition);
-extern int merkle_geometry_child_node(const MerkleGeometry *geometry,
-								  int node_in_partition, int child_ordinal);
-extern void merkle_update_tree_path(Relation indexRel, int leafId,
-                                    MerkleHash *hash, bool isXorIn);
-extern void merkle_stage_delta(Relation indexRel, int leafId,
-								 const MerkleHash *hash);
 extern void merkle_stage_delta_event(Relation indexRel, MerkleDeltaEventType event_type,
 									 const uint8 *old_key_hash, const uint8 *new_key_hash,
 									 const MerkleHash *hash);
@@ -400,20 +292,35 @@ extern void do_split(Oid index_oid, const uint8 *node_id, int prefix_len);
 static inline uint8
 merkle_next_bits(const uint8 *key_hash, int prefix_len, int w)
 {
-	int byte_idx = prefix_len / 8;
-	int bit_off = prefix_len % 8;
-	int shift = 8 - bit_off - w;
-	return (key_hash[byte_idx] >> shift) & ((1 << w) - 1);
+	uint32 res = 0;
+	int i;
+	for (i = 0; i < w; i++)
+	{
+		int bit_idx = prefix_len + i;
+		int byte_pos = bit_idx / 8;
+		int bit_pos = 7 - (bit_idx % 8);
+		uint8 bit = (key_hash[byte_pos] >> bit_pos) & 1;
+		res = (res << 1) | bit;
+	}
+	return (uint8) res;
 }
 
 static inline void
 merkle_bytea_extend(uint8 *result_node_id, const uint8 *node_id, int prefix_len, uint8 bits, int w)
 {
-	int byte_idx = prefix_len / 8;
-	int bit_off = prefix_len % 8;
-	int shift = 8 - bit_off - w;
+	int i;
 	memcpy(result_node_id, node_id, 8);
-	result_node_id[byte_idx] |= (bits << shift);
+	for (i = 0; i < w; i++)
+	{
+		int bit_idx = prefix_len + i;
+		int byte_pos = bit_idx / 8;
+		int bit_pos = 7 - (bit_idx % 8);
+		uint8 bit = (bits >> (w - 1 - i)) & 1;
+		if (bit)
+			result_node_id[byte_pos] |= (1 << bit_pos);
+		else
+			result_node_id[byte_pos] &= ~(1 << bit_pos);
+	}
 }
 
 static inline void
@@ -442,15 +349,34 @@ merkle_bytea_upper_bound(uint8 *result_upper, const uint8 *node_id, int prefix_l
 static inline int
 merkle_parent_of(uint8 *parent_node_id, const uint8 *node_id, int prefix_len, int w)
 {
-	int new_prefix_len = prefix_len - w;
-	int byte_idx = new_prefix_len / 8;
-	int bit_off = new_prefix_len % 8;
-	int shift = 8 - bit_off - w;
+	int parent_prefix_len = prefix_len - w;
+	int i;
 
 	memcpy(parent_node_id, node_id, 8);
-	parent_node_id[byte_idx] &= ~((((1 << w) - 1) << shift) & 0xFF);
-	return new_prefix_len;
+	if (parent_prefix_len < 0)
+		parent_prefix_len = 0;
+
+	for (i = parent_prefix_len; i < 64; i++)
+	{
+		int byte_pos = i / 8;
+		int bit_pos = 7 - (i % 8);
+		parent_node_id[byte_pos] &= ~(1 << bit_pos);
+	}
+	return parent_prefix_len;
 }
+
+/*
+ * In-memory node splitting state
+ */
+typedef struct MerkleTupleHashEntry
+{
+	uint8		key_hash[8];
+	MerkleHash	tuple_hash;
+} MerkleTupleHashEntry;
+
+extern void merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
+									  MerkleTupleHashEntry *entries, int num_entries,
+									  int fanout, int bits_per_split, int split_threshold);
 
 /*
  * SQL-callable verification functions
@@ -468,6 +394,7 @@ extern Datum merkle_get_node_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_get_child_hashes(PG_FUNCTION_ARGS);
 extern Datum merkle_get_node_hashes(PG_FUNCTION_ARGS);
 extern Datum merkle_get_children_batch(PG_FUNCTION_ARGS);
+extern Datum merkle_get_descendants_batch(PG_FUNCTION_ARGS);
 extern Datum merkle_get_leaf_members(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hashes(PG_FUNCTION_ARGS);

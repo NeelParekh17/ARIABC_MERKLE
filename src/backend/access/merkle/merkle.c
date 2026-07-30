@@ -164,31 +164,31 @@ merkle_reject_concurrent_ddl(Oid index_oid, const char *command)
 static void
 merkle_register_relopts(void)
 {
-    if (merkle_relopts_registered) /* already registered */
-        return;
-    
-    merkle_relopt_kind = add_reloption_kind();
-    
-    add_int_reloption(merkle_relopt_kind, "partitions",
-                      "Number of partitions in the merkle index",
-                      MERKLE_NUM_PARTITIONS, 1, 10000, AccessExclusiveLock);
-    
-    add_int_reloption(merkle_relopt_kind, "leaves_per_partition",
-                      "Number of leaves per partition (must be power of fanout)",
-                      MERKLE_LEAVES_PER_PARTITION, 2, 1024, AccessExclusiveLock);
+	if (merkle_relopts_registered) /* already registered */
+		return;
 
-    add_int_reloption(merkle_relopt_kind, "fanout",
-                      "Branching factor (children per internal node)",
-                      MERKLE_DEFAULT_FANOUT, 2, 1024, AccessExclusiveLock);
-    
-    merkle_relopts_registered = true;
+	merkle_relopt_kind = add_reloption_kind();
+
+	add_int_reloption(merkle_relopt_kind, "fanout",
+					  "Branching factor (children per internal node)",
+					  MERKLE_DEFAULT_FANOUT, 2, 1024, AccessExclusiveLock);
+
+	add_int_reloption(merkle_relopt_kind, "split_threshold",
+					  "Node size to trigger a split",
+					  SPLIT_THRESHOLD, 2, 100000, AccessExclusiveLock);
+
+	add_int_reloption(merkle_relopt_kind, "merge_threshold",
+					  "Node size to trigger a merge",
+					  MERKLE_MERGE_THRESHOLD, 1, 100000, AccessExclusiveLock);
+
+	merkle_relopts_registered = true;
 }
 
 /* Reloption parsing table */
 static relopt_parse_elt merkle_relopt_tab[] = {
-    {"partitions", RELOPT_TYPE_INT, offsetof(MerkleOptions, partitions)},
-    {"leaves_per_partition", RELOPT_TYPE_INT, offsetof(MerkleOptions, leaves_per_partition)},
-    {"fanout", RELOPT_TYPE_INT, offsetof(MerkleOptions, fanout)}
+	{"fanout", RELOPT_TYPE_INT, offsetof(MerkleOptions, fanout)},
+	{"split_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, split_threshold)},
+	{"merge_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, merge_threshold)}
 };
 
 /*
@@ -199,41 +199,28 @@ static relopt_parse_elt merkle_relopt_tab[] = {
 bytea *
 merkle_options(Datum reloptions, bool validate)
 {
-    MerkleOptions *opts;
-    
-    /* Ensure our reloptions are registered */
-    merkle_register_relopts();
-    
-    opts = (MerkleOptions *) build_reloptions(reloptions, validate,
-                                               merkle_relopt_kind,
-                                               sizeof(MerkleOptions),
-                                               merkle_relopt_tab,
-                                               lengthof(merkle_relopt_tab));
-    
-    if (validate && opts != NULL)
-    {
-        if (opts->fanout < 2 || opts->fanout > 1024)
-        {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("fanout must be between 2 and 1024")));
-        }
+	MerkleOptions *opts;
 
-        /* Check if leaves_per_partition is a power of fanout */
-        if (!merkle_is_power_of(opts->leaves_per_partition, opts->fanout))
-        {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("leaves_per_partition must be a power of fanout"),
-                     errhint("For fanout=%d, suggested values: %d, %d, %d, ...",
-                             opts->fanout,
-                             opts->fanout,
-                             opts->fanout * opts->fanout,
-                             opts->fanout * opts->fanout * opts->fanout)));
-        }
-    }
-    
-    return (bytea *) opts;
+	/* Ensure our reloptions are registered */
+	merkle_register_relopts();
+
+	opts = (MerkleOptions *) build_reloptions(reloptions, validate,
+											   merkle_relopt_kind,
+											   sizeof(MerkleOptions),
+											   merkle_relopt_tab,
+											   lengthof(merkle_relopt_tab));
+
+	if (validate && opts != NULL)
+	{
+		if (opts->fanout < 2 || opts->fanout > 1024)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("fanout must be between 2 and 1024")));
+		}
+	}
+
+	return (bytea *) opts;
 }
 
 /*
@@ -244,46 +231,53 @@ merkle_options(Datum reloptions, bool validate)
 MerkleOptions *
 merkle_get_options(Relation indexRel)
 {
-    MerkleOptions *opts;
-    bytea *relopts;
-    
-    relopts = indexRel->rd_options;
-    if (relopts == NULL)
-    {
-        /* No options specified, return defaults */
-        opts = (MerkleOptions *) palloc0(sizeof(MerkleOptions));
-        SET_VARSIZE(opts, sizeof(MerkleOptions));
-        opts->partitions = MERKLE_NUM_PARTITIONS;
-        opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
-        opts->fanout = MERKLE_DEFAULT_FANOUT;
-        return opts;
-    }
-    
-    /*
-     * Options were stored - copy and validate.
-     * The options are stored with local_reloptions format which includes
-     * a varlena header followed by the option values at their defined offsets.
-     */
-    opts = (MerkleOptions *) palloc0(sizeof(MerkleOptions));
-    memcpy(opts, relopts, Min(VARSIZE(relopts), sizeof(MerkleOptions)));
-    SET_VARSIZE(opts, sizeof(MerkleOptions));
+	MerkleOptions *opts;
+	bytea *relopts;
 
-    /* Backward compatibility: older rd_options blobs won't have fanout */
-    if (VARSIZE(relopts) < (offsetof(MerkleOptions, fanout) + sizeof(int)))
-        opts->fanout = MERKLE_DEFAULT_FANOUT;
-    
-    /* Validate options - if values look corrupt, use defaults */
-    if (opts->partitions <= 0 || opts->partitions > 10000 ||
-        opts->leaves_per_partition <= 0 || opts->leaves_per_partition > 1024 ||
-        opts->fanout < 2 || opts->fanout > 1024 ||
-        !merkle_is_power_of(opts->leaves_per_partition, opts->fanout))
-    {
-        opts->partitions = MERKLE_NUM_PARTITIONS;
-        opts->leaves_per_partition = MERKLE_LEAVES_PER_PARTITION;
-        opts->fanout = MERKLE_DEFAULT_FANOUT;
-    }
-    
-    return opts;
+	relopts = indexRel->rd_options;
+	if (relopts == NULL)
+	{
+		/* No options specified, return defaults */
+		opts = (MerkleOptions *) palloc0(sizeof(MerkleOptions));
+		SET_VARSIZE(opts, sizeof(MerkleOptions));
+		opts->fanout = MERKLE_DEFAULT_FANOUT;
+		opts->split_threshold = SPLIT_THRESHOLD;
+		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
+		return opts;
+	}
+
+	/*
+	 * Options were stored - copy and validate.
+	 * The options are stored with local_reloptions format which includes
+	 * a varlena header followed by the option values at their defined offsets.
+	 */
+	opts = (MerkleOptions *) palloc0(sizeof(MerkleOptions));
+	memcpy(opts, relopts, Min(VARSIZE(relopts), sizeof(MerkleOptions)));
+	SET_VARSIZE(opts, sizeof(MerkleOptions));
+
+	/* Backward compatibility: older rd_options blobs won't have fanout */
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, fanout) + sizeof(int)))
+		opts->fanout = MERKLE_DEFAULT_FANOUT;
+
+	/* Backward compatibility: older rd_options blobs won't have thresholds */
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, merge_threshold) + sizeof(int)))
+	{
+		opts->split_threshold = SPLIT_THRESHOLD;
+		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
+	}
+
+	/* Validate options - if values look corrupt, use defaults */
+	if (opts->fanout < 2 || opts->fanout > 1024 ||
+		opts->split_threshold < 2 || opts->split_threshold > 100000 ||
+		opts->merge_threshold < 1 || opts->merge_threshold > 100000 ||
+		opts->merge_threshold >= opts->split_threshold)
+	{
+		opts->fanout = MERKLE_DEFAULT_FANOUT;
+		opts->split_threshold = SPLIT_THRESHOLD;
+		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
+	}
+
+	return opts;
 }
 
 PG_FUNCTION_INFO_V1(merklehandler);

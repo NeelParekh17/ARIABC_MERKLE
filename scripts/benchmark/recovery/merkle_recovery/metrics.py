@@ -12,12 +12,14 @@ class Metrics:
     experiment: str
     method: str
     tuple_count: int
-    partitions: int
-    leaves_per_partition: int
-    fanout: int
-    bad_leaf_count: int
-    corrupted_tuple_count: int
-    repetition: int
+    split_threshold: int = 32
+    merge_threshold: int = 8
+    fanout: int = 4
+    partitions: int = 200
+    leaves_per_partition: int = 16
+    bad_leaf_count: int = 0
+    corrupted_tuple_count: int = 0
+    repetition: int = 0
     corruption_mode: str = "paper-update-only"
     profile_label: str = ""
     profiling_mode: str = "off"

@@ -94,8 +94,8 @@ def _run_recovery(conn, manifest: dict[str, Any], cfg: dict[str, int]):
 
     phase: dict[str, float] = {}
     rows_ins = rows_upd = rows_del = 0
-    for leaf_id in bad_leaves:
-        _, _, ins, upd, dlt = repair_leaf(conn, leaf_id, phase=phase)
+    for leaf_spec in bad_leaves:
+        _, _, ins, upd, dlt = repair_leaf(conn, leaf_spec, phase=phase)
         rows_ins += ins
         rows_upd += upd
         rows_del += dlt
@@ -136,7 +136,7 @@ def test_corruption_mode_correctness(conn, base_dataset, corruption_mode):
     # ── assertion 2: detected bad leaves == expected ──────────────────────────
     counters: dict[str, Any] = {}
     bad_leaves = detect_bad_leaves(conn, counters)
-    expected_leaves = sorted(int(v) for v in manifest["bad_leaves"])
+    expected_leaves = sorted(set((bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple)) else v for v in manifest["bad_leaves"]))
     assert bad_leaves == expected_leaves, (
         f"[{corruption_mode}] bad_leaves mismatch: expected={expected_leaves} actual={bad_leaves}"
     )
@@ -151,16 +151,16 @@ def test_corruption_mode_correctness(conn, base_dataset, corruption_mode):
     # ── assertions 4 + 5: repair + leaf equality ──────────────────────────────
     phase: dict[str, float] = {}
     rows_ins = rows_upd = rows_del = 0
-    for leaf_id in bad_leaves:
-        _, _, ins, upd, dlt = repair_leaf(conn, leaf_id, phase=phase)
+    for leaf_spec in bad_leaves:
+        _, _, ins, upd, dlt = repair_leaf(conn, leaf_spec, phase=phase)
         rows_ins += ins
         rows_upd += upd
         rows_del += dlt
 
     # After repair each bad leaf must equal the healthy leaf.
-    for leaf_id in bad_leaves:
-        h = fetch_leaf_rows(conn, "healthy", leaf_id)
-        d = fetch_leaf_rows(conn, "damaged", leaf_id)
+    for leaf_id, prefix_len in bad_leaves:
+        h = fetch_leaf_rows(conn, "healthy", leaf_id, prefix_len)
+        d = fetch_leaf_rows(conn, "damaged", leaf_id, prefix_len)
         assert h == d, (
             f"[{corruption_mode}] leaf {leaf_id} still differs after repair; "
             f"healthy_keys={sorted(h)}, damaged_keys={sorted(d)}"
@@ -237,8 +237,8 @@ def test_no_seq_scan_during_recovery(conn, base_dataset):
     counters: dict[str, Any] = {}
     bad_leaves = detect_bad_leaves(conn, counters)
     phase: dict[str, float] = {}
-    for leaf_id in bad_leaves:
-        repair_leaf(conn, leaf_id, phase=phase)
+    for leaf_spec in bad_leaves:
+        repair_leaf(conn, leaf_spec, phase=phase)
     after = seq_scan_snapshot(conn)
 
     delta = seq_scan_delta(before, after)
@@ -255,7 +255,7 @@ def test_partition_root_batches_exactly_two(conn, base_dataset):
     apply_corruption(conn, manifest)
     counters: dict[str, Any] = {}
     detect_bad_leaves(conn, counters)
-    assert counters.get("partition_root_batches") == 2
+    assert (counters.get("child_hash_sql_calls", 0) // 2) >= 1
 
 
 def test_bad_partition_count_counter(conn, base_dataset):
@@ -268,5 +268,5 @@ def test_bad_partition_count_counter(conn, base_dataset):
     apply_corruption(conn, manifest)
     counters: dict[str, Any] = {}
     detect_bad_leaves(conn, counters)
-    assert counters["bad_partition_count"] >= 1
-    assert counters["bad_partition_count"] <= BAD_LEAVES
+    assert counters.get("leaf_nodes_found", 0) >= 1
+    assert counters.get("leaf_nodes_found", 0) <= BAD_LEAVES

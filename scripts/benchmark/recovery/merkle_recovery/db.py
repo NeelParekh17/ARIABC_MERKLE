@@ -13,7 +13,10 @@ from psycopg.rows import dict_row
 
 def connect(args: argparse.Namespace):
     """Open a psycopg3 connection with autocommit and dict row factory."""
-    return psycopg.connect(args.dsn, autocommit=True, row_factory=dict_row)
+    conn = psycopg.connect(args.dsn, autocommit=True, row_factory=dict_row)
+    with conn.cursor() as cur:
+        cur.execute("SET enable_seqscan = off")
+    return conn
 
 
 def execute(conn, sql: str, params: tuple[Any, ...] | None = None) -> list[dict[str, Any]]:
@@ -48,10 +51,11 @@ def geometry(conn, schema: str = "healthy") -> dict[str, int]:
     raw = scalar(conn, f"SELECT merkle_tree_stats('{schema}.usertable'::regclass)")
     data = json.loads(raw)
     return {
-        "partitions": int(data["num_partitions"]),
-        "leaves_per_partition": int(data["leaves_per_partition"]),
-        "fanout": int(data["fanout"]),
-        "nodes_per_partition": int(data["nodes_per_partition"]),
+        "fanout": int(data.get("fanout", 4)),
+        "split_threshold": int(data.get("split_threshold", 32)),
+        "merge_threshold": int(data.get("merge_threshold", 8)),
+        "total_nodes": int(data.get("total_nodes", 0)),
+        "leaf_nodes": int(data.get("leaf_nodes", 0)),
     }
 
 

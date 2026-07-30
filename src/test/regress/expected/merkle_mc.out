@@ -1,0 +1,88 @@
+-- Test multi-column Merkle index with dynamic partitioning
+\set ECHO none
+ merkle_apply_pending 
+----------------------
+                    5
+(1 row)
+
+CREATE TABLE merkle_mc_test (ts timestamptz, tag text, val int);
+-- Create a dynamic Merkle index
+CREATE INDEX merkle_mc_idx ON merkle_mc_test
+    USING merkle (ts, tag);
+INSERT INTO merkle_mc_test VALUES
+    ('2024-01-01 10:00:00+00', 'alpha', 10),
+    ('2024-01-01 11:00:00+00', 'beta',  20),
+    ('2024-01-01 12:00:00+00', 'gamma', 30);
+SELECT merkle_apply_pending();
+ merkle_apply_pending 
+----------------------
+                    6
+(1 row)
+
+SELECT merkle_verify('merkle_mc_test') AS mc_initial_verify;
+ mc_initial_verify 
+-------------------
+ t
+(1 row)
+
+-- Check routes (now dynamic, so it might output different internal node IDs, but let's just get the count)
+SELECT count(*) FROM ariabc_internal.merkle_node WHERE index_oid = 'merkle_mc_idx'::regclass AND is_leaf = true;
+ count 
+-------
+     1
+(1 row)
+
+UPDATE merkle_mc_test SET val = val * 10 WHERE tag = 'alpha';
+SELECT merkle_apply_pending();
+ merkle_apply_pending 
+----------------------
+                    7
+(1 row)
+
+SELECT merkle_verify('merkle_mc_test') AS mc_payload_update_verify;
+ mc_payload_update_verify 
+--------------------------
+ t
+(1 row)
+
+UPDATE merkle_mc_test SET tag = 'gamma' WHERE tag = 'beta';
+SELECT merkle_apply_pending();
+ merkle_apply_pending 
+----------------------
+                    8
+(1 row)
+
+SELECT merkle_verify('merkle_mc_test') AS mc_rk_update_verify;
+ mc_rk_update_verify 
+---------------------
+ t
+(1 row)
+
+-- Test nulls
+INSERT INTO merkle_mc_test (ts, tag, val) VALUES ('2024-01-01 13:00:00+00', NULL, 40);
+SELECT merkle_apply_pending();
+ merkle_apply_pending 
+----------------------
+                    9
+(1 row)
+
+SELECT merkle_verify('merkle_mc_test') AS mc_null_insert_verify;
+ mc_null_insert_verify 
+-----------------------
+ t
+(1 row)
+
+DELETE FROM merkle_mc_test;
+SELECT merkle_apply_pending();
+ merkle_apply_pending 
+----------------------
+                   10
+(1 row)
+
+SELECT merkle_verify('merkle_mc_test') AS mc_delete_verify;
+ mc_delete_verify 
+------------------
+ t
+(1 row)
+
+DROP TABLE merkle_mc_test;

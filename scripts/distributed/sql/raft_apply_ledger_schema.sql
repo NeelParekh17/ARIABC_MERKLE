@@ -84,6 +84,18 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_local_delta (
     )
 );
 
+-- Dynamic Merkle tree node table (Section 7 of Plan_review.md)
+CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_node (
+    index_oid    oid      NOT NULL,
+    node_id      bytea    NOT NULL,
+    prefix_len   smallint NOT NULL,
+    is_leaf      boolean  NOT NULL,
+    tuple_count  bigint   NOT NULL DEFAULT 0,
+    hash         bytea    NOT NULL,
+    PRIMARY KEY (index_oid, node_id, prefix_len)
+);
+CREATE INDEX IF NOT EXISTS merkle_node_lookup_idx ON ariabc_internal.merkle_node (index_oid, node_id, prefix_len);
+
 -- Schema version tracking metadata
 CREATE TABLE IF NOT EXISTS ariabc_internal.raft_apply_schema_meta (
     schema_version integer PRIMARY KEY

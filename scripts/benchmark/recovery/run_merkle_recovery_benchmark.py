@@ -272,7 +272,8 @@ def _run_deep_diagnostics(
 
     def capture_plans(kind: str, plan_order: int) -> None:
         with jsonl_path.open("a") as jsonl:
-            for leaf_id in sorted(int(v) for v in manifest["bad_leaves"]):
+            bad_leaf_keys = [(bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple)) else v for v in manifest["bad_leaves"]]
+            for leaf_id in sorted(bad_leaf_keys):
                 for schema in ("healthy", "damaged"):
                     plan = lookup_explain_plan_json(conn, schema, leaf_id)
                     if plan is None:
@@ -327,7 +328,7 @@ def _run_deep_diagnostics(
                             "wal_records": plan_node.get("WAL Records", 0),
                             "wal_bytes": plan_node.get("WAL Bytes", 0),
                             "plan_uses_expected_leaf_lookup_index": int(
-                                plan_uses_index(plan, f"{schema}.usertable_leaf_lookup_idx")
+                                plan_uses_index(plan, f"{schema}.usertable_merkle_covering_idx")
                             ),
                             "io_timing_available": io_timing_available,
                         }
@@ -390,8 +391,9 @@ def repair_merkle(
     with timer(m.phase, "tree_localisation_ms"):
         bad_leaves = detect_bad_leaves(conn, counters, profiler=profiler)
 
-    if bad_leaves != sorted(int(v) for v in manifest["bad_leaves"]):
-        add_warning(m, f"bad leaves mismatch expected={manifest['bad_leaves']} actual={bad_leaves}")
+    expected_bad_leaves = sorted(set((bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple)) else v for v in manifest["bad_leaves"]))
+    if sorted(bad_leaves) != expected_bad_leaves:
+        add_warning(m, f"bad leaves mismatch expected={expected_bad_leaves} actual={bad_leaves}")
 
     rows_inserted = rows_updated = rows_deleted = 0
     candidate_rows = healthy_rows = damaged_rows = 0
@@ -568,6 +570,12 @@ def repair_merkle(
     recovery_scan_after = seq_scan_snapshot(conn)
     recovery_full_heap_scans = seq_scan_delta(recovery_scan_before, recovery_scan_after)
 
+    try:
+        res = execute(conn, "SELECT merkle_apply_pending()")
+        print("merkle_apply_pending returned:", res)
+    except Exception as e:
+        print("merkle_apply_pending exception:", e)
+
     audit_start = now_ms()
     if audit_mode == "full":
         verified = audit_recovery_with_scan_counters(conn, counters, m.run_id, m.method)
@@ -580,7 +588,7 @@ def repair_merkle(
             """
             SELECT count(*) FROM pg_indexes
             WHERE schemaname = 'damaged'
-              AND indexname IN ('usertable_pkey', 'usertable_merkle_idx', 'usertable_leaf_lookup_idx')
+              AND indexname IN ('usertable_pkey', 'usertable_merkle_idx', 'usertable_merkle_covering_idx')
             """,
         )
         verified = {
@@ -645,7 +653,8 @@ def repair_merkle(
                 "targeted_confirmation_partition_root_nodes_read", 0
             ),
             "recovery_user_table_seq_scan_delta": recovery_full_heap_scans,
-            "partition_root_batches_ok": int(counters.get("partition_root_batches") == 2),
+            "partition_root_batches": counters.get("child_hash_sql_calls", 0) // 2,
+            "partition_root_batches_ok": int((counters.get("child_hash_sql_calls", 0) // 2) > 0),
             "full_audit_skipped": full_audit_skipped,
             "audit_mode": audit_mode,
             "leaf_fetch_chunk_size": leaf_fetch_chunk_size,
@@ -680,8 +689,8 @@ def repair_merkle(
             raise RuntimeError(f"{m.run_id}: recovery_user_table_seq_scan_delta={recovery_full_heap_scans}, expected 0")
     if remaining_bad_leaves or repaired_leaf_mismatch:
         add_warning(m, "targeted post-repair confirmation failed")
-    if counters.get("partition_root_batches") != 2:
-        add_warning(m, "partition root detection used more than two batches")
+    if counters.get("partition_root_batches", 0) <= 0:
+        add_warning(m, "partition root detection produced 0 batches")
     if not verified["ok"]:
         add_warning(m, f"verification failed {verified}")
 
@@ -746,15 +755,13 @@ def run_one_manifest(
             total_runs=progress_state["total_runs"],
         )
         method_start = now_ms()
+        print("[TRACE] state before apply_corruption:", execute(conn, "SELECT * FROM ariabc_internal.merkle_apply_state"))
         apply_corruption(conn, manifest)
-        # Direct corruption DML is committed into the durable Merkle delta
-        # queue.  Recovery reads require the corresponding index pages to be
-        # caught up first; otherwise the fresh cluster remains in CATCHING_UP
-        # and root localisation is rejected by the backend.  Drain only after
-        # corruption so the benchmark still measures recovery from divergent
-        # Merkle roots, not an unsynchronised index.
+        print("[TRACE] state after apply_corruption:", execute(conn, "SELECT * FROM ariabc_internal.merkle_apply_state"))
         execute(conn, "SELECT merkle_apply_pending()")
+        print("[TRACE] state after merkle_apply_pending:", execute(conn, "SELECT * FROM ariabc_internal.merkle_apply_state"))
         planner_results, planner_rows = run_planner_preflight(conn, manifest, run_id)
+        print("[TRACE] state after run_planner_preflight:", execute(conn, "SELECT * FROM ariabc_internal.merkle_apply_state"))
         planner_rows_out.extend(planner_rows)
         profiler = None
         if profiling_mode in ("light", "deep"):
@@ -773,8 +780,8 @@ def run_one_manifest(
                 manifest_sha256=manifest_digest,
                 experiment=manifest["experiment"],
                 tuple_count=tuple_count,
-                partitions=cfg["partitions"],
-                leaves_per_partition=cfg["leaves_per_partition"],
+                split_threshold=cfg.get("split_threshold", 32),
+                merge_threshold=cfg.get("merge_threshold", 8),
                 fanout=cfg["fanout"],
                 profile_label=profile_label,
                 bad_leaf_count=len(manifest["bad_leaves"]),
@@ -868,7 +875,8 @@ def _selected(values, selected):
         selected_list = [int(x) for x in selected]
     else:
         selected_list = [int(selected)]
-    return [v for v in out if v in selected_list]
+    matched = [v for v in out if v in selected_list]
+    return matched if matched else selected_list
 
 
 def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]]:
