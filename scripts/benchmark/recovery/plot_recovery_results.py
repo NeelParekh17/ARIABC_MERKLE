@@ -201,14 +201,14 @@ def plot_all(result_dir: Path):
         "Figure 13-style Merkle recovery time",
         "bad_leaf_count",
         "median ms",
-        aggregate(fig13, "bad_leaf_count", "restore_repair_ms", "partitions"),
+        aggregate(fig13, "bad_leaf_count", "restore_repair_ms", "fanout"),
     )
     svg_line_chart(
         plots / "figure13_candidate_rows.svg",
         "Candidate rows fetched",
         "bad_leaf_count",
         "median candidate rows",
-        aggregate(fig13, "bad_leaf_count", "candidate_rows_fetched", "partitions"),
+        aggregate(fig13, "bad_leaf_count", "candidate_rows_fetched", "fanout"),
     )
 
     run_map = {r["run_id"]: r for r in rows if "run_id" in r}
@@ -431,7 +431,7 @@ def plot_all(result_dir: Path):
                 f"Recovery time vs fanout — {title_suffix}",
                 "fanout",
                 "median restore_repair_ms",
-                aggregate(tier_rows, "fanout", "restore_repair_ms", "leaves_per_partition"),
+                aggregate(tier_rows, "fanout", "restore_repair_ms", "profile_label"),
             )
             svg_line_chart(
                 plots / f"fanout_localisation_time_{tier_key}.svg",
@@ -440,7 +440,7 @@ def plot_all(result_dir: Path):
                 "median tree_localisation_ms",
                 aggregate(
                     [r for r in rows if r.get("profile_label") in tier_labels],
-                    "fanout", "tree_localisation_ms", "leaves_per_partition",
+                    "fanout", "tree_localisation_ms", "profile_label",
                 ),
             )
 
@@ -452,7 +452,7 @@ def plot_all(result_dir: Path):
                 if v is not None:
                     index_points.append({
                         "x": str(row.get("fanout", "")),
-                        "series": str(row.get("leaves_per_partition", "")),
+                        "series": str(row.get("profile_label", "")),
                         "median": v / (1024 * 1024),
                     })
         if index_points:
@@ -475,7 +475,7 @@ def plot_all(result_dir: Path):
                     for row in sweep_backend:
                         v = as_float(row.get(metric_field))
                         if v is not None:
-                            grouped[(str(row.get("fanout", "")), str(row.get("leaves_per_partition", "")))].append(v)
+                            grouped[(str(row.get("fanout", "")), str(row.get("profile_label", "")))].append(v)
                     agg = [
                         {"x": x, "series": s, "median": median(vals)}
                         for (x, s), vals in grouped.items()

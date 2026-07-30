@@ -16,6 +16,7 @@ def detect_bad_leaves(
     operation_prefix: str = "",
     profiler: ProfileCollector | None = None,
     stage_name: str = "localisation",
+    depth: int = 3,
 ) -> list[tuple[bytes, int]]:
     """Walk the dynamic Merkle tree and return sorted (node_id, prefix_len) of differing leaves."""
     bad: list[tuple[bytes, int]] = []
@@ -26,24 +27,22 @@ def detect_bad_leaves(
     counters[f"{prefix}tree_nodes_visited"] = 0
 
     # Start at the canonical root
-    frontier: list[tuple[bytes, int]] = [(bytes(8), 0)]
+    frontier: set[tuple[bytes, int]] = {(bytes(8), 0)}
+    bits_per_split = 2  # fanout = 4 -> bits_per_split = 2
 
     while frontier:
-        parents = frontier
-        frontier = []
+        parents = sorted(list(frontier))
+        frontier = set()
         counters[f"{prefix}tree_nodes_visited"] += len(parents)
         
         node_ids = [n for n, p in parents]
         prefix_lens = [p for n, p in parents]
-        
-        # Use depth=4 as per Plan_review.md Section 11 & 13 for optimal per-roundtrip progress
-        depth = 4
+        p_len = prefix_lens[0]
+        boundary_len = p_len + depth * bits_per_split
         
         batch_sql = """
-            SELECT p.parent_node_id, p.parent_prefix_len, d.node_id, d.prefix_len, d.is_leaf, d.hash 
-            FROM unnest(%s::bytea[], %s::smallint[]) AS p(parent_node_id, parent_prefix_len)
-            CROSS JOIN LATERAL merkle_get_descendants_batch(%s::regclass, p.parent_node_id, p.parent_prefix_len, %s::int4) d
-            WHERE d.prefix_len > p.parent_prefix_len
+            SELECT node_id, prefix_len, is_leaf, hash 
+            FROM merkle_get_descendants_batch(%s::regclass, %s::bytea[], %s::smallint[], %s::int4)
         """
         
         healthy_rows = record_call(
@@ -54,7 +53,7 @@ def detect_bad_leaves(
             fn=lambda: execute(
                 conn,
                 batch_sql,
-                (node_ids, prefix_lens, "healthy.usertable_merkle_idx", depth),
+                ("healthy.usertable_merkle_idx", node_ids, prefix_lens, depth),
             ),
         )
         damaged_rows = record_call(
@@ -65,7 +64,7 @@ def detect_bad_leaves(
             fn=lambda: execute(
                 conn,
                 batch_sql,
-                (node_ids, prefix_lens, "damaged.usertable_merkle_idx", depth),
+                ("damaged.usertable_merkle_idx", node_ids, prefix_lens, depth),
             ),
         )
         counters[f"{prefix}child_hash_sql_calls"] += 2
@@ -76,24 +75,21 @@ def detect_bad_leaves(
             for row in damaged_rows
         }
 
-        # Track which nodes have their children present in this batch
-        parents_in_batch = {
-            (bytes(row["parent_node_id"]), int(row["parent_prefix_len"]))
-            for row in healthy_rows
-        }
-        
         compare_start = time.perf_counter_ns()
         for row in healthy_rows:
-            key = (bytes(row["node_id"]), int(row["prefix_len"]))
+            node_p_len = int(row["prefix_len"])
+            if node_p_len <= p_len:
+                continue
+            key = (bytes(row["node_id"]), node_p_len)
             if row["hash"] != damaged_children.get(key):
                 if row["is_leaf"]:
                     if key not in bad:
                         bad.append(key)
                         counters[f"{prefix}leaf_nodes_found"] += 1
                 else:
-                    # Only add to frontier if its children were not fetched in this batch
-                    if key not in parents_in_batch and key not in frontier:
-                        frontier.append(key)
+                    # Only add to frontier if this internal node is at the batch expansion boundary
+                    if node_p_len >= boundary_len:
+                        frontier.add(key)
                     
         if profiler is not None and profiler.enabled:
             profiler.record(

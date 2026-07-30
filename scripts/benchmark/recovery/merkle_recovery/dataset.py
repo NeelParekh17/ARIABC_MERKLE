@@ -152,8 +152,6 @@ def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int
 def build_dataset(
     conn,
     tuple_count: int,
-    partitions: int = 200,
-    leaves_per_partition: int = 16,
     fanout: int = 4,
     split_threshold: int = 32,
     merge_threshold: int = 8,
@@ -277,8 +275,6 @@ def table_sizes(conn) -> dict[str, int]:
 def bucket_consistency_sample(
     conn,
     tuple_count: int,
-    partitions: int = 200,
-    leaves_per_partition: int = 16,
     fanout: int = 4,
     seed: int = 0,
     sample_size: int = 10_000,
@@ -290,8 +286,6 @@ def bucket_consistency_sample(
     return (
         {
             "tuple_count": tuple_count,
-            "partitions": partitions,
-            "leaves_per_partition": leaves_per_partition,
             "fanout": fanout,
             "sample_count": 0,
             "sample_seed": seed,
