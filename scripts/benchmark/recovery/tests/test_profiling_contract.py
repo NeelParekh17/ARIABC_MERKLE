@@ -110,9 +110,9 @@ def test_profile_summary_can_group_by_geometry():
             "run_id": "r-l16",
             "experiment": "recovery-scaling-diagnosis",
             "tuple_count": 5000000,
-            "partitions": 200,
-            "leaves_per_partition": 16,
             "fanout": 2,
+            "split_threshold": 32,
+            "merge_threshold": 8,
             "profile_label": "baseline_l16",
             "bad_leaf_count": 10,
             "corrupted_tuple_count": 300,
@@ -125,9 +125,9 @@ def test_profile_summary_can_group_by_geometry():
             "run_id": "r-l128",
             "experiment": "recovery-scaling-diagnosis",
             "tuple_count": 5000000,
-            "partitions": 200,
-            "leaves_per_partition": 128,
             "fanout": 2,
+            "split_threshold": 32,
+            "merge_threshold": 8,
             "profile_label": "preprovisioned_l128",
             "bad_leaf_count": 10,
             "corrupted_tuple_count": 300,
@@ -140,11 +140,11 @@ def test_profile_summary_can_group_by_geometry():
     summary = group_profile_rows_with_fraction(
         rows,
         restore_repair_ms=12.0,
-        group_keys=("profile_label", "tuple_count", "leaves_per_partition"),
+        group_keys=("profile_label", "tuple_count", "split_threshold"),
     )
-    assert {(row["profile_label"], row["leaves_per_partition"]) for row in summary} == {
-        ("baseline_l16", 16),
-        ("preprovisioned_l128", 128),
+    assert {(row["profile_label"], row["split_threshold"]) for row in summary} == {
+        ("baseline_l16", 32),
+        ("preprovisioned_l128", 32),
     }
 
 
@@ -199,7 +199,7 @@ def test_packager_allows_profiling_artifacts():
 
 
 def test_backend_profile_update_only_invariants_require_row_hash_and_ns_time():
-    cfg = {"partitions": 200, "leaves_per_partition": 16, "fanout": 2}
+    cfg = {"fanout": 2, "split_threshold": 32, "merge_threshold": 8}
     counters = {"child_hash_sql_calls": 40, "child_hash_nodes_read": 80}
     post = {
         "targeted_confirmation_child_hash_sql_calls": 40,
@@ -241,54 +241,47 @@ def test_backend_profile_update_only_invariants_require_row_hash_and_ns_time():
     assert any("tree_path_update_ns" in reason for reason in reasons)
 
 
-def test_backend_profile_depth_expectations_for_static_geometries():
-    for leaves_per_partition, expected_depth in [(16, 5), (32, 6), (64, 7), (128, 8)]:
-        cfg = {"partitions": 200, "leaves_per_partition": leaves_per_partition, "fanout": 2}
-        backend = {
-            "root_hash_helper_calls": 4,
-            "root_hash_nodes_returned": 800,
-            "child_hash_helper_calls": 0,
-            "child_hash_nodes_returned": 0,
-            "row_hash_compute_calls": 600,
-            "tree_path_update_calls": 600,
-            "tree_path_nodes_touched": 600 * expected_depth,
-            "tree_path_update_ns": 1,
-        }
-        assert validate_backend_profile_stats(
-            backend,
-            cfg,
-            {},
-            {},
-            rows_updated=300,
-            rows_inserted=0,
-            rows_deleted=0,
-        ) == []
+def test_backend_profile_depth_expectations_for_dynamic_geometries():
+    cfg = {"fanout": 2, "split_threshold": 32, "merge_threshold": 8}
+    backend = {
+        "root_hash_helper_calls": 4,
+        "child_hash_helper_calls": 0,
+        "child_hash_nodes_returned": 0,
+        "row_hash_compute_calls": 600,
+        "tree_path_update_calls": 600,
+        "tree_path_update_ns": 1,
+    }
+    assert validate_backend_profile_stats(
+        backend,
+        cfg,
+        {},
+        {},
+        rows_updated=300,
+        rows_inserted=0,
+        rows_deleted=0,
+    ) == []
 
 
 def test_invalid_geometry_fails_before_database_construction():
-    with pytest.raises(ValueError, match="partitions"):
-        validate_geometry(0, 16, 2)
     with pytest.raises(ValueError, match="fanout"):
-        validate_geometry(200, 16, 1)
-    with pytest.raises(ValueError, match="leaves_per_partition"):
-        validate_geometry(200, 0, 2)
-    with pytest.raises(ValueError, match="exact power"):
-        validate_geometry(200, 12, 2)
-    validate_geometry(200, 128, 2)
+        validate_geometry(1)
+    with pytest.raises(ValueError, match="split_threshold"):
+        validate_geometry(2, split_threshold=8, merge_threshold=16)
+    validate_geometry(2, split_threshold=32, merge_threshold=8)
 
 
 def test_manual_geometry_override_gets_truthful_label():
     args = Namespace(
         profile="recovery-scaling-diagnosis",
-        leaves_per_partition=64,
         fanout=2,
-        partitions=200,
+        split_threshold=32,
+        merge_threshold=8,
         tuple_count=1_000_000,
         bad_leaf_count=10,
         geometry_label="baseline_l16",
     )
     specs = _series_for_profile(args, object())
-    assert {spec["geometry_label"] for spec in specs} == {"manual-p200-l64-f2"}
+    assert {spec["geometry_label"] for spec in specs} == {"manual-f2-s32-m8"}
 
 
 def test_deep_diagnostics_orders_candidate_repair_confirmation(monkeypatch, tmp_path):
@@ -325,8 +318,6 @@ def test_deep_diagnostics_orders_candidate_repair_confirmation(monkeypatch, tmp_
         {
             "experiment": "diagnosis",
             "tuple_count": 100,
-            "partitions": 10,
-            "leaves_per_partition": 16,
             "fanout": 2,
             "bad_leaves": [3],
             "corruptions": [1],
@@ -334,8 +325,6 @@ def test_deep_diagnostics_orders_candidate_repair_confirmation(monkeypatch, tmp_
         tmp_path,
         run_id="r1",
         tuple_count=100,
-        partitions=10,
-        leaves_per_partition=16,
         fanout=2,
         profile_label="l16",
         repetition=0,
@@ -365,8 +354,6 @@ def test_deep_diagnostics_runs_once_per_manifest_not_per_repetition(monkeypatch,
             experiment=manifest["experiment"],
             method="merkle",
             tuple_count=tuple_count,
-            partitions=manifest["partitions"],
-            leaves_per_partition=manifest["leaves_per_partition"],
             fanout=manifest["fanout"],
             bad_leaf_count=len(manifest["bad_leaves"]),
             corrupted_tuple_count=len(manifest["corruptions"]),
@@ -396,8 +383,6 @@ def test_deep_diagnostics_runs_once_per_manifest_not_per_repetition(monkeypatch,
         {
             "experiment": "diagnosis",
             "tuple_count": 100,
-            "partitions": 10,
-            "leaves_per_partition": 16,
             "fanout": 2,
             "bad_leaves": [3],
             "corruptions": [1],
@@ -421,9 +406,7 @@ def test_deep_diagnostics_runs_once_per_manifest_not_per_repetition(monkeypatch,
 def test_diagnosis_run_ids_are_unique_across_geometries():
     args = Namespace(
         profile="recovery-scaling-diagnosis",
-        leaves_per_partition=None,
         fanout=None,
-        partitions=None,
         tuple_count=5000000,
         bad_leaf_count=None,
         geometry_label=None,
@@ -433,8 +416,6 @@ def test_diagnosis_run_ids_are_unique_across_geometries():
         {
             "experiment": spec["experiment"],
             "tuple_count": spec["tuple_count"],
-            "partitions": spec["partitions"],
-            "leaves_per_partition": spec["leaves_per_partition"],
             "fanout": spec["fanout"],
             "bad_leaves": list(range(spec["bad_leaf_count"])),
             "corruptions": list(range(spec["corrupted_tuple_count"])),
@@ -452,28 +433,27 @@ def test_profile_report_contract_markers_for_l16_l128_tables():
     report = "\n".join(
         [
             "## Phase Medians And P95",
-            "| baseline_l16 | 1000000 | 200 | 16 | 2 | 10 | 300 | candidate_row_fetch_ms | 1.000 | 1.000 |",
-            "| baseline_l16 | 3000000 | 200 | 16 | 2 | 10 | 300 | candidate_row_fetch_ms | 2.000 | 2.000 |",
-            "| baseline_l16 | 5000000 | 200 | 16 | 2 | 10 | 300 | candidate_row_fetch_ms | 3.000 | 3.000 |",
-            "| preprovisioned_l128 | 1000000 | 200 | 128 | 2 | 10 | 300 | candidate_row_fetch_ms | 1.000 | 1.000 |",
-            "| preprovisioned_l128 | 3000000 | 200 | 128 | 2 | 10 | 300 | candidate_row_fetch_ms | 1.100 | 1.100 |",
-            "| preprovisioned_l128 | 5000000 | 200 | 128 | 2 | 10 | 300 | candidate_row_fetch_ms | 1.200 | 1.200 |",
+            "| baseline_l16 | 1000000 | 2 | 10 | 300 | candidate_row_fetch_ms | 1.000 | 1.000 |",
+            "| baseline_l16 | 3000000 | 2 | 10 | 300 | candidate_row_fetch_ms | 2.000 | 2.000 |",
+            "| baseline_l16 | 5000000 | 2 | 10 | 300 | candidate_row_fetch_ms | 3.000 | 3.000 |",
+            "| preprovisioned_l128 | 1000000 | 2 | 10 | 300 | candidate_row_fetch_ms | 1.000 | 1.000 |",
+            "| preprovisioned_l128 | 3000000 | 2 | 10 | 300 | candidate_row_fetch_ms | 1.100 | 1.100 |",
+            "| preprovisioned_l128 | 5000000 | 2 | 10 | 300 | candidate_row_fetch_ms | 1.200 | 1.200 |",
             "## Growth Ratios",
             "- highest-growing phase: `candidate_row_fetch_ms`",
         ]
     )
-    for label, leaf_count in (("baseline_l16", 16), ("preprovisioned_l128", 128)):
+    for label in ("baseline_l16", "preprovisioned_l128"):
         for tuple_count in (1_000_000, 3_000_000, 5_000_000):
-            assert f"| {label} | {tuple_count} | 200 | {leaf_count} |" in report
+            assert f"| {label} | {tuple_count} |" in report
     assert "highest-growing phase" in report
 
 
 def test_manual_geometry_requires_label():
     args = Namespace(
         profile="recovery-scaling-diagnosis",
-        leaves_per_partition=16,
-        fanout=None,
-        partitions=None,
+        fanout=2,
+        split_threshold=32,
         tuple_count=1_000_000,
         bad_leaf_count=None,
         geometry_label=None,
@@ -485,9 +465,9 @@ def test_manual_geometry_requires_label():
 def test_manual_geometry_with_label_produces_one_run():
     args = Namespace(
         profile="recovery-scaling-diagnosis",
-        leaves_per_partition=16,
         fanout=2,
-        partitions=200,
+        split_threshold=32,
+        merge_threshold=8,
         tuple_count=1_000_000,
         bad_leaf_count=None,
         geometry_label="baseline_l16",
@@ -495,8 +475,6 @@ def test_manual_geometry_with_label_produces_one_run():
     series = _series_for_profile(args, object())
     assert len(series) == 1
     assert series[0]["tuple_count"] == 1_000_000
-    assert series[0]["partitions"] == 200
-    assert series[0]["leaves_per_partition"] == 16
     assert series[0]["fanout"] == 2
 
 
@@ -506,8 +484,6 @@ def test_full_recovery_phase_reconciliation():
         experiment="test_exp",
         method="merkle",
         tuple_count=1000,
-        partitions=10,
-        leaves_per_partition=16,
         fanout=2,
         bad_leaf_count=1,
         corrupted_tuple_count=10,
@@ -563,9 +539,7 @@ _ALL_SWEEP_LABELS = [
 def _sweep_args(**overrides):
     base = dict(
         profile="fanout-width-sweep",
-        leaves_per_partition=None,
         fanout=None,
-        partitions=None,
         tuple_count=None,
         bad_leaf_count=None,
         geometry_label=None,
@@ -597,8 +571,6 @@ def test_fanout_sweep_run_ids_are_unique():
         manifest = {
             "experiment": spec["experiment"],
             "tuple_count": spec["tuple_count"],
-            "partitions": spec["partitions"],
-            "leaves_per_partition": spec["leaves_per_partition"],
             "fanout": spec["fanout"],
             "bad_leaves": list(range(spec["bad_leaf_count"])),
             "corruptions": list(range(spec["corrupted_tuple_count"])),
@@ -611,7 +583,7 @@ def test_fanout_sweep_run_ids_are_unique():
 def test_fanout_sweep_all_geometries_pass_validation():
     specs = _series_for_profile(_sweep_args(), _sweep_config())
     for spec in specs:
-        validate_geometry(spec["partitions"], spec["leaves_per_partition"], spec["fanout"])
+        validate_geometry(spec["fanout"], spec.get("split_threshold", 32), spec.get("merge_threshold", 8))
 
 
 def test_fanout_sweep_rejects_manual_fanout_override():
@@ -619,49 +591,39 @@ def test_fanout_sweep_rejects_manual_fanout_override():
         _series_for_profile(_sweep_args(fanout=4), _sweep_config())
 
 
-def test_fanout_sweep_rejects_manual_lpp_override():
-    with pytest.raises(ValueError, match="fixed geometry labels"):
-        _series_for_profile(_sweep_args(leaves_per_partition=256), _sweep_config())
-
-
-def test_fanout_sweep_rejects_manual_partitions_override():
-    with pytest.raises(ValueError, match="fixed geometry labels"):
-        _series_for_profile(_sweep_args(partitions=100), _sweep_config())
-
-
 def test_fanout_sweep_label_filter_f16_l16():
     specs = _series_for_profile(_sweep_args(geometry_label="fanout_f16_l16"), _sweep_config())
     assert len(specs) == 1
-    assert specs[0]["fanout"] == 16 and specs[0]["leaves_per_partition"] == 16
+    assert specs[0]["fanout"] == 16
 
 
 def test_fanout_sweep_label_filter_f128_l128():
     specs = _series_for_profile(_sweep_args(geometry_label="fanout_f128_l128"), _sweep_config())
     assert len(specs) == 1
-    assert specs[0]["fanout"] == 128 and specs[0]["leaves_per_partition"] == 128
+    assert specs[0]["fanout"] == 128
 
 
 def test_fanout_sweep_label_filter_f256_l256():
     specs = _series_for_profile(_sweep_args(geometry_label="fanout_f256_l256"), _sweep_config())
     assert len(specs) == 1
-    assert specs[0]["fanout"] == 256 and specs[0]["leaves_per_partition"] == 256
+    assert specs[0]["fanout"] == 256
 
 
 def test_fanout_sweep_label_filter_f64_l64():
     specs = _series_for_profile(_sweep_args(geometry_label="fanout_f64_l64"), _sweep_config())
     assert len(specs) == 1
-    assert specs[0]["fanout"] == 64 and specs[0]["leaves_per_partition"] == 64
+    assert specs[0]["fanout"] == 64
 
 def test_fanout_sweep_label_filter_f512_l512():
     specs = _series_for_profile(_sweep_args(geometry_label="fanout_f512_l512"), _sweep_config())
     assert len(specs) == 1
-    assert specs[0]["fanout"] == 512 and specs[0]["leaves_per_partition"] == 512
+    assert specs[0]["fanout"] == 512
 
 
 def test_fanout_sweep_label_filter_f1024_l1024():
     specs = _series_for_profile(_sweep_args(geometry_label="fanout_f1024_l1024"), _sweep_config())
     assert len(specs) == 1
-    assert specs[0]["fanout"] == 1024 and specs[0]["leaves_per_partition"] == 1024
+    assert specs[0]["fanout"] == 1024
 
 
 def test_fanout_sweep_corrupted_tuple_count_is_always_300():
@@ -680,26 +642,6 @@ def test_fanout_sweep_bad_leaf_count_default_is_20():
         )
 
 
-@pytest.mark.parametrize("fanout,lpp,expected_depth", [
-    (4,    16,    3),
-    (16,   16,    2),
-    (4,    64,    4),
-    (8,    64,    3),
-    (64,   64,    2),
-    (128,  128,   2),
-    (4,    256,   5),
-    (16,   256,   3),
-    (256,  256,   2),
-    (512,  512,   2),
-    (4,    1024,  6),
-    (32,   1024,  3),
-    (1024, 1024,  2),
-])
-def test_tree_depth_for_fanout_sweep_geometries(fanout, lpp, expected_depth):
-    from run_merkle_recovery_benchmark import tree_depth
-    assert tree_depth(lpp, fanout) == expected_depth
-
-
 def test_validate_geometry_accepts_all_sweep_geometries():
     from merkle_recovery.config import profile_config
     import json, pathlib
@@ -707,7 +649,7 @@ def test_validate_geometry_accepts_all_sweep_geometries():
     matrix = json.loads(matrix_path.read_text())
     for label in _ALL_SWEEP_LABELS:
         geo = matrix[label]
-        validate_geometry(geo["partitions"], geo["leaves_per_partition"], geo["fanout"])
+        validate_geometry(geo.get("fanout", 4), geo.get("split_threshold", 32), geo.get("merge_threshold", 8))
 
 
 def test_fanout_sweep_rejects_manual_tuple_count_override():
@@ -732,9 +674,7 @@ def test_fanout_sweep_rejects_invalid_corruption_mode():
 def _size_scaling_args(**overrides):
     base = dict(
         profile="size-scaling-k75-c300",
-        leaves_per_partition=None,
         fanout=None,
-        partitions=None,
         tuple_count=None,
         bad_leaf_count=None,
         geometry_label=None,
@@ -777,10 +717,6 @@ def test_size_scaling_rejects_manual_overrides():
         _series_for_profile(_size_scaling_args(tuple_count=1000), config)
     with pytest.raises(ValueError, match="do not override geometry"):
         _series_for_profile(_size_scaling_args(fanout=4), config)
-    with pytest.raises(ValueError, match="do not override geometry"):
-        _series_for_profile(_size_scaling_args(leaves_per_partition=256), config)
-    with pytest.raises(ValueError, match="do not override geometry"):
-        _series_for_profile(_size_scaling_args(partitions=100), config)
     with pytest.raises(ValueError, match="uses fixed --bad-leaf-count=75"):
         _series_for_profile(_size_scaling_args(bad_leaf_count=50), config)
 
@@ -799,9 +735,7 @@ def test_size_scaling_rejects_invalid_corruption_mode():
 def _best_scaling_args(**overrides):
     base = dict(
         profile="best-scaling-f32-l1024-k75-c300",
-        leaves_per_partition=None,
         fanout=None,
-        partitions=None,
         tuple_count=None,
         bad_leaf_count=None,
         geometry_label=None,
@@ -842,10 +776,6 @@ def test_best_scaling_rejects_manual_overrides():
     config = _best_scaling_config()
     with pytest.raises(ValueError, match="fixed geometry"):
         _series_for_profile(_best_scaling_args(fanout=4), config)
-    with pytest.raises(ValueError, match="fixed geometry"):
-        _series_for_profile(_best_scaling_args(leaves_per_partition=256), config)
-    with pytest.raises(ValueError, match="fixed geometry"):
-        _series_for_profile(_best_scaling_args(partitions=100), config)
     with pytest.raises(ValueError, match="uses fixed --bad-leaf-count=75"):
         _series_for_profile(_best_scaling_args(bad_leaf_count=50), config)
     with pytest.raises(ValueError, match="only supports geometry_label=fanout_f32_l1024"):
@@ -875,8 +805,6 @@ def test_contract_with_skipped_audit():
         corrupted_tuple_count=300,
         repetition=0,
         corruption_mode="paper-update-only",
-        partitions=32,
-        leaves_per_partition=1024,
         fanout=32,
     )
     # Set all necessary counters

@@ -23,7 +23,6 @@ from run_merkle_recovery_benchmark import validate_backend_profile_stats
 import json
 
 SMOKE_N = 5_000_000
-P = 200
 K = 20
 C = 300
 
@@ -40,28 +39,28 @@ def conn(dsn):
         yield c
 
 @pytest.mark.integration
-@pytest.mark.parametrize("f,l", [
-    (64, 64),
-    (512, 512),
-    (1024, 1024),
+@pytest.mark.parametrize("f", [
+    64,
+    512,
+    1024,
 ])
-def test_official_smoke_geometry(conn, f, l):
+def test_official_smoke_geometry(conn, f):
     # 1. Build dataset
-    build_dataset(conn, SMOKE_N, P, l, f)
+    build_dataset(conn, SMOKE_N, fanout=f)
 
     # 2. 300 distinct corruptions, 20 bad leaves
     manifest = choose_corruption_manifest(
-        conn, "smoke", SMOKE_N, P, l, f, K, C, 
+        conn, "smoke", SMOKE_N, fanout=f, bad_leaf_count=K, corrupted_tuple_count=C,
         seed=1000 + f, corruption_mode="paper-update-only"
     )
     
-    assert len(set(manifest["bad_leaves"])) == K, f"Expected exactly {K} bad leaves"
+    assert len(set(tuple(v) if isinstance(v, list) else v for v in manifest["bad_leaves"])) == K, f"Expected exactly {K} bad leaves"
     assert len(manifest["corruptions"]) == C, f"Expected exactly {C} corruptions"
     
     validate_manifest_leaf_mapping(conn, manifest)
 
     # Reset and apply
-    reset_damaged_from_healthy(conn, {"partitions": P, "leaves_per_partition": l, "fanout": f})
+    reset_damaged_from_healthy(conn, {"fanout": f})
     apply_corruption(conn, manifest)
 
     before_seq = seq_scan_snapshot(conn)
@@ -74,13 +73,14 @@ def test_official_smoke_geometry(conn, f, l):
     counters: dict[str, Any] = {}
     bad_leaves = detect_bad_leaves(conn, counters)
     assert len(bad_leaves) == K, f"Detection found {len(bad_leaves)} leaves, expected {K}"
-    assert bad_leaves == sorted(manifest["bad_leaves"])
+    expected_leaves = sorted((bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple)) else v for v in manifest["bad_leaves"])
+    assert bad_leaves == expected_leaves
 
     # 4. Repair
     phase: dict[str, float] = {}
     inserted = updated = deleted = 0
-    for leaf_id in bad_leaves:
-        _, _, ins, upd, dlt = repair_leaf(conn, leaf_id, phase=phase)
+    for leaf_spec in bad_leaves:
+        _, _, ins, upd, dlt = repair_leaf(conn, leaf_spec, phase=phase)
         inserted += ins
         updated += upd
         deleted += dlt
@@ -101,9 +101,9 @@ def test_official_smoke_geometry(conn, f, l):
     assert remaining_bad_leaves == [], "targeted post-repair confirmation failed, leaves still damaged"
 
     # 6. Confirmation fetches for repaired leaves
-    for leaf_id in bad_leaves:
-        h = fetch_leaf_rows(conn, "healthy", leaf_id)
-        d = fetch_leaf_rows(conn, "damaged", leaf_id)
+    for leaf_id, prefix_len in bad_leaves:
+        h = fetch_leaf_rows(conn, "healthy", leaf_id, prefix_len)
+        d = fetch_leaf_rows(conn, "damaged", leaf_id, prefix_len)
         assert h == d, f"leaf {leaf_id} mismatch after repair"
 
     after_seq = seq_scan_snapshot(conn)
@@ -113,7 +113,7 @@ def test_official_smoke_geometry(conn, f, l):
     backend_prof = json.loads(backend_json) if backend_json else {}
 
     # 7. Verification checks
-    audit = audit_recovery(conn, f"smoke_f{f}_l{l}", "merkle")
+    audit = audit_recovery(conn, f"smoke_f{f}", "merkle")
     assert audit["roots_match"], "Merkle roots do not match after repair"
     assert audit["healthy_minus_damaged"] == 0, "Healthy EXCEPT Damaged is not empty"
     assert audit["damaged_minus_healthy"] == 0, "Damaged EXCEPT Healthy is not empty"
@@ -127,7 +127,7 @@ def test_official_smoke_geometry(conn, f, l):
     # 8. Backend profiler validation with post_repair_counters
     discrepancies = validate_backend_profile_stats(
         backend_prof,
-        {"partitions": P, "leaves_per_partition": l, "fanout": f},
+        {"fanout": f},
         counters,
         post_repair_counters,
         rows_updated=C,

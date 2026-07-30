@@ -798,48 +798,61 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 			running_offset += bucket_counts[i];
 		}
 
-		for (i = 0; i < num_entries; i++)
+		PG_TRY();
 		{
-			uint8 b = merkle_next_bits(entries[i].key_hash, prefix_len, bits_per_split);
-			if (b < fanout)
+			for (i = 0; i < num_entries; i++)
 			{
-				partitioned_entries[current_offsets[b]++] = entries[i];
+				uint8 b = merkle_next_bits(entries[i].key_hash, prefix_len, bits_per_split);
+				if (b < fanout)
+				{
+					partitioned_entries[current_offsets[b]++] = entries[i];
+				}
+			}
+
+			for (i = 0; i < fanout; i++)
+			{
+				uint8		child_node_id[8];
+				int			child_prefix_len = prefix_len + bits_per_split;
+				bytea	   *child_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
+				bytea	   *child_hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
+				Datum		ins_values[5];
+
+				merkle_bytea_extend(child_node_id, node_id, prefix_len, (uint8) i, bits_per_split);
+				SET_VARSIZE(child_id_bytea, VARHDRSZ + 8);
+				memcpy(VARDATA(child_id_bytea), child_node_id, 8);
+
+				SET_VARSIZE(child_hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
+				memcpy(VARDATA(child_hash_bytea), bucket_hashes[i].data, MERKLE_HASH_BYTES);
+
+				ins_values[0] = ObjectIdGetDatum(index_oid);
+				ins_values[1] = PointerGetDatum(child_id_bytea);
+				ins_values[2] = Int16GetDatum((int16) child_prefix_len);
+				ins_values[3] = Int64GetDatum((int64) bucket_counts[i]);
+				ins_values[4] = PointerGetDatum(child_hash_bytea);
+
+				SPI_execute_plan(plan_split_insert_child, ins_values, NULL, false, 1);
+
+				pfree(child_id_bytea);
+				pfree(child_hash_bytea);
+
+				if (bucket_counts[i] > split_threshold && child_prefix_len < MAX_PREFIX_LEN)
+				{
+					merkle_do_split_in_memory(index_oid, child_node_id, child_prefix_len,
+									   &partitioned_entries[bucket_offsets[i]], bucket_counts[i],
+									   fanout, bits_per_split, split_threshold);
+				}
 			}
 		}
-
-		for (i = 0; i < fanout; i++)
+		PG_CATCH();
 		{
-			uint8		child_node_id[8];
-			int			child_prefix_len = prefix_len + bits_per_split;
-			bytea	   *child_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-			bytea	   *child_hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
-			Datum		ins_values[5];
-
-			merkle_bytea_extend(child_node_id, node_id, prefix_len, (uint8) i, bits_per_split);
-			SET_VARSIZE(child_id_bytea, VARHDRSZ + 8);
-			memcpy(VARDATA(child_id_bytea), child_node_id, 8);
-
-			SET_VARSIZE(child_hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
-			memcpy(VARDATA(child_hash_bytea), bucket_hashes[i].data, MERKLE_HASH_BYTES);
-
-			ins_values[0] = ObjectIdGetDatum(index_oid);
-			ins_values[1] = PointerGetDatum(child_id_bytea);
-			ins_values[2] = Int16GetDatum((int16) child_prefix_len);
-			ins_values[3] = Int64GetDatum((int64) bucket_counts[i]);
-			ins_values[4] = PointerGetDatum(child_hash_bytea);
-
-			SPI_execute_plan(plan_split_insert_child, ins_values, NULL, false, 1);
-
-			pfree(child_id_bytea);
-			pfree(child_hash_bytea);
-
-			if (bucket_counts[i] > split_threshold && child_prefix_len < MAX_PREFIX_LEN)
+			if (partitioned_entries != NULL)
 			{
-				merkle_do_split_in_memory(index_oid, child_node_id, child_prefix_len,
-								   &partitioned_entries[bucket_offsets[i]], bucket_counts[i],
-								   fanout, bits_per_split, split_threshold);
+				free(partitioned_entries);
+				partitioned_entries = NULL;
 			}
+			PG_RE_THROW();
 		}
+		PG_END_TRY();
 
 		free(partitioned_entries);
 		pfree(bucket_offsets);
@@ -932,21 +945,35 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len)
 			if (!entries)
 				elog(ERROR, "out of memory allocating Merkle entries from catalog (%llu entries)", (unsigned long long) SPI_processed);
 
-			for (i = 0; i < SPI_processed; i++)
+			PG_TRY();
 			{
-				HeapTuple	tup = SPI_tuptable->vals[i];
-				TupleDesc	td = SPI_tuptable->tupdesc;
-				bool		isnull;
-				Datum		kh_d = SPI_getbinval(tup, td, 1, &isnull);
-				Datum		th_d = SPI_getbinval(tup, td, 2, &isnull);
-				bytea	   *kh_b = DatumGetByteaPP(kh_d);
-				bytea	   *th_b = DatumGetByteaPP(th_d);
+				for (i = 0; i < SPI_processed; i++)
+				{
+					HeapTuple	tup = SPI_tuptable->vals[i];
+					TupleDesc	td = SPI_tuptable->tupdesc;
+					bool		isnull;
+					Datum		kh_d = SPI_getbinval(tup, td, 1, &isnull);
+					Datum		th_d = SPI_getbinval(tup, td, 2, &isnull);
+					bytea	   *kh_b = DatumGetByteaPP(kh_d);
+					bytea	   *th_b = DatumGetByteaPP(th_d);
 
-				memcpy(entries[i].key_hash, VARDATA_ANY(kh_b), 8);
-				memcpy(entries[i].tuple_hash.data, VARDATA_ANY(th_b), MERKLE_HASH_BYTES);
+					memcpy(entries[i].key_hash, VARDATA_ANY(kh_b), 8);
+					memcpy(entries[i].tuple_hash.data, VARDATA_ANY(th_b), MERKLE_HASH_BYTES);
+				}
+
+				merkle_do_split_in_memory(index_oid, node_id, prefix_len, entries, SPI_processed, fanout, bits_per_split, split_threshold);
 			}
+			PG_CATCH();
+			{
+				if (entries != NULL)
+				{
+					free(entries);
+					entries = NULL;
+				}
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
 
-			merkle_do_split_in_memory(index_oid, node_id, prefix_len, entries, SPI_processed, fanout, bits_per_split, split_threshold);
 			free(entries);
 		}
 

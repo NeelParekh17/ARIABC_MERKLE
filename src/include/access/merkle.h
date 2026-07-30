@@ -395,6 +395,7 @@ extern Datum merkle_get_child_hashes(PG_FUNCTION_ARGS);
 extern Datum merkle_get_node_hashes(PG_FUNCTION_ARGS);
 extern Datum merkle_get_children_batch(PG_FUNCTION_ARGS);
 extern Datum merkle_get_descendants_batch(PG_FUNCTION_ARGS);
+extern Datum merkle_get_descendants_batch_array(PG_FUNCTION_ARGS);
 extern Datum merkle_get_leaf_members(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_get_partition_root_hashes(PG_FUNCTION_ARGS);

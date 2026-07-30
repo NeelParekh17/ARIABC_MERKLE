@@ -67,8 +67,6 @@ def conn(dsn):
 
 
 SMALL_N = 1_000
-PARTITIONS = 50
-LPP = 4          # leaves per partition
 FANOUT = 2
 BAD_LEAVES = 3
 CORRUPT_TUPLES = 6
@@ -78,8 +76,8 @@ SEED = 42_000
 @pytest.fixture(scope="module")
 def base_dataset(conn):
     """Build a shared healthy dataset once per test module."""
-    build_dataset(conn, SMALL_N, PARTITIONS, LPP, FANOUT)
-    return {"partitions": PARTITIONS, "leaves_per_partition": LPP, "fanout": FANOUT}
+    build_dataset(conn, SMALL_N, fanout=FANOUT)
+    return {"fanout": FANOUT, "split_threshold": 32, "merge_threshold": 8}
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -117,8 +115,6 @@ def test_corruption_mode_correctness(conn, base_dataset, corruption_mode):
         conn,
         experiment="test",
         tuple_count=SMALL_N,
-        partitions=cfg["partitions"],
-        leaves_per_partition=cfg["leaves_per_partition"],
         fanout=cfg["fanout"],
         bad_leaf_count=BAD_LEAVES,
         corrupted_tuple_count=CORRUPT_TUPLES,
@@ -227,8 +223,8 @@ def test_no_seq_scan_during_recovery(conn, base_dataset):
     """Recovery must not perform a full heap sequential scan."""
     cfg = base_dataset
     manifest = choose_corruption_manifest(
-        conn, "test", SMALL_N, cfg["partitions"], cfg["leaves_per_partition"],
-        cfg["fanout"], BAD_LEAVES, CORRUPT_TUPLES, SEED + 1, "paper-update-only",
+        conn, "test", SMALL_N,
+        fanout=cfg["fanout"], bad_leaf_count=BAD_LEAVES, corrupted_tuple_count=CORRUPT_TUPLES, seed=SEED + 1, corruption_mode="paper-update-only",
     )
     reset_damaged_from_healthy(conn, cfg)
     apply_corruption(conn, manifest)
@@ -248,8 +244,8 @@ def test_no_seq_scan_during_recovery(conn, base_dataset):
 def test_partition_root_batches_exactly_two(conn, base_dataset):
     cfg = base_dataset
     manifest = choose_corruption_manifest(
-        conn, "test", SMALL_N, cfg["partitions"], cfg["leaves_per_partition"],
-        cfg["fanout"], BAD_LEAVES, CORRUPT_TUPLES, SEED + 2, "paper-update-only",
+        conn, "test", SMALL_N,
+        fanout=cfg["fanout"], bad_leaf_count=BAD_LEAVES, corrupted_tuple_count=CORRUPT_TUPLES, seed=SEED + 2, corruption_mode="paper-update-only",
     )
     reset_damaged_from_healthy(conn, cfg)
     apply_corruption(conn, manifest)
@@ -261,8 +257,8 @@ def test_partition_root_batches_exactly_two(conn, base_dataset):
 def test_bad_partition_count_counter(conn, base_dataset):
     cfg = base_dataset
     manifest = choose_corruption_manifest(
-        conn, "test", SMALL_N, cfg["partitions"], cfg["leaves_per_partition"],
-        cfg["fanout"], BAD_LEAVES, CORRUPT_TUPLES, SEED + 3, "paper-update-only",
+        conn, "test", SMALL_N,
+        fanout=cfg["fanout"], bad_leaf_count=BAD_LEAVES, corrupted_tuple_count=CORRUPT_TUPLES, seed=SEED + 3, corruption_mode="paper-update-only",
     )
     reset_damaged_from_healthy(conn, cfg)
     apply_corruption(conn, manifest)

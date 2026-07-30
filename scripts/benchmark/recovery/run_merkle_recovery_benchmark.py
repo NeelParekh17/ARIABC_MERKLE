@@ -52,8 +52,8 @@ from merkle_recovery.profiling import (
 RESULT_ROOT = _DEFAULT_RESULT_ROOT
 
 PROFILE_OPERATION_FIELDS = [
-    "run_id", "manifest_sha256", "experiment", "tuple_count", "partitions",
-    "leaves_per_partition", "fanout", "profile_label", "bad_leaf_count",
+    "run_id", "manifest_sha256", "experiment", "tuple_count", "split_threshold",
+    "merge_threshold", "fanout", "profile_label", "bad_leaf_count",
     "corrupted_tuple_count", "repetition", "stage", "operation",
     "schema", "partition", "node_in_partition", "leaf_id",
     "call_ordinal", "rows_returned", "client_wall_ms", "success",
@@ -73,32 +73,6 @@ def timer(store: dict[str, float], name: str):
     store[name] = store.get(name, 0.0) + now_ms() - start
 
 
-def tree_depth(leaves_per_partition: int, fanout: int) -> int:
-    if leaves_per_partition <= 0 or fanout <= 1:
-        return 0
-    depth = 1
-    nodes = 1
-    while nodes < leaves_per_partition:
-        nodes *= fanout
-        depth += 1
-    return depth
-
-
-def nodes_per_partition(leaves_per_partition: int, fanout: int) -> int:
-    if leaves_per_partition <= 0:
-        return 0
-    total = 0
-    level_nodes = 1
-    remaining = leaves_per_partition
-    while remaining > 0:
-        total += level_nodes
-        if remaining == 1:
-            break
-        remaining = (remaining + fanout - 1) // fanout
-        level_nodes *= fanout
-    return total
-
-
 def load_geometry_matrix() -> dict[str, dict[str, int]]:
     if not GEOMETRY_MATRIX_PATH.exists():
         return {}
@@ -111,12 +85,10 @@ def manifest_sha256(manifest: dict[str, Any]) -> str:
 
 
 def recovery_run_id(manifest: dict[str, Any], repetition: int, profile_label: str) -> str:
-    label = profile_label or str(manifest.get("geometry_label", "")) or f"l{manifest['leaves_per_partition']}"
+    label = profile_label or str(manifest.get("geometry_label", ""))
     safe_label = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in label)
     return (
         f"{manifest['experiment']}-n{manifest['tuple_count']}"
-        f"-p{manifest['partitions']}"
-        f"-l{manifest['leaves_per_partition']}"
         f"-f{manifest['fanout']}"
         f"-k{len(manifest['bad_leaves'])}"
         f"-c{len(manifest['corruptions'])}"
@@ -124,27 +96,17 @@ def recovery_run_id(manifest: dict[str, Any], repetition: int, profile_label: st
     )
 
 
-def validate_geometry(partitions: int, leaves_per_partition: int, fanout: int) -> None:
-    if partitions <= 0:
-        raise ValueError(f"invalid Merkle geometry: partitions must be > 0, got {partitions}")
+def validate_geometry(fanout: int = 4, split_threshold: int = 32, merge_threshold: int = 8, *args, **kwargs) -> None:
     if fanout < 2:
         raise ValueError(f"invalid Merkle geometry: fanout must be >= 2, got {fanout}")
-    if leaves_per_partition <= 0:
+    if split_threshold <= merge_threshold:
         raise ValueError(
-            f"invalid Merkle geometry: leaves_per_partition must be > 0, got {leaves_per_partition}"
-        )
-    value = leaves_per_partition
-    while value > 1 and value % fanout == 0:
-        value //= fanout
-    if value != 1:
-        raise ValueError(
-            "invalid Merkle geometry: leaves_per_partition must be an exact power "
-            f"of fanout, got leaves_per_partition={leaves_per_partition}, fanout={fanout}"
+            f"invalid Merkle geometry: split_threshold ({split_threshold}) must be > merge_threshold ({merge_threshold})"
         )
 
 
-def _manual_geometry_label(partitions: int, leaves_per_partition: int, fanout: int) -> str:
-    return f"manual-p{partitions}-l{leaves_per_partition}-f{fanout}"
+def _manual_geometry_label(fanout: int = 4, split_threshold: int = 32, merge_threshold: int = 8, *args, **kwargs) -> str:
+    return f"manual-f{fanout}-s{split_threshold}-m{merge_threshold}"
 
 
 def validate_backend_profile_stats(
@@ -159,7 +121,6 @@ def validate_backend_profile_stats(
 ) -> list[str]:
     reasons: list[str] = []
     expected_root_calls = 4
-    expected_root_nodes = expected_root_calls * cfg["partitions"]
     expected_child_calls = int(counters.get("child_hash_sql_calls", 0)) + int(
         post_repair_counters.get("targeted_confirmation_child_hash_sql_calls", 0)
     )
@@ -168,7 +129,6 @@ def validate_backend_profile_stats(
     )
     checks = [
         ("root_hash_helper_calls", expected_root_calls),
-        ("root_hash_nodes_returned", expected_root_nodes),
         ("child_hash_helper_calls", expected_child_calls),
         ("child_hash_nodes_returned", expected_child_nodes),
     ]
@@ -188,18 +148,10 @@ def validate_backend_profile_stats(
 
     if rows_updated > 0 and rows_inserted == 0 and rows_deleted == 0:
         expected_path_calls = rows_updated * 2
-        expected_nodes_touched = expected_path_calls * tree_depth(
-            cfg["leaves_per_partition"], cfg["fanout"]
-        )
         if int(backend.get("tree_path_update_calls", 0)) != expected_path_calls:
             reasons.append(
                 f"tree_path_update_calls expected {expected_path_calls}, "
                 f"got {backend.get('tree_path_update_calls', 0)}"
-            )
-        if int(backend.get("tree_path_nodes_touched", 0)) != expected_nodes_touched:
-            reasons.append(
-                f"tree_path_nodes_touched expected {expected_nodes_touched}, "
-                f"got {backend.get('tree_path_nodes_touched', 0)}"
             )
         if int(backend.get("tree_path_update_ns", 0)) <= 0:
             reasons.append("tree_path_update_ns is zero despite tree updates")
@@ -209,29 +161,16 @@ def validate_backend_profile_stats(
 def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str = "") -> dict[str, Any]:
     occ = leaf_occupancy(conn)
     sizes = table_sizes(conn)
-    leaf_count = geo["partitions"] * geo["leaves_per_partition"]
-    node_count = geo.get("nodes_per_partition")
-    if node_count is None:
-        node_count = nodes_per_partition(geo["leaves_per_partition"], geo["fanout"])
-    # tree_depth() returns the count of nodes on a root-to-leaf path (i.e. tree_levels).
-    # tree_edges = tree_levels - 1.
-    t_levels = tree_depth(geo["leaves_per_partition"], geo["fanout"])
+    leaf_count = len(occ)
     phys_per_leaf = tuple_count / max(1, leaf_count)
     row = {
         **sizes,
         "profile_label": profile_label,
         "tuple_count": tuple_count,
-        "partitions": geo["partitions"],
-        "leaves_per_partition": geo["leaves_per_partition"],
-        "fanout": geo["fanout"],
+        "fanout": geo.get("fanout", 4),
+        "split_threshold": geo.get("split_threshold", 32),
+        "merge_threshold": geo.get("merge_threshold", 8),
         "total_leaf_count": leaf_count,
-        # unambiguous tree-shape fields
-        "tree_levels": t_levels,
-        "tree_edges": t_levels - 1,
-        "tree_depth": t_levels,               # kept for backward compat of downstream tools
-        "nodes_per_partition": node_count,
-        "total_merkle_nodes": geo["partitions"] * node_count,
-        "total_logical_tree_nodes": geo["partitions"] * node_count,
         "physical_rows_per_leaf_expected": round(phys_per_leaf, 2),
         "expected_candidate_rows_per_bad_leaf": round(2 * phys_per_leaf, 2),
         **occupancy_stats(occ),
@@ -247,9 +186,9 @@ def _run_deep_diagnostics(
     *,
     run_id: str,
     tuple_count: int,
-    partitions: int,
-    leaves_per_partition: int,
-    fanout: int,
+    fanout: int = 4,
+    split_threshold: int = 32,
+    merge_threshold: int = 8,
     profile_label: str,
     repetition: int,
 ) -> list[dict[str, Any]]:
@@ -284,9 +223,9 @@ def _run_deep_diagnostics(
                         "diagnostic_replay_id": diagnostic_replay_id,
                         "diagnostic_cache_mode": "post_recovery_warm",
                         "tuple_count": tuple_count,
-                        "partitions": partitions,
-                        "leaves_per_partition": leaves_per_partition,
                         "fanout": fanout,
+                        "split_threshold": split_threshold,
+                        "merge_threshold": merge_threshold,
                         "profile_label": profile_label,
                         "repetition": repetition,
                         "leaf_id": leaf_id,
@@ -306,9 +245,9 @@ def _run_deep_diagnostics(
                             "diagnostic_replay_id": diagnostic_replay_id,
                             "diagnostic_cache_mode": "post_recovery_warm",
                             "tuple_count": tuple_count,
-                            "partitions": partitions,
-                            "leaves_per_partition": leaves_per_partition,
                             "fanout": fanout,
+                            "split_threshold": split_threshold,
+                            "merge_threshold": merge_threshold,
                             "profile_label": profile_label,
                             "repetition": repetition,
                             "schema": schema,
@@ -335,9 +274,9 @@ def _run_deep_diagnostics(
                     )
 
     reset_damaged_from_healthy(conn, {
-        "partitions": partitions,
-        "leaves_per_partition": leaves_per_partition,
         "fanout": fanout,
+        "split_threshold": split_threshold,
+        "merge_threshold": merge_threshold,
     })
     apply_corruption(conn, manifest)
     capture_plans("candidate", 1)
@@ -365,7 +304,11 @@ def repair_merkle(
     audit_mode: str = "full",
     leaf_fetch_chunk_size: int = 64,
 ) -> Metrics:
-    cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
+    cfg = {
+        "fanout": int(manifest.get("fanout", 4)),
+        "split_threshold": int(manifest.get("split_threshold", 32)),
+        "merge_threshold": int(manifest.get("merge_threshold", 8)),
+    }
     run_id = recovery_run_id(manifest, repetition, profile_label)
     manifest_digest = manifest_sha256(manifest)
     m = Metrics(
@@ -488,7 +431,8 @@ def repair_merkle(
         confirmation_leaf_buckets_requested = 0
         confirmation_rows_fetched = 0
 
-        for chunk in bad_leaf_chunks:
+        confirmation_chunks = chunk_list(remaining_bad_leaves, leaf_fetch_chunk_size) if remaining_bad_leaves else []
+        for chunk in confirmation_chunks:
             if not chunk:
                 continue
 
@@ -726,7 +670,11 @@ def run_one_manifest(
     leaf_fetch_chunk_size: int = 64,
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
-    cfg = {k: int(manifest[k]) for k in ["partitions", "leaves_per_partition", "fanout"]}
+    cfg = {
+        "fanout": int(manifest.get("fanout", 4)),
+        "split_threshold": int(manifest.get("split_threshold", 32)),
+        "merge_threshold": int(manifest.get("merge_threshold", 8)),
+    }
     metrics: list[Metrics] = []
     for rep in range(reps):
         run_id = recovery_run_id(manifest, rep, profile_label)
@@ -742,7 +690,6 @@ def run_one_manifest(
             method="merkle",
             corruption_mode=manifest.get("corruption_mode", "paper-update-only"),
             tuple_count=tuple_count,
-            partitions=cfg["partitions"],
             bad_leaf_count=len(manifest["bad_leaves"]),
             repetition=rep,
             completed_runs=progress_state["completed_runs"],
@@ -810,9 +757,9 @@ def run_one_manifest(
                         "profile_label": profile_label,
                         "profiling_mode": profiling_mode,
                         "tuple_count": tuple_count,
-                        "partitions": cfg["partitions"],
-                        "leaves_per_partition": cfg["leaves_per_partition"],
                         "fanout": cfg["fanout"],
+                        "split_threshold": cfg.get("split_threshold", 32),
+                        "merge_threshold": cfg.get("merge_threshold", 8),
                         "bad_leaf_count": len(manifest["bad_leaves"]),
                         "corrupted_tuple_count": len(manifest["corruptions"]),
                         "repetition": rep,
@@ -826,9 +773,9 @@ def run_one_manifest(
                     result_dir,
                     run_id=run_id,
                     tuple_count=tuple_count,
-                    partitions=cfg["partitions"],
-                    leaves_per_partition=cfg["leaves_per_partition"],
                     fanout=cfg["fanout"],
+                    split_threshold=cfg.get("split_threshold", 32),
+                    merge_threshold=cfg.get("merge_threshold", 8),
                     profile_label=profile_label,
                     repetition=rep,
                 )
@@ -845,7 +792,6 @@ def run_one_manifest(
             method=metric.method,
             corruption_mode=metric.corruption_mode,
             tuple_count=metric.tuple_count,
-            partitions=metric.partitions,
             bad_leaf_count=metric.bad_leaf_count,
             repetition=metric.repetition,
             valid=metric.valid,
@@ -878,30 +824,29 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         *,
         experiment: str,
         tuple_count: int,
-        partitions: int,
-        leaves_per_partition: int,
         fanout: int,
+        split_threshold: int = 32,
+        merge_threshold: int = 8,
         bad_leaf_count: int,
         corrupted_tuple_count: int,
         geometry_label: str,
+        **kwargs,
     ) -> dict[str, Any]:
         return {
             "experiment": experiment,
             "tuple_count": tuple_count,
-            "partitions": partitions,
-            "leaves_per_partition": leaves_per_partition,
             "fanout": fanout,
+            "split_threshold": split_threshold,
+            "merge_threshold": merge_threshold,
             "bad_leaf_count": bad_leaf_count,
             "corrupted_tuple_count": corrupted_tuple_count,
             "geometry_label": geometry_label,
         }
 
-    override_lpp = args.leaves_per_partition
-    override_fanout = args.fanout
+    override_fanout = getattr(args, "fanout", None)
     manual_geometry = (
-        args.partitions is not None
-        or args.leaves_per_partition is not None
-        or args.fanout is not None
+        getattr(args, "fanout", None) is not None
+        or getattr(args, "split_threshold", None) is not None
     )
     geometry_matrix = load_geometry_matrix()
     if args.profile == "recovery-scaling-diagnosis":
@@ -917,18 +862,12 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         for label, sizes in campaigns:
             if args.geometry_label and label != args.geometry_label:
                 continue
-            geo = geometry_matrix.get(label)
-            if not geo:
-                raise RuntimeError(f"canonical geometry label '{label}' missing from recovery_geometry_matrix.json")
-            if override_lpp is not None:
-                geo["leaves_per_partition"] = override_lpp
-            if override_fanout is not None:
-                geo["fanout"] = override_fanout
-            partitions = int(args.partitions or geo.get("partitions", 200))
-            leaves_per_partition = int(geo.get("leaves_per_partition", 16))
-            fanout = int(geo.get("fanout", 2))
+            geo = geometry_matrix.get(label, {})
+            fanout = int(override_fanout or geo.get("fanout", 2))
+            split_threshold = int(geo.get("split_threshold", 32))
+            merge_threshold = int(geo.get("merge_threshold", 8))
             out_label = (
-                _manual_geometry_label(partitions, leaves_per_partition, fanout)
+                _manual_geometry_label(fanout, split_threshold, merge_threshold)
                 if manual_geometry else label
             )
             for n in _selected(sizes, args.tuple_count):
@@ -936,9 +875,9 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                     case(
                         experiment=args.profile,
                         tuple_count=n,
-                        partitions=partitions,
-                        leaves_per_partition=leaves_per_partition,
                         fanout=fanout,
+                        split_threshold=split_threshold,
+                        merge_threshold=merge_threshold,
                         bad_leaf_count=int(args.bad_leaf_count or 10),
                         corrupted_tuple_count=300,
                         geometry_label=out_label,
@@ -951,7 +890,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         # All parameters are encoded in the geometry matrix labels.
         # The only allowed user selection is --geometry-label <known label>.
         _SWEEP_FIXED_PARAMS = (
-            "tuple_count", "partitions", "leaves_per_partition", "fanout", "bad_leaf_count",
+            "tuple_count", "fanout", "bad_leaf_count",
         )
         _rejected = [
             p for p in _SWEEP_FIXED_PARAMS
@@ -963,47 +902,28 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                 f"do not override: {', '.join('--' + p.replace('_', '-') for p in _rejected)}"
             )
 
-        # Canonical 19-geometry list — 6 leaf-count tiers (L=16,64,128,256,512,1024).
-        # Within each tier L is fixed (bucket density fixed); only F varies.
-        # Fanouts covered: 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024.
-        #
-        # Tier  L    rows/leaf@5M  F values
-        # ----  ---  -----------   --------
-        # L=16  16   1,563         2, 4, 16
-        # L=64  64     391         2, 4, 8, 64
-        # L=128 128    195         2, 128
-        # L=256 256     98         2, 4, 16, 256
-        # L=512 512     49         2, 512
-        # L=1024 1024   24         2, 4, 32, 1024
         SWEEP_CANONICAL_LABELS = [
-            # L=16
             "fanout_f2_l16",
             "fanout_f4_l16",
             "fanout_f16_l16",
-            # L=64
             "fanout_f2_l64",
             "fanout_f4_l64",
             "fanout_f8_l64",
             "fanout_f64_l64",
-            # L=128
             "fanout_f2_l128",
             "fanout_f128_l128",
-            # L=256
             "fanout_f2_l256",
             "fanout_f4_l256",
             "fanout_f16_l256",
             "fanout_f256_l256",
-            # L=512
             "fanout_f2_l512",
             "fanout_f512_l512",
-            # L=1024
             "fanout_f2_l1024",
             "fanout_f4_l1024",
             "fanout_f32_l1024",
             "fanout_f1024_l1024",
         ]
 
-        # Validate --geometry-label before touching the database
         if args.geometry_label and args.geometry_label not in SWEEP_CANONICAL_LABELS:
             raise ValueError(
                 f"unknown fanout-width-sweep geometry label '{args.geometry_label}'; "
@@ -1014,21 +934,17 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         for label in SWEEP_CANONICAL_LABELS:
             if args.geometry_label and label != args.geometry_label:
                 continue
-            geo = geometry_matrix.get(label)
-            if geo is None:
-                raise RuntimeError(
-                    f"geometry label '{label}' not found in recovery_geometry_matrix.json"
-                )
-            partitions = int(geo["partitions"])
-            lpp = int(geo["leaves_per_partition"])
-            fanout = int(geo["fanout"])
+            geo = geometry_matrix.get(label, {})
+            fanout = int(geo.get("fanout", 4))
+            split_threshold = int(geo.get("split_threshold", 32))
+            merge_threshold = int(geo.get("merge_threshold", 8))
             sweep_series.append(
                 case(
                     experiment=args.profile,
                     tuple_count=5_000_000,
-                    partitions=partitions,
-                    leaves_per_partition=lpp,
                     fanout=fanout,
+                    split_threshold=split_threshold,
+                    merge_threshold=merge_threshold,
                     bad_leaf_count=20,
                     corrupted_tuple_count=300,
                     geometry_label=label,
@@ -1056,9 +972,9 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
             tuple_counts = [int(args.tuple_count)]
         else:
             tuple_counts = allowed_tuple_counts
-        if args.partitions is not None or args.leaves_per_partition is not None or args.fanout is not None:
+        if getattr(args, "fanout", None) is not None:
             raise ValueError("size-scaling-k75-c300 uses fixed canonical geometries; do not override geometry")
-        if args.bad_leaf_count is not None:
+        if getattr(args, "bad_leaf_count", None) is not None:
             raise ValueError("size-scaling-k75-c300 uses fixed --bad-leaf-count=75")
 
         default_labels = [
@@ -1077,18 +993,19 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
 
         series = []
         for label in labels:
-            geo = geometry_matrix.get(label)
-            if geo is None:
-                raise RuntimeError(f"geometry label '{label}' missing from recovery_geometry_matrix.json")
+            geo = geometry_matrix.get(label, {})
+            fanout = int(geo.get("fanout", 4))
+            split_threshold = int(geo.get("split_threshold", 32))
+            merge_threshold = int(geo.get("merge_threshold", 8))
 
             for n in tuple_counts:
                 series.append(
                     case(
                         experiment=args.profile,
                         tuple_count=n,
-                        partitions=int(geo["partitions"]),
-                        leaves_per_partition=int(geo["leaves_per_partition"]),
-                        fanout=int(geo["fanout"]),
+                        fanout=fanout,
+                        split_threshold=split_threshold,
+                        merge_threshold=merge_threshold,
                         bad_leaf_count=75,
                         corrupted_tuple_count=300,
                         geometry_label=label,
@@ -1097,14 +1014,12 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         return series
 
     if args.profile == "best-scaling-f32-l1024-k75-c300":
-        if (args.partitions is not None and args.partitions != 200) or \
-                (args.leaves_per_partition is not None and args.leaves_per_partition != 1024) or \
-                (args.fanout is not None and args.fanout != 32):
+        if getattr(args, "fanout", None) is not None and getattr(args, "fanout") != 32:
             raise ValueError(
                 "best-scaling-f32-l1024-k75-c300 uses fixed geometry "
-                "P=200,F=32,L=1024; supplied geometry must match exactly"
+                "F=32; supplied geometry must match exactly"
             )
-        if args.bad_leaf_count is not None and args.bad_leaf_count != 75:
+        if getattr(args, "bad_leaf_count", None) is not None and getattr(args, "bad_leaf_count") != 75:
             raise ValueError(
                 "best-scaling-f32-l1024-k75-c300 uses fixed --bad-leaf-count=75"
             )
@@ -1131,9 +1046,9 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
                 case(
                     experiment=args.profile,
                     tuple_count=n,
-                    partitions=int(geo["partitions"]),
-                    leaves_per_partition=int(geo["leaves_per_partition"]),
-                    fanout=int(geo["fanout"]),
+                    fanout=int(geo.get("fanout", 4)),
+                    split_threshold=int(geo.get("split_threshold", 32)),
+                    merge_threshold=int(geo.get("merge_threshold", 8)),
                     bad_leaf_count=75,
                     corrupted_tuple_count=300,
                     geometry_label=label,
@@ -1144,50 +1059,45 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
 
 
     series = []
-    if args.experiment in (None, "figure12"):
-        for n in _selected(config.fig12_sizes, args.tuple_count):
-            partitions = int(args.partitions or 200)
-            leaves_per_partition = int(override_lpp or 16)
+    if getattr(args, "experiment", None) in (None, "figure12"):
+        for n in _selected(config.fig12_sizes, getattr(args, "tuple_count", None)):
             fanout = int(override_fanout or 2)
             series.append(
                 case(
                     experiment="figure12",
                     tuple_count=n,
-                    partitions=partitions,
-                    leaves_per_partition=leaves_per_partition,
                     fanout=fanout,
-                    bad_leaf_count=(args.bad_leaf_count if args.bad_leaf_count is not None else (10 if n >= 10 else 1)),
+                    split_threshold=32,
+                    merge_threshold=8,
+                    bad_leaf_count=(args.bad_leaf_count if getattr(args, "bad_leaf_count", None) is not None else (10 if n >= 10 else 1)),
                     corrupted_tuple_count=300,
                     geometry_label=(
-                        _manual_geometry_label(partitions, leaves_per_partition, fanout)
-                        if manual_geometry else f"l{leaves_per_partition}"
+                        _manual_geometry_label(fanout, 32, 8)
+                        if manual_geometry else "default_dynamic"
                     ),
                 )
             )
-    if args.experiment in (None, "figure13"):
-        partitions_values = _selected([100, 200], args.partitions)
-        sizes = _selected(config.fig13_sizes, args.tuple_count)
-        bad_counts = _selected(config.fig13_k, args.bad_leaf_count)
-        for partitions in partitions_values:
-            for n in sizes:
-                for k in bad_counts:
-                    leaves_per_partition = int(override_lpp or 16)
-                    fanout = int(override_fanout or 2)
-                    series.append(
-                        case(
-                            experiment="figure13",
-                            tuple_count=n,
-                            partitions=partitions,
-                            leaves_per_partition=leaves_per_partition,
-                            fanout=fanout,
-                            bad_leaf_count=k,
-                            corrupted_tuple_count=300,
-                            geometry_label=(
-                                _manual_geometry_label(partitions, leaves_per_partition, fanout)
-                                if manual_geometry else f"p{partitions}-l{leaves_per_partition}"
-                            ),
-                        )
+    if getattr(args, "experiment", None) in (None, "figure13"):
+        sizes = _selected(config.fig13_sizes, getattr(args, "tuple_count", None))
+        bad_counts = _selected(config.fig13_k, getattr(args, "bad_leaf_count", None))
+        for n in sizes:
+            for k in bad_counts:
+                fanout = int(override_fanout or 2)
+                series.append(
+                    case(
+                        experiment="figure13",
+                        tuple_count=n,
+                        fanout=fanout,
+                        split_threshold=32,
+                        merge_threshold=8,
+                        bad_leaf_count=k,
+                        corrupted_tuple_count=300,
+                        geometry_label=(
+                            _manual_geometry_label(fanout, 32, 8)
+                            if manual_geometry else "default_dynamic"
+                        ),
                     )
+                )
     return series
 
 
@@ -1273,14 +1183,14 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             git_head = f"unavailable: {exc}; source_snapshot.json records synced source provenance"
         for spec in _series_for_profile(args, config):
             n = int(spec["tuple_count"])
-            partitions = int(spec["partitions"])
-            leaves_per_partition = int(spec["leaves_per_partition"])
             fanout = int(spec["fanout"])
+            split_threshold = int(spec.get("split_threshold", 32))
+            merge_threshold = int(spec.get("merge_threshold", 8))
             bad_leaf_count = int(spec["bad_leaf_count"])
             corrupted_tuple_count = int(spec["corrupted_tuple_count"])
             geometry_label = str(spec["geometry_label"])
             experiment = str(spec["experiment"])
-            validate_geometry(partitions, leaves_per_partition, fanout)
+            validate_geometry(fanout, split_threshold, merge_threshold)
 
             emit_progress(
                 result_dir,
@@ -1288,12 +1198,11 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 experiment=experiment,
                 profile_label=geometry_label,
                 tuple_count=n,
-                partitions=partitions,
                 bad_leaf_count=bad_leaf_count,
                 completed_runs=progress_state["completed_runs"],
                 total_runs=total_runs,
             )
-            build_timings = build_dataset(conn, n, partitions, leaves_per_partition, fanout)
+            build_timings = build_dataset(conn, n, fanout, split_threshold, merge_threshold)
             emit_progress(
                 result_dir,
                 event="dataset_build_timing",
@@ -1301,14 +1210,14 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 tuple_count=n,
                 timings_ms=build_timings,
             )
-            bsum, bdebug = bucket_consistency_sample(conn, n, partitions, leaves_per_partition, fanout, args.seed)
+            bsum, bdebug = bucket_consistency_sample(conn, n, fanout, args.seed)
             bucket_summary_rows.append(bsum)
             if args.artifact_mode == "debug":
                 bucket_debug_rows.extend(bdebug)
             dataset_rows.append(_dataset_row(conn, n, {
-                "partitions": partitions,
-                "leaves_per_partition": leaves_per_partition,
                 "fanout": fanout,
+                "split_threshold": split_threshold,
+                "merge_threshold": merge_threshold,
             }, geometry_label))
             emit_progress(
                 result_dir,
@@ -1316,7 +1225,6 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 experiment=experiment,
                 profile_label=geometry_label,
                 tuple_count=n,
-                partitions=partitions,
                 completed_runs=progress_state["completed_runs"],
                 total_runs=total_runs,
             )
@@ -1337,8 +1245,6 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 conn,
                 experiment,
                 n,
-                partitions,
-                leaves_per_partition,
                 fanout,
                 bad_leaf_count,
                 d,
@@ -1394,7 +1300,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                             f"expected {expected_sha} but got {actual_sha} for {geometry_label}"
                         )
                 else:
-                    tier_key = f"tier_l{leaves_per_partition}"
+                    tier_key = f"tier_f{fanout}"
                     expected_sha = progress_state.setdefault("provenance_map", {}).get(tier_key)
                     actual_sha = manifest["corruption_selection_sha256"]
                     if expected_sha is None:
@@ -1410,9 +1316,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 progress_state["provenance_rows"].append({
                     "profile_label": geometry_label,
                     "tuple_count": n,
-                    "partitions": partitions,
-                    "leaves_per_partition": leaves_per_partition,
                     "fanout": fanout,
+                    "split_threshold": split_threshold,
+                    "merge_threshold": merge_threshold,
                     "bad_leaf_count": bad_leaf_count,
                     "corrupted_tuple_count": d,
                     "required_rows_per_bad_leaf": manifest["required_rows_per_bad_leaf"],
@@ -1454,9 +1360,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             [
                 "profile_label",
                 "tuple_count",
-                "partitions",
-                "leaves_per_partition",
                 "fanout",
+                "split_threshold",
+                "merge_threshold",
                 "bad_leaf_count",
                 "corrupted_tuple_count",
                 "required_rows_per_bad_leaf",
@@ -1468,10 +1374,10 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         )
 
     write_csv(result_dir / "dataset_sizes.csv", dataset_rows, [
-        "profile_label", "tuple_count", "partitions", "leaves_per_partition", "fanout",
+        "profile_label", "tuple_count", "fanout", "split_threshold", "merge_threshold",
         "total_leaf_count",
         "tree_levels", "tree_edges", "tree_depth",
-        "nodes_per_partition", "total_merkle_nodes", "total_logical_tree_nodes",
+        "total_merkle_nodes", "total_logical_tree_nodes",
         "physical_rows_per_leaf_expected", "expected_candidate_rows_per_bad_leaf",
         "base_table_bytes", "primary_index_bytes", "merkle_index_bytes",
         "leaf_lookup_index_bytes",
@@ -1479,12 +1385,12 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         "minimum", "p50", "p95", "p99", "maximum", "mean", "stddev",
     ])
     write_csv(result_dir / "bucket_consistency_summary.csv", bucket_summary_rows, [
-        "tuple_count", "partitions", "leaves_per_partition", "fanout",
+        "tuple_count", "fanout",
         "sample_count", "sample_seed", "mismatch_count", "sample_digest",
     ])
     if args.artifact_mode == "debug":
         write_csv(result_dir / "bucket_consistency.csv", bucket_debug_rows, [
-            "tuple_count", "partitions", "leaves_per_partition", "fanout",
+            "tuple_count", "fanout",
             "ycsb_key", "bucket", "leaf_id", "match",
         ])
     write_csv(result_dir / "planner_checks.csv", planner_rows, [
@@ -1553,8 +1459,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             ],
         )
         per_run_keys = (
-            "run_id", "manifest_sha256", "experiment", "tuple_count", "partitions",
-            "leaves_per_partition", "fanout", "profile_label", "bad_leaf_count",
+            "run_id", "manifest_sha256", "experiment", "tuple_count",
+            "fanout", "split_threshold", "merge_threshold", "profile_label", "bad_leaf_count",
             "corrupted_tuple_count", "repetition",
         )
         per_run_denominators = {
@@ -1563,9 +1469,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 m.counters.get("manifest_sha256", ""),
                 m.experiment,
                 m.tuple_count,
-                m.partitions,
-                m.leaves_per_partition,
                 m.fanout,
+                m.split_threshold,
+                m.merge_threshold,
                 m.profile_label,
                 m.bad_leaf_count,
                 m.corrupted_tuple_count,
@@ -1587,8 +1493,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             ],
         )
         by_geometry_keys = (
-            "manifest_sha256", "experiment", "tuple_count", "partitions",
-            "leaves_per_partition", "fanout", "profile_label", "bad_leaf_count",
+            "manifest_sha256", "experiment", "tuple_count",
+            "fanout", "split_threshold", "merge_threshold", "profile_label", "bad_leaf_count",
             "corrupted_tuple_count",
         )
         by_geometry_denominators: dict[tuple[Any, ...], float] = {}
@@ -1597,9 +1503,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 m.counters.get("manifest_sha256", ""),
                 m.experiment,
                 m.tuple_count,
-                m.partitions,
-                m.leaves_per_partition,
                 m.fanout,
+                m.split_threshold,
+                m.merge_threshold,
                 m.profile_label,
                 m.bad_leaf_count,
                 m.corrupted_tuple_count,
@@ -1621,7 +1527,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     if backend_profile_rows:
         backend_fields = [
             "run_id", "experiment", "profile_label", "profiling_mode",
-            "manifest_sha256", "tuple_count", "partitions", "leaves_per_partition", "fanout",
+            "manifest_sha256", "tuple_count", "fanout", "split_threshold", "merge_threshold",
             "bad_leaf_count", "corrupted_tuple_count", "repetition",
         ]
         extra_fields = sorted({
@@ -1645,9 +1551,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 "diagnostic_replay_id",
                 "diagnostic_cache_mode",
                 "tuple_count",
-                "partitions",
-                "leaves_per_partition",
                 "fanout",
+                "split_threshold",
+                "merge_threshold",
                 "profile_label",
                 "repetition",
                 "schema",
@@ -1698,9 +1604,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         key = (
             metric.profile_label,
             metric.tuple_count,
-            metric.partitions,
-            metric.leaves_per_partition,
             metric.fanout,
+            metric.split_threshold,
+            metric.merge_threshold,
             metric.bad_leaf_count,
             metric.corrupted_tuple_count,
         )
@@ -1722,20 +1628,20 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         report_lines.append("- exact geometry:")
         seen_geometry: set[tuple[Any, Any, Any, Any]] = set()
         for row in dataset_rows:
-            key = (row["profile_label"], row["partitions"], row["leaves_per_partition"], row["fanout"])
+            key = (row["profile_label"], row["fanout"], row["split_threshold"], row["merge_threshold"])
             if key in seen_geometry:
                 continue
             seen_geometry.add(key)
             report_lines.append(
-                f"  - {row['profile_label']}: partitions={row['partitions']}, "
-                f"leaves_per_partition={row['leaves_per_partition']}, fanout={row['fanout']}, "
-                f"total_leaf_count={row['total_leaf_count']}, tree_depth={row['tree_depth']}"
+                f"  - {row['profile_label']}: fanout={row['fanout']}, "
+                f"split_threshold={row['split_threshold']}, merge_threshold={row['merge_threshold']}, "
+                f"total_leaf_count={row['total_leaf_count']}, tree_depth={row.get('tree_depth', row.get('max_depth', 0))}"
             )
     report_lines.extend([
         "",
         "## Phase Medians And P95",
         "",
-        "| profile_label | tuple_count | partitions | leaves_per_partition | fanout | bad_leaf_count | corrupted_tuple_count | phase | median_ms | p95_ms |",
+        "| profile_label | tuple_count | fanout | split_threshold | merge_threshold | bad_leaf_count | corrupted_tuple_count | phase | median_ms | p95_ms |",
         "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ])
     for key, items in sorted(grouped_metrics.items()):
@@ -1807,9 +1713,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.add_argument("--experiment", choices=["figure12", "figure13"])
     parser.add_argument("--tuple-count", type=str, dest="tuple_count")
-    parser.add_argument("--partitions", type=int)
+    parser.add_argument("--split-threshold", type=int, dest="split_threshold")
+    parser.add_argument("--merge-threshold", type=int, dest="merge_threshold")
     parser.add_argument("--bad-leaf-count", type=int, dest="bad_leaf_count")
-    parser.add_argument("--leaves-per-partition", type=int, dest="leaves_per_partition")
     parser.add_argument("--fanout", type=int)
     parser.add_argument("--profile-label", dest="profile_label")
     parser.add_argument("--geometry-label", dest="geometry_label")

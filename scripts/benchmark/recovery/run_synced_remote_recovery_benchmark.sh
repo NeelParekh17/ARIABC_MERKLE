@@ -14,9 +14,9 @@ Options:
   --build-profile debug|release  default: debug for smoke, release for preflight/paper
   --experiment figure12|figure13
   --tuple-count N
-  --partitions N
+  --split-threshold N
+  --merge-threshold N
   --bad-leaf-count K
-  --leaves-per-partition N
   --fanout N
   --geometry-label LABEL
   --profiling off|light|deep
@@ -45,9 +45,9 @@ PROFILE=""
 BUILD_PROFILE=""   # empty = auto: debug for smoke, release for preflight/paper
 EXPERIMENT=""
 TUPLE_COUNT=""
-PARTITIONS=""
+SPLIT_THRESHOLD=""
+MERGE_THRESHOLD=""
 BAD_LEAF_COUNT=""
-LEAVES_PER_PARTITION=""
 FANOUT=""
 GEOMETRY_LABEL=""
 PROFILING="off"
@@ -74,9 +74,9 @@ while [[ $# -gt 0 ]]; do
     --profile) PROFILE="${2:?}"; shift 2 ;;
     --experiment) EXPERIMENT="${2:?}"; shift 2 ;;
     --tuple-count) TUPLE_COUNT="${2:?}"; shift 2 ;;
-    --partitions) PARTITIONS="${2:?}"; shift 2 ;;
+    --split-threshold) SPLIT_THRESHOLD="${2:?}"; shift 2 ;;
+    --merge-threshold) MERGE_THRESHOLD="${2:?}"; shift 2 ;;
     --bad-leaf-count) BAD_LEAF_COUNT="${2:?}"; shift 2 ;;
-    --leaves-per-partition) LEAVES_PER_PARTITION="${2:?}"; shift 2 ;;
     --fanout) FANOUT="${2:?}"; shift 2 ;;
     --geometry-label) GEOMETRY_LABEL="${2:?}"; shift 2 ;;
     --profiling) PROFILING="${2:?}"; shift 2 ;;
@@ -236,8 +236,9 @@ remote_ssh_cmd_stdinless() {
 remote_ssh_step() {
   local label="$1"
   shift
-  if ! remote_ssh_cmd_stdinless "$@"; then
-    local rc=$?
+  local rc=0
+  remote_ssh_cmd_stdinless "$@" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
     progress "$label: failed with rc=$rc"
     return "$rc"
   fi
@@ -264,9 +265,10 @@ LOCAL_MANIFEST="$LOCAL_MANIFEST_DIR/source_snapshot.json"
 ROOTS_FILE="$ROOT/scripts/benchmark/recovery/sync_source_roots.txt"
 
 progress "starting recovery benchmark run $RUN_ID on $SSH_TARGET (profile=$PROFILE build=$BUILD_PROFILE artifact_mode=$ARTIFACT_MODE)"
-if ! remote_ssh_cmd_stdinless "printf '%s\n' ssh-ok" >/dev/null; then
-  rc=$?
-  progress "SSH connectivity check failed with rc=$rc"
+ssh_rc=0
+remote_ssh_cmd_stdinless "printf '%s\n' ssh-ok" >/dev/null || ssh_rc=$?
+if [[ "$ssh_rc" -ne 0 ]]; then
+  progress "SSH connectivity check failed with rc=$ssh_rc"
   cat >&2 <<EOF
 Remote SSH did not complete within the configured timeout.
 Target: $SSH_TARGET
@@ -276,7 +278,7 @@ Timeout: ${SSH_TIMEOUT}s
 If this is a slow or tarpitted SSH daemon, retry with a larger --ssh-timeout.
 If password auth is required, run with SSH_PASSWORD set in the environment.
 EOF
-  exit "$rc"
+  exit "$ssh_rc"
 fi
 mkdir -p "$LOCAL_MANIFEST_DIR"
 "$LOCAL_PYTHON" "$ROOT/scripts/benchmark/recovery/create_source_snapshot.py" \
@@ -392,8 +394,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'" >/dev/null
 progress "remote source and environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q PARTITIONS=%q BAD_LEAF_COUNT=%q LEAVES_PER_PARTITION=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$PARTITIONS" "$BAD_LEAF_COUNT" "$LEAVES_PER_PARTITION" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -566,14 +568,14 @@ fi
 if [[ -n "$TUPLE_COUNT" ]]; then
   BENCH_SELECTORS+=(--tuple-count "$TUPLE_COUNT")
 fi
-if [[ -n "$PARTITIONS" ]]; then
-  BENCH_SELECTORS+=(--partitions "$PARTITIONS")
+if [[ -n "$SPLIT_THRESHOLD" ]]; then
+  BENCH_SELECTORS+=(--split-threshold "$SPLIT_THRESHOLD")
+fi
+if [[ -n "$MERGE_THRESHOLD" ]]; then
+  BENCH_SELECTORS+=(--merge-threshold "$MERGE_THRESHOLD")
 fi
 if [[ -n "$BAD_LEAF_COUNT" ]]; then
   BENCH_SELECTORS+=(--bad-leaf-count "$BAD_LEAF_COUNT")
-fi
-if [[ -n "$LEAVES_PER_PARTITION" ]]; then
-  BENCH_SELECTORS+=(--leaves-per-partition "$LEAVES_PER_PARTITION")
 fi
 if [[ -n "$FANOUT" ]]; then
   BENCH_SELECTORS+=(--fanout "$FANOUT")

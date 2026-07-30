@@ -52,6 +52,7 @@ lib*.pc
 # Exclude log, markdown, diff files
 *.log
 *.md
+!Dynamic_merkle_docs/*.md
 *.diff
 
 # Exclude scripts by default (but allow whitelisting specific files)

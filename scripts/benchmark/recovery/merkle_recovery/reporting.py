@@ -45,14 +45,13 @@ def format_event_table(event: dict[str, Any]) -> str:
         ]
         return build_table(headers, row)
     elif evt_type == "dataset_start":
-        headers = ["EVENT", "EXPERIMENT", "LABEL", "TUPLES", "PARTITIONS", "BAD LEAVES", "PROGRESS", "TIME (LOCAL)"]
+        headers = ["EVENT", "EXPERIMENT", "LABEL", "TUPLES", "BAD LEAVES", "PROGRESS", "TIME (LOCAL)"]
         progress_str = f"{event.get('completed_runs', 0)}/{event.get('total_runs', 0)}"
         row = [
             evt_type,
             str(event.get("experiment", "")),
             str(event.get("profile_label", "")),
             f"{int(event.get('tuple_count', 0)):,}",
-            str(event.get("partitions", "")),
             str(event.get("bad_leaf_count", "")),
             progress_str,
             str(event.get("timestamp_local", "")),
@@ -116,6 +115,7 @@ def format_event_table(event: dict[str, Any]) -> str:
 def emit_progress(result_dir: Path, **event: object) -> None:
     now = datetime.now()
     event["timestamp_local"] = now.astimezone().isoformat(timespec="seconds")
+    event["timestamp_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     line = json.dumps(event, sort_keys=True, default=str)
     with (result_dir / "progress.jsonl").open("a") as f:
         f.write(line + "\n")

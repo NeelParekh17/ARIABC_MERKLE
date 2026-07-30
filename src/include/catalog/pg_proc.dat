@@ -10946,6 +10946,13 @@ proargtypes => 'cstring', prosrc => 'bcdb_block_submit_results' },
   proallargtypes => '{regclass,bytea,int2,int4,bytea,int2,bool,bytea}',
   proargmodes => '{i,i,i,i,o,o,o,o}',
   proargnames => '{relid,node_id,prefix_len,max_depth,node_id,prefix_len,is_leaf,hash}',
-  prosrc => 'merkle_get_descendants_batch' }
+  prosrc => 'merkle_get_descendants_batch' },
+{ oid => '7017', descr => 'Merkle dynamic tree descendants batch query',
+  proname => 'merkle_get_descendants_batch', prorows => '100', proretset => 't',
+  provolatile => 'v', prorettype => 'record', proargtypes => 'regclass _bytea _int2 int4',
+  proallargtypes => '{regclass,_bytea,_int2,int4,bytea,int2,bool,bytea}',
+  proargmodes => '{i,i,i,i,o,o,o,o}',
+  proargnames => '{relid,node_ids,prefix_lens,max_depth,node_id,prefix_len,is_leaf,hash}',
+  prosrc => 'merkle_get_descendants_batch_array' }
 
 ]
