@@ -406,16 +406,16 @@ def repair_merkle(
     if bad_leaves:
         lookup_scans = candidate_fetch_sql_calls
 
+    with timer(m.phase, "repair_write_ms"):
+        with timer(m.phase, "merkle_metadata_apply_ms"):
+            record_call(
+                profiler,
+                stage="repair",
+                operation="repair_merkle_apply_pending",
+                fn=lambda: execute(conn, "SELECT merkle_apply_pending()"),
+            )
+
     with timer(m.phase, "targeted_post_repair_confirmation_ms"):
-        # Repair DML commits a second Merkle delta batch.  Confirmation reads
-        # must observe the repaired roots, so drain that batch at the durable
-        # boundary before asking the backend for recovery status.
-        record_call(
-            profiler,
-            stage="targeted_confirmation",
-            operation="confirmation_merkle_apply_pending",
-            fn=lambda: execute(conn, "SELECT merkle_apply_pending()"),
-        )
         post_repair_counters: dict[str, Any] = {}
         remaining_bad_leaves = detect_bad_leaves(
             conn,
@@ -513,12 +513,6 @@ def repair_merkle(
 
     recovery_scan_after = seq_scan_snapshot(conn)
     recovery_full_heap_scans = seq_scan_delta(recovery_scan_before, recovery_scan_after)
-
-    try:
-        res = execute(conn, "SELECT merkle_apply_pending()")
-        print("merkle_apply_pending returned:", res)
-    except Exception as e:
-        print("merkle_apply_pending exception:", e)
 
     audit_start = now_ms()
     if audit_mode == "full":

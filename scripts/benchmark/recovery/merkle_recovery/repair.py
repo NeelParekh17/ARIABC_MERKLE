@@ -326,47 +326,48 @@ def repair_leaf(
             )
 
     with _timer("repair_write_ms"):
-        for key in inserts:
-            vals = hrows[key]
-            record_call(
-                profiler,
-                stage="repair",
-                operation="insert_dml",
-                leaf_id=leaf_id_str,
-                schema="damaged",
-                fn=lambda vals=vals: execute(
-                    conn,
-                    "INSERT INTO damaged.usertable VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                    tuple(vals[c] for c in ALL_COLUMNS),
-                ),
-            )
-            rows_inserted += 1
-        for key in updates:
-            vals = hrows[key]
-            record_call(
-                profiler,
-                stage="repair",
-                operation="update_dml",
-                leaf_id=leaf_id_str,
-                schema="damaged",
-                fn=lambda vals=vals, key=key: execute(
-                    conn,
-                    "UPDATE damaged.usertable SET field0=%s, field1=%s, field2=%s, field3=%s, field4=%s, "
-                    "field5=%s, field6=%s, field7=%s, field8=%s, field9=%s WHERE ycsb_key=%s",
-                    tuple(vals[f] for f in FIELDS) + (key,),
-                ),
-            )
-            rows_updated += 1
-        for key in deletes:
-            record_call(
-                profiler,
-                stage="repair",
-                operation="delete_dml",
-                leaf_id=leaf_id_str,
-                schema="damaged",
-                fn=lambda key=key: execute(conn, "DELETE FROM damaged.usertable WHERE ycsb_key = %s", (key,)),
-            )
-            rows_deleted += 1
+        with _timer("repair_table_dml_ms"):
+            for key in inserts:
+                vals = hrows[key]
+                record_call(
+                    profiler,
+                    stage="repair",
+                    operation="insert_dml",
+                    leaf_id=leaf_id_str,
+                    schema="damaged",
+                    fn=lambda vals=vals: execute(
+                        conn,
+                        "INSERT INTO damaged.usertable VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        tuple(vals[c] for c in ALL_COLUMNS),
+                    ),
+                )
+                rows_inserted += 1
+            for key in updates:
+                vals = hrows[key]
+                record_call(
+                    profiler,
+                    stage="repair",
+                    operation="update_dml",
+                    leaf_id=leaf_id_str,
+                    schema="damaged",
+                    fn=lambda vals=vals, key=key: execute(
+                        conn,
+                        "UPDATE damaged.usertable SET field0=%s, field1=%s, field2=%s, field3=%s, field4=%s, "
+                        "field5=%s, field6=%s, field7=%s, field8=%s, field9=%s WHERE ycsb_key=%s",
+                        tuple(vals[f] for f in FIELDS) + (key,),
+                    ),
+                )
+                rows_updated += 1
+            for key in deletes:
+                record_call(
+                    profiler,
+                    stage="repair",
+                    operation="delete_dml",
+                    leaf_id=leaf_id_str,
+                    schema="damaged",
+                    fn=lambda key=key: execute(conn, "DELETE FROM damaged.usertable WHERE ycsb_key = %s", (key,)),
+                )
+                rows_deleted += 1
 
     return hrows, drows, rows_inserted, rows_updated, rows_deleted
 
