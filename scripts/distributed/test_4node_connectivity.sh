@@ -16,14 +16,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 declare -a NODE_IDS=(1 2 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
+declare -a NODE_IPS=(10.129.148.247 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 declare -a NODE_CLIENT_PORTS=(8000 8000 8001)
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 
-KAFKA_HOST="10.129.148.236"
+KAFKA_HOST="10.129.148.247"
 KAFKA_PORT=9092
 KAFKA_HOME_REMOTE="/home/neel/Desktop/kafka_2.13-3.7.0"
 KAFKA_RESULT_TOPIC="ariabc_results"
@@ -141,7 +141,7 @@ fi
 log "=== Check 5: Raft leader election ==="
 LATEST_LOG_DIR="$(ls -dt "$REPO_ROOT/scripts/bench_full_results"/cluster4_* 2>/dev/null | head -1 || echo "")"
 if [[ -n "$LATEST_LOG_DIR" && -d "$LATEST_LOG_DIR" ]]; then
-  LEADER_COUNT="$(grep -l -i 'leader\|became leader' "$LATEST_LOG_DIR"/server_node*.log 2>/dev/null | wc -l || echo 0)"
+  LEADER_COUNT="$(grep -l -i 'leader\|became leader' "$LATEST_LOG_DIR"/server_node*.log 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
   if [[ "$LEADER_COUNT" -gt 0 ]]; then
     ok "Raft leader signal found in $LEADER_COUNT server log(s) in $LATEST_LOG_DIR"
   else

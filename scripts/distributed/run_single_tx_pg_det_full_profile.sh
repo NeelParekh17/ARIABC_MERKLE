@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-TARGET_NODE="${TARGET_NODE:-neel@10.129.148.236}"
+TARGET_NODE="${TARGET_NODE:-neel@10.129.148.247}"
 TARGET_MACHINE_LABEL="${TARGET_MACHINE_LABEL:-}"
 REMOTE_REPO="${REMOTE_REPO:-/home/neel/Desktop/ariabc_cluster}"
 REMOTE_INSTALL="${REMOTE_INSTALL:-/home/neel/Desktop/ariabc_install}"
@@ -57,7 +57,7 @@ Usage:
 
 Environment:
   SQL='...'                         SQL statement to run once.
-  TARGET_NODE=neel@10.129.148.236   Single-node PG/DET target.
+  TARGET_NODE=neel@10.129.148.247   Single-node PG/DET target.
   SKIP_SINGLE_SYNC=1                Use existing remote repo/install by default.
   FULL_SKIP_SYNC=1 FULL_SKIP_BUILD=1
   FULL_BCDB_PHASE_TRACE=1           Enable full-system phase trace for one tx.

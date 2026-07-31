@@ -11,7 +11,7 @@ set -euo pipefail
 # Active nodes:
 #   neel@10.129.148.248    utkarsh-MS-7C96
 #   neel@10.129.148.246      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
-#   neel@10.129.148.236    neel-MS-7C96
+#   neel@10.129.148.247    neel-MS-7C96
 #
 # Default benchmark profiles (runs 3 × modes in this order):
 #   1. pg mode             – plain PostgreSQL baseline (no BCDB)
@@ -31,7 +31,7 @@ set -euo pipefail
 #   --ssh-key <path>        SSH private key (optional if key-auth is default)
 #   --ssh-port <22>         SSH port
 #   --modes <pg,det>        Comma-separated modes: pg, det, nondet  [default: pg,det]
-#   --threads <csv>         Thread counts csv  [default: 1,2,3,4,5,6,8,10,12,16]
+#   --threads <csv>         Thread counts csv  [default: 1,2,4,8,12,16]
 #   --runs <3>              Runs per workload/thread combination
 #   --workloads <csv>       Workload filenames (default: bench_threads_matrix.py defaults)
 #   --rates <csv>           Rate limits csv (optional)
@@ -39,7 +39,9 @@ set -euo pipefail
 #   --signing-privkey <p>   Signing key path (relative to repo root)  [default: scripts/bench_signing_privkey.pem]
 #   --enforce-signatures <1> 0|1 — set bcdb_enforce_signatures in workload sessions  [default: 1]
 #   --poll-interval <60>    Seconds between monitoring polls
-#   --hang-timeout <60>     Seconds of no log change before hang warning
+#   --warmup-runs <1>       Unmeasured warmup executions before the matrix  [default: 1]
+#   --timeout-db-s <900>    Timeout for restore/apply/verification SQL; 0 disables it
+#   --hang-timeout <300>    Seconds of no log change before long-stage warning
 #   --skip-sync             Skip the rsync phase (reuse last-synced remote source)
 #
 
@@ -51,7 +53,7 @@ source "$SCRIPT_DIR/benchmark_defaults.sh"
 NEEL_NODES=(
   "neel@10.129.148.248"
   "neel@10.129.148.246"
-  "neel@10.129.148.236"
+  "neel@10.129.148.247"
 )
 NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"
 NEEL_REMOTE_INSTALL="/home/neel/Desktop/ariabc_install"
@@ -72,11 +74,14 @@ RATES=""
 SIGNING_MODES="0"
 SIGNING_PRIVKEY="scripts/bench_signing_privkey.pem"
 ENFORCE_SIGNATURES="1"
+WARMUP_RUNS="1"
+DB_STAGE_TIMEOUT_S="900"
 DB_NAME="postgres"
 DB_USER="postgres"
 DB_PORT=5438
 POLL_INTERVAL_S=60
-HANG_TIMEOUT_S=60
+HANG_TIMEOUT_S=300
+DB_READY_TIMEOUT_S=120
 SKIP_SYNC=0
 
 while [[ $# -gt 0 ]]; do
@@ -91,8 +96,10 @@ while [[ $# -gt 0 ]]; do
     --signing-modes) SIGNING_MODES="${2:-}"; shift 2 ;;
     --signing-privkey) SIGNING_PRIVKEY="${2:-}"; shift 2 ;;
     --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
+    --warmup-runs)  WARMUP_RUNS="${2:-1}"; shift 2 ;;
+    --timeout-db-s) DB_STAGE_TIMEOUT_S="${2:-900}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
-    --hang-timeout)  HANG_TIMEOUT_S="${2:-60}"; shift 2 ;;
+    --hang-timeout)  HANG_TIMEOUT_S="${2:-300}"; shift 2 ;;
     --skip-sync)     SKIP_SYNC=1; shift 1 ;;
     -h|--help)
       sed -n '/^# Usage/,/^[^#]/p' "$0" | head -n 20
@@ -136,6 +143,7 @@ declare -A NODE_INST=()
 declare -A NODE_STATUS=()
 declare -A NODE_LAST_HASH=()
 declare -A NODE_LAST_CHG=()
+declare -A NODE_LAST_WARN=()
 declare -A NODE_RSYNC_PID=()
 
 # _abort_run REASON [node1 node2 ...]
@@ -267,6 +275,8 @@ lmsg "Workloads    : ${WORKLOADS:-<bench_threads_matrix.py defaults>}"
 lmsg "SigningModes : ${SIGNING_MODES:-<default>}"
 lmsg "SigningKey   : ${SIGNING_PRIVKEY_LOCAL:-<not set>}"
 lmsg "EnforceSig   : ${ENFORCE_SIGNATURES:-<default>}"
+lmsg "WarmupRuns   : $WARMUP_RUNS"
+lmsg "DB timeout   : ${DB_STAGE_TIMEOUT_S}s (0=disabled)"
 lmsg "Result root  : $LOCAL_RESULT_ROOT"
 echo
 
@@ -598,6 +608,7 @@ _build_bench_flags() {
     fi
   fi
   [[ -n "$ENFORCE_SIGNATURES" ]] && extra+=" --enforce-signatures '$ENFORCE_SIGNATURES'"
+  extra+=" --warmup-runs '$WARMUP_RUNS' --timeout-db-s '$DB_STAGE_TIMEOUT_S'"
   printf '%s' "$extra"
 }
 
@@ -777,7 +788,7 @@ if [[ "$running_at_start" -eq 0 ]]; then
 fi
 
 lmsg "All benchmarks launched ($running_at_start running). Monitoring every ${POLL_INTERVAL_S}s."
-lmsg "Hang detection threshold: ${HANG_TIMEOUT_S}s of no log change."
+lmsg "Long-stage threshold: ${HANG_TIMEOUT_S}s of no parent-log change."
 echo
 
 # ============================================================
@@ -795,19 +806,24 @@ _check_synchronous_commit() {
   local psql_bin="$inst/bin/psql"
   local sc_val=""
 
-  sc_val=$(ssh_run "$node" \
-    "LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
-     -tAc 'SHOW synchronous_commit;' 2>/dev/null || true" 2>/dev/null || true)
+  for ((attempt=1; attempt <= DB_READY_TIMEOUT_S / 2; attempt++)); do
+    sc_val=$(ssh_run "$node" \
+      "LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
+       -tAc 'SHOW synchronous_commit;' 2>/dev/null || true" 2>/dev/null || true)
+    sc_val="${sc_val//[[:space:]]/}"
+    if [[ "$sc_val" == "on" ]]; then
+      lmsg "  [OK]  $node  synchronous_commit = on"
+      return 0
+    elif [[ -n "$sc_val" ]]; then
+      lmsg "  [FAIL] $node  synchronous_commit = $sc_val  (expected: on)"
+      _sc_bad+=("$node")
+      return 0
+    fi
+    sleep 2
+  done
 
-  sc_val="${sc_val// /}"  # trim whitespace
-  if [[ "$sc_val" == "on" ]]; then
-    lmsg "  [OK]  $node  synchronous_commit = on"
-  elif [[ -z "$sc_val" ]]; then
-    lmsg "  [WARN] $node  could not read synchronous_commit (postgres may still be starting)"
-  else
-    lmsg "  [FAIL] $node  synchronous_commit = $sc_val  (expected: on)"
-    _sc_bad+=("$node")
-  fi
+  lmsg "  [FAIL] $node  synchronous_commit could not be read within ${DB_READY_TIMEOUT_S}s"
+  _sc_bad+=("$node")
 }
 
 for entry in "${ALL_NODES[@]}"; do
@@ -926,7 +942,10 @@ _check_node() {
     local tail_out=""
     tail_out=$(ssh_run "$node" "tail -10 '$bench_log' 2>/dev/null || true" 2>/dev/null || true)
 
-    # Hang detection
+    # A workload case can legitimately spend several minutes in restore or
+    # merkle_apply_pending() without changing the parent log.  Treat this as a
+    # long-stage warning, not proof of a deadlock; bench_threads_matrix.py has
+    # the bounded DB-stage timeout passed in the launch command.
     local hash; hash=$(printf '%s' "$tail_out" | md5sum | cut -d' ' -f1)
     local prev="${NODE_LAST_HASH[$node]:-}"
     local now; now="$(date +%s)"
@@ -935,8 +954,13 @@ _check_node() {
       NODE_LAST_CHG["$node"]="$now"
     else
       local stale=$(( now - NODE_LAST_CHG["$node"] ))
-      if [[ "$stale" -ge "$HANG_TIMEOUT_S" ]]; then
-        echo "  *** HANG WARNING: $node – no log change for ${stale}s (pid=$pid) ***"
+      if [[ "$stale" -ge "$HANG_TIMEOUT_S" && "${NODE_LAST_WARN[$node]:-0}" != "$(( stale / HANG_TIMEOUT_S ))" ]]; then
+        local case_info
+        case_info=$(ssh_run "$node" "cat '${NODE_REMOTE_OUT[$node]}/current_case.json' 2>/dev/null || true" 2>/dev/null || true)
+        echo "  *** LONG-STAGE WARNING: $node – no parent-log change for ${stale}s (pid=$pid) ***"
+        [[ -n "$case_info" ]] && echo "      active case: $case_info"
+        echo "      This is not a hang verdict; DB-stage timeout=${DB_STAGE_TIMEOUT_S}s."
+        NODE_LAST_WARN["$node"]="$(( stale / HANG_TIMEOUT_S ))"
       fi
     fi
 

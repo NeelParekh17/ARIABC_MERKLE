@@ -150,6 +150,7 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
         -printf '%f\n' | sort > "$BEFORE"
 
       env \
+        FORCE_BUILD="${FORCE_BUILD:-0}" \
         SKIP_RDKAFKA_SETUP=1 \
         ARIABC_PREFERRED_LEADER_ID=1 \
         ARIABC_RAFT_DURABLE_ASYNC_FLUSH=1 \
