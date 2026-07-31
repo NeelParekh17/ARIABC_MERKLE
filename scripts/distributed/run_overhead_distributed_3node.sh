@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Run full 4-profile overhead benchmark on distributed topology.
 # Note: 10.129.148.248 is DOWN; 10.129.148.248 is firewalled (SSH-only).
-# Accessible PG nodes: 10.129.148.246 + 10.129.148.236 (truly distributed).
+# Accessible PG nodes: 10.129.148.246 + 10.129.148.247 (truly distributed).
 # 240 appears twice in the 3-node Raft quorum for valid consensus.
-# Gateway + Kafka: 10.129.148.236 (neel)
+# Gateway + Kafka: 10.129.148.247 (neel)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -13,13 +13,13 @@ source "$ROOT/scripts/distributed/benchmark_defaults.sh"
 # --------------------------------------------------------------------------
 # Topology
 # --------------------------------------------------------------------------
-PG_HOSTS="10.129.148.236,10.129.148.246,10.129.148.236"
+PG_HOSTS="10.129.148.247,10.129.148.246,10.129.148.247"
 RAFT_HOSTS="$PG_HOSTS"
 RAFT_MEMBER_HOSTS="$PG_HOSTS"
 RAFT_CLIENT_HOSTS="$PG_HOSTS"
 PG_USERS="neel,neel,neel"
 RAFT_USERS="neel,neel,neel"
-GW_HOST="10.129.148.236"
+GW_HOST="10.129.148.247"
 GW_USER="neel"
 SSH_USER="neel"
 SSH_KEY="/home/neel/.ssh/id_rsa"
@@ -33,9 +33,9 @@ FULL_RUNS="${PROFILE_RUNS:-3}"
 WORKLOADS="${PROFILE_WORKLOADS:-ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt,ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt}"
 RATES="${PROFILE_RATES:-0}"
 
-# Kafka runs on the gateway (240). All PG nodes can reach 10.129.148.236:9092.
+# Kafka runs on the gateway (240). All PG nodes can reach 10.129.148.247:9092.
 KAFKA_HOME="/tmp/kafka_2.13-3.7.0"
-KAFKA_BOOTSTRAP="10.129.148.236:9092"   # external IP so all nodes can reach it
+KAFKA_BOOTSTRAP="10.129.148.247:9092"   # external IP so all nodes can reach it
 
 # --------------------------------------------------------------------------
 # Global knobs — kept constant across profiles for fair comparison
@@ -88,7 +88,7 @@ ensure_kafka_ready() {
   remote_cmd=$(cat <<'REMOTE_EOF'
 set -euo pipefail
 KAFKA_HOME="/tmp/kafka_2.13-3.7.0"
-GW_IP="10.129.148.236"
+GW_IP="10.129.148.247"
 TOPICS_SH="$KAFKA_HOME/bin/kafka-topics.sh"
 STORAGE_SH="$KAFKA_HOME/bin/kafka-storage.sh"
 SERVER_SH="$KAFKA_HOME/bin/kafka-server-start.sh"

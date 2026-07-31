@@ -9,7 +9,7 @@ Run: `run_single_machine_matrix_all_nodes.sh`, mode=det, threads=5, runs=3
 | PG1  | 10.129.148.248 | 7965.7 | 3850.5 | baseline |
 | PG3  | 10.129.148.248 | 3161.9 | 1288.2 | 2.5× slower |
 | PG2  | 10.129.148.246 | 2519.0 | 1094.1 | 3.2× slower |
-| GW   | 10.129.148.236 | 1803.9 | 889.2  | 4.4× slower |
+| GW   | 10.129.148.247 | 1803.9 | 889.2  | 4.4× slower |
 
 ---
 
@@ -64,13 +64,13 @@ Additional contributing factor: a second PostgreSQL instance (`bibrank_db`)
 runs continuously on 10.129.148.246 and competes for NVMe I/O and CPU.
 It is not possible to stop it without root access on that machine.
 
-### Root Cause for GW (10.129.148.236)
+### Root Cause for GW (10.129.148.247)
 
 GW runs as a **shared desktop** — user `shalini` has multiple VSCode, Firefox,
 and Chrome processes consuming ~10 GiB of the 15 GiB RAM, pushing the
 AriaBC postgres into swap (3.6 GiB swap used during the run).
 
-In the **distributed benchmark** topology, `10.129.148.236` is the **Gateway
+In the **distributed benchmark** topology, `10.129.148.247` is the **Gateway
 only** — it does not run Postgres. So this memory pressure does **not** affect
 distributed benchmark TPS. The GW single-machine result is only relevant when
 comparing node health in isolation.
@@ -164,7 +164,7 @@ ssh neel@10.129.148.248 'rm -rf /tmp/ariabc_cluster/.bench_tmp/*/pg_log/* \
 ```bash
 cd /work/ARIABC/AriaBC
 scripts/distributed/run_single_machine_matrix_all_nodes.sh \
-  --pg-hosts 10.129.148.248,10.129.148.246,10.129.148.248,10.129.148.236 \
+  --pg-hosts 10.129.148.248,10.129.148.246,10.129.148.248,10.129.148.247 \
   --pg-users neel,neel,neel,neel \
   --ssh-key ~/.ssh/id_rsa \
   --threads 5 --runs 3 --modes det

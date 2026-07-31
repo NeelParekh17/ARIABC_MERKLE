@@ -1,79 +1,81 @@
-# `run_sweep.sh` distributed benchmark README
+# Distributed Benchmark Sweep Harness (`run_sweep.sh`)
 
-This file documents `scripts/distributed/run_sweep.sh`, the campaign wrapper that
-runs the current distributed PG/executor worker sweep across the configured
-AriaBC cluster.
+This document details `scripts/distributed/run_sweep.sh`, the automated campaign wrapper that executes distributed PostgreSQL/executor worker sweeps across the configured 4-node AriaBC Raft-Kafka cluster.
 
-## What the script does
+---
 
-`run_sweep.sh` is a wrapper around `scripts/distributed/run_4node_raft_cluster.sh`.
-It:
+## 🌟 What the Script Does
 
-1. changes to `/work/ARIABC/AriaBC`;
-2. builds `ariabc_pg_gateway` and `ariabc_pg_server`;
-3. runs `bash -n scripts/distributed/run_4node_raft_cluster.sh`;
-4. runs `git diff --check`;
-5. creates a campaign directory under `scripts/bench_full_results/`;
-6. runs the distributed benchmark for each server executor worker count;
-7. repeats each worker count three times;
-8. records each produced `cluster4_*` artifact and summary.
+`run_sweep.sh` automates multi-node distributed performance sweeps by wrapping `scripts/distributed/run_4node_raft_cluster.sh`.
 
-All stdout/stderr from the campaign is redirected to `out.txt` in the repository
-root. The script does not stream to the terminal after the initial build/check
-messages.
+It performs the following steps:
 
-## Basic run
+1. Changes working directory to repository root (`/work/ARIABC/AriaBC`).
+2. Builds updated C++ server (`ariabc_pg_server`) and gateway (`ariabc_pg_gateway`) binaries.
+3. Performs syntax validation on `run_4node_raft_cluster.sh` (`bash -n`).
+4. Runs `git diff --check` to ensure no workspace formatting errors exist.
+5. Initializes a campaign output directory under `scripts/bench_full_results/`.
+6. Iterates over specified server executor worker counts (`--executor-workers`).
+7. Repeats each worker count configuration for designated repetitions (`--reps`).
+8. Collects benchmark artifacts (`cluster4_*`), CSV summaries, and profile logs.
+
+All stdout/stderr output is logged to `out.txt` in the repository root.
+
+---
+
+## 🚀 Usage & Quick Start
+
+### Basic Campaign Execution
 
 From the repository root:
 
 ```bash
+# Run default distributed sweep
 ./scripts/distributed/run_sweep.sh
 ```
 
-Show supported sweep and topology flags:
+### View Help & Options
 
 ```bash
 ./scripts/distributed/run_sweep.sh --help
 ```
 
-Watch progress in another terminal:
+### Monitor Sweep Progress
 
 ```bash
 tail -f out.txt
 ```
 
-The campaign directory is printed near the end of `out.txt`:
+---
+
+## 📁 Campaign Output Directory Structure
+
+At the end of a run, the campaign location is logged to `out.txt`:
 
 ```text
-Artifacts: scripts/bench_full_results/pg_executor_sweep_<timestamp>
+Artifacts: scripts/bench_full_results/pg_executor_sweep_<timestamp>/
 ```
 
-Inside that directory:
+Inside the campaign directory:
 
 ```text
-runs.csv      maps pg_executor_workers, repetition, and cluster4_* artifact
-run_dirs.txt  one cluster4_* artifact path per line
-summary.csv   appended output from summarize_raft_profile.py
-campaign.env  sweep settings and forwarded cluster args for this campaign
+runs.csv      # Maps pg_executor_workers, repetition ID, and artifact paths
+run_dirs.txt  # List of produced cluster4_* artifact directories
+summary.csv   # Aggregated TPS and latency metrics from summarize_raft_profile.py
+campaign.env  # Environment snapshot and flags used for the campaign
 ```
 
-Each individual distributed run still creates its own normal
-`scripts/bench_full_results/cluster4_*` artifact.
+Individual run artifacts are stored in `scripts/bench_full_results/cluster4_*`.
 
-## Current cluster topology
+---
 
-`run_sweep.sh` does not define the cluster machines directly. It calls
-`run_4node_raft_cluster.sh`, which sources:
+## 🌐 Cluster Topology Configuration
 
-```text
-scripts/distributed/cluster_topology.sh
-```
-
-The current topology in that file is:
+`run_sweep.sh` sources topology parameters from `scripts/distributed/cluster_topology.sh`:
 
 ```bash
 declare -a NODE_IDS=(1 2 4)
-declare -a NODE_IPS=(10.129.148.236 10.129.148.246 10.129.148.248)
+declare -a NODE_IPS=(10.129.148.247 10.129.148.246 10.129.148.248)
 declare -a NODE_NAMES=(admin123 user4 utkarsh)
 declare -a NODE_USERS=(neel neel neel)
 declare -a NODE_IS_U22=(0 1 0)
@@ -85,15 +87,14 @@ export DB_USER=postgres
 export DB_NAME=postgres
 ```
 
-`NODE_IS_U22` matters because Ubuntu 22.04 nodes use the separate
-`/home/neel/Desktop/ariabc_pg_build_u22` server/gateway binaries. Ubuntu 24.04
-nodes use the synced repository build under
-`/home/neel/Desktop/ariabc_cluster/ariabc_pg/build`.
+> [!NOTE]
+> `NODE_IS_U22` specifies OS binary paths: Ubuntu 22.04 nodes use `/home/neel/Desktop/ariabc_pg_build_u22` binaries, while Ubuntu 24.04 nodes use synced `/home/neel/Desktop/ariabc_cluster/ariabc_pg/build` binaries.
 
-## Use different cluster nodes from CLI
+---
 
-`run_sweep.sh` accepts topology flags and forwards them to
-`run_4node_raft_cluster.sh`. The topology flags are aligned CSV arrays:
+## 🛠️ CLI Topology & Custom Sweep Flags
+
+Topology parameters can be overridden directly from the command line:
 
 ```bash
 ./scripts/distributed/run_sweep.sh \
@@ -106,144 +107,31 @@ nodes use the synced repository build under
   --kafka-host 10.10.0.11
 ```
 
-Keep these arrays aligned by index. For example, index 1 in every array refers
-to the same machine:
-
-```text
-NODE_IDS[1]=2
-NODE_IPS[1]=10.10.0.12
-NODE_NAMES[1]=node-b
-NODE_USERS[1]=neel
-NODE_IS_U22[1]=0
-NODE_CLIENT_PORTS[1]=8000
-```
-
-Optional topology-related flags:
+### Customizing Executor Workers & Repetitions
 
 ```bash
---raft-port 9000
---db-port 5438
---db-user postgres
---db-name postgres
---kafka-port 9092
---kafka-home-remote /home/neel/Desktop/kafka_2.13-3.7.0
+# Sweep specific worker counts with 3 repetitions
+./scripts/distributed/run_sweep.sh --executor-workers 8,16,24,32 --reps 3
+
+# Fast 1-pass smoke sweep
+./scripts/distributed/run_sweep.sh --executor-workers 8 --reps 1
 ```
 
-Checklist when replacing a node:
-
-1. SSH must work from the gateway to `NODE_USERS[i]@NODE_IPS[i]`.
-2. The remote repository path must exist or be creatable:
-   `/home/neel/Desktop/ariabc_cluster`.
-3. The remote install path must exist or be creatable:
-   `/home/neel/Desktop/ariabc_install`.
-4. PostgreSQL uses `DB_PORT=5438`.
-5. Raft server traffic uses `RAFT_PORT=9000`.
-6. Gateway client traffic uses `NODE_CLIENT_PORTS`.
-7. If a node is Ubuntu 22.04, set `NODE_IS_U22=1`.
-8. Avoid a client port already used on that machine. The current `utkarsh`
-   entry uses `8001` because `8000` is occupied there.
-
-The default Kafka broker is:
+### Customizing Client Threads
 
 ```bash
-KAFKA_HOST="10.129.148.236"
-KAFKA_PORT=9092
-KAFKA_HOME_REMOTE="/home/neel/Desktop/kafka_2.13-3.7.0"
+# Set client thread count and worker lanes
+./scripts/distributed/run_sweep.sh --threads 96 --det-client-workers 96
 ```
 
-If you move Kafka to a different machine, pass `--kafka-host` and optionally
-`--kafka-port` / `--kafka-home-remote`, or keep node 1 as the Kafka host.
+---
 
-## Gateway machine
+## ✅ Post-Sweep Verification
 
-`run_4node_raft_cluster.sh` delegates execution to the gateway machine unless it
-is already running there. These environment variables control that delegation:
+After completing a distributed benchmark campaign, verify replica state consistency and Merkle tree root alignment across all cluster nodes:
 
 ```bash
-GATEWAY_HOST=10.129.27.111
-GATEWAY_USER=neel
-GATEWAY_HOSTNAME=myubuntu
-GATEWAY_REPO=/home/neel/ARIABC/AriaBC
-GATEWAY_INSTALL=/home/neel/ARIABC/install
+./scripts/distributed/test_merkle_consistency.sh
 ```
 
-Example using another gateway:
-
-```bash
-GATEWAY_HOST=10.10.0.20 \
-GATEWAY_USER=neel \
-GATEWAY_HOSTNAME=my-gateway \
-GATEWAY_REPO=/home/neel/ARIABC/AriaBC \
-GATEWAY_INSTALL=/home/neel/ARIABC/install \
-./scripts/distributed/run_sweep.sh
-```
-
-To force running on the current machine without delegation:
-
-```bash
-BYPASS_DELEGATION=1 ./scripts/distributed/run_sweep.sh
-```
-
-## Change client threads
-
-The default sweep runs with:
-
-```bash
---threads 96
---det-client-workers 96
-```
-
-To run a 48-thread campaign:
-
-```bash
-./scripts/distributed/run_sweep.sh --threads 48
-```
-
-`run_sweep.sh --threads N` sets both the deterministic client lane count and
-the gateway deterministic threadpool worker count. If you need those to differ:
-
-```bash
-./scripts/distributed/run_sweep.sh --threads 96 --det-client-workers 48
-```
-
-## Change the server executor sweep
-
-For example, to sweep only 8, 16, and 24 server executor workers:
-
-```bash
-./scripts/distributed/run_sweep.sh --executor-workers 8,16,24
-```
-
-Quoted space-separated lists also work:
-
-```bash
-./scripts/distributed/run_sweep.sh --executor-workers "8 16 24"
-```
-
-Each `E` is passed to both:
-
-```bash
---server-exec-workers "$E"
---server-pg-connections "$E"
-```
-
-Keep these two values equal. `run_4node_raft_cluster.sh` rejects configurations
-where one is set without the other or where they differ.
-
-## Change repetitions
-
-For a quick one-pass smoke sweep:
-
-```bash
-./scripts/distributed/run_sweep.sh --reps 1
-```
-
-For five repetitions:
-
-```bash
-./scripts/distributed/run_sweep.sh --reps 1,2,3,4,5
-```
-
-If a node replacement fails, first verify SSH, free ports, OS profile
-(`NODE_IS_U22`), remote paths, and whether the Kafka host still points at a
-reachable broker.
+Ensure output reports `divergence_count=0` and `permanent_failures=0`.

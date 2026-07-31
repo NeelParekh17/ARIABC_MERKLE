@@ -136,7 +136,17 @@ def _run(
                 stdin.close()
 
 
-def _psql_value(psql: str, *, db: str, port: int, user: str, query: str, cwd: Path, env: dict[str, str]) -> Optional[str]:
+def _psql_value(
+    psql: str,
+    *,
+    db: str,
+    port: int,
+    user: str,
+    query: str,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_s: Optional[int] = None,
+) -> Optional[str]:
     argv = [
         psql,
         "-X",
@@ -152,7 +162,15 @@ def _psql_value(psql: str, *, db: str, port: int, user: str, query: str, cwd: Pa
         query,
     ]
     try:
-        proc = subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+        )
     except Exception:
         return None
     if proc.returncode != 0:
@@ -160,7 +178,17 @@ def _psql_value(psql: str, *, db: str, port: int, user: str, query: str, cwd: Pa
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
 
 
-def _psql_exec(psql: str, *, db: str, port: int, user: str, query: str, cwd: Path, env: dict[str, str]) -> tuple[bool, str]:
+def _psql_exec(
+    psql: str,
+    *,
+    db: str,
+    port: int,
+    user: str,
+    query: str,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_s: Optional[int] = None,
+) -> tuple[bool, str]:
     argv = [
         psql,
         "-X",
@@ -175,7 +203,15 @@ def _psql_exec(psql: str, *, db: str, port: int, user: str, query: str, cwd: Pat
         query,
     ]
     try:
-        proc = subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+        )
     except Exception as e:
         return False, str(e)
     msg = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip())
@@ -196,6 +232,7 @@ def _ensure_merkle_index_enabled(
     user: str,
     cwd: Path,
     env: dict[str, str],
+    timeout_s: Optional[int] = 30,
 ) -> tuple[bool, list[str]]:
     notes: list[str] = []
     server_env = dict(env)
@@ -209,6 +246,7 @@ def _ensure_merkle_index_enabled(
         query="ALTER SYSTEM SET enable_merkle_index = 'on';",
         cwd=cwd,
         env=server_env,
+        timeout_s=timeout_s,
     )
     if not ok:
         notes.append("alter_system_enable_merkle_index_failed=" + msg.replace("\n", " ")[:240])
@@ -221,6 +259,7 @@ def _ensure_merkle_index_enabled(
             query="SELECT pg_reload_conf();",
             cwd=cwd,
             env=server_env,
+            timeout_s=timeout_s,
         )
         if not reload_ok:
             notes.append("reload_after_enable_merkle_index_failed=" + reload_msg.replace("\n", " ")[:240])
@@ -233,6 +272,7 @@ def _ensure_merkle_index_enabled(
         query="SHOW enable_merkle_index;",
         cwd=cwd,
         env=server_env,
+        timeout_s=timeout_s,
     )
     effective_value = _psql_value(
         psql,
@@ -242,6 +282,7 @@ def _ensure_merkle_index_enabled(
         query="SHOW enable_merkle_index;",
         cwd=cwd,
         env=env,
+        timeout_s=timeout_s,
     )
 
     if (persistent_value or "").strip().lower() != "on":
@@ -1253,8 +1294,21 @@ def main() -> int:
             " Default: 1. Set to 0 to disable."
         ),
     )
+    parser.add_argument(
+        "--timeout-db-s",
+        type=int,
+        default=900,
+        help=(
+            "Timeout in seconds for restore, Merkle apply, and verification SQL. "
+            "0 disables the database-stage timeout. Default: 900."
+        ),
+    )
 
     args = parser.parse_args()
+
+    if args.timeout_db_s < 0:
+        print("ERROR: --timeout-db-s must be >= 0", file=sys.stderr)
+        return 2
 
     scripts_dir = Path(__file__).resolve().parent
     repo_root = scripts_dir.parent
@@ -1358,6 +1412,7 @@ def main() -> int:
         "timeouts": {
             "workload_s": args.timeout_workload_s,
             "workload_det_s": args.timeout_workload_det_s,
+            "database_stage_s": args.timeout_db_s,
         },
         "commands": {
             "start_server": str(start_server),
@@ -1456,6 +1511,11 @@ def main() -> int:
 
         for mode in modes:
             db_type = MODE_NAME_TO_DB_TYPE[mode]
+            # The dynamic Merkle index belongs to the deterministic AriaBC
+            # path.  Keep pg/nondet as genuine non-Merkle comparison modes;
+            # restore_usertable_small.sql defaults to enabled for manual use,
+            # so the psql variable must be explicit here.
+            merkle_enabled_for_mode = db_type == 1
             effective_signing_modes = signing_modes if db_type == 1 else [0]
             for workload in workloads:
                 workload_path = scripts_dir / workload
@@ -1515,6 +1575,7 @@ def main() -> int:
                                     query="show data_directory;",
                                     cwd=scripts_dir,
                                     env=env,
+                                    timeout_s=30,
                                 )
                                 live_data_dir = _canonical_path_str(live_data_dir_raw)
 
@@ -1549,6 +1610,7 @@ def main() -> int:
                                         f"threads={th} run={run_idx}",
                                         flush=True,
                                     )
+                                    restore_t0 = time.monotonic()
                                     restore_exit = _run(
                                         [
                                             psql_path,
@@ -1562,6 +1624,8 @@ def main() -> int:
                                             args.db,
                                             "-v",
                                             "ON_ERROR_STOP=1",
+                                            "-v",
+                                            f"bench_enable_merkle={1 if merkle_enabled_for_mode else 0}",
                                             "-f",
                                             str(restore_sql),
                                         ],
@@ -1569,6 +1633,13 @@ def main() -> int:
                                         env=env,
                                         stdout_path=restore_log_out,
                                         stderr_path=restore_log_err,
+                                        timeout_s=args.timeout_db_s or None,
+                                    )
+                                    print(
+                                        f"  [restore-done] mode={mode} workload={workload} "
+                                        f"threads={th} run={run_idx} exit={restore_exit} "
+                                        f"elapsed={time.monotonic() - restore_t0:.1f}s",
+                                        flush=True,
                                     )
 
                                 workload_exit = -1
@@ -1651,6 +1722,7 @@ def main() -> int:
                                             f"threads={th} run={run_idx}",
                                             flush=True,
                                         )
+                                        restore_t0 = time.monotonic()
                                         restore_exit = _run(
                                             [
                                                 psql_path,
@@ -1664,6 +1736,8 @@ def main() -> int:
                                                 args.db,
                                                 "-v",
                                                 "ON_ERROR_STOP=1",
+                                                "-v",
+                                                f"bench_enable_merkle={1 if merkle_enabled_for_mode else 0}",
                                                 "-f",
                                                 str(restore_sql),
                                             ],
@@ -1671,6 +1745,13 @@ def main() -> int:
                                             env=env,
                                             stdout_path=case_dir / "restore_after_warmup.out",
                                             stderr_path=case_dir / "restore_after_warmup.err",
+                                            timeout_s=args.timeout_db_s or None,
+                                        )
+                                        print(
+                                            f"  [restore-after-warmup-done] mode={mode} workload={workload} "
+                                            f"threads={th} run={run_idx} exit={restore_exit} "
+                                            f"elapsed={time.monotonic() - restore_t0:.1f}s",
+                                            flush=True,
                                         )
                                         # Reset DET txid counter to 0 for the actual measured run.
                                         if db_type == 1:
@@ -1709,29 +1790,94 @@ def main() -> int:
                                 count_s = None
                                 root_hash = None
                                 verify = None
+                                dynamic_merkle_contract = None
                                 verification_error = ""
                                 timeout_diag_path: Optional[Path] = None
                                 if restore_exit == 0 and workload_exit == 0:
-                                    apply_ok, apply_msg = _psql_exec(
-                                        psql_path,
-                                        db=args.db,
-                                        port=args.port,
-                                        user=args.user,
-                                        query="select merkle_apply_pending();",
-                                        cwd=scripts_dir,
-                                        env=env,
-                                    )
-                                    if not apply_ok:
-                                        verification_error = "merkle_apply_pending_failed: " + apply_msg
+                                    if merkle_enabled_for_mode:
+                                        print(
+                                            f"  [merkle-apply] mode={mode} workload={workload} "
+                                            f"threads={th} run={run_idx}",
+                                            flush=True,
+                                        )
+                                        apply_t0 = time.monotonic()
+                                        apply_ok, apply_msg = _psql_exec(
+                                            psql_path,
+                                            db=args.db,
+                                            port=args.port,
+                                            user=args.user,
+                                            query="select merkle_apply_pending();",
+                                            cwd=scripts_dir,
+                                            env=env,
+                                            timeout_s=args.timeout_db_s or None,
+                                        )
+                                        print(
+                                            f"  [merkle-apply-done] mode={mode} workload={workload} "
+                                            f"threads={th} run={run_idx} ok={apply_ok} "
+                                            f"elapsed={time.monotonic() - apply_t0:.1f}s",
+                                            flush=True,
+                                        )
+                                        if not apply_ok:
+                                            verification_error = "merkle_apply_pending_failed: " + apply_msg
+                                        else:
+                                            count_s = _psql_value(
+                                                psql_path, db=args.db, port=args.port, user=args.user,
+                                                query="select count(*) from usertable_small;",
+                                                cwd=scripts_dir, env=env,
+                                                timeout_s=args.timeout_db_s or None,
+                                            )
+                                            root_hash = _psql_value(
+                                                psql_path, db=args.db, port=args.port, user=args.user,
+                                                query="select merkle_root_hash('usertable_small');",
+                                                cwd=scripts_dir, env=env,
+                                                timeout_s=args.timeout_db_s or None,
+                                            )
+                                            verify = _psql_value(
+                                                psql_path, db=args.db, port=args.port, user=args.user,
+                                                query="select merkle_verify('usertable_small');",
+                                                cwd=scripts_dir, env=env,
+                                                timeout_s=args.timeout_db_s or None,
+                                            )
+                                            dynamic_merkle_contract = _psql_value(
+                                                psql_path,
+                                                db=args.db,
+                                                port=args.port,
+                                                user=args.user,
+                                                query=(
+                                                    "SELECT CASE WHEN am.amname = 'merkle' "
+                                                    "AND i.indisvalid AND i.indisready "
+                                                    "AND EXISTS (SELECT 1 FROM ariabc_internal.merkle_node n "
+                                                    "WHERE n.index_oid = i.indexrelid AND n.prefix_len = 0) "
+                                                    "THEN 't' ELSE 'f' END "
+                                                    "FROM pg_catalog.pg_index i "
+                                                    "JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid "
+                                                    "JOIN pg_catalog.pg_am am ON am.oid = c.relam "
+                                                    "WHERE i.indexrelid = 'public.usertable_small_merkle_idx'::regclass;"
+                                                ),
+                                                cwd=scripts_dir,
+                                                env=env,
+                                                timeout_s=args.timeout_db_s or None,
+                                            )
+                                            if count_s is None or root_hash is None or verify is None:
+                                                verification_error = "post_workload_verification_query_failed"
+                                            elif dynamic_merkle_contract != "t":
+                                                verification_error = (
+                                                    "dynamic_merkle_contract_failed: "
+                                                    f"{dynamic_merkle_contract or 'missing'}"
+                                                )
                                     else:
-                                        count_s = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select count(*) from usertable_small;", cwd=scripts_dir, env=env)
-                                        root_hash = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_root_hash('usertable_small');", cwd=scripts_dir, env=env)
-                                        verify = _psql_value(psql_path, db=args.db, port=args.port, user=args.user, query="select merkle_verify('usertable_small');", cwd=scripts_dir, env=env)
-                                        if count_s is None or root_hash is None or verify is None:
-                                            verification_error = "post_workload_verification_query_failed"
+                                        count_s = _psql_value(
+                                            psql_path, db=args.db, port=args.port, user=args.user,
+                                            query="select count(*) from usertable_small;",
+                                            cwd=scripts_dir, env=env,
+                                            timeout_s=args.timeout_db_s or None,
+                                        )
+                                        verify = "skipped"
+                                        if count_s is None:
+                                            verification_error = "post_workload_row_count_query_failed"
                                     if verification_error:
                                         (case_dir / "verification.err").write_text(verification_error + "\n")
-                                if restore_exit == 0 and workload_exit == 124:
+                                if restore_exit == 124 or workload_exit == 124:
                                     timeout_diag_path = _capture_timeout_diagnostics(
                                         case_dir=case_dir,
                                         psql=psql_path,
@@ -1748,6 +1894,11 @@ def main() -> int:
                                     row_count = int(count_s.strip())
 
                                 notes_parts: list[str] = []
+                                notes_parts.append(f"merkle_enabled={1 if merkle_enabled_for_mode else 0}")
+                                if merkle_enabled_for_mode:
+                                    notes_parts.append(
+                                        f"dynamic_merkle_contract={dynamic_merkle_contract or 'unknown'}"
+                                    )
                                 bcdb_extra_gucs = env.get("BCDB_EXTRA_GUCS", "")
                                 if bcdb_extra_gucs:
                                     notes_parts.append(
@@ -1839,7 +1990,7 @@ def main() -> int:
                                         flush=True,
                                     )
                                     return 1
-                                if verification_error or verify != "t":
+                                if merkle_enabled_for_mode and (verification_error or verify != "t"):
                                     print(
                                         f"ERROR: Merkle verification failed for mode={mode} workload={workload} "
                                         f"threads={th} run={run_idx} verify={verify!r}; aborting matrix",

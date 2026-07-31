@@ -519,6 +519,10 @@ BEGIN
          WHERE schema_version = 3;
     ELSIF current_version = 4 THEN
         NULL;
+    ELSIF current_version = 5 THEN
+        UPDATE ariabc_internal.raft_apply_schema_meta
+           SET schema_version = 4
+         WHERE schema_version = 5;
     ELSE
         RAISE EXCEPTION 'unsupported raft_apply schema_version %', current_version;
     END IF;

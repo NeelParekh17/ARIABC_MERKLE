@@ -147,7 +147,7 @@ fi
 
 resolve_host_ip() {
   case "$1" in
-    admin123) printf '%s\n' "10.129.148.236" ;;
+    admin123) printf '%s\n' "10.129.148.247" ;;
     user4) printf '%s\n' "10.129.148.246" ;;
     utkarsh) printf '%s\n' "10.129.148.248" ;;
     *) printf '%s\n' "$1" ;;

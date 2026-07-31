@@ -2,11 +2,11 @@
 # run_4node_raft_cluster.sh — Bootstrap and test the AriaBC distributed cluster.
 #
 # Topology (from plan.txt):
-#   Node 1 (RAFT ID 1): admin123   10.129.148.236  neel  [Kafka host]  Ubuntu 24.04
+#   Node 1 (RAFT ID 1): admin123   10.129.148.247  neel  [Kafka host]  Ubuntu 24.04
 #   Node 2 (RAFT ID 2): user4      10.129.148.246    neel               Ubuntu 22.04
 #   Node 4 (RAFT ID 4): utkarsh    10.129.148.248  neel               Ubuntu 24.04
 #   Gateway            : proposed-gw 10.129.27.111 (this machine, local)
-#   Kafka broker       : 10.129.148.236:9092
+#   Kafka broker       : 10.129.148.247:9092
 #
 # IMPORTANT KNOWN CONSTRAINTS (confirmed 2026-04-24):
 #   - Ubuntu 22.04 nodes (user4, new-node) CANNOT run ASUS-built binary (GLIBC 2.38 required).
@@ -83,7 +83,7 @@ source "${SCRIPT_DIR}/cluster_topology.sh"
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 
-KAFKA_HOST="${KAFKA_HOST:-10.129.148.236}"
+KAFKA_HOST="${KAFKA_HOST:-10.129.148.247}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
 KAFKA_RESULT_TOPIC="${KAFKA_RESULT_TOPIC:-ariabc_results}"
 KAFKA_HOME_REMOTE="${KAFKA_HOME_REMOTE:-/home/neel/Desktop/kafka_2.13-3.7.0}"
@@ -502,7 +502,7 @@ Options:
   --db-port N      Override PostgreSQL port (default from cluster_topology.sh)
   --db-user USER   Override PostgreSQL user (default from cluster_topology.sh)
   --db-name NAME   Override PostgreSQL database (default from cluster_topology.sh)
-  --kafka-host H   Override Kafka broker host (default: 10.129.148.236)
+  --kafka-host H   Override Kafka broker host (default: 10.129.148.247)
   --kafka-port N   Override Kafka broker port (default: 9092)
   --kafka-home-remote DIR
                   Override remote Kafka installation directory.
@@ -4150,4 +4150,5 @@ if [[ -d "$REPO_ROOT/scripts/bench_full_results/durable_storage_test_results" ]]
   cp -r "$REPO_ROOT/scripts/bench_full_results/durable_storage_test_results" "$LOG_DIR/"
 fi
 
+log "=== 4-node cluster test complete ==="
 log "=== 4-node cluster test complete ==="
