@@ -274,5 +274,3 @@ def apply_corruption(conn, manifest: dict[str, Any]) -> None:
             )
         else:
             raise ValueError(f"unknown op {op!r} in manifest entry")
-    
-    execute(conn, "SELECT merkle_apply_pending()")

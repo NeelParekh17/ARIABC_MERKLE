@@ -119,8 +119,14 @@ def validate_backend_profile_stats(
     rows_inserted: int,
     rows_deleted: int,
 ) -> list[str]:
+    """Validate counters emitted by the current native dynamic path.
+
+    The old static implementation exposed root-helper and tree-path counters.
+    Dynamic recovery reports the batched child lookups here.  Root reads are
+    ordinary catalog SQL, while full-audit row hashing is intentionally outside
+    this recovery-only profile snapshot.
+    """
     reasons: list[str] = []
-    expected_root_calls = 4
     expected_child_calls = int(counters.get("child_hash_sql_calls", 0)) + int(
         post_repair_counters.get("targeted_confirmation_child_hash_sql_calls", 0)
     )
@@ -128,7 +134,6 @@ def validate_backend_profile_stats(
         post_repair_counters.get("targeted_confirmation_child_hash_nodes_read", 0)
     )
     checks = [
-        ("root_hash_helper_calls", expected_root_calls),
         ("child_hash_helper_calls", expected_child_calls),
         ("child_hash_nodes_returned", expected_child_nodes),
     ]
@@ -137,24 +142,6 @@ def validate_backend_profile_stats(
         if actual != expected:
             reasons.append(f"{field} expected {expected}, got {actual}")
 
-    if rows_updated > 0:
-        expected_row_hash_calls = rows_updated * 2
-        actual_row_hash_calls = int(backend.get("row_hash_compute_calls", 0))
-        if actual_row_hash_calls != expected_row_hash_calls:
-            reasons.append(
-                f"row_hash_compute_calls expected {expected_row_hash_calls}, "
-                f"got {actual_row_hash_calls}"
-            )
-
-    if rows_updated > 0 and rows_inserted == 0 and rows_deleted == 0:
-        expected_path_calls = rows_updated * 2
-        if int(backend.get("tree_path_update_calls", 0)) != expected_path_calls:
-            reasons.append(
-                f"tree_path_update_calls expected {expected_path_calls}, "
-                f"got {backend.get('tree_path_update_calls', 0)}"
-            )
-        if int(backend.get("tree_path_update_ns", 0)) <= 0:
-            reasons.append("tree_path_update_ns is zero despite tree updates")
     return reasons
 
 
@@ -405,15 +392,6 @@ def repair_merkle(
 
     if bad_leaves:
         lookup_scans = candidate_fetch_sql_calls
-
-    with timer(m.phase, "repair_write_ms"):
-        with timer(m.phase, "merkle_metadata_apply_ms"):
-            record_call(
-                profiler,
-                stage="repair",
-                operation="repair_merkle_apply_pending",
-                fn=lambda: execute(conn, "SELECT merkle_apply_pending()"),
-            )
 
     with timer(m.phase, "targeted_post_repair_confirmation_ms"):
         post_repair_counters: dict[str, Any] = {}
@@ -690,13 +668,8 @@ def run_one_manifest(
             total_runs=progress_state["total_runs"],
         )
         method_start = now_ms()
-        print("[TRACE] state before apply_corruption:", execute(conn, "SELECT * FROM ariabc_internal.merkle_apply_state"))
         apply_corruption(conn, manifest)
-        print("[TRACE] state after apply_corruption:", execute(conn, "SELECT * FROM ariabc_internal.merkle_apply_state"))
-        execute(conn, "SELECT merkle_apply_pending()")
-        print("[TRACE] state after merkle_apply_pending:", execute(conn, "SELECT * FROM ariabc_internal.merkle_apply_state"))
         planner_results, planner_rows = run_planner_preflight(conn, manifest, run_id)
-        print("[TRACE] state after run_planner_preflight:", execute(conn, "SELECT * FROM ariabc_internal.merkle_apply_state"))
         planner_rows_out.extend(planner_rows)
         profiler = None
         if profiling_mode in ("light", "deep"):
@@ -857,7 +830,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
             if args.geometry_label and label != args.geometry_label:
                 continue
             geo = geometry_matrix.get(label, {})
-            fanout = int(override_fanout or geo.get("fanout", 2))
+            fanout = int(override_fanout or geo.get("fanout", 4))
             split_threshold = int(geo.get("split_threshold", 32))
             merge_threshold = int(geo.get("merge_threshold", 8))
             out_label = (
@@ -961,9 +934,13 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
             50_000_000,
         ]
         if args.tuple_count is not None:
-            if int(args.tuple_count) not in allowed_tuple_counts:
-                raise ValueError("size-scaling-k75-c300 owns tuple counts from 1M to 50M")
-            tuple_counts = [int(args.tuple_count)]
+            selected_sizes = _selected(allowed_tuple_counts, args.tuple_count)
+            invalid_sizes = [n for n in selected_sizes if n not in allowed_tuple_counts]
+            if invalid_sizes:
+                raise ValueError(
+                    "size-scaling-k75-c300 owns tuple counts from 1M to 50M"
+                )
+            tuple_counts = selected_sizes
         else:
             tuple_counts = allowed_tuple_counts
         if getattr(args, "fanout", None) is not None:
@@ -1055,7 +1032,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
     series = []
     if getattr(args, "experiment", None) in (None, "figure12"):
         for n in _selected(config.fig12_sizes, getattr(args, "tuple_count", None)):
-            fanout = int(override_fanout or 2)
+            fanout = int(override_fanout or 4)
             series.append(
                 case(
                     experiment="figure12",
@@ -1076,7 +1053,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         bad_counts = _selected(config.fig13_k, getattr(args, "bad_leaf_count", None))
         for n in sizes:
             for k in bad_counts:
-                fanout = int(override_fanout or 2)
+                fanout = int(override_fanout or 4)
                 series.append(
                     case(
                         experiment="figure13",

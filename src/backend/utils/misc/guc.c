@@ -404,7 +404,6 @@ static const struct config_enum_entry synchronous_commit_options[] = {
 static const struct config_enum_entry merkle_read_lag_policy_options[] = {
 	{"error", MERKLE_READ_LAG_ERROR, false},
 	{"wait", MERKLE_READ_LAG_WAIT, false},
-	{"apply", MERKLE_READ_LAG_APPLY, false},
 	{NULL, 0, false}
 };
 
@@ -902,6 +901,15 @@ static struct config_bool ConfigureNamesBool[] =
 			gettext_noop("Merkle-indexed tables reject writes while maintenance is disabled; controls are superuser-only.")
 		},
 		&enable_merkle_index,
+		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"merkle_apply_synchronous_direct", PGC_SUSET, DEVELOPER_OPTIONS,
+			gettext_noop("Apply dynamic Merkle index updates synchronously in the same transaction as the heap mutation."),
+			gettext_noop("When off, Merkle-indexed writes are rejected; deferred local-delta apply is not supported. Raft-ledger transactions use the synchronous ledger applier.")
+		},
+		&merkle_apply_synchronous_direct,
 		true,
 		NULL, NULL, NULL
 	},

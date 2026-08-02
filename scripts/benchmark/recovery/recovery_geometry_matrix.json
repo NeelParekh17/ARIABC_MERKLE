@@ -1,16 +1,16 @@
 {
   "baseline_l16": {
-    "fanout": 2,
+    "fanout": 4,
     "split_threshold": 32,
     "merge_threshold": 8
   },
   "preprovisioned_l128": {
-    "fanout": 2,
+    "fanout": 4,
     "split_threshold": 32,
     "merge_threshold": 8
   },
   "sensitivity_l64": {
-    "fanout": 2,
+    "fanout": 4,
     "split_threshold": 32,
     "merge_threshold": 8
   },
@@ -90,7 +90,7 @@
     "merge_threshold": 8
   },
   "sensitivity_l32": {
-    "fanout": 2,
+    "fanout": 4,
     "split_threshold": 32,
     "merge_threshold": 8
   },

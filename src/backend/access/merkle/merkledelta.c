@@ -1,12 +1,11 @@
 /*-------------------------------------------------------------------------
  *
  * merkledelta.c
- *    Transaction-local Merkle delta staging and durable local enqueue.
+ *    Transaction-local Merkle delta staging and synchronous application.
  *
- * Physical Merkle pages are deliberately not modified by user transactions.
- * Each transaction aggregates XOR deltas by index/leaf and persists one
- * compact binary blob.  The ordered applier in merkleapply.c is the only
- * normal-runtime v7 page mutator.
+ * Transactions aggregate Merkle XOR deltas by index/leaf.  Direct/plain
+ * transactions can materialize those deltas in PRE_COMMIT; Raft-ledger
+ * transactions serialize them into the ledger and use the ordered applier.
  *
  *-------------------------------------------------------------------------
  */
@@ -31,12 +30,6 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
-
-typedef struct MerkleDeltaEntry
-{
-	MerkleDeltaKey key;
-	MerkleHash	xor_delta;
-} MerkleDeltaEntry;
 
 typedef struct MerkleSubxactFrame
 {
@@ -398,112 +391,6 @@ merkle_mark_staged_delta_persisted(void)
 	merkle_staged_delta_persisted = true;
 }
 
-static void
-merkle_persist_local_delta_impl(void)
-{
-	bytea	   *blob;
-	int			spi_rc;
-	bool		isnull;
-	Datum		seq_datum;
-	uint64		apply_seq;
-	bool		deterministic_bcdb_seq;
-	Oid			argtypes[3] = {INT8OID, INT4OID, BYTEAOID};
-	Datum		values[3];
-	char		nulls[3] = {' ', ' ', ' '};
-	bool		pushed_snapshot = false;
-
-	if (!merkle_has_staged_delta())
-		return;
-
-	if (is_bcdb_worker && activeTx != NULL && activeTx->raft_ledger_enabled)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("safe-ledger transaction reached PRE_COMMIT with an unpersisted Merkle delta"),
-				 errdetail("raft_log_index=%llu item_ordinal=%u",
-						   (unsigned long long) activeTx->raft_log_index,
-						   (unsigned) activeTx->raft_item_ordinal)));
-	deterministic_bcdb_seq = enable_merkle_index && is_bcdb_worker &&
-		activeTx != NULL && !activeTx->raft_ledger_enabled &&
-		activeTx->tx_id != BCDBInvalidTid;
-	if (!ActiveSnapshotSet())
-	{
-		PushActiveSnapshot(GetTransactionSnapshot());
-		pushed_snapshot = true;
-	}
-
-	spi_rc = SPI_connect();
-	if (spi_rc != SPI_OK_CONNECT)
-		elog(ERROR, "Merkle local delta SPI_connect failed: %d", spi_rc);
-
-	if (deterministic_bcdb_seq)
-	{
-		/*
-		 * Direct DET workers must never contend on the singleton SQL allocator
-		 * while holding user-row locks.  Their transaction id is already a
-		 * replica-agreed total order and gives every writer a distinct key.
-		 * Read-only txids intentionally leave holes; merkle_apply_until_impl()
-		 * may cross only holes proven terminal by last_committed_tx_id.
-		 */
-		if (activeTx->tx_id < 0 || activeTx->tx_id == PG_INT32_MAX)
-			elog(ERROR, "BCDB transaction id cannot be represented as a Merkle sequence");
-		apply_seq = (uint64) activeTx->tx_id + 1;
-	}
-	else
-	{
-		spi_rc = SPI_execute(
-			"UPDATE ariabc_internal.merkle_apply_counter"
-			"   SET next_seq = next_seq + 1"
-			" WHERE singleton"
-			" RETURNING next_seq",
-			false, 1);
-		if (spi_rc != SPI_OK_UPDATE_RETURNING || SPI_processed != 1)
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_TABLE),
-					 errmsg("Merkle crash-safety state is not initialized"),
-					 errhint("Run scripts/distributed/bootstrap_raft_apply_ledger.sh for this database.")));
-
-		seq_datum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
-								  1, &isnull);
-		if (isnull || DatumGetInt64(seq_datum) <= 0)
-			elog(ERROR, "Merkle apply counter returned an invalid sequence");
-		apply_seq = (uint64) DatumGetInt64(seq_datum);
-	}
-
-	blob = merkle_serialize_staged_delta(0, 0);
-	if (blob == NULL)
-		elog(ERROR, "Merkle staged delta disappeared during PRE_COMMIT");
-
-	values[0] = Int64GetDatum((int64) apply_seq);
-	values[1] = Int32GetDatum(MERKLE_DELTA_VERSION);
-	values[2] = PointerGetDatum(blob);
-	spi_rc = SPI_execute_with_args(
-		"INSERT INTO ariabc_internal.merkle_local_delta"
-		"       (apply_seq, delta_version, delta_blob)"
-		" VALUES ($1, $2, $3)",
-		3, argtypes, values, nulls, false, 1);
-	if (spi_rc != SPI_OK_INSERT || SPI_processed != 1)
-		elog(ERROR, "failed to persist local Merkle delta at sequence %llu",
-			 (unsigned long long) apply_seq);
-
-	/*
-	 * P0.2: Advance terminal_prefix_seq in the same transaction as the
-	 * delta insert.  A local delta row is terminal by definition (it is
-	 * committed by this transaction), so as soon as next_seq moves to
-	 * apply_seq, the prefix can advance to include it.
-	 */
-	if (!deterministic_bcdb_seq)
-		(void) merkle_advance_terminal_prefix_spi();
-
-	if (SPI_finish() != SPI_OK_FINISH)
-		elog(ERROR, "Merkle local delta SPI_finish failed");
-	if (pushed_snapshot)
-		PopActiveSnapshot();
-
-	merkle_staged_delta_persisted = true;
-	merkle_crash_failpoint("after_merkle_delta_ledger_written");
-	merkle_crash_failpoint("after_merkle_delta_queue_written");
-}
-
 typedef struct MerklePartNoticeKey
 {
 	Oid index_oid;
@@ -619,30 +506,58 @@ merkle_emit_staged_deltas_notice(void)
 		pfree(out.data);
 }
 
-/* The durable queue is intentionally not writable by PUBLIC.  DML against a
- * Merkle-indexed table still has to work for ordinary table owners, so run
- * this backend-internal SPI mutation under the bootstrap superuser context
- * and restore the caller identity on every path. */
-static void
-merkle_persist_local_delta(void)
+/*
+ * Apply the current transaction's staged deltas while the caller's current
+ * transaction/subtransaction is still open.  DET worker apply uses this entry
+ * point so heap DML and Merkle-node DML share the same rollback boundary.
+ * The PRE_COMMIT callback below remains as a fallback for ordinary SQL paths
+ * that do not pass through the BCDB worker apply stage.
+ */
+void
+merkle_apply_staged_deltas_synchronously(void)
 {
-	Oid saved_userid;
-	int saved_sec_context;
+	HTAB *combined;
+	MerkleSubxactFrame *frame;
+	HASH_SEQ_STATUS seq;
+	MerkleDeltaEntry *entry;
+	bool saved_is_bcdb_worker;
 
-	GetUserIdAndSecContext(&saved_userid, &saved_sec_context);
-	SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
-						   saved_sec_context | SECURITY_LOCAL_USERID_CHANGE);
+	if (!merkle_has_staged_delta() || merkle_staged_delta_persisted)
+		return;
+
+	combined = merkle_delta_create_map(CurrentMemoryContext);
+	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
+	{
+		hash_seq_init(&seq, frame->entries);
+		while ((entry = hash_seq_search(&seq)) != NULL)
+			merkle_delta_merge_one(combined, entry);
+	}
+
+	merkle_crash_failpoint("before_merkle_sync_apply");
+	/*
+	 * DET workers mark their business DML with is_bcdb_worker so the heap
+	 * change can be deferred into the optimistic write set.  The synchronous
+	 * applier is already in the post-apply phase and its SPI statements are
+	 * the real Merkle-node mutations; routing those statements back through
+	 * BCDB's deferred DML path would leave the tree update unapplied at commit.
+	 */
+	saved_is_bcdb_worker = is_bcdb_worker;
+	is_bcdb_worker = false;
 	PG_TRY();
 	{
-		merkle_persist_local_delta_impl();
+		merkle_apply_staged_synchronous_safe(combined);
 	}
 	PG_CATCH();
 	{
-		SetUserIdAndSecContext(saved_userid, saved_sec_context);
+		is_bcdb_worker = saved_is_bcdb_worker;
+		hash_destroy(combined);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	SetUserIdAndSecContext(saved_userid, saved_sec_context);
+	is_bcdb_worker = saved_is_bcdb_worker;
+	merkle_crash_failpoint("after_merkle_sync_apply");
+	hash_destroy(combined);
+	merkle_staged_delta_persisted = true;
 }
 
 static void
@@ -661,8 +576,22 @@ merkle_delta_xact_callback(XactEvent event, void *arg)
 		if (merkle_has_staged_delta())
 		{
 			merkle_emit_staged_deltas_notice();
-			if (!merkle_staged_delta_persisted)
-				merkle_persist_local_delta();
+			/*
+			 * The safe-ledger finalizer serializes the same staged frames into
+			 * raft_apply_item and middleware applies that blob synchronously
+			 * before returning the block result.  Applying here as well would
+			 * XOR the same delta twice.  Direct mode is therefore deliberately
+			 * limited to transactions which are not owned by the ledger path.
+			 */
+			if (!merkle_staged_delta_persisted &&
+				merkle_apply_synchronous_direct &&
+				(activeTx == NULL || !activeTx->raft_ledger_enabled))
+				merkle_apply_staged_deltas_synchronously();
+			else if (!merkle_staged_delta_persisted)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("synchronous Merkle apply is required for Merkle-indexed writes"),
+						 errhint("Set merkle_apply_synchronous_direct = on; deferred local-delta apply is no longer supported.")));
 		}
 		return;
 	}

@@ -2052,22 +2052,10 @@ bool pg_executor::initialize_bcdb() {
         }
 
         // Enforce the Merkle recovery gate before workers are exposed.  The
-        // rebuild/apply calls are idempotent and use the control session's
-        // READ COMMITTED isolation; a non-READY result is a startup failure,
-        // not a condition to defer until the first client request.
+        // The synchronous DML and safe-ledger paths own Merkle page apply;
+        // startup only rebuilds old-format indexes and validates READY state.
         {
-            PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_apply_pending();");
-            if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-                std::cerr << "Safe mode validation failed: Merkle committed-prefix apply failed: "
-                          << (res ? PQerrorMessage(c) : "null result") << std::endl;
-                if (res) PQclear(res);
-                PQfinish(c);
-                bcdb_init_failed_ = true;
-                return false;
-            }
-            PQclear(res);
-
-            res = PQexec(c, "SELECT pg_catalog.merkle_rebuild_legacy_indexes();");
+            PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_rebuild_legacy_indexes();");
             if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
                 std::cerr << "Safe mode validation failed: Merkle legacy-index rebuild failed: "
                           << (res ? PQerrorMessage(c) : "null result") << std::endl;

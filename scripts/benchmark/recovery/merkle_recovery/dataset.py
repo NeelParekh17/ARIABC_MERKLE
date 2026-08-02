@@ -15,6 +15,26 @@ from .db import execute, run_file, scalar, geometry
 def ensure_helpers(conn) -> None:
     run_file(conn, BENCH_DIR / "sql" / "recovery_helpers.sql")
 
+    # Recovery DML must use the current synchronous Merkle contract.  Every
+    # UPDATE/INSERT/DELETE below must update merkle_node in the same database
+    # transaction; this benchmark must never defer Merkle maintenance.
+    execute(conn, "SET enable_merkle_index = on")
+    execute(conn, "SET merkle_apply_synchronous_direct = on")
+    execute(conn, "SET synchronous_commit = on")
+    settings = {
+        "enable_merkle_index": str(scalar(conn, "SHOW enable_merkle_index")).lower(),
+        "merkle_apply_synchronous_direct": str(
+            scalar(conn, "SHOW merkle_apply_synchronous_direct")
+        ).lower(),
+        "synchronous_commit": str(scalar(conn, "SHOW synchronous_commit")).lower(),
+    }
+    if any(value != "on" for value in settings.values()):
+        raise RuntimeError(
+            "synchronous Merkle recovery contract not active: "
+            f"{settings}"
+        )
+    print(f"[contract] synchronous Merkle settings: {settings}", flush=True)
+
     required = [
         "merkle_get_descendants_batch",
         "merkle_root_hash",
@@ -44,12 +64,10 @@ def ensure_helpers(conn) -> None:
 
 
 def recreate_schema(conn) -> None:
+    # This is a scratch-cluster reset.  Direct synchronous mode has no
+    # deferred local-delta queue; reset only the Raft recovery watermark.
     try:
-        execute(conn, "SELECT merkle_apply_pending()")
-    except Exception:
-        pass
-    try:
-        execute(conn, "TRUNCATE ariabc_internal.merkle_local_delta, ariabc_internal.merkle_node CASCADE")
+        execute(conn, "TRUNCATE ariabc_internal.merkle_node CASCADE")
         execute(conn, "UPDATE ariabc_internal.merkle_apply_state SET applied_seq = 0, state = 0, error_text = NULL")
         execute(conn, "UPDATE ariabc_internal.merkle_apply_counter SET next_seq = 0, terminal_prefix_seq = 0")
     except Exception:
@@ -214,10 +232,6 @@ def build_dataset(
 
 def reset_damaged_from_healthy(conn, cfg: dict[str, int]) -> None:
     """Restore damaged.usertable to a clean copy of healthy; rebuild all indexes."""
-    try:
-        execute(conn, "SELECT merkle_apply_pending()")
-    except Exception:
-        pass
     execute(conn, "DROP TABLE IF EXISTS damaged.usertable CASCADE")
     execute(conn, "CREATE TABLE damaged.usertable (LIKE healthy.usertable INCLUDING DEFAULTS)")
     execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")

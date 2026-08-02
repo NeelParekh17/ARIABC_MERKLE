@@ -109,7 +109,7 @@ cp "$TEMPLATE_CONFIG" "$PGDATA_DIR/postgresql.conf"
 # If we had to fall back to system postgres binaries (non-BCDB build),
 # drop BCDB-only GUCs so postmaster can start with the canonical template.
 if [[ "$BIN_DIR" != "$INSTALL_DIR/bin" ]]; then
-  sed -i -E '/^[[:space:]]*(bcdb_[a-zA-Z0-9_]+|merkle_update_detection|enable_merkle_index|merkle_update_detection_suppress)[[:space:]]*=.*/d' \
+  sed -i -E '/^[[:space:]]*(bcdb_[a-zA-Z0-9_]+|merkle_update_detection|enable_merkle_index|merkle_apply_synchronous_direct|merkle_update_detection_suppress)[[:space:]]*=.*/d' \
     "$PGDATA_DIR/postgresql.conf"
   if grep -Eq '^[[:space:]]*unix_socket_directories[[:space:]]*=' "$PGDATA_DIR/postgresql.conf"; then
     sed -i -E "s|^[[:space:]]*unix_socket_directories[[:space:]]*=.*$|unix_socket_directories = '/tmp'|" \
@@ -166,7 +166,7 @@ _try_start_postgres() {
 }
 
 _strip_bcdb_only_gucs() {
-  sed -i -E '/^[[:space:]]*(bcdb_[a-zA-Z0-9_]+|merkle_update_detection|enable_merkle_index|merkle_update_detection_suppress)[[:space:]]*=.*/d' \
+  sed -i -E '/^[[:space:]]*(bcdb_[a-zA-Z0-9_]+|merkle_update_detection|enable_merkle_index|merkle_apply_synchronous_direct|merkle_update_detection_suppress)[[:space:]]*=.*/d' \
     "$PGDATA_DIR/postgresql.conf"
 }
 
@@ -192,7 +192,7 @@ if ! _try_start_postgres; then
       "$REPO_ROOT/server.log" 2>/dev/null; then
     _reinit_pgdata
     _try_start_postgres
-  elif grep -qE 'unrecognized configuration parameter "(bcdb_[a-zA-Z0-9_]+|merkle_update_detection|enable_merkle_index|merkle_update_detection_suppress)"' \
+  elif grep -qE 'unrecognized configuration parameter "(bcdb_[a-zA-Z0-9_]+|merkle_update_detection|enable_merkle_index|merkle_apply_synchronous_direct|merkle_update_detection_suppress)"' \
       "$REPO_ROOT/server.log" 2>/dev/null; then
     echo "[ensure_pg] Detected non-BCDB postgres binary; removing BCDB-only GUCs and retrying..."
     _strip_bcdb_only_gucs

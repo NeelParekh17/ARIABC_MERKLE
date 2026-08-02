@@ -22,8 +22,6 @@ INSERT INTO merkle_dyn_test VALUES
     (0, '', '*null*', '\x', '2026-01-02 03:04:05+05:30', 'NaN'),
     (1, 'a*b', '', '\x0102', '2026-07-10 12:00:00+00', 'Infinity');
 
-SELECT merkle_apply_pending();
-
 SELECT merkle_verify('merkle_dyn_test') AS initial_verify;
 
 CREATE TEMP TABLE merkle_root_before AS
@@ -57,7 +55,6 @@ SELECT merkle_verify('merkle_dyn_test') AS savepoint_verify,
 UPDATE merkle_dyn_test SET payload = 'updated' WHERE id = 1;
 UPDATE merkle_dyn_test SET id = 7 WHERE id = 0;
 DELETE FROM merkle_dyn_test WHERE id = '-9223372036854775808';
-SELECT merkle_apply_pending();
 SELECT merkle_verify('merkle_dyn_test') AS dml_verify;
 
 CREATE TABLE merkle_route_test (ts timestamptz, key_text text);
@@ -66,14 +63,12 @@ INSERT INTO merkle_route_test VALUES ('2026-07-10 12:00:00+00', '*null*');
 
 SET timezone = 'America/Los_Angeles';
 SET datestyle = 'German, DMY';
-SELECT merkle_apply_pending();
 SELECT merkle_verify('merkle_route_test') AS canonical_route_verify;
 RESET timezone;
 RESET datestyle;
 DROP TABLE merkle_route_test;
 
 TRUNCATE merkle_dyn_test;
-SELECT merkle_apply_pending();
 SELECT merkle_verify('merkle_dyn_test') AS truncate_verify;
 DROP TABLE merkle_dyn_test;
 

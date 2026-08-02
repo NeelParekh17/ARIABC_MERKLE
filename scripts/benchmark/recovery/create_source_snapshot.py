@@ -81,6 +81,11 @@ def gather_files(repo_root: Path, roots: list[str]) -> list[Path]:
         for path in candidates:
             if not is_selected(path, repo_root):
                 continue
+            # Generated executable symlinks can legitimately be absent before
+            # a clean remote build (for example src/bin/initdb/postgres).
+            # Do not let a dangling build artifact prevent source sync.
+            if path.is_symlink() and not path.exists():
+                continue
             rel = path.relative_to(repo_root).as_posix()
             files.setdefault(rel, path)
     return [files[key] for key in sorted(files)]

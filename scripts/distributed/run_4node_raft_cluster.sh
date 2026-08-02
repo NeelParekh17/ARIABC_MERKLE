@@ -3015,7 +3015,9 @@ done
 
 MERKLE_GUC_VALUE=off
 [[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && MERKLE_GUC_VALUE=on
-log "=== Phase 3.3: Set enable_merkle_index=$MERKLE_GUC_VALUE on all ${#NODE_IDS[@]} nodes (parallel) ==="
+MERKLE_SYNC_GUC_VALUE=off
+[[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && MERKLE_SYNC_GUC_VALUE=on
+log "=== Phase 3.3: Set synchronous Merkle GUCs (enable_merkle_index=$MERKLE_GUC_VALUE merkle_apply_synchronous_direct=$MERKLE_SYNC_GUC_VALUE synchronous_commit=on) on all ${#NODE_IDS[@]} nodes (parallel) ==="
 declare -a MERKLE_GUC_PIDS=(); declare -a MERKLE_GUC_NAMES=()
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
@@ -3025,11 +3027,27 @@ for idx in "${!NODE_IDS[@]}"; do
     \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
       -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET enable_merkle_index = '$MERKLE_GUC_VALUE'\"
     \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET merkle_apply_synchronous_direct = '$MERKLE_SYNC_GUC_VALUE'\"
+    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET synchronous_commit = 'on'\"
+    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
       -v ON_ERROR_STOP=1 -c \"SELECT pg_reload_conf()\" >/dev/null
     actual=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
       -tAc \"SHOW enable_merkle_index\" | tr -d '[:space:]')
     [[ \"\$actual\" == '$MERKLE_GUC_VALUE' ]] || {
       echo \"enable_merkle_index expected $MERKLE_GUC_VALUE, got \$actual\" >&2
+      exit 1
+    }
+    actual_sync=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -tAc \"SHOW merkle_apply_synchronous_direct\" | tr -d '[:space:]')
+    [[ \"\$actual_sync\" == '$MERKLE_SYNC_GUC_VALUE' ]] || {
+      echo \"merkle_apply_synchronous_direct expected $MERKLE_SYNC_GUC_VALUE, got \$actual_sync\" >&2
+      exit 1
+    }
+    actual_commit=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      -tAc \"SHOW synchronous_commit\" | tr -d '[:space:]')
+    [[ \"\$actual_commit\" == on ]] || {
+      echo \"synchronous_commit expected on, got \$actual_commit\" >&2
       exit 1
     }
   " >/dev/null &
@@ -4039,22 +4057,10 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
       cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
       if [[ '$ENABLE_MERKLE_INDEX' -eq 1 ]]; then
-        if [[ '$RAFT_APPLY_LEDGER_MODE' == off ]]; then
-          filled=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"
-            WITH inserted AS (
-              INSERT INTO ariabc_internal.merkle_local_delta
-                     (apply_seq, delta_version, delta_blob)
-              SELECT seq, 0, NULL
-                FROM generate_series(1::bigint, $((MARKER_SEQ + 1))::bigint) AS seq
-              ON CONFLICT (apply_seq) DO NOTHING
-              RETURNING 1
-            )
-            SELECT count(*) FROM inserted\")
-        fi
-        applied=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT merkle_apply_pending()')
-        recovery_state=\$(\$INSTALL_DIR/bin/psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT (merkle_recovery_status()::jsonb)->>'state'\")
-        if [[ \"\$recovery_state\" != READY ]]; then
-          echo \"Merkle recovery did not reach READY after applying \$applied entries: \$recovery_state\" >&2
+        merkle_sync=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+          -tAc 'SHOW merkle_apply_synchronous_direct' | tr -d '[:space:]')
+        if [[ \"\$merkle_sync\" != on ]]; then
+          echo \"synchronous Merkle verification expected merkle_apply_synchronous_direct=on, got \$merkle_sync\" >&2
           exit 1
         fi
         root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
@@ -4066,7 +4072,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
       echo \"\$cnt|\$root|\$verify\"
     " >"$readback_file" 2>"$readback_stderr_file" &
     POST_READBACK_PIDS[$idx]="$!"
-    log "  [$name] post-marker Merkle drain started (pid $!)"
+    log "  [$name] post-marker synchronous Merkle verification started (pid $!)"
   done
 
   for idx in "${!NODE_IDS[@]}"; do

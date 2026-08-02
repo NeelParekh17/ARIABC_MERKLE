@@ -162,6 +162,8 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
           "${CLUSTER_ARGS[@]}" \
           --ordering-mode raft-kafka \
           --execution-profile threaded-raft-direct \
+          --enable-merkle-index 1 \
+          --raft-apply-ledger-mode off \
           --threads "$THREADS" \
           --det-client-workers "$DET_CLIENT_WORKERS" \
           --det-client-inflight 1 \

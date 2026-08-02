@@ -1,20 +1,9 @@
 -- Test dynamic split and merge
 \set ECHO none
- apply_cleared 
----------------
- t
-(1 row)
-
 CREATE TABLE sm_test (id int);
 CREATE INDEX sm_idx ON sm_test USING merkle (id) WITH (split_threshold=32, merge_threshold=8);
 -- Insert 10 rows (below split threshold)
 INSERT INTO sm_test SELECT generate_series(1, 10);
-SELECT merkle_apply_pending() > 0 AS applied;
- applied 
----------
- t
-(1 row)
-
 SELECT prefix_len, is_leaf, tuple_count FROM ariabc_internal.merkle_node WHERE index_oid = 'sm_idx'::regclass ORDER BY prefix_len, node_id;
  prefix_len | is_leaf | tuple_count 
 ------------+---------+-------------
@@ -29,12 +18,6 @@ SELECT merkle_verify('sm_test') AS initial_verify;
 
 -- Insert 30 more rows (total 40 > 32). This will trigger a split on the root.
 INSERT INTO sm_test SELECT generate_series(11, 40);
-SELECT merkle_apply_pending() > 0 AS applied;
- applied 
----------
- t
-(1 row)
-
 SELECT prefix_len, is_leaf FROM ariabc_internal.merkle_node WHERE index_oid = 'sm_idx'::regclass ORDER BY prefix_len, node_id;
  prefix_len | is_leaf 
 ------------+---------
@@ -63,12 +46,6 @@ SELECT node_id, prefix_len, is_leaf FROM merkle_get_descendants_batch('sm_idx'::
 
 -- Delete 35 rows (total 5 < 8). This will trigger a merge on the children.
 DELETE FROM sm_test WHERE id > 5;
-SELECT merkle_apply_pending() > 0 AS applied;
- applied 
----------
- t
-(1 row)
-
 SELECT prefix_len, is_leaf, tuple_count FROM ariabc_internal.merkle_node WHERE index_oid = 'sm_idx'::regclass ORDER BY prefix_len, node_id;
  prefix_len | is_leaf | tuple_count 
 ------------+---------+-------------

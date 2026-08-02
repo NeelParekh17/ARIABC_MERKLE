@@ -1,6 +1,8 @@
 -- raft_apply_ledger_schema.sql
 -- Database schema for the crash-safe Raft -> BCDB -> PostgreSQL recovery ledger
 
+SET client_min_messages = warning;
+
 BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS ariabc_internal;
@@ -9,10 +11,10 @@ CREATE SCHEMA IF NOT EXISTS ariabc_internal;
 -- Register SQL wrappers for the v7 built-ins so bootstrap/recovery works
 -- without requiring a destructive initdb.  On fresh clusters this is an
 -- idempotent CREATE OR REPLACE of the catalog-defined functions.
-CREATE OR REPLACE FUNCTION pg_catalog.merkle_apply_pending()
-RETURNS bigint
-AS 'merkle_apply_pending_sql'
-LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_hash_xor_sql(bytea, bytea)
+RETURNS bytea
+AS 'merkle_hash_xor_sql'
+LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION pg_catalog.merkle_recovery_status()
 RETURNS text
@@ -71,18 +73,70 @@ INSERT INTO ariabc_internal.merkle_apply_state(singleton, applied_seq)
 VALUES (true, 0)
 ON CONFLICT (singleton) DO NOTHING;
 
--- Direct PostgreSQL transactions (outside the Raft safe-ledger path) store
--- one compact transaction batch here.  The row and heap DML commit atomically.
-CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_local_delta (
-    apply_seq      bigint PRIMARY KEY CHECK (apply_seq > 0),
-    delta_version  integer NOT NULL,
-    delta_blob     bytea,
-    committed_at   timestamptz NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT merkle_local_delta_payload_check CHECK (
-        (delta_version = 0 AND delta_blob IS NULL) OR
-        (delta_version = 1 AND delta_blob IS NOT NULL)
-    )
-);
+-- The old post-commit local-delta queue is intentionally removed.  Refuse to
+-- discard rows silently if an administrator is upgrading a database that was
+-- still using the retired fallback path.
+DO $$
+DECLARE
+    has_pending boolean := false;
+BEGIN
+    IF to_regclass('ariabc_internal.merkle_local_delta') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM ariabc_internal.merkle_local_delta)' INTO has_pending;
+        IF has_pending THEN
+            RAISE EXCEPTION
+                'cannot remove legacy merkle_local_delta with pending rows; drain or rebuild this database before bootstrap';
+        END IF;
+    END IF;
+END
+$$;
+
+DROP TABLE IF EXISTS ariabc_internal.merkle_local_delta;
+
+-- merkle_apply_pending was shipped as a pinned bootstrap function.  PostgreSQL
+-- intentionally rejects DROP FUNCTION for pinned pg_proc rows, even for a
+-- superuser.  Remove this one retired zero-argument entry as a catalog
+-- migration; fresh initdb clusters never contain it because pg_proc.dat no
+-- longer defines it.  Refuse the migration if any non-pin dependency exists.
+DO $$
+DECLARE
+    legacy_oid oid;
+BEGIN
+    SELECT p.oid
+      INTO legacy_oid
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'pg_catalog'::regnamespace
+       AND p.proname = 'merkle_apply_pending'
+       AND p.pronargs = 0
+     LIMIT 1;
+
+    IF legacy_oid IS NOT NULL THEN
+        IF EXISTS (
+            SELECT 1
+              FROM pg_catalog.pg_depend d
+             WHERE d.refclassid = 'pg_proc'::regclass
+               AND d.refobjid = legacy_oid
+               AND d.deptype <> 'p'
+               AND NOT (d.classid = 'pg_proc'::regclass
+                        AND d.objid = legacy_oid)
+        ) THEN
+            RAISE EXCEPTION
+                'cannot remove pinned merkle_apply_pending: another catalog object depends on it';
+        END IF;
+
+        DELETE FROM pg_catalog.pg_depend
+         WHERE (classid = 'pg_proc'::regclass AND objid = legacy_oid)
+            OR (refclassid = 'pg_proc'::regclass AND refobjid = legacy_oid);
+        DELETE FROM pg_catalog.pg_description
+         WHERE classoid = 'pg_proc'::regclass
+           AND objoid = legacy_oid;
+        DELETE FROM pg_catalog.pg_init_privs
+         WHERE classoid = 'pg_proc'::regclass
+           AND objoid = legacy_oid;
+        DELETE FROM pg_catalog.pg_proc
+         WHERE oid = legacy_oid;
+    END IF;
+END
+$$;
 
 -- Dynamic Merkle tree node table (Section 7 of Plan_review.md)
 CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_node (
@@ -244,26 +298,13 @@ LOCK TABLE ariabc_internal.raft_apply_schema_meta,
            ariabc_internal.raft_apply_entry,
            ariabc_internal.raft_apply_item,
            ariabc_internal.merkle_apply_counter,
-           ariabc_internal.merkle_apply_state,
-           ariabc_internal.merkle_local_delta
+           ariabc_internal.merkle_apply_state
     IN ACCESS EXCLUSIVE MODE;
 
 ALTER TABLE ariabc_internal.merkle_apply_state
     DROP CONSTRAINT IF EXISTS merkle_apply_state_state_check;
 ALTER TABLE ariabc_internal.merkle_apply_state
     ADD CONSTRAINT merkle_apply_state_state_check CHECK (state IN (0, 1, 2, 3, 4));
-
-ALTER TABLE ariabc_internal.merkle_local_delta
-    ALTER COLUMN delta_blob DROP NOT NULL;
-ALTER TABLE ariabc_internal.merkle_local_delta
-    DROP CONSTRAINT IF EXISTS merkle_local_delta_delta_version_check;
-ALTER TABLE ariabc_internal.merkle_local_delta
-    DROP CONSTRAINT IF EXISTS merkle_local_delta_payload_check;
-ALTER TABLE ariabc_internal.merkle_local_delta
-    ADD CONSTRAINT merkle_local_delta_payload_check CHECK (
-        (delta_version = 0 AND delta_blob IS NULL) OR
-        (delta_version = 1 AND delta_blob IS NOT NULL)
-    );
 
 ALTER TABLE ariabc_internal.raft_apply_entry
     ADD COLUMN IF NOT EXISTS merkle_apply_seq_base bigint;
@@ -485,7 +526,7 @@ BEGIN
     ELSIF current_version = 3 THEN
         -- P0.3 fix for v3: compute a correct contiguous prefix.  Start from
         -- applied_seq (which the v3 schema maintained correctly) and advance
-        -- one step at a time across both queues, stopping at the first gap.
+        -- one step at a time across finalized Raft items, stopping at the first gap.
         -- Do NOT use MAX() + absence-of-nonterminal as proof of contiguity.
         DECLARE
             prefix_val bigint;
@@ -502,9 +543,6 @@ BEGIN
                     SELECT 1 FROM ariabc_internal.raft_apply_item
                      WHERE merkle_apply_seq = next_pos
                        AND state IN (2, 3, 4)
-                    UNION ALL
-                    SELECT 1 FROM ariabc_internal.merkle_local_delta
-                     WHERE apply_seq = next_pos
                 ) INTO found_row;
                 EXIT WHEN NOT found_row;
                 prefix_val := next_pos;
@@ -539,8 +577,7 @@ ON ariabc_internal.raft_apply_item;
 DROP FUNCTION IF EXISTS ariabc_internal.check_claimed_rows_trigger();
 
 REVOKE ALL ON ariabc_internal.merkle_apply_counter,
-                    ariabc_internal.merkle_apply_state,
-                    ariabc_internal.merkle_local_delta
+                    ariabc_internal.merkle_apply_state
 FROM PUBLIC;
 -- Status and freshness checks are safe to expose read-only.  Mutation paths
 -- execute inside trusted backend code and the applier functions remain
@@ -548,7 +585,6 @@ FROM PUBLIC;
 GRANT SELECT ON ariabc_internal.merkle_apply_counter,
                     ariabc_internal.merkle_apply_state
 TO PUBLIC;
-REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_apply_pending() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_rebuild_legacy_indexes() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_apply_until(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.merkle_verify(regclass) FROM PUBLIC;
