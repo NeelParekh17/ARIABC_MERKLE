@@ -68,6 +68,20 @@ verify_install() {
   return 0
 }
 
+# A debug/cassert build is useful for debugging but invalidates benchmark
+# comparisons.  In particular, --clean-when-rebuild used to produce
+# --enable-debug --enable-cassert with -O0 -g3, so a node that rebuilt locally
+# could be several times slower than nodes that reused the synchronized
+# optimized install.  Detect old debug installs and force them through the
+# optimized rebuild path below.
+install_has_debug_info() {
+  local postgres_bin="$1"
+
+  command -v readelf >/dev/null 2>&1 || return 1
+  readelf -S "$postgres_bin" 2>/dev/null |
+    grep -Eq '[[:space:]]\.debug_[^[:space:]]+'
+}
+
 install_is_stale() {
   local dir="$1"
   local postgres_bin="$dir/bin/postgres"
@@ -93,7 +107,9 @@ install_is_stale() {
 
 if [[ "$FORCE_REBUILD" != "1" ]]; then
   if verify_install "$INSTALL_DIR"; then
-    if [[ "$TRUST_INSTALL" == "1" ]] || ! install_is_stale "$INSTALL_DIR"; then
+    if install_has_debug_info "$INSTALL_DIR/bin/postgres"; then
+      echo "[INFO] existing install contains debug sections; forcing optimized rebuild" >&2
+    elif [[ "$TRUST_INSTALL" == "1" ]] || ! install_is_stale "$INSTALL_DIR"; then
       echo "INSTALL_READY=1"
       echo "INSTALL_DIR=$INSTALL_DIR"
       [[ "$TRUST_INSTALL" == "1" ]] && echo "TRUST_INSTALL=1"
@@ -378,7 +394,7 @@ fi
       mkdir -p "$build_dir"
       rm -f "$REPO_ROOT"/conftest "$REPO_ROOT"/conftest.* "$REPO_ROOT"/confdefs.h "$REPO_ROOT"/a.out "$REPO_ROOT"/b.out
       cd "$build_dir"
-      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" CFLAGS="-O2"
       make -C "$build_dir" -j"$jobs"
       _repair_src_include_symlinks
       _stage_vpath_generated_headers
@@ -387,7 +403,7 @@ fi
       mkdir -p "$build_dir"
       rm -f "$REPO_ROOT"/conftest "$REPO_ROOT"/conftest.* "$REPO_ROOT"/confdefs.h "$REPO_ROOT"/a.out "$REPO_ROOT"/b.out
       cd "$build_dir"
-      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" --enable-debug --enable-cassert CFLAGS="-O0 -g3"
+      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" CFLAGS="-O2"
       make -C "$build_dir" -j"$jobs"
       _repair_src_include_symlinks
       _stage_vpath_generated_headers
@@ -398,6 +414,12 @@ fi
 
 if ! verify_install "$INSTALL_DIR"; then
   echo "ERROR: custom install is still not runnable after rebuild" >&2
+  echo "BUILD_LOG=$build_log" >&2
+  exit 1
+fi
+
+if install_has_debug_info "$INSTALL_DIR/bin/postgres"; then
+  echo "ERROR: optimized custom install still contains debug sections" >&2
   echo "BUILD_LOG=$build_log" >&2
   exit 1
 fi

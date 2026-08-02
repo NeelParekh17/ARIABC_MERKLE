@@ -178,9 +178,9 @@ merkle_open_consistent_index(Oid index_oid)
 	Relation index_rel;
 	int save_policy;
 
-	/* Temporarily force APPLY policy so pending deltas are automatically applied */
+	/* Root/localisation reads must observe the already-synchronous Merkle state. */
 	save_policy = merkle_read_lag_policy;
-	merkle_read_lag_policy = MERKLE_READ_LAG_APPLY;
+	merkle_read_lag_policy = MERKLE_READ_LAG_WAIT;
 	merkle_require_fresh();
 	merkle_read_lag_policy = save_policy;
 

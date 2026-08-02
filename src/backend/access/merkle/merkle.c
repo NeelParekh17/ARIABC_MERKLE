@@ -23,6 +23,7 @@
 
 /* GUC: Enable/disable Merkle index updates */
 bool enable_merkle_index = true;
+bool merkle_apply_synchronous_direct = false;
 bool merkle_index_maintenance_suppress = false;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
 bool merkle_update_detection = false;
@@ -125,7 +126,7 @@ merkle_reject_ddl(Relation rel, const char *command)
 				 errdetail("applied_seq=%llu target_seq=%llu",
 						   (unsigned long long) status.applied_seq,
 						   (unsigned long long) status.target_seq),
-				 errhint("Run SELECT merkle_apply_pending() before changing or dropping the relation.")));
+					 errhint("Wait for synchronous Merkle maintenance to reach READY before changing or dropping the relation.")));
 }
 
 /*

@@ -26,12 +26,14 @@
 
 /* GUC: Enable/disable Merkle index updates */
 extern bool enable_merkle_index;
+/* GUC: Apply Merkle deltas synchronously within transaction */
+extern bool merkle_apply_synchronous_direct;
 /* Internal executor guard while generic UPDATE index insertion is running. */
 extern bool merkle_index_maintenance_suppress;
 /* GUC: Emit NOTICE lines for Merkle build roots */
 extern bool merkle_update_detection;
 extern bool merkle_recovery_profile_enabled;
-/* GUC: reject stale reads (error) or synchronously catch up (wait). */
+/* GUC: reject stale reads or wait for the synchronous applier. */
 extern int merkle_read_lag_policy;
 #define MERKLE_APPLY_DEFAULT_BATCH_ITEMS 256
 #define MERKLE_APPLY_DEFAULT_BATCH_BYTES (1024 * 1024)
@@ -43,7 +45,6 @@ extern int merkle_apply_batch_pages;
 extern int merkle_apply_batch_time_ms;
 #define MERKLE_READ_LAG_ERROR 0
 #define MERKLE_READ_LAG_WAIT  1
-#define MERKLE_READ_LAG_APPLY 2
 /*
  * GUC: Suppress Merkle update-detection output during Merkle index builds
  * (CREATE INDEX / REINDEX).
@@ -120,6 +121,12 @@ typedef struct MerkleHash
 {
     uint8       data[MERKLE_HASH_BYTES];
 } MerkleHash;
+
+typedef struct MerkleDeltaEntry
+{
+	MerkleDeltaKey key;
+	MerkleHash	xor_delta;
+} MerkleDeltaEntry;
 
 /*
  * MerkleMetaPageData - Metadata stored on page 0
@@ -251,12 +258,13 @@ extern bytea *merkle_serialize_staged_delta(uint64 raft_log_index,
 										 uint32 item_ordinal);
 extern void merkle_mark_staged_delta_persisted(void);
 extern bool merkle_has_staged_delta(void);
+extern void merkle_apply_staged_synchronous_safe(HTAB *combined_delta_map);
+extern void merkle_apply_staged_deltas_synchronously(void);
 extern void merkle_crash_failpoint(const char *name);
 extern void merkle_init_tree(Relation indexRel, Oid heapOid,
 							 MerkleOptions *opts, uint64 baseline_apply_seq);
 
 /* Ordered committed-delta applier and freshness gates. */
-extern uint64 merkle_apply_pending_internal(void);
 extern uint64 merkle_apply_until_internal(uint64 required_seq);
 extern uint64 merkle_raft_apply_target(const uint8 *epoch_id,
 									   uint64 raft_log_index,
@@ -406,7 +414,6 @@ extern void merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *s
 											 MerkleHash *result);
 extern Datum merkle_key_hash_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_tuple_hash_sql(PG_FUNCTION_ARGS);
-extern Datum merkle_apply_pending_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_until_sql(PG_FUNCTION_ARGS);
 
 #endif /* MERKLE_H */

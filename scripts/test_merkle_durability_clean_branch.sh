@@ -295,7 +295,7 @@ record_existing_tree_and_binary() {
         echo
         echo "[current schema markers]"
         grep -nE \
-            'merkle_apply_state|merkle_local_delta|terminal_prefix_seq|merkle_apply_seq_base' \
+            'merkle_apply_state|terminal_prefix_seq|merkle_apply_seq_base' \
             "${REPO}/scripts/distributed/sql/raft_apply_ledger_schema.sql" 2>/dev/null ||
             true
         echo
@@ -384,7 +384,6 @@ validate_branch_contract() {
     for required_pattern in \
         'CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_apply_counter' \
         'CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_apply_state' \
-        'CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_local_delta' \
         'terminal_prefix_seq' \
         'merkle_apply_seq_base' \
         'merkle_apply_seq' \
@@ -407,7 +406,7 @@ validate_branch_contract() {
         echo
         echo "[schema durability markers]"
         grep -nE \
-            'merkle_apply_counter|merkle_apply_state|merkle_local_delta|terminal_prefix_seq|merkle_apply_seq_base|merkle_apply_seq|merkle_delta_blob' \
+            'merkle_apply_counter|merkle_apply_state|terminal_prefix_seq|merkle_apply_seq_base|merkle_apply_seq|merkle_delta_blob' \
             "$schema"
     } | tee "${ARTIFACT_DIR}/validated_source_contract.txt"
 }
@@ -535,7 +534,7 @@ clean_build_and_install() {
         echo "[binary durability markers]"
         strings "$POSTGRES" |
             grep -E \
-                'ordered_committed_delta_wal|after_user_transaction_commit|after_apply_state_commit|BLOCKED_ON_GAP|merkle_apply_pending' |
+                'ordered_committed_delta_wal|after_user_transaction_commit|after_apply_state_commit|BLOCKED_ON_GAP' |
             sort -u
         echo
         echo "[private libpq]"
@@ -562,9 +561,9 @@ clean_build_and_install() {
         "${ARTIFACT_DIR}/fresh_binary_provenance.txt" ||
         die "Fresh installed binary lacks the expected crash failpoint marker."
 
-    grep -q 'merkle_apply_pending' \
+    grep -q 'after_user_transaction_commit' \
         "${ARTIFACT_DIR}/fresh_binary_provenance.txt" ||
-        die "Fresh installed binary lacks the Merkle applier marker."
+        die "Fresh installed binary lacks the synchronous Merkle marker."
 
     grep -Fq "libpq.so.5 => ${PREFIX}/lib/libpq.so.5" \
         "${ARTIFACT_DIR}/fresh_binary_provenance.txt" ||
@@ -680,13 +679,10 @@ SELECT pg_catalog.merkle_recovery_status();
 TABLE ariabc_internal.merkle_apply_state;
 TABLE ariabc_internal.merkle_apply_counter;
 
-\echo '--- Local delta queue ---'
-SELECT apply_seq,
-       delta_version,
-       octet_length(delta_blob) AS delta_bytes,
-       committed_at
-FROM ariabc_internal.merkle_local_delta
-ORDER BY apply_seq;
+\echo '--- Finalized Raft Merkle items ---'
+SELECT count(*) AS finalized_items
+FROM ariabc_internal.raft_apply_item
+WHERE state IN (2, 3, 4);
 
 \echo '--- User table ---'
 SELECT count(*) AS rows,
@@ -765,12 +761,11 @@ WHERE id <= 1000;
 SQL
 
     show_state \
-        "after clean-control COMMIT, before apply" \
+        "after clean-control COMMIT with synchronous Merkle apply" \
         "state_01_clean_pending.txt"
 
     sql <<'SQL' | tee "${ARTIFACT_DIR}/apply_01_clean.txt"
 SELECT pg_catalog.merkle_recovery_status() AS before_apply;
-SELECT pg_catalog.merkle_apply_pending() AS applied_through;
 SELECT pg_catalog.merkle_recovery_status() AS after_apply;
 SQL
 
@@ -861,7 +856,7 @@ post_commit_crash_test() {
         die "Server log does not show PostgreSQL crash recovery."
 
     show_state \
-        "after crash recovery, before explicit Merkle apply" \
+        "after crash recovery with synchronous Merkle state" \
         "state_03_after_crash_before_apply.txt"
 
     local survived
@@ -871,7 +866,6 @@ post_commit_crash_test() {
 
     sql <<'SQL' | tee "${ARTIFACT_DIR}/apply_02_after_crash.txt"
 SELECT pg_catalog.merkle_recovery_status() AS before_apply;
-SELECT pg_catalog.merkle_apply_pending() AS applied_through;
 SELECT pg_catalog.merkle_recovery_status() AS after_apply;
 SQL
 
@@ -890,7 +884,6 @@ SQL
     local final_terminal_prefix_seq
     local final_blocked_seq
     local final_tree_lag
-    local final_queue_rows
     local final_verify
 
     final_status="$(scalar "SELECT pg_catalog.merkle_recovery_status();")"
@@ -900,7 +893,6 @@ SQL
     final_terminal_prefix_seq="$(scalar "SELECT (pg_catalog.merkle_recovery_status()::jsonb ->> 'terminal_prefix_seq');")"
     final_blocked_seq="$(scalar "SELECT (pg_catalog.merkle_recovery_status()::jsonb ->> 'blocked_seq');")"
     final_tree_lag="$(scalar "SELECT (pg_catalog.merkle_tree_stats('${TABLE_NAME}'::regclass)::jsonb ->> 'lag_items');")"
-    final_queue_rows="$(scalar "SELECT count(*) FROM ariabc_internal.merkle_local_delta;")"
     final_verify="$(scalar "SELECT pg_catalog.merkle_verify('${TABLE_NAME}'::regclass);")"
 
     [[ "$final_state" == "READY" ]] ||
@@ -913,8 +905,6 @@ SQL
         die "Final blocked_seq is ${final_blocked_seq}, expected 0."
     [[ "$final_tree_lag" == "0" ]] ||
         die "Merkle tree stats report lag_items=${final_tree_lag}, expected 0."
-    [[ "$final_queue_rows" == "0" ]] ||
-        die "Local Merkle delta queue still has ${final_queue_rows} row(s)."
     [[ "$final_verify" == "t" ]] ||
         die "Final Merkle verification is false."
 
@@ -929,7 +919,6 @@ SQL
         echo "final_terminal_prefix_seq=${final_terminal_prefix_seq}"
         echo "final_blocked_seq=${final_blocked_seq}"
         echo "final_tree_lag=${final_tree_lag}"
-        echo "final_queue_rows=${final_queue_rows}"
         echo "final_verify=${final_verify}"
     } | tee "${ARTIFACT_DIR}/final_result.txt"
 }

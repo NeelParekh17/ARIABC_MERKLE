@@ -198,7 +198,7 @@ def test_packager_allows_profiling_artifacts():
         assert name in package_recovery_artifacts.ALLOWED
 
 
-def test_backend_profile_update_only_invariants_require_row_hash_and_ns_time():
+def test_backend_profile_dynamic_invariants_require_batched_children():
     cfg = {"fanout": 2, "split_threshold": 32, "merge_threshold": 8}
     counters = {"child_hash_sql_calls": 40, "child_hash_nodes_read": 80}
     post = {
@@ -206,14 +206,8 @@ def test_backend_profile_update_only_invariants_require_row_hash_and_ns_time():
         "targeted_confirmation_child_hash_nodes_read": 80,
     }
     good_backend = {
-        "root_hash_helper_calls": 4,
-        "root_hash_nodes_returned": 800,
         "child_hash_helper_calls": 80,
         "child_hash_nodes_returned": 160,
-        "row_hash_compute_calls": 600,
-        "tree_path_update_calls": 600,
-        "tree_path_nodes_touched": 3000,
-        "tree_path_update_ns": 1,
     }
     assert validate_backend_profile_stats(
         good_backend,
@@ -226,8 +220,7 @@ def test_backend_profile_update_only_invariants_require_row_hash_and_ns_time():
     ) == []
 
     bad_backend = dict(good_backend)
-    bad_backend["row_hash_compute_calls"] = 0
-    bad_backend["tree_path_update_ns"] = 0
+    bad_backend["child_hash_nodes_returned"] = 0
     reasons = validate_backend_profile_stats(
         bad_backend,
         cfg,
@@ -237,19 +230,14 @@ def test_backend_profile_update_only_invariants_require_row_hash_and_ns_time():
         rows_inserted=0,
         rows_deleted=0,
     )
-    assert any("row_hash_compute_calls" in reason for reason in reasons)
-    assert any("tree_path_update_ns" in reason for reason in reasons)
+    assert any("child_hash_nodes_returned" in reason for reason in reasons)
 
 
 def test_backend_profile_depth_expectations_for_dynamic_geometries():
     cfg = {"fanout": 2, "split_threshold": 32, "merge_threshold": 8}
     backend = {
-        "root_hash_helper_calls": 4,
         "child_hash_helper_calls": 0,
         "child_hash_nodes_returned": 0,
-        "row_hash_compute_calls": 600,
-        "tree_path_update_calls": 600,
-        "tree_path_update_ns": 1,
     }
     assert validate_backend_profile_stats(
         backend,
@@ -345,6 +333,7 @@ def test_deep_diagnostics_runs_once_per_manifest_not_per_repetition(monkeypatch,
     monkeypatch.setattr(bench, "apply_corruption", lambda *args, **kwargs: None)
     monkeypatch.setattr(bench, "run_planner_preflight", lambda *args, **kwargs: ({}, []))
     monkeypatch.setattr(bench, "execute", lambda *args, **kwargs: [])
+    monkeypatch.setattr(bench, "assert_synchronous_merkle_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(bench, "validate_profile_invariants", lambda *args, **kwargs: [])
 
     def fake_repair_merkle(conn, manifest, tuple_count, repetition, planner_results, schema_rows_out, **kwargs):
@@ -709,6 +698,14 @@ def test_size_scaling_produces_eleven_runs():
     for spec in specs:
         assert spec["bad_leaf_count"] == 75
         assert spec["corrupted_tuple_count"] == 300
+
+
+def test_size_scaling_accepts_matched_subset():
+    specs = _series_for_profile(
+        _size_scaling_args(tuple_count="1000000,3000000,5000000"),
+        _size_scaling_config(),
+    )
+    assert [spec["tuple_count"] for spec in specs] == [1_000_000, 3_000_000, 5_000_000]
 
 
 def test_size_scaling_rejects_manual_overrides():

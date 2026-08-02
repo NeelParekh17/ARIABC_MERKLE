@@ -23,13 +23,74 @@ DEFAULT_WORKLOADS = [
     "ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt",
 ]
 
+MODE_CONTRACTS = {
+    # Plain PostgreSQL is deliberately a normal SQL client and never creates
+    # or maintains AriaBC's Merkle index.
+    "pg": {
+        "canonical": "pg",
+        "db_type": 0,
+        "execution_contract": "plain_postgres",
+        "bcdb_enabled": 0,
+        "merkle_enabled": 0,
+        "enable_merkle_index": "off",
+        "synchronous_direct": "off",
+    },
+    # BCDB-only is the important middle tier: it uses the deterministic BCDB
+    # wire protocol, but the table is restored without a Merkle index and all
+    # Merkle maintenance is explicitly disabled.
+    "bcdb_det": {
+        "canonical": "bcdb_det",
+        "db_type": 1,
+        "execution_contract": "bcdb_deterministic_no_merkle",
+        "bcdb_enabled": 1,
+        "merkle_enabled": 0,
+        "enable_merkle_index": "off",
+        # Keep the same direct-path setting as DET. With no Merkle index this
+        # has no staged delta to apply, so the only intended difference is the
+        # presence/absence of Merkle maintenance itself.
+        "synchronous_direct": "on",
+    },
+    # Full deterministic BCDB with the dynamic Merkle index and synchronous
+    # direct apply on every eligible transaction.
+    "bcdb_merkle": {
+        "canonical": "bcdb_merkle",
+        "db_type": 1,
+        "execution_contract": "bcdb_deterministic_synchronous_merkle",
+        "bcdb_enabled": 1,
+        "merkle_enabled": 1,
+        "enable_merkle_index": "on",
+        "synchronous_direct": "on",
+    },
+    # Retain historical aliases for compatibility. `bcdb` and `det` are
+    # accepted, but the canonical names make the execution distinction clear.
+    "postgres": "pg",
+    "bcdb": "bcdb_det",
+    "det": "bcdb_merkle",
+    "safedb": "bcdb_merkle",
+    "nondet": {
+        "canonical": "nondet",
+        "db_type": 2,
+        "execution_contract": "plain_sql_nondeterministic",
+        "bcdb_enabled": 0,
+        "merkle_enabled": 0,
+        "enable_merkle_index": "off",
+        "synchronous_direct": "off",
+    },
+    "aria": "nondet",
+}
+
+
+def _mode_contract(mode: str) -> dict[str, object]:
+    value = MODE_CONTRACTS[mode]
+    if isinstance(value, str):
+        value = MODE_CONTRACTS[value]
+    return value
+
+
+# Kept as a compatibility surface for callers that imported this mapping.
 MODE_NAME_TO_DB_TYPE = {
-    "pg": 0,
-    "postgres": 0,
-    "det": 1,
-    "safedb": 1,
-    "nondet": 2,
-    "aria": 2,
+    mode: int(_mode_contract(mode)["db_type"])
+    for mode in MODE_CONTRACTS
 }
 
 
@@ -49,6 +110,11 @@ class RunResult:
     ts_utc: str
     mode: str
     db_type: int
+    execution_contract: str
+    bcdb_enabled: int
+    merkle_enabled: int
+    merkle_apply_synchronous_direct: int
+    merkle_index_present: int
     workload: str
     threads: int
     run: int
@@ -219,9 +285,30 @@ def _psql_exec(
 
 
 def _force_pgoption(env: dict[str, str], key: str, value: str) -> None:
-    option = f"-c {key}={value}"
+    """Set one PGOPTIONS GUC without accumulating stale duplicate values."""
     existing = env.get("PGOPTIONS", "").strip()
-    env["PGOPTIONS"] = f"{existing} {option}".strip() if existing else option
+    try:
+        parts = shlex.split(existing)
+    except ValueError:
+        # PGOPTIONS is normally simple `-c key=value` text. Preserve unusual
+        # caller input rather than making the benchmark fail during setup.
+        parts = existing.split()
+
+    filtered: list[str] = []
+    i = 0
+    while i < len(parts):
+        if (
+            parts[i] == "-c"
+            and i + 1 < len(parts)
+            and parts[i + 1].split("=", 1)[0] == key
+        ):
+            i += 2
+            continue
+        filtered.append(parts[i])
+        i += 1
+
+    filtered.extend(["-c", f"{key}={value}"])
+    env["PGOPTIONS"] = shlex.join(filtered)
 
 
 def _ensure_merkle_index_enabled(
@@ -232,48 +319,21 @@ def _ensure_merkle_index_enabled(
     user: str,
     cwd: Path,
     env: dict[str, str],
+    enable_merkle_index: str,
+    synchronous_direct: bool,
     timeout_s: Optional[int] = 30,
 ) -> tuple[bool, list[str]]:
     notes: list[str] = []
-    server_env = dict(env)
-    server_env.pop("PGOPTIONS", None)
 
-    ok, msg = _psql_exec(
-        psql,
-        db=db,
-        port=port,
-        user=user,
-        query="ALTER SYSTEM SET enable_merkle_index = 'on';",
-        cwd=cwd,
-        env=server_env,
-        timeout_s=timeout_s,
-    )
-    if not ok:
-        notes.append("alter_system_enable_merkle_index_failed=" + msg.replace("\n", " ")[:240])
-    else:
-        reload_ok, reload_msg = _psql_exec(
-            psql,
-            db=db,
-            port=port,
-            user=user,
-            query="SELECT pg_reload_conf();",
-            cwd=cwd,
-            env=server_env,
-            timeout_s=timeout_s,
-        )
-        if not reload_ok:
-            notes.append("reload_after_enable_merkle_index_failed=" + reload_msg.replace("\n", " ")[:240])
+    # These are benchmark-session requirements, not cluster-wide configuration.
+    # ALTER SYSTEM is deliberately not used here: this custom psql/backend path
+    # can execute ALTER SYSTEM inside a transaction block, which makes the whole
+    # case fail before restore.  Applying the GUC through PGOPTIONS also ensures
+    # restore, warmup, measured workload, and verification use the same mode.
+    _force_pgoption(env, "enable_merkle_index", enable_merkle_index)
+    _force_pgoption(env, "merkle_apply_synchronous_direct", "on" if synchronous_direct else "off")
+    session_env = dict(env)
 
-    persistent_value = _psql_value(
-        psql,
-        db=db,
-        port=port,
-        user=user,
-        query="SHOW enable_merkle_index;",
-        cwd=cwd,
-        env=server_env,
-        timeout_s=timeout_s,
-    )
     effective_value = _psql_value(
         psql,
         db=db,
@@ -281,14 +341,30 @@ def _ensure_merkle_index_enabled(
         user=user,
         query="SHOW enable_merkle_index;",
         cwd=cwd,
-        env=env,
+        env=session_env,
+        timeout_s=timeout_s,
+    )
+    effective_direct = _psql_value(
+        psql,
+        db=db,
+        port=port,
+        user=user,
+        query="SHOW merkle_apply_synchronous_direct;",
+        cwd=cwd,
+        env=session_env,
         timeout_s=timeout_s,
     )
 
-    if (persistent_value or "").strip().lower() != "on":
-        notes.append(f"persistent_enable_merkle_index={persistent_value or 'unknown'}")
-    if (effective_value or "").strip().lower() != "on":
+    if (effective_value or "").strip().lower() != enable_merkle_index:
         notes.append(f"effective_enable_merkle_index={effective_value or 'unknown'}")
+        return False, notes
+
+    expected_direct = "on" if synchronous_direct else "off"
+    if (effective_direct or "").strip().lower() != expected_direct:
+        notes.append(
+            "effective_merkle_apply_synchronous_direct="
+            f"{effective_direct or 'unknown'}"
+        )
         return False, notes
 
     return True, notes
@@ -633,6 +709,13 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
         out_rows.append(
             {
                 "mode": mode,
+                "execution_contract": rs[0].get("execution_contract", "") if rs else "",
+                "bcdb_enabled": rs[0].get("bcdb_enabled", "") if rs else "",
+                "merkle_enabled": rs[0].get("merkle_enabled", "") if rs else "",
+                "merkle_apply_synchronous_direct": rs[0].get(
+                    "merkle_apply_synchronous_direct", ""
+                ) if rs else "",
+                "merkle_index_present": rs[0].get("merkle_index_present", "") if rs else "",
                 "workload": workload,
                 "threads": threads,
                 "rate": rate,
@@ -836,6 +919,137 @@ def _write_det_overhead(summary_csv: Path, out_csv: Path) -> None:
         writer.writeheader()
         for r in out_rows:
             writer.writerow(r)
+
+
+def _write_mode_decomposition(summary_csv: Path, out_csv: Path) -> None:
+    """Write the PG -> BCDB -> synchronous-Merkle performance decomposition."""
+    if not summary_csv.exists():
+        raise FileNotFoundError(f"missing summary.csv: {summary_csv}")
+
+    with summary_csv.open("r", newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    def as_int(value: str) -> Optional[int]:
+        try:
+            return int((value or "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def as_float(value: str) -> Optional[float]:
+        try:
+            return float((value or "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def metric(row: Optional[dict[str, str]], preferred: str, fallback: str) -> Optional[float]:
+        if row is None:
+            return None
+        value = as_float(row.get(preferred, ""))
+        return value if value is not None else as_float(row.get(fallback, ""))
+
+    def fmt(value: Optional[float]) -> str:
+        return f"{value:.3f}" if value is not None else ""
+
+    def tps_overhead(base: Optional[float], candidate: Optional[float]) -> Optional[float]:
+        if base is None or candidate is None or base == 0:
+            return None
+        return 100.0 * (base - candidate) / base
+
+    def latency_overhead(base: Optional[float], candidate: Optional[float]) -> Optional[float]:
+        if base is None or candidate is None or base == 0:
+            return None
+        return 100.0 * (candidate - base) / base
+
+    mode_norm = {
+        "postgres": "pg",
+        "pg": "pg",
+        "bcdb_det": "bcdb_det",
+        "bcdb_merkle": "bcdb_merkle",
+        "bcdb": "bcdb_det",
+        "safedb": "bcdb_merkle",
+        "det": "bcdb_merkle",
+    }
+    by_key_mode: dict[tuple[str, int, int, int, int, str], dict[str, str]] = {}
+    for row in rows:
+        workload = (row.get("workload") or "").strip()
+        threads = as_int(row.get("threads", ""))
+        rate = as_int(row.get("rate", ""))
+        if not workload or threads is None or rate is None:
+            continue
+        signing = as_int(row.get("signing", "")) or 0
+        enforce = as_int(row.get("enforce_signatures", "")) or 0
+        mode = mode_norm.get((row.get("mode") or "").strip().lower(), "")
+        if mode not in ("pg", "bcdb_det", "bcdb_merkle"):
+            continue
+        by_key_mode[(workload, threads, rate, signing, enforce, mode)] = row
+
+    keys = sorted(
+        {key[:-1] for key in by_key_mode},
+        key=lambda key: (key[0], key[1], key[2], key[3], key[4]),
+    )
+    out_rows: list[dict[str, Any]] = []
+    for workload, threads, rate, signing, enforce in keys:
+        cases = {
+            mode: by_key_mode.get((workload, threads, rate, signing, enforce, mode))
+            for mode in ("pg", "bcdb_det", "bcdb_merkle")
+        }
+        pg = cases["pg"]
+        bcdb = cases["bcdb_det"]
+        det = cases["bcdb_merkle"]
+        pg_tps = metric(pg, "median_throughput_tps", "mean_throughput_tps")
+        bcdb_tps = metric(bcdb, "median_throughput_tps", "mean_throughput_tps")
+        det_tps = metric(det, "median_throughput_tps", "mean_throughput_tps")
+        pg_ms = metric(pg, "median_workload_overall_ms", "mean_workload_overall_ms")
+        bcdb_ms = metric(bcdb, "median_workload_overall_ms", "mean_workload_overall_ms")
+        det_ms = metric(det, "median_workload_overall_ms", "mean_workload_overall_ms")
+
+        out_rows.append({
+            "workload": workload,
+            "threads": threads,
+            "rate": rate,
+            "signing": signing,
+            "enforce_signatures": enforce,
+            "pg_runs": as_int(pg.get("runs", "")) if pg else "",
+            "bcdb_runs": as_int(bcdb.get("runs", "")) if bcdb else "",
+            "det_runs": as_int(det.get("runs", "")) if det else "",
+            "pg_verify": pg.get("pass_rate_merkle_verify", "") if pg else "",
+            "bcdb_verify": bcdb.get("pass_rate_merkle_verify", "") if bcdb else "",
+            "det_verify": det.get("pass_rate_merkle_verify", "") if det else "",
+            "pg_median_tps": fmt(pg_tps),
+            "bcdb_no_merkle_median_tps": fmt(bcdb_tps),
+            "det_synchronous_merkle_median_tps": fmt(det_tps),
+            "bcdb_tps_delta_vs_pg": fmt(bcdb_tps - pg_tps if bcdb_tps is not None and pg_tps is not None else None),
+            "bcdb_overhead_pct_vs_pg": fmt(tps_overhead(pg_tps, bcdb_tps)),
+            "det_tps_delta_vs_bcdb": fmt(det_tps - bcdb_tps if det_tps is not None and bcdb_tps is not None else None),
+            "merkle_overhead_pct_vs_bcdb": fmt(tps_overhead(bcdb_tps, det_tps)),
+            "det_total_overhead_pct_vs_pg": fmt(tps_overhead(pg_tps, det_tps)),
+            "pg_median_workload_ms": fmt(pg_ms),
+            "bcdb_no_merkle_median_workload_ms": fmt(bcdb_ms),
+            "det_synchronous_merkle_median_workload_ms": fmt(det_ms),
+            "bcdb_extra_workload_ms_vs_pg": fmt(bcdb_ms - pg_ms if bcdb_ms is not None and pg_ms is not None else None),
+            "bcdb_latency_overhead_pct_vs_pg": fmt(latency_overhead(pg_ms, bcdb_ms)),
+            "merkle_extra_workload_ms_vs_bcdb": fmt(det_ms - bcdb_ms if det_ms is not None and bcdb_ms is not None else None),
+            "merkle_latency_overhead_pct_vs_bcdb": fmt(latency_overhead(bcdb_ms, det_ms)),
+            "det_total_latency_overhead_pct_vs_pg": fmt(latency_overhead(pg_ms, det_ms)),
+            "decomposition_status": "complete" if pg and bcdb and det else "incomplete",
+        })
+
+    fieldnames = list(out_rows[0].keys()) if out_rows else [
+        "workload", "threads", "rate", "signing", "enforce_signatures",
+        "pg_runs", "bcdb_runs", "det_runs", "pg_verify", "bcdb_verify", "det_verify",
+        "pg_median_tps", "bcdb_no_merkle_median_tps", "det_synchronous_merkle_median_tps",
+        "bcdb_tps_delta_vs_pg", "bcdb_overhead_pct_vs_pg", "det_tps_delta_vs_bcdb",
+        "merkle_overhead_pct_vs_bcdb", "det_total_overhead_pct_vs_pg",
+        "pg_median_workload_ms", "bcdb_no_merkle_median_workload_ms",
+        "det_synchronous_merkle_median_workload_ms", "bcdb_extra_workload_ms_vs_pg",
+        "bcdb_latency_overhead_pct_vs_pg", "merkle_extra_workload_ms_vs_bcdb",
+        "merkle_latency_overhead_pct_vs_bcdb", "det_total_latency_overhead_pct_vs_pg",
+        "decomposition_status",
+    ]
+    with out_csv.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(out_rows)
 
 
 def _write_signing_overhead(summary_csv: Path, out_csv: Path) -> None:
@@ -1069,8 +1283,8 @@ def _safe_filename(value: str) -> str:
 
 def _generate_tps_graphs(summary_csv: Path, out_dir: Path) -> list[Path]:
     """
-    Generate one TPS-vs-threads graph per workload (and per rate when multiple
-    rates are present) comparing pg/det/nondet series from summary.csv.
+    Generate one TPS-vs-threads graph per workload comparing the three measured
+    execution contracts from summary.csv.
     """
     try:
         import matplotlib
@@ -1107,13 +1321,14 @@ def _generate_tps_graphs(summary_csv: Path, out_dir: Path) -> list[Path]:
     mode_norm = {
         "postgres": "pg",
         "pg": "pg",
-        "safedb": "det",
-        "det": "det",
-        "aria": "nondet",
-        "nondet": "nondet",
+        "bcdb_det": "bcdb_det",
+        "bcdb_merkle": "bcdb_merkle",
+        "bcdb": "bcdb_det",
+        "safedb": "bcdb_merkle",
+        "det": "bcdb_merkle",
     }
-    mode_order = ["pg", "det", "nondet"]
-    mode_colors = {"pg": "#1f77b4", "det": "#2ca02c", "nondet": "#d62728"}
+    mode_order = ["pg", "bcdb_det", "bcdb_merkle"]
+    mode_colors = {"pg": "#1f77b4", "bcdb_det": "#ff7f0e", "bcdb_merkle": "#2ca02c"}
 
     # Group by workload and rate so each line compares modes under same workload/rate.
     # Older summary files may not have a `rate` column; treat those as rate=0.
@@ -1225,8 +1440,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--modes",
-        default="pg,det,nondet",
-        help="Comma-separated modes: pg/postgres, det/safedb, nondet/aria.",
+        default="pg,bcdb_det,bcdb_merkle",
+        help="Comma-separated modes: pg, bcdb_det, bcdb_merkle.",
     )
     parser.add_argument(
         "--signing-modes",
@@ -1379,6 +1594,8 @@ def main() -> int:
     server_log_path = repo_root / "server.log"
 
     env = dict(os.environ)
+    install_dir = env.get("ARIABC_INSTALL_DIR", "/work/ARIABC/install")
+    env["LD_LIBRARY_PATH"] = f"{install_dir}/lib:" + env.get("LD_LIBRARY_PATH", "")
     env.setdefault("PGHOST", "localhost")
     env.setdefault("PGPORT", str(args.port))
     env.setdefault("PGUSER", args.user)
@@ -1391,10 +1608,6 @@ def main() -> int:
     env.setdefault("DB_NAME", args.db)
     # Avoid client-side statement timeouts interrupting long deterministic runs.
     env.setdefault("STATEMENT_TIMEOUT", "0")
-    # Make every libpq client in the benchmark see Merkle maintenance enabled,
-    # even if a stale postgresql.auto.conf was left with enable_merkle_index=off.
-    _force_pgoption(env, "enable_merkle_index", "on")
-
     meta = {
         "created_utc": _now_utc_iso(),
         "repo_root": str(repo_root),
@@ -1403,6 +1616,9 @@ def main() -> int:
         "workloads": workloads,
         "runs": args.runs,
         "modes": modes,
+        "mode_contracts": {
+            mode: _mode_contract(mode) for mode in modes
+        },
         "signing_modes": signing_modes,
         "signing_privkey": args.signing_privkey,
         "enforce_signatures": args.enforce_signatures,
@@ -1445,17 +1661,17 @@ def main() -> int:
                 print(f"ERROR: missing both {raw_csv} and {summary_csv}", file=sys.stderr)
                 return 2
             _write_summary(raw_csv, summary_csv)
-        _write_det_overhead(summary_csv, det_overhead_csv)
+        _write_mode_decomposition(summary_csv, det_overhead_csv)
         _write_signing_overhead(summary_csv, signing_overhead_csv)
         print(f"Wrote summary:      {summary_csv}")
-        print(f"Wrote det overhead: {det_overhead_csv}")
+        print(f"Wrote mode decomposition: {det_overhead_csv}")
         print(f"Wrote sign overhead:{signing_overhead_csv}")
         return 0
 
     existing = _load_existing_keys(raw_csv) if not args.no_resume else set()
-    if args.no_server_restart and any(MODE_NAME_TO_DB_TYPE[m] == 1 for m in modes):
+    if args.no_server_restart and any(_mode_contract(m)["db_type"] == 1 for m in modes):
         print(
-            "NOTE: Forcing server restart for det/safedb runs because sequence numbers reset to 0 each run.",
+            "NOTE: Forcing server restart for BCDB runs because sequence numbers reset to 0 each run.",
             file=sys.stderr,
         )
 
@@ -1463,6 +1679,11 @@ def main() -> int:
         ts_utc="",
         mode="",
         db_type=0,
+        execution_contract="",
+        bcdb_enabled=0,
+        merkle_enabled=0,
+        merkle_apply_synchronous_direct=0,
+        merkle_index_present=0,
         workload="",
         threads=0,
         run=0,
@@ -1498,7 +1719,7 @@ def main() -> int:
 
         total = sum(
             len(workloads) * len(threads) * len(rates) * args.runs *
-            (len(signing_modes) if MODE_NAME_TO_DB_TYPE[mode] == 1 else 1)
+            (len(signing_modes) if _mode_contract(mode)["db_type"] == 1 else 1)
             for mode in modes
         )
         # Single global warmup flag: we only need to warm the buffer pool once
@@ -1510,12 +1731,13 @@ def main() -> int:
         done = 0
 
         for mode in modes:
-            db_type = MODE_NAME_TO_DB_TYPE[mode]
-            # The dynamic Merkle index belongs to the deterministic AriaBC
-            # path.  Keep pg/nondet as genuine non-Merkle comparison modes;
-            # restore_usertable_small.sql defaults to enabled for manual use,
-            # so the psql variable must be explicit here.
-            merkle_enabled_for_mode = db_type == 1
+            contract = _mode_contract(mode)
+            db_type = int(contract["db_type"])
+            execution_contract = str(contract["execution_contract"])
+            bcdb_enabled_for_mode = bool(contract["bcdb_enabled"])
+            merkle_enabled_for_mode = bool(contract["merkle_enabled"])
+            enable_merkle_index_for_mode = str(contract["enable_merkle_index"])
+            synchronous_direct_for_mode = str(contract["synchronous_direct"]) == "on"
             effective_signing_modes = signing_modes if db_type == 1 else [0]
             for workload in workloads:
                 workload_path = scripts_dir / workload
@@ -1587,13 +1809,15 @@ def main() -> int:
                                     user=args.user,
                                     cwd=scripts_dir,
                                     env=env,
+                                    enable_merkle_index=enable_merkle_index_for_mode,
+                                    synchronous_direct=synchronous_direct_for_mode,
                                 )
 
                                 restore_exit = 0
                                 if not merkle_enabled_ok:
                                     restore_exit = 98
                                     restore_log_err.write_text(
-                                        "enable_merkle_index_not_on=1\n"
+                                        "benchmark_session_guc_contract_failed=1\n"
                                         + "\n".join(merkle_enable_notes)
                                         + "\n"
                                     )
@@ -1609,6 +1833,12 @@ def main() -> int:
                                         f"  [restore] mode={mode} workload={workload} "
                                         f"threads={th} run={run_idx}",
                                         flush=True,
+                                    )
+                                    restore_env = dict(env)
+                                    _force_pgoption(
+                                        restore_env,
+                                        "merkle_apply_synchronous_direct",
+                                        "on" if synchronous_direct_for_mode else "off",
                                     )
                                     restore_t0 = time.monotonic()
                                     restore_exit = _run(
@@ -1630,7 +1860,7 @@ def main() -> int:
                                             str(restore_sql),
                                         ],
                                         cwd=scripts_dir,
-                                        env=env,
+                                        env=restore_env,
                                         stdout_path=restore_log_out,
                                         stderr_path=restore_log_err,
                                         timeout_s=args.timeout_db_s or None,
@@ -1647,6 +1877,15 @@ def main() -> int:
                                     case_env = dict(env)
                                     case_env.setdefault("PYTHONUNBUFFERED", "1")
                                     if db_type == 1:
+                                        # Enable the unified PRE_COMMIT path for
+                                        # direct DET clients.  The backend still
+                                        # exempts safe-ledger transactions and
+                                        # lets their ordered ledger apply run once.
+                                        _force_pgoption(
+                                            case_env,
+                                            "merkle_apply_synchronous_direct",
+                                            "on" if synchronous_direct_for_mode else "off",
+                                        )
                                         # Deterministic runs against a freshly restarted server must start at txid 0.
                                         # Force a clean start even if the parent shell has DET_START_SEQ set.
                                         case_env["DET_START_SEQ"] = "0"
@@ -1723,6 +1962,12 @@ def main() -> int:
                                             flush=True,
                                         )
                                         restore_t0 = time.monotonic()
+                                        restore_env = dict(env)
+                                        _force_pgoption(
+                                            restore_env,
+                                            "merkle_apply_synchronous_direct",
+                                            "on" if synchronous_direct_for_mode else "off",
+                                        )
                                         restore_exit = _run(
                                             [
                                                 psql_path,
@@ -1742,7 +1987,7 @@ def main() -> int:
                                                 str(restore_sql),
                                             ],
                                             cwd=scripts_dir,
-                                            env=env,
+                                            env=restore_env,
                                             stdout_path=case_dir / "restore_after_warmup.out",
                                             stderr_path=case_dir / "restore_after_warmup.err",
                                             timeout_s=args.timeout_db_s or None,
@@ -1791,35 +2036,67 @@ def main() -> int:
                                 root_hash = None
                                 verify = None
                                 dynamic_merkle_contract = None
+                                merkle_index_present = None
+                                merkle_recovery_state = None
+                                merkle_applied_seq = None
+                                merkle_target_seq = None
                                 verification_error = ""
                                 timeout_diag_path: Optional[Path] = None
                                 if restore_exit == 0 and workload_exit == 0:
                                     if merkle_enabled_for_mode:
                                         print(
-                                            f"  [merkle-apply] mode={mode} workload={workload} "
+                                            f"  [merkle-sync-check] mode={mode} workload={workload} "
                                             f"threads={th} run={run_idx}",
                                             flush=True,
                                         )
-                                        apply_t0 = time.monotonic()
-                                        apply_ok, apply_msg = _psql_exec(
+                                        sync_check_t0 = time.monotonic()
+                                        recovery_status = _psql_value(
                                             psql_path,
                                             db=args.db,
                                             port=args.port,
                                             user=args.user,
-                                            query="select merkle_apply_pending();",
+                                            query="select merkle_recovery_status();",
                                             cwd=scripts_dir,
                                             env=env,
                                             timeout_s=args.timeout_db_s or None,
                                         )
                                         print(
-                                            f"  [merkle-apply-done] mode={mode} workload={workload} "
-                                            f"threads={th} run={run_idx} ok={apply_ok} "
-                                            f"elapsed={time.monotonic() - apply_t0:.1f}s",
+                                            f"  [merkle-sync-check-done] mode={mode} workload={workload} "
+                                            f"threads={th} run={run_idx} "
+                                            f"elapsed={time.monotonic() - sync_check_t0:.1f}s",
                                             flush=True,
                                         )
-                                        if not apply_ok:
-                                            verification_error = "merkle_apply_pending_failed: " + apply_msg
+                                        status_obj: Optional[dict[str, Any]] = None
+                                        if recovery_status:
+                                            try:
+                                                parsed_status = json.loads(recovery_status)
+                                                if isinstance(parsed_status, dict):
+                                                    status_obj = parsed_status
+                                            except (TypeError, ValueError):
+                                                status_obj = None
+                                        if status_obj is None:
+                                            verification_error = (
+                                                "merkle_recovery_status_query_failed: "
+                                                f"{recovery_status or 'missing'}"
+                                            )
                                         else:
+                                            status_state = str(status_obj.get("state", ""))
+                                            applied_seq = status_obj.get("applied_seq")
+                                            target_seq = status_obj.get("target_seq")
+                                            merkle_recovery_state = status_state
+                                            merkle_applied_seq = applied_seq
+                                            merkle_target_seq = target_seq
+                                            if (
+                                                status_state != "READY"
+                                                or applied_seq != target_seq
+                                            ):
+                                                verification_error = (
+                                                    "synchronous_merkle_apply_incomplete: "
+                                                    f"state={status_state or 'missing'} "
+                                                    f"applied_seq={applied_seq!r} "
+                                                    f"target_seq={target_seq!r}"
+                                                )
+                                        if not verification_error:
                                             count_s = _psql_value(
                                                 psql_path, db=args.db, port=args.port, user=args.user,
                                                 query="select count(*) from usertable_small;",
@@ -1858,6 +2135,9 @@ def main() -> int:
                                                 env=env,
                                                 timeout_s=args.timeout_db_s or None,
                                             )
+                                            merkle_index_present = (
+                                                "t" if dynamic_merkle_contract == "t" else "f"
+                                            )
                                             if count_s is None or root_hash is None or verify is None:
                                                 verification_error = "post_workload_verification_query_failed"
                                             elif dynamic_merkle_contract != "t":
@@ -1872,9 +2152,31 @@ def main() -> int:
                                             cwd=scripts_dir, env=env,
                                             timeout_s=args.timeout_db_s or None,
                                         )
+                                        merkle_index_present = _psql_value(
+                                            psql_path,
+                                            db=args.db,
+                                            port=args.port,
+                                            user=args.user,
+                                            query=(
+                                                "SELECT CASE WHEN EXISTS ("
+                                                "SELECT 1 FROM pg_catalog.pg_index i "
+                                                "JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid "
+                                                "JOIN pg_catalog.pg_am am ON am.oid = c.relam "
+                                                "WHERE i.indrelid = 'public.usertable_small'::regclass "
+                                                "AND am.amname = 'merkle') THEN 't' ELSE 'f' END;"
+                                            ),
+                                            cwd=scripts_dir,
+                                            env=env,
+                                            timeout_s=args.timeout_db_s or None,
+                                        )
                                         verify = "skipped"
                                         if count_s is None:
                                             verification_error = "post_workload_row_count_query_failed"
+                                        elif merkle_index_present != "f":
+                                            verification_error = (
+                                                "unexpected_merkle_index_present="
+                                                f"{merkle_index_present or 'unknown'}"
+                                            )
                                     if verification_error:
                                         (case_dir / "verification.err").write_text(verification_error + "\n")
                                 if restore_exit == 124 or workload_exit == 124:
@@ -1894,7 +2196,27 @@ def main() -> int:
                                     row_count = int(count_s.strip())
 
                                 notes_parts: list[str] = []
+                                notes_parts.append(f"execution_contract={execution_contract}")
+                                notes_parts.append(f"bcdb_enabled={1 if bcdb_enabled_for_mode else 0}")
                                 notes_parts.append(f"merkle_enabled={1 if merkle_enabled_for_mode else 0}")
+                                notes_parts.append(
+                                    "merkle_apply_synchronous_direct="
+                                    f"{1 if synchronous_direct_for_mode else 0}"
+                                )
+                                if merkle_index_present is not None:
+                                    notes_parts.append(
+                                        f"merkle_index_present={1 if merkle_index_present == 't' else 0}"
+                                    )
+                                if merkle_recovery_state is not None:
+                                    notes_parts.append(
+                                        f"merkle_recovery_state={merkle_recovery_state}"
+                                    )
+                                    notes_parts.append(
+                                        f"merkle_applied_seq={merkle_applied_seq}"
+                                    )
+                                    notes_parts.append(
+                                        f"merkle_target_seq={merkle_target_seq}"
+                                    )
                                 if merkle_enabled_for_mode:
                                     notes_parts.append(
                                         f"dynamic_merkle_contract={dynamic_merkle_contract or 'unknown'}"
@@ -1940,6 +2262,15 @@ def main() -> int:
                                     ts_utc=_now_utc_iso(),
                                     mode=mode,
                                     db_type=db_type,
+                                    execution_contract=execution_contract,
+                                    bcdb_enabled=1 if bcdb_enabled_for_mode else 0,
+                                    merkle_enabled=1 if merkle_enabled_for_mode else 0,
+                                    merkle_apply_synchronous_direct=(
+                                        1 if synchronous_direct_for_mode else 0
+                                    ),
+                                    merkle_index_present=(
+                                        1 if merkle_index_present == "t" else 0
+                                    ),
                                     workload=workload,
                                     threads=th,
                                     run=run_idx,
@@ -2005,7 +2336,7 @@ def main() -> int:
         print(f"WARNING: failed to write summary: {e}", file=sys.stderr)
 
     try:
-        _write_det_overhead(summary_csv, det_overhead_csv)
+        _write_mode_decomposition(summary_csv, det_overhead_csv)
     except Exception as e:
         print(f"WARNING: failed to write det overhead summary: {e}", file=sys.stderr)
 
@@ -2028,7 +2359,7 @@ def main() -> int:
     print("")
     print(f"Wrote raw results: {raw_csv}")
     print(f"Wrote summary:     {summary_csv}")
-    print(f"Wrote det overhead:{det_overhead_csv}")
+    print(f"Wrote mode decomposition:{det_overhead_csv}")
     print(f"Wrote sign overhead:{signing_overhead_csv}")
     print(f"Wrote metadata:    {meta_json}")
     if graph_paths:

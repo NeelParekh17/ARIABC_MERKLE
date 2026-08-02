@@ -296,7 +296,8 @@ merkle_compute_row_hash(Relation heapRel, ItemPointer tid, MerkleHash *result)
 		 * During INSERT, the tuple is in the heap but not yet committed,
 		 * so GetActiveSnapshot() won't see it.
 		 */
-		if (!table_tuple_fetch_row_version(heapRel, tid, SnapshotSelf, slot))
+		bool fetch_ok = table_tuple_fetch_row_version(heapRel, tid, SnapshotSelf, slot);
+		if (!fetch_ok)
 		{
 			merkle_hash_zero(result);
 		}
@@ -461,7 +462,23 @@ merkle_read_meta(Relation indexRel, int *fanout,
 	Page                page;
 	MerkleMetaPageData *meta;
 	Oid                 cache_relid = RelationGetRelid(indexRel);
-	/* Always read fresh metapage from relation buffer pool for 100% accuracy */
+	const MerkleMetaCacheEntry *cached;
+
+	/*
+	 * Tree geometry is immutable while a DML transaction can hold the index
+	 * lock.  The cache is transaction-local and is invalidated at xact end, so
+	 * reusing it avoids a metapage pin/lock for every staged delta and every
+	 * ancestor propagation step without allowing a REINDEX geometry change to
+	 * leak into a later transaction.
+	 */
+	cached = merkle_meta_cache_lookup(cache_relid);
+	if (cached != NULL)
+	{
+		if (fanout)          *fanout          = cached->fanout;
+		if (split_threshold) *split_threshold = cached->split_threshold;
+		if (merge_threshold) *merge_threshold = cached->merge_threshold;
+		return;
+	}
 
 	buf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
 	LockBuffer(buf, BUFFER_LOCK_SHARE);
@@ -628,6 +645,45 @@ merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
 	result = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
 	SET_VARSIZE(result, VARHDRSZ + MERKLE_HASH_BYTES);
 	memcpy(VARDATA(result), hash.data, MERKLE_HASH_BYTES);
+
+	PG_RETURN_BYTEA_P(result);
+}
+
+PG_FUNCTION_INFO_V1(merkle_hash_xor_sql);
+
+Datum
+merkle_hash_xor_sql(PG_FUNCTION_ARGS)
+{
+	bytea	   *arg1;
+	bytea	   *arg2;
+	bytea	   *result;
+	MerkleHash	h1;
+	MerkleHash	h2;
+	MerkleHash	res_h;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("merkle_hash_xor_sql arguments cannot be null")));
+
+	arg1 = PG_GETARG_BYTEA_PP(0);
+	arg2 = PG_GETARG_BYTEA_PP(1);
+
+	if (VARSIZE_ANY_EXHDR(arg1) != MERKLE_HASH_BYTES ||
+		VARSIZE_ANY_EXHDR(arg2) != MERKLE_HASH_BYTES)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("merkle_hash_xor_sql requires exact %d-byte inputs", MERKLE_HASH_BYTES)));
+
+	memcpy(h1.data, VARDATA_ANY(arg1), MERKLE_HASH_BYTES);
+	memcpy(h2.data, VARDATA_ANY(arg2), MERKLE_HASH_BYTES);
+
+	memcpy(&res_h, &h1, sizeof(MerkleHash));
+	merkle_hash_xor(&res_h, &h2);
+
+	result = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
+	SET_VARSIZE(result, VARHDRSZ + MERKLE_HASH_BYTES);
+	memcpy(VARDATA(result), res_h.data, MERKLE_HASH_BYTES);
 
 	PG_RETURN_BYTEA_P(result);
 }

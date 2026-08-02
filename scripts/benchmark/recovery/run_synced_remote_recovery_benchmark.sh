@@ -347,6 +347,7 @@ sync_root() {
       --exclude '*.o' --exclude '*.a' --exclude '*.so' --exclude '*.so.*' \
       --exclude '*.d' --exclude '*.gcda' --exclude '*.gcno' \
       --exclude '*.copybin' --exclude '*.tar' --exclude '*.tar.gz' --exclude '*.zip' \
+      --exclude 'bin/initdb/postgres' --exclude 'bin/pg_ctl/postgres' \
       --exclude '*.pc' --exclude '*.list' \
       --exclude '*_d.h' --exclude '*_d.dat' \
       --exclude 'schemapg.h' --exclude 'errcodes.h' \
@@ -676,7 +677,7 @@ fi
 remote_progress "temporary socket directory ready: $REMOTE_SOCKET_DIR"
 remote_progress "PostgreSQL start requested; logs: $REMOTE_LOG_DIR/pg_ctl_start.log and $REMOTE_LOG_DIR/postgres.log"
 if "$REMOTE_INSTALL_DIR/bin/pg_ctl" -D "$REMOTE_PGDATA" -l "$REMOTE_LOG_DIR/postgres.log" \
-    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=2GB -c maintenance_work_mem=1GB -c work_mem=128MB -c max_wal_size=16GB -c checkpoint_timeout=30min -c synchronous_commit=off -c wal_buffers=64MB" \
+    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=2GB -c maintenance_work_mem=1GB -c work_mem=128MB -c max_wal_size=16GB -c checkpoint_timeout=30min -c synchronous_commit=on -c wal_buffers=64MB" \
     -w start 9>&- >"$REMOTE_LOG_DIR/pg_ctl_start.log" 2>&1; then
   remote_progress "PostgreSQL started"
 else

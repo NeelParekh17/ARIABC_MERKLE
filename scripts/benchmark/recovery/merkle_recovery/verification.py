@@ -89,12 +89,6 @@ def audit_recovery(conn, run_id: str, method: str) -> dict[str, Any]:
     import time
     from contextlib import contextmanager
 
-    try:
-        res = execute(conn, "SELECT merkle_apply_pending()")
-        print("[audit_recovery] merkle_apply_pending res:", res)
-    except Exception as e:
-        print("[audit_recovery] merkle_apply_pending failed:", e)
-
     phase: dict[str, float] = {}
 
     @contextmanager

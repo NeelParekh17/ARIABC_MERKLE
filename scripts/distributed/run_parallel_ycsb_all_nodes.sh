@@ -14,8 +14,9 @@ set -euo pipefail
 #   neel@10.129.148.247    neel-MS-7C96
 #
 # Default benchmark profiles (runs 3 × modes in this order):
-#   1. pg mode             – plain PostgreSQL baseline (no BCDB)
-#   2. det mode sign=0     – deterministic, unsigned, enforce_signatures=1
+#   1. pg mode                   – plain PostgreSQL baseline (no BCDB)
+#   2. bcdb_det mode sign=0      – deterministic BCDB, no Merkle
+#   3. bcdb_merkle mode sign=0   – deterministic BCDB + synchronous Merkle
 #
 # Signing key for sign=1 runs lives at scripts/bench_signing_privkey.pem (EC P-256).
 #
@@ -30,7 +31,7 @@ set -euo pipefail
 #
 #   --ssh-key <path>        SSH private key (optional if key-auth is default)
 #   --ssh-port <22>         SSH port
-#   --modes <pg,det>        Comma-separated modes: pg, det, nondet  [default: pg,det]
+#   --modes <...>          Comma-separated modes: pg, bcdb_det, bcdb_merkle  [default: pg,bcdb_det,bcdb_merkle]
 #   --threads <csv>         Thread counts csv  [default: 1,2,4,8,12,16]
 #   --runs <3>              Runs per workload/thread combination
 #   --workloads <csv>       Workload filenames (default: bench_threads_matrix.py defaults)
@@ -58,6 +59,7 @@ NEEL_NODES=(
 NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"
 NEEL_REMOTE_INSTALL="/home/neel/Desktop/ariabc_install"
 TEMPLATE_CONF_LOCAL="/work/ARIABC/pgdata/postgresql.conf"
+LOCAL_INSTALL_DIR="${ARIABC_INSTALL_DIR:-/work/ARIABC/install}"
 
 # Node-specific password auth (all nodes now use key auth; add entries here only
 # if a node requires sshpass).
@@ -66,7 +68,7 @@ declare -A NODE_PASSWORDS=()
 # ---- Tunable defaults ----
 SSH_KEY=""
 SSH_PORT=22
-MODES="pg,det"
+MODES="pg,bcdb_det,bcdb_merkle"
 THREADS="${ARIABC_DEFAULT_FULL_THREADS}"
 RUNS=3
 WORKLOADS=""
@@ -88,7 +90,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --ssh-key)       SSH_KEY="${2:-}"; shift 2 ;;
     --ssh-port)      SSH_PORT="${2:-22}"; shift 2 ;;
-    --modes)         MODES="${2:-pg,det}"; shift 2 ;;
+    --modes)         MODES="${2:-pg,bcdb_det,bcdb_merkle}"; shift 2 ;;
     --threads)       THREADS="${2:-}"; shift 2 ;;
     --runs)          RUNS="${2:-3}"; shift 2 ;;
     --workloads)     WORKLOADS="${2:-}"; shift 2 ;;
@@ -252,6 +254,23 @@ for req in \
   fi
 done
 
+# A source edit is not runnable evidence until the local install has been
+# rebuilt/installed from that exact checkout.  This gate runs before rsync so
+# the install tree copied to execution-only nodes cannot lag the source tree.
+# --skip-sync intentionally bypasses this gate because it explicitly requests
+# reuse of the last synchronized source/install pair.
+if [[ "$SKIP_SYNC" == "0" ]]; then
+  lmsg "=== Preflight: refreshing local custom install from current source ==="
+  if ! bash "$REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh" \
+      --repo-root "$REPO_ROOT" --install-dir "$LOCAL_INSTALL_DIR" \
+      --clean-when-rebuild; then
+    echo "ERROR: local custom install is missing or stale; source was not benchmarked" >&2
+    exit 1
+  fi
+  lmsg "Preflight: local custom install matches current source checkout."
+  echo
+fi
+
 for node in "${!NODE_PASSWORDS[@]}"; do
   if [[ -n "${NODE_PASSWORDS[$node]}" ]]; then
     command -v sshpass >/dev/null 2>&1 || {
@@ -373,6 +392,28 @@ if [[ "$SKIP_SYNC" == "1" ]]; then
 else
   lmsg "=== Phase 1: Syncing source to all remote nodes in parallel ==="
 
+  # The local PGDATA config is also used as the remote fresh-cluster template.
+  # Do not inherit the legacy blocking commit-watermark setting from an older
+  # experiment: with concurrent DET workers it can deadlock when a successor
+  # holds a tuple/Merkle lock while waiting for its predecessor to publish.
+  # The CAS prefix advancement is the required liveness path for this runner.
+  SHARED_TEMPLATE_LOCAL="$REPO_ROOT/.bench_tmp/shared_postgresql.conf"
+  mkdir -p "$REPO_ROOT/.bench_tmp"
+  cp "$TEMPLATE_CONF_LOCAL" "$SHARED_TEMPLATE_LOCAL"
+  sed -i -E \
+    "s|^[[:space:]]*bcdb_advance_commit_watermark[[:space:]]*=.*$|bcdb_advance_commit_watermark = 'on'|" \
+    "$SHARED_TEMPLATE_LOCAL"
+  if ! grep -Eq '^[[:space:]]*bcdb_advance_commit_watermark[[:space:]]*=' "$SHARED_TEMPLATE_LOCAL"; then
+    printf "\nbcdb_advance_commit_watermark = 'on'\n" >> "$SHARED_TEMPLATE_LOCAL"
+  fi
+  sed -i -E \
+    "s|^[[:space:]]*bcdb_serial_gate_source[[:space:]]*=.*$|bcdb_serial_gate_source = 0|" \
+    "$SHARED_TEMPLATE_LOCAL"
+  if ! grep -Eq '^[[:space:]]*bcdb_serial_gate_source[[:space:]]*=' "$SHARED_TEMPLATE_LOCAL"; then
+    printf 'bcdb_serial_gate_source = 0\n' >> "$SHARED_TEMPLATE_LOCAL"
+  fi
+  lmsg "  Benchmark template: bcdb_advance_commit_watermark=on, bcdb_serial_gate_source=0"
+
   declare -A SYNC_BGPIDS=()
   declare -A SYNC_LOGS=()
 
@@ -468,7 +509,7 @@ else
       # Copy canonical postgresql.conf template
       _rsync_allow_vanished -az \
         -e "$(_rsync_e_for_node "$node")" \
-        "$TEMPLATE_CONF_LOCAL" "$node:$repo/.bench_tmp/shared_postgresql.conf" >> "$slog" 2>&1
+        "$SHARED_TEMPLATE_LOCAL" "$node:$repo/.bench_tmp/shared_postgresql.conf" >> "$slog" 2>&1
 
       echo "Finished OK: $(_ts)" >> "$slog"
     ) &
@@ -528,15 +569,14 @@ for entry in "${ALL_NODES[@]}"; do
     mkdir -p '$repo/.bench_tmp'
     chmod +x '$repo/scripts/distributed/ensure_custom_install_from_repo.sh'
     if [[ '$SKIP_SYNC' == '0' ]]; then
-      echo '[INFO] source/install were just synced; trusting synced install if it verifies'
+      echo '[INFO] source/install were just synced; checking install freshness against source'
       if bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
-        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-        --trust-install; then
+        --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild; then
         exit 0
       fi
-      echo '[INFO] synced install did not verify on this host; attempting local rebuild'
+      echo '[INFO] synced install is missing or stale; attempting local rebuild'
       if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
-        echo 'ERROR: synced install did not verify and make/gcc are unavailable for rebuild' >&2
+        echo 'ERROR: synced install is stale/missing and make/gcc are unavailable for rebuild' >&2
         exit 1
       fi
       bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
@@ -650,10 +690,9 @@ cd '$repo/scripts'
 ensure_install_args=()
 if [[ '$SKIP_SYNC' == '0' ]]; then
   if ! bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
-    --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild \
-    --trust-install; then
+    --repo-root '$repo' --install-dir '$inst' --clean-when-rebuild; then
     if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
-      echo 'ERROR: synced install did not verify and make/gcc are unavailable for rebuild' >&2
+      echo 'ERROR: synced install is stale/missing and make/gcc are unavailable for rebuild' >&2
       exit 1
     fi
     bash '$repo/scripts/distributed/ensure_custom_install_from_repo.sh' \
@@ -797,7 +836,7 @@ echo
 # while the benchmark is active, to confirm the setting has
 # not been flipped by auto.conf, ALTER SYSTEM, or a session SET.
 # ============================================================
-lmsg "=== Phase 2.5: Verifying synchronous_commit on all nodes ==="
+lmsg "=== Phase 2.5: Verifying synchronous_commit and merkle_apply_synchronous_direct on all nodes ==="
 declare -a _sc_bad=()
 _check_synchronous_commit() {
   local node="$1"
@@ -805,24 +844,44 @@ _check_synchronous_commit() {
   local inst="${NODE_INST[$node]:-}"
   local psql_bin="$inst/bin/psql"
   local sc_val=""
+  local merkle_sync_val=""
+  local advance_val=""
+  local gate_source_val=""
 
   for ((attempt=1; attempt <= DB_READY_TIMEOUT_S / 2; attempt++)); do
     sc_val=$(ssh_run "$node" \
       "LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
        -tAc 'SHOW synchronous_commit;' 2>/dev/null || true" 2>/dev/null || true)
     sc_val="${sc_val//[[:space:]]/}"
-    if [[ "$sc_val" == "on" ]]; then
-      lmsg "  [OK]  $node  synchronous_commit = on"
+
+    merkle_sync_val=$(ssh_run "$node" \
+      "PGOPTIONS='-c merkle_apply_synchronous_direct=on' LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
+       -tAc 'SHOW merkle_apply_synchronous_direct;' 2>/dev/null || true" 2>/dev/null || true)
+    merkle_sync_val="${merkle_sync_val//[[:space:]]/}"
+
+    advance_val=$(ssh_run "$node" \
+      "LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
+       -tAc 'SHOW bcdb_advance_commit_watermark;' 2>/dev/null || true" 2>/dev/null || true)
+    advance_val="${advance_val//[[:space:]]/}"
+
+    gate_source_val=$(ssh_run "$node" \
+      "LD_LIBRARY_PATH='$inst/lib' '$psql_bin' -h 127.0.0.1 -p '$DB_PORT' -U '$DB_USER' -d '$DB_NAME' \
+       -tAc 'SHOW bcdb_serial_gate_source;' 2>/dev/null || true" 2>/dev/null || true)
+    gate_source_val="${gate_source_val//[[:space:]]/}"
+
+    if [[ "$sc_val" == "on" && "$merkle_sync_val" == "on" &&
+          "$advance_val" == "on" && "$gate_source_val" == "0" ]]; then
+      lmsg "  [OK]  $node  synchronous_commit=on, merkle_apply_synchronous_direct=on, bcdb_advance_commit_watermark=on, bcdb_serial_gate_source=0"
       return 0
-    elif [[ -n "$sc_val" ]]; then
-      lmsg "  [FAIL] $node  synchronous_commit = $sc_val  (expected: on)"
+    elif [[ -n "$sc_val" && -n "$merkle_sync_val" && -n "$advance_val" && -n "$gate_source_val" ]]; then
+      lmsg "  [FAIL] $node  synchronous_commit=$sc_val merkle_apply_synchronous_direct=$merkle_sync_val bcdb_advance_commit_watermark=$advance_val bcdb_serial_gate_source=$gate_source_val (expected: on, on, on, 0)"
       _sc_bad+=("$node")
       return 0
     fi
     sleep 2
   done
 
-  lmsg "  [FAIL] $node  synchronous_commit could not be read within ${DB_READY_TIMEOUT_S}s"
+  lmsg "  [FAIL] $node  Postgres GUCs could not be read within ${DB_READY_TIMEOUT_S}s"
   _sc_bad+=("$node")
 }
 
@@ -833,9 +892,9 @@ for entry in "${ALL_NODES[@]}"; do
 done
 
 if [[ "${#_sc_bad[@]}" -gt 0 ]]; then
-  _abort_run "synchronous_commit != on on ${#_sc_bad[@]} node(s)" "${_sc_bad[@]}"
+  _abort_run "GUC verification failed on ${#_sc_bad[@]} node(s)" "${_sc_bad[@]}"
 fi
-lmsg "Phase 2.5 complete: synchronous_commit = on on all nodes."
+lmsg "Phase 2.5 complete: synchronous commit, direct Merkle apply, and non-blocking DET watermark verified on all nodes."
 echo
 
 # ============================================================
@@ -943,7 +1002,7 @@ _check_node() {
     tail_out=$(ssh_run "$node" "tail -10 '$bench_log' 2>/dev/null || true" 2>/dev/null || true)
 
     # A workload case can legitimately spend several minutes in restore or
-    # merkle_apply_pending() without changing the parent log.  Treat this as a
+    # synchronous Merkle materialization without changing the parent log. Treat this as a
     # long-stage warning, not proof of a deadlock; bench_threads_matrix.py has
     # the bounded DB-stage timeout passed in the launch command.
     local hash; hash=$(printf '%s' "$tail_out" | md5sum | cut -d' ' -f1)
@@ -1095,7 +1154,12 @@ for ndir in node_dirs:
 if not groups:
     sys.exit(0)
 
-mode_norm = {"postgres": "pg", "pg": "pg", "safedb": "det", "det": "det", "aria": "nondet", "nondet": "nondet"}
+mode_norm = {
+    "postgres": "pg", "pg": "pg",
+    "bcdb_det": "bcdb_det", "bcdb": "bcdb_det",
+    "bcdb_merkle": "bcdb_merkle", "det": "bcdb_merkle", "safedb": "bcdb_merkle",
+    "aria": "nondet", "nondet": "nondet",
+}
 
 for (workload, rate), items in groups.items():
     series = {}
@@ -1103,10 +1167,10 @@ for (workload, rate), items in groups.items():
         raw_mode = (r.get("mode") or "").strip().lower()
         mode = mode_norm.get(raw_mode, raw_mode)
         
-        if mode != "det":
+        if mode not in ("pg", "bcdb_det", "bcdb_merkle"):
             continue
         
-        label = f"{node_name}_det"
+        label = f"{node_name}_{mode}"
         
         th = as_int(r.get("threads", ""))
         tps = as_float(r.get("median_throughput_tps", ""))
@@ -1130,7 +1194,8 @@ for (workload, rate), items in groups.items():
         
         # simple heuristic for line style
         ls = "-"
-        if "_det" in label: ls = "--"
+        if "_bcdb_det" in label: ls = "--"
+        if "_bcdb_merkle" in label: ls = "-"
         if "_nondet" in label: ls = ":"
         
         ax.plot(xs, ys, marker="o", linewidth=1.5, markersize=4.0, linestyle=ls, label=label)

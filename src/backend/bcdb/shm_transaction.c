@@ -534,6 +534,25 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     tx->create_time = 0;
     tx->has_raw = false;
     tx->has_war = false;
+
+	/*
+	 * A tx-pool entry can be recycled after the previous transaction is
+	 * deleted.  Initialise the complete safe-ledger metadata here rather
+	 * than relying on hash-table allocation to return zeroed memory.  A stale
+	 * raft_ledger_enabled bit is especially dangerous: it diverts an ordinary
+	 * transaction away from the synchronous Merkle PRE_COMMIT path and makes
+	 * the worker attempt ledger finalisation with log_index=0.
+	 */
+	tx->raft_ledger_enabled = false;
+	tx->raft_log_index = 0;
+	tx->raft_item_ordinal = 0;
+	tx->raft_item_count = 0;
+	memset(tx->raft_epoch_id, 0, BCDB_RAFT_DIGEST_BYTES);
+	memset(tx->raft_entry_digest, 0, BCDB_RAFT_DIGEST_BYTES);
+	memset(tx->raft_item_digest, 0, BCDB_RAFT_DIGEST_BYTES);
+	memset(tx->raft_terminal_digest, 0, BCDB_RAFT_DIGEST_BYTES);
+	tx->raft_terminal_format_version = 0;
+	tx->raft_terminal_state = 0;
 	tx->raft_terminal_update_confirmed = false;
 	tx->raft_terminal_returning_verified = false;
 	tx->raft_terminal_verified_top_xid = InvalidTransactionId;
@@ -1803,11 +1822,10 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
             return false;
         }
 
-        /* Compute old hash from the same oldSlot image used for leafing */
-        merkle_compute_slot_hash(relation, oldSlot, &oldHash);
+		/* Compute old hash from the same oldSlot image used for leafing */
+		merkle_compute_slot_hash(relation, oldSlot, &oldHash);
 
 		hasOldHash = !merkle_hash_is_zero(&oldHash);
-
 		if (hasOldHash)
 		{
 			indexList = RelationGetIndexList(relation);
@@ -1958,8 +1976,8 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
         merkle_compute_slot_hash(relation, newSlot, &newHash);
         hasNewHash = !merkle_hash_is_zero(&newHash);
 
-        if (hasNewHash)
-        {
+		if (hasNewHash)
+		{
             int i;
 
             for (i = 0; i < pendingCount; i++)

@@ -27,7 +27,7 @@ LEAF_LOOKUP_INDEXES = {
     "damaged": "usertable_merkle_covering_idx",
 }
 
-BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only static recovery
+BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only dynamic recovery
 TIMING_CONTRACT_VERSION = 1
 ZERO_HASH = "0" * 64
 

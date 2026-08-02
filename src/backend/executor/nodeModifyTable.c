@@ -132,7 +132,6 @@ bcdb_is_safe_ledger_relation(Relation relation)
 	return strcmp(relname, "raft_apply_schema_meta") == 0 ||
 		   strcmp(relname, "merkle_apply_counter") == 0 ||
 		   strcmp(relname, "merkle_apply_state") == 0 ||
-		   strcmp(relname, "merkle_local_delta") == 0 ||
 		   strcmp(relname, "raft_apply_epoch") == 0 ||
 		   strcmp(relname, "raft_apply_entry") == 0 ||
 		   strcmp(relname, "raft_apply_entry_item") == 0 ||

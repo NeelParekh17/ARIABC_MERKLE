@@ -103,7 +103,6 @@ psql "${PSQL_ARGS[@]}" -f "$SQL_FILE"
 if [[ "$CLEAN" -eq 1 ]]; then
     echo "Cleaning existing rows for epoch $EPOCH..."
     psql "${PSQL_ARGS[@]}" -c "
-    SELECT merkle_apply_pending();
     DO \$\$
     DECLARE
       applied bigint;
@@ -143,13 +142,12 @@ echo "Schema version OK (version=4)."
 # direct/raft delta rows therefore refer to state that is intentionally being
 # discarded and may contain relation OIDs from a previous table incarnation.
 if [[ "$RESET_FOR_RESTORE" -eq 1 ]]; then
-    echo "Resetting Merkle recovery queues before full table restore..."
+    echo "Resetting Merkle recovery state before full table restore..."
     psql "${PSQL_ARGS[@]}" -c "
 BEGIN;
 DELETE FROM ariabc_internal.raft_apply_item;
 DELETE FROM ariabc_internal.raft_apply_entry_item;
 DELETE FROM ariabc_internal.raft_apply_entry;
-TRUNCATE ariabc_internal.merkle_local_delta;
 UPDATE ariabc_internal.merkle_apply_counter
    SET next_seq = 0,
        terminal_prefix_seq = 0
@@ -210,10 +208,10 @@ else
 fi
 
 # Upgrade any pre-v7 tree before the Raft server is allowed to serve this
-# database, then apply the committed prefix left by a prior crash.  Both calls
-# are privileged internal operations; the final DO block is the hard gate.
-echo "Rebuilding legacy Merkle indexes and applying committed recovery prefix..."
-psql "${PSQL_ARGS[@]}" -c "SELECT merkle_apply_pending(); SELECT merkle_rebuild_legacy_indexes(); SELECT merkle_apply_pending();"
+# database.  Committed Raft Merkle items are applied synchronously by the
+# ledger middleware; bootstrap only validates the resulting state.
+echo "Rebuilding Merkle indexes and validating committed recovery state..."
+psql "${PSQL_ARGS[@]}" -c "SELECT merkle_rebuild_legacy_indexes();"
 psql "${PSQL_ARGS[@]}" -v ON_ERROR_STOP=1 -c "
 DO \$\$
 DECLARE

@@ -1138,21 +1138,11 @@ uint64_t pg_state_machine::safe_sync_startup(uint64_t durable_log_start_index) {
     }
 
     // The server must never start safe mode with a legacy/invalid Merkle
-    // format or an unapplied committed prefix.  Rebuild is idempotent and is
-    // a no-op when no Merkle index exists yet (bootstrap creates the index
-    // later), while the final status query is the hard READY gate.
+    // format or a non-READY recovery state. Rebuild is idempotent and is a
+    // no-op when no Merkle index exists yet; page apply is synchronous in the
+    // transaction/ledger path, while the final status query is the hard gate.
     {
-        PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_apply_pending();");
-        if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-            const std::string msg = PQerrorMessage(c);
-            if (res) PQclear(res);
-            PQfinish(c);
-            throw std::runtime_error(
-                "SAFE_STARTUP_FAILED: Merkle committed-prefix apply failed: " + msg);
-        }
-        PQclear(res);
-
-        res = PQexec(c, "SELECT pg_catalog.merkle_rebuild_legacy_indexes();");
+        PGresult* res = PQexec(c, "SELECT pg_catalog.merkle_rebuild_legacy_indexes();");
         if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
             const std::string msg = PQerrorMessage(c);
             if (res) PQclear(res);

@@ -54,6 +54,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "access/xact.h"
+#include "access/merkle.h"
 #include "utils/resowner.h"
 
 #define EMIT_SAFE_LEDGER_XACT(tx, _phase) \
@@ -3124,11 +3125,25 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                     continue;
                 }
             }
-            else
-            {
-                PTRACE_END(BCDB_PHASE_APPLY);
-            }
-            num_restarts += apply_retries;
+			else
+			{
+				PTRACE_END(BCDB_PHASE_APPLY);
+			}
+
+			/*
+			 * The retry helper owns an internal PG_TRY boundary.  Apply the
+			 * deferred Merkle nodes only after that helper has returned, while
+			 * the worker is back in the command's top-level transaction.  Doing
+			 * this inside the retry helper can leave the heap write committed but
+			 * discard the SPI Merkle updates when the surrounding worker flow
+			 * unwinds its retry state.
+			 */
+			if (merkle_apply_synchronous_direct &&
+				merkle_has_staged_delta() &&
+				(tx == NULL || !tx->raft_ledger_enabled))
+				merkle_apply_staged_deltas_synchronously();
+
+			num_restarts += apply_retries;
             bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT,
                                     (uint64)apply_retries);
 
