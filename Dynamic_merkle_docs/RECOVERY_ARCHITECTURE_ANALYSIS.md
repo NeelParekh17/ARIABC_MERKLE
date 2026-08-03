@@ -12,7 +12,7 @@ This report presents a comprehensive comparative evaluation of PostgreSQL-based 
 * **Mechanics**: Leaf nodes remain fixed regardless of dataset growth. Leaf occupancy scales linearly with table size $N$ (from ~4.9 rows/leaf at 1M to ~244.1 rows/leaf at 50M). Candidate fetching reads full candidate heap rows across candidate leaf ranges.
 * **Repetitions**: Median of 3 repetitions per dataset size across 11 scale points (1M to 50M). Medians across warm repetitions (r1/r2) are evaluated.
 
-### 2. Dynamic (`fanout_f4_l16`, current synchronous direct path)
+### 2. Dynamic (`fanout_f4`, current synchronous direct path)
 * **Artifact Path**: `scripts/benchmark/recovery/fetched/ariabc-recovery-size-scaling-k75-c300-20260801T172828Z-00530a`
 * **Configuration**: Full scale-scaling campaign spanning 1M to 50M tuples across all 11 dataset sizes (1M, 3M, 5M, 7M, 10M, 15M, 20M, 25M, 30M, 40M, 50M), $F=4$, split threshold 32, merge threshold 8, $K=75$ bad leaves, $C=300$ corruptions, `audit_mode=skip`, `profiling=off`, with 5 repetitions per scale point (55 total runs).
 * **Contract Proof**: `enable_merkle_index=on`, `merkle_apply_synchronous_direct=on`, and `synchronous_commit=on`; all 55 runs are valid (`valid=55/55`); `legacy_merkle_pending_rows_after_corruption=0` and `legacy_merkle_pending_rows_after_repair=0` for every run; stdout confirms zero `merkle_apply_pending()` invocations.

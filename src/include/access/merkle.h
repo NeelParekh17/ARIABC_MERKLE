@@ -260,6 +260,7 @@ extern void merkle_mark_staged_delta_persisted(void);
 extern bool merkle_has_staged_delta(void);
 extern void merkle_apply_staged_synchronous_safe(HTAB *combined_delta_map);
 extern void merkle_apply_staged_deltas_synchronously(void);
+extern void merkle_clear_split_ranges(void);
 extern void merkle_crash_failpoint(const char *name);
 extern void merkle_init_tree(Relation indexRel, Oid heapOid,
 							 MerkleOptions *opts, uint64 baseline_apply_seq);
@@ -294,7 +295,7 @@ merkle_bits_per_split_for_fanout(int fanout)
 }
 
 extern void merkle_require_fresh(void);
-extern void do_split(Oid index_oid, const uint8 *node_id, int prefix_len);
+extern void do_split(Oid index_oid, const uint8 *node_id, int prefix_len, int64 target_count);
 
 /* Bit manipulation helpers for Dynamic Merkle tree prefix traversal */
 static inline uint8

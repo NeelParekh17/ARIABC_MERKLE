@@ -926,6 +926,10 @@ struct raft_orderer {
     uint64_t next_seq = 1;
     uint64_t next_assigned_seq = 1;
     std::map<uint64_t, std::shared_ptr<raft_ordered_entry>> pending;
+    // leader-assigned dedup: maps req_id -> first_seq for in-flight requests.
+    // Prevents retried gateway submissions from getting a new first_seq and
+    // being committed twice to the Raft log with different raft_log_idx.
+    std::unordered_map<std::string, uint64_t> req_id_to_seq;
 };
 
 bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
@@ -950,10 +954,30 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
             orderer.next_seq = order_start_seq;
             orderer.next_assigned_seq = order_start_seq;
         }
+        // Idempotent assignment: if this req_id is already in-flight (a gateway
+        // retry), reuse its original first_seq so it lands in the same Raft
+        // log slot. Without this, retries get a new first_seq, are committed
+        // twice, and produce duplicate_identity_conflict in the vote store.
+        std::string primary_req_id = req.req_id;
+        if (primary_req_id.empty() && req.is_batch() && !req.batch_items.empty()) {
+            primary_req_id = req.batch_items.front().req_id;
+        }
+        if (!primary_req_id.empty()) {
+            auto it_dedup = orderer.req_id_to_seq.find(primary_req_id);
+            if (it_dedup != orderer.req_id_to_seq.end()) {
+                out_resp.status = 1;
+                out_resp.msg = "LEADER_ASSIGNED_INFLIGHT_DUPLICATE req_id=" + primary_req_id +
+                               " existing_first_seq=" + std::to_string(it_dedup->second);
+                return true;
+            }
+        }
         first_seq = orderer.next_assigned_seq;
         last_seq = first_seq + static_cast<uint64_t>(req.item_count() - 1);
         entry->req = req;
         orderer.next_assigned_seq = last_seq + 1;
+        if (!primary_req_id.empty()) {
+            orderer.req_id_to_seq[primary_req_id] = first_seq;
+        }
         g_prof.orderer_leader_assigned_requests.fetch_add(1, std::memory_order_relaxed);
         g_prof.orderer_leader_assigned_items.fetch_add(entry->req.item_count(),
                                                        std::memory_order_relaxed);
@@ -1011,6 +1035,12 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
                                 std::to_string(blocked->first_seq) +
                                 " blocked_by=" + std::to_string(blocker_seq);
             blocked->done = true;
+            if (leader_assigned) {
+                const std::string& rid = blocked->req.req_id;
+                if (!rid.empty()) {
+                    orderer.req_id_to_seq.erase(rid);
+                }
+            }
         }
         orderer.pending.clear();
         orderer.cv.notify_all();
@@ -1082,6 +1112,13 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
                       << " entries=" << ready_batch.size()
                       << std::endl;
             g_prof.orderer_drains.fetch_add(1, std::memory_order_relaxed);
+            orderer.next_seq = ready_batch.back()->last_seq + 1;
+            std::cerr << "SAFE_RAFT_ORDERER_ADVANCE"
+                      << " next_seq=" << orderer.next_seq
+                      << std::endl;
+            orderer.drained_any = true;
+            orderer.cv.notify_all();
+
             lk.unlock();
             append_requests_to_raft_batch(raft, psm, ready_batch);
             lk.lock();
@@ -1090,6 +1127,14 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
             uint64_t blocker_seq = ready_batch.front()->first_seq;
             for (std::shared_ptr<raft_ordered_entry> ready : ready_batch) {
                 ready->done = true;
+                // Remove from dedup map once the entry is committed and complete
+                // so that post-commit retries are treated as fresh requests.
+                if (leader_assigned) {
+                    const std::string& rid = ready->req.req_id;
+                    if (!rid.empty()) {
+                        orderer.req_id_to_seq.erase(rid);
+                    }
+                }
                 if (ready->resp.status != 0 && !failed) {
                     failed = true;
                     blocker_seq = ready->first_seq;
@@ -1100,12 +1145,6 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
                 orderer.cv.notify_all();
                 break;
             }
-
-            orderer.next_seq = ready_batch.back()->last_seq + 1;
-            std::cerr << "SAFE_RAFT_ORDERER_ADVANCE"
-                      << " next_seq=" << orderer.next_seq
-                      << std::endl;
-            orderer.drained_any = true;
             orderer.cv.notify_all();
         }
     };

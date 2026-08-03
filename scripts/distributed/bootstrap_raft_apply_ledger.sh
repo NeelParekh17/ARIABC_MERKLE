@@ -83,9 +83,11 @@ fi
 echo "Clean:    $CLEAN"
 echo "Reset:    $RESET_FOR_RESTORE"
 
-# Build psql base arguments.  ON_ERROR_STOP=1 causes psql to exit non-zero on
+export PGOPTIONS="${PGOPTIONS:--c client_min_messages=warning}"
+
+# Build psql base arguments. ON_ERROR_STOP=1 causes psql to exit non-zero on
 # any SQL error so the script aborts rather than silently continuing.
-PSQL_ARGS=( -d "$DBNAME" -p "$PORT" -h "$HOST" -v ON_ERROR_STOP=1 )
+PSQL_ARGS=( -X -q -d "$DBNAME" -p "$PORT" -h "$HOST" -v ON_ERROR_STOP=1 )
 if [[ -n "$USER" ]]; then
     PSQL_ARGS+=( -U "$USER" )
 fi

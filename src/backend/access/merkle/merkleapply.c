@@ -47,6 +47,14 @@ typedef struct MerkleLeafEvent
 	MerkleHash	delta;
 } MerkleLeafEvent;
 
+static void merkle_route_cache_clear_index(Oid index_oid);
+static void merkle_sync_prepare_plans(void);
+static void propagate_hash_to_ancestors_atomic(Oid index_oid, const uint8 *leaf_node_id,
+											   int leaf_prefix_len,
+											   const MerkleHash *tuple_hash_delta,
+											   int64 count_delta,
+											   int bits_per_split);
+
 typedef struct MerkleNodeEvent
 {
 	uint64		seq;
@@ -622,15 +630,17 @@ get_index_key_expr_str(Oid index_oid)
 }
 
 static void
-propagate_hash_to_ancestors(Oid index_oid, const uint8 *leaf_node_id, int leaf_prefix_len, const MerkleHash *tuple_hash_delta)
+propagate_hash_to_ancestors(Oid index_oid, const uint8 *leaf_node_id, int leaf_prefix_len, const MerkleHash *tuple_hash_delta, int64 count_delta)
 {
 	uint8 curr_node_id[8];
 	int curr_prefix_len = leaf_prefix_len;
 	Relation index_rel = index_open(index_oid, AccessShareLock);
 	int fanout = DYNAMIC_MERKLE_FANOUT;
+	int bits_per_split;
+
 	merkle_read_meta(index_rel, &fanout, NULL, NULL);
 	index_close(index_rel, AccessShareLock);
-	int bits_per_split = merkle_bits_per_split_for_fanout(fanout);
+	bits_per_split = merkle_bits_per_split_for_fanout(fanout);
 
 	memcpy(curr_node_id, leaf_node_id, 8);
 
@@ -650,7 +660,7 @@ propagate_hash_to_ancestors(Oid index_oid, const uint8 *leaf_node_id, int leaf_p
 		sel_values[2] = Int16GetDatum((int16) parent_prefix_len);
 
 		spi_rc = SPI_execute_with_args(
-			"SELECT hash FROM ariabc_internal.merkle_node"
+			"SELECT hash, tuple_count FROM ariabc_internal.merkle_node"
 			" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3",
 			3, sel_argtypes, sel_values, NULL, false, 1);
 
@@ -660,30 +670,34 @@ propagate_hash_to_ancestors(Oid index_oid, const uint8 *leaf_node_id, int leaf_p
 			HeapTuple tuple = SPI_tuptable->vals[0];
 			bool isnull;
 			Datum hash_datum = SPI_getbinval(tuple, tupdesc, 1, &isnull);
+			int64 p_count = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 2, &isnull));
 			bytea *hash_bytea = DatumGetByteaPP(hash_datum);
 			MerkleHash parent_hash;
 			MerkleHash new_parent_hash;
+			int64 new_p_count = p_count + count_delta;
+			if (new_p_count < 0) new_p_count = 0;
 
 			memcpy(parent_hash.data, VARDATA_ANY(hash_bytea), MERKLE_HASH_BYTES);
 			memcpy(&new_parent_hash, &parent_hash, sizeof(MerkleHash));
 			merkle_hash_xor(&new_parent_hash, tuple_hash_delta);
 
 			{
-				Oid upd_argtypes[4] = {BYTEAOID, OIDOID, BYTEAOID, INT2OID};
-				Datum upd_values[4];
+				Oid upd_argtypes[5] = {BYTEAOID, INT8OID, OIDOID, BYTEAOID, INT2OID};
+				Datum upd_values[5];
 				bytea *new_hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
 				SET_VARSIZE(new_hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
 				memcpy(VARDATA(new_hash_bytea), new_parent_hash.data, MERKLE_HASH_BYTES);
 
 				upd_values[0] = PointerGetDatum(new_hash_bytea);
-				upd_values[1] = ObjectIdGetDatum(index_oid);
-				upd_values[2] = PointerGetDatum(parent_bytea);
-				upd_values[3] = Int16GetDatum((int16) parent_prefix_len);
+				upd_values[1] = Int64GetDatum(new_p_count);
+				upd_values[2] = ObjectIdGetDatum(index_oid);
+				upd_values[3] = PointerGetDatum(parent_bytea);
+				upd_values[4] = Int16GetDatum((int16) parent_prefix_len);
 
 				SPI_execute_with_args(
-					"UPDATE ariabc_internal.merkle_node SET hash = $1"
-					" WHERE index_oid = $2 AND node_id = $3 AND prefix_len = $4",
-					4, upd_argtypes, upd_values, NULL, false, 1);
+					"UPDATE ariabc_internal.merkle_node SET hash = $1, tuple_count = $2"
+					" WHERE index_oid = $3 AND node_id = $4 AND prefix_len = $5",
+					5, upd_argtypes, upd_values, NULL, false, 1);
 
 				pfree(new_hash_bytea);
 			}
@@ -714,12 +728,12 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 	/* Prepare SPI plans once for high-frequency split operations */
 	if (plan_split_update_nonleaf == NULL)
 	{
-		Oid upd_argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
+		Oid upd_argtypes[5] = {OIDOID, BYTEAOID, INT2OID, INT8OID, BYTEAOID};
 		SPIPlanPtr plan = SPI_prepare(
 			"UPDATE ariabc_internal.merkle_node"
-			"   SET is_leaf = false"
+			"   SET is_leaf = false, tuple_count = $4, hash = $5"
 			" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3",
-			3, upd_argtypes);
+			5, upd_argtypes);
 		if (plan == NULL)
 			elog(ERROR, "SPI_prepare failed for plan_split_update_nonleaf");
 		SPI_keepplan(plan);
@@ -740,23 +754,6 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 			elog(ERROR, "SPI_prepare failed for plan_split_insert_child");
 		SPI_keepplan(plan);
 		plan_split_insert_child = plan;
-	}
-
-	/* Mark the node being split as an internal non-leaf node */
-	{
-		bytea *id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-		Datum upd_values[3];
-
-		SET_VARSIZE(id_bytea, VARHDRSZ + 8);
-		memcpy(VARDATA(id_bytea), node_id, 8);
-
-		upd_values[0] = ObjectIdGetDatum(index_oid);
-		upd_values[1] = PointerGetDatum(id_bytea);
-		upd_values[2] = Int16GetDatum((int16) prefix_len);
-
-		SPI_execute_plan(plan_split_update_nonleaf, upd_values, NULL, false, 1);
-
-		pfree(id_bytea);
 	}
 
 	bucket_counts = (int *) palloc0(fanout * sizeof(int));
@@ -851,26 +848,135 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 	}
 
 	{
+		MerkleHash	total_split_hash;
+		int64		total_split_count = 0;
+		MerkleHash	old_hash;
+		int64		old_count = 0;
 		bytea	   *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-		Datum		upd_values[3];
+		bytea	   *hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
+		Datum		upd_values[5];
+
+		merkle_hash_zero(&total_split_hash);
+		for (i = 0; i < fanout; i++)
+		{
+			merkle_hash_xor(&total_split_hash, &bucket_hashes[i]);
+			total_split_count += bucket_counts[i];
+		}
+
+		merkle_hash_zero(&old_hash);
+		{
+			Oid sel_argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
+			Datum sel_values[3];
+			bytea *id_b = (bytea *) palloc(VARHDRSZ + 8);
+
+			int spi_rc;
+			SET_VARSIZE(id_b, VARHDRSZ + 8);
+			memcpy(VARDATA(id_b), node_id, 8);
+			sel_values[0] = ObjectIdGetDatum(index_oid);
+			sel_values[1] = PointerGetDatum(id_b);
+			sel_values[2] = Int16GetDatum((int16) prefix_len);
+
+			PushActiveSnapshot(GetLatestSnapshot());
+			spi_rc = SPI_execute_with_args(
+				"SELECT hash, tuple_count FROM ariabc_internal.merkle_node"
+				" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3",
+				3, sel_argtypes, sel_values, NULL, true, 1);
+			PopActiveSnapshot();
+
+			if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
+			{
+				bool isnull;
+				Datum h_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+				Datum c_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull);
+				if (!isnull)
+				{
+					bytea *h_b = DatumGetByteaPP(h_d);
+					memcpy(old_hash.data, VARDATA_ANY(h_b), MERKLE_HASH_BYTES);
+				}
+				if (!isnull)
+					old_count = DatumGetInt64(c_d);
+			}
+			pfree(id_b);
+		}
 
 		SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
 		memcpy(VARDATA(node_id_bytea), node_id, 8);
+
+		SET_VARSIZE(hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
+		memcpy(VARDATA(hash_bytea), total_split_hash.data, MERKLE_HASH_BYTES);
+
 		upd_values[0] = ObjectIdGetDatum(index_oid);
 		upd_values[1] = PointerGetDatum(node_id_bytea);
 		upd_values[2] = Int16GetDatum((int16) prefix_len);
+		upd_values[3] = Int64GetDatum(total_split_count);
+		upd_values[4] = PointerGetDatum(hash_bytea);
 
 		SPI_execute_plan(plan_split_update_nonleaf, upd_values, NULL, false, 1);
 
 		pfree(node_id_bytea);
+		pfree(hash_bytea);
+
+		if (prefix_len > 0)
+		{
+			MerkleHash hash_delta;
+			int64 count_delta = total_split_count - old_count;
+			memcpy(hash_delta.data, total_split_hash.data, MERKLE_HASH_BYTES);
+			merkle_hash_xor(&hash_delta, &old_hash);
+
+			propagate_hash_to_ancestors_atomic(index_oid, node_id, prefix_len, &hash_delta, count_delta, bits_per_split);
+		}
 	}
 
 	pfree(bucket_counts);
 	pfree(bucket_hashes);
 }
 
+typedef struct SplitRange {
+	Oid index_oid;
+	uint8 lower[8];
+	uint8 upper[8];
+} SplitRange;
+
+#define MAX_SPLIT_RANGES 64
+static SplitRange active_split_ranges[MAX_SPLIT_RANGES];
+static int num_active_split_ranges = 0;
+
+static void
+merkle_register_split_range(Oid index_oid, const uint8 *lower, const uint8 *upper)
+{
+	if (num_active_split_ranges < MAX_SPLIT_RANGES)
+	{
+		active_split_ranges[num_active_split_ranges].index_oid = index_oid;
+		memcpy(active_split_ranges[num_active_split_ranges].lower, lower, 8);
+		memcpy(active_split_ranges[num_active_split_ranges].upper, upper, 8);
+		num_active_split_ranges++;
+	}
+}
+
 void
-do_split(Oid index_oid, const uint8 *node_id, int prefix_len)
+merkle_clear_split_ranges(void)
+{
+	num_active_split_ranges = 0;
+}
+
+static bool
+merkle_is_in_split_range(Oid index_oid, const uint8 *routing_key)
+{
+	int i;
+	for (i = 0; i < num_active_split_ranges; i++)
+	{
+		if (active_split_ranges[i].index_oid == index_oid &&
+			memcmp(routing_key, active_split_ranges[i].lower, 8) >= 0 &&
+			memcmp(routing_key, active_split_ranges[i].upper, 8) <= 0)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void
+do_split(Oid index_oid, const uint8 *node_id, int prefix_len, int64 target_count)
 {
 	uint8		lower[8];
 	uint8		upper[8];
@@ -910,7 +1016,7 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len)
 		"SELECT %s AS kh, merkle_tuple_hash(%s.*) AS th"
 		"  FROM %s"
 		" WHERE %s BETWEEN $1 AND $2"
-		" ORDER BY kh",
+		" ORDER BY ctid",
 		key_expr, heap_name, heap_name, key_expr);
 
 	{
@@ -926,7 +1032,9 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len)
 		values[0] = PointerGetDatum(lower_bytea);
 		values[1] = PointerGetDatum(upper_bytea);
 
+		PushActiveSnapshot(GetLatestSnapshot());
 		spi_rc = SPI_execute_with_args(buf.data, 2, argtypes, values, NULL, true, 0);
+		PopActiveSnapshot();
 
 		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 		{
@@ -953,6 +1061,9 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len)
 				}
 
 				merkle_do_split_in_memory(index_oid, node_id, prefix_len, entries, SPI_processed, fanout, bits_per_split, split_threshold);
+				merkle_register_split_range(index_oid, lower, upper);
+				merkle_route_cache_clear_index(index_oid);
+				CommandCounterIncrement();
 			}
 			PG_CATCH();
 			{
@@ -1014,20 +1125,25 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 		values[2] = PointerGetDatum(lower_bytea);
 		values[3] = PointerGetDatum(upper_bytea);
 
+		PushActiveSnapshot(GetLatestSnapshot());
 		spi_rc = SPI_execute_with_args(
 			"SELECT count(*), bool_and(is_leaf), sum(tuple_count)::bigint"
 			"  FROM ariabc_internal.merkle_node"
 			" WHERE index_oid = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4",
 			4, argtypes, values, NULL, true, 1);
+		PopActiveSnapshot();
 
 		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 		{
 			TupleDesc td = SPI_tuptable->tupdesc;
 			HeapTuple tup = SPI_tuptable->vals[0];
 			bool isnull;
+			int64 cnt_val = DatumGetInt64(SPI_getbinval(tup, td, 1, &isnull));
 			bool all_leaves = DatumGetBool(SPI_getbinval(tup, td, 2, &isnull));
 			int64 total_count = DatumGetInt64(SPI_getbinval(tup, td, 3, &isnull));
 
+			elog(NOTICE, "do_merge_check node=%02x%02x plen=%d parent_plen=%d cnt_val=%ld leaves=%s total_count=%ld merge_thresh=%d",
+				 node_id[0], node_id[1], prefix_len, parent_prefix_len, (long) cnt_val, all_leaves ? "t" : "f", (long) total_count, merge_thresh);
 
 			if (all_leaves && total_count < merge_thresh)
 			{
@@ -1035,10 +1151,12 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 				MerkleHash merged_hash;
 				merkle_hash_zero(&merged_hash);
 
+				PushActiveSnapshot(GetLatestSnapshot());
 				spi_rc = SPI_execute_with_args(
 					"SELECT hash FROM ariabc_internal.merkle_node"
 					" WHERE index_oid = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4",
 					4, argtypes, values, NULL, true, 0);
+				PopActiveSnapshot();
 
 				if (spi_rc == SPI_OK_SELECT)
 				{
@@ -1054,10 +1172,16 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 					}
 				}
 
+				if (total_count == 0)
+					merkle_hash_zero(&merged_hash);
+
+				CommandCounterIncrement();
+				PushActiveSnapshot(GetLatestSnapshot());
 				SPI_execute_with_args(
 					"DELETE FROM ariabc_internal.merkle_node"
 					" WHERE index_oid = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4",
 					4, argtypes, values, NULL, false, 0);
+				PopActiveSnapshot();
 
 				{
 					bytea *parent_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
@@ -1076,14 +1200,24 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 					upd_values[3] = PointerGetDatum(parent_id_bytea);
 					upd_values[4] = Int16GetDatum((int16) parent_prefix_len);
 
+					CommandCounterIncrement();
+					PushActiveSnapshot(GetLatestSnapshot());
 					SPI_execute_with_args(
 						"UPDATE ariabc_internal.merkle_node"
 						"   SET is_leaf = true, tuple_count = $1, hash = $2"
 						" WHERE index_oid = $3 AND node_id = $4 AND prefix_len = $5",
 						5, upd_argtypes, upd_values, NULL, false, 1);
+					PopActiveSnapshot();
 
 					pfree(parent_id_bytea);
 					pfree(merged_hash_bytea);
+					merkle_route_cache_clear_index(index_oid);
+					CommandCounterIncrement();
+				}
+
+				if (parent_prefix_len > 0)
+				{
+					do_merge_check(index_oid, parent_node_id, parent_prefix_len, merge_thresh);
 				}
 			}
 		}
@@ -1112,9 +1246,11 @@ apply_leaf_event(Oid index_oid, const uint8 key_hash[8], const MerkleHash *tuple
 	int prefix_len = 0;
 	Relation index_rel = index_open(index_oid, AccessShareLock);
 	int fanout = DYNAMIC_MERKLE_FANOUT;
+	int bits_per_split;
+
 	merkle_read_meta(index_rel, &fanout, NULL, NULL);
 	index_close(index_rel, AccessShareLock);
-	int bits_per_split = merkle_bits_per_split_for_fanout(fanout);
+	bits_per_split = merkle_bits_per_split_for_fanout(fanout);
 
 	memset(node_id, 0, 8);
 
@@ -1254,7 +1390,7 @@ apply_leaf_event(Oid index_oid, const uint8 key_hash[8], const MerkleHash *tuple
 				CommandCounterIncrement();
 				UpdateActiveSnapshotCommandId();
 
-				propagate_hash_to_ancestors(index_oid, node_id, prefix_len, tuple_hash_delta);
+				propagate_hash_to_ancestors(index_oid, node_id, prefix_len, tuple_hash_delta, count_delta);
 
 				{
 					Relation indexRel = index_open(index_oid, AccessShareLock);
@@ -1363,7 +1499,7 @@ merkle_apply_leaf_events(MerkleEventArray *events, uint64 batch_end)
 	for (i = 0; i < num_pending_sm; i++)
 	{
 		if (pending_sm[i].is_split)
-			do_split(pending_sm[i].index_oid, pending_sm[i].node_id, pending_sm[i].prefix_len);
+			do_split(pending_sm[i].index_oid, pending_sm[i].node_id, pending_sm[i].prefix_len, 0);
 		else
 			do_merge_check(pending_sm[i].index_oid, pending_sm[i].node_id, pending_sm[i].prefix_len, pending_sm[i].merge_thresh);
 	}
@@ -2164,11 +2300,25 @@ merkle_route_cache_invalidate(Oid index_oid, const uint8 *routing_key)
 }
 
 static void
+merkle_route_cache_clear_index(Oid index_oid)
+{
+	int i;
+
+	for (i = 0; i < MERKLE_ROUTE_CACHE_SLOTS; i++)
+	{
+		MerkleRouteCacheEntry *entry = &merkle_route_cache[i];
+
+		if (entry->valid && entry->index_oid == index_oid)
+			entry->valid = false;
+	}
+}
+
+static void
 merkle_sync_prepare_plans(void)
 {
 	Oid route_argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
 	Oid leaf_argtypes[5] = {BYTEAOID, INT8OID, OIDOID, BYTEAOID, INT2OID};
-	Oid ancestor_argtypes[4] = {BYTEAOID, OIDOID, BYTEAOID, INT2OID};
+	Oid ancestor_argtypes[5] = {BYTEAOID, INT8OID, OIDOID, BYTEAOID, INT2OID};
 	SPIPlanPtr plan;
 
 	if (merkle_sync_route_plan == NULL ||
@@ -2189,7 +2339,7 @@ merkle_sync_prepare_plans(void)
 	{
 		plan = SPI_prepare(
 			"UPDATE ariabc_internal.merkle_node"
-			"   SET hash = pg_catalog.merkle_hash_xor_sql(hash, $1),"
+			"   SET hash = CASE WHEN tuple_count + $2 = 0 THEN '\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea ELSE pg_catalog.merkle_hash_xor_sql(hash, $1) END,"
 			"       tuple_count = tuple_count + $2"
 			" WHERE index_oid = $3 AND node_id = $4 AND prefix_len = $5"
 			"   AND is_leaf = true"
@@ -2206,9 +2356,10 @@ merkle_sync_prepare_plans(void)
 	{
 		plan = SPI_prepare(
 			"UPDATE ariabc_internal.merkle_node"
-			"   SET hash = pg_catalog.merkle_hash_xor_sql(hash, $1)"
-			" WHERE index_oid = $2 AND node_id = $3 AND prefix_len = $4",
-			4, ancestor_argtypes);
+			"   SET hash = CASE WHEN GREATEST(tuple_count + $2, 0) = 0 THEN '\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea ELSE pg_catalog.merkle_hash_xor_sql(hash, $1) END,"
+			"       tuple_count = GREATEST(tuple_count + $2, 0)"
+			" WHERE index_oid = $3 AND node_id = $4 AND prefix_len = $5",
+			5, ancestor_argtypes);
 		if (plan == NULL || SPI_keepplan(plan) != 0)
 			elog(ERROR, "SPI_prepare failed for synchronous Merkle ancestor plan");
 		merkle_sync_ancestor_update_plan = plan;
@@ -2219,10 +2370,13 @@ static void
 propagate_hash_to_ancestors_atomic(Oid index_oid, const uint8 *leaf_node_id,
 								   int leaf_prefix_len,
 								   const MerkleHash *tuple_hash_delta,
+								   int64 count_delta,
 								   int bits_per_split)
 {
 	uint8 curr_node_id[8];
 	int curr_prefix_len = leaf_prefix_len;
+
+	merkle_sync_prepare_plans();
 
 	memcpy(curr_node_id, leaf_node_id, 8);
 
@@ -2230,7 +2384,7 @@ propagate_hash_to_ancestors_atomic(Oid index_oid, const uint8 *leaf_node_id,
 	{
 		uint8 parent_node_id[8];
 		int parent_prefix_len = merkle_parent_of(parent_node_id, curr_node_id, curr_prefix_len, bits_per_split);
-		Datum upd_values[4];
+		Datum upd_values[5];
 		bytea *delta_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
 		bytea *parent_bytea = (bytea *) palloc(VARHDRSZ + 8);
 		int spi_rc;
@@ -2242,18 +2396,21 @@ propagate_hash_to_ancestors_atomic(Oid index_oid, const uint8 *leaf_node_id,
 		memcpy(VARDATA(parent_bytea), parent_node_id, 8);
 
 		upd_values[0] = PointerGetDatum(delta_bytea);
-		upd_values[1] = ObjectIdGetDatum(index_oid);
-		upd_values[2] = PointerGetDatum(parent_bytea);
-		upd_values[3] = Int16GetDatum((int16) parent_prefix_len);
+		upd_values[1] = Int64GetDatum(count_delta);
+		upd_values[2] = ObjectIdGetDatum(index_oid);
+		upd_values[3] = PointerGetDatum(parent_bytea);
+		upd_values[4] = Int16GetDatum((int16) parent_prefix_len);
 
+		PushActiveSnapshot(GetLatestSnapshot());
 		spi_rc = SPI_execute_plan(merkle_sync_ancestor_update_plan,
 									 upd_values, NULL, false, 1);
+		PopActiveSnapshot();
 
 		pfree(delta_bytea);
 		pfree(parent_bytea);
 
 		if (spi_rc != SPI_OK_UPDATE && spi_rc != SPI_OK_UPDATE_RETURNING)
-			elog(ERROR, "propagate_hash_to_ancestors_atomic SPI update failed for index %u", index_oid);
+			elog(ERROR, "propagate_hash_to_ancestors_atomic SPI update failed (rc=%d) for index %u", spi_rc, index_oid);
 
 		if (SPI_processed == 0)
 			ereport(ERROR,
@@ -2288,8 +2445,10 @@ merkle_atomic_update_leaf(Oid index_oid, const uint8 *leaf_node_id, int leaf_pre
 	upd_values[3] = PointerGetDatum(node_bytea);
 	upd_values[4] = Int16GetDatum((int16) leaf_prefix_len);
 
+	PushActiveSnapshot(GetLatestSnapshot());
 	spi_rc = SPI_execute_plan(merkle_sync_leaf_update_plan,
 								 upd_values, NULL, false, 1);
+	PopActiveSnapshot();
 
 	pfree(delta_bytea);
 	pfree(node_bytea);
@@ -2321,8 +2480,10 @@ merkle_node_is_leaf(Oid index_oid, const uint8 *node_id, int prefix_len)
 	values[1] = PointerGetDatum(node_bytea);
 	values[2] = Int16GetDatum((int16) prefix_len);
 
+	PushActiveSnapshot(GetLatestSnapshot());
 	spi_rc = SPI_execute_plan(merkle_sync_route_plan,
 								 values, NULL, false, 1);
+	PopActiveSnapshot();
 
 	if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 	{
@@ -2375,8 +2536,10 @@ merkle_resolve_route_leaf(Oid index_oid, const uint8 *routing_key,
 		values[1] = PointerGetDatum(node_id_bytea);
 		values[2] = Int16GetDatum((int16) prefix_len);
 
+		PushActiveSnapshot(GetLatestSnapshot());
 		spi_rc = SPI_execute_plan(merkle_sync_route_plan,
 								 values, NULL, false, 1);
+		PopActiveSnapshot();
 
 		if (spi_rc != SPI_OK_SELECT)
 		{
@@ -2471,7 +2634,7 @@ merkle_check_split_merge_guarded(Oid index_oid, const uint8 *node_id, int prefix
 
 		if (merkle_node_is_leaf(index_oid, node_id, prefix_len))
 		{
-			do_split(index_oid, node_id, prefix_len);
+			do_split(index_oid, node_id, prefix_len, current_count);
 		}
 	}
 	else if (current_count < merge_thresh && prefix_len > 0)
@@ -2515,6 +2678,9 @@ merkle_apply_single_coalesced_entry(const MerkleDeltaEntry *entry, int max_retri
 		elog(ERROR, "unrecognized Merkle delta event type: %u", entry->key.event_type);
 	}
 
+	if (merkle_is_in_split_range(index_oid, routing_key))
+		return;
+
 	for (attempt = 0; attempt < max_retries; attempt++)
 	{
 		uint8 leaf_node_id[8];
@@ -2533,7 +2699,7 @@ merkle_apply_single_coalesced_entry(const MerkleDeltaEntry *entry, int max_retri
 		if (rows_updated == 1)
 		{
 			propagate_hash_to_ancestors_atomic(index_oid, leaf_node_id, leaf_prefix_len,
-											   &entry->xor_delta, bits_per_split);
+											   &entry->xor_delta, count_delta, bits_per_split);
 			/* Make the complete in-transaction node update visible to the
 			 * split/merge guard with one CCI instead of one per ancestor. */
 			CommandCounterIncrement();
@@ -2576,6 +2742,8 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 	num_entries = hash_get_num_entries(combined_delta_map);
 	if (num_entries == 0)
 		return;
+
+	merkle_clear_split_ranges();
 
 	sorted_entries = (MerkleDeltaEntry **) palloc(num_entries * sizeof(MerkleDeltaEntry *));
 	hash_seq_init(&seq, combined_delta_map);

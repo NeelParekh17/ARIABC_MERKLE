@@ -159,6 +159,12 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
         if out["permanent_failures"] == "":
             out["permanent_failures"] = as_int(row, "permanent_failures")
 
+    if not out.get("client_workers") or out.get("client_workers") == "0":
+        out["client_workers"] = meta.get(
+            "det_client_workers",
+            meta.get("client_threads", meta.get("threads", meta.get("client_workers", "")))
+        )
+
     server_rows = rows.get("PROFILE_SERVER", [])
     if server_rows:
         leader_rows = [
@@ -166,7 +172,16 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
             if as_int(row, "append_calls") > 0 or as_int(row, "read_frames") > 100
         ]
         leader_path, row = leader_rows[-1] if leader_rows else server_rows[-1]
-        out["server_workers"] = row.get("configured_server_workers", "")
+        srv_workers = row.get("configured_server_workers", "")
+        if not srv_workers or srv_workers == "0":
+            srv_workers = row.get(
+                "bcdb_block_size",
+                row.get(
+                    "bcdb_init_arg_size_configured",
+                    row.get("bcdb_init_block_size_configured", meta.get("server_exec_workers", "")),
+                ),
+            )
+        out["server_workers"] = srv_workers
         out["bcdb_workers"] = row.get("bcdb_block_size", "")
         out["bcdb_init_arg_size"] = row.get(
             "bcdb_init_arg_size_configured",

@@ -1,7 +1,7 @@
 -- raft_apply_ledger_schema.sql
 -- Database schema for the crash-safe Raft -> BCDB -> PostgreSQL recovery ledger
 
-SET client_min_messages = warning;
+-- SET client_min_messages = warning;
 
 BEGIN;
 

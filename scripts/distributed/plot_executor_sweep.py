@@ -45,6 +45,11 @@ def load_valid_rows(path: pathlib.Path) -> list[dict[str, str]]:
                 continue
 
             workers = as_int(row, "server_workers")
+            if workers <= 0:
+                workers = as_int(row, "bcdb_workers")
+            if workers <= 0:
+                workers = as_int(row, "bcdb_init_arg_size")
+
             tps = as_float(row, "tps")
             merkle = as_int(row, "merkle_pass")
             div = as_int(row, "divergence_count")
@@ -63,7 +68,7 @@ def load_valid_rows(path: pathlib.Path) -> list[dict[str, str]]:
                 valid.append(row)
             else:
                 rejected.append(
-                    f"run_id={row.get('run_id')} workers={row.get('server_workers')} "
+                    f"run_id={row.get('run_id')} workers={workers} "
                     f"tps={row.get('tps')} merkle={row.get('merkle_pass')} "
                     f"div={row.get('divergence_count')} fail={row.get('permanent_failures')}"
                 )
@@ -88,10 +93,14 @@ def main() -> int:
 
     rows = load_valid_rows(args.input_csv)
 
-    # Group by server_workers
+    # Group by server_workers (or bcdb_workers fallback)
     grouped: dict[int, list[float]] = defaultdict(list)
     for row in rows:
         workers = as_int(row, "server_workers")
+        if workers <= 0:
+            workers = as_int(row, "bcdb_workers")
+        if workers <= 0:
+            workers = as_int(row, "bcdb_init_arg_size")
         tps = as_float(row, "tps")
         grouped[workers].append(tps)
 
