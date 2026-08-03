@@ -53,10 +53,14 @@ lib*.pc
 *.log
 *.md
 !Dynamic_merkle_docs/*.md
+!DISTRIBUTED_ARCHITECTURE_DIAGRAM.md
 *.diff
 
 # Exclude scripts by default (but allow whitelisting specific files)
 /scripts/*
+!/scripts/bench_full_results/
+/scripts/bench_full_results/*
+!/scripts/bench_full_results/*.zip
 
 # ...except for all distributed orchestration / benchmark / runbook files.
 # This folder is the collaborator-facing entrypoint for the 4-node Raft
@@ -95,6 +99,7 @@ lib*.pc
 /analysis.txt
 /git_diff_worker.txt
 /output.txt
+/out.txt
 /phase0_probe.py
 /phase0_probe_autocommit.py
 /phase0_probe_simple.py

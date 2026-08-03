@@ -16,6 +16,8 @@ Sweep options:
   --reps LIST              Repetition labels to run for each executor worker.
                            Accepts comma-separated or quoted space-separated values.
                            Default: "1 2 3"
+  --kafka-completion-mode MODE Completion mode: majority, majority_async_all3, or async.
+                           Default: "majority"
 
 Cluster topology options forwarded to run_4node_raft_cluster.sh:
   --node-ids CSV
@@ -58,6 +60,8 @@ THREADS=96
 DET_CLIENT_WORKERS=""
 EXECUTOR_WORKERS="1 2 4 8 12 16"
 REPS="1 2 3"
+KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority}"
+EXECUTION_PROFILE="${EXECUTION_PROFILE:-event-direct}"
 CLUSTER_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -78,8 +82,18 @@ while [[ $# -gt 0 ]]; do
       REPS="$(normalize_list "${2:?missing value for --reps}")"
       shift 2
       ;;
+    --kafka-completion-mode)
+      KAFKA_COMPLETION_MODE="${2:?missing value for --kafka-completion-mode}"
+      shift 2
+      ;;
+    --execution-profile)
+      EXECUTION_PROFILE="${2:?missing value for --execution-profile}"
+      CLUSTER_ARGS+=("$1" "$2")
+      shift 2
+      ;;
     --node-ids|--node-ips|--node-names|--node-users|--node-is-u22|--node-client-ports|\
-    --raft-port|--db-port|--db-user|--db-name|--kafka-host|--kafka-port|--kafka-home-remote)
+    --raft-port|--db-port|--db-user|--db-name|--kafka-host|--kafka-port|--kafka-home-remote|\
+    --det-client-inflight|--raft-ordered-batch-linger-us|--enable-merkle-index|--det-client-mode)
       CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
       shift 2
       ;;
@@ -123,6 +137,7 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
   printf 'det_client_workers=%s\n' "$DET_CLIENT_WORKERS"
   printf 'executor_workers=%s\n' "$EXECUTOR_WORKERS"
   printf 'reps=%s\n' "$REPS"
+  printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
   printf 'cluster_args='
   printf '%q ' "${CLUSTER_ARGS[@]}"
   printf '\n'
@@ -130,7 +145,7 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
 
 # Wrapped execution sequence to funnel into out.txt
 {
-  echo "Campaign: threads=$THREADS det_client_workers=$DET_CLIENT_WORKERS executor_workers=[$EXECUTOR_WORKERS] reps=[$REPS]"
+  echo "Campaign: threads=$THREADS det_client_workers=$DET_CLIENT_WORKERS executor_workers=[$EXECUTOR_WORKERS] reps=[$REPS] kafka_completion_mode=$KAFKA_COMPLETION_MODE"
   if [[ "${#CLUSTER_ARGS[@]}" -gt 0 ]]; then
     printf 'Cluster args: '
     printf '%q ' "${CLUSTER_ARGS[@]}"
@@ -156,30 +171,31 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
         ARIABC_RAFT_DURABLE_ASYNC_FLUSH=1 \
         ARIABC_RAFT_STREAM_GAP=512 \
         ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER=1 \
-        BCDB_DET_QUEUE_HIGH_WM=128 \
-        BCDB_DET_QUEUE_LOW_WM=64 \
+        BCDB_DET_QUEUE_HIGH_WM=65536 \
+        BCDB_DET_QUEUE_LOW_WM=32768 \
         ./scripts/distributed/run_4node_raft_cluster.sh \
           "${CLUSTER_ARGS[@]}" \
           --ordering-mode raft-kafka \
-          --execution-profile threaded-raft-direct \
           --enable-merkle-index 1 \
           --raft-apply-ledger-mode off \
           --threads "$THREADS" \
-          --det-client-workers "$DET_CLIENT_WORKERS" \
-          --det-client-inflight 1 \
+          --det-client-workers "${DET_CLIENT_WORKERS:-$THREADS}" \
+          --det-client-inflight "${DET_CLIENT_INFLIGHT:-16}" \
           --server-exec-workers "$E" \
-          --server-pg-connections "$E" \
-          --bcdb-workers 8 \
-          --bcdb-init-block-size 8 \
+          --server-pg-connections "${SERVER_PG_CONNECTIONS:-$E}" \
+          --pool-size "${SERVER_PG_CONNECTIONS:-$E}" \
+          --bcdb-workers "${BCDB_WORKERS:-$E}" \
+          --bcdb-init-block-size "$E" \
           --bcdb-decouple-workers 1 \
-          --raft-ordered-fanout 1 \
-          --raft-ordering-policy leader-assigned \
+          --conn-fanout "${CONN_FANOUT:-1}" \
+          --raft-ordered-fanout "${RAFT_ORDERED_FANOUT:-1}" \
+          --raft-ordering-policy "${RAFT_ORDERING_POLICY:-leader-assigned}" \
           --raft-ordered-batch-append 1 \
-          --raft-ordered-batch-target-entries 32 \
-          --raft-ordered-batch-linger-us 1000 \
-          --raft-ordered-coalesce-log 0 \
-          --kafka-completion-mode async \
-          --det-window 65536
+          --raft-ordered-batch-target-entries "${RAFT_ORDERED_BATCH_TARGET_ENTRIES:-64}" \
+          --raft-ordered-batch-linger-us "${RAFT_ORDERED_LINGER_US:-1000}" \
+          --raft-ordered-coalesce-log "${RAFT_ORDERED_COALESCE_LOG:-1}" \
+          --kafka-completion-mode "$KAFKA_COMPLETION_MODE" \
+          --det-window "${DET_WINDOW:-65536}"
 
       RUN_NAME="$(
         comm -13 "$BEFORE" \

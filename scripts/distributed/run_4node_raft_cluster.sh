@@ -384,6 +384,7 @@ PER_THREAD_WINDOW="${PER_THREAD_WINDOW:-1024}"
 DET_WINDOW_EXPLICIT=0
 DET_BATCH_SIZE_EXPLICIT=0
 DET_PIPELINE_DEPTH_EXPLICIT=0
+DET_CLIENT_INFLIGHT_EXPLICIT=0
 CONN_FANOUT="${CONN_FANOUT:-1}"
 CONN_FANOUT_EXPLICIT=0
 RAFT_ORDERED_FANOUT="${RAFT_ORDERED_FANOUT:-${ARIABC_RAFT_ORDERED_FANOUT:-1}}"
@@ -391,9 +392,9 @@ RAFT_ORDERED_BATCH_APPEND="${RAFT_ORDERED_BATCH_APPEND:-${ARIABC_RAFT_ORDERED_BA
 RAFT_ORDERED_BATCH_APPEND_EXPLICIT=0
 RAFT_ORDERED_COALESCE_LOG="${RAFT_ORDERED_COALESCE_LOG:-${ARIABC_RAFT_ORDERED_COALESCE_LOG:-0}}"
 RAFT_ORDERED_COALESCE_LOG_EXPLICIT=0
-RAFT_ORDERED_BATCH_TARGET_ENTRIES="${RAFT_ORDERED_BATCH_TARGET_ENTRIES:-${ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES:-1}}"
-RAFT_ORDERED_BATCH_LINGER_US="${RAFT_ORDERED_BATCH_LINGER_US:-${ARIABC_RAFT_ORDERED_BATCH_LINGER_US:-0}}"
-RAFT_ORDERING_POLICY="${RAFT_ORDERING_POLICY:-${ARIABC_RAFT_ORDERING_POLICY:-preassigned}}"
+RAFT_ORDERED_BATCH_TARGET_ENTRIES="${RAFT_ORDERED_BATCH_TARGET_ENTRIES:-${ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES:-64}}"
+RAFT_ORDERED_BATCH_LINGER_US="${RAFT_ORDERED_BATCH_LINGER_US:-${ARIABC_RAFT_ORDERED_BATCH_LINGER_US:-2000}}"
+RAFT_ORDERING_POLICY="${RAFT_ORDERING_POLICY:-${ARIABC_RAFT_ORDERING_POLICY:-leader-assigned}}"
 SUBMIT_MODE="${SUBMIT_MODE:-event}"
 DET_SUBMIT_PIPELINE="${DET_SUBMIT_PIPELINE:-1}"
 DET_PIPELINE_DEPTH="${DET_PIPELINE_DEPTH:-0}"
@@ -743,7 +744,7 @@ while [[ $# -gt 0 ]]; do
     --raft-ordered-coalesce-log) RAFT_ORDERED_COALESCE_LOG="${2:-1}"; RAFT_ORDERED_COALESCE_LOG_EXPLICIT=1; shift 2 ;;
     --raft-ordered-batch-target-entries) RAFT_ORDERED_BATCH_TARGET_ENTRIES="${2:-1}"; shift 2 ;;
     --raft-ordered-batch-linger-us) RAFT_ORDERED_BATCH_LINGER_US="${2:-0}"; shift 2 ;;
-    --raft-ordering-policy) RAFT_ORDERING_POLICY="${2:-preassigned}"; shift 2 ;;
+    --raft-ordering-policy) RAFT_ORDERING_POLICY="${2:-leader-assigned}"; shift 2 ;;
     --broadcast-accept-quorum) GATEWAY_BROADCAST_ACCEPT_QUORUM="${2:-0}"; shift 2 ;;
     --broadcast-result-quorum) GATEWAY_BROADCAST_RESULT_QUORUM="${2:-0}"; shift 2 ;;
     --broadcast-drain-in-timed-run) GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${2:-1}"; shift 2 ;;
@@ -753,7 +754,7 @@ while [[ $# -gt 0 ]]; do
     --submit-mode)  SUBMIT_MODE="${2:-event}"; shift 2 ;;
     --det-client-mode) DET_CLIENT_MODE="${2:-event}"; shift 2 ;;
     --det-client-workers) DET_CLIENT_WORKERS="${2:-0}"; shift 2 ;;
-    --det-client-inflight) DET_CLIENT_INFLIGHT="${2:-1}"; shift 2 ;;
+    --det-client-inflight) DET_CLIENT_INFLIGHT="${2:-1}"; DET_CLIENT_INFLIGHT_EXPLICIT=1; shift 2 ;;
     --pg-exec-mode) PG_EXEC_MODE="${2:-event}"; shift 2 ;;
     --server-exec-workers) SERVER_EXEC_WORKERS="${2:-0}"; shift 2 ;;
     --server-pg-connections) SERVER_PG_CONNECTIONS="${2:-0}"; shift 2 ;;
@@ -833,7 +834,9 @@ case "$EXECUTION_PROFILE" in
     DET_PREFIXED_DIRECT_PARALLEL=0
     DET_EVENT_BLOCK_FASTPATH=0
     DET_CLIENT_MODE="threadpool"
-    DET_CLIENT_INFLIGHT=1
+    if [[ "${DET_CLIENT_INFLIGHT_EXPLICIT:-0}" -eq 0 ]]; then
+      DET_CLIENT_INFLIGHT=1
+    fi
     SUBMIT_MODE="blocking"
     DET_SUBMIT_PIPELINE=0
     if [[ "$KAFKA_COMPLETION_MODE_EXPLICIT" -eq 0 ]]; then
@@ -855,10 +858,10 @@ case "$EXECUTION_PROFILE" in
       SERVER_PG_CONNECTIONS="$SERVER_EXEC_WORKERS"
     fi
     if [[ "$BCDB_DET_QUEUE_HIGH_WM" -eq 0 ]]; then
-      BCDB_DET_QUEUE_HIGH_WM=128
+      BCDB_DET_QUEUE_HIGH_WM=65536
     fi
     if [[ "$BCDB_DET_QUEUE_LOW_WM" -eq 0 ]]; then
-      BCDB_DET_QUEUE_LOW_WM=64
+      BCDB_DET_QUEUE_LOW_WM=32768
     fi
     DB_CONN_POOL_SIZE="$SERVER_PG_CONNECTIONS"
     ;;
@@ -1219,8 +1222,8 @@ if [[ "$DET_CLIENT_MODE" == "threadpool" ]]; then
     echo "ERROR: --det-client-mode threadpool requires --submit-mode blocking" >&2
     exit 2
   fi
-  if [[ "$DET_CLIENT_INFLIGHT" -ne 1 ]]; then
-    echo "ERROR: --det-client-mode threadpool requires --det-client-inflight 1" >&2
+  if [[ "$DET_CLIENT_INFLIGHT" -lt 1 ]]; then
+    echo "ERROR: --det-client-mode threadpool requires --det-client-inflight >= 1" >&2
     exit 2
   fi
   if [[ "$DET_BATCH_SIZE" -ne 1 ]]; then
@@ -1245,7 +1248,7 @@ fi
 if [[ "$EXECUTION_PROFILE" == "threaded-raft-direct" ]]; then
   if [[ "$PG_EXEC_MODE" != "threaded" ||
         "$DET_CLIENT_MODE" != "threadpool" ||
-        "$DET_CLIENT_INFLIGHT" -ne 1 ||
+        "$DET_CLIENT_INFLIGHT" -lt 1 ||
         "$SERVER_EXEC_WORKERS" -lt 1 ||
         "$SERVER_PG_CONNECTIONS" -ne "$SERVER_EXEC_WORKERS" ||
         "$DET_PREFIXED_DIRECT_PARALLEL" != "0" ||
@@ -1256,16 +1259,12 @@ if [[ "$EXECUTION_PROFILE" == "threaded-raft-direct" ]]; then
   fi
 fi
 if [[ "$RAFT_ORDERING_POLICY" == "leader-assigned" ]]; then
-  if [[ "$EXECUTION_PROFILE" != "threaded-raft-direct" ||
-        "$ORDERING_MODE" != "raft-kafka" ||
+  if [[ "$ORDERING_MODE" != "raft-kafka" ||
         "$BYPASS_RAFT" -ne 0 ||
         "$RAFT_ORDERED_FANOUT" != "1" ||
         "$RAFT_APPLY_LEDGER_MODE" != "off" ||
-        "$DET_RAW_SQL" != "0" ||
-        "$DET_CLIENT_MODE" != "threadpool" ||
-        "$DET_CLIENT_INFLIGHT" -ne 1 ||
-        "$DET_BATCH_SIZE" -ne 1 ]]; then
-    echo "ERROR: --raft-ordering-policy leader-assigned requires threaded-raft-direct, raft-kafka, bypassRaft=0, raftOrderedFanout=1, raftApplyLedger=off, detRawSql=0, detClientMode=threadpool, detClientInflight=1, detBatchSize=1" >&2
+        "$DET_RAW_SQL" != "0" ]]; then
+    echo "ERROR: --raft-ordering-policy leader-assigned requires raft-kafka, bypassRaft=0, raftOrderedFanout=1, raftApplyLedger=off, detRawSql=0" >&2
     exit 2
   fi
 fi
@@ -1287,7 +1286,12 @@ node_ssh() {
   local idx="$1"; shift
   local ip="${NODE_IPS[$idx]}"
   local user="${NODE_USERS[$idx]}"
-  local cmd=(sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@")
+  local cmd=()
+  if command -v sshpass >/dev/null 2>&1 && [[ -n "$CLUSTER_PASSWORD" ]]; then
+    cmd=(sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@")
+  else
+    cmd=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$user@$ip" "$@")
+  fi
   if [[ -n "${NODE_SSH_COMMAND_TIMEOUT:-}" && "${NODE_SSH_COMMAND_TIMEOUT:-0}" != "0" ]]; then
     timeout "$NODE_SSH_COMMAND_TIMEOUT" "${cmd[@]}"
   else
@@ -1831,11 +1835,13 @@ if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
     client_port="${NODE_CLIENT_PORTS[$idx]}"
     log "  Killing server on $name (ports 9000, $client_port)"
     node_ssh "$idx" "
-      fuser -k 9000/tcp 2>/dev/null || true
-      fuser -k ${client_port}/tcp 2>/dev/null || true
-      ROOT_DIR=\"\$(readlink -f \"$RAFT_STORAGE_DIR\" 2>/dev/null || echo \"$RAFT_STORAGE_DIR\")\"
+      set +e
+      pkill -9 ariabc_pg_server >/dev/null 2>&1 || true
+      fuser -k 9000/tcp >/dev/null 2>&1 || true
+      fuser -k ${client_port}/tcp >/dev/null 2>&1 || true
+      ROOT_DIR=\"\$(readlink -m \"$RAFT_STORAGE_DIR\" 2>/dev/null || echo \"$RAFT_STORAGE_DIR\")\"
       TARGET_DIR=\"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\"
-      TARGET_DIR=\"\$(readlink -f \"\$TARGET_DIR\" 2>/dev/null || echo \"\$TARGET_DIR\")\"
+      TARGET_DIR=\"\$(readlink -m \"\$TARGET_DIR\" 2>/dev/null || echo \"\$TARGET_DIR\")\"
       if [[ \"$RAFT_STORAGE_MODE\" == \"durable\" && \"$RAFT_STORAGE_ACTION\" == \"fresh\" ]]; then
         # Safety validation: target path must start exactly with canonical ROOT_DIR/RAFT_CLUSTER_ID/nodeID
         if [[ \"\$TARGET_DIR\" == \"\$ROOT_DIR/$RAFT_CLUSTER_ID/node$id\" && \"\$TARGET_DIR\" != \"/\" && \"\$TARGET_DIR\" != \"\$HOME\" && \"\$TARGET_DIR\" != \"$REMOTE_REPO_ROOT\" ]]; then
@@ -1847,6 +1853,7 @@ if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
         fi
       fi
       sleep 0.5
+      exit 0
     " &
     CLEANUP_PIDS+=("$!")
     CLEANUP_IDS+=("$id")
@@ -2475,29 +2482,18 @@ fi
 # Phase 1.8: Clock Validity Preflight
 # ---------------------------------------------------------------------------
 log "=== Phase 1.8: Clock Validity Preflight ==="
-log "  [local] (gateway) clock metrics:"
-(
-  date +%s%3N
-  timedatectl status || true
-  if command -v chronyc >/dev/null 2>&1; then
-    chronyc tracking || true
-  else
-    echo "chronyc not installed; skipping Chrony details"
-  fi
-) 2>&1 | sed "s/^/    /"
+local_ts="$(date +%s%3N)"
+local_status="$(timedatectl status 2>/dev/null | awk -F': ' '/Local time|System clock synchronized|NTP service/ {printf "%s: %s; ", $1, $2}' | tr -s ' ' || true)"
+log "  [local] (gateway) ts=$local_ts ${local_status:-clock check done}"
 
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
-  log "  [$name] (server) clock metrics:"
-  node_ssh "$idx" "
-    date +%s%3N
-    timedatectl status || true
-    if command -v chronyc >/dev/null 2>&1; then
-      chronyc tracking || true
-    else
-      echo 'chronyc not installed; skipping Chrony details'
-    fi
-  " 2>&1 | sed "s/^/    /"
+  node_clock="$(node_ssh "$idx" "
+    ts=\$(date +%s%3N)
+    st=\$(timedatectl status 2>/dev/null | awk -F': ' '/Local time|System clock synchronized|NTP service/ {printf \"%s: %s; \", \$1, \$2}' | tr -s ' ' || true)
+    echo \"ts=\$ts \$st\"
+  " 2>/dev/null || echo "clock check failed")"
+  log "  [$name] (server) $node_clock"
 done
 
 # ---------------------------------------------------------------------------
@@ -3128,6 +3124,7 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
     node_ssh "$idx" "
       INSTALL_DIR='$REMOTE_INSTALL_DIR'
       export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+      export PGOPTIONS=\"\${PGOPTIONS:--c client_min_messages=warning}\"
       test -f '$remote_restore' || { echo 'missing restore SQL: $remote_restore' >&2; exit 1; }
       \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
         -v ON_ERROR_STOP=1 -f '$remote_restore'
@@ -3409,7 +3406,15 @@ done
 if [[ "$BYPASS_RAFT" -eq 1 ]]; then
   sleep 2
 else
-  sleep 5  # Let Raft elect a leader and stabilize
+  log "  Waiting for Raft leadership to stabilize on preferred leader..."
+  for attempt in $(seq 1 15); do
+    pref_leader_status="$(node_ssh 0 "grep -E 'LEADER \(term|my id: 1, leader: 1' '$REMOTE_LOG_DIR/nuraft_node1.log' 2>/dev/null | tail -1" 2>/dev/null || true)"
+    if [[ -n "$pref_leader_status" ]]; then
+      log "  Node 1 leadership confirmed: $pref_leader_status"
+      break
+    fi
+    sleep 1
+  done
 fi
 
 if [[ "$ALL_UP" -eq 1 ]]; then

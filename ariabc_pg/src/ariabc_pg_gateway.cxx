@@ -406,8 +406,8 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
         return false;
     }
     if (opt.det_client_mode == "threadpool") {
-        if (opt.det_client_inflight != 1) {
-            err = "--detClientMode threadpool requires --detClientInflight 1";
+        if (opt.det_client_inflight < 1) {
+            err = "--detClientMode threadpool requires --detClientInflight >= 1";
             return false;
         }
         if (opt.submit_mode != "blocking") {
@@ -3517,6 +3517,19 @@ bool submit_to_cluster(const std::vector<host_port>& nodes,
                 if (out_node_idx) *out_node_idx = idx;
                 return out_wait_result_success != nullptr;
             }
+
+            const bool is_already_accepted =
+                (resp.msg.rfind("DUPLICATE_RAFT_DET_SEQ", 0) == 0 ||
+                 resp.msg.rfind("STALE_RAFT_DET_SEQ", 0) == 0 ||
+                 resp.msg.rfind("LEADER_ASSIGNED_INFLIGHT_DUPLICATE", 0) == 0);
+            if (is_already_accepted) {
+                cli.leader_known = true;
+                cli.leader_idx = idx;
+                if (out_resp) *out_resp = resp;
+                if (out_node_idx) *out_node_idx = idx;
+                return true;
+            }
+
             // Not accepted: follower redirect, Raft transient, or admission-control backpressure.
             g_submit_prof.not_accepted.fetch_add(1, std::memory_order_relaxed);
             err = resp.msg;
@@ -3714,6 +3727,16 @@ bool submit_to_cluster_event(async_cluster_submitter& submitter,
         }
 
         if (resp.status == 1) {
+            const bool is_already_accepted =
+                (resp.msg.rfind("DUPLICATE_RAFT_DET_SEQ", 0) == 0 ||
+                 resp.msg.rfind("STALE_RAFT_DET_SEQ", 0) == 0);
+            if (is_already_accepted) {
+                g_event_submit_leader_idx.store(static_cast<int>(idx), std::memory_order_relaxed);
+                if (out_resp) *out_resp = resp;
+                if (out_node_idx) *out_node_idx = idx;
+                return true;
+            }
+
             err = resp.msg;
 
             int leader_id = -1;
@@ -4698,6 +4721,7 @@ int main(int argc, char** argv) {
             const auto start_time = std::chrono::steady_clock::now();
             std::chrono::milliseconds backoff(2);
 
+            int last_leader_idx = -1;
             while (true) {
                 int leader_count = 0;
                 int elected_node_idx = -1;
@@ -4718,28 +4742,27 @@ int main(int argc, char** argv) {
                 }
 
                 if (leader_count == 1 && elected_node_idx >= 0) {
-                    ariabc_pg::g_event_submit_leader_idx.store(
-                        elected_node_idx, std::memory_order_relaxed);
+                    if (last_leader_idx == elected_node_idx) {
+                        ariabc_pg::g_event_submit_leader_idx.store(
+                            elected_node_idx, std::memory_order_relaxed);
 
-                    std::cout << "real Raft leader confirmed: node_endpoint_index="
-                              << elected_node_idx
-                              << " endpoint=" << nodes[elected_node_idx].host
-                              << ":" << nodes[elected_node_idx].port
-                              << std::endl;
-                    return true;
+                        std::cout << "real Raft leader confirmed: node_endpoint_index="
+                                  << elected_node_idx
+                                  << " endpoint=" << nodes[elected_node_idx].host
+                                  << ":" << nodes[elected_node_idx].port
+                                  << std::endl;
+                        return true;
+                    }
+                    last_leader_idx = elected_node_idx;
+                } else {
+                    last_leader_idx = -1;
                 }
 
                 const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now() - start_time).count();
                 if (elapsed >= 30) break;
 
-                std::this_thread::sleep_for(backoff);
-                if (backoff < std::chrono::milliseconds(500)) {
-                    backoff *= 2;
-                    if (backoff > std::chrono::milliseconds(500)) {
-                        backoff = std::chrono::milliseconds(500);
-                    }
-                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
 
             std::cerr << "leader warmup failed: no single elected leader reported "
@@ -5263,12 +5286,13 @@ int main(int argc, char** argv) {
             const bool det_client_threadpool = (opt.det_client_mode == "threadpool");
             const size_t det_threadpool_workers =
                 det_client_threadpool
-                    ? std::max<size_t>(
-                          1,
-                          static_cast<size_t>(
-                              opt.det_client_workers > 0
-                                  ? opt.det_client_workers
-                                  : opt.num_terminals))
+                    ? (std::max<size_t>(
+                           1,
+                           static_cast<size_t>(
+                               opt.det_client_workers > 0
+                                   ? opt.det_client_workers
+                                   : opt.num_terminals)) *
+                       static_cast<size_t>(std::max(1, opt.det_client_inflight)))
                     : 0;
             std::atomic<size_t> det_gateway_workers_created(0);
             std::atomic<size_t> det_gateway_active_submits(0);
@@ -5362,6 +5386,7 @@ int main(int argc, char** argv) {
                                               << " worker=" << worker_id
                                               << " idx=" << idx
                                               << " tries=" << tries
+                                              << " err=" << submit_err
                                               << std::endl;
                                 }
                                 std::this_thread::sleep_for(backoff);

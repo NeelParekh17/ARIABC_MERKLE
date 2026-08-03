@@ -12,6 +12,6 @@ FROM (
     SELECT * FROM healthy.usertable
 ) diff;
 
-SELECT merkle_root_hash('healthy.usertable'::regclass) = merkle_root_hash('damaged.usertable'::regclass) AS roots_match;
-SELECT merkle_verify('healthy.usertable'::regclass) AS healthy_merkle_verify;
-SELECT merkle_verify('damaged.usertable'::regclass) AS damaged_merkle_verify;
+SELECT merkle_root_hash_index('healthy.usertable_merkle_idx'::regclass) = merkle_root_hash_index('damaged.usertable_merkle_idx'::regclass) AS roots_match;
+SELECT merkle_verify_index('healthy.usertable_merkle_idx'::regclass) AS healthy_merkle_verify;
+SELECT merkle_verify_index('damaged.usertable_merkle_idx'::regclass) AS damaged_merkle_verify;
