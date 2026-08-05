@@ -46,6 +46,9 @@ def is_selected(path: Path, repo_root: Path) -> bool:
         return False
     if path.name in IGNORED_FILE_NAMES:
         return False
+    rel_str = rel.as_posix()
+    if rel_str.endswith("bin/initdb/postgres") or rel_str.endswith("bin/pg_ctl/postgres"):
+        return False
     # Shared-library files (*.so, *.so.1, libfoo.so.1.2.3, etc.)
     if path.suffix == ".so" or ".so." in path.name:
         return False
