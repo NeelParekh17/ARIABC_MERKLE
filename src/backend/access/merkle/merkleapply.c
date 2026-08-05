@@ -172,9 +172,13 @@ merkle_mark_recovery_state_impl(MerkleRecoveryState state, const char *reason)
 		2, argtypes, values, nulls, false, 1);
 	if (spi_rc != SPI_OK_UPDATE || SPI_processed != 1)
 	{
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
 		(void) SPI_finish();
 		return;
 	}
+	if (SPI_tuptable != NULL)
+		SPI_freetuptable(SPI_tuptable);
 	(void) SPI_finish();
 }
 
@@ -235,6 +239,7 @@ merkle_advance_terminal_prefix_spi(void)
 	if (isnull)
 		elog(ERROR, "merkle_advance_terminal_prefix: terminal_prefix_seq is NULL");
 	current_prefix = (uint64) DatumGetInt64(datum);
+	SPI_freetuptable(SPI_tuptable);
 	new_prefix = current_prefix;
 
 	/*
@@ -277,6 +282,8 @@ merkle_advance_terminal_prefix_spi(void)
 			new_prefix = seq;
 			advanced = true;
 		}
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
 		if (new_prefix == batch_start || SPI_processed < 1024)
 			break;
 	}
@@ -380,6 +387,7 @@ merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS)
 			if (isnull || !OidIsValid(index_oids[i]))
 				elog(ERROR, "invalid Merkle index OID in catalog scan");
 		}
+		SPI_freetuptable(SPI_tuptable);
 	}
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "Merkle legacy-index scan SPI_finish failed");
@@ -465,6 +473,7 @@ merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS)
 			elog(ERROR, "Merkle rebuild verification query failed");
 		verify_ok = DatumGetBool(SPI_getbinval(
 			SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &verify_null));
+		SPI_freetuptable(SPI_tuptable);
 		if (verify_null || !verify_ok)
 		{
 			(void) SPI_finish();
@@ -614,6 +623,7 @@ get_index_key_expr_str(Oid index_oid)
 		Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
 		if (!isnull)
 			expr_str = TextDatumGetCString(d);
+		SPI_freetuptable(SPI_tuptable);
 	}
 
 	if (expr_str == NULL || strlen(expr_str) == 0)
@@ -681,6 +691,8 @@ propagate_hash_to_ancestors(Oid index_oid, const uint8 *leaf_node_id, int leaf_p
 			memcpy(&new_parent_hash, &parent_hash, sizeof(MerkleHash));
 			merkle_hash_xor(&new_parent_hash, tuple_hash_delta);
 
+			SPI_freetuptable(SPI_tuptable);
+
 			{
 				Oid upd_argtypes[5] = {BYTEAOID, INT8OID, OIDOID, BYTEAOID, INT2OID};
 				Datum upd_values[5];
@@ -699,9 +711,14 @@ propagate_hash_to_ancestors(Oid index_oid, const uint8 *leaf_node_id, int leaf_p
 					" WHERE index_oid = $3 AND node_id = $4 AND prefix_len = $5",
 					5, upd_argtypes, upd_values, NULL, false, 1);
 
+				if (SPI_tuptable != NULL)
+					SPI_freetuptable(SPI_tuptable);
+
 				pfree(new_hash_bytea);
 			}
 		}
+		else if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
 
 		pfree(parent_bytea);
 		memcpy(curr_node_id, parent_node_id, 8);
@@ -720,7 +737,6 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 	int			i;
 	int		   *bucket_counts;
 	MerkleHash *bucket_hashes;
-	int			bucket_offset = 0;
 
 	if (num_entries <= 0)
 		return;
@@ -768,7 +784,6 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 			merkle_hash_xor(&bucket_hashes[b], &entries[i].tuple_hash);
 		}
 	}
-
 	/* Group entries by bucket so recursive calls receive the exact subset of tuples */
 	{
 		MerkleTupleHashEntry *partitioned_entries = (MerkleTupleHashEntry *) malloc((size_t) num_entries * sizeof(MerkleTupleHashEntry));
@@ -819,6 +834,8 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 				ins_values[4] = PointerGetDatum(child_hash_bytea);
 
 				SPI_execute_plan(plan_split_insert_child, ins_values, NULL, false, 1);
+				if (SPI_tuptable != NULL)
+					SPI_freetuptable(SPI_tuptable);
 
 				pfree(child_id_bytea);
 				pfree(child_hash_bytea);
@@ -850,8 +867,6 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 	{
 		MerkleHash	total_split_hash;
 		int64		total_split_count = 0;
-		MerkleHash	old_hash;
-		int64		old_count = 0;
 		bytea	   *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
 		bytea	   *hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
 		Datum		upd_values[5];
@@ -861,42 +876,6 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 		{
 			merkle_hash_xor(&total_split_hash, &bucket_hashes[i]);
 			total_split_count += bucket_counts[i];
-		}
-
-		merkle_hash_zero(&old_hash);
-		{
-			Oid sel_argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
-			Datum sel_values[3];
-			bytea *id_b = (bytea *) palloc(VARHDRSZ + 8);
-
-			int spi_rc;
-			SET_VARSIZE(id_b, VARHDRSZ + 8);
-			memcpy(VARDATA(id_b), node_id, 8);
-			sel_values[0] = ObjectIdGetDatum(index_oid);
-			sel_values[1] = PointerGetDatum(id_b);
-			sel_values[2] = Int16GetDatum((int16) prefix_len);
-
-			PushActiveSnapshot(GetLatestSnapshot());
-			spi_rc = SPI_execute_with_args(
-				"SELECT hash, tuple_count FROM ariabc_internal.merkle_node"
-				" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3",
-				3, sel_argtypes, sel_values, NULL, true, 1);
-			PopActiveSnapshot();
-
-			if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
-			{
-				bool isnull;
-				Datum h_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
-				Datum c_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull);
-				if (!isnull)
-				{
-					bytea *h_b = DatumGetByteaPP(h_d);
-					memcpy(old_hash.data, VARDATA_ANY(h_b), MERKLE_HASH_BYTES);
-				}
-				if (!isnull)
-					old_count = DatumGetInt64(c_d);
-			}
-			pfree(id_b);
 		}
 
 		SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
@@ -912,19 +891,13 @@ merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
 		upd_values[4] = PointerGetDatum(hash_bytea);
 
 		SPI_execute_plan(plan_split_update_nonleaf, upd_values, NULL, false, 1);
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
 
 		pfree(node_id_bytea);
 		pfree(hash_bytea);
 
-		if (prefix_len > 0)
-		{
-			MerkleHash hash_delta;
-			int64 count_delta = total_split_count - old_count;
-			memcpy(hash_delta.data, total_split_hash.data, MERKLE_HASH_BYTES);
-			merkle_hash_xor(&hash_delta, &old_hash);
-
-			propagate_hash_to_ancestors_atomic(index_oid, node_id, prefix_len, &hash_delta, count_delta, bits_per_split);
-		}
+		/* Splits re-partition existing entries without changing total ancestor count or XOR hash */
 	}
 
 	pfree(bucket_counts);
@@ -987,7 +960,6 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len, int64 target_count
 	char	   *key_expr;
 	int			spi_rc;
 	StringInfoData buf;
-	MerkleOptions *opts;
 	int			fanout;
 	int			bits_per_split;
 	int			split_threshold;
@@ -1012,18 +984,27 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len, int64 target_count
 	key_expr = get_index_key_expr_str(index_oid);
 
 	initStringInfo(&buf);
+	/* Evaluate the route expression once per heap tuple.  Calling the
+	 * polymorphic SQL wrapper independently in the target list and the
+	 * predicate can produce different expression-cache contexts; materializing
+	 * here keeps the selected route and the copied route key identical. */
 	appendStringInfo(&buf,
-		"SELECT %s AS kh, merkle_tuple_hash(%s.*) AS th"
-		"  FROM %s"
-		" WHERE %s BETWEEN $1 AND $2"
-		" ORDER BY ctid",
-		key_expr, heap_name, heap_name, key_expr);
+		"WITH merkle_split_rows AS MATERIALIZED ("
+		" SELECT ctid, %s AS kh, merkle_tuple_hash(%s.*) AS th"
+		"   FROM %s"
+		")"
+		" SELECT kh, th"
+		"   FROM merkle_split_rows"
+		"  WHERE kh BETWEEN $1 AND $2"
+		"  ORDER BY ctid",
+		key_expr, heap_name, heap_name);
 
 	{
 		Oid			argtypes[2] = {BYTEAOID, BYTEAOID};
 		Datum		values[2];
 		bytea	   *lower_bytea = (bytea *) palloc(VARHDRSZ + 8);
 		bytea	   *upper_bytea = (bytea *) palloc(VARHDRSZ + 8);
+		uint64		scan_rows;
 
 		SET_VARSIZE(lower_bytea, VARHDRSZ + 8);
 		SET_VARSIZE(upper_bytea, VARHDRSZ + 8);
@@ -1034,33 +1015,55 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len, int64 target_count
 
 		PushActiveSnapshot(GetLatestSnapshot());
 		spi_rc = SPI_execute_with_args(buf.data, 2, argtypes, values, NULL, true, 0);
+		scan_rows = SPI_processed;
 		PopActiveSnapshot();
 
-		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
+		if (target_count > 0 && scan_rows != (uint64) target_count)
+		{
+			if (SPI_tuptable != NULL)
+				SPI_freetuptable(SPI_tuptable);
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("Merkle split row count does not match node tuple_count"),
+					 errdetail("index %u node prefix length %d has tuple_count %lld but the heap scan returned %llu rows",
+							   index_oid, prefix_len, (long long) target_count,
+							   (unsigned long long) scan_rows)));
+		}
+
+		if (spi_rc == SPI_OK_SELECT && scan_rows > 0)
 		{
 			int						i;
-			MerkleTupleHashEntry   *entries = (MerkleTupleHashEntry *) malloc((size_t) SPI_processed * sizeof(MerkleTupleHashEntry));
+			int						num_entries;
+			MerkleTupleHashEntry *entries;
+
+			if (scan_rows > PG_INT32_MAX)
+				elog(ERROR, "too many rows returned while splitting Merkle node (%llu)",
+					 (unsigned long long) scan_rows);
+			num_entries = (int) scan_rows;
+			entries = (MerkleTupleHashEntry *) malloc((size_t) num_entries * sizeof(MerkleTupleHashEntry));
 
 			if (!entries)
-				elog(ERROR, "out of memory allocating Merkle entries from catalog (%llu entries)", (unsigned long long) SPI_processed);
+				elog(ERROR, "out of memory allocating Merkle entries from catalog (%llu entries)", (unsigned long long) scan_rows);
+
+			/* Copy all data out of the SPI tuptable before freeing it. */
+			for (i = 0; i < num_entries; i++)
+			{
+				HeapTuple	tup = SPI_tuptable->vals[i];
+				TupleDesc	td = SPI_tuptable->tupdesc;
+				bool		isnull;
+				Datum		kh_d = SPI_getbinval(tup, td, 1, &isnull);
+				Datum		th_d = SPI_getbinval(tup, td, 2, &isnull);
+				bytea	   *kh_b = DatumGetByteaPP(kh_d);
+				bytea	   *th_b = DatumGetByteaPP(th_d);
+
+				memcpy(entries[i].key_hash, VARDATA_ANY(kh_b), 8);
+				memcpy(entries[i].tuple_hash.data, VARDATA_ANY(th_b), MERKLE_HASH_BYTES);
+			}
+			SPI_freetuptable(SPI_tuptable);
 
 			PG_TRY();
 			{
-				for (i = 0; i < SPI_processed; i++)
-				{
-					HeapTuple	tup = SPI_tuptable->vals[i];
-					TupleDesc	td = SPI_tuptable->tupdesc;
-					bool		isnull;
-					Datum		kh_d = SPI_getbinval(tup, td, 1, &isnull);
-					Datum		th_d = SPI_getbinval(tup, td, 2, &isnull);
-					bytea	   *kh_b = DatumGetByteaPP(kh_d);
-					bytea	   *th_b = DatumGetByteaPP(th_d);
-
-					memcpy(entries[i].key_hash, VARDATA_ANY(kh_b), 8);
-					memcpy(entries[i].tuple_hash.data, VARDATA_ANY(th_b), MERKLE_HASH_BYTES);
-				}
-
-				merkle_do_split_in_memory(index_oid, node_id, prefix_len, entries, SPI_processed, fanout, bits_per_split, split_threshold);
+				merkle_do_split_in_memory(index_oid, node_id, prefix_len, entries, num_entries, fanout, bits_per_split, split_threshold);
 				merkle_register_split_range(index_oid, lower, upper);
 				merkle_route_cache_clear_index(index_oid);
 				CommandCounterIncrement();
@@ -1078,6 +1081,8 @@ do_split(Oid index_oid, const uint8 *node_id, int prefix_len, int64 target_count
 
 			free(entries);
 		}
+		else if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
 
 		pfree(lower_bytea);
 		pfree(upper_bytea);
@@ -1091,9 +1096,6 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 {
 	uint8 parent_node_id[8];
 	int parent_prefix_len;
-	uint8 lower[8];
-	uint8 upper[8];
-	int spi_rc;
 	Relation index_rel;
 	int fanout, bits_per_split;
 
@@ -1107,14 +1109,19 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 	index_close(index_rel, AccessShareLock);
 
 	parent_prefix_len = merkle_parent_of(parent_node_id, node_id, prefix_len, bits_per_split);
-	memcpy(lower, parent_node_id, 8);
-	merkle_bytea_upper_bound(upper, parent_node_id, parent_prefix_len);
 
 	{
-		Oid argtypes[4] = {OIDOID, INT2OID, BYTEAOID, BYTEAOID};
-		Datum values[4];
+		uint8 lower[8];
+		uint8 upper[8];
 		bytea *lower_bytea = (bytea *) palloc(VARHDRSZ + 8);
 		bytea *upper_bytea = (bytea *) palloc(VARHDRSZ + 8);
+		Oid argtypes[4] = {OIDOID, INT2OID, BYTEAOID, BYTEAOID};
+		Datum values[4];
+		int spi_rc;
+
+		memcpy(lower, parent_node_id, 8);
+		merkle_bytea_upper_bound(upper, parent_node_id, parent_prefix_len);
+
 		SET_VARSIZE(lower_bytea, VARHDRSZ + 8);
 		SET_VARSIZE(upper_bytea, VARHDRSZ + 8);
 		memcpy(VARDATA(lower_bytea), lower, 8);
@@ -1138,14 +1145,22 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 			TupleDesc td = SPI_tuptable->tupdesc;
 			HeapTuple tup = SPI_tuptable->vals[0];
 			bool isnull;
-			int64 cnt_val = DatumGetInt64(SPI_getbinval(tup, td, 1, &isnull));
-			bool all_leaves = DatumGetBool(SPI_getbinval(tup, td, 2, &isnull));
-			int64 total_count = DatumGetInt64(SPI_getbinval(tup, td, 3, &isnull));
+			Datum datum;
+			int64 total_children;
+			bool all_leaves;
+			int64 total_count;
 
-			elog(NOTICE, "do_merge_check node=%02x%02x plen=%d parent_plen=%d cnt_val=%ld leaves=%s total_count=%ld merge_thresh=%d",
-				 node_id[0], node_id[1], prefix_len, parent_prefix_len, (long) cnt_val, all_leaves ? "t" : "f", (long) total_count, merge_thresh);
+			datum = SPI_getbinval(tup, td, 1, &isnull);
+			total_children = isnull ? 0 : DatumGetInt64(datum);
+			datum = SPI_getbinval(tup, td, 2, &isnull);
+			all_leaves = !isnull && DatumGetBool(datum);
+			datum = SPI_getbinval(tup, td, 3, &isnull);
+			total_count = isnull ? 0 : DatumGetInt64(datum);
 
-			if (all_leaves && total_count < merge_thresh)
+			if (SPI_tuptable != NULL)
+				SPI_freetuptable(SPI_tuptable);
+
+			if (total_children > 0 && all_leaves && total_count <= merge_thresh)
 			{
 				int i;
 				MerkleHash merged_hash;
@@ -1171,6 +1186,9 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 						merkle_hash_xor(&merged_hash, &ch);
 					}
 				}
+
+				if (SPI_tuptable != NULL)
+					SPI_freetuptable(SPI_tuptable);
 
 				if (total_count == 0)
 					merkle_hash_zero(&merged_hash);
@@ -1208,6 +1226,8 @@ do_merge_check(Oid index_oid, const uint8 *node_id, int prefix_len, int merge_th
 						" WHERE index_oid = $3 AND node_id = $4 AND prefix_len = $5",
 						5, upd_argtypes, upd_values, NULL, false, 1);
 					PopActiveSnapshot();
+					if (SPI_tuptable != NULL)
+						SPI_freetuptable(SPI_tuptable);
 
 					pfree(parent_id_bytea);
 					pfree(merged_hash_bytea);
@@ -1232,7 +1252,8 @@ typedef struct {
 	uint8 node_id[8];
 	int prefix_len;
 	bool is_split;
-	int merge_thresh; /* Add merge_thresh so we can pass it correctly */
+	int split_thresh;
+	int merge_thresh;
 } PendingSplitMerge;
 
 #define MAX_PENDING_SPLIT_MERGE 1024
@@ -1278,6 +1299,9 @@ apply_leaf_event(Oid index_oid, const uint8 key_hash[8], const MerkleHash *tuple
 
 		if (SPI_processed == 0)
 		{
+			if (SPI_tuptable != NULL)
+				SPI_freetuptable(SPI_tuptable);
+
 			if (prefix_len == 0)
 			{
 				Oid ins_argtypes[4] = {OIDOID, BYTEAOID, INT2OID, BYTEAOID};
@@ -1336,6 +1360,7 @@ apply_leaf_event(Oid index_oid, const uint8 key_hash[8], const MerkleHash *tuple
 							appendStringInfo(&buf, "[len=%d id=%.8s leaf=%s cnt=%ld] ",
 											 plen, nid, ileaf ? "t" : "f", (long) tc);
 						}
+						SPI_freetuptable(SPI_tuptable);
 					}
 				}
 				pfree(node_id_bytea);
@@ -1356,6 +1381,8 @@ apply_leaf_event(Oid index_oid, const uint8 key_hash[8], const MerkleHash *tuple
 			int64 new_count;
 
 			memcpy(current_hash.data, VARDATA_ANY(hash_bytea), MERKLE_HASH_BYTES);
+			if (SPI_tuptable != NULL)
+				SPI_freetuptable(SPI_tuptable);
 
 			if (is_leaf)
 			{
@@ -1420,10 +1447,12 @@ apply_leaf_event(Oid index_oid, const uint8 key_hash[8], const MerkleHash *tuple
 							memcpy(pending_sm[num_pending_sm].node_id, node_id, 8);
 							pending_sm[num_pending_sm].prefix_len = prefix_len;
 							pending_sm[num_pending_sm].is_split = true;
+							pending_sm[num_pending_sm].split_thresh = split_thresh;
+							pending_sm[num_pending_sm].merge_thresh = merge_thresh;
 							num_pending_sm++;
 						}
 					}
-					else if (new_count < merge_thresh && prefix_len > 0)
+					else if (new_count <= merge_thresh && prefix_len > 0)
 					{
 						bool found = false;
 						int k;
@@ -1564,6 +1593,8 @@ merkle_raft_apply_target(const uint8 *epoch_id, uint64 raft_log_index,
 	if (isnull)
 		elog(ERROR, "resolved Merkle Raft target is NULL");
 	target = (uint64) DatumGetInt64(target_datum);
+	if (SPI_tuptable != NULL)
+		SPI_freetuptable(SPI_tuptable);
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "Merkle target SPI_finish failed");
 	PopActiveSnapshot();
@@ -2419,6 +2450,9 @@ propagate_hash_to_ancestors_atomic(Oid index_oid, const uint8 *leaf_node_id,
 							index_oid),
 					 errdetail("parent prefix length=%d", parent_prefix_len)));
 
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
+
 		memcpy(curr_node_id, parent_node_id, 8);
 		curr_prefix_len = parent_prefix_len;
 	}
@@ -2459,6 +2493,7 @@ merkle_atomic_update_leaf(Oid index_oid, const uint8 *leaf_node_id, int leaf_pre
 		Datum count_datum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
 		if (new_count_out)
 			*new_count_out = DatumGetInt64(count_datum);
+		SPI_freetuptable(SPI_tuptable);
 		return 1;
 	}
 
@@ -2489,6 +2524,7 @@ merkle_node_is_leaf(Oid index_oid, const uint8 *node_id, int prefix_len)
 	{
 		bool isnull;
 		is_leaf = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull));
+		SPI_freetuptable(SPI_tuptable);
 	}
 
 	pfree(node_bytea);
@@ -2549,6 +2585,9 @@ merkle_resolve_route_leaf(Oid index_oid, const uint8 *routing_key,
 
 		if (SPI_processed == 0)
 		{
+			if (SPI_tuptable != NULL)
+				SPI_freetuptable(SPI_tuptable);
+
 			if (prefix_len == 0)
 			{
 				Oid ins_argtypes[4] = {OIDOID, BYTEAOID, INT2OID, BYTEAOID};
@@ -2568,6 +2607,9 @@ merkle_resolve_route_leaf(Oid index_oid, const uint8 *routing_key,
 					" ON CONFLICT (index_oid, node_id, prefix_len) DO NOTHING",
 					4, ins_argtypes, ins_values, NULL, false, 1);
 
+				if (SPI_tuptable != NULL)
+					SPI_freetuptable(SPI_tuptable);
+
 				pfree(zero_hash_bytea);
 				pfree(node_id_bytea);
 				memcpy(leaf_node_id, node_id, 8);
@@ -2582,6 +2624,9 @@ merkle_resolve_route_leaf(Oid index_oid, const uint8 *routing_key,
 		{
 			bool isnull;
 			bool is_leaf = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull));
+
+			if (SPI_tuptable != NULL)
+				SPI_freetuptable(SPI_tuptable);
 
 			if (is_leaf)
 			{
@@ -2637,7 +2682,7 @@ merkle_check_split_merge_guarded(Oid index_oid, const uint8 *node_id, int prefix
 			do_split(index_oid, node_id, prefix_len, current_count);
 		}
 	}
-	else if (current_count < merge_thresh && prefix_len > 0)
+	else if (current_count <= merge_thresh && prefix_len > 0)
 	{
 		int64 lock_key = merkle_compute_advisory_lock_key(index_oid, node_id, prefix_len);
 		DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(lock_key));
@@ -2704,8 +2749,30 @@ merkle_apply_single_coalesced_entry(const MerkleDeltaEntry *entry, int max_retri
 			 * split/merge guard with one CCI instead of one per ancestor. */
 			CommandCounterIncrement();
 			if (count_delta != 0)
-				merkle_check_split_merge_guarded(index_oid, leaf_node_id, leaf_prefix_len,
-													new_count, split_thresh, merge_thresh);
+			{
+				bool found = false;
+				int k;
+				for (k = 0; k < num_pending_sm; k++)
+				{
+					if (pending_sm[k].index_oid == index_oid &&
+						pending_sm[k].prefix_len == leaf_prefix_len &&
+						memcmp(pending_sm[k].node_id, leaf_node_id, 8) == 0)
+					{
+						found = true;
+						break;
+					}
+				}
+				if (!found && num_pending_sm < MAX_PENDING_SPLIT_MERGE)
+				{
+					pending_sm[num_pending_sm].index_oid = index_oid;
+					memcpy(pending_sm[num_pending_sm].node_id, leaf_node_id, 8);
+					pending_sm[num_pending_sm].prefix_len = leaf_prefix_len;
+					pending_sm[num_pending_sm].is_split = (new_count > split_thresh);
+					pending_sm[num_pending_sm].split_thresh = split_thresh;
+					pending_sm[num_pending_sm].merge_thresh = merge_thresh;
+					num_pending_sm++;
+				}
+			}
 			applied = true;
 			break;
 		}
@@ -2753,9 +2820,52 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 
 	qsort(sorted_entries, num_entries, sizeof(MerkleDeltaEntry *), merkle_delta_entry_cmp);
 
+	num_pending_sm = 0;
+
 	for (i = 0; i < num_entries; i++)
 	{
 		merkle_apply_single_coalesced_entry(sorted_entries[i], max_retries);
+	}
+
+	if (num_pending_sm > 0)
+	{
+		int k;
+		CommandCounterIncrement();
+		for (k = 0; k < num_pending_sm; k++)
+		{
+			Oid argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
+			Datum values[3];
+			bytea *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
+			int spi_rc;
+
+			SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
+			memcpy(VARDATA(node_id_bytea), pending_sm[k].node_id, 8);
+			values[0] = ObjectIdGetDatum(pending_sm[k].index_oid);
+			values[1] = PointerGetDatum(node_id_bytea);
+			values[2] = Int16GetDatum((int16) pending_sm[k].prefix_len);
+
+			PushActiveSnapshot(GetLatestSnapshot());
+			spi_rc = SPI_execute_with_args(
+				"SELECT tuple_count FROM ariabc_internal.merkle_node"
+				" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3 AND is_leaf = true",
+				3, argtypes, values, NULL, true, 1);
+			PopActiveSnapshot();
+
+			if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
+			{
+				bool isnull;
+				int64 latest_count = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull));
+				SPI_freetuptable(SPI_tuptable);
+				merkle_check_split_merge_guarded(pending_sm[k].index_oid,
+												 pending_sm[k].node_id,
+												 pending_sm[k].prefix_len,
+												 latest_count,
+												 pending_sm[k].split_thresh,
+												 pending_sm[k].merge_thresh);
+			}
+			pfree(node_id_bytea);
+		}
+		num_pending_sm = 0;
 	}
 
 	pfree(sorted_entries);

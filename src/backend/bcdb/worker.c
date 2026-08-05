@@ -291,6 +291,8 @@ bcdb_safe_postcommit_witness(const uint8 *epoch_id,
 	if (result_txt) pfree(result_txt);
 	if (error_txt) pfree(error_txt);
 	pfree(epoch_copy);
+	if (SPI_tuptable != NULL)
+		SPI_freetuptable(SPI_tuptable);
 	SPI_finish();
 	if (pushed_snapshot)
 		PopActiveSnapshot();

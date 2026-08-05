@@ -140,6 +140,7 @@ merkle_populate_index_stats(Oid index_oid, IndexBulkDeleteResult *stats)
                 stats->num_index_tuples = DatumGetFloat8(tuples_datum);
             if (!isnull)
                 stats->num_pages = (int) Max(1.0, DatumGetFloat8(count_datum));
+            SPI_freetuptable(SPI_tuptable);
         }
         SPI_finish();
     }

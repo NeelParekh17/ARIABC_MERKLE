@@ -292,6 +292,8 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 				found_catalog_leaves = true;
 			}
 		}
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
 		SPI_finish();
 	}
 
@@ -367,6 +369,8 @@ merkle_root_hash_index(PG_FUNCTION_ARGS)
 					found = true;
 				}
 			}
+			if (SPI_tuptable != NULL)
+				SPI_freetuptable(SPI_tuptable);
 			SPI_finish();
 		}
 		pfree(zero_id_bytea);
@@ -468,6 +472,8 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
             if (!isnull1) totalNodes = (int) DatumGetInt64(d1);
             if (!isnull2) leafNodes = (int) DatumGetInt64(d2);
         }
+        if (SPI_tuptable != NULL)
+            SPI_freetuptable(SPI_tuptable);
         SPI_finish();
     }
     

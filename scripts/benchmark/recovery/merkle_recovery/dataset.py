@@ -232,6 +232,13 @@ def build_dataset(
 
     execute(conn, "ANALYZE healthy.usertable")
     execute(conn, "ANALYZE damaged.usertable")
+    execute(conn, "ANALYZE ariabc_internal.merkle_node")
+    print(f"[dataset] executing CHECKPOINT to flush dirty buffers and WAL...", flush=True)
+    execute(conn, "CHECKPOINT")
+    # Warm table and index pages into shared_buffers
+    execute(conn, "SELECT count(*) FROM healthy.usertable")
+    execute(conn, "SELECT count(*) FROM damaged.usertable")
+    execute(conn, "SELECT count(*) FROM ariabc_internal.merkle_node")
     timings = {
         "healthy_table_ms": (t2 - t1) * 1000.0,
         "damaged_table_ms": (t3 - t2) * 1000.0,
@@ -250,6 +257,8 @@ def reset_damaged_from_healthy(conn, cfg: dict[str, int]) -> None:
     execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")
     create_damaged_indexes(conn, cfg.get("split_threshold", 32), cfg.get("merge_threshold", 8), cfg.get("fanout", 4))
     execute(conn, "ANALYZE damaged.usertable")
+    execute(conn, "ANALYZE ariabc_internal.merkle_node")
+    execute(conn, "CHECKPOINT")
 
 
 # ── occupancy helpers ────────────────────────────────────────────────────────
