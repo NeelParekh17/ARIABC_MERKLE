@@ -29,6 +29,7 @@
 #include "parser/parse_coerce.h"
 #include "funcapi.h"
 #include "access/xact.h"
+#include "access/xloginsert.h"
 #include "portability/instr_time.h"
 
 
@@ -594,6 +595,8 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	meta->baselineApplySeq = baseline_apply_seq;
 
 	MarkBufferDirty(metabuf);
+	if (RelationNeedsWAL(indexRel))
+		log_newpage_buffer(metabuf, true);
 	UnlockReleaseBuffer(metabuf);
 }
 
@@ -604,7 +607,48 @@ typedef struct MerkleKeyHashCache
 	FmgrInfo	send_fn;
 } MerkleKeyHashCache;
 
+/*
+ * merkle_node_upper_bound_sql - SQL-callable wrapper around merkle_bytea_upper_bound.
+ *
+ * Computes the inclusive upper-bound bytea for a Merkle prefix range, exactly
+ * as do_split() and do_merge_check() do internally.  This eliminates the need
+ * for a hand-rolled plpgsql duplicate in test/utility scripts.
+ *
+ * Usage:  merkle_node_upper_bound(node_id bytea, prefix_len int) -> bytea
+ */
+PG_FUNCTION_INFO_V1(merkle_node_upper_bound_sql);
+
+Datum
+merkle_node_upper_bound_sql(PG_FUNCTION_ARGS)
+{
+	bytea	   *node_id_arg = PG_GETARG_BYTEA_PP(0);
+	int			prefix_len  = PG_GETARG_INT32(1);
+	uint8		node_id[8];
+	uint8		upper[8];
+	bytea	   *result;
+
+	if (VARSIZE_ANY_EXHDR(node_id_arg) != 8)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("merkle_node_upper_bound: node_id must be exactly 8 bytes")));
+
+	if (prefix_len < 0 || prefix_len > 64)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("merkle_node_upper_bound: prefix_len must be in [0, 64]")));
+
+	memcpy(node_id, VARDATA_ANY(node_id_arg), 8);
+	merkle_bytea_upper_bound(upper, node_id, prefix_len);
+
+	result = (bytea *) palloc(VARHDRSZ + 8);
+	SET_VARSIZE(result, VARHDRSZ + 8);
+	memcpy(VARDATA(result), upper, 8);
+
+	PG_RETURN_BYTEA_P(result);
+}
+
 PG_FUNCTION_INFO_V1(merkle_key_hash_sql);
+
 
 Datum
 merkle_key_hash_sql(PG_FUNCTION_ARGS)
@@ -705,14 +749,17 @@ merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
 			if (cache->slot != NULL)
 				ExecDropSingleTupleTableSlot(cache->slot);
 			if (cache->tupdesc != NULL)
-				ReleaseTupleDesc(cache->tupdesc);
+				FreeTupleDesc(cache->tupdesc);
 		}
 
 		cache = (MerkleTupleHashCache *) MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, sizeof(MerkleTupleHashCache));
 		cache->tup_type = tup_type;
 		cache->tup_typmod = tup_typmod;
-		cache->tupdesc = lookup_rowtype_tupdesc(tup_type, tup_typmod);
-		PinTupleDesc(cache->tupdesc);
+		{
+			MemoryContext oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+			cache->tupdesc = lookup_rowtype_tupdesc_copy(tup_type, tup_typmod);
+			MemoryContextSwitchTo(oldcxt);
+		}
 		cache->slot = MakeSingleTupleTableSlot(cache->tupdesc, &TTSOpsHeapTuple);
 		cache->send_functions = (FmgrInfo *) MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, cache->tupdesc->natts * sizeof(FmgrInfo));
 

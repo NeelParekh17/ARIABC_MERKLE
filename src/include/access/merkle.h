@@ -414,6 +414,7 @@ extern Datum merkle_recovery_status(PG_FUNCTION_ARGS);
 extern void merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *slot,
 											 MerkleHash *result);
 extern Datum merkle_key_hash_sql(PG_FUNCTION_ARGS);
+extern Datum merkle_node_upper_bound_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_tuple_hash_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_until_sql(PG_FUNCTION_ARGS);
 

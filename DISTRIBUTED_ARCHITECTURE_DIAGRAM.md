@@ -22,7 +22,7 @@ The cluster consists of **4 machines** (1 Gateway controller machine + 3 Databas
                                                 v
 +---------------------------------------------------------------------------------------------------+
 |                                  NODE 1: admin123 (Leader)                                        |
-|                                  IP: 10.129.148.247 | Ubuntu 20.04                                   |
+|                                  IP: 10.129.148.247 | Ubuntu 20.04                                |
 |                                                                                                   |
 |  +-----------------------------------+   +-----------------------------------------------------+  |
 |  | Kafka Broker (KRaft mode)         |   | ariabc_pg_server (Raft Leader, Node ID=1)           |  |
@@ -81,7 +81,7 @@ Each server node (`admin123`, `user4`, `utkarsh`) executes the exact same softwa
 |  |                                                v                                            |
 |  |                                 +------------------------------+                            |
 |  |                                 | BCDB Deterministic Scheduler |                            |
-|  |                                 | (8 Worker Queues)            |                            |
+|  |                                 | ($E Worker Queues: 1..16)    |                            |
 |  |                                 +--------------+---------------+                            |
 |  +------------------------------------------------|--------------------------------------------+  |
 |                                                   | Local SPI / Shared Memory Connection          |
@@ -158,11 +158,11 @@ The end-to-end execution lifecycle in `scripts/distributed/run_sweep.sh` (which 
 
 ```text
 +---------------------------------------------------------------------------------------------------------------------------------------------------+
-| STAGE 1: TRANSACTION INGESTION, SHARDING & DIRECT SOCKET SUBMISSION (run_sweep.sh Default Mode)                                                   |
+| STAGE 1: TRANSACTION INGESTION, SHARDING & CLUSTER SUBMISSION (run_sweep.sh Default Campaign Mode)                                                |
 |                                                                                                                                                   |
 |   GATEWAY MACHINE (proposed-gw: 10.129.27.111)                                                                                                    |
 |   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
-|   | ariabc_pg_gateway Process (--threads 96 --det-client-workers 96 --det-client-inflight 1)                                                   |  |
+|   | ariabc_pg_gateway Process (--threads 96 --det-client-workers 96 --det-client-inflight 16 --det-window 65536)                              |  |
 |   |   WORKLOAD FILE: scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt (Total 20,000 YCSB SQL queries: idx 0..19999)         |  |
 |   |                                                                                                                                            |  |
 |   |   IN-MEMORY TRACKING TABLE (vote_store):                                                                                                   |  |
@@ -189,7 +189,7 @@ The end-to-end execution lifecycle in `scripts/distributed/run_sweep.sh` (which 
                                                           | TCP 4-Tuple Connections to Port 8000       |
                                                           v                                            v
 +---------------------------------------------------------------------------------------------------------------------------------------------------+
-| STAGE 2: 96 SERVER RPC THREADS, SHARED `raft_orderer` MEMORY TABLE, DURABLE LOG & REPLICATION                                                     |
+| STAGE 2: 96 SERVER RPC THREADS, RAFT LEADER ORDERING (raft_orderer), DURABLE LOG & REPLICATION                                                     |
 |                                                                                                                                                   |
 |   NODE 1: admin123 (Raft Leader, Node ID=1 | IP: 10.129.148.247)                                                                                  |
 |   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
@@ -267,126 +267,282 @@ The end-to-end execution lifecycle in `scripts/distributed/run_sweep.sh` (which 
 +---------------------------------------------------------------------------------------------------------------------------------------------------+
                                                         |
                                                         v
-+-------------------------------------------------------------------------------------------------------------------------------+
-| STAGE 3: DETERMINISTIC DB EXECUTION & SYNCHRONOUS MERKLE TREE STAGING                                                         |
-|                                                                                                                               |
-|   EXECUTED CONCURRENTS ON ALL 3 NODES: admin123 (10.129.148.247), user4 (10.129.148.246), utkarsh (10.129.148.248)            |
-|                                                                                                                               |
-|   +-----------------------------------------------------------------------------------------------------------------------+   |
-|   | ariabc_pg_server Process                                                                                              |   |
-|   |   - BCDB Deterministic Scheduler dispatches committed Raft entries across 8 Worker Queues (--bcdb-workers 8)        |   |
-|   +---------------------------------------------------|-------------------------------------------------------------------+   |
-|                                                       | Local SPI / libpq Pool Connection (Port 5438)                         |
-|                                                       v                                                                       |
-|   +-----------------------------------------------------------------------------------------------------------------------+   |
-|   | PostgreSQL Backend Engine (Port 5438 | postgres process)                                                              |   |
-|   |                                                                                                                       |   |
-|   |   1. Workload Execution:                                                                                              |   |
-|   |      - DML executed on `public.usertable_small` (INSERT / UPDATE / DELETE)                                            |   |
-|   |                                                                                                                       |   |
-|   |   2. In-Memory Staging (`src/backend/access/merkle/merkledelta.c`):                                                   |   |
-|   |      - PostgreSQL heap access hooks intercept modified tuples                                                         |   |
-|   |      - Compute `TupleKeyHash` and stage delta in backend memory HTAB buffer                                           |   |
-|   |                                                                                                                       |   |
-|   |   3. Transaction Pre-Commit Hook (`merkle_apply_staged_synchronous_safe` in `merkleapply.c`):                         |   |
-|   |      - Reads staged HTAB delta buffer at PRE_COMMIT                                                                   |   |
-|   |      - Route lookup in `ariabc_internal.merkle_node` prefix radix tree                                                |   |
-|   |      - Atomically updates leaf node XOR aggregate hash & tuple_count                                                  |   |
-|   |      - Checks dynamic node split threshold (>32 tuples) or merge threshold (<8 tuples)                               |   |
-|   |      - Bubbles XOR hash modifications up parent radix nodes to ROOT (\x0000000000000000)                              |   |
-|   +-----------------------------------------------------------------------------------------------------------------------+   |
-+-------------------------------------------------------------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------------------------------------------------------------------+
+| STAGE 3: DETERMINISTIC BCDB ENGINE EXECUTION, CONFLICT TRACKING & SYNCHRONOUS MERKLE STAGING (8 PARALLEL WORKERS)                                 |
+|                                                                                                                                                   |
+|   EXECUTED CONCURRENTLY ON ALL 3 CLUSTER NODES: admin123 (10.129.148.247), user4 (10.129.148.246), utkarsh (10.129.148.248)                       |
+|   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
+|   | ariabc_pg_server & BCDB Deterministic Scheduler                                                                                           |   |
+|   |   BCDB Scheduler: Dispatches committed Raft entries into 8 Partitioned Worker Queues (--bcdb-workers 8)                                   |   |
+|   |   +-------------------+  +-------------------+  +-------------------+        +-------------------+  +-------------------+                 |   |
+|   |   | TX QUEUE #0       |  | TX QUEUE #1       |  | TX QUEUE #2       |  ...   | TX QUEUE #6       |  | TX QUEUE #7       |                 |   |
+|   |   | [tx0, tx8, tx16]  |  | [tx1, tx9, tx17]  |  | [tx2, tx10, tx18] |  ...   | [tx6, tx14, tx22] |  | [tx7, tx15, tx23] |                 |   |
+|   |   +---------+---------+  +---------+---------+  +---------+---------+        +---------+---------+  +---------+---------+                 |   |
+|   +-------------|----------------------|----------------------|------------------------------|----------------------|-------------------------+   |
+|                 |                      |                      |                              |                      |                             |
+|                 v                      v                      v                              v                      v                             |
+|   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
+|   | 8 PARALLEL BCDB WORKER BACKENDS (PostgreSQL Engine Processes on Port 5438)                                                                |   |
+|   |                                                                                                                                           |   |
+|   |   STEP 1: OPTIMISTIC PARALLEL EXECUTION & PROCESS-LOCAL RW-SET STAGING                                                                    |   |
+|   |   +--------------------------+  SQL Execution  +----------------------------+  Access Hooks  +------------------------------------+       |   |
+|   |   | Worker Backend Process   | -------------> | PostgreSQL Heap AM Engine    | ------------> | Backend Memory Context             |       |   |
+|   |   | (Queue Worker #0..#7)    |                  | (usertable_small UPDATE)   |                | (bcdb_tx_context: zero shm lock)   |      |   |
+|   |   +--------------------------+                  +----------------------------+                +-----------------+------------------+      |   |
+|   |                                                                                                             |                             |   |
+|   |                                                                                                             v                             |   |
+|   |                                                                               +---------------------------------------------------+       |   |
+|   |                                                                               | PROCESS-LOCAL SINGLY-LINKED LISTS                 |       |   |
+|   |                                                                               | - rs_table_record: [TAG1] -> [TAG2] -> NULL       |       |   |
+|   |                                                                               |   (Tag: relOid=16384, page=12, offset=4)          |       |   |
+|   |                                                                               | - ws_table_record: [TAG1, CMD_UPDATE, Slot, CID]  |       |   |
+|   |                                                                               +---------------------------------------------------+       |   |
+|   |                                                                                                                                           |   |
+|   |   STEP 2: DETERMINISTIC CONFLICT TRACKING & DUAL HASH SHARD PROBING (conflict_checkDT)                                                    |   |
+|   |   +------------------------------------+          Probes Tuple Tags           +---------------------------------------------------+       |   |
+|   |   | Local RW Lists (Step 1)            | -----------------------------------> | SHARED WSTable DUAL SHARDS (Ping-Pong Scheme)     |       |   |
+|   |   | - rs_table_record                  |                                      | +-----------------------+ +---------------------+ |       |   |
+|   |   | - ws_table_record                  |                                      | | Active Shard (map)    | | Secondary (mapB)    | |       |   |
+|   |   +------------------------------------+                                      | +-----------------------+ +---------------------+ |       |   |
+|   |                                                                               +-------------------------+-------------------------+       |   |
+|   |                                                                                                         |                                 |   |
+|   |                                                                                                         v                                 |   |
+|   |                                                                               +---------------------------------------------------+       |   |
+|   |                                                                               | CONFLICT EVALUATION ENGINE (cand_txid < self_txid)|       |   |
+|   |                                                                               | - RAW Probe : ws_table tag matches local rs_record|       |   |
+|   |                                                                               | - WAR Probe : rs_table tag matches local ws_record|       |   |
+|   |                                                                               | - WAW Probe : ws_table tag matches local ws_record|       |   |
+|   |                                                                               +-------------------------+-------------------------+       |   |
+|   |                                                                                                         |                                 |   |
+|   |                                                                    +------------------------------------+--------------------------------+       |   |
+|   |                                                                    | PASS (Zero Conflict)                                                | FAIL (Conflict Hit)
+|   |                                                                    v                                                                     v   |   |
+|   |                                                   +----------------------------------+                                  +----------------+   |   |
+|   |                                                   | Proceed to Publish & Serial Gate |                                  | Defer / Retry  |   |   |
+|   |                                                   +----------------------------------+                                  +----------------+   |   |
+|   |                                                                                                                                           |   |
+|   |   STEP 3: WRITE-SET PUBLISHING & SERIAL COMMIT GATE PIPELINE                                                                              |   |
+|   |   +------------------------------------+  publish_ws_tableDT()  +---------------------------------------------------------------------+   |   |
+|   |   | Local ws_table_record              | ---------------------> | SHARED ACTIVE SHARD (ws_table->mapActive)                           |   |   |
+|   |   | [TAG1, CMD_UPDATE, Slot, CID]      |                        | Atomically commits Write-Set tags for future conflict probes        |   |   |
+|   |   +------------------------------------+                        +----------------------------------+----------------------------------+   |   |
+|   |                                                                                                    |                                          |   |
+|   |                                                                                                    v                                          |   |
+|   |                                                                 +---------------------------------------------------------------------+   |   |
+|   |                                                                 | bcdb_wait_for_serial_slot() (SERIAL GATE WATERMARK)                 |   |   |
+|   |                                                                 | Enforces: tx_id == last_committed_tx_id + 1                         |   |   |
+|   |                                                                 | Blocks out-of-order commits; advances watermark on commit completion|   |   |
+|   |                                                                 +---------------------------------------------------------------------+   |   |
+|   |                                                                                                                                           |   |
+|   |   STEP 4: SYNCHRONOUS MERKLE TREE STAGING & ATOMIC RADIX BUBBLE                                                                           |   |
+|   |   +--------------------------+  Heap Modification  +----------------------------+  Key Delta Stage  +-------------------------------+   |   |
+|   |   | Modified Tuple           | ------------------> | merkledelta.c Access Hook  | ----------------> | Process HTAB Memory Buffer    |   |   |
+|   |   | (usertable_small key=42) |                     | Compute TupleKeyHash(42)   |                   | Map: Key -> Delta (XOR Hash)  |   |   |
+|   |   +--------------------------+                     +----------------------------+                   +---------------+---------------+   |   |
+|   |                                                                                                                     |                         |   |
+|   |                                                                                                                     v PRE_COMMIT Hook         |   |
+|   |                                                                               +---------------------------------------------------+   |   |
+|   |                                                                               | merkle_apply_staged_synchronous_safe()            |   |   |
+|   |                                                                               | Lookup Node in ariabc_internal.merkle_node        |   |   |
+|   |                                                                               +-------------------------+-------------------------+   |   |
+|   |                                                                                                         |                             |   |
+|   |                                                                                                         v                             |   |
+|   |   DYNAMIC BINARY RADIX PREFIX MERKLE TREE STRUCTURE:                                                                                      |   |
+|   |                                               +---------------------------------------+                                                   |   |
+|   |                                               | ROOT NODE (Parent Level 0)            |                                                   |   |
+|   |                                               | node_id: \x0000000000000000           |                                                   |   |
+|   |                                               | prefix_len: 0  | is_leaf: false       |                                                   |   |
+|   |                                               | root_hash: Child_0_Hash ^ Child_1_Hash|                                                   |   |
+|   |                                               +-------------------+-------------------+                                                   |   |
+|   |                                                                   |                                                                       |   |
+|   |                                       +---------------------------+---------------------------+                                           |   |
+|   |                                       | Bit 0 = 0                                             | Bit 0 = 1                                 |   |
+|   |                                       v                                                       v                                           |   |
+|   |                       +-------------------------------+                       +-------------------------------+                           |   |
+|   |                       | LEFT LEAF NODE                |                       | RIGHT LEAF NODE               |                           |   |
+|   |                       | node_id: \x0000000000000000   |                       | node_id: \x8000000000000000   |                           |   |
+|   |                       | prefix_len: 1 | is_leaf: true |                       | prefix_len: 1 | is_leaf: true |                           |   |
+|   |                       | tuple_count: 24 (Threshold 32)|                       | tuple_count: 18 (Threshold 32)|                           |   |
+|   |                       | hash: XOR(Tuples in Left)     |                       | hash: XOR(Tuples in Right)    |                           |   |
+|   |                       +-------------------------------+                       +-------------------------------+                           |   |
+|   |                                       |                                                       |                                           |   |
+|   |                                       +---------------------------+---------------------------+                                           |   |
+|   |                                                                   |                                                                       |   |
+|   |   TREE REBALANCING ENGINE:                                        v                                                                       |   |
+|   |   +-----------------------------------+   +------------------------------------+   +--------------------------------------------------+   |   |
+|   |   | 1. Leaf XOR Update                |   | 2. Rebalancing Rule                |   | 3. Atomic Parent Bubble                          |   |   |
+|   |   | leaf_hash = leaf_hash ^ delta_hash|   | Split if tuple > 32 (prefix_len+1) |   | Propagate XOR modifications up parent nodes      |   |   |
+|   |   | tuple_count = tuple_count + 1     |   | Merge if tuple < 8 with sibling    |   | up to ROOT (\x0000000000000000)                  |   |   |
+|   |   +-----------------------------------+   +------------------------------------+   +--------------------------------------------------+   |   |
+|   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
++---------------------------------------------------------------------------------------------------------------------------------------------------+
                                                         |
                                                         v
-+-------------------------------------------------------------------------------------------------------------------------------+
-| STAGE 4: ASYNC KAFKA RESULT STREAMING & BACKGROUND vote_store VALIDATION                                                      |
-|                                                                                                                               |
-|   ALL 3 SERVER NODES: admin123, user4, utkarsh                                                                                |
-|   +-----------------------------------------------------------------------------------------------------------------------+   |
-|   | librdkafka Producer inside ariabc_pg_server                                                                           |   |
-|   |   - Publishes result record: { req_id: "client-0", node_id: 1, status: OK, merkle_root: 0xa3f... } to Kafka Broker    |   |
-|   +---------------------------------------------------|-------------------------------------------------------------------+   |
-|                                                       | Kafka TCP Produce (Port 9092)                                         |
-|                                                       v                                                                       |
-|   NODE 1: admin123 (10.129.148.247:9092)                                                                                      |
-|   +-----------------------------------------------------------------------------------------------------------------------+   |
-|   | Kafka Broker (KRaft Mode | Topic: ariabc_results)                                                                       |   |
-|   +---------------------------------------------------|-------------------------------------------------------------------+   |
-|                                                       | Kafka TCP Consume (Port 9092)                                         |
-|                                                       v                                                                       |
-|   GATEWAY MACHINE (proposed-gw: 10.129.27.111)                                                                               |
-|   +-----------------------------------------------------------------------------------------------------------------------+   |
-|   | Background Kafka Result Consumer Thread (inside ariabc_pg_gateway)                                                    |   |
-|   |   1. Asynchronously polls result records for `req_id: client-0` from topic `ariabc_results`                           |   |
-|   |   2. Looks up `vote_store["client-0"]` in background without blocking Worker Thread #0                                |   |
-|   |   3. Accumulates replica root hash returns (Node 1, Node 2, Node 4) for result metrics tracking                        |   |
-|   +-----------------------------------------------------------------------------------------------------------------------+   |
-+-------------------------------------------------------------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------------------------------------------------------------------+
+| STAGE 4: ASYNC KAFKA RESULT STREAMING & BACKGROUND vote_store VALIDATION                                                                          |
+|                                                                                                                                                   |
+|   ALL 3 SERVER NODES: admin123 (10.129.148.247), user4 (10.129.148.246), utkarsh (10.129.148.248)                                                 |
+|   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
+|   | librdkafka Producer inside ariabc_pg_server                                                                                               |   |
+|   |   - Publishes result record: { req_id: "client-0", node_id: 1, status: OK, merkle_root: 0xa3f... } to Kafka Broker                        |   |
+|   +---------------------------------------------------|-----------------------------------------------------------------------------------+   |
+|                                                       | Kafka TCP Produce (Port 9092)                                                         |
+|                                                       v                                                                                       |
+|   NODE 1: admin123 (10.129.148.247:9092)                                                                                                          |
+|   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
+|   | Kafka Broker (KRaft Mode | Topic: ariabc_results)                                                                                           |   |
+|   +---------------------------------------------------|-----------------------------------------------------------------------------------+   |
+|                                                       | Kafka TCP Consume (Port 9092)                                                         |
+|                                                       v                                                                                       |
+|   GATEWAY MACHINE (proposed-gw: 10.129.27.111)                                                                                                    |
+|   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
+|   | Background Kafka Result Consumer Thread (inside ariabc_pg_gateway)                                                                        |   |
+|   |   1. Asynchronously polls result records for `req_id: client-0` from topic `ariabc_results`                                               |   |
+|   |   2. Looks up `vote_store["client-0"]` in background without blocking Worker Thread #0                                                    |   |
+|   |   3. Accumulates replica root hash returns (Node 1, Node 2, Node 4) for result metrics tracking                                           |   |
+|   +-------------------------------------------------------------------------------------------------------------------------------------------+   |
++---------------------------------------------------------------------------------------------------------------------------------------------------+
                                                         |
                                                         v
-+-------------------------------------------------------------------------------------------------------------------------------+
-| STAGE 5: POST-WORKLOAD BARRIER & REPLICA CONSISTENCY VERIFICATION (Phase 8 in run_4node_raft_cluster.sh / run_sweep.sh)      |
-|                                                                                                                               |
-|   1. BARRIER MARKER SUBMISSION:                                                                                               |
-|      - Gateway submits final barrier transaction marker (`key = 99999999`) across cluster to flush all pending blocks.        |
-|                                                                                                                               |
-|   2. CONCURRENT SSH MERKLE READBACK:                                                                                          |
-|      - Runner script executes concurrent psql queries on port 5438 across admin123, user4, and utkarsh:                      |
-|        * `SELECT count(*) FROM usertable_small;`                                                                              |
-|        * `SELECT merkle_root_hash('usertable_small');`                                                                        |
-|        * `SELECT merkle_verify('usertable_small');`                                                                           |
-|                                                                                                                               |
-|   3. IN-DATABASE INTEGRITY CHECK (`src/backend/access/merkle/merkleverify.c`):                                               |
-|      - `merkle_verify()` scans table tuples, recalculates bottom-up leaf XOR hashes, verifies tree topology, and checks    |
-|        against stored root in `ariabc_internal.merkle_node`. Returns `t` (true).                                             |
-|                                                                                                                               |
-|   4. CONSISTENCY PASS/FAIL VALIDATION:                                                                                        |
-|      - Script validates: POST_COUNTS[1] == POST_COUNTS[2] == POST_COUNTS[4]                                                   |
-|                      AND POST_ROOTS[1]  == POST_ROOTS[2]  == POST_ROOTS[4]                                                   |
-|                      AND POST_VERIFY    == 't' on all nodes                                                                   |
-|      - Outcome: Zero Hash Divergence (`divergence_count=0`, `permanent_failures=0`, `POST_PASS=1`).                            |
-+-------------------------------------------------------------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------------------------------------------------------------------+
+| STAGE 5: POST-WORKLOAD BARRIER & REPLICA CONSISTENCY VERIFICATION (Phase 8 in run_4node_raft_cluster.sh / run_sweep.sh)                          |
+|                                                                                                                                                   |
+|   1. BARRIER MARKER SUBMISSION:                                                                                                                   |
+|      - Gateway submits final barrier transaction marker (`key = 99999999`) across cluster to flush all pending blocks.                            |
+|                                                                                                                                                   |
+|   2. CONCURRENT SSH MERKLE READBACK:                                                                                                              |
+|      - Runner script executes concurrent psql queries on port 5438 across admin123, user4, and utkarsh:                                          |
+|        * `SELECT count(*) FROM usertable_small;`                                                                                                  |
+|        * `SELECT merkle_root_hash('usertable_small');`                                                                                            |
+|        * `SELECT merkle_verify('usertable_small');`                                                                                               |
+|                                                                                                                                                   |
+|   3. IN-DATABASE INTEGRITY CHECK (`src/backend/access/merkle/merkleverify.c`):                                                                  |
+|      - `merkle_verify()` scans table tuples, recalculates bottom-up leaf XOR hashes, verifies tree topology, and checks                        |
+|        against stored root in `ariabc_internal.merkle_node`. Returns `t` (true).                                                                 |
+|                                                                                                                                                   |
+|   4. CONSISTENCY PASS/FAIL VALIDATION:                                                                                                            |
+|      - Script validates: POST_COUNTS[1] == POST_COUNTS[2] == POST_COUNTS[4]                                                                       |
+|                      AND POST_ROOTS[1]  == POST_ROOTS[2]  == POST_ROOTS[4]                                                                       |
+|                      AND POST_VERIFY    == 't' on all nodes                                                                                       |
+|      - Outcome: Zero Hash Divergence (`divergence_count=0`, `permanent_failures=0`, `POST_PASS=1`).                                               |
++---------------------------------------------------------------------------------------------------------------------------------------------------+
 ```
 
 #### Detailed Pipeline Breakdown
 
 1. **Transaction Ingestion, Sharding, Tagging & Tracking (Gateway -> Leader)**:
-   - `ariabc_pg_gateway` runs on the Gateway Controller (`10.129.27.111`) with 96 worker threads (`--threads 96 --det-client-workers 96 --det-client-inflight 1`).
+   - `ariabc_pg_gateway` runs on the Gateway Controller (`10.129.27.111`) with 96 worker threads (`--threads 96 --det-client-workers 96 --det-client-inflight 16 --det-window 65536`).
    - Ingests 20,000 YCSB SQL queries from `scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt` (`idx = 0..19999`).
    - **Strided Sharding**: Queries are partitioned across the 96 worker threads round-robin:
      - Worker 0 handles `idx = 0, 96, 192, 288...`
      - Worker 1 handles `idx = 1, 97, 193, 289...`
      - Worker 95 handles `idx = 95, 191, 287, 383...`
-   - **Dual Identifier Payload Tagging**:
+   - **Dual Identifier Payload Tagging & Leader-Assigned Ordering**:
      - **Protocol Request ID (`req_id`)**: Every query gets assigned a unique tracking string (e.g. `client-0`, `client-1`, ..., `client-19999`).
-     - **Deterministic Sequence Tag (`det_seq`)**: Queries are prepended with `"s <seq>"` (e.g. `s 00000000 UPDATE usertable_small SET ...`) to enforce global deterministic execution order across the Raft cluster.
+     - **Deterministic Sequence Tag (`det_seq`) & Policy**: Queries carry a sequence tag `"s <seq>"`. Under `run_sweep.sh` default (`--raft-ordering-policy leader-assigned`), the Raft Leader assigns/validates global deterministic execution order at admission while batching (`--raft-ordered-batch-append 1`, `--raft-ordered-batch-target-entries 64`, `--raft-ordered-batch-linger-us 1000`) and coalescing log entries (`--raft-ordered-coalesce-log 1`).
    - **In-Memory Tracking (`vote_store`)**: Before transmitting a query over the socket, the worker thread registers `req_id` into the shared in-memory `vote_store` map.
    - **Parallel TCP Socket Streaming**: Each worker thread maintains its own dedicated outbound socket (`TCP Socket #0` to `#95`) to Node 1 (`admin123:8000`), using unique Linux OS ephemeral ports (`:49152`..`:49247`).
 
-2. **Connection Pooling (--pool-size 256), 96 Dedicated Server RPC Threads, Local Durability & Direct ACK**:
+2. **Connection Pooling (--pool-size $E), 96 Dedicated Server RPC Threads, Leader Raft Ordering & Replication**:
    - `ariabc_pg_server` on Node 1 (`admin123`) runs a main listen loop on port 8000.
    - **Per-Socket Dedicated Server Threads**: As the 96 Gateway sockets connect, Node 1 calls `accept()` on port 8000 and spawns **96 dedicated Server RPC Listener Threads** (`std::thread th([fd...] { handle_client_fd(fd...); })`).
      - Server RPC Thread #0 manages `Socket FD = 7` (connected to Gateway Worker Thread #0).
      - Server RPC Thread #1 manages `Socket FD = 8` (connected to Gateway Worker Thread #1).
      - Server RPC Thread #95 manages `Socket FD = 102` (connected to Gateway Worker Thread #95).
-   - **Exact Per-Thread Execution Sequence on Leader**:
-     1. **Read Request Frame**: Server RPC Thread #0 reads `req_id: client-0` & `det_seq: s 00000000` from `Socket FD = 7`.
-     2. **Local Raft Log Durability**: Server RPC Thread #0 invokes `raft->append_entries({log})`, serializing and writing the entry into Node 1's local durable NuRaft log store.
-     3. **Fast Direct Socket ACK**: Under `run_sweep.sh` default (`--kafka-completion-mode async`), Server RPC Thread #0 immediately writes a submission ACK frame back over `Socket FD = 7` to Gateway Worker Thread #0, unblocking it to send query `idx = 96` (`s 00000096 UPDATE ...`).
-     4. **Asynchronous Replication**: NuRaft replicates log entries asynchronously via `AppendEntries` RPC over TCP port 9000 to Followers: Node 2 (`user4`) and Node 3 (`utkarsh`).
+   - **Full Leader-Assigned Raft Ordering Pipeline (`append_raft_ordered` & `raft_orderer`)**:
+     1. **Leader Sequence Assignment (`--raft-ordering-policy leader-assigned`)**: When request frames arrive, the Raft Leader (`admin123`) assigns global monotonically increasing sequence tags (`orderer.next_assigned_seq`) upon admission and tracks `orderer.req_id_to_seq` for idempotent deduplication against gateway retries.
+     2. **Orderer Queueing (`orderer.pending`)**: Each assigned request entry is stored in the thread-safe `orderer.pending` map sorted by sequence number.
+     3. **Contiguous Batch Collection & Coalescing (`drain_ready`)**: `drain_ready()` extracts contiguous ready sequence ranges starting at `orderer.next_seq`. Under `--raft-ordered-batch-append 1`, it accumulates batches up to `--raft-ordered-batch-target-entries 64` (or waits up to `--raft-ordered-batch-linger-us 1000` µs). When `--raft-ordered-coalesce-log 1` is set, ready batches are fused into a single multi-item Raft log entry.
+     4. **Local Durable Log Store Append**: The Raft Leader serializes and appends the ordered log batch into Node 1's local durable NuRaft log store (`run_raft/node_1/log/segment_...log`) with `ARIABC_RAFT_DURABLE_ASYNC_FLUSH=1`.
+     5. **NuRaft Consensus Replication**: NuRaft streams `AppendEntries` RPC frames over TCP Port 9000 to Follower nodes: Node 2 (`user4:9000`) and Node 3 (`utkarsh:9000`). Once a majority quorum acknowledges replication, the entry index is committed across the cluster.
+     6. **Leader Completion ACK**: Under `run_sweep.sh` default (`--kafka-completion-mode majority`), completion waits for 3-node consensus before client receipt; under `--kafka-completion-mode async`, an ACK frame is returned immediately over `Socket FD = 7` upon local Raft admission.
 
-3. **Deterministic DB Execution & Merkle Staging (PostgreSQL / BCDB)**:
-   - On commit, `ariabc_pg_server` on all 3 nodes dispatches the ordered transactions to the BCDB Deterministic Scheduler (`--bcdb-workers 8`).
-   - PostgreSQL backend (`port 5438`) executes DML on `public.usertable_small`.
-   - **Staging (`merkledelta.c`)**: Table hooks intercept inserted/updated/deleted tuples, hash the tuple keys (`TupleKeyHash`), and stage deltas into a per-backend in-memory hash table (`HTAB`).
-   - **Pre-Commit (`merkleapply.c`)**: `merkle_apply_staged_synchronous_safe()` executes at transaction `PRE_COMMIT`. It looks up affected prefix radix tree nodes in `ariabc_internal.merkle_node`, updates leaf aggregate XOR hashes, splits leaves if tuple count exceeds 32 (or merges if below 8), and bubbles modified XOR hashes up to the root node (`node_id: \x0000000000000000`).
+3. **Deterministic BCDB Engine Execution, Conflict Tracking & Merkle Staging**:
+   - On commit, `ariabc_pg_server` on all 3 nodes dispatches the ordered
+     transactions to the BCDB Deterministic Scheduler across 8 partitioned
+     transaction queues (`tx_queues[0..7]`) in shared memory
+     (`--bcdb-workers 8`, with `--server-exec-workers 8` and
+     `--server-pg-connections 8`).
+   - **Step 1: Optimistic Parallel Execution & Process-Local RW Staging**:
+     - 8 parallel BCDB worker processes dequeue transactions and execute
+       DML statements (`UPDATE`, `INSERT`, `DELETE`) on
+       `public.usertable_small` (Port 5438).
+     - During execution, `rs_table_reserveDT()` and `ws_table_reserveDT()`
+       intercept reads/writes and append tuple tags (`PREDICATELOCKTARGETTAG`)
+       to process-local linked lists (`rs_table_record` and `ws_table_record`)
+       in `bcdb_tx_context`. No shared memory locks are acquired.
+   - **Step 2: Deterministic Conflict Tracking (`conflict_checkDT()`)**:
+     - Shared memory maintains dual Write-Set hash tables (`WSTable` with
+       shards `map` and `mapB`) in a **Ping-Pong Scheme** to allow zero-lock
+       table clear during block rotations.
+     - Workers execute `conflict_checkDT()`, checking local RW sets against
+       `ws_table` and `rs_table` for earlier transactions
+       (`cand_txid < self_txid`):
+       * **RAW (Read-After-Write)**: Probes if an earlier transaction wrote
+         a tuple read by this worker.
+       * **WAR (Write-After-Read)**: Probes if an earlier transaction read
+         a tuple written by this worker.
+       * **WAW (Write-After-Write)**: Probes if an earlier transaction
+         wrote a tuple written by this worker.
+    - **Step 3: Write-Set Publishing & Serial Commit Gate**:
+      - `publish_ws_tableDT()` atomically commits local write-set entries
+        into the active shard (`ws_table->mapActive`).
+      - `bcdb_wait_for_serial_slot()` enforces sequential commit watermarks
+        (`tx_id == last_committed_tx_id + 1`) for deterministic ordering.
+    - **Step 4: Synchronous Merkle Tree Staging & Radix Update**:
+      - PostgreSQL heap hooks intercept modified tuples, calculate
+        `TupleKeyHash(ycsb_key)`, and stage key deltas in memory (`HTAB`).
+      - At transaction `PRE_COMMIT`, `merkle_apply_staged_synchronous_safe()`
+        updates `ariabc_internal.merkle_node`:
+        * Leaf aggregate XOR hash update: `leaf_hash = leaf_hash ^ delta_hash`.
+        * Rebalancing: Splits leaf when `tuple_count > 32` (prefix_len + 1);
+          Merges with sibling when `tuple_count < 8`.
+        * Bubbles modified XOR hashes up parent radix nodes to ROOT
+          (`node_id: \x0000000000000000`).
+   - **Transaction Commit Protocol & Index Maintenance Timeline**:
+     1. **Optimistic Phase — Normal Heap Mutation**:
+        Worker executes DML (`UPDATE`/`INSERT`/`DELETE`). PostgreSQL Heap AM
+        modifies tuple in buffer pool (`table_tuple_update`/`insert`).
+     2. **Optimistic Phase — Normal B-Tree Index Update**:
+        PostgreSQL immediately inserts/updates tuple pointers in standard
+        B-Tree indexes (e.g. `usertable_small_pkey` on `ycsb_key`) via
+        `execIndexing.c` during SQL execution.
+     3. **Optimistic Phase — RW Set Local Staging**:
+        `rs_table_reserveDT()` / `ws_table_reserveDT()` append tuple tags to
+        process-local linked lists (`rs_table_record` / `ws_table_record`).
+     4. **Optimistic Phase — Merkle Delta Staging (`merkledelta.c`)**:
+        Table access hooks compute `TupleKeyHash(ycsb_key)` and stage key XOR
+        deltas into a backend process-local `HTAB` buffer. The Merkle tree
+        table (`ariabc_internal.merkle_node`) is NOT modified yet.
+     5. **Validation Phase — BCDB Conflict Check (`conflict_checkDT()`)**:
+        Worker probes shared dual `WSTable` shards (`map` and `mapB`) for
+        RAW, WAR, and WAW conflicts against earlier-ordered transactions.
+     6. **Validation Phase — Write-Set Publishing (`publish_ws_tableDT()`)**:
+        On zero conflicts, local Write-Set entries are published to active shard
+        `ws_table->mapActive` for downstream conflict checking.
+     7. **Commit Gate Phase — Serial Slot Watermark**:
+        `bcdb_wait_for_serial_slot()` blocks execution until
+        `tx_id == last_committed_tx_id + 1`.
+     8. **PRE_COMMIT Hook Phase — Merkle Index Tree Apply (`merkleapply.c`)**:
+        Transaction commit protocol triggers `XACT_EVENT_PRE_COMMIT`.
+        `merkle_apply_staged_synchronous_safe()` reads staged deltas from `HTAB`,
+        mutates leaf nodes in `ariabc_internal.merkle_node` (`leaf_hash =
+        leaf_hash ^ delta_hash`), triggers dynamic split/merge rebalancing,
+        and bubbles XOR aggregate hashes up to ROOT (`\x0000000000000000`).
+     9. **Finalization Phase — WAL Record & Commit Completion**:
+        PostgreSQL writes transaction commit record to WAL, releases locks,
+        resets backend memory context, and advances serial commit watermark.
 
 4. **Async Kafka Result Streaming & Background Validation**:
-   - `ariabc_pg_server` processes on all 3 nodes use `librdkafka` to publish execution result records (`req_id`, `node_id`, `status`, `merkle_root`) to the Kafka Broker on Node 1 (`10.129.148.247:9092`, Topic `ariabc_results`).
-   - **Asynchronous Background Tracking**: The Gateway's Kafka Result Consumer thread polls topic `ariabc_results` in the background, matching `req_id` in `vote_store` for hash integrity metrics without blocking the Gateway worker threads.
+   - `ariabc_pg_server` processes on all 3 nodes use `librdkafka` to publish
+     execution result records (`req_id`, `node_id`, `status`, `merkle_root`)
+     to Kafka Broker on Node 1 (`10.129.148.247:9092`, Topic `ariabc_results`).
+   - **Asynchronous Background Tracking**: The Gateway Kafka Result Consumer
+     thread polls topic `ariabc_results` in background, matching `req_id`
+     in `vote_store` for hash integrity without blocking Gateway workers.
 
 5. **Post-Workload Barrier & Replica Verification (`Phase 8`)**:
-   - `run_4node_raft_cluster.sh` submits a barrier marker (`key=99999999`) across the cluster.
+    - `run_4node_raft_cluster.sh` submits a barrier marker (`key=99999999`) across the cluster.
    - Upon completion, the script executes SSH `psql` commands on port 5438 across all 3 nodes:
      - `SELECT count(*) FROM usertable_small;`
      - `SELECT merkle_root_hash('usertable_small');`
@@ -397,6 +553,23 @@ The end-to-end execution lifecycle in `scripts/distributed/run_sweep.sh` (which 
      - `POST_ROOTS[1]  == POST_ROOTS[2]  == POST_ROOTS[4]`
      - `POST_VERIFY    == 't'` on all nodes
    - Verification succeeds only when `divergence_count=0` and `permanent_failures=0`.
+
+6. **Full `run_sweep.sh` Campaign Environment & CLI Flag Configuration**:
+   - **Environment Variables Injected**:
+     - `FORCE_BUILD=0`, `SKIP_RDKAFKA_SETUP=1`
+     - `ARIABC_PREFERRED_LEADER_ID=1` (Pins Raft leadership priority to Node 1 `admin123`)
+     - `ARIABC_RAFT_DURABLE_ASYNC_FLUSH=1` (Async flush for local durable log store)
+     - `ARIABC_RAFT_STREAM_GAP=512` (Pipeline gap control for NuRaft streaming)
+     - `ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER=1` (Async background result publishing)
+     - `BCDB_DET_QUEUE_HIGH_WM=65536` / `BCDB_DET_QUEUE_LOW_WM=32768` (Admission queue watermarks)
+   - **Cluster CLI Arguments Passed**:
+     - `--ordering-mode raft-kafka`, `--enable-merkle-index 1`, `--raft-apply-ledger-mode off`
+     - `--threads 96`, `--det-client-workers 96`, `--det-client-inflight 16`, `--det-window 65536`
+     - `--server-exec-workers $E`, `--server-pg-connections $E`, `--pool-size $E`, `--bcdb-workers $E`, `--bcdb-init-block-size $E` (swept for $E \in \{1, 2, 4, 8, 12, 16\}$)
+     - `--bcdb-decouple-workers 1`, `--conn-fanout 1`, `--raft-ordered-fanout 1`
+     - `--raft-ordering-policy leader-assigned`, `--raft-ordered-batch-append 1`
+     - `--raft-ordered-batch-target-entries 64`, `--raft-ordered-batch-linger-us 1000`, `--raft-ordered-coalesce-log 1`
+     - `--kafka-completion-mode majority` (default campaign completion mode)
 
 ---
 

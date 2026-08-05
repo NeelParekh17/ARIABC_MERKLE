@@ -554,10 +554,14 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 		 MyProcPid, (unsigned long long) tx->raft_log_index, (unsigned) tx->raft_item_ordinal,
 		 spi_rc, (unsigned long) SPI_processed);
 	if (spi_rc != SPI_OK_SELECT || SPI_processed != 1) {
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
 		ledger_spi_end(&spi_scope);
 		elog(ERROR, "raft_apply_ledger: claim validation failed (manifest mismatch, missing, or out of bounds) for log_index=%llu ordinal=%u",
 			 (unsigned long long) tx->raft_log_index, (unsigned) tx->raft_item_ordinal);
 	}
+	if (SPI_tuptable != NULL)
+		SPI_freetuptable(SPI_tuptable);
 	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_select_ok",
 		 MyProcPid,
 		 (unsigned long long) tx->raft_log_index,
@@ -601,6 +605,8 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 								   false, 1);
 	EMIT_SAFE_LEDGER_XACT(tx, "claim_insert_after");
 	uint64 insert_processed = SPI_processed;
+	if (SPI_tuptable != NULL)
+		SPI_freetuptable(SPI_tuptable);
 	if (spi_rc != SPI_OK_INSERT)
 	{
 		ledger_spi_end(&spi_scope);
@@ -1266,6 +1272,9 @@ validate_terminal_update_returning(BCDBShmXact *tx,
 			 cluster_id,
 			 node_id);
 	}
+
+	if (SPI_tuptable != NULL)
+		SPI_freetuptable(SPI_tuptable);
 }
 
 void
@@ -1523,6 +1532,8 @@ bcdb_safe_finalize_nonterminal_failure(BCDBShmXact *tx,
 		"    AND $3 < e.expected_items"
 		" ON CONFLICT (epoch_id, raft_log_index, item_ordinal) DO NOTHING");
 	spi_rc = SPI_execute_with_args(sql_buf, 6, argtypes, values, nulls, false, 1);
+	if (SPI_tuptable != NULL)
+		SPI_freetuptable(SPI_tuptable);
 	if (spi_rc != SPI_OK_INSERT)
 	{
 		ledger_spi_end(&spi_scope);
@@ -1631,6 +1642,8 @@ bcdb_safe_finalize_nonterminal_failure(BCDBShmXact *tx,
 				RAFT_ITEM_STATE_NONTERMINAL_FAILURE,
 				RAFT_ITEM_STATE_CLAIMED);
 			spi_rc = SPI_execute_with_args(sql_buf, 8, upd_argtypes, upd_values, upd_nulls, false, 1);
+			if (SPI_tuptable != NULL)
+				SPI_freetuptable(SPI_tuptable);
 			if (spi_rc != SPI_OK_UPDATE || SPI_processed != 1)
 			{
 				ledger_spi_end(&spi_scope);
@@ -1732,6 +1745,8 @@ bcdb_safe_finalize_nonterminal_failure(BCDBShmXact *tx,
 			ledger_spi_end(&spi_scope);
 			elog(ERROR, "raft_apply_ledger: state=4 verification mismatch");
 		}
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
 	}
 
 	if (stored_failure)

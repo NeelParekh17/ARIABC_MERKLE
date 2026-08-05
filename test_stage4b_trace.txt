@@ -1,0 +1,178 @@
+SET
+DO
+NOTICE:  schema "ariabc_internal" already exists, skipping
+CREATE SCHEMA
+NOTICE:  relation "merkle_node" already exists, skipping
+CREATE TABLE
+NOTICE:  relation "merkle_node_prefix_idx" already exists, skipping
+CREATE INDEX
+SET
+SET
+DELETE 1
+DROP TABLE
+CREATE TABLE
+CREATE INDEX
+========================================================================
+STAGE 1: Initial Root Leaf State (10 Rows < Split Threshold 16)
+========================================================================
+INSERT 0 10
+     node_hex     | prefix_len | is_leaf | tuple_count |                            node_hash                             
+------------------+------------+---------+-------------+------------------------------------------------------------------
+ 0000000000000000 |          0 | t       |          10 | 47d566db02d3d301fe512537b3f225929711bb0dd27681ff9a8a8229f1493099
+(1 row)
+
+ table_row_count 
+-----------------
+              10
+(1 row)
+
+ verify_passed 
+---------------
+ t
+(1 row)
+
+
+========================================================================
+STAGE 2: Root Level Split (Insert 15 more rows -> Total 25 > 16)
+Root (prefix_len=0) becomes internal (is_leaf=false); 4 children created at prefix_len=2
+========================================================================
+INSERT 0 10
+NOTICE:  do_merge_check node=0000 plen=2 parent_plen=0 cnt_val=4 leaves=t total_count=25 merge_thresh=8
+NOTICE:  do_merge_check node=4000 plen=2 parent_plen=0 cnt_val=4 leaves=t total_count=25 merge_thresh=8
+NOTICE:  do_merge_check node=8000 plen=2 parent_plen=0 cnt_val=4 leaves=t total_count=25 merge_thresh=8
+NOTICE:  do_merge_check node=c000 plen=2 parent_plen=0 cnt_val=4 leaves=t total_count=25 merge_thresh=8
+INSERT 0 5
+     node_hex     | prefix_len | is_leaf | tuple_count |                            node_hash                             
+------------------+------------+---------+-------------+------------------------------------------------------------------
+ 0000000000000000 |          0 | f       |          25 | 5fd35c84006024e581fdefecbaca575e48d4b7276b2c1ca305be048bcd991272
+ 0000000000000000 |          2 | t       |           7 | 03c877728a460c33c4de0314aaa6922672c8dd9a083504c68a8f7d94c7a4dc3f
+ 4000000000000000 |          2 | t       |           6 | 5d2246a43bd2c5f882466c4c3d6d7ab763424a7dc8b969ea39894b053f10172b
+ 8000000000000000 |          2 | t       |           6 | 1c2c6f8eb4c70b5f741954ddf4140aeb01a3c52c2e3fe2a43aae9a55f0653266
+ c000000000000000 |          2 | t       |           6 | 1d1502dc0533e671b37cd469d915b52458fde5ec859f932b8c16a84fc548eb00
+(5 rows)
+
+ table_row_count 
+-----------------
+              25
+(1 row)
+
+ verify_passed 
+---------------
+ t
+(1 row)
+
+
+========================================================================
+STAGE 2B: Inspect Rows Belonging to Specific Leaf Node 4000000000000000
+========================================================================
+ id |  val   |   key_hash_hex   
+----+--------+------------------
+  8 | row_8  | 42e7bafb968d3f62
+ 10 | row_10 | 6a33a6789d39ee73
+ 18 | row_18 | d43c7361185df7f8
+ 23 | row_23 | 70ddf01e1a4e8c86
+ 24 | row_24 | 70ac9d4482826054
+ 25 | row_25 | a1ebf8201e1fc49d
+(6 rows)
+
+
+========================================================================
+STAGE 3: Next-Level (Multi-level) Split (Insert 40 more rows 26..65 -> Total 65)
+Child leaf 8000 (tuple_count=22 > split_threshold 16) splits further into grandchildren at prefix_len=4
+========================================================================
+INSERT 0 20
+INSERT 0 20
+     node_hex     | prefix_len | is_leaf | tuple_count |                            node_hash                             
+------------------+------------+---------+-------------+------------------------------------------------------------------
+ 0000000000000000 |          0 | f       |          65 | 17b7e61e4cfd680c823fddc694d29e26e48bc90a9355e76920850a6052ba75b1
+ 0000000000000000 |          2 | t       |          15 | 1f1dde6f0bd3f4bf255979722cec3aa1a348cc68e0346a408292d52920ecf37d
+ 4000000000000000 |          2 | t       |          12 | 33a54bd02bb6f079d611279a1ac00889f481f3d03826aec6e4cc7eff0f481f53
+ 8000000000000000 |          2 | f       |          30 | e0fe7128019d6a1d885c8fffba0c2b5fe143b61ed69b0cddf3160cb78c4c004f
+ c000000000000000 |          2 | t       |          16 | df6ac0177e8bb3072e84ae74bfbff233d4e9144e82a9d505a0c80334bd03edd9
+ 8000000000000000 |          4 | t       |           8 | ae102382f7e11fd5975ffb73ab41f1996e5a8fe505a502d1fe428ca77a390fb5
+ 9000000000000000 |          4 | t       |           6 | a533ec592dca31b75d86abf6831a2a2d53b689fea7f70c769846c25faab0861a
+ a000000000000000 |          4 | t       |          10 | d2dad27caca9538a56cfd12f0470964ecd0e5a1d96ab222ab6c397be609eb50b
+ b000000000000000 |          4 | t       |           6 | 39076c8f771f17f5144a0e55962766a511a1ea18e262205023d1d5f13c5b3ceb
+(9 rows)
+
+ table_row_count 
+-----------------
+              65
+(1 row)
+
+ verify_passed 
+---------------
+ t
+(1 row)
+
+
+========================================================================
+STAGE 4A: Level-4 Grandchildren Merge (Delete upper range rows 65 down to 26)
+Level-4 grandchildren collapse and merge back into Level-2 child node
+========================================================================
+NOTICE:  do_merge_check node=0000 plen=2 parent_plen=0 cnt_val=4 leaves=f total_count=33 merge_thresh=8
+NOTICE:  do_merge_check node=4000 plen=2 parent_plen=0 cnt_val=4 leaves=f total_count=33 merge_thresh=8
+NOTICE:  do_merge_check node=8000 plen=4 parent_plen=2 cnt_val=4 leaves=t total_count=14 merge_thresh=8
+NOTICE:  do_merge_check node=9000 plen=4 parent_plen=2 cnt_val=4 leaves=t total_count=14 merge_thresh=8
+NOTICE:  do_merge_check node=a000 plen=4 parent_plen=2 cnt_val=4 leaves=t total_count=14 merge_thresh=8
+NOTICE:  do_merge_check node=b000 plen=4 parent_plen=2 cnt_val=4 leaves=t total_count=14 merge_thresh=8
+NOTICE:  do_merge_check node=c000 plen=2 parent_plen=0 cnt_val=4 leaves=f total_count=33 merge_thresh=8
+DO
+     node_hex     | prefix_len | is_leaf | tuple_count |                            node_hash                             
+------------------+------------+---------+-------------+------------------------------------------------------------------
+ 0000000000000000 |          0 | f       |          25 | 5fd35c84006024e581fdefecbaca575e48d4b7276b2c1ca305be048bcd991272
+ 0000000000000000 |          2 | t       |           7 | 03c877728a460c33c4de0314aaa6922672c8dd9a083504c68a8f7d94c7a4dc3f
+ 4000000000000000 |          2 | t       |           6 | 5d2246a43bd2c5f882466c4c3d6d7ab763424a7dc8b969ea39894b053f10172b
+ 8000000000000000 |          2 | f       |          14 | 18b7ad10a749be8fa3b6f67853597f89874b91ce314a18932fab3460bc34466f
+ c000000000000000 |          2 | t       |           6 | 1d1502dc0533e671b37cd469d915b52458fde5ec859f932b8c16a84fc548eb00
+ 8000000000000000 |          4 | t       |           3 | f537e9274e5d6dcf9a18c856b6f0f38f8847a727ff7df1467b226bca83211dea
+ 9000000000000000 |          4 | t       |           1 | 6bad678979dad169caa5bcb36d3b4d6f1161d6a1e9b184d3f208edc0716a6455
+ a000000000000000 |          4 | t       |           5 | b6065bed9e6bf27069aa4ce1aeeb01c31e4bedc2eff91a939ba40b637e6851bf
+ b000000000000000 |          4 | t       |           5 | 302b78530ea5f0599aa1ce7c2679c0aa00260d8ac87f77953d25b90930176e6f
+(9 rows)
+
+ table_row_count 
+-----------------
+              25
+(1 row)
+
+ verify_passed 
+---------------
+ t
+(1 row)
+
+
+========================================================================
+STAGE 4B: Root Level Merge (Delete rows 25 down to 1 -> Total tuples 0 < merge_threshold 8)
+Level-2 children collapse and merge back into single Root Leaf at prefix_len=0 (is_leaf=true)
+========================================================================
+NOTICE:  do_merge_check node=0000 plen=2 parent_plen=0 cnt_val=4 leaves=f total_count=8 merge_thresh=8
+NOTICE:  do_merge_check node=4000 plen=2 parent_plen=0 cnt_val=4 leaves=f total_count=8 merge_thresh=8
+NOTICE:  do_merge_check node=8000 plen=4 parent_plen=2 cnt_val=4 leaves=t total_count=8 merge_thresh=8
+NOTICE:  do_merge_check node=8000 plen=2 parent_plen=0 cnt_val=4 leaves=t total_count=8 merge_thresh=8
+DELETE 25
+     node_hex     | prefix_len | is_leaf | tuple_count |                            node_hash                             
+------------------+------------+---------+-------------+------------------------------------------------------------------
+ 0000000000000000 |          0 | t       |           8 | 049bc29e138eb5d0d7afa2a5a74d756286e854e21f75fa371505ae354c517409
+(1 row)
+
+ table_row_count 
+-----------------
+               0
+(1 row)
+
+WARNING:  merkle_verify_index mismatch: found_catalog=1 stored=049bc29e138eb5d0d7afa2a5a74d756286e854e21f75fa371505ae354c517409 heap_xor=0000000000000000000000000000000000000000000000000000000000000000
+ verify_passed 
+---------------
+ f
+(1 row)
+
+
+========================================================================
+STAGE 5: Final Tree Statistics & Root Hash
+========================================================================
+                      final_merkle_root_hash                      
+------------------------------------------------------------------
+ 049bc29e138eb5d0d7afa2a5a74d756286e854e21f75fa371505ae354c517409
+(1 row)
+

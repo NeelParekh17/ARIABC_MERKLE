@@ -648,6 +648,30 @@ def run_one_manifest(
         "merge_threshold": int(manifest.get("merge_threshold", 8)),
     }
     metrics: list[Metrics] = []
+    # ── Untimed Warmup Cycle ───────────────────────────────────────────────
+    # Run 1 untimed warmup cycle to prime PostgreSQL query plans, Python bytecode,
+    # and shared_buffers page caches so rep 0 starts with the exact same warm state
+    # as subsequent repetitions.
+    if reps > 0:
+        warmup_id = f"{recovery_run_id(manifest, 0, profile_label)}-warmup"
+        apply_corruption(conn, manifest)
+        planner_results, _ = run_planner_preflight(conn, manifest, warmup_id)
+        repair_merkle(
+            conn,
+            manifest,
+            tuple_count,
+            -1,
+            planner_results,
+            [],
+            profile_label=profile_label,
+            profiling_mode="off",
+            profiler=None,
+            benchmark_profile="",
+            audit_mode="skip",
+            leaf_fetch_chunk_size=leaf_fetch_chunk_size,
+        )
+        execute(conn, "CHECKPOINT")
+
     for rep in range(reps):
         run_id = recovery_run_id(manifest, rep, profile_label)
         manifest_digest = manifest_sha256(manifest)

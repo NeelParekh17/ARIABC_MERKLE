@@ -1048,6 +1048,11 @@
   proname => 'merkle_hash_xor_sql', provolatile => 'i', proparallel => 's',
   proisstrict => 't', prorettype => 'bytea', proargtypes => 'bytea bytea',
   prosrc => 'merkle_hash_xor_sql' },
+{ oid => '9939', descr => 'compute inclusive upper-bound bytea for a Merkle prefix range',
+  proname => 'merkle_node_upper_bound', provolatile => 'i', proisstrict => 't',
+  prorettype => 'bytea', proargtypes => 'bytea int4',
+  proargnames => '{node_id,prefix_len}',
+  prosrc => 'merkle_node_upper_bound_sql' },
 
 { oid => '338', descr => 'validate an operator class',
   proname => 'amvalidate', provolatile => 'v', prorettype => 'bool',
