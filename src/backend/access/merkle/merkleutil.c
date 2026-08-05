@@ -184,8 +184,8 @@ merkle_hash_uint32(blake3_hasher *hasher, uint32 value)
  * therefore do not depend on TimeZone, DateStyle, locale, or output GUCs.
  */
 void
-merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *slot,
-								MerkleHash *result)
+merkle_hash_slot_canonical_desc_fast(TupleDesc tupdesc, TupleTableSlot *slot,
+									 FmgrInfo *send_functions, MerkleHash *result)
 {
 	blake3_hasher	hasher;
 	int				i;
@@ -228,13 +228,20 @@ merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *slot,
 
 		if (!isnull)
 		{
-			Oid			typsend;
-			bool		typisvarlena;
 			bytea	   *encoded;
 			uint32		length;
 
-			getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
-			encoded = OidSendFunctionCall(typsend, val);
+			if (send_functions != NULL && OidIsValid(send_functions[i].fn_oid))
+			{
+				encoded = DatumGetByteaP(FunctionCall1(&send_functions[i], val));
+			}
+			else
+			{
+				Oid			typsend;
+				bool		typisvarlena;
+				getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+				encoded = OidSendFunctionCall(typsend, val);
+			}
 			length = (uint32) VARSIZE_ANY_EXHDR(encoded);
 			merkle_hash_uint32(&hasher, length);
 			if (length > 0)
@@ -244,6 +251,13 @@ merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *slot,
 	}
 
 	blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+}
+
+void
+merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *slot,
+								MerkleHash *result)
+{
+	merkle_hash_slot_canonical_desc_fast(tupdesc, slot, NULL, result);
 }
 
 static void
@@ -340,7 +354,8 @@ profile_done:
  * heap operation success, while still hashing the OLD row image.
  */
 void
-merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *result)
+merkle_compute_slot_hash_fast(Relation heapRel, TupleTableSlot *slot,
+						   FmgrInfo *send_functions, MerkleHash *result)
 {
 	bool			profile_enabled = merkle_recovery_profile_enabled;
 	instr_time		start_time;
@@ -352,7 +367,7 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
 		merkle_recovery_profile_state.row_hash_compute_calls++;
 	}
 
-	merkle_hash_slot_canonical(heapRel, slot, result);
+	merkle_hash_slot_canonical_desc_fast(RelationGetDescr(heapRel), slot, send_functions, result);
 
 	if (profile_enabled)
 	{
@@ -361,6 +376,12 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
 		INSTR_TIME_ADD(merkle_recovery_profile_state.row_hash_compute_time,
 					   elapsed_time);
 	}
+}
+
+void
+merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *result)
+{
+	merkle_compute_slot_hash_fast(heapRel, slot, NULL, result);
 }
 
 /*
@@ -377,9 +398,10 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
  * was incompatible with a future dynamic prefix tree (sequential keys share
  * high bits).  Route format version 2 removes that special path.
  */
-static void
-merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
-									  TupleDesc tupdesc, uint8 digest[MERKLE_HASH_BYTES])
+void
+merkle_compute_canonical_route_digest_fast(Datum *values, bool *isnull, int nkeys,
+											TupleDesc tupdesc, FmgrInfo *send_functions,
+											uint8 digest[MERKLE_HASH_BYTES])
 {
 	blake3_hasher hasher;
 	int			i;
@@ -402,13 +424,20 @@ merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
 
 		if (!isnull[i])
 		{
-			Oid			typsend;
-			bool		typisvarlena;
 			bytea	   *encoded;
 			uint32		length;
 
-			getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
-			encoded = OidSendFunctionCall(typsend, values[i]);
+			if (send_functions != NULL && OidIsValid(send_functions[i].fn_oid))
+			{
+				encoded = DatumGetByteaP(FunctionCall1(&send_functions[i], values[i]));
+			}
+			else
+			{
+				Oid			typsend;
+				bool		typisvarlena;
+				getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+				encoded = OidSendFunctionCall(typsend, values[i]);
+			}
 			length = (uint32) VARSIZE_ANY_EXHDR(encoded);
 			merkle_hash_uint32(&hasher, length);
 			if (length > 0)
@@ -420,6 +449,13 @@ merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
 	}
 
 	blake3_hasher_finalize(&hasher, digest, MERKLE_HASH_BYTES);
+}
+
+static void
+merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
+									  TupleDesc tupdesc, uint8 digest[MERKLE_HASH_BYTES])
+{
+	merkle_compute_canonical_route_digest_fast(values, isnull, nkeys, tupdesc, NULL, digest);
 }
 
 /*
@@ -561,6 +597,13 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	UnlockReleaseBuffer(metabuf);
 }
 
+typedef struct MerkleKeyHashCache
+{
+	Oid			argtype;
+	TupleDesc	tupdesc;
+	FmgrInfo	send_fn;
+} MerkleKeyHashCache;
+
 PG_FUNCTION_INFO_V1(merkle_key_hash_sql);
 
 Datum
@@ -570,8 +613,8 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 	Oid			argtype;
 	uint8		digest[MERKLE_HASH_BYTES];
 	bytea	   *result;
-	TupleDesc   tupdesc;
 	bool        isnull;
+	MerkleKeyHashCache *cache;
 
 	if (PG_ARGISNULL(0))
 	{
@@ -588,11 +631,27 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 	if (!OidIsValid(argtype))
 		argtype = INT8OID;
 
-	tupdesc = CreateTemplateTupleDesc(1);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "key", argtype, -1, 0);
+	cache = (MerkleKeyHashCache *) fcinfo->flinfo->fn_extra;
+	if (cache == NULL || cache->argtype != argtype)
+	{
+		Oid typsend;
+		bool typisvarlena;
 
-	merkle_compute_canonical_route_digest(&val, &isnull, 1, tupdesc, digest);
-	FreeTupleDesc(tupdesc);
+		if (cache != NULL && cache->tupdesc != NULL)
+			FreeTupleDesc(cache->tupdesc);
+
+		cache = (MerkleKeyHashCache *) MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, sizeof(MerkleKeyHashCache));
+		cache->argtype = argtype;
+		cache->tupdesc = CreateTemplateTupleDesc(1);
+		TupleDescInitEntry(cache->tupdesc, (AttrNumber) 1, "key", argtype, -1, 0);
+
+		getTypeBinaryOutputInfo(argtype, &typsend, &typisvarlena);
+		fmgr_info_cxt(typsend, &cache->send_fn, fcinfo->flinfo->fn_mcxt);
+
+		fcinfo->flinfo->fn_extra = (void *) cache;
+	}
+
+	merkle_compute_canonical_route_digest_fast(&val, &isnull, 1, cache->tupdesc, &cache->send_fn, digest);
 
 	result = (bytea *) palloc(VARHDRSZ + 8);
 	SET_VARSIZE(result, VARHDRSZ + 8);
@@ -600,6 +659,15 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BYTEA_P(result);
 }
+
+typedef struct MerkleTupleHashCache
+{
+	Oid			tup_type;
+	int32		tup_typmod;
+	TupleDesc	tupdesc;
+	TupleTableSlot *slot;
+	FmgrInfo   *send_functions;
+} MerkleTupleHashCache;
 
 PG_FUNCTION_INFO_V1(merkle_tuple_hash_sql);
 
@@ -611,9 +679,9 @@ merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
 	int32		tup_typmod;
 	TupleDesc	tupdesc;
 	HeapTupleData tuple;
-	TupleTableSlot *slot;
 	MerkleHash	hash;
 	bytea	   *result;
+	MerkleTupleHashCache *cache;
 
 	if (PG_ARGISNULL(0))
 	{
@@ -626,21 +694,54 @@ merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
 	tuple_header = PG_GETARG_HEAPTUPLEHEADER(0);
 	tup_type = HeapTupleHeaderGetTypeId(tuple_header);
 	tup_typmod = HeapTupleHeaderGetTypMod(tuple_header);
-	tupdesc = lookup_rowtype_tupdesc(tup_type, tup_typmod);
 
+	cache = (MerkleTupleHashCache *) fcinfo->flinfo->fn_extra;
+	if (cache == NULL || cache->tup_type != tup_type || cache->tup_typmod != tup_typmod)
+	{
+		int i;
+
+		if (cache != NULL)
+		{
+			if (cache->slot != NULL)
+				ExecDropSingleTupleTableSlot(cache->slot);
+			if (cache->tupdesc != NULL)
+				ReleaseTupleDesc(cache->tupdesc);
+		}
+
+		cache = (MerkleTupleHashCache *) MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, sizeof(MerkleTupleHashCache));
+		cache->tup_type = tup_type;
+		cache->tup_typmod = tup_typmod;
+		cache->tupdesc = lookup_rowtype_tupdesc(tup_type, tup_typmod);
+		PinTupleDesc(cache->tupdesc);
+		cache->slot = MakeSingleTupleTableSlot(cache->tupdesc, &TTSOpsHeapTuple);
+		cache->send_functions = (FmgrInfo *) MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, cache->tupdesc->natts * sizeof(FmgrInfo));
+
+		for (i = 0; i < cache->tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(cache->tupdesc, i);
+			if (!attr->attisdropped)
+			{
+				Oid typsend;
+				bool typisvarlena;
+				getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+				fmgr_info_cxt(typsend, &cache->send_functions[i], fcinfo->flinfo->fn_mcxt);
+			}
+		}
+
+		fcinfo->flinfo->fn_extra = (void *) cache;
+	}
+
+	tupdesc = cache->tupdesc;
 	memset(&tuple, 0, sizeof(tuple));
 	tuple.t_len = HeapTupleHeaderGetDatumLength(tuple_header);
 	ItemPointerSetInvalid(&(tuple.t_self));
 	tuple.t_tableOid = InvalidOid;
 	tuple.t_data = tuple_header;
 
-	slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsHeapTuple);
-	ExecStoreHeapTuple(&tuple, slot, false);
+	ExecClearTuple(cache->slot);
+	ExecStoreHeapTuple(&tuple, cache->slot, false);
 
-	merkle_hash_slot_canonical_desc(tupdesc, slot, &hash);
-
-	ExecDropSingleTupleTableSlot(slot);
-	ReleaseTupleDesc(tupdesc);
+	merkle_hash_slot_canonical_desc_fast(tupdesc, cache->slot, cache->send_functions, &hash);
 
 	result = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
 	SET_VARSIZE(result, VARHDRSZ + MERKLE_HASH_BYTES);
