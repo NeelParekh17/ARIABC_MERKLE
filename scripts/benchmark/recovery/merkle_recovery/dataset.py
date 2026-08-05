@@ -108,14 +108,23 @@ def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int 
     execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_covering_idx")
     execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_idx")
     t_idx1 = time.time()
-    execute(
-        conn,
-        f"""
-        CREATE INDEX usertable_merkle_idx
-        ON healthy.usertable USING merkle (ycsb_key)
-        WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold}, fanout = {fanout})
-        """
-    )
+    # Disable synchronous_commit for the Merkle index build.
+    # merkle_do_split_in_memory issues O(N/split_threshold) SPI INSERT/UPDATE
+    # calls; with synchronous_commit=on each call stalls waiting for WAL fsync.
+    # Index builds are crash-recoverable (heap data is already committed), so
+    # async WAL here is safe and eliminates the dominant build latency.
+    execute(conn, "SET synchronous_commit = off")
+    try:
+        execute(
+            conn,
+            f"""
+            CREATE INDEX usertable_merkle_idx
+            ON healthy.usertable USING merkle (ycsb_key)
+            WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold}, fanout = {fanout})
+            """
+        )
+    finally:
+        execute(conn, "SET synchronous_commit = on")
     print(f"  [index] CREATE INDEX USING merkle on healthy took {time.time()-t_idx1:.2f}s", flush=True)
     _verify_merkle_index(conn, "healthy", fanout, split_threshold, merge_threshold)
 
@@ -139,14 +148,18 @@ def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int
     execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_idx")
 
     t_idx1 = time.time()
-    execute(
-        conn,
-        f"""
-        CREATE INDEX usertable_merkle_idx
-        ON damaged.usertable USING merkle (ycsb_key)
-        WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold}, fanout = {fanout})
-        """,
-    )
+    execute(conn, "SET synchronous_commit = off")
+    try:
+        execute(
+            conn,
+            f"""
+            CREATE INDEX usertable_merkle_idx
+            ON damaged.usertable USING merkle (ycsb_key)
+            WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold}, fanout = {fanout})
+            """,
+        )
+    finally:
+        execute(conn, "SET synchronous_commit = on")
     print(f"  [index] CREATE INDEX USING merkle on damaged took {time.time()-t_idx1:.2f}s", flush=True)
     _verify_merkle_index(conn, "damaged", fanout, split_threshold, merge_threshold)
 
