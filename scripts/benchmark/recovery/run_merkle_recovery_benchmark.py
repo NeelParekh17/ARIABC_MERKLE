@@ -20,12 +20,19 @@ from merkle_recovery.config import (
     BENCH_DIR, RESULT_ROOT as _DEFAULT_RESULT_ROOT, GEOMETRY_MATRIX_PATH,
     BENCHMARK_SCHEMA_VERSION, TIMING_CONTRACT_VERSION,
     BENCHMARK_SCOPE_METADATA,
-    profile_config,
+    profile_config, leaf_key,
 )
-from merkle_recovery.db import connect, execute, scalar, show_setting
+from merkle_recovery.db import (
+    connect,
+    diff_merkle_node_index_stats,
+    execute,
+    merkle_node_index_stats,
+    scalar,
+    show_setting,
+)
 from merkle_recovery.dataset import (
     build_dataset, reset_damaged_from_healthy,
-    leaf_occupancy, occupancy_stats, table_sizes,
+    leaf_occupancy, occupancy_stats, table_sizes, tree_stats,
     bucket_consistency_sample, ensure_helpers,
 )
 from merkle_recovery.manifest import (
@@ -46,7 +53,7 @@ from merkle_recovery.reporting import (
 from merkle_recovery.profiling import (
     ProfileCollector, group_profile_rows_with_denominators,
     group_profile_rows_with_fraction, validate_profile_invariants,
-    record_call,
+    parse_json_plan, record_call,
 )
 
 RESULT_ROOT = _DEFAULT_RESULT_ROOT
@@ -56,14 +63,39 @@ PROFILE_OPERATION_FIELDS = [
     "merge_threshold", "fanout", "profile_label", "bad_leaf_count",
     "corrupted_tuple_count", "repetition", "stage", "operation",
     "schema", "partition", "node_in_partition", "leaf_id",
+    "localisation_prefix_len", "localisation_frontier_nodes",
+    "localisation_batch_depth", "localisation_max_depth",
     "call_ordinal", "rows_returned", "client_wall_ms", "success",
 ]
+
+# Recovery writes are synchronous and touch the same small damaged-leaf set on
+# every repetition. A single warmup is not enough to settle the first WAL/
+# commit path after a large index build, so keep several untimed cycles outside
+# the reported sample. The normal apply_corruption() checkpoint remains the
+# clean boundary immediately before each measured repetition.
+RECOVERY_WARMUP_CYCLES = 3
 
 
 # ── timing helper ─────────────────────────────────────────────────────────────
 
 def now_ms() -> float:
     return time.perf_counter() * 1000.0
+
+
+def assert_synchronous_merkle_state(conn) -> None:
+    """Fail fast if the crash-safe Merkle apply engine is not ready."""
+    raw = scalar(conn, "SELECT merkle_recovery_status()")
+    if raw is None:
+        return
+    status = json.loads(raw)
+    if status.get("state") not in (None, "READY"):
+        raise RuntimeError(f"Merkle recovery state is not READY: {status}")
+
+
+def chunk_list(values: list[Any], size: int) -> list[list[Any]]:
+    if size <= 0:
+        return [values]
+    return [values[i:i + size] for i in range(0, len(values), size)]
 
 
 @contextmanager
@@ -127,10 +159,14 @@ def validate_backend_profile_stats(
     this recovery-only profile snapshot.
     """
     reasons: list[str] = []
-    expected_child_calls = int(counters.get("child_hash_sql_calls", 0)) + int(
+    partition_catalog_path = bool(
+        counters.get("partition_subtree_sql_calls", 0)
+        or post_repair_counters.get("targeted_confirmation_partition_subtree_sql_calls", 0)
+    )
+    expected_child_calls = 0 if partition_catalog_path else int(counters.get("child_hash_sql_calls", 0)) + int(
         post_repair_counters.get("targeted_confirmation_child_hash_sql_calls", 0)
     )
-    expected_child_nodes = int(counters.get("child_hash_nodes_read", 0)) + int(
+    expected_child_nodes = 0 if partition_catalog_path else int(counters.get("child_hash_nodes_read", 0)) + int(
         post_repair_counters.get("targeted_confirmation_child_hash_nodes_read", 0)
     )
     checks = [
@@ -148,10 +184,12 @@ def validate_backend_profile_stats(
 def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str = "") -> dict[str, Any]:
     occ = leaf_occupancy(conn)
     sizes = table_sizes(conn)
+    tstats = tree_stats(conn, int(geo.get("fanout", 4)))
     leaf_count = len(occ)
     phys_per_leaf = tuple_count / max(1, leaf_count)
     row = {
         **sizes,
+        **tstats,
         "profile_label": profile_label,
         "tuple_count": tuple_count,
         "fanout": geo.get("fanout", 4),
@@ -163,6 +201,208 @@ def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str
         **occupancy_stats(occ),
     }
     return row
+
+
+def _extend_localisation_node_id(node_id: bytes, prefix_len: int, bucket: int, bits: int) -> bytes:
+    """Mirror merkle_bytea_extend() for an untimed diagnostic replay."""
+    result = bytearray(node_id)
+    for offset in range(bits):
+        bit_idx = prefix_len + offset
+        byte_pos = bit_idx // 8
+        bit_pos = 7 - (bit_idx % 8)
+        bit = (bucket >> (bits - 1 - offset)) & 1
+        if bit:
+            result[byte_pos] |= 1 << bit_pos
+        else:
+            result[byte_pos] &= ~(1 << bit_pos)
+    return bytes(result)
+
+
+def _localisation_sql(explain: bool = False, partition_aware: bool = False) -> str:
+    prefix = "EXPLAIN (ANALYZE, BUFFERS, SETTINGS, TIMING OFF, FORMAT JSON) " if explain else ""
+    if partition_aware:
+        return (
+            f"{prefix}WITH wanted(partition_id, node_id) AS ("
+            "SELECT * FROM unnest(%s::int4[], %s::bytea[])) "
+            "SELECT n.partition_id, n.node_id, n.prefix_len, n.is_leaf, n.hash "
+            "FROM wanted w JOIN ariabc_internal.merkle_node n "
+            "ON n.partition_id = w.partition_id AND n.node_id = w.node_id "
+            "WHERE n.index_oid = %s AND n.prefix_len = %s::smallint "
+            "ORDER BY n.partition_id, n.node_id"
+        )
+    return (
+        f"{prefix}SELECT node_id, prefix_len, is_leaf, hash "
+        "FROM ariabc_internal.merkle_node "
+        "WHERE index_oid = %s AND prefix_len = %s "
+        "AND node_id = ANY(%s::bytea[]) ORDER BY node_id"
+    )
+
+
+def _plan_access_summary(plan: dict[str, Any]) -> dict[str, Any]:
+    nodes: list[dict[str, Any]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            if "Node Type" in value:
+                nodes.append(value)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(plan)
+    root = plan.get("Plan", {}) if isinstance(plan, dict) else {}
+    return {
+        "plan_node_types": "|".join(sorted({str(n.get("Node Type", "")) for n in nodes})),
+        "plan_index_names": "|".join(sorted({str(n.get("Index Name", "")) for n in nodes if n.get("Index Name")})),
+        "plan_actual_rows": root.get("Actual Rows", 0),
+        "plan_rows_removed_by_filter": sum(int(n.get("Rows Removed by Filter", 0) or 0) for n in nodes),
+        "shared_hit_blocks": sum(int(n.get("Shared Hit Blocks", 0) or 0) for n in nodes),
+        "shared_read_blocks": sum(int(n.get("Shared Read Blocks", 0) or 0) for n in nodes),
+        "shared_dirtied_blocks": sum(int(n.get("Shared Dirtied Blocks", 0) or 0) for n in nodes),
+        "shared_written_blocks": sum(int(n.get("Shared Written Blocks", 0) or 0) for n in nodes),
+        "planning_ms": plan.get("Planning Time", 0.0),
+        "execution_ms": plan.get("Execution Time", 0.0),
+        "io_read_ms": plan.get("I/O Read Time", 0.0),
+        "io_write_ms": plan.get("I/O Write Time", 0.0),
+    }
+
+
+def _run_localisation_diagnostics(
+    conn,
+    profiler: ProfileCollector,
+    result_dir: Path,
+    *,
+    run_id: str,
+    tuple_count: int,
+    fanout: int,
+    split_threshold: int,
+    merge_threshold: int,
+    profile_label: str,
+    repetition: int,
+) -> list[dict[str, Any]]:
+    """Replay the exact localization frontiers with EXPLAIN, outside timing.
+
+    The native function performs several internal SPI queries per call.  The
+    profiler records the exact frontier inputs; this function replays those
+    inputs and the same child expansion in an untimed diagnostic phase, making
+    the chosen index, filtered rows, and buffer activity visible in artifacts.
+    """
+    if not profiler.localisation_batches:
+        return []
+    plan_jsonl = result_dir / "localisation_plan_profiles.jsonl"
+    summary_rows: list[dict[str, Any]] = []
+    bits_per_split = 0
+    while (1 << bits_per_split) < max(2, fanout):
+        bits_per_split += 1
+    replay_id = f"{run_id}-localisation-diagnostic"
+
+    index_oids = {
+        schema: scalar(conn, f"SELECT '{schema}.usertable_merkle_idx'::regclass::oid")
+        for schema in ("healthy", "damaged")
+    }
+    with plan_jsonl.open("a") as jsonl:
+        for batch in profiler.localisation_batches:
+            current_nodes = list(batch["node_ids"])
+            current_partition_ids = batch.get("partition_ids")
+            partition_aware = current_partition_ids is not None
+            current_prefix_len = int(batch["prefix_len"])
+            max_depth = int(batch["max_depth"])
+            for inner_depth in range(max_depth + 1):
+                if not current_nodes:
+                    break
+                explain_sql = _localisation_sql(explain=True, partition_aware=partition_aware)
+                plain_sql = _localisation_sql(explain=False, partition_aware=partition_aware)
+                healthy_rows: list[dict[str, Any]] = []
+                for schema in ("healthy", "damaged"):
+                    if partition_aware:
+                        plan_params = (
+                            current_partition_ids,
+                            current_nodes,
+                            index_oids[schema],
+                            current_prefix_len,
+                        )
+                    else:
+                        plan_params = (index_oids[schema], current_prefix_len, current_nodes)
+                    plan_rows = execute(
+                        conn,
+                        explain_sql,
+                        plan_params,
+                    )
+                    plan = parse_json_plan(plan_rows)
+                    if not isinstance(plan, dict):
+                        continue
+                    if schema == "healthy":
+                        healthy_rows = execute(
+                            conn,
+                            plain_sql,
+                            plan_params,
+                        )
+                    payload = {
+                        "run_id": run_id,
+                        "manifest_sha256": profiler.manifest_sha256,
+                        "diagnostic_replay_id": replay_id,
+                        "diagnostic_cache_mode": "post_recovery_warm",
+                        "tuple_count": tuple_count,
+                        "fanout": fanout,
+                        "split_threshold": split_threshold,
+                        "merge_threshold": merge_threshold,
+                        "profile_label": profile_label,
+                        "repetition": repetition,
+                        "schema": schema,
+                        "source_batch_ordinal": batch["batch_ordinal"],
+                        "inner_depth": inner_depth,
+                        "prefix_len": current_prefix_len,
+                        "input_node_count": len(current_nodes),
+                        "partition_aware": int(partition_aware),
+                        "index_oid": index_oids[schema],
+                        "plan": plan,
+                    }
+                    jsonl.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
+                    summary_rows.append(
+                        {
+                            "run_id": run_id,
+                            "manifest_sha256": profiler.manifest_sha256,
+                            "diagnostic_replay_id": replay_id,
+                            "diagnostic_cache_mode": "post_recovery_warm",
+                            "tuple_count": tuple_count,
+                            "fanout": fanout,
+                            "split_threshold": split_threshold,
+                            "merge_threshold": merge_threshold,
+                            "profile_label": profile_label,
+                            "repetition": repetition,
+                            "schema": schema,
+                            "source_batch_ordinal": batch["batch_ordinal"],
+                            "inner_depth": inner_depth,
+                            "prefix_len": current_prefix_len,
+                            "input_node_count": len(current_nodes),
+                            "partition_aware": int(partition_aware),
+                            "index_oid": index_oids[schema],
+                            **_plan_access_summary(plan),
+                        }
+                    )
+                next_nodes: list[bytes] = []
+                next_partition_ids: list[int] = []
+                if inner_depth < max_depth:
+                    for row in healthy_rows:
+                        if not bool(row["is_leaf"]):
+                            for bucket in range(fanout):
+                                next_nodes.append(
+                                    _extend_localisation_node_id(
+                                        bytes(row["node_id"]),
+                                        current_prefix_len,
+                                        bucket,
+                                        bits_per_split,
+                                    )
+                                )
+                                if partition_aware:
+                                    next_partition_ids.append(int(row["partition_id"]))
+                current_nodes = next_nodes
+                if partition_aware:
+                    current_partition_ids = next_partition_ids
+                current_prefix_len += bits_per_split
+    return summary_rows
 
 
 
@@ -198,7 +438,7 @@ def _run_deep_diagnostics(
 
     def capture_plans(kind: str, plan_order: int) -> None:
         with jsonl_path.open("a") as jsonl:
-            bad_leaf_keys = [(bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple)) else v for v in manifest["bad_leaves"]]
+            bad_leaf_keys = [leaf_key(v) for v in manifest["bad_leaves"]]
             for leaf_id in sorted(bad_leaf_keys):
                 for schema in ("healthy", "damaged"):
                     plan = lookup_explain_plan_json(conn, schema, leaf_id)
@@ -222,7 +462,11 @@ def _run_deep_diagnostics(
                         "io_timing_available": io_timing_available,
                         "plan": plan,
                     }
-                    jsonl.write(json.dumps(payload, sort_keys=True) + "\n")
+                    # psycopg can expose bytea parameters as bytes in an
+                    # EXPLAIN payload.  Preserve the diagnostic record rather
+                    # than failing the benchmark after recovery has already
+                    # completed.
+                    jsonl.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
                     plan_node = plan.get("Plan", {})
                     summary_rows.append(
                         {
@@ -268,7 +512,8 @@ def _run_deep_diagnostics(
     apply_corruption(conn, manifest)
     capture_plans("candidate", 1)
     diagnostic_phase: dict[str, float] = {}
-    for leaf_id in sorted(int(v) for v in manifest["bad_leaves"]):
+    bad_leaf_keys = [leaf_key(v) for v in manifest["bad_leaves"]]
+    for leaf_id in sorted(bad_leaf_keys):
         repair_leaf(conn, leaf_id, phase=diagnostic_phase, profiler=None)
     capture_plans("confirmation", 2)
     return summary_rows
@@ -283,6 +528,7 @@ def repair_merkle(
     repetition: int,
     planner_results: dict[str, Any],
     schema_rows_out: list[dict[str, Any]],
+    localisation_index_stats_rows_out: list[dict[str, Any]] | None = None,
     *,
     profile_label: str = "",
     profiling_mode: str = "off",
@@ -295,6 +541,7 @@ def repair_merkle(
         "fanout": int(manifest.get("fanout", 4)),
         "split_threshold": int(manifest.get("split_threshold", 32)),
         "merge_threshold": int(manifest.get("merge_threshold", 8)),
+        "partitions": int(manifest.get("partitions", 200)),
     }
     run_id = recovery_run_id(manifest, repetition, profile_label)
     manifest_digest = manifest_sha256(manifest)
@@ -317,11 +564,120 @@ def repair_merkle(
     counters = m.counters
     counters.update(planner_results)
     counters["manifest_sha256"] = manifest_digest
+    localisation_stats_flush_wait_ms = 0.0
+    localisation_stats_probe_ms = 0.0
+
+    # Snapshot the catalog index counters immediately around localization.
+    # The native function executes its descendant SQL through SPI, so this is
+    # the server-side evidence of which merkle_node index actually did work.
+    localisation_index_before: list[dict[str, Any]] = []
+    localisation_index_stats_ok = False
+    try:
+        track_counts_enabled = str(show_setting(conn, "track_counts")).lower() == "on"
+        localisation_index_stats_ok = track_counts_enabled
+        if track_counts_enabled:
+            stats_probe_start = now_ms()
+            localisation_index_before = merkle_node_index_stats(conn)
+            localisation_stats_probe_ms += now_ms() - stats_probe_start
+    except Exception as exc:
+        localisation_index_stats_ok = False
+        counters["localisation_index_stats_error"] = str(exc)
 
     with timer(m.phase, "tree_localisation_ms"):
-        bad_leaves = detect_bad_leaves(conn, counters, profiler=profiler)
+        bad_leaves = detect_bad_leaves(
+            conn,
+            counters,
+            profiler=profiler,
+            fanout=cfg["fanout"],
+            partition_aware=True,
+        )
 
-    expected_bad_leaves = sorted(set((bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple)) else v for v in manifest["bad_leaves"]))
+    if localisation_index_stats_ok:
+        stats_probe_start = now_ms()
+        try:
+            localisation_index_after = merkle_node_index_stats(conn)
+            localisation_index_deltas = diff_merkle_node_index_stats(
+                localisation_index_before,
+                localisation_index_after,
+            )
+            stats_activity_fields = (
+                "idx_scan_delta",
+                "idx_tup_read_delta",
+                "idx_tup_fetch_delta",
+                "idx_blks_read_delta",
+                "idx_blks_hit_delta",
+            )
+            # PostgreSQL 13's stats collector may not flush a short SPI query
+            # before the next statement.  Retry once outside the measured
+            # localization timer; never add this wait to tree_localisation_ms.
+            if (
+                localisation_index_deltas
+                and all(bool(stat.get("track_counts_enabled")) for stat in localisation_index_deltas)
+                and not any(
+                    int(stat.get(field, 0) or 0)
+                    for stat in localisation_index_deltas
+                    for field in stats_activity_fields
+                )
+            ):
+                flush_wait_start = now_ms()
+                time.sleep(0.6)
+                localisation_stats_flush_wait_ms += now_ms() - flush_wait_start
+                localisation_index_after = merkle_node_index_stats(conn)
+                localisation_index_deltas = diff_merkle_node_index_stats(
+                    localisation_index_before,
+                    localisation_index_after,
+                )
+            counters["localisation_index_stats_available"] = int(
+                bool(localisation_index_deltas)
+                and all(bool(stat.get("track_counts_enabled")) for stat in localisation_index_deltas)
+            )
+            counters["localisation_index_stats_nonzero"] = int(
+                any(
+                    int(stat.get(field, 0) or 0)
+                    for stat in localisation_index_deltas
+                    for field in stats_activity_fields
+                )
+            )
+            for stat in localisation_index_deltas:
+                index_name = str(stat["index_name"])
+                safe_name = "".join(
+                    ch if ch.isalnum() else "_" for ch in index_name
+                ).strip("_")
+                for field in (
+                    "idx_scan_delta",
+                    "idx_tup_read_delta",
+                    "idx_tup_fetch_delta",
+                    "idx_blks_read_delta",
+                    "idx_blks_hit_delta",
+                ):
+                    counters[f"localisation_{safe_name}_{field}"] = stat[field]
+                if localisation_index_stats_rows_out is not None:
+                    localisation_index_stats_rows_out.append(
+                        {
+                            "run_id": run_id,
+                            "manifest_sha256": manifest_digest,
+                            "experiment": manifest["experiment"],
+                            "profile_label": profile_label,
+                            "tuple_count": tuple_count,
+                            "fanout": cfg["fanout"],
+                            "split_threshold": cfg["split_threshold"],
+                            "merge_threshold": cfg["merge_threshold"],
+                            "bad_leaf_count": len(manifest["bad_leaves"]),
+                            "corrupted_tuple_count": len(manifest["corruptions"]),
+                            "repetition": repetition,
+                            "phase": "tree_localisation",
+                            **stat,
+                        }
+                    )
+        except Exception as exc:
+            counters["localisation_index_stats_available"] = 0
+            counters["localisation_index_stats_error"] = str(exc)
+        finally:
+            localisation_stats_probe_ms += now_ms() - stats_probe_start
+    else:
+        counters["localisation_index_stats_available"] = 0
+
+    expected_bad_leaves = sorted(set(leaf_key(v) for v in manifest["bad_leaves"]))
     if sorted(bad_leaves) != expected_bad_leaves:
         add_warning(m, f"bad leaves mismatch expected={expected_bad_leaves} actual={bad_leaves}")
 
@@ -366,25 +722,32 @@ def repair_merkle(
         candidate_fetch_batches += healthy_by_leaf.batches + damaged_by_leaf.batches
         candidate_leaf_buckets_requested += healthy_by_leaf.leaf_buckets_requested + damaged_by_leaf.leaf_buckets_requested
 
-        for leaf_id in chunk:
-            hrows, drows, ins, upd, dlt = repair_leaf(
-                conn,
-                leaf_id,
-                phase=m.phase,
-                profiler=profiler,
-                prefetched=(
-                    healthy_by_leaf.get(leaf_id, {}),
-                    damaged_by_leaf.get(leaf_id, {}),
-                ),
-            )
-            healthy_rows += len(hrows)
-            damaged_rows += len(drows)
-            leaf_total = len(hrows) + len(drows)
-            candidate_rows += leaf_total
-            per_leaf_candidates.append(leaf_total)
-            rows_inserted += ins
-            rows_updated += upd
-            rows_deleted += dlt
+        # Keep the fetch outside the transaction, then apply one bounded
+        # write transaction per chunk. This preserves synchronous Merkle
+        # maintenance and rollback atomicity while avoiding one WAL/commit
+        # wait for every repaired row.
+        with timer(m.phase, "repair_write_ms"):
+            with conn.transaction():
+                for leaf_id in chunk:
+                    hrows, drows, ins, upd, dlt = repair_leaf(
+                        conn,
+                        leaf_id,
+                        phase=m.phase,
+                        profiler=profiler,
+                        prefetched=(
+                            healthy_by_leaf.get(leaf_id, {}),
+                            damaged_by_leaf.get(leaf_id, {}),
+                        ),
+                        measure_repair_write=False,
+                    )
+                    healthy_rows += len(hrows)
+                    damaged_rows += len(drows)
+                    leaf_total = len(hrows) + len(drows)
+                    candidate_rows += leaf_total
+                    per_leaf_candidates.append(leaf_total)
+                    rows_inserted += ins
+                    rows_updated += upd
+                    rows_deleted += dlt
 
         # Discard chunk from memory
         del healthy_by_leaf
@@ -402,6 +765,8 @@ def repair_merkle(
             operation_prefix="confirmation_",
             profiler=profiler,
             stage_name="targeted_confirmation",
+            fanout=cfg["fanout"],
+            partition_aware=True,
         )
         repaired_leaf_mismatch = False
         confirmation_fetch_sql_calls = 0
@@ -475,7 +840,11 @@ def repair_merkle(
                     f"backend profile invariant failed for {m.run_id}: {backend_reasons}; {backend}"
                 )
 
-    recovery_end = now_ms()
+    # Exclude the index-statistics probes from the measured recovery boundary.
+    # They are diagnostic SQL, not recovery work.  Keep both the total probe
+    # cost and its asynchronous flush-wait subset as explicit fields so the
+    # observability cost remains auditable.
+    recovery_end = now_ms() - localisation_stats_probe_ms
     paper_end = recovery_end
 
     total_recovery_ms = recovery_end - paper_start
@@ -569,11 +938,13 @@ def repair_merkle(
                 "targeted_confirmation_partition_root_nodes_read", 0
             ),
             "recovery_user_table_seq_scan_delta": recovery_full_heap_scans,
-            "partition_root_batches": counters.get("child_hash_sql_calls", 0) // 2,
-            "partition_root_batches_ok": int((counters.get("child_hash_sql_calls", 0) // 2) > 0),
+            "partition_root_batches": counters.get("partition_root_batches", 0),
+            "partition_root_batches_ok": int(counters.get("partition_root_batches", 0) > 0),
             "full_audit_skipped": full_audit_skipped,
             "audit_mode": audit_mode,
             "leaf_fetch_chunk_size": leaf_fetch_chunk_size,
+            "localisation_stats_probe_ms": round(localisation_stats_probe_ms, 3),
+            "localisation_stats_flush_wait_ms": round(localisation_stats_flush_wait_ms, 3),
         }
     )
 
@@ -634,6 +1005,8 @@ def run_one_manifest(
     deep_plan_summary_rows_out: list[dict[str, Any]],
     result_dir: Path,
     progress_state: dict[str, int],
+    localisation_index_stats_rows_out: list[dict[str, Any]] | None = None,
+    localisation_plan_summary_rows_out: list[dict[str, Any]] | None = None,
     *,
     profile_label: str = "",
     profiling_mode: str = "off",
@@ -648,29 +1021,32 @@ def run_one_manifest(
         "merge_threshold": int(manifest.get("merge_threshold", 8)),
     }
     metrics: list[Metrics] = []
-    # ── Untimed Warmup Cycle ───────────────────────────────────────────────
-    # Run 1 untimed warmup cycle to prime PostgreSQL query plans, Python bytecode,
-    # and shared_buffers page caches so rep 0 starts with the exact same warm state
-    # as subsequent repetitions.
+    # ── Untimed Warmup Cycles ───────────────────────────────────────────────
+    # Prime PostgreSQL query plans, Python bytecode, shared_buffers pages, and
+    # the synchronous Merkle/WAL write path before rep 0. Do not add an
+    # explicit checkpoint here: it would introduce an unrelated I/O barrier
+    # between warmup and measurement. The dataset build already establishes
+    # the initial checkpoint boundary.
     if reps > 0:
-        warmup_id = f"{recovery_run_id(manifest, 0, profile_label)}-warmup"
-        apply_corruption(conn, manifest)
-        planner_results, _ = run_planner_preflight(conn, manifest, warmup_id)
-        repair_merkle(
-            conn,
-            manifest,
-            tuple_count,
-            -1,
-            planner_results,
-            [],
-            profile_label=profile_label,
-            profiling_mode="off",
-            profiler=None,
-            benchmark_profile="",
-            audit_mode="skip",
-            leaf_fetch_chunk_size=leaf_fetch_chunk_size,
-        )
-        execute(conn, "CHECKPOINT")
+        for warmup_rep in range(RECOVERY_WARMUP_CYCLES):
+            warmup_id = f"{recovery_run_id(manifest, 0, profile_label)}-warmup{warmup_rep}"
+            apply_corruption(conn, manifest)
+            planner_results, _ = run_planner_preflight(conn, manifest, warmup_id)
+            repair_merkle(
+                conn,
+                manifest,
+                tuple_count,
+                -1,
+                planner_results,
+                [],
+                localisation_index_stats_rows_out=None,
+                profile_label=profile_label,
+                profiling_mode="off",
+                profiler=None,
+                benchmark_profile="",
+                audit_mode="skip",
+                leaf_fetch_chunk_size=leaf_fetch_chunk_size,
+            )
 
     for rep in range(reps):
         run_id = recovery_run_id(manifest, rep, profile_label)
@@ -729,6 +1105,7 @@ def run_one_manifest(
             rep,
             planner_results,
             schema_rows_out,
+            localisation_index_stats_rows_out=localisation_index_stats_rows_out,
             profile_label=profile_label,
             profiling_mode=profiling_mode,
             profiler=profiler,
@@ -758,6 +1135,20 @@ def run_one_manifest(
                     }
                 )
             if profiling_mode == "deep" and rep == 0:
+                localisation_rows = _run_localisation_diagnostics(
+                    conn,
+                    profiler,
+                    result_dir,
+                    run_id=run_id,
+                    tuple_count=tuple_count,
+                    fanout=cfg["fanout"],
+                    split_threshold=cfg.get("split_threshold", 32),
+                    merge_threshold=cfg.get("merge_threshold", 8),
+                    profile_label=profile_label,
+                    repetition=rep,
+                )
+                if localisation_plan_summary_rows_out is not None:
+                    localisation_plan_summary_rows_out.extend(localisation_rows)
                 deep_rows = _run_deep_diagnostics(
                     conn,
                     manifest,
@@ -1146,6 +1537,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     profile_operation_rows: list[dict[str, Any]] = []
     backend_profile_rows: list[dict[str, Any]] = []
     deep_plan_summary_rows: list[dict[str, Any]] = []
+    localisation_index_stats_rows: list[dict[str, Any]] = []
+    localisation_plan_summary_rows: list[dict[str, Any]] = []
+    runtime_setting_rows: list[dict[str, Any]] = []
     io_timing_setting = ""
     server_version = ""
     git_head = ""
@@ -1164,6 +1558,28 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 ) from exc
         io_timing_setting = str(show_setting(conn, "track_io_timing"))
         server_version = str(scalar(conn, "SHOW server_version"))
+        for setting_name in (
+            "shared_buffers",
+            "effective_cache_size",
+            "work_mem",
+            "random_page_cost",
+            "seq_page_cost",
+            "enable_seqscan",
+            "max_parallel_workers_per_gather",
+            "track_io_timing",
+            "track_counts",
+            "jit",
+        ):
+            try:
+                setting_value = show_setting(conn, setting_name)
+            except Exception as exc:
+                setting_value = f"unavailable: {exc}"
+            runtime_setting_rows.append(
+                {
+                    "setting": setting_name,
+                    "value": str(setting_value),
+                }
+            )
         try:
             import subprocess
             git_bin = shutil.which("git") or "/usr/bin/git"
@@ -1337,6 +1753,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     deep_plan_summary_rows,
                     result_dir,
                     progress_state,
+                    localisation_index_stats_rows,
+                    localisation_plan_summary_rows,
                     profile_label=geometry_label,
                     profiling_mode=args.profiling,
                     benchmark_profile=args.profile,
@@ -1372,6 +1790,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         "profile_label", "tuple_count", "fanout", "split_threshold", "merge_threshold",
         "total_leaf_count",
         "tree_levels", "tree_edges", "tree_depth",
+        "tree_height", "max_prefix_len",
         "total_merkle_nodes", "total_logical_tree_nodes",
         "physical_rows_per_leaf_expected", "expected_candidate_rows_per_bad_leaf",
         "base_table_bytes", "primary_index_bytes", "merkle_index_bytes",
@@ -1391,6 +1810,27 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     write_csv(result_dir / "planner_checks.csv", planner_rows, [
         "run_id", "schema", "leaf_id", "index_oid", "index_relfilenode",
         "index_definition", "plan_uses_expected_leaf_lookup_index", "plan_json_sha256",
+    ])
+    write_csv(result_dir / "localisation_index_stats.csv", localisation_index_stats_rows, [
+        "run_id", "manifest_sha256", "experiment", "profile_label", "tuple_count",
+        "fanout", "split_threshold", "merge_threshold", "bad_leaf_count",
+        "corrupted_tuple_count", "repetition", "phase", "index_name",
+        "idx_scan_delta", "idx_tup_read_delta", "idx_tup_fetch_delta",
+        "idx_blks_read_delta", "idx_blks_hit_delta", "relation_bytes",
+        "index_bytes", "estimated_relation_rows", "track_counts_enabled",
+    ])
+    write_csv(result_dir / "runtime_settings.csv", runtime_setting_rows, [
+        "setting", "value",
+    ])
+    write_csv(result_dir / "localisation_plan_summary.csv", localisation_plan_summary_rows, [
+        "run_id", "manifest_sha256", "diagnostic_replay_id", "diagnostic_cache_mode",
+        "tuple_count", "fanout", "split_threshold", "merge_threshold",
+        "profile_label", "repetition", "schema", "source_batch_ordinal",
+        "inner_depth", "prefix_len", "input_node_count", "index_oid",
+        "plan_node_types", "plan_index_names", "plan_actual_rows",
+        "plan_rows_removed_by_filter", "shared_hit_blocks", "shared_read_blocks",
+        "shared_dirtied_blocks", "shared_written_blocks", "planning_ms",
+        "execution_ms", "io_read_ms", "io_write_ms",
     ])
     write_csv(result_dir / "schema_fidelity.csv", schema_fidelity_rows, [
         "run_id", "method", "check_name", "healthy_value", "damaged_value", "match",
@@ -1632,6 +2072,16 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 f"split_threshold={row['split_threshold']}, merge_threshold={row['merge_threshold']}, "
                 f"total_leaf_count={row['total_leaf_count']}, tree_depth={row.get('tree_depth', row.get('max_depth', 0))}"
             )
+    report_lines.extend([
+        "",
+        "## Localization Access Observability",
+        "",
+        "Per-run deltas for `pg_stat_all_indexes` and `pg_statio_all_indexes` around the native `merkle_node` localization call are in `localisation_index_stats.csv`.",
+        "These include index scans, index tuples read/fetched, buffer reads/hits, and relation/index sizes.",
+        "The diagnostic snapshot and asynchronous stats flush are reported as `localisation_stats_probe_ms` and `localisation_stats_flush_wait_ms`; both are excluded from `restore_repair_ms`.",
+        "The session planner/cache settings used by the campaign are in `runtime_settings.csv`.",
+        "Deep profiling additionally replays the exact localization frontiers with `EXPLAIN (ANALYZE, BUFFERS, SETTINGS)` in `localisation_plan_summary.csv` and `localisation_plan_profiles.jsonl`.",
+    ])
     report_lines.extend([
         "",
         "## Phase Medians And P95",

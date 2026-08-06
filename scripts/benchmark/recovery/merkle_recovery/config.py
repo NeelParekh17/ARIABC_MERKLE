@@ -31,6 +31,35 @@ BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only dynamic rec
 TIMING_CONTRACT_VERSION = 1
 ZERO_HASH = "0" * 64
 
+
+def leaf_key(value: Any) -> tuple:
+    """Normalize a recovery leaf coordinate.
+
+    New manifests carry ``(partition_id, node_id_hex, prefix_len)``.  The
+    two-field form remains accepted for old manifests and unit callers; it
+    means ``(node_id, prefix_len)`` and therefore uses the legacy unfiltered
+    candidate lookup path.
+    """
+    if isinstance(value, (list, tuple)):
+        if len(value) == 3:
+            node = value[1] if isinstance(value[1], bytes) else bytes.fromhex(str(value[1]))
+            return (int(value[0]), node, int(value[2]))
+        if len(value) == 2:
+            first = value[0]
+            node = first if isinstance(first, bytes) else bytes.fromhex(str(first))
+            return (node, int(value[1]))
+    if isinstance(value, bytes):
+        raise ValueError("leaf coordinate requires a prefix length")
+    return value
+
+
+def leaf_key_json(value: Any) -> list:
+    """Return the canonical JSON representation of a leaf coordinate."""
+    normalized = leaf_key(value)
+    if len(normalized) == 3:
+        return [int(normalized[0]), normalized[1].hex(), int(normalized[2])]
+    return [normalized[0].hex(), int(normalized[1])]
+
 # Explicit scope metadata written into every config.json
 BENCHMARK_SCOPE_METADATA: dict[str, str] = {
     "benchmark_scope": "merkle_only_dynamic_recovery",

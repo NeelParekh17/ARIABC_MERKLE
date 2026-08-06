@@ -62,7 +62,12 @@ def schema_fidelity_checks(conn, run_id: str, method: str) -> list[dict[str, Any
         )
     add("constraints", constraints["healthy"], constraints["damaged"])
 
-    for index_name in ("usertable_pkey", "usertable_merkle_idx", "usertable_merkle_covering_idx"):
+    for index_name in (
+        "usertable_pkey",
+        "usertable_merkle_idx",
+        "usertable_merkle_covering_idx",
+        "usertable_merkle_partition_lookup_idx",
+    ):
         definitions: dict[str, Any] = {}
         for schema in ("healthy", "damaged"):
             definition = scalar(
@@ -135,7 +140,11 @@ def audit_recovery(conn, run_id: str, method: str) -> dict[str, Any]:
         """
         SELECT count(*) FROM pg_indexes
         WHERE schemaname = 'damaged'
-          AND indexname IN ('usertable_pkey', 'usertable_merkle_idx', 'usertable_merkle_covering_idx')
+          AND indexname IN (
+              'usertable_pkey', 'usertable_merkle_idx',
+              'usertable_merkle_covering_idx',
+              'usertable_merkle_partition_lookup_idx'
+          )
         """,
     )
     return {

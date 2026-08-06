@@ -1053,6 +1053,11 @@
   prorettype => 'bytea', proargtypes => 'bytea int4',
   proargnames => '{node_id,prefix_len}',
   prosrc => 'merkle_node_upper_bound_sql' },
+{ oid => '9940', descr => 'compute hash-routed Merkle partition for an 8-byte route hash',
+  proname => 'merkle_partition_for_hash', provolatile => 'i', proisstrict => 't',
+  prorettype => 'int4', proargtypes => 'bytea int4',
+  proargnames => '{key_hash,partitions}',
+  prosrc => 'merkle_partition_for_hash' },
 
 { oid => '338', descr => 'validate an operator class',
   proname => 'amvalidate', provolatile => 'v', prorettype => 'bool',
@@ -10958,6 +10963,14 @@ proargtypes => 'cstring', prosrc => 'bcdb_block_submit_results' },
   proallargtypes => '{regclass,_bytea,_int2,int4,bytea,int2,bool,bytea}',
   proargmodes => '{i,i,i,i,o,o,o,o}',
   proargnames => '{relid,node_ids,prefix_lens,max_depth,node_id,prefix_len,is_leaf,hash}',
+  prosrc => 'merkle_get_descendants_batch_array' }
+{ oid => '7018', descr => 'Merkle partition-aware dynamic tree descendants batch query',
+  proname => 'merkle_get_descendants_batch', prorows => '100', proretset => 't',
+  provolatile => 'v', prorettype => 'record',
+  proargtypes => 'regclass int4 _bytea _int2 int4',
+  proallargtypes => '{regclass,int4,_bytea,_int2,int4,bytea,int2,bool,bytea}',
+  proargmodes => '{i,i,i,i,i,o,o,o,o}',
+  proargnames => '{relid,partition_id,node_ids,prefix_lens,max_depth,node_id,prefix_len,is_leaf,hash}',
   prosrc => 'merkle_get_descendants_batch_array' }
 
 ]

@@ -1,0 +1,163 @@
+Here is the full transcription of the provided audio, logically divided into sections for clear scannability.
+
+---
+
+### Implementation of Splits and Merges
+
+**Speaker 1:** Right, done the implementation of split and merges. So whenever like we do...
+**Speaker 2:** Last time you showed me split, right? Merges you didn't show me last time.
+**Speaker 1:** So like how I will done the implementation of merge is like that this is having 0 bit and this is having let's suppose next plus 2 bits, and this will have again 4 bits for this level. So that will be detected and when we have to go to this node, we will just do 4 minus 2, 2 for detecting this parent node. And prefix will be same, right?
+**Speaker 2:** Wait, wait, we have a count, right?
+**Speaker 1:** Yes, yes, we have a count.
+**Speaker 2:** So the merge happens based on the count.
+**Speaker 1:** Yes, merge will happen based on count.
+**Speaker 2:** So if this count is below the threshold, all its children get merged.
+**Speaker 1:** Yes.
+**Speaker 2:** That is all right? There is nothing more. Why are you telling me about 0, 2, 4...
+**Speaker 1:** I'm just telling you that...
+**Speaker 2:** These get merged into this. Children get merged into the parent when their total count here drops below the threshold for the parent. That's all.
+**Speaker 1:** Yes, that is exactly it.
+**Speaker 2:** And when the count exceeds the threshold, it gets split.
+**Speaker 1:** It will be splitted like plus two for the prefix. Yes.
+**Speaker 2:** What happens if plus two or one is not represented... split could be one or two depending on that...
+**Speaker 1:** Yes. Sure.
+**Speaker 2:** That's clear. Very simple. Very easy to see that it is deterministic.
+**Speaker 1:** I've also checked the order also, like once I have inserted in ascending order, then decreasing order, and then I have inserted some extra things and removed those extra things, everything. So still the order is same only.
+**Speaker 2:** Good. That is testing the implementation. You can push it further. But this logic makes it extremely easy to see that it is deterministic. Because the mapping of the tuples to the path is deterministic. And if the count is greater than this, the path will be bigger, otherwise it will be shorter. So it's very easy to see that the tree itself is deterministic. We can give an intuitive argument why the tree is deterministic. We will have to put that in the paper at that place. So it's very easy to see... in the old one we had to worry which ones to merge, there was a lot of headache. Now all that is gone. Because the splitting is entirely deterministic, we get the same number of children, there's no virtual... this... that... life is much simpler with this than what we had earlier.
+**Speaker 1:** Which one earlier?
+**Speaker 2:** The one where we had multiple logical, physical... all that is gone now.
+**Speaker 1:** Ah, okay, yeah. So that was more complicated there. Here it is very easy. Good. And like we had also consistent with the tuple counts also. So like if here it is 10 then after increasing few more it is, root also is getting updated with tuple counts and splits is happening.
+**Speaker 2:** That you discussed... some postponing, now that is not there.
+**Speaker 1:** It is immediately updated. And this is merging that I did. So after this I inserted few more to like do more splitting and then removed those to get back to those... get back to zero.
+**Speaker 2:** Okay.
+**Speaker 1:** And this is the order that I was saying that in different orders that I have inserted, it is finally getting same hash every time.
+
+---
+
+### Structure Verification and Hashing
+
+**Speaker 2:** So the tree structure also we should make sure it's the same.
+**Speaker 1:** Yeah, tree structure might...
+**Speaker 2:** Just the list of nodes should be the same. How do you verify that the list of nodes is the same? Maybe we do a hash of each of the things in there and combine it. That is hash of the IDs of the nodes. And just for correctness... it's not required otherwise... if this hash is symmetric, that hash should not be symmetric. It might be... it might not be. Depending on split behavior. Yeah, it should not be a hash of the tuples, it's a hash of the IDs of the nodes. Not the content... the structure... a hash on the structure.
+**Speaker 1:** Yeah, fine, I will write it.
+**Speaker 2:** That is just for a quick comparison. Not a... it will be like a debug option. Later on we will turn it off. You can manually check also.
+**Speaker 1:** Yes, that's right.
+**Speaker 2:** So you can have a function or a query which computes the hash and everything, so you do it in this, then you run the other tests, again do it and make sure it's the same. It doesn't involve the code, it's just a small function on top.
+**Speaker 1:** Fine.
+**Speaker 2:** Okay, just be a UDF... a query. Okay.
+
+---
+
+### Query Optimization (DML and IN Clauses)
+
+**Speaker 1:** Later I also did the recovery test on that ranking server. So now it is like proper... not very much huge variance that we were having that day. After cleaning up.
+**Speaker 2:** That is good. We found that for a different reason but it is good for the server also not to be so full.
+**Speaker 1:** Yeah. Also like earlier let's suppose there were 300 corrupted tuples. Like earlier implementation that I did of first static rules right. I have identified 300 corrupted tuples. Now I will send one DML query then wait, then send another wait... but now I'm sending all in one batch only.
+**Speaker 2:** Which one? All of... for repairing. All like... I have detected that these 300 corrupted tuples are there. For that 300 DML queries are generated. I see. And you're running all the queries and sending one network run only... one F sync only.
+**Speaker 2:** So, instead of running 300 queries, you could also... you're taking the keys right, and then... yeah, you could even do an `IN` query. If you have a list of things... instead of running 300 queries locally where key is this, where key is this, where key is this, it's a well-known optimization that you do `WHERE key IN` and give a list. Now this `IN` list cannot be huge, it cannot be a million. So you have to put some bound on it. If it is very large, you have to do it differently. You have to maybe create a relation and so on because the parsing of the SQL query itself will become a problem. So if there's massive corruption, then you might as well send the whole thing. You should not even bother about this. So what you can do for now, for testing purposes we're not going to take it at every point in between. So you put some threshold. Up to that threshold you do an `IN` query. Beyond that threshold if it is really big, then you just send everything. Whether it is changed or not, whether it... you've detected enough corruption that you might as well send everything, so there's a threshold for that. And ideally for things in between you can do instead of the `IN` you should create a temporary relation and then `IN` that relation.
+**Speaker 1:** Okay.
+**Speaker 2:** That's the ideal thing. Instead of an `IN` textual query, we have to create a temporary relation, and then the query will say `IN (SELECT whatever FROM the temporary relation)`.
+**Speaker 1:** Okay.
+**Speaker 2:** That will be the logically correct way... efficient way of handling it.
+**Speaker 1:** How is that efficient?
+**Speaker 2:** Because you're not running separate queries. Supposing you have a thousand tuples that are corrupted, you can probably still do `IN` over there and an actual list. But if it's 10,000 or 100,000, then you're better off doing it... let's say a million for example, probably at a million you might as well ship the whole thing, but let's say it's a million in a database of a billion tuples. You don't want to ship a billion things. So what you will do is create a relation with all these million values, and the query to retrieve it will be `SELECT * FROM this WHERE the key is in this relation`... `SELECT key FROM that relation`.
+**Speaker 1:** Okay.
+**Speaker 2:** So that will be the select query. So it will be one query only, regardless.
+**Speaker 1:** Yeah.
+**Speaker 2:** It won't be do it for this key, do it for this key, which is much much slower. Even if there is an index, this separate query is much slower than the `IN` query. Because in the `IN` query it will actually use the index and iterate locally. It'll not treat it as separate queries. It will be way faster for the local thing. You already optimized one part which is collect everything and send it instead of sending one at a time. Now the next optimization is modify the query so only one query runs to find the tuple which have to be shipped.
+**Speaker 1:** Yes, okay. Yes.
+**Speaker 2:** Good. We run the `IN` query run as a single query right?
+**Speaker 1:** Yeah, `IN` is a single query.
+**Speaker 2:** But then I mean okay how does creating a separate relation and putting that keys into that... if the `IN` list is too big. If the `IN` list is 100,000 you can do that. But if it's a million, your SQL string is 1 million keys long. That will cause problems for most databases. So beyond the limit, you're better off creating a relation, insert the keys into that... into that... and then the query becomes `IN (SELECT * FROM that relation)`.
+**Speaker 1:** Okay. We ran into same issue in our 631 project as far as I remember that we optimized for DuckDB... like you that time also said about this thing only I remember... `IN` query like make sure it's small not very much huge. You at that time suggested to have some array structure like bloom filter something like that over there.
+**Speaker 2:** That was for semi-join. For semi-join you can do bloom. Here you don't want to do.
+**Speaker 1:** Okay. Good.
+
+---
+
+### Benchmarking and Latency Metrics
+
+**Speaker 2:** So this is... you tested on how many pairs so far? What is the size of the row count? Of which count? Of which table?
+**Speaker 1:** Like it was around 32 KB.
+**Speaker 2:** You said you had some numbers for the comparison on this thing.
+**Speaker 1:** Yeah I also have those numbers. So... this was the earlier static that we did. That we had.
+**Speaker 2:** Did you rerun it after the disk space...
+**Speaker 1:** Okay fine.
+**Speaker 2:** But I mean, this spike may go away...
+**Speaker 1:** Yes, that spike may go away, but basically trend will be the same. Yes. And... the localization cost is like increasing with the depth... levels of the dynamic merkle tree. Which is the localization... this is... like this our dynamic, up to here it was like levels were 10 and now from here to here the levels are 11 and from here to here levels are 12.
+**Speaker 2:** The localization you mean which... what is it you...
+**Speaker 1:** Like to identify the exact leaf node that has got corrupted.
+**Speaker 2:** Oh. Only here there are far fewer leaf nodes.
+**Speaker 1:** Yes. Everything...
+**Speaker 2:** Yeah, okay. So you're using a branching of four now?
+**Speaker 1:** Yes, yes. But there also we are optimizing that, like what we had discussed in the meeting, like to in one fetch just directly go to depth of three levels and directly send that. Yeah.
+**Speaker 2:** That is also done.
+**Speaker 1:** Fine. This is including... yes, yes.
+**Speaker 2:** Sure. Let's see... I didn't get what is the localization latency.
+**Speaker 1:** So, so... from root node to identifying which... if hash mismatch is there, then we will go to the child node, and if there are four child nodes, let's suppose only one child node is mismatching, then we will go to that depth...
+**Speaker 2:** No, but how do you define the latency? Latency is the amount of time taken to do one... to identify exact leaf node that is over there corrupted. Across two nodes? Across two... merkle... yeah. No, but you just have one ranking server, that's what you're running this on. So what is the other instance?
+**Speaker 1:** So both... both of dummy schema and healthy schema both are in the same only.
+**Speaker 2:** Okay. Same machine. So this is one healthy and one corrupted you're saying.
+**Speaker 1:** Yes, yes.
+**Speaker 2:** And then okay, so this latency is if you have a tree of depth 10, then you have corrupted something, then what is the difference with static and dynamic? Why does static...
+**Speaker 1:** Static is less than dynamic.
+**Speaker 2:** Why does... Because you find the leaf quickly but the leaf has huge number of nodes. Oh, this is just to find the leaf, you're not comparing them actually.
+**Speaker 1:** No.
+**Speaker 2:** So this is only for our understanding, it will not go in the paper because it will cause confusion. The actual cost of finding the tuples is what matters.
+**Speaker 1:** Yeah. Sure. So to fetch the tuples, so each leaf node is having like around 32 only, that is the cap that I've set. So this is not going above like very much huge... more than 32. And also the comparison cost is also decreased.
+**Speaker 2:** That is okay...
+**Speaker 1:** And this is what I was talking about that...
+**Speaker 2:** Okay, so total time. Yeah. This is the complete...
+**Speaker 1:** No no no, just for that DML queries that I was saying.
+**Speaker 2:** Okay. So these are very slow.
+**Speaker 1:** No, I was saying right, that in static I had this implementation that one by one 300 different DML queries... here it is 300 only but like here it's all in one batch only it's going.
+**Speaker 2:** One... it's going in one batch but you still have 300...
+**Speaker 1:** Yes, yes, yes. Because if you see the scale of this, this is 4,000 milliseconds, the other ones are like one-tenth of it, 400 milliseconds. The other costs. This is the big part of the cost. So when you optimize it, this cost should come down. It will come down significantly.
+**Speaker 2:** It has already came down... this was like total cost, total, entire, entire process.
+**Speaker 1:** Yeah, this was earlier static and this is now new dynamic. So this includes that choice... yes.
+**Speaker 2:** But what I'm saying is... yeah, so it includes the cost of applying it on the other side. Okay, that has to be done one at a time, there is no other way... unless... but there is a upset query can be done. So a bunch of other things to take into account. Here we assume the tuple is there but it is updated. It's also possible that in the corrupted thing a tuple is deleted or a tuple is inserted. So you may have to replace an existing tuple, add a tuple where nothing existed with that key or delete. Insert or delete. Yeah. Fine. So make sure these are all properly handled.
+**Speaker 1:** Currently it is only for updates. So... okay.
+**Speaker 2:** Yeah. The recovery should work regardless. So you have to update... mention in the paper also. It will be caught, but...
+**Speaker 1:** Okay. Then... this just confirmation... this is like again what I was showing that each candidate like each leaf that we are catching will be having around 32 only. And... this is the variance that I showed, like earlier we had so much huge variance now it has got reduced. Like I had earlier one also. So yeah...
+**Speaker 2:** Yeah, completely right. Crazy. Yeah.
+**Speaker 1:** After this I did that optimization so here you can see that it is like same only.
+**Speaker 2:** Here... so here that is like without optimization, one by one each individual query. So it's same, almost same as previously.
+**Speaker 1:** What is the... what is the static meaning? What is the dynamic meaning? This is like what... earlier I showed you right, that total time for recovery, entire process. This is it.
+**Speaker 2:** This is the updated run. Here there was no benefit actually. Yes. It was as slow, even if you ignore those spikes. There was no benefit, but now you are seeing the benefit.
+**Speaker 1:** No... that is majorly because of repair right? Like because of this latency.
+**Speaker 2:** Here also there is no difference... yeah, I'm saying that because of optimization of this phase right?
+**Speaker 1:** Sure. Because these phases have optimization but like numbers are very small to see 35 and 5... it will be nothing.
+**Speaker 2:** Yeah.
+**Speaker 1:** So we are seeing that here the scales are very much high because this was like earlier server was having very less space that's why.
+**Speaker 2:** Oh so these are because of the server space, you're seeing some different spikes... this actually we saw the spikes and then I thought this is weird it should not happen, and you found the server was... So that is sorted.
+**Speaker 1:** Okay. Then the final paper we will not have so many graphs. We will just take well asked the total things. Still like... so this is observation with earlier... ah not the new one.
+**Speaker 2:** No. After the cleanup it is not. So after cleanup you should see this one also pretty smooth. I'll go back to repo. Earlier implementation.
+**Speaker 1:** The static one. Yes. Okay.
+**Speaker 2:** It is just one data point, so that's fine. Okay. Artificial...
+**Speaker 1:** Yeah, okay. Nice.
+**Speaker 2:** Good. And here how much... how much... no so this is a size of data set, how much corruption you have?
+**Speaker 1:** 300.
+**Speaker 2:** Same 300 for all of them? Okay. And how many... 300 in one leaf node or scattered how?
+**Speaker 1:** It is randomly done.
+**Speaker 2:** Oh random. Okay. Because... pretty much it will be like everything will go in a unique this thing because you have 32 per leaf node... 1 million size so too many leaves... probably 1 per leaf and everything. But then... yeah... I mean we don't have any justification for 300 as such. So...
+**Speaker 1:** It's fine. Previously we came up with that number because it represented corruption of an entire leaf when we had that previous data set on and we were doing a static this thing. So... we can okay that's fine. It's just a number. You can also try with larger and see how that time varies. It will be linear in the number of corrupted things.
+**Speaker 2:** Yes.
+**Speaker 1:** Okay. What is this... F32? That was the test that we have decided that we should have 32 fan out. Oh ok. Okay. And 1024 leaves. Yeah.
+**Speaker 2:** And here when you are doing across two trees, how many levels are you taking sending together?
+**Speaker 1:** Three. Three levels meaning four power three right? 64. Yes, yes 64 nodes.
+**Speaker 2:** So this number may have to vary. Make sure the implementation has this as a parameter. So here you are running both on the same machine so smaller is better. But if you're running across a wide area network, you are better off sending even more. So instead of three levels you may choose five levels in one go. In fact, as I was saying, some of these implementations send the entire merkle tree. Just send the whole thing. Forget one level or two levels or three levels. Send the whole thing. So if you have enough wide area latency, that itself becomes an option if the merkle tree is not too huge. But our assumption is if you have 100 partitions... there may be cases where you can send the whole merkle tree if it's small. But otherwise we have to go by levels.
+**Speaker 1:** For now just stick to the levels, one parameter sending over there... the parameter can be tweaked. If you say ten levels then the whole tree goes.
+**Speaker 2:** Yes.
+**Speaker 1:** So we can see the performance will vary with that. Yeah. So that parameter is in the recovery script, not in the actual code.
+**Speaker 2:** Yes, not in yes in actual code.
+**Speaker 1:** Also you can test for fan out also. Yes. Like what values? 2, 4...
+**Speaker 2:** 2, 4. 2 will be too small because there's no point in branching that it will become worse after that. So...
+**Speaker 1:** Yeah, number of tuples updated, all that. Wait... no, there is a slight benefit to a larger fan out. In the sense the merkle tree height is less. So the number of things which you update will come down. But the split cost will be more. That's true. Yes. So we can play around with that. So we'll have to measure the cost of during normal processing also. With different sizes and then the cost during recovery.
+**Speaker 2:** So yeah, performance study will have to be done with all these variations. Get the whole thing working and then we will start thinking about how to structure the performance study, what all has to be done.
+**Speaker 1:** Okay, so have you pushed this to Github or local?
+**Speaker 2:** I think yes it is pushed. No, not pushed, something is there.
+**Speaker 1:** Okay good.
+**Speaker 2:** I'll also check it out. Fine.
+**Speaker 1:** I updated the sections on this dynamic thing, 6.1, 6 and 6.1 I think. So you removed the old ones?
+**Speaker 2:** Previous version? That is long gone. 6.2 is there is some yet to be cleaned up but 6 and 6.1 including figures everything is updated.
+**Speaker 1:** Algorithms. Yes. Okay, is there anything ready to discuss now? Yeah, we can check them 6 and 6.1.

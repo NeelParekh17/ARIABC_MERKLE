@@ -9,8 +9,8 @@ Options:
   --ssh-user USER
   --ssh-port PORT
   --ssh-key PATH
-  --remote-root PATH           default: /work/ARIABC/merkle_recovery_runs
-  --remote-python PATH         default: /work/ARIABC/AriaBC/.venv/bin/python3
+  --remote-root PATH           default: /home/protectdr/merkle_recovery_runs
+  --remote-python PATH         default: /usr/bin/python3
   --build-profile debug|release  default: debug for smoke, release for preflight/paper
   --experiment figure12|figure13
   --tuple-count N
@@ -20,6 +20,7 @@ Options:
   --fanout N
   --geometry-label LABEL
   --profiling off|light|deep
+  --track-counts on|off      default: on; off removes PostgreSQL stats overhead
   --repetitions N
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
@@ -31,6 +32,7 @@ Options:
   --ssh-timeout SECONDS        default: 15
   --keep-remote-archive
   --keep-failure-logs
+  --fetch RUN_ID|latest       fetch completed remote run results without starting a new run
 USAGE
 }
 
@@ -39,8 +41,8 @@ SSH_USER=""
 SSH_PORT="22"
 SSH_KEY=""
 SSH_PASSWORD="${SSH_PASSWORD:-}"
-REMOTE_ROOT="/work/ARIABC/merkle_recovery_runs"
-REMOTE_PYTHON="/work/ARIABC/AriaBC/.venv/bin/python3"
+REMOTE_ROOT="/home/protectdr/merkle_recovery_runs"
+REMOTE_PYTHON="/usr/bin/python3"
 PROFILE=""
 BUILD_PROFILE=""   # empty = auto: debug for smoke, release for preflight/paper
 EXPERIMENT=""
@@ -51,6 +53,7 @@ BAD_LEAF_COUNT=""
 FANOUT=""
 GEOMETRY_LABEL=""
 PROFILING="off"
+TRACK_COUNTS="on"
 REPETITIONS=""
 ARTIFACT_MODE="summary"
 CORRUPTION_MODE="paper-update-only"
@@ -61,6 +64,7 @@ MIN_FREE_GIB=40
 SSH_TIMEOUT="${SSH_TIMEOUT:-15}"
 KEEP_REMOTE_ARCHIVE=0
 KEEP_FAILURE_LOGS=0
+FETCH_ONLY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     --fanout) FANOUT="${2:?}"; shift 2 ;;
     --geometry-label) GEOMETRY_LABEL="${2:?}"; shift 2 ;;
     --profiling) PROFILING="${2:?}"; shift 2 ;;
+    --track-counts) TRACK_COUNTS="${2:?}"; shift 2 ;;
     --repetitions) REPETITIONS="${2:?}"; shift 2 ;;
     --artifact-mode) ARTIFACT_MODE="${2:?}"; shift 2 ;;
     --corruption-mode) CORRUPTION_MODE="${2:?}"; shift 2 ;;
@@ -90,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --ssh-timeout) SSH_TIMEOUT="${2:?}"; shift 2 ;;
     --keep-remote-archive) KEEP_REMOTE_ARCHIVE=1; shift ;;
     --keep-failure-logs) KEEP_FAILURE_LOGS=1; shift ;;
+    --fetch) FETCH_ONLY="${2:?}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -99,10 +105,12 @@ if [[ -z "$HOST" ]]; then
   echo "host must be specified" >&2
   exit 2
 fi
-case "$PROFILE" in
-  smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300) ;;
-  *) echo "profile must be smoke, preflight, paper, recovery-scaling-diagnosis, fanout-width-sweep, size-scaling-k75-c300, or best-scaling-f32-l1024-k75-c300" >&2; exit 2 ;;
-esac
+if [[ -z "$FETCH_ONLY" ]]; then
+  case "$PROFILE" in
+    smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300) ;;
+    *) echo "profile must be smoke, preflight, paper, recovery-scaling-diagnosis, fanout-width-sweep, size-scaling-k75-c300, or best-scaling-f32-l1024-k75-c300" >&2; exit 2 ;;
+  esac
+fi
 case "$ARTIFACT_MODE" in
   summary|debug) ;;
   *) echo "artifact-mode must be summary or debug" >&2; exit 2 ;;
@@ -118,6 +126,10 @@ esac
 case "$PROFILING" in
   off|light|deep) ;;
   *) echo "profiling must be off, light, or deep" >&2; exit 2 ;;
+esac
+case "$TRACK_COUNTS" in
+  on|off) ;;
+  *) echo "track-counts must be on or off" >&2; exit 2 ;;
 esac
 case "$EXPERIMENT" in
   ""|figure12|figure13) ;;
@@ -243,6 +255,39 @@ remote_ssh_step() {
     return "$rc"
   fi
 }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -n "$FETCH_ONLY" ]]; then
+  if [[ "$FETCH_ONLY" == "latest" ]]; then
+    progress "locating latest completed remote artifact on $SSH_TARGET under $REMOTE_ROOT/artifacts/"
+    latest_tar="$(remote_ssh_cmd_stdinless "ls -t '$REMOTE_ROOT/artifacts/'*.tar.gz 2>/dev/null | head -n 1" || true)"
+    if [[ -z "$latest_tar" ]]; then
+      progress "error: no completed remote artifacts found under $REMOTE_ROOT/artifacts/"
+      exit 1
+    fi
+    FETCH_ONLY="$(basename "$latest_tar" .tar.gz)"
+    progress "latest remote artifact identified: $FETCH_ONLY"
+  fi
+
+  FETCH_SCRIPT="$SCRIPT_DIR/fetch_synced_remote_recovery_results.sh"
+  fetch_args=(
+    --host "$HOST"
+    --ssh-port "$SSH_PORT"
+    --remote-root "$REMOTE_ROOT"
+    --run-id "$FETCH_ONLY"
+  )
+  if [[ -n "$SSH_USER" ]]; then fetch_args+=(--ssh-user "$SSH_USER"); fi
+  if [[ -n "$SSH_KEY" ]]; then fetch_args+=(--ssh-key "$SSH_KEY"); fi
+  if [[ "$KEEP_REMOTE_ARCHIVE" -eq 1 ]]; then fetch_args+=(--keep-remote-archive); fi
+
+  progress "fetching remote artifact for $FETCH_ONLY"
+  fetched_dir="$("$FETCH_SCRIPT" "${fetch_args[@]}")"
+  progress "fetched result directory: $fetched_dir"
+
+  printf '%s\n' "$fetched_dir"
+  exit 0
+fi
 
 rsync_remote() {
   rsync -aL -q --delete -e "$RSYNC_RSH" "$@"
@@ -395,16 +440,20 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'" >/dev/null
 progress "remote source and environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q TRACK_COUNTS=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "$TRACK_COUNTS" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
 progress "starting remote benchmark payload; remote logs will be under $REMOTE_LOG_DIR"
 REMOTE_PAYLOAD_STARTED=1
 LOCAL_OWNS_RUN_DIR=0
-if ! remote_ssh_cmd "env $remote_env_prefix bash -s" <<'REMOTE'
+
+progress "uploading remote runner payload to $REMOTE_RUN_DIR/run_payload.sh"
+remote_ssh_cmd "cat > '$REMOTE_RUN_DIR/run_payload.sh' && chmod +x '$REMOTE_RUN_DIR/run_payload.sh'" <<'REMOTE'
+#!/usr/bin/env bash
 set -Eeuo pipefail
+trap '' HUP
 
 remote_progress() {
   local remote_host
@@ -540,7 +589,7 @@ on_interrupt() {
   exit 130
 }
 
-trap on_interrupt INT TERM HUP
+trap on_interrupt INT TERM
 trap cleanup EXIT
 
 free_kib="$(df -Pk "$REMOTE_ROOT" | awk "NR==2 {print \$4}")"
@@ -675,9 +724,12 @@ if (( ${#SOCKET_FILE} > 107 )); then
   exit 1
 fi
 remote_progress "temporary socket directory ready: $REMOTE_SOCKET_DIR"
+# Keep PostgreSQL relation/index statistics configurable: diagnostic runs use
+# them for localization access deltas; clean performance runs can disable the
+# collection overhead explicitly with --track-counts off.
 remote_progress "PostgreSQL start requested; logs: $REMOTE_LOG_DIR/pg_ctl_start.log and $REMOTE_LOG_DIR/postgres.log"
 if "$REMOTE_INSTALL_DIR/bin/pg_ctl" -D "$REMOTE_PGDATA" -l "$REMOTE_LOG_DIR/postgres.log" \
-    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=4GB -c maintenance_work_mem=1GB -c work_mem=128MB -c max_wal_size=32GB -c checkpoint_timeout=60min -c autovacuum=off -c track_counts=off -c synchronous_commit=on -c wal_buffers=64MB" \
+    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=4GB -c maintenance_work_mem=1GB -c work_mem=128MB -c max_wal_size=32GB -c checkpoint_timeout=60min -c autovacuum=off -c track_counts=$TRACK_COUNTS -c synchronous_commit=on -c wal_buffers=64MB" \
     -w start 9>&- >"$REMOTE_LOG_DIR/pg_ctl_start.log" 2>&1; then
   remote_progress "PostgreSQL started"
 else
@@ -788,12 +840,26 @@ fi
 
 cleanup_success=1
 REMOTE
-then
-  progress "remote benchmark payload failed for $RUN_ID; see remote failure output above"
-  exit 1
+
+REMOTE_PID="$(remote_ssh_cmd "nohup env $remote_env_prefix bash '$REMOTE_RUN_DIR/run_payload.sh' > '$REMOTE_LOG_DIR/remote_runner.log' 2>&1 & echo \$!")"
+progress "remote benchmark payload launched detached under nohup (PID $REMOTE_PID)"
+progress "remote log output is saved to $REMOTE_LOG_DIR/remote_runner.log"
+progress "NOTE: This run will continue on $SSH_TARGET even if your local machine is shut down or disconnected."
+progress "following live logs below (press Ctrl+C to detach without killing the remote run)..."
+
+set +e
+remote_ssh_cmd "tail --pid=$REMOTE_PID -f -n +1 '$REMOTE_LOG_DIR/remote_runner.log' 2>/dev/null || tail -f -n +1 '$REMOTE_LOG_DIR/remote_runner.log'"
+set -e
+
+if remote_ssh_cmd_stdinless "test -f '$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz'"; then
+  progress "remote benchmark payload completed successfully for $RUN_ID"
+  REMOTE_PAYLOAD_STARTED=0
+else
+  progress "remote benchmark payload failed or is still running for $RUN_ID; check $REMOTE_LOG_DIR/remote_runner.log on $SSH_TARGET"
+  if remote_ssh_cmd_stdinless "test -d '$REMOTE_FAILURES_ROOT/$RUN_ID'"; then
+    exit 1
+  fi
 fi
-progress "remote benchmark payload completed"
-REMOTE_PAYLOAD_STARTED=0
 
 FETCH_SCRIPT="$SCRIPT_DIR/fetch_synced_remote_recovery_results.sh"
 fetch_args=(
@@ -814,4 +880,32 @@ fi
 progress "fetching remote artifact for $RUN_ID"
 fetched_dir="$("$FETCH_SCRIPT" "${fetch_args[@]}")"
 progress "fetched result directory: $fetched_dir"
+
+# ---------------------------------------------------------------------------
+# Post-run: generate per-run analysis report comparing Dynamic vs Static best.
+# Writes to Dynamic_merkle_docs/run_reports/RECOVERY_RUN_REPORT_<RUN_ID>.md
+# Does NOT modify Dynamic_merkle_docs/RECOVERY_ARCHITECTURE_ANALYSIS.md.
+# ---------------------------------------------------------------------------
+REPORT_SCRIPT="$SCRIPT_DIR/generate_run_report.py"
+if [[ -x "$REPORT_SCRIPT" || -f "$REPORT_SCRIPT" ]] && [[ -d "$fetched_dir" ]]; then
+  # Select the report python: prefer LOCAL_PYTHON (venv) but fall back to
+  # system python3 if venv numpy/matplotlib C-extensions are broken.
+  REPORT_PYTHON="$LOCAL_PYTHON"
+  if ! "$LOCAL_PYTHON" -c "import numpy, matplotlib" >/dev/null 2>&1; then
+    REPORT_PYTHON="$(command -v python3 2>/dev/null || true)"
+    progress "venv numpy/matplotlib broken — falling back to system python3 ($REPORT_PYTHON) for report"
+  fi
+  if [[ -n "$REPORT_PYTHON" && -x "$REPORT_PYTHON" ]]; then
+    report_out="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --fetched-dir "$fetched_dir" 2>&1)" && true
+    report_md="$(printf '%s' "$report_out" | tail -1)"
+    if [[ -n "$report_md" && -f "$report_md" ]]; then
+      progress "run analysis report written: $report_md (plots: $(dirname "$report_md")/plots/)"
+    else
+      progress "WARNING: report generation failed (non-fatal): $report_out"
+    fi
+  else
+    progress "WARNING: no usable python3 found for report generation (non-fatal)"
+  fi
+fi
+
 printf '%s\n' "$fetched_dir"

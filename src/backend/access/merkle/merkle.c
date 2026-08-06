@@ -182,6 +182,10 @@ merkle_register_relopts(void)
 					  "Node size to trigger a merge",
 					  MERKLE_MERGE_THRESHOLD, 1, 100000, AccessExclusiveLock);
 
+	add_int_reloption(merkle_relopt_kind, "partitions",
+					  "Number of independent hash-routed Merkle partitions",
+					  MERKLE_DEFAULT_PARTITIONS, 1, 100000, AccessExclusiveLock);
+
 	merkle_relopts_registered = true;
 }
 
@@ -189,7 +193,8 @@ merkle_register_relopts(void)
 static relopt_parse_elt merkle_relopt_tab[] = {
 	{"fanout", RELOPT_TYPE_INT, offsetof(MerkleOptions, fanout)},
 	{"split_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, split_threshold)},
-	{"merge_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, merge_threshold)}
+	{"merge_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, merge_threshold)},
+	{"partitions", RELOPT_TYPE_INT, offsetof(MerkleOptions, num_partitions)}
 };
 
 /*
@@ -213,11 +218,12 @@ merkle_options(Datum reloptions, bool validate)
 
 	if (validate && opts != NULL)
 	{
-		if (opts->fanout < 2 || opts->fanout > 1024)
+		if (opts->fanout < 2 || opts->fanout > 1024 ||
+			opts->num_partitions < 1 || opts->num_partitions > 100000)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("fanout must be between 2 and 1024")));
+					 errmsg("fanout must be between 2 and 1024 and partitions must be between 1 and 100000")));
 		}
 	}
 
@@ -244,6 +250,7 @@ merkle_get_options(Relation indexRel)
 		opts->fanout = MERKLE_DEFAULT_FANOUT;
 		opts->split_threshold = SPLIT_THRESHOLD;
 		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
+		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
 		return opts;
 	}
 
@@ -266,16 +273,20 @@ merkle_get_options(Relation indexRel)
 		opts->split_threshold = SPLIT_THRESHOLD;
 		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
 	}
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, num_partitions) + sizeof(int)))
+		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
 
 	/* Validate options - if values look corrupt, use defaults */
 	if (opts->fanout < 2 || opts->fanout > 1024 ||
 		opts->split_threshold < 2 || opts->split_threshold > 100000 ||
-		opts->merge_threshold < 1 || opts->merge_threshold > 100000 ||
-		opts->merge_threshold >= opts->split_threshold)
+		 opts->merge_threshold < 1 || opts->merge_threshold > 100000 ||
+		 opts->merge_threshold >= opts->split_threshold ||
+		 opts->num_partitions < 1 || opts->num_partitions > 100000)
 	{
 		opts->fanout = MERKLE_DEFAULT_FANOUT;
 		opts->split_threshold = SPLIT_THRESHOLD;
 		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
+		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
 	}
 
 	return opts;
