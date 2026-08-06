@@ -43,6 +43,10 @@ class ProfileOperation:
     partition: str = ""
     node_in_partition: str = ""
     leaf_id: str = ""
+    localisation_prefix_len: str = ""
+    localisation_frontier_nodes: str = ""
+    localisation_batch_depth: str = ""
+    localisation_max_depth: str = ""
     call_ordinal: int = 0
     rows_returned: int = 0
     client_wall_ms: float = 0.0
@@ -67,6 +71,10 @@ class ProfileOperation:
             "partition": self.partition,
             "node_in_partition": self.node_in_partition,
             "leaf_id": self.leaf_id,
+            "localisation_prefix_len": self.localisation_prefix_len,
+            "localisation_frontier_nodes": self.localisation_frontier_nodes,
+            "localisation_batch_depth": self.localisation_batch_depth,
+            "localisation_max_depth": self.localisation_max_depth,
             "call_ordinal": self.call_ordinal,
             "rows_returned": self.rows_returned,
             "client_wall_ms": f"{self.client_wall_ms:.6f}",
@@ -94,6 +102,7 @@ class ProfileCollector:
     backend_profile: dict[str, Any] | None = None
     deep_plan_rows: list[dict[str, Any]] = field(default_factory=list)
     deep_plan_summary_rows: list[dict[str, Any]] = field(default_factory=list)
+    localisation_batches: list[dict[str, Any]] = field(default_factory=list)
     invalid_reasons: list[str] = field(default_factory=list)
 
     def next_ordinal(self) -> int:
@@ -112,6 +121,10 @@ class ProfileCollector:
         partition: int | str = "",
         node_in_partition: int | str = "",
         leaf_id: int | str = "",
+        localisation_prefix_len: int | str = "",
+        localisation_frontier_nodes: int | str = "",
+        localisation_batch_depth: int | str = "",
+        localisation_max_depth: int | str = "",
     ) -> None:
         if not self.enabled:
             return
@@ -134,6 +147,18 @@ class ProfileCollector:
                 partition="" if partition == "" else str(partition),
                 node_in_partition="" if node_in_partition == "" else str(node_in_partition),
                 leaf_id="" if leaf_id == "" else str(leaf_id),
+                localisation_prefix_len=(
+                    "" if localisation_prefix_len == "" else str(localisation_prefix_len)
+                ),
+                localisation_frontier_nodes=(
+                    "" if localisation_frontier_nodes == "" else str(localisation_frontier_nodes)
+                ),
+                localisation_batch_depth=(
+                    "" if localisation_batch_depth == "" else str(localisation_batch_depth)
+                ),
+                localisation_max_depth=(
+                    "" if localisation_max_depth == "" else str(localisation_max_depth)
+                ),
                 call_ordinal=self.next_ordinal(),
                 rows_returned=rows_returned,
                 client_wall_ms=client_wall_ns / 1_000_000.0,
@@ -146,6 +171,30 @@ class ProfileCollector:
 
     def add_invalid_reason(self, reason: str) -> None:
         self.invalid_reasons.append(reason)
+
+    def record_localisation_batch(
+        self,
+        *,
+        stage: str,
+        batch_ordinal: int,
+        prefix_len: int,
+        node_ids: list[bytes],
+        max_depth: int,
+        partition_ids: list[int] | None = None,
+    ) -> None:
+        """Keep exact batch inputs for an untimed post-run EXPLAIN replay."""
+        if not self.enabled or stage != "localisation":
+            return
+        self.localisation_batches.append(
+            {
+                "stage": stage,
+                "batch_ordinal": batch_ordinal,
+                "prefix_len": prefix_len,
+                "node_ids": [bytes(node_id) for node_id in node_ids],
+                "max_depth": max_depth,
+                "partition_ids": None if partition_ids is None else [int(value) for value in partition_ids],
+            }
+        )
 
     def rows(self) -> list[dict[str, Any]]:
         return [op.as_row() for op in self.operations]
@@ -185,6 +234,10 @@ def record_call(
     partition: int | str = "",
     node_in_partition: int | str = "",
     leaf_id: int | str = "",
+    localisation_prefix_len: int | str = "",
+    localisation_frontier_nodes: int | str = "",
+    localisation_batch_depth: int | str = "",
+    localisation_max_depth: int | str = "",
     fn,
 ):
     if collector is None or not collector.enabled:
@@ -214,6 +267,10 @@ def record_call(
             partition=partition,
             node_in_partition=node_in_partition,
             leaf_id=leaf_id,
+            localisation_prefix_len=localisation_prefix_len,
+            localisation_frontier_nodes=localisation_frontier_nodes,
+            localisation_batch_depth=localisation_batch_depth,
+            localisation_max_depth=localisation_max_depth,
             client_wall_ns=now_ns() - start,
         )
 
@@ -470,5 +527,9 @@ def parse_json_plan(explain_rows: list[dict[str, Any]]) -> Any:
         return None
     doc = explain_rows[0].get("QUERY PLAN")
     if isinstance(doc, str):
-        return json.loads(doc)[0]
+        doc = json.loads(doc)
+    # psycopg may decode FORMAT JSON directly to the top-level EXPLAIN array,
+    # while text results arrive as the JSON string handled above.
+    if isinstance(doc, list):
+        return doc[0] if doc else None
     return doc

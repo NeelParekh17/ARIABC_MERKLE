@@ -35,7 +35,7 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
-#define MERKLE_ENTRY_CHUNK_SIZE 4194304 /* 4M entries * 40 bytes = 160 MB per chunk */
+#define MERKLE_ENTRY_CHUNK_SIZE 4194304 /* fixed-size chunk; entries include partition routing */
 
 typedef struct
 {
@@ -57,6 +57,7 @@ merkle_entry_at(const MerkleEntryArray *ea, size_t idx)
 typedef struct
 {
 	uint8		node_id[8];
+	int		partition_id;
 	int16		prefix_len;
 	bool		is_leaf;
 	int64		tuple_count;
@@ -79,7 +80,7 @@ bulk_node_set_init(MerkleBulkNodeSet *bs, int initial_capacity)
 }
 
 static void
-bulk_node_set_add(MerkleBulkNodeSet *bs, const uint8 *node_id, int prefix_len,
+bulk_node_set_add(MerkleBulkNodeSet *bs, int partition_id, const uint8 *node_id, int prefix_len,
 				  bool is_leaf, int64 tuple_count, const MerkleHash *hash)
 {
 	MerkleNodeRecord *rec;
@@ -91,6 +92,7 @@ bulk_node_set_add(MerkleBulkNodeSet *bs, const uint8 *node_id, int prefix_len,
 							(size_t) bs->max_records * sizeof(MerkleNodeRecord));
 	}
 	rec = &bs->records[bs->num_records++];
+	rec->partition_id = partition_id;
 	memcpy(rec->node_id, node_id, 8);
 	rec->prefix_len   = (int16) prefix_len;
 	rec->is_leaf      = is_leaf;
@@ -106,6 +108,7 @@ bulk_node_set_add(MerkleBulkNodeSet *bs, const uint8 *node_id, int prefix_len,
  */
 static MerkleHash
 merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
+						int partition_id,
 						const uint8 *node_id, int prefix_len,
 						const MerkleEntryArray *ea, size_t start_idx, size_t num_entries,
 						int fanout, int bits_per_split, int split_threshold,
@@ -157,14 +160,14 @@ merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
 		if (bucket_counts[i] > split_threshold && child_prefix_len < max_prefix_len)
 		{
 			MerkleHash child_hash = merkle_build_tree_pass1(
-				bs, child_node_id, child_prefix_len,
+				bs, partition_id, child_node_id, child_prefix_len,
 				ea, start_idx + (size_t) bucket_offsets[i], (size_t) bucket_counts[i],
 				fanout, bits_per_split, split_threshold, max_prefix_len);
 			merkle_hash_xor(&node_hash, &child_hash);
 		}
 		else
 		{
-			bulk_node_set_add(bs, child_node_id, child_prefix_len,
+			bulk_node_set_add(bs, partition_id, child_node_id, child_prefix_len,
 							  true, (int64) bucket_counts[i], &bucket_hashes[i]);
 			merkle_hash_xor(&node_hash, &bucket_hashes[i]);
 		}
@@ -176,7 +179,7 @@ merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
 
 	/* Emit internal node record after children */
 	if (prefix_len > 0)
-		bulk_node_set_add(bs, node_id, prefix_len, false, total_count, &node_hash);
+	bulk_node_set_add(bs, partition_id, node_id, prefix_len, false, total_count, &node_hash);
 
 	return node_hash;
 }
@@ -198,21 +201,21 @@ merkle_bulk_flush_nodes(Oid index_oid, const MerkleBulkNodeSet *bs)
 		int			j;
 		int			ret;
 
-		argtypes = (Oid *) palloc((size_t) chunk_len * 6 * sizeof(Oid));
-		values = (Datum *) palloc((size_t) chunk_len * 6 * sizeof(Datum));
-		nulls = (char *) palloc((size_t) chunk_len * 6 * sizeof(char));
-		memset(nulls, ' ', (size_t) chunk_len * 6);
+		argtypes = (Oid *) palloc((size_t) chunk_len * 7 * sizeof(Oid));
+		values = (Datum *) palloc((size_t) chunk_len * 7 * sizeof(Datum));
+		nulls = (char *) palloc((size_t) chunk_len * 7 * sizeof(char));
+		memset(nulls, ' ', (size_t) chunk_len * 7);
 
 		initStringInfo(&sql);
 		appendStringInfoString(&sql,
 			"INSERT INTO ariabc_internal.merkle_node"
-			" (index_oid, node_id, prefix_len, is_leaf, tuple_count, hash)"
+			" (index_oid, partition_id, node_id, prefix_len, is_leaf, tuple_count, hash)"
 			" VALUES ");
 
 		for (j = 0; j < chunk_len; j++)
 		{
 			MerkleNodeRecord *r = &bs->records[i + j];
-			int			base = j * 6;
+			int			base = j * 7;
 			bytea	   *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
 			bytea	   *hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
 
@@ -223,32 +226,34 @@ merkle_bulk_flush_nodes(Oid index_oid, const MerkleBulkNodeSet *bs)
 			memcpy(VARDATA(hash_bytea), r->hash.data, MERKLE_HASH_BYTES);
 
 			argtypes[base + 0] = OIDOID;
-			argtypes[base + 1] = BYTEAOID;
-			argtypes[base + 2] = INT2OID;
-			argtypes[base + 3] = BOOLOID;
-			argtypes[base + 4] = INT8OID;
-			argtypes[base + 5] = BYTEAOID;
+			argtypes[base + 1] = INT4OID;
+			argtypes[base + 2] = BYTEAOID;
+			argtypes[base + 3] = INT2OID;
+			argtypes[base + 4] = BOOLOID;
+			argtypes[base + 5] = INT8OID;
+			argtypes[base + 6] = BYTEAOID;
 
 			values[base + 0] = ObjectIdGetDatum(index_oid);
-			values[base + 1] = PointerGetDatum(node_id_bytea);
-			values[base + 2] = Int16GetDatum(r->prefix_len);
-			values[base + 3] = BoolGetDatum(r->is_leaf);
-			values[base + 4] = Int64GetDatum(r->tuple_count);
-			values[base + 5] = PointerGetDatum(hash_bytea);
+			values[base + 1] = Int32GetDatum(r->partition_id);
+			values[base + 2] = PointerGetDatum(node_id_bytea);
+			values[base + 3] = Int16GetDatum(r->prefix_len);
+			values[base + 4] = BoolGetDatum(r->is_leaf);
+			values[base + 5] = Int64GetDatum(r->tuple_count);
+			values[base + 6] = PointerGetDatum(hash_bytea);
 
 			if (j > 0)
 				appendStringInfoString(&sql, ", ");
-			appendStringInfo(&sql, "($%d, $%d, $%d, $%d, $%d, $%d)",
-							 base + 1, base + 2, base + 3, base + 4, base + 5, base + 6);
+			appendStringInfo(&sql, "($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+							 base + 1, base + 2, base + 3, base + 4, base + 5, base + 6, base + 7);
 		}
 
 		appendStringInfoString(&sql,
-			" ON CONFLICT (index_oid, node_id, prefix_len) DO UPDATE"
+			" ON CONFLICT (index_oid, partition_id, node_id, prefix_len) DO UPDATE"
 			"   SET is_leaf = EXCLUDED.is_leaf,"
 			"       tuple_count = EXCLUDED.tuple_count,"
 			"       hash = EXCLUDED.hash");
 
-		ret = SPI_execute_with_args(sql.data, chunk_len * 6, argtypes, values, nulls, false, chunk_len);
+		ret = SPI_execute_with_args(sql.data, chunk_len * 7, argtypes, values, nulls, false, chunk_len);
 		if (ret < 0)
 			elog(ERROR, "merkle bulk INSERT failed at batch starting at %d", i);
 
@@ -259,9 +264,9 @@ merkle_bulk_flush_nodes(Oid index_oid, const MerkleBulkNodeSet *bs)
 
 		for (j = 0; j < chunk_len; j++)
 		{
-			int base = j * 6;
-			pfree(DatumGetPointer(values[base + 1]));
-			pfree(DatumGetPointer(values[base + 5]));
+			int base = j * 7;
+			pfree(DatumGetPointer(values[base + 2]));
+			pfree(DatumGetPointer(values[base + 6]));
 		}
 
 		pfree(argtypes);
@@ -293,6 +298,7 @@ typedef struct
 	int			bits_per_split;
 	int			split_threshold;
 	int			merge_threshold;
+	int			num_partitions;
 } MerkleBuildState;
 
 static void merkle_emit_build_nodes_report(Relation indexRel,
@@ -311,6 +317,8 @@ merkle_entry_key_cmp(const void *a, const void *b)
 {
 	const MerkleTupleHashEntry *ea = (const MerkleTupleHashEntry *) a;
 	const MerkleTupleHashEntry *eb = (const MerkleTupleHashEntry *) b;
+	if (ea->partition_id != eb->partition_id)
+		return ea->partition_id < eb->partition_id ? -1 : 1;
 	return memcmp(ea->key_hash, eb->key_hash, 8);
 }
 
@@ -516,8 +524,15 @@ merkle_build_callback(Relation indexRel,
 		if (buildstate->num_chunks >= buildstate->max_chunks)
 		{
 			int new_max = buildstate->max_chunks ? buildstate->max_chunks * 2 : 16;
-			buildstate->chunks = (MerkleTupleHashEntry **)
-				repalloc(buildstate->chunks, (size_t) new_max * sizeof(MerkleTupleHashEntry *));
+
+			/* repalloc() cannot grow a NULL pointer on the first chunk. */
+			if (buildstate->chunks == NULL)
+				buildstate->chunks = (MerkleTupleHashEntry **)
+					palloc((size_t) new_max * sizeof(MerkleTupleHashEntry *));
+			else
+				buildstate->chunks = (MerkleTupleHashEntry **)
+					repalloc(buildstate->chunks,
+							(size_t) new_max * sizeof(MerkleTupleHashEntry *));
 			buildstate->max_chunks = new_max;
 		}
 		buildstate->chunks[buildstate->num_chunks] = (MerkleTupleHashEntry *)
@@ -528,6 +543,7 @@ merkle_build_callback(Relation indexRel,
 
 	entry = &buildstate->chunks[chunk_idx][chunk_off];
 	memcpy(entry->key_hash, route.route_digest, 8);
+	entry->partition_id = (uint32) route.partition_id;
 	memcpy(&entry->tuple_hash, &hash, sizeof(MerkleHash));
 	buildstate->num_entries++;
 
@@ -628,6 +644,7 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
     buildstate.fanout = opts->fanout;
 	buildstate.split_threshold = opts->split_threshold;
 	buildstate.merge_threshold = opts->merge_threshold;
+	buildstate.num_partitions = opts->num_partitions;
 	buildstate.bits_per_split = merkle_bits_per_split_for_fanout(buildstate.fanout);
 
 	merkle_init_tree(indexRel, RelationGetRelid(heapRel), opts,
@@ -659,91 +676,79 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
 		Oid index_oid = RelationGetRelid(indexRel);
-		uint8 zero_node_id[8];
-		MerkleHash root_hash;
-
-		memset(zero_node_id, 0, 8);
-		memset(&root_hash, 0, sizeof(MerkleHash));
-
-		for (size_t k = 0; k < buildstate.num_entries; k++)
-		{
-			size_t c = k / MERKLE_ENTRY_CHUNK_SIZE;
-			size_t o = k % MERKLE_ENTRY_CHUNK_SIZE;
-			merkle_hash_xor(&root_hash, &buildstate.chunks[c][o].tuple_hash);
-		}
-
+		Oid clear_types[1] = {OIDOID};
+		Datum clear_values[1] = {ObjectIdGetDatum(index_oid)};
 		ea = merkle_prepare_sorted_entries(&buildstate);
-
-		if (buildstate.indtuples <= buildstate.split_threshold)
+		/* REINDEX must replace, rather than overlay, the previous dynamic
+		 * geometry.  This also removes pre-partition-format rows left by an
+		 * upgraded cluster before the first partitioned rebuild. */
+		SPI_execute_with_args(
+			"DELETE FROM ariabc_internal.merkle_node WHERE index_oid = $1",
+			1, clear_types, clear_values, NULL, false, 0);
+		/* Each partition owns an independent dynamic tree rooted at
+		 * (partition_id, node_id=0, prefix_len=0).  Entries are sorted by
+		 * partition_id, so each partition is a contiguous slice. */
+		for (int partition_id = 0;
+			 partition_id < buildstate.num_partitions;
+			 partition_id++)
 		{
-			bytea *root_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-			bytea *root_hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
-			Oid argtypes[5] = {OIDOID, BYTEAOID, INT2OID, INT8OID, BYTEAOID};
-			Datum values[5];
+			size_t start = 0;
+			size_t count = 0;
+			uint8 zero_node_id[8] = {0};
+			MerkleHash partition_hash;
 
-			SET_VARSIZE(root_id_bytea, VARHDRSZ + 8);
-			memcpy(VARDATA(root_id_bytea), zero_node_id, 8);
+			while (start < ea.num_entries &&
+				   merkle_entry_at(&ea, start)->partition_id < (uint32) partition_id)
+				start++;
+			while (start + count < ea.num_entries &&
+				   merkle_entry_at(&ea, start + count)->partition_id == (uint32) partition_id)
+				count++;
 
-			SET_VARSIZE(root_hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
-			memcpy(VARDATA(root_hash_bytea), root_hash.data, MERKLE_HASH_BYTES);
+			merkle_hash_zero(&partition_hash);
+			for (size_t k = 0; k < count; k++)
+				merkle_hash_xor(&partition_hash,
+								&merkle_entry_at(&ea, start + k)->tuple_hash);
 
-			values[0] = ObjectIdGetDatum(index_oid);
-			values[1] = PointerGetDatum(root_id_bytea);
-			values[2] = Int16GetDatum((int16) 0);
-			values[3] = Int64GetDatum((int64) buildstate.indtuples);
-			values[4] = PointerGetDatum(root_hash_bytea);
-
-			SPI_execute_with_args(
-				"INSERT INTO ariabc_internal.merkle_node"
-				" (index_oid, node_id, prefix_len, is_leaf, tuple_count, hash)"
-				" VALUES ($1, $2, $3, true, $4, $5)"
-				" ON CONFLICT (index_oid, node_id, prefix_len) DO UPDATE"
-				"   SET is_leaf = true, tuple_count = EXCLUDED.tuple_count, hash = EXCLUDED.hash",
-				5, argtypes, values, NULL, false, 1);
-
-			if (SPI_tuptable != NULL)
-				SPI_freetuptable(SPI_tuptable);
-
-			pfree(root_id_bytea);
-			pfree(root_hash_bytea);
-		}
-		else
-		{
-			MerkleBulkNodeSet bulk;
-			MerkleHash computed_root_hash;
-			int est_nodes = Max(1024, (int) ((buildstate.num_entries / buildstate.split_threshold) * 3));
-			bulk_node_set_init(&bulk, est_nodes);
-
-			PG_TRY();
+			if (count <= (size_t) buildstate.split_threshold)
 			{
-				computed_root_hash = merkle_build_tree_pass1(
-					&bulk,
-					zero_node_id, 0,
-					&ea, 0, ea.num_entries,
-					buildstate.fanout, buildstate.bits_per_split,
-					buildstate.split_threshold,
-					MAX_PREFIX_LEN);
-
-				/* Add root (prefix_len=0) as non-leaf with computed hash */
-				bulk_node_set_add(&bulk, zero_node_id, 0, false,
-								  (int64) buildstate.indtuples, &computed_root_hash);
-
-				/* Single (batched) INSERT of all nodes */
+				MerkleBulkNodeSet bulk;
+				bulk_node_set_init(&bulk, 1);
+				bulk_node_set_add(&bulk, partition_id, zero_node_id, 0, true,
+								  (int64) count, &partition_hash);
 				merkle_bulk_flush_nodes(index_oid, &bulk);
-			}
-			PG_CATCH();
-			{
-				if (bulk.records)
-				{
-					pfree(bulk.records);
-					bulk.records = NULL;
-				}
-				PG_RE_THROW();
-			}
-			PG_END_TRY();
-
-			if (bulk.records)
 				pfree(bulk.records);
+			}
+			else
+			{
+				MerkleBulkNodeSet bulk;
+				MerkleHash computed_root_hash;
+				int est_nodes = Max(1024, (int) ((count / buildstate.split_threshold) * 3));
+
+				bulk_node_set_init(&bulk, est_nodes);
+				PG_TRY();
+				{
+					computed_root_hash = merkle_build_tree_pass1(
+						&bulk, partition_id, zero_node_id, 0,
+						&ea, start, count,
+						buildstate.fanout, buildstate.bits_per_split,
+						buildstate.split_threshold, MAX_PREFIX_LEN);
+					bulk_node_set_add(&bulk, partition_id, zero_node_id, 0, false,
+									  (int64) count, &computed_root_hash);
+					merkle_bulk_flush_nodes(index_oid, &bulk);
+				}
+				PG_CATCH();
+				{
+					if (bulk.records)
+					{
+						pfree(bulk.records);
+						bulk.records = NULL;
+					}
+					PG_RE_THROW();
+				}
+				PG_END_TRY();
+				if (bulk.records)
+					pfree(bulk.records);
+			}
 		}
 
 		if (SPI_tuptable != NULL)
@@ -832,6 +837,7 @@ merkleBuildempty(Relation indexRel)
     meta->fanout = fanout;
     meta->split_threshold = opts->split_threshold;
     meta->merge_threshold = opts->merge_threshold;
+	meta->num_partitions = opts->num_partitions;
 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = recovery_status.managed ?

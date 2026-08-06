@@ -21,12 +21,17 @@ def ensure_helpers(conn) -> None:
     execute(conn, "SET enable_merkle_index = on")
     execute(conn, "SET merkle_apply_synchronous_direct = on")
     execute(conn, "SET synchronous_commit = on")
+    def setting_text(value: Any) -> str:
+        if isinstance(value, bytes):
+            value = value.decode("ascii")
+        return str(value).strip().lower()
+
     settings = {
-        "enable_merkle_index": str(scalar(conn, "SHOW enable_merkle_index")).lower(),
-        "merkle_apply_synchronous_direct": str(
+        "enable_merkle_index": setting_text(scalar(conn, "SHOW enable_merkle_index")),
+        "merkle_apply_synchronous_direct": setting_text(
             scalar(conn, "SHOW merkle_apply_synchronous_direct")
-        ).lower(),
-        "synchronous_commit": str(scalar(conn, "SHOW synchronous_commit")).lower(),
+        ),
+        "synchronous_commit": setting_text(scalar(conn, "SHOW synchronous_commit")),
     }
     if any(value != "on" for value in settings.values()):
         raise RuntimeError(
@@ -35,31 +40,30 @@ def ensure_helpers(conn) -> None:
         )
     print(f"[contract] synchronous Merkle settings: {settings}", flush=True)
 
-    required = [
-        "merkle_get_descendants_batch",
-        "merkle_root_hash",
-        "merkle_verify",
+    required_signatures = [
+        "pg_catalog.merkle_get_descendants_batch(regclass,integer,bytea[],smallint[],integer)",
+        "pg_catalog.merkle_get_partition_root_hashes(regclass)",
+        "pg_catalog.merkle_partition_for_hash(bytea,integer)",
+        "pg_catalog.merkle_root_hash(regclass)",
+        "pg_catalog.merkle_verify(regclass)",
     ]
 
     missing = execute(
         conn,
         """
-        SELECT wanted.name
-        FROM unnest(%s::text[]) AS wanted(name)
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM pg_proc p
-            WHERE p.proname = wanted.name
-        )
+        SELECT wanted.signature
+        FROM unnest(%s::text[]) AS wanted(signature)
+        WHERE to_regprocedure(wanted.signature) IS NULL
         """,
-        (required,),
+        (required_signatures,),
     )
 
     if missing:
-        names = ", ".join(row["name"] for row in missing)
+        names = ", ".join(row["signature"] for row in missing)
         raise RuntimeError(
-            f"Missing built-in Merkle SQL functions: {names}. "
-            "Use a PostgreSQL cluster initialized from the current AriaBC build."
+            f"Missing current Merkle SQL functions: {names}. "
+            "The recovery compatibility bootstrap could not register them; "
+            "use a current AriaBC postgres binary and rerun ledger schema bootstrap."
         )
 
 
@@ -89,7 +93,10 @@ def _verify_merkle_index(conn, schema: str, fanout: int, split_threshold: int, m
         """,
         (schema,),
     )
-    if len(rows) != 1 or rows[0]["amname"] != "merkle" or not rows[0]["indisvalid"]:
+    amname = rows[0]["amname"] if rows else None
+    if isinstance(amname, bytes):
+        amname = amname.decode("ascii")
+    if len(rows) != 1 or amname != "merkle" or not rows[0]["indisvalid"]:
         raise RuntimeError(f"{schema}.usertable_merkle_idx was not created as a valid Merkle index")
     actual = geometry(conn, schema)
     expected = {
@@ -103,9 +110,11 @@ def _verify_merkle_index(conn, schema: str, fanout: int, split_threshold: int, m
         )
 
 
-def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int = 8, fanout: int = 4) -> None:
+def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int = 8,
+                          fanout: int = 4, partitions: int = 200) -> None:
     import time
     execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_covering_idx")
+    execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_partition_lookup_idx")
     execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_idx")
     t_idx1 = time.time()
     # Disable synchronous_commit for the Merkle index build.
@@ -120,7 +129,8 @@ def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int 
             f"""
             CREATE INDEX usertable_merkle_idx
             ON healthy.usertable USING merkle (ycsb_key)
-            WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold}, fanout = {fanout})
+            WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold},
+                  fanout = {fanout}, partitions = {partitions})
             """
         )
     finally:
@@ -140,11 +150,27 @@ def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int 
     print(f"  [index] CREATE INDEX usertable_merkle_covering_idx on healthy took {time.time()-t_idx2:.2f}s", flush=True)
     if not execute(conn, "SELECT 1 FROM pg_indexes WHERE schemaname = 'healthy' AND indexname = 'usertable_merkle_covering_idx'"):
         raise RuntimeError("healthy.usertable_merkle_covering_idx was not created")
+    execute(
+        conn,
+        f"""
+        CREATE INDEX usertable_merkle_partition_lookup_idx
+        ON healthy.usertable
+        (
+          merkle_partition_for_hash(merkle_key_hash(ycsb_key), {partitions}),
+          merkle_key_hash(ycsb_key),
+          ycsb_key
+        )
+        """,
+    )
+    if not execute(conn, "SELECT 1 FROM pg_indexes WHERE schemaname = 'healthy' AND indexname = 'usertable_merkle_partition_lookup_idx'"):
+        raise RuntimeError("healthy.usertable_merkle_partition_lookup_idx was not created")
 
 
-def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int = 8, fanout: int = 4) -> None:
+def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int = 8,
+                           fanout: int = 4, partitions: int = 200) -> None:
     import time
     execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_covering_idx")
+    execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_partition_lookup_idx")
     execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_idx")
 
     t_idx1 = time.time()
@@ -155,7 +181,8 @@ def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int
             f"""
             CREATE INDEX usertable_merkle_idx
             ON damaged.usertable USING merkle (ycsb_key)
-            WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold}, fanout = {fanout})
+            WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold},
+                  fanout = {fanout}, partitions = {partitions})
             """,
         )
     finally:
@@ -175,6 +202,20 @@ def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int
     print(f"  [index] CREATE INDEX usertable_merkle_covering_idx on damaged took {time.time()-t_idx2:.2f}s", flush=True)
     if not execute(conn, "SELECT 1 FROM pg_indexes WHERE schemaname = 'damaged' AND indexname = 'usertable_merkle_covering_idx'"):
         raise RuntimeError("damaged.usertable_merkle_covering_idx was not created")
+    execute(
+        conn,
+        f"""
+        CREATE INDEX usertable_merkle_partition_lookup_idx
+        ON damaged.usertable
+        (
+          merkle_partition_for_hash(merkle_key_hash(ycsb_key), {partitions}),
+          merkle_key_hash(ycsb_key),
+          ycsb_key
+        )
+        """,
+    )
+    if not execute(conn, "SELECT 1 FROM pg_indexes WHERE schemaname = 'damaged' AND indexname = 'usertable_merkle_partition_lookup_idx'"):
+        raise RuntimeError("damaged.usertable_merkle_partition_lookup_idx was not created")
     execute(conn, "ANALYZE damaged.usertable")
 
 
@@ -186,6 +227,7 @@ def build_dataset(
     fanout: int = 4,
     split_threshold: int = 32,
     merge_threshold: int = 8,
+    partitions: int = 200,
     *args,
     **kwargs,
 ) -> dict[str, float]:
@@ -223,11 +265,11 @@ def build_dataset(
     print(f"[dataset] INSERT damaged.usertable took {time.time()-t2:.2f}s", flush=True)
 
     t3 = time.time()
-    create_merkle_indexes(conn, split_threshold, merge_threshold, fanout)
+    create_merkle_indexes(conn, split_threshold, merge_threshold, fanout, partitions)
     print(f"[dataset] create_merkle_indexes (healthy) took {time.time()-t3:.2f}s", flush=True)
 
     t4 = time.time()
-    create_damaged_indexes(conn, split_threshold, merge_threshold, fanout)
+    create_damaged_indexes(conn, split_threshold, merge_threshold, fanout, partitions)
     print(f"[dataset] create_damaged_indexes (damaged) took {time.time()-t4:.2f}s", flush=True)
 
     execute(conn, "ANALYZE healthy.usertable")
@@ -255,7 +297,8 @@ def reset_damaged_from_healthy(conn, cfg: dict[str, int]) -> None:
     execute(conn, "DROP TABLE IF EXISTS damaged.usertable CASCADE")
     execute(conn, "CREATE TABLE damaged.usertable (LIKE healthy.usertable INCLUDING DEFAULTS)")
     execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")
-    create_damaged_indexes(conn, cfg.get("split_threshold", 32), cfg.get("merge_threshold", 8), cfg.get("fanout", 4))
+    create_damaged_indexes(conn, cfg.get("split_threshold", 32), cfg.get("merge_threshold", 8),
+                           cfg.get("fanout", 4), cfg.get("partitions", 200))
     execute(conn, "ANALYZE damaged.usertable")
     execute(conn, "ANALYZE ariabc_internal.merkle_node")
     execute(conn, "CHECKPOINT")
@@ -303,9 +346,65 @@ def table_sizes(conn) -> dict[str, int]:
         "base_table_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable'::regclass)")),
         "primary_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_pkey'::regclass)")),
         "merkle_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_merkle_idx'::regclass)")),
-        "leaf_lookup_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_merkle_covering_idx'::regclass)")),
+        "leaf_lookup_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_merkle_partition_lookup_idx'::regclass)")),
         "total_schema_bytes": int(scalar(conn, "SELECT pg_total_relation_size('healthy.usertable'::regclass)")),
     }
+
+
+def _bits_per_split(fanout: int) -> int:
+    bits = 0
+    while (1 << bits) < max(2, int(fanout)):
+        bits += 1
+    return bits
+
+
+def tree_stats(conn, fanout: int = 4) -> dict[str, int]:
+    """Return measured Merkle height from the native node catalog.
+
+    ``prefix_len`` is a hash-bit length, not a tree level.  For example,
+    fanout 4 advances two route bits per split, so a deepest prefix of 20 is
+    a route depth of 10 and a root-inclusive height of 11.  Keep both values
+    explicit; ``ceil(log_fanout(leaf_count))`` is only a capacity lower bound
+    and must not be reported as the measured tree depth.
+    """
+    rows = execute(
+        conn,
+        """
+        SELECT
+            count(*)::int AS total_merkle_nodes,
+            count(*) FILTER (WHERE is_leaf)::int AS total_leaf_count,
+            coalesce(max(prefix_len), 0)::int AS max_prefix_len,
+            count(DISTINCT prefix_len)::int AS tree_levels
+        FROM ariabc_internal.merkle_node
+        WHERE index_oid = 'healthy.usertable_merkle_idx'::regclass
+        """
+    )
+    if not rows or not rows[0]:
+        return {
+            "total_merkle_nodes": 0,
+            "tree_levels": 0,
+            "max_prefix_len": 0,
+            "tree_depth": 0,
+            "tree_height": 0,
+            "tree_edges": 0,
+            "total_logical_tree_nodes": 0,
+        }
+    r = rows[0]
+    total_nodes = int(r.get("total_merkle_nodes") or 0)
+    max_prefix = int(r.get("max_prefix_len") or 0)
+    tree_levels = int(r.get("tree_levels") or 0)
+    route_bits = _bits_per_split(fanout)
+    route_depth = (max_prefix + route_bits - 1) // route_bits if max_prefix else 0
+    return {
+        "total_merkle_nodes": total_nodes,
+        "tree_levels": tree_levels,
+        "max_prefix_len": max_prefix,
+        "tree_depth": route_depth,
+        "tree_height": route_depth + 1 if total_nodes else 0,
+        "tree_edges": max(0, total_nodes - 1),
+        "total_logical_tree_nodes": total_nodes,
+    }
+
 
 
 def bucket_consistency_sample(

@@ -15,6 +15,7 @@ class Metrics:
     split_threshold: int = 32
     merge_threshold: int = 8
     fanout: int = 4
+    partitions: int = 200
     bad_leaf_count: int = 0
     corrupted_tuple_count: int = 0
     repetition: int = 0

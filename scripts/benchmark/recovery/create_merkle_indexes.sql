@@ -7,19 +7,35 @@ DROP INDEX IF EXISTS damaged.usertable_merkle_idx;
 
 CREATE INDEX usertable_merkle_idx
 ON healthy.usertable USING merkle (ycsb_key)
-WITH (fanout = :fanout, split_threshold = :split_threshold, merge_threshold = :merge_threshold);
+WITH (fanout = :fanout, split_threshold = :split_threshold, merge_threshold = :merge_threshold, partitions = 200);
 
 CREATE INDEX usertable_merkle_idx
 ON damaged.usertable USING merkle (ycsb_key)
-WITH (fanout = :fanout, split_threshold = :split_threshold, merge_threshold = :merge_threshold);
+WITH (fanout = :fanout, split_threshold = :split_threshold, merge_threshold = :merge_threshold, partitions = 200);
 
 CREATE INDEX usertable_merkle_covering_idx
 ON healthy.usertable
 ( merkle_key_hash(ycsb_key), merkle_tuple_hash(healthy.usertable.*), ycsb_key );
 
+CREATE INDEX usertable_merkle_partition_lookup_idx
+ON healthy.usertable
+(
+  merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200),
+  merkle_key_hash(ycsb_key),
+  ycsb_key
+);
+
 CREATE INDEX usertable_merkle_covering_idx
 ON damaged.usertable
 ( merkle_key_hash(ycsb_key), merkle_tuple_hash(damaged.usertable.*), ycsb_key );
+
+CREATE INDEX usertable_merkle_partition_lookup_idx
+ON damaged.usertable
+(
+  merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200),
+  merkle_key_hash(ycsb_key),
+  ycsb_key
+);
 
 ANALYZE healthy.usertable;
 ANALYZE damaged.usertable;

@@ -31,7 +31,7 @@ import pytest
 # Allow running from repo root without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from merkle_recovery.config import ALL_COLUMNS
+from merkle_recovery.config import ALL_COLUMNS, leaf_key
 from merkle_recovery.dataset import (
     build_dataset, ensure_helpers, leaf_occupancy,
     reset_damaged_from_healthy,
@@ -132,7 +132,13 @@ def test_corruption_mode_correctness(conn, base_dataset, corruption_mode):
     # ── assertion 2: detected bad leaves == expected ──────────────────────────
     counters: dict[str, Any] = {}
     bad_leaves = detect_bad_leaves(conn, counters)
-    expected_leaves = sorted(set((bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple)) else v for v in manifest["bad_leaves"]))
+    expected_leaves = sorted(
+        set(
+            (normalized[1], normalized[2])
+            if len(normalized) == 3 else normalized
+            for normalized in (leaf_key(value) for value in manifest["bad_leaves"])
+        )
+    )
     assert bad_leaves == expected_leaves, (
         f"[{corruption_mode}] bad_leaves mismatch: expected={expected_leaves} actual={bad_leaves}"
     )

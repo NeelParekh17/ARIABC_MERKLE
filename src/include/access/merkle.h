@@ -80,7 +80,7 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
  * Page layout constants
  */
 #define MERKLE_METAPAGE_BLKNO       0
-#define MERKLE_VERSION              9   /* Pure dynamic Merkle index format */
+#define MERKLE_VERSION              10  /* Partitioned dynamic Merkle index format */
 #define MERKLE_ROUTE_FORMAT_VERSION 4
 #define MERKLE_ROW_HASH_FORMAT_VERSION 1
 
@@ -91,6 +91,7 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 #define SPLIT_THRESHOLD             32
 #define MERKLE_MERGE_THRESHOLD      8
 #define MAX_PREFIX_LEN              60
+#define MERKLE_DEFAULT_PARTITIONS   200
 
 typedef enum MerkleDeltaEventType
 {
@@ -138,6 +139,7 @@ typedef struct MerkleMetaPageData
     int32           fanout;             /* branching factor (children per internal node) */
 	int32           split_threshold;    /* max tuples before node split */
 	int32           merge_threshold;    /* min tuples before node merge */
+	int32           num_partitions;     /* independent top-level Merkle roots */
 	uint32          routeFormatVersion; /* deterministic key-routing format */
 	uint32          rowHashFormatVersion; /* canonical row serialization format */
 	uint64          baselineApplySeq;   /* heap snapshot represented at build */
@@ -148,7 +150,8 @@ typedef struct MerkleMetaPageData
 
 /*
  * MerkleOptions - User-configurable options for Merkle index
- * Parsed from CREATE INDEX ... WITH (fanout=X, split_threshold=Y, merge_threshold=Z)
+ * Parsed from CREATE INDEX ... WITH (fanout=X, split_threshold=Y,
+ * merge_threshold=Z, partitions=N)
  */
 typedef struct MerkleOptions
 {
@@ -156,6 +159,7 @@ typedef struct MerkleOptions
 	int			fanout;
 	int			split_threshold;
 	int			merge_threshold;
+	int			num_partitions;
 } MerkleOptions;
 
 /*
@@ -165,6 +169,7 @@ typedef struct MerkleRoute
 {
 	uint8		route_digest[MERKLE_HASH_BYTES];
 	uint64		static_route_value;
+	int			partition_id;
 } MerkleRoute;
 
 typedef enum MerkleRecoveryState
@@ -203,7 +208,8 @@ extern MerkleOptions *merkle_get_options(Relation indexRel);
  * Helper to read tree config from metadata
  */
 extern void merkle_read_meta(Relation indexRel, int *fanout,
-                             int *split_threshold, int *merge_threshold);
+							 int *split_threshold, int *merge_threshold,
+							 int *num_partitions);
 
 /*
  * Index build functions
@@ -248,6 +254,8 @@ extern void merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot,
 extern void merkle_compute_route(Relation indexRel, Datum *values,
 								 bool *isnull, int nkeys,
 								 MerkleRoute *result);
+extern int merkle_partition_for_routing_key(Oid index_oid,
+										const uint8 *routing_key);
 extern bool merkle_relation_has_index(Relation rel);
 extern void merkle_reject_ddl(Relation rel, const char *command);
 extern void merkle_reject_concurrent_ddl(Oid index_oid, const char *command);
@@ -295,7 +303,8 @@ merkle_bits_per_split_for_fanout(int fanout)
 }
 
 extern void merkle_require_fresh(void);
-extern void do_split(Oid index_oid, const uint8 *node_id, int prefix_len, int64 target_count);
+extern void do_split(Oid index_oid, int partition_id, const uint8 *node_id,
+					 int prefix_len, int64 target_count);
 
 /* Bit manipulation helpers for Dynamic Merkle tree prefix traversal */
 static inline uint8
@@ -380,10 +389,12 @@ merkle_parent_of(uint8 *parent_node_id, const uint8 *node_id, int prefix_len, in
 typedef struct MerkleTupleHashEntry
 {
 	uint8		key_hash[8];
+	uint32		partition_id;
 	MerkleHash	tuple_hash;
 } MerkleTupleHashEntry;
 
-extern void merkle_do_split_in_memory(Oid index_oid, const uint8 *node_id, int prefix_len,
+extern void merkle_do_split_in_memory(Oid index_oid, int partition_id,
+									  const uint8 *node_id, int prefix_len,
 									  MerkleTupleHashEntry *entries, int num_entries,
 									  int fanout, int bits_per_split, int split_threshold);
 
@@ -416,6 +427,7 @@ extern void merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *s
 extern Datum merkle_key_hash_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_node_upper_bound_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_tuple_hash_sql(PG_FUNCTION_ARGS);
+extern Datum merkle_partition_for_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_until_sql(PG_FUNCTION_ARGS);
 
 #endif /* MERKLE_H */

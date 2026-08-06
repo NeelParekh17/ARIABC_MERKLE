@@ -53,6 +53,7 @@ typedef struct MerkleMetaCacheEntry {
     int  fanout;
     int  split_threshold;
     int  merge_threshold;
+	int  num_partitions;
 } MerkleMetaCacheEntry;
 static MerkleMetaCacheEntry merkle_meta_cache[MERKLE_META_CACHE_SLOTS];
 static bool merkle_meta_cache_registered = false;
@@ -88,7 +89,8 @@ merkle_meta_cache_lookup(Oid relid)
 }
 
 static void
-merkle_meta_cache_store(Oid relid, int fanout, int split_threshold, int merge_threshold)
+merkle_meta_cache_store(Oid relid, int fanout, int split_threshold,
+							int merge_threshold, int num_partitions)
 {
     int i;
     /* LRU-ish: replace first empty slot, else replace slot 0. */
@@ -107,6 +109,7 @@ merkle_meta_cache_store(Oid relid, int fanout, int split_threshold, int merge_th
     merkle_meta_cache[target].fanout          = fanout;
     merkle_meta_cache[target].split_threshold = split_threshold;
     merkle_meta_cache[target].merge_threshold = merge_threshold;
+	merkle_meta_cache[target].num_partitions = num_partitions;
 }
 
 /*
@@ -466,7 +469,7 @@ merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
  */
 void
 merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
-					 MerkleRoute *result)
+						 MerkleRoute *result)
 {
 	TupleDesc		tupdesc;
 	uint64			static_route_value = 0;
@@ -486,6 +489,30 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 		static_route_value = (static_route_value << 8) | result->route_digest[i];
 
 	result->static_route_value = static_route_value;
+	{
+		int num_partitions = MERKLE_DEFAULT_PARTITIONS;
+		merkle_read_meta(indexRel, NULL, NULL, NULL, &num_partitions);
+		result->partition_id = (int) (static_route_value % (uint64) num_partitions);
+	}
+}
+
+int
+merkle_partition_for_routing_key(Oid index_oid, const uint8 *routing_key)
+{
+	Relation index_rel;
+	int num_partitions = MERKLE_DEFAULT_PARTITIONS;
+	uint64 route_value = 0;
+	int i;
+
+	if (routing_key == NULL)
+		elog(ERROR, "NULL Merkle routing key");
+	for (i = 0; i < 8; i++)
+		route_value = (route_value << 8) | routing_key[i];
+
+	index_rel = index_open(index_oid, AccessShareLock);
+	merkle_read_meta(index_rel, NULL, NULL, NULL, &num_partitions);
+	index_close(index_rel, AccessShareLock);
+	return (int) (route_value % (uint64) num_partitions);
 }
 
 /*
@@ -493,7 +520,8 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
  */
 void
 merkle_read_meta(Relation indexRel, int *fanout,
-				 int *split_threshold, int *merge_threshold)
+				 int *split_threshold, int *merge_threshold,
+				 int *num_partitions)
 {
 	Buffer              buf;
 	Page                page;
@@ -514,6 +542,7 @@ merkle_read_meta(Relation indexRel, int *fanout,
 		if (fanout)          *fanout          = cached->fanout;
 		if (split_threshold) *split_threshold = cached->split_threshold;
 		if (merge_threshold) *merge_threshold = cached->merge_threshold;
+		if (num_partitions) *num_partitions = cached->num_partitions;
 		return;
 	}
 
@@ -545,8 +574,10 @@ merkle_read_meta(Relation indexRel, int *fanout,
 	if (fanout)          *fanout          = meta->fanout;
 	if (split_threshold) *split_threshold = meta->split_threshold;
 	if (merge_threshold) *merge_threshold = meta->merge_threshold;
+	if (num_partitions) *num_partitions = meta->num_partitions;
 
-	merkle_meta_cache_store(cache_relid, meta->fanout, meta->split_threshold, meta->merge_threshold);
+	merkle_meta_cache_store(cache_relid, meta->fanout, meta->split_threshold,
+							meta->merge_threshold, meta->num_partitions);
 
 	UnlockReleaseBuffer(buf);
 }
@@ -564,18 +595,21 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	int             fanout;
 	int             split_threshold;
 	int             merge_threshold;
+	int             num_partitions;
 
 	if (opts != NULL)
 	{
 		fanout = opts->fanout;
 		split_threshold = opts->split_threshold;
 		merge_threshold = opts->merge_threshold;
+		num_partitions = opts->num_partitions;
 	}
 	else
 	{
 		fanout = MERKLE_DEFAULT_FANOUT;
 		split_threshold = SPLIT_THRESHOLD;
 		merge_threshold = MERKLE_MERGE_THRESHOLD;
+		num_partitions = MERKLE_DEFAULT_PARTITIONS;
 	}
 
 	metabuf = ReadBuffer(indexRel, P_NEW);
@@ -590,6 +624,7 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	meta->fanout = fanout;
 	meta->split_threshold = split_threshold;
 	meta->merge_threshold = merge_threshold;
+	meta->num_partitions = num_partitions;
 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = baseline_apply_seq;
@@ -648,6 +683,25 @@ merkle_node_upper_bound_sql(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(merkle_key_hash_sql);
+PG_FUNCTION_INFO_V1(merkle_partition_for_hash);
+
+Datum
+merkle_partition_for_hash(PG_FUNCTION_ARGS)
+{
+	bytea *hash = PG_GETARG_BYTEA_PP(0);
+	int32 num_partitions = PG_GETARG_INT32(1);
+	uint64 route_value = 0;
+	int i;
+
+	if (VARSIZE_ANY_EXHDR(hash) != 8 || num_partitions < 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("merkle_partition_for_hash requires an 8-byte hash and positive partition count")));
+	for (i = 0; i < 8; i++)
+		route_value = (route_value << 8) | ((const uint8 *) VARDATA_ANY(hash))[i];
+
+	PG_RETURN_INT32((int32) (route_value % (uint64) num_partitions));
+}
 
 
 Datum
@@ -680,11 +734,13 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 	{
 		Oid typsend;
 		bool typisvarlena;
+		MemoryContext oldcxt;
 
 		if (cache != NULL && cache->tupdesc != NULL)
 			FreeTupleDesc(cache->tupdesc);
 
-		cache = (MerkleKeyHashCache *) MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, sizeof(MerkleKeyHashCache));
+		oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+		cache = (MerkleKeyHashCache *) palloc0(sizeof(MerkleKeyHashCache));
 		cache->argtype = argtype;
 		cache->tupdesc = CreateTemplateTupleDesc(1);
 		TupleDescInitEntry(cache->tupdesc, (AttrNumber) 1, "key", argtype, -1, 0);
@@ -693,6 +749,7 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 		fmgr_info_cxt(typsend, &cache->send_fn, fcinfo->flinfo->fn_mcxt);
 
 		fcinfo->flinfo->fn_extra = (void *) cache;
+		MemoryContextSwitchTo(oldcxt);
 	}
 
 	merkle_compute_canonical_route_digest_fast(&val, &isnull, 1, cache->tupdesc, &cache->send_fn, digest);
@@ -758,9 +815,9 @@ merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
 		{
 			MemoryContext oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
 			cache->tupdesc = lookup_rowtype_tupdesc_copy(tup_type, tup_typmod);
+			cache->slot = MakeSingleTupleTableSlot(cache->tupdesc, &TTSOpsHeapTuple);
 			MemoryContextSwitchTo(oldcxt);
 		}
-		cache->slot = MakeSingleTupleTableSlot(cache->tupdesc, &TTSOpsHeapTuple);
 		cache->send_functions = (FmgrInfo *) MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, cache->tupdesc->natts * sizeof(FmgrInfo));
 
 		for (i = 0; i < cache->tupdesc->natts; i++)

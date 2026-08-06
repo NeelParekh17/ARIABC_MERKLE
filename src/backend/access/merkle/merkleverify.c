@@ -64,6 +64,9 @@ PG_FUNCTION_INFO_V1(merkle_get_partition_root_hashes);
 PG_FUNCTION_INFO_V1(merkle_recovery_profile_reset);
 PG_FUNCTION_INFO_V1(merkle_recovery_profile_stats);
 
+static Tuplestorestate *merkle_begin_materialized_srf(FunctionCallInfo fcinfo,
+												TupleDesc *tupdesc);
+
 /*
  * find_merkle_index() - Find the Merkle index on a table
  *
@@ -279,17 +282,23 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 		spi_rc = SPI_execute_with_args(
 			"SELECT hash FROM ariabc_internal.merkle_node"
 			" WHERE index_oid = $1 AND prefix_len = 0",
-			1, sel_types, sel_vals, NULL, true, 1);
+			1, sel_types, sel_vals, NULL, true, 0);
 
 		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 		{
-			bool isnull;
-			Datum h_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
-			if (!isnull)
+			int root_i;
+			for (root_i = 0; root_i < (int) SPI_processed; root_i++)
 			{
-				bytea *h_b = DatumGetByteaPP(h_d);
-				memcpy(stored_root_hash.data, VARDATA_ANY(h_b), MERKLE_HASH_BYTES);
-				found_catalog_leaves = true;
+				bool isnull;
+				Datum h_d = SPI_getbinval(SPI_tuptable->vals[root_i], SPI_tuptable->tupdesc, 1, &isnull);
+				if (!isnull)
+				{
+					bytea *h_b = DatumGetByteaPP(h_d);
+					MerkleHash partition_hash;
+					memcpy(partition_hash.data, VARDATA_ANY(h_b), MERKLE_HASH_BYTES);
+					merkle_hash_xor(&stored_root_hash, &partition_hash);
+					found_catalog_leaves = true;
+				}
 			}
 		}
 		if (SPI_tuptable != NULL)
@@ -341,39 +350,41 @@ merkle_root_hash_index(PG_FUNCTION_ARGS)
 
 	{
 		int spi_rc;
-		Oid argtypes[3] = {OIDOID, BYTEAOID, INT2OID};
-		Datum values[3];
-		bytea *zero_id_bytea = (bytea *) palloc0(VARHDRSZ + 8);
-
-		SET_VARSIZE(zero_id_bytea, VARHDRSZ + 8);
+		Oid argtypes[2] = {OIDOID, INT2OID};
+		Datum values[2];
 
 		if (SPI_connect() == SPI_OK_CONNECT)
 		{
 			values[0] = ObjectIdGetDatum(indexOid);
-			values[1] = PointerGetDatum(zero_id_bytea);
-			values[2] = Int16GetDatum(0);
+			values[1] = Int16GetDatum(0);
 
 			spi_rc = SPI_execute_with_args(
-				"SELECT hash FROM ariabc_internal.merkle_node"
-				" WHERE index_oid = $1 AND node_id = $2 AND prefix_len = $3",
-				3, argtypes, values, NULL, true, 1);
+			"SELECT hash FROM ariabc_internal.merkle_node"
+			" WHERE index_oid = $1 AND prefix_len = $2",
+			2, argtypes, values, NULL, true, 0);
 
 			if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 			{
-				bool isnull;
-				Datum hash_d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
-				if (!isnull)
+				int root_i;
+				merkle_hash_zero(&root_h);
+				for (root_i = 0; root_i < (int) SPI_processed; root_i++)
 				{
-					bytea *h_b = DatumGetByteaPP(hash_d);
-					memcpy(root_h.data, VARDATA_ANY(h_b), MERKLE_HASH_BYTES);
-					found = true;
+					bool isnull;
+					Datum hash_d = SPI_getbinval(SPI_tuptable->vals[root_i], SPI_tuptable->tupdesc, 1, &isnull);
+					if (!isnull)
+					{
+						bytea *h_b = DatumGetByteaPP(hash_d);
+						MerkleHash partition_hash;
+						memcpy(partition_hash.data, VARDATA_ANY(h_b), MERKLE_HASH_BYTES);
+						merkle_hash_xor(&root_h, &partition_hash);
+						found = true;
+					}
 				}
 			}
 			if (SPI_tuptable != NULL)
 				SPI_freetuptable(SPI_tuptable);
 			SPI_finish();
 		}
-		pfree(zero_id_bytea);
 	}
 
 	if (found)
@@ -411,6 +422,7 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     int             fanout = 0;
 	int             split_threshold = 0;
 	int             merge_threshold = 0;
+	int             num_partitions = 0;
 	MerkleRecoveryStatusData recovery_status;
 	const char     *recovery_state_name;
 
@@ -445,7 +457,7 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     heapTupdesc = RelationGetDescr(heapRel);
 
 	/* Read metadata */
-	merkle_read_meta(indexRel, &fanout, &split_threshold, &merge_threshold);
+	merkle_read_meta(indexRel, &fanout, &split_threshold, &merge_threshold, &num_partitions);
     
     /* Read metadata page directly for version fields */
     metabuf = ReadBuffer(indexRel, MERKLE_METAPAGE_BLKNO);
@@ -460,8 +472,8 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
         Datum sel_vals[1] = {ObjectIdGetDatum(indexOid)};
         int spi_rc;
 
-        spi_rc = SPI_execute_with_args(
-            "SELECT count(*), count(*) FILTER (WHERE is_leaf) FROM ariabc_internal.merkle_node WHERE index_oid = $1",
+		spi_rc = SPI_execute_with_args(
+			"SELECT count(*), count(*) FILTER (WHERE is_leaf) FROM ariabc_internal.merkle_node WHERE index_oid = $1",
             1, sel_types, sel_vals, NULL, true, 0);
 
         if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
@@ -502,7 +514,8 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     initStringInfo(&buf);
     appendStringInfo(&buf, 
                      "{\"version\": %u, "
-                     "\"fanout\": %d, "
+					 "\"fanout\": %d, "
+					 "\"partitions\": %d, "
                      "\"split_threshold\": %d, "
                      "\"merge_threshold\": %d, "
                      "\"total_nodes\": %d, "
@@ -518,7 +531,8 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
 					 "\"lag_items\": %llu, "
                      "\"index_keys\": %s}",
                      meta->version,
-                     fanout,
+					 fanout,
+					 num_partitions,
                      split_threshold,
                      merge_threshold,
                      totalNodes,
@@ -644,18 +658,156 @@ merkle_get_node_hash(PG_FUNCTION_ARGS)
 Datum
 merkle_get_partition_root_hash(PG_FUNCTION_ARGS)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("merkle_get_partition_root_hash is not supported for dynamic Merkle trees")));
-	PG_RETURN_NULL();
+	Oid		indexOid = PG_GETARG_OID(0);
+	int32	partition_id = PG_GETARG_INT32(1);
+	Relation indexRel;
+	int		num_partitions = MERKLE_DEFAULT_PARTITIONS;
+	MerkleHash root_hash;
+	char	*result;
+	bool	found = false;
+
+	indexRel = merkle_open_consistent_index(indexOid);
+	merkle_read_meta(indexRel, NULL, NULL, NULL, &num_partitions);
+	index_close(indexRel, NoLock);
+	if (partition_id < 0 || partition_id >= num_partitions)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Merkle partition %d is outside [0, %d)",
+						 partition_id, num_partitions)));
+
+	merkle_hash_zero(&root_hash);
+	if (SPI_connect() == SPI_OK_CONNECT)
+	{
+		Oid		argtypes[3] = {OIDOID, INT4OID, INT2OID};
+		Datum	args[3];
+		int		spi_rc;
+		args[0] = ObjectIdGetDatum(indexOid);
+		args[1] = Int32GetDatum(partition_id);
+		args[2] = Int16GetDatum(0);
+		spi_rc = SPI_execute_with_args(
+			"SELECT hash FROM ariabc_internal.merkle_node "
+			" WHERE index_oid = $1 AND partition_id = $2 "
+			"   AND node_id = '\\x0000000000000000'::bytea AND prefix_len = $3",
+			3, argtypes, args, NULL, true, 1);
+		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
+		{
+			bool	isnull;
+			Datum	hash_d = SPI_getbinval(SPI_tuptable->vals[0],
+										 SPI_tuptable->tupdesc, 1, &isnull);
+			if (!isnull)
+			{
+				bytea *hash_b = DatumGetByteaPP(hash_d);
+				if (VARSIZE_ANY_EXHDR(hash_b) != MERKLE_HASH_BYTES)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("invalid Merkle partition root hash length")));
+				memcpy(root_hash.data, VARDATA_ANY(hash_b), MERKLE_HASH_BYTES);
+				found = true;
+			}
+		}
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
+		SPI_finish();
+	}
+
+	result = found ? merkle_hash_to_hex(&root_hash) :
+		pstrdup("0000000000000000000000000000000000000000000000000000000000000000");
+	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
 
 Datum
 merkle_get_partition_root_hashes(PG_FUNCTION_ARGS)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("merkle_get_partition_root_hashes is not supported for dynamic Merkle trees")));
+	Oid		indexOid = PG_GETARG_OID(0);
+	Relation indexRel;
+	int		num_partitions = MERKLE_DEFAULT_PARTITIONS;
+	TupleDesc tupdesc;
+	Tuplestorestate *tupstore;
+	MemoryContext old_mcx;
+	MerkleHash *partition_hashes;
+	bool	*partition_present;
+	int		p;
+
+	indexRel = merkle_open_consistent_index(indexOid);
+	merkle_read_meta(indexRel, NULL, NULL, NULL, &num_partitions);
+	index_close(indexRel, NoLock);
+
+	if (num_partitions <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("Merkle index has no partitions")));
+
+	tupstore = merkle_begin_materialized_srf(fcinfo, &tupdesc);
+	old_mcx = MemoryContextSwitchTo(CurrentMemoryContext);
+	partition_hashes = (MerkleHash *) palloc0((size_t) num_partitions * sizeof(MerkleHash));
+	partition_present = (bool *) palloc0((size_t) num_partitions * sizeof(bool));
+	MemoryContextSwitchTo(old_mcx);
+
+	if (SPI_connect() == SPI_OK_CONNECT)
+	{
+		Oid		argtypes[1] = {OIDOID};
+		Datum	args[1] = {ObjectIdGetDatum(indexOid)};
+		int		spi_rc;
+
+		spi_rc = SPI_execute_with_args(
+			"SELECT partition_id, hash FROM ariabc_internal.merkle_node "
+			" WHERE index_oid = $1 AND node_id = '\\x0000000000000000'::bytea "
+			"   AND prefix_len = 0 ORDER BY partition_id",
+			1, argtypes, args, NULL, true, 0);
+		if (spi_rc == SPI_OK_SELECT)
+		{
+			for (p = 0; p < (int) SPI_processed; p++)
+			{
+				bool	partition_isnull;
+				bool	hash_isnull;
+				int32	partition_id = DatumGetInt32(SPI_getbinval(
+					SPI_tuptable->vals[p], SPI_tuptable->tupdesc, 1,
+					&partition_isnull));
+				Datum	hash_d = SPI_getbinval(SPI_tuptable->vals[p],
+					SPI_tuptable->tupdesc, 2, &hash_isnull);
+
+				if (partition_isnull || hash_isnull ||
+					partition_id < 0 || partition_id >= num_partitions)
+					continue;
+				{
+					bytea *hash_b = DatumGetByteaPP(hash_d);
+					if (VARSIZE_ANY_EXHDR(hash_b) != MERKLE_HASH_BYTES)
+						ereport(ERROR,
+								(errcode(ERRCODE_DATA_CORRUPTED),
+								 errmsg("invalid Merkle partition root hash length")));
+					memcpy(partition_hashes[partition_id].data,
+						   VARDATA_ANY(hash_b), MERKLE_HASH_BYTES);
+					partition_present[partition_id] = true;
+				}
+			}
+		}
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
+		SPI_finish();
+	}
+
+	for (p = 0; p < num_partitions; p++)
+	{
+		Datum values[2];
+		bool nulls[2] = {false, false};
+		MerkleHash zero_hash;
+		char *hash_text;
+
+		if (partition_present[p])
+			hash_text = merkle_hash_to_hex(&partition_hashes[p]);
+		else
+		{
+			merkle_hash_zero(&zero_hash);
+			hash_text = merkle_hash_to_hex(&zero_hash);
+		}
+		values[0] = Int32GetDatum(p);
+		values[1] = CStringGetTextDatum(hash_text);
+		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		pfree(hash_text);
+	}
+	pfree(partition_hashes);
+	pfree(partition_present);
+	tuplestore_donestoring(tupstore);
 	PG_RETURN_NULL();
 }
 
@@ -824,7 +976,7 @@ merkle_get_descendants_batch(PG_FUNCTION_ARGS)
 	MemoryContext old_mcx;
 
 	indexRel = index_open(indexOid, AccessShareLock);
-	merkle_read_meta(indexRel, &fanout, NULL, NULL);
+	merkle_read_meta(indexRel, &fanout, NULL, NULL, NULL);
 	index_close(indexRel, AccessShareLock);
 	bits_per_split = merkle_bits_per_split_for_fanout(fanout);
 
@@ -966,9 +1118,11 @@ Datum
 merkle_get_descendants_batch_array(PG_FUNCTION_ARGS)
 {
 	Oid relid = PG_GETARG_OID(0);
-	ArrayType *node_ids_arr = PG_GETARG_ARRAYTYPE_P(1);
-	ArrayType *prefix_lens_arr = PG_GETARG_ARRAYTYPE_P(2);
-	int32 max_depth = PG_GETARG_INT32(3);
+	bool partition_aware = (PG_NARGS() >= 5);
+	ArrayType *node_ids_arr = PG_GETARG_ARRAYTYPE_P(partition_aware ? 2 : 1);
+	ArrayType *prefix_lens_arr = PG_GETARG_ARRAYTYPE_P(partition_aware ? 3 : 2);
+	int32 partition_id = partition_aware ? PG_GETARG_INT32(1) : -1;
+	int32 max_depth = PG_GETARG_INT32(partition_aware ? 4 : 3);
 	Oid indexOid = resolve_merkle_index_arg(relid);
 	TupleDesc tupdesc;
 	Tuplestorestate *tupstore;
@@ -1005,7 +1159,16 @@ merkle_get_descendants_batch_array(PG_FUNCTION_ARGS)
 	}
 
 	indexRel = index_open(indexOid, AccessShareLock);
-	merkle_read_meta(indexRel, &fanout, NULL, NULL);
+	{
+		int num_partitions = MERKLE_DEFAULT_PARTITIONS;
+		merkle_read_meta(indexRel, &fanout, NULL, NULL, &num_partitions);
+		if (partition_aware &&
+			(partition_id < 0 || partition_id >= num_partitions))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("Merkle partition %d is outside [0, %d)",
+							 partition_id, num_partitions)));
+	}
 	index_close(indexRel, AccessShareLock);
 	bits_per_split = merkle_bits_per_split_for_fanout(fanout);
 
@@ -1039,8 +1202,9 @@ merkle_get_descendants_batch_array(PG_FUNCTION_ARGS)
 	for (depth = 0; depth <= max_depth && num_current_nodes > 0; depth++)
 	{
 		ArrayType *arr;
-		Oid argtypes[3] = {OIDOID, INT2OID, BYTEAARRAYOID};
-		Datum args[3];
+		Oid partition_argtypes[4] = {OIDOID, INT4OID, INT2OID, BYTEAARRAYOID};
+		Oid legacy_argtypes[3] = {OIDOID, INT2OID, BYTEAARRAYOID};
+		Datum args[4];
 		int spi_rc;
 		Datum *next_nodes = NULL;
 		int num_next_nodes = 0;
@@ -1051,15 +1215,30 @@ merkle_get_descendants_batch_array(PG_FUNCTION_ARGS)
 		MemoryContextSwitchTo(old_mcx);
 
 		args[0] = ObjectIdGetDatum(indexOid);
-		args[1] = Int16GetDatum(current_prefix_len);
-		args[2] = PointerGetDatum(arr);
-
-		spi_rc = SPI_execute_with_args(
-			"SELECT node_id, prefix_len, is_leaf, hash "
-			"  FROM ariabc_internal.merkle_node "
-			" WHERE index_oid = $1 AND prefix_len = $2 AND node_id = ANY($3::bytea[]) "
-			" ORDER BY node_id",
-			3, argtypes, args, NULL, true, 0);
+		if (partition_aware)
+		{
+			args[1] = Int32GetDatum(partition_id);
+			args[2] = Int16GetDatum(current_prefix_len);
+			args[3] = PointerGetDatum(arr);
+			spi_rc = SPI_execute_with_args(
+				"SELECT node_id, prefix_len, is_leaf, hash "
+				"  FROM ariabc_internal.merkle_node "
+				" WHERE index_oid = $1 AND partition_id = $2 "
+				"   AND prefix_len = $3 AND node_id = ANY($4::bytea[]) "
+				" ORDER BY node_id",
+				4, partition_argtypes, args, NULL, true, 0);
+		}
+		else
+		{
+			args[1] = Int32GetDatum(current_prefix_len);
+			args[2] = PointerGetDatum(arr);
+			spi_rc = SPI_execute_with_args(
+				"SELECT node_id, prefix_len, is_leaf, hash "
+				"  FROM ariabc_internal.merkle_node "
+				" WHERE index_oid = $1 AND prefix_len = $2 AND node_id = ANY($3::bytea[]) "
+				" ORDER BY node_id",
+				3, legacy_argtypes, args, NULL, true, 0);
+		}
 
 		if (spi_rc != SPI_OK_SELECT)
 			elog(ERROR, "merkle_get_descendants_batch_array query failed: %d", spi_rc);

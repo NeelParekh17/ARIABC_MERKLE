@@ -125,4 +125,17 @@ if [[ "$KEEP_REMOTE_ARCHIVE" -eq 0 ]]; then
   remote_ssh_cmd "rm -f '$REMOTE_ARCHIVE'"
 fi
 rm -f "$LOCAL_ARCHIVE"
+
+REPORT_SCRIPT="$SCRIPT_DIR/generate_run_report.py"
+if [[ -f "$REPORT_SCRIPT" && -d "$DEST" ]]; then
+  REPORT_PYTHON="$(command -v python3 2>/dev/null || true)"
+  if [[ -n "$REPORT_PYTHON" && -x "$REPORT_PYTHON" ]]; then
+    report_out="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --fetched-dir "$DEST" 2>&1)" && true
+    report_md="$(printf '%s' "$report_out" | tail -1)"
+    if [[ -n "$report_md" && -f "$report_md" ]]; then
+      printf '[fetch] run analysis report written: %s\n' "$report_md" >&2
+    fi
+  fi
+fi
+
 printf '%s\n' "$DEST"

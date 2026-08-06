@@ -43,6 +43,28 @@ RETURNS text
 AS 'merkle_root_hash_index'
 LANGUAGE internal VOLATILE PARALLEL UNSAFE;
 
+-- Partition-root vector and partition-scoped descent APIs used by recovery.
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_get_partition_root_hash(index_or_table regclass, partition integer)
+RETURNS text
+AS 'merkle_get_partition_root_hash'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_get_partition_root_hashes(index_or_table regclass)
+RETURNS TABLE(partition integer, hash text)
+AS 'merkle_get_partition_root_hashes'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_get_descendants_batch(
+    relid regclass, partition_id integer, node_ids bytea[], prefix_lens smallint[], max_depth integer)
+RETURNS TABLE(node_id bytea, prefix_len smallint, is_leaf boolean, hash bytea)
+AS 'merkle_get_descendants_batch_array'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_partition_for_hash(key_hash bytea, partitions integer)
+RETURNS integer
+AS 'merkle_partition_for_hash'
+LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
+
 -- Global ordering for crash-safe Merkle delta application.  Raft positions
 -- are epoch-scoped; this counter supplies a database-wide, non-repeating
 -- sequence.  Raft manifests reserve a range once per multi-item entry.
@@ -141,14 +163,23 @@ $$;
 -- Dynamic Merkle tree node table (Section 7 of Plan_review.md)
 CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_node (
     index_oid    oid      NOT NULL,
+    partition_id integer  NOT NULL,
     node_id      bytea    NOT NULL,
     prefix_len   smallint NOT NULL,
     is_leaf      boolean  NOT NULL,
     tuple_count  bigint   NOT NULL DEFAULT 0,
     hash         bytea    NOT NULL,
-    PRIMARY KEY (index_oid, node_id, prefix_len)
+    PRIMARY KEY (index_oid, partition_id, node_id, prefix_len)
 );
-CREATE INDEX IF NOT EXISTS merkle_node_prefix_idx ON ariabc_internal.merkle_node (index_oid, prefix_len);
+ALTER TABLE ariabc_internal.merkle_node
+    ADD COLUMN IF NOT EXISTS partition_id integer NOT NULL DEFAULT 0;
+ALTER TABLE ariabc_internal.merkle_node
+    DROP CONSTRAINT IF EXISTS merkle_node_pkey;
+ALTER TABLE ariabc_internal.merkle_node
+    ADD CONSTRAINT merkle_node_pkey
+    PRIMARY KEY (index_oid, partition_id, node_id, prefix_len);
+CREATE INDEX IF NOT EXISTS merkle_node_prefix_idx
+    ON ariabc_internal.merkle_node (index_oid, partition_id, prefix_len);
 
 -- Schema version tracking metadata
 CREATE TABLE IF NOT EXISTS ariabc_internal.raft_apply_schema_meta (
