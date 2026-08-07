@@ -17,8 +17,10 @@ Options:
   --split-threshold N
   --merge-threshold N
   --bad-leaf-count K
-  --fanout N
+  --fanout N                    default: 4
   --geometry-label LABEL
+  --levels-per-batch|--localisation-depth-step N  default: 3 (levels per batch round-trip)
+  --partitions|--num-partitions N                default: 200 (number of tree partitions)
   --profiling off|light|deep
   --track-counts on|off      default: on; off removes PostgreSQL stats overhead
   --repetitions N
@@ -65,6 +67,8 @@ SSH_TIMEOUT="${SSH_TIMEOUT:-15}"
 KEEP_REMOTE_ARCHIVE=0
 KEEP_FAILURE_LOGS=0
 FETCH_ONLY=""
+LEVELS_PER_BATCH=""
+PARTITIONS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -83,6 +87,8 @@ while [[ $# -gt 0 ]]; do
     --bad-leaf-count) BAD_LEAF_COUNT="${2:?}"; shift 2 ;;
     --fanout) FANOUT="${2:?}"; shift 2 ;;
     --geometry-label) GEOMETRY_LABEL="${2:?}"; shift 2 ;;
+    --levels-per-batch|--localisation-depth-step) LEVELS_PER_BATCH="${2:?}"; shift 2 ;;
+    --partitions|--num-partitions) PARTITIONS="${2:?}"; shift 2 ;;
     --profiling) PROFILING="${2:?}"; shift 2 ;;
     --track-counts) TRACK_COUNTS="${2:?}"; shift 2 ;;
     --repetitions) REPETITIONS="${2:?}"; shift 2 ;;
@@ -559,7 +565,7 @@ cleanup() {
   cp -f "$REMOTE_RUN_DIR/source_snapshot.json" "$REMOTE_FAILURES_ROOT/$RUN_ID/source_snapshot.json" 2>/dev/null || true
   for name in configure.log generated_headers.log build.log install.log initdb.log \
               pg_ctl_start.log pg_isready.log postgres.log \
-              benchmark.stdout benchmark.stderr package.log; do
+              benchmark.stdout benchmark.stderr package.log remote_runner.log; do
     if [[ -f "$REMOTE_LOG_DIR/$name" ]]; then
       cp -f "$REMOTE_LOG_DIR/$name" "$REMOTE_FAILURES_ROOT/$RUN_ID/$name"
     fi
@@ -632,6 +638,12 @@ if [[ -n "$FANOUT" ]]; then
 fi
 if [[ -n "$GEOMETRY_LABEL" ]]; then
   BENCH_SELECTORS+=(--geometry-label "$GEOMETRY_LABEL")
+fi
+if [[ -n "${LEVELS_PER_BATCH:-}" ]]; then
+  BENCH_SELECTORS+=(--levels-per-batch "$LEVELS_PER_BATCH")
+fi
+if [[ -n "${PARTITIONS:-}" ]]; then
+  BENCH_SELECTORS+=(--partitions "$PARTITIONS")
 fi
 
 # Build profile: CFLAGS must be an env assignment, not a positional configure arg.
