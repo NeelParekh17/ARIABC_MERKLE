@@ -184,7 +184,7 @@ merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
 	return node_hash;
 }
 
-#define BULK_INSERT_BATCH 256
+#define BULK_INSERT_BATCH 1024
 
 static void
 merkle_bulk_flush_nodes(Oid index_oid, const MerkleBulkNodeSet *bs)

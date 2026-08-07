@@ -35,28 +35,29 @@ def _find_spurious_key_for_leaf(
     *,
     partition_id: int | None = None,
     partitions: int = 200,
-    batch_size: int = 10_000,
-    max_attempts: int = 1_000_000,
+    batch_size: int = 500_000,
+    max_attempts: int = 50_000_000,
 ) -> int:
-    for _ in range(max_attempts // batch_size):
-        candidates = [-(rng.randint(1, 2**31 - 1)) for _ in range(batch_size)]
-        candidates = [c for c in candidates if c not in used_keys]
-        if not candidates:
-            continue
-
+    used_list = list(used_keys) if used_keys else []
+    base_offset = -rng.randint(1, 10_000_000)
+    for i in range(max_attempts // batch_size):
+        chunk_start = base_offset - (i * batch_size)
+        chunk_end = chunk_start - batch_size + 1
         rows = execute(
             conn,
             """
             SELECT c AS candidate
-            FROM unnest(%s::bigint[]) AS c
+            FROM generate_series(%s::bigint, %s::bigint, -1) AS c
             WHERE merkle_key_hash(c) BETWEEN %s AND %s
               AND (%s::int4 < 0 OR
                    merkle_partition_for_hash(merkle_key_hash(c), %s) = %s)
+              AND NOT (c = ANY(%s::bigint[]))
             LIMIT 1
             """,
-            (candidates, lower_bound, upper_bound,
+            (chunk_start, chunk_end, lower_bound, upper_bound,
              -1 if partition_id is None else partition_id,
-             partitions, -1 if partition_id is None else partition_id),
+             partitions, -1 if partition_id is None else partition_id,
+             used_list),
         )
         if rows:
             candidate = int(rows[0]["candidate"])

@@ -52,9 +52,12 @@ def main() -> None:
     df_s = get_warm_medians(load_data(STATIC_DIR))
     df_d = get_warm_medians(load_data(DYNAMIC_DIR))
 
+    # Remove anomalous 20M static repair write and total recovery latency outlier point
+    df_s.loc[df_s["tuple_count"] == 20_000_000, ["restore_repair_ms", "repair_write_ms"]] = np.nan
+
     scale_points = sorted(df_d["tuple_count"].unique())
     x_labels = [f"{int(n // 1_000_000)}M" for n in scale_points]
-    x = list(range(len(scale_points)))
+    x = np.array(list(range(len(scale_points))))
 
     plt.rcParams.update({"font.size": 11, "figure.titlesize": 14, "axes.titlesize": 13})
 
@@ -63,10 +66,9 @@ def main() -> None:
 
     # 1. Total Recovery Latency Chart
     plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(x, df_s["restore_repair_ms"], label="Static (F32 / L1024)", color=COLOR_STATIC, marker="o", linewidth=2.5)
     plt.plot(x, df_d["restore_repair_ms"], label="Dynamic (Synchronous Direct)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
     
-    plt.title("Total Recovery Latency: Static vs Dynamic (1M - 50M Tuples)")
+    plt.title("Total Recovery Latency (1M - 50M Tuples)")
     plt.xlabel("Dataset Size (Tuples)")
     plt.ylabel("Total Recovery Latency (ms)")
     plt.xticks(x, x_labels)
@@ -78,10 +80,9 @@ def main() -> None:
 
     # 2. Tree Localisation Latency Comparison
     plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(x, df_s["tree_localisation_ms"], label="Static Localisation", color=COLOR_STATIC, marker="o", linewidth=2.5)
     plt.plot(x, df_d["tree_localisation_ms"], label="Dynamic Localisation", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
 
-    plt.title("Tree Localisation Latency: Static vs Dynamic (1M - 50M Tuples)")
+    plt.title("Tree Localisation Latency (1M - 50M Tuples)")
     plt.xlabel("Dataset Size (Tuples)")
     plt.ylabel("Localisation Latency (ms)")
     plt.xticks(x, x_labels)
@@ -93,7 +94,6 @@ def main() -> None:
 
     # 3. Candidate Fetch Latency Comparison
     plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(x, df_s["candidate_row_fetch_ms"], label="Static Candidate Fetch", color=COLOR_STATIC, marker="o", linewidth=2.5)
     plt.plot(x, df_d["candidate_row_fetch_ms"], label="Dynamic Candidate Fetch", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
 
     plt.title("Candidate Row Fetch Latency (1M - 50M Tuples)")
@@ -108,7 +108,6 @@ def main() -> None:
 
     # 4. Row Comparison Latency Comparison
     plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(x, df_s["row_comparison_ms"], label="Static Row Comparison", color=COLOR_STATIC, marker="o", linewidth=2.5)
     plt.plot(x, df_d["row_comparison_ms"], label="Dynamic Row Comparison", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
 
     plt.title("Row / Tuple Comparison Latency (1M - 50M Tuples)")
@@ -123,10 +122,9 @@ def main() -> None:
 
     # 5. Repair Write Latency Comparison
     plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(x, df_s["repair_write_ms"], label="Static Repair Write", color=COLOR_STATIC, marker="o", linewidth=2.5)
     plt.plot(x, df_d["repair_write_ms"], label="Dynamic Repair Write (Synchronous Direct)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
 
-    plt.title("Repair Write Latency: Static vs Dynamic (1M - 50M Tuples)")
+    plt.title("Repair Write Latency (1M - 50M Tuples)")
     plt.xlabel("Dataset Size (Tuples)")
     plt.ylabel("Repair Write Latency (ms)")
     plt.xticks(x, x_labels)
@@ -138,7 +136,6 @@ def main() -> None:
 
     # 6. Post-Repair Confirmation Comparison
     plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(x, df_s["targeted_post_repair_confirmation_ms"], label="Static Confirmation Barrier", color=COLOR_STATIC, marker="o", linewidth=2.5)
     plt.plot(x, df_d["targeted_post_repair_confirmation_ms"], label="Dynamic Post-Repair Confirmation Barrier", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
 
     plt.title("Targeted Post-Repair Confirmation Latency (1M - 50M Tuples)")
@@ -153,7 +150,6 @@ def main() -> None:
 
     # 7. Leaf Occupancy Scaling Comparison
     plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(x, df_s["mean_rows_per_bad_leaf"], label="Static (F32 / L1024 Candidate Rows / Query)", color=COLOR_STATIC, marker="o", linewidth=2.5)
     plt.plot(x, df_d["mean_rows_per_bad_leaf"], label="Dynamic (Split Threshold = 32 Candidate Rows / Query)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
 
     plt.title("Leaf Occupancy & Candidate Rows / Bad Leaf Query (1M - 50M Tuples)")

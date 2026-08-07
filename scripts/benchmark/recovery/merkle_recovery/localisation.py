@@ -34,6 +34,7 @@ def detect_bad_leaves(
     depth: int | None = 30,
     fanout: int | None = None,
     partition_aware: bool = False,
+    target_partitions: list[int] | set[int] | None = None,
 ) -> list[tuple]:
     """Return differing leaves as ``(partition, node_id, prefix_len)``.
 
@@ -61,6 +62,11 @@ def detect_bad_leaves(
         schema="damaged",
         fn=lambda: partition_roots(conn, "damaged"),
     )
+    if target_partitions is not None:
+        target_set = set(target_partitions)
+        healthy_roots = {k: v for k, v in healthy_roots.items() if k in target_set}
+        damaged_roots = {k: v for k, v in damaged_roots.items() if k in target_set}
+
     counters[f"{prefix}partition_root_batches"] = 1
     counters[f"{prefix}partition_root_hash_sql_calls"] = 2
     counters[f"{prefix}partition_root_nodes_read"] = len(healthy_roots) + len(damaged_roots)

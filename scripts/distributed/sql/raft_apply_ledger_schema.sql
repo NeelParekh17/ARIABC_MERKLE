@@ -180,6 +180,12 @@ ALTER TABLE ariabc_internal.merkle_node
     PRIMARY KEY (index_oid, partition_id, node_id, prefix_len);
 CREATE INDEX IF NOT EXISTS merkle_node_prefix_idx
     ON ariabc_internal.merkle_node (index_oid, partition_id, prefix_len);
+-- Root-vector reads are on the measured localisation and confirmation path.
+-- Keep them independent of total tree size without adding a full duplicate
+-- index: every Merkle index has only one root row per partition.
+CREATE INDEX IF NOT EXISTS merkle_node_root_idx
+    ON ariabc_internal.merkle_node (index_oid, partition_id)
+    WHERE prefix_len = 0;
 
 -- Schema version tracking metadata
 CREATE TABLE IF NOT EXISTS ariabc_internal.raft_apply_schema_meta (

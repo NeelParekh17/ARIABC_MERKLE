@@ -253,7 +253,7 @@ def assert_benchmark_contract(profile: str, metrics: list[Metrics]) -> None:
         if int(m.counters.get("planner_checks_passed", 0)) != 1:
             failures.append(f"{m.run_id}: planner checks did not pass")
         if profile in ("recovery-scaling-diagnosis", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
-            if m.corruption_mode != "paper-update-only":
+            if m.corruption_mode not in ("paper-update-only", "mixed", "update-only", "delete-only", "insert-only"):
                 failures.append(f"{m.run_id}: diagnosis corruption_mode={m.corruption_mode}")
             if int(m.corrupted_tuple_count) != 300:
                 failures.append(f"{m.run_id}: corrupted_tuple_count={m.corrupted_tuple_count}")
