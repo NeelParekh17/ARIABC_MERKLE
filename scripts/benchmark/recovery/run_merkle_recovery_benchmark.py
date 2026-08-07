@@ -42,6 +42,7 @@ from merkle_recovery.manifest import (
 from merkle_recovery.localisation import detect_bad_leaves
 from merkle_recovery.repair import (
     fetch_leaf_rows, fetch_leaf_rows_batch, run_planner_preflight, repair_leaf,
+    execute_batched_deletes, execute_batched_inserts, execute_batched_updates,
     seq_scan_snapshot, seq_scan_delta,
     per_leaf_row_counts, FetchResult,
 )
@@ -731,6 +732,10 @@ def repair_merkle(
         # wait for every repaired row.
         with timer(m.phase, "repair_write_ms"):
             with conn.transaction():
+                chunk_inserts: list[int] = []
+                chunk_updates: list[int] = []
+                chunk_deletes: list[int] = []
+                chunk_hrows: dict[int, dict[str, Any]] = {}
                 for leaf_id in chunk:
                     hrows, drows, ins, upd, dlt = repair_leaf(
                         conn,
@@ -742,15 +747,21 @@ def repair_merkle(
                             damaged_by_leaf.get(leaf_id, {}),
                         ),
                         measure_repair_write=False,
+                        execute_dml=False,
                     )
                     healthy_rows += len(hrows)
                     damaged_rows += len(drows)
                     leaf_total = len(hrows) + len(drows)
                     candidate_rows += leaf_total
                     per_leaf_candidates.append(leaf_total)
-                    rows_inserted += ins
-                    rows_updated += upd
-                    rows_deleted += dlt
+                    chunk_hrows.update(hrows)
+                    chunk_inserts.extend(ins)
+                    chunk_updates.extend(upd)
+                    chunk_deletes.extend(dlt)
+
+                rows_inserted += execute_batched_inserts(conn, "damaged", chunk_inserts, chunk_hrows, profiler)
+                rows_updated += execute_batched_updates(conn, "damaged", chunk_updates, chunk_hrows, profiler)
+                rows_deleted += execute_batched_deletes(conn, "damaged", chunk_deletes, profiler)
 
         # Discard chunk from memory
         del healthy_by_leaf
@@ -1275,6 +1286,8 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         return series
 
     if args.profile == "fanout-width-sweep":
+        if getattr(args, "corruption_mode", None) not in (None, "paper-update-only", "mixed"):
+            raise ValueError("fanout-width-sweep requires --corruption-mode mixed or paper-update-only")
         # fanout-width-sweep: fixed workload, no overrides permitted.
         # All parameters are encoded in the geometry matrix labels.
         # The only allowed user selection is --geometry-label <known label>.
@@ -1342,6 +1355,8 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         return sweep_series
 
     if args.profile == "size-scaling-k75-c300":
+        if getattr(args, "corruption_mode", None) not in (None, "paper-update-only", "mixed"):
+            raise ValueError("size-scaling-k75-c300 requires --corruption-mode mixed or paper-update-only")
         allowed_tuple_counts = [
             1_000_000,
             3_000_000,
@@ -1407,6 +1422,8 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         return series
 
     if args.profile == "best-scaling-f32-l1024-k75-c300":
+        if getattr(args, "corruption_mode", None) not in (None, "paper-update-only", "mixed"):
+            raise ValueError("best-scaling-f32-l1024-k75-c300 requires --corruption-mode mixed or paper-update-only")
         if getattr(args, "fanout", None) is not None and getattr(args, "fanout") != 32:
             raise ValueError(
                 "best-scaling-f32-l1024-k75-c300 uses fixed geometry "
@@ -1502,9 +1519,9 @@ def _count_planned_runs(config, args) -> int:
 
 def run_benchmark(args: argparse.Namespace) -> Path:
     global RESULT_ROOT
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     result_dir = RESULT_ROOT / ts
-    result_dir.mkdir(parents=True, exist_ok=False)
+    result_dir.mkdir(parents=True, exist_ok=True)
     (result_dir / "plots").mkdir()
 
     config = profile_config(args.profile)
@@ -2206,7 +2223,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split-threshold", type=int, dest="split_threshold")
     parser.add_argument("--merge-threshold", type=int, dest="merge_threshold")
     parser.add_argument("--bad-leaf-count", type=int, dest="bad_leaf_count")
-    parser.add_argument("--fanout", type=int, default=4)
+    parser.add_argument("--fanout", type=int, default=None)
     parser.add_argument("--profile-label", dest="profile_label")
     parser.add_argument("--geometry-label", dest="geometry_label")
     parser.add_argument("--profiling", choices=["off", "light", "deep"], default="off")
@@ -2286,8 +2303,8 @@ def main(argv: list[str] | None = None) -> int:
     # so the remote launcher's dedicated scratch volume is honoured.
     scratch_parent = Path(args.scratch_dir) if args.scratch_dir else RESULT_ROOT
     scratch_parent.mkdir(parents=True, exist_ok=True)
-    scratch = scratch_parent / ("tmp_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
-    scratch.mkdir(parents=True, exist_ok=False)
+    scratch = scratch_parent / ("tmp_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+    scratch.mkdir(parents=True, exist_ok=True)
     try:
         with (scratch / "stdout.log").open("w") as out, (scratch / "stderr.log").open("w") as err:
             with redirect_stdout(out), redirect_stderr(err):

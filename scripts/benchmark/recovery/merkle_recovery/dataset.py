@@ -84,10 +84,12 @@ def recreate_schema(conn, *, bulk_load: bool = True, unlogged: bool = False) -> 
     # lets PostgreSQL build each B-tree in bulk instead of doing one random
     # index insertion for every generated row.
     persistence = "UNLOGGED " if unlogged else ""
-    execute(conn, "CREATE SCHEMA IF NOT EXISTS healthy")
-    execute(conn, "CREATE SCHEMA IF NOT EXISTS damaged")
-    execute(conn, "DROP TABLE IF EXISTS healthy.usertable CASCADE")
-    execute(conn, "DROP TABLE IF EXISTS damaged.usertable CASCADE")
+    execute(conn, "DROP SCHEMA IF EXISTS healthy CASCADE")
+    execute(conn, "DROP SCHEMA IF EXISTS damaged CASCADE")
+    execute(conn, "CREATE SCHEMA healthy")
+    execute(conn, "CREATE SCHEMA damaged")
+    if not getattr(conn, "autocommit", False):
+        conn.commit()
     table_sql = f"""
         CREATE {persistence}TABLE {{schema}}.usertable (
             ycsb_key bigint NOT NULL,

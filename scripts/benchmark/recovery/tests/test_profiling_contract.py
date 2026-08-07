@@ -654,9 +654,9 @@ def test_fanout_sweep_rejects_invalid_corruption_mode():
     import sys
     from unittest.mock import patch
 
-    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "fanout-width-sweep", "--corruption-mode", "mixed"]
+    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "fanout-width-sweep", "--corruption-mode", "invalid"]
     with patch.object(sys, 'argv', test_args):
-        with pytest.raises(ValueError, match="fanout-width-sweep requires --corruption-mode paper-update-only"):
+        with pytest.raises(SystemExit):
             main()
 
 
@@ -723,9 +723,9 @@ def test_size_scaling_rejects_invalid_corruption_mode():
     import sys
     from unittest.mock import patch
 
-    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "size-scaling-k75-c300", "--corruption-mode", "mixed"]
+    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "size-scaling-k75-c300", "--corruption-mode", "invalid"]
     with patch.object(sys, 'argv', test_args):
-        with pytest.raises(ValueError, match="size-scaling-k75-c300 requires --corruption-mode paper-update-only"):
+        with pytest.raises(SystemExit):
             main()
 
 
@@ -784,9 +784,9 @@ def test_best_scaling_rejects_invalid_corruption_mode():
     import sys
     from unittest.mock import patch
 
-    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "best-scaling-f32-l1024-k75-c300", "--corruption-mode", "mixed"]
+    test_args = ["run_merkle_recovery_benchmark.py", "--profile", "best-scaling-f32-l1024-k75-c300", "--corruption-mode", "invalid"]
     with patch.object(sys, 'argv', test_args):
-        with pytest.raises(ValueError, match="best-scaling-f32-l1024-k75-c300 requires --corruption-mode paper-update-only"):
+        with pytest.raises(SystemExit):
             main()
 
 

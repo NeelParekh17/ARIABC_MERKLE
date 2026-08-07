@@ -82,14 +82,14 @@ def leaf_lookup_batch_sql(schema: str, partition_aware: bool = True) -> str:
     if partition_aware:
         return (
             f"SELECT {', '.join(ALL_COLUMNS)}, p.partition_id, p.node_id AS merkle_leaf_id, p.prefix_len "
-            f"FROM unnest(%s::int4[], %s::bytea[], %s::smallint[], %s::bytea[], %s::bytea[]) "
+            f"FROM ROWS FROM (unnest(%s::int4[]), unnest(%s::bytea[]), unnest(%s::smallint[]), unnest(%s::bytea[]), unnest(%s::bytea[])) "
             f"AS p(partition_id, node_id, prefix_len, lower_bound, upper_bound) "
             f"JOIN {schema}.usertable u ON merkle_key_hash(u.ycsb_key) BETWEEN p.lower_bound AND p.upper_bound "
             f"AND merkle_partition_for_hash(merkle_key_hash(u.ycsb_key), %s) = p.partition_id"
         )
     return (
         f"SELECT {', '.join(ALL_COLUMNS)}, p.node_id AS merkle_leaf_id, p.prefix_len "
-        f"FROM unnest(%s::bytea[], %s::smallint[], %s::bytea[], %s::bytea[]) AS p(node_id, prefix_len, lower_bound, upper_bound) "
+        f"FROM ROWS FROM (unnest(%s::bytea[]), unnest(%s::smallint[]), unnest(%s::bytea[]), unnest(%s::bytea[])) AS p(node_id, prefix_len, lower_bound, upper_bound) "
         f"JOIN {schema}.usertable u ON merkle_key_hash(u.ycsb_key) BETWEEN p.lower_bound AND p.upper_bound"
     )
 
@@ -293,6 +293,114 @@ def representative_leaf_ids(total_leaves: int, count: int) -> list[int]:
 
 # ── repair DML ───────────────────────────────────────────────────────────────
 
+def execute_batched_deletes(
+    conn,
+    schema: str,
+    keys: list[int],
+    profiler: ProfileCollector | None = None,
+    leaf_id_str: str = "",
+    batch_size: int = 500,
+) -> int:
+    if not keys:
+        return 0
+    total_deleted = 0
+    for i in range(0, len(keys), batch_size):
+        sub_keys = keys[i:i + batch_size]
+        in_sql = ", ".join(["%s"] * len(sub_keys))
+        sql = f"DELETE FROM {schema}.usertable WHERE ycsb_key IN ({in_sql})"
+        params = tuple(sub_keys)
+        record_call(
+            profiler,
+            stage="repair",
+            operation="delete_dml",
+            leaf_id=leaf_id_str,
+            schema=schema,
+            fn=lambda sql=sql, params=params: execute(conn, sql, params),
+        )
+        total_deleted += len(sub_keys)
+    return total_deleted
+
+
+def execute_batched_inserts(
+    conn,
+    schema: str,
+    keys: list[int],
+    hrows: dict[int, dict[str, Any]],
+    profiler: ProfileCollector | None = None,
+    leaf_id_str: str = "",
+    batch_size: int = 500,
+) -> int:
+    if not keys:
+        return 0
+    total_inserted = 0
+    cols_sql = "ycsb_key, " + ", ".join(FIELDS)
+    first_row_pattern = "(%s::bigint, " + ", ".join(["%s::text"] * len(FIELDS)) + ")"
+    other_row_pattern = "(" + ", ".join(["%s"] * len(ALL_COLUMNS)) + ")"
+    for i in range(0, len(keys), batch_size):
+        sub_keys = keys[i:i + batch_size]
+        values_sql = ", ".join([first_row_pattern] + [other_row_pattern] * (len(sub_keys) - 1))
+        sql = f"INSERT INTO {schema}.usertable ({cols_sql}) VALUES {values_sql}"
+        params_list = []
+        for k in sub_keys:
+            vals = hrows[k]
+            params_list.append(k)
+            params_list.extend(_db_text(vals[f]) for f in FIELDS)
+        params = tuple(params_list)
+        record_call(
+            profiler,
+            stage="repair",
+            operation="insert_dml",
+            leaf_id=leaf_id_str,
+            schema=schema,
+            fn=lambda sql=sql, params=params: execute(conn, sql, params),
+        )
+        total_inserted += len(sub_keys)
+    return total_inserted
+
+
+def execute_batched_updates(
+    conn,
+    schema: str,
+    keys: list[int],
+    hrows: dict[int, dict[str, Any]],
+    profiler: ProfileCollector | None = None,
+    leaf_id_str: str = "",
+    batch_size: int = 500,
+) -> int:
+    if not keys:
+        return 0
+    total_updated = 0
+    set_clause = ", ".join([f"{f} = v.{f}" for f in FIELDS])
+    cols_sql = "ycsb_key, " + ", ".join(FIELDS)
+    first_row_pattern = "(%s::bigint, " + ", ".join(["%s::text"] * len(FIELDS)) + ")"
+    other_row_pattern = "(" + ", ".join(["%s"] * len(ALL_COLUMNS)) + ")"
+    for i in range(0, len(keys), batch_size):
+        sub_keys = keys[i:i + batch_size]
+        values_sql = ", ".join([first_row_pattern] + [other_row_pattern] * (len(sub_keys) - 1))
+        sql = (
+            f"UPDATE {schema}.usertable AS u "
+            f"SET {set_clause} "
+            f"FROM (VALUES {values_sql}) AS v({cols_sql}) "
+            f"WHERE u.ycsb_key = v.ycsb_key"
+        )
+        params_list = []
+        for k in sub_keys:
+            vals = hrows[k]
+            params_list.append(k)
+            params_list.extend(_db_text(vals[f]) for f in FIELDS)
+        params = tuple(params_list)
+        record_call(
+            profiler,
+            stage="repair",
+            operation="update_dml",
+            leaf_id=leaf_id_str,
+            schema=schema,
+            fn=lambda sql=sql, params=params: execute(conn, sql, params),
+        )
+        total_updated += len(sub_keys)
+    return total_updated
+
+
 def repair_leaf(
     conn,
     leaf_key: tuple[bytes, int],
@@ -301,7 +409,8 @@ def repair_leaf(
     profiler: ProfileCollector | None = None,
     prefetched: tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]] | None = None,
     measure_repair_write: bool = True,
-) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]], int, int, int]:
+    execute_dml: bool = True,
+) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]], Any, Any, Any]:
     @contextmanager
     def _timer(key: str):
         t0 = time.perf_counter() * 1000.0
@@ -319,40 +428,22 @@ def repair_leaf(
 
     if prefetched is None:
         with _timer("candidate_row_fetch_ms"):
-            hrows_raw = record_call(
+            hrows = record_call(
                 profiler,
                 stage="candidate_fetch",
                 operation="leaf_fetch_healthy",
                 schema="healthy",
                 leaf_id=leaf_id_str,
-                fn=lambda: execute(conn, leaf_lookup_sql("healthy", partition_aware=len(leaf_key) == 3), _leaf_lookup_params(leaf_key)),
+                fn=lambda: fetch_leaf_rows(conn, "healthy", leaf_key),
             )
-            drows_raw = record_call(
+            drows = record_call(
                 profiler,
                 stage="candidate_fetch",
                 operation="leaf_fetch_damaged",
                 schema="damaged",
                 leaf_id=leaf_id_str,
-                fn=lambda: execute(conn, leaf_lookup_sql("damaged", partition_aware=len(leaf_key) == 3), _leaf_lookup_params(leaf_key)),
+                fn=lambda: fetch_leaf_rows(conn, "damaged", leaf_key),
             )
-            mat_start = time.perf_counter_ns()
-            hrows = {
-                int(r["ycsb_key"]): {column: _db_text(r[column]) for column in ALL_COLUMNS}
-                for r in hrows_raw
-            }
-            drows = {
-                int(r["ycsb_key"]): {column: _db_text(r[column]) for column in ALL_COLUMNS}
-                for r in drows_raw
-            }
-            if profiler is not None and profiler.enabled:
-                profiler.record(
-                    stage="candidate_fetch",
-                    operation="candidate_dict_materialisation_cpu",
-                    schema="",
-                    leaf_id=leaf_id_str,
-                    client_wall_ns=time.perf_counter_ns() - mat_start,
-                    rows_returned=len(hrows_raw) + len(drows_raw),
-                )
     else:
         hrows, drows = prefetched
 
@@ -373,64 +464,19 @@ def repair_leaf(
             )
         payload_start = time.perf_counter_ns()
         updates = [key for key in common_keys if hrows[key] != drows[key]]
-        if profiler is not None and profiler.enabled:
-            profiler.record(
-                stage="comparison",
-                operation="row_payload_comparison_cpu",
-                leaf_id=leaf_id_str,
-                client_wall_ns=time.perf_counter_ns() - payload_start,
-                rows_returned=len(hrows) + len(drows),
-            )
+        if not execute_dml:
+            return hrows, drows, inserts, updates, deletes
 
-    # The main recovery path wraps several leaves in one transaction. Keep
-    # the per-leaf write timer for standalone callers, but let the caller own
-    # the aggregate write timing when it also needs to include COMMIT/WAL.
-    write_timer = _timer("repair_write_ms") if measure_repair_write else nullcontext()
-    with write_timer:
-        with _timer("repair_table_dml_ms"):
-            for key in inserts:
-                vals = hrows[key]
-                record_call(
-                    profiler,
-                    stage="repair",
-                    operation="insert_dml",
-                    leaf_id=leaf_id_str,
-                    schema="damaged",
-                    fn=lambda vals=vals: execute(
-                        conn,
-                        "INSERT INTO damaged.usertable VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                        tuple(vals[c] for c in ALL_COLUMNS),
-                    ),
-                )
-                rows_inserted += 1
-            for key in updates:
-                vals = hrows[key]
-                record_call(
-                    profiler,
-                    stage="repair",
-                    operation="update_dml",
-                    leaf_id=leaf_id_str,
-                    schema="damaged",
-                    fn=lambda vals=vals, key=key: execute(
-                        conn,
-                        "UPDATE damaged.usertable SET field0=%s, field1=%s, field2=%s, field3=%s, field4=%s, "
-                        "field5=%s, field6=%s, field7=%s, field8=%s, field9=%s WHERE ycsb_key=%s",
-                        tuple(vals[f] for f in FIELDS) + (key,),
-                    ),
-                )
-                rows_updated += 1
-            for key in deletes:
-                record_call(
-                    profiler,
-                    stage="repair",
-                    operation="delete_dml",
-                    leaf_id=leaf_id_str,
-                    schema="damaged",
-                    fn=lambda key=key: execute(conn, "DELETE FROM damaged.usertable WHERE ycsb_key = %s", (key,)),
-                )
-                rows_deleted += 1
+        rows_inserted = rows_updated = rows_deleted = 0
+        write_timer = _timer("repair_write_ms") if measure_repair_write else nullcontext()
+        with write_timer:
+            with _timer("repair_table_dml_ms"):
+                rows_inserted += execute_batched_inserts(conn, "damaged", inserts, hrows, profiler, leaf_id_str)
+                rows_updated += execute_batched_updates(conn, "damaged", updates, hrows, profiler, leaf_id_str)
+                rows_deleted += execute_batched_deletes(conn, "damaged", deletes, profiler, leaf_id_str)
 
-    return hrows, drows, rows_inserted, rows_updated, rows_deleted
+        return hrows, drows, rows_inserted, rows_updated, rows_deleted
+
 
 
 def per_leaf_row_counts(bad_leaves: list, per_leaf: list[int]) -> dict[str, float]:

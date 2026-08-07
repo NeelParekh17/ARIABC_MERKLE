@@ -15,6 +15,7 @@ def connect(args: argparse.Namespace):
     """Open a psycopg3 connection with autocommit and dict row factory."""
     conn = psycopg.connect(args.dsn, autocommit=True, row_factory=dict_row)
     with conn.cursor() as cur:
+        cur.execute("SET enable_merkle_index = on")
         cur.execute("SET enable_seqscan = off")
         # Disable parallel workers: with 688K+ rows in merkle_node, the planner
         # may choose a parallel count(*) plan whose workers hang indefinitely
@@ -27,10 +28,9 @@ def execute(conn, sql: str, params: tuple[Any, ...] | None = None) -> list[dict[
     """Execute SQL and return all rows as a list of dicts."""
     with conn.cursor() as cur:
         cur.execute(sql, params)
-        try:
+        if cur.description is not None:
             return cur.fetchall()
-        except psycopg.ProgrammingError:
-            return []
+        return []
 
 
 def scalar(conn, sql: str, params: tuple[Any, ...] | None = None) -> Any:

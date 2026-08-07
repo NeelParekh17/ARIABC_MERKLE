@@ -1,0 +1,26 @@
+### Query Optimization (DML and IN Clauses)
+
+**Speaker 1:** Later I also did the recovery test on that ranking server. So now it is like proper... not very much huge variance that we were having that day. After cleaning up.
+**Speaker 2:** That is good. We found that for a different reason but it is good for the server also not to be so full.
+**Speaker 1:** Yeah. Also like earlier let's suppose there were 300 corrupted tuples. Like earlier implementation that I did of first static rules right. I have identified 300 corrupted tuples. Now I will send one DML query then wait, then send another wait... but now I'm sending all in one batch only.
+**Speaker 2:** Which one? All of... for repairing. All like... I have detected that these 300 corrupted tuples are there. For that 300 DML queries are generated. I see. And you're running all the queries and sending one network run only... one F sync only.
+**Speaker 2:** So, instead of running 300 queries, you could also... you're taking the keys right, and then... yeah, you could even do an `IN` query. If you have a list of things... instead of running 300 queries locally where key is this, where key is this, where key is this, it's a well-known optimization that you do `WHERE key IN` and give a list. Now this `IN` list cannot be huge, it cannot be a million. So you have to put some bound on it. If it is very large, you have to do it differently. You have to maybe create a relation and so on because the parsing of the SQL query itself will become a problem. So if there's massive corruption, then you might as well send the whole thing. You should not even bother about this. So what you can do for now, for testing purposes we're not going to take it at every point in between. So you put some threshold. Up to that threshold you do an `IN` query. Beyond that threshold if it is really big, then you just send everything. Whether it is changed or not, whether it... you've detected enough corruption that you might as well send everything, so there's a threshold for that. And ideally for things in between you can do instead of the `IN` you should create a temporary relation and then `IN` that relation.
+**Speaker 1:** Okay.
+**Speaker 2:** That's the ideal thing. Instead of an `IN` textual query, we have to create a temporary relation, and then the query will say `IN (SELECT whatever FROM the temporary relation)`.
+**Speaker 1:** Okay.
+**Speaker 2:** That will be the logically correct way... efficient way of handling it.
+**Speaker 1:** How is that efficient?
+**Speaker 2:** Because you're not running separate queries. Supposing you have a thousand tuples that are corrupted, you can probably still do `IN` over there and an actual list. But if it's 10,000 or 100,000, then you're better off doing it... let's say a million for example, probably at a million you might as well ship the whole thing, but let's say it's a million in a database of a billion tuples. You don't want to ship a billion things. So what you will do is create a relation with all these million values, and the query to retrieve it will be `SELECT * FROM this WHERE the key is in this relation`... `SELECT key FROM that relation`.
+**Speaker 1:** Okay.
+**Speaker 2:** So that will be the select query. So it will be one query only, regardless.
+**Speaker 1:** Yeah.
+**Speaker 2:** It won't be do it for this key, do it for this key, which is much much slower. Even if there is an index, this separate query is much slower than the `IN` query. Because in the `IN` query it will actually use the index and iterate locally. It'll not treat it as separate queries. It will be way faster for the local thing. You already optimized one part which is collect everything and send it instead of sending one at a time. Now the next optimization is modify the query so only one query runs to find the tuple which have to be shipped.
+**Speaker 1:** Yes, okay. Yes.
+**Speaker 2:** Good. We run the `IN` query run as a single query right?
+**Speaker 1:** Yeah, `IN` is a single query.
+**Speaker 2:** But then I mean okay how does creating a separate relation and putting that keys into that... if the `IN` list is too big. If the `IN` list is 100,000 you can do that. But if it's a million, your SQL string is 1 million keys long. That will cause problems for most databases. So beyond the limit, you're better off creating a relation, insert the keys into that... into that... and then the query becomes `IN (SELECT * FROM that relation)`.
+**Speaker 1:** Okay. We ran into same issue in our 631 project as far as I remember that we optimized for DuckDB... like you that time also said about this thing only I remember... `IN` query like make sure it's small not very much huge. You at that time suggested to have some array structure like bloom filter something like that over there.
+**Speaker 2:** That was for semi-join. For semi-join you can do bloom. Here you don't want to do.
+**Speaker 1:** Okay. Good.
+
+---

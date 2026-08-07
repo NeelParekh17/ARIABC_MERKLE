@@ -19,7 +19,7 @@ class Metrics:
     bad_leaf_count: int = 0
     corrupted_tuple_count: int = 0
     repetition: int = 0
-    corruption_mode: str = "paper-update-only"
+    corruption_mode: str = "mixed"
     profile_label: str = ""
     profiling_mode: str = "off"
     valid: bool = True

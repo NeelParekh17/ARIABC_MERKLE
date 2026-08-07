@@ -75,7 +75,7 @@ def choose_corruption_manifest(
     bad_leaf_count: int = 10,
     corrupted_tuple_count: int = 300,
     seed: int = 0,
-    corruption_mode: str = "paper-update-only",
+    corruption_mode: str = "mixed",
     forced_bad_leaves: list[list] | None = None,
     *args,
     **kwargs,
