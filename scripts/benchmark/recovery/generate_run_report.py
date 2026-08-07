@@ -49,7 +49,7 @@ STATIC_REF = {
     7_000_000:  {"loc": 50.999,  "fetch": 53.948,  "cmp": 7.442,  "repair": 859.749,   "conf": 64.859,  "total": 1054.462, "rpl": 69.89},
     10_000_000: {"loc": 51.441,  "fetch": 70.863,  "cmp": 9.386,  "repair": 856.819,   "conf": 85.511,  "total": 1092.559, "rpl": 98.19},
     15_000_000: {"loc": 51.802,  "fetch": 94.638,  "cmp": 12.994, "repair": 858.267,   "conf": 116.281, "total": 1154.303, "rpl": 146.69},
-    20_000_000: {"loc": 51.641,  "fetch": 116.495, "cmp": 18.731, "repair": 4014.818,  "conf": 150.032, "total": 4375.417, "rpl": 195.20},
+    20_000_000: {"loc": 51.641,  "fetch": 116.495, "cmp": 18.731, "repair": float("nan"), "conf": 150.032, "total": float("nan"), "rpl": 195.20},
     25_000_000: {"loc": 51.925,  "fetch": 135.180, "cmp": 20.530, "repair": 852.533,   "conf": 146.113, "total": 1230.731, "rpl": 244.93},
     30_000_000: {"loc": 52.078,  "fetch": 150.135, "cmp": 24.035, "repair": 854.633,   "conf": 157.615, "total": 1264.787, "rpl": 293.33},
     40_000_000: {"loc": 51.675,  "fetch": 186.740, "cmp": 31.187, "repair": 866.879,   "conf": 200.087, "total": 1367.157, "rpl": 391.07},
@@ -252,8 +252,6 @@ def cv_per_scale(dyn_all: dict[int, list[tuple[int, float]]]) -> dict[int, float
 def save_line(path: Path, x, x_labels, s_vals, d_vals, title, ylabel):
     plt.rcParams.update(PLT_PARAMS)
     fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
-    if any(not math.isnan(v) for v in s_vals):
-        ax.plot(x, s_vals, label="Static (F32 / L1024)", color=COLOR_STATIC,  marker="o", linewidth=2.5)
     ax.plot(x, d_vals, label="Dynamic (Synchronous Direct)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
     ax.set_title(title)
     ax.set_xlabel("Dataset Size")
@@ -279,16 +277,13 @@ def save_localisation_with_levels(
     fig, ax1 = plt.subplots(figsize=(11, 6), dpi=150)
 
     # Left axis — latency lines
-    if any(not math.isnan(v) for v in s_vals):
-        ax1.plot(x, s_vals, label="Static (F32/L1024)",
-                 color=COLOR_STATIC, marker="o", linewidth=2.5)
     ax1.plot(x, d_vals, label="Dynamic (Synchronous Direct)",
              color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
     ax1.set_xlabel("Dataset Size")
     ax1.set_ylabel("Tree Localisation Latency (ms)", color="black")
     ax1.set_xticks(x); ax1.set_xticklabels(x_labels)
     ax1.grid(True, linestyle="--", alpha=0.5)
-    ax1.set_title("Tree Localisation Latency: Static vs Dynamic\n"
+    ax1.set_title("Tree Localisation Latency\n"
                   f"(with {depth_label} — right axis)")
 
     # Right axis — tree depth step line
@@ -355,8 +350,6 @@ def save_stacked(path: Path, x, x_labels, dyn: dict[int, dict], scales):
 def save_leaf(path: Path, x, x_labels, s_rpl, d_rpl):
     plt.rcParams.update(PLT_PARAMS)
     fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
-    if any(not math.isnan(v) for v in s_rpl):
-        ax.plot(x, s_rpl, label="Static (F32/L1024) Rows/Leaf", color=COLOR_STATIC,  marker="o", linewidth=2.5)
     ax.plot(x, d_rpl, label="Dynamic Rows/Leaf (Split Threshold=32)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
     ax.set_title("Leaf Occupancy: Candidate Rows / Bad Leaf Query")
     ax.set_xlabel("Dataset Size"); ax.set_ylabel("Mean Candidate Rows / Bad Leaf Query")
@@ -378,12 +371,12 @@ def generate_plots(plots_dir: Path, dyn_med: dict[int, dict], scales: list[int],
     def sv(key): return [STATIC_REF.get(tc, {}).get(key, float("nan")) for tc in scales]
 
     specs = [
-        ("total_recovery_latency.png",       "total",  "Total Recovery Latency: Static vs Dynamic",         "Total Recovery Latency (ms)"),
-        ("tree_localisation_comparison.png", "loc",    "Tree Localisation Latency: Static vs Dynamic",      "Localisation Latency (ms)"),
-        ("candidate_fetch_comparison.png",   "fetch",  "Candidate Row Fetch Latency: Static vs Dynamic",    "Candidate Fetch Latency (ms)"),
-        ("row_comparison_comparison.png",    "cmp",    "Row / Tuple Comparison Latency: Static vs Dynamic", "Row Comparison Latency (ms)"),
-        ("repair_write_comparison.png",      "repair", "Repair Write Latency: Static vs Dynamic",           "Repair Write Latency (ms)"),
-        ("post_repair_confirmation_comparison.png", "conf", "Post-Repair Confirmation Latency: Static vs Dynamic", "Confirmation Latency (ms)"),
+        ("total_recovery_latency.png",       "total",  "Total Recovery Latency",                 "Total Recovery Latency (ms)"),
+        ("tree_localisation_comparison.png", "loc",    "Tree Localisation Latency",              "Localisation Latency (ms)"),
+        ("candidate_fetch_comparison.png",   "fetch",  "Candidate Row Fetch Latency",            "Candidate Fetch Latency (ms)"),
+        ("row_comparison_comparison.png",    "cmp",    "Row / Tuple Comparison Latency",         "Row Comparison Latency (ms)"),
+        ("repair_write_comparison.png",      "repair", "Repair Write Latency",                   "Repair Write Latency (ms)"),
+        ("post_repair_confirmation_comparison.png", "conf", "Post-Repair Confirmation Latency",  "Confirmation Latency (ms)"),
     ]
     out = {}
     for fname, key, title, ylabel in specs:

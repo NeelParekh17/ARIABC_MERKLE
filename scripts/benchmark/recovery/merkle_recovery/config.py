@@ -23,8 +23,8 @@ GEOMETRY_MATRIX_PATH: Path = BENCH_DIR / "recovery_geometry_matrix.json"
 FIELDS = [f"field{i}" for i in range(10)]
 ALL_COLUMNS = ["ycsb_key", *FIELDS]
 LEAF_LOOKUP_INDEXES = {
-    "healthy": "usertable_merkle_covering_idx",
-    "damaged": "usertable_merkle_covering_idx",
+    "healthy": "usertable_merkle_partition_lookup_idx",
+    "damaged": "usertable_merkle_partition_lookup_idx",
 }
 
 BENCHMARK_SCHEMA_VERSION = 3   # v2 = three-method; v3 = Merkle-only dynamic recovery

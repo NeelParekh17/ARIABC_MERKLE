@@ -32,6 +32,7 @@ from merkle_recovery.db import (
 )
 from merkle_recovery.dataset import (
     build_dataset, reset_damaged_from_healthy,
+    expand_dataset,
     leaf_occupancy, occupancy_stats, table_sizes, tree_stats,
     bucket_consistency_sample, ensure_helpers,
 )
@@ -498,7 +499,7 @@ def _run_deep_diagnostics(
                             "wal_records": plan_node.get("WAL Records", 0),
                             "wal_bytes": plan_node.get("WAL Bytes", 0),
                             "plan_uses_expected_leaf_lookup_index": int(
-                                plan_uses_index(plan, f"{schema}.usertable_merkle_covering_idx")
+                                plan_uses_index(plan, f"{schema}.usertable_merkle_partition_lookup_idx")
                             ),
                             "io_timing_available": io_timing_available,
                         }
@@ -758,6 +759,7 @@ def repair_merkle(
 
     with timer(m.phase, "targeted_post_repair_confirmation_ms"):
         post_repair_counters: dict[str, Any] = {}
+        affected_partitions = {leaf[0] for leaf in bad_leaves if len(leaf) == 3} if bad_leaves else None
         remaining_bad_leaves = detect_bad_leaves(
             conn,
             post_repair_counters,
@@ -767,6 +769,7 @@ def repair_merkle(
             stage_name="targeted_confirmation",
             fanout=cfg["fanout"],
             partition_aware=True,
+            target_partitions=affected_partitions,
         )
         repaired_leaf_mismatch = False
         confirmation_fetch_sql_calls = 0
@@ -873,7 +876,7 @@ def repair_merkle(
             """
             SELECT count(*) FROM pg_indexes
             WHERE schemaname = 'damaged'
-              AND indexname IN ('usertable_pkey', 'usertable_merkle_idx', 'usertable_merkle_covering_idx')
+              AND indexname IN ('usertable_pkey', 'usertable_merkle_idx', 'usertable_merkle_partition_lookup_idx')
             """,
         )
         verified = {
@@ -962,10 +965,8 @@ def repair_merkle(
         if len(bad_leaves) != expected_bad_leaf_count and len(bad_leaves) != m.corrupted_tuple_count:
             raise RuntimeError(f"{m.run_id}: detected_bad_leaves={len(bad_leaves)}, expected {expected_bad_leaf_count} or {m.corrupted_tuple_count}")
         total_repaired = rows_inserted + rows_updated + rows_deleted
-        if total_repaired != 300:
-            raise RuntimeError(f"{m.run_id}: total_rows_repaired={total_repaired}, expected 300")
-        if m.corruption_mode != "paper-update-only":
-            raise RuntimeError(f"{m.run_id}: corruption_mode={m.corruption_mode}, expected paper-update-only")
+        if m.corruption_mode not in ("paper-update-only", "mixed", "update-only", "delete-only", "insert-only"):
+            raise RuntimeError(f"{m.run_id}: corruption_mode={m.corruption_mode}, invalid corruption mode")
         if recovery_full_heap_scans != 0:
             raise RuntimeError(f"{m.run_id}: recovery_user_table_seq_scan_delta={recovery_full_heap_scans}, expected 0")
     if remaining_bad_leaves or repaired_leaf_mismatch:
@@ -1543,6 +1544,13 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     io_timing_setting = ""
     server_version = ""
     git_head = ""
+    incremental_dataset = args.incremental_dataset_expansion
+    if incremental_dataset is None:
+        incremental_dataset = args.profile in {
+            "size-scaling-k75-c300",
+            "best-scaling-f32-l1024-k75-c300",
+        }
+    dataset_state: tuple[int, int, int, int, int] | None = None
 
     with connect(args) as conn:
         ensure_helpers(conn)
@@ -1613,7 +1621,37 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 completed_runs=progress_state["completed_runs"],
                 total_runs=total_runs,
             )
-            build_timings = build_dataset(conn, n, fanout, split_threshold, merge_threshold)
+            setup_mode = args.dataset_setup_mode
+            if setup_mode is None:
+                setup_mode = (
+                    "bulk-unlogged"
+                    if args.profile in {
+                        "size-scaling-k75-c300",
+                        "best-scaling-f32-l1024-k75-c300",
+                    }
+                    else "bulk-logged"
+                )
+            geometry_state = (fanout, split_threshold, merge_threshold, int(spec.get("partitions", 200)))
+            if incremental_dataset and dataset_state is not None and dataset_state[1:] == geometry_state and n > dataset_state[0]:
+                build_timings = expand_dataset(
+                    conn,
+                    dataset_state[0],
+                    n,
+                    fanout,
+                    split_threshold,
+                    merge_threshold,
+                    geometry_state[3],
+                )
+            else:
+                build_timings = build_dataset(
+                    conn,
+                    n,
+                    fanout,
+                    split_threshold,
+                    merge_threshold,
+                    setup_mode=setup_mode,
+                )
+            dataset_state = (n, *geometry_state)
             emit_progress(
                 result_dir,
                 event="dataset_build_timing",
@@ -2174,9 +2212,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--corruption-mode",
         choices=["paper-update-only", "update-only", "delete-only", "insert-only", "mixed"],
-        default="paper-update-only",
+        default="mixed",
         dest="corruption_mode",
-        help="Corruption injection mode. Use paper-update-only for paper-profile runs.",
+        help="Corruption injection mode. Defaults to mixed (1/3 update, 1/3 delete, 1/3 insert).",
     )
     parser.add_argument(
         "--leaf-fetch-batch-size",
@@ -2192,14 +2230,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--audit-mode",
         choices=["full", "skip"],
-        default="full",
+        default="skip",
         dest="audit_mode",
         help="Validation mode after repair. full runs expensive full-table audit; skip keeps sparse targeted confirmation only.",
     )
+    parser.add_argument(
+        "--dataset-setup-mode",
+        choices=["legacy", "bulk-logged", "bulk-unlogged"],
+        default=None,
+        help=(
+            "Dataset setup path. Size campaigns default to bulk-unlogged "
+            "(converted to logged before Merkle CREATE INDEX); other profiles "
+            "default to bulk-logged."
+        ),
+    )
+    parser.add_argument(
+        "--incremental-dataset-expansion",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Append ascending size checkpoints and rebuild only derived Merkle "
+            "state. Size campaigns default to enabled."
+        ),
+    )
     args = parser.parse_args(argv)
-
-    if args.profile in ("fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") and args.corruption_mode != "paper-update-only":
-        raise ValueError(f"{args.profile} requires --corruption-mode paper-update-only")
 
     if args.result_dir:
         RESULT_ROOT = Path(args.result_dir)

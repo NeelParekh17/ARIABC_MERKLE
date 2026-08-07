@@ -13,7 +13,6 @@ from .db import execute, scalar
 from .profiling import ProfileCollector, record_call, parse_json_plan
 
 LEAF_LOOKUP_PLAN_INDEXES = (
-    "usertable_merkle_covering_idx",
     "usertable_merkle_partition_lookup_idx",
 )
 

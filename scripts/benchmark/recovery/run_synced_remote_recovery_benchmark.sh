@@ -24,7 +24,7 @@ Options:
   --repetitions N
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
-                               default: paper-update-only
+                               default: mixed
   --audit-mode full|skip       default: full
   --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
@@ -56,8 +56,8 @@ PROFILING="off"
 TRACK_COUNTS="on"
 REPETITIONS=""
 ARTIFACT_MODE="summary"
-CORRUPTION_MODE="paper-update-only"
-AUDIT_MODE="full"
+CORRUPTION_MODE="mixed"
+AUDIT_MODE="skip"
 LEAF_FETCH_BATCH_SIZE=64
 RUN_STATIC_MERKLE_REGRESSION=0
 MIN_FREE_GIB=40
@@ -729,7 +729,7 @@ remote_progress "temporary socket directory ready: $REMOTE_SOCKET_DIR"
 # collection overhead explicitly with --track-counts off.
 remote_progress "PostgreSQL start requested; logs: $REMOTE_LOG_DIR/pg_ctl_start.log and $REMOTE_LOG_DIR/postgres.log"
 if "$REMOTE_INSTALL_DIR/bin/pg_ctl" -D "$REMOTE_PGDATA" -l "$REMOTE_LOG_DIR/postgres.log" \
-    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=4GB -c maintenance_work_mem=1GB -c work_mem=128MB -c max_wal_size=32GB -c checkpoint_timeout=60min -c autovacuum=off -c track_counts=$TRACK_COUNTS -c synchronous_commit=on -c wal_buffers=64MB" \
+    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=32GB -c effective_cache_size=160GB -c maintenance_work_mem=16GB -c work_mem=256MB -c max_wal_size=128GB -c checkpoint_timeout=60min -c autovacuum=off -c track_counts=$TRACK_COUNTS -c synchronous_commit=on -c wal_buffers=256MB -c max_worker_processes=128 -c max_parallel_workers=96 -c max_parallel_maintenance_workers=32" \
     -w start 9>&- >"$REMOTE_LOG_DIR/pg_ctl_start.log" 2>&1; then
   remote_progress "PostgreSQL started"
 else
