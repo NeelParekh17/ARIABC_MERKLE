@@ -58,7 +58,7 @@ PROFILING="off"
 TRACK_COUNTS="on"
 REPETITIONS=""
 ARTIFACT_MODE="summary"
-CORRUPTION_MODE="mixed"
+CORRUPTION_MODE=""
 AUDIT_MODE="skip"
 LEAF_FETCH_BATCH_SIZE=64
 RUN_STATIC_MERKLE_REGRESSION=0
@@ -106,6 +106,10 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -z "$CORRUPTION_MODE" ]]; then
+  CORRUPTION_MODE="mixed"
+fi
 
 if [[ -z "$HOST" ]]; then
   echo "host must be specified" >&2
