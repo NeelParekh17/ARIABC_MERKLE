@@ -537,6 +537,7 @@ def repair_merkle(
     benchmark_profile: str = "",
     audit_mode: str = "full",
     leaf_fetch_chunk_size: int = 64,
+    levels_per_batch: int = 3,
 ) -> Metrics:
     cfg = {
         "fanout": int(manifest.get("fanout", 4)),
@@ -591,6 +592,7 @@ def repair_merkle(
             profiler=profiler,
             fanout=cfg["fanout"],
             partition_aware=True,
+            levels_per_batch=levels_per_batch,
         )
 
     if localisation_index_stats_ok:
@@ -770,6 +772,7 @@ def repair_merkle(
             fanout=cfg["fanout"],
             partition_aware=True,
             target_partitions=affected_partitions,
+            levels_per_batch=levels_per_batch,
         )
         repaired_leaf_mismatch = False
         confirmation_fetch_sql_calls = 0
@@ -1014,6 +1017,7 @@ def run_one_manifest(
     benchmark_profile: str = "",
     audit_mode: str = "full",
     leaf_fetch_chunk_size: int = 64,
+    levels_per_batch: int = 3,
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
     cfg = {
@@ -1047,6 +1051,7 @@ def run_one_manifest(
                 benchmark_profile="",
                 audit_mode="skip",
                 leaf_fetch_chunk_size=leaf_fetch_chunk_size,
+                levels_per_batch=levels_per_batch,
             )
 
     for rep in range(reps):
@@ -1113,6 +1118,7 @@ def run_one_manifest(
             benchmark_profile=benchmark_profile,
             audit_mode=audit_mode,
             leaf_fetch_chunk_size=leaf_fetch_chunk_size,
+            levels_per_batch=levels_per_batch,
         )
         metrics.append(metric)
         if profiler is not None:
@@ -1798,6 +1804,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     benchmark_profile=args.profile,
                     audit_mode=args.audit_mode,
                     leaf_fetch_chunk_size=args.leaf_fetch_batch_size,
+                    levels_per_batch=getattr(args, "levels_per_batch", 3),
                 )
             )
 
@@ -2199,7 +2206,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split-threshold", type=int, dest="split_threshold")
     parser.add_argument("--merge-threshold", type=int, dest="merge_threshold")
     parser.add_argument("--bad-leaf-count", type=int, dest="bad_leaf_count")
-    parser.add_argument("--fanout", type=int)
+    parser.add_argument("--fanout", type=int, default=4)
     parser.add_argument("--profile-label", dest="profile_label")
     parser.add_argument("--geometry-label", dest="geometry_label")
     parser.add_argument("--profiling", choices=["off", "light", "deep"], default="off")
@@ -2252,6 +2259,22 @@ def main(argv: list[str] | None = None) -> int:
             "Append ascending size checkpoints and rebuild only derived Merkle "
             "state. Size campaigns default to enabled."
         ),
+    )
+    parser.add_argument(
+        "--levels-per-batch",
+        "--localisation-depth-step",
+        type=int,
+        default=3,
+        dest="levels_per_batch",
+        help="Number of Merkle tree levels to descend per SQL batch/round-trip during localisation (default: 3).",
+    )
+    parser.add_argument(
+        "--partitions",
+        "--num-partitions",
+        type=int,
+        default=None,
+        dest="partitions",
+        help="Number of Merkle tree partitions (default: 200).",
     )
     args = parser.parse_args(argv)
 
