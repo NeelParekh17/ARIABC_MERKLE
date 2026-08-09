@@ -473,6 +473,17 @@ def main():
     ds_old = parse_progress_jsonl(old_dir)
     ds_new = parse_progress_jsonl(new_dir)
 
+    if ds_old or ds_new:
+        ds_old_sec = [ds_old.get(tc, {}).get('dataset_total_ms', float('nan')) / 1000.0 for tc in scales]
+        ds_new_sec = [ds_new.get(tc, {}).get('dataset_total_ms', float('nan')) / 1000.0 for tc in scales]
+        save_comparison_line(
+            plots_dir / "dataset_build_time_comparison.png",
+            x, x_labels, ds_old_sec, ds_new_sec,
+            f"Incremental Dataset Build Latency: {old_label} vs {new_label}",
+            "Dataset Expansion Time (Seconds)",
+            old_label=old_label, new_label=new_label
+        )
+
     for tc in scales:
         o_ms = ds_old.get(tc, {}).get("dataset_total_ms", float("nan"))
         n_ms = ds_new.get(tc, {}).get("dataset_total_ms", float("nan"))

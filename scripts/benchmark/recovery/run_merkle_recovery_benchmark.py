@@ -184,9 +184,19 @@ def validate_backend_profile_stats(
 
 
 def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str = "") -> dict[str, Any]:
+    import time
+    t_occ0 = time.perf_counter()
     occ = leaf_occupancy(conn)
+    leaf_occupancy_ms = (time.perf_counter() - t_occ0) * 1000.0
+
+    t_sz0 = time.perf_counter()
     sizes = table_sizes(conn)
+    table_sizes_ms = (time.perf_counter() - t_sz0) * 1000.0
+
+    t_ts0 = time.perf_counter()
     tstats = tree_stats(conn, int(geo.get("fanout", 4)))
+    tree_stats_ms = (time.perf_counter() - t_ts0) * 1000.0
+
     leaf_count = len(occ)
     phys_per_leaf = tuple_count / max(1, leaf_count)
     row = {
@@ -200,9 +210,13 @@ def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str
         "total_leaf_count": leaf_count,
         "physical_rows_per_leaf_expected": round(phys_per_leaf, 2),
         "expected_candidate_rows_per_bad_leaf": round(2 * phys_per_leaf, 2),
+        "leaf_occupancy_ms": round(leaf_occupancy_ms, 3),
+        "table_sizes_ms": round(table_sizes_ms, 3),
+        "tree_stats_ms": round(tree_stats_ms, 3),
         **occupancy_stats(occ),
     }
     return row
+
 
 
 def _extend_localisation_node_id(node_id: bytes, prefix_len: int, bucket: int, bits: int) -> bytes:
@@ -725,16 +739,16 @@ def repair_merkle(
                 stage="candidate_fetch",
                 operation="leaf_fetch_batch_healthy",
                 schema="healthy",
-                fn=lambda: fetch_leaf_rows_batch(conn, "healthy", chunk,
-                                                 chunk_size=0),
+                fn=lambda c=chunk: fetch_leaf_rows_batch(conn, "healthy", c,
+                                                         chunk_size=0, partitions=cfg["partitions"]),
             )
             damaged_by_leaf: FetchResult = record_call(
                 profiler,
                 stage="candidate_fetch",
                 operation="leaf_fetch_batch_damaged",
                 schema="damaged",
-                fn=lambda: fetch_leaf_rows_batch(conn, "damaged", chunk,
-                                                 chunk_size=0),
+                fn=lambda c=chunk: fetch_leaf_rows_batch(conn, "damaged", c,
+                                                         chunk_size=0, partitions=cfg["partitions"]),
             )
 
         candidate_fetch_sql_calls += healthy_by_leaf.sql_calls + damaged_by_leaf.sql_calls
@@ -817,16 +831,16 @@ def repair_merkle(
                 stage="targeted_confirmation",
                 operation="confirmation_leaf_fetch_batch_healthy",
                 schema="healthy",
-                fn=lambda: fetch_leaf_rows_batch(conn, "healthy", chunk,
-                                                 chunk_size=0),
+                fn=lambda c=chunk: fetch_leaf_rows_batch(conn, "healthy", c,
+                                                         chunk_size=0, partitions=cfg["partitions"]),
             )
             confirmed_damaged: FetchResult = record_call(
                 profiler,
                 stage="targeted_confirmation",
                 operation="confirmation_leaf_fetch_batch_damaged",
                 schema="damaged",
-                fn=lambda: fetch_leaf_rows_batch(conn, "damaged", chunk,
-                                                 chunk_size=0),
+                fn=lambda c=chunk: fetch_leaf_rows_batch(conn, "damaged", c,
+                                                         chunk_size=0, partitions=cfg["partitions"]),
             )
 
             confirmation_fetch_sql_calls += confirmed_healthy.sql_calls + confirmed_damaged.sql_calls
@@ -1060,7 +1074,10 @@ def run_one_manifest(
     # explicit checkpoint here: it would introduce an unrelated I/O barrier
     # between warmup and measurement. The dataset build already establishes
     # the initial checkpoint boundary.
+    warmup_cycles_ms = 0.0
     if reps > 0:
+        import time
+        t_w_start = time.perf_counter()
         for warmup_rep in range(RECOVERY_WARMUP_CYCLES):
             warmup_id = f"{recovery_run_id(manifest, 0, profile_label)}-warmup{warmup_rep}"
             apply_corruption(conn, manifest)
@@ -1082,6 +1099,10 @@ def run_one_manifest(
                 levels_per_batch=levels_per_batch,
                 synchronous_commit=synchronous_commit,
             )
+        warmup_cycles_ms = (time.perf_counter() - t_w_start) * 1000.0
+        print(f"  [warmup] {RECOVERY_WARMUP_CYCLES} untimed recovery cycles took {warmup_cycles_ms/1000.0:.2f}s", flush=True)
+    manifest["recovery_warmup_cycles_ms"] = round(warmup_cycles_ms, 3)
+
 
     for rep in range(reps):
         run_id = recovery_run_id(manifest, rep, profile_label)
@@ -1685,6 +1706,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     split_threshold,
                     merge_threshold,
                     setup_mode=setup_mode,
+                    partitions=geometry_state[3],
                 )
             dataset_state = (n, *geometry_state)
             emit_progress(
@@ -1694,15 +1716,22 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 tuple_count=n,
                 timings_ms=build_timings,
             )
+            t_bcs0 = time.perf_counter()
             bsum, bdebug = bucket_consistency_sample(conn, n, fanout, args.seed)
+            bucket_consistency_sample_ms = (time.perf_counter() - t_bcs0) * 1000.0
             bucket_summary_rows.append(bsum)
             if args.artifact_mode == "debug":
                 bucket_debug_rows.extend(bdebug)
-            dataset_rows.append(_dataset_row(conn, n, {
+
+            t_dsr0 = time.perf_counter()
+            ds_row = _dataset_row(conn, n, {
                 "fanout": fanout,
                 "split_threshold": split_threshold,
                 "merge_threshold": merge_threshold,
-            }, geometry_label))
+            }, geometry_label)
+            dataset_row_total_ms = (time.perf_counter() - t_dsr0) * 1000.0
+            dataset_rows.append(ds_row)
+
             emit_progress(
                 result_dir,
                 event="dataset_complete",
@@ -1711,6 +1740,11 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 tuple_count=n,
                 completed_runs=progress_state["completed_runs"],
                 total_runs=total_runs,
+                bucket_consistency_sample_ms=round(bucket_consistency_sample_ms, 3),
+                dataset_row_total_ms=round(dataset_row_total_ms, 3),
+                tree_stats_ms=ds_row.get("tree_stats_ms", 0.0),
+                leaf_occupancy_ms=ds_row.get("leaf_occupancy_ms", 0.0),
+                table_sizes_ms=ds_row.get("table_sizes_ms", 0.0),
             )
             d = corrupted_tuple_count if args.profile == "recovery-scaling-diagnosis" else (
                 300 if args.profile in ("paper", "preflight", "fanout-width-sweep", "size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300") else bad_leaf_count
@@ -1725,6 +1759,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             else:
                 forced_bad_leaves = None
 
+            t_cm0 = time.perf_counter()
             manifest = choose_corruption_manifest(
                 conn,
                 experiment,
@@ -1736,8 +1771,24 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 corruption_mode=args.corruption_mode,
                 forced_bad_leaves=forced_bad_leaves,
             )
+            choose_corruption_manifest_ms = (time.perf_counter() - t_cm0) * 1000.0
             d = manifest["corrupted_tuple_count"]
+
+            t_vmlm0 = time.perf_counter()
             validate_manifest_leaf_mapping(conn, manifest)
+            validate_manifest_leaf_mapping_ms = (time.perf_counter() - t_vmlm0) * 1000.0
+
+            print(
+                f"[verification] tuple_count={n} "
+                f"bucket_sample={bucket_consistency_sample_ms:.1f}ms "
+                f"tree_stats={ds_row.get('tree_stats_ms', 0):.1f}ms "
+                f"leaf_occ={ds_row.get('leaf_occupancy_ms', 0):.1f}ms "
+                f"table_sizes={ds_row.get('table_sizes_ms', 0):.1f}ms "
+                f"choose_manifest={choose_corruption_manifest_ms:.1f}ms "
+                f"validate_mapping={validate_manifest_leaf_mapping_ms:.1f}ms",
+                flush=True,
+            )
+
 
             if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):
                 if forced_key not in forced_map:
@@ -1766,7 +1817,10 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     selected_bad_leaf_row_capacity=selected_capacity,
                     required_corrupted_tuple_count=d,
                     corruption_selection_sha256=manifest["corruption_selection_sha256"],
+                    choose_corruption_manifest_ms=round(choose_corruption_manifest_ms, 3),
+                    validate_manifest_leaf_mapping_ms=round(validate_manifest_leaf_mapping_ms, 3),
                 )
+
 
                 # Assert provenance
                 if args.profile in ("size-scaling-k75-c300", "best-scaling-f32-l1024-k75-c300"):

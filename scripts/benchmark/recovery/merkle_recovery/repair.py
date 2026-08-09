@@ -116,7 +116,7 @@ class FetchResult:
 
 
 def fetch_leaf_rows_batch(
-    conn, schema: str, leaf_keys: list[tuple[bytes, int]], chunk_size: int = 0
+    conn, schema: str, leaf_keys: list[tuple[bytes, int]], chunk_size: int = 0, partitions: int = 200
 ) -> FetchResult:
     result = FetchResult()
     unique_keys = sorted(set(leaf_key_fn(value) for value in leaf_keys), key=str)
@@ -142,7 +142,7 @@ def fetch_leaf_rows_batch(
         lowers = [bytea_lower_bound(node_ids[i], prefix_lens[i]) for i in range(len(chunk))]
         uppers = [bytea_upper_bound(node_ids[i], prefix_lens[i]) for i in range(len(chunk))]
         if aware:
-            params = ([k[0] for k in chunk], node_ids, prefix_lens, lowers, uppers, 200)
+            params = ([k[0] for k in chunk], node_ids, prefix_lens, lowers, uppers, partitions)
         else:
             params = (node_ids, prefix_lens, lowers, uppers)
 
@@ -171,9 +171,9 @@ def _plan_node_uses_index(node: Any, index_name: str) -> bool:
 def _plan_uses_leaf_lookup_index(plan: Any) -> bool:
     return any(_plan_node_uses_index(plan, name) for name in LEAF_LOOKUP_PLAN_INDEXES)
 
-def indexed_lookup_plan_ok(conn, schema: str, leaf_key: tuple[bytes, int]) -> tuple[bool, str]:
+def indexed_lookup_plan_ok(conn, schema: str, leaf_key: tuple[bytes, int], partitions: int = 200) -> tuple[bool, str]:
     leaf_key = leaf_key_normalized = leaf_key_fn(leaf_key)
-    params = _leaf_lookup_params(leaf_key_normalized)
+    params = _leaf_lookup_params(leaf_key_normalized, partitions)
     plan_rows = execute(
         conn, leaf_lookup_sql(schema, explain=True, partition_aware=len(leaf_key_normalized) == 3), params
     )
@@ -189,7 +189,7 @@ def indexed_lookup_plan_ok(conn, schema: str, leaf_key: tuple[bytes, int]) -> tu
 def leaf_lookup_batch_explain_sql(schema: str, partition_aware: bool = True) -> str:
     return "EXPLAIN (FORMAT JSON) " + leaf_lookup_batch_sql(schema, partition_aware)
 
-def batch_indexed_lookup_plan_ok(conn, schema: str, leaf_keys: list[tuple[bytes, int]]) -> tuple[bool, str]:
+def batch_indexed_lookup_plan_ok(conn, schema: str, leaf_keys: list[tuple[bytes, int]], partitions: int = 200) -> tuple[bool, str]:
     if not leaf_keys:
         return True, "{}"
     normalized = [leaf_key_fn(value) for value in leaf_keys]
@@ -199,7 +199,7 @@ def batch_indexed_lookup_plan_ok(conn, schema: str, leaf_keys: list[tuple[bytes,
     lowers = [bytea_lower_bound(node_ids[i], prefix_lens[i]) for i in range(len(normalized))]
     uppers = [bytea_upper_bound(node_ids[i], prefix_lens[i]) for i in range(len(normalized))]
     if aware:
-        params = ([k[0] for k in normalized], node_ids, prefix_lens, lowers, uppers, 200)
+        params = ([k[0] for k in normalized], node_ids, prefix_lens, lowers, uppers, partitions)
     else:
         params = (node_ids, prefix_lens, lowers, uppers)
     plan_rows = execute(conn, leaf_lookup_batch_explain_sql(schema, aware), params)
@@ -221,6 +221,7 @@ def run_planner_preflight(
     # just check the actual bad leaves.
     import hashlib
     unique_bad_leaves = set(tuple(x) if isinstance(x, (list, tuple)) else x for x in manifest["bad_leaves"])
+    partitions = int(manifest.get("partitions", 200))
     out: dict[str, Any] = {
         "planner_checked_leaf_count": len(unique_bad_leaves),
         "planner_checks_passed": 1,
@@ -232,14 +233,14 @@ def run_planner_preflight(
 
     for leaf_key in bad_keys:
         for schema in ("healthy", "damaged"):
-            ok, detail = indexed_lookup_plan_ok(conn, schema, leaf_key)
+            ok, detail = indexed_lookup_plan_ok(conn, schema, leaf_key, partitions=partitions)
             if not ok:
                 out["planner_checks_passed"] = 0
                 raise RuntimeError(f"Plan missing index usage: {detail}")
 
     if bad_keys:
         for schema in ("healthy", "damaged"):
-            ok, detail = batch_indexed_lookup_plan_ok(conn, schema, bad_keys)
+            ok, detail = batch_indexed_lookup_plan_ok(conn, schema, bad_keys, partitions=partitions)
             if not ok:
                 out["planner_checks_passed"] = 0
                 raise RuntimeError(f"Batch plan missing index usage: {detail}")
