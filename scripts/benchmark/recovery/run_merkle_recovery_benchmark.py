@@ -207,7 +207,10 @@ def _dataset_row(conn, tuple_count: int, geo: dict[str, int], profile_label: str
 
 def _extend_localisation_node_id(node_id: bytes, prefix_len: int, bucket: int, bits: int) -> bytes:
     """Mirror merkle_bytea_extend() for an untimed diagnostic replay."""
+    required_bytes = (prefix_len + bits + 7) // 8
     result = bytearray(node_id)
+    if len(result) < required_bytes:
+        result.extend(b"\x00" * (required_bytes - len(result)))
     for offset in range(bits):
         bit_idx = prefix_len + offset
         byte_pos = bit_idx // 8
@@ -224,13 +227,13 @@ def _localisation_sql(explain: bool = False, partition_aware: bool = False) -> s
     prefix = "EXPLAIN (ANALYZE, BUFFERS, SETTINGS, TIMING OFF, FORMAT JSON) " if explain else ""
     if partition_aware:
         return (
-            f"{prefix}WITH wanted(partition_id, node_id) AS ("
-            "SELECT * FROM unnest(%s::int4[], %s::bytea[])) "
+            f"{prefix}WITH wanted(partition_id, node_id, prefix_len) AS ("
+            "SELECT * FROM unnest(%s::int4[], %s::bytea[], %s::int2[])) "
             "SELECT n.partition_id, n.node_id, n.prefix_len, n.is_leaf, n.hash "
             "FROM wanted w JOIN ariabc_internal.merkle_node n "
-            "ON n.partition_id = w.partition_id AND n.node_id = w.node_id "
-            "WHERE n.index_oid = %s AND n.prefix_len = %s::smallint "
-            "ORDER BY n.partition_id, n.node_id"
+            "ON n.partition_id = w.partition_id AND n.node_id = w.node_id AND n.prefix_len = w.prefix_len "
+            "WHERE n.index_oid = %s "
+            "ORDER BY n.partition_id, n.prefix_len, n.node_id"
         )
     return (
         f"{prefix}SELECT node_id, prefix_len, is_leaf, hash "
@@ -309,8 +312,11 @@ def _run_localisation_diagnostics(
             current_nodes = list(batch["node_ids"])
             current_partition_ids = batch.get("partition_ids")
             partition_aware = current_partition_ids is not None
-            current_prefix_len = int(batch["prefix_len"])
-            max_depth = int(batch["max_depth"])
+            max_depth = int(batch.get("max_depth", 0))
+            current_prefix_len = int(batch.get("prefix_len", 0))
+            current_prefix_lens = batch.get("prefix_lens")
+            if current_prefix_lens is None:
+                current_prefix_lens = [current_prefix_len] * len(current_nodes)
             for inner_depth in range(max_depth + 1):
                 if not current_nodes:
                     break
@@ -322,8 +328,8 @@ def _run_localisation_diagnostics(
                         plan_params = (
                             current_partition_ids,
                             current_nodes,
+                            current_prefix_lens,
                             index_oids[schema],
-                            current_prefix_len,
                         )
                     else:
                         plan_params = (index_oids[schema], current_prefix_len, current_nodes)
@@ -539,6 +545,7 @@ def repair_merkle(
     audit_mode: str = "full",
     leaf_fetch_chunk_size: int = 64,
     levels_per_batch: int = 3,
+    synchronous_commit: str = "on",
 ) -> Metrics:
     cfg = {
         "fanout": int(manifest.get("fanout", 4)),
@@ -690,6 +697,9 @@ def repair_merkle(
     lookup_scans = 0
     per_leaf_candidates: list[int] = []
 
+    if synchronous_commit.lower() in ("on", "off"):
+        execute(conn, f"SET synchronous_commit = {synchronous_commit}")
+
     # Split bad_leaves into chunks to bound peak memory.
     if leaf_fetch_chunk_size <= 0:
         bad_leaf_chunks = [bad_leaves]
@@ -699,6 +709,11 @@ def repair_merkle(
     candidate_fetch_sql_calls = 0
     candidate_fetch_batches = 0
     candidate_leaf_buckets_requested = 0
+
+    all_inserts: list[int] = []
+    all_updates: list[int] = []
+    all_deletes: list[int] = []
+    all_hrows: dict[int, dict[str, Any]] = {}
 
     for chunk in bad_leaf_chunks:
         if not chunk:
@@ -726,46 +741,47 @@ def repair_merkle(
         candidate_fetch_batches += healthy_by_leaf.batches + damaged_by_leaf.batches
         candidate_leaf_buckets_requested += healthy_by_leaf.leaf_buckets_requested + damaged_by_leaf.leaf_buckets_requested
 
-        # Keep the fetch outside the transaction, then apply one bounded
-        # write transaction per chunk. This preserves synchronous Merkle
-        # maintenance and rollback atomicity while avoiding one WAL/commit
-        # wait for every repaired row.
-        with timer(m.phase, "repair_write_ms"):
-            with conn.transaction():
-                chunk_inserts: list[int] = []
-                chunk_updates: list[int] = []
-                chunk_deletes: list[int] = []
-                chunk_hrows: dict[int, dict[str, Any]] = {}
-                for leaf_id in chunk:
-                    hrows, drows, ins, upd, dlt = repair_leaf(
-                        conn,
-                        leaf_id,
-                        phase=m.phase,
-                        profiler=profiler,
-                        prefetched=(
-                            healthy_by_leaf.get(leaf_id, {}),
-                            damaged_by_leaf.get(leaf_id, {}),
-                        ),
-                        measure_repair_write=False,
-                        execute_dml=False,
-                    )
-                    healthy_rows += len(hrows)
-                    damaged_rows += len(drows)
-                    leaf_total = len(hrows) + len(drows)
-                    candidate_rows += leaf_total
-                    per_leaf_candidates.append(leaf_total)
-                    chunk_hrows.update(hrows)
-                    chunk_inserts.extend(ins)
-                    chunk_updates.extend(upd)
-                    chunk_deletes.extend(dlt)
-
-                rows_inserted += execute_batched_inserts(conn, "damaged", chunk_inserts, chunk_hrows, profiler)
-                rows_updated += execute_batched_updates(conn, "damaged", chunk_updates, chunk_hrows, profiler)
-                rows_deleted += execute_batched_deletes(conn, "damaged", chunk_deletes, profiler)
+        for leaf_id in chunk:
+            hrows, drows, ins, upd, dlt = repair_leaf(
+                conn,
+                leaf_id,
+                phase=m.phase,
+                profiler=profiler,
+                prefetched=(
+                    healthy_by_leaf.get(leaf_id, {}),
+                    damaged_by_leaf.get(leaf_id, {}),
+                ),
+                measure_repair_write=False,
+                execute_dml=False,
+            )
+            healthy_rows += len(hrows)
+            damaged_rows += len(drows)
+            leaf_total = len(hrows) + len(drows)
+            candidate_rows += leaf_total
+            per_leaf_candidates.append(leaf_total)
+            all_hrows.update(hrows)
+            all_inserts.extend(ins)
+            all_updates.extend(upd)
+            all_deletes.extend(dlt)
 
         # Discard chunk from memory
         del healthy_by_leaf
         del damaged_by_leaf
+
+    # Apply all accumulated repair DMLs in one single write transaction across the entire recovery phase
+    if all_inserts or all_updates or all_deletes:
+        with timer(m.phase, "repair_write_ms"):
+            with timer(m.phase, "repair_transaction_block_ms"):
+                t_tx_enter = time.perf_counter()
+                with conn.transaction():
+                    t_inside_tx = time.perf_counter()
+                    rows_inserted += execute_batched_inserts(conn, "damaged", all_inserts, all_hrows, profiler, phase=m.phase)
+                    rows_updated += execute_batched_updates(conn, "damaged", all_updates, all_hrows, profiler, phase=m.phase)
+                    rows_deleted += execute_batched_deletes(conn, "damaged", all_deletes, profiler, phase=m.phase)
+                    t_before_commit = time.perf_counter()
+                t_after_commit = time.perf_counter()
+                m.phase["repair_commit_wire_ms"] = m.phase.get("repair_commit_wire_ms", 0.0) + (t_after_commit - t_before_commit) * 1000.0
+                m.phase["repair_begin_wire_ms"] = m.phase.get("repair_begin_wire_ms", 0.0) + (t_inside_tx - t_tx_enter) * 1000.0
 
     if bad_leaves:
         lookup_scans = candidate_fetch_sql_calls
@@ -1029,6 +1045,7 @@ def run_one_manifest(
     audit_mode: str = "full",
     leaf_fetch_chunk_size: int = 64,
     levels_per_batch: int = 3,
+    synchronous_commit: str = "on",
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
     cfg = {
@@ -1063,6 +1080,7 @@ def run_one_manifest(
                 audit_mode="skip",
                 leaf_fetch_chunk_size=leaf_fetch_chunk_size,
                 levels_per_batch=levels_per_batch,
+                synchronous_commit=synchronous_commit,
             )
 
     for rep in range(reps):
@@ -1130,6 +1148,7 @@ def run_one_manifest(
             audit_mode=audit_mode,
             leaf_fetch_chunk_size=leaf_fetch_chunk_size,
             levels_per_batch=levels_per_batch,
+            synchronous_commit=synchronous_commit,
         )
         metrics.append(metric)
         if profiler is not None:
@@ -1646,14 +1665,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             )
             setup_mode = args.dataset_setup_mode
             if setup_mode is None:
-                setup_mode = (
-                    "bulk-unlogged"
-                    if args.profile in {
-                        "size-scaling-k75-c300",
-                        "best-scaling-f32-l1024-k75-c300",
-                    }
-                    else "bulk-logged"
-                )
+                setup_mode = "bulk-logged"
             geometry_state = (fanout, split_threshold, merge_threshold, int(spec.get("partitions", 200)))
             if incremental_dataset and dataset_state is not None and dataset_state[1:] == geometry_state and n > dataset_state[0]:
                 build_timings = expand_dataset(
@@ -1822,6 +1834,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     audit_mode=args.audit_mode,
                     leaf_fetch_chunk_size=args.leaf_fetch_batch_size,
                     levels_per_batch=getattr(args, "levels_per_batch", 3),
+                    synchronous_commit=getattr(args, "synchronous_commit", "on"),
                 )
             )
 
@@ -2281,9 +2294,9 @@ def main(argv: list[str] | None = None) -> int:
         "--levels-per-batch",
         "--localisation-depth-step",
         type=int,
-        default=3,
+        default=1,
         dest="levels_per_batch",
-        help="Number of Merkle tree levels to descend per SQL batch/round-trip during localisation (default: 3).",
+        help="Number of Merkle tree levels to descend per SQL batch/round-trip during localisation (default: 1).",
     )
     parser.add_argument(
         "--partitions",
@@ -2292,6 +2305,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         dest="partitions",
         help="Number of Merkle tree partitions (default: 200).",
+    )
+    parser.add_argument(
+        "--synchronous-commit",
+        choices=["on", "off"],
+        default="on",
+        dest="synchronous_commit",
+        help="PostgreSQL synchronous_commit setting during recovery repair (default: on).",
     )
     args = parser.parse_args(argv)
 

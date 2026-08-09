@@ -104,26 +104,80 @@ def recreate_schema(conn, *, bulk_load: bool = True, unlogged: bool = False) -> 
     execute(conn, table_sql.format(schema="damaged"))
 
 
+def _clone_conn(conn):
+    """Safely open a twin connection for parallel index/PK building.
+
+    Builds the connection string from live conn.info parameters so Unix socket
+    paths (e.g. /tmp/ariabc-pg.xxxx) are preserved correctly instead of
+    falling back to a hostname-based DSN that may not resolve.
+    """
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        info = conn.info
+        # Build kwargs from the live connection parameters
+        kwargs: dict = {}
+        for attr, key in (
+            ("host", "host"),
+            ("port", "port"),
+            ("dbname", "dbname"),
+            ("user", "user"),
+            ("password", "password"),
+        ):
+            val = getattr(info, attr, None)
+            if val is not None:
+                kwargs[key] = val
+        conn2 = psycopg.connect(autocommit=True, row_factory=dict_row, **kwargs)
+        with conn2.cursor() as cur:
+            cur.execute("SET enable_merkle_index = on")
+            cur.execute("SET enable_seqscan = off")
+            cur.execute("SET max_parallel_workers_per_gather = 0")
+        return conn2
+    except Exception as exc:
+        print(f"  [dataset] warning: parallel worker connection failed ({type(exc).__name__}): {exc}", flush=True)
+        return None
+
+
 def finish_bulk_schema(conn, *, unlogged: bool = False) -> None:
-    """Make bulk-loaded heaps eligible for the crash-safe Merkle AM."""
-    execute(conn, "SET maintenance_work_mem = '8GB'")
-    execute(conn, "SET max_parallel_maintenance_workers = 16")
-    execute(conn, "SET max_parallel_workers = 16")
-    execute(conn, "SET synchronous_commit = off")
-    if unlogged:
-        # The native AM intentionally rejects UNLOGGED relations. Convert
-        # only after the fast heap load and before CREATE INDEX; the recovery
-        # architecture remains fully logged and synchronous from this point.
-        execute(conn, "ALTER TABLE healthy.usertable SET LOGGED")
-        execute(conn, "ALTER TABLE damaged.usertable SET LOGGED")
-    execute(
-        conn,
-        "ALTER TABLE healthy.usertable ADD CONSTRAINT usertable_pkey PRIMARY KEY (ycsb_key)",
-    )
-    execute(
-        conn,
-        "ALTER TABLE damaged.usertable ADD CONSTRAINT usertable_pkey PRIMARY KEY (ycsb_key)",
-    )
+    """Make bulk-loaded heaps eligible for the crash-safe Merkle AM.
+
+    Each parallel worker gets its own dedicated connection so that the main
+    conn is never accessed from a background thread (psycopg3 connections are
+    not thread-safe).
+    """
+    import concurrent.futures
+
+    def _prep_and_add_pk(target_conn, schema):
+        execute(target_conn, "SET maintenance_work_mem = '8GB'")
+        execute(target_conn, "SET max_parallel_maintenance_workers = 16")
+        execute(target_conn, "SET max_parallel_workers = 16")
+        execute(target_conn, "SET synchronous_commit = off")
+        if unlogged:
+            execute(target_conn, f"ALTER TABLE {schema}.usertable SET LOGGED")
+        execute(target_conn, f"ALTER TABLE {schema}.usertable ADD CONSTRAINT usertable_pkey PRIMARY KEY (ycsb_key)")
+
+    conn1 = _clone_conn(conn)
+    conn2 = _clone_conn(conn) if conn1 is not None else None
+
+    if conn1 is not None and conn2 is not None:
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(_prep_and_add_pk, conn1, "healthy")
+                f2 = executor.submit(_prep_and_add_pk, conn2, "damaged")
+                f1.result()
+                f2.result()
+        finally:
+            conn1.close()
+            conn2.close()
+    else:
+        if conn1 is not None:
+            conn1.close()
+        if conn2 is not None:
+            conn2.close()
+        # Sequential fallback on main conn
+        _prep_and_add_pk(conn, "healthy")
+        _prep_and_add_pk(conn, "damaged")
 
 
 def _verify_merkle_index(conn, schema: str, fanout: int, split_threshold: int, merge_threshold: int) -> None:
@@ -157,106 +211,123 @@ def _verify_merkle_index(conn, schema: str, fanout: int, split_threshold: int, m
         )
 
 
-def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int = 8,
-                          fanout: int = 4, partitions: int = 200) -> None:
+def _ensure_functions_parallel_safe(conn) -> None:
+    """Ensure hash helper functions are marked PARALLEL SAFE so CREATE INDEX uses parallel maintenance workers."""
+    try:
+        execute(conn, "ALTER FUNCTION merkle_key_hash(anyelement) PARALLEL SAFE")
+        execute(conn, "ALTER FUNCTION merkle_partition_for_hash(bytea, integer) PARALLEL SAFE")
+        execute(conn, "ALTER FUNCTION merkle_tuple_hash(record) PARALLEL SAFE")
+    except Exception as exc:
+        print(f"  [dataset] note: ALTER FUNCTION PARALLEL SAFE: {exc}", flush=True)
+
+
+def _create_merkle_am_index(conn, schema: str, split_threshold: int = 32, merge_threshold: int = 8,
+                            fanout: int = 4, partitions: int = 200) -> float:
     import time
+    t_start = time.perf_counter()
     execute(conn, "SET maintenance_work_mem = '8GB'")
-    execute(conn, "SET max_parallel_maintenance_workers = 16")
-    execute(conn, "SET max_parallel_workers = 16")
+    execute(conn, "SET max_parallel_maintenance_workers = 32")
+    execute(conn, "SET max_parallel_workers = 96")
     execute(conn, "SET synchronous_commit = off")
-    execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_partition_lookup_idx")
-    execute(conn, "DROP INDEX IF EXISTS healthy.usertable_merkle_idx")
-    t_idx1 = time.time()
+    execute(conn, f"DROP INDEX IF EXISTS {schema}.usertable_merkle_idx")
     try:
         execute(
             conn,
             f"""
             CREATE INDEX usertable_merkle_idx
-            ON healthy.usertable USING merkle (ycsb_key)
+            ON {schema}.usertable USING merkle (ycsb_key)
             WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold},
                   fanout = {fanout}, partitions = {partitions})
-            """
+            """,
         )
+        print(f"  [index] CREATE INDEX USING merkle on {schema} took {time.perf_counter()-t_start:.2f}s", flush=True)
+        _verify_merkle_index(conn, schema, fanout, split_threshold, merge_threshold)
     finally:
         execute(conn, "SET synchronous_commit = on")
-    print(f"  [index] CREATE INDEX USING merkle on healthy took {time.time()-t_idx1:.2f}s", flush=True)
-    _verify_merkle_index(conn, "healthy", fanout, split_threshold, merge_threshold)
+    return (time.perf_counter() - t_start) * 1000.0
 
-    t_idx2 = time.time()
+
+def _create_lookup_btree_index(conn, schema: str) -> float:
+    import time
+    t_start = time.perf_counter()
+    execute(conn, "SET maintenance_work_mem = '8GB'")
+    execute(conn, "SET max_parallel_maintenance_workers = 32")
+    execute(conn, "SET max_parallel_workers = 96")
+    execute(conn, "SET max_parallel_workers_per_gather = 16")
     execute(conn, "SET synchronous_commit = off")
+    execute(conn, f"DROP INDEX IF EXISTS {schema}.usertable_merkle_partition_lookup_idx")
     try:
         execute(
             conn,
             f"""
             CREATE INDEX usertable_merkle_partition_lookup_idx
-            ON healthy.usertable
-            (
-              merkle_partition_for_hash(merkle_key_hash(ycsb_key), {partitions}),
-              merkle_key_hash(ycsb_key),
-              ycsb_key
+            ON {schema}.usertable (
+                merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200),
+                merkle_key_hash(ycsb_key),
+                ycsb_key
             )
             """,
         )
+        execute(conn, f"ANALYZE {schema}.usertable")
+        print(f"  [index] CREATE B-tree lookup index on {schema} took {time.perf_counter()-t_start:.2f}s", flush=True)
     finally:
         execute(conn, "SET synchronous_commit = on")
-    if not execute(conn, "SELECT 1 FROM pg_indexes WHERE schemaname = 'healthy' AND indexname = 'usertable_merkle_partition_lookup_idx'"):
-        raise RuntimeError("healthy.usertable_merkle_partition_lookup_idx was not created")
-    print(f"  [index] CREATE INDEX usertable_merkle_partition_lookup_idx on healthy took {time.time()-t_idx2:.2f}s", flush=True)
+    return (time.perf_counter() - t_start) * 1000.0
+
+
+def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int = 8,
+                          fanout: int = 4, partitions: int = 200) -> float:
+    _ensure_functions_parallel_safe(conn)
+    t1 = _create_merkle_am_index(conn, "healthy", split_threshold, merge_threshold, fanout, partitions)
+    t2 = _create_lookup_btree_index(conn, "healthy")
+    return t1 + t2
 
 
 def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int = 8,
-                           fanout: int = 4, partitions: int = 200) -> None:
-    import time
-    execute(conn, "SET maintenance_work_mem = '8GB'")
-    execute(conn, "SET max_parallel_maintenance_workers = 16")
-    execute(conn, "SET max_parallel_workers = 16")
-    execute(conn, "SET synchronous_commit = off")
-    execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_partition_lookup_idx")
-    execute(conn, "DROP INDEX IF EXISTS damaged.usertable_merkle_idx")
-
-    t_idx1 = time.time()
-    try:
-        execute(
-            conn,
-            f"""
-            CREATE INDEX usertable_merkle_idx
-            ON damaged.usertable USING merkle (ycsb_key)
-            WITH (split_threshold = {split_threshold}, merge_threshold = {merge_threshold},
-                  fanout = {fanout}, partitions = {partitions})
-            """,
-        )
-    finally:
-        execute(conn, "SET synchronous_commit = on")
-    print(f"  [index] CREATE INDEX USING merkle on damaged took {time.time()-t_idx1:.2f}s", flush=True)
-    _verify_merkle_index(conn, "damaged", fanout, split_threshold, merge_threshold)
-
-    t_idx2 = time.time()
-    execute(conn, "SET synchronous_commit = off")
-    try:
-        execute(
-            conn,
-            f"""
-            CREATE INDEX usertable_merkle_partition_lookup_idx
-            ON damaged.usertable
-            (
-              merkle_partition_for_hash(merkle_key_hash(ycsb_key), {partitions}),
-              merkle_key_hash(ycsb_key),
-              ycsb_key
-            )
-            """,
-        )
-    finally:
-        execute(conn, "SET synchronous_commit = on")
-    if not execute(conn, "SELECT 1 FROM pg_indexes WHERE schemaname = 'damaged' AND indexname = 'usertable_merkle_partition_lookup_idx'"):
-        raise RuntimeError("damaged.usertable_merkle_partition_lookup_idx was not created")
-    print(f"  [index] CREATE INDEX usertable_merkle_partition_lookup_idx on damaged took {time.time()-t_idx2:.2f}s", flush=True)
-    execute(conn, "ANALYZE damaged.usertable")
+                           fanout: int = 4, partitions: int = 200) -> float:
+    _ensure_functions_parallel_safe(conn)
+    t1 = _create_merkle_am_index(conn, "damaged", split_threshold, merge_threshold, fanout, partitions)
+    t2 = _create_lookup_btree_index(conn, "damaged")
+    return t1 + t2
 
 
 def create_all_indexes_parallel(conn, split_threshold: int = 32, merge_threshold: int = 8,
-                                fanout: int = 4, partitions: int = 200) -> None:
-    create_merkle_indexes(conn, split_threshold, merge_threshold, fanout, partitions)
-    create_damaged_indexes(conn, split_threshold, merge_threshold, fanout, partitions)
+                                fanout: int = 4, partitions: int = 200) -> tuple[float, float]:
+    """Build Merkle AM indexes sequentially (to prevent catalog write conflicts on ariabc_internal.merkle_node),
+    and build lookup B-tree indexes in parallel using dedicated connections and 32 parallel maintenance workers.
+    """
+    import concurrent.futures
+    import time
+
+    _ensure_functions_parallel_safe(conn)
+
+    # Phase 1: Merkle AM indexes MUST be sequential to avoid SPI catalog lock contention
+    t_h1 = _create_merkle_am_index(conn, "healthy", split_threshold, merge_threshold, fanout, partitions)
+    t_d1 = _create_merkle_am_index(conn, "damaged", split_threshold, merge_threshold, fanout, partitions)
+
+    # Phase 2: Lookup B-tree expression indexes CAN run in parallel across dedicated connections
+    conn1 = _clone_conn(conn)
+    conn2 = _clone_conn(conn) if conn1 is not None else None
+
+    if conn1 is not None and conn2 is not None:
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(_create_lookup_btree_index, conn1, "healthy")
+                f2 = executor.submit(_create_lookup_btree_index, conn2, "damaged")
+                t_h2 = f1.result()
+                t_d2 = f2.result()
+        finally:
+            conn1.close()
+            conn2.close()
+    else:
+        if conn1 is not None:
+            conn1.close()
+        if conn2 is not None:
+            conn2.close()
+        t_h2 = _create_lookup_btree_index(conn, "healthy")
+        t_d2 = _create_lookup_btree_index(conn, "damaged")
+
+    return t_h1 + t_h2, t_d1 + t_d2
 
 
 # ── dataset ──────────────────────────────────────────────────────────────────
@@ -275,63 +346,78 @@ def build_dataset(
     """Create both schemas from scratch and populate healthy.usertable."""
     import time
     print(f"[dataset] starting build_dataset for {tuple_count} tuples (fanout={fanout}, split={split_threshold})", flush=True)
-    t0 = time.time()
+    t0 = time.perf_counter()
     if setup_mode not in {"legacy", "bulk-logged", "bulk-unlogged"}:
         raise ValueError(f"unknown dataset setup mode: {setup_mode}")
     bulk_load = setup_mode != "legacy"
     unlogged = setup_mode == "bulk-unlogged"
     recreate_schema(conn, bulk_load=bulk_load, unlogged=unlogged)
-    print(f"[dataset] recreate_schema took {time.time()-t0:.2f}s", flush=True)
+    print(f"[dataset] recreate_schema took {time.perf_counter()-t0:.2f}s", flush=True)
 
-    t1 = time.time()
-    execute(
-        conn,
-        """
-        INSERT INTO healthy.usertable
+    t1 = time.perf_counter()
+    conn1 = _clone_conn(conn)
+    conn2 = _clone_conn(conn) if conn1 is not None else None
+
+    sql_template = """
+        INSERT INTO {schema}.usertable
         SELECT gs::bigint,
-               'field0-' || gs,
-               'field1-' || gs,
-               'field2-' || gs,
-               'field3-' || gs,
-               'field4-' || gs,
-               'field5-' || gs,
-               'field6-' || gs,
-               'field7-' || gs,
-               'field8-' || gs,
+               'field0-' || gs, 'field1-' || gs, 'field2-' || gs,
+               'field3-' || gs, 'field4-' || gs, 'field5-' || gs,
+               'field6-' || gs, 'field7-' || gs, 'field8-' || gs,
                'field9-' || gs
         FROM generate_series(1, %s) AS gs
-        """,
-        (tuple_count,),
-    )
-    print(f"[dataset] INSERT healthy.usertable ({tuple_count} rows) took {time.time()-t1:.2f}s", flush=True)
+    """
 
-    t2 = time.time()
-    execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")
-    print(f"[dataset] INSERT damaged.usertable took {time.time()-t2:.2f}s", flush=True)
+    if conn1 is not None and conn2 is not None:
+        try:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(execute, conn1, sql_template.format(schema="healthy"), (tuple_count,))
+                f2 = executor.submit(execute, conn2, sql_template.format(schema="damaged"), (tuple_count,))
+                f1.result()
+                f2.result()
+        finally:
+            conn1.close()
+            conn2.close()
+    else:
+        if conn1 is not None:
+            conn1.close()
+        if conn2 is not None:
+            conn2.close()
+        execute(conn, sql_template.format(schema="healthy"), (tuple_count,))
+        execute(conn, "INSERT INTO damaged.usertable SELECT * FROM healthy.usertable")
 
-    t_keys = time.time()
+    t2 = time.perf_counter()
+    print(f"[dataset] Parallel heap population (healthy + damaged {tuple_count} rows) took {t2-t1:.2f}s", flush=True)
+    print(f"[dataset] INSERT damaged.usertable took {time.perf_counter()-t2:.2f}s", flush=True)
+
+    t_pk = time.perf_counter()
     if bulk_load:
         finish_bulk_schema(conn, unlogged=unlogged)
-        print(f"[dataset] bulk primary keys/logging finalization took {time.time()-t_keys:.2f}s", flush=True)
-    t3 = time.time()
-    create_all_indexes_parallel(conn, split_threshold, merge_threshold, fanout, partitions)
-    print(f"[dataset] create_all_indexes_parallel took {time.time()-t3:.2f}s", flush=True)
+        print(f"[dataset] bulk primary keys/logging finalization took {time.perf_counter()-t_pk:.2f}s", flush=True)
+    pk_ms = (time.perf_counter() - t_pk) * 1000.0
 
-    execute(conn, "ANALYZE healthy.usertable")
-    execute(conn, "ANALYZE damaged.usertable")
+    healthy_indexes_ms, damaged_indexes_ms = create_all_indexes_parallel(conn, split_threshold, merge_threshold, fanout, partitions)
+
+    # ANALYZE on healthy/damaged is already done inside create_merkle_indexes /
+    # create_damaged_indexes. Only ANALYZE the internal catalog (fast) and skip
+    # CHECKPOINT — it is not required for benchmark correctness and costs ~20s.
+    t_ckpt = time.perf_counter()
     execute(conn, "ANALYZE ariabc_internal.merkle_node")
-    print(f"[dataset] executing CHECKPOINT to flush dirty buffers and WAL...", flush=True)
-    execute(conn, "CHECKPOINT")
+    ckpt_ms = (time.perf_counter() - t_ckpt) * 1000.0
+
     # Warm table and index pages into shared_buffers
     execute(conn, "SELECT count(*) FROM healthy.usertable")
     execute(conn, "SELECT count(*) FROM damaged.usertable")
     execute(conn, "SELECT count(*) FROM ariabc_internal.merkle_node")
     timings = {
         "healthy_table_ms": (t2 - t1) * 1000.0,
-        "damaged_table_ms": (t3 - t2) * 1000.0,
-        "healthy_indexes_ms": (time.time() - t3) * 1000.0 / 2.0,
-        "damaged_indexes_ms": (time.time() - t3) * 1000.0 / 2.0,
-        "dataset_total_ms": (time.time() - t0) * 1000.0,
+        "damaged_table_ms": (t_pk - t2) * 1000.0,
+        "primary_keys_ms": pk_ms,
+        "healthy_indexes_ms": healthy_indexes_ms,
+        "damaged_indexes_ms": damaged_indexes_ms,
+        "analyze_checkpoint_ms": ckpt_ms,
+        "dataset_total_ms": (time.perf_counter() - t0) * 1000.0,
         "dataset_setup_mode": setup_mode,
     }
     print(f"[dataset] total build_dataset completed in {timings['dataset_total_ms'] / 1000.0:.2f}s", flush=True)
@@ -363,7 +449,7 @@ def expand_dataset(
             f"expansion requires tuple_count > previous count; got {previous_tuple_count} -> {tuple_count}"
         )
 
-    t0 = time.time()
+    t0 = time.perf_counter()
     execute(conn, "SET synchronous_commit = off")
     for schema in ("healthy", "damaged"):
         execute(conn, f"DROP INDEX IF EXISTS {schema}.usertable_merkle_partition_lookup_idx")
@@ -374,7 +460,7 @@ def expand_dataset(
     # scans and preserving the existing catalog-backed tree contract.
     execute(conn, "TRUNCATE ariabc_internal.merkle_node")
 
-    t1 = time.time()
+    t1 = time.perf_counter()
     execute(
         conn,
         """
@@ -388,7 +474,7 @@ def expand_dataset(
         """,
         (previous_tuple_count + 1, tuple_count),
     )
-    t2 = time.time()
+    t2 = time.perf_counter()
     execute(
         conn,
         """
@@ -398,27 +484,29 @@ def expand_dataset(
         """,
         (previous_tuple_count, tuple_count),
     )
-    t3 = time.time()
+    t3 = time.perf_counter()
 
+    t_pk = time.perf_counter()
     finish_bulk_schema(conn, unlogged=False)
+    pk_ms = (time.perf_counter() - t_pk) * 1000.0
 
-    t4 = time.time()
-    create_all_indexes_parallel(conn, split_threshold, merge_threshold, fanout, partitions)
-    t5 = time.time()
+    healthy_indexes_ms, damaged_indexes_ms = create_all_indexes_parallel(conn, split_threshold, merge_threshold, fanout, partitions)
 
-    execute(conn, "ANALYZE healthy.usertable")
-    execute(conn, "ANALYZE damaged.usertable")
+    t_ckpt = time.perf_counter()
     execute(conn, "ANALYZE ariabc_internal.merkle_node")
-    execute(conn, "CHECKPOINT")
+    ckpt_ms = (time.perf_counter() - t_ckpt) * 1000.0
+
     execute(conn, "SELECT count(*) FROM healthy.usertable")
     execute(conn, "SELECT count(*) FROM damaged.usertable")
     execute(conn, "SELECT count(*) FROM ariabc_internal.merkle_node")
     timings = {
         "healthy_table_ms": (t2 - t1) * 1000.0,
         "damaged_table_ms": (t3 - t2) * 1000.0,
-        "healthy_indexes_ms": (t5 - t4) * 1000.0 / 2.0,
-        "damaged_indexes_ms": (t5 - t4) * 1000.0 / 2.0,
-        "dataset_total_ms": (time.time() - t0) * 1000.0,
+        "primary_keys_ms": pk_ms,
+        "healthy_indexes_ms": healthy_indexes_ms,
+        "damaged_indexes_ms": damaged_indexes_ms,
+        "analyze_checkpoint_ms": ckpt_ms,
+        "dataset_total_ms": (time.perf_counter() - t0) * 1000.0,
         "dataset_setup_mode": "incremental-expansion",
         "previous_tuple_count": previous_tuple_count,
         "appended_tuple_count": tuple_count - previous_tuple_count,
@@ -489,7 +577,7 @@ def table_sizes(conn) -> dict[str, int]:
         "base_table_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable'::regclass)")),
         "primary_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_pkey'::regclass)")),
         "merkle_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_merkle_idx'::regclass)")),
-        "leaf_lookup_index_bytes": int(scalar(conn, "SELECT pg_relation_size('healthy.usertable_merkle_partition_lookup_idx'::regclass)")),
+        "leaf_lookup_index_bytes": int(scalar(conn, "SELECT coalesce(pg_relation_size(to_regclass('healthy.usertable_merkle_partition_lookup_idx')), 0)")),
         "total_schema_bytes": int(scalar(conn, "SELECT pg_total_relation_size('healthy.usertable'::regclass)")),
     }
 

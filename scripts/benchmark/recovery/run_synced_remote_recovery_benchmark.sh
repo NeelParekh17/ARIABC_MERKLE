@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+OUT_FILE="$ROOT/out.txt"
+
+# Tee all stdout and stderr live to out.txt at the repository root
+if [[ -z "${RECOVERY_LOG_TEE_ACTIVE:-}" ]]; then
+  export RECOVERY_LOG_TEE_ACTIVE=1
+  : > "$OUT_FILE"
+  exec > >(tee -a "$OUT_FILE") 2> >(tee -a "$OUT_FILE" >&2)
+fi
+
 usage() {
   cat <<'USAGE'
 Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300 [options]
@@ -19,7 +30,7 @@ Options:
   --bad-leaf-count K
   --fanout N                    default: 4
   --geometry-label LABEL
-  --levels-per-batch|--localisation-depth-step N  default: 3 (levels per batch round-trip)
+  --levels-per-batch|--localisation-depth-step N  default: 1 (levels per batch round-trip)
   --partitions|--num-partitions N                default: 200 (number of tree partitions)
   --profiling off|light|deep
   --track-counts on|off      default: on; off removes PostgreSQL stats overhead
@@ -27,6 +38,7 @@ Options:
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
                                default: mixed
+  --synchronous-commit on|off  default: on
   --audit-mode full|skip       default: full
   --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
@@ -56,6 +68,7 @@ FANOUT=""
 GEOMETRY_LABEL=""
 PROFILING="off"
 TRACK_COUNTS="on"
+SYNCHRONOUS_COMMIT="on"
 REPETITIONS=""
 ARTIFACT_MODE="summary"
 CORRUPTION_MODE=""
@@ -91,6 +104,7 @@ while [[ $# -gt 0 ]]; do
     --partitions|--num-partitions) PARTITIONS="${2:?}"; shift 2 ;;
     --profiling) PROFILING="${2:?}"; shift 2 ;;
     --track-counts) TRACK_COUNTS="${2:?}"; shift 2 ;;
+    --synchronous-commit) SYNCHRONOUS_COMMIT="${2:?}"; shift 2 ;;
     --repetitions) REPETITIONS="${2:?}"; shift 2 ;;
     --artifact-mode) ARTIFACT_MODE="${2:?}"; shift 2 ;;
     --corruption-mode) CORRUPTION_MODE="${2:?}"; shift 2 ;;
@@ -141,6 +155,10 @@ case "$TRACK_COUNTS" in
   on|off) ;;
   *) echo "track-counts must be on or off" >&2; exit 2 ;;
 esac
+case "$SYNCHRONOUS_COMMIT" in
+  on|off) ;;
+  *) echo "synchronous-commit must be on or off" >&2; exit 2 ;;
+esac
 case "$EXPERIMENT" in
   ""|figure12|figure13) ;;
   *) echo "experiment must be figure12 or figure13" >&2; exit 2 ;;
@@ -181,8 +199,6 @@ progress() {
     "$(date --iso-8601=seconds)" "$*" >&2
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LOCAL_PYTHON="$ROOT/.venv/bin/python3"
 if [[ ! -x "$LOCAL_PYTHON" ]]; then
   LOCAL_PYTHON="$(command -v python3)"
@@ -450,8 +466,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'" >/dev/null
 progress "remote source and environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q TRACK_COUNTS=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "$TRACK_COUNTS" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q TRACK_COUNTS=%q SYNCHRONOUS_COMMIT=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "$TRACK_COUNTS" "$SYNCHRONOUS_COMMIT" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -808,6 +824,7 @@ BENCH_ARGS=(
   --audit-mode "$AUDIT_MODE"
   --leaf-fetch-batch-size "$LEAF_FETCH_BATCH_SIZE"
   --profiling "$PROFILING"
+  --synchronous-commit "$SYNCHRONOUS_COMMIT"
 )
 BENCH_ARGS+=("${BENCH_REPETITIONS[@]}")
 BENCH_ARGS+=("${BENCH_SELECTORS[@]}")

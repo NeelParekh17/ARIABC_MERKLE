@@ -684,6 +684,7 @@ merkle_node_upper_bound_sql(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(merkle_key_hash_sql);
 PG_FUNCTION_INFO_V1(merkle_partition_for_hash);
+PG_FUNCTION_INFO_V1(merkle_find_spurious_key_sql);
 
 Datum
 merkle_partition_for_hash(PG_FUNCTION_ARGS)
@@ -702,6 +703,88 @@ merkle_partition_for_hash(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT32((int32) (route_value % (uint64) num_partitions));
 }
+
+Datum
+merkle_find_spurious_key_sql(PG_FUNCTION_ARGS)
+{
+	bytea	   *lower_arg = PG_GETARG_BYTEA_PP(0);
+	bytea	   *upper_arg = PG_GETARG_BYTEA_PP(1);
+	int32		partition_id = PG_GETARG_INT32(2);
+	int32		partitions = PG_GETARG_INT32(3);
+	int64		base_offset = PG_GETARG_INT64(4);
+	int32		max_attempts = PG_GETARG_INT32(5);
+
+	uint8		lower[8];
+	uint8		upper[8];
+	blake3_hasher base_hasher;
+	static const uint8 magic[] = {'A', 'R', 'I', 'A', 'R', 'O', 'U', 'T'};
+	int32		i;
+
+	if (VARSIZE_ANY_EXHDR(lower_arg) != 8 || VARSIZE_ANY_EXHDR(upper_arg) != 8)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("merkle_find_spurious_key requires 8-byte lower and upper bounds")));
+
+	if (partitions < 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("merkle_find_spurious_key requires positive partition count")));
+
+	memcpy(lower, VARDATA_ANY(lower_arg), 8);
+	memcpy(upper, VARDATA_ANY(upper_arg), 8);
+
+	/* Pre-initialize fixed header of BLAKE3 hasher for int8 canonical route digest */
+	blake3_hasher_init(&base_hasher);
+	blake3_hasher_update(&base_hasher, magic, sizeof(magic));
+	merkle_hash_uint32(&base_hasher, MERKLE_ROUTE_FORMAT_VERSION); /* 4 */
+	merkle_hash_uint32(&base_hasher, 1); /* nkeys = 1 */
+
+	/* Key 1 schema descriptor */
+	merkle_hash_uint32(&base_hasher, 1); /* attrnum = 1 */
+	merkle_hash_uint32(&base_hasher, 20); /* INT8OID = 20 */
+	merkle_hash_uint32(&base_hasher, -1); /* atttypmod = -1 */
+	{
+		uint8 null_flag = 0;
+		blake3_hasher_update(&base_hasher, &null_flag, 1);
+	}
+	merkle_hash_uint32(&base_hasher, 8); /* key length = 8 bytes */
+
+	for (i = 0; i < max_attempts; i++)
+	{
+		blake3_hasher hasher = base_hasher;
+		uint8 key_bytes[8];
+		uint8 digest[MERKLE_HASH_BYTES];
+		uint64 route_value = 0;
+		int64 candidate = base_offset - i;
+		int p;
+
+		key_bytes[0] = (uint8) ((uint64) candidate >> 56);
+		key_bytes[1] = (uint8) ((uint64) candidate >> 48);
+		key_bytes[2] = (uint8) ((uint64) candidate >> 40);
+		key_bytes[3] = (uint8) ((uint64) candidate >> 32);
+		key_bytes[4] = (uint8) ((uint64) candidate >> 24);
+		key_bytes[5] = (uint8) ((uint64) candidate >> 16);
+		key_bytes[6] = (uint8) ((uint64) candidate >> 8);
+		key_bytes[7] = (uint8) candidate;
+
+		blake3_hasher_update(&hasher, key_bytes, 8);
+		blake3_hasher_finalize(&hasher, digest, MERKLE_HASH_BYTES);
+
+		for (p = 0; p < 8; p++)
+			route_value = (route_value << 8) | digest[p];
+
+		if (partition_id >= 0 && (int32) (route_value % (uint64) partitions) != partition_id)
+			continue;
+
+		if (memcmp(digest, lower, 8) >= 0 && memcmp(digest, upper, 8) <= 0)
+		{
+			PG_RETURN_INT64(candidate);
+		}
+	}
+
+	PG_RETURN_NULL();
+}
+
 
 
 Datum

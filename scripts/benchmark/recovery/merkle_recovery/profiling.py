@@ -181,6 +181,7 @@ class ProfileCollector:
         node_ids: list[bytes],
         max_depth: int,
         partition_ids: list[int] | None = None,
+        prefix_lens: list[int] | None = None,
     ) -> None:
         """Keep exact batch inputs for an untimed post-run EXPLAIN replay."""
         if not self.enabled or stage != "localisation":
@@ -193,6 +194,7 @@ class ProfileCollector:
                 "node_ids": [bytes(node_id) for node_id in node_ids],
                 "max_depth": max_depth,
                 "partition_ids": None if partition_ids is None else [int(value) for value in partition_ids],
+                "prefix_lens": None if prefix_lens is None else [int(value) for value in prefix_lens],
             }
         )
 
