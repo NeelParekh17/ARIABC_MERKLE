@@ -63,6 +63,28 @@ typedef struct MerkleRecoveryProfileStats
 	uint64		tree_path_update_calls;
 	uint64		tree_path_nodes_touched;
 	instr_time	tree_path_update_time;
+
+	/* Granular Commit Teardown Subroutine Microsecond Timings */
+	uint64		commit_total_us;
+	uint64		commit_pre_commit_us;
+	uint64		commit_wal_flush_us;
+	uint64		commit_proc_array_us;
+	uint64		commit_buffers_us;
+	uint64		commit_relcache_us;
+	uint64		commit_inval_us;
+	uint64		commit_locks_us;
+	uint64		commit_guc_us;
+	uint64		commit_memory_us;
+	uint64		commit_remaining_us;
+
+	/* Microsecond Breakdown of RecordTransactionCommit() */
+	uint64		commit_rec_prep_us;
+	uint64		commit_rec_bufmgr_us;
+	uint64		commit_rec_xlog_us;
+	uint64		commit_rec_ts_us;
+	uint64		commit_rec_sync_us;
+	uint64		commit_rec_clog_us;
+	uint64		commit_rec_cleanup_us;
 } MerkleRecoveryProfileStats;
 
 extern uint64 merkle_recovery_profile_reset_generation;
@@ -428,6 +450,7 @@ extern Datum merkle_key_hash_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_node_upper_bound_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_tuple_hash_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_partition_for_hash(PG_FUNCTION_ARGS);
+extern Datum merkle_find_spurious_key_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_until_sql(PG_FUNCTION_ARGS);
 
 #endif /* MERKLE_H */

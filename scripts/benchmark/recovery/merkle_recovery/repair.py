@@ -14,6 +14,7 @@ from .profiling import ProfileCollector, record_call, parse_json_plan
 
 LEAF_LOOKUP_PLAN_INDEXES = (
     "usertable_merkle_partition_lookup_idx",
+    "usertable_merkle_idx",
 )
 
 
@@ -300,15 +301,21 @@ def execute_batched_deletes(
     profiler: ProfileCollector | None = None,
     leaf_id_str: str = "",
     batch_size: int = 500,
+    phase: dict[str, float] | None = None,
 ) -> int:
     if not keys:
         return 0
     total_deleted = 0
     for i in range(0, len(keys), batch_size):
         sub_keys = keys[i:i + batch_size]
+        t_build_0 = time.perf_counter()
         in_sql = ", ".join(["%s"] * len(sub_keys))
         sql = f"DELETE FROM {schema}.usertable WHERE ycsb_key IN ({in_sql})"
         params = tuple(sub_keys)
+        if phase is not None:
+            phase["repair_sql_building_ms"] = phase.get("repair_sql_building_ms", 0.0) + (time.perf_counter() - t_build_0) * 1000.0
+
+        t_exec_0 = time.perf_counter()
         record_call(
             profiler,
             stage="repair",
@@ -317,6 +324,8 @@ def execute_batched_deletes(
             schema=schema,
             fn=lambda sql=sql, params=params: execute(conn, sql, params),
         )
+        if phase is not None:
+            phase["repair_dml_wire_ms"] = phase.get("repair_dml_wire_ms", 0.0) + (time.perf_counter() - t_exec_0) * 1000.0
         total_deleted += len(sub_keys)
     return total_deleted
 
@@ -329,6 +338,7 @@ def execute_batched_inserts(
     profiler: ProfileCollector | None = None,
     leaf_id_str: str = "",
     batch_size: int = 500,
+    phase: dict[str, float] | None = None,
 ) -> int:
     if not keys:
         return 0
@@ -338,6 +348,7 @@ def execute_batched_inserts(
     other_row_pattern = "(" + ", ".join(["%s"] * len(ALL_COLUMNS)) + ")"
     for i in range(0, len(keys), batch_size):
         sub_keys = keys[i:i + batch_size]
+        t_build_0 = time.perf_counter()
         values_sql = ", ".join([first_row_pattern] + [other_row_pattern] * (len(sub_keys) - 1))
         sql = f"INSERT INTO {schema}.usertable ({cols_sql}) VALUES {values_sql}"
         params_list = []
@@ -346,6 +357,10 @@ def execute_batched_inserts(
             params_list.append(k)
             params_list.extend(_db_text(vals[f]) for f in FIELDS)
         params = tuple(params_list)
+        if phase is not None:
+            phase["repair_sql_building_ms"] = phase.get("repair_sql_building_ms", 0.0) + (time.perf_counter() - t_build_0) * 1000.0
+
+        t_exec_0 = time.perf_counter()
         record_call(
             profiler,
             stage="repair",
@@ -354,6 +369,8 @@ def execute_batched_inserts(
             schema=schema,
             fn=lambda sql=sql, params=params: execute(conn, sql, params),
         )
+        if phase is not None:
+            phase["repair_dml_wire_ms"] = phase.get("repair_dml_wire_ms", 0.0) + (time.perf_counter() - t_exec_0) * 1000.0
         total_inserted += len(sub_keys)
     return total_inserted
 
@@ -366,6 +383,7 @@ def execute_batched_updates(
     profiler: ProfileCollector | None = None,
     leaf_id_str: str = "",
     batch_size: int = 500,
+    phase: dict[str, float] | None = None,
 ) -> int:
     if not keys:
         return 0
@@ -376,6 +394,7 @@ def execute_batched_updates(
     other_row_pattern = "(" + ", ".join(["%s"] * len(ALL_COLUMNS)) + ")"
     for i in range(0, len(keys), batch_size):
         sub_keys = keys[i:i + batch_size]
+        t_build_0 = time.perf_counter()
         values_sql = ", ".join([first_row_pattern] + [other_row_pattern] * (len(sub_keys) - 1))
         sql = (
             f"UPDATE {schema}.usertable AS u "
@@ -389,6 +408,10 @@ def execute_batched_updates(
             params_list.append(k)
             params_list.extend(_db_text(vals[f]) for f in FIELDS)
         params = tuple(params_list)
+        if phase is not None:
+            phase["repair_sql_building_ms"] = phase.get("repair_sql_building_ms", 0.0) + (time.perf_counter() - t_build_0) * 1000.0
+
+        t_exec_0 = time.perf_counter()
         record_call(
             profiler,
             stage="repair",
@@ -397,6 +420,8 @@ def execute_batched_updates(
             schema=schema,
             fn=lambda sql=sql, params=params: execute(conn, sql, params),
         )
+        if phase is not None:
+            phase["repair_dml_wire_ms"] = phase.get("repair_dml_wire_ms", 0.0) + (time.perf_counter() - t_exec_0) * 1000.0
         total_updated += len(sub_keys)
     return total_updated
 

@@ -928,7 +928,25 @@ merkle_recovery_profile_stats(PG_FUNCTION_ARGS)
 					 "\"tree_path_update_calls\":%llu,"
 					 "\"tree_path_nodes_touched\":%llu,"
 					 "\"tree_path_update_us\":%llu,"
-					 "\"tree_path_update_ns\":%llu"
+					 "\"tree_path_update_ns\":%llu,"
+					 "\"commit_total_us\":%llu,"
+					 "\"commit_pre_commit_us\":%llu,"
+					 "\"commit_wal_flush_us\":%llu,"
+					 "\"commit_proc_array_us\":%llu,"
+					 "\"commit_buffers_us\":%llu,"
+					 "\"commit_relcache_us\":%llu,"
+					 "\"commit_inval_us\":%llu,"
+					 "\"commit_locks_us\":%llu,"
+					 "\"commit_guc_us\":%llu,"
+					 "\"commit_memory_us\":%llu,"
+					 "\"commit_remaining_us\":%llu,"
+					 "\"commit_rec_prep_us\":%llu,"
+					 "\"commit_rec_bufmgr_us\":%llu,"
+					 "\"commit_rec_xlog_us\":%llu,"
+					 "\"commit_rec_ts_us\":%llu,"
+					 "\"commit_rec_sync_us\":%llu,"
+					 "\"commit_rec_clog_us\":%llu,"
+					 "\"commit_rec_cleanup_us\":%llu"
 					 "}",
 					 MyProcPid,
 					 (unsigned long long) merkle_recovery_profile_reset_generation,
@@ -945,7 +963,25 @@ merkle_recovery_profile_stats(PG_FUNCTION_ARGS)
 					 (unsigned long long) merkle_recovery_profile_state.tree_path_update_calls,
 					 (unsigned long long) merkle_recovery_profile_state.tree_path_nodes_touched,
 					 (unsigned long long) tree_path_update_us,
-					 (unsigned long long) tree_path_update_ns);
+					 (unsigned long long) tree_path_update_ns,
+					 (unsigned long long) merkle_recovery_profile_state.commit_total_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_pre_commit_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_wal_flush_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_proc_array_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_buffers_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_relcache_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_inval_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_locks_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_guc_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_memory_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_remaining_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_rec_prep_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_rec_bufmgr_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_rec_xlog_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_rec_ts_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_rec_sync_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_rec_clog_us,
+					 (unsigned long long) merkle_recovery_profile_state.commit_rec_cleanup_us);
 
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }

@@ -35,36 +35,115 @@ def _find_spurious_key_for_leaf(
     *,
     partition_id: int | None = None,
     partitions: int = 200,
-    batch_size: int = 500_000,
-    max_attempts: int = 50_000_000,
+    **kwargs,
 ) -> int:
-    used_list = list(used_keys) if used_keys else []
-    base_offset = -rng.randint(1, 10_000_000)
-    for i in range(max_attempts // batch_size):
-        chunk_start = base_offset - (i * batch_size)
-        chunk_end = chunk_start - batch_size + 1
+    target_pid = -1 if partition_id is None else partition_id
+    base_offset = -rng.randint(1, 1_000_000_000)
+
+    # 1. Expand search window across up to 100 chunks of 50,000,000 keys each (5B total search space)
+    max_attempts_per_chunk = 50_000_000
+    for _ in range(100):
         rows = execute(
             conn,
             """
-            SELECT c AS candidate
-            FROM generate_series(%s::bigint, %s::bigint, -1) AS c
-            WHERE merkle_key_hash(c) BETWEEN %s AND %s
-              AND (%s::int4 < 0 OR
-                   merkle_partition_for_hash(merkle_key_hash(c), %s) = %s)
-              AND NOT (c = ANY(%s::bigint[]))
-            LIMIT 1
+            SELECT merkle_find_spurious_key(%s::bytea, %s::bytea, %s::int4, %s::int4, %s::bigint, %s::int4) AS candidate
             """,
-            (chunk_start, chunk_end, lower_bound, upper_bound,
-             -1 if partition_id is None else partition_id,
-             partitions, -1 if partition_id is None else partition_id,
-             used_list),
+            (lower_bound, upper_bound, target_pid, partitions, base_offset, max_attempts_per_chunk),
         )
-        if rows:
+        if rows and rows[0]["candidate"] is not None:
             candidate = int(rows[0]["candidate"])
-            used_keys.add(candidate)
-            return candidate
+            if candidate not in used_keys:
+                used_keys.add(candidate)
+                return candidate
+        base_offset -= max_attempts_per_chunk
+
+    # 2. Fallback search loop using direct SQL evaluation
+    curr_key = -rng.randint(1, 10_000_000)
+    for _ in range(500_000):
+        res = execute(
+            conn,
+            """
+            SELECT (merkle_key_hash(%s::bigint) BETWEEN %s AND %s
+                    AND (%s < 0 OR merkle_partition_for_hash(merkle_key_hash(%s::bigint), %s) = %s)) AS match
+            """,
+            (curr_key, lower_bound, upper_bound, target_pid, curr_key, partitions, target_pid),
+        )
+        if res and res[0]["match"]:
+            if curr_key not in used_keys:
+                used_keys.add(curr_key)
+                return curr_key
+        curr_key -= 1
 
     raise RuntimeError("could not find a spurious key mapping to leaf")
+
+
+def _find_existing_keys_for_leaf(
+    conn,
+    lower: bytes,
+    upper: bytes,
+    partition_id: int,
+    partitions: int,
+    tuple_count: int,
+    want: int,
+    rng: random.Random,
+    used_keys: set[int],
+) -> list[int]:
+    target_pid = -1 if partition_id is None else partition_id
+    res: list[int] = []
+
+    # 1. Fast random C-native search
+    max_chunk_attempts = 10_000_000
+    for _ in range(want * 20):
+        base_offset = rng.randint(1, tuple_count)
+        rows = execute(
+            conn,
+            """
+            SELECT merkle_find_spurious_key(%s::bytea, %s::bytea, %s::int4, %s::int4, %s::bigint, %s::int4) AS candidate
+            """,
+            (lower, upper, target_pid, partitions, base_offset, max_chunk_attempts),
+        )
+        if rows and rows[0]["candidate"] is not None:
+            candidate = int(rows[0]["candidate"])
+            if 1 <= candidate <= tuple_count and candidate not in used_keys:
+                res.append(candidate)
+                used_keys.add(candidate)
+                if len(res) == want:
+                    return res
+
+    # 2. Guaranteed B-tree Index Scan fallback on healthy.usertable
+    if len(res) < want:
+        if target_pid >= 0:
+            sql = """
+                SELECT ycsb_key
+                FROM healthy.usertable
+                WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key), %s) = %s
+                  AND merkle_key_hash(ycsb_key) >= %s
+                  AND merkle_key_hash(ycsb_key) <= %s
+                LIMIT %s
+            """
+            params = (partitions, target_pid, lower, upper, (want - len(res)) * 20 + 50)
+        else:
+            sql = """
+                SELECT ycsb_key
+                FROM healthy.usertable
+                WHERE merkle_key_hash(ycsb_key) >= %s
+                  AND merkle_key_hash(ycsb_key) <= %s
+                LIMIT %s
+            """
+            params = (lower, upper, (want - len(res)) * 20 + 50)
+
+        fallback_rows = execute(conn, sql, params)
+        for r in fallback_rows:
+            cand = int(r["ycsb_key"])
+            if 1 <= cand <= tuple_count and cand not in used_keys:
+                res.append(cand)
+                used_keys.add(cand)
+                if len(res) == want:
+                    return res
+
+    if len(res) == want:
+        return res
+    raise RuntimeError(f"could not find {want} existing keys for leaf (found {len(res)})")
 
 
 def choose_corruption_manifest(
@@ -83,23 +162,26 @@ def choose_corruption_manifest(
     
     rng = random.Random(f"{seed}_{tuple_count}_{bad_leaf_count}")
     
-    occ = execute(
-        conn,
-        """
-        SELECT partition_id, node_id, prefix_len, tuple_count
-        FROM ariabc_internal.merkle_node
-        WHERE index_oid = 'healthy.usertable_merkle_idx'::regclass AND is_leaf = true
-        ORDER BY partition_id, prefix_len, node_id
-        """
-    )
-
-    partitions = int(geometry(conn, "healthy").get("partitions", 200))
-    
     c_count = int(corrupted_tuple_count)
     b_count = int(bad_leaf_count)
     base = c_count // b_count
     rem = c_count % b_count
     min_required_rows = base + (1 if rem > 0 else 0)
+
+    occ = execute(
+        conn,
+        """
+        SELECT partition_id, node_id, prefix_len, tuple_count
+        FROM ariabc_internal.merkle_node
+        WHERE index_oid = 'healthy.usertable_merkle_idx'::regclass
+          AND is_leaf = true
+          AND tuple_count >= %s
+        ORDER BY partition_id, prefix_len, node_id
+        """,
+        (min_required_rows,),
+    )
+
+    partitions = int(geometry(conn, "healthy").get("partitions", 200))
 
     # The same node/prefix coordinate exists under every partition root, so
     # partition_id is part of the durable leaf identity.
@@ -145,6 +227,7 @@ def choose_corruption_manifest(
     entries: list[dict[str, Any]] = []
 
     used_spurious_keys: set[int] = set()
+    used_reference_keys: set[int] = set()
 
     for pos, leaf_key in enumerate(leaves):
         want = base + (1 if pos < rem else 0)
@@ -154,23 +237,13 @@ def choose_corruption_manifest(
         lower = bytea_lower_bound(node_id_hex, prefix_len)
         upper = bytea_upper_bound(node_id_hex, prefix_len)
         
-        keys = execute(
-            conn,
-            """
-            SELECT ycsb_key
-            FROM healthy.usertable
-            WHERE merkle_key_hash(ycsb_key) BETWEEN %s AND %s
-              AND merkle_partition_for_hash(merkle_key_hash(ycsb_key), %s) = %s
-            ORDER BY ycsb_key
-            LIMIT %s
-            """,
-            (lower, upper, partitions, partition_id, want),
+        keys = _find_existing_keys_for_leaf(
+            conn, lower, upper, partition_id, partitions, tuple_count, want, rng, used_reference_keys
         )
         if len(keys) < want:
             raise RuntimeError(f"leaf {leaf_key} has {len(keys)} rows, need {want}")
 
-        for row in keys:
-            k = int(row["ycsb_key"])
+        for k in keys:
             op = "update"
             if corruption_mode == "delete-only":
                 op = "delete"
@@ -248,33 +321,38 @@ def choose_corruption_manifest(
 
 
 def validate_manifest_leaf_mapping(conn, manifest: dict[str, Any]) -> None:
-    mismatches: list[dict[str, Any]] = []
-    for entry in manifest["corruptions"]:
+    if not manifest["corruptions"]:
+        return
+
+    partitions = int(manifest.get("partitions", 200))
+    params = []
+    values_clauses = []
+    for idx, entry in enumerate(manifest["corruptions"]):
         check_key = entry["ycsb_key"]
         leaf_spec = entry["leaf_id"]
-        if len(leaf_spec) == 3:
-            partition_id, node_id_hex, prefix_len = int(leaf_spec[0]), leaf_spec[1], int(leaf_spec[2])
-        else:
-            partition_id, node_id_hex, prefix_len = None, leaf_spec[0], int(leaf_spec[1])
-        lower = bytea_lower_bound(node_id_hex, prefix_len)
-        upper = bytea_upper_bound(node_id_hex, prefix_len)
-        
-        actual = scalar(
-            conn,
-            """SELECT merkle_key_hash(%s::bigint) BETWEEN %s AND %s
-                      AND (%s::int4 IS NULL OR
-                           merkle_partition_for_hash(merkle_key_hash(%s::bigint), %s) = %s)""",
-            (check_key, lower, upper, partition_id, check_key,
-             int(manifest.get("partitions", 200)), partition_id),
+        partition_id = int(leaf_spec[0]) if len(leaf_spec) == 3 else -1
+        node_hex = leaf_spec[1] if len(leaf_spec) == 3 else leaf_spec[0]
+        prefix_len = int(leaf_spec[2]) if len(leaf_spec) == 3 else int(leaf_spec[1])
+        lower = bytea_lower_bound(node_hex, prefix_len)
+        upper = bytea_upper_bound(node_hex, prefix_len)
+
+        values_clauses.append(f"(%s::bigint, %s::bytea, %s::bytea, %s::int4, %s::int4)")
+        params.extend([check_key, lower, upper, partition_id, idx])
+
+    sql = f"""
+        WITH items(check_key, lower_b, upper_b, partition_id, idx) AS (
+            VALUES {', '.join(values_clauses)}
         )
-        if not actual:
-            mismatches.append(
-                {
-                    "ycsb_key": check_key,
-                    "op": entry["op"],
-                    "expected": entry["leaf_id"],
-                }
-            )
+        SELECT idx, check_key,
+               (merkle_key_hash(check_key) BETWEEN lower_b AND upper_b
+                AND (partition_id < 0 OR merkle_partition_for_hash(merkle_key_hash(check_key), {partitions}) = partition_id)) AS valid
+        FROM items
+    """
+    rows = execute(conn, sql, tuple(params))
+    mismatches = [
+        manifest["corruptions"][r["idx"]]
+        for r in rows if not r["valid"]
+    ]
     if mismatches:
         raise RuntimeError(
             f"corruption manifest rows do not map to intended leaves: {mismatches[:5]}"
