@@ -180,7 +180,7 @@ def finish_bulk_schema(conn, *, unlogged: bool = False) -> None:
         _prep_and_add_pk(conn, "damaged")
 
 
-def _verify_merkle_index(conn, schema: str, fanout: int, split_threshold: int, merge_threshold: int) -> None:
+def _verify_merkle_index(conn, schema: str, fanout: int, split_threshold: int, merge_threshold: int, partitions: int = 200) -> None:
     """Fail immediately if CREATE INDEX did not create the requested Merkle index."""
     rows = execute(
         conn,
@@ -204,6 +204,7 @@ def _verify_merkle_index(conn, schema: str, fanout: int, split_threshold: int, m
         "fanout": fanout,
         "split_threshold": split_threshold,
         "merge_threshold": merge_threshold,
+        "partitions": partitions,
     }
     if any(actual[key] != value for key, value in expected.items()):
         raise RuntimeError(
@@ -241,13 +242,13 @@ def _create_merkle_am_index(conn, schema: str, split_threshold: int = 32, merge_
             """,
         )
         print(f"  [index] CREATE INDEX USING merkle on {schema} took {time.perf_counter()-t_start:.2f}s", flush=True)
-        _verify_merkle_index(conn, schema, fanout, split_threshold, merge_threshold)
+        _verify_merkle_index(conn, schema, fanout, split_threshold, merge_threshold, partitions)
     finally:
         execute(conn, "SET synchronous_commit = on")
     return (time.perf_counter() - t_start) * 1000.0
 
 
-def _create_lookup_btree_index(conn, schema: str) -> float:
+def _create_lookup_btree_index(conn, schema: str, partitions: int = 200) -> float:
     import time
     t_start = time.perf_counter()
     execute(conn, "SET maintenance_work_mem = '8GB'")
@@ -262,7 +263,7 @@ def _create_lookup_btree_index(conn, schema: str) -> float:
             f"""
             CREATE INDEX usertable_merkle_partition_lookup_idx
             ON {schema}.usertable (
-                merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200),
+                merkle_partition_for_hash(merkle_key_hash(ycsb_key), {partitions}),
                 merkle_key_hash(ycsb_key),
                 ycsb_key
             )
@@ -279,7 +280,7 @@ def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int 
                           fanout: int = 4, partitions: int = 200) -> float:
     _ensure_functions_parallel_safe(conn)
     t1 = _create_merkle_am_index(conn, "healthy", split_threshold, merge_threshold, fanout, partitions)
-    t2 = _create_lookup_btree_index(conn, "healthy")
+    t2 = _create_lookup_btree_index(conn, "healthy", partitions)
     return t1 + t2
 
 
@@ -287,7 +288,7 @@ def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int
                            fanout: int = 4, partitions: int = 200) -> float:
     _ensure_functions_parallel_safe(conn)
     t1 = _create_merkle_am_index(conn, "damaged", split_threshold, merge_threshold, fanout, partitions)
-    t2 = _create_lookup_btree_index(conn, "damaged")
+    t2 = _create_lookup_btree_index(conn, "damaged", partitions)
     return t1 + t2
 
 
@@ -312,8 +313,8 @@ def create_all_indexes_parallel(conn, split_threshold: int = 32, merge_threshold
     if conn1 is not None and conn2 is not None:
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                f1 = executor.submit(_create_lookup_btree_index, conn1, "healthy")
-                f2 = executor.submit(_create_lookup_btree_index, conn2, "damaged")
+                f1 = executor.submit(_create_lookup_btree_index, conn1, "healthy", partitions)
+                f2 = executor.submit(_create_lookup_btree_index, conn2, "damaged", partitions)
                 t_h2 = f1.result()
                 t_d2 = f2.result()
         finally:
@@ -324,8 +325,8 @@ def create_all_indexes_parallel(conn, split_threshold: int = 32, merge_threshold
             conn1.close()
         if conn2 is not None:
             conn2.close()
-        t_h2 = _create_lookup_btree_index(conn, "healthy")
-        t_d2 = _create_lookup_btree_index(conn, "damaged")
+        t_h2 = _create_lookup_btree_index(conn, "healthy", partitions)
+        t_d2 = _create_lookup_btree_index(conn, "damaged", partitions)
 
     return t_h1 + t_h2, t_d1 + t_d2
 

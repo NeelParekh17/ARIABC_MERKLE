@@ -252,6 +252,7 @@ def cv_per_scale(dyn_all: dict[int, list[tuple[int, float]]]) -> dict[int, float
 def save_line(path: Path, x, x_labels, s_vals, d_vals, title, ylabel):
     plt.rcParams.update(PLT_PARAMS)
     fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
+    ax.plot(x, s_vals, label="Static (F32 / L1024)", color=COLOR_STATIC, marker="o", linewidth=2.5, linestyle="--")
     ax.plot(x, d_vals, label="Dynamic (Synchronous Direct)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
     ax.set_title(title)
     ax.set_xlabel("Dataset Size")
@@ -277,13 +278,15 @@ def save_localisation_with_levels(
     fig, ax1 = plt.subplots(figsize=(11, 6), dpi=150)
 
     # Left axis — latency lines
+    ax1.plot(x, s_vals, label="Static (F32 / L1024)",
+             color=COLOR_STATIC, marker="o", linewidth=2.5, linestyle="--")
     ax1.plot(x, d_vals, label="Dynamic (Synchronous Direct)",
              color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
     ax1.set_xlabel("Dataset Size")
     ax1.set_ylabel("Tree Localisation Latency (ms)", color="black")
     ax1.set_xticks(x); ax1.set_xticklabels(x_labels)
     ax1.grid(True, linestyle="--", alpha=0.5)
-    ax1.set_title("Tree Localisation Latency\n"
+    ax1.set_title("Tree Localisation Latency: Static vs Dynamic\n"
                   f"(with {depth_label} — right axis)")
 
     # Right axis — tree depth step line
@@ -324,7 +327,6 @@ def save_localisation_with_levels(
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
-    plt.close(fig)
 
 
 def save_stacked(path: Path, x, x_labels, dyn: dict[int, dict], scales):
@@ -350,8 +352,9 @@ def save_stacked(path: Path, x, x_labels, dyn: dict[int, dict], scales):
 def save_leaf(path: Path, x, x_labels, s_rpl, d_rpl):
     plt.rcParams.update(PLT_PARAMS)
     fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
+    ax.plot(x, s_rpl, label="Static Rows/Leaf (F32 / L1024)", color=COLOR_STATIC, marker="o", linewidth=2.5, linestyle="--")
     ax.plot(x, d_rpl, label="Dynamic Rows/Leaf (Split Threshold=32)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
-    ax.set_title("Leaf Occupancy: Candidate Rows / Bad Leaf Query")
+    ax.set_title("Leaf Occupancy: Candidate Rows / Bad Leaf Query (Static vs Dynamic)")
     ax.set_xlabel("Dataset Size"); ax.set_ylabel("Mean Candidate Rows / Bad Leaf Query")
     ax.set_xticks(x); ax.set_xticklabels(x_labels)
     ax.grid(True, linestyle="--", alpha=0.6)
