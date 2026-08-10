@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import random
+import time
 from typing import Any
 
 from .config import ALL_COLUMNS, FIELDS, leaf_key_json
 from .db import execute, scalar, geometry
 
+_MANIFEST_KEY_CACHE: dict[tuple, dict[str, Any]] = {}
+
+
 def bytea_lower_bound(node_id_hex: str, prefix_len: int) -> bytes:
     return bytes.fromhex(node_id_hex)
+
 
 def bytea_upper_bound(node_id_hex: str, prefix_len: int) -> bytes:
     res = bytearray(bytes.fromhex(node_id_hex))
@@ -26,124 +31,194 @@ def bytea_upper_bound(node_id_hex: str, prefix_len: int) -> bytes:
     return bytes(res)
 
 
-def _find_spurious_key_for_leaf(
+def _batch_find_existing_keys_for_leaves(
     conn,
-    lower_bound: bytes,
-    upper_bound: bytes,
-    rng: random.Random,
-    used_keys: set[int],
-    *,
-    partition_id: int | None = None,
-    partitions: int = 200,
-    **kwargs,
-) -> int:
-    target_pid = -1 if partition_id is None else partition_id
-    base_offset = -rng.randint(1, 1_000_000_000)
-
-    # 1. Expand search window across up to 100 chunks of 50,000,000 keys each (5B total search space)
-    max_attempts_per_chunk = 50_000_000
-    for _ in range(100):
-        rows = execute(
-            conn,
-            """
-            SELECT merkle_find_spurious_key(%s::bytea, %s::bytea, %s::int4, %s::int4, %s::bigint, %s::int4) AS candidate
-            """,
-            (lower_bound, upper_bound, target_pid, partitions, base_offset, max_attempts_per_chunk),
-        )
-        if rows and rows[0]["candidate"] is not None:
-            candidate = int(rows[0]["candidate"])
-            if candidate not in used_keys:
-                used_keys.add(candidate)
-                return candidate
-        base_offset -= max_attempts_per_chunk
-
-    # 2. Fallback search loop using direct SQL evaluation
-    curr_key = -rng.randint(1, 10_000_000)
-    for _ in range(500_000):
-        res = execute(
-            conn,
-            """
-            SELECT (merkle_key_hash(%s::bigint) BETWEEN %s AND %s
-                    AND (%s < 0 OR merkle_partition_for_hash(merkle_key_hash(%s::bigint), %s) = %s)) AS match
-            """,
-            (curr_key, lower_bound, upper_bound, target_pid, curr_key, partitions, target_pid),
-        )
-        if res and res[0]["match"]:
-            if curr_key not in used_keys:
-                used_keys.add(curr_key)
-                return curr_key
-        curr_key -= 1
-
-    raise RuntimeError("could not find a spurious key mapping to leaf")
-
-
-def _find_existing_keys_for_leaf(
-    conn,
-    lower: bytes,
-    upper: bytes,
-    partition_id: int,
+    leaf_requests: list[dict[str, Any]],
     partitions: int,
     tuple_count: int,
-    want: int,
     rng: random.Random,
-    used_keys: set[int],
-) -> list[int]:
-    target_pid = -1 if partition_id is None else partition_id
-    res: list[int] = []
+) -> dict[int, list[int]]:
+    """Batch fetch existing keys from healthy.usertable for all requested leaves using 1 LATERAL index query."""
+    if not leaf_requests:
+        return {}
 
-    # 1. Fast random C-native search
-    max_chunk_attempts = 10_000_000
-    for _ in range(want * 20):
-        base_offset = rng.randint(1, tuple_count)
-        rows = execute(
-            conn,
-            """
-            SELECT merkle_find_spurious_key(%s::bytea, %s::bytea, %s::int4, %s::int4, %s::bigint, %s::int4) AS candidate
-            """,
-            (lower, upper, target_pid, partitions, base_offset, max_chunk_attempts),
+    values_clauses = []
+    params = []
+    for req in leaf_requests:
+        values_clauses.append("(%s::int4, %s::int4, %s::bytea, %s::bytea, %s::int4)")
+        params.extend([
+            req["leaf_idx"],
+            req["partition_id"] if req["partition_id"] is not None and req["partition_id"] >= 0 else 0,
+            req["lower"],
+            req["upper"],
+            req["want"],
+        ])
+
+    sql = f"""
+        WITH targets(leaf_idx, pid, lower_b, upper_b, want) AS (
+            VALUES {', '.join(values_clauses)}
         )
-        if rows and rows[0]["candidate"] is not None:
-            candidate = int(rows[0]["candidate"])
-            if 1 <= candidate <= tuple_count and candidate not in used_keys:
-                res.append(candidate)
-                used_keys.add(candidate)
-                if len(res) == want:
-                    return res
+        SELECT t.leaf_idx, u.ycsb_key
+        FROM targets t
+        CROSS JOIN LATERAL (
+            SELECT ycsb_key
+            FROM healthy.usertable
+            WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key), {int(partitions)}) = t.pid
+              AND merkle_key_hash(ycsb_key) >= t.lower_b
+              AND merkle_key_hash(ycsb_key) <= t.upper_b
+            LIMIT t.want * 10 + 20
+        ) u
+    """
+    rows = execute(conn, sql, tuple(params))
 
-    # 2. Guaranteed B-tree Index Scan fallback on healthy.usertable
-    if len(res) < want:
-        if target_pid >= 0:
-            sql = """
-                SELECT ycsb_key
-                FROM healthy.usertable
-                WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key), %s) = %s
-                  AND merkle_key_hash(ycsb_key) >= %s
-                  AND merkle_key_hash(ycsb_key) <= %s
-                LIMIT %s
-            """
-            params = (partitions, target_pid, lower, upper, (want - len(res)) * 20 + 50)
+    leaf_keys_map: dict[int, list[int]] = {req["leaf_idx"]: [] for req in leaf_requests}
+    for r in rows:
+        idx = int(r["leaf_idx"])
+        key = int(r["ycsb_key"])
+        if 1 <= key <= tuple_count:
+            if key not in leaf_keys_map[idx]:
+                leaf_keys_map[idx].append(key)
+
+    final_map: dict[int, list[int]] = {}
+    used_global_keys: set[int] = set()
+
+    for req in leaf_requests:
+        idx = req["leaf_idx"]
+        want = req["want"]
+        found = [k for k in leaf_keys_map[idx] if k not in used_global_keys]
+
+        if len(found) < want:
+            pid = req["partition_id"]
+            lower = req["lower"]
+            upper = req["upper"]
+            if pid is not None and pid >= 0:
+                fallback_sql = f"""
+                    SELECT ycsb_key FROM healthy.usertable
+                    WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key), {int(partitions)}) = %s
+                      AND merkle_key_hash(ycsb_key) >= %s AND merkle_key_hash(ycsb_key) <= %s
+                    LIMIT %s
+                """
+                fallback_params = (pid, lower, upper, (want - len(found)) * 20 + 50)
+            else:
+                fallback_sql = """
+                    SELECT ycsb_key FROM healthy.usertable
+                    WHERE merkle_key_hash(ycsb_key) >= %s AND merkle_key_hash(ycsb_key) <= %s
+                    LIMIT %s
+                """
+                fallback_params = (lower, upper, (want - len(found)) * 20 + 50)
+
+            f_rows = execute(conn, fallback_sql, fallback_params)
+            for r in f_rows:
+                k = int(r["ycsb_key"])
+                if 1 <= k <= tuple_count and k not in used_global_keys and k not in found:
+                    found.append(k)
+                    if len(found) >= want:
+                        break
+
+        if len(found) < want:
+            raise RuntimeError(f"could not find {want} existing keys for leaf idx {idx} (found {len(found)})")
+
+        if len(found) > want:
+            rng.shuffle(found)
+            selected = found[:want]
         else:
-            sql = """
-                SELECT ycsb_key
-                FROM healthy.usertable
-                WHERE merkle_key_hash(ycsb_key) >= %s
-                  AND merkle_key_hash(ycsb_key) <= %s
-                LIMIT %s
+            selected = found
+
+        for k in selected:
+            used_global_keys.add(k)
+        final_map[idx] = selected
+
+    return final_map
+
+
+def _batch_find_spurious_keys(
+    conn,
+    spurious_requests: list[dict[str, Any]],
+    partitions: int,
+    rng: random.Random,
+) -> dict[int, int]:
+    """Batch compute spurious keys in parallel using PostgreSQL C function merkle_find_spurious_key."""
+    if not spurious_requests:
+        return {}
+
+    dsn = None
+    try:
+        if hasattr(conn, "info") and hasattr(conn.info, "dsn"):
+            dsn = conn.info.dsn
+    except Exception:
+        dsn = None
+
+    num_workers = min(16, len(spurious_requests))
+    chunk_size = (len(spurious_requests) + num_workers - 1) // num_workers
+    request_chunks = [
+        spurious_requests[i : i + chunk_size]
+        for i in range(0, len(spurious_requests), chunk_size)
+    ]
+
+    def _worker(sub_requests: list[dict[str, Any]]) -> dict[int, int]:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        local_conn = None
+        try:
+            if dsn:
+                local_conn = psycopg.connect(dsn, autocommit=True, row_factory=dict_row)
+                with local_conn.cursor() as cur:
+                    cur.execute("SET enable_merkle_index = on")
+                    cur.execute("SET max_parallel_workers_per_gather = 0")
+                use_conn = local_conn
+            else:
+                use_conn = conn
+
+            values_clauses = []
+            params = []
+            max_attempts = 200_000_000
+
+            for req in sub_requests:
+                item_idx = req["item_idx"]
+                base_offset = (item_idx + 1) * 1_000_000_000
+                values_clauses.append("(%s::int4, %s::bytea, %s::bytea, %s::int4, %s::bigint, %s::int4)")
+                params.extend([
+                    item_idx,
+                    req["lower"],
+                    req["upper"],
+                    req["partition_id"] if req["partition_id"] is not None else -1,
+                    base_offset,
+                    max_attempts,
+                ])
+
+            sql = f"""
+                WITH targets(item_idx, lower_b, upper_b, target_pid, base_offset, max_attempts) AS (
+                    VALUES {', '.join(values_clauses)}
+                )
+                SELECT t.item_idx,
+                       merkle_find_spurious_key(t.lower_b, t.upper_b, t.target_pid, {int(partitions)}, t.base_offset, t.max_attempts) AS candidate
+                FROM targets t
             """
-            params = (lower, upper, (want - len(res)) * 20 + 50)
+            rows = execute(use_conn, sql, tuple(params))
+            res: dict[int, int] = {}
+            for r in rows:
+                if r["candidate"] is not None:
+                    res[int(r["item_idx"])] = int(r["candidate"])
+            return res
+        finally:
+            if local_conn is not None and dsn:
+                local_conn.close()
 
-        fallback_rows = execute(conn, sql, params)
-        for r in fallback_rows:
-            cand = int(r["ycsb_key"])
-            if 1 <= cand <= tuple_count and cand not in used_keys:
-                res.append(cand)
-                used_keys.add(cand)
-                if len(res) == want:
-                    return res
+    final_res: dict[int, int] = {}
+    if dsn and num_workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(_worker, chunk) for chunk in request_chunks]
+            for f in futures:
+                final_res.update(f.result())
+    else:
+        final_res = _worker(spurious_requests)
 
-    if len(res) == want:
-        return res
-    raise RuntimeError(f"could not find {want} existing keys for leaf (found {len(res)})")
+    if len(final_res) < len(spurious_requests):
+        raise RuntimeError(f"could not find spurious key for all items (got {len(final_res)}/{len(spurious_requests)})")
+
+    return final_res
 
 
 def choose_corruption_manifest(
@@ -159,15 +234,29 @@ def choose_corruption_manifest(
     *args,
     **kwargs,
 ) -> dict[str, Any]:
+
+    cache_key = (
+        tuple_count,
+        fanout,
+        bad_leaf_count,
+        corrupted_tuple_count,
+        seed,
+        corruption_mode,
+        tuple(tuple(x) for x in forced_bad_leaves) if forced_bad_leaves is not None else None,
+    )
+    if cache_key in _MANIFEST_KEY_CACHE:
+        return dict(_MANIFEST_KEY_CACHE[cache_key])
     
     rng = random.Random(f"{seed}_{tuple_count}_{bad_leaf_count}")
     
+    t0 = time.perf_counter()
     c_count = int(corrupted_tuple_count)
     b_count = int(bad_leaf_count)
     base = c_count // b_count
     rem = c_count % b_count
     min_required_rows = base + (1 if rem > 0 else 0)
 
+    t_occ0 = time.perf_counter()
     occ = execute(
         conn,
         """
@@ -180,11 +269,10 @@ def choose_corruption_manifest(
         """,
         (min_required_rows,),
     )
+    t_occ = (time.perf_counter() - t_occ0) * 1000.0
 
     partitions = int(geometry(conn, "healthy").get("partitions", 200))
 
-    # The same node/prefix coordinate exists under every partition root, so
-    # partition_id is part of the durable leaf identity.
     occ_map = {}
     for r in occ:
         partition_id = int(r["partition_id"])
@@ -201,8 +289,6 @@ def choose_corruption_manifest(
     eligible = [k for k, v in occ_map.items() if v["count"] >= min_required_rows]
 
     if forced_bad_leaves is not None:
-        # Accept old [node_id_hex, prefix_len] and canonical
-        # [partition_id, node_id_hex, prefix_len] coordinates.
         leaves = []
         for x in forced_bad_leaves:
             if len(x) == 3:
@@ -224,11 +310,8 @@ def choose_corruption_manifest(
 
     selected_leaf_capacities = {leaf: occ_map[leaf]["count"] for leaf in leaves}
     selected_bad_leaf_row_capacity = sum(selected_leaf_capacities.values())
-    entries: list[dict[str, Any]] = []
 
-    used_spurious_keys: set[int] = set()
-    used_reference_keys: set[int] = set()
-
+    leaf_requests = []
     for pos, leaf_key in enumerate(leaves):
         want = base + (1 if pos < rem else 0)
         node_id_hex = occ_map[leaf_key]["node_id"]
@@ -236,39 +319,90 @@ def choose_corruption_manifest(
         partition_id = occ_map[leaf_key]["partition_id"]
         lower = bytea_lower_bound(node_id_hex, prefix_len)
         upper = bytea_upper_bound(node_id_hex, prefix_len)
-        
-        keys = _find_existing_keys_for_leaf(
-            conn, lower, upper, partition_id, partitions, tuple_count, want, rng, used_reference_keys
-        )
-        if len(keys) < want:
-            raise RuntimeError(f"leaf {leaf_key} has {len(keys)} rows, need {want}")
+        leaf_requests.append({
+            "leaf_idx": pos,
+            "leaf_key": leaf_key,
+            "partition_id": partition_id,
+            "node_id_hex": node_id_hex,
+            "prefix_len": prefix_len,
+            "lower": lower,
+            "upper": upper,
+            "want": want,
+        })
+
+    t_exist0 = time.perf_counter()
+    existing_keys_map = _batch_find_existing_keys_for_leaves(
+        conn, leaf_requests, partitions, tuple_count, rng
+    )
+    t_exist = (time.perf_counter() - t_exist0) * 1000.0
+
+    spurious_requests = []
+    entry_prep = []
+
+    for req in leaf_requests:
+        pos = req["leaf_idx"]
+        keys = existing_keys_map[pos]
+        partition_id = req["partition_id"]
+        node_id_hex = req["node_id_hex"]
+        prefix_len = req["prefix_len"]
+        lower = req["lower"]
+        upper = req["upper"]
 
         for k in keys:
+            global_entry_index = len(entry_prep)
             op = "update"
             if corruption_mode == "delete-only":
                 op = "delete"
             elif corruption_mode == "insert-only":
                 op = "insert"
             elif corruption_mode == "mixed":
-                global_entry_index = len(entries)
                 op = ("update", "delete", "insert")[global_entry_index % 3]
 
-            if op == "insert":
-                entry_key = _find_spurious_key_for_leaf(
-                    conn, lower, upper, rng, used_spurious_keys,
-                    partition_id=partition_id, partitions=partitions,
-                )
-            else:
-                entry_key = k
+            item_idx = len(entry_prep)
+            prep_info = {
+                "leaf_id": [partition_id, node_id_hex, prefix_len],
+                "op": op,
+                "reference_key": k,
+                "lower": lower,
+                "upper": upper,
+                "partition_id": partition_id,
+            }
+            entry_prep.append(prep_info)
 
-            entries.append(
-                {
-                    "leaf_id": [partition_id, node_id_hex, prefix_len],
-                    "ycsb_key": entry_key,
-                    "op": op,
-                    "reference_key": k,
-                }
-            )
+            if op == "insert":
+                base_offset = (item_idx + 1) * 10_000_000
+                spurious_requests.append({
+                    "item_idx": item_idx,
+                    "lower": lower,
+                    "upper": upper,
+                    "partition_id": partition_id,
+                    "base_offset": base_offset,
+                })
+
+    t_spur0 = time.perf_counter()
+    spurious_keys_map = _batch_find_spurious_keys(conn, spurious_requests, partitions, rng)
+    t_spur = (time.perf_counter() - t_spur0) * 1000.0
+
+    print(
+        f"  [manifest profile] occ={t_occ:.1f}ms exist={t_exist:.1f}ms (reqs={len(leaf_requests)}) spur={t_spur:.1f}ms (reqs={len(spurious_requests)}) total={(time.perf_counter()-t0)*1000.0:.1f}ms",
+        flush=True,
+    )
+
+    entries: list[dict[str, Any]] = []
+    for item_idx, prep in enumerate(entry_prep):
+        op = prep["op"]
+        ref_key = prep["reference_key"]
+        if op == "insert":
+            entry_key = spurious_keys_map[item_idx]
+        else:
+            entry_key = ref_key
+
+        entries.append({
+            "leaf_id": prep["leaf_id"],
+            "ycsb_key": entry_key,
+            "op": op,
+            "reference_key": ref_key,
+        })
 
     import hashlib
     import json
