@@ -1,0 +1,211 @@
+**Speaker 1 (Student):** In the last two days what we discussed, right, there was a dip over this 30 million or around, from 25. So I did more points, did between this range and found that here for each individual leaf the number of rows are falling over here from 14 to 12.
+
+**Speaker 2 (Professor):** Mm.
+
+**Speaker 1:** So that is causing this overall candidate row... latency to drop here also, from 43 to 30, which is why latency dropped. And I've also calculated the leaf row—total number of leaves over that period of time.
+
+**Speaker 2:** Yeah.
+
+**Speaker 1:** So...
+
+**Speaker 2:** There's a clear jump.
+
+**Speaker 1:** Yes, there's a clear jump.
+
+**Speaker 2:** That's a good explanation. The splits are kind of coordinated.
+
+**Speaker 1:** Yes. So here it's 18 rows per leaf, and here it's 14 rows per leaf. And here it got reduced to 12. So that's why we're seeing less latency.
+
+**Speaker 2:** Right, so it went from 18 to 12.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** These are random or sorted in some way? No, it's a hash, so it should be random.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Yeah, this... is there a way of fixing this? It has to be deterministic, so postponing for some has to be uniform across all of this.
+
+**Speaker 1:** Mm. Why would we postpone?
+
+**Speaker 2:** So this... What is happening here? You keep inserting, it's uniformly distributed. At some point all of them get full and everything splits.
+
+**Speaker 1:** Everything splits, yes.
+
+**Speaker 2:** So there's a jump. There's a sudden change in performance. So it is... In general, it will reflect during normal execution. It'll slow down at that point because a lot of splits are happening. Have you done the experiment on normal execution?
+
+**Speaker 1:** No.
+
+**Speaker 2:** Do that. That will give us an idea of what is happening there also.
+
+**Speaker 1:** Normal execution for these many tuples?
+
+**Speaker 2:** Yeah, when you are running the whole system in the normal mode.
+
+**Speaker 1:** Like when we do YCSB workload, that is only 12,000 or 20,000 transactions.
+
+**Speaker 2:** No, do larger transactions.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** Plus, YCSB does not do update...
+
+**Speaker 1:** It does very, very less updates.
+
+**Speaker 2:** Yeah, you can do with update. So what you've shown here is the time for... So we're inserting things into this Merkle tree...
+
+**Speaker 1:** Mm-hm.
+
+**Speaker 2:** What about the time for each of these things?
+
+**Speaker 1:** Time as in?
+
+**Speaker 2:** So what did you measure here? You measured...
+
+**Speaker 1:** Okay, so no, this is...
+
+**Speaker 2:** Not the row count, I know.
+
+**Speaker 1:** Okay, it's round here.
+
+**Speaker 2:** So what all have you measured?
+
+**Speaker 1:** So the fetching latency...
+
+**Speaker 2:** This is split latency. But what about creation of the tree itself? When you insert, how much time does it take to insert each row?
+
+**Speaker 1:** Okay, so that is measured in...
+
+*(Phone rings)*
+
+**Speaker 2:** Hello? Yeah. Hi Satya, yeah, tell me. Yes. Yes, yes. Yeah, so did you check if Professor Vinay is there? He's coordinating. Yeah. Yeah, yeah, so I'm happy to be there. I'm free and I mean I'm meeting a student, but I can take time off whenever you want. Yeah. Yeah, sure, fine. I think this is critical, I can push student meeting as required. So Vinay is also there, right? Yeah, yeah, but he should be there. Yeah, sure. So we can meet in my room, it is fine. Two of you are coming, right? Fine. Yeah, just check with Vinay and just come to my cabin. Okay, yeah.
+
+*(Phone call ends)*
+
+**Speaker 1:** I measured the overall time for creating the entire data set.
+
+**Speaker 2:** Yeah.
+
+**Speaker 1:** It's in seconds.
+
+**Speaker 2:** Okay, so this is fine, it is reasonably smooth. It's not... The logarithmic aspect is shown here, this is okay. It's to be expected. It's not a straight line.
+
+**Speaker 1:** Yes, and here... So how I'm building data set is like... so I have created up to 1 million. Now I am adding 2 million more rows. So I kept intact that table, adding 2 million more rows, but dropping the Merkle index and creating the index again.
+
+**Speaker 2:** Mm.
+
+**Speaker 1:** So tables is created as an incremental way and Merkle index is dropping and creating again.
+
+**Speaker 2:** No, but this is the time for...
+
+**Speaker 1:** Entire thing.
+
+**Speaker 2:** What do you mean entire thing?
+
+**Speaker 1:** Entire table plus index, all creation.
+
+**Speaker 2:** But if you're dropping and recreating the Merkle index, that is not the right way of doing it. In reality, that will not happen, right? Why would you drop the Merkle index? You start with a Merkle index and keep inserting, and so you should get the timing as you keep inserting—the cumulative time.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** Why would you drop the Merkle index and recreate it? I didn't follow that.
+
+**Speaker 1:** No, I thought that every time we are changing the entire mechanism for index, so I dropped...
+
+**Speaker 2:** What do you mean mechanism? I didn't get it.
+
+**Speaker 1:** So till now I have a benchmark for 1 million, so now we are changing to 3 million, so that's why...
+
+**Speaker 2:** Yeah, but the point is this number should be total time for inserting 3 million, 5 million. So you just keep inserting without dropping index or anything, and get the times at the various stages.
+
+**Speaker 1:** Okay, but so that will be more time because... so for... okay, so that's why I did, because like, while creating Merkle index, if I...
+
+**Speaker 2:** See, this can be just for the Merkle index, forget everything else. Forget tuple insertion time. Just that will work. Just for the Merkle index.
+
+**Speaker 1:** No, I am saying that only. So if I had kept Merkle index till here, and if I am inserting 2 million more rows into table, so each insertion will also create an insertion in Merkle index also. And that was taking more time compared to dropping and creating index.
+
+**Speaker 2:** No, no, no, no. The way we have to measure the actual Merkle thing... So the point is this, right? That B-tree with random insertion gets screwed up. But that is kind of known. So the assumption is in a steady data set the rates will... Okay, so... So how do you create the Merkle index from scratch? You're sorting and doing something? Sorting on the hash and...
+
+**Speaker 1:** Yes, yes, bulk loading is there of entire...
+
+**Speaker 2:** Okay, I get what you're saying. That's why... I see where you're coming from. But in the real life that will not happen. In the real life, you have a secondary index, it's there. That's it. It'll be rate limited by that. And we also know if you are adding millions of rows like this, it will take time.
+
+**Speaker 1:** Yes, it was taking time, that's why...
+
+**Speaker 2:** Yeah, but that is not meaningful for us. You're doing bulk loading of Merkle tree, but who's going to do bulk loading of... That is also useful for a different goal. When you are bulk loading the data set, you bulk load the Merkle tree, which will happen automatically.
+
+**Speaker 1:** Mm-hm.
+
+**Speaker 2:** But in a normal execution, you're not doing the bulk load. If this is an issue, then you should be using this thing, what is it called... write-optimized LSM tree.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** LSM tree. So that is a different challenge, which Merkle tree does not directly address. What is an LSM Merkle tree? I don't think that is a thing. We'll have to think about it, but that's not a thing.
+
+**Speaker 1:** Mm-hm.
+
+**Speaker 2:** So let's not worry about that. So this is what we need to worry about.
+
+**Speaker 1:** Actually that it would be... 50 million was taking so much time.
+
+**Speaker 2:** Don't do 50 million! Who asked you to do 50 million?
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** Do up to 10 million. You could also do the incremental thing, right? So if you already have 10 million rows, now you're adding 2 million rows, what is the incremental time? This is the cumulative time for rebuilding the whole index.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Right. But I think that's not an issue. We know that things will slow down, so what we want to do is do the normal insertion. Oh, but then there has to be some index. So if you have no index, insertion will be very fast, and the moment you create a Merkle tree you're creating a secondary index, things will slow down.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** But that's not a... We can't help it. That structure demands that. So we'll do experiments with smaller number of rows.
+
+**Speaker 1:** As far as I remember at 10 million...
+
+**Speaker 2:** So how did you do bulk load on that? Did you have to special case that or it just worked?
+
+**Speaker 1:** No, it just worked.
+
+**Speaker 2:** Because it is an index on a function?
+
+**Speaker 1:** No, not because of that. So what we do is that we fetch all of the million million rows. If you fetch up to this many rows, then we will bulk insert in index like that way.
+
+**Speaker 2:** So what do you mean bound?
+
+**Speaker 1:** I have mentioned that fetch this many rows first of all, then insert into Merkle index in sorted order like...
+
+**Speaker 2:** How did you do that? You manually did the sort?
+
+**Speaker 1:** Yes, yes, yes.
+
+**Speaker 2:** So you sorted on the index...
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Yeah, no, that's okay, that is a bulk loading thing. But for Merkle tree the point is individual ones have to be there. You can't bulk load it in normal operation. That is only for loading the data set, which is a separate issue. Supposing you drop the Merkle index, load the data set, create the Merkle index, then it will automatically do it. So you can measure that timing separately. So supposing you have 10 million rows, and you're creating the Merkle index for the first time on this using the built-in thing, then Postgres itself will handle those issues.
+
+**Speaker 1:** For Merkle index...
+
+**Speaker 2:** Not for Merkle index, Merkle is a record insertion. But the index I mean the B-tree index.
+
+**Speaker 1:** Yes.
+
+**Speaker 2:** Row inserts anyway are as they are. So the B-tree index part will be optimized. Row inserts are anyway, it's a heap, it just goes in whatever order, so that is not a problem. The slowdown would almost surely be because of the B+ tree. Because if you are going to 50 million rows and you are beyond the buffer size, that's a standard B+ tree bulk load... If you don't bulk load, if you do a series of insertions, it slows down. We know that.
+
+**Speaker 1:** Mm.
+
+**Speaker 2:** And there's nothing we can do about it because we need the hash at the root of the Merkle tree for a transaction. We cannot postpone it like this. So we have to live with it. And in reality there are many secondary indices. So in the paper we can talk about this. Yeah, come in.
+
+*(Door opens)*
+
+**Speaker 2:** Okay, I'll continue with you later. Can you come after 30 minutes?
+
+**Speaker 1:** Is Vinay here?
+
+**Third Speaker:** He just left. I called him.
+
+**Speaker 2:** Oh, he just left.
+
+*(Student leaves room; ambient corridor sounds and conversation)*
