@@ -67,6 +67,8 @@ def warm_medians(runs: list[dict], phase_rows: list[dict]) -> dict[int, dict]:
         "fetch":  ["candidate_row_fetch_ms", "candidate_row_fetch"],
         "cmp":    ["row_comparison_ms", "row_comparison"],
         "repair": ["repair_write_ms", "repair_write"],
+        "dml_wire": ["repair_dml_wire_ms", "repair_dml_wire"],
+        "commit_wire": ["repair_commit_wire_ms", "repair_commit_wire"],
         "conf":   ["targeted_post_repair_confirmation_ms", "targeted_post_repair_confirmation"],
         "total":  ["restore_repair_ms"],
         "rpl":    ["mean_rows_per_bad_leaf"],
@@ -150,6 +152,14 @@ def save_localisation_with_levels(
 
     ax1.plot(x, old_vals, label=old_label, color=COLOR_OLD, marker="o", linewidth=2.2, linestyle="--")
     ax1.plot(x, new_vals, label=new_label, color=COLOR_NEW, marker="s", linewidth=2.5)
+    for xi, val in zip(x, new_vals):
+        if not math.isnan(val):
+            ax1.annotate(f"{val:.1f}", (xi, val), textcoords="offset points", xytext=(0, 7),
+                         ha="center", fontsize=8.5, fontweight="bold", color=COLOR_NEW)
+    for xi, val in zip(x, old_vals):
+        if not math.isnan(val):
+            ax1.annotate(f"{val:.1f}", (xi, val), textcoords="offset points", xytext=(0, -13),
+                         ha="center", fontsize=8.5, color=COLOR_OLD)
     ax1.set_xlabel("Dataset Size")
     ax1.set_ylabel("Tree Localisation Latency (ms)", color="black")
     ax1.set_xticks(x); ax1.set_xticklabels(x_labels)
@@ -199,6 +209,14 @@ def save_comparison_line(path: Path, x, x_labels, old_vals, new_vals, title, yla
     fig, ax = plt.subplots(figsize=(11, 6), dpi=150)
     ax.plot(x, old_vals, label=old_label, color=COLOR_OLD, marker="o", linewidth=2.2, linestyle="--")
     ax.plot(x, new_vals, label=new_label, color=COLOR_NEW, marker="s", linewidth=2.5)
+    for xi, val in zip(x, new_vals):
+        if not math.isnan(val):
+            ax.annotate(f"{val:.1f}", (xi, val), textcoords="offset points", xytext=(0, 7),
+                        ha="center", fontsize=8.5, fontweight="bold", color=COLOR_NEW)
+    for xi, val in zip(x, old_vals):
+        if not math.isnan(val):
+            ax.annotate(f"{val:.1f}", (xi, val), textcoords="offset points", xytext=(0, -13),
+                        ha="center", fontsize=8.5, color=COLOR_OLD)
     ax.set_title(title)
     ax.set_xlabel("Dataset Size")
     ax.set_ylabel(ylabel)
@@ -220,8 +238,8 @@ def save_stacked_side_by_side(path: Path, x, x_labels, old_med: dict[int, dict],
     b1 = np.zeros(len(scales))
     b2 = np.zeros(len(scales))
     for key, lbl, col in zip(keys, labels, colors):
-        v1 = np.nan_to_num(np.array([old_med[tc].get(key, float("nan")) for tc in scales]))
-        v2 = np.nan_to_num(np.array([new_med[tc].get(key, float("nan")) for tc in scales]))
+        v1 = np.nan_to_num(np.array([old_med.get(tc, {}).get(key, float("nan")) for tc in scales]))
+        v2 = np.nan_to_num(np.array([new_med.get(tc, {}).get(key, float("nan")) for tc in scales]))
         ax1.bar(x, v1, 0.55, bottom=b1, label=lbl, color=col)
         ax2.bar(x, v2, 0.55, bottom=b2, label=lbl, color=col)
         b1 += v1
@@ -334,11 +352,21 @@ def main():
         ("row_comparison_comparison.png",    "cmp",    f"Row Comparison Latency: {old_label} vs {new_label}",       "Row Comparison Latency (ms)"),
         ("repair_write_comparison.png",      "repair", f"Repair Write Latency: {old_label} vs {new_label}",         "Repair Write Latency (ms)"),
         ("post_repair_confirmation_comparison.png", "conf", f"Post-Repair Confirmation: {old_label} vs {new_label}", "Confirmation Latency (ms)"),
-        ("leaf_occupancy_scaling.png",       "rpl",    f"Leaf Occupancy Scaling: {old_label} vs {new_label}",       "Mean Candidate Rows / Bad Leaf"),
     ]
 
     for fname, key, title, ylabel in specs:
         save_comparison_line(plots_dir / fname, x, x_labels, ov(key), nv(key), title, ylabel, old_label=old_label, new_label=new_label)
+
+    # Leaf Occupancy per schema
+    ov_rpl_schema = [v / 2.0 if not math.isnan(v) else float("nan") for v in ov("rpl")]
+    nv_rpl_schema = [v / 2.0 if not math.isnan(v) else float("nan") for v in nv("rpl")]
+    save_comparison_line(
+        plots_dir / "leaf_occupancy_scaling.png",
+        x, x_labels, ov_rpl_schema, nv_rpl_schema,
+        f"Physical Leaf Occupancy per Schema: {old_label} vs {new_label}",
+        "Physical Rows / Bad Leaf (Per Schema)",
+        old_label=old_label, new_label=new_label
+    )
 
     # Custom Tree Localisation with right-axis levels
     save_localisation_with_levels(
@@ -381,11 +409,16 @@ def main():
     for tc in scales:
         o = old_med.get(tc, {}).get("total", float("nan"))
         n = new_med.get(tc, {}).get("total", float("nan"))
-        diff = n - o
-        pct = ((n - o) / o * 100.0) if o > 0 else float("nan")
-        pct_str = f"**{pct:+.1f}%** ⚡" if pct < 0 else f"+{pct:.1f}%"
+        if not math.isnan(o) and not math.isnan(n):
+            diff = n - o
+            diff_str = f"{diff:+.2f}"
+            pct = ((n - o) / o * 100.0) if o > 0 else float("nan")
+            pct_str = f"**{pct:+.1f}%** ⚡" if pct < 0 else f"+{pct:.1f}%"
+        else:
+            diff_str = "—"
+            pct_str = "—"
         lbl = f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc)
-        L.append(f"| **{lbl}** | {fmt(o)} | {fmt(n)} | {diff:+.2f} | {pct_str} |")
+        L.append(f"| **{lbl}** | {fmt(o)} | {fmt(n)} | {diff_str} | {pct_str} |")
 
     L += [
         "",
@@ -428,6 +461,27 @@ def main():
         "### 5.4 Repair Write Phase",
         f"![Repair Write Latency]({plt_rel('repair_write_comparison.png')})",
         "",
+        "#### Detailed Repair Write Sub-Phase Breakdown:",
+        "",
+        f"| Scale | {old_label} Total `repair_write` | {old_label} `dml_wire` | {old_label} `commit_wire` | {new_label} Total `repair_write` | {new_label} `dml_wire` | {new_label} `commit_wire` | `COMMIT` Delta (ms) |",
+        "|:---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+
+    for tc in scales:
+        o = old_med.get(tc, {})
+        n = new_med.get(tc, {})
+        o_rep = o.get('repair', float('nan'))
+        o_dml = o.get('dml_wire', float('nan'))
+        o_com = o.get('commit_wire', float('nan'))
+        n_rep = n.get('repair', float('nan'))
+        n_dml = n.get('dml_wire', float('nan'))
+        n_com = n.get('commit_wire', float('nan'))
+        com_diff = f"{n_com - o_com:+.2f} ms" if not math.isnan(n_com) and not math.isnan(o_com) else "—"
+        lbl = f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc)
+        L.append(f"| **{lbl}** | {fmt(o_rep)} ms | {fmt(o_dml)} ms | {fmt(o_com)} ms | {fmt(n_rep)} ms | {fmt(n_dml)} ms | {fmt(n_com)} ms | {com_diff} |")
+
+    L += [
+        "",
         "### 5.5 Post-Repair Confirmation Phase",
         f"![Post-Repair Confirmation Latency]({plt_rel('post_repair_confirmation_comparison.png')})",
         "",
@@ -437,6 +491,30 @@ def main():
         "",
         "### 6.1 Leaf Occupancy Comparison",
         f"![Leaf Occupancy Scaling]({plt_rel('leaf_occupancy_scaling.png')})",
+        "",
+        "> **Note on Leaf Occupancy**:",
+        "> - **Physical Rows / Bad Leaf (Per Schema)**: The true physical row count per leaf bucket in PostgreSQL (bounded by $T_{\\text{split}} = 32$ and $T_{\\text{merge}} = 8$).",
+        "> - **Combined Candidate Rows (Healthy + Damaged)**: Total rows fetched across both replicas ($2 \\times \\text{physical rows}$).",
+        "",
+        f"| Scale | {old_label} (Rows/Leaf per Schema) | {new_label} (Rows/Leaf per Schema) | {old_label} Cand. Rows ($K=75$) | {new_label} Cand. Rows ($K=75$) |",
+        "|:---|---:|---:|---:|---:|",
+    ]
+
+    for tc in scales:
+        o_comb = old_med.get(tc, {}).get("rpl", float("nan"))
+        n_comb = new_med.get(tc, {}).get("rpl", float("nan"))
+        o_schema = o_comb / 2.0 if not math.isnan(o_comb) else float("nan")
+        n_schema = n_comb / 2.0 if not math.isnan(n_comb) else float("nan")
+        o_cand = o_comb * 75.0 if not math.isnan(o_comb) else float("nan")
+        n_cand = n_comb * 75.0 if not math.isnan(n_comb) else float("nan")
+        lbl = f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc)
+        o_schema_str = f"{fmt(o_schema, 2)} rows/leaf" if not math.isnan(o_schema) else "—"
+        n_schema_str = f"{fmt(n_schema, 2)} rows/leaf" if not math.isnan(n_schema) else "—"
+        o_cand_str = f"{fmt(o_cand, 0)} rows" if not math.isnan(o_cand) else "—"
+        n_cand_str = f"{fmt(n_cand, 0)} rows" if not math.isnan(n_cand) else "—"
+        L.append(f"| **{lbl}** | {o_schema_str} | {n_schema_str} | {o_cand_str} | {n_cand_str} |")
+
+    L += [
         "",
         "### 6.2 Variance (CV%) Comparison",
         f"![CV% Comparison]({plt_rel('cv_per_scale.png')})",
@@ -489,14 +567,20 @@ def main():
         n_ms = ds_new.get(tc, {}).get("dataset_total_ms", float("nan"))
         o_s = o_ms / 1000.0 if not math.isnan(o_ms) else float("nan")
         n_s = n_ms / 1000.0 if not math.isnan(n_ms) else float("nan")
-        diff_s = n_s - o_s
-        pct = ((n_s - o_s) / o_s * 100.0) if o_s > 0 else float("nan")
-        pct_str = f"**{pct:+.1f}%** ⚡" if pct < 0 else f"+{pct:.1f}%"
+        if not math.isnan(o_s) and not math.isnan(n_s):
+            diff_s = f"{n_s - o_s:+.2f} s"
+            pct = ((n_s - o_s) / o_s * 100.0) if o_s > 0 else float("nan")
+            pct_str = f"**{pct:+.1f}%** ⚡" if pct < 0 else f"+{pct:.1f}%"
+        else:
+            diff_s = "—"
+            pct_str = "—"
         appended = ds_new.get(tc, {}).get("appended_tuple_count", tc)
         mode = ds_new.get(tc, {}).get("dataset_setup_mode", "bulk-logged")
         lbl = f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc)
         app_lbl = f"+{appended // 1_000_000}M" if appended < tc else f"{appended // 1_000_000}M"
-        L.append(f"| **{lbl}** | {app_lbl} | `{mode}` | {fmt(o_s)} s ({o_s/60:.2f} m) | {fmt(n_s)} s ({n_s/60:.2f} m) | {diff_s:+.2f} s | {pct_str} |")
+        o_str = f"{fmt(o_s)} s ({o_s/60:.2f} m)" if not math.isnan(o_s) else "N/A"
+        n_str = f"{fmt(n_s)} s ({n_s/60:.2f} m)" if not math.isnan(n_s) else "N/A"
+        L.append(f"| **{lbl}** | {app_lbl} | `{mode}` | {o_str} | {n_str} | {diff_s} | {pct_str} |")
 
     L += [
         "",
@@ -509,13 +593,22 @@ def main():
     cum_o = 0.0
     cum_n = 0.0
     for tc in scales:
+        has_o = tc in ds_old
         o_s = ds_old.get(tc, {}).get("dataset_total_ms", 0.0) / 1000.0
         n_s = ds_new.get(tc, {}).get("dataset_total_ms", 0.0) / 1000.0
-        cum_o += o_s
+        if has_o:
+            cum_o += o_s
         cum_n += n_s
         lbl = f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc)
-        diff_cum = cum_n - cum_o
-        L.append(f"| **{lbl}** | {cum_o:.2f} s ({cum_o/60:.2f} m) | {cum_n:.2f} s ({cum_n/60:.2f} m) | {diff_cum:+.2f} s ({diff_cum/60:+.2f} m) |")
+        if has_o:
+            diff_cum = cum_n - cum_o
+            diff_str = f"{diff_cum:+.2f} s ({diff_cum/60:+.2f} m)"
+            o_cum_str = f"{cum_o:.2f} s ({cum_o/60:.2f} m)"
+        else:
+            diff_str = "—"
+            o_cum_str = "N/A"
+        n_cum_str = f"{cum_n:.2f} s ({cum_n/60:.2f} m)"
+        L.append(f"| **{lbl}** | {o_cum_str} | {n_cum_str} | {diff_str} |")
 
     L += [
         "",

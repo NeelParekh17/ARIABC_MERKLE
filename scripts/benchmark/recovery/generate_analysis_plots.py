@@ -150,11 +150,15 @@ def main() -> None:
 
     # 7. Leaf Occupancy Scaling Comparison
     plt.figure(figsize=(10, 6), dpi=300)
-    plt.plot(x, df_d["mean_rows_per_bad_leaf"], label="Dynamic (Split Threshold = 32 Candidate Rows / Query)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
+    schema_rpl = df_d["mean_rows_per_bad_leaf"] / 2.0
+    plt.plot(x, schema_rpl, label="Physical Leaf Occupancy per Schema (Rows / Bad Leaf)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
+    for xi, val in zip(x, schema_rpl):
+        plt.annotate(f"{val:.1f}", (xi, val), textcoords="offset points", xytext=(0, 7),
+                     ha="center", fontsize=8.5, fontweight="bold", color=COLOR_DYNAMIC)
 
-    plt.title("Leaf Occupancy & Candidate Rows / Bad Leaf Query (1M - 50M Tuples)")
+    plt.title("Leaf Occupancy Scaling (Physical Rows per Bad Leaf)")
     plt.xlabel("Dataset Size (Tuples)")
-    plt.ylabel("Mean Candidate Rows / Bad Leaf Query")
+    plt.ylabel("Physical Rows per Bad Leaf")
     plt.xticks(x, x_labels)
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.legend(frameon=True, facecolor="white", framealpha=0.9, loc="upper left")

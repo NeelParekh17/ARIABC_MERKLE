@@ -677,7 +677,7 @@ def _size_scaling_config():
     return profile_config("size-scaling-k75-c300")
 
 
-def test_size_scaling_produces_eleven_runs():
+def test_size_scaling_produces_eleven_runs_by_default():
     specs = _series_for_profile(_size_scaling_args(), _size_scaling_config())
     assert len(specs) == 11
     geometries = [(s["geometry_label"], s["tuple_count"]) for s in specs]
@@ -700,18 +700,23 @@ def test_size_scaling_produces_eleven_runs():
         assert spec["corrupted_tuple_count"] == 300
 
 
-def test_size_scaling_accepts_matched_subset():
+def test_size_scaling_accepts_custom_tuple_counts():
     specs = _series_for_profile(
-        _size_scaling_args(tuple_count="1000000,3000000,5000000"),
+        _size_scaling_args(tuple_count="1000000,3000000,5000000,7000000,10000000,15000000,20000000,25000000,26000000,27000000,28000000,29000000,30000000,40000000,50000000"),
         _size_scaling_config(),
     )
-    assert [spec["tuple_count"] for spec in specs] == [1_000_000, 3_000_000, 5_000_000]
+    assert len(specs) == 15
+    assert [spec["tuple_count"] for spec in specs] == [
+        1_000_000, 3_000_000, 5_000_000, 7_000_000, 10_000_000,
+        15_000_000, 20_000_000, 25_000_000, 26_000_000, 27_000_000,
+        28_000_000, 29_000_000, 30_000_000, 40_000_000, 50_000_000,
+    ]
 
 
 def test_size_scaling_rejects_manual_overrides():
     config = _size_scaling_config()
-    with pytest.raises(ValueError, match="owns tuple counts"):
-        _series_for_profile(_size_scaling_args(tuple_count=1000), config)
+    with pytest.raises(ValueError, match="positive integer"):
+        _series_for_profile(_size_scaling_args(tuple_count=-1000), config)
     with pytest.raises(ValueError, match="do not override geometry"):
         _series_for_profile(_size_scaling_args(fanout=4), config)
     with pytest.raises(ValueError, match="uses fixed --bad-leaf-count=75"):
