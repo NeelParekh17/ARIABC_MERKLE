@@ -232,6 +232,26 @@ def all_reps(runs: list[dict]) -> dict[int, list[tuple[int, float]]]:
     return {k: sorted(v) for k, v in out.items()}
 
 
+def parse_progress_jsonl(fetched_dir: Path) -> dict[int, dict]:
+    """Parse progress.jsonl to extract dataset_build_timing metrics per scale."""
+    p = fetched_dir / "progress.jsonl"
+    if not p.exists():
+        return {}
+    out = {}
+    with open(p) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+                if data.get("event") == "dataset_build_timing" or "timings_ms" in data:
+                    tc = int(data.get("tuple_count", 0))
+                    out[tc] = data.get("timings_ms", {})
+            except Exception:
+                pass
+    return out
+
+
 def cv_per_scale(dyn_all: dict[int, list[tuple[int, float]]]) -> dict[int, float]:
     """Coefficient of variation (%) of restore_repair_ms across ALL reps per scale."""
     result = {}
@@ -369,10 +389,89 @@ def save_leaf(path: Path, x, x_labels, d_rpl_per_schema):
     fig.tight_layout(); fig.savefig(path); plt.close(fig)
 
 
+def save_dataset_build_time(path: Path, x, x_labels, total_sec: list[float]):
+    """Line chart of incremental dataset creation/expansion time (seconds)."""
+    plt.rcParams.update(PLT_PARAMS)
+    fig, ax = plt.subplots(figsize=(11, 6), dpi=150)
+    ax.plot(x, total_sec, label="Dataset Build / Expansion Time", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
+    for xi, val in zip(x, total_sec):
+        if not math.isnan(val):
+            label_text = f"{val:.1f}s\n({val/60.0:.1f}m)" if val >= 60.0 else f"{val:.1f}s"
+            ax.annotate(label_text, (xi, val), textcoords="offset points", xytext=(0, 7),
+                        ha="center", fontsize=8.5, fontweight="bold", color=COLOR_DYNAMIC)
+    ax.set_title("Incremental Dataset Build Latency per Scale Step (1M → 50M)")
+    ax.set_xlabel("Dataset Target Scale")
+    ax.set_ylabel("Dataset Expansion Time (Seconds)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(x_labels)
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.legend(frameon=True, facecolor="white", framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def save_dataset_build_composition(path: Path, x, x_labels, ds_data: dict[int, dict], scales: list[int]):
+    """Stacked bar chart showing dataset creation sub-phase breakdown."""
+    plt.rcParams.update(PLT_PARAMS)
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
+
+    heap_sec = []
+    merkle_sec = []
+    pk_sec = []
+    ckpt_sec = []
+
+    for tc in scales:
+        t = ds_data.get(tc, {})
+        h_tbl = _flt(t.get("healthy_table_ms", 0.0))
+        d_tbl = _flt(t.get("damaged_table_ms", 0.0))
+        h_idx = _flt(t.get("healthy_indexes_ms", 0.0))
+        d_idx = _flt(t.get("damaged_indexes_ms", 0.0))
+        pk = _flt(t.get("primary_keys_ms", 0.0))
+        ckpt = _flt(t.get("analyze_checkpoint_ms", 0.0))
+
+        h_tbl = 0.0 if math.isnan(h_tbl) else h_tbl
+        d_tbl = 0.0 if math.isnan(d_tbl) else d_tbl
+        h_idx = 0.0 if math.isnan(h_idx) else h_idx
+        d_idx = 0.0 if math.isnan(d_idx) else d_idx
+        pk = 0.0 if math.isnan(pk) else pk
+        ckpt = 0.0 if math.isnan(ckpt) else ckpt
+
+        heap_sec.append((h_tbl + d_tbl) / 1000.0)
+        merkle_sec.append((h_idx + d_idx) / 1000.0)
+        pk_sec.append(pk / 1000.0)
+        ckpt_sec.append(ckpt / 1000.0)
+
+    categories = [
+        ("Heap Data Population", np.array(heap_sec), "#1f77b4"),
+        ("Merkle Tree Index Build", np.array(merkle_sec), "#ff7f0e"),
+        ("Primary Keys & Logging", np.array(pk_sec), "#2ca02c"),
+        ("Catalog & Analyze/Checkpoint", np.array(ckpt_sec), "#9467bd"),
+    ]
+
+    bottom = np.zeros(len(scales))
+    for label, vals, color in categories:
+        if np.any(vals > 0):
+            ax.bar(x, vals, 0.55, bottom=bottom, label=label, color=color)
+            bottom += vals
+
+    ax.set_title("Dataset Construction Phase Timing Composition")
+    ax.set_xlabel("Dataset Target Scale")
+    ax.set_ylabel("Expansion Time (Seconds)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(x_labels)
+    ax.grid(True, linestyle="--", alpha=0.4, axis="y")
+    ax.legend(frameon=True, facecolor="white", framealpha=0.9, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
 def generate_plots(plots_dir: Path, dyn_med: dict[int, dict], scales: list[int],
                    tree_depth: dict[int, int] | None = None,
                    tree_depth_label: str = "Tree Levels",
-                   cv_vals: dict[int, float] | None = None) -> dict[str, Path]:
+                   cv_vals: dict[int, float] | None = None,
+                   ds_data: dict[int, dict] | None = None) -> dict[str, Path]:
     plots_dir.mkdir(parents=True, exist_ok=True)
     x = list(range(len(scales)))
     x_labels = [f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc) for tc in scales]
@@ -417,6 +516,17 @@ def generate_plots(plots_dir: Path, dyn_med: dict[int, dict], scales: list[int],
         save_cv(p, x, x_labels, [cv_vals.get(tc, float("nan")) for tc in scales])
         out["cv_per_scale.png"] = p
 
+    if ds_data:
+        ds_sec = [_flt(ds_data.get(tc, {}).get("dataset_total_ms", float("nan"))) / 1000.0 for tc in scales]
+        if any(not math.isnan(s) for s in ds_sec):
+            p = plots_dir / "dataset_build_time.png"
+            save_dataset_build_time(p, x, x_labels, ds_sec)
+            out["dataset_build_time.png"] = p
+
+            p = plots_dir / "dataset_build_composition.png"
+            save_dataset_build_composition(p, x, x_labels, ds_data, scales)
+            out["dataset_build_composition.png"] = p
+
     return out
 
 
@@ -454,6 +564,7 @@ def build_report(
     run_id: str,
     plots_dir: Path,
     depth_info: dict[int, dict[str, str]] | None = None,
+    ds_data: dict[int, dict] | None = None,
 ) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -611,6 +722,109 @@ def build_report(
         "> Bars above the 20% threshold (orange line) indicate high variance — likely from checkpoint/WAL interference.",
         "",
         f"![CV% per Scale]({plt_rel('cv_per_scale.png')})",
+    ]
+
+    if ds_data and any(tc in ds_data for tc in scales):
+        L += [
+            "",
+            "---",
+            "",
+            "## 10. Dataset Construction & Incremental Expansion Latency",
+            "",
+            f"![Dataset Construction Latency]({plt_rel('dataset_build_time.png')})",
+            "",
+            f"![Dataset Construction Breakdown]({plt_rel('dataset_build_composition.png')})",
+            "",
+            "### 10.1 Step-by-Step Incremental Dataset Expansion Time & Phase Composition",
+            "",
+            "| Scale | Appended Tuples | Setup Mode | Heap Population (s) | Merkle Tree Build (s) | PK & Catalog (s) | Step Total (s) | Step Total (min) | Cumulative Time |",
+            "|:---|:---|:---|---:|---:|---:|---:|---:|---:|",
+        ]
+        cum_sec = 0.0
+        tot_all_sec = sum(_flt(ds_data.get(tc, {}).get("dataset_total_ms", 0.0)) / 1000.0 for tc in scales)
+        for tc in scales:
+            t = ds_data.get(tc, {})
+            tot_ms = _flt(t.get("dataset_total_ms", float("nan")))
+            tot_s = tot_ms / 1000.0 if not math.isnan(tot_ms) else float("nan")
+            if not math.isnan(tot_s):
+                cum_sec += tot_s
+            mode = t.get("dataset_setup_mode", "bulk-logged" if tc == scales[0] else "incremental-expansion")
+            prev_tc = t.get("previous_tuple_count")
+            appended = t.get("appended_tuple_count", tc if tc == scales[0] else (tc - prev_tc) if prev_tc is not None else tc)
+            app_lbl = f"+{appended // 1_000_000}M" if appended < tc else f"{appended // 1_000_000}M" if appended >= 1_000_000 else f"+{appended:,}"
+
+            h_tbl = _flt(t.get("healthy_table_ms", 0.0))
+            d_tbl = _flt(t.get("damaged_table_ms", 0.0))
+            h_idx = _flt(t.get("healthy_indexes_ms", 0.0))
+            d_idx = _flt(t.get("damaged_indexes_ms", 0.0))
+            pk = _flt(t.get("primary_keys_ms", 0.0))
+            ckpt = _flt(t.get("analyze_checkpoint_ms", 0.0))
+
+            h_tbl = 0.0 if math.isnan(h_tbl) else h_tbl
+            d_tbl = 0.0 if math.isnan(d_tbl) else d_tbl
+            h_idx = 0.0 if math.isnan(h_idx) else h_idx
+            d_idx = 0.0 if math.isnan(d_idx) else d_idx
+            pk = 0.0 if math.isnan(pk) else pk
+            ckpt = 0.0 if math.isnan(ckpt) else ckpt
+
+            heap_s = (h_tbl + d_tbl) / 1000.0
+            merkle_s = (h_idx + d_idx) / 1000.0
+            pk_ckpt_s = (pk + ckpt) / 1000.0
+
+            tot_s_str = f"{tot_s:.2f} s" if not math.isnan(tot_s) else "N/A"
+            tot_m_str = f"{tot_s / 60.0:.2f} min" if not math.isnan(tot_s) else "N/A"
+            cum_str = f"{cum_sec:.2f} s ({cum_sec / 60.0:.2f} m)" if not math.isnan(tot_s) else "N/A"
+
+            L.append(f"| **{lbl(tc)}** | {app_lbl} | `{mode}` | {heap_s:.2f} s | {merkle_s:.2f} s | {pk_ckpt_s:.2f} s | {tot_s_str} | {tot_m_str} | {cum_str} |")
+
+        L += [
+            "",
+            "### 10.2 Component Breakdown Details (ms)",
+            "",
+            "Exact millisecond telemetry for each dataset creation sub-phase:",
+            "",
+            "| Scale | Healthy Heap (ms) | Damaged Heap (ms) | Healthy Merkle Index (ms) | Damaged Merkle Index (ms) | Primary Keys (ms) | Analyze / Catalog (ms) | Total Step (ms) |",
+            "|:---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for tc in scales:
+            t = ds_data.get(tc, {})
+            h_tbl = _flt(t.get("healthy_table_ms", float("nan")))
+            d_tbl = _flt(t.get("damaged_table_ms", float("nan")))
+            h_idx = _flt(t.get("healthy_indexes_ms", float("nan")))
+            d_idx = _flt(t.get("damaged_indexes_ms", float("nan")))
+            pk = _flt(t.get("primary_keys_ms", float("nan")))
+            ckpt = _flt(t.get("analyze_checkpoint_ms", float("nan")))
+            tot_ms = _flt(t.get("dataset_total_ms", float("nan")))
+
+            pk_str = fmt(pk, 2) if not math.isnan(pk) else "—"
+            ckpt_str = fmt(ckpt, 2) if not math.isnan(ckpt) else "—"
+
+            L.append(f"| **{lbl(tc)}** | {fmt(h_tbl, 2)} | {fmt(d_tbl, 2)} | {fmt(h_idx, 2)} | {fmt(d_idx, 2)} | {pk_str} | {ckpt_str} | **{fmt(tot_ms, 2)} ms** |")
+
+        L += [
+            "",
+            "### 10.3 Cumulative Dataset Construction Time Progression",
+            "",
+            "| Target Scale | Step Time (s) | Cumulative Elapsed (s) | Cumulative Elapsed (min) | % of Total Build Time |",
+            "|:---|---:|---:|---:|---:|",
+        ]
+        running_sec = 0.0
+        for tc in scales:
+            t = ds_data.get(tc, {})
+            tot_ms = _flt(t.get("dataset_total_ms", float("nan")))
+            tot_s = tot_ms / 1000.0 if not math.isnan(tot_ms) else float("nan")
+            if not math.isnan(tot_s):
+                running_sec += tot_s
+                pct = (running_sec / tot_all_sec * 100.0) if tot_all_sec > 0 else 0.0
+                pct_str = f"{pct:.1f}%"
+            else:
+                pct_str = "N/A"
+            tot_s_str = f"{tot_s:.2f} s" if not math.isnan(tot_s) else "N/A"
+            cum_s_str = f"{running_sec:.2f} s" if not math.isnan(tot_s) else "N/A"
+            cum_m_str = f"{running_sec / 60.0:.2f} min" if not math.isnan(tot_s) else "N/A"
+            L.append(f"| **{lbl(tc)}** | {tot_s_str} | {cum_s_str} | {cum_m_str} | {pct_str} |")
+
+    L += [
         "",
         "---",
         "",
@@ -696,6 +910,7 @@ def main():
     # Load data
     runs   = read_csv(fetched_dir / "runs.csv")
     phases = read_csv(fetched_dir / "phase_timings.csv") if (fetched_dir / "phase_timings.csv").exists() else []
+    ds_data = parse_progress_jsonl(fetched_dir)
     dyn_med   = warm_medians(runs, phases)
     dyn_all   = all_reps(runs)
     cv_map    = cv_per_scale(dyn_all)
@@ -703,7 +918,7 @@ def main():
     td_map, td_label = tree_levels_per_scale(runs, fetched_dir)
     scales    = sorted(dyn_med)
 
-    # Generate plots (including CV chart and tree-depth localisation overlay)
+    # Generate plots (including CV chart, dataset build charts, and tree-depth localisation overlay)
     generate_plots(
         plots_dir,
         dyn_med,
@@ -711,10 +926,11 @@ def main():
         cv_vals=cv_map,
         tree_depth=td_map,
         tree_depth_label=td_label,
+        ds_data=ds_data,
     )
 
     # Generate markdown
-    report = build_report(fetched_dir, run_id, plots_dir, depth_info)
+    report = build_report(fetched_dir, run_id, plots_dir, depth_info, ds_data=ds_data)
     report_path.write_text(report)
     print(str(report_path))
 

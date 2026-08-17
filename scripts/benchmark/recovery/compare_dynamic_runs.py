@@ -286,6 +286,73 @@ def save_cv_comparison(path: Path, x, x_labels, cv_old: list[float], cv_new: lis
     plt.close(fig)
 
 
+def save_dataset_composition_side_by_side(path: Path, x, x_labels, ds_old: dict[int, dict], ds_new: dict[int, dict], scales: list[int], old_label="Dynamic Old", new_label="Dynamic New"):
+    plt.rcParams.update(PLT_PARAMS)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), dpi=150, sharey=True)
+
+    def extract_cats(ds_data):
+        heap_sec = []
+        merkle_sec = []
+        pk_sec = []
+        ckpt_sec = []
+        for tc in scales:
+            t = ds_data.get(tc, {})
+            h_tbl = _flt(t.get("healthy_table_ms", 0.0))
+            d_tbl = _flt(t.get("damaged_table_ms", 0.0))
+            h_idx = _flt(t.get("healthy_indexes_ms", 0.0))
+            d_idx = _flt(t.get("damaged_indexes_ms", 0.0))
+            pk = _flt(t.get("primary_keys_ms", 0.0))
+            ckpt = _flt(t.get("analyze_checkpoint_ms", 0.0))
+
+            h_tbl = 0.0 if math.isnan(h_tbl) else h_tbl
+            d_tbl = 0.0 if math.isnan(d_tbl) else d_tbl
+            h_idx = 0.0 if math.isnan(h_idx) else h_idx
+            d_idx = 0.0 if math.isnan(d_idx) else d_idx
+            pk = 0.0 if math.isnan(pk) else pk
+            ckpt = 0.0 if math.isnan(ckpt) else ckpt
+
+            heap_sec.append((h_tbl + d_tbl) / 1000.0)
+            merkle_sec.append((h_idx + d_idx) / 1000.0)
+            pk_sec.append(pk / 1000.0)
+            ckpt_sec.append(ckpt / 1000.0)
+        return [
+            ("Heap Data Population", np.array(heap_sec), "#1f77b4"),
+            ("Merkle Tree Index Build", np.array(merkle_sec), "#ff7f0e"),
+            ("Primary Keys & Logging", np.array(pk_sec), "#2ca02c"),
+            ("Catalog & Analyze/Checkpoint", np.array(ckpt_sec), "#9467bd"),
+        ]
+
+    cats_old = extract_cats(ds_old)
+    cats_new = extract_cats(ds_new)
+
+    b1 = np.zeros(len(scales))
+    for label, vals, color in cats_old:
+        if np.any(vals > 0):
+            ax1.bar(x, vals, 0.55, bottom=b1, label=label, color=color)
+            b1 += vals
+
+    b2 = np.zeros(len(scales))
+    for label, vals, color in cats_new:
+        if np.any(vals > 0):
+            ax2.bar(x, vals, 0.55, bottom=b2, label=label, color=color)
+            b2 += vals
+
+    ax1.set_title(f"{old_label} Dataset Composition")
+    ax1.set_xlabel("Dataset Target Scale"); ax1.set_ylabel("Expansion Time (Seconds)")
+    ax1.set_xticks(x); ax1.set_xticklabels(x_labels)
+    ax1.grid(True, linestyle="--", alpha=0.4, axis="y")
+
+    ax2.set_title(f"{new_label} Dataset Composition")
+    ax2.set_xlabel("Dataset Target Scale")
+    ax2.set_xticks(x); ax2.set_xticklabels(x_labels)
+    ax2.grid(True, linestyle="--", alpha=0.4, axis="y")
+    ax2.legend(frameon=True, facecolor="white", framealpha=0.9, loc="upper left")
+
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
 def fmt(v: float, d: int = 2) -> str:
     return "N/A" if math.isnan(v) else f"{v:,.{d}f}"
 
@@ -338,7 +405,6 @@ def main():
     def ov(key): return [old_med.get(tc, {}).get(key, float("nan")) for tc in scales]
     def nv(key): return [new_med.get(tc, {}).get(key, float("nan")) for tc in scales]
 
-    # Generate plot suite
     # Extract tree depth per scale
     levels_map = tree_levels_per_scale(new_dir)
     if not levels_map:
@@ -377,6 +443,42 @@ def main():
 
     save_stacked_side_by_side(plots_dir / "phase_stacked_composition.png", x, x_labels, old_med, new_med, scales, old_label=old_label, new_label=new_label)
     save_cv_comparison(plots_dir / "cv_per_scale.png", x, x_labels, [cv_old.get(tc, float("nan")) for tc in scales], [cv_new.get(tc, float("nan")) for tc in scales], old_label=old_label, new_label=new_label)
+
+    # Helper for dataset timings from progress.jsonl
+    def parse_progress_jsonl(fetched_dir: Path) -> dict[int, dict]:
+        p = fetched_dir / 'progress.jsonl'
+        if not p.exists(): return {}
+        out = {}
+        with open(p) as f:
+            for line in f:
+                if not line.strip(): continue
+                try:
+                    data = json.loads(line)
+                    if data.get('event') == 'dataset_build_timing' or 'timings_ms' in data:
+                        tc = int(data.get('tuple_count', 0))
+                        out[tc] = data.get('timings_ms', {})
+                except Exception:
+                    pass
+        return out
+
+    ds_old = parse_progress_jsonl(old_dir)
+    ds_new = parse_progress_jsonl(new_dir)
+
+    if ds_old or ds_new:
+        ds_old_sec = [ds_old.get(tc, {}).get('dataset_total_ms', float('nan')) / 1000.0 for tc in scales]
+        ds_new_sec = [ds_new.get(tc, {}).get('dataset_total_ms', float('nan')) / 1000.0 for tc in scales]
+        save_comparison_line(
+            plots_dir / "dataset_build_time_comparison.png",
+            x, x_labels, ds_old_sec, ds_new_sec,
+            f"Incremental Dataset Build Latency: {old_label} vs {new_label}",
+            "Dataset Expansion Time (Seconds)",
+            old_label=old_label, new_label=new_label
+        )
+        save_dataset_composition_side_by_side(
+            plots_dir / "dataset_build_composition.png",
+            x, x_labels, ds_old, ds_new, scales,
+            old_label=old_label, new_label=new_label
+        )
 
     # Build Markdown report
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -525,42 +627,13 @@ def main():
         "",
         f"![Dataset Construction Latency]({plt_rel('dataset_build_time_comparison.png')})",
         "",
+        f"![Dataset Construction Composition]({plt_rel('dataset_build_composition.png')})",
+        "",
         "### 7.1 Step-by-Step Incremental Dataset Expansion Time",
         "",
         f"| Scale | Appended Tuples | Setup Mode | {old_label} (s) | {new_label} (s) | Delta (s) | Speedup / Change |",
         "|:---|:---|:---|---:|---:|---:|---:|",
     ]
-
-    # Helper for dataset timings from progress.jsonl
-    def parse_progress_jsonl(fetched_dir: Path) -> dict[int, dict]:
-        p = fetched_dir / 'progress.jsonl'
-        if not p.exists(): return {}
-        out = {}
-        with open(p) as f:
-            for line in f:
-                if not line.strip(): continue
-                try:
-                    data = json.loads(line)
-                    if data.get('event') == 'dataset_build_timing' or 'timings_ms' in data:
-                        tc = int(data.get('tuple_count', 0))
-                        out[tc] = data['timings_ms']
-                except Exception:
-                    pass
-        return out
-
-    ds_old = parse_progress_jsonl(old_dir)
-    ds_new = parse_progress_jsonl(new_dir)
-
-    if ds_old or ds_new:
-        ds_old_sec = [ds_old.get(tc, {}).get('dataset_total_ms', float('nan')) / 1000.0 for tc in scales]
-        ds_new_sec = [ds_new.get(tc, {}).get('dataset_total_ms', float('nan')) / 1000.0 for tc in scales]
-        save_comparison_line(
-            plots_dir / "dataset_build_time_comparison.png",
-            x, x_labels, ds_old_sec, ds_new_sec,
-            f"Incremental Dataset Build Latency: {old_label} vs {new_label}",
-            "Dataset Expansion Time (Seconds)",
-            old_label=old_label, new_label=new_label
-        )
 
     for tc in scales:
         o_ms = ds_old.get(tc, {}).get("dataset_total_ms", float("nan"))
@@ -574,10 +647,10 @@ def main():
         else:
             diff_s = "—"
             pct_str = "—"
-        appended = ds_new.get(tc, {}).get("appended_tuple_count", tc)
-        mode = ds_new.get(tc, {}).get("dataset_setup_mode", "bulk-logged")
+        appended = ds_new.get(tc, {}).get("appended_tuple_count", ds_old.get(tc, {}).get("appended_tuple_count", tc))
+        mode = ds_new.get(tc, {}).get("dataset_setup_mode", ds_old.get(tc, {}).get("dataset_setup_mode", "bulk-logged" if tc == scales[0] else "incremental-expansion"))
         lbl = f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc)
-        app_lbl = f"+{appended // 1_000_000}M" if appended < tc else f"{appended // 1_000_000}M"
+        app_lbl = f"+{appended // 1_000_000}M" if appended < tc else f"{appended // 1_000_000}M" if appended >= 1_000_000 else f"+{appended:,}"
         o_str = f"{fmt(o_s)} s ({o_s/60:.2f} m)" if not math.isnan(o_s) else "N/A"
         n_str = f"{fmt(n_s)} s ({n_s/60:.2f} m)" if not math.isnan(n_s) else "N/A"
         L.append(f"| **{lbl}** | {app_lbl} | `{mode}` | {o_str} | {n_str} | {diff_s} | {pct_str} |")
@@ -593,22 +666,59 @@ def main():
     cum_o = 0.0
     cum_n = 0.0
     for tc in scales:
-        has_o = tc in ds_old
-        o_s = ds_old.get(tc, {}).get("dataset_total_ms", 0.0) / 1000.0
-        n_s = ds_new.get(tc, {}).get("dataset_total_ms", 0.0) / 1000.0
+        has_o = tc in ds_old and not math.isnan(_flt(ds_old[tc].get("dataset_total_ms")))
+        has_n = tc in ds_new and not math.isnan(_flt(ds_new[tc].get("dataset_total_ms")))
+        o_s = ds_old.get(tc, {}).get("dataset_total_ms", 0.0) / 1000.0 if has_o else 0.0
+        n_s = ds_new.get(tc, {}).get("dataset_total_ms", 0.0) / 1000.0 if has_n else 0.0
         if has_o:
             cum_o += o_s
-        cum_n += n_s
+        if has_n:
+            cum_n += n_s
         lbl = f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc)
-        if has_o:
+        if has_o and has_n:
             diff_cum = cum_n - cum_o
             diff_str = f"{diff_cum:+.2f} s ({diff_cum/60:+.2f} m)"
             o_cum_str = f"{cum_o:.2f} s ({cum_o/60:.2f} m)"
+            n_cum_str = f"{cum_n:.2f} s ({cum_n/60:.2f} m)"
+        elif has_n:
+            diff_str = "—"
+            o_cum_str = "N/A"
+            n_cum_str = f"{cum_n:.2f} s ({cum_n/60:.2f} m)"
         else:
             diff_str = "—"
             o_cum_str = "N/A"
-        n_cum_str = f"{cum_n:.2f} s ({cum_n/60:.2f} m)"
+            n_cum_str = "N/A"
         L.append(f"| **{lbl}** | {o_cum_str} | {n_cum_str} | {diff_str} |")
+
+    L += [
+        "",
+        "### 7.3 Detailed Sub-Phase Breakdown per Scale (ms)",
+        "",
+        f"| Scale | Arch | Healthy Heap (ms) | Damaged Heap (ms) | Healthy Merkle Index (ms) | Damaged Merkle Index (ms) | Primary Keys (ms) | Analyze / Catalog (ms) | Total Step (ms) |",
+        "|:---|:---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+
+    for tc in scales:
+        lbl = f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc)
+        to = ds_old.get(tc, {})
+        tn = ds_new.get(tc, {})
+
+        def get_row(t, arch_lbl):
+            if not t:
+                return f"| | {arch_lbl} | — | — | — | — | — | — | — |"
+            h_tbl = _flt(t.get("healthy_table_ms", float("nan")))
+            d_tbl = _flt(t.get("damaged_table_ms", float("nan")))
+            h_idx = _flt(t.get("healthy_indexes_ms", float("nan")))
+            d_idx = _flt(t.get("damaged_indexes_ms", float("nan")))
+            pk = _flt(t.get("primary_keys_ms", float("nan")))
+            ckpt = _flt(t.get("analyze_checkpoint_ms", float("nan")))
+            tot = _flt(t.get("dataset_total_ms", float("nan")))
+            pk_str = fmt(pk, 2) if not math.isnan(pk) else "—"
+            ckpt_str = fmt(ckpt, 2) if not math.isnan(ckpt) else "—"
+            return f"| | {arch_lbl} | {fmt(h_tbl, 2)} | {fmt(d_tbl, 2)} | {fmt(h_idx, 2)} | {fmt(d_idx, 2)} | {pk_str} | {ckpt_str} | **{fmt(tot, 2)} ms** |"
+
+        L.append(f"| **{lbl}** | {old_label} | {fmt(_flt(to.get('healthy_table_ms', float('nan'))), 2)} | {fmt(_flt(to.get('damaged_table_ms', float('nan'))), 2)} | {fmt(_flt(to.get('healthy_indexes_ms', float('nan'))), 2)} | {fmt(_flt(to.get('damaged_indexes_ms', float('nan'))), 2)} | {fmt(_flt(to.get('primary_keys_ms', float('nan'))), 2) if not math.isnan(_flt(to.get('primary_keys_ms', float('nan')))) else '—'} | {fmt(_flt(to.get('analyze_checkpoint_ms', float('nan'))), 2) if not math.isnan(_flt(to.get('analyze_checkpoint_ms', float('nan')))) else '—'} | **{fmt(_flt(to.get('dataset_total_ms', float('nan'))), 2)} ms** |")
+        L.append(get_row(tn, new_label))
 
     L += [
         "",
