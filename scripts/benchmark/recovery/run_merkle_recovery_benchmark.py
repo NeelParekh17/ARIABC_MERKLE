@@ -559,7 +559,7 @@ def repair_merkle(
     audit_mode: str = "full",
     leaf_fetch_chunk_size: int = 64,
     levels_per_batch: int = 3,
-    synchronous_commit: str = "on",
+    synchronous_commit: str = "off",
 ) -> Metrics:
     cfg = {
         "fanout": int(manifest.get("fanout", 4)),
@@ -1059,7 +1059,7 @@ def run_one_manifest(
     audit_mode: str = "full",
     leaf_fetch_chunk_size: int = 64,
     levels_per_batch: int = 3,
-    synchronous_commit: str = "on",
+    synchronous_commit: str = "off",
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
     cfg = {
@@ -1246,17 +1246,18 @@ def run_one_manifest(
 
 
 def _selected(values, selected):
-    out = list(values)
     if selected is None:
-        return out
+        return list(values)
     if isinstance(selected, str):
         selected_list = [int(x.strip()) for x in selected.split(",") if x.strip()]
-    elif isinstance(selected, list):
+    elif isinstance(selected, (list, tuple, set)):
         selected_list = [int(x) for x in selected]
     else:
         selected_list = [int(selected)]
-    matched = [v for v in out if v in selected_list]
-    return matched if matched else selected_list
+    for n in selected_list:
+        if n <= 0:
+            raise ValueError(f"tuple_count must be a positive integer, got {n}")
+    return selected_list
 
 
 def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]]:
@@ -1397,7 +1398,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
     if args.profile == "size-scaling-k75-c300":
         if getattr(args, "corruption_mode", None) not in (None, "paper-update-only", "mixed"):
             raise ValueError("size-scaling-k75-c300 requires --corruption-mode mixed or paper-update-only")
-        allowed_tuple_counts = [
+        default_tuple_counts = [
             1_000_000,
             3_000_000,
             5_000_000,
@@ -1410,16 +1411,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
             40_000_000,
             50_000_000,
         ]
-        if args.tuple_count is not None:
-            selected_sizes = _selected(allowed_tuple_counts, args.tuple_count)
-            invalid_sizes = [n for n in selected_sizes if n not in allowed_tuple_counts]
-            if invalid_sizes:
-                raise ValueError(
-                    "size-scaling-k75-c300 owns tuple counts from 1M to 50M"
-                )
-            tuple_counts = selected_sizes
-        else:
-            tuple_counts = allowed_tuple_counts
+        tuple_counts = _selected(default_tuple_counts, args.tuple_count)
         if getattr(args, "fanout", None) is not None:
             raise ValueError("size-scaling-k75-c300 uses fixed canonical geometries; do not override geometry")
         if getattr(args, "bad_leaf_count", None) is not None:
@@ -1888,7 +1880,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     audit_mode=args.audit_mode,
                     leaf_fetch_chunk_size=args.leaf_fetch_batch_size,
                     levels_per_batch=getattr(args, "levels_per_batch", 3),
-                    synchronous_commit=getattr(args, "synchronous_commit", "on"),
+                    synchronous_commit=getattr(args, "synchronous_commit", "off"),
                 )
             )
 
@@ -2363,9 +2355,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--synchronous-commit",
         choices=["on", "off"],
-        default="on",
+        default="off",
         dest="synchronous_commit",
-        help="PostgreSQL synchronous_commit setting during recovery repair (default: on).",
+        help="PostgreSQL synchronous_commit setting during recovery repair (default: off).",
     )
     args = parser.parse_args(argv)
 

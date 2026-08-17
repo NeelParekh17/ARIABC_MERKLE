@@ -14,7 +14,7 @@ fi
 
 usage() {
   cat <<'USAGE'
-Usage: run_synced_remote_recovery_benchmark.sh --host admin123|user4|utkarsh --profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300 [options]
+Usage: run_synced_remote_recovery_benchmark.sh --host ranking|admin123|user4|utkarsh|<hostname> --profile smoke|preflight|paper|recovery-scaling-diagnosis|fanout-width-sweep|size-scaling-k75-c300|best-scaling-f32-l1024-k75-c300 [options]
 
 Options:
   --ssh-user USER
@@ -38,7 +38,7 @@ Options:
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
                                default: mixed
-  --synchronous-commit on|off  default: on
+  --synchronous-commit on|off  default: off
   --audit-mode full|skip       default: full
   --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
@@ -68,7 +68,7 @@ FANOUT=""
 GEOMETRY_LABEL=""
 PROFILING="off"
 TRACK_COUNTS="on"
-SYNCHRONOUS_COMMIT="on"
+SYNCHRONOUS_COMMIT="off"
 REPETITIONS=""
 ARTIFACT_MODE="summary"
 CORRUPTION_MODE=""
@@ -190,6 +190,7 @@ resolve_host_ip() {
     admin123) printf '%s\n' "10.129.148.247" ;;
     user4) printf '%s\n' "10.129.148.246" ;;
     utkarsh) printf '%s\n' "10.129.148.248" ;;
+    ranking|ranking.cse.iitb.ac.in) printf '%s\n' "ranking.cse.iitb.ac.in" ;;
     *) printf '%s\n' "$1" ;;
   esac
 }

@@ -249,11 +249,14 @@ def cv_per_scale(dyn_all: dict[int, list[tuple[int, float]]]) -> dict[int, float
 # ---------------------------------------------------------------------------
 # Plot helpers
 # ---------------------------------------------------------------------------
-def save_line(path: Path, x, x_labels, s_vals, d_vals, title, ylabel):
+def save_line(path: Path, x, x_labels, d_vals, title, ylabel):
     plt.rcParams.update(PLT_PARAMS)
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
-    ax.plot(x, s_vals, label="Static (F32 / L1024)", color=COLOR_STATIC, marker="o", linewidth=2.5, linestyle="--")
+    fig, ax = plt.subplots(figsize=(11, 6), dpi=150)
     ax.plot(x, d_vals, label="Dynamic (Synchronous Direct)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
+    for xi, val in zip(x, d_vals):
+        if not math.isnan(val):
+            ax.annotate(f"{val:.1f}", (xi, val), textcoords="offset points", xytext=(0, 7),
+                        ha="center", fontsize=8.5, fontweight="bold", color=COLOR_DYNAMIC)
     ax.set_title(title)
     ax.set_xlabel("Dataset Size")
     ax.set_ylabel(ylabel)
@@ -267,7 +270,7 @@ def save_line(path: Path, x, x_labels, s_vals, d_vals, title, ylabel):
 
 def save_localisation_with_levels(
     path: Path, x, x_labels,
-    s_vals: list[float], d_vals: list[float],
+    d_vals: list[float],
     tree_depth: list[int],
     depth_label: str = "Actual tree height (root=1)",
 ):
@@ -277,21 +280,22 @@ def save_localisation_with_levels(
     plt.rcParams.update(PLT_PARAMS)
     fig, ax1 = plt.subplots(figsize=(11, 6), dpi=150)
 
-    # Left axis — latency lines
-    ax1.plot(x, s_vals, label="Static (F32 / L1024)",
-             color=COLOR_STATIC, marker="o", linewidth=2.5, linestyle="--")
+    # Left axis — Dynamic latency line
     ax1.plot(x, d_vals, label="Dynamic (Synchronous Direct)",
              color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
+    for xi, val in zip(x, d_vals):
+        if not math.isnan(val):
+            ax1.annotate(f"{val:.1f}", (xi, val), textcoords="offset points", xytext=(0, 7),
+                         ha="center", fontsize=8.5, fontweight="bold", color=COLOR_DYNAMIC)
     ax1.set_xlabel("Dataset Size")
     ax1.set_ylabel("Tree Localisation Latency (ms)", color="black")
     ax1.set_xticks(x); ax1.set_xticklabels(x_labels)
     ax1.grid(True, linestyle="--", alpha=0.5)
-    ax1.set_title("Tree Localisation Latency: Static vs Dynamic\n"
-                  f"(with {depth_label} — right axis)")
+    ax1.set_title(f"Tree Localisation Latency\n(with {depth_label} — right axis)")
 
     # Right axis — tree depth step line
     ax2 = ax1.twinx()
-    depth_color = "#e377c2"   # pink/purple — distinct from both series
+    depth_color = "#e377c2"   # pink/purple — distinct from latency line
     ax2.step(x, tree_depth, where="mid", color=depth_color,
              linewidth=2.0, linestyle=":", label=depth_label)
     ax2.set_ylabel(depth_label, color=depth_color)
@@ -349,13 +353,16 @@ def save_stacked(path: Path, x, x_labels, dyn: dict[int, dict], scales):
     fig.tight_layout(); fig.savefig(path); plt.close(fig)
 
 
-def save_leaf(path: Path, x, x_labels, s_rpl, d_rpl):
+def save_leaf(path: Path, x, x_labels, d_rpl_per_schema):
     plt.rcParams.update(PLT_PARAMS)
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
-    ax.plot(x, s_rpl, label="Static Rows/Leaf (F32 / L1024)", color=COLOR_STATIC, marker="o", linewidth=2.5, linestyle="--")
-    ax.plot(x, d_rpl, label="Dynamic Rows/Leaf (Split Threshold=32)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
-    ax.set_title("Leaf Occupancy: Candidate Rows / Bad Leaf Query (Static vs Dynamic)")
-    ax.set_xlabel("Dataset Size"); ax.set_ylabel("Mean Candidate Rows / Bad Leaf Query")
+    fig, ax = plt.subplots(figsize=(11, 6), dpi=150)
+    ax.plot(x, d_rpl_per_schema, label="Physical Leaf Occupancy per Schema (Rows / Bad Leaf)", color=COLOR_DYNAMIC, marker="s", linewidth=2.5)
+    for xi, val in zip(x, d_rpl_per_schema):
+        if not math.isnan(val):
+            ax.annotate(f"{val:.1f}", (xi, val), textcoords="offset points", xytext=(0, 7),
+                        ha="center", fontsize=8.5, fontweight="bold", color=COLOR_DYNAMIC)
+    ax.set_title("Leaf Occupancy Scaling (Physical Rows per Bad Leaf)")
+    ax.set_xlabel("Dataset Size"); ax.set_ylabel("Physical Rows per Bad Leaf")
     ax.set_xticks(x); ax.set_xticklabels(x_labels)
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.legend(frameon=True, facecolor="white", framealpha=0.9)
@@ -363,15 +370,14 @@ def save_leaf(path: Path, x, x_labels, s_rpl, d_rpl):
 
 
 def generate_plots(plots_dir: Path, dyn_med: dict[int, dict], scales: list[int],
-                   cv_vals: dict[int, float] | None = None,
                    tree_depth: dict[int, int] | None = None,
-                   tree_depth_label: str = "Actual tree height (root=1)") -> dict[str, Path]:
+                   tree_depth_label: str = "Tree Levels",
+                   cv_vals: dict[int, float] | None = None) -> dict[str, Path]:
     plots_dir.mkdir(parents=True, exist_ok=True)
     x = list(range(len(scales)))
     x_labels = [f"{tc // 1_000_000}M" if tc >= 1_000_000 else str(tc) for tc in scales]
 
     def dv(key): return [dyn_med[tc].get(key, float("nan")) for tc in scales]
-    def sv(key): return [STATIC_REF.get(tc, {}).get(key, float("nan")) for tc in scales]
 
     specs = [
         ("total_recovery_latency.png",       "total",  "Total Recovery Latency",                 "Total Recovery Latency (ms)"),
@@ -384,7 +390,7 @@ def generate_plots(plots_dir: Path, dyn_med: dict[int, dict], scales: list[int],
     out = {}
     for fname, key, title, ylabel in specs:
         p = plots_dir / fname
-        save_line(p, x, x_labels, sv(key), dv(key), title, ylabel)
+        save_line(p, x, x_labels, dv(key), title, ylabel)
         out[fname] = p
 
     p = plots_dir / "phase_stacked_composition.png"
@@ -396,12 +402,14 @@ def generate_plots(plots_dir: Path, dyn_med: dict[int, dict], scales: list[int],
         td_vals = [tree_depth.get(tc, 0) for tc in scales]
         p = plots_dir / "tree_localisation_comparison.png"
         save_localisation_with_levels(
-            p, x, x_labels, sv("loc"), dv("loc"), td_vals, tree_depth_label
+            p, x, x_labels, dv("loc"), td_vals, tree_depth_label
         )
         out["tree_localisation_comparison.png"] = p  # overwrites generic version
 
     p = plots_dir / "leaf_occupancy_scaling.png"
-    save_leaf(p, x, x_labels, sv("rpl"), dv("rpl"))
+    rpl_comb = dv("rpl")
+    rpl_per_schema = [v / 2.0 if not math.isnan(v) else float("nan") for v in rpl_comb]
+    save_leaf(p, x, x_labels, rpl_per_schema)
     out["leaf_occupancy_scaling.png"] = p
 
     if cv_vals is not None:
@@ -410,7 +418,6 @@ def generate_plots(plots_dir: Path, dyn_med: dict[int, dict], scales: list[int],
         out["cv_per_scale.png"] = p
 
     return out
-
 
 
 def save_cv(path: Path, x, x_labels, cv_vals: list[float]):
@@ -510,8 +517,7 @@ def build_report(
         "",
         f"> **Generated**: {now}  ",
         f"> **Profile**: `{cfg.get('profile','size-scaling-k75-c300')}` | Fanout F={report_fanout} | Split {report_split} | Merge {report_merge} | K={report_bad_leaves} bad leaves | C={cfg.get('corrupted_tuple_count') or 300} corruptions | Audit: `{cfg.get('audit_mode','skip')}`  ",
-        f"> **Dynamic Artifact**: `scripts/benchmark/recovery/fetched/{run_id}`  ",
-        f"> **Static Baseline**: `scripts/benchmark/recovery/fetched/{STATIC_BASELINE_ID}`",
+        f"> **Dynamic Artifact**: `scripts/benchmark/recovery/fetched/{run_id}`",
         "",
         "---",
         "",
@@ -553,7 +559,7 @@ def build_report(
         "",
         "## 1. Total Recovery Latency",
         "",
-        f"![Total Recovery Latency: Static vs Dynamic]({plt_rel('total_recovery_latency.png')})",
+        f"![Total Recovery Latency]({plt_rel('total_recovery_latency.png')})",
         "",
         "---",
         "",
@@ -608,25 +614,36 @@ def build_report(
         "",
         "---",
         "",
-        "## Full Phase Comparison Matrix",
+        "## Full Phase Recovery Matrix",
         "",
         "Values are warm-repetition medians (rep ≥ 1) in milliseconds.",
         "",
-        "| Scale | Arch | Tree Localisation | Cand. Fetch | Row Cmp | Repair Write | Post-Repair Conf | **Total Recovery** |",
-        "|:---|:---|---:|---:|---:|---:|---:|---:|",
+        "| Scale | Tree Localisation | Cand. Fetch | Row Cmp | Repair Write | Post-Repair Conf | **Total Recovery** |",
+        "|:---|---:|---:|---:|---:|---:|---:|",
     ]
 
     for tc in scales:
         d = dyn_med[tc]
-        s = STATIC_REF.get(tc, {})
-        L.append(f"| **{lbl(tc)}** | Static  | {fmt(s.get('loc',float('nan')))} | {fmt(s.get('fetch',float('nan')))} | {fmt(s.get('cmp',float('nan')))} | {fmt(s.get('repair',float('nan')))} | {fmt(s.get('conf',float('nan')))} | **{fmt(s.get('total',float('nan')))} ms** |")
-        L.append(f"| | Dynamic | {fmt(d['loc'])} | {fmt(d['fetch'])} | {fmt(d['cmp'])} | {fmt(d['repair'])} | {fmt(d['conf'])} | **{fmt(d['total'])} ms** |")
+        L.append(f"| **{lbl(tc)}** | {fmt(d['loc'])} | {fmt(d['fetch'])} | {fmt(d['cmp'])} | {fmt(d['repair'])} | {fmt(d['conf'])} | **{fmt(d['total'])} ms** |")
 
-    L += ["", "---", "", "## Leaf Occupancy Table", "",
-          "| Scale | Dynamic Rows/Leaf | Static Rows/Leaf |",
-          "|:---|---:|---:|"]
+    L += [
+        "",
+        "---",
+        "",
+        "## Leaf Occupancy Breakdown",
+        "",
+        "> **Note on Leaf Occupancy**:",
+        "> - **Physical Rows / Bad Leaf (Per Schema)**: The true physical row count per leaf bucket in PostgreSQL (bounded by $T_{\\text{split}} = 32$ and $T_{\\text{merge}} = 8$).",
+        "> - **Combined Candidate Rows (Healthy + Damaged)**: Total rows fetched across both replicas ($2 \\times \\text{physical rows}$).",
+        "",
+        "| Scale | Physical Rows / Bad Leaf (Per Schema) | Combined Candidate Rows (Healthy + Damaged) | Total Candidate Rows Fetched ($K=75$) |",
+        "|:---|---:|---:|---:|",
+    ]
     for tc in scales:
-        L.append(f"| **{lbl(tc)}** | {fmt(dyn_med[tc].get('rpl', float('nan')), 1)} | {fmt(STATIC_REF.get(tc, {}).get('rpl', float('nan')), 1)} |")
+        comb_rpl = dyn_med[tc].get("rpl", float("nan"))
+        schema_rpl = comb_rpl / 2.0 if not math.isnan(comb_rpl) else float("nan")
+        cand_rows = comb_rpl * 75.0 if not math.isnan(comb_rpl) else float("nan")
+        L.append(f"| **{lbl(tc)}** | {fmt(schema_rpl, 2)} rows/leaf | {fmt(comb_rpl, 2)} rows/leaf | {fmt(cand_rows, 0)} rows |")
 
     cv_map = cv_per_scale(dyn_all)
     L += ["", "---", "", "## Repetition Stability (`restore_repair_ms`)", ""]
@@ -647,7 +664,6 @@ def build_report(
           f"| Run ID | `{run_id}` |",
           f"| Generated | `{now}` |",
           f"| Dynamic Dir | `scripts/benchmark/recovery/fetched/{run_id}` |",
-          f"| Static Baseline | `scripts/benchmark/recovery/fetched/{STATIC_BASELINE_ID}` |",
           f"| Reference Doc | `Dynamic_merkle_docs/RECOVERY_ARCHITECTURE_ANALYSIS.md` |",
           ""]
 

@@ -163,13 +163,12 @@ def profile_config(profile: str) -> BenchmarkConfig:
             ],
             fig13_sizes=[],
             fig13_k=[],
-            repetitions=5,
+            repetitions=10,
             extra={
                 "campaign": "size_scaling_k75_c300",
                 "description": (
-                    "Compares N=1M,3M,5M for three fixed geometries: "
-                    "F=2,L=16; F=2,L=128; F=32,L=1024. "
-                    "Uses K=75 bad leaves and C=300 update-only corruptions."
+                    "Compares N=1M to 50M for fixed geometry F=4,L=16. "
+                    "Uses K=75 bad leaves and C=300 corruptions."
                 ),
             },
         )
