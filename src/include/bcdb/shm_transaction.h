@@ -260,7 +260,7 @@ extern void store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *
 extern void store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid);
 extern bool apply_optim_update(ItemPointer tid, TupleTableSlot* slot, CommandId cid);
 extern bool apply_optim_insert(TupleTableSlot* slot, CommandId cid);
-extern bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid);
+extern bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedSlot, CommandId cid, int32 keyval);
 extern bool apply_deferred_delete_by_key(Oid relOid, int keyval);
 extern bool apply_optim_writes(void);
 extern void bcdb_reset_apply_error_flags(void);

@@ -151,6 +151,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     --exclude='*.so.*' \
     --exclude='*.d' \
     --exclude='*.manifest' \
+    --exclude='tmp_install' \
     --exclude='ariabc_pg/build' \
     --exclude='scripts/bench_full_results' \
     --exclude='scripts/bench_results' \
@@ -1545,6 +1546,7 @@ node_rsync_repo() {
     --exclude='__pycache__' \
     --exclude='*.pyc' \
     --exclude='conftest*' \
+    --exclude='tmp_install' \
     --exclude='scripts/bench_full_results' \
     --exclude='scripts/bench_results' \
     -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
@@ -3956,7 +3958,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   MERKLE_DRAIN_SSH_TIMEOUT="${MERKLE_DRAIN_SSH_TIMEOUT:-30}"
 
   WORKLOAD_LINES="$(awk 'BEGIN{n=0} /^[[:space:]]*($|--)/{next} {n++} END{print n}' "$WORKLOAD_FILE")"
-  MARKER_VAL="cluster_ycsb_done_$(date +%Y%m%d_%H%M%S)"
+  MARKER_VAL="cluster_ycsb_done_marker"
   MARKER_FILE="$LOG_DIR/post_verify_marker.sql"
   # Gateway deterministic sequence for workload item idx is:
   # In preassigned mode, gateway DET ids are detStartSeq + idx, so the marker
@@ -4070,11 +4072,13 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
         fi
         root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
         verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
+        data_md5=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT md5(string_agg(ycsb_key::text || field1 || field2 || field3 || field4 || field5 || field6 || field7 || field8 || field9 || field10, ',' ORDER BY ycsb_key)) FROM $VERIFY_TABLE\")
       else
         root=disabled
         verify=disabled
+        data_md5=disabled
       fi
-      echo \"\$cnt|\$root|\$verify\"
+      echo \"\$cnt|\$root|\$verify|\$data_md5\"
     " >"$readback_file" 2>"$readback_stderr_file" &
     POST_READBACK_PIDS[$idx]="$!"
     log "  [$name] post-marker synchronous Merkle verification started (pid $!)"
@@ -4087,19 +4091,21 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     if wait "${POST_READBACK_PIDS[$idx]}"; then
       readback="$(tr -d '[:space:]' < "$readback_file")"
     else
-      readback="error|error|error"
+      readback="error|error|error|error"
       log "  WARNING: [$name] post-marker readback failed; see $readback_stderr_file"
     fi
     if [[ -s "$readback_stderr_file" ]]; then
       log "  [$name] post-marker readback stderr (saved in $readback_stderr_file):"
       cat "$readback_stderr_file" >&2
     fi
-    IFS='|' read -r cnt root verify <<<"$readback"
+    IFS='|' read -r cnt root verify data_md5 <<<"$readback"
     POST_COUNTS[$idx]="$cnt"
     POST_ROOTS[$idx]="$root"
     POST_VERIFY[$idx]="$verify"
-    log "  [$name] rows=$cnt root=$root merkle_verify=$verify"
+    log "  [$name] rows=$cnt root=$root data_md5=$data_md5 merkle_verify=$verify"
   done
+
+  watchdog_query_node 0 "COPY (SELECT ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10 FROM $VERIFY_TABLE ORDER BY ycsb_key) TO STDOUT WITH CSV" > "$LOG_DIR/usertable_small_dump.csv" 2>/dev/null || true
 
   reference_count="${POST_COUNTS[0]}"
   reference_root="${POST_ROOTS[0]}"

@@ -306,6 +306,7 @@ private:
     bool initialize_bcdb();
     void ensure_bcdb_initialized_for_sql(const std::string& sql);
     uint64_t get_det_tx_seq(const task& t) const;
+    bool get_det_tx_seq_valid(const task& t, uint64_t& out_seq) const;
     void det_mark_tx_state(uint64_t tx_seq, det_tx_state st);
     bool det_wait_for_apply_turn(uint64_t tx_seq);
     void det_finish_apply(uint64_t tx_seq);
@@ -382,6 +383,9 @@ private:
     std::mutex q_mu_;
     std::condition_variable q_cv_;
     std::queue<task> q_;
+    std::map<uint64_t, task> det_preassigned_reorder_buf_;
+    uint64_t next_det_preassigned_seq_ = 0;
+    bool det_preassigned_seq_initialized_ = false;
     std::vector<std::thread> threads_;
 
     // Event-driven (reactor) mode.
@@ -412,6 +416,8 @@ private:
         uint64_t exec_start_ns = 0;
     };
     std::vector<conn_state> conns_;
+    std::vector<std::queue<task>> conn_qs_;
+    void push_task_ordered(task&& t);
     std::vector<pollfd> pfds_scratch_;
     std::thread event_thread_;
     bool event_mode_ = false;

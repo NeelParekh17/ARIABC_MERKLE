@@ -117,11 +117,14 @@ Topology parameters can be overridden directly from the command line:
 ./scripts/distributed/run_sweep.sh --executor-workers 8 --reps 1
 ```
 
-### Customizing Client Threads
+### Customizing Client Threads & Ordering Policy
 
 ```bash
 # Set client thread count and worker lanes
 ./scripts/distributed/run_sweep.sh --threads 96 --det-client-workers 96
+
+# Use preassigned ordering for 100% deterministic, repeatable Merkle root hashes across all runs
+./scripts/distributed/run_sweep.sh --raft-ordering-policy preassigned
 ```
 
 ---
