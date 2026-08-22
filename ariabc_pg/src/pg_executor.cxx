@@ -236,6 +236,92 @@ bool det_block_skip_readonly_enabled() {
     return enabled;
 }
 
+std::string lower_copy(const std::string& in) {
+    std::string out = in;
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+static bool is_reset_barrier_sql(const std::string& sql) {
+    const std::string t = lower_copy(trim_copy(sql));
+    return t.find("bcdb_reset(") != std::string::npos;
+}
+
+static bool state_machine_preassigned_ordering_enabled() {
+    const char* env = std::getenv("ARIABC_RAFT_ORDERING_POLICY");
+    if (!env || !*env) return true;
+    const std::string pol = trim_copy(env);
+    return pol.empty() || pol == "preassigned";
+}
+
+static bool extract_ycsb_key(const std::string& sql, int64_t& out_key) {
+    if (sql.empty()) return false;
+    const size_t len = sql.size();
+
+    // 1. Search for WHERE clause (for SELECT, UPDATE, DELETE)
+    for (size_t i = 0; i + 5 < len; ++i) {
+        if ((sql[i] == 'w' || sql[i] == 'W') &&
+            (sql[i+1] == 'h' || sql[i+1] == 'H') &&
+            (sql[i+2] == 'e' || sql[i+2] == 'E') &&
+            (sql[i+3] == 'r' || sql[i+3] == 'R') &&
+            (sql[i+4] == 'e' || sql[i+4] == 'E') &&
+            (i == 0 || std::isspace(static_cast<unsigned char>(sql[i-1]))) &&
+            (std::isspace(static_cast<unsigned char>(sql[i+5])))) {
+            size_t p = i + 5;
+            while (p + 3 < len) {
+                if ((sql[p] == 'k' || sql[p] == 'K') &&
+                    (sql[p+1] == 'e' || sql[p+1] == 'E') &&
+                    (sql[p+2] == 'y' || sql[p+2] == 'Y')) {
+                    size_t k = p + 3;
+                    while (k < len && (sql[k] == ' ' || sql[k] == '=' || sql[k] == '_' ||
+                                      sql[k] == 's' || sql[k] == 'S' ||
+                                      sql[k] == 'b' || sql[k] == 'B' ||
+                                      sql[k] == 'y' || sql[k] == 'Y' ||
+                                      sql[k] == 'c' || sql[k] == 'C')) {
+                        if (sql[k] == '=') {
+                            ++k;
+                            break;
+                        }
+                        ++k;
+                    }
+                    while (k < len && sql[k] == ' ') ++k;
+                    if (k < len && (std::isdigit(static_cast<unsigned char>(sql[k])) || sql[k] == '-')) {
+                        char* end = nullptr;
+                        out_key = std::strtoll(sql.c_str() + k, &end, 10);
+                        if (end != sql.c_str() + k) return true;
+                    }
+                }
+                ++p;
+            }
+        }
+    }
+
+    // 2. Search for VALUES clause (for INSERT)
+    for (size_t i = 0; i + 6 < len; ++i) {
+        if ((sql[i] == 'v' || sql[i] == 'V') &&
+            (sql[i+1] == 'a' || sql[i+1] == 'A') &&
+            (sql[i+2] == 'l' || sql[i+2] == 'L') &&
+            (sql[i+3] == 'u' || sql[i+3] == 'U') &&
+            (sql[i+4] == 'e' || sql[i+4] == 'E') &&
+            (sql[i+5] == 's' || sql[i+5] == 'S')) {
+            size_t p = i + 6;
+            while (p < len && sql[p] != '(') ++p;
+            if (p < len && sql[p] == '(') {
+                ++p;
+                while (p < len && sql[p] == ' ') ++p;
+                if (p < len && (std::isdigit(static_cast<unsigned char>(sql[p])) || sql[p] == '-')) {
+                    char* end = nullptr;
+                    out_key = std::strtoll(sql.c_str() + p, &end, 10);
+                    if (end != sql.c_str() + p) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool sql_is_plain_select(const std::string& sql) {
     const std::string s = trim_copy(sql);
     if (s.size() < 6) return false;
@@ -2424,6 +2510,7 @@ pg_executor::pg_executor(int node_id,
 
     if (event_mode_) {
         conns_.reserve(all_conns_.size());
+        conn_qs_.resize(all_conns_.size());
         for (PGconn* c : all_conns_) {
             conn_state st;
             st.c = c;
@@ -2452,6 +2539,27 @@ pg_executor::pg_executor(int node_id,
 
 pg_executor::~pg_executor() {
     stop();
+}
+
+void pg_executor::push_task_ordered(task&& t) {
+    const bool preassigned_mode = state_machine_preassigned_ordering_enabled();
+    if (preassigned_mode && !conn_qs_.empty()) {
+        int64_t ycsb_key = 0;
+        size_t target_conn = 0;
+        if (extract_ycsb_key(t.sql, ycsb_key)) {
+            target_conn = (static_cast<uint64_t>(ycsb_key) * 2654435761ULL) % conn_qs_.size();
+        } else {
+            uint64_t task_seq = 0;
+            if (get_det_tx_seq_valid(t, task_seq)) {
+                target_conn = task_seq % conn_qs_.size();
+            } else {
+                target_conn = std::hash<std::string>{}(t.req_id) % conn_qs_.size();
+            }
+        }
+        conn_qs_[target_conn].push(std::move(t));
+    } else {
+        q_.push(std::move(t));
+    }
 }
 
 void pg_executor::enqueue(const std::string& req_id,
@@ -2484,6 +2592,7 @@ void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
     {
         const uint64_t now_ns = now_steady_ns();
         std::lock_guard<std::mutex> lk(q_mu_);
+        const bool preassigned_mode = state_machine_preassigned_ordering_enabled();
         for (size_t i = 0; i < req_ids.size(); ++i) {
             task t;
             t.req_id = req_ids[i];
@@ -2505,7 +2614,32 @@ void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
             if (i < item_digests_hex.size()) {
                 t.item_digest = item_digests_hex[i];
             }
-            q_.push(std::move(t));
+
+            uint64_t seq = 0;
+            const bool has_seq = get_det_tx_seq_valid(t, seq);
+            if (preassigned_mode && has_seq && is_det_prefixed_sql(t.sql) && !is_reset_barrier_sql(t.sql)) {
+                if (!det_preassigned_seq_initialized_ || seq < next_det_preassigned_seq_) {
+                    next_det_preassigned_seq_ = seq;
+                    det_preassigned_seq_initialized_ = true;
+                    det_preassigned_reorder_buf_.clear();
+                }
+                det_preassigned_reorder_buf_[seq] = std::move(t);
+                while (!det_preassigned_reorder_buf_.empty() &&
+                       det_preassigned_reorder_buf_.begin()->first == next_det_preassigned_seq_) {
+                    push_task_ordered(std::move(det_preassigned_reorder_buf_.begin()->second));
+                    det_preassigned_reorder_buf_.erase(det_preassigned_reorder_buf_.begin());
+                    ++next_det_preassigned_seq_;
+                }
+            } else {
+                if (preassigned_mode && !det_preassigned_reorder_buf_.empty()) {
+                    while (!det_preassigned_reorder_buf_.empty()) {
+                        push_task_ordered(std::move(det_preassigned_reorder_buf_.begin()->second));
+                        det_preassigned_reorder_buf_.erase(det_preassigned_reorder_buf_.begin());
+                    }
+                    det_preassigned_seq_initialized_ = false;
+                }
+                push_task_ordered(std::move(t));
+            }
 
             const size_t depth = q_.size();
             st_queue_depth_cur_.store(static_cast<uint64_t>(depth), std::memory_order_relaxed);
@@ -3192,11 +3326,30 @@ uint64_t pg_executor::get_det_tx_seq(const task& t) const {
     if (t.has_assigned_det_seq) {
         return t.assigned_det_seq;
     }
+    uint64_t seq = 0;
+    if (parse_det_prefixed_sql_parts(t.sql, &seq, nullptr)) {
+        return seq;
+    }
     uint64_t tx_seq = 0;
-    if (parse_req_num(t.req_id, tx_seq) && tx_seq > 0) {
+    if (parse_req_num(t.req_id, tx_seq)) {
         return tx_seq;
     }
     return 0;
+}
+
+bool pg_executor::get_det_tx_seq_valid(const task& t, uint64_t& out_seq) const {
+    if (t.has_assigned_det_seq) {
+        out_seq = t.assigned_det_seq;
+        return true;
+    }
+    if (parse_det_prefixed_sql_parts(t.sql, &out_seq, nullptr)) {
+        return true;
+    }
+    if (parse_req_num(t.req_id, out_seq)) {
+        return true;
+    }
+    out_seq = 0;
+    return false;
 }
 
 void pg_executor::det_mark_tx_state(uint64_t tx_seq, det_tx_state st) {
@@ -4738,6 +4891,18 @@ void pg_executor::event_loop() {
                 q_.push(delayed_.top().t);
                 delayed_.pop();
             }
+            if (!det_preassigned_reorder_buf_.empty()) {
+                const uint64_t oldest_enq_ns = det_preassigned_reorder_buf_.begin()->second.enqueue_ns;
+                if (oldest_enq_ns != 0 && now_ns >= oldest_enq_ns + 5000000ULL) {
+                    next_det_preassigned_seq_ = det_preassigned_reorder_buf_.begin()->first;
+                    while (!det_preassigned_reorder_buf_.empty() &&
+                           det_preassigned_reorder_buf_.begin()->first == next_det_preassigned_seq_) {
+                        push_task_ordered(std::move(det_preassigned_reorder_buf_.begin()->second));
+                        det_preassigned_reorder_buf_.erase(det_preassigned_reorder_buf_.begin());
+                        ++next_det_preassigned_seq_;
+                    }
+                }
+            }
             st_delayed_cur_.store(static_cast<uint64_t>(delayed_.size()), std::memory_order_relaxed);
         }
 
@@ -4751,13 +4916,27 @@ void pg_executor::event_loop() {
             det_event_block_fastpath_enabled() &&
             bcdb_init_done_ &&
             !conns_.empty()) {
+            const size_t fixed_chunk_size = []() -> size_t {
+                const char* v = std::getenv("ARIABC_DET_BLOCK_CHUNK_SIZE");
+                if (v && *v) {
+                    size_t s = std::strtoul(v, nullptr, 10);
+                    if (s > 0) return s;
+                }
+                const char* pol = std::getenv("ARIABC_RAFT_ORDERING_POLICY");
+                if (!pol || !*pol || std::string(pol) == "preassigned") {
+                    return 64; // Default fixed chunk size for preassigned determinism across thread counts
+                }
+                return 0;
+            }();
+
             const size_t base_block_cap = bcdb_init_done_
                 ? static_cast<size_t>(bcdb_block_size_)
                 : std::max<size_t>(1, static_cast<size_t>(db_opt_.conn_pool_size));
-            const size_t block_cap =
-                std::min<size_t>(det_block_max_,
-                                 base_block_cap *
-                                 static_cast<size_t>(std::max(1, det_block_pipeline_)));
+            const size_t block_cap = (fixed_chunk_size > 0)
+                ? std::min<size_t>(det_block_max_, fixed_chunk_size)
+                : std::min<size_t>(det_block_max_,
+                                   base_block_cap *
+                                   static_cast<size_t>(std::max(1, det_block_pipeline_)));
             int det_blocks_inflight = 0;
 
             for (const auto& cs : conns_) {
@@ -4777,8 +4956,34 @@ void pg_executor::event_loop() {
                     if (delayed_.empty() && !q_.empty() && is_det_prefixed_sql(q_.front().sql)) {
                         std::queue<task> restored;
                         std::vector<task> candidate;
-                        candidate.reserve(block_cap);
-                        while (!q_.empty() && candidate.size() < block_cap) {
+
+                        uint64_t start_seq = 0;
+                        bool has_start_seq = get_det_tx_seq_valid(q_.front(), start_seq);
+
+                        size_t desired_block_size = block_cap;
+                        if (has_start_seq && block_cap > 0) {
+                            const size_t offset_in_block = static_cast<size_t>(start_seq % block_cap);
+                            desired_block_size = block_cap - offset_in_block;
+                        }
+                        if (desired_block_size == 0) desired_block_size = block_cap;
+                        desired_block_size = std::min<size_t>(block_cap, desired_block_size);
+
+                        candidate.reserve(desired_block_size);
+                        uint64_t expected_next_seq = start_seq;
+
+                        while (!q_.empty() && candidate.size() < desired_block_size) {
+                            const task& front_task = q_.front();
+                            if (!is_det_prefixed_sql(front_task.sql)) {
+                                break;
+                            }
+                            if (lower_copy(trim_copy(front_task.sql)).find("bcdb_reset(") != std::string::npos) {
+                                if (candidate.empty()) {
+                                    candidate.push_back(std::move(q_.front()));
+                                    q_.pop();
+                                }
+                                break;
+                            }
+
                             /*
                              * In Kafka-only/bypass mode raft_log_idx is 0, so
                              * each replica must keep the gateway batch boundary:
@@ -4790,33 +4995,37 @@ void pg_executor::event_loop() {
                              * block may span several committed Raft batches.
                              */
                             if (!candidate.empty() &&
-                                q_.front().raft_log_idx != candidate.front().raft_log_idx &&
+                                front_task.raft_log_idx != candidate.front().raft_log_idx &&
                                 (candidate.front().raft_log_idx == 0 ||
-                                 q_.front().raft_log_idx == 0)) {
+                                 front_task.raft_log_idx == 0)) {
                                 break;
                             }
+
+                            uint64_t cur_seq = 0;
+                            if (has_start_seq) {
+                                if (!get_det_tx_seq_valid(front_task, cur_seq) || cur_seq != expected_next_seq) {
+                                    break;
+                                }
+                                expected_next_seq = cur_seq + 1;
+                            }
+
                             candidate.push_back(std::move(q_.front()));
                             q_.pop();
                         }
 
                         bool eligible = !candidate.empty();
-                        uint64_t first_req_num = 0;
-                        for (size_t i = 0; eligible && i < candidate.size(); ++i) {
-                            const uint64_t req_num = get_det_tx_seq(candidate[i]);
-                            if (req_num == 0 || !is_det_prefixed_sql(candidate[i].sql)) {
-                                eligible = false;
-                                break;
-                            }
-                            if (i == 0) {
-                                first_req_num = req_num;
-                            } else if (req_num != first_req_num + static_cast<uint64_t>(i)) {
-                                eligible = false;
-                                break;
-                            }
+                        const bool is_single_barrier =
+                            (candidate.size() == 1 &&
+                             lower_copy(trim_copy(candidate.front().sql)).find("bcdb_reset(") != std::string::npos);
+
+                        uint64_t partial_wait_ns = det_partial_block_max_wait_ns();
+                        if (state_machine_preassigned_ordering_enabled()) {
+                            partial_wait_ns = 50ULL * 1000ULL * 1000ULL; // 50ms wait to ensure full 64-tx block alignment
+                        } else if (partial_wait_ns == 0 && (fixed_chunk_size > 0)) {
+                            partial_wait_ns = 2ULL * 1000ULL * 1000ULL; // 2ms default for aligned determinism
                         }
 
-                        const uint64_t partial_wait_ns = det_partial_block_max_wait_ns();
-                        if (eligible && partial_wait_ns > 0 && candidate.size() < block_cap) {
+                        if (eligible && !is_single_barrier && candidate.size() < desired_block_size && partial_wait_ns > 0) {
                             const uint64_t oldest_enqueue_ns = candidate.front().enqueue_ns;
                             if (oldest_enqueue_ns != 0) {
                                 const uint64_t ready_ns = oldest_enqueue_ns + partial_wait_ns;
@@ -5074,8 +5283,9 @@ void pg_executor::event_loop() {
 
         // Assign ready work to idle connections.
         size_t inflight = 0;
+        const bool preassigned_exec = state_machine_preassigned_ordering_enabled();
         const bool cap_det_event_inflight =
-            db_opt_.db_type == 1 && !det_event_block_fastpath_enabled();
+            db_opt_.db_type == 1 && !det_event_block_fastpath_enabled() && !preassigned_exec;
         const bool strict_det_per_tx_event =
             cap_det_event_inflight &&
             !det_allow_raw_compat_ &&
@@ -5087,7 +5297,8 @@ void pg_executor::event_loop() {
                          static_cast<size_t>(std::max(1, det_block_parallel_)),
                          conns_.empty() ? 1 : conns_.size()))
             : conns_.size();
-        for (auto& cs : conns_) {
+        for (size_t conn_idx = 0; conn_idx < conns_.size(); ++conn_idx) {
+            auto& cs = conns_[conn_idx];
             if (cs.st != conn_state::state::IDLE) {
                 ++inflight;
                 continue;
@@ -5101,7 +5312,11 @@ void pg_executor::event_loop() {
             size_t depth_after_pop = 0;
             {
                 std::lock_guard<std::mutex> lk(q_mu_);
-                if (!q_.empty()) {
+                if (!conn_qs_.empty() && conn_idx < conn_qs_.size() && !conn_qs_[conn_idx].empty()) {
+                    t = std::move(conn_qs_[conn_idx].front());
+                    conn_qs_[conn_idx].pop();
+                    have = true;
+                } else if (!q_.empty()) {
                     const task& front = q_.front();
                     if (db_opt_.db_type == 1 &&
                         !is_det_prefixed_sql(front.sql) &&
@@ -5168,7 +5383,7 @@ void pg_executor::event_loop() {
                     }
                 }
             }
-            if (!have) break;
+            if (!have) continue;
             if (t.dispatch_seq == 0) {
                 t.dispatch_seq = next_dispatch_seq_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -5661,7 +5876,11 @@ void pg_executor::event_loop() {
         }
         if (idle) {
             std::lock_guard<std::mutex> lk(q_mu_);
-            if (q_.empty() && delayed_.empty()) {
+            bool all_conn_qs_empty = true;
+            for (const auto& cq : conn_qs_) {
+                if (!cq.empty()) { all_conn_qs_empty = false; break; }
+            }
+            if (q_.empty() && delayed_.empty() && all_conn_qs_empty) {
                 flush_batch(FLUSH_REASON_IDLE);
             }
         }

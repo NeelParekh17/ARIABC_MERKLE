@@ -3015,10 +3015,17 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 published_max_advanced = true;
             }
 
-            /*
-             * Lever D v2 apply path:
-             * retry apply in a subtransaction without re-running parse/plan.
-             */
+			/*
+			 * Enforce strict sequence order for heap write-set application:
+			 * Transaction N must only apply its writes to the heap after
+			 * transaction N-1 has fully committed to prevent page lock races
+			 * on intersecting keys from corrupting update ordering.
+			 */
+			if (!SIMPLEQ_EMPTY(&activeTx->optim_write_list))
+			{
+				bcdb_wait_for_prev_committed(tx);
+			}
+
             PTRACE_BEGIN(BCDB_PHASE_APPLY);
             apply_nonretryable = false;
             apply_terminal_noop = false;

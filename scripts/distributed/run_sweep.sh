@@ -18,6 +18,9 @@ Sweep options:
                            Default: "1 2 3"
   --kafka-completion-mode MODE Completion mode: majority, majority_async_all3, or async.
                            Default: "majority"
+  --raft-ordering-policy POLICY
+                           Raft ordering policy: leader-assigned or preassigned.
+                           Default: "leader-assigned"
 
 Cluster topology options forwarded to run_4node_raft_cluster.sh:
   --node-ids CSV
@@ -42,6 +45,7 @@ Example:
     --threads 96 \
     --executor-workers 4,8,16 \
     --reps 1,2 \
+    --raft-ordering-policy preassigned \
     --node-ids 1,2,3 \
     --node-ips 10.10.0.11,10.10.0.12,10.10.0.13 \
     --node-names node-a,node-b,node-c \
@@ -62,6 +66,7 @@ EXECUTOR_WORKERS="1 2 4 8 12 16"
 REPS="1 2 3"
 KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority}"
 EXECUTION_PROFILE="${EXECUTION_PROFILE:-event-direct}"
+RAFT_ORDERING_POLICY="${RAFT_ORDERING_POLICY:-leader-assigned}"
 CLUSTER_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -86,6 +91,10 @@ while [[ $# -gt 0 ]]; do
       KAFKA_COMPLETION_MODE="${2:?missing value for --kafka-completion-mode}"
       shift 2
       ;;
+    --raft-ordering-policy)
+      RAFT_ORDERING_POLICY="${2:?missing value for --raft-ordering-policy}"
+      shift 2
+      ;;
     --execution-profile)
       EXECUTION_PROFILE="${2:?missing value for --execution-profile}"
       CLUSTER_ARGS+=("$1" "$2")
@@ -93,7 +102,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --node-ids|--node-ips|--node-names|--node-users|--node-is-u22|--node-client-ports|\
     --raft-port|--db-port|--db-user|--db-name|--kafka-host|--kafka-port|--kafka-home-remote|\
-    --det-client-inflight|--raft-ordered-batch-linger-us|--enable-merkle-index|--det-client-mode)
+    --det-client-inflight|--raft-ordered-batch-linger-us|--enable-merkle-index|--det-client-mode|\
+    --raft-ordered-batch-append|--raft-ordered-batch-target-entries|--raft-ordered-coalesce-log|\
+    --raft-ordered-fanout|--conn-fanout|--det-window|--bcdb-decouple-workers)
       CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
       shift 2
       ;;
@@ -138,6 +149,7 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
   printf 'executor_workers=%s\n' "$EXECUTOR_WORKERS"
   printf 'reps=%s\n' "$REPS"
   printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
+  printf 'raft_ordering_policy=%s\n' "$RAFT_ORDERING_POLICY"
   printf 'cluster_args='
   printf '%q ' "${CLUSTER_ARGS[@]}"
   printf '\n'
@@ -145,7 +157,7 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
 
 # Wrapped execution sequence to funnel into out.txt
 {
-  echo "Campaign: threads=$THREADS det_client_workers=$DET_CLIENT_WORKERS executor_workers=[$EXECUTOR_WORKERS] reps=[$REPS] kafka_completion_mode=$KAFKA_COMPLETION_MODE"
+  echo "Campaign: threads=$THREADS det_client_workers=$DET_CLIENT_WORKERS executor_workers=[$EXECUTOR_WORKERS] reps=[$REPS] kafka_completion_mode=$KAFKA_COMPLETION_MODE raft_ordering_policy=$RAFT_ORDERING_POLICY"
   if [[ "${#CLUSTER_ARGS[@]}" -gt 0 ]]; then
     printf 'Cluster args: '
     printf '%q ' "${CLUSTER_ARGS[@]}"
