@@ -37,8 +37,8 @@ DB_HOST = "/tmp"
 RATE = 800
 NUM = 4
 LOG_SKIP = 4000
-MAX_RETRIES = 10  # Increased for BCDB slot contention
-RETRY_BACKOFF_SEC = 0.1  # Increased for BCDB
+MAX_RETRIES = 50  # Increased for BCDB slot contention and high concurrency
+RETRY_BACKOFF_SEC = 0.05  # Increased for BCDB
 # Benchmarks can legitimately have long deterministic waits/retries.
 # Keep statement timeout disabled by default; allow override via env.
 STATEMENT_TIMEOUT = "0"

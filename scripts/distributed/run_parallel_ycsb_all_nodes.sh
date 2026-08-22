@@ -9,9 +9,10 @@ set -euo pipefail
 # to finish before starting the next).
 #
 # Active nodes:
-#   neel@10.129.148.248    utkarsh-MS-7C96
+#   neel@10.129.148.248      utkarsh-MS-7C96
 #   neel@10.129.148.246      kartik-MS-7C96  (Ubuntu 22.04 – on-host rebuild)
-#   neel@10.129.148.247    neel-MS-7C96
+#   neel@10.129.148.247      neel-MS-7C96
+#   protectdr@ranking.cse.iitb.ac.in  user-MZ73-LM0-000 (AMD EPYC 9654 96-Core)
 #
 # Default benchmark profiles (runs 3 × modes in this order):
 #   1. pg mode                   – plain PostgreSQL baseline (no BCDB)
@@ -29,6 +30,7 @@ set -euo pipefail
 # Usage:
 #   scripts/distributed/run_parallel_ycsb_all_nodes.sh [options]
 #
+#   --nodes <csv>           Comma-separated list of target user@host nodes
 #   --ssh-key <path>        SSH private key (optional if key-auth is default)
 #   --ssh-port <22>         SSH port
 #   --modes <...>          Comma-separated modes: pg, bcdb_det, bcdb_merkle  [default: pg,bcdb_det,bcdb_merkle]
@@ -51,13 +53,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/benchmark_defaults.sh"
 
 # ---- Static node config ----
-NEEL_NODES=(
+DEFAULT_NODES=(
   "neel@10.129.148.248"
   "neel@10.129.148.246"
   "neel@10.129.148.247"
+  "protectdr@ranking.cse.iitb.ac.in"
 )
-NEEL_REMOTE_REPO="/home/neel/Desktop/ariabc_cluster"
-NEEL_REMOTE_INSTALL="/home/neel/Desktop/ariabc_install"
+NODES_OVERRIDE=""
 TEMPLATE_CONF_LOCAL="/work/ARIABC/pgdata/postgresql.conf"
 LOCAL_INSTALL_DIR="${ARIABC_INSTALL_DIR:-/work/ARIABC/install}"
 
@@ -88,6 +90,7 @@ SKIP_SYNC=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --nodes)         NODES_OVERRIDE="${2:-}"; shift 2 ;;
     --ssh-key)       SSH_KEY="${2:-}"; shift 2 ;;
     --ssh-port)      SSH_PORT="${2:-22}"; shift 2 ;;
     --modes)         MODES="${2:-pg,bcdb_det,bcdb_merkle}"; shift 2 ;;
@@ -302,12 +305,25 @@ echo
 # ---- Build node registry ----
 # Entry format: "node|repo_root|install_dir|type"
 declare -a ALL_NODES=()
+declare -a _target_nodes=()
 
-for n in "${NEEL_NODES[@]}"; do
-  ALL_NODES+=("$n|${NEEL_REMOTE_REPO}|${NEEL_REMOTE_INSTALL}|neel")
+if [[ -n "$NODES_OVERRIDE" ]]; then
+  IFS=',' read -ra _target_nodes <<< "$NODES_OVERRIDE"
+else
+  _target_nodes=("${DEFAULT_NODES[@]}")
+fi
+
+for n in "${_target_nodes[@]}"; do
+  n="$(echo "$n" | xargs)"
+  [[ -z "$n" ]] && continue
+  user="${n%@*}"
+  host="${n#*@}"
+  repo="/home/$user/Desktop/ariabc_cluster"
+  inst="/home/$user/Desktop/ariabc_install"
+  ALL_NODES+=("$n|$repo|$inst|$user")
 done
 
-lmsg "Nodes:"
+lmsg "Nodes (${#ALL_NODES[@]}):"
 for entry in "${ALL_NODES[@]}"; do
   IFS='|' read -r node repo inst type <<< "$entry"
   lmsg "  [$type] $node"
@@ -831,17 +847,16 @@ lmsg "Long-stage threshold: ${HANG_TIMEOUT_S}s of no parent-log change."
 echo
 
 # ============================================================
-# PHASE 2.5: VERIFY synchronous_commit = on ON ALL NODES
-# Query the live running Postgres on every node right now,
-# while the benchmark is active, to confirm the setting has
-# not been flipped by auto.conf, ALTER SYSTEM, or a session SET.
+# PHASE 2.5: LIVE GUC VALIDATION
+# Verify GUC parameters match dynamic Merkle contract
 # ============================================================
 lmsg "=== Phase 2.5: Verifying synchronous_commit and merkle_apply_synchronous_direct on all nodes ==="
 declare -a _sc_bad=()
 _check_synchronous_commit() {
   local node="$1"
-  local type="$2"
-  local inst="${NODE_INST[$node]:-}"
+  local repo="$2"
+  local inst="$3"
+  local type="$4"
   local psql_bin="$inst/bin/psql"
   local sc_val=""
   local merkle_sync_val=""
@@ -869,7 +884,7 @@ _check_synchronous_commit() {
        -tAc 'SHOW bcdb_serial_gate_source;' 2>/dev/null || true" 2>/dev/null || true)
     gate_source_val="${gate_source_val//[[:space:]]/}"
 
-    if [[ "$sc_val" == "on" && "$merkle_sync_val" == "on" &&
+    if [[ "$sc_val" == "on" && "$merkle_sync_val" == "on" && \
           "$advance_val" == "on" && "$gate_source_val" == "0" ]]; then
       lmsg "  [OK]  $node  synchronous_commit=on, merkle_apply_synchronous_direct=on, bcdb_advance_commit_watermark=on, bcdb_serial_gate_source=0"
       return 0
@@ -888,7 +903,7 @@ _check_synchronous_commit() {
 for entry in "${ALL_NODES[@]}"; do
   IFS='|' read -r node repo inst type <<< "$entry"
   [[ "${NODE_STATUS[$node]:-}" == "running" ]] || continue
-  _check_synchronous_commit "$node" "$type"
+  _check_synchronous_commit "$node" "$repo" "$inst" "$type"
 done
 
 if [[ "${#_sc_bad[@]}" -gt 0 ]]; then
@@ -912,13 +927,23 @@ _active_count() {
 _collect_node() {
   local node="$1"
   local remote_out="${NODE_REMOTE_OUT[$node]}"
-  local local_node_dir="$LOCAL_RESULT_ROOT/$(safe_label "$node")"
+  local safe_node
+  safe_node="$(safe_label "$node")"
+  local local_node_dir="$LOCAL_RESULT_ROOT/$safe_node"
+  local collect_log="$LOG_DIR/collect_${safe_node}.log"
 
   mkdir -p "$local_node_dir"
   rsync -az \
     -e "$(_rsync_e_for_node "$node")" \
-    "$node:$remote_out/" "$local_node_dir/" 2>/dev/null || \
-    lmsg "  WARNING: rsync of results failed for $node"
+    "$node:$remote_out/" "$local_node_dir/" \
+    > "$collect_log" 2>&1 || true
+
+  # Also pull the main bench nohup log
+  local remote_bench_log="${NODE_LOG[$node]}"
+  rsync -az \
+    -e "$(_rsync_e_for_node "$node")" \
+    "$node:$remote_bench_log" "$LOG_DIR/bench_${safe_node}.log" \
+    >> "$collect_log" 2>&1 || true
 
   if [[ -f "$local_node_dir/results.csv" && -f "$local_node_dir/summary.csv" ]]; then
     NODE_STATUS["$node"]="done"
@@ -1109,9 +1134,9 @@ done
 echo
 
 # ============================================================
-# PHASE 5: COMBINED GRAPHS
+# PHASE 5: DEDICATED PER-NODE & COMBINED GRAPHS
 # ============================================================
-lmsg "=== Phase 5: Generating combined graphs ==="
+lmsg "=== Phase 5: Generating per-node and combined graphs ==="
 python3 - "$LOCAL_RESULT_ROOT" <<'PYEOF'
 import csv
 import sys
@@ -1123,7 +1148,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 except Exception:
-    print("  [GRAPH] matplotlib not found, skipping combined graphs.")
+    print("  [GRAPH] matplotlib not found, skipping graph generation.")
     sys.exit(0)
 
 result_root = Path(sys.argv[1])
@@ -1137,23 +1162,6 @@ def as_float(v):
     try: return float((v or "").strip())
     except: return None
 
-groups = {}
-for ndir in node_dirs:
-    node_name = ndir.name
-    summary_csv = ndir / "summary.csv"
-    if not summary_csv.exists():
-        continue
-    with summary_csv.open("r", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            wl = (row.get("workload") or "").strip()
-            if not wl: continue
-            rate = as_int(row.get("rate", "")) or 0
-            groups.setdefault((wl, rate), []).append((node_name, row))
-
-if not groups:
-    sys.exit(0)
-
 mode_norm = {
     "postgres": "pg", "pg": "pg",
     "bcdb_det": "bcdb_det", "bcdb": "bcdb_det",
@@ -1161,43 +1169,150 @@ mode_norm = {
     "aria": "nondet", "nondet": "nondet",
 }
 
+mode_meta = {
+    "pg": {"label": "Plain PostgreSQL (pg)", "color": "#1f77b4", "marker": "o", "linestyle": "-"},
+    "bcdb_det": {"label": "BCDB Deterministic (bcdb_det)", "color": "#ff7f0e", "marker": "s", "linestyle": "--"},
+    "bcdb_merkle": {"label": "BCDB Dynamic Merkle (bcdb_merkle)", "color": "#2ca02c", "marker": "D", "linestyle": "-"},
+}
+
+node_title_map = {
+    "neel_at_10_129_148_248": "Node 1: 10.129.148.248 (utkarsh-MS-7C96)",
+    "neel_at_10_129_148_246": "Node 2: 10.129.148.246 (kartik-MS-7C96)",
+    "neel_at_10_129_148_247": "Node 3: 10.129.148.247 (neel-MS-7C96)",
+    "protectdr_at_ranking_cse_iitb_ac_in": "Node 4: ranking.cse.iitb.ac.in (AMD EPYC 9654 96-Core)",
+}
+
+groups = {}
+node_summaries = {}
+
+for ndir in node_dirs:
+    node_name = ndir.name
+    summary_csv = ndir / "summary.csv"
+    if not summary_csv.exists():
+        continue
+    node_rows = []
+    with summary_csv.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            node_rows.append(row)
+            wl = (row.get("workload") or "").strip()
+            if not wl: continue
+            rate = as_int(row.get("rate", "")) or 0
+            groups.setdefault((wl, rate), []).append((node_name, row))
+    if node_rows:
+        node_summaries[node_name] = node_rows
+
+# 1. Generate dedicated per-node comparison graphs
+for node_name, rows in node_summaries.items():
+    workloads_in_node = sorted(list({(r.get("workload") or "").strip() for r in rows if (r.get("workload") or "").strip()}))
+    if not workloads_in_node:
+        continue
+
+    num_wl = len(workloads_in_node)
+    fig_w = 7.5 * num_wl
+    fig, axes = plt.subplots(1, num_wl, figsize=(fig_w, 5.8), dpi=160, squeeze=False)
+    display_node = node_title_map.get(node_name, node_name.replace("_at_", "@").replace("_", "."))
+    fig.suptitle(f"AriaBC Throughput (TPS vs Threads)\n{display_node}", fontsize=13, fontweight="bold", y=0.98)
+
+    for ax_idx, wl in enumerate(workloads_in_node):
+        ax = axes[0][ax_idx]
+        stem = re.sub(r'[^A-Za-z0-9_.-]', '_', wl)
+        title = f"{wl}"
+        if "skew0-99" in wl or "skew0.99" in wl:
+            title = f"YCSB Skew 0.99 (Point + Inserts)\n{wl}"
+        elif "skew-01" in wl or "skew0.1" in wl:
+            title = f"YCSB Skew 0.1 (Clean Txns)\n{wl}"
+        ax.set_title(title, fontsize=10, fontweight="bold", pad=8)
+        ax.set_xlabel("Concurrent Threads", fontsize=9, fontweight="bold")
+        ax.set_ylabel("Throughput (TPS)", fontsize=9, fontweight="bold")
+        ax.grid(True, linestyle="--", alpha=0.5, color="#cccccc")
+
+        for mode_key in ["pg", "bcdb_det", "bcdb_merkle"]:
+            meta = mode_meta[mode_key]
+            sub = [
+                r for r in rows
+                if (r.get("workload") or "").strip() == wl and mode_norm.get((r.get("mode") or "").strip().lower()) == mode_key
+            ]
+            sub = sorted(sub, key=lambda x: as_int(x.get("threads")) or 0)
+            if not sub:
+                continue
+            xs = [as_int(r.get("threads")) for r in sub if as_int(r.get("threads")) is not None]
+            ys = [as_float(r.get("median_throughput_tps")) or as_float(r.get("mean_throughput_tps")) for r in sub]
+            valid_pairs = [(x, y) for x, y in zip(xs, ys) if x is not None and y is not None]
+            if not valid_pairs:
+                continue
+            pxs = [p[0] for p in valid_pairs]
+            pys = [p[1] for p in valid_pairs]
+
+            ax.plot(
+                pxs, pys,
+                label=meta["label"],
+                color=meta["color"],
+                marker=meta["marker"],
+                markersize=5.5,
+                linewidth=2.0,
+                linestyle=meta["linestyle"]
+            )
+
+            # Peak label
+            if pys:
+                max_idx = pys.index(max(pys))
+                ax.annotate(
+                    f"{pys[max_idx]:.0f}",
+                    xy=(pxs[max_idx], pys[max_idx]),
+                    xytext=(0, 6),
+                    textcoords="offset points",
+                    ha="center",
+                    fontsize=8,
+                    color=meta["color"],
+                    fontweight="bold"
+                )
+
+        ax.set_xticks(sorted(list({as_int(r.get("threads")) for r in rows if as_int(r.get("threads")) is not None})))
+        ax.set_ylim(bottom=0)
+        ax.legend(frameon=True, facecolor="white", edgecolor="#e0e0e0", fontsize=8.5, loc="upper left")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    out_path = result_root / f"{node_name}_tps.png"
+    fig.savefig(out_path, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  [GRAPH] Generated per-node graph: {out_path.name}")
+
+# 2. Generate combined cross-node graphs
 for (workload, rate), items in groups.items():
     series = {}
     for node_name, r in items:
         raw_mode = (r.get("mode") or "").strip().lower()
         mode = mode_norm.get(raw_mode, raw_mode)
-        
+
         if mode not in ("pg", "bcdb_det", "bcdb_merkle"):
             continue
-        
+
         label = f"{node_name}_{mode}"
-        
         th = as_int(r.get("threads", ""))
         tps = as_float(r.get("median_throughput_tps", ""))
         if tps is None:
             tps = as_float(r.get("mean_throughput_tps", ""))
         if th is None or tps is None:
             continue
-            
+
         series.setdefault(label, []).append((th, tps))
-        
+
     if not any(series.values()):
         continue
-        
+
     fig, ax = plt.subplots(figsize=(10, 6), dpi=130)
-    
-    # Sort labels for consistent coloring
+
     for label in sorted(series.keys()):
         points = sorted(series[label], key=lambda x: x[0])
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
-        
-        # simple heuristic for line style
+
         ls = "-"
         if "_bcdb_det" in label: ls = "--"
         if "_bcdb_merkle" in label: ls = "-"
         if "_nondet" in label: ls = ":"
-        
+
         ax.plot(xs, ys, marker="o", linewidth=1.5, markersize=4.0, linestyle=ls, label=label)
 
     ax.set_xlabel("Threads")
@@ -1207,27 +1322,28 @@ for (workload, rate), items in groups.items():
         title += f" - rate={rate}"
     ax.set_title(title)
     ax.grid(True, linestyle="--", alpha=0.6)
-    
+
     if len(series) > 6:
         ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0.)
     else:
         ax.legend()
-        
+
     def safe_name(s):
         s = s.replace('@', '_at_')
         return re.sub(r'[^A-Za-z0-9_.-]', '_', s)
-        
+
     stem = safe_name(workload)
     out_name = f"combined_tps_{stem}"
     if rate > 0:
         out_name += f"_rate-{rate}"
     out_name += ".png"
-    
+
     out_path = result_root / out_name
     fig.savefig(out_path, bbox_inches='tight')
     plt.close(fig)
     print(f"  [GRAPH] Generated combined graph: {out_name}")
 PYEOF
+
 echo
 
 lmsg "Logs:    $LOG_DIR"

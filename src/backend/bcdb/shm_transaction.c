@@ -17,6 +17,7 @@
 #include <executor/executor.h>
 #include <executor/nodeModifyTable.h>
 #include <bcdb/worker.h>
+#include "bcdb/shm_block.h"
 #include "bcdb/bcdb_dsa.h"
 #include "utils/hsearch.h"
 #include <stddef.h>
@@ -2407,6 +2408,21 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
 							  ItemPointerGetBlockNumberNoCheck(&currentTid),
 							  ItemPointerGetOffsetNumberNoCheck(&currentTid));
 				XactLockTableWait(wait_xid, relation, &currentTid, XLTW_FetchUpdated);
+				retry_lookup = true;
+			}
+			else if (!found &&
+					 activeTx != NULL &&
+					 activeTx->tx_id > 0 &&
+					 bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
+					 get_last_committed_txid(activeTx) < (activeTx->tx_id - 1))
+			{
+				BCDB_FLOW_LOG("[BCDB_FLOW] deferred_delete_wait_prev_commit pid=%d txid=%d rel=%u key=%d last_committed=%d",
+							  MyProcPid,
+							  (int)activeTx->tx_id,
+							  (unsigned int)relOid,
+							  keyval,
+							  (int)get_last_committed_txid(activeTx));
+				bcdb_wait_for_prev_committed(activeTx);
 				retry_lookup = true;
 			}
 		} while (retry_lookup);

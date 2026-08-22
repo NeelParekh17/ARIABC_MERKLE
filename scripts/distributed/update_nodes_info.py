@@ -18,6 +18,7 @@ NODES = [
     {"id": 1, "name": "admin123", "user": "neel", "ip": "10.129.148.247", "client_port": 8000, "is_gateway": False},
     {"id": 2, "name": "user4", "user": "neel", "ip": "10.129.148.246", "client_port": 8000, "is_gateway": False},
     {"id": 4, "name": "utkarsh", "user": "neel", "ip": "10.129.148.248", "client_port": 8001, "is_gateway": False},
+    {"id": 7, "name": "ranking-epyc", "user": "protectdr", "ip": "ranking.cse.iitb.ac.in", "client_port": 8000, "is_gateway": False},
     {"id": 5, "name": "asus-laptop", "user": "neel", "ip": "127.0.0.1", "client_port": 8000, "is_gateway": True},
     {"id": 6, "name": "proposed-gw", "user": "neel", "ip": "10.129.27.111", "client_port": 8000, "is_gateway": True},
 ]
@@ -368,9 +369,9 @@ def main():
     md = []
     md.append("# 🖥️ AriaBC 4-Node Cluster Inventory & Live Status")
     md.append("")
-    md.append(f"> **Last Updated:** `{now_str}`  ")
-    md.append("> **Automatic Update:** Yes (Updated via `scripts/distributed/update_nodes_info.py`)  ")
-    md.append("> **Service Sockets Checked:** BCDB PostgreSQL (Port `5438`), AriaBC Server (Port `8000`/`8001`)  ")
+    md.append(f"> **Last Updated:** `{now_str}`")
+    md.append("> **Automatic Update:** Yes (Updated via `scripts/distributed/update_nodes_info.py`)")
+    md.append("> **Service Sockets Checked:** BCDB PostgreSQL (Port `5438`), AriaBC Server (Port `8000`/`8001`)")
     md.append("")
     md.append("## 📊 Cluster Summary Table")
     md.append("")
