@@ -2544,17 +2544,12 @@ pg_executor::~pg_executor() {
 void pg_executor::push_task_ordered(task&& t) {
     const bool preassigned_mode = state_machine_preassigned_ordering_enabled();
     if (preassigned_mode && !conn_qs_.empty()) {
-        int64_t ycsb_key = 0;
+        uint64_t task_seq = 0;
         size_t target_conn = 0;
-        if (extract_ycsb_key(t.sql, ycsb_key)) {
-            target_conn = (static_cast<uint64_t>(ycsb_key) * 2654435761ULL) % conn_qs_.size();
+        if (get_det_tx_seq_valid(t, task_seq)) {
+            target_conn = task_seq % conn_qs_.size();
         } else {
-            uint64_t task_seq = 0;
-            if (get_det_tx_seq_valid(t, task_seq)) {
-                target_conn = task_seq % conn_qs_.size();
-            } else {
-                target_conn = std::hash<std::string>{}(t.req_id) % conn_qs_.size();
-            }
+            target_conn = std::hash<std::string>{}(t.req_id) % conn_qs_.size();
         }
         conn_qs_[target_conn].push(std::move(t));
     } else {
