@@ -256,72 +256,6 @@ static bool state_machine_preassigned_ordering_enabled() {
     return pol.empty() || pol == "preassigned";
 }
 
-static bool extract_ycsb_key(const std::string& sql, int64_t& out_key) {
-    if (sql.empty()) return false;
-    const size_t len = sql.size();
-
-    // 1. Search for WHERE clause (for SELECT, UPDATE, DELETE)
-    for (size_t i = 0; i + 5 < len; ++i) {
-        if ((sql[i] == 'w' || sql[i] == 'W') &&
-            (sql[i+1] == 'h' || sql[i+1] == 'H') &&
-            (sql[i+2] == 'e' || sql[i+2] == 'E') &&
-            (sql[i+3] == 'r' || sql[i+3] == 'R') &&
-            (sql[i+4] == 'e' || sql[i+4] == 'E') &&
-            (i == 0 || std::isspace(static_cast<unsigned char>(sql[i-1]))) &&
-            (std::isspace(static_cast<unsigned char>(sql[i+5])))) {
-            size_t p = i + 5;
-            while (p + 3 < len) {
-                if ((sql[p] == 'k' || sql[p] == 'K') &&
-                    (sql[p+1] == 'e' || sql[p+1] == 'E') &&
-                    (sql[p+2] == 'y' || sql[p+2] == 'Y')) {
-                    size_t k = p + 3;
-                    while (k < len && (sql[k] == ' ' || sql[k] == '=' || sql[k] == '_' ||
-                                      sql[k] == 's' || sql[k] == 'S' ||
-                                      sql[k] == 'b' || sql[k] == 'B' ||
-                                      sql[k] == 'y' || sql[k] == 'Y' ||
-                                      sql[k] == 'c' || sql[k] == 'C')) {
-                        if (sql[k] == '=') {
-                            ++k;
-                            break;
-                        }
-                        ++k;
-                    }
-                    while (k < len && sql[k] == ' ') ++k;
-                    if (k < len && (std::isdigit(static_cast<unsigned char>(sql[k])) || sql[k] == '-')) {
-                        char* end = nullptr;
-                        out_key = std::strtoll(sql.c_str() + k, &end, 10);
-                        if (end != sql.c_str() + k) return true;
-                    }
-                }
-                ++p;
-            }
-        }
-    }
-
-    // 2. Search for VALUES clause (for INSERT)
-    for (size_t i = 0; i + 6 < len; ++i) {
-        if ((sql[i] == 'v' || sql[i] == 'V') &&
-            (sql[i+1] == 'a' || sql[i+1] == 'A') &&
-            (sql[i+2] == 'l' || sql[i+2] == 'L') &&
-            (sql[i+3] == 'u' || sql[i+3] == 'U') &&
-            (sql[i+4] == 'e' || sql[i+4] == 'E') &&
-            (sql[i+5] == 's' || sql[i+5] == 'S')) {
-            size_t p = i + 6;
-            while (p < len && sql[p] != '(') ++p;
-            if (p < len && sql[p] == '(') {
-                ++p;
-                while (p < len && sql[p] == ' ') ++p;
-                if (p < len && (std::isdigit(static_cast<unsigned char>(sql[p])) || sql[p] == '-')) {
-                    char* end = nullptr;
-                    out_key = std::strtoll(sql.c_str() + p, &end, 10);
-                    if (end != sql.c_str() + p) return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
 bool sql_is_plain_select(const std::string& sql) {
     const std::string s = trim_copy(sql);
     if (s.size() < 6) return false;
@@ -2542,8 +2476,7 @@ pg_executor::~pg_executor() {
 }
 
 void pg_executor::push_task_ordered(task&& t) {
-    const bool preassigned_mode = state_machine_preassigned_ordering_enabled();
-    if (preassigned_mode && !conn_qs_.empty()) {
+    if (!conn_qs_.empty()) {
         uint64_t task_seq = 0;
         size_t target_conn = 0;
         if (get_det_tx_seq_valid(t, task_seq)) {
@@ -2612,7 +2545,7 @@ void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
 
             uint64_t seq = 0;
             const bool has_seq = get_det_tx_seq_valid(t, seq);
-            if (preassigned_mode && has_seq && is_det_prefixed_sql(t.sql) && !is_reset_barrier_sql(t.sql)) {
+            if (has_seq && is_det_prefixed_sql(t.sql) && !is_reset_barrier_sql(t.sql)) {
                 if (!det_preassigned_seq_initialized_ || seq < next_det_preassigned_seq_) {
                     next_det_preassigned_seq_ = seq;
                     det_preassigned_seq_initialized_ = true;
@@ -2626,7 +2559,7 @@ void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
                     ++next_det_preassigned_seq_;
                 }
             } else {
-                if (preassigned_mode && !det_preassigned_reorder_buf_.empty()) {
+                if (!det_preassigned_reorder_buf_.empty()) {
                     while (!det_preassigned_reorder_buf_.empty()) {
                         push_task_ordered(std::move(det_preassigned_reorder_buf_.begin()->second));
                         det_preassigned_reorder_buf_.erase(det_preassigned_reorder_buf_.begin());
@@ -2636,7 +2569,11 @@ void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
                 push_task_ordered(std::move(t));
             }
 
-            const size_t depth = q_.size();
+            size_t total_conn_qs = 0;
+            for (const auto& cq : conn_qs_) {
+                total_conn_qs += cq.size();
+            }
+            const size_t depth = q_.size() + total_conn_qs;
             st_queue_depth_cur_.store(static_cast<uint64_t>(depth), std::memory_order_relaxed);
             st_queue_depth_samples_.fetch_add(1, std::memory_order_relaxed);
             st_queue_depth_sum_.fetch_add(static_cast<uint64_t>(depth), std::memory_order_relaxed);
@@ -2660,7 +2597,11 @@ void pg_executor::enqueue_batch(const std::vector<std::string>& req_ids,
         }
         const size_t delayed = delayed_.size();
         const size_t inflight = static_cast<size_t>(st_inflight_cur_.load(std::memory_order_relaxed));
-        const size_t queued = q_.size() + delayed;
+        size_t total_conn_qs = 0;
+        for (const auto& cq : conn_qs_) {
+            total_conn_qs += cq.size();
+        }
+        const size_t queued = q_.size() + total_conn_qs + delayed;
         const size_t backlog = queued + inflight;
         st_backlog_cur_.store(static_cast<uint64_t>(backlog), std::memory_order_relaxed);
         st_delayed_cur_.store(static_cast<uint64_t>(delayed), std::memory_order_relaxed);
@@ -5311,6 +5252,16 @@ void pg_executor::event_loop() {
                     t = std::move(conn_qs_[conn_idx].front());
                     conn_qs_[conn_idx].pop();
                     have = true;
+                    size_t total_conn_qs = 0;
+                    for (const auto& cq : conn_qs_) {
+                        total_conn_qs += cq.size();
+                    }
+                    depth_after_pop = q_.size() + total_conn_qs;
+                    st_queue_depth_cur_.store(static_cast<uint64_t>(depth_after_pop),
+                                              std::memory_order_relaxed);
+                    st_queue_depth_samples_.fetch_add(1, std::memory_order_relaxed);
+                    st_queue_depth_sum_.fetch_add(static_cast<uint64_t>(depth_after_pop),
+                                                  std::memory_order_relaxed);
                 } else if (!q_.empty()) {
                     const task& front = q_.front();
                     if (db_opt_.db_type == 1 &&

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-ARIABC_DEFAULT_FULL_THREADS="${ARIABC_DEFAULT_FULL_THREADS:-1,2,4,8,12,16}"
+ARIABC_DEFAULT_FULL_THREADS="${ARIABC_DEFAULT_FULL_THREADS:-1,2,4,8}"
 
 ariabc_apply_comparison_profile_defaults() {
   local profile="${1:-manual}"

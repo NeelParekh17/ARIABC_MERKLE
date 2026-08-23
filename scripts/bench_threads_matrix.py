@@ -1518,6 +1518,11 @@ def main() -> int:
             "0 disables the database-stage timeout. Default: 900."
         ),
     )
+    parser.add_argument(
+        "--pg-isolation",
+        default=os.getenv("PG_ISOLATION_LEVEL", "serializable"),
+        help="Transaction isolation level for PG/nondet mode (default: serializable).",
+    )
 
     args = parser.parse_args()
 
@@ -1889,6 +1894,8 @@ def main() -> int:
                                         # Deterministic runs against a freshly restarted server must start at txid 0.
                                         # Force a clean start even if the parent shell has DET_START_SEQ set.
                                         case_env["DET_START_SEQ"] = "0"
+                                    if args.pg_isolation:
+                                        case_env["PG_ISOLATION_LEVEL"] = str(args.pg_isolation)
                                     # Publish a pointer file so an external monitor can follow the
                                     # active workload output (workload.out) for this run.
                                     pointer_path = out_dir / "current_case.json"
@@ -1920,6 +1927,8 @@ def main() -> int:
                                         "--enforce-signatures",
                                         str(args.enforce_signatures),
                                     ]
+                                    if args.pg_isolation:
+                                        workload_argv.extend(["--pg-isolation", str(args.pg_isolation)])
                                     if signing == 1:
                                         workload_argv.extend(["--privkey", args.signing_privkey])
 

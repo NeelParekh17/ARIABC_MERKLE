@@ -34,7 +34,7 @@ set -euo pipefail
 #   --ssh-key <path>        SSH private key (optional if key-auth is default)
 #   --ssh-port <22>         SSH port
 #   --modes <...>          Comma-separated modes: pg, bcdb_det, bcdb_merkle  [default: pg,bcdb_det,bcdb_merkle]
-#   --threads <csv>         Thread counts csv  [default: 1,2,4,8,12,16]
+#   --threads <csv>         Thread counts csv  [default: 1,2,4,8]
 #   --runs <3>              Runs per workload/thread combination
 #   --workloads <csv>       Workload filenames (default: bench_threads_matrix.py defaults)
 #   --rates <csv>           Rate limits csv (optional)
@@ -57,7 +57,6 @@ DEFAULT_NODES=(
   "neel@10.129.148.248"
   "neel@10.129.148.246"
   "neel@10.129.148.247"
-  "protectdr@ranking.cse.iitb.ac.in"
 )
 NODES_OVERRIDE=""
 TEMPLATE_CONF_LOCAL="/work/ARIABC/pgdata/postgresql.conf"
@@ -78,6 +77,7 @@ RATES=""
 SIGNING_MODES="0"
 SIGNING_PRIVKEY="scripts/bench_signing_privkey.pem"
 ENFORCE_SIGNATURES="1"
+PG_ISOLATION="serializable"
 WARMUP_RUNS="1"
 DB_STAGE_TIMEOUT_S="900"
 DB_NAME="postgres"
@@ -101,6 +101,7 @@ while [[ $# -gt 0 ]]; do
     --signing-modes) SIGNING_MODES="${2:-}"; shift 2 ;;
     --signing-privkey) SIGNING_PRIVKEY="${2:-}"; shift 2 ;;
     --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
+    --pg-isolation)  PG_ISOLATION="${2:-serializable}"; shift 2 ;;
     --warmup-runs)  WARMUP_RUNS="${2:-1}"; shift 2 ;;
     --timeout-db-s) DB_STAGE_TIMEOUT_S="${2:-900}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
@@ -297,6 +298,7 @@ lmsg "Workloads    : ${WORKLOADS:-<bench_threads_matrix.py defaults>}"
 lmsg "SigningModes : ${SIGNING_MODES:-<default>}"
 lmsg "SigningKey   : ${SIGNING_PRIVKEY_LOCAL:-<not set>}"
 lmsg "EnforceSig   : ${ENFORCE_SIGNATURES:-<default>}"
+lmsg "PG Isolation : $PG_ISOLATION"
 lmsg "WarmupRuns   : $WARMUP_RUNS"
 lmsg "DB timeout   : ${DB_STAGE_TIMEOUT_S}s (0=disabled)"
 lmsg "Result root  : $LOCAL_RESULT_ROOT"
@@ -428,7 +430,13 @@ else
   if ! grep -Eq '^[[:space:]]*bcdb_serial_gate_source[[:space:]]*=' "$SHARED_TEMPLATE_LOCAL"; then
     printf 'bcdb_serial_gate_source = 0\n' >> "$SHARED_TEMPLATE_LOCAL"
   fi
-  lmsg "  Benchmark template: bcdb_advance_commit_watermark=on, bcdb_serial_gate_source=0"
+  sed -i -E \
+    "s|^[[:space:]]*default_transaction_isolation[[:space:]]*=.*$|default_transaction_isolation = '${PG_ISOLATION}'|" \
+    "$SHARED_TEMPLATE_LOCAL"
+  if ! grep -Eq '^[[:space:]]*default_transaction_isolation[[:space:]]*=' "$SHARED_TEMPLATE_LOCAL"; then
+    printf "\ndefault_transaction_isolation = '%s'\n" "$PG_ISOLATION" >> "$SHARED_TEMPLATE_LOCAL"
+  fi
+  lmsg "  Benchmark template: default_transaction_isolation=$PG_ISOLATION, bcdb_advance_commit_watermark=on, bcdb_serial_gate_source=0"
 
   declare -A SYNC_BGPIDS=()
   declare -A SYNC_LOGS=()
@@ -664,6 +672,7 @@ _build_bench_flags() {
     fi
   fi
   [[ -n "$ENFORCE_SIGNATURES" ]] && extra+=" --enforce-signatures '$ENFORCE_SIGNATURES'"
+  [[ -n "$PG_ISOLATION" ]] && extra+=" --pg-isolation '$PG_ISOLATION'"
   extra+=" --warmup-runs '$WARMUP_RUNS' --timeout-db-s '$DB_STAGE_TIMEOUT_S'"
   printf '%s' "$extra"
 }
@@ -728,6 +737,7 @@ export ARIABC_PSQL='$inst/bin/psql'
 export ARIABC_INSTALL_DIR='$inst'
 export ARIABC_DIR='$repo'
 export ARIABC_PGPORT='$DB_PORT'
+export PG_ISOLATION_LEVEL='$PG_ISOLATION'
 export LD_LIBRARY_PATH='$inst/lib:\${LD_LIBRARY_PATH:-}'
 pgdata_line=\$(bash '$repo/scripts/distributed/ensure_single_node_postgres.sh' \
   --repo-root '$repo' --install-dir '$inst' \

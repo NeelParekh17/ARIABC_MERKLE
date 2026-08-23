@@ -100,8 +100,12 @@ parser.add_argument("--privkey", default="",
                     help="PEM private key path used when --signing=1.")
 parser.add_argument("--enforce-signatures", type=int, choices=[0, 1], default=0,
                     help="Set bcdb_enforce_signatures in each session.")
+parser.add_argument("--isolation", "--pg-isolation", dest="pg_isolation",
+                    default=os.getenv("PG_ISOLATION_LEVEL", "serializable"),
+                    help="Transaction isolation level for PG/nondet mode (default: serializable).")
 args = parser.parse_args()
 
+PG_ISOLATION_LEVEL = (args.pg_isolation or os.getenv("PG_ISOLATION_LEVEL", "serializable")).strip().lower()
 NUM = args.num_thread
 DB_TYPE_RAW = args.db_type
 DB_TYPE = DB_TYPE_RAW
@@ -412,6 +416,8 @@ def _apply_worker_session_settings(cur):
     cur.execute(
         f"SET bcdb_enforce_signatures = '{'on' if ENFORCE_SIGNATURES else 'off'}'"
     )
+    if PG_ISOLATION_LEVEL and DB_TYPE in (0, 2):
+        cur.execute(f"SET default_transaction_isolation = '{PG_ISOLATION_LEVEL}'")
     if CLIENT_PUBLIC_KEY_B64:
         # Use SET instead of SELECT set_config(...): this fork still has some
         # row-return paths that can leak raw debug bytes into libpq sessions.
