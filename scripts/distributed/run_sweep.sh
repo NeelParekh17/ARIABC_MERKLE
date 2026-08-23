@@ -12,12 +12,15 @@ Sweep options:
   --det-client-workers N   Gateway deterministic threadpool workers.
   --executor-workers LIST  Server executor worker counts to sweep.
                            Accepts comma-separated or quoted space-separated values.
-                           Default: "1 2 4 8 12 16"
+                           Default: "1 2 4 8"
+  --workloads LIST         Workload SQL files to sweep.
+                           Accepts comma-separated or quoted space-separated values.
+                           Default: "scripts/ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt"
   --reps LIST              Repetition labels to run for each executor worker.
                            Accepts comma-separated or quoted space-separated values.
                            Default: "1 2 3"
   --kafka-completion-mode MODE Completion mode: majority, majority_async_all3, or async.
-                           Default: "majority"
+                           Default: "majority_async_all3"
   --raft-ordering-policy POLICY
                            Raft ordering policy: leader-assigned or preassigned.
                            Default: "leader-assigned"
@@ -43,7 +46,7 @@ Other:
 Example:
   ./scripts/distributed/run_sweep.sh \
     --threads 96 \
-    --executor-workers 4,8,16 \
+    --executor-workers 1,2,4,8 \
     --reps 1,2 \
     --raft-ordering-policy preassigned \
     --node-ids 1,2,3 \
@@ -62,9 +65,11 @@ normalize_list() {
 
 THREADS=96
 DET_CLIENT_WORKERS=""
-EXECUTOR_WORKERS="1 2 4 8 12 16"
+EXECUTOR_WORKERS="1 2 4 8"
+DEFAULT_WORKLOADS="scripts/ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt"
+WORKLOADS="$DEFAULT_WORKLOADS"
 REPS="1 2 3"
-KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority}"
+KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority_async_all3}"
 EXECUTION_PROFILE="${EXECUTION_PROFILE:-event-direct}"
 RAFT_ORDERING_POLICY="${RAFT_ORDERING_POLICY:-leader-assigned}"
 CLUSTER_ARGS=()
@@ -81,6 +86,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --executor-workers)
       EXECUTOR_WORKERS="$(normalize_list "${2:?missing value for --executor-workers}")"
+      shift 2
+      ;;
+    --workloads)
+      WORKLOADS="$(normalize_list "${2:?missing value for --workloads}")"
       shift 2
       ;;
     --reps)
@@ -142,11 +151,12 @@ mkdir -p "$OUT"
 : > "$OUT/run_dirs.txt"
 : > "$OUT/summary.csv"
 
-printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
+printf 'workload,pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
 {
   printf 'threads=%s\n' "$THREADS"
   printf 'det_client_workers=%s\n' "$DET_CLIENT_WORKERS"
   printf 'executor_workers=%s\n' "$EXECUTOR_WORKERS"
+  printf 'workloads=%s\n' "$WORKLOADS"
   printf 'reps=%s\n' "$REPS"
   printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
   printf 'raft_ordering_policy=%s\n' "$RAFT_ORDERING_POLICY"
@@ -157,82 +167,104 @@ printf 'pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
 
 # Wrapped execution sequence to funnel into out.txt
 {
-  echo "Campaign: threads=$THREADS det_client_workers=$DET_CLIENT_WORKERS executor_workers=[$EXECUTOR_WORKERS] reps=[$REPS] kafka_completion_mode=$KAFKA_COMPLETION_MODE raft_ordering_policy=$RAFT_ORDERING_POLICY"
+  echo "Campaign: threads=$THREADS det_client_workers=$DET_CLIENT_WORKERS executor_workers=[$EXECUTOR_WORKERS] workloads=[$WORKLOADS] reps=[$REPS] kafka_completion_mode=$KAFKA_COMPLETION_MODE raft_ordering_policy=$RAFT_ORDERING_POLICY"
   if [[ "${#CLUSTER_ARGS[@]}" -gt 0 ]]; then
     printf 'Cluster args: '
     printf '%q ' "${CLUSTER_ARGS[@]}"
     printf '\n'
   fi
 
-  for E in $EXECUTOR_WORKERS; do
-    for REP in $REPS; do
-      echo
-      echo "=============================================================="
-      echo "PG/EXECUTOR WORKERS=$E | REP=$REP"
-      echo "=============================================================="
+  for WL_RAW in $WORKLOADS; do
+    if [[ "$WL_RAW" = /* ]]; then
+      WL="$WL_RAW"
+    else
+      WL="/work/ARIABC/AriaBC/$WL_RAW"
+    fi
+    wl_base="$(basename "$WL")"
+    wl_tag="${wl_base%.*}"
+    : > "$OUT/summary_${wl_tag}.csv"
 
-      BEFORE="$(mktemp)"
-      find scripts/bench_full_results \
-        -mindepth 1 -maxdepth 1 -type d -name 'cluster4_*' \
-        -printf '%f\n' | sort > "$BEFORE"
+    echo
+    echo "=============================================================="
+    echo "=== WORKLOAD: $wl_base"
+    echo "=============================================================="
 
-      env \
-        FORCE_BUILD="${FORCE_BUILD:-0}" \
-        SKIP_RDKAFKA_SETUP=1 \
-        ARIABC_PREFERRED_LEADER_ID=1 \
-        ARIABC_RAFT_DURABLE_ASYNC_FLUSH=1 \
-        ARIABC_RAFT_STREAM_GAP=512 \
-        ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER=1 \
-        BCDB_DET_QUEUE_HIGH_WM=65536 \
-        BCDB_DET_QUEUE_LOW_WM=32768 \
-        ./scripts/distributed/run_4node_raft_cluster.sh \
-          "${CLUSTER_ARGS[@]}" \
-          --ordering-mode raft-kafka \
-          --enable-merkle-index 1 \
-          --raft-apply-ledger-mode off \
-          --threads "$THREADS" \
-          --det-client-workers "${DET_CLIENT_WORKERS:-$THREADS}" \
-          --det-client-inflight "${DET_CLIENT_INFLIGHT:-16}" \
-          --server-exec-workers "$E" \
-          --server-pg-connections "${SERVER_PG_CONNECTIONS:-$E}" \
-          --pool-size "${SERVER_PG_CONNECTIONS:-$E}" \
-          --bcdb-workers "${BCDB_WORKERS:-$E}" \
-          --bcdb-init-block-size "$E" \
-          --bcdb-decouple-workers 1 \
-          --conn-fanout "${CONN_FANOUT:-1}" \
-          --raft-ordered-fanout "${RAFT_ORDERED_FANOUT:-1}" \
-          --raft-ordering-policy "${RAFT_ORDERING_POLICY:-leader-assigned}" \
-          --raft-ordered-batch-append 1 \
-          --raft-ordered-batch-target-entries "${RAFT_ORDERED_BATCH_TARGET_ENTRIES:-64}" \
-          --raft-ordered-batch-linger-us "${RAFT_ORDERED_LINGER_US:-1000}" \
-          --raft-ordered-coalesce-log "${RAFT_ORDERED_COALESCE_LOG:-1}" \
-          --kafka-completion-mode "$KAFKA_COMPLETION_MODE" \
-          --det-window "${DET_WINDOW:-65536}"
+    for E in $EXECUTOR_WORKERS; do
+      for REP in $REPS; do
+        echo
+        echo "--------------------------------------------------------------"
+        echo "WORKLOAD=$wl_base | PG/EXECUTOR WORKERS=$E | REP=$REP"
+        echo "--------------------------------------------------------------"
 
-      RUN_NAME="$(
-        comm -13 "$BEFORE" \
-          <(find scripts/bench_full_results \
-            -mindepth 1 -maxdepth 1 -type d -name 'cluster4_*' \
-            -printf '%f\n' | sort) | tail -n1
-      )"
-      rm -f "$BEFORE"
+        BEFORE="$(mktemp)"
+        find scripts/bench_full_results \
+          -mindepth 1 -maxdepth 1 -type d -name 'cluster4_*' \
+          -printf '%f\n' | sort > "$BEFORE"
 
-      RUN="scripts/bench_full_results/$RUN_NAME"
-      [[ -d "$RUN" ]] || { echo "Could not locate fresh benchmark artifact"; exit 1; }
+        set +e
+        env \
+          FORCE_BUILD="${FORCE_BUILD:-0}" \
+          SKIP_RDKAFKA_SETUP=1 \
+          ARIABC_PREFERRED_LEADER_ID=1 \
+          ARIABC_RAFT_DURABLE_ASYNC_FLUSH=1 \
+          ARIABC_RAFT_STREAM_GAP=512 \
+          ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER=1 \
+          BCDB_DET_QUEUE_HIGH_WM=65536 \
+          BCDB_DET_QUEUE_LOW_WM=32768 \
+          ./scripts/distributed/run_4node_raft_cluster.sh \
+            "${CLUSTER_ARGS[@]}" \
+            --workload "$WL" \
+            --ordering-mode raft-kafka \
+            --enable-merkle-index 1 \
+            --raft-apply-ledger-mode off \
+            --threads "$THREADS" \
+            --det-client-workers "${DET_CLIENT_WORKERS:-$THREADS}" \
+            --det-client-inflight "${DET_CLIENT_INFLIGHT:-16}" \
+            --server-exec-workers "$E" \
+            --server-pg-connections "${SERVER_PG_CONNECTIONS:-$E}" \
+            --pool-size "${SERVER_PG_CONNECTIONS:-$E}" \
+            --bcdb-workers "${BCDB_WORKERS:-$E}" \
+            --bcdb-init-block-size "$E" \
+            --bcdb-decouple-workers 1 \
+            --conn-fanout "${CONN_FANOUT:-1}" \
+            --raft-ordered-fanout "${RAFT_ORDERED_FANOUT:-1}" \
+            --raft-ordering-policy "${RAFT_ORDERING_POLICY:-leader-assigned}" \
+            --raft-ordered-batch-append 1 \
+            --raft-ordered-batch-target-entries "${RAFT_ORDERED_BATCH_TARGET_ENTRIES:-64}" \
+            --raft-ordered-batch-linger-us "${RAFT_ORDERED_LINGER_US:-1000}" \
+            --raft-ordered-coalesce-log "${RAFT_ORDERED_COALESCE_LOG:-1}" \
+            --kafka-completion-mode "$KAFKA_COMPLETION_MODE" \
+            --det-window "${DET_WINDOW:-65536}"
+        RUN_RC=$?
+        set -e
 
-      printf '%s,%s,%s\n' "$E" "$REP" "$RUN" | tee -a "$OUT/runs.csv"
-      printf '%s\n' "$RUN" >> "$OUT/run_dirs.txt"
+        RUN_NAME="$(
+          comm -13 "$BEFORE" \
+            <(find scripts/bench_full_results \
+              -mindepth 1 -maxdepth 1 -type d -name 'cluster4_*' \
+              -printf '%f\n' | sort) | tail -n1
+        )"
+        rm -f "$BEFORE"
 
-      python3 scripts/distributed/summarize_raft_profile.py "$RUN" | tee -a "$OUT/summary.csv"
+        if [[ -n "$RUN_NAME" && -d "scripts/bench_full_results/$RUN_NAME" ]]; then
+          RUN="scripts/bench_full_results/$RUN_NAME"
+          printf '%s,%s,%s,%s\n' "$wl_base" "$E" "$REP" "$RUN" | tee -a "$OUT/runs.csv"
+          printf '%s\n' "$RUN" >> "$OUT/run_dirs.txt"
+
+          python3 scripts/distributed/summarize_raft_profile.py "$RUN" | tee -a "$OUT/summary.csv" "$OUT/summary_${wl_tag}.csv" || true
+        else
+          echo "WARNING: Could not locate fresh benchmark artifact for WORKLOAD=$wl_base E=$E REP=$REP (cluster run exited with code $RUN_RC)"
+        fi
+      done
     done
-  done
 
-  echo
-  echo "Generating TPS graph..."
-  python3 scripts/distributed/plot_executor_sweep.py \
-    --input-csv "$OUT/summary.csv" \
-    --output-img "$OUT/executor_sweep_tps.png" \
-    --title "Executor Worker Sweep: TPS vs Executor Workers (Threads=$THREADS)"
+    echo
+    echo "Generating TPS graph for $wl_base..."
+    python3 scripts/distributed/plot_executor_sweep.py \
+      --input-csv "$OUT/summary_${wl_tag}.csv" \
+      --output-img "$OUT/executor_sweep_${wl_tag}_tps.png" \
+      --title "Executor Sweep ($wl_base): TPS vs Workers (Threads=$THREADS)" || true
+  done
 
   echo
   echo "Done."

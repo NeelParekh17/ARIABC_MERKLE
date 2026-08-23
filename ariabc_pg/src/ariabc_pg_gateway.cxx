@@ -2144,14 +2144,12 @@ public:
         auto all_nodes_ready = [&]() -> bool {
             auto it = m_.find(key);
             if (it == m_.end()) {
-                out_error = "audit_entry_evicted";
-                return true; // Stop waiting if missing
+                return false;
             }
             return resolve_all_nodes_consistent_locked(key, out_error);
         };
 
         if (all_nodes_ready()) {
-            if (out_error == "audit_entry_evicted") return audit_status::MISSING;
             return out_error.empty() ? audit_status::READY : audit_status::MISMATCH;
         }
 
@@ -2180,7 +2178,6 @@ public:
                 return audit_status::TIMEOUT;
             }
         }
-        if (out_error == "audit_entry_evicted") return audit_status::MISSING;
         return out_error.empty() ? audit_status::READY : audit_status::MISMATCH;
     }
 
@@ -2368,6 +2365,12 @@ public:
         out.audit_deadline_heap_stale_pops = audit_deadline_heap_stale_pops_;
         out.audit_deadline_heap_timeout_pops = audit_deadline_heap_timeout_pops_;
         return out;
+    }
+
+    std::string describe_req(uint64_t req_num) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        vote_key key{expected_epoch_hex_, req_num};
+        return describe_req_locked(key);
     }
 
     bool try_pop_any_terminal(std::deque<uint64_t>& inflight,
@@ -2911,7 +2914,7 @@ private:
     std::string sig_key_;
     std::string expected_epoch_hex_;
     bool safe_ledger_mode_;
-    std::mutex mu_;
+    mutable std::mutex mu_;
     std::condition_variable cv_;
     std::unordered_map<vote_key, vote_entry, vote_key_hash> m_;
     std::list<vote_key> req_order_;
@@ -4347,18 +4350,19 @@ int main(int argc, char** argv) {
     };
 
     auto emit_recovery_event = [&](uint64_t req_num, const std::string& reason) {
+        const std::string detail = votes.describe_req(req_num);
         std::ostringstream oss;
         oss << "{\"type\":\"majority_failure\""
             << ",\"req_num\":" << req_num
-            << ",\"reason\":\"" << ariabc_pg::json_escape(reason) << "\"}";
+            << ",\"reason\":\"" << ariabc_pg::json_escape(reason) << "\""
+            << ",\"detail\":\"" << ariabc_pg::json_escape(detail) << "\"}";
         const std::string msg = oss.str();
+        std::cerr << "RECOVERY_EVENT: " << msg << std::endl;
         if (!opt.kafka_bootstrap.empty()) {
             std::string perr;
             if (!err_prod.send_line(msg, perr)) {
                 std::cerr << "errTopic send failed: " << perr << std::endl;
             }
-        } else {
-            std::cerr << msg << std::endl;
         }
     };
 
