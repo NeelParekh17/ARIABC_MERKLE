@@ -276,6 +276,7 @@ extern void clean_rs_ws_table(void);
 extern bool ws_table_check(PREDICATELOCKTARGETTAG *tag);
 extern void conflict_check(void);
 
+extern void bcdb_compute_intkey_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid, int32 intKey);
 extern void rs_table_reserveDT( const PREDICATELOCKTARGETTAG *tag);
 extern void ws_table_reserveDT( PREDICATELOCKTARGETTAG *tag);
 extern bool ws_table_checkDT(PREDICATELOCKTARGETTAG *tag);
