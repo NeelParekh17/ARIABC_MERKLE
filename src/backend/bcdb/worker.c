@@ -53,6 +53,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sched.h>
 #include "access/xact.h"
 #include "access/merkle.h"
 #include "utils/resowner.h"
@@ -519,16 +520,40 @@ bcdb_block_return_actual_results_enabled(void)
     return cached == 1;
 }
 
-static bool
+static inline int
+bcdb_fast_query_type(const char *query)
+{
+	const char *p = query;
+	if (p == NULL)
+		return 0;
+	while (*p != '\0' && isspace((unsigned char)*p))
+		p++;
+	switch (toupper((unsigned char)*p))
+	{
+		case 'S':
+			if (pg_strncasecmp(p, "SELECT", 6) == 0)
+				return 1; /* SELECT */
+			break;
+		case 'I':
+			if (pg_strncasecmp(p, "INSERT", 6) == 0)
+				return 2; /* INSERT */
+			break;
+		case 'U':
+			if (pg_strncasecmp(p, "UPDATE", 6) == 0)
+				return 3; /* UPDATE */
+			break;
+		case 'D':
+			if (pg_strncasecmp(p, "DELETE", 6) == 0)
+				return 4; /* DELETE */
+			break;
+	}
+	return 0;
+}
+
+static inline bool
 bcdb_query_is_select(const char *query)
 {
-    const char *s = query;
-
-    if (s == NULL)
-        return false;
-    while (*s != '\0' && isspace((unsigned char)*s))
-        s++;
-    return strncasecmp(s, "select", 6) == 0;
+	return bcdb_fast_query_type(query) == 1;
 }
 
 #define BCDB_FLOW_LOG(...)                       \
@@ -1135,19 +1160,25 @@ bcdb_wait_for_slot_consumable(BCBlock *block, BCTxID tx_id, int slot)
 
             CHECK_FOR_INTERRUPTS();
 
-            if (spins < 64)
-            {
-                spins++;
-                pg_spin_delay();
-            }
-            else
-            {
-                if (poll_us == 0)
-                    poll_us = 1;
-                else if (poll_us < 64)
-                    poll_us *= 2;
-                pg_usleep((long)poll_us);
-            }
+			if (spins < 1024)
+			{
+				spins++;
+				pg_spin_delay();
+			}
+			else if (spins < 1280)
+			{
+				spins++;
+				pg_spin_delay();
+				sched_yield();
+			}
+			else
+			{
+				if (poll_us == 0)
+					poll_us = 1;
+				else if (poll_us < 16)
+					poll_us *= 2;
+				pg_usleep((long)poll_us);
+			}
         }
     }
 }
@@ -1385,43 +1416,49 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 
         CHECK_FOR_INTERRUPTS();
 
-        if (spins < 64)
-        {
-            /* Hot neighbour finishing any moment — spin without syscall. */
-            spins++;
-            pg_spin_delay();
-        }
-        else
-        {
-            if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
-            {
-                ConditionVariable *cv;
-                int wake_slot = (int)(tx->tx_id % MAX_TX_PER_BLOCK);
+		if (spins < 1024)
+		{
+			/* Hot neighbour finishing any moment — spin without syscall. */
+			spins++;
+			pg_spin_delay();
+		}
+		else if (spins < 1280)
+		{
+			spins++;
+			pg_spin_delay();
+			sched_yield();
+		}
+		else
+		{
+			if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
+			{
+				ConditionVariable *cv;
+				int wake_slot = (int)(tx->tx_id % MAX_TX_PER_BLOCK);
 
-                if (wake_slot < 0)
-                    wake_slot += MAX_TX_PER_BLOCK;
-                cv = &block->done_conds[wake_slot];
+				if (wake_slot < 0)
+					wake_slot += MAX_TX_PER_BLOCK;
+				cv = &block->done_conds[wake_slot];
 
-                ConditionVariablePrepareToSleep(cv);
-                if ((get_published_max_txid(tx) + 1) < tx->tx_id)
+				ConditionVariablePrepareToSleep(cv);
+				if ((get_published_max_txid(tx) + 1) < tx->tx_id)
 				{
 					if (collect_gate_stats)
 						SHARD_INC(serial_gate_cv_sleep_count);
-                    ConditionVariableSleep(cv, WAIT_EVENT_BLOCK_COMMIT);
+					ConditionVariableSleep(cv, WAIT_EVENT_BLOCK_COMMIT);
 				}
-                ConditionVariableCancelSleep();
-            }
-            else
-            {
-                if (poll_us == 0)
-                    poll_us = 1;
-                else if (poll_us < poll_max_us)
-                    poll_us *= 2;
-                if (poll_us > poll_max_us)
-                    poll_us = poll_max_us;
-                pg_usleep((long)poll_us);
-            }
-        }
+				ConditionVariableCancelSleep();
+			}
+			else
+			{
+				if (poll_us == 0)
+					poll_us = 1;
+				else if (poll_us < poll_max_us)
+					poll_us *= 2;
+				if (poll_us > poll_max_us)
+					poll_us = poll_max_us;
+				pg_usleep((long)poll_us);
+			}
+		}
     }
 
     if (gate_debug)
@@ -1529,19 +1566,25 @@ bcdb_wait_for_prev_committed(BCDBShmXact *tx)
         }
 
         CHECK_FOR_INTERRUPTS();
-        if (spins < 128)
-        {
-            spins++;
-            pg_spin_delay();
-        }
-        else
-        {
-            if (poll_us == 0)
-                poll_us = 1;
-            else if (poll_us < 64)
-                poll_us *= 2;
-            pg_usleep((long)poll_us);
-        }
+		if (spins < 1024)
+		{
+			spins++;
+			pg_spin_delay();
+		}
+		else if (spins < 1280)
+		{
+			spins++;
+			pg_spin_delay();
+			sched_yield();
+		}
+		else
+		{
+			if (poll_us == 0)
+				poll_us = 1;
+			else if (poll_us < 16)
+				poll_us *= 2;
+			pg_usleep((long)poll_us);
+		}
     }
 
     if (gate_debug)
@@ -1631,19 +1674,25 @@ bcdb_wait_for_target_committed(BCDBShmXact *tx, BCTxID target_txid)
         }
 
         CHECK_FOR_INTERRUPTS();
-        if (spins < 128)
-        {
-            spins++;
-            pg_spin_delay();
-        }
-        else
-        {
-            if (poll_us == 0)
-                poll_us = 1;
-            else if (poll_us < 64)
-                poll_us *= 2;
-            pg_usleep((long)poll_us);
-        }
+		if (spins < 1024)
+		{
+			spins++;
+			pg_spin_delay();
+		}
+		else if (spins < 1280)
+		{
+			spins++;
+			pg_spin_delay();
+			sched_yield();
+		}
+		else
+		{
+			if (poll_us == 0)
+				poll_us = 1;
+			else if (poll_us < 16)
+				poll_us *= 2;
+			pg_usleep((long)poll_us);
+		}
     }
 
     if (gate_debug)
@@ -1894,39 +1943,45 @@ parse_delete_from_relname(const char *sql, char *relname_out, Size relname_out_s
 static void
 bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
 {
-    const char *sql;
-    int32 keyval;
-    Oid relOid;
-    char relname[NAMEDATALEN];
-    uint32 h;
-    PREDICATELOCKTARGETTAG tag;
+	const char *sql;
+	int32 keyval;
+	Oid relOid;
+	char relname[NAMEDATALEN];
+	uint32 h;
+	PREDICATELOCKTARGETTAG tag;
+	static char cached_del_relname[NAMEDATALEN] = "";
+	static Oid cached_del_relid = InvalidOid;
 
-    if (tx == NULL)
-        return;
+	if (tx == NULL || !completiontag_is_delete_0(completionTag))
+		return;
 
-    sql = skip_ws(tx->sql);
-    if (pg_strncasecmp(sql, "DELETE", 6) != 0)
-        return;
+	sql = skip_ws(tx->sql);
+	if (pg_strncasecmp(sql, "DELETE", 6) != 0)
+		return;
 
-    if (!completiontag_is_delete_0(completionTag))
-        return;
+	if (!parse_ycsb_key_eq_int32(sql, &keyval))
+		return;
 
-    if (!parse_ycsb_key_eq_int32(sql, &keyval))
-        return;
+	if (!parse_delete_from_relname(sql, relname, sizeof(relname)))
+		return;
 
-    if (!parse_delete_from_relname(sql, relname, sizeof(relname)))
-        return;
+	if (cached_del_relname[0] != '\0' && strcmp(relname, cached_del_relname) == 0 && OidIsValid(cached_del_relid))
+		relOid = cached_del_relid;
+	else
+	{
+		relOid = RelnameGetRelid(relname);
+		if (!OidIsValid(relOid))
+			return;
+		strlcpy(cached_del_relname, relname, sizeof(cached_del_relname));
+		cached_del_relid = relOid;
+	}
 
-    relOid = RelnameGetRelid(relname);
-    if (!OidIsValid(relOid))
-        return;
-
-    h = hash_any((unsigned char *)&keyval, sizeof(int32));
-    SET_PREDICATELOCKTARGETTAG_TUPLE(tag, 0, relOid,
-                                     (BlockNumber)(h >> 16),
-                                     (OffsetNumber)((h & 0xFFFF) | 1));
-    ws_table_reserveDT(&tag);
-    store_optim_delete_by_key(relOid, keyval, GetCurrentCommandId(true));
+	h = hash_any((unsigned char *)&keyval, sizeof(int32));
+	SET_PREDICATELOCKTARGETTAG_TUPLE(tag, 0, relOid,
+									 (BlockNumber)(h >> 16),
+									 (OffsetNumber)((h & 0xFFFF) | 1));
+	ws_table_reserveDT(&tag);
+	store_optim_delete_by_key(relOid, keyval, GetCurrentCommandId(true));
 }
 
 BCBlockID
@@ -2273,19 +2328,14 @@ void get_write_set(BCDBShmXact *tx, Snapshot snapshot)
 
 int chk_query_type(const char *query, const char *fmt1_str, const char *fmt2_str)
 {
-
-    int cmd_type = 1;
-    int cmd_len = 6; // all of INSERT, UPDATE, DELETE, SELECT len = 6 !!
-    int ofst = 0;
-    for (ofst = 0; ofst < cmd_len; ofst++)
-    {
-        if ((query[ofst] != fmt1_str[ofst]) && (query[ofst] != fmt2_str[ofst]))
-        {
-            cmd_type = 0;
-            break;
-        }
-    }
-    return cmd_type;
+	const char *p = query;
+	if (p == NULL)
+		return 0;
+	while (*p != '\0' && isspace((unsigned char)*p))
+		p++;
+	if (pg_strncasecmp(p, fmt1_str, 6) == 0 || pg_strncasecmp(p, fmt2_str, 6) == 0)
+		return 1;
+	return 0;
 }
 
 /*
@@ -3280,39 +3330,36 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                        __LINE__, get_last_committed_txid(tx), tx->tx_id, tx->sql);
 #endif
 
-            {
-                uint64 finish_result_start = bcdb_ptrace_timer_start();
-                int read_cmd = chk_query_type(tx->sql, "select", "SELECT");
+			{
+				uint64 finish_result_start = bcdb_ptrace_timer_start();
+				int qtype = bcdb_fast_query_type(tx->sql);
 
 				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
 				{
 					snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
 								"\n\t*%s* ERROR %s %s\n", tx->hash, det_err_sqlstate, det_err_msg);
 				}
-                else if (apply_terminal_noop)
-                {
-                    /*
-                     * Transaction was aborted after exhausting retries (e.g. unique
-                     * constraint violation, non-retryable error).  Report 0 rows
-                     * affected using whatever command type the SQL was.
-                     */
-                    int del_cmd = chk_query_type(tx->sql, "delete", "DELETE");
-                    int upd_cmd = chk_query_type(tx->sql, "update", "UPDATE");
-                    int ins_cmd = chk_query_type(tx->sql, "insert", "INSERT");
-                    if (ins_cmd == 1)
-                        snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
-                                 "\n\t*%s* INSERT 0 0\n", tx->hash);
-                    else if (upd_cmd == 1)
-                        snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
-                                 "\n\t*%s* UPDATE 0\n", tx->hash);
-                    else if (del_cmd == 1)
-                        snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
-                                 "\n\t*%s* DELETE 0\n", tx->hash);
-                    else
-                        snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
-                                 "\n\t*%s* ERROR\n", tx->hash);
-                }
-				else if (read_cmd == 1)
+				else if (apply_terminal_noop)
+				{
+					/*
+					 * Transaction was aborted after exhausting retries (e.g. unique
+					 * constraint violation, non-retryable error).  Report 0 rows
+					 * affected using whatever command type the SQL was.
+					 */
+					if (qtype == 2) /* INSERT */
+						snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+								 "\n\t*%s* INSERT 0 0\n", tx->hash);
+					else if (qtype == 3) /* UPDATE */
+						snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+								 "\n\t*%s* UPDATE 0\n", tx->hash);
+					else if (qtype == 4) /* DELETE */
+						snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+								 "\n\t*%s* DELETE 0\n", tx->hash);
+					else
+						snprintf(block->result[mem_txid], sizeof(block->result[mem_txid]),
+								 "\n\t*%s* ERROR\n", tx->hash);
+				}
+				else if (qtype == 1) /* SELECT */
 					strlcpy(block->result[mem_txid], tx_result, sizeof(block->result[mem_txid]));
                 else
                 {
