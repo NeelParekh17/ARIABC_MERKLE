@@ -3065,17 +3065,6 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 published_max_advanced = true;
             }
 
-			/*
-			 * Enforce strict sequence order for heap write-set application:
-			 * Transaction N must only apply its writes to the heap after
-			 * transaction N-1 has fully committed to prevent page lock races
-			 * on intersecting keys from corrupting update ordering.
-			 */
-			if (!SIMPLEQ_EMPTY(&activeTx->optim_write_list))
-			{
-				bcdb_wait_for_prev_committed(tx);
-			}
-
             PTRACE_BEGIN(BCDB_PHASE_APPLY);
             apply_nonretryable = false;
             apply_terminal_noop = false;
@@ -3160,9 +3149,18 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 						}
 						else
 						{
-							ereport(ERROR,
-									(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
-										errmsg("BCDB apply unique/non-deterministic constraint conflict, retrying transaction")));
+							BCDB_FLOW_LOG("[BCDB_FLOW] apply_unique_conflict_full_restart pid=%d txid=%d xid=%u retries=%d last_committed=%d published_max=%d",
+										  getpid(),
+										  tx ? (int)tx->tx_id : -1,
+										  (unsigned int)(tx ? tx->xid : InvalidTransactionId),
+										  apply_retries,
+										  tx ? (int)get_last_committed_txid(tx) : -1,
+										  tx ? (int)get_published_max_txid(tx) : -1);
+							if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
+								get_last_committed_txid(tx) < (tx->tx_id - 1))
+								bcdb_wait_for_prev_committed(tx);
+							rw_conflicts = 1;
+							continue;
 						}
                     }
                 }
