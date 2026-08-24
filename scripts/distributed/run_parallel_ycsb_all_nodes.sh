@@ -43,6 +43,10 @@ set -euo pipefail
 #   --enforce-signatures <1> 0|1 — set bcdb_enforce_signatures in workload sessions  [default: 1]
 #   --poll-interval <60>    Seconds between monitoring polls
 #   --warmup-runs <1>       Unmeasured warmup executions before the matrix  [default: 1]
+#   --merkle-partitions <200> Number of hash-routed Merkle partitions  [default: 200]
+#   --merkle-fanout <4>     Merkle tree branching factor  [default: 4]
+#   --merkle-split-threshold <32> Node tuple count triggering a split  [default: 32]
+#   --merkle-merge-threshold <8>  Node tuple count triggering a merge  [default: 8]
 #   --timeout-db-s <900>    Timeout for restore/apply/verification SQL; 0 disables it
 #   --hang-timeout <300>    Seconds of no log change before long-stage warning
 #   --skip-sync             Skip the rsync phase (reuse last-synced remote source)
@@ -79,6 +83,10 @@ SIGNING_PRIVKEY="scripts/bench_signing_privkey.pem"
 ENFORCE_SIGNATURES="1"
 PG_ISOLATION="serializable"
 WARMUP_RUNS="1"
+MERKLE_PARTITIONS="200"
+MERKLE_FANOUT="4"
+MERKLE_SPLIT_THRESHOLD="32"
+MERKLE_MERGE_THRESHOLD="8"
 DB_STAGE_TIMEOUT_S="900"
 DB_NAME="postgres"
 DB_USER="postgres"
@@ -103,6 +111,10 @@ while [[ $# -gt 0 ]]; do
     --enforce-signatures) ENFORCE_SIGNATURES="${2:-}"; shift 2 ;;
     --pg-isolation)  PG_ISOLATION="${2:-serializable}"; shift 2 ;;
     --warmup-runs)  WARMUP_RUNS="${2:-1}"; shift 2 ;;
+    --merkle-partitions) MERKLE_PARTITIONS="${2:-200}"; shift 2 ;;
+    --merkle-fanout)     MERKLE_FANOUT="${2:-4}"; shift 2 ;;
+    --merkle-split-threshold) MERKLE_SPLIT_THRESHOLD="${2:-32}"; shift 2 ;;
+    --merkle-merge-threshold) MERKLE_MERGE_THRESHOLD="${2:-8}"; shift 2 ;;
     --timeout-db-s) DB_STAGE_TIMEOUT_S="${2:-900}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL_S="${2:-60}"; shift 2 ;;
     --hang-timeout)  HANG_TIMEOUT_S="${2:-300}"; shift 2 ;;
@@ -673,6 +685,10 @@ _build_bench_flags() {
   fi
   [[ -n "$ENFORCE_SIGNATURES" ]] && extra+=" --enforce-signatures '$ENFORCE_SIGNATURES'"
   [[ -n "$PG_ISOLATION" ]] && extra+=" --pg-isolation '$PG_ISOLATION'"
+  [[ -n "$MERKLE_PARTITIONS" ]] && extra+=" --merkle-partitions '$MERKLE_PARTITIONS'"
+  [[ -n "$MERKLE_FANOUT" ]] && extra+=" --merkle-fanout '$MERKLE_FANOUT'"
+  [[ -n "$MERKLE_SPLIT_THRESHOLD" ]] && extra+=" --merkle-split-threshold '$MERKLE_SPLIT_THRESHOLD'"
+  [[ -n "$MERKLE_MERGE_THRESHOLD" ]] && extra+=" --merkle-merge-threshold '$MERKLE_MERGE_THRESHOLD'"
   extra+=" --warmup-runs '$WARMUP_RUNS' --timeout-db-s '$DB_STAGE_TIMEOUT_S'"
   printf '%s' "$extra"
 }

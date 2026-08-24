@@ -1523,6 +1523,30 @@ def main() -> int:
         default=os.getenv("PG_ISOLATION_LEVEL", "serializable"),
         help="Transaction isolation level for PG/nondet mode (default: serializable).",
     )
+    parser.add_argument(
+        "--merkle-partitions",
+        type=int,
+        default=200,
+        help="Number of independent hash-routed Merkle partitions (default: 200).",
+    )
+    parser.add_argument(
+        "--merkle-fanout",
+        type=int,
+        default=4,
+        help="Merkle tree branching factor / fanout (default: 4).",
+    )
+    parser.add_argument(
+        "--merkle-split-threshold",
+        type=int,
+        default=32,
+        help="Node tuple count triggering a split (default: 32).",
+    )
+    parser.add_argument(
+        "--merkle-merge-threshold",
+        type=int,
+        default=8,
+        help="Node tuple count triggering a merge (default: 8).",
+    )
 
     args = parser.parse_args()
 
@@ -1861,6 +1885,14 @@ def main() -> int:
                                             "ON_ERROR_STOP=1",
                                             "-v",
                                             f"bench_enable_merkle={1 if merkle_enabled_for_mode else 0}",
+                                            "-v",
+                                            f"merkle_partitions={args.merkle_partitions}",
+                                            "-v",
+                                            f"merkle_fanout={args.merkle_fanout}",
+                                            "-v",
+                                            f"merkle_split_threshold={args.merkle_split_threshold}",
+                                            "-v",
+                                            f"merkle_merge_threshold={args.merkle_merge_threshold}",
                                             "-f",
                                             str(restore_sql),
                                         ],
@@ -1992,6 +2024,14 @@ def main() -> int:
                                                 "ON_ERROR_STOP=1",
                                                 "-v",
                                                 f"bench_enable_merkle={1 if merkle_enabled_for_mode else 0}",
+                                                "-v",
+                                                f"merkle_partitions={args.merkle_partitions}",
+                                                "-v",
+                                                f"merkle_fanout={args.merkle_fanout}",
+                                                "-v",
+                                                f"merkle_split_threshold={args.merkle_split_threshold}",
+                                                "-v",
+                                                f"merkle_merge_threshold={args.merkle_merge_threshold}",
                                                 "-f",
                                                 str(restore_sql),
                                             ],
