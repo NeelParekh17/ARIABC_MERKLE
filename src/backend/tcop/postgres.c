@@ -88,6 +88,7 @@
 
 #include <stdio.h>
 #include <execinfo.h>
+#include <sched.h>
 #include "bcdb/globals.h"
 #include "bcdb/worker.h"
 #include "bcdb/middleware.h"
@@ -4666,6 +4667,7 @@ void PostgresMain(int argc, char *argv[],
 			bool is_bcdb_hashed_det = false;
 			if (qlen >= 11 && query_string[0] == 's' && query_string[1] == ' ')
 			{
+				pfx_id = 0;
 				is_bcdb_hashed_det = true;
 				for (int j = 2; j < 10; j++)
 				{
@@ -4675,7 +4677,10 @@ void PostgresMain(int argc, char *argv[],
 						is_bcdb_hashed_det = false;
 						break;
 					}
+					pfx_id = pfx_id * 10 + (c - '0');
+					pfx_str[j - 2] = c;
 				}
+				pfx_str[8] = '\0';
 				if (is_bcdb_hashed_det && query_string[10] != ' ')
 					is_bcdb_hashed_det = false;
 			}
@@ -4684,9 +4689,6 @@ void PostgresMain(int argc, char *argv[],
 			{
 				if (get_blksz() <= 0)
 					set_blksz(1);
-				strncpy(pfx_str, query_string + 2, 8);
-				pfx_str[8] = '\0';
-				pfx_id = atoi(pfx_str);
 				if (sign == 1)
 				{
 					size_t sig_len = (size_t) (i - 11);
@@ -4715,7 +4717,12 @@ void PostgresMain(int argc, char *argv[],
 						elog(WARNING, "create_tx returned NULL for hash %s, retrying", pfx_str);
 
 					CHECK_FOR_INTERRUPTS();
-					pg_usleep(5000L);
+					if (tx_retry < 32)
+						pg_spin_delay();
+					else if (tx_retry < 64)
+						sched_yield();
+					else
+						pg_usleep(50L);
 					tx_retry++;
 
 					if (tx_retry >= tx_retry_limit)

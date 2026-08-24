@@ -1868,7 +1868,7 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
                     bool isnull[INDEX_MAX_KEYS];
 					MerkleRoute route;
 
-                    indexInfo = BuildIndexInfo(indexRel);
+					indexInfo = RelationGetIndexInfo(indexRel);
                     FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
 					merkle_compute_route(indexRel, values, isnull,
 										 indexInfo->ii_NumIndexKeyAttrs, &route);
@@ -1999,7 +1999,7 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
                     bool isnull[INDEX_MAX_KEYS];
 					MerkleRoute route;
 
-                    indexInfo = BuildIndexInfo(indexRel);
+					indexInfo = RelationGetIndexInfo(indexRel);
                     FormIndexDatum(indexInfo, newSlot, NULL, values, isnull);
 					merkle_compute_route(indexRel, values, isnull,
 										 indexInfo->ii_NumIndexKeyAttrs, &route);
@@ -2217,7 +2217,7 @@ bool apply_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *storedS
                 bool isnull[INDEX_MAX_KEYS];
 					MerkleRoute route;
 
-                indexInfo = BuildIndexInfo(indexRel);
+				indexInfo = RelationGetIndexInfo(indexRel);
                 FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
 				merkle_compute_route(indexRel, values, isnull,
 									 indexInfo->ii_NumIndexKeyAttrs, &route);
@@ -2530,7 +2530,7 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
                 bool isnull[INDEX_MAX_KEYS];
 				MerkleRoute route;
 
-                indexInfo = BuildIndexInfo(indexRel);
+				indexInfo = RelationGetIndexInfo(indexRel);
                 FormIndexDatum(indexInfo, oldSlot, NULL, values, isnull);
 				merkle_compute_route(indexRel, values, isnull,
 									 indexInfo->ii_NumIndexKeyAttrs, &route);

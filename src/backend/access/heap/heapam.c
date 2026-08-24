@@ -1908,7 +1908,7 @@ heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
 				continue;
 			}
 
-			indexInfo = BuildIndexInfo(indexRelation);
+			indexInfo = RelationGetIndexInfo(indexRelation);
 
 			if (unique_check && indexRelation->rd_index->indisunique)
 				indexUniqueCheck = UNIQUE_CHECK_YES;
