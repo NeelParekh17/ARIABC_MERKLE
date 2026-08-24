@@ -360,6 +360,10 @@ SKIP_RDKAFKA_SETUP="${SKIP_RDKAFKA_SETUP:-0}"
 SKIP_RESTORE="${SKIP_RESTORE:-0}"
 SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
 ENABLE_MERKLE_INDEX="${ENABLE_MERKLE_INDEX:-1}"
+MERKLE_PARTITIONS="${MERKLE_PARTITIONS:-200}"
+MERKLE_FANOUT="${MERKLE_FANOUT:-4}"
+MERKLE_SPLIT_THRESHOLD="${MERKLE_SPLIT_THRESHOLD:-32}"
+MERKLE_MERGE_THRESHOLD="${MERKLE_MERGE_THRESHOLD:-8}"
 STOP_ONLY="${STOP_ONLY:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
@@ -484,6 +488,14 @@ Options:
   --enable-merkle-index N
                   Set the server default for Merkle maintenance: 0|1
                   (default: 1). Use 0 only for explicit overhead controls.
+  --merkle-partitions N
+                  Number of independent hash-routed Merkle partitions (default: 200)
+  --merkle-fanout N
+                  Merkle tree branching factor / fanout (default: 4)
+  --merkle-split-threshold N
+                  Node tuple count triggering a split (default: 32)
+  --merkle-merge-threshold N
+                  Node tuple count triggering a merge (default: 8)
   --skip-workload Start PostgreSQL/Raft servers, wait for a leader, collect logs,
                   and exit without starting the gateway, submitting SQL, or
                   sending the post-run marker
@@ -708,6 +720,10 @@ while [[ $# -gt 0 ]]; do
     --skip-restore) SKIP_RESTORE=1; shift ;;
     --skip-post-verify) SKIP_POST_VERIFY=1; shift ;;
     --enable-merkle-index) ENABLE_MERKLE_INDEX="${2:-}"; shift 2 ;;
+    --merkle-partitions) MERKLE_PARTITIONS="${2:-}"; shift 2 ;;
+    --merkle-fanout) MERKLE_FANOUT="${2:-}"; shift 2 ;;
+    --merkle-split-threshold) MERKLE_SPLIT_THRESHOLD="${2:-}"; shift 2 ;;
+    --merkle-merge-threshold) MERKLE_MERGE_THRESHOLD="${2:-}"; shift 2 ;;
     --skip-workload) SKIP_WORKLOAD=1; SKIP_POST_VERIFY=1; shift ;;
     --stop-only) STOP_ONLY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
@@ -3129,7 +3145,12 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
       export PGOPTIONS=\"\${PGOPTIONS:--c client_min_messages=warning}\"
       test -f '$remote_restore' || { echo 'missing restore SQL: $remote_restore' >&2; exit 1; }
       \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
-        -v ON_ERROR_STOP=1 -f '$remote_restore'
+        -v ON_ERROR_STOP=1 \
+        -v merkle_partitions='$MERKLE_PARTITIONS' \
+        -v merkle_fanout='$MERKLE_FANOUT' \
+        -v merkle_split_threshold='$MERKLE_SPLIT_THRESHOLD' \
+        -v merkle_merge_threshold='$MERKLE_MERGE_THRESHOLD' \
+        -f '$remote_restore'
       if [[ '$ENABLE_MERKLE_INDEX' -eq 0 ]]; then
         \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$\
           DECLARE r record;

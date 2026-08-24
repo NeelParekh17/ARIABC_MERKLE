@@ -112,6 +112,7 @@ while [[ $# -gt 0 ]]; do
     --node-ids|--node-ips|--node-names|--node-users|--node-is-u22|--node-client-ports|\
     --raft-port|--db-port|--db-user|--db-name|--kafka-host|--kafka-port|--kafka-home-remote|\
     --det-client-inflight|--raft-ordered-batch-linger-us|--enable-merkle-index|--det-client-mode|\
+    --merkle-partitions|--merkle-fanout|--merkle-split-threshold|--merkle-merge-threshold|\
     --raft-ordered-batch-append|--raft-ordered-batch-target-entries|--raft-ordered-coalesce-log|\
     --raft-ordered-fanout|--conn-fanout|--det-window|--bcdb-decouple-workers)
       CLUSTER_ARGS+=("$1" "${2:?missing value for $1}")
