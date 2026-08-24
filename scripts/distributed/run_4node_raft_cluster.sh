@@ -3484,7 +3484,14 @@ for idx in "${!NODE_IDS[@]}"; do
   id="${NODE_IDS[$idx]}"
   name="${NODE_NAMES[$idx]}"
   REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
-  status_line="$(node_ssh "$idx" "grep -E 'bcdb_init (enabled|skipped)' '$REMOTE_SRV_LOG' | tail -1" 2>/dev/null || true)"
+  status_line=""
+  for _try in {1..10}; do
+    status_line="$(node_ssh "$idx" "grep -E 'bcdb_init (enabled|skipped)' '$REMOTE_SRV_LOG' | tail -1" 2>/dev/null || true)"
+    if [[ -n "$status_line" ]]; then
+      break
+    fi
+    sleep 1
+  done
   if [[ "$status_line" == *"bcdb_init enabled"* ]]; then
     (( BCDB_ENABLED++ )) || true
   elif [[ "$status_line" == *"bcdb_init skipped"* ]]; then

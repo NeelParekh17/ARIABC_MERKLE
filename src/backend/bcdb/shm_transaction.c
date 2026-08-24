@@ -766,22 +766,33 @@ void clear_tx_pool(void)
  * Called from predicate.c whenever PostgreSQL SSI records a predicate lock
  * for a BCDB transaction.
  *
- * NOTE: rs_table_reserve() (the old non-DT variant that actually wrote to
- * rs_table->map) has been removed — all its call sites were replaced by
- * this function.
+/*
+ * bcdb_compute_intkey_tag
+ *
+ * Unified computation of primary-key hash tags for BCDB write-set and read-set
+ * conflict tracking. Uses fixed dbOid=0 and the table's relation Oid, hashing
+ * the 32-bit integer key with hash_any().
  */
+void bcdb_compute_intkey_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid, int32 intKey)
+{
+	uint32 h = hash_any((unsigned char *) &intKey, sizeof(int32));
+	SET_PREDICATELOCKTARGETTAG_TUPLE(*tag, 0, relOid,
+									 (BlockNumber)(h >> 16),
+									 (OffsetNumber)((h & 0xFFFF) | 1));
+}
+
 void rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 {
-    if (!bcdb_dt_conflict_tracking)
-    {
-        (void)tag;
-        return;
-    }
+	if (!bcdb_dt_conflict_tracking || bcdb_tx_context == NULL || activeTx == NULL)
+	{
+		(void)tag;
+		return;
+	}
 
-    WSTableEntryRecord *record;
-    record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
-    record->tag = *tag;
-    LIST_INSERT_HEAD(&rs_table_record, record, link);
+	WSTableEntryRecord *record;
+	record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
+	record->tag = *tag;
+	LIST_INSERT_HEAD(&rs_table_record, record, link);
 }
 
 /*
@@ -804,16 +815,16 @@ void rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
  */
 void ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
 {
-    if (!bcdb_dt_conflict_tracking)
-    {
-        (void)tag;
-        return;
-    }
+	if (!bcdb_dt_conflict_tracking || bcdb_tx_context == NULL || activeTx == NULL)
+	{
+		(void)tag;
+		return;
+	}
 
-    WSTableEntryRecord *record;
-    record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
-    record->tag = *tag;
-    LIST_INSERT_HEAD(&ws_table_record, record, link);
+	WSTableEntryRecord *record;
+	record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
+	record->tag = *tag;
+	LIST_INSERT_HEAD(&ws_table_record, record, link);
 }
 
 /*

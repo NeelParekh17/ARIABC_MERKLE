@@ -1987,14 +1987,11 @@ int main(int argc, char** argv) {
         cs_new<ariabc_pg::pg_state_machine>(opt.id, opt.db, opt.kafka);
 
     if (opt.db.db_type == 1 && opt.db.raft_apply_ledger_mode != "safe") {
-        // Legacy/non-safe mode: initialize BCDB in background to not block startup
-        std::thread([sm] {
-            ariabc_pg::pg_state_machine* psm =
-                dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
-            if (psm) {
-                psm->ensure_bcdb_initialized();
-            }
-        }).detach();
+        ariabc_pg::pg_state_machine* psm =
+            dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
+        if (psm) {
+            psm->ensure_bcdb_initialized();
+        }
     }
 
     if (opt.bypass_raft) {

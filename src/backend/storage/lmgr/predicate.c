@@ -2577,6 +2577,24 @@ PredicateLockTuple(Relation relation, HeapTuple tuple, Snapshot snapshot)
 									 ItemPointerGetBlockNumber(tid),
 									 ItemPointerGetOffsetNumber(tid));
 	PredicateLockAcquire(&tag);
+
+	if (is_bcdb_worker && activeTx != NULL && bcdb_tx_context != NULL &&
+		relation->rd_index == NULL && !IsSystemRelation(relation) &&
+		tuple != NULL && tuple->t_data != NULL)
+	{
+		TupleDesc tupdesc = RelationGetDescr(relation);
+		if (tupdesc && tupdesc->natts >= 1)
+		{
+			bool isNull;
+			Datum keyVal = heap_getattr(tuple, 1, tupdesc, &isNull);
+			if (!isNull)
+			{
+				PREDICATELOCKTARGETTAG key_tag;
+				bcdb_compute_intkey_tag(&key_tag, RelationGetRelid(relation), DatumGetInt32(keyVal));
+				rs_table_reserveDT(&key_tag);
+			}
+		}
+	}
 }
 
 

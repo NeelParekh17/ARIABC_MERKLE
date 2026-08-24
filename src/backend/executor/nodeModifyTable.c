@@ -85,30 +85,17 @@
  */
 static void
 bcdb_compute_key_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid,
-                     TupleTableSlot *slot)
+					 TupleTableSlot *slot)
 {
-    Datum   keyVal;
-    bool    isNull;
-    uint32  h;
+	Datum	keyVal;
+	bool	isNull;
 
-    /* Extract the first column (primary key) from the slot */
-    keyVal = slot_getattr(slot, 1, &isNull);
-    if (isNull)
-        h = 0;
-    else
-    {
-        int32 intKey = DatumGetInt32(keyVal);
-        h = hash_any((unsigned char *) &intKey, sizeof(int32));
-    }
-
-    /*
-     * Pack into tag.  We use a fixed dbOid of 0 (same as existing code)
-     * and the table's relOid.  The hash is split so that the lower 16-bit
-     * field (offsetNumber) is always >= 1 to keep ItemPointer-like validity.
-     */
-    SET_PREDICATELOCKTARGETTAG_TUPLE(*tag, 0, relOid,
-                                     (BlockNumber)(h >> 16),
-                                     (OffsetNumber)((h & 0xFFFF) | 1));
+	/* Extract the first column (primary key) from the slot */
+	keyVal = slot_getattr(slot, 1, &isNull);
+	if (isNull)
+		bcdb_compute_intkey_tag(tag, relOid, 0);
+	else
+		bcdb_compute_intkey_tag(tag, relOid, DatumGetInt32(keyVal));
 }
 
 static bool
