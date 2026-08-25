@@ -647,7 +647,7 @@ bcdb_advance_block_enqueue_turn(BCBlockID block_id)
 static inline uint64
 bcdb_wait_until_committed(BCTxID target_tx_id)
 {
-	BCBlock *blk = get_block_by_id(1, false); /* sentinel block holds the CV */
+	BCBlock *blk = bcdb_get_block1(); /* sentinel block holds the CV */
 	int spins = 0;
 	int poll_us = 0;
 	uint64 wait_start_us = bcdb_get_time();
@@ -769,7 +769,7 @@ bcdb_wait_until_committed(BCTxID target_tx_id)
 static inline uint64
 bcdb_wait_until_slot_ready(BCTxID target_tx_id)
 {
-	BCBlock *blk     = get_block_by_id(1, false); /* sentinel block holds the result ring */
+	BCBlock *blk     = bcdb_get_block1(); /* sentinel block holds the result ring */
 	int      slot    = bcdb_result_slot_for_txid(target_tx_id);
 	int      spins   = 0;
 	int      poll_us = 0;
@@ -879,7 +879,7 @@ bcdb_wait_until_block_slots_ready(const BCDBBlockResultRef *refs,
 								  int num_tx,
 								  BCBlockID block_id)
 {
-	BCBlock *result_block = get_block_by_id(1, false); /* sentinel block holds the ring */
+	BCBlock *result_block = bcdb_get_block1(); /* sentinel block holds the ring */
 	int    spins = 0;
 	int    poll_us = 0;
 	uint64 wait_start_us = bcdb_get_time();
@@ -1385,20 +1385,21 @@ parse_block_with_txs(const char *json)
 		if (!cJSON_IsString(sql) || (sql->valuestring == NULL))
 			goto error;
 
-		/* Diagnostic dump of the first few txs only -- bounded so a 1024-tx
-		 * block doesn't produce 1024 prints when SAFEDBG is on. */
-		if(j < 5) {
-			cJSON_Print(sql);
-		}
-
-		/* Required: "hash" -- caller-supplied unique tx identifier. */
+		/* Required: "hash". */
 		hash = cJSON_GetObjectItemCaseSensitive(tx_json, "hash");
-		if (!cJSON_IsString(hash))
+		if (!cJSON_IsString(hash) || (hash->valuestring == NULL))
 			goto error;
-		if(j < 5) {
-			cJSON_Print(hash);
+
+#if SAFEDBG
+		/* Diagnostic dump of the first few txs only */
+		if (j < 5) {
+			char *p_sql = cJSON_Print(sql);
+			char *p_hash = cJSON_Print(hash);
+			if (p_sql) { printf("safeDbg sql: %s\n", p_sql); free(p_sql); }
+			if (p_hash) { printf("safeDbg hash: %s\n", p_hash); free(p_hash); }
 			j++;
 		}
+#endif
 
 		isolation = XACT_SERIALIZABLE;
 		/* See parse_tx() for full rationale: pred_lock=false matches the
@@ -1593,9 +1594,15 @@ parse_block_with_txs(const char *json)
 	}
 	if (explicit_txids != NULL)
 		pfree(explicit_txids);
+	if (parsed != NULL)
+		cJSON_Delete(parsed);
 	return block;
 
 error:
+	if (explicit_txids != NULL)
+		pfree(explicit_txids);
+	if (parsed != NULL)
+		cJSON_Delete(parsed);
 	print_trace();
 	ereport(FATAL,
 		(errmsg("[ZL] cannot create block in shared memory")));
@@ -1696,11 +1703,13 @@ bcdb_middleware_submit_block(const char* block_json)
 		  max_tx_id = tx->tx_id;
 	}
 
-	result_block = get_block_by_id(1, false);
+	result_block = bcdb_get_block1();
 	if (result_block == NULL)
 		ereport(ERROR,
 				(errmsg("BCDB result block is not initialized")));
+#if SAFEDBG
 	gettimeofday(&tv1, NULL);
+#endif
 	/* Wait for the contiguous committed watermark to reach max_tx_id.
 	 * Because the watermark only advances after each predecessor publishes
 	 * its result slot, this implies our target slot is also published. */
@@ -1817,7 +1826,7 @@ bcdb_middleware_submit_block_results(const char* block_json)
 	__sync_add_and_fetch(&block_meta->global_bmax, 1);
 
 	/* Sentinel block holds the result ring; it must already exist. */
-	result_block = get_block_by_id(1, false);
+	result_block = bcdb_get_block1();
 	if (result_block == NULL)
 		ereport(ERROR,
 				(errmsg("BCDB result block is not initialized")));
@@ -2159,8 +2168,8 @@ bcdb_middleware_submit_block2(const char* block_json)
 		tx_queue_insert(block->txs[i], block->txs[i]->tx_id);
 		if ((i % numTxBurst == 0) && (i > 0))
 		{
-			gettimeofday(&tv1, NULL);
 #if SAFEDBG
+			gettimeofday(&tv1, NULL);
 			printf("\n\n\t time= %ld.%ld  getpid %d\n", tv1.tv_sec, tv1.tv_usec, getpid());
 			printf("\t ariaMyDbg %s : %s: %d pid %d  sleeping %dms next burstSz %d from tx %d\n\n", __FILE__, __FUNCTION__, __LINE__ , getpid() ,burstTime, numTxBurst, i );
 #endif

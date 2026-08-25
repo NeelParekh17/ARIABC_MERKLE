@@ -129,7 +129,7 @@ def main() -> int:
     ax.fill_between(xs, ys_min, ys_max, color=primary_color, alpha=0.15, label="Min-Max Range")
     
     # Plot line and marker points
-    ax.plot(xs, ys_median, color=primary_color, linewidth=2.5, marker="o", markersize=8, label="Median TPS")
+    ax.plot(xs, ys_median, color=primary_color, linewidth=2.5, marker="o", markersize=8, label="Median Majority-Visible TPS")
     
     # Error bars for variability
     yerr_low = [med - mn for med, mn in zip(ys_median, ys_min)]
@@ -151,7 +151,7 @@ def main() -> int:
 
     ax.set_title(args.title, fontsize=14, fontweight="bold", pad=15, color=text_color)
     ax.set_xlabel("Server Executor Workers", fontsize=11, labelpad=10, color=text_color)
-    ax.set_ylabel("Completed Transactions Per Second (TPS)", fontsize=11, labelpad=10, color=text_color)
+    ax.set_ylabel("Majority-Visible Transactions Per Second (TPS)", fontsize=11, labelpad=10, color=text_color)
     
     ax.set_xticks(xs)
     ax.set_xticklabels([str(x) for x in xs])

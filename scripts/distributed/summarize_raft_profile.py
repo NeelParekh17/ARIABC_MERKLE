@@ -150,6 +150,31 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
         out["divergence_count"] = as_int(row, "divergence_count")
         out["permanent_failures"] = as_int(row, "permanent_failures")
 
+    # Prefer TPS_majority_visible from run_summary.env if present
+    summary_env = read_env_file(root / "run_summary.env")
+    if summary_env:
+        tps_maj = summary_env.get("tps_majority_visible", "")
+        if tps_maj and tps_maj not in ("N/A", "INVALID"):
+            try:
+                val = float(tps_maj)
+                if val > 0:
+                    out["tps"] = f"{val:.2f}"
+            except (ValueError, TypeError):
+                pass
+        if not out["tps"]:
+            tps_all3 = summary_env.get("tps_all3_audit_drained", "")
+            if tps_all3 and tps_all3 not in ("N/A", "INVALID"):
+                try:
+                    val = float(tps_all3)
+                    if val > 0:
+                        out["tps"] = f"{val:.2f}"
+                except (ValueError, TypeError):
+                    pass
+        if "divergence_count" in summary_env:
+            out["divergence_count"] = as_int(summary_env, "divergence_count")
+        if "permanent_failures" in summary_env:
+            out["permanent_failures"] = as_int(summary_env, "permanent_failures")
+
     gateways = rows.get("PROFILE_GATEWAY", [])
     if gateways:
         _, row = max(gateways, key=lambda item: as_int(item[1], "submit_attempts"))
@@ -234,12 +259,29 @@ def summarize_root(root: pathlib.Path) -> None:
     progress = rows.get("PROGRESS_GATEWAY_DET", [])
     if progress:
         _, row = max(progress, key=lambda item: as_int(item[1], "completed"))
+        tps_val = as_float(row, "completed_tps")
+        perm_fail = as_int(row, "permanent_failures")
+        div_count = as_int(row, "divergence_count")
+        summary_env = read_env_file(root / "run_summary.env")
+        if summary_env:
+            tps_maj = summary_env.get("tps_majority_visible", "")
+            if tps_maj and tps_maj not in ("N/A", "INVALID"):
+                try:
+                    v = float(tps_maj)
+                    if v > 0:
+                        tps_val = v
+                except (ValueError, TypeError):
+                    pass
+            if "permanent_failures" in summary_env:
+                perm_fail = as_int(summary_env, "permanent_failures")
+            if "divergence_count" in summary_env:
+                div_count = as_int(summary_env, "divergence_count")
         print(
             "  result "
-            f"tps={as_float(row, 'completed_tps'):.2f} "
+            f"tps={tps_val:.2f} "
             f"completed={as_int(row, 'completed')} "
-            f"permanent_failures={as_int(row, 'permanent_failures')} "
-            f"divergence_count={as_int(row, 'divergence_count')}"
+            f"permanent_failures={perm_fail} "
+            f"divergence_count={div_count}"
         )
 
     gateways = rows.get("PROFILE_GATEWAY", [])
