@@ -789,12 +789,13 @@ bcdb_cleanup_optim_write_list(BCDBShmXact *tx, bool drop_slots)
     if (tx == NULL)
         return;
 
-    while ((optim_write_entry = SIMPLEQ_FIRST(&tx->optim_write_list)))
-    {
-        if (drop_slots && optim_write_entry->slot)
-            ExecDropSingleTupleTableSlot(optim_write_entry->slot);
-        SIMPLEQ_REMOVE_HEAD(&tx->optim_write_list, link);
-    }
+	while ((optim_write_entry = SIMPLEQ_FIRST(&tx->optim_write_list)))
+	{
+		if (drop_slots && optim_write_entry->slot)
+			ExecDropSingleTupleTableSlot(optim_write_entry->slot);
+		SIMPLEQ_REMOVE_HEAD(&tx->optim_write_list, link);
+	}
+	bcdb_reset_tupledesc_cache();
 }
 
 /*
@@ -897,7 +898,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 		PG_TRY();
 		{
 			bcdb_reset_apply_error_flags();
-			elog(LOG,
+			BCDB_FLOW_LOG(
 				 "SAFE_APPLY_ATTEMPT_BEGIN log=%llu ord=%u attempt=%d nest_level=%d",
 				 (unsigned long long) (tx ? tx->raft_log_index : 0),
 				 (unsigned) (tx ? tx->raft_item_ordinal : 0),
@@ -937,7 +938,20 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 			MemoryContextSwitchTo(old_context);
 			CurrentResourceOwner = old_owner;
 
-			if (is_deterministic)
+			if (edata->sqlerrcode == ERRCODE_UNIQUE_VIOLATION ||
+				(state_str && strcmp(state_str, "23505") == 0))
+			{
+				BCDB_FLOW_LOG("[BCDB_FLOW] apply_insert_unique_violation pid=%d txid=%d xid=%u sqlstate=%s",
+							  getpid(),
+							  tx ? (int)tx->tx_id : -1,
+							  (unsigned int)(tx ? tx->xid : InvalidTransactionId),
+							  state_str ? state_str : "23505");
+				bcdb_set_apply_unique_violation(true);
+				apply_ok = false;
+				apply_failed_unique = true;
+				FreeErrorData(edata);
+			}
+			else if (is_deterministic)
 			{
 				const char *err_class = "unknown_error_class";
 				if (strcmp(state_str, "42P01") == 0) err_class = "undefined_table";
@@ -2547,9 +2561,15 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
     tv1.tv_sec = 0;
     tv2.tv_sec = 0;
-    tv1.tv_usec = 0;
-    tv2.tv_usec = 0;
-    gettimeofday(&tv1, NULL);
+#if (SAFEDBG1 || SAFEDBG3)
+	gettimeofday(&tv1, NULL);
+#elif defined(bcdb_trace_timestamps_enabled)
+	if (unlikely(bcdb_trace_timestamps_enabled()))
+		gettimeofday(&tv1, NULL);
+#else
+	if (unlikely(bcdb_trace_timestamps_enabled()))
+		gettimeofday(&tv1, NULL);
+#endif
 #if SAFEDBG3
     printf(" id= %d  time= %ld.%ld\n", tx->tx_id, tv1.tv_sec, tv1.tv_usec);
 #endif
@@ -2580,8 +2600,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             int mem_txid;
             BCBlock *committed_block;
 
-            block = get_block_by_id(1, false);
-            Assert(block != NULL);
+			block = bcdb_get_block1();
+			Assert(block != NULL);
             mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
 
             tx->status = TX_COMMITTING;
@@ -2711,7 +2731,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 else
                     XactIsoLevel = tx->isolation;
                 PTRACE_BEGIN(BCDB_PHASE_PARSE_PLAN);
-				elog(LOG, "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=before_tx_start",
+				BCDB_FLOW_LOG("LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=before_tx_start",
 						MyProcPid, (int) tx->tx_id,
 						(unsigned long long) tx->raft_log_index,
 						(unsigned) tx->raft_item_ordinal);
@@ -2745,7 +2765,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
 					if (tx->raft_ledger_enabled)
 					{
-						elog(LOG, "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=before_claim",
+						BCDB_FLOW_LOG("LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=before_claim",
 								MyProcPid, (int) tx->tx_id,
 								(unsigned long long) tx->raft_log_index,
 								(unsigned) tx->raft_item_ordinal);
@@ -2756,7 +2776,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 															&sqlstate_claim,
 															&replay_failure);
 
-						elog(LOG, "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=after_claim result=%d",
+						BCDB_FLOW_LOG("LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=after_claim result=%d",
 								MyProcPid, (int) tx->tx_id,
 								(unsigned long long) tx->raft_log_index,
 								(unsigned) tx->raft_item_ordinal,
@@ -2828,21 +2848,21 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 							}
 
 							replay_xid = GetCurrentTransactionId();
-							elog(LOG,
+							BCDB_FLOW_LOG(
 								 "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=replay_nonterminal_finish_xact xid=%u",
 								 MyProcPid, (int) tx->tx_id,
 								 (unsigned long long) tx->raft_log_index,
 								 (unsigned) tx->raft_item_ordinal,
 								 (unsigned) replay_xid);
 							finish_xact_command();
-							elog(LOG,
+							BCDB_FLOW_LOG(
 								 "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=replay_nonterminal_publish xid=%u",
 								 MyProcPid, (int) tx->tx_id,
 								 (unsigned long long) tx->raft_log_index,
 								 (unsigned) tx->raft_item_ordinal,
 								 (unsigned) replay_xid);
 							bcdb_complete_nonterminal_failure_item(tx, &replay_failure, true);
-							elog(LOG,
+							BCDB_FLOW_LOG(
 								 "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=replay_nonterminal_cleanup xid=%u",
 								 MyProcPid, (int) tx->tx_id,
 								 (unsigned long long) tx->raft_log_index,
@@ -2983,8 +3003,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             printf("safeDbg id= %d  wait-time= %ld.%ld\n", tx->tx_id,
                    tx_start_time.tv_sec, tx_start_time.tv_usec);
 #endif
-            block = get_block_by_id(1, false);
-            Assert(block != NULL);
+			block = bcdb_get_block1();
+			Assert(block != NULL);
             latest_tx_id = get_last_committed_txid(tx);
             if (dualTab)
             {
@@ -3220,20 +3240,35 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                    __FILE__, __FUNCTION__, __LINE__, latest_tx_id, tx->tx_id);
 #endif
 
-            SpinLockAcquire(restart_counter_lock);
             total_num_restarts += num_restarts;
-            SpinLockRelease(restart_counter_lock);
 
+#if (SAFEDBG1 || SAFEDBG3)
             gettimeofday(&tv2, NULL);
             t_delta = (tv2.tv_usec - tv1.tv_usec);
             if (t_delta < 0)
                 t_delta += 1000000;
-
 #if SAFEDBG1
             printf("\nsafeDbg id= %d start= %ld.%ld finish= %ld.%ld restarts= %d exec= %d tx= %s\n",
                    tx->tx_id, tv1.tv_sec, tv1.tv_usec, tv2.tv_sec, tv2.tv_usec, total_num_restarts, t_delta, tx->sql);
 #endif
             t_sinceTx1 += t_delta;
+#elif defined(bcdb_trace_timestamps_enabled)
+			if (unlikely(bcdb_trace_timestamps_enabled()))
+			{
+				gettimeofday(&tv2, NULL);
+				t_delta = (tv2.tv_usec - tv1.tv_usec);
+				if (t_delta < 0)
+					t_delta += 1000000;
+			}
+#else
+			if (unlikely(bcdb_trace_timestamps_enabled()))
+			{
+				gettimeofday(&tv2, NULL);
+				t_delta = (tv2.tv_usec - tv1.tv_usec);
+				if (t_delta < 0)
+					t_delta += 1000000;
+			}
+#endif
 
             if (bcdb_trace_timestamps_enabled() &&
                 (tx->tx_id) % 1000 < 3 * bcdb_runtime_workers())
@@ -3592,7 +3627,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 			else
 			{
 				if (block == NULL)
-					block = get_block_by_id(1, false);
+					block = bcdb_get_block1();
 				bcdb_publish_error_result(block, tx, sqlstate);
 				if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
 					!published_max_advanced)

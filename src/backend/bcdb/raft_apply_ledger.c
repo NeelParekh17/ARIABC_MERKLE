@@ -35,18 +35,41 @@ extern void block_cleaning_dt(BCBlockID block_id);
 #include "bcdb/globals.h"
 #include "bcdb/worker.h"
 
+static inline bool
+bcdb_flow_debug_enabled(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_FLOW_DEBUG");
+		cached = (v && *v && *v != '0' && *v != 'n' && *v != 'N' && *v != 'f' && *v != 'F') ? 1 : 0;
+	}
+	return cached == 1;
+}
+
+#define BCDB_LEDGER_STAGE_LOG(...)               \
+	do                                           \
+	{                                            \
+		if (unlikely(bcdb_flow_debug_enabled())) \
+			elog(LOG, __VA_ARGS__);              \
+	} while (0)
+
 #define EMIT_SAFE_LEDGER_XACT(tx, _phase) \
-	elog(LOG, "SAFE_LEDGER_XACT phase=%s\n" \
-			  "log=%llu ord=%u\n" \
-			  "top_xid=%u\n" \
-			  "nest_level=%d\n" \
-			  "subxid=%u", \
-		 (_phase), \
-		 (unsigned long long) (tx)->raft_log_index, \
-		 (unsigned) (tx)->raft_item_ordinal, \
-		 (unsigned) GetTopTransactionIdIfAny(), \
-		 GetCurrentTransactionNestLevel(), \
-		 (unsigned) GetCurrentSubTransactionId())
+	do { \
+		if (unlikely(bcdb_flow_debug_enabled())) \
+			elog(LOG, "SAFE_LEDGER_XACT phase=%s\n" \
+					  "log=%llu ord=%u\n" \
+					  "top_xid=%u\n" \
+					  "nest_level=%d\n" \
+					  "subxid=%u", \
+				 (_phase), \
+				 (unsigned long long) (tx)->raft_log_index, \
+				 (unsigned) (tx)->raft_item_ordinal, \
+				 (unsigned) GetTopTransactionIdIfAny(), \
+				 GetCurrentTransactionNestLevel(), \
+				 (unsigned) GetCurrentSubTransactionId()); \
+	} while (0)
 
 /* --------------------------------------------------------------------------
  * Internal helpers
@@ -133,7 +156,7 @@ bytea_to_cstring_in_context(bytea *ba, MemoryContext context)
 static BCBlock *
 bcdb_result_ring_owner_block(void)
 {
-	return get_block_by_id(BCDB_RESULT_RING_OWNER_BLOCK_ID, false);
+	return bcdb_get_block1();
 }
 
 static bool
@@ -493,16 +516,16 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 		return RAFT_CLAIM_DISABLED;
 
 	/* Connect to SPI inside the existing top-level transaction */
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=spi_connect",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=spi_connect",
 		 MyProcPid,
 		 (unsigned long long) tx->raft_log_index,
 		 (unsigned) tx->raft_item_ordinal);
 	LedgerSpiScope spi_scope = ledger_spi_begin();
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=spi_connect_ok",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=spi_connect_ok",
 		 MyProcPid,
 		 (unsigned long long) tx->raft_log_index,
 		 (unsigned) tx->raft_item_ordinal);
-	elog(LOG,
+	BCDB_LEDGER_STAGE_LOG(
 		 "LEDGER_STAGE pid=%d log=%llu ord=%u stage=spi_scope_ready pushed_snapshot=%d active_snapshot=%d",
 		 MyProcPid,
 		 (unsigned long long) tx->raft_log_index,
@@ -528,29 +551,29 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 	argtypes[2] = INT4OID;
 	argtypes[3] = BYTEAOID;
 	argtypes[4] = BYTEAOID;
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_args_begin",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_args_begin",
 		 MyProcPid, (unsigned long long) tx->raft_log_index, (unsigned) tx->raft_item_ordinal);
 	values[0] = PointerGetDatum(make_bytea(tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES));
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=epoch_bytea_ok",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=epoch_bytea_ok",
 		 MyProcPid, (unsigned long long) tx->raft_log_index, (unsigned) tx->raft_item_ordinal);
 	values[1] = Int64GetDatum((int64) tx->raft_log_index);
 	values[2] = Int32GetDatum((int32) tx->raft_item_ordinal);
 	values[3] = PointerGetDatum(make_bytea(tx->raft_entry_digest, BCDB_RAFT_DIGEST_BYTES));
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=entry_digest_bytea_ok",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=entry_digest_bytea_ok",
 		 MyProcPid, (unsigned long long) tx->raft_log_index, (unsigned) tx->raft_item_ordinal);
 	values[4] = PointerGetDatum(make_bytea(tx->raft_item_digest, BCDB_RAFT_DIGEST_BYTES));
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=item_digest_bytea_ok",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=item_digest_bytea_ok",
 		 MyProcPid, (unsigned long long) tx->raft_log_index, (unsigned) tx->raft_item_ordinal);
 	memset(nulls, ' ', 5);
 
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_spi_before",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_spi_before",
 		 MyProcPid, (unsigned long long) tx->raft_log_index, (unsigned) tx->raft_item_ordinal);
 
 	EMIT_SAFE_LEDGER_XACT(tx, "claim_manifest_before");
 	spi_rc = SPI_execute_with_args(sql_buf, 5, argtypes, values, nulls, true /* read_only */, 1);
 	EMIT_SAFE_LEDGER_XACT(tx, "claim_manifest_after");
 
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_spi_after rc=%d processed=%lu",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_spi_after rc=%d processed=%lu",
 		 MyProcPid, (unsigned long long) tx->raft_log_index, (unsigned) tx->raft_item_ordinal,
 		 spi_rc, (unsigned long) SPI_processed);
 	if (spi_rc != SPI_OK_SELECT || SPI_processed != 1) {
@@ -562,7 +585,7 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 	}
 	if (SPI_tuptable != NULL)
 		SPI_freetuptable(SPI_tuptable);
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_select_ok",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=manifest_select_ok",
 		 MyProcPid,
 		 (unsigned long long) tx->raft_log_index,
 		 (unsigned) tx->raft_item_ordinal);
@@ -617,7 +640,7 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 			 spi_rc);
 	}
 
-	elog(LOG, "LEDGER_STAGE pid=%d log=%llu ord=%u stage=claimed_insert rc=%d processed=%lu",
+	BCDB_LEDGER_STAGE_LOG("LEDGER_STAGE pid=%d log=%llu ord=%u stage=claimed_insert rc=%d processed=%lu",
 		 MyProcPid,
 		 (unsigned long long) tx->raft_log_index,
 		 (unsigned) tx->raft_item_ordinal,

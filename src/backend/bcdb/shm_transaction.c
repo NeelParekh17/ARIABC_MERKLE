@@ -164,6 +164,11 @@ bool bcdb_apply_had_unique_violation(void)
     return bcdb_apply_unique_violation;
 }
 
+void bcdb_set_apply_unique_violation(bool val)
+{
+	bcdb_apply_unique_violation = val;
+}
+
 /*
  * Broad execution-flow diagnostics. Off by default; enable with
  * BCDB_FLOW_DEBUG=1 for targeted stall investigations.
@@ -387,50 +392,50 @@ bcdb_table_tuple_delete_step1(Relation relation,
         GET_PREDICATELOCKTARGETTAG_OFFSET(locktag)
 
 #define WSTableGetPartitionIdx(hashcode) ((hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS)
-#define WSTablePartitionLock(hashcode) (&(ws_table->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS]))
+#define WSTableMapAPartitionLock(table, hashcode) (&((table)->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS].lock))
+#define WSTableMapBPartitionLock(table, hashcode) (&((table)->mapB_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS].lock))
+#define WSTablePartitionLock(hashcode) (&(ws_table->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS].lock))
 #define RSTableGetPartitionIdx(hashcode) ((hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS)
-#define RSTablePartitionLock(hashcode) (&(rs_table->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS]))
+#define RSTablePartitionLock(hashcode) (&(rs_table->map_locks[(hashcode) % WRITE_CONFLICT_MAP_NUM_PARTITIONS].lock))
 
 /*
  * WSTableLockAllPartitions / WSTableUnlockAllPartitions
  *
  * DT hash rotation uses shm_hash_clear(), which rewrites the dynahash bucket
- * and freelist state in bulk.  Normal readers/writers already protect each
- * hash_search_with_hash_value() with one WSTable partition spinlock; rotation
- * must therefore take every partition lock before clearing a shard.  Without
- * this, one backend can be inside dynahash while another resets the same hash
- * table, leaving a partition spinlock held forever and eventually panicking as
- * "stuck spinlock detected" in table_checkDT().
+ * and freelist state in bulk.  Normal readers/writers protect each
+ * hash_search_with_hash_value() with the partition spinlock of the shard they
+ * access (map_locks for map, mapB_locks for mapB).  Rotation only needs to lock
+ * all partition spinlocks of the INACTIVE shard being cleared.  Concurrent
+ * readers/writers operating on the other (active) shard proceed uninterrupted.
  *
- * Locks are acquired in ascending index and released in reverse order.  Normal
- * operations only ever take one partition lock, so this ordering cannot form a
- * cycle with them.
+ * Locks are acquired in ascending index and released in reverse order.
  */
 static void
-WSTableLockAllPartitions(WSTable *table)
+WSTableLockAllPartitions(WSTable *table, bool lock_map_b)
 {
-    int i;
+	int i;
+	WSPartitionLock *locks = lock_map_b ? table->mapB_locks : table->map_locks;
 
-    for (i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
-        SpinLockAcquire(&table->map_locks[i]);
+	for (i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
+		SpinLockAcquire(&locks[i].lock);
 }
 
 static void
-WSTableUnlockAllPartitions(WSTable *table)
+WSTableUnlockAllPartitions(WSTable *table, bool lock_map_b)
 {
-    int i;
+	int i;
+	WSPartitionLock *locks = lock_map_b ? table->mapB_locks : table->map_locks;
 
-    for (i = WRITE_CONFLICT_MAP_NUM_PARTITIONS - 1; i >= 0; i--)
-        SpinLockRelease(&table->map_locks[i]);
+	for (i = WRITE_CONFLICT_MAP_NUM_PARTITIONS - 1; i >= 0; i--)
+		SpinLockRelease(&locks[i].lock);
 }
 
 /*
  * WSTableClearShard
  *
- * Safely clear one DT write-set shard while excluding all concurrent
- * table_checkDT() probes and publish_ws_tableDT() inserts.  mapB has an
- * additional non-empty cache bit; clear it while the table is still locked so
- * later readers cannot skip/scan based on stale state.
+ * Safely clear one DT write-set shard while excluding concurrent probes and
+ * inserts targeting THAT specific shard.  The other shard remains available for
+ * active execution.
  */
 static void
 WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b,
@@ -445,7 +450,7 @@ WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b,
 		*clear_us = 0;
 
 	lock_start = bcdb_get_time();
-	WSTableLockAllPartitions(table);
+	WSTableLockAllPartitions(table, clears_map_b);
 	if (lock_acquire_us != NULL)
 		*lock_acquire_us = bcdb_get_time() - lock_start;
 	clear_start = bcdb_get_time();
@@ -454,7 +459,7 @@ WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b,
 		pg_atomic_write_u32(&table->mapB_nonempty, 0);
 	if (clear_us != NULL)
 		*clear_us = bcdb_get_time() - clear_start;
-	WSTableUnlockAllPartitions(table);
+	WSTableUnlockAllPartitions(table, clears_map_b);
 }
 
 /*
@@ -513,8 +518,8 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
         return NULL;
     }
     LWLockInitialize(&tx->lock, LWTRANCHE_TX);
-    LWLockAcquire(&tx->lock, LW_EXCLUSIVE);
     SpinLockRelease(tx_pool_lock);
+	LWLockAcquire(&tx->lock, LW_EXCLUSIVE);
 
     /* hash_search() already copied key bytes into tx->hash */
     strcpy(tx->sql, sql);
@@ -702,7 +707,10 @@ void create_tx_pool(void)
 		ws_table->mapActive = ws_table->map;
 		pg_atomic_init_u32(&ws_table->mapB_nonempty, 0);
 		for (int i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
-			SpinLockInit(&(ws_table->map_locks[i]));
+		{
+			SpinLockInit(&(ws_table->map_locks[i].lock));
+			SpinLockInit(&(ws_table->mapB_locks[i].lock));
+		}
 	}
 	else
 	{
@@ -727,20 +735,23 @@ void create_tx_pool(void)
 		rs_table->mapActive = rs_table->map;
 		pg_atomic_init_u32(&rs_table->mapB_nonempty, 0);
 		for (int i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
-			SpinLockInit(&(rs_table->map_locks[i]));
+		{
+			SpinLockInit(&(rs_table->map_locks[i].lock));
+			SpinLockInit(&(rs_table->mapB_locks[i].lock));
+		}
     }
 }
 
 Size tx_pool_size(void)
 {
-    Size ret = hash_estimate_size(MAX_SHM_TX, sizeof(BCDBShmXact));
-    ret = add_size(ret, hash_estimate_size(MAX_SHM_TX, sizeof(XidMapEntry)));
-    ret = add_size(ret, sizeof(slock_t) * 2);
+	Size ret = hash_estimate_size(MAX_SHM_TX, sizeof(BCDBShmXact));
+	ret = add_size(ret, hash_estimate_size(MAX_SHM_TX, sizeof(XidMapEntry)));
+	ret = add_size(ret, sizeof(slock_t) * 2);
 	ret = add_size(ret, sizeof(pg_atomic_uint32));
-    ret = add_size(ret, sizeof(TxQueue) * NUM_TX_QUEUE_PARTITION);
-    ret = add_size(ret, sizeof(WSTable));
-    ret = add_size(ret, hash_estimate_size(MAX_WRITE_CONFLICT, sizeof(WSTableEntry)));
-    return ret;
+	ret = add_size(ret, sizeof(TxQueue) * NUM_TX_QUEUE_PARTITION);
+	ret = add_size(ret, sizeof(WSTable) * 2);
+	ret = add_size(ret, hash_estimate_size(MAX_WRITE_CONFLICT, sizeof(WSTableEntry)));
+	return ret;
 }
 
 void clear_tx_pool(void)
@@ -978,7 +989,7 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
         bool found;
         WSTableEntry *entry;
         BCTxID cand_id;
-        slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
+		slock_t *partition_lock = WSTableMapAPartitionLock(table, tuple_hash);
         uint64 probe_lock_start = bcdb_ptrace_timer_start();
 
         SpinLockAcquire(partition_lock);
@@ -1012,7 +1023,7 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
 		bool found;
 		WSTableEntry *entry;
 		BCTxID cand_id;
-		slock_t *partition_lock = WSTablePartitionLock(tuple_hash);
+		slock_t *partition_lock = WSTableMapBPartitionLock(table, tuple_hash);
 		uint64 probe_lock_start = bcdb_ptrace_timer_start();
 
 		SpinLockAcquire(partition_lock);
@@ -1192,12 +1203,10 @@ void tx_queue_insert(BCDBShmXact *tx, int32 partition)
 
     tx->queue_partition = partition;
     queue->size += 1;
-    // SpinLockAcquire(nexec_lock);
-    gettimeofday(&tv1, NULL);
 #if SAFEDBG
+	gettimeofday(&tv1, NULL);
     printf(" safeDB func %s hash %s time= %ld.%ld\n", __FUNCTION__, tx->hash, tv1.tv_sec, tv1.tv_usec);
 #endif
-    // SpinLockRelease(nexec_lock);
     SpinLockRelease(&queue->lock);
     ConditionVariableSignal(&queue->empty_cond);
 }
@@ -1240,10 +1249,10 @@ tx_queue_next(int32 partition)
     *numExecPt -= 1;
     //SpinLockRelease(nexec_lock);
     */
-    gettimeofday(&tv1, NULL);
-    // printf("\n safeDB func %s time= %ld.%ld\n", __FUNCTION__, tv1.tv_sec, tv1.tv_usec);
-    // printf("safeDB %s : %s: %d nExec= %d \n\n", __FILE__, __FUNCTION__, __LINE__ ,  *numExecPt);
-    //	}
+#if SAFEDBG
+	gettimeofday(&tv1, NULL);
+	printf("\n safeDB func %s time= %ld.%ld\n", __FUNCTION__, tv1.tv_sec, tv1.tv_usec);
+#endif
     while (queue->size <= 0)
     {
 
@@ -1257,27 +1266,8 @@ tx_queue_next(int32 partition)
     tx = TAILQ_FIRST(&queue->list);
     TAILQ_REMOVE(&queue->list, tx, queue_link);
     tx->queue_link.tqe_prev = NULL;
-    /*
-    if (((tx)->queue_link.tqe_next) == NULL)	{
-    printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
-    printf("safeDB ** next NULL ** %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue); }
-    printf("safeDB %s : %s: %d partition %d num_queue %d \n", __FILE__, __FUNCTION__, __LINE__ , partition, num_queue);
-#define TAILQ_REMOVE(head, elm, field) do {				\
-    if (((elm)->field.tqe_next) != NULL)				\
-    if (((tx)->queue_link.tqe_next) != NULL)				\
-    SpinLockAcquire(nexec_lock);
-    if( ( *numExecPt + blocksize) ==0)
-    {
-    shm_hash_clear(ws_table->map, MAX_WRITE_CONFLICT);
-    shm_hash_clear(ws_table->mapB, MAX_WRITE_CONFLICT);
-    printf(" safeDB %s : %s: %d nExec= 0 !!! reset htab \n\n", __FILE__, __FUNCTION__, __LINE__ );
-    }
-    *numExecPt += 1;
-    SpinLockRelease(nexec_lock);
-    printf("safeDB %s : %s: %d nExec= %d tx %d\n\n", __FILE__, __FUNCTION__, __LINE__ ,  *numExecPt , tx->tx_id);
-    */
-    gettimeofday(&tv1, NULL);
 #if SAFEDBG
+	gettimeofday(&tv1, NULL);
     printf("\n func %s hash %s time= %ld.%ld", __FUNCTION__, tx->hash, tv1.tv_sec, tv1.tv_usec);
     printf("safeDB %s : %s: %d pid %d tx %d\n", __FILE__, __FUNCTION__, __LINE__, getpid(), tx->tx_id);
 #endif
@@ -1287,43 +1277,98 @@ tx_queue_next(int32 partition)
     return tx;
 }
 
+#define BCDB_MAX_CACHED_DESCS 8
+
+typedef struct BCDBTupleDescCacheEntry
+{
+	Oid			relOid;
+	TupleDesc	desc;
+} BCDBTupleDescCacheEntry;
+
+static BCDBTupleDescCacheEntry bcdb_td_cache[BCDB_MAX_CACHED_DESCS];
+static int bcdb_td_cache_count = 0;
+static BCTxID bcdb_td_cache_txid = -1;
+
+void
+bcdb_reset_tupledesc_cache(void)
+{
+	bcdb_td_cache_count = 0;
+	bcdb_td_cache_txid = -1;
+}
+
+static void
+bcdb_tupledesc_cache_reset_cb(void *arg)
+{
+	bcdb_reset_tupledesc_cache();
+}
+
 static TupleTableSlot *
 clone_slot(TupleTableSlot *slot)
 {
-    TupleTableSlot *ret;
-    TupleDesc newdesc;
+	TupleTableSlot *ret;
+	TupleDesc	desc = NULL;
+	Oid			relOid = slot->tts_tableOid;
 
-    /*
-     * CRITICAL: Use TTSOpsHeapTuple (not the source slot's ops) to ensure the
-     * clone MATERIALIZES the data with its own heap-allocated copy.
-     *
-     * If the source is a BufferHeapTupleTableSlot with a pinned buffer,
-     * ExecCopySlot into another BufferHeapTupleTableSlot would call
-     * tts_buffer_heap_store_tuple(), which pins THE SAME heap buffer and
-     * registers it with CurrentResourceOwner.  When the optimistic-phase
-     * transaction ends, the ResourceOwner releases that pin.  But the clone
-     * survives (in bcdb_tx_context) until serial-apply, where
-     * ExecDropSingleTupleTableSlot tries to ReleaseBuffer on the already-
-     * unpinned buffer → TRAP "ref != NULL" in UnpinBuffer.
-     *
-     * TTSOpsHeapTuple slots always copy the tuple into palloc'd memory,
-     * so they never hold buffer pins and are safe across transaction
-     * boundaries.
-     */
-    ret = MakeTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsHeapTuple);
-    ExecCopySlot(ret, slot);
-    ret->tts_tableOid = slot->tts_tableOid;
-    /*
-     * Create an independent copy of the TupleDesc for the cloned slot.
-     * MakeTupleTableSlot already pinned the original TupleDesc, so we must
-     * release that pin before replacing the pointer with the copy.
-     * Without this, the original TupleDesc's refcount would never reach zero,
-     * causing TupleDesc reference leak warnings on every BCDB transaction.
-     */
-    newdesc = CreateTupleDescCopy(slot->tts_tupleDescriptor);
-    ReleaseTupleDesc(ret->tts_tupleDescriptor);
-    ret->tts_tupleDescriptor = newdesc;
-    return ret;
+	if (activeTx != NULL && activeTx->tx_id != bcdb_td_cache_txid)
+	{
+		bcdb_td_cache_count = 0;
+		bcdb_td_cache_txid = activeTx->tx_id;
+	}
+
+	if (OidIsValid(relOid))
+	{
+		for (int i = 0; i < bcdb_td_cache_count; i++)
+		{
+			if (bcdb_td_cache[i].relOid == relOid)
+			{
+				desc = bcdb_td_cache[i].desc;
+				break;
+			}
+		}
+	}
+
+	if (desc == NULL)
+	{
+		/*
+		 * If this is the first cache entry in bcdb_tx_context, register a
+		 * reset callback so that any MemoryContextReset(bcdb_tx_context)
+		 * automatically resets the cache before memory is freed.
+		 */
+		if (bcdb_td_cache_count == 0 && bcdb_tx_context != NULL)
+		{
+			MemoryContextCallback *cb = (MemoryContextCallback *)
+				MemoryContextAlloc(bcdb_tx_context, sizeof(MemoryContextCallback));
+			cb->func = bcdb_tupledesc_cache_reset_cb;
+			cb->arg = NULL;
+			MemoryContextRegisterResetCallback(bcdb_tx_context, cb);
+		}
+
+		/*
+		 * Create an independent copy in bcdb_tx_context so that the cloned
+		 * slot's descriptor outlives the transient portal/executor context
+		 * without pinning the portal's original TupleDesc.
+		 */
+		desc = CreateTupleDescCopy(slot->tts_tupleDescriptor);
+		desc->tdrefcount = -1;
+		if (OidIsValid(relOid) && bcdb_td_cache_count < BCDB_MAX_CACHED_DESCS)
+		{
+			bcdb_td_cache[bcdb_td_cache_count].relOid = relOid;
+			bcdb_td_cache[bcdb_td_cache_count].desc = desc;
+			bcdb_td_cache_count++;
+		}
+	}
+
+	/*
+	 * CRITICAL: Use TTSOpsHeapTuple (not the source slot's ops) to ensure the
+	 * clone MATERIALIZES the data with its own heap-allocated copy.
+	 *
+	 * Because 'desc' has tdrefcount == -1, MakeTupleTableSlot does not register
+	 * it with CurrentResourceOwner, avoiding leak warnings when the portal drops.
+	 */
+	ret = MakeTupleTableSlot(desc, &TTSOpsHeapTuple);
+	ExecCopySlot(ret, slot);
+	ret->tts_tableOid = relOid;
+	return ret;
 }
 
 /*
@@ -1428,6 +1473,7 @@ void remove_tx_xid_map(TransactionId xid)
 {
     bool found;
     XidMapEntry *entry;
+	BCDBShmXact *mapped_tx = NULL;
     uint64 spin_t0 = 0;
     uint64 spin_wait_us = 0;
 
@@ -1449,6 +1495,15 @@ void remove_tx_xid_map(TransactionId xid)
                     (unsigned long)spin_wait_us);
 
     if (entry)
+	{
+		mapped_tx = entry->tx;
+		hash_search(xid_map, &xid, HASH_REMOVE, &found);
+		BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove post_remove pid=%d xid=%u removed=%d",
+						(int)getpid(), (unsigned int)xid, found ? 1 : 0);
+	}
+	SpinLockRelease(xid_map_lock);
+
+	if (mapped_tx != NULL)
     {
         uint64 lw_wait_us = 0;
         uint64 lw_t0 = 0;
@@ -1457,24 +1512,19 @@ void remove_tx_xid_map(TransactionId xid)
             lw_t0 = bcdb_get_time();
 
         BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove pre_lwlock pid=%d xid=%u tx_ptr=%p",
-                        (int)getpid(), (unsigned int)xid, (void *)entry->tx);
-        LWLockAcquire(&entry->tx->lock, LW_EXCLUSIVE);
+						(int)getpid(), (unsigned int)xid, (void *)mapped_tx);
+		LWLockAcquire(&mapped_tx->lock, LW_EXCLUSIVE);
         if (bcdb_xidmap_debug_enabled())
             lw_wait_us = bcdb_get_time() - lw_t0;
 
         if (bcdb_xidmap_debug_enabled() && lw_wait_us >= 1000)
             ereport(LOG,
                     (errmsg("[BCDB_XIDMAP] remove lwlock_wait pid=%d xid=%u tx_ptr=%p wait_us=%lu",
-                            (int)getpid(), (unsigned int)xid, (void *)entry->tx,
+							(int)getpid(), (unsigned int)xid, (void *)mapped_tx,
                             (unsigned long)lw_wait_us)));
 
-        hash_search(xid_map, &xid, HASH_REMOVE, &found);
-        LWLockRelease(&entry->tx->lock);
-
-        BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove post_remove pid=%d xid=%u removed=%d",
-                        (int)getpid(), (unsigned int)xid, found ? 1 : 0);
+		LWLockRelease(&mapped_tx->lock);
     }
-    SpinLockRelease(xid_map_lock);
 
     BCDB_XIDMAP_LOG("[BCDB_XIDMAP] remove exit pid=%d xid=%u found=%d",
                     (int)getpid(), (unsigned int)xid, found ? 1 : 0);
@@ -1502,27 +1552,41 @@ bcdb_dirty_xid_is_ordered_predecessor(TransactionId xid)
     if (!TransactionIdIsValid(xid) || activeTx == NULL)
         return false;
 
-    SpinLockAcquire(xid_map_lock);
-    /*
-     * SnapshotDirty can report the subtransaction XID that inserted the heap
-     * tuple. apply_optim_insert() uses an internal subtransaction, and
-     * GetCurrentTransactionId() records exactly that observed XID in xid_map.
-     * Try it before falling back to the top transaction ID.
-     */
+	/*
+	 * SnapshotDirty can report the subtransaction XID that inserted the heap
+	 * tuple. apply_optim_insert() uses an internal subtransaction, and
+	 * GetCurrentTransactionId() records exactly that observed XID in xid_map.
+	 * Try it before falling back to the top transaction ID.
+	 *
+	 * IMPORTANT: SubTransGetTopmostTransaction() calls SubTransGetParent()
+	 * which acquires SubtransControlLock (an LWLock) and may do SLRU I/O.
+	 * We must NOT call it while holding xid_map_lock (a spinlock), because
+	 * spinlocks must never be held while sleeping.  So we split this into
+	 * two spinlock-protected lookups with the subtrans walk in between.
+	 */
+
+	/* First attempt: direct XID lookup under the spinlock. */
+	SpinLockAcquire(xid_map_lock);
     entry = hash_search(xid_map, &xid, HASH_FIND, NULL);
     if (entry != NULL && entry->tx != NULL)
         mapped_txid = entry->tx->tx_id;
-    else
+	SpinLockRelease(xid_map_lock);
+
+	/* If the direct lookup missed, resolve to the topmost transaction ID
+	 * outside any spinlock, then re-check.  SubTransGetTopmostTransaction
+	 * can acquire LWLocks and do SLRU I/O, so it must run lock-free. */
+	if (mapped_txid < 0)
     {
         topxid = SubTransGetTopmostTransaction(xid);
         if (topxid != xid)
         {
+			SpinLockAcquire(xid_map_lock);
             entry = hash_search(xid_map, &topxid, HASH_FIND, NULL);
             if (entry != NULL && entry->tx != NULL)
                 mapped_txid = entry->tx->tx_id;
+			SpinLockRelease(xid_map_lock);
         }
     }
-    SpinLockRelease(xid_map_lock);
 
     return mapped_txid >= 0 && mapped_txid < activeTx->tx_id;
 }
@@ -1642,10 +1706,6 @@ bool apply_optim_insert(TupleTableSlot *slot, CommandId cid)
 {
     uint64 apply_insert_start = bcdb_ptrace_timer_start();
     Relation relation = RelationIdGetRelation(slot->tts_tableOid);
-    MemoryContext old_context = CurrentMemoryContext;
-    ResourceOwner old_owner = CurrentResourceOwner;
-    bool insert_ok = false;
-    ErrorData *edata = NULL;
 
 	if (!enable_merkle_index && merkle_relation_has_index(relation))
 	{
@@ -1660,76 +1720,19 @@ bool apply_optim_insert(TupleTableSlot *slot, CommandId cid)
     DEBUGMSG("[ZL] tx %s applying optim insert (rel: %d)", activeTx->hash, relation->rd_id);
     bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_APPLY_INSERT_COUNT, 1);
 
-    /*
-     * Run the heap + index insert inside a subtransaction so we can catch a
-     * duplicate-key ERROR (or any ERROR) without aborting the caller's serial
-     * transaction.
-     *
-	 * Merkle DML stages a transaction-local delta.  The staged map follows the
-	 * enclosing subtransaction and is serialized only when the terminal
-	 * ledger row commits, so no page undo is needed here.
-     */
+	/*
+	 * Apply the heap + index insert directly inside the enclosing
+	 * bcdb_apply_retry subtransaction.  Any duplicate-key or constraint error
+	 * is caught by bcdb_apply_optim_writes_with_retry()'s PG_CATCH block,
+	 * avoiding inner subtransaction allocation and SubtransControlLock contention.
+	 */
+	table_tuple_insert(relation, slot, cid, 0, NULL);
+	heap_apply_index(relation, slot, true, true);
+	RelationClose(relation);
 
-    BeginInternalSubTransaction("bcdb_insert");
-    PG_TRY();
-    {
-        table_tuple_insert(relation, slot, cid, 0, NULL);
-
-        heap_apply_index(relation, slot, true, true);
-
-        ReleaseCurrentSubTransaction();
-        MemoryContextSwitchTo(old_context);
-        CurrentResourceOwner = old_owner;
-        insert_ok = true;
-    }
-    PG_CATCH();
-    {
-        MemoryContextSwitchTo(old_context);
-        edata = CopyErrorData();
-        FlushErrorState();
-        MemoryContextSwitchTo(old_context);
-        RollbackAndReleaseCurrentSubTransaction();
-        MemoryContextSwitchTo(old_context);
-        CurrentResourceOwner = old_owner;
-    }
-    PG_END_TRY();
-
-    RelationClose(relation);
-
-    if (edata != NULL)
-    {
-        if (edata->sqlerrcode == ERRCODE_UNIQUE_VIOLATION)
-        {
-            bool key_is_null = true;
-            int32 key_val = 0;
-
-            if (slot != NULL)
-            {
-                Datum key_datum = slot_getattr(slot, 1, &key_is_null);
-                if (!key_is_null)
-                    key_val = DatumGetInt32(key_datum);
-            }
-
-            BCDB_FLOW_LOG("[BCDB_FLOW] apply_insert_unique_violation pid=%d txid=%d xid=%u rel=%u key_is_null=%d key=%d",
-                          getpid(),
-                          activeTx ? (int)activeTx->tx_id : -1,
-                          (unsigned int)(activeTx ? activeTx->xid : InvalidTransactionId),
-                          slot ? slot->tts_tableOid : InvalidOid,
-                          key_is_null ? 1 : 0,
-                          key_val);
-            bcdb_apply_unique_violation = true;
-            FreeErrorData(edata);
-            bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_INSERT_US,
-                                   apply_insert_start);
-            return false;
-        }
-
-        ReThrowError(edata);
-    }
-
-    bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_INSERT_US,
-                           apply_insert_start);
-    return insert_ok;
+	bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_APPLY_INSERT_US,
+						   apply_insert_start);
+	return true;
 }
 
 bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
@@ -2935,7 +2938,7 @@ void publish_ws_tableDT(int id)
         uint64 lock_start;
         tag = &(record->tag);
         tuple_hash = PredicateLockTargetTagHashCode(tag);
-        partition_lock = WSTablePartitionLock(tuple_hash);
+		partition_lock = using_map_b ? WSTableMapBPartitionLock(ws_table, tuple_hash) : WSTableMapAPartitionLock(ws_table, tuple_hash);
         
         lock_start = bcdb_ptrace_timer_start();
         SpinLockAcquire(partition_lock);

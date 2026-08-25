@@ -569,7 +569,7 @@ bcdb_gate_diagnostics(PG_FUNCTION_ARGS)
 	printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 #endif
 
-	BCBlock *blk = get_block_by_id(1, false);
+	BCBlock *blk = bcdb_get_block1();
 	BCTxID   published     = blk ? (BCTxID)__atomic_load_n(&blk->published_max_tx_id, __ATOMIC_RELAXED) : -1;
 	BCTxID   last_committed = blk ? (BCTxID)__atomic_load_n(&blk->last_committed_tx_id, __ATOMIC_RELAXED) : -1;
 	BCBlockID next_enqueue  = block_meta ?

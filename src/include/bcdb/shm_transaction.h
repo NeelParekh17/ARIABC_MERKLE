@@ -93,15 +93,22 @@ typedef struct _OptimWriteEntry
 } OptimWriteEntry;
 
 #define      TX_MAP_SZ  ((2 * NUM_WORKERS) - 1)
+
+typedef struct _WSPartitionLock
+{
+	slock_t lock;
+} pg_attribute_aligned(PG_CACHE_LINE_SIZE) WSPartitionLock;
+
 typedef struct _WSTable
 {
-    /* partition the available list and HTAB to avoid contention */
-    HTAB               *map;
-    HTAB               *mapB;
-    HTAB               *mapActive;
-    /* mapB emptiness cache for DT conflict probes */
-    pg_atomic_uint32    mapB_nonempty;
-    slock_t             map_locks[WRITE_CONFLICT_MAP_NUM_PARTITIONS];
+	/* partition the available list and HTAB to avoid contention */
+	HTAB			   *map;
+	HTAB			   *mapB;
+	HTAB			   *mapActive;
+	/* mapB emptiness cache for DT conflict probes */
+	pg_atomic_uint32	mapB_nonempty;
+	WSPartitionLock		map_locks[WRITE_CONFLICT_MAP_NUM_PARTITIONS];
+	WSPartitionLock		mapB_locks[WRITE_CONFLICT_MAP_NUM_PARTITIONS];
 } WSTable;
 
 /* to do: move non-shared element out */
@@ -183,7 +190,7 @@ typedef struct _TxQueue
     ConditionVariable                        empty_cond;
     ConditionVariable                        full_cond;
     int32 volatile                           size;
-} TxQueue;
+} pg_attribute_aligned(PG_CACHE_LINE_SIZE) TxQueue;
 
 /*typedef struct _TxResult
 {
@@ -265,6 +272,8 @@ extern bool apply_deferred_delete_by_key(Oid relOid, int keyval);
 extern bool apply_optim_writes(void);
 extern void bcdb_reset_apply_error_flags(void);
 extern bool bcdb_apply_had_unique_violation(void);
+extern void bcdb_set_apply_unique_violation(bool val);
+extern void bcdb_reset_tupledesc_cache(void);
 /* check_stale_read removed — SSI stale-read check that was never called; see shm_transaction.c */
 /* clean_ws_table_record, clean_rs_table_record removed — non-DT per-entry cleanup with no callers;
  * use clean_rs_ws_table() (bulk clear) instead */
