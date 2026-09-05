@@ -111,6 +111,14 @@ public:
         item.has_assigned_det_seq = true;
         item.assigned_det_seq = seq;
         register_result_batch(seq, std::vector<client_api_request_item>{item});
+        {
+            std::lock_guard<std::mutex> lk(tracker_mu_);
+            entry_tracker_record& rec = entry_tracker_[seq];
+            if (rec.total_items == 0) {
+                rec.total_items = 1;
+                rec.terminal_item.assign(1, false);
+            }
+        }
         std::vector<std::string> req_ids{req_id};
         std::vector<std::string> sqls{sql};
         std::vector<uint64_t> assigned_det_seqs{seq};
@@ -122,6 +130,14 @@ public:
         if (items.empty()) return;
         const uint64_t last_seq = first_seq + static_cast<uint64_t>(items.size() - 1);
         register_result_batch(last_seq, items);
+        {
+            std::lock_guard<std::mutex> lk(tracker_mu_);
+            entry_tracker_record& rec = entry_tracker_[last_seq];
+            if (rec.total_items == 0) {
+                rec.total_items = static_cast<uint32_t>(items.size());
+                rec.terminal_item.assign(rec.total_items, false);
+            }
+        }
         std::vector<std::string> req_ids;
         std::vector<std::string> sqls;
         std::vector<uint64_t> assigned_det_seqs;

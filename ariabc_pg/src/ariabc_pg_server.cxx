@@ -1397,30 +1397,35 @@ bool direct_enqueue_ordered(pg_state_machine* psm,
 
     std::unique_lock<std::mutex> lk(orderer.mu);
     const uint64_t order_start_seq = det_order_start_seq();
+    std::cerr << "[ORDERER] first_seq=" << first_seq << " last_seq=" << last_seq
+              << " order_start_seq=" << order_start_seq << " init=" << orderer.initialized
+              << " next_seq=" << orderer.next_seq << std::endl;
     if (!orderer.initialized) {
         orderer.initialized = true;
-        // Workloads in the benchmark start at the configured DET epoch, but
-        // the one-shot preflight uses a high sequence. If a fanout lane
-        // delivers a later batch first, do not make that batch the epoch start.
-        orderer.next_seq = (first_seq >= 90000000ULL) ? first_seq : order_start_seq;
+        if (first_seq >= 90000000ULL) {
+            orderer.next_seq = first_seq;
+        } else if (order_start_seq > 0) {
+            orderer.next_seq = order_start_seq;
+        } else {
+            orderer.next_seq = first_seq;
+        }
+        std::cerr << "[ORDERER] initialized next_seq to " << orderer.next_seq << std::endl;
     } else if (orderer.pending.empty() &&
                first_seq < orderer.next_seq &&
                !orderer.drained_any) {
         orderer.next_seq = first_seq;
+        std::cerr << "[ORDERER] reset next_seq to " << orderer.next_seq << std::endl;
     } else if (orderer.pending.empty() &&
                first_seq < orderer.next_seq &&
                orderer.next_seq - first_seq > 1000000ULL) {
-        // The benchmark preflight uses a high DET sequence, then the workload
-        // restarts at the configured epoch. With multi-socket fanout, a later
-        // workload batch can arrive before the first batch; reset to the epoch
-        // start, not to that later batch, so the FIFO executor still sees
-        // contiguous DET order.
         orderer.next_seq = order_start_seq;
+        std::cerr << "[ORDERER] reset epoch next_seq to " << orderer.next_seq << std::endl;
     }
 
     if (orderer.pending.find(first_seq) != orderer.pending.end()) {
         out_resp.status = 1;
         out_resp.msg = "DUPLICATE_DIRECT_DET_SEQ first_seq=" + std::to_string(first_seq);
+        std::cerr << "[ORDERER] DUPLICATE_DIRECT_DET_SEQ: " << first_seq << std::endl;
         return true;
     }
     orderer.pending.emplace(first_seq, entry);
@@ -1428,10 +1433,15 @@ bool direct_enqueue_ordered(pg_state_machine* psm,
     auto drain_ready = [&]() {
         while (!g_stop.load(std::memory_order_relaxed)) {
             auto it = orderer.pending.find(orderer.next_seq);
-            if (it == orderer.pending.end()) break;
+            if (it == orderer.pending.end()) {
+                std::cerr << "[ORDERER] drain stopped: next_seq=" << orderer.next_seq
+                          << " not in pending (size=" << orderer.pending.size() << ")" << std::endl;
+                break;
+            }
             std::shared_ptr<direct_ordered_entry> ready = it->second;
             orderer.pending.erase(it);
 
+            std::cerr << "[ORDERER] draining ready first_seq=" << ready->first_seq << std::endl;
             lk.unlock();
             direct_enqueue_to_state_machine(psm, ready->req, ready->first_seq);
             lk.lock();
@@ -1465,6 +1475,7 @@ void handle_client_fd_direct(int fd,
                               pg_state_machine* psm,
                               std::atomic<uint64_t>& seq_counter,
                               direct_orderer& orderer) {
+    std::cerr << "[DIRECT] client connected fd=" << fd << std::endl;
     {
         int one = 1;
         (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
@@ -1475,7 +1486,13 @@ void handle_client_fd_direct(int fd,
         const auto r0 = std::chrono::steady_clock::now();
         const bool ok_read = read_request_frame(fd, req, err);
         const auto r1 = std::chrono::steady_clock::now();
-        if (!ok_read) break;
+        if (!ok_read) {
+            std::cerr << "[DIRECT] read_request_frame failed fd=" << fd << " err=" << err << std::endl;
+            break;
+        }
+
+        std::cerr << "[DIRECT] req fd=" << fd << " req_id=" << req.req_id << " sql=" << req.sql.substr(0, 40)
+                  << " batch_items=" << req.batch_items.size() << std::endl;
 
         debug_trace_server_request(req);
         g_prof.client_read_frames.fetch_add(1, std::memory_order_relaxed);
@@ -1495,7 +1512,7 @@ void handle_client_fd_direct(int fd,
         if (req.sql == "__ARIABC_CTRL_GET_LEADER") {
             client_api_response resp;
             resp.status = 0;
-            resp.msg = "-1";
+            resp.msg = "1";
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
             continue;
@@ -1503,7 +1520,7 @@ void handle_client_fd_direct(int fd,
         if (req.sql == "__ARIABC_CTRL_IS_LEADER") {
             client_api_response resp;
             resp.status = 0;
-            resp.msg = "0";
+            resp.msg = "1";
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
             continue;
