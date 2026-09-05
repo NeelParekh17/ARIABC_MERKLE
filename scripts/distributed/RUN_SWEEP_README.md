@@ -129,6 +129,28 @@ Topology parameters can be overridden directly from the command line:
 
 ---
 
+## 🔬 Multi-Mode Comparative Sweep (`run_all_modes_gateway_sweep.py`)
+
+For automated comparison between standalone PostgreSQL, BCDB deterministic concurrency control, BCDB dynamic Merkle indexing, and the 4-node Raft-Kafka cluster, run `scripts/distributed/run_all_modes_gateway_sweep.py`:
+
+```bash
+python3 scripts/distributed/run_all_modes_gateway_sweep.py \
+  --modes pg,bcdb_det,bcdb_merkle,cluster \
+  --workers 1,2,4,8,12,16,20,24 \
+  --workloads "scripts/ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt,scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt" \
+  --run-cluster
+```
+
+This runs the benchmark across:
+- **`pg`**: Plain PostgreSQL (dbType=0)
+- **`bcdb_det`**: BCDB deterministic engine without Merkle indexing (dbType=1, enable_merkle_index=off)
+- **`bcdb_merkle`**: BCDB deterministic engine with dynamic Merkle tree indexing (dbType=1, enable_merkle_index=on)
+- **`cluster`**: 4-node distributed Raft-Kafka cluster
+
+Live terminal output and verification signatures are logged to `out_4modes_live.txt`, with summary CSVs and comparative scaling graphs saved under `scripts/bench_full_results/all_modes_gateway_sweep_<timestamp>/`.
+
+---
+
 ## ✅ Post-Sweep Verification
 
 After completing a distributed benchmark campaign, verify replica state consistency and Merkle tree root alignment across all cluster nodes:
