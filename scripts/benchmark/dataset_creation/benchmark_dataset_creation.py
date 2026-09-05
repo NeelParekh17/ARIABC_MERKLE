@@ -103,13 +103,24 @@ def measure_dataset_creation_single_run(
     synchronous_commit: str = "off",
 ) -> Dict[str, Any]:
     """
-    Perform a clean, isolated build of the dataset with all indexes for a given tuple count.
-    Measures each sub-phase precisely.
+    Benchmark live DML-driven dataset creation with all indexes present.
+
+    The execution order is:
+      1. Create empty table WITH primary key constraint.
+      2. Create Merkle AM index on empty table.
+      3. Create Partition Lookup B-Tree index on empty table.
+      4. INSERT all N rows via generate_series — every row triggers live PK
+         B-Tree insertion, live Merkle tree node updates (hash computation,
+         splits), and live Lookup B-Tree expression index insertion.
+      5. ANALYZE.
+
+    This measures the true transactional index maintenance cost, NOT the
+    PostgreSQL CREATE INDEX bulk-build path.
     """
     timings: Dict[str, float] = {}
     t_start_total = time.perf_counter()
 
-    # Step 1: Clean table and catalog reset
+    # ── Step 1: Clean slate — drop old table, reset Merkle catalog ────────
     t0 = time.perf_counter()
     execute_sql(conn, f"SET synchronous_commit = {synchronous_commit}")
     execute_sql(conn, "DROP TABLE IF EXISTS usertable CASCADE")
@@ -119,10 +130,13 @@ def measure_dataset_creation_single_run(
         execute_sql(conn, "UPDATE ariabc_internal.merkle_apply_counter SET next_seq = 0, terminal_prefix_seq = 0")
     except Exception:
         pass
+    timings["catalog_reset_ms"] = (time.perf_counter() - t0) * 1000.0
 
+    # ── Step 2: Create table WITH primary key (on empty table) ────────────
+    t_schema = time.perf_counter()
     create_table_sql = """
         CREATE TABLE usertable (
-            ycsb_key BIGINT NOT NULL,
+            ycsb_key BIGINT NOT NULL PRIMARY KEY,
             field0 TEXT NOT NULL, field1 TEXT NOT NULL,
             field2 TEXT NOT NULL, field3 TEXT NOT NULL,
             field4 TEXT NOT NULL, field5 TEXT NOT NULL,
@@ -131,29 +145,10 @@ def measure_dataset_creation_single_run(
         )
     """
     execute_sql(conn, create_table_sql)
-    timings["schema_reset_ms"] = (time.perf_counter() - t0) * 1000.0
+    timings["create_table_with_pk_ms"] = (time.perf_counter() - t_schema) * 1000.0
 
-    # Step 2: Bulk Heap Data Population
-    t1 = time.perf_counter()
-    populate_sql = """
-        INSERT INTO usertable
-        SELECT gs::bigint,
-               'field0-' || gs, 'field1-' || gs, 'field2-' || gs,
-               'field3-' || gs, 'field4-' || gs, 'field5-' || gs,
-               'field6-' || gs, 'field7-' || gs, 'field8-' || gs,
-               'field9-' || gs
-        FROM generate_series(1, %s) AS gs
-    """
-    execute_sql(conn, populate_sql, (tuple_count,))
-    timings["heap_populate_ms"] = (time.perf_counter() - t1) * 1000.0
-
-    # Step 3: Primary Key B-Tree Index Creation
-    t2 = time.perf_counter()
-    execute_sql(conn, "ALTER TABLE usertable ADD CONSTRAINT usertable_pkey PRIMARY KEY (ycsb_key)")
-    timings["primary_key_btree_ms"] = (time.perf_counter() - t2) * 1000.0
-
-    # Step 4: Dynamic Merkle AM Index Creation
-    t3 = time.perf_counter()
+    # ── Step 3: Create Merkle AM index on empty table ─────────────────────
+    t_merkle_idx = time.perf_counter()
     merkle_index_sql = f"""
         CREATE INDEX usertable_merkle_idx
         ON usertable USING merkle (ycsb_key)
@@ -165,10 +160,10 @@ def measure_dataset_creation_single_run(
         )
     """
     execute_sql(conn, merkle_index_sql)
-    timings["merkle_am_index_ms"] = (time.perf_counter() - t3) * 1000.0
+    timings["create_merkle_index_empty_ms"] = (time.perf_counter() - t_merkle_idx) * 1000.0
 
-    # Step 5: Partition / Hash Lookup B-Tree Expression Index Creation
-    t4 = time.perf_counter()
+    # ── Step 4: Create Partition Lookup B-Tree index on empty table ────────
+    t_lookup_idx = time.perf_counter()
     lookup_index_sql = f"""
         CREATE INDEX usertable_merkle_partition_lookup_idx
         ON usertable (
@@ -178,23 +173,46 @@ def measure_dataset_creation_single_run(
         )
     """
     execute_sql(conn, lookup_index_sql)
-    timings["lookup_btree_index_ms"] = (time.perf_counter() - t4) * 1000.0
+    timings["create_lookup_index_empty_ms"] = (time.perf_counter() - t_lookup_idx) * 1000.0
 
-    # Step 6: Statistics Analysis
-    t5 = time.perf_counter()
+    timings["schema_setup_total_ms"] = (time.perf_counter() - t_schema) * 1000.0
+
+    # ── Step 5: INSERT all N rows with live index maintenance ─────────────
+    #
+    # Every row inserted here triggers:
+    #   • PK B-Tree: random index page lookup → leaf insert → possible split
+    #   • Merkle AM: hash computation → partition routing → node update →
+    #     possible leaf split → parent hash recomputation up to root
+    #   • Lookup B-Tree: expression evaluation → index insert
+    #
+    t_insert = time.perf_counter()
+    populate_sql = """
+        INSERT INTO usertable
+        SELECT gs::bigint,
+               'field0-' || gs, 'field1-' || gs, 'field2-' || gs,
+               'field3-' || gs, 'field4-' || gs, 'field5-' || gs,
+               'field6-' || gs, 'field7-' || gs, 'field8-' || gs,
+               'field9-' || gs
+        FROM generate_series(1, %s) AS gs
+    """
+    execute_sql(conn, populate_sql, (tuple_count,))
+    timings["live_indexed_insert_ms"] = (time.perf_counter() - t_insert) * 1000.0
+
+    # ── Step 6: Statistics Analysis ───────────────────────────────────────
+    t_analyze = time.perf_counter()
     execute_sql(conn, "ANALYZE usertable")
     execute_sql(conn, "ANALYZE ariabc_internal.merkle_node")
-    timings["analyze_ms"] = (time.perf_counter() - t5) * 1000.0
+    timings["analyze_ms"] = (time.perf_counter() - t_analyze) * 1000.0
 
     timings["total_dataset_creation_ms"] = (time.perf_counter() - t_start_total) * 1000.0
     timings["total_dataset_creation_s"] = timings["total_dataset_creation_ms"] / 1000.0
     timings["tuples_per_second"] = (
-        (tuple_count / (timings["total_dataset_creation_ms"] / 1000.0))
-        if timings["total_dataset_creation_ms"] > 0
+        (tuple_count / (timings["live_indexed_insert_ms"] / 1000.0))
+        if timings["live_indexed_insert_ms"] > 0
         else 0.0
     )
 
-    # Verification & Integrity Checks
+    # ── Verification & Integrity Checks ──────────────────────────────────
     actual_rows = int(scalar_sql(conn, "SELECT count(*) FROM usertable"))
     if actual_rows != tuple_count:
         raise RuntimeError(f"Verification failed: expected {tuple_count} rows, got {actual_rows}")
@@ -203,14 +221,14 @@ def measure_dataset_creation_single_run(
     if not merkle_valid:
         raise RuntimeError("Verification failed: merkle_verify('usertable') returned false")
 
-    # Sizing Metrics
+    # ── Sizing Metrics ───────────────────────────────────────────────────
     heap_bytes = int(scalar_sql(conn, "SELECT pg_relation_size('usertable'::regclass)"))
     pkey_bytes = int(scalar_sql(conn, "SELECT pg_relation_size('usertable_pkey'::regclass)"))
     merkle_bytes = int(scalar_sql(conn, "SELECT pg_relation_size('usertable_merkle_idx'::regclass)"))
     lookup_bytes = int(scalar_sql(conn, "SELECT pg_relation_size('usertable_merkle_partition_lookup_idx'::regclass)"))
     total_bytes = int(scalar_sql(conn, "SELECT pg_total_relation_size('usertable'::regclass)"))
 
-    # Merkle Internal Node Catalog Metrics
+    # ── Merkle Internal Node Catalog Metrics ─────────────────────────────
     node_stats = execute_sql(
         conn,
         """
@@ -276,7 +294,9 @@ def run_benchmark_suite(
     ensure_environment(conn)
 
     print("=" * 80)
-    print("  AriaBC Dataset Creation Benchmark (Heap + PK B-Tree + Merkle AM + Lookup Index)")
+    print("  AriaBC Dataset Creation Benchmark (Live-Indexed DML)")
+    print("  Strategy: Create table + all indexes FIRST, then INSERT N rows")
+    print("  (measures true transactional index maintenance cost)")
     print(f"  Scales: {scales}")
     print(f"  Repetitions per scale: {repetitions}")
     print(f"  Geometry: Fanout={fanout}, Split={split_threshold}, Merge={merge_threshold}, Partitions={partitions}")
@@ -292,7 +312,7 @@ def run_benchmark_suite(
 
         runs_for_scale: List[Dict[str, Any]] = []
         for rep in range(1, repetitions + 1):
-            sys.stdout.write(f"  [Repetition {rep}/{repetitions}] Building dataset ... ")
+            sys.stdout.write(f"  [Repetition {rep}/{repetitions}] Creating schema + indexes, then inserting {scale:,} rows ... ")
             sys.stdout.flush()
 
             metrics = measure_dataset_creation_single_run(
@@ -311,15 +331,17 @@ def run_benchmark_suite(
 
             t_ms = metrics["timings_ms"]["total_dataset_creation_ms"]
             t_s = metrics["timings_ms"]["total_dataset_creation_s"]
+            insert_s = metrics["timings_ms"]["live_indexed_insert_ms"] / 1000.0
             tps = metrics["timings_ms"]["tuples_per_second"]
-            print(f"Done in {t_s:.3f}s ({t_ms:.1f} ms, {tps:,.0f} tuples/s) [Merkle Verify: OK]")
+            print(
+                f"Done in {t_s:.3f}s (insert: {insert_s:.3f}s, {tps:,.0f} tuples/s) "
+                f"[Merkle Verify: OK]"
+            )
 
         # Aggregate metrics across repetitions
         tot_times = [r["timings_ms"]["total_dataset_creation_ms"] for r in runs_for_scale]
-        heap_times = [r["timings_ms"]["heap_populate_ms"] for r in runs_for_scale]
-        pkey_times = [r["timings_ms"]["primary_key_btree_ms"] for r in runs_for_scale]
-        merkle_times = [r["timings_ms"]["merkle_am_index_ms"] for r in runs_for_scale]
-        lookup_times = [r["timings_ms"]["lookup_btree_index_ms"] for r in runs_for_scale]
+        schema_times = [r["timings_ms"]["schema_setup_total_ms"] for r in runs_for_scale]
+        insert_times = [r["timings_ms"]["live_indexed_insert_ms"] for r in runs_for_scale]
         analyze_times = [r["timings_ms"]["analyze_ms"] for r in runs_for_scale]
         tps_list = [r["timings_ms"]["tuples_per_second"] for r in runs_for_scale]
 
@@ -335,10 +357,8 @@ def run_benchmark_suite(
             "total_ms_min": min(tot_times),
             "total_ms_max": max(tot_times),
             "total_s_mean": statistics.mean(tot_times) / 1000.0,
-            "heap_ms_mean": statistics.mean(heap_times),
-            "pkey_btree_ms_mean": statistics.mean(pkey_times),
-            "merkle_am_ms_mean": statistics.mean(merkle_times),
-            "lookup_btree_ms_mean": statistics.mean(lookup_times),
+            "schema_setup_ms_mean": statistics.mean(schema_times),
+            "live_indexed_insert_ms_mean": statistics.mean(insert_times),
             "analyze_ms_mean": statistics.mean(analyze_times),
             "tps_mean": statistics.mean(tps_list),
             "heap_mb": sizes["heap_mb"],
@@ -366,15 +386,15 @@ def run_benchmark_suite(
 
 def print_summary_table(aggregated: List[Dict[str, Any]]) -> None:
     """Print clean summary ASCII table to stdout."""
-    print("\n" + "=" * 120)
-    print("                                     DATASET CREATION TIME BENCHMARK SUMMARY TABLE")
-    print("=" * 120)
+    print("\n" + "=" * 130)
+    print("                   DATASET CREATION BENCHMARK (Live-Indexed DML: Create Schema+Indexes FIRST, Then INSERT)")
+    print("=" * 130)
     header = (
-        f"{'Scale':>8} | {'Heap (ms)':>10} | {'PK BTree(ms)':>12} | {'Merkle AM(ms)':>13} | "
-        f"{'Lookup(ms)':>10} | {'Total Time':>11} | {'Throughput':>14} | {'Total Size':>10} | {'Merkle Height':>13}"
+        f"{'Scale':>8} | {'Schema(ms)':>10} | {'Insert+Idx(ms)':>14} | {'ANALYZE(ms)':>11} | "
+        f"{'Total Time':>11} | {'Throughput':>14} | {'Total Size':>10} | {'Merkle Height':>13}"
     )
     print(header)
-    print("-" * 120)
+    print("-" * 130)
 
     for r in aggregated:
         tot_str = f"{r['total_s_mean']:.3f} s" if r["total_s_mean"] >= 1.0 else f"{r['total_ms_mean']:.1f} ms"
@@ -382,16 +402,15 @@ def print_summary_table(aggregated: List[Dict[str, Any]]) -> None:
         size_str = f"{r['total_mb']:.2f} MB"
         print(
             f"{r['scale_label']:>8} | "
-            f"{r['heap_ms_mean']:>10.2f} | "
-            f"{r['pkey_btree_ms_mean']:>12.2f} | "
-            f"{r['merkle_am_ms_mean']:>13.2f} | "
-            f"{r['lookup_btree_ms_mean']:>10.2f} | "
+            f"{r['schema_setup_ms_mean']:>10.2f} | "
+            f"{r['live_indexed_insert_ms_mean']:>14.2f} | "
+            f"{r['analyze_ms_mean']:>11.2f} | "
             f"{tot_str:>11} | "
             f"{tps_str:>14} | "
             f"{size_str:>10} | "
             f"{r['merkle_tree_height']:>13}"
         )
-    print("=" * 120 + "\n")
+    print("=" * 130 + "\n")
 
 
 def save_results(output_dir: Path, raw_results: List[Dict[str, Any]], aggregated: List[Dict[str, Any]]) -> None:
@@ -401,7 +420,7 @@ def save_results(output_dir: Path, raw_results: List[Dict[str, Any]], aggregated
         writer = csv.writer(f)
         writer.writerow([
             "scale", "scale_label", "repetitions",
-            "heap_ms_mean", "pkey_btree_ms_mean", "merkle_am_ms_mean", "lookup_btree_ms_mean", "analyze_ms_mean",
+            "schema_setup_ms_mean", "live_indexed_insert_ms_mean", "analyze_ms_mean",
             "total_ms_mean", "total_ms_stddev", "total_s_mean", "tps_mean",
             "heap_mb", "pkey_mb", "merkle_mb", "lookup_mb", "total_mb",
             "merkle_total_nodes", "merkle_leaf_nodes", "merkle_tree_height"
@@ -409,9 +428,10 @@ def save_results(output_dir: Path, raw_results: List[Dict[str, Any]], aggregated
         for r in aggregated:
             writer.writerow([
                 r["scale"], r["scale_label"], r["repetitions"],
-                round(r["heap_ms_mean"], 3), round(r["pkey_btree_ms_mean"], 3),
-                round(r["merkle_am_ms_mean"], 3), round(r["lookup_btree_ms_mean"], 3),
-                round(r["analyze_ms_mean"], 3), round(r["total_ms_mean"], 3),
+                round(r["schema_setup_ms_mean"], 3),
+                round(r["live_indexed_insert_ms_mean"], 3),
+                round(r["analyze_ms_mean"], 3),
+                round(r["total_ms_mean"], 3),
                 round(r["total_ms_stddev"], 3), round(r["total_s_mean"], 4),
                 round(r["tps_mean"], 1),
                 r["heap_mb"], r["pkey_mb"], r["merkle_mb"], r["lookup_mb"], r["total_mb"],
@@ -426,7 +446,7 @@ def save_results(output_dir: Path, raw_results: List[Dict[str, Any]], aggregated
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Benchmark dataset creation time with all indexes.")
+    parser = argparse.ArgumentParser(description="Benchmark dataset creation time with live index maintenance.")
     parser.add_argument("--dsn", default="host=localhost port=55432 dbname=postgres user=postgres", help="PostgreSQL DSN string")
     parser.add_argument("--scales", default="1000,10000,100000,1000000", help="Comma-separated tuple counts (e.g. '1000,10000,100000,1000000')")
     parser.add_argument("--repetitions", type=int, default=3, help="Number of repetitions per scale")

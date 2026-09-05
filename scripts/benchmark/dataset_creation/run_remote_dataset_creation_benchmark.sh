@@ -33,6 +33,7 @@ Options:
   --synchronous-commit on|off  default: off
   --min-free-gib N             default: 20
   --ssh-timeout SECONDS        default: 15
+  --fetch RUN_ID|latest       fetch completed remote run results without starting a new run
 USAGE
 }
 
@@ -53,6 +54,7 @@ PARTITIONS="200"
 SYNCHRONOUS_COMMIT="off"
 MIN_FREE_GIB="20"
 SSH_TIMEOUT="${SSH_TIMEOUT:-15}"
+FETCH_ONLY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -72,6 +74,7 @@ while [[ $# -gt 0 ]]; do
     --synchronous-commit) SYNCHRONOUS_COMMIT="${2:?}"; shift 2 ;;
     --min-free-gib) MIN_FREE_GIB="${2:?}"; shift 2 ;;
     --ssh-timeout) SSH_TIMEOUT="${2:?}"; shift 2 ;;
+    --fetch) FETCH_ONLY="${2:?}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -131,6 +134,58 @@ remote_ssh_cmd_stdinless() {
   remote_ssh_cmd "$@" </dev/null
 }
 
+# ---------------------------------------------------------------------------
+# Mode: Fetch existing run without re-running
+# ---------------------------------------------------------------------------
+if [[ -n "$FETCH_ONLY" ]]; then
+  progress "Checking remote runs directory on $SSH_TARGET"
+  if [[ "$FETCH_ONLY" == "latest" ]]; then
+    target_run_id="$(remote_ssh_cmd_stdinless "ls -1td '$REMOTE_ROOT/runs'/dataset-creation-* 2>/dev/null | head -n 1 | xargs -r basename" || true)"
+    if [[ -z "$target_run_id" ]]; then
+      echo "ERROR: No remote dataset creation runs found under $REMOTE_ROOT/runs" >&2
+      exit 1
+    fi
+    progress "Identified latest run: $target_run_id"
+  else
+    target_run_id="$FETCH_ONLY"
+  fi
+
+  remote_target_dir="$REMOTE_ROOT/runs/$target_run_id"
+  local_target_dir="$ROOT/scripts/benchmark/dataset_creation/results/$target_run_id"
+
+  # Check if run is still in progress
+  if remote_ssh_cmd_stdinless "test -f '$remote_target_dir/RUNNING' && ! test -f '$remote_target_dir/COMPLETED'"; then
+    progress "Run $target_run_id is still executing on remote host. Attaching to live log (Ctrl+C to detach):"
+    set +e
+    remote_ssh_cmd "tail -f -n +1 '$remote_target_dir/logs/remote_runner.log' 2>/dev/null || tail -f '$remote_target_dir/logs/postgres.log'"
+    set -e
+  fi
+
+  progress "Downloading results from $SSH_TARGET:$remote_target_dir/results to $local_target_dir"
+  mkdir -p "$local_target_dir"
+  "${SCP_CMD[@]}" -r "$SSH_TARGET:$remote_target_dir/results/*" "$local_target_dir/" || true
+  "${SCP_CMD[@]}" -r "$SSH_TARGET:$remote_target_dir/logs" "$local_target_dir/" || true
+
+  LOCAL_PYTHON="$ROOT/.venv/bin/python3"
+  if [[ ! -x "$LOCAL_PYTHON" ]]; then LOCAL_PYTHON="$(command -v python3)"; fi
+
+  if [[ -x "$LOCAL_PYTHON" ]] && "$LOCAL_PYTHON" -c "import matplotlib, numpy" >/dev/null 2>&1; then
+    progress "Generating visualization plots from results..."
+    "$LOCAL_PYTHON" "$ROOT/scripts/benchmark/dataset_creation/plot_dataset_creation.py" \
+      --csv "$local_target_dir/dataset_creation_results.csv" \
+      --output-dir "$local_target_dir" || true
+  fi
+
+  progress "Fetch complete! Results saved in $local_target_dir"
+  if [[ -f "$local_target_dir/dataset_creation_results.csv" ]]; then
+    cat "$local_target_dir/dataset_creation_results.csv"
+  fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Mode: New Run Setup & Execution
+# ---------------------------------------------------------------------------
 RUN_ID="dataset-creation-$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%06x' "$((RANDOM << 1 ^ RANDOM))")"
 REMOTE_RUN_DIR="$REMOTE_ROOT/runs/$RUN_ID"
 REMOTE_SRC_DIR="$REMOTE_RUN_DIR/src"
@@ -152,7 +207,7 @@ fi
 progress "Creating remote run directories under $REMOTE_RUN_DIR"
 remote_ssh_cmd_stdinless "mkdir -p '$REMOTE_RUN_DIR' '$REMOTE_SRC_DIR' '$REMOTE_LOG_DIR' '$REMOTE_RESULTS_DIR'"
 
-# Clean up remote run directory on exit if error
+# Pre-run cleanup trap for setup phase only (disabled once background job starts)
 cleanup_needed=1
 cleanup_local() {
   local rc=$?
@@ -219,6 +274,8 @@ remote_ssh_cmd "cat > '$REMOTE_RUN_DIR/run_payload.sh' && chmod +x '$REMOTE_RUN_
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+touch "$REMOTE_RUN_DIR/RUNNING"
+
 remote_progress() {
   printf '[%s] [remote:%s] %s\n' "$(date --iso-8601=seconds)" "$(hostname -s 2>/dev/null || hostname)" "$*" >&2
 }
@@ -238,6 +295,7 @@ fail_with_log() {
   if [[ -n "$log_file" ]]; then
     tail_log "$log_file"
   fi
+  touch "$REMOTE_RUN_DIR/FAILED"
   exit 1
 }
 
@@ -340,31 +398,51 @@ PYTHONUNBUFFERED=1 "$REMOTE_PYTHON" \
   --synchronous-commit "$SYNCHRONOUS_COMMIT" \
   --output-dir "$REMOTE_RESULTS_DIR"
 
+touch "$REMOTE_RUN_DIR/COMPLETED"
 remote_progress "Benchmark execution finished successfully!"
 REMOTE_PAYLOAD
 
-progress "Executing remote dataset creation benchmark..."
-remote_ssh_cmd "env $remote_env_prefix bash '$REMOTE_RUN_DIR/run_payload.sh'"
+# Launch remote payload detached under nohup
+progress "Launching remote benchmark payload detached under nohup..."
+REMOTE_PID="$(remote_ssh_cmd "nohup env $remote_env_prefix bash '$REMOTE_RUN_DIR/run_payload.sh' > '$REMOTE_LOG_DIR/remote_runner.log' 2>&1 & echo \$!")"
 
-progress "Fetching benchmark artifacts to local directory $LOCAL_RESULTS_DIR"
-mkdir -p "$LOCAL_RESULTS_DIR"
-"${SCP_CMD[@]}" -r "$SSH_TARGET:$REMOTE_RESULTS_DIR/*" "$LOCAL_RESULTS_DIR/"
-"${SCP_CMD[@]}" -r "$SSH_TARGET:$REMOTE_LOG_DIR" "$LOCAL_RESULTS_DIR/"
-
-progress "Cleaning up remote run directory: $REMOTE_RUN_DIR"
-remote_ssh_cmd_stdinless "rm -rf '$REMOTE_RUN_DIR'" >/dev/null 2>&1 || true
+# Disable local auto-deletion since process is running in background
 cleanup_needed=0
 
-# Run local plotting if python + matplotlib available
-LOCAL_PYTHON="$ROOT/.venv/bin/python3"
-if [[ ! -x "$LOCAL_PYTHON" ]]; then LOCAL_PYTHON="$(command -v python3)"; fi
+progress "Remote benchmark payload running under PID $REMOTE_PID on $SSH_TARGET"
+progress "NOTE: This run will continue safely on $SSH_TARGET even if your laptop is closed or disconnected."
+progress "Streaming live logs below (press Ctrl+C at any time to detach without stopping the remote run):"
+echo "--------------------------------------------------------------------------------"
 
-if [[ -x "$LOCAL_PYTHON" ]] && "$LOCAL_PYTHON" -c "import matplotlib, numpy" >/dev/null 2>&1; then
-  progress "Generating visualization plots from results..."
-  "$LOCAL_PYTHON" "$ROOT/scripts/benchmark/dataset_creation/plot_dataset_creation.py" \
-    --csv "$LOCAL_RESULTS_DIR/dataset_creation_results.csv" \
-    --output-dir "$LOCAL_RESULTS_DIR"
+set +e
+remote_ssh_cmd "tail --pid=$REMOTE_PID -f -n +1 '$REMOTE_LOG_DIR/remote_runner.log' 2>/dev/null || tail -f '$REMOTE_LOG_DIR/remote_runner.log'"
+set -e
+
+echo "--------------------------------------------------------------------------------"
+if remote_ssh_cmd_stdinless "test -f '$REMOTE_RUN_DIR/COMPLETED'"; then
+  progress "Remote benchmark payload completed successfully for $RUN_ID"
+  progress "Fetching benchmark artifacts to local directory $LOCAL_RESULTS_DIR"
+  mkdir -p "$LOCAL_RESULTS_DIR"
+  "${SCP_CMD[@]}" -r "$SSH_TARGET:$REMOTE_RESULTS_DIR/*" "$LOCAL_RESULTS_DIR/" || true
+  "${SCP_CMD[@]}" -r "$SSH_TARGET:$REMOTE_LOG_DIR" "$LOCAL_RESULTS_DIR/" || true
+
+  # Run local plotting if python + matplotlib available
+  LOCAL_PYTHON="$ROOT/.venv/bin/python3"
+  if [[ ! -x "$LOCAL_PYTHON" ]]; then LOCAL_PYTHON="$(command -v python3)"; fi
+
+  if [[ -x "$LOCAL_PYTHON" ]] && "$LOCAL_PYTHON" -c "import matplotlib, numpy" >/dev/null 2>&1; then
+    progress "Generating visualization plots from results..."
+    "$LOCAL_PYTHON" "$ROOT/scripts/benchmark/dataset_creation/plot_dataset_creation.py" \
+      --csv "$LOCAL_RESULTS_DIR/dataset_creation_results.csv" \
+      --output-dir "$LOCAL_RESULTS_DIR" || true
+  fi
+
+  progress "Dataset creation benchmark complete! Results saved in $LOCAL_RESULTS_DIR"
+  if [[ -f "$LOCAL_RESULTS_DIR/dataset_creation_results.csv" ]]; then
+    cat "$LOCAL_RESULTS_DIR/dataset_creation_results.csv"
+  fi
+else
+  progress "Detached from remote run $RUN_ID."
+  progress "To check status or fetch results once complete, run:"
+  progress "  $0 --host $HOST --fetch $RUN_ID"
 fi
-
-progress "Dataset creation benchmark complete! Results saved in $LOCAL_RESULTS_DIR"
-cat "$LOCAL_RESULTS_DIR/dataset_creation_results.csv"

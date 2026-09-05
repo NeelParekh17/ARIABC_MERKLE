@@ -139,24 +139,28 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
   # Record originating commit before syncing (since .git is excluded)
   CALLER_GIT_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 
-  echo "Syncing workspace to gateway machine..."
-  rsync -az --delete \
-    --exclude='.git' \
-    --exclude='.venv' \
-    --exclude='.bench_tmp' \
-    --exclude='__pycache__' \
-    --exclude='*.o' \
-    --exclude='*.a' \
-    --exclude='*.so' \
-    --exclude='*.so.*' \
-    --exclude='*.d' \
-    --exclude='*.manifest' \
-    --exclude='tmp_install' \
-    --exclude='ariabc_pg/build' \
-    --exclude='scripts/bench_full_results' \
-    --exclude='scripts/bench_results' \
-    "$REPO_ROOT/" \
-    "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/"
+  if [[ "${SKIP_SYNC:-0}" -eq 0 ]]; then
+    echo "Syncing workspace to gateway machine..."
+    rsync -az --delete \
+      --exclude='.git' \
+      --exclude='.venv' \
+      --exclude='.bench_tmp' \
+      --exclude='__pycache__' \
+      --exclude='*.o' \
+      --exclude='*.a' \
+      --exclude='*.so' \
+      --exclude='*.so.*' \
+      --exclude='*.d' \
+      --exclude='*.manifest' \
+      --exclude='tmp_install' \
+      --exclude='ariabc_pg/build' \
+      --exclude='scripts/bench_full_results' \
+      --exclude='scripts/bench_results' \
+      "$REPO_ROOT/" \
+      "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/"
+  else
+    echo "Skipping workspace sync to gateway machine (SKIP_SYNC=1)"
+  fi
 
   for _cmake_cache in /tmp/cmake-3.28.3-linux-x86_64.tar.gz "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
     if [[ -s "$_cmake_cache" ]]; then
@@ -185,8 +189,11 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     NODE_IS_U22_CSV NODE_CLIENT_PORTS_CSV \
     RAFT_PORT DB_PORT DB_USER DB_NAME \
     KAFKA_HOST KAFKA_PORT KAFKA_RESULT_TOPIC KAFKA_HOME_REMOTE \
+    KAFKA_FAST_RESET DUMP_VERIFY_CSV \
     KAFKA_COMPLETION_MODE \
     ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US \
+    ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER \
+    ARIABC_RAFT_DURABLE_ASYNC_FLUSH ARIABC_RAFT_STREAM_GAP \
     ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES ARIABC_RAFT_ORDERED_BATCH_LINGER_US \
     ARIABC_RAFT_ORDERING_POLICY \
     ARIABC_FULL_RESULT_REPLICA_LIMIT \
@@ -194,7 +201,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     ARIABC_PREFERRED_LEADER_ID \
     ARIABC_ALLOW_DET_RESUME \
     ARIABC_OS_PROFILE \
-    POSTGRES_LOG_MODE \
+    POSTGRES_LOG_MODE CLUSTER_STOP_POSTGRES_ON_EXIT \
     BCDB_WORKER_COUNT DB_CONN_POOL_SIZE BCDB_INIT_BLOCK_SIZE \
     BCDB_DECOUPLE_WORKERS \
     BCDB_BLOCK_RETURN_ACTUAL_RESULTS \
@@ -466,6 +473,8 @@ GATEWAY_STALL_WATCHDOG="${GATEWAY_STALL_WATCHDOG:-${ENABLE_FASTPATH_WATCHDOG:-1}
 GATEWAY_STALL_POLL_SECONDS="${GATEWAY_STALL_POLL_SECONDS:-5}"
 GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-3}"
 SKIP_WORKLOAD="${SKIP_WORKLOAD:-0}"          # 1=start cluster and leader only; do not start gateway or submit SQL
+KAFKA_FAST_RESET="${KAFKA_FAST_RESET:-1}"    # 1=fast Kafka reset (skip JVM console consumer smoke check)
+DUMP_VERIFY_CSV="${DUMP_VERIFY_CSV:-0}"      # 0=skip slow 2.7MB CSV dump; use cryptographic root and row count
 
 # ===========================================================================
 # Function: usage
@@ -1510,38 +1519,43 @@ collect_cluster_logs() {
     return 0
   fi
   log "$label"
+  declare -a COLLECT_PIDS=()
   for idx in "${!NODE_IDS[@]}"; do
-    id="${NODE_IDS[$idx]}"
-    name="${NODE_NAMES[$idx]}"
-    ip="${NODE_IPS[$idx]}"
-    user="${NODE_USERS[$idx]}"
-    REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
-    REMOTE_NURAFT_LOG="/home/neel/ariabc_pg_srv${id}.log"
-    REMOTE_PG_LOG="$REMOTE_REPO_ROOT/server.log"
-    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
-    timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-      "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
-    if [[ "$POSTGRES_LOG_MODE" == "full" ]]; then
+    (
+      id="${NODE_IDS[$idx]}"
+      name="${NODE_NAMES[$idx]}"
+      ip="${NODE_IPS[$idx]}"
+      user="${NODE_USERS[$idx]}"
+      REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
+      REMOTE_NURAFT_LOG="/home/neel/ariabc_pg_srv${id}.log"
+      REMOTE_PG_LOG="$REMOTE_REPO_ROOT/server.log"
       timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
-    else
-      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-        "$user@$ip" \
-        "grep -E '^(RUN_MARKER|.*PROFILE_BCDB_(GATE|BLOCK)|.*(ERROR|FATAL|PANIC):|.*starting PostgreSQL|.*database system was shut down|.*database system is ready to accept connections)' '$REMOTE_PG_LOG' 2>/dev/null || true" \
-        > "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
-    fi
-    if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
+        "$user@$ip:$REMOTE_SRV_LOG" "$LOG_DIR/server_node${id}_${name}.log" 2>/dev/null || true
       timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
-        "$LOG_DIR/" 2>/dev/null || true
-    fi
-    if [[ "${ARIABC_OS_PROFILE:-0}" -eq 1 ]]; then
-      mkdir -p "$LOG_DIR/os_node${id}_${name}"
-      timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        "$user@$ip:$REMOTE_LOG_DIR/os_*.log" "$LOG_DIR/os_node${id}_${name}/" 2>/dev/null || true
-    fi
+        "$user@$ip:$REMOTE_NURAFT_LOG" "$LOG_DIR/nuraft_node${id}_${name}.log" 2>/dev/null || true
+      if [[ "$POSTGRES_LOG_MODE" == "full" ]]; then
+        timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+          "$user@$ip:$REMOTE_PG_LOG" "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
+      else
+        timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+          "$user@$ip" \
+          "grep -E '^(RUN_MARKER|.*PROFILE_BCDB_(GATE|BLOCK)|.*(ERROR|FATAL|PANIC):|.*starting PostgreSQL|.*database system was shut down|.*database system is ready to accept connections)' '$REMOTE_PG_LOG' 2>/dev/null || true" \
+          > "$LOG_DIR/postgres_node${id}_${name}.log" 2>/dev/null || true
+      fi
+      if [[ "$BCDB_PHASE_TRACE_ON" != "0" ]]; then
+        timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+          "$user@$ip:$REMOTE_REPO_ROOT/.bench_tmp/bcdb_phase_trace_node${id}.*" \
+          "$LOG_DIR/" 2>/dev/null || true
+      fi
+      if [[ "${ARIABC_OS_PROFILE:-0}" -eq 1 ]]; then
+        mkdir -p "$LOG_DIR/os_node${id}_${name}"
+        timeout "$log_rsync_timeout" sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+          "$user@$ip:$REMOTE_LOG_DIR/os_*.log" "$LOG_DIR/os_node${id}_${name}/" 2>/dev/null || true
+      fi
+    ) &
+    COLLECT_PIDS+=("$!")
   done
+  for p in "${COLLECT_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
 }
 
 # ===========================================================================
@@ -1870,7 +1884,6 @@ if [[ "$SKIP_CLEANUP" -eq 0 ]]; then
           exit 1
         fi
       fi
-      sleep 0.5
       exit 0
     " &
     CLEANUP_PIDS+=("$!")
@@ -2050,7 +2063,17 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
       fi
     fi
 
+    for _c_cand in /home/neel/bin/cmake-3.28.3-linux-x86_64/bin /tmp/cmake-3.28.3-linux-x86_64/bin; do
+      [[ -d "$_c_cand" ]] && export PATH="$_c_cand:$PATH"
+    done
+
     log "  Configuring local ariabc_pg build against $LOCAL_INSTALL_DIR"
+    if [[ -f "$REPO_ROOT/ariabc_pg/build/CMakeCache.txt" ]]; then
+      _cached_dir="$(sed -n -E 's/^CMAKE_CACHEFILE_DIR:INTERNAL=(.*)/\1/p' "$REPO_ROOT/ariabc_pg/build/CMakeCache.txt" 2>/dev/null || true)"
+      if [[ -n "$_cached_dir" && "$_cached_dir" != "$REPO_ROOT/ariabc_pg/build" ]]; then
+        rm -rf "$REPO_ROOT/ariabc_pg/build/CMakeCache.txt" "$REPO_ROOT/ariabc_pg/build/CMakeFiles"
+      fi
+    fi
     cmake -S "$REPO_ROOT/ariabc_pg" -B "$REPO_ROOT/ariabc_pg/build" \
       -DCMAKE_BUILD_TYPE=Release \
       $LOCAL_KAFKA_CMAKE_OPT \
@@ -2426,6 +2449,10 @@ fi
 } >> "$LOG_DIR/run_meta.env"
 
 binary_provenance_ok=1
+declare -a PROV_PIDS=()
+declare -a PROV_FILES=()
+declare -a NODE_CLOCKS=()
+
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
   is_u22="${NODE_IS_U22[$idx]}"
@@ -2436,26 +2463,52 @@ for idx in "${!NODE_IDS[@]}"; do
     srv_bin="$REMOTE_BIN_U24"
     gw_path="$REMOTE_GATEWAY_BIN_U24"
   fi
-  log "  [$name] provenance:"
-  prov_output=$(node_ssh "$idx" "
-    git_head=\$(git -C '$REMOTE_REPO_ROOT' rev-parse HEAD 2>/dev/null || echo unknown)
-    srv_sha=\$(sha256sum '$srv_bin' 2>/dev/null | awk '{print \$1}' || echo missing)
-    gw_sha=\$(sha256sum '$gw_path' 2>/dev/null | awk '{print \$1}' || echo missing)
-    pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
-    live_src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
-    synced_src_fp=\$(cat '$REMOTE_REPO_ROOT/.ariabc_synced_source_fingerprint' 2>/dev/null || true)
-    src_fp=\"\${synced_src_fp:-\$live_src_fp}\"
-    echo \"git_head=\$git_head\"
-    echo \"ariabc_pg_server_path=$srv_bin\"
-    echo \"ariabc_pg_server_sha256=\$srv_sha\"
-    echo \"ariabc_pg_gateway_path=$gw_path\"
-    echo \"ariabc_pg_gateway_sha256=\$gw_sha\"
-    echo \"postgres_sha256=\$pg_sha\"
-    echo \"source_fingerprint=\$src_fp\"
-    echo \"live_source_fingerprint=\$live_src_fp\"
-  " 2>/dev/null)
+  prov_file="$(mktemp)"
+  PROV_FILES+=("$prov_file")
 
-  echo "$prov_output" | sed "s/^/    /"
+  (
+    node_ssh "$idx" "
+      git_head=\$(git -C '$REMOTE_REPO_ROOT' rev-parse HEAD 2>/dev/null || echo unknown)
+      srv_sha=\$(sha256sum '$srv_bin' 2>/dev/null | awk '{print \$1}' || echo missing)
+      gw_sha=\$(sha256sum '$gw_path' 2>/dev/null | awk '{print \$1}' || echo missing)
+      pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
+      synced_src_fp=\$(cat '$REMOTE_REPO_ROOT/.ariabc_synced_source_fingerprint' 2>/dev/null || true)
+      if [[ -n \"\$synced_src_fp\" ]]; then
+        src_fp=\"\$synced_src_fp\"
+        live_src_fp=\"\$synced_src_fp\"
+      else
+        live_src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
+        src_fp=\"\$live_src_fp\"
+      fi
+      ts=\$(date +%s%3N)
+      st=\$(timedatectl status 2>/dev/null | awk -F': ' '/Local time|System clock synchronized|NTP service/ {printf \"%s: %s; \", \$1, \$2}' | tr -s ' ' || true)
+      echo \"git_head=\$git_head\"
+      echo \"ariabc_pg_server_path=$srv_bin\"
+      echo \"ariabc_pg_server_sha256=\$srv_sha\"
+      echo \"ariabc_pg_gateway_path=$gw_path\"
+      echo \"ariabc_pg_gateway_sha256=\$gw_sha\"
+      echo \"postgres_sha256=\$pg_sha\"
+      echo \"source_fingerprint=\$src_fp\"
+      echo \"live_source_fingerprint=\$live_src_fp\"
+      echo \"node_clock=ts=\$ts \$st\"
+    " 2>/dev/null > "$prov_file"
+  ) &
+  PROV_PIDS+=("$!")
+done
+
+for p in "${PROV_PIDS[@]}"; do
+  wait "$p" 2>/dev/null || true
+done
+
+for idx in "${!NODE_IDS[@]}"; do
+  name="${NODE_NAMES[$idx]}"
+  is_u22="${NODE_IS_U22[$idx]}"
+  prov_output="$(cat "${PROV_FILES[$idx]}")"
+  NODE_CLOCKS[$idx]="$(sed -n 's/^node_clock=//p' "${PROV_FILES[$idx]}" | tail -1)"
+  rm -f "${PROV_FILES[$idx]}"
+
+  log "  [$name] provenance:"
+  echo "$prov_output" | grep -v '^node_clock=' | sed "s/^/    /"
   node_server_sha="$(echo "$prov_output" | sed -n 's/^ariabc_pg_server_sha256=//p' | tail -1)"
   node_gateway_sha="$(echo "$prov_output" | sed -n 's/^ariabc_pg_gateway_sha256=//p' | tail -1)"
   node_src_fingerprint="$(echo "$prov_output" | sed -n 's/^source_fingerprint=//p' | tail -1)"
@@ -2478,7 +2531,7 @@ for idx in "${!NODE_IDS[@]}"; do
   fi
 
   {
-    echo "$prov_output" | while read -r line; do
+    echo "$prov_output" | grep -v '^node_clock=' | while read -r line; do
       if [[ -n "$line" ]]; then
         echo "node${idx}_${line}"
       fi
@@ -2497,7 +2550,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 1.8: Clock Validity Preflight
+# Phase 1.8: Clock Validity Preflight (reusing parallel-collected status)
 # ---------------------------------------------------------------------------
 log "=== Phase 1.8: Clock Validity Preflight ==="
 local_ts="$(date +%s%3N)"
@@ -2506,12 +2559,7 @@ log "  [local] (gateway) ts=$local_ts ${local_status:-clock check done}"
 
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
-  node_clock="$(node_ssh "$idx" "
-    ts=\$(date +%s%3N)
-    st=\$(timedatectl status 2>/dev/null | awk -F': ' '/Local time|System clock synchronized|NTP service/ {printf \"%s: %s; \", \$1, \$2}' | tr -s ' ' || true)
-    echo \"ts=\$ts \$st\"
-  " 2>/dev/null || echo "clock check failed")"
-  log "  [$name] (server) $node_clock"
+  log "  [$name] (server) ${NODE_CLOCKS[$idx]:-clock check done}"
 done
 
 # ---------------------------------------------------------------------------
@@ -2562,22 +2610,23 @@ else
   done
 fi
 
-"\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" \
-  --create --topic "$KAFKA_RESULT_TOPIC" --partitions ${#NODE_IDS[@]} --replication-factor 1 \
-  --if-not-exists >/dev/null 2>&1 || true
-echo "Topic '$KAFKA_RESULT_TOPIC' ready"
+if [[ "${KAFKA_FAST_RESET:-1}" -eq 1 ]]; then
+  "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" --delete --topic "$KAFKA_RESULT_TOPIC" >/dev/null 2>&1 || true
+  "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" \
+    --create --topic "$KAFKA_RESULT_TOPIC" --partitions ${#NODE_IDS[@]} --replication-factor 1 --if-not-exists >/dev/null 2>&1 || true
+  echo "Topic '$KAFKA_RESULT_TOPIC' ready (fast reset PASS)"
+else
+  "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" \
+    --create --topic "$KAFKA_RESULT_TOPIC" --partitions ${#NODE_IDS[@]} --replication-factor 1 \
+    --if-not-exists >/dev/null 2>&1 || true
+  echo "Topic '$KAFKA_RESULT_TOPIC' ready"
+fi
 KAFKA_EOF
-  log "  Kafka ready"
+  log "  Kafka ready and topic reset complete"
 
-  # --- Kafka consumer-lag preflight (detects stale broker state) ----------
-  # After repeated benchmark runs the broker may accumulate old log segments
-  # and high-water-mark offsets from prior consumer groups.  A warm broker
-  # with 80k+ stale records can add 400-700ms of end-to-end consume latency
-  # (vs ~100ms on a clean broker), costing ~1000 TPS in a kafka_majority
-  # completion path.  Resetting the topic before each workload eliminates
-  # this source of non-determinism.
-  log "  Preflight: resetting topic $KAFKA_RESULT_TOPIC to flush stale offsets..."
-  node_ssh 0 bash <<KAFKA_FLUSH_EOF
+  if [[ "${KAFKA_FAST_RESET:-1}" -eq 0 ]]; then
+    log "  Preflight: resetting topic $KAFKA_RESULT_TOPIC to flush stale offsets..."
+    node_ssh 0 bash <<KAFKA_FLUSH_EOF
 set -euo pipefail
 KAFKA_HOME="$KAFKA_HOME_REMOTE"
 TOPICS_SH="\$KAFKA_HOME/bin/kafka-topics.sh"
@@ -2606,7 +2655,8 @@ else
   echo "Kafka preflight WARN: smoke test message not confirmed (broker may be slow)" >&2
 fi
 KAFKA_FLUSH_EOF
-  log "  Kafka preflight complete"
+    log "  Kafka preflight complete"
+  fi
 else
   [[ "$NO_KAFKA" -eq 1 ]] && log "  Skipping Kafka (--no-kafka mode)"
   [[ "$SKIP_KAFKA" -eq 1 ]] && log "  Skipping Kafka setup (--skip-kafka)"
@@ -2617,6 +2667,17 @@ fi
 # Each node's SSH command writes a status line to a temp file so we can run
 # all four verify/restart sessions concurrently and validate results serially.
 # ---------------------------------------------------------------------------
+GUC_TARGET_DT_CONFLICT="$([[ "$BCDB_DT_CONFLICT_TRACKING" == "1" ]] && echo on || echo off)"
+GUC_TARGET_DT_SKIP_READS="$([[ "$BCDB_DT_COMPLETION_ONLY_SKIP_READS" == "1" ]] && echo on || echo off)"
+GUC_TARGET_TELEMETRY="$([[ "$BCDB_GATE_TELEMETRY" == "1" ]] && echo on || echo off)"
+GUC_TARGET_SNAPSHOT="$([[ "$BCDB_GATE_SNAPSHOT_EACH_BLOCK" == "1" ]] && echo on || echo off)"
+GUC_CONN_BUDGET="$BCDB_WORKER_COUNT"
+[[ "$GUC_CONN_BUDGET" -lt "$BCDB_INIT_BLOCK_SIZE" ]] && GUC_CONN_BUDGET="$BCDB_INIT_BLOCK_SIZE"
+GUC_MIN_MAX_CONNS=$(( DB_CONN_POOL_SIZE * 3 + 64 ))
+GUC_WORKER_MIN_CONNS=$(( GUC_CONN_BUDGET + DB_CONN_POOL_SIZE + 64 ))
+[[ "$GUC_MIN_MAX_CONNS" -lt "$GUC_WORKER_MIN_CONNS" ]] && GUC_MIN_MAX_CONNS="$GUC_WORKER_MIN_CONNS"
+[[ "$GUC_MIN_MAX_CONNS" -lt 256 ]] && GUC_MIN_MAX_CONNS=256
+
 log "=== Phase 3: Verify BCDB postgres on all ${#NODE_IDS[@]} nodes (parallel) ==="
 declare -a PG3_PIDS=()
 declare -a PG3_STATUS_FILES=()
@@ -2664,10 +2725,33 @@ for idx in "${!NODE_IDS[@]}"; do
       echo \"PG_FAILPOINT_ACTIVE: node ${id}: $FAILPOINT_ENV=1\"
     fi
     > '$REMOTE_REPO_ROOT/server.log'
+    set_auto_conf() {
+      local key=\"\$1\"
+      local val=\"\$2\"
+      if grep -qE \"^[[:space:]]*\${key}[[:space:]]*=\" \"\$PGDATA/postgresql.auto.conf\" 2>/dev/null; then
+        sed -i -E \"s|^[[:space:]]*\${key}[[:space:]]*=.*|\${key} = '\${val}'|\" \"\$PGDATA/postgresql.auto.conf\"
+      else
+        echo \"\${key} = '\${val}'\" >> \"\$PGDATA/postgresql.auto.conf\"
+      fi
+    }
     if [[ -f \"\$PGDATA/postgresql.auto.conf\" ]]; then
-      sed -i -E \"s/^(bcdb_result_ring_slots[[:space:]]*=[[:space:]]*)'?[0-9]+'?/\\1'$RESULT_RING_CAPACITY'/\" \"\$PGDATA/postgresql.auto.conf\"
-      if [[ '$BCDB_OVERWRITE_PROTECTION' == '0' ]]; then
+      set_auto_conf bcdb_worker_count \"$BCDB_WORKER_COUNT\"
+      set_auto_conf bcdb_serial_gate_mode \"$BCDB_SERIAL_GATE_MODE\"
+      set_auto_conf bcdb_serial_gate_source \"$BCDB_SERIAL_GATE_SOURCE\"
+      set_auto_conf bcdb_dt_conflict_tracking \"$GUC_TARGET_DT_CONFLICT\"
+      set_auto_conf bcdb_dt_completion_only_skip_reads \"$GUC_TARGET_DT_SKIP_READS\"
+      set_auto_conf bcdb_dt_hashtab_switch_threshold \"$BCDB_DT_HASHTAB_SWITCH_THRESHOLD\"
+      set_auto_conf bcdb_result_ring_slots \"$RESULT_RING_CAPACITY\"
+      set_auto_conf bcdb_gate_telemetry \"$GUC_TARGET_TELEMETRY\"
+      set_auto_conf bcdb_gate_snapshot_each_block \"$GUC_TARGET_SNAPSHOT\"
+      if [[ '$BCDB_OVERWRITE_PROTECTION' != '0' ]]; then
+        set_auto_conf bcdb_overwrite_protection \"$BCDB_OVERWRITE_PROTECTION\"
+      else
         sed -i -E \"/^[[:space:]]*bcdb_overwrite_protection[[:space:]]*=/d\" \"\$PGDATA/postgresql.auto.conf\"
+      fi
+      cur_max_conn=\$(grep -E '^[[:space:]]*max_connections[[:space:]]*=' \"\$PGDATA/postgresql.auto.conf\" 2>/dev/null | sed -E \"s/.*=[[:space:]]*'([0-9]+)'.*/\\1/\" || echo 0)
+      if [[ -z \"\$cur_max_conn\" || \"\$cur_max_conn\" -lt \"$GUC_MIN_MAX_CONNS\" ]]; then
+        set_auto_conf max_connections \"$GUC_MIN_MAX_CONNS\"
       fi
     fi
     if [[ '$BCDB_PHASE_TRACE_ON' != '0' ]]; then
@@ -2969,49 +3053,53 @@ for idx in "${!NODE_IDS[@]}"; do
     die "bcdb_result_ring_slots mismatch on ${NODE_NAMES[$idx]} after reconfigure: postgres=$actual_ring_slots expected=$RESULT_RING_CAPACITY"
   fi
 done
-# --- end Phase 3 parallel validation ---
 
 # ---------------------------------------------------------------------------
-# Phase 3.1: Ensure bcdb_gate_diagnostics function exists on all nodes
-# Reusing existing PGDATA does not automatically pick up pg_proc.dat changes.
+# Phase 3.1: Coordinated parallel setup on all nodes:
+# Diagnostics function, benchmark role, synchronous Merkle GUCs, run markers,
+# schema bootstrap, and table restore in a single consolidated SSH session per node.
 # ---------------------------------------------------------------------------
-log "=== Phase 3.1: Ensure bcdb_gate_diagnostics function exists on all ${#NODE_IDS[@]} nodes (parallel) ==="
-declare -a DIAG_PIDS=()
+log "=== Phase 3.1: Database setup, schema bootstrap, and restore on all ${#NODE_IDS[@]} nodes (parallel) ==="
+MERKLE_GUC_VALUE=off
+[[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && MERKLE_GUC_VALUE=on
+MERKLE_SYNC_GUC_VALUE=off
+[[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && MERKLE_SYNC_GUC_VALUE=on
+
+declare -a SETUP_PIDS=()
+declare -a SETUP_NAMES=()
+
 for idx in "${!NODE_IDS[@]}"; do
   name="${NODE_NAMES[$idx]}"
-  log "  Ensuring bcdb_gate_diagnostics exists on $name"
+  id="${NODE_IDS[$idx]}"
+  remote_restore="$REMOTE_REPO_ROOT/scripts/restore_usertable_small.sql"
+  BOOTSTRAP_MODE_ARGS="--schema-only"
+  if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
+    BOOTSTRAP_MODE_ARGS="--epoch '$RAFT_EPOCH_HEX'"
+    if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
+      BOOTSTRAP_MODE_ARGS+=" --clean"
+    fi
+  elif [[ "$SKIP_RESTORE" -eq 0 ]]; then
+    BOOTSTRAP_MODE_ARGS+=" --reset-for-restore"
+  fi
+
   node_ssh "$idx" "
+    set -euo pipefail
     INSTALL_DIR='$REMOTE_INSTALL_DIR'
+    BIN=\$INSTALL_DIR/bin
     export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
-    \"\$INSTALL_DIR/bin/psql\" -X -q -h 127.0.0.1 -p '$DB_PORT' -U postgres postgres -v ON_ERROR_STOP=1 -c \"
+    export PATH=\"\$BIN:\$PATH\"
+    export PGOPTIONS=\"\${PGOPTIONS:--c client_min_messages=warning}\"
+
+    # 1. Ensure bcdb_gate_diagnostics function exists
+    \$BIN/psql -X -q -h 127.0.0.1 -p '$DB_PORT' -U postgres postgres -v ON_ERROR_STOP=1 -c \"
 CREATE OR REPLACE FUNCTION bcdb_gate_diagnostics()
 RETURNS text
 LANGUAGE internal
 AS 'bcdb_gate_diagnostics';
-\" >/dev/null && \\
-    \"\$INSTALL_DIR/bin/psql\" -X -q -h 127.0.0.1 -p '$DB_PORT' -U postgres postgres -Atc 'SELECT left(bcdb_gate_diagnostics(), 40);' >/dev/null
-  " &
-  DIAG_PIDS+=("$!")
-done
-for pid in "${DIAG_PIDS[@]}"; do
-  wait "$pid"
-done
-# ---------------------------------------------------------------------------
-# Phase 3.2: Ensure the local OS login role exists in Postgres
-# Current BCDB worker bootstrap still opens internal libpq connections without
-# overriding the role, so they fall back to the service account (`neel` on the
-# benchmark nodes). Create that role if it is missing so bcdb_init can start.
-# ---------------------------------------------------------------------------
+\" >/dev/null
 
-log "=== Phase 3.2: Ensure local benchmark role exists on all ${#NODE_IDS[@]} nodes (parallel) ==="
-declare -a ROLE_PIDS=(); declare -a ROLE_NAMES=()
-for idx in "${!NODE_IDS[@]}"; do
-  name="${NODE_NAMES[$idx]}"
-  log "  Ensuring role neel exists on $name"
-  node_ssh "$idx" "
-    INSTALL_DIR='$REMOTE_INSTALL_DIR'
-    export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
-    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"
+    # 2. Ensure local benchmark role exists
+    \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"
       DO \\\$\\\$
       BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'neel') THEN
@@ -3019,140 +3107,41 @@ for idx in "${!NODE_IDS[@]}"; do
         END IF;
       END
       \\\$\\\$
-    \"
-  " >/dev/null &
-  ROLE_PIDS+=("$!"); ROLE_NAMES+=("$name")
-done
-for i in "${!ROLE_PIDS[@]}"; do
-  wait "${ROLE_PIDS[$i]}" || die "failed to ensure role neel on ${ROLE_NAMES[$i]}"
-done
+    \" >/dev/null
 
-MERKLE_GUC_VALUE=off
-[[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && MERKLE_GUC_VALUE=on
-MERKLE_SYNC_GUC_VALUE=off
-[[ "$ENABLE_MERKLE_INDEX" -eq 1 ]] && MERKLE_SYNC_GUC_VALUE=on
-log "=== Phase 3.3: Set synchronous Merkle GUCs (enable_merkle_index=$MERKLE_GUC_VALUE merkle_apply_synchronous_direct=$MERKLE_SYNC_GUC_VALUE synchronous_commit=on) on all ${#NODE_IDS[@]} nodes (parallel) ==="
-declare -a MERKLE_GUC_PIDS=(); declare -a MERKLE_GUC_NAMES=()
-for idx in "${!NODE_IDS[@]}"; do
-  name="${NODE_NAMES[$idx]}"
-  node_ssh "$idx" "
-    INSTALL_DIR='$REMOTE_INSTALL_DIR'
-    export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
-    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+    # 3. Set synchronous Merkle GUCs
+    \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
       -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET enable_merkle_index = '$MERKLE_GUC_VALUE'\"
-    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+    \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
       -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET merkle_apply_synchronous_direct = '$MERKLE_SYNC_GUC_VALUE'\"
-    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+    \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
       -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET synchronous_commit = 'on'\"
-    \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+    \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
       -v ON_ERROR_STOP=1 -c \"SELECT pg_reload_conf()\" >/dev/null
-    actual=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
-      -tAc \"SHOW enable_merkle_index\" | tr -d '[:space:]')
-    [[ \"\$actual\" == '$MERKLE_GUC_VALUE' ]] || {
-      echo \"enable_merkle_index expected $MERKLE_GUC_VALUE, got \$actual\" >&2
-      exit 1
-    }
-    actual_sync=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
-      -tAc \"SHOW merkle_apply_synchronous_direct\" | tr -d '[:space:]')
-    [[ \"\$actual_sync\" == '$MERKLE_SYNC_GUC_VALUE' ]] || {
-      echo \"merkle_apply_synchronous_direct expected $MERKLE_SYNC_GUC_VALUE, got \$actual_sync\" >&2
-      exit 1
-    }
-    actual_commit=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
-      -tAc \"SHOW synchronous_commit\" | tr -d '[:space:]')
-    [[ \"\$actual_commit\" == on ]] || {
-      echo \"synchronous_commit expected on, got \$actual_commit\" >&2
-      exit 1
-    }
-  " >/dev/null &
-  MERKLE_GUC_PIDS+=("$!"); MERKLE_GUC_NAMES+=("$name")
-done
-for i in "${!MERKLE_GUC_PIDS[@]}"; do
-  wait "${MERKLE_GUC_PIDS[$i]}" || die "failed to set enable_merkle_index on ${MERKLE_GUC_NAMES[$i]}"
-done
 
-log "  Writing PostgreSQL run markers on all nodes"
-for idx in "${!NODE_IDS[@]}"; do
-  id="${NODE_IDS[$idx]}"
-  name="${NODE_NAMES[$idx]}"
-  node_ssh "$idx" "
+    # 4. Write PostgreSQL run markers
     mkdir -p '$REMOTE_REPO_ROOT'
     echo 'RUN_MARKER run_id=$RUN_ID cluster_id=$RAFT_CLUSTER_ID phase=postgres_ready node_id=$id started_at='\"\$(date -Is)\" >> '$REMOTE_REPO_ROOT/server.log'
     echo 'RUN_MARKER run_start_epoch=$RUN_START_EPOCH' >> '$REMOTE_REPO_ROOT/server.log'
-  " >/dev/null || log "  WARNING: failed to write PostgreSQL run marker on $name"
-done
 
-# ---------------------------------------------------------------------------
-# Phase 3.4: Install/upgrade the Merkle state schema and replay the committed
-# prefix before any restore can replace a referenced relfilenode. Direct mode
-# needs the schema even though it does not use the Raft apply ledger.
-# ---------------------------------------------------------------------------
-LEDGER_BOOTSTRAPPED=0
-if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" || "$ENABLE_MERKLE_INDEX" -eq 1 ]]; then
-  log "=== Phase 3.4: Bootstrapping Merkle schema/recovery on all ${#NODE_IDS[@]} nodes (parallel) ==="
-  if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
-    [[ -n "$RAFT_EPOCH_HEX" ]] || die "RAFT_EPOCH_HEX must be provided when RAFT_APPLY_LEDGER_MODE=safe"
-  fi
-  declare -a EARLY_BOOTSTRAP_PIDS=()
-  for idx in "${!NODE_IDS[@]}"; do
-    name="${NODE_NAMES[$idx]}"
-    BOOTSTRAP_MODE_ARGS="--schema-only"
-    if [[ "$RAFT_APPLY_LEDGER_MODE" == "safe" ]]; then
-      BOOTSTRAP_MODE_ARGS="--epoch '$RAFT_EPOCH_HEX'"
-      if [[ "$RAFT_STORAGE_ACTION" == "fresh" ]]; then
-        BOOTSTRAP_MODE_ARGS+=" --clean"
-      fi
-    elif [[ "$SKIP_RESTORE" -eq 0 ]]; then
-      BOOTSTRAP_MODE_ARGS+=" --reset-for-restore"
-    fi
-    log "  Bootstrapping Merkle schema/recovery on $name"
-    node_ssh "$idx" "
-      export PATH=\"$REMOTE_INSTALL_DIR/bin:\$PATH\"
-      export LD_LIBRARY_PATH=\"$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+    # 5. Bootstrap Merkle schema/recovery if needed
+    if [[ '$RAFT_APPLY_LEDGER_MODE' == 'safe' || '$ENABLE_MERKLE_INDEX' -eq 1 ]]; then
       bash '$REMOTE_REPO_ROOT/scripts/distributed/bootstrap_raft_apply_ledger.sh' \
-        --db '$DB_NAME' --port '$DB_PORT' --user '$DB_USER' $BOOTSTRAP_MODE_ARGS
-    " &
-    EARLY_BOOTSTRAP_PIDS+=("$!")
-  done
-  EARLY_BOOTSTRAP_ALL_OK=1
-  for i in "${!EARLY_BOOTSTRAP_PIDS[@]}"; do
-    wait "${EARLY_BOOTSTRAP_PIDS[$i]}" || {
-      log "  bootstrap FAILED on ${NODE_NAMES[$i]}"
-      EARLY_BOOTSTRAP_ALL_OK=0
-    }
-  done
-  [[ "$EARLY_BOOTSTRAP_ALL_OK" -eq 1 ]] || die "Phase 3.4 Merkle bootstrap failed on one or more nodes"
-  LEDGER_BOOTSTRAPPED=1
-fi
+        --db '$DB_NAME' --port '$DB_PORT' --user '$DB_USER' $BOOTSTRAP_MODE_ARGS >/dev/null
+    fi
 
-# ---------------------------------------------------------------------------
-# Phase 3.5: Restore benchmark table state on all configured nodes
-# The distributed run is meaningful only if every replica starts from the same
-# table contents and Merkle index.  The restore SQL also calls bcdb_reset().
-# ---------------------------------------------------------------------------
-if [[ "$SKIP_RESTORE" -eq 0 ]]; then
-  log "=== Phase 3.5: Restore $VERIFY_TABLE on all ${#NODE_IDS[@]} nodes (parallel) ==="
-  [[ -f "$RESTORE_SQL" ]] || die "restore SQL not found: $RESTORE_SQL"
-
-  declare -a RESTORE_PIDS=(); declare -a RESTORE_NAMES=()
-  for idx in "${!NODE_IDS[@]}"; do
-    name="${NODE_NAMES[$idx]}"
-    remote_restore="$REMOTE_REPO_ROOT/scripts/restore_usertable_small.sql"
-    log "  Restoring $VERIFY_TABLE on $name (background)"
-    node_ssh "$idx" "
-      INSTALL_DIR='$REMOTE_INSTALL_DIR'
-      export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
-      export PGOPTIONS=\"\${PGOPTIONS:--c client_min_messages=warning}\"
+    # 6. Restore table if needed
+    if [[ '$SKIP_RESTORE' -eq 0 ]]; then
       test -f '$remote_restore' || { echo 'missing restore SQL: $remote_restore' >&2; exit 1; }
-      \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+      \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
         -v ON_ERROR_STOP=1 \
         -v merkle_partitions='$MERKLE_PARTITIONS' \
         -v merkle_fanout='$MERKLE_FANOUT' \
         -v merkle_split_threshold='$MERKLE_SPLIT_THRESHOLD' \
         -v merkle_merge_threshold='$MERKLE_MERGE_THRESHOLD' \
-        -f '$remote_restore'
+        -f '$remote_restore' >/dev/null
       if [[ '$ENABLE_MERKLE_INDEX' -eq 0 ]]; then
-        \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$\
+        \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$
           DECLARE r record;
           BEGIN
             FOR r IN
@@ -3168,30 +3157,31 @@ if [[ "$SKIP_RESTORE" -eq 0 ]]; then
               EXECUTE format('DROP INDEX %s', r.oid::regclass);
             END LOOP;
           END
-        \\\$\\\$;\"
-        merkle_count=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT count(*) FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_am am ON am.oid=c.relam WHERE t.relname='$VERIFY_TABLE' AND am.amname='merkle'\" | tr -d '[:space:]')
-        [[ \"\$merkle_count\" == 0 ]] || { echo \"Merkle control run still has \$merkle_count index(es)\" >&2; exit 1; }
+        \\\$\\\$;\" >/dev/null
       fi
-      cnt=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
+      cnt=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
       if [[ '$ENABLE_MERKLE_INDEX' -eq 1 ]]; then
-        root=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
-        verify=\$(\$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
+        root=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
+        verify=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_verify('$VERIFY_TABLE')\")
       else
         root=disabled
         verify=disabled
       fi
       echo \"count=\$cnt root=\$root verify=\$verify\"
-    " 2>&1 | sed "s/^/  [$name] /" &
-    RESTORE_PIDS+=("$!"); RESTORE_NAMES+=("$name")
-  done
-  RESTORE_ALL_OK=1
-  for i in "${!RESTORE_PIDS[@]}"; do
-    wait "${RESTORE_PIDS[$i]}" || { log "  restore FAILED on ${RESTORE_NAMES[$i]}"; RESTORE_ALL_OK=0; }
-  done
-  [[ "$RESTORE_ALL_OK" -eq 1 ]] || die "Phase 3.5 restore failed on one or more nodes"
-else
-  log "=== Phase 3.5: Restore skipped (--skip-restore) ==="
-fi
+    else
+      echo \"setup complete (restore skipped)\"
+    fi
+  " 2>&1 | sed "s/^/  [$name] /" &
+  SETUP_PIDS+=("$!")
+  SETUP_NAMES+=("$name")
+done
+
+SETUP_ALL_OK=1
+for i in "${!SETUP_PIDS[@]}"; do
+  wait "${SETUP_PIDS[$i]}" || { log "  setup/restore FAILED on ${SETUP_NAMES[$i]}"; SETUP_ALL_OK=0; }
+done
+[[ "$SETUP_ALL_OK" -eq 1 ]] || die "Phase 3.1 setup/restore failed on one or more nodes"
+LEDGER_BOOTSTRAPPED=1
 
 # ---------------------------------------------------------------------------
 # Phase 3.8: Bootstrap AriaBC Apply Ledger Schema and Epoch on all nodes
@@ -3252,6 +3242,7 @@ if [[ "$ARIABC_PREFERRED_LEADER_ID" -gt 0 ]]; then
   done
 fi
 log "  Server start order indices: ${START_ORDER[*]} (preferredLeaderId=$ARIABC_PREFERRED_LEADER_ID)"
+declare -a FOLLOWER_LAUNCH_PIDS=()
 
 for start_pos in "${!START_ORDER[@]}"; do
   idx="${START_ORDER[$start_pos]}"
@@ -3277,7 +3268,8 @@ for start_pos in "${!START_ORDER[@]}"; do
   # the source-built v2.3.0 .so is loaded, not whatever the OS happens to have.
   NODE_LIB_PATH="/home/neel/Desktop/rdkafka_local/lib:$REMOTE_INSTALL_DIR/lib"
 
-  node_ssh "$idx" "
+  launch_cmd() {
+    node_ssh "$idx" "
 	    mkdir -p '$REMOTE_LOG_DIR'
 	    rm -f '$REMOTE_SRV_LOG'
 	    rm -f '/home/neel/ariabc_pg_srv${id}.log'
@@ -3384,10 +3376,18 @@ for start_pos in "${!START_ORDER[@]}"; do
       >>'$REMOTE_SRV_LOG' 2>&1 &
     echo \"started pid=\$!\"
   " 2>&1 | sed "s/^/  [$name] /"
-  if [[ "$ARIABC_PREFERRED_LEADER_ID" -gt 0 && "$start_pos" -eq 0 ]]; then
-    sleep 2
+  }
+  if [[ "$start_pos" -eq 0 ]]; then
+    launch_cmd
+    if [[ "$ARIABC_PREFERRED_LEADER_ID" -gt 0 ]]; then
+      sleep 0.5
+    fi
+  else
+    launch_cmd &
+    FOLLOWER_LAUNCH_PIDS+=("$!")
   fi
 done
+for p in "${FOLLOWER_LAUNCH_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
 
 log "  All ${#NODE_IDS[@]} server launch commands sent"
 phase_marker "PHASE_4_SERVERS_STARTED"
@@ -3403,25 +3403,49 @@ fi
 MAX_WAIT=60
 ALL_UP=0
 
-for attempt in $(seq 1 "$MAX_WAIT"); do
-  UP=0
-  for idx in "${!NODE_IDS[@]}"; do
-    client_port="${NODE_CLIENT_PORTS[$idx]}"
-    if NODE_SSH_COMMAND_TIMEOUT=5 node_ssh "$idx" "ss -tlnp 2>/dev/null | grep -q ':${client_port}'" 2>/dev/null; then
-      (( UP++ )) || true
-    fi
-  done
+declare -a ENDPOINTS_PROBE=()
+for idx in "${!NODE_IDS[@]}"; do
+  ENDPOINTS_PROBE+=("${NODE_IPS[$idx]}:${NODE_CLIENT_PORTS[$idx]}")
+done
+ENDPOINTS_CSV="$(IFS=,; echo "${ENDPOINTS_PROBE[*]}")"
 
-  if [[ "$UP" -ge ${#NODE_IDS[@]} ]]; then
+for attempt in $(seq 1 "$MAX_WAIT"); do
+  # Direct non-blocking TCP socket probe from gateway to all server client ports (<5ms)
+  if python3 -c '
+import socket, sys
+for ep in sys.argv[1].split(","):
+    ip, port = ep.split(":")
+    s = socket.socket()
+    s.settimeout(0.1)
+    try:
+        s.connect((ip, int(port)))
+        s.close()
+    except Exception:
+        sys.exit(1)
+sys.exit(0)
+' "$ENDPOINTS_CSV" 2>/dev/null; then
     log "  All ${#NODE_IDS[@]} server client ports responding (attempt $attempt)"
     ALL_UP=1
     break
   fi
 
-  if [[ $(( attempt % 5 )) -eq 0 ]]; then
+  # Fallback to SSH check every 10 attempts if direct connect has not yet succeeded
+  if [[ $(( attempt % 10 )) -eq 0 ]]; then
+    UP=0
+    for idx in "${!NODE_IDS[@]}"; do
+      client_port="${NODE_CLIENT_PORTS[$idx]}"
+      if NODE_SSH_COMMAND_TIMEOUT=3 node_ssh "$idx" "ss -tlnp 2>/dev/null | grep -q ':${client_port}'" 2>/dev/null; then
+        (( UP++ )) || true
+      fi
+    done
     log "  Waiting... $UP/${#NODE_IDS[@]} servers up (${attempt}s elapsed)"
+    if [[ "$UP" -ge ${#NODE_IDS[@]} ]]; then
+      log "  All ${#NODE_IDS[@]} server client ports responding (fallback SSH check, attempt $attempt)"
+      ALL_UP=1
+      break
+    fi
   fi
-  sleep 1
+  sleep 0.2
 done
 
 [[ "$ALL_UP" -eq 0 ]] && log "WARNING: Not all ${#NODE_IDS[@]} nodes responded within ${MAX_WAIT}s"
@@ -3430,33 +3454,19 @@ if [[ "$BYPASS_RAFT" -eq 1 ]]; then
   sleep 2
 else
   log "  Waiting for Raft leadership to stabilize on preferred leader..."
-  for attempt in $(seq 1 15); do
-    pref_leader_status="$(node_ssh 0 "grep -E 'LEADER \(term|my id: 1, leader: 1' '$REMOTE_LOG_DIR/nuraft_node1.log' 2>/dev/null | tail -1" 2>/dev/null || true)"
+  for attempt in $(seq 1 30); do
+    pref_leader_status="$(node_ssh 0 "grep -E 'preferred_leader active|ariabc_pg_server ready|LEADER \(term|my id: 1, leader: 1' '$REMOTE_LOG_DIR/server_node1.log' 2>/dev/null | tail -1" 2>/dev/null || true)"
     if [[ -n "$pref_leader_status" ]]; then
       log "  Node 1 leadership confirmed: $pref_leader_status"
       break
     fi
-    sleep 1
+    sleep 0.2
   done
 fi
 
 if [[ "$ALL_UP" -eq 1 ]]; then
   phase_marker "PHASE_5_CLUSTER_READY"
 fi
-
-# Check for bcdb_init success on the leader node (any node that started)
-if [[ "$BYPASS_RAFT" -eq 1 ]]; then
-  log "  Checking BCDB init and bypass-server readiness..."
-else
-  log "  Checking BCDB init; gateway will wait for a real Raft leader before submitting."
-fi
-for idx in "${!NODE_IDS[@]}"; do
-  id="${NODE_IDS[$idx]}"
-  name="${NODE_NAMES[$idx]}"
-  REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
-  result="$(node_ssh "$idx" "grep -E 'bcdb_init|leader_probe|ready' '$REMOTE_SRV_LOG' 2>/dev/null | tail -3" 2>/dev/null || true)"
-  log "  [$name] $result"
-done
 
 # ---------------------------------------------------------------------------
 # Phase 6: Gateway test
@@ -3476,22 +3486,37 @@ done
 GW_BIN="$LOCAL_BIN/ariabc_pg_gateway"
 GW_LOG="$LOG_DIR/gateway_test.log"
 
-log "  Checking server-startup bcdb_init status..."
+log "  Checking server-startup bcdb_init status on all ${#NODE_IDS[@]} nodes (parallel)..."
+declare -a BCDB_PIDS=()
+declare -a BCDB_FILES=()
+for idx in "${!NODE_IDS[@]}"; do
+  id="${NODE_IDS[$idx]}"
+  REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
+  tmp_file="$(mktemp)"
+  BCDB_FILES+=("$tmp_file")
+  (
+    status_line=""
+    for _try in {1..10}; do
+      status_line="$(node_ssh "$idx" "grep -E 'bcdb_init (enabled|skipped)' '$REMOTE_SRV_LOG' 2>/dev/null | tail -1" 2>/dev/null || true)"
+      if [[ -n "$status_line" ]]; then
+        break
+      fi
+      sleep 0.2
+    done
+    echo "$status_line" > "$tmp_file"
+  ) &
+  BCDB_PIDS+=("$!")
+done
+
+for p in "${BCDB_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+
 BCDB_ENABLED=0
 BCDB_SKIPPED=0
 BCDB_MISSING=0
 for idx in "${!NODE_IDS[@]}"; do
-  id="${NODE_IDS[$idx]}"
   name="${NODE_NAMES[$idx]}"
-  REMOTE_SRV_LOG="$REMOTE_LOG_DIR/server_node${id}.log"
-  status_line=""
-  for _try in {1..10}; do
-    status_line="$(node_ssh "$idx" "grep -E 'bcdb_init (enabled|skipped)' '$REMOTE_SRV_LOG' | tail -1" 2>/dev/null || true)"
-    if [[ -n "$status_line" ]]; then
-      break
-    fi
-    sleep 1
-  done
+  status_line="$(cat "${BCDB_FILES[$idx]}" 2>/dev/null || true)"
+  rm -f "${BCDB_FILES[$idx]}" 2>/dev/null || true
   if [[ "$status_line" == *"bcdb_init enabled"* ]]; then
     (( BCDB_ENABLED++ )) || true
   elif [[ "$status_line" == *"bcdb_init skipped"* ]]; then
@@ -3940,7 +3965,9 @@ log "EXECUTION_PROFILE profile=${EXECUTION_PROFILE} ledger_mode=${RAFT_APPLY_LED
 log "  divergence_count : $DIVERGENCE"
 log "  permanent_failures: $FAILURES"
 
-collect_cluster_logs "  Collecting server logs from all nodes..."
+if [[ "$COLLECT_FINAL_SERVER_PROFILE" == "0" ]]; then
+  collect_cluster_logs "  Collecting server logs from all nodes..."
+fi
 
 log ""
 log "=== Cluster logs ==="
@@ -4048,30 +4075,48 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
   for idx in "${!NODE_IDS[@]}"; do NODE_MARKER_READY+=("0"); done
   while true; do
     elapsed=$(( $(date +%s) - VERIFY_START ))
-    all_ready=1
+    declare -a CHECK_PIDS=()
+    declare -a CHECK_FILES=()
+    declare -a CHECK_IDXS=()
     for idx in "${!NODE_IDS[@]}"; do
       [[ "${NODE_MARKER_READY[$idx]}" -eq 1 ]] && continue
+      check_file="$(mktemp)"
+      CHECK_FILES+=("$check_file")
+      CHECK_IDXS+=("$idx")
+      (
+        NODE_SSH_COMMAND_TIMEOUT="$VERIFY_NODE_SSH_TIMEOUT" node_ssh "$idx" "
+          INSTALL_DIR='$REMOTE_INSTALL_DIR'
+          export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+          \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+            -tAc \"SELECT field1 FROM $VERIFY_TABLE WHERE ycsb_key=$VERIFY_MARKER_KEY\"
+        " 2>/dev/null | tr -d '[:space:]' > "$check_file"
+      ) &
+      CHECK_PIDS+=("$!")
+    done
+    if [[ ${#CHECK_PIDS[@]} -eq 0 ]]; then
+      break
+    fi
+    for p in "${CHECK_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+    all_now=1
+    for k in "${!CHECK_IDXS[@]}"; do
+      idx="${CHECK_IDXS[$k]}"
       name="${NODE_NAMES[$idx]}"
-      val="$(NODE_SSH_COMMAND_TIMEOUT="$VERIFY_NODE_SSH_TIMEOUT" node_ssh "$idx" "
-        INSTALL_DIR='$REMOTE_INSTALL_DIR'
-        export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
-        \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
-          -tAc \"SELECT field1 FROM $VERIFY_TABLE WHERE ycsb_key=$VERIFY_MARKER_KEY\"
-      " 2>/dev/null | tr -d '[:space:]')" || true
+      val="$(cat "${CHECK_FILES[$k]}" 2>/dev/null || true)"
+      rm -f "${CHECK_FILES[$k]}" 2>/dev/null || true
       if [[ "$val" == "$MARKER_VAL" ]]; then
         NODE_MARKER_READY[$idx]=1
         log "  [$name] marker visible (${elapsed}s)"
       else
-        all_ready=0
+        all_now=0
       fi
     done
-    [[ "$all_ready" -eq 1 ]] && break
+    [[ "$all_now" -eq 1 ]] && break
     if [[ "$elapsed" -ge "$VERIFY_TIMEOUT" ]]; then
       log "ERROR: marker was not visible on all nodes after ${VERIFY_TIMEOUT}s"
       collect_final_profiles_before_fail "marker timeout"
       exit 1
     fi
-    sleep 2
+    sleep 0.5
   done
 
   declare -a POST_ROOTS=()
@@ -4133,7 +4178,10 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     log "  [$name] rows=$cnt root=$root data_md5=$data_md5 merkle_verify=$verify"
   done
 
-  watchdog_query_node 0 "COPY (SELECT ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10 FROM $VERIFY_TABLE ORDER BY ycsb_key) TO STDOUT WITH CSV" > "$LOG_DIR/usertable_small_dump.csv" 2>/dev/null || true
+  DUMP_VERIFY_CSV="${DUMP_VERIFY_CSV:-0}"
+  if [[ "$DUMP_VERIFY_CSV" -eq 1 ]]; then
+    watchdog_query_node 0 "COPY (SELECT ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10 FROM $VERIFY_TABLE ORDER BY ycsb_key) TO STDOUT WITH CSV" > "$LOG_DIR/usertable_small_dump.csv" 2>/dev/null || true
+  fi
 
   reference_count="${POST_COUNTS[0]}"
   reference_root="${POST_ROOTS[0]}"
@@ -4164,30 +4212,51 @@ fi
 
 if [[ "$COLLECT_FINAL_SERVER_PROFILE" != "0" ]]; then
   log "=== Final server profile collection ==="
-  log "  Capturing final BCDB gate diagnostics on all nodes..."
+  log "  Capturing final BCDB gate diagnostics on all nodes (parallel)..."
+  declare -a DIAG_PIDS=()
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
-    NODE_SSH_COMMAND_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}" node_ssh "$idx" "
-      INSTALL_DIR='$REMOTE_INSTALL_DIR'
-      export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
-      \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
-        -tAc 'SELECT bcdb_gate_diagnostics()' >/dev/null
-    " >/dev/null 2>&1 || log "  WARNING: [$name] final bcdb_gate_diagnostics failed"
+    (
+      NODE_SSH_COMMAND_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}" node_ssh "$idx" "
+        INSTALL_DIR='$REMOTE_INSTALL_DIR'
+        export LD_LIBRARY_PATH=\"\$INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+        \$INSTALL_DIR/bin/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME \
+          -tAc 'SELECT bcdb_gate_diagnostics()' >/dev/null
+      " >/dev/null 2>&1 || log "  WARNING: [$name] final bcdb_gate_diagnostics failed"
+    ) &
+    DIAG_PIDS+=("$!")
   done
-  log "  Sending SIGTERM to ariabc_pg_server on all nodes so PROFILE_SERVER is flushed"
+  for p in "${DIAG_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+  log "  Sending SIGTERM to ariabc_pg_server on all nodes in parallel so PROFILE_SERVER is flushed"
+  declare -a TERM_PIDS=()
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
     client_port="${NODE_CLIENT_PORTS[$idx]}"
-    NODE_SSH_COMMAND_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}" node_ssh "$idx" "
-      fuser -k -TERM 9000/tcp 2>/dev/null || true
-      fuser -k -TERM ${client_port}/tcp 2>/dev/null || true
-    " >/dev/null 2>&1 || true
-    log "  [$name] stop signal sent"
+    (
+      NODE_SSH_COMMAND_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}" node_ssh "$idx" "
+        fuser -k -TERM 9000/tcp 2>/dev/null || true
+        fuser -k -TERM ${client_port}/tcp 2>/dev/null || true
+      " >/dev/null 2>&1 || true
+    ) &
+    TERM_PIDS+=("$!")
   done
-  sleep 2
+  for p in "${TERM_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+  sleep 1
   collect_cluster_logs "  Collecting final server logs with PROFILE_SERVER lines..."
   log "  Server profiles: grep 'PROFILE_SERVER' $LOG_DIR/server_node*.log"
   log "  BCDB profiles: grep 'PROFILE_BCDB_BLOCK' $LOG_DIR/postgres_node*.log"
+fi
+
+if [[ "${CLUSTER_STOP_POSTGRES_ON_EXIT:-0}" == "1" ]]; then
+  log "=== Stopping PostgreSQL instances across all cluster nodes (CLUSTER_STOP_POSTGRES_ON_EXIT=1) ==="
+  for idx in "${!NODE_IDS[@]}"; do
+    _n_name="${NODE_NAMES[$idx]}"
+    NODE_SSH_COMMAND_TIMEOUT="${VERIFY_NODE_SSH_TIMEOUT:-20}" node_ssh "$idx" "
+      export LD_LIBRARY_PATH=\"$REMOTE_INSTALL_DIR/lib:\${LD_LIBRARY_PATH:-}\"
+      \$REMOTE_INSTALL_DIR/bin/pg_ctl -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' -m fast stop >/dev/null 2>&1 || true
+    " >/dev/null 2>&1 || true
+    log "  [$_n_name] PostgreSQL stopped"
+  done
 fi
 
 if [[ -d "$REPO_ROOT/scripts/bench_full_results/durable_storage_test_results" ]]; then
