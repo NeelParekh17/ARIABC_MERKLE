@@ -48,31 +48,54 @@ def format_throughput_label(tps: float) -> str:
 
 
 def load_data(csv_path: Path):
-    """Load benchmark metrics from CSV file."""
+    """Load benchmark metrics from CSV file, supporting both live-indexed DML and legacy formats."""
     rows = []
     with open(csv_path, "r") as f:
         reader = csv.DictReader(f)
         for r in reader:
+            # Check if using new live-indexed format or legacy format
+            is_live_indexed = "live_indexed_insert_ms_mean" in r
+            if is_live_indexed:
+                schema_ms = float(r.get("schema_setup_ms_mean", 0.0))
+                insert_ms = float(r.get("live_indexed_insert_ms_mean", 0.0))
+                analyze_ms = float(r.get("analyze_ms_mean", 0.0))
+                # For compatibility with component breakdown plots
+                heap_ms = insert_ms
+                pkey_ms = 0.0
+                merkle_ms = 0.0
+                lookup_ms = 0.0
+            else:
+                heap_ms = float(r.get("heap_ms_mean", 0.0))
+                pkey_ms = float(r.get("pkey_btree_ms_mean", 0.0))
+                merkle_ms = float(r.get("merkle_am_ms_mean", 0.0))
+                lookup_ms = float(r.get("lookup_btree_ms_mean", 0.0))
+                analyze_ms = float(r.get("analyze_ms_mean", 0.0))
+                schema_ms = pkey_ms + merkle_ms + lookup_ms
+                insert_ms = heap_ms
+
             rows.append({
                 "scale": int(r["scale"]),
                 "scale_label": r["scale_label"],
                 "repetitions": int(r["repetitions"]),
-                "heap_ms": float(r["heap_ms_mean"]),
-                "pkey_btree_ms": float(r["pkey_btree_ms_mean"]),
-                "merkle_am_ms": float(r["merkle_am_ms_mean"]),
-                "lookup_btree_ms": float(r["lookup_btree_ms_mean"]),
-                "analyze_ms": float(r["analyze_ms_mean"]),
+                "is_live_indexed": is_live_indexed,
+                "schema_setup_ms": schema_ms,
+                "live_indexed_insert_ms": insert_ms,
+                "heap_ms": heap_ms,
+                "pkey_btree_ms": pkey_ms,
+                "merkle_am_ms": merkle_ms,
+                "lookup_btree_ms": lookup_ms,
+                "analyze_ms": analyze_ms,
                 "total_ms": float(r["total_ms_mean"]),
                 "total_s": float(r["total_s_mean"]),
                 "tps": float(r["tps_mean"]),
-                "heap_mb": float(r["heap_mb"]),
-                "pkey_mb": float(r["pkey_mb"]),
-                "merkle_mb": float(r["merkle_mb"]),
-                "lookup_mb": float(r["lookup_mb"]),
-                "total_mb": float(r["total_mb"]),
-                "merkle_total_nodes": int(r["merkle_total_nodes"]),
-                "merkle_leaf_nodes": int(r["merkle_leaf_nodes"]),
-                "merkle_tree_height": int(r["merkle_tree_height"]),
+                "heap_mb": float(r.get("heap_mb", 0.0)),
+                "pkey_mb": float(r.get("pkey_mb", 0.0)),
+                "merkle_mb": float(r.get("merkle_mb", 0.0)),
+                "lookup_mb": float(r.get("lookup_mb", 0.0)),
+                "total_mb": float(r.get("total_mb", 0.0)),
+                "merkle_total_nodes": int(r.get("merkle_total_nodes", 0)),
+                "merkle_leaf_nodes": int(r.get("merkle_leaf_nodes", 0)),
+                "merkle_tree_height": int(r.get("merkle_tree_height", 0)),
             })
     return rows
 
@@ -82,83 +105,147 @@ def plot_component_breakdown_dual(rows, output_dir: Path):
     Plot dual-panel stacked bar chart:
     - Left panel: Small scales (1k to 1M)
     - Right panel: Large production scales (3M to 50M)
-    This prevents small scales from being flattened by 5 orders of magnitude.
+    Supports both live-indexed DML and legacy breakdowns.
     """
     small_rows = [r for r in rows if r["scale"] <= 1_000_000]
     large_rows = [r for r in rows if r["scale"] >= 1_000_000]
 
-    colors = {
-        "heap": "#2b5c8f",
-        "pkey": "#3a9278",
-        "merkle": "#e27c3e",
-        "lookup": "#8b5bb5",
-        "analyze": "#888888",
-    }
+    is_live = rows[0].get("is_live_indexed", False)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7), dpi=200, gridspec_kw={"width_ratios": [1, 1.8]})
 
-    # --- Left Panel: 1k to 1M ---
-    labels1 = [r["scale_label"] for r in small_rows]
-    heap1 = np.array([r["heap_ms"] / 1000.0 for r in small_rows])
-    pkey1 = np.array([r["pkey_btree_ms"] / 1000.0 for r in small_rows])
-    merkle1 = np.array([r["merkle_am_ms"] / 1000.0 for r in small_rows])
-    lookup1 = np.array([r["lookup_btree_ms"] / 1000.0 for r in small_rows])
-    analyze1 = np.array([r["analyze_ms"] / 1000.0 for r in small_rows])
-    x1 = np.arange(len(labels1))
-    w1 = 0.5
+    if is_live:
+        colors = {
+            "schema": "#3a9278",
+            "insert": "#2b5c8f",
+            "analyze": "#888888",
+        }
 
-    ax1.bar(x1, heap1, w1, label="Heap Populate (generate_series)", color=colors["heap"])
-    ax1.bar(x1, pkey1, w1, bottom=heap1, label="PK B-Tree (usertable_pkey)", color=colors["pkey"])
-    ax1.bar(x1, merkle1, w1, bottom=heap1 + pkey1, label="Merkle AM Index (usertable_merkle_idx)", color=colors["merkle"])
-    ax1.bar(x1, lookup1, w1, bottom=heap1 + pkey1 + merkle1, label="Lookup B-Tree (partition_lookup_idx)", color=colors["lookup"])
-    ax1.bar(x1, analyze1, w1, bottom=heap1 + pkey1 + merkle1 + lookup1, label="ANALYZE & Catalog Stats", color=colors["analyze"])
+        # --- Left Panel ---
+        labels1 = [r["scale_label"] for r in small_rows]
+        schema1 = np.array([r["schema_setup_ms"] / 1000.0 for r in small_rows])
+        insert1 = np.array([r["live_indexed_insert_ms"] / 1000.0 for r in small_rows])
+        analyze1 = np.array([r["analyze_ms"] / 1000.0 for r in small_rows])
+        x1 = np.arange(len(labels1))
+        w1 = 0.5
 
-    ax1.set_title("Small & Medium Scales (1k → 1M)", fontsize=13, fontweight="bold", pad=10)
-    ax1.set_ylabel("Dataset Creation Time (Seconds)", fontsize=11, fontweight="bold")
-    ax1.set_xlabel("Scale (Tuples)", fontsize=11, fontweight="bold")
-    ax1.set_xticks(x1)
-    ax1.set_xticklabels(labels1, fontsize=10.5, fontweight="bold")
-    ax1.grid(axis="y", linestyle="--", alpha=0.5)
-    ax1.set_ylim(0, max(small_rows[-1]["total_s"] * 1.25, 1.0))
+        ax1.bar(x1, schema1, w1, label="Schema & Empty Indexes Setup", color=colors["schema"])
+        ax1.bar(x1, insert1, w1, bottom=schema1, label="Live-Indexed INSERT (PK + Merkle + Lookup)", color=colors["insert"])
+        ax1.bar(x1, analyze1, w1, bottom=schema1 + insert1, label="ANALYZE & Catalog Stats", color=colors["analyze"])
 
-    for i in range(len(small_rows)):
-        tot = small_rows[i]["total_s"]
-        t_label = format_time_label(tot)
-        tps_label = format_throughput_label(small_rows[i]["tps"])
-        ax1.text(x1[i], tot + (small_rows[-1]["total_s"] * 0.03), f"{t_label}\n({tps_label})", ha="center", va="bottom", fontsize=8.5, fontweight="bold")
+        ax1.set_title("Small & Medium Scales (1k → 1M)", fontsize=13, fontweight="bold", pad=10)
+        ax1.set_ylabel("Dataset Creation Time (Seconds)", fontsize=11, fontweight="bold")
+        ax1.set_xlabel("Scale (Tuples)", fontsize=11, fontweight="bold")
+        ax1.set_xticks(x1)
+        ax1.set_xticklabels(labels1, fontsize=10.5, fontweight="bold")
+        ax1.grid(axis="y", linestyle="--", alpha=0.5)
+        ax1.set_ylim(0, max(small_rows[-1]["total_s"] * 1.25, 1.0))
 
-    # --- Right Panel: 1M to 50M ---
-    labels2 = [r["scale_label"] for r in large_rows]
-    heap2 = np.array([r["heap_ms"] / 1000.0 for r in large_rows])
-    pkey2 = np.array([r["pkey_btree_ms"] / 1000.0 for r in large_rows])
-    merkle2 = np.array([r["merkle_am_ms"] / 1000.0 for r in large_rows])
-    lookup2 = np.array([r["lookup_btree_ms"] / 1000.0 for r in large_rows])
-    analyze2 = np.array([r["analyze_ms"] / 1000.0 for r in large_rows])
-    x2 = np.arange(len(labels2))
-    w2 = 0.55
+        for i in range(len(small_rows)):
+            tot = small_rows[i]["total_s"]
+            t_label = format_time_label(tot)
+            tps_label = format_throughput_label(small_rows[i]["tps"])
+            ax1.text(x1[i], tot + (small_rows[-1]["total_s"] * 0.03), f"{t_label}\n({tps_label})", ha="center", va="bottom", fontsize=8.5, fontweight="bold")
 
-    ax2.bar(x2, heap2, w2, color=colors["heap"])
-    ax2.bar(x2, pkey2, w2, bottom=heap2, color=colors["pkey"])
-    ax2.bar(x2, merkle2, w2, bottom=heap2 + pkey2, color=colors["merkle"])
-    ax2.bar(x2, lookup2, w2, bottom=heap2 + pkey2 + merkle2, color=colors["lookup"])
-    ax2.bar(x2, analyze2, w2, bottom=heap2 + pkey2 + merkle2 + lookup2, color=colors["analyze"])
+        # --- Right Panel ---
+        labels2 = [r["scale_label"] for r in large_rows]
+        schema2 = np.array([r["schema_setup_ms"] / 1000.0 for r in large_rows])
+        insert2 = np.array([r["live_indexed_insert_ms"] / 1000.0 for r in large_rows])
+        analyze2 = np.array([r["analyze_ms"] / 1000.0 for r in large_rows])
+        x2 = np.arange(len(labels2))
+        w2 = 0.55
 
-    ax2.set_title("Production Multi-Million Scales (1M → 50M)", fontsize=13, fontweight="bold", pad=10)
-    ax2.set_ylabel("Dataset Creation Time (Seconds)", fontsize=11, fontweight="bold")
-    ax2.set_xlabel("Scale (Tuples)", fontsize=11, fontweight="bold")
-    ax2.set_xticks(x2)
-    ax2.set_xticklabels(labels2, fontsize=10.5, fontweight="bold")
-    ax2.grid(axis="y", linestyle="--", alpha=0.5)
-    ax2.set_ylim(0, large_rows[-1]["total_s"] * 1.18)
+        ax2.bar(x2, schema2, w2, color=colors["schema"])
+        ax2.bar(x2, insert2, w2, bottom=schema2, color=colors["insert"])
+        ax2.bar(x2, analyze2, w2, bottom=schema2 + insert2, color=colors["analyze"])
 
-    for i in range(len(large_rows)):
-        tot = large_rows[i]["total_s"]
-        t_label = format_time_label(tot)
-        tps_label = format_throughput_label(large_rows[i]["tps"])
-        ax2.text(x2[i], tot + (large_rows[-1]["total_s"] * 0.025), f"{t_label}\n({tps_label})", ha="center", va="bottom", fontsize=8, fontweight="bold")
+        ax2.set_title("Production Multi-Million Scales (1M → 50M)", fontsize=13, fontweight="bold", pad=10)
+        ax2.set_ylabel("Dataset Creation Time (Seconds)", fontsize=11, fontweight="bold")
+        ax2.set_xlabel("Scale (Tuples)", fontsize=11, fontweight="bold")
+        ax2.set_xticks(x2)
+        ax2.set_xticklabels(labels2, fontsize=10.5, fontweight="bold")
+        ax2.grid(axis="y", linestyle="--", alpha=0.5)
+        ax2.set_ylim(0, large_rows[-1]["total_s"] * 1.18)
 
-    handles, labels = ax1.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.99), ncol=5, frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=10)
+        for i in range(len(large_rows)):
+            tot = large_rows[i]["total_s"]
+            t_label = format_time_label(tot)
+            tps_label = format_throughput_label(large_rows[i]["tps"])
+            ax2.text(x2[i], tot + (large_rows[-1]["total_s"] * 0.025), f"{t_label}\n({tps_label})", ha="center", va="bottom", fontsize=8, fontweight="bold")
+
+        handles, labels = ax1.get_legend_handles_labels()
+        fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.99), ncol=3, frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=10)
+    else:
+        colors = {
+            "heap": "#2b5c8f",
+            "pkey": "#3a9278",
+            "merkle": "#e27c3e",
+            "lookup": "#8b5bb5",
+            "analyze": "#888888",
+        }
+
+        # --- Left Panel: 1k to 1M ---
+        labels1 = [r["scale_label"] for r in small_rows]
+        heap1 = np.array([r["heap_ms"] / 1000.0 for r in small_rows])
+        pkey1 = np.array([r["pkey_btree_ms"] / 1000.0 for r in small_rows])
+        merkle1 = np.array([r["merkle_am_ms"] / 1000.0 for r in small_rows])
+        lookup1 = np.array([r["lookup_btree_ms"] / 1000.0 for r in small_rows])
+        analyze1 = np.array([r["analyze_ms"] / 1000.0 for r in small_rows])
+        x1 = np.arange(len(labels1))
+        w1 = 0.5
+
+        ax1.bar(x1, heap1, w1, label="Heap Populate (generate_series)", color=colors["heap"])
+        ax1.bar(x1, pkey1, w1, bottom=heap1, label="PK B-Tree (usertable_pkey)", color=colors["pkey"])
+        ax1.bar(x1, merkle1, w1, bottom=heap1 + pkey1, label="Merkle AM Index (usertable_merkle_idx)", color=colors["merkle"])
+        ax1.bar(x1, lookup1, w1, bottom=heap1 + pkey1 + merkle1, label="Lookup B-Tree (partition_lookup_idx)", color=colors["lookup"])
+        ax1.bar(x1, analyze1, w1, bottom=heap1 + pkey1 + merkle1 + lookup1, label="ANALYZE & Catalog Stats", color=colors["analyze"])
+
+        ax1.set_title("Small & Medium Scales (1k → 1M)", fontsize=13, fontweight="bold", pad=10)
+        ax1.set_ylabel("Dataset Creation Time (Seconds)", fontsize=11, fontweight="bold")
+        ax1.set_xlabel("Scale (Tuples)", fontsize=11, fontweight="bold")
+        ax1.set_xticks(x1)
+        ax1.set_xticklabels(labels1, fontsize=10.5, fontweight="bold")
+        ax1.grid(axis="y", linestyle="--", alpha=0.5)
+        ax1.set_ylim(0, max(small_rows[-1]["total_s"] * 1.25, 1.0))
+
+        for i in range(len(small_rows)):
+            tot = small_rows[i]["total_s"]
+            t_label = format_time_label(tot)
+            tps_label = format_throughput_label(small_rows[i]["tps"])
+            ax1.text(x1[i], tot + (small_rows[-1]["total_s"] * 0.03), f"{t_label}\n({tps_label})", ha="center", va="bottom", fontsize=8.5, fontweight="bold")
+
+        # --- Right Panel: 1M to 50M ---
+        labels2 = [r["scale_label"] for r in large_rows]
+        heap2 = np.array([r["heap_ms"] / 1000.0 for r in large_rows])
+        pkey2 = np.array([r["pkey_btree_ms"] / 1000.0 for r in large_rows])
+        merkle2 = np.array([r["merkle_am_ms"] / 1000.0 for r in large_rows])
+        lookup2 = np.array([r["lookup_btree_ms"] / 1000.0 for r in large_rows])
+        analyze2 = np.array([r["analyze_ms"] / 1000.0 for r in large_rows])
+        x2 = np.arange(len(labels2))
+        w2 = 0.55
+
+        ax2.bar(x2, heap2, w2, color=colors["heap"])
+        ax2.bar(x2, pkey2, w2, bottom=heap2, color=colors["pkey"])
+        ax2.bar(x2, merkle2, w2, bottom=heap2 + pkey2, color=colors["merkle"])
+        ax2.bar(x2, lookup2, w2, bottom=heap2 + pkey2 + merkle2, color=colors["lookup"])
+        ax2.bar(x2, analyze2, w2, bottom=heap2 + pkey2 + merkle2 + lookup2, color=colors["analyze"])
+
+        ax2.set_title("Production Multi-Million Scales (1M → 50M)", fontsize=13, fontweight="bold", pad=10)
+        ax2.set_ylabel("Dataset Creation Time (Seconds)", fontsize=11, fontweight="bold")
+        ax2.set_xlabel("Scale (Tuples)", fontsize=11, fontweight="bold")
+        ax2.set_xticks(x2)
+        ax2.set_xticklabels(labels2, fontsize=10.5, fontweight="bold")
+        ax2.grid(axis="y", linestyle="--", alpha=0.5)
+        ax2.set_ylim(0, large_rows[-1]["total_s"] * 1.18)
+
+        for i in range(len(large_rows)):
+            tot = large_rows[i]["total_s"]
+            t_label = format_time_label(tot)
+            tps_label = format_throughput_label(large_rows[i]["tps"])
+            ax2.text(x2[i], tot + (large_rows[-1]["total_s"] * 0.025), f"{t_label}\n({tps_label})", ha="center", va="bottom", fontsize=8, fontweight="bold")
+
+        handles, labels = ax1.get_legend_handles_labels()
+        fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.99), ncol=5, frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=10)
 
     plt.suptitle("AriaBC Dataset Creation & Indexing Time Breakdown Across Scales (1k → 50M)", fontsize=15, fontweight="bold", y=1.04)
     plt.tight_layout()

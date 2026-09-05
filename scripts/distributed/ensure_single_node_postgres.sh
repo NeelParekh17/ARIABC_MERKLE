@@ -9,6 +9,7 @@ DB_NAME="postgres"
 TEMPLATE_CONFIG=""
 REQUIRE_CUSTOM=0
 FRESH_PGDATA=0
+ALLOW_REMOTE_CLIENT=0
 
 usage() {
   cat <<'EOF'
@@ -18,7 +19,7 @@ Usage:
     --install-dir </home/neel/Desktop/ariabc_install> \
     [--db-port <5438>] [--db-user <postgres>] [--db-name <postgres>] \
     --template-config </home/neel/Desktop/ariabc_cluster/.bench_tmp/shared_postgresql.conf> \
-    [--require-custom] [--fresh-pgdata]
+    [--require-custom] [--fresh-pgdata] [--allow-remote-client]
 
 Ensures a local single-node postgres cluster exists and is running on given port.
 Prints: PGDATA=<path>
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --template-config) TEMPLATE_CONFIG="${2:-}"; shift 2 ;;
     --require-custom) REQUIRE_CUSTOM=1; shift 1 ;;
     --fresh-pgdata) FRESH_PGDATA=1; shift 1 ;;
+    --allow-remote-client) ALLOW_REMOTE_CLIENT=1; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -128,6 +130,19 @@ rm -f "$PGDATA_DIR/postgresql.auto.conf"
 if ! grep -Eq '^host\s+all\s+all\s+127\.0\.0\.1/32\s+trust$' "$PGDATA_DIR/pg_hba.conf"; then
   echo "host all all 127.0.0.1/32 trust" >> "$PGDATA_DIR/pg_hba.conf"
 fi
+if [[ "$ALLOW_REMOTE_CLIENT" == "1" ]]; then
+  if grep -Eq '^[[:space:]]*#?[[:space:]]*listen_addresses[[:space:]]*=' "$PGDATA_DIR/postgresql.conf"; then
+    sed -i -E "s|^[[:space:]]*#?[[:space:]]*listen_addresses[[:space:]]*=.*$|listen_addresses = '*'|" "$PGDATA_DIR/postgresql.conf"
+  else
+    echo "listen_addresses = '*'" >> "$PGDATA_DIR/postgresql.conf"
+  fi
+  if ! grep -Eq '^host\s+all\s+all\s+10\.129\.0\.0/16\s+trust$' "$PGDATA_DIR/pg_hba.conf"; then
+    echo "host all all 10.129.0.0/16 trust" >> "$PGDATA_DIR/pg_hba.conf"
+  fi
+  if ! grep -Eq '^host\s+all\s+all\s+0\.0\.0\.0/0\s+trust$' "$PGDATA_DIR/pg_hba.conf"; then
+    echo "host all all 0.0.0.0/0 trust" >> "$PGDATA_DIR/pg_hba.conf"
+  fi
+fi
 
 if "$BIN_DIR/pg_ctl" -D "$PGDATA_DIR" status >/dev/null 2>&1; then
   "$BIN_DIR/pg_ctl" -D "$PGDATA_DIR" -w -t 90 stop -m fast || true
@@ -184,6 +199,11 @@ _reinit_pgdata() {
   rm -f "$PGDATA_DIR/bench_single_auto.conf" "$PGDATA_DIR/postgresql.auto.conf"
   if ! grep -Eq '^host\s+all\s+all\s+127\.0\.0\.1/32\s+trust$' "$PGDATA_DIR/pg_hba.conf"; then
     echo "host all all 127.0.0.1/32 trust" >> "$PGDATA_DIR/pg_hba.conf"
+  fi
+  if [[ "$ALLOW_REMOTE_CLIENT" == "1" ]]; then
+    sed -i -E "s|^[[:space:]]*#?[[:space:]]*listen_addresses[[:space:]]*=.*$|listen_addresses = '*'|" "$PGDATA_DIR/postgresql.conf"
+    echo "host all all 10.129.0.0/16 trust" >> "$PGDATA_DIR/pg_hba.conf"
+    echo "host all all 0.0.0.0/0 trust" >> "$PGDATA_DIR/pg_hba.conf"
   fi
 }
 

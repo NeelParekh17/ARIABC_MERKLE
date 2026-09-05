@@ -10,15 +10,15 @@ Sweep options:
   --threads N              Client deterministic lanes and det client workers
                            unless --det-client-workers is also set.
   --det-client-workers N   Gateway deterministic threadpool workers.
-  --executor-workers LIST  Server executor worker counts to sweep.
+  --executor-workers LIST  Database replica executor worker counts to sweep.
                            Accepts comma-separated or quoted space-separated values.
-                           Default: "1 2 4 8"
+                           Default: "1 2 4 8 12 16"
   --workloads LIST         Workload SQL files to sweep.
                            Accepts comma-separated or quoted space-separated values.
                            Default: "scripts/ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt"
   --reps LIST              Repetition labels to run for each executor worker.
                            Accepts comma-separated or quoted space-separated values.
-                           Default: "1 2 3"
+                           Default: "1"
   --kafka-completion-mode MODE Completion mode: majority, majority_async_all3, or async.
                            Default: "majority_async_all3"
   --raft-ordering-policy POLICY
@@ -65,10 +65,10 @@ normalize_list() {
 
 THREADS=96
 DET_CLIENT_WORKERS=""
-EXECUTOR_WORKERS="1 2 4 8"
+EXECUTOR_WORKERS="1 2 4 8 12 16"
 DEFAULT_WORKLOADS="scripts/ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt"
 WORKLOADS="$DEFAULT_WORKLOADS"
-REPS="1 2 3"
+REPS="1"
 KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority_async_all3}"
 EXECUTION_PROFILE="${EXECUTION_PROFILE:-event-direct}"
 RAFT_ORDERING_POLICY="${RAFT_ORDERING_POLICY:-leader-assigned}"

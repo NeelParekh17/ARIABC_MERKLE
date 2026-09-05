@@ -626,7 +626,12 @@ def _write_summary(raw_csv: Path, summary_csv: Path) -> None:
     def _resolve_stmt_count(workload_name: str) -> Optional[int]:
         if workload_name in workload_stmt_cache:
             return workload_stmt_cache[workload_name]
-        count = _count_workload_statements(scripts_dir / workload_name)
+        wp = scripts_dir / workload_name
+        if not wp.exists():
+            wp = repo_root / workload_name
+        if not wp.exists():
+            wp = scripts_dir / Path(workload_name).name
+        count = _count_workload_statements(wp)
         workload_stmt_cache[workload_name] = count
         return count
 
@@ -1471,6 +1476,13 @@ def main() -> int:
         default="",
         help="Comma-separated Qrates (per worker thread) to run; overrides --rate. Include 0 for unthrottled.",
     )
+    parser.add_argument("--db-host", default=os.environ.get("DB_HOST", "localhost"), help="DB host (default: localhost).")
+    parser.add_argument(
+        "--client-threads",
+        type=int,
+        default=int(os.environ.get("BENCH_CLIENT_THREADS", "0")),
+        help="Fixed client thread concurrency (Option 1). If > 0, decouples client lanes from server workers (--threads).",
+    )
     parser.add_argument("--db", default="postgres", help="Database name.")
     parser.add_argument("--user", default="postgres", help="DB user.")
     parser.add_argument("--port", type=int, default=5438, help="DB port.")
@@ -1624,17 +1636,17 @@ def main() -> int:
 
     env = dict(os.environ)
     install_dir = env.get("ARIABC_INSTALL_DIR", "/work/ARIABC/install")
-    env["LD_LIBRARY_PATH"] = f"{install_dir}/lib:" + env.get("LD_LIBRARY_PATH", "")
-    env.setdefault("PGHOST", "localhost")
-    env.setdefault("PGPORT", str(args.port))
-    env.setdefault("PGUSER", args.user)
-    env.setdefault("PGDATABASE", args.db)
+    db_host = (args.db_host or "localhost").strip()
+    env["PGHOST"] = db_host
+    env["PGPORT"] = str(args.port)
+    env["PGUSER"] = args.user
+    env["PGDATABASE"] = args.db
     # generic-saicopg-traffic-load+logSkip-safedb+pg.py reads DB_* env vars,
     # not PG* vars; set both so remote/non-default socket layouts work.
-    env.setdefault("DB_HOST", "localhost")
-    env.setdefault("DB_PORT", str(args.port))
-    env.setdefault("DB_USER", args.user)
-    env.setdefault("DB_NAME", args.db)
+    env["DB_HOST"] = db_host
+    env["DB_PORT"] = str(args.port)
+    env["DB_USER"] = args.user
+    env["DB_NAME"] = args.db
     # Avoid client-side statement timeouts interrupting long deterministic runs.
     env.setdefault("STATEMENT_TIMEOUT", "0")
     meta = {
@@ -1692,6 +1704,10 @@ def main() -> int:
             _write_summary(raw_csv, summary_csv)
         _write_mode_decomposition(summary_csv, det_overhead_csv)
         _write_signing_overhead(summary_csv, signing_overhead_csv)
+        try:
+            _generate_tps_graphs(summary_csv, out_dir)
+        except Exception as e:
+            print(f"WARNING: failed to generate graphs: {e}", file=sys.stderr)
         print(f"Wrote summary:      {summary_csv}")
         print(f"Wrote mode decomposition: {det_overhead_csv}")
         print(f"Wrote sign overhead:{signing_overhead_csv}")
@@ -1771,6 +1787,10 @@ def main() -> int:
             for workload in workloads:
                 workload_path = scripts_dir / workload
                 if not workload_path.exists():
+                    workload_path = repo_root / workload
+                if not workload_path.exists():
+                    workload_path = scripts_dir / Path(workload).name
+                if not workload_path.exists():
                     print(f"WARNING: missing workload file {workload_path}, skipping", file=sys.stderr)
                     continue
                 workload_stmt_count = _count_workload_statements(workload_path)
@@ -1807,16 +1827,49 @@ def main() -> int:
 
                                 restart_server = (not args.no_server_restart) or (db_type == 1)
                                 start_exit = 0
+                                is_remote_host = db_host not in ("localhost", "127.0.0.1", "")
                                 if restart_server:
-                                    start_exit = _run(
-                                        ["/usr/bin/bash", str(start_server)],
-                                        cwd=scripts_dir,
-                                        env=env,
-                                        stdout_path=start_log_out,
-                                        stderr_path=start_log_err,
-                                    )
+                                    effective_extra_gucs = env.get("BCDB_EXTRA_GUCS", "")
+                                    if db_type == 1:
+                                        guc_items = [g.strip() for g in effective_extra_gucs.split(",") if g.strip() and not g.strip().startswith("bcdb_worker_count=")]
+                                        guc_items.append(f"bcdb_worker_count={th}")
+                                        effective_extra_gucs = ",".join(guc_items)
 
-                                expected_data_dir = _canonical_path_str(env.get("ARIABC_PGDATA", "/work/ARIABC/pgdata"))
+                                    if is_remote_host:
+                                        remote_user = os.environ.get("REMOTE_DB_USER", "neel")
+                                        remote_dir = os.environ.get("REMOTE_ARIABC_DIR", "/home/neel/Desktop/ariabc_cluster")
+                                        remote_pgdata = os.environ.get("REMOTE_ARIABC_PGDATA", f"{remote_dir}/.bench_tmp/single_node_pgdata")
+                                        remote_inst = os.environ.get("REMOTE_ARIABC_INSTALL", "/home/neel/Desktop/ariabc_install")
+                                        ssh_cmd = [
+                                            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                            f"{remote_user}@{db_host}",
+                                            f"ARIABC_DIR='{remote_dir}' ARIABC_INSTALL_DIR='{remote_inst}' ARIABC_PGDATA='{remote_pgdata}' PGPORT='{args.port}' BCDB_EXTRA_GUCS='{effective_extra_gucs}' bash '{remote_dir}/scripts/start_server.sh'",
+                                        ]
+                                        start_exit = _run(
+                                            ssh_cmd,
+                                            cwd=scripts_dir,
+                                            env=env,
+                                            stdout_path=start_log_out,
+                                            stderr_path=start_log_err,
+                                        )
+                                    else:
+                                        start_env = dict(env)
+                                        if effective_extra_gucs:
+                                            start_env["BCDB_EXTRA_GUCS"] = effective_extra_gucs
+                                        start_exit = _run(
+                                            ["/usr/bin/bash", str(start_server)],
+                                            cwd=scripts_dir,
+                                            env=start_env,
+                                            stdout_path=start_log_out,
+                                            stderr_path=start_log_err,
+                                        )
+
+                                if is_remote_host:
+                                    remote_dir = os.environ.get("REMOTE_ARIABC_DIR", "/home/neel/Desktop/ariabc_cluster")
+                                    remote_pgdata = os.environ.get("REMOTE_ARIABC_PGDATA", f"{remote_dir}/.bench_tmp/single_node_pgdata")
+                                    expected_data_dir = _canonical_path_str(env.get("ARIABC_PGDATA", remote_pgdata))
+                                else:
+                                    expected_data_dir = _canonical_path_str(env.get("ARIABC_PGDATA", "/work/ARIABC/pgdata"))
                                 live_data_dir = None
                                 live_data_dir_raw = _psql_value(
                                     psql_path,
@@ -1946,13 +1999,14 @@ def main() -> int:
                                         pointer_path.write_text(json.dumps(pointer_payload) + "\n")
                                     except Exception as _e:
                                         print(f"WARNING: could not write current_case pointer: {_e}", file=sys.stderr)
+                                    effective_client_threads = args.client_threads if args.client_threads and args.client_threads > 0 else th
                                     workload_argv = [
                                         python_path,
                                         str(workload_py),
                                         args.db,
                                         str(workload_path),
                                         str(db_type),
-                                        str(th),
+                                        str(effective_client_threads),
                                         str(rate),
                                         "--signing",
                                         str(signing),
