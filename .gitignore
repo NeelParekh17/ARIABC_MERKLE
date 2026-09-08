@@ -61,6 +61,13 @@ lib*.pc
 !/scripts/bench_full_results/
 /scripts/bench_full_results/*
 !/scripts/bench_full_results/*.zip
+!/scripts/bench_full_results/TPCC_BENCHMARK_SCALING_DETAILED_ANALYSIS.md
+!/scripts/bench_full_results/tpcc_*.png
+!/scripts/bench_full_results/ycsb_all_72_sweep/
+/scripts/bench_full_results/ycsb_all_72_sweep/*
+!/scripts/bench_full_results/ycsb_all_72_sweep/YCSB_72_WORKLOADS_DETAILED_ANALYSIS.md
+!/scripts/bench_full_results/ycsb_all_72_sweep/graphs/
+!/scripts/bench_full_results/ycsb_all_72_sweep/graphs/*.png
 
 # ...except for all distributed orchestration / benchmark / runbook files.
 # This folder is the collaborator-facing entrypoint for the 4-node Raft
@@ -68,6 +75,8 @@ lib*.pc
 # whitelist-only model kept churning every time a new script was added.
 !/scripts/distributed/
 !/scripts/distributed/**
+!/scripts/generate_deterministic_workload.py
+!/scripts/verify_deterministic_engine.py
 
 # Python bytecode under the distributed/ folder is still build output.
 /scripts/distributed/__pycache__/
