@@ -212,13 +212,18 @@ bool kafka_console_producer::start(const std::string& bootstrap,
 
     const char* acks = (profile == kafka_producer_profile::control_durable) ? "all" : "1";
     const char* linger_ms = (profile == kafka_producer_profile::result_fast) ? "0" : "5";
+    const char* default_comp = (profile == kafka_producer_profile::result_fast) ? "lz4" : "snappy";
+    const char* env_comp = ::getenv("ARIABC_KAFKA_COMPRESSION_TYPE");
+    const char* compression = (env_comp && *env_comp) ? env_comp : default_comp;
     if (!conf_set(conf, "acks", acks, err) ||
         !conf_set(conf, "linger.ms", linger_ms, err) ||
         !conf_set(conf, "batch.num.messages", "10000", err) ||
         !conf_set(conf, "batch.size", "1048576", err) ||
-        !conf_set(conf, "compression.type", "snappy", err) ||
+        !conf_set(conf, "compression.type", compression, err) ||
         !conf_set(conf, "queue.buffering.max.messages", "1000000", err) ||
         !conf_set(conf, "queue.buffering.max.kbytes", "1048576", err) ||
+        !conf_set(conf, "socket.send.buffer.bytes", "4194304", err) ||
+        !conf_set(conf, "socket.receive.buffer.bytes", "4194304", err) ||
         !conf_set(conf, "socket.nagle.disable", "true", err)) {
         rd_kafka_conf_destroy(conf);
         return false;
@@ -237,17 +242,27 @@ bool kafka_console_producer::start(const std::string& bootstrap,
     poll_thread_stop_.store(false, std::memory_order_relaxed);
     poll_thread_ = std::thread([this]() {
         rd_kafka_t* rk_local = reinterpret_cast<rd_kafka_t*>(rk_);
+        uint64_t local_calls = 0;
+        uint64_t local_poll_ns = 0;
         while (!poll_thread_stop_.load(std::memory_order_relaxed)) {
             const auto p0 = std::chrono::steady_clock::now();
             rd_kafka_poll(rk_local, 1);
             const auto p1 = std::chrono::steady_clock::now();
-            uint64_t poll_ns = static_cast<uint64_t>(
+            local_poll_ns += static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count());
-            {
+            ++local_calls;
+            if (local_calls >= 128) {
                 std::lock_guard<std::mutex> lock(stats_mutex_);
-                ++stats_.producer_callback_poll_calls;
-                stats_.producer_callback_poll_ns += poll_ns;
+                stats_.producer_callback_poll_calls += local_calls;
+                stats_.producer_callback_poll_ns += local_poll_ns;
+                local_calls = 0;
+                local_poll_ns = 0;
             }
+        }
+        if (local_calls > 0) {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.producer_callback_poll_calls += local_calls;
+            stats_.producer_callback_poll_ns += local_poll_ns;
         }
         rd_kafka_poll(rk_local, 0);
     });
@@ -266,12 +281,6 @@ bool kafka_console_producer::send_payload(const std::string& payload,
         return false;
     }
     rd_kafka_t* rk = reinterpret_cast<rd_kafka_t*>(rk_);
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        ++stats_.send_calls;
-        stats_.payload_bytes += static_cast<uint64_t>(payload.size());
-    }
-
     for (int attempt = 0; attempt < 6; ++attempt) {
         delivery_opaque* opaque = new delivery_opaque;
         opaque->producer = this;
@@ -287,18 +296,20 @@ bool kafka_console_producer::send_payload(const std::string& payload,
             RD_KAFKA_V_OPAQUE(opaque),
             RD_KAFKA_V_END);
         const auto p1 = std::chrono::steady_clock::now();
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.producev_ns += static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count());
-        }
 
         if (e == RD_KAFKA_RESP_ERR_NO_ERROR) {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            ++stats_.send_ok;
+            const uint64_t prod_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(p1 - p0).count());
             uint64_t before = delivery_pending_.fetch_add(1, std::memory_order_relaxed);
             uint64_t dp = before + 1;
-            update_max_u64(stats_.delivery_pending_max, dp);
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                ++stats_.send_calls;
+                stats_.payload_bytes += static_cast<uint64_t>(payload.size());
+                stats_.producev_ns += prod_ns;
+                ++stats_.send_ok;
+                update_max_u64(stats_.delivery_pending_max, dp);
+            }
             if (before == 8) {
                 pending_crossed_above_8_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -461,8 +472,9 @@ bool kafka_console_consumer::start_latest_multi(const std::string& bootstrap,
         // Majority-completion waits on these replies synchronously. Favor
         // low-latency fetch return over large broker-side batching.
         !conf_set(conf, "fetch.min.bytes", "1", err) ||
-        !conf_set(conf, "fetch.wait.max.ms", "0", err) ||
-        !conf_set(conf, "max.partition.fetch.bytes", "1048576", err) ||
+        !conf_set(conf, "fetch.wait.max.ms", "100", err) ||
+        !conf_set(conf, "max.partition.fetch.bytes", "8388608", err) ||
+        !conf_set(conf, "socket.receive.buffer.bytes", "4194304", err) ||
         !conf_set(conf, "socket.nagle.disable", "true", err)) {
         rd_kafka_conf_destroy(conf);
         return false;

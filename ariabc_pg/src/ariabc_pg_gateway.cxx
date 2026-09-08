@@ -1617,7 +1617,9 @@ struct vote_store {
 
     // Batch add: process all records under a single mutex lock and
     // notify waiters once at the end. This replaces N individual
-    // mutex + cv_.notify_all() cycles with a single pair.
+    // Batch add: verify signatures outside the lock, then process records in chunks
+    // of up to 128 records under the lock. This allows client threads to interleave and pop
+    // ready majorities promptly rather than waiting through a monolithic 15+ ms hold.
     void add_replies_batch(const std::vector<kafka_reply_record>& recs,
                            std::vector<std::string>& out_recovery_notes)
     {
@@ -1628,17 +1630,21 @@ struct vote_store {
             sig_valid.push_back(verify_result_signature(rec, sig_key_));
         }
         out_recovery_notes.resize(recs.size());
-        /* Part 5: measure time waiting for the mutex lock (wait vs hold). */
-        const uint64_t wait_start_ns = steady_now_ns();
-        std::lock_guard<std::mutex> lk(mu_);
-        const uint64_t hold_start_ns = steady_now_ns();
-        record_mutex_wait_locked(hold_start_ns > wait_start_ns ? (hold_start_ns - wait_start_ns) : 0);
-        for (size_t i = 0; i < recs.size(); ++i) {
-            add_reply_inner_locked(recs[i], sig_valid[i], out_recovery_notes[i]);
-        }
-        record_mutex_hold_locked(steady_now_ns() - hold_start_ns);
-        if (!recs.empty()) {
-            cv_.notify_all();
+
+        const size_t kChunkSize = 128;
+        for (size_t start = 0; start < recs.size(); start += kChunkSize) {
+            const size_t end = std::min(recs.size(), start + kChunkSize);
+            const uint64_t wait_start_ns = steady_now_ns();
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                const uint64_t hold_start_ns = steady_now_ns();
+                record_mutex_wait_locked(hold_start_ns > wait_start_ns ? (hold_start_ns - wait_start_ns) : 0);
+                for (size_t i = start; i < end; ++i) {
+                    add_reply_inner_locked(recs[i], sig_valid[i], out_recovery_notes[i]);
+                }
+                record_mutex_hold_locked(steady_now_ns() - hold_start_ns);
+                cv_.notify_all();
+            }
         }
     }
 
@@ -2077,6 +2083,29 @@ public:
             cv_.notify_all();
         }
     }
+    void note_inflight_registered_batch(const std::vector<uint64_t>& req_nums)
+    {
+        if (req_nums.empty()) return;
+        std::string ignored_result;
+        std::string ignored_error;
+        std::lock_guard<std::mutex> lk(mu_);
+        bool any_ready = false;
+        for (uint64_t req_num : req_nums) {
+            vote_key key{expected_epoch_hex_, req_num};
+            if (resolve_terminal_locked(key, ignored_result, ignored_error)) {
+                enqueue_ready_locked(key);
+                any_ready = true;
+            }
+        }
+        if (any_ready) {
+            cv_.notify_all();
+        }
+    }
+    struct terminal_majority_item {
+        uint64_t req_num = 0;
+        std::string result;
+        std::string error;
+    };
 
     bool wait_any_majority(
         std::list<uint64_t>& inflight,
@@ -2128,6 +2157,57 @@ public:
             }
         }
         return out_error.empty();
+    }
+
+    bool wait_any_majority_batch(
+        std::list<uint64_t>& inflight,
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
+        int poll_interval_us,
+        int poll_count,
+        std::vector<terminal_majority_item>& out_batch,
+        size_t max_batch = 64)
+    {
+        out_batch.clear();
+        std::unique_lock<std::mutex> lk(mu_);
+
+        auto terminal = [&]() -> bool {
+            pop_terminal_inflight_batch_locked(inflight, inflight_pos, out_batch, max_batch);
+            return !out_batch.empty();
+        };
+
+        if (terminal()) return true;
+        if (poll_count <= 0) {
+            while (!terminal()) {
+                const auto wait_t0 = std::chrono::steady_clock::now();
+                cv_.wait(lk);
+                const auto wait_t1 = std::chrono::steady_clock::now();
+                record_wait_sleep_locked(static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            }
+            return true;
+        }
+
+        const long long total_us =
+            static_cast<long long>(poll_interval_us) * static_cast<long long>(poll_count);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::microseconds(std::max<long long>(1, total_us));
+        while (!terminal()) {
+            const auto wait_t0 = std::chrono::steady_clock::now();
+            const std::cv_status st = cv_.wait_until(lk, deadline);
+            const auto wait_t1 = std::chrono::steady_clock::now();
+            record_wait_sleep_locked(static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
+            if (st == std::cv_status::timeout && !terminal()) {
+                std::cerr << "vote_store timeout inflight="
+                          << describe_inflight_locked(inflight)
+                          << std::endl;
+                terminal_majority_item err_item;
+                err_item.error = "majority_timeout";
+                out_batch.push_back(std::move(err_item));
+                return false;
+            }
+        }
+        return true;
     }
 
     // Wait until all nodes have reported this request and all valid signatures
@@ -2226,6 +2306,69 @@ public:
             }
         }
         return audit_mark_status::PINNED;
+    }
+
+    std::vector<audit_mark_status> mark_audit_pending_batch(
+        const std::vector<uint64_t>& req_nums,
+        int poll_interval_us,
+        int poll_count)
+    {
+        std::vector<audit_mark_status> statuses;
+        statuses.reserve(req_nums.size());
+        std::lock_guard<std::mutex> lk(mu_);
+        bool notified = false;
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        int actual_poll_count = poll_count;
+        if (actual_poll_count <= 0) {
+            actual_poll_count = 30000000 / std::max(1, poll_interval_us); // 30 seconds max
+        }
+        const uint64_t total_us = static_cast<uint64_t>(poll_interval_us) * static_cast<uint64_t>(actual_poll_count);
+        const uint64_t timeout_ns = total_us * 1000;
+
+        for (uint64_t req_num : req_nums) {
+            if (capacity_exhausted_.load(std::memory_order_relaxed)) {
+                statuses.push_back(audit_mark_status::CAPACITY_EXHAUSTED);
+                continue;
+            }
+            vote_key key{expected_epoch_hex_, req_num};
+            auto it = m_.find(key);
+            if (it == m_.end()) {
+                statuses.push_back(audit_mark_status::MISSING);
+                continue;
+            }
+            if (!it->second.audit_pending) {
+                it->second.audit_pending = true;
+                it->second.audit_pending_ns = now_ns;
+                it->second.audit_generation++;
+                audit_pending_current_++;
+                if (audit_pending_current_ > audit_pending_max_) {
+                    audit_pending_max_ = audit_pending_current_;
+                }
+                const uint64_t deadline_ns = now_ns + timeout_ns;
+                it->second.audit_deadline_ns = deadline_ns;
+                audit_deadline_heap_.push(audit_deadline_entry{deadline_ns, key, it->second.audit_generation});
+                notified = true;
+            }
+            if (!it->second.all3_ready_queued) {
+                std::string err;
+                if (resolve_all_nodes_consistent_locked(key, err)) {
+                    it->second.all3_ready_ns = it->second.audit_pending_ns;
+                    it->second.all3_ready_queued = true;
+                    all3_ready_queue_.push_back(key);
+                    if (all3_ready_queue_.size() > all3_ready_queue_depth_max_) {
+                        all3_ready_queue_depth_max_ = all3_ready_queue_.size();
+                    }
+                    notified = true;
+                }
+            }
+            statuses.push_back(audit_mark_status::PINNED);
+        }
+        if (notified) {
+            cv_.notify_all();
+        }
+        return statuses;
     }
 
     void unpin_audit(uint64_t req_num) {
@@ -2656,41 +2799,37 @@ private:
             return false;
         }
 
-        for (const auto& kv : e.by_node) {
-            const int node_id = kv.first;
-            if ((it_maj->second & node_bit(node_id)) == 0) continue;
-            const vote_entry::node_obs& obs = kv.second;
-            if (!obs.sig_valid) continue;
-            if (obs.rec.result_hash != e.majority_hash) continue;
-            if (!obs.rec.has_full_result) continue;
-            if (safe_ledger_mode_ && obs.rec.wire_version == 4) {
-                /*
-                 * B4 safe-ledger result_hash is the terminal ledger digest,
-                 * not canonical_hash(full_result). Signature verification
-                 * already covers that digest and whether full_result is
-                 * present, so returning this majority payload is valid.
-                 */
-                // Cross-check all nodes in the majority to ensure they agree on terminal_state and full_result
-                std::string first_state;
-                std::string first_full;
-                bool mismatch = false;
-                for (const auto& kv2 : e.by_node) {
-                    if ((it_maj->second & node_bit(kv2.first)) == 0) continue;
-                    if (!kv2.second.sig_valid) continue;
-                    if (kv2.second.rec.result_hash != e.majority_hash) continue;
-                    if (first_state.empty()) {
-                        first_state = kv2.second.rec.terminal_state;
-                    } else if (first_state != kv2.second.rec.terminal_state) {
+        {
+            /*
+             * For signed wire protocols (B3 and B4), result_hash is cryptographically
+             * signed and verified by the node's signature. If any node in the majority
+             * included full_result, we verify and use it; otherwise the agreed terminal
+             * state is returned. This prevents blocking quorum resolution when followers
+             * or all replicas offload full results and publish compact hashes only.
+             */
+            std::string first_state;
+            std::string first_full;
+            bool mismatch = false;
+            bool any_signed_wire = false;
+            for (const auto& kv2 : e.by_node) {
+                if ((it_maj->second & node_bit(kv2.first)) == 0) continue;
+                if (!kv2.second.sig_valid) continue;
+                if (kv2.second.rec.result_hash != e.majority_hash) continue;
+                if (kv2.second.rec.wire_version >= 3) any_signed_wire = true;
+                if (first_state.empty()) {
+                    first_state = kv2.second.rec.terminal_state;
+                } else if (first_state != kv2.second.rec.terminal_state) {
+                    mismatch = true;
+                }
+                if (kv2.second.rec.has_full_result) {
+                    if (first_full.empty()) {
+                        first_full = kv2.second.rec.full_result;
+                    } else if (first_full != kv2.second.rec.full_result) {
                         mismatch = true;
                     }
-                    if (kv2.second.rec.has_full_result) {
-                        if (first_full.empty()) {
-                            first_full = kv2.second.rec.full_result;
-                        } else if (first_full != kv2.second.rec.full_result) {
-                            mismatch = true;
-                        }
-                    }
                 }
+            }
+            if (any_signed_wire) {
                 if (mismatch) {
                     out_error = "majority_mismatch";
                     e.terminal_set = true;
@@ -2699,13 +2838,22 @@ private:
                     e.terminal_state.clear();
                     return true;
                 }
-                out_result = obs.rec.full_result;
+                out_result = first_full;
                 e.terminal_set = true;
                 e.terminal_result = out_result;
                 e.terminal_error.clear();
-                e.terminal_state = obs.rec.terminal_state;
+                e.terminal_state = first_state.empty() ? "OK" : first_state;
                 return true;
             }
+        }
+
+        for (const auto& kv : e.by_node) {
+            const int node_id = kv.first;
+            if ((it_maj->second & node_bit(node_id)) == 0) continue;
+            const vote_entry::node_obs& obs = kv.second;
+            if (!obs.sig_valid) continue;
+            if (obs.rec.result_hash != e.majority_hash) continue;
+            if (!obs.rec.has_full_result) continue;
             const std::string full_hash = canonical_result_hash(obs.rec.full_result);
             if (full_hash != e.majority_hash) continue;
             out_result = obs.rec.full_result;
@@ -2716,7 +2864,7 @@ private:
             return true;
         }
 
-        // Majority exists but we don't yet have a full result for it.
+        // Majority exists but we don't yet have a full result for it (legacy mode).
         if (!e.all_reported) return false;
         out_error = "majority_full_result_missing";
         e.terminal_set = true;
@@ -2836,6 +2984,40 @@ private:
             return true;
         }
         return false;
+    }
+
+    size_t pop_terminal_inflight_batch_locked(
+        std::list<uint64_t>& inflight,
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
+        std::vector<terminal_majority_item>& out_batch,
+        size_t max_batch)
+    {
+        while (!ready_reqs_.empty() && out_batch.size() < max_batch) {
+            const vote_key key = ready_reqs_.front();
+            ready_reqs_.pop_front();
+            ready_members_.erase(key);
+
+            if (key.epoch_hex != expected_epoch_hex_) continue;
+
+            auto it_pos = inflight_pos.find(key.req_num);
+            if (it_pos == inflight_pos.end()) continue;
+
+            std::string err;
+            std::string result;
+            if (!resolve_terminal_locked(key, result, err)) {
+                continue;
+            }
+
+            terminal_majority_item item;
+            item.req_num = key.req_num;
+            item.result = std::move(result);
+            item.error = std::move(err);
+            out_batch.push_back(std::move(item));
+
+            inflight.erase(it_pos->second);
+            inflight_pos.erase(it_pos);
+        }
+        return out_batch.size();
     }
 
     std::string describe_req_locked(const vote_key& key) const
@@ -4137,13 +4319,11 @@ int main(int argc, char** argv) {
         });
 
         kafka_thread = std::thread([&] {
-            int poll_timeout_ms = 1;
             while (!stop.load()) {
                 std::string kerr;
                 std::vector<ariabc_pg::kafka_consumed_message> kafka_batch;
-                if (!consumer.poll_batch_messages(kafka_batch, 5000, poll_timeout_ms, kerr)) {
+                if (!consumer.poll_batch_messages(kafka_batch, 5000, 2, kerr)) {
                     if (kerr == "timeout") {
-                        poll_timeout_ms = 1;
                         continue;
                     }
                     if (!stop.load()) {
@@ -4151,7 +4331,6 @@ int main(int argc, char** argv) {
                     }
                     break;
                 }
-                poll_timeout_ms = 1;
 
                 kafka_messages.fetch_add(static_cast<uint64_t>(kafka_batch.size()), std::memory_order_relaxed);
 
@@ -4238,6 +4417,7 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> det_seq(opt.det_start_seq);
     std::atomic<long long> total_wait_ns(0);
     std::atomic<long long> total_submit_ns(0);
+    std::atomic<long long> submit_wall_ms_stat(0);
     std::atomic<long long> total_majority_wait_ns(0);
     std::atomic<int> duplicate_key_errors(0);
     std::atomic<uint64_t> term_leader_unknown(0);
@@ -4417,6 +4597,50 @@ int main(int argc, char** argv) {
             case ResolvedOutcome::ProtocolFailure:
                 permanent_failures.fetch_add(1, std::memory_order_relaxed);
                 break;
+        }
+        return true;
+    };
+
+    auto record_resolved_outcome_batch = [&](const std::vector<std::pair<uint64_t, ResolvedOutcome>>& items) -> bool {
+        std::lock_guard<std::mutex> lk(resolved_outcome_mu);
+        for (const auto& kv : items) {
+            const uint64_t req_num = kv.first;
+            const ResolvedOutcome outcome = kv.second;
+            auto it = resolved_outcome_accounting.find(req_num);
+            if (it != resolved_outcome_accounting.end()) {
+                if (it->second != outcome) {
+                    std::cerr << "resolved outcome mismatch for req_num=" << req_num
+                              << " existing=" << static_cast<int>(it->second)
+                              << " new=" << static_cast<int>(outcome) << std::endl;
+                    {
+                        std::lock_guard<std::mutex> fatal_lk(fatal_gateway_error_mu);
+                        if (!fatal_gateway_error.load(std::memory_order_relaxed)) {
+                            permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                            fatal_gateway_error_message =
+                                "resolved outcome mismatch for req_num=" + std::to_string(req_num);
+                        }
+                        fatal_gateway_error.store(true, std::memory_order_release);
+                    }
+                    return false;
+                }
+                continue;
+            }
+            resolved_outcome_accounting.insert(std::make_pair(req_num, outcome));
+            client_quorum_complete_count.fetch_add(1, std::memory_order_relaxed);
+            switch (outcome) {
+                case ResolvedOutcome::Ok:
+                    success_count.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case ResolvedOutcome::DeterministicError:
+                    deterministic_error_count.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case ResolvedOutcome::NonterminalFailure:
+                    nonterminal_failure_count.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                case ResolvedOutcome::ProtocolFailure:
+                    permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                    break;
+            }
         }
         return true;
     };
@@ -5048,6 +5272,10 @@ int main(int argc, char** argv) {
             };
 
             auto on_det_batch_accepted = [&](const std::vector<det_shaped_request>& items) -> bool {
+                std::vector<uint64_t> registered_rids;
+                if (majority_wait_enabled) {
+                    registered_rids.reserve(items.size());
+                }
                 for (size_t i = 0; i < items.size(); ++i) {
                     if (!reset_commit_barrier(items[i].sql)) {
                         permanent_failures.fetch_add(1);
@@ -5059,13 +5287,16 @@ int main(int argc, char** argv) {
                         auto it_pos = inflight.end();
                         --it_pos;
                         inflight_pos[items[i].req_num] = it_pos;
-                        votes.note_inflight_registered(items[i].req_num);
+                        registered_rids.push_back(items[i].req_num);
                         det_inflight_count.fetch_add(1, std::memory_order_relaxed);
                         track_reset_req(items[i].req_num, items[i].sql);
                     } else {
                         det_completed_count.fetch_add(1, std::memory_order_relaxed);
                         release_det_req_lane(items[i].req_num);
                     }
+                }
+                if (majority_wait_enabled && !registered_rids.empty()) {
+                    votes.note_inflight_registered_batch(registered_rids);
                 }
                 return true;
             };
@@ -5156,6 +5387,37 @@ int main(int argc, char** argv) {
                 }
             };
 
+            auto record_async_all3_pending_batch = [&](const std::vector<uint64_t>& rids) {
+                if (!majority_async_all3_validation || rids.empty()) {
+                    return;
+                }
+                std::vector<ariabc_pg::audit_mark_status> statuses =
+                    votes.mark_audit_pending_batch(rids, opt.poll_interval_us, opt.poll_count);
+                for (size_t i = 0; i < statuses.size(); ++i) {
+                    const ariabc_pg::audit_mark_status status = statuses[i];
+                    const uint64_t rid = rids[i];
+                    if (status == ariabc_pg::audit_mark_status::MISSING) {
+                        async_all3_missing_count.fetch_add(1, std::memory_order_relaxed);
+                        bump_terminal_reason("audit_entry_evicted");
+                        emit_recovery_event(rid, "audit_entry_evicted");
+                        permanent_failures.fetch_add(1);
+                        continue;
+                    }
+                    if (status == ariabc_pg::audit_mark_status::CAPACITY_EXHAUSTED || votes.capacity_exhausted()) {
+                        std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
+                        if (!fatal_gateway_error.load(std::memory_order_relaxed)) {
+                            fatal_gateway_error_message = "audit_capacity_exhausted: all vote_store entries pinned";
+                            fatal_gateway_error.store(true, std::memory_order_release);
+                            bump_terminal_reason("audit_capacity_exhausted");
+                            emit_recovery_event(rid, fatal_gateway_error_message);
+                            permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                            async_all3_capacity_exhausted_count.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        return;
+                    }
+                }
+            };
+
             auto drain_async_all3_audit = [&]() -> bool {
                 if (fatal_gateway_error.load(std::memory_order_relaxed)) {
                     std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
@@ -5207,41 +5469,59 @@ int main(int argc, char** argv) {
                         std::cerr << "fatal_gateway_error: " << fatal_gateway_error_message << std::endl;
                         return false;
                     }
-                    std::string maj;
-                    std::string wait_err;
-                    uint64_t rid = 0;
+                    const size_t needed = inflight.size() - max_outstanding;
+                    const size_t pop_batch_size = std::min<size_t>(256, std::max<size_t>(1, needed));
+                    std::vector<ariabc_pg::vote_store::terminal_majority_item> batch_res;
                     const auto w0 = std::chrono::steady_clock::now();
-                    const bool ok_wait = votes.wait_any_majority(
+                    const bool ok_wait = votes.wait_any_majority_batch(
                         inflight, inflight_pos, opt.poll_interval_us, opt.poll_count,
-                        rid, maj, wait_err);
+                        batch_res, pop_batch_size);
                     const auto w1 = std::chrono::steady_clock::now();
                     total_majority_wait_ns.fetch_add(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
-                    if (!ok_wait) {
-                        if (wait_err.empty()) wait_err = "majority_timeout";
+                    if (!ok_wait || batch_res.empty()) {
+                        std::string wait_err = (batch_res.empty() || batch_res[0].error.empty()) ? "majority_timeout" : batch_res[0].error;
                         bump_terminal_reason(wait_err);
-                        emit_recovery_event(rid, wait_err);
+                        emit_recovery_event(batch_res.empty() ? 0 : batch_res[0].req_num, wait_err);
                         permanent_failures.fetch_add(1);
                         return false;
                     }
-                    votes.print_nonterminal_failure_marker(rid);
-                    votes.print_deterministic_error_marker(rid);
-                    if (!record_resolved_outcome_once(rid, get_resolved_outcome(rid)) &&
+                    std::vector<std::pair<uint64_t, ResolvedOutcome>> outcomes;
+                    outcomes.reserve(batch_res.size());
+                    std::vector<uint64_t> rids_for_audit;
+                    rids_for_audit.reserve(batch_res.size());
+                    for (const auto& item : batch_res) {
+                        const uint64_t rid = item.req_num;
+                        if (!item.error.empty()) {
+                            bump_terminal_reason(item.error);
+                            emit_recovery_event(rid, item.error);
+                            permanent_failures.fetch_add(1);
+                            return false;
+                        }
+                        votes.print_nonterminal_failure_marker(rid);
+                        votes.print_deterministic_error_marker(rid);
+                        outcomes.emplace_back(rid, get_resolved_outcome(rid));
+                        rids_for_audit.push_back(rid);
+                    }
+                    if (!record_resolved_outcome_batch(outcomes) &&
                         fatal_gateway_error.load(std::memory_order_acquire)) {
                         return false;
                     }
                     if (majority_async_all3_validation) {
-                        record_async_all3_pending(rid);
+                        record_async_all3_pending_batch(rids_for_audit);
                     }
-                    if (!wait_strict_all_nodes_for_req(rid)) {
-                        return false;
-                    }
-                    det_completed_count.fetch_add(1, std::memory_order_relaxed);
-                    det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
-                    release_det_req_lane(rid);
-                    if (!maybe_wait_reset_all_nodes(rid)) {
-                        permanent_failures.fetch_add(1);
-                        return false;
+                    for (const auto& item : batch_res) {
+                        const uint64_t rid = item.req_num;
+                        if (!wait_strict_all_nodes_for_req(rid)) {
+                            return false;
+                        }
+                        det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                        det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                        release_det_req_lane(rid);
+                        if (!maybe_wait_reset_all_nodes(rid)) {
+                            permanent_failures.fetch_add(1);
+                            return false;
+                        }
                     }
                 }
                 return true;
@@ -5535,6 +5815,8 @@ int main(int argc, char** argv) {
                 std::deque<background_completion_wait> background_completion_waits;
                 size_t pending_request_count = 0;
                 size_t next_idx = 0;
+                std::chrono::steady_clock::time_point pipeline_first_submit_tp;
+                bool pipeline_first_submit_set = false;
 
                 auto enqueue_background_completion_wait =
                     [&](size_t node_idx,
@@ -5862,14 +6144,36 @@ int main(int argc, char** argv) {
                         det_sent_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
                         det_pending_accept_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
                         pending_accepts.push_back(std::move(ticket));
+                        if (!pipeline_first_submit_set) {
+                            pipeline_first_submit_tp = std::chrono::steady_clock::now();
+                            pipeline_first_submit_set = true;
+                        }
                         next_idx = next_after_batch;
                     }
 
                     if (failed) break;
 
-                    if (!pending_accepts.empty()) {
-                        if (!drain_one_accept()) {
-                            failed = true;
+                    while (!pending_accepts.empty()) {
+                        bool first_is_done = false;
+                        if (!pending_accepts.front().ctxs.empty()) {
+                            ariabc_pg::client_api_response tmp_resp;
+                            std::string tmp_err;
+                            submitter->try_collect_submit(
+                                pending_accepts.front().ctxs.front(), tmp_resp, tmp_err, first_is_done);
+                        }
+                        if (first_is_done) {
+                            if (!drain_one_accept()) {
+                                failed = true;
+                                break;
+                            }
+                        } else {
+                            if (next_idx < queries.size() && pending_accepts.size() < 16) {
+                                break;
+                            }
+                            if (!drain_one_accept()) {
+                                failed = true;
+                                break;
+                            }
                             break;
                         }
                     }
@@ -5902,6 +6206,13 @@ int main(int argc, char** argv) {
                             break;
                         }
                     }
+                }
+                if (pipeline_first_submit_set) {
+                    const auto pipeline_last_submit_tp = std::chrono::steady_clock::now();
+                    submit_wall_ms_stat.store(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            pipeline_last_submit_tp - pipeline_first_submit_tp).count(),
+                        std::memory_order_relaxed);
                 }
                 if (!failed) {
                     const bool report_client_accept_time =
@@ -6055,45 +6366,68 @@ int main(int argc, char** argv) {
 
             if (majority_wait_enabled) {
                 while (!failed && !inflight.empty()) {
-                    std::string maj;
-                    std::string wait_err;
-                    uint64_t rid = 0;
+                    if (fatal_gateway_error.load(std::memory_order_relaxed)) {
+                        failed = true;
+                        break;
+                    }
+                    const size_t pop_batch_size = std::min<size_t>(256, inflight.size());
+                    std::vector<ariabc_pg::vote_store::terminal_majority_item> batch_res;
                     const auto w0 = std::chrono::steady_clock::now();
-                    const bool ok_wait = votes.wait_any_majority(
+                    const bool ok_wait = votes.wait_any_majority_batch(
                         inflight, inflight_pos, opt.poll_interval_us, opt.poll_count,
-                        rid, maj, wait_err);
+                        batch_res, pop_batch_size);
                     const auto w1 = std::chrono::steady_clock::now();
                     total_majority_wait_ns.fetch_add(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
-                    if (!ok_wait) {
-                        if (wait_err.empty()) wait_err = "majority_timeout";
+                    if (!ok_wait || batch_res.empty()) {
+                        std::string wait_err = (batch_res.empty() || batch_res[0].error.empty()) ? "majority_timeout" : batch_res[0].error;
                         bump_terminal_reason(wait_err);
-                        emit_recovery_event(rid, wait_err);
+                        emit_recovery_event(batch_res.empty() ? 0 : batch_res[0].req_num, wait_err);
                         permanent_failures.fetch_add(1);
                         failed = true;
                         break;
                     }
-                    votes.print_nonterminal_failure_marker(rid);
-                    votes.print_deterministic_error_marker(rid);
-                    if (!record_resolved_outcome_once(rid, get_resolved_outcome(rid)) &&
+                    std::vector<std::pair<uint64_t, ResolvedOutcome>> outcomes;
+                    outcomes.reserve(batch_res.size());
+                    std::vector<uint64_t> rids_for_audit;
+                    rids_for_audit.reserve(batch_res.size());
+                    for (const auto& item : batch_res) {
+                        const uint64_t rid = item.req_num;
+                        if (!item.error.empty()) {
+                            bump_terminal_reason(item.error);
+                            emit_recovery_event(rid, item.error);
+                            permanent_failures.fetch_add(1);
+                            failed = true;
+                            break;
+                        }
+                        votes.print_nonterminal_failure_marker(rid);
+                        votes.print_deterministic_error_marker(rid);
+                        outcomes.emplace_back(rid, get_resolved_outcome(rid));
+                        rids_for_audit.push_back(rid);
+                    }
+                    if (failed) break;
+                    if (!record_resolved_outcome_batch(outcomes) &&
                         fatal_gateway_error.load(std::memory_order_acquire)) {
                         failed = true;
                         break;
                     }
                     if (majority_async_all3_validation) {
-                        record_async_all3_pending(rid);
+                        record_async_all3_pending_batch(rids_for_audit);
                     }
-                    if (!wait_strict_all_nodes_for_req(rid)) {
-                        failed = true;
-                        break;
-                    }
-                    det_completed_count.fetch_add(1, std::memory_order_relaxed);
-                    det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
-                    release_det_req_lane(rid);
-                    if (!maybe_wait_reset_all_nodes(rid)) {
-                        permanent_failures.fetch_add(1);
-                        failed = true;
-                        break;
+                    for (const auto& item : batch_res) {
+                        const uint64_t rid = item.req_num;
+                        if (!wait_strict_all_nodes_for_req(rid)) {
+                            failed = true;
+                            break;
+                        }
+                        det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                        det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                        release_det_req_lane(rid);
+                        if (!maybe_wait_reset_all_nodes(rid)) {
+                            permanent_failures.fetch_add(1);
+                            failed = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -6340,6 +6674,7 @@ int main(int argc, char** argv) {
         std::cout << " overall wall time including drains (millisec) = " << overall_wall_ms << std::endl;
         std::cout << " total wait time (ms) " << wait_ms << std::endl;
         std::cout << " submit time (ms) " << submit_ms << std::endl;
+        std::cout << " submit wall time (ms) " << submit_wall_ms_stat.load() << std::endl;
         std::cout << " majority wait time (ms) " << majority_wait_ms << std::endl;
         std::cout << " background accept drain time (ms) " << background_accept_drain_ms << std::endl;
         std::cout << "duplicate_key_errors=" << duplicate_key_errors.load() << std::endl;
@@ -6544,6 +6879,7 @@ int main(int argc, char** argv) {
             << " audit_deadline_heap_timeout_pops=" << vote_prof.audit_deadline_heap_timeout_pops
             << " audit_drain_ms=" << (async_all3_audit_drain_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " audit_capacity_exhausted=" << (fatal_gateway_error.load(std::memory_order_relaxed) ? 1 : 0)
+            << " submit_wall_ms=" << submit_wall_ms_stat.load(std::memory_order_relaxed)
             << " err_send_calls=" << ep.send_calls
             << " err_send_ok=" << ep.send_ok
             << " err_producev_ms=" << (ep.producev_ns / 1000000.0)

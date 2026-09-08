@@ -105,6 +105,16 @@ size_t kafka_async_result_publisher_max_records() {
     return static_cast<size_t>(std::min<unsigned long long>(parsed, 4096ULL));
 }
 
+size_t kafka_async_result_publisher_target_records() {
+    const char* v = std::getenv("ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS");
+    if (!v || !*v) return 64;
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(v, &end, 10);
+    if (errno != 0 || end == v || *end != '\0' || parsed == 0) return 64;
+    return static_cast<size_t>(std::min<unsigned long long>(parsed, 4096ULL));
+}
+
 size_t kafka_async_result_publisher_max_bytes() {
     const char* v = std::getenv("ARIABC_KAFKA_ASYNC_RESULT_BATCH_BYTES");
     if (!v || !*v) return 1024 * 1024;
@@ -121,7 +131,7 @@ int kafka_async_result_publisher_delay_us() {
         char* end = nullptr;
         errno = 0;
         const long parsed = std::strtol(shared, &end, 10);
-        if (errno == 0 && end != shared && *end == '\0' && parsed > 0 && parsed <= 1000000) {
+        if (errno == 0 && end != shared && *end == '\0' && parsed >= 0 && parsed <= 1000000) {
             return static_cast<int>(parsed);
         }
     }
@@ -130,11 +140,11 @@ int kafka_async_result_publisher_delay_us() {
         char* end = nullptr;
         errno = 0;
         const long parsed = std::strtol(v, &end, 10);
-        if (errno == 0 && end != v && *end == '\0' && parsed > 0 && parsed <= 1000000) {
+        if (errno == 0 && end != v && *end == '\0' && parsed >= 0 && parsed <= 1000000) {
             return static_cast<int>(parsed);
         }
     }
-    return kKafkaBatchMaxDelayMs * 1000;
+    return 50;
 }
 
 static const int kConfiguredDelayUs = []() -> int {
@@ -148,9 +158,9 @@ static const int kConfiguredDelayUs = []() -> int {
     errno = 0;
     const long v = std::strtol(e, &end, 10);
 
-    // Do not accept 0, negatives, malformed values, or absurd delays.
+    // Accept 0 for immediate flush, and up to 1s.
     if (errno != 0 || end == e || *end != '\0' ||
-        v <= 0 || v > 1000000)
+        v < 0 || v > 1000000)
         return -1;
 
     return static_cast<int>(v);
@@ -290,7 +300,8 @@ int full_result_replica_limit() {
         if (!v || !*v) return 0;
         char* end = nullptr;
         const long parsed = std::strtol(v, &end, 10);
-        if (end == v || parsed <= 0) return 0;
+        if (end == v) return 0;
+        if (parsed < 0) return -1;
         return static_cast<int>(std::min<long>(parsed, 1024));
     }();
     return limit;
@@ -1122,8 +1133,8 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
 
             const int full_result_limit = full_result_replica_limit();
             const bool include_full_result =
-                (full_result_limit <= 0 ||
-                 static_cast<int>(node_id) <= full_result_limit);
+                (full_result_limit == 0 ||
+                 (full_result_limit > 0 && static_cast<int>(node_id) <= full_result_limit));
             const uint64_t ts_ms = now_epoch_ms();
 
             std::string term_digest_hex;
@@ -1217,8 +1228,8 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
         const uint64_t raft_log_idx = (i < raft_log_idxs.size()) ? raft_log_idxs[i] : 0;
         const int full_result_limit = full_result_replica_limit();
         const bool include_full_result =
-            (full_result_limit <= 0 ||
-             static_cast<int>(node_id) <= full_result_limit);
+            (full_result_limit == 0 ||
+             (full_result_limit > 0 && static_cast<int>(node_id) <= full_result_limit));
         const uint64_t ts_ms = now_epoch_ms();
         std::string result_hash;
         if (i < terminal_digests.size() && terminal_digests[i].size() == 64) {
@@ -2290,6 +2301,8 @@ pg_executor::pg_executor(int node_id,
                   << node_id_
                   << " records="
                   << kafka_async_result_publisher_max_records()
+                  << " target_records="
+                  << kafka_async_result_publisher_target_records()
                   << " delay_us="
                   << kafka_async_result_publisher_delay_us()
                   << std::endl;
@@ -3194,6 +3207,7 @@ void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& b
 
 void pg_executor::kafka_publisher_loop() {
     const size_t max_records = kafka_async_result_publisher_max_records();
+    const size_t target_records = kafka_async_result_publisher_target_records();
     const size_t max_bytes = kafka_async_result_publisher_max_bytes();
     const int max_delay_us = kafka_async_result_publisher_delay_us();
     std::vector<kafka_result_record> batch;
@@ -3238,9 +3252,26 @@ void pg_executor::kafka_publisher_loop() {
                     reason = kafka_flush_reason::FINAL;
                     break;
                 }
+                if (batch.size() >= target_records) {
+                    reason = kafka_flush_reason::RECORDS;
+                    break;
+                }
 
+                // Check pipeline state: if no active transactions are in-flight
+                // or queued in PostgreSQL, and nothing is left in kafka_pub_q_,
+                // all work for the current workload run is finished! Flush the
+                // tail batch immediately without lingering.
+                const uint64_t active_work =
+                    st_inflight_cur_.load(std::memory_order_relaxed) +
+                    st_backlog_cur_.load(std::memory_order_relaxed);
+                if (active_work == 0 && kafka_pub_q_.empty()) {
+                    reason = kafka_flush_reason::IDLE;
+                    break;
+                }
+
+                const int linger_us = (max_delay_us > 0) ? max_delay_us : 2000;
                 const auto deadline =
-                    batch_start + std::chrono::microseconds(max_delay_us);
+                    batch_start + std::chrono::microseconds(linger_us);
                 const bool woke = kafka_pub_cv_.wait_until(lk, deadline, [this] {
                     return kafka_pub_stop_ || !kafka_pub_q_.empty();
                 });
@@ -4158,11 +4189,14 @@ void pg_executor::worker_loop() {
             maybe_strip_det_prefix_for_compat(t.sql, det_raw_compat_mode_, db_opt_.db_type);
         bool is_error = false;
         const std::string result = exec_sql(c, sql_exec, &is_error);
-        std::cerr << "SAFE_BACKEND_REPLY"
-                  << " log=" << t.raft_log_idx
-                  << " ord=" << t.raft_item_ordinal
-                  << " bytes=" << result.size()
-                  << std::endl;
+        static const bool s_trace_backend_reply = (::getenv("ARIABC_TRACE_BACKEND_REPLY") != nullptr);
+        if (s_trace_backend_reply) {
+            std::cerr << "SAFE_BACKEND_REPLY"
+                      << " log=" << t.raft_log_idx
+                      << " ord=" << t.raft_item_ordinal
+                      << " bytes=" << result.size()
+                      << std::endl;
+        }
         if (det_prefixed_requires_apply_turn) {
             det_finish_apply(det_tx_seq);
         }
@@ -4671,11 +4705,14 @@ void pg_executor::event_loop() {
             for (size_t i = 0; i < n; ++i) {
                 const bool is_err = (i < ready.errors.size()) ? ready.errors[i] : false;
 
-                std::cerr << "SAFE_BACKEND_REPLY"
-                          << " log=" << ready.tasks[i].raft_log_idx
-                          << " ord=" << ready.tasks[i].raft_item_ordinal
-                          << " bytes=" << ready.results[i].size()
-                          << std::endl;
+                static const bool s_trace_backend_reply = (::getenv("ARIABC_TRACE_BACKEND_REPLY") != nullptr);
+                if (s_trace_backend_reply) {
+                    std::cerr << "SAFE_BACKEND_REPLY"
+                              << " log=" << ready.tasks[i].raft_log_idx
+                              << " ord=" << ready.tasks[i].raft_item_ordinal
+                              << " bytes=" << ready.results[i].size()
+                              << std::endl;
+                }
                 ConfirmedResult conf = accept_safe_confirmed_result(ready.tasks[i], ready.results[i]);
                 // Fail closed: do not publish Kafka and do not advance Raft applied tracker
                 if (conf.raft_log_index == static_cast<uint64_t>(-1)) {
@@ -4741,11 +4778,14 @@ void pg_executor::event_loop() {
 
     auto mark_det_result_ready = [&](PGconn* durable_conn, task done_task, const std::string& out, bool is_error = false) {
         const uint64_t ready_ns = now_steady_ns();
-        std::cerr << "SAFE_BACKEND_REPLY"
-                  << " log=" << done_task.raft_log_idx
-                  << " ord=" << done_task.raft_item_ordinal
-                  << " bytes=" << out.size()
-                  << std::endl;
+        static const bool s_trace_backend_reply = (::getenv("ARIABC_TRACE_BACKEND_REPLY") != nullptr);
+        if (s_trace_backend_reply) {
+            std::cerr << "SAFE_BACKEND_REPLY"
+                      << " log=" << done_task.raft_log_idx
+                      << " ord=" << done_task.raft_item_ordinal
+                      << " bytes=" << out.size()
+                      << std::endl;
+        }
         ConfirmedResult conf = accept_safe_confirmed_result(done_task, out);
         // Fail closed: do not publish Kafka and do not advance Raft applied tracker
         if (conf.raft_log_index == static_cast<uint64_t>(-1)) {
