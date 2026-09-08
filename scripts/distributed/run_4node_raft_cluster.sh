@@ -83,7 +83,7 @@ source "${SCRIPT_DIR}/cluster_topology.sh"
 ARIABC_CLUSTER_PASSWORD="${ARIABC_CLUSTER_PASSWORD:-clusterinfolab123}"
 CLUSTER_PASSWORD="$ARIABC_CLUSTER_PASSWORD"
 
-KAFKA_HOST="${KAFKA_HOST:-10.129.148.247}"
+KAFKA_HOST="${KAFKA_HOST:-10.129.27.111}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
 KAFKA_RESULT_TOPIC="${KAFKA_RESULT_TOPIC:-ariabc_results}"
 KAFKA_HOME_REMOTE="${KAFKA_HOME_REMOTE:-/home/neel/Desktop/kafka_2.13-3.7.0}"
@@ -192,6 +192,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     KAFKA_FAST_RESET DUMP_VERIFY_CSV \
     KAFKA_COMPLETION_MODE \
     ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US \
+    ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS \
     ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER \
     ARIABC_RAFT_DURABLE_ASYNC_FLUSH ARIABC_RAFT_STREAM_GAP \
     ARIABC_RAFT_ORDERED_BATCH_TARGET_ENTRIES ARIABC_RAFT_ORDERED_BATCH_LINGER_US \
@@ -228,6 +229,8 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
       if [[ "$_arg" == "${REPO_ROOT}/"* ]]; then
         _rel="${_arg#${REPO_ROOT}/}"
         _arg="${GATEWAY_REPO}/${_rel}"
+      elif [[ "$_arg" != /* ]]; then
+        _arg="${GATEWAY_REPO}/${_arg}"
       fi
       rewritten_args+=("$_arg")
     elif [[ "$_arg" == "--workload" ]]; then
@@ -456,9 +459,11 @@ BCDB_DET_QUEUE_HIGH_WM="${BCDB_DET_QUEUE_HIGH_WM:-0}"  # >0 overrides determinis
 BCDB_DET_QUEUE_LOW_WM="${BCDB_DET_QUEUE_LOW_WM:-0}"    # >0 overrides deterministic server admission low watermark
 BCDB_FLOW_DEBUG="${BCDB_FLOW_DEBUG:-0}"      # 1=emit targeted worker/apply flow logs on cluster replicas
 POSTGRES_LOG_MODE="${POSTGRES_LOG_MODE:-compact}"  # compact=filtered artifact, full=raw server.log
-ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-2}"  # 0=all replicas include full SQL results in Kafka; 2 keeps full results on quorum while all replicas still publish hashes
+ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-1}"  # -1=no replicas include full results; 0=all replicas include full SQL results; 1=Raft leader only
 ARIABC_RESULT_PUBLISH_REPLICA_LIMIT="${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT:-0}"  # 0=all replicas publish Kafka result records
-ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-1}"  # 0=Raft default election priority; 1=pin leader to admin123 (Kafka host)
+ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US="${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-2000}" # 2000us safety linger with pipeline idle drain
+ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS="${ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS:-64}" # target batch size 64 records
+ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-1}"  # 0=Raft default election priority; 1=pin leader to admin123
 GATEWAY_BROADCAST_ACCEPT_QUORUM="${GATEWAY_BROADCAST_ACCEPT_QUORUM:-0}"  # 0=gateway legacy majority for broadcast accepts
 GATEWAY_BROADCAST_RESULT_QUORUM="${GATEWAY_BROADCAST_RESULT_QUORUM:-0}"  # 0=legacy accept-completion surface
 GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN="${GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN:-1}"  # 1=legacy, 0=client-visible quorum time + post-run drain
@@ -1192,8 +1197,8 @@ if [[ "$BCDB_BLOCK_WAIT_WATERMARK" != "0" && "$BCDB_BLOCK_WAIT_WATERMARK" != "1"
   echo "ERROR: --bcdb-block-wait-watermark must be 0 or 1" >&2
   exit 2
 fi
-if [[ "$ARIABC_FULL_RESULT_REPLICA_LIMIT" -lt 0 || "$ARIABC_FULL_RESULT_REPLICA_LIMIT" -gt 4 ]]; then
-  echo "ERROR: --full-result-replica-limit must be between 0 and 4" >&2
+if [[ "$ARIABC_FULL_RESULT_REPLICA_LIMIT" -lt -1 || "$ARIABC_FULL_RESULT_REPLICA_LIMIT" -gt 4 ]]; then
+  echo "ERROR: --full-result-replica-limit must be between -1 and 4" >&2
   exit 2
 fi
 if [[ "$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT" -lt 0 || "$ARIABC_RESULT_PUBLISH_REPLICA_LIMIT" -gt 4 ]]; then
@@ -1322,6 +1327,43 @@ node_ssh() {
     timeout "$NODE_SSH_COMMAND_TIMEOUT" "${cmd[@]}"
   else
     "${cmd[@]}"
+  fi
+}
+
+# ===========================================================================
+# Function: run_kafka_cmd
+# Description: Executes a command on the Kafka host ($KAFKA_HOST), either
+#              locally if Kafka is co-located with this host, or via SSH.
+# ===========================================================================
+run_kafka_cmd() {
+  local is_local=0
+  if [[ "$KAFKA_HOST" == "127.0.0.1" || "$KAFKA_HOST" == "localhost" ]]; then
+    is_local=1
+  elif hostname -I 2>/dev/null | grep -qw "$KAFKA_HOST"; then
+    is_local=1
+  elif ip -br addr 2>/dev/null | grep -q "$KAFKA_HOST"; then
+    is_local=1
+  fi
+
+  if [[ "$is_local" -eq 1 ]]; then
+    bash "$@"
+  else
+    local target_node_idx=-1
+    for idx in "${!NODE_IPS[@]}"; do
+      if [[ "${NODE_IPS[$idx]}" == "$KAFKA_HOST" ]]; then
+        target_node_idx="$idx"
+        break
+      fi
+    done
+    if [[ "$target_node_idx" -ge 0 ]]; then
+      node_ssh "$target_node_idx" bash "$@"
+    else
+      if command -v sshpass >/dev/null 2>&1 && [[ -n "$CLUSTER_PASSWORD" ]]; then
+        sshpass -p "$CLUSTER_PASSWORD" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "neel@$KAFKA_HOST" bash "$@"
+      else
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "neel@$KAFKA_HOST" bash "$@"
+      fi
+    fi
   fi
 }
 
@@ -2563,11 +2605,11 @@ for idx in "${!NODE_IDS[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Phase 2: Kafka on admin123
+# Phase 2: Kafka broker
 # ---------------------------------------------------------------------------
 if [[ "$NO_KAFKA" -eq 0 && "$SKIP_KAFKA" -eq 0 ]]; then
-  log "=== Phase 2: Ensure Kafka (KRaft) running on admin123 (${KAFKA_HOST}) ==="
-  node_ssh 0 bash <<KAFKA_EOF
+  log "=== Phase 2: Ensure Kafka (KRaft) running on ${KAFKA_HOST} ==="
+  run_kafka_cmd <<KAFKA_EOF
 set -euo pipefail
 KAFKA_HOME="$KAFKA_HOME_REMOTE"
 KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
@@ -2589,6 +2631,10 @@ GW_IP="${KAFKA_HOST}"
 
 sed -i "s|^advertised.listeners=.*|advertised.listeners=PLAINTEXT://\$GW_IP:${KAFKA_PORT}|" "\$SERVER_PROPS" 2>/dev/null || \
   echo "advertised.listeners=PLAINTEXT://\$GW_IP:${KAFKA_PORT}" >> "\$SERVER_PROPS"
+
+grep -q '^socket.send.buffer.bytes=' "\$SERVER_PROPS" 2>/dev/null || echo "socket.send.buffer.bytes=4194304" >> "\$SERVER_PROPS"
+grep -q '^socket.receive.buffer.bytes=' "\$SERVER_PROPS" 2>/dev/null || echo "socket.receive.buffer.bytes=4194304" >> "\$SERVER_PROPS"
+grep -q '^num.network.threads=' "\$SERVER_PROPS" 2>/dev/null || echo "num.network.threads=8" >> "\$SERVER_PROPS"
 
 if "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" --list >/dev/null 2>&1; then
   echo "Kafka already running at \$GW_IP:${KAFKA_PORT}"
@@ -2626,7 +2672,7 @@ KAFKA_EOF
 
   if [[ "${KAFKA_FAST_RESET:-1}" -eq 0 ]]; then
     log "  Preflight: resetting topic $KAFKA_RESULT_TOPIC to flush stale offsets..."
-    node_ssh 0 bash <<KAFKA_FLUSH_EOF
+    run_kafka_cmd <<KAFKA_FLUSH_EOF
 set -euo pipefail
 KAFKA_HOME="$KAFKA_HOME_REMOTE"
 TOPICS_SH="\$KAFKA_HOME/bin/kafka-topics.sh"
@@ -3139,6 +3185,7 @@ AS 'bcdb_gate_diagnostics';
         -v merkle_fanout='$MERKLE_FANOUT' \
         -v merkle_split_threshold='$MERKLE_SPLIT_THRESHOLD' \
         -v merkle_merge_threshold='$MERKLE_MERGE_THRESHOLD' \
+        -v bench_enable_merkle='$ENABLE_MERKLE_INDEX' \
         -f '$remote_restore' >/dev/null
       if [[ '$ENABLE_MERKLE_INDEX' -eq 0 ]]; then
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"DO \\\$\\\$
@@ -3303,6 +3350,11 @@ for start_pos in "${!START_ORDER[@]}"; do
 	      export ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US='${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-}'
 	    else
 	      unset ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US
+	    fi
+	    if [[ -n \"${ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS:-}\" ]]; then
+	      export ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS='${ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS:-}'
+	    else
+	      unset ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS
 	    fi
 	    export ARIABC_FULL_RESULT_REPLICA_LIMIT='${ARIABC_FULL_RESULT_REPLICA_LIMIT}'
 	    export ARIABC_RESULT_PUBLISH_REPLICA_LIMIT='${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT}'
