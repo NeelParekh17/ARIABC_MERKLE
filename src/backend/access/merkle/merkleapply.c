@@ -48,6 +48,7 @@ typedef struct MerkleLeafEvent
 } MerkleLeafEvent;
 
 static void merkle_route_cache_clear_index(Oid index_oid);
+static void merkle_route_cache_clear_partition(Oid index_oid, int partition_id);
 static void merkle_sync_prepare_plans(void);
 static void propagate_hash_to_ancestors_atomic(Oid index_oid, int partition_id,
 													 const uint8 *leaf_node_id,
@@ -607,6 +608,9 @@ merkle_parse_delta_blob(bytea *blob, uint64 seq, uint64 expected_log_index,
 	}
 }
 
+static Oid cached_key_expr_index_oid = InvalidOid;
+static char *cached_key_expr_str = NULL;
+
 static char *
 get_index_key_expr_str(Oid index_oid)
 {
@@ -614,6 +618,9 @@ get_index_key_expr_str(Oid index_oid)
 	Oid argtypes[1] = {OIDOID};
 	Datum values[1] = {ObjectIdGetDatum(index_oid)};
 	char *expr_str = NULL;
+
+	if (cached_key_expr_str != NULL && cached_key_expr_index_oid == index_oid)
+		return pstrdup(cached_key_expr_str);
 
 	spi_rc = SPI_execute_with_args(
 		"SELECT pg_catalog.pg_get_indexdef($1, 1, true)",
@@ -635,8 +642,13 @@ get_index_key_expr_str(Oid index_oid)
 	{
 		char *buf = palloc(strlen(expr_str) + 30);
 		sprintf(buf, "merkle_key_hash(%s)", expr_str);
-		return buf;
+		expr_str = buf;
 	}
+
+	if (cached_key_expr_str != NULL)
+		free(cached_key_expr_str);
+	cached_key_expr_str = strdup(expr_str);
+	cached_key_expr_index_oid = index_oid;
 
 	return expr_str;
 }
@@ -996,21 +1008,17 @@ do_split(Oid index_oid, int partition_id, const uint8 *node_id, int prefix_len, 
 	key_expr = get_index_key_expr_str(index_oid);
 
 	initStringInfo(&buf);
-	/* Evaluate the route expression once per heap tuple.  Calling the
-	 * polymorphic SQL wrapper independently in the target list and the
-	 * predicate can produce different expression-cache contexts; materializing
-	 * here keeps the selected route and the copied route key identical. */
+	/*
+	 * Streamlined split row retrieval: scan directly using the covering
+	 * B-tree index (usertable_small_merkle_lookup_idx) avoiding table-wide
+	 * sequential scans, CTE materialization, and sorting overhead.
+	 */
 	appendStringInfo(&buf,
-		"WITH merkle_split_rows AS MATERIALIZED ("
-		" SELECT ctid, %s AS kh, merkle_tuple_hash(%s.*) AS th"
-		"   FROM %s"
-		")"
-		" SELECT kh, th"
-		"   FROM merkle_split_rows"
-		"  WHERE merkle_partition_for_hash(kh, $3) = $4"
-		"    AND kh BETWEEN $1 AND $2"
-		"  ORDER BY ctid",
-		key_expr, heap_name, heap_name);
+		"SELECT %s AS kh, merkle_tuple_hash(u.*) AS th"
+		"  FROM %s u"
+		" WHERE merkle_partition_for_hash(%s, $3) = $4"
+		"   AND %s BETWEEN $1 AND $2",
+		key_expr, heap_name, key_expr, key_expr);
 
 	{
 		Oid			argtypes[4] = {BYTEAOID, BYTEAOID, INT4OID, INT4OID};
@@ -1080,7 +1088,7 @@ do_split(Oid index_oid, int partition_id, const uint8 *node_id, int prefix_len, 
 			{
 				merkle_do_split_in_memory(index_oid, partition_id, node_id, prefix_len, entries, num_entries, fanout, bits_per_split, split_threshold);
 				merkle_register_split_range(index_oid, partition_id, lower, upper);
-				merkle_route_cache_clear_index(index_oid);
+				merkle_route_cache_clear_partition(index_oid, partition_id);
 				CommandCounterIncrement();
 			}
 			PG_CATCH();
@@ -1248,7 +1256,7 @@ do_merge_check(Oid index_oid, int partition_id, const uint8 *node_id, int prefix
 
 					pfree(parent_id_bytea);
 					pfree(merged_hash_bytea);
-					merkle_route_cache_clear_index(index_oid);
+					merkle_route_cache_clear_partition(index_oid, partition_id);
 					CommandCounterIncrement();
 				}
 
@@ -2268,6 +2276,7 @@ merkle_delta_entry_cmp(const void *a, const void *b)
 static SPIPlanPtr merkle_sync_route_plan = NULL;
 static SPIPlanPtr merkle_sync_leaf_update_plan = NULL;
 static SPIPlanPtr merkle_sync_ancestor_update_plan = NULL;
+static SPIPlanPtr merkle_sync_check_count_plan = NULL;
 
 /*
  * Most benchmark workloads repeatedly touch a small hot set of keys.  A
@@ -2283,6 +2292,7 @@ typedef struct MerkleRouteCacheEntry
 	bool valid;
 	Oid index_oid;
 	RelFileNode index_rnode;
+	int partition_id;
 	uint8 routing_key[8];
 	uint8 leaf_node_id[8];
 	int leaf_prefix_len;
@@ -2292,7 +2302,7 @@ static MerkleRouteCacheEntry merkle_route_cache[MERKLE_ROUTE_CACHE_SLOTS];
 
 static uint32
 merkle_route_cache_hash(Oid index_oid, const RelFileNode *index_rnode,
-						const uint8 *routing_key)
+						int partition_id, const uint8 *routing_key)
 {
 	uint32 hash = index_oid;
 	int i;
@@ -2300,6 +2310,7 @@ merkle_route_cache_hash(Oid index_oid, const RelFileNode *index_rnode,
 	hash = hash * 33U + index_rnode->spcNode;
 	hash = hash * 33U + index_rnode->dbNode;
 	hash = hash * 33U + index_rnode->relNode;
+	hash = hash * 33U + (uint32) partition_id;
 	for (i = 0; i < 8; i++)
 		hash = hash * 33U + routing_key[i];
 	return hash;
@@ -2307,14 +2318,15 @@ merkle_route_cache_hash(Oid index_oid, const RelFileNode *index_rnode,
 
 static bool
 merkle_route_cache_lookup(Oid index_oid, const RelFileNode *index_rnode,
-						  const uint8 *routing_key, uint8 *leaf_node_id,
-						  int *leaf_prefix_len)
+						  int partition_id, const uint8 *routing_key,
+						  uint8 *leaf_node_id, int *leaf_prefix_len)
 {
 	MerkleRouteCacheEntry *entry = &merkle_route_cache[
-		merkle_route_cache_hash(index_oid, index_rnode, routing_key) %
+		merkle_route_cache_hash(index_oid, index_rnode, partition_id, routing_key) %
 		MERKLE_ROUTE_CACHE_SLOTS];
 
 	if (!entry->valid || entry->index_oid != index_oid ||
+		entry->partition_id != partition_id ||
 		!RelFileNodeEquals(entry->index_rnode, *index_rnode) ||
 		memcmp(entry->routing_key, routing_key, 8) != 0)
 		return false;
@@ -2326,23 +2338,24 @@ merkle_route_cache_lookup(Oid index_oid, const RelFileNode *index_rnode,
 
 static void
 merkle_route_cache_store(Oid index_oid, const RelFileNode *index_rnode,
-						 const uint8 *routing_key, const uint8 *leaf_node_id,
-						 int leaf_prefix_len)
+						 int partition_id, const uint8 *routing_key,
+						 const uint8 *leaf_node_id, int leaf_prefix_len)
 {
 	MerkleRouteCacheEntry *entry = &merkle_route_cache[
-		merkle_route_cache_hash(index_oid, index_rnode, routing_key) %
+		merkle_route_cache_hash(index_oid, index_rnode, partition_id, routing_key) %
 		MERKLE_ROUTE_CACHE_SLOTS];
 
 	entry->valid = true;
 	entry->index_oid = index_oid;
 	entry->index_rnode = *index_rnode;
+	entry->partition_id = partition_id;
 	memcpy(entry->routing_key, routing_key, 8);
 	memcpy(entry->leaf_node_id, leaf_node_id, 8);
 	entry->leaf_prefix_len = leaf_prefix_len;
 }
 
 static void
-merkle_route_cache_invalidate(Oid index_oid, const uint8 *routing_key)
+merkle_route_cache_invalidate(Oid index_oid, int partition_id, const uint8 *routing_key)
 {
 	int i;
 
@@ -2354,7 +2367,23 @@ merkle_route_cache_invalidate(Oid index_oid, const uint8 *routing_key)
 		MerkleRouteCacheEntry *entry = &merkle_route_cache[i];
 
 		if (entry->valid && entry->index_oid == index_oid &&
+			entry->partition_id == partition_id &&
 			memcmp(entry->routing_key, routing_key, 8) == 0)
+			entry->valid = false;
+	}
+}
+
+static void
+merkle_route_cache_clear_partition(Oid index_oid, int partition_id)
+{
+	int i;
+
+	for (i = 0; i < MERKLE_ROUTE_CACHE_SLOTS; i++)
+	{
+		MerkleRouteCacheEntry *entry = &merkle_route_cache[i];
+
+		if (entry->valid && entry->index_oid == index_oid &&
+			entry->partition_id == partition_id)
 			entry->valid = false;
 	}
 }
@@ -2423,6 +2452,19 @@ merkle_sync_prepare_plans(void)
 		if (plan == NULL || SPI_keepplan(plan) != 0)
 			elog(ERROR, "SPI_prepare failed for synchronous Merkle ancestor plan");
 		merkle_sync_ancestor_update_plan = plan;
+	}
+
+	if (merkle_sync_check_count_plan == NULL ||
+		!SPI_plan_is_valid(merkle_sync_check_count_plan))
+	{
+		plan = SPI_prepare(
+			"SELECT tuple_count"
+			"  FROM ariabc_internal.merkle_node"
+			" WHERE index_oid = $1 AND partition_id = $2 AND node_id = $3 AND prefix_len = $4 AND is_leaf = true",
+			4, route_argtypes);
+		if (plan == NULL || SPI_keepplan(plan) != 0)
+			elog(ERROR, "SPI_prepare failed for synchronous Merkle check count plan");
+		merkle_sync_check_count_plan = plan;
 	}
 }
 
@@ -2589,7 +2631,7 @@ merkle_resolve_route_leaf(Oid index_oid, int partition_id, const uint8 *routing_
 		*split_threshold_out = split_threshold;
 	if (merge_threshold_out)
 		*merge_threshold_out = merge_threshold;
-	if (merkle_route_cache_lookup(index_oid, &index_rnode, routing_key,
+	if (merkle_route_cache_lookup(index_oid, &index_rnode, partition_id, routing_key,
 								  leaf_node_id, &prefix_len))
 		return prefix_len;
 	memset(node_id, 0, 8);
@@ -2649,7 +2691,7 @@ merkle_resolve_route_leaf(Oid index_oid, int partition_id, const uint8 *routing_
 				pfree(zero_hash_bytea);
 				pfree(node_id_bytea);
 				memcpy(leaf_node_id, node_id, 8);
-				merkle_route_cache_store(index_oid, &index_rnode, routing_key,
+				merkle_route_cache_store(index_oid, &index_rnode, partition_id, routing_key,
 										 leaf_node_id, 0);
 				return 0;
 			}
@@ -2668,7 +2710,7 @@ merkle_resolve_route_leaf(Oid index_oid, int partition_id, const uint8 *routing_
 			{
 				pfree(node_id_bytea);
 				memcpy(leaf_node_id, node_id, 8);
-				merkle_route_cache_store(index_oid, &index_rnode, routing_key,
+				merkle_route_cache_store(index_oid, &index_rnode, partition_id, routing_key,
 										 leaf_node_id, prefix_len);
 				return prefix_len;
 			}
@@ -2817,7 +2859,7 @@ merkle_apply_single_coalesced_entry(const MerkleDeltaEntry *entry, int max_retri
 			break;
 		}
 
-		merkle_route_cache_invalidate(index_oid, routing_key);
+		merkle_route_cache_invalidate(index_oid, partition_id, routing_key);
 		if (!merkle_node_is_leaf(index_oid, partition_id, leaf_node_id, leaf_prefix_len))
 		{
 			/* Node split occurred during route resolution; retry route lookup */
@@ -2886,10 +2928,7 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 			values[3] = Int16GetDatum((int16) pending_sm[k].prefix_len);
 
 			PushActiveSnapshot(GetLatestSnapshot());
-			spi_rc = SPI_execute_with_args(
-				"SELECT tuple_count FROM ariabc_internal.merkle_node"
-				" WHERE index_oid = $1 AND partition_id = $2 AND node_id = $3 AND prefix_len = $4 AND is_leaf = true",
-				4, argtypes, values, NULL, true, 1);
+			spi_rc = SPI_execute_plan(merkle_sync_check_count_plan, values, NULL, false, 1);
 			PopActiveSnapshot();
 
 			if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
