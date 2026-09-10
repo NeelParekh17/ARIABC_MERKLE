@@ -54,6 +54,8 @@ lib*.pc
 *.md
 !Dynamic_merkle_docs/*.md
 !DISTRIBUTED_ARCHITECTURE_DIAGRAM.md
+!NuRaft/*.md
+!NuRaft/**/*.md
 *.diff
 
 # Exclude scripts by default (but allow whitelisting specific files)
