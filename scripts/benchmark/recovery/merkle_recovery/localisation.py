@@ -104,7 +104,7 @@ def detect_bad_leaves(
     }
     subtree_sql = """
         WITH wanted(partition_id, node_id, prefix_len) AS (
-            SELECT * FROM unnest(%s::int4[], %s::bytea[], %s::int2[])
+            SELECT * FROM unnest(%s::int2[], %s::bytea[], %s::int2[])
         )
         SELECT n.partition_id, n.node_id, n.prefix_len, n.is_leaf, n.hash
         FROM wanted w

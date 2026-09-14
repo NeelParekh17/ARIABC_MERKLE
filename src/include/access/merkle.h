@@ -284,27 +284,20 @@ extern void merkle_reject_concurrent_ddl(Oid index_oid, const char *command);
 extern void merkle_stage_delta_event(Relation indexRel, MerkleDeltaEventType event_type,
 									 const uint8 *old_key_hash, const uint8 *new_key_hash,
 									 const MerkleHash *hash);
-extern bytea *merkle_serialize_staged_delta(uint64 raft_log_index,
-										 uint32 item_ordinal);
 extern void merkle_mark_staged_delta_persisted(void);
 extern bool merkle_has_staged_delta(void);
 extern void merkle_apply_staged_synchronous_safe(HTAB *combined_delta_map);
 extern void merkle_apply_staged_deltas_synchronously(void);
-extern void merkle_clear_split_ranges(void);
 extern void merkle_crash_failpoint(const char *name);
 extern void merkle_init_tree(Relation indexRel, Oid heapOid,
 							 MerkleOptions *opts, uint64 baseline_apply_seq);
 
 /* Ordered committed-delta applier and freshness gates. */
 extern uint64 merkle_apply_until_internal(uint64 required_seq);
-extern uint64 merkle_raft_apply_target(const uint8 *epoch_id,
-									   uint64 raft_log_index,
-									   uint32 item_ordinal);
 extern void merkle_get_recovery_status(MerkleRecoveryStatusData *status);
 extern void merkle_require_fresh(void);
 extern void merkle_mark_recovery_state(MerkleRecoveryState state,
 									 const char *reason);
-extern uint64 merkle_advance_terminal_prefix_spi(void);
 extern Datum merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS);
 
 /*

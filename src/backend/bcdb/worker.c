@@ -3216,8 +3216,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 			 * unwinds its retry state.
 			 */
 			if (merkle_apply_synchronous_direct &&
-				merkle_has_staged_delta() &&
-				(tx == NULL || !tx->raft_ledger_enabled))
+				merkle_has_staged_delta())
 				merkle_apply_staged_deltas_synchronously();
 
 			num_restarts += apply_retries;

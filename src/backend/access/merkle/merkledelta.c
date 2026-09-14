@@ -41,9 +41,7 @@ typedef struct MerkleSubxactFrame
 static MerkleSubxactFrame *merkle_delta_frames = NULL;
 static bool merkle_delta_callbacks_registered = false;
 static bool merkle_staged_delta_persisted = false;
-static uint64 merkle_serialized_entry_count = 0;
 static uint64 merkle_delta_generation = 0;
-static uint64 merkle_serialized_generation = 0;
 
 static void merkle_delta_xact_callback(XactEvent event, void *arg);
 static void merkle_delta_subxact_callback(SubXactEvent event,
@@ -155,9 +153,7 @@ merkle_delta_reset(void)
 	while (merkle_delta_frames != NULL)
 		merkle_delta_unlink_frame(merkle_delta_frames);
 	merkle_staged_delta_persisted = false;
-	merkle_serialized_entry_count = 0;
 	merkle_delta_generation = 0;
-	merkle_serialized_generation = 0;
 }
 
 static void
@@ -239,155 +235,9 @@ merkle_staged_entry_count(void)
 	return count;
 }
 
-static int
-merkle_delta_entry_cmp(const void *left, const void *right)
-{
-	const MerkleDeltaEntry *a = (const MerkleDeltaEntry *) left;
-	const MerkleDeltaEntry *b = (const MerkleDeltaEntry *) right;
-	int cmp;
-
-	if (a->key.index_oid != b->key.index_oid)
-		return a->key.index_oid < b->key.index_oid ? -1 : 1;
-	if (a->key.index_rnode.spcNode != b->key.index_rnode.spcNode)
-		return a->key.index_rnode.spcNode < b->key.index_rnode.spcNode ? -1 : 1;
-	if (a->key.index_rnode.dbNode != b->key.index_rnode.dbNode)
-		return a->key.index_rnode.dbNode < b->key.index_rnode.dbNode ? -1 : 1;
-	if (a->key.index_rnode.relNode != b->key.index_rnode.relNode)
-		return a->key.index_rnode.relNode < b->key.index_rnode.relNode ? -1 : 1;
-	if (a->key.event_type != b->key.event_type)
-		return a->key.event_type < b->key.event_type ? -1 : 1;
-	cmp = memcmp(a->key.old_key_hash, b->key.old_key_hash, 8);
-	if (cmp != 0)
-		return cmp;
-	return memcmp(a->key.new_key_hash, b->key.new_key_hash, 8);
-}
-
-static void
-merkle_delta_put_u32(char *dst, uint32 value)
-{
-	value = pg_hton32(value);
-	memcpy(dst, &value, sizeof(value));
-}
-
-static void
-merkle_delta_put_u64(char *dst, uint64 value)
-{
-	value = pg_hton64(value);
-	memcpy(dst, &value, sizeof(value));
-}
-
-bytea *
-merkle_serialize_staged_delta(uint64 raft_log_index, uint32 item_ordinal)
-{
-	MemoryContext old_context;
-	HTAB	   *combined;
-	MerkleSubxactFrame *frame;
-	HASH_SEQ_STATUS seq;
-	MerkleDeltaEntry *entry;
-	MerkleDeltaEntry *sorted;
-	long		count;
-	long		i = 0;
-	Size		payload_bytes;
-	Size		total_bytes;
-	bytea	   *result;
-	char	   *header;
-	char	   *payload;
-	char		crc_header[MERKLE_DELTA_HEADER_BYTES];
-	pg_crc32c	crc;
-
-	if (!merkle_has_staged_delta())
-		return NULL;
-
-	old_context = MemoryContextSwitchTo(CurrentMemoryContext);
-	combined = merkle_delta_create_map(CurrentMemoryContext);
-	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
-	{
-		hash_seq_init(&seq, frame->entries);
-		while ((entry = hash_seq_search(&seq)) != NULL)
-			merkle_delta_merge_one(combined, entry);
-	}
-
-	count = hash_get_num_entries(combined);
-	if (count <= 0)
-	{
-		hash_destroy(combined);
-		MemoryContextSwitchTo(old_context);
-		return NULL;
-	}
-
-	sorted = palloc(sizeof(*sorted) * count);
-	hash_seq_init(&seq, combined);
-	while ((entry = hash_seq_search(&seq)) != NULL)
-		sorted[i++] = *entry;
-	Assert(i == count);
-	qsort(sorted, count, sizeof(*sorted), merkle_delta_entry_cmp);
-
-	payload_bytes = (Size) count * MERKLE_DELTA_ENTRY_BYTES;
-	total_bytes = VARHDRSZ + MERKLE_DELTA_HEADER_BYTES + payload_bytes;
-	if (!AllocSizeIsValid(total_bytes) || payload_bytes > PG_UINT32_MAX)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("Merkle delta batch is too large")));
-
-	result = palloc0(total_bytes);
-	SET_VARSIZE(result, total_bytes);
-	header = VARDATA(result);
-	payload = header + MERKLE_DELTA_HEADER_BYTES;
-
-	for (i = 0; i < count; i++)
-	{
-		char *dst = payload + (i * MERKLE_DELTA_ENTRY_BYTES);
-
-		merkle_delta_put_u32(dst + 0, sorted[i].key.index_oid);
-		merkle_delta_put_u32(dst + 4, sorted[i].key.index_rnode.spcNode);
-		merkle_delta_put_u32(dst + 8, sorted[i].key.index_rnode.dbNode);
-		merkle_delta_put_u32(dst + 12, sorted[i].key.index_rnode.relNode);
-		dst[16] = (char) sorted[i].key.event_type;
-		memcpy(dst + 17, sorted[i].key.old_key_hash, 8);
-		memcpy(dst + 25, sorted[i].key.new_key_hash, 8);
-		merkle_delta_put_u32(dst + 33, MERKLE_VERSION);
-		memset(dst + 37, 0, 3); /* padding */
-		memcpy(dst + 40, sorted[i].xor_delta.data, MERKLE_HASH_BYTES);
-	}
-
-	merkle_delta_put_u32(header + 0, MERKLE_DELTA_MAGIC);
-	merkle_delta_put_u32(header + 4, MERKLE_DELTA_VERSION);
-	merkle_delta_put_u32(header + 8, raft_log_index != 0 ? 1 : 0);
-	merkle_delta_put_u32(header + 12, (uint32) count);
-	merkle_delta_put_u32(header + 16, (uint32) payload_bytes);
-	merkle_delta_put_u64(header + 24, raft_log_index);
-	merkle_delta_put_u32(header + 32, item_ordinal);
-	merkle_delta_put_u32(header + 36, 0);
-	memcpy(crc_header, header, MERKLE_DELTA_HEADER_BYTES);
-	memset(crc_header + 20, 0, sizeof(uint32));
-	INIT_CRC32C(crc);
-	COMP_CRC32C(crc, crc_header, sizeof(crc_header));
-	COMP_CRC32C(crc, payload, payload_bytes);
-	FIN_CRC32C(crc);
-	merkle_delta_put_u32(header + 20, (uint32) crc);
-	merkle_serialized_entry_count = (uint64) count;
-	merkle_serialized_generation = merkle_delta_generation;
-
-	pfree(sorted);
-	hash_destroy(combined);
-	MemoryContextSwitchTo(old_context);
-	return result;
-}
-
 void
 merkle_mark_staged_delta_persisted(void)
 {
-	if (!merkle_has_staged_delta())
-		return;
-	if (merkle_serialized_entry_count == 0 ||
-		merkle_serialized_generation != merkle_delta_generation)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("Merkle delta changed after terminal serialization"),
-				 errdetail("serialized_generation=%llu current_generation=%llu staged_entries=%llu",
-						   (unsigned long long) merkle_serialized_generation,
-						   (unsigned long long) merkle_delta_generation,
-						   (unsigned long long) merkle_staged_entry_count())));
 	merkle_staged_delta_persisted = true;
 }
 
@@ -577,21 +427,11 @@ merkle_delta_xact_callback(XactEvent event, void *arg)
 		{
 			merkle_emit_staged_deltas_notice();
 			/*
-			 * The safe-ledger finalizer serializes the same staged frames into
-			 * raft_apply_item and middleware applies that blob synchronously
-			 * before returning the block result.  Applying here as well would
-			 * XOR the same delta twice.  Direct mode is therefore deliberately
-			 * limited to transactions which are not owned by the ledger path.
+			 * Synchronous direct apply: apply all staged Merkle deltas
+			 * directly in-place before committing the transaction.
 			 */
-			if (!merkle_staged_delta_persisted &&
-				merkle_apply_synchronous_direct &&
-				(activeTx == NULL || !activeTx->raft_ledger_enabled))
+			if (!merkle_staged_delta_persisted)
 				merkle_apply_staged_deltas_synchronously();
-			else if (!merkle_staged_delta_persisted)
-				ereport(ERROR,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("synchronous Merkle apply is required for Merkle-indexed writes"),
-						 errhint("Set merkle_apply_synchronous_direct = on; deferred local-delta apply is no longer supported.")));
 		}
 		return;
 	}
