@@ -124,6 +124,9 @@ GATEWAY_USER="${GATEWAY_USER:-neel}"
 GATEWAY_HOSTNAME="${GATEWAY_HOSTNAME:-myubuntu}"
 GATEWAY_REPO="${GATEWAY_REPO:-/home/neel/ARIABC/AriaBC}"
 GATEWAY_INSTALL="${GATEWAY_INSTALL:-/home/neel/ARIABC/install}"
+CLUSTER_RUN_ID="${CLUSTER_RUN_ID:-cluster4_$(date +%Y%m%d_%H%M%S)_$$}"
+[[ "$CLUSTER_RUN_ID" =~ ^cluster4_[a-zA-Z0-9_]+$ ]] || { echo "Invalid CLUSTER_RUN_ID" >&2; exit 2; }
+export CLUSTER_RUN_ID
 
 for _arg in "$@"; do
   if [[ "$_arg" == "-h" || "$_arg" == "--help" ]]; then
@@ -241,28 +244,38 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     fi
   done
 
+  delegate_env+=("CLUSTER_RUN_ID=$CLUSTER_RUN_ID")
   printf -v quoted_env '%q ' "${delegate_env[@]}"
   printf -v quoted_args '%q ' "${rewritten_args[@]}"
 
   echo "Running benchmark remotely on gateway..."
+  cancel_delegated_run() {
+    trap '' INT TERM
+    echo "Cancelling delegated run $CLUSTER_RUN_ID..."
+    timeout 45 ssh -o BatchMode=yes -o ConnectTimeout=10 "$GATEWAY_USER@$GATEWAY_HOST" \
+      "f='$GATEWAY_REPO/scripts/bench_full_results/$CLUSTER_RUN_ID/runner.pid'; if test -f \"\$f\"; then pid=\$(cat \"\$f\"); case \$pid in ''|*[!0-9]*) exit 2;; esac; kill -TERM -- -\"\$pid\" 2>/dev/null || true; fi" || true
+    exit 130
+  }
+  trap cancel_delegated_run INT TERM HUP
   ssh "$GATEWAY_USER@$GATEWAY_HOST" \
     "export PATH=\$HOME/bin:\$PATH && cd '$GATEWAY_REPO' && env $quoted_env \
-     ./scripts/distributed/run_4node_raft_cluster.sh $quoted_args" \
+     setsid ./scripts/distributed/run_4node_raft_cluster.sh $quoted_args" \
     || ssh_exit_code=$?
 
   ssh_exit_code=${ssh_exit_code:-0}
 
   echo "Fetching logs back from gateway..."
   rsync -az \
-    "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/scripts/bench_full_results/" \
+    "$GATEWAY_USER@$GATEWAY_HOST:$GATEWAY_REPO/scripts/bench_full_results/$CLUSTER_RUN_ID" \
     "$REPO_ROOT/scripts/bench_full_results/"
 
   echo "=== Delegation complete (exit code: $ssh_exit_code) ==="
   exit "$ssh_exit_code"
 fi
 
-LOG_DIR="$REPO_ROOT/scripts/bench_full_results/cluster4_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$LOG_DIR"
+LOG_DIR="$REPO_ROOT/scripts/bench_full_results/$CLUSTER_RUN_ID"
+mkdir "$LOG_DIR" || { echo "Refusing to overwrite run $LOG_DIR" >&2; exit 2; }
+echo "$$" > "$LOG_DIR/runner.pid"
 LOG_FILE="$LOG_DIR/runner.log"
 exec > >(tee -ia "$LOG_FILE") 2>&1
 REMOTE_LOG_DIR="/tmp/ariabc_cluster"
@@ -459,6 +472,7 @@ BCDB_DET_QUEUE_HIGH_WM="${BCDB_DET_QUEUE_HIGH_WM:-0}"  # >0 overrides determinis
 BCDB_DET_QUEUE_LOW_WM="${BCDB_DET_QUEUE_LOW_WM:-0}"    # >0 overrides deterministic server admission low watermark
 BCDB_FLOW_DEBUG="${BCDB_FLOW_DEBUG:-0}"      # 1=emit targeted worker/apply flow logs on cluster replicas
 POSTGRES_LOG_MODE="${POSTGRES_LOG_MODE:-compact}"  # compact=filtered artifact, full=raw server.log
+DB_SHARED_BUFFERS="${DB_SHARED_BUFFERS:-32MB}"
 ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-1}"  # -1=no replicas include full results; 0=all replicas include full SQL results; 1=Raft leader only
 ARIABC_RESULT_PUBLISH_REPLICA_LIMIT="${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT:-0}"  # 0=all replicas publish Kafka result records
 ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US="${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-2000}" # 2000us safety linger with pipeline idle drain
@@ -476,7 +490,7 @@ COLLECT_FINAL_SERVER_PROFILE="${COLLECT_FINAL_SERVER_PROFILE:-1}"
 SKIP_CLUSTER_LOGS="${SKIP_CLUSTER_LOGS:-0}"  # 1=skip fetching server/nuraft/postgres logs from cluster nodes
 GATEWAY_STALL_WATCHDOG="${GATEWAY_STALL_WATCHDOG:-${ENABLE_FASTPATH_WATCHDOG:-1}}" # 1=terminate gateway if completed= stalls
 GATEWAY_STALL_POLL_SECONDS="${GATEWAY_STALL_POLL_SECONDS:-5}"
-GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-3}"
+GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-12}"
 SKIP_WORKLOAD="${SKIP_WORKLOAD:-0}"          # 1=start cluster and leader only; do not start gateway or submit SQL
 KAFKA_FAST_RESET="${KAFKA_FAST_RESET:-1}"    # 1=fast Kafka reset (skip JVM console consumer smoke check)
 DUMP_VERIFY_CSV="${DUMP_VERIFY_CSV:-0}"      # 0=skip slow 2.7MB CSV dump; use cryptographic root and row count
@@ -513,6 +527,7 @@ Options:
   --skip-workload Start PostgreSQL/Raft servers, wait for a leader, collect logs,
                   and exit without starting the gateway, submitting SQL, or
                   sending the post-run marker
+  --db-shared-buffers SIZE  PostgreSQL shared_buffers on every replica (default: 32MB)
   --stop-only      Stop stale cluster server processes and exit after cleanup
   --skip-pg-restart
                   Do not restart PostgreSQL before restore (default restarts)
@@ -741,6 +756,7 @@ while [[ $# -gt 0 ]]; do
     --skip-workload) SKIP_WORKLOAD=1; SKIP_POST_VERIFY=1; shift ;;
     --stop-only) STOP_ONLY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
+    --db-shared-buffers) DB_SHARED_BUFFERS="${2:-}"; shift 2 ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
     --node-ids) NODE_IDS_CSV="${2:-}"; shift 2 ;;
     --node-ips) NODE_IPS_CSV="${2:-}"; shift 2 ;;
@@ -1428,6 +1444,14 @@ start_fastpath_watchdog() {
         fi
 
         if [[ "$progress_made" -eq 0 ]]; then
+          # If gateway has not yet confirmed the Raft leader and we are still in early startup,
+          # do not treat pre-flight / Raft election latency as a stall.
+          if [[ -f "$GW_LOG" ]] && ! grep -q "real Raft leader confirmed" "$GW_LOG" 2>/dev/null; then
+            if [[ "$stuck_cycles" -lt 6 ]]; then
+              log "WATCHDOG: Gateway preflight / Raft leader confirmation in progress (cycle $((stuck_cycles+1))/6 grace)..."
+              continue
+            fi
+          fi
           (( stuck_cycles++ )) || true
           status_str=""
           for idx in "${!NODE_IDS[@]}"; do
@@ -1799,6 +1823,7 @@ _compute_src_fingerprint() {
   )
 }
 
+[[ "$DB_SHARED_BUFFERS" =~ ^[1-9][0-9]*(kB|MB|GB)$ ]] || die "Invalid --db-shared-buffers: $DB_SHARED_BUFFERS"
 RAFT_MEMBERS="$(build_raft_members)"
 
 if [[ "$NO_KAFKA" -eq 0 &&
@@ -1810,6 +1835,9 @@ else
 fi
 log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass_raft=$BYPASS_RAFT, gateway_broadcast_to_all=$GATEWAY_BROADCAST_TO_ALL, kafka_completion_mode=$KAFKA_COMPLETION_MODE)"
 {
+  printf 'run_id=%s\n' "$RUN_ID"
+  printf 'workload_file=%s\n' "$WORKLOAD_FILE"
+  printf 'db_shared_buffers=%s\n' "$DB_SHARED_BUFFERS"
   printf 'ordering_mode=%s\n' "$ORDERING_MODE"
   printf 'execution_profile=%s\n' "$EXECUTION_PROFILE"
   printf 'enable_merkle_index=%s\n' "$ENABLE_MERKLE_INDEX"
@@ -1885,13 +1913,42 @@ local_src_fingerprint="$(_compute_src_fingerprint)"
 
 
 on_signal() {
+  trap '' INT TERM HUP
   cleanup_all
+  # Only the benchmark data directories and configured AriaBC client ports.
+  for idx in "${!NODE_IDS[@]}"; do
+    node_ssh "$idx" "
+      fuser -k -TERM ${NODE_CLIENT_PORTS[$idx]}/tcp $RAFT_PORT/tcp >/dev/null 2>&1 || true
+      export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib'
+      if '$REMOTE_INSTALL_DIR/bin/pg_ctl' -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' status >/dev/null 2>&1; then
+        '$REMOTE_INSTALL_DIR/bin/pg_ctl' -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' -m fast -w -t 20 stop
+      fi
+    " > "$LOG_DIR/cancel_node${NODE_IDS[$idx]}.log" 2>&1 &
+  done
+  wait || true
+  printf 'exit_code=130\n' >> "$LOG_DIR/run_meta.env"
   trap - EXIT
-  exit 124
+  exit 130
 }
 
 trap cleanup_all EXIT
-trap on_signal INT TERM
+trap on_signal INT TERM HUP
+
+# A busy host is not a valid benchmark environment. Use the current run queue,
+# not the five-minute load average, which remains high after jobs are stopped.
+for idx in "${!NODE_IDS[@]}"; do
+  health_file="$LOG_DIR/health_node${NODE_IDS[$idx]}.log"
+  if ! node_ssh "$idx" '
+    cpus=$(nproc)
+    running=$(awk "{split(\$4,a,\"/\"); print a[1]}" /proc/loadavg)
+    echo "cpus=$cpus runnable=$running"
+    free -h
+    test "$running" -le "$((cpus * 2))"
+  ' > "$health_file" 2>&1; then
+    cat "$health_file"
+    die "Host health preflight failed on ${NODE_NAMES[$idx]} (SSH or CPU contention)"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Phase 0: Cleanup
@@ -2505,7 +2562,7 @@ for idx in "${!NODE_IDS[@]}"; do
     srv_bin="$REMOTE_BIN_U24"
     gw_path="$REMOTE_GATEWAY_BIN_U24"
   fi
-  prov_file="$(mktemp)"
+  prov_file="$LOG_DIR/provenance_${name}.env"
   PROV_FILES+=("$prov_file")
 
   (
@@ -2515,13 +2572,8 @@ for idx in "${!NODE_IDS[@]}"; do
       gw_sha=\$(sha256sum '$gw_path' 2>/dev/null | awk '{print \$1}' || echo missing)
       pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
       synced_src_fp=\$(cat '$REMOTE_REPO_ROOT/.ariabc_synced_source_fingerprint' 2>/dev/null || true)
-      if [[ -n \"\$synced_src_fp\" ]]; then
-        src_fp=\"\$synced_src_fp\"
-        live_src_fp=\"\$synced_src_fp\"
-      else
         live_src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
-        src_fp=\"\$live_src_fp\"
-      fi
+      src_fp=\"\${synced_src_fp:-\$live_src_fp}\"
       ts=\$(date +%s%3N)
       st=\$(timedatectl status 2>/dev/null | awk -F': ' '/Local time|System clock synchronized|NTP service/ {printf \"%s: %s; \", \$1, \$2}' | tr -s ' ' || true)
       echo \"git_head=\$git_head\"
@@ -2533,13 +2585,13 @@ for idx in "${!NODE_IDS[@]}"; do
       echo \"source_fingerprint=\$src_fp\"
       echo \"live_source_fingerprint=\$live_src_fp\"
       echo \"node_clock=ts=\$ts \$st\"
-    " 2>/dev/null > "$prov_file"
+    " > "$prov_file" 2> "$prov_file.stderr"
   ) &
   PROV_PIDS+=("$!")
 done
 
 for p in "${PROV_PIDS[@]}"; do
-  wait "$p" 2>/dev/null || true
+  wait "$p" || binary_provenance_ok=0
 done
 
 for idx in "${!NODE_IDS[@]}"; do
@@ -2547,7 +2599,12 @@ for idx in "${!NODE_IDS[@]}"; do
   is_u22="${NODE_IS_U22[$idx]}"
   prov_output="$(cat "${PROV_FILES[$idx]}")"
   NODE_CLOCKS[$idx]="$(sed -n 's/^node_clock=//p' "${PROV_FILES[$idx]}" | tail -1)"
-  rm -f "${PROV_FILES[$idx]}"
+  if [[ -z "$prov_output" ]]; then
+    log "  [$name] provenance unavailable (SSH/command failure)"
+    cat "${PROV_FILES[$idx]}.stderr"
+    binary_provenance_ok=0
+    continue
+  fi
 
   log "  [$name] provenance:"
   echo "$prov_output" | grep -v '^node_clock=' | sed "s/^/    /"
@@ -2731,10 +2788,10 @@ for idx in "${!NODE_IDS[@]}"; do
   ip="${NODE_IPS[$idx]}"
   id="${NODE_IDS[$idx]}"
   log "  Checking ${NODE_NAMES[$idx]} (${ip}:${DB_PORT})"
-  pg3_status_file="$(mktemp)"
+  pg3_status_file="$LOG_DIR/postgres_setup_node${id}.log"
   PG3_STATUS_FILES+=("$pg3_status_file")
   (
-  status_line="$(node_ssh "$idx" "
+  node_ssh "$idx" "
     ulimit -c unlimited || true
     INSTALL_DIR='$REMOTE_INSTALL_DIR'
     PGDATA='$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata'
@@ -2781,6 +2838,7 @@ for idx in "${!NODE_IDS[@]}"; do
       fi
     }
     if [[ -f \"\$PGDATA/postgresql.auto.conf\" ]]; then
+      set_auto_conf shared_buffers \"$DB_SHARED_BUFFERS\"
       set_auto_conf bcdb_worker_count \"$BCDB_WORKER_COUNT\"
       set_auto_conf bcdb_serial_gate_mode \"$BCDB_SERIAL_GATE_MODE\"
       set_auto_conf bcdb_serial_gate_source \"$BCDB_SERIAL_GATE_SOURCE\"
@@ -2937,6 +2995,11 @@ for idx in "${!NODE_IDS[@]}"; do
     target_ring_slots=\"$RESULT_RING_CAPACITY\"
     target_owp=\"$BCDB_OVERWRITE_PROTECTION\"
     needs_restart=0
+    actual_buffer_bytes=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -v ON_ERROR_STOP=1 -c \"SELECT pg_size_bytes(current_setting('shared_buffers'));\" | tr -d '[:space:]')
+    target_buffer_bytes=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -v ON_ERROR_STOP=1 -c \"SELECT pg_size_bytes('$DB_SHARED_BUFFERS');\" | tr -d '[:space:]')
+    if [[ \"\$actual_buffer_bytes\" != \"\$target_buffer_bytes\" ]]; then
+      needs_restart=1
+    fi
     if [[ \"\$worker_count\" != \"$BCDB_WORKER_COUNT\" ]]; then
       needs_restart=1
     fi
@@ -3034,8 +3097,13 @@ for idx in "${!NODE_IDS[@]}"; do
       full_page_writes=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show full_page_writes;' | tr -d '[:space:]')
       wal_level=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show wal_level;' | tr -d '[:space:]')
     fi
-    echo \"postgres OK bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_serial_gate_source=\$serial_gate_source bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp_display bcdb_gate_telemetry=\$gate_telemetry bcdb_gate_snapshot_each_block=\$gate_snapshot max_connections=\$max_connections synchronous_commit=\$synchronous_commit fsync=\$fsync_guc full_page_writes=\$full_page_writes wal_level=\$wal_level\"
-  " 2>&1)" && echo "$status_line" > "$pg3_status_file" || { echo "FAILED" > "$pg3_status_file"; exit 1; }
+    actual_buffer_bytes=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -v ON_ERROR_STOP=1 -c \"SELECT pg_size_bytes(current_setting('shared_buffers'));\" | tr -d '[:space:]')
+    if [[ \"\$actual_buffer_bytes\" != \"\$target_buffer_bytes\" ]]; then
+      echo 'ERROR: shared_buffers mismatch after restart'
+      exit 1
+    fi
+    echo \"postgres OK shared_buffers=$DB_SHARED_BUFFERS shared_buffers_bytes=\$actual_buffer_bytes bcdb_worker_count=\$worker_count bcdb_serial_gate_mode=\$serial_gate bcdb_serial_gate_source=\$serial_gate_source bcdb_dt_conflict_tracking=\$dt_conflict bcdb_dt_completion_only_skip_reads=\$dt_skip_reads bcdb_dt_hashtab_switch_threshold=\$hashtab_threshold bcdb_result_ring_slots=\$ring_slots bcdb_overwrite_protection=\$owp_display bcdb_gate_telemetry=\$gate_telemetry bcdb_gate_snapshot_each_block=\$gate_snapshot max_connections=\$max_connections synchronous_commit=\$synchronous_commit fsync=\$fsync_guc full_page_writes=\$full_page_writes wal_level=\$wal_level\"
+  " > "$pg3_status_file" 2>&1
   ) &
   PG3_PIDS+=("$!")
 done
@@ -3046,11 +3114,18 @@ for i in "${!PG3_PIDS[@]}"; do
   idx="$i"
   wait "${PG3_PIDS[$i]}" || { log "  could not verify postgres on ${NODE_NAMES[$i]}"; PG3_ALL_OK=0; }
 done
-[[ "$PG3_ALL_OK" -eq 1 ]] || die "Phase 3 postgres verify failed on one or more nodes"
+if [[ "$PG3_ALL_OK" -ne 1 ]]; then
+  for status_file in "${PG3_STATUS_FILES[@]}"; do
+    log "PostgreSQL setup output: $status_file"
+    tail -n 60 "$status_file"
+  done
+  collect_cluster_logs "Collecting PostgreSQL startup failure evidence..."
+  die "Phase 3 postgres verify failed on one or more nodes"
+fi
 
 for idx in "${!NODE_IDS[@]}"; do
   status_line="$(cat "${PG3_STATUS_FILES[$idx]}" 2>/dev/null || true)"
-  rm -f "${PG3_STATUS_FILES[$idx]}"
+  # Keep per-node setup diagnostics in the run artifact.
   log "  ${NODE_NAMES[$idx]}: $status_line"
   actual_workers="$(sed -n 's/.*bcdb_worker_count=\([0-9][0-9]*\).*/\1/p' <<<"$status_line" | tail -1)"
   if [[ -n "$actual_workers" && "$actual_workers" != "$BCDB_WORKER_COUNT" ]]; then
@@ -3432,7 +3507,7 @@ for start_pos in "${!START_ORDER[@]}"; do
   if [[ "$start_pos" -eq 0 ]]; then
     launch_cmd
     if [[ "$ARIABC_PREFERRED_LEADER_ID" -gt 0 ]]; then
-      sleep 0.5
+      sleep 2.0
     fi
   else
     launch_cmd &
@@ -3506,13 +3581,13 @@ if [[ "$BYPASS_RAFT" -eq 1 ]]; then
   sleep 2
 else
   log "  Waiting for Raft leadership to stabilize on preferred leader..."
-  for attempt in $(seq 1 30); do
-    pref_leader_status="$(node_ssh 0 "grep -E 'preferred_leader active|ariabc_pg_server ready|LEADER \(term|my id: 1, leader: 1' '$REMOTE_LOG_DIR/server_node1.log' 2>/dev/null | tail -1" 2>/dev/null || true)"
+  for attempt in $(seq 1 60); do
+    pref_leader_status="$(node_ssh 0 "grep -E 'preferred_leader active|LEADER \(term|my id: 1, leader: 1' '$REMOTE_LOG_DIR/server_node1.log' 2>/dev/null | tail -1" 2>/dev/null || true)"
     if [[ -n "$pref_leader_status" ]]; then
       log "  Node 1 leadership confirmed: $pref_leader_status"
       break
     fi
-    sleep 0.2
+    sleep 0.5
   done
 fi
 

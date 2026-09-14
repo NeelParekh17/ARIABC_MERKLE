@@ -26,50 +26,36 @@ import re
 import statistics
 import subprocess
 import sys
+import signal
+import json
+import uuid
+import shlex
+import hashlib
+from benchmark_validation import count_workload_queries, parse_gateway_result
+from cluster_sweep_support import captured_command, campaign_contract, run_cluster_case, write_campaign_report
 import time
 from pathlib import Path
 
 
 def run_cmd(cmd, check=True, timeout=180):
     """Executes a command synchronously via shell."""
-    p = subprocess.run(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        timeout=timeout,
-    )
-    if check and p.returncode != 0:
-        raise RuntimeError(f"Command failed (code {p.returncode}):\n{cmd}\n\nOutput:\n{p.stdout}")
-    return p.returncode, p.stdout
+    rc, output = captured_command(cmd, shell=True, timeout=timeout)
+    if check and rc != 0:
+        raise RuntimeError(f"Command failed (code {rc}):\n{cmd}\n\nOutput:\n{output}")
+    return rc, output
 
 
 def run_cmd_args(args_list, check=True, timeout=180):
-    """Executes a command list synchronously without shell expansion."""
-    p = subprocess.run(
-        args_list,
-        shell=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        timeout=timeout,
-    )
-    if check and p.returncode != 0:
-        raise RuntimeError(f"Command failed (code {p.returncode}):\n{' '.join(args_list)}\n\nOutput:\n{p.stdout}")
-    return p.returncode, p.stdout
+    rc, output = captured_command(args_list, timeout=timeout)
+    if check and rc != 0:
+        raise RuntimeError(f"Command failed (code {rc}): {args_list}\n{output}")
+    return rc, output
 
 
 def preflight_health_check(args):
     print("\n" + "=" * 80)
     print("PRE-FLIGHT ENVIRONMENT & MEMORY CHECK")
     print("=" * 80)
-
-    # 1. Check for rogue processes or old servers on db_port/server_port
-    rogue_cmd = f"""ssh -o BatchMode=yes {args.db_user}@{args.db_host} "
-        fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true
-    " """
-    run_cmd(rogue_cmd, check=False)
 
     # 2. Check memory & swap status across relevant hosts
     hosts_to_check = [(f"DB Server ({args.db_host})", f"{args.db_user}@{args.db_host}")]
@@ -82,7 +68,7 @@ def preflight_health_check(args):
 
     for label, host in hosts_to_check:
         mem_cmd = f"""ssh -o BatchMode=yes {host} "free -h" """
-        _, mem_out = run_cmd(mem_cmd, check=False)
+        _, mem_out = run_cmd(mem_cmd, check=True, timeout=30)
         print(f"[{label}] Memory status:")
         for line in mem_out.strip().splitlines():
             print(f"  {line}")
@@ -90,29 +76,21 @@ def preflight_health_check(args):
 
 
 def teardown_postgres(args, run_cluster=False):
-    print("\n" + "=" * 80)
-    print("POST-SWEEP TEARDOWN: Releasing PostgreSQL instances and shared memory")
-    print("=" * 80)
-    # Stop standalone PostgreSQL on args.db_host
-    stop_cmd = f"""ssh -o BatchMode=yes {args.db_user}@{args.db_host} "
-        fuser -k -TERM {args.server_port}/tcp >/dev/null 2>&1 || true
-        export LD_LIBRARY_PATH=/home/{args.db_user}/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
-        /home/{args.db_user}/Desktop/ariabc_install/bin/pg_ctl -D /home/{args.db_user}/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -m fast stop >/dev/null 2>&1 || true
-    " """
-    run_cmd(stop_cmd, check=False)
-    print(f"  [{args.db_host}] Standalone PostgreSQL stopped")
-
+    hosts = [(args.db_host, args.server_port)]
     if run_cluster:
-        cluster_nodes = ["10.129.148.247", "10.129.148.246", "10.129.148.248"]
-        for node in cluster_nodes:
-            node_cmd = f"""ssh -o BatchMode=yes neel@{node} "
-                fuser -k -TERM 8000/tcp 8001/tcp 9000/tcp >/dev/null 2>&1 || true
-                export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
-                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -m fast stop >/dev/null 2>&1 || true
-            " """
-            run_cmd(node_cmd, check=False)
-            print(f"  [{node}] Cluster PostgreSQL stopped")
-    print("=" * 80 + "\n")
+        hosts = [("10.129.148.247", 8000), ("10.129.148.246", 8000),
+                 ("10.129.148.248", 8001)]
+    for host, port in hosts:
+        command = (
+            f"fuser -k -TERM {port}/tcp 9000/tcp >/dev/null 2>&1 || true; "
+            f"export LD_LIBRARY_PATH=/home/{args.db_user}/Desktop/ariabc_install/lib; "
+            f"ctl=/home/{args.db_user}/Desktop/ariabc_install/bin/pg_ctl; "
+            f"data=/home/{args.db_user}/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata; "
+            'if "$ctl" -D "$data" status >/dev/null 2>&1; then '
+            '"$ctl" -D "$data" -m fast -w -t 30 stop; fi')
+        rc, output = run_cmd_args(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                   f"{args.db_user}@{host}", command], check=False, timeout=45)
+        print(f"  [{host}] benchmark teardown exit={rc}: {output.strip()}")
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +301,7 @@ def setup_tpcc_postgres(args, mode, w, warehouses):
 YCSB_CSV_FIELDS = [
     "mode", "workload", "server_workers", "bcdb_workers", "pool_size",
     "total_queries", "wall_time_ms", "tps", "merkle_pass",
-    "divergence_count", "permanent_failures",
+    "divergence_count", "permanent_failures", "run_id", "shared_buffers", "source_fingerprint",
 ]
 
 TPCC_CSV_FIELDS = [
@@ -428,11 +406,16 @@ def main():
     )
     parser.add_argument(
         "--db-shared-buffers",
-        default="3000MB",
-        help="PostgreSQL shared_buffers setting (e.g. 3000MB or 32GB, default: 3000MB)",
+        default="32MB",
+        help="PostgreSQL shared_buffers setting (default: 32MB)",
     )
 
     args = parser.parse_args()
+    if not re.fullmatch(r"[1-9][0-9]*(?:kB|MB|GB)", args.db_shared_buffers):
+        parser.error("--db-shared-buffers must be a positive integer followed by kB, MB, or GB")
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    signal.signal(signal.SIGTERM, interrupted)
     init_remote_paths(args.db_user)
 
     # Set default modes based on benchmark type
@@ -440,7 +423,7 @@ def main():
         if args.benchmark == "tpcc":
             args.modes = "pg,bcdb_det,bcdb_merkle"
         else:
-            args.modes = "pg,bcdb_det,bcdb_merkle,cluster"
+            args.modes = "cluster,pg,bcdb_det,bcdb_merkle"
 
     repo_root = Path(__file__).resolve().parents[2]
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -492,7 +475,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
     results = []
     completed_keys = set()
 
-    if summary_csv.exists():
+    if summary_csv.exists() and summary_csv.stat().st_size > 0:
         with open(summary_csv, "r") as f:
             reader = csv.DictReader(f)
             for r in reader:
@@ -1198,6 +1181,8 @@ def _run_ycsb_sweep(args, repo_root, out_dir, modes):
         else:
             workloads.append(w)
 
+    campaign_contract(repo_root, out_dir, args, workloads, workers, modes)
+
     # Pre-load cluster baseline data
     cluster_data = {}
     cluster_csv_path = repo_root / args.cluster_summary
@@ -1227,14 +1212,19 @@ def _run_ycsb_sweep(args, repo_root, out_dir, modes):
     summary_csv = out_dir / "summary.csv"
     results = []
     completed_keys = set()
-    if summary_csv.exists():
+    if summary_csv.exists() and summary_csv.stat().st_size > 0:
         with open(summary_csv, "r") as f:
             reader = csv.DictReader(f)
             for r in reader:
                 if r.get("mode") and r.get("workload") and r.get("server_workers"):
                     try:
                         sw = int(r["server_workers"])
-                        completed_keys.add((r["mode"], r["workload"], sw))
+                        mp = int(r.get("merkle_pass", 1))
+                        div = int(r.get("divergence_count", 0))
+                        perm = int(r.get("permanent_failures", 0))
+                        tps_val = float(r.get("tps", 0.0))
+                        if mp == 1 and div == 0 and perm == 0 and tps_val > 0:
+                            completed_keys.add((r["mode"], r["workload"], sw))
                         results.append({
                             "mode": r["mode"],
                             "workload": r["workload"],
@@ -1243,10 +1233,10 @@ def _run_ycsb_sweep(args, repo_root, out_dir, modes):
                             "pool_size": int(r.get("pool_size", sw)),
                             "total_queries": int(r.get("total_queries", 20004)),
                             "wall_time_ms": float(r.get("wall_time_ms", 0.0)),
-                            "tps": float(r.get("tps", 0.0)),
-                            "merkle_pass": int(r.get("merkle_pass", 1)),
-                            "divergence_count": int(r.get("divergence_count", 0)),
-                            "permanent_failures": int(r.get("permanent_failures", 0)),
+                            "tps": tps_val,
+                            "merkle_pass": mp,
+                            "divergence_count": div,
+                            "permanent_failures": perm,
                         })
                     except (ValueError, TypeError):
                         pass
@@ -1283,207 +1273,144 @@ EOF
 
     preflight_health_check(args)
     cluster_run_idx = 0
+    last_configured_state = None
+    runs_since_restart = 0
+    cluster_runs_since_restart = 0
     try:
         for mode in modes:
             print(f"\n==========================================================================")
             print(f"MODE: {mode.upper()}")
             print(f"==========================================================================")
 
-            for wl in workloads:
-                wl_name = Path(wl).name
-                print(f"\n>>> Workload: {wl_name} (Mode: {mode}) <<<")
+            for w in workers:
+                print(f"\n##########################################################################")
+                print(f"WORKER COUNT: {w} (Mode: {mode})")
+                print(f"##########################################################################")
 
-                for w in workers:
-                    print(f"\n--- [Mode: {mode} | Workers: {w}] ---")
+                for wl in workloads:
+                    wl_name = Path(wl).name
+                    print(f"\n--- [Mode: {mode} | Workload: {wl_name} | Workers: {w}] ---")
                     if (mode, wl_name, w) in completed_keys:
                         print(f"  [{mode} | {wl_name} | workers={w}] Already completed in {summary_csv}, skipping...")
                         continue
 
                     if mode == "cluster":
                         if not args.run_cluster:
-                            tps_cl = cluster_data.get((wl_name, w), 0.0)
-                            wall_ms = (20004.0 / tps_cl * 1000.0) if tps_cl > 0 else 0.0
-                            print(f"  [Cluster] Reusing verified baseline: TPS={tps_cl:.2f} | MerklePass=1 | Divergence=0 | Failures=0")
-                            res_entry = {
-                                "mode": "cluster",
-                                "workload": wl_name,
-                                "server_workers": w,
-                                "bcdb_workers": w,
-                                "pool_size": w,
-                                "total_queries": 20004,
-                                "wall_time_ms": wall_ms,
-                                "tps": tps_cl,
-                                "merkle_pass": 1,
-                                "divergence_count": 0,
-                                "permanent_failures": 0,
-                            }
-                            results.append(res_entry)
-                            with open(summary_csv, "a", newline="") as f:
-                                writer = csv.writer(f)
-                                writer.writerow([
-                                    "cluster",
-                                    wl_name,
-                                    w,
-                                    w,
-                                    w,
-                                    20004,
-                                    f"{wall_ms:.1f}",
-                                    f"{tps_cl:.2f}",
-                                    1,
-                                    0,
-                                    0,
-                                ])
-                            continue
+                            raise RuntimeError("Cluster baseline reuse lacks per-run verification/provenance; use --run-cluster")
                         else:
-                            print(f"  [1/2] Executing live 4-node cluster benchmark (workers={w}, cluster_run_idx={cluster_run_idx})...")
-                            # Clean Node 1 server port 8000 and 9000 first
-                            run_cmd(f"ssh {args.db_user}@{args.db_host} 'fuser -k -9 {args.server_port}/tcp 9000/tcp >/dev/null 2>&1 || true'")
-                            skip_sync_val = "1" if cluster_run_idx > 0 else "0"
-                            skip_build_val = "1" if cluster_run_idx > 0 else "0"
-                            cluster_run_cmd = f"""env \\
-                                FORCE_BUILD=0 \\
-                                SKIP_RDKAFKA_SETUP=1 \\
-                                SKIP_SYNC={skip_sync_val} \\
-                                SKIP_BUILD={skip_build_val} \\
-                                KAFKA_FAST_RESET=1 \\
-                                DUMP_VERIFY_CSV=0 \\
-                                ARIABC_PREFERRED_LEADER_ID=1 \\
-                                ARIABC_RAFT_DURABLE_ASYNC_FLUSH=1 \\
-                                ARIABC_RAFT_STREAM_GAP=512 \\
-                                ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER=1 \\
-                                ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US=2000 \\
-                                ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS=64 \\
-                                ARIABC_FULL_RESULT_REPLICA_LIMIT=-1 \\
-                                BCDB_DET_QUEUE_HIGH_WM=65536 \\
-                                BCDB_DET_QUEUE_LOW_WM=32768 \\
-                                {repo_root}/scripts/distributed/run_4node_raft_cluster.sh \\
-                                  --workload "{repo_root}/{wl}" \\
-                                  --ordering-mode raft-kafka \\
-                                  --enable-merkle-index 1 \\
-                                  --raft-apply-ledger-mode off \\
-                                  --threads 96 \\
-                                  --det-client-workers 96 \\
-                                  --det-client-inflight 16 \\
-                                  --server-exec-workers {w} \\
-                                  --server-pg-connections {w} \\
-                                  --pool-size {w} \\
-                                  --bcdb-workers {w} \\
-                                  --bcdb-init-block-size {w} \\
-                                  --bcdb-decouple-workers 1 \\
-                                  --conn-fanout 1 \\
-                                  --raft-ordered-fanout 1 \\
-                                  --raft-ordering-policy leader-assigned \\
-                                  --raft-ordered-batch-append 1 \\
-                                  --raft-ordered-batch-target-entries 64 \\
-                                  --raft-ordered-batch-linger-us 1000 \\
-                                  --raft-ordered-coalesce-log 1 \\
-                                  --kafka-completion-mode majority_async_all3 \\
-                                  --det-window 65536
-                            """
-                            run_cmd(cluster_run_cmd, check=False, timeout=600)
-                            cluster_run_idx += 1
-                            _, find_out = run_cmd(f"find {repo_root}/scripts/bench_full_results -maxdepth 1 -type d -name 'cluster4_*' | sort -V | tail -n1")
-                            latest_run_dir = find_out.strip()
-                            _, sum_out = run_cmd(f"python3 {repo_root}/scripts/distributed/summarize_raft_profile.py {latest_run_dir}")
-                            sum_lines = [l.strip() for l in sum_out.strip().splitlines() if l.strip()]
-                            if len(sum_lines) >= 2:
-                                data_row = sum_lines[1].split(",")
-                                tps_cl = float(data_row[3])
-                                merkle_pass_cl = int(data_row[27])
-                                div_cl = int(data_row[28])
-                                perm_cl = int(data_row[29])
-                            else:
-                                tps_cl = 0.0
-                                merkle_pass_cl = 0
-                                div_cl = 0
-                                perm_cl = 0
+                            cluster_runs_since_restart += 1
+                            needs_cluster_restart = (last_configured_state != ("cluster", w)) or (cluster_runs_since_restart >= 8)
                             try:
-                                with open(repo_root / wl) as _wlf:
-                                    total_queries_wl = sum(1 for line in _wlf if line.strip() and not line.strip().startswith("--"))
-                            except Exception:
-                                total_queries_wl = 20004
-                            wall_ms = (float(total_queries_wl) / tps_cl * 1000.0) if tps_cl > 0 else 0.0
-                            print(f"  -> [cluster] Results: TPS={tps_cl:.2f} | MerklePass={merkle_pass_cl} | Divergence={div_cl} | Failures={perm_cl}")
-                            res_entry = {
-                                "mode": "cluster",
-                                "workload": wl_name,
-                                "server_workers": w,
-                                "bcdb_workers": w,
-                                "pool_size": w,
-                                "total_queries": total_queries_wl,
-                                "wall_time_ms": wall_ms,
-                                "tps": tps_cl,
-                                "merkle_pass": merkle_pass_cl,
-                                "divergence_count": div_cl,
-                                "permanent_failures": perm_cl,
-                            }
+                                res_entry = run_cluster_case(
+                                    args, repo_root, out_dir, wl, w, cluster_run_idx,
+                                    restart=needs_cluster_restart)
+                            except Exception as e:
+                                print(f"  [cluster | {wl_name} | workers={w}] Attempt failed ({e}), forcing full postgres restart and retrying once...", flush=True)
+                                teardown_postgres(args, run_cluster=True)
+                                time.sleep(2)
+                                res_entry = run_cluster_case(
+                                    args, repo_root, out_dir, wl, w, cluster_run_idx,
+                                    restart=True)
+                            if needs_cluster_restart:
+                                cluster_runs_since_restart = 0
+                            cluster_run_idx += 1
+                            last_configured_state = ("cluster", w)
                             results.append(res_entry)
-                            cluster_data[(wl_name, w)] = tps_cl
+                            cluster_data[(wl_name, w)] = res_entry["tps"]
                             with open(summary_csv, "a", newline="") as f:
-                                writer = csv.writer(f)
-                                writer.writerow([
-                                    "cluster",
-                                    wl_name,
-                                    w,
-                                    w,
-                                    w,
-                                    total_queries_wl,
-                                    f"{wall_ms:.1f}",
-                                    f"{tps_cl:.2f}",
-                                    merkle_pass_cl,
-                                    div_cl,
-                                    perm_cl,
-                                ])
+                                csv.DictWriter(f, fieldnames=YCSB_CSV_FIELDS).writerow(res_entry)
+                            print(f"  -> [cluster] PASS: TPS={res_entry['tps']:.2f} | "
+                                  f"MerklePass=1 | Divergence=0 | Failures=0 | run={res_entry['run_id']}")
                             continue
 
                     # Step 1: Configure PostgreSQL on Node 1 for standalone modes
-                    if mode == "pg":
-                        db_type = 0
-                        setup_cmd = f"""ssh {args.db_user}@{args.db_host} "
-                            fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true
-                            export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
-                            if ! /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
-                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
-                            fi
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'ALTER SYSTEM SET bcdb_worker_count = 1;' >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'ALTER SYSTEM SET enable_merkle_index = off;' >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 restart >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle=0 -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -f /tmp/drop_merkle.sql >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
-                        " """
-                    elif mode == "bcdb_det":
-                        db_type = 1
-                        setup_cmd = f"""ssh {args.db_user}@{args.db_host} "
-                            fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true
-                            export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
-                            if ! /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
-                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
-                            fi
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'ALTER SYSTEM SET bcdb_worker_count = {w};' >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'ALTER SYSTEM SET enable_merkle_index = off;' >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 restart >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle=0 -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -f /tmp/drop_merkle.sql >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
-                        " """
-                    else:  # bcdb_merkle
-                        db_type = 1
-                        setup_cmd = f"""ssh {args.db_user}@{args.db_host} "
-                            fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true
-                            export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
-                            if ! /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
-                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
-                            fi
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'ALTER SYSTEM SET bcdb_worker_count = {w};' >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'ALTER SYSTEM SET enable_merkle_index = on;' >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 restart >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle=1 -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql >/dev/null 2>&1
-                            /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
-                        " """
+                    db_type = 0 if mode == "pg" else 1
+                    target_w = 1 if mode == "pg" else w
+                    merkle_enable_guc = "on" if mode == "bcdb_merkle" else "off"
+                    merkle_flag = 1 if mode == "bcdb_merkle" else 0
 
-                    print(f"  [1/4] Preparing PostgreSQL on {args.db_host} ({mode}, workers={w})...")
+                    is_dml_workload = any(k in wl_name for k in ["dml", "insert", "delete", "update"])
+                    runs_since_restart += 1
+                    needs_periodic_restart = (mode in ("bcdb_det", "bcdb_merkle") and (runs_since_restart >= 8 or is_dml_workload))
+                    needs_pg_restart = (last_configured_state != (mode, w)) or needs_periodic_restart
+
+                    log_cap_snip = (
+                        "if [ -f /tmp/postgres_single.log ] && [ \\$(stat -c %s /tmp/postgres_single.log 2>/dev/null || echo 0) -gt 1073741824 ]; then "
+                        "  truncate -s 0 /tmp/postgres_single.log 2>/dev/null || true; "
+                        "fi;"
+                    )
+
+                    if needs_pg_restart:
+                        setup_cmd = f"""ssh {args.db_user}@{args.db_host} "
+                            set -e
+                            fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true
+                            {log_cap_snip}
+                            export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
+                            if ! /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                            fi
+                            /home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -c \\"ALTER SYSTEM SET bcdb_worker_count = {target_w};\\" -c \\"ALTER SYSTEM SET enable_merkle_index = '{merkle_enable_guc}';\\" -c \\"ALTER SYSTEM SET shared_buffers = '{args.db_shared_buffers}';\\" -c \\"ALTER SYSTEM SET synchronous_commit = 'on';\\" >/dev/null 2>&1
+                            /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
+                            for _chk in \\$(seq 1 30); do
+                                if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                    break
+                                fi
+                                sleep 0.5
+                            done
+                            /home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
+                        " """
+                        print(f"  [1/4] Reconfiguring & Restarting PostgreSQL on {args.db_host} ({mode}, workers={w})...")
+                        last_configured_state = (mode, w)
+                        runs_since_restart = 0
+                    else:
+                        setup_cmd = f"""ssh {args.db_user}@{args.db_host} "
+                            set -e
+                            fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true
+                            {log_cap_snip}
+                            export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
+                            if ! /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \
+                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                            fi
+                            for _chk in \\$(seq 1 30); do
+                                if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                    break
+                                fi
+                                sleep 0.5
+                            done
+                            if ! /home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1; then
+                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \
+                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                                for _chk in \\$(seq 1 30); do
+                                    if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                        break
+                                    fi
+                                    sleep 0.5
+                                done
+                                /home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
+                            fi
+                        " """
+                        print(f"  [1/4] Fast restoring usertable_small on {args.db_host} ({mode}, workers={w}, zero-restart)...")
+
                     run_cmd(setup_cmd, check=True)
+                    # Verify effective settings instead of trusting ALTER SYSTEM
+                    # or a readiness probe after a failed restart.
+                    settings_sql = "SELECT json_object_agg(name, setting) FROM pg_settings;"
+                    _, settings_out = run_cmd_args([
+                        "ssh", f"{args.db_user}@{args.db_host}",
+                        "export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib; "
+                        f"/home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 "
+                        f"-p {args.db_port} -U postgres -d postgres -At -c {shlex.quote(settings_sql)}"
+                    ])
+                    effective_settings = json.loads(settings_out)
+                    size_match = re.fullmatch(r"([0-9]+)(kB|MB|GB)", args.db_shared_buffers)
+                    expected_bytes = int(size_match[1]) * {"kB": 1024, "MB": 1024**2, "GB": 1024**3}[size_match[2]]
+                    if int(effective_settings["shared_buffers"]) * int(effective_settings["block_size"]) != expected_bytes:
+                        raise RuntimeError("Effective shared_buffers differs from requested setting")
+                    for name, value in {"bcdb_worker_count": str(target_w), "enable_merkle_index": merkle_enable_guc,
+                                        "synchronous_commit": "on", "fsync": "on", "full_page_writes": "on"}.items():
+                        if effective_settings[name] != value:
+                            raise RuntimeError(f"Unexpected setting {name}={effective_settings[name]}")
 
                     # Step 2: Start ariabc_pg_server on Node 1
                     print(f"  [2/4] Starting ariabc_pg_server on {args.db_host}:{args.server_port} (poolSize={w}, dbType={db_type})...")
@@ -1491,6 +1418,13 @@ EOF
                         start_server_cmd = f"""ssh {args.db_user}@{args.db_host} "
                             export ARIABC_PROFILE=1
                             export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
+
+                            for _chk in \\$(seq 1 30); do
+                                if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                    break
+                                fi
+                                sleep 0.5
+                            done
 
                             nohup /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server \\
                               --id 1 \\
@@ -1530,6 +1464,13 @@ EOF
                             export ARIABC_DET_PREFIXED_DIRECT_PARALLEL=1
                             export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
 
+                            for _chk in \\$(seq 1 30); do
+                                if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                    break
+                                fi
+                                sleep 0.5
+                            done
+
                             nohup /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server \\
                               --id 1 \\
                               --raftEndpoint 127.0.0.1:9000 \\
@@ -1563,7 +1504,10 @@ EOF
                         raise RuntimeError(f"Server failed to start on port {args.server_port}")
 
                     # Step 3: Run ariabc_pg_gateway from Gateway machine (10.129.27.111)
-                    gw_workload_path = f"{args.gateway_repo}/{wl}"
+                    workload_sha = hashlib.sha256((repo_root / wl).read_bytes()).hexdigest()
+                    gw_workload_path = f"/tmp/ariabc_ycsb_{workload_sha}.sql"
+                    run_cmd_args(["scp", "-o", "BatchMode=yes", str(repo_root / wl),
+                                  f"{args.gateway_user}@{args.gateway_host}:{gw_workload_path}"])
                     print(f"  [3/4] Running ariabc_pg_gateway from {args.gateway_host} ({mode})...")
                     if mode == "pg":
                         gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
@@ -1605,51 +1549,61 @@ EOF
                               --totalNodes 1
                         " """
 
-                    _, gw_out = run_cmd(gw_cmd, check=True, timeout=300)
-
-                    # Parse metrics
-                    time_match = re.search(r"overall time taken \(millisec\) = (\d+)", gw_out)
-                    if not time_match:
-                        time_match = re.search(r"overall (?:wall )?time(?: including drains)? \(millisec\) = (\d+)", gw_out)
-                    wall_time_ms = float(time_match.group(1)) if time_match else 0.0
-
-                    total_match = re.search(r"loaded (\d+) queries", gw_out)
-                    if not total_match:
-                        total_match = re.search(r"PROGRESS_GATEWAY_DET.*?\btotal=(\d+)", gw_out)
-                    total_queries = int(total_match.group(1)) if total_match else 20004
-
-                    div_match = re.search(r"divergence_count=(\d+)", gw_out)
-                    divergence_count = int(div_match.group(1)) if div_match else 0
-
-                    perm_match = re.search(r"permanent_failures=(\d+)", gw_out)
-                    permanent_failures = int(perm_match.group(1)) if perm_match else 0
-
-                    prog_tps_matches = re.findall(r"completed_tps=([0-9.]+)", gw_out)
-                    completed_tps = float(prog_tps_matches[-1]) if prog_tps_matches else 0.0
-
-                    # IMPORTANT: Always use wall-time-based TPS for fair cross-mode comparison.
-                    # completed_tps excludes warm_leader_route() warmup (~22% inflation).
-                    if wall_time_ms > 0:
-                        tps = total_queries / (wall_time_ms / 1000.0)
-                    else:
-                        tps = 0.0
-                    if completed_tps > 0.0:
-                        print(f"    NOTE: completed_tps={completed_tps:.2f} vs wall_tps={tps:.2f} (delta={((completed_tps/tps)-1)*100:.1f}%)" if tps > 0 else "")
+                    attempt_id = "single_" + uuid.uuid4().hex
+                    attempt_dir = out_dir / "attempts"
+                    attempt_dir.mkdir(exist_ok=True)
+                    gateway_rc, gw_out = run_cmd(gw_cmd, check=False, timeout=300)
+                    (attempt_dir / f"{attempt_id}.gateway.log").write_text(gw_out)
+                    expected_queries = count_workload_queries(repo_root / wl)
+                    metrics = parse_gateway_result(gw_out, expected_queries, gateway_rc, mode=mode)
+                    _, db_binary_provenance = run_cmd_args([
+                        "ssh", f"{args.db_user}@{args.db_host}",
+                        "export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib; "
+                        "/home/neel/Desktop/ariabc_install/bin/postgres --version; "
+                        "sha256sum /home/neel/Desktop/ariabc_install/bin/postgres "
+                        "/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server"
+                    ])
+                    _, gateway_binary_provenance = run_cmd_args([
+                        "ssh", f"{args.gateway_user}@{args.gateway_host}",
+                        f"sha256sum {shlex.quote(args.gateway_repo + '/ariabc_pg/build/bin/ariabc_pg_gateway')}"
+                    ])
+                    wall_time_ms = metrics["wall_time_ms"]
+                    total_queries = metrics["total_queries"]
+                    divergence_count = metrics["divergence_count"]
+                    permanent_failures = metrics["permanent_failures"]
+                    completed_tps = metrics["completed_tps"]
+                    tps = metrics["tps"]
+                    (attempt_dir / f"{attempt_id}.json").write_text(json.dumps(
+                        dict(mode=mode, workload=wl, workers=w, metrics=metrics,
+                             gateway_command=gw_cmd, workload_sha256=workload_sha,
+                             db_binary_provenance=db_binary_provenance,
+                             gateway_binary_provenance=gateway_binary_provenance,
+                             effective_settings=effective_settings), indent=2) + "\n")
 
                     # Step 4: Stop server cleanly and verify Merkle consistency if applicable
                     print(f"  [4/4] Verifying state and stopping server on {args.db_host}...")
+                    fast_teardown_cmd = (
+                        f"fuser -k -TERM {args.server_port}/tcp >/dev/null 2>&1 || true; "
+                        f"for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do "
+                        f"  fuser {args.server_port}/tcp >/dev/null 2>&1 || break; "
+                        f"  sleep 0.02; "
+                        f"done; "
+                    )
                     if mode == "bcdb_merkle":
                         _, verify_out = run_cmd_args([
                             "ssh", f"{args.db_user}@{args.db_host}",
-                            f"fuser -k -TERM {args.server_port}/tcp >/dev/null 2>&1 || true; sleep 1; "
+                            f"{fast_teardown_cmd} "
                             f"export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib; "
-                            f"/home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -At -c \"SELECT merkle_verify('usertable_small');\""
+                            f"/home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -At -c \"SELECT merkle_verify('usertable_small');\""
                         ], check=True)
-                        merkle_pass = 1 if "t" in verify_out.strip() else 0
+                        merkle_pass = 1 if verify_out.strip() == "t" else 0
+                        (attempt_dir / f"{attempt_id}.merkle.txt").write_text(verify_out)
+                        if not merkle_pass:
+                            raise RuntimeError("Merkle verification failed; refusing TPS row")
                     else:
                         run_cmd_args([
                             "ssh", f"{args.db_user}@{args.db_host}",
-                            f"fuser -k -TERM {args.server_port}/tcp >/dev/null 2>&1 || true; sleep 1;"
+                            fast_teardown_cmd
                         ], check=True)
                         merkle_pass = 1  # Not applicable, marked clean
 
@@ -1659,7 +1613,7 @@ EOF
                         "mode": mode,
                         "workload": wl_name,
                         "server_workers": w,
-                        "bcdb_workers": w,
+                        "bcdb_workers": target_w,
                         "pool_size": w,
                         "total_queries": total_queries,
                         "wall_time_ms": wall_time_ms,
@@ -1676,7 +1630,7 @@ EOF
                             mode,
                             wl_name,
                             w,
-                            w,
+                            target_w,
                             w,
                             total_queries,
                             wall_time_ms,
@@ -1684,7 +1638,17 @@ EOF
                             merkle_pass,
                             divergence_count,
                             permanent_failures,
+                            attempt_id,
+                            args.db_shared_buffers,
+                            json.loads((out_dir / "campaign.json").read_text())["source_sha256"],
                         ])
+
+                    # After a timeout run (wall_time_ms >= 20000), the gateway killed
+                    # ariabc_pg_server mid-flight, potentially leaving stuck spinlocks
+                    # in shared memory.  Force a full PostgreSQL restart on the next run
+                    # to avoid PANIC: stuck spinlock at remove_tx_xid_map.
+                    if wall_time_ms >= 20000:
+                        last_configured_state = None
 
         # Comparison analysis across all modes
         print("\n" + "=" * 120)
@@ -1793,6 +1757,7 @@ EOF
         except Exception as e:
             print(f"Failed to generate plot: {e}")
 
+        write_campaign_report(out_dir)
         print("\nAll modes benchmark campaign completed successfully!")
     finally:
         if not args.keep_postgres:
