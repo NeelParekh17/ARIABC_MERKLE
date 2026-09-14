@@ -23,7 +23,7 @@
 
 /* GUC: Enable/disable Merkle index updates */
 bool enable_merkle_index = true;
-bool merkle_apply_synchronous_direct = false;
+bool merkle_apply_synchronous_direct = true;
 bool merkle_index_maintenance_suppress = false;
 /* GUC: Emit NOTICE lines for touched Merkle nodes on commit */
 bool merkle_update_detection = false;

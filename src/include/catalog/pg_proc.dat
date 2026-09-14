@@ -1055,7 +1055,7 @@
   prosrc => 'merkle_node_upper_bound_sql' },
 { oid => '9940', descr => 'compute hash-routed Merkle partition for an 8-byte route hash',
   proname => 'merkle_partition_for_hash', provolatile => 'i', proparallel => 's', proisstrict => 't',
-  prorettype => 'int4', proargtypes => 'bytea int4',
+  prorettype => 'int2', proargtypes => 'bytea int4',
   proargnames => '{key_hash,partitions}',
   prosrc => 'merkle_partition_for_hash' },
 { oid => '9941', descr => 'fast C search for a spurious key matching a Merkle leaf prefix and partition',

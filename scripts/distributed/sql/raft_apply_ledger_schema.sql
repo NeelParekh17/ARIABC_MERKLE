@@ -60,8 +60,21 @@ RETURNS TABLE(node_id bytea, prefix_len smallint, is_leaf boolean, hash bytea)
 AS 'merkle_get_descendants_batch_array'
 LANGUAGE internal VOLATILE PARALLEL UNSAFE;
 
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_proc
+        WHERE proname = 'merkle_partition_for_hash'
+          AND prorettype = 'integer'::regtype
+    ) THEN
+        UPDATE pg_proc
+           SET prorettype = 'smallint'::regtype
+         WHERE proname = 'merkle_partition_for_hash';
+    END IF;
+END $$;
+
 CREATE OR REPLACE FUNCTION pg_catalog.merkle_partition_for_hash(key_hash bytea, partitions integer)
-RETURNS integer
+RETURNS smallint
 AS 'merkle_partition_for_hash'
 LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
 
@@ -160,19 +173,36 @@ BEGIN
 END
 $$;
 
--- Dynamic Merkle tree node table (Section 7 of Plan_review.md)
+-- Dynamic Merkle tree node table (Section 7 of Plan_review.md & OOM_100M_DATABASE_STORAGE_BREAKDOWN.md)
+-- Reordered for zero internal padding: tuple_count(4B) + index_oid(4B) + partition_id(2B) + prefix_len(2B) + is_leaf(1B) + node_id(9B) + hash(33B)
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'ariabc_internal'
+          AND table_name = 'merkle_node'
+          AND (
+            (column_name = 'tuple_count' AND data_type = 'bigint')
+            OR (column_name = 'partition_id' AND data_type = 'integer')
+            OR (column_name != 'tuple_count' AND ordinal_position = 1)
+          )
+    ) THEN
+        DROP TABLE IF EXISTS ariabc_internal.merkle_node CASCADE;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_node (
+    tuple_count  integer  NOT NULL DEFAULT 0,
     index_oid    oid      NOT NULL,
-    partition_id integer  NOT NULL,
-    node_id      bytea    NOT NULL,
+    partition_id smallint NOT NULL,
     prefix_len   smallint NOT NULL,
     is_leaf      boolean  NOT NULL,
-    tuple_count  bigint   NOT NULL DEFAULT 0,
+    node_id      bytea    NOT NULL,
     hash         bytea    NOT NULL,
     PRIMARY KEY (index_oid, partition_id, node_id, prefix_len)
 );
 ALTER TABLE ariabc_internal.merkle_node
-    ADD COLUMN IF NOT EXISTS partition_id integer NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS partition_id smallint NOT NULL DEFAULT 0;
 ALTER TABLE ariabc_internal.merkle_node
     DROP CONSTRAINT IF EXISTS merkle_node_pkey;
 ALTER TABLE ariabc_internal.merkle_node

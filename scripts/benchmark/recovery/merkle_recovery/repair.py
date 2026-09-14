@@ -83,7 +83,7 @@ def leaf_lookup_batch_sql(schema: str, partition_aware: bool = True) -> str:
     if partition_aware:
         return (
             f"SELECT {', '.join(ALL_COLUMNS)}, p.partition_id, p.node_id AS merkle_leaf_id, p.prefix_len "
-            f"FROM ROWS FROM (unnest(%s::int4[]), unnest(%s::bytea[]), unnest(%s::smallint[]), unnest(%s::bytea[]), unnest(%s::bytea[])) "
+            f"FROM ROWS FROM (unnest(%s::int2[]), unnest(%s::bytea[]), unnest(%s::smallint[]), unnest(%s::bytea[]), unnest(%s::bytea[])) "
             f"AS p(partition_id, node_id, prefix_len, lower_bound, upper_bound) "
             f"JOIN {schema}.usertable u ON merkle_key_hash(u.ycsb_key) BETWEEN p.lower_bound AND p.upper_bound "
             f"AND merkle_partition_for_hash(merkle_key_hash(u.ycsb_key), %s) = p.partition_id"

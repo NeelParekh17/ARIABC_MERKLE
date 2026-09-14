@@ -368,3 +368,9 @@ target_link_libraries(durable_raft_restart_contract_test
                       dl)
 
 add_test(NAME durable_raft_restart_contract_test COMMAND durable_raft_restart_contract_test)
+
+# Deterministic error receipts must exclude replica-local catalog OIDs.
+add_executable(pg_error_result_test tests/pg_error_result_test.cxx)
+target_include_directories(pg_error_result_test PRIVATE src)
+target_compile_options(pg_error_result_test PRIVATE -UNDEBUG)
+add_test(NAME pg_error_result_test COMMAND pg_error_result_test)

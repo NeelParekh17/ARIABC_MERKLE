@@ -1,4 +1,5 @@
 #include "pg_executor.hxx"
+#include "pg_error_result.hxx"
 
 #include "ariabc_pg_util.hxx"
 
@@ -406,11 +407,9 @@ std::string format_result(PGresult* res) {
     if (st == PGRES_COMMAND_OK) {
         return PQcmdStatus(res) ? PQcmdStatus(res) : "OK";
     }
-    const char* msg = PQresultErrorMessage(res);
-    std::string out = "ERROR ";
-    if (msg && *msg) out.append(trim_copy(msg));
-    else out.append("unknown");
-    return out;
+    return ariabc_pg::canonical_pg_error_result(
+        PQresultErrorField(res, PG_DIAG_SQLSTATE),
+        PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY));
 }
 
 bool parse_req_num(const std::string& req_id, uint64_t& out_req_num) {
@@ -3620,9 +3619,11 @@ std::string pg_executor::exec_sql(PGconn* c, const std::string& sql, bool* is_er
             return out;
         }
 
-        const char* sqlstate = res ? PQresultErrorField(res, PG_DIAG_SQLSTATE) : nullptr;
-        const bool retryable = is_retryable_sqlstate(sqlstate);
-        const std::string err_msg = res ? trim_copy(PQresultErrorMessage(res)) : "null result";
+        const char* state = res ? PQresultErrorField(res, PG_DIAG_SQLSTATE) : nullptr;
+        const std::string sqlstate = state ? state : "XX000";
+        const bool retryable = is_retryable_sqlstate(sqlstate.c_str());
+        const std::string err_msg = ariabc_pg::canonical_pg_error_result(
+            sqlstate.c_str(), res ? PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY) : nullptr);
         if (res) PQclear(res);
 
         if (!retryable) {
@@ -3632,14 +3633,14 @@ std::string pg_executor::exec_sql(PGconn* c, const std::string& sql, bool* is_er
                     std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
                 std::memory_order_relaxed);
             if (is_error) *is_error = true;
-            return "ERROR " + err_msg;
+            return err_msg;
         }
-        if (retryable && sqlstate) {
-            if (strcmp(sqlstate, "40001") == 0) {
+        if (retryable) {
+            if (strcmp(sqlstate.c_str(), "40001") == 0) {
                 st_retryable_sqlstate_40001_.fetch_add(1, std::memory_order_relaxed);
-            } else if (strcmp(sqlstate, "40P01") == 0) {
+            } else if (strcmp(sqlstate.c_str(), "40P01") == 0) {
                 st_retryable_sqlstate_40P01_.fetch_add(1, std::memory_order_relaxed);
-            } else if (strcmp(sqlstate, "57014") == 0) {
+            } else if (strcmp(sqlstate.c_str(), "57014") == 0) {
                 st_retryable_sqlstate_57014_.fetch_add(1, std::memory_order_relaxed);
             }
         }
@@ -5797,7 +5798,8 @@ void pg_executor::event_loop() {
                 } else {
                     const char* sqlstate = last ? PQresultErrorField(last, PG_DIAG_SQLSTATE) : nullptr;
                     retry = is_retryable_sqlstate(sqlstate);
-                    err_msg = last ? trim_copy(PQresultErrorMessage(last)) : "null result";
+                    err_msg = ariabc_pg::canonical_pg_error_result(
+                        sqlstate, last ? PQresultErrorField(last, PG_DIAG_MESSAGE_PRIMARY) : nullptr);
                     if (retry && sqlstate) {
                         if (strcmp(sqlstate, "40001") == 0) {
                             st_retryable_sqlstate_40001_.fetch_add(1, std::memory_order_relaxed);
@@ -5808,7 +5810,7 @@ void pg_executor::event_loop() {
                         }
                     }
                     if (!retry) {
-                        out = "ERROR " + err_msg;
+                        out = err_msg;
                     }
                 }
                 if (last) PQclear(last);

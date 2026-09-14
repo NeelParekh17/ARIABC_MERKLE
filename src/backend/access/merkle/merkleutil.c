@@ -701,7 +701,7 @@ merkle_partition_for_hash(PG_FUNCTION_ARGS)
 	for (i = 0; i < 8; i++)
 		route_value = (route_value << 8) | ((const uint8 *) VARDATA_ANY(hash))[i];
 
-	PG_RETURN_INT32((int32) (route_value % (uint64) num_partitions));
+	PG_RETURN_INT16((int16) (route_value % (uint64) num_partitions));
 }
 
 Datum

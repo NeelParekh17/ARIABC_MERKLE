@@ -9,7 +9,7 @@ SET enable_merkle_index = on;
 CREATE OR REPLACE FUNCTION pg_catalog.merkle_partition_for_hash(
     key_hash bytea, partitions integer
 )
-RETURNS integer
+RETURNS smallint
 AS 'merkle_partition_for_hash'
 LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
 
