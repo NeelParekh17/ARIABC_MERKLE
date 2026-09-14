@@ -142,10 +142,15 @@ lib*.pc
 /scripts/distributed/single_node_good_run.txt
 /scripts/distributed/output*.txt
 /scripts/distributed/*.log
+/scripts/distributed/out_4modes_live.txt
 /scripts/distributed/recovery_artifacts/
 /scripts/benchmark/recovery/fetched/
 /scripts/benchmark/recovery/results/scratch_*/
 /scripts/benchmark/recovery/results/*.copybin
+/nohup.out
+/out_4modes_live.txt
+/scratch/
+/How to Write to SSDs - 2603.09927v3.pdf
 
 # Merkle recovery benchmark artifacts
 scripts/benchmark/recovery/fetched/

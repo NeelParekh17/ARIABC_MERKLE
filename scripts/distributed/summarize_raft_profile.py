@@ -127,7 +127,8 @@ def merkle_pass(root: pathlib.Path) -> int:
     if not runner_log.exists():
         return 0
     text = runner_log.read_text(errors="replace")
-    return 1 if re.search(r"pre-marker .*PASS|post-marker .*PASS|consistency: PASS", text) else 0
+    # A pre-workload/pre-marker check cannot certify the final database state.
+    return 1 if re.search(r"post-marker .*PASS|usertable_small consistency: PASS", text) else 0
 
 
 def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
@@ -143,9 +144,20 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
     out["bcdb_init_arg_size"] = meta.get("bcdb_init_arg_size", meta.get("bcdb_init_block_size", ""))
     leader_path: pathlib.Path | None = None
 
-    progress = rows.get("PROGRESS_GATEWAY_DET", [])
+    # runner.log also embeds the one-query verification gateway. Never let that
+    # overwrite the workload's counters, or prefer an early progress sample just
+    # because majority completion reached its maximum before the audit drained.
+    workload_log = root / "gateway_test.log"
+    workload_records = []
+    if workload_log.exists():
+        workload_records = [parse_kv_line(line) for line in
+                            workload_log.read_text(errors="replace").splitlines()]
+    progress = [(workload_log, row) for prefix, row in workload_records
+                if prefix == "PROGRESS_GATEWAY_DET"]
+    if not workload_records:
+        progress = rows.get("PROGRESS_GATEWAY_DET", [])
     if progress:
-        _, row = max(progress, key=lambda item: as_int(item[1], "completed"))
+        _, row = progress[-1]
         out["tps"] = f"{as_float(row, 'completed_tps'):.2f}"
         out["divergence_count"] = as_int(row, "divergence_count")
         out["permanent_failures"] = as_int(row, "permanent_failures")
@@ -175,14 +187,26 @@ def collect_csv_row(root: pathlib.Path) -> Dict[str, object]:
         if "permanent_failures" in summary_env:
             out["permanent_failures"] = as_int(summary_env, "permanent_failures")
 
-    gateways = rows.get("PROFILE_GATEWAY", [])
+    gateways = [(workload_log, row) for prefix, row in workload_records
+                if prefix == "PROFILE_GATEWAY"]
+    if not workload_records:
+        gateways = rows.get("PROFILE_GATEWAY", [])
     if gateways:
-        _, row = max(gateways, key=lambda item: as_int(item[1], "submit_attempts"))
+        _, row = gateways[-1]
         out["client_workers"] = row.get("configured_gateway_workers", "")
         out["gateway_submit_to_accept_ms"] = f"{as_float(row, 'submit_to_accept_ms'):.3f}"
         out["gateway_accept_to_terminal_ms"] = f"{as_float(row, 'accept_to_terminal_ms'):.3f}"
-        if out["permanent_failures"] == "":
+        if "permanent_failures" in row:
             out["permanent_failures"] = as_int(row, "permanent_failures")
+    if workload_log.exists():
+        final_divergence = re.findall(r"^divergence_count=(\d+)\s*$",
+                                     workload_log.read_text(errors="replace"), re.M)
+        if final_divergence:
+            out["divergence_count"] = int(final_divergence[-1])
+    if (as_int(out, "permanent_failures") > 0 or
+            as_int(out, "divergence_count") > 0):
+        out["tps"] = ""
+        out["merkle_pass"] = 0
 
     if not out.get("client_workers") or out.get("client_workers") == "0":
         out["client_workers"] = meta.get(
