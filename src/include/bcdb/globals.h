@@ -41,6 +41,7 @@ extern PGDLLIMPORT bool                bcdb_gate_snapshot_each_block;
  * Default: false.
  */
 extern PGDLLIMPORT bool                bcdb_gate_telemetry_enabled;
+extern PGDLLIMPORT bool                bcdb_ledger_trace;
 
 
 typedef enum BcdbIsolationLevel{

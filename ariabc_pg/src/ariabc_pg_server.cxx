@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <unordered_set>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -872,6 +873,42 @@ void append_requests_to_raft_batch(
     }
 }
 
+// A batch succeeds only after every item has a successful terminal result.
+// Use one deadline and one control round trip, rather than a connection per item.
+client_api_response wait_for_results(pg_state_machine* psm, const std::string& command) {
+    client_api_response resp;
+    resp.status = 1;
+    resp.msg = "INVALID_WAIT_RESULTS_COMMAND";
+    std::istringstream input(command);
+    std::string verb, id;
+    int timeout_ms = 0;
+    if (!(input >> verb >> timeout_ms) || verb != "WAIT_RESULTS" ||
+        timeout_ms <= 0 || timeout_ms > 600000 || !psm) return resp;
+    std::vector<std::string> ids;
+    std::unordered_set<std::string> unique;
+    while (input >> id) {
+        if (ids.size() >= 65536 || !unique.insert(id).second) return resp;
+        ids.push_back(id);
+    }
+    if (ids.empty()) return resp;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    size_t completed = 0;
+    for (const auto& req_id : ids) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        std::string failure;
+        if (remaining <= 0 || !psm->wait_for_result_id(req_id, static_cast<int>(remaining), &failure)) {
+            resp.msg = "WAIT_RESULTS_FAILED req_id=" + req_id + " completed=" +
+                std::to_string(completed) + " reason=" + (failure.empty() ? "timeout" : failure);
+            return resp;
+        }
+        ++completed;
+    }
+    resp.status = 0;
+    resp.msg = "WAIT_RESULTS_OK state=COMPLETED completed=" + std::to_string(completed);
+    return resp;
+}
+
 void maybe_wait_for_terminal_result(pg_state_machine* psm,
                                     const client_api_request& req,
                                     client_api_response& resp,
@@ -1231,6 +1268,11 @@ void handle_client_fd(int fd,
             if (!ok_write) break;
             continue;
         }
+        if (starts_with(req.sql, "WAIT_RESULTS ")) {
+            const auto resp = wait_for_results(psm, req.sql);
+            if (!write_response_frame(fd, resp, err)) break;
+            continue;
+        }
         if (psm && starts_with(req.sql, "WAIT_RESULT_ID")) {
             std::string wait_req_id;
             int timeout_ms = 30000;
@@ -1532,6 +1574,11 @@ void handle_client_fd_direct(int fd,
             resp.msg = std::to_string(seq_counter.load(std::memory_order_relaxed));
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
+            continue;
+        }
+        if (starts_with(req.sql, "WAIT_RESULTS ")) {
+            const auto resp = wait_for_results(psm, req.sql);
+            if (!write_response_frame(fd, resp, err)) break;
             continue;
         }
         if (starts_with(req.sql, "WAIT_RESULT_ID")) {

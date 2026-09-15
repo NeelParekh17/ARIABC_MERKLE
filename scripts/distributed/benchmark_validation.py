@@ -46,14 +46,12 @@ def parse_gateway_result(output, expected_queries, returncode=0, mode=None):
             raise ValueError("Expected direct event-mode gateway profile")
         if profile.get("not_accepted") != "0":
             raise ValueError("Gateway had rejected requests/retries")
+        if profile.get("direct_completion_protocol") != "2":
+            raise ValueError("Gateway lacks the all-request terminal completion protocol")
+        if profile.get("direct_terminal_success_count") != str(expected_queries):
+            raise ValueError("Gateway did not verify every successful terminal result")
         if mode == "pg":
-            # PG bypassRaft executes synchronously before status=0. A normal
-            # final summary follows joining all worker loops, which retry until
-            # success. Exactly N attempts therefore excludes failed/retried SQL.
-            # read_calls counts syscalls, not responses (frames can coalesce).
-            if profile.get("submit_attempts") != str(expected_queries):
-                raise ValueError("PG attempts differ from workload; retries or missing queries")
-            completion_evidence = "direct_pg_completed_loop_without_retries"
+            completion_evidence = "direct_all_request_terminal_results_v2"
         elif mode in ("bcdb_det", "bcdb_merkle"):
             progress = re.findall(r"^PROGRESS_GATEWAY_DET .*\bfinal=1\s*$", output, re.M)
             if not progress:
@@ -63,7 +61,7 @@ def parse_gateway_result(output, expected_queries, returncode=0, mode=None):
                 raise ValueError("Deterministic gateway did not complete every query")
             if any(values.get(k) != "0" for k in ("pipeline_outstanding", "majority_inflight", "pending_accept")):
                 raise ValueError("Deterministic gateway still has outstanding requests")
-            completion_evidence = "direct_det_final_progress"
+            completion_evidence = "direct_all_request_terminal_results_v2"
         else:
             raise ValueError(f"Unsupported single-node mode: {mode}")
     times = re.findall(r"^\s*overall time taken \(millisec\) = (\d+)\s*$", output, re.M)
@@ -72,7 +70,7 @@ def parse_gateway_result(output, expected_queries, returncode=0, mode=None):
     if not times or not drains or min(int(times[-1]), int(drains[-1])) <= 0:
         raise ValueError("Missing positive final gateway elapsed time")
     completed = re.findall(r"\bcompleted_tps=([0-9.]+)", output)
-    # Preserve the historical single-node denominator, but expose drain time too.
+    # Direct protocol v2 includes all terminal waits in the reported interval.
     elapsed = int(times[-1])
     return dict(counters, total_queries=expected_queries, validated_completed_queries=expected_queries,
                 completion_evidence=completion_evidence, wall_time_ms=elapsed,

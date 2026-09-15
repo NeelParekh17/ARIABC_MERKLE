@@ -160,6 +160,8 @@ bcdb_emit_apply_attempt_end(unsigned long long log_id,
 							int unique_violation,
 							int will_retry)
 {
+	if (!bcdb_ledger_trace)
+		return;
 	elog(LOG,
 		 "SAFE_APPLY_ATTEMPT_END log=%llu ord=%u attempt=%d apply_ok=%d unique_violation=%d will_retry=%d",
 		 log_id,

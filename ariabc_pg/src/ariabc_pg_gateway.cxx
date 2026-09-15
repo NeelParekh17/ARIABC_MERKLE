@@ -4666,6 +4666,13 @@ int main(int argc, char** argv) {
         return true;
     };
 
+    std::mutex direct_terminal_mu;
+    std::unordered_set<std::string> direct_terminal_success_ids;
+    auto note_direct_terminal = [&](const std::string& id) {
+        std::lock_guard<std::mutex> lock(direct_terminal_mu);
+        direct_terminal_success_ids.insert(id);
+    };
+
     auto wait_direct_completion = [&](size_t node_idx,
                                       const ariabc_pg::client_api_response& submit_resp,
                                       const std::string& req_label) -> bool {
@@ -4682,6 +4689,13 @@ int main(int argc, char** argv) {
         if (node_suffix != std::string::npos) {
             wait_req_id.resize(node_suffix);
         }
+        std::vector<std::string> wait_ids;
+        const bool is_batch_wait = wait_req_id.compare(0, 4, "ids:") == 0;
+        if (is_batch_wait) {
+            std::istringstream ids(wait_req_id.substr(4));
+            std::string id;
+            while (ids >> id) wait_ids.push_back(id);
+        }
         const bool can_wait_by_req_id =
             !wait_req_id.empty() &&
             wait_req_id != "det_batch" &&
@@ -4691,7 +4705,10 @@ int main(int argc, char** argv) {
 
         uint64_t raft_log_idx = 0;
         std::string wait_cmd;
-        if (can_wait_by_req_id) {
+        if (is_batch_wait && !wait_ids.empty()) {
+            wait_cmd = "WAIT_RESULTS 30000 " + wait_req_id.substr(4);
+        } else if (can_wait_by_req_id) {
+            wait_ids.push_back(wait_req_id);
             wait_cmd = "WAIT_RESULT_ID " + wait_req_id + " 30000";
         } else {
             if (!ariabc_pg::parse_named_u64_field(submit_resp.msg, "raft_log_idx=", raft_log_idx) ||
@@ -4719,6 +4736,19 @@ int main(int argc, char** argv) {
             permanent_failures.fetch_add(1);
             return false;
         }
+        // Status zero alone can be an enqueue acknowledgement from an old server.
+        uint64_t completed = 0;
+        const bool terminal_ok = is_batch_wait
+            ? (wait_resp.msg.find("WAIT_RESULTS_OK state=COMPLETED ") == 0 &&
+               ariabc_pg::parse_named_u64_field(wait_resp.msg, "completed=", completed) &&
+               completed == wait_ids.size())
+            : (wait_resp.msg.find("WAIT_RESULT_ID_OK state=COMPLETED ") == 0);
+        if (!terminal_ok) {
+            std::cerr << "Missing terminal completion evidence: " << wait_resp.msg << std::endl;
+            permanent_failures.fetch_add(1);
+            return false;
+        }
+        for (const auto& id : wait_ids) note_direct_terminal(id);
         return true;
     };
 
@@ -5742,6 +5772,7 @@ int main(int argc, char** argv) {
                                     threadpool_failed.store(true, std::memory_order_release);
                                     break;
                                 }
+                                if (direct_wait_on_submit_socket) note_direct_terminal(item.req_id);
                                 det_completed_count.fetch_add(1, std::memory_order_relaxed);
                             }
 
@@ -5907,9 +5938,8 @@ int main(int argc, char** argv) {
                     ariabc_pg::client_api_response resp;
                     std::string submit_err;
                     bool ok_submit = true;
-                    std::string batch_label = ticket.items.empty()
-                        ? std::string("det_pipeline_batch")
-                        : ticket.items.front().req_id;
+                    std::string batch_label = "ids:";
+                    for (const auto& item : ticket.items) batch_label += item.req_id + " ";
                     std::vector<std::pair<size_t, ariabc_pg::client_api_response>>
                         broadcast_result_waits;
                     if (opt.broadcast_to_all && !majority_wait_enabled) {
@@ -6315,14 +6345,15 @@ int main(int argc, char** argv) {
                     }
                     det_sent_count.fetch_add(batch_items.size(), std::memory_order_relaxed);
 
+                    std::string batch_label = "ids:";
+                    for (const auto& item : batch_items) batch_label += item.req_id + " ";
                     const bool needs_direct_completion_wait =
                         !(opt.broadcast_to_all && !majority_wait_enabled);
                     if (needs_direct_completion_wait &&
                         !wait_direct_completion_quorum(
                             submit_node_idx,
                             submit_resp,
-                            batch_items.empty() ? std::string("det_batch")
-                                                : batch_items.front().req_id)) {
+                            batch_label)) {
                         release_det_item_lanes(batch_items);
                         failed = true;
                         break;
@@ -6491,6 +6522,15 @@ int main(int argc, char** argv) {
                         1,
                         static_cast<size_t>(opt.nondet_window > 0 ? opt.nondet_window : auto_per_worker));
                     std::deque<uint64_t> inflight;
+                    std::unordered_map<uint64_t, std::pair<size_t, ariabc_pg::client_api_response>> direct_pending;
+                    auto wait_pg_direct = [&](uint64_t rid) {
+                        const auto found = direct_pending.find(rid);
+                        if (found == direct_pending.end()) return false;
+                        const bool ok = wait_direct_completion_quorum(found->second.first,
+                            found->second.second, req_id_for_idx(rid - opt.req_id_offset));
+                        direct_pending.erase(found);
+                        return ok;
+                    };
                     while (true) {
                         const size_t idx = next_idx.fetch_add(1);
                         if (idx >= queries.size()) break;
@@ -6542,7 +6582,14 @@ int main(int argc, char** argv) {
                         while (true) {
                             const auto submit_t0 = std::chrono::steady_clock::now();
                             acquire_submit_slot();
-                            submitted = submit_only_quiet(req_id, sql, sub_err);
+                            ariabc_pg::client_api_request request;
+                            request.req_id = req_id;
+                            request.sql = sql;
+                            ariabc_pg::client_api_response response;
+                            size_t node_idx = 0;
+                            submitted = submit_request_quiet(request, sub_err, &response, &node_idx);
+                            if (submitted && !majority_wait_enabled && opt.completion_path == "direct")
+                                direct_pending.emplace(req_num, std::make_pair(node_idx, response));
                             release_submit_slot();
                             const auto submit_t1 = std::chrono::steady_clock::now();
                             total_submit_ns.fetch_add(
@@ -6574,7 +6621,8 @@ int main(int argc, char** argv) {
                             } else {
                                 rid = inflight.front();
                                 inflight.pop_front();
-                                ok_wait = wait_majority(rid, maj);
+                                ok_wait = (!majority_wait_enabled && opt.completion_path == "direct")
+                                    ? wait_pg_direct(rid) : wait_majority(rid, maj);
                             }
                             const auto w1 = std::chrono::steady_clock::now();
                             total_majority_wait_ns.fetch_add(
@@ -6616,7 +6664,8 @@ int main(int argc, char** argv) {
                         } else {
                             rid = inflight.front();
                             inflight.pop_front();
-                            ok_wait = wait_majority(rid, maj);
+                            ok_wait = (!majority_wait_enabled && opt.completion_path == "direct")
+                                ? wait_pg_direct(rid) : wait_majority(rid, maj);
                         }
                         const auto w1 = std::chrono::steady_clock::now();
                         total_majority_wait_ns.fetch_add(
@@ -6637,6 +6686,12 @@ int main(int argc, char** argv) {
         }
 
         const auto t_end = std::chrono::steady_clock::now();
+        if (!majority_wait_enabled && opt.completion_path == "direct") {
+            client_completion_end = t_end;
+            client_completion_end_set = true;
+            if (direct_terminal_success_ids.size() != queries.size())
+                permanent_failures.fetch_add(1);
+        }
         if (kafka_enabled) {
             consumer.set_busy_hint(false);
         }
@@ -6747,6 +6802,8 @@ int main(int argc, char** argv) {
             (opt.db_type == 1) ? effective_det_pipeline_depth(prof_det_terminals, prof_det_window) : 0;
         std::cout
             << "PROFILE_GATEWAY "
+            << " direct_terminal_success_count=" << direct_terminal_success_ids.size()
+            << " direct_completion_protocol=2"
             << " completion_path=" << opt.completion_path
             << " validation_mode=" << opt.validation_mode
             << " broadcast_to_all=" << (opt.broadcast_to_all ? 1 : 0)

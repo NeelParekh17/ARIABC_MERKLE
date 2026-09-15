@@ -1,5 +1,17 @@
 # Review of the 100M YCSB benchmark and in-memory comparison
 
+## September 15 completion and checkpoint correction
+
+The earlier direct-path acceptance assumption was incorrect. Enqueue acknowledgement is not SQL completion, and waiting for the first DET batch item does not establish completion of the whole batch. The gateway now uses direct completion protocol 2: PG waits for terminal results, DET batches wait for every request ID, and the timed interval includes those waits. The shared Python validator rejects old binaries/profiles lacking `direct_terminal_success_count=N` and protocol 2.
+
+`bcdb_ledger_trace=off` is now the PostgreSQL default. It disables the verbose per-request ledger/boundary/result-ring diagnostics while preserving errors and aggregate counters. Diagnostic/crash investigations needing these messages must explicitly set `bcdb_ledger_trace=on` at PostgreSQL startup. Changing `log_min_messages` to `error` does not suppress PostgreSQL LOG messages.
+
+The OOM runner enables and verifies `log_checkpoints=on`, records checkpoint write/sync/longest-file-sync timings in CSV and `checkpoint.json`, and saves `checkpoint.log` plus Linux Dirty/Writeback snapshots. Keep `shared_buffers=32MB` and durability enabled.
+
+The user's completed `scripts/bench_full_results/oom_100m_sweep/run_20260915_012215_3cb02623` matches the fixed binary hashes and validates all 18 terminal counts plus six Merkle checks. Its detailed analysis is `CORRECTED_RUN_ANALYSIS_20260915.md` in that directory. Uniform Merkle/w16 spends 8.759 of 9.204 checkpoint seconds synchronizing files. Quiet DET/Merkle PostgreSQL logs are only about 5–6KB. These measurements supersede the original review's unvalidated direct-completion assumption; earlier throughput figures require a new in-memory run using the same fixed gateway.
+
+The remaining sections retain the original review context.
+
 Reviewed on 2026-09-14. The original runner was **not reliable enough for the proposed comparison**. The Python runner and the single-node YCSB acceptance path have been corrected. The full remote benchmark has **not** been executed as part of this review; its runtime checks and Merkle verification must pass before using new throughput results.
 
 The existing results, plots, user-modified analysis, and golden database were not changed. Original script copies for this review are under `.bench_tmp/oom_audit_original/`.

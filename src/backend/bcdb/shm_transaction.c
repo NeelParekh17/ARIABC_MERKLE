@@ -3084,7 +3084,7 @@ void clean_rs_ws_table(void)
 void
 bcdb_emit_ledger_boundary(const char *phase)
 {
-	if (is_bcdb_worker && activeTx != NULL)
+	if (bcdb_ledger_trace && is_bcdb_worker && activeTx != NULL)
 	{
 		/*
 		 * Use the D1 struct fields directly when ledger is enabled;

@@ -441,6 +441,141 @@ def prepare_ledger_schema(args):
         raise RuntimeError(f"Golden baseline has nonzero apply state: {state}")
 
 
+def get_remote_baseline_identity(args):
+    """Inspect active pgdata_base to obtain fresh control, checksum and sizing metadata."""
+    cmd = db_shell(args) + f"""
+{args.install_dir}/bin/pg_controldata {args.remote_dir}/pgdata_base | grep -E 'Database system identifier|Latest checkpoint location|Database cluster state' | sed 's/.*: *//'
+sha256sum {args.remote_dir}/pgdata_base/global/pg_control {args.remote_dir}/pgdata_base/PG_VERSION
+find {args.remote_dir}/pgdata_base -type f | wc -l
+du -sb {args.remote_dir}/pgdata_base | cut -f1
+"""
+    lines = run_remote(args.remote_host, args.remote_user, cmd, timeout=30).stdout.strip().splitlines()
+    if len(lines) < 7:
+        raise RuntimeError(f"Failed to inspect baseline identity; got {lines}")
+    return dict(
+        db_system_id=lines[0].strip(),
+        cluster_state=lines[1].strip(),
+        checkpoint_lsn=lines[2].strip(),
+        pg_control_sha256=lines[3].split()[0],
+        pg_version_sha256=lines[4].split()[0],
+        file_count=int(lines[5].strip()),
+        total_bytes=int(lines[6].strip()),
+    )
+
+
+def validate_golden_baseline(args):
+    """Full-scan the golden baseline once per sweep and record a manifest outside pgdata_base.
+
+    The manifest records exact row counts, key bounds, relation byte sizes, relpages,
+    and block-device/control file hashes. Subsequent resets verify physical file copy
+    fidelity before postmaster starts, followed by exact O(1) relation size and bound checks.
+    """
+    manifest_path = f"{args.remote_dir}/.ariabc_golden_manifest.json"
+    meta = get_remote_baseline_identity(args)
+    if meta["cluster_state"] != "shut down":
+        raise RuntimeError(f"Golden database cluster state is not cleanly shut down: {meta['cluster_state']}")
+
+    existing = run_remote(args.remote_host, args.remote_user,
+                          f"cat {manifest_path} 2>/dev/null || echo MISSING",
+                          timeout=15).stdout.strip()
+    if existing != "MISSING":
+        try:
+            manifest = json.loads(existing)
+        except Exception:
+            manifest = {}
+        if (manifest.get("version") == 2 and
+                manifest.get("db_rows") == args.db_rows and
+                manifest.get("keyspace") == f"{args.db_rows}|1|{args.db_rows}" and
+                manifest.get("db_system_id") == meta["db_system_id"] and
+                manifest.get("checkpoint_lsn") == meta["checkpoint_lsn"] and
+                manifest.get("pg_control_sha256") == meta["pg_control_sha256"] and
+                manifest.get("pg_version_sha256") == meta["pg_version_sha256"] and
+                manifest.get("file_count") == meta["file_count"] and
+                manifest.get("total_bytes") == meta["total_bytes"]):
+            print(f"  Golden manifest verified (cached & fresh): {args.db_rows:,} rows, "
+                  f"{manifest['file_count']} files, {manifest['total_bytes'] / 2**30:.2f} GiB, "
+                  f"LSN {manifest['checkpoint_lsn']}")
+            return manifest
+        print(f"  Golden manifest is missing, stale, or baseline changed; re-validating golden baseline...")
+
+    # Start PG against a temporary check copy to run the full verification scan.
+    check_dir = f"{args.remote_dir}/pgdata_golden_check"
+    stop_server(args)
+    stop_postgres(args)
+    try:
+        run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+rm -rf {check_dir}
+cp -a --reflink=never {args.remote_dir}/pgdata_base {check_dir}
+cat > {check_dir}/postgresql.auto.conf <<'EOCONF'
+port = {args.db_port}
+listen_addresses = '*'
+shared_buffers = '256MB'
+enable_merkle_index = off
+bcdb_worker_count = 1
+bcdb_ledger_trace = off
+max_parallel_workers_per_gather = 4
+EOCONF
+{args.install_dir}/bin/pg_ctl -D {check_dir} \
+    -l {args.remote_dir}/golden_check.log -w -t 120 start
+""", timeout=args.reset_timeout)
+
+        def golden_sql(statement, timeout=600):
+            command = (db_shell(args) + f"{args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 "
+                       f"-h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -At "
+                       f"-c {shlex.quote(statement)}")
+            return run_remote(args.remote_host, args.remote_user, command, timeout=timeout).stdout.strip()
+
+        print(f"  Validating golden baseline: full-scanning {args.db_rows:,} rows...")
+        identity = golden_sql("SELECT count(*), min(ycsb_key), max(ycsb_key) FROM usertable;",
+                              timeout=args.verify_timeout)
+        expected = f"{args.db_rows}|1|{args.db_rows}"
+        if identity != expected:
+            raise RuntimeError(f"Golden baseline keyspace mismatch: {identity} != {expected}")
+
+        # Exact byte sizes & page counts (avoid lossy float4 reltuples)
+        table_stats = golden_sql("SELECT pg_relation_size('usertable'), "
+                                 "pg_relation_size('usertable_pkey1'), "
+                                 "pg_total_relation_size('usertable'), "
+                                 "relpages FROM pg_class WHERE relname='usertable';")
+        heap_bytes, index_bytes, total_rel_bytes, relpages = [int(x) for x in table_stats.split('|')]
+
+        indexes = golden_sql("SELECT json_agg(row_to_json(i)) FROM "
+                             "(SELECT indexname, indexdef FROM pg_indexes "
+                             "WHERE tablename='usertable' ORDER BY indexname) i;")
+    finally:
+        # Guaranteed cleanup of the temporary check instance
+        run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+if [ -f {check_dir}/postmaster.pid ]; then
+    {args.install_dir}/bin/pg_ctl -D {check_dir} -w stop -m immediate || true
+fi
+rm -rf {check_dir}
+""", timeout=150, check=False)
+
+    manifest = dict(
+        version=2,
+        db_rows=args.db_rows,
+        keyspace=identity,
+        db_system_id=meta["db_system_id"],
+        checkpoint_lsn=meta["checkpoint_lsn"],
+        pg_control_sha256=meta["pg_control_sha256"],
+        pg_version_sha256=meta["pg_version_sha256"],
+        file_count=meta["file_count"],
+        total_bytes=meta["total_bytes"],
+        heap_bytes=heap_bytes,
+        index_bytes=index_bytes,
+        total_relation_bytes=total_rel_bytes,
+        relpages=relpages,
+        indexes=json.loads(indexes),
+    )
+    run_remote(args.remote_host, args.remote_user,
+               f"printf %s {shlex.quote(json.dumps(manifest))} > {manifest_path}",
+               timeout=15)
+    print(f"  Golden manifest written: {args.db_rows:,} rows, "
+          f"{manifest['file_count']} files, {manifest['total_bytes'] / 2**30:.2f} GiB, "
+          f"heap {heap_bytes / 2**30:.2f} GiB ({relpages:,} pages)")
+    return manifest
+
+
 def reset_remote_pgdata(args, mode, workers):
     stop_server(args)
     stop_postgres(args)
@@ -467,6 +602,8 @@ max_wal_size = '20GB'
 max_connections = 256
 track_counts = on
 track_io_timing = on
+log_checkpoints = on
+bcdb_ledger_trace = off
 bcdb_serial_gate_mode = 1
 bcdb_serial_gate_source = 0
 bcdb_dt_conflict_tracking = on
@@ -477,6 +614,29 @@ bcdb_gate_telemetry = off
 bcdb_gate_snapshot_each_block = off
 merkle_apply_synchronous_direct = on
 """
+    manifest = getattr(args, '_golden_manifest', None)
+    if manifest is None:
+        raw = run_remote(args.remote_host, args.remote_user,
+                         f"cat {args.remote_dir}/.ariabc_golden_manifest.json 2>/dev/null || echo MISSING",
+                         check=False).stdout.strip()
+        if raw != "MISSING":
+            try:
+                manifest = json.loads(raw)
+                args._golden_manifest = manifest
+            except Exception:
+                manifest = None
+
+    # Pre-startup copy integrity verification script.
+    # Runs immediately after cp -a and BEFORE postmaster starts or touches any file.
+    copy_verify_cmd = ""
+    if manifest:
+        copy_verify_cmd = f"""
+test "$(find {args.remote_dir}/pgdata -type f | wc -l)" -eq "{manifest['file_count']}"
+test "$(du -sb {args.remote_dir}/pgdata | cut -f1)" -eq "{manifest['total_bytes']}"
+test "$(sha256sum {args.remote_dir}/pgdata/PG_VERSION | cut -d' ' -f1)" = "{manifest['pg_version_sha256']}"
+test "$(sha256sum {args.remote_dir}/pgdata/global/pg_control | cut -d' ' -f1)" = "{manifest['pg_control_sha256']}"
+"""
+
     result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
 test -f {args.remote_dir}/pgdata_base/PG_VERSION
 test ! -L {args.remote_dir}/pgdata
@@ -487,6 +647,8 @@ available=$(df -B1 --output=avail {args.remote_dir} | tail -1)
 test "$available" -gt "$((needed + 21474836480))"
 rm -rf -- {args.remote_dir}/pgdata
 cp -a --reflink=never {args.remote_dir}/pgdata_base {args.remote_dir}/pgdata
+{copy_verify_cmd}
+sync
 printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
 : > {args.remote_dir}/postgres.log
 """, timeout=args.reset_timeout)
@@ -495,12 +657,32 @@ printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
     if mode != "bcdb_merkle":
         sql(args, "DROP INDEX IF EXISTS usertable_merkle_idx; "
                   "DROP INDEX IF EXISTS usertable_merkle_lookup_idx;")
-    # Reject a wrong-size/stale/partial baseline before timing anything. This
-    # full scan is followed by shutdown and cache clearing, so it is not warmup.
-    identity = sql(args, "SELECT count(*), min(ycsb_key), max(ycsb_key) FROM usertable;",
-                   timeout=args.verify_timeout)
-    if identity != f"{args.db_rows}|1|{args.db_rows}":
-        raise RuntimeError(f"Wrong golden keyspace: {identity}")
+    # Verification phase:
+    # If --verify-mode full is requested, run an exhaustive SELECT count(*) table scan.
+    # Otherwise, rely on the validated immutable baseline and run fast O(1) sanity checks
+    # (B-tree bounds, relation byte sizes, catalog block counts, and index definitions).
+    if getattr(args, "verify_mode", "fast") == "full":
+        identity = sql(args, "SELECT count(*), min(ycsb_key), max(ycsb_key) FROM usertable;",
+                       timeout=args.verify_timeout)
+        expected = f"{args.db_rows}|1|{args.db_rows}"
+        if identity != expected:
+            raise RuntimeError(f"Wrong golden keyspace after restore: {identity} != {expected}")
+        bounds = f"1|{args.db_rows}"
+    else:
+        bounds = sql(args, "SELECT min(ycsb_key), max(ycsb_key) FROM usertable;")
+        if bounds != f"1|{args.db_rows}":
+            raise RuntimeError(f"Post-copy key bounds mismatch: {bounds}")
+    table_stats = sql(args, "SELECT pg_relation_size('usertable'), "
+                            "pg_relation_size('usertable_pkey1'), "
+                            "relpages FROM pg_class WHERE relname='usertable';")
+    heap_bytes, index_bytes, relpages = [int(x) for x in table_stats.split('|')]
+    if manifest:
+        if heap_bytes != manifest['heap_bytes']:
+            raise RuntimeError(f"Post-copy heap size mismatch: {heap_bytes} != {manifest['heap_bytes']}")
+        if index_bytes != manifest['index_bytes']:
+            raise RuntimeError(f"Post-copy index size mismatch: {index_bytes} != {manifest['index_bytes']}")
+        if relpages != manifest['relpages']:
+            raise RuntimeError(f"Post-copy relpages mismatch: {relpages} != {manifest['relpages']}")
     indexes = sql(args, "SELECT json_agg(row_to_json(i)) FROM "
                        "(SELECT indexname, indexdef FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;")
     if ("USING merkle" in indexes) != (mode == "bcdb_merkle"):
@@ -521,13 +703,15 @@ printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
         raise RuntimeError("Effective shared_buffers differs from requested value")
     for key, value in {"bcdb_worker_count": str(bcdb_workers), "enable_merkle_index": enable,
                        "fsync": "on", "full_page_writes": "on", "synchronous_commit": "on",
-                       "track_counts": "on", "track_io_timing": "on"}.items():
+                       "track_counts": "on", "track_io_timing": "on",
+                       "log_checkpoints": "on", "bcdb_ledger_trace": "off"}.items():
         if settings[key] != value:
             raise RuntimeError(f"Unexpected effective setting {key}={settings[key]}")
     sizes = json.loads(sql(args, "SELECT json_build_object('heap_bytes', pg_relation_size('usertable'), "
                           "'table_total_bytes', pg_total_relation_size('usertable'), "
                           "'database_bytes', pg_database_size(current_database()));"))
-    return dict(settings=settings, sizes=sizes, keyspace=identity, indexes=json.loads(indexes),
+    return dict(settings=settings, sizes=sizes,
+                keyspace=f"{args.db_rows}|{bounds}", indexes=json.loads(indexes),
                 reset_output=result.stdout, cache_drop_output=cache.stdout)
 
 
@@ -566,8 +750,21 @@ def get_pg_io_stats(args):
     # These are PostgreSQL buffer misses, not necessarily physical device reads.
     return json.loads(sql(args, "SELECT row_to_json(s) FROM (SELECT d.blks_read, d.blks_hit, "
         "d.blk_read_time, d.blk_write_time, b.buffers_clean, b.buffers_backend, "
+        "b.checkpoint_write_time, b.checkpoint_sync_time, b.checkpoints_req, "
         "b.buffers_checkpoint, b.buffers_alloc FROM pg_stat_database d CROSS JOIN pg_stat_bgwriter b "
         "WHERE d.datname=current_database()) s;"))
+
+
+def parse_checkpoint_log(output):
+    matches = re.findall(
+        r"checkpoint complete:.*?write=([0-9.]+) s, sync=([0-9.]+) s, total=([0-9.]+) s; "
+        r"sync files=(\d+), longest=([0-9.]+) s, average=([0-9.]+) s", output)
+    if not matches:
+        raise RuntimeError("Missing checkpoint write/sync timing evidence")
+    w, s, t, files, longest, average = matches[-1]
+    return dict(write_ms=float(w)*1000, sync_ms=float(s)*1000, total_ms=float(t)*1000,
+                sync_files=int(files), longest_sync_ms=float(longest)*1000,
+                average_sync_ms=float(average)*1000)
 
 
 def get_remote_nvme_stats(args):
@@ -665,11 +862,23 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         # CHECKPOINT is measured separately, outside the TPS interval. It makes
         # deferred dirty heap/index writeback visible instead of counting only
         # writes that happened to reach the device during the short workload.
+        checkpoint_pg_before = get_pg_io_stats(args)
+        memory_before = run_remote(args.remote_host, args.remote_user,
+                                   "cat /proc/meminfo", timeout=15).stdout
         checkpoint_before = get_remote_nvme_stats(args)
         checkpoint_start = time.monotonic()
         sql(args, "CHECKPOINT;", timeout=args.verify_timeout)
         checkpoint_ms = (time.monotonic() - checkpoint_start) * 1000
         checkpoint_after = get_remote_nvme_stats(args)
+        memory_after = run_remote(args.remote_host, args.remote_user,
+                                  "cat /proc/meminfo", timeout=15).stdout
+        checkpoint_log = run_remote(args.remote_host, args.remote_user,
+            f"tail -n 30 {args.remote_dir}/postgres.log", timeout=15).stdout
+        (case_dir / "checkpoint.log").write_text(checkpoint_log)
+        checkpoint = parse_checkpoint_log(checkpoint_log)
+        (case_dir / "checkpoint.json").write_text(json.dumps(dict(
+            **checkpoint, memory_before=memory_before, memory_after=memory_after,
+            pg_before=checkpoint_pg_before), indent=2) + "\n")
         # BCDB's long-lived workers do not call pgstat_report_stat during their
         # loop. Clean PostgreSQL shutdown invokes pgstat_beshutdown_hook(true),
         # persisting their counters. Restart preserves those cumulative totals.
@@ -703,6 +912,11 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
                    device_read_ios=delta(device_before, device_after, "read_ios"),
                    device_write_ios=delta(device_before, device_after, "write_ios"),
                    checkpoint_ms=checkpoint_ms,
+                   checkpoint_write_ms=checkpoint["write_ms"],
+                   checkpoint_sync_ms=checkpoint["sync_ms"],
+                   checkpoint_total_ms=checkpoint["total_ms"],
+                   checkpoint_sync_files=checkpoint["sync_files"],
+                   checkpoint_longest_sync_ms=checkpoint["longest_sync_ms"],
                    checkpoint_write_mib=delta(checkpoint_before, checkpoint_after, "write_sectors") / 2048,
                    blks_read=read, blks_hit=hits, hit_ratio_pct=100 * hits / (hits + read) if hits + read else "",
                    blk_read_time_ms=delta(pg_before, pg_after, "blk_read_time"),
@@ -757,6 +971,8 @@ def parse_args(argv=None):
     parser.add_argument("--gen-only", action="store_true")
     parser.add_argument("--verify-merkle", action="store_true", default=True, help="Always enabled for Merkle cases")
     parser.add_argument("--reset-mode", choices=["cp"], default="cp", help="Only pristine copies support fair comparisons")
+    parser.add_argument("--verify-mode", choices=["fast", "full"], default="fast",
+                        help="Validation mode on per-case resets: 'fast' performs pre-start copy integrity and post-start catalog/bound sanity checks; 'full' runs an exhaustive SELECT count(*) scan on every reset.")
     parser.add_argument("--dry-run", action="store_true", help="Generate workloads and manifest locally; do not contact servers")
     parser.add_argument("--preflight-only", action="store_true", help="Probe binaries, ports, storage and sudo; do not start databases")
     args = parser.parse_args(argv)
@@ -892,6 +1108,8 @@ def main(argv=None):
             generating = False
         if args.gen_only:
             return
+        golden = validate_golden_baseline(args)
+        args._golden_manifest = golden
         rows = []
         for wl in args.workloads:
             for skew in args.skews:
