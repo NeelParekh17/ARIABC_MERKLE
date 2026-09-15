@@ -151,8 +151,12 @@ PGresult* PQexec(PGconn* conn, const char* query) {
     pg_result* res = new pg_result();
     res->status = PGRES_TUPLES_OK;
 
-    if (q.find("raft_apply_schema_meta") != std::string::npos) {
-        res->rows.push_back({"1", "2", "2"}); // count = 1, min = 2, max = 2
+    if (q.find("SET SESSION CHARACTERISTICS") == 0) {
+        res->status = PGRES_COMMAND_OK;
+    } else if (q.find("merkle_recovery_status") != std::string::npos) {
+        res->rows.push_back({"{\"state\":\"READY\"}"});
+    } else if (q.find("raft_apply_schema_meta") != std::string::npos) {
+        res->rows.push_back({"1", "4", "4"}); // current schema version
     } else if (q.find("raft_apply_epoch") != std::string::npos) {
         res->rows.push_back({"1"}); // protocol_version = 1
     } else if (q.find("raft_apply_item") != std::string::npos && q.find("state = 1") != std::string::npos) {

@@ -37,10 +37,11 @@ class GatewayValidationTests(unittest.TestCase):
         direct = GOOD.replace('success_count=20000', 'success_count=0').replace(
             'client_quorum_complete_count=20000', 'client_quorum_complete_count=0')
         direct += ('PROFILE_GATEWAY completion_path=direct submit_mode=event '
-                   'submit_attempts=20000 read_calls=5314 not_accepted=0\n')
+                   'submit_attempts=20000 read_calls=5314 not_accepted=0 '
+                   'direct_completion_protocol=2 direct_terminal_success_count=20000\n')
         self.assertEqual(parse_gateway_result(direct, 20000, mode='pg')['validated_completed_queries'], 20000)
         with self.assertRaises(ValueError):
-            parse_gateway_result(direct.replace('submit_attempts=20000', 'submit_attempts=20001'),
+            parse_gateway_result(direct.replace('direct_terminal_success_count=20000', 'direct_terminal_success_count=19999'),
                                  20000, mode='pg')
         direct += ('PROGRESS_GATEWAY_DET total=20000 sent=20000 accepted=20000 completed=20000 '
                    'pipeline_outstanding=0 majority_inflight=0 pending_accept=0 final=1\n')
@@ -48,6 +49,16 @@ class GatewayValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_gateway_result(direct.replace('completed=20000', 'completed=19999'),
                                  20000, mode='bcdb_merkle')
+
+    def test_old_false_pass_profiles_are_rejected(self):
+        old = GOOD + ('PROFILE_GATEWAY completion_path=direct submit_mode=event '
+                      'submit_attempts=20000 read_calls=5314 not_accepted=0\n'
+                      'PROGRESS_GATEWAY_DET total=20000 sent=20000 accepted=20000 '
+                      'completed=20000 pipeline_outstanding=0 majority_inflight=0 '
+                      'pending_accept=0 final=1\n')
+        for mode in ('pg', 'bcdb_det', 'bcdb_merkle'):
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                parse_gateway_result(old, 20000, mode=mode)
 
     def test_complete(self):
         result = parse_gateway_result(GOOD, 20000)
@@ -126,6 +137,7 @@ class RunnerTests(unittest.TestCase):
     def test_invalid_config_fails_before_remote_actions(self):
         for argv in (['--reset-mode', 'inplace'], ['--skews', 'nan'], ['--skews', '-.1'],
                      ['--workers', '0'], ['--db-rows', '0'], ['--workloads', 'typo'],
+                     ['--verify-mode', 'invalid'],
                      ['--remote-dir', '/tmp/../'], ['--shared-buffers', '32MB;echo bad']):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 oom.parse_args(argv)
@@ -164,6 +176,15 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(any('fuser -k' in command for command in captured))
         self.assertFalse(any("-delete" in command for command in captured))
 
+    def test_checkpoint_phase_evidence(self):
+        result = oom.parse_checkpoint_log('checkpoint complete: wrote 2077 buffers (50.7%); '
+            '0 WAL file(s) added, 0 removed, 0 recycled; write=0.012 s, sync=26.100 s, '
+            'total=26.200 s; sync files=31, longest=25.000 s, average=0.842 s; distance=0 kB')
+        self.assertEqual(result['sync_ms'], 26100)
+        self.assertEqual(result['write_ms'], 12)
+        with self.assertRaises(RuntimeError):
+            oom.parse_checkpoint_log('')
+
     def test_device_errors_and_counter_reset_not_reported_as_zero(self):
         with self.assertRaises(RuntimeError):
             oom.delta({'read': 100}, {'read': 99}, 'read')
@@ -173,14 +194,24 @@ class RunnerTests(unittest.TestCase):
 
     def test_reset_validates_before_cache_drop_and_clears_auto_conf(self):
         args = oom.parse_args([])
+        args._golden_manifest = dict(
+            version=2, db_rows=100000000,
+            keyspace='100000000|1|100000000',
+            heap_bytes=25600000000, index_bytes=2246000000, relpages=3125000,
+            file_count=42, total_bytes=31200000000,
+            pg_version_sha256='abc123', pg_control_sha256='ctrl456',
+            indexes=[{'indexname': 'usertable_pkey1', 'indexdef': 'USING btree'}])
         commands = []
         def fake_remote(host, user, command, **kwargs):
             commands.append(command)
             return subprocess.CompletedProcess([], 0, '', '')
         settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
-                        synchronous_commit='on', track_counts='on', track_io_timing='on')
-        responses = ['', '100000000|1|100000000', '[{"indexdef":"USING btree"}]',
+                        synchronous_commit='on', track_counts='on', track_io_timing='on',
+                        log_checkpoints='on', bcdb_ledger_trace='off')
+        # Sequence: 1. drop indexes (non-merkle), 2. min/max bounds, 3. relation sizes & relpages, 4. index query, 5. settings, 6. sizes
+        responses = ['', '1|100000000', '25600000000|2246000000|3125000',
+                     '[{"indexdef":"USING btree"}]',
                      json.dumps(settings), '{"heap_bytes":25600000000}']
         with mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
              mock.patch.object(oom, 'prepare_ledger_schema'), \
@@ -190,11 +221,142 @@ class RunnerTests(unittest.TestCase):
         script = '\n'.join(commands)
         self.assertIn('postgresql.auto.conf', script)
         self.assertIn('cp -a --reflink=never', script)
+        # Verify pre-startup copy check is present before postmaster starts
+        self.assertIn('test "$(find', script)
+        self.assertIn('pgdata -type f | wc -l)" -eq "42"', script)
+        self.assertIn('sync', script)
         self.assertIn('drop_caches', script)
         self.assertNotIn('fuser -k', script)
         for command in commands:
             check = subprocess.run(['bash', '-n'], input=command, text=True, capture_output=True)
             self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_reset_verify_mode_full_runs_table_scan(self):
+        args = oom.parse_args(['--verify-mode', 'full'])
+        args._golden_manifest = dict(
+            version=2, db_rows=100000000,
+            keyspace='100000000|1|100000000',
+            heap_bytes=25600000000, index_bytes=2246000000, relpages=3125000,
+            file_count=42, total_bytes=31200000000,
+            pg_version_sha256='abc123', pg_control_sha256='ctrl456',
+            indexes=[{'indexname': 'usertable_pkey1', 'indexdef': 'USING btree'}])
+        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+                        enable_merkle_index='off', fsync='on', full_page_writes='on',
+                        synchronous_commit='on', track_counts='on', track_io_timing='on',
+                        log_checkpoints='on', bcdb_ledger_trace='off')
+        # Full mode sequence: 1. drop indexes, 2. full count(*) scan, 3. relation sizes, 4. index query, 5. settings, 6. sizes
+        sql_queries = []
+        def fake_sql(a, stmt, **kwargs):
+            sql_queries.append(stmt)
+            if 'DROP INDEX' in stmt:
+                return ''
+            if 'SELECT count(*)' in stmt:
+                return '100000000|1|100000000'
+            if 'pg_relation_size' in stmt and 'pg_database_size' not in stmt:
+                return '25600000000|2246000000|3125000'
+            if 'pg_indexes' in stmt:
+                return '[{"indexdef":"USING btree"}]'
+            if 'pg_settings' in stmt:
+                return json.dumps(settings)
+            if 'pg_database_size' in stmt:
+                return '{"heap_bytes":25600000000}'
+            return ''
+
+        with mock.patch.object(oom, 'run_remote', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+             mock.patch.object(oom, 'prepare_ledger_schema'), \
+             mock.patch.object(oom, 'sql', side_effect=fake_sql):
+            result = oom.reset_remote_pgdata(args, 'pg', 1)
+        self.assertTrue(any('SELECT count(*)' in q for q in sql_queries))
+        self.assertEqual(result['keyspace'], '100000000|1|100000000')
+
+    def test_golden_manifest_cached_when_fresh(self):
+        args = oom.parse_args([])
+        manifest = dict(
+            version=2, db_rows=100000000,
+            keyspace='100000000|1|100000000',
+            db_system_id='7684032419562209436',
+            checkpoint_lsn='5/AF7085F0',
+            pg_control_sha256='ctrl456', pg_version_sha256='abc123',
+            file_count=42, total_bytes=31200000000,
+            heap_bytes=25600000000, index_bytes=2246000000, relpages=3125000,
+            indexes=[{'indexname': 'usertable_pkey1', 'indexdef': 'USING btree'}])
+        meta_lines = "7684032419562209436\nshut down\n5/AF7085F0\nctrl456  pg_control\nabc123  PG_VERSION\n42\n31200000000\n"
+        def fake_remote(host, user, command, **kwargs):
+            if 'pg_controldata' in command:
+                return subprocess.CompletedProcess([], 0, meta_lines, '')
+            if '.ariabc_golden_manifest.json' in command:
+                return subprocess.CompletedProcess([], 0, json.dumps(manifest), '')
+            return subprocess.CompletedProcess([], 0, '', '')
+        with mock.patch.object(oom, 'run_remote', side_effect=fake_remote):
+            result = oom.validate_golden_baseline(args)
+        self.assertEqual(result['db_rows'], 100000000)
+        self.assertEqual(result['checkpoint_lsn'], '5/AF7085F0')
+
+    def test_stale_golden_manifest_rejected_when_baseline_changes(self):
+        args = oom.parse_args([])
+        manifest = dict(
+            version=2, db_rows=100000000,
+            keyspace='100000000|1|100000000',
+            db_system_id='7684032419562209436',
+            checkpoint_lsn='5/AF7085F0',  # OLD LSN
+            pg_control_sha256='ctrl456', pg_version_sha256='abc123',
+            file_count=42, total_bytes=31200000000)
+        # Active baseline has new checkpoint LSN 5/B0000000 (baseline changed!)
+        meta_lines = "7684032419562209436\nshut down\n5/B0000000\nctrl_new  pg_control\nabc123  PG_VERSION\n42\n31200000000\n"
+        commands = []
+        sql_responses = ['100000000|1|100000000\n', '25600000000|2246000000|27850000000|3125000\n', '[]\n']
+        def fake_remote(host, user, command, **kwargs):
+            commands.append(command)
+            if 'pg_controldata' in command:
+                return subprocess.CompletedProcess([], 0, meta_lines, '')
+            if '.ariabc_golden_manifest.json' in command and 'cat' in command:
+                return subprocess.CompletedProcess([], 0, json.dumps(manifest), '')
+            if 'psql' in command:
+                return subprocess.CompletedProcess([], 0, sql_responses.pop(0), '')
+            return subprocess.CompletedProcess([], 0, '', '')
+        with mock.patch.object(oom, 'run_remote', side_effect=fake_remote):
+            result = oom.validate_golden_baseline(args)
+        # Verifies re-validation ran because LSN was stale
+        self.assertEqual(result['checkpoint_lsn'], '5/B0000000')
+
+    def test_fast_reset_rejects_mismatched_relation_size(self):
+        args = oom.parse_args([])
+        args._golden_manifest = dict(
+            version=2, db_rows=100000000,
+            keyspace='100000000|1|100000000',
+            heap_bytes=25600000000, index_bytes=2246000000, relpages=3125000,
+            file_count=42, total_bytes=31200000000,
+            pg_version_sha256='abc123', pg_control_sha256='ctrl456',
+            indexes=[{'indexname': 'usertable_pkey1', 'indexdef': 'USING btree'}])
+        def fake_remote(host, user, command, **kwargs):
+            return subprocess.CompletedProcess([], 0, '', '')
+        # Return wrong heap size (e.g. truncated or missing rows)
+        responses = ['', '1|100000000', '25599999999|2246000000|3125000']
+        with mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
+             mock.patch.object(oom, 'prepare_ledger_schema'), \
+             mock.patch.object(oom, 'sql', side_effect=responses), \
+             self.assertRaises(RuntimeError) as ctx:
+            oom.reset_remote_pgdata(args, 'pg', 1)
+        self.assertIn("Post-copy heap size mismatch", str(ctx.exception))
+
+    def test_golden_validation_cleans_up_check_dir_on_failure(self):
+        args = oom.parse_args([])
+        meta_lines = "7684032419562209436\nshut down\n5/AF7085F0\nctrl456  pg_control\nabc123  PG_VERSION\n42\n31200000000\n"
+        commands = []
+        def fake_remote(host, user, command, **kwargs):
+            commands.append(command)
+            if 'pg_controldata' in command:
+                return subprocess.CompletedProcess([], 0, meta_lines, '')
+            return subprocess.CompletedProcess([], 0, '', '')
+        # Simulate failure during full scan query
+        with mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
+             mock.patch.object(oom, 'sql', side_effect=RuntimeError("Simulated query timeout")):
+            with self.assertRaises(RuntimeError):
+                oom.validate_golden_baseline(args)
+        # Check that cleanup of pgdata_golden_check was executed in finally
+        cleanup_script = '\n'.join(commands)
+        self.assertIn('rm -rf /tmp/ariabc_oom_100m/pgdata_golden_check', cleanup_script)
+        self.assertIn('pg_ctl -D /tmp/ariabc_oom_100m/pgdata_golden_check -w stop -m immediate', cleanup_script)
 
 
 if __name__ == '__main__':

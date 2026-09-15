@@ -45,6 +45,7 @@ bool    bcdb_gate_snapshot_each_block = false;
  * partial totals).
  */
 bool    bcdb_gate_telemetry_enabled = false;
+bool    bcdb_ledger_trace = false;
 pid_t   pid;
 BcdbIsolationLevel BcdbCurrentIsolationLevel = BCDB_SERIALIZABLE;
 int32         worker_id;

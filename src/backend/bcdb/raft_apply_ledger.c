@@ -2040,7 +2040,8 @@ bcdb_finish_terminal_item(BCDBShmXact *tx,
 		mem_txid = (int)(tx->tx_id % (BCTxID) slots);
 		if (mem_txid < 0) mem_txid += slots;
 
-		elog(LOG,
+		if (bcdb_ledger_trace)
+			elog(LOG,
 			 "SAFE_RING_WRITE log=%llu ord=%u tx=%d slot=%d payload_len=%zu",
 			 (unsigned long long) tx->raft_log_index,
 			 (unsigned) tx->raft_item_ordinal,
@@ -2107,7 +2108,8 @@ bcdb_finish_terminal_item(BCDBShmXact *tx,
 
 	bcdb_emit_ledger_boundary(is_replay ? "ledger_replay_complete" : "ledger_finalize");
 
-	elog(LOG,
+	if (bcdb_ledger_trace)
+		elog(LOG,
 		 "raft_apply_ledger: finished item log_index=%llu ordinal=%u "
 		 "is_error=%d is_replay=%d fmtver=%d",
 		 (unsigned long long) tx->raft_log_index,

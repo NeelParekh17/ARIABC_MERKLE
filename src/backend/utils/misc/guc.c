@@ -1017,6 +1017,15 @@ static struct config_bool ConfigureNamesBool[] =
 			NULL, NULL, NULL
 		},
 		{
+			{"bcdb_ledger_trace", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+				gettext_noop("Enable verbose per-transaction BCDB ledger trace messages."),
+				NULL
+			},
+			&bcdb_ledger_trace,
+			false,
+			NULL, NULL, NULL
+		},
+		{
 			{"bcdb_gate_telemetry", PGC_POSTMASTER, DEVELOPER_OPTIONS,
 				gettext_noop("Enable aggregate BCDB gate diagnostics."),
 				NULL
