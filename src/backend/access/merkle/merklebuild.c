@@ -124,9 +124,9 @@ merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
 						int fanout, int bits_per_split, int split_threshold,
 						int max_prefix_len)
 {
-	int			bucket_counts[16] = {0};
-	int			bucket_offsets[16] = {0};
-	MerkleHash	bucket_hashes[16];
+	int		   *bucket_counts;
+	int		   *bucket_offsets;
+	MerkleHash *bucket_hashes;
 	MerkleHash	node_hash;
 	int64		total_count = (int64) num_entries;
 	int			i;
@@ -137,10 +137,9 @@ merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
 	if (num_entries <= 0)
 		return node_hash;
 
-	if (fanout > 16)
-		elog(ERROR, "merkle tree fanout %d exceeds maximum stack capacity 16", fanout);
-
-	memset(bucket_hashes, 0, fanout * sizeof(MerkleHash));
+	bucket_counts = (int *) palloc0(fanout * sizeof(int));
+	bucket_offsets = (int *) palloc0(fanout * sizeof(int));
+	bucket_hashes = (MerkleHash *) palloc0(fanout * sizeof(MerkleHash));
 
 	entries_base = (ea->num_chunks == 1) ? &ea->chunks[0][start_idx] : NULL;
 
@@ -186,6 +185,10 @@ merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
 			merkle_hash_xor(&node_hash, &bucket_hashes[i]);
 		}
 	}
+
+	pfree(bucket_counts);
+	pfree(bucket_offsets);
+	pfree(bucket_hashes);
 
 	/* Emit internal node record after children */
 	if (prefix_len > 0)
@@ -1408,10 +1411,7 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	g_phase3_tree_build_ms = 0.0;
 	g_phase3_catalog_flush_ms = 0.0;
 
-	buildstate.chunks = NULL;
-	buildstate.num_chunks = 0;
-	buildstate.max_chunks = 0;
-	buildstate.num_entries = 0;
+	MemSet(&buildstate, 0, sizeof(buildstate));
 	MemSet(&ea, 0, sizeof(ea));
 	MemSet(&recovery_status, 0, sizeof(recovery_status));
 
