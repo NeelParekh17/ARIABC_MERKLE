@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(ariabc_pg_app LANGUAGES CXX)
+project(ariabc_pg_app LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -125,18 +125,31 @@ else()
     message(WARNING "libpq not found (libpq-fe.h / -lpq). Skipping ariabc_pg_server build.")
 endif()
 
+set(BLAKE3_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3.c
+    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3_dispatch.c
+    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3_portable.c)
+
+set_source_files_properties(${BLAKE3_SOURCES} PROPERTIES
+    COMPILE_DEFINITIONS "BLAKE3_NO_SSE2;BLAKE3_NO_SSE41;BLAKE3_NO_AVX2;BLAKE3_NO_AVX512")
+
+set(BLAKE3_INCLUDES
+    ${CMAKE_CURRENT_LIST_DIR}/../src/common)
+
 add_executable(ariabc_pg_gateway
                src/ariabc_pg_gateway.cxx
                src/async_cluster_submitter.cxx
                src/kafka_console.cxx
                src/wire_protocol_async.cxx
-               src/wire_protocol.cxx)
+               src/wire_protocol.cxx
+               ${BLAKE3_SOURCES})
 
 target_include_directories(ariabc_pg_gateway
                           PRIVATE
                             ${ARIABC_COMMON_INC}
                             ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
-                            ${RDKAFKA_INCLUDE_DIR})
+                            ${RDKAFKA_INCLUDE_DIR}
+                            ${BLAKE3_INCLUDES})
 
 target_compile_definitions(ariabc_pg_gateway PRIVATE ${ARIABC_TRANSPORT_DEFS})
 
@@ -145,6 +158,18 @@ target_link_libraries(ariabc_pg_gateway
                       ${ARIABC_PG_KAFKA_LIBS}
                       z
                       dl)
+
+add_executable(blake3_tx_sign_test
+               tests/blake3_tx_sign_test.cxx
+               ${BLAKE3_SOURCES})
+
+target_include_directories(blake3_tx_sign_test
+                          PRIVATE
+                            ${ARIABC_COMMON_INC}
+                            ${BLAKE3_INCLUDES})
+
+target_link_libraries(blake3_tx_sign_test
+                      pthread)
 
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/wire_protocol_test.cxx")
     add_executable(ariabc_pg_wire_protocol_test

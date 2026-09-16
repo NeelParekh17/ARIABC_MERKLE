@@ -152,6 +152,7 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
         "ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US": "2000",
         "ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS": "64",
         "ARIABC_FULL_RESULT_REPLICA_LIMIT": "-1",
+        "ARIABC_KAFKA_PAYLOAD_FORMAT": os.environ.get("ARIABC_KAFKA_PAYLOAD_FORMAT", "text"),
         "BCDB_DET_QUEUE_HIGH_WM": "65536", "BCDB_DET_QUEUE_LOW_WM": "32768",
         "GATEWAY_STALL_WATCHDOG": "1", "GATEWAY_STALL_POLL_SECONDS": "5",
         "GATEWAY_STALL_MAX_CYCLES": "12",

@@ -193,7 +193,7 @@ class RunnerTests(unittest.TestCase):
                 oom.get_remote_nvme_stats(oom.parse_args([]))
 
     def test_reset_validates_before_cache_drop_and_clears_auto_conf(self):
-        args = oom.parse_args([])
+        args = oom.parse_args(['--reset-mode', 'cp'])
         args._golden_manifest = dict(
             version=2, db_rows=100000000,
             keyspace='100000000|1|100000000',
@@ -230,6 +230,38 @@ class RunnerTests(unittest.TestCase):
         for command in commands:
             check = subprocess.run(['bash', '-n'], input=command, text=True, capture_output=True)
             self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_reset_mode_undo_in_place_and_cold_cache_restart(self):
+        args = oom.parse_args(['--reset-mode', 'undo'])
+        args._golden_manifest = dict(
+            version=2, db_rows=100000000,
+            keyspace='100000000|1|100000000',
+            heap_bytes=25600000000, index_bytes=2246000000, relpages=3125000,
+            file_count=42, total_bytes=31200000000,
+            pg_version_sha256='abc123', pg_control_sha256='ctrl456',
+            indexes=[{'indexname': 'usertable_pkey1', 'indexdef': 'USING btree'}])
+        commands = []
+        def fake_remote(host, user, command, **kwargs):
+            commands.append(command)
+            if 'test -f' in command and 'PG_VERSION' in command:
+                return subprocess.CompletedProcess([], 0, '', '')
+            return subprocess.CompletedProcess([], 0, '', '')
+        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+                        enable_merkle_index='off', fsync='on', full_page_writes='on',
+                        synchronous_commit='on', track_counts='on', track_io_timing='on',
+                        log_checkpoints='on', bcdb_ledger_trace='off')
+        responses = ['', '1|100000000', '25600000000|2246000000|3125000',
+                     '[{"indexdef":"USING btree"}]',
+                     json.dumps(settings), '{"heap_bytes":25600000000}']
+        with mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
+             mock.patch.object(oom, 'prepare_ledger_schema'), \
+             mock.patch.object(oom, 'sql', side_effect=responses):
+            result = oom.reset_remote_pgdata(args, 'pg', 1)
+        script = '\n'.join(commands)
+        self.assertNotIn('cp -a --reflink=never', script)
+        self.assertIn('drop_caches', script)
+        self.assertIn('postgresql.auto.conf', script)
+
 
     def test_reset_verify_mode_full_runs_table_scan(self):
         args = oom.parse_args(['--verify-mode', 'full'])
@@ -320,7 +352,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result['checkpoint_lsn'], '5/B0000000')
 
     def test_fast_reset_rejects_mismatched_relation_size(self):
-        args = oom.parse_args([])
+        args = oom.parse_args(['--reset-mode', 'cp'])
         args._golden_manifest = dict(
             version=2, db_rows=100000000,
             keyspace='100000000|1|100000000',
