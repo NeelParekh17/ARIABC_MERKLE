@@ -79,6 +79,8 @@ lib*.pc
 !/scripts/distributed/**
 !/scripts/generate_deterministic_workload.py
 !/scripts/verify_deterministic_engine.py
+!/scripts/ycsb_suite/
+!/scripts/ycsb_suite/**
 
 # Python bytecode under the distributed/ folder is still build output.
 /scripts/distributed/__pycache__/

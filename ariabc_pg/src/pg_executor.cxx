@@ -1268,6 +1268,88 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
     return out;
 }
 
+bool is_kafka_text_format() {
+    const char* val = std::getenv("ARIABC_KAFKA_PAYLOAD_FORMAT");
+    return val && (::strcmp(val, "text") == 0 || ::strcmp(val, "TEXT") == 0 || ::strcmp(val, "1") == 0);
+}
+
+std::string build_text_batch_payload(const std::vector<std::string>& req_ids,
+                                     const std::vector<std::string>& results,
+                                     const std::vector<uint64_t>& raft_log_idxs,
+                                     const std::vector<int>& leader_node_hints,
+                                     const std::vector<std::string>& terminal_digests,
+                                     const std::vector<uint32_t>& raft_item_ordinals,
+                                     const std::vector<std::string>& terminal_states,
+                                     const std::vector<int>& format_versions,
+                                     uint16_t node_id,
+                                     const std::string& sig_key,
+                                     const std::string& raft_epoch_hex,
+                                     bool safe_ledger_mode)
+{
+    std::string out;
+    out.reserve(req_ids.size() * 128);
+
+    const int full_result_limit = full_result_replica_limit();
+    const bool include_full_result =
+        (full_result_limit == 0 ||
+         (full_result_limit > 0 && static_cast<int>(node_id) <= full_result_limit));
+
+    for (size_t i = 0; i < req_ids.size(); ++i) {
+        uint64_t req_num = 0;
+        if (!parse_req_num(req_ids[i], req_num)) {
+            req_num = static_cast<uint64_t>(std::hash<std::string>{}(req_ids[i]));
+        }
+
+        const int leader_node_id = (i < leader_node_hints.size()) ? leader_node_hints[i] : -1;
+        const uint64_t raft_log_idx = (i < raft_log_idxs.size()) ? raft_log_idxs[i] : 0;
+        const uint32_t raft_item_ordinal = (i < raft_item_ordinals.size()) ? raft_item_ordinals[i] : 0;
+
+        std::string term_digest_hex;
+        if (i < terminal_digests.size() && terminal_digests[i].size() == 64) {
+            term_digest_hex = terminal_digests[i];
+        } else {
+            term_digest_hex = canonical_result_hash(results[i]);
+        }
+
+        out += "T1\t";
+        out += std::to_string(req_num) + "\t";
+        out += req_ids[i] + "\t";
+        out += std::to_string(node_id) + "\t";
+        out += std::to_string(leader_node_id) + "\t";
+        out += std::to_string(raft_log_idx) + "\t";
+        out += std::to_string(include_full_result ? 1 : 0) + "\t";
+        out += term_digest_hex + "\t";
+        if (include_full_result) {
+            out += results[i];
+        }
+        out += "\n";
+    }
+    return out;
+}
+
+std::string build_batch_payload(const std::vector<std::string>& req_ids,
+                                const std::vector<std::string>& results,
+                                const std::vector<uint64_t>& raft_log_idxs,
+                                const std::vector<int>& leader_node_hints,
+                                const std::vector<std::string>& terminal_digests,
+                                const std::vector<uint32_t>& raft_item_ordinals,
+                                const std::vector<std::string>& terminal_states,
+                                const std::vector<int>& format_versions,
+                                uint16_t node_id,
+                                const std::string& sig_key,
+                                const std::string& raft_epoch_hex,
+                                bool safe_ledger_mode)
+{
+    if (is_kafka_text_format()) {
+        return build_text_batch_payload(req_ids, results, raft_log_idxs, leader_node_hints,
+                                        terminal_digests, raft_item_ordinals, terminal_states,
+                                        format_versions, node_id, sig_key, raft_epoch_hex, safe_ledger_mode);
+    }
+    return build_bin_batch_payload_v2(req_ids, results, raft_log_idxs, leader_node_hints,
+                                      terminal_digests, raft_item_ordinals, terminal_states,
+                                      format_versions, node_id, sig_key, raft_epoch_hex, safe_ledger_mode);
+}
+
 static std::string hex_preview(const std::string& input)
 {
     static const char digits[] = "0123456789abcdef";
@@ -3171,7 +3253,7 @@ void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& b
 
     std::string err;
     const auto b0 = std::chrono::steady_clock::now();
-    const std::string payload = build_bin_batch_payload_v2(
+    const std::string payload = build_batch_payload(
         batch_req_ids,
         batch_results,
         batch_raft_log_idxs,
@@ -3905,7 +3987,7 @@ void pg_executor::worker_loop() {
         // send ONCE. The consumer (gateway) already decodes 'B3' payloads
         // with N>1 records via parse_kafka_payload_records.
         const auto b0 = std::chrono::steady_clock::now();
-        const std::string payload = build_bin_batch_payload_v2(
+        const std::string payload = build_batch_payload(
             batch_req_ids,
             batch_results,
             batch_raft_log_idxs,
@@ -4510,7 +4592,7 @@ void pg_executor::event_loop() {
         std::string err;
         // True batching: build ONE multi-record payload, send ONCE.
         const auto b0 = std::chrono::steady_clock::now();
-        const std::string payload = build_bin_batch_payload_v2(
+        const std::string payload = build_batch_payload(
             batch_req_ids,
             batch_results,
             batch_raft_log_idxs,
