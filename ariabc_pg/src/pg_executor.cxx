@@ -1,5 +1,6 @@
 #include "pg_executor.hxx"
 #include "pg_error_result.hxx"
+#include "pg_retry_policy.hxx"
 
 #include "ariabc_pg_util.hxx"
 
@@ -108,11 +109,14 @@ size_t kafka_async_result_publisher_max_records() {
 
 size_t kafka_async_result_publisher_target_records() {
     const char* v = std::getenv("ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS");
-    if (!v || !*v) return 64;
+    if (!v || !*v) {
+        v = std::getenv("ARIABC_KAFKA_RESULT_BATCH_TARGET_RECORDS");
+    }
+    if (!v || !*v) return 32;
     char* end = nullptr;
     errno = 0;
     const unsigned long long parsed = std::strtoull(v, &end, 10);
-    if (errno != 0 || end == v || *end != '\0' || parsed == 0) return 64;
+    if (errno != 0 || end == v || *end != '\0' || parsed == 0) return 32;
     return static_cast<size_t>(std::min<unsigned long long>(parsed, 4096ULL));
 }
 
@@ -145,7 +149,7 @@ int kafka_async_result_publisher_delay_us() {
             return static_cast<int>(parsed);
         }
     }
-    return 50;
+    return 150;
 }
 
 static const int kConfiguredDelayUs = []() -> int {
@@ -1478,7 +1482,7 @@ pg_executor::ConfirmedResult pg_executor::accept_safe_confirmed_result(const pg_
         res.raft_log_index = t.raft_log_idx;
         res.raft_item_ordinal = t.raft_item_ordinal;
         res.terminal_digest = "";
-        res.terminal_state = "OK";
+        res.terminal_state = (raw_backend_result.rfind("ERROR", 0) == 0) ? "ERROR" : "OK";
         res.payload = raw_backend_result;
         res.format_version = 1;
         return res;
@@ -2418,22 +2422,20 @@ pg_executor::pg_executor(int node_id,
     queue_low_wm_ = std::max<size_t>(
         low_min,
         static_cast<size_t>(db_opt_.conn_pool_size) * low_factor);
-    if (det_mode) {
-        if (const char* v = std::getenv("BCDB_DET_QUEUE_HIGH_WM")) {
-            errno = 0;
-            char* end = nullptr;
-            const unsigned long long override_high = std::strtoull(v, &end, 10);
-            if (errno == 0 && end && *end == '\0' && override_high > 0) {
-                queue_high_wm_ = static_cast<size_t>(override_high);
-            }
+    if (const char* v = std::getenv("BCDB_DET_QUEUE_HIGH_WM")) {
+        errno = 0;
+        char* end = nullptr;
+        const unsigned long long override_high = std::strtoull(v, &end, 10);
+        if (errno == 0 && end && *end == '\0' && override_high > 0) {
+            queue_high_wm_ = static_cast<size_t>(override_high);
         }
-        if (const char* v = std::getenv("BCDB_DET_QUEUE_LOW_WM")) {
-            errno = 0;
-            char* end = nullptr;
-            const unsigned long long override_low = std::strtoull(v, &end, 10);
-            if (errno == 0 && end && *end == '\0' && override_low > 0) {
-                queue_low_wm_ = static_cast<size_t>(override_low);
-            }
+    }
+    if (const char* v = std::getenv("BCDB_DET_QUEUE_LOW_WM")) {
+        errno = 0;
+        char* end = nullptr;
+        const unsigned long long override_low = std::strtoull(v, &end, 10);
+        if (errno == 0 && end && *end == '\0' && override_low > 0) {
+            queue_low_wm_ = static_cast<size_t>(override_low);
         }
     }
     if (queue_low_wm_ > queue_high_wm_) {
@@ -2926,6 +2928,7 @@ pg_executor_stats pg_executor::stats() const {
     out.retryable_sqlstate_40P01 = st_retryable_sqlstate_40P01_.load(std::memory_order_relaxed);
     out.retryable_sqlstate_57014 = st_retryable_sqlstate_57014_.load(std::memory_order_relaxed);
     out.retry_attempts_total = st_retry_attempts_total_.load(std::memory_order_relaxed);
+    out.retry_backoff_requested_ms = st_retry_backoff_requested_ms_.load(std::memory_order_relaxed);
     out.retry_exhausted_total = st_retry_exhausted_total_.load(std::memory_order_relaxed);
     out.kafka_flush_calls = st_kafka_flush_calls_.load(std::memory_order_relaxed);
     out.kafka_payload_bytes = st_kafka_payload_bytes_.load(std::memory_order_relaxed);
@@ -3131,6 +3134,17 @@ void pg_executor::enqueue_kafka_result(const task& t, const ConfirmedResult& con
     kafka_pub_cv_.notify_one();
 }
 
+int32_t pg_executor::kafka_partition() const {
+    const char* env_part = ::getenv("ARIABC_KAFKA_PARTITION");
+    if (env_part && *env_part) {
+        return static_cast<int32_t>(std::atoi(env_part));
+    }
+    if (node_id_ == 1) return 0;
+    if (node_id_ == 2) return 1;
+    if (node_id_ == 4) return 2;
+    return (node_id_ > 0) ? static_cast<int32_t>((node_id_ - 1) % 3) : -1;
+}
+
 void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& batch,
                                              kafka_flush_reason reason) {
     if (!kafka_enabled_ || batch.empty()) return;
@@ -3275,7 +3289,7 @@ void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& b
                                       std::memory_order_relaxed);
 
     const auto s0 = std::chrono::steady_clock::now();
-    const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err);
+    const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err, kafka_partition());
     if (!kafka_send_ok) {
         std::cerr << "Kafka async result send failed: " << err << std::endl;
     }
@@ -3350,7 +3364,11 @@ void pg_executor::kafka_publisher_loop() {
                     break;
                 }
 
-                const int linger_us = (max_delay_us > 0) ? max_delay_us : 2000;
+                if (max_delay_us <= 0) {
+                    reason = kafka_flush_reason::AGE;
+                    break;
+                }
+                const int linger_us = max_delay_us;
                 const auto deadline =
                     batch_start + std::chrono::microseconds(linger_us);
                 const bool woke = kafka_pub_cv_.wait_until(lk, deadline, [this] {
@@ -3472,20 +3490,25 @@ void pg_executor::notify_task_failed(uint64_t raft_log_idx,
 void pg_executor::mark_task_applied_ordered(uint64_t dispatch_seq,
                                             uint64_t raft_log_idx,
                                             uint32_t item_ordinal,
-                                            uint64_t ready_ns) {
+                                            uint64_t ready_ns,
+                                            const std::string& failure_reason) {
     if (raft_log_idx == 0) return;
     if (dispatch_seq == 0) {
-        notify_task_applied(raft_log_idx, item_ordinal);
+        if (failure_reason.empty()) {
+            notify_task_applied(raft_log_idx, item_ordinal);
+        } else {
+            notify_task_failed(raft_log_idx, item_ordinal, failure_reason);
+        }
         return;
     }
 
-    std::vector<std::pair<uint64_t, uint32_t>> ready_to_notify;
+    std::vector<ordered_apply_result> ready_to_notify;
     {
         std::lock_guard<std::mutex> lk(det_ordered_apply_mu_);
         if (dispatch_seq < det_next_ordered_apply_seq_) {
             return;
         }
-        det_ordered_apply_ready_[dispatch_seq] = {raft_log_idx, item_ordinal};
+        det_ordered_apply_ready_[dispatch_seq] = {raft_log_idx, item_ordinal, failure_reason};
         const uint64_t pending = static_cast<uint64_t>(det_ordered_apply_ready_.size());
         uint64_t cur_max = st_ordered_apply_pending_max_.load(std::memory_order_relaxed);
         while (pending > cur_max &&
@@ -3496,7 +3519,7 @@ void pg_executor::mark_task_applied_ordered(uint64_t dispatch_seq,
         for (;;) {
             auto it = det_ordered_apply_ready_.find(det_next_ordered_apply_seq_);
             if (it == det_ordered_apply_ready_.end()) break;
-            ready_to_notify.push_back(it->second);
+            ready_to_notify.push_back(std::move(it->second));
             det_ordered_apply_ready_.erase(it);
             ++det_next_ordered_apply_seq_;
         }
@@ -3509,8 +3532,12 @@ void pg_executor::mark_task_applied_ordered(uint64_t dispatch_seq,
                                                 std::memory_order_relaxed);
         }
     }
-    for (const auto& p : ready_to_notify) {
-        notify_task_applied(p.first, p.second);
+    for (const auto& item : ready_to_notify) {
+        if (item.failure_reason.empty()) {
+            notify_task_applied(item.raft_log_idx, item.item_ordinal);
+        } else {
+            notify_task_failed(item.raft_log_idx, item.item_ordinal, item.failure_reason);
+        }
     }
 }
 
@@ -3738,7 +3765,10 @@ std::string pg_executor::exec_sql(PGconn* c, const std::string& sql, bool* is_er
         }
 
         st_retry_attempts_total_.fetch_add(1, std::memory_order_relaxed);
-        std::this_thread::sleep_for(std::chrono::milliseconds(db_opt_.retry_backoff_ms));
+        const int delay_ms = pg_retry_delay_ms(db_opt_.db_type, sqlstate.c_str(),
+                                               attempt, db_opt_.retry_backoff_ms);
+        st_retry_backoff_requested_ms_.fetch_add(delay_ms, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     }
 
     {
@@ -4022,7 +4052,7 @@ void pg_executor::worker_loop() {
                       << " bytes=" << payload.size()
                       << std::endl;
         }
-        const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err);
+        const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err, kafka_partition());
         if (!kafka_send_ok) {
             std::cerr << "Kafka send failed: " << err << std::endl;
         } else if (safe_trace_on) {
@@ -4179,12 +4209,13 @@ void pg_executor::worker_loop() {
                 if (should_publish_kafka_result(node_id_)) {
                     if (db_opt_.raft_apply_ledger_mode != "safe") {
                         if (t.dispatch_seq == 0) {
-                            notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
+                            notify_task_failed(t.raft_log_idx, t.raft_item_ordinal, result);
                         } else {
                             mark_task_applied_ordered(t.dispatch_seq,
                                                       t.raft_log_idx,
                                                       t.raft_item_ordinal,
-                                                      now_steady_ns());
+                                                      now_steady_ns(),
+                                                      result);
                         }
                     }
                     if (async_kafka_publisher_active()) {
@@ -4213,6 +4244,15 @@ void pg_executor::worker_loop() {
             } else {
                 std::cout << (t.req_id + "  " + std::to_string(node_id_) + "  " + result)
                           << std::endl;
+                if (t.dispatch_seq == 0) {
+                    notify_task_failed(t.raft_log_idx, t.raft_item_ordinal, result);
+                } else {
+                    mark_task_applied_ordered(t.dispatch_seq,
+                                              t.raft_log_idx,
+                                              t.raft_item_ordinal,
+                                              now_steady_ns(),
+                                              result);
+                }
             }
             finish_ordered_emit(t.dispatch_seq);
             continue;
@@ -4357,13 +4397,19 @@ void pg_executor::worker_loop() {
         if (kafka_enabled_ &&
             should_publish_kafka_result(node_id_) &&
             db_opt_.raft_apply_ledger_mode != "safe") {
+            const std::string fail_reason = (is_error || confirmed.terminal_state == "ERROR" || result.rfind("ERROR", 0) == 0) ? result : "";
             if (t.dispatch_seq == 0) {
-                notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
+                if (fail_reason.empty()) {
+                    notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
+                } else {
+                    notify_task_failed(t.raft_log_idx, t.raft_item_ordinal, fail_reason);
+                }
             } else {
                 mark_task_applied_ordered(t.dispatch_seq,
                                           t.raft_log_idx,
                                           t.raft_item_ordinal,
-                                          now_steady_ns());
+                                          now_steady_ns(),
+                                          fail_reason);
             }
         }
 
@@ -4417,13 +4463,19 @@ void pg_executor::worker_loop() {
             const std::string msg =
                 t.req_id + "  " + std::to_string(node_id_) + "  " + result;
             std::cout << msg << std::endl;
+            const std::string fail_reason = (is_error || confirmed.terminal_state == "ERROR" || result.rfind("ERROR", 0) == 0) ? result : "";
             if (t.dispatch_seq == 0) {
-                notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
+                if (fail_reason.empty()) {
+                    notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
+                } else {
+                    notify_task_failed(t.raft_log_idx, t.raft_item_ordinal, fail_reason);
+                }
             } else {
                 mark_task_applied_ordered(t.dispatch_seq,
                                           t.raft_log_idx,
                                           t.raft_item_ordinal,
-                                          now_steady_ns());
+                                          now_steady_ns(),
+                                          fail_reason);
             }
         }
         if (kafka_enabled_ && !should_publish_kafka_result(node_id_)) {
@@ -4627,7 +4679,7 @@ void pg_executor::event_loop() {
                       << " bytes=" << payload.size()
                       << std::endl;
         }
-        const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err);
+        const bool kafka_send_ok = kafka_prod_.send_payload(payload, batch_req_ids.front(), err, kafka_partition());
         if (!kafka_send_ok) {
             std::cerr << "Kafka send failed: " << err << std::endl;
         } else if (safe_trace_on) {
@@ -4706,24 +4758,34 @@ void pg_executor::event_loop() {
     size_t last_inflight_level = 0;
 
     auto emit_det_result = [&](const task& done_task, const std::string& out, bool is_error = false, const std::string& terminal_digest = "", const std::string& terminal_state = "", int format_version = 1) {
+        const std::string eff_terminal_state =
+            terminal_state.empty() ? (is_error ? "ERROR" : "OK") : terminal_state;
+        const std::string fail_reason =
+            (is_error || eff_terminal_state == "ERROR" || out.rfind("ERROR", 0) == 0) ? out : "";
         if (kafka_enabled_) {
             if (should_publish_kafka_result(node_id_)) {
                 if (async_kafka_publisher_active()) {
                     ConfirmedResult conf;
                     conf.payload = out;
                     conf.terminal_digest = terminal_digest;
-                    conf.terminal_state =
-                        terminal_state.empty() ? (is_error ? "ERROR" : "OK") : terminal_state;
+                    conf.terminal_state = eff_terminal_state;
                     conf.format_version = format_version;
                     enqueue_kafka_result(done_task, conf);
                     if (done_task.dispatch_seq == 0) {
-                        notify_task_applied(done_task.raft_log_idx,
-                                            done_task.raft_item_ordinal);
+                        if (fail_reason.empty()) {
+                            notify_task_applied(done_task.raft_log_idx,
+                                                done_task.raft_item_ordinal);
+                        } else {
+                            notify_task_failed(done_task.raft_log_idx,
+                                               done_task.raft_item_ordinal,
+                                               fail_reason);
+                        }
                     } else {
                         mark_task_applied_ordered(done_task.dispatch_seq,
                                                   done_task.raft_log_idx,
                                                   done_task.raft_item_ordinal,
-                                                  now_steady_ns());
+                                                  now_steady_ns(),
+                                                  fail_reason);
                     }
                 } else {
                     debug_trace_exec(done_task.req_id, done_task.raft_log_idx, out);
@@ -4735,7 +4797,7 @@ void pg_executor::event_loop() {
                     batch_terminal_digests.push_back(terminal_digest);
                     batch_append_ns.push_back(now_steady_ns());
                     batch_raft_item_ordinals.push_back(done_task.raft_item_ordinal);
-                    batch_terminal_states.push_back(terminal_state.empty() ? (is_error ? "ERROR" : "OK") : terminal_state);
+                    batch_terminal_states.push_back(eff_terminal_state);
                     batch_format_versions.push_back(format_version);
                     batch_dispatch_seqs.push_back(done_task.dispatch_seq);
                     batch_ready_ns.push_back(now_steady_ns());
@@ -4750,22 +4812,32 @@ void pg_executor::event_loop() {
             std::cout << (done_task.req_id + "  " + std::to_string(node_id_) + "  " + out)
                       << std::endl;
             if (done_task.dispatch_seq == 0) {
-                notify_task_applied(done_task.raft_log_idx, done_task.raft_item_ordinal);
+                if (fail_reason.empty()) {
+                    notify_task_applied(done_task.raft_log_idx, done_task.raft_item_ordinal);
+                } else {
+                    notify_task_failed(done_task.raft_log_idx, done_task.raft_item_ordinal, fail_reason);
+                }
             } else {
                 mark_task_applied_ordered(done_task.dispatch_seq,
                                           done_task.raft_log_idx,
                                           done_task.raft_item_ordinal,
-                                          now_steady_ns());
+                                          now_steady_ns(),
+                                          fail_reason);
             }
         }
         if (kafka_enabled_ && !should_publish_kafka_result(node_id_)) {
             if (done_task.dispatch_seq == 0) {
-                notify_task_applied(done_task.raft_log_idx, done_task.raft_item_ordinal);
+                if (fail_reason.empty()) {
+                    notify_task_applied(done_task.raft_log_idx, done_task.raft_item_ordinal);
+                } else {
+                    notify_task_failed(done_task.raft_log_idx, done_task.raft_item_ordinal, fail_reason);
+                }
             } else {
                 mark_task_applied_ordered(done_task.dispatch_seq,
                                           done_task.raft_log_idx,
                                           done_task.raft_item_ordinal,
-                                          now_steady_ns());
+                                          now_steady_ns(),
+                                          fail_reason);
             }
         }
     };
@@ -5856,6 +5928,7 @@ void pg_executor::event_loop() {
                 std::string out;
                 bool retry = false;
                 std::string err_msg;
+                std::string retry_sqlstate;
                 const ExecStatusType st = last ? PQresultStatus(last) : PGRES_FATAL_ERROR;
                 const bool is_error = !(st == PGRES_TUPLES_OK || st == PGRES_COMMAND_OK);
                 if (!is_error) {
@@ -5879,6 +5952,7 @@ void pg_executor::event_loop() {
                     }
                 } else {
                     const char* sqlstate = last ? PQresultErrorField(last, PG_DIAG_SQLSTATE) : nullptr;
+                    retry_sqlstate = sqlstate ? sqlstate : "";
                     retry = is_retryable_sqlstate(sqlstate);
                     err_msg = ariabc_pg::canonical_pg_error_result(
                         sqlstate, last ? PQresultErrorField(last, PG_DIAG_MESSAGE_PRIMARY) : nullptr);
@@ -5912,8 +5986,11 @@ void pg_executor::event_loop() {
                         st_retry_attempts_total_.fetch_add(1, std::memory_order_relaxed);
                         done_task.attempt = attempt + 1;
                         delayed_task dt;
+                        const int delay_ms = pg_retry_delay_ms(db_opt_.db_type,
+                            retry_sqlstate.c_str(), attempt, db_opt_.retry_backoff_ms);
+                        st_retry_backoff_requested_ms_.fetch_add(delay_ms, std::memory_order_relaxed);
                         dt.deadline_ns = now_steady_ns() +
-                            static_cast<uint64_t>(std::max(0, db_opt_.retry_backoff_ms)) * 1000000ULL;
+                            static_cast<uint64_t>(delay_ms) * 1000000ULL;
                         dt.t = std::move(done_task);
                         {
                             std::lock_guard<std::mutex> lk(q_mu_);

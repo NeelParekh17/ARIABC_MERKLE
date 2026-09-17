@@ -211,12 +211,15 @@ bool kafka_console_producer::start(const std::string& bootstrap,
     }
 
     const char* acks = (profile == kafka_producer_profile::control_durable) ? "all" : "1";
-    const char* linger_ms = (profile == kafka_producer_profile::result_fast) ? "0" : "5";
+    const char* env_linger = ::getenv("ARIABC_KAFKA_PRODUCER_LINGER_MS");
+    const char* default_linger = (profile == kafka_producer_profile::result_fast) ? "0" : "5";
+    const char* linger_ms = (env_linger && *env_linger) ? env_linger : default_linger;
     const char* default_comp = (profile == kafka_producer_profile::result_fast) ? "lz4" : "snappy";
     const char* env_comp = ::getenv("ARIABC_KAFKA_COMPRESSION_TYPE");
     const char* compression = (env_comp && *env_comp) ? env_comp : default_comp;
     if (!conf_set(conf, "acks", acks, err) ||
         !conf_set(conf, "linger.ms", linger_ms, err) ||
+        !conf_set(conf, "queue.buffering.max.ms", linger_ms, err) ||
         !conf_set(conf, "batch.num.messages", "10000", err) ||
         !conf_set(conf, "batch.size", "1048576", err) ||
         !conf_set(conf, "compression.type", compression, err) ||
@@ -224,6 +227,7 @@ bool kafka_console_producer::start(const std::string& bootstrap,
         !conf_set(conf, "queue.buffering.max.kbytes", "1048576", err) ||
         !conf_set(conf, "socket.send.buffer.bytes", "4194304", err) ||
         !conf_set(conf, "socket.receive.buffer.bytes", "4194304", err) ||
+        !conf_set(conf, "socket.blocking.max.ms", "1", err) ||
         !conf_set(conf, "socket.nagle.disable", "true", err)) {
         rd_kafka_conf_destroy(conf);
         return false;
@@ -270,17 +274,19 @@ bool kafka_console_producer::start(const std::string& bootstrap,
 }
 
 bool kafka_console_producer::send_line(const std::string& line, std::string& err) {
-    return send_payload(line + "\n", std::string(), err);
+    return send_payload(line + "\n", std::string(), err, -1);
 }
 
 bool kafka_console_producer::send_payload(const std::string& payload,
                                           const std::string& key,
-                                          std::string& err) {
+                                          std::string& err,
+                                          int32_t partition) {
     if (!rk_) {
         err = "producer not started";
         return false;
     }
     rd_kafka_t* rk = reinterpret_cast<rd_kafka_t*>(rk_);
+    const int32_t eff_partition = (partition >= 0) ? partition : RD_KAFKA_PARTITION_UA;
     for (int attempt = 0; attempt < 6; ++attempt) {
         delivery_opaque* opaque = new delivery_opaque;
         opaque->producer = this;
@@ -289,7 +295,7 @@ bool kafka_console_producer::send_payload(const std::string& payload,
         const rd_kafka_resp_err_t e = rd_kafka_producev(
             rk,
             RD_KAFKA_V_TOPIC(topic_.c_str()),
-            RD_KAFKA_V_PARTITION(RD_KAFKA_PARTITION_UA),
+            RD_KAFKA_V_PARTITION(eff_partition),
             RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
             RD_KAFKA_V_KEY(key.empty() ? nullptr : key.data(), key.size()),
             RD_KAFKA_V_VALUE(const_cast<char*>(payload.data()), payload.size()),
@@ -466,15 +472,24 @@ bool kafka_console_consumer::start_latest_multi(const std::string& bootstrap,
         gid = "ariabc_pg_gateway";
     }
 
+    const char* env_fetch_wait = ::getenv("ARIABC_KAFKA_FETCH_WAIT_MAX_MS");
+    const char* fetch_wait_ms = (env_fetch_wait && *env_fetch_wait) ? env_fetch_wait : "1";
+
     if (!conf_set(conf, "group.id", gid, err) ||
         !conf_set(conf, "enable.auto.commit", "false", err) ||
         !conf_set(conf, "auto.offset.reset", "latest", err) ||
         // Majority-completion waits on these replies synchronously. Favor
         // low-latency fetch return over large broker-side batching.
         !conf_set(conf, "fetch.min.bytes", "1", err) ||
-        !conf_set(conf, "fetch.wait.max.ms", "100", err) ||
+        !conf_set(conf, "fetch.wait.max.ms", fetch_wait_ms, err) ||
+        !conf_set(conf, "fetch.error.backoff.ms", "1", err) ||
+        !conf_set(conf, "queued.min.messages", "100000", err) ||
+        !conf_set(conf, "queued.max.messages.kbytes", "1048576", err) ||
+        !conf_set(conf, "fetch.message.max.bytes", "10485760", err) ||
         !conf_set(conf, "max.partition.fetch.bytes", "8388608", err) ||
         !conf_set(conf, "socket.receive.buffer.bytes", "4194304", err) ||
+        !conf_set(conf, "socket.blocking.max.ms", "1", err) ||
+        !conf_set(conf, "check.crcs", "false", err) ||
         !conf_set(conf, "socket.nagle.disable", "true", err)) {
         rd_kafka_conf_destroy(conf);
         return false;
@@ -638,7 +653,7 @@ bool kafka_console_producer::send_line(const std::string&, std::string& err) {
     return false;
 }
 bool kafka_console_producer::send_payload(const std::string&, const std::string&,
-                                          std::string& err) {
+                                          std::string& err, int32_t) {
     err = "Kafka disabled";
     return false;
 }

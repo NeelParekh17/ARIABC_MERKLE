@@ -87,7 +87,7 @@ KAFKA_HOST="${KAFKA_HOST:-10.129.27.111}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
 KAFKA_RESULT_TOPIC="${KAFKA_RESULT_TOPIC:-ariabc_results}"
 KAFKA_HOME_REMOTE="${KAFKA_HOME_REMOTE:-/home/neel/Desktop/kafka_2.13-3.7.0}"
-KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
+KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-${KAFKA_HOST}:9092,${KAFKA_HOST}:9094,${KAFKA_HOST}:9096}"
 
 DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Gateway/server connection pool size
 BCDB_INIT_BLOCK_SIZE="${BCDB_INIT_BLOCK_SIZE:-}" # Legacy bcdb_init(True,N) argument; empty preserves DB_CONN_POOL_SIZE default
@@ -352,7 +352,7 @@ apply_topology_overrides() {
   [[ "$DB_PORT" =~ ^[0-9]+$ ]] || die "DB_PORT must be numeric: $DB_PORT"
   [[ "$KAFKA_PORT" =~ ^[0-9]+$ ]] || die "KAFKA_PORT must be numeric: $KAFKA_PORT"
   [[ -n "$KAFKA_HOST" ]] || die "KAFKA_HOST cannot be empty"
-  KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
+  KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-${KAFKA_HOST}:9092,${KAFKA_HOST}:9094,${KAFKA_HOST}:9096}"
 }
 
 # ---------------------------------------------------------------------------
@@ -474,10 +474,12 @@ BCDB_DET_QUEUE_LOW_WM="${BCDB_DET_QUEUE_LOW_WM:-0}"    # >0 overrides determinis
 BCDB_FLOW_DEBUG="${BCDB_FLOW_DEBUG:-0}"      # 1=emit targeted worker/apply flow logs on cluster replicas
 POSTGRES_LOG_MODE="${POSTGRES_LOG_MODE:-compact}"  # compact=filtered artifact, full=raw server.log
 DB_SHARED_BUFFERS="${DB_SHARED_BUFFERS:-32MB}"
-ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:-1}"  # -1=no replicas include full results; 0=all replicas include full SQL results; 1=Raft leader only
+ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:--1}"  # -1=no replicas include full results; 0=all replicas include full SQL results; 1=Raft leader only
 ARIABC_RESULT_PUBLISH_REPLICA_LIMIT="${ARIABC_RESULT_PUBLISH_REPLICA_LIMIT:-0}"  # 0=all replicas publish Kafka result records
-ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US="${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-2000}" # 2000us safety linger with pipeline idle drain
-ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS="${ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS:-64}" # target batch size 64 records
+ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US="${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-150}" # 150us micro-coalesce
+ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS="${ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS:-32}" # target batch size 32 records
+ARIABC_KAFKA_RESULT_BATCH_TARGET_RECORDS="${ARIABC_KAFKA_RESULT_BATCH_TARGET_RECORDS:-32}"
+ARIABC_KAFKA_ASYNC_RESULT_BATCH_RECORDS="${ARIABC_KAFKA_ASYNC_RESULT_BATCH_RECORDS:-256}"
 ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-1}"  # 0=Raft default election priority; 1=pin leader to admin123
 GATEWAY_BROADCAST_ACCEPT_QUORUM="${GATEWAY_BROADCAST_ACCEPT_QUORUM:-0}"  # 0=gateway legacy majority for broadcast accepts
 GATEWAY_BROADCAST_RESULT_QUORUM="${GATEWAY_BROADCAST_RESULT_QUORUM:-0}"  # 0=legacy accept-completion surface
@@ -2685,7 +2687,11 @@ if [[ ! -f "\$KAFKA_HOME/bin/kafka-topics.sh" ]]; then
 fi
 
 SERVER_PROPS="\$KAFKA_HOME/config/kraft/server.properties"
+SERVER_2_PROPS="\$KAFKA_HOME/config/kraft/server_2.properties"
+SERVER_3_PROPS="\$KAFKA_HOME/config/kraft/server_3.properties"
 GW_IP="${KAFKA_HOST}"
+STORAGE_SH="\$KAFKA_HOME/bin/kafka-storage.sh"
+SERVER_SH="\$KAFKA_HOME/bin/kafka-server-start.sh"
 
 sed -i "s|^advertised.listeners=.*|advertised.listeners=PLAINTEXT://\$GW_IP:${KAFKA_PORT}|" "\$SERVER_PROPS" 2>/dev/null || \
   echo "advertised.listeners=PLAINTEXT://\$GW_IP:${KAFKA_PORT}" >> "\$SERVER_PROPS"
@@ -2694,37 +2700,101 @@ grep -q '^socket.send.buffer.bytes=' "\$SERVER_PROPS" 2>/dev/null || echo "socke
 grep -q '^socket.receive.buffer.bytes=' "\$SERVER_PROPS" 2>/dev/null || echo "socket.receive.buffer.bytes=4194304" >> "\$SERVER_PROPS"
 grep -q '^num.network.threads=' "\$SERVER_PROPS" 2>/dev/null || echo "num.network.threads=8" >> "\$SERVER_PROPS"
 
-if "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" --list >/dev/null 2>&1; then
-  echo "Kafka already running at \$GW_IP:${KAFKA_PORT}"
-else
-  echo "Starting Kafka..."
-  STORAGE_SH="\$KAFKA_HOME/bin/kafka-storage.sh"
-  SERVER_SH="\$KAFKA_HOME/bin/kafka-server-start.sh"
+# Ensure server_2.properties and server_3.properties exist
+if [[ ! -f "\$SERVER_2_PROPS" ]]; then
+  cat > "\$SERVER_2_PROPS" << S2_EOF
+process.roles=broker
+node.id=2
+controller.quorum.voters=1@localhost:9093
+listeners=PLAINTEXT://:9094
+inter.broker.listener.name=PLAINTEXT
+advertised.listeners=PLAINTEXT://\${GW_IP}:9094
+controller.listener.names=CONTROLLER
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL,SASL_PLAINTEXT:SASL_PLAINTEXT,SASL_SSL:SASL_SSL
+num.network.threads=8
+num.io.threads=8
+socket.send.buffer.bytes=4194304
+socket.receive.buffer.bytes=4194304
+socket.request.max.bytes=104857600
+log.dirs=/tmp/kraft-broker-2-logs
+num.partitions=1
+num.recovery.threads.per.data.dir=1
+offsets.topic.replication.factor=1
+transaction.state.log.replication.factor=1
+transaction.state.log.min.isr=1
+log.retention.hours=168
+log.segment.bytes=1073741824
+log.retention.check.interval.ms=300000
+S2_EOF
+fi
+
+if [[ ! -f "\$SERVER_3_PROPS" ]]; then
+  cat > "\$SERVER_3_PROPS" << S3_EOF
+process.roles=broker
+node.id=3
+controller.quorum.voters=1@localhost:9093
+listeners=PLAINTEXT://:9096
+inter.broker.listener.name=PLAINTEXT
+advertised.listeners=PLAINTEXT://\${GW_IP}:9096
+controller.listener.names=CONTROLLER
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL,SASL_PLAINTEXT:SASL_PLAINTEXT,SASL_SSL:SASL_SSL
+num.network.threads=8
+num.io.threads=8
+socket.send.buffer.bytes=4194304
+socket.receive.buffer.bytes=4194304
+socket.request.max.bytes=104857600
+log.dirs=/tmp/kraft-broker-3-logs
+num.partitions=1
+num.recovery.threads.per.data.dir=1
+offsets.topic.replication.factor=1
+transaction.state.log.replication.factor=1
+transaction.state.log.min.isr=1
+log.retention.hours=168
+log.segment.bytes=1073741824
+log.retention.check.interval.ms=300000
+S3_EOF
+fi
+
+# Check broker 1
+if ! "\$TOPICS_SH" --bootstrap-server "\$GW_IP:9092" --list >/dev/null 2>&1; then
   cluster_id="\$("\$STORAGE_SH" random-uuid 2>/dev/null | tail -1 | tr -d '\r')"
   [[ -z "\$cluster_id" ]] && { echo "ERROR: failed to generate cluster ID" >&2; exit 1; }
   "\$STORAGE_SH" format -t "\$cluster_id" -c "\$SERVER_PROPS" --ignore-formatted >/dev/null 2>&1 || true
   "\$SERVER_SH" -daemon "\$SERVER_PROPS"
-  for i in \$(seq 1 60); do
-    if "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" --list >/dev/null 2>&1; then
-      echo "Kafka ready after \${i}s"
-      break
-    fi
-    sleep 1
-    [[ "\$i" -eq 60 ]] && { echo "ERROR: Kafka did not start" >&2; exit 1; }
-  done
 fi
 
-if [[ "${KAFKA_FAST_RESET:-1}" -eq 1 ]]; then
-  "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" --delete --topic "$KAFKA_RESULT_TOPIC" >/dev/null 2>&1 || true
-  "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" \
-    --create --topic "$KAFKA_RESULT_TOPIC" --partitions ${#NODE_IDS[@]} --replication-factor 1 --if-not-exists >/dev/null 2>&1 || true
-  echo "Topic '$KAFKA_RESULT_TOPIC' ready (fast reset PASS)"
-else
-  "\$TOPICS_SH" --bootstrap-server "\$GW_IP:${KAFKA_PORT}" \
-    --create --topic "$KAFKA_RESULT_TOPIC" --partitions ${#NODE_IDS[@]} --replication-factor 1 \
-    --if-not-exists >/dev/null 2>&1 || true
-  echo "Topic '$KAFKA_RESULT_TOPIC' ready"
+CLUSTER_ID="\$(grep '^cluster.id=' /tmp/kraft-combined-logs/meta.properties 2>/dev/null | cut -d= -f2 || true)"
+if [[ -n "\$CLUSTER_ID" ]]; then
+  "\$STORAGE_SH" format -t "\$CLUSTER_ID" -c "\$SERVER_2_PROPS" --ignore-formatted >/dev/null 2>&1 || true
+  "\$STORAGE_SH" format -t "\$CLUSTER_ID" -c "\$SERVER_3_PROPS" --ignore-formatted >/dev/null 2>&1 || true
 fi
+
+# Check broker 2
+if ! "\$TOPICS_SH" --bootstrap-server "\$GW_IP:9094" --list >/dev/null 2>&1; then
+  "\$SERVER_SH" -daemon "\$SERVER_2_PROPS"
+fi
+
+# Check broker 3
+if ! "\$TOPICS_SH" --bootstrap-server "\$GW_IP:9096" --list >/dev/null 2>&1; then
+  "\$SERVER_SH" -daemon "\$SERVER_3_PROPS"
+fi
+
+for i in \$(seq 1 60); do
+  if "\$TOPICS_SH" --bootstrap-server "\$GW_IP:9092" --list >/dev/null 2>&1 && \
+     "\$TOPICS_SH" --bootstrap-server "\$GW_IP:9094" --list >/dev/null 2>&1 && \
+     "\$TOPICS_SH" --bootstrap-server "\$GW_IP:9096" --list >/dev/null 2>&1; then
+    echo "All 3 Kafka brokers ready after \${i}s"
+    break
+  fi
+  sleep 1
+  [[ "\$i" -eq 60 ]] && { echo "ERROR: One or more Kafka brokers did not start" >&2; exit 1; }
+done
+
+# Re-create topic with explicit replica assignment across all 3 brokers: 1, 2, 3
+"\$TOPICS_SH" --bootstrap-server "\$GW_IP:9092" --delete --topic "$KAFKA_RESULT_TOPIC" >/dev/null 2>&1 || true
+"\$TOPICS_SH" --bootstrap-server "\$GW_IP:9092" \
+  --create --topic "$KAFKA_RESULT_TOPIC" --replica-assignment 1,2,3 --if-not-exists >/dev/null 2>&1 || true
+echo "Topic '$KAFKA_RESULT_TOPIC' ready with 3 partitions across 3 brokers (PASS)"
 KAFKA_EOF
   log "  Kafka ready and topic reset complete"
 

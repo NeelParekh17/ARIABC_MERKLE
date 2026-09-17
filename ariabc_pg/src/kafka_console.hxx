@@ -65,7 +65,8 @@ public:
     bool send_line(const std::string& line, std::string& err);
     bool send_payload(const std::string& payload,
                       const std::string& key,
-                      std::string& err);
+                      std::string& err,
+                      int32_t partition = -1);
     bool wait_for_delivery(int timeout_ms, std::string& err);
 
     kafka_producer_stats stats() const;
