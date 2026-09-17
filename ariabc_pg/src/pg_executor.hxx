@@ -54,6 +54,7 @@ struct pg_executor_stats {
     uint64_t retryable_sqlstate_40P01 = 0;
     uint64_t retryable_sqlstate_57014 = 0;
     uint64_t retry_attempts_total = 0;
+    uint64_t retry_backoff_requested_ms = 0;
     uint64_t retry_exhausted_total = 0;
 
     uint64_t kafka_flush_calls = 0;
@@ -192,6 +193,8 @@ struct db_options {
     int conn_pool_size = 20;
     int bcdb_init_block_size = 0;
     int max_retries = 10;
+    // Cap for PG conflict retries (1ms exponential start); fixed delay for
+    // deterministic execution and query cancellation.
     int retry_backoff_ms = 100;
 
     std::string raft_apply_ledger_mode = "off";
@@ -312,7 +315,7 @@ private:
     void det_finish_apply(uint64_t tx_seq);
     void notify_task_applied(uint64_t raft_log_idx, uint32_t item_ordinal);
     void notify_task_failed(uint64_t raft_log_idx, uint32_t item_ordinal, const std::string& reason);
-    void mark_task_applied_ordered(uint64_t dispatch_seq, uint64_t raft_log_idx, uint32_t item_ordinal, uint64_t ready_ns);
+    void mark_task_applied_ordered(uint64_t dispatch_seq, uint64_t raft_log_idx, uint32_t item_ordinal, uint64_t ready_ns, const std::string& failure_reason = "");
     bool ensure_safe_ledger_terminal(PGconn* c, const task& t, const ConfirmedResult& confirmed);
     bool ensure_safe_nonterminal_failure(const task& t, const ConfirmedResult& confirmed);
     bool ensure_safe_outcome(PGconn* c, const task& t, const ConfirmedResult& confirmed);
@@ -350,6 +353,7 @@ private:
     void kafka_publisher_loop();
     void publish_kafka_result_batch(std::vector<kafka_result_record>& batch,
                                     kafka_flush_reason reason);
+    int32_t kafka_partition() const;
 
     static bool is_event_mode(const std::string& mode);
 
@@ -475,6 +479,7 @@ private:
     std::atomic<uint64_t> st_retryable_sqlstate_40P01_{0};
     std::atomic<uint64_t> st_retryable_sqlstate_57014_{0};
     std::atomic<uint64_t> st_retry_attempts_total_{0};
+    std::atomic<uint64_t> st_retry_backoff_requested_ms_{0};
     std::atomic<uint64_t> st_retry_exhausted_total_{0};
     std::atomic<uint64_t> st_kafka_flush_calls_{0};
     std::atomic<uint64_t> st_kafka_payload_bytes_{0};
@@ -587,7 +592,12 @@ private:
 
     std::mutex det_ordered_apply_mu_;
     uint64_t det_next_ordered_apply_seq_ = 1;
-    std::map<uint64_t, std::pair<uint64_t, uint32_t>> det_ordered_apply_ready_; /* dispatch_seq → {raft_log_idx, item_ordinal} */
+    struct ordered_apply_result {
+        uint64_t raft_log_idx;
+        uint32_t item_ordinal;
+        std::string failure_reason;
+    };
+    std::map<uint64_t, ordered_apply_result> det_ordered_apply_ready_;
     std::mutex det_emit_mu_;
     std::condition_variable det_emit_cv_;
     uint64_t det_next_emit_seq_ = 1;

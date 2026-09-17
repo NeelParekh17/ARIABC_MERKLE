@@ -399,3 +399,8 @@ add_executable(pg_error_result_test tests/pg_error_result_test.cxx)
 target_include_directories(pg_error_result_test PRIVATE src)
 target_compile_options(pg_error_result_test PRIVATE -UNDEBUG)
 add_test(NAME pg_error_result_test COMMAND pg_error_result_test)
+
+add_executable(pg_retry_policy_test tests/pg_retry_policy_test.cxx)
+target_include_directories(pg_retry_policy_test PRIVATE src)
+target_compile_options(pg_retry_policy_test PRIVATE -UNDEBUG)
+add_test(NAME pg_retry_policy_test COMMAND pg_retry_policy_test)

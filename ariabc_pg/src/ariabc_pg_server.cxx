@@ -1517,7 +1517,6 @@ void handle_client_fd_direct(int fd,
                               pg_state_machine* psm,
                               std::atomic<uint64_t>& seq_counter,
                               direct_orderer& orderer) {
-    std::cerr << "[DIRECT] client connected fd=" << fd << std::endl;
     {
         int one = 1;
         (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
@@ -1529,13 +1528,14 @@ void handle_client_fd_direct(int fd,
         const bool ok_read = read_request_frame(fd, req, err);
         const auto r1 = std::chrono::steady_clock::now();
         if (!ok_read) {
-            std::cerr << "[DIRECT] read_request_frame failed fd=" << fd << " err=" << err << std::endl;
+            if (debug_req_trace_enabled()) {
+                std::cerr << "[DIRECT] read_request_frame failed fd=" << fd << " err=" << err << std::endl;
+            }
             break;
         }
 
-        std::cerr << "[DIRECT] req fd=" << fd << " req_id=" << req.req_id << " sql=" << req.sql.substr(0, 40)
-                  << " batch_items=" << req.batch_items.size() << std::endl;
-
+        // Use the opt-in, bounded trace below instead of flushing stderr for
+        // every submit and completion RPC in benchmark runs.
         debug_trace_server_request(req);
         g_prof.client_read_frames.fetch_add(1, std::memory_order_relaxed);
         g_prof.client_read_ns.fetch_add(
@@ -1750,6 +1750,7 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " retryable_sqlstate_40P01=" << exec.retryable_sqlstate_40P01
         << " retryable_sqlstate_57014=" << exec.retryable_sqlstate_57014
         << " retry_attempts_total=" << exec.retry_attempts_total
+        << " retry_backoff_requested_ms=" << exec.retry_backoff_requested_ms
         << " retry_exhausted_total=" << exec.retry_exhausted_total
         << " enqueue_to_pickup_us=" << (exec.queue_delay_dequeue_ns / 1000.0)
         << " pickup_to_PQexec_start_us=" << (exec.queue_delay_exec_start_ns / 1000.0)
