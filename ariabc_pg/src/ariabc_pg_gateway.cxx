@@ -4347,7 +4347,15 @@ int main(int argc, char** argv) {
 
     std::atomic<bool> stop(false);
     std::thread kafka_thread;
-    std::thread dispatch_thread;
+    const size_t num_dispatch_workers = []() -> size_t {
+        const char* env_w = ::getenv("ARIABC_GATEWAY_DISPATCH_WORKERS");
+        if (env_w && *env_w) {
+            int w = std::atoi(env_w);
+            if (w > 0 && w <= 64) return static_cast<size_t>(w);
+        }
+        return 8;
+    }();
+    std::vector<std::thread> dispatch_threads;
     std::mutex dispatch_mu;
     std::condition_variable dispatch_cv;
     struct gateway_dispatch_batch {
@@ -4387,78 +4395,81 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> consumer_dispatch_records_max(0);     /* max records in one dispatch */
 
     if (kafka_enabled) {
-        dispatch_thread = std::thread([&] {
-            while (true) {
-                gateway_dispatch_batch batch;
-                {
-                    std::unique_lock<std::mutex> lk(dispatch_mu);
-                    dispatch_cv.wait(lk, [&] { return !dispatch_queue.empty() || stop.load(); });
-                    if (dispatch_queue.empty() && stop.load()) break;
-                    batch = std::move(dispatch_queue.front());
-                    dispatch_queue.pop_front();
-                }
+        dispatch_threads.reserve(num_dispatch_workers);
+        for (size_t wi = 0; wi < num_dispatch_workers; ++wi) {
+            dispatch_threads.emplace_back([&] {
+                while (true) {
+                    gateway_dispatch_batch batch;
+                    {
+                        std::unique_lock<std::mutex> lk(dispatch_mu);
+                        dispatch_cv.wait(lk, [&] { return !dispatch_queue.empty() || stop.load(); });
+                        if (dispatch_queue.empty() && stop.load()) break;
+                        batch = std::move(dispatch_queue.front());
+                        dispatch_queue.pop_front();
+                    }
 
-                std::vector<std::string> recoveries;
-                const uint64_t add_start_ns = ariabc_pg::steady_now_ns();
-                if (batch.parse_done_ns > 0 && add_start_ns >= batch.parse_done_ns) {
-                    kafka_parse_to_vote_store_ns.fetch_add(add_start_ns - batch.parse_done_ns,
-                                                           std::memory_order_relaxed);
-                }
+                    std::vector<std::string> recoveries;
+                    const uint64_t add_start_ns = ariabc_pg::steady_now_ns();
+                    if (batch.parse_done_ns > 0 && add_start_ns >= batch.parse_done_ns) {
+                        kafka_parse_to_vote_store_ns.fetch_add(add_start_ns - batch.parse_done_ns,
+                                                               std::memory_order_relaxed);
+                    }
 
-                /* Part 5: consumer dispatch aggregate counters. */
-                const uint64_t batch_recs = static_cast<uint64_t>(batch.records.size());
-                consumer_dispatch_batches.fetch_add(1, std::memory_order_relaxed);
-                consumer_dispatch_records_total.fetch_add(batch_recs, std::memory_order_relaxed);
-                ariabc_pg::atomic_max_u64(consumer_dispatch_records_max, batch_recs);
+                    /* Part 5: consumer dispatch aggregate counters. */
+                    const uint64_t batch_recs = static_cast<uint64_t>(batch.records.size());
+                    consumer_dispatch_batches.fetch_add(1, std::memory_order_relaxed);
+                    consumer_dispatch_records_total.fetch_add(batch_recs, std::memory_order_relaxed);
+                    ariabc_pg::atomic_max_u64(consumer_dispatch_records_max, batch_recs);
 
-                const auto a0 = std::chrono::steady_clock::now();
-                votes.add_replies_batch(batch.records, recoveries);
-                const auto a1 = std::chrono::steady_clock::now();
-                kafka_add_reply_ns.fetch_add(
-                    static_cast<uint64_t>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(a1 - a0).count()),
-                    std::memory_order_relaxed);
+                    const auto a0 = std::chrono::steady_clock::now();
+                    votes.add_replies_batch(batch.records, recoveries);
+                    const auto a1 = std::chrono::steady_clock::now();
+                    kafka_add_reply_ns.fetch_add(
+                        static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(a1 - a0).count()),
+                        std::memory_order_relaxed);
 
-                for (size_t i = 0; i < recoveries.size(); ++i) {
-                    if (!recoveries[i].empty()) {
-                        divergence_count.fetch_add(1);
-                        if (recoveries[i].find("vote_store_capacity_exhausted") != std::string::npos) {
-                            std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
-                            if (!fatal_gateway_error.load(std::memory_order_relaxed)) {
-                                fatal_gateway_error_message = "audit_capacity_exhausted: vote_store capacity exhausted";
-                                fatal_gateway_error.store(true, std::memory_order_release);
-                                term_other_failure.fetch_add(1, std::memory_order_relaxed);
-                                {
-                                    std::ostringstream oss;
-                                    oss << "{\"type\":\"majority_failure\""
-                                        << ",\"req_num\":" << batch.records[i].req_num
-                                        << ",\"reason\":\"" << ariabc_pg::json_escape(fatal_gateway_error_message) << "\"}";
-                                    const std::string msg = oss.str();
-                                    if (!opt.kafka_bootstrap.empty()) {
-                                        std::string perr;
-                                        if (!err_prod.send_line(msg, perr)) {
-                                            std::cerr << "errTopic send failed: " << perr << std::endl;
+                    for (size_t i = 0; i < recoveries.size(); ++i) {
+                        if (!recoveries[i].empty()) {
+                            divergence_count.fetch_add(1);
+                            if (recoveries[i].find("vote_store_capacity_exhausted") != std::string::npos) {
+                                std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
+                                if (!fatal_gateway_error.load(std::memory_order_relaxed)) {
+                                    fatal_gateway_error_message = "audit_capacity_exhausted: vote_store capacity exhausted";
+                                    fatal_gateway_error.store(true, std::memory_order_release);
+                                    term_other_failure.fetch_add(1, std::memory_order_relaxed);
+                                    {
+                                        std::ostringstream oss;
+                                        oss << "{\"type\":\"majority_failure\""
+                                            << ",\"req_num\":" << batch.records[i].req_num
+                                            << ",\"reason\":\"" << ariabc_pg::json_escape(fatal_gateway_error_message) << "\"}";
+                                        const std::string msg = oss.str();
+                                        if (!opt.kafka_bootstrap.empty()) {
+                                            std::string perr;
+                                            if (!err_prod.send_line(msg, perr)) {
+                                                std::cerr << "errTopic send failed: " << perr << std::endl;
+                                            }
+                                        } else {
+                                            std::cerr << msg << std::endl;
                                         }
-                                    } else {
-                                        std::cerr << msg << std::endl;
                                     }
+                                    permanent_failures.fetch_add(1, std::memory_order_relaxed);
+                                    async_all3_capacity_exhausted_count.fetch_add(1, std::memory_order_relaxed);
                                 }
-                                permanent_failures.fetch_add(1, std::memory_order_relaxed);
-                                async_all3_capacity_exhausted_count.fetch_add(1, std::memory_order_relaxed);
                             }
-                        }
-                        if (!opt.kafka_bootstrap.empty()) {
-                            std::string perr;
-                            if (!err_prod.send_line(recoveries[i], perr)) {
-                                std::cerr << "errTopic send failed: " << perr << std::endl;
+                            if (!opt.kafka_bootstrap.empty()) {
+                                std::string perr;
+                                if (!err_prod.send_line(recoveries[i], perr)) {
+                                    std::cerr << "errTopic send failed: " << perr << std::endl;
+                                }
+                            } else {
+                                std::cerr << recoveries[i] << std::endl;
                             }
-                        } else {
-                            std::cerr << recoveries[i] << std::endl;
                         }
                     }
                 }
-            }
-        });
+            });
+        }
 
         kafka_thread = std::thread([&] {
             while (!stop.load()) {
@@ -7122,6 +7133,7 @@ int main(int argc, char** argv) {
             << " consumer_poll_to_parse_ms=" << (kafka_consumer_poll_to_parse_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " parse_to_vote_store_ms=" << (kafka_parse_to_vote_store_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " kafka_add_reply_ms=" << (kafka_add_reply_ns.load(std::memory_order_relaxed) / 1000000.0)
+            << " dispatch_workers=" << num_dispatch_workers
             << " consume_lag_ms_mean_cross_host_clock_unverified=" << lag_ms_mean
             << " consume_lag_ms_max_cross_host_clock_unverified=" << lag_ms_max
             << " dispatch_messages_bin_1=" << dispatch_messages_bin_1.load(std::memory_order_relaxed)
@@ -7460,15 +7472,16 @@ int main(int argc, char** argv) {
     }
 
     stop = true;
+    if (kafka_thread.joinable()) kafka_thread.join();
     dispatch_cv.notify_all();
+    for (auto& t : dispatch_threads) {
+        if (t.joinable()) t.join();
+    }
     if (async_audit_thread.joinable()) {
         async_audit_stop.store(true, std::memory_order_relaxed);
         votes.stop_audit();
         async_audit_thread.join();
     }
-    
-    if (dispatch_thread.joinable()) dispatch_thread.join();
-    if (kafka_thread.joinable()) kafka_thread.join();
     consumer.stop();
     err_prod.stop();
     return exit_code;

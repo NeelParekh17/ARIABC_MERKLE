@@ -2262,6 +2262,10 @@ pg_executor::pg_executor(int node_id,
     , on_task_applied_(std::move(on_task_applied))
     , on_task_failed_(std::move(on_task_failed))
 {
+    if (const char* v = std::getenv("ARIABC_PG_MAX_RETRIES")) {
+        int parsed = std::atoi(v);
+        if (parsed > 0) db_opt_.max_retries = parsed;
+    }
     event_mode_ = is_event_mode(db_opt_.exec_mode);
     if (db_opt_.db_type == 1) {
         // Parallel deterministic workers are on by default in threaded mode:
@@ -2369,8 +2373,7 @@ pg_executor::pg_executor(int node_id,
                                kafka_opt_.result_topic,
                                kafka_producer_profile::result_fast,
                                err)) {
-            std::cerr << "Kafka disabled: " << err << std::endl;
-            kafka_enabled_ = false;
+            throw std::runtime_error("Kafka result producer startup failed: " + err);
         } else {
             kafka_enabled_ = true;
         }

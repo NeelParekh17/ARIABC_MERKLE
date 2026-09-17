@@ -278,7 +278,8 @@ add_executable(b4_codec_sig_test
                src/durable_state_mgr.cxx
                src/durable_log_store.cxx
                src/logger.cc
-               src/in_memory_log_store.cxx)
+               src/in_memory_log_store.cxx
+               ${BLAKE3_SOURCES})
 
 target_include_directories(b4_codec_sig_test
                             PRIVATE
@@ -286,7 +287,8 @@ target_include_directories(b4_codec_sig_test
                               ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                               ${LIBPQ_INCLUDE_DIR}
                               ${POSTGRES_INCLUDE_DIR}
-                              ${RDKAFKA_INCLUDE_DIR})
+                              ${RDKAFKA_INCLUDE_DIR}
+                              ${BLAKE3_INCLUDES})
 
 target_compile_definitions(b4_codec_sig_test PRIVATE ${ARIABC_TRANSPORT_DEFS} BUILDING_UNIT_TESTS)
 
@@ -298,6 +300,16 @@ target_link_libraries(b4_codec_sig_test
                       dl)
 
 enable_testing()
+if(ARIABC_HAVE_KAFKA AND EXISTS "${RDKAFKA_INCLUDE_DIR}/librdkafka/rdkafka_mock.h")
+    add_executable(kafka_producer_readiness_test
+                   tests/kafka_producer_readiness_test.cxx
+                   src/kafka_console.cxx)
+    target_include_directories(kafka_producer_readiness_test PRIVATE src ${RDKAFKA_INCLUDE_DIR})
+    target_compile_options(kafka_producer_readiness_test PRIVATE -UNDEBUG)
+    target_link_libraries(kafka_producer_readiness_test ${ARIABC_PG_KAFKA_LIBS} pthread)
+    add_test(NAME kafka_producer_readiness_test COMMAND kafka_producer_readiness_test)
+    set_tests_properties(kafka_producer_readiness_test PROPERTIES TIMEOUT 45)
+endif()
 add_test(NAME durable_state_mgr_test COMMAND durable_state_mgr_test)
 add_test(NAME durable_log_store_test COMMAND durable_log_store_test)
 add_test(NAME durable_raft_cluster_smoke_test COMMAND durable_raft_cluster_smoke_test)

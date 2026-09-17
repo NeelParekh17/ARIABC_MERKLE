@@ -62,6 +62,65 @@ bool conf_set(rd_kafka_conf_t* conf,
     return conf_set(conf, name, std::string(val), err);
 }
 
+bool prepare_producer_topic(rd_kafka_t* rk,
+                            const std::string& topic,
+                            std::string& err)
+{
+    // Register the topic and resolve its partitions before accepting work.
+    // Merely connecting bootstrap.servers fetches broker metadata only. With
+    // librdkafka 2.3, the first producev on an unknown topic can sit in the
+    // unassigned queue until the next one-second topic scan, even at linger=0.
+    // Do not send a dummy result: readiness must not change consumer offsets.
+    rd_kafka_topic_t* rkt = rd_kafka_topic_new(rk, topic.c_str(), nullptr);
+    if (!rkt) {
+        err = "Kafka producer topic creation failed: " + rd_errstr(rd_kafka_last_error());
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    bool ready = false;
+    do {
+        const rd_kafka_metadata_t* md = nullptr;
+        const int remaining_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count());
+        if (remaining_ms <= 0) break;
+        const rd_kafka_resp_err_t rc =
+            rd_kafka_metadata(rk, 0, rkt, &md,
+                              remaining_ms < 2000 ? remaining_ms : 2000);
+        err = "Kafka producer topic metadata unavailable: " + topic;
+        if (rc != RD_KAFKA_RESP_ERR_NO_ERROR) {
+            err += ": " + rd_errstr(rc);
+        } else if (md) {
+            for (int ti = 0; ti < md->topic_cnt; ++ti) {
+                const rd_kafka_metadata_topic_t& mt = md->topics[ti];
+                if (topic != mt.topic) continue;
+                if (mt.err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                    err += ": " + rd_errstr(mt.err);
+                    break;
+                }
+                ready = mt.partition_cnt > 0;
+                for (int pi = 0; pi < mt.partition_cnt; ++pi) {
+                    if (mt.partitions[pi].err != RD_KAFKA_RESP_ERR_NO_ERROR ||
+                        mt.partitions[pi].leader < 0) {
+                        ready = false;
+                        err += ": partition leader unavailable";
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        if (md) rd_kafka_metadata_destroy(md);
+        if (ready) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    rd_kafka_topic_destroy(rkt);
+    if (ready) err.clear();
+    return ready;
+}
+
 bool assign_topics_from_beginning(rd_kafka_t* rk,
                                   const std::vector<std::string>& topics,
                                   std::string& err)
@@ -227,7 +286,7 @@ bool kafka_console_producer::start(const std::string& bootstrap,
         !conf_set(conf, "queue.buffering.max.kbytes", "1048576", err) ||
         !conf_set(conf, "socket.send.buffer.bytes", "4194304", err) ||
         !conf_set(conf, "socket.receive.buffer.bytes", "4194304", err) ||
-        !conf_set(conf, "socket.blocking.max.ms", "1", err) ||
+        !conf_set(conf, "max.in.flight.requests.per.connection", "64", err) ||
         !conf_set(conf, "socket.nagle.disable", "true", err)) {
         rd_kafka_conf_destroy(conf);
         return false;
@@ -238,6 +297,11 @@ bool kafka_console_producer::start(const std::string& bootstrap,
     if (!rk) {
         err = std::string("rd_kafka_new(PRODUCER) failed: ") + errstr;
         rd_kafka_conf_destroy(conf);
+        return false;
+    }
+
+    if (!prepare_producer_topic(rk, topic, err)) {
+        rd_kafka_destroy(rk);
         return false;
     }
 
@@ -488,7 +552,6 @@ bool kafka_console_consumer::start_latest_multi(const std::string& bootstrap,
         !conf_set(conf, "fetch.message.max.bytes", "10485760", err) ||
         !conf_set(conf, "max.partition.fetch.bytes", "8388608", err) ||
         !conf_set(conf, "socket.receive.buffer.bytes", "4194304", err) ||
-        !conf_set(conf, "socket.blocking.max.ms", "1", err) ||
         !conf_set(conf, "check.crcs", "false", err) ||
         !conf_set(conf, "socket.nagle.disable", "true", err)) {
         rd_kafka_conf_destroy(conf);

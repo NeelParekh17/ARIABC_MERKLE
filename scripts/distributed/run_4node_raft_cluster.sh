@@ -87,6 +87,7 @@ KAFKA_HOST="${KAFKA_HOST:-10.129.27.111}"
 KAFKA_PORT="${KAFKA_PORT:-9092}"
 KAFKA_RESULT_TOPIC="${KAFKA_RESULT_TOPIC:-ariabc_results}"
 KAFKA_HOME_REMOTE="${KAFKA_HOME_REMOTE:-/home/neel/Desktop/kafka_2.13-3.7.0}"
+KAFKA_ROUTING_MODE="${KAFKA_ROUTING_MODE:-colocated}" # colocated|remote
 KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-${KAFKA_HOST}:9092,${KAFKA_HOST}:9094,${KAFKA_HOST}:9096}"
 
 DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Gateway/server connection pool size
@@ -191,7 +192,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
     NODE_IS_U22_CSV NODE_CLIENT_PORTS_CSV \
     RAFT_PORT DB_PORT DB_USER DB_NAME \
-    KAFKA_HOST KAFKA_PORT KAFKA_RESULT_TOPIC KAFKA_HOME_REMOTE \
+    KAFKA_HOST KAFKA_PORT KAFKA_RESULT_TOPIC KAFKA_HOME_REMOTE KAFKA_ROUTING_MODE \
     KAFKA_FAST_RESET DUMP_VERIFY_CSV \
     KAFKA_COMPLETION_MODE \
     ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US \
@@ -352,7 +353,11 @@ apply_topology_overrides() {
   [[ "$DB_PORT" =~ ^[0-9]+$ ]] || die "DB_PORT must be numeric: $DB_PORT"
   [[ "$KAFKA_PORT" =~ ^[0-9]+$ ]] || die "KAFKA_PORT must be numeric: $KAFKA_PORT"
   [[ -n "$KAFKA_HOST" ]] || die "KAFKA_HOST cannot be empty"
-  KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-${KAFKA_HOST}:9092,${KAFKA_HOST}:9094,${KAFKA_HOST}:9096}"
+  if [[ "$KAFKA_ROUTING_MODE" == "colocated" ]]; then
+    KAFKA_BOOTSTRAP="${NODE_IPS[0]}:9092,${NODE_IPS[1]}:9092,${NODE_IPS[2]}:9092"
+  else
+    KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-${KAFKA_HOST}:9092,${KAFKA_HOST}:9094,${KAFKA_HOST}:9096}"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -552,6 +557,8 @@ Options:
   --kafka-port N   Override Kafka broker port (default: 9092)
   --kafka-home-remote DIR
                   Override remote Kafka installation directory.
+  --kafka-routing-mode M
+                  Kafka broker routing mode: colocated (brokers on db nodes, default) or remote
   --ordering-mode M
                   Cluster ordering mode:
                     raft-kafka  = normal Raft ordering + selected Kafka completion
@@ -774,6 +781,7 @@ while [[ $# -gt 0 ]]; do
     --kafka-host) KAFKA_HOST="${2:-}"; shift 2 ;;
     --kafka-port) KAFKA_PORT="${2:-}"; shift 2 ;;
     --kafka-home-remote) KAFKA_HOME_REMOTE="${2:-}"; shift 2 ;;
+    --kafka-routing-mode) KAFKA_ROUTING_MODE="${2:-colocated}"; shift 2 ;;
     --ordering-mode) ORDERING_MODE="${2:-raft-kafka}"; shift 2 ;;
     --kafka-completion-mode) KAFKA_COMPLETION_MODE="${2:-majority}"; KAFKA_COMPLETION_MODE_EXPLICIT=1; shift 2 ;;
     --execution-profile) EXECUTION_PROFILE="${2:-event-direct}"; shift 2 ;;
@@ -1869,6 +1877,7 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'bcdb_workers=%s\n' "$BCDB_WORKER_COUNT"
   printf 'completion_path=%s\n' "$RUN_META_COMPLETION_PATH"
   printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
+  printf 'kafka_routing_mode=%s\n' "$KAFKA_ROUTING_MODE"
   printf 'kafka_bootstrap=%s\n' "$KAFKA_BOOTSTRAP"
   printf 'result_topic=%s\n' "$KAFKA_RESULT_TOPIC"
   printf 'raft_storage_mode=%s\n' "$RAFT_STORAGE_MODE"
@@ -2668,8 +2677,108 @@ done
 # Phase 2: Kafka broker
 # ---------------------------------------------------------------------------
 if [[ "$NO_KAFKA" -eq 0 && "$SKIP_KAFKA" -eq 0 ]]; then
-  log "=== Phase 2: Ensure Kafka (KRaft) running on ${KAFKA_HOST} ==="
-  run_kafka_cmd <<KAFKA_EOF
+  if [[ "$KAFKA_ROUTING_MODE" == "colocated" ]]; then
+    log "=== Phase 2: Ensure Colocated Kafka (KRaft) cluster running on nodes (${NODE_IPS[*]}) ==="
+    all_brokers_ready=1
+    for idx in "${!NODE_IPS[@]}"; do
+      if ! node_ssh "$idx" "if ! command -v java >/dev/null 2>&1; then export JAVA_HOME=/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64; export PATH=\$JAVA_HOME/bin:\$PATH; fi; '$KAFKA_HOME_REMOTE/bin/kafka-topics.sh' --bootstrap-server localhost:9092 --list >/dev/null 2>&1"; then
+        all_brokers_ready=0
+        break
+      fi
+    done
+
+    if [[ "$all_brokers_ready" -eq 0 ]]; then
+      log "  Configuring and launching colocated KRaft cluster across nodes..."
+      CLUSTER_ID=$(node_ssh 0 "if ! command -v java >/dev/null 2>&1; then export JAVA_HOME=/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64; export PATH=\$JAVA_HOME/bin:\$PATH; fi; grep '^cluster.id=' /tmp/kraft-colocated-logs/meta.properties 2>/dev/null | cut -d= -f2 || '$KAFKA_HOME_REMOTE/bin/kafka-storage.sh' random-uuid | tail -1 | tr -d '\r'")
+      [[ -z "$CLUSTER_ID" ]] && die "Failed to determine KRaft cluster ID"
+      log "  KRaft cluster ID: $CLUSTER_ID"
+
+      for idx in "${!NODE_IPS[@]}"; do
+        nip="${NODE_IPS[$idx]}"
+        nid=$(( idx + 1 ))
+        is_ctrl=0
+        [[ "$idx" -eq 0 ]] && is_ctrl=1
+
+        roles="broker"
+        listeners="PLAINTEXT://0.0.0.0:9092"
+        if [[ "$is_ctrl" -eq 1 ]]; then
+          roles="broker,controller"
+          listeners="PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+        fi
+
+        node_ssh "$idx" "
+set -euo pipefail
+if ! command -v java >/dev/null 2>&1; then
+  export JAVA_HOME=/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64
+  export PATH=\$JAVA_HOME/bin:\$PATH
+fi
+mkdir -p '$KAFKA_HOME_REMOTE/config/kraft'
+cat > '$KAFKA_HOME_REMOTE/config/kraft/server_colocated.properties' << 'PROP_EOF'
+process.roles=${roles}
+node.id=${nid}
+controller.quorum.voters=1@${NODE_IPS[0]}:9093
+listeners=${listeners}
+inter.broker.listener.name=PLAINTEXT
+advertised.listeners=PLAINTEXT://${nip}:9092
+controller.listener.names=CONTROLLER
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL,SASL_PLAINTEXT:SASL_PLAINTEXT,SASL_SSL:SASL_SSL
+num.network.threads=8
+num.io.threads=8
+socket.send.buffer.bytes=4194304
+socket.receive.buffer.bytes=4194304
+socket.request.max.bytes=104857600
+log.dirs=/tmp/kraft-colocated-logs
+num.partitions=1
+num.recovery.threads.per.data.dir=1
+offsets.topic.replication.factor=1
+transaction.state.log.replication.factor=1
+transaction.state.log.min.isr=1
+log.retention.hours=168
+log.segment.bytes=1073741824
+log.retention.check.interval.ms=300000
+PROP_EOF
+
+'$KAFKA_HOME_REMOTE/bin/kafka-storage.sh' format -t '$CLUSTER_ID' -c '$KAFKA_HOME_REMOTE/config/kraft/server_colocated.properties' --ignore-formatted >/dev/null 2>&1 || true
+
+if ! '$KAFKA_HOME_REMOTE/bin/kafka-topics.sh' --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
+  '$KAFKA_HOME_REMOTE/bin/kafka-server-start.sh' -daemon '$KAFKA_HOME_REMOTE/config/kraft/server_colocated.properties'
+fi
+"
+      done
+
+      for w in $(seq 1 40); do
+        all_ready=1
+        for idx in "${!NODE_IPS[@]}"; do
+          if ! node_ssh "$idx" "if ! command -v java >/dev/null 2>&1; then export JAVA_HOME=/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64; export PATH=\$JAVA_HOME/bin:\$PATH; fi; '$KAFKA_HOME_REMOTE/bin/kafka-topics.sh' --bootstrap-server localhost:9092 --list >/dev/null 2>&1"; then
+            all_ready=0
+            break
+          fi
+        done
+        if [[ "$all_ready" -eq 1 ]]; then
+          log "  All 3 colocated Kafka brokers ready after ${w}s"
+          break
+        fi
+        sleep 1
+        [[ "$w" -eq 40 ]] && die "Colocated Kafka brokers failed to start within 40s"
+      done
+    else
+      log "  All 3 colocated Kafka brokers already running and healthy"
+    fi
+
+    # Re-create topic with explicit replica assignment across all 3 brokers: 1, 2, 3
+    node_ssh 0 "
+set -euo pipefail
+if ! command -v java >/dev/null 2>&1; then
+  export JAVA_HOME=/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64
+  export PATH=\$JAVA_HOME/bin:\$PATH
+fi
+'$KAFKA_HOME_REMOTE/bin/kafka-topics.sh' --bootstrap-server localhost:9092 --delete --topic '$KAFKA_RESULT_TOPIC' >/dev/null 2>&1 || true
+'$KAFKA_HOME_REMOTE/bin/kafka-topics.sh' --bootstrap-server localhost:9092 --create --topic '$KAFKA_RESULT_TOPIC' --replica-assignment 1,2,3 --if-not-exists >/dev/null 2>&1 || true
+"
+    log "  Topic '$KAFKA_RESULT_TOPIC' ready with partitions 0,1,2 assigned to brokers 1,2,3 (PASS)"
+  else
+    log "=== Phase 2: Ensure Kafka (KRaft) running on ${KAFKA_HOST} ==="
+    run_kafka_cmd <<KAFKA_EOF
 set -euo pipefail
 KAFKA_HOME="$KAFKA_HOME_REMOTE"
 KAFKA_BOOTSTRAP="${KAFKA_HOST}:${KAFKA_PORT}"
@@ -2796,6 +2905,7 @@ done
   --create --topic "$KAFKA_RESULT_TOPIC" --replica-assignment 1,2,3 --if-not-exists >/dev/null 2>&1 || true
 echo "Topic '$KAFKA_RESULT_TOPIC' ready with 3 partitions across 3 brokers (PASS)"
 KAFKA_EOF
+  fi
   log "  Kafka ready and topic reset complete"
 
   if [[ "${KAFKA_FAST_RESET:-1}" -eq 0 ]]; then
@@ -3352,6 +3462,7 @@ AS 'bcdb_gate_diagnostics';
           END
         \\\$\\\$;\" >/dev/null
       fi
+      \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"VACUUM ANALYZE $VERIFY_TABLE;\" >/dev/null
       cnt=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc 'SELECT count(*) FROM $VERIFY_TABLE')
       if [[ '$ENABLE_MERKLE_INDEX' -eq 1 ]]; then
         root=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -tAc \"SELECT merkle_root_hash('$VERIFY_TABLE')\")
@@ -3362,7 +3473,8 @@ AS 'bcdb_gate_diagnostics';
       fi
       echo \"count=\$cnt root=\$root verify=\$verify\"
     else
-      echo \"setup complete (restore skipped)\"
+      \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"VACUUM ANALYZE $VERIFY_TABLE;\" >/dev/null
+      echo \"setup complete (restore skipped, table vacuum analyzed)\"
     fi
   " 2>&1 | sed "s/^/  [$name] /" &
   SETUP_PIDS+=("$!")
@@ -3418,7 +3530,13 @@ log "=== Phase 4: Starting ariabc_pg_server on all ${#NODE_IDS[@]} nodes ==="
 
 REMOTE_LOG_DIR="/tmp/ariabc_cluster"
 KAFKA_ARGS=""
-[[ "$NO_KAFKA" -eq 0 ]] && KAFKA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC"
+if [[ "$NO_KAFKA" -eq 0 ]]; then
+  if [[ "$KAFKA_ROUTING_MODE" == "colocated" ]]; then
+    KAFKA_ARGS="--kafkaBootstrap localhost:9092 --resultTopic $KAFKA_RESULT_TOPIC"
+  else
+    KAFKA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC"
+  fi
+fi
 
 START_ORDER=("${!NODE_IDS[@]}")
 if [[ "$ARIABC_PREFERRED_LEADER_ID" -gt 0 ]]; then
@@ -3774,12 +3892,16 @@ fi
 
 GW_EXTRA_ARGS=""
 if [[ "$NO_KAFKA" -eq 0 ]]; then
+  GW_KAFKA_BOOTSTRAP="$KAFKA_BOOTSTRAP"
+  if [[ "$KAFKA_ROUTING_MODE" == "colocated" ]]; then
+    GW_KAFKA_BOOTSTRAP="${NODE_IPS[0]}:9092,${NODE_IPS[1]}:9092,${NODE_IPS[2]}:9092"
+  fi
   if [[ "$KAFKA_COMPLETION_MODE" == "majority" ]]; then
-    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --validationMode strict_majority --totalNodes ${#NODE_IDS[@]}"
+    GW_EXTRA_ARGS="--kafkaBootstrap $GW_KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --validationMode strict_majority --totalNodes ${#NODE_IDS[@]}"
   elif [[ "$KAFKA_COMPLETION_MODE" == "majority_async_all3" ]]; then
-    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --validationMode majority_async_all3 --totalNodes ${#NODE_IDS[@]}"
+    GW_EXTRA_ARGS="--kafkaBootstrap $GW_KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 1 --completionPath kafka_majority --validationMode majority_async_all3 --totalNodes ${#NODE_IDS[@]}"
   else
-    GW_EXTRA_ARGS="--kafkaBootstrap $KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 0 --completionPath direct --validationMode async_hash --totalNodes ${#NODE_IDS[@]} --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
+    GW_EXTRA_ARGS="--kafkaBootstrap $GW_KAFKA_BOOTSTRAP --resultTopic $KAFKA_RESULT_TOPIC --waitMajority 0 --completionPath direct --validationMode async_hash --totalNodes ${#NODE_IDS[@]} --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
   fi
   if [[ "$GATEWAY_BROADCAST_TO_ALL" -eq 1 ]]; then
     GW_EXTRA_ARGS="$GW_EXTRA_ARGS --broadcastToAll 1"
