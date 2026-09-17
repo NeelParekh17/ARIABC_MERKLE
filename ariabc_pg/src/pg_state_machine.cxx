@@ -1441,6 +1441,16 @@ void pg_state_machine::note_item_failed(uint64_t log_idx,
               << " ord=" << item_ordinal
               << " reason=" << reason
               << std::endl;
+    {
+        std::lock_guard<std::mutex> lk(tracker_mu_);
+        auto it = entry_tracker_.find(log_idx);
+        if (it != entry_tracker_.end()) {
+            if (item_ordinal < it->second.total_items) {
+                it->second.mark_ordinal(item_ordinal);
+            }
+        }
+        maybe_advance_prefix_locked();
+    }
     note_result_item_failed(log_idx, item_ordinal, reason);
 }
 

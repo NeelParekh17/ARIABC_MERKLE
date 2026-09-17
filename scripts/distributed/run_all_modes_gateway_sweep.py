@@ -664,29 +664,45 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
 
                         # Step 4: Run ariabc_pg_gateway from Gateway machine
                         print(f"  [3/4] Running ariabc_pg_gateway from {args.gateway_host} ({mode}, W={wh}, workers={w})...")
-                        gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
-                            {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway \\
-                              --nodes {args.db_host}:{args.server_port} \\
-                              --queryFrom {gw_workload_path} \\
-                              --dbType {0 if mode == 'pg' else 1} \\
-                              --detStartSeq 0 \\
-                              --reqIdOffset 1 \\
-                              --detWindow 65536 \\
-                              --detBatchSize 256 \\
-                              --dbConnPoolSize {w} \\
-                              --submitMode event \\
-                              --detSubmitPipeline 1 \\
-                              --detPipelineDepth 1024 \\
-                              --detClientMode event \\
-                              --detClientWorkers 96 \\
-                              --detClientInflight 16 \\
-                              --clientId single-gateway-direct \\
-                              --numTerminals 96 \\
-                              --connFanout 1 \\
-                              --waitMajority 0 \\
-                              --completionPath direct \\
-                              --totalNodes 1
-                        " """
+                        if mode == "pg":
+                            gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
+                                {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway \\
+                                  --nodes {args.db_host}:{args.server_port} \\
+                                  --queryFrom {gw_workload_path} \\
+                                  --dbType 0 \\
+                                  --numTerminals 96 \\
+                                  --submitLimit 512 \\
+                                  --nondetWindow 8 \\
+                                  --submitMode event \\
+                                  --connFanout 1 \\
+                                  --waitMajority 0 \\
+                                  --completionPath direct \\
+                                  --totalNodes 1
+                            " """
+                        else:
+                            gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
+                                {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway \\
+                                  --nodes {args.db_host}:{args.server_port} \\
+                                  --queryFrom {gw_workload_path} \\
+                                  --dbType 1 \\
+                                  --detStartSeq 0 \\
+                                  --reqIdOffset 1 \\
+                                  --detWindow 65536 \\
+                                  --detBatchSize 256 \\
+                                  --dbConnPoolSize {w} \\
+                                  --submitMode event \\
+                                  --detSubmitPipeline 1 \\
+                                  --detPipelineDepth 1024 \\
+                                  --detClientMode event \\
+                                  --detClientWorkers 96 \\
+                                  --detClientInflight 16 \\
+                                  --clientId single-gateway-direct \\
+                                  --numTerminals 96 \\
+                                  --connFanout 1 \\
+                                  --waitMajority 0 \\
+                                  --completionPath direct \\
+                                  --totalNodes 1
+                            " """
 
                         _, gw_out = run_cmd(gw_cmd, check=True, timeout=600)
 
@@ -2188,6 +2204,7 @@ EOF
                                 export BCDB_DET_QUEUE_HIGH_WM=65536
                                 export BCDB_DET_QUEUE_LOW_WM=32768
                                 export ARIABC_PROFILE=1
+                                export ARIABC_PG_MAX_RETRIES=100
                                 export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
 
                                 for _chk in \\$(seq 1 30); do
@@ -2281,29 +2298,45 @@ EOF
                         run_cmd_args(["scp", "-o", "BatchMode=yes", str(repo_root / wl),
                                       f"{args.gateway_user}@{args.gateway_host}:{gw_workload_path}"])
                         print(f"  [3/4] Running ariabc_pg_gateway from {args.gateway_host} ({mode})...")
-                        gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
-                            {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway \\
-                              --nodes {args.db_host}:{args.server_port} \\
-                              --queryFrom {gw_workload_path} \\
-                              --dbType {0 if mode == 'pg' else 1} \\
-                              --detStartSeq 0 \\
-                              --reqIdOffset 1 \\
-                              --detWindow 65536 \\
-                              --detBatchSize 256 \\
-                              --dbConnPoolSize {w} \\
-                              --submitMode event \\
-                              --detSubmitPipeline 1 \\
-                              --detPipelineDepth 1024 \\
-                              --detClientMode event \\
-                              --detClientWorkers 96 \\
-                              --detClientInflight 16 \\
-                              --clientId single-gateway-direct \\
-                              --numTerminals 96 \\
-                              --connFanout 1 \\
-                              --waitMajority 0 \\
-                              --completionPath direct \\
-                              --totalNodes 1
-                        " """
+                        if mode == "pg":
+                            gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
+                                {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway \\
+                                  --nodes {args.db_host}:{args.server_port} \\
+                                  --queryFrom {gw_workload_path} \\
+                                  --dbType 0 \\
+                                  --numTerminals 96 \\
+                                  --submitLimit 512 \\
+                                  --nondetWindow 8 \\
+                                  --submitMode event \\
+                                  --connFanout 1 \\
+                                  --waitMajority 0 \\
+                                  --completionPath direct \\
+                                  --totalNodes 1
+                            " """
+                        else:
+                            gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
+                                {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway \\
+                                  --nodes {args.db_host}:{args.server_port} \\
+                                  --queryFrom {gw_workload_path} \\
+                                  --dbType 1 \\
+                                  --detStartSeq 0 \\
+                                  --reqIdOffset 1 \\
+                                  --detWindow 65536 \\
+                                  --detBatchSize 256 \\
+                                  --dbConnPoolSize {w} \\
+                                  --submitMode event \\
+                                  --detSubmitPipeline 1 \\
+                                  --detPipelineDepth 1024 \\
+                                  --detClientMode event \\
+                                  --detClientWorkers 96 \\
+                                  --detClientInflight 16 \\
+                                  --clientId single-gateway-direct \\
+                                  --numTerminals 96 \\
+                                  --connFanout 1 \\
+                                  --waitMajority 0 \\
+                                  --completionPath direct \\
+                                  --totalNodes 1
+                            " """
 
                         attempt_id = "single_" + uuid.uuid4().hex
                         attempt_dir = out_dir / "attempts"
