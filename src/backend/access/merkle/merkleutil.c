@@ -18,7 +18,9 @@
 #include "access/htup_details.h"
 #include "access/tableam.h"
 #include "catalog/pg_type.h"
+#include "catalog/namespace.h"
 #include "common/blake3.h"
+#include "executor/spi.h"
 #include "storage/bufmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
@@ -30,6 +32,7 @@
 #include "funcapi.h"
 #include "access/xact.h"
 #include "access/xloginsert.h"
+#include "miscadmin.h"
 #include "portability/instr_time.h"
 
 
@@ -47,7 +50,7 @@
  * Cache is cleared on XactCallback so a new txn always re-reads at least
  * once (protects against REINDEX-induced geometry changes between txns).
  */
-#define MERKLE_META_CACHE_SLOTS 4
+#define MERKLE_META_CACHE_SLOTS 64
 typedef struct MerkleMetaCacheEntry {
     Oid  relid;              /* InvalidOid => empty slot */
     int  fanout;
@@ -57,6 +60,13 @@ typedef struct MerkleMetaCacheEntry {
 } MerkleMetaCacheEntry;
 static MerkleMetaCacheEntry merkle_meta_cache[MERKLE_META_CACHE_SLOTS];
 static bool merkle_meta_cache_registered = false;
+
+#define MERKLE_PARTITION_CACHE_SIZE 64
+typedef struct MerklePartitionCacheEntry {
+	Oid  index_oid;
+	int  num_partitions;
+} MerklePartitionCacheEntry;
+static MerklePartitionCacheEntry g_partition_cache[MERKLE_PARTITION_CACHE_SIZE];
 
 static void
 merkle_meta_cache_clear(void)
@@ -499,7 +509,6 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 int
 merkle_partition_for_routing_key(Oid index_oid, const uint8 *routing_key)
 {
-	Relation index_rel;
 	int num_partitions = MERKLE_DEFAULT_PARTITIONS;
 	uint64 route_value = 0;
 	int i;
@@ -509,9 +518,36 @@ merkle_partition_for_routing_key(Oid index_oid, const uint8 *routing_key)
 	for (i = 0; i < 8; i++)
 		route_value = (route_value << 8) | routing_key[i];
 
-	index_rel = index_open(index_oid, AccessShareLock);
-	merkle_read_meta(index_rel, NULL, NULL, NULL, &num_partitions);
-	index_close(index_rel, AccessShareLock);
+	/* Fast path: check process memory cache */
+	for (i = 0; i < MERKLE_PARTITION_CACHE_SIZE; i++)
+	{
+		if (g_partition_cache[i].index_oid == index_oid && g_partition_cache[i].num_partitions > 0)
+			return (int) (route_value % (uint64) g_partition_cache[i].num_partitions);
+	}
+
+	/* Slow path: read index metadata once and cache in process memory */
+	{
+		Relation index_rel = index_open(index_oid, AccessShareLock);
+		int empty_slot = -1;
+
+		merkle_read_meta(index_rel, NULL, NULL, NULL, &num_partitions);
+		index_close(index_rel, AccessShareLock);
+
+		for (i = 0; i < MERKLE_PARTITION_CACHE_SIZE; i++)
+		{
+			if (g_partition_cache[i].index_oid == InvalidOid || g_partition_cache[i].index_oid == index_oid)
+			{
+				empty_slot = i;
+				break;
+			}
+		}
+		if (empty_slot < 0)
+			empty_slot = (int) (index_oid % MERKLE_PARTITION_CACHE_SIZE);
+
+		g_partition_cache[empty_slot].index_oid = index_oid;
+		g_partition_cache[empty_slot].num_partitions = num_partitions;
+	}
+
 	return (int) (route_value % (uint64) num_partitions);
 }
 
@@ -629,9 +665,11 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = baseline_apply_seq;
 
+	START_CRIT_SECTION();
 	MarkBufferDirty(metabuf);
 	if (RelationNeedsWAL(indexRel))
 		log_newpage_buffer(metabuf, true);
+	END_CRIT_SECTION();
 	UnlockReleaseBuffer(metabuf);
 }
 
@@ -974,6 +1012,89 @@ merkle_hash_xor_sql(PG_FUNCTION_ARGS)
 	memcpy(VARDATA(result), res_h.data, MERKLE_HASH_BYTES);
 
 	PG_RETURN_BYTEA_P(result);
+}
+
+void
+merkle_get_node_tablename(Oid index_oid, char *buf, size_t buflen)
+{
+	snprintf(buf, buflen, "merkle_node_%u", index_oid);
+}
+
+Oid
+merkle_get_node_table_relid(Oid index_oid)
+{
+	char tablename[64];
+	Oid nspoid = get_namespace_oid("ariabc_internal", true);
+	if (!OidIsValid(nspoid))
+		return InvalidOid;
+	merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+	return get_relname_relid(tablename, nspoid);
+}
+
+void
+merkle_ensure_node_table(Oid index_oid)
+{
+	char *sql;
+	int rc;
+
+	if (OidIsValid(merkle_get_node_table_relid(index_oid)))
+		return;
+
+	sql = psprintf(
+		"CREATE SCHEMA IF NOT EXISTS ariabc_internal;\n"
+		"CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_node_%u (\n"
+		"    tuple_count  integer  NOT NULL DEFAULT 0,\n"
+		"    partition_id smallint NOT NULL,\n"
+		"    prefix_len   smallint NOT NULL,\n"
+		"    is_leaf      boolean  NOT NULL,\n"
+		"    node_id      bytea    NOT NULL,\n"
+		"    hash         bytea    NOT NULL,\n"
+		"    PRIMARY KEY (partition_id, node_id, prefix_len)\n"
+		") WITH (fillfactor = 80);\n"
+		"CREATE INDEX IF NOT EXISTS merkle_node_%u_prefix_idx\n"
+		"    ON ariabc_internal.merkle_node_%u (partition_id, prefix_len, node_id);\n"
+		"CREATE INDEX IF NOT EXISTS merkle_node_%u_root_idx\n"
+		"    ON ariabc_internal.merkle_node_%u (partition_id)\n"
+		"    WHERE prefix_len = 0;\n",
+		index_oid, index_oid, index_oid, index_oid, index_oid);
+
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed in merkle_ensure_node_table: %d", rc);
+
+	PushActiveSnapshot(GetLatestSnapshot());
+	rc = SPI_execute(sql, false, 0);
+	PopActiveSnapshot();
+
+	SPI_finish();
+	pfree(sql);
+
+	if (rc < 0)
+		elog(ERROR, "failed to create dedicated table ariabc_internal.merkle_node_%u (rc=%d)", index_oid, rc);
+
+	CommandCounterIncrement();
+}
+
+void
+merkle_drop_node_table(Oid index_oid)
+{
+	char *sql;
+	int rc;
+
+	sql = psprintf("DROP TABLE IF EXISTS ariabc_internal.merkle_node_%u CASCADE;", index_oid);
+
+	rc = SPI_connect();
+	if (rc != SPI_OK_CONNECT)
+		elog(ERROR, "SPI_connect failed in merkle_drop_node_table: %d", rc);
+
+	PushActiveSnapshot(GetLatestSnapshot());
+	rc = SPI_execute(sql, false, 0);
+	PopActiveSnapshot();
+
+	SPI_finish();
+	pfree(sql);
+
+	CommandCounterIncrement();
 }
 
 /* End of file */

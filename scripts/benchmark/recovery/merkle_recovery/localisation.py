@@ -102,19 +102,57 @@ def detect_bad_leaves(
     frontier: set[tuple[int, bytes, int]] = {
         (partition_id, bytes(8), 0) for partition_id in mismatched_partitions
     }
-    subtree_sql = """
-        WITH wanted(partition_id, node_id, prefix_len) AS (
-            SELECT * FROM unnest(%s::int2[], %s::bytea[], %s::int2[])
-        )
-        SELECT n.partition_id, n.node_id, n.prefix_len, n.is_leaf, n.hash
-        FROM wanted w
-        JOIN ariabc_internal.merkle_node n
-          ON n.partition_id = w.partition_id
-         AND n.node_id = w.node_id
-         AND n.prefix_len = w.prefix_len
-        WHERE n.index_oid = %s::regclass
-        ORDER BY n.partition_id, n.prefix_len, n.node_id
-    """
+
+    # Resolve dedicated tables for direct primary key index scans, bypassing the UNION ALL view
+    oids = execute(
+        conn,
+        "SELECT to_regclass('healthy.usertable_merkle_idx')::oid AS h_oid, to_regclass('damaged.usertable_merkle_idx')::oid AS d_oid",
+    )
+    h_oid = oids[0].get("h_oid") if oids else None
+    d_oid = oids[0].get("d_oid") if oids else None
+    has_dedicated_tables = bool(h_oid and d_oid)
+
+    if has_dedicated_tables:
+        healthy_table = f"ariabc_internal.merkle_node_{int(h_oid)}"
+        damaged_table = f"ariabc_internal.merkle_node_{int(d_oid)}"
+        joined_subtree_sql = f"""
+            WITH wanted(partition_id, node_id, prefix_len) AS (
+                SELECT * FROM unnest(%s::int2[], %s::bytea[], %s::int2[])
+            )
+            SELECT
+                w.partition_id,
+                w.node_id,
+                w.prefix_len,
+                h.is_leaf AS healthy_is_leaf,
+                h.hash    AS healthy_hash,
+                d.is_leaf AS damaged_is_leaf,
+                d.hash    AS damaged_hash
+            FROM wanted w
+            LEFT JOIN {healthy_table} h
+              ON h.partition_id = w.partition_id
+             AND h.node_id = w.node_id
+             AND h.prefix_len = w.prefix_len
+            LEFT JOIN {damaged_table} d
+              ON d.partition_id = w.partition_id
+             AND d.node_id = w.node_id
+             AND d.prefix_len = w.prefix_len
+            ORDER BY w.partition_id, w.prefix_len, w.node_id
+        """
+    else:
+        subtree_sql = """
+            WITH wanted(partition_id, node_id, prefix_len) AS (
+                SELECT * FROM unnest(%s::int2[], %s::bytea[], %s::int2[])
+            )
+            SELECT n.partition_id, n.node_id, n.prefix_len, n.is_leaf, n.hash
+            FROM wanted w
+            JOIN ariabc_internal.merkle_node n
+              ON n.partition_id = w.partition_id
+             AND n.node_id = w.node_id
+             AND n.prefix_len = w.prefix_len
+            WHERE n.index_oid = %s::regclass
+            ORDER BY n.partition_id, n.prefix_len, n.node_id
+        """
+
     batch_ordinal = 0
     step_limit = max(1, int(levels_per_batch))
 
@@ -167,57 +205,99 @@ def detect_bad_leaves(
                 prefix_lens=prefix_lens,
             )
 
-        def fetch(schema: str) -> list[dict[str, Any]]:
-            return execute(
-                conn,
-                subtree_sql,
-                (partitions, node_ids, prefix_lens, f"{schema}.usertable_merkle_idx"),
-            )
+        healthy_nodes: dict[tuple[int, bytes, int], dict[str, Any]] = {}
+        damaged_nodes: dict[tuple[int, bytes, int], dict[str, Any]] = {}
 
-        healthy_rows = record_call(
-            profiler,
-            stage=stage_name,
-            operation=f"{operation_prefix}partition_nodes_healthy",
-            schema="healthy",
-            localisation_prefix_len=base_prefix_len,
-            localisation_frontier_nodes=len(current_parents),
-            localisation_batch_depth=batch_ordinal,
-            localisation_max_depth=depth,
-            fn=lambda: fetch("healthy"),
-        )
-        damaged_rows = record_call(
-            profiler,
-            stage=stage_name,
-            operation=f"{operation_prefix}partition_nodes_damaged",
-            schema="damaged",
-            localisation_prefix_len=base_prefix_len,
-            localisation_frontier_nodes=len(current_parents),
-            localisation_batch_depth=batch_ordinal,
-            localisation_max_depth=depth,
-            fn=lambda: fetch("damaged"),
-        )
+        if has_dedicated_tables:
+            joined_rows = record_call(
+                profiler,
+                stage=stage_name,
+                operation=f"{operation_prefix}partition_nodes_joined",
+                schema="both",
+                localisation_prefix_len=base_prefix_len,
+                localisation_frontier_nodes=len(current_parents),
+                localisation_batch_depth=batch_ordinal,
+                localisation_max_depth=depth,
+                fn=lambda: execute(conn, joined_subtree_sql, (partitions, node_ids, prefix_lens)),
+            )
+            for row in joined_rows:
+                k = (int(row["partition_id"]), bytes(row["node_id"]), int(row["prefix_len"]))
+                if row["healthy_hash"] is not None:
+                    healthy_nodes[k] = {
+                        "partition_id": row["partition_id"],
+                        "node_id": row["node_id"],
+                        "prefix_len": row["prefix_len"],
+                        "is_leaf": row["healthy_is_leaf"],
+                        "hash": row["healthy_hash"],
+                    }
+                if row["damaged_hash"] is not None:
+                    damaged_nodes[k] = {
+                        "partition_id": row["partition_id"],
+                        "node_id": row["node_id"],
+                        "prefix_len": row["prefix_len"],
+                        "is_leaf": row["damaged_is_leaf"],
+                        "hash": row["damaged_hash"],
+                    }
+        else:
+            def fetch(schema: str) -> list[dict[str, Any]]:
+                return execute(
+                    conn,
+                    subtree_sql,
+                    (partitions, node_ids, prefix_lens, f"{schema}.usertable_merkle_idx"),
+                )
+
+            healthy_rows = record_call(
+                profiler,
+                stage=stage_name,
+                operation=f"{operation_prefix}partition_nodes_healthy",
+                schema="healthy",
+                localisation_prefix_len=base_prefix_len,
+                localisation_frontier_nodes=len(current_parents),
+                localisation_batch_depth=batch_ordinal,
+                localisation_max_depth=depth,
+                fn=lambda: fetch("healthy"),
+            )
+            damaged_rows = record_call(
+                profiler,
+                stage=stage_name,
+                operation=f"{operation_prefix}partition_nodes_damaged",
+                schema="damaged",
+                localisation_prefix_len=base_prefix_len,
+                localisation_frontier_nodes=len(current_parents),
+                localisation_batch_depth=batch_ordinal,
+                localisation_max_depth=depth,
+                fn=lambda: fetch("damaged"),
+            )
+            healthy_nodes = {
+                (int(row["partition_id"]), bytes(row["node_id"]), int(row["prefix_len"])): row
+                for row in healthy_rows
+            }
+            damaged_nodes = {
+                (int(row["partition_id"]), bytes(row["node_id"]), int(row["prefix_len"])): row
+                for row in damaged_rows
+            }
+
+        # Check if any mismatched partition root is an unsplit leaf (has no child rows in either replica)
+        if base_prefix_len == 0:
+            for parent in current_parents:
+                c_keys = [k for k in batch_candidates if parent_map.get(k) == parent]
+                healthy_has = any(k in healthy_nodes for k in c_keys)
+                damaged_has = any(k in damaged_nodes for k in c_keys)
+                if not healthy_has or not damaged_has:
+                    bad.add(parent)
 
         counters[f"{prefix}partition_subtree_sql_calls"] = counters.get(
             f"{prefix}partition_subtree_sql_calls", 0
         ) + 2
         counters[f"{prefix}partition_subtree_nodes_read"] = counters.get(
             f"{prefix}partition_subtree_nodes_read", 0
-        ) + len(healthy_rows) + len(damaged_rows)
+        ) + len(healthy_nodes) + len(damaged_nodes)
         counters[f"{prefix}child_hash_sql_calls"] = counters.get(
             f"{prefix}child_hash_sql_calls", 0
         ) + 2
         counters[f"{prefix}child_hash_nodes_read"] = counters.get(
             f"{prefix}child_hash_nodes_read", 0
-        ) + len(healthy_rows) + len(damaged_rows)
-
-        healthy_nodes = {
-            (int(row["partition_id"]), bytes(row["node_id"]), int(row["prefix_len"])): row
-            for row in healthy_rows
-        }
-        damaged_nodes = {
-            (int(row["partition_id"]), bytes(row["node_id"]), int(row["prefix_len"])): row
-            for row in damaged_rows
-        }
+        ) + len(healthy_nodes) + len(damaged_nodes)
 
         compare_start = time.perf_counter_ns()
 
@@ -258,7 +338,7 @@ def detect_bad_leaves(
                 stage=stage_name,
                 operation=f"{operation_prefix}partition_nodes_compare_cpu",
                 client_wall_ns=time.perf_counter_ns() - compare_start,
-                rows_returned=len(healthy_rows) + len(damaged_rows),
+                rows_returned=len(healthy_nodes) + len(damaged_nodes),
             )
     counters[f"{prefix}leaf_nodes_found"] = len(bad)
 

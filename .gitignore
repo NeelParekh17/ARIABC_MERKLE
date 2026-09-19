@@ -47,6 +47,7 @@ lib*.pc
 /.vscode/
 /src/.vscode/
 /.idea/
+/.freebuff/
 *.bcdbtest
 
 # Exclude log, markdown, diff files

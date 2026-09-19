@@ -44,6 +44,7 @@ Options:
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
   --min-free-gib N             default: 40
   --ssh-timeout SECONDS        default: 15
+  --cpu-affinity CPULIST       default: 8-15; pin remote execution to specific CPU cores via taskset
   --keep-remote-archive
   --keep-failure-logs
   --fetch RUN_ID|latest       fetch completed remote run results without starting a new run
@@ -82,9 +83,11 @@ KEEP_FAILURE_LOGS=0
 FETCH_ONLY=""
 LEVELS_PER_BATCH=""
 PARTITIONS=""
+CPU_AFFINITY="8-15"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --cpu-affinity) CPU_AFFINITY="${2:?}"; shift 2 ;;
     --host) HOST="${2:?}"; shift 2 ;;
     --ssh-user) SSH_USER="${2:?}"; shift 2 ;;
     --ssh-port) SSH_PORT="${2:?}"; shift 2 ;;
@@ -467,8 +470,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'" >/dev/null
 progress "remote source and environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q TRACK_COUNTS=%q SYNCHRONOUS_COMMIT=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "$TRACK_COUNTS" "$SYNCHRONOUS_COMMIT" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q TRACK_COUNTS=%q SYNCHRONOUS_COMMIT=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q CPU_AFFINITY=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "$TRACK_COUNTS" "$SYNCHRONOUS_COMMIT" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS" "${CPU_AFFINITY:-}")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -481,6 +484,13 @@ remote_ssh_cmd "cat > '$REMOTE_RUN_DIR/run_payload.sh' && chmod +x '$REMOTE_RUN_
 #!/usr/bin/env bash
 set -Eeuo pipefail
 trap '' HUP
+
+if [[ -n "${CPU_AFFINITY:-}" ]]; then
+  if command -v taskset >/dev/null 2>&1; then
+    taskset -cp "$CPU_AFFINITY" $$ >/dev/null 2>&1 || true
+    echo "pinned payload to CPU cores $CPU_AFFINITY (affinity: $(taskset -p $$ 2>/dev/null || true))" >&2
+  fi
+fi
 
 remote_progress() {
   local remote_host
@@ -762,7 +772,7 @@ remote_progress "temporary socket directory ready: $REMOTE_SOCKET_DIR"
 # collection overhead explicitly with --track-counts off.
 remote_progress "PostgreSQL start requested; logs: $REMOTE_LOG_DIR/pg_ctl_start.log and $REMOTE_LOG_DIR/postgres.log"
 if "$REMOTE_INSTALL_DIR/bin/pg_ctl" -D "$REMOTE_PGDATA" -l "$REMOTE_LOG_DIR/postgres.log" \
-    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=32GB -c effective_cache_size=160GB -c maintenance_work_mem=16GB -c work_mem=256MB -c max_wal_size=128GB -c checkpoint_timeout=60min -c autovacuum=off -c track_counts=$TRACK_COUNTS -c synchronous_commit=on -c wal_buffers=256MB -c max_worker_processes=128 -c max_parallel_workers=96 -c max_parallel_maintenance_workers=32" \
+    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=32GB -c effective_cache_size=160GB -c maintenance_work_mem=16GB -c work_mem=256MB -c max_wal_size=128GB -c checkpoint_timeout=60min -c autovacuum=off -c track_counts=$TRACK_COUNTS -c synchronous_commit=$SYNCHRONOUS_COMMIT -c wal_buffers=256MB -c max_worker_processes=128 -c max_parallel_workers=96 -c max_parallel_maintenance_workers=32" \
     -w start 9>&- >"$REMOTE_LOG_DIR/pg_ctl_start.log" 2>&1; then
   remote_progress "PostgreSQL started"
 else
@@ -875,7 +885,7 @@ fi
 cleanup_success=1
 REMOTE
 
-REMOTE_PID="$(remote_ssh_cmd "nohup env $remote_env_prefix bash '$REMOTE_RUN_DIR/run_payload.sh' > '$REMOTE_LOG_DIR/remote_runner.log' 2>&1 & echo \$!")"
+REMOTE_PID="$(remote_ssh_cmd "nohup env $remote_env_prefix ${CPU_AFFINITY:+taskset -c $CPU_AFFINITY} bash '$REMOTE_RUN_DIR/run_payload.sh' > '$REMOTE_LOG_DIR/remote_runner.log' 2>&1 & echo \$!")"
 progress "remote benchmark payload launched detached under nohup (PID $REMOTE_PID)"
 progress "remote log output is saved to $REMOTE_LOG_DIR/remote_runner.log"
 progress "NOTE: This run will continue on $SSH_TARGET even if your local machine is shut down or disconnected."

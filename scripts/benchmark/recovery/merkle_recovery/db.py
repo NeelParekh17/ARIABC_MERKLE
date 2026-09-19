@@ -139,7 +139,7 @@ def merkle_node_index_stats(conn) -> list[dict[str, Any]]:
          AND io.relname = s.relname
          AND io.indexrelname = s.indexrelname
         WHERE s.schemaname = 'ariabc_internal'
-          AND s.relname = 'merkle_node'
+          AND (s.relname = 'merkle_node' OR s.relname LIKE 'merkle_node_%')
         ORDER BY s.indexrelname
         """,
         (track_counts_enabled,),

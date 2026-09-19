@@ -71,7 +71,34 @@ def recreate_schema(conn, *, bulk_load: bool = True, unlogged: bool = False) -> 
     # This is a scratch-cluster reset.  Direct synchronous mode has no
     # deferred local-delta queue; reset only the Raft recovery watermark.
     try:
-        execute(conn, "TRUNCATE ariabc_internal.merkle_node CASCADE")
+        execute(
+            conn,
+            """
+            DO $$
+            DECLARE
+                r record;
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'ariabc_internal' AND c.relname = 'merkle_node' AND c.relkind IN ('r', 'p')
+                ) THEN
+                    EXECUTE 'TRUNCATE ariabc_internal.merkle_node CASCADE';
+                END IF;
+
+                FOR r IN (
+                    SELECT tablename
+                    FROM pg_tables
+                    WHERE schemaname = 'ariabc_internal' AND tablename LIKE 'merkle_node_%'
+                ) LOOP
+                    EXECUTE format('TRUNCATE ariabc_internal.%I CASCADE', r.tablename);
+                END LOOP;
+            END $$;
+            """
+        )
+    except Exception:
+        pass
+    try:
         execute(conn, "UPDATE ariabc_internal.merkle_apply_state SET applied_seq = 0, state = 0, error_text = NULL")
         execute(conn, "UPDATE ariabc_internal.merkle_apply_counter SET next_seq = 0, terminal_prefix_seq = 0")
     except Exception:
@@ -281,6 +308,7 @@ def create_merkle_indexes(conn, split_threshold: int = 32, merge_threshold: int 
     _ensure_functions_parallel_safe(conn)
     t1 = _create_merkle_am_index(conn, "healthy", split_threshold, merge_threshold, fanout, partitions)
     t2 = _create_lookup_btree_index(conn, "healthy", partitions)
+    sync_merkle_node_view(conn)
     return t1 + t2
 
 
@@ -289,6 +317,7 @@ def create_damaged_indexes(conn, split_threshold: int = 32, merge_threshold: int
     _ensure_functions_parallel_safe(conn)
     t1 = _create_merkle_am_index(conn, "damaged", split_threshold, merge_threshold, fanout, partitions)
     t2 = _create_lookup_btree_index(conn, "damaged", partitions)
+    sync_merkle_node_view(conn)
     return t1 + t2
 
 
@@ -329,6 +358,99 @@ def create_all_indexes_parallel(conn, split_threshold: int = 32, merge_threshold
         t_d2 = _create_lookup_btree_index(conn, "damaged", partitions)
 
     return t_h1 + t_h2, t_d1 + t_d2
+
+
+def sync_merkle_node_view(conn) -> None:
+    """Ensure ariabc_internal.merkle_node is a unified compatibility view over dedicated per-index tables."""
+    execute(
+        conn,
+        """
+        DO $$
+        DECLARE
+            r record;
+            sql text := '';
+            first boolean := true;
+        BEGIN
+            FOR r IN (
+                SELECT c.oid, c.relname, n.nspname
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relam = (SELECT oid FROM pg_am WHERE amname = 'merkle')
+                  AND c.relkind = 'i'
+            ) LOOP
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'ariabc_internal'
+                      AND table_name = 'merkle_node_' || r.oid
+                ) THEN
+                    IF NOT first THEN
+                        sql := sql || ' UNION ALL ';
+                    END IF;
+                    sql := sql || format('SELECT tuple_count, %s::oid AS index_oid, partition_id, prefix_len, is_leaf, node_id, hash FROM ariabc_internal.merkle_node_%s', r.oid, r.oid);
+                    first := false;
+                END IF;
+            END LOOP;
+
+            IF EXISTS (
+                SELECT 1 FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'ariabc_internal' AND c.relname = 'merkle_node'
+            ) THEN
+                EXECUTE (
+                    SELECT CASE WHEN c.relkind = 'v' THEN 'DROP VIEW ariabc_internal.merkle_node CASCADE'
+                                ELSE 'DROP TABLE ariabc_internal.merkle_node CASCADE'
+                           END
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'ariabc_internal' AND c.relname = 'merkle_node'
+                );
+            END IF;
+
+            IF sql <> '' THEN
+                EXECUTE 'CREATE VIEW ariabc_internal.merkle_node AS ' || sql;
+            ELSE
+                CREATE TABLE ariabc_internal.merkle_node (
+                    tuple_count integer DEFAULT 0,
+                    index_oid oid,
+                    partition_id smallint,
+                    prefix_len smallint,
+                    is_leaf boolean,
+                    node_id bytea,
+                    hash bytea
+                );
+            END IF;
+        END $$;
+        """,
+    )
+
+
+def analyze_merkle_node_tables(conn) -> None:
+    """Analyze internal merkle_node tables (individual tables if view, or table directly)."""
+    execute(
+        conn,
+        """
+        DO $$
+        DECLARE
+            r record;
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'ariabc_internal' AND c.relname = 'merkle_node' AND c.relkind IN ('r', 'p')
+            ) THEN
+                EXECUTE 'ANALYZE ariabc_internal.merkle_node';
+            END IF;
+
+            FOR r IN (
+                SELECT tablename
+                FROM pg_tables
+                WHERE schemaname = 'ariabc_internal' AND tablename LIKE 'merkle_node_%'
+            ) LOOP
+                EXECUTE format('ANALYZE ariabc_internal.%I', r.tablename);
+            END LOOP;
+        END $$;
+        """
+    )
 
 
 # ── dataset ──────────────────────────────────────────────────────────────────
@@ -399,12 +521,13 @@ def build_dataset(
     pk_ms = (time.perf_counter() - t_pk) * 1000.0
 
     healthy_indexes_ms, damaged_indexes_ms = create_all_indexes_parallel(conn, split_threshold, merge_threshold, fanout, partitions)
+    sync_merkle_node_view(conn)
 
     # ANALYZE on healthy/damaged is already done inside create_merkle_indexes /
     # create_damaged_indexes. Only ANALYZE the internal catalog (fast) and skip
     # CHECKPOINT — it is not required for benchmark correctness and costs ~20s.
     t_ckpt = time.perf_counter()
-    execute(conn, "ANALYZE ariabc_internal.merkle_node")
+    analyze_merkle_node_tables(conn)
     ckpt_ms = (time.perf_counter() - t_ckpt) * 1000.0
 
     # Warm table and index pages into shared_buffers
@@ -459,7 +582,34 @@ def expand_dataset(
     # The benchmark owns this scratch internal catalog. Remove rows belonging
     # to the dropped index OIDs before the next build, avoiding orphan-node
     # scans and preserving the existing catalog-backed tree contract.
-    execute(conn, "TRUNCATE ariabc_internal.merkle_node")
+    try:
+        execute(
+            conn,
+            """
+            DO $$
+            DECLARE
+                r record;
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'ariabc_internal' AND c.relname = 'merkle_node' AND c.relkind IN ('r', 'p')
+                ) THEN
+                    EXECUTE 'TRUNCATE ariabc_internal.merkle_node CASCADE';
+                END IF;
+
+                FOR r IN (
+                    SELECT tablename
+                    FROM pg_tables
+                    WHERE schemaname = 'ariabc_internal' AND tablename LIKE 'merkle_node_%'
+                ) LOOP
+                    EXECUTE format('TRUNCATE ariabc_internal.%I CASCADE', r.tablename);
+                END LOOP;
+            END $$;
+            """
+        )
+    except Exception:
+        pass
 
     t1 = time.perf_counter()
     execute(
@@ -492,9 +642,10 @@ def expand_dataset(
     pk_ms = (time.perf_counter() - t_pk) * 1000.0
 
     healthy_indexes_ms, damaged_indexes_ms = create_all_indexes_parallel(conn, split_threshold, merge_threshold, fanout, partitions)
+    sync_merkle_node_view(conn)
 
     t_ckpt = time.perf_counter()
-    execute(conn, "ANALYZE ariabc_internal.merkle_node")
+    analyze_merkle_node_tables(conn)
     ckpt_ms = (time.perf_counter() - t_ckpt) * 1000.0
 
     execute(conn, "SELECT count(*) FROM healthy.usertable")
@@ -532,7 +683,7 @@ def reset_damaged_from_healthy(conn, cfg: dict[str, int]) -> None:
     create_damaged_indexes(conn, cfg.get("split_threshold", 32), cfg.get("merge_threshold", 8),
                            cfg.get("fanout", 4), cfg.get("partitions", 200))
     execute(conn, "ANALYZE damaged.usertable")
-    execute(conn, "ANALYZE ariabc_internal.merkle_node")
+    analyze_merkle_node_tables(conn)
     execute(conn, "CHECKPOINT")
 
 

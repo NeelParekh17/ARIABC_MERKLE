@@ -273,16 +273,16 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 
 	merkle_hash_zero(&stored_root_hash);
 
-	/* 1. Dynamic Index: Fetch root hash from catalog ariabc_internal.merkle_node */
+	/* 1. Dynamic Index: Fetch root hash from catalog ariabc_internal.merkle_node_<indexOid> */
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
-		Oid sel_types[1] = {OIDOID};
-		Datum sel_vals[1] = {ObjectIdGetDatum(indexOid)};
+		char *sql = psprintf(
+			"SELECT hash FROM ariabc_internal.merkle_node_%u"
+			" WHERE prefix_len = 0",
+			indexOid);
 
-		spi_rc = SPI_execute_with_args(
-			"SELECT hash FROM ariabc_internal.merkle_node"
-			" WHERE index_oid = $1 AND prefix_len = 0",
-			1, sel_types, sel_vals, NULL, true, 0);
+		spi_rc = SPI_execute(sql, true, 0);
+		pfree(sql);
 
 		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 		{
@@ -350,18 +350,16 @@ merkle_root_hash_index(PG_FUNCTION_ARGS)
 
 	{
 		int spi_rc;
-		Oid argtypes[2] = {OIDOID, INT2OID};
-		Datum values[2];
 
 		if (SPI_connect() == SPI_OK_CONNECT)
 		{
-			values[0] = ObjectIdGetDatum(indexOid);
-			values[1] = Int16GetDatum(0);
+			char *sql = psprintf(
+				"SELECT hash FROM ariabc_internal.merkle_node_%u"
+				" WHERE prefix_len = 0",
+				indexOid);
 
-			spi_rc = SPI_execute_with_args(
-			"SELECT hash FROM ariabc_internal.merkle_node"
-			" WHERE index_oid = $1 AND prefix_len = $2",
-			2, argtypes, values, NULL, true, 0);
+			spi_rc = SPI_execute(sql, true, 0);
+			pfree(sql);
 
 			if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 			{
@@ -468,13 +466,13 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     /* Query dynamic catalog node counts via SPI */
     if (SPI_connect() == SPI_OK_CONNECT)
     {
-        Oid sel_types[1] = {OIDOID};
-        Datum sel_vals[1] = {ObjectIdGetDatum(indexOid)};
-        int spi_rc;
+		char *sql = psprintf(
+			"SELECT count(*), count(*) FILTER (WHERE is_leaf) FROM ariabc_internal.merkle_node_%u",
+			indexOid);
+		int spi_rc;
 
-		spi_rc = SPI_execute_with_args(
-			"SELECT count(*), count(*) FILTER (WHERE is_leaf) FROM ariabc_internal.merkle_node WHERE index_oid = $1",
-            1, sel_types, sel_vals, NULL, true, 0);
+		spi_rc = SPI_execute(sql, true, 0);
+		pfree(sql);
 
         if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
         {
@@ -678,17 +676,19 @@ merkle_get_partition_root_hash(PG_FUNCTION_ARGS)
 	merkle_hash_zero(&root_hash);
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
-		Oid		argtypes[3] = {OIDOID, INT4OID, INT2OID};
-		Datum	args[3];
+		Oid		argtypes[2] = {INT2OID, INT2OID};
+		Datum	args[2];
+		char   *sql;
 		int		spi_rc;
-		args[0] = ObjectIdGetDatum(indexOid);
-		args[1] = Int32GetDatum(partition_id);
-		args[2] = Int16GetDatum(0);
-		spi_rc = SPI_execute_with_args(
-			"SELECT hash FROM ariabc_internal.merkle_node "
-			" WHERE index_oid = $1 AND partition_id = $2 "
-			"   AND node_id = '\\x0000000000000000'::bytea AND prefix_len = $3",
-			3, argtypes, args, NULL, true, 1);
+		args[0] = Int16GetDatum((int16) partition_id);
+		args[1] = Int16GetDatum(0);
+		sql = psprintf(
+			"SELECT hash FROM ariabc_internal.merkle_node_%u "
+			" WHERE partition_id = $1 "
+			"   AND node_id = '\\x0000000000000000'::bytea AND prefix_len = $2",
+			indexOid);
+		spi_rc = SPI_execute_with_args(sql, 2, argtypes, args, NULL, true, 1);
+		pfree(sql);
 		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 		{
 			bool	isnull;
@@ -745,22 +745,24 @@ merkle_get_partition_root_hashes(PG_FUNCTION_ARGS)
 
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
-		Oid		argtypes[1] = {OIDOID};
-		Datum	args[1] = {ObjectIdGetDatum(indexOid)};
+		char   *sql;
 		int		spi_rc;
 
-		spi_rc = SPI_execute_with_args(
-			"SELECT partition_id, hash FROM ariabc_internal.merkle_node "
-			" WHERE index_oid = $1 AND node_id = '\\x0000000000000000'::bytea "
+		sql = psprintf(
+			"SELECT partition_id, hash FROM ariabc_internal.merkle_node_%u "
+			" WHERE node_id = '\\x0000000000000000'::bytea "
 			"   AND prefix_len = 0 ORDER BY partition_id",
-			1, argtypes, args, NULL, true, 0);
+			indexOid);
+		spi_rc = SPI_execute(sql, true, 0);
+		pfree(sql);
+
 		if (spi_rc == SPI_OK_SELECT)
 		{
 			for (p = 0; p < (int) SPI_processed; p++)
 			{
 				bool	partition_isnull;
 				bool	hash_isnull;
-				int32	partition_id = DatumGetInt32(SPI_getbinval(
+				int32	partition_id = (int32) DatumGetInt16(SPI_getbinval(
 					SPI_tuptable->vals[p], SPI_tuptable->tupdesc, 1,
 					&partition_isnull));
 				Datum	hash_d = SPI_getbinval(SPI_tuptable->vals[p],
@@ -1044,8 +1046,9 @@ merkle_get_descendants_batch(PG_FUNCTION_ARGS)
 	for (depth = 0; depth <= max_depth && num_current_nodes > 0; depth++)
 	{
 		ArrayType *arr;
-		Oid argtypes[3] = {OIDOID, INT2OID, BYTEAARRAYOID};
-		Datum args[3];
+		Oid argtypes[2] = {INT2OID, BYTEAARRAYOID};
+		Datum args[2];
+		char *sql;
 		int spi_rc;
 		Datum *next_nodes = NULL;
 		int num_next_nodes = 0;
@@ -1055,16 +1058,17 @@ merkle_get_descendants_batch(PG_FUNCTION_ARGS)
 		arr = construct_array(current_nodes, num_current_nodes, BYTEAOID, -1, false, 'i');
 		MemoryContextSwitchTo(old_mcx);
 
-		args[0] = ObjectIdGetDatum(indexOid);
-		args[1] = Int16GetDatum(current_prefix_len);
-		args[2] = PointerGetDatum(arr);
+		args[0] = Int16GetDatum(current_prefix_len);
+		args[1] = PointerGetDatum(arr);
 
-		spi_rc = SPI_execute_with_args(
+		sql = psprintf(
 			"SELECT node_id, prefix_len, is_leaf, hash "
-			"  FROM ariabc_internal.merkle_node "
-			" WHERE index_oid = $1 AND prefix_len = $2 AND node_id = ANY($3::bytea[]) "
+			"  FROM ariabc_internal.merkle_node_%u "
+			" WHERE prefix_len = $1 AND node_id = ANY($2::bytea[]) "
 			" ORDER BY node_id",
-			3, argtypes, args, NULL, true, 0);
+			indexOid);
+		spi_rc = SPI_execute_with_args(sql, 2, argtypes, args, NULL, true, 0);
+		pfree(sql);
 
 		if (spi_rc != SPI_OK_SELECT)
 			elog(ERROR, "merkle_get_descendants_batch query failed: %d", spi_rc);
@@ -1238,9 +1242,10 @@ merkle_get_descendants_batch_array(PG_FUNCTION_ARGS)
 	for (depth = 0; depth <= max_depth && num_current_nodes > 0; depth++)
 	{
 		ArrayType *arr;
-		Oid partition_argtypes[4] = {OIDOID, INT4OID, INT2OID, BYTEAARRAYOID};
-		Oid legacy_argtypes[3] = {OIDOID, INT2OID, BYTEAARRAYOID};
-		Datum args[4];
+		Oid partition_argtypes[3] = {INT2OID, INT2OID, BYTEAARRAYOID};
+		Oid legacy_argtypes[2] = {INT2OID, BYTEAARRAYOID};
+		Datum args[3];
+		char *sql;
 		int spi_rc;
 		Datum *next_nodes = NULL;
 		int num_next_nodes = 0;
@@ -1250,30 +1255,33 @@ merkle_get_descendants_batch_array(PG_FUNCTION_ARGS)
 		arr = construct_array(current_nodes, num_current_nodes, BYTEAOID, -1, false, 'i');
 		MemoryContextSwitchTo(old_mcx);
 
-		args[0] = ObjectIdGetDatum(indexOid);
 		if (partition_aware)
 		{
-			args[1] = Int32GetDatum(partition_id);
-			args[2] = Int16GetDatum(current_prefix_len);
-			args[3] = PointerGetDatum(arr);
-			spi_rc = SPI_execute_with_args(
+			args[0] = Int16GetDatum((int16) partition_id);
+			args[1] = Int16GetDatum(current_prefix_len);
+			args[2] = PointerGetDatum(arr);
+			sql = psprintf(
 				"SELECT node_id, prefix_len, is_leaf, hash "
-				"  FROM ariabc_internal.merkle_node "
-				" WHERE index_oid = $1 AND partition_id = $2 "
-				"   AND prefix_len = $3 AND node_id = ANY($4::bytea[]) "
+				"  FROM ariabc_internal.merkle_node_%u "
+				" WHERE partition_id = $1 "
+				"   AND prefix_len = $2 AND node_id = ANY($3::bytea[]) "
 				" ORDER BY node_id",
-				4, partition_argtypes, args, NULL, true, 0);
+				indexOid);
+			spi_rc = SPI_execute_with_args(sql, 3, partition_argtypes, args, NULL, true, 0);
+			pfree(sql);
 		}
 		else
 		{
-			args[1] = Int32GetDatum(current_prefix_len);
-			args[2] = PointerGetDatum(arr);
-			spi_rc = SPI_execute_with_args(
+			args[0] = Int16GetDatum(current_prefix_len);
+			args[1] = PointerGetDatum(arr);
+			sql = psprintf(
 				"SELECT node_id, prefix_len, is_leaf, hash "
-				"  FROM ariabc_internal.merkle_node "
-				" WHERE index_oid = $1 AND prefix_len = $2 AND node_id = ANY($3::bytea[]) "
+				"  FROM ariabc_internal.merkle_node_%u "
+				" WHERE prefix_len = $1 AND node_id = ANY($2::bytea[]) "
 				" ORDER BY node_id",
-				3, legacy_argtypes, args, NULL, true, 0);
+				indexOid);
+			spi_rc = SPI_execute_with_args(sql, 2, legacy_argtypes, args, NULL, true, 0);
+			pfree(sql);
 		}
 
 		if (spi_rc != SPI_OK_SELECT)
