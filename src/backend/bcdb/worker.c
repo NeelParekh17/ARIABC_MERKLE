@@ -929,11 +929,13 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 			if (state_str)
 				strlcpy(caught_sqlstate, state_str, sizeof(caught_sqlstate));
 			elog(LOG,
-				 "SAFE_APPLY_EXCEPTION log=%llu ord=%u attempt=%d sqlstate=%s",
+				 "SAFE_APPLY_EXCEPTION log=%llu ord=%u attempt=%d sqlstate=%s msg=%s detail=%s",
 				 (unsigned long long) (tx ? tx->raft_log_index : 0),
 				 (unsigned) (tx ? tx->raft_item_ordinal : 0),
 				 attempt,
-				 caught_sqlstate[0] ? caught_sqlstate : "XXXXXX");
+				 caught_sqlstate[0] ? caught_sqlstate : "XXXXXX",
+				 edata->message ? edata->message : "",
+				 edata->detail ? edata->detail : "");
 			FlushErrorState();
 			MemoryContextSwitchTo(old_context);
 			RollbackAndReleaseCurrentSubTransaction();
@@ -1018,6 +1020,20 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 			if (num_apply_retries)
 				*num_apply_retries = retries;
 			return true;
+		}
+
+		if (apply_failed_unique && tx && tx->sql && strstr(tx->sql, "_proc"))
+		{
+			if (num_apply_retries)
+				*num_apply_retries = retries;
+			if (nonretryable_error)
+				*nonretryable_error = false;
+			BCDB_FLOW_LOG("[BCDB_FLOW] apply_proc_unique_violation_fast_retry pid=%d txid=%d xid=%u retries=%d",
+						  getpid(),
+						  tx ? (int)tx->tx_id : -1,
+						  (unsigned int)(tx ? tx->xid : InvalidTransactionId),
+						  retries);
+			return false;
 		}
 
 		retries++;

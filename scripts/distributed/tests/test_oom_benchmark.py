@@ -134,6 +134,47 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(args.shared_buffers, '32MB')
         self.assertEqual(oom.parse_args(['--workers', '1,8,16']).workers, args.workers)
 
+    def test_default_cli_reset_mode_is_cp_and_workers(self):
+        args = oom.parse_args([])
+        self.assertEqual(args.reset_mode, 'cp')
+        self.assertEqual(args.workers, [1, 8, 16])
+        self.assertEqual(args.modes, ['pg', 'bcdb_det', 'bcdb_merkle'])
+        self.assertEqual(args.skews, [0.0, 0.99])
+
+    def test_gateway_command_pipeline_unified_across_modes(self):
+        args = oom.parse_args(['--gateway-host', 'localhost'])
+        with tempfile.NamedTemporaryFile('w', suffix='.sql') as wf, tempfile.NamedTemporaryFile('w', suffix='.log') as lf:
+            wf.write('SELECT * FROM usertable WHERE ycsb_key=1;\n')
+            wf.flush()
+            with mock.patch('subprocess.run') as mock_run:
+                mock_run.return_value = subprocess.CompletedProcess(
+                    [], 0,
+                    'loaded 1 queries\n'
+                    'PROGRESS_GATEWAY_DET total=1 sent=1 accepted=1 completed=1 '
+                    'pipeline_outstanding=0 majority_inflight=0 pending_accept=0 final=1\n'
+                    'PROFILE_GATEWAY completion_path=direct submit_mode=event not_accepted=0 '
+                    'direct_completion_protocol=2 direct_terminal_success_count=1\n'
+                    'overall time taken (millisec) = 10\n'
+                    'overall wall time including drains (millisec) = 10\n'
+                    'divergence_count=0 permanent_failures=0 deterministic_error_count=0 '
+                    'nonterminal_failure_count=0 duplicate_key_errors=0 '
+                    'client_quorum_complete_count=0 success_count=0\n',
+                    ''
+                )
+                m_pg = oom.run_local_gateway_benchmark(args, Path(wf.name), 'pg', 8, Path(lf.name))
+                cmd_pg = m_pg['command']
+                m_det = oom.run_local_gateway_benchmark(args, Path(wf.name), 'bcdb_det', 8, Path(lf.name))
+                cmd_det = m_det['command']
+
+                self.assertIn('--detBatchSize', cmd_pg)
+                self.assertIn('256', cmd_pg)
+                self.assertIn('--detWindow', cmd_pg)
+                self.assertIn('65536', cmd_pg)
+                # Ensure the only difference between pg and det commands is --dbType 0 vs 1
+                cmd_pg_norm = ['1' if c == '0' and prev == '--dbType' else c
+                               for prev, c in zip([''] + cmd_pg[:-1], cmd_pg)]
+                self.assertEqual(cmd_pg_norm, cmd_det)
+
     def test_invalid_config_fails_before_remote_actions(self):
         for argv in (['--reset-mode', 'inplace'], ['--skews', 'nan'], ['--skews', '-.1'],
                      ['--workers', '0'], ['--db-rows', '0'], ['--workloads', 'typo'],
@@ -316,7 +357,7 @@ class RunnerTests(unittest.TestCase):
         def fake_remote(host, user, command, **kwargs):
             if 'pg_controldata' in command:
                 return subprocess.CompletedProcess([], 0, meta_lines, '')
-            if '.ariabc_golden_manifest.json' in command:
+            if '.ariabc_golden_manifest' in command:
                 return subprocess.CompletedProcess([], 0, json.dumps(manifest), '')
             return subprocess.CompletedProcess([], 0, '', '')
         with mock.patch.object(oom, 'run_remote', side_effect=fake_remote):
@@ -341,7 +382,7 @@ class RunnerTests(unittest.TestCase):
             commands.append(command)
             if 'pg_controldata' in command:
                 return subprocess.CompletedProcess([], 0, meta_lines, '')
-            if '.ariabc_golden_manifest.json' in command and 'cat' in command:
+            if '.ariabc_golden_manifest' in command and 'cat' in command:
                 return subprocess.CompletedProcess([], 0, json.dumps(manifest), '')
             if 'psql' in command:
                 return subprocess.CompletedProcess([], 0, sql_responses.pop(0), '')
@@ -389,6 +430,13 @@ class RunnerTests(unittest.TestCase):
         cleanup_script = '\n'.join(commands)
         self.assertIn('rm -rf /tmp/ariabc_oom_100m/pgdata_golden_check', cleanup_script)
         self.assertIn('pg_ctl -D /tmp/ariabc_oom_100m/pgdata_golden_check -w stop -m immediate', cleanup_script)
+
+    def test_cli_base_dir_name_option(self):
+        args_default = oom.parse_args([])
+        self.assertEqual(args_default.base_dir_name, 'pgdata_base_fanout32')
+
+        args_custom = oom.parse_args(['--base-dir-name', 'pgdata_base'])
+        self.assertEqual(args_custom.base_dir_name, 'pgdata_base')
 
 
 if __name__ == '__main__':

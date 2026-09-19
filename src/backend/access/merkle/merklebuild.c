@@ -215,7 +215,6 @@ typedef struct MerkleCatalogFlushState
 	int				batch_size;
 	int				nslots;
 	MemoryContext	batch_cxt;
-	int				att_index_oid;
 	int				att_partition_id;
 	int				att_node_id;
 	int				att_prefix_len;
@@ -228,8 +227,13 @@ static MerkleCatalogFlushState *
 merkle_catalog_flush_init(Oid index_oid, int batch_size)
 {
 	MerkleCatalogFlushState *state = (MerkleCatalogFlushState *) palloc0(sizeof(MerkleCatalogFlushState));
-	RangeVar   *rv = makeRangeVar("ariabc_internal", "merkle_node", -1);
+	char tablename[64];
+	RangeVar   *rv;
 	int			i;
+
+	merkle_ensure_node_table(index_oid);
+	merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+	rv = makeRangeVar("ariabc_internal", tablename, -1);
 
 	state->catalog_rel = table_openrv(rv, RowExclusiveLock);
 	state->tupdesc = RelationGetDescr(state->catalog_rel);
@@ -257,7 +261,6 @@ merkle_catalog_flush_init(Oid index_oid, int batch_size)
 											 ALLOCSET_DEFAULT_SIZES);
 
 	/* Resolve column attribute numbers dynamically */
-	state->att_index_oid = -1;
 	state->att_partition_id = -1;
 	state->att_node_id = -1;
 	state->att_prefix_len = -1;
@@ -271,9 +274,7 @@ merkle_catalog_flush_init(Oid index_oid, int batch_size)
 
 		if (attr->attisdropped)
 			continue;
-		if (strcmp(NameStr(attr->attname), "index_oid") == 0)
-			state->att_index_oid = i;
-		else if (strcmp(NameStr(attr->attname), "partition_id") == 0)
+		if (strcmp(NameStr(attr->attname), "partition_id") == 0)
 			state->att_partition_id = i;
 		else if (strcmp(NameStr(attr->attname), "node_id") == 0)
 			state->att_node_id = i;
@@ -287,12 +288,12 @@ merkle_catalog_flush_init(Oid index_oid, int batch_size)
 			state->att_hash = i;
 	}
 
-	if (state->att_index_oid < 0 || state->att_partition_id < 0 ||
+	if (state->att_partition_id < 0 ||
 		state->att_node_id < 0 || state->att_prefix_len < 0 ||
 		state->att_is_leaf < 0 || state->att_tuple_count < 0 ||
 		state->att_hash < 0)
 	{
-		elog(ERROR, "ariabc_internal.merkle_node catalog schema mismatch: missing required columns");
+		elog(ERROR, "ariabc_internal.%s catalog schema mismatch: missing required columns", tablename);
 	}
 
 	return state;
@@ -341,8 +342,8 @@ merkle_catalog_flush_add(MerkleCatalogFlushState *state,
 	MemoryContext oldcxt;
 	bytea	   *node_id_bytea;
 	bytea	   *hash_bytea;
-	Datum		values[7];
-	bool		isnull[7] = {false, false, false, false, false, false, false};
+	Datum		values[6];
+	bool		isnull[6] = {false, false, false, false, false, false};
 	HeapTuple	htup;
 
 	if (state->nslots >= state->batch_size)
@@ -358,12 +359,11 @@ merkle_catalog_flush_add(MerkleCatalogFlushState *state,
 	SET_VARSIZE(hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
 	memcpy(VARDATA(hash_bytea), r->hash.data, MERKLE_HASH_BYTES);
 
-	values[state->att_index_oid] = ObjectIdGetDatum(index_oid);
-	values[state->att_partition_id] = Int32GetDatum(r->partition_id);
+	values[state->att_partition_id] = Int16GetDatum((int16) r->partition_id);
 	values[state->att_node_id] = PointerGetDatum(node_id_bytea);
-	values[state->att_prefix_len] = Int16GetDatum(r->prefix_len);
+	values[state->att_prefix_len] = Int16GetDatum((int16) r->prefix_len);
 	values[state->att_is_leaf] = BoolGetDatum(r->is_leaf);
-	values[state->att_tuple_count] = Int64GetDatum(r->tuple_count);
+	values[state->att_tuple_count] = Int32GetDatum((int32) r->tuple_count);
 	values[state->att_hash] = PointerGetDatum(hash_bytea);
 
 	htup = heap_form_tuple(state->tupdesc, values, isnull);
@@ -1647,17 +1647,13 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	ea = merkle_prepare_sorted_entries(&buildstate);
 
 	/* REINDEX must replace, rather than overlay, the previous dynamic
-	 * geometry. This also removes pre-partition-format rows left by an
-	 * upgraded cluster before the first partitioned rebuild. */
+	 * geometry. Ensure dedicated node table exists, then truncate it. */
+	merkle_ensure_node_table(RelationGetRelid(indexRel));
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
-		Oid clear_types[1] = {OIDOID};
-		Datum clear_values[1] = {ObjectIdGetDatum(RelationGetRelid(indexRel))};
-
-		SPI_execute_with_args(
-			"DELETE FROM ariabc_internal.merkle_node WHERE index_oid = $1",
-			1, clear_types, clear_values, NULL, false, 0);
-
+		char *trunc_sql = psprintf("TRUNCATE TABLE ariabc_internal.merkle_node_%u;", RelationGetRelid(indexRel));
+		SPI_execute(trunc_sql, false, 0);
+		pfree(trunc_sql);
 		if (SPI_tuptable != NULL)
 			SPI_freetuptable(SPI_tuptable);
 		SPI_finish();

@@ -264,6 +264,10 @@ def main():
         ax.set_ylabel("Peak Median TPS (w=16)", fontsize=10, fontweight="bold")
         ax.set_xticks(SKEW_FLOAT_VALS)
         ax.set_xticklabels(["0.0", "0.2", "0.5", "0.7", "0.8", "0.9", "0.99", "1.2"], fontsize=8.5)
+        max_fam_tps = max(
+            [data[wl_key][s][m].get(16, {}).get("max", 0.0) for s in SKEWS for m in SERIES_CONFIG] or [1000.0]
+        )
+        ax.set_ylim(bottom=0, top=max(max_fam_tps * 1.15, 1000.0))
         ax.grid(True, linestyle=":", alpha=0.6, color="#cccccc")
 
     # Clean up empty 6th subplot in 2x3 grid
@@ -328,6 +332,10 @@ def main():
         if idx == 0:
             ax.set_ylabel("Throughput (TPS)", fontsize=10, fontweight="bold")
         ax.set_xticks(WORKERS)
+        max_fam_tps = max(
+            [data[wl_key]["0_99"][m].get(w, {}).get("max", 0.0) for w in WORKERS for m in SERIES_CONFIG] or [1000.0]
+        )
+        ax.set_ylim(bottom=0, top=max(max_fam_tps * 1.15, 1000.0))
         ax.grid(True, linestyle=":", alpha=0.6, color="#cccccc")
 
     handles, labels = axes[0].get_legend_handles_labels()

@@ -101,11 +101,12 @@ def sql(args, statement, timeout=600):
 
 
 def check_remote_db_exists(args):
+    base_dir = f"{args.remote_dir}/{getattr(args, 'base_dir_name', 'pgdata_base')}"
     result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
-if [ -f {args.remote_dir}/pgdata_base/PG_VERSION ]; then
-    {args.install_dir}/bin/pg_controldata {args.remote_dir}/pgdata_base
-elif [ -e {args.remote_dir}/pgdata_base ]; then
-    echo 'Incomplete pgdata_base; repair it before benchmarking' >&2
+if [ -f {base_dir}/PG_VERSION ]; then
+    {args.install_dir}/bin/pg_controldata {base_dir}
+elif [ -e {base_dir} ]; then
+    echo 'Incomplete base database; repair it before benchmarking' >&2
     exit 1
 else
     echo MISSING
@@ -372,7 +373,7 @@ sha256sum {args.install_dir}/bin/postgres {args.cluster_dir}/ariabc_pg/build/bin
     else:
         binary = REPO_ROOT / "ariabc_pg/build/bin/ariabc_pg_gateway"
         gw = f"{hashlib.sha256(binary.read_bytes()).hexdigest()} {binary}\n"
-    if getattr(args, "reset_mode", "undo") == "undo":
+    if getattr(args, "reset_mode", "cp") == "undo":
         undo_script = REPO_ROOT / "scripts/distributed/ycsb_undo.py"
         if undo_script.exists():
             run_remote(args.remote_host, args.remote_user,
@@ -448,12 +449,13 @@ def prepare_ledger_schema(args):
 
 
 def get_remote_baseline_identity(args):
-    """Inspect active pgdata_base to obtain fresh control, checksum and sizing metadata."""
+    """Inspect active baseline directory to obtain fresh control, checksum and sizing metadata."""
+    base_dir = f"{args.remote_dir}/{getattr(args, 'base_dir_name', 'pgdata_base')}"
     cmd = db_shell(args) + f"""
-{args.install_dir}/bin/pg_controldata {args.remote_dir}/pgdata_base | grep -E 'Database system identifier|Latest checkpoint location|Database cluster state' | sed 's/.*: *//'
-sha256sum {args.remote_dir}/pgdata_base/global/pg_control {args.remote_dir}/pgdata_base/PG_VERSION
-find {args.remote_dir}/pgdata_base -type f | wc -l
-du -sb {args.remote_dir}/pgdata_base | cut -f1
+{args.install_dir}/bin/pg_controldata {base_dir} | grep -E 'Database system identifier|Latest checkpoint location|Database cluster state' | sed 's/.*: *//'
+sha256sum {base_dir}/global/pg_control {base_dir}/PG_VERSION
+find {base_dir} -type f | wc -l
+du -sb {base_dir} | cut -f1
 """
     lines = run_remote(args.remote_host, args.remote_user, cmd, timeout=30).stdout.strip().splitlines()
     if len(lines) < 7:
@@ -470,13 +472,16 @@ du -sb {args.remote_dir}/pgdata_base | cut -f1
 
 
 def validate_golden_baseline(args):
-    """Full-scan the golden baseline once per sweep and record a manifest outside pgdata_base.
+    """Full-scan the golden baseline once per sweep and record a manifest outside base directory.
 
     The manifest records exact row counts, key bounds, relation byte sizes, relpages,
     and block-device/control file hashes. Subsequent resets verify physical file copy
     fidelity before postmaster starts, followed by exact O(1) relation size and bound checks.
     """
-    manifest_path = f"{args.remote_dir}/.ariabc_golden_manifest.json"
+    base_name = getattr(args, "base_dir_name", "pgdata_base")
+    base_dir = f"{args.remote_dir}/{base_name}"
+    manifest_name = f".ariabc_golden_manifest_{base_name}.json" if base_name != "pgdata_base" else ".ariabc_golden_manifest.json"
+    manifest_path = f"{args.remote_dir}/{manifest_name}"
     meta = get_remote_baseline_identity(args)
     if meta["cluster_state"] != "shut down":
         raise RuntimeError(f"Golden database cluster state is not cleanly shut down: {meta['cluster_state']}")
@@ -511,7 +516,7 @@ def validate_golden_baseline(args):
     try:
         run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
 rm -rf {check_dir}
-cp -a --reflink=never {args.remote_dir}/pgdata_base {check_dir}
+cp -a --reflink=never {base_dir} {check_dir}
 cat > {check_dir}/postgresql.auto.conf <<'EOCONF'
 port = {args.db_port}
 listen_addresses = '*'
@@ -656,10 +661,14 @@ bcdb_gate_telemetry = off
 bcdb_gate_snapshot_each_block = off
 merkle_apply_synchronous_direct = on
 """
+    base_name = getattr(args, "base_dir_name", "pgdata_base")
+    base_dir = f"{args.remote_dir}/{base_name}"
+    manifest_name = f".ariabc_golden_manifest_{base_name}.json" if base_name != "pgdata_base" else ".ariabc_golden_manifest.json"
+    manifest_path = f"{args.remote_dir}/{manifest_name}"
     manifest = getattr(args, '_golden_manifest', None)
     if manifest is None:
         raw = run_remote(args.remote_host, args.remote_user,
-                         f"cat {args.remote_dir}/.ariabc_golden_manifest.json 2>/dev/null || echo MISSING",
+                         f"cat {manifest_path} 2>/dev/null || echo MISSING",
                          check=False).stdout.strip()
         if raw != "MISSING":
             try:
@@ -680,7 +689,7 @@ test "$(sha256sum {args.remote_dir}/pgdata/global/pg_control | cut -d' ' -f1)" =
 """
 
     do_physical_copy = False
-    if getattr(args, 'reset_mode', 'undo') == 'cp':
+    if getattr(args, 'reset_mode', 'cp') == 'cp':
         do_physical_copy = True
     elif getattr(args, '_need_physical_reset', False):
         do_physical_copy = True
@@ -696,15 +705,15 @@ test "$(sha256sum {args.remote_dir}/pgdata/global/pg_control | cut -d' ' -f1)" =
 
     if do_physical_copy:
         result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
-test -f {args.remote_dir}/pgdata_base/PG_VERSION
+test -f {base_dir}/PG_VERSION
 test ! -L {args.remote_dir}/pgdata
-test ! -L {args.remote_dir}/pgdata_base
+test ! -L {base_dir}
 # Require room for a full copy plus WAL growth; do not consume all free space.
-needed=$(du -sb {args.remote_dir}/pgdata_base | cut -f1)
+needed=$(du -sb {base_dir} | cut -f1)
 available=$(df -B1 --output=avail {args.remote_dir} | tail -1)
 test "$available" -gt "$((needed + 21474836480))"
 rm -rf -- {args.remote_dir}/pgdata
-cp -a --reflink=never {args.remote_dir}/pgdata_base {args.remote_dir}/pgdata
+cp -a --reflink=never {base_dir} {args.remote_dir}/pgdata
 {copy_verify_cmd}
 sync
 printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
@@ -749,7 +758,7 @@ printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
                             "relpages FROM pg_class WHERE relname='usertable';")
     heap_bytes, index_bytes, relpages = [int(x) for x in table_stats.split('|')]
     if manifest:
-        if getattr(args, "reset_mode", "undo") == "cp" or do_physical_copy:
+        if getattr(args, "reset_mode", "cp") == "cp" or do_physical_copy:
             if heap_bytes != manifest['heap_bytes']:
                 raise RuntimeError(f"Post-copy heap size mismatch: {heap_bytes} != {manifest['heap_bytes']}")
             if index_bytes != manifest['index_bytes']:
@@ -867,16 +876,13 @@ def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
               str(REPO_ROOT / "ariabc_pg/build/bin/ariabc_pg_gateway"))
     remote_wl = f"/tmp/oom_{hashlib.sha256(workload_file.read_bytes()).hexdigest()}.sql"
     command = [binary, "--nodes", f"{args.remote_host}:{args.server_port}", "--queryFrom",
-               remote_wl if remote else str(workload_file), "--dbType", "0" if mode == "pg" else "1"]
-    if mode == "pg":
-        command += ["--submitLimit", "512", "--nondetWindow", "8"]
-    else:
-        command += ["--detStartSeq", "0", "--reqIdOffset", "1", "--detWindow", "65536",
-                    "--detBatchSize", "256", "--dbConnPoolSize", str(workers), "--detSubmitPipeline", "1",
-                    "--detPipelineDepth", "1024", "--detClientMode", "event", "--detClientWorkers", "96",
-                    "--detClientInflight", "16", "--clientId", "single-gateway-direct"]
-    command += ["--numTerminals", "96", "--submitMode", "event", "--connFanout", "1",
-                "--waitMajority", "0", "--completionPath", "direct", "--totalNodes", "1"]
+               remote_wl if remote else str(workload_file), "--dbType", "0" if mode == "pg" else "1",
+               "--detStartSeq", "0", "--reqIdOffset", "1", "--detWindow", "65536",
+               "--detBatchSize", "256", "--dbConnPoolSize", str(workers), "--detSubmitPipeline", "1",
+               "--detPipelineDepth", "1024", "--detClientMode", "event", "--detClientWorkers", "96",
+               "--detClientInflight", "16", "--clientId", "single-gateway-direct",
+               "--numTerminals", "96", "--submitMode", "event", "--connFanout", "1",
+               "--waitMajority", "0", "--completionPath", "direct", "--totalNodes", "1"]
     timed_command = ["timeout", "--signal=TERM", "--kill-after=15", str(args.gateway_timeout), *command]
     start = time.monotonic()
     try:
@@ -926,7 +932,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
                             f"{args.gateway_user}@{args.gateway_host}:/tmp/oom_{digest}.sql"],
                            check=True, timeout=60)
         undo_dir = None
-        if getattr(args, "reset_mode", "undo") == "undo":
+        if getattr(args, "reset_mode", "cp") == "undo":
             undo_dir = prepare_workload_undo(args, workload_file)
         # PG13 collector publishes asynchronously. Allow startup counters to
         # settle; after the run disconnect the server before the final snapshot.
@@ -978,7 +984,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
                 raise RuntimeError(f"Merkle verification failed: {merkle}")
             merkle = "PASS"
         undo_restore_ms = 0.0
-        if getattr(args, "reset_mode", "undo") == "undo" and undo_dir:
+        if getattr(args, "reset_mode", "cp") == "undo" and undo_dir:
             undo_restore_ms = apply_workload_undo(args, undo_dir)
             (case_dir / "undo_restore_ms.txt").write_text(f"{undo_restore_ms:.2f} ms\n")
         read = delta(pg_before, pg_after, "blks_read")
@@ -1047,7 +1053,7 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=42, help="Suite base seed; adds int(skew * 100)")
     parser.add_argument("--trials", type=int, default=1, help="Independent cold restores per case")
     parser.add_argument("--modes", nargs="+", default=["pg", "bcdb_det", "bcdb_merkle"])
-    parser.add_argument("--workers", nargs="+", default=["1", "2", "4", "8", "16"])
+    parser.add_argument("--workers", nargs="+", default=["1", "8", "16"])
     parser.add_argument("--skews", nargs="+", default=["0.0", "0.99"])
     parser.add_argument("--workloads", nargs="+", default=["a"])
     parser.add_argument("--output-dir", "--out-dir", dest="out_dir",
@@ -1055,10 +1061,12 @@ def parse_args(argv=None):
     parser.add_argument("--gateway-timeout", type=int, default=1800)
     parser.add_argument("--reset-timeout", type=int, default=3600)
     parser.add_argument("--verify-timeout", type=int, default=1800)
-    parser.add_argument("--skip-gen", action="store_true", help="Require an existing clean pgdata_base")
+    parser.add_argument("--base-dir-name", default="pgdata_base_fanout32",
+                        help="Name of baseline database directory inside remote-dir (default: pgdata_base_fanout32)")
+    parser.add_argument("--skip-gen", action="store_true", help="Require an existing clean baseline database")
     parser.add_argument("--gen-only", action="store_true")
-    parser.add_argument("--reset-mode", choices=["undo", "cp"], default="undo",
-                        help="Reset strategy: 'undo' uses fast logical before-image restore + cold cache restart; 'cp' uses full physical file copy")
+    parser.add_argument("--reset-mode", choices=["undo", "cp"], default="cp",
+                        help="Reset strategy: 'cp' uses full physical file copy; 'undo' uses fast logical before-image restore")
     parser.add_argument("--verify-mode", choices=["fast", "full"], default="fast",
                         help="Validation mode on per-case resets: 'fast' performs pre-start copy integrity and post-start catalog/bound sanity checks; 'full' runs an exhaustive SELECT count(*) scan on every reset.")
     parser.add_argument("--dry-run", action="store_true", help="Generate workloads and manifest locally; do not contact servers")
@@ -1140,6 +1148,7 @@ def write_report(out_dir, rows):
                         marker="o", label=mode)
         ax.set(title=f"Cold-start YCSB {wl.upper()}, skew={skew}, rows={rows[0]['db_rows']:,}",
                xlabel="Server workers / PG connection pool", ylabel="SQL statements per second")
+        ax.set_ylim(bottom=0)
         ax.legend()
         ax.grid(alpha=0.3)
         fig.tight_layout()
@@ -1190,7 +1199,7 @@ def main(argv=None):
         exists = check_remote_db_exists(args)
         if not exists:
             if args.skip_gen:
-                raise RuntimeError("--skip-gen requires an existing clean pgdata_base")
+                raise RuntimeError(f"--skip-gen requires an existing clean {args.base_dir_name}")
             generating = True
             generate_remote_100m_database(args)
             generating = False
@@ -1200,7 +1209,7 @@ def main(argv=None):
         args._golden_manifest = golden
         rows = []
         cases = []
-        if getattr(args, "reset_mode", "undo") == "undo":
+        if getattr(args, "reset_mode", "cp") == "undo":
             # Group by mode (putting bcdb_merkle first) so that the Merkle index
             # present in pgdata_base is preserved across all Merkle runs, and then
             # dropped once for bcdb_det and pg. This completely avoids physical cp -a copies.

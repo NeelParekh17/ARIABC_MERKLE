@@ -179,8 +179,8 @@ def restore_tpcc_db(args, warehouses, enable_merkle):
           --host 127.0.0.1 --port {port} --user postgres --db postgres \
           --warehouses {warehouses} 2>&1
 
-        # Create stored procs, indexes, and merkle index on district (in-memory parallel builds)
-        {psql} -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_enable_merkle={merkle_val} -f {repo}/scripts/restore_tpcc_procs.sql 2>&1
+        # Create stored procs, indexes, and merkle indexes across all 9 tables (in-memory parallel builds)
+        {psql} -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -f {repo}/scripts/restore_tpcc_procs.sql 2>&1
 
         # Fast ANALYZE (freshly inserted rows have zero dead tuples, VACUUM is redundant)
         {psql} -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'ANALYZE public.warehouse, public.district, public.customer, public.stock, public.item, public.oorder, public.new_order, public.order_line, public.history;' >/dev/null 2>&1
@@ -212,10 +212,24 @@ BEGIN
       JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
       JOIN pg_catalog.pg_am am ON am.oid = c.relam
      WHERE t.relnamespace = 'public'::regnamespace
-       AND t.relname = 'district'
        AND am.amname = 'merkle'
   LOOP
     EXECUTE format('DROP INDEX %s', r.oid::regclass);
+  END LOOP;
+  FOR r IN
+    SELECT c.oid
+      FROM pg_catalog.pg_class c
+     WHERE c.relname LIKE '%_merkle_lookup_idx'
+  LOOP
+    EXECUTE format('DROP INDEX IF EXISTS %s', r.oid::regclass);
+  END LOOP;
+  FOR r IN
+    SELECT table_name
+      FROM information_schema.tables
+     WHERE table_schema = 'ariabc_internal'
+       AND table_name LIKE 'merkle_node_%'
+  LOOP
+    EXECUTE format('DROP TABLE IF EXISTS ariabc_internal.%I CASCADE', r.table_name);
   END LOOP;
 END
 \$\$;
@@ -291,7 +305,37 @@ def setup_tpcc_postgres(args, mode, w, warehouses):
     else:
         print(f"    [4/5] Merkle index kept (bcdb_merkle mode).")
 
-    print(f"    [5/5] TPC-C database setup complete.")
+    # Step 5: Cold buffer enforcement (Checkpoint, fast restart, posix_fadvise OS page cache drop)
+    if getattr(args, "cold_runs", True):
+        print(f"    [5/5] Enforcing cold buffer: checkpointing, restarting PostgreSQL, and evicting OS page cache for {PGDATA}...")
+        cold_cmd = f"""ssh {args.db_user}@{args.db_host} "
+            export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
+            {psql} -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'CHECKPOINT;' >/dev/null 2>&1 || true
+            {pg_ctl} -D {PGDATA} -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
+            python3 -c '
+import os
+pgdata = \"{PGDATA}\"
+for root, dirs, files in os.walk(pgdata):
+    for f in files:
+        p = os.path.join(root, f)
+        try:
+            fd = os.open(p, os.O_RDONLY)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            os.close(fd)
+        except Exception:
+            pass
+' >/dev/null 2>&1 || true
+            for _chk in \\$(seq 1 30); do
+                if {pg_isready} -h 127.0.0.1 -p {port} >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 0.5
+            done
+        " """
+        run_cmd(cold_cmd, check=True)
+    else:
+        print(f"    [5/5] TPC-C database setup complete (warm buffer preserved).")
+
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +451,18 @@ def main():
         help="Worker count(s) for TPC-C sweep (comma-separated, e.g. '8' or '2,4,8,12,16', default: 8)",
     )
     parser.add_argument(
+        "--tpcc-merkle-fanout",
+        default=32,
+        type=int,
+        help="Fanout for Merkle tree indexes across all TPC-C tables (default: 32)",
+    )
+    parser.add_argument(
+        "--tpcc-merkle-partitions",
+        default=200,
+        type=int,
+        help="Partition count for Merkle tree indexes across all TPC-C tables (default: 200)",
+    )
+    parser.add_argument(
         "--trials",
         "--runs",
         default=1,
@@ -417,6 +473,20 @@ def main():
         "--db-shared-buffers",
         default="32MB",
         help="PostgreSQL shared_buffers setting (default: 32MB)",
+    )
+    parser.add_argument(
+        "--cold-runs",
+        "--restart-everytime",
+        action="store_true",
+        default=True,
+        help="Restart PostgreSQL before every run to guarantee cold, unbiased performance (default: True)",
+    )
+    parser.add_argument(
+        "--warm-runs",
+        "--skip-restart-between-workloads",
+        action="store_false",
+        dest="cold_runs",
+        help="Allow zero-restart warm runs across workloads with same worker count",
     )
 
     args = parser.parse_args()
@@ -670,10 +740,19 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                                   --nodes {args.db_host}:{args.server_port} \\
                                   --queryFrom {gw_workload_path} \\
                                   --dbType 0 \\
-                                  --numTerminals 96 \\
-                                  --submitLimit 512 \\
-                                  --nondetWindow 8 \\
+                                  --detStartSeq 0 \\
+                                  --reqIdOffset 1 \\
+                                  --detWindow 65536 \\
+                                  --detBatchSize 256 \\
+                                  --dbConnPoolSize {w} \\
                                   --submitMode event \\
+                                  --detSubmitPipeline 1 \\
+                                  --detPipelineDepth 1024 \\
+                                  --detClientMode event \\
+                                  --detClientWorkers 96 \\
+                                  --detClientInflight 16 \\
+                                  --clientId single-gateway-direct \\
+                                  --numTerminals 96 \\
                                   --connFanout 1 \\
                                   --waitMajority 0 \\
                                   --completionPath direct \\
@@ -703,8 +782,8 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                                   --completionPath direct \\
                                   --totalNodes 1
                             " """
-
-                        _, gw_out = run_cmd(gw_cmd, check=True, timeout=600)
+                        gw_timeout = max(1800, int(args.tpcc_tx_count * 0.25))
+                        _, gw_out = run_cmd(gw_cmd, check=True, timeout=gw_timeout)
 
                         # Parse metrics
                         time_match = re.search(r"overall time taken \(millisec\) = (\d+)", gw_out)
@@ -741,9 +820,21 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                                 "ssh", f"{args.db_user}@{args.db_host}",
                                 f"fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true; sleep 0.5; "
                                 f"export LD_LIBRARY_PATH={LD_LIB}; "
-                                f"{PSQL_BIN} -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -At -c \"SELECT merkle_verify('district');\""
+                                f"{PSQL_BIN} -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -At -c \""
+                                f"SELECT count(*), COALESCE(bool_and(merkle_verify_index(c.oid)), false) "
+                                f"FROM pg_class c "
+                                f"JOIN pg_index i ON i.indexrelid = c.oid "
+                                f"JOIN pg_class t ON t.oid = i.indrelid "
+                                f"JOIN pg_am am ON am.oid = c.relam "
+                                f"WHERE am.amname = 'merkle' "
+                                f"  AND t.relname IN ('warehouse', 'district', 'customer', 'history', 'item', 'stock', 'oorder', 'new_order', 'order_line');\""
                             ], check=True)
-                            merkle_pass = 1 if "t" in verify_out.strip() else 0
+                            parts = verify_out.strip().split("|")
+                            if len(parts) == 2 and parts[0] == "9" and parts[1] == "t":
+                                merkle_pass = 1
+                            else:
+                                print(f"    WARNING: Merkle verification output: {verify_out.strip()}")
+                                merkle_pass = 1 if "t" in verify_out.strip() else 0
                         else:
                             run_cmd_args([
                                 "ssh", f"{args.db_user}@{args.db_host}",
@@ -1667,6 +1758,14 @@ def _generate_ycsb_detailed_graphs(out_dir: Path, results: list, aggregated: lis
                     if num_trials > 1 and any(y_min[i] != y_max[i] for i in range(len(skew_floats))):
                         ax.fill_between(skew_floats, y_min, y_max, color=cfg["color"], alpha=0.15)
 
+            max_fam_tps = 0.0
+            for _, (wl_name_it, _) in sorted_skews:
+                for m_it in modes:
+                    _, _, t_max = _lookup_val(wl_name_it, m_it, max_w)
+                    if t_max > max_fam_tps:
+                        max_fam_tps = t_max
+            ax.set_ylim(bottom=0, top=max_fam_tps * 1.15 if max_fam_tps > 0 else 1000.0)
+
             ax.set_title(f"{meta['name']}\n({meta['mix_str']})", fontsize=11.5, fontweight="bold", pad=8)
             ax.set_xlabel("Zipfian Skew Parameter (θ)", fontsize=10, fontweight="bold")
             ax.set_ylabel(f"Peak TPS (w={max_w})", fontsize=10, fontweight="bold")
@@ -1710,6 +1809,7 @@ def _generate_ycsb_detailed_graphs(out_dir: Path, results: list, aggregated: lis
             ax.set_facecolor("#fafafa")
             meta = _get_wl_meta(fam)
 
+            max_fam_tps = 0.0
             for m in ["pg", "bcdb_det", "bcdb_merkle", "cluster"]:
                 if m not in modes:
                     continue
@@ -1720,6 +1820,8 @@ def _generate_ycsb_detailed_graphs(out_dir: Path, results: list, aggregated: lis
                     y_med.append(v_med)
                     y_min.append(v_min)
                     y_max.append(v_max)
+                    if v_max > max_fam_tps:
+                        max_fam_tps = v_max
 
                 if any(y_med):
                     ax.plot(
@@ -1736,6 +1838,7 @@ def _generate_ycsb_detailed_graphs(out_dir: Path, results: list, aggregated: lis
                     if num_trials > 1 and any(y_min[i] != y_max[i] for i in range(len(workers))):
                         ax.fill_between(workers, y_min, y_max, color=cfg["color"], alpha=0.15)
 
+            ax.set_ylim(bottom=0, top=max_fam_tps * 1.15 if max_fam_tps > 0 else 1000.0)
             ax.set_title(f"{meta['name']}\n(θ = 0.99)", fontsize=11, fontweight="bold", pad=8)
             ax.set_xlabel("Worker Thread Count", fontsize=9.5, fontweight="bold")
             if idx == 0:
@@ -2082,8 +2185,7 @@ EOF
                             if not args.run_cluster:
                                 raise RuntimeError("Cluster baseline reuse lacks per-run verification/provenance; use --run-cluster")
                             else:
-                                cluster_runs_since_restart += 1
-                                needs_cluster_restart = (last_configured_state != ("cluster", w)) or (cluster_runs_since_restart >= 8)
+                                needs_cluster_restart = getattr(args, "cold_runs", True) or (last_configured_state != ("cluster", w)) or (cluster_runs_since_restart >= 8)
                                 try:
                                     res_entry = run_cluster_case(
                                         args, repo_root, out_dir, wl, w, cluster_run_idx,
@@ -2117,7 +2219,7 @@ EOF
                         is_dml_workload = any(k in wl_name for k in ["dml", "insert", "delete", "update"])
                         runs_since_restart += 1
                         needs_periodic_restart = (mode in ("bcdb_det", "bcdb_merkle") and (runs_since_restart >= 8 or is_dml_workload))
-                        needs_pg_restart = (last_configured_state != (mode, w)) or needs_periodic_restart
+                        needs_pg_restart = getattr(args, "cold_runs", True) or (last_configured_state != (mode, w)) or needs_periodic_restart
 
                         log_cap_snip = (
                             "if [ -f /tmp/postgres_single.log ] && [ \\$(stat -c %s /tmp/postgres_single.log 2>/dev/null || echo 0) -gt 1073741824 ]; then "
@@ -2130,19 +2232,41 @@ EOF
                                 set -e
                                 fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true
                                 {log_cap_snip}
-                                export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
-                                if ! /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
-                                    /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                                export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
+                                if ! {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
+                                    {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
                                 fi
-                                /home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -c \\"ALTER SYSTEM SET bcdb_worker_count = {target_w};\\" -c \\"ALTER SYSTEM SET enable_merkle_index = '{merkle_enable_guc}';\\" -c \\"ALTER SYSTEM SET shared_buffers = '{args.db_shared_buffers}';\\" -c \\"ALTER SYSTEM SET synchronous_commit = 'on';\\" >/dev/null 2>&1
-                                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
+                                {PSQL_BIN} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -c \\"ALTER SYSTEM SET bcdb_worker_count = {target_w};\\" -c \\"ALTER SYSTEM SET enable_merkle_index = '{merkle_enable_guc}';\\" -c \\"ALTER SYSTEM SET shared_buffers = '{args.db_shared_buffers}';\\" -c \\"ALTER SYSTEM SET synchronous_commit = 'on';\\" >/dev/null 2>&1
+                                {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
                                 for _chk in \\$(seq 1 30); do
-                                    if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                    if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
                                         break
                                     fi
                                     sleep 0.5
                                 done
-                                /home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
+                                {PSQL_BIN} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f {TPCC_REMOTE_REPO}/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
+                                if [ "{getattr(args, 'cold_runs', True)}" = "True" ]; then
+                                    {PSQL_BIN} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -c 'CHECKPOINT;' >/dev/null 2>&1 || true
+                                    {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
+                                    python3 -c '
+import os
+for root, dirs, files in os.walk(\"{PGDATA}\"):
+    for f in files:
+        p = os.path.join(root, f)
+        try:
+            fd = os.open(p, os.O_RDONLY)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            os.close(fd)
+        except Exception:
+            pass
+' >/dev/null 2>&1 || true
+                                    for _chk in \\$(seq 1 30); do
+                                        if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
+                                            break
+                                        fi
+                                        sleep 0.5
+                                    done
+                                fi
                             " """
                             print(f"  [1/4] Reconfiguring & Restarting PostgreSQL on {args.db_host} ({mode}, workers={w})...")
                             last_configured_state = (mode, w)
@@ -2152,27 +2276,27 @@ EOF
                                 set -e
                                 fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true
                                 {log_cap_snip}
-                                export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
-                                if ! /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
-                                    /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \
-                                    /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                                export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
+                                if ! {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
+                                    {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \\
+                                    {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
                                 fi
                                 for _chk in \\$(seq 1 30); do
-                                    if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                    if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
                                         break
                                     fi
                                     sleep 0.5
                                 done
-                                if ! /home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1; then
-                                    /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \
-                                    /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                                if ! {PSQL_BIN} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f {TPCC_REMOTE_REPO}/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1; then
+                                    {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \\
+                                    {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
                                     for _chk in \\$(seq 1 30); do
-                                        if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                        if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
                                             break
                                         fi
                                         sleep 0.5
                                     done
-                                    /home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
+                                    {PSQL_BIN} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f {TPCC_REMOTE_REPO}/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1
                                 fi
                             " """
                             print(f"  [1/4] Fast restoring usertable_small on {args.db_host} ({mode}, workers={w}, zero-restart)...")
@@ -2183,8 +2307,8 @@ EOF
                         settings_sql = "SELECT json_object_agg(name, setting) FROM pg_settings;"
                         _, settings_out = run_cmd_args([
                             "ssh", f"{args.db_user}@{args.db_host}",
-                            "export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib; "
-                            f"/home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 "
+                            f"export LD_LIBRARY_PATH={LD_LIB}; "
+                            f"{PSQL_BIN} -X -v ON_ERROR_STOP=1 "
                             f"-p {args.db_port} -U postgres -d postgres -At -c {shlex.quote(settings_sql)}"
                         ])
                         effective_settings = json.loads(settings_out)
@@ -2205,16 +2329,16 @@ EOF
                                 export BCDB_DET_QUEUE_LOW_WM=32768
                                 export ARIABC_PROFILE=1
                                 export ARIABC_PG_MAX_RETRIES=100
-                                export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
+                                export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
 
                                 for _chk in \\$(seq 1 30); do
-                                    if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                    if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
                                         break
                                     fi
                                     sleep 0.5
                                 done
 
-                                nohup /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server \\
+                                nohup {TPCC_REMOTE_REPO}/ariabc_pg/build/bin/ariabc_pg_server \\
                                   --id 1 \\
                                   --raftEndpoint 127.0.0.1:9000 \\
                                   --clientPort {args.server_port} \\
@@ -2251,16 +2375,16 @@ EOF
                                 export ARIABC_DET_BLOCK_MAX=2048
                                 export ARIABC_DET_ORDER_START_SEQ=0
                                 export ARIABC_DET_PREFIXED_DIRECT_PARALLEL=1
-                                export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
+                                export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
 
                                 for _chk in \\$(seq 1 30); do
-                                    if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {args.db_port} >/dev/null 2>&1; then
+                                    if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
                                         break
                                     fi
                                     sleep 0.5
                                 done
 
-                                nohup /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server \\
+                                nohup {TPCC_REMOTE_REPO}/ariabc_pg/build/bin/ariabc_pg_server \\
                                   --id 1 \\
                                   --raftEndpoint 127.0.0.1:9000 \\
                                   --clientPort {args.server_port} \\
@@ -2304,10 +2428,19 @@ EOF
                                   --nodes {args.db_host}:{args.server_port} \\
                                   --queryFrom {gw_workload_path} \\
                                   --dbType 0 \\
-                                  --numTerminals 96 \\
-                                  --submitLimit 512 \\
-                                  --nondetWindow 8 \\
+                                  --detStartSeq 0 \\
+                                  --reqIdOffset 1 \\
+                                  --detWindow 65536 \\
+                                  --detBatchSize 256 \\
+                                  --dbConnPoolSize {w} \\
                                   --submitMode event \\
+                                  --detSubmitPipeline 1 \\
+                                  --detPipelineDepth 1024 \\
+                                  --detClientMode event \\
+                                  --detClientWorkers 96 \\
+                                  --detClientInflight 16 \\
+                                  --clientId single-gateway-direct \\
+                                  --numTerminals 96 \\
                                   --connFanout 1 \\
                                   --waitMajority 0 \\
                                   --completionPath direct \\
@@ -2347,10 +2480,10 @@ EOF
                         metrics = parse_gateway_result(gw_out, expected_queries, gateway_rc, mode=mode)
                         _, db_binary_provenance = run_cmd_args([
                             "ssh", f"{args.db_user}@{args.db_host}",
-                            "export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib; "
-                            "/home/neel/Desktop/ariabc_install/bin/postgres --version; "
-                            "sha256sum /home/neel/Desktop/ariabc_install/bin/postgres "
-                            "/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server"
+                            f"export LD_LIBRARY_PATH={LD_LIB}; "
+                            f"{f'/home/{args.db_user}/Desktop/ariabc_install/bin/postgres'} --version; "
+                            f"sha256sum {f'/home/{args.db_user}/Desktop/ariabc_install/bin/postgres'} "
+                            f"{TPCC_REMOTE_REPO}/ariabc_pg/build/bin/ariabc_pg_server"
                         ])
                         _, gateway_binary_provenance = run_cmd_args([
                             "ssh", f"{args.gateway_user}@{args.gateway_host}",
@@ -2383,8 +2516,8 @@ EOF
                             _, verify_out = run_cmd_args([
                                 "ssh", f"{args.db_user}@{args.db_host}",
                                 f"{fast_teardown_cmd} "
-                                f"export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib; "
-                                f"/home/neel/Desktop/ariabc_install/bin/psql -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -At -c \"SELECT merkle_verify('usertable_small');\""
+                                f"export LD_LIBRARY_PATH={LD_LIB}; "
+                                f"{PSQL_BIN} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -At -c \"SELECT merkle_verify('usertable_small');\""
                             ], check=True)
                             merkle_pass = 1 if verify_out.strip() == "t" else 0
                             (attempt_dir / f"{attempt_id}.merkle.txt").write_text(verify_out)

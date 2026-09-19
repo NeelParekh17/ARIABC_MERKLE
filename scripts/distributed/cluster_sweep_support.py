@@ -145,7 +145,7 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
     env = os.environ.copy()
     env.update({
         "CLUSTER_RUN_ID": run_id, "FORCE_BUILD": "0", "SKIP_RDKAFKA_SETUP": "1",
-        "SKIP_SYNC": str(int(run_index > 0)), "SKIP_BUILD": str(int(run_index > 0)),
+        "SKIP_SYNC": os.environ.get("SKIP_SYNC", "1"), "SKIP_BUILD": os.environ.get("SKIP_BUILD", "1"),
         "KAFKA_FAST_RESET": "1", "DUMP_VERIFY_CSV": "0",
         "ARIABC_PREFERRED_LEADER_ID": "1", "ARIABC_RAFT_DURABLE_ASYNC_FLUSH": "1",
         "ARIABC_RAFT_STREAM_GAP": "512", "ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER": "1",
@@ -173,7 +173,7 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
                "--raft-ordering-policy", "leader-assigned", "--raft-ordered-batch-append", "1",
                "--raft-ordered-batch-target-entries", "64", "--raft-ordered-batch-linger-us", "1000",
                "--raft-ordered-coalesce-log", "1", "--kafka-completion-mode", "majority_async_all3",
-               "--det-window", "65536"]
+               "--det-window", "65536", "--skip-sync", "--skip-build"]
     if not restart:
         command.append("--skip-pg-restart")
     metadata["command"] = command

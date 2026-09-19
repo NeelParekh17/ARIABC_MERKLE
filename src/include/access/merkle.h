@@ -446,4 +446,10 @@ extern Datum merkle_partition_for_hash(PG_FUNCTION_ARGS);
 extern Datum merkle_find_spurious_key_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_apply_until_sql(PG_FUNCTION_ARGS);
 
+/* Dedicated node table helpers (per-index physical storage) */
+extern void merkle_get_node_tablename(Oid index_oid, char *buf, size_t buflen);
+extern Oid merkle_get_node_table_relid(Oid index_oid);
+extern void merkle_ensure_node_table(Oid index_oid);
+extern void merkle_drop_node_table(Oid index_oid);
+
 #endif /* MERKLE_H */
