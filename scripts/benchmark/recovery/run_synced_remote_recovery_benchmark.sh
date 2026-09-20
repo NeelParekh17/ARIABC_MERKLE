@@ -44,7 +44,7 @@ Options:
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
   --min-free-gib N             default: 40
   --ssh-timeout SECONDS        default: 15
-  --cpu-affinity CPULIST       default: 8-15; pin remote execution to specific CPU cores via taskset
+  --cpu-affinity CPULIST       default: 176-183; pin remote execution to specific CPU cores via taskset
   --keep-remote-archive
   --keep-failure-logs
   --fetch RUN_ID|latest       fetch completed remote run results without starting a new run
@@ -83,11 +83,13 @@ KEEP_FAILURE_LOGS=0
 FETCH_ONLY=""
 LEVELS_PER_BATCH=""
 PARTITIONS=""
-CPU_AFFINITY="8-15"
+CPU_AFFINITY="176-183"
+WARMUP_CYCLES=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cpu-affinity) CPU_AFFINITY="${2:?}"; shift 2 ;;
+    --warmup-cycles) WARMUP_CYCLES="${2:?}"; shift 2 ;;
     --host) HOST="${2:?}"; shift 2 ;;
     --ssh-user) SSH_USER="${2:?}"; shift 2 ;;
     --ssh-port) SSH_PORT="${2:?}"; shift 2 ;;
@@ -837,6 +839,9 @@ BENCH_ARGS=(
   --profiling "$PROFILING"
   --synchronous-commit "$SYNCHRONOUS_COMMIT"
 )
+if [[ -n "${WARMUP_CYCLES:-}" ]]; then
+  BENCH_ARGS+=(--warmup-cycles "$WARMUP_CYCLES")
+fi
 BENCH_ARGS+=("${BENCH_REPETITIONS[@]}")
 BENCH_ARGS+=("${BENCH_SELECTORS[@]}")
 

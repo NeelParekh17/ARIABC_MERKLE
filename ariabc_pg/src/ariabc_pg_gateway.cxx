@@ -3360,15 +3360,15 @@ bool run_early_ready_race_self_test()
     // Scenario A: Quorum completion followed by entry eviction prior to audit pin (returns MISSING, no hang).
     {
         vote_store votes_a(3, 2, 1, sig_key); // max capacity = 1
-        
+
         votes_a.note_inflight_registered(1);
         std::string rec1_1, rec1_2, rec2_2;
         votes_a.add_reply(make_rec_for(1, 1, true), rec1_1);
         votes_a.add_reply(make_rec_for(1, 2, false), rec1_2);
-        
+
         votes_a.note_inflight_registered(2);
         votes_a.add_reply(make_rec_for(2, 2, true), rec2_2); // evicts req 1
-        
+
         audit_mark_status status = votes_a.mark_audit_pending(1, 1000, 100);
         if (status != audit_mark_status::MISSING) {
             std::cerr << "Scenario A failed: expected MISSING, got " << (int)status << std::endl;
@@ -4668,9 +4668,13 @@ int main(int argc, char** argv) {
             return ariabc_pg::submit_to_cluster_event(
                 *submitter, nodes, rr_idx, req, out_err, out_resp, out_node_idx);
         }
+        const char* wait_timeout_env = std::getenv("ARIABC_WAIT_RESULT_TIMEOUT_MS");
+        const int wait_timeout_ms = (wait_timeout_env && *wait_timeout_env)
+            ? std::max(1000, std::atoi(wait_timeout_env))
+            : 180000;
         return ariabc_pg::submit_to_cluster(
             nodes, rr_idx, req, out_err, out_resp, out_node_idx,
-            wait_result_on_success, 30000, out_wait_result_success);
+            wait_result_on_success, wait_timeout_ms, out_wait_result_success);
     };
 
     auto submit_only_quiet = [&](const std::string& req_id,
@@ -4880,13 +4884,19 @@ int main(int argc, char** argv) {
             wait_req_id.find('[') == std::string::npos &&
             wait_req_id.find(' ') == std::string::npos;
 
+        const char* wait_timeout_env = std::getenv("ARIABC_WAIT_RESULT_TIMEOUT_MS");
+        const int wait_timeout_ms = (wait_timeout_env && *wait_timeout_env)
+            ? std::max(1000, std::atoi(wait_timeout_env))
+            : 180000;
+        const std::string wait_timeout_str = std::to_string(wait_timeout_ms);
+
         uint64_t raft_log_idx = 0;
         std::string wait_cmd;
         if (is_batch_wait && !wait_ids.empty()) {
-            wait_cmd = "WAIT_RESULTS 30000 " + wait_req_id.substr(4);
+            wait_cmd = "WAIT_RESULTS " + wait_timeout_str + " " + wait_req_id.substr(4);
         } else if (can_wait_by_req_id) {
             wait_ids.push_back(wait_req_id);
-            wait_cmd = "WAIT_RESULT_ID " + wait_req_id + " 30000";
+            wait_cmd = "WAIT_RESULT_ID " + wait_req_id + " " + wait_timeout_str;
         } else {
             if (!ariabc_pg::parse_named_u64_field(submit_resp.msg, "raft_log_idx=", raft_log_idx) ||
                 raft_log_idx == 0) {
@@ -4895,7 +4905,7 @@ int main(int argc, char** argv) {
                 permanent_failures.fetch_add(1);
                 return false;
             }
-            wait_cmd = "WAIT_RESULT " + std::to_string(raft_log_idx) + " 30000";
+            wait_cmd = "WAIT_RESULT " + std::to_string(raft_log_idx) + " " + wait_timeout_str;
         }
         ariabc_pg::client_api_response wait_resp;
         std::string cerr;
@@ -5073,8 +5083,12 @@ int main(int argc, char** argv) {
             return false;
         }
 
+        const char* wait_timeout_env = std::getenv("ARIABC_WAIT_RESULT_TIMEOUT_MS");
+        const int wait_timeout_ms = (wait_timeout_env && *wait_timeout_env)
+            ? std::max(1000, std::atoi(wait_timeout_env))
+            : 180000;
         const std::string wait_cmd =
-            "__ARIABC_CTRL_WAIT_COMMIT_INDEX " + std::to_string(target_commit_idx) + " 30000";
+            "__ARIABC_CTRL_WAIT_COMMIT_INDEX " + std::to_string(target_commit_idx) + " " + std::to_string(wait_timeout_ms);
         for (size_t i = 0; i < nodes.size(); ++i) {
             ariabc_pg::client_api_response resp;
             std::string cerr;

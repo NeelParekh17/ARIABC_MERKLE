@@ -25,8 +25,23 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import math
 
-target_dir = repo_root / "scripts/bench_full_results/abcdf_4modes_4skews_cold_20260917_192158"
-pg_sweep_dir = repo_root / "scripts/bench_full_results/pg_rerun_cold_20260917_211929"
+import argparse
+
+parser = argparse.ArgumentParser(description="Update YCSB ABCDF campaign with 3-trial median PG numbers")
+parser.add_argument(
+    "--target-dir",
+    default=str(repo_root / "scripts/bench_full_results/abcdf_4modes_4skews_cold_20260917_192158"),
+    help="Target campaign directory containing summary.csv with all 4 modes",
+)
+parser.add_argument(
+    "--pg-dir",
+    default=str(repo_root / "scripts/bench_full_results/pg_rerun_cold_20260917_211929"),
+    help="Directory containing 3-trial PG sweep results",
+)
+args = parser.parse_args()
+
+target_dir = Path(args.target_dir)
+pg_sweep_dir = Path(args.pg_dir)
 
 # 1. Back up target summary.csv if not already backed up
 backup_file = target_dir / "summary_single_trial_backup.csv"

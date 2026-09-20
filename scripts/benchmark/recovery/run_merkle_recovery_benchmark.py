@@ -75,7 +75,7 @@ PROFILE_OPERATION_FIELDS = [
 # commit path after a large index build, so keep several untimed cycles outside
 # the reported sample. The normal apply_corruption() checkpoint remains the
 # clean boundary immediately before each measured repetition.
-RECOVERY_WARMUP_CYCLES = 3
+RECOVERY_WARMUP_CYCLES = 6
 
 
 # ── timing helper ─────────────────────────────────────────────────────────────
@@ -1060,6 +1060,7 @@ def run_one_manifest(
     leaf_fetch_chunk_size: int = 64,
     levels_per_batch: int = 3,
     synchronous_commit: str = "off",
+    warmup_cycles: int | None = None,
 ) -> list[Metrics]:
     tuple_count = int(manifest["tuple_count"])
     cfg = {
@@ -1075,10 +1076,13 @@ def run_one_manifest(
     # between warmup and measurement. The dataset build already establishes
     # the initial checkpoint boundary.
     warmup_cycles_ms = 0.0
-    if reps > 0:
+    effective_warmup_cycles = warmup_cycles if warmup_cycles is not None else (
+        6 if cfg["fanout"] >= 32 else RECOVERY_WARMUP_CYCLES
+    )
+    if reps > 0 and effective_warmup_cycles > 0:
         import time
         t_w_start = time.perf_counter()
-        for warmup_rep in range(RECOVERY_WARMUP_CYCLES):
+        for warmup_rep in range(effective_warmup_cycles):
             warmup_id = f"{recovery_run_id(manifest, 0, profile_label)}-warmup{warmup_rep}"
             apply_corruption(conn, manifest)
             planner_results, _ = run_planner_preflight(conn, manifest, warmup_id)
@@ -1100,7 +1104,7 @@ def run_one_manifest(
                 synchronous_commit=synchronous_commit,
             )
         warmup_cycles_ms = (time.perf_counter() - t_w_start) * 1000.0
-        print(f"  [warmup] {RECOVERY_WARMUP_CYCLES} untimed recovery cycles took {warmup_cycles_ms/1000.0:.2f}s", flush=True)
+        print(f"  [warmup] {effective_warmup_cycles} untimed recovery cycles took {warmup_cycles_ms/1000.0:.2f}s", flush=True)
     manifest["recovery_warmup_cycles_ms"] = round(warmup_cycles_ms, 3)
 
 
@@ -1412,20 +1416,24 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
             50_000_000,
         ]
         tuple_counts = _selected(default_tuple_counts, args.tuple_count)
-        if getattr(args, "fanout", None) is not None:
+        if getattr(args, "fanout", None) is not None and getattr(args, "fanout") != 32:
             raise ValueError("size-scaling-k75-c300 uses fixed canonical geometries; do not override geometry")
         if getattr(args, "bad_leaf_count", None) is not None:
             raise ValueError("size-scaling-k75-c300 uses fixed --bad-leaf-count=75")
 
-        default_labels = [
-            "fanout_f4_l16",
-        ]
+        if getattr(args, "fanout", None) == 32 or args.geometry_label in ("fanout_f32_l16", "fanout_f32_l1024"):
+            default_labels = [args.geometry_label if args.geometry_label in ("fanout_f32_l16", "fanout_f32_l1024") else "fanout_f32_l16"]
+        else:
+            default_labels = [
+                "fanout_f4_l16",
+            ]
 
+        valid_labels = ["fanout_f4_l16", "fanout_f32_l16", "fanout_f32_l1024"]
         if args.geometry_label:
-            if args.geometry_label not in geometry_matrix:
+            if args.geometry_label not in geometry_matrix or args.geometry_label not in valid_labels:
                 raise ValueError(
                     f"unknown size-scaling-k75-c300 geometry label '{args.geometry_label}'; "
-                    f"valid labels: {', '.join(default_labels)}"
+                    f"valid labels: {', '.join(valid_labels)}"
                 )
             labels = [args.geometry_label]
         else:
@@ -1434,7 +1442,7 @@ def _series_for_profile(args: argparse.Namespace, config) -> list[dict[str, Any]
         series = []
         for label in labels:
             geo = geometry_matrix.get(label, {})
-            fanout = int(geo.get("fanout", 4))
+            fanout = int(geo.get("fanout", 32 if "f32" in label else 4))
             split_threshold = int(geo.get("split_threshold", 32))
             merge_threshold = int(geo.get("merge_threshold", 8))
 
@@ -1881,6 +1889,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     leaf_fetch_chunk_size=args.leaf_fetch_batch_size,
                     levels_per_batch=getattr(args, "levels_per_batch", 3),
                     synchronous_commit=getattr(args, "synchronous_commit", "off"),
+                    warmup_cycles=getattr(args, "warmup_cycles", None),
                 )
             )
 
@@ -2358,6 +2367,17 @@ def main(argv: list[str] | None = None) -> int:
         default="off",
         dest="synchronous_commit",
         help="PostgreSQL synchronous_commit setting during recovery repair (default: off).",
+    )
+    parser.add_argument(
+        "--warmup-cycles",
+        type=int,
+        default=None,
+        dest="warmup_cycles",
+        help=(
+            "Number of untimed warmup recovery cycles before timed repetitions "
+            "(default: 6 for fanout>=32, 3 otherwise). Use to pre-fill "
+            "shared_buffers, plan cache, and catalog caches before Rep 0."
+        ),
     )
     args = parser.parse_args(argv)
 

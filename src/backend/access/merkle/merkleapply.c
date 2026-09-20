@@ -1542,34 +1542,53 @@ merkle_compute_advisory_lock_key(Oid index_oid, const uint8 *node_id, int prefix
 	return (int64) h;
 }
 
+static int
+merkle_pending_sm_cmp(const void *a, const void *b)
+{
+	const PendingSplitMerge *p1 = (const PendingSplitMerge *) a;
+	const PendingSplitMerge *p2 = (const PendingSplitMerge *) b;
+	int64 k1 = merkle_compute_advisory_lock_key(p1->index_oid, p1->node_id, p1->prefix_len);
+	int64 k2 = merkle_compute_advisory_lock_key(p2->index_oid, p2->node_id, p2->prefix_len);
+
+	if (k1 != k2)
+		return (k1 < k2) ? -1 : 1;
+	return 0;
+}
+
 static void
 merkle_check_split_merge_guarded(Oid index_oid, int partition_id, const uint8 *node_id, int prefix_len,
 								 int64 current_count, int split_thresh,
-								 int merge_thresh)
+								 int merge_thresh, bool is_split)
 {
 	/* Same-leaf updates preserve tuple_count and can never cross a geometry
 	 * threshold.  The caller only reaches this helper for count-changing
 	 * events; keeping that invariant out of the hot update path avoids an
 	 * advisory-lock probe for every UPDATE statement. */
 
-	if (current_count > split_thresh && prefix_len < MAX_PREFIX_LEN)
+	if (is_split)
 	{
-		int64 lock_key = merkle_compute_advisory_lock_key(index_oid, node_id, prefix_len);
-		DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(lock_key));
-
-		if (merkle_node_is_leaf(index_oid, partition_id, node_id, prefix_len))
+		if (current_count > split_thresh && prefix_len < MAX_PREFIX_LEN)
 		{
-			do_split(index_oid, partition_id, node_id, prefix_len, current_count);
+			int64 lock_key = merkle_compute_advisory_lock_key(index_oid, node_id, prefix_len);
+			DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(lock_key));
+
+			if (merkle_node_is_leaf(index_oid, partition_id, node_id, prefix_len))
+			{
+				do_split(index_oid, partition_id, node_id, prefix_len, current_count);
+			}
 		}
 	}
-	else if (current_count <= merge_thresh && prefix_len > 0)
+	else
 	{
-		int64 lock_key = merkle_compute_advisory_lock_key(index_oid, node_id, prefix_len);
-		DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(lock_key));
-
-		if (merkle_node_is_leaf(index_oid, partition_id, node_id, prefix_len))
+		if (current_count <= merge_thresh && prefix_len > 0)
 		{
-			do_merge_check(index_oid, partition_id, node_id, prefix_len, merge_thresh);
+			int64 lock_key = merkle_compute_advisory_lock_key(index_oid, node_id, prefix_len);
+			DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(lock_key));
+
+			if (merkle_node_is_leaf(index_oid, partition_id, node_id, prefix_len))
+			{
+				do_merge_check(index_oid, partition_id, node_id, prefix_len, merge_thresh);
+			}
 		}
 	}
 }
@@ -1629,29 +1648,46 @@ merkle_apply_single_coalesced_entry(Relation catalog_rel, Relation pkey_idx_rel,
 			CommandCounterIncrement();
 			if (count_delta != 0)
 			{
-				bool found = false;
-				int k;
-				for (k = 0; k < num_pending_sm; k++)
+				bool needs_sm = false;
+				bool is_split = false;
+
+				if (count_delta > 0 && new_count > split_thresh && leaf_prefix_len < MAX_PREFIX_LEN)
 				{
-					if (pending_sm[k].index_oid == index_oid &&
-							pending_sm[k].partition_id == partition_id &&
-						pending_sm[k].prefix_len == leaf_prefix_len &&
-						memcmp(pending_sm[k].node_id, leaf_node_id, 8) == 0)
-					{
-						found = true;
-						break;
-					}
+					needs_sm = true;
+					is_split = true;
 				}
-				if (!found && num_pending_sm < MAX_PENDING_SPLIT_MERGE)
+				else if (count_delta < 0 && new_count <= merge_thresh && leaf_prefix_len > 0)
 				{
-					pending_sm[num_pending_sm].index_oid = index_oid;
-					pending_sm[num_pending_sm].partition_id = partition_id;
-					memcpy(pending_sm[num_pending_sm].node_id, leaf_node_id, 8);
-					pending_sm[num_pending_sm].prefix_len = leaf_prefix_len;
-					pending_sm[num_pending_sm].is_split = (new_count > split_thresh);
-					pending_sm[num_pending_sm].split_thresh = split_thresh;
-					pending_sm[num_pending_sm].merge_thresh = merge_thresh;
-					num_pending_sm++;
+					needs_sm = true;
+					is_split = false;
+				}
+
+				if (needs_sm)
+				{
+					bool found = false;
+					int k;
+					for (k = 0; k < num_pending_sm; k++)
+					{
+						if (pending_sm[k].index_oid == index_oid &&
+							pending_sm[k].partition_id == partition_id &&
+							pending_sm[k].prefix_len == leaf_prefix_len &&
+							memcmp(pending_sm[k].node_id, leaf_node_id, 8) == 0)
+						{
+							found = true;
+							break;
+						}
+					}
+					if (!found && num_pending_sm < MAX_PENDING_SPLIT_MERGE)
+					{
+						pending_sm[num_pending_sm].index_oid = index_oid;
+						pending_sm[num_pending_sm].partition_id = partition_id;
+						memcpy(pending_sm[num_pending_sm].node_id, leaf_node_id, 8);
+						pending_sm[num_pending_sm].prefix_len = leaf_prefix_len;
+						pending_sm[num_pending_sm].is_split = is_split;
+						pending_sm[num_pending_sm].split_thresh = split_thresh;
+						pending_sm[num_pending_sm].merge_thresh = merge_thresh;
+						num_pending_sm++;
+					}
 				}
 			}
 			applied = true;
@@ -1761,6 +1797,7 @@ merkle_coalesced_node_find_or_add(MerkleCoalescedNode **nodes_ptr, int *count_pt
 static bool
 merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 						  TupleTableSlot *scan_slot, TupleTableSlot *update_slot,
+						  EState *estate,
 						  int partition_id, const uint8 *node_id, int prefix_len,
 						  bool is_leaf, const MerkleHash *xor_delta,
 						  int64 count_delta, int64 *new_count_out)
@@ -1823,24 +1860,21 @@ merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 		old_count = isnull ? 0 : DatumGetInt32(d_count);
 
 		d_hash = slot_getattr(scan_slot, 6, &isnull);
-		old_hash_bytea = DatumGetByteaPP(d_hash);
-		if (VARSIZE_ANY_EXHDR(old_hash_bytea) == MERKLE_HASH_BYTES)
-			memcpy(old_hash.data, VARDATA_ANY(old_hash_bytea), MERKLE_HASH_BYTES);
+		if (!isnull)
+		{
+			old_hash_bytea = DatumGetByteaPP(d_hash);
+			if (VARSIZE_ANY_EXHDR(old_hash_bytea) == MERKLE_HASH_BYTES)
+				memcpy(old_hash.data, VARDATA_ANY(old_hash_bytea), MERKLE_HASH_BYTES);
+			else
+				merkle_hash_zero(&old_hash);
+		}
 		else
+		{
 			merkle_hash_zero(&old_hash);
+		}
 
 		calc_count = (int64) old_count + count_delta;
-		if (is_leaf)
-		{
-			if (calc_count < 0)
-				elog(ERROR, "merkle_direct_update_node: count %lld + delta %lld < 0 for partition %d prefix %d",
-					 (long long) old_count, (long long) count_delta, partition_id, prefix_len);
-			new_count = (int32) calc_count;
-		}
-		else
-		{
-			new_count = (calc_count < 0) ? 0 : (int32) calc_count;
-		}
+		new_count = (calc_count < 0) ? 0 : (int32) calc_count;
 
 		if (new_count == 0)
 		{
@@ -1872,6 +1906,8 @@ merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 		ExecClearTuple(update_slot);
 		ExecStoreHeapTuple(newTup, update_slot, true);
 
+		lockmode = LockTupleExclusive;
+		memset(&tmfd, 0, sizeof(tmfd));
 		result = table_tuple_update(catalog_rel, &cur_tid, update_slot,
 									GetCurrentCommandId(true),
 									GetActiveSnapshot(),
@@ -1884,18 +1920,12 @@ merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 		{
 			if (unlikely(update_indexes))
 			{
-				/* Extremely rare non-HOT update when page has zero free space */
-				EState *estate = CreateExecutorState();
-				ResultRelInfo *rri = makeNode(ResultRelInfo);
-				InitResultRelInfo(rri, catalog_rel, 1, NULL, 0);
-				ExecOpenIndices(rri, false);
-				estate->es_result_relations = rri;
-				estate->es_num_result_relations = 1;
-				estate->es_result_relation_info = rri;
-				ExecInsertIndexTuples(update_slot, estate, false, NULL, NIL);
-				ExecCloseIndices(rri);
-				pfree(rri);
-				FreeExecutorState(estate);
+				/* Non-HOT update: update indexes pointing to the new heap tuple */
+				if (estate != NULL)
+				{
+					ExecInsertIndexTuples(update_slot, estate, false, NULL, NIL);
+					ResetPerTupleExprContext(estate);
+				}
 			}
 
 			if (new_count_out)
@@ -1905,7 +1935,7 @@ merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 		else if (result == TM_Updated)
 		{
 			retries++;
-			if (retries > 10)
+			if (retries > 256)
 				elog(ERROR, "merkle_direct_update_node: max update retries exceeded for partition %d prefix %d",
 					 partition_id, prefix_len);
 
@@ -1935,6 +1965,8 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 	Relation pkey_idx_rel = NULL;
 	TupleTableSlot *slot = NULL;
 	TupleTableSlot *update_slot = NULL;
+	ResultRelInfo *rri = NULL;
+	EState *estate = NULL;
 
 	num_entries = hash_get_num_entries(combined_delta_map);
 	if (num_entries == 0)
@@ -1973,6 +2005,9 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 		catalog_rel = NULL;
 		pkey_idx_rel = NULL;
 		slot = NULL;
+		update_slot = NULL;
+		rri = NULL;
+		estate = NULL;
 
 		if (!OidIsValid(plans->catalog_relid))
 		{
@@ -2002,6 +2037,15 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 				pkey_idx_rel = index_open(plans->pkey_idx_oid, RowExclusiveLock);
 				slot = table_slot_create(catalog_rel, NULL);
 				update_slot = MakeSingleTupleTableSlot(RelationGetDescr(catalog_rel), &TTSOpsHeapTuple);
+				update_slot->tts_tableOid = RelationGetRelid(catalog_rel);
+
+				estate = CreateExecutorState();
+				rri = makeNode(ResultRelInfo);
+				InitResultRelInfo(rri, catalog_rel, 1, NULL, 0);
+				ExecOpenIndices(rri, false);
+				estate->es_result_relations = rri;
+				estate->es_num_result_relations = 1;
+				estate->es_result_relation_info = rri;
 			}
 		}
 
@@ -2081,7 +2125,7 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 				if (catalog_rel != NULL && pkey_idx_rel != NULL && slot != NULL && update_slot != NULL)
 				{
 					updated = merkle_direct_update_node(catalog_rel, pkey_idx_rel,
-														slot, update_slot,
+														slot, update_slot, estate,
 														node->partition_id, node->node_id,
 														node->prefix_len, node->is_leaf,
 														&node->xor_delta, node->count_delta,
@@ -2138,16 +2182,33 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 						 curr_index_oid, node->partition_id, node->prefix_len);
 				}
 
-				if (node->is_leaf && node->count_delta != 0 && num_pending_sm < MAX_PENDING_SPLIT_MERGE)
+				if (node->is_leaf && node->count_delta != 0)
 				{
-					pending_sm[num_pending_sm].index_oid = curr_index_oid;
-					pending_sm[num_pending_sm].partition_id = node->partition_id;
-					memcpy(pending_sm[num_pending_sm].node_id, node->node_id, 8);
-					pending_sm[num_pending_sm].prefix_len = node->prefix_len;
-					pending_sm[num_pending_sm].is_split = (new_count > node->split_thresh);
-					pending_sm[num_pending_sm].split_thresh = node->split_thresh;
-					pending_sm[num_pending_sm].merge_thresh = node->merge_thresh;
-					num_pending_sm++;
+					bool needs_sm = false;
+					bool is_split = false;
+
+					if (node->count_delta > 0 && new_count > node->split_thresh && node->prefix_len < MAX_PREFIX_LEN)
+					{
+						needs_sm = true;
+						is_split = true;
+					}
+					else if (node->count_delta < 0 && new_count <= node->merge_thresh && node->prefix_len > 0)
+					{
+						needs_sm = true;
+						is_split = false;
+					}
+
+					if (needs_sm && num_pending_sm < MAX_PENDING_SPLIT_MERGE)
+					{
+						pending_sm[num_pending_sm].index_oid = curr_index_oid;
+						pending_sm[num_pending_sm].partition_id = node->partition_id;
+						memcpy(pending_sm[num_pending_sm].node_id, node->node_id, 8);
+						pending_sm[num_pending_sm].prefix_len = node->prefix_len;
+						pending_sm[num_pending_sm].is_split = is_split;
+						pending_sm[num_pending_sm].split_thresh = node->split_thresh;
+						pending_sm[num_pending_sm].merge_thresh = node->merge_thresh;
+						num_pending_sm++;
+					}
 				}
 			}
 			CommandCounterIncrement();
@@ -2169,6 +2230,17 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 				ExecDropSingleTupleTableSlot(update_slot);
 				update_slot = NULL;
 			}
+			if (rri != NULL)
+			{
+				ExecCloseIndices(rri);
+				pfree(rri);
+				rri = NULL;
+			}
+			if (estate != NULL)
+			{
+				FreeExecutorState(estate);
+				estate = NULL;
+			}
 			if (pkey_idx_rel != NULL)
 			{
 				index_close(pkey_idx_rel, RowExclusiveLock);
@@ -2187,6 +2259,10 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 	{
 		int k;
 		CommandCounterIncrement();
+
+		if (num_pending_sm > 1)
+			qsort(pending_sm, num_pending_sm, sizeof(PendingSplitMerge), merkle_pending_sm_cmp);
+
 		for (k = 0; k < num_pending_sm; k++)
 		{
 			Datum values[3];
@@ -2218,7 +2294,8 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 												 pending_sm[k].prefix_len,
 												 latest_count,
 												 pending_sm[k].split_thresh,
-												 pending_sm[k].merge_thresh);
+												 pending_sm[k].merge_thresh,
+												 pending_sm[k].is_split);
 			}
 			else if (SPI_tuptable != NULL)
 				SPI_freetuptable(SPI_tuptable);
