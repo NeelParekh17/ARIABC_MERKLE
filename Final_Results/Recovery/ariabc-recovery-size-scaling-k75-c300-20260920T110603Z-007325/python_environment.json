@@ -1,0 +1,8 @@
+{
+  "benchmark_script": "/home/protectdr/merkle_recovery_runs/runs/ariabc-recovery-size-scaling-k75-c300-20260920T110603Z-007325/src/scripts/benchmark/recovery/run_merkle_recovery_benchmark.py",
+  "platform": "Linux-7.0.0-29-generic-x86_64-with-glibc2.39",
+  "psycopg_version": "3.3.3",
+  "python_executable": "/usr/bin/python3",
+  "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "working_directory": "/home/protectdr/merkle_recovery_runs/runs/ariabc-recovery-size-scaling-k75-c300-20260920T110603Z-007325/src"
+}

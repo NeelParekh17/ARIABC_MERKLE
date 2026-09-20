@@ -180,7 +180,7 @@ def restore_tpcc_db(args, warehouses, enable_merkle):
           --warehouses {warehouses} 2>&1
 
         # Create stored procs, indexes, and merkle indexes across all 9 tables (in-memory parallel builds)
-        {psql} -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -f {repo}/scripts/restore_tpcc_procs.sql 2>&1
+        {psql} -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -v bench_merkle_split_threshold={args.tpcc_merkle_split_threshold} -v bench_merkle_merge_threshold={args.tpcc_merkle_merge_threshold} -f {repo}/scripts/restore_tpcc_procs.sql 2>&1
 
         # Fast ANALYZE (freshly inserted rows have zero dead tuples, VACUUM is redundant)
         {psql} -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'ANALYZE public.warehouse, public.district, public.customer, public.stock, public.item, public.oorder, public.new_order, public.order_line, public.history;' >/dev/null 2>&1
@@ -463,6 +463,18 @@ def main():
         help="Partition count for Merkle tree indexes across all TPC-C tables (default: 200)",
     )
     parser.add_argument(
+        "--tpcc-merkle-split-threshold",
+        default=32,
+        type=int,
+        help="Split threshold for Merkle tree indexes across all TPC-C tables (default: 32)",
+    )
+    parser.add_argument(
+        "--tpcc-merkle-merge-threshold",
+        default=8,
+        type=int,
+        help="Merge threshold for Merkle tree indexes across all TPC-C tables (default: 8)",
+    )
+    parser.add_argument(
         "--trials",
         "--runs",
         default=1,
@@ -652,6 +664,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                                 export BCDB_DET_QUEUE_HIGH_WM=65536
                                 export BCDB_DET_QUEUE_LOW_WM=32768
                                 export ARIABC_PROFILE=1
+                                export ARIABC_PG_MAX_RETRIES=100
                                 export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
 
                                 nohup {TPCC_REMOTE_REPO}/ariabc_pg/build/bin/ariabc_pg_server \\
@@ -736,6 +749,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                         print(f"  [3/4] Running ariabc_pg_gateway from {args.gateway_host} ({mode}, W={wh}, workers={w})...")
                         if mode == "pg":
                             gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
+                                export ARIABC_WAIT_RESULT_TIMEOUT_MS=180000
                                 {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway \\
                                   --nodes {args.db_host}:{args.server_port} \\
                                   --queryFrom {gw_workload_path} \\
@@ -760,6 +774,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                             " """
                         else:
                             gw_cmd = f"""ssh {args.gateway_user}@{args.gateway_host} "
+                                export ARIABC_WAIT_RESULT_TIMEOUT_MS=180000
                                 {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway \\
                                   --nodes {args.db_host}:{args.server_port} \\
                                   --queryFrom {gw_workload_path} \\
@@ -2047,6 +2062,13 @@ def _run_ycsb_sweep(args, repo_root, out_dir, modes):
                 "scripts/ycsb_suite/ycsb_workload_balanced_dml_skew_0_99_20k.txt",
             ]
             workloads.extend(sigmod_files)
+        elif w in ("abcdf_4skews", "abcdf_4", "abcdf_4modes_4skews"):
+            suite_dir = repo_root / "scripts/ycsb_suite"
+            for fam in ["a", "b", "c", "d", "f"]:
+                for s in ["0_00", "0_50", "0_99", "1_20"]:
+                    p = suite_dir / f"ycsb_workload_{fam}_skew_{s}_20k.txt"
+                    if p.exists():
+                        workloads.append(str(p.relative_to(repo_root)))
         elif w in ("abcdf", "abcdf_all", "ycsb_abcdf"):
             suite_dir = repo_root / "scripts/ycsb_suite"
             for fam in ["a", "b", "c", "d", "f"]:

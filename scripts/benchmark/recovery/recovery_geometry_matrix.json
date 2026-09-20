@@ -29,6 +29,11 @@
     "split_threshold": 32,
     "merge_threshold": 8
   },
+  "fanout_f32_l16": {
+    "fanout": 32,
+    "split_threshold": 32,
+    "merge_threshold": 8
+  },
   "fanout_f2_l128": {
     "fanout": 2,
     "split_threshold": 32,
