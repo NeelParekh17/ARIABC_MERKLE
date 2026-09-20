@@ -161,3 +161,5 @@ scripts/benchmark/recovery/results/
 **/__pycache__/
 *.py[cod]
 *.pyo
+
+graphify-out/
