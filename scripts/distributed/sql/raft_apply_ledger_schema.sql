@@ -173,49 +173,11 @@ BEGIN
 END
 $$;
 
--- Dynamic Merkle tree node table (Section 7 of Plan_review.md & OOM_100M_DATABASE_STORAGE_BREAKDOWN.md)
--- Reordered for zero internal padding: tuple_count(4B) + index_oid(4B) + partition_id(2B) + prefix_len(2B) + is_leaf(1B) + node_id(9B) + hash(33B)
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'ariabc_internal'
-          AND table_name = 'merkle_node'
-          AND (
-            (column_name = 'tuple_count' AND data_type = 'bigint')
-            OR (column_name = 'partition_id' AND data_type = 'integer')
-            OR (column_name != 'tuple_count' AND ordinal_position = 1)
-          )
-    ) THEN
-        DROP TABLE IF EXISTS ariabc_internal.merkle_node CASCADE;
-    END IF;
-END $$;
-
-CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_node (
-    tuple_count  integer  NOT NULL DEFAULT 0,
-    index_oid    oid      NOT NULL,
-    partition_id smallint NOT NULL,
-    prefix_len   smallint NOT NULL,
-    is_leaf      boolean  NOT NULL,
-    node_id      bytea    NOT NULL,
-    hash         bytea    NOT NULL,
-    PRIMARY KEY (index_oid, partition_id, node_id, prefix_len)
-);
-ALTER TABLE ariabc_internal.merkle_node
-    ADD COLUMN IF NOT EXISTS partition_id smallint NOT NULL DEFAULT 0;
-ALTER TABLE ariabc_internal.merkle_node
-    DROP CONSTRAINT IF EXISTS merkle_node_pkey;
-ALTER TABLE ariabc_internal.merkle_node
-    ADD CONSTRAINT merkle_node_pkey
-    PRIMARY KEY (index_oid, partition_id, node_id, prefix_len);
-CREATE INDEX IF NOT EXISTS merkle_node_prefix_idx
-    ON ariabc_internal.merkle_node (index_oid, partition_id, prefix_len);
--- Root-vector reads are on the measured localisation and confirmation path.
--- Keep them independent of total tree size without adding a full duplicate
--- index: every Merkle index has only one root row per partition.
-CREATE INDEX IF NOT EXISTS merkle_node_root_idx
-    ON ariabc_internal.merkle_node (index_oid, partition_id)
-    WHERE prefix_len = 0;
+-- Merkle node storage uses per-index tables (ariabc_internal.merkle_node_<oid>)
+-- created on demand by merkle_ensure_node_table() inside the backend.  A
+-- compatibility VIEW named merkle_node over those tables is installed by the
+-- backend at first access.  This schema file does NOT manage any merkle_node
+-- DDL; attempting to do so here would conflict with the view the backend owns.
 
 -- Schema version tracking metadata
 CREATE TABLE IF NOT EXISTS ariabc_internal.raft_apply_schema_meta (

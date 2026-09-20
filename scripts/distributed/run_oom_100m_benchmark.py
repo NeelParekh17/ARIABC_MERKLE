@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -146,27 +147,27 @@ def copy_worker(w_id, start_k, count, psql_bin, db_port):
     pool = make_pool(1000)
     pool_len = len(pool)
     batch_size = 25000
-    
+
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = "{args.install_dir}/lib:/home/neel/Desktop/rdkafka_local/lib:" + env.get("LD_LIBRARY_PATH", "")
-    
+
     psql_cmd = [
         psql_bin, '-h', '127.0.0.1', '-p', str(db_port), '-U', 'postgres', '-d', 'postgres',
         '-X', '-v', 'ON_ERROR_STOP=1', '-c', 'COPY usertable (ycsb_key, field1, field2, field3, field4, field5, field6, field7, field8, field9, field10) FROM stdin;'
     ]
     p = subprocess.Popen(psql_cmd, stdin=subprocess.PIPE, text=True, bufsize=2097152, env=env)
-    
+
     lines = []
     end_k = start_k + count
     for i in range(start_k, end_k):
         idx = i % (pool_len - 10)
         f = pool[idx:idx+10]
         lines.append(f"{{i}}\\t{{f[0]}}\\t{{f[1]}}\\t{{f[2]}}\\t{{f[3]}}\\t{{f[4]}}\\t{{f[5]}}\\t{{f[6]}}\\t{{f[7]}}\\t{{f[8]}}\\t{{f[9]}}\\n")
-        
+
         if len(lines) >= batch_size:
             p.stdin.write(''.join(lines))
             lines.clear()
-            
+
     if lines:
         p.stdin.write(''.join(lines))
     p.stdin.close()
@@ -180,19 +181,19 @@ def main():
     chunk = total_rows // num_workers
     psql_bin = '{args.install_dir}/bin/psql'
     db_port = {args.db_port}
-    
+
     print(f"  [STREAM-16W] Launching 16 parallel COPY workers for {{total_rows:,}} rows...", flush=True)
     t0 = time.time()
-    
+
     tasks = []
     for w in range(num_workers):
         start_k = 1 + w * chunk
         cnt = chunk if w < num_workers - 1 else (total_rows - start_k + 1)
         tasks.append((w, start_k, cnt, psql_bin, db_port))
-        
+
     with mp.Pool(num_workers) as pool:
         pool.starmap(copy_worker, tasks)
-        
+
     elapsed = time.time() - t0
     rate = total_rows / elapsed if elapsed > 0 else 0
     print(f"  [STREAM-16W] Successfully ingested {{total_rows:,}} rows in {{elapsed:.1f}}s ({{rate:,.0f}} rows/sec)!", flush=True)
@@ -210,7 +211,7 @@ if __name__ == '__main__':
     # 1. Initialize clean PostgreSQL cluster with postgres superuser
     echo '  [1/6] Running initdb...'
     {args.install_dir}/bin/initdb -U postgres -A trust -D {args.remote_dir}/pgdata -E UTF8 --locale=C >/dev/null
-    
+
     # 2. Configure high-performance bulk loading parameters
     cat << 'EOF' >> {args.remote_dir}/pgdata/postgresql.conf
 port = {args.db_port}
@@ -240,7 +241,7 @@ EOF
     # 3. Start PostgreSQL
     echo '  [2/6] Starting PostgreSQL for bulk load...'
     {args.install_dir}/bin/pg_ctl -D {args.remote_dir}/pgdata -l {args.remote_dir}/postgres_init.log -w start
-    
+
     {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -f {args.remote_dir}/scripts/ledger.sql
     # 4. Create usertable and ariabc_internal catalog schema
     echo '  [3/6] Creating usertable and ariabc_internal catalog schema...'
@@ -277,7 +278,7 @@ EOF
         SET maintenance_work_mem = '6GB';
         ALTER TABLE usertable ADD CONSTRAINT usertable_pkey1 PRIMARY KEY (ycsb_key);
     "
-    
+
     echo '  [5/6] Building Merkle Covering Lookup Index...'
     {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "
         SET max_parallel_maintenance_workers = 16;
@@ -291,17 +292,17 @@ EOF
         CREATE INDEX usertable_merkle_idx ON usertable USING merkle (ycsb_key)
         WITH (partitions = 200, fanout = 4, split_threshold = 32, merge_threshold = 8);
     "
-    
+
     echo '  [6/6] Analyzing table statistics...'
     {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "ANALYZE usertable;"
-    
+
     # Restore standard safety settings before creating golden backup
     sed -i "s/fsync = off/fsync = on/g" {args.remote_dir}/pgdata/postgresql.conf
     sed -i "s/full_page_writes = off/full_page_writes = on/g" {args.remote_dir}/pgdata/postgresql.conf
-    
+
     # Stop PostgreSQL cleanly
     {args.install_dir}/bin/pg_ctl -D {args.remote_dir}/pgdata stop -m fast
-    
+
     # Keep PostgreSQL-managed WAL intact. Never delete WAL files by hand.
     sync
 
@@ -420,13 +421,14 @@ def start_postgres(args):
 
 
 def prepare_ledger_schema(args):
-    # The old OOM generator created three placeholder tables instead of the
-    # ledger schema. Repair only those empty placeholders in the disposable
-    # copy. Never run the schema's destructive Merkle layout migration here.
-    layout = sql(args, "SELECT string_agg(column_name || ':' || data_type, ',' ORDER BY ordinal_position) "
-                       "FROM information_schema.columns WHERE table_schema='ariabc_internal' AND table_name='merkle_node';")
-    if not layout.startswith('tuple_count:integer,index_oid:oid,partition_id:smallint,'):
-        raise RuntimeError("Golden Merkle layout is incompatible; rebuild in a fresh --remote-dir")
+    # The new schema uses per-index merkle_node_<oid> tables managed entirely
+    # by the backend (merkle_ensure_node_table).  The compatibility VIEW named
+    # merkle_node is installed by the backend at first access.  No layout check
+    # is needed or possible here — integrity is confirmed by merkle_verify later.
+    #
+    # Legacy path: the old OOM generator created three placeholder tables
+    # instead of the real ledger schema.  Repair those empty placeholders in
+    # the disposable copy before running the schema script.
     legacy = sql(args, "SELECT count(*) FROM information_schema.columns WHERE table_schema='ariabc_internal' "
                        "AND table_name='raft_apply_entry' AND column_name='test_marker';")
     if legacy == '1':
@@ -807,7 +809,7 @@ def start_remote_ariabc_server(args, mode, workers):
                "--raftMembers", "1=127.0.0.1:9000", "--dbName", "postgres", "--dbHost", "127.0.0.1",
                "--dbPort", str(args.db_port), "--dbUser", "postgres", "--dbType", "0" if mode == "pg" else "1",
                "--safedb", "0" if mode == "pg" else "1", "--dbConnPoolSize", str(workers), "--bypassRaft", "1"]
-    environment = {"ARIABC_PROFILE": "1"}
+    environment = {"ARIABC_PROFILE": "1", "ARIABC_PG_MAX_RETRIES": "100"}
     if mode != "pg":
         command += ["--pgExecMode", "event", "--bcdbInitBlockSize", str(workers)]
         environment.update(BCDB_DECOUPLE_WORKERS="1", BCDB_DET_QUEUE_HIGH_WM="65536",
@@ -1071,7 +1073,13 @@ def parse_args(argv=None):
                         help="Validation mode on per-case resets: 'fast' performs pre-start copy integrity and post-start catalog/bound sanity checks; 'full' runs an exhaustive SELECT count(*) scan on every reset.")
     parser.add_argument("--dry-run", action="store_true", help="Generate workloads and manifest locally; do not contact servers")
     parser.add_argument("--preflight-only", action="store_true", help="Probe binaries, ports, storage and sudo; do not start databases")
+    parser.add_argument("--resume-dir", default=None,
+                        help="Resume an existing benchmark run directory, skipping already completed cases in summary.csv")
     args = parser.parse_args(argv)
+    if args.resume_dir:
+        resume_path = Path(args.resume_dir).resolve()
+        if not (resume_path / "campaign.json").is_file():
+            parser.error(f"--resume-dir does not contain campaign.json: {resume_path}")
     for name, convert in (("modes", str), ("workers", int), ("skews", float), ("workloads", str)):
         try:
             values = [convert(v) for item in getattr(args, name) for v in item.split(",") if v]
@@ -1125,13 +1133,13 @@ def write_report(out_dir, rows):
              "|---|---:|---|---:|---:|---:|---:|---:|---:|"]
     groups = {}
     for row in rows:
-        key = tuple(row[k] for k in ("workload", "skew", "mode", "workers"))
+        key = (str(row["workload"]), float(row["skew"]), str(row["mode"]), int(row["workers"]))
         groups.setdefault(key, []).append(row)
     for key, values in sorted(groups.items()):
-        tps = [r["tps"] for r in values]
+        tps = [float(r["tps"]) for r in values]
         lines.append("| " + " | ".join(map(str, key)) +
                      f" | {len(values)} | {statistics.median(tps):.2f} | {min(tps):.2f} | {max(tps):.2f}"
-                     f" | {statistics.median(r['device_read_mib'] for r in values):.2f} |")
+                     f" | {statistics.median(float(r['device_read_mib']) for r in values):.2f} |")
     (out_dir / "REPORT.md").write_text("\n".join(lines) + "\n")
     try:
         import matplotlib
@@ -1139,14 +1147,14 @@ def write_report(out_dir, rows):
         import matplotlib.pyplot as plt
     except ImportError:
         return
-    for wl, skew in sorted({(r["workload"], r["skew"]) for r in rows}):
+    for wl, skew in sorted({(str(r["workload"]), float(r["skew"])) for r in rows}):
         fig, ax = plt.subplots(figsize=(8, 5))
         for mode in ("pg", "bcdb_det", "bcdb_merkle"):
             keys = sorted(k for k in groups if k[:3] == (wl, skew, mode))
             if keys:
-                ax.plot([k[3] for k in keys], [statistics.median(r["tps"] for r in groups[k]) for k in keys],
+                ax.plot([int(k[3]) for k in keys], [statistics.median(float(r["tps"]) for r in groups[k]) for k in keys],
                         marker="o", label=mode)
-        ax.set(title=f"Cold-start YCSB {wl.upper()}, skew={skew}, rows={rows[0]['db_rows']:,}",
+        ax.set(title=f"Cold-start YCSB {wl.upper()}, skew={skew}, rows={int(rows[0]['db_rows']):,}",
                xlabel="Server workers / PG connection pool", ylabel="SQL statements per second")
         ax.set_ylim(bottom=0)
         ax.legend()
@@ -1158,41 +1166,65 @@ def write_report(out_dir, rows):
 
 def main(argv=None):
     args = parse_args(argv)
-    # Never mix old generator/configuration results or overwrite user artifacts.
-    out_root = REPO_ROOT / args.out_dir
-    out_dir = out_root / (datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8])
-    out_dir.mkdir(parents=True)
-    print(f"Artifacts: {out_dir}", flush=True)
-    manifest = dict(version=2, arguments=vars(args), cache_policy="cold_start_os_cache_unbounded",
-                    timing="gateway_overall_time_taken", workloads={})
-    manifest["source_sha256"] = {str(path.relative_to(REPO_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-                                  for path in (Path(__file__).resolve(), REPO_ROOT / "scripts/generate_ycsb_workloads.py",
-                                               REPO_ROOT / "scripts/distributed/sql/raft_apply_ledger_schema.sql",
-                                               Path(__file__).with_name("large_zipf.py"),
-                                               Path(__file__).with_name("benchmark_validation.py"))}
+    if args.resume_dir:
+        out_dir = Path(args.resume_dir).resolve()
+        if not (out_dir / "campaign.json").is_file():
+            raise RuntimeError(f"Cannot resume: {out_dir / 'campaign.json'} not found")
+        campaign = json.loads((out_dir / "campaign.json").read_text())
+        for k, v in campaign.get("arguments", {}).items():
+            if k not in ("resume_dir", "out_dir", "dry_run", "preflight_only") and hasattr(args, k):
+                setattr(args, k, v)
+        print(f"Resuming campaign from: {out_dir}", flush=True)
+    else:
+        # Never mix old generator/configuration results or overwrite user artifacts.
+        out_root = REPO_ROOT / args.out_dir
+        out_dir = out_root / (datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8])
+        out_dir.mkdir(parents=True)
+        print(f"Artifacts: {out_dir}", flush=True)
+        manifest = dict(version=2, arguments=vars(args), cache_policy="cold_start_os_cache_unbounded",
+                        timing="gateway_overall_time_taken", workloads={})
+        manifest["source_sha256"] = {str(path.relative_to(REPO_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                      for path in (Path(__file__).resolve(), REPO_ROOT / "scripts/generate_ycsb_workloads.py",
+                                                   REPO_ROOT / "scripts/distributed/sql/raft_apply_ledger_schema.sql",
+                                                   Path(__file__).with_name("large_zipf.py"),
+                                                   Path(__file__).with_name("benchmark_validation.py"))}
     files = {}
     for wl in args.workloads:
         for skew in args.skews:
             path = out_dir / "workloads" / f"ycsb_{wl}_skew_{skew}_{args.txs}.sql"
-            generate_100m_ycsb_workload(path, wl, skew, args.txs, args.db_rows, args.seed)
-            if count_workload_queries(path) != args.txs:
-                raise RuntimeError("Generated statement count differs from --txs")
+            if not path.is_file():
+                generate_100m_ycsb_workload(path, wl, skew, args.txs, args.db_rows, args.seed)
+                if count_workload_queries(path) != args.txs:
+                    raise RuntimeError("Generated statement count differs from --txs")
             files[wl, skew] = path
-            manifest["workloads"][path.name] = dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                                                    queries=args.txs)
-    (out_dir / "campaign.json").write_text(json.dumps(manifest, indent=2) + "\n")
+            if not args.resume_dir:
+                manifest["workloads"][path.name] = dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                                                        queries=args.txs)
+    if not args.resume_dir:
+        (out_dir / "campaign.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if args.dry_run:
         print(f"Dry run: generated {len(files)} workloads; no remote commands executed.")
         return
     # A directory lock is deliberately persistent after an unclean controller
     # death. Inspect its owner.txt before manually removing a stale lock.
-    run_remote(args.remote_host, args.remote_user,
-               f"mkdir -p {args.remote_dir}\nmkdir {args.remote_dir}/benchmark.lock\n"
-               f"printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/owner.txt")
+    lock_cmd = f"""
+if [ -d {args.remote_dir}/benchmark.lock ]; then
+    owner=$(cat {args.remote_dir}/benchmark.lock/owner.txt 2>/dev/null || true)
+    if [ "$owner" = {shlex.quote(str(out_dir))} ]; then
+        rm -f {args.remote_dir}/benchmark.lock/owner.txt
+        rmdir {args.remote_dir}/benchmark.lock
+    fi
+fi
+mkdir -p {args.remote_dir}
+mkdir {args.remote_dir}/benchmark.lock
+printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/owner.txt
+"""
+    run_remote(args.remote_host, args.remote_user, lock_cmd)
     generating = False
     try:
         ensure_cache_drop_access(args)
-        (out_dir / "preflight.txt").write_text(preflight(args))
+        if not (out_dir / "preflight.txt").is_file():
+            (out_dir / "preflight.txt").write_text(preflight(args))
         if args.preflight_only:
             print("Preflight passed; no database started or cache cleared.")
             return
@@ -1208,6 +1240,34 @@ def main(argv=None):
         golden = validate_golden_baseline(args)
         args._golden_manifest = golden
         rows = []
+        completed_keys = set()
+        if args.resume_dir and (out_dir / "summary.csv").is_file():
+            with (out_dir / "summary.csv").open("r", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for r in reader:
+                    case_dir = Path(r["artifact_dir"])
+                    if (case_dir / "result.json").is_file():
+                        row_data = json.loads((case_dir / "result.json").read_text())["row"]
+                    else:
+                        row_data = dict(r)
+                        for float_col in ("skew", "reset_time_ms", "undo_restore_ms", "tps", "completed_tps",
+                                          "device_window_ms", "device_read_mib", "device_write_mib",
+                                          "checkpoint_ms", "checkpoint_write_ms", "checkpoint_sync_ms",
+                                          "checkpoint_total_ms", "checkpoint_longest_sync_ms", "checkpoint_write_mib",
+                                          "hit_ratio_pct", "blk_read_time_ms", "blk_write_time_ms"):
+                            if row_data.get(float_col):
+                                row_data[float_col] = float(row_data[float_col])
+                        for int_col in ("workers", "trial", "total_queries", "db_rows", "wall_time_ms",
+                                        "wall_including_drains_ms", "device_read_ios", "device_write_ios",
+                                        "checkpoint_sync_files", "blks_read", "blks_hit", "buffers_backend",
+                                        "divergence_count", "permanent_failures", "validated_completed_queries"):
+                            if row_data.get(int_col):
+                                row_data[int_col] = int(row_data[int_col])
+                    rows.append(row_data)
+                    completed_keys.add((str(row_data["workload"]), float(row_data["skew"]),
+                                        str(row_data["mode"]), int(row_data["workers"]), int(row_data["trial"])))
+            print(f"Resuming {out_dir}: {len(rows)} cases already completed.", flush=True)
+
         cases = []
         if getattr(args, "reset_mode", "cp") == "undo":
             # Group by mode (putting bcdb_merkle first) so that the Merkle index
@@ -1230,13 +1290,21 @@ def main(argv=None):
                                 cases.append((wl, skew, mode, workers, trial))
 
         for wl, skew, mode, workers, trial in cases:
+            key = (str(wl), float(skew), str(mode), int(workers), int(trial))
             name = f"{wl}_s{skew}_{mode}_w{workers}_t{trial}"
+            if key in completed_keys:
+                print(f"Skipping completed case: {name}", flush=True)
+                continue
+            case_dir = out_dir / name
+            if case_dir.is_dir():
+                shutil.rmtree(case_dir, ignore_errors=True)
             print(f"Running {name}: pristine restore, validation, then cold start", flush=True)
-            row = run_case(args, wl, skew, mode, workers, trial, files[wl, skew], out_dir / name)
+            row = run_case(args, wl, skew, mode, workers, trial, files[wl, skew], case_dir)
             rows.append(row)
+            summary_exists = (out_dir / "summary.csv").is_file() and (out_dir / "summary.csv").stat().st_size > 0
             with (out_dir / "summary.csv").open("a", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=list(row))
-                if len(rows) == 1:
+                if not summary_exists:
                     writer.writeheader()
                 writer.writerow(row)
             print(f"  PASS: {row['tps']:.2f} TPS, {row['device_read_mib']:.2f} MiB read, "

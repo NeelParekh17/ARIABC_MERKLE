@@ -1062,6 +1062,12 @@ merkle_route_cache_store(Oid index_oid, const RelFileNode *index_rnode,
 static void
 merkle_route_cache_invalidate(Oid index_oid, int partition_id, const uint8 *routing_key)
 {
+	if (routing_key == NULL)
+	{
+		merkle_route_cache_clear_partition(index_oid, partition_id);
+		return;
+	}
+
 	uint32 idx = merkle_route_cache_hash(index_oid, partition_id, routing_key);
 	MerkleRouteCacheEntry *entry = &merkle_route_cache[idx];
 
