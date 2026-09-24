@@ -4,11 +4,52 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 import psycopg
 from psycopg.rows import dict_row
+
+
+_stats_barriers: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def wait_for_stats(conn, timeout: float = 10.0) -> float:
+    """Publish this backend's completed work before reading cumulative stats.
+
+    PG13 reports counters asynchronously when returning to idle, at most once
+    every 500 ms. Clearing a reader snapshot alone does not flush the writer.
+    Scan a private temporary table and await its expected cumulative scan count
+    as a publication marker. Polling also lets this backend return to idle and
+    report. A missing marker fails closed instead of accepting stale counters.
+    Call outside workload timers; return the diagnostic elapsed milliseconds.
+    The benchmark must own its connection and run without concurrent workloads.
+    """
+    started = time.monotonic()
+    if not conn.autocommit or conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        raise RuntimeError("statistics barrier requires an idle autocommit connection")
+    if str(show_setting(conn, "track_counts")).lower() != "on":
+        raise RuntimeError("statistics barrier requires track_counts=on")
+    if conn not in _stats_barriers:
+        execute(conn, "CREATE TEMP TABLE _ariabc_recovery_stats_barrier (marker boolean)")
+        oid = scalar(conn, "SELECT 'pg_temp._ariabc_recovery_stats_barrier'::regclass::oid")
+        _stats_barriers[conn] = (oid, 0)
+    oid, previous = _stats_barriers[conn]
+    expected = previous + 1
+    execute(conn, "SELECT count(*) FROM pg_temp._ariabc_recovery_stats_barrier")
+    _stats_barriers[conn] = (oid, expected)
+    while True:
+        execute(conn, "SELECT pg_stat_clear_snapshot()")
+        observed = int(scalar(conn, "SELECT pg_stat_get_numscans(%s::oid)", (oid,)))
+        if observed == expected:
+            return (time.monotonic() - started) * 1000.0
+        if observed > expected or time.monotonic() - started >= timeout:
+            raise RuntimeError(
+                f"statistics publication barrier failed: expected {expected} scans, got {observed}"
+            )
+        time.sleep(0.05)
 
 
 def connect(args: argparse.Namespace):
@@ -114,7 +155,9 @@ def merkle_node_index_stats(conn) -> list[dict[str, Any]]:
     is not visible to the Python timing wrapper.  PostgreSQL's index and
     index-I/O statistics provide an inexpensive, server-side observation of
     the actual access path used by that query.  The caller must take a
-    before/after snapshot around localization and compute the delta.
+    before/after snapshot around localization and compute the delta. Call
+    wait_for_stats before each snapshot to attribute asynchronous counters to
+    this phase rather than earlier setup or audit work.
     """
     execute(conn, "SELECT pg_stat_clear_snapshot()")
     track_counts_enabled = str(show_setting(conn, "track_counts")).lower() == "on"
@@ -139,10 +182,12 @@ def merkle_node_index_stats(conn) -> list[dict[str, Any]]:
          AND io.relname = s.relname
          AND io.indexrelname = s.indexrelname
         WHERE s.schemaname = 'ariabc_internal'
-          AND (s.relname = 'merkle_node' OR s.relname LIKE 'merkle_node_%')
+          AND (s.relname = 'merkle_node' OR s.relname LIKE %s)
         ORDER BY s.indexrelname
         """,
-        (track_counts_enabled,),
+        # Bind the LIKE pattern too: a literal percent in a parameterized
+        # query is interpreted as a Psycopg placeholder, even inside quotes.
+        (track_counts_enabled, "merkle_node_%"),
     )
 
 

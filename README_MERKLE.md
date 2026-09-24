@@ -1,214 +1,197 @@
-# ARIABC Merkle Tree Access Method & Recovery Engine
+# Native Merkle index: quickstart and operating model
 
-This document provides a comprehensive technical reference for the Merkle tree engine integrated directly into PostgreSQL/AriaBC (`src/backend/access/merkle/`). It covers the native dynamic Merkle access method, synchronous Copy-on-Write (COW) page layouts (v8 format), BLAKE3 cryptographic hashing, SQL query interfaces, distributed recovery verification, and the live dynamic Merkle visualizer.
+Reviewed against the working tree on **2026-09-22**. The native `merkle` index
+maintains partitioned, dynamic trees over a logged PostgreSQL table. Keys choose
+where a row belongs; **all live row attributes** contribute to its BLAKE3-256
+hash. Tree hashes are XOR aggregates of those row hashes.
 
----
+Use this guide for SQL and verification. The
+[implementation reference](MERKLE_INDEX_COMPLETE_DETAILS.md) explains the source,
+storage layout, and transaction hooks; the
+[recovery guide](Dynamic_merkle_docs/RECOVERY_ARCHITECTURE_ANALYSIS.md) describes
+selective row repair.
 
-## 🌟 Architectural Overview
+## What is stored
 
-The Merkle tree engine provides cryptographic verification of database integrity and high-speed state synchronization across distributed replicas through a hierarchical hash tree structure.
-
-```text
-                        Global Root Hash (BLAKE3 256-bit)
-                       /               |               \
-                Partition 0       Partition 1       Partition 2 ...
-                /        \         /        \         /        \
-            Node 0.1   Node 0.2  Node 1.1  Node 1.2  Node 2.1   Node 2.2
-             /   \      /   \     /   \     /   \     /   \      /   \
-           L0     L1   L2   L3   L4    L5  L6    L7  L8    L9   L10  L11
-           [Tuples: Bounded Leaf Buckets (Dynamic Splitting/Merging)]
+```mermaid
+flowchart TD
+    Row[Heap row] --> Key[Canonical indexed key bytes]
+    Row --> Value[Canonical full-row bytes]
+    Key --> Route[BLAKE3 route hash: 8 bytes]
+    Route --> Partition[Partition and key-prefix path]
+    Value --> Hash[BLAKE3 row hash: 32 bytes]
+    Partition --> Leaf[Dynamic leaf]
+    Hash -->|XOR contribution| Leaf
+    Leaf -->|XOR| Ancestors[Ancestor and partition hashes]
+    Ancestors -->|XOR partition roots| Root[Global aggregate root]
 ```
 
-### Key Technical Innovations
+The index metapage stores format and geometry. Actual nodes live in
+`ariabc_internal.merkle_node_<index_oid>`, an ordinary PostgreSQL relation with
+MVCC and WAL. Current versions are **index format 10**, **routing format 4**, and
+**row-hash format 1**. There are no immutable copy-on-write node pages or retained
+Merkle root journals in this implementation.
 
-1. **Native Access Method (`USING merkle`)**: Fully integrated into PostgreSQL's Table and Index Access Method interfaces. Supports both single-key and multi-key index targets.
-2. **Dynamic Bounded Leaf Geometry**: Automatically splits leaves when tuple occupancy exceeds `split_threshold` and merges leaves when tuple count drops below `merge_threshold`, maintaining optimal tree depth and row density.
-3. **Synchronous Copy-on-Write (COW)**: Page updates retain immutable historic node records and write new node versions atomically without blocking concurrent reader queries.
-4. **BLAKE3 Cryptographic Hashing**: Uses 256-bit BLAKE3 hashing, enabling SIMD-accelerated, highly parallelized hash computation.
-5. **Dynamic Depth Scaling**: Trees dynamically scale in depth (e.g. from Level 4 at 1M rows to Level 7 at 50M rows) with strictly bounded $O(\log_F N)$ descent latency.
-6. **Optimized Recovery Pipeline**: Uses array-based batching and frontier pruning to accelerate tree localization and candidate row repair across corrupted replicas.
+Merkle does not support query scans, uniqueness enforcement, or inclusion
+proofs. Keep a primary key or ordinary index for lookups. XOR is order independent,
+but equal duplicate contributions cancel; matching roots alone are not a proof
+against adversarial changes or a substitute for exact row comparison.
 
----
+## Create an index
 
-## 📁 Source Code Organization
-
-The core engine lives inside PostgreSQL kernel sources:
-
-```text
-src/backend/access/merkle/
-├── merkle.c        # Main access method interface routines and AM handlers
-├── merklebuild.c   # Bulk index build, tree initialisation, and tuple insertion
-├── merkleinsert.c  # Transactional single-row insertion and tuple routing
-├── merkleutil.c    # Cryptographic hashing (BLAKE3), memory management, tree navigation
-├── merkleverify.c  # In-kernel verification procedures, proof generation, catalog audits
-├── merkleapply.c   # Dynamic leaf split/merge execution and page-level COW mutators
-├── merkledelta.c   # In-memory transaction delta staging and PRE_COMMIT apply routines
-└── Makefile        # Module build rules
-```
-
-### Associated Headers & Catalogs
-
-- `src/include/access/merkle.h`: Main header declaring C data structures (`MerkleBuildState`, `MerkleNodeRecord`, `MerkleLeafBucket`), version macros (layout v8), and exported functions.
-- `src/common/blake3.c` & `src/include/common/blake3.h`: BLAKE3 SIMD/C hash implementation.
-- Catalog files (`src/include/catalog/pg_am.dat`, `pg_proc.dat`, `pg_opclass.dat`): System catalog registrations for the `merkle` access method.
-
----
-
-## 🛠️ DDL & Index Creation Options
-
-### Creating Dynamic Merkle Indexes
-
-Dynamic Merkle indexes adapt their tree geometry based on workload volume.
-
-```sql
--- Create a Dynamic Merkle index with standard F=32 fanout and 1024-tuple leaf threshold
-CREATE INDEX usertable_dynamic_merkle_idx ON usertable
-USING merkle (ycsb_key)
-WITH (
-    fanout = 32,
-    split_threshold = 1024,
-    merge_threshold = 256,
-    dynamic = true
-);
-
--- Create a Multi-Key Dynamic Merkle Index
-CREATE INDEX usertable_multikey_merkle ON usertable
-USING merkle (ycsb_key, field1)
-WITH (
-    fanout = 32,
-    split_threshold = 512,
-    merge_threshold = 128,
-    dynamic = true
-);
-```
-
-### Index Parameters
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `fanout` | Integer | `32` | Logical child capacity per internal tree node ($F$). |
-| `split_threshold` | Integer | `1024` | Maximum tuple count per leaf before a dynamic split occurs. |
-| `merge_threshold` | Integer | `256` | Minimum tuple count per leaf before a dynamic merge occurs. |
-| `dynamic` | Boolean | `true` | Enables dynamic leaf splitting/merging and COW node updates. |
-| `partitions` | Integer | `200` | Static partition count (for fixed static Merkle index configurations). |
-
----
-
-## 🔍 SQL Diagnostics & Verification Functions
-
-PostgreSQL provides built-in SQL functions to inspect Merkle tree structures, verify data integrity, and fetch proofs:
-
-```sql
--- 1. Full Tree Integrity Verification
--- Computes and re-verifies all hashes across the tree. Returns TRUE if valid.
-SELECT merkle_verify('usertable');
-
--- 2. Fetch Root Hash
--- Returns the 256-bit BLAKE3 global root hash string (in hex).
-SELECT merkle_root_hash('usertable');
-
--- 3. Detailed Tree Statistics
--- Displays total nodes, leaf count, dynamic depth, and occupancy metrics.
-SELECT merkle_tree_stats('usertable');
-
--- 4. View Node Hashes
--- Lists nodeid, partition, node_in_partition, is_leaf, leaf_id, and BLAKE3 hash.
-SELECT * FROM merkle_node_hash('usertable') LIMIT 10;
-
--- 5. View Tuple-to-Leaf Bucketing
--- Maps tuples to their target leaf buckets.
-SELECT * FROM merkle_leaf_tuples('usertable') LIMIT 10;
-
--- 6. Locate Leaf ID for Key(s)
--- Returns target leaf_id, partition, and node_in_partition for a key value.
-SELECT * FROM merkle_leaf_id('usertable', 1199);
-```
-
----
-
-## ⚡ Synchronous Copy-on-Write (COW) & Dynamic Geometry
-
-### Dynamic Leaf Splitting & Merging
-
-When transaction updates or bulk loads insert tuples into a leaf node:
-1. The target leaf bucket receives the new key hash.
-2. If total tuples in the leaf exceed `split_threshold`, `merkle_do_split()` executes:
-   - Allocates two new sibling leaf bucket records.
-   - Redistributes existing tuples across sibling leaves according to key space ranges.
-   - Propagates new leaf node hashes up the tree hierarchy.
-3. If tuple deletions drop leaf occupancy below `merge_threshold`, sibling leaves are merged into a unified node.
-
-### Layout v8 Physical Records (`pageinspect`)
-
-Physical pages written by `merkleapply.c` use layout **v8** binary record layout:
-- **Header Magic & Version**: Guarantees layout integrity (`v8`).
-- **CRC32C Checksum**: Validates record byte integrity on disk/buffer read.
-- **Physical Locators**: Decoded using `(block, offset, page_generation)` locators.
-- **Root Journaling**: Retains previous-version links for historical snapshot reads and MVCC consistency.
-
----
-
-## 🔄 State Recovery Engine (`scripts/benchmark/recovery/`)
-
-The Merkle recovery engine synchronizes damaged replicas with healthy reference databases in five distinct phases:
-
-```text
-[Phase 1: Localisation] ➔ [Phase 2: Candidate Fetch] ➔ [Phase 3: Row Comparison] ➔ [Phase 4: Repair DML] ➔ [Phase 5: Verification Audit]
-```
-
-1. **Phase 1: Localisation**: Performs top-down Merkle tree comparison between healthy and damaged replicas. Divergent parent nodes are expanded down to dynamic leaf buckets using frontier pruning.
-2. **Phase 2: Candidate Fetch**: Selects all row keys falling inside the localized corrupt leaf ranges from both healthy and damaged tables.
-3. **Phase 3: Row/Tuple Comparison**: Executes in-memory key alignment identifying missing, extra, or modified tuple columns.
-4. **Phase 4: Repair DML Execution**: Issues targeted `INSERT`, `UPDATE`, or `DELETE` SQL DML statements to correct corrupt tuples.
-5. **Phase 5: Post-Repair Audit**: Re-evaluates `merkle_verify()` and asserts `divergence_count = 0`.
-
-### Synthetic Corruption Modes
-
-The benchmark suite (`run_merkle_recovery_benchmark.py`) supports 5 synthetic corruption injection modes:
-
-| Mode | Injection Description | Use Case |
-|---|---|---|
-| `paper-update-only` | Mutates existing row columns (`field9`) | Standard paper recovery benchmark profile |
-| `update-only` | Modifies tuple values across bad leaves | Value corruption validation |
-| `delete-only` | Drops targeted rows from damaged replica | Missing-data recovery validation |
-| `insert-only` | Injects spurious rows into damaged replica | Extra-data purging validation |
-| `mixed` | Equal split of updates, deletes, and inserts | Real-world complex failure recovery |
-
-For complete benchmark instructions, detailed timing contracts, and plotting scripts, see [`scripts/benchmark/recovery/README.md`](scripts/benchmark/recovery/README.md).
-
----
-
-## 🖥️ Live Dynamic Merkle Inspector (`dynamic_merkle_visualizer/`)
-
-The repository includes a web-based inspector (`dynamic_merkle_visualizer/`) for interactive analysis of live PostgreSQL dynamic Merkle indexes.
+Use this repository's PostgreSQL build. On a disposable database named
+`aria_demo`, run the current bootstrap as a database administrator from the
+repository root:
 
 ```bash
-# Launch inspector web app
-MERKLE_VIZ_CONNINFO='host=127.0.0.1 port=5432 dbname=postgres user=postgres' \
-  ./.venv/bin/python3 dynamic_merkle_visualizer/app.py
+/work/ARIABC/install/bin/psql -X -v ON_ERROR_STOP=1 -d aria_demo \
+  -f scripts/distributed/sql/raft_apply_ledger_schema.sql
+/work/ARIABC/install/bin/psql -X -v ON_ERROR_STOP=1 -d aria_demo
 ```
 
-### Features
+The bootstrap installs SQL wrappers and internal tables. Installing it does not
+by itself enable safe-ledger mode in a replica server.
 
-- **Live Buffer Inspection**: Reads direct PostgreSQL shared buffers using `pageinspect.get_raw_page()`.
-- **Reachable Physical Tree View**: Displays active dynamic MVCC root nodes, internal slots, leaf buckets, item heads, and BLAKE3 hashes.
-- **Record Journaling**: Inspects retained immutable physical records, identifying retired vs reachable node versions and COW link lineages.
-- **Direct Mutator**: Provides controls to insert, update, or delete live tuples and observe real-time dynamic tree splitting, merging, and hash propagation.
+In `psql`, with autocommit enabled:
 
----
+```sql
+CREATE TABLE public.merkle_demo (
+    id bigint PRIMARY KEY,
+    payload text,
+    revision integer NOT NULL DEFAULT 0
+);
 
-## 📊 Performance & Scalability Summary
+CREATE INDEX merkle_demo_idx ON public.merkle_demo USING merkle (id)
+WITH (fanout = 4, split_threshold = 32, merge_threshold = 8, partitions = 200);
 
-Empirical benchmarking across 1M to 50M tuple scaling runs (documented in [`Dynamic_merkle_docs/RECOVERY_ARCHITECTURE_ANALYSIS.md`](Dynamic_merkle_docs/RECOVERY_ARCHITECTURE_ANALYSIS.md)) demonstrates:
+INSERT INTO public.merkle_demo (id, payload)
+SELECT n, 'value-' || n FROM generate_series(1, 1000) AS g(n);
 
-- **Bounded Recovery Time**: Total recovery latency scales predictably with tree depth $O(\log_F N)$.
-- **Sub-Second Repair**: Localized 300-tuple corruption across 50,000,000 rows is repaired in under 1 second.
-- **BLAKE3 Efficiency**: In-kernel BLAKE3 hashing introduces < 5% overhead during high-volume transactional ingestion.
+SELECT merkle_verify('public.merkle_demo'::regclass);
+SELECT merkle_tree_stats('public.merkle_demo'::regclass)::json;
+```
 
----
+| Reloption | Source default | Meaning |
+|---|---:|---|
+| `fanout` | 4 | Branching geometry for key-prefix descent |
+| `split_threshold` | 32 | Occupancy trigger for splitting a leaf |
+| `merge_threshold` | 8 | Threshold used when merging eligible leaf children |
+| `partitions` | 200 | Number of independent top-level partitions |
 
-## 🔐 Security & Immutability
+These defaults come from [merkle.h](src/include/access/merkle.h). Benchmark
+profiles may choose different values. Use `merge_threshold < split_threshold`.
+Depth limits and shared routing prefixes mean a split threshold is not an
+unconditional maximum leaf size. There is no `dynamic` or
+`leaves_per_partition` option.
 
-- **Cryptographic Tamper-Evidence**: Any unauthorized modification to row values or index pointers invalidates the BLAKE3 root hash.
-- **Proof Generation**: Independent Merkle inclusion proofs can be generated and verified without full table scans.
-- **Transactional Consistency**: Merkle deltas stage in memory and commit atomically during `PRE_COMMIT` execution in `merkledelta.c`.
+Multi-column routing is supported, for example `USING merkle (tenant_id, id)`.
+Only one Merkle index per table is supported. Use permanent logged tables;
+TEMP and UNLOGGED tables are rejected. Merkle concurrent index DDL is rejected,
+and guarded ALTER TABLE operations require removing/rebuilding the Merkle index
+around the schema change. See the reference before changing table structure.
+
+## Writes and transactions
+
+```mermaid
+flowchart TD
+    DML[INSERT / UPDATE / DELETE] --> Stage[Stage and coalesce transaction deltas]
+    Stage --> Decision{Transaction outcome}
+    Decision -->|Commit path| Apply[Apply node changes in the same transaction]
+    Apply --> Commit[PostgreSQL commits heap and nodes together]
+    Decision -->|Abort| Rollback[Discard staged deltas and roll back transactional writes]
+```
+
+The ordinary SQL path applies staged deltas at PRE_COMMIT. BCDB workers have an
+explicit synchronous apply point before their transaction commits, with the
+transaction callback as a fallback. A payload-only update changes the row hash
+even when the routing key and ordinary indexes do not change.
+
+```sql
+BEGIN;
+UPDATE public.merkle_demo SET payload = 'changed', revision = revision + 1
+WHERE id = 1;
+DELETE FROM public.merkle_demo WHERE id = 2;
+INSERT INTO public.merkle_demo (id, payload) VALUES (1001, 'new');
+COMMIT;
+
+SELECT merkle_verify('public.merkle_demo'::regclass);
+```
+
+Read roots **after COMMIT**: fresh-root helpers reject reads while the current
+transaction has staged deltas. `merkle_apply_synchronous_direct=off` does not
+create an asynchronous maintenance mode; the PRE_COMMIT fallback still applies
+staged work. Disabling `enable_merkle_index` is not a supported way to bypass
+maintenance on an indexed table: relevant DML paths fail rather than silently
+accepting untracked writes.
+
+Rollback and savepoint abort discard their staged changes. PostgreSQL rollback
+also handles any node writes already made in that transaction; there is no
+separate XOR undo replay. Synchronous maintenance refers to transaction ordering;
+WAL flush durability still depends on PostgreSQL settings.
+
+## Supported inspection and verification
+
+| SQL call | Result / scope |
+|---|---|
+| `merkle_verify(table::regclass)` | Boolean comparison of the visible heap aggregate with stored partition-root aggregate |
+| `merkle_verify_index(index::regclass)` | Same verification for a specified Merkle index |
+| `merkle_root_hash(table::regclass)` | Global aggregate as hexadecimal text |
+| `merkle_root_hash_index(index::regclass)` | Global aggregate for a specified index |
+| `merkle_get_partition_root_hashes(index_or_table::regclass)` | Rows containing partition number and hexadecimal hash |
+| `merkle_get_partition_root_hash(index_or_table::regclass, partition)` | One partition's hash |
+| `merkle_tree_stats(table::regclass)` | JSON text describing geometry, node counts, and format metadata |
+| `merkle_key_hash(value)` / `merkle_tuple_hash(record)` | Canonical 8-byte route hash / 32-byte row hash |
+
+For an audit while other sessions may write, acquire a table lock before taking
+the verification snapshot:
+
+```sql
+BEGIN;
+LOCK TABLE public.merkle_demo IN SHARE MODE;
+SELECT merkle_verify('public.merkle_demo'::regclass) AS heap_matches_roots;
+SELECT merkle_root_hash_index('public.merkle_demo_idx'::regclass) AS root;
+SELECT * FROM merkle_get_partition_root_hashes('public.merkle_demo_idx'::regclass)
+ORDER BY partition;
+COMMIT;
+```
+
+This checks the heap aggregate against roots; it does not reconstruct and verify
+every intermediate node or tuple count. Across replicas, compare at a common
+completed workload boundary with compatible schema, hashing format, and routing
+configuration. Use exact row comparison when the claim is full dataset equality.
+
+The catalog retains old fixed-tree helpers such as `merkle_node_hash`,
+`merkle_leaf_tuples`, and `merkle_leaf_id`, but they raise unsupported-operation
+errors for dynamic trees. Use the supported root APIs and dedicated node tables;
+the [reference](MERKLE_INDEX_COMPLETE_DETAILS.md) lists the remaining stubs.
+
+`merkle_recovery_status()` currently reports compatibility READY/zero-lag
+values, and `merkle_apply_until()` returns its requested sequence. They do not
+measure or drain a background queue. Likewise, the legacy `crash_recovery`
+label in `merkle_tree_stats()` does not describe an active delta replay engine.
+`BCDB_MERKLE_ROOTS` notices are diagnostics, not final replica verification.
+
+## Rebuild, repair, and tests
+
+`REINDEX INDEX public.merkle_demo_idx` rebuilds metadata from the **current heap**.
+It can repair the index representation, but it cannot restore lost or altered
+application rows. Logical repair needs a trusted reference dataset. The current
+[recovery benchmark](scripts/benchmark/recovery/run_merkle_recovery_benchmark.py)
+compares two schemas in one database, descends mismatching partitions, repairs
+candidate rows in a transaction, and then performs the configured audit.
+It is not an automatic Kafka-triggered repair service or a physical page-repair
+protocol.
+
+The focused regression selection, after building the repository, is:
+
+```bash
+make -C src/test/regress check-tests \
+  TESTS="merkle_functional_index merkle_mc split_merge"
+```
+
+See [merkle_functional_index.sql](src/test/regress/sql/merkle_functional_index.sql),
+[merkle_mc.sql](src/test/regress/sql/merkle_mc.sql), and
+[split_merge.sql](src/test/regress/sql/split_merge.sql) for executable coverage.
+For backend execution details read
+[BCDB/Merkle flow](ARIABC_BCNDB_MERKLE_FLOW.md); for replicated completion and
+restart semantics read the [distributed diagrams](DISTRIBUTED_ARCHITECTURE_DIAGRAM.md).

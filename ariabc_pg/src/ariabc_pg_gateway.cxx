@@ -669,7 +669,8 @@ bool send_control_req_to_node(const host_port& hp,
                               const std::string& control_sql,
                               client_api_response& out_resp,
                               std::string& err,
-                              bool reuse_connection = false)
+                              bool reuse_connection = false,
+                              int recv_timeout_ms = 0)
 {
     err.clear();
     // Completion waits are a data-plane operation: opening a socket for every
@@ -689,6 +690,17 @@ bool send_control_req_to_node(const host_port& hp,
     if (connection->fd < 0) connection->fd = connect_tcp(hp.host, hp.port, err);
     if (connection->fd < 0) return false;
     const int fd = connection->fd;
+    // connect_tcp() applies a 35 s receive timeout. Server-side waits
+    // (WAIT_RESULTS, WAIT_COMMIT_INDEX) may legitimately block for their own,
+    // longer timeout, so the socket must outlive it or the read fails with
+    // EAGAIN while the server is still waiting.
+    {
+        struct timeval io_timeout;
+        const int ms = recv_timeout_ms > 0 ? recv_timeout_ms : 35000;
+        io_timeout.tv_sec = ms / 1000;
+        io_timeout.tv_usec = (ms % 1000) * 1000;
+        (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+    }
 
     const uint64_t ts_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4909,7 +4921,8 @@ int main(int argc, char** argv) {
         }
         ariabc_pg::client_api_response wait_resp;
         std::string cerr;
-        if (!ariabc_pg::send_control_req_to_node(nodes[node_idx], wait_cmd, wait_resp, cerr, true)) {
+        if (!ariabc_pg::send_control_req_to_node(nodes[node_idx], wait_cmd, wait_resp, cerr, true,
+                                                 wait_timeout_ms + 30000)) {
             std::cerr << "direct completion wait failed for " << req_label
                       << " wait_cmd=" << wait_cmd
                       << " err=" << cerr << std::endl;
@@ -5092,7 +5105,8 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < nodes.size(); ++i) {
             ariabc_pg::client_api_response resp;
             std::string cerr;
-            if (!ariabc_pg::send_control_req_to_node(nodes[i], wait_cmd, resp, cerr)) {
+            if (!ariabc_pg::send_control_req_to_node(nodes[i], wait_cmd, resp, cerr, false,
+                                                     wait_timeout_ms + 30000)) {
                 std::cerr << "reset barrier wait failed node=" << (i + 1)
                           << " target=" << target_commit_idx
                           << " err=" << cerr << std::endl;

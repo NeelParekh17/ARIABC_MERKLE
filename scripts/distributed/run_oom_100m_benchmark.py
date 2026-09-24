@@ -38,12 +38,16 @@ DEFAULT_CLUSTER_DIR = "/home/neel/Desktop/ariabc_cluster"
 DEFAULT_GATEWAY_HOST = "10.129.27.111"
 DEFAULT_GATEWAY_USER = "neel"
 DEFAULT_GATEWAY_REPO = "/home/neel/ARIABC/AriaBC"
+from benchmark_contract import balanced_cases, source_hashes, RemoteTelemetry, validate_ycsb_results, write_variability_report
+
 SUPPORTED_WORKLOADS = ("a", "b", "c", "d", "f", "all_update", "all_insert", "all_delete")
 _SUDO_PASSWORD = None
 
 
 def run_remote(host, user, cmd, timeout=600, check=True):
     res = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                          "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120",
+                          "-o", "TCPKeepAlive=yes",
                           f"{user}@{host}", "bash -s"],
                          input="set -euo pipefail\nexport LC_ALL=C\n" + cmd,
                          capture_output=True, text=True, timeout=timeout)
@@ -130,6 +134,8 @@ def generate_remote_100m_database(args):
     print("=" * 80)
 
     start_total = time.time()
+    base_name = getattr(args, "base_dir_name", "pgdata_base")
+    base_dir = f"{args.remote_dir}/{base_name}"
 
     schema = (REPO_ROOT / "scripts/distributed/sql/raft_apply_ledger_schema.sql").read_text()
     run_remote(args.remote_host, args.remote_user,
@@ -206,7 +212,7 @@ if __name__ == '__main__':
     export LD_LIBRARY_PATH=/home/neel/Desktop/rdkafka_local/lib:{args.install_dir}/lib:${{LD_LIBRARY_PATH:-}}
     mkdir -p {args.remote_dir}/golden {args.remote_dir}/scripts
     test ! -e {args.remote_dir}/pgdata
-    test ! -e {args.remote_dir}/pgdata_base
+    test ! -e {base_dir}
 
     # 1. Initialize clean PostgreSQL cluster with postgres superuser
     echo '  [1/6] Running initdb...'
@@ -290,7 +296,7 @@ EOF
             ycsb_key
         );
         CREATE INDEX usertable_merkle_idx ON usertable USING merkle (ycsb_key)
-        WITH (partitions = 200, fanout = 4, split_threshold = 32, merge_threshold = 8);
+        WITH (partitions = 200, fanout = 32, split_threshold = 32, merge_threshold = 8);
     "
 
     echo '  [6/6] Analyzing table statistics...'
@@ -307,10 +313,10 @@ EOF
     sync
 
     # Create pristine uncompressed pgdata_base directory for clean cp -a resets
-    echo 'Creating pristine pgdata_base directory ({args.remote_dir}/pgdata_base)...'
-    test ! -e {args.remote_dir}/pgdata_base.tmp
-    cp -a --reflink=never {args.remote_dir}/pgdata {args.remote_dir}/pgdata_base.tmp
-    mv {args.remote_dir}/pgdata_base.tmp {args.remote_dir}/pgdata_base
+    echo 'Creating pristine baseline directory ({base_dir})...'
+    test ! -e {base_dir}.tmp
+    cp -a --reflink=never {args.remote_dir}/pgdata {base_dir}.tmp
+    mv {base_dir}.tmp {base_dir}
 
     # Create pigz compressed golden tarball as persistent archive
     echo 'Packing golden archive ({args.remote_dir}/golden/pgdata_golden.tar.gz)...'
@@ -374,12 +380,6 @@ sha256sum {args.install_dir}/bin/postgres {args.cluster_dir}/ariabc_pg/build/bin
     else:
         binary = REPO_ROOT / "ariabc_pg/build/bin/ariabc_pg_gateway"
         gw = f"{hashlib.sha256(binary.read_bytes()).hexdigest()} {binary}\n"
-    if getattr(args, "reset_mode", "cp") == "undo":
-        undo_script = REPO_ROOT / "scripts/distributed/ycsb_undo.py"
-        if undo_script.exists():
-            run_remote(args.remote_host, args.remote_user,
-                       f"printf %s {shlex.quote(undo_script.read_text())} > {args.remote_dir}/ycsb_undo.py\n"
-                       f"chmod +x {args.remote_dir}/ycsb_undo.py\n", timeout=30)
     return result.stdout + result.stderr + "\nGateway:\n" + gw
 
 
@@ -589,43 +589,9 @@ rm -rf {check_dir}
     return manifest
 
 
-def prepare_workload_undo(args, workload_file):
-    digest = hashlib.sha256(workload_file.read_bytes()).hexdigest()
-    remote_wl = f"{args.remote_dir}/workload_{digest[:16]}.sql"
-    undo_dir = f"{args.remote_dir}/undo_{digest[:16]}"
-    undo_script = REPO_ROOT / "scripts/distributed/ycsb_undo.py"
-    run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
-printf %s {shlex.quote(undo_script.read_text())} > {args.remote_dir}/ycsb_undo.py
-chmod +x {args.remote_dir}/ycsb_undo.py
-if [ ! -f {remote_wl} ]; then
-    printf %s {shlex.quote(workload_file.read_text())} > {remote_wl}
-fi
-export LD_LIBRARY_PATH={args.install_dir}/lib
-if grep -q '::oid::regclass' {undo_dir}/restore.sql 2>/dev/null; then
-    rm -rf {undo_dir}
-fi
-if [ ! -f {undo_dir}/restore.sql ]; then
-    python3 {args.remote_dir}/ycsb_undo.py prepare --psql {args.install_dir}/bin/psql --port {args.db_port} --workload {remote_wl} --output-dir {undo_dir}
-fi
-""", timeout=600)
-    return undo_dir
-
-
-def apply_workload_undo(args, undo_dir):
-    start = time.monotonic()
-    res = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
-export LD_LIBRARY_PATH={args.install_dir}/lib
-{args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -f {undo_dir}/restore.sql
-python3 {args.remote_dir}/ycsb_undo.py verify --psql {args.install_dir}/bin/psql --port {args.db_port} --output-dir {undo_dir}
-""", timeout=args.reset_timeout, check=False)
-    elapsed_ms = (time.monotonic() - start) * 1000
-    if res.returncode != 0:
-        print(f"  WARNING: Undo restore or verification failed ({res.stderr.strip()}); marking next reset for physical copy", flush=True)
-        args._need_physical_reset = True
-    return elapsed_ms
-
-
 def reset_remote_pgdata(args, mode, workers):
+    if getattr(args, "reset_mode", "cp") != "cp":
+        raise RuntimeError("Benchmark resets require a full pristine physical copy (--reset-mode cp)")
     stop_server(args)
     stop_postgres(args)
     enable = "on" if mode == "bcdb_merkle" else "off"
@@ -690,24 +656,11 @@ test "$(sha256sum {args.remote_dir}/pgdata/PG_VERSION | cut -d' ' -f1)" = "{mani
 test "$(sha256sum {args.remote_dir}/pgdata/global/pg_control | cut -d' ' -f1)" = "{manifest['pg_control_sha256']}"
 """
 
-    do_physical_copy = False
-    if getattr(args, 'reset_mode', 'cp') == 'cp':
-        do_physical_copy = True
-    elif getattr(args, '_need_physical_reset', False):
-        do_physical_copy = True
-    else:
-        check_pg = run_remote(args.remote_host, args.remote_user,
-                              f"test -f {args.remote_dir}/pgdata/PG_VERSION", check=False)
-        check_dropped = run_remote(args.remote_host, args.remote_user,
-                                   f"test -f {args.remote_dir}/pgdata/.merkle_index_dropped", check=False)
-        if check_pg.returncode != 0:
-            do_physical_copy = True
-        elif mode == "bcdb_merkle" and (getattr(args, '_merkle_index_dropped', False) or check_dropped.returncode == 0):
-            do_physical_copy = True
-
-    if do_physical_copy:
-        result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+    # Every trial gets the same stopped baseline, including heap/index layout,
+    # WAL and visibility state. Never reuse a logically restored working copy.
+    result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
 test -f {base_dir}/PG_VERSION
+test ! -f {base_dir}/postmaster.pid
 test ! -L {args.remote_dir}/pgdata
 test ! -L {base_dir}
 # Require room for a full copy plus WAL growth; do not consume all free space.
@@ -722,13 +675,6 @@ printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
 : > {args.remote_dir}/postgres.log
 rm -f {args.remote_dir}/pgdata/.merkle_index_dropped
 """, timeout=args.reset_timeout)
-        args._need_physical_reset = False
-        args._merkle_index_dropped = False
-    else:
-        result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
-printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
-: > {args.remote_dir}/postgres.log
-""")
 
     start_postgres(args)
     prepare_ledger_schema(args)
@@ -760,16 +706,12 @@ printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
                             "relpages FROM pg_class WHERE relname='usertable';")
     heap_bytes, index_bytes, relpages = [int(x) for x in table_stats.split('|')]
     if manifest:
-        if getattr(args, "reset_mode", "cp") == "cp" or do_physical_copy:
-            if heap_bytes != manifest['heap_bytes']:
-                raise RuntimeError(f"Post-copy heap size mismatch: {heap_bytes} != {manifest['heap_bytes']}")
-            if index_bytes != manifest['index_bytes']:
-                raise RuntimeError(f"Post-copy index size mismatch: {index_bytes} != {manifest['index_bytes']}")
-            if relpages != manifest['relpages']:
-                raise RuntimeError(f"Post-copy relpages mismatch: {relpages} != {manifest['relpages']}")
-        else:
-            if heap_bytes > int(manifest['heap_bytes'] * 1.05):
-                raise RuntimeError(f"Post-undo heap size excessive: {heap_bytes} > {int(manifest['heap_bytes'] * 1.05)}")
+        if heap_bytes != manifest['heap_bytes']:
+            raise RuntimeError(f"Post-copy heap size mismatch: {heap_bytes} != {manifest['heap_bytes']}")
+        if index_bytes != manifest['index_bytes']:
+            raise RuntimeError(f"Post-copy index size mismatch: {index_bytes} != {manifest['index_bytes']}")
+        if relpages != manifest['relpages']:
+            raise RuntimeError(f"Post-copy relpages mismatch: {relpages} != {manifest['relpages']}")
     indexes = sql(args, "SELECT json_agg(row_to_json(i)) FROM "
                        "(SELECT indexname, indexdef FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;")
     if ("USING merkle" in indexes) != (mode == "bcdb_merkle"):
@@ -809,18 +751,25 @@ def start_remote_ariabc_server(args, mode, workers):
                "--raftMembers", "1=127.0.0.1:9000", "--dbName", "postgres", "--dbHost", "127.0.0.1",
                "--dbPort", str(args.db_port), "--dbUser", "postgres", "--dbType", "0" if mode == "pg" else "1",
                "--safedb", "0" if mode == "pg" else "1", "--dbConnPoolSize", str(workers), "--bypassRaft", "1"]
-    environment = {"ARIABC_PROFILE": "1", "ARIABC_PG_MAX_RETRIES": "100"}
+    environment = {
+        "ARIABC_PROFILE": "1",
+        "ARIABC_PG_MAX_RETRIES": "100",
+        "BCDB_DET_QUEUE_HIGH_WM": "65536",
+        "BCDB_DET_QUEUE_LOW_WM": "32768",
+    }
     if mode != "pg":
         command += ["--pgExecMode", "event", "--bcdbInitBlockSize", str(workers)]
         environment.update(BCDB_DECOUPLE_WORKERS="1", BCDB_DET_QUEUE_HIGH_WM="65536",
                            BCDB_DET_QUEUE_LOW_WM="32768", ARIABC_DET_BLOCK_PARALLEL="64",
                            ARIABC_DET_BLOCK_PIPELINE="4", ARIABC_DET_BLOCK_MAX="2048",
                            ARIABC_DET_ORDER_START_SEQ="0", ARIABC_DET_PREFIXED_DIRECT_PARALLEL="1")
+    elif getattr(args, "pg_exec_mode", "threaded") == "event":
+        command += ["--pgExecMode", "event"]
     exports = "\n".join(f"export {key}={value}" for key, value in environment.items())
     run_remote(args.remote_host, args.remote_user, db_shell(args) + exports + f"""
 if fuser {args.server_port}/tcp >/dev/null 2>&1; then exit 1; fi
 cd {args.remote_dir}
-nohup {shlex.join(command)} </dev/null >{args.remote_dir}/server.log 2>&1 &
+nohup {shlex.join(command)} </dev/null >{args.remote_dir}/server.log 2>{args.remote_dir}/server.err.log &
 pid=$!
 echo "$pid" > {args.remote_dir}/server.pid
 for i in $(seq 1 100); do
@@ -828,7 +777,7 @@ for i in $(seq 1 100); do
     if fuser {args.server_port}/tcp >/dev/null 2>&1; then exit 0; fi
     sleep 0.2
 done
-cat {args.remote_dir}/server.log
+cat {args.remote_dir}/server.log {args.remote_dir}/server.err.log 2>/dev/null || true
 exit 1
 """, timeout=30)
     return dict(command=command, environment=environment)
@@ -902,7 +851,7 @@ def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
     output = result.stdout + "\n" + result.stderr
     log_path.write_text(output)
     metrics = parse_gateway_result(output, count_workload_queries(workload_file), result.returncode, mode=mode)
-    metrics.update(gateway_process_wall_ms=(time.monotonic() - start) * 1000, command=command)
+    metrics.update(gateway_returncode=result.returncode, gateway_process_wall_ms=(time.monotonic() - start) * 1000, command=command)
     return metrics
 
 
@@ -914,9 +863,9 @@ def delta(before, after, key):
 
 
 def collect_logs(args, case_dir):
-    for name in ("server.log", "postgres.log"):
+    for name in ("server.log", "server.err.log", "postgres.log"):
         result = run_remote(args.remote_host, args.remote_user,
-                            f"cat {args.remote_dir}/{name}", timeout=60, check=False)
+                            f"cat {args.remote_dir}/{name} 2>/dev/null || true", timeout=60, check=False)
         (case_dir / name).write_text(result.stdout + result.stderr)
 
 
@@ -933,19 +882,22 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
             subprocess.run(["scp", "-o", "BatchMode=yes", str(workload_file),
                             f"{args.gateway_user}@{args.gateway_host}:/tmp/oom_{digest}.sql"],
                            check=True, timeout=60)
-        undo_dir = None
-        if getattr(args, "reset_mode", "cp") == "undo":
-            undo_dir = prepare_workload_undo(args, workload_file)
         # PG13 collector publishes asynchronously. Allow startup counters to
         # settle; after the run disconnect the server before the final snapshot.
         time.sleep(1)
         pg_before = get_pg_io_stats(args)
         device_before = get_remote_nvme_stats(args)
         measurement_start = time.monotonic()
-        metrics = run_local_gateway_benchmark(args, workload_file, mode, workers, case_dir / "gateway.log")
+        with RemoteTelemetry(args.remote_host, args.remote_user, case_dir / "telemetry.jsonl",
+                             args.install_dir + "/bin/psql", args.db_port, args.install_dir + "/lib"):
+            metrics = run_local_gateway_benchmark(args, workload_file, mode, workers, case_dir / "gateway.log")
+
         device_after = get_remote_nvme_stats(args)
         device_window_ms = (time.monotonic() - measurement_start) * 1000
         stop_server(args)
+        collect_logs(args, case_dir)
+        if workload in ("a", "b", "c", "d", "f"):
+            metrics.update(validate_ycsb_results((case_dir / "server.log").read_text(), args.txs, mode=mode))
         time.sleep(1)
         # CHECKPOINT is measured separately, outside the TPS interval. It makes
         # deferred dirty heap/index writeback visible instead of counting only
@@ -976,8 +928,11 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         pg_after = get_pg_io_stats(args)
         snapshots = dict(pg_before=pg_before, pg_after=pg_after, device_before=device_before,
                          device_after=device_after, checkpoint_before=checkpoint_before,
-                         checkpoint_after=checkpoint_after)
+                         checkpoint_after=checkpoint_after,
+                         continuous_write_mib=delta(device_before, checkpoint_after, "write_sectors") / 2048,
+                         interphase_write_mib=delta(device_after, checkpoint_before, "write_sectors") / 2048)
         (case_dir / "io.json").write_text(json.dumps(snapshots, indent=2) + "\n")
+        (case_dir / "cache_policy.txt").write_text("Cold start; OS page cache and storage-controller cache are not memory-bounded.\n")
         merkle = "N/A"
         if mode == "bcdb_merkle":
             merkle = sql(args, "SELECT merkle_verify('usertable');", timeout=args.verify_timeout)
@@ -985,10 +940,6 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
             if merkle != "t":
                 raise RuntimeError(f"Merkle verification failed: {merkle}")
             merkle = "PASS"
-        undo_restore_ms = 0.0
-        if getattr(args, "reset_mode", "cp") == "undo" and undo_dir:
-            undo_restore_ms = apply_workload_undo(args, undo_dir)
-            (case_dir / "undo_restore_ms.txt").write_text(f"{undo_restore_ms:.2f} ms\n")
         read = delta(pg_before, pg_after, "blks_read")
         hits = delta(pg_before, pg_after, "blks_hit")
         if device_before["device"] != device_after["device"]:
@@ -996,7 +947,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         row = dict(workload=workload, skew=skew, mode=mode, workers=workers, trial=trial,
                    total_queries=metrics["total_queries"], shared_buffers=args.shared_buffers,
                    db_rows=args.db_rows, reset_time_ms=reset_ms,
-                   undo_restore_ms=undo_restore_ms,
+                   reset_mode="cp",
                    wall_time_ms=metrics["wall_time_ms"], wall_including_drains_ms=metrics["wall_including_drains_ms"],
                    tps=metrics["tps"], completed_tps=metrics["completed_tps"],
                    device=device_before["device"], device_window_ms=device_window_ms,
@@ -1025,8 +976,6 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         (case_dir / "FAILED.txt").write_text(str(exc) + "\n")
         raise
     finally:
-        if sys.exc_info()[0] is not None:
-            args._need_physical_reset = True
         # Run all cleanup operations, preserving the original failure and logs.
 
         cleanup_errors = []
@@ -1053,7 +1002,7 @@ def parse_args(argv=None):
     parser.add_argument("--shared-buffers", default="32MB")
     parser.add_argument("--txs", type=int, default=20000, help="SQL statements per case, as in the in-memory suite")
     parser.add_argument("--seed", type=int, default=42, help="Suite base seed; adds int(skew * 100)")
-    parser.add_argument("--trials", type=int, default=1, help="Independent cold restores per case")
+    parser.add_argument("--trials", type=int, default=5, help="Independent cold restores per case")
     parser.add_argument("--modes", nargs="+", default=["pg", "bcdb_det", "bcdb_merkle"])
     parser.add_argument("--workers", nargs="+", default=["1", "8", "16"])
     parser.add_argument("--skews", nargs="+", default=["0.0", "0.99"])
@@ -1067,15 +1016,22 @@ def parse_args(argv=None):
                         help="Name of baseline database directory inside remote-dir (default: pgdata_base_fanout32)")
     parser.add_argument("--skip-gen", action="store_true", help="Require an existing clean baseline database")
     parser.add_argument("--gen-only", action="store_true")
-    parser.add_argument("--reset-mode", choices=["undo", "cp"], default="cp",
-                        help="Reset strategy: 'cp' uses full physical file copy; 'undo' uses fast logical before-image restore")
+    parser.add_argument("--reset-mode", choices=["cp"], default="cp",
+                        help="Restore the complete stopped pristine database with cp -a --reflink=never before every case")
     parser.add_argument("--verify-mode", choices=["fast", "full"], default="fast",
                         help="Validation mode on per-case resets: 'fast' performs pre-start copy integrity and post-start catalog/bound sanity checks; 'full' runs an exhaustive SELECT count(*) scan on every reset.")
     parser.add_argument("--dry-run", action="store_true", help="Generate workloads and manifest locally; do not contact servers")
     parser.add_argument("--preflight-only", action="store_true", help="Probe binaries, ports, storage and sudo; do not start databases")
     parser.add_argument("--resume-dir", default=None,
                         help="Resume an existing benchmark run directory, skipping already completed cases in summary.csv")
+    parser.add_argument("--auto-resume", action="store_true",
+                        help="Automatically find and resume the latest run directory under --out-dir containing campaign.json")
+    parser.add_argument("--pg-exec-mode", choices=["event", "threaded"], default="threaded",
+                        help="Executor mode for pg in OOM (default 'threaded' matches archived run; 'event' matches YCSB/TPC-C)")
     args = parser.parse_args(argv)
+    if (not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", args.base_dir_name)
+            or args.base_dir_name == "pgdata"):
+        parser.error("--base-dir-name must be a separate directory name, never pgdata or a path")
     if args.resume_dir:
         resume_path = Path(args.resume_dir).resolve()
         if not (resume_path / "campaign.json").is_file():
@@ -1166,11 +1122,30 @@ def write_report(out_dir, rows):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.auto_resume and not args.resume_dir and args.out_dir:
+        out_root = (REPO_ROOT / args.out_dir).resolve()
+        if out_root.is_dir():
+            candidates = sorted([
+                d for d in out_root.iterdir()
+                if d.is_dir() and d.name.startswith("run_") and (d / "campaign.json").is_file()
+            ], key=lambda d: d.stat().st_mtime, reverse=True)
+            if candidates:
+                args.resume_dir = str(candidates[0])
+                print(f"Auto-resuming latest run directory: {args.resume_dir}", flush=True)
+            elif (out_root / "campaign.json").is_file():
+                args.resume_dir = str(out_root)
+                print(f"Auto-resuming root run directory: {args.resume_dir}", flush=True)
+
     if args.resume_dir:
         out_dir = Path(args.resume_dir).resolve()
         if not (out_dir / "campaign.json").is_file():
             raise RuntimeError(f"Cannot resume: {out_dir / 'campaign.json'} not found")
         campaign = json.loads((out_dir / "campaign.json").read_text())
+        if campaign.get("arguments", {}).get("reset_mode") != "cp":
+            raise RuntimeError("Only pristine physical-copy campaigns may be resumed; start a new --reset-mode cp campaign")
+        if campaign.get("version") != 3 or campaign.get("source_sha256") != source_hashes(REPO_ROOT):
+            raise RuntimeError("Resume source contract changed or is legacy; use a new campaign")
+
         for k, v in campaign.get("arguments", {}).items():
             if k not in ("resume_dir", "out_dir", "dry_run", "preflight_only") and hasattr(args, k):
                 setattr(args, k, v)
@@ -1181,13 +1156,9 @@ def main(argv=None):
         out_dir = out_root / (datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:8])
         out_dir.mkdir(parents=True)
         print(f"Artifacts: {out_dir}", flush=True)
-        manifest = dict(version=2, arguments=vars(args), cache_policy="cold_start_os_cache_unbounded",
+        manifest = dict(version=3, arguments=vars(args), cache_policy="cold_start_os_cache_unbounded",
                         timing="gateway_overall_time_taken", workloads={})
-        manifest["source_sha256"] = {str(path.relative_to(REPO_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-                                      for path in (Path(__file__).resolve(), REPO_ROOT / "scripts/generate_ycsb_workloads.py",
-                                                   REPO_ROOT / "scripts/distributed/sql/raft_apply_ledger_schema.sql",
-                                                   Path(__file__).with_name("large_zipf.py"),
-                                                   Path(__file__).with_name("benchmark_validation.py"))}
+        manifest["source_sha256"] = source_hashes(REPO_ROOT)
     files = {}
     for wl in args.workloads:
         for skew in args.skews:
@@ -1208,13 +1179,6 @@ def main(argv=None):
     # A directory lock is deliberately persistent after an unclean controller
     # death. Inspect its owner.txt before manually removing a stale lock.
     lock_cmd = f"""
-if [ -d {args.remote_dir}/benchmark.lock ]; then
-    owner=$(cat {args.remote_dir}/benchmark.lock/owner.txt 2>/dev/null || true)
-    if [ "$owner" = {shlex.quote(str(out_dir))} ]; then
-        rm -f {args.remote_dir}/benchmark.lock/owner.txt
-        rmdir {args.remote_dir}/benchmark.lock
-    fi
-fi
 mkdir -p {args.remote_dir}
 mkdir {args.remote_dir}/benchmark.lock
 printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/owner.txt
@@ -1223,8 +1187,16 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
     generating = False
     try:
         ensure_cache_drop_access(args)
-        if not (out_dir / "preflight.txt").is_file():
-            (out_dir / "preflight.txt").write_text(preflight(args))
+        current_preflight = preflight(args)
+        preflight_path = out_dir / "preflight.txt"
+        if preflight_path.exists():
+            old = re.findall(r"^[0-9a-f]{64}\s+\S+", preflight_path.read_text(), re.M)
+            new = re.findall(r"^[0-9a-f]{64}\s+\S+", current_preflight, re.M)
+            if len(new) != 3 or new != old:
+                raise RuntimeError("Benchmark executable hashes changed on resume")
+            (out_dir / ("preflight_resume_" + uuid.uuid4().hex + ".txt")).write_text(current_preflight)
+        else:
+            preflight_path.write_text(current_preflight)
         if args.preflight_only:
             print("Preflight passed; no database started or cache cleared.")
             return
@@ -1249,45 +1221,25 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
                     if (case_dir / "result.json").is_file():
                         row_data = json.loads((case_dir / "result.json").read_text())["row"]
                     else:
-                        row_data = dict(r)
-                        for float_col in ("skew", "reset_time_ms", "undo_restore_ms", "tps", "completed_tps",
-                                          "device_window_ms", "device_read_mib", "device_write_mib",
-                                          "checkpoint_ms", "checkpoint_write_ms", "checkpoint_sync_ms",
-                                          "checkpoint_total_ms", "checkpoint_longest_sync_ms", "checkpoint_write_mib",
-                                          "hit_ratio_pct", "blk_read_time_ms", "blk_write_time_ms"):
-                            if row_data.get(float_col):
-                                row_data[float_col] = float(row_data[float_col])
-                        for int_col in ("workers", "trial", "total_queries", "db_rows", "wall_time_ms",
-                                        "wall_including_drains_ms", "device_read_ios", "device_write_ios",
-                                        "checkpoint_sync_files", "blks_read", "blks_hit", "buffers_backend",
-                                        "divergence_count", "permanent_failures", "validated_completed_queries"):
-                            if row_data.get(int_col):
-                                row_data[int_col] = int(row_data[int_col])
+                        raise RuntimeError(f"Missing per-case evidence on resume: {case_dir}")
+                    if (case_dir / "FAILED.txt").exists() or (case_dir / "cleanup_errors.txt").exists():
+                        raise RuntimeError(f"Cannot resume an accepted row with failure evidence: {case_dir}")
+                    saved = json.loads((case_dir / "result.json").read_text())
+                    parse_gateway_result((case_dir / "gateway.log").read_text(), int(row_data["total_queries"]),
+                                         saved["gateway"]["gateway_returncode"], mode=row_data["mode"])
+                    if row_data["workload"] in ("a", "b", "c", "d", "f"):
+                        validate_ycsb_results((case_dir / "server.log").read_text(), int(row_data["total_queries"]), mode=row_data["mode"])
+                    if row_data["mode"] == "bcdb_merkle" and (case_dir / "merkle_verify.txt").read_text().strip() != "t":
+                        raise RuntimeError("Missing saved Merkle PASS on resume")
                     rows.append(row_data)
                     completed_keys.add((str(row_data["workload"]), float(row_data["skew"]),
                                         str(row_data["mode"]), int(row_data["workers"]), int(row_data["trial"])))
             print(f"Resuming {out_dir}: {len(rows)} cases already completed.", flush=True)
 
-        cases = []
-        if getattr(args, "reset_mode", "cp") == "undo":
-            # Group by mode (putting bcdb_merkle first) so that the Merkle index
-            # present in pgdata_base is preserved across all Merkle runs, and then
-            # dropped once for bcdb_det and pg. This completely avoids physical cp -a copies.
-            ordered_modes = sorted(args.modes, key=lambda m: (0 if m == "bcdb_merkle" else (1 if m == "bcdb_det" else 2)))
-            for mode in ordered_modes:
-                for wl in args.workloads:
-                    for skew in args.skews:
-                        for workers in args.workers:
-                            for trial in range(1, args.trials + 1):
-                                cases.append((wl, skew, mode, workers, trial))
-        else:
-            for wl in args.workloads:
-                for skew in args.skews:
-                    for workers in args.workers:
-                        for trial in range(1, args.trials + 1):
-                            shift = (trial - 1) % len(args.modes)
-                            for mode in args.modes[shift:] + args.modes[:shift]:
-                                cases.append((wl, skew, mode, workers, trial))
+        cases = [(wl, skew, mode, workers, trial)
+                 for wl, skew, workers, mode, trial in balanced_cases(
+                     [(wl, skew, workers) for wl in args.workloads for skew in args.skews for workers in args.workers],
+                     args.modes, args.trials, args.seed)]
 
         for wl, skew, mode, workers, trial in cases:
             key = (str(wl), float(skew), str(mode), int(workers), int(trial))
@@ -1297,7 +1249,7 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
                 continue
             case_dir = out_dir / name
             if case_dir.is_dir():
-                shutil.rmtree(case_dir, ignore_errors=True)
+                case_dir = out_dir / (name + "_attempt_" + uuid.uuid4().hex[:8])
             print(f"Running {name}: pristine restore, validation, then cold start", flush=True)
             row = run_case(args, wl, skew, mode, workers, trial, files[wl, skew], case_dir)
             rows.append(row)
@@ -1310,6 +1262,7 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
             print(f"  PASS: {row['tps']:.2f} TPS, {row['device_read_mib']:.2f} MiB read, "
                   f"Merkle={row['merkle_verify']}", flush=True)
             write_report(out_dir, rows)
+            write_variability_report(out_dir, rows)
         print(f"Completed {len(rows)} accepted cases. Results: {out_dir / 'summary.csv'}")
     finally:
         try:

@@ -177,6 +177,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_invalid_config_fails_before_remote_actions(self):
         for argv in (['--reset-mode', 'inplace'], ['--skews', 'nan'], ['--skews', '-.1'],
+                     ['--base-dir-name', 'pgdata'], ['--base-dir-name', '../pgdata'],
                      ['--workers', '0'], ['--db-rows', '0'], ['--workloads', 'typo'],
                      ['--verify-mode', 'invalid'],
                      ['--remote-dir', '/tmp/../'], ['--shared-buffers', '32MB;echo bad']):
@@ -194,7 +195,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual((root / 'summary.csv').read_text(), 'old results\n')
             manifests = list(root.glob('run_*/campaign.json'))
             self.assertEqual(len(manifests), 1)
-            self.assertEqual(json.loads(manifests[0].read_text())['version'], 2)
+            self.assertEqual(json.loads(manifests[0].read_text())['version'], 3)
 
     def test_remote_scripts_are_valid_bash_and_stop_on_error(self):
         captured = []
@@ -216,6 +217,9 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(checked.returncode, 0, checked.stderr)
         self.assertFalse(any('fuser -k' in command for command in captured))
         self.assertFalse(any("-delete" in command for command in captured))
+        generation = '\n'.join(captured)
+        self.assertIn('fanout = 32', generation)
+        self.assertIn(f'mv {args.remote_dir}/{args.base_dir_name}.tmp {args.remote_dir}/{args.base_dir_name}', generation)
 
     def test_checkpoint_phase_evidence(self):
         result = oom.parse_checkpoint_log('checkpoint complete: wrote 2077 buffers (50.7%); '
@@ -272,8 +276,8 @@ class RunnerTests(unittest.TestCase):
             check = subprocess.run(['bash', '-n'], input=command, text=True, capture_output=True)
             self.assertEqual(check.returncode, 0, check.stderr)
 
-    def test_reset_mode_undo_in_place_and_cold_cache_restart(self):
-        args = oom.parse_args(['--reset-mode', 'undo'])
+    def test_reset_mode_cp_always_copies_and_cold_cache_restarts(self):
+        args = oom.parse_args(['--reset-mode', 'cp'])
         args._golden_manifest = dict(
             version=2, db_rows=100000000,
             keyspace='100000000|1|100000000',
@@ -299,9 +303,20 @@ class RunnerTests(unittest.TestCase):
              mock.patch.object(oom, 'sql', side_effect=responses):
             result = oom.reset_remote_pgdata(args, 'pg', 1)
         script = '\n'.join(commands)
-        self.assertNotIn('cp -a --reflink=never', script)
+        self.assertIn('cp -a --reflink=never', script)
+        self.assertIn('test ! -f ' + args.remote_dir + '/' + args.base_dir_name + '/postmaster.pid', script)
         self.assertIn('drop_caches', script)
         self.assertIn('postgresql.auto.conf', script)
+
+    def test_undo_reset_rejected_before_remote_work(self):
+        with self.assertRaises(SystemExit), mock.patch('sys.stderr'):
+            oom.parse_args(['--reset-mode', 'undo'])
+        args = oom.parse_args([])
+        args.reset_mode = 'undo'
+        with mock.patch.object(oom, 'run_remote') as remote:
+            with self.assertRaisesRegex(RuntimeError, 'pristine physical copy'):
+                oom.reset_remote_pgdata(args, 'pg', 1)
+            remote.assert_not_called()
 
 
     def test_reset_verify_mode_full_runs_table_scan(self):

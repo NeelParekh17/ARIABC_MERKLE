@@ -1,0 +1,19 @@
+[
+  {
+    "configuration": [
+      "pg",
+      "ycsb_workload_d_skew_1_20_20k.txt",
+      "",
+      "",
+      "",
+      "4"
+    ],
+    "trials": 1,
+    "median": 26595.744680851065,
+    "mean": 26595.744680851065,
+    "min": 26595.744680851065,
+    "max": 26595.744680851065,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  }
+]

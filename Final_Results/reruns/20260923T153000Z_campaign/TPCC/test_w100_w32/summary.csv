@@ -1,0 +1,4 @@
+benchmark,mode,workload,warehouses,server_workers,bcdb_workers,pool_size,total_queries,wall_time_ms,tps,merkle_pass,divergence_count,permanent_failures,trial,run_id
+tpcc,bcdb_det,tpcc-workload-20000-w100-seed42.txt,100,32,32,32,20000,11439,1748.40,1,0,0,1,tpcc_c1982a91f368423da074a657c0cd497e
+tpcc,pg,tpcc-workload-20000-w100-seed42.txt,100,32,1,32,20000,4885,4094.17,1,0,0,1,tpcc_06e3d9b5d02542d0842bccd7f1e2e6a2
+tpcc,bcdb_merkle,tpcc-workload-20000-w100-seed42.txt,100,32,32,32,20000,36592,546.57,1,0,0,1,tpcc_3fdb579b46b64b75a88d49a01ef32f55

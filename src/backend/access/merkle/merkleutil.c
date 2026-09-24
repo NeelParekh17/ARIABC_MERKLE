@@ -132,7 +132,7 @@ void
 merkle_hash_xor(MerkleHash *dest, const MerkleHash *src)
 {
     int i;
-    
+
     for (i = 0; i < MERKLE_HASH_BYTES; i++)
         dest->data[i] ^= src->data[i];
 }
@@ -153,7 +153,7 @@ bool
 merkle_hash_is_zero(const MerkleHash *hash)
 {
     int i;
-    
+
     for (i = 0; i < MERKLE_HASH_BYTES; i++)
     {
         if (hash->data[i] != 0)
@@ -172,10 +172,10 @@ merkle_hash_to_hex(const MerkleHash *hash)
 {
     char *result = palloc(MERKLE_HASH_BYTES * 2 + 1);
     int i;
-    
+
     for (i = 0; i < MERKLE_HASH_BYTES; i++)
         sprintf(result + (i * 2), "%02x", hash->data[i]);
-    
+
     result[MERKLE_HASH_BYTES * 2] = '\0';
     return result;
 }
@@ -676,8 +676,14 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 typedef struct MerkleKeyHashCache
 {
 	Oid			argtype;
+	bool		is_rowtype;
 	TupleDesc	tupdesc;
 	FmgrInfo	send_fn;
+	/* For composite / rowtype key: */
+	Oid			tup_type;
+	int32		tup_typmod;
+	int			nkeys;
+	FmgrInfo   *send_functions;
 } MerkleKeyHashCache;
 
 /*
@@ -851,29 +857,145 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 		argtype = INT8OID;
 
 	cache = (MerkleKeyHashCache *) fcinfo->flinfo->fn_extra;
-	if (cache == NULL || cache->argtype != argtype)
+
+	if (type_is_rowtype(argtype))
 	{
-		Oid typsend;
-		bool typisvarlena;
-		MemoryContext oldcxt;
+		HeapTupleHeader tuple_header = NULL;
+		Oid tup_type = InvalidOid;
+		int32 tup_typmod = -1;
 
-		if (cache != NULL && cache->tupdesc != NULL)
-			FreeTupleDesc(cache->tupdesc);
+		if (!isnull)
+		{
+			tuple_header = DatumGetHeapTupleHeader(val);
+			tup_type = HeapTupleHeaderGetTypeId(tuple_header);
+			tup_typmod = HeapTupleHeaderGetTypMod(tuple_header);
+		}
 
-		oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
-		cache = (MerkleKeyHashCache *) palloc0(sizeof(MerkleKeyHashCache));
-		cache->argtype = argtype;
-		cache->tupdesc = CreateTemplateTupleDesc(1);
-		TupleDescInitEntry(cache->tupdesc, (AttrNumber) 1, "key", argtype, -1, 0);
+		if (cache == NULL || !cache->is_rowtype || cache->tup_type != tup_type || cache->tup_typmod != tup_typmod)
+		{
+			int i;
+			MemoryContext oldcxt;
 
-		getTypeBinaryOutputInfo(argtype, &typsend, &typisvarlena);
-		fmgr_info_cxt(typsend, &cache->send_fn, fcinfo->flinfo->fn_mcxt);
+			if (cache != NULL)
+			{
+				if (cache->tupdesc != NULL)
+					FreeTupleDesc(cache->tupdesc);
+				if (cache->send_functions != NULL)
+				{
+					pfree(cache->send_functions);
+					cache->send_functions = NULL;
+				}
+			}
+			else
+			{
+				oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+				cache = (MerkleKeyHashCache *) palloc0(sizeof(MerkleKeyHashCache));
+				fcinfo->flinfo->fn_extra = (void *) cache;
+				MemoryContextSwitchTo(oldcxt);
+			}
 
-		fcinfo->flinfo->fn_extra = (void *) cache;
-		MemoryContextSwitchTo(oldcxt);
+			cache->argtype = argtype;
+			cache->is_rowtype = true;
+			cache->tup_type = tup_type;
+			cache->tup_typmod = tup_typmod;
+
+			if (OidIsValid(tup_type))
+			{
+				oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+				cache->tupdesc = lookup_rowtype_tupdesc_copy(tup_type, tup_typmod);
+				cache->nkeys = cache->tupdesc->natts;
+				cache->send_functions = (FmgrInfo *) palloc0(cache->nkeys * sizeof(FmgrInfo));
+				for (i = 0; i < cache->nkeys; i++)
+				{
+					Form_pg_attribute attr = TupleDescAttr(cache->tupdesc, i);
+					if (!attr->attisdropped)
+					{
+						Oid typsend;
+						bool typisvarlena;
+						getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+						fmgr_info_cxt(typsend, &cache->send_functions[i], fcinfo->flinfo->fn_mcxt);
+					}
+				}
+				MemoryContextSwitchTo(oldcxt);
+			}
+			else
+			{
+				cache->tupdesc = NULL;
+				cache->nkeys = 0;
+				cache->send_functions = NULL;
+			}
+		}
+
+		if (!isnull && cache->tupdesc != NULL && cache->nkeys > 0)
+		{
+			Datum  rec_values_buf[32];
+			bool   rec_nulls_buf[32];
+			Datum *rec_values = (cache->nkeys <= 32) ? rec_values_buf : (Datum *) palloc(cache->nkeys * sizeof(Datum));
+			bool  *rec_nulls = (cache->nkeys <= 32) ? rec_nulls_buf : (bool *) palloc(cache->nkeys * sizeof(bool));
+			HeapTupleData tuple;
+
+			memset(&tuple, 0, sizeof(tuple));
+			tuple.t_len = HeapTupleHeaderGetDatumLength(tuple_header);
+			ItemPointerSetInvalid(&(tuple.t_self));
+			tuple.t_tableOid = InvalidOid;
+			tuple.t_data = tuple_header;
+
+			heap_deform_tuple(&tuple, cache->tupdesc, rec_values, rec_nulls);
+
+			merkle_compute_canonical_route_digest_fast(rec_values, rec_nulls, cache->nkeys, cache->tupdesc, cache->send_functions, digest);
+
+			if (cache->nkeys > 32)
+			{
+				pfree(rec_values);
+				pfree(rec_nulls);
+			}
+		}
+		else
+		{
+			memset(digest, 0, MERKLE_HASH_BYTES);
+		}
 	}
+	else
+	{
+		if (cache == NULL || cache->is_rowtype || cache->argtype != argtype)
+		{
+			Oid typsend;
+			bool typisvarlena;
+			MemoryContext oldcxt;
 
-	merkle_compute_canonical_route_digest_fast(&val, &isnull, 1, cache->tupdesc, &cache->send_fn, digest);
+			if (cache != NULL)
+			{
+				if (cache->tupdesc != NULL)
+					FreeTupleDesc(cache->tupdesc);
+				if (cache->send_functions != NULL)
+				{
+					pfree(cache->send_functions);
+					cache->send_functions = NULL;
+				}
+			}
+			else
+			{
+				oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+				cache = (MerkleKeyHashCache *) palloc0(sizeof(MerkleKeyHashCache));
+				fcinfo->flinfo->fn_extra = (void *) cache;
+				MemoryContextSwitchTo(oldcxt);
+			}
+
+			cache->argtype = argtype;
+			cache->is_rowtype = false;
+
+			oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+			cache->tupdesc = CreateTemplateTupleDesc(1);
+			TupleDescInitEntry(cache->tupdesc, (AttrNumber) 1, "key", argtype, -1, 0);
+
+			getTypeBinaryOutputInfo(argtype, &typsend, &typisvarlena);
+			fmgr_info_cxt(typsend, &cache->send_fn, fcinfo->flinfo->fn_mcxt);
+
+			MemoryContextSwitchTo(oldcxt);
+		}
+
+		merkle_compute_canonical_route_digest_fast(&val, &isnull, 1, cache->tupdesc, &cache->send_fn, digest);
+	}
 
 	result = (bytea *) palloc(VARHDRSZ + 8);
 	SET_VARSIZE(result, VARHDRSZ + 8);

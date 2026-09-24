@@ -1,187 +1,287 @@
-# Recovery Architecture Analysis
+# Dynamic Merkle Recovery Architecture
 
-This report presents a comprehensive comparative evaluation of PostgreSQL-based Merkle recovery across the full **1M to 50M tuple scale range** (11 dataset scale points: 1M, 3M, 5M, 7M, 10M, 15M, 20M, 25M, 30M, 40M, 50M). It provides a matched two-way analysis comparing **Static (`F32 / L1024`)** and **Dynamic** (current synchronous direct Merkle commit path, `merkle_apply_synchronous_direct=on`).
+Source review: **2026-09-22**, against the current working tree, including local
+changes. This document describes the native index and the recovery harness.
+Measurements and plots belong in individual [run reports](run_reports/); they
+are not latency guarantees of the architecture.
 
----
+## Scope and component boundaries
 
-## Architectural Profiles & Artifact Provenance
+| Mechanism | Responsibility | Implementation |
+|---|---|---|
+| Transactional Merkle maintenance | Commit indexed table contents and Merkle nodes together | Native access method and PostgreSQL executor hooks |
+| Sparse state repair | Compare a healthy reference with a damaged table and repair differing rows | Python harness issuing SQL |
+| Replicated command recovery | Redeliver retained Raft entries and replay or execute ledger items | NuRaft, `ariabc_pg`, and BCDB apply ledger |
 
-### 1. Static (`F32 / L1024`)
-* **Artifact Path**: `scripts/benchmark/recovery/fetched/ariabc-recovery-best-scaling-f32-l1024-k75-c300-20260714T040459Z-0068d0`
-* **Configuration**: Best static fixed-leaf layout with Fanout $F=32$ and $L=1024$ leaves per partition ($204,800$ total leaves across 200 partitions).
-* **Mechanics**: Leaf nodes remain fixed regardless of dataset growth. Leaf occupancy scales linearly with table size $N$ (from ~4.9 rows/leaf at 1M to ~244.1 rows/leaf at 50M). Candidate fetching reads full candidate heap rows across candidate leaf ranges.
-* **Repetitions**: Median of 3 repetitions per dataset size across 11 scale points (1M to 50M). Medians across warm repetitions (r1/r2) are evaluated.
+The sparse-repair benchmark uses `healthy.usertable` and `damaged.usertable` in
+one PostgreSQL database. It does not exercise a network protocol between live
+Raft replicas. Corruption is SQL DML with Merkle maintenance enabled, so it
+tests divergent table states, not arbitrary damage to heap or index pages.
+Remote runner scripts place this benchmark on another host; that alone does
+not make its two schemas independent database replicas.
 
-### 2. Dynamic (`fanout_f4`, current synchronous direct path)
-* **Artifact Path**: `scripts/benchmark/recovery/fetched/ariabc-recovery-size-scaling-k75-c300-20260809T123849Z-0083f5`
-* **Configuration**: Full scale-scaling campaign spanning 1M to 50M tuples across all 11 dataset sizes (1M, 3M, 5M, 7M, 10M, 15M, 20M, 25M, 30M, 40M, 50M), $F=4$, split threshold 32, merge threshold 8, $K=75$ bad leaves, $C=300$ corruptions, `audit_mode=skip`, `profiling=off`, with 10 repetitions per scale point (110 total runs).
-* **Contract Proof**: `enable_merkle_index=on`, `merkle_apply_synchronous_direct=on`, and `synchronous_commit=on`; all 110 runs are valid (`valid=110/110`); `legacy_merkle_pending_rows_after_corruption=0` and `legacy_merkle_pending_rows_after_repair=0` for every run; stdout confirms zero `merkle_apply_pending()` invocations.
-* **Mechanics**: Merkle node updates are applied **synchronously direct** inside the same transaction as the user DML write. Because the benchmark harness uses autocommit connections, each repaired row is executed as a separate transaction; synchronous Merkle maintenance is included inside `repair_write_ms` (and `repair_table_dml_ms`) with `merkle_metadata_apply_ms = 0`.
+See [the gateway/server architecture](../ariabc_pg/ARIABC_PG_ARCHITECTURE.md)
+for replicated execution and restart behavior. Kafka divergence events are
+observations; the gateway does not automatically invoke this repair pipeline.
 
----
+```mermaid
+flowchart TD
+    H[Healthy table and Merkle index] --> L[Compare roots and descend differing branches]
+    D[Damaged table and Merkle index] --> L
+    L --> C[Fetch candidate rows through lookup B-trees]
+    C --> R[Compare keys and row values]
+    R --> T[One repair transaction with batched DML]
+    T --> M[Apply staged Merkle changes before commit]
+    M --> V[Targeted post-commit confirmation]
+    V --> A[Optional full table and index audit]
+```
 
-## Matched Phase Comparison (Full Scale Sweep: 1M to 50M Tuples)
+## Native index representation
 
-Values are warm-repetition medians in milliseconds (`restore_repair_ms` is the authoritative total recovery latency). Warm medians evaluate r1/r2 for Static, and r1..r9 for Dynamic.
+The access method lives in [src/backend/access/merkle](../src/backend/access/merkle/).
+Its format and defaults are declared in
+[merkle.h](../src/include/access/merkle.h): index format **10**, routing format
+**4**, and row-hash format **1**.
 
-### Full 11-Scale Point Comparison Matrix
+Each index has a metapage and a dedicated ordinary PostgreSQL table named
+`ariabc_internal.merkle_node_<index_oid>`. Node storage contains:
 
-| Scale | Architecture | Tree Localisation | Candidate Fetch | Row Comparison | Repair Write (DML + Merkle) | Post-Repair Confirmation | Total Recovery Latency (`restore_repair_ms`) |
-|:---|:---|---:|---:|---:|---:|---:|---:|
-| **1M** | **Static** | 50.84 | 11.17 | 3.21 | 859.63 | 18.85 | **958.71 ms** |
-| | **Dynamic** | 44.75 | 44.22 | 1.88 | 68.21 | 2.73 | **162.68 ms** |
-| **3M** | **Static** | 41.70 | 20.73 | 4.23 | 780.64 | 28.07 | **890.48 ms** |
-| | **Dynamic** | 59.53 | 34.38 | 1.43 | 72.41 | 2.78 | **173.82 ms** |
-| **5M** | **Static** | 45.44 | 32.74 | 5.96 | 849.00 | 48.10 | **997.27 ms** |
-| | **Dynamic** | 61.08 | 46.56 | 2.04 | 73.72 | 2.80 | **187.85 ms** |
-| **7M** | **Static** | 51.00 | 53.95 | 7.44 | 859.75 | 64.86 | **1,054.46 ms** |
-| | **Dynamic** | 57.22 | 33.20 | 1.35 | 77.76 | 2.81 | **174.94 ms** |
-| **10M** | **Static** | 51.44 | 70.86 | 9.39 | 856.82 | 85.51 | **1,092.56 ms** |
-| | **Dynamic** | 60.24 | 30.93 | 1.22 | 78.69 | 2.78 | **175.44 ms** |
-| **15M** | **Static** | 51.80 | 94.64 | 12.99 | 858.27 | 116.28 | **1,154.30 ms** |
-| | **Dynamic** | 75.19 | 41.61 | 1.77 | 82.30 | 2.85 | **206.97 ms** |
-| **20M** | **Static** | 51.64 | 116.50 | 18.73 | N/A | 150.03 | **N/A ms** |
-| | **Dynamic** | 63.33 | 42.76 | 1.82 | 80.10 | 2.83 | **193.23 ms** |
-| **25M** | **Static** | 51.92 | 135.18 | 20.53 | 852.53 | 146.11 | **1,230.73 ms** |
-| | **Dynamic** | 63.85 | 27.29 | 1.41 | 69.46 | 2.81 | **166.79 ms** |
-| **30M** | **Static** | 52.08 | 150.13 | 24.04 | 854.63 | 157.62 | **1,264.79 ms** |
-| | **Dynamic** | 66.17 | 29.74 | 1.15 | 85.39 | 2.93 | **187.10 ms** |
-| **40M** | **Static** | 51.67 | 186.74 | 31.19 | 866.88 | 200.09 | **1,367.16 ms** |
-| | **Dynamic** | 75.09 | 31.42 | 1.23 | 90.53 | 2.86 | **211.61 ms** |
-| **50M** | **Static** | 49.99 | 207.47 | 36.84 | 766.49 | 223.80 | **1,317.54 ms** |
-| | **Dynamic** | 70.89 | 33.72 | 1.37 | 83.77 | 2.82 | **194.81 ms** |
+- `partition_id`, `node_id`, and `prefix_len`, forming the primary key;
+- `is_leaf`, `tuple_count`, and the 32-byte `hash`;
+- an additional `(partition_id, prefix_len, node_id)` index and a partial
+  partition-root index where `prefix_len = 0`.
 
----
+The benchmark maintains `ariabc_internal.merkle_node` as a compatibility view
+over these tables. It is not the shared physical node table on the normal
+current path. Local index OIDs identify storage, not portable replica identity.
 
-## Detailed Diagnostic Analysis: Performance & Repetition Stability
+Key routing uses a versioned, length-prefixed binary representation hashed with
+BLAKE3, including integer keys. `merkle_key_hash()` exposes the eight-byte
+routing key used by recovery lookup predicates;
+`merkle_partition_for_hash()` derives the partition. Tree descent uses key
+prefixes within each partition. Canonical row hashes are BLAKE3-256; node
+maintenance uses XOR aggregation of row contributions. These roots are not a
+conventional hash-of-concatenated-children construction.
 
-A rigorous examination of the raw repetition telemetry across all 110 benchmark runs (11 scale points $\times$ 10 repetitions) demonstrates strong performance stability across the full 1M to 50M scale sweep:
+| Native index option | Default |
+|---|---:|
+| `fanout` | 4 |
+| `split_threshold` | 32 |
+| `merge_threshold` | 8 |
+| `partitions` | 200 |
 
-### 1. Consistent Sub-212 ms Recovery Latency Across All Scale Points
-* **Observed Data**: Total recovery latency for Dynamic Merkle recovery stays strictly between **162.68 ms and 211.61 ms** across all scale points from 1M to 50M tuples.
-* **Comparison with Static**: Static recovery latency scales from 958.71 ms at 1M up to 1,317.54 ms at 50M (and suffers N/A write failures at 20M). Dynamic Merkle recovery delivers **5.9x to 7.4x total latency reduction** across the dataset spectrum.
+The maximum routing prefix length is 60 bits. Split and merge logic adapts the
+tree to occupancy. Thresholds are triggers, not a guarantee that every query
+returns at most `split_threshold` rows: queries can cover both tables,
+different topologies, and overlapping ranges. Campaign overrides, including
+fanout 32, must be read from their effective configuration.
 
-### 2. Bounded Repair Write Latency
-* **Observed Data**: `repair_write_ms` is tightly bounded between **68.21 ms and 90.53 ms** for 300 updates (~0.23 ms to ~0.30 ms per repaired tuple).
-* **Root Cause**: Optimized dynamic catalog indexing and direct Merkle node updates minimize PostgreSQL B-tree write amplification during repair statements, keeping repair write latency flat even as the underlying heap expands from 1M to 50M tuples.
+The current `CREATE INDEX ... USING merkle` options are `fanout`,
+`split_threshold`, `merge_threshold`, and `partitions`. Historical labels such
+as `fanout_f32_l1024` remain in harness configuration, but are not evidence of a
+second fixed-leaf access method or a current `leaves_per_partition` option.
 
-### 3. Repetition Variance & Stability (CV%)
-* **Observed Repetition Data**:
-  * 1M–30M & 50M: CV% ranges between **2.1% and 10.5%**, reflecting excellent run-to-run consistency.
-  * 40M: Shows a warm median of **211.61 ms** with a single repetition outlier (Rep 6: 383.13 ms) resulting in a CV of **24.9%**.
-* **Root Cause**: Intermittent background PostgreSQL WAL buffer management occasionally introduces minor I/O latency on individual repair statements, but warm medians remain stable sub-212 ms across all scales.
+## Transactional maintenance and crash boundary
 
----
+[merkleinsert.c](../src/backend/access/merkle/merkleinsert.c) and
+[nodeModifyTable.c](../src/backend/executor/nodeModifyTable.c) stage insert,
+delete, and update contributions. [merkledelta.c](../src/backend/access/merkle/merkledelta.c)
+keeps transaction/subtransaction delta maps, coalesces contributions, merges
+committed subtransactions, and discards aborted changes.
 
-## Key Mechanistic Insights across Dataset Scales
+`merkle_apply_staged_deltas_synchronously()` applies staged changes while the
+originating transaction is open. Ordinary SQL reaches this through `PRE_COMMIT`.
+The BCDB worker calls it during its apply phase so heap DML and Merkle DML share
+the rollback boundary. The worker marker is temporarily disabled while
+applying actual Merkle-node mutations, preventing those writes from being
+deferred back into the BCDB business write set.
 
-### 1. Bounded $O(1)$ Candidate Fetching and Row Comparison
-* **Static Scaling ($F=32, L=1024$)**: Fixed leaf bucket count forces leaf occupancy to scale linearly with table size $N$ (~4.9 rows/leaf at 1M up to ~244.1 rows/leaf at 50M). Consequently, Static Candidate Fetch latency grows **18.6x** from **11.17 ms** at 1M to **207.47 ms** at 50M, while Static Row Comparison latency grows **11.5x** from **3.21 ms** at 1M to **36.84 ms** at 50M.
-* **Dynamic Boundedness ($F=4$, Split Threshold = 32)**: Dynamic leaf splitting caps mean candidate rows per bad leaf query at **22.8 to 42.4 rows** across all scale points up to 50M tuples. As a result:
-  * **Candidate Fetch Latency**: Strictly bounded between **27.29 ms and 46.56 ms** across the entire 1M to 50M range for Dynamic.
-  * **Row Comparison Latency**: Strictly bounded between **1.15 ms and 2.04 ms** across all scale points for Dynamic.
+[merkleapply.c](../src/backend/access/merkle/merkleapply.c) sorts work by index
+and routing coordinates, resolves leaves through cached routes and dedicated
+catalog indexes, coalesces node updates, updates ancestors, and performs guarded
+split/merge work. Table changes and node changes commit or abort together.
+PostgreSQL WAL and the selected `synchronous_commit`/`fsync` settings govern
+crash durability. Synchronous Merkle maintenance and synchronous WAL flushing
+are separate properties.
 
-### 2. Logarithmic Tree Localisation Scaling
-* **Static Flat Lookup**: Static performs array lookups over fixed partition leaves, maintaining near-constant localisation time (~50.0 to 52.1 ms) across all scale points.
-* **Dynamic Tree Depth Progression ($\log_4$ Fanout)**: C-native array batching and frontier traversal navigate the dynamic tree topology efficiently. Localisation time scales predictably with tree height:
-  * **1M Tuples**: Height 6 (Depth 5) — **44.75 ms**
-  * **3M – 10M Tuples**: Height 7 (Depth 6) — **57.22 ms to 61.08 ms**
-  * **15M – 30M Tuples**: Height 8 (Depth 7) — **63.33 ms to 75.19 ms**
-  * **40M – 50M Tuples**: Height 9 (Depth 8) — **68.14 ms to 75.09 ms**
+The harness sets `enable_merkle_index=on` and
+`merkle_apply_synchronous_direct=on`. In the current backend, staged changes
+always use synchronous apply; the retained GUC does not select an asynchronous
+queue implementation. Root reads with staged uncommitted deltas are rejected.
+Prepared transactions after Merkle updates are also rejected.
 
-### 3. Synchronous Direct Merkle Commit & Transaction Boundaries
-* **Synchronous Direct Mechanics**: Merkle node updates are computed and applied immediately inside the user row-write transaction (`merkle_apply_synchronous_direct=on`).
-* Across all scale points, Repair Write takes **~68.21 ms to 90.53 ms** for 300 row updates (~0.23–0.30 ms per repair statement), folding all synchronous Merkle updates directly into the write phase without any separate metadata apply phase.
+### Retained compatibility surfaces
 
-### 4. Ultra-Fast Post-Repair Confirmation Barrier
-* **Static Confirmation**: Full heap file verification scan scales linearly with database size, increasing **11.9x** from **18.85 ms** at 1M to **223.80 ms** at 50M.
-* **Dynamic Confirmation**: Targeted cryptographic verification fetching and verifying partition root hashes post-repair remains strictly a **~2.71 to 2.93 ms constant** barrier across all scale points up to 50M tuples.
+`merkle_apply_until()` returns its argument; `merkle_recovery_status()` reports
+`READY` with zero sequence fields. These interfaces do not implement a running
+background applier, measure backlog, or independently verify the heap.
 
----
+The [bootstrap schema](../scripts/distributed/sql/raft_apply_ledger_schema.sql)
+still contains apply-state/counter tables and ledger delta columns for schema
+compatibility. It removes the retired local delta table only if empty and
+removes the old zero-argument pending-apply function with dependency checks.
+The active repair path has no `merkle_apply_pending()` drain phase: metadata
+work is included in the repair transaction.
 
-## Detailed Phase Mechanics & Analysis Figures
+## Recovery dataset and lookup indexes
 
-### 1. Total Recovery Latency Overview
+[dataset.py](../scripts/benchmark/recovery/merkle_recovery/dataset.py) creates
+matching schemas, loads data, and builds three indexes per table:
 
-![Total Recovery Latency: Static vs Dynamic](./plots/total_recovery_latency.png)
+1. The `ycsb_key` primary key.
+2. `usertable_merkle_idx`, using the native Merkle access method.
+3. `usertable_merkle_partition_lookup_idx`, a B-tree beginning with
+   `merkle_partition_for_hash(merkle_key_hash(ycsb_key), partitions)` and
+   `merkle_key_hash(ycsb_key)`.
 
-### 2. Phase Breakdown and Composition
+The node tables localise differences; the lookup B-tree retrieves full user
+rows. Setup checks the actual index method and geometry and analyses derived
+tables. Bulk setup and incremental size expansion are available; setup/build
+costs are outside the measured repair interval.
 
-![Phase Timing Composition Comparison](./plots/phase_stacked_composition.png)
+Corruption manifests specify selected keys, leaves, and operations. Supported
+modes are `mixed`, `update-only`, `delete-only`, `insert-only`, and
+`paper-update-only`. Manifests provide reproducibility and validation targets;
+localisation discovers differences by comparing trees.
 
-### 3. Tree Localisation Phase Mechanics
+## Recovery pipeline
 
-![Tree Localisation Latency Comparison](./plots/tree_localisation_comparison.png)
+### 1. Compare roots and localise differing leaves
 
-### 4. Candidate Fetch Phase Mechanics
+[localisation.py](../scripts/benchmark/recovery/merkle_recovery/localisation.py)
+calls `merkle_get_partition_root_hashes()` for both indexes. Only partitions
+with different roots enter the frontier. Coordinates include partition, node
+ID, and prefix length, so equal prefixes in different partitions stay distinct.
 
-![Candidate Fetch Latency Comparison](./plots/candidate_fetch_comparison.png)
+The current fast path generates candidate coordinates in Python, sends arrays
+through `unnest`, and joins the healthy and damaged dedicated node tables in
+one SQL query per frontier batch. It prunes matching branches and continues
+through differing internal nodes. It also handles unsplit partition roots.
+A fallback performs separate queries through the compatibility view.
 
-### 5. Row / Tuple Comparison Phase Mechanics
+`--levels-per-batch` controls how many levels are speculatively fetched per
+round trip; the CLI default is **1**. Larger values trade fewer round trips for
+more candidate nodes. The native descendant helper still exists, but it is not
+the active dedicated-table localisation loop.
 
-![Row Comparison Latency Comparison](./plots/row_comparison_comparison.png)
+Some legacy logical counters increment by two for a healthy/damaged pair even
+when the fast path issued one joined SQL statement. Use profiling call records
+and catalog statistics when interpreting actual statement counts.
 
-### 6. Repair Write Phase Mechanics
+### 2. Fetch candidates and compare rows
 
-![Repair Write Phase Latency Comparison](./plots/repair_write_comparison.png)
+[repair.py](../scripts/benchmark/recovery/merkle_recovery/repair.py) converts
+leaf prefixes to routing-key ranges and fetches full rows from both tables,
+including a partition predicate. Batched array queries use the lookup B-tree;
+planner preflight checks test suitability for the sparse-repair contract.
 
-### 7. Targeted Post-Repair Confirmation Phase Mechanics
+The CLI default is **64 leaf IDs per fetch batch**. Python aligns rows by
+`ycsb_key` and determines missing rows, extra rows, and differing common rows.
+The main runner accumulates repair operations and healthy values across chunks.
+Fetch chunking limits each query's result set; it does not make the total
+accumulated repair state constant in size.
 
-![Targeted Post-Repair Confirmation Latency Comparison](./plots/post_repair_confirmation_comparison.png)
+### 3. Commit repairs and Merkle changes together
 
----
+[run_merkle_recovery_benchmark.py](../scripts/benchmark/recovery/run_merkle_recovery_benchmark.py)
+opens **one explicit `conn.transaction()` for the entire repair write phase**,
+despite the connection otherwise being in autocommit mode. It issues batched
+inserts, `UPDATE ... FROM (VALUES ...)`, and deletes; helper batch sizes default
+to 500 keys. Merkle maintenance runs before this transaction commits.
 
-## Leaf Geometry and Occupancy Scaling (1M to 50M)
+`repair_write_ms` includes the transaction and commit. Finer timers include SQL
+construction, DML wire time, transaction entry, and commit wire time. These are
+nested diagnostics and must not all be added to the outer write timer. The CLI
+default for `--synchronous-commit` is **on**; record overrides when comparing
+campaigns.
 
-![Leaf Occupancy Scaling Comparison](./plots/leaf_occupancy_scaling.png)
+### 4. Confirm affected partitions
 
-| Dataset Size | Static Candidate Rows / Bad Leaf Query ($F=32, L=1024$) | Dynamic Candidate Rows / Bad Leaf Query (Split Threshold = 32) |
-|---:|:---:|:---:|
-| **1M** | **11.92** candidate rows/leaf query (~11.9 rows/leaf) | **38.2** candidate rows/leaf query |
-| **3M** | **29.52** candidate rows/leaf query (~29.5 rows/leaf) | **29.4** candidate rows/leaf query |
-| **5M** | **49.44** candidate rows/leaf query (~49.4 rows/leaf) | **42.4** candidate rows/leaf query |
-| **7M** | **69.89** candidate rows/leaf query (~69.9 rows/leaf) | **27.4** candidate rows/leaf query |
-| **10M** | **98.19** candidate rows/leaf query (~98.2 rows/leaf) | **25.0** candidate rows/leaf query |
-| **15M** | **146.69** candidate rows/leaf query (~146.7 rows/leaf) | **36.7** candidate rows/leaf query |
-| **20M** | **195.20** candidate rows/leaf query (~195.2 rows/leaf) | **37.4** candidate rows/leaf query |
-| **25M** | **244.93** candidate rows/leaf query (~244.9 rows/leaf) | **29.3** candidate rows/leaf query |
-| **30M** | **293.33** candidate rows/leaf query (~293.3 rows/leaf) | **22.8** candidate rows/leaf query |
-| **40M** | **391.07** candidate rows/leaf query (~391.1 rows/leaf) | **25.0** candidate rows/leaf query |
-| **50M** | **486.40** candidate rows/leaf query (~486.4 rows/leaf) | **28.9** candidate rows/leaf query |
+After commit, localisation runs again with the affected partition set. Matching
+roots end the check quickly; remaining differing leaves trigger candidate-row
+comparison. Remaining leaf differences or row mismatches invalidate the run.
+This is targeted confirmation, not a scan of every user row.
 
-*Note: In the PostgreSQL Merkle index engine, dynamic leaf nodes split whenever they exceed `split_threshold = 32`. Across the entire 1M to 50M scale sweep, dynamic leaf occupancy remains strictly bounded between 22.8 and 42.4 candidate rows per query. For Static (F32 / L1024, 204,800 fixed leaves), recovery range queries span ~2 adjacent leaf buckets per bad leaf, causing candidate fetched rows to scale linearly from 11.92 to 486.40.*
+### 5. Run the selected audit
 
----
+The CLI defaults to `--audit-mode full`.
+[verification.py](../scripts/benchmark/recovery/merkle_recovery/verification.py)
+checks both directions of `EXCEPT ALL`, root equality, `merkle_verify()` on both
+tables, and schema/required-index fidelity. This independent full audit is
+outside `restore_repair_ms`.
 
-## Repetition Stability & Contract Proofs for Dynamic
+`--audit-mode skip` retains targeted confirmation and schema checks. Its
+placeholder full-audit fields do not prove that the omitted queries ran;
+inspect `full_audit_skipped` and `audit_validation_skipped`. Similarly, a
+`READY` compatibility response alone does not prove table equality.
 
-### 1. Contract Verification Summary (Artifact `...0083f5`)
-* **Total Benchmark Runs**: 110 (11 scale points $\times$ 10 repetitions: r0..r9)
-* **Valid Runs**: 110 / 110 (100% contract compliance)
-* **Pending Rows After Corruption**: `legacy_merkle_pending_rows_after_corruption = 0` across all 110 runs
-* **Pending Rows After Repair**: `legacy_merkle_pending_rows_after_repair = 0` across all 110 runs
-* **Synchronous Direct Directives**: `enable_merkle_index=on`, `merkle_apply_synchronous_direct=on`, `synchronous_commit=on`
+## Timing and evidence contract
 
-### 2. Repetition Timing Distribution (r0 to r9)
+| Measurement | Boundary |
+|---|---|
+| `tree_localisation_ms` | Root comparison and differing-node descent |
+| `candidate_row_fetch_ms` | Candidate SQL and row transfer |
+| `row_comparison_ms` | Python key/value comparison |
+| `repair_write_ms` | Batched repair transaction, Merkle maintenance, and commit |
+| `targeted_post_repair_confirmation_ms` | Post-commit affected-partition check |
+| `restore_repair_ms` | Sparse recovery interval, excluding localisation statistics probes |
+| `audit_validation_ms` | Separate full-audit wrapper when enabled |
+| `end_to_end_observed_ms` | Wider run interval, including observability and audit overhead |
 
-| Scale Point | Rep 0 (ms) | Rep 1 (ms) | Rep 2 (ms) | Rep 3 (ms) | Rep 4 (ms) | Rep 5 (ms) | Rep 6 (ms) | Rep 7 (ms) | Rep 8 (ms) | Rep 9 (ms) | Warm Median (r1..r9) | CV% |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| **1M** | 159.77 | 161.18 | 183.42 | 158.86 | 167.93 | 162.68 | 170.51 | 165.50 | 159.84 | 156.33 | **162.68 ms** | `4.8%` |
-| **3M** | 162.16 | 174.81 | 173.82 | 172.74 | 173.39 | 173.16 | 184.69 | 173.96 | 164.48 | 183.60 | **173.82 ms** | `4.0%` |
-| **5M** | 176.76 | 180.09 | 155.96 | 164.97 | 223.87 | 187.69 | 189.07 | 188.86 | 189.65 | 187.85 | **187.85 ms** | `9.8%` |
-| **7M** | 175.03 | 172.97 | 174.68 | 195.53 | 177.99 | 174.83 | 187.37 | 170.75 | 175.45 | 174.94 | **174.94 ms** | `4.3%` |
-| **10M** | 173.37 | 174.15 | 175.42 | 171.63 | 174.58 | 192.27 | 177.06 | 188.71 | 177.23 | 175.44 | **175.44 ms** | `3.8%` |
-| **15M** | 206.59 | 208.82 | 217.87 | 205.32 | 205.78 | 213.89 | 207.21 | 206.97 | 204.42 | 205.83 | **206.97 ms** | `2.1%` |
-| **20M** | 189.90 | 191.09 | 204.82 | 191.75 | 194.31 | 193.84 | 193.23 | 190.75 | 191.64 | 205.12 | **193.23 ms** | `2.9%` |
-| **25M** | 208.33 | 212.46 | 166.03 | 162.93 | 166.20 | 171.01 | 166.79 | 167.63 | 166.40 | 168.57 | **166.79 ms** | `10.5%` |
-| **30M** | 187.86 | 199.92 | 186.20 | 186.68 | 187.30 | 187.10 | 186.25 | 193.16 | 186.64 | 199.78 | **187.10 ms** | `2.9%` |
-| **40M** | 201.16 | 214.76 | 200.88 | 221.37 | 197.63 | 211.61 | 383.13 | 210.32 | 198.35 | 213.37 | **211.61 ms** | `24.9%` |
-| **50M** | 197.04 | 213.28 | 196.88 | 194.81 | 197.98 | 197.46 | 170.86 | 165.88 | 163.03 | 169.47 | **194.81 ms** | `9.4%` |
+Recovery observability and orchestration have separate phase fields. There is
+no independently timed deferred Merkle apply stage.
 
----
+[db.py](../scripts/benchmark/recovery/merkle_recovery/db.py) reads native node
+index statistics around localisation. PostgreSQL statistics publish
+asynchronously, so the harness uses a temporary-table counter barrier with an
+idle autocommit connection and `track_counts=on`. Probe cost and its flush-wait
+subset are recorded separately; localisation probes and recovery scan-counter
+snapshots are outside the sparse-recovery timer. Catalog counters can include
+other sessions, so attribution requires an isolated benchmark database.
 
-## Architectural Summary & Strategic Recommendations
+Acceptance checks include planner suitability, absence of recovery-time user
+table sequential scans, sparse candidate counts, targeted confirmation, and
+the requested audit. Historical zero counters or skipped-audit placeholders do
+not replace these checks. Preserve effective geometry, manifests, source/build
+provenance, PostgreSQL settings, per-run validity, profiling mode, and warmup
+policy alongside timings.
 
-1. **Definitive Bounded Candidate Retrieval**: Dynamic Merkle indexing fully solves the candidate row retrieval bottleneck of fixed static leaves. Candidate fetch latency remains constant at **~27–47 ms** and tuple comparison remains constant at **~1.15–2.04 ms** across all 50 million tuples.
-2. **Synchronous Direct Integrity**: Direct synchronous Merkle updates guarantee zero stale Merkle state at transaction commit. `legacy_merkle_pending_rows_after_corruption` and `legacy_merkle_pending_rows_after_repair` are strictly 0.
-3. **Flat Sub-212 ms Recovery Scale**: Total recovery latency stays bounded under **212 ms** across all 11 scale points from 1M to 50M tuples, delivering a **5.9x to 7.4x speedup** over Static recovery.
+Dynamic splitting reduces the candidate set when damage is sparse. Actual cost
+still depends on tree depth, fanout, damaged partitions/leaves, candidate rows,
+round trips, topology changes, and commit I/O. Neither constant-time recovery
+nor a fixed latency ceiling follows from the implementation.
+
+## Replicated restart recovery
+
+Safe-ledger execution adds `(epoch, raft_log_index, item_ordinal)` identity and
+durable terminal results in `ariabc_internal.raft_apply_item`. The backend
+finalises successful or deterministic-error outcomes and can replay stored
+terminal results when Raft redelivers an entry. Current successful finalisation
+stores no deferred Merkle delta blob; Merkle writes belong to the user
+transaction.
+
+Safe startup validates schema version 4, epoch identity, and terminal digests;
+it invokes legacy-index rebuild/verification and checks the retained status
+interface. It requires retained logs and currently starts the applied prefix
+at zero for Raft redelivery and result replay. It does not skip directly to a
+maximum ledger index. NuRaft snapshots do not contain PostgreSQL data, and
+durable log compaction is unsupported.
+
+These restart mechanics are distinct from choosing a healthy table and issuing
+sparse repair DML. The latter is implemented by the harness, with no automatic
+online donor-selection, workload-quiescence, or distributed repair coordinator.
+
+## Source and validation entry points
+
+- [Native index build](../src/backend/access/merkle/merklebuild.c),
+  [hashing/storage](../src/backend/access/merkle/merkleutil.c), and
+  [verification](../src/backend/access/merkle/merkleverify.c).
+- [BCDB worker apply](../src/backend/bcdb/worker.c) and
+  [terminal ledger](../src/backend/bcdb/raft_apply_ledger.c).
+- [Recovery harness tests](../scripts/benchmark/recovery/tests/) and
+  [native Merkle regression cases](../src/test/regress/sql/merkle_functional_index.sql).
+- [Safe-ledger recovery matrix](../scripts/distributed/run_safe_ledger_recovery_matrix.sh)
+  and [replica consistency check](../scripts/distributed/test_merkle_consistency.sh).
+
+This refresh is based on source inspection; it does not claim a new benchmark
+or crash-test result.
