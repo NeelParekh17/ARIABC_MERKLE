@@ -14,6 +14,8 @@ ALLOWED = {
     "config.json",
     "environment.txt",
     "host_info.json",
+    "host_samples.jsonl",
+    "series_order.json",
     "python_environment.json",
     "progress.json",
     "progress.jsonl",

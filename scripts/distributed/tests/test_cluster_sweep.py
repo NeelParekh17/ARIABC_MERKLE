@@ -46,7 +46,7 @@ class ClusterEvidenceTest(unittest.TestCase):
 
     def test_accept_requires_all_workload_audits(self):
         self.write("runner.log", "usertable_small consistency: PASS\n")
-        self.write("gateway_test.log", "divergence_count=0\nPROFILE_GATEWAY permanent_failures=0\n")
+        self.write("gateway_test.log", "divergence_count=0\nPROFILE_GATEWAY permanent_failures=0 deterministic_error_count=0 nonterminal_failure_count=0\n")
         self.write("run_summary.env", "all3_audit_valid=yes\nasync_all3_verified_count=19999\n"
                    "tps_majority_visible=2000\npermanent_failures=0\ndivergence_count=0\n")
         with self.assertRaisesRegex(RuntimeError, "count does not match"):
@@ -56,7 +56,7 @@ class ClusterEvidenceTest(unittest.TestCase):
 
     def test_resume_rejects_changed_buffers_and_legacy_results(self):
         self.write("workload.sql", "SELECT 1;\n")
-        args = SimpleNamespace(db_shared_buffers="32MB")
+        args = SimpleNamespace(db_shared_buffers="32MB", trials=5, cold_runs=True, order_seed=42)
         campaign_contract(self.root, self.root, args, ["workload.sql"], [1], ["cluster"])
         args.db_shared_buffers = "64MB"
         with self.assertRaisesRegex(RuntimeError, "settings changed"):

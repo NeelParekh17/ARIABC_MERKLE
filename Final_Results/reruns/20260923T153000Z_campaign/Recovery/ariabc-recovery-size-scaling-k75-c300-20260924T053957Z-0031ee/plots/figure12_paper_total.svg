@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450.0" y="25" text-anchor="middle" font-family="sans-serif" font-size="18">Figure 12-style paper total</text>
+<line x1="80" y1="45" x2="80" y2="440" stroke="#222"/>
+<line x1="80" y1="440" x2="870" y2="440" stroke="#222"/>
+<text x="450.0" y="500" text-anchor="middle" font-family="sans-serif" font-size="13">tuple_count</text>
+<text x="18" y="260.0" text-anchor="middle" transform="rotate(-90 18 260.0)" font-family="sans-serif" font-size="13">median ms</text>
+<line x1="76" y1="440.0" x2="80" y2="440.0" stroke="#222"/>
+<text x="72" y="444.0" text-anchor="end" font-family="sans-serif" font-size="11">0</text>
+<line x1="76" y1="361.0" x2="80" y2="361.0" stroke="#222"/>
+<text x="72" y="365.0" text-anchor="end" font-family="sans-serif" font-size="11">53</text>
+<line x1="76" y1="282.0" x2="80" y2="282.0" stroke="#222"/>
+<text x="72" y="286.0" text-anchor="end" font-family="sans-serif" font-size="11">106</text>
+<line x1="76" y1="203.0" x2="80" y2="203.0" stroke="#222"/>
+<text x="72" y="207.0" text-anchor="end" font-family="sans-serif" font-size="11">159</text>
+<line x1="76" y1="124.0" x2="80" y2="124.0" stroke="#222"/>
+<text x="72" y="128.0" text-anchor="end" font-family="sans-serif" font-size="11">213</text>
+<line x1="76" y1="45.0" x2="80" y2="45.0" stroke="#222"/>
+<text x="72" y="49.0" text-anchor="end" font-family="sans-serif" font-size="11">266</text>
+<line x1="115.9" y1="440" x2="115.9" y2="444" stroke="#222"/>
+<text x="115.9" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">1000000</text>
+<line x1="187.7" y1="440" x2="187.7" y2="444" stroke="#222"/>
+<text x="187.7" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">3000000</text>
+<line x1="259.5" y1="440" x2="259.5" y2="444" stroke="#222"/>
+<text x="259.5" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">5000000</text>
+<line x1="331.4" y1="440" x2="331.4" y2="444" stroke="#222"/>
+<text x="331.4" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">7000000</text>
+<line x1="403.2" y1="440" x2="403.2" y2="444" stroke="#222"/>
+<text x="403.2" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">10000000</text>
+<line x1="475.0" y1="440" x2="475.0" y2="444" stroke="#222"/>
+<text x="475.0" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">15000000</text>
+<line x1="546.8" y1="440" x2="546.8" y2="444" stroke="#222"/>
+<text x="546.8" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">20000000</text>
+<line x1="618.6" y1="440" x2="618.6" y2="444" stroke="#222"/>
+<text x="618.6" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">25000000</text>
+<line x1="690.5" y1="440" x2="690.5" y2="444" stroke="#222"/>
+<text x="690.5" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">30000000</text>
+<line x1="762.3" y1="440" x2="762.3" y2="444" stroke="#222"/>
+<text x="762.3" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">40000000</text>
+<line x1="834.1" y1="440" x2="834.1" y2="444" stroke="#222"/>
+<text x="834.1" y="462" text-anchor="middle" font-family="sans-serif" font-size="11">50000000</text>
+<rect x="90.8" y="185.1" width="49.3" height="254.9" fill="#1f77b4"/>
+<rect x="162.6" y="158.2" width="49.3" height="281.8" fill="#1f77b4"/>
+<rect x="234.4" y="115.4" width="49.3" height="324.6" fill="#1f77b4"/>
+<rect x="306.2" y="100.3" width="49.3" height="339.7" fill="#1f77b4"/>
+<rect x="378.0" y="91.7" width="49.3" height="348.3" fill="#1f77b4"/>
+<rect x="449.9" y="82.7" width="49.3" height="357.3" fill="#1f77b4"/>
+<rect x="521.7" y="95.9" width="49.3" height="344.1" fill="#1f77b4"/>
+<rect x="593.5" y="87.7" width="49.3" height="352.3" fill="#1f77b4"/>
+<rect x="665.3" y="80.9" width="49.3" height="359.1" fill="#1f77b4"/>
+<rect x="737.1" y="95.3" width="49.3" height="344.7" fill="#1f77b4"/>
+<rect x="809.0" y="90.5" width="49.3" height="349.5" fill="#1f77b4"/>
+<rect x="90" y="53" width="12" height="12" fill="#1f77b4"/>
+<text x="108" y="63" font-family="sans-serif" font-size="12">merkle</text>
+</svg>

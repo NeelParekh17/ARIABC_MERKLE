@@ -269,6 +269,9 @@ def _create_merkle_am_index(conn, schema: str, split_threshold: int = 32, merge_
             """,
         )
         print(f"  [index] CREATE INDEX USING merkle on {schema} took {time.perf_counter()-t_start:.2f}s", flush=True)
+        # Geometry reads the compatibility view; refresh it before the first
+        # verification on a fresh database and after each per-index table change.
+        sync_merkle_node_view(conn)
         _verify_merkle_index(conn, schema, fanout, split_threshold, merge_threshold, partitions)
     finally:
         execute(conn, "SET synchronous_commit = on")

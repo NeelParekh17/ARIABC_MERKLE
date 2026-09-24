@@ -9,6 +9,7 @@ import time
 import uuid
 import re
 
+from benchmark_contract import source_hashes, VERSION
 from summarize_raft_profile import collect_csv_row, read_env_file
 
 
@@ -52,7 +53,10 @@ def campaign_contract(repo, out, args, workloads, workers, modes):
                 source_hash.update(str(path.relative_to(repo)).encode())
                 source_hash.update(path.read_bytes())
     contract = {
-        "version": 1, "shared_buffers": args.db_shared_buffers,
+        "version": VERSION, "shared_buffers": args.db_shared_buffers,
+        "harness_sha256": source_hashes(repo),
+        "trials": args.trials, "cold_runs": args.cold_runs, "order_seed": args.order_seed,
+        "tpcc": {k: v for k, v in vars(args).items() if k.startswith("tpcc_") or k == "warehouses"},
         "source_sha256": source_hash.hexdigest(),
         "workers": workers, "modes": modes,
         "workloads": {wl: hashlib.sha256((repo / wl).read_bytes()).hexdigest()
@@ -121,11 +125,13 @@ def accept_cluster_artifact(root, expected_queries):
     # passing throughput point, even when error payloads are canonicalized.
     gateway = (root / "gateway_test.log").read_text(errors="replace")
     profiles = [line for line in gateway.splitlines() if line.startswith("PROFILE_GATEWAY ")]
+    if not profiles:
+        raise RuntimeError("Missing terminal gateway profile")
     if profiles:
         for key in ("deterministic_error_count", "nonterminal_failure_count"):
             value = re.search(r"\b" + key + r"=(\d+)", profiles[-1])
-            if value and int(value[1]) != 0:
-                raise RuntimeError(f"{key}={value[1]}")
+            if not value or int(value[1]) != 0:
+                raise RuntimeError(f"Missing or nonzero {key}")
     for log in root.glob("postgres_node*.log"):
         if re.search(r"ERROR:.*(?:merkle_|Merkle)", log.read_text(errors="replace")):
             raise RuntimeError(f"Merkle execution error in {log.name}")
@@ -144,8 +150,13 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
     meta_path = attempts / (run_id + ".json")
     env = os.environ.copy()
     env.update({
-        "CLUSTER_RUN_ID": run_id, "FORCE_BUILD": "0", "SKIP_RDKAFKA_SETUP": "1",
-        "SKIP_SYNC": os.environ.get("SKIP_SYNC", "1"), "SKIP_BUILD": os.environ.get("SKIP_BUILD", "1"),
+        "BENCH_COLD_CACHE": "1" if args.cold_runs else "0",
+        "GATEWAY_HOST": args.gateway_host, "GATEWAY_USER": args.gateway_user, "GATEWAY_REPO": args.gateway_repo,
+        "LOCAL_INSTALL_DIR": os.environ.get("LOCAL_INSTALL_DIR", "/home/neel/ARIABC/install"),
+        "PATH": f"{Path.home()}/bin:{Path.home()}/.local/bin:{os.environ.get('PATH', '')}",
+        "CLUSTER_RUN_ID": run_id, "FORCE_BUILD": os.environ.get("FORCE_BUILD", "0"), "SKIP_RDKAFKA_SETUP": "1",
+        "SKIP_SYNC": os.environ.get("SKIP_SYNC", "0" if run_index == 0 else "1"),
+        "SKIP_BUILD": os.environ.get("SKIP_BUILD", "0" if run_index == 0 else "1"),
         "KAFKA_FAST_RESET": "1", "DUMP_VERIFY_CSV": "0",
         "ARIABC_PREFERRED_LEADER_ID": "1", "ARIABC_RAFT_DURABLE_ASYNC_FLUSH": "1",
         "ARIABC_RAFT_STREAM_GAP": "512", "ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER": "1",
@@ -160,9 +171,19 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
         "GATEWAY_STALL_WATCHDOG": "1", "GATEWAY_STALL_POLL_SECONDS": "5",
         "GATEWAY_STALL_MAX_CYCLES": "12",
     })
+    # Versioned workload files may live in .bench_tmp, excluded from workspace
+    # synchronization. Upload the exact bytes independently of --skip-sync.
+    digest = hashlib.sha256((repo / workload).read_bytes()).hexdigest()
+    remote_workload = "/tmp/ariabc_cluster_" + digest + ".sql"
+    subprocess.run(["scp", "-o", "BatchMode=yes", str(repo / workload),
+                    f"{args.gateway_user}@{args.gateway_host}:{remote_workload}"], check=True, timeout=60)
+    for name in ("run_4node_raft_cluster.sh", "benchmark_cache.py", "source_fingerprint.py"):
+        subprocess.run(["scp", "-o", "BatchMode=yes", str(repo / "scripts/distributed" / name),
+                        f"{args.gateway_user}@{args.gateway_host}:{args.gateway_repo}/scripts/distributed/{name}"], check=True, timeout=60)
+    metadata["workload_sha256"] = digest
     gw_workers = str(os.environ.get("DET_CLIENT_WORKERS", "96"))
     command = [str(repo / "scripts/distributed/run_4node_raft_cluster.sh"),
-               "--workload", str(repo / workload), "--db-shared-buffers", args.db_shared_buffers,
+               "--workload", remote_workload, "--db-shared-buffers", args.db_shared_buffers,
                "--ordering-mode", "raft-kafka", "--enable-merkle-index", "1",
                "--raft-apply-ledger-mode", "off", "--threads", gw_workers,
                "--det-client-workers", gw_workers, "--det-client-inflight", "16",
@@ -173,7 +194,11 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
                "--raft-ordering-policy", "leader-assigned", "--raft-ordered-batch-append", "1",
                "--raft-ordered-batch-target-entries", "64", "--raft-ordered-batch-linger-us", "1000",
                "--raft-ordered-coalesce-log", "1", "--kafka-completion-mode", "majority_async_all3",
-               "--det-window", "65536", "--skip-sync", "--skip-build"]
+               "--det-window", "65536"]
+    if env["SKIP_SYNC"] == "1":
+        command.append("--skip-sync")
+    if env["SKIP_BUILD"] == "1":
+        command.append("--skip-build")
     if not restart:
         command.append("--skip-pg-restart")
     metadata["command"] = command
@@ -197,7 +222,20 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
         provenance = read_env_file(root / "run_meta.env")
         if provenance.get("db_shared_buffers") != args.db_shared_buffers:
             raise RuntimeError("run artifact does not confirm requested shared_buffers")
-        tps = float(metrics["tps"])
+        majority_tps = float(metrics["tps"])
+        gateway = (root / "gateway_test.log").read_text()
+        drains = re.findall(r"^\s*overall wall time including drains \(millisec\) = (\d+)\s*$", gateway, re.M)
+        if not drains or int(drains[-1]) <= 0:
+            raise RuntimeError("Missing all-three drained wall time")
+        if args.cold_runs:
+            cache_logs = list(root.glob("cache_node*.log"))
+            if len(cache_logs) != 3 or any('"policy": "stopped_pg_fadvise_verified_mincore"' not in p.read_text() for p in cache_logs):
+                raise RuntimeError("Missing verified cold-cache preparation on all three replicas")
+        all3_wall_ms = int(drains[-1])
+        all3_tps = count * 1000.0 / all3_wall_ms
+        tps = majority_tps
+        metadata.update(majority_tps=majority_tps, all3_tps=all3_tps,
+                        timing="majority_visible_completion", all3_wall_ms=all3_wall_ms)
         result = dict(mode="cluster", workload=Path(workload).name, server_workers=workers,
                       bcdb_workers=workers, pool_size=workers, total_queries=count,
                       wall_time_ms=round(count / tps * 1000, 1), tps=tps,

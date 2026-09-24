@@ -9,7 +9,7 @@ from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from .config import ALL_COLUMNS, FIELDS, LEAF_LOOKUP_INDEXES, leaf_key as leaf_key_fn
-from .db import execute, scalar
+from .db import execute, scalar, wait_for_stats
 from .profiling import ProfileCollector, record_call, parse_json_plan
 
 LEAF_LOOKUP_PLAN_INDEXES = (
@@ -268,6 +268,7 @@ def lookup_explain_plan_json(conn, schema: str, leaf_key: tuple[bytes, int]) -> 
 # ── seq-scan counters ────────────────────────────────────────────────────────
 
 def seq_scan_snapshot(conn) -> dict[str, int]:
+    wait_for_stats(conn)
     execute(conn, "SELECT pg_stat_clear_snapshot()")
     rows = execute(
         conn,
@@ -477,8 +478,8 @@ def repair_leaf(
         key_start = time.perf_counter_ns()
         hkeys = set(hrows)
         dkeys = set(drows)
-        inserts = sorted(hkeys - dkeys)   
-        deletes = sorted(dkeys - hkeys)   
+        inserts = sorted(hkeys - dkeys)
+        deletes = sorted(dkeys - hkeys)
         common_keys = sorted(hkeys & dkeys)
         if profiler is not None and profiler.enabled:
             profiler.record(

@@ -375,18 +375,25 @@ get_index_key_expr_str(Oid index_oid)
 	Oid argtypes[1] = {OIDOID};
 	Datum values[1] = {ObjectIdGetDatum(index_oid)};
 	char *expr_str = NULL;
+	int16 natts = 1;
 
 	if (plans->key_expr_str != NULL)
 		return pstrdup(plans->key_expr_str);
 
 	spi_rc = SPI_execute_with_args(
-		"SELECT pg_catalog.pg_get_indexdef($1, 1, true)",
+		"SELECT (SELECT indnatts FROM pg_catalog.pg_index WHERE indexrelid = $1) AS natts, "
+		"       string_agg(pg_catalog.pg_get_indexdef($1, attnum, true), ', ' ORDER BY attnum) AS cols "
+		"  FROM generate_series(1, (SELECT indnatts FROM pg_catalog.pg_index WHERE indexrelid = $1)) AS attnum "
+		" GROUP BY 1",
 		1, argtypes, values, NULL, true, 1);
 
 	if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 	{
 		bool isnull;
-		Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+		Datum d_natts = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+		if (!isnull)
+			natts = DatumGetInt16(d_natts);
+		Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull);
 		if (!isnull)
 			expr_str = TextDatumGetCString(d);
 		SPI_freetuptable(SPI_tuptable);
@@ -397,9 +404,10 @@ get_index_key_expr_str(Oid index_oid)
 
 	if (strstr(expr_str, "merkle_key_hash") == NULL)
 	{
-		char *buf = palloc(strlen(expr_str) + 30);
-		sprintf(buf, "merkle_key_hash(%s)", expr_str);
-		expr_str = buf;
+		if (natts > 1)
+			expr_str = psprintf("merkle_key_hash(ROW(%s))", expr_str);
+		else
+			expr_str = psprintf("merkle_key_hash(%s)", expr_str);
 	}
 
 	plans->key_expr_str = strdup(expr_str);

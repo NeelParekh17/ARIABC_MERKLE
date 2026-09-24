@@ -1,0 +1,23 @@
+{
+  "cpu": "x86_64",
+  "filesystem": {
+    "block_size": 4096,
+    "blocks": 480238371,
+    "blocks_available": 299848176,
+    "blocks_free": 319492375,
+    "bytes_free": 1228178128896,
+    "bytes_total": 1967056367616,
+    "fragment_size": 4096,
+    "path": "/home/protectdr/merkle_recovery_runs/runs/ariabc-recovery-size-scaling-k75-c300-20260922T013346Z-00aaa3"
+  },
+  "hostname": "user-MZ73-LM0-000",
+  "kernel": "7.0.0-29-generic",
+  "memory": {
+    "mem_total_kib": 263520620
+  },
+  "platform": "Linux-7.0.0-29-generic-x86_64-with-glibc2.39",
+  "psycopg_version": "3.3.3",
+  "python_executable": "/usr/bin/python3",
+  "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "timestamp_utc": "2026-09-22T05:56:30.781339Z"
+}

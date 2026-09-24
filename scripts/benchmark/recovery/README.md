@@ -6,6 +6,37 @@ It supports both static and **native Dynamic Merkle Index** configurations, benc
 
 ---
 
+## Recovery statistics
+
+`localisation_index_stats.csv` records before/after deltas for the native
+`merkle_node` catalog indexes. The SQL binds the `merkle_node_%` pattern as a
+value: a literal `%` inside a parameterized Psycopg query is interpreted as a
+placeholder, which previously prevented all index statistics from being read.
+Historical files affected by that error cannot be backfilled from their logs;
+rerun the campaign to collect these counters.
+
+PostgreSQL 13 publishes statistics asynchronously. Each measurement boundary
+now waits until a private temporary table's scan counter confirms that the
+benchmark backend has published its work. This also keeps setup and full-audit
+heap scans out of subsequent recovery counters. The barrier requires
+`track_counts=on` and an idle autocommit connection, and fails if publication
+cannot be confirmed within ten seconds. Run in an isolated benchmark database:
+the underlying catalog counters include activity from other sessions.
+
+Index probe and publication waits are recorded in `localisation_stats_probe_ms`
+and `localisation_stats_flush_wait_ms`. Those waits and the recovery scan-counter
+snapshots are outside `restore_repair_ms`; end-to-end time includes them. The
+full-audit wrapper also includes its scan-counter waits.
+
+The integration regression tests require a disposable PostgreSQL database:
+
+```bash
+./.venv/bin/python3 -m pytest -q \
+  scripts/benchmark/recovery/tests/test_index_stats.py \
+  scripts/benchmark/recovery/tests/test_profiling_contract.py \
+  --dsn 'host=127.0.0.1 port=55491 dbname=postgres user=postgres'
+```
+
 ## 🏗️ Architecture & Recovery Phases
 
 The benchmark operates using two side-by-side database schemas in a single PostgreSQL instance:

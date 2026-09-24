@@ -184,7 +184,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
   )
 
   for var in \
-    FORCE_BUILD \
+    FORCE_BUILD BENCH_COLD_CACHE \
     SKIP_SYNC SKIP_BUILD SKIP_KAFKA SKIP_CLEANUP \
     SKIP_RDKAFKA_SETUP SKIP_RESTORE SKIP_POST_VERIFY \
     ENABLE_MERKLE_INDEX \
@@ -261,7 +261,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
   trap cancel_delegated_run INT TERM HUP
   ssh "$GATEWAY_USER@$GATEWAY_HOST" \
     "export PATH=\$HOME/bin:\$PATH && cd '$GATEWAY_REPO' && env $quoted_env \
-     setsid ./scripts/distributed/run_4node_raft_cluster.sh $quoted_args" \
+     setsid --wait ./scripts/distributed/run_4node_raft_cluster.sh $quoted_args" \
     || ssh_exit_code=$?
 
   ssh_exit_code=${ssh_exit_code:-0}
@@ -1811,27 +1811,23 @@ build_raft_members() {
 #   Outputs a SHA256 string representing the source tree state.
 # ===========================================================================
 _compute_src_hash() {
-  # Hash C/C++ sources + key header + ring capacity value
-  {
-    find "$REPO_ROOT/src" "$REPO_ROOT/ariabc_pg" \
-      \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
-      -not -path '*/build/*' -not -path '*/.git/*' \
-      -exec sha256sum {} \; 2>/dev/null | sort
-    echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
-  } | sha256sum | awk '{print $1}'
+  # The cache and provenance checks must identify the same portable inputs.
+  _compute_src_fingerprint
 }
 
 _compute_src_fingerprint() {
-  (
-    cd "$REPO_ROOT"
-    {
-      find src ariabc_pg \
-        \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) \
-        -not -path '*/build/*' -not -path '*/.git/*' \
-        -exec sha256sum {} \; 2>/dev/null | sort
-      echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"
-    } | sha256sum | awk '{print $1}'
-  )
+  python3 "$REPO_ROOT/scripts/distributed/source_fingerprint.py" \
+    --repo "$REPO_ROOT" --ring-capacity "$RESULT_RING_CAPACITY"
+}
+
+verify_build_manifest() {
+  local binary="$1" expected_source="$2"
+  local manifest="${binary}.manifest" recorded_sha recorded_source actual_sha
+  [[ -x "$binary" && -f "$manifest" ]] || return 1
+  recorded_sha="$(sed -n 's/^binary_sha256=//p' "$manifest")"
+  recorded_source="$(sed -n 's/^source_fingerprint=//p' "$manifest")"
+  actual_sha="$(sha256sum "$binary" | awk '{print $1}')" || return 1
+  [[ "$recorded_sha" == "$actual_sha" && "$recorded_source" == "$expected_source" ]]
 }
 
 [[ "$DB_SHARED_BUFFERS" =~ ^[1-9][0-9]*(kB|MB|GB)$ ]] || die "Invalid --db-shared-buffers: $DB_SHARED_BUFFERS"
@@ -1928,6 +1924,7 @@ on_signal() {
   trap '' INT TERM HUP
   cleanup_all
   # Only the benchmark data directories and configured AriaBC client ports.
+  local -a cancel_pids=()
   for idx in "${!NODE_IDS[@]}"; do
     node_ssh "$idx" "
       fuser -k -TERM ${NODE_CLIENT_PORTS[$idx]}/tcp $RAFT_PORT/tcp >/dev/null 2>&1 || true
@@ -1936,8 +1933,11 @@ on_signal() {
         '$REMOTE_INSTALL_DIR/bin/pg_ctl' -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' -m fast -w -t 20 stop
       fi
     " > "$LOG_DIR/cancel_node${NODE_IDS[$idx]}.log" 2>&1 &
+    cancel_pids+=("$!")
   done
-  wait || true
+  for cancel_pid in "${cancel_pids[@]}"; do
+    wait "$cancel_pid" 2>/dev/null || true
+  done
   printf 'exit_code=130\n' >> "$LOG_DIR/run_meta.env"
   trap - EXIT
   exit 130
@@ -2130,12 +2130,23 @@ mkdir -p "$BUILD_STAMP_DIR"
 
 
 if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
+  # Normalize the requested compile-time constant before computing cache keys.
+  local_globals="$REPO_ROOT/src/include/bcdb/globals.h"
+  [[ -f "$local_globals" ]] || die "missing local globals header: $local_globals"
+  current_ring_capacity="$(sed -n -E 's/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+([0-9]+).*/\1/p' "$local_globals" | head -n 1)"
+  if [[ "$current_ring_capacity" != "$RESULT_RING_CAPACITY" ]]; then
+    sed -i -E "s/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+[0-9]+/#define BCDB_RESULT_RING_CAPACITY $RESULT_RING_CAPACITY/" "$local_globals"
+  fi
   log "  Computing source hash to check if rebuild is needed..."
   _current_hash="$(_compute_src_hash)"
   _stamp_hash=""
   [[ -f "$BUILD_STAMP_FILE" ]] && _stamp_hash="$(cat "$BUILD_STAMP_FILE" 2>/dev/null || true)"
-  if [[ "${FORCE_BUILD:-0}" -eq 1 || "$_current_hash" != "$_stamp_hash" ]]; then
-    log "  Source changed, first run, or FORCE_BUILD=1 — will rebuild (hash: $(echo "$_current_hash" | head -c 12)...)"
+  _local_manifests_valid=1
+  for bin_path in "$LOCAL_BIN/ariabc_pg_gateway" "$LOCAL_BIN/ariabc_pg_server" "$LOCAL_INSTALL_DIR/bin/postgres"; do
+    verify_build_manifest "$bin_path" "$_current_hash" || _local_manifests_valid=0
+  done
+  if [[ "${FORCE_BUILD:-0}" -eq 1 || "$_current_hash" != "$_stamp_hash" || "$_local_manifests_valid" -ne 1 ]]; then
+    log "  Source/build manifest changed, first run, or FORCE_BUILD=1 — will rebuild (hash: $(echo "$_current_hash" | head -c 12)...)"
     _BUILD_HASH_TO_SAVE="$_current_hash"
   else
     log "  Source hash unchanged ($(echo "$_current_hash" | head -c 12)...) — skipping Phases 0.8 + 1.5 (pass FORCE_BUILD=1 to override)"
@@ -2208,7 +2219,7 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
         bin_sha="$(sha256sum "$bin_path" 2>/dev/null | awk '{print $1}' || echo missing)"
         git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
         git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
-        src_fp="$(cd "$REPO_ROOT" && { find src ariabc_pg \( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \; 2>/dev/null | sort; echo "RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY"; } | sha256sum | awk '{print $1}')"
+        src_fp="$(_compute_src_fingerprint)"
         build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
         {
@@ -2223,8 +2234,8 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
       fi
     done
 
-    # Save build stamp so next run can auto-skip if source unchanged
-    [[ -n "${_BUILD_HASH_TO_SAVE:-}" ]] && echo "$_BUILD_HASH_TO_SAVE" > "$BUILD_STAMP_FILE"
+    # Save the identity actually built, never a pre-cleanup source hash.
+    _compute_src_hash > "$BUILD_STAMP_FILE"
   ) >"$LOCAL_BUILD_LOG" 2>&1 &
   LOCAL_BUILD_PID=$!
   log "  [local] build launched in background (pid $LOCAL_BUILD_PID, log: $LOCAL_BUILD_LOG)"
@@ -2371,6 +2382,7 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
       set -euo pipefail
       echo "[$name] Rebuilding custom PostgreSQL install"
       node_ssh "$idx" "
+        set -e
         chmod +x '$REMOTE_REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh'
         sed -i -E 's/^#define[[:space:]]+BCDB_RESULT_RING_CAPACITY[[:space:]]+[0-9]+/#define BCDB_RESULT_RING_CAPACITY $RESULT_RING_CAPACITY/' '$REMOTE_REPO_ROOT/src/include/bcdb/globals.h'
         bash '$REMOTE_REPO_ROOT/scripts/distributed/ensure_custom_install_from_repo.sh' \
@@ -2499,32 +2511,7 @@ fi
 # enough to trust a benchmark. Record executable identities before measurement.
 # ---------------------------------------------------------------------------
 log "=== Phase 1.6: Source and binary provenance ==="
-# Always recompute and update local manifests atomically
-for bin_path in "$LOCAL_INSTALL_DIR/bin/postgres" "$LOCAL_BIN/ariabc_pg_server" "$LOCAL_BIN/ariabc_pg_gateway"; do
-  if [[ -f "$bin_path" ]]; then
-    dir_path="$(dirname "$bin_path")"
-    bin_name="$(basename "$bin_path")"
-    manifest_path="$dir_path/${bin_name}.manifest"
-    bin_sha="$(sha256sum "$bin_path" 2>/dev/null | awk '{print $1}' || echo missing)"
-    git_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-    git_dirty="$(git -C "$REPO_ROOT" diff --quiet -- src ariabc_pg scripts/distributed 2>/dev/null && echo 0 || echo 1)"
-    src_fp="$local_src_fingerprint"
-    build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    tmp_manifest="${manifest_path}.tmp"
-    {
-      printf 'binary_name=%s\n' "$bin_name"
-      printf 'binary_sha256=%s\n' "$bin_sha"
-      printf 'build_time=%s\n' "$build_time"
-      printf 'git_head=%s\n' "$git_head"
-      printf 'git_dirty=%s\n' "$git_dirty"
-      printf 'source_fingerprint=%s\n' "$src_fp"
-    } > "$tmp_manifest"
-    chmod 644 "$manifest_path" 2>/dev/null || true
-    mv -f "$tmp_manifest" "$manifest_path"
-    chmod 444 "$manifest_path"
-  fi
-done
-
+# Build manifests are written only by build steps, never refreshed by measurement.
 local_gateway_sha="$(sha256sum "$LOCAL_BIN/ariabc_pg_gateway" 2>/dev/null | awk '{print $1}' || echo missing)"
 local_server_sha="$(sha256sum "$LOCAL_BIN/ariabc_pg_server" 2>/dev/null | awk '{print $1}' || echo missing)"
 local_postgres_sha="$(sha256sum "$LOCAL_INSTALL_DIR/bin/postgres" 2>/dev/null | awk '{print $1}' || echo missing)"
@@ -2537,6 +2524,9 @@ log "  local source_fingerprint=$local_src_fingerprint"
 if [[ "$local_gateway_sha" == "missing" || "$local_server_sha" == "missing" ]]; then
   die "local ariabc_pg binaries are missing; cannot prove binary provenance"
 fi
+for bin_path in "$LOCAL_BIN/ariabc_pg_gateway" "$LOCAL_BIN/ariabc_pg_server" "$LOCAL_INSTALL_DIR/bin/postgres"; do
+  verify_build_manifest "$bin_path" "$local_src_fingerprint" || die "build manifest does not match current binary/source: $bin_path; rebuild required"
+done
 
 {
   printf 'local_git_head=%s\n' "$local_git_head"
@@ -2579,12 +2569,18 @@ for idx in "${!NODE_IDS[@]}"; do
 
   (
     node_ssh "$idx" "
+      $(declare -f verify_build_manifest)
+      manifest_ok=1
+      for bin_path in '$srv_bin' '$gw_path' '$REMOTE_INSTALL_DIR/bin/postgres'; do
+        verify_build_manifest \"\$bin_path\" '$local_src_fingerprint' || manifest_ok=0
+      done
+      echo \"build_manifests_valid=\$manifest_ok\"
       git_head=\$(git -C '$REMOTE_REPO_ROOT' rev-parse HEAD 2>/dev/null || echo unknown)
       srv_sha=\$(sha256sum '$srv_bin' 2>/dev/null | awk '{print \$1}' || echo missing)
       gw_sha=\$(sha256sum '$gw_path' 2>/dev/null | awk '{print \$1}' || echo missing)
       pg_sha=\$(sha256sum '$REMOTE_INSTALL_DIR/bin/postgres' 2>/dev/null | awk '{print \$1}' || echo missing)
       synced_src_fp=\$(cat '$REMOTE_REPO_ROOT/.ariabc_synced_source_fingerprint' 2>/dev/null || true)
-        live_src_fp=\$(cd '$REMOTE_REPO_ROOT' && { find src ariabc_pg \\( -name '*.c' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name 'CMakeLists.txt' \\) -not -path '*/build/*' -not -path '*/.git/*' -exec sha256sum {} \\; 2>/dev/null | sort; echo 'RESULT_RING_CAPACITY=$RESULT_RING_CAPACITY'; } | sha256sum | awk '{print \$1}')
+      live_src_fp=\$(python3 '$REMOTE_REPO_ROOT/scripts/distributed/source_fingerprint.py' --repo '$REMOTE_REPO_ROOT' --ring-capacity '$RESULT_RING_CAPACITY')
       src_fp=\"\${synced_src_fp:-\$live_src_fp}\"
       ts=\$(date +%s%3N)
       st=\$(timedatectl status 2>/dev/null | awk -F': ' '/Local time|System clock synchronized|NTP service/ {printf \"%s: %s; \", \$1, \$2}' | tr -s ' ' || true)
@@ -2624,9 +2620,20 @@ for idx in "${!NODE_IDS[@]}"; do
   node_gateway_sha="$(echo "$prov_output" | sed -n 's/^ariabc_pg_gateway_sha256=//p' | tail -1)"
   node_src_fingerprint="$(echo "$prov_output" | sed -n 's/^source_fingerprint=//p' | tail -1)"
 
+  node_live_src_fingerprint="$(echo "$prov_output" | sed -n 's/^live_source_fingerprint=//p' | tail -1)"
+  if [[ "$(echo "$prov_output" | sed -n 's/^build_manifests_valid=//p')" != "1" ]]; then
+    log "  [${name}] BINARY_PROVENANCE_FAIL: build manifest does not match current binary/source; rebuild required"
+    binary_provenance_ok=0
+  fi
+  if [[ -z "$node_live_src_fingerprint" || "$node_live_src_fingerprint" != "$node_src_fingerprint" || "$node_live_src_fingerprint" != "$local_src_fingerprint" ]]; then
+    log "  [${name}] BINARY_PROVENANCE_FAIL: live source differs from recorded/local source; sync and rebuild"
+    binary_provenance_ok=0
+  fi
+
   if [[ "$is_u22" -eq 0 ]]; then
     if [[ "$node_server_sha" != "$local_server_sha" ||
-          "$node_gateway_sha" != "$local_gateway_sha" ]]; then
+          "$node_gateway_sha" != "$local_gateway_sha" ||
+          "$(echo "$prov_output" | sed -n 's/^postgres_sha256=//p')" != "$local_postgres_sha" ]]; then
       log "  [${name}] BINARY_PROVENANCE_FAIL: U24 executable SHA mismatch"
       binary_provenance_ok=0
     fi
@@ -3122,7 +3129,7 @@ for idx in "${!NODE_IDS[@]}"; do
       hard_stop_benchmark_postgres
       echo '  attempting postgres start'
       ulimit -c unlimited
-      \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log' 2>&1 || echo 'start attempted'
+      \$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log' 2>&1 || echo 'start attempted'
       sleep 3
       \$BIN/pg_isready -h 127.0.0.1 -p $DB_PORT -U $DB_USER >/dev/null 2>&1 || {
         echo 'WARNING: postgres may not be ready'
@@ -3133,10 +3140,10 @@ for idx in "${!NODE_IDS[@]}"; do
     if [[ "$FORCE_PG_RESTART" -eq 1 ]]; then
       echo '  restarting postgres to clear stale benchmark backends'
       ulimit -c unlimited
-      if ! \$BIN/pg_ctl -D \$PGDATA -w -t 60 restart -l '$REMOTE_REPO_ROOT/server.log'; then
+      if ! \$BIN/pg_ctl -D \$PGDATA -w -t 120 restart -l '$REMOTE_REPO_ROOT/server.log'; then
         hard_stop_benchmark_postgres
         ulimit -c unlimited
-        \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log'
+        \$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log'
       fi
       ensure_ready
     fi
@@ -3254,10 +3261,10 @@ for idx in "${!NODE_IDS[@]}"; do
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET max_connections = '\$min_max_connections';\"
       fi
       ulimit -c unlimited
-      if ! \$BIN/pg_ctl -D \$PGDATA -w -t 60 restart -l '$REMOTE_REPO_ROOT/server.log'; then
+      if ! \$BIN/pg_ctl -D \$PGDATA -w -t 120 restart -l '$REMOTE_REPO_ROOT/server.log'; then
         hard_stop_benchmark_postgres
         ulimit -c unlimited
-        \$BIN/pg_ctl -D \$PGDATA -w -t 60 start -l '$REMOTE_REPO_ROOT/server.log'
+        \$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log'
       fi
       ensure_ready
       worker_count=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_worker_count;' | tr -d '[:space:]')
@@ -3526,6 +3533,19 @@ fi
 #   - Nodes 1-3: clientPort=8000
 #   - Node 4 (utkarsh): clientPort=8001 (8000 taken by HP printer snap)
 # ---------------------------------------------------------------------------
+if [[ "${BENCH_COLD_CACHE:-0}" -eq 1 ]]; then
+  log "Evicting database files on stopped replicas after restore"
+  CACHE_HELPER_B64="$(base64 -w0 "$REPO_ROOT/scripts/distributed/benchmark_cache.py")"
+  for idx in "${!NODE_IDS[@]}"; do
+    node_ssh "$idx" "set -e; export LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib';
+      '$REMOTE_INSTALL_DIR/bin/psql' -X -v ON_ERROR_STOP=1 -p '$DB_PORT' -U postgres postgres -c CHECKPOINT;
+      '$REMOTE_INSTALL_DIR/bin/pg_ctl' -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' -m fast -w -t 120 stop;
+      python3 -c \"import base64; exec(base64.b64decode('$CACHE_HELPER_B64'))\" '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata';
+      '$REMOTE_INSTALL_DIR/bin/pg_ctl' -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' -l '$REMOTE_REPO_ROOT/server.log' -w -t 120 start
+    " > "$LOG_DIR/cache_node${idx}.log" 2>&1 || die "Cache preparation failed on ${NODE_NAMES[$idx]}"
+  done
+fi
+
 log "=== Phase 4: Starting ariabc_pg_server on all ${#NODE_IDS[@]} nodes ==="
 
 REMOTE_LOG_DIR="/tmp/ariabc_cluster"
@@ -3779,6 +3799,12 @@ else
     fi
     sleep 0.5
   done
+  # Allow 3 s for the new leader to flush any pending Raft log entries to all
+  # followers before the gateway starts assigning deterministic sequence numbers.
+  # Without this window a leadership election that completes just before Phase 6
+  # leaves followers mid-catchup, producing different Merkle result hashes than
+  # the leader and causing divergence_count > 0.
+  sleep 3
 fi
 
 if [[ "$ALL_UP" -eq 1 ]]; then

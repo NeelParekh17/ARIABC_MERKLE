@@ -38,7 +38,7 @@ Options:
   --artifact-mode summary|debug  default: summary
   --corruption-mode paper-update-only|update-only|delete-only|insert-only|mixed
                                default: mixed
-  --synchronous-commit on|off  default: off
+  --synchronous-commit on|off  default: on
   --audit-mode full|skip       default: full
   --leaf-fetch-batch-size N    default: 64 (0 = unbounded single SQL)
   --run-static-merkle-regression  run merkle_static SQL regression on remote before benchmark
@@ -69,11 +69,11 @@ FANOUT=""
 GEOMETRY_LABEL=""
 PROFILING="off"
 TRACK_COUNTS="on"
-SYNCHRONOUS_COMMIT="off"
+SYNCHRONOUS_COMMIT="on"
 REPETITIONS=""
 ARTIFACT_MODE="summary"
 CORRUPTION_MODE=""
-AUDIT_MODE="skip"
+AUDIT_MODE="full"
 LEAF_FETCH_BATCH_SIZE=64
 RUN_STATIC_MERKLE_REGRESSION=0
 MIN_FREE_GIB=40
@@ -230,9 +230,9 @@ fi
 SSH_COMMON_OPTS=(
   -o StrictHostKeyChecking=accept-new
   -o ConnectTimeout="$SSH_TIMEOUT"
-  -o ConnectionAttempts=1
-  -o ServerAliveInterval="$SSH_TIMEOUT"
-  -o ServerAliveCountMax=1
+  -o ConnectionAttempts=3
+  -o ServerAliveInterval=60
+  -o ServerAliveCountMax=5
   -o NumberOfPasswordPrompts=1
   -o LogLevel=ERROR
 )
@@ -472,8 +472,8 @@ remote_ssh_step "verifying remote Python benchmark environment" \
   "'$REMOTE_PYTHON' '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/verify_recovery_python_env.py' --contract '$REMOTE_RUN_DIR/src/scripts/benchmark/recovery/python_requirements_contract.json'" >/dev/null
 progress "remote source and environment verified"
 
-remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q TRACK_COUNTS=%q SYNCHRONOUS_COMMIT=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q CPU_AFFINITY=%q' \
-  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "$TRACK_COUNTS" "$SYNCHRONOUS_COMMIT" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS" "${CPU_AFFINITY:-}")
+remote_env_prefix=$(printf 'RUN_ID=%q REMOTE_ROOT=%q REMOTE_RUNS_ROOT=%q REMOTE_ARTIFACTS_ROOT=%q REMOTE_FAILURES_ROOT=%q REMOTE_LOCK_DIR=%q REMOTE_RUN_DIR=%q REMOTE_SRC_DIR=%q REMOTE_INSTALL_DIR=%q REMOTE_PGDATA=%q REMOTE_SCRATCH_DIR=%q REMOTE_RESULTS_DIR=%q REMOTE_LOG_DIR=%q REMOTE_PYTHON=%q BENCH_PROFILE=%q BUILD_PROFILE=%q EXPERIMENT=%q TUPLE_COUNT=%q SPLIT_THRESHOLD=%q MERGE_THRESHOLD=%q BAD_LEAF_COUNT=%q FANOUT=%q GEOMETRY_LABEL=%q PROFILING=%q TRACK_COUNTS=%q SYNCHRONOUS_COMMIT=%q REPETITIONS=%q ARTIFACT_MODE=%q CORRUPTION_MODE=%q AUDIT_MODE=%q LEAF_FETCH_BATCH_SIZE=%q RUN_STATIC_MERKLE_REGRESSION=%q MIN_FREE_GIB=%q KEEP_FAILURE_LOGS=%q CPU_AFFINITY=%q LEVELS_PER_BATCH=%q PARTITIONS=%q WARMUP_CYCLES=%q' \
+  "$RUN_ID" "$REMOTE_ROOT" "$REMOTE_RUNS_ROOT" "$REMOTE_ARTIFACTS_ROOT" "$REMOTE_FAILURES_ROOT" "$REMOTE_LOCK_DIR" "$REMOTE_RUN_DIR" "$REMOTE_SRC_DIR" "$REMOTE_INSTALL_DIR" "$REMOTE_PGDATA" "$REMOTE_SCRATCH_DIR" "$REMOTE_RESULTS_DIR" "$REMOTE_LOG_DIR" "$REMOTE_PYTHON" "$PROFILE" "$BUILD_PROFILE" "$EXPERIMENT" "$TUPLE_COUNT" "$SPLIT_THRESHOLD" "$MERGE_THRESHOLD" "$BAD_LEAF_COUNT" "$FANOUT" "$GEOMETRY_LABEL" "$PROFILING" "$TRACK_COUNTS" "$SYNCHRONOUS_COMMIT" "${REPETITIONS:-}" "$ARTIFACT_MODE" "$CORRUPTION_MODE" "$AUDIT_MODE" "$LEAF_FETCH_BATCH_SIZE" "$RUN_STATIC_MERKLE_REGRESSION" "$MIN_FREE_GIB" "$KEEP_FAILURE_LOGS" "${CPU_AFFINITY:-}" "${LEVELS_PER_BATCH:-}" "${PARTITIONS:-}" "${WARMUP_CYCLES:-}")
 
 remote_archive="$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz"
 
@@ -527,9 +527,23 @@ remote_progress "checking recovery benchmark lock ($LOCK_FILE)"
 exec 9>"$LOCK_FILE"
 
 if ! flock -n 9; then
-  remote_progress "lock is currently held by existing process(es); auto-clearing stale lock holders"
   lock_pids="$(fuser "$LOCK_FILE" 2>/dev/null || true)"
   if [[ -n "$lock_pids" ]]; then
+    active_runner=""
+    for pid in $lock_pids; do
+      cmd_info="$(ps -p "$pid" -o args= 2>/dev/null || echo "")"
+      if echo "$cmd_info" | grep -q 'run_payload.sh'; then
+        active_runner="$pid"
+        break
+      fi
+    done
+    if [[ -n "$active_runner" && "${FORCE_KILL_RUNNING:-0}" != "1" ]]; then
+      remote_progress "An active recovery benchmark run is already in progress (PID $active_runner)!"
+      remote_progress "To attach to or fetch this run, use --fetch <RUN_ID> or --fetch latest."
+      remote_progress "To forcibly terminate it and start a new run, pass FORCE_KILL_RUNNING=1."
+      exit 1
+    fi
+    remote_progress "lock is currently held by existing process(es); clearing stale lock holders"
     remote_progress "found process(es) holding lock file: $lock_pids"
     for pid in $lock_pids; do
       if [[ "$pid" -ne "$$" ]]; then
@@ -774,7 +788,7 @@ remote_progress "temporary socket directory ready: $REMOTE_SOCKET_DIR"
 # collection overhead explicitly with --track-counts off.
 remote_progress "PostgreSQL start requested; logs: $REMOTE_LOG_DIR/pg_ctl_start.log and $REMOTE_LOG_DIR/postgres.log"
 if "$REMOTE_INSTALL_DIR/bin/pg_ctl" -D "$REMOTE_PGDATA" -l "$REMOTE_LOG_DIR/postgres.log" \
-    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=32GB -c effective_cache_size=160GB -c maintenance_work_mem=16GB -c work_mem=256MB -c max_wal_size=128GB -c checkpoint_timeout=60min -c autovacuum=off -c track_counts=$TRACK_COUNTS -c synchronous_commit=$SYNCHRONOUS_COMMIT -c wal_buffers=256MB -c max_worker_processes=128 -c max_parallel_workers=96 -c max_parallel_maintenance_workers=32" \
+    -o "-k $REMOTE_SOCKET_DIR -p 55432 -c listen_addresses='' -c shared_buffers=32GB -c effective_cache_size=160GB -c maintenance_work_mem=16GB -c work_mem=256MB -c max_wal_size=128GB -c checkpoint_timeout=60min -c autovacuum=off -c track_io_timing=on -c track_counts=$TRACK_COUNTS -c synchronous_commit=$SYNCHRONOUS_COMMIT -c wal_buffers=256MB -c max_worker_processes=128 -c max_parallel_workers=96 -c max_parallel_maintenance_workers=32" \
     -w start 9>&- >"$REMOTE_LOG_DIR/pg_ctl_start.log" 2>&1; then
   remote_progress "PostgreSQL started"
 else
@@ -897,7 +911,15 @@ progress "NOTE: This run will continue on $SSH_TARGET even if your local machine
 progress "following live logs below (press Ctrl+C to detach without killing the remote run)..."
 
 set +e
-remote_ssh_cmd "tail --pid=$REMOTE_PID -f -n +1 '$REMOTE_LOG_DIR/remote_runner.log' 2>/dev/null || tail -f -n +1 '$REMOTE_LOG_DIR/remote_runner.log'"
+while true; do
+  remote_ssh_cmd "tail --pid=$REMOTE_PID -f -n +1 '$REMOTE_LOG_DIR/remote_runner.log' 2>/dev/null || tail -f -n +1 '$REMOTE_LOG_DIR/remote_runner.log'"
+  if remote_ssh_cmd_stdinless "kill -0 $REMOTE_PID 2>/dev/null"; then
+    progress "remote log tail disconnected, but payload (PID $REMOTE_PID) is still running on $SSH_TARGET; reconnecting in 5s..."
+    sleep 5
+  else
+    break
+  fi
+done
 set -e
 
 if remote_ssh_cmd_stdinless "test -f '$REMOTE_ARTIFACTS_ROOT/$RUN_ID.tar.gz'"; then

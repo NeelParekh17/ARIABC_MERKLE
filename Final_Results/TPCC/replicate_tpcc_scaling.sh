@@ -30,7 +30,7 @@ echo "==========================================================================
 # ------------------------------------------------------------------------------
 run_full_orchestrated() {
     python3 scripts/distributed/orchestrate_tpcc_full_evaluation.py \
-        --trials 3 \
+        --trials "${BENCH_TRIALS:-5}" \
         --split-threshold 32 \
         --merge-threshold 8 \
         --workers-dir "${WORKERS_DIR}" \
@@ -54,7 +54,7 @@ run_campaign1_workers() {
         --modes pg,bcdb_det,bcdb_merkle \
         --warehouses 100 \
         --tpcc-workers 8,16,24,32 \
-        --trials 3 \
+        --trials "${BENCH_TRIALS:-5}" \
         --tpcc-tx-count 20000 \
         --tpcc-seed 42 \
         --tpcc-remote-payment-pct 15.0 \
@@ -85,7 +85,7 @@ run_campaign2_warehouses() {
         --modes pg,bcdb_det,bcdb_merkle \
         --warehouses 5,10,20,30,50,75,100 \
         --tpcc-workers 32 \
-        --trials 3 \
+        --trials "${BENCH_TRIALS:-5}" \
         --tpcc-tx-count 20000 \
         --tpcc-seed 42 \
         --tpcc-remote-payment-pct 15.0 \

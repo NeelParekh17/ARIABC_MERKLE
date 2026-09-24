@@ -29,6 +29,7 @@ from merkle_recovery.db import (
     merkle_node_index_stats,
     scalar,
     show_setting,
+    wait_for_stats,
 )
 from merkle_recovery.dataset import (
     build_dataset, reset_damaged_from_healthy,
@@ -79,6 +80,16 @@ RECOVERY_WARMUP_CYCLES = 6
 
 
 # ── timing helper ─────────────────────────────────────────────────────────────
+
+def record_host_sample(result_dir, run_id, stage):
+    sample = {"run_id": run_id, "stage": stage, "unix_ns": time.time_ns()}
+    for name in ("meminfo", "vmstat", "diskstats", "stat", "loadavg", "pressure/io", "pressure/memory", "pressure/cpu"):
+        path = Path("/proc") / name
+        sample[name] = path.read_text() if path.exists() else None
+    sample["cpu_frequency"] = {str(p): p.read_text().strip() for p in Path("/sys/devices/system/cpu").glob("cpu[0-9]*/cpufreq/scaling_cur_freq")}
+    with (result_dir / "host_samples.jsonl").open("a") as stream:
+        stream.write(json.dumps(sample) + "\n")
+
 
 def now_ms() -> float:
     return time.perf_counter() * 1000.0
@@ -583,8 +594,9 @@ def repair_merkle(
         **cfg,
     )
     total_start = now_ms()
-    paper_start = total_start
+    # Drain setup/previous-audit counters before starting measured recovery.
     recovery_scan_before = seq_scan_snapshot(conn)
+    paper_start = now_ms()
     counters = m.counters
     counters.update(planner_results)
     counters["manifest_sha256"] = manifest_digest
@@ -601,8 +613,11 @@ def repair_merkle(
         localisation_index_stats_ok = track_counts_enabled
         if track_counts_enabled:
             stats_probe_start = now_ms()
-            localisation_index_before = merkle_node_index_stats(conn)
-            localisation_stats_probe_ms += now_ms() - stats_probe_start
+            try:
+                localisation_stats_flush_wait_ms += wait_for_stats(conn)
+                localisation_index_before = merkle_node_index_stats(conn)
+            finally:
+                localisation_stats_probe_ms += now_ms() - stats_probe_start
     except Exception as exc:
         localisation_index_stats_ok = False
         counters["localisation_index_stats_error"] = str(exc)
@@ -620,6 +635,7 @@ def repair_merkle(
     if localisation_index_stats_ok:
         stats_probe_start = now_ms()
         try:
+            localisation_stats_flush_wait_ms += wait_for_stats(conn)
             localisation_index_after = merkle_node_index_stats(conn)
             localisation_index_deltas = diff_merkle_node_index_stats(
                 localisation_index_before,
@@ -632,26 +648,6 @@ def repair_merkle(
                 "idx_blks_read_delta",
                 "idx_blks_hit_delta",
             )
-            # PostgreSQL 13's stats collector may not flush a short SPI query
-            # before the next statement.  Retry once outside the measured
-            # localization timer; never add this wait to tree_localisation_ms.
-            if (
-                localisation_index_deltas
-                and all(bool(stat.get("track_counts_enabled")) for stat in localisation_index_deltas)
-                and not any(
-                    int(stat.get(field, 0) or 0)
-                    for stat in localisation_index_deltas
-                    for field in stats_activity_fields
-                )
-            ):
-                flush_wait_start = now_ms()
-                time.sleep(0.6)
-                localisation_stats_flush_wait_ms += now_ms() - flush_wait_start
-                localisation_index_after = merkle_node_index_stats(conn)
-                localisation_index_deltas = diff_merkle_node_index_stats(
-                    localisation_index_before,
-                    localisation_index_after,
-                )
             counters["localisation_index_stats_available"] = int(
                 bool(localisation_index_deltas)
                 and all(bool(stat.get("track_counts_enabled")) for stat in localisation_index_deltas)
@@ -1110,6 +1106,7 @@ def run_one_manifest(
 
     for rep in range(reps):
         run_id = recovery_run_id(manifest, rep, profile_label)
+        record_host_sample(result_dir, run_id, "before")
         manifest_digest = manifest_sha256(manifest)
         emit_progress(
             result_dir,
@@ -1224,6 +1221,7 @@ def run_one_manifest(
                     repetition=rep,
                 )
                 deep_plan_summary_rows_out.extend(deep_rows)
+        record_host_sample(result_dir, run_id, "after")
         progress_state["completed_runs"] += 1
         emit_progress(
             result_dir,
@@ -1627,6 +1625,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                     "Profiling backend is not installed in this PGDATA. "
                     "Use the benchmark bootstrap command to create a fresh profiling cluster."
                 ) from exc
+        execute(conn, "SET track_io_timing = on")
         io_timing_setting = str(show_setting(conn, "track_io_timing"))
         server_version = str(scalar(conn, "SHOW server_version"))
         for setting_name in (
@@ -1638,6 +1637,9 @@ def run_benchmark(args: argparse.Namespace) -> Path:
             "enable_seqscan",
             "max_parallel_workers_per_gather",
             "track_io_timing",
+            "synchronous_commit",
+            "fsync",
+            "full_page_writes",
             "track_counts",
             "jit",
         ):
@@ -1663,7 +1665,15 @@ def run_benchmark(args: argparse.Namespace) -> Path:
                 git_head = "unavailable; source_snapshot.json records synced source provenance"
         except Exception as exc:
             git_head = f"unavailable: {exc}; source_snapshot.json records synced source provenance"
-        for spec in _series_for_profile(args, config):
+        series = list(_series_for_profile(args, config))
+        if getattr(args, "series_order", "random") == "random":
+            import random
+            random.Random(args.seed).shuffle(series)
+            # Random size order requires independent builds, never incrementally
+            # extending one ascending dataset and conflating its age with size.
+            incremental_dataset = False
+        (result_dir / "series_order.json").write_text(json.dumps(series, indent=2) + "\n")
+        for spec in series:
             n = int(spec["tuple_count"])
             fanout = int(spec["fanout"])
             split_threshold = int(spec.get("split_threshold", 32))
@@ -2209,6 +2219,7 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         "Per-run deltas for `pg_stat_all_indexes` and `pg_statio_all_indexes` around the native `merkle_node` localization call are in `localisation_index_stats.csv`.",
         "These include index scans, index tuples read/fetched, buffer reads/hits, and relation/index sizes.",
         "The diagnostic snapshot and asynchronous stats flush are reported as `localisation_stats_probe_ms` and `localisation_stats_flush_wait_ms`; both are excluded from `restore_repair_ms`.",
+        "Statistics boundaries await a private scan-counter publication marker; setup and full-audit scans are drained outside measured recovery. Catalog counters require an isolated benchmark database.",
         "The session planner/cache settings used by the campaign are in `runtime_settings.csv`.",
         "Deep profiling additionally replays the exact localization frontiers with `EXPLAIN (ANALYZE, BUFFERS, SETTINGS)` in `localisation_plan_summary.csv` and `localisation_plan_profiles.jsonl`.",
     ])
@@ -2296,6 +2307,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--geometry-label", dest="geometry_label")
     parser.add_argument("--profiling", choices=["off", "light", "deep"], default="off")
     parser.add_argument("--repetitions", type=int)
+    parser.add_argument("--series-order", choices=["ascending", "random"], default="random")
     parser.add_argument("--seed", type=int, default=20260703)
     parser.add_argument("--result-dir", dest="result_dir")
     parser.add_argument("--scratch-dir", dest="scratch_dir")
@@ -2322,7 +2334,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--audit-mode",
         choices=["full", "skip"],
-        default="skip",
+        default="full",
         dest="audit_mode",
         help="Validation mode after repair. full runs expensive full-table audit; skip keeps sparse targeted confirmation only.",
     )
@@ -2364,9 +2376,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--synchronous-commit",
         choices=["on", "off"],
-        default="off",
+        default="on",
         dest="synchronous_commit",
-        help="PostgreSQL synchronous_commit setting during recovery repair (default: off).",
+        help="PostgreSQL synchronous_commit setting during recovery repair (default: on).",
     )
     parser.add_argument(
         "--warmup-cycles",

@@ -1,0 +1,35 @@
+ M .gitignore
+ M DISTRIBUTED_ARCHITECTURE_DIAGRAM.md
+ M Dynamic_merkle_docs/RECOVERY_ARCHITECTURE_ANALYSIS.md
+ M Final_Results/Recovery/replicate_recovery_scaling.sh
+ M Final_Results/TPCC/replicate_tpcc_scaling.sh
+ M Final_Results/YCSB/replicate_ycsb_scaling.sh
+ M README.md
+ M README_MERKLE.md
+ M scripts/benchmark/recovery/README.md
+ M scripts/benchmark/recovery/merkle_recovery/dataset.py
+ M scripts/benchmark/recovery/merkle_recovery/db.py
+ M scripts/benchmark/recovery/merkle_recovery/repair.py
+ M scripts/benchmark/recovery/package_recovery_artifacts.py
+ M scripts/benchmark/recovery/run_merkle_recovery_benchmark.py
+ M scripts/benchmark/recovery/run_synced_remote_recovery_benchmark.sh
+ M scripts/distributed/cluster_sweep_support.py
+ M scripts/distributed/orchestrate_tpcc_full_evaluation.py
+ M scripts/distributed/run_4node_raft_cluster.sh
+ M scripts/distributed/run_all_modes_gateway_sweep.py
+ M scripts/distributed/run_oom_100m_benchmark.py
+ M scripts/distributed/tests/test_cluster_sweep.py
+ M scripts/distributed/tests/test_oom_benchmark.py
+?? Dynamic_merkle_docs/run_reports/ariabc-recovery-size-scaling-k75-c300-20260922T013346Z-00aaa3/
+?? Dynamic_merkle_docs/run_reports/ariabc-recovery-size-scaling-k75-c300-20260922T134115Z-001754/
+?? Final_Results/OOM_100M/fanout32_full_sweep/scaling_a_0.5.png
+?? Final_Results/OOM_100M/fanout32_full_sweep/scaling_a_1.2.png
+?? Final_Results/Recovery/plots/rerun_20260922/
+?? Final_Results/reruns/
+?? dynamic_merkle_visualizer/
+?? scripts/benchmark/recovery/tests/test_index_stats.py
+?? scripts/distributed/benchmark_cache.py
+?? scripts/distributed/benchmark_contract.py
+?? scripts/distributed/benchmark_telemetry.py
+?? scripts/distributed/tests/test_benchmark_contract.py
+?? scripts/distributed/tests/test_cluster_provenance.py
