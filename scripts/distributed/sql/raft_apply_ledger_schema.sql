@@ -173,7 +173,7 @@ BEGIN
 END
 $$;
 
--- Merkle node storage uses per-index tables (ariabc_internal.merkle_node_<oid>)
+-- Merkle node storage uses table-specific tables (ariabc_internal.merkle_node_<tablename>)
 -- created on demand by merkle_ensure_node_table() inside the backend.  A
 -- compatibility VIEW named merkle_node over those tables is installed by the
 -- backend at first access.  This schema file does NOT manage any merkle_node

@@ -73,7 +73,15 @@ def test_official_smoke_geometry(conn, f):
     counters: dict[str, Any] = {}
     bad_leaves = detect_bad_leaves(conn, counters)
     assert len(bad_leaves) == K, f"Detection found {len(bad_leaves)} leaves, expected {K}"
-    expected_leaves = sorted((bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple)) else v for v in manifest["bad_leaves"])
+    expected_leaves = sorted(
+        [
+            (bytes.fromhex(v[1]), int(v[2])) if isinstance(v, (list, tuple)) and len(v) == 3
+            else (bytes.fromhex(v[0]), int(v[1])) if isinstance(v, (list, tuple))
+            else v
+            for v in manifest["bad_leaves"]
+        ],
+        key=lambda item: (item[1], item[0]),
+    )
     assert bad_leaves == expected_leaves
 
     # 4. Repair

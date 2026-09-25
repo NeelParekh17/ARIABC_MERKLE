@@ -122,11 +122,15 @@ merkle_populate_index_stats(Oid index_oid, IndexBulkDeleteResult *stats)
 {
     if (SPI_connect() == SPI_OK_CONNECT)
     {
-		char *sql = psprintf(
+		char tablename[64];
+		char *sql;
+		int spi_rc;
+		merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+		sql = psprintf(
 			"SELECT COALESCE(sum(tuple_count), 0)::float8, count(*)::float8 "
-			"  FROM ariabc_internal.merkle_node_%u "
-			" WHERE is_leaf = true", index_oid);
-		int spi_rc = SPI_execute(sql, true, 0);
+			"  FROM ariabc_internal.%s "
+			" WHERE is_leaf = true", tablename);
+		spi_rc = SPI_execute(sql, true, 0);
 		pfree(sql);
 
         if (spi_rc == SPI_OK_SELECT && SPI_processed > 0 && SPI_tuptable != NULL)

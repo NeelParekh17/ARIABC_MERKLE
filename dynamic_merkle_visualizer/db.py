@@ -143,9 +143,22 @@ class Inspector:
     def table(target):
         return sql.Identifier(target["table_schema"], target["table_name"])
 
-    @staticmethod
-    def nodes_table(target):
-        return sql.Identifier("ariabc_internal", f"merkle_node_{target['index_oid']}")
+    @classmethod
+    def nodes_table_name(cls, target):
+        if target.get("table_schema") not in ("public", "pg_catalog"):
+            return f"merkle_node_{target['table_schema']}_{target['table_name']}"
+        return f"merkle_node_{target['table_name']}"
+
+    def nodes_table(self, target, conn=None):
+        name = self.nodes_table_name(target)
+        if conn is not None:
+            if not conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok",
+                                (f"ariabc_internal.{name}",)).fetchone()["ok"]:
+                fallback = f"merkle_node_{target['index_oid']}"
+                if conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok",
+                                (f"ariabc_internal.{fallback}",)).fetchone()["ok"]:
+                    name = fallback
+        return sql.Identifier("ariabc_internal", name)
 
     @contextmanager
     def locked(self, conn, index_oid, write=False):
@@ -171,8 +184,12 @@ class Inspector:
         actual = tuple(stats.get(k) for k in ("version", "route_format_version", "row_hash_format_version"))
         if actual != (10, 4, 1):
             raise InspectorError(f"Unsupported native Merkle formats {actual}; this inspector expects 10 / 4 / 1", 409)
+        name = self.nodes_table_name(target)
         exists = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok",
-                              (f"ariabc_internal.merkle_node_{target['index_oid']}",)).fetchone()["ok"]
+                              (f"ariabc_internal.{name}",)).fetchone()["ok"]
+        if not exists:
+            exists = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS ok",
+                                  (f"ariabc_internal.merkle_node_{target['index_oid']}",)).fetchone()["ok"]
         if not exists:
             raise InspectorError("Dedicated native Merkle node relation is missing", 409)
         columns = conn.execute("""SELECT attnum, attname AS name,

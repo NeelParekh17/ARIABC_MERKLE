@@ -89,7 +89,8 @@ def recreate_schema(conn, *, bulk_load: bool = True, unlogged: bool = False) -> 
                 FOR r IN (
                     SELECT tablename
                     FROM pg_tables
-                    WHERE schemaname = 'ariabc_internal' AND tablename LIKE 'merkle_node_%'
+                    WHERE schemaname = 'ariabc_internal'
+                      AND (tablename LIKE 'merkle_node_healthy_%' OR tablename LIKE 'merkle_node_damaged_%')
                 ) LOOP
                     EXECUTE format('TRUNCATE ariabc_internal.%I CASCADE', r.tablename);
                 END LOOP;
@@ -375,23 +376,43 @@ def sync_merkle_node_view(conn) -> None:
             first boolean := true;
         BEGIN
             FOR r IN (
-                SELECT c.oid, c.relname, n.nspname
+                SELECT c.oid, c.relname, n.nspname,
+                       c2.relname AS heap_name, n2.nspname AS heap_schema
                 FROM pg_class c
                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_index ind ON ind.indexrelid = c.oid
+                JOIN pg_class c2 ON c2.oid = ind.indrelid
+                JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
                 WHERE c.relam = (SELECT oid FROM pg_am WHERE amname = 'merkle')
                   AND c.relkind = 'i'
             ) LOOP
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'ariabc_internal'
-                      AND table_name = 'merkle_node_' || r.oid
-                ) THEN
-                    IF NOT first THEN
-                        sql := sql || ' UNION ALL ';
+                DECLARE
+                    node_tbl text;
+                BEGIN
+                    IF r.heap_schema NOT IN ('public', 'pg_catalog') THEN
+                        node_tbl := 'merkle_node_' || r.heap_schema || '_' || r.heap_name;
+                    ELSE
+                        node_tbl := 'merkle_node_' || r.heap_name;
                     END IF;
-                    sql := sql || format('SELECT tuple_count, %s::oid AS index_oid, partition_id, prefix_len, is_leaf, node_id, hash FROM ariabc_internal.merkle_node_%s', r.oid, r.oid);
-                    first := false;
-                END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = 'ariabc_internal'
+                          AND table_name = node_tbl
+                    ) THEN
+                        node_tbl := 'merkle_node_' || r.oid;
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = 'ariabc_internal'
+                          AND table_name = node_tbl
+                    ) THEN
+                        IF NOT first THEN
+                            sql := sql || ' UNION ALL ';
+                        END IF;
+                        sql := sql || format('SELECT tuple_count, %s::oid AS index_oid, partition_id, prefix_len, is_leaf, node_id, hash FROM ariabc_internal.%I', r.oid, node_tbl);
+                        first := false;
+                    END IF;
+                END;
             END LOOP;
 
             IF EXISTS (
@@ -604,7 +625,8 @@ def expand_dataset(
                 FOR r IN (
                     SELECT tablename
                     FROM pg_tables
-                    WHERE schemaname = 'ariabc_internal' AND tablename LIKE 'merkle_node_%'
+                    WHERE schemaname = 'ariabc_internal'
+                      AND (tablename LIKE 'merkle_node_healthy_%' OR tablename LIKE 'merkle_node_damaged_%')
                 ) LOOP
                     EXECUTE format('TRUNCATE ariabc_internal.%I CASCADE', r.tablename);
                 END LOOP;

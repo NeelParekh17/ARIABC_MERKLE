@@ -435,12 +435,15 @@ merkle_do_split_in_memory(Oid index_oid, int partition_id, const uint8 *node_id,
 	/* Prepare SPI plans once for high-frequency split operations */
 	if (plans->split_update_nonleaf == NULL || !SPI_plan_is_valid(plans->split_update_nonleaf))
 	{
+		char tablename[64];
+		char *upd_sql;
 		Oid upd_argtypes[5] = {INT2OID, BYTEAOID, INT2OID, INT4OID, BYTEAOID};
-		char *upd_sql = psprintf(
-			"UPDATE ariabc_internal.merkle_node_%u"
+		merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+		upd_sql = psprintf(
+			"UPDATE ariabc_internal.%s"
 			"   SET is_leaf = false, tuple_count = $4, hash = $5"
 			" WHERE partition_id = $1 AND node_id = $2 AND prefix_len = $3",
-			index_oid);
+			tablename);
 		SPIPlanPtr plan = SPI_prepare(upd_sql, 5, upd_argtypes);
 		pfree(upd_sql);
 		if (plan == NULL)
@@ -451,14 +454,17 @@ merkle_do_split_in_memory(Oid index_oid, int partition_id, const uint8 *node_id,
 
 	if (plans->split_insert_child == NULL || !SPI_plan_is_valid(plans->split_insert_child))
 	{
+		char tablename[64];
+		char *ins_sql;
 		Oid ins_argtypes[5] = {INT2OID, BYTEAOID, INT2OID, INT4OID, BYTEAOID};
-		char *ins_sql = psprintf(
-			"INSERT INTO ariabc_internal.merkle_node_%u"
+		merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+		ins_sql = psprintf(
+			"INSERT INTO ariabc_internal.%s"
 			" (partition_id, node_id, prefix_len, is_leaf, tuple_count, hash)"
 			" VALUES ($1, $2, $3, true, $4, $5)"
 			" ON CONFLICT (partition_id, node_id, prefix_len) DO UPDATE"
 			"   SET is_leaf = true, tuple_count = EXCLUDED.tuple_count, hash = EXCLUDED.hash",
-			index_oid);
+			tablename);
 		SPIPlanPtr plan = SPI_prepare(ins_sql, 5, ins_argtypes);
 		pfree(ins_sql);
 		if (plan == NULL)
@@ -757,11 +763,15 @@ do_merge_check(Oid index_oid, int partition_id, const uint8 *node_id, int prefix
 		values[3] = PointerGetDatum(upper_bytea);
 
 		PushActiveSnapshot(GetLatestSnapshot());
-		sql = psprintf(
-			"SELECT count(*), bool_and(is_leaf), sum(tuple_count)::bigint"
-			"  FROM ariabc_internal.merkle_node_%u"
-			" WHERE partition_id = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4",
-			index_oid);
+		{
+			char tablename[64];
+			merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+			sql = psprintf(
+				"SELECT count(*), bool_and(is_leaf), sum(tuple_count)::bigint"
+				"  FROM ariabc_internal.%s"
+				" WHERE partition_id = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4",
+				tablename);
+		}
 		spi_rc = SPI_execute_with_args(sql, 4, argtypes, values, NULL, true, 1);
 		pfree(sql);
 		PopActiveSnapshot();
@@ -802,11 +812,15 @@ do_merge_check(Oid index_oid, int partition_id, const uint8 *node_id, int prefix
 				 * merge inputs from them rather than from the unlocked read.
 				 */
 				PushActiveSnapshot(GetLatestSnapshot());
-				sql = psprintf(
-					"SELECT hash, tuple_count, is_leaf FROM ariabc_internal.merkle_node_%u"
-					" WHERE partition_id = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4"
-					" FOR UPDATE SKIP LOCKED",
-					index_oid);
+				{
+					char tablename[64];
+					merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+					sql = psprintf(
+						"SELECT hash, tuple_count, is_leaf FROM ariabc_internal.%s"
+						" WHERE partition_id = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4"
+						" FOR UPDATE SKIP LOCKED",
+						tablename);
+				}
 				spi_rc = SPI_execute_with_args(sql, 4, argtypes, values, NULL, false, 0);
 				pfree(sql);
 				PopActiveSnapshot();
@@ -845,10 +859,14 @@ do_merge_check(Oid index_oid, int partition_id, const uint8 *node_id, int prefix
 
 				CommandCounterIncrement();
 				PushActiveSnapshot(GetLatestSnapshot());
-				sql = psprintf(
-					"DELETE FROM ariabc_internal.merkle_node_%u"
-					" WHERE partition_id = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4",
-					index_oid);
+				{
+					char tablename[64];
+					merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+					sql = psprintf(
+						"DELETE FROM ariabc_internal.%s"
+						" WHERE partition_id = $1 AND prefix_len = $2 AND node_id BETWEEN $3 AND $4",
+						tablename);
+				}
 				SPI_execute_with_args(sql, 4, argtypes, values, NULL, false, 0);
 				pfree(sql);
 				PopActiveSnapshot();
@@ -872,11 +890,15 @@ do_merge_check(Oid index_oid, int partition_id, const uint8 *node_id, int prefix
 
 					CommandCounterIncrement();
 					PushActiveSnapshot(GetLatestSnapshot());
-					sql = psprintf(
-						"UPDATE ariabc_internal.merkle_node_%u"
-						"   SET is_leaf = true, tuple_count = $1, hash = $2"
-						" WHERE partition_id = $3 AND node_id = $4 AND prefix_len = $5",
-						index_oid);
+					{
+						char tablename[64];
+						merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+						sql = psprintf(
+							"UPDATE ariabc_internal.%s"
+							"   SET is_leaf = true, tuple_count = $1, hash = $2"
+							" WHERE partition_id = $3 AND node_id = $4 AND prefix_len = $5",
+							tablename);
+					}
 					SPI_execute_with_args(sql, 5, upd_argtypes, upd_values, NULL, false, 1);
 					pfree(sql);
 					PopActiveSnapshot();
@@ -1177,17 +1199,20 @@ merkle_sync_prepare_plans(Oid index_oid)
 	Oid route_argtypes[3] = {INT2OID, BYTEAOID, INT2OID};
 	Oid leaf_argtypes[5] = {BYTEAOID, INT4OID, INT2OID, BYTEAOID, INT2OID};
 	Oid ancestor_argtypes[5] = {BYTEAOID, INT4OID, INT2OID, BYTEAOID, INT2OID};
+	char tablename[64];
 	char *sql;
 	SPIPlanPtr plan;
+
+	merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
 
 	if (plans->sync_route_plan == NULL ||
 		!SPI_plan_is_valid(plans->sync_route_plan))
 	{
 		sql = psprintf(
 			"SELECT is_leaf"
-			"  FROM ariabc_internal.merkle_node_%u"
+			"  FROM ariabc_internal.%s"
 			" WHERE partition_id = $1 AND node_id = $2 AND prefix_len = $3",
-			index_oid);
+			tablename);
 		plan = SPI_prepare(sql, 3, route_argtypes);
 		pfree(sql);
 		if (plan == NULL || SPI_keepplan(plan) != 0)
@@ -1199,14 +1224,14 @@ merkle_sync_prepare_plans(Oid index_oid)
 		!SPI_plan_is_valid(plans->sync_leaf_update_plan))
 	{
 		sql = psprintf(
-			"UPDATE ariabc_internal.merkle_node_%u"
+			"UPDATE ariabc_internal.%s"
 			"   SET hash = CASE WHEN tuple_count + $2 = 0 THEN '\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea ELSE pg_catalog.merkle_hash_xor_sql(hash, $1) END,"
 			"       tuple_count = tuple_count + $2"
 			" WHERE partition_id = $3 AND node_id = $4 AND prefix_len = $5"
 			"   AND is_leaf = true"
 			"   AND tuple_count + $2 >= 0"
 			" RETURNING tuple_count",
-			index_oid);
+			tablename);
 		plan = SPI_prepare(sql, 5, leaf_argtypes);
 		pfree(sql);
 		if (plan == NULL || SPI_keepplan(plan) != 0)
@@ -1218,11 +1243,11 @@ merkle_sync_prepare_plans(Oid index_oid)
 		!SPI_plan_is_valid(plans->sync_ancestor_update_plan))
 	{
 		sql = psprintf(
-			"UPDATE ariabc_internal.merkle_node_%u"
+			"UPDATE ariabc_internal.%s"
 			"   SET hash = CASE WHEN GREATEST(tuple_count + $2, 0) = 0 THEN '\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea ELSE pg_catalog.merkle_hash_xor_sql(hash, $1) END,"
 			"       tuple_count = GREATEST(tuple_count + $2, 0)"
 			" WHERE partition_id = $3 AND node_id = $4 AND prefix_len = $5",
-			index_oid);
+			tablename);
 		plan = SPI_prepare(sql, 5, ancestor_argtypes);
 		pfree(sql);
 		if (plan == NULL || SPI_keepplan(plan) != 0)
@@ -1235,9 +1260,9 @@ merkle_sync_prepare_plans(Oid index_oid)
 	{
 		sql = psprintf(
 			"SELECT tuple_count"
-			"  FROM ariabc_internal.merkle_node_%u"
+			"  FROM ariabc_internal.%s"
 			" WHERE partition_id = $1 AND node_id = $2 AND prefix_len = $3 AND is_leaf = true",
-			index_oid);
+			tablename);
 		plan = SPI_prepare(sql, 3, route_argtypes);
 		pfree(sql);
 		if (plan == NULL || SPI_keepplan(plan) != 0)
@@ -1529,12 +1554,16 @@ restart_traversal:
 				ins_values[2] = Int16GetDatum(0);
 				ins_values[3] = PointerGetDatum(zero_hash_bytea);
 
-				ins_sql = psprintf(
-					"INSERT INTO ariabc_internal.merkle_node_%u"
-					" (partition_id, node_id, prefix_len, is_leaf, tuple_count, hash)"
-					" VALUES ($1, $2, $3, true, 0, $4)"
-					" ON CONFLICT (partition_id, node_id, prefix_len) DO NOTHING",
-					index_oid);
+				{
+					char tablename[64];
+					merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+					ins_sql = psprintf(
+						"INSERT INTO ariabc_internal.%s"
+						" (partition_id, node_id, prefix_len, is_leaf, tuple_count, hash)"
+						" VALUES ($1, $2, $3, true, 0, $4)"
+						" ON CONFLICT (partition_id, node_id, prefix_len) DO NOTHING",
+						tablename);
+				}
 
 				SPI_execute_with_args(ins_sql, 4, ins_argtypes, ins_values, NULL, false, 1);
 				pfree(ins_sql);
@@ -2220,9 +2249,11 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 			}
 			if (!OidIsValid(plans->pkey_idx_oid))
 			{
+				char tablename[64];
 				char pkey_idx_name[64];
 				RangeVar *idx_rv;
-				snprintf(pkey_idx_name, sizeof(pkey_idx_name), "merkle_node_%u_pkey", curr_index_oid);
+				merkle_get_node_tablename(curr_index_oid, tablename, sizeof(tablename));
+				snprintf(pkey_idx_name, sizeof(pkey_idx_name), "%s_pkey", tablename);
 				idx_rv = makeRangeVar("ariabc_internal", pkey_idx_name, -1);
 				plans->pkey_idx_oid = RangeVarGetRelid(idx_rv, NoLock, false);
 			}

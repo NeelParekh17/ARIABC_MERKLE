@@ -67,8 +67,12 @@ class LiveDatabaseContract(unittest.TestCase):
             self.assertTrue(all(len(n["hash"])==64 and len(n["node_id"])==16 for n in snapshot["nodes"]))
             combined.extend(snapshot["nodes"])
             # Compare every displayed record to the exact dedicated SQL relation.
+            tbl_rel = f"merkle_node_{catalog['indexes'][0]['table_name']}"
             with psycopg.connect(self.cluster.dsn) as conn:
-                rows=conn.execute(psycopg.sql.SQL("SELECT partition_id,prefix_len,is_leaf,tuple_count,encode(node_id,'hex'),encode(hash,'hex') FROM {} WHERE partition_id=%s ORDER BY prefix_len,node_id").format(psycopg.sql.Identifier("ariabc_internal",f"merkle_node_{oid}")),(partition,)).fetchall()
+                chk = conn.execute("SELECT to_regclass(%s) IS NOT NULL", (f"ariabc_internal.{tbl_rel}",)).fetchone()[0]
+                if not chk:
+                    tbl_rel = f"merkle_node_{oid}"
+                rows=conn.execute(psycopg.sql.SQL("SELECT partition_id,prefix_len,is_leaf,tuple_count,encode(node_id,'hex'),encode(hash,'hex') FROM {} WHERE partition_id=%s ORDER BY prefix_len,node_id").format(psycopg.sql.Identifier("ariabc_internal", tbl_rel)),(partition,)).fetchall()
             actual={(r[4],r[1]):(r[2],r[3],r[5]) for r in rows}
             observed={(n["node_id"],n["prefix_len"]):(n["is_leaf"],n["tuple_count"],n["hash"]) for n in snapshot["nodes"]}
             self.assertEqual(observed,actual)

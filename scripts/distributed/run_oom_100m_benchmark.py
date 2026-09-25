@@ -421,7 +421,7 @@ def start_postgres(args):
 
 
 def prepare_ledger_schema(args):
-    # The new schema uses per-index merkle_node_<oid> tables managed entirely
+    # The new schema uses table-specific merkle_node_<tablename> tables managed entirely
     # by the backend (merkle_ensure_node_table).  The compatibility VIEW named
     # merkle_node is installed by the backend at first access.  No layout check
     # is needed or possible here — integrity is confirmed by merkle_verify later.

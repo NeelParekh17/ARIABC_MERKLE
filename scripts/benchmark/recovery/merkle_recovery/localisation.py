@@ -106,15 +106,35 @@ def detect_bad_leaves(
     # Resolve dedicated tables for direct primary key index scans, bypassing the UNION ALL view
     oids = execute(
         conn,
-        "SELECT to_regclass('healthy.usertable_merkle_idx')::oid AS h_oid, to_regclass('damaged.usertable_merkle_idx')::oid AS d_oid",
+        """
+        SELECT
+            to_regclass('ariabc_internal.merkle_node_healthy_usertable')::text AS h_tbl,
+            to_regclass('ariabc_internal.merkle_node_damaged_usertable')::text AS d_tbl,
+            to_regclass('healthy.usertable_merkle_idx')::oid AS h_oid,
+            to_regclass('damaged.usertable_merkle_idx')::oid AS d_oid
+        """,
     )
+    h_tbl = oids[0].get("h_tbl") if oids else None
+    d_tbl = oids[0].get("d_tbl") if oids else None
     h_oid = oids[0].get("h_oid") if oids else None
     d_oid = oids[0].get("d_oid") if oids else None
-    has_dedicated_tables = bool(h_oid and d_oid)
+
+    healthy_table = None
+    damaged_table = None
+    if h_tbl and d_tbl:
+        healthy_table = h_tbl
+        damaged_table = d_tbl
+    elif h_oid and d_oid:
+        h_fallback = f"ariabc_internal.merkle_node_{int(h_oid)}"
+        d_fallback = f"ariabc_internal.merkle_node_{int(d_oid)}"
+        chk = execute(conn, f"SELECT to_regclass('{h_fallback}')::text AS h, to_regclass('{d_fallback}')::text AS d")
+        if chk and chk[0].get("h") and chk[0].get("d"):
+            healthy_table = chk[0]["h"]
+            damaged_table = chk[0]["d"]
+
+    has_dedicated_tables = bool(healthy_table and damaged_table)
 
     if has_dedicated_tables:
-        healthy_table = f"ariabc_internal.merkle_node_{int(h_oid)}"
-        damaged_table = f"ariabc_internal.merkle_node_{int(d_oid)}"
         joined_subtree_sql = f"""
             WITH wanted(partition_id, node_id, prefix_len) AS (
                 SELECT * FROM unnest(%s::int2[], %s::bytea[], %s::int2[])
