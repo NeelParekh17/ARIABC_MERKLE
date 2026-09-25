@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR=/work/ARIABC/AriaBC
-RESULT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESULT_ROOT="$SCRIPT_DIR"
+REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_DIR"
 
 TPCC_TRIALS="${TPCC_TRIALS:-3}"
 unset SKIP_SYNC SKIP_BUILD FORCE_BUILD DET_CLIENT_WORKERS
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
-export LOCAL_INSTALL_DIR="${LOCAL_INSTALL_DIR:-/work/ARIABC/install}"
+export LOCAL_INSTALL_DIR="${LOCAL_INSTALL_DIR:-$(test -d /work/ARIABC/install && echo /work/ARIABC/install || echo "$REPO_DIR/../install")}"
 
 echo "=== ARIA BC TPC-C BENCHMARK SUITE ==="
 echo "Result Root: $RESULT_ROOT"
@@ -82,7 +83,11 @@ preflight_verify_tpcc_nodes() {
   echo "DB Node (10.129.7.57): VERIFIED ($db_fp)"
 
   local gw_fp
-  gw_fp="$(sshpass -p clusterinfolab123 ssh -o StrictHostKeyChecking=no neel@10.129.27.111 'grep "^source_fingerprint=" /home/neel/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_gateway.manifest 2>/dev/null | cut -d= -f2 || true')"
+  if [[ -f "$REPO_DIR/ariabc_pg/build/bin/ariabc_pg_gateway.manifest" ]]; then
+    gw_fp="$(grep "^source_fingerprint=" "$REPO_DIR/ariabc_pg/build/bin/ariabc_pg_gateway.manifest" 2>/dev/null | cut -d= -f2 || true)"
+  else
+    gw_fp="$(sshpass -p clusterinfolab123 ssh -o StrictHostKeyChecking=no neel@10.129.27.111 'grep "^source_fingerprint=" /home/neel/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_gateway.manifest 2>/dev/null | cut -d= -f2 || true')"
+  fi
   if [[ "$gw_fp" != "$expected_fp" ]]; then
     echo "ERROR: Gateway (10.129.27.111) manifest fingerprint ($gw_fp) does not match expected ($expected_fp)" >&2
     return 1
