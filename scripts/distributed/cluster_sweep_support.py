@@ -145,13 +145,15 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
     root = repo / "scripts/bench_full_results" / run_id
     log = attempts / (run_id + ".log")
     metadata = {"run_id": run_id, "workload": workload, "workers": workers,
-                "shared_buffers": args.db_shared_buffers, "status": "running",
+                "shared_buffers": getattr(args, "db_shared_buffers", "32MB"), "status": "running",
                 "artifact_dir": str(root)}
     meta_path = attempts / (run_id + ".json")
     env = os.environ.copy()
     env.update({
-        "BENCH_COLD_CACHE": "1" if args.cold_runs else "0",
-        "GATEWAY_HOST": args.gateway_host, "GATEWAY_USER": args.gateway_user, "GATEWAY_REPO": args.gateway_repo,
+        "BENCH_COLD_CACHE": "1" if getattr(args, "cold_runs", False) else "0",
+        "GATEWAY_HOST": getattr(args, "gateway_host", "10.129.27.111"),
+        "GATEWAY_USER": getattr(args, "gateway_user", "neel"),
+        "GATEWAY_REPO": getattr(args, "gateway_repo", "/home/neel/ARIABC/AriaBC"),
         "LOCAL_INSTALL_DIR": os.environ.get("LOCAL_INSTALL_DIR", "/home/neel/ARIABC/install"),
         "PATH": f"{Path.home()}/bin:{Path.home()}/.local/bin:{os.environ.get('PATH', '')}",
         "CLUSTER_RUN_ID": run_id, "FORCE_BUILD": os.environ.get("FORCE_BUILD", "0"), "SKIP_RDKAFKA_SETUP": "1",
@@ -182,9 +184,14 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
                         f"{args.gateway_user}@{args.gateway_host}:{args.gateway_repo}/scripts/distributed/{name}"], check=True, timeout=60)
     metadata["workload_sha256"] = digest
     gw_workers = str(os.environ.get("DET_CLIENT_WORKERS", "96"))
+    tx_sign = getattr(args, "tx_sign", None) or os.environ.get("TX_SIGN") or os.environ.get("ARIABC_TX_SIGN") or "blake3"
+    env["TX_SIGN"] = str(tx_sign)
+    env["ARIABC_TX_SIGN"] = str(tx_sign)
+    metadata["tx_sign"] = str(tx_sign)
     command = [str(repo / "scripts/distributed/run_4node_raft_cluster.sh"),
-               "--workload", remote_workload, "--db-shared-buffers", args.db_shared_buffers,
+               "--workload", remote_workload, "--db-shared-buffers", getattr(args, "db_shared_buffers", "32MB"),
                "--ordering-mode", "raft-kafka", "--enable-merkle-index", "1",
+               "--tx-sign", str(tx_sign),
                "--raft-apply-ledger-mode", "off", "--threads", gw_workers,
                "--det-client-workers", gw_workers, "--det-client-inflight", "16",
                "--server-exec-workers", str(workers), "--server-pg-connections", str(workers),

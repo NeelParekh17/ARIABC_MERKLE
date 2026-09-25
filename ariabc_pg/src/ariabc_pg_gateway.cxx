@@ -210,10 +210,12 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.query_from = need("--queryFrom");
             } else if (a == "--querySign") {
                 opt.query_sign = std::stoi(need("--querySign"));
-            } else if (a == "--txSign") {
-                opt.tx_sign = ariabc_pg::trim_copy(need("--txSign"));
-            } else if (a == "--txSigKey") {
-                opt.tx_sig_key = need("--txSigKey");
+            } else if (a == "--txSign" || a == "--tx-sign" || a == "--enable-tx-sign") {
+                opt.tx_sign = ariabc_pg::trim_copy(need(a.c_str()));
+            } else if (a == "--no-tx-sign" || a == "--disable-tx-sign") {
+                opt.tx_sign = "0";
+            } else if (a == "--txSigKey" || a == "--tx-sig-key") {
+                opt.tx_sig_key = need(a.c_str());
             } else if (a == "--pubKeyFile") {
                 opt.pub_key_file = need("--pubKeyFile");
             } else if (a == "--privKeyFile") {
@@ -4343,10 +4345,14 @@ int main(int argc, char** argv) {
     std::thread async_audit_thread;
 
     ariabc_pg::blake3_tx_signer tx_signer;
-    const bool tx_sign_enable = (opt.tx_sign != "0" && opt.tx_sign != "off" && opt.tx_sign != "none");
+    const bool tx_sign_enable = (opt.tx_sign != "0" && opt.tx_sign != "off" && opt.tx_sign != "none" &&
+                                 opt.tx_sign != "false" && opt.tx_sign != "no" && opt.tx_sign != "disable" &&
+                                 opt.tx_sign != "disabled");
     tx_signer.init(tx_sign_enable, opt.tx_sig_key);
     if (tx_signer.is_enabled()) {
         std::cout << "BLAKE3 on-the-fly transaction signing & verification: ENABLED" << std::endl;
+    } else {
+        std::cout << "BLAKE3 on-the-fly transaction signing & verification: DISABLED" << std::endl;
     }
 
     std::vector<ariabc_pg::blake3_sig_256> query_tx_sigs;
