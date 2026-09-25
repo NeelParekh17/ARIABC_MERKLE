@@ -1,3 +1,2 @@
-status=failed
-exit_code=1
-finished_utc=2026-09-24T11:06:47Z
+status=completed
+finished_utc=2026-09-25T14:07:56Z

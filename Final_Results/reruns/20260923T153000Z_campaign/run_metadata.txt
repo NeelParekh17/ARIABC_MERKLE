@@ -9,7 +9,3 @@ tpcc_host=10.129.7.57
 recovery_host=ranking.cse.iitb.ac.in
 planned_runs=565
 copied_recovery_artifacts=/work/ARIABC/AriaBC/scripts/benchmark/recovery/fetched/ariabc-recovery-size-scaling-k75-c300-20260924T053957Z-0031ee
-# 2026-09-24T13:00Z gateway fix: ariabc_pg_gateway.cxx completion-wait socket timeout (35 s hard SO_RCVTIMEO) now follows ARIABC_WAIT_RESULT_TIMEOUT_MS + 30 s.
-# YCSB and Recovery ran on source_fingerprint=7bbdd971...; TPC-C and OOM run on source_fingerprint=58a21513c46714bd10c38e86c161dcdca5a9a7bba01d147720589d09ce173649.
-# Server/postgres binaries unchanged (identical sha256); only ariabc_pg_gateway changed. First TPC-C attempt archived as TPCC/workers_w100_FAILED_gateway35s_20260924T1106Z.
-source_fingerprint_tpcc_oom=58a21513c46714bd10c38e86c161dcdca5a9a7bba01d147720589d09ce173649

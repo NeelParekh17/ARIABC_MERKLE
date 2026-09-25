@@ -251,7 +251,6 @@ run_stage TPCC/workers_w100 python3 -u scripts/distributed/run_all_modes_gateway
   --tpcc-merkle-merge-threshold 8 \
   --db-shared-buffers 32GB \
   --cold-runs \
-  --tpcc-prewarm \
   --order-seed 42 \
   --out-dir "$RESULT_ROOT/TPCC/workers_w100"
 
@@ -279,7 +278,6 @@ run_stage TPCC/warehouses_w32 python3 -u scripts/distributed/run_all_modes_gatew
   --tpcc-merkle-merge-threshold 8 \
   --db-shared-buffers 32GB \
   --cold-runs \
-  --tpcc-prewarm \
   --order-seed 42 \
   --out-dir "$RESULT_ROOT/TPCC/warehouses_w32"
 

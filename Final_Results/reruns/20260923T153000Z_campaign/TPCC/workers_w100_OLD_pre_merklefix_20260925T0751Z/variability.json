@@ -1,0 +1,206 @@
+[
+  {
+    "configuration": [
+      "bcdb_det",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "16"
+    ],
+    "trials": 3,
+    "median": 1713.796058269066,
+    "mean": 1528.2032301929066,
+    "min": 1128.3497884344147,
+    "max": 1742.4638438752395,
+    "cv_pct": 22.678906175300156,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "24"
+    ],
+    "trials": 3,
+    "median": 1829.9935950224174,
+    "mean": 1825.908958688233,
+    "min": 1814.5527127563055,
+    "max": 1833.1805682859763,
+    "cv_pct": 0.5456489901239823,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "32"
+    ],
+    "trials": 3,
+    "median": 1760.5633802816901,
+    "mean": 1762.0668986073968,
+    "min": 1759.7888253409592,
+    "max": 1765.848490199541,
+    "cv_pct": 0.1871537059111277,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "8"
+    ],
+    "trials": 3,
+    "median": 1320.829480914014,
+    "mean": 1315.9077516275074,
+    "min": 1300.8976193573567,
+    "max": 1325.9961546111517,
+    "cv_pct": 1.0071652004467269,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "16"
+    ],
+    "trials": 3,
+    "median": 453.92646391284615,
+    "mean": 442.2133207060778,
+    "min": 314.47529796534485,
+    "max": 558.2382002400424,
+    "cv_pct": 27.656979434212147,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "24"
+    ],
+    "trials": 3,
+    "median": 552.5777753218765,
+    "mean": 455.1036313475821,
+    "min": 257.34726439857945,
+    "max": 555.3858543222904,
+    "cv_pct": 37.632701859266696,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "32"
+    ],
+    "trials": 3,
+    "median": 543.9512619669277,
+    "mean": 457.80102395426866,
+    "min": 281.6266756787203,
+    "max": 547.8251342171579,
+    "cv_pct": 33.32971041731299,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "8"
+    ],
+    "trials": 3,
+    "median": 525.1135558064432,
+    "mean": 409.79487633304063,
+    "min": 178.536358929496,
+    "max": 525.7347142631828,
+    "cv_pct": 48.87225372888798,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "16"
+    ],
+    "trials": 3,
+    "median": 2746.875429199286,
+    "mean": 2743.145678626131,
+    "min": 2729.2576419213974,
+    "max": 2753.3039647577093,
+    "cv_pct": 0.45383975149991046,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "24"
+    ],
+    "trials": 3,
+    "median": 3540.449637103912,
+    "mean": 2707.730936496439,
+    "min": 959.554766588303,
+    "max": 3623.1884057971015,
+    "cv_pct": 55.933551622349896,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "32"
+    ],
+    "trials": 3,
+    "median": 4255.31914893617,
+    "mean": 4241.377249033878,
+    "min": 4179.728317659352,
+    "max": 4289.084280506112,
+    "cv_pct": 1.3202130234453477,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "tpcc-workload-20000-w100-seed42.txt",
+      "",
+      "100",
+      "",
+      "8"
+    ],
+    "trials": 3,
+    "median": 1639.0755613833799,
+    "mean": 1286.8186740309982,
+    "min": 581.767409389726,
+    "max": 1639.6130513198884,
+    "cv_pct": 47.44975944275362,
+    "status": "insufficient_repeats"
+  }
+]

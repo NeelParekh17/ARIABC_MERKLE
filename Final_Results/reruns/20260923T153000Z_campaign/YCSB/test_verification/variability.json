@@ -1,0 +1,206 @@
+[
+  {
+    "configuration": [
+      "bcdb_det",
+      "ycsb_workload_c_skew_0_50_20k.txt",
+      "",
+      "",
+      "",
+      "16"
+    ],
+    "trials": 1,
+    "median": 47961.630695443644,
+    "mean": 47961.630695443644,
+    "min": 47961.630695443644,
+    "max": 47961.630695443644,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "ycsb_workload_c_skew_0_50_20k.txt",
+      "",
+      "",
+      "",
+      "4"
+    ],
+    "trials": 1,
+    "median": 32786.88524590164,
+    "mean": 32786.88524590164,
+    "min": 32786.88524590164,
+    "max": 32786.88524590164,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "ycsb_workload_d_skew_1_20_20k.txt",
+      "",
+      "",
+      "",
+      "16"
+    ],
+    "trials": 1,
+    "median": 27359.781121751024,
+    "mean": 27359.781121751024,
+    "min": 27359.781121751024,
+    "max": 27359.781121751024,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "ycsb_workload_d_skew_1_20_20k.txt",
+      "",
+      "",
+      "",
+      "4"
+    ],
+    "trials": 1,
+    "median": 18796.992481203008,
+    "mean": 18796.992481203008,
+    "min": 18796.992481203008,
+    "max": 18796.992481203008,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "ycsb_workload_c_skew_0_50_20k.txt",
+      "",
+      "",
+      "",
+      "16"
+    ],
+    "trials": 1,
+    "median": 46838.4074941452,
+    "mean": 46838.4074941452,
+    "min": 46838.4074941452,
+    "max": 46838.4074941452,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "ycsb_workload_c_skew_0_50_20k.txt",
+      "",
+      "",
+      "",
+      "4"
+    ],
+    "trials": 1,
+    "median": 32573.289902280132,
+    "mean": 32573.289902280132,
+    "min": 32573.289902280132,
+    "max": 32573.289902280132,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "ycsb_workload_d_skew_1_20_20k.txt",
+      "",
+      "",
+      "",
+      "16"
+    ],
+    "trials": 1,
+    "median": 26007.802340702212,
+    "mean": 26007.802340702212,
+    "min": 26007.802340702212,
+    "max": 26007.802340702212,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "ycsb_workload_d_skew_1_20_20k.txt",
+      "",
+      "",
+      "",
+      "4"
+    ],
+    "trials": 1,
+    "median": 18399.264029438822,
+    "mean": 18399.264029438822,
+    "min": 18399.264029438822,
+    "max": 18399.264029438822,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "ycsb_workload_c_skew_0_50_20k.txt",
+      "",
+      "",
+      "",
+      "16"
+    ],
+    "trials": 1,
+    "median": 67340.06734006734,
+    "mean": 67340.06734006734,
+    "min": 67340.06734006734,
+    "max": 67340.06734006734,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "ycsb_workload_c_skew_0_50_20k.txt",
+      "",
+      "",
+      "",
+      "4"
+    ],
+    "trials": 1,
+    "median": 48661.800486618005,
+    "mean": 48661.800486618005,
+    "min": 48661.800486618005,
+    "max": 48661.800486618005,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "ycsb_workload_d_skew_1_20_20k.txt",
+      "",
+      "",
+      "",
+      "16"
+    ],
+    "trials": 1,
+    "median": 58139.53488372093,
+    "mean": 58139.53488372093,
+    "min": 58139.53488372093,
+    "max": 58139.53488372093,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "ycsb_workload_d_skew_1_20_20k.txt",
+      "",
+      "",
+      "",
+      "4"
+    ],
+    "trials": 1,
+    "median": 34904.01396160558,
+    "mean": 34904.01396160558,
+    "min": 34904.01396160558,
+    "max": 34904.01396160558,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  }
+]
