@@ -470,6 +470,11 @@ def main():
         help="Path to cluster baseline summary.csv for comparison",
     )
     parser.add_argument(
+        "--tx-sign",
+        default=os.environ.get("ARIABC_TX_SIGN", "blake3"),
+        help="Transaction signing mode: blake3|1 (enabled) or 0|off (disabled). Default: blake3",
+    )
+    parser.add_argument(
         "--run-cluster",
         action="store_true",
         help="Force live execution of 4-node cluster benchmark instead of reusing verified baseline",
@@ -2455,6 +2460,7 @@ EOF
                       --clientId single-gateway-direct \\
                       --numTerminals 96 \\
                       --connFanout 1 \\
+                      --txSign {args.tx_sign} \\
                       --waitMajority 0 \\
                       --completionPath direct \\
                       --totalNodes 1
@@ -2479,6 +2485,7 @@ EOF
                       --clientId single-gateway-direct \\
                       --numTerminals 96 \\
                       --connFanout 1 \\
+                      --txSign {args.tx_sign} \\
                       --waitMajority 0 \\
                       --completionPath direct \\
                       --totalNodes 1

@@ -59,6 +59,7 @@ lib*.pc
 !NuRaft/**/*.md
 !/dynamic_merkle_visualizer/
 !/dynamic_merkle_visualizer/README.md
+!Final_Results/TX_SIGN/*.md
 *.diff
 
 # Exclude scripts by default (but allow whitelisting specific files)

@@ -217,7 +217,8 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     RAFT_STORAGE_MODE RAFT_STORAGE_DIR RAFT_STORAGE_ACTION RAFT_STORAGE_ROOT RAFT_CLUSTER_ID \
     FAILPOINT_NODE_ID FAILPOINT_ENV FAILPOINT_RAFT_LOG_INDEX FAILPOINT_ITEM_ORDINAL \
     ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE \
-    ARIABC_PHASE3_INVOCATION_ID
+    ARIABC_PHASE3_INVOCATION_ID \
+    TX_SIGN ARIABC_TX_SIGN
   do
     if [[ -v "$var" ]]; then
       delegate_env+=("$var=${!var}")
@@ -502,6 +503,7 @@ GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-12}"
 SKIP_WORKLOAD="${SKIP_WORKLOAD:-0}"          # 1=start cluster and leader only; do not start gateway or submit SQL
 KAFKA_FAST_RESET="${KAFKA_FAST_RESET:-1}"    # 1=fast Kafka reset (skip JVM console consumer smoke check)
 DUMP_VERIFY_CSV="${DUMP_VERIFY_CSV:-0}"      # 0=skip slow 2.7MB CSV dump; use cryptographic root and row count
+TX_SIGN="${TX_SIGN:-${ARIABC_TX_SIGN:-blake3}}" # blake3|1=sign txs with blake3; 0|off=disable tx signing
 
 # ===========================================================================
 # Function: usage
@@ -524,6 +526,8 @@ Options:
   --enable-merkle-index N
                   Set the server default for Merkle maintenance: 0|1
                   (default: 1). Use 0 only for explicit overhead controls.
+  --tx-sign MODE  Transaction signing mode: blake3|1 (enabled) or 0|off (disabled).
+                  (default: blake3)
   --merkle-partitions N
                   Number of independent hash-routed Merkle partitions (default: 200)
   --merkle-fanout N
@@ -767,6 +771,10 @@ while [[ $# -gt 0 ]]; do
     --stop-only) STOP_ONLY=1; shift ;;
     --skip-pg-restart) FORCE_PG_RESTART=0; shift ;;
     --db-shared-buffers) DB_SHARED_BUFFERS="${2:-}"; shift 2 ;;
+    --tx-sign)      TX_SIGN="${2:-}"; shift 2 ;;
+    --txSign)       TX_SIGN="${2:-}"; shift 2 ;;
+    --enable-tx-sign) TX_SIGN="${2:-}"; shift 2 ;;
+    --no-tx-sign)   TX_SIGN="0"; shift ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
     --node-ids) NODE_IDS_CSV="${2:-}"; shift 2 ;;
     --node-ips) NODE_IPS_CSV="${2:-}"; shift 2 ;;
@@ -1882,6 +1890,7 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'raft_cluster_id=%s\n' "$RAFT_CLUSTER_ID"
   printf 'raft_epoch_hex=%s\n' "$RAFT_EPOCH_HEX"
   printf 'skip_workload=%s\n' "$SKIP_WORKLOAD"
+  printf 'tx_sign=%s\n' "$TX_SIGN"
   printf 'phase3_invocation_id=%s\n' "${ARIABC_PHASE3_INVOCATION_ID:-}"
 } > "$LOG_DIR/run_meta.env"
 
@@ -3945,7 +3954,7 @@ fi
 
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
-log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM"
+log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM | txSign=$TX_SIGN"
 log "  DET ids:       executionProfile=$EXECUTION_PROFILE detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detClientMode=$DET_CLIENT_MODE detClientWorkers=$DET_CLIENT_WORKERS detClientInflight=$DET_CLIENT_INFLIGHT serverExecWorkers=$SERVER_EXEC_WORKERS serverPgConnections=$SERVER_PG_CONNECTIONS connFanout=$CONN_FANOUT raftOrderedFanout=$RAFT_ORDERED_FANOUT raftOrderedBatchAppend=$RAFT_ORDERED_BATCH_APPEND raftOrderedCoalesceLog=$RAFT_ORDERED_COALESCE_LOG raftOrderingPolicy=$RAFT_ORDERING_POLICY raftOrderedBatchTargetEntries=$RAFT_ORDERED_BATCH_TARGET_ENTRIES raftOrderedBatchLingerUs=$RAFT_ORDERED_BATCH_LINGER_US broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbInitArgSize=$BCDB_INIT_BLOCK_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
 phase_marker "PHASE_6_WORKLOAD_STARTED"
 # Print a clear banner that distinguishes pipeline-depth from real OS parallelism
@@ -3989,7 +3998,8 @@ _gw_common_args() {
     --detClientInflight "$DET_CLIENT_INFLIGHT" \
     --clientId "$client_id" \
     --numTerminals "$num_terms" \
-    --connFanout "$CONN_FANOUT"
+    --connFanout "$CONN_FANOUT" \
+    --txSign "$TX_SIGN"
   [[ -n "${POLL_COUNT:-}" ]] && printf '%s\n' --pollCount "$POLL_COUNT"
   [[ -n "${POLL_INTERVAL_US:-}" ]] && printf '%s\n' --pollIntervalUs "$POLL_INTERVAL_US"
   # Append extra args word-by-word
@@ -4407,6 +4417,7 @@ if [[ "$SKIP_POST_VERIFY" -eq 0 ]]; then
     --detPipelineDepth 1 \
     --clientId "cluster-ycsb-marker" \
     --numTerminals 1 \
+    --txSign "$TX_SIGN" \
     --raft-epoch-hex "$RAFT_EPOCH_HEX" \
     --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
     $GW_EXTRA_ARGS \
