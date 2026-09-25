@@ -32,6 +32,7 @@
 #include "funcapi.h"
 #include "access/xact.h"
 #include "access/xloginsert.h"
+#include "catalog/index.h"
 #include "miscadmin.h"
 #include "portability/instr_time.h"
 
@@ -1139,6 +1140,28 @@ merkle_hash_xor_sql(PG_FUNCTION_ARGS)
 void
 merkle_get_node_tablename(Oid index_oid, char *buf, size_t buflen)
 {
+	Oid heap_oid = IndexGetRelation(index_oid, true);
+	if (OidIsValid(heap_oid))
+	{
+		char *relname = get_rel_name(heap_oid);
+		if (relname != NULL)
+		{
+			Oid nsp_oid = get_rel_namespace(heap_oid);
+			char *nspname = nsp_oid ? get_namespace_name(nsp_oid) : NULL;
+
+			if (nspname != NULL &&
+				strcmp(nspname, "public") != 0 &&
+				strcmp(nspname, "pg_catalog") != 0)
+			{
+				snprintf(buf, buflen, "merkle_node_%s_%s", nspname, relname);
+			}
+			else
+			{
+				snprintf(buf, buflen, "merkle_node_%s", relname);
+			}
+			return;
+		}
+	}
 	snprintf(buf, buflen, "merkle_node_%u", index_oid);
 }
 
@@ -1156,15 +1179,22 @@ merkle_get_node_table_relid(Oid index_oid)
 void
 merkle_ensure_node_table(Oid index_oid)
 {
+	char tablename[64];
+	char prefix_idx[64];
+	char root_idx[64];
 	char *sql;
 	int rc;
 
 	if (OidIsValid(merkle_get_node_table_relid(index_oid)))
 		return;
 
+	merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+	snprintf(prefix_idx, sizeof(prefix_idx), "%s_prefix_idx", tablename);
+	snprintf(root_idx, sizeof(root_idx), "%s_root_idx", tablename);
+
 	sql = psprintf(
 		"CREATE SCHEMA IF NOT EXISTS ariabc_internal;\n"
-		"CREATE TABLE IF NOT EXISTS ariabc_internal.merkle_node_%u (\n"
+		"CREATE TABLE IF NOT EXISTS ariabc_internal.%s (\n"
 		"    tuple_count  integer  NOT NULL DEFAULT 0,\n"
 		"    partition_id smallint NOT NULL,\n"
 		"    prefix_len   smallint NOT NULL,\n"
@@ -1173,12 +1203,12 @@ merkle_ensure_node_table(Oid index_oid)
 		"    hash         bytea    NOT NULL,\n"
 		"    PRIMARY KEY (partition_id, node_id, prefix_len)\n"
 		") WITH (fillfactor = 80);\n"
-		"CREATE INDEX IF NOT EXISTS merkle_node_%u_prefix_idx\n"
-		"    ON ariabc_internal.merkle_node_%u (partition_id, prefix_len, node_id);\n"
-		"CREATE INDEX IF NOT EXISTS merkle_node_%u_root_idx\n"
-		"    ON ariabc_internal.merkle_node_%u (partition_id)\n"
+		"CREATE INDEX IF NOT EXISTS %s\n"
+		"    ON ariabc_internal.%s (partition_id, prefix_len, node_id);\n"
+		"CREATE INDEX IF NOT EXISTS %s\n"
+		"    ON ariabc_internal.%s (partition_id)\n"
 		"    WHERE prefix_len = 0;\n",
-		index_oid, index_oid, index_oid, index_oid, index_oid);
+		tablename, prefix_idx, tablename, root_idx, tablename);
 
 	rc = SPI_connect();
 	if (rc != SPI_OK_CONNECT)
@@ -1192,7 +1222,7 @@ merkle_ensure_node_table(Oid index_oid)
 	pfree(sql);
 
 	if (rc < 0)
-		elog(ERROR, "failed to create dedicated table ariabc_internal.merkle_node_%u (rc=%d)", index_oid, rc);
+		elog(ERROR, "failed to create dedicated table ariabc_internal.%s (rc=%d)", tablename, rc);
 
 	CommandCounterIncrement();
 }
@@ -1200,10 +1230,12 @@ merkle_ensure_node_table(Oid index_oid)
 void
 merkle_drop_node_table(Oid index_oid)
 {
+	char tablename[64];
 	char *sql;
 	int rc;
 
-	sql = psprintf("DROP TABLE IF EXISTS ariabc_internal.merkle_node_%u CASCADE;", index_oid);
+	merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+	sql = psprintf("DROP TABLE IF EXISTS ariabc_internal.%s CASCADE;", tablename);
 
 	rc = SPI_connect();
 	if (rc != SPI_OK_CONNECT)

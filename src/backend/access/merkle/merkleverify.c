@@ -276,10 +276,13 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 	/* 1. Dynamic Index: Fetch root hash from catalog ariabc_internal.merkle_node_<indexOid> */
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
-		char *sql = psprintf(
-			"SELECT hash FROM ariabc_internal.merkle_node_%u"
+		char tablename[64];
+		char *sql;
+		merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
+		sql = psprintf(
+			"SELECT hash FROM ariabc_internal.%s"
 			" WHERE prefix_len = 0",
-			indexOid);
+			tablename);
 
 		spi_rc = SPI_execute(sql, true, 0);
 		pfree(sql);
@@ -353,10 +356,13 @@ merkle_root_hash_index(PG_FUNCTION_ARGS)
 
 		if (SPI_connect() == SPI_OK_CONNECT)
 		{
-			char *sql = psprintf(
-				"SELECT hash FROM ariabc_internal.merkle_node_%u"
+			char tablename[64];
+			char *sql;
+			merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
+			sql = psprintf(
+				"SELECT hash FROM ariabc_internal.%s"
 				" WHERE prefix_len = 0",
-				indexOid);
+				tablename);
 
 			spi_rc = SPI_execute(sql, true, 0);
 			pfree(sql);
@@ -466,10 +472,13 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
     /* Query dynamic catalog node counts via SPI */
     if (SPI_connect() == SPI_OK_CONNECT)
     {
-		char *sql = psprintf(
-			"SELECT count(*), count(*) FILTER (WHERE is_leaf) FROM ariabc_internal.merkle_node_%u",
-			indexOid);
+		char tablename[64];
+		char *sql;
 		int spi_rc;
+		merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
+		sql = psprintf(
+			"SELECT count(*), count(*) FILTER (WHERE is_leaf) FROM ariabc_internal.%s",
+			tablename);
 
 		spi_rc = SPI_execute(sql, true, 0);
 		pfree(sql);
@@ -678,15 +687,17 @@ merkle_get_partition_root_hash(PG_FUNCTION_ARGS)
 	{
 		Oid		argtypes[2] = {INT2OID, INT2OID};
 		Datum	args[2];
+		char	tablename[64];
 		char   *sql;
 		int		spi_rc;
+		merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
 		args[0] = Int16GetDatum((int16) partition_id);
 		args[1] = Int16GetDatum(0);
 		sql = psprintf(
-			"SELECT hash FROM ariabc_internal.merkle_node_%u "
+			"SELECT hash FROM ariabc_internal.%s "
 			" WHERE partition_id = $1 "
 			"   AND node_id = '\\x0000000000000000'::bytea AND prefix_len = $2",
-			indexOid);
+			tablename);
 		spi_rc = SPI_execute_with_args(sql, 2, argtypes, args, NULL, true, 1);
 		pfree(sql);
 		if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
@@ -745,14 +756,16 @@ merkle_get_partition_root_hashes(PG_FUNCTION_ARGS)
 
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
+		char	tablename[64];
 		char   *sql;
 		int		spi_rc;
 
+		merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
 		sql = psprintf(
-			"SELECT partition_id, hash FROM ariabc_internal.merkle_node_%u "
+			"SELECT partition_id, hash FROM ariabc_internal.%s "
 			" WHERE node_id = '\\x0000000000000000'::bytea "
 			"   AND prefix_len = 0 ORDER BY partition_id",
-			indexOid);
+			tablename);
 		spi_rc = SPI_execute(sql, true, 0);
 		pfree(sql);
 
@@ -1061,12 +1074,16 @@ merkle_get_descendants_batch(PG_FUNCTION_ARGS)
 		args[0] = Int16GetDatum(current_prefix_len);
 		args[1] = PointerGetDatum(arr);
 
-		sql = psprintf(
-			"SELECT node_id, prefix_len, is_leaf, hash "
-			"  FROM ariabc_internal.merkle_node_%u "
-			" WHERE prefix_len = $1 AND node_id = ANY($2::bytea[]) "
-			" ORDER BY node_id",
-			indexOid);
+		{
+			char tablename[64];
+			merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
+			sql = psprintf(
+				"SELECT node_id, prefix_len, is_leaf, hash "
+				"  FROM ariabc_internal.%s "
+				" WHERE prefix_len = $1 AND node_id = ANY($2::bytea[]) "
+				" ORDER BY node_id",
+				tablename);
+		}
 		spi_rc = SPI_execute_with_args(sql, 2, argtypes, args, NULL, true, 0);
 		pfree(sql);
 
@@ -1257,29 +1274,33 @@ merkle_get_descendants_batch_array(PG_FUNCTION_ARGS)
 
 		if (partition_aware)
 		{
+			char tablename[64];
+			merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
 			args[0] = Int16GetDatum((int16) partition_id);
 			args[1] = Int16GetDatum(current_prefix_len);
 			args[2] = PointerGetDatum(arr);
 			sql = psprintf(
 				"SELECT node_id, prefix_len, is_leaf, hash "
-				"  FROM ariabc_internal.merkle_node_%u "
+				"  FROM ariabc_internal.%s "
 				" WHERE partition_id = $1 "
 				"   AND prefix_len = $2 AND node_id = ANY($3::bytea[]) "
 				" ORDER BY node_id",
-				indexOid);
+				tablename);
 			spi_rc = SPI_execute_with_args(sql, 3, partition_argtypes, args, NULL, true, 0);
 			pfree(sql);
 		}
 		else
 		{
+			char tablename[64];
+			merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
 			args[0] = Int16GetDatum(current_prefix_len);
 			args[1] = PointerGetDatum(arr);
 			sql = psprintf(
 				"SELECT node_id, prefix_len, is_leaf, hash "
-				"  FROM ariabc_internal.merkle_node_%u "
+				"  FROM ariabc_internal.%s "
 				" WHERE prefix_len = $1 AND node_id = ANY($2::bytea[]) "
 				" ORDER BY node_id",
-				indexOid);
+				tablename);
 			spi_rc = SPI_execute_with_args(sql, 2, legacy_argtypes, args, NULL, true, 0);
 			pfree(sql);
 		}

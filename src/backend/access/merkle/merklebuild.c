@@ -1651,7 +1651,10 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	merkle_ensure_node_table(RelationGetRelid(indexRel));
 	if (SPI_connect() == SPI_OK_CONNECT)
 	{
-		char *trunc_sql = psprintf("TRUNCATE TABLE ariabc_internal.merkle_node_%u;", RelationGetRelid(indexRel));
+		char tablename[64];
+		char *trunc_sql;
+		merkle_get_node_tablename(RelationGetRelid(indexRel), tablename, sizeof(tablename));
+		trunc_sql = psprintf("DELETE FROM ariabc_internal.%s;", tablename);
 		SPI_execute(trunc_sql, false, 0);
 		pfree(trunc_sql);
 		if (SPI_tuptable != NULL)

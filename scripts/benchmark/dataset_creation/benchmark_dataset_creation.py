@@ -125,6 +125,10 @@ def measure_dataset_creation_single_run(
     execute_sql(conn, f"SET synchronous_commit = {synchronous_commit}")
     execute_sql(conn, "DROP TABLE IF EXISTS usertable CASCADE")
     try:
+        execute_sql(conn, "TRUNCATE ariabc_internal.merkle_node_usertable CASCADE")
+    except Exception:
+        pass
+    try:
         execute_sql(conn, "TRUNCATE ariabc_internal.merkle_node CASCADE")
         execute_sql(conn, "UPDATE ariabc_internal.merkle_apply_state SET applied_seq = 0, state = 0, error_text = NULL")
         execute_sql(conn, "UPDATE ariabc_internal.merkle_apply_counter SET next_seq = 0, terminal_prefix_seq = 0")
@@ -201,7 +205,10 @@ def measure_dataset_creation_single_run(
     # ── Step 6: Statistics Analysis ───────────────────────────────────────
     t_analyze = time.perf_counter()
     execute_sql(conn, "ANALYZE usertable")
-    execute_sql(conn, "ANALYZE ariabc_internal.merkle_node")
+    try:
+        execute_sql(conn, "ANALYZE ariabc_internal.merkle_node_usertable")
+    except Exception:
+        execute_sql(conn, "ANALYZE ariabc_internal.merkle_node")
     timings["analyze_ms"] = (time.perf_counter() - t_analyze) * 1000.0
 
     timings["total_dataset_creation_ms"] = (time.perf_counter() - t_start_total) * 1000.0
@@ -229,17 +236,29 @@ def measure_dataset_creation_single_run(
     total_bytes = int(scalar_sql(conn, "SELECT pg_total_relation_size('usertable'::regclass)"))
 
     # ── Merkle Internal Node Catalog Metrics ─────────────────────────────
-    node_stats = execute_sql(
-        conn,
-        """
-        SELECT
-            count(*)::int AS total_nodes,
-            count(*) FILTER (WHERE is_leaf)::int AS leaf_nodes,
-            coalesce(max(prefix_len), 0)::int AS max_prefix_len
-        FROM ariabc_internal.merkle_node
-        WHERE index_oid = 'usertable_merkle_idx'::regclass
-        """,
-    )
+    try:
+        node_stats = execute_sql(
+            conn,
+            """
+            SELECT
+                count(*)::int AS total_nodes,
+                count(*) FILTER (WHERE is_leaf)::int AS leaf_nodes,
+                coalesce(max(prefix_len), 0)::int AS max_prefix_len
+            FROM ariabc_internal.merkle_node_usertable
+            """,
+        )
+    except Exception:
+        node_stats = execute_sql(
+            conn,
+            """
+            SELECT
+                count(*)::int AS total_nodes,
+                count(*) FILTER (WHERE is_leaf)::int AS leaf_nodes,
+                coalesce(max(prefix_len), 0)::int AS max_prefix_len
+            FROM ariabc_internal.merkle_node
+            WHERE index_oid = 'usertable_merkle_idx'::regclass
+            """,
+        )
     total_nodes = int(node_stats[0]["total_nodes"] or 0)
     leaf_nodes = int(node_stats[0]["leaf_nodes"] or 0)
     max_prefix = int(node_stats[0]["max_prefix_len"] or 0)

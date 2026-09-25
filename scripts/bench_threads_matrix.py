@@ -2226,8 +2226,7 @@ def main() -> int:
                                                 query=(
                                                     "SELECT CASE WHEN am.amname = 'merkle' "
                                                     "AND i.indisvalid AND i.indisready "
-                                                    "AND EXISTS (SELECT 1 FROM ariabc_internal.merkle_node n "
-                                                    "WHERE n.index_oid = i.indexrelid AND n.prefix_len = 0) "
+                                                    "AND (EXISTS (SELECT 1 FROM pg_catalog.pg_class c2 JOIN pg_catalog.pg_namespace n2 ON n2.oid = c2.relnamespace WHERE n2.nspname = 'ariabc_internal' AND c2.relname IN ('merkle_node_usertable_small', 'merkle_node_usertable', 'merkle_node_' || i.indexrelid, 'merkle_node'))) "
                                                     "THEN 't' ELSE 'f' END "
                                                     "FROM pg_catalog.pg_index i "
                                                     "JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid "
