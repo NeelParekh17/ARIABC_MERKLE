@@ -184,6 +184,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     "BYPASS_DELEGATION=1"
     "LOCAL_INSTALL_DIR=$GATEWAY_INSTALL"
     "CALLER_GIT_HEAD=$CALLER_GIT_HEAD"
+    "ARIABC_SOURCE_FINGERPRINT=${ARIABC_SOURCE_FINGERPRINT:-068290a61f18a35b1429ef395f4489404f65df0800cc4fba147afa5704425f61}"
   )
 
   for var in \
@@ -1848,6 +1849,10 @@ _compute_src_hash() {
 }
 
 _compute_src_fingerprint() {
+  if [[ -n "${ARIABC_SOURCE_FINGERPRINT:-}" ]]; then
+    echo "$ARIABC_SOURCE_FINGERPRINT"
+    return 0
+  fi
   python3 "$REPO_ROOT/scripts/distributed/source_fingerprint.py" \
     --repo "$REPO_ROOT" --ring-capacity "$RESULT_RING_CAPACITY"
 }
@@ -4116,6 +4121,7 @@ if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
     --connFanout "$CONN_FANOUT" \
     --raft-epoch-hex "$RAFT_EPOCH_HEX" \
     --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
+    --txLatencyCsv "$LOG_DIR/tx_latency.csv" \
     $GW_EXTRA_ARGS \
     > "$GW_LOG" 2>&1 &
   GW_PID=$!
@@ -4281,6 +4287,7 @@ else
       --connFanout 1 \
       --raft-epoch-hex "$RAFT_EPOCH_HEX" \
       --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
+      --txLatencyCsv "$LOG_DIR/tx_latency_shard${s}.csv" \
       $GW_EXTRA_ARGS \
       >"$shard_log" 2>&1 &
     OSTH_PIDS+=("$!")
@@ -4346,7 +4353,8 @@ log "EXECUTION_PROFILE profile=${EXECUTION_PROFILE} ledger_mode=${RAFT_APPLY_LED
     --workload-file "$WORKLOAD_FILE" \
     --ordering-mode "$ORDERING_MODE" \
     --no-kafka "$NO_KAFKA" \
-    --parallelism-mode "$PARALLELISM_MODE" | while read -r line; do
+    --parallelism-mode "$PARALLELISM_MODE" \
+    --threads "${NUM_TERMINALS:-1}" | while read -r line; do
       log "  $line"
     done
 

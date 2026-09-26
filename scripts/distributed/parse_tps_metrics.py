@@ -32,6 +32,16 @@ def parse_logs(log_files, parallelism_mode):
     async_all3_timeout_count = 0
     async_all3_missing_count = 0
 
+    has_empirical_latency = False
+    empirical_lat_count = 0
+    empirical_lat_min_ms = 0.0
+    empirical_lat_mean_ms = 0.0
+    empirical_lat_p50_ms = 0.0
+    empirical_lat_p90_ms = 0.0
+    empirical_lat_p95_ms = 0.0
+    empirical_lat_p99_ms = 0.0
+    empirical_lat_max_ms = 0.0
+
     for log_file in log_files:
         if not os.path.exists(log_file):
             continue
@@ -81,6 +91,19 @@ def parse_logs(log_files, parallelism_mode):
                     if m_m:
                         async_all3_missing_count += int(m_m.group(1))
 
+                # Empirical transaction latency
+                m_lat = re.search(r'TX_LATENCY_EMPIRICAL count=(\d+) min_ms=([0-9.]+) mean_ms=([0-9.]+) p50_ms=([0-9.]+) p90_ms=([0-9.]+) p95_ms=([0-9.]+) p99_ms=([0-9.]+) max_ms=([0-9.]+)', line)
+                if m_lat:
+                    has_empirical_latency = True
+                    empirical_lat_count = int(m_lat.group(1))
+                    empirical_lat_min_ms = float(m_lat.group(2))
+                    empirical_lat_mean_ms = float(m_lat.group(3))
+                    empirical_lat_p50_ms = float(m_lat.group(4))
+                    empirical_lat_p90_ms = float(m_lat.group(5))
+                    empirical_lat_p95_ms = float(m_lat.group(6))
+                    empirical_lat_p99_ms = float(m_lat.group(7))
+                    empirical_lat_max_ms = float(m_lat.group(8))
+
     # Resolve timing metrics based on parallelism mode
     if parallelism_mode == "os-threads":
         majority_visible_ms = max(majority_visible_ms_list) if majority_visible_ms_list else 0
@@ -101,7 +124,16 @@ def parse_logs(log_files, parallelism_mode):
         "async_all3_verified_count": async_all3_verified_count,
         "async_all3_failure_count": async_all3_failure_count,
         "async_all3_timeout_count": async_all3_timeout_count,
-        "async_all3_missing_count": async_all3_missing_count
+        "async_all3_missing_count": async_all3_missing_count,
+        "has_empirical_latency": has_empirical_latency,
+        "empirical_lat_count": empirical_lat_count,
+        "empirical_lat_min_ms": empirical_lat_min_ms,
+        "empirical_lat_mean_ms": empirical_lat_mean_ms,
+        "empirical_lat_p50_ms": empirical_lat_p50_ms,
+        "empirical_lat_p90_ms": empirical_lat_p90_ms,
+        "empirical_lat_p95_ms": empirical_lat_p95_ms,
+        "empirical_lat_p99_ms": empirical_lat_p99_ms,
+        "empirical_lat_max_ms": empirical_lat_max_ms
     }
 
 def main():
@@ -122,6 +154,7 @@ def main():
                 "overall wall time including drains (millisec) = 1200\n"
                 "divergence_count=0\n"
                 "permanent_failures=0\n"
+                "TX_LATENCY_EMPIRICAL count=20000 min_ms=0.100 mean_ms=0.450 p50_ms=0.400 p90_ms=0.700 p95_ms=0.850 p99_ms=1.200 max_ms=3.500\n"
             )
             
             with open(gw_log_path, "w") as f:
@@ -135,7 +168,10 @@ def main():
             
             metrics = parse_logs(filtered_log_files, "pipeline")
             assert metrics["async_all3_verified_count"] == 20513, f"Expected 20513, got {metrics['async_all3_verified_count']}"
-            print("Self-test 1 (Ignore runner.log and prevent double counting): PASSED")
+            assert metrics["has_empirical_latency"] is True, "Expected empirical latency to be parsed"
+            assert metrics["empirical_lat_p50_ms"] == 0.400, f"Expected p50=0.400, got {metrics['empirical_lat_p50_ms']}"
+            assert metrics["empirical_lat_p95_ms"] == 0.850, f"Expected p95=0.850, got {metrics['empirical_lat_p95_ms']}"
+            print("Self-test 1 (Ignore runner.log and prevent double counting, parse empirical latency): PASSED")
             
             workload_transactions = 20000
             async_all3_verified_count = metrics["async_all3_verified_count"]
@@ -161,6 +197,7 @@ def main():
     parser.add_argument("--ordering-mode", required=True)
     parser.add_argument("--no-kafka", type=int, required=True)
     parser.add_argument("--parallelism-mode", required=True)
+    parser.add_argument("--threads", type=int, default=1, help="Client concurrency / worker threads count")
     args = parser.parse_args()
 
     # 1. Determine workload transactions
@@ -205,8 +242,14 @@ def main():
     all3_audit_valid = ""
     parser_error = ""
 
+    threads = max(1, getattr(args, "threads", 1))
+    lat_majority_ms_str = "N/A"
+    lat_all3_ms_str = "N/A"
+    inter_completion_ms_str = "N/A"
+
     # Output presentation to console
     print(f"Queries                         : {workload_transactions}")
+    print(f"Client Threads / Concurrency    : {threads}")
 
     if validation_mode == "majority_async_all3":
         print(f"Completion mode                 : majority_async_all3")
@@ -216,7 +259,13 @@ def main():
         if majority_visible_ms > 0:
             tps_majority = workload_transactions * 1000.0 / majority_visible_ms
             tps_majority_visible = f"{tps_majority:.2f}"
+            lat_majority_ms = threads * 1000.0 / tps_majority
+            lat_majority_ms_str = f"{lat_majority_ms:.3f}"
+            inter_completion_ms = 1000.0 / tps_majority
+            inter_completion_ms_str = f"{inter_completion_ms:.3f}"
             print(f"TPS_majority_visible            : {tps_majority_visible} tx/s")
+            print(f"Latency_majority_per_tx         : {lat_majority_ms_str} ms (concurrency={threads})")
+            print(f"Inter_completion_time (1/TPS)   : {inter_completion_ms_str} ms")
         else:
             tps_majority_visible = "N/A"
             print(f"TPS_majority_visible            : N/A")
@@ -240,7 +289,10 @@ def main():
             if all3_audit_drained_ms > 0:
                 tps_all3 = workload_transactions * 1000.0 / all3_audit_drained_ms
                 tps_all3_audit_drained = f"{tps_all3:.2f}"
+                lat_all3_ms = threads * 1000.0 / tps_all3
+                lat_all3_ms_str = f"{lat_all3_ms:.3f}"
                 print(f"TPS_all3_audit_drained          : {tps_all3_audit_drained} tx/s")
+                print(f"Latency_all3_per_tx             : {lat_all3_ms_str} ms (concurrency={threads})")
             else:
                 tps_all3_audit_drained = "INVALID"
                 print(f"TPS_all3_audit_drained          : INVALID")
@@ -265,9 +317,15 @@ def main():
         if majority_visible_ms > 0:
             tps_strict = workload_transactions * 1000.0 / majority_visible_ms
             tps_strict_str = f"{tps_strict:.2f} tx/s"
+            lat_strict_ms = threads * 1000.0 / tps_strict
+            lat_majority_ms_str = f"{lat_strict_ms:.3f}"
+            inter_completion_ms_str = f"{1000.0 / tps_strict:.3f}"
+            print(f"TPS_strict_majority             : {tps_strict_str}")
+            print(f"Latency_strict_per_tx           : {lat_majority_ms_str} ms (concurrency={threads})")
+            print(f"Inter_completion_time (1/TPS)   : {inter_completion_ms_str} ms")
         else:
             tps_strict_str = "N/A"
-        print(f"TPS_strict_majority             : {tps_strict_str}")
+            print(f"TPS_strict_majority             : {tps_strict_str}")
 
     else: # direct/no-Kafka
         print(f"Completion mode                 : direct")
@@ -275,9 +333,24 @@ def main():
         if majority_visible_ms > 0:
             tps_direct = workload_transactions * 1000.0 / majority_visible_ms
             tps_direct_str = f"{tps_direct:.2f} tx/s"
+            lat_direct_ms = threads * 1000.0 / tps_direct
+            lat_majority_ms_str = f"{lat_direct_ms:.3f}"
+            inter_completion_ms_str = f"{1000.0 / tps_direct:.3f}"
+            print(f"TPS_direct                      : {tps_direct_str}")
+            print(f"Latency_direct_per_tx           : {lat_majority_ms_str} ms (concurrency={threads})")
+            print(f"Inter_completion_time (1/TPS)   : {inter_completion_ms_str} ms")
         else:
             tps_direct_str = "N/A"
-        print(f"TPS_direct                      : {tps_direct_str}")
+            print(f"TPS_direct                      : {tps_direct_str}")
+
+    # Output empirical transaction latency if tracked
+    if metrics["has_empirical_latency"]:
+        print(f"Latency_empirical_mean          : {metrics['empirical_lat_mean_ms']:.3f} ms")
+        print(f"Latency_empirical_p50           : {metrics['empirical_lat_p50_ms']:.3f} ms")
+        print(f"Latency_empirical_p90           : {metrics['empirical_lat_p90_ms']:.3f} ms")
+        print(f"Latency_empirical_p95           : {metrics['empirical_lat_p95_ms']:.3f} ms")
+        print(f"Latency_empirical_p99           : {metrics['empirical_lat_p99_ms']:.3f} ms")
+        print(f"Latency_empirical_max           : {metrics['empirical_lat_max_ms']:.3f} ms")
 
     # Write summary files
     env_file = os.path.join(args.log_dir, "run_summary.env")
@@ -285,7 +358,8 @@ def main():
 
     # Fields to write
     summary_fields = [
-        ("schema_version", "4"),
+        ("schema_version", "6"),
+        ("threads", str(threads)),
         ("workload_transactions", str(workload_transactions)),
         ("ordering_mode", args.ordering_mode),
         ("completion_path", completion_path),
@@ -293,7 +367,17 @@ def main():
         ("majority_visible_ms", str(majority_visible_ms) if majority_visible_ms > 0 else ""),
         ("all3_audit_drained_ms", str(all3_audit_drained_ms) if all3_audit_drained_ms > 0 else ""),
         ("tps_majority_visible", tps_majority_visible),
+        ("latency_majority_per_tx_ms", lat_majority_ms_str),
         ("tps_all3_audit_drained", tps_all3_audit_drained),
+        ("latency_all3_per_tx_ms", lat_all3_ms_str),
+        ("inter_completion_time_ms", inter_completion_ms_str),
+        ("has_empirical_latency", "yes" if metrics["has_empirical_latency"] else "no"),
+        ("latency_empirical_mean_ms", f"{metrics['empirical_lat_mean_ms']:.3f}" if metrics["has_empirical_latency"] else "N/A"),
+        ("latency_empirical_p50_ms", f"{metrics['empirical_lat_p50_ms']:.3f}" if metrics["has_empirical_latency"] else "N/A"),
+        ("latency_empirical_p90_ms", f"{metrics['empirical_lat_p90_ms']:.3f}" if metrics["has_empirical_latency"] else "N/A"),
+        ("latency_empirical_p95_ms", f"{metrics['empirical_lat_p95_ms']:.3f}" if metrics["has_empirical_latency"] else "N/A"),
+        ("latency_empirical_p99_ms", f"{metrics['empirical_lat_p99_ms']:.3f}" if metrics["has_empirical_latency"] else "N/A"),
+        ("latency_empirical_max_ms", f"{metrics['empirical_lat_max_ms']:.3f}" if metrics["has_empirical_latency"] else "N/A"),
         ("all3_audit_valid", all3_audit_valid),
         ("parser_error", parser_error),
         ("divergence_count", str(divergence_count)),

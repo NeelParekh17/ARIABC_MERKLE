@@ -1,2 +1,0 @@
-mode,workload,server_workers,bcdb_workers,pool_size,total_queries,wall_time_ms,tps,merkle_pass,divergence_count,permanent_failures,run_id,shared_buffers,source_fingerprint,trial
-cluster,ycsb_workload_d_skew_1_20_20k.txt,4,4,4,20000,1194.0,16750.418760469012,1,0,0,cluster4_20260923_134222_4334cf1a,32MB,e5e6cc5037b07227a8549f69e49a518588b5d7b6b8f110207b5738e4a37fbab4,1

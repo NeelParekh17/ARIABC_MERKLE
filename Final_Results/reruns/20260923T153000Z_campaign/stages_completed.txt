@@ -1,4 +1,0 @@
-YCSB
-Recovery
-TPCC/workers_w100
-TPCC/warehouses_w32

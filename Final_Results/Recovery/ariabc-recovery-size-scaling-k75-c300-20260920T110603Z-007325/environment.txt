@@ -1,7 +1,0 @@
-timestamp_utc=2026-09-20T11:08:46Z
-timestamp_local=2026-09-20T16:38:46+05:30
-cwd=/home/protectdr/merkle_recovery_runs/runs/ariabc-recovery-size-scaling-k75-c300-20260920T110603Z-007325/src
-python=3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
-platform=Linux-7.0.0-29-generic-x86_64-with-glibc2.39
-dsn=host=/tmp/ariabc-pg.3mXg3u port=55432 dbname=postgres user=protectdr
-git_head_error=Command '['git', 'rev-parse', 'HEAD']' returned non-zero exit status 128.

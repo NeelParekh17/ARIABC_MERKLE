@@ -178,6 +178,7 @@ struct gateway_options {
     // which is essential for single-node gateway-direct throughput to scale.
     int conn_fanout = 1;
     int self_test_early_ready_race = 0;
+    std::string tx_latency_csv;
 
     // Online Recovery options (ProtectDB Algorithm 2)
     std::string recovery_mode = "off"; // "off", "active", "passive", "both"
@@ -203,7 +204,7 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--detClientMode event|threadpool] [--detClientWorkers <n>] [--detClientInflight <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>] \\\n"
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--detClientMode event|threadpool] [--detClientWorkers <n>] [--detClientInflight <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--txLatencyCsv <path>] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>] \\\n"
         << "    [--recoveryMode off|active|passive|both] [--recoveryIntervalMs <ms>] [--recoveryDbPort <port>] [--recoveryDbUser <user>] [--recoveryDbName <name>] [--recoveryDbPassword <pass>] [--recoveryTable <auto|table>] [--recoveryNodes <nodes_csv>] [--recoveryHookScript <path>] [--recoveryCompareScript <path>]\n";
 }
 
@@ -318,6 +319,8 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 if (opt.conn_fanout < 1) opt.conn_fanout = 1;
             } else if (a == "--selfTestEarlyReadyRace") {
                 opt.self_test_early_ready_race = std::stoi(need("--selfTestEarlyReadyRace"));
+            } else if (a == "--txLatencyCsv" || a == "--tx-latency-csv") {
+                opt.tx_latency_csv = need(a.c_str());
             } else if (a == "--recoveryMode" || a == "--recovery-mode") {
                 opt.recovery_mode = ariabc_pg::trim_copy(need(a.c_str()));
             } else if (a == "--recoveryIntervalMs" || a == "--recovery-interval-ms") {
@@ -4205,11 +4208,108 @@ int listen_tcp(int port) {
     return fd;
 }
 
+class tx_latency_tracker {
+public:
+    void init(size_t n, uint64_t req_id_offset) {
+        req_id_offset_ = req_id_offset;
+        submit_times_.assign(n, std::chrono::steady_clock::time_point());
+        finish_times_.assign(n, std::chrono::steady_clock::time_point());
+        completed_.assign(n, 0);
+    }
+
+    void record_submit_idx(size_t idx, std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now()) {
+        if (idx < submit_times_.size()) {
+            submit_times_[idx] = tp;
+        }
+    }
+
+    void record_submit_req(uint64_t req_num, std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now()) {
+        if (req_num >= req_id_offset_) {
+            record_submit_idx(static_cast<size_t>(req_num - req_id_offset_), tp);
+        }
+    }
+
+    void record_finish_idx(size_t idx, std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now()) {
+        if (idx < finish_times_.size()) {
+            finish_times_[idx] = tp;
+            completed_[idx] = 1;
+        }
+    }
+
+    void record_finish_req(uint64_t req_num, std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now()) {
+        if (req_num >= req_id_offset_) {
+            record_finish_idx(static_cast<size_t>(req_num - req_id_offset_), tp);
+        }
+    }
+
+    void dump_and_print_summary(const std::string& csv_out_path = "") const {
+        std::vector<double> latencies_ms;
+        latencies_ms.reserve(completed_.size());
+        for (size_t i = 0; i < completed_.size(); ++i) {
+            if (completed_[i] && submit_times_[i].time_since_epoch().count() > 0) {
+                const double ms = std::chrono::duration<double, std::milli>(finish_times_[i] - submit_times_[i]).count();
+                if (ms >= 0.0) {
+                    latencies_ms.push_back(ms);
+                }
+            }
+        }
+        if (latencies_ms.empty()) {
+            return;
+        }
+        std::sort(latencies_ms.begin(), latencies_ms.end());
+        double sum = 0.0;
+        for (double d : latencies_ms) sum += d;
+        const double mean = sum / latencies_ms.size();
+        const double min = latencies_ms.front();
+        const double max = latencies_ms.back();
+        auto pct = [&](double p) -> double {
+            if (latencies_ms.empty()) return 0.0;
+            size_t idx = static_cast<size_t>(std::ceil(p / 100.0 * latencies_ms.size())) - 1;
+            if (idx >= latencies_ms.size()) idx = latencies_ms.size() - 1;
+            return latencies_ms[idx];
+        };
+        const double p50 = pct(50.0);
+        const double p90 = pct(90.0);
+        const double p95 = pct(95.0);
+        const double p99 = pct(99.0);
+
+        std::cout << "TX_LATENCY_EMPIRICAL count=" << latencies_ms.size()
+                  << " min_ms=" << std::fixed << std::setprecision(3) << min
+                  << " mean_ms=" << mean
+                  << " p50_ms=" << p50
+                  << " p90_ms=" << p90
+                  << " p95_ms=" << p95
+                  << " p99_ms=" << p99
+                  << " max_ms=" << max
+                  << std::endl;
+
+        if (!csv_out_path.empty()) {
+            std::ofstream ofs(csv_out_path);
+            if (ofs.is_open()) {
+                ofs << "tx_idx,latency_ms\n";
+                for (size_t i = 0; i < completed_.size(); ++i) {
+                    if (completed_[i] && submit_times_[i].time_since_epoch().count() > 0) {
+                        const double ms = std::chrono::duration<double, std::milli>(finish_times_[i] - submit_times_[i]).count();
+                        ofs << i << "," << std::fixed << std::setprecision(4) << ms << "\n";
+                    }
+                }
+            }
+        }
+    }
+
+private:
+    uint64_t req_id_offset_ = 0;
+    std::vector<std::chrono::steady_clock::time_point> submit_times_;
+    std::vector<std::chrono::steady_clock::time_point> finish_times_;
+    std::vector<uint8_t> completed_;
+};
+
 } // namespace ariabc_pg
 
 #ifndef BUILDING_UNIT_TESTS
 int main(int argc, char** argv) {
     using ariabc_pg::gateway_options;
+    using ariabc_pg::tx_latency_tracker;
 
     gateway_options opt;
     std::string err;
@@ -5234,6 +5334,8 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "loaded " << queries.size() << " queries" << std::endl;
+        tx_latency_tracker tx_lat_tracker;
+        tx_lat_tracker.init(queries.size(), opt.req_id_offset);
         if (tx_signer.is_enabled()) {
             query_tx_sigs.resize(queries.size());
             query_tx_sqls.resize(queries.size());
@@ -5639,6 +5741,7 @@ int main(int argc, char** argv) {
                             return false;
                         }
                         det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                        tx_lat_tracker.record_finish_idx(items[i].idx);
                         release_det_req_lane(items[i].req_num);
                     }
                 }
@@ -5867,6 +5970,7 @@ int main(int argc, char** argv) {
                             return false;
                         }
                         det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                        tx_lat_tracker.record_finish_req(rid);
                         det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
                         release_det_req_lane(rid);
                         if (!maybe_wait_reset_all_nodes(rid)) {
@@ -5980,6 +6084,7 @@ int main(int argc, char** argv) {
                             req.sql = item.sql;
 
                             const auto tx_t0 = std::chrono::steady_clock::now();
+                            tx_lat_tracker.record_submit_idx(idx, tx_t0);
                             int tries = 0;
                             std::chrono::milliseconds backoff(2);
                             ariabc_pg::client_api_response submit_resp;
@@ -6079,6 +6184,7 @@ int main(int argc, char** argv) {
                                     break;
                                 }
                                 det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                                tx_lat_tracker.record_finish_idx(item.idx);
                                 det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
                                 if (!maybe_wait_reset_all_nodes(item.req_num)) {
                                     permanent_failures.fetch_add(1, std::memory_order_relaxed);
@@ -6105,6 +6211,7 @@ int main(int argc, char** argv) {
                                     break;
                                 }
                                 det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                                tx_lat_tracker.record_finish_idx(item.idx);
                             }
 
                             const auto tx_t1 = std::chrono::steady_clock::now();
@@ -6501,6 +6608,9 @@ int main(int argc, char** argv) {
                         ticket.ctxs = std::move(ctxs);
                         ticket.submit_node_idx = single_submit_node_idx;
                         ticket.submit_started_at = submit_started_at;
+                        for (const auto& itm : ticket.items) {
+                            tx_lat_tracker.record_submit_idx(itm.idx, submit_started_at);
+                        }
                         pending_request_count += ticket.items.size();
                         det_sent_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
                         det_pending_accept_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
@@ -6652,6 +6762,9 @@ int main(int argc, char** argv) {
                     }
 
                     const auto tx_t0 = std::chrono::steady_clock::now();
+                    for (const auto& itm : batch_items) {
+                        tx_lat_tracker.record_submit_idx(itm.idx, tx_t0);
+                    }
 
                     int tries = 0;
                     std::chrono::milliseconds backoff(2);
@@ -6788,6 +6901,7 @@ int main(int argc, char** argv) {
                             break;
                         }
                         det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                        tx_lat_tracker.record_finish_req(rid);
                         det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
                         release_det_req_lane(rid);
                         if (!maybe_wait_reset_all_nodes(rid)) {
@@ -6906,6 +7020,7 @@ int main(int argc, char** argv) {
                         }
 
                         const auto tx_t0 = std::chrono::steady_clock::now();
+                        tx_lat_tracker.record_submit_idx(idx, tx_t0);
                         const std::string req_id = req_id_for_idx(idx);
                         const uint64_t req_num = req_num_for_idx(idx);
                         if (tx_signer.is_enabled()) {
@@ -6986,6 +7101,7 @@ int main(int argc, char** argv) {
                                 if (!verify_completed_item(rid)) {
                                     permanent_failures.fetch_add(1);
                                 }
+                                tx_lat_tracker.record_finish_req(rid);
                                 if (opt.db_type == 2 && !maj.empty() && ariabc_pg::is_duplicate_key_result(maj)) {
                                     duplicate_key_errors.fetch_add(1);
                                 }
@@ -7034,6 +7150,7 @@ int main(int argc, char** argv) {
                             if (!verify_completed_item(rid)) {
                                 permanent_failures.fetch_add(1);
                             }
+                            tx_lat_tracker.record_finish_req(rid);
                             if (opt.db_type == 2 && !maj.empty() && ariabc_pg::is_duplicate_key_result(maj)) {
                                 duplicate_key_errors.fetch_add(1);
                             }
@@ -7143,6 +7260,8 @@ int main(int argc, char** argv) {
                       << (async_all3_audit_drain_ns.load(std::memory_order_relaxed) / 1000000.0)
                       << std::endl;
         }
+
+        tx_lat_tracker.dump_and_print_summary(opt.tx_latency_csv);
 
         uint64_t sub_attempts = ariabc_pg::g_submit_prof.attempts.load(std::memory_order_relaxed);
         uint64_t sub_conn_calls = ariabc_pg::g_submit_prof.connect_calls.load(std::memory_order_relaxed);

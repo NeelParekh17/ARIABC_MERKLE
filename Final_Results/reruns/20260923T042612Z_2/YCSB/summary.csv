@@ -1,3 +1,0 @@
-mode,workload,server_workers,bcdb_workers,pool_size,total_queries,wall_time_ms,tps,merkle_pass,divergence_count,permanent_failures,run_id,shared_buffers,source_fingerprint,trial
-pg,ycsb_workload_d_skew_1_20_20k.txt,4,1,4,20000,698,28653.30,1,0,0,single_800f18de10b6454a9b7457b1102f6b65,32MB,bca6daed9b4548f4272d753402fd18992f457320befed0497d4cc835115221d0,1
-bcdb_merkle,ycsb_workload_d_skew_1_20_20k.txt,4,4,4,20000,1162,17211.70,1,0,0,single_1bf94704b71a4508ba0c0f36bd34ab2e,32MB,bca6daed9b4548f4272d753402fd18992f457320befed0497d4cc835115221d0,1
