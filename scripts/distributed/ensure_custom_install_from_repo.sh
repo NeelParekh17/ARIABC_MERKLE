@@ -394,7 +394,7 @@ fi
       mkdir -p "$build_dir"
       rm -f "$REPO_ROOT"/conftest "$REPO_ROOT"/conftest.* "$REPO_ROOT"/confdefs.h "$REPO_ROOT"/a.out "$REPO_ROOT"/b.out
       cd "$build_dir"
-      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" CFLAGS="-O2"
+      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" --without-readline CFLAGS="-O2"
       make -C "$build_dir" -j"$jobs"
       _repair_src_include_symlinks
       _stage_vpath_generated_headers
@@ -403,7 +403,7 @@ fi
       mkdir -p "$build_dir"
       rm -f "$REPO_ROOT"/conftest "$REPO_ROOT"/conftest.* "$REPO_ROOT"/confdefs.h "$REPO_ROOT"/a.out "$REPO_ROOT"/b.out
       cd "$build_dir"
-      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" CFLAGS="-O2"
+      ac_cv_exeext= CPPFLAGS="$combined_cppflags" LDFLAGS="$combined_ldflags" "$REPO_ROOT/configure" --prefix="$INSTALL_DIR" --without-readline CFLAGS="-O2"
       make -C "$build_dir" -j"$jobs"
       _repair_src_include_symlinks
       _stage_vpath_generated_headers

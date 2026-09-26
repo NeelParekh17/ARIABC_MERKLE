@@ -583,7 +583,23 @@ def main():
         dest="cold_runs",
         help="Allow zero-restart warm runs across workloads with same worker count",
     )
-
+    parser.add_argument(
+        "--recovery-mode",
+        choices=["off", "active", "passive", "both"],
+        default="off",
+        help="Online Merkle recovery mode (default: off)",
+    )
+    parser.add_argument(
+        "--recovery-interval-ms",
+        type=int,
+        default=200,
+        help="Passive recovery check interval in milliseconds (default: 200)",
+    )
+    parser.add_argument(
+        "--recovery-table",
+        default="auto",
+        help="Table to monitor for Merkle recovery or 'auto' for dynamic schema discovery (default: auto)",
+    )
     parser.add_argument("--order-seed", type=int, default=42)
     args = parser.parse_args()
     if args.trials < 1:

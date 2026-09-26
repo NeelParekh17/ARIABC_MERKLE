@@ -188,11 +188,11 @@ merkle_open_consistent_index(Oid index_oid)
 	merkle_read_lag_policy = save_policy;
 
 	heap_oid = IndexGetRelation(index_oid, false);
-	heap_rel = table_open(heap_oid, ShareLock);
-	/* Keep the ShareLock until transaction end, but release the relcache ref
+	heap_rel = table_open(heap_oid, AccessShareLock);
+	/* Keep the AccessShareLock until transaction end, but release the relcache ref
 	 * before opening/reading the index. */
 	table_close(heap_rel, NoLock);
-	index_rel = index_open(index_oid, ShareLock);
+	index_rel = index_open(index_oid, AccessShareLock);
 	if (index_rel->rd_rel->relam != MERKLE_AM_OID ||
 		index_rel->rd_index->indrelid != heap_oid)
 		ereport(ERROR,

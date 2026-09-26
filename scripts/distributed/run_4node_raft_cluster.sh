@@ -97,6 +97,9 @@ BCDB_WORKER_COUNT="${BCDB_WORKER_COUNT:-}"    # Defaults to DB_CONN_POOL_SIZE af
 REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"
 REMOTE_INSTALL_DIR="/home/neel/Desktop/ariabc_install"
 LOCAL_INSTALL_DIR="${LOCAL_INSTALL_DIR:-/work/ARIABC/install}"
+if [[ ! -d "$LOCAL_INSTALL_DIR" && -d "/home/neel/ARIABC/install" ]]; then
+  LOCAL_INSTALL_DIR="/home/neel/ARIABC/install"
+fi
 # Binary path for Ubuntu 24.04 nodes (admin123, utkarsh): use the synced
 # ASUS/local build from the remote repo. This matches the last known good
 # 4-node Kafka-majority run (nodes 1/4 used ariabc_cluster/ariabc_pg/build).
@@ -218,7 +221,8 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     FAILPOINT_NODE_ID FAILPOINT_ENV FAILPOINT_RAFT_LOG_INDEX FAILPOINT_ITEM_ORDINAL \
     ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE \
     ARIABC_PHASE3_INVOCATION_ID \
-    TX_SIGN ARIABC_TX_SIGN
+    TX_SIGN ARIABC_TX_SIGN \
+    RECOVERY_MODE RECOVERY_INTERVAL_MS RECOVERY_DB_PORT RECOVERY_TABLE RECOVERY_NODES
   do
     if [[ -v "$var" ]]; then
       delegate_env+=("$var=${!var}")
@@ -405,7 +409,7 @@ fi
 KAFKA_COMPLETION_MODE="${KAFKA_COMPLETION_MODE:-majority}" # majority|async|majority-async-all3
 EXECUTION_PROFILE="${EXECUTION_PROFILE:-event-direct}" # event-direct|threaded-raft-direct|event-safe-block
 TEST_QUERIES="${TEST_QUERIES:-50}"  # number of test transactions
-WORKLOAD_FILE="${WORKLOAD_FILE:-$REPO_ROOT/scripts/ycsb-skew0-99-tx-20k-point-safedb-intkey-insert12k-uniq.txt}"
+WORKLOAD_FILE="${WORKLOAD_FILE:-$REPO_ROOT/scripts/ycsb_suite/ycsb_workload_all_update_skew_1_20_20k.txt}"
 RESTORE_SQL="${RESTORE_SQL:-$REPO_ROOT/scripts/restore_usertable_small.sql}"
 VERIFY_TABLE="${VERIFY_TABLE:-usertable_small}"
 VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
@@ -420,6 +424,7 @@ DET_WINDOW_EXPLICIT=0
 DET_BATCH_SIZE_EXPLICIT=0
 DET_PIPELINE_DEPTH_EXPLICIT=0
 DET_CLIENT_INFLIGHT_EXPLICIT=0
+BCDB_INIT_BLOCK_SIZE_EXPLICIT=0
 CONN_FANOUT="${CONN_FANOUT:-1}"
 CONN_FANOUT_EXPLICIT=0
 RAFT_ORDERED_FANOUT="${RAFT_ORDERED_FANOUT:-${ARIABC_RAFT_ORDERED_FANOUT:-1}}"
@@ -753,6 +758,12 @@ Options:
 EOF
 }
 
+RECOVERY_MODE="${RECOVERY_MODE:-off}"
+RECOVERY_INTERVAL_MS="${RECOVERY_INTERVAL_MS:-200}"
+RECOVERY_DB_PORT="${RECOVERY_DB_PORT:-5438}"
+RECOVERY_TABLE="${RECOVERY_TABLE:-$VERIFY_TABLE}"
+RECOVERY_NODES="${RECOVERY_NODES:-}"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-sync)    SKIP_SYNC=1; shift ;;
@@ -841,7 +852,7 @@ while [[ $# -gt 0 ]]; do
     --bcdb-dt-parse-barrier) BCDB_DT_PARSE_BARRIER="${2:-0}"; shift 2 ;;
     --bcdb-block-enqueue-yield-every) BCDB_BLOCK_ENQUEUE_YIELD_EVERY="${2:-0}"; shift 2 ;;
     --bcdb-worker-count|--bcdb-workers) BCDB_WORKER_COUNT="${2:-}"; shift 2 ;;
-    --bcdb-init-block-size) BCDB_INIT_BLOCK_SIZE="${2:-}"; shift 2 ;;
+    --bcdb-init-block-size) BCDB_INIT_BLOCK_SIZE="${2:-}"; BCDB_INIT_BLOCK_SIZE_EXPLICIT=1; shift 2 ;;
     --bcdb-decouple-workers) BCDB_DECOUPLE_WORKERS="${2:-0}"; shift 2 ;;
     --bcdb-dt-conflict-tracking) BCDB_DT_CONFLICT_TRACKING="${2:-1}"; shift 2 ;;
     --bcdb-dt-light-snapshot) BCDB_DT_LIGHT_SNAPSHOT="${2:-0}"; shift 2 ;;
@@ -867,12 +878,25 @@ while [[ $# -gt 0 ]]; do
     --failpoint-raft-log-index) FAILPOINT_RAFT_LOG_INDEX="${2:-}"; shift 2 ;;
     --failpoint-min-raft-log-index) FAILPOINT_MIN_RAFT_LOG_INDEX="${2:-}"; shift 2 ;;
     --failpoint-item-ordinal) FAILPOINT_ITEM_ORDINAL="${2:-}"; shift 2 ;;
+    --recovery-mode) RECOVERY_MODE="${2:-off}"; shift 2 ;;
+    --recovery-interval-ms) RECOVERY_INTERVAL_MS="${2:-200}"; shift 2 ;;
+    --recovery-db-port) RECOVERY_DB_PORT="${2:-5438}"; shift 2 ;;
+    --recovery-table) RECOVERY_TABLE="${2:-$VERIFY_TABLE}"; shift 2 ;;
+    --recovery-nodes) RECOVERY_NODES="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
 
 apply_topology_overrides
+
+if [[ -z "$RECOVERY_NODES" ]]; then
+  rec_nodes=()
+  for idx in "${!NODE_IDS[@]}"; do
+    rec_nodes+=("${NODE_NAMES[$idx]}=${NODE_IPS[$idx]}:$DB_PORT")
+  done
+  RECOVERY_NODES="$(IFS=,; echo "${rec_nodes[*]}")"
+fi
 
 for _num_pair in \
   "det-client-workers:$DET_CLIENT_WORKERS" \
@@ -3952,6 +3976,16 @@ else
   GW_EXTRA_ARGS="--waitMajority 0 --completionPath direct --totalNodes ${#NODE_IDS[@]} --directCompletionQuorum $GATEWAY_DIRECT_COMPLETION_QUORUM"
 fi
 
+if [[ "${RECOVERY_MODE:-off}" != "off" ]]; then
+  GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryMode $RECOVERY_MODE"
+  [[ -n "${RECOVERY_INTERVAL_MS:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryIntervalMs $RECOVERY_INTERVAL_MS"
+  [[ -n "${RECOVERY_DB_PORT:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryDbPort $RECOVERY_DB_PORT"
+  [[ -n "${RECOVERY_TABLE:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryTable $RECOVERY_TABLE"
+  [[ -n "${RECOVERY_NODES:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryNodes $RECOVERY_NODES"
+  GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryCompareScript $SCRIPT_DIR/recovery/compare_states.py"
+  GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryHookScript $SCRIPT_DIR/recovery/active_recovery_hook.py"
+fi
+
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM | txSign=$TX_SIGN"
@@ -4002,6 +4036,15 @@ _gw_common_args() {
     --txSign "$TX_SIGN"
   [[ -n "${POLL_COUNT:-}" ]] && printf '%s\n' --pollCount "$POLL_COUNT"
   [[ -n "${POLL_INTERVAL_US:-}" ]] && printf '%s\n' --pollIntervalUs "$POLL_INTERVAL_US"
+  if [[ "${RECOVERY_MODE:-off}" != "off" ]]; then
+    printf '%s\n' --recoveryMode "$RECOVERY_MODE"
+    [[ -n "${RECOVERY_INTERVAL_MS:-}" ]] && printf '%s\n' --recoveryIntervalMs "$RECOVERY_INTERVAL_MS"
+    [[ -n "${RECOVERY_DB_PORT:-}" ]] && printf '%s\n' --recoveryDbPort "$RECOVERY_DB_PORT"
+    [[ -n "${RECOVERY_TABLE:-}" ]] && printf '%s\n' --recoveryTable "$RECOVERY_TABLE"
+    [[ -n "${RECOVERY_NODES:-}" ]] && printf '%s\n' --recoveryNodes "$RECOVERY_NODES"
+    printf '%s\n' --recoveryCompareScript "$SCRIPT_DIR/recovery/compare_states.py"
+    printf '%s\n' --recoveryHookScript "$SCRIPT_DIR/recovery/active_recovery_hook.py"
+  fi
   # Append extra args word-by-word
   for _ga in $GW_EXTRA_ARGS; do printf '%s\n' "$_ga"; done
 }
@@ -4047,6 +4090,7 @@ MAIN_PID=$$
 WATCHDOG_PID=""
 
 if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
+  export PYTHONPATH="/home/neel/Desktop/ariabc_cluster/.venv/lib/python3.12/site-packages:${PYTHONPATH:-}"
   # Run gateway in the background and capture its PID
   "$GW_BIN" \
     --nodes "$GW_NODES" \
