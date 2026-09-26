@@ -1,5 +1,0 @@
-status=running
-started_utc=2026-09-23T12:02:26Z
-current_stage=YCSB
-last_completed_stage=OOM_100M/preflight
-expected_measured_runs=565

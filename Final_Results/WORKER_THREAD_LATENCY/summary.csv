@@ -1,0 +1,5 @@
+workers,terminals,parallelism_mode,det_batch_size,per_thread_window,ordering_mode,run,tps,server_svc_time_node1_us,server_svc_time_cluster_avg_us,server_svc_time_cluster_avg_ms,server_queue_wait_ms,gw_latency_mean_ms,gw_latency_p50_ms,gw_latency_p95_ms,gw_latency_p99_ms,workload_lines,gateway_ms,elapsed_s,run_dir,status
+1,96,pipeline,256,256,raft-kafka,1,2713,365.19,361.10,0.3611,3505.7,3729.732,3720.252,6963.398,7260.835,20000,7373,35,/work/ARIABC/AriaBC/scripts/bench_full_results/cluster_sweep_20260926_225739/workers=1_run1,ok
+4,96,pipeline,256,256,raft-kafka,1,5181,760.64,774.77,0.7748,1782.7,1968.706,1944.494,3618.171,3781.419,20000,3860,33,/work/ARIABC/AriaBC/scripts/bench_full_results/cluster_sweep_20260926_225739/workers=4_run1,ok
+8,96,pipeline,256,256,raft-kafka,1,8684,909.61,924.51,0.9245,991.0,1199.096,1170.197,2151.881,2241.770,20000,2303,26,/work/ARIABC/AriaBC/scripts/bench_full_results/cluster_sweep_20260926_225739/workers=8_run1,ok
+16,96,pipeline,256,256,raft-kafka,1,14378,1092.42,1117.02,1.1170,535.8,767.677,727.115,1285.050,1337.807,20000,1391,27,/work/ARIABC/AriaBC/scripts/bench_full_results/cluster_sweep_20260926_225739/workers=16_run1,ok

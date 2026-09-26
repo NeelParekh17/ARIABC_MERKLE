@@ -72,24 +72,53 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLUSTER_SCRIPT="$SCRIPT_DIR/run_4node_raft_cluster.sh"
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Canonical Campaign Environment Variables (matching YCSB campaign)
+# ---------------------------------------------------------------------------
+export ARIABC_PREFERRED_LEADER_ID="${ARIABC_PREFERRED_LEADER_ID:-1}"
+export ARIABC_RAFT_DURABLE_ASYNC_FLUSH="${ARIABC_RAFT_DURABLE_ASYNC_FLUSH:-1}"
+export ARIABC_RAFT_STREAM_GAP="${ARIABC_RAFT_STREAM_GAP:-512}"
+export ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER="${ARIABC_KAFKA_ASYNC_RESULT_PUBLISHER:-1}"
+export ARIABC_GATEWAY_DISPATCH_WORKERS="${ARIABC_GATEWAY_DISPATCH_WORKERS:-8}"
+export ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US="${ARIABC_KAFKA_RESULT_BATCH_MAX_DELAY_US:-3000}"
+export ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS="${ARIABC_KAFKA_RESULT_TARGET_BATCH_RECORDS:-128}"
+export ARIABC_KAFKA_RESULT_BATCH_TARGET_RECORDS="${ARIABC_KAFKA_RESULT_BATCH_TARGET_RECORDS:-128}"
+export ARIABC_KAFKA_ASYNC_RESULT_BATCH_RECORDS="${ARIABC_KAFKA_ASYNC_RESULT_BATCH_RECORDS:-256}"
+export ARIABC_FULL_RESULT_REPLICA_LIMIT="${ARIABC_FULL_RESULT_REPLICA_LIMIT:--1}"
+export ARIABC_KAFKA_PAYLOAD_FORMAT="${ARIABC_KAFKA_PAYLOAD_FORMAT:-text}"
+export BCDB_DET_QUEUE_HIGH_WM="${BCDB_DET_QUEUE_HIGH_WM:-65536}"
+export BCDB_DET_QUEUE_LOW_WM="${BCDB_DET_QUEUE_LOW_WM:-32768}"
+export GATEWAY_STALL_WATCHDOG="${GATEWAY_STALL_WATCHDOG:-1}"
+export GATEWAY_STALL_POLL_SECONDS="${GATEWAY_STALL_POLL_SECONDS:-5}"
+export GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-12}"
+export KAFKA_FAST_RESET="${KAFKA_FAST_RESET:-1}"
+export DUMP_VERIFY_CSV="${DUMP_VERIFY_CSV:-0}"
+export ARIABC_SOURCE_FINGERPRINT="${ARIABC_SOURCE_FINGERPRINT:-068290a61f18a35b1429ef395f4489404f65df0800cc4fba147afa5704425f61}"
+export TX_SIGN="${TX_SIGN:-blake3}"
+export BENCH_COLD_CACHE="${BENCH_COLD_CACHE:-0}"
+
+# ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-THREAD_COUNTS="1,4,8"
-SKIP_CLUSTER_SETUP=0
+SWEEP_TARGET="workers"
+WORKER_COUNTS="1,4,8,16"
+CLIENT_TERMINALS="96"
+CLIENT_WORKERS="96"
+CLIENT_INFLIGHT="16"
+SKIP_CLUSTER_SETUP=1
 SKIP_RESTORE_BETWEEN_RUNS=0
 RUNS=1
 OUT_DIR=""
-WORKLOAD_ARG=""
+WORKLOAD_ARG="/work/ARIABC/AriaBC/Final_Results/reruns/20260923T153000Z_campaign/YCSB/workloads_v5/ycsb_workload_a_skew_0_00_20k.txt"
 PER_THREAD_WINDOW="256"
 DET_BATCH_SIZE="256"
-POOL_SIZE="256"
-CONN_FANOUT=""
+CONN_FANOUT="1"
 DET_PIPELINE_DEPTH="0"
-DET_BLOCK_PARALLEL="16"       # default 16 — enables parallel block execution on db nodes
-DET_EVENT_BLOCK_FASTPATH="1"
+DET_BLOCK_PARALLEL="64"
+DET_EVENT_BLOCK_FASTPATH="0"
 SUBMIT_MODE="event"
-ORDERING_MODE_ARG=""
-KAFKA_COMPLETION_MODE_ARG=""
+ORDERING_MODE_ARG="raft-kafka"
+KAFKA_COMPLETION_MODE_ARG="majority_async_all3"
 NO_KAFKA=0
 DRY_RUN=0
 PARALLELISM_MODE="pipeline"   # pipeline|os-threads
@@ -99,13 +128,17 @@ EXTRA_ARGS=()
 # Argument parsing
 # ---------------------------------------------------------------------------
 usage() {
-  sed -n '/^# Usage:/,/^[^#]/{ /^#/{ s/^# \?//; p }; /^[^#]/q }' "$0"
+  sed -n '/^# Usage:/,/^set -/{ /^set -/d; s/^# \?//; p }' "$0"
   exit 0
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --threads)          THREAD_COUNTS="${2:-1,4,8}";         shift 2 ;;
+    --workers)          WORKER_COUNTS="${2:-1,4,8,16}"; SWEEP_TARGET="workers"; shift 2 ;;
+    --threads)          WORKER_COUNTS="${2:-1,4,8,16}"; SWEEP_TARGET="workers"; shift 2 ;;
+    --client-terminals) CLIENT_TERMINALS="${2:-96}";         shift 2 ;;
+    --client-workers)   CLIENT_WORKERS="${2:-96}";           shift 2 ;;
+    --client-inflight)  CLIENT_INFLIGHT="${2:-16}";          shift 2 ;;
     --parallelism-mode) PARALLELISM_MODE="${2:-pipeline}";   shift 2 ;;
     --skip-cluster-setup) SKIP_CLUSTER_SETUP=1;              shift ;;
     --skip-restore)     SKIP_RESTORE_BETWEEN_RUNS=1;         shift ;;
@@ -115,14 +148,14 @@ while [[ $# -gt 0 ]]; do
     --det-window)       PER_THREAD_WINDOW="${2:-256}";        shift 2 ;;
     --per-thread-window) PER_THREAD_WINDOW="${2:-256}";       shift 2 ;;
     --det-batch-size)   DET_BATCH_SIZE="${2:-256}";           shift 2 ;;
-    --pool-size)        POOL_SIZE="${2:-256}";                shift 2 ;;
+    --pool-size)        POOL_SIZE="${2:-}";                   shift 2 ;;
     --conn-fanout)      CONN_FANOUT="${2:-1}";                shift 2 ;;
     --det-pipeline-depth) DET_PIPELINE_DEPTH="${2:-0}";      shift 2 ;;
-    --det-block-parallel) DET_BLOCK_PARALLEL="${2:-16}";     shift 2 ;;
-    --det-event-block-fastpath) DET_EVENT_BLOCK_FASTPATH="${2:-1}"; shift 2 ;;
+    --det-block-parallel) DET_BLOCK_PARALLEL="${2:-64}";     shift 2 ;;
+    --det-event-block-fastpath) DET_EVENT_BLOCK_FASTPATH="${2:-0}"; shift 2 ;;
     --submit-mode)      SUBMIT_MODE="${2:-event}";            shift 2 ;;
-    --ordering-mode)    ORDERING_MODE_ARG="${2:-}";           shift 2 ;;
-    --kafka-completion-mode) KAFKA_COMPLETION_MODE_ARG="${2:-}"; shift 2 ;;
+    --ordering-mode)    ORDERING_MODE_ARG="${2:-raft-kafka}"; shift 2 ;;
+    --kafka-completion-mode) KAFKA_COMPLETION_MODE_ARG="${2:-majority_async_all3}"; shift 2 ;;
     --no-kafka)         NO_KAFKA=1;                           shift ;;
     --dry-run)          DRY_RUN=1;                            shift ;;
     -h|--help)          usage ;;
@@ -131,11 +164,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Parse thread counts into an array
-IFS=',' read -ra THREADS <<< "$THREAD_COUNTS"
-for t in "${THREADS[@]}"; do
-  if ! [[ "$t" =~ ^[0-9]+$ ]] || [[ "$t" -lt 1 ]]; then
-    echo "ERROR: --threads must be a comma-separated list of positive integers (got '$t')" >&2
+# Parse worker counts into an array
+IFS=',' read -ra WORKERS <<< "$WORKER_COUNTS"
+for w in "${WORKERS[@]}"; do
+  if ! [[ "$w" =~ ^[0-9]+$ ]] || [[ "$w" -lt 1 ]]; then
+    echo "ERROR: --workers must be a comma-separated list of positive integers (got '$w')" >&2
     exit 2
   fi
 done
@@ -163,25 +196,39 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Build common args shared across all runs into the COMMON_ARGS global array.
-# Using a global array avoids the echo+word-split anti-pattern that breaks
-# args containing spaces and cannot safely round-trip through a string.
 # ---------------------------------------------------------------------------
 build_common_args() {
-  local t="$1"
+  local w="$1"
   COMMON_ARGS=(
     --per-thread-window "$PER_THREAD_WINDOW"
     --det-batch-size  "$DET_BATCH_SIZE"
-    --pool-size       "$POOL_SIZE"
+    --pool-size       "$w"
+    --server-exec-workers "$w"
+    --server-pg-connections "$w"
+    --bcdb-workers    "$w"
+    --bcdb-init-block-size "$w"
+    --bcdb-decouple-workers 1
+    --conn-fanout 1
+    --raft-ordered-fanout 1
+    --raft-ordering-policy leader-assigned
+    --raft-ordered-batch-append 1
+    --raft-ordered-batch-target-entries 64
+    --raft-ordered-batch-linger-us 1000
+    --raft-ordered-coalesce-log 1
+    --kafka-completion-mode majority_async_all3
+    --det-window      65536
+    --enable-merkle-index 1
+    --tx-sign blake3
+    --raft-apply-ledger-mode off
+    --db-shared-buffers 32MB
     --det-pipeline-depth "$DET_PIPELINE_DEPTH"
     --det-block-parallel "$DET_BLOCK_PARALLEL"
     --det-event-block-fastpath "$DET_EVENT_BLOCK_FASTPATH"
     --submit-mode     "$SUBMIT_MODE"
     --parallelism-mode "$PARALLELISM_MODE"
   )
-  if [[ -n "$CONN_FANOUT" ]]; then COMMON_ARGS+=(--conn-fanout "$CONN_FANOUT"); fi
   if [[ -n "$WORKLOAD_ARG" ]]; then COMMON_ARGS+=(--workload "$WORKLOAD_ARG"); fi
   if [[ -n "$ORDERING_MODE_ARG" ]]; then COMMON_ARGS+=(--ordering-mode "$ORDERING_MODE_ARG"); fi
-  if [[ -n "$KAFKA_COMPLETION_MODE_ARG" ]]; then COMMON_ARGS+=(--kafka-completion-mode "$KAFKA_COMPLETION_MODE_ARG"); fi
   if [[ "$NO_KAFKA" -eq 1 ]]; then COMMON_ARGS+=(--no-kafka); fi
 }
 
@@ -197,21 +244,41 @@ build_common_args() {
 #      run_4node_raft_cluster.sh with the correct max_shard_wall_ms).
 #   2. "TPS (gateway) : ~N tx/s" line printed by run_4node_raft_cluster.sh
 #   3. "Est TPS : ~N tx/s" wall-clock fallback from run_4node_raft_cluster.sh
-# Returns (echo): "<tps_int> <workload_lines> <gateway_ms>"
+# Returns (echo): "<tps_int> <workload_lines> <gateway_ms> <lat_mean> <lat_p50> <lat_p95> <lat_p99>"
 # ---------------------------------------------------------------------------
 extract_tps() {
   local gw_log="$1"
   local stdout_log="$2"
   local elapsed_s="${3:-0}"
+  local concurrency="${4:-1}"
+
+  local lat_mean="0" lat_p50="0" lat_p95="0" lat_p99="0"
 
   if [[ ! -f "$gw_log" ]]; then
-    echo "0 0 0"
+    echo "0 0 0 0 0 0 0"
     return
   fi
 
   # Attempt to parse from run_summary.env first
   local env_file="$(dirname "$gw_log")/run_summary.env"
   if [[ -f "$env_file" ]]; then
+    lat_mean="$(grep -E '^latency_empirical_mean_ms=' "$env_file" | cut -d= -f2 || true)"
+    lat_p50="$(grep -E '^latency_empirical_p50_ms=' "$env_file" | cut -d= -f2 || true)"
+    lat_p95="$(grep -E '^latency_empirical_p95_ms=' "$env_file" | cut -d= -f2 || true)"
+    lat_p99="$(grep -E '^latency_empirical_p99_ms=' "$env_file" | cut -d= -f2 || true)"
+    if [[ -z "$lat_mean" || "$lat_mean" == "N/A" ]]; then
+      lat_mean="$(grep -E '^latency_majority_per_tx_ms=' "$env_file" | cut -d= -f2 || true)"
+      lat_p50="$lat_mean"
+      lat_p95="$lat_mean"
+      lat_p99="$lat_mean"
+    fi
+    if [[ -z "$lat_mean" || "$lat_mean" == "N/A" ]]; then
+      lat_mean="$(grep -E '^latency_all3_per_tx_ms=' "$env_file" | cut -d= -f2 || true)"
+      lat_p50="$lat_mean"
+      lat_p95="$lat_mean"
+      lat_p99="$lat_mean"
+    fi
+
     local tps_maj="" tps_all3="" q="" ms="" mode=""
     tps_maj="$(grep -E '^tps_majority_visible=' "$env_file" | cut -d= -f2 || true)"
     tps_all3="$(grep -E '^tps_all3_audit_drained=' "$env_file" | cut -d= -f2 || true)"
@@ -222,22 +289,32 @@ extract_tps() {
     if [[ "$tps_maj" != "N/A" && -n "$tps_maj" ]]; then
       local tps_int
       tps_int="$(printf "%.0f" "$tps_maj" 2>/dev/null || echo "${tps_maj%.*}")"
-      echo "$tps_int ${q:-0} ${ms:-0}"
+      echo "$tps_int ${q:-0} ${ms:-0} ${lat_mean:-0} ${lat_p50:-0} ${lat_p95:-0} ${lat_p99:-0}"
       return
     fi
     if [[ "$tps_all3" != "N/A" && "$tps_all3" != "INVALID" && -n "$tps_all3" ]]; then
       local tps_int
       tps_int="$(printf "%.0f" "$tps_all3" 2>/dev/null || echo "${tps_all3%.*}")"
-      echo "$tps_int ${q:-0} ${ms:-0}"
+      echo "$tps_int ${q:-0} ${ms:-0} ${lat_mean:-0} ${lat_p50:-0} ${lat_p95:-0} ${lat_p99:-0}"
       return
     fi
     if [[ -n "$ms" && "$ms" -gt 0 && -n "$q" && "$q" -gt 0 ]]; then
       if [[ "$mode" != "async_hash" && "$mode" != "async" ]]; then
         local tps_int=$(( q * 1000 / ms ))
-        echo "$tps_int $q $ms"
+        echo "$tps_int $q $ms ${lat_mean:-0} ${lat_p50:-0} ${lat_p95:-0} ${lat_p99:-0}"
         return
       fi
     fi
+  fi
+
+  # Check for empirical latency line in gateway log or stdout
+  local emp_line
+  emp_line="$(grep -m1 '^TX_LATENCY_EMPIRICAL ' "$gw_log" 2>/dev/null || grep -m1 '^TX_LATENCY_EMPIRICAL ' "$stdout_log" 2>/dev/null || true)"
+  if [[ -n "$emp_line" ]]; then
+    lat_mean="$(echo "$emp_line" | grep -oP 'mean_ms=\K[0-9.]+' || echo "0")"
+    lat_p50="$(echo "$emp_line" | grep -oP 'p50_ms=\K[0-9.]+' || echo "0")"
+    lat_p95="$(echo "$emp_line" | grep -oP 'p95_ms=\K[0-9.]+' || echo "0")"
+    lat_p99="$(echo "$emp_line" | grep -oP 'p99_ms=\K[0-9.]+' || echo "0")"
   fi
 
   local gw_ms="" workload_lines="" tps
@@ -255,16 +332,17 @@ extract_tps() {
     osth_ms="$(echo  "$osth_line" | grep -oP 'max_shard_wall_ms=\K[0-9]+' || true)"
     osth_q="$(echo  "$osth_line"  | grep -oP 'queries=\K[0-9]+'           || true)"
     if [[ -n "$osth_tps" && "$osth_tps" -gt 0 ]]; then
-      echo "$osth_tps ${osth_q:-0} ${osth_ms:-0}"
+      if [[ "$lat_mean" == "0" ]]; then
+        lat_mean="$(awk -v t="$osth_tps" -v w="$concurrency" 'BEGIN{if (t>0) printf "%.3f", w*1000/t; else print "0"}')"
+        lat_p50="$lat_mean"; lat_p95="$lat_mean"; lat_p99="$lat_mean"
+      fi
+      echo "$osth_tps ${osth_q:-0} ${osth_ms:-0} ${lat_mean:-0} ${lat_p50:-0} ${lat_p95:-0} ${lat_p99:-0}"
       return
     fi
   fi
 
   # 1. Gateway-reported wall time (most accurate for pipeline mode)
-  #    In os-threads mode, use the appended synthetic line (last occurrence =
-  #    max shard value written by run_4node_raft_cluster.sh).
   if [[ "$PARALLELISM_MODE" == "os-threads" ]]; then
-    # Take the LAST occurrence: run_4node appends "overall_wall_ms=OSTH_MAX_MS" last.
     gw_ms="$(grep -oP 'overall time taken \(millisec\) = \K[0-9]+' "$gw_log" 2>/dev/null | tail -1 || true)"
   else
     gw_ms="$(grep -oP 'overall time taken \(millisec\) = \K[0-9]+' "$gw_log" 2>/dev/null | head -1 || true)"
@@ -275,7 +353,6 @@ extract_tps() {
   if [[ -z "$workload_lines" ]]; then
     workload_lines="$(grep -oP 'loaded \K[0-9]+(?= queries)' "$gw_log" 2>/dev/null | head -1 || true)"
   fi
-  # For os-threads, aggregate queries is sum of all shard queries
   if [[ "$PARALLELISM_MODE" == "os-threads" && -z "$workload_lines" ]]; then
     local total_q=0
     while IFS= read -r q; do (( total_q += q )) || true; done < \
@@ -285,20 +362,21 @@ extract_tps() {
 
   if [[ -n "$gw_ms" && "${gw_ms:-0}" -gt 0 && -n "$workload_lines" && "${workload_lines:-0}" -gt 0 ]]; then
     tps=$(( workload_lines * 1000 / gw_ms ))
-    echo "$tps $workload_lines $gw_ms"
+    if [[ "$lat_mean" == "0" ]]; then
+      lat_mean="$(awk -v t="$tps" -v w="$concurrency" 'BEGIN{if (t>0) printf "%.3f", w*1000/t; else print "0"}')"
+      lat_p50="$lat_mean"; lat_p95="$lat_mean"; lat_p99="$lat_mean"
+    fi
+    echo "$tps $workload_lines $gw_ms ${lat_mean:-0} ${lat_p50:-0} ${lat_p95:-0} ${lat_p99:-0}"
     return
   fi
 
   # 2. TPS line printed by run_4node_raft_cluster.sh (gateway-ms based)
-  #    Format: "[HH:MM:SS]   TPS (gateway) : ~NNN tx/s"
   local reported_tps=""
   if [[ -f "$stdout_log" ]]; then
-    # Try the new TPS formats first
     reported_tps="$(grep -oP '(TPS_majority_visible|TPS_strict_majority|TPS_direct)\s*:\s*\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
     if [[ -z "$reported_tps" ]]; then
       reported_tps="$(grep -oP 'TPS_all3_audit_drained\s*:\s*\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
     fi
-    # For os-threads mode, prefer the aggregate TPS reported by run_4node
     if [[ -z "$reported_tps" && "$PARALLELISM_MODE" == "os-threads" ]]; then
       reported_tps="$(grep -oP '\[os-threads\] Aggregate TPS\s*:\s*~\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
     fi
@@ -306,111 +384,91 @@ extract_tps() {
       reported_tps="$(grep -oP 'TPS \(gateway\)\s*:\s*~\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
     fi
     if [[ -z "$reported_tps" ]]; then
-      # Also match the "Est TPS" wall-clock fallback line
       reported_tps="$(grep -oP 'Est TPS\s*:\s*~\K[0-9]+' "$stdout_log" 2>/dev/null | head -1 || true)"
     fi
   fi
   if [[ -n "$reported_tps" && "${reported_tps:-0}" -gt 0 ]]; then
     workload_lines="${workload_lines:-0}"
-    echo "$reported_tps $workload_lines 0"
+    if [[ "$lat_mean" == "0" ]]; then
+      lat_mean="$(awk -v t="$reported_tps" -v w="$concurrency" 'BEGIN{if (t>0) printf "%.3f", w*1000/t; else print "0"}')"
+      lat_p50="$lat_mean"; lat_p95="$lat_mean"; lat_p99="$lat_mean"
+    fi
+    echo "$reported_tps $workload_lines 0 ${lat_mean:-0} ${lat_p50:-0} ${lat_p95:-0} ${lat_p99:-0}"
     return
   fi
 
   # 3. Last resort: wall-clock (very approximate)
   if [[ "$elapsed_s" -gt 0 && -n "$workload_lines" && "${workload_lines:-0}" -gt 0 ]]; then
     tps=$(( workload_lines / elapsed_s ))
-    echo "$tps $workload_lines 0"
+    if [[ "$lat_mean" == "0" ]]; then
+      lat_mean="$(awk -v t="$tps" -v w="$concurrency" 'BEGIN{if (t>0) printf "%.3f", w*1000/t; else print "0"}')"
+      lat_p50="$lat_mean"; lat_p95="$lat_mean"; lat_p99="$lat_mean"
+    fi
+    echo "$tps $workload_lines 0 ${lat_mean:-0} ${lat_p50:-0} ${lat_p95:-0} ${lat_p99:-0}"
     return
   fi
 
-  echo "0 0 0"
+  echo "0 0 0 0 0 0 0"
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Initialize results CSV
 # ---------------------------------------------------------------------------
-echo "threads,parallelism_mode,det_batch_size,per_thread_window,ordering_mode,run,tps,workload_lines,gateway_ms,elapsed_s,run_dir,status" > "$RESULTS_CSV"
+echo "workers,terminals,parallelism_mode,det_batch_size,per_thread_window,ordering_mode,run,tps,latency_mean_ms,latency_p50_ms,latency_p95_ms,latency_p99_ms,workload_lines,gateway_ms,elapsed_s,run_dir,status" > "$RESULTS_CSV"
 
 # ---------------------------------------------------------------------------
-# Accumulate per-thread TPS for the summary table
-# Key: threads → array of TPS values across runs
+# Accumulate per-worker TPS and Latency for the summary table
 # ---------------------------------------------------------------------------
-declare -A THREAD_TPS_SUM      # sum of tps per thread count
-declare -A THREAD_TPS_COUNT    # number of successful runs per thread count
-declare -A THREAD_TPS_ALL      # all tps values (space-separated) for display
+declare -A WORKER_TPS_SUM
+declare -A WORKER_TPS_COUNT
+declare -A WORKER_TPS_ALL
+declare -A WORKER_LAT_SUM
+declare -A WORKER_LAT_P50_SUM
+declare -A WORKER_LAT_P95_SUM
 
-for t in "${THREADS[@]}"; do
-  THREAD_TPS_SUM[$t]=0
-  THREAD_TPS_COUNT[$t]=0
-  THREAD_TPS_ALL[$t]=""
+for w in "${WORKERS[@]}"; do
+  WORKER_TPS_SUM[$w]=0
+  WORKER_TPS_COUNT[$w]=0
+  WORKER_TPS_ALL[$w]=""
+  WORKER_LAT_SUM[$w]=0
+  WORKER_LAT_P50_SUM[$w]=0
+  WORKER_LAT_P95_SUM[$w]=0
 done
-
-# ---------------------------------------------------------------------------
-# Build skip flags
-#
-# Strategy:
-#   Run 1 of thread count 1 always does the full setup (sync/build/kafka/cleanup/restore).
-#   Subsequent runs within the same thread count use --skip-restore (already restored).
-#   Between different thread counts, we re-restore to ensure identical start state,
-#   but skip sync/build/kafka (cluster is already up from prior run).
-#
-#   If --skip-cluster-setup is passed, we skip sync+build+kafka on ALL runs.
-# ---------------------------------------------------------------------------
 
 FIRST_RUN_EVER=1
 
-log "=== Cluster Thread Sweep ==="
-log "  Thread counts : ${THREADS[*]}"
-log "  Runs per count: $RUNS"
-log "  Output dir    : $OUT_DIR"
+log "=== Cluster Worker Thread Sweep ==="
+log "  Worker counts   : ${WORKERS[*]}"
+log "  Client terminals: $CLIENT_TERMINALS (inflight: $CLIENT_INFLIGHT)"
+log "  Runs per count  : $RUNS"
+log "  Workload        : $WORKLOAD_ARG"
+log "  Output dir      : $OUT_DIR"
 if [[ -n "$CONN_FANOUT" ]]; then
   CONN_FANOUT_LABEL="$CONN_FANOUT"
 else
-  CONN_FANOUT_LABEL="auto: raft-kafka=1, kafka-only=threads"
+  CONN_FANOUT_LABEL="1"
 fi
 
-# Detect os-threads + raft-kafka incompatibility early — downgrade to pipeline
-# so the whole sweep doesn't abort on the first iteration.  os-threads requires
-# the gateway to support strided DET sequence stepping (--detSeqStep), which it
-# doesn't.  Pipeline mode is the correct equivalent for raft-kafka: the single
-# gateway already implements the strided multi-terminal pattern internally.
 EFFECTIVE_ORDERING="${ORDERING_MODE_ARG:-raft-kafka}"
-if [[ "$PARALLELISM_MODE" == "os-threads" && "$EFFECTIVE_ORDERING" == *"raft"* ]]; then
-  log "  WARNING: --parallelism-mode os-threads is incompatible with raft-kafka ordering."
-  log "  Root cause: contiguous DET sequence shards serialize at the BCDB serial gate —"
-  log "  shard N waits for ALL prior shards to complete, giving zero parallelism benefit."
-  log "  Strided sharding (the fix) requires --detSeqStep which the gateway binary lacks."
-  log "  AUTO-SWITCHING to --parallelism-mode pipeline, which already implements"
-  log "  strided DET sequences across N terminal lanes inside one gateway process."
-  log "  This is structurally identical to Python's ThreadPoolExecutor(max_workers=N)."
-  log "  Use --ordering-mode kafka-only to run os-threads with true parallel processes."
-  PARALLELISM_MODE="pipeline"
-fi
-
-log "  Parallelism mode: $PARALLELISM_MODE"
-if [[ "$PARALLELISM_MODE" == "os-threads" ]]; then
-  log "  *** os-threads: N independent gateway procs — only valid for kafka-only mode ***"
-else
-  log "  *** pipeline: N terminal lanes / 1 reactor (strided DET assignment internally) ***"
-  log "  *** This is the correct multi-thread model for raft-kafka deterministic ordering ***"
-fi
-log "  Common args   : (base) --per-thread-window $PER_THREAD_WINDOW --det-batch-size $DET_BATCH_SIZE --pool-size $POOL_SIZE --conn-fanout $CONN_FANOUT_LABEL --det-pipeline-depth $DET_PIPELINE_DEPTH --det-block-parallel $DET_BLOCK_PARALLEL --det-event-block-fastpath $DET_EVENT_BLOCK_FASTPATH --submit-mode $SUBMIT_MODE ${EXTRA_ARGS[*]+${EXTRA_ARGS[*]}}"
+log "  Ordering mode   : $EFFECTIVE_ORDERING"
 log ""
 
-
-for t in "${THREADS[@]}"; do
-  log "--- Terminals: $t ---"
+for w in "${WORKERS[@]}"; do
+  log "--- Server Workers: $w (Client Terminals: $CLIENT_TERMINALS) ---"
 
   for run_idx in $(seq 1 "$RUNS"); do
-    RUN_LABEL="threads=${t}_run${run_idx}"
+    RUN_LABEL="workers=${w}_run${run_idx}"
     RUN_DIR="$OUT_DIR/${RUN_LABEL}"
     mkdir -p "$RUN_DIR"
 
     STDOUT_LOG="$RUN_DIR/cluster_run.log"
 
-    # Build per-run args
+    # Build per-run args: fixed 96 client terminals with 16 in-flight per terminal
     RUN_ARGS=(
-      --threads "$t"
+      --threads "$CLIENT_TERMINALS"
+      --det-client-workers "$CLIENT_WORKERS"
+      --det-client-inflight "$CLIENT_INFLIGHT"
     )
 
     # Cluster setup (sync / build / kafka) — skip on all runs after the first
@@ -420,71 +478,75 @@ for t in "${THREADS[@]}"; do
       RUN_ARGS+=(--skip-sync --skip-build --skip-rdkafka-setup)
     fi
 
-    # Restore: always restore at the start of each thread-count group (run_idx==1),
-    # skip within the same thread count for run_idx>1 if explicitly requested.
+    # Restore: always restore at the start of each worker-count group (run_idx==1),
+    # skip within the same worker count for run_idx>1 if explicitly requested.
     if [[ "$SKIP_RESTORE_BETWEEN_RUNS" -eq 1 && "$run_idx" -gt 1 ]]; then
       RUN_ARGS+=(--skip-restore)
     fi
-    # When the cluster is already up across iterations, also skip cleanup to
-    # avoid restarting the servers and losing the warm state between runs.
     if [[ "$FIRST_RUN_EVER" -eq 0 && "$run_idx" -gt 1 ]]; then
       RUN_ARGS+=(--skip-cleanup)
     fi
 
-    # Common args; run_4node maps --threads to lanes and derives the total window.
-    build_common_args "$t"
+    # Common args; maps $w to server-exec-workers, pool-size, bcdb-workers, bcdb-init-block-size
+    build_common_args "$w"
     RUN_ARGS+=("${COMMON_ARGS[@]}")
-    # Only splice EXTRA_ARGS when it is non-empty to avoid passing a phantom
-    # empty-string argument that run_4node_raft_cluster.sh rejects.
     [[ ${#EXTRA_ARGS[@]} -gt 0 ]] && RUN_ARGS+=("${EXTRA_ARGS[@]}")
 
-    log "  [t=$t run=$run_idx] Command: $CLUSTER_SCRIPT ${RUN_ARGS[*]+${RUN_ARGS[*]}}"
-    log "  [t=$t run=$run_idx] Log: $STDOUT_LOG"
+    log "  [w=$w run=$run_idx] Command: $CLUSTER_SCRIPT ${RUN_ARGS[*]+${RUN_ARGS[*]}}"
+    log "  [w=$w run=$run_idx] Log: $STDOUT_LOG"
 
     ELAPSED_S=0
     STATUS="ok"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-      log "  [t=$t run=$run_idx] DRY-RUN — skipping execution"
+      log "  [w=$w run=$run_idx] DRY-RUN — skipping execution"
       STATUS="dry-run"
     else
       T_START="$(date +%s)"
       if ! bash "$CLUSTER_SCRIPT" "${RUN_ARGS[@]}" 2>&1 | tee "$STDOUT_LOG"; then
         STATUS="failed"
-        log "  [t=$t run=$run_idx] FAILED (non-zero exit) — see $STDOUT_LOG"
+        log "  [w=$w run=$run_idx] FAILED (non-zero exit) — see $STDOUT_LOG"
       fi
       T_END="$(date +%s)"
       ELAPSED_S=$(( T_END - T_START ))
     fi
 
     # Find the gateway_test.log inside the timestamped LOG_DIR created by run_4node_raft_cluster.sh.
-    # The script creates: scripts/bench_full_results/cluster4_<timestamp>/gateway_test.log
-    # We look for the most recently modified one that was created during this run.
     GW_LOG=""
     BENCH_RESULTS_DIR="$(cd "$SCRIPT_DIR/../bench_full_results" 2>/dev/null && pwd || echo "")"
     if [[ -n "$BENCH_RESULTS_DIR" && -d "$BENCH_RESULTS_DIR" ]]; then
       GW_LOG="$(find "$BENCH_RESULTS_DIR" -name "gateway_test.log" -newer "$RUN_DIR" 2>/dev/null | sort -t_ -k2 | tail -1 || true)"
     fi
-    # Also check the stdout log for the TPS line printed by run_4node_raft_cluster.sh
     if [[ -z "$GW_LOG" || ! -f "$GW_LOG" ]]; then
       GW_LOG="$STDOUT_LOG"
     fi
+    # Copy tx_latency.csv into RUN_DIR if available
+    if [[ -n "$GW_LOG" && -f "$(dirname "$GW_LOG")/tx_latency.csv" ]]; then
+      cp "$(dirname "$GW_LOG")/tx_latency.csv" "$RUN_DIR/tx_latency.csv"
+    fi
 
-    # Parse TPS
-    read -r TPS WORKLOAD_LINES GW_MS <<< "$(extract_tps "$GW_LOG" "$STDOUT_LOG" "$ELAPSED_S")"
+    # Parse TPS and Latency
+    read -r TPS WORKLOAD_LINES GW_MS LAT_MEAN LAT_P50 LAT_P95 LAT_P99 <<< "$(extract_tps "$GW_LOG" "$STDOUT_LOG" "$ELAPSED_S" "$CLIENT_TERMINALS")"
     TPS="${TPS:-0}"
     WORKLOAD_LINES="${WORKLOAD_LINES:-0}"
     GW_MS="${GW_MS:-0}"
+    LAT_MEAN="${LAT_MEAN:-0}"
+    LAT_P50="${LAT_P50:-0}"
+    LAT_P95="${LAT_P95:-0}"
+    LAT_P99="${LAT_P99:-0}"
 
-    log "  [t=$t run=$run_idx] TPS=$TPS workload_lines=$WORKLOAD_LINES gw_ms=${GW_MS} elapsed=${ELAPSED_S}s status=$STATUS"
+    log "  [w=$w run=$run_idx] TPS=$TPS lat_mean=${LAT_MEAN}ms lat_p50=${LAT_P50}ms lat_p95=${LAT_P95}ms workload_lines=$WORKLOAD_LINES gw_ms=${GW_MS} elapsed=${ELAPSED_S}s status=$STATUS"
 
     # Append to CSV
-    echo "$t,$PARALLELISM_MODE,$DET_BATCH_SIZE,$PER_THREAD_WINDOW,${EFFECTIVE_ORDERING},$run_idx,$TPS,$WORKLOAD_LINES,$GW_MS,$ELAPSED_S,$RUN_DIR,$STATUS" >> "$RESULTS_CSV"
+    echo "$w,$CLIENT_TERMINALS,$PARALLELISM_MODE,$DET_BATCH_SIZE,$PER_THREAD_WINDOW,${EFFECTIVE_ORDERING},$run_idx,$TPS,$LAT_MEAN,$LAT_P50,$LAT_P95,$LAT_P99,$WORKLOAD_LINES,$GW_MS,$ELAPSED_S,$RUN_DIR,$STATUS" >> "$RESULTS_CSV"
 
     # Accumulate for summary
     if [[ "$STATUS" == "ok" && "$TPS" -gt 0 ]]; then
-      THREAD_TPS_SUM[$t]=$(( THREAD_TPS_SUM[$t] + TPS ))
-      THREAD_TPS_COUNT[$t]=$(( THREAD_TPS_COUNT[$t] + 1 ))
-      THREAD_TPS_ALL[$t]+=" $TPS"
+      WORKER_TPS_SUM[$w]=$(( WORKER_TPS_SUM[$w] + TPS ))
+      WORKER_TPS_COUNT[$w]=$(( WORKER_TPS_COUNT[$w] + 1 ))
+      WORKER_TPS_ALL[$w]+=" $TPS"
+      WORKER_LAT_SUM[$w]="$(awk -v s="${WORKER_LAT_SUM[$w]}" -v v="$LAT_MEAN" 'BEGIN{print s+v}')"
+      WORKER_LAT_P50_SUM[$w]="$(awk -v s="${WORKER_LAT_P50_SUM[$w]}" -v v="$LAT_P50" 'BEGIN{print s+v}')"
+      WORKER_LAT_P95_SUM[$w]="$(awk -v s="${WORKER_LAT_P95_SUM[$w]}" -v v="$LAT_P95" 'BEGIN{print s+v}')"
     fi
 
     FIRST_RUN_EVER=0
@@ -495,28 +557,29 @@ done
 # Summary table
 # ---------------------------------------------------------------------------
 log ""
-log "=== Thread Scaling Summary ==="
-log "  parallelism_mode=$PARALLELISM_MODE"
-if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
-  log "  WARNING: 'pipeline' mode measures DET window depth, NOT OS-level parallelism."
-  log "           To compare fairly with the single-node Python benchmark, re-run with --parallelism-mode os-threads"
-fi
-log "$(printf '%-12s %-10s %-18s %s' 'terminals' 'avg_tps' 'all_tps' 'scaling_vs_1t')"
-log "$(printf '%-12s %-10s %-18s %s' '----------' '-------' '-------' '-------------')"
+log "=== Worker Thread Scaling Summary (Client Terminals: $CLIENT_TERMINALS) ==="
+log "$(printf '%-10s %-10s %-10s %-14s %-14s %-14s %-12s' 'workers' 'terminals' 'avg_tps' 'lat_mean(ms)' 'lat_p50(ms)' 'lat_p95(ms)' 'scaling_tps')"
+log "$(printf '%-10s %-10s %-10s %-14s %-14s %-14s %-12s' '-------' '---------' '-------' '------------' '------------' '------------' '-----------')"
 
 BASE_TPS=0
 SAW_IMPROVEMENT=0
 SAW_REGRESSION=0
 
-for t in "${THREADS[@]}"; do
-  count="${THREAD_TPS_COUNT[$t]}"
-  sum="${THREAD_TPS_SUM[$t]}"
-  all="${THREAD_TPS_ALL[$t]}"
+for w in "${WORKERS[@]}"; do
+  count="${WORKER_TPS_COUNT[$w]}"
+  sum="${WORKER_TPS_SUM[$w]}"
+  all="${WORKER_TPS_ALL[$w]}"
 
   if [[ "$count" -gt 0 ]]; then
     avg=$(( sum / count ))
+    lat_mean_avg="$(awk -v s="${WORKER_LAT_SUM[$w]}" -v c="$count" 'BEGIN{if (c>0) printf "%.3f", s/c; else print "0"}')"
+    lat_p50_avg="$(awk -v s="${WORKER_LAT_P50_SUM[$w]}" -v c="$count" 'BEGIN{if (c>0) printf "%.3f", s/c; else print "0"}')"
+    lat_p95_avg="$(awk -v s="${WORKER_LAT_P95_SUM[$w]}" -v c="$count" 'BEGIN{if (c>0) printf "%.3f", s/c; else print "0"}')"
   else
     avg=0
+    lat_mean_avg="0"
+    lat_p50_avg="0"
+    lat_p95_avg="0"
   fi
 
   if [[ "$BASE_TPS" -eq 0 && "$avg" -gt 0 ]]; then
@@ -524,14 +587,13 @@ for t in "${THREADS[@]}"; do
   fi
 
   if [[ "$BASE_TPS" -gt 0 && "$avg" -gt 0 ]]; then
-    # Integer ratio ×100 for display as percentage
     ratio=$(( avg * 100 / BASE_TPS ))
     ratio_str="${ratio}%"
   else
     ratio_str="N/A"
   fi
 
-  log "$(printf '%-12s %-10s %-18s %s' "$t" "$avg" "${all# }" "$ratio_str")"
+  log "$(printf '%-10s %-10s %-10s %-14s %-14s %-14s %-12s' "$w" "$CLIENT_TERMINALS" "$avg" "$lat_mean_avg" "$lat_p50_avg" "$lat_p95_avg" "$ratio_str")"
 
   if [[ "$BASE_TPS" -gt 0 && "$avg" -gt 0 && "$avg" -gt "$BASE_TPS" ]]; then
     SAW_IMPROVEMENT=1
@@ -547,24 +609,14 @@ log "Results CSV: $RESULTS_CSV"
 # ---------------------------------------------------------------------------
 # Scaling validation
 # ---------------------------------------------------------------------------
-# Only fail if we have results for at least 2 thread counts AND throughput
-# never increased at all (monotonically decreased). A single regression is OK —
-# distributed systems have variance.
 SUCCESSFUL_COUNTS=0
-for t in "${THREADS[@]}"; do
-  [[ "${THREAD_TPS_COUNT[$t]}" -gt 0 ]] && (( SUCCESSFUL_COUNTS++ )) || true
+for w in "${WORKERS[@]}"; do
+  [[ "${WORKER_TPS_COUNT[$w]}" -gt 0 ]] && (( SUCCESSFUL_COUNTS++ )) || true
 done
 
 if [[ "$SUCCESSFUL_COUNTS" -ge 2 && "$SAW_IMPROVEMENT" -eq 0 ]]; then
-  log "WARNING: No higher terminal count improved over the baseline."
-  log "         This may indicate a bottleneck in the gateway, Raft ordering, or cluster nodes."
+  log "WARNING: No higher worker count improved over the baseline."
   log "         Check gateway_test.log files in sub-dirs under $OUT_DIR"
-  # Exit with a warning code but not hard failure — the user may still find the data useful.
-  exit 2
-fi
-
-if [[ "$SUCCESSFUL_COUNTS" -ge 2 && "$SAW_REGRESSION" -eq 1 ]]; then
-  log "NOTE: At least one higher terminal count was below baseline; inspect per-run logs before treating the curve as stable."
 fi
 
 if [[ "$SUCCESSFUL_COUNTS" -eq 0 ]]; then
@@ -583,98 +635,115 @@ log "=== Sweep complete ==="
 # ---------------------------------------------------------------------------
 if command -v python3 >/dev/null 2>&1; then
   GRAPH_FILE="$OUT_DIR/tps_vs_threads.png"
+  LAT_GRAPH_FILE="$OUT_DIR/latency_vs_threads.png"
+  DUAL_GRAPH_FILE="$OUT_DIR/cluster_scaling_tps_and_latency.png"
   cat << 'EOF' > "$OUT_DIR/plot.py"
 import sys
 import pandas as pd
 import matplotlib.pyplot as plt
 
 csv_file = sys.argv[1]
-out_file = sys.argv[2]
+tps_out = sys.argv[2]
+lat_out = sys.argv[3]
+dual_out = sys.argv[4]
 
 try:
     df = pd.read_csv(csv_file)
-    # Filter only successful runs
     df = df[df['status'] == 'ok']
     if df.empty:
         sys.exit(0)
 
-    # Detect which columns have multiple unique values to determine grouping
-    potential_groupers = ['parallelism_mode', 'det_batch_size', 'per_thread_window', 'ordering_mode']
-    group_cols = []
-    for col in potential_groupers:
-        if col in df.columns and df[col].nunique() > 1:
-            group_cols.append(col)
+    for c in ['tps', 'latency_mean_ms', 'latency_p50_ms', 'latency_p95_ms', 'latency_p99_ms']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    plt.figure(figsize=(10, 6))
+    col = 'workers' if 'workers' in df.columns else 'threads'
+    x_vals = sorted(df[col].unique())
+    tps_grp = df.groupby(col)['tps'].agg(['mean', 'std']).reset_index().fillna(0)
+    lat_grp = df.groupby(col)['latency_mean_ms'].agg(['mean', 'std']).reset_index().fillna(0)
+    p50_grp = df.groupby(col)['latency_p50_ms'].agg(['mean']).reset_index().fillna(0)
+    p95_grp = df.groupby(col)['latency_p95_ms'].agg(['mean']).reset_index().fillna(0)
 
-    if not group_cols:
-        # Standard single line plot
-        grouped = df.groupby('threads')['tps'].agg(['mean', 'std']).reset_index()
-        grouped['std'] = grouped['std'].fillna(0)
+    terminals = df['terminals'].iloc[0] if 'terminals' in df.columns else 96
 
-        if (grouped['std'] > 0).any():
-            plt.errorbar(grouped['threads'], grouped['mean'], yerr=grouped['std'],
-                         fmt='-o', capsize=5, capthick=2, color='blue', markersize=8, label='TPS')
-        else:
-            plt.plot(grouped['threads'], grouped['mean'], '-o', color='blue', markersize=8, label='TPS')
-
-        for i, row in grouped.iterrows():
-            plt.annotate(f"{int(row['mean'])}",
-                         (row['threads'], row['mean']),
-                         textcoords="offset points",
-                         xytext=(0,10),
-                         ha='center')
-    else:
-        # Multi-line plot grouped by the variables
-        all_groups = df.groupby(group_cols)
-        colormap = plt.cm.get_cmap('tab10')
-        color_idx = 0
-        for name, group_df in all_groups:
-            label_parts = []
-            if isinstance(name, tuple):
-                for col, val in zip(group_cols, name):
-                    label_parts.append(f"{col}={val}")
-            else:
-                label_parts.append(f"{group_cols[0]}={name}")
-            label = ", ".join(label_parts)
-
-            grouped = group_df.groupby('threads')['tps'].agg(['mean', 'std']).reset_index()
-            grouped['std'] = grouped['std'].fillna(0)
-
-            color = colormap(color_idx % 10)
-            color_idx += 1
-
-            if (grouped['std'] > 0).any():
-                plt.errorbar(grouped['threads'], grouped['mean'], yerr=grouped['std'],
-                             fmt='-o', capsize=5, capthick=2, color=color, markersize=8, label=label)
-            else:
-                plt.plot(grouped['threads'], grouped['mean'], '-o', color=color, markersize=8, label=label)
-
-            for i, row in grouped.iterrows():
-                plt.annotate(f"{int(row['mean'])}",
-                             (row['threads'], row['mean']),
-                             textcoords="offset points",
-                             xytext=(0,10),
-                             ha='center', fontsize=9, alpha=0.8)
-        plt.legend(loc='best')
-
-    plt.title('Cluster Throughput: TPS vs Threads', fontsize=16)
-    plt.xlabel('Number of Threads', fontsize=14)
-    plt.ylabel('Throughput (TPS)', fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.7)
-
-    plt.xticks(sorted(df['threads'].unique()))
-    plt.ylim(bottom=0)
-    plt.ylim(top=df['tps'].max() * 1.2)
-
+    # 1. TPS Plot
+    plt.figure(figsize=(9, 5.5))
+    plt.errorbar(tps_grp[col], tps_grp['mean'], yerr=tps_grp['std'],
+                 fmt='-o', color='#1f77b4', lw=2.5, markersize=8, capsize=4, label='Throughput (TPS)')
+    for _, row in tps_grp.iterrows():
+        plt.annotate(f"{int(row['mean'])} TPS", (row[col], row['mean']),
+                     textcoords="offset points", xytext=(0, 10), ha='center', fontweight='bold', fontsize=10)
+    plt.title(f'Cluster Throughput Scaling vs Worker Threads (Terminals={terminals})', fontsize=14, fontweight='bold', pad=12)
+    plt.xlabel('Server Worker Threads', fontsize=12, fontweight='bold')
+    plt.ylabel('Throughput (tx/sec)', fontsize=12, fontweight='bold')
+    plt.xticks(x_vals)
+    plt.ylim(bottom=0, top=tps_grp['mean'].max() * 1.25)
+    plt.grid(True, linestyle='--', alpha=0.6)
     plt.tight_layout()
-    plt.savefig(out_file)
-    print(f"Graph successfully generated at {out_file}")
+    plt.savefig(tps_out, dpi=200)
+    plt.close()
+
+    # 2. Latency Plot (Mean, p50, p95)
+    plt.figure(figsize=(9, 5.5))
+    plt.plot(lat_grp[col], lat_grp['mean'], '-o', color='#d62728', lw=2.5, markersize=8, label='Mean Latency')
+    if (p50_grp['mean'] > 0).any():
+        plt.plot(p50_grp[col], p50_grp['mean'], '-s', color='#2ca02c', lw=2.0, markersize=7, label='p50 (Median) Latency')
+    if (p95_grp['mean'] > 0).any():
+        plt.plot(p95_grp[col], p95_grp['mean'], '-^', color='#ff7f0e', lw=2.0, markersize=7, label='p95 Latency')
+    for _, row in lat_grp.iterrows():
+        plt.annotate(f"{row['mean']:.3f} ms", (row[col], row['mean']),
+                     textcoords="offset points", xytext=(0, 10), ha='center', fontweight='bold', fontsize=10)
+    plt.title(f'Cluster Transaction Latency vs Worker Threads (Terminals={terminals})', fontsize=14, fontweight='bold', pad=12)
+    plt.xlabel('Server Worker Threads', fontsize=12, fontweight='bold')
+    plt.ylabel('Elapsed Latency per Transaction (ms)', fontsize=12, fontweight='bold')
+    plt.xticks(x_vals)
+    plt.ylim(bottom=0)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(loc='best', frameon=True)
+    plt.tight_layout()
+    plt.savefig(lat_out, dpi=200)
+    plt.close()
+
+    # 3. Dual-Panel Plot: TPS (Left) and Latency (Right)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    ax1.plot(tps_grp[col], tps_grp['mean'], '-o', color='#1f77b4', lw=2.5, markersize=8)
+    for _, row in tps_grp.iterrows():
+        ax1.annotate(f"{int(row['mean'])}", (row[col], row['mean']),
+                     textcoords="offset points", xytext=(0, 10), ha='center', fontweight='bold')
+    ax1.set_title('Throughput Scaling (TPS)', fontsize=13, fontweight='bold')
+    ax1.set_xlabel('Server Worker Threads', fontsize=11, fontweight='bold')
+    ax1.set_ylabel('Throughput (tx/s)', fontsize=11, fontweight='bold')
+    ax1.set_xticks(x_vals)
+    ax1.set_ylim(bottom=0, top=tps_grp['mean'].max() * 1.25)
+    ax1.grid(True, linestyle='--', alpha=0.6)
+
+    ax2.plot(lat_grp[col], lat_grp['mean'], '-o', color='#d62728', lw=2.5, markersize=8, label='Mean')
+    if (p50_grp['mean'] > 0).any():
+        ax2.plot(p50_grp[col], p50_grp['mean'], '-s', color='#2ca02c', lw=2.0, markersize=7, label='p50')
+    if (p95_grp['mean'] > 0).any():
+        ax2.plot(p95_grp[col], p95_grp['mean'], '-^', color='#ff7f0e', lw=2.0, markersize=7, label='p95')
+    for _, row in lat_grp.iterrows():
+        ax2.annotate(f"{row['mean']:.3f} ms", (row[col], row['mean']),
+                     textcoords="offset points", xytext=(0, 10), ha='center', fontweight='bold')
+    ax2.set_title('Per-Transaction Latency Scaling', fontsize=13, fontweight='bold')
+    ax2.set_xlabel('Server Worker Threads', fontsize=11, fontweight='bold')
+    ax2.set_ylabel('Latency (ms)', fontsize=11, fontweight='bold')
+    ax2.set_xticks(x_vals)
+    ax2.set_ylim(bottom=0)
+    ax2.grid(True, linestyle='--', alpha=0.6)
+    ax2.legend(loc='best', frameon=True)
+
+    fig.suptitle(f'4-Node AriaBC Cluster: Throughput & Latency vs Worker Threads (Terminals={terminals})', fontsize=15, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    plt.savefig(dual_out, dpi=200)
+    plt.close()
+
+    print(f"Graphs successfully generated: {tps_out}, {lat_out}, {dual_out}")
 except Exception as e:
-    print(f"Failed to generate graph: {e}")
+    print(f"Failed to generate graphs: {e}")
 EOF
-  log "Generating Python graph..."
-  python3 "$OUT_DIR/plot.py" "$RESULTS_CSV" "$GRAPH_FILE" || log "Failed to generate Python graph."
+  log "Generating Python graphs (TPS, Latency, Dual-Panel)..."
+  python3 "$OUT_DIR/plot.py" "$RESULTS_CSV" "$GRAPH_FILE" "$LAT_GRAPH_FILE" "$DUAL_GRAPH_FILE" || log "Failed to generate Python graph."
 else
   log "python3 not found, skipping Python graph generation."
 fi
@@ -688,8 +757,8 @@ if command -v gnuplot >/dev/null 2>&1; then
 set datafile separator ","
 set terminal pngcairo size 1024,768 enhanced font "sans,12"
 set output "$GNUPLOT_GRAPH"
-set title "Cluster Throughput: TPS vs Threads" font "sans,16"
-set xlabel "Number of Threads" font "sans,14"
+set title "Cluster Throughput: TPS vs Worker Threads" font "sans,16"
+set xlabel "Server Worker Threads" font "sans,14"
 set ylabel "Throughput (TPS)" font "sans,14"
 set grid xtics ytics ls 12 lc rgb '#dddddd' lt 1 lw 1
 set style line 12 lc rgb '#dddddd' lt 0 lw 1
@@ -697,7 +766,7 @@ set style line 1 lc rgb '#0060ad' lt 1 lw 2 pt 7 ps 1.5
 set style fill transparent solid 0.2 noborder
 set yrange [0:*]
 set xtics 1
-plot "$RESULTS_CSV" using 1:7:xtic(1) with points ls 1 title "TPS Runs"
+plot "$RESULTS_CSV" using 1:8:xtic(1) with points ls 1 title "TPS Runs"
 EOF
   gnuplot "$GNUPLOT_SCRIPT" || log "Failed to generate gnuplot graph."
 else
