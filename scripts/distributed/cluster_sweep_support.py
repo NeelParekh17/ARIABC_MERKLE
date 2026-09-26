@@ -182,6 +182,8 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
     for name in ("run_4node_raft_cluster.sh", "benchmark_cache.py", "source_fingerprint.py"):
         subprocess.run(["scp", "-o", "BatchMode=yes", str(repo / "scripts/distributed" / name),
                         f"{args.gateway_user}@{args.gateway_host}:{args.gateway_repo}/scripts/distributed/{name}"], check=True, timeout=60)
+    subprocess.run(["scp", "-r", "-o", "BatchMode=yes", str(repo / "scripts/distributed/recovery"),
+                    f"{args.gateway_user}@{args.gateway_host}:{args.gateway_repo}/scripts/distributed/"], check=True, timeout=60)
     metadata["workload_sha256"] = digest
     gw_workers = str(os.environ.get("DET_CLIENT_WORKERS", "96"))
     tx_sign = getattr(args, "tx_sign", None) or os.environ.get("TX_SIGN") or os.environ.get("ARIABC_TX_SIGN") or "blake3"
@@ -202,6 +204,15 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
                "--raft-ordered-batch-target-entries", "64", "--raft-ordered-batch-linger-us", "1000",
                "--raft-ordered-coalesce-log", "1", "--kafka-completion-mode", "majority_async_all3",
                "--det-window", "65536"]
+    recovery_mode = getattr(args, "recovery_mode", None) or os.environ.get("RECOVERY_MODE", "off")
+    if recovery_mode != "off":
+        command.extend(["--recovery-mode", recovery_mode])
+        recovery_interval = getattr(args, "recovery_interval_ms", None) or os.environ.get("RECOVERY_INTERVAL_MS")
+        if recovery_interval:
+            command.extend(["--recovery-interval-ms", str(recovery_interval)])
+        recovery_table = getattr(args, "recovery_table", None) or os.environ.get("RECOVERY_TABLE")
+        if recovery_table:
+            command.extend(["--recovery-table", str(recovery_table)])
     if env["SKIP_SYNC"] == "1":
         command.append("--skip-sync")
     if env["SKIP_BUILD"] == "1":

@@ -3,6 +3,7 @@
 #include "kafka_console.hxx"
 #include "wire_protocol.hxx"
 #include "blake3_tx_signer.hxx"
+#include "gateway_recovery_manager.hxx"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -177,6 +178,18 @@ struct gateway_options {
     // which is essential for single-node gateway-direct throughput to scale.
     int conn_fanout = 1;
     int self_test_early_ready_race = 0;
+
+    // Online Recovery options (ProtectDB Algorithm 2)
+    std::string recovery_mode = "off"; // "off", "active", "passive", "both"
+    int recovery_interval_ms = 200;
+    int recovery_db_port = 5438;
+    std::string recovery_db_user = "postgres";
+    std::string recovery_db_name = "postgres";
+    std::string recovery_db_password;
+    std::string recovery_table = "auto";
+    std::string recovery_nodes;
+    std::string recovery_hook_script;
+    std::string recovery_compare_script;
 };
 
 void usage(const char* argv0) {
@@ -190,7 +203,8 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--detClientMode event|threadpool] [--detClientWorkers <n>] [--detClientInflight <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>]\n";
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--detClientMode event|threadpool] [--detClientWorkers <n>] [--detClientInflight <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>] \\\n"
+        << "    [--recoveryMode off|active|passive|both] [--recoveryIntervalMs <ms>] [--recoveryDbPort <port>] [--recoveryDbUser <user>] [--recoveryDbName <name>] [--recoveryDbPassword <pass>] [--recoveryTable <auto|table>] [--recoveryNodes <nodes_csv>] [--recoveryHookScript <path>] [--recoveryCompareScript <path>]\n";
 }
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
@@ -304,6 +318,26 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 if (opt.conn_fanout < 1) opt.conn_fanout = 1;
             } else if (a == "--selfTestEarlyReadyRace") {
                 opt.self_test_early_ready_race = std::stoi(need("--selfTestEarlyReadyRace"));
+            } else if (a == "--recoveryMode" || a == "--recovery-mode") {
+                opt.recovery_mode = ariabc_pg::trim_copy(need(a.c_str()));
+            } else if (a == "--recoveryIntervalMs" || a == "--recovery-interval-ms") {
+                opt.recovery_interval_ms = std::stoi(need(a.c_str()));
+            } else if (a == "--recoveryDbPort" || a == "--recovery-db-port") {
+                opt.recovery_db_port = std::stoi(need(a.c_str()));
+            } else if (a == "--recoveryDbUser" || a == "--recovery-db-user") {
+                opt.recovery_db_user = need(a.c_str());
+            } else if (a == "--recoveryDbName" || a == "--recovery-db-name") {
+                opt.recovery_db_name = need(a.c_str());
+            } else if (a == "--recoveryDbPassword" || a == "--recovery-db-password") {
+                opt.recovery_db_password = need(a.c_str());
+            } else if (a == "--recoveryTable" || a == "--recovery-table") {
+                opt.recovery_table = need(a.c_str());
+            } else if (a == "--recoveryNodes" || a == "--recovery-nodes") {
+                opt.recovery_nodes = need(a.c_str());
+            } else if (a == "--recoveryHookScript" || a == "--recovery-hook-script") {
+                opt.recovery_hook_script = need(a.c_str());
+            } else if (a == "--recoveryCompareScript" || a == "--recovery-compare-script") {
+                opt.recovery_compare_script = need(a.c_str());
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -4244,6 +4278,24 @@ int main(int argc, char** argv) {
     }
     ariabc_pg::vote_store votes(total_nodes, majority, opt.vote_store_max_entries, result_sig_key, opt.raft_epoch_hex, opt.raft_apply_ledger_mode == "safe");
 
+    std::unique_ptr<ariabc_pg::gateway_recovery_manager> recovery_mgr;
+    if (opt.recovery_mode != "off" && !opt.recovery_mode.empty()) {
+        recovery_mgr.reset(new ariabc_pg::gateway_recovery_manager(
+            opt.recovery_mode,
+            opt.recovery_interval_ms,
+            opt.recovery_db_port,
+            opt.recovery_db_user,
+            opt.recovery_db_name,
+            opt.recovery_db_password,
+            opt.recovery_table,
+            opt.recovery_nodes,
+            opt.recovery_hook_script,
+            opt.recovery_compare_script,
+            nodes,
+            ariabc_pg::g_raft_node_ids
+        ));
+    }
+
 #ifndef SSL_LIBRARY_NOT_FOUND
     ariabc_pg::openssl_keypair keys;
     if (opt.query_sign == 1) {
@@ -4450,6 +4502,13 @@ int main(int argc, char** argv) {
                     for (size_t i = 0; i < recoveries.size(); ++i) {
                         if (!recoveries[i].empty()) {
                             divergence_count.fetch_add(1);
+                            if (recovery_mgr) {
+                                if (recovery_mgr->is_active_enabled()) {
+                                    recovery_mgr->handle_divergence_note(recoveries[i]);
+                                } else if (recovery_mgr->is_passive_enabled()) {
+                                    recovery_mgr->trigger_immediate_check();
+                                }
+                            }
                             if (recoveries[i].find("vote_store_capacity_exhausted") != std::string::npos) {
                                 std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
                                 if (!fatal_gateway_error.load(std::memory_order_relaxed)) {
@@ -7025,6 +7084,10 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
 
+        if (recovery_mgr) {
+            recovery_mgr->stop_passive_and_drain();
+        }
+
         std::cout << "overall time taken (millisec) = " << overall_ms << std::endl;
         std::cout << " overall wall time including drains (millisec) = " << overall_wall_ms << std::endl;
         std::cout << " total wait time (ms) " << wait_ms << std::endl;
@@ -7035,6 +7098,12 @@ int main(int argc, char** argv) {
         std::cout << "duplicate_key_errors=" << duplicate_key_errors.load() << std::endl;
         std::cout << "divergence_count=" << divergence_count.load() << std::endl;
         std::cout << "permanent_failures=" << permanent_failures.load() << std::endl;
+        if (recovery_mgr) {
+            std::cout << "recovery_triggered_count=" << recovery_mgr->triggered_count() << std::endl;
+            std::cout << "recovery_success_count=" << recovery_mgr->success_count() << std::endl;
+            std::cout << "recovery_failure_count=" << recovery_mgr->failure_count() << std::endl;
+            std::cout << "recovery_total_ms=" << recovery_mgr->total_ms() << std::endl;
+        }
         if (tx_signer.is_enabled()) {
             const uint64_t signed_cnt = tx_signatures_signed.load(std::memory_order_relaxed);
             const uint64_t verified_cnt = tx_signatures_verified.load(std::memory_order_relaxed);
@@ -7266,6 +7335,11 @@ int main(int argc, char** argv) {
             << " err_flush_ms=" << (ep.flush_ns / 1000000.0)
             << " overall_wall_ms=" << overall_wall_ms
             << " background_accept_drain_ms=" << background_accept_drain_ms
+            << " recovery_mode=" << opt.recovery_mode
+            << " recovery_triggered_count=" << (recovery_mgr ? recovery_mgr->triggered_count() : 0)
+            << " recovery_success_count=" << (recovery_mgr ? recovery_mgr->success_count() : 0)
+            << " recovery_failure_count=" << (recovery_mgr ? recovery_mgr->failure_count() : 0)
+            << " recovery_total_ms=" << (recovery_mgr ? recovery_mgr->total_ms() : 0)
             << std::endl;
 
         exit_code = (permanent_failures.load() > 0) ? 1 : 0;
@@ -7506,6 +7580,9 @@ int main(int argc, char** argv) {
     }
 
     stop = true;
+    if (recovery_mgr) {
+        recovery_mgr->stop();
+    }
     if (kafka_thread.joinable()) kafka_thread.join();
     dispatch_cv.notify_all();
     for (auto& t : dispatch_threads) {
