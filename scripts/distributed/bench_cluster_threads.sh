@@ -69,6 +69,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CLUSTER_SCRIPT="$SCRIPT_DIR/run_4node_raft_cluster.sh"
 
 # ---------------------------------------------------------------------------
@@ -93,7 +94,9 @@ export GATEWAY_STALL_POLL_SECONDS="${GATEWAY_STALL_POLL_SECONDS:-5}"
 export GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-12}"
 export KAFKA_FAST_RESET="${KAFKA_FAST_RESET:-1}"
 export DUMP_VERIFY_CSV="${DUMP_VERIFY_CSV:-0}"
-export ARIABC_SOURCE_FINGERPRINT="${ARIABC_SOURCE_FINGERPRINT:-068290a61f18a35b1429ef395f4489404f65df0800cc4fba147afa5704425f61}"
+if [[ -z "${ARIABC_SOURCE_FINGERPRINT:-}" && -f "$SCRIPT_DIR/source_fingerprint.py" ]]; then
+  export ARIABC_SOURCE_FINGERPRINT="$(python3 "$SCRIPT_DIR/source_fingerprint.py" --repo "$REPO_ROOT" --ring-capacity "${RESULT_RING_CAPACITY:-2048}" 2>/dev/null || true)"
+fi
 export TX_SIGN="${TX_SIGN:-blake3}"
 export BENCH_COLD_CACHE="${BENCH_COLD_CACHE:-0}"
 
@@ -109,7 +112,7 @@ SKIP_CLUSTER_SETUP=1
 SKIP_RESTORE_BETWEEN_RUNS=0
 RUNS=1
 OUT_DIR=""
-WORKLOAD_ARG="/work/ARIABC/AriaBC/Final_Results/reruns/20260923T153000Z_campaign/YCSB/workloads_v5/ycsb_workload_a_skew_0_00_20k.txt"
+WORKLOAD_ARG="${REPO_ROOT}/Final_Results/YCSB/workloads_v5/ycsb_workload_a_skew_0_00_20k.txt"
 PER_THREAD_WINDOW="256"
 DET_BATCH_SIZE="256"
 CONN_FANOUT="1"
@@ -514,7 +517,7 @@ for w in "${WORKERS[@]}"; do
     GW_LOG=""
     BENCH_RESULTS_DIR="$(cd "$SCRIPT_DIR/../bench_full_results" 2>/dev/null && pwd || echo "")"
     if [[ -n "$BENCH_RESULTS_DIR" && -d "$BENCH_RESULTS_DIR" ]]; then
-      GW_LOG="$(find "$BENCH_RESULTS_DIR" -name "gateway_test.log" -newer "$RUN_DIR" 2>/dev/null | sort -t_ -k2 | tail -1 || true)"
+      GW_LOG="$(find "$BENCH_RESULTS_DIR" -maxdepth 2 -name "gateway_test.log" -newer "$RUN_DIR" 2>/dev/null | sort -t_ -k2 | tail -1 || true)"
     fi
     if [[ -z "$GW_LOG" || ! -f "$GW_LOG" ]]; then
       GW_LOG="$STDOUT_LOG"

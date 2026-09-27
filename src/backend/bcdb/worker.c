@@ -3474,6 +3474,9 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				postcommit_fmtver = tx->raft_terminal_format_version;
 			}
 
+			/* Recovery cut: publish our writer xid before it can become visible. */
+			bcdb_note_precommit_xid(tx->tx_id, GetTopTransactionIdIfAny());
+
 			finish_xact_command();
 
 			if (do_postcommit_witness)
@@ -3800,6 +3803,7 @@ void bcdb_worker_process_tx(BCDBShmXact *tx)
             tx->end_local_copy_time = bcdb_get_time();
 		if (tx->sxact != NULL)
 			tx->sxact->flags |= SXACT_FLAG_PREPARED;
+		bcdb_note_precommit_xid(tx->tx_id, GetTopTransactionIdIfAny());
         finish_xact_command();
 
         DEBUGMSG("[ZL] worker(%d) commiting tx(%s)", getpid(), tx->hash);

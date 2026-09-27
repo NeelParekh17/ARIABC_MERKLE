@@ -289,6 +289,22 @@ pg_state_machine::pg_state_machine(int node_id,
     {}
 
 pg_state_machine::~pg_state_machine() {
+    replay_stop_.store(true, std::memory_order_release);
+    if (replay_thread_.joinable()) {
+        replay_thread_.join();
+    }
+    {
+        std::lock_guard<std::mutex> lk(cuts_mu_);
+        for (auto& kv : cuts_) {
+            if (kv.second.keeper) PQfinish(kv.second.keeper);
+        }
+        cuts_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(keeper_mu_);
+        if (keeper_spare_) PQfinish(keeper_spare_);
+        keeper_spare_ = nullptr;
+    }
     executor_.stop();
 }
 
@@ -351,6 +367,22 @@ uint64_t pg_state_machine::next_committed_det_seq_locked() {
 nuraft::ptr<nuraft::buffer> pg_state_machine::commit(const nuraft::ulong log_idx,
                                                      nuraft::buffer& data)
 {
+    std::lock_guard<std::mutex> lk(commit_mu_);
+    const uint64_t idx = static_cast<uint64_t>(log_idx);
+    if (cut_pending_.load(std::memory_order_acquire)) {
+        maybe_prepare_cut_locked(idx);
+    }
+    if (idx > last_commit_seen_) last_commit_seen_ = idx;
+    if (recov_mode_.load(std::memory_order_acquire) != 0) {
+        return quarantine_ack(idx, data);
+    }
+    return commit_apply_locked(idx, data);
+}
+
+nuraft::ptr<nuraft::buffer> pg_state_machine::commit_apply_locked(uint64_t log_idx,
+                                                                  nuraft::buffer& data)
+{
+    if (log_idx > last_enqueued_idx_) last_enqueued_idx_ = log_idx;
     if (data.size() == 0) {
         std::cout << "[pg_state_machine::commit] no-op commit at log_idx=" << log_idx << std::endl;
         {
@@ -360,7 +392,7 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit(const nuraft::ulong log_idx
             rec.terminal_item.assign(1, false);
         }
         note_item_applied(log_idx, 0);
-        nuraft::ptr<nuraft::buffer> ack = nuraft::buffer::alloc(0);
+            nuraft::ptr<nuraft::buffer> ack = nuraft::buffer::alloc(0);
         return ack;
     }
 
@@ -442,6 +474,9 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit(const nuraft::ulong log_idx
         validate_assigned_det_seq_or_abort(batch.items[i],
                                            static_cast<uint64_t>(log_idx),
                                            static_cast<uint32_t>(i));
+        if (batch.items[i].has_assigned_det_seq) {
+            last_assigned_det_seq_ = static_cast<int64_t>(batch.items[i].assigned_det_seq);
+        }
     }
 
     if (batch.items.size() == 1) {
@@ -622,6 +657,20 @@ void pg_state_machine::commit_config(const nuraft::ulong log_idx,
                                      nuraft::ptr<nuraft::cluster_config>& new_conf) {
     (void)new_conf;
     std::cout << "[pg_state_machine::commit_config] log_idx=" << log_idx << std::endl;
+    std::lock_guard<std::mutex> lk(commit_mu_);
+    const uint64_t idx = static_cast<uint64_t>(log_idx);
+    if (cut_pending_.load(std::memory_order_acquire)) {
+        maybe_prepare_cut_locked(idx);
+    }
+    if (idx > last_commit_seen_) last_commit_seen_ = idx;
+    if (recov_mode_.load(std::memory_order_acquire) != 0) {
+        return;
+    }
+    commit_noop_locked(idx);
+}
+
+void pg_state_machine::commit_noop_locked(uint64_t log_idx) {
+    if (log_idx > last_enqueued_idx_) last_enqueued_idx_ = log_idx;
     {
         std::lock_guard<std::mutex> lk(tracker_mu_);
         entry_tracker_record& rec = entry_tracker_[static_cast<uint64_t>(log_idx)];

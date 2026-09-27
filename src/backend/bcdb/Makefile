@@ -22,7 +22,8 @@ OBJS = \
 	middleware.o \
 	func.o \
 	bcdb_dsa.o \
-	raft_apply_ledger.o
+	raft_apply_ledger.o \
+	recovery.o
 
 include $(top_srcdir)/src/backend/common.mk
 

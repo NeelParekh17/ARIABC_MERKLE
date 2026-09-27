@@ -621,7 +621,10 @@ void wait_for_admission_drain(pg_state_machine* psm) {
     const auto s0 = std::chrono::steady_clock::now();
     bool stalled = false;
     uint64_t waits = 0;
-    while (psm->admission_control_blocked() && !g_stop.load(std::memory_order_relaxed)) {
+    // A recovering replica's replay backlog must never throttle cluster
+    // submissions routed through it (it may be the Raft leader).
+    while (psm->recovery_live() &&
+           psm->admission_control_blocked() && !g_stop.load(std::memory_order_relaxed)) {
         stalled = true;
         // Cap a single wait so we re-check g_stop periodically.
         (void)psm->wait_for_admission_drain(50ULL * 1000ULL * 1000ULL); // 50ms
@@ -1266,6 +1269,16 @@ void handle_client_fd(int fd,
             resp.msg = std::to_string(static_cast<uint64_t>(psm->last_commit_index()));
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
+            continue;
+        }
+        if (psm && starts_with(req.sql, "__ARIABC_CTRL_RECOVERY ")) {
+            client_api_response resp;
+            std::string msg;
+            const bool ok = psm->handle_recovery_control(
+                req.sql.substr(std::string("__ARIABC_CTRL_RECOVERY ").size()), msg);
+            resp.status = ok ? 0 : 2;
+            resp.msg = msg;
+            if (!write_response_frame(fd, resp, err)) break;
             continue;
         }
         if (starts_with(req.sql, "WAIT_RESULTS ")) {
@@ -2302,6 +2315,15 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) {
             std::cerr << "FATAL: " << e.what() << std::endl;
             return 1;
+        }
+    }
+
+    // Online recovery replays committed entries from the local log store.
+    {
+        ariabc_pg::pg_state_machine* psm =
+            dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
+        if (psm && smgr) {
+            psm->set_log_store(smgr->load_log_store());
         }
     }
 

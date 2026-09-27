@@ -284,6 +284,18 @@ public:
     bool ensure_bcdb_initialized();
     int bcdb_block_size() const { return bcdb_block_size_; }
 
+    // Online recovery: stop/start publishing results while this replica is
+    // quarantined, and restart deterministic ordering after a rebase so the
+    // next dispatched sequence is `next_seq`.
+    void set_publish_suppressed(bool suppressed) {
+        publish_suppressed_.store(suppressed, std::memory_order_release);
+    }
+    bool publish_suppressed() const {
+        return publish_suppressed_.load(std::memory_order_acquire);
+    }
+    void reset_det_order(uint64_t next_seq);
+    const std::string& conninfo() const { return conninfo_; }
+
 private:
     struct notice_state;
     static void notice_processor(void* arg, const char* message);
@@ -384,6 +396,7 @@ private:
     std::atomic<uint64_t> st_kafka_async_publisher_queue_max_{0};
 
     std::atomic<bool> stop_{false};
+    std::atomic<bool> publish_suppressed_{false};
     std::mutex q_mu_;
     std::condition_variable q_cv_;
     std::queue<task> q_;

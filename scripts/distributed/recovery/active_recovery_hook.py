@@ -86,6 +86,7 @@ def main() -> int:
         db_password=args.db_password,
         damaged_node_id=dmg_id,
         reference_node_id=ref_id,
+        req_num=args.req_num,
     )
 
     logger.info("Active Recovery Result: %s", json.dumps(res, indent=2))

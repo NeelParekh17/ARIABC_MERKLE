@@ -31,6 +31,12 @@ def parse_logs(log_files, parallelism_mode):
     async_all3_failure_count = 0
     async_all3_timeout_count = 0
     async_all3_missing_count = 0
+    async_all3_recovery_attributed_count = 0
+    recovery_triggered = 0
+    recovery_success = 0
+    recovery_failure = 0
+    recovery_final_check = ""
+    recovery_events = []
 
     has_empirical_latency = False
     empirical_lat_count = 0
@@ -90,6 +96,25 @@ def parse_logs(log_files, parallelism_mode):
                     m_m = re.search(r'async_all3_missing_count=(\d+)', line)
                     if m_m:
                         async_all3_missing_count += int(m_m.group(1))
+                    m_ra = re.search(r'async_all3_recovery_attributed_count=(\d+)', line)
+                    if m_ra:
+                        async_all3_recovery_attributed_count += int(m_ra.group(1))
+
+                # Online replica recovery outcome
+                m_rt = re.search(r'^recovery_triggered_count=(\d+)', line)
+                if m_rt:
+                    recovery_triggered += int(m_rt.group(1))
+                m_rs = re.search(r'^recovery_success_count=(\d+)', line)
+                if m_rs:
+                    recovery_success += int(m_rs.group(1))
+                m_rf = re.search(r'^recovery_failure_count=(\d+)', line)
+                if m_rf:
+                    recovery_failure += int(m_rf.group(1))
+                m_fc = re.search(r'^RECOVERY_FINAL_CHECK result=(\S+)', line)
+                if m_fc:
+                    recovery_final_check = m_fc.group(1)
+                if line.startswith("RECOVERY_EVENT "):
+                    recovery_events.append(line.strip())
 
                 # Empirical transaction latency
                 m_lat = re.search(r'TX_LATENCY_EMPIRICAL count=(\d+) min_ms=([0-9.]+) mean_ms=([0-9.]+) p50_ms=([0-9.]+) p90_ms=([0-9.]+) p95_ms=([0-9.]+) p99_ms=([0-9.]+) max_ms=([0-9.]+)', line)
@@ -123,6 +148,12 @@ def parse_logs(log_files, parallelism_mode):
         "client_quorum_complete_count": client_quorum_complete_count,
         "async_all3_verified_count": async_all3_verified_count,
         "async_all3_failure_count": async_all3_failure_count,
+        "async_all3_recovery_attributed_count": async_all3_recovery_attributed_count,
+        "recovery_triggered": recovery_triggered,
+        "recovery_success": recovery_success,
+        "recovery_failure": recovery_failure,
+        "recovery_final_check": recovery_final_check,
+        "recovery_events": recovery_events,
         "async_all3_timeout_count": async_all3_timeout_count,
         "async_all3_missing_count": async_all3_missing_count,
         "has_empirical_latency": has_empirical_latency,
@@ -235,6 +266,15 @@ def main():
     async_all3_failure_count = metrics["async_all3_failure_count"]
     async_all3_timeout_count = metrics["async_all3_timeout_count"]
     async_all3_missing_count = metrics["async_all3_missing_count"]
+    recovery_attributed = metrics["async_all3_recovery_attributed_count"]
+    # Divergences are expected when a replica is corrupted on purpose; they are
+    # acceptable only if every detected outlier was recovered online and all
+    # replicas ended with identical state digests.
+    recovered_ok = (metrics["recovery_triggered"] > 0 and
+                    metrics["recovery_failure"] == 0 and
+                    metrics["recovery_success"] == metrics["recovery_triggered"] and
+                    metrics["recovery_final_check"] == "PASS")
+    effective_divergence = 0 if recovered_ok else divergence_count
 
     # 5. Determine output values
     tps_majority_visible = "N/A"
@@ -277,12 +317,12 @@ def main():
         else:
             is_valid = (
                 client_quorum_complete_count == workload_transactions and
-                async_all3_verified_count == workload_transactions and
+                async_all3_verified_count + (recovery_attributed if recovered_ok else 0) == workload_transactions and
                 async_all3_failure_count == 0 and
                 async_all3_timeout_count == 0 and
                 async_all3_missing_count == 0 and
                 permanent_failures == 0 and
-                divergence_count == 0
+                effective_divergence == 0
             )
 
         if is_valid:
@@ -303,6 +343,13 @@ def main():
             all3_audit_valid = "no"
 
         print(f"All-3 audit valid               : {all3_audit_valid}")
+        if metrics["recovery_triggered"] > 0:
+            print(f"Online recoveries               : triggered={metrics['recovery_triggered']} "
+                  f"succeeded={metrics['recovery_success']} failed={metrics['recovery_failure']} "
+                  f"final_check={metrics['recovery_final_check'] or 'n/a'} "
+                  f"raw_divergence={divergence_count} audit_recovery_attributed={recovery_attributed}")
+            for ev in metrics["recovery_events"]:
+                print(f"  {ev}")
         if parser_error:
             print(f"parser_error                    : {parser_error}")
 
@@ -380,7 +427,13 @@ def main():
         ("latency_empirical_max_ms", f"{metrics['empirical_lat_max_ms']:.3f}" if metrics["has_empirical_latency"] else "N/A"),
         ("all3_audit_valid", all3_audit_valid),
         ("parser_error", parser_error),
-        ("divergence_count", str(divergence_count)),
+        ("divergence_count", str(effective_divergence)),
+        ("raw_divergence_count", str(divergence_count)),
+        ("recovery_triggered_count", str(metrics["recovery_triggered"])),
+        ("recovery_success_count", str(metrics["recovery_success"])),
+        ("recovery_failure_count", str(metrics["recovery_failure"])),
+        ("recovery_final_check", metrics["recovery_final_check"]),
+        ("async_all3_recovery_attributed_count", str(recovery_attributed)),
         ("permanent_failures", str(permanent_failures)),
         ("client_quorum_complete_count", str(client_quorum_complete_count) if validation_mode == "majority_async_all3" else ""),
         ("async_all3_verified_count", str(async_all3_verified_count) if validation_mode == "majority_async_all3" else ""),

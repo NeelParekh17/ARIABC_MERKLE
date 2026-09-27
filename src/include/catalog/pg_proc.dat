@@ -10978,4 +10978,14 @@ proargtypes => 'cstring', prosrc => 'bcdb_block_submit_results' },
   proargnames => '{relid,partition_id,node_ids,prefix_lens,max_depth,node_id,prefix_len,is_leaf,hash}',
   prosrc => 'merkle_get_descendants_batch_array' }
 
+# bcdb recovery functions
+{ oid => '9898', descr => 'BCDB export an MVCC snapshot of the deterministic prefix 0..boundary',
+  proname => 'bcdb_cut_snapshot_export', provolatile => 'v', proparallel => 'u',
+  prorettype => 'text', proargtypes => 'int4 int4',
+  prosrc => 'bcdb_cut_snapshot_export' },
+{ oid => '9899', descr => 'BCDB rebase deterministic watermarks after replica recovery',
+  proname => 'bcdb_recovery_rebase', provolatile => 'v', proparallel => 'u',
+  prorettype => 'bool', proargtypes => 'int4',
+  prosrc => 'bcdb_recovery_rebase' },
+
 ]

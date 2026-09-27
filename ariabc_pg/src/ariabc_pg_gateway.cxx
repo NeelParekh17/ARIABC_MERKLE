@@ -1755,6 +1755,51 @@ struct vote_store {
         , safe_ledger_mode_(safe_ledger_mode)
         {}
 
+    /*
+     * Online recovery hooks.  A recovering node N keeps voting: while it drains
+     * the entries it had already started its results still count, but only
+     * when they match another replica's hash, so a damaged replica cannot make
+     * a wrong result win and the majority never has to wait for the slowest
+     * healthy replica alone.  The coordinator picks a boundary L at or beyond
+     * every entry N executed before the repair, so N's pre-repair votes are all
+     * for entries <= L; the all-node audit ignores them (N's state for those
+     * entries was replaced by a healthy snapshot) and audits N's replayed votes
+     * for entries > L normally.  A node stays "catching up" until it reports
+     * LIVE; audits waiting only on catching-up nodes are not timed out.
+     */
+    void begin_node_recovery(int node_id) {
+        std::lock_guard<std::mutex> lk(mu_);
+        node_recovery_state& st = node_recovery_[node_id];
+        st.active = true;
+        st.boundary_known = false;
+        st.catching_up = true;
+        cv_.notify_all();
+    }
+
+    void set_node_recovery_boundary(int node_id, uint64_t boundary_log_idx) {
+        std::lock_guard<std::mutex> lk(mu_);
+        node_recovery_state& st = node_recovery_[node_id];
+        st.active = true;
+        st.boundary_known = true;
+        st.boundary = std::max(st.boundary, boundary_log_idx);
+        requeue_resolvable_audits_locked();
+        cv_.notify_all();
+    }
+
+    void set_node_live(int node_id, bool live) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = node_recovery_.find(node_id);
+        if (it == node_recovery_.end()) return;
+        it->second.catching_up = !live;
+        requeue_resolvable_audits_locked();
+        cv_.notify_all();
+    }
+
+    uint64_t recovery_excused_divergences() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return recovery_excused_divergences_;
+    }
+
     void add_reply(kafka_reply_record rec,
                    std::string& out_recovery_note)
     {
@@ -1829,6 +1874,15 @@ private:
             }
         }
 
+        bool replace_allowed = false;
+        if (!node_recovery_.empty()) {
+            auto rs = node_recovery_.find(rec.node_id);
+            if (rs != node_recovery_.end() && rs->second.active && rs->second.boundary_known &&
+                rec.raft_log_idx > rs->second.boundary) {
+                replace_allowed = true;   /* replayed after the repair */
+            }
+        }
+
         const uint64_t add_ns = steady_now_ns();
         vote_key key{safe_ledger_mode_ ? rec.epoch_hex : expected_epoch_hex_, rec.req_num};
 
@@ -1888,6 +1942,11 @@ private:
             rec.has_full_result
         };
         auto it_seen = e.seen_reply_keys.find(reply_identity);
+        if (it_seen != e.seen_reply_keys.end() && replace_allowed &&
+            !(it_seen->second == reply_fingerprint)) {
+            e.seen_reply_keys.erase(it_seen);
+            it_seen = e.seen_reply_keys.end();
+        }
         if (it_seen != e.seen_reply_keys.end()) {
             if (it_seen->second == reply_fingerprint) {
                 return;
@@ -1956,6 +2015,12 @@ private:
 
         if (!e.all_reported && e.nodes_seen_count >= total_nodes_) {
             e.all_reported = true;
+            if (!e.divergence_reported &&
+                (e.hash_to_nodes_valid.size() > 1 || has_invalid_sig_locked(e)) &&
+                divergence_excused_by_recovery_locked(e)) {
+                e.divergence_reported = true;
+                ++recovery_excused_divergences_;
+            }
             if (!e.divergence_reported &&
                 (e.hash_to_nodes_valid.size() > 1 || has_invalid_sig_locked(e))) {
                 e.divergence_reported = true;
@@ -2575,6 +2640,16 @@ public:
 
                 auto map_it = m_.find(top_entry.key);
                 if (map_it != m_.end() && map_it->second.audit_pending &&
+                    map_it->second.audit_generation == top_entry.generation &&
+                    !map_it->second.all3_ready_queued &&
+                    waiting_only_on_catching_up_locked(map_it->second)) {
+                    const uint64_t extended = now_ns + (timeout_ns > 0 ? timeout_ns : 1000000000ULL);
+                    map_it->second.audit_deadline_ns = extended;
+                    audit_deadline_heap_.push(audit_deadline_entry{extended, top_entry.key, top_entry.generation});
+                    ++recovery_audit_deadline_extensions_;
+                    continue;
+                }
+                if (map_it != m_.end() && map_it->second.audit_pending &&
                     map_it->second.audit_generation == top_entry.generation) {
 
                     if (!map_it->second.all3_ready_queued) {
@@ -3059,7 +3134,26 @@ private:
         if (it == m_.end()) return false;
         const vote_entry& e = it->second;
 
-        if (static_cast<int>(e.by_node.size()) < total_nodes_) {
+        int covered = 0;
+        uint64_t ignored_mask = 0;
+        for (const auto& kv : node_recovery_) {
+            if (!kv.second.active) continue;
+            const bool below = kv.second.boundary_known && e.identity_pinned &&
+                               e.pinned_raft_log_idx <= kv.second.boundary;
+            if (e.by_node.count(kv.first)) {
+                /* A vote cast before the node's state was replaced by the
+                 * snapshot says nothing about the repaired replica. */
+                if (below) {
+                    ignored_mask |= node_bit(kv.first);
+                    ++covered;
+                }
+                continue;
+            }
+            if (!kv.second.boundary_known) return false;
+            if (below) ++covered;
+        }
+        const int present = static_cast<int>(e.by_node.size()) - popcount_mask(ignored_mask);
+        if (present + covered < total_nodes_) {
             return false;
         }
         if (has_invalid_sig_locked(e)) {
@@ -3068,16 +3162,90 @@ private:
         }
 
         bool unanimous_hash = false;
+        uint64_t majority_mask = 0;
         for (const auto& kv : e.hash_to_nodes_valid) {
-            if (popcount_mask(kv.second) == total_nodes_) {
+            const uint64_t mask = kv.second & ~ignored_mask;
+            const int votes = popcount_mask(mask);
+            if (votes == present) {
                 unanimous_hash = true;
                 break;
             }
+            if (votes * 2 > total_nodes_) majority_mask = mask;
         }
         if (!unanimous_hash) {
             out_error = "all_nodes_hash_mismatch";
+            if (majority_mask != 0) {
+                std::string minority;
+                for (const auto& kv : e.by_node) {
+                    if ((majority_mask & node_bit(kv.first)) == 0 &&
+                        (ignored_mask & node_bit(kv.first)) == 0) {
+                        if (!minority.empty()) minority += ",";
+                        minority += std::to_string(kv.first);
+                    }
+                }
+                if (!minority.empty()) out_error += ":minority=" + minority;
+            }
         }
         return true;
+    }
+
+    /*
+     * True when every valid vote outside the recovering nodes agrees, i.e. the
+     * divergence comes only from a replica whose repair already covers this
+     * entry (boundary unknown yet, or entry <= boundary).
+     */
+    bool divergence_excused_by_recovery_locked(const vote_entry& e) const {
+        uint64_t excused = 0;
+        for (const auto& kv : node_recovery_) {
+            if (!kv.second.active) continue;
+            if (!kv.second.boundary_known ||
+                (e.identity_pinned && e.pinned_raft_log_idx <= kv.second.boundary)) {
+                excused |= node_bit(kv.first);
+            }
+        }
+        if (excused == 0) return false;
+        for (const auto& kv : e.by_node) {
+            if (!kv.second.sig_valid && (excused & node_bit(kv.first)) == 0) return false;
+        }
+        int groups = 0;
+        for (const auto& kv : e.hash_to_nodes_valid) {
+            if ((kv.second & ~excused) != 0) ++groups;
+        }
+        return groups <= 1;
+    }
+
+    /* Audits waiting only on nodes that are still catching up must not time out. */
+    bool waiting_only_on_catching_up_locked(const vote_entry& e) const {
+        bool any = false;
+        for (const auto& kv : node_recovery_) {
+            if (!kv.second.active || !kv.second.catching_up) continue;
+            if (e.by_node.count(kv.first)) continue;
+            any = true;
+        }
+        if (!any) return false;
+        int missing_other = total_nodes_ - static_cast<int>(e.by_node.size());
+        for (const auto& kv : node_recovery_) {
+            if (kv.second.active && kv.second.catching_up && !e.by_node.count(kv.first)) {
+                --missing_other;
+            }
+        }
+        return missing_other <= 0;
+    }
+
+    void requeue_resolvable_audits_locked() {
+        for (auto& kv : m_) {
+            vote_entry& e = kv.second;
+            if (!e.audit_pending || e.all3_ready_queued) continue;
+            std::string err;
+            if (resolve_all_nodes_consistent_locked(kv.first, err)) {
+                e.all3_ready_ns = steady_now_ns();
+                e.all3_ready_queued = true;
+                all3_ready_queue_.push_back(kv.first);
+                if (all3_ready_queue_.size() > all3_ready_queue_depth_max_) {
+                    all3_ready_queue_depth_max_ = all3_ready_queue_.size();
+                }
+            }
+        }
     }
 
     bool pop_terminal_inflight_locked(std::deque<uint64_t>& inflight,
@@ -3274,6 +3442,16 @@ private:
     std::string sig_key_;
     std::string expected_epoch_hex_;
     bool safe_ledger_mode_;
+    struct node_recovery_state {
+        bool active = false;
+        bool boundary_known = false;
+        bool catching_up = false;
+        uint64_t boundary = 0;
+    };
+    std::unordered_map<int, node_recovery_state> node_recovery_;
+    uint64_t recovery_excused_divergences_ = 0;
+    uint64_t recovery_audit_deadline_extensions_ = 0;
+
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::unordered_map<vote_key, vote_entry, vote_key_hash> m_;
@@ -4286,11 +4464,23 @@ public:
         if (!csv_out_path.empty()) {
             std::ofstream ofs(csv_out_path);
             if (ofs.is_open()) {
-                ofs << "tx_idx,latency_ms\n";
+                // finish_ms: completion time relative to the first submit, so
+                // per-interval throughput (and any stall) can be reconstructed.
+                std::chrono::steady_clock::time_point origin;
+                bool have_origin = false;
+                for (size_t i = 0; i < completed_.size(); ++i) {
+                    if (submit_times_[i].time_since_epoch().count() > 0 &&
+                        (!have_origin || submit_times_[i] < origin)) {
+                        origin = submit_times_[i];
+                        have_origin = true;
+                    }
+                }
+                ofs << "tx_idx,latency_ms,finish_ms\n";
                 for (size_t i = 0; i < completed_.size(); ++i) {
                     if (completed_[i] && submit_times_[i].time_since_epoch().count() > 0) {
                         const double ms = std::chrono::duration<double, std::milli>(finish_times_[i] - submit_times_[i]).count();
-                        ofs << i << "," << std::fixed << std::setprecision(4) << ms << "\n";
+                        const double fin = std::chrono::duration<double, std::milli>(finish_times_[i] - origin).count();
+                        ofs << i << "," << std::fixed << std::setprecision(4) << ms << "," << fin << "\n";
                     }
                 }
             }
@@ -4394,6 +4584,13 @@ int main(int argc, char** argv) {
             nodes,
             ariabc_pg::g_raft_node_ids
         ));
+        ariabc_pg::gateway_recovery_manager::vote_hooks hooks;
+        hooks.begin = [&votes](int node) { votes.begin_node_recovery(node); };
+        hooks.boundary = [&votes](int node, uint64_t boundary) {
+            votes.set_node_recovery_boundary(node, boundary);
+        };
+        hooks.live = [&votes](int node, bool live) { votes.set_node_live(node, live); };
+        recovery_mgr->set_vote_hooks(hooks);
     }
 
 #ifndef SSL_LIBRARY_NOT_FOUND
@@ -4764,6 +4961,7 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> nonterminal_failure_count(0);
     std::atomic<uint64_t> async_all3_verified_count(0);
     std::atomic<uint64_t> async_all3_failure_count(0);
+    std::atomic<uint64_t> async_all3_recovery_attributed_count(0);
     std::atomic<uint64_t> async_all3_timeout_count(0);
     std::atomic<uint64_t> async_all3_missing_count(0);
     std::atomic<uint64_t> async_all3_audit_drain_ns(0);
@@ -5798,6 +5996,12 @@ int main(int argc, char** argv) {
                             bump_terminal_reason(all_err);
                             emit_recovery_event(rid, all_err);
                             permanent_failures.fetch_add(1);
+                        } else if (recovery_mgr &&
+                                   all_err.rfind("all_nodes_hash_mismatch:minority=", 0) == 0 &&
+                                   recovery_mgr->handle_audit_mismatch(all_err)) {
+                            // A single outlier replica diverged: the majority result
+                            // stands and the outlier is repaired online.
+                            async_all3_recovery_attributed_count.fetch_add(1, std::memory_order_relaxed);
                         } else if (!all_err.empty()) {
                             async_all3_failure_count.fetch_add(1, std::memory_order_relaxed);
                             bump_terminal_reason(all_err);
@@ -5884,6 +6088,7 @@ int main(int argc, char** argv) {
                 while (true) {
                     uint64_t processed = async_all3_verified_count.load(std::memory_order_relaxed) +
                                          async_all3_failure_count.load(std::memory_order_relaxed) +
+                                         async_all3_recovery_attributed_count.load(std::memory_order_relaxed) +
                                          async_all3_timeout_count.load(std::memory_order_relaxed) +
                                          async_all3_missing_count.load(std::memory_order_relaxed);
                     if (processed >= completed) {
@@ -7220,6 +7425,11 @@ int main(int argc, char** argv) {
             std::cout << "recovery_success_count=" << recovery_mgr->success_count() << std::endl;
             std::cout << "recovery_failure_count=" << recovery_mgr->failure_count() << std::endl;
             std::cout << "recovery_total_ms=" << recovery_mgr->total_ms() << std::endl;
+            std::cout << "recovery_compare_rounds=" << recovery_mgr->compare_rounds() << std::endl;
+            std::cout << "recovery_compare_mismatches=" << recovery_mgr->compare_mismatches() << std::endl;
+            std::cout << "recovery_excused_divergences=" << votes.recovery_excused_divergences() << std::endl;
+            std::cout << "async_all3_recovery_attributed_count="
+                      << async_all3_recovery_attributed_count.load() << std::endl;
         }
         if (tx_signer.is_enabled()) {
             const uint64_t signed_cnt = tx_signatures_signed.load(std::memory_order_relaxed);
@@ -7438,6 +7648,7 @@ int main(int argc, char** argv) {
             << " async_all3_timeout_count=" << async_all3_timeout_count.load(std::memory_order_relaxed)
             << " async_all3_missing_count=" << async_all3_missing_count.load(std::memory_order_relaxed)
             << " async_all3_capacity_exhausted_count=" << async_all3_capacity_exhausted_count.load(std::memory_order_relaxed)
+            << " async_all3_recovery_attributed_count=" << async_all3_recovery_attributed_count.load(std::memory_order_relaxed)
             << " audit_pending_current=" << vote_prof.audit_pending_current
             << " audit_pending_max=" << vote_prof.audit_pending_max
             << " all3_ready_queue_depth_max=" << vote_prof.all3_ready_queue_depth_max
