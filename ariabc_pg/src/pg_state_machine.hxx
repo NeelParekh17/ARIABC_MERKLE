@@ -8,6 +8,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <map>
+#include <thread>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -207,6 +208,23 @@ public:
      */
     void seed_durable_prefix(uint64_t prefix);
 
+    /*
+     * Online replica recovery (ProtectDB Alg. 2 without stalling the cluster).
+     *
+     * Healthy node: CUT exports an MVCC snapshot containing exactly the Raft
+     * prefix <= L (det seq <= B) without pausing execution.
+     * Damaged node: QUARANTINE stops applying entries (Raft participation is
+     * unchanged), RECOVER repairs the database from a healthy node's cut,
+     * rebases BCDB to B and replays entries L+1.. from the local Raft log.
+     *
+     * handle_recovery_control() serves "__ARIABC_CTRL_RECOVERY <verb> k=v.."
+     * requests; returns false (and sets err) on failure.
+     */
+    void set_log_store(nuraft::ptr<nuraft::log_store> log_store) { log_store_ = log_store; }
+    bool handle_recovery_control(const std::string& command,
+                                 std::string& out_msg);
+    bool recovery_live() const { return recov_mode_.load(std::memory_order_acquire) == 0; }
+
 #ifdef BUILDING_UNIT_TESTS
     struct result_tracker_debug_counts {
         size_t pending_result_counts = 0;
@@ -263,6 +281,70 @@ private:
      * Caller must hold tracker_mu_.
      */
     void maybe_advance_prefix_locked();
+
+    /* Existing commit body; caller holds commit_mu_. */
+    nuraft::ptr<nuraft::buffer> commit_apply_locked(uint64_t log_idx, nuraft::buffer& data);
+    void commit_noop_locked(uint64_t log_idx);
+    nuraft::ptr<nuraft::buffer> quarantine_ack(uint64_t log_idx, nuraft::buffer& data);
+
+    struct recovery_cut {
+        std::string snapshot_id;
+        uint64_t boundary_log_idx = 0;
+        int64_t boundary_det_seq = -1;
+        PGconn* keeper = nullptr;
+        std::string digest;
+        uint64_t created_ns = 0;
+        uint64_t prepare_us = 0;
+        uint64_t export_us = 0;
+    };
+    struct pending_cut {
+        uint64_t target_log_idx = 0;   /* cut before this entry; boundary = target-1 */
+        bool prepared = false;
+        bool failed = false;
+        std::string error;
+        uint64_t boundary_log_idx = 0;
+        int64_t boundary_det_seq = -1;
+        PGconn* keeper = nullptr;
+        uint64_t prepare_us = 0;
+    };
+    std::string pg_conninfo() const;
+    PGconn* take_keeper_conn();
+    void refill_keeper_conn_async();
+    void maybe_prepare_cut_locked(uint64_t log_idx);
+    bool prepare_cut_locked(uint64_t boundary_log_idx, pending_cut& pc);
+    bool cmd_cut(const std::map<std::string, std::string>& args, std::string& out);
+    bool cmd_release(const std::map<std::string, std::string>& args, std::string& out);
+    bool cmd_quarantine(std::string& out);
+    bool cmd_recover(const std::map<std::string, std::string>& args, std::string& out);
+    bool cmd_status(std::string& out);
+    void release_cut_locked(const std::string& snapshot_id);
+    void reap_expired_cuts();
+    void replay_loop(uint64_t from_idx);
+
+    std::mutex commit_mu_;                 /* serialises commit()/replay/cut prepare */
+    uint64_t last_commit_seen_ = 0;        /* highest log idx delivered by NuRaft */
+    uint64_t last_enqueued_idx_ = 0;       /* highest log idx applied via commit_apply_locked */
+    int64_t last_assigned_det_seq_ = -1;   /* det seq of the last item enqueued */
+    std::atomic<int> recov_mode_{0};       /* 0=LIVE 1=QUARANTINED 2=REPLAYING */
+    nuraft::ptr<nuraft::log_store> log_store_;
+
+    std::atomic<bool> cut_pending_{false};
+    pending_cut pending_cut_;              /* guarded by commit_mu_ */
+    std::condition_variable_any cut_cv_;
+
+    std::mutex cuts_mu_;
+    std::map<std::string, recovery_cut> cuts_;
+
+    std::mutex keeper_mu_;
+    PGconn* keeper_spare_ = nullptr;
+    bool keeper_refill_running_ = false;
+
+    std::mutex recover_mu_;                /* one RECOVER at a time */
+    std::thread replay_thread_;
+    std::atomic<bool> replay_stop_{false};
+    std::atomic<uint64_t> replay_next_{0};
+    std::atomic<uint64_t> recoveries_done_{0};
+    std::string last_recover_summary_;     /* guarded by recover_mu_ */
 
     pg_executor executor_;
 

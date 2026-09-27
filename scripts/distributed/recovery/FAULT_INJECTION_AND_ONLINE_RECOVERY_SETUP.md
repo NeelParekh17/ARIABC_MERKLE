@@ -1,267 +1,125 @@
-# Online Merkle Fault Injection and Autonomous Recovery Setup
+# Fault injection and online recovery: setup and runbook
 
-This document provides a complete guide to the **ProtectDB Online Concurrency and Merkle Recovery Subsystem** in AriaBC. It details the architecture, component interaction, fault injection procedures, and step-by-step instructions for reproducing online data healing during active Phase 6 benchmark execution.
+How to inject corruption into one replica during a cluster benchmark and watch
+the online recovery repair it.  The recovery design (detection modes, the
+QUARANTINE → CUT → RECOVER → replay flow, control verbs, limits) is described
+in [ONLINE_RECOVERY.md](ONLINE_RECOVERY.md); this file covers the cluster, the
+tools in this directory and how to run and read a test.
 
----
+## 1. Cluster
 
-## 1. System Overview & Architecture
+| Role | Host | Raft id | Client port | DB port | Notes |
+|---|---|---|---|---|---|
+| Gateway / runner | `10.129.27.111` | – | – | – | builds binaries, runs `ariabc_pg_gateway` |
+| admin123 | `10.129.148.247` | 1 | 8000 | 5438 | usually Raft leader and recovery reference |
+| user4 | `10.129.148.246` | 2 | 8000 | 5438 | Ubuntu 22.04; slowest replica (shared desktop, little free memory) |
+| utkarsh | `10.129.148.248` | 4 | 8001 | 5438 | default fault target |
 
-AriaBC is a deterministic transaction processing system with synchronized Merkle tree indexing across all cluster replicas. During execution, transactions are ordered via Raft-Kafka and dispatched deterministically to PostgreSQL backends.
+Replicas are compared with `usertable_small` (12,001 rows, Merkle index,
+200 partitions).  Kafka (KRaft) runs co-located on the three nodes.
 
-```
-                              [ Client / Workload Generator ]
-                                             │ (Phase 6)
-                                             ▼
-                             ┌───────────────────────────────┐
-                             │       ariabc_pg_gateway       │
-                             │  (10.129.27.111 / Controller) │
-                             │                               │
-                             │   ┌───────────────────────┐   │
-                             │   │ GatewayRecoveryManager│   │
-                             │   │  (Passive thread, 1s) │   │
-                             │   └───────────┬───────────┘   │
-                             └───────────────┼───────────────┘
-                                             │ Merkle Root Check
-                                             │ (every interval)
-                      ┌──────────────────────┼──────────────────────┐
-                      │                      │                      │
-                      ▼                      ▼                      ▼
-             ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-             │ Node 1: admin123│    │  Node 2: user4  │    │ Node 4: utkarsh │
-             │ 10.129.148.247  │    │ 10.129.148.246  │    │ 10.129.148.248  │
-             │   (Raft Leader) │    │ (Raft Follower) │    │ (Target Replica)│
-             └─────────────────┘    └─────────────────┘    └────────▲────────┘
-                      │                      │                      │
-                      └────── Majority Quorum Hash ─────────────────┘
-                               (2 of 3 nodes match)                 │
-                                                                    │ External Fault
-                                                                    │ Injection
-                                                      ┌─────────────┴─────────────┐
-                                                      │  corrupt_during_phase6.sh │
-                                                      │  (Modifies live tuples)   │
-                                                      └───────────────────────────┘
-```
+Before a benchmark, check that no other user's workload is running on the
+nodes (load, iowait, swap-in).  user4's own BCDB PostgreSQL holds ~7 GB of
+shared memory, so other desktop sessions on it quickly push it into swap; a
+lagging user4 slows fault attribution and any transaction on which the other
+two replicas disagree (see ONLINE_RECOVERY.md, Limits).
 
-### Key Principles:
-1. **Dynamic Merkle State**: Each replica maintains an incremental Merkle index tree on the active tables (e.g. `usertable_small`). Any committed `UPDATE`, `INSERT`, or `DELETE` immediately updates the partition and table-level root hashes.
-2. **Autonomous Quorum Detection**: The gateway's `GatewayRecoveryManager` periodically polls the Merkle root hash across all cluster nodes using `compare_states.py`.
-3. **Outlier Localization**: When one node's root hash deviates from the 2-node majority quorum, `compare_states.py` triggers `recovery_engine.py`.
-4. **Sub-second Fine-Grained Repair**: The engine traverses the Merkle tree hierarchy (Root $\to$ 200 Partitions $\to$ Leaves $\to$ Tuples) to locate and heal *only* the corrupted rows from the reference replica, without stopping or blocking the ongoing transaction pipeline.
+## 2. Files in this directory
 
----
+| File | Status | Purpose |
+|---|---|---|
+| `ONLINE_RECOVERY.md` | current | design, modes, control verbs, results, limits |
+| `run_recovery_cluster_test.sh` | current | benchmark wrapper (8 workers, 96 lanes, raft-kafka, `majority_async_all3`) around `run_4node_raft_cluster.sh` |
+| `fault_injector.py` | current | corrupts N tuples on one replica (`update`/`delete`/`insert`/`mixed`); used by the runner's `--inject-fault-*` flags |
+| `remote_db.py`, `compare_states.py` | current (helpers) | connections and Merkle root queries used by `fault_injector.py`; `compare_states.py --once --check-only` is a manual cross-replica root check |
+| `tps_timeline.py` | current | per-100 ms client throughput from `tx_latency.csv` (`TPS_TIMELINE`, `TPS_RECOVERY_WINDOW` in Phase 7) |
+| `ONLINE_RECOVERY_END_TO_END_REPORT.md` | historical | report written by another agent; read the corrections block at its top |
+| `recovery_engine.py`, `active_recovery_hook.py`, `compare_states.py --auto-recover` | legacy | the earlier external repair that patched rows on the live database while the workload ran; not used by the gateway any more and unsafe under load (it does not repair to an exact log boundary).  Use only on an idle cluster |
+| `corrupt_during_phase6.py`, `corrupt_during_phase6.sh` | legacy | standalone watcher that injects a fault when Phase 6 starts; superseded by `--inject-fault-*` |
+| `provision_and_cleanup_nodes.py` | do not use | one-off script that kills all `ariabc_pg` processes and drops TPC-C tables on every node; contains a hardcoded password |
 
-## 2. Directory Structure & Components
+Recovery itself lives in the C++ binaries: `ariabc_pg/src/gateway_recovery_manager.hxx`
+(coordinator), the vote store in `ariabc_pg_gateway.cxx`,
+`pg_state_machine_recovery.cxx` and `replica_repair.cxx` (server side),
+`ariabc_recovery_tool.cxx` (manual control), and `src/backend/bcdb/recovery.c`
+(snapshot cut and rebase inside PostgreSQL).
 
-All scripts and engines for fault injection and recovery reside under [`scripts/distributed/recovery/`](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/):
+## 3. Running a test
 
-| File | Type | Description |
-| :--- | :--- | :--- |
-| [`compare_states.py`](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/compare_states.py) | Python CLI / Daemon | Multi-node Merkle state comparison daemon. Polls root hashes across all replicas, calculates quorum agreement, and triggers healing for outlier nodes. |
-| [`recovery_engine.py`](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/recovery_engine.py) | Python Engine | ProtectDB Algorithm 2 implementation. Performs hierarchical localization (table $\to$ partition $\to$ leaf) and repairs tuples via batched DML. |
-| [`fault_injector.py`](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/fault_injector.py) | Python CLI / Lib | Controlled data corruption tool. Injects `update`, `delete`, `insert`, or `mixed` faults with `READ COMMITTED` isolation and retry semantics. |
-| [`corrupt_during_phase6.py`](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/corrupt_during_phase6.py) | Python Watcher | Orchestrates fault injection during live Phase 6 runs. Waits for gateway startup, introduces a delay, injects corruption, and monitors convergence. |
-| [`corrupt_during_phase6.sh`](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/corrupt_during_phase6.sh) | Bash Wrapper | Convenient bash entrypoint for running the Phase 6 corruption watcher with proper `PYTHONPATH`. |
-| [`remote_db.py`](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/remote_db.py) | Python Module | Database connection and catalog introspection abstraction using `psycopg` with optimized connection parameters. |
-| [`active_recovery_hook.py`](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/active_recovery_hook.py) | Python Bridge | Hook script executed by the C++ gateway process when active recovery triggers are received. |
-
----
-
-## 3. Cluster Nodes Configuration
-
-| Node Name | IP Address | DB Port | Raft Port | OS / Environment | Default Role |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Gateway / Controller** | `10.129.27.111` | - | - | Ubuntu 24.04 (`neel`) | Gateway & Benchmark Runner |
-| **admin123** | `10.129.148.247` | `5438` | `8000` | Ubuntu 24.04 (`admin123`) | Node 1 (Raft Leader / Quorum Ref) |
-| **user4** | `10.129.148.246` | `5438` | `8000` | Ubuntu 22.04 (`neel`) | Node 2 (Raft Follower / Quorum Ref) |
-| **utkarsh** | `10.129.148.248` | `5438` | `8001` | Ubuntu 24.04 (`utkarsh`) | Node 4 (Raft Follower / Fault Target) |
-
-> [!NOTE]
-> Database credentials across all nodes default to user `postgres`, database `postgres`, port `5438` (or default `5432` if unmapped).
-
----
-
-## 4. How Online Recovery Operates in Phase 6
-
-When the benchmark executes Phase 6, the following sequence occurs:
-
-1. **Gateway Initialization**:
-   `ariabc_pg_gateway` starts with `--recovery-mode passive --recovery-interval-ms <N> --recovery-table usertable_small`.
-2. **Background Polling**:
-   Every $N$ milliseconds (e.g., 1000ms), the gateway runs a non-blocking `compare_states.py` check.
-3. **External Fault Injection**:
-   An external process (`corrupt_during_phase6.sh`) modifies $K$ tuples in `utkarsh` while the gateway is submitting thousands of update transactions across all 3 nodes.
-4. **Divergence Detection**:
-   On the next check tick:
-   - Node 1 (`admin123`): Root `0c6509f9...`
-   - Node 2 (`user4`):    Root `0c6509f9...`
-   - Node 4 (`utkarsh`):  Root `e879329e...` (DIVERGED!)
-   - **Quorum Result**: 2 of 3 nodes agree on `0c6509f9...`. Node `utkarsh` is flagged as damaged.
-5. **Hierarchical Localization**:
-   - Compares 200 partition root hashes between `utkarsh` and `admin123`.
-   - Identifies only the few partitions containing the corrupted tuples (e.g., 5 partitions).
-   - Localizes down to the exact 4-leaf tree nodes.
-6. **In-Flight Tuple Repair**:
-   - Queries the genuine tuples from `admin123` for the localized keys.
-   - Executes batched `UPDATE` statements on `utkarsh` under `READ COMMITTED` isolation.
-   - `utkarsh`'s Merkle tree automatically updates.
-7. **Re-synchronization & Convergence**:
-   - `utkarsh`'s Merkle root converges back to the live quorum hash.
-   - Total healing time: **~150 ms** for recovery execution, **~2 to 3.5 seconds** end-to-end including poll interval.
-
----
-
-## 5. Step-by-Step Execution Guide
-
-To reproduce the live external corruption and autonomous healing, follow this two-terminal workflow.
-
-### Workflow: 2-Terminal Live Test
-
-#### Terminal 1: Launch External Corruption Watcher
-Start the corruption watcher **first** so it is ready and listening for Phase 6 startup:
+All runs go through the wrapper; extra flags are passed to
+`run_4node_raft_cluster.sh`.  The first run after a code change must build
+(omit `--skip-build`); later runs can reuse the binaries.
 
 ```bash
 cd /work/ARIABC/AriaBC
+R=scripts/distributed/recovery/run_recovery_cluster_test.sh
 
-./scripts/distributed/recovery/corrupt_during_phase6.sh \
-  --target utkarsh \
-  --count 100 \
-  --fault-type update \
-  --table usertable_small \
-  --delay-sec 2.0
+# A: baseline, recovery off
+$R --recovery-mode off
+# B: recovery on, no fault (overhead)
+$R --recovery-mode both --skip-build
+# C: recovery on, 100 corrupted tuples on utkarsh 5 s into the workload
+$R --recovery-mode both --inject-fault-node utkarsh --inject-fault-count 100 \
+   --inject-fault-delay-sec 5 --skip-build
 ```
 
-**Parameters Explained:**
-- `--target utkarsh`: Injects corruption specifically into node `utkarsh` (`10.129.148.248:5438`).
-- `--count 100`: Corrupts 100 random tuples in the table.
-- `--fault-type update`: Modifies row fields (can also be `delete`, `insert`, or `mixed`).
-- `--delay-sec 2.0`: Waits 2.0 seconds after Phase 6 starts to ensure the workload is running at full pipeline throughput before injecting the fault.
+`--recovery-mode` is `off`, `active`, `passive` or `both` (see ONLINE_RECOVERY.md).
+Fault flags: `--inject-fault-node NAME|ID`, `--inject-fault-count N` (default 100),
+`--inject-fault-type update|delete|insert|mixed` (default update),
+`--inject-fault-delay-sec S` (default 3).  The comparison interval is
+`RECOVERY_INTERVAL_MS` (wrapper default 1000).
 
-*Terminal 1 output will display:*
-```text
-[INFO] [compare_states] Monitoring for Phase 6 workload start (gateway_host=10.129.27.111)...
-[INFO] [compare_states] Still waiting for Phase 6 to begin...
-```
+Results land in `scripts/bench_full_results/<run id>/` (set the id with
+`CLUSTER_RUN_ID=...`).
 
----
+## 4. Reading the results
 
-#### Terminal 2: Launch the 4-Node Cluster Benchmark
-In Terminal 2, start the cluster benchmark with passive online recovery enabled:
+`runner.log`, Phase 7:
+
+| Line | Meaning |
+|---|---|
+| `TPS_majority_visible` | client throughput |
+| `TPS_TIMELINE ... steady_min_tps= empty_buckets= max_completion_gap_ms=` | per-100 ms throughput; empty buckets / long gaps mean a stall |
+| `TPS_RECOVERY_WINDOW ... min_bucket_tps_inside= empty_buckets_inside=` | the same, restricted to fault injection → recovery done |
+| `RECOVERY_EVENT node= reason= result=PASS ...` | one recovery: `reason` is `result_divergence` / `audit_mismatch` (active) or `merkle_compare` (passive); `cut_ms`, `repair_ms`, `rows_upserted`, `replay_from`, `total_ms` |
+| `RECOVERY_FINAL_CHECK result=PASS` | end-of-run digest comparison of all replicas at the same Raft index |
+| `recovery_compare_rounds=` | aligned state comparisons completed during the run (passive / both) |
+| `All-3 audit valid` | every transaction's result was confirmed by all replicas (a repaired replica is covered by its snapshot up to the boundary) |
+
+Phase 8 independently compares Merkle roots, row counts and `merkle_verify()`
+on all nodes (`usertable_small consistency: PASS`).
+
+Per node, `server_node*.log` has one `RECOVERY_CTRL node= verb= result=` line
+per control call (QUARANTINE, CUT, RECOVER with its phase timings) and
+`RECOVERY_REPLAY_LIVE` when the repaired replica is back on live commits.
+`fault_injection.log` shows the target's root before and after corruption.
+
+## 5. Manual checks on an idle cluster
 
 ```bash
-cd /work/ARIABC/AriaBC
-
-./scripts/distributed/run_4node_raft_cluster.sh \
-  --skip-build \
-  --threads 8 \
-  --server-exec-workers 8 \
-  --server-pg-connections 8 \
-  --pool-size 8 \
-  --bcdb-workers 8 \
-  --bcdb-init-block-size 8 \
-  --bcdb-decouple-workers 1 \
-  --ordering-mode raft-kafka \
-  --raft-ordering-policy leader-assigned \
-  --kafka-completion-mode majority_async_all3 \
-  --det-window 65536 \
-  --recovery-mode passive \
-  --recovery-interval-ms 1000 \
-  --recovery-table usertable_small
-```
-
-**Key Recovery Options:**
-- `--recovery-mode passive`: Enables the background online recovery daemon in the gateway.
-- `--recovery-interval-ms 1000`: Runs the compare state check every **1 second** (set to `200` for 200ms high-frequency checks).
-- `--recovery-table usertable_small`: Specifies the target table with Merkle index.
-- `--skip-build`: Skips recompilation since binaries are already built on all nodes.
-
----
-
-### What to Observe During Execution
-
-#### In Terminal 1 (Corruption Watcher Output):
-```text
-[INFO] [compare_states] >>> Phase 6 is ACTIVE! Found running ariabc_pg_gateway (PID 394713)
-[INFO] [compare_states] Workload running. Waiting 2.00s delay before fault injection...
-[INFO] [compare_states] >>> INJECTING CORRUPTION: Corrupting 100 tuples on utkarsh (10.129.148.248:5438)...
-[INFO] [compare_states] Before injection: table 'usertable_small' root hash = d55efc5f...
-[INFO] [compare_states] Injecting UPDATE corruption on 100 tuples (sample key 1878, attempt 1)
-[INFO] [compare_states] After corruption: table 'usertable_small' root hash = 8f9b29f8... (changed: True, total corrupted: 100)
-[INFO] [compare_states] Corruption successfully injected! Monitoring online auto-recovery...
-[INFO] [compare_states] Reference node root hash: e43a5398...
-[INFO] [compare_states] *** HEALED! Target node root hash matches reference quorum (408c6870...) in 3488.78 ms (polls: 33)! ***
-[INFO] [compare_states] === Phase 6 Online Recovery Demonstration: COMPLETE (PASS) ===
-```
-
-#### In Terminal 2 (Cluster Log Output):
-```text
-[recovery_mgr] Initialized ProtectDB Alg 2 Online Recovery: mode=passive interval=1000ms db_port=5438 table=usertable_small ...
-...
-recovery_triggered_count=1
-recovery_success_count=1
-recovery_failure_count=0
-recovery_total_ms=147
-...
-[recovery_mgr] Phase 6 workload complete: running final Merkle drain & consistency verification...
-[recovery_mgr] Table 'usertable_small': PASS (root=bc6e9749... across all 3 nodes)
-[recovery_mgr] Final cluster Merkle verification: PASS - all replicas fully synchronized with 0 corruption remaining.
-...
-[18:36:19]   [admin123] rows=12001 root=bc6e9749... data_md5=016e2324... merkle_verify=t
-[18:36:19]   [user4]    rows=12001 root=bc6e9749... data_md5=016e2324... merkle_verify=t
-[18:36:19]   [utkarsh]  rows=12001 root=bc6e9749... data_md5=016e2324... merkle_verify=t
-[18:36:19]   usertable_small consistency: PASS rows=12001 root=bc6e9749...
-```
-
----
-
-## 6. Standalone / Offline Verification Commands
-
-You can also test state comparison, fault injection, and recovery manually on a running or idle cluster:
-
-### A. Check Merkle Root Hash Consistency Across All Replicas
-```bash
+# Merkle roots of all replicas (read-only)
 python3 scripts/distributed/recovery/compare_states.py \
   --nodes "admin123=10.129.148.247:5438,user4=10.129.148.246:5438,utkarsh=10.129.148.248:5438" \
-  --table usertable_small \
-  --once
-```
+  --table usertable_small --once --check-only
 
-### B. Manually Inject Corruption on a Single Replica
-```bash
 # Corrupt 50 tuples on utkarsh
 python3 scripts/distributed/recovery/fault_injector.py \
-  --target-node 10.129.148.248:5438 \
-  --table usertable_small \
-  --fault-type update \
-  --count 50
+  --target-node 10.129.148.248:5438 --table usertable_small --fault-type update --count 50
+
+# Server state / control (while ariabc_pg_server is running; the client port from §1)
+ariabc_pg/build/bin/ariabc_recovery_tool ctl 10.129.148.248:8001 STATUS
 ```
 
-### C. Manually Trigger Autonomous Localization & Healing
-```bash
-python3 scripts/distributed/recovery/compare_states.py \
-  --nodes "admin123=10.129.148.247:5438,user4=10.129.148.246:5438,utkarsh=10.129.148.248:5438" \
-  --table usertable_small \
-  --once \
-  --auto-recover
-```
+`compare_states.py` recovers automatically unless `--check-only` is given; do
+not run it without `--check-only` while a workload is running.
 
-Expected output:
-```text
-[INFO] Table 'usertable_small': Quorum root bc6e9749... on nodes ['admin123', 'user4']. Damaged outlier node(s): ['utkarsh']
-[INFO] Triggering Online Recovery for node utkarsh on table 'usertable_small' against reference admin123...
-[INFO] Table 'usertable_small' localisation: 5 mismatched partitions ([6, 25, 77, 82, 198])
-[INFO] Partition 6 localized down to 1 differing leaves (out of 4 total leaves)
-...
-[INFO] Table 'usertable_small' recovery SUCCEEDED in 125.03 ms
-rows_updated: 50, localisation_ms: 27.5ms, diff_ms: 60.9ms, dml_ms: 6.2ms, total_ms: 125.1ms
-```
+## 6. Troubleshooting
 
----
-
-## 7. Troubleshooting & Common Pitfalls
-
-| Issue | Root Cause | Solution |
-| :--- | :--- | :--- |
-| `could not serialize access due to read/write dependencies` | PostgreSQL SSI (`SERIALIZABLE`) detects rw-antidependency cycles during concurrent transactions. | Ensure `fault_injector.py` and `remote_db.py` use `SET default_transaction_isolation = 'read committed'`. Already configured in current scripts. |
-| `No module named 'psycopg'` on Gateway | System Python on `10.129.27.111` lacks psycopg package. | Prepend the virtualenv site-packages path to `PYTHONPATH`: `export PYTHONPATH="/home/neel/Desktop/ariabc_cluster/.venv/lib/python3.12/site-packages:${PYTHONPATH:-}"`. |
-| Script hangs waiting for Phase 6 | Gateway PID detection was checking regex matching its own bash args. | Use exact `pidof ariabc_pg_gateway` check, as implemented in `corrupt_during_phase6.py`. |
-| `Permission denied` on remote node | SSH username mismatch. | Node 2 (`10.129.148.246`) uses user `neel`. Node 1 uses `admin123`, Node 4 uses `utkarsh`. |
+| Symptom | Cause / fix |
+|---|---|
+| `recovery_compare_rounds=0` under load | compare cuts timed out before every replica executed up to the boundary; raise `ARIABC_RECOVERY_COMPARE_TIMEOUT_MS` (default 30000) or check for a lagging replica |
+| `CUT ... ERR cut_target_timeout` after the workload ends | expected: no new Raft entries arrive, the round is skipped; the final check cuts at the common commit point |
+| `RECOVER ... ERR boundary_behind_local` | the reference's cut was older than what the damaged replica already executed; the coordinator retries with a newer cut |
+| `function merkle_node_upper_bound(bytea, integer) does not exist` | data directory older than the catalog entry; the server registers the helper functions itself on first use |
+| Long transaction latencies / late detection after a fault | a lagging third replica (usually user4): transactions on which the two fast replicas disagree wait for its vote |
+| `No module named 'psycopg'` on the gateway host | `export PYTHONPATH=/home/neel/Desktop/ariabc_cluster/.venv/lib/python3.12/site-packages:$PYTHONPATH` |

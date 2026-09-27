@@ -78,6 +78,60 @@ RETURNS smallint
 AS 'merkle_partition_for_hash'
 LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE OR REPLACE FUNCTION public.merkle_partition_for_hash(key_hash bytea, partitions integer)
+RETURNS smallint
+AS 'merkle_partition_for_hash'
+LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_node_upper_bound' AND pronamespace = 'pg_catalog'::regnamespace) THEN
+    CREATE FUNCTION pg_catalog.merkle_node_upper_bound(node_id bytea, prefix_len integer)
+    RETURNS bytea LANGUAGE internal IMMUTABLE STRICT AS 'merkle_node_upper_bound_sql';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_key_hash' AND pronamespace = 'pg_catalog'::regnamespace) THEN
+    CREATE FUNCTION pg_catalog.merkle_key_hash(anyelement)
+    RETURNS bytea LANGUAGE internal IMMUTABLE STRICT AS 'merkle_key_hash_sql';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_find_spurious_key' AND pronamespace = 'pg_catalog'::regnamespace) THEN
+    CREATE FUNCTION pg_catalog.merkle_find_spurious_key(lower_bound bytea, upper_bound bytea, partition_id integer, partitions integer, base_offset bigint, max_attempts integer)
+    RETURNS bigint LANGUAGE internal IMMUTABLE STRICT AS 'merkle_find_spurious_key_sql';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'bcdb_cut_snapshot_export' AND pronamespace = 'pg_catalog'::regnamespace) THEN
+    CREATE FUNCTION pg_catalog.bcdb_cut_snapshot_export(integer, integer)
+    RETURNS text LANGUAGE internal VOLATILE AS 'bcdb_cut_snapshot_export';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'bcdb_recovery_rebase' AND pronamespace = 'pg_catalog'::regnamespace) THEN
+    CREATE FUNCTION pg_catalog.bcdb_recovery_rebase(integer)
+    RETURNS boolean LANGUAGE internal VOLATILE AS 'bcdb_recovery_rebase';
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.merkle_node_upper_bound(node_id bytea, prefix_len integer)
+RETURNS bytea
+AS 'merkle_node_upper_bound_sql'
+LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION public.merkle_key_hash(anyelement)
+RETURNS bytea
+AS 'merkle_key_hash_sql'
+LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION public.merkle_find_spurious_key(lower_bound bytea, upper_bound bytea, partition_id integer, partitions integer, base_offset bigint, max_attempts integer)
+RETURNS bigint
+AS 'merkle_find_spurious_key_sql'
+LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION public.bcdb_cut_snapshot_export(integer, integer)
+RETURNS text
+AS 'bcdb_cut_snapshot_export'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION public.bcdb_recovery_rebase(integer)
+RETURNS boolean
+AS 'bcdb_recovery_rebase'
+LANGUAGE internal VOLATILE PARALLEL UNSAFE;
+
 -- Global ordering for crash-safe Merkle delta application.  Raft positions
 -- are epoch-scoped; this counter supplies a database-wide, non-repeating
 -- sequence.  Raft manifests reserve a range once per multi-item entry.

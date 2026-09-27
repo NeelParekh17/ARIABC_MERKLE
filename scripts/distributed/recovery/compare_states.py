@@ -126,8 +126,8 @@ def check_and_recover_once(
                 majority_hash = h
                 majority_nodes = n_list
 
-        if not majority_hash or len(majority_nodes) < (len(nodes) // 2):
-            logger.error("Table '%s': No majority quorum found among nodes: %s", tbl, roots)
+        if not majority_hash or len(majority_nodes) * 2 <= len(nodes):
+            logger.error("Table '%s': No strict majority quorum found among %d nodes (largest group has %d): %s", tbl, len(nodes), len(majority_nodes), roots)
             continue
 
         ref_node_id = majority_nodes[0]

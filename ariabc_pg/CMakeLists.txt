@@ -97,6 +97,8 @@ if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
     add_executable(ariabc_pg_server
                    src/ariabc_pg_server.cxx
                    src/pg_state_machine.cxx
+                   src/pg_state_machine_recovery.cxx
+                   src/replica_repair.cxx
                    src/pg_executor.cxx
                    src/kafka_console.cxx
                    src/wire_protocol.cxx
@@ -158,6 +160,23 @@ target_link_libraries(ariabc_pg_gateway
                       ${ARIABC_PG_KAFKA_LIBS}
                       z
                       dl)
+
+add_executable(ariabc_recovery_tool
+               src/ariabc_recovery_tool.cxx
+               src/replica_repair.cxx
+               src/wire_protocol.cxx)
+
+target_include_directories(ariabc_recovery_tool
+                          PRIVATE
+                            ${ARIABC_COMMON_INC}
+                            ${LIBPQ_INCLUDE_DIR}
+                            ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
+
+target_compile_definitions(ariabc_recovery_tool PRIVATE ${ARIABC_TRANSPORT_DEFS})
+
+target_link_libraries(ariabc_recovery_tool
+                      NuRaft::static_lib
+                      ${LIBPQ_LIBRARY})
 
 add_executable(blake3_tx_sign_test
                tests/blake3_tx_sign_test.cxx
@@ -319,6 +338,8 @@ add_test(NAME b4_codec_sig_test COMMAND b4_codec_sig_test)
 add_executable(pg_state_machine_test
                tests/pg_state_machine_test.cxx
                src/pg_state_machine.cxx
+               src/pg_state_machine_recovery.cxx
+               src/replica_repair.cxx
                src/pg_executor.cxx
                src/kafka_console.cxx
                src/wire_protocol.cxx)
@@ -351,6 +372,8 @@ add_test(NAME pg_state_machine_test COMMAND pg_state_machine_test)
 add_executable(durable_raft_pg_apply_contract_test
                tests/durable_raft_pg_apply_contract_test.cxx
                src/pg_state_machine.cxx
+               src/pg_state_machine_recovery.cxx
+               src/replica_repair.cxx
                src/pg_executor.cxx
                src/kafka_console.cxx
                src/wire_protocol.cxx

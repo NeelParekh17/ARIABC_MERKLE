@@ -3151,6 +3151,10 @@ int32_t pg_executor::kafka_partition() const {
 void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& batch,
                                              kafka_flush_reason reason) {
     if (!kafka_enabled_ || batch.empty()) return;
+    if (publish_suppressed_.load(std::memory_order_acquire)) {
+        batch.clear();
+        return;
+    }
 
     st_kafka_flush_calls_.fetch_add(1, std::memory_order_relaxed);
     const uint64_t flush_ns = now_steady_ns();
@@ -3419,6 +3423,22 @@ bool pg_executor::get_det_tx_seq_valid(const task& t, uint64_t& out_seq) const {
     }
     out_seq = 0;
     return false;
+}
+
+void pg_executor::reset_det_order(uint64_t next_seq) {
+    {
+        std::lock_guard<std::mutex> lk(q_mu_);
+        det_preassigned_reorder_buf_.clear();
+        next_det_preassigned_seq_ = next_seq;
+        det_preassigned_seq_initialized_ = true;
+    }
+    {
+        std::lock_guard<std::mutex> lk(det_apply_mu_);
+        det_tx_states_.clear();
+        det_next_apply_seq_ = next_seq;
+        det_apply_initialized_ = true;
+    }
+    det_apply_cv_.notify_all();
 }
 
 void pg_executor::det_mark_tx_state(uint64_t tx_seq, det_tx_state st) {
@@ -3910,7 +3930,8 @@ void pg_executor::worker_loop() {
     };
 
     auto flush_batch = [&](event_flush_reason reason = FLUSH_REASON_FINAL) {
-        if (!kafka_enabled_ || batch_req_ids.empty()) {
+        if (!kafka_enabled_ || batch_req_ids.empty() ||
+            publish_suppressed_.load(std::memory_order_acquire)) {
             batch_req_ids.clear();
             batch_results.clear();
             batch_raft_log_idxs.clear();
@@ -4539,7 +4560,8 @@ void pg_executor::event_loop() {
     };
 
     auto flush_batch = [&](event_flush_reason reason = FLUSH_REASON_FINAL) {
-        if (!kafka_enabled_ || batch_req_ids.empty()) {
+        if (!kafka_enabled_ || batch_req_ids.empty() ||
+            publish_suppressed_.load(std::memory_order_acquire)) {
             batch_req_ids.clear();
             batch_results.clear();
             batch_raft_log_idxs.clear();

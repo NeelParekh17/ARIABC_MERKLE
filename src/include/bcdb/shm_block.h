@@ -104,6 +104,24 @@ typedef struct
      * ring size because the submit window can be larger than the result ring.
      */
     int32 volatile    published_ready_txid[MAX_TX_PER_BLOCK];
+	/*
+	 * Recovery cut support: the top-level PostgreSQL xid of each writing
+	 * deterministic transaction, recorded immediately BEFORE its commit.
+	 * Keyed by tx_id % BCDB_RESULT_RING_CAPACITY; precommit_txid[slot] is the
+	 * owner tag (release-stored after precommit_xid[slot]).
+	 *
+	 * bcdb_cut_snapshot_export() uses these to build an MVCC snapshot that
+	 * contains exactly the deterministic prefix 0..B even when later
+	 * transactions committed out of order.  Must remain LAST in BCBlock.
+	 */
+	int32 volatile         precommit_txid[BCDB_RESULT_RING_CAPACITY];
+	TransactionId volatile precommit_xid[BCDB_RESULT_RING_CAPACITY];
+	/*
+	 * Highest tx_id that has recorded a pre-commit xid.  Updated before the
+	 * slot tag, so a cut that later observes it below boundary+capacity knows
+	 * no slot in its window was overwritten.
+	 */
+	int32 volatile         precommit_max_txid;
 } BCBlock;
 
 typedef struct
@@ -170,6 +188,8 @@ extern BCTxID   get_num_tx_sub(void);
 
 extern void     set_num_txqd(int num);
 extern BCTxID   get_num_txqd(void);
+extern void     bcdb_note_precommit_xid(BCTxID tx_id, TransactionId xid);
+extern void     bcdb_rebase_block1(BCTxID boundary);
 extern int      bcdb_get_result_ring_slots(void);
 extern int      bcdb_get_runtime_result_ring_slots(void);
 /* delete_block_by_id, print_block_status, and set_last_committed_id

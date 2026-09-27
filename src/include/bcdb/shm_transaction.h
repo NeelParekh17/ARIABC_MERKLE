@@ -248,6 +248,8 @@ extern void         tx_queue_insert(BCDBShmXact *tx, int32 partition);
 
 extern void         create_tx_pool(void);
 extern void         clear_tx_pool(void);
+extern void         bcdb_ws_tables_clear_all(void);
+extern bool         bcdb_tx_pool_is_empty(void);
 extern Size         tx_pool_size(void);
 extern BCDBShmXact* get_tx_by_hash(const char *hash);
 /* get_tx_by_xid and get_tx_by_xid_locked removed — no callers; see shm_transaction.c */

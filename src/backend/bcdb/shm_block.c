@@ -347,6 +347,24 @@ bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
 	/* Lever D publish-phase ready-bitset; -1 = txid not yet published. */
     for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
         block->published_ready_txid[i] = -1;
+
+	/* Recovery cut: no pre-commit xid recorded yet. */
+	for (int i = 0; i < BCDB_RESULT_RING_CAPACITY; i++)
+	{
+		block->precommit_txid[i] = -1;
+		block->precommit_xid[i] = InvalidTransactionId;
+	}
+	block->precommit_max_txid = -1;
+}
+
+static inline int
+bcdb_precommit_slot_for_txid(BCTxID tx_id)
+{
+	int slot = (int) (tx_id % (BCTxID) BCDB_RESULT_RING_CAPACITY);
+
+	if (slot < 0)
+		slot += BCDB_RESULT_RING_CAPACITY;
+	return slot;
 }
 
 /*
@@ -522,6 +540,86 @@ bcdb_reset_block_pool_state(void)
     SpinLockRelease(block_pool_lock);
     block1_cache = block;
 
+}
+
+/*
+ * bcdb_note_precommit_xid
+ *
+ * Record the top-level xid of a writing deterministic transaction just before
+ * its PostgreSQL commit.  A recovery cut (bcdb_cut_snapshot_export) reads these
+ * slots to hide transactions beyond the cut boundary that committed out of
+ * order.  The xid store precedes the release-store of the owner tag, so a
+ * reader that acquires tag == tx_id also observes the xid.
+ */
+void
+bcdb_note_precommit_xid(BCTxID tx_id, TransactionId xid)
+{
+	BCBlock *blk = get_block1_cached(true);
+	int      slot;
+
+	if (blk == NULL || tx_id < 0 || !TransactionIdIsValid(xid))
+		return;
+	slot = bcdb_precommit_slot_for_txid(tx_id);
+	{
+		int32 cur = __atomic_load_n(&blk->precommit_max_txid, __ATOMIC_ACQUIRE);
+
+		while (cur < tx_id &&
+			   !__atomic_compare_exchange_n(&blk->precommit_max_txid, &cur, tx_id,
+											false, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE))
+			;
+	}
+	__atomic_store_n(&blk->precommit_xid[slot], xid, __ATOMIC_RELAXED);
+	__atomic_store_n(&blk->precommit_txid[slot], tx_id, __ATOMIC_RELEASE);
+}
+
+/*
+ * bcdb_rebase_block1
+ *
+ * Reposition the deterministic watermarks of the sentinel block to
+ * `boundary` after a recovery restored the database to the state that
+ * contains exactly transactions 0..boundary.  The entry is reset in place
+ * (same shared-memory address, so other backends' cached block1 pointers stay
+ * valid) and condition variables are left untouched because idle backends may
+ * still be registered on them.
+ *
+ * Caller guarantees no deterministic transaction is in flight.
+ */
+void
+bcdb_rebase_block1(BCTxID boundary)
+{
+	BCBlock *blk = get_block1_cached(true);
+
+	if (blk == NULL)
+		elog(ERROR, "bcdb_rebase_block1: sentinel block unavailable");
+
+	SpinLockAcquire(block_pool_lock);
+	blk->num_tx = 0;
+	blk->num_ready = 0;
+	blk->num_finished = 0;
+	blk->num_tx_sub = 0;
+	blk->num_tx_qd = 0;
+	for (int i = 0; i < MAX_TX_PER_BLOCK; i++)
+	{
+		blk->txs[i] = NULL;
+		blk->published_ready_txid[i] = -1;
+	}
+	for (int i = 0; i < BCDB_RESULT_RING_CAPACITY; i++)
+	{
+		blk->result[i][0] = '\0';
+		blk->result_committed_txid[i] = -1;
+		blk->result_commit_xid[i] = InvalidTransactionId;
+		blk->result_consumed_txid[i] = -1;
+		blk->precommit_txid[i] = -1;
+		blk->precommit_xid[i] = InvalidTransactionId;
+	}
+	blk->precommit_max_txid = boundary;
+	blk->published_max_tx_id = boundary;
+	blk->last_committed_tx_id = boundary;
+	block_meta->num_committed = boundary;
+	SpinLockRelease(block_pool_lock);
+
+	pg_memory_barrier();
+	ConditionVariableBroadcast(&blk->condCommit);
 }
 
 /*

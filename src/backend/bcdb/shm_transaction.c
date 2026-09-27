@@ -465,6 +465,33 @@ WSTableClearShard(WSTable *table, HTAB *map, bool clears_map_b,
 }
 
 /*
+ * bcdb_ws_tables_clear_all
+ *
+ * Drop every published write-set entry from both DT shards.  Used by the
+ * recovery rebase, which re-executes transaction ids that may already have
+ * stale entries from a previous (corrupted) execution.  Caller guarantees
+ * no deterministic transaction is in flight.
+ */
+bool
+bcdb_tx_pool_is_empty(void)
+{
+	return hash_get_num_entries(tx_pool) == 0 && hash_get_num_entries(xid_map) == 0;
+}
+
+void
+bcdb_ws_tables_clear_all(void)
+{
+	if (ws_table == NULL)
+		return;
+	/* shm_hash_clear rebuilds the whole fixed-size table: skip empty shards. */
+	if (hash_get_num_entries(ws_table->map) > 0)
+		WSTableClearShard(ws_table, ws_table->map, false, NULL, NULL);
+	if (hash_get_num_entries(ws_table->mapB) > 0)
+		WSTableClearShard(ws_table, ws_table->mapB, true, NULL, NULL);
+	ws_table->mapActive = ws_table->map;
+}
+
+/*
  * dummy_hash
  *
  * Identity hash for use with the WSTable partitioned hash tables.

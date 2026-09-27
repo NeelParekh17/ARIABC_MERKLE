@@ -26,11 +26,13 @@ class OnlineRecoveryEngine:
         reference_node: NodeConnection,
         table: Optional[str] = None,
         batch_size: int = 500,
+        req_num: int = 0,
     ):
         self.damaged_node = damaged_node
         self.reference_node = reference_node
         self.table = table  # None or "auto" means discover all tables on the fly
         self.batch_size = batch_size
+        self.req_num = req_num
 
     def run_recovery(self) -> Dict[str, Any]:
         """Execute recovery for all divergent tables discovered dynamically."""
@@ -39,6 +41,7 @@ class OnlineRecoveryEngine:
             "status": "FAILED",
             "damaged_node_id": self.damaged_node.node_id,
             "reference_node_id": self.reference_node.node_id,
+            "req_num": self.req_num,
             "tables_recovered": [],
             "total_rows_updated": 0,
             "total_rows_inserted": 0,
@@ -238,15 +241,24 @@ class OnlineRecoveryEngine:
         # 4. Post-Repair Confirmation
         t_ver_0 = time.perf_counter()
         post_dmg_parts = self.damaged_node.get_partition_root_hashes(table_name)
+        post_ref_parts = self.reference_node.get_partition_root_hashes(table_name)
         t_stats["verify_ms"] = (time.perf_counter() - t_ver_0) * 1000.0
 
-        remaining = [p for p in mismatched if ref_parts.get(p) != post_dmg_parts.get(p)]
-        if not remaining:
+        remaining = [p for p in mismatched if post_ref_parts.get(p) != post_dmg_parts.get(p)]
+        ref_root = self.reference_node.get_merkle_root_hash(table_name)
+        dmg_root = self.damaged_node.get_merkle_root_hash(table_name)
+        if not remaining and ref_root and dmg_root and ref_root == dmg_root:
             t_stats["status"] = "PASS"
-            logger.info("Table '%s' recovery SUCCEEDED in %.2f ms", table_name, (time.perf_counter() - t_start) * 1000.0)
+            logger.info("Table '%s' recovery SUCCEEDED in %.2f ms (verified root: %s)", table_name, (time.perf_counter() - t_start) * 1000.0, ref_root)
         else:
             t_stats["status"] = "FAIL"
-            logger.error("Table '%s' verification FAILED: partitions %s still mismatch", table_name, remaining)
+            logger.error(
+                "Table '%s' verification FAILED: partitions %s still mismatch (ref_root=%s vs dmg_root=%s)",
+                table_name,
+                remaining,
+                ref_root,
+                dmg_root,
+            )
 
         t_stats["total_ms"] = (time.perf_counter() - t_start) * 1000.0
         return t_stats
@@ -263,6 +275,7 @@ def run_recovery(
     db_password: Optional[str] = None,
     damaged_node_id: str = "damaged",
     reference_node_id: str = "reference",
+    req_num: int = 0,
 ) -> Dict[str, Any]:
     """Helper entry point for triggering recovery with connection parameters."""
     damaged_conn = NodeConnection(
@@ -287,6 +300,7 @@ def run_recovery(
             damaged_node=damaged_conn,
             reference_node=reference_conn,
             table=table,
+            req_num=req_num,
         )
         return engine.run_recovery()
     finally:

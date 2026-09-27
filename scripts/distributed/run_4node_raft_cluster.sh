@@ -93,6 +93,7 @@ KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-${KAFKA_HOST}:9092,${KAFKA_HOST}:9094,${KAFK
 DB_CONN_POOL_SIZE="${DB_CONN_POOL_SIZE:-256}" # Gateway/server connection pool size
 BCDB_INIT_BLOCK_SIZE="${BCDB_INIT_BLOCK_SIZE:-}" # Legacy bcdb_init(True,N) argument; empty preserves DB_CONN_POOL_SIZE default
 BCDB_WORKER_COUNT="${BCDB_WORKER_COUNT:-}"    # Defaults to DB_CONN_POOL_SIZE after args are parsed
+RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-2048}"
 
 REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"
 REMOTE_INSTALL_DIR="/home/neel/Desktop/ariabc_install"
@@ -180,12 +181,19 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
   done
 
   # Forward benchmark-relevant environment values.
+  caller_src_fingerprint="${ARIABC_SOURCE_FINGERPRINT:-}"
+  if [[ -z "$caller_src_fingerprint" && -f "$REPO_ROOT/scripts/distributed/source_fingerprint.py" ]]; then
+    caller_src_fingerprint="$(python3 "$REPO_ROOT/scripts/distributed/source_fingerprint.py" --repo "$REPO_ROOT" --ring-capacity "${RESULT_RING_CAPACITY:-2048}" 2>/dev/null || true)"
+  fi
+
   delegate_env=(
     "BYPASS_DELEGATION=1"
     "LOCAL_INSTALL_DIR=$GATEWAY_INSTALL"
     "CALLER_GIT_HEAD=$CALLER_GIT_HEAD"
-    "ARIABC_SOURCE_FINGERPRINT=${ARIABC_SOURCE_FINGERPRINT:-068290a61f18a35b1429ef395f4489404f65df0800cc4fba147afa5704425f61}"
   )
+  if [[ -n "$caller_src_fingerprint" ]]; then
+    delegate_env+=("ARIABC_SOURCE_FINGERPRINT=$caller_src_fingerprint")
+  fi
 
   for var in \
     FORCE_BUILD BENCH_COLD_CACHE \
@@ -223,7 +231,11 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE \
     ARIABC_PHASE3_INVOCATION_ID \
     TX_SIGN ARIABC_TX_SIGN \
-    RECOVERY_MODE RECOVERY_INTERVAL_MS RECOVERY_DB_PORT RECOVERY_TABLE RECOVERY_NODES
+    RECOVERY_MODE RECOVERY_INTERVAL_MS RECOVERY_DB_PORT RECOVERY_TABLE RECOVERY_NODES \
+    INJECT_FAULT_NODE INJECT_FAULT_COUNT INJECT_FAULT_TYPE INJECT_FAULT_DELAY_SEC \
+    ARIABC_RECOVERY_COMPARE_MARGIN ARIABC_RECOVERY_REPLAY_WINDOW ARIABC_RECOVERY_CATCHUP_WAIT_MS \
+    ARIABC_RECOVERY_COMPARE_TIMEOUT_MS ARIABC_RECOVERY_CUT_TTL_MS \
+    RESULT_RING_CAPACITY
   do
     if [[ -v "$var" ]]; then
       delegate_env+=("$var=${!var}")
@@ -755,6 +767,13 @@ Options:
   --bcdb-overwrite-protection N
                   Result-ring overwrite protection: 0=off, 1=Option-A (per-slot), 2=Option-B (watermark) (default: 0)
   --pool-size N    Gateway dbConnPoolSize and bcdb_init deterministic block size (default: 256)
+  --recovery-mode M  Online replica recovery: off|active|passive|both (default: off)
+                  active = recover on result/audit divergence; passive = periodic
+                  aligned Merkle state comparison (--recovery-interval-ms); both
+  --inject-fault-node NAME|ID   Corrupt this replica's table during the workload
+  --inject-fault-count N        Tuples to corrupt (default: 100)
+  --inject-fault-type T         update|delete|insert|mixed (default: update)
+  --inject-fault-delay-sec S    Seconds after the workload starts (default: 3)
   -h, --help
 EOF
 }
@@ -764,6 +783,10 @@ RECOVERY_INTERVAL_MS="${RECOVERY_INTERVAL_MS:-200}"
 RECOVERY_DB_PORT="${RECOVERY_DB_PORT:-5438}"
 RECOVERY_TABLE="${RECOVERY_TABLE:-$VERIFY_TABLE}"
 RECOVERY_NODES="${RECOVERY_NODES:-}"
+INJECT_FAULT_NODE="${INJECT_FAULT_NODE:-}"
+INJECT_FAULT_COUNT="${INJECT_FAULT_COUNT:-100}"
+INJECT_FAULT_TYPE="${INJECT_FAULT_TYPE:-update}"
+INJECT_FAULT_DELAY_SEC="${INJECT_FAULT_DELAY_SEC:-3}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -884,6 +907,10 @@ while [[ $# -gt 0 ]]; do
     --recovery-db-port) RECOVERY_DB_PORT="${2:-5438}"; shift 2 ;;
     --recovery-table) RECOVERY_TABLE="${2:-$VERIFY_TABLE}"; shift 2 ;;
     --recovery-nodes) RECOVERY_NODES="${2:-}"; shift 2 ;;
+    --inject-fault-node) INJECT_FAULT_NODE="${2:-}"; shift 2 ;;
+    --inject-fault-count) INJECT_FAULT_COUNT="${2:-100}"; shift 2 ;;
+    --inject-fault-type) INJECT_FAULT_TYPE="${2:-update}"; shift 2 ;;
+    --inject-fault-delay-sec) INJECT_FAULT_DELAY_SEC="${2:-3}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -2450,12 +2477,14 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
 
       node_ssh "$idx" bash -s <<BUILDSSH
 set -euo pipefail
-if command -v cmake >/dev/null 2>&1; then
+# NuRaft requires CMake >= 3.26; Ubuntu 22.04 ships 3.22, so prefer the
+# staged portable CMake whenever it exists.
+if [[ -x "$REMOTE_CMAKE_U22" ]]; then
+  CMAKE="$REMOTE_CMAKE_U22"
+elif command -v cmake >/dev/null 2>&1; then
   CMAKE="\$(command -v cmake)"
 elif command -v cmake3 >/dev/null 2>&1; then
   CMAKE="\$(command -v cmake3)"
-elif [[ -x "$REMOTE_CMAKE_U22" ]]; then
-  CMAKE="$REMOTE_CMAKE_U22"
 else
   echo "[$name] ERROR: cmake not found (also missing $REMOTE_CMAKE_U22)" >&2
   exit 1
@@ -3987,14 +4016,44 @@ if [[ "${RECOVERY_MODE:-off}" != "off" ]]; then
   [[ -n "${RECOVERY_DB_PORT:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryDbPort $RECOVERY_DB_PORT"
   [[ -n "${RECOVERY_TABLE:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryTable $RECOVERY_TABLE"
   [[ -n "${RECOVERY_NODES:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryNodes $RECOVERY_NODES"
-  GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryCompareScript $SCRIPT_DIR/recovery/compare_states.py"
-  GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryHookScript $SCRIPT_DIR/recovery/active_recovery_hook.py"
 fi
 
 log "  Gateway nodes: $GW_NODES"
 log "  Workload:      $WORKLOAD_FILE ($(wc -l < "$WORKLOAD_FILE") statements)"
 log "  Mode:          dbType=1 (det) | orderingMode=$ORDERING_MODE | orderingPath=$ORDERING_PATH | kafkaCompletion=$KAFKA_COMPLETION_MODE | completionPath=$(echo $GW_EXTRA_ARGS | grep -o 'completionPath [^ ]*' | cut -d' ' -f2) | broadcastToAll=$GATEWAY_BROADCAST_TO_ALL | broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM | broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM | broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN | directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM | txSign=$TX_SIGN"
 log "  DET ids:       executionProfile=$EXECUTION_PROFILE detStartSeq=$DET_START_SEQ reqIdOffset=$REQ_ID_OFFSET detWindow=$DET_WINDOW detBatchSize=$DET_BATCH_SIZE terminals=$NUM_TERMINALS detClientMode=$DET_CLIENT_MODE detClientWorkers=$DET_CLIENT_WORKERS detClientInflight=$DET_CLIENT_INFLIGHT serverExecWorkers=$SERVER_EXEC_WORKERS serverPgConnections=$SERVER_PG_CONNECTIONS connFanout=$CONN_FANOUT raftOrderedFanout=$RAFT_ORDERED_FANOUT raftOrderedBatchAppend=$RAFT_ORDERED_BATCH_APPEND raftOrderedCoalesceLog=$RAFT_ORDERED_COALESCE_LOG raftOrderingPolicy=$RAFT_ORDERING_POLICY raftOrderedBatchTargetEntries=$RAFT_ORDERED_BATCH_TARGET_ENTRIES raftOrderedBatchLingerUs=$RAFT_ORDERED_BATCH_LINGER_US broadcastAcceptQuorum=$GATEWAY_BROADCAST_ACCEPT_QUORUM broadcastResultQuorum=$GATEWAY_BROADCAST_RESULT_QUORUM broadcastDrainInTimedRun=$GATEWAY_BROADCAST_DRAIN_IN_TIMED_RUN directCompletionQuorum=$GATEWAY_DIRECT_COMPLETION_QUORUM detPipelineDepth=$DET_PIPELINE_DEPTH submitMode=$SUBMIT_MODE poolSize=$DB_CONN_POOL_SIZE bcdbInitArgSize=$BCDB_INIT_BLOCK_SIZE bcdbWorkerCount=$BCDB_WORKER_COUNT bcdbDecoupleWorkers=$BCDB_DECOUPLE_WORKERS bcdbDtConflictTracking=$BCDB_DT_CONFLICT_TRACKING bcdbDtLightSnapshot=$BCDB_DT_LIGHT_SNAPSHOT bcdbDtSkipReadonlyGate=$BCDB_DT_SKIP_READONLY_GATE bcdbDtCompletionOnlySkipReads=$BCDB_DT_COMPLETION_ONLY_SKIP_READS bcdbDtHashtabSwitchThreshold=$BCDB_DT_HASHTAB_SWITCH_THRESHOLD detRawSql=$DET_RAW_SQL detBlockParallel=$DET_BLOCK_PARALLEL detBlockPipeline=$DET_BLOCK_PIPELINE detBlockMax=$DET_BLOCK_MAX detPartialBlockMaxWaitUs=$DET_PARTIAL_BLOCK_MAX_WAIT_US detEventBlockFastpath=$DET_EVENT_BLOCK_FASTPATH detPrefixedDirectParallel=$DET_PREFIXED_DIRECT_PARALLEL detCompletionOnlySuccess=$DET_COMPLETION_ONLY_SUCCESS bcdbBlockProfile=$BCDB_BLOCK_PROFILE bcdbBlockWaitWatermark=$BCDB_BLOCK_WAIT_WATERMARK bcdbPhaseTrace=$BCDB_PHASE_TRACE_ON bcdbPollMaxUs=$BCDB_POLL_MAX_US bcdbSerialGateMode=$BCDB_SERIAL_GATE_MODE bcdbSerialGateSource=$BCDB_SERIAL_GATE_SOURCE bcdbDtParseBarrier=$BCDB_DT_PARSE_BARRIER bcdbBlockEnqueueYieldEvery=$BCDB_BLOCK_ENQUEUE_YIELD_EVERY"
+# ---------------------------------------------------------------------------
+# Function: start_fault_injection
+# Description: When --inject-fault-node is set, corrupts that replica's table in
+#              the background INJECT_FAULT_DELAY_SEC seconds after the gateway
+#              starts, recording the injection time for the throughput timeline.
+# ---------------------------------------------------------------------------
+start_fault_injection() {
+  [[ -n "$INJECT_FAULT_NODE" ]] || return 0
+  local target_ip="" idx
+  for idx in "${!NODE_IDS[@]}"; do
+    if [[ "${NODE_NAMES[$idx]}" == "$INJECT_FAULT_NODE" || "${NODE_IDS[$idx]}" == "$INJECT_FAULT_NODE" ]]; then
+      target_ip="${NODE_IPS[$idx]}"
+    fi
+  done
+  if [[ -z "$target_ip" ]]; then
+    log "  WARNING: --inject-fault-node $INJECT_FAULT_NODE matches no node; skipping injection"
+    return 0
+  fi
+  log "  Fault injection armed: node=$INJECT_FAULT_NODE ($target_ip) count=$INJECT_FAULT_COUNT type=$INJECT_FAULT_TYPE delay=${INJECT_FAULT_DELAY_SEC}s"
+  (
+    sleep "$INJECT_FAULT_DELAY_SEC"
+    echo "fault_inject_start_epoch_ms=$(date +%s%3N)" >> "$LOG_DIR/fault_timeline.env"
+    python3 "$SCRIPT_DIR/recovery/fault_injector.py" \
+      --target-node "$target_ip:$DB_PORT" --table "$VERIFY_TABLE" \
+      --fault-type "$INJECT_FAULT_TYPE" --count "$INJECT_FAULT_COUNT" \
+      > "$LOG_DIR/fault_injection.log" 2>&1
+    echo "fault_inject_rc=$?" >> "$LOG_DIR/fault_timeline.env"
+    echo "fault_inject_done_epoch_ms=$(date +%s%3N)" >> "$LOG_DIR/fault_timeline.env"
+  ) &
+  FAULT_INJECT_PID=$!
+}
+
 phase_marker "PHASE_6_WORKLOAD_STARTED"
 # Print a clear banner that distinguishes pipeline-depth from real OS parallelism
 # so this output can be compared honestly against the single-node Python script:
@@ -4041,15 +4100,6 @@ _gw_common_args() {
     --txSign "$TX_SIGN"
   [[ -n "${POLL_COUNT:-}" ]] && printf '%s\n' --pollCount "$POLL_COUNT"
   [[ -n "${POLL_INTERVAL_US:-}" ]] && printf '%s\n' --pollIntervalUs "$POLL_INTERVAL_US"
-  if [[ "${RECOVERY_MODE:-off}" != "off" ]]; then
-    printf '%s\n' --recoveryMode "$RECOVERY_MODE"
-    [[ -n "${RECOVERY_INTERVAL_MS:-}" ]] && printf '%s\n' --recoveryIntervalMs "$RECOVERY_INTERVAL_MS"
-    [[ -n "${RECOVERY_DB_PORT:-}" ]] && printf '%s\n' --recoveryDbPort "$RECOVERY_DB_PORT"
-    [[ -n "${RECOVERY_TABLE:-}" ]] && printf '%s\n' --recoveryTable "$RECOVERY_TABLE"
-    [[ -n "${RECOVERY_NODES:-}" ]] && printf '%s\n' --recoveryNodes "$RECOVERY_NODES"
-    printf '%s\n' --recoveryCompareScript "$SCRIPT_DIR/recovery/compare_states.py"
-    printf '%s\n' --recoveryHookScript "$SCRIPT_DIR/recovery/active_recovery_hook.py"
-  fi
   # Append extra args word-by-word
   for _ga in $GW_EXTRA_ARGS; do printf '%s\n' "$_ga"; done
 }
@@ -4126,6 +4176,9 @@ if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
     > "$GW_LOG" 2>&1 &
   GW_PID=$!
   echo "$GW_PID" > "$LOG_DIR/gateway.pid"
+  GW_START_EPOCH_MS="$(date +%s%3N)"
+  echo "gateway_start_epoch_ms=$GW_START_EPOCH_MS" > "$LOG_DIR/fault_timeline.env"
+  start_fault_injection
 
   # Tail the log in the background so output appears in real-time
   tail --pid="$GW_PID" -f "$GW_LOG" &
@@ -4357,6 +4410,13 @@ log "EXECUTION_PROFILE profile=${EXECUTION_PROFILE} ledger_mode=${RAFT_APPLY_LED
     --threads "${NUM_TERMINALS:-1}" | while read -r line; do
       log "  $line"
     done
+
+  # Per-interval client-visible throughput (stall check around recovery).
+  if [[ -f "$LOG_DIR/tx_latency.csv" ]]; then
+    python3 "$SCRIPT_DIR/recovery/tps_timeline.py" --log-dir "$LOG_DIR" --gw-log "$GW_LOG" 2>&1 | while read -r line; do
+      log "  $line"
+    done
+  fi
 
   if [[ -f "$LOG_DIR/run_summary.env" ]]; then
     DIVERGENCE="$(grep -E '^divergence_count=' "$LOG_DIR/run_summary.env" | cut -d= -f2 || true)"
