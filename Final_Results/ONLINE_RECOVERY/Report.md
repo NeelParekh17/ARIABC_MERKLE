@@ -1,6 +1,6 @@
 # AriaBC Distributed Online Replica Recovery (ProtectDB Algorithm 2): Final Evaluation Report
 
-> **Location**: `Final_Results/Recovery/distributed_online_recovery/`
+> **Location**: `Final_Results/ONLINE_RECOVERY/`
 > **Artifacts**: `runs/` (all 12 raw cluster run directories, complete logs, latencies, manifests)
 > **Workload**: 160,000 YCSB Transactions, 96 Concurrent Client Lanes, Pipeline Parallelism, `majority_async_all3` Validation
 > **Cluster Layout**: 3-Node Distributed Raft-Kafka Cluster
@@ -157,7 +157,7 @@ All runs can be reproduced using the replication script:
 
 ```bash
 cd /work/ARIABC/AriaBC
-bash Final_Results/Recovery/distributed_online_recovery/replicate_distributed_recovery.sh
+bash Final_Results/ONLINE_RECOVERY/replicate_distributed_recovery.sh
 ```
 
 Individual scenarios can also be executed directly via the wrapper:

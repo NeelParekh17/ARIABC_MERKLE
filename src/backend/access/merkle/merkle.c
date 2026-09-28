@@ -236,6 +236,27 @@ merkle_options(Datum reloptions, bool validate)
 					 errmsg("fanout must be between 2 and 1024 and partitions must be between 1 and %d",
 							MERKLE_MAX_PARTITIONS)));
 		}
+		if (opts->split_threshold < 2 || opts->split_threshold > 100000)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("split_threshold (%d) must be between 2 and 100000",
+							opts->split_threshold)));
+		}
+		if (opts->merge_threshold < 1 || opts->merge_threshold > 100000)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("merge_threshold (%d) must be between 1 and 100000",
+							opts->merge_threshold)));
+		}
+		if (opts->merge_threshold >= opts->split_threshold)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("merge_threshold (%d) must be strictly less than split_threshold (%d)",
+							opts->merge_threshold, opts->split_threshold)));
+		}
 		if (opts->partition_key_columns > 0 &&
 			opts->num_partitions % opts->subpartitions != 0)
 		{
@@ -302,17 +323,19 @@ merkle_get_options(Relation indexRel)
 		opts->subpartitions = 1;
 	}
 
-	/* Validate options - if values look corrupt, use defaults */
-	if (opts->fanout < 2 || opts->fanout > 1024 ||
-		opts->split_threshold < 2 || opts->split_threshold > 100000 ||
-		 opts->merge_threshold < 1 || opts->merge_threshold > 100000 ||
-		 opts->merge_threshold >= opts->split_threshold ||
-		 opts->num_partitions < 1 || opts->num_partitions > MERKLE_MAX_PARTITIONS)
-	{
+	/* Validate options - if values look corrupt, use defaults independently */
+	if (opts->fanout < 2 || opts->fanout > 1024)
 		opts->fanout = MERKLE_DEFAULT_FANOUT;
+
+	if (opts->num_partitions < 1 || opts->num_partitions > MERKLE_MAX_PARTITIONS)
+		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
+
+	if (opts->split_threshold < 2 || opts->split_threshold > 100000 ||
+		opts->merge_threshold < 1 || opts->merge_threshold > 100000 ||
+		opts->merge_threshold >= opts->split_threshold)
+	{
 		opts->split_threshold = SPLIT_THRESHOLD;
 		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
-		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
 	}
 	if (opts->partition_key_columns < 0 || opts->partition_key_columns > INDEX_MAX_KEYS ||
 		opts->subpartitions < 1 ||
