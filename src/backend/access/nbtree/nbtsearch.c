@@ -996,18 +996,8 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 
 	if (is_bcdb_worker && activeTx != NULL && bcdb_tx_context != NULL &&
 		scan->heapRelation != NULL && !IsSystemRelation(scan->heapRelation) &&
-		keysCount >= 1 && startKeys[0] != NULL)
-	{
-		ScanKey curKey = startKeys[0];
-		if ((curKey->sk_flags & (SK_ISNULL | SK_ROW_HEADER)) == 0 &&
-			curKey->sk_strategy == BTEqualStrategyNumber)
-		{
-			Datum keyVal = curKey->sk_argument;
-			PREDICATELOCKTARGETTAG key_tag;
-			bcdb_compute_intkey_tag(&key_tag, RelationGetRelid(scan->heapRelation), DatumGetInt32(keyVal));
-			rs_table_reserveDT(&key_tag);
-		}
-	}
+		keysCount >= 1)
+		bcdb_reserve_read_key_tag_scan(scan->heapRelation, rel, startKeys, keysCount);
 
 	/*
 	 * We want to start the scan somewhere within the index.  Set up an

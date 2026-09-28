@@ -241,6 +241,7 @@ extern pg_atomic_uint32 *bcdb_safe_failpoint_fired;
 extern HTAB         *tx_pool;
 extern TxQueue      *tx_queues;
 extern WSTableRecord ws_table_record;
+extern WSTableRecord ws_table_publish_record;	/* published, never checked */
 extern WSTableRecord rs_table_record;
 
 extern BCDBShmXact* tx_queue_next(int32 partition);
@@ -287,9 +288,15 @@ extern void clean_rs_ws_table(void);
 extern bool ws_table_check(PREDICATELOCKTARGETTAG *tag);
 extern void conflict_check(void);
 
-extern void bcdb_compute_intkey_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid, int32 intKey);
+/* DT key tags: hash of the relation's key columns (see shm_transaction.c). */
+extern void bcdb_reserve_write_key_tags(Relation rel, TupleTableSlot *slot);
+extern void bcdb_reserve_read_key_tag_heap(Relation rel, HeapTuple tuple);
+extern void bcdb_reserve_read_key_tag_scan(Relation heapRel, Relation indexRel,
+										   struct ScanKeyData **startKeys, int keysCount);
+extern bool bcdb_compute_int4_key_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid, int32 key);
 extern void rs_table_reserveDT( const PREDICATELOCKTARGETTAG *tag);
 extern void ws_table_reserveDT( PREDICATELOCKTARGETTAG *tag);
+extern void ws_table_reserve_publish_onlyDT(PREDICATELOCKTARGETTAG *tag);
 extern bool ws_table_checkDT(PREDICATELOCKTARGETTAG *tag);
 extern int conflict_checkDT(void);
 extern void bcdb_reset_last_conflict_txid(void);

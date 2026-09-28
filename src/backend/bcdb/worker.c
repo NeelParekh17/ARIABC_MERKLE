@@ -1979,7 +1979,6 @@ bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
 	int32 keyval;
 	Oid relOid;
 	char relname[NAMEDATALEN];
-	uint32 h;
 	PREDICATELOCKTARGETTAG tag;
 	static char cached_del_relname[NAMEDATALEN] = "";
 	static Oid cached_del_relid = InvalidOid;
@@ -2008,11 +2007,9 @@ bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
 		cached_del_relid = relOid;
 	}
 
-	h = hash_any((unsigned char *)&keyval, sizeof(int32));
-	SET_PREDICATELOCKTARGETTAG_TUPLE(tag, 0, relOid,
-									 (BlockNumber)(h >> 16),
-									 (OffsetNumber)((h & 0xFFFF) | 1));
-	ws_table_reserveDT(&tag);
+	/* The same full-key tag an INSERT of this key reserves. */
+	if (bcdb_compute_int4_key_tag(&tag, relOid, keyval))
+		ws_table_reserveDT(&tag);
 	store_optim_delete_by_key(relOid, keyval, GetCurrentCommandId(true));
 }
 
@@ -2575,6 +2572,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     tx->block_id_snapshot = tx->block_id_committed - 1;
 
     LIST_INIT(&ws_table_record);
+	LIST_INIT(&ws_table_publish_record);
     LIST_INIT(&rs_table_record);
 
     tv1.tv_sec = 0;
@@ -2683,6 +2681,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				apply_terminal_noop = false;
 				apply_idempotent_noop = false;
                 LIST_INIT(&ws_table_record);
+				LIST_INIT(&ws_table_publish_record);
                 LIST_INIT(&rs_table_record);
 
                 if (init)
@@ -3739,6 +3738,7 @@ void bcdb_worker_process_tx(BCDBShmXact *tx)
 
     DEBUGMSG("[ZL] tx %s snapshot %d", tx->hash, tx->block_id_snapshot);
     LIST_INIT(&ws_table_record);
+	LIST_INIT(&ws_table_publish_record);
     LIST_INIT(&rs_table_record);
 
     PG_TRY();

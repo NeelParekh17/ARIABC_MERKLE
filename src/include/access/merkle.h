@@ -114,6 +114,8 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 #define MERKLE_MERGE_THRESHOLD      8
 #define MAX_PREFIX_LEN              60
 #define MERKLE_DEFAULT_PARTITIONS   200
+/* Node tables and merkle_partition_for_hash() store partition ids as int2. */
+#define MERKLE_MAX_PARTITIONS       32767
 
 typedef enum MerkleDeltaEventType
 {
@@ -165,6 +167,13 @@ typedef struct MerkleMetaPageData
 	uint32          routeFormatVersion; /* deterministic key-routing format */
 	uint32          rowHashFormatVersion; /* canonical row serialization format */
 	uint64          baselineApplySeq;   /* heap snapshot represented at build */
+	/*
+	 * Leading-key partition routing (see merkle_route_digest_apply_leading).
+	 * Metapages written before these fields existed read them as zero, which
+	 * selects plain full-key hash routing.
+	 */
+	int32           partition_key_columns; /* 0 = route by full-key hash only */
+	int32           subpartitions;      /* partitions per leading-key group */
 } MerkleMetaPageData;
 
 #define MerklePageGetMeta(page) \
@@ -182,6 +191,8 @@ typedef struct MerkleOptions
 	int			split_threshold;
 	int			merge_threshold;
 	int			num_partitions;
+	int			partition_key_columns;
+	int			subpartitions;
 } MerkleOptions;
 
 /*
@@ -232,6 +243,13 @@ extern MerkleOptions *merkle_get_options(Relation indexRel);
 extern void merkle_read_meta(Relation indexRel, int *fanout,
 							 int *split_threshold, int *merge_threshold,
 							 int *num_partitions);
+extern void merkle_read_route_meta(Relation indexRel, int *num_partitions,
+								   int *partition_key_columns,
+								   int *subpartitions);
+extern void merkle_route_digest_apply_leading(uint8 *route_digest,
+											  const uint8 *lead_digest,
+											  int num_partitions,
+											  int subpartitions);
 
 /*
  * Index build functions
@@ -440,6 +458,7 @@ extern Datum merkle_recovery_status(PG_FUNCTION_ARGS);
 extern void merkle_hash_slot_canonical_desc(TupleDesc tupdesc, TupleTableSlot *slot,
 											 MerkleHash *result);
 extern Datum merkle_key_hash_sql(PG_FUNCTION_ARGS);
+extern Datum merkle_key_hash_routed_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_node_upper_bound_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_tuple_hash_sql(PG_FUNCTION_ARGS);
 extern Datum merkle_partition_for_hash(PG_FUNCTION_ARGS);

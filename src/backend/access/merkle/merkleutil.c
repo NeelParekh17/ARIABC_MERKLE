@@ -58,6 +58,8 @@ typedef struct MerkleMetaCacheEntry {
     int  split_threshold;
     int  merge_threshold;
 	int  num_partitions;
+	int  partition_key_columns;
+	int  subpartitions;
 } MerkleMetaCacheEntry;
 static MerkleMetaCacheEntry merkle_meta_cache[MERKLE_META_CACHE_SLOTS];
 static bool merkle_meta_cache_registered = false;
@@ -101,7 +103,8 @@ merkle_meta_cache_lookup(Oid relid)
 
 static void
 merkle_meta_cache_store(Oid relid, int fanout, int split_threshold,
-							int merge_threshold, int num_partitions)
+							int merge_threshold, int num_partitions,
+							int partition_key_columns, int subpartitions)
 {
     int i;
     /* LRU-ish: replace first empty slot, else replace slot 0. */
@@ -121,6 +124,8 @@ merkle_meta_cache_store(Oid relid, int fanout, int split_threshold,
     merkle_meta_cache[target].split_threshold = split_threshold;
     merkle_meta_cache[target].merge_threshold = merge_threshold;
 	merkle_meta_cache[target].num_partitions = num_partitions;
+	merkle_meta_cache[target].partition_key_columns = partition_key_columns;
+	merkle_meta_cache[target].subpartitions = subpartitions;
 }
 
 /*
@@ -474,9 +479,68 @@ merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
 }
 
 /*
+ * merkle_route_digest_apply_leading() - Leading-key partition routing.
+ *
+ * With partition_key_columns = n > 0, every row whose first n index key
+ * columns are equal lands in one group of `subpartitions` consecutive
+ * partitions: the group comes from the digest of those n columns and the
+ * full-key digest picks the partition inside the group.
+ *
+ * Only the first 8 bytes of the full-key digest (the route value) are
+ * rewritten, and the new value differs from the old one by less than
+ * num_partitions.  Every consumer derives the partition as
+ * route_value % num_partitions (apply, split, lookup indexes, repair) and
+ * therefore agrees on it, while the high-order bits that steer the
+ * in-partition prefix tree are unchanged except in the rare carry case.
+ */
+void
+merkle_route_digest_apply_leading(uint8 *route_digest, const uint8 *lead_digest,
+								  int num_partitions, int subpartitions)
+{
+	uint64		route_value = 0;
+	uint64		lead_value = 0;
+	uint64		partitions;
+	uint64		groups;
+	uint64		target;
+	uint64		base;
+	uint64		routed;
+	int			i;
+
+	if (num_partitions < 1 || subpartitions < 1 ||
+		num_partitions % subpartitions != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid Merkle leading-key routing: partitions=%d subpartitions=%d",
+						num_partitions, subpartitions)));
+
+	for (i = 0; i < 8; i++)
+	{
+		route_value = (route_value << 8) | route_digest[i];
+		lead_value = (lead_value << 8) | lead_digest[i];
+	}
+
+	partitions = (uint64) num_partitions;
+	groups = partitions / (uint64) subpartitions;
+	target = (lead_value % groups) * (uint64) subpartitions +
+		route_value % (uint64) subpartitions;
+	base = route_value - route_value % partitions;
+	routed = base + target;
+	if (routed < base)			/* wrapped past UINT64_MAX */
+		routed = base - partitions + target;
+
+	for (i = 7; i >= 0; i--)
+	{
+		route_digest[i] = (uint8) (routed & 0xFF);
+		routed >>= 8;
+	}
+}
+
+/*
  * merkle_compute_route() - Single relation-aware routing entry point.
  *
  * All key types use uniform BLAKE3-256 routing (route format version 4).
+ * Indexes built with partition_key_columns > 0 additionally group partitions
+ * by their leading key columns.
  */
 void
 merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
@@ -484,6 +548,9 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 {
 	TupleDesc		tupdesc;
 	uint64			static_route_value = 0;
+	int				num_partitions = MERKLE_DEFAULT_PARTITIONS;
+	int				partition_key_columns = 0;
+	int				subpartitions = 1;
 	int				i;
 
 	if (result == NULL)
@@ -496,15 +563,28 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 	/* Uniform BLAKE3 routing for all key types including integers. */
 	merkle_compute_canonical_route_digest(values, isnull, nkeys, tupdesc, result->route_digest);
 
+	merkle_read_route_meta(indexRel, &num_partitions, &partition_key_columns,
+						   &subpartitions);
+	if (partition_key_columns > 0)
+	{
+		uint8		lead_digest[MERKLE_HASH_BYTES];
+
+		if (partition_key_columns > nkeys)
+			ereport(ERROR,
+					(errcode(ERRCODE_INDEX_CORRUPTED),
+					 errmsg("Merkle index \"%s\" routes by %d leading key columns but has %d",
+							RelationGetRelationName(indexRel), partition_key_columns, nkeys)));
+		merkle_compute_canonical_route_digest(values, isnull, partition_key_columns,
+											  tupdesc, lead_digest);
+		merkle_route_digest_apply_leading(result->route_digest, lead_digest,
+										  num_partitions, subpartitions);
+	}
+
 	for (i = 0; i < 8; i++)
 		static_route_value = (static_route_value << 8) | result->route_digest[i];
 
 	result->static_route_value = static_route_value;
-	{
-		int num_partitions = MERKLE_DEFAULT_PARTITIONS;
-		merkle_read_meta(indexRel, NULL, NULL, NULL, &num_partitions);
-		result->partition_id = (int) (static_route_value % (uint64) num_partitions);
-	}
+	result->partition_id = (int) (static_route_value % (uint64) num_partitions);
 }
 
 int
@@ -614,9 +694,41 @@ merkle_read_meta(Relation indexRel, int *fanout,
 	if (num_partitions) *num_partitions = meta->num_partitions;
 
 	merkle_meta_cache_store(cache_relid, meta->fanout, meta->split_threshold,
-							meta->merge_threshold, meta->num_partitions);
+							meta->merge_threshold, meta->num_partitions,
+							meta->partition_key_columns,
+							Max(meta->subpartitions, 1));
 
 	UnlockReleaseBuffer(buf);
+}
+
+/*
+ * merkle_read_route_meta() - Read the partition routing configuration.
+ *
+ * partition_key_columns is zero for indexes that route by the full-key hash
+ * alone, including every index built before leading-key routing existed.
+ */
+void
+merkle_read_route_meta(Relation indexRel, int *num_partitions,
+					   int *partition_key_columns, int *subpartitions)
+{
+	const MerkleMetaCacheEntry *cached;
+
+	cached = merkle_meta_cache_lookup(RelationGetRelid(indexRel));
+	if (cached == NULL)
+	{
+		merkle_read_meta(indexRel, NULL, NULL, NULL, NULL);
+		cached = merkle_meta_cache_lookup(RelationGetRelid(indexRel));
+		if (cached == NULL)
+			elog(ERROR, "Merkle metapage cache miss for index \"%s\"",
+				 RelationGetRelationName(indexRel));
+	}
+
+	if (num_partitions)
+		*num_partitions = cached->num_partitions;
+	if (partition_key_columns)
+		*partition_key_columns = cached->partition_key_columns;
+	if (subpartitions)
+		*subpartitions = cached->subpartitions;
 }
 
 /*
@@ -633,6 +745,8 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	int             split_threshold;
 	int             merge_threshold;
 	int             num_partitions;
+	int             partition_key_columns;
+	int             subpartitions;
 
 	if (opts != NULL)
 	{
@@ -640,6 +754,8 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 		split_threshold = opts->split_threshold;
 		merge_threshold = opts->merge_threshold;
 		num_partitions = opts->num_partitions;
+		partition_key_columns = opts->partition_key_columns;
+		subpartitions = opts->subpartitions;
 	}
 	else
 	{
@@ -647,6 +763,8 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 		split_threshold = SPLIT_THRESHOLD;
 		merge_threshold = MERKLE_MERGE_THRESHOLD;
 		num_partitions = MERKLE_DEFAULT_PARTITIONS;
+		partition_key_columns = 0;
+		subpartitions = 1;
 	}
 
 	metabuf = ReadBuffer(indexRel, P_NEW);
@@ -665,6 +783,8 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = baseline_apply_seq;
+	meta->partition_key_columns = partition_key_columns;
+	meta->subpartitions = subpartitions;
 
 	START_CRIT_SECTION();
 	MarkBufferDirty(metabuf);
@@ -832,17 +952,24 @@ merkle_find_spurious_key_sql(PG_FUNCTION_ARGS)
 
 
 
-Datum
-merkle_key_hash_sql(PG_FUNCTION_ARGS)
+/*
+ * merkle_key_hash_arg_digest() - Canonical route digest of one SQL argument.
+ *
+ * A scalar argument is hashed as a one-column key and a record argument as a
+ * multi-column key, matching merkle_compute_route() over the same columns.
+ * *cache_slot holds the per-call-site type cache for this argument.
+ */
+static void
+merkle_key_hash_arg_digest(FunctionCallInfo fcinfo, int argno,
+						   MerkleKeyHashCache **cache_slot,
+						   uint8 digest[MERKLE_HASH_BYTES])
 {
 	Datum		val;
 	Oid			argtype;
-	uint8		digest[MERKLE_HASH_BYTES];
-	bytea	   *result;
 	bool        isnull;
 	MerkleKeyHashCache *cache;
 
-	if (PG_ARGISNULL(0))
+	if (PG_ARGISNULL(argno))
 	{
 		isnull = true;
 		val = (Datum) 0;
@@ -850,14 +977,14 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 	else
 	{
 		isnull = false;
-		val = PG_GETARG_DATUM(0);
+		val = PG_GETARG_DATUM(argno);
 	}
 
-	argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	argtype = get_fn_expr_argtype(fcinfo->flinfo, argno);
 	if (!OidIsValid(argtype))
 		argtype = INT8OID;
 
-	cache = (MerkleKeyHashCache *) fcinfo->flinfo->fn_extra;
+	cache = *cache_slot;
 
 	if (type_is_rowtype(argtype))
 	{
@@ -891,7 +1018,7 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 			{
 				oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
 				cache = (MerkleKeyHashCache *) palloc0(sizeof(MerkleKeyHashCache));
-				fcinfo->flinfo->fn_extra = (void *) cache;
+				*cache_slot = cache;
 				MemoryContextSwitchTo(oldcxt);
 			}
 
@@ -978,7 +1105,7 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 			{
 				oldcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
 				cache = (MerkleKeyHashCache *) palloc0(sizeof(MerkleKeyHashCache));
-				fcinfo->flinfo->fn_extra = (void *) cache;
+				*cache_slot = cache;
 				MemoryContextSwitchTo(oldcxt);
 			}
 
@@ -997,6 +1124,63 @@ merkle_key_hash_sql(PG_FUNCTION_ARGS)
 
 		merkle_compute_canonical_route_digest_fast(&val, &isnull, 1, cache->tupdesc, &cache->send_fn, digest);
 	}
+}
+
+Datum
+merkle_key_hash_sql(PG_FUNCTION_ARGS)
+{
+	uint8		digest[MERKLE_HASH_BYTES];
+	bytea	   *result;
+
+	merkle_key_hash_arg_digest(fcinfo, 0,
+							   (MerkleKeyHashCache **) &fcinfo->flinfo->fn_extra,
+							   digest);
+
+	result = (bytea *) palloc(VARHDRSZ + 8);
+	SET_VARSIZE(result, VARHDRSZ + 8);
+	memcpy(VARDATA(result), digest, 8);
+
+	PG_RETURN_BYTEA_P(result);
+}
+
+/*
+ * merkle_key_hash_routed(full_key, leading_key, partitions, subpartitions)
+ *
+ * SQL counterpart of merkle_compute_route() for an index built with
+ * partition_key_columns > 0: full_key is the complete index key (as for
+ * merkle_key_hash) and leading_key its first partition_key_columns columns,
+ * each passed as ROW(...) or as a scalar for a single column.  The result
+ * feeds merkle_partition_for_hash() exactly like merkle_key_hash().
+ */
+PG_FUNCTION_INFO_V1(merkle_key_hash_routed_sql);
+
+Datum
+merkle_key_hash_routed_sql(PG_FUNCTION_ARGS)
+{
+	MerkleKeyHashCache **caches = (MerkleKeyHashCache **) fcinfo->flinfo->fn_extra;
+	uint8		digest[MERKLE_HASH_BYTES];
+	uint8		lead_digest[MERKLE_HASH_BYTES];
+	int32		num_partitions = PG_GETARG_INT32(2);
+	int32		subpartitions = PG_GETARG_INT32(3);
+	bytea	   *result;
+
+	if (num_partitions < 1 || num_partitions > MERKLE_MAX_PARTITIONS ||
+		subpartitions < 1 || num_partitions % subpartitions != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("merkle_key_hash_routed requires 1 <= partitions <= %d and partitions a multiple of subpartitions",
+						MERKLE_MAX_PARTITIONS)));
+
+	if (caches == NULL)
+	{
+		caches = (MerkleKeyHashCache **)
+			MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, 2 * sizeof(MerkleKeyHashCache *));
+		fcinfo->flinfo->fn_extra = (void *) caches;
+	}
+
+	merkle_key_hash_arg_digest(fcinfo, 0, &caches[0], digest);
+	merkle_key_hash_arg_digest(fcinfo, 1, &caches[1], lead_digest);
+	merkle_route_digest_apply_leading(digest, lead_digest, num_partitions, subpartitions);
 
 	result = (bytea *) palloc(VARHDRSZ + 8);
 	SET_VARSIZE(result, VARHDRSZ + 8);

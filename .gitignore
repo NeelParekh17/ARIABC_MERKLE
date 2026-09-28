@@ -59,11 +59,8 @@ lib*.pc
 !NuRaft/**/*.md
 !/dynamic_merkle_visualizer/
 !/dynamic_merkle_visualizer/README.md
-!Final_Results/TX_SIGN/*.md
-!Final_Results/WORKER_THREAD_LATENCY/*.md
-!Final_Results/YCSB/*.md
-!Final_Results/Recovery/*.md
-!Final_Results/TPCC/*.md
+!Final_Results/*.md
+!Final_Results/**/*.md
 *.diff
 
 # Exclude scripts by default (but allow whitelisting specific files)
