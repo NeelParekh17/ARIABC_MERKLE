@@ -23,9 +23,9 @@ This directory contains the complete and authoritative evaluation of AriaBC's Me
   - **Deterministic Online Repair**: Merkle localization in **5.9 ms**, targeted row streaming in **54 ms** (0 full table copies).
   - **Dynamic Prioritized Reference Selection**: Automatically routes snapshot cut requests to fast replicas, lifting leader corruption throughput from 4,440 TPS to **8,674 TPS** (+95.3%) and eliminating stalls.
   - **Cryptographic Verification**: 100% Phase 8 Merkle root match across all 3 nodes (`root=80566f71...`), 0 permanent failures.
-- **Directory**: [`distributed_online_recovery/`](./distributed_online_recovery/) *(also linked at [`Final_Results/ONLINE_RECOVERY`](../ONLINE_RECOVERY))*
-- **Core Report**: [`distributed_online_recovery/Report.md`](./distributed_online_recovery/Report.md)
-- **Summary CSV**: [`distributed_online_recovery/summary.csv`](./distributed_online_recovery/summary.csv)
-- **Replication Script**: [`distributed_online_recovery/replicate_distributed_recovery.sh`](./distributed_online_recovery/replicate_distributed_recovery.sh)
-- **Graphs**: [`distributed_online_recovery/graphs/`](./distributed_online_recovery/graphs/)
-- **Raw Run Artifacts**: [`distributed_online_recovery/runs/`](./distributed_online_recovery/runs/) (12 full run directories with runner logs, timelines, latency CSVs)
+- **Directory**: [`Final_Results/ONLINE_RECOVERY/`](../ONLINE_RECOVERY/)
+- **Core Report**: [`Final_Results/ONLINE_RECOVERY/Report.md`](../ONLINE_RECOVERY/Report.md)
+- **Summary CSV**: [`Final_Results/ONLINE_RECOVERY/summary.csv`](../ONLINE_RECOVERY/summary.csv)
+- **Replication Script**: [`Final_Results/ONLINE_RECOVERY/replicate_distributed_recovery.sh`](../ONLINE_RECOVERY/replicate_distributed_recovery.sh)
+- **Graphs**: [`Final_Results/ONLINE_RECOVERY/graphs/`](../ONLINE_RECOVERY/graphs/)
+- **Raw Run Artifacts**: [`Final_Results/ONLINE_RECOVERY/runs/`](../ONLINE_RECOVERY/runs/) (12 full run directories with runner logs, timelines, latency CSVs)

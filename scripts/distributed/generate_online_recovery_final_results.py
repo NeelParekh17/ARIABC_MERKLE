@@ -6,7 +6,7 @@ Processes benchmark results from scripts/bench_full_results/ for AriaBC's
 Distributed Online Replica Recovery (ProtectDB Algorithm 2),
 generates publication-quality figures, copies all 12 run directories and logs,
 writes the consolidated summary.csv, replication shell script, and the
-authoritative Report.md into Final_Results/Recovery/distributed_online_recovery.
+authoritative Report.md into Final_Results/ONLINE_RECOVERY.
 """
 
 import os
@@ -22,7 +22,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BENCH_DIR = REPO_ROOT / "scripts/bench_full_results"
-TARGET_DIR = REPO_ROOT / "Final_Results/Recovery/distributed_online_recovery"
+TARGET_DIR = REPO_ROOT / "Final_Results/ONLINE_RECOVERY"
 RUNS_DIR = TARGET_DIR / "runs"
 GRAPHS_DIR = TARGET_DIR / "graphs"
 
@@ -596,7 +596,7 @@ echo "=== All replication runs completed successfully! ==="
 def generate_report_markdown(rows):
     md_content = """# AriaBC Distributed Online Replica Recovery (ProtectDB Algorithm 2): Final Evaluation Report
 
-> **Location**: `Final_Results/Recovery/distributed_online_recovery/`
+> **Location**: `Final_Results/ONLINE_RECOVERY/`
 > **Artifacts**: `runs/` (all 12 raw cluster run directories, complete logs, latencies, manifests)
 > **Workload**: 160,000 YCSB Transactions, 96 Concurrent Client Lanes, Pipeline Parallelism, `majority_async_all3` Validation
 > **Cluster Layout**: 3-Node Distributed Raft-Kafka Cluster
@@ -756,7 +756,7 @@ All runs can be reproduced using the replication script:
 
 ```bash
 cd /work/ARIABC/AriaBC
-bash Final_Results/Recovery/distributed_online_recovery/replicate_distributed_recovery.sh
+bash Final_Results/ONLINE_RECOVERY/replicate_distributed_recovery.sh
 ```
 
 Individual scenarios can also be executed directly via the wrapper:

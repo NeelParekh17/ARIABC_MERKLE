@@ -283,7 +283,7 @@ from a healthy peer, sparse Merkle tree descent and local Raft log replay withou
 client transactions on the healthy quorum.
 
 ```bash
-mkdir -p "$RESULT_ROOT/Recovery/distributed_online_recovery"
+mkdir -p "$RESULT_ROOT/ONLINE_RECOVERY"
 
 # Replication script executes all 7 canonical scenarios:
 # 1. Baseline (Recovery OFF)
@@ -293,8 +293,8 @@ mkdir -p "$RESULT_ROOT/Recovery/distributed_online_recovery"
 # 5. Follower Fault (Active vote divergence detection)
 # 6. Follower Mixed Fault (Update + Delete + Insert)
 # 7. Leader Mixed Fault (Prioritized Reference Selection)
-bash Final_Results/Recovery/distributed_online_recovery/replicate_distributed_recovery.sh \
-  2>&1 | tee "$RESULT_ROOT/Recovery/distributed_online_recovery/runner.log"
+bash Final_Results/ONLINE_RECOVERY/replicate_distributed_recovery.sh \
+  2>&1 | tee "$RESULT_ROOT/ONLINE_RECOVERY/runner.log"
 ```
 
 Individual runs can also be invoked directly:
