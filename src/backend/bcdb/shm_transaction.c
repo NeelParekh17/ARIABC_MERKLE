@@ -41,6 +41,12 @@
 #include "bcdb/worker_controller.h"
 #include "storage/spin.h"
 #include "storage/predicate_internals.h"
+#include "access/stratnum.h"
+#include "catalog/pg_index.h"
+#include "utils/inval.h"
+#include "utils/lsyscache.h"
+#include "utils/syscache.h"
+#include "utils/typcache.h"
 #include <time.h>
 #include <stdio.h>
 
@@ -135,6 +141,7 @@ TxQueue *tx_queues;
 WSTable *ws_table;
 WSTable *rs_table;
 WSTableRecord ws_table_record;
+WSTableRecord ws_table_publish_record;
 WSTableRecord rs_table_record;
 static bool bcdb_apply_unique_violation = false;
 extern HTAB *PredicateLockTargetHash;
@@ -795,6 +802,384 @@ void clear_tx_pool(void)
 }
 
 /*
+ * Deterministic Execution (DT) key tags
+ * -------------------------------------
+ * A key tag names a logical row, or a range of rows sharing a key prefix, by
+ * a hash of the relation's key columns: its primary key, else its replica
+ * identity index, else its narrowest plain unique index (bcdb_keytag_index),
+ * else (no unique key) column 1 alone.  Writers and readers
+ * compute tags the same way, so conflict_checkDT() matches them exactly.
+ *
+ * A tag carries the number of leading key columns it covers (prefix_cols) in
+ * its db field, so a prefix tag never equals a full-key tag:
+ *
+ *   - every INSERT/UPDATE/DELETE reserves the full-key tag in the checked
+ *     write set (write-write conflicts are per row) and every proper prefix
+ *     tag in the publish-only set;
+ *   - a heap tuple read reserves the tuple's full-key tag;
+ *   - a B-tree scan whose equality keys bind the first m key columns reserves
+ *     the m-column tag, so it conflicts with any concurrent write (including
+ *     an INSERT, i.e. a phantom) in that key range.
+ *
+ * Column values are hashed with the type's default hash function (the same
+ * one hash joins use), so equal values of one type always hash alike; types
+ * without one fall back to hashing their binary image.
+ */
+#define BCDB_KEYTAG_DB_BASE ((Oid) 0xBCDB0000)
+
+typedef struct BCDBKeyTagInfo
+{
+	Oid			relid;			/* hash key */
+	Oid			keyindex;		/* key index; InvalidOid = column 1 */
+	bool		valid;			/* fully built */
+	int			ncols;
+	AttrNumber	attnums[INDEX_MAX_KEYS];
+	Oid			typids[INDEX_MAX_KEYS];
+	Oid			collations[INDEX_MAX_KEYS];
+	Oid			hashprocs[INDEX_MAX_KEYS];	/* InvalidOid = hash binary image */
+	FmgrInfo   *hashfns[INDEX_MAX_KEYS];	/* owned by the type cache */
+	int16		typlens[INDEX_MAX_KEYS];
+	bool		typbyvals[INDEX_MAX_KEYS];
+} BCDBKeyTagInfo;
+
+static HTAB *bcdb_keytag_info_hash = NULL;
+
+static void
+bcdb_keytag_relcache_callback(Datum arg, Oid relid)
+{
+	(void) arg;
+	if (bcdb_keytag_info_hash == NULL)
+		return;
+	if (OidIsValid(relid))
+		(void) hash_search(bcdb_keytag_info_hash, &relid, HASH_REMOVE, NULL);
+	else
+	{
+		HASH_SEQ_STATUS status;
+		BCDBKeyTagInfo *entry;
+
+		hash_seq_init(&status, bcdb_keytag_info_hash);
+		while ((entry = hash_seq_search(&status)) != NULL)
+			(void) hash_search(bcdb_keytag_info_hash, &entry->relid, HASH_REMOVE, NULL);
+	}
+}
+
+/*
+ * bcdb_keytag_index - the index whose columns name a row: the primary key,
+ * else the replica identity index, else the valid, non-partial unique index
+ * on plain columns with the fewest key columns (ties broken by index name,
+ * so the choice does not depend on OID assignment).  InvalidOid if none.
+ */
+static Oid
+bcdb_keytag_index(Relation rel)
+{
+	Oid			keyindex = RelationGetPrimaryKeyIndex(rel);
+	List	   *indexes;
+	ListCell   *lc;
+	int			best_natts = INDEX_MAX_KEYS + 1;
+	char	   *best_name = NULL;
+
+	if (!OidIsValid(keyindex))
+		keyindex = RelationGetReplicaIndex(rel);
+	if (OidIsValid(keyindex))
+		return keyindex;
+
+	indexes = RelationGetIndexList(rel);
+	foreach(lc, indexes)
+	{
+		Oid			indexoid = lfirst_oid(lc);
+		HeapTuple	indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexoid));
+		Form_pg_index index;
+		bool		usable;
+		int			i;
+
+		if (!HeapTupleIsValid(indexTuple))
+			continue;
+		index = (Form_pg_index) GETSTRUCT(indexTuple);
+		usable = index->indisunique && index->indisvalid && index->indislive &&
+			index->indnkeyatts > 0 &&
+			heap_attisnull(indexTuple, Anum_pg_index_indpred, NULL) &&
+			heap_attisnull(indexTuple, Anum_pg_index_indexprs, NULL);
+		for (i = 0; usable && i < index->indnkeyatts; i++)
+			if (index->indkey.values[i] <= 0)
+				usable = false;
+		if (usable)
+		{
+			char	   *name = get_rel_name(indexoid);
+
+			if (name != NULL &&
+				(index->indnkeyatts < best_natts ||
+				 (index->indnkeyatts == best_natts && strcmp(name, best_name) < 0)))
+			{
+				keyindex = indexoid;
+				best_natts = index->indnkeyatts;
+				best_name = name;
+			}
+		}
+		ReleaseSysCache(indexTuple);
+	}
+	list_free(indexes);
+	return keyindex;
+}
+
+static const BCDBKeyTagInfo *
+bcdb_keytag_info(Relation rel)
+{
+	Oid			relid = RelationGetRelid(rel);
+	Oid			keyindex;
+	BCDBKeyTagInfo *info;
+	bool		found;
+	int			i;
+
+	if (bcdb_keytag_info_hash == NULL)
+	{
+		HASHCTL		ctl;
+
+		MemSet(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(BCDBKeyTagInfo);
+		ctl.hcxt = TopMemoryContext;
+		bcdb_keytag_info_hash = hash_create("BCDB key tag info", 64, &ctl,
+											HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		CacheRegisterRelcacheCallback(bcdb_keytag_relcache_callback, (Datum) 0);
+	}
+
+	/* Index DDL on the relation invalidates the entry (relcache callback). */
+	info = hash_search(bcdb_keytag_info_hash, &relid, HASH_ENTER, &found);
+	if (found && info->valid)
+		return info;
+
+	info->valid = false;
+	keyindex = bcdb_keytag_index(rel);
+	info->ncols = 1;
+	info->attnums[0] = 1;
+	if (OidIsValid(keyindex))
+	{
+		HeapTuple	indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(keyindex));
+
+		if (HeapTupleIsValid(indexTuple))
+		{
+			Form_pg_index index = (Form_pg_index) GETSTRUCT(indexTuple);
+			bool		plain = index->indnkeyatts > 0;
+
+			for (i = 0; i < index->indnkeyatts; i++)
+				if (index->indkey.values[i] <= 0)
+					plain = false;	/* expression column: keep column 1 */
+			if (plain)
+			{
+				info->ncols = index->indnkeyatts;
+				for (i = 0; i < info->ncols; i++)
+					info->attnums[i] = index->indkey.values[i];
+			}
+			ReleaseSysCache(indexTuple);
+		}
+	}
+	for (i = 0; i < info->ncols; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(RelationGetDescr(rel), info->attnums[i] - 1);
+		TypeCacheEntry *tce = lookup_type_cache(attr->atttypid, TYPECACHE_HASH_PROC_FINFO);
+
+		info->typids[i] = attr->atttypid;
+		info->collations[i] = attr->attcollation;
+		info->typlens[i] = attr->attlen;
+		info->typbyvals[i] = attr->attbyval;
+		info->hashprocs[i] = tce->hash_proc;
+		info->hashfns[i] = OidIsValid(tce->hash_proc) ? &tce->hash_proc_finfo : NULL;
+	}
+	info->keyindex = keyindex;
+	info->valid = true;
+	return info;
+}
+
+static uint32
+bcdb_keytag_hash_value(const BCDBKeyTagInfo *info, int col, Datum value, bool isnull)
+{
+	if (isnull)
+		return 0x9e3779b9;
+	if (info->hashfns[col] != NULL)
+		return DatumGetUInt32(FunctionCall1Coll(info->hashfns[col],
+												info->collations[col], value));
+	if (info->typbyvals[col])
+	{
+		char		buf[sizeof(Datum)];
+
+		store_att_byval(buf, value, info->typlens[col]);
+		return DatumGetUInt32(hash_any((unsigned char *) buf, info->typlens[col]));
+	}
+	if (info->typlens[col] == -1)
+	{
+		struct varlena *v = pg_detoast_datum_packed((struct varlena *) DatumGetPointer(value));
+		uint32		h = DatumGetUInt32(hash_any((unsigned char *) VARDATA_ANY(v),
+												VARSIZE_ANY_EXHDR(v)));
+
+		if ((Pointer) v != DatumGetPointer(value))
+			pfree(v);
+		return h;
+	}
+	if (info->typlens[col] == -2)
+		return DatumGetUInt32(hash_any((unsigned char *) DatumGetCString(value),
+									   strlen(DatumGetCString(value))));
+	return DatumGetUInt32(hash_any((unsigned char *) DatumGetPointer(value),
+								   info->typlens[col]));
+}
+
+static inline void
+bcdb_keytag_make(PREDICATELOCKTARGETTAG *tag, Oid relid, int prefix_cols, uint32 h)
+{
+	SET_PREDICATELOCKTARGETTAG_TUPLE(*tag, 0, relid,
+									 (BlockNumber) (h >> 16),
+									 (OffsetNumber) ((h & 0xFFFF) | 1));
+	/*
+	 * SET_PREDICATELOCKTARGETTAG_TUPLE zeroes the db field in this tree so
+	 * read and write TID tags match; key tags carry their prefix length there
+	 * instead, which also keeps them apart from TID tags.
+	 */
+	tag->locktag_field1 = BCDB_KEYTAG_DB_BASE | (uint32) prefix_cols;
+}
+
+static inline bool
+bcdb_keytag_tracking(void)
+{
+	return bcdb_dt_conflict_tracking && bcdb_tx_context != NULL && activeTx != NULL;
+}
+
+/*
+ * bcdb_reserve_write_key_tags - write-set tags for a row being inserted,
+ * updated or deleted.  slot holds the row's key columns.
+ */
+void
+bcdb_reserve_write_key_tags(Relation rel, TupleTableSlot *slot)
+{
+	const BCDBKeyTagInfo *info;
+	PREDICATELOCKTARGETTAG tag;
+	uint32		h = 0;
+	int			i;
+
+	if (!bcdb_keytag_tracking())
+		return;
+
+	info = bcdb_keytag_info(rel);
+	for (i = 0; i < info->ncols; i++)
+	{
+		bool		isnull;
+		Datum		value = slot_getattr(slot, info->attnums[i], &isnull);
+
+		h = hash_combine(h, bcdb_keytag_hash_value(info, i, value, isnull));
+		bcdb_keytag_make(&tag, RelationGetRelid(rel), i + 1, h);
+		if (i + 1 < info->ncols)
+			ws_table_reserve_publish_onlyDT(&tag);
+		else
+			ws_table_reserveDT(&tag);
+	}
+}
+
+/* bcdb_reserve_read_key_tag_heap - read-set tag for one heap tuple read. */
+void
+bcdb_reserve_read_key_tag_heap(Relation rel, HeapTuple tuple)
+{
+	const BCDBKeyTagInfo *info;
+	PREDICATELOCKTARGETTAG tag;
+	uint32		h = 0;
+	int			i;
+
+	if (!bcdb_keytag_tracking())
+		return;
+
+	info = bcdb_keytag_info(rel);
+	for (i = 0; i < info->ncols; i++)
+	{
+		bool		isnull;
+		Datum		value = heap_getattr(tuple, info->attnums[i], RelationGetDescr(rel), &isnull);
+
+		h = hash_combine(h, bcdb_keytag_hash_value(info, i, value, isnull));
+	}
+	bcdb_keytag_make(&tag, RelationGetRelid(rel), info->ncols, h);
+	rs_table_reserveDT(&tag);
+}
+
+/*
+ * bcdb_reserve_read_key_tag_scan - read-set tag for a B-tree scan.
+ *
+ * startKeys are the positioning keys _bt_first() chose.  The tag covers the
+ * longest run of leading key columns bound by an equality key whose argument
+ * hashes like the column; a scan that binds none reserves nothing here and
+ * relies on the per-tuple tags of the rows it returns.
+ */
+void
+bcdb_reserve_read_key_tag_scan(Relation heapRel, Relation indexRel,
+							   ScanKey *startKeys, int keysCount)
+{
+	const BCDBKeyTagInfo *info;
+	PREDICATELOCKTARGETTAG tag;
+	uint32		h = 0;
+	int			bound = 0;
+	int			i;
+
+	if (!bcdb_keytag_tracking() || heapRel == NULL || indexRel == NULL)
+		return;
+
+	info = bcdb_keytag_info(heapRel);
+	for (i = 0; i < info->ncols; i++)
+	{
+		ScanKey		match = NULL;
+		int			k;
+
+		for (k = 0; k < keysCount && match == NULL; k++)
+		{
+			ScanKey		key = startKeys[k];
+			int			idxcol = key->sk_attno - 1;
+			Oid			argtype;
+
+			if (key->sk_strategy != BTEqualStrategyNumber ||
+				(key->sk_flags & (SK_ISNULL | SK_ROW_HEADER | SK_ROW_MEMBER)) != 0 ||
+				idxcol < 0 || idxcol >= IndexRelationGetNumberOfKeyAttributes(indexRel) ||
+				indexRel->rd_index->indkey.values[idxcol] != info->attnums[i])
+				continue;
+
+			argtype = OidIsValid(key->sk_subtype) ? key->sk_subtype :
+				indexRel->rd_opcintype[idxcol];
+			if (argtype == info->typids[i] ||
+				(OidIsValid(info->hashprocs[i]) &&
+				 lookup_type_cache(argtype, TYPECACHE_HASH_PROC)->hash_proc == info->hashprocs[i]))
+				match = key;
+		}
+		if (match == NULL)
+			break;
+		h = hash_combine(h, bcdb_keytag_hash_value(info, i, match->sk_argument, false));
+		bound = i + 1;
+	}
+
+	if (bound == 0)
+		return;
+	bcdb_keytag_make(&tag, RelationGetRelid(heapRel), bound, h);
+	rs_table_reserveDT(&tag);
+}
+
+/*
+ * bcdb_compute_int4_key_tag - full-key tag of relOid's row whose single int4
+ * key column equals key.  Returns false if the relation's key is not a single
+ * int4 column.
+ */
+bool
+bcdb_compute_int4_key_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid, int32 key)
+{
+	Relation	rel = RelationIdGetRelation(relOid);
+	const BCDBKeyTagInfo *info;
+	bool		ok = false;
+
+	if (!RelationIsValid(rel))
+		return false;
+	info = bcdb_keytag_info(rel);
+	if (info->ncols == 1 && info->typids[0] == INT4OID)
+	{
+		bcdb_keytag_make(tag, relOid, 1,
+						 hash_combine(0, bcdb_keytag_hash_value(info, 0, Int32GetDatum(key), false)));
+		ok = true;
+	}
+	RelationClose(rel);
+	return ok;
+}
+
+/*
  * rs_table_reserveDT
  *
  * Deterministic Execution (DT) path read-set reservation.  Intentionally
@@ -805,21 +1190,7 @@ void clear_tx_pool(void)
  *
  * Called from predicate.c whenever PostgreSQL SSI records a predicate lock
  * for a BCDB transaction.
- *
-/*
- * bcdb_compute_intkey_tag
- *
- * Unified computation of primary-key hash tags for BCDB write-set and read-set
- * conflict tracking. Uses fixed dbOid=0 and the table's relation Oid, hashing
- * the 32-bit integer key with hash_any().
  */
-void bcdb_compute_intkey_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid, int32 intKey)
-{
-	uint32 h = hash_any((unsigned char *) &intKey, sizeof(int32));
-	SET_PREDICATELOCKTARGETTAG_TUPLE(*tag, 0, relOid,
-									 (BlockNumber)(h >> 16),
-									 (OffsetNumber)((h & 0xFFFF) | 1));
-}
 
 void rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 {
@@ -865,6 +1236,36 @@ void ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
 	record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
 	record->tag = *tag;
 	LIST_INSERT_HEAD(&ws_table_record, record, link);
+}
+
+/*
+ * ws_table_reserve_publish_onlyDT
+ *
+ * Like ws_table_reserveDT, but the tag is only published for later readers
+ * and never checked by conflict_checkDT(): key-prefix tags let a range read
+ * see concurrent writes inside its range without making two writers of
+ * different rows in that range conflict.  Rows written together usually share
+ * their prefixes, so a repeat of a recently reserved tag is dropped.
+ */
+void ws_table_reserve_publish_onlyDT(PREDICATELOCKTARGETTAG *tag)
+{
+	WSTableEntryRecord *record;
+	int			scanned = 0;
+
+	if (!bcdb_dt_conflict_tracking || bcdb_tx_context == NULL || activeTx == NULL)
+		return;
+
+	LIST_FOREACH(record, &ws_table_publish_record, link)
+	{
+		if (memcmp(&record->tag, tag, sizeof(*tag)) == 0)
+			return;
+		if (++scanned >= 32)
+			break;
+	}
+
+	record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
+	record->tag = *tag;
+	LIST_INSERT_HEAD(&ws_table_publish_record, record, link);
 }
 
 /*
@@ -1023,7 +1424,7 @@ bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
 
         SpinLockAcquire(partition_lock);
         bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPA_LOCK_WAIT_US, probe_lock_start);
-        
+
         uint64 probe_hash_start = bcdb_ptrace_timer_start();
         entry = hash_search_with_hash_value(table->map, tag,
                                             tuple_hash, HASH_FIND, &found);
@@ -3065,27 +3466,31 @@ void publish_ws_tableDT(int id)
         }
     } // clean_rs_ws_table(id); // reset before HASH_ENTER get-write-set !!!
 
-    LIST_FOREACH(record, &ws_table_record, link)
-    {
-        uint64 lock_start;
-        tag = &(record->tag);
-        tuple_hash = PredicateLockTargetTagHashCode(tag);
-		partition_lock = using_map_b ? WSTableMapBPartitionLock(ws_table, tuple_hash) : WSTableMapAPartitionLock(ws_table, tuple_hash);
-        
-        lock_start = bcdb_ptrace_timer_start();
-        SpinLockAcquire(partition_lock);
-        bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_PARTITION_LOCK_US, lock_start);
-        entry = (WSTableEntry *)hash_search_with_hash_value(ws_table->mapActive,
-                                                            tag,
-                                                            tuple_hash,
-                                                            HASH_ENTER,
-                                                            &found);
-        if (!found || entry->tx_id < activeTx->tx_id)
-            entry->tx_id = activeTx->tx_id;
-        SpinLockRelease(partition_lock);
-        published_any = true;
-        bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_WS_PUBLISH_ENTRIES, 1);
-    }
+	/* Checked write-set tags first, then the publish-only key-prefix tags. */
+	for (int pass = 0; pass < 2; pass++)
+	{
+		LIST_FOREACH(record, pass == 0 ? &ws_table_record : &ws_table_publish_record, link)
+		{
+			uint64 lock_start;
+			tag = &(record->tag);
+			tuple_hash = PredicateLockTargetTagHashCode(tag);
+			partition_lock = using_map_b ? WSTableMapBPartitionLock(ws_table, tuple_hash) : WSTableMapAPartitionLock(ws_table, tuple_hash);
+
+			lock_start = bcdb_ptrace_timer_start();
+			SpinLockAcquire(partition_lock);
+			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_PARTITION_LOCK_US, lock_start);
+			entry = (WSTableEntry *)hash_search_with_hash_value(ws_table->mapActive,
+																tag,
+																tuple_hash,
+																HASH_ENTER,
+																&found);
+			if (!found || entry->tx_id < activeTx->tx_id)
+				entry->tx_id = activeTx->tx_id;
+			SpinLockRelease(partition_lock);
+			published_any = true;
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_WS_PUBLISH_ENTRIES, 1);
+		}
+	}
 
     if (using_map_b && published_any)
         pg_atomic_write_u32(&ws_table->mapB_nonempty, 1);

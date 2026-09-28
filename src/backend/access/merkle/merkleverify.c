@@ -523,6 +523,8 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
                      "{\"version\": %u, "
 					 "\"fanout\": %d, "
 					 "\"partitions\": %d, "
+					 "\"partition_key_columns\": %d, "
+					 "\"subpartitions\": %d, "
                      "\"split_threshold\": %d, "
                      "\"merge_threshold\": %d, "
                      "\"total_nodes\": %d, "
@@ -540,6 +542,8 @@ merkle_tree_stats(PG_FUNCTION_ARGS)
                      meta->version,
 					 fanout,
 					 num_partitions,
+					 meta->partition_key_columns,
+					 Max(meta->subpartitions, 1),
                      split_threshold,
                      merge_threshold,
                      totalNodes,

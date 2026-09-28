@@ -184,7 +184,15 @@ merkle_register_relopts(void)
 
 	add_int_reloption(merkle_relopt_kind, "partitions",
 					  "Number of independent hash-routed Merkle partitions",
-					  MERKLE_DEFAULT_PARTITIONS, 1, 100000, AccessExclusiveLock);
+					  MERKLE_DEFAULT_PARTITIONS, 1, MERKLE_MAX_PARTITIONS, AccessExclusiveLock);
+
+	add_int_reloption(merkle_relopt_kind, "partition_key_columns",
+					  "Leading index key columns that select a partition group (0 = full-key hash routing)",
+					  0, 0, INDEX_MAX_KEYS, AccessExclusiveLock);
+
+	add_int_reloption(merkle_relopt_kind, "subpartitions",
+					  "Partitions per leading-key group when partition_key_columns > 0",
+					  1, 1, MERKLE_MAX_PARTITIONS, AccessExclusiveLock);
 
 	merkle_relopts_registered = true;
 }
@@ -194,7 +202,9 @@ static relopt_parse_elt merkle_relopt_tab[] = {
 	{"fanout", RELOPT_TYPE_INT, offsetof(MerkleOptions, fanout)},
 	{"split_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, split_threshold)},
 	{"merge_threshold", RELOPT_TYPE_INT, offsetof(MerkleOptions, merge_threshold)},
-	{"partitions", RELOPT_TYPE_INT, offsetof(MerkleOptions, num_partitions)}
+	{"partitions", RELOPT_TYPE_INT, offsetof(MerkleOptions, num_partitions)},
+	{"partition_key_columns", RELOPT_TYPE_INT, offsetof(MerkleOptions, partition_key_columns)},
+	{"subpartitions", RELOPT_TYPE_INT, offsetof(MerkleOptions, subpartitions)}
 };
 
 /*
@@ -219,11 +229,20 @@ merkle_options(Datum reloptions, bool validate)
 	if (validate && opts != NULL)
 	{
 		if (opts->fanout < 2 || opts->fanout > 1024 ||
-			opts->num_partitions < 1 || opts->num_partitions > 100000)
+			opts->num_partitions < 1 || opts->num_partitions > MERKLE_MAX_PARTITIONS)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("fanout must be between 2 and 1024 and partitions must be between 1 and 100000")));
+					 errmsg("fanout must be between 2 and 1024 and partitions must be between 1 and %d",
+							MERKLE_MAX_PARTITIONS)));
+		}
+		if (opts->partition_key_columns > 0 &&
+			opts->num_partitions % opts->subpartitions != 0)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("partitions (%d) must be a multiple of subpartitions (%d)",
+							opts->num_partitions, opts->subpartitions)));
 		}
 	}
 
@@ -251,6 +270,8 @@ merkle_get_options(Relation indexRel)
 		opts->split_threshold = SPLIT_THRESHOLD;
 		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
 		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
+		opts->partition_key_columns = 0;
+		opts->subpartitions = 1;
 		return opts;
 	}
 
@@ -275,18 +296,30 @@ merkle_get_options(Relation indexRel)
 	}
 	if (VARSIZE(relopts) < (offsetof(MerkleOptions, num_partitions) + sizeof(int)))
 		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, subpartitions) + sizeof(int)))
+	{
+		opts->partition_key_columns = 0;
+		opts->subpartitions = 1;
+	}
 
 	/* Validate options - if values look corrupt, use defaults */
 	if (opts->fanout < 2 || opts->fanout > 1024 ||
 		opts->split_threshold < 2 || opts->split_threshold > 100000 ||
 		 opts->merge_threshold < 1 || opts->merge_threshold > 100000 ||
 		 opts->merge_threshold >= opts->split_threshold ||
-		 opts->num_partitions < 1 || opts->num_partitions > 100000)
+		 opts->num_partitions < 1 || opts->num_partitions > MERKLE_MAX_PARTITIONS)
 	{
 		opts->fanout = MERKLE_DEFAULT_FANOUT;
 		opts->split_threshold = SPLIT_THRESHOLD;
 		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
 		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
+	}
+	if (opts->partition_key_columns < 0 || opts->partition_key_columns > INDEX_MAX_KEYS ||
+		opts->subpartitions < 1 ||
+		(opts->partition_key_columns > 0 && opts->num_partitions % opts->subpartitions != 0))
+	{
+		opts->partition_key_columns = 0;
+		opts->subpartitions = 1;
 	}
 
 	return opts;

@@ -458,13 +458,40 @@ typedef struct
 	uint8     (*attr_headers)[12];
 	uint8     (*key_headers)[12];
 	blake3_hasher base_route_hasher;
+	blake3_hasher base_lead_hasher;	/* route header over the leading keys */
 	blake3_hasher base_tuple_hasher;
 
 	int			bits_per_split;
 	int			split_threshold;
 	int			merge_threshold;
 	int			num_partitions;
+	int			partition_key_columns;	/* 0 = full-key hash routing */
+	int			subpartitions;
 } MerkleBuildState;
+
+/*
+ * Finish the route digests of one tuple and derive its partition, applying
+ * leading-key routing when the index uses it.
+ */
+static inline void
+merkle_build_finish_route(MerkleBuildState *buildstate,
+						  blake3_hasher *route_hasher,
+						  blake3_hasher *lead_hasher,
+						  MerkleRoute *route)
+{
+	blake3_hasher_finalize(route_hasher, route->route_digest, MERKLE_HASH_BYTES);
+	if (buildstate->partition_key_columns > 0)
+	{
+		uint8		lead_digest[MERKLE_HASH_BYTES];
+
+		blake3_hasher_finalize(lead_hasher, lead_digest, MERKLE_HASH_BYTES);
+		merkle_route_digest_apply_leading(route->route_digest, lead_digest,
+										  buildstate->num_partitions,
+										  buildstate->subpartitions);
+	}
+	route->static_route_value = pg_bswap64(*((uint64 *) route->route_digest));
+	route->partition_id = (int) (route->static_route_value % (uint64) buildstate->num_partitions);
+}
 
 static void merkle_emit_build_nodes_report(Relation indexRel,
 										  MerkleBuildState *buildstate);
@@ -924,6 +951,7 @@ merkle_compute_route_and_hash_direct(Relation indexRel,
 									  MerkleHash *tuple_hash)
 {
 	blake3_hasher route_hasher = buildstate->base_route_hasher;
+	blake3_hasher lead_hasher = buildstate->base_lead_hasher;
 	blake3_hasher tuple_hasher = buildstate->base_tuple_hasher;
 	TupleDesc tupdesc = buildstate->tupdesc;
 	int i;
@@ -937,6 +965,13 @@ merkle_compute_route_and_hash_direct(Relation indexRel,
 						  key_isnull[i],
 						  buildstate->key_kinds[i],
 						  &buildstate->key_send_functions[i]);
+		if (i < buildstate->partition_key_columns)
+			merkle_hash_datum(&lead_hasher,
+							  buildstate->key_headers[i],
+							  key_values[i],
+							  key_isnull[i],
+							  buildstate->key_kinds[i],
+							  &buildstate->key_send_functions[i]);
 	}
 
 	/* 2. Compute Tuple Hash over all heap attributes using cached headers and zero-alloc serializer */
@@ -955,11 +990,8 @@ merkle_compute_route_and_hash_direct(Relation indexRel,
 						  &buildstate->send_functions[i]);
 	}
 
-	blake3_hasher_finalize(&route_hasher, route->route_digest, MERKLE_HASH_BYTES);
+	merkle_build_finish_route(buildstate, &route_hasher, &lead_hasher, route);
 	blake3_hasher_finalize(&tuple_hasher, tuple_hash->data, MERKLE_HASH_BYTES);
-
-	route->static_route_value = pg_bswap64(*((uint64 *) route->route_digest));
-	route->partition_id = (int) (route->static_route_value % (uint64) buildstate->num_partitions);
 }
 
 /*
@@ -1207,39 +1239,46 @@ merkle_heapam_index_build_scan(Relation heapRelation,
 			for (j = 0; j < ntup; j++)
 			{
 				blake3_hasher route_hasher = buildstate->base_route_hasher;
+				blake3_hasher lead_hasher = buildstate->base_lead_hasher;
 				int k;
 
 				for (k = 0; k < buildstate->nkeys; k++)
 				{
 					AttrNumber attno = indexInfo->ii_IndexAttrNumbers[k];
+					Datum key_val;
+					bool key_null;
+
 					if (attno > 0)
 					{
-						merkle_hash_datum(&route_hasher,
-										  buildstate->key_headers[k],
-										  page_row_values[j][attno - 1],
-										  page_row_isnull[j][attno - 1],
-										  buildstate->key_kinds[k],
-										  &buildstate->key_send_functions[k]);
+						key_val = page_row_values[j][attno - 1];
+						key_null = page_row_isnull[j][attno - 1];
 					}
 					else if (indexInfo->ii_Expressions != NIL || predicate != NULL)
 					{
-						Datum key_val;
-						bool key_null;
 						MemoryContextReset(econtext->ecxt_per_tuple_memory);
 						ExecStoreBufferHeapTuple(&page_tuples[j], slot, buf);
 						FormIndexDatum(indexInfo, slot, estate, &key_val, &key_null);
-						merkle_hash_datum(&route_hasher,
+					}
+					else
+						continue;
+
+					merkle_hash_datum(&route_hasher,
+									  buildstate->key_headers[k],
+									  key_val,
+									  key_null,
+									  buildstate->key_kinds[k],
+									  &buildstate->key_send_functions[k]);
+					if (k < buildstate->partition_key_columns)
+						merkle_hash_datum(&lead_hasher,
 										  buildstate->key_headers[k],
 										  key_val,
 										  key_null,
 										  buildstate->key_kinds[k],
 										  &buildstate->key_send_functions[k]);
-					}
 				}
 
-				blake3_hasher_finalize(&route_hasher, page_routes[j].route_digest, MERKLE_HASH_BYTES);
-				page_routes[j].static_route_value = pg_bswap64(*((uint64 *) page_routes[j].route_digest));
-				page_routes[j].partition_id = (int) (page_routes[j].static_route_value % (uint64) buildstate->num_partitions);
+				merkle_build_finish_route(buildstate, &route_hasher, &lead_hasher,
+										  &page_routes[j]);
 			}
 			INSTR_TIME_SET_CURRENT(t_sub_end);
 			INSTR_TIME_ACCUM_DIFF(rhash_accum, t_sub_end, t_sub_start);
@@ -1485,7 +1524,17 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	buildstate.split_threshold = opts->split_threshold;
 	buildstate.merge_threshold = opts->merge_threshold;
 	buildstate.num_partitions = opts->num_partitions;
+	buildstate.partition_key_columns = opts->partition_key_columns;
+	buildstate.subpartitions = opts->subpartitions;
 	buildstate.bits_per_split = merkle_bits_per_split_for_fanout(buildstate.fanout);
+
+	if (buildstate.partition_key_columns > indexInfo->ii_NumIndexKeyAttrs)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("partition_key_columns (%d) exceeds the %d key columns of Merkle index \"%s\"",
+						buildstate.partition_key_columns,
+						indexInfo->ii_NumIndexKeyAttrs,
+						RelationGetRelationName(indexRel))));
 
 	merkle_init_tree(indexRel, RelationGetRelid(heapRel), opts,
 					 recovery_status.managed ? recovery_status.applied_seq : 0);
@@ -1587,6 +1636,13 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 		blake3_hasher_update(&buildstate.base_route_hasher, route_magic, sizeof(route_magic));
 		merkle_hash_uint32_local(&buildstate.base_route_hasher, MERKLE_ROUTE_FORMAT_VERSION);
 		merkle_hash_uint32_local(&buildstate.base_route_hasher, (uint32) buildstate.nkeys);
+
+		/* Same header as the full-key digest, over the leading key columns. */
+		blake3_hasher_init(&buildstate.base_lead_hasher);
+		blake3_hasher_update(&buildstate.base_lead_hasher, route_magic, sizeof(route_magic));
+		merkle_hash_uint32_local(&buildstate.base_lead_hasher, MERKLE_ROUTE_FORMAT_VERSION);
+		merkle_hash_uint32_local(&buildstate.base_lead_hasher,
+								 (uint32) buildstate.partition_key_columns);
 
 		blake3_hasher_init(&buildstate.base_tuple_hasher);
 		blake3_hasher_update(&buildstate.base_tuple_hasher, tuple_magic, sizeof(tuple_magic));
@@ -1910,6 +1966,8 @@ merkleBuildempty(Relation indexRel)
 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
 	meta->baselineApplySeq = recovery_status.managed ?
 		recovery_status.applied_seq : 0;
+	meta->partition_key_columns = opts->partition_key_columns;
+	meta->subpartitions = opts->subpartitions;
 
     pfree(opts);
     

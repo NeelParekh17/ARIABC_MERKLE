@@ -367,44 +367,68 @@ merkle_get_plans(Oid index_oid)
 	return &g_plan_cache[empty_slot];
 }
 
+/* Comma-separated definitions of the first max_cols index key columns. */
 static char *
-get_index_key_expr_str(Oid index_oid)
+get_index_key_columns_str(Oid index_oid, int max_cols, int16 *natts_out)
 {
-	MerklePlanCacheEntry *plans = merkle_get_plans(index_oid);
 	int spi_rc;
-	Oid argtypes[1] = {OIDOID};
-	Datum values[1] = {ObjectIdGetDatum(index_oid)};
-	char *expr_str = NULL;
-	int16 natts = 1;
-
-	if (plans->key_expr_str != NULL)
-		return pstrdup(plans->key_expr_str);
+	Oid argtypes[2] = {OIDOID, INT4OID};
+	Datum values[2] = {ObjectIdGetDatum(index_oid), Int32GetDatum(max_cols)};
+	char *cols_str = NULL;
 
 	spi_rc = SPI_execute_with_args(
 		"SELECT (SELECT indnatts FROM pg_catalog.pg_index WHERE indexrelid = $1) AS natts, "
 		"       string_agg(pg_catalog.pg_get_indexdef($1, attnum, true), ', ' ORDER BY attnum) AS cols "
-		"  FROM generate_series(1, (SELECT indnatts FROM pg_catalog.pg_index WHERE indexrelid = $1)) AS attnum "
+		"  FROM generate_series(1, LEAST((SELECT indnatts FROM pg_catalog.pg_index WHERE indexrelid = $1), $2)) AS attnum "
 		" GROUP BY 1",
-		1, argtypes, values, NULL, true, 1);
+		2, argtypes, values, NULL, true, 1);
 
 	if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
 	{
 		bool isnull;
 		Datum d_natts = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
-		if (!isnull)
-			natts = DatumGetInt16(d_natts);
+		if (!isnull && natts_out != NULL)
+			*natts_out = DatumGetInt16(d_natts);
 		Datum d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull);
 		if (!isnull)
-			expr_str = TextDatumGetCString(d);
+			cols_str = TextDatumGetCString(d);
 		SPI_freetuptable(SPI_tuptable);
 	}
 
-	if (expr_str == NULL || strlen(expr_str) == 0)
+	if (cols_str == NULL || strlen(cols_str) == 0)
 		elog(ERROR, "could not determine index key expression for index %u", index_oid);
+	return cols_str;
+}
+
+static char *
+get_index_key_expr_str(Oid index_oid)
+{
+	MerklePlanCacheEntry *plans = merkle_get_plans(index_oid);
+	char *expr_str;
+	int16 natts = 1;
+
+	if (plans->key_expr_str != NULL)
+		return pstrdup(plans->key_expr_str);
+
+	expr_str = get_index_key_columns_str(index_oid, INDEX_MAX_KEYS, &natts);
 
 	if (strstr(expr_str, "merkle_key_hash") == NULL)
 	{
-		if (natts > 1)
+		Relation index_rel = index_open(index_oid, AccessShareLock);
+		int num_partitions = MERKLE_DEFAULT_PARTITIONS;
+		int partition_key_columns = 0;
+		int subpartitions = 1;
+
+		merkle_read_route_meta(index_rel, &num_partitions, &partition_key_columns,
+							   &subpartitions);
+		index_close(index_rel, AccessShareLock);
+
+		if (partition_key_columns > 0)
+			expr_str = psprintf("merkle_key_hash_routed(ROW(%s), ROW(%s), %d, %d)",
+								expr_str,
+								get_index_key_columns_str(index_oid, partition_key_columns, NULL),
+								num_partitions, subpartitions);
+		else if (natts > 1)
 			expr_str = psprintf("merkle_key_hash(ROW(%s))", expr_str);
 		else
 			expr_str = psprintf("merkle_key_hash(%s)", expr_str);

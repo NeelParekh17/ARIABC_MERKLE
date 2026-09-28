@@ -69,35 +69,6 @@
 #include <bcdb/shm_transaction.h>
 #include <bcdb/globals.h>
 
-/*
- * bcdb_compute_key_tag - Compute a write-set tag based on primary key values.
- *
- * Both INSERT and DELETE for the same primary key must produce the same tag
- * so that conflict_checkDT detects cross-operation conflicts on the same key.
- * Without this, INSERT operations are invisible to conflict detection,
- * allowing DELETE transactions to proceed with stale snapshots where a key
- * was temporarily absent, leaving phantom hashes in the merkle tree.
- *
- * We read the first column (assumed to be the primary key) from the given
- * slot and use hash_any to compute a stable 32-bit hash.  The hash is split
- * into blockNumber (upper 16 bits) and offsetNumber (lower 16 bits + 1,
- * since offset 0 is invalid) inside a PREDICATELOCKTARGETTAG.
- */
-static void
-bcdb_compute_key_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid,
-					 TupleTableSlot *slot)
-{
-	Datum	keyVal;
-	bool	isNull;
-
-	/* Extract the first column (primary key) from the slot */
-	keyVal = slot_getattr(slot, 1, &isNull);
-	if (isNull)
-		bcdb_compute_intkey_tag(tag, relOid, 0);
-	else
-		bcdb_compute_intkey_tag(tag, relOid, DatumGetInt32(keyVal));
-}
-
 static bool
 bcdb_is_safe_ledger_relation(Relation relation)
 {
@@ -1026,10 +997,7 @@ ExecInsert(ModifyTableState *mtstate,
 				 * later INSERT commit) would proceed without retry, leaving
 				 * a phantom merkle hash from the prior INSERT.
 				 */
-				PREDICATELOCKTARGETTAG tag;
-				bcdb_compute_key_tag(&tag,
-									 resultRelationDesc->rd_id, slot);
-				ws_table_reserveDT(&tag);
+				bcdb_reserve_write_key_tags(resultRelationDesc, slot);
 				store_optim_insert(slot);
 				//return NULL;
 			}
@@ -1228,7 +1196,6 @@ ldelete:;
 		 */
 		if (defer_bcdb_dml)
 		{
-			PREDICATELOCKTARGETTAG tag;
 			PREDICATELOCKTARGETTAG tid_tag;
 			/*
 			 * DELETE registers TWO write-set tags:
@@ -1268,10 +1235,7 @@ ldelete:;
 												  estate->es_snapshot,
 												  keySlot))
 				{
-					bcdb_compute_key_tag(&tag,
-										 resultRelationDesc->rd_id,
-										 keySlot);
-					ws_table_reserveDT(&tag);
+					bcdb_reserve_write_key_tags(resultRelationDesc, keySlot);
 				}
 				/* Pass keySlot to store_optim_delete so apply can
 				 * re-lookup the correct TID at commit time. The
@@ -1866,7 +1830,6 @@ lreplace:;
 			//debugtup(slot, NULL);
 	//printf("ariaMyDbg %s : %s: %d \n", __FILE__, __FUNCTION__, __LINE__ );
 				PREDICATELOCKTARGETTAG tid_tag;
-				PREDICATELOCKTARGETTAG key_tag;
 
 				/*
 				 * UPDATE registers TWO write-set tags:
@@ -1891,9 +1854,8 @@ lreplace:;
 												 ItemPointerGetOffsetNumber(tupleid));
 				ws_table_reserveDT(&tid_tag);
 
-				/* Tag 2: Primary-key-based */
-				bcdb_compute_key_tag(&key_tag, resultRelationDesc->rd_id, slot);
-				ws_table_reserveDT(&key_tag);
+				/* Tag 2: key-based (full key, plus publish-only key prefixes) */
+				bcdb_reserve_write_key_tags(resultRelationDesc, slot);
 				
 				/*
 				 * Deferred Merkle update:

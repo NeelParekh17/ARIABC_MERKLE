@@ -1,0 +1,6 @@
+merkle_build_s=25
+measure_start=07:14:58
+prewarm_blocks=1142094
+completed_tps=2402.07
+divergence_count=0 permanent_failures=0
+traced_tx=20000 total_restarts=1997 tx_with_restart=1977

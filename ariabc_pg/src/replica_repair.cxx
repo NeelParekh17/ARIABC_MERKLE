@@ -116,6 +116,8 @@ struct table_info {
     std::vector<std::string> pk;  // unquoted
     std::string merkle_key;       // single column, unquoted; empty if none/unsupported
     int partitions = 200;
+    int partition_key_columns = 0; // Merkle leading-key routing; 0 = hash(key) % partitions
+    int subpartitions = 1;
     std::vector<std::string> cols; // unquoted, attnum order
 };
 
@@ -154,6 +156,10 @@ bool discover_tables(PGconn* ref, std::vector<table_info>& out, std::string& err
         for (const std::string& opt : split_csv(r[3])) {
             if (opt.rfind("partitions=", 0) == 0) {
                 t.partitions = std::max(1, std::atoi(opt.c_str() + 11));
+            } else if (opt.rfind("partition_key_columns=", 0) == 0) {
+                t.partition_key_columns = std::max(0, std::atoi(opt.c_str() + 22));
+            } else if (opt.rfind("subpartitions=", 0) == 0) {
+                t.subpartitions = std::max(1, std::atoi(opt.c_str() + 14));
             }
         }
         t.cols = split_csv(r[4]);
@@ -235,8 +241,17 @@ std::string bounds_cte(const std::vector<leaf_key>& ranges) {
            p.str() + ", " + n.str() + ", " + l.str() + ") AS u(p, lo, l)) ";
 }
 
-std::string range_pred(const std::string& key_expr, int partitions) {
-    const std::string h = "merkle_key_hash(" + key_expr + ")";
+/* Route hash of a single-column Merkle key, as merkle_compute_route() computes it. */
+std::string route_hash_expr(const table_info& t, const std::string& key_expr) {
+    if (t.partition_key_columns > 0)
+        return "merkle_key_hash_routed(ROW(" + key_expr + "), ROW(" + key_expr + "), " +
+               std::to_string(t.partitions) + ", " + std::to_string(t.subpartitions) + ")";
+    return "merkle_key_hash(" + key_expr + ")";
+}
+
+std::string range_pred(const table_info& t, const std::string& key_expr) {
+    const int partitions = t.partitions;
+    const std::string h = route_hash_expr(t, key_expr);
     return "merkle_partition_for_hash(" + h + ", " + std::to_string(partitions) +
            ") = b.p AND " + h + " BETWEEN b.lo AND b.hi";
 }
@@ -443,7 +458,7 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
     uint64_t candidates = 0;
     const std::string copy_out =
         "COPY (" + cte + "SELECT DISTINCT ON (" + pk_list_t + ") " + join_quoted(local, t.cols, "t.") +
-        " FROM b JOIN " + tbl + " t ON " + range_pred("t." + key, t.partitions) +
+        " FROM b JOIN " + tbl + " t ON " + range_pred(t, "t." + key) +
         " ORDER BY " + pk_list_t + ") TO STDOUT";
     if (!stream_copy(ref, copy_out, local, "COPY " + tmp + " (" + cols + ") FROM STDIN",
                      candidates, err)) {
@@ -462,7 +477,7 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
     }
     uint64_t deleted = 0;
     if (!exec_cmd(local,
-                  cte + "DELETE FROM " + tbl + " t USING b WHERE " + range_pred("t." + key, t.partitions) +
+                  cte + "DELETE FROM " + tbl + " t USING b WHERE " + range_pred(t, "t." + key) +
                       " AND NOT EXISTS (SELECT 1 FROM " + tmp + " r WHERE " + pk_match + ")",
                   err, &deleted)) {
         return commit_or_rollback(local, false, err);
@@ -615,6 +630,10 @@ bool repair_replica_from_snapshot(const std::string& local_conninfo,
                        "  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_key_hash' AND pronamespace = 'pg_catalog'::regnamespace) THEN "
                        "    CREATE FUNCTION pg_catalog.merkle_key_hash(anyelement) "
                        "    RETURNS bytea LANGUAGE internal IMMUTABLE STRICT AS 'merkle_key_hash_sql'; "
+                       "  END IF; "
+                       "  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_key_hash_routed' AND pronamespace = 'pg_catalog'::regnamespace) THEN "
+                       "    CREATE FUNCTION pg_catalog.merkle_key_hash_routed(full_key \"any\", leading_key \"any\", partitions integer, subpartitions integer) "
+                       "    RETURNS bytea LANGUAGE internal IMMUTABLE STRICT AS 'merkle_key_hash_routed_sql'; "
                        "  END IF; "
                        "END $$; "
                        "CREATE OR REPLACE FUNCTION public.merkle_node_upper_bound(node_id bytea, prefix_len integer) "

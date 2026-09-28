@@ -184,7 +184,7 @@ def restore_tpcc_db(args, warehouses, enable_merkle):
         {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'ALTER TABLE warehouse SET LOGGED; ALTER TABLE district SET LOGGED; ALTER TABLE customer SET LOGGED; ALTER TABLE history SET LOGGED; ALTER TABLE oorder SET LOGGED; ALTER TABLE order_line SET LOGGED; ALTER TABLE new_order SET LOGGED; ALTER TABLE stock SET LOGGED; ALTER TABLE item SET LOGGED;' 2>&1
 
         # Create stored procs, indexes, and merkle indexes across all 9 tables (in-memory parallel builds)
-        {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -v bench_merkle_split_threshold={args.tpcc_merkle_split_threshold} -v bench_merkle_merge_threshold={args.tpcc_merkle_merge_threshold} -f {repo}/scripts/restore_tpcc_procs.sql 2>&1
+        {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -v bench_merkle_split_threshold={args.tpcc_merkle_split_threshold} -v bench_merkle_merge_threshold={args.tpcc_merkle_merge_threshold} -v bench_merkle_partition_key_columns={args.tpcc_merkle_partition_key_columns} -v bench_merkle_subpartitions={args.tpcc_merkle_subpartitions} -f {repo}/scripts/restore_tpcc_procs.sql 2>&1
 
         # Fast ANALYZE (freshly inserted rows have zero dead tuples, VACUUM is redundant)
         {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'ANALYZE public.warehouse, public.district, public.customer, public.stock, public.item, public.oorder, public.new_order, public.order_line, public.history;' >/dev/null
@@ -550,6 +550,20 @@ def main():
         default=8,
         type=int,
         help="Merge threshold for Merkle tree indexes across all TPC-C tables (default: 8)",
+    )
+    parser.add_argument(
+        "--tpcc-merkle-partition-key-columns",
+        default=0,
+        type=int,
+        help="Leading Merkle key columns that select a partition group; 1 groups every TPC-C "
+             "index by warehouse id. 0 (default) routes by hash(full key) %% partitions.",
+    )
+    parser.add_argument(
+        "--tpcc-merkle-subpartitions",
+        default=1,
+        type=int,
+        help="Partitions per leading-key group when --tpcc-merkle-partition-key-columns > 0; "
+             "--tpcc-merkle-partitions must be a multiple of it (default: 1)",
     )
     parser.add_argument(
         "--tpcc-prewarm",
