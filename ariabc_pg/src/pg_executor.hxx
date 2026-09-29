@@ -56,6 +56,7 @@ struct pg_executor_stats {
     uint64_t retry_attempts_total = 0;
     uint64_t retry_backoff_requested_ms = 0;
     uint64_t retry_exhausted_total = 0;
+    bool retry_jitter = false;
 
     uint64_t kafka_flush_calls = 0;
     uint64_t kafka_payload_bytes = 0;
@@ -494,6 +495,9 @@ private:
     std::atomic<uint64_t> st_retry_attempts_total_{0};
     std::atomic<uint64_t> st_retry_backoff_requested_ms_{0};
     std::atomic<uint64_t> st_retry_exhausted_total_{0};
+    // ARIABC_PG_RETRY_JITTER (default 1): full jitter on PG 40001/40P01 backoff.
+    bool retry_jitter_ = true;
+    int pg_retry_backoff_ms(int attempt, const char* sqlstate);
     std::atomic<uint64_t> st_kafka_flush_calls_{0};
     std::atomic<uint64_t> st_kafka_payload_bytes_{0};
     std::atomic<uint64_t> st_kafka_build_payload_ns_{0};

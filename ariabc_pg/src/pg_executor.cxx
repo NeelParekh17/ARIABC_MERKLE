@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <random>
 #include <poll.h>
 #include <sstream>
 #include <stdexcept>
@@ -2266,6 +2267,9 @@ pg_executor::pg_executor(int node_id,
         int parsed = std::atoi(v);
         if (parsed > 0) db_opt_.max_retries = parsed;
     }
+    if (const char* v = std::getenv("ARIABC_PG_RETRY_JITTER")) {
+        retry_jitter_ = std::atoi(v) != 0;
+    }
     event_mode_ = is_event_mode(db_opt_.exec_mode);
     if (db_opt_.db_type == 1) {
         // Parallel deterministic workers are on by default in threaded mode:
@@ -2932,6 +2936,7 @@ pg_executor_stats pg_executor::stats() const {
     out.retryable_sqlstate_57014 = st_retryable_sqlstate_57014_.load(std::memory_order_relaxed);
     out.retry_attempts_total = st_retry_attempts_total_.load(std::memory_order_relaxed);
     out.retry_backoff_requested_ms = st_retry_backoff_requested_ms_.load(std::memory_order_relaxed);
+    out.retry_jitter = retry_jitter_;
     out.retry_exhausted_total = st_retry_exhausted_total_.load(std::memory_order_relaxed);
     out.kafka_flush_calls = st_kafka_flush_calls_.load(std::memory_order_relaxed);
     out.kafka_payload_bytes = st_kafka_payload_bytes_.load(std::memory_order_relaxed);
@@ -3788,8 +3793,7 @@ std::string pg_executor::exec_sql(PGconn* c, const std::string& sql, bool* is_er
         }
 
         st_retry_attempts_total_.fetch_add(1, std::memory_order_relaxed);
-        const int delay_ms = pg_retry_delay_ms(db_opt_.db_type, sqlstate.c_str(),
-                                               attempt, db_opt_.retry_backoff_ms);
+        const int delay_ms = pg_retry_backoff_ms(attempt, sqlstate.c_str());
         st_retry_backoff_requested_ms_.fetch_add(delay_ms, std::memory_order_relaxed);
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     }
@@ -6011,8 +6015,7 @@ void pg_executor::event_loop() {
                         st_retry_attempts_total_.fetch_add(1, std::memory_order_relaxed);
                         done_task.attempt = attempt + 1;
                         delayed_task dt;
-                        const int delay_ms = pg_retry_delay_ms(db_opt_.db_type,
-                            retry_sqlstate.c_str(), attempt, db_opt_.retry_backoff_ms);
+                        const int delay_ms = pg_retry_backoff_ms(attempt, retry_sqlstate.c_str());
                         st_retry_backoff_requested_ms_.fetch_add(delay_ms, std::memory_order_relaxed);
                         dt.deadline_ns = now_steady_ns() +
                             static_cast<uint64_t>(delay_ms) * 1000000ULL;
@@ -6084,6 +6087,15 @@ void pg_executor::event_loop() {
         }
     }
     flush_batch(FLUSH_REASON_FINAL);
+}
+
+int pg_executor::pg_retry_backoff_ms(int attempt, const char* sqlstate) {
+    const int ceiling = pg_retry_delay_ms(db_opt_.db_type, sqlstate, attempt, db_opt_.retry_backoff_ms);
+    if (!retry_jitter_ || !pg_retry_jitter_applies(db_opt_.db_type, sqlstate)) {
+        return ceiling;
+    }
+    thread_local std::mt19937_64 rng{std::random_device{}()};
+    return pg_retry_full_jitter_ms(ceiling, rng());
 }
 
 } // namespace ariabc_pg

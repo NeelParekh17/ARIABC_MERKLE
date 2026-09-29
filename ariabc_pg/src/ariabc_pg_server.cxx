@@ -1765,6 +1765,7 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " retry_attempts_total=" << exec.retry_attempts_total
         << " retry_backoff_requested_ms=" << exec.retry_backoff_requested_ms
         << " retry_exhausted_total=" << exec.retry_exhausted_total
+        << " retry_jitter=" << (exec.retry_jitter ? 1 : 0)
         << " enqueue_to_pickup_us=" << (exec.queue_delay_dequeue_ns / 1000.0)
         << " pickup_to_PQexec_start_us=" << (exec.queue_delay_exec_start_ns / 1000.0)
         << " PQexec_us=" << (exec.pg_query_ns / 1000.0)

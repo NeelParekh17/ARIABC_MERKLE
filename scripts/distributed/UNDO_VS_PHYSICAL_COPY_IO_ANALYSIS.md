@@ -1,5 +1,31 @@
 # Technical Deep Dive: Why Logical Undo Reduces Read/Write I/O vs. Physical Copy
 
+> **Review addendum (2026-09-29).** The conclusion still holds: logical undo is not valid
+> for these measurements, and every case must start from the byte-identical pristine
+> files. Three corrections to the explanation below:
+>
+> 1. **WAL mechanism.** A full-page image is written on the first change to a page after
+>    *every* checkpoint, whatever was touched before, so "already touched and
+>    checkpointed during undo" does not remove FPIs. Undo's `UPDATE` rewrote the hot rows
+>    into a few thousand new pages at the end of the heap. The next run therefore
+>    modifies far fewer distinct pages, which explains both the 558 → 44 MB WAL drop and
+>    the halving of blocks read.
+> 2. **cp w=8 slowdown (747 TPS).** The cp run spent 66.9 s on device reads vs 16.2 s for
+>    undo. The data disk is an Intel 660p QLC SSD, and the 32 GB `cp` before every case
+>    left it saturated, so part of that gap is disk state. Relation-extension locking
+>    alone was not established as the cause.
+> 3. **"cp is the only method."** A byte-identical file-level restore also meets the
+>    requirement. The runner's default `--reset-mode delta` restores with
+>    `rsync --inplace --no-whole-file` from the stopped baseline and then byte-compares
+>    every file (`diff -rq`) before each case.
+>    - An A/B test (`.bench_tmp/oom_ab_cp_vs_delta_20260929`, skew 0, w8, pg and Merkle,
+>      2 trials each, same SSD-settle gate) gave identical WAL (Merkle 333,213 kB in all
+>      four runs; pg 154,164 vs 154,171 kB).
+>    - PG blocks read, device reads and checkpoint writes were within 0.3%, and TPS
+>      overlapped (Merkle cp 2259/2282 vs delta 2172/2480; pg cp 3812/3886 vs delta
+>      3817/3762).
+>    - Resets took 124–242 s instead of about 600 s.
+
 ## Executive Summary
 
 When benchmarking PostgreSQL under an Out-Of-Memory (OOM) cold-start workload (100M rows, 32 GB database, 32 MB `shared_buffers`), the choice of database reset mechanism fundamentally alters the **physical storage layout** and the resulting **disk I/O**:

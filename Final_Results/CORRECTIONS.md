@@ -108,6 +108,78 @@ set, OS cache, shared memory and storage-controller state are separate quantitie
   every point, with medians and minimums kept in `summary.csv`. They are still below
   the five-trial qualification bar.
 
+## OOM 100M, 2026-09-28
+
+The archived OOM results (`fanout32_full_sweep`) should not be used for mode
+comparisons. Three problems were found:
+
+- **Restore/SSD state.** The 100M host (`.247`) stores its data on an Intel 660p
+  (QLC with an SLC write cache). The per-case 32 GB `cp` ran at about 95 MB/s once
+  the cache was full. While it and its writeback ran, 4 KB random-read latency rose
+  from about 0.1–0.15 ms to 0.4–22 ms. In the archived rows, TPS follows the
+  measured device read await (for example, det w8: 2.96 ms → 794 TPS vs
+  0.36 ms → 4,764 TPS), not the mode.
+  - Fix: the runner now restores with a byte-identical `rsync --inplace
+    --no-whole-file` delta from a per-variant stopped baseline (Merkle / plain). It
+    verifies the restore against that baseline, then waits until read and O_DSYNC
+    write probe latencies match an idle calibration before each cold start.
+- **Stale binaries.** The `.247` install and server and the `.111` gateway were
+  built before 88bae28 (primary-key det conflict tags, leading-key routing). All
+  three were rebuilt from 763b9ef.
+- **Empty Merkle tree with post-00fae31 binaries.** The golden baseline keeps its
+  tree in `ariabc_internal.merkle_node_16449`. Newer binaries look for
+  `merkle_node_usertable`, and when it is missing they create an empty one. Any
+  Merkle case on the old baseline would therefore have measured an empty tree.
+  - Fix: `pgdata_base_fanout32_tblnamed` is the golden copy with the table and its
+    indexes renamed, and it passes `merkle_verify`. The runner now refuses a Merkle
+    case whose `merkle_node_usertable` is missing or empty.
+
+The delta restore is byte-identical to `cp`:
+
+- **Content.** Both working copies, restored after a real run, compared equal to their
+  baselines with `diff -rq`: 1085/1085 and 1099/1099 files, 0 differences. The runner
+  now repeats this byte comparison in every case before the cache drop.
+- **A/B test.** `.bench_tmp/oom_ab_cp_vs_delta_20260929`: skew 0, w8, pg and Merkle,
+  2 trials of each reset method.
+  - WAL was identical: Merkle 333,213 kB in all four runs; pg 154,164 vs 154,171 kB.
+  - Blocks read, device reads and checkpoint writes were within 0.3%.
+  - TPS ranges overlapped.
+
+pg now runs with `--pgExecMode event`, the same as the YCSB and TPC-C harnesses.
+The runner also checks the canonical BCDB GUCs and serializable isolation for
+every case.
+
+## pg retry policy: jitter (2026-09-29)
+
+The pg executor retried serialization failures with exponential backoff (2^n ms, capped
+at 100 ms) but no jitter. At 16 workers on contended YCSB, retries on the same hot row
+kept colliding, and pg throughput collapsed.
+
+| Point (100M rows, out of core) | Old policy | With jitter |
+|---|---|---|
+| A θ1.2 w16 | 3,210 TPS, 16,481 retries | 9,804 TPS |
+| A θ0.99 w16 | 4,634 TPS | 9,780 TPS |
+
+- Full jitter is now the default (`ARIABC_PG_RETRY_JITTER`; `pg_retry_policy.hxx`).
+- The runner records and verifies the setting in every case.
+- Earlier results where det beat pg under contention came from this policy. That
+  includes the archived in-memory YCSB campaign (`project_ycsb_pg_baseline_ssi_backoff`:
+  A θ1.2 w16 had 21,024 retries). Rerun those points before using them.
+- A READ COMMITTED pg mode (`pg_rc`) was added for single-row workloads (A, B, C, D;
+  not F).
+- `Final_Results/YCSB` pg rows were rerun with jitter on 2026-09-29: 240 cases, 3 trials
+  per point. Before that, a subset rerun of det, det + Merkle and the cluster confirmed the
+  other modes reproduce. See `YCSB/CURATION.md` and the pg-rerun section of
+  `YCSB/ANALYSIS.md`.
+- **Gateway host .111 clock.** After its 2026-09-28 reboot, .111 ran on the HPET
+  clocksource, because the kernel marked the TSC unstable at boot (1.4 µs per clock read).
+  That slowed short, high-TPS runs. It now boots with `tsc=reliable` (backup of the old
+  config: `/etc/default/grub.bak_20260929_tsc`) and uses the `performance` power profile.
+  Check `current_clocksource` = `tsc` before gateway benchmarks.
+- Results: `Final_Results/OOM_100M/`. Evidence for the correction (the same binary without
+  jitter, 9 cases, plus the full comparison table) is archived outside Final_Results in
+  `.bench_tmp/oom_superseded_20260929/`.
+
 ## Validation artifacts
 
 These are focused correctness/setup checks, not replacement performance curves.
@@ -128,19 +200,10 @@ result; it still rejects missing IDs, duplicate results and zero affected rows.
 New database generation now honors the requested baseline directory and uses
 fanout 32. The failed smoke remains archived alongside the successful rerun.
 
-Use fresh output directories for new measurements. A full repeated 100M campaign
-has not yet been completed with these corrections. Its historical rankings remain
-unqualified until that campaign finishes. The original 36-case campaign spent
-about 5.89 hours in setup alone, so five complete trials are substantial work.
-
-For a fresh OOM campaign (from the repository root):
-
-```bash
-python3 scripts/distributed/run_oom_100m_benchmark.py \
-  --workloads a --skews 0.0 0.5 0.99 1.2 --workers 1 8 16 \
-  --modes pg bcdb_det bcdb_merkle --trials 5 --shared-buffers 32MB --reset-mode cp \
-  --out-dir scripts/bench_full_results/oom_corrected
-```
+Use fresh output directories for new measurements. The corrected 100M results are in
+`Final_Results/OOM_100M/` (108 cases, 1 trial each). `COMMANDS.md` section 2 has the
+commands. The aborted and partial campaigns from 2026-09-28/29 are archived in
+`.bench_tmp/oom_superseded_20260929/`, together with the old-policy pg cases.
 
 The YCSB and TPC-C replication wrappers also default to five trials. Do not merge
 new measurements with the historical summaries: workload semantics, durability,

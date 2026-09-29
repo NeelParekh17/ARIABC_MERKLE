@@ -40,7 +40,7 @@ TPCC_TRIALS=5
 | Saved result | Configuration | Historical measured runs |
 |---|---|---:|
 | `YCSB/abcdf_4modes_4skews_cold_20260920_132045` (also copied to `YCSB/summary.csv`) | A/B/C/D/F; skews 0, .5, .99, 1.2; workers 1/4/8/16; four modes; 20K requests; 32MB buffers | 320 |
-| `OOM_100M/fanout32_full_sweep` | 100M rows; A; skews 0, .5, .99, 1.2; workers 1/8/16; three modes; 20K requests; 32MB buffers | 36, from two campaigns |
+| `OOM_100M` | 100M rows; A θ 0/.99/1.2 + B, C, D, F θ .99; workers 1/4/8/16; pg SERIALIZABLE, pg READ COMMITTED, det, det + Merkle; 20K statements; 32MB buffers; 1 trial | 108 |
 | `TPCC/workers_w100` | 100 warehouses; workers 8/16/24/32/48/64; pg, det, Merkle (hash % 200 and warehouse routing); 20K transactions; 32GB buffers; 3 trials | 72 |
 | `TPCC/warehouses_w32` | warehouses 5/10/20/30/50/75/100; 32 workers; pg, det, Merkle (hash % 200 and warehouse routing); 20K transactions; 32GB buffers; 3 trials | 84 |
 | `Recovery/ariabc-recovery-size-scaling-k75-c300-20260920T110603Z-007325` | 11 sizes from 1M to 50M; fanout 32; K=75; C=300; 10 repetitions | 110 |
@@ -88,89 +88,48 @@ while the all-three follower audit drain metrics are tracked in attempt metadata
 reads recently completed inserts via point selects under the latest distribution,
 preserving true read-latest behavior while ensuring reads only target committed records.
 
-## 2. OOM 100M — first saved campaign, skews 0 and .99
+## 2. OOM 100M — pg, det and det + Merkle
 
-Matches `run_20260920_192445_39e71923`: 18 cases at one trial.
-Uses **only physical `cp` resets**, with fanout 32 from the existing baseline.
+Results: `Final_Results/OOM_100M/` (README, `summary.csv`, `figures/`, `runs/`).
 
-```bash
-python3 -u scripts/distributed/run_oom_100m_benchmark.py \
-  --remote-host 10.129.148.247 \
-  --remote-user neel \
-  --remote-dir /tmp/ariabc_oom_100m \
-  --install-dir /home/neel/Desktop/ariabc_install \
-  --cluster-dir /home/neel/Desktop/ariabc_cluster \
-  --gateway-host 10.129.27.111 \
-  --gateway-user neel \
-  --gateway-repo /home/neel/ARIABC/AriaBC \
-  --db-port 5438 \
-  --server-port 8000 \
-  --db-rows 100000000 \
-  --shared-buffers 32MB \
-  --txs 20000 \
-  --seed 42 \
-  --workloads a \
-  --skews 0.0 0.99 \
-  --workers 1 8 16 \
-  --modes pg bcdb_det bcdb_merkle \
-  --trials "$OOM_TRIALS" \
-  --reset-mode cp \
-  --verify-mode fast \
-  --base-dir-name pgdata_base_fanout32 \
-  --skip-gen \
-  --gateway-timeout 1800 \
-  --reset-timeout 3600 \
-  --verify-timeout 1800 \
-  --out-dir "$RESULT_ROOT/OOM_100M/skews_0_and_0_99"
-```
+Prerequisites on `neel@10.129.148.247`:
 
-## 3. OOM 100M — second saved campaign, skews .5 and 1.2
+- The install in `~/Desktop/ariabc_install` and the server in `~/Desktop/ariabc_cluster`,
+  both built from the commit being measured. The server must include pg retry jitter:
+  it prints `retry_jitter=` in its stats, and the runner checks it.
+  - `.247` has no C++ compiler, so ariabc_pg is built on `.111` against `.247`'s install.
+- `pgdata_base_fanout32_tblnamed`: the golden copy with the node table renamed to
+  `merkle_node_usertable` and `merkle_verify` PASS. The runner derives the `_plain`
+  baseline (no Merkle indexes) the first time it runs.
 
-Matches `run_20260921_012214_d626773b`: another 18 cases at one trial.
-Its original manifest is in `scripts/bench_full_results/fanout32_full_sweep/`;
-the combined Final_Results manifest only lists the first campaign's two skews.
+Three campaigns produce the published results. Run them one at a time.
 
 ```bash
-python3 -u scripts/distributed/run_oom_100m_benchmark.py \
-  --remote-host 10.129.148.247 \
-  --remote-user neel \
-  --remote-dir /tmp/ariabc_oom_100m \
-  --install-dir /home/neel/Desktop/ariabc_install \
-  --cluster-dir /home/neel/Desktop/ariabc_cluster \
-  --gateway-host 10.129.27.111 \
-  --gateway-user neel \
-  --gateway-repo /home/neel/ARIABC/AriaBC \
-  --db-port 5438 \
-  --server-port 8000 \
-  --db-rows 100000000 \
-  --shared-buffers 32MB \
-  --txs 20000 \
-  --seed 42 \
-  --workloads a \
-  --skews 0.5 1.2 \
-  --workers 1 8 16 \
-  --modes pg bcdb_det bcdb_merkle \
-  --trials "$OOM_TRIALS" \
-  --reset-mode cp \
-  --verify-mode fast \
-  --base-dir-name pgdata_base_fanout32 \
-  --skip-gen \
-  --gateway-timeout 1800 \
-  --reset-timeout 3600 \
-  --verify-timeout 1800 \
-  --out-dir "$RESULT_ROOT/OOM_100M/skews_0_5_and_1_2"
+COMBOS="a:0.0 a:0.99 a:1.2 b:0.99 c:0.99 d:0.99 f:0.99"
+R="python3 -u scripts/distributed/run_oom_100m_benchmark.py --workers 1 4 8 16 --trials 1 --skip-gen"
+
+# det and det + Merkle -> runs/det_merkle
+$R --modes bcdb_det bcdb_merkle --combos $COMBOS --out-dir Final_Results/OOM_100M/runs_new/det_merkle
+
+# pg SERIALIZABLE, exponential backoff with full jitter -> runs/pg_serializable
+$R --modes pg --pg-retry-jitter on --combos $COMBOS --out-dir Final_Results/OOM_100M/runs_new/pg_serializable
+
+# pg READ COMMITTED; F is excluded (not serializable at READ COMMITTED) -> runs/pg_read_committed
+$R --modes pg_rc --combos a:0.0 a:0.99 a:1.2 b:0.99 c:0.99 d:0.99 --out-dir Final_Results/OOM_100M/runs_new/pg_read_committed
 ```
 
-Each OOM command creates a new `run_*` subdirectory containing its own manifest,
-`summary.csv`, case logs and plots. Preserve both manifests. `--skip-gen` deliberately
-requires the saved pristine baseline; it prevents an unexpected new 100M load.
-`--verify-mode fast` still validates the golden baseline and copy metadata; it avoids
-a full 100M-row count on every reset. The reset always copies the complete database.
+Runner defaults:
 
-To execute all 36 configurations as **one new campaign**, use command 2 with
-`--skews 0.0 0.5 0.99 1.2` and a single new output directory, and omit command 3.
+- **Reset** (`--reset-mode delta`): byte-identical rsync restore from the stopped
+  baseline for each variant, with a size/mtime check every case and a `diff -rq` byte
+  comparison on the first restore of each working copy and every 10th restore.
+- **SSD settle:** before each cold start, wait until QD1/QD8 reads and O_DSYNC writes are
+  within 1.25× of the idle calibration.
 
-## 4. TPC-C — worker scaling at 100 warehouses
+After the runs, rebuild `summary.csv` from the runs' summaries and regenerate the figures
+with `python3 scripts/distributed/plot_oom_figures.py`.
+
+## 3. TPC-C — worker scaling at 100 warehouses
 
 The whole pipeline runs on ranking (`protectdr@10.129.7.57`, EPYC 9654), and no other host is
 involved. It uses the isolated build in `~/claude_checks`: sources in `src/`, PostgreSQL
@@ -199,7 +158,7 @@ The configurations used are:
 - **Merkle, hash % 200:** `200 0 1 merkle`
 - **Merkle, warehouse routing:** `16384 1 16 merkle`
 
-## 5. TPC-C — warehouse scaling at 32 workers
+## 4. TPC-C — warehouse scaling at 32 workers
 
 ```bash
 ssh protectdr@10.129.7.57
@@ -213,7 +172,7 @@ cd ~/claude_checks
 caveats. The harness path (`run_all_modes_gateway_sweep.py --benchmark tpcc`) now also
 accepts `--tpcc-merkle-partition-key-columns` and `--tpcc-merkle-subpartitions`.
 
-## 6. Recovery — 1M through 50M, K=75, C=300, fanout 32
+## 5. Recovery — 1M through 50M, K=75, C=300, fanout 32
 
 The profile selects exactly 1M, 3M, 5M, 7M, 10M, 15M, 20M, 25M, 30M, 40M and
 50M rows; split 32, merge 8, K=75 and C=300. Ten repetitions produce 110 runs.
@@ -273,7 +232,7 @@ series order. The saved config leaves warmup unspecified; six cycles and affinit
 176–183 come from the replication wrapper. Do not call the new run an exact
 reproduction of the old audit/cache conditions.
 
-## 7. Distributed Online Replica Recovery — 3-node cluster, YCSB 160k, in-flight fault injection
+## 6. Distributed Online Replica Recovery — 3-node cluster, YCSB 160k, in-flight fault injection
 
 Evaluates ProtectDB Algorithm 2 running inside the replicated Raft-Kafka cluster
 (`admin123` = 1, `user4` = 2, `utkarsh` = 4) under 160,000 transactions and 96 client lanes.
