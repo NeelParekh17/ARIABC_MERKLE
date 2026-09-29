@@ -1,0 +1,8 @@
+merkle_build_s=22
+measure_start=18:35:12
+prewarm_blocks=1522237
+completed_tps=1456.74
+divergence_count=0 permanent_failures=0
+traced_tx=0 total_restarts=0 tx_with_restart=0
+serialization_failures=891
+server_sha256=cc02e6df017f5d1d retry_jitter=default_on

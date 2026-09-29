@@ -167,6 +167,10 @@ kept colliding, and pg throughput collapsed.
   A θ1.2 w16 had 21,024 retries). Rerun those points before using them.
 - A READ COMMITTED pg mode (`pg_rc`) was added for single-row workloads (A, B, C, D;
   not F).
+- `Final_Results/TPCC` pg was rerun with jitter on ranking on 2026-09-29 (45 runs, including extra trials at 8 and 48 workers).
+  - The server was rebuilt with only the jitter patch; det reproduced with the same restart counts.
+  - pg's best-of-3 rose 15–23% at 5–30 warehouses and 15% at 64 workers; other points changed by −3% to +7%.
+  - See `TPCC/README.md`, section "pg rerun".
 - `Final_Results/YCSB` pg rows were rerun with jitter on 2026-09-29: 240 cases, 3 trials
   per point. Before that, a subset rerun of det, det + Merkle and the cluster confirmed the
   other modes reproduce. See `YCSB/CURATION.md` and the pg-rerun section of

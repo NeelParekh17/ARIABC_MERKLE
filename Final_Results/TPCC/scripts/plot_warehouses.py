@@ -49,7 +49,8 @@ def panel(ax, keys, title):
     ax.set_ylabel("Throughput (TPS, best of 3)", color=TEXT2)
     ax.set_xticks(WS)
     ax.set_xlim(0, 112)
-    ax.set_ylim(bottom=0)
+    top = max(max(tps[(k, w)]) for k, *_ in SERIES if k in keys for w in WS)
+    ax.set_ylim(0, top * 1.35)  # headroom so the legend never covers a line
     ax.grid(axis="y", color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     for s in ("top", "right"):

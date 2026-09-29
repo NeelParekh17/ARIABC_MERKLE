@@ -1,4 +1,4 @@
-# TPC-C scaling results (ranking, 2026-09-28)
+# TPC-C scaling results (ranking, 2026-09-28; pg rerun 2026-09-29)
 
 This directory replaces the earlier TPC-C campaign (runs of 2026-09-20 to 2026-09-25) completely. Those results came from code with two defects that are fixed here:
 
@@ -6,6 +6,8 @@ This directory replaces the earlier TPC-C campaign (runs of 2026-09-20 to 2026-0
 - **Merkle partitions ignored warehouses.** The Merkle index split rows into partitions by a hash of the full key modulo 200, so warehouse count had no effect on how writes clashed on partition rows.
 
 Both fixes are in the working tree and are not yet committed (see [Code under test](#code-under-test)).
+
+**pg was rerun on 2026-09-29** with the corrected retry policy (exponential backoff with full jitter). See [pg rerun](#pg-rerun-2026-09-29). det and both Merkle layouts are unchanged from 2026-09-28.
 
 ![TPC-C throughput vs warehouses](tpcc_warehouses_scaling.png)
 
@@ -15,7 +17,7 @@ Both fixes are in the working tree and are not yet committed (see [Code under te
 
 | Label | Engine mode | Merkle layout |
 |---|---|---|
-| **pg** | PostgreSQL path of the AriaBC build (`--dbType 0`), SERIALIZABLE, SSI retries (`ARIABC_PG_MAX_RETRIES=100`) | none |
+| **pg** | PostgreSQL path of the AriaBC build (`--dbType 0`), SERIALIZABLE, serialization failures retried with exponential backoff and full jitter, capped at 100 ms (`ARIABC_PG_MAX_RETRIES=100`) | none |
 | **det** | Deterministic execution (`--dbType 1 --safedb 1`) | none |
 | **Merkle, hash % 200** | det plus synchronous Merkle indexes on all 9 tables | `partitions=200`: the previous layout |
 | **Merkle, warehouse routing** | det plus synchronous Merkle indexes on all 9 tables | `partitions=16384, partition_key_columns=1, subpartitions=16`: each warehouse is confined to its own group of 16 partitions |
@@ -30,13 +32,13 @@ Best-of-3 TPS. Per-run results are in `warehouses_w32/all_runs.csv`, and `wareho
 
 | Warehouses | pg | det | Merkle, warehouse routing | Merkle, hash % 200 |
 |---:|---:|---:|---:|---:|
-| 5 | 1,828 | 916 | 568 | 505 |
-| 10 | 2,895 | 1,219 | 737 | 594 |
-| 20 | 3,632 | 1,596 | 918 | 519 |
-| 30 | 3,983 | 1,867 | 1,072 | 603 |
-| 50 | 4,482 | 2,189 | 1,246 | 626 |
-| 75 | 4,349 | 2,487 | 1,409 | 625 |
-| 100 | 4,462 | 2,672 | 1,514 | 628 |
+| 5 | 2,250 | 916 | 568 | 505 |
+| 10 | 3,447 | 1,219 | 737 | 594 |
+| 20 | 4,164 | 1,596 | 918 | 519 |
+| 30 | 4,595 | 1,867 | 1,072 | 603 |
+| 50 | 4,652 | 2,189 | 1,246 | 626 |
+| 75 | 4,634 | 2,487 | 1,409 | 625 |
+| 100 | 4,556 | 2,672 | 1,514 | 628 |
 
 ## Worker scaling (100 warehouses)
 
@@ -44,16 +46,18 @@ Best-of-3 TPS. Per-run results are in `workers_w100/all_runs.csv`, and `workers_
 
 | Workers | pg | det | Merkle, warehouse routing | Merkle, hash % 200 |
 |---:|---:|---:|---:|---:|
-| 8 | 1,686 | 1,390 | 800 | 563 |
-| 16 | 2,834 | 2,069 | 1,112 | 625 |
-| 24 | 3,806 | 2,572 | 1,299 | 633 |
-| 32 | 4,632 | 2,653 | 1,531 | 632 |
-| 48 | 5,283 | 2,611 | 1,404 † | 620 |
-| 64 | 4,881 | 2,374 | 1,319 | 617 |
+| 8 | 1,657 ‡ | 1,390 | 800 | 563 |
+| 16 | 2,778 | 2,069 | 1,112 | 625 |
+| 24 | 3,700 | 2,572 | 1,299 | 633 |
+| 32 | 4,609 | 2,653 | 1,531 | 632 |
+| 48 | 5,571 ‡ | 2,611 | 1,404 † | 620 |
+| 64 | 5,621 | 2,374 | 1,319 | 617 |
+
+‡ pg at 8 and 48 workers has 6 trials. In each case two of the first three trials hit ranking's intermittent slowdown (see Caveats), so three more were run (`scripts/pg_jitter_extra.sh`). At 8 workers, 4 of the 6 trials ran at about 1,650 TPS; at 48 workers, 3 of the 6 ran at 5,358–5,571 TPS. Serialization-failure counts were normal in the slow runs. The point reports the best of all 6.
 
 † Merkle with warehouse routing at 48 workers has 6 trials. The original three all hit the intermittent mid-run slowdown described under Caveats: about 1,100 TPS for 5 s, then about 300 TPS from 10 to 20 s, finishing at 733, 721 and 693 TPS. A rerun of three more trials (`scripts/rerun_k48.sh`, `runs/merkle_wh16_k48_s{1,2,3}_w100`) ran steadily at 1,404, 1,391 and 1,355 TPS with the same restart count (about 2,800). The point reports the best of all 6.
 
-## Correctness evidence (all 159 runs)
+## Correctness evidence (all 165 runs)
 
 - **Clean completion.** No run had a permanent failure or a divergence. Every run completed and validated all 20,000 transactions.
 - **Merkle verification.** `merkle_verify_index` passed on all 9 Merkle indexes in every Merkle run (87 runs).
@@ -61,7 +65,15 @@ Best-of-3 TPS. Per-run results are in `workers_w100/all_runs.csv`, and `workers_
 
 ## What the results show
 
-- **pg** is limited by WAL and group commit. It rises to about 4,450 TPS by 50 warehouses, and to 5,280 TPS at 48 workers.
+- **pg** reaches about 4,600 TPS from 30 warehouses on and keeps scaling with workers, to 5,620 TPS at 64. Serialization failures are frequent under SERIALIZABLE, and the table below gives the median per run of 20,000 transactions. Jittered retries keep them from limiting throughput as they did before the rerun.
+
+  | Warehouses (32 workers) | 5 | 10 | 20 | 30 | 50 | 75 | 100 |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | Serialization failures | 51,908 | 23,171 | 14,925 | 7,065 | 4,706 | 3,221 | 2,368 |
+
+  | Workers (100 warehouses) | 8 | 16 | 24 | 32 | 48 | 64 |
+  |---|---:|---:|---:|---:|---:|---:|
+  | Serialization failures | 308 | 772 | 1,434 | 2,357 | 4,310 | 6,075 |
 - **det** now keeps scaling with warehouse count, reaching 2,672 TPS at 100 warehouses (the earlier campaign got 1,750). That comes from row-level conflict tags. Median restarts at 32 workers:
 
   | Warehouses | Restarts |
@@ -73,6 +85,20 @@ Best-of-3 TPS. Per-run results are in `workers_w100/all_runs.csv`, and `workers_
   At 100 warehouses 7.5% of transactions restart, which matches the real row-conflict rate of the workload. Across worker counts det levels off at about 2,600 TPS from 24 workers, which is the ordered-commit ceiling.
 - **Merkle, hash % 200** does not scale with warehouse count or worker count, staying between about 500 and 630 TPS. With 200 fixed partitions per table, the partition root rows are hot for every transaction, so contention does not fall as warehouses are added. The trees also get deeper as data grows: `order_line` reaches 4 levels by 20 warehouses and `stock` by 100.
 - **Merkle, warehouse routing** scales with warehouse count, reaching 1,514 TPS at 100 warehouses (2.4× the old layout). Tree depth stays constant, at 3.0 levels for `stock` and about 3.5 for `order_line`. Merkle updates remain synchronous, so every partition root is exact at commit and recovery by comparing snapshot roots is unchanged.
+
+## pg rerun (2026-09-29)
+
+The original pg runs retried serialization failures with exponential backoff **without jitter**. Retries on the same hot row then collided in lockstep. The server was rebuilt on ranking with only the retry-jitter patch applied (`ariabc_pg_server` sha256 `cc02e6df…`). The old binary is kept as `ariabc_pg_server.bak_pre_jitter_20260929`. pg was then rerun with the unchanged `merkle_run.sh` flags, as runs `pg_jit_*` (`scripts/pg_jitter_rerun.sh`).
+
+- **det reproduces on the rebuilt server.** The patch only changes pg's retry path. Three trials each of det at W=100 and W=5 (32 workers) ran at 2,524–2,548 and 886–887 TPS, against 2,562–2,672 and 910–916 originally. Restart counts matched (about 1,506 and 14,760). These verification runs are archived outside Final_Results.
+- **pg improved most where contention is highest:**
+
+  | Warehouses | 5 | 10 | 20 | 30 |
+  |---|---:|---:|---:|---:|
+  | Change in best TPS | +23% | +19% | +15% | +15% |
+
+  From 50 warehouses on, the change is +2% to +7%. In the worker sweep the change is within noise (−3% to +5%), except at 64 workers (+15%), where retries are most frequent. Serialization-failure counts were essentially unchanged: conflicts still happen, but less time is lost to them.
+- **Checks on every pg run (45):** 20,000/20,000 transactions validated, no divergence or permanent failure, no PostgreSQL FATAL/PANIC, correct server binary. The superseded pg runs are archived outside Final_Results.
 
 ## Method
 
@@ -114,6 +140,9 @@ These changes are uncommitted in the working tree at the time of these runs. Bot
   - `run_all_modes_gateway_sweep.py` exposes them as `--tpcc-merkle-partition-key-columns` and `--tpcc-merkle-subpartitions`.
 
 ## Reproducing
+
+pg rerun: `scripts/pg_jitter_rerun.sh` (det verification plus both pg sweeps) and `scripts/pg_jitter_extra.sh` (the extra 8- and 48-worker trials). Charts: `python3 scripts/plot_warehouses.py --csv warehouses_w32/all_runs.csv --summary warehouses_w32/summary.csv --out tpcc_warehouses_scaling.png`, and likewise `plot_workers.py` for `workers_w100`.
+
 
 The scripts are in `scripts/`. They expect the layout on ranking: sources in `~/claude_checks/src`, installed into `~/claude_checks/install`, with `ariabc_pg` built in `~/claude_checks/src/ariabc_pg/build`.
 
