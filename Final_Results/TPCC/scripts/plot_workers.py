@@ -49,7 +49,8 @@ def panel(ax, keys, title):
     ax.set_ylabel("Throughput (TPS, best of 3)", color=TEXT2)
     ax.set_xticks(WS)
     ax.set_xlim(0, 72)
-    ax.set_ylim(bottom=0)
+    top = max(max(tps[(k, w)]) for k, *_ in SERIES if k in keys for w in WS)
+    ax.set_ylim(0, top * 1.35)  # headroom so the legend never covers a line
     ax.grid(axis="y", color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     for s in ("top", "right"):
@@ -69,7 +70,7 @@ fig.suptitle("TPC-C throughput vs workers at 100 warehouses on ranking (EPYC 965
              fontsize=14, color=TEXT, y=0.985)
 fig.text(0.01, 0.905,
          "20,000 tx/run · 100 warehouses · shared_buffers 32GB · prewarmed · SERIALIZABLE (pg retries: exponential backoff with jitter) · det key-tag fix in det & Merkle · "
-         "\nline = best of 3 trials (peak), band = min–max",
+         "\nline = best of 3 trials (peak; pg at 8 and 48 workers: best of 6, see README), band = min–max",
          fontsize=9, color=TEXT2, ha="left")
 fig.tight_layout(rect=(0, 0, 1, 0.89))
 out = args.out or os.path.join(here, "tpcc_ranking_modes_vs_workers.png")
