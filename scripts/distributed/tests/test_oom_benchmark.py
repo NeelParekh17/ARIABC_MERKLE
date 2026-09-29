@@ -125,6 +125,11 @@ class ZipfTests(unittest.TestCase):
             self.assertEqual(path.read_text().splitlines(), expected)
 
 
+SETTLE = dict(settled=True, wait_s=30.0, qd1_median_us=120.0, qd8_median_us=250.0, wr_median_us=400.0)
+DEVICE = dict(device='/sys/devices/nvme0n1p2', read_ios=1, read_sectors=1, read_ms=1,
+              write_ios=1, write_sectors=1, write_ms=1, io_ms=1)
+
+
 class RunnerTests(unittest.TestCase):
     def test_requested_cli_and_legacy_comma_form(self):
         args = oom.parse_args(['--workloads', 'a', '--skews', '0.0', '0.99', '--workers', '1', '8', '16',
@@ -134,12 +139,84 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(args.shared_buffers, '32MB')
         self.assertEqual(oom.parse_args(['--workers', '1,8,16']).workers, args.workers)
 
-    def test_default_cli_reset_mode_is_cp_and_workers(self):
+    def test_default_cli_reset_mode_is_delta_and_workers(self):
         args = oom.parse_args([])
-        self.assertEqual(args.reset_mode, 'cp')
+        self.assertEqual(args.reset_mode, 'delta')
+        self.assertEqual(args.pg_exec_mode, 'event')
         self.assertEqual(args.workers, [1, 8, 16])
         self.assertEqual(args.modes, ['pg', 'bcdb_det', 'bcdb_merkle'])
         self.assertEqual(args.skews, [0.0, 0.99])
+
+    def test_combos_select_explicit_workload_skew_pairs(self):
+        args = oom.parse_args(['--combos', 'a:0.0', 'a:0.99', 'a:1.2', 'b:0.99,c:0.99', 'd:0.99', 'f:0.99',
+                               '--workers', '1', '4', '8', '16'])
+        self.assertEqual(args.combos, [('a', 0.0), ('a', 0.99), ('a', 1.2), ('b', 0.99), ('c', 0.99),
+                                       ('d', 0.99), ('f', 0.99)])
+        self.assertEqual(args.workloads, ['a', 'b', 'c', 'd', 'f'])
+        self.assertEqual(args.skews, [0.0, 0.99, 1.2])
+        self.assertEqual(oom.parse_args(['--workloads', 'a', 'c', '--skews', '0', '0.99']).combos,
+                         [('a', 0.0), ('a', 0.99), ('c', 0.0), ('c', 0.99)])
+        for bad in (['--combos', 'a'], ['--combos', 'a:x'], ['--combos', 'a:0.99', 'a:0.99'],
+                    ['--combos', 'z:0.99'], ['--combos', 'a:3']):
+            with self.subTest(bad=bad), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                oom.parse_args(bad)
+
+    def test_dry_run_generates_only_requested_combos(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(oom, 'run_remote') as remote:
+            with contextlib.redirect_stdout(io.StringIO()):
+                oom.main(['--output-dir', directory, '--dry-run', '--txs', '10', '--db-rows', '1000',
+                          '--combos', 'a:0.0', 'c:0.99', '--workers', '1', '--modes', 'pg'])
+            remote.assert_not_called()
+            names = sorted(p.name for p in Path(directory).glob('run_*/workloads/*.sql'))
+            self.assertEqual(names, ['ycsb_a_skew_0.0_10.sql', 'ycsb_c_skew_0.99_10.sql'])
+
+    def test_pg_rc_mode_is_pg_at_read_committed_and_refused_for_f(self):
+        args = oom.parse_args(['--modes', 'pg', 'pg_rc', '--combos', 'a:1.2', 'c:0.99'])
+        self.assertEqual(args.modes, ['pg', 'pg_rc'])
+        self.assertEqual(oom.base_mode('pg_rc'), 'pg')
+        self.assertEqual(oom.isolation_for('pg_rc'), 'read committed')
+        self.assertEqual(oom.isolation_for('pg'), 'serializable')
+        self.assertEqual(oom.isolation_for('bcdb_det'), 'serializable')
+        self.assertEqual(oom.variant('pg_rc'), 'plain')
+        for argv in (['--modes', 'pg_rc', '--combos', 'f:0.99'], ['--modes', 'pg_rc', '--workloads', 'a', 'f']):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                oom.parse_args(argv)
+        captured = []
+        def fake_remote(host, user, command, **kwargs):
+            captured.append(command)
+            return subprocess.CompletedProcess([], 0, '', '')
+        with mock.patch.object(oom, 'run_remote', side_effect=fake_remote):
+            server = oom.start_remote_ariabc_server(args, 'pg_rc', 8)
+        self.assertIn('--dbType', server['command'])
+        self.assertEqual(server['command'][server['command'].index('--dbType') + 1], '0')
+        self.assertEqual(server['command'][server['command'].index('--safedb') + 1], '0')
+        self.assertNotIn('--bcdbInitBlockSize', server['command'])
+
+    def test_reset_writes_isolation_per_mode(self):
+        for mode, isolation in (('pg', 'serializable'), ('pg_rc', 'read committed')):
+            args = oom.parse_args(['--reset-mode', 'cp'])
+            args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
+                                         total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
+            settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+                            enable_merkle_index='off', fsync='on', full_page_writes='on',
+                            synchronous_commit='on', track_counts='on', track_io_timing='on',
+                            log_checkpoints='on', bcdb_ledger_trace='off',
+                            default_transaction_isolation=isolation, **oom.CANONICAL_BCDB_SETTINGS)
+            commands = []
+            def fake_remote(host, user, command, **kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess([], 0, '', '')
+            responses = ['', '1|100000000', '1|2|3', '[{"indexname":"usertable_pkey1"}]',
+                         json.dumps(settings), '{}']
+            with self.subTest(mode=mode), \
+                 mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
+                 mock.patch.object(oom, 'prepare_ledger_schema'), \
+                 mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE), \
+                 mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
+                 mock.patch.object(oom, 'sql', side_effect=responses):
+                oom.reset_remote_pgdata(args, mode, 8)
+            # The config travels shell-quoted; match through the quoting.
+            self.assertRegex('\n'.join(commands), r"default_transaction_isolation = [^\n]{0,6}" + isolation)
 
     def test_gateway_command_pipeline_unified_across_modes(self):
         args = oom.parse_args(['--gateway-host', 'localhost'])
@@ -253,13 +330,16 @@ class RunnerTests(unittest.TestCase):
         settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
                         synchronous_commit='on', track_counts='on', track_io_timing='on',
-                        log_checkpoints='on', bcdb_ledger_trace='off')
+                        log_checkpoints='on', bcdb_ledger_trace='off',
+                        default_transaction_isolation='serializable', **oom.CANONICAL_BCDB_SETTINGS)
         # Sequence: 1. drop indexes (non-merkle), 2. min/max bounds, 3. relation sizes & relpages, 4. index query, 5. settings, 6. sizes
         responses = ['', '1|100000000', '25600000000|2246000000|3125000',
                      '[{"indexdef":"USING btree"}]',
                      json.dumps(settings), '{"heap_bytes":25600000000}']
         with mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
              mock.patch.object(oom, 'prepare_ledger_schema'), \
+             mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE), \
+             mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
              mock.patch.object(oom, 'sql', side_effect=responses):
             result = oom.reset_remote_pgdata(args, 'pg', 1)
         self.assertEqual(result['settings']['shared_buffers'], '4096')
@@ -269,6 +349,7 @@ class RunnerTests(unittest.TestCase):
         # Verify pre-startup copy check is present before postmaster starts
         self.assertIn('test "$(find', script)
         self.assertIn('pgdata -type f | wc -l)" -eq "42"', script)
+        self.assertIn('du -sb /tmp/ariabc_oom_100m/pgdata', script)
         self.assertIn('sync', script)
         self.assertIn('drop_caches', script)
         self.assertNotIn('fuser -k', script)
@@ -294,12 +375,15 @@ class RunnerTests(unittest.TestCase):
         settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
                         synchronous_commit='on', track_counts='on', track_io_timing='on',
-                        log_checkpoints='on', bcdb_ledger_trace='off')
+                        log_checkpoints='on', bcdb_ledger_trace='off',
+                        default_transaction_isolation='serializable', **oom.CANONICAL_BCDB_SETTINGS)
         responses = ['', '1|100000000', '25600000000|2246000000|3125000',
                      '[{"indexdef":"USING btree"}]',
                      json.dumps(settings), '{"heap_bytes":25600000000}']
         with mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
              mock.patch.object(oom, 'prepare_ledger_schema'), \
+             mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE), \
+             mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
              mock.patch.object(oom, 'sql', side_effect=responses):
             result = oom.reset_remote_pgdata(args, 'pg', 1)
         script = '\n'.join(commands)
@@ -307,6 +391,94 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('test ! -f ' + args.remote_dir + '/' + args.base_dir_name + '/postmaster.pid', script)
         self.assertIn('drop_caches', script)
         self.assertIn('postgresql.auto.conf', script)
+
+    def test_delta_reset_restores_changed_blocks_from_variant_baseline(self):
+        args = oom.parse_args([])
+        args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
+                                     total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
+        args._plain_manifest = dict(args._golden_manifest, file_count=40)
+        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='8',
+                        enable_merkle_index='off', fsync='on', full_page_writes='on',
+                        synchronous_commit='on', track_counts='on', track_io_timing='on',
+                        log_checkpoints='on', bcdb_ledger_trace='off',
+                        default_transaction_isolation='serializable', **oom.CANONICAL_BCDB_SETTINGS)
+        for mode, base, work, count in (('bcdb_det', 'pgdata_base_fanout32_tblnamed_plain', 'pgdata_plain', '40'),
+                                        ('bcdb_merkle', 'pgdata_base_fanout32_tblnamed', 'pgdata_merkle', '42')):
+            commands = []
+            def fake_remote(host, user, command, **kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess([], 0, '', '')
+            merkle = mode == 'bcdb_merkle'
+            index_json = ('[{"indexname":"usertable_merkle_lookup_idx","indexdef":"USING merkle"}]'
+                          if merkle else '[{"indexname":"usertable_pkey1"}]')
+            responses = ([] if merkle else ['']) + ['1|100000000', '1|2|3', index_json] + \
+                        (['24000'] if merkle else []) + [
+                         json.dumps(dict(settings, enable_merkle_index='on' if merkle else 'off')), '{}']
+            with self.subTest(mode=mode), \
+                 mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
+                 mock.patch.object(oom, 'prepare_ledger_schema'), \
+                 mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE) as settle, \
+                 mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
+                 mock.patch.object(oom, 'sql', side_effect=responses):
+                result = oom.reset_remote_pgdata(args, mode, 8)
+                settle.assert_called_once()
+            script = '\n'.join(commands)
+            self.assertIn(f'rsync -a --inplace --no-whole-file --delete --stats '
+                          f'/tmp/ariabc_oom_100m/{base}/ /tmp/ariabc_oom_100m/{work}/', script)
+            self.assertIn(f'rsync -an --delete --itemize-changes /tmp/ariabc_oom_100m/{base}/', script)
+            # Default 'sampled': the first restore of each working copy is byte-compared.
+            self.assertIn(f'diff -rq --no-dereference /tmp/ariabc_oom_100m/{base} /tmp/ariabc_oom_100m/{work}', script)
+            self.assertLess(script.index('diff -rq'), script.index('drop_caches'))
+            self.assertIn(f'{work} -type f | wc -l)" -eq "{count}"', script)
+            self.assertNotIn('du -sb /tmp/ariabc_oom_100m/' + work + ' |', script)
+            self.assertLess(script.index('--itemize-changes'), script.index('drop_caches'))
+            self.assertEqual(args._pgdata, '/tmp/ariabc_oom_100m/' + work)
+            self.assertEqual(result['settle'], SETTLE)
+            for command in commands:
+                check = subprocess.run(['bash', '-n'], input=command, text=True, capture_output=True)
+                self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_merkle_reset_rejects_empty_table_named_tree(self):
+        args = oom.parse_args(['--reset-mode', 'cp'])
+        args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
+                                     total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
+        index_json = '[{"indexname":"usertable_merkle_lookup_idx","indexdef":"USING merkle"}]'
+        with mock.patch.object(oom, 'run_remote', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+             mock.patch.object(oom, 'prepare_ledger_schema'), \
+             mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE) as settle, \
+             mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
+             mock.patch.object(oom, 'sql', side_effect=['1|100000000', '1|2|3', index_json, '-1']):
+            with self.assertRaisesRegex(RuntimeError, 'merkle_node_usertable is missing or empty'):
+                oom.reset_remote_pgdata(args, 'bcdb_merkle', 1)
+            settle.assert_not_called()
+
+    def test_sampled_content_check_schedule(self):
+        args = oom.parse_args([])
+        args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
+                                     total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
+        args._plain_manifest = dict(args._golden_manifest)
+        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+                        enable_merkle_index='off', fsync='on', full_page_writes='on',
+                        synchronous_commit='on', track_counts='on', track_io_timing='on',
+                        log_checkpoints='on', bcdb_ledger_trace='off',
+                        default_transaction_isolation='serializable', **oom.CANONICAL_BCDB_SETTINGS)
+        checked = []
+        for case in range(1, 13):
+            commands = []
+            def fake_remote(host, user, command, **kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess([], 0, '', '')
+            responses = ['', '1|100000000', '1|2|3', '[{"indexname":"usertable_pkey1"}]',
+                         json.dumps(settings), '{}']
+            with mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
+                 mock.patch.object(oom, 'prepare_ledger_schema'), \
+                 mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE), \
+                 mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
+                 mock.patch.object(oom, 'sql', side_effect=responses):
+                oom.reset_remote_pgdata(args, 'pg', 1)
+            if any('diff -rq' in c for c in commands):
+                checked.append(case)
+        self.assertEqual(checked, [1, 10])
 
     def test_undo_reset_rejected_before_remote_work(self):
         with self.assertRaises(SystemExit), mock.patch('sys.stderr'):
@@ -320,7 +492,7 @@ class RunnerTests(unittest.TestCase):
 
 
     def test_reset_verify_mode_full_runs_table_scan(self):
-        args = oom.parse_args(['--verify-mode', 'full'])
+        args = oom.parse_args(['--verify-mode', 'full', '--reset-mode', 'cp'])
         args._golden_manifest = dict(
             version=2, db_rows=100000000,
             keyspace='100000000|1|100000000',
@@ -331,7 +503,8 @@ class RunnerTests(unittest.TestCase):
         settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
                         synchronous_commit='on', track_counts='on', track_io_timing='on',
-                        log_checkpoints='on', bcdb_ledger_trace='off')
+                        log_checkpoints='on', bcdb_ledger_trace='off',
+                        default_transaction_isolation='serializable', **oom.CANONICAL_BCDB_SETTINGS)
         # Full mode sequence: 1. drop indexes, 2. full count(*) scan, 3. relation sizes, 4. index query, 5. settings, 6. sizes
         sql_queries = []
         def fake_sql(a, stmt, **kwargs):
@@ -352,6 +525,8 @@ class RunnerTests(unittest.TestCase):
 
         with mock.patch.object(oom, 'run_remote', return_value=subprocess.CompletedProcess([], 0, '', '')), \
              mock.patch.object(oom, 'prepare_ledger_schema'), \
+             mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE), \
+             mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
              mock.patch.object(oom, 'sql', side_effect=fake_sql):
             result = oom.reset_remote_pgdata(args, 'pg', 1)
         self.assertTrue(any('SELECT count(*)' in q for q in sql_queries))
@@ -422,6 +597,8 @@ class RunnerTests(unittest.TestCase):
         responses = ['', '1|100000000', '25599999999|2246000000|3125000']
         with mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
              mock.patch.object(oom, 'prepare_ledger_schema'), \
+             mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE), \
+             mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
              mock.patch.object(oom, 'sql', side_effect=responses), \
              self.assertRaises(RuntimeError) as ctx:
             oom.reset_remote_pgdata(args, 'pg', 1)
@@ -448,7 +625,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_cli_base_dir_name_option(self):
         args_default = oom.parse_args([])
-        self.assertEqual(args_default.base_dir_name, 'pgdata_base_fanout32')
+        self.assertEqual(args_default.base_dir_name, 'pgdata_base_fanout32_tblnamed')
 
         args_custom = oom.parse_args(['--base-dir-name', 'pgdata_base'])
         self.assertEqual(args_custom.base_dir_name, 'pgdata_base')

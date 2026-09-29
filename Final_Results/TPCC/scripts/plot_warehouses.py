@@ -1,10 +1,15 @@
-import csv, statistics as st, collections, os
+import argparse, csv, statistics as st, collections, os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 here = os.path.dirname(os.path.abspath(__file__))
-rows = list(csv.DictReader(open(os.path.expanduser("~/claude_checks/chart/results.csv"))))
+ap = argparse.ArgumentParser()
+ap.add_argument("--csv", default="~/claude_checks/chart/results.csv", help="per-run results (mode, layout, ..., tps)")
+ap.add_argument("--summary", default=None, help="summary CSV to write (default: next to this script)")
+ap.add_argument("--out", default=None, help="PNG to write (default: next to this script)")
+args = ap.parse_args()
+rows = list(csv.DictReader(open(os.path.expanduser(args.csv))))
 tps = collections.defaultdict(list)
 for r in rows:
     tps[(r["mode"] + "_" + r["layout"], int(r["W"]))].append(float(r["tps"]))
@@ -20,7 +25,7 @@ SERIES = [
 ]
 TEXT, TEXT2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e6e5e0", "#fcfcfb"
 
-with open(os.path.join(here, "tpcc_ranking_warehouses_summary.csv"), "w") as f:
+with open(args.summary or os.path.join(here, "tpcc_ranking_warehouses_summary.csv"), "w") as f:
     f.write("config,warehouses,trials,best_tps,median_tps,min_tps\n")
     for key, *_ in SERIES:
         for w in WS:
@@ -62,10 +67,11 @@ panel(axes[0], {"pg_cur", "det_cur", "merkle_wh16", "merkle_cur"}, "All modes")
 panel(axes[1], {"merkle_wh16", "merkle_cur"}, "Merkle mode: partition layout")
 fig.suptitle("TPC-C throughput vs warehouses on ranking (EPYC 9654)", x=0.01, ha="left",
              fontsize=14, color=TEXT, y=0.985)
-fig.text(0.01, 0.925,
-         "20,000 tx/run · 32 workers · shared_buffers 32GB · prewarmed · SERIALIZABLE · det key-tag fix in det & Merkle · "
-         "line = best of 3 trials (peak), band = min–max",
+fig.text(0.01, 0.905,
+         "20,000 tx/run · 32 workers · shared_buffers 32GB · prewarmed · SERIALIZABLE (pg retries: exponential backoff with jitter) · det key-tag fix in det & Merkle · "
+         "\nline = best of 3 trials (peak), band = min–max",
          fontsize=9, color=TEXT2, ha="left")
-fig.tight_layout(rect=(0, 0, 1, 0.93))
-fig.savefig(os.path.join(here, "tpcc_ranking_modes_vs_warehouses.png"), dpi=200, facecolor=SURFACE)
-print("wrote", os.path.join(here, "tpcc_ranking_modes_vs_warehouses.png"))
+fig.tight_layout(rect=(0, 0, 1, 0.89))
+out = args.out or os.path.join(here, "tpcc_ranking_modes_vs_warehouses.png")
+fig.savefig(out, dpi=200, facecolor=SURFACE)
+print("wrote", out)

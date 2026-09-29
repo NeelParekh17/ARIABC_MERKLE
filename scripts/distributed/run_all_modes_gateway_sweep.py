@@ -1550,6 +1550,121 @@ def _format_wl_label(wl_path):
     return name
 
 
+def _plot_ycsb_final_comparison(out_dir, results, aggregated, workloads, workers, trials,
+                                gateway_host, db_host):
+    """All-modes TPS vs workers, one subplot per workload (final_tps_all_modes_*.png)."""
+    import math
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_plots = len(workloads)
+    n_cols = min(3, n_plots) if n_plots > 1 else 1
+    n_rows = math.ceil(n_plots / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.5 * n_cols, 5.0 * n_rows), squeeze=False)
+
+    for idx, wl in enumerate(workloads):
+        r_idx = idx // n_cols
+        c_idx = idx % n_cols
+        ax = axes[r_idx][c_idx]
+        wl_key = Path(wl).name
+        title = _format_wl_label(wl)
+
+        x = workers
+
+        def _get_vals(m):
+            ymed, ymin, ymax = [], [], []
+            wl_base = Path(wl_key).name
+            for w in x:
+                w_int = int(w)
+                match = next((a for a in aggregated if a.get("mode") == m and Path(a.get("workload", "")).name == wl_base and int(a.get("server_workers", 0)) == w_int), None)
+                if match:
+                    ymed.append(float(match["median_tps"]))
+                    ymin.append(float(match.get("min_tps", match["median_tps"])))
+                    ymax.append(float(match.get("max_tps", match["median_tps"])))
+                else:
+                    r_match = next((r for r in results if r.get("mode") == m and Path(r.get("workload", "")).name == wl_base and int(r.get("server_workers", 0)) == w_int), None)
+                    val = float(r_match["tps"]) if r_match else 0.0
+                    ymed.append(val)
+                    ymin.append(val)
+                    ymax.append(val)
+            return ymed, ymin, ymax
+
+        y_pg, y_pg_min, y_pg_max = _get_vals("pg")
+        y_det, y_det_min, y_det_max = _get_vals("bcdb_det")
+        y_merkle, y_merkle_min, y_merkle_max = _get_vals("bcdb_merkle")
+        y_cluster, y_cl_min, y_cl_max = _get_vals("cluster")
+
+        if any(y_pg):
+            ax.plot(x, y_pg, "^:", color="#6c757d", linewidth=2.0, markersize=7, label="Vanilla PostgreSQL (pg)")
+            if trials > 1 and any(y_pg_min[i] != y_pg_max[i] for i in range(len(x))):
+                ax.fill_between(x, y_pg_min, y_pg_max, color="#6c757d", alpha=0.15)
+        if any(y_det):
+            ax.plot(x, y_det, "d-.", color="#28a745", linewidth=2.2, markersize=7, label="BCDB Deterministic (bcdb_det)")
+            if trials > 1 and any(y_det_min[i] != y_det_max[i] for i in range(len(x))):
+                ax.fill_between(x, y_det_min, y_det_max, color="#28a745", alpha=0.15)
+        if any(y_merkle):
+            ax.plot(x, y_merkle, "s-", color="#0056b3", linewidth=2.5, markersize=8, label="BCDB Merkle (bcdb_merkle)")
+            if trials > 1 and any(y_merkle_min[i] != y_merkle_max[i] for i in range(len(x))):
+                ax.fill_between(x, y_merkle_min, y_merkle_max, color="#0056b3", alpha=0.15)
+        if any(y_cluster):
+            ax.plot(x, y_cluster, "o--", color="#dc3545", linewidth=2.5, markersize=8, label="4-Node Raft-Kafka Cluster")
+            if trials > 1 and any(y_cl_min[i] != y_cl_max[i] for i in range(len(x))):
+                ax.fill_between(x, y_cl_min, y_cl_max, color="#dc3545", alpha=0.15)
+
+        for xi, ym, yc in zip(x, y_merkle, y_cluster):
+            if yc > 0 and ym > 0:
+                d = (ym - yc) / yc * 100.0
+                ax.annotate(
+                    f"{d:+.1f}%",
+                    xy=(xi, ym),
+                    xytext=(0, 10),
+                    textcoords="offset points",
+                    ha="center",
+                    fontsize=8.5,
+                    fontweight="bold",
+                    color="#0056b3",
+                )
+
+        all_y = y_merkle + y_cluster + y_det + y_pg
+        max_y = max(all_y) if all_y else 1000.0
+        ax.set_ylim(bottom=0, top=max(max_y * 1.18, 1000.0))
+        ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
+        ax.set_xlabel("Executor Worker Count", fontsize=10, fontweight="bold")
+        ax.set_ylabel("Throughput (TPS)", fontsize=10, fontweight="bold")
+        ax.set_xticks(x)
+        ax.grid(True, linestyle=":", alpha=0.6)
+        ax.legend(loc="upper left", fontsize=8.5)
+
+    # Clean up empty subplots
+    for empty_idx in range(n_plots, n_rows * n_cols):
+        fig.delaxes(axes[empty_idx // n_cols][empty_idx % n_cols])
+
+    metric_title = f"Median Throughput Scaling ({trials} Trials)" if trials > 1 else "Throughput Scaling Across All Modes"
+    plt.suptitle(
+        f"{metric_title}: pg, bcdb_det, bcdb_merkle vs 4-Node Cluster\n"
+        f"Hardware Topology: Dedicated Gateway Client ({gateway_host}) -> DB Node ({db_host})",
+        fontsize=13,
+        fontweight="bold",
+    )
+    # Reserve room for the two-line suptitle; otherwise it overlaps the first row's titles.
+    plt.tight_layout(rect=(0, 0, 1, 1 - 0.9 / (5.0 * n_rows)))
+
+    plot_path = out_dir / ("final_tps_all_modes_median_comparison.png" if trials > 1 else "final_tps_all_modes_comparison.png")
+    plt.savefig(plot_path, dpi=180)
+    if trials > 1:
+        # also write standard filename for compatibility
+        plt.savefig(out_dir / "final_tps_all_modes_comparison.png", dpi=180)
+    print(f"\nSaved comparison plot to: {plot_path}")
+
+    # Also save master plots into graphs directory
+    graphs_dir = out_dir / "graphs"
+    graphs_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(graphs_dir / "final_tps_all_modes_comparison.png", dpi=180)
+    if trials > 1:
+        plt.savefig(graphs_dir / "final_tps_all_modes_median_comparison.png", dpi=180)
+
+
 def _print_ycsb_median_and_cv_comparison(aggregated, workloads, workers, modes, num_trials, format_wl_func):
     """Print multi-trial YCSB median comparison table with CV%."""
     print("\n" + "=" * 145)
@@ -1625,10 +1740,10 @@ _KNOWN_WL_METADATA = {
         "title": "Workload A (Update Heavy — 50% Read, 50% Update)",
         "name": "Workload A",
         "mix_str": "50% Read, 50% Update",
-        "desc": "Heavy write contention; severe 2PL lock escalation and latch thrashing in PostgreSQL under high Zipfian skew",
+        "desc": "50% point reads, 50% point updates; write contention grows with Zipfian skew",
         "file_prefix": "workload_a",
         "reads": "50%", "updates": "50%", "inserts": "0%", "deletes": "0%",
-        "behavior": "Heavy write contention; severe 2PL lock escalation and latch thrashing in PostgreSQL under high Zipfian skew."
+        "behavior": "Write contention on hot keys grows with Zipfian skew."
     },
     "b": {
         "title": "Workload B (Read Predominant — 95% Read, 5% Update)",
@@ -1658,12 +1773,12 @@ _KNOWN_WL_METADATA = {
         "behavior": "Read latest; temporal locality biased toward newly inserted keys (activity feeds/timelines)."
     },
     "f": {
-        "title": "Workload F (Read-Modify-Write — 67% Read, 33% Update)",
+        "title": "Workload F (Read-Modify-Write — 50% Read, 50% RMW)",
         "name": "Workload F",
-        "mix_str": "67% Read, 33% Update (RMW)",
-        "desc": "Read-modify-write cycle on same record; severe latch contention in PostgreSQL under skew",
+        "mix_str": "50% Read, 50% Read-Modify-Write",
+        "desc": "Read-modify-write of one record per statement (materialized CTE); contention grows with skew",
         "file_prefix": "workload_f",
-        "reads": "67%", "updates": "33%", "inserts": "0%", "deletes": "0%",
+        "reads": "50%", "updates": "50% (RMW)", "inserts": "0%", "deletes": "0%",
         "behavior": "Read-Modify-Write (RMW); reads record, updates attributes, and writes back within single transaction."
     },
     "balanced_dml": {
@@ -1724,10 +1839,10 @@ _KNOWN_WL_METADATA = {
         "title": "ALL_UPDATE (100% Updates — 0% Read, 0% Insert, 0% Delete)",
         "name": "ALL_UPDATE",
         "mix_str": "100% Updates",
-        "desc": "Peak data contention; demonstrates 2PL lock collapse in PG vs BCDB determinism resilience",
+        "desc": "Peak data contention on a small hot key set",
         "file_prefix": "workload_all_update",
         "reads": "0%", "updates": "100%", "inserts": "0%", "deletes": "0%",
-        "behavior": "Pure update stress test; causes catastrophic 2PL lock escalation and latch thrashing in PostgreSQL."
+        "behavior": "Pure update stress test; every statement writes."
     },
 }
 
@@ -1918,7 +2033,7 @@ def _generate_ycsb_detailed_graphs(out_dir: Path, results: list, aggregated: lis
 
         handles, labels = axes[0][0].get_legend_handles_labels()
         if handles:
-            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.985), ncol=min(4, len(handles)), fontsize=11.5, framealpha=0.95)
+            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.01), ncol=min(4, len(handles)), fontsize=11.5, framealpha=0.95)
 
         trial_str = f"({num_trials} Trials Median)" if num_trials > 1 else ""
         plt.suptitle(
@@ -2000,12 +2115,12 @@ def _generate_ycsb_detailed_graphs(out_dir: Path, results: list, aggregated: lis
 
         handles, labels = axes_flat[0].get_legend_handles_labels()
         if handles:
-            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.985), ncol=min(4, len(handles)), fontsize=11.5, framealpha=0.95)
+            fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.01), ncol=min(4, len(handles)), fontsize=11.5, framealpha=0.95)
 
         trial_str = f"(3 Trials Median)" if num_trials > 1 else ""
         plt.suptitle(
             f"Zipfian Skew Sensitivity Comparison Across Workloads (Workers = {max_w} {trial_str})\n"
-            f"Demonstrating BCDB Deterministic Concurrency Control Resistance to Lock Thrashing Under Skew",
+            f"Throughput at the highest worker count as Zipfian skew increases",
             fontsize=13.5,
             fontweight="bold",
             y=1.02,
@@ -2700,115 +2815,8 @@ EOF
 
         # Generate multi-curve comparison plot (dynamically sizing subplots)
         try:
-            import math
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-
-            n_plots = len(workloads)
-            n_cols = min(3, n_plots) if n_plots > 1 else 1
-            n_rows = math.ceil(n_plots / n_cols)
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.5 * n_cols, 5.0 * n_rows), squeeze=False)
-
-            for idx, wl in enumerate(workloads):
-                r_idx = idx // n_cols
-                c_idx = idx % n_cols
-                ax = axes[r_idx][c_idx]
-                wl_key = Path(wl).name
-                title = _format_wl_label(wl)
-
-                x = workers
-
-                def _get_vals(m):
-                    ymed, ymin, ymax = [], [], []
-                    wl_base = Path(wl_key).name
-                    for w in x:
-                        w_int = int(w)
-                        match = next((a for a in aggregated if a.get("mode") == m and Path(a.get("workload", "")).name == wl_base and int(a.get("server_workers", 0)) == w_int), None)
-                        if match:
-                            ymed.append(float(match["median_tps"]))
-                            ymin.append(float(match.get("min_tps", match["median_tps"])))
-                            ymax.append(float(match.get("max_tps", match["median_tps"])))
-                        else:
-                            r_match = next((r for r in results if r.get("mode") == m and Path(r.get("workload", "")).name == wl_base and int(r.get("server_workers", 0)) == w_int), None)
-                            val = float(r_match["tps"]) if r_match else 0.0
-                            ymed.append(val)
-                            ymin.append(val)
-                            ymax.append(val)
-                    return ymed, ymin, ymax
-
-                y_pg, y_pg_min, y_pg_max = _get_vals("pg")
-                y_det, y_det_min, y_det_max = _get_vals("bcdb_det")
-                y_merkle, y_merkle_min, y_merkle_max = _get_vals("bcdb_merkle")
-                y_cluster, y_cl_min, y_cl_max = _get_vals("cluster")
-
-                if any(y_pg):
-                    ax.plot(x, y_pg, "^:", color="#6c757d", linewidth=2.0, markersize=7, label="Vanilla PostgreSQL (pg)")
-                    if args.trials > 1 and any(y_pg_min[i] != y_pg_max[i] for i in range(len(x))):
-                        ax.fill_between(x, y_pg_min, y_pg_max, color="#6c757d", alpha=0.15)
-                if any(y_det):
-                    ax.plot(x, y_det, "d-.", color="#28a745", linewidth=2.2, markersize=7, label="BCDB Deterministic (bcdb_det)")
-                    if args.trials > 1 and any(y_det_min[i] != y_det_max[i] for i in range(len(x))):
-                        ax.fill_between(x, y_det_min, y_det_max, color="#28a745", alpha=0.15)
-                if any(y_merkle):
-                    ax.plot(x, y_merkle, "s-", color="#0056b3", linewidth=2.5, markersize=8, label="BCDB Merkle (bcdb_merkle)")
-                    if args.trials > 1 and any(y_merkle_min[i] != y_merkle_max[i] for i in range(len(x))):
-                        ax.fill_between(x, y_merkle_min, y_merkle_max, color="#0056b3", alpha=0.15)
-                if any(y_cluster):
-                    ax.plot(x, y_cluster, "o--", color="#dc3545", linewidth=2.5, markersize=8, label="4-Node Raft-Kafka Cluster")
-                    if args.trials > 1 and any(y_cl_min[i] != y_cl_max[i] for i in range(len(x))):
-                        ax.fill_between(x, y_cl_min, y_cl_max, color="#dc3545", alpha=0.15)
-
-                for xi, ym, yc in zip(x, y_merkle, y_cluster):
-                    if yc > 0 and ym > 0:
-                        d = (ym - yc) / yc * 100.0
-                        ax.annotate(
-                            f"{d:+.1f}%",
-                            xy=(xi, ym),
-                            xytext=(0, 10),
-                            textcoords="offset points",
-                            ha="center",
-                            fontsize=8.5,
-                            fontweight="bold",
-                            color="#0056b3",
-                        )
-
-                all_y = y_merkle + y_cluster + y_det + y_pg
-                max_y = max(all_y) if all_y else 1000.0
-                ax.set_ylim(bottom=0, top=max(max_y * 1.18, 1000.0))
-                ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
-                ax.set_xlabel("Executor Worker Count", fontsize=10, fontweight="bold")
-                ax.set_ylabel("Throughput (TPS)", fontsize=10, fontweight="bold")
-                ax.set_xticks(x)
-                ax.grid(True, linestyle=":", alpha=0.6)
-                ax.legend(loc="upper left", fontsize=8.5)
-
-            # Clean up empty subplots
-            for empty_idx in range(n_plots, n_rows * n_cols):
-                fig.delaxes(axes[empty_idx // n_cols][empty_idx % n_cols])
-
-            metric_title = f"Median Throughput Scaling ({args.trials} Trials)" if args.trials > 1 else "Throughput Scaling Across All Modes"
-            plt.suptitle(
-                f"{metric_title}: pg, bcdb_det, bcdb_merkle vs 4-Node Cluster\n"
-                f"Hardware Topology: Dedicated Gateway Client ({args.gateway_host}) -> DB Node ({args.db_host})",
-                fontsize=13,
-                fontweight="bold",
-            )
-            plt.tight_layout()
-
-            plot_path = out_dir / ("final_tps_all_modes_median_comparison.png" if args.trials > 1 else "final_tps_all_modes_comparison.png")
-            plt.savefig(plot_path, dpi=180)
-            if args.trials > 1:
-                # also write standard filename for compatibility
-                plt.savefig(out_dir / "final_tps_all_modes_comparison.png", dpi=180)
-            print(f"\nSaved comparison plot to: {plot_path}")
-
-            # Also save master plots into graphs directory
-            graphs_dir = out_dir / "graphs"
-            graphs_dir.mkdir(parents=True, exist_ok=True)
-            plt.savefig(graphs_dir / "final_tps_all_modes_comparison.png", dpi=180)
-            if args.trials > 1:
-                plt.savefig(graphs_dir / "final_tps_all_modes_median_comparison.png", dpi=180)
+            _plot_ycsb_final_comparison(out_dir, results, aggregated, workloads, workers, args.trials,
+                                        args.gateway_host, args.db_host)
         except Exception as e:
             print(f"Failed to generate plot: {e}")
 

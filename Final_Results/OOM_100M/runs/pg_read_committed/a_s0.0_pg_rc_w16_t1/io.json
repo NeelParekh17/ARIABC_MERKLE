@@ -1,0 +1,70 @@
+{
+  "pg_before": {
+    "blks_read": 26396131,
+    "blks_hit": 77808451,
+    "blk_read_time": 50283.287,
+    "blk_write_time": 9623.403,
+    "buffers_clean": 8283,
+    "buffers_backend": 10142705,
+    "checkpoint_write_time": 4678,
+    "checkpoint_sync_time": 2801,
+    "checkpoints_req": 4,
+    "buffers_checkpoint": 57113,
+    "buffers_alloc": 4011381
+  },
+  "pg_after": {
+    "blks_read": 26439435,
+    "blks_hit": 77943030,
+    "blk_read_time": 84062.923,
+    "blk_write_time": 9781.889,
+    "buffers_clean": 10502,
+    "buffers_backend": 10159994,
+    "checkpoint_write_time": 4691,
+    "checkpoint_sync_time": 2969,
+    "checkpoints_req": 5,
+    "buffers_checkpoint": 58180,
+    "buffers_alloc": 4054663
+  },
+  "device_before": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 349345994,
+    "read_sectors": 49539056032,
+    "read_ms": 700734989,
+    "write_ios": 395979310,
+    "write_sectors": 25410911480,
+    "write_ms": 1922787883,
+    "io_ms": 282841280
+  },
+  "device_after": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 349386550,
+    "read_sectors": 49539726232,
+    "read_ms": 700768108,
+    "write_ios": 395988129,
+    "write_sectors": 25411304408,
+    "write_ms": 1922791865,
+    "io_ms": 282844685
+  },
+  "checkpoint_before": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 349386574,
+    "read_sectors": 49539727784,
+    "read_ms": 700768115,
+    "write_ios": 395988732,
+    "write_sectors": 25411320064,
+    "write_ms": 1922791923,
+    "io_ms": 282844700
+  },
+  "checkpoint_after": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 349386586,
+    "read_sectors": 49539727952,
+    "read_ms": 700768117,
+    "write_ios": 396006181,
+    "write_sectors": 25411607944,
+    "write_ms": 1922814073,
+    "io_ms": 282844887
+  },
+  "continuous_write_mib": 340.0703125,
+  "interphase_write_mib": 7.64453125
+}

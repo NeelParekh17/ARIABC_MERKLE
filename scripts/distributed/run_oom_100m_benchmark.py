@@ -4,6 +4,14 @@
 32MB shared_buffers does not cap the Linux page cache. Each case restores a
 clean baseline, validates it, stops PostgreSQL, drops caches, and restarts.
 See OOM_100M_BENCHMARK_REVIEW.md for comparison limits and run instructions.
+
+Restore and device state (2026-09-28): the 100M host stores data on an Intel
+660p QLC SSD. A 32GB `cp` before every case exhausted its SLC cache, and the
+drive's background folding inflated device read latency by up to 20x during
+the timed run (TPS then tracked read latency rather than mode). The default
+`delta` reset therefore restores a byte-identical copy from a per-variant
+baseline with rsync, writing only the changed blocks, and every case waits
+until probed random-read latency matches the campaign's idle calibration.
 """
 import argparse
 import csv
@@ -15,6 +23,7 @@ import os
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -42,15 +51,89 @@ from benchmark_contract import balanced_cases, source_hashes, RemoteTelemetry, v
 
 SUPPORTED_WORKLOADS = ("a", "b", "c", "d", "f", "all_update", "all_insert", "all_delete")
 _SUDO_PASSWORD = None
+PROBE_SCRIPT = Path(__file__).resolve().parent / "device_settle_probe.py"
+# Must match the canonical YCSB/TPC-C harness (run_all_modes_gateway_sweep.py).
+CANONICAL_BCDB_SETTINGS = {
+    "bcdb_serial_gate_mode": "1",
+    "bcdb_serial_gate_source": "0",
+    "bcdb_dt_conflict_tracking": "on",
+    "bcdb_result_ring_slots": "2048",
+    "bcdb_dt_completion_only_skip_reads": "off",
+    "bcdb_dt_hashtab_switch_threshold": "1500",
+    "bcdb_gate_telemetry": "off",
+    "bcdb_gate_snapshot_each_block": "off",
+    "merkle_apply_synchronous_direct": "on",
+}
 
 
-def run_remote(host, user, cmd, timeout=600, check=True):
-    res = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                          "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120",
-                          "-o", "TCPKeepAlive=yes",
-                          f"{user}@{host}", "bash -s"],
-                         input="set -euo pipefail\nexport LC_ALL=C\n" + cmd,
-                         capture_output=True, text=True, timeout=timeout)
+def pgdata(args):
+    """Working data directory of the current case."""
+    return getattr(args, "_pgdata", f"{args.remote_dir}/pgdata")
+
+
+PG_ISOLATION = {"pg": "serializable", "pg_rc": "read committed"}
+
+
+def base_mode(mode):
+    """pg_rc is plain PostgreSQL at READ COMMITTED; everything else treats it as pg."""
+    return "pg" if mode in PG_ISOLATION else mode
+
+
+def isolation_for(mode):
+    # det/Merkle serialize through deterministic execution; their sessions keep
+    # the historical serializable default.
+    return PG_ISOLATION.get(mode, "serializable")
+
+
+def variant(mode):
+    return "merkle" if mode == "bcdb_merkle" else "plain"
+
+
+def base_dir_name_for(args, mode):
+    # pg/det run without the Merkle indexes. In delta mode they restore from a
+    # baseline that already lacks them, so no mode rewrites ~6GB of index files.
+    if args.reset_mode == "delta" and variant(mode) == "plain":
+        return args.base_dir_name + "_plain"
+    return args.base_dir_name
+
+
+def work_dir_for(args, mode):
+    if args.reset_mode == "delta":
+        return f"{args.remote_dir}/pgdata_{variant(mode)}"
+    return f"{args.remote_dir}/pgdata"
+
+
+def manifest_path_for(args, base_name):
+    name = f".ariabc_golden_manifest_{base_name}.json" if base_name != "pgdata_base" else ".ariabc_golden_manifest.json"
+    return f"{args.remote_dir}/{name}"
+
+
+SSH_CONNECT_ERRORS = ("Connection timed out", "Connection refused", "No route to host",
+                      "Network is unreachable", "Connection closed by", "Connection reset by",
+                      "kex_exchange_identification", "Could not resolve hostname")
+
+
+def run_remote(host, user, cmd, timeout=600, check=True, retry_on_drop=False):
+    """Run a remote bash script.
+
+    SSH exit 255 with no output and a connection error means the command never
+    started, so it is always retried. A drop after the command started is only
+    retried for idempotent callers (retry_on_drop=True).
+    """
+    for attempt in range(8):
+        res = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                              "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8",
+                              f"{user}@{host}", "bash -s"],
+                             input="set -euo pipefail\nexport LC_ALL=C\n" + cmd,
+                             capture_output=True, text=True, timeout=timeout)
+        if res.returncode != 255:
+            break
+        never_started = not res.stdout and any(e in res.stderr for e in SSH_CONNECT_ERRORS)
+        if not (never_started or retry_on_drop):
+            break
+        print(f"  ssh to {host} failed (attempt {attempt + 1}); retrying: {res.stderr.strip()[:200]}",
+              flush=True)
+        time.sleep(min(60, 5 * 2 ** attempt))
     if check and res.returncode:
         raise RuntimeError(f"Remote command failed on {host} ({res.returncode}):\n{res.stdout}\n{res.stderr}")
     return res
@@ -407,17 +490,29 @@ fi
 
 
 def stop_postgres(args):
+    # Any working directory may hold the running instance (delta mode keeps one per variant).
+    dirs = [f"{args.remote_dir}/{name}" for name in ("pgdata", "pgdata_merkle", "pgdata_plain")]
     return run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
-if {args.install_dir}/bin/pg_ctl -D {args.remote_dir}/pgdata status >/dev/null 2>&1; then
-    {args.install_dir}/bin/pg_ctl -D {args.remote_dir}/pgdata -w -t 120 stop -m fast
-fi
-""", timeout=150)
+for d in {' '.join(dirs)}; do
+    if [ -f "$d/postmaster.pid" ] && {args.install_dir}/bin/pg_ctl -D "$d" status >/dev/null 2>&1; then
+        {args.install_dir}/bin/pg_ctl -D "$d" -w -t 120 stop -m fast
+    fi
+done
+""", timeout=150, retry_on_drop=True)
 
 
 def start_postgres(args):
     return run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
-{args.install_dir}/bin/pg_ctl -D {args.remote_dir}/pgdata -l {args.remote_dir}/postgres.log -w -t 120 start
-""", timeout=150)
+if ! {args.install_dir}/bin/pg_ctl -D {pgdata(args)} status >/dev/null 2>&1; then
+    {args.install_dir}/bin/pg_ctl -D {pgdata(args)} -l {args.remote_dir}/postgres.log -w -t 120 start
+fi
+# Idempotent retries may find it still starting.
+for i in $(seq 1 120); do
+    if {args.install_dir}/bin/pg_isready -q -h 127.0.0.1 -p {args.db_port}; then exit 0; fi
+    sleep 1
+done
+echo 'PostgreSQL did not become ready' >&2; exit 1
+""", timeout=300, retry_on_drop=True)
 
 
 def prepare_ledger_schema(args):
@@ -450,9 +545,9 @@ def prepare_ledger_schema(args):
         raise RuntimeError(f"Golden baseline has nonzero apply state: {state}")
 
 
-def get_remote_baseline_identity(args):
+def get_remote_baseline_identity(args, base_name=None):
     """Inspect active baseline directory to obtain fresh control, checksum and sizing metadata."""
-    base_dir = f"{args.remote_dir}/{getattr(args, 'base_dir_name', 'pgdata_base')}"
+    base_dir = f"{args.remote_dir}/{base_name or getattr(args, 'base_dir_name', 'pgdata_base')}"
     cmd = db_shell(args) + f"""
 {args.install_dir}/bin/pg_controldata {base_dir} | grep -E 'Database system identifier|Latest checkpoint location|Database cluster state' | sed 's/.*: *//'
 sha256sum {base_dir}/global/pg_control {base_dir}/PG_VERSION
@@ -589,13 +684,166 @@ rm -rf {check_dir}
     return manifest
 
 
-def reset_remote_pgdata(args, mode, workers):
-    if getattr(args, "reset_mode", "cp") != "cp":
-        raise RuntimeError("Benchmark resets require a full pristine physical copy (--reset-mode cp)")
+def ensure_plain_baseline(args, golden):
+    """Derive the pg/det baseline: the golden copy with both Merkle indexes dropped.
+
+    This is exactly the state the per-case cp reset produced after its DROP
+    INDEX, made once and stopped cleanly so delta restores never rewrite the
+    Merkle index files. It is rebuilt whenever the golden baseline changes.
+    """
+    name = args.base_dir_name + "_plain"
+    plain = f"{args.remote_dir}/{name}"
+    golden_dir = f"{args.remote_dir}/{args.base_dir_name}"
+    path = manifest_path_for(args, name)
+    exists = run_remote(args.remote_host, args.remote_user,
+                        f"test -f {plain}/PG_VERSION && echo YES || echo NO", timeout=15).stdout.strip()
+    if exists == "YES":
+        raw = run_remote(args.remote_host, args.remote_user,
+                         f"cat {path} 2>/dev/null || echo MISSING", timeout=15).stdout.strip()
+        meta = get_remote_baseline_identity(args, name)
+        try:
+            manifest = json.loads(raw)
+        except ValueError:
+            manifest = {}
+        if (manifest.get("derived_from_checkpoint_lsn") == golden["checkpoint_lsn"] and
+                manifest.get("derived_from_pg_control_sha256") == golden["pg_control_sha256"] and
+                meta["cluster_state"] == "shut down" and
+                all(manifest.get(k) == meta[k] for k in ("db_system_id", "checkpoint_lsn",
+                                                         "pg_control_sha256", "file_count", "total_bytes"))):
+            print(f"  Plain baseline verified: {manifest['file_count']} files, "
+                  f"{manifest['total_bytes'] / 2**30:.2f} GiB", flush=True)
+            return manifest
+        print("  Plain baseline is stale or unverified; rebuilding it from the golden baseline", flush=True)
+
     stop_server(args)
     stop_postgres(args)
+    tmp = plain + ".tmp"
+    conf = (f"port = {args.db_port}\nlisten_addresses = '*'\nshared_buffers = '128MB'\n"
+            "enable_merkle_index = off\nbcdb_worker_count = 1\nbcdb_ledger_trace = off\n"
+            "autovacuum = off\nmax_parallel_maintenance_workers = 0\n")
+    run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+rm -rf -- {plain} {tmp}
+cp -a --reflink=never {golden_dir} {tmp}
+printf %s {shlex.quote(conf)} > {tmp}/postgresql.auto.conf
+{args.install_dir}/bin/pg_ctl -D {tmp} -l {args.remote_dir}/plain_baseline.log -w -t 120 start
+""", timeout=args.reset_timeout)
+    saved = getattr(args, "_pgdata", None)
+    args._pgdata = tmp
+    try:
+        prepare_ledger_schema(args)
+        sql(args, "DROP INDEX usertable_merkle_idx; DROP INDEX usertable_merkle_lookup_idx;")
+        stats = sql(args, "SELECT pg_relation_size('usertable'), pg_relation_size('usertable_pkey1'), "
+                          "relpages FROM pg_class WHERE relname='usertable';")
+        if stats != f"{golden['heap_bytes']}|{golden['index_bytes']}|{golden['relpages']}":
+            raise RuntimeError(f"Plain baseline relation sizes differ from golden: {stats}")
+        indexes = json.loads(sql(args, "SELECT json_agg(row_to_json(i)) FROM (SELECT indexname, indexdef "
+                                       "FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;"))
+        if any("merkle" in i["indexname"] for i in indexes):
+            raise RuntimeError(f"Merkle index survived in plain baseline: {indexes}")
+        sql(args, "CHECKPOINT;")
+    finally:
+        run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+if [ -f {tmp}/postmaster.pid ]; then {args.install_dir}/bin/pg_ctl -D {tmp} -w -t 120 stop -m fast; fi
+""", timeout=150)
+        if saved is None:
+            del args._pgdata
+        else:
+            args._pgdata = saved
+    run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+cp -a {golden_dir}/postgresql.auto.conf {tmp}/postgresql.auto.conf
+rm -f {tmp}/postmaster.opts
+{args.install_dir}/bin/pg_controldata {tmp} | grep -Eq 'Database cluster state:[[:space:]]+shut down$'
+sync
+mv {tmp} {plain}
+""", timeout=args.reset_timeout)
+    meta = get_remote_baseline_identity(args, name)
+    manifest = dict(version=2, db_rows=args.db_rows, keyspace=golden["keyspace"],
+                    heap_bytes=golden["heap_bytes"], index_bytes=golden["index_bytes"],
+                    relpages=golden["relpages"], indexes=indexes,
+                    derived_from_checkpoint_lsn=golden["checkpoint_lsn"],
+                    derived_from_pg_control_sha256=golden["pg_control_sha256"],
+                    **{k: meta[k] for k in ("db_system_id", "checkpoint_lsn", "pg_control_sha256",
+                                            "pg_version_sha256", "file_count", "total_bytes")})
+    run_remote(args.remote_host, args.remote_user,
+               f"printf %s {shlex.quote(json.dumps(manifest))} > {path}", timeout=15)
+    print(f"  Plain baseline written: {manifest['file_count']} files, "
+          f"{manifest['total_bytes'] / 2**30:.2f} GiB", flush=True)
+    return manifest
+
+
+def device_stat_path(args):
+    return f"/sys/dev/block/$(findmnt -n -r -o MAJ:MIN -T {args.remote_dir} | tr -d '[:space:]')/stat"
+
+
+def upload_probe(args):
+    run_remote(args.remote_host, args.remote_user,
+               f"printf %s {shlex.quote(PROBE_SCRIPT.read_text())} > {args.remote_dir}/device_settle_probe.py",
+               timeout=15)
+
+
+def run_probe(args, probe_args, timeout):
+    # Reads the never-modified golden baseline with O_DIRECT: no page-cache effect.
+    command = (f"python3 {args.remote_dir}/device_settle_probe.py {probe_args} "
+               f"--data-dir {args.remote_dir}/{args.base_dir_name} --device-stat {device_stat_path(args)} "
+               f"--write-file {args.remote_dir}/.device_probe_write")
+    result = run_remote(args.remote_host, args.remote_user, command, timeout=timeout, check=False)
+    lines = result.stdout.strip().splitlines()
+    if result.returncode not in (0, 3) or not lines:
+        raise RuntimeError(f"Device probe failed ({result.returncode}): {result.stdout}\n{result.stderr}")
+    return json.loads(lines[-1])
+
+
+def calibrate_device(args, out_dir):
+    """Idle random-read latency of the data SSD; per-case thresholds derive from it."""
+    print(f"Calibrating idle SSD read latency (at least {args.calibrate_min_wait_s}s)...", flush=True)
+    result = run_probe(args, f"calibrate --consecutive 6 --min-wait {args.calibrate_min_wait_s} "
+                             f"--max-wait {args.calibrate_min_wait_s + 3600}",
+                       timeout=args.calibrate_min_wait_s + 3700)
+    if not result.get("settled"):
+        raise RuntimeError("Device never became write-idle during calibration")
+    window = result["history"][-6:]
+    qd1 = statistics.median(e["qd1"]["median_us"] for e in window)
+    qd8 = statistics.median(e["qd8"]["median_us"] for e in window)
+    wr = statistics.median(e["wr"]["median_us"] for e in window)
+    if qd1 > 500 or wr > 2000:
+        raise RuntimeError(f"Idle latency (QD1 read {qd1:.0f}us, write {wr:.0f}us) is implausible; "
+                           "is the device busy?")
+    thresholds = dict(qd1_us=max(qd1 * args.settle_factor, qd1 + 30),
+                      qd8_us=max(qd8 * args.settle_factor, qd8 + 30),
+                      wr_us=max(wr * args.settle_factor, wr + 50))
+    (out_dir / f"device_calibration_{uuid.uuid4().hex[:8]}.json").write_text(
+        json.dumps(dict(idle_qd1_median_us=qd1, idle_qd8_median_us=qd8, idle_wr_median_us=wr,
+                        thresholds=thresholds, probe=result), indent=2) + "\n")
+    print(f"  Idle QD1 read {qd1:.0f}us, QD8 read {qd8:.0f}us, O_DSYNC 8KB write {wr:.0f}us; thresholds "
+          f"{thresholds['qd1_us']:.0f}/{thresholds['qd8_us']:.0f}/{thresholds['wr_us']:.0f}us", flush=True)
+    return thresholds
+
+
+def wait_for_device_settle(args):
+    thresholds = getattr(args, "_probe_thresholds", None)
+    if thresholds is None:
+        raise RuntimeError("Device settle thresholds are not calibrated")
+    result = run_probe(args, f"settle --qd1-threshold-us {thresholds['qd1_us']:.1f} "
+                             f"--qd8-threshold-us {thresholds['qd8_us']:.1f} "
+                             f"--wr-threshold-us {thresholds['wr_us']:.1f} --consecutive 3 "
+                             f"--min-wait {args.settle_min_s} --max-wait {args.settle_max_s}",
+                       timeout=args.settle_max_s + 120)
+    if not result.get("settled"):
+        last = result["history"][-1] if result.get("history") else {}
+        raise RuntimeError(f"SSD did not return to idle read latency within {args.settle_max_s}s: {last}")
+    print(f"  SSD settled after {result['wait_s']:.0f}s (QD1 {result['qd1_median_us']:.0f}us, "
+          f"QD8 {result['qd8_median_us']:.0f}us, write {result['wr_median_us']:.0f}us)", flush=True)
+    return result
+
+
+def reset_remote_pgdata(args, mode, workers):
+    if getattr(args, "reset_mode", "cp") not in ("cp", "delta"):
+        raise RuntimeError("Benchmark resets require a full pristine physical copy (--reset-mode cp or delta)")
+    stop_server(args)
+    stop_postgres(args)
+    args._pgdata = work_dir_for(args, mode)
     enable = "on" if mode == "bcdb_merkle" else "off"
-    bcdb_workers = workers if mode != "pg" else 1
+    bcdb_workers = workers if base_mode(mode) != "pg" else 1
     # auto.conf is replaced on the disposable copy so old ALTER SYSTEM values
     # cannot silently override the campaign contract.
     config = f"""port = {args.db_port}
@@ -628,12 +876,16 @@ bcdb_dt_hashtab_switch_threshold = 1500
 bcdb_gate_telemetry = off
 bcdb_gate_snapshot_each_block = off
 merkle_apply_synchronous_direct = on
+default_transaction_isolation = '{isolation_for(mode)}'
 """
-    base_name = getattr(args, "base_dir_name", "pgdata_base")
+    base_name = base_dir_name_for(args, mode)
     base_dir = f"{args.remote_dir}/{base_name}"
-    manifest_name = f".ariabc_golden_manifest_{base_name}.json" if base_name != "pgdata_base" else ".ariabc_golden_manifest.json"
-    manifest_path = f"{args.remote_dir}/{manifest_name}"
-    manifest = getattr(args, '_golden_manifest', None)
+    work = pgdata(args)
+    manifest_path = manifest_path_for(args, base_name)
+    manifest = (getattr(args, '_plain_manifest', None) if base_name != args.base_dir_name
+                else getattr(args, '_golden_manifest', None))
+    if manifest is None and base_name != args.base_dir_name:
+        raise RuntimeError(f"Missing validated manifest for {base_name}")
     if manifest is None:
         raw = run_remote(args.remote_host, args.remote_user,
                          f"cat {manifest_path} 2>/dev/null || echo MISSING",
@@ -649,32 +901,78 @@ merkle_apply_synchronous_direct = on
     # Runs immediately after cp -a and BEFORE postmaster starts or touches any file.
     copy_verify_cmd = ""
     if manifest:
+        # A delta-restored directory can keep grown directory inodes (pg_wal),
+        # so its du differs; the rsync comparison below covers it instead.
+        du_check = (f'test "$(du -sb {work} | cut -f1)" -eq "{manifest["total_bytes"]}"'
+                    if args.reset_mode == "cp" else "")
         copy_verify_cmd = f"""
-test "$(find {args.remote_dir}/pgdata -type f | wc -l)" -eq "{manifest['file_count']}"
-test "$(du -sb {args.remote_dir}/pgdata | cut -f1)" -eq "{manifest['total_bytes']}"
-test "$(sha256sum {args.remote_dir}/pgdata/PG_VERSION | cut -d' ' -f1)" = "{manifest['pg_version_sha256']}"
-test "$(sha256sum {args.remote_dir}/pgdata/global/pg_control | cut -d' ' -f1)" = "{manifest['pg_control_sha256']}"
+test "$(find {work} -type f | wc -l)" -eq "{manifest['file_count']}"
+{du_check}
+test "$(sha256sum {work}/PG_VERSION | cut -d' ' -f1)" = "{manifest['pg_version_sha256']}"
+test "$(sha256sum {work}/global/pg_control | cut -d' ' -f1)" = "{manifest['pg_control_sha256']}"
 """
+
+    if args.reset_mode == "cp":
+        restore_cmd = f"""
+rm -rf -- {work}
+cp -a --reflink=never {base_dir} {work}
+echo RESTORE_METHOD=cp
+"""
+    else:
+        # Independent of rsync: compare every byte before the cache drop, so the
+        # extra reads cannot affect the timed run.
+        content_check = ""
+        checked = getattr(args, "_content_checked", set())
+        args._restore_count = getattr(args, "_restore_count", 0) + 1
+        if (args.delta_content_check == "every" or
+                (args.delta_content_check == "sampled" and
+                 (work not in checked or args._restore_count % 10 == 0))):
+            args._content_checked = checked | {work}
+            content_check = f"""t0=$(date +%s)
+if ! diff -rq --no-dereference {base_dir} {work} >&2; then echo "Restored copy content differs from baseline" >&2; exit 1; fi
+echo "CONTENT_CHECK=identical seconds=$(( $(date +%s) - t0 ))"
+"""
+        # rsync's quick check (size + mtime) is exact here: -a restores the
+        # baseline mtimes, and any PostgreSQL write moves a file's mtime.
+        # --inplace --no-whole-file writes only the blocks that differ, so the
+        # result is byte-identical to the baseline without a 32GB rewrite.
+        restore_cmd = f"""
+if [ -f {work}/PG_VERSION ] && [ ! -f {work}/postmaster.pid ]; then
+    rsync -a --inplace --no-whole-file --delete --stats {base_dir}/ {work}/
+    echo RESTORE_METHOD=delta
+else
+    rm -rf -- {work}
+    cp -a --reflink=never {base_dir} {work}
+    echo RESTORE_METHOD=seed_cp
+fi
+# Every file must now match the baseline in name, size, mtime and mode.
+diffs=$(rsync -an --delete --itemize-changes {base_dir}/ {work}/)
+if [ -n "$diffs" ]; then echo "Restored copy differs from baseline: $diffs" >&2; exit 1; fi
+{content_check}"""
 
     # Every trial gets the same stopped baseline, including heap/index layout,
     # WAL and visibility state. Never reuse a logically restored working copy.
+    device_before_restore = get_remote_nvme_stats(args)
     result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
 test -f {base_dir}/PG_VERSION
 test ! -f {base_dir}/postmaster.pid
-test ! -L {args.remote_dir}/pgdata
+test ! -L {work}
 test ! -L {base_dir}
 # Require room for a full copy plus WAL growth; do not consume all free space.
-needed=$(du -sb {base_dir} | cut -f1)
-available=$(df -B1 --output=avail {args.remote_dir} | tail -1)
-test "$available" -gt "$((needed + 21474836480))"
-rm -rf -- {args.remote_dir}/pgdata
-cp -a --reflink=never {base_dir} {args.remote_dir}/pgdata
+if [ ! -d {work} ]; then
+    needed=$(du -sb {base_dir} | cut -f1)
+    available=$(df -B1 --output=avail {args.remote_dir} | tail -1)
+    test "$available" -gt "$((needed + 21474836480))"
+fi
+{restore_cmd}
 {copy_verify_cmd}
 sync
-printf %s {shlex.quote(config)} > {args.remote_dir}/pgdata/postgresql.auto.conf
+printf %s {shlex.quote(config)} > {work}/postgresql.auto.conf
 : > {args.remote_dir}/postgres.log
-rm -f {args.remote_dir}/pgdata/.merkle_index_dropped
+rm -f {work}/.merkle_index_dropped
 """, timeout=args.reset_timeout)
+    device_after_restore = get_remote_nvme_stats(args)
+    restore_write_mib = delta(device_before_restore, device_after_restore, "write_sectors") / 2048
 
     start_postgres(args)
     prepare_ledger_schema(args)
@@ -682,10 +980,10 @@ rm -f {args.remote_dir}/pgdata/.merkle_index_dropped
         sql(args, "DROP INDEX IF EXISTS usertable_merkle_idx; "
                   "DROP INDEX IF EXISTS usertable_merkle_lookup_idx;")
         args._merkle_index_dropped = True
-        run_remote(args.remote_host, args.remote_user, f"touch {args.remote_dir}/pgdata/.merkle_index_dropped", check=False)
+        run_remote(args.remote_host, args.remote_user, f"touch {work}/.merkle_index_dropped", check=False)
     else:
         args._merkle_index_dropped = False
-        run_remote(args.remote_host, args.remote_user, f"rm -f {args.remote_dir}/pgdata/.merkle_index_dropped", check=False)
+        run_remote(args.remote_host, args.remote_user, f"rm -f {work}/.merkle_index_dropped", check=False)
     # Verification phase:
     # If --verify-mode full is requested, run an exhaustive SELECT count(*) table scan.
     # Otherwise, rely on the validated immutable baseline and run fast O(1) sanity checks
@@ -718,7 +1016,18 @@ rm -f {args.remote_dir}/pgdata/.merkle_index_dropped
         raise RuntimeError(f"Wrong Merkle index state: {indexes}")
     if ("merkle_lookup_idx" in indexes) != (mode == "bcdb_merkle"):
         raise RuntimeError("Merkle lookup index does not match mode")
+    if mode == "bcdb_merkle":
+        # Since 00fae31 the backend resolves ariabc_internal.merkle_node_<table>;
+        # when absent it silently creates an EMPTY tree (older baselines used
+        # merkle_node_<index oid>). Refuse to measure against an empty tree.
+        node_pages = sql(args, "SELECT coalesce((SELECT relpages FROM pg_class WHERE oid = "
+                               "to_regclass('ariabc_internal.merkle_node_usertable')), -1);")
+        if int(node_pages) <= 0:
+            raise RuntimeError("ariabc_internal.merkle_node_usertable is missing or empty; "
+                               "use a baseline migrated to table-named Merkle node storage")
     stop_postgres(args)
+    # The timed run must not overlap the SSD's background work from the restore.
+    settle = wait_for_device_settle(args)
     # Cache dropping must happen AFTER the validation scan and BEFORE startup.
     cache = run_remote(args.remote_host, args.remote_user,
                        "sync\n" + sudo_command('echo 3 > /proc/sys/vm/drop_caches') + "\n"
@@ -734,7 +1043,9 @@ rm -f {args.remote_dir}/pgdata/.merkle_index_dropped
     for key, value in {"bcdb_worker_count": str(bcdb_workers), "enable_merkle_index": enable,
                        "fsync": "on", "full_page_writes": "on", "synchronous_commit": "on",
                        "track_counts": "on", "track_io_timing": "on",
-                       "log_checkpoints": "on", "bcdb_ledger_trace": "off"}.items():
+                       "log_checkpoints": "on", "bcdb_ledger_trace": "off",
+                       "default_transaction_isolation": isolation_for(mode),
+                       **CANONICAL_BCDB_SETTINGS}.items():
         if settings[key] != value:
             raise RuntimeError(f"Unexpected effective setting {key}={settings[key]}")
     sizes = json.loads(sql(args, "SELECT json_build_object('heap_bytes', pg_relation_size('usertable'), "
@@ -742,22 +1053,24 @@ rm -f {args.remote_dir}/pgdata/.merkle_index_dropped
                           "'database_bytes', pg_database_size(current_database()));"))
     return dict(settings=settings, sizes=sizes,
                 keyspace=f"{args.db_rows}|{bounds}", indexes=json.loads(indexes),
-                reset_output=result.stdout, cache_drop_output=cache.stdout)
+                reset_output=result.stdout, cache_drop_output=cache.stdout,
+                restore_write_mib=restore_write_mib, settle=settle)
 
 
 def start_remote_ariabc_server(args, mode, workers):
     command = [f"{args.cluster_dir}/ariabc_pg/build/bin/ariabc_pg_server",
                "--id", "1", "--raftEndpoint", "127.0.0.1:9000", "--clientPort", str(args.server_port),
                "--raftMembers", "1=127.0.0.1:9000", "--dbName", "postgres", "--dbHost", "127.0.0.1",
-               "--dbPort", str(args.db_port), "--dbUser", "postgres", "--dbType", "0" if mode == "pg" else "1",
-               "--safedb", "0" if mode == "pg" else "1", "--dbConnPoolSize", str(workers), "--bypassRaft", "1"]
+               "--dbPort", str(args.db_port), "--dbUser", "postgres", "--dbType", "0" if base_mode(mode) == "pg" else "1",
+               "--safedb", "0" if base_mode(mode) == "pg" else "1", "--dbConnPoolSize", str(workers), "--bypassRaft", "1"]
     environment = {
         "ARIABC_PROFILE": "1",
         "ARIABC_PG_MAX_RETRIES": "100",
         "BCDB_DET_QUEUE_HIGH_WM": "65536",
         "BCDB_DET_QUEUE_LOW_WM": "32768",
+        "ARIABC_PG_RETRY_JITTER": "1" if args.pg_retry_jitter == "on" else "0",
     }
-    if mode != "pg":
+    if base_mode(mode) != "pg":
         command += ["--pgExecMode", "event", "--bcdbInitBlockSize", str(workers)]
         environment.update(BCDB_DECOUPLE_WORKERS="1", BCDB_DET_QUEUE_HIGH_WM="65536",
                            BCDB_DET_QUEUE_LOW_WM="32768", ARIABC_DET_BLOCK_PARALLEL="64",
@@ -808,7 +1121,7 @@ def get_remote_nvme_stats(args):
     # Measure the filesystem's block device (often a partition), not an assumed
     # nvme0n1. Device counters include unrelated traffic on that device.
     output = run_remote(args.remote_host, args.remote_user, f"""
-major_minor=$(findmnt -n -r -o MAJ:MIN -T {args.remote_dir}/pgdata | tr -d '[:space:]')
+major_minor=$(findmnt -n -r -o MAJ:MIN -T {args.remote_dir} | tr -d '[:space:]')
 readlink -f /sys/dev/block/"$major_minor"
 cat /sys/dev/block/"$major_minor"/stat
 """, timeout=15).stdout.splitlines()
@@ -827,7 +1140,7 @@ def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
               str(REPO_ROOT / "ariabc_pg/build/bin/ariabc_pg_gateway"))
     remote_wl = f"/tmp/oom_{hashlib.sha256(workload_file.read_bytes()).hexdigest()}.sql"
     command = [binary, "--nodes", f"{args.remote_host}:{args.server_port}", "--queryFrom",
-               remote_wl if remote else str(workload_file), "--dbType", "0" if mode == "pg" else "1",
+               remote_wl if remote else str(workload_file), "--dbType", "0" if base_mode(mode) == "pg" else "1",
                "--detStartSeq", "0", "--reqIdOffset", "1", "--detWindow", "65536",
                "--detBatchSize", "256", "--dbConnPoolSize", str(workers), "--detSubmitPipeline", "1",
                "--detPipelineDepth", "1024", "--detClientMode", "event", "--detClientWorkers", "96",
@@ -850,7 +1163,7 @@ def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
         raise
     output = result.stdout + "\n" + result.stderr
     log_path.write_text(output)
-    metrics = parse_gateway_result(output, count_workload_queries(workload_file), result.returncode, mode=mode)
+    metrics = parse_gateway_result(output, count_workload_queries(workload_file), result.returncode, mode=base_mode(mode))
     metrics.update(gateway_returncode=result.returncode, gateway_process_wall_ms=(time.monotonic() - start) * 1000, command=command)
     return metrics
 
@@ -897,7 +1210,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         stop_server(args)
         collect_logs(args, case_dir)
         if workload in ("a", "b", "c", "d", "f"):
-            metrics.update(validate_ycsb_results((case_dir / "server.log").read_text(), args.txs, mode=mode))
+            metrics.update(validate_ycsb_results((case_dir / "server.log").read_text(), args.txs, mode=base_mode(mode)))
         time.sleep(1)
         # CHECKPOINT is measured separately, outside the TPS interval. It makes
         # deferred dirty heap/index writeback visible instead of counting only
@@ -944,16 +1257,34 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         hits = delta(pg_before, pg_after, "blks_hit")
         if device_before["device"] != device_after["device"]:
             raise RuntimeError("Database block device changed")
+        server_log = (case_dir / "server.log").read_text(errors="replace")
+        retries = dict(re.findall(r"\b(retry_attempts_total|retry_backoff_requested_ms|retry_exhausted_total|"
+                                  r"retry_jitter)=(\d+)", server_log))
+        if base_mode(mode) == "pg" and retries.get("retry_jitter") != ("1" if args.pg_retry_jitter == "on" else "0"):
+            raise RuntimeError(f"Server reports retry_jitter={retries.get('retry_jitter')!r}, "
+                               f"expected --pg-retry-jitter {args.pg_retry_jitter} (stale server binary?)")
         row = dict(workload=workload, skew=skew, mode=mode, workers=workers, trial=trial,
+                   isolation=isolation_for(mode),
+                   retry_attempts=int(retries.get("retry_attempts_total", 0)),
+                   retry_backoff_requested_ms=int(retries.get("retry_backoff_requested_ms", 0)),
+                   retry_exhausted=int(retries.get("retry_exhausted_total", 0)),
+                   pg_retry_jitter=args.pg_retry_jitter if base_mode(mode) == "pg" else "",
                    total_queries=metrics["total_queries"], shared_buffers=args.shared_buffers,
                    db_rows=args.db_rows, reset_time_ms=reset_ms,
-                   reset_mode="cp",
+                   reset_mode=args.reset_mode,
+                   restore_write_mib=setup["restore_write_mib"],
+                   settle_wait_s=setup["settle"]["wait_s"],
+                   settle_qd1_median_us=setup["settle"]["qd1_median_us"],
+                   settle_qd8_median_us=setup["settle"]["qd8_median_us"],
+                   settle_wr_median_us=setup["settle"]["wr_median_us"],
                    wall_time_ms=metrics["wall_time_ms"], wall_including_drains_ms=metrics["wall_including_drains_ms"],
                    tps=metrics["tps"], completed_tps=metrics["completed_tps"],
                    device=device_before["device"], device_window_ms=device_window_ms,
                    device_read_mib=delta(device_before, device_after, "read_sectors") / 2048,
                    device_write_mib=delta(device_before, device_after, "write_sectors") / 2048,
                    device_read_ios=delta(device_before, device_after, "read_ios"),
+                   device_read_await_ms=(delta(device_before, device_after, "read_ms") /
+                                         max(1, delta(device_before, device_after, "read_ios"))),
                    device_write_ios=delta(device_before, device_after, "write_ios"),
                    checkpoint_ms=checkpoint_ms,
                    checkpoint_write_ms=checkpoint["write_ms"],
@@ -1007,17 +1338,33 @@ def parse_args(argv=None):
     parser.add_argument("--workers", nargs="+", default=["1", "8", "16"])
     parser.add_argument("--skews", nargs="+", default=["0.0", "0.99"])
     parser.add_argument("--workloads", nargs="+", default=["a"])
+    parser.add_argument("--combos", nargs="+", default=None,
+                        help="Explicit workload:skew pairs (e.g. a:0.0 a:0.99 c:0.99) instead of the "
+                             "--workloads x --skews cross product")
     parser.add_argument("--output-dir", "--out-dir", dest="out_dir",
                         default="scripts/bench_full_results/oom_100m_sweep")
     parser.add_argument("--gateway-timeout", type=int, default=1800)
     parser.add_argument("--reset-timeout", type=int, default=3600)
     parser.add_argument("--verify-timeout", type=int, default=1800)
-    parser.add_argument("--base-dir-name", default="pgdata_base_fanout32",
-                        help="Name of baseline database directory inside remote-dir (default: pgdata_base_fanout32)")
+    parser.add_argument("--base-dir-name", default="pgdata_base_fanout32_tblnamed",
+                        help="Baseline database directory inside remote-dir. The default is the fanout-32 "
+                             "golden copy migrated to table-named Merkle node storage "
+                             "(ariabc_internal.merkle_node_usertable), required by binaries since 00fae31")
     parser.add_argument("--skip-gen", action="store_true", help="Require an existing clean baseline database")
     parser.add_argument("--gen-only", action="store_true")
-    parser.add_argument("--reset-mode", choices=["cp"], default="cp",
-                        help="Restore the complete stopped pristine database with cp -a --reflink=never before every case")
+    parser.add_argument("--reset-mode", choices=["delta", "cp"], default="delta",
+                        help="delta (default): byte-identical rsync restore from a per-variant stopped baseline, "
+                             "writing only changed blocks; cp: full cp -a --reflink=never copy before every case")
+    parser.add_argument("--delta-content-check", choices=["every", "sampled", "off"], default="sampled",
+                        help="Byte-compare the delta-restored copy with its baseline (diff -rq): every case, "
+                             "or sampled = first restore of each working copy plus every 10th case "
+                             "(the rsync size/mtime comparison still runs in every case)")
+    parser.add_argument("--settle-factor", type=float, default=1.25,
+                        help="Per-case SSD read-latency threshold as a multiple of idle calibration (min +30us)")
+    parser.add_argument("--settle-min-s", type=int, default=20)
+    parser.add_argument("--settle-max-s", type=int, default=1800)
+    parser.add_argument("--calibrate-min-wait-s", type=int, default=300,
+                        help="Minimum probing time before idle latency is accepted at campaign start")
     parser.add_argument("--verify-mode", choices=["fast", "full"], default="fast",
                         help="Validation mode on per-case resets: 'fast' performs pre-start copy integrity and post-start catalog/bound sanity checks; 'full' runs an exhaustive SELECT count(*) scan on every reset.")
     parser.add_argument("--dry-run", action="store_true", help="Generate workloads and manifest locally; do not contact servers")
@@ -1026,8 +1373,11 @@ def parse_args(argv=None):
                         help="Resume an existing benchmark run directory, skipping already completed cases in summary.csv")
     parser.add_argument("--auto-resume", action="store_true",
                         help="Automatically find and resume the latest run directory under --out-dir containing campaign.json")
-    parser.add_argument("--pg-exec-mode", choices=["event", "threaded"], default="threaded",
-                        help="Executor mode for pg in OOM (default 'threaded' matches archived run; 'event' matches YCSB/TPC-C)")
+    parser.add_argument("--pg-retry-jitter", choices=["on", "off"], default="on",
+                        help="Full jitter on pg serialization-failure backoff (ARIABC_PG_RETRY_JITTER); "
+                             "'off' reproduces the pre-2026-09-29 deterministic exponential backoff")
+    parser.add_argument("--pg-exec-mode", choices=["event", "threaded"], default="event",
+                        help="Executor mode for pg (default 'event' matches YCSB/TPC-C; 'threaded' matches archived OOM runs)")
     args = parser.parse_args(argv)
     if (not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", args.base_dir_name)
             or args.base_dir_name == "pgdata"):
@@ -1036,6 +1386,21 @@ def parse_args(argv=None):
         resume_path = Path(args.resume_dir).resolve()
         if not (resume_path / "campaign.json").is_file():
             parser.error(f"--resume-dir does not contain campaign.json: {resume_path}")
+    if args.combos:
+        combos = []
+        for item in (v for c in args.combos for v in c.split(",") if v):
+            workload, sep, skew = item.partition(":")
+            try:
+                combos.append((workload, float(skew)))
+            except ValueError:
+                parser.error(f"Invalid --combos entry {item!r}; expected workload:skew")
+            if not sep:
+                parser.error(f"Invalid --combos entry {item!r}; expected workload:skew")
+        if len(combos) != len(set(combos)):
+            parser.error("--combos must not contain duplicates")
+        args.combos = combos
+        args.workloads = list(dict.fromkeys(w for w, _ in combos))
+        args.skews = [str(v) for v in dict.fromkeys(s for _, s in combos)]
     for name, convert in (("modes", str), ("workers", int), ("skews", float), ("workloads", str)):
         try:
             values = [convert(v) for item in getattr(args, name) for v in item.split(",") if v]
@@ -1044,16 +1409,23 @@ def parse_args(argv=None):
         if not values or len(values) != len(set(values)):
             parser.error(f"--{name} must be nonempty and contain no duplicates")
         setattr(args, name, values)
-    if set(args.modes) - {"pg", "bcdb_det", "bcdb_merkle"}:
-        parser.error("--modes supports pg, bcdb_det, bcdb_merkle")
+    if set(args.modes) - {"pg", "pg_rc", "bcdb_det", "bcdb_merkle"}:
+        parser.error("--modes supports pg, pg_rc, bcdb_det, bcdb_merkle")
     if set(args.workloads) - set(SUPPORTED_WORKLOADS):
         parser.error("Supported large-keyspace workloads: " + ", ".join(SUPPORTED_WORKLOADS) +
                      "; custom DML key-recycling semantics require a separate large-keyspace generator")
+    if not args.combos:
+        args.combos = [(w, s) for w in args.workloads for s in args.skews]
+    if "pg_rc" in args.modes and any(w == "f" for w, _ in args.combos):
+        # F reads and writes the same row in one statement; at READ COMMITTED the
+        # read can predate the version the write replaces, which is not serializable.
+        parser.error("pg_rc is not serializable for workload F; run F with pg (SERIALIZABLE)")
     if any(not 0 <= v <= 2 for v in args.skews):
         parser.error("--skews must be finite values between 0 and 2, inclusive")
     if any(v < 1 or v > 128 for v in args.workers):
         parser.error("--workers must be between 1 and 128")
-    for name in ("txs", "db_rows", "trials", "gateway_timeout", "reset_timeout", "verify_timeout"):
+    for name in ("txs", "db_rows", "trials", "gateway_timeout", "reset_timeout", "verify_timeout",
+                 "settle_max_s", "calibrate_min_wait_s"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     max_key = args.db_rows + args.txs
@@ -1105,7 +1477,7 @@ def write_report(out_dir, rows):
         return
     for wl, skew in sorted({(str(r["workload"]), float(r["skew"])) for r in rows}):
         fig, ax = plt.subplots(figsize=(8, 5))
-        for mode in ("pg", "bcdb_det", "bcdb_merkle"):
+        for mode in ("pg", "pg_rc", "bcdb_det", "bcdb_merkle"):
             keys = sorted(k for k in groups if k[:3] == (wl, skew, mode))
             if keys:
                 ax.plot([int(k[3]) for k in keys], [statistics.median(float(r["tps"]) for r in groups[k]) for k in keys],
@@ -1141,8 +1513,8 @@ def main(argv=None):
         if not (out_dir / "campaign.json").is_file():
             raise RuntimeError(f"Cannot resume: {out_dir / 'campaign.json'} not found")
         campaign = json.loads((out_dir / "campaign.json").read_text())
-        if campaign.get("arguments", {}).get("reset_mode") != "cp":
-            raise RuntimeError("Only pristine physical-copy campaigns may be resumed; start a new --reset-mode cp campaign")
+        if campaign.get("arguments", {}).get("reset_mode") not in ("cp", "delta"):
+            raise RuntimeError("Only pristine physical-copy campaigns may be resumed; start a new campaign")
         if campaign.get("version") != 3 or campaign.get("source_sha256") != source_hashes(REPO_ROOT):
             raise RuntimeError("Resume source contract changed or is legacy; use a new campaign")
 
@@ -1160,17 +1532,17 @@ def main(argv=None):
                         timing="gateway_overall_time_taken", workloads={})
         manifest["source_sha256"] = source_hashes(REPO_ROOT)
     files = {}
-    for wl in args.workloads:
-        for skew in args.skews:
-            path = out_dir / "workloads" / f"ycsb_{wl}_skew_{skew}_{args.txs}.sql"
-            if not path.is_file():
-                generate_100m_ycsb_workload(path, wl, skew, args.txs, args.db_rows, args.seed)
-                if count_workload_queries(path) != args.txs:
-                    raise RuntimeError("Generated statement count differs from --txs")
-            files[wl, skew] = path
-            if not args.resume_dir:
-                manifest["workloads"][path.name] = dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                                                        queries=args.txs)
+    args.combos = [(str(w), float(s)) for w, s in args.combos]  # JSON round-trip on resume
+    for wl, skew in args.combos:
+        path = out_dir / "workloads" / f"ycsb_{wl}_skew_{skew}_{args.txs}.sql"
+        if not path.is_file():
+            generate_100m_ycsb_workload(path, wl, skew, args.txs, args.db_rows, args.seed)
+            if count_workload_queries(path) != args.txs:
+                raise RuntimeError("Generated statement count differs from --txs")
+        files[wl, skew] = path
+        if not args.resume_dir:
+            manifest["workloads"][path.name] = dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                                                    queries=args.txs)
     if not args.resume_dir:
         (out_dir / "campaign.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if args.dry_run:
@@ -1211,6 +1583,11 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
             return
         golden = validate_golden_baseline(args)
         args._golden_manifest = golden
+        upload_probe(args)
+        # Calibrate before any large write this campaign makes (plain baseline).
+        args._probe_thresholds = calibrate_device(args, out_dir)
+        if args.reset_mode == "delta" and set(args.modes) - {"bcdb_merkle"}:
+            args._plain_manifest = ensure_plain_baseline(args, golden)
         rows = []
         completed_keys = set()
         if args.resume_dir and (out_dir / "summary.csv").is_file():
@@ -1226,9 +1603,9 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
                         raise RuntimeError(f"Cannot resume an accepted row with failure evidence: {case_dir}")
                     saved = json.loads((case_dir / "result.json").read_text())
                     parse_gateway_result((case_dir / "gateway.log").read_text(), int(row_data["total_queries"]),
-                                         saved["gateway"]["gateway_returncode"], mode=row_data["mode"])
+                                         saved["gateway"]["gateway_returncode"], mode=base_mode(row_data["mode"]))
                     if row_data["workload"] in ("a", "b", "c", "d", "f"):
-                        validate_ycsb_results((case_dir / "server.log").read_text(), int(row_data["total_queries"]), mode=row_data["mode"])
+                        validate_ycsb_results((case_dir / "server.log").read_text(), int(row_data["total_queries"]), mode=base_mode(row_data["mode"]))
                     if row_data["mode"] == "bcdb_merkle" and (case_dir / "merkle_verify.txt").read_text().strip() != "t":
                         raise RuntimeError("Missing saved Merkle PASS on resume")
                     rows.append(row_data)
@@ -1238,7 +1615,7 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
 
         cases = [(wl, skew, mode, workers, trial)
                  for wl, skew, workers, mode, trial in balanced_cases(
-                     [(wl, skew, workers) for wl in args.workloads for skew in args.skews for workers in args.workers],
+                     [(wl, skew, workers) for wl, skew in args.combos for workers in args.workers],
                      args.modes, args.trials, args.seed)]
 
         for wl, skew, mode, workers, trial in cases:
