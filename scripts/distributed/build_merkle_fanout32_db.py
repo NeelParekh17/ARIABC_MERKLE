@@ -39,9 +39,21 @@ def main():
     parser.add_argument("--install-dir", default=DEFAULT_INSTALL_DIR)
     parser.add_argument("--db-port", type=int, default=DEFAULT_DB_PORT)
     parser.add_argument("--fanout", type=int, default=32)
+    parser.add_argument("--split-threshold", type=int, default=None,
+                        help="Default: 1024 for fanout 32, otherwise 32")
+    parser.add_argument("--merge-threshold", type=int, default=None,
+                        help="Default: max(1, split threshold / 4)")
     parser.add_argument("--source-base", default="pgdata_base")
     parser.add_argument("--target-base", default="pgdata_base_fanout32")
     args = parser.parse_args()
+    if args.split_threshold is None:
+        args.split_threshold = 1024 if args.fanout == 32 else 32
+    if args.merge_threshold is None:
+        args.merge_threshold = max(1, args.split_threshold // 4)
+    if not 2 <= args.split_threshold <= 100000:
+        parser.error("--split-threshold must be between 2 and 100000")
+    if not 1 <= args.merge_threshold < args.split_threshold:
+        parser.error("--merge-threshold must be positive and less than --split-threshold")
 
     db_env = f"export LD_LIBRARY_PATH={args.install_dir}/lib:/home/neel/Desktop/rdkafka_local/lib:${{LD_LIBRARY_PATH:-}}\n"
 
@@ -111,7 +123,7 @@ SET max_parallel_maintenance_workers = 16;
 SET maintenance_work_mem = '6GB';
 DROP INDEX IF EXISTS usertable_merkle_idx;
 CREATE INDEX usertable_merkle_idx ON usertable USING merkle (ycsb_key)
-WITH (partitions = 200, fanout = {args.fanout}, split_threshold = 32, merge_threshold = 8);
+WITH (partitions = 200, fanout = {args.fanout}, split_threshold = {args.split_threshold}, merge_threshold = {args.merge_threshold});
 """
         start_idx = time.monotonic()
         idx_res = run_remote(args.remote_host, args.remote_user, db_env + f"""
@@ -130,6 +142,9 @@ SELECT indexdef FROM pg_indexes WHERE indexname = 'usertable_merkle_idx';
 {args.install_dir}/bin/psql -X -A -t -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "
 SELECT merkle_verify('usertable');
 "
+{args.install_dir}/bin/psql -X -A -t -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "
+SELECT merkle_tree_stats('usertable')::json;
+"
 """)
         lines = [line.strip() for line in verify_res.stdout.splitlines() if line.strip()]
         idx_def = lines[0]
@@ -141,6 +156,14 @@ SELECT merkle_verify('usertable');
             raise RuntimeError(f"Index definition does not contain fanout={args.fanout}: {idx_def}")
         if merkle_pass != "t":
             raise RuntimeError(f"Cryptographic merkle_verify failed: {merkle_pass}")
+        if len(lines) < 3:
+            raise RuntimeError("Missing Merkle metapage geometry after index build")
+        stats = json.loads(lines[2])
+        for option, expected in (("fanout", args.fanout),
+                                 ("split_threshold", args.split_threshold),
+                                 ("merge_threshold", args.merge_threshold)):
+            if stats.get(option) != expected:
+                raise RuntimeError(f"Unexpected Merkle {option}: {stats.get(option)} != {expected}")
 
         # Restore standard production config before stopping
         prod_conf = f"""port = {args.db_port}

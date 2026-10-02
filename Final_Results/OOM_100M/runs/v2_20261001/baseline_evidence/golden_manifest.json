@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "db_rows": 100000000,
+  "keyspace": "100000000|1|100000000",
+  "db_system_id": "7691699869859840018",
+  "checkpoint_lsn": "5/3F3BB878",
+  "pg_control_sha256": "3d189088a13b4288757bdeb2f84895a06425ad9f49bf6d5a428a8f39128530fb",
+  "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+  "file_count": 1146,
+  "total_bytes": 35866720143,
+  "heap_bytes": 28248489984,
+  "index_bytes": 2246197248,
+  "total_relation_bytes": 33655930880,
+  "relpages": 3448302,
+  "indexes": [
+    {
+      "indexname": "usertable_merkle_idx",
+      "indexdef": "CREATE INDEX usertable_merkle_idx ON public.usertable USING merkle (ycsb_key) WITH (partitions='200', fanout='32', split_threshold='1024', merge_threshold='256')"
+    },
+    {
+      "indexname": "usertable_merkle_lookup_idx",
+      "indexdef": "CREATE INDEX usertable_merkle_lookup_idx ON public.usertable USING btree (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200), merkle_key_hash(ycsb_key), ycsb_key)"
+    },
+    {
+      "indexname": "usertable_pkey1",
+      "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+    }
+  ]
+}

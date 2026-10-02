@@ -1447,7 +1447,8 @@ static int
 merkle_resolve_route_leaf(Relation catalog_rel, Relation pkey_idx_rel, TupleTableSlot *slot,
 						  Oid index_oid, int partition_id, const uint8 *routing_key,
 						  uint8 *leaf_node_id, int *bits_per_split_out,
-						  int *split_threshold_out, int *merge_threshold_out)
+						  int *split_threshold_out, int *merge_threshold_out,
+						  ItemPointerData **route_tids_out)
 {
 	uint8 node_id[8];
 	int prefix_len = 0;
@@ -1457,6 +1458,10 @@ merkle_resolve_route_leaf(Relation catalog_rel, Relation pkey_idx_rel, TupleTabl
 	int bits_per_split;
 	RelFileNode index_rnode;
 	int traversal_restarts = 0;
+	volatile Snapshot traversal_snapshot = NULL;
+	ItemPointerData *route_tids = NULL;
+	int num_route_tids;
+	int i;
 
 	/* Use cached index metadata to eliminate repetitive block 0 reads */
 	if (g_cached_meta_index_oid != index_oid)
@@ -1474,6 +1479,15 @@ merkle_resolve_route_leaf(Relation catalog_rel, Relation pkey_idx_rel, TupleTabl
 	merge_threshold = g_cached_merge_thresh;
 	bits_per_split = g_cached_bits_per_split;
 	index_rnode = g_cached_meta_rnode;
+	num_route_tids = 64 / bits_per_split + 1;
+
+	/* Hints belong only to this traversal, never to the route cache. */
+	if (route_tids_out != NULL)
+	{
+		if (*route_tids_out != NULL)
+			pfree(*route_tids_out);
+		*route_tids_out = NULL;
+	}
 
 	if (bits_per_split_out)
 		*bits_per_split_out = bits_per_split;
@@ -1487,148 +1501,176 @@ merkle_resolve_route_leaf(Relation catalog_rel, Relation pkey_idx_rel, TupleTabl
 								  leaf_node_id, &prefix_len))
 		return prefix_len;
 
-restart_traversal:
-	memset(node_id, 0, 8);
-	prefix_len = 0;
-
-	/* 2. Cache miss: traverse trie using direct B-tree scan without SPI */
-	for (;;)
+	if (route_tids_out != NULL && catalog_rel != NULL &&
+		pkey_idx_rel != NULL && slot != NULL)
 	{
-		bool is_leaf = false;
-		bool found_node = false;
+		route_tids = palloc(num_route_tids * sizeof(ItemPointerData));
+		*route_tids_out = route_tids;
+	}
 
-		if (catalog_rel != NULL && pkey_idx_rel != NULL && slot != NULL)
+	PG_TRY();
+	{
+	restart_traversal:
+		/* Register once per traversal: protect its versions from pruning. */
+		if (traversal_snapshot != NULL)
+			UnregisterSnapshot(traversal_snapshot);
+		traversal_snapshot = NULL;
+		traversal_snapshot = RegisterSnapshot(GetLatestSnapshot());
+		if (route_tids != NULL)
+			for (i = 0; i < num_route_tids; i++)
+				ItemPointerSetInvalid(&route_tids[i]);
+		memset(node_id, 0, 8);
+		prefix_len = 0;
+
+		/* 2. Cache miss: traverse trie using direct B-tree scan without SPI */
+		for (;;)
 		{
-			ScanKeyData skey[3];
-			bytea *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-			IndexScanDesc iscan;
+			bool is_leaf = false;
+			bool found_node = false;
 
-			SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
-			memcpy(VARDATA(node_id_bytea), node_id, 8);
-
-			ScanKeyInit(&skey[0], 1, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) partition_id));
-			ScanKeyInit(&skey[1], 2, BTEqualStrategyNumber, F_BYTEAEQ, PointerGetDatum(node_id_bytea));
-			ScanKeyInit(&skey[2], 3, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) prefix_len));
-
-			iscan = index_beginscan(catalog_rel, pkey_idx_rel, GetLatestSnapshot(), 3, 0);
-			index_rescan(iscan, skey, 3, NULL, 0);
-			ExecClearTuple(slot);
-			found_node = index_getnext_slot(iscan, ForwardScanDirection, slot);
-			if (found_node)
+			if (catalog_rel != NULL && pkey_idx_rel != NULL && slot != NULL)
 			{
-				bool isnull;
-				merkle_init_cat_col_offsets(slot->tts_tupleDescriptor);
-				if (g_cat_att_is_leaf > 0)
-				{
-					Datum d = slot_getattr(slot, g_cat_att_is_leaf, &isnull);
-					is_leaf = (!isnull && DatumGetBool(d));
-				}
-			}
-			index_endscan(iscan);
-			pfree(node_id_bytea);
-		}
-		else
-		{
-			/* Fallback to SPI if catalog_rel / pkey_idx_rel not provided */
-			Datum values[3];
-			bytea *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-			int spi_rc;
-			MerklePlanCacheEntry *plans;
-
-			merkle_sync_prepare_plans(index_oid);
-			plans = merkle_get_plans(index_oid);
-
-			SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
-			memcpy(VARDATA(node_id_bytea), node_id, 8);
-
-			values[0] = Int16GetDatum((int16) partition_id);
-			values[1] = PointerGetDatum(node_id_bytea);
-			values[2] = Int16GetDatum((int16) prefix_len);
-
-			PushActiveSnapshot(GetLatestSnapshot());
-			spi_rc = SPI_execute_plan(plans->sync_route_plan, values, NULL, false, 1);
-			PopActiveSnapshot();
-
-			if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
-			{
-				bool isnull;
-				found_node = true;
-				is_leaf = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull));
-				SPI_freetuptable(SPI_tuptable);
-			}
-			pfree(node_id_bytea);
-		}
-
-		if (!found_node)
-		{
-			if (prefix_len == 0)
-			{
-				Oid ins_argtypes[4] = {INT2OID, BYTEAOID, INT2OID, BYTEAOID};
-				Datum ins_values[4];
+				ScanKeyData skey[3];
 				bytea *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-				bytea *zero_hash_bytea = (bytea *) palloc0(VARHDRSZ + MERKLE_HASH_BYTES);
-				char *ins_sql;
+				IndexScanDesc iscan;
 
 				SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
 				memcpy(VARDATA(node_id_bytea), node_id, 8);
-				SET_VARSIZE(zero_hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
 
-				ins_values[0] = Int16GetDatum((int16) partition_id);
-				ins_values[1] = PointerGetDatum(node_id_bytea);
-				ins_values[2] = Int16GetDatum(0);
-				ins_values[3] = PointerGetDatum(zero_hash_bytea);
+				ScanKeyInit(&skey[0], 1, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) partition_id));
+				ScanKeyInit(&skey[1], 2, BTEqualStrategyNumber, F_BYTEAEQ, PointerGetDatum(node_id_bytea));
+				ScanKeyInit(&skey[2], 3, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) prefix_len));
 
+				iscan = index_beginscan(catalog_rel, pkey_idx_rel, traversal_snapshot, 3, 0);
+				index_rescan(iscan, skey, 3, NULL, 0);
+				ExecClearTuple(slot);
+				found_node = index_getnext_slot(iscan, ForwardScanDirection, slot);
+				if (found_node)
 				{
-					char tablename[64];
-					merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
-					ins_sql = psprintf(
-						"INSERT INTO ariabc_internal.%s"
-						" (partition_id, node_id, prefix_len, is_leaf, tuple_count, hash)"
-						" VALUES ($1, $2, $3, true, 0, $4)"
-						" ON CONFLICT (partition_id, node_id, prefix_len) DO NOTHING",
-						tablename);
+					bool isnull;
+
+					if (route_tids != NULL)
+						route_tids[prefix_len / bits_per_split] = slot->tts_tid;
+					merkle_init_cat_col_offsets(slot->tts_tupleDescriptor);
+					if (g_cat_att_is_leaf > 0)
+					{
+						Datum d = slot_getattr(slot, g_cat_att_is_leaf, &isnull);
+						is_leaf = (!isnull && DatumGetBool(d));
+					}
 				}
-
-				SPI_execute_with_args(ins_sql, 4, ins_argtypes, ins_values, NULL, false, 1);
-				pfree(ins_sql);
-
-				if (SPI_tuptable != NULL)
-					SPI_freetuptable(SPI_tuptable);
-
-				pfree(zero_hash_bytea);
+				index_endscan(iscan);
 				pfree(node_id_bytea);
-				memcpy(leaf_node_id, node_id, 8);
-				merkle_route_cache_store(index_oid, &index_rnode, partition_id, routing_key,
-										 leaf_node_id, 0);
-				return 0;
+			}
+			else
+			{
+				/* Fallback to SPI if catalog_rel / pkey_idx_rel not provided */
+				Datum values[3];
+				bytea *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
+				int spi_rc;
+				MerklePlanCacheEntry *plans;
+
+				merkle_sync_prepare_plans(index_oid);
+				plans = merkle_get_plans(index_oid);
+
+				SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
+				memcpy(VARDATA(node_id_bytea), node_id, 8);
+
+				values[0] = Int16GetDatum((int16) partition_id);
+				values[1] = PointerGetDatum(node_id_bytea);
+				values[2] = Int16GetDatum((int16) prefix_len);
+
+				spi_rc = SPI_execute_snapshot(plans->sync_route_plan, values, NULL,
+											  traversal_snapshot, InvalidSnapshot,
+												  false, false, 1);
+
+				if (spi_rc == SPI_OK_SELECT && SPI_processed > 0)
+				{
+					bool isnull;
+					found_node = true;
+					is_leaf = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull));
+					SPI_freetuptable(SPI_tuptable);
+				}
+				pfree(node_id_bytea);
 			}
 
-			/*
-			 * Each level is read with a fresh snapshot, so a merge that
-			 * committed after we read this node's parent as internal has
-			 * deleted it.  Retry from the root, which sees the merged leaf.
-			 */
-			if (++traversal_restarts <= MERKLE_ROUTE_MAX_RESTARTS)
-				goto restart_traversal;
-			elog(ERROR, "merkle_resolve_route_leaf node (index=%u, len=%d) not found", index_oid, prefix_len);
-		}
+			if (!found_node)
+			{
+				if (prefix_len == 0)
+				{
+					Oid ins_argtypes[4] = {INT2OID, BYTEAOID, INT2OID, BYTEAOID};
+					Datum ins_values[4];
+					bytea *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
+					bytea *zero_hash_bytea = (bytea *) palloc0(VARHDRSZ + MERKLE_HASH_BYTES);
+					char *ins_sql;
 
-		if (is_leaf)
-		{
-			memcpy(leaf_node_id, node_id, 8);
-			merkle_route_cache_store(index_oid, &index_rnode, partition_id, routing_key,
-									 leaf_node_id, prefix_len);
-			return prefix_len;
-		}
-		else
-		{
-			uint8 bits = merkle_next_bits(routing_key, prefix_len, bits_per_split);
-			uint8 next_node_id[8];
-			merkle_bytea_extend(next_node_id, node_id, prefix_len, bits, bits_per_split);
-			memcpy(node_id, next_node_id, 8);
-			prefix_len += bits_per_split;
+					SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
+					memcpy(VARDATA(node_id_bytea), node_id, 8);
+					SET_VARSIZE(zero_hash_bytea, VARHDRSZ + MERKLE_HASH_BYTES);
+
+					ins_values[0] = Int16GetDatum((int16) partition_id);
+					ins_values[1] = PointerGetDatum(node_id_bytea);
+					ins_values[2] = Int16GetDatum(0);
+					ins_values[3] = PointerGetDatum(zero_hash_bytea);
+
+					{
+						char tablename[64];
+						merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+						ins_sql = psprintf(
+							"INSERT INTO ariabc_internal.%s"
+							" (partition_id, node_id, prefix_len, is_leaf, tuple_count, hash)"
+							" VALUES ($1, $2, $3, true, 0, $4)"
+							" ON CONFLICT (partition_id, node_id, prefix_len) DO NOTHING",
+							tablename);
+					}
+
+					SPI_execute_with_args(ins_sql, 4, ins_argtypes, ins_values, NULL, false, 1);
+					pfree(ins_sql);
+
+					if (SPI_tuptable != NULL)
+						SPI_freetuptable(SPI_tuptable);
+
+					pfree(zero_hash_bytea);
+					pfree(node_id_bytea);
+					memcpy(leaf_node_id, node_id, 8);
+					merkle_route_cache_store(index_oid, &index_rnode, partition_id, routing_key,
+											 leaf_node_id, 0);
+					break;
+				}
+
+				/*
+				 * Retry a missing child from the root with a fresh snapshot.
+				 * Discard all hints from the incomplete traversal as well.
+				 */
+				if (++traversal_restarts <= MERKLE_ROUTE_MAX_RESTARTS)
+					goto restart_traversal;
+				elog(ERROR, "merkle_resolve_route_leaf node (index=%u, len=%d) not found", index_oid, prefix_len);
+			}
+
+			if (is_leaf)
+			{
+				memcpy(leaf_node_id, node_id, 8);
+				merkle_route_cache_store(index_oid, &index_rnode, partition_id, routing_key,
+										 leaf_node_id, prefix_len);
+				break;
+			}
+			else
+			{
+				uint8 bits = merkle_next_bits(routing_key, prefix_len, bits_per_split);
+				uint8 next_node_id[8];
+				merkle_bytea_extend(next_node_id, node_id, prefix_len, bits, bits_per_split);
+				memcpy(node_id, next_node_id, 8);
+				prefix_len += bits_per_split;
+			}
 		}
 	}
+	PG_FINALLY();
+	{
+		if (traversal_snapshot != NULL)
+			UnregisterSnapshot(traversal_snapshot);
+	}
+	PG_END_TRY();
+
+	return prefix_len;
 }
 
 static int64
@@ -1738,7 +1780,7 @@ merkle_apply_single_coalesced_entry(Relation catalog_rel, Relation pkey_idx_rel,
 		leaf_prefix_len = merkle_resolve_route_leaf(catalog_rel, pkey_idx_rel, slot,
 										   index_oid, partition_id, routing_key,
 										   leaf_node_id, &bits_per_split,
-										   &split_thresh, &merge_thresh);
+										   &split_thresh, &merge_thresh, NULL);
 		rows_updated = merkle_atomic_update_leaf(index_oid, partition_id, leaf_node_id, leaf_prefix_len,
 												 &entry->xor_delta, count_delta, &new_count);
 		if (rows_updated == 1)
@@ -1822,6 +1864,7 @@ typedef struct MerkleCoalescedNode
 	uint8		node_id[8];
 	bool		is_leaf;
 	bool		stale;			/* leaf was split/merged away before we locked it */
+	ItemPointerData tid_hint;	/* revalidate before use; not a row identity */
 	MerkleHash	xor_delta;
 	int64		count_delta;
 	int			split_thresh;
@@ -1835,7 +1878,19 @@ typedef struct MerkleEntryRoute
 	int			prefix_len;
 	int64		count_delta;
 	bool		pending;		/* leaf delta not yet applied */
+	ItemPointerData *route_tids;	/* root-to-leaf, indexed by prefix / split bits */
 } MerkleEntryRoute;
+
+/* Heap state survives ERROR longjmp; its local pointer is fixed before PG_TRY. */
+typedef struct MerkleNodeIndexState
+{
+	EState	   *estate;
+	ResultRelInfo *rri;
+	bool		indices_open;
+	MerkleCoalescedNode *coalesced_nodes;
+	int			num_coalesced;
+	int			cap_coalesced;
+} MerkleNodeIndexState;
 
 #define MERKLE_LEAF_MAX_REROUTES 16
 
@@ -1862,7 +1917,8 @@ merkle_coalesced_node_cmp(const void *a, const void *b)
 static int
 merkle_coalesced_node_find_or_add(MerkleCoalescedNode **nodes_ptr, int *count_ptr, int *capacity_ptr,
 								  int partition_id, int prefix_len, const uint8 *node_id,
-								  bool is_leaf, int split_thresh, int merge_thresh)
+								  bool is_leaf, int split_thresh, int merge_thresh,
+								  const ItemPointerData *tid_hint)
 {
 	MerkleCoalescedNode *nodes = *nodes_ptr;
 	int i;
@@ -1874,6 +1930,8 @@ merkle_coalesced_node_find_or_add(MerkleCoalescedNode **nodes_ptr, int *count_pt
 		{
 			if (is_leaf)
 				nodes[i].is_leaf = true;
+			if (tid_hint != NULL && ItemPointerIsValid(tid_hint))
+				nodes[i].tid_hint = *tid_hint;
 			return i;
 		}
 	}
@@ -1891,6 +1949,9 @@ merkle_coalesced_node_find_or_add(MerkleCoalescedNode **nodes_ptr, int *count_pt
 	memcpy(nodes[i].node_id, node_id, 8);
 	nodes[i].is_leaf = is_leaf;
 	nodes[i].stale = false;
+	ItemPointerSetInvalid(&nodes[i].tid_hint);
+	if (tid_hint != NULL && ItemPointerIsValid(tid_hint))
+		nodes[i].tid_hint = *tid_hint;
 	merkle_hash_zero(&nodes[i].xor_delta);
 	nodes[i].count_delta = 0;
 	nodes[i].split_thresh = split_thresh;
@@ -1902,8 +1963,8 @@ merkle_coalesced_node_find_or_add(MerkleCoalescedNode **nodes_ptr, int *count_pt
  * merkle_direct_update_node
  *
  * Directly updates a leaf or ancestor Merkle node in the dedicated catalog table
- * using low-level B-tree index lookup and table_tuple_update() in C, completely
- * bypassing SPI, SQL query evaluation, and ProcArrayLock snapshot thrashing.
+ * using a validated route TID (or B-tree lookup) and table_tuple_update() in C,
+ * bypassing SPI and SQL query evaluation.
  *
  * If concurrent transactions updated the tuple while we waited, it traverses the
  * ctid chain (handling TM_Updated) and applies the commutative delta to the newest
@@ -1930,14 +1991,12 @@ typedef enum MerkleNodeUpdateResult
 static MerkleNodeUpdateResult
 merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 						  TupleTableSlot *scan_slot, TupleTableSlot *update_slot,
-						  EState *estate,
+						  MerkleNodeIndexState *index_state,
 						  int partition_id, const uint8 *node_id, int prefix_len,
 						  bool is_leaf, const MerkleHash *xor_delta,
-						  int64 count_delta, int64 *new_count_out)
+						  int64 count_delta, const ItemPointerData *tid_hint,
+						  int64 *new_count_out)
 {
-	ScanKeyData skey[3];
-	bytea *node_id_bytea;
-	IndexScanDesc iscan;
 	bool found = false;
 	ItemPointerData cur_tid;
 	TM_Result result;
@@ -1961,23 +2020,78 @@ merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 	int32 new_count;
 	MerkleHash old_hash;
 	MerkleHash new_hash;
+	Snapshot lookup_snapshot;
 
 	td = RelationGetDescr(catalog_rel);
 
-	node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
-	SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
-	memcpy(VARDATA(node_id_bytea), node_id, 8);
-
-	ScanKeyInit(&skey[0], 1, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) partition_id));
-	ScanKeyInit(&skey[1], 2, BTEqualStrategyNumber, F_BYTEAEQ, PointerGetDatum(node_id_bytea));
-	ScanKeyInit(&skey[2], 3, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) prefix_len));
-
-	iscan = index_beginscan(catalog_rel, pkey_idx_rel, GetLatestSnapshot(), 3, 0);
-	index_rescan(iscan, skey, 3, NULL, 0);
+	/* Keep a fresh snapshot per node, including after predecessor commits. */
+	lookup_snapshot = GetLatestSnapshot();
 	ExecClearTuple(scan_slot);
-	found = index_getnext_slot(iscan, ForwardScanDirection, scan_slot);
-	index_endscan(iscan);
-	pfree(node_id_bytea);
+	if (tid_hint != NULL && ItemPointerIsValid(tid_hint))
+	{
+		/*
+		 * Routing released its snapshot and buffer pins.  This TID may now
+		 * be dead, redirected by HOT pruning, or reused for another node.
+		 * Fetch only the exact visible version, then check the full key.
+		 */
+		cur_tid = *tid_hint;
+		if (table_tuple_fetch_row_version(catalog_rel, &cur_tid,
+										  lookup_snapshot, scan_slot))
+		{
+			Datum d;
+			bytea *stored_node_id;
+
+			d = slot_getattr(scan_slot, 2, &isnull);
+			found = !isnull && DatumGetInt16(d) == partition_id;
+			d = slot_getattr(scan_slot, 3, &isnull);
+			found = found && !isnull && DatumGetInt16(d) == prefix_len;
+			d = slot_getattr(scan_slot, 5, &isnull);
+			if (found && !isnull)
+			{
+				stored_node_id = DatumGetByteaPP(d);
+				found = VARSIZE_ANY_EXHDR(stored_node_id) == 8 &&
+					memcmp(VARDATA_ANY(stored_node_id), node_id, 8) == 0;
+			}
+			else
+				found = false;
+			if (found && is_leaf)
+			{
+				merkle_init_cat_col_offsets(td);
+				found = false;
+				if (g_cat_att_is_leaf > 0)
+				{
+					d = slot_getattr(scan_slot, g_cat_att_is_leaf, &isnull);
+					found = !isnull && DatumGetBool(d);
+				}
+			}
+			if (found)
+			{
+				oldTup = ExecFetchSlotHeapTuple(scan_slot, false, NULL);
+				/* An update already linked a successor; let the PK find it. */
+				found = ItemPointerEquals(&cur_tid, &oldTup->t_data->t_ctid);
+			}
+		}
+	}
+
+	if (!found)
+	{
+		ScanKeyData skey[3];
+		bytea *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
+		IndexScanDesc iscan;
+
+		SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
+		memcpy(VARDATA(node_id_bytea), node_id, 8);
+		ScanKeyInit(&skey[0], 1, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) partition_id));
+		ScanKeyInit(&skey[1], 2, BTEqualStrategyNumber, F_BYTEAEQ, PointerGetDatum(node_id_bytea));
+		ScanKeyInit(&skey[2], 3, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) prefix_len));
+
+		iscan = index_beginscan(catalog_rel, pkey_idx_rel, lookup_snapshot, 3, 0);
+		index_rescan(iscan, skey, 3, NULL, 0);
+		ExecClearTuple(scan_slot);
+		found = index_getnext_slot(iscan, ForwardScanDirection, scan_slot);
+		index_endscan(iscan);
+		pfree(node_id_bytea);
+	}
 
 	if (!found)
 		return is_leaf ? MERKLE_NODE_UPDATE_STALE_LEAF : MERKLE_NODE_UPDATE_MISSING;
@@ -2066,11 +2180,19 @@ merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 			if (unlikely(update_indexes))
 			{
 				/* Non-HOT update: update indexes pointing to the new heap tuple */
-				if (estate != NULL)
+				if (index_state->estate == NULL)
 				{
-					ExecInsertIndexTuples(update_slot, estate, false, NULL, NIL);
-					ResetPerTupleExprContext(estate);
+					index_state->estate = CreateExecutorState();
+					index_state->rri = makeNode(ResultRelInfo);
+					InitResultRelInfo(index_state->rri, catalog_rel, 1, NULL, 0);
+					ExecOpenIndices(index_state->rri, false);
+					index_state->indices_open = true;
+					index_state->estate->es_result_relations = index_state->rri;
+					index_state->estate->es_num_result_relations = 1;
+					index_state->estate->es_result_relation_info = index_state->rri;
 				}
+				ExecInsertIndexTuples(update_slot, index_state->estate, false, NULL, NIL);
+				ResetPerTupleExprContext(index_state->estate);
 			}
 
 			if (new_count_out)
@@ -2111,16 +2233,16 @@ merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,
 static MerkleNodeUpdateResult
 merkle_apply_coalesced_node(Relation catalog_rel, Relation pkey_idx_rel,
 							TupleTableSlot *slot, TupleTableSlot *update_slot,
-							EState *estate, MerklePlanCacheEntry *plans,
+							MerkleNodeIndexState *index_state, MerklePlanCacheEntry *plans,
 							Oid index_oid, const MerkleCoalescedNode *node,
 							int64 *new_count_out)
 {
 	if (catalog_rel != NULL && pkey_idx_rel != NULL && slot != NULL && update_slot != NULL)
 		return merkle_direct_update_node(catalog_rel, pkey_idx_rel,
-										 slot, update_slot, estate,
+										 slot, update_slot, index_state,
 										 node->partition_id, node->node_id,
 										 node->prefix_len, node->is_leaf,
-										 &node->xor_delta, node->count_delta,
+										 &node->xor_delta, node->count_delta, &node->tid_hint,
 										 new_count_out);
 
 	/* Fallback to SPI if direct table relations are unavailable */
@@ -2217,8 +2339,6 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 	Relation pkey_idx_rel = NULL;
 	TupleTableSlot *slot = NULL;
 	TupleTableSlot *update_slot = NULL;
-	ResultRelInfo *rri = NULL;
-	EState *estate = NULL;
 
 	num_entries = hash_get_num_entries(combined_delta_map);
 	if (num_entries == 0)
@@ -2246,9 +2366,7 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 		long start_idx = i;
 		long end_idx;
 		MerklePlanCacheEntry *plans = merkle_get_plans(curr_index_oid);
-		MerkleCoalescedNode *coalesced_nodes = NULL;
-		int num_coalesced = 0;
-		int cap_coalesced = 0;
+		MerkleNodeIndexState *index_state = palloc0(sizeof(MerkleNodeIndexState));
 
 		while (i < num_entries && sorted_entries[i].entry->key.index_oid == curr_index_oid)
 			i++;
@@ -2258,8 +2376,6 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 		pkey_idx_rel = NULL;
 		slot = NULL;
 		update_slot = NULL;
-		rri = NULL;
-		estate = NULL;
 
 		if (!OidIsValid(plans->catalog_relid))
 		{
@@ -2292,14 +2408,6 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 				slot = table_slot_create(catalog_rel, NULL);
 				update_slot = MakeSingleTupleTableSlot(RelationGetDescr(catalog_rel), &TTSOpsHeapTuple);
 				update_slot->tts_tableOid = RelationGetRelid(catalog_rel);
-
-				estate = CreateExecutorState();
-				rri = makeNode(ResultRelInfo);
-				InitResultRelInfo(rri, catalog_rel, 1, NULL, 0);
-				ExecOpenIndices(rri, false);
-				estate->es_result_relations = rri;
-				estate->es_num_result_relations = 1;
-				estate->es_result_relation_info = rri;
 			}
 		}
 
@@ -2313,7 +2421,7 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 			int split_thresh = 0;
 			int merge_thresh = 0;
 			int round;
-			MerkleEntryRoute *routes = (MerkleEntryRoute *) palloc(n * sizeof(MerkleEntryRoute));
+			MerkleEntryRoute *routes = (MerkleEntryRoute *) palloc0(n * sizeof(MerkleEntryRoute));
 
 			/* Phase 1: route every delta to the leaf that currently covers it. */
 			for (j = 0; j < n; j++)
@@ -2334,7 +2442,7 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 															 curr_index_oid, sorted_entries[start_idx + j].partition_id,
 															 sorted_entries[start_idx + j].routing_key,
 															 route->node_id, &bits_per_split,
-															 &split_thresh, &merge_thresh);
+															 &split_thresh, &merge_thresh, &route->route_tids);
 				route->pending = true;
 			}
 
@@ -2351,7 +2459,7 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 			{
 				int num_stale = 0;
 
-				num_coalesced = 0;
+				index_state->num_coalesced = 0;
 				for (j = 0; j < n; j++)
 				{
 					const MerkleDeltaEntry *delta_entry = sorted_entries[start_idx + j].entry;
@@ -2359,27 +2467,31 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 
 					if (!routes[j].pending)
 						continue;
-					leaf_idx = merkle_coalesced_node_find_or_add(&coalesced_nodes, &num_coalesced, &cap_coalesced,
+					leaf_idx = merkle_coalesced_node_find_or_add(&index_state->coalesced_nodes,
+																&index_state->num_coalesced, &index_state->cap_coalesced,
 																sorted_entries[start_idx + j].partition_id,
 																routes[j].prefix_len, routes[j].node_id,
-																true, split_thresh, merge_thresh);
-					merkle_hash_xor(&coalesced_nodes[leaf_idx].xor_delta, &delta_entry->xor_delta);
-					coalesced_nodes[leaf_idx].count_delta += routes[j].count_delta;
+																true, split_thresh, merge_thresh,
+																routes[j].route_tids == NULL ? NULL :
+																&routes[j].route_tids[routes[j].prefix_len / bits_per_split]);
+					merkle_hash_xor(&index_state->coalesced_nodes[leaf_idx].xor_delta, &delta_entry->xor_delta);
+					index_state->coalesced_nodes[leaf_idx].count_delta += routes[j].count_delta;
 				}
 
-				if (num_coalesced > 1)
-					qsort(coalesced_nodes, num_coalesced, sizeof(MerkleCoalescedNode), merkle_coalesced_node_cmp);
+				if (index_state->num_coalesced > 1)
+					qsort(index_state->coalesced_nodes, index_state->num_coalesced,
+						  sizeof(MerkleCoalescedNode), merkle_coalesced_node_cmp);
 
-				for (long k = 0; k < num_coalesced; k++)
+				for (long k = 0; k < index_state->num_coalesced; k++)
 				{
-					MerkleCoalescedNode *node = &coalesced_nodes[k];
+					MerkleCoalescedNode *node = &index_state->coalesced_nodes[k];
 					int64 new_count = 0;
 
 					/* Net-zero deltas also cancel on every ancestor of this leaf. */
 					if (node->count_delta == 0 && merkle_hash_is_zero(&node->xor_delta))
 						continue;
 
-					if (merkle_apply_coalesced_node(catalog_rel, pkey_idx_rel, slot, update_slot, estate,
+					if (merkle_apply_coalesced_node(catalog_rel, pkey_idx_rel, slot, update_slot, index_state,
 													plans, curr_index_oid, node, &new_count) != MERKLE_NODE_UPDATE_OK)
 					{
 						node->stale = true;
@@ -2408,11 +2520,12 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 
 					if (!routes[j].pending)
 						continue;
-					leaf_idx = merkle_coalesced_node_find_or_add(&coalesced_nodes, &num_coalesced, &cap_coalesced,
+					leaf_idx = merkle_coalesced_node_find_or_add(&index_state->coalesced_nodes,
+																&index_state->num_coalesced, &index_state->cap_coalesced,
 																sorted_entries[start_idx + j].partition_id,
 																routes[j].prefix_len, routes[j].node_id,
-																true, split_thresh, merge_thresh);
-					if (!coalesced_nodes[leaf_idx].stale)
+																true, split_thresh, merge_thresh, NULL);
+					if (!index_state->coalesced_nodes[leaf_idx].stale)
 					{
 						routes[j].pending = false;
 						continue;
@@ -2421,12 +2534,12 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 																	curr_index_oid, sorted_entries[start_idx + j].partition_id,
 																	sorted_entries[start_idx + j].routing_key,
 																	routes[j].node_id, &bits_per_split,
-																	&split_thresh, &merge_thresh);
+																	&split_thresh, &merge_thresh, &routes[j].route_tids);
 				}
 			}
 
 			/* Phase 3: propagate every delta to the ancestors of its final leaf. */
-			num_coalesced = 0;
+			index_state->num_coalesced = 0;
 			for (j = 0; j < n; j++)
 			{
 				const MerkleDeltaEntry *delta_entry = sorted_entries[start_idx + j].entry;
@@ -2439,11 +2552,14 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 				{
 					uint8 parent_node_id[8];
 					int parent_prefix_len = merkle_parent_of(parent_node_id, curr_node_id, curr_prefix_len, bits_per_split);
-					int parent_idx = merkle_coalesced_node_find_or_add(&coalesced_nodes, &num_coalesced, &cap_coalesced,
+					int parent_idx = merkle_coalesced_node_find_or_add(&index_state->coalesced_nodes,
+																	  &index_state->num_coalesced, &index_state->cap_coalesced,
 																	  partition_id, parent_prefix_len, parent_node_id,
-																	  false, split_thresh, merge_thresh);
-					merkle_hash_xor(&coalesced_nodes[parent_idx].xor_delta, &delta_entry->xor_delta);
-					coalesced_nodes[parent_idx].count_delta += routes[j].count_delta;
+																	  false, split_thresh, merge_thresh,
+																	  routes[j].route_tids == NULL ? NULL :
+																	  &routes[j].route_tids[parent_prefix_len / bits_per_split]);
+					merkle_hash_xor(&index_state->coalesced_nodes[parent_idx].xor_delta, &delta_entry->xor_delta);
+					index_state->coalesced_nodes[parent_idx].count_delta += routes[j].count_delta;
 
 					memcpy(curr_node_id, parent_node_id, 8);
 					curr_prefix_len = parent_prefix_len;
@@ -2452,17 +2568,18 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 
 			/* Sort ancestors in strict canonical order:
 			 * Partition ID ASC -> prefix_len DESC -> node_id ASC */
-			if (num_coalesced > 1)
-				qsort(coalesced_nodes, num_coalesced, sizeof(MerkleCoalescedNode), merkle_coalesced_node_cmp);
+			if (index_state->num_coalesced > 1)
+				qsort(index_state->coalesced_nodes, index_state->num_coalesced,
+					  sizeof(MerkleCoalescedNode), merkle_coalesced_node_cmp);
 
-			for (long k = 0; k < num_coalesced; k++)
+			for (long k = 0; k < index_state->num_coalesced; k++)
 			{
-				MerkleCoalescedNode *node = &coalesced_nodes[k];
+				MerkleCoalescedNode *node = &index_state->coalesced_nodes[k];
 
 				if (node->count_delta == 0 && merkle_hash_is_zero(&node->xor_delta))
 					continue;
 
-				if (merkle_apply_coalesced_node(catalog_rel, pkey_idx_rel, slot, update_slot, estate,
+				if (merkle_apply_coalesced_node(catalog_rel, pkey_idx_rel, slot, update_slot, index_state,
 												plans, curr_index_oid, node, NULL) != MERKLE_NODE_UPDATE_OK)
 				{
 					merkle_route_cache_invalidate(curr_index_oid, node->partition_id, NULL);
@@ -2470,15 +2587,18 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 						 curr_index_oid, node->partition_id, node->prefix_len);
 				}
 			}
+			for (j = 0; j < n; j++)
+				if (routes[j].route_tids != NULL)
+					pfree(routes[j].route_tids);
 			pfree(routes);
 			CommandCounterIncrement();
 		}
 		PG_FINALLY();
 		{
-			if (coalesced_nodes != NULL)
+			if (index_state->coalesced_nodes != NULL)
 			{
-				pfree(coalesced_nodes);
-				coalesced_nodes = NULL;
+				pfree(index_state->coalesced_nodes);
+				index_state->coalesced_nodes = NULL;
 			}
 			if (slot != NULL)
 			{
@@ -2490,17 +2610,16 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 				ExecDropSingleTupleTableSlot(update_slot);
 				update_slot = NULL;
 			}
-			if (rri != NULL)
+			if (index_state->rri != NULL)
 			{
-				ExecCloseIndices(rri);
-				pfree(rri);
-				rri = NULL;
+				/* Partial ExecOpenIndices failures are cleaned up at abort. */
+				if (index_state->indices_open)
+					ExecCloseIndices(index_state->rri);
+				pfree(index_state->rri);
 			}
-			if (estate != NULL)
-			{
-				FreeExecutorState(estate);
-				estate = NULL;
-			}
+			if (index_state->estate != NULL)
+				FreeExecutorState(index_state->estate);
+			pfree(index_state);
 			if (pkey_idx_rel != NULL)
 			{
 				index_close(pkey_idx_rel, RowExclusiveLock);

@@ -88,7 +88,8 @@ static char *ChooseIndexNameAddition(List *colnames);
 static List *ChooseIndexColumnNames(List *indexElems);
 static void RangeVarCallbackForReindexIndex(const RangeVar *relation,
 											Oid relId, Oid oldRelId, void *arg);
-static bool ReindexRelationConcurrently(Oid relationOid, int options);
+static bool ReindexRelationConcurrently(Oid relationOid, int options,
+										bool skip_merkle);
 static void ReindexPartitionedIndex(Relation parentIdx);
 static void update_relispartition(Oid relationId, bool newval);
 
@@ -2361,7 +2362,7 @@ ReindexIndex(RangeVar *indexRelation, int options, bool concurrent)
 	index_close(irel, NoLock);
 
 	if (concurrent)
-		ReindexRelationConcurrently(indOid, options);
+		ReindexRelationConcurrently(indOid, options, false);
 	else
 		reindex_index(indOid, false, persistence,
 					  options | REINDEXOPT_REPORT_PROGRESS);
@@ -2455,7 +2456,7 @@ ReindexTable(RangeVar *relation, int options, bool concurrent)
 
 	if (concurrent)
 	{
-		result = ReindexRelationConcurrently(heapOid, options);
+		result = ReindexRelationConcurrently(heapOid, options, false);
 
 		if (!result)
 			ereport(NOTICE,
@@ -2661,7 +2662,7 @@ ReindexMultipleTables(const char *objectName, ReindexObjectType objectKind,
 
 		if (concurrent)
 		{
-			(void) ReindexRelationConcurrently(relid, options);
+			(void) ReindexRelationConcurrently(relid, options, true);
 			/* ReindexRelationConcurrently() does the verbose output */
 		}
 		else
@@ -2701,6 +2702,9 @@ ReindexMultipleTables(const char *objectName, ReindexObjectType objectKind,
  * itself will be rebuilt.  If 'relationOid' belongs to a partitioned table
  * then we issue a warning to mention these are not yet supported.
  *
+ * Merkle indexes cannot be rebuilt concurrently.  If 'skip_merkle' is true
+ * (for schema/database operations), warn and skip them; otherwise error.
+ *
  * The locks taken on parent tables and involved indexes are kept until the
  * transaction is committed, at which point a session lock is taken on each
  * relation.  Both of these protect against concurrent schema changes.
@@ -2709,7 +2713,7 @@ ReindexMultipleTables(const char *objectName, ReindexObjectType objectKind,
  * indexes, when relevant), otherwise returns false.
  */
 static bool
-ReindexRelationConcurrently(Oid relationOid, int options)
+ReindexRelationConcurrently(Oid relationOid, int options, bool skip_merkle)
 {
 	List	   *heapRelationIds = NIL;
 	List	   *indexIds = NIL;
@@ -2900,6 +2904,32 @@ ReindexRelationConcurrently(Oid relationOid, int options)
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("cannot reindex this type of relation concurrently")));
 			break;
+	}
+
+	/* Check all candidate indexes before creating any catalog entries. */
+	foreach(lc, indexIds)
+	{
+		Oid			indexId = lfirst_oid(lc);
+		Relation	indexRel = index_open(indexId, ShareUpdateExclusiveLock);
+
+		if (indexRel->rd_rel->relam == MERKLE_AM_OID)
+		{
+			if (!skip_merkle)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("REINDEX CONCURRENTLY is not supported for Merkle indexes"),
+						 errhint("Use non-concurrent REINDEX after Merkle recovery is synchronized.")));
+
+			ereport(WARNING,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot reindex Merkle index \"%s.%s\" concurrently, skipping",
+							get_namespace_name(get_rel_namespace(indexId)),
+							get_rel_name(indexId)),
+					 errhint("Use non-concurrent REINDEX after Merkle recovery is synchronized.")));
+			indexIds = foreach_delete_current(indexIds, lc);
+		}
+
+		index_close(indexRel, NoLock);
 	}
 
 	/* Definitely no indexes, so leave */

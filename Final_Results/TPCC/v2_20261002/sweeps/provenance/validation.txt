@@ -1,0 +1,3 @@
+PASS: 36 distinct matrix runs, full requested point coverage, endpoint/interior threshold, strict <0.65, shared-point retry deduplication
+{"mode": "pg", "tps": 1708.21, "completed": 2000, "perm_fail": 0, "div": 0, "merkle_verify": "", "wal_per_tx": 44123.92, "restarts": 5020}
+{"mode": "merkle", "tps": 591.83, "completed": 2000, "perm_fail": 0, "div": 0, "merkle_verify": "9:true", "wal_per_tx": 78552.188, "restarts": 1523}

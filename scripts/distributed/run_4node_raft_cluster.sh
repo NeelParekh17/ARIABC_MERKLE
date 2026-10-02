@@ -409,8 +409,8 @@ SKIP_POST_VERIFY="${SKIP_POST_VERIFY:-0}"
 ENABLE_MERKLE_INDEX="${ENABLE_MERKLE_INDEX:-1}"
 MERKLE_PARTITIONS="${MERKLE_PARTITIONS:-200}"
 MERKLE_FANOUT="${MERKLE_FANOUT:-4}"
-MERKLE_SPLIT_THRESHOLD="${MERKLE_SPLIT_THRESHOLD:-32}"
-MERKLE_MERGE_THRESHOLD="${MERKLE_MERGE_THRESHOLD:-8}"
+MERKLE_SPLIT_THRESHOLD="${MERKLE_SPLIT_THRESHOLD:-}"
+MERKLE_MERGE_THRESHOLD="${MERKLE_MERGE_THRESHOLD:-}"
 STOP_ONLY="${STOP_ONLY:-0}"
 FORCE_PG_RESTART="${FORCE_PG_RESTART:-1}"
 NO_KAFKA="${NO_KAFKA:-0}"           # set to 1 to skip kafka and run direct-only test
@@ -551,9 +551,9 @@ Options:
   --merkle-fanout N
                   Merkle tree branching factor / fanout (default: 4)
   --merkle-split-threshold N
-                  Node tuple count triggering a split (default: 32)
+                  Node tuple count triggering a split (default: 1024 for fanout 32, otherwise 32)
   --merkle-merge-threshold N
-                  Node tuple count triggering a merge (default: 8)
+                  Node tuple count triggering a merge (default: max(1, split threshold / 4))
   --skip-workload Start PostgreSQL/Raft servers, wait for a leader, collect logs,
                   and exit without starting the gateway, submitting SQL, or
                   sending the post-run marker
@@ -917,6 +917,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 apply_topology_overrides
+
+# Resolve omitted thresholds after both environment and CLI geometry overrides.
+if [[ -z "$MERKLE_SPLIT_THRESHOLD" ]]; then
+  MERKLE_SPLIT_THRESHOLD=32
+  [[ ! "$MERKLE_FANOUT" =~ ^0*32$ ]] || MERKLE_SPLIT_THRESHOLD=1024
+fi
+if [[ ! "$MERKLE_SPLIT_THRESHOLD" =~ ^[0-9]{1,6}$ ]] ||
+   (( 10#$MERKLE_SPLIT_THRESHOLD < 2 || 10#$MERKLE_SPLIT_THRESHOLD > 100000 )); then
+  die "--merkle-split-threshold must be between 2 and 100000"
+fi
+if [[ -z "$MERKLE_MERGE_THRESHOLD" ]]; then
+  MERKLE_MERGE_THRESHOLD=$((10#$MERKLE_SPLIT_THRESHOLD / 4))
+  (( MERKLE_MERGE_THRESHOLD >= 1 )) || MERKLE_MERGE_THRESHOLD=1
+fi
 
 if [[ -z "$RECOVERY_NODES" ]]; then
   rec_nodes=()

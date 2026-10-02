@@ -1,0 +1,34 @@
+2026-10-02T10:42:11+05:30 RUNNING preflight
+2026-10-02T10:42:11+05:30 RUNNING build (PostgreSQL -j64)
+2026-10-02T10:42:40+05:30 RUNNING smoke_C5_t0_e32 tx=2000 mode=merkle split=1024 merge=256 fillfactor=90
+2026-10-02T10:50:40+05:30 FAILED stage=smoke_C5_t0_e32 exit=1 line=90
+2026-10-02T10:56:32+05:30 RUNNING preflight
+2026-10-02T10:56:33+05:30 RUNNING resume: verify previously built binaries and smoke evidence
+2026-10-02T10:56:36+05:30 PASS smoke; RUNNING headline matrix
+2026-10-02T10:56:36+05:30 RUNNING headline_C1_t1_e32 tx=20000 mode=det split=1024 merge=256 fillfactor=default
+2026-10-02T11:00:11+05:30 PASS headline_C1_t1_e32
+2026-10-02T11:00:14+05:30 RUNNING headline_C2_t1_e32 tx=20000 mode=merkle split=32 merge=8 fillfactor=default
+2026-10-02T11:08:50+05:30 PASS headline_C2_t1_e32
+2026-10-02T11:08:54+05:30 RUNNING headline_C3_t1_e32 tx=20000 mode=merkle split=1024 merge=256 fillfactor=default
+2026-10-02T11:17:05+05:30 PASS headline_C3_t1_e32
+2026-10-02T11:17:08+05:30 RUNNING headline_C4_t1_e32 tx=20000 mode=det split=1024 merge=256 fillfactor=90
+2026-10-02T11:21:55+05:30 PASS headline_C4_t1_e32
+2026-10-02T11:21:57+05:30 RUNNING headline_C5_t1_e32 tx=20000 mode=merkle split=1024 merge=256 fillfactor=90
+2026-10-02T11:31:50+05:30 PASS headline_C5_t1_e32
+2026-10-02T11:31:53+05:30 RUNNING headline_C1_t2_e32 tx=20000 mode=det split=1024 merge=256 fillfactor=default
+2026-10-02T11:37:01+05:30 PASS headline_C1_t2_e32
+2026-10-02T11:37:03+05:30 RUNNING headline_C2_t2_e32 tx=20000 mode=merkle split=32 merge=8 fillfactor=default
+2026-10-02T11:47:27+05:30 PASS headline_C2_t2_e32
+2026-10-02T11:47:31+05:30 RUNNING headline_C3_t2_e32 tx=20000 mode=merkle split=1024 merge=256 fillfactor=default
+2026-10-02T11:55:49+05:30 PASS headline_C3_t2_e32
+2026-10-02T11:55:52+05:30 RUNNING headline_C4_t2_e32 tx=20000 mode=det split=1024 merge=256 fillfactor=90
+2026-10-02T12:03:35+05:30 FAILED stage=headline_C4_t2_e32 exit=1 line=107
+2026-10-02T12:17:59+05:30 RUNNING continuation preflight
+2026-10-02T12:17:59+05:30 RUNNING headline_C4_t2_e32 tx=20000 mode=det split=1024 merge=256 fillfactor=90 (continuation)
+2026-10-02T12:22:50+05:30 PASS headline_C4_t2_e32
+2026-10-02T12:22:53+05:30 RUNNING headline_C5_t2_e32 tx=20000 mode=merkle split=1024 merge=256 fillfactor=90 (continuation)
+2026-10-02T12:32:05+05:30 PASS headline_C5_t2_e32
+2026-10-02T12:32:08+05:30 RUNNING headline_C1_t3_e32 tx=20000 mode=det split=1024 merge=256 fillfactor=default (continuation)
+2026-10-02T12:36:58+05:30 PASS headline_C1_t3_e32
+2026-10-02T12:37:01+05:30 RUNNING summary
+2026-10-02T12:37:01+05:30 COMPLETE headline (2 trials C2-C5, 3 for C1; C4_t2 rerun after stop-timeout fix) summary.md ready

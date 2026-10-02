@@ -1,0 +1,2 @@
+{"id": "bca2b45e2543469da0a60bd8b6f52e02", "time": "2026-10-01T06:26:16.101542+00:00", "event": "start", "argv": ["neel@10.129.148.246", "true"], "command": "neel@10.129.148.246 true", "stdin": null}
+{"id": "bca2b45e2543469da0a60bd8b6f52e02", "time": "2026-10-01T06:26:16.356532+00:00", "event": "end", "exit_code": 0}

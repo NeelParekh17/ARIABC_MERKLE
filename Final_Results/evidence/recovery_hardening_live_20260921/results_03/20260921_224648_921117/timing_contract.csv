@@ -1,0 +1,7 @@
+run_id,method,paper_style_total_ms,restore_repair_ms,audit_validation_ms,end_to_end_observed_ms,cleanup_ms,paper_end_before_audit_start,audit_validation_positive,end_to_end_covers_paper_and_audit,full_audit_skipped,audit_validation_skipped
+figure13-n1200-f32-k1-c1-manual-f32-s32-m8-merkle-r0,merkle,12.226,12.226,15.212,28.262,0.053,1,1,1,0,0
+figure13-n1200-f32-k1-c1-manual-f32-s32-m8-merkle-r1,merkle,10.872,10.872,14.339,25.657,0.044,1,1,1,0,0
+figure12-n1000-f32-k10-c10-manual-f32-s32-m8-merkle-r0,merkle,19.909,19.909,13.823,34.176,0.048,1,1,1,0,0
+figure12-n1000-f32-k10-c10-manual-f32-s32-m8-merkle-r1,merkle,21.551,21.551,12.003,34.090,0.049,1,1,1,0,0
+figure13-n1200-f32-k2-c2-manual-f32-s32-m8-merkle-r0,merkle,22.862,22.862,11.166,34.550,0.044,1,1,1,0,0
+figure13-n1200-f32-k2-c2-manual-f32-s32-m8-merkle-r1,merkle,12.203,12.203,12.139,24.771,0.042,1,1,1,0,0

@@ -1,0 +1,53 @@
+[
+  {
+    "configuration": [
+      "bcdb_det",
+      "a",
+      "0.99",
+      "",
+      "8",
+      ""
+    ],
+    "trials": 1,
+    "median": 5780.346820809248,
+    "mean": 5780.346820809248,
+    "min": 5780.346820809248,
+    "max": 5780.346820809248,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "a",
+      "0.99",
+      "",
+      "8",
+      ""
+    ],
+    "trials": 1,
+    "median": 5847.953216374269,
+    "mean": 5847.953216374269,
+    "min": 5847.953216374269,
+    "max": 5847.953216374269,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "a",
+      "0.99",
+      "",
+      "8",
+      ""
+    ],
+    "trials": 1,
+    "median": 3448.2758620689656,
+    "mean": 3448.2758620689656,
+    "min": 3448.2758620689656,
+    "max": 3448.2758620689656,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  }
+]

@@ -1,0 +1,10 @@
+relname,relpersistence,reloptions,heap_bytes,total_bytes
+customer,p,,1881759744,1881767936
+district,p,,139264,163840
+history,p,,364642304,364642304
+item,p,,11214848,11214848
+new_order,p,,51699712,51699712
+oorder,p,,285908992,285908992
+order_line,p,,4249468928,4249468928
+stock,p,,3571720192,3571720192
+warehouse,p,,16384,16384

@@ -74,12 +74,20 @@ SELECT merkle_tree_stats('public.merkle_demo'::regclass)::json;
 | Reloption | Source default | Meaning |
 |---|---:|---|
 | `fanout` | 4 | Branching geometry for key-prefix descent |
-| `split_threshold` | 32 | Occupancy trigger for splitting a leaf |
-| `merge_threshold` | 8 | Threshold used when merging eligible leaf children |
+| `split_threshold` | 1024 for fanout 32; otherwise 32 | Occupancy trigger for splitting a leaf |
+| `merge_threshold` | max(1, split_threshold / 4) | Threshold used when merging eligible leaf children |
 | `partitions` | 200 | Number of independent top-level partitions |
 
 These defaults come from [merkle.h](src/include/access/merkle.h). Benchmark
 profiles may choose different values. Use `merge_threshold < split_threshold`.
+Omitting both thresholds with `fanout = 32` selects 1024/256; fanout 4 retains
+32/8. Explicit thresholds are honored, including an explicit split threshold
+with an omitted merge threshold (which defaults to one quarter of that split
+threshold, rounded down and at least 1). Existing indexes keep their metapage
+geometry until rebuilt. Larger leaves reduce tree depth but can increase split
+work and the number of rows in a recovery range. Eligible siblings merge only
+when their combined count is at most the merge threshold; the one-quarter
+default preserves the legacy hysteresis ratio.
 Depth limits and shared routing prefixes mean a split threshold is not an
 unconditional maximum leaf size. There is no `dynamic` or
 `leaves_per_partition` option.

@@ -1,0 +1,186 @@
+2026-10-02T12:53:50.718776+05:30 RUNNING smoke W=5 workers=32 mode=pg attempt=1 reason=
+2026-10-02T12:54:42.659775+05:30 PASS pg_smoke_k32_t1_w5 TPS=1708.21 completed=2000 divergence=0 failures=0
+2026-10-02T12:54:42.897816+05:30 RUNNING smoke W=5 workers=32 mode=merkle attempt=1 reason=
+2026-10-02T12:55:51.366984+05:30 PASS merkle_smoke_k32_t1_w5 TPS=591.83 completed=2000 divergence=0 failures=0
+2026-10-02T12:55:51.622174+05:30 SMOKE_COMPLETE pg and merkle 2000/2000
+2026-10-02T12:57:47.319234+05:30 RUNNING matrix W=5 workers=32 mode=pg attempt=1 reason=
+2026-10-02T12:59:09.483879+05:30 PASS pg_matrix_k32_t1_w5 TPS=764.37 completed=20000 divergence=0 failures=0
+2026-10-02T12:59:09.729965+05:30 RUNNING matrix W=5 workers=32 mode=det attempt=1 reason=
+2026-10-02T13:00:23.445725+05:30 PASS det_matrix_k32_t1_w5 TPS=898.56 completed=20000 divergence=0 failures=0
+2026-10-02T13:00:23.689774+05:30 RUNNING matrix W=5 workers=32 mode=merkle attempt=1 reason=
+2026-10-02T13:01:59.294792+05:30 PASS merkle_matrix_k32_t1_w5 TPS=662.85 completed=20000 divergence=0 failures=0
+2026-10-02T13:01:59.586591+05:30 RUNNING matrix W=100 workers=8 mode=pg attempt=1 reason=
+2026-10-02T13:07:22.746862+05:30 PASS pg_matrix_k8_t1_w100 TPS=593.21 completed=20000 divergence=0 failures=0
+2026-10-02T13:07:25.591320+05:30 RUNNING matrix W=100 workers=8 mode=det attempt=1 reason=
+2026-10-02T13:13:15.337140+05:30 PASS det_matrix_k8_t1_w100 TPS=805.43 completed=20000 divergence=0 failures=0
+2026-10-02T13:13:18.173717+05:30 RUNNING matrix W=100 workers=8 mode=merkle attempt=1 reason=
+2026-10-02T13:22:25.967765+05:30 PASS merkle_matrix_k8_t1_w100 TPS=1041.21 completed=20000 divergence=0 failures=0
+2026-10-02T13:22:29.493068+05:30 RUNNING matrix W=10 workers=32 mode=pg attempt=1 reason=
+2026-10-02T13:23:35.218611+05:30 PASS pg_matrix_k32_t1_w10 TPS=3432.72 completed=20000 divergence=0 failures=0
+2026-10-02T13:23:35.622175+05:30 RUNNING matrix W=10 workers=32 mode=det attempt=1 reason=
+2026-10-02T13:24:52.130220+05:30 PASS det_matrix_k32_t1_w10 TPS=1187.22 completed=20000 divergence=0 failures=0
+2026-10-02T13:24:52.530495+05:30 RUNNING matrix W=10 workers=32 mode=merkle attempt=1 reason=
+2026-10-02T13:26:48.286751+05:30 PASS merkle_matrix_k32_t1_w10 TPS=879.79 completed=20000 divergence=0 failures=0
+2026-10-02T13:26:48.765655+05:30 RUNNING matrix W=100 workers=16 mode=pg attempt=1 reason=
+2026-10-02T13:32:43.266686+05:30 PASS pg_matrix_k16_t1_w100 TPS=3004.75 completed=20000 divergence=0 failures=0
+2026-10-02T13:32:46.090856+05:30 RUNNING matrix W=100 workers=16 mode=det attempt=1 reason=
+2026-10-02T13:38:11.220104+05:30 PASS det_matrix_k16_t1_w100 TPS=2104.38 completed=20000 divergence=0 failures=0
+2026-10-02T13:38:14.044786+05:30 RUNNING matrix W=100 workers=16 mode=merkle attempt=1 reason=
+2026-10-02T13:49:18.275682+05:30 PASS merkle_matrix_k16_t1_w100 TPS=1122.76 completed=20000 divergence=0 failures=0
+2026-10-02T13:49:21.809618+05:30 RUNNING matrix W=20 workers=32 mode=pg attempt=1 reason=
+2026-10-02T13:50:42.806569+05:30 PASS pg_matrix_k32_t1_w20 TPS=4360.22 completed=20000 divergence=0 failures=0
+2026-10-02T13:50:43.490509+05:30 RUNNING matrix W=20 workers=32 mode=det attempt=1 reason=
+2026-10-02T13:52:29.050908+05:30 PASS det_matrix_k32_t1_w20 TPS=984.39 completed=20000 divergence=0 failures=0
+2026-10-02T13:52:29.732722+05:30 RUNNING matrix W=20 workers=32 mode=merkle attempt=1 reason=
+2026-10-02T13:55:49.194410+05:30 PASS merkle_matrix_k32_t1_w20 TPS=483.51 completed=20000 divergence=0 failures=0
+2026-10-02T13:55:50.023355+05:30 RUNNING matrix W=100 workers=24 mode=pg attempt=1 reason=
+2026-10-02T14:01:30.764410+05:30 PASS pg_matrix_k24_t1_w100 TPS=4075.96 completed=20000 divergence=0 failures=0
+2026-10-02T14:01:33.588724+05:30 RUNNING matrix W=100 workers=24 mode=det attempt=1 reason=
+2026-10-02T14:07:27.222028+05:30 PASS det_matrix_k24_t1_w100 TPS=2579.25 completed=20000 divergence=0 failures=0
+2026-10-02T14:07:30.047902+05:30 RUNNING matrix W=100 workers=24 mode=merkle attempt=1 reason=
+2026-10-02T14:17:49.169170+05:30 PASS merkle_matrix_k24_t1_w100 TPS=960.2 completed=20000 divergence=0 failures=0
+2026-10-02T14:17:52.697605+05:30 RUNNING matrix W=30 workers=32 mode=pg attempt=1 reason=
+2026-10-02T14:19:56.995739+05:30 PASS pg_matrix_k32_t1_w30 TPS=4682.93 completed=20000 divergence=0 failures=0
+2026-10-02T14:19:57.951841+05:30 RUNNING matrix W=30 workers=32 mode=det attempt=1 reason=
+2026-10-02T14:21:56.312322+05:30 PASS det_matrix_k32_t1_w30 TPS=1892.93 completed=20000 divergence=0 failures=0
+2026-10-02T14:21:57.268915+05:30 RUNNING matrix W=30 workers=32 mode=merkle attempt=1 reason=
+2026-10-02T14:26:26.148691+05:30 PASS merkle_matrix_k32_t1_w30 TPS=1336.15 completed=20000 divergence=0 failures=0
+2026-10-02T14:26:27.304377+05:30 RUNNING matrix W=100 workers=32 mode=pg attempt=1 reason=
+2026-10-02T14:31:47.197091+05:30 PASS pg_matrix_k32_t1_w100 TPS=5028.05 completed=20000 divergence=0 failures=0
+2026-10-02T14:31:50.026954+05:30 RUNNING matrix W=100 workers=32 mode=det attempt=1 reason=
+2026-10-02T14:36:44.301670+05:30 PASS det_matrix_k32_t1_w100 TPS=2814.97 completed=20000 divergence=0 failures=0
+2026-10-02T14:36:47.250916+05:30 RUNNING matrix W=100 workers=32 mode=merkle attempt=1 reason=
+2026-10-02T14:47:08.115164+05:30 PASS merkle_matrix_k32_t1_w100 TPS=1157.86 completed=20000 divergence=0 failures=0
+2026-10-02T14:47:11.641048+05:30 RUNNING matrix W=50 workers=32 mode=pg attempt=1 reason=
+2026-10-02T14:50:05.099293+05:30 PASS pg_matrix_k32_t1_w50 TPS=1764.21 completed=20000 divergence=0 failures=0
+2026-10-02T14:50:06.583669+05:30 RUNNING matrix W=50 workers=32 mode=det attempt=1 reason=
+2026-10-02T14:53:05.313239+05:30 PASS det_matrix_k32_t1_w50 TPS=1381.66 completed=20000 divergence=0 failures=0
+2026-10-02T14:53:06.796749+05:30 RUNNING matrix W=50 workers=32 mode=merkle attempt=1 reason=
+2026-10-02T14:58:20.760625+05:30 PASS merkle_matrix_k32_t1_w50 TPS=1578.02 completed=20000 divergence=0 failures=0
+2026-10-02T14:58:22.553923+05:30 RUNNING matrix W=100 workers=48 mode=pg attempt=1 reason=
+2026-10-02T15:04:12.732447+05:30 PASS pg_matrix_k48_t1_w100 TPS=2322.46 completed=20000 divergence=0 failures=0
+2026-10-02T15:04:15.592849+05:30 RUNNING matrix W=100 workers=48 mode=det attempt=1 reason=
+2026-10-02T15:09:56.602069+05:30 PASS det_matrix_k48_t1_w100 TPS=2641.76 completed=20000 divergence=0 failures=0
+2026-10-02T15:09:59.474188+05:30 RUNNING matrix W=100 workers=48 mode=merkle attempt=1 reason=
+2026-10-02T15:20:42.949830+05:30 PASS merkle_matrix_k48_t1_w100 TPS=736.53 completed=20000 divergence=0 failures=0
+2026-10-02T15:20:46.523228+05:30 RUNNING matrix W=75 workers=32 mode=pg attempt=1 reason=
+2026-10-02T15:25:08.422143+05:30 PASS pg_matrix_k32_t1_w75 TPS=1412.51 completed=20000 divergence=0 failures=0
+2026-10-02T15:25:10.574901+05:30 RUNNING matrix W=75 workers=32 mode=det attempt=1 reason=
+2026-10-02T15:29:18.923273+05:30 PASS det_matrix_k32_t1_w75 TPS=2595.15 completed=20000 divergence=0 failures=0
+2026-10-02T15:29:21.081972+05:30 RUNNING matrix W=75 workers=32 mode=merkle attempt=1 reason=
+2026-10-02T15:36:44.822445+05:30 PASS merkle_matrix_k32_t1_w75 TPS=1797.7 completed=20000 divergence=0 failures=0
+2026-10-02T15:36:47.415523+05:30 RUNNING matrix W=100 workers=64 mode=pg attempt=1 reason=
+2026-10-02T15:43:56.062416+05:30 PASS pg_matrix_k64_t1_w100 TPS=2029.37 completed=20000 divergence=0 failures=0
+2026-10-02T15:43:58.899558+05:30 RUNNING matrix W=100 workers=64 mode=det attempt=1 reason=
+2026-10-02T15:49:44.239489+05:30 PASS det_matrix_k64_t1_w100 TPS=1609.03 completed=20000 divergence=0 failures=0
+2026-10-02T15:49:47.065731+05:30 RUNNING matrix W=100 workers=64 mode=merkle attempt=1 reason=
+2026-10-02T15:59:21.695628+05:30 PASS merkle_matrix_k64_t1_w100 TPS=1717.03 completed=20000 divergence=0 failures=0
+2026-10-02T15:59:25.604041+05:30 RUNNING matrix W=5 workers=32 mode=pg attempt=2 reason=W=5 tps=764.37 threshold=2231.268
+2026-10-02T16:00:57.892766+05:30 PASS pg_matrix_k32_t2_w5 TPS=767.75 completed=20000 divergence=0 failures=0
+2026-10-02T16:00:58.215666+05:30 RUNNING matrix W=20 workers=32 mode=merkle attempt=2 reason=W=20 tps=483.51 threshold=571.8635
+2026-10-02T16:04:08.473016+05:30 PASS merkle_matrix_k32_t2_w20 TPS=1137.52 completed=20000 divergence=0 failures=0
+2026-10-02T16:04:09.365708+05:30 RUNNING matrix W=100 workers=32 mode=merkle attempt=2 reason=W=100 tps=1157.86 threshold=1168.505
+2026-10-02T16:15:58.502734+05:30 PASS merkle_matrix_k32_t2_w100 TPS=1984.35 completed=20000 divergence=0 failures=0
+2026-10-02T16:16:02.167713+05:30 RUNNING matrix W=100 workers=8 mode=pg attempt=2 reason=workers=8 tps=593.21 threshold=1953.0875
+2026-10-02T16:22:08.880747+05:30 PASS pg_matrix_k8_t2_w100 TPS=1730.12 completed=20000 divergence=0 failures=0
+2026-10-02T16:22:11.923952+05:30 RUNNING matrix W=100 workers=8 mode=det attempt=2 reason=workers=8 tps=805.43 threshold=1367.8470000000002
+2026-10-02T16:29:25.545359+05:30 PASS det_matrix_k8_t2_w100 TPS=997.62 completed=20000 divergence=0 failures=0
+2026-10-02T16:29:28.592902+05:30 RUNNING matrix W=100 workers=64 mode=det attempt=2 reason=workers=64 tps=1609.03 threshold=1717.1440000000002
+2026-10-02T16:35:26.336178+05:30 PASS det_matrix_k64_t2_w100 TPS=786.33 completed=20000 divergence=0 failures=0
+2026-10-02T16:35:29.381234+05:30 RUNNING matrix W=100 workers=48 mode=merkle attempt=2 reason=workers=48 tps=736.53 threshold=752.6089999999999
+2026-10-02T16:45:45.128469+05:30 PASS merkle_matrix_k48_t2_w100 TPS=1873.09 completed=20000 divergence=0 failures=0
+2026-10-02T16:45:48.768638+05:30 COMPLETE distinct_runs=36 accepted_attempts=43 reruns=7 failed_reruns=[]
+2026-10-02T16:55:14.079806+05:30 RUNNING matrix W=100 workers=64 mode=pg attempt=2 reason=pass2
+2026-10-02T17:01:09.479714+05:30 PASS pg_matrix_k64_t2_w100 TPS=6349.55 completed=20000 divergence=0 failures=0
+2026-10-02T17:01:12.509891+05:30 RUNNING matrix W=100 workers=64 mode=det attempt=3 reason=pass2
+2026-10-02T17:07:17.869076+05:30 PASS det_matrix_k64_t3_w100 TPS=760.14 completed=20000 divergence=0 failures=0
+2026-10-02T17:07:20.904322+05:30 RUNNING matrix W=100 workers=64 mode=merkle attempt=2 reason=pass2
+2026-10-02T17:17:04.702437+05:30 PASS merkle_matrix_k64_t2_w100 TPS=1704.28 completed=20000 divergence=0 failures=0
+2026-10-02T17:17:08.343948+05:30 RUNNING matrix W=75 workers=32 mode=pg attempt=2 reason=pass2
+2026-10-02T17:21:49.213536+05:30 PASS pg_matrix_k32_t2_w75 TPS=4997.49 completed=20000 divergence=0 failures=0
+2026-10-02T17:21:51.547399+05:30 RUNNING matrix W=75 workers=32 mode=det attempt=2 reason=pass2
+2026-10-02T17:25:50.931916+05:30 PASS det_matrix_k32_t2_w75 TPS=2622.14 completed=20000 divergence=0 failures=0
+2026-10-02T17:25:53.267819+05:30 RUNNING matrix W=75 workers=32 mode=merkle attempt=2 reason=pass2
+2026-10-02T17:33:34.147884+05:30 PASS merkle_matrix_k32_t2_w75 TPS=1810.0 completed=20000 divergence=0 failures=0
+2026-10-02T17:33:37.011483+05:30 RUNNING matrix W=100 workers=48 mode=pg attempt=2 reason=pass2
+2026-10-02T17:38:45.487277+05:30 PASS pg_matrix_k48_t2_w100 TPS=6197.14 completed=20000 divergence=0 failures=0
+2026-10-02T17:38:48.517779+05:30 RUNNING matrix W=100 workers=48 mode=det attempt=2 reason=pass2
+2026-10-02T17:44:41.489051+05:30 PASS det_matrix_k48_t2_w100 TPS=772.86 completed=20000 divergence=0 failures=0
+2026-10-02T17:44:44.520722+05:30 RUNNING matrix W=100 workers=48 mode=merkle attempt=3 reason=pass2
+2026-10-02T17:55:17.145016+05:30 PASS merkle_matrix_k48_t3_w100 TPS=1855.78 completed=20000 divergence=0 failures=0
+2026-10-02T17:55:20.788809+05:30 RUNNING matrix W=50 workers=32 mode=pg attempt=2 reason=pass2
+2026-10-02T17:58:53.276034+05:30 PASS pg_matrix_k32_t2_w50 TPS=2615.04 completed=20000 divergence=0 failures=0
+2026-10-02T17:58:54.909497+05:30 RUNNING matrix W=50 workers=32 mode=det attempt=2 reason=pass2
+2026-10-02T18:02:01.345698+05:30 PASS det_matrix_k32_t2_w50 TPS=2202.43 completed=20000 divergence=0 failures=0
+2026-10-02T18:02:02.976599+05:30 RUNNING matrix W=50 workers=32 mode=merkle attempt=2 reason=pass2
+2026-10-02T18:07:28.679636+05:30 PASS merkle_matrix_k32_t2_w50 TPS=1566.48 completed=20000 divergence=0 failures=0
+2026-10-02T18:07:30.654513+05:30 RUNNING matrix W=100 workers=32 mode=pg attempt=2 reason=pass2
+2026-10-02T18:12:50.006334+05:30 PASS pg_matrix_k32_t2_w100 TPS=876.88 completed=20000 divergence=0 failures=0
+2026-10-02T18:12:53.035808+05:30 RUNNING matrix W=100 workers=32 mode=det attempt=2 reason=pass2
+2026-10-02T18:19:01.200742+05:30 PASS det_matrix_k32_t2_w100 TPS=2749.24 completed=20000 divergence=0 failures=0
+2026-10-02T18:19:04.235461+05:30 RUNNING matrix W=100 workers=32 mode=merkle attempt=3 reason=pass2
+2026-10-02T18:28:45.117428+05:30 PASS merkle_matrix_k32_t3_w100 TPS=749.25 completed=20000 divergence=0 failures=0
+2026-10-02T18:28:48.760397+05:30 RUNNING matrix W=30 workers=32 mode=pg attempt=2 reason=pass2
+2026-10-02T18:31:53.675468+05:30 PASS pg_matrix_k32_t2_w30 TPS=958.44 completed=20000 divergence=0 failures=0
+2026-10-02T18:31:54.724622+05:30 RUNNING matrix W=30 workers=32 mode=det attempt=2 reason=pass2
+2026-10-02T18:34:14.698327+05:30 PASS det_matrix_k32_t2_w30 TPS=1892.16 completed=20000 divergence=0 failures=0
+2026-10-02T18:34:15.745558+05:30 RUNNING matrix W=30 workers=32 mode=merkle attempt=2 reason=pass2
+2026-10-02T18:37:39.787862+05:30 PASS merkle_matrix_k32_t2_w30 TPS=1343.32 completed=20000 divergence=0 failures=0
+2026-10-02T18:37:41.050925+05:30 RUNNING matrix W=100 workers=24 mode=pg attempt=2 reason=pass2
+2026-10-02T18:43:41.834033+05:30 PASS pg_matrix_k24_t2_w100 TPS=1487.11 completed=20000 divergence=0 failures=0
+2026-10-02T18:43:44.866462+05:30 RUNNING matrix W=100 workers=24 mode=det attempt=2 reason=pass2
+2026-10-02T18:49:23.380992+05:30 PASS det_matrix_k24_t2_w100 TPS=2579.04 completed=20000 divergence=0 failures=0
+2026-10-02T18:49:26.414031+05:30 RUNNING matrix W=100 workers=24 mode=merkle attempt=2 reason=pass2
+2026-10-02T18:59:10.470361+05:30 PASS merkle_matrix_k24_t2_w100 TPS=1809.26 completed=20000 divergence=0 failures=0
+2026-10-02T18:59:14.116716+05:30 RUNNING matrix W=20 workers=32 mode=pg attempt=2 reason=pass2
+2026-10-02T19:02:08.495422+05:30 PASS pg_matrix_k32_t2_w20 TPS=3232.47 completed=20000 divergence=0 failures=0
+2026-10-02T19:02:09.243583+05:30 RUNNING matrix W=20 workers=32 mode=det attempt=2 reason=pass2
+2026-10-02T19:04:13.962467+05:30 PASS det_matrix_k32_t2_w20 TPS=687.99 completed=20000 divergence=0 failures=0
+2026-10-02T19:04:14.709794+05:30 RUNNING matrix W=20 workers=32 mode=merkle attempt=3 reason=pass2
+2026-10-02T19:07:58.475522+05:30 PASS merkle_matrix_k32_t3_w20 TPS=1137.75 completed=20000 divergence=0 failures=0
+2026-10-02T19:07:59.371621+05:30 RUNNING matrix W=100 workers=16 mode=pg attempt=2 reason=pass2
+2026-10-02T19:15:08.864786+05:30 PASS pg_matrix_k16_t2_w100 TPS=734.44 completed=20000 divergence=0 failures=0
+2026-10-02T19:15:11.898906+05:30 RUNNING matrix W=100 workers=16 mode=det attempt=2 reason=pass2
+2026-10-02T19:20:38.217973+05:30 PASS det_matrix_k16_t2_w100 TPS=1142.32 completed=20000 divergence=0 failures=0
+2026-10-02T19:20:41.252736+05:30 RUNNING matrix W=100 workers=16 mode=merkle attempt=2 reason=pass2
+2026-10-02T19:30:41.187660+05:30 PASS merkle_matrix_k16_t2_w100 TPS=469.89 completed=20000 divergence=0 failures=0
+2026-10-02T19:30:44.840660+05:30 RUNNING matrix W=10 workers=32 mode=pg attempt=2 reason=pass2
+2026-10-02T19:32:22.088777+05:30 PASS pg_matrix_k32_t2_w10 TPS=878.12 completed=20000 divergence=0 failures=0
+2026-10-02T19:32:22.502830+05:30 RUNNING matrix W=10 workers=32 mode=det attempt=2 reason=pass2
+2026-10-02T19:33:56.380609+05:30 PASS det_matrix_k32_t2_w10 TPS=1196.65 completed=20000 divergence=0 failures=0
+2026-10-02T19:33:56.792502+05:30 RUNNING matrix W=10 workers=32 mode=merkle attempt=2 reason=pass2
+2026-10-02T19:35:58.759048+05:30 PASS merkle_matrix_k32_t2_w10 TPS=860.43 completed=20000 divergence=0 failures=0
+2026-10-02T19:35:59.249523+05:30 RUNNING matrix W=100 workers=8 mode=pg attempt=3 reason=pass2
+2026-10-02T19:43:06.307220+05:30 PASS pg_matrix_k8_t3_w100 TPS=1737.22 completed=20000 divergence=0 failures=0
+2026-10-02T19:43:09.347316+05:30 RUNNING matrix W=100 workers=8 mode=det attempt=3 reason=pass2
+2026-10-02T19:50:23.188940+05:30 PASS det_matrix_k8_t3_w100 TPS=422.14 completed=20000 divergence=0 failures=0
+2026-10-02T19:50:26.237901+05:30 RUNNING matrix W=100 workers=8 mode=merkle attempt=2 reason=pass2
+2026-10-02T20:01:59.498891+05:30 PASS merkle_matrix_k8_t2_w100 TPS=1040.79 completed=20000 divergence=0 failures=0
+2026-10-02T20:02:03.167701+05:30 RUNNING matrix W=5 workers=32 mode=pg attempt=3 reason=pass2
+2026-10-02T20:03:05.406508+05:30 PASS pg_matrix_k32_t3_w5 TPS=2274.18 completed=20000 divergence=0 failures=0
+2026-10-02T20:03:05.657878+05:30 RUNNING matrix W=5 workers=32 mode=det attempt=2 reason=pass2
+2026-10-02T20:04:46.376637+05:30 PASS det_matrix_k32_t2_w5 TPS=905.92 completed=20000 divergence=0 failures=0
+2026-10-02T20:04:46.626500+05:30 RUNNING matrix W=5 workers=32 mode=merkle attempt=2 reason=pass2
+2026-10-02T20:06:23.526321+05:30 PASS merkle_matrix_k32_t2_w5 TPS=664.71 completed=20000 divergence=0 failures=0
+2026-10-02T20:06:23.825548+05:30 RUNNING matrix W=50 workers=32 mode=pg attempt=3 reason=pass2 stall: W=50 tps=2615.04 threshold=3043.9045
+2026-10-02T20:10:28.499218+05:30 PASS pg_matrix_k32_t3_w50 TPS=4858.92 completed=20000 divergence=0 failures=0
+2026-10-02T20:10:30.143652+05:30 RUNNING matrix W=100 workers=8 mode=pg attempt=4 reason=pass2 stall: workers=8 tps=1737.22 threshold=1953.0875
+2026-10-02T20:16:35.670083+05:30 PASS pg_matrix_k8_t4_w100 TPS=1740.14 completed=20000 divergence=0 failures=0
+2026-10-02T20:16:38.718414+05:30 RUNNING matrix W=100 workers=8 mode=det attempt=4 reason=pass2 stall: workers=8 tps=997.62 threshold=1367.8470000000002
+2026-10-02T20:24:03.597679+05:30 PASS det_matrix_k8_t4_w100 TPS=1430.62 completed=20000 divergence=0 failures=0
+2026-10-02T20:24:06.647830+05:30 RUNNING matrix W=100 workers=64 mode=det attempt=4 reason=pass2 stall: workers=64 tps=1609.03 threshold=1717.1440000000002
+2026-10-02T20:30:19.216030+05:30 PASS det_matrix_k64_t4_w100 TPS=1087.07 completed=20000 divergence=0 failures=0
+2026-10-02T20:30:22.240115+05:30 PASS2_COMPLETE failed_pass2_runs=[]
+2026-10-02T20:34:03.126072+05:30 RUNNING matrix W=20 workers=32 mode=det attempt=3 reason=extra: suspect stall after pass2
+2026-10-02T20:36:07.140988+05:30 PASS det_matrix_k32_t3_w20 TPS=1578.57 completed=20000 divergence=0 failures=0
+2026-10-02T20:36:07.895602+05:30 RUNNING matrix W=20 workers=32 mode=det attempt=4 reason=extra: suspect stall after pass2
+2026-10-02T20:38:06.291939+05:30 PASS det_matrix_k32_t4_w20 TPS=1064.93 completed=20000 divergence=0 failures=0
+2026-10-02T20:38:07.036835+05:30 RUNNING matrix W=100 workers=16 mode=merkle attempt=3 reason=extra: suspect stall after pass2
+2026-10-02T20:48:24.384903+05:30 PASS merkle_matrix_k16_t3_w100 TPS=1504.3 completed=20000 divergence=0 failures=0
+2026-10-02T20:48:28.031903+05:30 RUNNING matrix W=100 workers=16 mode=merkle attempt=4 reason=extra: suspect stall after pass2
+2026-10-02T20:59:42.235909+05:30 PASS merkle_matrix_k16_t4_w100 TPS=1507.57 completed=20000 divergence=0 failures=0
+2026-10-02T20:59:45.888476+05:30 RUNNING matrix W=100 workers=64 mode=det attempt=5 reason=extra: suspect stall after pass2
+2026-10-02T21:07:12.110733+05:30 PASS det_matrix_k64_t5_w100 TPS=824.91 completed=20000 divergence=0 failures=0
+2026-10-02T21:07:15.142607+05:30 RUNNING matrix W=100 workers=64 mode=det attempt=6 reason=extra: suspect stall after pass2
+2026-10-02T21:14:20.962882+05:30 PASS det_matrix_k64_t6_w100 TPS=2378.97 completed=20000 divergence=0 failures=0
+2026-10-02T21:14:23.975128+05:30 EXTRA_COMPLETE

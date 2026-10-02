@@ -1,0 +1,40 @@
+{
+  "sweep_attempts": 89,
+  "headline_attempts": 11,
+  "headline_included": 10,
+  "distinct_points": 36,
+  "merkle_sweep_attempts": 29,
+  "merkle_headline_attempts": 6,
+  "completed_per_attempt": 20000,
+  "divergence": 0,
+  "permanent_failures": 0,
+  "merkle_verify": "9:true",
+  "evidence_files": 1730,
+  "evidence_bytes": 87743209,
+  "det_merkle_projection_sha256": {
+    "5": "fdb9545f1c588209556c090351f39a0bfa49da418633f1d5aa9b5264750440e4",
+    "10": "bd7be72cb0aff50bb5ffd228515a6e72832a00e7483bbb66bf7bfdd159b37b86",
+    "20": "faf167b53c1d9b493ac3503a6246a4db5c0b962832108e74c530904de252b2ed",
+    "30": "dcb895e5961ab8e84091fbf3d3723531593ec1ba9db18214b3209f1c59c9a049",
+    "50": "3c523efbb74ee48e0493cad7ad63d1bbb21596cf8f367c931d9f0bdd61847837",
+    "75": "af2f577fe844a231b285860adf2cb11d7fbc0efb76695f78c32498adac5cab5a",
+    "100": "e82921e1ebb1b7abe7c1e53c1c1c8d4524fa60ea665e9cb376325a1edd45bd8c"
+  },
+  "workload_sha256_by_W": {
+    "5": "b5fa452be4d5d63b6faa221b8e1ff8091a7ed914cc1ecb560b7e8664afc6985f",
+    "10": "2b9ce263dd089391b82e65ec8da8c6a9f6a4af0272067bfd0d6e55537fd0546d",
+    "20": "a943d1fa690757f1f75626b924dd7dcd83fc41666e1112fd09bb7ac2cdd41200",
+    "30": "77b833a61b152d057ba5be378ed0f2976c8c9b949b535e5cd435bc7c921566ff",
+    "50": "69b76165b0d20b767f76f18856d81be737bc277efda940384bd70679321905f5",
+    "75": "7f12e2ba85c7ad52f36807629b4136c19fe23a1a74cfc14d0427fc55926adb13",
+    "100": "f4b6d719f093760611fc105d806224921e076fdafe2806e943a2a2fae3b7b126"
+  },
+  "exclusion": {
+    "config": "C1",
+    "trial": 2,
+    "tps": 887.7840909090909,
+    "reason": "User-designated ranking stall; excluded from headline means only"
+  },
+  "failures_jsonl_present": false,
+  "state_comparison_limit": "Eight mutable tables: row count and 64-bit row-hash sum; timestamps excluded; not full row equality or all-replica recovery validation"
+}

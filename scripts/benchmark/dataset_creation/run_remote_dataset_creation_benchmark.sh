@@ -27,8 +27,8 @@ Options:
   --scales SCALES              default: 1000,10000,100000,1000000 (1k, 10k, 100k, 1M)
   --repetitions N              default: 3
   --fanout N                   default: 4
-  --split-threshold N          default: 32
-  --merge-threshold N          default: 8
+  --split-threshold N          default: 1024 for fanout 32, otherwise 32
+  --merge-threshold N          default: max(1, split threshold / 4)
   --partitions N               default: 200
   --synchronous-commit on|off  default: off
   --min-free-gib N             default: 20
@@ -48,8 +48,8 @@ BUILD_PROFILE="release"
 SCALES="1000,10000,100000,1000000"
 REPETITIONS="3"
 FANOUT="4"
-SPLIT_THRESHOLD="32"
-MERGE_THRESHOLD="8"
+SPLIT_THRESHOLD=""
+MERGE_THRESHOLD=""
 PARTITIONS="200"
 SYNCHRONOUS_COMMIT="off"
 MIN_FREE_GIB="20"
@@ -79,6 +79,20 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -z "$SPLIT_THRESHOLD" ]]; then
+  SPLIT_THRESHOLD=32
+  [[ ! "$FANOUT" =~ ^0*32$ ]] || SPLIT_THRESHOLD=1024
+fi
+if [[ ! "$SPLIT_THRESHOLD" =~ ^[0-9]{1,6}$ ]] ||
+   (( 10#$SPLIT_THRESHOLD < 2 || 10#$SPLIT_THRESHOLD > 100000 )); then
+  echo "--split-threshold must be between 2 and 100000" >&2
+  exit 2
+fi
+if [[ -z "$MERGE_THRESHOLD" ]]; then
+  MERGE_THRESHOLD=$((10#$SPLIT_THRESHOLD / 4))
+  (( MERGE_THRESHOLD >= 1 )) || MERGE_THRESHOLD=1
+fi
 
 resolve_host_ip() {
   case "$1" in

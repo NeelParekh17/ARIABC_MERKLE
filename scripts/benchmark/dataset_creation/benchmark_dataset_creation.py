@@ -14,7 +14,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def get_connection(dsn: str):
@@ -97,8 +97,8 @@ def measure_dataset_creation_single_run(
     conn,
     tuple_count: int,
     fanout: int = 4,
-    split_threshold: int = 32,
-    merge_threshold: int = 8,
+    split_threshold: Optional[int] = None,
+    merge_threshold: Optional[int] = None,
     partitions: int = 200,
     synchronous_commit: str = "off",
 ) -> Dict[str, Any]:
@@ -117,6 +117,10 @@ def measure_dataset_creation_single_run(
     This measures the true transactional index maintenance cost, NOT the
     PostgreSQL CREATE INDEX bulk-build path.
     """
+    if split_threshold is None:
+        split_threshold = 1024 if fanout == 32 else 32
+    if merge_threshold is None:
+        merge_threshold = max(1, split_threshold // 4)
     timings: Dict[str, float] = {}
     t_start_total = time.perf_counter()
 
@@ -302,13 +306,17 @@ def run_benchmark_suite(
     scales: List[int],
     repetitions: int = 3,
     fanout: int = 4,
-    split_threshold: int = 32,
-    merge_threshold: int = 8,
+    split_threshold: Optional[int] = None,
+    merge_threshold: Optional[int] = None,
     partitions: int = 200,
     synchronous_commit: str = "off",
     output_dir: Path = Path("."),
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Run the complete dataset creation benchmark across all scale points."""
+    if split_threshold is None:
+        split_threshold = 1024 if fanout == 32 else 32
+    if merge_threshold is None:
+        merge_threshold = max(1, split_threshold // 4)
     conn = get_connection(dsn)
     ensure_environment(conn)
 
@@ -470,8 +478,8 @@ def parse_args():
     parser.add_argument("--scales", default="1000,10000,100000,1000000", help="Comma-separated tuple counts (e.g. '1000,10000,100000,1000000')")
     parser.add_argument("--repetitions", type=int, default=3, help="Number of repetitions per scale")
     parser.add_argument("--fanout", type=int, default=4, help="Merkle tree fanout (default: 4)")
-    parser.add_argument("--split-threshold", type=int, default=32, help="Merkle leaf split threshold (default: 32)")
-    parser.add_argument("--merge-threshold", type=int, default=8, help="Merkle leaf merge threshold (default: 8)")
+    parser.add_argument("--split-threshold", type=int, default=None, help="Default: 1024 for fanout 32, otherwise 32")
+    parser.add_argument("--merge-threshold", type=int, default=None, help="Default: max(1, split threshold / 4)")
     parser.add_argument("--partitions", type=int, default=200, help="Number of tree partitions (default: 200)")
     parser.add_argument("--synchronous-commit", choices=["on", "off"], default="off", help="Synchronous commit mode during creation (default: off)")
     parser.add_argument("--output-dir", default="results", help="Directory to save benchmark output artifacts")

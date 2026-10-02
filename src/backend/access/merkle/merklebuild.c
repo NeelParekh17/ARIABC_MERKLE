@@ -25,17 +25,21 @@
 #include "access/merkle.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "catalog/heap.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_type.h"
+#include "commands/tablecmds.h"
 #include "common/blake3.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "pgstat.h"
 #include "port/pg_bswap.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/predicate.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
@@ -202,6 +206,65 @@ static double g_phase3_tree_build_ms = 0.0;
 static double g_phase3_slice_scan_ms = 0.0;
 
 #define BULK_INSERT_BATCH 1000
+
+/*
+ * Give the dedicated node heap, its indexes and TOAST fresh transactional
+ * storage, retaining their OIDs for the synchronous applier's relation cache.
+ * The caller holds AccessExclusiveLock on the heap.  Each old file survives
+ * until commit; abort restores it and discards the replacement instead.
+ */
+static void
+merkle_build_replace_node_storage(Relation rel)
+{
+	List	   *index_list;
+	ListCell   *lc;
+	Oid			toast_oid = rel->rd_rel->reltoastrelid;
+
+	CheckTableNotInUse(rel, "rebuild Merkle node storage");
+	CheckTableForSerializableConflictIn(rel);
+	RelationSetNewRelfilenode(rel, rel->rd_rel->relpersistence);
+
+	index_list = RelationGetIndexList(rel);
+	foreach(lc, index_list)
+	{
+		Relation	index_rel = index_open(lfirst_oid(lc), AccessExclusiveLock);
+
+		/* Old index page coordinates are no longer meaningful after reset. */
+		TransferPredicateLocksToHeapRelation(index_rel);
+		RelationSetNewRelfilenode(index_rel, index_rel->rd_rel->relpersistence);
+		index_close(index_rel, NoLock);
+	}
+	list_free(index_list);
+
+	if (OidIsValid(toast_oid))
+	{
+		Relation	toast_rel = table_open(toast_oid, AccessExclusiveLock);
+
+		merkle_build_replace_node_storage(toast_rel);
+		table_close(toast_rel, NoLock);
+	}
+}
+
+static void
+merkle_build_reset_node_table(Oid index_oid)
+{
+	Relation	node_rel;
+
+	merkle_ensure_node_table(index_oid);
+	node_rel = table_open(merkle_get_node_table_relid(index_oid), AccessExclusiveLock);
+	merkle_build_replace_node_storage(node_rel);
+
+	/*
+	 * All files are new in this transaction, so this normally nontransactional
+	 * helper cannot destroy pre-build storage.  It initializes empty indexes
+	 * directly, avoiding SQL TRUNCATE's reindex_relation() and the forbidden
+	 * nested reindex_index() when our caller is already running REINDEX.
+	 */
+	heap_truncate_one_rel(node_rel);
+	pgstat_count_truncate(node_rel);
+	CommandCounterIncrement();
+	table_close(node_rel, NoLock);
+}
 
 typedef struct MerkleCatalogFlushState
 {
@@ -1456,6 +1519,13 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 
     PG_TRY();
     {
+	/* Also cover concurrent builds reached through REINDEX TABLE/SCHEMA. */
+	if (indexInfo->ii_Concurrent)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("concurrent builds are not supported for Merkle indexes"),
+				 errhint("Use non-concurrent CREATE INDEX or REINDEX.")));
+
 	if (heapRel->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT ||
 		indexRel->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT)
 		ereport(ERROR,
@@ -1702,21 +1772,13 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
 	INSTR_TIME_SET_CURRENT(start_phase2);
 	ea = merkle_prepare_sorted_entries(&buildstate);
 
-	/* REINDEX must replace, rather than overlay, the previous dynamic
-	 * geometry. Ensure dedicated node table exists, then truncate it. */
-	merkle_ensure_node_table(RelationGetRelid(indexRel));
-	if (SPI_connect() == SPI_OK_CONNECT)
-	{
-		char tablename[64];
-		char *trunc_sql;
-		merkle_get_node_tablename(RelationGetRelid(indexRel), tablename, sizeof(tablename));
-		trunc_sql = psprintf("DELETE FROM ariabc_internal.%s;", tablename);
-		SPI_execute(trunc_sql, false, 0);
-		pfree(trunc_sql);
-		if (SPI_tuptable != NULL)
-			SPI_freetuptable(SPI_tuptable);
-		SPI_finish();
-	}
+	/*
+	 * The non-concurrent build already holds ShareLock (or stronger) on the
+	 * base heap, draining DML before we lock the node table.  Replace physical
+	 * storage as well as geometry so DROP/CREATE and REINDEX leave no old heap
+	 * versions or bloated node indexes behind.
+	 */
+	merkle_build_reset_node_table(RelationGetRelid(indexRel));
 
 	INSTR_TIME_SET_CURRENT(end_phase2);
 	INSTR_TIME_SUBTRACT(end_phase2, start_phase2);

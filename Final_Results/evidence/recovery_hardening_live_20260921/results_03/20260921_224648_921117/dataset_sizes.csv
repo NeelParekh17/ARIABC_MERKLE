@@ -1,0 +1,4 @@
+profile_label,tuple_count,fanout,split_threshold,merge_threshold,total_leaf_count,tree_levels,tree_edges,tree_depth,tree_height,max_prefix_len,total_merkle_nodes,total_logical_tree_nodes,physical_rows_per_leaf_expected,expected_candidate_rows_per_bad_leaf,base_table_bytes,primary_index_bytes,merkle_index_bytes,leaf_lookup_index_bytes,total_schema_bytes,minimum,p50,p95,p99,maximum,mean,stddev
+manual-f32-s32-m8,1200,32,32,8,200,1,199,0,1,0,200,200,6.0,12.0,196608,49152,8192,65536,352256,0.0,6.0,10.0,11.0,15.0,6.0,2.360084744241189
+manual-f32-s32-m8,1000,32,32,8,200,1,199,0,1,0,200,200,5.0,10.0,163840,40960,8192,57344,303104,0.0,5.0,9.0,10.0,13.0,5.0,2.080865204668481
+manual-f32-s32-m8,1200,32,32,8,200,1,199,0,1,0,200,200,6.0,12.0,196608,49152,8192,65536,352256,0.0,6.0,10.0,11.0,15.0,6.0,2.360084744241189

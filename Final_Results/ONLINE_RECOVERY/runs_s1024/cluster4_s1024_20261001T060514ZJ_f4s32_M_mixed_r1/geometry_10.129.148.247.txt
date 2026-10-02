@@ -1,0 +1,45 @@
+                                   data_directory                                    | port | default_isolation | synchronous_merkle
+-------------------------------------------------------------------------------------+------+-------------------+--------------------
+ /home/neel/Desktop/recovery_s1024_20261001T060514ZJ/repo/.bench_tmp/recovery_pgdata | 5448 | serializable      | on
+(1 row)
+
+ heap_rows
+-----------
+     12001
+(1 row)
+
+                                                                                                       definition                                                                                                       |                                               reloptions
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------
+ CREATE INDEX usertable_small_merkle_idx ON public.usertable_small USING merkle (ycsb_key) WITH (partitions='200', fanout='4', split_threshold='32', merge_threshold='8', partition_key_columns='0', subpartitions='1') | {partitions=200,fanout=4,split_threshold=32,merge_threshold=8,partition_key_columns=0,subpartitions=1}
+(1 row)
+
+ nodes | leaves | internal_nodes | partition_roots | empty_leaves | min_nonempty_occupancy | avg_nonempty_occupancy | max_occupancy | max_prefix_bits | node_storage_bytes
+-------+--------+----------------+-----------------+--------------+------------------------+------------------------+---------------+-----------------+--------------------
+  1000 |    800 |            200 |             200 |            0 |                      4 |    15.0012500000000000 |            27 |               2 |           10649600
+(1 row)
+
+ prefix_len | is_leaf | nodes | tuple_count_sum
+------------+---------+-------+-----------------
+          0 | f       |   200 |           12001
+          2 | t       |   800 |           12001
+(2 rows)
+
+                               root                               | verified
+------------------------------------------------------------------+----------
+ 80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5 | t
+(1 row)
+
+ fsync
+-------
+ on
+(1 row)
+
+ synchronous_commit
+--------------------
+ on
+(1 row)
+
+ full_page_writes
+------------------
+ on
+(1 row)

@@ -176,11 +176,11 @@ merkle_register_relopts(void)
 
 	add_int_reloption(merkle_relopt_kind, "split_threshold",
 					  "Node size to trigger a split",
-					  SPLIT_THRESHOLD, 2, 100000, AccessExclusiveLock);
+					  0, 2, 100000, AccessExclusiveLock);
 
 	add_int_reloption(merkle_relopt_kind, "merge_threshold",
 					  "Node size to trigger a merge",
-					  MERKLE_MERGE_THRESHOLD, 1, 100000, AccessExclusiveLock);
+					  0, 1, 100000, AccessExclusiveLock);
 
 	add_int_reloption(merkle_relopt_kind, "partitions",
 					  "Number of independent hash-routed Merkle partitions",
@@ -208,6 +208,21 @@ static relopt_parse_elt merkle_relopt_tab[] = {
 };
 
 /*
+ * PG reloptions accept defaults outside the explicit input range.  Zero
+ * therefore marks an omitted threshold; an explicit zero is still rejected
+ * by the reloptions parser.  Resolve before validation or metapage creation.
+ */
+static void
+merkle_resolve_thresholds(MerkleOptions *opts)
+{
+	if (opts->split_threshold == 0)
+		opts->split_threshold = (opts->fanout == 32) ?
+			MERKLE_FANOUT32_SPLIT_THRESHOLD : SPLIT_THRESHOLD;
+	if (opts->merge_threshold == 0)
+		opts->merge_threshold = Max(1, opts->split_threshold / 4);
+}
+
+/*
  * merkle_options() - Parse reloptions for merkle index
  *
  * This is called during CREATE INDEX to parse WITH clause options.
@@ -225,6 +240,9 @@ merkle_options(Datum reloptions, bool validate)
 											   sizeof(MerkleOptions),
 											   merkle_relopt_tab,
 											   lengthof(merkle_relopt_tab));
+
+	if (opts != NULL)
+		merkle_resolve_thresholds(opts);
 
 	if (validate && opts != NULL)
 	{
@@ -288,8 +306,7 @@ merkle_get_options(Relation indexRel)
 		opts = (MerkleOptions *) palloc0(sizeof(MerkleOptions));
 		SET_VARSIZE(opts, sizeof(MerkleOptions));
 		opts->fanout = MERKLE_DEFAULT_FANOUT;
-		opts->split_threshold = SPLIT_THRESHOLD;
-		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
+		merkle_resolve_thresholds(opts);
 		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
 		opts->partition_key_columns = 0;
 		opts->subpartitions = 1;
@@ -309,12 +326,11 @@ merkle_get_options(Relation indexRel)
 	if (VARSIZE(relopts) < (offsetof(MerkleOptions, fanout) + sizeof(int)))
 		opts->fanout = MERKLE_DEFAULT_FANOUT;
 
-	/* Backward compatibility: older rd_options blobs won't have thresholds */
+	/* Backward compatibility: resolve any missing thresholds independently. */
+	if (VARSIZE(relopts) < (offsetof(MerkleOptions, split_threshold) + sizeof(int)))
+		opts->split_threshold = 0;
 	if (VARSIZE(relopts) < (offsetof(MerkleOptions, merge_threshold) + sizeof(int)))
-	{
-		opts->split_threshold = SPLIT_THRESHOLD;
-		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
-	}
+		opts->merge_threshold = 0;
 	if (VARSIZE(relopts) < (offsetof(MerkleOptions, num_partitions) + sizeof(int)))
 		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
 	if (VARSIZE(relopts) < (offsetof(MerkleOptions, subpartitions) + sizeof(int)))
@@ -330,12 +346,15 @@ merkle_get_options(Relation indexRel)
 	if (opts->num_partitions < 1 || opts->num_partitions > MERKLE_MAX_PARTITIONS)
 		opts->num_partitions = MERKLE_DEFAULT_PARTITIONS;
 
+	merkle_resolve_thresholds(opts);
+
 	if (opts->split_threshold < 2 || opts->split_threshold > 100000 ||
 		opts->merge_threshold < 1 || opts->merge_threshold > 100000 ||
 		opts->merge_threshold >= opts->split_threshold)
 	{
-		opts->split_threshold = SPLIT_THRESHOLD;
-		opts->merge_threshold = MERKLE_MERGE_THRESHOLD;
+		opts->split_threshold = 0;
+		opts->merge_threshold = 0;
+		merkle_resolve_thresholds(opts);
 	}
 	if (opts->partition_key_columns < 0 || opts->partition_key_columns > INDEX_MAX_KEYS ||
 		opts->subpartitions < 1 ||

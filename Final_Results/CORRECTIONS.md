@@ -1,5 +1,102 @@
 # Benchmark corrections and qualification
 
+## Primary TPC-C figures updated to v2 (2026-10-02)
+
+`TPCC/tpcc_warehouses_scaling.png` and `TPCC/tpcc_workers_scaling.png` now show
+the completed **v2** sweep: pg with retry jitter, det and synchronous Merkle,
+all at fillfactor 90 and SERIALIZABLE. Merkle uses warehouse routing
+16384/1/16, fanout 32, split 1024 / merge 256. The right panels explicitly
+label the previous split-32 warehouse-routing and hash-%-200 curves as
+different-configuration references. Old figures/README are preserved in
+`TPCC/previous/`, and September CSVs/plot scripts are unchanged.
+
+The sweep contains 89 accepted 20,000-transaction attempts over 36 distinct
+points: initial pass with stall reruns, reverse-order second pass with reruns,
+then two extra attempts each at det W20/32, Merkle W100/16 and det W100/64.
+Lines show best of all accepted attempts, bands min–max; README tables include
+best/median/min and attempt counts, with ratios using only new denominators.
+The raw source `summary.md` still described the first pass; publication uses
+the completed status history and accepted observations rather than that text.
+
+`TPCC/tpcc_headline_ab_v2.png` shows C1..C5 mean TPS and decimal WAL kB/tx.
+There are 11 accepted headline attempts; C1 trial 2 at 887.78 TPS is excluded
+from the headline means as a ranking stall, leaving two included attempts per
+configuration. Its evidence remains. HOT fractions pool the same included
+attempts. Customer non-HOT falls to about 0.0061%, not exactly zero. Headline
+C4/C5 apply FF90 to eight mutable tables and leave immutable `item` at default;
+the subsequent sweeps apply FF90 to all nine tables. This distinction is
+recorded rather than assuming identical physical configuration.
+
+All 100 measured attempts have saved 20,000 terminal successes, divergence 0,
+permanent failures 0 and gateway exit 0; all 35 measured Merkle attempts have
+`merkle_verify=9:true`. Saved settings confirm SERIALIZABLE, synchronous
+maintenance and durability. det/Merkle state checksums match per W, including
+headline versus sweeps at W100. This is an eight-table count/64-bit-hash-sum
+projection excluding timestamps and immutable `item`, not full row equality
+or three-replica/recovery evidence. No canonical hash or recovery code changed.
+
+Ranking intermittently stalled many attempts despite low observed host load.
+The cause remains unknown; suspected NUMA placement is unconfirmed. The pg
+W5 third attempt returned to the prior publication's throughput. Unequal
+best-of-attempt counts and small headline samples prevent a stable or isolated
+causal performance claim. Slow sweep attempts remain in medians/min–max bands.
+
+Read-only SSH/rsync fetched 1,730 evidence files (87,743,209 bytes) with remote
+SHA-256 checksums into `TPCC/v2_20261002/{sweeps,headline_ab}/`; no pgdata,
+ptrace trees or bulk server logs were copied. A local saved-file audit checked
+hashes, raw terminal logs, configurations, table options, WAL and state records.
+No build, database instance or benchmark ran during publication. Reproduction
+of the publication and previous plots is documented in
+[COMMANDS.md, section 3](COMMANDS.md#3-tpc-c--v2-primary-publication-2026-10-02).
+
+## Primary OOM publication updated to fresh v2 (2026-10-02)
+
+`OOM_100M/figures/` now uses only the completed 2026-10-01 **fresh v2** campaign:
+84 accepted SERIALIZABLE cases (pg with jitter, det, synchronous det + Merkle),
+including read-only C at every worker count. All cases validated 20,000 terminal
+results, with zero reported divergence, permanent failures and exhausted retries;
+all 28 Merkle cases passed post-workload verification. The publication audit also
+checked all 1,680,000 successful unique per-case server request IDs and all seven
+published SQL hashes against the saved files. This is saved-evidence validation,
+not a new remote run.
+
+V2 uses a fresh 100M-row **fillfactor-90 heap for every mode**, 200 Merkle
+partitions, fanout 32, split 1024 / merge 256, compact rebuild storage and the
+frozen working-tree code including uncommitted Merkle changes. PG, server and
+gateway have v2 build provenance; the final successful source snapshot hash is
+`b376a4586ee96f263db61190f9dcdd69a330f2478cf3181b8e8135dc368cf171`.
+The intermediate launch-report hash is not the successful build identity.
+Merkle leaf/ancestor maintenance remains synchronous through the partition root
+inside the transaction; canonical row-hash format remains version 1.
+
+The primary series are updated because all three modes now have matched fresh
+measurements on the current configuration. Ratios use **v2 det/pg**, rather than
+mixing new Merkle with September denominators. A separate labeled comparison
+shows previous split-32 and split-1024 observations, including the earlier rerun's
+historical det/pg denominator caveat. Different datasets/configurations/builds
+and one trial per point prevent single-change attribution or stable rankings.
+The earlier paired fillfactor experiment observed Merkle benefits and modest det
+costs; fillfactor 90 is an explicit configuration choice, not an isolated gain.
+PG READ COMMITTED was intentionally not rerun.
+
+The consolidated CSV preserves 136 historical rows' existing fields and appends
+84 v2 rows (220 total), with `campaign`/`fillfactor` columns. Earlier primary
+figures are retained under `OOM_100M/figures/previous/`, and the entire preceding
+README content remains under "Previous results". Original old OOM pgdata was
+deleted at the user's request, so it cannot reproduce those physical baselines.
+Compact curated evidence, unchanged per-case files, path mapping and checksums
+are in `OOM_100M/runs/v2_20261001/`. Duplicate SQL is linked by identical hash;
+no source/build tarballs were copied. Their checksums and original .111 location
+are recorded in `remote_bulk_sha256.txt` and `CURATION.md`.
+
+Failed build preparation produced no data and is retained separately. An aborted
+first load used an unattainable 12288MB MemAvailable guard; after the guard became
+4608MB and the partial load was deleted, one clean generation completed. Stale
+same-size source/build state on .247 was moved aside; snapshot rsync now uses
+`--checksum`. These failures are preparation history, not failed measured cases.
+Exact completed commands and repeatable publication checks are in
+[COMMANDS.md, section 2](COMMANDS.md#2-oom-100m--fresh-v2-primary-result).
+
 Updated 23 September 2026. Original CSVs, logs and plots in this directory remain
 historical observations. They have not been relabeled as measurements made with
 the corrected harness. The detailed evidence audit is
@@ -139,7 +236,7 @@ The delta restore is byte-identical to `cp`:
 - **Content.** Both working copies, restored after a real run, compared equal to their
   baselines with `diff -rq`: 1085/1085 and 1099/1099 files, 0 differences. The runner
   now repeats this byte comparison in every case before the cache drop.
-- **A/B test.** `.bench_tmp/oom_ab_cp_vs_delta_20260929`: skew 0, w8, pg and Merkle,
+- **A/B test.** `Final_Results/evidence/oom_ab_cp_vs_delta_20260929/`: skew 0, w8, pg and Merkle,
   2 trials of each reset method.
   - WAL was identical: Merkle 333,213 kB in all four runs; pg 154,164 vs 154,171 kB.
   - Blocks read, device reads and checkpoint writes were within 0.3%.
@@ -182,7 +279,40 @@ kept colliding, and pg throughput collapsed.
   Check `current_clocksource` = `tsc` before gateway benchmarks.
 - Results: `Final_Results/OOM_100M/`. Evidence for the correction (the same binary without
   jitter, 9 cases, plus the full comparison table) is archived outside Final_Results in
-  `.bench_tmp/oom_superseded_20260929/`.
+  `10.129.27.111:~/claude_ctl/archive/bench_tmp_20261002/oom_superseded_20260929/` (moved off the workstation on 2026-10-02).
+
+## OOM split geometry and method clarification (2026-10-01)
+
+The published 2026-09-29 Merkle curve used **fanout 32, split threshold 32 and
+merge threshold 8**. Fanout is not the split threshold. Its 108 cases remain
+valid observations of that configuration; they are not superseded or relabeled.
+The 2026-10-01 addition contains 24 Merkle cases with split 1024 / merge 256 and
+optimized PostgreSQL, plus four canonical det drift controls: 136 consolidated
+cases. Separate mode labels preserve both Merkle series and the published det
+comparison denominator. Read-only C was not rerun.
+
+The earlier README's attribution of the whole Merkle penalty to node-page I/O
+was too strong: synchronous SQL/executor work, hashing, buffers, WAL and
+contention also contribute. The new baseline is rebuilt and manually compacted
+with `VACUUM FULL`; the October campaign changes geometry, code and physical
+baseline together, so it does not isolate a code-only speedup. The campaign
+handoff reports a separate 2–4% code-only microbenchmark, whose paired raw
+observations are not included here. New/old TPS is 1.022–1.809× across matching
+points; the four det controls range −6.60% to +13.88%. Single trials do not
+establish stable rankings.
+
+The published method uses `delta_content_check=sampled`: full byte comparisons
+on first restore and every tenth restore, with size/mtime checks every case.
+The earlier statement above that full byte comparison repeats in every case
+is therefore superseded by the actual archived campaign settings. The source
+identity for optimized PostgreSQL is handoff-reported HEAD 19562ae plus
+uncommitted changes; per-case executable SHA-256 hashes identify what ran but
+are not an immutable source snapshot. See [OOM_100M/README.md](OOM_100M/README.md)
+and [COMMANDS.md, section 2a](COMMANDS.md#2a-oom-100m--split-1024--optimized-code-2026-10-01).
+
+Historical READ COMMITTED data remains labeled and archived; it is omitted from
+current SERIALIZABLE figures/campaigns and is not evidence that READ COMMITTED
+in general provides SERIALIZABLE semantics.
 
 ## Validation artifacts
 
@@ -192,11 +322,11 @@ checks. Python compilation, shell syntax checks and `git diff --check` passed.
 
 | Check | Evidence |
 |---|---|
-| YCSB D/F, PG/Det/Merkle, 20,000 operations per case | [6 accepted cases](../.bench_tmp/benchmark_hardening_live_20260921_04/summary.csv); every canonical result checked; zero reported final divergence/permanent failures; enabled Merkle checks passed |
-| TPC-C, one warehouse, 1,000 transactions in each mode | [3 accepted cases](../.bench_tmp/tpcc_hardening_live_20260921_02/summary.csv); logged-table and durability checks; zero reported final divergence/permanent failures; enabled Merkle verification passed |
-| Recovery, two repetitions of three small scenarios | [6 full-audit passes](../.bench_tmp/recovery_hardening_live_20260921/results_03/20260921_224648_921117/runs.csv); actual order and 12 before/after host samples saved |
-| Cluster, 20,000 requests, three replicas | [Accepted smoke](../.bench_tmp/cluster_hardening_live_20260921_05/summary.csv); all 20,000 all-three audits passed; zero divergence/failures/timeouts/missing audits; post-marker roots and data checksums matched; all build manifests passed; zero resident database pages on each node before startup |
-| Actual 100M runner path on a separate 12,000-row database, physical copy before each mode | [3 accepted cp cases](../.bench_tmp/cp_restore_validation_20260922/run_20260922_064845_ee10cd9b/summary.csv); 1,000 terminal completions and row results per case; 32 MB buffers; durability on; telemetry recorded; Merkle PASS. This checks the runner and restoration path, not 100M performance. |
+| YCSB D/F, PG/Det/Merkle, 20,000 operations per case | [6 accepted cases](evidence/benchmark_hardening_live_20260921_04/summary.csv); every canonical result checked; zero reported final divergence/permanent failures; enabled Merkle checks passed |
+| TPC-C, one warehouse, 1,000 transactions in each mode | [3 accepted cases](evidence/tpcc_hardening_live_20260921_02/summary.csv); logged-table and durability checks; zero reported final divergence/permanent failures; enabled Merkle verification passed |
+| Recovery, two repetitions of three small scenarios | [6 full-audit passes](evidence/recovery_hardening_live_20260921/results_03/20260921_224648_921117/runs.csv); actual order and 12 before/after host samples saved |
+| Cluster, 20,000 requests, three replicas | [Accepted smoke](evidence/cluster_hardening_live_20260921_05/summary.csv); all 20,000 all-three audits passed; zero divergence/failures/timeouts/missing audits; post-marker roots and data checksums matched; all build manifests passed; zero resident database pages on each node before startup |
+| Actual 100M runner path on a separate 12,000-row database, physical copy before each mode | [3 accepted cp cases](evidence/cp_restore_validation_20260922/run_20260922_064845_ee10cd9b/summary.csv); 1,000 terminal completions and row results per case; 32 MB buffers; durability on; telemetry recorded; Merkle PASS. This checks the runner and restoration path, not 100M performance. |
 
 The physical-copy smoke also exposed joined executor-log records from concurrent
 output. The parser now splits complete request headers before validating each
@@ -207,7 +337,7 @@ fanout 32. The failed smoke remains archived alongside the successful rerun.
 Use fresh output directories for new measurements. The corrected 100M results are in
 `Final_Results/OOM_100M/` (108 cases, 1 trial each). `COMMANDS.md` section 2 has the
 commands. The aborted and partial campaigns from 2026-09-28/29 are archived in
-`.bench_tmp/oom_superseded_20260929/`, together with the old-policy pg cases.
+`10.129.27.111:~/claude_ctl/archive/bench_tmp_20261002/oom_superseded_20260929/` (moved off the workstation on 2026-10-02), together with the old-policy pg cases.
 
 The YCSB and TPC-C replication wrappers also default to five trials. Do not merge
 new measurements with the historical summaries: workload semantics, durability,

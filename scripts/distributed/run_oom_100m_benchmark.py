@@ -304,11 +304,11 @@ if __name__ == '__main__':
     # 2. Configure high-performance bulk loading parameters
     cat << 'EOF' >> {args.remote_dir}/pgdata/postgresql.conf
 port = {args.db_port}
-shared_buffers = 4GB
-maintenance_work_mem = 6GB
-max_parallel_maintenance_workers = 16
-max_parallel_workers = 16
-max_parallel_workers_per_gather = 8
+shared_buffers = {args.gen_shared_buffers}
+maintenance_work_mem = {args.gen_maintenance_work_mem}
+max_parallel_maintenance_workers = {args.gen_parallel_maintenance_workers}
+max_parallel_workers = {max(1, args.gen_parallel_maintenance_workers)}
+max_parallel_workers_per_gather = {min(8, args.gen_parallel_maintenance_workers)}
 max_connections = 100
 wal_level = minimal
 max_wal_senders = 0
@@ -318,6 +318,8 @@ synchronous_commit = off
 fsync = off
 full_page_writes = off
 enable_merkle_index = on
+merkle_apply_synchronous_direct = on
+default_transaction_isolation = 'serializable'
 bcdb_worker_count = 1
 listen_addresses = '*'
 EOF
@@ -340,7 +342,7 @@ EOF
             ycsb_key integer NOT NULL,
             field1 text, field2 text, field3 text, field4 text, field5 text,
             field6 text, field7 text, field8 text, field9 text, field10 text
-        );
+        ) WITH (fillfactor = {args.usertable_fillfactor});
     " >/dev/null
     """
 
@@ -353,37 +355,44 @@ EOF
 
     print(f"Streaming {args.db_rows:,} rows directly into PostgreSQL...")
     stream_cmd = f"export LD_LIBRARY_PATH=/home/neel/Desktop/rdkafka_local/lib:{args.install_dir}/lib:${{LD_LIBRARY_PATH:-}} && python3 {args.remote_dir}/scripts/stream_100m.py"
-    stream_res = run_remote(args.remote_host, args.remote_user, stream_cmd, timeout=3600)
+    stream_res = run_remote(args.remote_host, args.remote_user, stream_cmd, timeout=args.generation_timeout)
     for line in stream_res.stdout.splitlines():
         print(line)
 
     # Step 5: Indexing and vacuum
-    print("Building Primary Key and Merkle covering indexes (using 16 parallel maintenance workers)...")
+    print(f"Building Primary Key and Merkle covering indexes (using {args.gen_parallel_maintenance_workers} parallel maintenance workers)...")
     index_cmd = f"""
     export LD_LIBRARY_PATH=/home/neel/Desktop/rdkafka_local/lib:{args.install_dir}/lib:${{LD_LIBRARY_PATH:-}}
     echo '  [4/6] Building Primary Key B-Tree index...'
     {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "
-        SET max_parallel_maintenance_workers = 16;
-        SET maintenance_work_mem = '6GB';
+        SET max_parallel_maintenance_workers = {args.gen_parallel_maintenance_workers};
+        SET maintenance_work_mem = '{args.gen_maintenance_work_mem}';
         ALTER TABLE usertable ADD CONSTRAINT usertable_pkey1 PRIMARY KEY (ycsb_key);
     "
 
     echo '  [5/6] Building Merkle Covering Lookup Index...'
     {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "
-        SET max_parallel_maintenance_workers = 16;
-        SET maintenance_work_mem = '6GB';
+        SET max_parallel_maintenance_workers = {args.gen_parallel_maintenance_workers};
+        SET maintenance_work_mem = '{args.gen_maintenance_work_mem}';
         DROP INDEX IF EXISTS usertable_merkle_lookup_idx;
         CREATE INDEX usertable_merkle_lookup_idx ON usertable (
             merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200),
             merkle_key_hash(ycsb_key),
             ycsb_key
         );
+    "
+    # The custom Merkle build allocations are not capped by maintenance_work_mem.
+    # Check after the lookup build has released its memory, before Merkle starts.
+    awk '/MemAvailable:/ {{available=$2; found=1}} END {{if (!found || available < {args.gen_min_mem_available_mb} * 1024) exit 1}}' /proc/meminfo
+    free -m
+    {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "
         CREATE INDEX usertable_merkle_idx ON usertable USING merkle (ycsb_key)
-        WITH (partitions = 200, fanout = 32, split_threshold = 32, merge_threshold = 8);
+        WITH (partitions = 200, fanout = 32, split_threshold = 1024, merge_threshold = 256);
     "
 
     echo '  [6/6] Analyzing table statistics...'
     {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "ANALYZE usertable;"
+    {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "ANALYZE ariabc_internal.merkle_node_usertable;"
 
     # Restore standard safety settings before creating golden backup
     sed -i "s/fsync = off/fsync = on/g" {args.remote_dir}/pgdata/postgresql.conf
@@ -409,7 +418,7 @@ EOF
     touch {args.remote_dir}/golden/done.flag
     echo 'GOLDEN_READY'
     """
-    res = run_remote(args.remote_host, args.remote_user, index_cmd, timeout=3600)
+    res = run_remote(args.remote_host, args.remote_user, index_cmd, timeout=args.generation_timeout)
     for line in res.stdout.splitlines():
         print(line)
 
@@ -1016,6 +1025,7 @@ rm -f {work}/.merkle_index_dropped
         raise RuntimeError(f"Wrong Merkle index state: {indexes}")
     if ("merkle_lookup_idx" in indexes) != (mode == "bcdb_merkle"):
         raise RuntimeError("Merkle lookup index does not match mode")
+    merkle_stats = None
     if mode == "bcdb_merkle":
         # Since 00fae31 the backend resolves ariabc_internal.merkle_node_<table>;
         # when absent it silently creates an EMPTY tree (older baselines used
@@ -1025,6 +1035,12 @@ rm -f {work}/.merkle_index_dropped
         if int(node_pages) <= 0:
             raise RuntimeError("ariabc_internal.merkle_node_usertable is missing or empty; "
                                "use a baseline migrated to table-named Merkle node storage")
+        # Read persisted geometry, rather than interpreting omitted reloptions
+        # using this binary's defaults. This scan precedes the cold cache drop.
+        merkle_stats = json.loads(sql(args, "SELECT merkle_tree_stats('usertable');",
+                                      timeout=args.verify_timeout))
+        if merkle_stats["total_nodes"] <= 0:
+            raise RuntimeError("Merkle node table contains no visible nodes")
     stop_postgres(args)
     # The timed run must not overlap the SSD's background work from the restore.
     settle = wait_for_device_settle(args)
@@ -1053,6 +1069,11 @@ rm -f {work}/.merkle_index_dropped
                           "'database_bytes', pg_database_size(current_database()));"))
     return dict(settings=settings, sizes=sizes,
                 keyspace=f"{args.db_rows}|{bounds}", indexes=json.loads(indexes),
+                merkle_stats=merkle_stats,
+                provenance=dict(install_dir=args.install_dir, cluster_dir=args.cluster_dir,
+                                gateway_repo=args.gateway_repo, baseline_dir=base_dir,
+                                baseline_manifest=manifest,
+                                executables=getattr(args, "_executables", [])),
                 reset_output=result.stdout, cache_drop_output=cache.stdout,
                 restore_write_mib=restore_write_mib, settle=settle)
 
@@ -1301,7 +1322,9 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
                    validated_completed_queries=metrics["validated_completed_queries"], merkle_verify=merkle,
                    workload_sha256=hashlib.sha256(workload_file.read_bytes()).hexdigest(),
                    artifact_dir=str(case_dir))
-        (case_dir / "result.json").write_text(json.dumps(dict(row=row, gateway=metrics), indent=2) + "\n")
+        (case_dir / "result.json").write_text(json.dumps(dict(
+            row=row, gateway=metrics, provenance=setup["provenance"],
+            merkle_stats=setup["merkle_stats"]), indent=2) + "\n")
         return row
     except BaseException as exc:
         (case_dir / "FAILED.txt").write_text(str(exc) + "\n")
@@ -1331,6 +1354,15 @@ def parse_args(argv=None):
     parser.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT)
     parser.add_argument("--db-rows", type=int, default=100000000)
     parser.add_argument("--shared-buffers", default="32MB")
+    parser.add_argument("--usertable-fillfactor", type=int, default=100,
+                        help="Heap fillfactor set before COPY when generating a fresh baseline")
+    parser.add_argument("--gen-shared-buffers", default="4GB")
+    parser.add_argument("--gen-maintenance-work-mem", default="6GB")
+    parser.add_argument("--gen-parallel-maintenance-workers", type=int, default=16)
+    parser.add_argument("--gen-min-mem-available-mb", type=int, default=0,
+                        help="Required MemAvailable before the custom Merkle index build; 0 disables the limit")
+    parser.add_argument("--generation-timeout", type=int, default=3600,
+                        help="Timeout in seconds for each remote COPY/index/archive generation stage")
     parser.add_argument("--txs", type=int, default=20000, help="SQL statements per case, as in the in-memory suite")
     parser.add_argument("--seed", type=int, default=42, help="Suite base seed; adds int(skew * 100)")
     parser.add_argument("--trials", type=int, default=5, help="Independent cold restores per case")
@@ -1379,6 +1411,13 @@ def parse_args(argv=None):
     parser.add_argument("--pg-exec-mode", choices=["event", "threaded"], default="event",
                         help="Executor mode for pg (default 'event' matches YCSB/TPC-C; 'threaded' matches archived OOM runs)")
     args = parser.parse_args(argv)
+    if not 10 <= args.usertable_fillfactor <= 100:
+        parser.error("--usertable-fillfactor must be between 10 and 100")
+    for name in ("gen_shared_buffers", "gen_maintenance_work_mem"):
+        if not re.fullmatch(r"[1-9][0-9]*(?:kB|MB|GB)", getattr(args, name)):
+            parser.error(f"--{name.replace('_', '-')} must be an integer followed by kB, MB, or GB")
+    if args.gen_parallel_maintenance_workers < 0 or args.gen_min_mem_available_mb < 0 or args.generation_timeout < 1:
+        parser.error("Generation workers/memory limit must be nonnegative and timeout must be positive")
     if (not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", args.base_dir_name)
             or args.base_dir_name == "pgdata"):
         parser.error("--base-dir-name must be a separate directory name, never pgdata or a path")
@@ -1560,6 +1599,12 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
     try:
         ensure_cache_drop_access(args)
         current_preflight = preflight(args)
+        hashes = re.findall(r"^([0-9a-f]{64})\s+(\S+)", current_preflight, re.M)
+        if len(hashes) != 3:
+            raise RuntimeError("Preflight did not record all three executable hashes")
+        args._executables = [dict(host=host, path=path, sha256=digest)
+                             for host, (digest, path) in zip(
+                                 (args.remote_host, args.remote_host, args.gateway_host), hashes)]
         preflight_path = out_dir / "preflight.txt"
         if preflight_path.exists():
             old = re.findall(r"^[0-9a-f]{64}\s+\S+", preflight_path.read_text(), re.M)

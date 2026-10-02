@@ -1,0 +1,1 @@
+inst=/home/protectdr/claude_checks/install_v2 src=/home/protectdr/claude_checks/src_v2 bin=/home/protectdr/claude_checks/src/ariabc_pg/build/bin split=32 merge=8 fillfactor=default mode=merkle warehouses=100 workers=32 tx=20000

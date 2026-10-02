@@ -72,6 +72,54 @@ TRUNCATE merkle_dyn_test;
 SELECT merkle_verify('merkle_dyn_test') AS truncate_verify;
 DROP TABLE merkle_dyn_test;
 
+-- Check resolved geometry in the metapage, including explicit overrides.
+DO $$
+DECLARE
+    geometry record;
+    stats json;
+BEGIN
+    CREATE TABLE merkle_geometry_test (id bigint);
+    FOR geometry IN
+        SELECT * FROM (VALUES
+            (NULL::text, 32, 8),
+            ('fanout=32', 1024, 256),
+            ('fanout=64', 32, 8),
+            ('fanout=32,split_threshold=32,merge_threshold=8', 32, 8),
+            ('fanout=32,split_threshold=128', 128, 32),
+            ('fanout=32,merge_threshold=7', 1024, 7),
+            ('fanout=32,split_threshold=2', 2, 1)
+        ) AS cases(options, expected_split, expected_merge)
+    LOOP
+        EXECUTE 'CREATE INDEX merkle_geometry_idx ON merkle_geometry_test USING merkle (id)'
+            || COALESCE(' WITH (' || geometry.options || ')', '');
+        stats := merkle_tree_stats('merkle_geometry_test'::regclass)::json;
+        IF ARRAY[(stats->>'split_threshold')::int, (stats->>'merge_threshold')::int]
+           IS DISTINCT FROM ARRAY[geometry.expected_split, geometry.expected_merge] THEN
+            RAISE EXCEPTION 'unexpected geometry for options %: %', geometry.options, stats;
+        END IF;
+        DROP INDEX merkle_geometry_idx;
+    END LOOP;
+    FOR geometry IN
+        SELECT * FROM (VALUES
+            ('fanout=32,split_threshold=0'),
+            ('fanout=32,merge_threshold=0'),
+            ('fanout=32,split_threshold=100001'),
+            ('fanout=32,merge_threshold=100001'),
+            ('fanout=32,merge_threshold=1024')
+        ) AS cases(options)
+    LOOP
+        BEGIN
+            EXECUTE 'CREATE INDEX merkle_geometry_idx ON merkle_geometry_test USING merkle (id) WITH ('
+                || geometry.options || ')';
+            RAISE EXCEPTION 'invalid geometry accepted: %', geometry.options;
+        EXCEPTION WHEN invalid_parameter_value THEN
+            NULL;
+        END;
+    END LOOP;
+    DROP TABLE merkle_geometry_test;
+END
+$$;
+
 -- Test SQL functional hash functions and dynamic Merkle functional covering index
 SELECT octet_length(merkle_key_hash(12345::bigint)) = 8 AS key_hash_len_8;
 SELECT octet_length(merkle_tuple_hash(r)) = 32 AS tuple_hash_len_32 FROM (SELECT 1::int AS a, 'test'::text AS b) r;

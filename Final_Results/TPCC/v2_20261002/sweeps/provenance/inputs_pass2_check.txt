@@ -1,0 +1,5 @@
+/home/protectdr/claude_checks/src_v2/scripts/generate_tpcc_workload.py: OK
+/home/protectdr/claude_checks/src_v2/scripts/restore_tpcc_scale.py: OK
+/home/protectdr/claude_checks/src_v2/scripts/restore_tpcc_procs.sql: OK
+/home/protectdr/claude_checks/src_v2/scripts/tpcc/tpcc-pgdump-full.sql: OK
+/home/protectdr/claude_checks/src_v2/scripts/distributed/benchmark_validation.py: OK

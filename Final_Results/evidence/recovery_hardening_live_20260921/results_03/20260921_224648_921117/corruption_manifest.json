@@ -1,0 +1,270 @@
+[
+  {
+    "experiment": "figure13",
+    "corruption_mode": "mixed",
+    "tuple_count": 1200,
+    "fanout": 32,
+    "seed": 20260703,
+    "bad_leaves": [
+      [
+        97,
+        "0000000000000000",
+        0
+      ]
+    ],
+    "partitions": 200,
+    "corruptions": [
+      {
+        "leaf_id": [
+          97,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 581,
+        "op": "update",
+        "reference_key": 581
+      }
+    ],
+    "corrupted_tuple_count": 1,
+    "required_rows_per_bad_leaf": 1,
+    "selected_bad_leaf_row_capacity": 9,
+    "selected_leaf_capacities": {
+      "97_0000000000000000_0": 9
+    },
+    "corruption_selection_sha256": "b024b48924b65327b3e4b4aa726cfe61995856f06e63eda27a332e04913c015d",
+    "bad_leaf_selection_sha256": "3a26eb4cdf4ec77c28463da84f4158b74e3605b0f83db709312efbf0be06799a",
+    "recovery_warmup_cycles_ms": 37.068
+  },
+  {
+    "experiment": "figure12",
+    "corruption_mode": "mixed",
+    "tuple_count": 1000,
+    "fanout": 32,
+    "seed": 20260703,
+    "bad_leaves": [
+      [
+        111,
+        "0000000000000000",
+        0
+      ],
+      [
+        163,
+        "0000000000000000",
+        0
+      ],
+      [
+        195,
+        "0000000000000000",
+        0
+      ],
+      [
+        42,
+        "0000000000000000",
+        0
+      ],
+      [
+        49,
+        "0000000000000000",
+        0
+      ],
+      [
+        55,
+        "0000000000000000",
+        0
+      ],
+      [
+        68,
+        "0000000000000000",
+        0
+      ],
+      [
+        72,
+        "0000000000000000",
+        0
+      ],
+      [
+        78,
+        "0000000000000000",
+        0
+      ],
+      [
+        85,
+        "0000000000000000",
+        0
+      ]
+    ],
+    "partitions": 200,
+    "corruptions": [
+      {
+        "leaf_id": [
+          111,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 180,
+        "op": "update",
+        "reference_key": 180
+      },
+      {
+        "leaf_id": [
+          163,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 549,
+        "op": "delete",
+        "reference_key": 549
+      },
+      {
+        "leaf_id": [
+          195,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 2999999995,
+        "op": "insert",
+        "reference_key": 489
+      },
+      {
+        "leaf_id": [
+          42,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 784,
+        "op": "update",
+        "reference_key": 784
+      },
+      {
+        "leaf_id": [
+          49,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 67,
+        "op": "delete",
+        "reference_key": 67
+      },
+      {
+        "leaf_id": [
+          55,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 5999999890,
+        "op": "insert",
+        "reference_key": 669
+      },
+      {
+        "leaf_id": [
+          68,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 217,
+        "op": "update",
+        "reference_key": 217
+      },
+      {
+        "leaf_id": [
+          72,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 739,
+        "op": "delete",
+        "reference_key": 739
+      },
+      {
+        "leaf_id": [
+          78,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 8999999967,
+        "op": "insert",
+        "reference_key": 996
+      },
+      {
+        "leaf_id": [
+          85,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 750,
+        "op": "update",
+        "reference_key": 750
+      }
+    ],
+    "corrupted_tuple_count": 10,
+    "required_rows_per_bad_leaf": 1,
+    "selected_bad_leaf_row_capacity": 39,
+    "selected_leaf_capacities": {
+      "111_0000000000000000_0": 4,
+      "163_0000000000000000_0": 4,
+      "195_0000000000000000_0": 4,
+      "42_0000000000000000_0": 2,
+      "49_0000000000000000_0": 4,
+      "55_0000000000000000_0": 6,
+      "68_0000000000000000_0": 6,
+      "72_0000000000000000_0": 4,
+      "78_0000000000000000_0": 1,
+      "85_0000000000000000_0": 4
+    },
+    "corruption_selection_sha256": "92a6a7b317e3ec77b1ffddc0aad78b3aeb1b6b7143abe74a71d8afbd1a69a241",
+    "bad_leaf_selection_sha256": "373b1eadd599012ce54be9a25a651418014612380edf5111fdd024a3a8ed341e",
+    "recovery_warmup_cycles_ms": 38.329
+  },
+  {
+    "experiment": "figure13",
+    "corruption_mode": "mixed",
+    "tuple_count": 1200,
+    "fanout": 32,
+    "seed": 20260703,
+    "bad_leaves": [
+      [
+        6,
+        "0000000000000000",
+        0
+      ],
+      [
+        85,
+        "0000000000000000",
+        0
+      ]
+    ],
+    "partitions": 200,
+    "corruptions": [
+      {
+        "leaf_id": [
+          6,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 946,
+        "op": "update",
+        "reference_key": 946
+      },
+      {
+        "leaf_id": [
+          85,
+          "0000000000000000",
+          0
+        ],
+        "ycsb_key": 1115,
+        "op": "delete",
+        "reference_key": 1115
+      }
+    ],
+    "corrupted_tuple_count": 2,
+    "required_rows_per_bad_leaf": 1,
+    "selected_bad_leaf_row_capacity": 15,
+    "selected_leaf_capacities": {
+      "6_0000000000000000_0": 10,
+      "85_0000000000000000_0": 5
+    },
+    "corruption_selection_sha256": "b3ad49722e5824d51df870415ee33404b370cc3eb570701f8b63b4ddb79265d7",
+    "bad_leaf_selection_sha256": "3515f547a07f96cfac29fdd52733ba5d708bb56085e48ff91ede102c84ea3702",
+    "recovery_warmup_cycles_ms": 21.988
+  }
+]

@@ -1,0 +1,8 @@
+name,setting
+bcdb_worker_count,16
+default_transaction_isolation,serializable
+fsync,on
+full_page_writes,on
+merkle_apply_synchronous_direct,on
+shared_buffers,4194304
+synchronous_commit,on
