@@ -1,0 +1,1 @@
+../../../../campaign/run_20261001_210222_bc54c340/workloads/ycsb_a_skew_1.2_20000.sql

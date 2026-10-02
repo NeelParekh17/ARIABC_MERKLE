@@ -1,0 +1,138 @@
+[
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_A_r3",
+    "before": {
+      "available_mib": 6953,
+      "swap_used_mib": 1785,
+      "pswpin": 173278737,
+      "pswpout": 405906385
+    },
+    "after": {
+      "available_mib": 7176,
+      "swap_used_mib": 1784,
+      "pswpin": 173279167,
+      "pswpout": 405906385
+    },
+    "swap_in_pages": 430,
+    "swap_out_pages": 0
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_B_r1",
+    "before": {
+      "available_mib": 7186,
+      "swap_used_mib": 1784,
+      "pswpin": 173279167,
+      "pswpout": 405906385
+    },
+    "after": {
+      "available_mib": 7126,
+      "swap_used_mib": 1784,
+      "pswpin": 173279261,
+      "pswpout": 405906385
+    },
+    "swap_in_pages": 94,
+    "swap_out_pages": 0
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_C_r1",
+    "before": {
+      "available_mib": 7137,
+      "swap_used_mib": 1784,
+      "pswpin": 173279261,
+      "pswpout": 405906385
+    },
+    "after": {
+      "available_mib": 7141,
+      "swap_used_mib": 1784,
+      "pswpin": 173279475,
+      "pswpout": 405906385
+    },
+    "swap_in_pages": 214,
+    "swap_out_pages": 0
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_L_mix_prio_r1",
+    "before": {
+      "available_mib": 6978,
+      "swap_used_mib": 1783,
+      "pswpin": 173279769,
+      "pswpout": 405906385
+    },
+    "after": {
+      "available_mib": 6935,
+      "swap_used_mib": 1783,
+      "pswpin": 173279850,
+      "pswpout": 405906385
+    },
+    "swap_in_pages": 81,
+    "swap_out_pages": 0
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_M_mixed_r1",
+    "before": {
+      "available_mib": 7162,
+      "swap_used_mib": 1784,
+      "pswpin": 173279475,
+      "pswpout": 405906385
+    },
+    "after": {
+      "available_mib": 6980,
+      "swap_used_mib": 1783,
+      "pswpin": 173279769,
+      "pswpout": 405906385
+    },
+    "swap_in_pages": 294,
+    "swap_out_pages": 0
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f4s32_A_r1",
+    "before": {
+      "available_mib": 6964,
+      "swap_used_mib": 1783,
+      "pswpin": 173279850,
+      "pswpout": 405906385
+    },
+    "after": {
+      "available_mib": 7027,
+      "swap_used_mib": 1783,
+      "pswpin": 173279862,
+      "pswpout": 405906385
+    },
+    "swap_in_pages": 12,
+    "swap_out_pages": 0
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f4s32_C_r1",
+    "before": {
+      "available_mib": 7040,
+      "swap_used_mib": 1783,
+      "pswpin": 173279862,
+      "pswpout": 405906385
+    },
+    "after": {
+      "available_mib": 7168,
+      "swap_used_mib": 1783,
+      "pswpin": 173279972,
+      "pswpout": 405906388
+    },
+    "swap_in_pages": 110,
+    "swap_out_pages": 3
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f4s32_M_mixed_r1",
+    "before": {
+      "available_mib": 7167,
+      "swap_used_mib": 1783,
+      "pswpin": 173279972,
+      "pswpout": 405906388
+    },
+    "after": {
+      "available_mib": 6944,
+      "swap_used_mib": 1783,
+      "pswpin": 173279979,
+      "pswpout": 405906388
+    },
+    "swap_in_pages": 7,
+    "swap_out_pages": 0
+  }
+]

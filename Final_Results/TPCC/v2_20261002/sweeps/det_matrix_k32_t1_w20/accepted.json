@@ -1,0 +1,32 @@
+{
+  "mode": "det",
+  "layout": "cur",
+  "W": 20,
+  "workers": 32,
+  "trial": 1,
+  "group": "matrix",
+  "tps": 984.39,
+  "restarts": 6393,
+  "merkle_verify": "",
+  "perm_fail": 0,
+  "div": 0,
+  "pg_serialization_failures": "",
+  "rerun": false,
+  "rerun_reason": "",
+  "wal_per_tx": 33519.1952,
+  "hot_fractions": {
+    "customer": 0.9996415770609319,
+    "district": 0.9971067112951721,
+    "history": null,
+    "new_order": null,
+    "oorder": 0.0,
+    "order_line": 0.9250464067886502,
+    "stock": 1.0,
+    "warehouse": 1.0
+  },
+  "state_sha256": "faf167b53c1d9b493ac3503a6246a4db5c0b962832108e74c530904de252b2ed",
+  "run": "/home/protectdr/claude_checks/tpcc_sweep_v2_20261002_130000/det_matrix_k32_t1_w20",
+  "accepted": true,
+  "completed": 20000,
+  "workload_sha256": "a943d1fa690757f1f75626b924dd7dcd83fc41666e1112fd09bb7ac2cdd41200"
+}

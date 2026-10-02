@@ -1,0 +1,23 @@
+2026-10-02T16:22:11+05:30
+ 16:22:11 up 42 days,  7:04, 15 users,  load average: 1.80, 2.27, 2.60
+USER         PID %CPU %MEM ELAPSED COMMAND
+protect+ 3926832  600  0.0       0 ps -eo user,pid,pcpu,pmem,etimes,args --sort=-pcpu
+bibrank  3801516 12.4  4.0   46581 target/debug/inmemory_pagerank
+bibrank  3431376 12.2  0.0  156471 htop
+bibrank  3235610  1.2  0.5  334338 /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/node --dns-result-order=ipv4first /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/out/bootstrap-fork --type=extensionHost --transformURIs --useHostProxy=false
+bibrank  3427684  0.8  0.1  158332 /home/bibrank/.vscode-server/extensions/anthropic.claude-code-2.1.285-linux-x64/resources/native-binary/claude --output-format stream-json --verbose --input-format stream-json --max-thinking-tokens 31999 --permission-prompt-tool stdio --setting-sources=user,project,local --debug --debug-to-stderr --enable-auth-status --no-chrome --replay-user-messages
+protect+ 3907260  0.7  0.0   12264 python3 /home/protectdr/claude_checks/tpcc_sweep_v2_20261002_130000/scripts/sweep_summary.py matrix /home/protectdr/claude_checks/tpcc_sweep_v2_20261002_130000
+bibrank  3235627  0.4  0.1  334336 /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/node /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/out/bootstrap-fork --type=fileWatcher
+bibrank  2040631  0.3  0.0  945044 /home/bibrank/.vscode-server/code-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c command-shell --cli-data-dir /home/bibrank/.vscode-server/cli --parent-process-id 2040613 --on-host=127.0.0.1 --on-port
+bibrank  3236767  0.2  1.5  334331 /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/node /home/bibrank/.vscode-server/extensions/ms-python.vscode-pylance-2026.4.1/dist/server.bundle.js --cancellationReceive=file:eee58787d92ba5f97b02441de1eaedb6c281f3dd4a --node-ipc --clientProcessId=3235610
+root     3926188  0.2  0.0     695 [kworker/u771:2-ext4-rsv-conversion]
+gdm      2053474  0.1  0.0  917729 /usr/bin/gnome-shell
+root     3926641  0.1  0.0     205 [kworker/u772:0-writeback]
+root        1236  0.1  0.0 3654239 [kswapd0]
+root     3926205  0.1  0.0     687 [kworker/u770:3-flush-259:0]
+root     3925725  0.1  0.0    1124 [kworker/u770:2-ext4-rsv-conversion]
+bibrank  2040604  0.1  0.0  945044 sshd: bibrank@notty
+bibrank  2040854  0.1  0.0  945043 /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/node /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/out/server-main.js --connection-token=remotessh --accept-server-license-terms --agent-host-bridge-port=43671 --agent-host-bridge-host=127.0.0.1 --start-server --enable-remote-auto-shutdown --socket-path=/tmp/code-8bdc4980-ebb4-407c-b7a1-3da6f553efae
+root        3207  0.1  0.0 3654234 /usr/sbin/NetworkManager --no-daemon
+bibrank  2040881  0.1  0.0  945043 /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/node /home/bibrank/.vscode-server/cli/servers/Stable-645f29cc3176500b4b5762ba887cf2a7f0ffdf2c/server/out/bootstrap-fork --type=ptyHost --logsPath /home/bibrank/.vscode-server/data/logs/20260921T175128
+root     3921988  0.1  0.0    2641 [kworker/u770:1-events_unbound]

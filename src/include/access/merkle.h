@@ -111,6 +111,8 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 #define MERKLE_DEFAULT_FANOUT       4
 #define BITS_PER_SPLIT              2
 #define SPLIT_THRESHOLD             32
+#define MERKLE_FANOUT32_SPLIT_THRESHOLD 1024
+/* Legacy 32/8 geometry; unspecified merge thresholds use split / 4. */
 #define MERKLE_MERGE_THRESHOLD      8
 #define MAX_PREFIX_LEN              60
 #define MERKLE_DEFAULT_PARTITIONS   200

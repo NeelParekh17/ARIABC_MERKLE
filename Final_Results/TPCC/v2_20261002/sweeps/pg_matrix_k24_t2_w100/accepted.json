@@ -1,0 +1,32 @@
+{
+  "mode": "pg",
+  "layout": "cur",
+  "W": 100,
+  "workers": 24,
+  "trial": 2,
+  "group": "matrix",
+  "tps": 1487.11,
+  "restarts": 1265,
+  "merkle_verify": "",
+  "perm_fail": 0,
+  "div": 0,
+  "pg_serialization_failures": 1265,
+  "rerun": true,
+  "rerun_reason": "pass2",
+  "wal_per_tx": 48480.696,
+  "hot_fractions": {
+    "customer": 0.9965841673158746,
+    "district": 0.9950220929582191,
+    "history": null,
+    "new_order": null,
+    "oorder": 0.0,
+    "order_line": 0.814280704215473,
+    "stock": 1.0,
+    "warehouse": 0.9704522386376452
+  },
+  "state_sha256": "5b4b96fd32abe15facfb7fefdaefe16ed7b4aabb78722882dada3f88adaed43c",
+  "run": "/home/protectdr/claude_checks/tpcc_sweep_v2_20261002_130000/pg_matrix_k24_t2_w100",
+  "accepted": true,
+  "completed": 20000,
+  "workload_sha256": "f4b6d719f093760611fc105d806224921e076fdafe2806e943a2a2fae3b7b126"
+}

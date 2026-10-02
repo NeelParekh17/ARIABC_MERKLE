@@ -1,0 +1,32 @@
+[
+  {
+    "experiment": "figure13",
+    "tuple_count": 1200,
+    "fanout": 32,
+    "split_threshold": 32,
+    "merge_threshold": 8,
+    "bad_leaf_count": 1,
+    "corrupted_tuple_count": 300,
+    "geometry_label": "manual-f32-s32-m8"
+  },
+  {
+    "experiment": "figure12",
+    "tuple_count": 1000,
+    "fanout": 32,
+    "split_threshold": 32,
+    "merge_threshold": 8,
+    "bad_leaf_count": 10,
+    "corrupted_tuple_count": 300,
+    "geometry_label": "manual-f32-s32-m8"
+  },
+  {
+    "experiment": "figure13",
+    "tuple_count": 1200,
+    "fanout": 32,
+    "split_threshold": 32,
+    "merge_threshold": 8,
+    "bad_leaf_count": 2,
+    "corrupted_tuple_count": 300,
+    "geometry_label": "manual-f32-s32-m8"
+  }
+]

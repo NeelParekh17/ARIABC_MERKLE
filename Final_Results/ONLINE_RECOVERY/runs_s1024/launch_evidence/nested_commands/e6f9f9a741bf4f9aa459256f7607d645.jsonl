@@ -1,0 +1,2 @@
+{"id": "e6f9f9a741bf4f9aa459256f7607d645", "time": "2026-10-01T07:12:18.775225+00:00", "event": "start", "argv": ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", "neel@10.129.148.248", "ss -tlnp 2>/dev/null | grep -q ':8019'"], "command": "-o StrictHostKeyChecking=no -o ConnectTimeout=10 neel@10.129.148.248 ss -tlnp 2>/dev/null | grep -q ':8019'", "stdin": null}
+{"id": "e6f9f9a741bf4f9aa459256f7607d645", "time": "2026-10-01T07:12:19.020420+00:00", "event": "end", "exit_code": 1}

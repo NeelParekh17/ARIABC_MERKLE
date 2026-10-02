@@ -1,0 +1,249 @@
+[
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_A_r3",
+    "refs": [],
+    "events": [],
+    "injection_attempts": 0,
+    "injection_failures": []
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_B_r1",
+    "refs": [],
+    "events": [],
+    "injection_attempts": 0,
+    "injection_failures": []
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_C_r1",
+    "refs": [
+      "2"
+    ],
+    "events": [
+      {
+        "node": "4",
+        "reason": "result_divergence",
+        "result": "PASS",
+        "ref": "2",
+        "attempt": "1",
+        "L": "272",
+        "B": "69375",
+        "detect_to_quarantine_ms": "0",
+        "cut_ms": "3129",
+        "recover_call_ms": "8220",
+        "repair_ms": "60",
+        "drain_ms": "0",
+        "catchup_ms": "8152",
+        "live": "1",
+        "mismatched_partitions": "30",
+        "differing_leaves": "30",
+        "rows_deleted": "0",
+        "rows_upserted": "35",
+        "full_copies": "0",
+        "replay_from": "273",
+        "replay_target": "371",
+        "total_ms": "11367",
+        "digest": "usertable_small:04ac5b7cf61350080919b8d4d3426e13481b3b92495a864b792bad914a79c6c0"
+      }
+    ],
+    "injection_attempts": 1,
+    "injection_failures": []
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_L_mix_prio_r1",
+    "refs": [
+      "4"
+    ],
+    "events": [
+      {
+        "node": "1",
+        "reason": "result_divergence",
+        "result": "PASS",
+        "ref": "4",
+        "attempt": "1",
+        "L": "299",
+        "B": "76031",
+        "detect_to_quarantine_ms": "0",
+        "cut_ms": "2731",
+        "recover_call_ms": "7594",
+        "repair_ms": "95",
+        "drain_ms": "0",
+        "catchup_ms": "7471",
+        "live": "1",
+        "mismatched_partitions": "65",
+        "differing_leaves": "65",
+        "rows_deleted": "34",
+        "rows_upserted": "45",
+        "full_copies": "0",
+        "replay_from": "300",
+        "replay_target": "394",
+        "total_ms": "10343",
+        "digest": "usertable_small:a815f41a34292ae837320eeb2bf9ebb933f819f302131c5c4b67e28b47ec6476"
+      }
+    ],
+    "injection_attempts": 3,
+    "injection_failures": [
+      [
+        "1",
+        "could not serialize access due to read/write dependencies among transactions"
+      ],
+      [
+        "2",
+        "could not serialize access due to concurrent update"
+      ]
+    ]
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f32s1024_M_mixed_r1",
+    "refs": [
+      "2"
+    ],
+    "events": [
+      {
+        "node": "4",
+        "reason": "result_divergence",
+        "result": "PASS",
+        "ref": "2",
+        "attempt": "1",
+        "L": "272",
+        "B": "69375",
+        "detect_to_quarantine_ms": "0",
+        "cut_ms": "3153",
+        "recover_call_ms": "8306",
+        "repair_ms": "93",
+        "drain_ms": "0",
+        "catchup_ms": "8187",
+        "live": "1",
+        "mismatched_partitions": "62",
+        "differing_leaves": "62",
+        "rows_deleted": "34",
+        "rows_upserted": "45",
+        "full_copies": "0",
+        "replay_from": "273",
+        "replay_target": "372",
+        "total_ms": "11484",
+        "digest": "usertable_small:04ac5b7cf61350080919b8d4d3426e13481b3b92495a864b792bad914a79c6c0"
+      }
+    ],
+    "injection_attempts": 1,
+    "injection_failures": []
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f4s32_A_r1",
+    "refs": [],
+    "events": [],
+    "injection_attempts": 0,
+    "injection_failures": []
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f4s32_C_r1",
+    "refs": [
+      "2"
+    ],
+    "events": [
+      {
+        "node": "4",
+        "reason": "result_divergence",
+        "result": "PASS",
+        "ref": "2",
+        "attempt": "1",
+        "L": "293",
+        "B": "74751",
+        "detect_to_quarantine_ms": "0",
+        "cut_ms": "3154",
+        "recover_call_ms": "7769",
+        "repair_ms": "67",
+        "drain_ms": "0",
+        "catchup_ms": "7641",
+        "live": "1",
+        "mismatched_partitions": "38",
+        "differing_leaves": "39",
+        "rows_deleted": "0",
+        "rows_upserted": "39",
+        "full_copies": "0",
+        "replay_from": "294",
+        "replay_target": "391",
+        "total_ms": "10940",
+        "digest": "usertable_small:c46eb859a33488b43311548247c06a00d13e70f4d97c6d510dedf212ca5ab1c9"
+      }
+    ],
+    "injection_attempts": 3,
+    "injection_failures": [
+      [
+        "1",
+        "could not serialize access due to concurrent update"
+      ],
+      [
+        "2",
+        "could not serialize access due to read/write dependencies among transactions"
+      ]
+    ]
+  },
+  {
+    "run": "cluster4_s1024_20261001T060514ZJ_f4s32_M_mixed_r1",
+    "refs": [
+      "2"
+    ],
+    "events": [
+      {
+        "node": "4",
+        "reason": "result_divergence",
+        "result": "PASS",
+        "ref": "2",
+        "attempt": "1",
+        "L": "546",
+        "B": "139519",
+        "detect_to_quarantine_ms": "6",
+        "cut_ms": "3661",
+        "recover_call_ms": "579",
+        "repair_ms": "91",
+        "drain_ms": "0",
+        "catchup_ms": "445",
+        "live": "1",
+        "mismatched_partitions": "66",
+        "differing_leaves": "73",
+        "rows_deleted": "34",
+        "rows_upserted": "46",
+        "full_copies": "0",
+        "replay_from": "547",
+        "replay_target": "626",
+        "total_ms": "4266",
+        "digest": "usertable_small:3a200cdf8a78ffc9c47af25ac1815d6c638983265e0f6aabbe710235cabfb619"
+      }
+    ],
+    "injection_attempts": 9,
+    "injection_failures": [
+      [
+        "1",
+        "could not serialize access due to concurrent update"
+      ],
+      [
+        "2",
+        "could not serialize access due to read/write dependencies among transactions"
+      ],
+      [
+        "3",
+        "could not serialize access due to read/write dependencies among transactions"
+      ],
+      [
+        "4",
+        "could not serialize access due to read/write dependencies among transactions"
+      ],
+      [
+        "5",
+        "could not serialize access due to read/write dependencies among transactions"
+      ],
+      [
+        "6",
+        "could not serialize access due to read/write dependencies among transactions"
+      ],
+      [
+        "7",
+        "could not serialize access due to read/write dependencies among transactions"
+      ],
+      [
+        "8",
+        "could not serialize access due to concurrent update"
+      ]
+    ]
+  }
+]

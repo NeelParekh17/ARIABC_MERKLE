@@ -1,0 +1,8 @@
+{
+  "benchmark_script": "/work/ARIABC/AriaBC/scripts/benchmark/recovery/run_merkle_recovery_benchmark.py",
+  "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+  "psycopg_version": "3.3.2",
+  "python_executable": "/work/ARIABC/AriaBC/.venv/bin/python3",
+  "python_version": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "working_directory": "/work/ARIABC/AriaBC"
+}

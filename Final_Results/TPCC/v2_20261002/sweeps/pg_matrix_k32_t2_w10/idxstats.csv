@@ -1,0 +1,10 @@
+public,customer,idx_customer_name_mid,17935
+public,customer,pk_customer,17328
+public,district,pk_district,22399
+public,item,pk_item,101246
+public,new_order,pk_new_order,16261
+public,oorder,idx_oorder_customer_latest,796
+public,oorder,pk_oorder,16099
+public,order_line,pk_order_line,16891
+public,stock,pk_stock,355447
+public,warehouse,pk_warehouse,27970

@@ -24,9 +24,12 @@
 #include "storage/bufmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/snapshot.h"
+#include "utils/syscache.h"
 #include "utils/typcache.h"
 #include "parser/parse_coerce.h"
 #include "funcapi.h"
@@ -70,6 +73,186 @@ typedef struct MerklePartitionCacheEntry {
 	int  num_partitions;
 } MerklePartitionCacheEntry;
 static MerklePartitionCacheEntry g_partition_cache[MERKLE_PARTITION_CACHE_SIZE];
+
+/*
+ * Backend-local binary-send metadata, shared by row and route hashing.  Keep
+ * descriptor fields rather than a TupleDesc pointer: transient descriptors
+ * can be freed and their addresses reused.  Matching descriptors may share
+ * metadata because a send function depends only on the attribute's type.
+ *
+ * Invalidation only marks entries stale.  A send function can accept catalog
+ * invalidations or re-enter hashing, so its FmgrInfo/fn_extra must remain
+ * allocated until the outer call releases the entry.  The bounded cache
+ * falls back to uncached calls if all entries are still in use.
+ */
+#define MERKLE_SEND_CACHE_SLOTS 64
+
+typedef struct MerkleSendCacheAttribute
+{
+	Oid			typid;
+	int32		typmod;
+	AttrNumber	attnum;
+	bool		isdropped;
+} MerkleSendCacheAttribute;
+
+typedef struct MerkleSendCacheEntry
+{
+	MemoryContext context;
+	Oid			typeid;
+	int32		typmod;
+	int			natts;
+	uint32		key;
+	uint32		live_attributes;
+	MerkleSendCacheAttribute *attributes;
+	FmgrInfo   *send_functions;
+	int			references;
+	bool		valid;
+} MerkleSendCacheEntry;
+
+static MerkleSendCacheEntry merkle_send_cache[MERKLE_SEND_CACHE_SLOTS];
+static bool merkle_send_cache_registered = false;
+
+static void
+merkle_send_cache_invalidate(void)
+{
+	int			i;
+
+	for (i = 0; i < MERKLE_SEND_CACHE_SLOTS; i++)
+		merkle_send_cache[i].valid = false;
+}
+
+static void
+merkle_send_cache_relcache_callback(Datum arg, Oid relid)
+{
+	(void) arg;
+	(void) relid;
+
+	/* Nested composite/array send functions may cache relation metadata too. */
+	merkle_send_cache_invalidate();
+}
+
+static void
+merkle_send_cache_syscache_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	(void) arg;
+	(void) cacheid;
+	(void) hashvalue;
+
+	merkle_send_cache_invalidate();
+}
+
+static MerkleSendCacheEntry *
+merkle_send_cache_acquire(TupleDesc tupdesc)
+{
+	MerkleSendCacheEntry *entry;
+	MerkleSendCacheEntry *replacement = NULL;
+	uint32		key = (uint32) tupdesc->tdtypeid;
+	int			i;
+	int			probe;
+	bool		matches;
+
+	if (!merkle_send_cache_registered)
+	{
+		CacheRegisterRelcacheCallback(merkle_send_cache_relcache_callback, (Datum) 0);
+		CacheRegisterSyscacheCallback(TYPEOID, merkle_send_cache_syscache_callback, (Datum) 0);
+		CacheRegisterSyscacheCallback(PROCOID, merkle_send_cache_syscache_callback, (Datum) 0);
+		merkle_send_cache_registered = true;
+	}
+
+	key = key * 31 + (uint32) tupdesc->tdtypmod;
+	key = key * 31 + (uint32) tupdesc->natts;
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		key = key * 31 + (uint32) attr->atttypid;
+		key = key * 31 + (uint32) attr->atttypmod;
+		key = key * 31 + (uint32) attr->attnum;
+		key = key * 31 + (uint32) attr->attisdropped;
+	}
+	/* Probe collisions rather than thrashing between active table schemas. */
+	for (probe = 0; probe < MERKLE_SEND_CACHE_SLOTS; probe++)
+	{
+		entry = &merkle_send_cache[(key + (uint32) probe) % MERKLE_SEND_CACHE_SLOTS];
+		matches = entry->valid && entry->key == key &&
+			entry->typeid == tupdesc->tdtypeid && entry->typmod == tupdesc->tdtypmod &&
+			entry->natts == tupdesc->natts;
+		for (i = 0; matches && i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+			MerkleSendCacheAttribute *cached = &entry->attributes[i];
+
+			matches = cached->typid == attr->atttypid &&
+				cached->typmod == attr->atttypmod && cached->attnum == attr->attnum &&
+				cached->isdropped == attr->attisdropped;
+		}
+		if (matches)
+		{
+			entry->references++;
+			return entry;
+		}
+		if (entry->references == 0 &&
+			(replacement == NULL || (replacement->valid && !entry->valid)))
+			replacement = entry;
+	}
+	if (replacement == NULL)
+		return NULL;
+
+	entry = replacement;
+	entry->valid = false;
+	if (entry->context == NULL)
+		entry->context = AllocSetContextCreate(CacheMemoryContext,
+											   "Merkle binary send cache",
+											   ALLOCSET_SMALL_SIZES);
+	else
+		MemoryContextReset(entry->context);
+	entry->typeid = tupdesc->tdtypeid;
+	entry->typmod = tupdesc->tdtypmod;
+	entry->natts = tupdesc->natts;
+	entry->key = key;
+	entry->live_attributes = 0;
+	entry->attributes = MemoryContextAlloc(entry->context,
+										  tupdesc->natts * sizeof(MerkleSendCacheAttribute));
+	entry->send_functions = MemoryContextAllocZero(entry->context,
+												  tupdesc->natts * sizeof(FmgrInfo));
+	for (i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+		MerkleSendCacheAttribute *cached = &entry->attributes[i];
+
+		cached->typid = attr->atttypid;
+		cached->typmod = attr->atttypmod;
+		cached->attnum = attr->attnum;
+		cached->isdropped = attr->attisdropped;
+		if (!attr->attisdropped)
+			entry->live_attributes++;
+	}
+	entry->valid = true;
+	entry->references = 1;
+	return entry;
+}
+
+static bytea *
+merkle_binary_send(Form_pg_attribute attr, Datum value, FmgrInfo *send_function,
+				   MerkleSendCacheEntry *cache)
+{
+	Oid			typsend;
+	bool		typisvarlena;
+
+	if (cache != NULL && cache->valid && !OidIsValid(send_function->fn_oid))
+	{
+		/* Preserve the uncached path's behavior for NULL/unsupported types. */
+		getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+		fmgr_info_cxt(typsend, send_function, cache->context);
+	}
+	if (send_function != NULL && (cache == NULL || cache->valid) &&
+		OidIsValid(send_function->fn_oid))
+		return SendFunctionCall(send_function, value);
+
+	/* An invalidation during a send call also affects subsequent attributes. */
+	getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
+	return OidSendFunctionCall(typsend, value);
+}
 
 static void
 merkle_meta_cache_clear(void)
@@ -203,9 +386,10 @@ merkle_hash_uint32(blake3_hasher *hasher, uint32 value)
  * Type send functions produce PostgreSQL's canonical wire representation and
  * therefore do not depend on TimeZone, DateStyle, locale, or output GUCs.
  */
-void
-merkle_hash_slot_canonical_desc_fast(TupleDesc tupdesc, TupleTableSlot *slot,
-									 FmgrInfo *send_functions, MerkleHash *result)
+static void
+merkle_hash_slot_canonical_desc_impl(TupleDesc tupdesc, TupleTableSlot *slot,
+									 FmgrInfo *send_functions,
+									 MerkleSendCacheEntry *cache, MerkleHash *result)
 {
 	blake3_hasher	hasher;
 	int				i;
@@ -218,9 +402,12 @@ merkle_hash_slot_canonical_desc_fast(TupleDesc tupdesc, TupleTableSlot *slot,
 		return;
 	}
 
-	for (i = 0; i < tupdesc->natts; i++)
-		if (!TupleDescAttr(tupdesc, i)->attisdropped)
-			live_attributes++;
+	if (cache != NULL)
+		live_attributes = cache->live_attributes;
+	else
+		for (i = 0; i < tupdesc->natts; i++)
+			if (!TupleDescAttr(tupdesc, i)->attisdropped)
+				live_attributes++;
 
 	blake3_hasher_init(&hasher);
 	blake3_hasher_update(&hasher, magic, sizeof(magic));
@@ -251,17 +438,9 @@ merkle_hash_slot_canonical_desc_fast(TupleDesc tupdesc, TupleTableSlot *slot,
 			bytea	   *encoded;
 			uint32		length;
 
-			if (send_functions != NULL && OidIsValid(send_functions[i].fn_oid))
-			{
-				encoded = DatumGetByteaP(FunctionCall1(&send_functions[i], val));
-			}
-			else
-			{
-				Oid			typsend;
-				bool		typisvarlena;
-				getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
-				encoded = OidSendFunctionCall(typsend, val);
-			}
+			encoded = merkle_binary_send(attr, val,
+									 send_functions != NULL ? &send_functions[i] : NULL,
+									 cache);
 			length = (uint32) VARSIZE_ANY_EXHDR(encoded);
 			merkle_hash_uint32(&hasher, length);
 			if (length > 0)
@@ -271,6 +450,39 @@ merkle_hash_slot_canonical_desc_fast(TupleDesc tupdesc, TupleTableSlot *slot,
 	}
 
 	blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+}
+
+void
+merkle_hash_slot_canonical_desc_fast(TupleDesc tupdesc, TupleTableSlot *slot,
+									 FmgrInfo *send_functions, MerkleHash *result)
+{
+	MerkleSendCacheEntry *cache;
+
+	if (send_functions != NULL || slot == NULL || TTS_EMPTY(slot))
+	{
+		merkle_hash_slot_canonical_desc_impl(tupdesc, slot, send_functions, NULL, result);
+		return;
+	}
+
+	cache = merkle_send_cache_acquire(tupdesc);
+	PG_TRY();
+	{
+		merkle_hash_slot_canonical_desc_impl(tupdesc, slot,
+										   cache != NULL ? cache->send_functions : NULL,
+										   cache, result);
+	}
+	PG_CATCH();
+	{
+		if (cache != NULL)
+		{
+			cache->valid = false;
+			cache->references--;
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (cache != NULL)
+		cache->references--;
 }
 
 void
@@ -418,9 +630,10 @@ merkle_compute_slot_hash(Relation heapRel, TupleTableSlot *slot, MerkleHash *res
  * was incompatible with a future dynamic prefix tree (sequential keys share
  * high bits).  Route format version 2 removes that special path.
  */
-void
-merkle_compute_canonical_route_digest_fast(Datum *values, bool *isnull, int nkeys,
+static void
+merkle_compute_canonical_route_digest_impl(Datum *values, bool *isnull, int nkeys,
 											TupleDesc tupdesc, FmgrInfo *send_functions,
+											MerkleSendCacheEntry *cache,
 											uint8 digest[MERKLE_HASH_BYTES])
 {
 	blake3_hasher hasher;
@@ -447,17 +660,9 @@ merkle_compute_canonical_route_digest_fast(Datum *values, bool *isnull, int nkey
 			bytea	   *encoded;
 			uint32		length;
 
-			if (send_functions != NULL && OidIsValid(send_functions[i].fn_oid))
-			{
-				encoded = DatumGetByteaP(FunctionCall1(&send_functions[i], values[i]));
-			}
-			else
-			{
-				Oid			typsend;
-				bool		typisvarlena;
-				getTypeBinaryOutputInfo(attr->atttypid, &typsend, &typisvarlena);
-				encoded = OidSendFunctionCall(typsend, values[i]);
-			}
+			encoded = merkle_binary_send(attr, values[i],
+									 send_functions != NULL ? &send_functions[i] : NULL,
+									 cache);
 			length = (uint32) VARSIZE_ANY_EXHDR(encoded);
 			merkle_hash_uint32(&hasher, length);
 			if (length > 0)
@@ -469,6 +674,41 @@ merkle_compute_canonical_route_digest_fast(Datum *values, bool *isnull, int nkey
 	}
 
 	blake3_hasher_finalize(&hasher, digest, MERKLE_HASH_BYTES);
+}
+
+void
+merkle_compute_canonical_route_digest_fast(Datum *values, bool *isnull, int nkeys,
+											TupleDesc tupdesc, FmgrInfo *send_functions,
+											uint8 digest[MERKLE_HASH_BYTES])
+{
+	MerkleSendCacheEntry *cache;
+
+	if (send_functions != NULL || nkeys <= 0)
+	{
+		merkle_compute_canonical_route_digest_impl(values, isnull, nkeys, tupdesc,
+													 send_functions, NULL, digest);
+		return;
+	}
+
+	cache = merkle_send_cache_acquire(tupdesc);
+	PG_TRY();
+	{
+		merkle_compute_canonical_route_digest_impl(values, isnull, nkeys, tupdesc,
+													 cache != NULL ? cache->send_functions : NULL,
+													 cache, digest);
+	}
+	PG_CATCH();
+	{
+		if (cache != NULL)
+		{
+			cache->valid = false;
+			cache->references--;
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (cache != NULL)
+		cache->references--;
 }
 
 static void

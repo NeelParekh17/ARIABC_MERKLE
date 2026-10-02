@@ -1,0 +1,43 @@
+{
+  "fig12_sizes": [
+    1000
+  ],
+  "fig13_sizes": [
+    1200
+  ],
+  "fig13_k": [
+    1,
+    2
+  ],
+  "repetitions": 2,
+  "benchmark_schema_version": 3,
+  "timing_contract_version": 1,
+  "dsn": "host=127.0.0.1 port=55489 dbname=postgres user=postgres",
+  "profile": "smoke",
+  "experiment": null,
+  "tuple_count": null,
+  "split_threshold": null,
+  "merge_threshold": null,
+  "bad_leaf_count": null,
+  "fanout": 32,
+  "profile_label": null,
+  "geometry_label": null,
+  "profiling": "off",
+  "series_order": "random",
+  "seed": 20260703,
+  "result_dir": ".bench_tmp/recovery_hardening_live_20260921/results_03",
+  "scratch_dir": ".bench_tmp/recovery_hardening_live_20260921/scratch",
+  "artifact_mode": "summary",
+  "corruption_mode": "mixed",
+  "leaf_fetch_batch_size": 64,
+  "audit_mode": "full",
+  "dataset_setup_mode": null,
+  "incremental_dataset_expansion": null,
+  "levels_per_batch": 1,
+  "partitions": null,
+  "synchronous_commit": "on",
+  "warmup_cycles": 1,
+  "benchmark_scope": "merkle_only_dynamic_recovery",
+  "enabled_methods": "merkle",
+  "paper_comparison_status": "merkle_series_only"
+}

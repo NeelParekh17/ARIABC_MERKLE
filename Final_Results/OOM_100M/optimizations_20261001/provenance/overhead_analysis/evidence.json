@@ -1,0 +1,123 @@
+{
+  "cases": 24,
+  "settings": {
+    "det:wal_compression": [
+      "off"
+    ],
+    "det:wal_level": [
+      "minimal"
+    ],
+    "det:default_transaction_isolation": [
+      "serializable"
+    ],
+    "det:full_page_writes": [
+      "on"
+    ],
+    "det:fsync": [
+      "on"
+    ],
+    "det:synchronous_commit": [
+      "on"
+    ],
+    "det:merkle_apply_synchronous_direct": [
+      "on"
+    ],
+    "old:wal_compression": [
+      "off"
+    ],
+    "old:wal_level": [
+      "minimal"
+    ],
+    "old:default_transaction_isolation": [
+      "serializable"
+    ],
+    "old:full_page_writes": [
+      "on"
+    ],
+    "old:fsync": [
+      "on"
+    ],
+    "old:synchronous_commit": [
+      "on"
+    ],
+    "old:merkle_apply_synchronous_direct": [
+      "on"
+    ],
+    "new:wal_compression": [
+      "off"
+    ],
+    "new:wal_level": [
+      "minimal"
+    ],
+    "new:default_transaction_isolation": [
+      "serializable"
+    ],
+    "new:full_page_writes": [
+      "on"
+    ],
+    "new:fsync": [
+      "on"
+    ],
+    "new:synchronous_commit": [
+      "on"
+    ],
+    "new:merkle_apply_synchronous_direct": [
+      "on"
+    ]
+  },
+  "controls": [
+    {
+      "workload": "a",
+      "workers": 1,
+      "control_det": 1.0038839141223435,
+      "new_control": 0.8315241769085853
+    },
+    {
+      "workload": "a",
+      "workers": 16,
+      "control_det": 1.1387619443290402,
+      "new_control": 0.7142433234421365
+    },
+    {
+      "workload": "f",
+      "workers": 1,
+      "control_det": 0.9339977435125988,
+      "new_control": 0.8240489656775394
+    },
+    {
+      "workload": "f",
+      "workers": 16,
+      "control_det": 1.0562376237623763,
+      "new_control": 0.7468204673173616
+    }
+  ],
+  "archived_read_only": [
+    {
+      "workers": 1,
+      "merkle_det": 0.9306027164685907,
+      "delta_read_mib": 0.81640625
+    },
+    {
+      "workers": 4,
+      "merkle_det": 1.0277777777777777,
+      "delta_read_mib": 0.12890625
+    },
+    {
+      "workers": 8,
+      "merkle_det": 1.0056899004267426,
+      "delta_read_mib": -0.08984375
+    },
+    {
+      "workers": 16,
+      "merkle_det": 1.0399619410085634,
+      "delta_read_mib": 0.03125
+    }
+  ],
+  "limitations": [
+    "Mutation-equivalent attribution assumes zero direct Merkle maintenance on SELECT; cache interference remains.",
+    "PG buffer reads are not device reads. No per-relation WAL or CPU timing in these artifacts.",
+    "Checkpoint distance is a WAL proxy across checkpoints, not a workload-only LSN counter; ambiguous matches stay blank.",
+    "At workers > 1 aggregate PG read time overlaps; it cannot be subtracted from wall time.",
+    "Provided 3000-update relation/WAL probe is a separate plain-SQL experiment."
+  ]
+}

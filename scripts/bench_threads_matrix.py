@@ -1550,17 +1550,21 @@ def main() -> int:
     parser.add_argument(
         "--merkle-split-threshold",
         type=int,
-        default=32,
-        help="Node tuple count triggering a split (default: 32).",
+        default=None,
+        help="Node tuple count triggering a split (default: 1024 for fanout 32, otherwise 32).",
     )
     parser.add_argument(
         "--merkle-merge-threshold",
         type=int,
-        default=8,
-        help="Node tuple count triggering a merge (default: 8).",
+        default=None,
+        help="Node tuple count triggering a merge (default: max(1, split threshold / 4)).",
     )
 
     args = parser.parse_args()
+    if args.merkle_split_threshold is None:
+        args.merkle_split_threshold = 1024 if args.merkle_fanout == 32 else 32
+    if args.merkle_merge_threshold is None:
+        args.merkle_merge_threshold = max(1, args.merkle_split_threshold // 4)
 
     if args.timeout_db_s < 0:
         print("ERROR: --timeout-db-s must be >= 0", file=sys.stderr)

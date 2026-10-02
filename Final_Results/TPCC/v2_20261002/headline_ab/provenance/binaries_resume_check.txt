@@ -1,0 +1,6 @@
+/home/protectdr/claude_checks/install_v2/bin/postgres: OK
+/home/protectdr/claude_checks/install_v2/bin/psql: OK
+/home/protectdr/claude_checks/install_v2/bin/pg_waldump: OK
+/home/protectdr/claude_checks/install_v2/lib/postgresql/pg_prewarm.so: OK
+/home/protectdr/claude_checks/src/ariabc_pg/build/bin/ariabc_pg_server: OK
+/home/protectdr/claude_checks/src/ariabc_pg/build/bin/ariabc_pg_gateway: OK

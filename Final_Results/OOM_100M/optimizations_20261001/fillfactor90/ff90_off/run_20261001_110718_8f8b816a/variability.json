@@ -1,0 +1,138 @@
+[
+  {
+    "configuration": [
+      "bcdb_det",
+      "a",
+      "0.0",
+      "",
+      "1",
+      ""
+    ],
+    "trials": 1,
+    "median": 1431.9467315815853,
+    "mean": 1431.9467315815853,
+    "min": 1431.9467315815853,
+    "max": 1431.9467315815853,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "a",
+      "0.0",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 4944.375772558715,
+    "mean": 4944.375772558715,
+    "min": 4944.375772558715,
+    "max": 4944.375772558715,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "f",
+      "0.99",
+      "",
+      "1",
+      ""
+    ],
+    "trials": 1,
+    "median": 1878.1106207155601,
+    "mean": 1878.1106207155601,
+    "min": 1878.1106207155601,
+    "max": 1878.1106207155601,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "f",
+      "0.99",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 7363.7702503681885,
+    "mean": 7363.7702503681885,
+    "min": 7363.7702503681885,
+    "max": 7363.7702503681885,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "a",
+      "0.0",
+      "",
+      "1",
+      ""
+    ],
+    "trials": 1,
+    "median": 1300.0520020800832,
+    "mean": 1300.0520020800832,
+    "min": 1300.0520020800832,
+    "max": 1300.0520020800832,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "a",
+      "0.0",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 4501.462975467027,
+    "mean": 4501.462975467027,
+    "min": 4501.462975467027,
+    "max": 4501.462975467027,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "f",
+      "0.99",
+      "",
+      "1",
+      ""
+    ],
+    "trials": 1,
+    "median": 1614.7263038914905,
+    "mean": 1614.7263038914905,
+    "min": 1614.7263038914905,
+    "max": 1614.7263038914905,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "f",
+      "0.99",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 5629.045876723895,
+    "mean": 5629.045876723895,
+    "min": 5629.045876723895,
+    "max": 5629.045876723895,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  }
+]

@@ -1,0 +1,187 @@
+{
+  "version": 3,
+  "arguments": {
+    "remote_host": "10.129.148.247",
+    "remote_user": "neel",
+    "remote_dir": "/tmp/ariabc_oom_v2_20261001",
+    "install_dir": "/home/neel/claude_opt/install_v2",
+    "cluster_dir": "/home/neel/claude_opt/cluster_v2",
+    "gateway_host": "10.129.27.111",
+    "gateway_user": "neel",
+    "gateway_repo": "/home/neel/claude_ctl/AriaBC_v2",
+    "db_port": 5458,
+    "server_port": 8058,
+    "db_rows": 100000000,
+    "shared_buffers": "32MB",
+    "usertable_fillfactor": 90,
+    "gen_shared_buffers": "512MB",
+    "gen_maintenance_work_mem": "1GB",
+    "gen_parallel_maintenance_workers": 2,
+    "gen_min_mem_available_mb": 4608,
+    "generation_timeout": 21600,
+    "txs": 20000,
+    "seed": 42,
+    "trials": 1,
+    "modes": [
+      "pg",
+      "bcdb_det",
+      "bcdb_merkle"
+    ],
+    "workers": [
+      1,
+      4,
+      8,
+      16
+    ],
+    "skews": [
+      0.0,
+      0.99,
+      1.2
+    ],
+    "workloads": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "f"
+    ],
+    "combos": [
+      [
+        "a",
+        0.0
+      ],
+      [
+        "a",
+        0.99
+      ],
+      [
+        "a",
+        1.2
+      ],
+      [
+        "b",
+        0.99
+      ],
+      [
+        "c",
+        0.99
+      ],
+      [
+        "d",
+        0.99
+      ],
+      [
+        "f",
+        0.99
+      ]
+    ],
+    "out_dir": "/home/neel/claude_ctl/results/oom_v2_20261001/generation",
+    "gateway_timeout": 1800,
+    "reset_timeout": 7200,
+    "verify_timeout": 7200,
+    "base_dir_name": "pgdata_base_v2_ff90",
+    "skip_gen": false,
+    "gen_only": true,
+    "reset_mode": "delta",
+    "delta_content_check": "sampled",
+    "settle_factor": 1.25,
+    "settle_min_s": 20,
+    "settle_max_s": 1800,
+    "calibrate_min_wait_s": 300,
+    "verify_mode": "fast",
+    "dry_run": false,
+    "preflight_only": false,
+    "resume_dir": null,
+    "auto_resume": false,
+    "pg_retry_jitter": "on",
+    "pg_exec_mode": "event"
+  },
+  "cache_policy": "cold_start_os_cache_unbounded",
+  "timing": "gateway_overall_time_taken",
+  "workloads": {
+    "ycsb_a_skew_0.0_20000.sql": {
+      "sha256": "7a031904b743e46ac36c81f8ee675141eec90f2831dd31f8788bed7a36bd1b83",
+      "queries": 20000
+    },
+    "ycsb_a_skew_0.99_20000.sql": {
+      "sha256": "a3f07805d1b15666b9ef9ce62daa7f441b622c08d151bc1c8d5ab67cfc97559b",
+      "queries": 20000
+    },
+    "ycsb_a_skew_1.2_20000.sql": {
+      "sha256": "4f763c4243628beba2cf3841e69b2056e518dcb24ad3bc1c9ff7d255ff9700f2",
+      "queries": 20000
+    },
+    "ycsb_b_skew_0.99_20000.sql": {
+      "sha256": "983f19f6c60e9a602d47968b1c1b8ff0badda0e023f82d0d49dc6030e1f1e91c",
+      "queries": 20000
+    },
+    "ycsb_c_skew_0.99_20000.sql": {
+      "sha256": "9609a417912694edc40eb9b1141750954187084fb5285000075b6d4ea7a0e483",
+      "queries": 20000
+    },
+    "ycsb_d_skew_0.99_20000.sql": {
+      "sha256": "9c025251db4a79632681b1a6274fd67924245a97d6d200314b84b4336900c34a",
+      "queries": 20000
+    },
+    "ycsb_f_skew_0.99_20000.sql": {
+      "sha256": "89dec3212c59cd9d38b0d7209c328955087abeef4f88b6f02a54643a4ba7e050",
+      "queries": 20000
+    }
+  },
+  "source_sha256": {
+    "scripts/generate_ycsb_workloads.py": "e239de1ec2b5800017951a042bc8bec3ce871f65d29f039b65cc1a6874249ed3",
+    "scripts/restore_usertable_small.sql": "492533f078cd2f49eea450d45f742edca8f7ecb81869f0864cd1b2f2ed4a5786",
+    "scripts/distributed/sql/raft_apply_ledger_schema.sql": "12beaba292be6c5bb372a3ec196ba29ac080eece6b30d65e5d2bd205b35bff08",
+    "scripts/distributed/aggregate_single_machine_min_profile.py": "bb2ca315cc93d0fb2a6b388043fb6ef92a946c08a92ecc6d901bd265a88cd25f",
+    "scripts/distributed/benchmark_cache.py": "19f9dd00b4db269ffa87ee87e1ccd3364cbda30240a1f42b01194edb13586181",
+    "scripts/distributed/benchmark_contract.py": "01b9b1b130ea6a47a671e0833e45fa0f895b238841683e785e6fd9c7efd8f6c2",
+    "scripts/distributed/benchmark_telemetry.py": "ea3b800a61128946aced0e030b6818fd3fca68d23ca225bc5ef4452ecf8e8f8d",
+    "scripts/distributed/benchmark_tx_sign_comparison.py": "b5bed5cc6a7d71b0dcfc25f51a0ae9615c7680eaab964552ca6e51ee9b6405d7",
+    "scripts/distributed/benchmark_validation.py": "adba0d1b27ca6680e50e10ba9abb0d0e475f90d37fe1583351641189ddd68bdd",
+    "scripts/distributed/benchmark_ycsb_updated_eval.py": "af15d36924d2ec2a8b61a6b2f2b0276aa8a2a5d4bff0f3adb365d328ea583289",
+    "scripts/distributed/build_merkle_fanout32_db.py": "cff7a70b7a6d8e64a2d17891867d5a30dfca11c3c555810ed24a186362825855",
+    "scripts/distributed/build_ycsb_capacity_graph.py": "9a95c735f9a9b96d15385f823323db9e57c4c5c01f17bc282bf7fd1e31397f14",
+    "scripts/distributed/check_leader.py": "018ae3c6de18671261577aa6256c13b084fe7bd43415874ab64bbeec00ac980d",
+    "scripts/distributed/cluster_sweep_support.py": "aaf571e37723d149e27e36b5ce23480c0417eb5757ea41942bcd1932e551ff82",
+    "scripts/distributed/compare_66_sweep.py": "44df0a3424c5737c1d229feb95f9680b8f94551365286616435baba8f9a4dd5d",
+    "scripts/distributed/compare_overhead_profiles.py": "3cd3274d13168aca7ec0455ac1bf74d88abb9c38d50a1f71e86f7f7673d07cc1",
+    "scripts/distributed/compute_tpcc_median.py": "55561b03d70df1624a9b99f5a216957a47cf20f60ede5c56e6749c6cdb805efe",
+    "scripts/distributed/device_settle_probe.py": "cc7a327bef9609e91138a76e567ee94e81d9d24749db8be3e8864ff07be90ac1",
+    "scripts/distributed/generate_abcdf_graphs.py": "286525eeeee2fbb297cd56260f04eb6ab115077df432af8386ada07ec318b554",
+    "scripts/distributed/generate_abcdf_markdown.py": "bd82af81aa2a69f5e89688a0ffa23a4b06aaf14d6be999038d7d002a7f634e3e",
+    "scripts/distributed/generate_online_recovery_final_results.py": "7d2e77f74286614cbc7517b2fa3acdf1734ea853dd5c23df34fd8d9cbbdafb49",
+    "scripts/distributed/generate_tx_sign_final_results.py": "0e85a05f7abdcee107fff4f0437228f39b5847dee77c8624215b09611e79c7a6",
+    "scripts/distributed/install_ssh_key_protectdb.py": "24c80afb30f923a33c90748133eb152e05e099642e20ce7bdd0560ee7d672134",
+    "scripts/distributed/large_zipf.py": "75c3d95dc4e31363a696bd342f0342247569a0359c42b65e4bd23f3d8074ae22",
+    "scripts/distributed/live_machine_probe.py": "7e7ebfa97185780cec6238e6a1f94ae3a66034043cce4e37ca3a809bd71873b3",
+    "scripts/distributed/measure_restoration_timing.py": "15388f2967cb15fc15eaae1d8b07dd6c7a6eac60b810c6977b34bcdf977497a8",
+    "scripts/distributed/orchestrate_tpcc_full_evaluation.py": "bcaca0d0863786a4dfdb9734d1c9108c2107efb31656772e338fb3c874bc4e9c",
+    "scripts/distributed/parse_tps_metrics.py": "14e955a68c701808b6f7de66328eb1ec6cc4656f347104e5c52136be97d378dd",
+    "scripts/distributed/plot_executor_sweep.py": "ee722adce37876efc2bb936e13cf6a006d40864d5e654d7ff696527f8447e045",
+    "scripts/distributed/plot_merkle_fanout_comparison.py": "dbd60c7127326d6673555e5c6d2cc57474ac6b5c6575fe6627003c1f15a94ce8",
+    "scripts/distributed/plot_oom_figures.py": "f4af86ce7feab2c3d65c4d8a3df9ef8911d82bebc4d11e836138a95bd60f638a",
+    "scripts/distributed/plot_overhead_profiles_combined.py": "c388546b4518b050012f5f35b88872c977ed1509370cbe5cbdff6e95dc3687da",
+    "scripts/distributed/plot_threaded_raft_direct_sweep.py": "3f9702dbbeeed3d67b2ceb821c79ff42924be4ab98e7aa7a6d9d8e8afc94f8c9",
+    "scripts/distributed/plot_three_modes_comparison.py": "1e15e9dae480506efe84237ae27bb1d92903926aa071dee1f49800ca1b05580f",
+    "scripts/distributed/plot_three_profiles_combined.py": "8f24952f4f98cebb8ad492de2a3ec76c955c49c7c13438ce25a76599df880b58",
+    "scripts/distributed/plot_ycsb_skew_tps_comparison.py": "a26ef9d2562182db9fc3e8b512b1435bd4994ded645afb82b27ed2447b766594",
+    "scripts/distributed/probe_bcdb_block_submit.py": "ee3b63b2d46b725aa3e3b1bb722bbcc2483dcd41e90b8b943f16ee1243bc9dc5",
+    "scripts/distributed/probe_dram_cache_machines.py": "702db79d90d7e81d8731e7dcf152dca18d327c9dcefdf6de6a4dbfae4a45256e",
+    "scripts/distributed/rerun_ycsb_outliers.py": "3fca049752ef82ebb9e1a9445307cb866c2ef7691c9fc886c6709b5cfd05ba81",
+    "scripts/distributed/run_all_modes_gateway_sweep.py": "56e92e2f22a93b56aec3a76b193691baf3e24edca5fc88c014d6f1516ca739a6",
+    "scripts/distributed/run_oom_100m_benchmark.py": "4a915c46af30698f1102f12c9008f9b2149810615e4c79db399737bfba209839",
+    "scripts/distributed/run_single_undo_test.py": "b9f6215b201eeb342ed1571fd15ef1c737d8a6246d28c2451bd8e95f8b6b69c1",
+    "scripts/distributed/run_singlenode_gateway_sweep.py": "b8ddc0420b9f5fe97d30df1c1a4a94c10ca83e51b3e3d10209495407d8a3efd4",
+    "scripts/distributed/source_fingerprint.py": "98f8fc72a5af5b0359789ca7b7f3f1f1ea049d15914455c600c70863799f91e6",
+    "scripts/distributed/summarize_raft_profile.py": "b2767f40566def4fb5fe330ad0e3646355c24326821d53aec1c8a0b441d560d3",
+    "scripts/distributed/test_tx_sign_smoke.py": "518bd8585f10550b5a794e6abfb03f39cfa422f8483d7778ccb5ed2ab4ebe845",
+    "scripts/distributed/update_nodes_info.py": "9ff51ae821239722bce4ff273ce794641d5e02e388c9e2837baa44529bc8fe49",
+    "scripts/distributed/update_pg_median_results.py": "457d64b78f3384fee753591d5b9342bd986fab1e4f670031e74d1c8da7adc977",
+    "scripts/distributed/validate_kafka_text_cluster_14.py": "45efe40eb0ab823842d6f25a50f519673fa1a1fb2905a54b738de3cc6a19eac2",
+    "scripts/distributed/validate_tx_sign_cluster_overhead.py": "377730261c39be8be97ee00e599fbd44004819b5a2490a9d7a120f8dfff575d7",
+    "scripts/distributed/validate_ycsb_undo.py": "1747392f9544f7969c277c693412d0babd8bbedd9a91aa4c15978634206fa25a",
+    "scripts/distributed/verify_workloads_bcd.py": "ad1352d7aac180f3ab580b19e6dd2d994cb5fd1fd5950984262f5a7dbaf07c6f",
+    "scripts/distributed/ycsb_undo.py": "ab37713de8684595d3f6c696da952bf15f756ad5cfe82c2d811659cff7ea668b",
+    "scripts/distributed/run_4node_raft_cluster.sh": "6bd970d02bd8da07015010d7c9a1aabe2299c5edc879cd0d9bded835ee962583"
+  }
+}

@@ -1,0 +1,5 @@
+det_off=0
+det_on=0
+merkle_on=0
+merkle_off=0
+CAMPAIGN_DONE

@@ -103,14 +103,16 @@ def main():
     parser = argparse.ArgumentParser(description="Full TPC-C Scaling Evaluation Orchestrator")
     parser.add_argument("--timestamp", default=None, help="Custom timestamp for output directories")
     parser.add_argument("--trials", type=int, default=5, help="Number of trials per configuration (default: 5)")
-    parser.add_argument("--split-threshold", type=int, default=32, help="Merkle split threshold (default: 32)")
-    parser.add_argument("--merge-threshold", type=int, default=8, help="Merkle merge threshold (default: 8)")
+    parser.add_argument("--split-threshold", type=int, default=1024, help="Merkle split threshold for fanout 32 (default: 1024)")
+    parser.add_argument("--merge-threshold", type=int, default=None, help="Default: max(1, split threshold / 4)")
     parser.add_argument("--skip-campaign1", action="store_true", help="Skip Campaign 1 (workers sweep)")
     parser.add_argument("--skip-campaign2", action="store_true", help="Skip Campaign 2 (warehouses sweep)")
     parser.add_argument("--report-only", action="store_true", help="Only compile report from existing directories")
     parser.add_argument("--workers-dir", default=None, help="Explicit workers directory for report-only")
     parser.add_argument("--warehouses-dir", default=None, help="Explicit warehouses directory for report-only")
     args = parser.parse_args()
+    if args.merge_threshold is None:
+        args.merge_threshold = max(1, args.split_threshold // 4)
 
     timestamp = args.timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     workers_dir = Path(args.workers_dir) if args.workers_dir else (BENCH_RESULTS_DIR / f"ranking_tpcc_workers_sweep_{timestamp}")

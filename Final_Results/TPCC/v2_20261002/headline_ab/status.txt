@@ -1,0 +1,1 @@
+2026-10-02T12:37:01+05:30 COMPLETE headline (2 trials C2-C5, 3 for C1; C4_t2 rerun after stop-timeout fix) summary.md ready

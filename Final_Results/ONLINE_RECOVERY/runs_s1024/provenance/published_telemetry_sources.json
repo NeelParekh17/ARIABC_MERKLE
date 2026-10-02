@@ -1,0 +1,86 @@
+[
+  {
+    "run_id": "cluster4_final_A_baseline_180113",
+    "candidate_rows": 0,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_final_A_baseline_180113",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_final_B_nofault_180113",
+    "candidate_rows": 0,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_final_B_nofault_180113",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_final_C_fault_180113",
+    "candidate_rows": 473,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_final_C_fault_180113",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_mode_M_passive_181118",
+    "candidate_rows": 115,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_mode_M_passive_181118",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_mode_M_active_r1_183115",
+    "candidate_rows": 2075,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_mode_M_active_r1_183115",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_mode_M_active_r2_183115",
+    "candidate_rows": 442,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_mode_M_active_r2_183115",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_test_mixed_utkarsh_184953",
+    "candidate_rows": 1195,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_test_mixed_utkarsh_184953",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_test_leader_184843",
+    "candidate_rows": 537,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_test_leader_184843",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_test_leader_mixed_185108",
+    "candidate_rows": 990,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_test_leader_mixed_185108",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_test_leader_192800",
+    "candidate_rows": 2385,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_test_leader_192800",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_test_leader_mixed_192316",
+    "candidate_rows": 2881,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_test_leader_mixed_192316",
+    "phase8": "PASS"
+  },
+  {
+    "run_id": "cluster4_recov_C_fault_140220",
+    "candidate_rows": 324,
+    "full_copies": 0,
+    "source": "Final_Results/ONLINE_RECOVERY/runs/cluster4_recov_C_fault_140220",
+    "phase8": "PASS"
+  }
+]

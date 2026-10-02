@@ -1,0 +1,1 @@
+retry_jitter=default_on pg_max_retries=100

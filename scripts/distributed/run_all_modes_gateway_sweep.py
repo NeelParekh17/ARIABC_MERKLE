@@ -541,15 +541,15 @@ def main():
     )
     parser.add_argument(
         "--tpcc-merkle-split-threshold",
-        default=32,
+        default=None,
         type=int,
-        help="Split threshold for Merkle tree indexes across all TPC-C tables (default: 32)",
+        help="Split threshold across all TPC-C tables (default: 1024 for fanout 32, otherwise 32)",
     )
     parser.add_argument(
         "--tpcc-merkle-merge-threshold",
-        default=8,
+        default=None,
         type=int,
-        help="Merge threshold for Merkle tree indexes across all TPC-C tables (default: 8)",
+        help="Merge threshold across all TPC-C tables (default: max(1, split threshold / 4))",
     )
     parser.add_argument(
         "--tpcc-merkle-partition-key-columns",
@@ -616,6 +616,10 @@ def main():
     )
     parser.add_argument("--order-seed", type=int, default=42)
     args = parser.parse_args()
+    if args.tpcc_merkle_split_threshold is None:
+        args.tpcc_merkle_split_threshold = 1024 if args.tpcc_merkle_fanout == 32 else 32
+    if args.tpcc_merkle_merge_threshold is None:
+        args.tpcc_merkle_merge_threshold = max(1, args.tpcc_merkle_split_threshold // 4)
     if args.trials < 1:
         parser.error("--trials must be positive")
     if not re.fullmatch(r"[1-9][0-9]*(?:kB|MB|GB)", args.db_shared_buffers):

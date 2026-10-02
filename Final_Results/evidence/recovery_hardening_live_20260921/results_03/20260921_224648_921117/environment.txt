@@ -1,0 +1,7 @@
+timestamp_utc=2026-09-21T17:16:48Z
+timestamp_local=2026-09-21T22:46:48+05:30
+cwd=/work/ARIABC/AriaBC
+python=3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+platform=Linux-6.8.0-139-generic-x86_64-with-glibc2.39
+dsn=host=127.0.0.1 port=55489 dbname=postgres user=postgres
+git_head=c4d12723c68c59462b5790c9bafb625f4d7f9e8d

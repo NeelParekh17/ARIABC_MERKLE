@@ -1,0 +1,1 @@
+inst=/home/protectdr/claude_checks/install_v2 src=/home/protectdr/claude_checks/src_v2 bin=/home/protectdr/claude_checks/src/ariabc_pg/build/bin split=1024 merge=256 fillfactor=default mode=det warehouses=100 workers=32 tx=20000

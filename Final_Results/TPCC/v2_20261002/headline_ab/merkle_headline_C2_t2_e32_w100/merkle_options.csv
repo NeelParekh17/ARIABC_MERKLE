@@ -1,0 +1,10 @@
+relname,reloptions
+customer_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16
+district_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16
+history_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16
+item_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16
+new_order_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16
+oorder_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16
+order_line_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16
+stock_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16
+warehouse_merkle_idx,partitions=16384;fanout=32;split_threshold=32;merge_threshold=8;partition_key_columns=1;subpartitions=16

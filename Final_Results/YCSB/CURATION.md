@@ -17,5 +17,5 @@ pg rows replaced.
   section added.
 
 The superseded pg logs and the original generated files are archived outside Final_Results
-in `.bench_tmp/ycsb_superseded_20260929/`. The verification runs of the other modes are in
-`.bench_tmp/ycsb_verify_20260929/`.
+in `10.129.27.111:~/claude_ctl/archive/bench_tmp_20261002/ycsb_superseded_20260929/` (moved off the workstation on 2026-10-02). The verification runs of the other modes are in
+`10.129.27.111:~/claude_ctl/archive/bench_tmp_20261002/ycsb_verify_20260929/`.

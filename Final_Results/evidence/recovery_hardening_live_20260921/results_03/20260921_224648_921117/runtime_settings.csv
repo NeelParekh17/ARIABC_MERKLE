@@ -1,0 +1,14 @@
+setting,value
+shared_buffers,32MB
+effective_cache_size,4GB
+work_mem,4MB
+random_page_cost,4
+seq_page_cost,1
+enable_seqscan,off
+max_parallel_workers_per_gather,0
+track_io_timing,on
+synchronous_commit,on
+fsync,on
+full_page_writes,on
+track_counts,on
+jit,on

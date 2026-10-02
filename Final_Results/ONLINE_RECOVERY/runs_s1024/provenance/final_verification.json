@@ -1,0 +1,17 @@
+{
+  "accepted_runs": 8,
+  "timed_transactions": 1280000,
+  "remote_commands": 690,
+  "unpaired_command_ids": [],
+  "published_protected_count": 582,
+  "published_changed": [],
+  "enriched_comparison_rows": 20,
+  "export": {
+    "accepted_runs": 8,
+    "copied_files": 582,
+    "copy_mismatches": [],
+    "protected_original_files": 582,
+    "protected_mismatches": []
+  },
+  "graphify_update_exit_code": 0
+}

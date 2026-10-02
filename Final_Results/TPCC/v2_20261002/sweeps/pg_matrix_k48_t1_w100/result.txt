@@ -1,0 +1,9 @@
+merkle_build_s=31
+measure_start=15:03:11
+prewarm_blocks=1677687
+gateway_rc=0
+wal_bytes=971420768
+wal_start=3/2291B300 wal_end=3/5C786760
+completed_tps=2322.46
+divergence_count=0 permanent_failures=0
+traced_tx=0 total_restarts=0 tx_with_restart=0

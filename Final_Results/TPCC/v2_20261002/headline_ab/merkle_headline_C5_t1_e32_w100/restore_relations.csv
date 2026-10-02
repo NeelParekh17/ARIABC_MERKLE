@@ -1,0 +1,10 @@
+relname,relpersistence,reloptions,heap_bytes,total_bytes
+customer,p,fillfactor=90,2129395712,2129403904
+district,p,fillfactor=90,155648,155648
+history,p,fillfactor=90,405413888,405413888
+item,p,,11214848,11214848
+new_order,p,fillfactor=90,57565184,57565184
+oorder,p,fillfactor=90,318439424,318439424
+order_line,p,fillfactor=90,4698390528,4698390528
+stock,p,fillfactor=90,4068147200,4068147200
+warehouse,p,fillfactor=90,16384,16384

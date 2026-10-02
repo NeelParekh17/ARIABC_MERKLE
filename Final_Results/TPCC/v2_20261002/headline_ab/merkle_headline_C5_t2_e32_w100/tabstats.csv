@@ -1,0 +1,16 @@
+ariabc_internal,merkle_node_customer,0,30924,30924,0
+ariabc_internal,merkle_node_district,0,17595,17595,0
+ariabc_internal,merkle_node_history,0,17072,17072,0
+ariabc_internal,merkle_node_new_order,0,17006,17006,0
+ariabc_internal,merkle_node_oorder,0,31959,31959,0
+ariabc_internal,merkle_node_order_line,0,253418,251314,0
+ariabc_internal,merkle_node_stock,0,157096,157092,0
+ariabc_internal,merkle_node_warehouse,0,8536,8536,0
+public,customer,0,16429,16428,0
+public,district,0,17595,17498,0
+public,history,8536,0,0,0
+public,new_order,9056,0,0,7890
+public,oorder,9056,7890,0,0
+public,order_line,90603,71285,57379,0
+public,stock,0,90603,90603,0
+public,warehouse,0,8539,8504,0

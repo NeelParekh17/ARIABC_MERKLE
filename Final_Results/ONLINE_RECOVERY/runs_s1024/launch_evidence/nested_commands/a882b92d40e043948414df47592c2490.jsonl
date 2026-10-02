@@ -1,0 +1,2 @@
+{"id": "a882b92d40e043948414df47592c2490", "time": "2026-10-01T07:04:34.309955+00:00", "event": "start", "argv": ["neel@10.129.148.248", "set -e; free -m; cat /proc/loadavg; cat /proc/vmstat; test -z \"$(ss -ltnH | awk '$4 ~ /:(5448|9018|8018|8019)$/ {print}')\""], "command": "neel@10.129.148.248 set -e; free -m; cat /proc/loadavg; cat /proc/vmstat; test -z \"$(ss -ltnH | awk '$4 ~ /:(5448|9018|8018|8019)$/ {print}')\"", "stdin": null}
+{"id": "a882b92d40e043948414df47592c2490", "time": "2026-10-01T07:04:34.586773+00:00", "event": "end", "exit_code": 0}

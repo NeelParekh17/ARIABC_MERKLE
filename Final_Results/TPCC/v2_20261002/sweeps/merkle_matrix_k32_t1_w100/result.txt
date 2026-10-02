@@ -1,0 +1,12 @@
+merkle_build_s=270
+measure_start=14:44:28
+prewarm_blocks=2028381
+gateway_rc=0
+wal_bytes=1878627800
+wal_start=3/BFD9B8F8 wal_end=4/2FD34ED0
+completed_tps=1157.86
+divergence_count=0 permanent_failures=0
+merkle_verify=9:true
+node_rows=0
+leaf_depth_levels=order_line:2.64 stock:2.00
+traced_tx=20000 total_restarts=1821 tx_with_restart=1806

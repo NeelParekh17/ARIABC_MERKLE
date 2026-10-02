@@ -1,0 +1,21 @@
+/usr/bin/python3
+/usr/bin/findmnt
+/usr/bin/fuser
+/usr/bin/flock
+/usr/bin/timeout
+Neel
+               total        used        free      shared  buff/cache   available
+Mem:     16121221120  2426179584 13267685376    31518720   802025472 13695041536
+Swap:     4294963200   565891072  3729072128
+SOURCE         FSTYPE TARGET
+/dev/nvme0n1p2 ext4   /
+259:2
+Filesystem        1B-blocks         Used   Available Use% Mounted on
+/dev/nvme0n1p2 501809635328 410107609088 66136223744  87% /
+postgres (PostgreSQL) 13devel
+30277981279b2b40ad88d8eb0b4585d82dae939161fbdaf3b2b02a6e29ed4165  /home/neel/claude_opt/install_opt/bin/postgres
+2b5dd1197efed60a14b60d1965bcf39b95a1db3ae99ef2aae7bb59d27ac1e501  /home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ariabc_pg_server
+
+Gateway:
+/usr/bin/timeout
+03731bcba093cf8e6e02a0385481b592aaffc0d8c6a0cf83a6ba65e0471da15a  /home/neel/ARIABC/AriaBC/ariabc_pg/build/bin/ariabc_pg_gateway

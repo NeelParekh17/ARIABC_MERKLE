@@ -1,0 +1,92 @@
+# Measurement qualification
+
+Successful SQL/verification does not establish stable throughput or serializability.
+A throughput ordering is not a correctness invariant. No observations are discarded.
+Five repeats is the minimum qualification check; CV <= 10% is a diagnostic, not a confidence interval.
+
+| Configuration | Trials | Median TPS | Min | Max | Sample CV % | Status |
+|---|---:|---:|---:|---:|---:|---|
+| bcdb_det / a / 0.0 / 1 | 1 | 1452.96 | 1452.96 | 1452.96 | unknown | insufficient_repeats |
+| bcdb_det / a / 0.0 / 16 | 1 | 5592.84 | 5592.84 | 5592.84 | unknown | insufficient_repeats |
+| bcdb_det / a / 0.0 / 4 | 1 | 2972.21 | 2972.21 | 2972.21 | unknown | insufficient_repeats |
+| bcdb_det / a / 0.0 / 8 | 1 | 3805.90 | 3805.90 | 3805.90 | unknown | insufficient_repeats |
+| bcdb_det / a / 0.99 / 1 | 1 | 2119.77 | 2119.77 | 2119.77 | unknown | insufficient_repeats |
+| bcdb_det / a / 0.99 / 16 | 1 | 8006.41 | 8006.41 | 8006.41 | unknown | insufficient_repeats |
+| bcdb_det / a / 0.99 / 4 | 1 | 3644.98 | 3644.98 | 3644.98 | unknown | insufficient_repeats |
+| bcdb_det / a / 0.99 / 8 | 1 | 5543.24 | 5543.24 | 5543.24 | unknown | insufficient_repeats |
+| bcdb_det / a / 1.2 / 1 | 1 | 2603.49 | 2603.49 | 2603.49 | unknown | insufficient_repeats |
+| bcdb_det / a / 1.2 / 16 | 1 | 8067.77 | 8067.77 | 8067.77 | unknown | insufficient_repeats |
+| bcdb_det / a / 1.2 / 4 | 1 | 4626.42 | 4626.42 | 4626.42 | unknown | insufficient_repeats |
+| bcdb_det / a / 1.2 / 8 | 1 | 6622.52 | 6622.52 | 6622.52 | unknown | insufficient_repeats |
+| bcdb_det / b / 0.99 / 1 | 1 | 3943.22 | 3943.22 | 3943.22 | unknown | insufficient_repeats |
+| bcdb_det / b / 0.99 / 16 | 1 | 13831.26 | 13831.26 | 13831.26 | unknown | insufficient_repeats |
+| bcdb_det / b / 0.99 / 4 | 1 | 8438.82 | 8438.82 | 8438.82 | unknown | insufficient_repeats |
+| bcdb_det / b / 0.99 / 8 | 1 | 11019.28 | 11019.28 | 11019.28 | unknown | insufficient_repeats |
+| bcdb_det / c / 0.99 / 1 | 1 | 4281.74 | 4281.74 | 4281.74 | unknown | insufficient_repeats |
+| bcdb_det / c / 0.99 / 16 | 1 | 18450.18 | 18450.18 | 18450.18 | unknown | insufficient_repeats |
+| bcdb_det / c / 0.99 / 4 | 1 | 10075.57 | 10075.57 | 10075.57 | unknown | insufficient_repeats |
+| bcdb_det / c / 0.99 / 8 | 1 | 14598.54 | 14598.54 | 14598.54 | unknown | insufficient_repeats |
+| bcdb_det / d / 0.99 / 1 | 1 | 3907.01 | 3907.01 | 3907.01 | unknown | insufficient_repeats |
+| bcdb_det / d / 0.99 / 16 | 1 | 13306.72 | 13306.72 | 13306.72 | unknown | insufficient_repeats |
+| bcdb_det / d / 0.99 / 4 | 1 | 8496.18 | 8496.18 | 8496.18 | unknown | insufficient_repeats |
+| bcdb_det / d / 0.99 / 8 | 1 | 11080.33 | 11080.33 | 11080.33 | unknown | insufficient_repeats |
+| bcdb_det / f / 0.99 / 1 | 1 | 1962.13 | 1962.13 | 1962.13 | unknown | insufficient_repeats |
+| bcdb_det / f / 0.99 / 16 | 1 | 7344.84 | 7344.84 | 7344.84 | unknown | insufficient_repeats |
+| bcdb_det / f / 0.99 / 4 | 1 | 3795.79 | 3795.79 | 3795.79 | unknown | insufficient_repeats |
+| bcdb_det / f / 0.99 / 8 | 1 | 5070.99 | 5070.99 | 5070.99 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 0.0 / 1 | 1 | 1327.76 | 1327.76 | 1327.76 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 0.0 / 16 | 1 | 4656.58 | 4656.58 | 4656.58 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 0.0 / 4 | 1 | 2636.09 | 2636.09 | 2636.09 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 0.0 / 8 | 1 | 3858.02 | 3858.02 | 3858.02 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 0.99 / 1 | 1 | 1853.91 | 1853.91 | 1853.91 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 0.99 / 16 | 1 | 6743.09 | 6743.09 | 6743.09 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 0.99 / 4 | 1 | 3471.02 | 3471.02 | 3471.02 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 0.99 / 8 | 1 | 4757.37 | 4757.37 | 4757.37 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 1.2 / 1 | 1 | 2378.40 | 2378.40 | 2378.40 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 1.2 / 16 | 1 | 6631.30 | 6631.30 | 6631.30 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 1.2 / 4 | 1 | 4158.87 | 4158.87 | 4158.87 | unknown | insufficient_repeats |
+| bcdb_merkle / a / 1.2 / 8 | 1 | 5468.96 | 5468.96 | 5468.96 | unknown | insufficient_repeats |
+| bcdb_merkle / b / 0.99 / 1 | 1 | 3561.89 | 3561.89 | 3561.89 | unknown | insufficient_repeats |
+| bcdb_merkle / b / 0.99 / 16 | 1 | 12322.86 | 12322.86 | 12322.86 | unknown | insufficient_repeats |
+| bcdb_merkle / b / 0.99 / 4 | 1 | 7454.34 | 7454.34 | 7454.34 | unknown | insufficient_repeats |
+| bcdb_merkle / b / 0.99 / 8 | 1 | 10025.06 | 10025.06 | 10025.06 | unknown | insufficient_repeats |
+| bcdb_merkle / c / 0.99 / 1 | 1 | 4125.41 | 4125.41 | 4125.41 | unknown | insufficient_repeats |
+| bcdb_merkle / c / 0.99 / 16 | 1 | 18621.97 | 18621.97 | 18621.97 | unknown | insufficient_repeats |
+| bcdb_merkle / c / 0.99 / 4 | 1 | 9794.32 | 9794.32 | 9794.32 | unknown | insufficient_repeats |
+| bcdb_merkle / c / 0.99 / 8 | 1 | 14184.40 | 14184.40 | 14184.40 | unknown | insufficient_repeats |
+| bcdb_merkle / d / 0.99 / 1 | 1 | 3498.34 | 3498.34 | 3498.34 | unknown | insufficient_repeats |
+| bcdb_merkle / d / 0.99 / 16 | 1 | 11198.21 | 11198.21 | 11198.21 | unknown | insufficient_repeats |
+| bcdb_merkle / d / 0.99 / 4 | 1 | 6680.03 | 6680.03 | 6680.03 | unknown | insufficient_repeats |
+| bcdb_merkle / d / 0.99 / 8 | 1 | 9095.04 | 9095.04 | 9095.04 | unknown | insufficient_repeats |
+| bcdb_merkle / f / 0.99 / 1 | 1 | 1789.23 | 1789.23 | 1789.23 | unknown | insufficient_repeats |
+| bcdb_merkle / f / 0.99 / 16 | 1 | 6327.11 | 6327.11 | 6327.11 | unknown | insufficient_repeats |
+| bcdb_merkle / f / 0.99 / 4 | 1 | 3301.42 | 3301.42 | 3301.42 | unknown | insufficient_repeats |
+| bcdb_merkle / f / 0.99 / 8 | 1 | 4747.21 | 4747.21 | 4747.21 | unknown | insufficient_repeats |
+| pg / a / 0.0 / 1 | 1 | 1554.61 | 1554.61 | 1554.61 | unknown | insufficient_repeats |
+| pg / a / 0.0 / 16 | 1 | 5701.25 | 5701.25 | 5701.25 | unknown | insufficient_repeats |
+| pg / a / 0.0 / 4 | 1 | 2909.94 | 2909.94 | 2909.94 | unknown | insufficient_repeats |
+| pg / a / 0.0 / 8 | 1 | 4075.81 | 4075.81 | 4075.81 | unknown | insufficient_repeats |
+| pg / a / 0.99 / 1 | 1 | 2066.33 | 2066.33 | 2066.33 | unknown | insufficient_repeats |
+| pg / a / 0.99 / 16 | 1 | 9881.42 | 9881.42 | 9881.42 | unknown | insufficient_repeats |
+| pg / a / 0.99 / 4 | 1 | 4442.47 | 4442.47 | 4442.47 | unknown | insufficient_repeats |
+| pg / a / 0.99 / 8 | 1 | 6521.03 | 6521.03 | 6521.03 | unknown | insufficient_repeats |
+| pg / a / 1.2 / 1 | 1 | 2738.60 | 2738.60 | 2738.60 | unknown | insufficient_repeats |
+| pg / a / 1.2 / 16 | 1 | 10411.24 | 10411.24 | 10411.24 | unknown | insufficient_repeats |
+| pg / a / 1.2 / 4 | 1 | 5868.54 | 5868.54 | 5868.54 | unknown | insufficient_repeats |
+| pg / a / 1.2 / 8 | 1 | 8061.27 | 8061.27 | 8061.27 | unknown | insufficient_repeats |
+| pg / b / 0.99 / 1 | 1 | 4124.56 | 4124.56 | 4124.56 | unknown | insufficient_repeats |
+| pg / b / 0.99 / 16 | 1 | 17746.23 | 17746.23 | 17746.23 | unknown | insufficient_repeats |
+| pg / b / 0.99 / 4 | 1 | 11806.38 | 11806.38 | 11806.38 | unknown | insufficient_repeats |
+| pg / b / 0.99 / 8 | 1 | 15588.46 | 15588.46 | 15588.46 | unknown | insufficient_repeats |
+| pg / c / 0.99 / 1 | 1 | 4582.95 | 4582.95 | 4582.95 | unknown | insufficient_repeats |
+| pg / c / 0.99 / 16 | 1 | 30581.04 | 30581.04 | 30581.04 | unknown | insufficient_repeats |
+| pg / c / 0.99 / 4 | 1 | 15649.45 | 15649.45 | 15649.45 | unknown | insufficient_repeats |
+| pg / c / 0.99 / 8 | 1 | 23980.82 | 23980.82 | 23980.82 | unknown | insufficient_repeats |
+| pg / d / 0.99 / 1 | 1 | 4127.12 | 4127.12 | 4127.12 | unknown | insufficient_repeats |
+| pg / d / 0.99 / 16 | 1 | 17953.32 | 17953.32 | 17953.32 | unknown | insufficient_repeats |
+| pg / d / 0.99 / 4 | 1 | 12262.42 | 12262.42 | 12262.42 | unknown | insufficient_repeats |
+| pg / d / 0.99 / 8 | 1 | 15785.32 | 15785.32 | 15785.32 | unknown | insufficient_repeats |
+| pg / f / 0.99 / 1 | 1 | 2001.60 | 2001.60 | 2001.60 | unknown | insufficient_repeats |
+| pg / f / 0.99 / 16 | 1 | 9871.67 | 9871.67 | 9871.67 | unknown | insufficient_repeats |
+| pg / f / 0.99 / 4 | 1 | 4248.09 | 4248.09 | 4248.09 | unknown | insufficient_repeats |
+| pg / f / 0.99 / 8 | 1 | 6756.76 | 6756.76 | 6756.76 | unknown | insufficient_repeats |

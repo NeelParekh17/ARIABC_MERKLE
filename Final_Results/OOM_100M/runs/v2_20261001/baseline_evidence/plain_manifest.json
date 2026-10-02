@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "db_rows": 100000000,
+  "keyspace": "100000000|1|100000000",
+  "heap_bytes": 28248489984,
+  "index_bytes": 2246197248,
+  "relpages": 3448302,
+  "indexes": [
+    {
+      "indexname": "usertable_pkey1",
+      "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+    }
+  ],
+  "derived_from_checkpoint_lsn": "5/3F3BB878",
+  "derived_from_pg_control_sha256": "3d189088a13b4288757bdeb2f84895a06425ad9f49bf6d5a428a8f39128530fb",
+  "db_system_id": "7691699869859840018",
+  "checkpoint_lsn": "5/3F40AC38",
+  "pg_control_sha256": "0c79389b027c13cb25c3811d14f796a343cc71223050f1ec7aaab0990c12d073",
+  "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+  "file_count": 1141,
+  "total_bytes": 32712466380
+}

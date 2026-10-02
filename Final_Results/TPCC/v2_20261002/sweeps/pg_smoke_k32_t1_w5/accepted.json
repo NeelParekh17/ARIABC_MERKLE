@@ -1,0 +1,32 @@
+{
+  "mode": "pg",
+  "layout": "cur",
+  "W": 5,
+  "workers": 32,
+  "trial": 1,
+  "group": "smoke",
+  "tps": 1708.21,
+  "restarts": 5020,
+  "merkle_verify": "",
+  "perm_fail": 0,
+  "div": 0,
+  "pg_serialization_failures": 5020,
+  "rerun": false,
+  "rerun_reason": "",
+  "wal_per_tx": 44123.92,
+  "hot_fractions": {
+    "customer": 0.9855769230769231,
+    "district": 0.6342494714587738,
+    "history": null,
+    "new_order": null,
+    "oorder": 0.0,
+    "order_line": 0.7058618890241781,
+    "stock": 0.9999357945425361,
+    "warehouse": 0.9689530685920578
+  },
+  "state_sha256": "81e66d1479cd8c0e11677fd5b482b3b4c0dbe30f942ecfd3230e37e67352d0d3",
+  "run": "/home/protectdr/claude_checks/tpcc_sweep_v2_20261002_130000/pg_smoke_k32_t1_w5",
+  "accepted": true,
+  "completed": 2000,
+  "workload_sha256": "dc508fc19fccbc2914e695e1590e98ed2ef5a908cf9228baf7d154e1a926c93c"
+}

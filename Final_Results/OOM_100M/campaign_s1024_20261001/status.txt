@@ -1,0 +1,3 @@
+det_rc=0
+merkle_rc=0
+CAMPAIGN_DONE

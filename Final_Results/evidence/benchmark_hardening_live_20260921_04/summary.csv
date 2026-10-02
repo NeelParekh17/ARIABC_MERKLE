@@ -1,0 +1,7 @@
+mode,workload,server_workers,bcdb_workers,pool_size,total_queries,wall_time_ms,tps,merkle_pass,divergence_count,permanent_failures,run_id,shared_buffers,source_fingerprint,trial
+pg,ycsb_workload_f_skew_0_99_20k.txt,8,1,8,20000,3903,5124.26,1,0,0,single_37af54de086e4cbfb5fd2f55599b9513,32MB,bca6daed9b4548f4272d753402fd18992f457320befed0497d4cc835115221d0,1
+bcdb_merkle,ycsb_workload_f_skew_0_99_20k.txt,8,8,8,20000,2568,7788.16,1,0,0,single_1ec5010379de45d7aab8de4852f32a68,32MB,bca6daed9b4548f4272d753402fd18992f457320befed0497d4cc835115221d0,1
+bcdb_det,ycsb_workload_f_skew_0_99_20k.txt,8,8,8,20000,2418,8271.30,1,0,0,single_58628f814a2c42c2b1f667bc09a824d5,32MB,bca6daed9b4548f4272d753402fd18992f457320befed0497d4cc835115221d0,1
+bcdb_det,ycsb_workload_d_skew_0_00_20k.txt,8,8,8,20000,868,23041.47,1,0,0,single_dd2e4aaf11404950a67291efaa35731a,32MB,bca6daed9b4548f4272d753402fd18992f457320befed0497d4cc835115221d0,1
+pg,ycsb_workload_d_skew_0_00_20k.txt,8,1,8,20000,490,40816.33,1,0,0,single_7efba0c2fe01433ea6d5586d5ad3b3c2,32MB,bca6daed9b4548f4272d753402fd18992f457320befed0497d4cc835115221d0,1
+bcdb_merkle,ycsb_workload_d_skew_0_00_20k.txt,8,8,8,20000,943,21208.91,1,0,0,single_79211fc3a80047779a74c40e9b385469,32MB,bca6daed9b4548f4272d753402fd18992f457320befed0497d4cc835115221d0,1

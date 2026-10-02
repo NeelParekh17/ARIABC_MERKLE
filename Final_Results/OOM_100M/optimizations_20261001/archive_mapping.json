@@ -1,0 +1,34 @@
+[
+  {
+    "source": ".bench_tmp/oom_walcomp_20261001/det_off/run_20261001_090856_a1f6d81b",
+    "archive": "Final_Results/OOM_100M/optimizations_20261001/wal_compression/det_off/run_20261001_090856_a1f6d81b"
+  },
+  {
+    "source": ".bench_tmp/oom_walcomp_20261001/det_on/run_20261001_092355_ac971a7a",
+    "archive": "Final_Results/OOM_100M/optimizations_20261001/wal_compression/det_on/run_20261001_092355_ac971a7a"
+  },
+  {
+    "source": ".bench_tmp/oom_walcomp_20261001/merkle_off/run_20261001_100447_9b61a3c1",
+    "archive": "Final_Results/OOM_100M/optimizations_20261001/wal_compression/merkle_off/run_20261001_100447_9b61a3c1"
+  },
+  {
+    "source": ".bench_tmp/oom_walcomp_20261001/merkle_on/run_20261001_093848_c27eeea0",
+    "archive": "Final_Results/OOM_100M/optimizations_20261001/wal_compression/merkle_on/run_20261001_093848_c27eeea0"
+  },
+  {
+    "source": ".bench_tmp/oom_walcomp_20261001/dry/run_20261001_090854_5182a6c1",
+    "archive": "Final_Results/OOM_100M/optimizations_20261001/wal_compression/dry/run_20261001_090854_5182a6c1"
+  },
+  {
+    "source": ".bench_tmp/oom_ff90_20261001/ff90_off/run_20261001_110718_8f8b816a",
+    "archive": "Final_Results/OOM_100M/optimizations_20261001/fillfactor90/ff90_off/run_20261001_110718_8f8b816a"
+  },
+  {
+    "source": ".bench_tmp/oom_walcomp_20261001/det_off/run_20261001_090856_a1f6d81b",
+    "archive": "Final_Results/OOM_100M/optimizations_20261001/fillfactor90/controls_ff100/det_off/run_20261001_090856_a1f6d81b"
+  },
+  {
+    "source": ".bench_tmp/oom_walcomp_20261001/merkle_off/run_20261001_100447_9b61a3c1",
+    "archive": "Final_Results/OOM_100M/optimizations_20261001/fillfactor90/controls_ff100/merkle_off/run_20261001_100447_9b61a3c1"
+  }
+]
