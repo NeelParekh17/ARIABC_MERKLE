@@ -1473,7 +1473,8 @@ pg_executor::ConfirmedResult pg_executor::accept_safe_confirmed_result(const pg_
         res.raft_item_ordinal = t.raft_item_ordinal;
         res.terminal_digest = "";
         res.terminal_state = "OK";
-        res.payload = raw_backend_result;
+        res.payload = is_expected_user_abort_result(raw_backend_result)
+            ? expected_user_abort_result() : raw_backend_result;
         res.format_version = 1;
         return res;
     }
@@ -1484,7 +1485,8 @@ pg_executor::ConfirmedResult pg_executor::accept_safe_confirmed_result(const pg_
         res.raft_item_ordinal = t.raft_item_ordinal;
         res.terminal_digest = "";
         res.terminal_state = (raw_backend_result.rfind("ERROR", 0) == 0) ? "ERROR" : "OK";
-        res.payload = raw_backend_result;
+        res.payload = is_expected_user_abort_result(raw_backend_result)
+            ? expected_user_abort_result() : raw_backend_result;
         res.format_version = 1;
         return res;
     }
@@ -2921,6 +2923,7 @@ pg_executor_stats pg_executor::stats() const {
     out.delayed_cur = st_delayed_cur_.load(std::memory_order_relaxed);
     out.conn_acquire_calls = st_conn_acquire_calls_.load(std::memory_order_relaxed);
     out.conn_acquire_wait_ns = st_conn_acquire_wait_ns_.load(std::memory_order_relaxed);
+    out.user_aborts = st_user_aborts_.load(std::memory_order_relaxed);
     out.exec_calls = st_exec_calls_.load(std::memory_order_relaxed);
     out.exec_ns = st_exec_ns_.load(std::memory_order_relaxed);
     out.pg_query_ns = st_pg_query_ns_.load(std::memory_order_relaxed);
@@ -3769,7 +3772,7 @@ std::string pg_executor::exec_sql(PGconn* c, const std::string& sql, bool* is_er
                 static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
                 std::memory_order_relaxed);
-            if (is_error) *is_error = true;
+            if (is_error) *is_error = !is_expected_user_abort_result(err_msg);
             return err_msg;
         }
         if (retryable) {
@@ -4352,6 +4355,8 @@ void pg_executor::worker_loop() {
             det_finish_apply(det_tx_seq);
         }
         ConfirmedResult confirmed = accept_safe_confirmed_result(t, result);
+        if (is_expected_user_abort_result(confirmed.payload))
+            st_user_aborts_.fetch_add(1, std::memory_order_relaxed);
         // Fail closed: do not publish Kafka and do not advance Raft applied tracker
         if (confirmed.raft_log_index == static_cast<uint64_t>(-1)) {
             std::cerr << "SAFE_PROTOCOL_FAILURE_NOT_APPLIED"
@@ -4787,6 +4792,8 @@ void pg_executor::event_loop() {
     size_t last_inflight_level = 0;
 
     auto emit_det_result = [&](const task& done_task, const std::string& out, bool is_error = false, const std::string& terminal_digest = "", const std::string& terminal_state = "", int format_version = 1) {
+        if (is_expected_user_abort_result(out))
+            st_user_aborts_.fetch_add(1, std::memory_order_relaxed);
         const std::string eff_terminal_state =
             terminal_state.empty() ? (is_error ? "ERROR" : "OK") : terminal_state;
         const std::string fail_reason =
@@ -5959,10 +5966,13 @@ void pg_executor::event_loop() {
                 std::string err_msg;
                 std::string retry_sqlstate;
                 const ExecStatusType st = last ? PQresultStatus(last) : PGRES_FATAL_ERROR;
-                const bool is_error = !(st == PGRES_TUPLES_OK || st == PGRES_COMMAND_OK);
+                bool is_error = !(st == PGRES_TUPLES_OK || st == PGRES_COMMAND_OK);
                 if (!is_error) {
                     const auto f0 = std::chrono::steady_clock::now();
-                    if (det_completion_only_success_ &&
+                    const bool expected_abort = last && PQntuples(last) == 1 &&
+                        PQnfields(last) == 1 &&
+                        is_expected_user_abort_result(PQgetvalue(last, 0, 0));
+                    if (!expected_abort && det_completion_only_success_ &&
                         db_opt_.db_type == 1 &&
                         is_det_prefixed_sql(cs.cur.sql)) {
                         out.clear();
@@ -5996,6 +6006,7 @@ void pg_executor::event_loop() {
                     }
                     if (!retry) {
                         out = err_msg;
+                        if (is_expected_user_abort_result(out)) is_error = false;
                     }
                 }
                 if (last) PQclear(last);

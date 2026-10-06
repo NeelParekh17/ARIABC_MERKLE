@@ -111,6 +111,7 @@ REMOTE_BIN_U22="/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server"
 REMOTE_GATEWAY_BIN_U22="/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_gateway"
 # Static cmake for Ubuntu 22.04 nodes (no system cmake 3.16+) — stays in /tmp (only needed at build time)
 REMOTE_CMAKE_U22="/tmp/cmake-3.28.3-linux-x86_64/bin/cmake"
+REMOTE_CMAKE_PERSIST_U22="/home/neel/Desktop/cmake_portable"  # survives reboots; re-linked into /tmp
 REMOTE_CMAKE_TARBALL_U22="/tmp/cmake-3.28.3-linux-x86_64.tar.gz"
 REMOTE_CMAKE_URL_U22="https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz"
 # OpenSSL headers pushed from ASUS for Ubuntu 22.04 build — stays in /tmp (build-time only)
@@ -199,6 +200,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     FORCE_BUILD BENCH_COLD_CACHE \
     SKIP_SYNC SKIP_BUILD SKIP_KAFKA SKIP_CLEANUP \
     SKIP_RDKAFKA_SETUP SKIP_RESTORE SKIP_POST_VERIFY \
+    POST_WORKLOAD_CONVERGE_SQL POST_WORKLOAD_CONVERGE_EXPECT POST_WORKLOAD_CONVERGE_TIMEOUT \
     ENABLE_MERKLE_INDEX \
     NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
     NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
@@ -1824,7 +1826,9 @@ ensure_u22_cmake() {
   local name="${NODE_NAMES[$idx]}"
   local cmake_tarball
 
-  if node_ssh "$idx" "command -v cmake >/dev/null 2>&1 || command -v cmake3 >/dev/null 2>&1 || test -x '$REMOTE_CMAKE_U22'" 2>/dev/null; then
+  # The build needs CMake >= 3.26. /tmp is wiped on reboot, so re-link the portable
+  # copy kept in $REMOTE_CMAKE_PERSIST_U22; a system cmake counts only if new enough.
+  if node_ssh "$idx" "test -x '$REMOTE_CMAKE_U22' || { test -x '$REMOTE_CMAKE_PERSIST_U22/bin/cmake' && rm -rf /tmp/cmake-3.28.3-linux-x86_64 && ln -s '$REMOTE_CMAKE_PERSIST_U22' /tmp/cmake-3.28.3-linux-x86_64 && test -x '$REMOTE_CMAKE_U22'; } || { v=\$(cmake --version 2>/dev/null | head -1 | grep -Eo '[0-9]+[.][0-9]+' | head -1); [[ -n \$v ]] && printf '%s\\n3.26\\n' \$v | sort -V -C -r; }" 2>/dev/null; then
     return 0
   fi
 
@@ -4480,6 +4484,34 @@ if [[ "$DIVERGENCE" != "0" && "$DIVERGENCE" != "?" ]] || [[ "$FAILURES" != "0" &
   log "WARNING: Cluster correctness issues detected (divergence=$DIVERGENCE failures=$FAILURES)"
   collect_final_profiles_before_fail "gateway correctness issue"
   exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Phase 7.5 (optional): wait for replica convergence before servers are stopped.
+# Direct completion acknowledges at the leader; followers apply shortly after.
+# Workloads without a YCSB marker (e.g. TPC-C) set POST_WORKLOAD_CONVERGE_SQL to
+# a query whose result must become identical (and stable) on every replica.
+# ---------------------------------------------------------------------------
+if [[ -n "${POST_WORKLOAD_CONVERGE_SQL:-}" ]]; then
+  log "=== Phase 7.5: Waiting for replica convergence (${POST_WORKLOAD_CONVERGE_TIMEOUT:-900}s max) ==="
+  _conv_prev="" _conv_stable=0 _conv_ok=0 _conv_deadline=$(( $(date +%s) + ${POST_WORKLOAD_CONVERGE_TIMEOUT:-900} ))
+  while (( $(date +%s) < _conv_deadline )); do
+    _conv_vals=()
+    for idx in "${!NODE_IDS[@]}"; do
+      _conv_vals+=("$(NODE_SSH_COMMAND_TIMEOUT=20 node_ssh "$idx" "LD_LIBRARY_PATH='$REMOTE_INSTALL_DIR/lib' '$REMOTE_INSTALL_DIR/bin/psql' -X -qAt -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -c \"$POST_WORKLOAD_CONVERGE_SQL\"" 2>/dev/null | tr -d '\n' || echo ERR)")
+    done
+    _conv_cur="${_conv_vals[*]}"
+    _conv_same=1
+    for v in "${_conv_vals[@]}"; do [[ "$v" == "${_conv_vals[0]}" && -n "$v" && "$v" != ERR ]] || _conv_same=0; done
+    if [[ $_conv_same -eq 1 && -n "${POST_WORKLOAD_CONVERGE_EXPECT:-}" && "${_conv_vals[0]}" != "$POST_WORKLOAD_CONVERGE_EXPECT"* ]]; then _conv_same=0; fi
+    if [[ $_conv_same -eq 1 && "$_conv_cur" == "$_conv_prev" ]]; then _conv_stable=$((_conv_stable+1)); else _conv_stable=0; fi
+    log "  convergence: ${_conv_cur} stable=${_conv_stable}"
+    if (( _conv_stable >= 3 )); then _conv_ok=1; break; fi
+    _conv_prev="$_conv_cur"
+    sleep 5
+  done
+  if [[ $_conv_ok -eq 1 ]]; then log "  CONVERGED: all ${#NODE_IDS[@]} replicas report ${_conv_vals[0]}"
+  else log "  ERROR: replicas did not converge before timeout"; CONVERGE_FAILED=1; fi
 fi
 
 # ---------------------------------------------------------------------------

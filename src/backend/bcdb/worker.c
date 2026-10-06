@@ -2563,6 +2563,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	char det_err_msg[512] = "";
 	int mem_txid = 0;
 
+	const bool dedicated_worker = is_bcdb_worker;
+
     is_bcdb_worker = true;
 
     Assert(tx != NULL);
@@ -3568,6 +3570,56 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 			*/
 		FlushErrorState();
 
+		/* A reserved business abort rolls back BEFORE any completion or gate
+		 * handoff. No optimistic write or Merkle delta may survive the abort.
+		 * Keep safe-ledger errors on their existing fail-closed path. */
+		if (tx != NULL && !tx->raft_ledger_enabled &&
+			strcmp(sqlstate, "TP001") == 0 &&
+			strcmp(message_copy, "TPC-C expected NewOrder rollback: invalid item") == 0)
+		{
+			const char *abort_result =
+				"USER_ABORT sqlstate=TP001 message=TPC-C expected NewOrder rollback: invalid item";
+
+			bcdb_drain_optim_write_list(activeTx);
+			AbortCurrentTransaction();
+			reset_xact_command();
+			activeTx->portal = NULL;
+			tx->queryDesc = NULL;
+			tx->sxact = NULL;
+			hold_portal_snapshot = false;
+			block = bcdb_get_block1();
+			bcdb_wait_for_dt_parse_barrier(tx, &parse_barrier_done);
+			if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
+				bcdb_wait_for_prev_committed(tx);
+			else
+			{
+				bcdb_wait_for_serial_slot(tx, block);
+				if (!published_max_advanced)
+					mark_published_ready_txid(tx);
+				/* Finish in serial order even though this item has no writes. */
+				bcdb_wait_for_prev_committed(tx);
+			}
+			tx->status = TX_COMMITED; /* terminal slot; SQL transaction aborted */
+			mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
+			bcdb_wait_for_slot_consumable(block, tx->tx_id, mem_txid);
+			bcdb_finish_terminal_item(tx, abort_result, false, false, InvalidTransactionId);
+			ereport(LOG, (errmsg("[BCDB_USER_ABORT] txid=%d sqlstate=TP001 rollback_complete=1",
+								(int) tx->tx_id)));
+			bcdb_ptrace_emit(tx->tx_id, num_restarts);
+			delete_tx(tx);
+			activeTx = NULL;
+			MemoryContextReset(bcdb_tx_context);
+			pfree(message_copy);
+			/* Inline "s <txid>" libpq execution already began a typed row
+			 * response. Send its real SQL error, rather than fabricating a
+			 * second RowDescription. Background J workers keep their loop. */
+			if (!dedicated_worker)
+				ReThrowError(edata);
+			FreeErrorData(edata);
+		}
+		else
+		{
+
 		ereport(LOG,
 				(errmsg("[BCDB_FATAL] worker_tx_error "
 						"pid=%d txid=%d raft_log=%llu ordinal=%u "
@@ -3715,6 +3767,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
 		if (message_copy != NULL)
 			pfree(message_copy);
+		}
 	}
 	PG_END_TRY();
 }

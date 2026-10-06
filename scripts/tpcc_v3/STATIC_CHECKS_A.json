@@ -1,0 +1,169 @@
+{
+  "bash_n_validate_remote_a": "PASS",
+  "database_or_server_started_locally": false,
+  "deterministic_timestamp_literals": "PASS 18448 timestamp-bearing statements in 20k W2 workload",
+  "forbidden_procedure_calls": "PASS no matches",
+  "generator": {
+    "constants": {
+      "C_LOAD": {
+        "255": 49
+      },
+      "C_RUN": {
+        "1023": 278,
+        "255": 138,
+        "8191": 5361
+      }
+    },
+    "count": 200000,
+    "nurand_histograms": {
+      "1023": {
+        "max_frequency": 1953,
+        "top5": [
+          [
+            2326,
+            1953
+          ],
+          [
+            1302,
+            1910
+          ],
+          [
+            350,
+            1558
+          ],
+          [
+            2294,
+            681
+          ],
+          [
+            2198,
+            681
+          ]
+        ],
+        "unique": 2709
+      },
+      "255": {
+        "max_frequency": 2635,
+        "top5": [
+          [
+            393,
+            2635
+          ],
+          [
+            905,
+            2605
+          ],
+          [
+            649,
+            2571
+          ],
+          [
+            161,
+            1862
+          ],
+          [
+            633,
+            923
+          ]
+        ],
+        "unique": 985
+      },
+      "8191": {
+        "max_frequency": 228,
+        "top5": [
+          [
+            13553,
+            228
+          ],
+          [
+            21745,
+            224
+          ],
+          [
+            46321,
+            217
+          ],
+          [
+            87281,
+            216
+          ],
+          [
+            95473,
+            214
+          ]
+        ],
+        "unique": 28777
+      }
+    },
+    "self_test": "PASS",
+    "stats": {
+      "delivery": 7806,
+      "expected_rollbacks": 893,
+      "new_order": 90512,
+      "order_lines": 906066,
+      "order_status": 8006,
+      "order_status_id": 3149,
+      "order_status_name": 4857,
+      "payment": 85704,
+      "payment_id": 34229,
+      "payment_name": 51475,
+      "remote_lines": 8983,
+      "remote_payments": 12855,
+      "stock_level": 7972
+    }
+  },
+  "git_diff_check": "PASS",
+  "graphify_update": "PASS; SQL extraction unavailable because tree_sitter_sql is not installed; no install attempted",
+  "legacy_files_unchanged": "PASS",
+  "loader": {
+    "counts": {
+      "customer": 30000,
+      "district": 10,
+      "history": 30000,
+      "item": 100000,
+      "new_order": 9000,
+      "oorder": 30000,
+      "order_line": 299797,
+      "stock": 100000,
+      "warehouse": 1
+    },
+    "self_test": "PASS",
+    "sha256_uncompressed": {
+      "customer": "1b499216e1efc965d7df92d729f40be48ada936fd513a917978ea3cdc0b7300a",
+      "district": "6cca219094151fb216a43dffee252d590bb55ba40830592fb98f2333b2b14f81",
+      "history": "ba5f075eab58af00e5343ebdbf37cebe54ae6d6ad1d9487ba8c46fefaceb6940",
+      "item": "1eb2b03ca7a78379b445d995661e804c06a02467631cfc3212d99d08f3143352",
+      "new_order": "8856039c797f8708313793dc660e62f4cad223d0e568de5e71c8ee186a166c8a",
+      "oorder": "36cf3ebf80be48b4c372c1f891416883ba05cd4b7091b222172e926b89b65f96",
+      "order_line": "cf6347191c9d6b0d5f1645e89233ae22c9c1a8bbd94838bbb2d6c88774269408",
+      "stock": "e3943b76517b45e652404b889dfa691b6eec8e097fb13c81b13282680a70b2b3",
+      "warehouse": "6e1de48d4830c553268e6d410a1bd7d636e6e8ba8360c575d6fcf44281a9993f"
+    },
+    "written_to_temp_dir": "/tmp/tpcc-v3-load-test-rntf9sp8"
+  },
+  "native_build_and_runtime": "PENDING integrator on ranking",
+  "py_compile": "PASS",
+  "schema_procedure_generator_interface": "PASS seven generated functions exist; nine UNLOGGED tables",
+  "w2_20k_seed42": {
+    "expected_committed_new_orders": 8995,
+    "expected_rollbacks": 88,
+    "generated_new_orders": 9083,
+    "sha256": "0e886cbe15f09e4725a51b57f60421e2cea22e82c817a3d5c18eceeae25f23d5"
+  },
+  "w5_generation_only": {
+    "actual_COPY_timing": "PENDING ranking",
+    "counts": {
+      "customer": 150000,
+      "district": 50,
+      "history": 150000,
+      "item": 100000,
+      "new_order": 45000,
+      "oorder": 150000,
+      "order_line": 1498433,
+      "stock": 500000,
+      "warehouse": 5
+    },
+    "database": false,
+    "seconds": 34.88
+  }
+}

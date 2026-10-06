@@ -1947,7 +1947,11 @@ bcdb_middleware_submit_block_results(const char* block_json)
 		 * BCDB_BLOCK_RETURN_ACTUAL_RESULTS. */
 		appendStringInfoString(&out, tx_refs[i].hash);
 		appendStringInfoChar(&out, '\t');
-		if (return_actual_results)
+		/* Preserve business outcomes even in completion-only mode. Otherwise
+		 * the executor cannot distinguish a rollback from a committed order. */
+		if (return_actual_results ||
+			strcmp(result_block->result[mem_txid],
+				   "USER_ABORT sqlstate=TP001 message=TPC-C expected NewOrder rollback: invalid item") == 0)
 		{
 			const char *result_text = result_block->result[mem_txid];
 

@@ -40,6 +40,7 @@ struct pg_executor_stats {
     uint64_t conn_acquire_calls = 0;
     uint64_t conn_acquire_wait_ns = 0;
 
+    uint64_t user_aborts = 0;
     uint64_t exec_calls = 0;
     uint64_t exec_ns = 0;
     uint64_t pg_query_ns = 0;
@@ -479,6 +480,7 @@ private:
     std::atomic<uint64_t> st_queue_delay_exec_start_ns_{0};
     std::atomic<uint64_t> st_conn_acquire_calls_{0};
     std::atomic<uint64_t> st_conn_acquire_wait_ns_{0};
+    std::atomic<uint64_t> st_user_aborts_{0};
     std::atomic<uint64_t> st_exec_calls_{0};
     std::atomic<uint64_t> st_exec_ns_{0};
     std::atomic<uint64_t> st_pg_query_ns_{0};

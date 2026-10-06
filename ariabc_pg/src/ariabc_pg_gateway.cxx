@@ -69,6 +69,7 @@ struct gateway_options {
     int det_raw_sql = 0;
 
     int tx_interval_ms = 0;
+    int progress_interval_ms = 5000;
     int qrate = 0; // per terminal, 0=unthrottled
     int num_terminals = 1;
     std::string client_id = "cli";
@@ -201,7 +202,7 @@ void usage(const char* argv0) {
         << "    [--querySign 0|1] [--pubKeyFile <path>] [--privKeyFile <path>] \\\n"
         << "    [--txSign 0|blake3] [--txSigKey <key>] \\\n"
         << "    [--dbType 0|1|2] [--detStartSeq <n>] [--detRawSql 0|1] [--qrate <n>] [--txIntervalMs <ms>] \\\n"
-        << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] \\\n"
+        << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] [--progressIntervalMs <ms>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
         << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--detClientMode event|threadpool] [--detClientWorkers <n>] [--detClientInflight <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--txLatencyCsv <path>] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>] \\\n"
@@ -245,6 +246,11 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.qrate = std::stoi(need("--qrate"));
             } else if (a == "--txIntervalMs") {
                 opt.tx_interval_ms = std::stoi(need("--txIntervalMs"));
+            } else if (a == "--progressIntervalMs") {
+                opt.progress_interval_ms = std::stoi(need("--progressIntervalMs"));
+                if (opt.progress_interval_ms < 1) {
+                    throw std::runtime_error("--progressIntervalMs must be positive");
+                }
             } else if (a == "--numTerminals") {
                 opt.num_terminals = std::stoi(need("--numTerminals"));
             } else if (a == "--clientId") {
@@ -4685,6 +4691,33 @@ int main(int argc, char** argv) {
     }
 
     std::atomic<int> permanent_failures(0);
+    // Count actual executor outcomes, never infer them from SQL input. The
+    // first replica's cumulative counter covers direct/fused/batched and Kafka
+    // completion alike. Dedicated benchmark servers are required for isolation.
+    std::atomic<uint64_t> user_aborts(0);
+    std::atomic<uint64_t> user_abort_poll_failures(0);
+    uint64_t user_abort_baseline = 0;
+    auto read_user_abort_count = [&](uint64_t& value) -> bool {
+        ariabc_pg::client_api_response response;
+        std::string error;
+        return !nodes.empty() && ariabc_pg::send_control_req_to_node(
+            nodes.front(), "__ARIABC_CTRL_GET_USER_ABORTS", response, error, true, 2000) &&
+            response.status == 0 &&
+            ariabc_pg::parse_named_u64_field(response.msg, "user_aborts=", value);
+    };
+    uint64_t initial_user_aborts = 0;
+    const bool user_abort_counter_supported = read_user_abort_count(initial_user_aborts);
+    user_abort_baseline = initial_user_aborts;
+    auto refresh_user_aborts = [&]() {
+        if (!user_abort_counter_supported) return;
+        uint64_t cumulative = 0;
+        if (read_user_abort_count(cumulative) && cumulative >= user_abort_baseline) {
+            user_aborts.store(cumulative - user_abort_baseline, std::memory_order_relaxed);
+        } else {
+            user_abort_poll_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
     std::atomic<uint64_t> term_other_failure(0);
     std::atomic<bool>     fatal_gateway_error(false);
     std::string           fatal_gateway_error_message;
@@ -5655,6 +5688,7 @@ int main(int argc, char** argv) {
             const auto det_progress_start = std::chrono::steady_clock::now();
             t_start = det_progress_start;
             auto emit_det_progress = [&](bool final) {
+                refresh_user_aborts();
                 const auto now = std::chrono::steady_clock::now();
                 const double elapsed_s =
                     std::chrono::duration_cast<std::chrono::duration<double>>(
@@ -5668,6 +5702,8 @@ int main(int argc, char** argv) {
 
                 std::ostringstream oss;
                 oss << "PROGRESS_GATEWAY_DET"
+                    << " wall_time_unix_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count()
                     << " elapsed_s=" << std::fixed << std::setprecision(1) << elapsed_s
                     << " total=" << queries.size()
                     << " sent=" << det_sent_count.load(std::memory_order_relaxed)
@@ -5684,6 +5720,9 @@ int main(int argc, char** argv) {
                     << " kafka_parse_failures=" << kafka_parse_failures.load(std::memory_order_relaxed)
                     << " kc_msgs=" << kc_prog.message_count
                     << " kc_timeouts=" << kc_prog.poll_timeouts
+                    << " user_aborts=" << user_aborts.load(std::memory_order_relaxed)
+                    << " user_abort_counter_supported=" << (user_abort_counter_supported ? 1 : 0)
+                    << " user_abort_poll_failures=" << user_abort_poll_failures.load(std::memory_order_relaxed)
                     << " permanent_failures=" << permanent_failures.load(std::memory_order_relaxed)
                     << " divergence_count=" << divergence_count.load(std::memory_order_relaxed);
                 if (final) oss << " final=1";
@@ -5692,7 +5731,7 @@ int main(int argc, char** argv) {
             std::thread det_progress_thread([&] {
                 std::unique_lock<std::mutex> lk(det_progress_mu);
                 while (!det_progress_stop.load(std::memory_order_relaxed)) {
-                    if (det_progress_cv.wait_for(lk, std::chrono::seconds(5), [&] {
+                    if (det_progress_cv.wait_for(lk, std::chrono::milliseconds(opt.progress_interval_ms), [&] {
                             return det_progress_stop.load(std::memory_order_relaxed);
                         })) {
                         break;
@@ -7419,6 +7458,10 @@ int main(int argc, char** argv) {
         std::cout << " background accept drain time (ms) " << background_accept_drain_ms << std::endl;
         std::cout << "duplicate_key_errors=" << duplicate_key_errors.load() << std::endl;
         std::cout << "divergence_count=" << divergence_count.load() << std::endl;
+        refresh_user_aborts();
+        std::cout << "user_aborts=" << user_aborts.load() << std::endl;
+        std::cout << "user_abort_counter_supported=" << (user_abort_counter_supported ? 1 : 0) << std::endl;
+        std::cout << "user_abort_poll_failures=" << user_abort_poll_failures.load() << std::endl;
         std::cout << "permanent_failures=" << permanent_failures.load() << std::endl;
         if (recovery_mgr) {
             std::cout << "recovery_triggered_count=" << recovery_mgr->triggered_count() << std::endl;

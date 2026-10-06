@@ -1281,6 +1281,13 @@ void handle_client_fd(int fd,
             if (!write_response_frame(fd, resp, err)) break;
             continue;
         }
+        if (psm && req.sql == "__ARIABC_CTRL_GET_USER_ABORTS") {
+            client_api_response resp;
+            resp.status = 0;
+            resp.msg = "user_aborts=" + std::to_string(psm->executor_stats().user_aborts);
+            if (!write_response_frame(fd, resp, err)) break;
+            continue;
+        }
         if (starts_with(req.sql, "WAIT_RESULTS ")) {
             const auto resp = wait_for_results(psm, req.sql);
             if (!write_response_frame(fd, resp, err)) break;
@@ -1589,6 +1596,13 @@ void handle_client_fd_direct(int fd,
             if (!ok_write) break;
             continue;
         }
+        if (psm && req.sql == "__ARIABC_CTRL_GET_USER_ABORTS") {
+            client_api_response resp;
+            resp.status = 0;
+            resp.msg = "user_aborts=" + std::to_string(psm->executor_stats().user_aborts);
+            if (!write_response_frame(fd, resp, err)) break;
+            continue;
+        }
         if (starts_with(req.sql, "WAIT_RESULTS ")) {
             const auto resp = wait_for_results(psm, req.sql);
             if (!write_response_frame(fd, resp, err)) break;
@@ -1758,6 +1772,7 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " concurrent_pqexec_cur=" << exec.concurrent_pqexec_cur
         << " max_concurrent_PQexec=" << exec.concurrent_pqexec_max
         << " overlapping_PQexec_intervals=" << exec.overlapping_pqexec_intervals
+        << " user_aborts=" << exec.user_aborts
         << " result_format_ms=" << (exec.result_format_ns / 1000000.0)
         << " retryable_sqlstate_40001=" << exec.retryable_sqlstate_40001
         << " retryable_sqlstate_40P01=" << exec.retryable_sqlstate_40P01

@@ -61,12 +61,14 @@ lib*.pc
 !/dynamic_merkle_visualizer/README.md
 !Final_Results/*.md
 !Final_Results/**/*.md
+!test.md
 *.diff
 
 # Exclude scripts by default (but allow whitelisting specific files)
 /scripts/*
 !/scripts/bench_full_results/
 /scripts/bench_full_results/*
+!/scripts/bench_full_results/README.md
 !/scripts/bench_full_results/*.zip
 !/scripts/bench_full_results/TPCC_BENCHMARK_SCALING_DETAILED_ANALYSIS.md
 !/scripts/bench_full_results/tpcc_*.png
@@ -86,6 +88,10 @@ lib*.pc
 !/scripts/verify_deterministic_engine.py
 !/scripts/ycsb_suite/
 !/scripts/ycsb_suite/**
+
+# TPC-C v3 workload, population, procedures and correctness runbooks.
+!/scripts/tpcc_v3/
+!/scripts/tpcc_v3/**
 
 # Python bytecode under the distributed/ folder is still build output.
 /scripts/distributed/__pycache__/
