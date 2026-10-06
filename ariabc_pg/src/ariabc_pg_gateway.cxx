@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <deque>
+#include <functional>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -1806,6 +1807,16 @@ struct vote_store {
         return recovery_excused_divergences_;
     }
 
+    // Per-transaction timeline hook: called under mu_ with the gateway steady
+    // clock when a replica's reply is stored (majority=false) and when the
+    // request first reaches a verified majority (majority=true). Clearing it
+    // takes mu_, so no call can still be running once the setter returns.
+    using reply_observer = std::function<void(uint64_t req_num, int node_id, uint64_t ns, bool majority)>;
+    void set_reply_observer(reply_observer observer) {
+        std::lock_guard<std::mutex> lk(mu_);
+        reply_observer_ = std::move(observer);
+    }
+
     void add_reply(kafka_reply_record rec,
                    std::string& out_recovery_note)
     {
@@ -2004,6 +2015,7 @@ private:
             e.hash_to_nodes_valid[stored_obs.rec.result_hash] |= node_bit(node_id);
         }
         increment_node_counter_locked(reply_records_by_node_, node_id);
+        if (reply_observer_) reply_observer_(rec_req_num, node_id, add_ns, false);
         refresh_majority_locked(key, e, add_ns, node_id);
 
         std::string all_err;
@@ -2963,6 +2975,7 @@ private:
         if (!had_majority && !e.terminal_set && !e.majority_hash.empty() && !e.ready_recorded) {
             e.ready_recorded = true;
             e.majority_ready_ns = now_ns;
+            if (reply_observer_) reply_observer_(key.req_num, trigger_node_id, now_ns, true);
             auto it_maj = e.hash_to_nodes_valid.find(e.majority_hash);
             if (it_maj != e.hash_to_nodes_valid.end()) {
                 e.majority_nodes_mask = it_maj->second;
@@ -3457,6 +3470,7 @@ private:
     std::unordered_map<int, node_recovery_state> node_recovery_;
     uint64_t recovery_excused_divergences_ = 0;
     uint64_t recovery_audit_deadline_extensions_ = 0;
+    reply_observer reply_observer_;
 
     mutable std::mutex mu_;
     std::condition_variable cv_;
@@ -4399,6 +4413,12 @@ public:
         submit_times_.assign(n, std::chrono::steady_clock::time_point());
         finish_times_.assign(n, std::chrono::steady_clock::time_point());
         completed_.assign(n, 0);
+        accept_ns_.assign(n, 0);
+        reply_ns_.assign(n * kReplySlots, 0);
+        reply_node_.assign(n * kReplySlots, 0);
+        replies_seen_.assign(n, 0);
+        majority_ns_.assign(n, 0);
+        majority_node_.assign(n, 0);
     }
 
     void record_submit_idx(size_t idx, std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now()) {
@@ -4410,6 +4430,13 @@ public:
     void record_submit_req(uint64_t req_num, std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now()) {
         if (req_num >= req_id_offset_) {
             record_submit_idx(static_cast<size_t>(req_num - req_id_offset_), tp);
+        }
+    }
+
+    // Leader ACK for the submit (Raft append accepted).
+    void record_accept_idx(size_t idx, std::chrono::steady_clock::time_point tp = std::chrono::steady_clock::now()) {
+        if (idx < accept_ns_.size() && accept_ns_[idx] == 0) {
+            accept_ns_[idx] = to_ns(tp);
         }
     }
 
@@ -4426,7 +4453,31 @@ public:
         }
     }
 
-    void dump_and_print_summary(const std::string& csv_out_path = "") const {
+    // vote_store::reply_observer target (runs under the vote_store mutex).
+    // Keeps the first arrival per replica, in arrival order.
+    void record_reply(uint64_t req_num, int node_id, uint64_t ns, bool majority) {
+        if (req_num < req_id_offset_) return;
+        const size_t idx = static_cast<size_t>(req_num - req_id_offset_);
+        if (idx >= majority_ns_.size()) return;
+        if (majority) {
+            if (majority_ns_[idx] == 0) {
+                majority_ns_[idx] = ns;
+                majority_node_[idx] = node_id;
+            }
+            return;
+        }
+        const size_t base = idx * kReplySlots;
+        const size_t seen = replies_seen_[idx];
+        for (size_t i = 0; i < seen; ++i) {
+            if (reply_node_[base + i] == node_id) return;
+        }
+        if (seen >= kReplySlots) return;
+        reply_ns_[base + seen] = ns;
+        reply_node_[base + seen] = node_id;
+        replies_seen_[idx] = static_cast<uint8_t>(seen + 1);
+    }
+
+    void dump_and_print_summary(const std::string& csv_out_path = "", int total_nodes = 0) const {
         std::vector<double> latencies_ms;
         latencies_ms.reserve(completed_.size());
         for (size_t i = 0; i < completed_.size(); ++i) {
@@ -4440,32 +4491,32 @@ public:
         if (latencies_ms.empty()) {
             return;
         }
-        std::sort(latencies_ms.begin(), latencies_ms.end());
-        double sum = 0.0;
-        for (double d : latencies_ms) sum += d;
-        const double mean = sum / latencies_ms.size();
-        const double min = latencies_ms.front();
-        const double max = latencies_ms.back();
-        auto pct = [&](double p) -> double {
-            if (latencies_ms.empty()) return 0.0;
-            size_t idx = static_cast<size_t>(std::ceil(p / 100.0 * latencies_ms.size())) - 1;
-            if (idx >= latencies_ms.size()) idx = latencies_ms.size() - 1;
-            return latencies_ms[idx];
-        };
-        const double p50 = pct(50.0);
-        const double p90 = pct(90.0);
-        const double p95 = pct(95.0);
-        const double p99 = pct(99.0);
+        print_stats("TX_LATENCY_EMPIRICAL", latencies_ms);
 
-        std::cout << "TX_LATENCY_EMPIRICAL count=" << latencies_ms.size()
-                  << " min_ms=" << std::fixed << std::setprecision(3) << min
-                  << " mean_ms=" << mean
-                  << " p50_ms=" << p50
-                  << " p90_ms=" << p90
-                  << " p95_ms=" << p95
-                  << " p99_ms=" << p99
-                  << " max_ms=" << max
-                  << std::endl;
+        // Per-stage timeline, all on the gateway steady clock and relative to
+        // the transaction's own submit: leader accept, first replica result,
+        // verified majority, last replica result.
+        std::vector<double> accept_ms, first_ms, majority_ms, all_ms, handoff_ms;
+        for (size_t i = 0; i < completed_.size(); ++i) {
+            if (!completed_[i] || submit_times_[i].time_since_epoch().count() <= 0) continue;
+            const uint64_t sub = to_ns(submit_times_[i]);
+            const uint64_t fin = to_ns(finish_times_[i]);
+            const uint64_t all = all_results_ns(i, total_nodes);
+            if (accept_ns_[i] >= sub) accept_ms.push_back(ns_to_ms(accept_ns_[i] - sub));
+            if (replies_seen_[i] > 0 && reply_ns_[i * kReplySlots] >= sub) {
+                first_ms.push_back(ns_to_ms(reply_ns_[i * kReplySlots] - sub));
+            }
+            if (majority_ns_[i] >= sub && majority_ns_[i] != 0) {
+                majority_ms.push_back(ns_to_ms(majority_ns_[i] - sub));
+                if (fin >= majority_ns_[i]) handoff_ms.push_back(ns_to_ms(fin - majority_ns_[i]));
+            }
+            if (all >= sub && all != 0) all_ms.push_back(ns_to_ms(all - sub));
+        }
+        print_stats("TX_TIMELINE_ACCEPT", accept_ms);
+        print_stats("TX_TIMELINE_FIRST_RESULT", first_ms);
+        print_stats("TX_TIMELINE_MAJORITY", majority_ms);
+        print_stats("TX_TIMELINE_ALL_RESULTS", all_ms);
+        print_stats("TX_TIMELINE_MAJORITY_TO_CLIENT", handoff_ms);
 
         if (!csv_out_path.empty()) {
             std::ofstream ofs(csv_out_path);
@@ -4481,12 +4532,32 @@ public:
                         have_origin = true;
                     }
                 }
-                ofs << "tx_idx,latency_ms,finish_ms\n";
+                // submit_ms is relative to the first submit; accept/first/
+                // majority/all are relative to this transaction's submit
+                // (empty when the event was not observed).
+                ofs << "tx_idx,latency_ms,finish_ms,submit_ms,accept_ms,first_result_ms,"
+                       "majority_ms,all_results_ms,first_node,majority_node,last_node,replies\n";
                 for (size_t i = 0; i < completed_.size(); ++i) {
                     if (completed_[i] && submit_times_[i].time_since_epoch().count() > 0) {
                         const double ms = std::chrono::duration<double, std::milli>(finish_times_[i] - submit_times_[i]).count();
                         const double fin = std::chrono::duration<double, std::milli>(finish_times_[i] - origin).count();
-                        ofs << i << "," << std::fixed << std::setprecision(4) << ms << "," << fin << "\n";
+                        const double sub_rel = std::chrono::duration<double, std::milli>(submit_times_[i] - origin).count();
+                        const uint64_t sub = to_ns(submit_times_[i]);
+                        const size_t seen = replies_seen_[i];
+                        const size_t base = i * kReplySlots;
+                        ofs << i << "," << std::fixed << std::setprecision(4) << ms << "," << fin
+                            << "," << sub_rel << ",";
+                        write_rel(ofs, accept_ns_[i], sub);
+                        ofs << ",";
+                        write_rel(ofs, seen > 0 ? reply_ns_[base] : 0, sub);
+                        ofs << ",";
+                        write_rel(ofs, majority_ns_[i], sub);
+                        ofs << ",";
+                        write_rel(ofs, all_results_ns(i, total_nodes), sub);
+                        ofs << "," << (seen > 0 ? reply_node_[base] : 0)
+                            << "," << majority_node_[i]
+                            << "," << (seen > 0 ? reply_node_[base + seen - 1] : 0)
+                            << "," << seen << "\n";
                     }
                 }
             }
@@ -4494,11 +4565,128 @@ public:
     }
 
 private:
+    static constexpr size_t kReplySlots = 4;  // replicas tracked per tx
+
+    static uint64_t to_ns(std::chrono::steady_clock::time_point tp) {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count());
+    }
+
+    static double ns_to_ms(uint64_t ns) {
+        return static_cast<double>(ns) / 1e6;
+    }
+
+    static void write_rel(std::ofstream& ofs, uint64_t ns, uint64_t base_ns) {
+        if (ns != 0 && ns >= base_ns) ofs << ns_to_ms(ns - base_ns);
+    }
+
+    // Arrival of the last replica, once every replica has replied.
+    uint64_t all_results_ns(size_t idx, int total_nodes) const {
+        const size_t seen = replies_seen_[idx];
+        if (total_nodes <= 0 || seen < static_cast<size_t>(total_nodes)) return 0;
+        return reply_ns_[idx * kReplySlots + seen - 1];
+    }
+
+    static void print_stats(const char* label, std::vector<double> v) {
+        if (v.empty()) return;
+        std::sort(v.begin(), v.end());
+        double sum = 0.0;
+        for (double d : v) sum += d;
+        auto pct = [&](double p) -> double {
+            size_t idx = static_cast<size_t>(std::ceil(p / 100.0 * v.size())) - 1;
+            if (idx >= v.size()) idx = v.size() - 1;
+            return v[idx];
+        };
+        std::cout << label << " count=" << v.size()
+                  << " min_ms=" << std::fixed << std::setprecision(3) << v.front()
+                  << " mean_ms=" << sum / v.size()
+                  << " p50_ms=" << pct(50.0)
+                  << " p90_ms=" << pct(90.0)
+                  << " p95_ms=" << pct(95.0)
+                  << " p99_ms=" << pct(99.0)
+                  << " max_ms=" << v.back()
+                  << std::endl;
+    }
+
     uint64_t req_id_offset_ = 0;
     std::vector<std::chrono::steady_clock::time_point> submit_times_;
     std::vector<std::chrono::steady_clock::time_point> finish_times_;
     std::vector<uint8_t> completed_;
+    std::vector<uint64_t> accept_ns_;
+    std::vector<uint64_t> reply_ns_;
+    std::vector<int> reply_node_;
+    std::vector<uint8_t> replies_seen_;
+    std::vector<uint64_t> majority_ns_;
+    std::vector<int> majority_node_;
 };
+
+// Replies from nodes 4, 1, 2 (3 replicas, majority 2) must give: first result
+// from node 4, verified majority when node 1 arrives, all results at node 2,
+// and a duplicate reply must not count as a new replica.
+bool run_tx_timeline_self_test()
+{
+    const std::string sig_key = "selftest-key";
+    const uint64_t req_num = 5;
+    const std::string result_hash = canonical_result_hash("timeline-result");
+    auto make_rec = [&](int node_id) {
+        kafka_reply_record rec;
+        rec.req_num = req_num;
+        rec.req_id = "selftest-" + std::to_string(req_num);
+        rec.node_id = node_id;
+        rec.leader_node_id = 1;
+        rec.result_hash = result_hash;
+        rec.hash_algo = kHashAlgo;
+        rec.timestamp_ms = now_epoch_ms();
+        rec.has_full_result = true;
+        rec.full_result = "timeline-result";
+        rec.raft_log_idx = 9;
+        rec.server_sig = sign_payload(
+            sig_key,
+            make_sig_payload(rec.req_num, rec.raft_log_idx, rec.req_id, rec.node_id,
+                             rec.leader_node_id, rec.result_hash, rec.timestamp_ms,
+                             rec.has_full_result));
+        return rec;
+    };
+
+    tx_latency_tracker tracker;
+    tracker.init(8, 1);
+    vote_store votes(3, 2, 16, sig_key);
+    votes.set_reply_observer([&tracker](uint64_t r, int n, uint64_t ns, bool maj) {
+        tracker.record_reply(r, n, ns, maj);
+    });
+    const size_t idx = static_cast<size_t>(req_num - 1);
+    tracker.record_submit_idx(idx);
+    tracker.record_accept_idx(idx);
+    std::string recovery;
+    for (int node : {4, 1, 1, 2}) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        votes.add_reply(make_rec(node), recovery);
+    }
+    tracker.record_finish_idx(idx);
+    votes.set_reply_observer(nullptr);
+
+    const std::string csv = "/tmp/ariabc_tx_timeline_selftest_" + std::to_string(::getpid()) + ".csv";
+    tracker.dump_and_print_summary(csv, 3);
+    std::ifstream ifs(csv);
+    std::string header, row;
+    std::getline(ifs, header);
+    std::getline(ifs, row);
+    ::unlink(csv.c_str());
+
+    std::vector<std::string> f;
+    std::stringstream ss(row);
+    for (std::string cell; std::getline(ss, cell, ',');) f.push_back(cell);
+    bool ok = header.rfind("tx_idx,latency_ms,finish_ms,submit_ms,accept_ms,first_result_ms,majority_ms,all_results_ms,", 0) == 0 &&
+              f.size() == 12 && f[0] == "4";
+    if (ok) {
+        const double first = std::stod(f[5]), majority = std::stod(f[6]), all = std::stod(f[7]);
+        ok = f[8] == "4" && f[9] == "1" && f[10] == "2" && f[11] == "3" &&
+             first > 0.0 && majority > first && all > majority &&
+             std::stod(f[1]) >= all;
+    }
+    std::cout << "SELFTEST tx_timeline " << (ok ? "PASS" : "FAIL") << " row=" << row << std::endl;
+    return ok;
+}
 
 } // namespace ariabc_pg
 
@@ -4515,7 +4703,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (opt.self_test_early_ready_race != 0) {
-        return ariabc_pg::run_early_ready_race_self_test() ? 0 : 1;
+        return (ariabc_pg::run_early_ready_race_self_test() &&
+                ariabc_pg::run_tx_timeline_self_test()) ? 0 : 1;
     }
 
     // Ignore SIGPIPE so broken sockets don't kill the process.
@@ -5567,6 +5756,9 @@ int main(int argc, char** argv) {
         std::cout << "loaded " << queries.size() << " queries" << std::endl;
         tx_latency_tracker tx_lat_tracker;
         tx_lat_tracker.init(queries.size(), opt.req_id_offset);
+        votes.set_reply_observer([&tx_lat_tracker](uint64_t req_num, int node_id, uint64_t ns, bool majority) {
+            tx_lat_tracker.record_reply(req_num, node_id, ns, majority);
+        });
         if (tx_signer.is_enabled()) {
             query_tx_sigs.resize(queries.size());
             query_tx_sqls.resize(queries.size());
@@ -6353,6 +6545,7 @@ int main(int argc, char** argv) {
                                     std::chrono::duration_cast<std::chrono::nanoseconds>(
                                         submit_t1 - submit_t0).count());
                                 if (ok_submit) {
+                                    tx_lat_tracker.record_accept_idx(idx, submit_t1);
                                     if (direct_wait_on_submit_socket && !same_socket_wait_ok) {
                                         std::cerr << "det threadpool direct wait failed"
                                                   << " worker=" << worker_id
@@ -6741,6 +6934,11 @@ int main(int argc, char** argv) {
                     total_submit_ns.fetch_add(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
                             submit_done_at - ticket.submit_started_at).count());
+                    if (ok_submit) {
+                        for (const auto& itm : ticket.items) {
+                            tx_lat_tracker.record_accept_idx(itm.idx, submit_done_at);
+                        }
+                    }
                     if (!ok_submit) {
                         std::cerr << "det pipeline submit failed req="
                                   << (ticket.items.empty() ? 0 : ticket.items.front().req_num)
@@ -7020,7 +7218,12 @@ int main(int argc, char** argv) {
                         const auto submit_t1 = std::chrono::steady_clock::now();
                         total_submit_ns.fetch_add(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(submit_t1 - submit_t0).count());
-                        if (ok_submit) break;
+                        if (ok_submit) {
+                            for (const auto& itm : batch_items) {
+                                tx_lat_tracker.record_accept_idx(itm.idx, submit_t1);
+                            }
+                            break;
+                        }
                         ++tries;
                         if (tries % 50 == 0) {
                             std::cerr << "det submit retry idx=" << idx << " tries=" << tries << std::endl;
@@ -7514,7 +7717,8 @@ int main(int argc, char** argv) {
                       << std::endl;
         }
 
-        tx_lat_tracker.dump_and_print_summary(opt.tx_latency_csv);
+        votes.set_reply_observer(nullptr);
+        tx_lat_tracker.dump_and_print_summary(opt.tx_latency_csv, total_nodes);
 
         uint64_t sub_attempts = ariabc_pg::g_submit_prof.attempts.load(std::memory_order_relaxed);
         uint64_t sub_conn_calls = ariabc_pg::g_submit_prof.connect_calls.load(std::memory_order_relaxed);
