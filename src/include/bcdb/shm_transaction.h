@@ -215,6 +215,8 @@ typedef struct _WSTableEntry
 typedef struct _WSTableEntryRecord
 {
     PREDICATELOCKTARGETTAG tag;
+	uint32		dt_hash;
+	bool		dt_has_write;	/* this read tag is also in the checked write-set */
     LIST_ENTRY(_WSTableEntryRecord) link;
 } WSTableEntryRecord;
 
@@ -243,6 +245,9 @@ extern TxQueue      *tx_queues;
 extern WSTableRecord ws_table_record;
 extern WSTableRecord ws_table_publish_record;	/* published, never checked */
 extern WSTableRecord rs_table_record;
+
+extern bool bcdb_dt_tag_dedup_enabled(void);
+extern void bcdb_dt_tag_set_reset(void);
 
 extern BCDBShmXact* tx_queue_next(int32 partition);
 extern void         tx_queue_insert(BCDBShmXact *tx, int32 partition);
