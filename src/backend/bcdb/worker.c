@@ -2636,7 +2636,6 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     is_bcdb_worker = true;
 
     Assert(tx != NULL);
-	trace_tx_id = tx->tx_id;
     tx->worker_pid = pid;
     activeTx = tx;
 	bcdb_emit_ledger_boundary("ledger_begin");
