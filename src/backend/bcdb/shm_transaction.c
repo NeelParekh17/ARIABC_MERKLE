@@ -3798,7 +3798,14 @@ bcdb_dt_validate_published(BCTxID published, bool at_turn)
 
 	if (!bcdb_dt_conflict_tracking)
 		return 0;
-	Assert(published < activeTx->tx_id);
+	/*
+	 * Only predecessors can conflict.  published_max can already be past our
+	 * own id when this transaction re-runs after its first publication (the
+	 * historical post-publish restart); scanning our own digest would then
+	 * report a conflict with ourselves and wait for our own commit forever.
+	 */
+	if (published >= activeTx->tx_id)
+		published = activeTx->tx_id - 1;
 	if (!bcdb_dt_validation_started && !at_turn)
 		goto full_check;
 	bcdb_reset_last_conflict_txid();
