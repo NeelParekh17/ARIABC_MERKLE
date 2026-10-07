@@ -8,7 +8,7 @@
 set -euo pipefail
 ROOT=$1; LABEL=$2; WORKERS=$3; WL=$4; shift 4
 PG_ENV=("$@")
-INST=$ROOT/install; SRC=$ROOT/src; BIN=$SRC/ariabc_pg/build/bin
+INST=$ROOT/install; SRC=$ROOT/src; BIN=${BIN:-$SRC/ariabc_pg/build/bin}
 HERE=$(cd "$(dirname "$0")" && pwd)
 RUN=$ROOT/runs/$LABEL
 PORT=${PORT:-55471}; CLIENT_PORT=${CLIENT_PORT:-18171}; RAFT_PORT=${RAFT_PORT:-19171}
