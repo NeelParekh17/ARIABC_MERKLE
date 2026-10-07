@@ -66,10 +66,15 @@ typedef enum
     BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT,
     BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT,
     BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT,
+	BCDB_PTRACE_COUNTER_CONFLICT_TURN_HITS,
+	BCDB_PTRACE_COUNTER_CONFLICT_TURN_CHECKS,
+	BCDB_PTRACE_COUNTER_EARLY_ROTATION_COUNT,
+	BCDB_PTRACE_COUNTER_EARLY_ROTATION_SKIPPED_COUNT,
     BCDB_PTRACE_COUNTER_COUNT
 } bcdb_ptrace_counter_id;
 
 bool bcdb_ptrace_enabled(void);
+bool bcdb_ptrace_fine_enabled(void);
 uint64 bcdb_ptrace_now_us(void);
 void bcdb_ptrace_add_us(bcdb_ptrace_metric_id metric, uint64 delta_us);
 void bcdb_ptrace_inc_counter(bcdb_ptrace_counter_id counter, uint64 delta);
@@ -81,6 +86,14 @@ bcdb_ptrace_timer_start(void)
     if (!bcdb_ptrace_enabled())
         return 0;
     return bcdb_ptrace_now_us();
+}
+
+static inline uint64
+bcdb_ptrace_fine_timer_start(void)
+{
+	if (!bcdb_ptrace_fine_enabled())
+		return 0;
+	return bcdb_ptrace_now_us();
 }
 
 static inline void

@@ -601,6 +601,21 @@ bool bcdb_ptrace_enabled(void)
     return cached == 1;
 }
 
+/* Fine lock/hash timings add clock reads to every serial-turn probe. */
+bool
+bcdb_ptrace_fine_enabled(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_PHASE_TRACE_FINE");
+
+		cached = (v != NULL && strcmp(v, "1") == 0);
+	}
+	return cached == 1 && bcdb_ptrace_enabled();
+}
+
 uint64
 bcdb_ptrace_now_us(void)
 {
@@ -670,14 +685,17 @@ bcdb_ptrace_open(void)
             "apply_insert_count,apply_update_count,apply_delete_count,"
             "apply_update_tm_being_modified_count,apply_delete_tm_being_modified_count,"
             "apply_update_wait_incident_count,apply_delete_wait_incident_count,"
-            "merkle_update_count,apply_retry_count,publish_hash_clear_count\n");
+		"merkle_update_count,apply_retry_count,publish_hash_clear_count,conflict_turn_hits,conflict_turn_checks,early_rotation_count,early_rotation_skipped_count\n");
 }
 
 static inline uint64
 bcdb_ptrace_delta_us(struct timespec *start, struct timespec *end)
 {
-    return ((uint64)(end->tv_sec - start->tv_sec) * 1000000ULL) +
-           ((uint64)(end->tv_nsec - start->tv_nsec) / 1000ULL);
+	int64 delta_ns = ((int64) end->tv_sec - (int64) start->tv_sec) *
+		INT64CONST(1000000000) + ((int64) end->tv_nsec - (int64) start->tv_nsec);
+
+	Assert(delta_ns >= 0);
+	return delta_ns > 0 ? (uint64) (delta_ns / 1000) : 0;
 }
 
 #define PTRACE_BEGIN(phase)                                                    \
@@ -727,7 +745,7 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             "%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+		"%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
             tx_id, restarts,
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PARSE_PLAN],
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PORTAL_RUN],
@@ -773,7 +791,11 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_DELETE_WAIT_INCIDENT_COUNT],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT],
-            (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT]);
+		(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT],
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_CONFLICT_TURN_HITS],
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_CONFLICT_TURN_CHECKS],
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_EARLY_ROTATION_COUNT],
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_EARLY_ROTATION_SKIPPED_COUNT]);
 }
 MemoryContext bcdb_tx_context;
 MemoryContext bcdb_worker_context;
@@ -2562,12 +2584,14 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	char det_err_sqlstate[6] = "XX000";
 	char det_err_msg[512] = "";
 	int mem_txid = 0;
+	BCTxID trace_tx_id;
 
 	const bool dedicated_worker = is_bcdb_worker;
 
     is_bcdb_worker = true;
 
     Assert(tx != NULL);
+	trace_tx_id = tx->tx_id;
     tx->worker_pid = pid;
     activeTx = tx;
 	bcdb_emit_ledger_boundary("ledger_begin");
@@ -2614,7 +2638,6 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             !bcdb_block_return_actual_results_enabled() &&
             bcdb_query_is_select(tx->sql))
         {
-            BCTxID fast_tx_id = tx->tx_id;
             int mem_txid;
             BCBlock *committed_block;
 
@@ -2664,7 +2687,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             delete_tx(tx);
             MemoryContextReset(bcdb_tx_context);
             PTRACE_END(BCDB_PHASE_TOTAL);
-            bcdb_ptrace_emit(fast_tx_id, 0);
+			bcdb_ptrace_emit(trace_tx_id, 0);
             return;
         }
 
@@ -2743,7 +2766,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                  * refresh this baseline, otherwise conflict_checkDT will repeatedly
                  * flag already-committed txs as conflicts and can livelock.
                  */
-                activeTx->tx_id_committed = get_last_committed_txid(tx);
+		activeTx->tx_id_committed = bcdb_dt_snapshot_baseline(tx);
                 init = false;
                 if (bcdb_dt_light_snapshot_enabled() && !bcdb_dt_conflict_tracking)
                     XactIsoLevel = XACT_READ_COMMITTED;
@@ -3055,7 +3078,12 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
 					rw_conflicts = 0;
 				else
+				{
+					bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_CONFLICT_TURN_CHECKS, 1);
 					rw_conflicts = conflict_checkDT();
+					if (rw_conflicts == 1)
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_CONFLICT_TURN_HITS, 1);
+				}
                 PTRACE_END(BCDB_PHASE_CONFLICT);
                 // conflict_check();
             }
@@ -3082,6 +3110,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                    getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id);
 #endif
             publish_ws_tableDT(tx->tx_id); // HASHTAB_SWITCH_THRESHOLD
+			bcdb_dt_snapshot_validated(tx);
             BCDB_FLOW_LOG("[BCDB_FLOW] publish_ws_done pid=%d txid=%d xid=%u last_committed=%d published_max_before=%d",
                           getpid(),
                           tx ? (int)tx->tx_id : -1,
@@ -3103,6 +3132,9 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 set_published_max_txid(tx);
                 published_max_advanced = true;
             }
+
+			/* The turn is released; a boundary publisher waits for this clear. */
+			bcdb_dt_finish_early_rotation(tx);
 
             PTRACE_BEGIN(BCDB_PHASE_APPLY);
             apply_nonretryable = false;
@@ -3525,7 +3557,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             MemoryContextReset(bcdb_tx_context);
             PTRACE_END(BCDB_PHASE_FINISH);
             PTRACE_END(BCDB_PHASE_TOTAL);
-            bcdb_ptrace_emit(tx->tx_id, num_restarts);
+			bcdb_ptrace_emit(trace_tx_id, num_restarts);
             break;
         }
     }
@@ -3536,6 +3568,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		char      *message_copy = NULL;
 
         ConditionVariableCancelSleep();
+		bcdb_dt_snapshot_validated(tx);
+		bcdb_dt_cancel_early_rotation(tx);
 		if (optimistic_worker_active)
 		{
 			bcdb_optimistic_worker_end();
@@ -3605,7 +3639,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 			bcdb_finish_terminal_item(tx, abort_result, false, false, InvalidTransactionId);
 			ereport(LOG, (errmsg("[BCDB_USER_ABORT] txid=%d sqlstate=TP001 rollback_complete=1",
 								(int) tx->tx_id)));
-			bcdb_ptrace_emit(tx->tx_id, num_restarts);
+			bcdb_ptrace_emit(trace_tx_id, num_restarts);
 			delete_tx(tx);
 			activeTx = NULL;
 			MemoryContextReset(bcdb_tx_context);
