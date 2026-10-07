@@ -1,4 +1,5 @@
 #include "postgres.h"
+#include "utils/hashutils.h"
 #include "bcdb/shm_transaction.h"
 #include "bcdb/utils/aligned_heap.h"
 #include "utils/elog.h"
@@ -143,6 +144,64 @@ WSTable *rs_table;
 WSTableRecord ws_table_record;
 WSTableRecord ws_table_publish_record;
 WSTableRecord rs_table_record;
+/* Two times the ranking client's maximum in-flight window (65536). */
+#define BCDB_DT_DIGEST_SLOTS 131072
+#define BCDB_DT_DIGEST_TAGS 384
+
+typedef struct BCDBDTDigest
+{
+	BCTxID tx_id;
+	uint32 count;			/* > capacity means overflow */
+	uint64 hashes[BCDB_DT_DIGEST_TAGS];
+} BCDBDTDigest;
+
+static BCDBDTDigest *bcdb_dt_digests;
+static uint64 *bcdb_dt_checked_hashes;
+static bool *bcdb_dt_checked_used;
+static Size bcdb_dt_checked_mask;
+static BCTxID bcdb_dt_validated_through;
+static bool bcdb_dt_validation_started;
+
+bool
+bcdb_dt_early_validate_enabled(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_DT_EARLY_VALIDATE");
+
+		cached = !(v != NULL &&
+				   (strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
+					strcmp(v, "FALSE") == 0 || strcmp(v, "no") == 0 ||
+					strcmp(v, "NO") == 0));
+	}
+	return cached == 1;
+}
+
+bool
+bcdb_dt_gate_lookahead_enabled(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_GATE_LOOKAHEAD");
+
+		cached = !(v != NULL &&
+				   (strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
+					strcmp(v, "FALSE") == 0 || strcmp(v, "no") == 0 ||
+					strcmp(v, "NO") == 0));
+	}
+	return bcdb_dt_early_validate_enabled() && cached == 1;
+}
+
+static uint64
+bcdb_dt_tag_digest(const PREDICATELOCKTARGETTAG *tag)
+{
+	return DatumGetUInt64(hash_any_extended((const unsigned char *) tag, sizeof(*tag), 0));
+}
+
 static bool bcdb_apply_unique_violation = false;
 extern HTAB *PredicateLockTargetHash;
 extern HTAB *PredicateLockHash;
@@ -670,6 +729,16 @@ void create_tx_pool(void)
 	bool locks_found;
 	bool failpoint_found;
 
+	/* Allocate even in OFF mode, allowing one binary to serve both modes. */
+	bcdb_dt_digests = ShmemInitStruct("bcdb_dt_digests",
+										 mul_size(sizeof(BCDBDTDigest), BCDB_DT_DIGEST_SLOTS),
+										 &found);
+	if (!found)
+	{
+		for (int i = 0; i < BCDB_DT_DIGEST_SLOTS; i++)
+			bcdb_dt_digests[i].tx_id = -1;
+	}
+
     restart_counter_lock = ShmemInitStruct("restart_counter_lock", sizeof(slock_t), &found);
     // nexec_lock = ShmemInitStruct("nexec_lock", sizeof(slock_t) , &found);
 #if SAFEDBG
@@ -786,6 +855,7 @@ Size tx_pool_size(void)
 	ret = add_size(ret, sizeof(pg_atomic_uint32));
 	ret = add_size(ret, sizeof(TxQueue) * NUM_TX_QUEUE_PARTITION);
 	ret = add_size(ret, sizeof(WSTable) * 2);
+	ret = add_size(ret, mul_size(sizeof(BCDBDTDigest), BCDB_DT_DIGEST_SLOTS));
 	ret = add_size(ret, hash_estimate_size(MAX_WRITE_CONFLICT, sizeof(WSTableEntry)));
 	return ret;
 }
@@ -3298,6 +3368,119 @@ int conflict_checkDT()
     return 0;
 }
 
+/* Rebuild after every speculative execution; storage dies with tx context. */
+void
+bcdb_dt_prepare_validation(void)
+{
+	WSTableEntryRecord *record;
+	Size count = 0;
+	Size capacity = 16;
+
+	for (int pass = 0; pass < 2; pass++)
+		LIST_FOREACH(record, pass == 0 ? &ws_table_record : &rs_table_record, link)
+			count++;
+	while (capacity < count * 2)
+		capacity *= 2;
+	bcdb_dt_checked_mask = capacity - 1;
+	bcdb_dt_checked_hashes = MemoryContextAlloc(bcdb_tx_context,
+												 capacity * sizeof(uint64));
+	bcdb_dt_checked_used = MemoryContextAllocZero(bcdb_tx_context,
+													capacity * sizeof(bool));
+	for (int pass = 0; pass < 2; pass++)
+	{
+		LIST_FOREACH(record, pass == 0 ? &ws_table_record : &rs_table_record, link)
+		{
+			uint64 hash = bcdb_dt_tag_digest(&record->tag);
+			Size slot = hash & bcdb_dt_checked_mask;
+
+			while (bcdb_dt_checked_used[slot] && bcdb_dt_checked_hashes[slot] != hash)
+				slot = (slot + 1) & bcdb_dt_checked_mask;
+			bcdb_dt_checked_used[slot] = true;
+			bcdb_dt_checked_hashes[slot] = hash;
+		}
+	}
+	bcdb_dt_validated_through = activeTx->tx_id_committed;
+	bcdb_dt_validation_started = false;
+}
+
+static bool
+bcdb_dt_digest_intersects(uint64 hash)
+{
+	Size slot = hash & bcdb_dt_checked_mask;
+
+	while (bcdb_dt_checked_used[slot])
+	{
+		if (bcdb_dt_checked_hashes[slot] == hash)
+			return true;
+		slot = (slot + 1) & bcdb_dt_checked_mask;
+	}
+	return false;
+}
+
+/*
+ * Capture the acquire-loaded publication prefix BEFORE probing the maps.
+ * A clean full check covers that prefix; later publications are covered by
+ * the ring. Successors cannot publish while this transaction owns/waits for
+ * its turn. Ring ownership is checked twice, including on an intersection;
+ * atomic payload reads and a read barrier make reuse safe.
+ */
+int
+bcdb_dt_validate_published(BCTxID published, bool at_turn)
+{
+	BCTxID first;
+
+	if (!bcdb_dt_conflict_tracking)
+		return 0;
+	Assert(published < activeTx->tx_id);
+	if (!bcdb_dt_validation_started && !at_turn)
+		goto full_check;
+	bcdb_reset_last_conflict_txid();
+	first = Max(bcdb_dt_validated_through, activeTx->tx_id_committed) + 1;
+	if ((int64) published - first >= BCDB_DT_DIGEST_SLOTS)
+		goto fallback;
+	for (BCTxID id = first; id <= published; id++)
+	{
+		BCDBDTDigest *digest = &bcdb_dt_digests[id % BCDB_DT_DIGEST_SLOTS];
+		uint32 count;
+		bool hit = false;
+
+		if (__atomic_load_n(&digest->tx_id, __ATOMIC_ACQUIRE) != id)
+			goto fallback;
+		count = __atomic_load_n(&digest->count, __ATOMIC_RELAXED);
+		if (count > BCDB_DT_DIGEST_TAGS)
+			goto fallback;
+		for (uint32 i = 0; i < count; i++)
+		{
+			if (bcdb_dt_digest_intersects(__atomic_load_n(&digest->hashes[i], __ATOMIC_RELAXED)))
+			{
+				hit = true;
+				break;
+			}
+		}
+		pg_read_barrier();
+		if (__atomic_load_n(&digest->tx_id, __ATOMIC_ACQUIRE) != id)
+			goto fallback;
+		bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_INCREMENTAL_TXS_CHECKED, 1);
+		if (hit)
+		{
+			bcdb_last_conflict_txid = id;
+			return 1;
+		}
+	}
+	bcdb_dt_validation_started = true;
+	bcdb_dt_validated_through = Max(bcdb_dt_validated_through, published);
+	return 0;
+
+fallback:
+	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_RING_FALLBACKS, 1);
+full_check:
+	if (conflict_checkDT())
+		return 1;
+	bcdb_dt_validation_started = true;
+	bcdb_dt_validated_through = Max(bcdb_dt_validated_through, published);
+	return 0;
+}
+
 /*
  * conflict_check  (non-DT path)
  *
@@ -3380,9 +3563,18 @@ void publish_ws_tableDT(int id)
     WSTableEntryRecord *record;
     slock_t *partition_lock;
     int x = 0;
+	BCDBDTDigest *digest = NULL;
+	uint32 digest_count = 0;
 
     if (!bcdb_dt_conflict_tracking)
         return;
+
+	if (bcdb_dt_early_validate_enabled())
+	{
+		digest = &bcdb_dt_digests[id % BCDB_DT_DIGEST_SLOTS];
+		__atomic_store_n(&digest->tx_id, -1, __ATOMIC_RELAXED);
+		pg_write_barrier();
+	}
 
     workers = bcdb_worker_count;
     if (workers <= 0)
@@ -3473,6 +3665,14 @@ void publish_ws_tableDT(int id)
 		{
 			uint64 lock_start;
 			tag = &(record->tag);
+			if (digest != NULL)
+			{
+				if (digest_count < BCDB_DT_DIGEST_TAGS)
+					__atomic_store_n(&digest->hashes[digest_count],
+										 bcdb_dt_tag_digest(tag), __ATOMIC_RELAXED);
+				if (digest_count <= BCDB_DT_DIGEST_TAGS)
+					digest_count++;
+			}
 			tuple_hash = PredicateLockTargetTagHashCode(tag);
 			partition_lock = using_map_b ? WSTableMapBPartitionLock(ws_table, tuple_hash) : WSTableMapAPartitionLock(ws_table, tuple_hash);
 
@@ -3490,6 +3690,12 @@ void publish_ws_tableDT(int id)
 			published_any = true;
 			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_WS_PUBLISH_ENTRIES, 1);
 		}
+	}
+
+	if (digest != NULL)
+	{
+		__atomic_store_n(&digest->count, digest_count, __ATOMIC_RELAXED);
+		__atomic_store_n(&digest->tx_id, id, __ATOMIC_RELEASE);
 	}
 
     if (using_map_b && published_any)

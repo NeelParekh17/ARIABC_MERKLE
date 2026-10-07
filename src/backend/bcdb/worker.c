@@ -670,7 +670,8 @@ bcdb_ptrace_open(void)
             "apply_insert_count,apply_update_count,apply_delete_count,"
             "apply_update_tm_being_modified_count,apply_delete_tm_being_modified_count,"
             "apply_update_wait_incident_count,apply_delete_wait_incident_count,"
-            "merkle_update_count,apply_retry_count,publish_hash_clear_count\n");
+			"merkle_update_count,apply_retry_count,publish_hash_clear_count,"
+			"early_conflict_hits,turn_conflict_hits,ring_fallbacks,incremental_txs_checked\n");
 }
 
 static inline uint64
@@ -727,7 +728,7 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             "%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+			"%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
             tx_id, restarts,
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PARSE_PLAN],
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PORTAL_RUN],
@@ -773,7 +774,11 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_DELETE_WAIT_INCIDENT_COUNT],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT],
-            (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT]);
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT],
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_EARLY_CONFLICT_HITS],
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_TURN_CONFLICT_HITS],
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_RING_FALLBACKS],
+			(unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_INCREMENTAL_TXS_CHECKED]);
 }
 MemoryContext bcdb_tx_context;
 MemoryContext bcdb_worker_context;
@@ -1293,8 +1298,8 @@ bcdb_wait_for_dt_parse_barrier(BCDBShmXact *tx, bool *barrier_done)
         *barrier_done = true;
 }
 
-static inline void
-bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
+static inline bool
+bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block, bool early_validate)
 {
     /*
      * Lever D publish gate: wait until `published_max_tx_id + 1 >= tx->tx_id`.
@@ -1320,6 +1325,8 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
     bool gate_debug = bcdb_gate_debug_enabled();
 	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
 	bool active_wait_registered = false;
+	bool conflict = false;
+	const bool lookahead = bcdb_dt_gate_lookahead_enabled();
 
     if (gate_debug)
         next_log_us = wait_start_us + 1000000;
@@ -1363,11 +1370,22 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 
     for (;;)
     {
-        if ((get_published_max_txid(tx) + 1) >= tx->tx_id)
+		BCTxID published = get_published_max_txid(tx);
+
+		if ((published + 1) >= tx->tx_id)
 		{
 			if (active_wait_registered)
 				gate_stats_finish_wait();
             break;
+		}
+
+		if (early_validate && bcdb_dt_validate_published(published, false))
+		{
+			conflict = true;
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_EARLY_CONFLICT_HITS, 1);
+			if (active_wait_registered)
+				gate_stats_finish_wait();
+			break;
 		}
 
         if (fresh_guard_start_us != 0)
@@ -1448,7 +1466,29 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 
         CHECK_FOR_INTERRUPTS();
 
-		if (spins < 1024)
+		if (lookahead)
+		{
+			if (get_published_max_txid(tx) + 2 >= tx->tx_id)
+			{
+				spins++;
+				pg_spin_delay();
+			}
+			else
+			{
+				ConditionVariable *cv = &block->done_conds[tx->tx_id % MAX_TX_PER_BLOCK];
+
+				ConditionVariablePrepareToSleep(cv);
+				if (get_published_max_txid(tx) + 2 < tx->tx_id)
+				{
+					if (collect_gate_stats)
+						SHARD_INC(serial_gate_cv_sleep_count);
+					/* PostgreSQL CV timeouts are integer milliseconds. */
+					ConditionVariableTimedSleep(cv, 1, WAIT_EVENT_BLOCK_COMMIT);
+				}
+				ConditionVariableCancelSleep();
+			}
+		}
+		else if (spins < 1024)
 		{
 			/* Hot neighbour finishing any moment — spin without syscall. */
 			spins++;
@@ -1518,6 +1558,7 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 		SHARD_UPDATE_MAX(serial_gate_wait_max_us, total_us);
 		SHARD_ADD(serial_gate_spin_iterations, (uint64)spins);
 	}
+	return conflict;
 }
 
 /*
@@ -2555,6 +2596,9 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	bool apply_idempotent_noop = false;
     bool published_max_advanced = false;
     bool parse_barrier_done = false;
+	const bool early_validate = bcdb_dt_early_validate_enabled() &&
+		bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED;
+	bool early_conflict = false;
 	bool in_business_sql_execution = false;
 	bool optimistic_worker_active = false;
     BCTxID retry_wait_committed_txid = -1;
@@ -3038,12 +3082,16 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                  * This avoids ConditionVariable wait-list corruption observed
                  * under concurrent direct "s <txid> ..." execution.
                  */
+				early_conflict = false;
+				if (early_validate && apply_outcome != BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
+					bcdb_dt_prepare_validation();
                 PTRACE_BEGIN(BCDB_PHASE_GATE);
                 bcdb_wait_for_dt_parse_barrier(tx, &parse_barrier_done);
                 if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
                     bcdb_wait_for_prev_committed(tx); /* paper-style: gate on full predecessor commit */
                 else
-                    bcdb_wait_for_serial_slot(tx, block); /* Lever D: gate on published_max */
+					early_conflict = bcdb_wait_for_serial_slot(tx, block,
+						early_validate && apply_outcome != BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR);
                 PTRACE_END(BCDB_PHASE_GATE);
 				strlcpy(tx_result, tx->select_result, sizeof(tx_result));
 
@@ -3054,8 +3102,16 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 PTRACE_BEGIN(BCDB_PHASE_CONFLICT);
 				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
 					rw_conflicts = 0;
+				else if (early_conflict)
+					rw_conflicts = 1;
 				else
-					rw_conflicts = conflict_checkDT();
+				{
+					rw_conflicts = early_validate ?
+						bcdb_dt_validate_published(get_published_max_txid(tx), true) :
+						conflict_checkDT();
+					if (rw_conflicts == 1)
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_TURN_CONFLICT_HITS, 1);
+				}
                 PTRACE_END(BCDB_PHASE_CONFLICT);
                 // conflict_check();
             }
@@ -3593,7 +3649,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				bcdb_wait_for_prev_committed(tx);
 			else
 			{
-				bcdb_wait_for_serial_slot(tx, block);
+				bcdb_wait_for_serial_slot(tx, block, false);
 				if (!published_max_advanced)
 					mark_published_ready_txid(tx);
 				/* Finish in serial order even though this item has no writes. */
