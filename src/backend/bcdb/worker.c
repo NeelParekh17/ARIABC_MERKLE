@@ -2630,7 +2630,6 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	char det_err_sqlstate[6] = "XX000";
 	char det_err_msg[512] = "";
 	int mem_txid = 0;
-	BCTxID trace_tx_id;
 
 	const bool dedicated_worker = is_bcdb_worker;
 
