@@ -1192,17 +1192,177 @@ bcdb_compute_int4_key_tag(PREDICATELOCKTARGETTAG *tag, Oid relOid, int32 key)
  * for a BCDB transaction.
  */
 
+/* Separate membership bits preserve the publish-only reservation semantics. */
+#define BCDB_DT_TAG_READ		1
+#define BCDB_DT_TAG_WRITE		2
+#define BCDB_DT_TAG_PUBLISH	4
+
+typedef struct BCDBDTTagEntry
+{
+	PREDICATELOCKTARGETTAG tag;
+	uint32		hash;
+	uint8		members;		/* zero marks an empty bucket */
+	WSTableEntryRecord *read_record;
+} BCDBDTTagEntry;
+
+static BCDBDTTagEntry *bcdb_dt_tags;
+static Size bcdb_dt_tags_capacity;
+static Size bcdb_dt_tags_count;
+
+bool
+bcdb_dt_tag_dedup_enabled(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_DT_TAG_DEDUP");
+
+		cached = !(v != NULL &&
+				   (strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
+					strcmp(v, "FALSE") == 0 || strcmp(v, "no") == 0 ||
+					strcmp(v, "NO") == 0));
+	}
+	return cached == 1;
+}
+
+/* Called wherever the record lists are initialized, including each retry. */
+void
+bcdb_dt_tag_set_reset(void)
+{
+	bcdb_dt_tags = NULL;
+	bcdb_dt_tags_capacity = 0;
+	bcdb_dt_tags_count = 0;
+}
+
+static void
+bcdb_dt_tag_set_reset_cb(void *arg)
+{
+	bcdb_dt_tag_set_reset();
+}
+
+static void
+bcdb_dt_tag_set_grow(void)
+{
+	BCDBDTTagEntry *old_tags = bcdb_dt_tags;
+	Size		old_capacity = bcdb_dt_tags_capacity;
+	Size		capacity = old_capacity ? old_capacity * 2 : 256;
+	BCDBDTTagEntry *tags;
+
+	if (capacity > MaxAllocSize / sizeof(BCDBDTTagEntry))
+		ereport(ERROR, (errmsg("BCDB transaction tag set is too large")));
+	tags = MemoryContextAllocZero(bcdb_tx_context,
+								  capacity * sizeof(BCDBDTTagEntry));
+	if (old_tags == NULL)
+	{
+		MemoryContextCallback *cb;
+
+		cb = MemoryContextAlloc(bcdb_tx_context, sizeof(*cb));
+		cb->func = bcdb_dt_tag_set_reset_cb;
+		cb->arg = NULL;
+		MemoryContextRegisterResetCallback(bcdb_tx_context, cb);
+	}
+	for (Size i = 0; i < old_capacity; i++)
+	{
+		Size		pos;
+
+		if (old_tags[i].members == 0)
+			continue;
+		pos = old_tags[i].hash & (capacity - 1);
+		while (tags[pos].members != 0)
+			pos = (pos + 1) & (capacity - 1);
+		tags[pos] = old_tags[i];
+	}
+	bcdb_dt_tags = tags;
+	bcdb_dt_tags_capacity = capacity;
+	if (old_tags != NULL)
+		pfree(old_tags);
+}
+
+/* Also used with dedup off when tracing, to measure baseline duplicates. */
+static BCDBDTTagEntry *
+bcdb_dt_tag_reserve(const PREDICATELOCKTARGETTAG *tag, uint8 member,
+					bool *duplicate)
+{
+	uint32		hash = PredicateLockTargetTagHashCode(tag);
+	Size		pos;
+	BCDBDTTagEntry *entry;
+	bcdb_ptrace_counter_id total_counter;
+	bcdb_ptrace_counter_id distinct_counter;
+
+	if (bcdb_dt_tags_capacity == 0 ||
+		bcdb_dt_tags_count >= bcdb_dt_tags_capacity / 2)
+		bcdb_dt_tag_set_grow();
+	pos = hash & (bcdb_dt_tags_capacity - 1);
+	while (bcdb_dt_tags[pos].members != 0 &&
+		   (bcdb_dt_tags[pos].hash != hash ||
+			memcmp(&bcdb_dt_tags[pos].tag, tag, sizeof(*tag)) != 0))
+		pos = (pos + 1) & (bcdb_dt_tags_capacity - 1);
+	entry = &bcdb_dt_tags[pos];
+	if (entry->members == 0)
+	{
+		entry->tag = *tag;
+		entry->hash = hash;
+		bcdb_dt_tags_count++;
+	}
+	*duplicate = (entry->members & member) != 0;
+	if (bcdb_ptrace_enabled())
+	{
+		if (member == BCDB_DT_TAG_READ)
+		{
+			total_counter = BCDB_PTRACE_COUNTER_RS_RESERVATIONS;
+			distinct_counter = BCDB_PTRACE_COUNTER_RS_DISTINCT;
+		}
+		else if (member == BCDB_DT_TAG_WRITE)
+		{
+			total_counter = BCDB_PTRACE_COUNTER_WS_RESERVATIONS;
+			distinct_counter = BCDB_PTRACE_COUNTER_WS_DISTINCT;
+		}
+		else
+		{
+			total_counter = BCDB_PTRACE_COUNTER_PUBLISH_ONLY_RESERVATIONS;
+			distinct_counter = BCDB_PTRACE_COUNTER_PUBLISH_ONLY_DISTINCT;
+		}
+		bcdb_ptrace_inc_counter(total_counter, 1);
+		if (!*duplicate)
+		{
+			bcdb_ptrace_inc_counter(distinct_counter, 1);
+			if ((member == BCDB_DT_TAG_READ &&
+				 (entry->members & BCDB_DT_TAG_WRITE) != 0) ||
+				(member == BCDB_DT_TAG_WRITE &&
+				 (entry->members & BCDB_DT_TAG_READ) != 0))
+				bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_RS_WS_OVERLAP, 1);
+		}
+	}
+	entry->members |= member;
+	return entry;
+}
+
 void rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
 {
+	WSTableEntryRecord *record;
+	BCDBDTTagEntry *entry = NULL;
+	bool		dedup = bcdb_dt_tag_dedup_enabled();
+	bool		duplicate;
+
 	if (!bcdb_dt_conflict_tracking || bcdb_tx_context == NULL || activeTx == NULL)
 	{
 		(void)tag;
 		return;
 	}
 
-	WSTableEntryRecord *record;
+	if (dedup || bcdb_ptrace_enabled())
+	{
+		entry = bcdb_dt_tag_reserve(tag, BCDB_DT_TAG_READ, &duplicate);
+		if (dedup && duplicate)
+			return;
+	}
 	record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
 	record->tag = *tag;
+	record->dt_hash = dedup ? entry->hash : 0;
+	record->dt_has_write = dedup && (entry->members & BCDB_DT_TAG_WRITE) != 0;
+	if (dedup)
+		entry->read_record = record;
 	LIST_INSERT_HEAD(&rs_table_record, record, link);
 }
 
@@ -1226,15 +1386,29 @@ void rs_table_reserveDT(const PREDICATELOCKTARGETTAG *tag)
  */
 void ws_table_reserveDT(PREDICATELOCKTARGETTAG *tag)
 {
+	WSTableEntryRecord *record;
+	BCDBDTTagEntry *entry = NULL;
+	bool		dedup = bcdb_dt_tag_dedup_enabled();
+	bool		duplicate;
+
 	if (!bcdb_dt_conflict_tracking || bcdb_tx_context == NULL || activeTx == NULL)
 	{
 		(void)tag;
 		return;
 	}
 
-	WSTableEntryRecord *record;
+	if (dedup || bcdb_ptrace_enabled())
+	{
+		entry = bcdb_dt_tag_reserve(tag, BCDB_DT_TAG_WRITE, &duplicate);
+		if (dedup && duplicate)
+			return;
+	}
 	record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
 	record->tag = *tag;
+	record->dt_hash = dedup ? entry->hash : 0;
+	record->dt_has_write = false;
+	if (dedup && entry->read_record != NULL)
+		entry->read_record->dt_has_write = true;
 	LIST_INSERT_HEAD(&ws_table_record, record, link);
 }
 
@@ -1251,20 +1425,34 @@ void ws_table_reserve_publish_onlyDT(PREDICATELOCKTARGETTAG *tag)
 {
 	WSTableEntryRecord *record;
 	int			scanned = 0;
+	BCDBDTTagEntry *entry = NULL;
+	bool		dedup = bcdb_dt_tag_dedup_enabled();
+	bool		duplicate;
 
 	if (!bcdb_dt_conflict_tracking || bcdb_tx_context == NULL || activeTx == NULL)
 		return;
 
-	LIST_FOREACH(record, &ws_table_publish_record, link)
+	if (dedup || bcdb_ptrace_enabled())
 	{
-		if (memcmp(&record->tag, tag, sizeof(*tag)) == 0)
+		entry = bcdb_dt_tag_reserve(tag, BCDB_DT_TAG_PUBLISH, &duplicate);
+		if (dedup && duplicate)
 			return;
-		if (++scanned >= 32)
-			break;
+	}
+	if (!dedup)
+	{
+		LIST_FOREACH(record, &ws_table_publish_record, link)
+		{
+			if (memcmp(&record->tag, tag, sizeof(*tag)) == 0)
+				return;
+			if (++scanned >= 32)
+				break;
+		}
 	}
 
 	record = MemoryContextAlloc(bcdb_tx_context, sizeof(WSTableEntryRecord));
 	record->tag = *tag;
+	record->dt_hash = dedup ? entry->hash : 0;
+	record->dt_has_write = false;
 	LIST_INSERT_HEAD(&ws_table_publish_record, record, link);
 }
 
@@ -1401,9 +1589,10 @@ bcdb_log_dt_conflict_detail(const char *source,
  *
  * Used by ws_table_checkDT() and indirectly by conflict_checkDT().
  */
-bool table_checkDT(PREDICATELOCKTARGETTAG *tag, WSTable *table)
+static bool
+bcdb_table_checkDT_hash(PREDICATELOCKTARGETTAG *tag, WSTable *table,
+						uint32 tuple_hash)
 {
-    uint32 tuple_hash = PredicateLockTargetTagHashCode(tag);
     static int once_out = false;
 
     if (!once_out)
@@ -1491,7 +1680,8 @@ check_done:;
  */
 bool ws_table_checkDT(PREDICATELOCKTARGETTAG *tag)
 {
-    return table_checkDT(tag, ws_table);
+	return bcdb_table_checkDT_hash(tag, ws_table,
+								   PredicateLockTargetTagHashCode(tag));
 }
 
 /*
@@ -3225,6 +3415,7 @@ int conflict_checkDT()
     uint64 ws_check_start;
     uint64 rs_check_start;
     WSTableEntryRecord *record;
+	const bool dedup = bcdb_dt_tag_dedup_enabled();
 
     if (!bcdb_dt_conflict_tracking)
         return 0;
@@ -3248,7 +3439,9 @@ int conflict_checkDT()
     {
         bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_WS_CONFLICT_CHECKS, 1);
         // ws_table_check
-        if (ws_table_checkDT(&record->tag))
+		if (dedup ?
+			bcdb_table_checkDT_hash(&record->tag, ws_table, record->dt_hash) :
+			ws_table_checkDT(&record->tag))
         {
             BCDB_FLOW_LOG("[BCDB_FLOW] conflict_check_ws_hit pid=%d txid=%d cand_txid=%d",
                           (int)getpid(),
@@ -3270,9 +3463,14 @@ int conflict_checkDT()
     rs_check_start = bcdb_ptrace_timer_start();
     LIST_FOREACH(record, &rs_table_record, link)
     {
+		/* The identical checked write tag already probed both maps. */
+		if (dedup && record->dt_has_write)
+			continue;
         bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_RS_CONFLICT_CHECKS, 1);
         // ws_table_check
-        if (ws_table_checkDT(&record->tag))
+		if (dedup ?
+			bcdb_table_checkDT_hash(&record->tag, ws_table, record->dt_hash) :
+			ws_table_checkDT(&record->tag))
         {
             BCDB_FLOW_LOG("[BCDB_FLOW] conflict_check_rs_hit pid=%d txid=%d cand_txid=%d",
                           (int)getpid(),
@@ -3367,6 +3565,7 @@ void conflict_check(void)
  */
 void publish_ws_tableDT(int id)
 {
+	const bool dedup = bcdb_dt_tag_dedup_enabled();
     uint64 publish_start = bcdb_ptrace_timer_start();
     int threshold;
     int min_threshold;
@@ -3473,7 +3672,8 @@ void publish_ws_tableDT(int id)
 		{
 			uint64 lock_start;
 			tag = &(record->tag);
-			tuple_hash = PredicateLockTargetTagHashCode(tag);
+			tuple_hash = dedup ? record->dt_hash :
+				PredicateLockTargetTagHashCode(tag);
 			partition_lock = using_map_b ? WSTableMapBPartitionLock(ws_table, tuple_hash) : WSTableMapAPartitionLock(ws_table, tuple_hash);
 
 			lock_start = bcdb_ptrace_timer_start();

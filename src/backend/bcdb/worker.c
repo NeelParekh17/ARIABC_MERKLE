@@ -670,7 +670,9 @@ bcdb_ptrace_open(void)
             "apply_insert_count,apply_update_count,apply_delete_count,"
             "apply_update_tm_being_modified_count,apply_delete_tm_being_modified_count,"
             "apply_update_wait_incident_count,apply_delete_wait_incident_count,"
-            "merkle_update_count,apply_retry_count,publish_hash_clear_count\n");
+			"merkle_update_count,apply_retry_count,publish_hash_clear_count,"
+			"rs_reservations,ws_reservations,publish_only_reservations,"
+			"rs_distinct,ws_distinct,publish_only_distinct,rs_ws_overlap\n");
 }
 
 static inline uint64
@@ -727,7 +729,7 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             "%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+			"%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu",
             tx_id, restarts,
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PARSE_PLAN],
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PORTAL_RUN],
@@ -774,6 +776,11 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT]);
+	for (int i = BCDB_PTRACE_COUNTER_RS_RESERVATIONS;
+		 i < BCDB_PTRACE_COUNTER_COUNT; i++)
+		fprintf(bcdb_ptrace_fp, ",%llu",
+				(unsigned long long)bcdb_ptrace_counter[i]);
+	fputc('\n', bcdb_ptrace_fp);
 }
 MemoryContext bcdb_tx_context;
 MemoryContext bcdb_worker_context;
@@ -2537,6 +2544,8 @@ static bool parse_recovery_query(const char *sql, char *snapId, size_t snapId_sz
 void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 {
     BCBlock *block = NULL;
+	/* The shared tx slot can be reused immediately after delete_tx(). */
+	const int trace_tx_id = tx ? tx->tx_id : -1;
     Snapshot snapshot;
 
     int latest_tx_id = 0;
@@ -2576,6 +2585,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     LIST_INIT(&ws_table_record);
 	LIST_INIT(&ws_table_publish_record);
     LIST_INIT(&rs_table_record);
+	bcdb_dt_tag_set_reset();
 
     tv1.tv_sec = 0;
     tv2.tv_sec = 0;
@@ -2685,6 +2695,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 LIST_INIT(&ws_table_record);
 				LIST_INIT(&ws_table_publish_record);
                 LIST_INIT(&rs_table_record);
+				bcdb_dt_tag_set_reset();
 
                 if (init)
                 {
@@ -3525,7 +3536,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             MemoryContextReset(bcdb_tx_context);
             PTRACE_END(BCDB_PHASE_FINISH);
             PTRACE_END(BCDB_PHASE_TOTAL);
-            bcdb_ptrace_emit(tx->tx_id, num_restarts);
+			bcdb_ptrace_emit(trace_tx_id, num_restarts);
             break;
         }
     }
@@ -3605,7 +3616,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 			bcdb_finish_terminal_item(tx, abort_result, false, false, InvalidTransactionId);
 			ereport(LOG, (errmsg("[BCDB_USER_ABORT] txid=%d sqlstate=TP001 rollback_complete=1",
 								(int) tx->tx_id)));
-			bcdb_ptrace_emit(tx->tx_id, num_restarts);
+			bcdb_ptrace_emit(trace_tx_id, num_restarts);
 			delete_tx(tx);
 			activeTx = NULL;
 			MemoryContextReset(bcdb_tx_context);
@@ -3793,6 +3804,7 @@ void bcdb_worker_process_tx(BCDBShmXact *tx)
     LIST_INIT(&ws_table_record);
 	LIST_INIT(&ws_table_publish_record);
     LIST_INIT(&rs_table_record);
+	bcdb_dt_tag_set_reset();
 
     PG_TRY();
     {
