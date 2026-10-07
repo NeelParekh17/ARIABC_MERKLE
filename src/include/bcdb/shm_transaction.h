@@ -107,6 +107,9 @@ typedef struct _WSTable
 	HTAB			   *mapActive;
 	/* mapB emptiness cache for DT conflict probes */
 	pg_atomic_uint32	mapB_nonempty;
+	/* Epoch markers for off-turn DT shard retirement; UINT32_MAX means none. */
+	pg_atomic_uint32	rotation_requested[2];
+	pg_atomic_uint32	rotation_completed[2];
 	WSPartitionLock		map_locks[WRITE_CONFLICT_MAP_NUM_PARTITIONS];
 	WSPartitionLock		mapB_locks[WRITE_CONFLICT_MAP_NUM_PARTITIONS];
 } WSTable;
@@ -117,6 +120,8 @@ typedef struct _BCDBShmXact
     /* hash servers as a unique ID accross the blocks */
     char               hash[TX_HASH_SIZE];
     BCTxID             tx_id;
+	/* Atomic: snapshot baseline until validation, INT32_MAX when idle. */
+	int32			   dt_snapshot_baseline;
     BCTxID             tx_id_committed;
     TransactionId      snap_xmin;     /* xmin of snapshot taken at portal_run start; T3-v2 */
 
@@ -311,6 +316,10 @@ extern int bcdb_dt_validate_published(BCTxID published, bool at_turn);
 extern void bcdb_reset_last_conflict_txid(void);
 extern BCTxID bcdb_get_last_conflict_txid(void);
 extern void publish_ws_tableDT(int id);
+extern BCTxID bcdb_dt_snapshot_baseline(BCDBShmXact *tx);
+extern void bcdb_dt_snapshot_validated(BCDBShmXact *tx);
+extern void bcdb_dt_finish_early_rotation(BCDBShmXact *tx);
+extern void bcdb_dt_cancel_early_rotation(BCDBShmXact *tx);
 
 /* Merkle change set functions */
 extern void merkle_record_update(Oid indexOid, int partitionId, MerkleHash *hash, bool is_insert);

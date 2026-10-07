@@ -555,6 +555,11 @@ bcdb_ws_tables_clear_all(void)
 	if (hash_get_num_entries(ws_table->mapB) > 0)
 		WSTableClearShard(ws_table, ws_table->mapB, true, NULL, NULL);
 	ws_table->mapActive = ws_table->map;
+	for (int i = 0; i < 2; i++)
+	{
+		pg_atomic_write_u32(&ws_table->rotation_requested[i], PG_UINT32_MAX);
+		pg_atomic_write_u32(&ws_table->rotation_completed[i], PG_UINT32_MAX);
+	}
 }
 
 /*
@@ -612,6 +617,7 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
         SpinLockRelease(tx_pool_lock);
         return NULL;
     }
+	__atomic_store_n(&tx->dt_snapshot_baseline, PG_INT32_MAX, __ATOMIC_RELEASE);
     LWLockInitialize(&tx->lock, LWTRANCHE_TX);
     SpinLockRelease(tx_pool_lock);
 	LWLockAcquire(&tx->lock, LW_EXCLUSIVE);
@@ -811,6 +817,11 @@ void create_tx_pool(void)
 									   &info, HASH_ELEM | HASH_BLOBS | HASH_FIXED_SIZE | HASH_PARTITION);
 		ws_table->mapActive = ws_table->map;
 		pg_atomic_init_u32(&ws_table->mapB_nonempty, 0);
+		for (int i = 0; i < 2; i++)
+		{
+			pg_atomic_init_u32(&ws_table->rotation_requested[i], PG_UINT32_MAX);
+			pg_atomic_init_u32(&ws_table->rotation_completed[i], PG_UINT32_MAX);
+		}
 		for (int i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
 		{
 			SpinLockInit(&(ws_table->map_locks[i].lock));
@@ -839,6 +850,11 @@ void create_tx_pool(void)
 		rs_table->mapB = NULL;
 		rs_table->mapActive = rs_table->map;
 		pg_atomic_init_u32(&rs_table->mapB_nonempty, 0);
+		for (int i = 0; i < 2; i++)
+		{
+			pg_atomic_init_u32(&rs_table->rotation_requested[i], PG_UINT32_MAX);
+			pg_atomic_init_u32(&rs_table->rotation_completed[i], PG_UINT32_MAX);
+		}
 		for (int i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
 		{
 			SpinLockInit(&(rs_table->map_locks[i].lock));
@@ -1679,12 +1695,12 @@ bcdb_table_checkDT_hash(PREDICATELOCKTARGETTAG *tag, WSTable *table,
         WSTableEntry *entry;
         BCTxID cand_id;
 		slock_t *partition_lock = WSTableMapAPartitionLock(table, tuple_hash);
-        uint64 probe_lock_start = bcdb_ptrace_timer_start();
+	uint64 probe_lock_start = bcdb_ptrace_fine_timer_start();
 
         SpinLockAcquire(partition_lock);
         bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPA_LOCK_WAIT_US, probe_lock_start);
 
-        uint64 probe_hash_start = bcdb_ptrace_timer_start();
+	uint64 probe_hash_start = bcdb_ptrace_fine_timer_start();
         entry = hash_search_with_hash_value(table->map, tag,
                                             tuple_hash, HASH_FIND, &found);
         if (found && (entry->tx_id < activeTx->tx_id) &&
@@ -1702,7 +1718,7 @@ bcdb_table_checkDT_hash(PREDICATELOCKTARGETTAG *tag, WSTable *table,
 	}
 
 	/*
-	 * mapB is only cleared when it becomes active for a new epoch. Once a
+	 * mapB is cleared at rotation, or safely retired before rotation. Once a
 	 * publish inserts there, the flag stays set until that clear, so we can
 	 * skip the second probe without paying hash_get_num_entries(mapB) on every
 	 * conflict check.
@@ -1713,12 +1729,12 @@ bcdb_table_checkDT_hash(PREDICATELOCKTARGETTAG *tag, WSTable *table,
 		WSTableEntry *entry;
 		BCTxID cand_id;
 		slock_t *partition_lock = WSTableMapBPartitionLock(table, tuple_hash);
-		uint64 probe_lock_start = bcdb_ptrace_timer_start();
+		uint64 probe_lock_start = bcdb_ptrace_fine_timer_start();
 
 		SpinLockAcquire(partition_lock);
 		bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_WS_PROBE_MAPB_LOCK_WAIT_US, probe_lock_start);
 
-		uint64 probe_hash_start = bcdb_ptrace_timer_start();
+		uint64 probe_hash_start = bcdb_ptrace_fine_timer_start();
 		entry = hash_search_with_hash_value(table->mapB, tag,
 											tuple_hash, HASH_FIND, &found);
 		if (found && (entry->tx_id < activeTx->tx_id) &&
@@ -3723,6 +3739,179 @@ void conflict_check(void)
     }
 }
 
+/* Cache the opt-out once, as with the other DT environment switches. */
+static bool
+bcdb_dt_early_rotation_enabled(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_DT_EARLY_ROTATION");
+
+		cached = !(v != NULL &&
+				   (strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
+					strcmp(v, "FALSE") == 0 || strcmp(v, "no") == 0 ||
+					strcmp(v, "NO") == 0));
+	}
+	return cached == 1 && bcdb_dt_conflict_tracking &&
+		bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED;
+}
+
+/*
+ * Register the snapshot baseline under the same lock as the retirement scan.
+ * If the scanner sees an idle/new entry, its later registration must observe
+ * at least the scanner's committed watermark.  Registration lasts until the
+ * final conflict check has passed, covering arbitrarily stalled snapshots.
+ */
+BCTxID
+bcdb_dt_snapshot_baseline(BCDBShmXact *tx)
+{
+	BCTxID baseline;
+
+	if (!bcdb_dt_early_rotation_enabled())
+		return get_last_committed_txid(tx);
+	SpinLockAcquire(tx_pool_lock);
+	baseline = get_last_committed_txid(tx);
+	__atomic_store_n(&tx->dt_snapshot_baseline, baseline, __ATOMIC_RELEASE);
+	SpinLockRelease(tx_pool_lock);
+	return baseline;
+}
+
+void
+bcdb_dt_snapshot_validated(BCDBShmXact *tx)
+{
+	if (bcdb_dt_early_rotation_enabled())
+		__atomic_store_n(&tx->dt_snapshot_baseline, PG_INT32_MAX, __ATOMIC_RELEASE);
+}
+
+static bool
+bcdb_dt_shard_can_retire(BCDBShmXact *tx, uint32 epoch, int threshold)
+{
+	BCTxID cutoff = ((int64) epoch - 1) * threshold - 1;
+	HASH_SEQ_STATUS scan;
+	BCDBShmXact *other;
+	bool safe = true;
+
+	/* Epoch x reuses entries no newer than (x-1)*threshold - 1. */
+	if (get_last_committed_txid(tx) < cutoff)
+		return false;
+	SpinLockAcquire(tx_pool_lock);
+	hash_seq_init(&scan, tx_pool);
+	while ((other = hash_seq_search(&scan)) != NULL)
+	{
+		if (__atomic_load_n(&other->dt_snapshot_baseline, __ATOMIC_ACQUIRE) < cutoff)
+		{
+			safe = false;
+			hash_seq_term(&scan);
+			break;
+		}
+	}
+	SpinLockRelease(tx_pool_lock);
+	return safe;
+}
+
+static int
+bcdb_dt_rotation_margin(void)
+{
+	int workers = bcdb_worker_count;
+
+	if (workers <= 0)
+		workers = BCDB_DEFAULT_WORKER_COUNT;
+	return 2 * Max(workers, 1);
+}
+
+/* An error between scheduling and clearing must not strand epoch entry. */
+void
+bcdb_dt_cancel_early_rotation(BCDBShmXact *tx)
+{
+	int threshold = bcdb_dt_hashtab_switch_threshold;
+	uint32 epoch;
+	int shard;
+
+	if (!bcdb_dt_early_rotation_enabled() || threshold <= 0 ||
+		tx->tx_id % threshold != bcdb_dt_rotation_margin())
+		return;
+	epoch = (uint32) (tx->tx_id / threshold) + 1;
+	shard = epoch % 2;
+	if (pg_atomic_read_u32(&ws_table->rotation_requested[shard]) == epoch &&
+		pg_atomic_read_u32(&ws_table->rotation_completed[shard]) != epoch)
+		pg_atomic_write_u32(&ws_table->rotation_requested[shard], PG_UINT32_MAX);
+}
+
+/* Called only AFTER the scheduling publisher releases the serial turn. */
+void
+bcdb_dt_finish_early_rotation(BCDBShmXact *tx)
+{
+	int threshold = bcdb_dt_hashtab_switch_threshold;
+	uint32 epoch;
+	int shard;
+	HTAB *map;
+	WSPartitionLock *locks;
+	uint64 clear_start;
+
+	if (!bcdb_dt_early_rotation_enabled() || threshold <= 0)
+		return;
+	epoch = (uint32) (tx->tx_id / threshold) + 1;
+	shard = epoch % 2;
+	if (pg_atomic_read_u32(&ws_table->rotation_requested[shard]) != epoch ||
+		pg_atomic_read_u32(&ws_table->rotation_completed[shard]) == epoch)
+		return;
+	/* Only the scheduling tx owns this request, even after losing the turn. */
+	if (tx->tx_id % threshold != bcdb_dt_rotation_margin())
+		return;
+	if (!bcdb_dt_shard_can_retire(tx, epoch, threshold))
+	{
+		pg_atomic_write_u32(&ws_table->rotation_requested[shard], PG_UINT32_MAX);
+		bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_EARLY_ROTATION_SKIPPED_COUNT, 1);
+		return;
+	}
+	map = shard ? ws_table->mapB : ws_table->map;
+	locks = shard ? ws_table->mapB_locks : ws_table->map_locks;
+	clear_start = bcdb_ptrace_timer_start();
+	/* No inserts into this inactive shard until completion is published. */
+	for (int i = 0; i < WRITE_CONFLICT_MAP_NUM_PARTITIONS; i++)
+	{
+		SpinLockAcquire(&locks[i].lock);
+		bcdb_shm_hash_clear_partition(map, i);
+		SpinLockRelease(&locks[i].lock);
+	}
+	bcdb_shm_hash_reset_allocations(map);
+	if (shard)
+		pg_atomic_write_u32(&ws_table->mapB_nonempty, 0);
+	/* Plain pg_atomic_read/write have no barrier semantics. */
+	pg_write_barrier();
+	pg_atomic_write_u32(&ws_table->rotation_completed[shard], epoch);
+	bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_HASH_CLEAR_US, clear_start);
+	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT, 1);
+	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_EARLY_ROTATION_COUNT, 1);
+}
+
+/* Wait at epoch entry if its off-turn clear is still in progress. */
+static bool
+bcdb_dt_rotation_ready(uint32 epoch)
+{
+	int shard = epoch % 2;
+	uint64 wait_start;
+
+	if (!bcdb_dt_early_rotation_enabled())
+		return false;
+	wait_start = bcdb_ptrace_timer_start();
+	while (pg_atomic_read_u32(&ws_table->rotation_requested[shard]) == epoch)
+	{
+		if (pg_atomic_read_u32(&ws_table->rotation_completed[shard]) == epoch)
+		{
+			pg_read_barrier();
+			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_ROTATION_LOCK_US, wait_start);
+			return true;
+		}
+		CHECK_FOR_INTERRUPTS();
+		pg_usleep(1L);
+	}
+	bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_ROTATION_LOCK_US, wait_start);
+	return false;
+}
+
 /*
  * publish_ws_tableDT
  *
@@ -3794,7 +3983,7 @@ void publish_ws_tableDT(int id)
     if (x % 2 == 0)
     {
         ws_table->mapActive = ws_table->map;
-        if (id % threshold == 0)
+	if (id % threshold == 0 && !bcdb_dt_rotation_ready(x))
         {
 			uint64 hash_clear_start = bcdb_ptrace_timer_start();
 			uint64 profile_clear_start = bcdb_get_time();
@@ -3827,7 +4016,7 @@ void publish_ws_tableDT(int id)
     {
         ws_table->mapActive = ws_table->mapB;
         using_map_b = true;
-        if (id % threshold == 0)
+	if (id % threshold == 0 && !bcdb_dt_rotation_ready(x))
         {
 			uint64 hash_clear_start = bcdb_ptrace_timer_start();
 			uint64 profile_clear_start = bcdb_get_time();
@@ -3876,7 +4065,7 @@ void publish_ws_tableDT(int id)
 				PredicateLockTargetTagHashCode(tag);
 			partition_lock = using_map_b ? WSTableMapBPartitionLock(ws_table, tuple_hash) : WSTableMapAPartitionLock(ws_table, tuple_hash);
 
-			lock_start = bcdb_ptrace_timer_start();
+			lock_start = bcdb_ptrace_fine_timer_start();
 			SpinLockAcquire(partition_lock);
 			bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_PARTITION_LOCK_US, lock_start);
 			entry = (WSTableEntry *)hash_search_with_hash_value(ws_table->mapActive,
@@ -3900,6 +4089,10 @@ void publish_ws_tableDT(int id)
 
     if (using_map_b && published_any)
         pg_atomic_write_u32(&ws_table->mapB_nonempty, 1);
+	/* Reserve the inactive shard before releasing the publication turn. */
+	if (bcdb_dt_early_rotation_enabled() && threshold > 2 * workers &&
+		id % threshold == 2 * workers)
+		pg_atomic_write_u32(&ws_table->rotation_requested[(x + 1) % 2], x + 1);
     bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_PUBLISH_WS_US, publish_start);
 }
 

@@ -142,6 +142,8 @@ extern Size hash_get_shared_size(HASHCTL *info, int flags);
 extern void AtEOXact_HashTables(bool isCommit);
 extern void AtEOSubXact_HashTables(bool isCommit, int nestDepth);
 extern void shm_hash_clear(HTAB *hashp, long nelem);
+extern void bcdb_shm_hash_clear_partition(HTAB *hashp, uint32 partition);
+extern void bcdb_shm_hash_reset_allocations(HTAB *hashp);
 
 /*
  * prototypes for functions in hashfn.c
