@@ -103,7 +103,7 @@ From the repository root:
 python3 scripts/distributed/tpcc_v2/publish_v2.py --validate-only
 (cd Final_Results/TPCC/v2_20261002/sweeps && sha256sum -c SHA256SUMS)
 (cd Final_Results/TPCC/v2_20261002/headline_ab && sha256sum -c SHA256SUMS)
-MPLCONFIGDIR=/tmp/ariabc-tpcc-v2-matplotlib python3 scripts/distributed/tpcc_v2/publish_v2.py
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/tpcc_v2/publish_v2.py
 ```
 
 These are saved-evidence analysis/publication commands, with no builds or benchmarks. Original plot scripts are unchanged and can regenerate previous figures into a separate output directory; see [COMMANDS.md](../COMMANDS.md). The fetch script deliberately refuses to overwrite an existing evidence snapshot.

@@ -175,7 +175,7 @@ for i in $(seq 1 50); do
  done
 GATEWAY_RC=0
 ARIABC_WAIT_RESULT_TIMEOUT_MS=180000 timeout 1800 $BIN/ariabc_pg_gateway --nodes 127.0.0.1:$CLIENT_PORT \
-  --queryFrom $WL --dbType $DBTYPE --detStartSeq 0 --reqIdOffset 1 --detWindow 65536 --detBatchSize 256 \
+  --queryFrom $WL --dbType $DBTYPE --detStartSeq 0 --reqIdOffset 1 --detWindow 1024 --detBatchSize 256 \
   --dbConnPoolSize $WORKERS --submitMode event --detSubmitPipeline 1 --detPipelineDepth 1024 \
   --detClientMode event --detClientWorkers 96 --detClientInflight 16 --clientId single-gateway-direct \
   --numTerminals 96 --connFanout 1 --waitMajority 0 --completionPath direct --totalNodes 1 \

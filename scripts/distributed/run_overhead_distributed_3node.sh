@@ -34,7 +34,7 @@ WORKLOADS="${PROFILE_WORKLOADS:-ycsbtx-skew-01-24k-pt-intkey-sid-clean-20k.txt,y
 RATES="${PROFILE_RATES:-0}"
 
 # Kafka runs on the gateway (240). All PG nodes can reach 10.129.148.247:9092.
-KAFKA_HOME="/tmp/kafka_2.13-3.7.0"
+KAFKA_HOME="/home/neel/Desktop/kafka_2.13-3.7.0"
 KAFKA_BOOTSTRAP="10.129.148.247:9092"   # external IP so all nodes can reach it
 
 # --------------------------------------------------------------------------
@@ -87,7 +87,7 @@ ensure_kafka_ready() {
   local remote_cmd
   remote_cmd=$(cat <<'REMOTE_EOF'
 set -euo pipefail
-KAFKA_HOME="/tmp/kafka_2.13-3.7.0"
+KAFKA_HOME="/home/neel/Desktop/kafka_2.13-3.7.0"
 GW_IP="10.129.148.247"
 TOPICS_SH="$KAFKA_HOME/bin/kafka-topics.sh"
 STORAGE_SH="$KAFKA_HOME/bin/kafka-storage.sh"
@@ -114,6 +114,8 @@ if [[ -z "$cluster_id" ]]; then
   exit 1
 fi
 
+mkdir -p /home/neel/ariabc_data/kafka  # never /tmp (Kafka's stock config defaults there)
+sed -i "/^log.dirs=/d" "$SERVER_PROPS"; echo "log.dirs=/home/neel/ariabc_data/kafka/kraft-combined-logs" >> "$SERVER_PROPS"
 "$STORAGE_SH" format -t "$cluster_id" -c "$SERVER_PROPS" --ignore-formatted >/dev/null 2>&1 || true
 "$SERVER_SH" -daemon "$SERVER_PROPS"
 

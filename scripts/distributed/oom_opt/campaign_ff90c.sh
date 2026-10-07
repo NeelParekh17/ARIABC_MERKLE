@@ -3,11 +3,11 @@
 cd /home/neel/claude_ctl/AriaBC
 O=/home/neel/claude_ctl/results/oom_ff90c_20261001; mkdir -p $O
 S=$O/status.txt; log() { echo "$(date '+%F %T') $*" | tee -a $S; }
-EV=/tmp/ariabc_oom_100m/ff90c_prep_20261001
+EV=/home/neel/ariabc_data/oom_100m/ff90c_prep_20261001
 log "campaign start"
-scp -q scripts/distributed/oom_opt/prep_ff90c_compact.sh neel@10.129.148.247:/tmp/ariabc_oom_100m/prep_ff90c_compact.sh
+scp -q scripts/distributed/oom_opt/prep_ff90c_compact.sh neel@10.129.148.247:/home/neel/ariabc_data/oom_100m/prep_ff90c_compact.sh
 ssh neel@10.129.148.247 "test -f $EV/PREP_STATUS && cat $EV/PREP_STATUS" | grep -q OK && log "prep already done" || {
-  ssh neel@10.129.148.247 "rm -rf $EV; nohup bash /tmp/ariabc_oom_100m/prep_ff90c_compact.sh $EV >/dev/null 2>&1 </dev/null &"
+  ssh neel@10.129.148.247 "rm -rf $EV; nohup bash /home/neel/ariabc_data/oom_100m/prep_ff90c_compact.sh $EV >/dev/null 2>&1 </dev/null &"
   log "prep started on .247"
   for i in $(seq 1 360); do st=$(ssh neel@10.129.148.247 "cat $EV/PREP_STATUS 2>/dev/null"); [ -n "$st" ] && break; sleep 30; done
   [ "$st" = OK ] || { log "PREP FAILED ($st)"; scp -qr neel@10.129.148.247:$EV $O/preparation; echo CAMPAIGN_FAILED >> $S; exit 1; }

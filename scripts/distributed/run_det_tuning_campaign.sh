@@ -174,7 +174,7 @@ COMMON_ARGS=(
   --threads 8
   --preferred-leader-id 1
   --pool-size 256
-  --det-window 8192
+  --det-window 1024
   --det-batch-size 256
   --det-pipeline-depth 1024
   --pg-exec-mode event

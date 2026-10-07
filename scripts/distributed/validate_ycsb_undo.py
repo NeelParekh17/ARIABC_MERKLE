@@ -7,6 +7,7 @@ not drop global caches. Full-table verification is timed separately from undo.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shlex
 import time
@@ -153,8 +154,10 @@ merkle_apply_synchronous_direct = on
                 for file in ('restore.sql', 'manifest.json', 'before.tsv'):
                     (case / file).write_text(remote(f'cat {undo_dir}/{file}').stdout)
                 digest = hashlib.sha256(workload.read_bytes()).hexdigest()
+                gateway_wl = oom.gateway_workload_path(args, digest)
                 oom.run_remote(args.gateway_host, args.gateway_user,
-                               f'printf %s {shlex.quote(workload.read_text())} > /tmp/oom_{digest}.sql')
+                               f'mkdir -p {shlex.quote(os.path.dirname(gateway_wl))} && '
+                               f'printf %s {shlex.quote(workload.read_text())} > {shlex.quote(gateway_wl)}')
                 oom.start_remote_ariabc_server(args, mode, args.workers)
                 print(f'{name}: executing {sum(capture["operations"].values())} statements', flush=True)
                 gateway = oom.run_local_gateway_benchmark(args, workload, mode, args.workers, case / 'gateway.log')

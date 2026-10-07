@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shlex
 import time
@@ -16,7 +17,7 @@ def main():
     parser.add_argument("--mode", choices=["bcdb_merkle", "bcdb_det", "pg"], required=True)
     parser.add_argument("--workload", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--remote-dir", default="/tmp/ariabc_undo_validation_20260916")
+    parser.add_argument("--remote-dir", default="/home/neel/ariabc_data/undo_validation_20260916")
     parser.add_argument("--remote-host", default=oom.DEFAULT_REMOTE_HOST)
     parser.add_argument("--remote-user", default=oom.DEFAULT_REMOTE_USER)
     parser.add_argument("--install-dir", default=oom.DEFAULT_INSTALL_DIR)
@@ -106,8 +107,10 @@ merkle_apply_synchronous_direct = on
 
     # 4. Run gateway benchmark
     digest = hashlib.sha256(args.workload.read_bytes()).hexdigest()
+    gateway_wl = oom.gateway_workload_path(args, digest)
     oom.run_remote(args.gateway_host, args.gateway_user,
-                   f"printf %s {shlex.quote(args.workload.read_text())} > /tmp/oom_{digest}.sql")
+                   f"mkdir -p {shlex.quote(os.path.dirname(gateway_wl))} && "
+                   f"printf %s {shlex.quote(args.workload.read_text())} > {shlex.quote(gateway_wl)}")
     print(f"Running workload via gateway ({args.mode})...", flush=True)
     gw_metrics = oom.run_local_gateway_benchmark(args, args.workload, args.mode, args.workers, out / "gateway.log")
     print(f"Gateway completed: accepted={gw_metrics.get('accepted_count')}, permanent_failures={gw_metrics.get('permanent_failures')}, divergence={gw_metrics.get('divergence_count')}", flush=True)

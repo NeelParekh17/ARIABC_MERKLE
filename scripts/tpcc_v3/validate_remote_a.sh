@@ -140,7 +140,7 @@ PY
   GW_RC=0
   env ARIABC_WAIT_RESULT_TIMEOUT_MS=180000 timeout 1800 "${PIN[@]}" "$BINDIR/ariabc_pg_gateway" \
     --nodes 127.0.0.1:$CLIENT_PORT --queryFrom "$WL" --dbType "$DBTYPE" --detStartSeq 0 --reqIdOffset 1 \
-    --detWindow 65536 --detBatchSize 256 --dbConnPoolSize "$WORKERS" --submitMode event --detSubmitPipeline 1 \
+    --detWindow 1024 --detBatchSize 256 --dbConnPoolSize "$WORKERS" --submitMode event --detSubmitPipeline 1 \
     --detPipelineDepth 1024 --detClientMode event --detClientWorkers 96 --detClientInflight 16 \
     --clientId A-validation --numTerminals 96 --connFanout 1 --waitMajority 0 --completionPath direct \
     --totalNodes 1 --progressIntervalMs 1000 > "$RUN/gateway.log" 2>&1 || GW_RC=$?

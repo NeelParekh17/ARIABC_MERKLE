@@ -134,7 +134,7 @@ class RunnerTests(unittest.TestCase):
     def test_requested_cli_and_legacy_comma_form(self):
         args = oom.parse_args(['--workloads', 'a', '--skews', '0.0', '0.99', '--workers', '1', '8', '16',
                                '--txs', '20000', '--remote-host', '10.129.148.247',
-                               '--remote-dir', '/tmp/ariabc_oom_100m', '--output-dir', '/tmp/results'])
+                               '--remote-dir', '/home/neel/ariabc_data/oom_100m', '--output-dir', '/home/neel/ariabc_data/results'])
         self.assertEqual(args.workers, [1, 8, 16])
         self.assertEqual(args.shared_buffers, '32MB')
         self.assertEqual(oom.parse_args(['--workers', '1,8,16']).workers, args.workers)
@@ -246,7 +246,7 @@ class RunnerTests(unittest.TestCase):
                 self.assertIn('--detBatchSize', cmd_pg)
                 self.assertIn('256', cmd_pg)
                 self.assertIn('--detWindow', cmd_pg)
-                self.assertIn('65536', cmd_pg)
+                self.assertEqual(cmd_pg[cmd_pg.index('--detWindow') + 1], '1024')
                 # Ensure the only difference between pg and det commands is --dbType 0 vs 1
                 cmd_pg_norm = ['1' if c == '0' and prev == '--dbType' else c
                                for prev, c in zip([''] + cmd_pg[:-1], cmd_pg)]
@@ -349,7 +349,7 @@ class RunnerTests(unittest.TestCase):
         # Verify pre-startup copy check is present before postmaster starts
         self.assertIn('test "$(find', script)
         self.assertIn('pgdata -type f | wc -l)" -eq "42"', script)
-        self.assertIn('du -sb /tmp/ariabc_oom_100m/pgdata', script)
+        self.assertIn('du -sb /home/neel/ariabc_data/oom_100m/pgdata', script)
         self.assertIn('sync', script)
         self.assertIn('drop_caches', script)
         self.assertNotIn('fuser -k', script)
@@ -424,15 +424,15 @@ class RunnerTests(unittest.TestCase):
                 settle.assert_called_once()
             script = '\n'.join(commands)
             self.assertIn(f'rsync -a --inplace --no-whole-file --delete --stats '
-                          f'/tmp/ariabc_oom_100m/{base}/ /tmp/ariabc_oom_100m/{work}/', script)
-            self.assertIn(f'rsync -an --delete --itemize-changes /tmp/ariabc_oom_100m/{base}/', script)
+                          f'/home/neel/ariabc_data/oom_100m/{base}/ /home/neel/ariabc_data/oom_100m/{work}/', script)
+            self.assertIn(f'rsync -an --delete --itemize-changes /home/neel/ariabc_data/oom_100m/{base}/', script)
             # Default 'sampled': the first restore of each working copy is byte-compared.
-            self.assertIn(f'diff -rq --no-dereference /tmp/ariabc_oom_100m/{base} /tmp/ariabc_oom_100m/{work}', script)
+            self.assertIn(f'diff -rq --no-dereference /home/neel/ariabc_data/oom_100m/{base} /home/neel/ariabc_data/oom_100m/{work}', script)
             self.assertLess(script.index('diff -rq'), script.index('drop_caches'))
             self.assertIn(f'{work} -type f | wc -l)" -eq "{count}"', script)
-            self.assertNotIn('du -sb /tmp/ariabc_oom_100m/' + work + ' |', script)
+            self.assertNotIn('du -sb /home/neel/ariabc_data/oom_100m/' + work + ' |', script)
             self.assertLess(script.index('--itemize-changes'), script.index('drop_caches'))
-            self.assertEqual(args._pgdata, '/tmp/ariabc_oom_100m/' + work)
+            self.assertEqual(args._pgdata, '/home/neel/ariabc_data/oom_100m/' + work)
             self.assertEqual(result['settle'], SETTLE)
             for command in commands:
                 check = subprocess.run(['bash', '-n'], input=command, text=True, capture_output=True)
@@ -620,8 +620,8 @@ class RunnerTests(unittest.TestCase):
                 oom.validate_golden_baseline(args)
         # Check that cleanup of pgdata_golden_check was executed in finally
         cleanup_script = '\n'.join(commands)
-        self.assertIn('rm -rf /tmp/ariabc_oom_100m/pgdata_golden_check', cleanup_script)
-        self.assertIn('pg_ctl -D /tmp/ariabc_oom_100m/pgdata_golden_check -w stop -m immediate', cleanup_script)
+        self.assertIn('rm -rf /home/neel/ariabc_data/oom_100m/pgdata_golden_check', cleanup_script)
+        self.assertIn('pg_ctl -D /home/neel/ariabc_data/oom_100m/pgdata_golden_check -w stop -m immediate', cleanup_script)
 
     def test_cli_base_dir_name_option(self):
         args_default = oom.parse_args([])

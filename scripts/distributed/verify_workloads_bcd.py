@@ -88,7 +88,7 @@ for wl_name, wl_path in WORKLOADS:
             "--raft-ordered-batch-linger-us", "1000",
             "--raft-ordered-coalesce-log", "1",
             "--kafka-completion-mode", "majority_async_all3",
-            "--det-window", "65536",
+            "--det-window", "1024",
         ]
 
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

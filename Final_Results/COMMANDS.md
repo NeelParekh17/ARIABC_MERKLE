@@ -177,7 +177,7 @@ publication commands already run were:
 
 ```bash
 python3 scripts/distributed/oom_v2/publish_v2.py --source .bench_tmp/oom_v2_20261001
-MPLCONFIGDIR=/tmp/ariabc-oom-v2-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign v2
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign v2
 python3 scripts/distributed/oom_v2/publish_readme.py
 ```
 
@@ -186,11 +186,11 @@ Repeatable orchestrator checks (no benchmark rerun required):
 ```bash
 python3 scripts/distributed/oom_v2/publish_v2.py --source Final_Results/OOM_100M/runs/v2_20261001 --validate-only
 (cd Final_Results/OOM_100M/runs/v2_20261001 && sha256sum -c ARCHIVE_SHA256SUMS)
-MPLCONFIGDIR=/tmp/ariabc-oom-v2-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign v2
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign v2
 python3 scripts/distributed/oom_v2/publish_readme.py
 # Preserve the archived historical PNGs; regenerate into a separate directory.
-MPLCONFIGDIR=/tmp/ariabc-oom-previous-matplotlib python3 scripts/distributed/plot_oom_figures.py \
-  --campaign previous --out /tmp/ariabc-oom-previous-figures
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py \
+  --campaign previous --out $HOME/ariabc_data/figures/oom_previous
 ```
 
 ## 2 (previous). OOM 100M — pg, det and det + Merkle
@@ -235,7 +235,7 @@ Runner defaults:
 
 These commands retain the historical dimensions. Their original pgdata is no longer
 available. Regenerate the archived observations from existing CSVs with
-`python3 scripts/distributed/plot_oom_figures.py --campaign previous --out /tmp/ariabc-oom-previous-figures`.
+`python3 scripts/distributed/plot_oom_figures.py --campaign previous --out $HOME/ariabc_data/figures/oom_previous`.
 
 ## 2a. OOM 100M — split 1024 + optimized code (2026-10-01)
 
@@ -300,13 +300,13 @@ analysis only, no DB or benchmark). The fresh directory preserves the archived
 comparison; artifact paths in the recomputed CSV point at the published runs.
 
 ```bash
-OOM_COMPARE_PARENT="$(mktemp -d /tmp/ariabc-oom-comparison.XXXXXX)"
+OOM_COMPARE_PARENT="$(mkdir -p $HOME/ariabc_data/figures && mktemp -d $HOME/ariabc_data/figures/oom-comparison.XXXXXX)"
 python3 scripts/distributed/oom_s1024/compare.py \
   --new Final_Results/OOM_100M/runs/merkle_s1024 \
   --control Final_Results/OOM_100M/runs/det_control_20261001 \
   --old-summary Final_Results/OOM_100M/runs/v2_20261001/publication_input/summary_before_v2.csv \
   --out-dir "$OOM_COMPARE_PARENT/comparison"
-MPLCONFIGDIR=/tmp/ariabc-oom-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign previous --out /tmp/ariabc-oom-previous-figures
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign previous --out $HOME/ariabc_data/figures/oom_previous
 (cd Final_Results/OOM_100M/runs/merkle_s1024 && sha256sum -c ARCHIVE_SHA256SUMS)
 (cd Final_Results/OOM_100M/runs/det_control_20261001 && sha256sum -c ARCHIVE_SHA256SUMS)
 ```
@@ -372,7 +372,7 @@ python3 scripts/distributed/tpcc_v2/publish_v2.py --validate-only
 (cd Final_Results/TPCC/v2_20261002/sweeps && sha256sum -c SHA256SUMS)
 (cd Final_Results/TPCC/v2_20261002/headline_ab && sha256sum -c SHA256SUMS)
 (cd Final_Results/TPCC/previous && sha256sum -c SHA256SUMS)
-MPLCONFIGDIR=/tmp/ariabc-tpcc-v2-matplotlib python3 scripts/distributed/tpcc_v2/publish_v2.py
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/tpcc_v2/publish_v2.py
 ```
 
 The publisher independently recomputes best/median/min and A/B means, audits
@@ -385,12 +385,12 @@ unexplained; suspected NUMA placement is not a confirmed cause.
 Regenerate the previous style/observations into a fresh directory:
 
 ```bash
-TPCC_PREVIOUS_OUT="$(mktemp -d /tmp/ariabc-tpcc-previous.XXXXXX)"
-MPLCONFIGDIR=/tmp/ariabc-tpcc-previous-matplotlib python3 Final_Results/TPCC/scripts/plot_warehouses.py \
+TPCC_PREVIOUS_OUT="$(mkdir -p $HOME/ariabc_data/figures && mktemp -d $HOME/ariabc_data/figures/tpcc-previous.XXXXXX)"
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 Final_Results/TPCC/scripts/plot_warehouses.py \
   --csv Final_Results/TPCC/warehouses_w32/all_runs.csv \
   --summary "$TPCC_PREVIOUS_OUT/warehouses_summary.csv" \
   --out "$TPCC_PREVIOUS_OUT/tpcc_warehouses_scaling.png"
-MPLCONFIGDIR=/tmp/ariabc-tpcc-previous-matplotlib python3 Final_Results/TPCC/scripts/plot_workers.py \
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 Final_Results/TPCC/scripts/plot_workers.py \
   --csv Final_Results/TPCC/workers_w100/all_runs.csv \
   --summary "$TPCC_PREVIOUS_OUT/workers_summary.csv" \
   --out "$TPCC_PREVIOUS_OUT/tpcc_workers_scaling.png"
@@ -578,7 +578,7 @@ as evidence and use the fresh-output commands below for another measurement.
 Publication regeneration (data analysis only; no SSH or workload):
 
 ```bash
-MPLCONFIGDIR=/tmp/ariabc-oom-opt-matplotlib python3 scripts/distributed/oom_opt/plot_opt.py
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/oom_opt/plot_opt.py
 (cd Final_Results/OOM_100M/optimizations_20261001 && sha256sum -c ARCHIVE_SHA256SUMS)
 ```
 

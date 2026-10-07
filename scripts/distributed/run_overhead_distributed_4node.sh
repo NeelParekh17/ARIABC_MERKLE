@@ -37,7 +37,7 @@ REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"
 REMOTE_INSTALL_DIR="/home/neel/Desktop/ariabc_install"
 
 # Kafka runs on the gateway (240). All PG nodes can reach 10.129.148.247:9092.
-KAFKA_HOME="/var/tmp/kafka_2.13-3.7.0"
+KAFKA_HOME="/home/neel/Desktop/kafka_2.13-3.7.0"
 KAFKA_BOOTSTRAP="10.129.148.247:9092"   # gateway external IP
 SINGLE_MATRIX_SCRIPT="$ROOT/scripts/distributed/run_single_machine_matrix_all_nodes.sh"
 SINGLE_MIN_AGG_SCRIPT="$ROOT/scripts/distributed/aggregate_single_machine_min_profile.py"
@@ -134,11 +134,11 @@ bootstrap_nodes() {
   # Kafka on gateway (240) — download if not present
   "${ssh_base[@]}" "$GW_USER@$GW_HOST" bash <<'KAFKA_BOOTSTRAP_EOF'
 set -euo pipefail
-KAFKA_HOME="/var/tmp/kafka_2.13-3.7.0"
+KAFKA_HOME="/home/neel/Desktop/kafka_2.13-3.7.0"
 if [[ ! -f "$KAFKA_HOME/bin/kafka-topics.sh" ]]; then
   echo "Kafka not found at $KAFKA_HOME, downloading..."
-  mkdir -p /var/tmp
-  cd /var/tmp
+  mkdir -p /home/neel/Desktop
+  cd /home/neel/Desktop
   KAFKA_TGZ="kafka_2.13-3.7.0.tgz"
   if [[ ! -f "$KAFKA_TGZ" ]]; then
     wget -q "https://archive.apache.org/dist/kafka/3.7.0/kafka_2.13-3.7.0.tgz" -O "$KAFKA_TGZ" \
@@ -159,7 +159,7 @@ ensure_kafka_ready() {
   local remote_cmd
   remote_cmd=$(cat <<REMOTE_EOF
 set -euo pipefail
-KAFKA_HOME="/var/tmp/kafka_2.13-3.7.0"
+KAFKA_HOME="/home/neel/Desktop/kafka_2.13-3.7.0"
 GW_IP="$gw_ip"
 TOPICS_SH="\$KAFKA_HOME/bin/kafka-topics.sh"
 STORAGE_SH="\$KAFKA_HOME/bin/kafka-storage.sh"
@@ -186,6 +186,8 @@ if [[ -z "\$cluster_id" ]]; then
   exit 1
 fi
 
+mkdir -p /home/neel/ariabc_data/kafka  # never /tmp (Kafka's stock config defaults there)
+sed -i "/^log.dirs=/d" "\$SERVER_PROPS"; echo "log.dirs=/home/neel/ariabc_data/kafka/kraft-combined-logs" >> "\$SERVER_PROPS"
 "\$STORAGE_SH" format -t "\$cluster_id" -c "\$SERVER_PROPS" --ignore-formatted >/dev/null 2>&1 || true
 "\$SERVER_SH" -daemon "\$SERVER_PROPS"
 

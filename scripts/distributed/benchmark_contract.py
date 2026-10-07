@@ -200,11 +200,11 @@ def prepare_remote_cold(args, pgdata, pg_ctl, psql, lib, run):
     """Use the same stopped-PG eviction sequence for both standalone suites."""
     import shlex
     source = Path(__file__).with_name('benchmark_cache.py').read_text()
-    command = (f'set -e; export LD_LIBRARY_PATH={shlex.quote(lib)}; '
+    command = (f'set -e; mkdir -p /home/{args.db_user}/ariabc_data/gateway_sweep; export LD_LIBRARY_PATH={shlex.quote(lib)}; '
                f'{shlex.quote(psql)} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -c CHECKPOINT; '
                f'{shlex.quote(pg_ctl)} -D {shlex.quote(pgdata)} -w -t 120 -m fast stop; '
                f'python3 -c {shlex.quote(source)} {shlex.quote(pgdata)}; '
-               f'{shlex.quote(pg_ctl)} -D {shlex.quote(pgdata)} -l /tmp/postgres_single.log -w -t 120 start')
+               f'{shlex.quote(pg_ctl)} -D {shlex.quote(pgdata)} -l /home/{args.db_user}/ariabc_data/gateway_sweep/postgres_single.log -w -t 120 start')
     _, output = run(['ssh', f'{args.db_user}@{args.db_host}', command], check=True, timeout=300)
     records = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
     if len(records) != 1:

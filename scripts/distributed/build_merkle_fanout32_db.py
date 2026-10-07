@@ -14,7 +14,7 @@ import time
 
 DEFAULT_REMOTE_HOST = "10.129.148.247"
 DEFAULT_REMOTE_USER = "neel"
-DEFAULT_REMOTE_DIR = "/tmp/ariabc_oom_100m"
+DEFAULT_REMOTE_DIR = "/home/neel/ariabc_data/oom_100m"
 DEFAULT_INSTALL_DIR = "/home/neel/Desktop/ariabc_install"
 DEFAULT_DB_PORT = 5438
 

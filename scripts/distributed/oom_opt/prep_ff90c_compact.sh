@@ -2,7 +2,7 @@
 # Run ON .247 (detached). Creates pgdata_base_f32s1024_ff90c: copy of the ff90 baseline whose
 # Merkle index is rebuilt with the fixed (compact-storage) build path. Source baseline untouched.
 set -euo pipefail
-R=/tmp/ariabc_oom_100m; SRC=$R/pgdata_base_f32s1024_ff90; DST=$R/pgdata_base_f32s1024_ff90c
+R=/home/neel/ariabc_data/oom_100m; SRC=$R/pgdata_base_f32s1024_ff90; DST=$R/pgdata_base_f32s1024_ff90c
 I=/home/neel/claude_opt/install_opt2; PORT=5449; EV=$1
 export LD_LIBRARY_PATH=$I/lib:/home/neel/Desktop/rdkafka_local/lib
 mkdir -p "$EV"; exec > >(tee -a "$EV/prep.log") 2>&1

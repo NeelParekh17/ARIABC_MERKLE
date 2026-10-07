@@ -31,6 +31,8 @@ from benchmark_validation import count_workload_queries, parse_gateway_result
 HOSTS = ("10.129.148.247", "10.129.148.246", "10.129.148.248")
 IDS = (1, 2, 4)
 INSTALL = "/home/neel/Desktop/ariabc_install"
+# Persistent per-run root on every replica (never /tmp: it is wiped on reboot).
+PAPER_ROOT_PREFIX = "/home/neel/ariabc_data/paper_cluster_"
 REPO = "/home/neel/Desktop/ariabc_cluster"
 KAFKA = "/home/neel/Desktop/kafka_2.13-3.7.0"
 PORTS = dict(pg=55493, client=18693, raft=19693, kafka=19092, controller=19093)
@@ -131,8 +133,8 @@ def owned_stop(pid_file, token, working_directory=None):
 def node_action(request):
     """RPC executed only on a replica; stdout is one JSON result."""
     root = Path(request["root"])
-    if not re.fullmatch(r"/tmp/ariabc_paper_cluster_[a-zA-Z0-9_]+", str(root)):
-        raise ValueError("Expected a fresh isolated /tmp/ariabc_paper_cluster_* root")
+    if not re.fullmatch(PAPER_ROOT_PREFIX + r"[a-zA-Z0-9_]+", str(root)):
+        raise ValueError("Expected a fresh isolated " + PAPER_ROOT_PREFIX + "* root")
     env = dict(os.environ, **ENVIRONMENT)
     if request.get("result_receipts") == "signed":
         env["ARIABC_KAFKA_PAYLOAD_FORMAT"] = "bin"
@@ -157,7 +159,7 @@ def node_action(request):
                         "--repo", REPO, "--ring-capacity", "2048"]).strip()
         if live != binary["source_fingerprint"]:
             raise RuntimeError("Live replica source differs from its build manifest")
-        root.mkdir()
+        root.mkdir(parents=True)
         return dict(server=binary, postgres=postgres, live_source_fingerprint=live,
                     hostname=socket.gethostname(), health=checked(["free", "-m"]))
     if action == "kafka_start":
@@ -351,7 +353,7 @@ class Campaign:
     def __init__(self, args):
         self.args = args
         self.out = args.out.resolve()
-        self.root = "/tmp/ariabc_paper_cluster_" + args.run_id
+        self.root = PAPER_ROOT_PREFIX + args.run_id
         self.node_script = self.root + "/run_paper_ycsb.py"
         self.active = []
         self.kafka_active = []
@@ -449,7 +451,7 @@ class Campaign:
         argv = [GATEWAY, "--nodes", ",".join(f"{h}:{PORTS['client']}" for h in hosts),
                 "--queryFrom", str(trace), "--dbType", str(int(mode != "pg")),
                 "--detStartSeq", str(count if marker else 0), "--reqIdOffset", str(count + 1 if marker else 1),
-                "--detWindow", "1" if marker else "65536", "--detBatchSize", "256",
+                "--detWindow", "1" if marker else "1024", "--detBatchSize", "256",
                 "--dbConnPoolSize", str(workers), "--submitMode", "event",
                 "--detSubmitPipeline", "0" if marker else "1", "--detPipelineDepth", "1" if marker else "1024",
                 "--detClientMode", "event", "--detClientWorkers", "1" if marker else "96",

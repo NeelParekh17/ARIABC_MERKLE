@@ -217,7 +217,7 @@ if ! RAFT_DIR="$(run_one raft-no-kafka 1 "")"; then
   echo "ERROR: aborting overhead run at profile raft-no-kafka" >&2
   exit 1
 fi
-if ! RK_DIR="$(run_one raft-kafka 0 "/tmp/kafka_2.13-3.7.0")"; then
+if ! RK_DIR="$(run_one raft-kafka 0 "/home/neel/Desktop/kafka_2.13-3.7.0")"; then
   echo "ERROR: aborting overhead run at profile raft-kafka" >&2
   exit 1
 fi

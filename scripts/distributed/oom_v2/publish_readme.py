@@ -231,11 +231,11 @@ Local artifact analysis only (no build, database or benchmark):
 python3 scripts/distributed/oom_v2/publish_v2.py \\
   --source Final_Results/OOM_100M/runs/v2_20261001 --validate-only
 (cd Final_Results/OOM_100M/runs/v2_20261001 && sha256sum -c ARCHIVE_SHA256SUMS)
-MPLCONFIGDIR=/tmp/ariabc-oom-v2-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign v2
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign v2
 python3 scripts/distributed/oom_v2/publish_readme.py
 # Historical figure regeneration into a fresh directory:
-MPLCONFIGDIR=/tmp/ariabc-oom-previous-matplotlib python3 scripts/distributed/plot_oom_figures.py \\
-  --campaign previous --out /tmp/ariabc-oom-previous-figures
+MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py \\
+  --campaign previous --out $HOME/ariabc_data/figures/oom_previous
 ```
 
 Exact completed remote campaign commands are in

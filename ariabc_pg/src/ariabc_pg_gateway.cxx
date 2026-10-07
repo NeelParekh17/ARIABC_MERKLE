@@ -72,6 +72,13 @@ struct gateway_options {
     int tx_interval_ms = 0;
     int progress_interval_ms = 5000;
     int qrate = 0; // per terminal, 0=unthrottled
+    // Aggregate offered load for the event det pipeline (tx/s, open loop:
+    // transaction i is due at start + i / targetTps). 0 = unthrottled.
+    double target_tps = 0.0;
+    // With --targetTps, due transactions are sent together once per tick (or
+    // as soon as a full det batch is due), so the leader sees batches rather
+    // than one request per transaction.
+    double pace_tick_ms = 5.0;
     int num_terminals = 1;
     std::string client_id = "cli";
     uint64_t req_id_offset = 0;
@@ -108,7 +115,7 @@ struct gateway_options {
 
     // Optional override for deterministic mode in-flight window.
     // 0 => auto (larger pipeline for modern multi-core boxes).
-    int det_window = 512;
+    int det_window = 1024;
     int det_batch_size = 16;
     // Optional DB connection-pool hint from benchmark harness. Auto window mode
     // scales from this value; explicit --detWindow is respected as-is.
@@ -202,7 +209,7 @@ void usage(const char* argv0) {
         << "    --queryFrom <file|port> --nodes <host:port,host:port,...> [--raft-node-ids <id,id,...>] \\\n"
         << "    [--querySign 0|1] [--pubKeyFile <path>] [--privKeyFile <path>] \\\n"
         << "    [--txSign 0|blake3] [--txSigKey <key>] \\\n"
-        << "    [--dbType 0|1|2] [--detStartSeq <n>] [--detRawSql 0|1] [--qrate <n>] [--txIntervalMs <ms>] \\\n"
+        << "    [--dbType 0|1|2] [--detStartSeq <n>] [--detRawSql 0|1] [--qrate <n>] [--targetTps <tx/s>] [--paceTickMs <ms>] [--txIntervalMs <ms>] \\\n"
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] [--progressIntervalMs <ms>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
@@ -243,6 +250,16 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.det_start_seq = static_cast<uint64_t>(std::stoull(need("--detStartSeq")));
             } else if (a == "--detRawSql") {
                 opt.det_raw_sql = std::stoi(need("--detRawSql"));
+            } else if (a == "--targetTps") {
+                opt.target_tps = std::stod(need("--targetTps"));
+                if (opt.target_tps < 0.0) {
+                    throw std::runtime_error("--targetTps must be >= 0");
+                }
+            } else if (a == "--paceTickMs") {
+                opt.pace_tick_ms = std::stod(need("--paceTickMs"));
+                if (opt.pace_tick_ms < 0.0) {
+                    throw std::runtime_error("--paceTickMs must be >= 0");
+                }
             } else if (a == "--qrate") {
                 opt.qrate = std::stoi(need("--qrate"));
             } else if (a == "--txIntervalMs") {
@@ -2405,6 +2422,19 @@ public:
             }
         }
         return out_error.empty();
+    }
+
+    // Non-blocking: pop whatever in-flight requests are already terminal.
+    bool try_pop_any_majority_batch(
+        std::list<uint64_t>& inflight,
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator>& inflight_pos,
+        std::vector<terminal_majority_item>& out_batch,
+        size_t max_batch = 64)
+    {
+        out_batch.clear();
+        std::lock_guard<std::mutex> lk(mu_);
+        pop_terminal_inflight_batch_locked(inflight, inflight_pos, out_batch, max_batch);
+        return !out_batch.empty();
     }
 
     bool wait_any_majority_batch(
@@ -6348,6 +6378,54 @@ int main(int argc, char** argv) {
                        async_all3_capacity_exhausted_count.load() == 0;
             };
 
+            // Complete a batch of majority-verified requests for the client.
+            auto complete_majority_batch =
+                [&](const std::vector<ariabc_pg::vote_store::terminal_majority_item>& batch_res) -> bool {
+                std::vector<std::pair<uint64_t, ResolvedOutcome>> outcomes;
+                outcomes.reserve(batch_res.size());
+                std::vector<uint64_t> rids_for_audit;
+                rids_for_audit.reserve(batch_res.size());
+                for (const auto& item : batch_res) {
+                    const uint64_t rid = item.req_num;
+                    if (!item.error.empty()) {
+                        bump_terminal_reason(item.error);
+                        emit_recovery_event(rid, item.error);
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+                    votes.print_nonterminal_failure_marker(rid);
+                    votes.print_deterministic_error_marker(rid);
+                    outcomes.emplace_back(rid, get_resolved_outcome(rid));
+                    rids_for_audit.push_back(rid);
+                }
+                if (!record_resolved_outcome_batch(outcomes) &&
+                    fatal_gateway_error.load(std::memory_order_acquire)) {
+                    return false;
+                }
+                if (majority_async_all3_validation) {
+                    record_async_all3_pending_batch(rids_for_audit);
+                }
+                for (const auto& item : batch_res) {
+                    const uint64_t rid = item.req_num;
+                    if (!verify_completed_item(rid)) {
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+                    if (!wait_strict_all_nodes_for_req(rid)) {
+                        return false;
+                    }
+                    det_completed_count.fetch_add(1, std::memory_order_relaxed);
+                    tx_lat_tracker.record_finish_req(rid);
+                    det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                    release_det_req_lane(rid);
+                    if (!maybe_wait_reset_all_nodes(rid)) {
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+                }
+                return true;
+            };
+
             auto wait_det_majority_window = [&](size_t max_outstanding) -> bool {
                 while (majority_wait_enabled && inflight.size() > max_outstanding) {
                     if (fatal_gateway_error.load(std::memory_order_relaxed)) {
@@ -6372,48 +6450,20 @@ int main(int argc, char** argv) {
                         permanent_failures.fetch_add(1);
                         return false;
                     }
-                    std::vector<std::pair<uint64_t, ResolvedOutcome>> outcomes;
-                    outcomes.reserve(batch_res.size());
-                    std::vector<uint64_t> rids_for_audit;
-                    rids_for_audit.reserve(batch_res.size());
-                    for (const auto& item : batch_res) {
-                        const uint64_t rid = item.req_num;
-                        if (!item.error.empty()) {
-                            bump_terminal_reason(item.error);
-                            emit_recovery_event(rid, item.error);
-                            permanent_failures.fetch_add(1);
-                            return false;
-                        }
-                        votes.print_nonterminal_failure_marker(rid);
-                        votes.print_deterministic_error_marker(rid);
-                        outcomes.emplace_back(rid, get_resolved_outcome(rid));
-                        rids_for_audit.push_back(rid);
+                    if (!complete_majority_batch(batch_res)) return false;
+                }
+                return true;
+            };
+
+            // Hand back results that are already verified without blocking, so
+            // completion is not deferred until the submit loop yields.
+            auto harvest_ready_majorities = [&]() -> bool {
+                while (majority_wait_enabled && !inflight.empty()) {
+                    std::vector<ariabc_pg::vote_store::terminal_majority_item> batch_res;
+                    if (!votes.try_pop_any_majority_batch(inflight, inflight_pos, batch_res, 256)) {
+                        return true;
                     }
-                    if (!record_resolved_outcome_batch(outcomes) &&
-                        fatal_gateway_error.load(std::memory_order_acquire)) {
-                        return false;
-                    }
-                    if (majority_async_all3_validation) {
-                        record_async_all3_pending_batch(rids_for_audit);
-                    }
-                    for (const auto& item : batch_res) {
-                        const uint64_t rid = item.req_num;
-                        if (!verify_completed_item(rid)) {
-                            permanent_failures.fetch_add(1);
-                            return false;
-                        }
-                        if (!wait_strict_all_nodes_for_req(rid)) {
-                            return false;
-                        }
-                        det_completed_count.fetch_add(1, std::memory_order_relaxed);
-                        tx_lat_tracker.record_finish_req(rid);
-                        det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
-                        release_det_req_lane(rid);
-                        if (!maybe_wait_reset_all_nodes(rid)) {
-                            permanent_failures.fetch_add(1);
-                            return false;
-                        }
-                    }
+                    if (!complete_majority_batch(batch_res)) return false;
                 }
                 return true;
             };
@@ -6974,15 +7024,49 @@ int main(int argc, char** argv) {
                     return true;
                 };
 
+                const auto pace_t0 = std::chrono::steady_clock::now();
+                auto pace_last_send = pace_t0;
+                double pace_max_lag_ms = 0.0;
+                // Scheduled arrival of transaction idx in open-loop mode.
+                auto pace_due_tp = [&](size_t idx) {
+                    return pace_t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(static_cast<double>(idx) / opt.target_tps));
+                };
                 while (!failed && (next_idx < queries.size() || !pending_accepts.empty())) {
+                    bool paced_wait = false;
                     while (!failed &&
                            next_idx < queries.size() &&
                            pending_request_count < det_submit_limit) {
+                        if (!harvest_ready_majorities()) {
+                            failed = true;
+                            break;
+                        }
                         size_t batch_cap = desired_det_batch_slots(next_idx);
                         if (batch_cap == 0) break;
                         if (pending_request_count + batch_cap > det_submit_limit) {
                             batch_cap = det_submit_limit - pending_request_count;
                             if (batch_cap == 0) break;
+                        }
+                        if (opt.target_tps > 0.0) {
+                            // Open-loop pacing: only transactions already due are sent.
+                            const double elapsed_s = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - pace_t0).count();
+                            const size_t due = std::min<size_t>(
+                                queries.size(),
+                                static_cast<size_t>(elapsed_s * opt.target_tps) + 1);
+                            const double since_send_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - pace_last_send).count();
+                            const size_t due_count = (due > next_idx) ? (due - next_idx) : 0;
+                            if (due_count == 0 ||
+                                (since_send_ms < opt.pace_tick_ms && due_count < batch_cap)) {
+                                paced_wait = true;
+                                break;
+                            }
+                            batch_cap = std::min(batch_cap, due_count);
+                            pace_last_send = std::chrono::steady_clock::now();
+                            pace_max_lag_ms = std::max(
+                                pace_max_lag_ms,
+                                elapsed_s * 1000.0 - static_cast<double>(next_idx) * 1000.0 / opt.target_tps);
                         }
                         if (majority_wait_enabled) {
                             const size_t inflight_total = inflight.size() + pending_request_count;
@@ -7051,7 +7135,12 @@ int main(int argc, char** argv) {
                         ticket.submit_node_idx = single_submit_node_idx;
                         ticket.submit_started_at = submit_started_at;
                         for (const auto& itm : ticket.items) {
-                            tx_lat_tracker.record_submit_idx(itm.idx, submit_started_at);
+                            // Open loop: latency counts from the scheduled arrival,
+                            // so time spent waiting for the next send tick is included.
+                            tx_lat_tracker.record_submit_idx(
+                                itm.idx,
+                                opt.target_tps > 0.0 ? std::min(submit_started_at, pace_due_tp(itm.idx))
+                                                     : submit_started_at);
                         }
                         pending_request_count += ticket.items.size();
                         det_sent_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
@@ -7080,7 +7169,17 @@ int main(int argc, char** argv) {
                                 break;
                             }
                         } else {
+                            if (!harvest_ready_majorities()) {
+                                failed = true;
+                                break;
+                            }
                             if (next_idx < queries.size() && pending_accepts.size() < 16) {
+                                break;
+                            }
+                            if (next_idx >= queries.size()) {
+                                // Nothing left to submit: poll the leader ACK rather than
+                                // block on it, so verified results keep reaching the client.
+                                std::this_thread::sleep_for(std::chrono::microseconds(50));
                                 break;
                             }
                             if (!drain_one_accept()) {
@@ -7093,6 +7192,9 @@ int main(int argc, char** argv) {
                     if (!drain_late_accepts(false)) {
                         failed = true;
                         break;
+                    }
+                    if (paced_wait) {
+                        std::this_thread::sleep_for(std::chrono::microseconds(50));
                     }
 
                     if (majority_wait_enabled && next_idx < queries.size()) {
@@ -7119,6 +7221,10 @@ int main(int argc, char** argv) {
                             break;
                         }
                     }
+                }
+                if (opt.target_tps > 0.0) {
+                    std::cout << "PACING target_tps=" << opt.target_tps
+                              << " max_send_lag_ms=" << pace_max_lag_ms << std::endl;
                 }
                 if (pipeline_first_submit_set) {
                     const auto pipeline_last_submit_tp = std::chrono::steady_clock::now();
@@ -7153,6 +7259,10 @@ int main(int argc, char** argv) {
                 }
             } else {
                 for (size_t idx = 0; idx < queries.size();) {
+                    if (!harvest_ready_majorities()) {
+                        failed = true;
+                        break;
+                    }
                     size_t batch_cap = desired_det_batch_slots(idx);
                     if (batch_cap == 0) {
                         if (majority_wait_enabled && !inflight.empty()) {

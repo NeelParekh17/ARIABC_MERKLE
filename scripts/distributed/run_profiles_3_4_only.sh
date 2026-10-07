@@ -80,7 +80,7 @@ ensure_kafka_ready() {
   local remote_cmd
   remote_cmd=$(cat <<'REMOTE_EOF'
 set -euo pipefail
-KAFKA_HOME="/tmp/kafka_2.13-3.7.0"
+KAFKA_HOME="/home/neel/Desktop/kafka_2.13-3.7.0"
 TOPICS_SH="$KAFKA_HOME/bin/kafka-topics.sh"
 STORAGE_SH="$KAFKA_HOME/bin/kafka-storage.sh"
 SERVER_SH="$KAFKA_HOME/bin/kafka-server-start.sh"
@@ -102,6 +102,8 @@ if [[ -z "$cluster_id" ]]; then
   exit 1
 fi
 
+mkdir -p /home/neel/ariabc_data/kafka  # never /tmp (Kafka's stock config defaults there)
+sed -i "/^log.dirs=/d" "$SERVER_PROPS"; echo "log.dirs=/home/neel/ariabc_data/kafka/kraft-combined-logs" >> "$SERVER_PROPS"
 "$STORAGE_SH" format -t "$cluster_id" -c "$SERVER_PROPS" --ignore-formatted >/dev/null 2>&1 || true
 "$SERVER_SH" -daemon "$SERVER_PROPS"
 
@@ -225,7 +227,7 @@ export PROFILE_GW_BROADCAST_ALL=1
 export PROFILE_CASE_TIMEOUT_S=180
 export PROFILE_GATEWAY_TIMEOUT_S=120
 export ARIABC_MAX_CASE_TIMEOUT_S=180
-if ! KAFKA_ONLY_DIR="$(run_one kafka-only-no-raft 0 "/tmp/kafka_2.13-3.7.0")"; then
+if ! KAFKA_ONLY_DIR="$(run_one kafka-only-no-raft 0 "/home/neel/Desktop/kafka_2.13-3.7.0")"; then
   echo "ERROR: aborting at profile kafka-only-no-raft" >&2
   exit 1
 fi
@@ -244,7 +246,7 @@ export PROFILE_GW_BROADCAST_ALL=0
 export PROFILE_CASE_TIMEOUT_S=180
 export PROFILE_GATEWAY_TIMEOUT_S=120
 export ARIABC_MAX_CASE_TIMEOUT_S=180
-if ! RK_DIR="$(run_one raft-kafka 0 "/tmp/kafka_2.13-3.7.0")"; then
+if ! RK_DIR="$(run_one raft-kafka 0 "/home/neel/Desktop/kafka_2.13-3.7.0")"; then
   echo "ERROR: aborting at profile raft-kafka" >&2
   exit 1
 fi

@@ -206,10 +206,10 @@ else
       # Sync psycopg wheels (both py3.10 and py3.12 binary builds)
       ssh_run "$node" "mkdir -p '$repo/.bench_tmp/psycopg_wheels'" >> "$slog" 2>&1
       rsync -az -e "$rsync_e" \
-        /tmp/psycopg_wheels/ "$node:$repo/.bench_tmp/psycopg_wheels/" >> "$slog" 2>&1
+        "${PSYCOPG_WHEELS_DIR:-$HOME/ariabc_data/tools/psycopg_wheels}/" "$node:$repo/.bench_tmp/psycopg_wheels/" >> "$slog" 2>&1
       # Also sync local py3.12 venv psycopg package dirs for direct copy on 3.12 machines
       rsync -az -e "$rsync_e" \
-        /tmp/psycopg_wheels/ "$node:$repo/.bench_tmp/psycopg_wheels/" >> "$slog" 2>&1
+        "${PSYCOPG_WHEELS_DIR:-$HOME/ariabc_data/tools/psycopg_wheels}/" "$node:$repo/.bench_tmp/psycopg_wheels/" >> "$slog" 2>&1
 
       echo "Finished OK: $(_ts)" >> "$slog"
     ) &

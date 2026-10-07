@@ -79,9 +79,9 @@ if [[ -n "${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP+x}" ]]; then
   FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP_WAS_SET=1
 fi
 FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP="${FULL_DET_PIPELINE_DEPTH_RAFT_KAFKA_MAP-}"
-FULL_DET_WINDOW="${FULL_DET_WINDOW:-4096}"
+FULL_DET_WINDOW="${FULL_DET_WINDOW:-1024}"
 FULL_DET_WINDOW_MULTIPLIER="${FULL_DET_WINDOW_MULTIPLIER:-256}"
-FULL_DET_WINDOW_MAX="${FULL_DET_WINDOW_MAX:-4096}"
+FULL_DET_WINDOW_MAX="${FULL_DET_WINDOW_MAX:-1024}"
 FULL_DET_BATCH_SIZE_MAP_WAS_SET=0
 if [[ -n "${FULL_DET_BATCH_SIZE_MAP+x}" ]]; then
   FULL_DET_BATCH_SIZE_MAP_WAS_SET=1
@@ -1109,7 +1109,7 @@ generate_local_per_machine_graph() {
     return
   fi
   log "Generating local per-machine graph from $summary"
-  MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mplconfig}" python3 - "$REPO_ROOT" "$summary" "$single_dir" <<'PYEOF' \
+  MPLCONFIGDIR="${MPLCONFIGDIR:-$HOME/.cache/ariabc_mplconfig}" python3 - "$REPO_ROOT" "$summary" "$single_dir" <<'PYEOF' \
     >> "$RUN_LOG_DIR/local_graphs.log" 2>&1 \
     || log "WARNING: local graph generation failed for $single_dir (see $RUN_LOG_DIR/local_graphs.log)"
 import sys
@@ -1776,7 +1776,7 @@ generate_outputs() {
   elif [[ "$FULL_THREAD_KNOB" == "fixed-window" ]]; then
     x_label="Single-node client threads / full-system labeled points (fixed detWindow=$FULL_DET_WINDOW)"
   fi
-  MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mplconfig}" \
+  MPLCONFIGDIR="${MPLCONFIGDIR:-$HOME/.cache/ariabc_mplconfig}" \
     python3 "$SCRIPT_DIR/plot_ycsb_skew_tps_comparison.py" \
       --single-results "$single_results" \
       "${single_gateway_args[@]}" \
@@ -1787,7 +1787,7 @@ generate_outputs() {
       --threads "$THREADS" \
       --x-label "$x_label"
   if [[ "$FULL_ONLY" != "1" && -f "$SCRIPT_DIR/build_ycsb_capacity_graph.py" ]]; then
-    MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mplconfig}" \
+    MPLCONFIGDIR="${MPLCONFIGDIR:-$HOME/.cache/ariabc_mplconfig}" \
       python3 "$SCRIPT_DIR/build_ycsb_capacity_graph.py" \
         --single-root "$OUT_DIR" \
         --gateway-cluster-summary "$OUT_DIR/summary.csv" \

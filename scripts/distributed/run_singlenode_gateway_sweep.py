@@ -131,9 +131,10 @@ def main():
             print(f"  [1/4] Preparing PostgreSQL on {args.db_host} (bcdb_worker_count={w})...")
             setup_cmd = f"""ssh {args.db_user}@{args.db_host} "
                 fuser -k -9 {args.server_port}/tcp 2>/dev/null || true
+                mkdir -p /home/neel/ariabc_data/gateway_sweep
                 export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
                 /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -c 'ALTER SYSTEM SET bcdb_worker_count = {w};' >/dev/null 2>&1
-                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 restart >/dev/null 2>&1
+                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /home/neel/ariabc_data/gateway_sweep/postgres_single.log -w -t 60 restart >/dev/null 2>&1
                 /home/neel/Desktop/ariabc_install/bin/psql -p {args.db_port} -U postgres -d postgres -f /home/neel/Desktop/ariabc_cluster/scripts/restore_usertable_small.sql >/dev/null 2>&1
             " """
             run_cmd(setup_cmd, check=True)
@@ -167,7 +168,7 @@ def main():
                   --bcdbInitBlockSize {w} \\
                   --pgExecMode event \\
                   --bypassRaft 1 \\
-                  </dev/null >/tmp/server_single.log 2>&1 &
+                  </dev/null >/home/neel/ariabc_data/gateway_sweep/server_single.log 2>&1 &
 
                 for i in \\$(seq 1 30); do
                     if fuser {args.server_port}/tcp >/dev/null 2>&1; then
@@ -193,7 +194,7 @@ def main():
                   --dbType 1 \\
                   --detStartSeq 0 \\
                   --reqIdOffset 1 \\
-                  --detWindow 65536 \\
+                  --detWindow 1024 \\
                   --detBatchSize 256 \\
                   --dbConnPoolSize {w} \\
                   --submitMode event \\

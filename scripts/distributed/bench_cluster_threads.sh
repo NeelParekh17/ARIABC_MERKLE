@@ -219,7 +219,7 @@ build_common_args() {
     --raft-ordered-batch-linger-us 1000
     --raft-ordered-coalesce-log 1
     --kafka-completion-mode majority_async_all3
-    --det-window      65536
+    --det-window      1024
     --enable-merkle-index 1
     --tx-sign blake3
     --raft-apply-ledger-mode off

@@ -104,6 +104,9 @@ PG_CTL_BIN = "/home/neel/Desktop/ariabc_install/bin/pg_ctl"
 PG_ISREADY_BIN = "/home/neel/Desktop/ariabc_install/bin/pg_isready"
 LD_LIB = "/home/neel/Desktop/ariabc_install/lib"
 PGDATA = "/home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata"
+# Persistent runtime dirs (never /tmp: it is wiped on reboot); main() derives them from --db-user/--gateway-user.
+DB_RUNTIME_DIR = "/home/neel/ariabc_data/gateway_sweep"
+GW_WORKLOAD_DIR = "/home/neel/ariabc_data/workloads"
 
 
 def init_remote_paths(db_user):
@@ -128,7 +131,7 @@ def generate_tpcc_workload(args, repo_root, warehouses, out_path):
     if count_workload_queries(local) != args.tpcc_tx_count:
         raise RuntimeError("TPC-C generated count mismatch")
     digest = hashlib.sha256(local.read_bytes()).hexdigest()
-    out_path = f"/tmp/ariabc_tpcc_{digest}.sql"
+    out_path = f"{GW_WORKLOAD_DIR}/ariabc_tpcc_{digest}.sql"
     run_cmd_args(["scp", "-o", "BatchMode=yes", str(local), f"{args.gateway_user}@{args.gateway_host}:{out_path}"], check=True)
     _, remote_hash = run_cmd_args(["ssh", f"{args.gateway_user}@{args.gateway_host}", f"sha256sum {out_path}"], check=True)
     if remote_hash.split()[0] != digest:
@@ -201,9 +204,9 @@ def restore_tpcc_db(args, warehouses, enable_merkle):
 
 
 def setup_tpcc_drop_merkle_sql(args):
-    """Create /tmp/drop_merkle_tpcc.sql on the DB node for non-merkle modes."""
+    """Create DB_RUNTIME_DIR/drop_merkle_tpcc.sql on the DB node for non-merkle modes."""
     init_drop_sql = fr"""ssh {args.db_user}@{args.db_host} "
-        cat <<'EOF' > /tmp/drop_merkle_tpcc.sql
+        cat <<'EOF' > {DB_RUNTIME_DIR}/drop_merkle_tpcc.sql
 ALTER SYSTEM SET enable_merkle_index = 'off';
 SELECT pg_reload_conf();
 DO \$\$
@@ -298,7 +301,7 @@ def setup_tpcc_postgres(args, mode, w, warehouses):
         fi
 
         if [ \\$running -eq 0 ]; then
-            {pg_ctl} -D {PGDATA} -l /tmp/postgres_single.log -w -t 180 start >/dev/null 2>&1
+            {pg_ctl} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 180 start >/dev/null 2>&1
             running=1
         fi
 
@@ -327,7 +330,7 @@ def setup_tpcc_postgres(args, mode, w, warehouses):
             {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -c \\"ALTER SYSTEM SET max_wal_size = '20GB';\\" >/dev/null 2>&1
             {tpcc_bcdb_alter_cmds(psql, port)}
 
-            {pg_ctl} -D {PGDATA} -l /tmp/postgres_single.log -w -t 180 restart >/dev/null 2>&1
+            {pg_ctl} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 180 restart >/dev/null 2>&1
         fi
     " """
     run_cmd(config_cmd, check=True)
@@ -341,7 +344,7 @@ def setup_tpcc_postgres(args, mode, w, warehouses):
         print(f"    [4/5] Dropping merkle indexes...")
         drop_cmd = f"""ssh {args.db_user}@{args.db_host} "
             export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
-            {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -f /tmp/drop_merkle_tpcc.sql >/dev/null 2>&1
+            {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -f {DB_RUNTIME_DIR}/drop_merkle_tpcc.sql >/dev/null 2>&1
         " """
         run_cmd(drop_cmd, check=True)
     else:
@@ -616,6 +619,11 @@ def main():
     )
     parser.add_argument("--order-seed", type=int, default=42)
     args = parser.parse_args()
+    global DB_RUNTIME_DIR, GW_WORKLOAD_DIR
+    DB_RUNTIME_DIR = f"/home/{args.db_user}/ariabc_data/gateway_sweep"
+    GW_WORKLOAD_DIR = f"/home/{args.gateway_user}/ariabc_data/workloads"
+    run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"mkdir -p {DB_RUNTIME_DIR}"], check=True)
+    run_cmd_args(["ssh", f"{args.gateway_user}@{args.gateway_host}", f"mkdir -p {GW_WORKLOAD_DIR}"], check=True)
     if args.tpcc_merkle_split_threshold is None:
         args.tpcc_merkle_split_threshold = 1024 if args.tpcc_merkle_fanout == 32 else 32
     if args.tpcc_merkle_merge_threshold is None:
@@ -809,7 +817,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                 [(wh, w) for wh in warehouse_counts for w in tpcc_workers], modes, args.trials, args.order_seed):
             trial_str = f" (Trial {trial}/{args.trials})"
             wl_filename = f"tpcc-workload-{args.tpcc_tx_count}-w{wh}-seed{args.tpcc_seed}.txt"
-            gw_workload_path = f"/tmp/{wl_filename}"
+            gw_workload_path = f"{GW_WORKLOAD_DIR}/{wl_filename}"
             gw_workload_path = generate_tpcc_workload(args, repo_root, wh, gw_workload_path)
             print(f"\n--- [Mode: {mode} | Warehouses: {wh} | Workers: {w}{trial_str}] ---")
 
@@ -843,7 +851,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
             # prewarm session's reads land before the baseline snapshot.
             buffer_stats_before = tpcc_psql_json(args, TPCC_BUFFER_STATS_SQL, pre_cmd="sleep 2; ")
 
-            _, pg_log_offset = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", "stat -c %s /tmp/postgres_single.log"], check=True)
+            _, pg_log_offset = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"stat -c %s {DB_RUNTIME_DIR}/postgres_single.log"], check=True)
             pg_log_offset = int(pg_log_offset.strip())
             # Step 3: Start ariabc_pg_server
             print(f"  [2/4] Starting ariabc_pg_server on {args.db_host}:{args.server_port} (poolSize={w}, dbType={db_type})...")
@@ -869,7 +877,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                       --dbConnPoolSize {w} \
                       --pgExecMode event \
                       --bypassRaft 1 \
-                      </dev/null >/tmp/server_single.log 2>/tmp/server_single.err.log &
+                      </dev/null >{DB_RUNTIME_DIR}/server_single.log 2>{DB_RUNTIME_DIR}/server_single.err.log &
 
                     for i in \\$(seq 1 30); do
                         if fuser {args.server_port}/tcp >/dev/null 2>&1; then
@@ -909,7 +917,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                       --bcdbInitBlockSize {w} \\
                       --pgExecMode event \\
                       --bypassRaft 1 \\
-                      </dev/null >/tmp/server_single.log 2>/tmp/server_single.err.log &
+                      </dev/null >{DB_RUNTIME_DIR}/server_single.log 2>{DB_RUNTIME_DIR}/server_single.err.log &
 
                     for i in \\$(seq 1 30); do
                         if fuser {args.server_port}/tcp >/dev/null 2>&1; then
@@ -927,7 +935,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                 raise RuntimeError(f"Server failed to start on port {args.server_port}")
 
             if mode != "pg":
-                check_init_cmd = f"""ssh {args.db_user}@{args.db_host} "grep -E 'bcdb_init enabled on node|bcdb_init skipped' /tmp/server_single.err.log /tmp/server_single.log || true" """
+                check_init_cmd = f"""ssh {args.db_user}@{args.db_host} "grep -E 'bcdb_init enabled on node|bcdb_init skipped' {DB_RUNTIME_DIR}/server_single.err.log {DB_RUNTIME_DIR}/server_single.log || true" """
                 _, init_out = run_cmd(check_init_cmd)
                 if "bcdb_init enabled on node" not in init_out:
                     raise RuntimeError(f"BCDB initialization failed or skipped in ariabc_pg_server:\n{init_out}")
@@ -944,7 +952,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                       --dbType 0 \\
                       --detStartSeq 0 \\
                       --reqIdOffset 1 \\
-                      --detWindow 65536 \\
+                      --detWindow 1024 \\
                       --detBatchSize 256 \\
                       --dbConnPoolSize {w} \\
                       --submitMode event \\
@@ -969,7 +977,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                       --dbType 1 \\
                       --detStartSeq 0 \\
                       --reqIdOffset 1 \\
-                      --detWindow 65536 \\
+                      --detWindow 1024 \\
                       --detBatchSize 256 \\
                       --dbConnPoolSize {w} \\
                       --submitMode event \\
@@ -993,11 +1001,11 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                                  PSQL_BIN, args.db_port, LD_LIB):
                 gateway_rc, gw_out = run_cmd(gw_cmd, check=False, timeout=gw_timeout)
             (attempt_dir / f"{attempt_id}.gateway.log").write_text(gw_out)
-            _, server_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", "cat /tmp/server_single.log"], check=True)
+            _, server_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"cat {DB_RUNTIME_DIR}/server_single.log"], check=True)
             (attempt_dir / f"{attempt_id}.server.log").write_text(server_out)
-            _, server_err = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", "cat /tmp/server_single.err.log 2>/dev/null || true"], check=False)
+            _, server_err = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"cat {DB_RUNTIME_DIR}/server_single.err.log 2>/dev/null || true"], check=False)
             (attempt_dir / f"{attempt_id}.server.err.log").write_text(server_err)
-            _, pg_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"tail -c +{pg_log_offset + 1} /tmp/postgres_single.log"], check=True)
+            _, pg_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"tail -c +{pg_log_offset + 1} {DB_RUNTIME_DIR}/postgres_single.log"], check=True)
             (attempt_dir / f"{attempt_id}.postgres.log").write_text(pg_out)
 
             metrics = parse_gateway_result(gw_out, args.tpcc_tx_count, gateway_rc, mode=mode)
@@ -1020,7 +1028,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                 f"fuser -k -9 {args.server_port}/tcp >/dev/null 2>&1 || true; sleep 0.5; "
                 f"export LD_LIBRARY_PATH={LD_LIB}; "
                 f"{PG_CTL_BIN} -D {PGDATA} -m fast -w -t 300 stop >/dev/null && "
-                f"{PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 180 start >/dev/null && sleep 1; "))
+                f"{PG_CTL_BIN} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 180 start >/dev/null && sleep 1; "))
             delta_read = buffer_stats_after["blks_read"] - buffer_stats_before["blks_read"]
             delta_hit = buffer_stats_after["blks_hit"] - buffer_stats_before["blks_hit"]
             buffer_stats = dict(before=buffer_stats_before, after=buffer_stats_after,
@@ -1051,7 +1059,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
                 ], check=True)
                 merkle_pass = 1  # Not applicable, marked clean
 
-            _, server_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", "cat /tmp/server_single.log"], check=True)
+            _, server_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"cat {DB_RUNTIME_DIR}/server_single.log"], check=True)
             (attempt_dir / f"{attempt_id}.server.log").write_text(server_out)
             _, binary_provenance = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}",
                 f"sha256sum {TPCC_REMOTE_REPO}/ariabc_pg/build/bin/ariabc_pg_server {Path(PSQL_BIN).parent}/postgres"], check=True)
@@ -2331,9 +2339,9 @@ def _run_ycsb_sweep(args, repo_root, out_dir, modes):
             writer = csv.writer(f)
             writer.writerow(YCSB_CSV_FIELDS)
 
-    # Ensure /tmp/drop_merkle.sql exists on Node 1
+    # Ensure DB_RUNTIME_DIR/drop_merkle.sql exists on Node 1
     init_drop_sql = fr"""ssh {args.db_user}@{args.db_host} "
-        cat <<'EOF' > /tmp/drop_merkle.sql
+        cat <<'EOF' > {DB_RUNTIME_DIR}/drop_merkle.sql
 ALTER SYSTEM SET enable_merkle_index = 'off';
 DO \$\$
 DECLARE r record;
@@ -2404,8 +2412,8 @@ EOF
             needs_pg_restart = getattr(args, "cold_runs", True) or (last_configured_state != (mode, w)) or needs_periodic_restart
 
             log_cap_snip = (
-                "if [ -f /tmp/postgres_single.log ] && [ \\$(stat -c %s /tmp/postgres_single.log 2>/dev/null || echo 0) -gt 1073741824 ]; then "
-                "  truncate -s 0 /tmp/postgres_single.log 2>/dev/null || true; "
+                f"if [ -f {DB_RUNTIME_DIR}/postgres_single.log ] && [ \\$(stat -c %s {DB_RUNTIME_DIR}/postgres_single.log 2>/dev/null || echo 0) -gt 1073741824 ]; then "
+                f"  truncate -s 0 {DB_RUNTIME_DIR}/postgres_single.log 2>/dev/null || true; "
                 "fi;"
             )
 
@@ -2416,10 +2424,10 @@ EOF
                     {log_cap_snip}
                     export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
                     if ! {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
-                        {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                        {PG_CTL_BIN} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
                     fi
                     {PSQL_BIN} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -c \\"ALTER SYSTEM SET bcdb_worker_count = {target_w};\\" -c \\"ALTER SYSTEM SET enable_merkle_index = '{merkle_enable_guc}';\\" -c \\"ALTER SYSTEM SET shared_buffers = '{args.db_shared_buffers}';\\" -c \\"ALTER SYSTEM SET synchronous_commit = 'on';\\" -c \\"ALTER SYSTEM SET fsync = 'on';\\" -c \\"ALTER SYSTEM SET full_page_writes = 'on';\\" -c \\"ALTER SYSTEM SET track_io_timing = 'on';\\" -c \\"ALTER SYSTEM SET autovacuum = 'off';\\" >/dev/null 2>&1
-                    {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
+                    {PG_CTL_BIN} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
                     for _chk in \\$(seq 1 30); do
                         if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
                             break
@@ -2438,8 +2446,8 @@ EOF
                     {log_cap_snip}
                     export LD_LIBRARY_PATH={LD_LIB}:\\${{LD_LIBRARY_PATH:-}}
                     if ! {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
-                        {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \\
-                        {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                        {PG_CTL_BIN} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \\
+                        {PG_CTL_BIN} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
                     fi
                     for _chk in \\$(seq 1 30); do
                         if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
@@ -2448,8 +2456,8 @@ EOF
                         sleep 0.5
                     done
                     if ! {PSQL_BIN} -X -v ON_ERROR_STOP=1 -p {args.db_port} -U postgres -d postgres -v bench_enable_merkle={merkle_flag} -f {TPCC_REMOTE_REPO}/scripts/restore_usertable_small.sql -c 'VACUUM ANALYZE usertable_small;' >/dev/null 2>&1; then
-                        {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \\
-                        {PG_CTL_BIN} -D {PGDATA} -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                        {PG_CTL_BIN} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1 || \\
+                        {PG_CTL_BIN} -D {PGDATA} -l {DB_RUNTIME_DIR}/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
                         for _chk in \\$(seq 1 30); do
                             if {PG_ISREADY_BIN} -p {args.db_port} >/dev/null 2>&1; then
                                 break
@@ -2486,7 +2494,7 @@ EOF
                 if effective_settings[name] != value:
                     raise RuntimeError(f"Unexpected setting {name}={effective_settings[name]}")
 
-            _, pg_log_offset = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", "stat -c %s /tmp/postgres_single.log"], check=True)
+            _, pg_log_offset = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"stat -c %s {DB_RUNTIME_DIR}/postgres_single.log"], check=True)
             pg_log_offset = int(pg_log_offset.strip())
             # Step 2: Start ariabc_pg_server on Node 1
             print(f"  [2/4] Starting ariabc_pg_server on {args.db_host}:{args.server_port} (poolSize={w}, dbType={db_type})...")
@@ -2519,7 +2527,7 @@ EOF
                       --dbConnPoolSize {w} \\
                       --pgExecMode event \\
                       --bypassRaft 1 \\
-                      </dev/null >/tmp/server_single.log 2>/tmp/server_single.err.log &
+                      </dev/null >{DB_RUNTIME_DIR}/server_single.log 2>{DB_RUNTIME_DIR}/server_single.err.log &
 
                     for i in \\$(seq 1 30); do
                         if fuser {args.server_port}/tcp >/dev/null 2>&1; then
@@ -2566,7 +2574,7 @@ EOF
                       --bcdbInitBlockSize {w} \\
                       --pgExecMode event \\
                       --bypassRaft 1 \\
-                      </dev/null >/tmp/server_single.log 2>/tmp/server_single.err.log &
+                      </dev/null >{DB_RUNTIME_DIR}/server_single.log 2>{DB_RUNTIME_DIR}/server_single.err.log &
 
                     for i in \\$(seq 1 30); do
                         if fuser {args.server_port}/tcp >/dev/null 2>&1; then
@@ -2585,7 +2593,7 @@ EOF
 
             # Step 3: Run ariabc_pg_gateway from Gateway machine (10.129.27.111)
             workload_sha = hashlib.sha256((repo_root / wl).read_bytes()).hexdigest()
-            gw_workload_path = f"/tmp/ariabc_ycsb_{workload_sha}.sql"
+            gw_workload_path = f"{GW_WORKLOAD_DIR}/ariabc_ycsb_{workload_sha}.sql"
             run_cmd_args(["scp", "-o", "BatchMode=yes", str(repo_root / wl),
                           f"{args.gateway_user}@{args.gateway_host}:{gw_workload_path}"])
             print(f"  [3/4] Running ariabc_pg_gateway from {args.gateway_host} ({mode})...")
@@ -2597,7 +2605,7 @@ EOF
                       --dbType 0 \\
                       --detStartSeq 0 \\
                       --reqIdOffset 1 \\
-                      --detWindow 65536 \\
+                      --detWindow 1024 \\
                       --detBatchSize 256 \\
                       --dbConnPoolSize {w} \\
                       --submitMode event \\
@@ -2622,7 +2630,7 @@ EOF
                       --dbType 1 \\
                       --detStartSeq 0 \\
                       --reqIdOffset 1 \\
-                      --detWindow 65536 \\
+                      --detWindow 1024 \\
                       --detBatchSize 256 \\
                       --dbConnPoolSize {w} \\
                       --submitMode event \\
@@ -2647,11 +2655,11 @@ EOF
                                  PSQL_BIN, args.db_port, LD_LIB):
                 gateway_rc, gw_out = run_cmd(gw_cmd, check=False, timeout=300)
             (attempt_dir / f"{attempt_id}.gateway.log").write_text(gw_out)
-            _, server_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", "cat /tmp/server_single.log"], check=True)
+            _, server_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"cat {DB_RUNTIME_DIR}/server_single.log"], check=True)
             (attempt_dir / f"{attempt_id}.server.log").write_text(server_out)
-            _, server_err = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", "cat /tmp/server_single.err.log 2>/dev/null || true"], check=False)
+            _, server_err = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"cat {DB_RUNTIME_DIR}/server_single.err.log 2>/dev/null || true"], check=False)
             (attempt_dir / f"{attempt_id}.server.err.log").write_text(server_err)
-            _, pg_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"tail -c +{pg_log_offset + 1} /tmp/postgres_single.log"], check=True)
+            _, pg_out = run_cmd_args(["ssh", f"{args.db_user}@{args.db_host}", f"tail -c +{pg_log_offset + 1} {DB_RUNTIME_DIR}/postgres_single.log"], check=True)
             (attempt_dir / f"{attempt_id}.postgres.log").write_text(pg_out)
 
             expected_queries = count_workload_queries(repo_root / wl)
@@ -2709,16 +2717,16 @@ EOF
                 merkle_pass = 1  # Not applicable, marked clean
 
             # Keep the executor profile with each attempt. A single
-            # /tmp/server_single.log is overwritten by the next case
+            # DB_RUNTIME_DIR/server_single.log is overwritten by the next case
             # and cannot explain a throughput anomaly afterwards.
             _, server_out = run_cmd_args([
                 "ssh", f"{args.db_user}@{args.db_host}",
-                "cat /tmp/server_single.log"
+                f"cat {DB_RUNTIME_DIR}/server_single.log"
             ], check=True)
             (attempt_dir / f"{attempt_id}.server.log").write_text(server_out)
             _, server_err = run_cmd_args([
                 "ssh", f"{args.db_user}@{args.db_host}",
-                "cat /tmp/server_single.err.log 2>/dev/null || true"
+                f"cat {DB_RUNTIME_DIR}/server_single.err.log 2>/dev/null || true"
             ], check=False)
             (attempt_dir / f"{attempt_id}.server.err.log").write_text(server_err)
             if re.fullmatch(r"ycsb_workload_[abcdf]_skew_.*", wl_name):

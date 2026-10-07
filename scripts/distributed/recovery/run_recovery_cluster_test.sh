@@ -44,7 +44,7 @@ exec bash "$REPO_ROOT/scripts/distributed/run_4node_raft_cluster.sh" \
   --conn-fanout 1 --raft-ordered-fanout 1 --raft-ordering-policy leader-assigned \
   --raft-ordered-batch-append 1 --raft-ordered-batch-target-entries 64 \
   --raft-ordered-batch-linger-us 1000 --raft-ordered-coalesce-log 1 \
-  --kafka-completion-mode majority_async_all3 --det-window 65536 \
+  --kafka-completion-mode majority_async_all3 --det-window 1024 \
   --enable-merkle-index 1 --tx-sign blake3 --raft-apply-ledger-mode off \
   --db-shared-buffers 32MB --det-pipeline-depth 0 --det-block-parallel 64 \
   --det-event-block-fastpath 0 --submit-mode event --parallelism-mode pipeline \

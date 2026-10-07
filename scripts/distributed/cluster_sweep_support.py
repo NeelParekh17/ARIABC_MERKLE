@@ -176,7 +176,9 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
     # Versioned workload files may live in .bench_tmp, excluded from workspace
     # synchronization. Upload the exact bytes independently of --skip-sync.
     digest = hashlib.sha256((repo / workload).read_bytes()).hexdigest()
-    remote_workload = "/tmp/ariabc_cluster_" + digest + ".sql"
+    remote_workload = f"/home/{args.gateway_user}/ariabc_data/workloads/ariabc_cluster_{digest}.sql"
+    subprocess.run(["ssh", "-o", "BatchMode=yes", f"{args.gateway_user}@{args.gateway_host}",
+                    f"mkdir -p /home/{args.gateway_user}/ariabc_data/workloads"], check=True, timeout=60)
     subprocess.run(["scp", "-o", "BatchMode=yes", str(repo / workload),
                     f"{args.gateway_user}@{args.gateway_host}:{remote_workload}"], check=True, timeout=60)
     for name in ("run_4node_raft_cluster.sh", "benchmark_cache.py", "source_fingerprint.py"):
@@ -203,7 +205,9 @@ def run_cluster_case(args, repo, out, workload, workers, run_index, restart):
                "--raft-ordering-policy", "leader-assigned", "--raft-ordered-batch-append", "1",
                "--raft-ordered-batch-target-entries", "64", "--raft-ordered-batch-linger-us", "1000",
                "--raft-ordered-coalesce-log", "1", "--kafka-completion-mode", "majority_async_all3",
-               "--det-window", "65536"]
+               "--det-window", os.environ.get("CLUSTER_DET_WINDOW", "1024")]
+    metadata["det_window"] = int(command[-1])
+    metadata["target_tps"] = float(os.environ.get("GATEWAY_TARGET_TPS") or 0)
     recovery_mode = getattr(args, "recovery_mode", None) or os.environ.get("RECOVERY_MODE", "off")
     if recovery_mode != "off":
         command.extend(["--recovery-mode", recovery_mode])

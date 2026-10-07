@@ -41,7 +41,7 @@ DEFAULT_REMOTE_HOST = "10.129.148.247"
 DEFAULT_REMOTE_USER = "neel"
 DEFAULT_DB_PORT = 5438
 DEFAULT_SERVER_PORT = 8000
-DEFAULT_REMOTE_DIR = "/tmp/ariabc_oom_100m"
+DEFAULT_REMOTE_DIR = "/home/neel/ariabc_data/oom_100m"
 DEFAULT_INSTALL_DIR = "/home/neel/Desktop/ariabc_install"
 DEFAULT_CLUSTER_DIR = "/home/neel/Desktop/ariabc_cluster"
 DEFAULT_GATEWAY_HOST = "10.129.27.111"
@@ -1155,14 +1155,19 @@ cat /sys/dev/block/"$major_minor"/stat
                 write_ios=values[4], write_sectors=values[6], write_ms=values[7], io_ms=values[9])
 
 
+def gateway_workload_path(args, digest):
+    # Kept under the gateway user's home, never /tmp (wiped on reboot).
+    return f"/home/{args.gateway_user}/ariabc_data/oom_workloads/oom_{digest}.sql"
+
+
 def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
     remote = args.gateway_host not in ("localhost", "127.0.0.1")
     binary = (f"{args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway" if remote else
               str(REPO_ROOT / "ariabc_pg/build/bin/ariabc_pg_gateway"))
-    remote_wl = f"/tmp/oom_{hashlib.sha256(workload_file.read_bytes()).hexdigest()}.sql"
+    remote_wl = gateway_workload_path(args, hashlib.sha256(workload_file.read_bytes()).hexdigest())
     command = [binary, "--nodes", f"{args.remote_host}:{args.server_port}", "--queryFrom",
                remote_wl if remote else str(workload_file), "--dbType", "0" if base_mode(mode) == "pg" else "1",
-               "--detStartSeq", "0", "--reqIdOffset", "1", "--detWindow", "65536",
+               "--detStartSeq", "0", "--reqIdOffset", "1", "--detWindow", "1024",
                "--detBatchSize", "256", "--dbConnPoolSize", str(workers), "--detSubmitPipeline", "1",
                "--detPipelineDepth", "1024", "--detClientMode", "event", "--detClientWorkers", "96",
                "--detClientInflight", "16", "--clientId", "single-gateway-direct",
@@ -1213,8 +1218,11 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         reset_ms = (time.monotonic() - started) * 1000
         if args.gateway_host not in ("localhost", "127.0.0.1"):
             digest = hashlib.sha256(workload_file.read_bytes()).hexdigest()
+            gateway_wl = gateway_workload_path(args, digest)
+            run_remote(args.gateway_host, args.gateway_user,
+                       f"mkdir -p {shlex.quote(os.path.dirname(gateway_wl))}", timeout=60)
             subprocess.run(["scp", "-o", "BatchMode=yes", str(workload_file),
-                            f"{args.gateway_user}@{args.gateway_host}:/tmp/oom_{digest}.sql"],
+                            f"{args.gateway_user}@{args.gateway_host}:{gateway_wl}"],
                            check=True, timeout=60)
         # PG13 collector publishes asynchronously. Allow startup counters to
         # settle; after the run disconnect the server before the final snapshot.

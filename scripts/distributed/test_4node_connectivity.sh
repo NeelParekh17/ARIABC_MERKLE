@@ -37,7 +37,7 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
 
 NO_KAFKA="${NO_KAFKA:-0}"
 SKIP_GW_TEST="${SKIP_GW_TEST:-0}"
-LOG_DIR="${LOG_DIR:-/tmp/ariabc_connectivity_$(date +%H%M%S)}"
+LOG_DIR="${LOG_DIR:-$HOME/ariabc_data/connectivity_logs/$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$LOG_DIR"
 
 PASS=0

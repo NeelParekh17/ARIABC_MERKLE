@@ -248,6 +248,7 @@ TOPIC_EOF
 
   node_ssh "$idx" "
     export LD_LIBRARY_PATH='${node_lib_path}:\${LD_LIBRARY_PATH:-}'
+    mkdir -p \"\$HOME/ariabc_data/cluster_logs\"
     nohup '$srv_bin' \
       --id ${NODE_IDS[$idx]} \
       --raftEndpoint ${ip}:${RAFT_PORT} \
@@ -256,7 +257,7 @@ TOPIC_EOF
       --dbName $DB_NAME --dbHost 127.0.0.1 --dbPort $DB_PORT --dbUser $DB_USER \
       --dbType 1 --safedb 1 --dbConnPoolSize $DB_CONN_POOL_SIZE \
       $kafka_args \
-      >'/tmp/ariabc_kafka_sweep_${name}.log' 2>&1 &
+      >"\$HOME/ariabc_data/cluster_logs/ariabc_kafka_sweep_${name}.log" 2>&1 &
     echo \$!
   " >"$node_log_dir/server_pid.txt" 2>&1
 

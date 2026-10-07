@@ -149,7 +149,7 @@ run_one() {
 workers=$workers
 det_block_parallel=$parallel
 pool_size=256
-det_window=8192
+det_window=1024
 det_batch_size=256
 det_pipeline_depth=1024
 threads=8
@@ -205,7 +205,7 @@ CFG
     "$RUNNER" \
       --threads 8 \
       --preferred-leader-id 1 \
-      --det-window 8192 \
+      --det-window 1024 \
       --det-batch-size 256 \
       --det-pipeline-depth 1024 \
       --pool-size 256 \

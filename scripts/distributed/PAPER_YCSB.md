@@ -231,7 +231,7 @@ cold-cache evidence, initial/final table dumps, and Merkle results. TPS counts
 transactions; multiply by ten for the rate of internal operations.
 
 Ports are isolated: PostgreSQL 55493, server 18693, Raft 19693, Kafka 19092,
-controller 19093. Owned data remains under `/tmp/ariabc_paper_cluster_RUN_ID`.
+controller 19093. Owned data remains under `/home/neel/ariabc_data/paper_cluster_RUN_ID`.
 Only PIDs recorded by this campaign are stopped. Canonical database instances,
 Kafka topics, installed source, and binaries are retained.
 

@@ -62,12 +62,13 @@ def run_standalone_case(mode, wl_name, w, retries=1):
             print(f"    [1/4] Reconfiguring & Restarting PostgreSQL on {DB_HOST} ({mode}, workers={w})...", flush=True)
             setup_cmd = f"""ssh {DB_USER}@{DB_HOST} "
                 fuser -k -9 {SERVER_PORT}/tcp >/dev/null 2>&1 || true
+                mkdir -p /home/neel/ariabc_data/gateway_sweep
                 export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
                 if ! /home/neel/Desktop/ariabc_install/bin/pg_isready -p {DB_PORT} >/dev/null 2>&1; then
-                    /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
+                    /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /home/neel/ariabc_data/gateway_sweep/postgres_single.log -w -t 60 start >/dev/null 2>&1 || true
                 fi
                 /home/neel/Desktop/ariabc_install/bin/psql -p {DB_PORT} -U postgres -d postgres -c \\"ALTER SYSTEM SET bcdb_worker_count = {w};\\" -c \\"ALTER SYSTEM SET enable_merkle_index = '{merkle_enable_guc}';\\" -c \\"ALTER SYSTEM SET shared_buffers = '{SHARED_BUFFERS}';\\" -c \\"ALTER SYSTEM SET synchronous_commit = 'on';\\" >/dev/null 2>&1
-                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /tmp/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
+                /home/neel/Desktop/ariabc_install/bin/pg_ctl -D /home/neel/Desktop/ariabc_cluster/.bench_tmp/single_node_pgdata -l /home/neel/ariabc_data/gateway_sweep/postgres_single.log -w -t 120 -m fast restart >/dev/null 2>&1
                 for _chk in \\$(seq 1 30); do
                     if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {DB_PORT} >/dev/null 2>&1; then
                         break
@@ -93,6 +94,7 @@ def run_standalone_case(mode, wl_name, w, retries=1):
                 export LD_LIBRARY_PATH=/home/neel/Desktop/ariabc_install/lib:\\${{LD_LIBRARY_PATH:-}}
 
                 fuser -k -9 {SERVER_PORT}/tcp >/dev/null 2>&1 || true
+                mkdir -p /home/neel/ariabc_data/gateway_sweep
 
                 for _chk in \\$(seq 1 30); do
                     if /home/neel/Desktop/ariabc_install/bin/pg_isready -p {DB_PORT} >/dev/null 2>&1; then
@@ -116,7 +118,7 @@ def run_standalone_case(mode, wl_name, w, retries=1):
                   --bcdbInitBlockSize {w} \\
                   --pgExecMode event \\
                   --bypassRaft 1 \\
-                  </dev/null >/tmp/server_single.log 2>&1 &
+                  </dev/null >/home/neel/ariabc_data/gateway_sweep/server_single.log 2>&1 &
 
                 for i in \\$(seq 1 30); do
                     if fuser {SERVER_PORT}/tcp >/dev/null 2>&1; then
@@ -141,7 +143,7 @@ def run_standalone_case(mode, wl_name, w, retries=1):
                   --dbType 1 \\
                   --detStartSeq 0 \\
                   --reqIdOffset 1 \\
-                  --detWindow 65536 \\
+                  --detWindow 1024 \\
                   --detBatchSize 256 \\
                   --dbConnPoolSize {w} \\
                   --submitMode event \\

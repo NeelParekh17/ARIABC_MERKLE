@@ -235,7 +235,7 @@ printf 'workload,pg_executor_workers,rep,artifact\n' > "$OUT/runs.csv"
             --raft-ordered-batch-linger-us "${RAFT_ORDERED_LINGER_US:-1000}" \
             --raft-ordered-coalesce-log "${RAFT_ORDERED_COALESCE_LOG:-1}" \
             --kafka-completion-mode "$KAFKA_COMPLETION_MODE" \
-            --det-window "${DET_WINDOW:-65536}"
+            --det-window "${DET_WINDOW:-1024}"
         RUN_RC=$?
         set -e
 

@@ -109,13 +109,18 @@ REMOTE_GATEWAY_BIN_U24="/home/neel/Desktop/ariabc_cluster/ariabc_pg/build/bin/ar
 # Binary path for Ubuntu 22.04 nodes (user4, new-node): built locally with rdkafka from Desktop
 REMOTE_BIN_U22="/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_server"
 REMOTE_GATEWAY_BIN_U22="/home/neel/Desktop/ariabc_pg_build_u22/bin/ariabc_pg_gateway"
-# Static cmake for Ubuntu 22.04 nodes (no system cmake 3.16+) — stays in /tmp (only needed at build time)
-REMOTE_CMAKE_U22="/tmp/cmake-3.28.3-linux-x86_64/bin/cmake"
-REMOTE_CMAKE_PERSIST_U22="/home/neel/Desktop/cmake_portable"  # survives reboots; re-linked into /tmp
-REMOTE_CMAKE_TARBALL_U22="/tmp/cmake-3.28.3-linux-x86_64.tar.gz"
+# Persistent data roots. Never /tmp: it is wiped on reboot.
+REMOTE_DATA_ROOT="${REMOTE_DATA_ROOT:-/home/neel/ariabc_data}"
+REMOTE_TOOLS_DIR="$REMOTE_DATA_ROOT/tools"        # cmake, openssl headers, rdkafka tarball
+REMOTE_KAFKA_DATA_DIR="$REMOTE_DATA_ROOT/kafka"   # KRaft log.dirs
+LOCAL_TOOLS_DIR="${LOCAL_TOOLS_DIR:-$HOME/ariabc_data/tools}"
+# Static cmake for Ubuntu 22.04 nodes (no system cmake 3.16+)
+REMOTE_CMAKE_U22="$REMOTE_TOOLS_DIR/cmake-3.28.3-linux-x86_64/bin/cmake"
+REMOTE_CMAKE_PERSIST_U22="/home/neel/Desktop/cmake_portable"  # older persistent copy; linked into REMOTE_TOOLS_DIR
+REMOTE_CMAKE_TARBALL_U22="$REMOTE_TOOLS_DIR/cmake-3.28.3-linux-x86_64.tar.gz"
 REMOTE_CMAKE_URL_U22="https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz"
-# OpenSSL headers pushed from ASUS for Ubuntu 22.04 build — stays in /tmp (build-time only)
-REMOTE_OPENSSL_INCLUDE_U22="/tmp/openssl_include"
+# OpenSSL headers pushed from ASUS for Ubuntu 22.04 build
+REMOTE_OPENSSL_INCLUDE_U22="$REMOTE_TOOLS_DIR/openssl_include"
 
 LOCAL_BIN="$REPO_ROOT/ariabc_pg/build/bin"
 
@@ -171,10 +176,12 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     echo "Skipping workspace sync to gateway machine (SKIP_SYNC=1)"
   fi
 
-  for _cmake_cache in /tmp/cmake-3.28.3-linux-x86_64.tar.gz "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
+  for _cmake_cache in "$LOCAL_TOOLS_DIR/cmake-3.28.3-linux-x86_64.tar.gz" "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
     if [[ -s "$_cmake_cache" ]]; then
       echo "Syncing cached portable CMake tarball to gateway..."
-      if ! rsync -az "$_cmake_cache" "$GATEWAY_USER@$GATEWAY_HOST:/tmp/cmake-3.28.3-linux-x86_64.tar.gz"; then
+      # Relative rsync paths resolve under the gateway user's home (ariabc_data/tools).
+      if ! { ssh -o BatchMode=yes -o ConnectTimeout=10 "$GATEWAY_USER@$GATEWAY_HOST" 'mkdir -p ariabc_data/tools' &&
+             rsync -az "$_cmake_cache" "$GATEWAY_USER@$GATEWAY_HOST:ariabc_data/tools/cmake-3.28.3-linux-x86_64.tar.gz"; }; then
         echo "WARNING: failed to sync cached portable CMake tarball to gateway; remote fallback may be used" >&2
       fi
       break
@@ -203,6 +210,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     POST_WORKLOAD_CONVERGE_SQL POST_WORKLOAD_CONVERGE_EXPECT POST_WORKLOAD_CONVERGE_TIMEOUT \
     ENABLE_MERKLE_INDEX \
     NO_KAFKA ORDERING_MODE CLUSTER_ORDERING_MODE \
+    GATEWAY_TARGET_TPS \
     NODE_IDS_CSV NODE_IPS_CSV NODE_NAMES_CSV NODE_USERS_CSV \
     NODE_IS_U22_CSV NODE_CLIENT_PORTS_CSV \
     RAFT_PORT DB_PORT DB_USER DB_NAME \
@@ -300,7 +308,7 @@ mkdir "$LOG_DIR" || { echo "Refusing to overwrite run $LOG_DIR" >&2; exit 2; }
 echo "$$" > "$LOG_DIR/runner.pid"
 LOG_FILE="$LOG_DIR/runner.log"
 exec > >(tee -ia "$LOG_FILE") 2>&1
-REMOTE_LOG_DIR="/tmp/ariabc_cluster"
+REMOTE_LOG_DIR="$REMOTE_DATA_ROOT/cluster_logs"
 RUN_ID="$(basename "$LOG_DIR")"
 RUN_START_EPOCH="$(date +%s)"
 
@@ -430,7 +438,7 @@ VERIFY_TABLE="${VERIFY_TABLE:-usertable_small}"
 VERIFY_MARKER_KEY="${VERIFY_MARKER_KEY:-99999999}"
 DET_START_SEQ="${DET_START_SEQ:-0}"
 REQ_ID_OFFSET="${REQ_ID_OFFSET:-1}"
-DET_WINDOW="${DET_WINDOW:-4096}"
+DET_WINDOW="${DET_WINDOW:-1024}"
 DET_BATCH_SIZE="${DET_BATCH_SIZE:-256}"
 NUM_TERMINALS="${NUM_TERMINALS:-1}"
 THREADS_ARG=""
@@ -610,7 +618,7 @@ Options:
                   First 8-digit DET sequence sent to BCDB (default: 0 for fresh strict runs)
   --req-id-offset N
                   First gateway request suffix (default: 1)
-  --det-window N   Gateway deterministic in-flight window (default: 4096)
+  --det-window N   Gateway deterministic in-flight window (default: 1024)
   --det-batch-size N
                   Gateway deterministic Raft batch size (default: 256)
   --parallelism-mode M
@@ -635,7 +643,7 @@ Options:
                   Per client-lane deterministic pipeline depth used with
                   --threads when --det-window/--det-pipeline-depth are not
                   explicitly set (default: 512). Effective detWindow becomes
-                  threads * per-thread-window.
+                  min(threads * per-thread-window, 1024).
   --conn-fanout N Gateway submit sockets per logical node in event submit mode
                   (default: 1). In raft-kafka mode, multi-socket fanout is safe
                   only with --raft-ordered-fanout 1 because the leader reorders
@@ -836,7 +844,7 @@ while [[ $# -gt 0 ]]; do
     --verify-table) VERIFY_TABLE="${2:-}"; shift 2 ;;
     --det-start-seq) DET_START_SEQ="${2:-0}"; shift 2 ;;
     --req-id-offset) REQ_ID_OFFSET="${2:-1}"; shift 2 ;;
-    --det-window)   DET_WINDOW="${2:-4096}"; DET_WINDOW_EXPLICIT=1; shift 2 ;;
+    --det-window)   DET_WINDOW="${2:-1024}"; DET_WINDOW_EXPLICIT=1; shift 2 ;;
     --det-batch-size) DET_BATCH_SIZE="${2:-256}"; DET_BATCH_SIZE_EXPLICIT=1; shift 2 ;;
     --threads) THREADS_ARG="${2:-1}"; NUM_TERMINALS="${2:-1}"; shift 2 ;;
     --num-terminals) NUM_TERMINALS="${2:-1}"; shift 2 ;;
@@ -1164,7 +1172,12 @@ if [[ "$NUM_TERMINALS" -lt 1 || "$DET_PIPELINE_DEPTH" -lt 0 || "$PER_THREAD_WIND
 fi
 if [[ -n "$THREADS_ARG" ]]; then
   if [[ "$DET_WINDOW_EXPLICIT" -eq 0 ]]; then
-    DET_WINDOW=$(( NUM_TERMINALS * PER_THREAD_WINDOW ))
+    # Never exceed the default window: more outstanding transactions only
+    # lengthen the queue (latency ~ window / TPS) without adding throughput.
+    _lane_window=$(( NUM_TERMINALS * PER_THREAD_WINDOW ))
+    if [[ "$_lane_window" -lt "$DET_WINDOW" ]]; then
+      DET_WINDOW="$_lane_window"
+    fi
   fi
   if [[ "$DET_PIPELINE_DEPTH_EXPLICIT" -eq 0 || "$DET_PIPELINE_DEPTH" -eq 0 ]]; then
     DET_PIPELINE_DEPTH="$PER_THREAD_WINDOW"
@@ -1560,18 +1573,18 @@ start_fastpath_watchdog() {
               watchdog_query_node "$idx" "SELECT * FROM pg_locks;" > "$LOG_DIR/pg_locks_${nip}.txt" 2>&1 || true
 
               node_ssh "$idx" "
-                awk '/RUN_MARKER/{flag=1} flag' '$REMOTE_LOG_DIR/server_node${id}.log' > '/tmp/server_node${id}_marker.log' 2>/dev/null || true
-                awk '/RUN_MARKER/{flag=1} flag' '$REMOTE_REPO_ROOT/server.log' > '/tmp/postgres_node${id}_marker.log' 2>/dev/null || true
-                echo '=== Active ariabc_pg_server PIDs ===' > '/tmp/server_node${id}_pids.txt'
-                pgrep -a -f 'ariabc_pg_server' >> '/tmp/server_node${id}_pids.txt' || true
+                awk '/RUN_MARKER/{flag=1} flag' '$REMOTE_LOG_DIR/server_node${id}.log' > '$REMOTE_LOG_DIR/server_node${id}_marker.log' 2>/dev/null || true
+                awk '/RUN_MARKER/{flag=1} flag' '$REMOTE_REPO_ROOT/server.log' > '$REMOTE_LOG_DIR/postgres_node${id}_marker.log' 2>/dev/null || true
+                echo '=== Active ariabc_pg_server PIDs ===' > '$REMOTE_LOG_DIR/server_node${id}_pids.txt'
+                pgrep -a -f 'ariabc_pg_server' >> '$REMOTE_LOG_DIR/server_node${id}_pids.txt' || true
               " >/dev/null 2>&1 || true
 
               timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-                "${NODE_USERS[$idx]}@$nip:/tmp/server_node${id}_marker.log" "$LOG_DIR/server_node${id}_${nip}_from_marker.log" 2>/dev/null || true
+                "${NODE_USERS[$idx]}@$nip:$REMOTE_LOG_DIR/server_node${id}_marker.log" "$LOG_DIR/server_node${id}_${nip}_from_marker.log" 2>/dev/null || true
               timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-                "${NODE_USERS[$idx]}@$nip:/tmp/postgres_node${id}_marker.log" "$LOG_DIR/postgres_node${id}_${nip}_from_marker.log" 2>/dev/null || true
+                "${NODE_USERS[$idx]}@$nip:$REMOTE_LOG_DIR/postgres_node${id}_marker.log" "$LOG_DIR/postgres_node${id}_${nip}_from_marker.log" 2>/dev/null || true
               timeout 20 sshpass -p "$CLUSTER_PASSWORD" rsync -az -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-                "${NODE_USERS[$idx]}@$nip:/tmp/server_node${id}_pids.txt" "$LOG_DIR/server_node${id}_${nip}_pids.txt" 2>/dev/null || true
+                "${NODE_USERS[$idx]}@$nip:$REMOTE_LOG_DIR/server_node${id}_pids.txt" "$LOG_DIR/server_node${id}_${nip}_pids.txt" 2>/dev/null || true
             done
 
             # Save last progress line
@@ -1805,7 +1818,7 @@ collect_final_profiles_before_fail() {
 # ===========================================================================
 find_local_cmake_tarball() {
   local candidate
-  for candidate in /tmp/cmake-3.28.3-linux-x86_64.tar.gz "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
+  for candidate in "$LOCAL_TOOLS_DIR/cmake-3.28.3-linux-x86_64.tar.gz" "$HOME/Desktop/cmake-3.28.3-linux-x86_64.tar.gz"; do
     if [[ -s "$candidate" ]]; then
       echo "$candidate"
       return 0
@@ -1826,14 +1839,15 @@ ensure_u22_cmake() {
   local name="${NODE_NAMES[$idx]}"
   local cmake_tarball
 
-  # The build needs CMake >= 3.26. /tmp is wiped on reboot, so re-link the portable
-  # copy kept in $REMOTE_CMAKE_PERSIST_U22; a system cmake counts only if new enough.
-  if node_ssh "$idx" "test -x '$REMOTE_CMAKE_U22' || { test -x '$REMOTE_CMAKE_PERSIST_U22/bin/cmake' && rm -rf /tmp/cmake-3.28.3-linux-x86_64 && ln -s '$REMOTE_CMAKE_PERSIST_U22' /tmp/cmake-3.28.3-linux-x86_64 && test -x '$REMOTE_CMAKE_U22'; } || { v=\$(cmake --version 2>/dev/null | head -1 | grep -Eo '[0-9]+[.][0-9]+' | head -1); [[ -n \$v ]] && printf '%s\\n3.26\\n' \$v | sort -V -C -r; }" 2>/dev/null; then
+  # The build needs CMake >= 3.26. Reuse the staged copy in $REMOTE_TOOLS_DIR, else link
+  # the older persistent copy in $REMOTE_CMAKE_PERSIST_U22; a system cmake counts only if new enough.
+  if node_ssh "$idx" "test -x '$REMOTE_CMAKE_U22' || { test -x '$REMOTE_CMAKE_PERSIST_U22/bin/cmake' && mkdir -p '$REMOTE_TOOLS_DIR' && rm -rf '$REMOTE_TOOLS_DIR/cmake-3.28.3-linux-x86_64' && ln -s '$REMOTE_CMAKE_PERSIST_U22' '$REMOTE_TOOLS_DIR/cmake-3.28.3-linux-x86_64' && test -x '$REMOTE_CMAKE_U22'; } || { v=\$(cmake --version 2>/dev/null | head -1 | grep -Eo '[0-9]+[.][0-9]+' | head -1); [[ -n \$v ]] && printf '%s\\n3.26\\n' \$v | sort -V -C -r; }" 2>/dev/null; then
     return 0
   fi
 
   log "  Staging portable CMake on $name"
   cmake_tarball="$(find_local_cmake_tarball || true)"
+  node_ssh "$idx" "mkdir -p '$REMOTE_TOOLS_DIR'" 2>/dev/null || true
   if [[ -n "$cmake_tarball" ]]; then
     if ! node_rsync_to "$idx" "$cmake_tarball" "$REMOTE_CMAKE_TARBALL_U22"; then
       log "  WARNING: failed to copy portable CMake tarball to $name; trying remote download"
@@ -1859,8 +1873,8 @@ ensure_u22_cmake() {
         exit 1
       fi
     fi
-    rm -rf /tmp/cmake-3.28.3-linux-x86_64
-    tar -C /tmp -xzf '$REMOTE_CMAKE_TARBALL_U22'
+    rm -rf '$REMOTE_TOOLS_DIR/cmake-3.28.3-linux-x86_64'
+    tar -C '$REMOTE_TOOLS_DIR' -xzf '$REMOTE_CMAKE_TARBALL_U22'
     test -x '$REMOTE_CMAKE_U22'
     '$REMOTE_CMAKE_U22' --version | head -1
   " 2>&1 | sed "s/^/[$name] /" || die "failed to stage portable CMake on $name"
@@ -2144,9 +2158,9 @@ if [[ "$SKIP_RDKAFKA_SETUP" -eq 0 ]]; then
   CMAKE_TARBALL="$(find_local_cmake_tarball || true)"
   if [[ -z "$CMAKE_TARBALL" ]]; then
     log "  cmake-3.28.3 tarball not found locally — will attempt apt-get on remote nodes"
-    log "    (pre-download: wget -P /tmp https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz)"
+    log "    (pre-download: wget -P $LOCAL_TOOLS_DIR https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz)"
   fi
-  RDKAFKA_TARBALL="/tmp/librdkafka-v2.3.0.tar.gz"
+  RDKAFKA_TARBALL="$LOCAL_TOOLS_DIR/librdkafka-v2.3.0.tar.gz"
 
   # All remote nodes — push cmake + librdkafka tarballs then build in parallel
   declare -a RDKAFKA_PIDS=()
@@ -2154,18 +2168,19 @@ if [[ "$SKIP_RDKAFKA_SETUP" -eq 0 ]]; then
   for idx in "${!NODE_IDS[@]}"; do
     name="${NODE_NAMES[$idx]}"
     log "  Pushing ensure_rdkafka.sh to $name..."
-    node_rsync_to "$idx" "$ENSURE_RDKAFKA_SCRIPT" "/tmp/ensure_rdkafka.sh" || { log "WARNING: rsync to $name failed"; RDKAFKA_PIDS+=(""); RDKAFKA_LOGS+=(""); continue; }
+    node_ssh "$idx" "mkdir -p '$REMOTE_TOOLS_DIR'" 2>/dev/null || true
+    node_rsync_to "$idx" "$ENSURE_RDKAFKA_SCRIPT" "$REMOTE_TOOLS_DIR/ensure_rdkafka.sh" || { log "WARNING: rsync to $name failed"; RDKAFKA_PIDS+=(""); RDKAFKA_LOGS+=(""); continue; }
     # Push cmake tarball so nodes without system cmake can still build
-    [[ -s "$CMAKE_TARBALL" ]] && node_rsync_to "$idx" "$CMAKE_TARBALL" "/tmp/cmake-3.28.3-linux-x86_64.tar.gz" 2>/dev/null || true
+    [[ -s "$CMAKE_TARBALL" ]] && node_rsync_to "$idx" "$CMAKE_TARBALL" "$REMOTE_CMAKE_TARBALL_U22" 2>/dev/null || true
     # Push librdkafka source tarball if already cached locally (avoids per-node download)
-    [[ -s "$RDKAFKA_TARBALL" ]] && node_rsync_to "$idx" "$RDKAFKA_TARBALL" "/tmp/librdkafka-v2.3.0.tar.gz" 2>/dev/null || true
+    [[ -s "$RDKAFKA_TARBALL" ]] && node_rsync_to "$idx" "$RDKAFKA_TARBALL" "$REMOTE_TOOLS_DIR/librdkafka-v2.3.0.tar.gz" 2>/dev/null || true
     rdkafka_log="$LOG_DIR/ensure_rdkafka_${name}.log"
     node_ssh "$idx" "
       set -euo pipefail
-      if [[ -f /tmp/cmake-3.28.3-linux-x86_64.tar.gz && ! -d /tmp/cmake-3.28.3-linux-x86_64 ]]; then
-        tar -C /tmp -xzf /tmp/cmake-3.28.3-linux-x86_64.tar.gz
+      if [[ -f '$REMOTE_CMAKE_TARBALL_U22' && ! -d '$REMOTE_TOOLS_DIR/cmake-3.28.3-linux-x86_64' ]]; then
+        tar -C '$REMOTE_TOOLS_DIR' -xzf '$REMOTE_CMAKE_TARBALL_U22'
       fi
-      chmod +x /tmp/ensure_rdkafka.sh && /tmp/ensure_rdkafka.sh
+      chmod +x '$REMOTE_TOOLS_DIR/ensure_rdkafka.sh' && ARIABC_BUILD_PARENT='$REMOTE_TOOLS_DIR' '$REMOTE_TOOLS_DIR/ensure_rdkafka.sh'
     " >"$rdkafka_log" 2>&1 &
     RDKAFKA_PIDS+=("$!")
     RDKAFKA_LOGS+=("$rdkafka_log")
@@ -2268,7 +2283,7 @@ if [[ "${SKIP_BUILD:-0}" -eq 0 ]]; then
       fi
     fi
 
-    for _c_cand in /home/neel/bin/cmake-3.28.3-linux-x86_64/bin /tmp/cmake-3.28.3-linux-x86_64/bin; do
+    for _c_cand in /home/neel/bin/cmake-3.28.3-linux-x86_64/bin "$LOCAL_TOOLS_DIR/cmake-3.28.3-linux-x86_64/bin"; do
       [[ -d "$_c_cand" ]] && export PATH="$_c_cand:$PATH"
     done
 
@@ -2509,7 +2524,7 @@ else
 fi
 REPO="$REMOTE_REPO_ROOT"
 INSTALL="$REMOTE_INSTALL_DIR"
-BUILD_DIR="/tmp/ariabc_pg_build_u22"
+BUILD_DIR="$REMOTE_DATA_ROOT/build/ariabc_pg_build_u22"
 DESKTOP_BIN_DIR="/home/neel/Desktop/ariabc_pg_build_u22/bin"
 EXTRA_CMAKE_ARGS="$_kafka_opt"
 
@@ -2781,7 +2796,7 @@ if [[ "$NO_KAFKA" -eq 0 && "$SKIP_KAFKA" -eq 0 ]]; then
 
     if [[ "$all_brokers_ready" -eq 0 ]]; then
       log "  Configuring and launching colocated KRaft cluster across nodes..."
-      CLUSTER_ID=$(node_ssh 0 "if ! command -v java >/dev/null 2>&1; then export JAVA_HOME=/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64; export PATH=\$JAVA_HOME/bin:\$PATH; fi; grep '^cluster.id=' /tmp/kraft-colocated-logs/meta.properties 2>/dev/null | cut -d= -f2 || '$KAFKA_HOME_REMOTE/bin/kafka-storage.sh' random-uuid | tail -1 | tr -d '\r'")
+      CLUSTER_ID=$(node_ssh 0 "if ! command -v java >/dev/null 2>&1; then export JAVA_HOME=/home/neel/Desktop/usr/lib/jvm/java-21-openjdk-amd64; export PATH=\$JAVA_HOME/bin:\$PATH; fi; id=\$(grep '^cluster.id=' '$REMOTE_KAFKA_DATA_DIR/kraft-colocated-logs/meta.properties' 2>/dev/null | cut -d= -f2); [[ -n \"\$id\" ]] || id=\$('$KAFKA_HOME_REMOTE/bin/kafka-storage.sh' random-uuid | tail -1 | tr -d '\r'); echo \"\$id\"")
       [[ -z "$CLUSTER_ID" ]] && die "Failed to determine KRaft cluster ID"
       log "  KRaft cluster ID: $CLUSTER_ID"
 
@@ -2819,7 +2834,7 @@ num.io.threads=8
 socket.send.buffer.bytes=4194304
 socket.receive.buffer.bytes=4194304
 socket.request.max.bytes=104857600
-log.dirs=/tmp/kraft-colocated-logs
+log.dirs=$REMOTE_KAFKA_DATA_DIR/kraft-colocated-logs
 num.partitions=1
 num.recovery.threads.per.data.dir=1
 offsets.topic.replication.factor=1
@@ -2900,6 +2915,11 @@ sed -i "s|^advertised.listeners=.*|advertised.listeners=PLAINTEXT://\$GW_IP:${KA
 grep -q '^socket.send.buffer.bytes=' "\$SERVER_PROPS" 2>/dev/null || echo "socket.send.buffer.bytes=4194304" >> "\$SERVER_PROPS"
 grep -q '^socket.receive.buffer.bytes=' "\$SERVER_PROPS" 2>/dev/null || echo "socket.receive.buffer.bytes=4194304" >> "\$SERVER_PROPS"
 grep -q '^num.network.threads=' "\$SERVER_PROPS" 2>/dev/null || echo "num.network.threads=8" >> "\$SERVER_PROPS"
+mkdir -p '$REMOTE_KAFKA_DATA_DIR'
+set_log_dirs() {
+  if grep -q '^log.dirs=' "\$1" 2>/dev/null; then sed -i "s|^log.dirs=.*|log.dirs=\$2|" "\$1"; else echo "log.dirs=\$2" >> "\$1"; fi
+}
+set_log_dirs "\$SERVER_PROPS" '$REMOTE_KAFKA_DATA_DIR/kraft-combined-logs'
 
 # Ensure server_2.properties and server_3.properties exist
 if [[ ! -f "\$SERVER_2_PROPS" ]]; then
@@ -2917,7 +2937,7 @@ num.io.threads=8
 socket.send.buffer.bytes=4194304
 socket.receive.buffer.bytes=4194304
 socket.request.max.bytes=104857600
-log.dirs=/tmp/kraft-broker-2-logs
+log.dirs=$REMOTE_KAFKA_DATA_DIR/kraft-broker-2-logs
 num.partitions=1
 num.recovery.threads.per.data.dir=1
 offsets.topic.replication.factor=1
@@ -2944,7 +2964,7 @@ num.io.threads=8
 socket.send.buffer.bytes=4194304
 socket.receive.buffer.bytes=4194304
 socket.request.max.bytes=104857600
-log.dirs=/tmp/kraft-broker-3-logs
+log.dirs=$REMOTE_KAFKA_DATA_DIR/kraft-broker-3-logs
 num.partitions=1
 num.recovery.threads.per.data.dir=1
 offsets.topic.replication.factor=1
@@ -2955,6 +2975,8 @@ log.segment.bytes=1073741824
 log.retention.check.interval.ms=300000
 S3_EOF
 fi
+set_log_dirs "\$SERVER_2_PROPS" '$REMOTE_KAFKA_DATA_DIR/kraft-broker-2-logs'
+set_log_dirs "\$SERVER_3_PROPS" '$REMOTE_KAFKA_DATA_DIR/kraft-broker-3-logs'
 
 # Check broker 1
 if ! "\$TOPICS_SH" --bootstrap-server "\$GW_IP:9092" --list >/dev/null 2>&1; then
@@ -2964,7 +2986,7 @@ if ! "\$TOPICS_SH" --bootstrap-server "\$GW_IP:9092" --list >/dev/null 2>&1; the
   "\$SERVER_SH" -daemon "\$SERVER_PROPS"
 fi
 
-CLUSTER_ID="\$(grep '^cluster.id=' /tmp/kraft-combined-logs/meta.properties 2>/dev/null | cut -d= -f2 || true)"
+CLUSTER_ID="\$(grep '^cluster.id=' '$REMOTE_KAFKA_DATA_DIR/kraft-combined-logs/meta.properties' 2>/dev/null | cut -d= -f2 || true)"
 if [[ -n "\$CLUSTER_ID" ]]; then
   "\$STORAGE_SH" format -t "\$CLUSTER_ID" -c "\$SERVER_2_PROPS" --ignore-formatted >/dev/null 2>&1 || true
   "\$STORAGE_SH" format -t "\$CLUSTER_ID" -c "\$SERVER_3_PROPS" --ignore-formatted >/dev/null 2>&1 || true
@@ -3613,7 +3635,7 @@ fi
 # Phase 4: Start ariabc_pg_server on each node
 # Binary selection:
 #   - Ubuntu 24.04 (admin123, utkarsh): REMOTE_BIN_U24 (synced ASUS/local build)
-#   - Ubuntu 22.04 (user4, new-node):   REMOTE_BIN_U22 (/tmp build, KAFKA_OPTIONAL=ON)
+#   - Ubuntu 22.04 (user4, new-node):   REMOTE_BIN_U22 (built in ~/ariabc_data/build, KAFKA_OPTIONAL=ON)
 # Port selection:
 #   - Nodes 1-3: clientPort=8000
 #   - Node 4 (utkarsh): clientPort=8001 (8000 taken by HP printer snap)
@@ -3633,7 +3655,7 @@ fi
 
 log "=== Phase 4: Starting ariabc_pg_server on all ${#NODE_IDS[@]} nodes ==="
 
-REMOTE_LOG_DIR="/tmp/ariabc_cluster"
+REMOTE_LOG_DIR="$REMOTE_DATA_ROOT/cluster_logs"
 KAFKA_ARGS=""
 if [[ "$NO_KAFKA" -eq 0 ]]; then
   if [[ "$KAFKA_ROUTING_MODE" == "colocated" ]]; then
@@ -4034,6 +4056,10 @@ if [[ "${RECOVERY_MODE:-off}" != "off" ]]; then
   [[ -n "${RECOVERY_DB_PORT:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryDbPort $RECOVERY_DB_PORT"
   [[ -n "${RECOVERY_TABLE:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryTable $RECOVERY_TABLE"
   [[ -n "${RECOVERY_NODES:-}" ]] && GW_EXTRA_ARGS="$GW_EXTRA_ARGS --recoveryNodes $RECOVERY_NODES"
+fi
+if [[ -n "${GATEWAY_TARGET_TPS:-}" && "${GATEWAY_TARGET_TPS}" != "0" ]]; then
+  # Open-loop offered load (tx/s) instead of a closed-loop flood.
+  GW_EXTRA_ARGS="$GW_EXTRA_ARGS --targetTps $GATEWAY_TARGET_TPS"
 fi
 
 log "  Gateway nodes: $GW_NODES"

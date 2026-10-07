@@ -13,7 +13,9 @@ set -euo pipefail
 RDKAFKA_VERSION="v2.3.0"
 INSTALL_DIR="${1:-$HOME/Desktop/rdkafka_local}"
 STAMP_FILE="$INSTALL_DIR/.ariabc_rdkafka_version"
-BUILD_PARENT="/tmp"
+# Persistent build/cache dir (never /tmp: it is wiped on reboot).
+BUILD_PARENT="${ARIABC_BUILD_PARENT:-$HOME/ariabc_data/tools}"
+mkdir -p "$BUILD_PARENT"
 TARBALL_URL="https://github.com/confluentinc/librdkafka/archive/refs/tags/${RDKAFKA_VERSION}.tar.gz"
 TARBALL="$BUILD_PARENT/librdkafka-${RDKAFKA_VERSION}.tar.gz"
 SRC_DIR="$BUILD_PARENT/librdkafka-${RDKAFKA_VERSION#v}"
@@ -34,9 +36,9 @@ fi
 
 log "Building librdkafka $RDKAFKA_VERSION → $INSTALL_DIR"
 
-# Locate cmake (3.16+ required; fall back to portable binary from /tmp)
+# Locate cmake (3.16+ required; fall back to the portable binary in BUILD_PARENT)
 CMAKE_CMD=""
-for cmd in cmake cmake3 /tmp/cmake-3.28.3-linux-x86_64/bin/cmake; do
+for cmd in cmake cmake3 "$BUILD_PARENT/cmake-3.28.3-linux-x86_64/bin/cmake"; do
   if command -v "$cmd" >/dev/null 2>&1 && "$cmd" --version 2>/dev/null | grep -qE 'cmake version [3-9]\.([0-9]{2,}|[2-9][0-9])'; then
     CMAKE_CMD="$cmd"
     break
@@ -64,9 +66,9 @@ fi
 if [[ -z "$CMAKE_CMD" ]]; then
   echo "ERROR: cmake not found. Options:" >&2
   echo "  1. sudo apt-get install cmake" >&2
-  echo "  2. Extract cmake-3.28.3 to /tmp/ and retry:" >&2
-  echo "     wget -P /tmp https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz" >&2
-  echo "     tar -C /tmp -xzf /tmp/cmake-3.28.3-linux-x86_64.tar.gz" >&2
+  echo "  2. Extract cmake-3.28.3 to $BUILD_PARENT and retry:" >&2
+  echo "     wget -P $BUILD_PARENT https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz" >&2
+  echo "     tar -C $BUILD_PARENT -xzf $BUILD_PARENT/cmake-3.28.3-linux-x86_64.tar.gz" >&2
   exit 1
 fi
 log "Using cmake: $CMAKE_CMD ($($CMAKE_CMD --version | head -1))"

@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Execute ON .247 by the orchestrator, after provisioning enough same-device space.
-# Usage: bash prepare_fillfactor90.sh /tmp/ariabc_oom_ff90_<unique_tag>
+# Usage: bash prepare_fillfactor90.sh /home/neel/ariabc_data/oom_ff90_<unique_tag>
 set -euo pipefail
 export LC_ALL=C
 test "$(id -un)" = neel
 case " $(hostname -I) " in *" 10.129.148.247 "*) ;; *) echo 'Run on .247 only' >&2; exit 1 ;; esac
-OOM_FF_ROOT=${1:?Supply a fresh evidence dir /tmp/ariabc_oom_100m/ff90_prep_<tag>}
-case "$OOM_FF_ROOT" in /tmp/ariabc_oom_100m/ff90_prep_*) ;; *) exit 1 ;; esac
-[[ "$OOM_FF_ROOT" =~ ^/tmp/ariabc_oom_100m/ff90_prep_[a-zA-Z0-9_-]+$ ]]
-OOM_FF_SOURCE=/tmp/ariabc_oom_100m/pgdata_base_f32s1024
+OOM_FF_ROOT=${1:?Supply a fresh evidence dir /home/neel/ariabc_data/oom_100m/ff90_prep_<tag>}
+case "$OOM_FF_ROOT" in /home/neel/ariabc_data/oom_100m/ff90_prep_*) ;; *) exit 1 ;; esac
+[[ "$OOM_FF_ROOT" =~ ^/home/neel/ariabc_data/oom_100m/ff90_prep_[a-zA-Z0-9_-]+$ ]]
+OOM_FF_SOURCE=/home/neel/ariabc_data/oom_100m/pgdata_base_f32s1024
 OOM_FF_INSTALL=/home/neel/claude_opt/install_opt
 OOM_FF_PORT=5449
-OOM_FF_BASE=/tmp/ariabc_oom_100m/pgdata_base_f32s1024_ff90
+OOM_FF_BASE=/home/neel/ariabc_data/oom_100m/pgdata_base_f32s1024_ff90
 export LD_LIBRARY_PATH="$OOM_FF_INSTALL/lib:/home/neel/Desktop/rdkafka_local/lib:${LD_LIBRARY_PATH:-}"
 test ! -e "$OOM_FF_ROOT"
-test ! -d /tmp/ariabc_oom_100m/benchmark.lock
+test ! -d /home/neel/ariabc_data/oom_100m/benchmark.lock
 test -f "$OOM_FF_SOURCE/PG_VERSION"
 test ! -f "$OOM_FF_SOURCE/postmaster.pid"
 "$OOM_FF_INSTALL/bin/pg_controldata" "$OOM_FF_SOURCE" | grep -Eq 'Database cluster state:[[:space:]]+shut down$'
@@ -22,7 +22,7 @@ if fuser "$OOM_FF_PORT"/tcp >/dev/null 2>&1; then exit 1; fi
 awk '/MemAvailable:/ {if ($2 < 12582912) exit 1; ok=1} END {if (!ok) exit 1}' /proc/meminfo
 # Conservative allowance for new golden/plain/working/check copies, rewrite,
 # index-sort temp, and 20GiB WAL. The reported 62GB free is insufficient.
-OOM_FF_FREE=$(df -B1 --output=avail /tmp | tail -n 1)
+OOM_FF_FREE=$(df -B1 --output=avail /home/neel/ariabc_data | tail -n 1)
 test "$OOM_FF_FREE" -gt 118111600640  # 110 GiB: base copy + VACUUM FULL rewrite + derived plain baseline + WAL; working copies are reused
 test ! -e "$OOM_FF_BASE"
 mkdir "$OOM_FF_ROOT"

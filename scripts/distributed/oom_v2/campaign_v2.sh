@@ -76,7 +76,7 @@ build_cpp() {
   remote "export LD_LIBRARY_PATH=$V2_INSTALL/lib:/home/neel/Desktop/rdkafka_local/lib:\${LD_LIBRARY_PATH:-}; for b in $V2_INSTALL/bin/postgres $V2_CLUSTER/ariabc_pg/build/bin/ariabc_pg_server; do info=\$(ldd \"\$b\"); printf '%s\\n' \"\$info\"; case \"\$info\" in *'not found'*) exit 1;; esac; sha256sum \"\$b\"; done"
 }
 generation() {
-  remote "mkdir -p $V2_REMOTE; df -h $V2_REMOTE; free -m; ps -eo pid,comm,rss --sort=-rss | sed -n '1,15p'; test ! -d /tmp/ariabc_oom_100m/benchmark.lock; test \$(df -B1 --output=avail $V2_REMOTE | tail -1) -ge 240000000000"
+  remote "mkdir -p $V2_REMOTE; df -h $V2_REMOTE; free -m; ps -eo pid,comm,rss --sort=-rss | sed -n '1,15p'; test ! -d /home/neel/ariabc_data/oom_100m/benchmark.lock; test \$(df -B1 --output=avail $V2_REMOTE | tail -1) -ge 240000000000"
   python3 -u scripts/distributed/run_oom_100m_benchmark.py "${V2_COMMON[@]}" --gen-only --out-dir "$V2_OUT/generation"
   remote "test -f $V2_REMOTE/golden/done.flag"
 }

@@ -12,7 +12,7 @@ import run_oom_100m_benchmark as runner
 def main():
     evidence = Path(sys.argv[1])
     args = runner.parse_args(sys.argv[2:])
-    assert args.remote_dir == '/tmp/ariabc_oom_v2_20261001'
+    assert args.remote_dir == '/home/neel/ariabc_data/oom_v2_20261001'
     assert args.install_dir == '/home/neel/claude_opt/install_v2'
     assert args.usertable_fillfactor == 90
     assert args.db_rows == 100000000

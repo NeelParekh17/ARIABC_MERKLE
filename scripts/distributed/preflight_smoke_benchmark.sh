@@ -460,7 +460,8 @@ if ! "${ssh_base[@]}" "$GATEWAY_USER@$GATEWAY_HOST" "bash -lc $(printf '%q' "$pr
     if [[ -z "$src_psql_path" ]]; then
       continue
     fi
-    tmp_psql="/tmp/ariabc_psql_fix_$$"
+    mkdir -p "$HOME/ariabc_data/scratch"
+    tmp_psql="$HOME/ariabc_data/scratch/ariabc_psql_fix_$$"
     "${scp_base[@]}" "$src_user@$src_host:$src_psql_path" "$tmp_psql"
     chmod +x "$tmp_psql"
     "${scp_base[@]}" "$tmp_psql" "$GATEWAY_USER@$GATEWAY_HOST:$REMOTE_INSTALL_DIR/bin/psql"
@@ -483,6 +484,7 @@ if [[ "$AUTO_DET_MODE" == "1" ]]; then
   echo "Checking deterministic parser-path capability (all PG hosts)..."
   probe_det_parser_cmd=$(cat <<EOF_REMOTE
 set -euo pipefail
+mkdir -p "\$HOME/ariabc_data/scratch"
 PSQL="$REMOTE_INSTALL_DIR/bin/psql"
 export PGCONNECT_TIMEOUT=5
 export PGOPTIONS='-c statement_timeout=5000'
@@ -490,9 +492,9 @@ probe_q="select case when exists (select 1 from pg_proc where proname = 'merkle_
 for hp in "${PG_HOST_ARR[0]}:5438" "${PG_HOST_ARR[1]}:5439" "${PG_HOST_ARR[2]}:5440"; do
   h="\${hp%:*}"
   p="\${hp##*:}"
-  v="\$(timeout "${PSQL_PROBE_TIMEOUT_S}s" env -u LD_LIBRARY_PATH "\$PSQL" -X -q -h "\$h" -p "\$p" -U postgres -d postgres -At -c "\$probe_q" 2>/tmp/ariabc_det_probe_\${p}.err || true)"
+  v="\$(timeout "${PSQL_PROBE_TIMEOUT_S}s" env -u LD_LIBRARY_PATH "\$PSQL" -X -q -h "\$h" -p "\$p" -U postgres -d postgres -At -c "\$probe_q" 2>\$HOME/ariabc_data/scratch/ariabc_det_probe_\${p}.err || true)"
   if [[ "\$v" != "1" ]]; then
-    echo "det_probe_failed host=\$h port=\$p value=\${v:-<empty>} err=\$(tr '\n' ' ' </tmp/ariabc_det_probe_\${p}.err | sed 's/[[:space:]]\+/ /g')" >&2
+    echo "det_probe_failed host=\$h port=\$p value=\${v:-<empty>} err=\$(tr '\n' ' ' <\$HOME/ariabc_data/scratch/ariabc_det_probe_\${p}.err | sed 's/[[:space:]]\+/ /g')" >&2
     exit 1
   fi
 done

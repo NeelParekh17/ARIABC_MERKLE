@@ -2,7 +2,7 @@
 # Source on .111; fixed paths keep the v2 campaign independent of other installs.
 V2_REPO=/home/neel/claude_ctl/AriaBC_v2
 V2_OUT=${1:-/home/neel/claude_ctl/results/oom_v2_20261001}
-V2_REMOTE=/tmp/ariabc_oom_v2_20261001
+V2_REMOTE=/home/neel/ariabc_data/oom_v2_20261001
 V2_INSTALL=/home/neel/claude_opt/install_v2
 V2_CLUSTER=/home/neel/claude_opt/cluster_v2
 V2_COMMON=(--remote-host 10.129.148.247 --remote-user neel
