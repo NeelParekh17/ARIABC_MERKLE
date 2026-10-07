@@ -917,6 +917,34 @@ void clear_tx_pool(void)
  */
 #define BCDB_KEYTAG_DB_BASE ((Oid) 0xBCDB0000)
 
+/*
+ * Unique indexes other than the key index get their own checked write tags,
+ * so two writers of one unique value always conflict and the earlier one wins
+ * deterministically (see the post-publication settle in worker.c).  Their
+ * prefix field is BCDB_KEYTAG_UNIQ | ncols, apart from key-index prefixes.
+ * Unique indexes this cache cannot tag per value (partial, expression, or more
+ * than BCDB_KEYTAG_MAX_UNIQ) fall back to one relation-wide write tag.
+ */
+#define BCDB_KEYTAG_MAX_UNIQ 8
+#define BCDB_KEYTAG_UNIQ 0x100
+#define BCDB_KEYTAG_UNIQ_REL 0x1FF
+
+typedef struct BCDBKeyColInfo
+{
+	AttrNumber	attnum;
+	Oid			collation;
+	FmgrInfo   *hashfn;			/* owned by the type cache; NULL = binary image */
+	int16		typlen;
+	bool		typbyval;
+} BCDBKeyColInfo;
+
+typedef struct BCDBUniqTagInfo
+{
+	Oid			indexoid;
+	int			ncols;
+	BCDBKeyColInfo cols[INDEX_MAX_KEYS];
+} BCDBUniqTagInfo;
+
 typedef struct BCDBKeyTagInfo
 {
 	Oid			relid;			/* hash key */
@@ -930,6 +958,9 @@ typedef struct BCDBKeyTagInfo
 	FmgrInfo   *hashfns[INDEX_MAX_KEYS];	/* owned by the type cache */
 	int16		typlens[INDEX_MAX_KEYS];
 	bool		typbyvals[INDEX_MAX_KEYS];
+	int			nuniq;			/* other unique indexes tagged per value */
+	bool		uniq_rel_tag;	/* some unique index needs the relation tag */
+	BCDBUniqTagInfo uniq[BCDB_KEYTAG_MAX_UNIQ];
 } BCDBKeyTagInfo;
 
 static HTAB *bcdb_keytag_info_hash = NULL;
@@ -1011,6 +1042,69 @@ bcdb_keytag_index(Relation rel)
 	return keyindex;
 }
 
+static void
+bcdb_keytag_fill_col(Relation rel, AttrNumber attnum, BCDBKeyColInfo *col)
+{
+	Form_pg_attribute attr = TupleDescAttr(RelationGetDescr(rel), attnum - 1);
+	TypeCacheEntry *tce = lookup_type_cache(attr->atttypid, TYPECACHE_HASH_PROC_FINFO);
+
+	col->attnum = attnum;
+	col->collation = attr->attcollation;
+	col->typlen = attr->attlen;
+	col->typbyval = attr->attbyval;
+	col->hashfn = OidIsValid(tce->hash_proc) ? &tce->hash_proc_finfo : NULL;
+}
+
+/* Record every unique index except the key index (see BCDB_KEYTAG_UNIQ). */
+static void
+bcdb_keytag_collect_unique(Relation rel, Oid keyindex, BCDBKeyTagInfo *info)
+{
+	List	   *indexes = RelationGetIndexList(rel);
+	ListCell   *lc;
+
+	info->nuniq = 0;
+	info->uniq_rel_tag = false;
+	foreach(lc, indexes)
+	{
+		Oid			indexoid = lfirst_oid(lc);
+		HeapTuple	indexTuple;
+		Form_pg_index index;
+		bool		plain;
+		int			i;
+
+		if (indexoid == keyindex)
+			continue;
+		indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexoid));
+		if (!HeapTupleIsValid(indexTuple))
+			continue;
+		index = (Form_pg_index) GETSTRUCT(indexTuple);
+		if (!index->indisunique)
+		{
+			ReleaseSysCache(indexTuple);
+			continue;
+		}
+		plain = index->indnkeyatts > 0 &&
+			heap_attisnull(indexTuple, Anum_pg_index_indpred, NULL) &&
+			heap_attisnull(indexTuple, Anum_pg_index_indexprs, NULL);
+		for (i = 0; plain && i < index->indnkeyatts; i++)
+			if (index->indkey.values[i] <= 0)
+				plain = false;
+		if (!plain || info->nuniq >= BCDB_KEYTAG_MAX_UNIQ)
+			info->uniq_rel_tag = true;
+		else
+		{
+			BCDBUniqTagInfo *u = &info->uniq[info->nuniq++];
+
+			u->indexoid = indexoid;
+			u->ncols = index->indnkeyatts;
+			for (i = 0; i < u->ncols; i++)
+				bcdb_keytag_fill_col(rel, index->indkey.values[i], &u->cols[i]);
+		}
+		ReleaseSysCache(indexTuple);
+	}
+	list_free(indexes);
+}
+
 static const BCDBKeyTagInfo *
 bcdb_keytag_info(Relation rel)
 {
@@ -1075,9 +1169,38 @@ bcdb_keytag_info(Relation rel)
 		info->hashprocs[i] = tce->hash_proc;
 		info->hashfns[i] = OidIsValid(tce->hash_proc) ? &tce->hash_proc_finfo : NULL;
 	}
+	bcdb_keytag_collect_unique(rel, keyindex, info);
 	info->keyindex = keyindex;
 	info->valid = true;
 	return info;
+}
+
+static uint32
+bcdb_keytag_hash_col(const BCDBKeyColInfo *col, Datum value)
+{
+	if (col->hashfn != NULL)
+		return DatumGetUInt32(FunctionCall1Coll(col->hashfn, col->collation, value));
+	if (col->typbyval)
+	{
+		char		buf[sizeof(Datum)];
+
+		store_att_byval(buf, value, col->typlen);
+		return DatumGetUInt32(hash_any((unsigned char *) buf, col->typlen));
+	}
+	if (col->typlen == -1)
+	{
+		struct varlena *v = pg_detoast_datum_packed((struct varlena *) DatumGetPointer(value));
+		uint32		h = DatumGetUInt32(hash_any((unsigned char *) VARDATA_ANY(v),
+												VARSIZE_ANY_EXHDR(v)));
+
+		if ((Pointer) v != DatumGetPointer(value))
+			pfree(v);
+		return h;
+	}
+	if (col->typlen == -2)
+		return DatumGetUInt32(hash_any((unsigned char *) DatumGetCString(value),
+									   strlen(DatumGetCString(value))));
+	return DatumGetUInt32(hash_any((unsigned char *) DatumGetPointer(value), col->typlen));
 }
 
 static uint32
@@ -1159,6 +1282,32 @@ bcdb_reserve_write_key_tags(Relation rel, TupleTableSlot *slot)
 			ws_table_reserve_publish_onlyDT(&tag);
 		else
 			ws_table_reserveDT(&tag);
+	}
+
+	/* Other unique indexes: one checked tag per non-NULL key value. */
+	for (i = 0; i < info->nuniq; i++)
+	{
+		const BCDBUniqTagInfo *u = &info->uniq[i];
+		uint32		uh = DatumGetUInt32(hash_uint32((uint32) u->indexoid));
+		bool		anynull = false;
+		int			c;
+
+		for (c = 0; c < u->ncols && !anynull; c++)
+		{
+			Datum		value = slot_getattr(slot, u->cols[c].attnum, &anynull);
+
+			if (!anynull)
+				uh = hash_combine(uh, bcdb_keytag_hash_col(&u->cols[c], value));
+		}
+		if (anynull)
+			continue;			/* NULLs never collide in a unique index */
+		bcdb_keytag_make(&tag, RelationGetRelid(rel), BCDB_KEYTAG_UNIQ | u->ncols, uh);
+		ws_table_reserveDT(&tag);
+	}
+	if (info->uniq_rel_tag)
+	{
+		bcdb_keytag_make(&tag, RelationGetRelid(rel), BCDB_KEYTAG_UNIQ_REL, 0);
+		ws_table_reserveDT(&tag);
 	}
 }
 

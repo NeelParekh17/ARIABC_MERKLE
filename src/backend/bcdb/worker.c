@@ -79,6 +79,10 @@ struct timeval tx_start_time;
 
 #define BCDB_APPLY_RETRY_MAX 64
 #define BCDB_APPLY_RETRY_BACKOFF_MAX_US 256
+/* Quick apply retries before settling on predecessor commit (settle mode). */
+#define BCDB_APPLY_SETTLE_QUICK_RETRIES 8
+/* Terminal SQLSTATE when validated writes fail after settle (should never happen). */
+#define BCDB_SQLSTATE_POST_PUBLISH_INVARIANT "BC001"
 
 /*
  * Hot-path debug I/O gate. /tmp/timestamps.txt open/fprintf/close per-tx is
@@ -478,6 +482,61 @@ bcdb_dt_light_snapshot_enabled(void)
     return cached == 1;
 }
 
+/*
+ * BCDB_DT_POST_PUBLISH_SETTLE (default on).
+ *
+ * Once a transaction has released its serial turn (published_max advanced),
+ * successors may validate, apply and commit.  Re-executing its business SQL
+ * after that point would take a snapshot that can include those successors'
+ * commits and break the prescribed order.  With settle on, an apply failure
+ * after release never re-executes: the worker waits until every predecessor
+ * has committed, re-applies the same validated deferred writes, and turns a
+ * persistent failure into a deterministic terminal outcome.  0 restores the
+ * historical full-restart branches (kept only for A/B and reproduction).
+ */
+static bool
+bcdb_dt_post_publish_settle_enabled(void)
+{
+	static int	cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_DT_POST_PUBLISH_SETTLE");
+
+		cached = !(v != NULL &&
+				   (strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
+					strcmp(v, "FALSE") == 0 || strcmp(v, "no") == 0 ||
+					strcmp(v, "NO") == 0));
+	}
+	return cached == 1;
+}
+
+/*
+ * BCDB_FAILPOINT_POST_PUBLISH_APPLY=<N>: for transactions with tx_id % N == 0,
+ * make the first post-publication apply attempt fail as a unique violation.
+ * Test-only; off unless the variable is set.
+ */
+static bool
+bcdb_failpoint_post_publish_apply(BCDBShmXact *tx)
+{
+	static int	modulus = -1;
+	static BCTxID fired_txid = -1;
+
+	if (modulus < 0)
+	{
+		const char *v = getenv("BCDB_FAILPOINT_POST_PUBLISH_APPLY");
+
+		modulus = (v != NULL) ? atoi(v) : 0;
+		if (modulus < 0)
+			modulus = 0;
+	}
+	if (modulus == 0 || tx == NULL || tx->tx_id % modulus != 0 ||
+		tx->tx_id == fired_txid)
+		return false;
+	fired_txid = tx->tx_id;
+	return true;
+}
+
 static bool
 bcdb_dt_skip_readonly_gate_enabled(void)
 {
@@ -689,7 +748,8 @@ bcdb_ptrace_open(void)
 			"early_conflict_hits,turn_conflict_hits,ring_fallbacks,incremental_txs_checked,"
 			"rs_reservations,ws_reservations,publish_only_reservations,"
 			"rs_distinct,ws_distinct,publish_only_distinct,rs_ws_overlap,"
-			"conflict_turn_checks,early_rotation_count,early_rotation_skipped_count\n");
+			"conflict_turn_checks,early_rotation_count,early_rotation_skipped_count,"
+			"post_publish_settles,post_publish_terminal_unique,post_publish_invariant\n");
 }
 
 static inline uint64
@@ -906,6 +966,8 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 	int retries = 0;
 	int backoff_us = 1;
 	int attempt = 1;
+	const bool settle = bcdb_dt_post_publish_settle_enabled();
+	const int retry_max = settle ? BCDB_APPLY_SETTLE_QUICK_RETRIES : BCDB_APPLY_RETRY_MAX;
 
 	bcdb_emit_ledger_boundary("ledger_apply_stage_begin");
 
@@ -933,7 +995,14 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 				 (unsigned) (tx ? tx->raft_item_ordinal : 0),
 				 attempt,
 				 GetCurrentTransactionNestLevel());
-			apply_ok = apply_optim_writes();
+			if (attempt == 1 && bcdb_failpoint_post_publish_apply(tx))
+			{
+				/* Test failpoint: behave exactly like a 23505 from apply. */
+				bcdb_set_apply_unique_violation(true);
+				apply_ok = false;
+			}
+			else
+				apply_ok = apply_optim_writes();
 			apply_failed_unique = (!apply_ok && bcdb_apply_had_unique_violation());
 			if (apply_ok)
 				ReleaseCurrentSubTransaction();
@@ -1005,6 +1074,31 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 				apply_ok = false;
 				apply_failed_unique = false;
 				FreeErrorData(edata);
+				if (settle)
+				{
+					/* Same stored writes, same error: retrying cannot help. */
+					if (num_apply_retries)
+						*num_apply_retries = retries;
+					if (nonretryable_error)
+						*nonretryable_error = true;
+					return false;
+				}
+			}
+			else if (settle && state_str &&
+					 (strcmp(state_str, "40001") == 0 ||
+					  strcmp(state_str, "40P01") == 0 ||
+					  strcmp(state_str, "55P03") == 0))
+			{
+				/*
+				 * Lock or serialization failure while applying validated writes:
+				 * the subtransaction released its locks, so retry/settle the same
+				 * writes instead of letting a timing-dependent error escape.
+				 */
+				BCDB_FLOW_LOG("[BCDB_FLOW] apply_transient_error pid=%d txid=%d sqlstate=%s",
+							  getpid(), tx ? (int)tx->tx_id : -1, state_str);
+				apply_ok = false;
+				apply_failed_unique = false;
+				FreeErrorData(edata);
 			}
 			else
 			{
@@ -1032,7 +1126,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 
 		if (!attempt_end_logged)
 		{
-			int will_retry = (!apply_ok && (retries < BCDB_APPLY_RETRY_MAX));
+			int will_retry = (!apply_ok && (retries < retry_max));
 			bcdb_emit_apply_attempt_end(
 				(unsigned long long) (tx ? tx->raft_log_index : 0),
 				tx ? (unsigned) tx->raft_item_ordinal : 0,
@@ -1049,7 +1143,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 			return true;
 		}
 
-		if (apply_failed_unique && tx && tx->sql && strstr(tx->sql, "_proc"))
+		if (!settle && apply_failed_unique && tx && tx->sql && strstr(tx->sql, "_proc"))
 		{
 			if (num_apply_retries)
 				*num_apply_retries = retries;
@@ -1064,7 +1158,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 		}
 
 		retries++;
-		if (retries > BCDB_APPLY_RETRY_MAX)
+		if (retries > retry_max)
 		{
 			if (num_apply_retries)
 				*num_apply_retries = retries;
@@ -3067,7 +3161,13 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				}
 				else
 				{
+					/*
+					 * The read-only skip releases the turn before validation, so a
+					 * later conflict would re-execute after release; settle mode
+					 * therefore ignores it.
+					 */
 					if (bcdb_dt_skip_readonly_gate_enabled() &&
+						!bcdb_dt_post_publish_settle_enabled() &&
 						bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
 						LIST_EMPTY(&ws_table_record))
 					{
@@ -3200,7 +3300,92 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             {
                 PTRACE_END(BCDB_PHASE_APPLY);
 
-                if (apply_nonretryable)
+				if (bcdb_dt_post_publish_settle_enabled() &&
+					bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED)
+				{
+					/*
+					 * Post-publication settle.  Successors already passed the
+					 * gate, so this transaction must not re-execute its business
+					 * SQL.  Successors cannot write any key this transaction
+					 * published (their check sees our tag and waits for our
+					 * commit), and write tags cover every unique index, so once
+					 * all predecessors have committed the outcome of re-applying
+					 * the same deferred writes depends only on the prefix state:
+					 * it is the same on every replica.
+					 */
+					bool		settled_ok = false;
+					bool		unique_failure = bcdb_apply_had_unique_violation();
+
+					bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_POST_PUBLISH_SETTLES, 1);
+					BCDB_FLOW_LOG("[BCDB_FLOW] apply_post_publish_settle pid=%d txid=%d retries=%d unique=%d last_committed=%d",
+								  getpid(), (int)tx->tx_id, apply_retries, (int)unique_failure,
+								  (int)get_last_committed_txid(tx));
+					if (!apply_nonretryable || unique_failure)
+					{
+						int			settled_apply_retries = 0;
+						bool		settled_nonretryable = false;
+
+						if (get_last_committed_txid(tx) < (tx->tx_id - 1))
+							bcdb_wait_for_prev_committed(tx);
+						PTRACE_BEGIN(BCDB_PHASE_APPLY);
+						settled_ok = bcdb_apply_optim_writes_with_retry(tx,
+																		&settled_apply_retries,
+																		&settled_nonretryable,
+																		det_err_sqlstate, det_err_msg);
+						PTRACE_END(BCDB_PHASE_APPLY);
+						apply_retries += settled_apply_retries;
+						apply_nonretryable = settled_nonretryable;
+						unique_failure = !settled_ok && bcdb_apply_had_unique_violation();
+					}
+
+					if (settled_ok)
+						apply_nonretryable = false;
+					else if (unique_failure &&
+							 bcdb_sql_is_insert_on_conflict_do_nothing(tx->sql))
+					{
+						apply_terminal_noop = true;
+						apply_idempotent_noop = true;
+					}
+					else if (unique_failure)
+					{
+						/* The statement would raise 23505 at its serial position. */
+						strlcpy(det_err_sqlstate, "23505", sizeof(det_err_sqlstate));
+						snprintf(det_err_msg, sizeof(det_err_msg),
+								 "format_version=1\nsqlstate=23505\nerror_class=unique_violation\n");
+						apply_outcome = BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR;
+						apply_terminal_noop = true;
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_POST_PUBLISH_TERMINAL_UNIQUE, 1);
+					}
+					else if (apply_nonretryable &&
+							 is_whitelisted_deterministic(det_err_sqlstate))
+					{
+						apply_outcome = BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR;
+						apply_terminal_noop = true;
+					}
+					else
+					{
+						/*
+						 * Validated writes failed although every predecessor has
+						 * committed: a protocol invariant broke.  Fail loudly with
+						 * a terminal error instead of re-executing out of order.
+						 */
+						ereport(WARNING,
+								(errmsg("BCDB_INVARIANT_POST_PUBLISH_APPLY txid=%d retries=%d sqlstate=%s last_committed=%d published_max=%d",
+										(int)tx->tx_id, apply_retries,
+										det_err_sqlstate[0] ? det_err_sqlstate : "none",
+										(int)get_last_committed_txid(tx),
+										(int)get_published_max_txid(tx))));
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_POST_PUBLISH_INVARIANT, 1);
+						strlcpy(det_err_sqlstate, BCDB_SQLSTATE_POST_PUBLISH_INVARIANT,
+								sizeof(det_err_sqlstate));
+						snprintf(det_err_msg, sizeof(det_err_msg),
+								 "format_version=1\nsqlstate=%s\nerror_class=post_publish_apply_invariant\n",
+								 BCDB_SQLSTATE_POST_PUBLISH_INVARIANT);
+						apply_outcome = BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR;
+						apply_terminal_noop = true;
+					}
+				}
+				else if (apply_nonretryable)
                 {
                     /*
                      * Lever D advances published_max before PostgreSQL commit, so a
