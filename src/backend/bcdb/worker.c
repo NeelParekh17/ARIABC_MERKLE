@@ -513,14 +513,16 @@ bcdb_dt_post_publish_settle_enabled(void)
 
 /*
  * BCDB_FAILPOINT_POST_PUBLISH_APPLY=<N>: for transactions with tx_id % N == 0,
- * make the first post-publication apply attempt fail as a unique violation.
- * Test-only; off unless the variable is set.
+ * every attempt of the FIRST post-publication apply call fails as a unique
+ * violation, so the caller's failure handling runs (historical restart, or
+ * settle).  Later apply calls for the same transaction succeed.  Test-only;
+ * off unless the variable is set.  Called once per apply call.
  */
 static bool
 bcdb_failpoint_post_publish_apply(BCDBShmXact *tx)
 {
 	static int	modulus = -1;
-	static BCTxID fired_txid = -1;
+	static BCTxID seen_txid = -1;
 
 	if (modulus < 0)
 	{
@@ -530,11 +532,10 @@ bcdb_failpoint_post_publish_apply(BCDBShmXact *tx)
 		if (modulus < 0)
 			modulus = 0;
 	}
-	if (modulus == 0 || tx == NULL || tx->tx_id % modulus != 0 ||
-		tx->tx_id == fired_txid)
+	if (modulus == 0 || tx == NULL || tx->tx_id == seen_txid)
 		return false;
-	fired_txid = tx->tx_id;
-	return true;
+	seen_txid = tx->tx_id;
+	return tx->tx_id % modulus == 0;
 }
 
 static bool
@@ -968,6 +969,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 	int attempt = 1;
 	const bool settle = bcdb_dt_post_publish_settle_enabled();
 	const int retry_max = settle ? BCDB_APPLY_SETTLE_QUICK_RETRIES : BCDB_APPLY_RETRY_MAX;
+	const bool failpoint = bcdb_failpoint_post_publish_apply(tx);
 
 	bcdb_emit_ledger_boundary("ledger_apply_stage_begin");
 
@@ -995,7 +997,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 				 (unsigned) (tx ? tx->raft_item_ordinal : 0),
 				 attempt,
 				 GetCurrentTransactionNestLevel());
-			if (attempt == 1 && bcdb_failpoint_post_publish_apply(tx))
+			if (failpoint)
 			{
 				/* Test failpoint: behave exactly like a 23505 from apply. */
 				bcdb_set_apply_unique_violation(true);
