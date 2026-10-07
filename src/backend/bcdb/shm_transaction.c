@@ -144,8 +144,12 @@ WSTable *rs_table;
 WSTableRecord ws_table_record;
 WSTableRecord ws_table_publish_record;
 WSTableRecord rs_table_record;
-/* Two times the ranking client's maximum in-flight window (65536). */
-#define BCDB_DT_DIGEST_SLOTS 131072
+/*
+ * Validation only reads ids between its snapshot watermark and published_max,
+ * a span bounded by the executing transactions (about two worker counts).
+ * Any id outside the ring, or a reused slot, falls back to the full map check.
+ */
+#define BCDB_DT_DIGEST_SLOTS 8192
 #define BCDB_DT_DIGEST_TAGS 384
 
 typedef struct BCDBDTDigest
@@ -3749,10 +3753,11 @@ bcdb_dt_early_rotation_enabled(void)
 	{
 		const char *v = getenv("BCDB_DT_EARLY_ROTATION");
 
-		cached = !(v != NULL &&
-				   (strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
-					strcmp(v, "FALSE") == 0 || strcmp(v, "no") == 0 ||
-					strcmp(v, "NO") == 0));
+		/* Off by default: the 2026-10-08 TPC-C A/B measured no gain. */
+		cached = (v != NULL &&
+				  (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 ||
+				   strcmp(v, "TRUE") == 0 || strcmp(v, "yes") == 0 ||
+				   strcmp(v, "on") == 0));
 	}
 	return cached == 1 && bcdb_dt_conflict_tracking &&
 		bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED;
