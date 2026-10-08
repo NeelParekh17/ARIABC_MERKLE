@@ -29,7 +29,7 @@
  *		ExecIndexOnlyScanInitializeWorker attach to DSM info in parallel worker
  */
 #include "postgres.h"
-#include "bcdb/shm_transaction.h"
+#include "bcdb/worker.h"
 
 #include "access/genam.h"
 #include "access/relscan.h"
@@ -164,6 +164,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
 							ItemPointerGetBlockNumber(tid),
 							&node->ioss_VMBuffer))
 		{
+			if (bcdb_pending_writes(RelationGetRelid(scandesc->heapRelation)))
+				bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_INDEXONLY_HEAP_FETCHES, 1);
 			/*
 			 * Rats, we have to visit the heap to check visibility.
 			 */

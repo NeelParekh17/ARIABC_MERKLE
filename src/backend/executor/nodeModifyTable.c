@@ -99,7 +99,7 @@ bcdb_is_safe_ledger_relation(Relation relation)
 static bool
 bcdb_should_defer_dml(Relation relation)
 {
-	if (!is_bcdb_worker || (activeTx != NULL && activeTx->needs_opf) ||
+	if (!is_bcdb_worker || (!bcdb_dt_simulating && activeTx != NULL && activeTx->needs_opf) ||
 		bcdb_is_safe_ledger_relation(relation))
 		return false;
 	if (bcdb_dt_simulating && relation->trigdesc != NULL)
@@ -110,7 +110,8 @@ bcdb_should_defer_dml(Relation relation)
 static void
 bcdb_opf_write_tags(Relation rel, TupleTableSlot *slot, ItemPointer tid)
 {
-	if (!is_bcdb_worker || activeTx == NULL || !activeTx->needs_opf)
+	if (!is_bcdb_worker || bcdb_dt_simulating ||
+		activeTx == NULL || !activeTx->needs_opf)
 		return;
 	if (slot != NULL && !TTS_EMPTY(slot))
 		bcdb_reserve_write_key_tags(rel, slot);
@@ -1148,7 +1149,8 @@ ExecDelete(ModifyTableState *mtstate,
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
 	bcdb_log_dml_route("DELETE", resultRelationDesc, defer_bcdb_dml);
-	if (activeTx != NULL && activeTx->needs_opf && tupleid != NULL)
+	if (!bcdb_dt_simulating && activeTx != NULL &&
+		activeTx->needs_opf && tupleid != NULL)
 	{
 		TupleTableSlot *oldslot = table_slot_create(resultRelationDesc, NULL);
 		if (table_tuple_fetch_row_version(resultRelationDesc, tupleid,
@@ -1599,7 +1601,8 @@ ExecUpdate(ModifyTableState *mtstate,
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
 	bcdb_log_dml_route("UPDATE", resultRelationDesc, defer_bcdb_dml);
-	if (activeTx != NULL && activeTx->needs_opf && tupleid != NULL)
+	if (!bcdb_dt_simulating && activeTx != NULL &&
+		activeTx->needs_opf && tupleid != NULL)
 	{
 		TupleTableSlot *oldslot = table_slot_create(resultRelationDesc, NULL);
 		if (table_tuple_fetch_row_version(resultRelationDesc, tupleid,

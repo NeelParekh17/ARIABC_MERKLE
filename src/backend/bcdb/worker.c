@@ -751,7 +751,8 @@ bcdb_ptrace_open(void)
 			"rs_distinct,ws_distinct,publish_only_distinct,rs_ws_overlap,"
 			"conflict_turn_checks,early_rotation_count,early_rotation_skipped_count,"
 			"post_publish_settles,post_publish_terminal_unique,post_publish_invariant,dt_opf,dt_opf_trigger,dt_opf_upsert,dt_opf_sequence,"
-			"dt_opf_own_insert,dt_opf_own_indexed_update,dt_overlay_hits,dt_lockrows_skipped\n");
+			"dt_opf_own_insert,dt_opf_own_indexed_update,dt_overlay_hits,dt_lockrows_skipped,"
+			"dt_indexed_update_checks,dt_write_compositions,dt_indexonly_heap_fetches,dt_opf_caught\n");
 }
 
 static inline uint64
@@ -2721,6 +2722,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED;
 	bool early_conflict = false;
 	bool in_business_sql_execution = false;
+	volatile bool business_sql_complete = false;
 	bool optimistic_worker_active = false;
     BCTxID retry_wait_committed_txid = -1;
 	bcdb_apply_outcome apply_outcome = BCDB_OUTCOME_OK;
@@ -2915,11 +2917,13 @@ opf_retry:
                  */
 				if (tx->needs_opf)
 				{
+					PTRACE_BEGIN(BCDB_PHASE_GATE);
 					block = bcdb_get_block1();
 					bcdb_wait_for_dt_parse_barrier(tx, &parse_barrier_done);
 					if (bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED)
 						bcdb_wait_for_serial_slot(tx, block, false);
 					bcdb_wait_for_prev_committed(tx);
+					PTRACE_END(BCDB_PHASE_GATE);
 				}
 		activeTx->tx_id_committed = bcdb_dt_snapshot_baseline(tx);
                 init = false;
@@ -3083,6 +3087,7 @@ opf_retry:
 				bcdb_emit_ledger_boundary("ledger_business_sql");
 
 				/* Run business SQL in a subtransaction if ledger is enabled to catch deterministic errors */
+				business_sql_complete = false;
 				bcdb_dt_simulating = !tx->needs_opf;
 				bcdb_optimistic_worker_begin();
 				optimistic_worker_active = true;
@@ -3149,10 +3154,14 @@ opf_retry:
 					get_write_set(tx, snapshot);
 					bcdb_maybe_enqueue_deferred_delete0_by_key(tx);
 				}
+				business_sql_complete = true;
 				/* PL/pgSQL may catch the internal error; it cannot accept that attempt. */
 				if (bcdb_dt_simulating && tx->needs_opf)
+				{
+					bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_OPF_CAUGHT, 1);
 					ereport(ERROR, (errcode(ERRCODE_BCDB_OPF),
 									errmsg("BCDB ordered physical fallback required")));
+				}
 				bcdb_dt_simulating = false;
 				bcdb_optimistic_worker_end();
 				optimistic_worker_active = false;
@@ -3868,6 +3877,8 @@ opf_retry:
 		if (edata->sqlerrcode == ERRCODE_BCDB_OPF && tx->needs_opf &&
 			!published_max_advanced)
 		{
+			if (!business_sql_complete)
+				PTRACE_END(BCDB_PHASE_PORTAL_RUN);
 			in_business_sql_execution = false;
 			rw_conflicts = 1;
 			FreeErrorData(edata);
@@ -3884,6 +3895,7 @@ opf_retry:
 			tx->portal = NULL;
 			tx->queryDesc = NULL;
 			tx->sxact = NULL;
+			PTRACE_END(BCDB_PHASE_TOTAL);
 			bcdb_ptrace_emit(trace_tx_id, num_restarts);
 		}
 

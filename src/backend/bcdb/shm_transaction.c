@@ -2453,6 +2453,7 @@ bcdb_dirty_xid_is_ordered_predecessor(TransactionId xid)
 }
 
 bool bcdb_dt_simulating = false;
+bool bcdb_have_pending_writes = false;
 
 typedef struct BCDBPendingKey
 {
@@ -2498,6 +2499,7 @@ bcdb_pending_reset(void *arg)
 {
 	bcdb_pending_tids = NULL;
 	bcdb_pending_relations = NULL;
+	bcdb_have_pending_writes = false;
 }
 
 static BCDBPendingRelation *
@@ -2527,6 +2529,7 @@ bcdb_pending_relation(Oid relid, bool create)
 		cb->func = bcdb_pending_reset;
 		cb->arg = NULL;
 		MemoryContextRegisterResetCallback(bcdb_tx_context, cb);
+		bcdb_have_pending_writes = true;
 	}
 	pending = hash_search(bcdb_pending_relations, &relid,
 						  create ? HASH_ENTER : HASH_FIND, &found);
@@ -2550,7 +2553,7 @@ bcdb_pending_writes(Oid relid)
 }
 
 void
-bcdb_check_pending_scan(Oid relid)
+bcdb_check_pending_scan_slow(Oid relid)
 {
 	BCDBPendingRelation *pending;
 
@@ -2565,7 +2568,7 @@ bcdb_check_pending_scan(Oid relid)
 }
 
 void
-bcdb_check_pending_index_scan(Oid relid, Relation index)
+bcdb_check_pending_index_scan_slow(Oid relid, Relation index)
 {
 	BCDBPendingRelation *pending;
 	int i;
@@ -2602,7 +2605,7 @@ bcdb_pending_tuple(Oid relid, ItemPointer tid, HASHACTION action)
 }
 
 bool
-bcdb_overlay_slot(Relation rel, TupleTableSlot *slot)
+bcdb_overlay_slot_slow(Relation rel, TupleTableSlot *slot)
 {
 	BCDBPendingTuple *pending;
 	OptimWriteEntry *entry;
@@ -2709,10 +2712,16 @@ void store_optim_update(Relation rel, TupleTableSlot *slot, ItemPointer old_tid,
 			relation->writes++;
 		}
 		else
+		{
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_WRITE_COMPOSITIONS, 1);
 			oldslot = write_entry->slot;
+		}
 		if (check_indexed)
+		{
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_INDEXED_UPDATE_CHECKS, 1);
 			write_entry->indexed_changed |= bcdb_indexed_columns_changed(rel,
 																 relation->indexed_attrs, oldslot, slot, &relation->changed_attrs);
+		}
 		relation->indexed_update |= write_entry->indexed_changed;
 		if (oldslot != NULL)
 			ExecDropSingleTupleTableSlot(oldslot);
@@ -2792,6 +2801,7 @@ void store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot)
 		write_entry = pending->entry;
 		if (write_entry != NULL)
 		{
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_WRITE_COMPOSITIONS, 1);
 			write_entry->operation = CMD_DELETE;
 			write_entry->cid = GetCurrentCommandId(true);
 			MemoryContextSwitchTo(old_context);

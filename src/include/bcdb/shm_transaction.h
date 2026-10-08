@@ -288,9 +288,32 @@ typedef enum
 extern bool bcdb_dt_simulating;
 extern void bcdb_request_opf(BCDBOpfReason reason);
 extern bool bcdb_pending_writes(Oid relid);
-extern void bcdb_check_pending_scan(Oid relid);
-extern void bcdb_check_pending_index_scan(Oid relid, Relation index);
-extern bool bcdb_overlay_slot(Relation rel, TupleTableSlot *slot);
+extern bool bcdb_have_pending_writes;
+extern void bcdb_check_pending_scan_slow(Oid relid);
+extern void bcdb_check_pending_index_scan_slow(Oid relid, Relation index);
+extern bool bcdb_overlay_slot_slow(Relation rel, TupleTableSlot *slot);
+
+static inline void
+bcdb_check_pending_scan(Oid relid)
+{
+	if (unlikely(bcdb_dt_simulating && bcdb_have_pending_writes))
+		bcdb_check_pending_scan_slow(relid);
+}
+
+static inline void
+bcdb_check_pending_index_scan(Oid relid, Relation index)
+{
+	if (unlikely(bcdb_dt_simulating && bcdb_have_pending_writes))
+		bcdb_check_pending_index_scan_slow(relid, index);
+}
+
+static inline bool
+bcdb_overlay_slot(Relation rel, TupleTableSlot *slot)
+{
+	if (unlikely(bcdb_dt_simulating && bcdb_have_pending_writes))
+		return bcdb_overlay_slot_slow(rel, slot);
+	return true;
+}
 
 extern void store_optim_update(Relation rel, TupleTableSlot *slot, ItemPointer old_tid,
 							   RangeTblEntry *rte);
