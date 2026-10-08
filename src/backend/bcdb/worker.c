@@ -1368,7 +1368,7 @@ bcdb_publish_error_result(BCBlock *block, BCDBShmXact *tx, const char *sqlstate)
 }
 
 static inline void
-bcdb_wait_for_dt_parse_barrier(BCDBShmXact *tx, bool *barrier_done)
+bcdb_wait_for_dt_parse_barrier(BCDBShmXact *tx, volatile bool *barrier_done)
 {
     BCBlock *committed_block;
     int32 num_ready;
@@ -2706,7 +2706,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	volatile int rw_conflicts = 1;
 	volatile bool init = true;
     bool hold_portal_snapshot = false;
-    int num_restarts = -1;
+	volatile int num_restarts = -1;
     int t_delta = 0;
     char snapId[32] = "";
     char tx_result[1024];
@@ -2716,14 +2716,14 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     bool apply_nonretryable = false;
 	bool apply_terminal_noop = false;
 	bool apply_idempotent_noop = false;
-    bool published_max_advanced = false;
-    bool parse_barrier_done = false;
+	volatile bool published_max_advanced = false;
+	volatile bool parse_barrier_done = false;
 	const bool early_validate = bcdb_dt_early_validate_enabled() &&
 		bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED;
 	bool early_conflict = false;
-	bool in_business_sql_execution = false;
+	volatile bool in_business_sql_execution = false;
 	volatile bool business_sql_complete = false;
-	bool optimistic_worker_active = false;
+	volatile bool optimistic_worker_active = false;
     BCTxID retry_wait_committed_txid = -1;
 	bcdb_apply_outcome apply_outcome = BCDB_OUTCOME_OK;
 	char det_err_sqlstate[6] = "XX000";
@@ -3873,10 +3873,11 @@ opf_retry:
 			*/
 		FlushErrorState();
 
-		bcdb_dt_simulating = false;
-		if (edata->sqlerrcode == ERRCODE_BCDB_OPF && tx->needs_opf &&
+		if (bcdb_dt_simulating && edata->sqlerrcode == ERRCODE_BCDB_OPF &&
+			tx->needs_opf &&
 			!published_max_advanced)
 		{
+			bcdb_dt_simulating = false;
 			if (!business_sql_complete)
 				PTRACE_END(BCDB_PHASE_PORTAL_RUN);
 			in_business_sql_execution = false;
@@ -3885,8 +3886,11 @@ opf_retry:
 			pfree(message_copy);
 			goto opf_retry;
 		}
+		bcdb_dt_simulating = false;
 		if (tx->needs_opf && !tx->raft_ledger_enabled)
 		{
+			if (in_business_sql_execution && !business_sql_complete)
+				PTRACE_END(BCDB_PHASE_PORTAL_RUN);
 			/* Physical execution already owns the turn; roll back before handoff. */
 			bcdb_drain_optim_write_list(activeTx);
 			AbortCurrentTransaction();
