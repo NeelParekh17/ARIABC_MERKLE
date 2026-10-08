@@ -89,6 +89,7 @@ typedef struct _OptimWriteEntry
     ItemPointerData old_tid;
     Oid             relOid;     /* relation OID, used for CMD_DELETE */
     int32           keyval;     /* primary key value for deferred DELETE-0 reexec */
+	bool			indexed_changed;
     CommandId       cid;
     SIMPLEQ_ENTRY(_OptimWriteEntry) link;
 } OptimWriteEntry;
@@ -140,6 +141,7 @@ typedef struct _BCDBShmXact
 
     int                isolation;
     bool               pred_lock;
+	bool			   needs_opf;
 
     SIMPLEQ_ENTRY(_BCDBShmXact)              link;
     TAILQ_ENTRY(_BCDBShmXact)                queue_link;
@@ -278,7 +280,47 @@ extern void         delete_tx(BCDBShmXact* tx);
 /* compose_tuple_hash, compose_index_hash, compose_tx_hash removed — no callers */
 
 extern uint32 dummy_hash(const void *key, Size key_size);
-extern void store_optim_update(TupleTableSlot* slot, ItemPointer old_tid);
+#define ERRCODE_BCDB_OPF MAKE_SQLSTATE('B','C','0','1','0')
+typedef enum
+{
+	BCDB_OPF_TRIGGER,
+	BCDB_OPF_UPSERT,
+	BCDB_OPF_SEQUENCE,
+	BCDB_OPF_OWN_INSERT,
+	BCDB_OPF_OWN_INDEXED_UPDATE
+} BCDBOpfReason;
+extern bool bcdb_dt_simulating;
+extern void bcdb_request_opf(BCDBOpfReason reason);
+extern bool bcdb_pending_writes(Oid relid);
+extern bool bcdb_have_pending_writes;
+extern void bcdb_check_pending_scan_slow(Oid relid);
+extern void bcdb_check_pending_index_scan_slow(Oid relid, Relation index);
+extern bool bcdb_overlay_slot_slow(Relation rel, TupleTableSlot *slot);
+
+static inline void
+bcdb_check_pending_scan(Oid relid)
+{
+	if (unlikely(bcdb_dt_simulating && bcdb_have_pending_writes))
+		bcdb_check_pending_scan_slow(relid);
+}
+
+static inline void
+bcdb_check_pending_index_scan(Oid relid, Relation index)
+{
+	if (unlikely(bcdb_dt_simulating && bcdb_have_pending_writes))
+		bcdb_check_pending_index_scan_slow(relid, index);
+}
+
+static inline bool
+bcdb_overlay_slot(Relation rel, TupleTableSlot *slot)
+{
+	if (unlikely(bcdb_dt_simulating && bcdb_have_pending_writes))
+		return bcdb_overlay_slot_slow(rel, slot);
+	return true;
+}
+
+extern void store_optim_update(Relation rel, TupleTableSlot *slot, ItemPointer old_tid,
+							   RangeTblEntry *rte);
 extern void store_optim_insert(TupleTableSlot* slot);
 extern void store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot);
 extern void store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid);

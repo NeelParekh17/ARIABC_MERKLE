@@ -13,6 +13,7 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+#include "bcdb/shm_transaction.h"
 
 #include "access/bufmask.h"
 #include "access/htup_details.h"
@@ -599,6 +600,8 @@ nextval_internal(Oid relid, bool check_permissions)
 	bool		cycle;
 	bool		logit = false;
 
+	bcdb_request_opf(BCDB_OPF_SEQUENCE);
+
 	/* open and lock sequence */
 	init_sequence(relid, &elm, &seqrel);
 
@@ -917,6 +920,8 @@ do_setval(Oid relid, int64 next, bool iscalled)
 	Form_pg_sequence pgsform;
 	int64		maxv,
 				minv;
+
+	bcdb_request_opf(BCDB_OPF_SEQUENCE);
 
 	/* open and lock sequence */
 	init_sequence(relid, &elm, &seqrel);

@@ -99,7 +99,30 @@ bcdb_is_safe_ledger_relation(Relation relation)
 static bool
 bcdb_should_defer_dml(Relation relation)
 {
-	return is_bcdb_worker && !bcdb_is_safe_ledger_relation(relation);
+	if (!is_bcdb_worker || (!bcdb_dt_simulating && activeTx != NULL && activeTx->needs_opf) ||
+		bcdb_is_safe_ledger_relation(relation))
+		return false;
+	if (bcdb_dt_simulating && relation->trigdesc != NULL)
+		bcdb_request_opf(BCDB_OPF_TRIGGER);
+	return true;
+}
+
+static void
+bcdb_opf_write_tags(Relation rel, TupleTableSlot *slot, ItemPointer tid)
+{
+	if (!is_bcdb_worker || bcdb_dt_simulating ||
+		activeTx == NULL || !activeTx->needs_opf)
+		return;
+	if (slot != NULL && !TTS_EMPTY(slot))
+		bcdb_reserve_write_key_tags(rel, slot);
+	if (tid != NULL && ItemPointerIsValid(tid))
+	{
+		PREDICATELOCKTARGETTAG tag;
+		SET_PREDICATELOCKTARGETTAG_TUPLE(tag, 0, RelationGetRelid(rel),
+										  ItemPointerGetBlockNumber(tid),
+										  ItemPointerGetOffsetNumber(tid));
+		ws_table_reserveDT(&tag);
+	}
 }
 
 static void
@@ -766,6 +789,8 @@ ExecInsert(ModifyTableState *mtstate,
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
 	bcdb_log_dml_route("INSERT", resultRelationDesc, defer_bcdb_dml);
+	if (defer_bcdb_dml && onconflict != ONCONFLICT_NONE)
+		bcdb_request_opf(BCDB_OPF_UPSERT);
 	/*
 	 * BEFORE ROW INSERT Triggers.
 	 *
@@ -869,6 +894,7 @@ ExecInsert(ModifyTableState *mtstate,
 			  resultRelInfo->ri_TrigDesc->trig_insert_before_row)))
 			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
+		bcdb_opf_write_tags(resultRelationDesc, slot, NULL);
 		if (onconflict != ONCONFLICT_NONE && resultRelInfo->ri_NumIndices > 0)
 		{
 			/* Perform a speculative insertion. */
@@ -1123,6 +1149,16 @@ ExecDelete(ModifyTableState *mtstate,
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
 	bcdb_log_dml_route("DELETE", resultRelationDesc, defer_bcdb_dml);
+	if (!bcdb_dt_simulating && activeTx != NULL &&
+		activeTx->needs_opf && tupleid != NULL)
+	{
+		TupleTableSlot *oldslot = table_slot_create(resultRelationDesc, NULL);
+		if (table_tuple_fetch_row_version(resultRelationDesc, tupleid,
+											  estate->es_snapshot, oldslot))
+			bcdb_opf_write_tags(resultRelationDesc, oldslot, tupleid);
+		ExecDropSingleTupleTableSlot(oldslot);
+	}
+
 
 	/* BEFORE ROW DELETE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -1565,6 +1601,16 @@ ExecUpdate(ModifyTableState *mtstate,
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
 	bcdb_log_dml_route("UPDATE", resultRelationDesc, defer_bcdb_dml);
+	if (!bcdb_dt_simulating && activeTx != NULL &&
+		activeTx->needs_opf && tupleid != NULL)
+	{
+		TupleTableSlot *oldslot = table_slot_create(resultRelationDesc, NULL);
+		if (table_tuple_fetch_row_version(resultRelationDesc, tupleid,
+											  estate->es_snapshot, oldslot))
+			bcdb_opf_write_tags(resultRelationDesc, oldslot, tupleid);
+		ExecDropSingleTupleTableSlot(oldslot);
+	}
+
 
 	/* BEFORE ROW UPDATE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -1869,7 +1915,8 @@ lreplace:;
 				 */
 				// ExecDeleteMerkleIndexes(resultRelationDesc, tupleid);
 				
-				store_optim_update(slot, tupleid);
+				store_optim_update(resultRelationDesc, slot, tupleid,
+								   exec_rt_fetch(resultRelInfo->ri_RangeTableIndex, estate));
 				
 				// ExecInsertMerkleIndexes(resultRelationDesc, slot);
 				
@@ -1894,6 +1941,7 @@ lreplace:;
 			}
 			else
 			{
+				bcdb_opf_write_tags(resultRelationDesc, slot, tupleid);
 				merkleDeletePlan = CaptureMerkleDeletePlan(resultRelationDesc, tupleid);
 
 				result = table_tuple_update(resultRelationDesc, tupleid, slot,
@@ -2137,6 +2185,8 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 	Datum		xminDatum;
 	TransactionId xmin;
 	bool		isnull;
+
+	bcdb_request_opf(BCDB_OPF_UPSERT);
 
 	/* Determine lock mode to use */
 	lockmode = ExecUpdateLockMode(estate, resultRelInfo);
@@ -2654,6 +2704,14 @@ ExecModifyTable(PlanState *pstate)
 	 */
 	if (node->fireBSTriggers)
 	{
+		if (bcdb_dt_simulating)
+		{
+			int i;
+			for (i = 0; i < node->mt_nplans; i++)
+				(void) bcdb_should_defer_dml(node->resultRelInfo[i].ri_RelationDesc);
+			if (node->rootResultRelInfo != NULL)
+				(void) bcdb_should_defer_dml(node->rootResultRelInfo->ri_RelationDesc);
+		}
 		fireBSTriggers(node);
 		node->fireBSTriggers = false;
 	}

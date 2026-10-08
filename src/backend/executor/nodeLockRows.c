@@ -20,6 +20,7 @@
  */
 
 #include "postgres.h"
+#include "bcdb/worker.h"
 
 #include "access/tableam.h"
 #include "access/xact.h"
@@ -179,6 +180,17 @@ lnext:
 		if (!IsolationUsesXactSnapshot())
 			lockflags |= TUPLE_LOCK_FLAG_FIND_LAST_VERSION;
 
+		if (bcdb_dt_simulating)
+		{
+			PREDICATELOCKTARGETTAG tag;
+			SET_PREDICATELOCKTARGETTAG_TUPLE(tag, 0, RelationGetRelid(erm->relation),
+											  ItemPointerGetBlockNumber(&tid),
+											  ItemPointerGetOffsetNumber(&tid));
+			rs_table_reserveDT(&tag);
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_LOCKROWS_SKIPPED, 1);
+			erm->curCtid = tid;
+			continue;
+		}
 		test = table_tuple_lock(erm->relation, &tid, estate->es_snapshot,
 								markSlot, estate->es_output_cid,
 								lockmode, erm->waitPolicy,
