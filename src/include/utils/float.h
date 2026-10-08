@@ -37,6 +37,7 @@ extern PGDLLIMPORT int extra_float_digits;
 /*
  * Utility functions in float.c
  */
+extern void bcdb_seed_random(uint64 tx_id);
 extern int	is_infinite(float8 val);
 extern float8 float8in_internal(char *num, char **endptr_p,
 								const char *type_name, const char *orig_string);

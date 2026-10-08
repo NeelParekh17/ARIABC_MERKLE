@@ -67,6 +67,18 @@ float8		degree_c_one = 1.0;
 static bool drandom_seed_set = false;
 static unsigned short drandom_seed[3] = {0, 0, 0};
 
+/* Reset random() for every deterministic attempt, using setseed's state. */
+void
+bcdb_seed_random(uint64 tx_id)
+{
+	uint64 seed = tx_id ^ UINT64CONST(0xBCDB13579BDF);
+
+	drandom_seed[0] = (unsigned short) seed;
+	drandom_seed[1] = (unsigned short) (seed >> 16);
+	drandom_seed[2] = (unsigned short) (seed >> 32);
+	drandom_seed_set = true;
+}
+
 /* Local function prototypes */
 static double sind_q1(double x);
 static double cosd_q1(double x);

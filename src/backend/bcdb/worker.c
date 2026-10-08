@@ -1,4 +1,5 @@
 #include "postgres.h"
+#include "utils/float.h"
 #include "bcdb/worker.h"
 #include "bcdb/shm_transaction.h"
 #include "bcdb/shm_block.h"
@@ -3072,6 +3073,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 					tx,
 					"after_ledger_claim_before_user_sql");
 
+				bcdb_seed_random((uint64) tx->tx_id);
 				bcdb_emit_ledger_boundary("ledger_business_sql");
 
 				/* Run business SQL in a subtransaction if ledger is enabled to catch deterministic errors */
