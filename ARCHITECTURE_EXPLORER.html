@@ -272,9 +272,10 @@ summary{cursor:pointer;color:var(--cyan);font-size:13px}
  <div class="panel" style="margin-top:14px">
   <div class="pad" style="padding-bottom:6px"><div class="row" style="gap:8px">
    <span class="small">Case</span><select id="sim-sc" aria-label="Scenario"><option value="random">random workload</option><option value="samekey">tx 6, 10, 12 update the same key</option><option value="twokeys">tx 12 needs tx 6 (k5) and tx 10 (k6)</option><option value="outoforder">tx 12 commits before tx 10</option><option value="postpub">tx 10 fails after publishing</option></select>
+   <span class="small" style="margin-left:8px">Protocol</span><div class="seg" role="group" aria-label="Protocol" id="sim-p"><button data-p="new" aria-pressed="true">new</button><button data-p="old" aria-pressed="false">old (main)</button></div>
    <span class="small" style="margin-left:8px">Backends</span><div class="seg" role="group" aria-label="Backends" id="sim-w"><button data-w="1" aria-pressed="false">1</button><button data-w="4" aria-pressed="false">4</button><button data-w="8" aria-pressed="true">8</button><button data-w="16" aria-pressed="false">16</button></div>
    <span class="small" style="margin-left:8px">Hot keys</span><div class="seg" role="group" aria-label="Hot-key share" id="sim-h"><button data-h="0" aria-pressed="false">0%</button><button data-h="0.15" aria-pressed="false">15%</button><button data-h="0.4" aria-pressed="true">40%</button></div>
-   <span class="spacer"></span><button class="primary" id="sim-play">▶ Play</button><button id="sim-restart">↺</button><select id="sim-speed" aria-label="Speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+   <span class="spacer"></span><button class="primary" id="sim-play">▶ Play</button><button id="sim-restart">↺</button><select id="sim-speed" aria-label="Speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
   </div>
   <input class="range" id="sim-range" type="range" min="0" max="10" step="0.001" value="0" aria-label="Model time" style="width:100%;margin-top:10px">
   <div class="row" id="sim-sel" style="gap:6px;margin-top:6px;min-height:24px"></div></div>
@@ -649,7 +650,7 @@ function initSeq(){renderSeq();$('#seq-svg').onclick=e=>{const l=e.target.closes
    ========================================================= */
 let simW=8,simH=0.4,simT=null,simRAF=null,simPlay=false,simNow=0,simLast=null,simSel=-1;
 function rng(seed){let s=seed>>>0;return()=>{s=(s*1664525+1013904223)>>>0;return s/4294967296}}
-let simSc='random';
+let simSc='random',simProto='new';
 /* scripted cases; every other tx gets a random cold key so it never interferes */
 const SIMSC={
  samekey:{t:'tx 6, 10, 12 update the same key',tx:{6:[['W','k5']],10:[['W','k5']],12:[['W','k5']]}},
@@ -664,17 +665,27 @@ function simulate(W,hot){const SC=SIMSC[simSc];if(SC){W=8;hot=0}
   const op0=r()<.5?'R':'W';const key0=r()<hot?HOT[r()<.5?0:1]:'k'+(10+Math.floor(r()*990));const keys=SC&&SC.tx[i]?SC.tx[i]:[[op0,key0]];
   const k=i%W;let t=connFree[k];const segs=[];if(t>0)segs.push(['queue',0,t]);let base=lcAt(t);const bases=[base];let retries=0;const conflicts=[];let failed=false,pubT=null;
   let d=.45+r()*.5;segs.push(['spec',t,t+d]);t+=d;
-  for(;;){const go=i?pub[i-1]:0;if(go>t){segs.push(['gate',t,go]);t=go}
-   /* conflict_checkDT: ws tags then rs tags, stop at the first hit */
+  for(;;){const go=i?pub[i-1]:0;
+   /* conflict_checkDT order: ws tags then rs tags, stop at the first hit */
    let conf=-1,wj=-1,hit=keys[0][1],first=true;
    for(const [o,kk] of keys){let w=-1;(writers[kk]||[]).forEach(j=>{if(j<i&&j>w)w=j});if(first){wj=w;first=false}if(w>base){conf=w;wj=w;hit=kk;break}}
-   segs.push(['val',t,t+.06,conf,wj,base,hit]);t+=.06;
+   /* new: bcdb_dt_validate_published runs while waiting in bcdb_wait_for_serial_slot; a writer
+      that publishes before our turn is caught then, and the restart does not hold the turn */
+   if(simProto==='new'&&conf>=0&&pubT==null){const seen=Math.max(t,pub[conf]);
+    if(seen<go){if(seen>t)segs.push(['gate',t,seen]);t=seen;segs.push(['echeck',t,t+.02,conf,wj,base,hit]);t+=.02;
+     retries++;conflicts.push({writer:conf,base,key:hit,early:true});segs.push(['eabort',t,t+.05,conf,hit]);t+=.05;
+     const wake=Math.max(t,cv[conf]);if(wake>t)segs.push(['wait',t,wake,conf]);t=wake;base=lcAt(t);bases.push(base);d=.45+r()*.5;segs.push(['respec',t,t+d]);t+=d;continue}}
+   if(go>t){segs.push(['gate',t,go]);t=go}
+   /* at the turn: old = full map probe of every tag; new = only digests published since the last early check */
+   const vd=simProto==='new'?.02:.06;segs.push(['val',t,t+vd,conf,wj,base,hit]);t+=vd;
    if(conf>=0){retries++;conflicts.push({writer:conf,base,key:hit});segs.push(['abort',t,t+.05,conf,hit]);t+=.05;
     const wake=Math.max(t,cv[conf]);if(wake>t)segs.push(['wait',t,wake,conf]);t=wake;base=lcAt(t);bases.push(base);d=.45+r()*.5;segs.push(['respec',t,t+d]);t+=d;continue}
    /* publish_ws_tableDT + set_published_max (only the first publish moves published_max) */
    if(pubT==null){pubT=t;pub[i]=t;keys.forEach(([o,kk])=>{if(o==='W')(writers[kk]=writers[kk]||[]).push(i)})}
    if(SC&&SC.fail&&SC.fail[i]&&!failed){failed=true;segs.push(['apply',t,t+.2]);t+=.2;segs.push(['afail',t,t+.05,i-1]);t+=.05;
-    /* apply_unique_conflict_full_restart: wait for predecessors, then rerun the same tx id */
+    if(simProto==='new'){/* settle: wait until every predecessor committed, re-apply the SAME validated writes, no re-run */
+     const wake=Math.max(t+.02,i?cv[i-1]:0);segs.push(['settle',t,wake,i-1]);t=wake;segs.push(['apply',t,t+.22]);t+=.22;break}
+    /* old: apply_unique_conflict_full_restart / apply_retry_restart: wait for predecessors, then rerun the same tx id */
     const wake=Math.max(t,i?cv[i-1]:0);if(wake>t)segs.push(['wait',t,wake,i-1]);t=wake;base=lcAt(t);bases.push(base);d=.45+r()*.5;segs.push(['respec',t,t+d]);t+=d;continue}
    const ap=(SC&&SC.ap&&SC.ap[i])||(keys.some(q=>q[0]==='W')?.22+r()*.18:.06);segs.push(['apply',t,t+ap]);t+=ap;break}
   const cm=keys.some(q=>q[0]==='W')?.14+r()*.08:.05;segs.push(['commit',t,t+cm]);t+=cm;
@@ -682,8 +693,8 @@ function simulate(W,hot){const SC=SIMSC[simSc];if(SC){W=8;hot=0}
   tx.push({i,k,keys,op:keys[0][0],key:keys[0][1],hot:SC?!!SC.tx[i]:keys.some(q=>HOT.includes(q[1])),segs,retries,conflicts,bases,pub:pub[i],done:t,cv:cv[i],failed});
  }
  const end=Math.max(...tx.map(x=>x.done))+.15;return{tx,end,W,N}}
-const SIMCOL={afail:'#ff5d73',queue:'#2a3a4f',spec:'#3987e5',respec:'#86b6ef',gate:'#5d6f86',val:'#e0a326',abort:'#ff8f8f',wait:'#d95926',apply:'#199e70',commit:'#9085e9'};
-const SIMNAME={afail:'apply failed → rerun',spec:'speculate',gate:'wait at gate',val:'check + publish',abort:'abort',wait:'wait for writer commit',respec:'re-speculate',apply:'apply heap + Merkle',commit:'commit (WAL)'};
+const SIMCOL={echeck:'#f2c14e',eabort:'#f78fb3',settle:'#5fd3c6',afail:'#ff5d73',queue:'#2a3a4f',spec:'#3987e5',respec:'#86b6ef',gate:'#5d6f86',val:'#e0a326',abort:'#ff8f8f',wait:'#d95926',apply:'#199e70',commit:'#9085e9'};
+const SIMNAME={echeck:'early check (while waiting)',eabort:'early abort (turn not held)',settle:'settle: wait for predecessors',afail:'apply failed',spec:'speculate',gate:'wait at gate',val:'check + publish',abort:'abort',wait:'wait for writer commit',respec:'re-speculate',apply:'apply heap + Merkle',commit:'commit (WAL)'};
 function simSeg(x,t){for(const s of x.segs)if(t>=s[1]&&t<s[2])return s;return null}
 function renderSim(){const S=simT,t=simNow,W=S.W;
  const top=92,area=430,lh=Math.min(54,area/W),l0=top+(area-W*lh)/2,ly=k=>l0+k*lh+lh/2,th=Math.min(24,lh-5);
@@ -693,8 +704,8 @@ function renderSim(){const S=simT,t=simNow,W=S.W;
  const T=(x,y,s,o={})=>`<text x="${x}" y="${y}"${o.a?` text-anchor="${o.a}"`:''} style="font:${o.w||600} ${o.s||11}px ${o.m?'var(--mono)':'var(--font)'};fill:${o.c||'#cfdbeb'}"${o.op!=null?` opacity="${o.op}"`:''}>${s}</text>`;
  /* station headers */
  const hd=(x0,x1,title,fn,col)=>{h+=`<rect x="${x0}" y="14" width="${x1-x0}" height="52" rx="10" fill="#101c2b" stroke="${col}" stroke-opacity=".55"/>`+T((x0+x1)/2,36,title,{a:'middle',s:12.5,w:800,c:col})+T((x0+x1)/2,54,fn,{a:'middle',s:9.5,m:1,c:'#8ea2ba'})};
- hd(X.q-4,X.s0-12,'backends','i % '+W,'#8ea2ba');hd(X.s0-4,X.s1+8,'speculate','get_write_set()',SIMCOL.spec);hd(X.g-40,X.G0-6,'wait','serial slot',SIMCOL.gate);
- hd(X.G0-2,X.G1+2,'gate','check+publish',SIMCOL.val);hd(X.a0-4,X.a1+8,'apply','heap + Merkle Δ',SIMCOL.apply);hd(X.c0-4,X.c1+14,'commit','finish_xact',SIMCOL.commit);
+ hd(X.q-4,X.s0-12,'backends','i % '+W,'#8ea2ba');hd(X.s0-4,X.s1+8,'speculate','get_write_set()',SIMCOL.spec);hd(X.g-40,X.G0-6,'wait',simProto==='new'?'slot+early chk':'serial slot',SIMCOL.gate);
+ hd(X.G0-2,X.G1+2,'gate',simProto==='new'?'Δ chk+publish':'check+publish',SIMCOL.val);hd(X.a0-4,X.a1+8,'apply','heap + Merkle Δ',SIMCOL.apply);hd(X.c0-4,X.c1+14,'commit','finish_xact',SIMCOL.commit);
  /* lanes */
  for(let k=0;k<W;k++){const y=ly(k);h+=`<line x1="${X.s0-6}" y1="${y}" x2="${X.c1+10}" y2="${y}" stroke="#1b293b" stroke-width="${Math.max(4,lh-10)}" stroke-linecap="round"/>`+T(X.q+4,y+4,'pid '+(k+1),{s:Math.min(10.5,lh*.42),m:1,c:'#6f8098'})}
  /* the ordered gate: one shared column, only tx = published_max+1 may enter */
@@ -711,17 +722,22 @@ function renderSim(){const S=simT,t=simNow,W=S.W;
    else if(s[0]==='gate')px=X.g-34;
    else if(s[0]==='val'){px=X.G0+(X.G1-X.G0)/2-20;probe={x,s,p}}
    else if(s[0]==='abort')px=X.G0+(X.G1-X.G0)/2-20-p*(X.G0-X.s0);
-   else if(s[0]==='afail')px=X.a0-p*(X.a0-X.s0);
+   else if(s[0]==='afail')px=simProto==='new'?X.a0:X.a0-p*(X.a0-X.s0);
+   else if(s[0]==='echeck')px=X.g-34;
+   else if(s[0]==='eabort')px=X.g-34-p*(X.g-34-X.s0);
+   else if(s[0]==='settle')px=X.a0;
    else if(s[0]==='wait')px=X.s0;
    else if(s[0]==='apply')px=X.a0+p*(X.a1-X.a0);
    else px=X.c0+p*(X.c1-X.c0);
    if(s[0]==='gate'&&t-s[1]>.05)h+=T(px+48,y+4,'zz',{s:Math.min(11,th*.5),w:800,c:'#8ea2ba',op:.6+.4*Math.sin(t*40)});
    if(s[0]==='gate'&&x.i-1>=0){const pv=S.tx[x.i-1];if(pv.pub>=s[1]&&t>=pv.pub-.0001&&t<pv.pub+.08)wakes.push({y})}
-   if(s[0]==='wait')h+=T(px+48,y+4,'⏳ ≥ '+s[3],{s:Math.min(11,th*.5),m:1,w:800,c:SIMCOL.wait})}
+   if(s[0]==='wait')h+=T(px+48,y+4,'⏳ ≥ '+s[3],{s:Math.min(11,th*.5),m:1,w:800,c:SIMCOL.wait});
+   if(s[0]==='echeck')h+=T(px+48,y+4,'✗ '+s[6]+' ← tx '+s[3],{s:Math.min(11,th*.5),m:1,w:800,c:SIMCOL.eabort});
+   if(s[0]==='settle')h+=T(px+48,y+4,'⏳ all ≤ '+s[3]+' commit',{s:Math.min(11,th*.5),m:1,w:800,c:SIMCOL.settle})}
   const sel=simSel===x.i;
   h+=`<g class="pgtok" data-i="${x.i}" style="cursor:pointer" opacity="${op}"><rect x="${px}" y="${y-th/2}" width="40" height="${th}" rx="6" fill="${col}" stroke="${sel?'#fff':x.hot?'#ffc87b':'none'}" stroke-width="${sel?2.4:1.6}"/>`+T(px+20,y+4,lab,{a:'middle',s:Math.min(11.5,th*.52),m:1,w:800,c:'#08111b'})+'</g>';
   if(s&&(s[0]==='spec'||s[0]==='respec')&&(t-s[1])/(s[2]-s[1])>.35&&lh>=22){const kl=x.keys.map(q=>q[0]+' '+q[1]).join(' · ');h+=`<rect x="${px+44}" y="${y-8}" width="${kl.length*6.1+16}" height="16" rx="8" fill="${x.op==='W'?'#3d2a12':'#12283d'}" stroke="${x.op==='W'?'#ffc87b':'#70dfef'}" stroke-width="1"/>`+T(px+52,y+4,kl,{s:9.5,m:1,w:700,c:x.op==='W'?'#ffc87b':'#70dfef'})}
-  if(s&&s[0]==='afail')h+=T(px+48,y+4,'✗ apply failed',{s:Math.min(11,th*.5),w:800,c:SIMCOL.afail})});
+  if(s&&s[0]==='afail')h+=T(px+48,y+4,simProto==='new'?'✗ apply failed → settle':'✗ apply failed → re-run',{s:Math.min(11,th*.5),w:800,c:SIMCOL.afail})});
  if(next<S.N&&!(probe&&probe.x.i===next)){const nx=S.tx[next];const s=simSeg(nx,t);h+=`<rect x="${X.G0+(X.G1-X.G0)/2-20}" y="${ly(nx.k)-th/2}" width="40" height="${th}" rx="6" fill="none" stroke="${SIMCOL.val}" stroke-dasharray="4 3"/>`+T(X.G0+(X.G1-X.G0)/2,ly(nx.k)+4,next,{a:'middle',s:Math.min(11,th*.5),m:1,w:700,c:SIMCOL.val,op:.8});if(s&&['abort','wait','respec'].includes(s[0])&&!nx.failed)h+=T(X.G0+(X.G1-X.G0)/2,l0-14,'🔒 held by '+next,{a:'middle',s:10,w:800,c:'#ff8f8f'})}
  wakes.forEach(w=>h+=`<path d="M${X.G0} ${w.y} L${X.g+10} ${w.y}" stroke="${SIMCOL.val}" stroke-width="2" marker-end="url(#pga)"/>`);
  /* write-set map (shared memory) */
@@ -730,9 +746,9 @@ function renderSim(){const S=simT,t=simNow,W=S.W;
  const latest=kk=>ents.filter(e=>e.key===kk).reduce((m,e)=>e.i>m.i?e:m,{i:null,at:-1});const pinned=SIMSC[simSc]?[...new Set(Object.values(SIMSC[simSc].tx).flat().map(q=>q[1]))]:['k1','k2'];
  const rows=[];const seen=new Set();pinned.forEach(kk=>{const e=latest(kk);rows.push({key:kk,w:e.i,at:e.at});seen.add(kk)});
  ents.forEach(e=>{if(!seen.has(e.key)&&rows.length<15){const l=latest(e.key);rows.push({key:e.key,w:l.i,at:l.at});seen.add(e.key)}});
- const pk=probe?probe.s[6]:null;if(pk&&!seen.has(pk))rows.splice(pinned.length,0,{key:pk,w:null,at:-1,ghost:true});const blocked=S.tx.filter(z=>{const s=simSeg(z,t);return s&&(s[0]==='abort'||s[0]==='wait'||s[0]==='afail'||(z.failed&&s[0]==='respec'&&s[1]>z.pub))});
+ const pk=probe?probe.s[6]:null;if(pk&&!seen.has(pk))rows.splice(pinned.length,0,{key:pk,w:null,at:-1,ghost:true});const blocked=S.tx.filter(z=>{const s=simSeg(z,t);return s&&(s[0]==='abort'||s[0]==='eabort'||s[0]==='wait'||s[0]==='afail'||s[0]==='settle'||(z.failed&&s[0]==='respec'&&s[1]>z.pub))});
  rows.slice(0,15).forEach((r,j)=>{const y=my+38+j*29;const isP=probe&&pk===r.key;const fresh=r.at>=0&&t-r.at<.12;
-  let st='',stc='#8ea2ba';const bl=!isP&&blocked.find(z=>{const sg=simSeg(z,t);return z.failed&&sg[1]>=z.pub?z.keys.some(q=>q[1]===r.key):z.conflicts.some(c=>c.key===r.key)});if(bl){const sg=simSeg(bl,t);st=bl.failed&&sg[1]>=bl.pub?`tx ${bl.i} re-running`:sg[0]==='abort'?`tx ${bl.i} aborts, restarts`:`tx ${bl.i} waits for ${sg[3]}`;stc='#ff8f8f'}if(isP){const [,,,conf,wj,base]=probe.s;if(wj<0){st='none ✓';stc='#94e5b1'}else if(conf>=0){st=`${wj} > base ${base} ✗`;stc='#ff8f8f'}else{st=`${wj} ≤ base ${base} ✓`;stc='#94e5b1'}}
+  let st='',stc='#8ea2ba';const bl=!isP&&blocked.find(z=>{const sg=simSeg(z,t);return z.failed&&sg[1]>=z.pub?z.keys.some(q=>q[1]===r.key):z.conflicts.some(c=>c.key===r.key)});if(bl){const sg=simSeg(bl,t);st=bl.failed&&sg[1]>=bl.pub?(simProto==='new'?`tx ${bl.i} settling`:`tx ${bl.i} re-running`):sg[0]==='abort'?`tx ${bl.i} aborts, restarts`:sg[0]==='eabort'?`tx ${bl.i} aborts early`:`tx ${bl.i} waits for ${sg[3]}`;stc='#ff8f8f'}if(isP){const [,,,conf,wj,base]=probe.s;if(wj<0){st='none ✓';stc='#94e5b1'}else if(conf>=0){st=`${wj} > base ${base} ✗`;stc='#ff8f8f'}else{st=`${wj} ≤ base ${base} ✓`;stc='#94e5b1'}}
   h+=`<rect x="${mx+8}" y="${y}" width="${mw-16}" height="24" rx="6" fill="${isP?(st.includes('✗')?'#3d1b1b':'#173a2a'):bl?'#2a1616':fresh?'#3a2d12':'#132235'}" stroke="${isP||bl?stc:fresh?'#ffc87b':'#22344a'}" stroke-width="${isP||fresh?1.8:1}"/>`+T(mx+18,y+16,r.key,{s:10.5,m:1,w:800,c:pinned.includes(r.key)?'#ffc87b':'#cfdbeb'})+T(mx+70,y+16,r.w==null?'—':'tx '+r.w,{s:10.5,m:1,w:700,c:'#edf4ff'});
   if(st)h+=T(mx+mw-14,y+16,st,{a:'end',s:9.5,m:1,w:800,c:stc});
   if(isP)h+=`<path d="M${X.G1+4} ${ly(probe.x.k)} C ${X.G1+120} ${ly(probe.x.k)} ${mx-60} ${y+12} ${mx+6} ${y+12}" fill="none" stroke="${stc}" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#pga)"/>`});
@@ -751,15 +767,17 @@ function renderSim(){const S=simT,t=simNow,W=S.W;
  S.tx.forEach(x=>x.segs.forEach(s=>{if(s[0]==='queue'||s[2]-s[1]<=0)return;h+=`<rect class="pgseg" data-i="${x.i}" x="${sx(s[1])}" y="${gy+x.k*gh}" width="${Math.max(.8,sx(s[2])-sx(s[1])-.6)}" height="${gh-1.4}" fill="${SIMCOL[s[0]]}" opacity="${s[1]<=t?(simSel<0||simSel===x.i?1:.35):.12}"/>`}));
  h+=`<line x1="${sx(t)}" y1="${gy-4}" x2="${sx(t)}" y2="${gy+W*gh+3}" stroke="#70dfef" stroke-width="2"/>`+T(X.q,gy+10,'timeline',{s:10,m:1,c:'#6f8098'});
  $('#sim-svg').innerHTML=h+'</svg>';
- const doneN=S.tx.filter(x=>x.done<=t).length,ret=S.tx.reduce((a,x)=>a+x.segs.filter(s=>s[0]==='abort'&&s[1]<=t).length,0);
- $('#sim-wm').innerHTML=`<div><small>published_max</small><strong>${pubMax}</strong></div><div><small>last_committed</small><strong>${lc}</strong></div><div><small>committed</small><strong>${doneN} / ${S.N}</strong></div><div><small>conflict restarts</small><strong>${ret}</strong></div><div><small>model throughput</small><strong>${t>0?fmt(Math.round(doneN/t*1000)):0} tx/s</strong></div>`;
+ const doneN=S.tx.filter(x=>x.done<=t).length,ret=S.tx.reduce((a,x)=>a+x.segs.filter(s=>s[0]==='abort'&&s[1]<=t).length,0),eret=S.tx.reduce((a,x)=>a+x.segs.filter(s=>s[0]==='eabort'&&s[1]<=t).length,0);
+ $('#sim-wm').innerHTML=`<div><small>published_max</small><strong>${pubMax}</strong></div><div><small>last_committed</small><strong>${lc}</strong></div><div><small>committed</small><strong>${doneN} / ${S.N}</strong></div><div><small>restarts holding the turn</small><strong>${ret}</strong></div>${simProto==='new'?`<div><small>early restarts (turn free)</small><strong>${eret}</strong></div>`:''}<div><small>model throughput</small><strong>${t>0?fmt(Math.round(doneN/t*1000)):0} tx/s</strong></div>`;
  if(simSel>=0){const x=S.tx[simSel];$('#sim-sel').innerHTML=[`tx ${x.i}`,`pid ${x.k+1}`,x.keys.map(q=>q[0]+' '+q[1]).join(' · '),`base ${x.bases.join(' → ')}`,x.conflicts.length?`conflict with tx ${x.conflicts.map(c=>c.writer).join(', ')}`:'no conflict',`published ${x.pub.toFixed(2)} ms`,`committed ${x.done.toFixed(2)} ms`].map((s,i)=>`<span class="tag" style="${i===0?'border-color:#fff;color:#fff':''}">${esc(s)}</span>`).join('')}else $('#sim-sel').innerHTML='';
  $('#sim-play').textContent=simPlay?'Ⅱ Pause':t>=S.end?'↺ Replay':'▶ Play';renderSimAborts();$('#sim-range').max=S.end;$('#sim-range').value=t}
 function simLoop(now){simRAF=null;if(!simPlay||!$('#v-pg').classList.contains('on')){simLast=null;return}const dt=simLast==null?0:Math.min(.06,(now-simLast)/1000);simLast=now;
  const nt=Math.min(simT.end,simNow+dt*simT.end/28*Number($('#sim-speed').value));const hit=$('#sim-explain').checked?simAborts(simT).find(a=>a.abT>simNow&&a.abT<=nt):null;simNow=hit?hit.abT:nt;if(simNow>=simT.end)simPlay=false;if(hit){simPlay=false;renderSim();whyStart(hit,true);return}renderSim();if(simPlay)simRAF=requestAnimationFrame(simLoop)}
 function simKick(){if(simRAF==null&&simPlay){simLast=null;simRAF=requestAnimationFrame(simLoop)}}
 function simReset(play=true){simT=simulate(simW,simH);simNow=0;simSel=-1;simPlay=play;EX.ab=null;EX.resume=false;renderSim();renderWhy();simKick()}
-function initSim(){$('#sim-legend').innerHTML=Object.entries(SIMNAME).map(([k,n])=>`<span><i class="sw" style="background:${SIMCOL[k]}"></i>${n}</span>`).join('')+`<span><i class="sw" style="background:transparent;outline:1.6px solid #ffc87b"></i>hot key</span>`;
+function simLegend(){$('#sim-legend').innerHTML=Object.entries(SIMNAME).filter(([k])=>simProto==='new'||!['echeck','eabort','settle'].includes(k)).map(([k,n])=>`<span><i class="sw" style="background:${SIMCOL[k]}"></i>${k==='afail'?(simProto==='new'?'apply failed → settle':'apply failed → re-run'):n}</span>`).join('')+`<span><i class="sw" style="background:transparent;outline:1.6px solid #ffc87b"></i>hot key</span>`}
+function initSim(){simLegend();
+ $('#sim-p').onclick=e=>{const b=e.target.closest('[data-p]');if(!b)return;simProto=b.dataset.p;$$('#sim-p button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));simLegend();simReset()};
  $('#sim-w').onclick=e=>{const b=e.target.closest('[data-w]');if(!b||simSc!=='random')return;simW=+b.dataset.w;$$('#sim-w button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));simReset()};
  $('#sim-h').onclick=e=>{const b=e.target.closest('[data-h]');if(!b||simSc!=='random')return;simH=+b.dataset.h;$$('#sim-h button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));simReset()};
  $('#sim-play').onclick=()=>{if(simNow>=simT.end){simNow=0}simPlay=!simPlay;EX.resume=false;renderSim();simKick()};
@@ -776,47 +794,55 @@ function initSim(){$('#sim-legend').innerHTML=Object.entries(SIMNAME).map(([k,n]
 /* ---- abort explainer: replays the exact model events behind one conflict restart ---- */
 const EX={ab:null,el:0,last:null,raf:null,resume:false,beatDur:1.8};
 function simAborts(S){const out=[];S.tx.forEach(x=>{let snap=0,att=0;x.segs.forEach((s,k)=>{if(s[0]==='spec'||s[0]==='respec')snap=s[1];
- if(s[0]==='afail'){const wt=x.segs.slice(k+1).find(q=>q[0]==='wait');const rs=x.segs.slice(k+1).find(q=>q[0]==='respec');const dep=S.tx.find(z=>z.i>x.i&&z.conflicts.some(c=>c.writer===x.i));const ind=S.tx.filter(z=>z.i>x.i&&z.done<x.done&&!z.conflicts.some(c=>c.writer===x.i));
-  out.push({type:'apply',i:x.i,k:x.k,att:att+1,key:x.keys[0][1],pubT:x.pub,abT:s[1],abEnd:s[2],waitEnd:wt?wt[2]:s[2],respecT:rs[1],done:x.done,xSegs:x.segs,dep,ind:ind.find(z=>SIMSC[simSc]&&SIMSC[simSc].tx[z.i])||ind[0],indAll:ind.map(z=>z.i)});att++;return}
- if(s[0]==='val'&&s[3]>=0){const w=s[3],W=S.tx[w],base=x.bases[att];const ab=x.segs[k+1];const wt=x.segs.slice(k+1).find(q=>q[0]==='wait');const rs=x.segs.slice(k+1).find(q=>q[0]==='respec');
-  const key=s[6],op=(x.keys.find(q=>q[1]===key)||x.keys[0])[0];const nextVal=x.segs.slice(k+1).find(q=>q[0]==='val');const final=nextVal&&nextVal[3]<0;
+ if(s[0]==='afail'){const wt=x.segs.slice(k+1).find(q=>q[0]==='wait');const rs=x.segs.slice(k+1).find(q=>q[0]==='respec');const st=x.segs.slice(k+1).find(q=>q[0]==='settle');const dep=S.tx.find(z=>z.i>x.i&&z.conflicts.some(c=>c.writer===x.i));const ind=S.tx.filter(z=>z.i>x.i&&z.done<x.done&&!z.conflicts.some(c=>c.writer===x.i));
+  out.push({type:'apply',i:x.i,k:x.k,att:att+1,key:x.keys[0][1],pubT:x.pub,abT:s[1],abEnd:s[2],waitEnd:wt?wt[2]:s[2],respecT:rs?rs[1]:null,settleEnd:st?st[2]:null,proto:simProto,done:x.done,xSegs:x.segs,dep,ind:ind.find(z=>SIMSC[simSc]&&SIMSC[simSc].tx[z.i])||ind[0],indAll:ind.map(z=>z.i)});att++;return}
+ if((s[0]==='val'||s[0]==='echeck')&&s[3]>=0){const early=s[0]==='echeck';const w=s[3],W=S.tx[w],base=x.bases[att];const ab=x.segs[k+1];const wt=x.segs.slice(k+1).find(q=>q[0]==='wait');const rs=x.segs.slice(k+1).find(q=>q[0]==='respec');
+  const key=s[6],op=(x.keys.find(q=>q[1]===key)||x.keys[0])[0];const nextVal=x.segs.slice(k+1).find(q=>q[0]==='val'||q[0]==='echeck');const final=nextVal&&nextVal[3]<0;
   const vis=(T)=>{let v=-1;S.tx.forEach(z=>{if(z.i<x.i&&z.keys.some(q=>q[0]==='W'&&q[1]===key)&&z.done<=T&&z.i>v)v=z.i});return v};
   let holder=-1;for(let j=base+1;j<=w;j++)if(S.tx[j].done>snap){holder=j;break}
-  const blocked=S.tx.filter(z=>z.i>x.i&&z.segs.some(q=>q[0]==='gate'&&q[2]>s[2]+1e-9&&q[1]<x.pub)).map(z=>z.i);
+  const blocked=early?[]:S.tx.filter(z=>z.i>x.i&&z.segs.some(q=>q[0]==='gate'&&q[2]>s[2]+1e-9&&q[1]<x.pub)).map(z=>z.i);
   out.push({i:x.i,k:x.k,att:att+1,key,op,w,base,snap,valT:s[1],valEnd:s[2],abT:ab[1],abEnd:ab[2],waitEnd:wt?wt[2]:ab[2],waited:!!wt,respecT:rs[1],respecEnd:rs[2],base2:x.bases[att+1],nextConf:nextVal?nextVal[3]:-1,nextKey:nextVal?nextVal[6]:null,older:S.tx.filter(z=>z.i<w&&z.i>base&&z.keys.some(q=>q[0]==='W'&&q[1]===key)).map(z=>z.i),others:x.keys.length>1?x.keys.filter(q=>q[1]!==key).map(q=>q[1]):[],nextValT:nextVal?nextVal[1]:x.pub,final,pub:x.pub,
-   wSegs:W.segs,xSegs:x.segs,wDone:W.done,wPub:W.pub,v1:vis(snap),v2:vis(rs[1]),kind:W.done<=snap?'lag':'stale',holder,blocked,delay:x.pub-s[2]});att++}})});return out}
+   wSegs:W.segs,xSegs:x.segs,wDone:W.done,wPub:W.pub,v1:vis(snap),v2:vis(rs[1]),kind:W.done<=snap?'lag':'stale',holder,blocked,delay:early?0:x.pub-s[2],early});att++}})});return out}
 function whyBeats(a){if(a.type==='apply')return applyBeats(a);const R=a.op==='R',vl=v=>v<0?'the initial row':'tx '+v+"'s version";
  const B=[{t:a.snap,k:'snap',cap:`tx ${a.i} starts on pid ${a.k+1}: its snapshot is taken while last_committed = ${a.base}`},
   {t:a.snap+.35*(a.valT-a.snap),k:'access',cap:a.kind==='stale'?`${R?'reads':'updates'} ${a.key} and sees ${vl(a.v1)}; tx ${a.w}'s write is not in this snapshot`:`${R?'reads':'updates'} ${a.key} and does see tx ${a.w}'s version (it committed before this snapshot)`},
   a.kind==='stale'?{t:a.wDone,k:'writer',cap:`tx ${a.w} (earlier in the order) writes ${a.key} and commits only after tx ${a.i}'s snapshot`}
    :{t:a.snap,k:'writer',cap:`but tx ${a.holder} had not committed yet, so last_committed was stuck at ${a.base}, below tx ${a.w}`},
-  {t:a.valT,k:'check',cap:`gate check: map says ${a.key} was last written by tx ${a.w}; ${a.base} < ${a.w} < ${a.i}, so tx ${a.w} may be missing from tx ${a.i}'s snapshot`+(a.older.length?` (tx ${a.older.join(', ')} also wrote ${a.key}; the map keeps only the latest, and waiting for ${a.w} covers them)`:'')+(a.others.length&&a.att===1?` · check stops at this first hit, ${a.others.join(', ')} not looked at yet`:'')},
-  {t:a.waited?a.waitEnd:a.abEnd,k:'abort',cap:(a.kind==='stale'?(R?`its read of ${a.key} is stale: the result would differ from running in tx order`:`its update was computed on an old ${a.key}: tx ${a.w}'s write would be lost`):`the check only trusts last_committed, so this is a conservative abort`)+(a.waited?` → abort and wait until last_committed ≥ ${a.w}`:` → abort and restart at once (tx ${a.w} already counted)`)},
+  {t:a.valT,k:'check',cap:a.early?`while tx ${a.i} waits for its turn, tx ${a.w} publishes; the incremental digest check sees ${a.key} → tx ${a.w}, and ${a.base} < ${a.w} < ${a.i}, so tx ${a.w} may be missing from tx ${a.i}'s snapshot`:`gate check: map says ${a.key} was last written by tx ${a.w}; ${a.base} < ${a.w} < ${a.i}, so tx ${a.w} may be missing from tx ${a.i}'s snapshot`+(a.older.length?` (tx ${a.older.join(', ')} also wrote ${a.key}; the map keeps only the latest, and waiting for ${a.w} covers them)`:'')+(a.others.length&&a.att===1?` · check stops at this first hit, ${a.others.join(', ')} not looked at yet`:'')},
+  {t:a.waited?a.waitEnd:a.abEnd,k:'abort',cap:(a.kind==='stale'?(R?`its read of ${a.key} is stale: the result would differ from running in tx order`:`its update was computed on an old ${a.key}: tx ${a.w}'s write would be lost`):`the check only trusts last_committed, so this is a conservative abort`)+(a.waited?` → abort and wait until last_committed ≥ ${a.w}`:` → abort and restart at once (tx ${a.w} already counted)`)+(a.early?'; this happens before its turn, so no later tx is held':'')},
   {t:a.respecT+.4*(a.respecEnd-a.respecT),k:'rerun',cap:`re-run with a new snapshot, last_committed = ${a.base2}: ${a.key} now includes ${vl(a.v2)}`},
-  {t:a.final?a.pub:a.nextValT,k:'pub',cap:a.final?`check passes (${a.w} ≤ ${a.base2}) and tx ${a.i} publishes; ${a.blocked.length?`tx ${a.blocked[0]}${a.blocked.length>1?'–'+a.blocked[a.blocked.length-1]:''} sat at the gate`:'no later tx was waiting'} for +${a.delay.toFixed(2)} ms`:`re-check: ${a.base2} now covers tx ${a.w}, but ${a.nextKey} → tx ${a.nextConf} > ${a.base2} → second abort`}];
+  {t:a.final?a.pub:a.nextValT,k:'pub',cap:a.final&&a.early?`at its turn only the digests published since the last early check are compared; nothing new conflicts and tx ${a.i} publishes`:a.final?`check passes (${a.w} ≤ ${a.base2}) and tx ${a.i} publishes; ${a.blocked.length?`tx ${a.blocked[0]}${a.blocked.length>1?'–'+a.blocked[a.blocked.length-1]:''} sat at the gate`:'no later tx was waiting'} for +${a.delay.toFixed(2)} ms`:`re-check: ${a.base2} now covers tx ${a.w}, but ${a.nextKey} → tx ${a.nextConf} > ${a.base2} → second abort`}];
  return B}
 function whyCap(T,s,op){const w=s.split(' ');const L=[''];w.forEach(x=>{if((L[L.length-1]+' '+x).length>132&&L.length<2)L.push(x);else L[L.length-1]=(L[L.length-1]?L[L.length-1]+' ':'')+x});return L.map((l,j)=>T(26,L.length>1?302+j*19:310,esc(l),{s:L.length>1?13.5:14,w:700,c:'#edf4ff',op})).join('')}
-function applyBeats(a){const d=a.dep,n=a.ind;return[
+function applyBeats(a){const d=a.dep,n=a.ind;if(a.proto==='new')return[
+ {t:a.pubT,cap:`tx ${a.i} passes its check and publishes ${a.key} → tx ${a.i}; published_max = ${a.i}, so later txs may enter the gate`},
+ {t:a.abT,cap:`applying its writes fails after the turn was released (a unique violation, a lock error, or the test failpoint)`},
+ {t:a.abEnd,cap:`the apply subtransaction rolls back. tx ${a.i} does not re-run its SQL: later txs may already have committed, and a fresh snapshot would see their writes`},
+ d?{t:d.segs.find(q=>(q[0]==='val'||q[0]==='echeck')&&q[3]===a.i)[1],cap:`tx ${d.i} also writes ${a.key}: map says tx ${a.i} > base ${d.conflicts.find(c=>c.writer===a.i).base} → tx ${d.i} waits for last_committed ≥ ${a.i}, so it cannot get ahead on this key`}:{t:a.abEnd+.1,cap:`no later tx touches ${a.key}`},
+ n?{t:n.done,cap:`tx ${n.i} (${n.keys.map(q=>q[1]).join(', ')}) shares no key with tx ${a.i} → it commits first; a re-run now would read its writes, out of order`}:{t:a.abEnd+.2,cap:`no unrelated tx committed meanwhile`},
+ {t:a.settleEnd,cap:`settle: tx ${a.i} waits until every tx < ${a.i} has committed, then re-applies the same validated writes (BCDB_DT_POST_PUBLISH_SETTLE)`},
+ {t:a.done,cap:`tx ${a.i} commits with the result of its validated run on every replica; a failure that persists would end as a deterministic 23505 instead`}].map((b,j)=>({...b,j})).sort((x,y)=>x.t-y.t||x.j-y.j);
+ return[
  {t:a.pubT,cap:`tx ${a.i} passes its check and publishes ${a.key} → tx ${a.i}; published_max = ${a.i}, so later txs may enter the gate`},
  {t:a.abT,cap:`applying its write fails after publishing (unique-key chain or apply retries exhausted)`},
  {t:a.abEnd,cap:`its heap write is rolled back before commit, so nobody saw it. tx ${a.i} keeps its id; published_max and the map entry ${a.key} → tx ${a.i} stay`},
  d?{t:d.segs.find(q=>q[0]==='val'&&q[3]===a.i)[1],cap:`tx ${d.i} also writes ${a.key}: map says tx ${a.i} > base ${d.conflicts.find(c=>c.writer===a.i).base} → tx ${d.i} must wait for last_committed ≥ ${a.i}`}:{t:a.abEnd+.1,cap:`no later tx touches ${a.key}`},
  n?{t:n.done,cap:`tx ${n.i} (${n.keys.map(q=>q[1]).join(', ')}) shares no key with tx ${a.i} → it commits first; last_committed stays below ${a.i}`}:{t:a.abEnd+.2,cap:`no unrelated tx committed meanwhile`},
- {t:a.respecT,cap:`tx ${a.i} waits for tx ≤ ${a.i-1} to commit, re-runs from a fresh snapshot, re-checks and publishes again (entries only ever move up)`},
+ {t:a.respecT,cap:`tx ${a.i} waits for tx ≤ ${a.i-1} to commit, re-runs from a fresh snapshot, re-checks and publishes again`+(n?` ⚠ that snapshot already holds later tx ${n.i}'s commit, which breaks the order (the new protocol settles instead)`:'')},
  {t:a.done,cap:`tx ${a.i} commits → last_committed jumps past every tx that finished early`+(d?` → tx ${d.i} re-runs and sees tx ${a.i}'s ${a.key}`:'')}].map((b,j)=>({...b,j})).sort((x,y)=>x.t-y.t||x.j-y.j)}
 function renderWhyApply(a){const el=$('#sim-why'),S=simT,B=applyBeats(a),nb=B.length,bi=Math.min(nb-1,Math.floor(EX.el/EX.beatDur)),bp=Math.min(1,(EX.el-bi*EX.beatDur)/(EX.beatDur*.45));
  const rowsTx=[S.tx[a.i],a.dep,a.ind].filter(Boolean);const t0=Math.min(...rowsTx.map(z=>z.segs.find(q=>q[0]==='spec')[1]))-.08,t1=Math.max(...rowsTx.map(z=>z.done))+.2;
  const prevT=bi?B[bi-1].t:t0;const playT=cl(prevT,B[bi].t,ce(0,1,bp));const X0=150,X1=690,sx=v=>X0+(Math.max(t0,Math.min(t1,v))-t0)/(t1-t0)*(X1-X0);
  const T=(x,y,s,o={})=>`<text x="${x}" y="${y}"${o.a?` text-anchor="${o.a}"`:''} style="font:${o.w||600} ${o.s||11}px ${o.m?'var(--mono)':'var(--font)'};fill:${o.c||'#cfdbeb'}"${o.op!=null?` opacity="${o.op}"`:''}>${s}</text>`;
  const red='#ff8f8f',amb='#ffc87b',grn='#94e5b1',cy='#70dfef';
- let h=`<svg viewBox="0 0 1200 340" role="img" aria-label="Why tx ${a.i} re-ran after publishing"><defs><marker id="wyb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker></defs><rect x="2" y="2" width="1196" height="336" rx="12" fill="#0e1826" stroke="${SIMCOL.afail}" stroke-opacity=".6"/>`;
- h+=T(16,26,`why tx ${a.i} re-ran after publishing`,{s:14,w:800,c:'#edf4ff'})+`<rect x="290" y="12" width="150" height="20" rx="10" fill="#3d1b22" stroke="${SIMCOL.afail}"/>`+T(365,26,'apply failed → rerun',{a:'middle',s:10.5,w:800,c:SIMCOL.afail});
+ let h=`<svg viewBox="0 0 1200 340" role="img" aria-label="${a.proto==='new'?'How tx '+a.i+' settles after a failed apply':'Why tx '+a.i+' re-ran after publishing'}"><defs><marker id="wyb" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker></defs><rect x="2" y="2" width="1196" height="336" rx="12" fill="#0e1826" stroke="${SIMCOL.afail}" stroke-opacity=".6"/>`;
+ const nw=a.proto==='new';h+=T(16,26,nw?`how tx ${a.i} settles after a failed apply`:`why tx ${a.i} re-ran after publishing`,{s:14,w:800,c:'#edf4ff'})+`<rect x="${nw?330:290}" y="12" width="160" height="20" rx="10" fill="${nw?'#123a36':'#3d1b22'}" stroke="${nw?SIMCOL.settle:SIMCOL.afail}"/>`+T(nw?410:370,26,nw?'apply failed → settle':'apply failed → rerun',{a:'middle',s:10.5,w:800,c:nw?SIMCOL.settle:SIMCOL.afail});
  const rows=[{y:62,z:S.tx[a.i],lab:'tx '+a.i+' · '+a.key,col:'#fff'},a.dep&&{y:116,z:a.dep,lab:'tx '+a.dep.i+' · '+a.key,col:amb},a.ind&&{y:170,z:a.ind,lab:'tx '+a.ind.i+' · '+a.ind.keys.map(q=>q[1]).join(','),col:cy}].filter(Boolean);
  rows.forEach(r=>{h+=T(16,r.y+15,r.lab,{s:10.5,m:1,w:800,c:r.col})+`<rect x="${X0}" y="${r.y}" width="${X1-X0}" height="22" rx="5" fill="#132235"/>`;
   r.z.segs.forEach(s=>{if(s[0]==='queue'||s[1]>playT||s[2]<=t0)return;const a0=sx(s[1]),a1=sx(Math.min(s[2],playT));h+=`<rect x="${a0}" y="${r.y+2}" width="${Math.max(1,a1-a0-.5)}" height="18" rx="3" fill="${SIMCOL[s[0]]}"/>`});
   if(playT>=r.z.done-1e-9)h+=`<line x1="${sx(r.z.done)}" y1="${r.y-6}" x2="${sx(r.z.done)}" y2="${r.y+28}" stroke="${grn}" stroke-width="2"/>`+T(sx(r.z.done),r.y-9,'✓ commit',{a:'middle',s:10,w:800,c:grn})});
  const mk=(t,y,s,col,up)=>{h+=`<line x1="${sx(t)}" y1="${y-6}" x2="${sx(t)}" y2="${y+28}" stroke="${col}" stroke-width="2"/>`+T(up==='s'?sx(t)+4:sx(t),up?y-9:y+40,s,{a:up==='s'?'start':up?'end':'middle',s:10,w:800,c:col})};
- mk(a.pubT,62,'publish',amb,true);if(bi>=1)mk(a.abT,62,'✗ apply',SIMCOL.afail);if(bi>=5)mk(a.respecT,62,'re-run','#94e5b1','s');
+ mk(a.pubT,62,'publish',amb,true);if(bi>=1)mk(a.abT,62,'✗ apply',SIMCOL.afail);if(bi>=5){if(nw)mk(a.settleEnd,62,'re-apply',SIMCOL.settle,'s');else mk(a.respecT,62,'re-run','#94e5b1','s')}
  h+=`<line x1="${sx(playT)}" y1="46" x2="${sx(playT)}" y2="196" stroke="${cy}" stroke-width="1.6" stroke-dasharray="3 3"/>`;
  for(let j=0;j<=5;j++){const tv=t0+(t1-t0)*j/5;h+=T(sx(tv),212,tv.toFixed(2)+' ms',{a:'middle',s:9,m:1,c:'#56697f'})}
  /* the row: tentative write rolled back, then the real one */
@@ -841,7 +867,7 @@ function renderWhy(){const el=$('#sim-why');const a=EX.ab;if(!a){el.innerHTML=`<
  const T=(x,y,s,o={})=>`<text x="${x}" y="${y}"${o.a?` text-anchor="${o.a}"`:''} style="font:${o.w||600} ${o.s||11}px ${o.m?'var(--mono)':'var(--font)'};fill:${o.c||'#cfdbeb'}"${o.op!=null?` opacity="${o.op}"`:''}>${s}</text>`;
  const red='#ff8f8f',amb='#ffc87b',grn='#94e5b1',cy='#70dfef';
  let h=`<svg viewBox="0 0 1200 340" role="img" aria-label="Why tx ${a.i} aborted"><defs><marker id="wya" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker><pattern id="wyh" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="#2a1a1a"/><line x1="0" y1="0" x2="0" y2="6" stroke="#5a2b2b" stroke-width="2"/></pattern></defs><rect x="2" y="2" width="1196" height="336" rx="12" fill="#0e1826" stroke="${red}" stroke-opacity=".5"/>`;
- h+=T(16,26,`why tx ${a.i} aborted`+(a.att>1?` (attempt ${a.att})`:''),{s:14,w:800,c:'#edf4ff'})+`<rect x="${190+String(a.i).length*8}" y="12" width="${a.kind==='stale'?92:138}" height="20" rx="10" fill="${a.kind==='stale'?'#3d1b1b':'#3a2d12'}" stroke="${a.kind==='stale'?red:amb}"/>`+T(190+String(a.i).length*8+(a.kind==='stale'?46:69),26,a.kind==='stale'?(a.op==='R'?'stale read':'lost update'):'watermark lag',{a:'middle',s:10.5,w:800,c:a.kind==='stale'?red:amb});
+ h+=T(16,26,`why tx ${a.i} aborted`+(a.early?' early':'')+(a.att>1?` (attempt ${a.att})`:''),{s:14,w:800,c:'#edf4ff'})+`<rect x="${190+String(a.i).length*8}" y="12" width="${a.kind==='stale'?92:138}" height="20" rx="10" fill="${a.kind==='stale'?'#3d1b1b':'#3a2d12'}" stroke="${a.kind==='stale'?red:amb}"/>`+T(190+String(a.i).length*8+(a.kind==='stale'?46:69),26,a.kind==='stale'?(a.op==='R'?'stale read':'lost update'):'watermark lag',{a:'middle',s:10.5,w:800,c:a.kind==='stale'?red:amb});
  /* timeline rows */
  const rows=[{y:62,lab:'tx '+a.w,segs:a.wSegs,col:amb},{y:116,lab:'tx '+a.i,segs:a.xSegs,col:'#fff'}];
  rows.forEach(r=>{h+=T(16,r.y+15,r.lab,{s:11.5,m:1,w:800,c:r.col})+`<rect x="${X0}" y="${r.y}" width="${X1-X0}" height="22" rx="5" fill="#132235"/>`;
@@ -877,7 +903,7 @@ function whyLoop(now){EX.raf=null;if(!EX.ab||!$('#v-pg').classList.contains('on'
  EX.el=Math.min(total,EX.el+dt*Number($('#sim-speed').value));renderWhy();
  if(EX.el>=total){if(EX.resume){EX.resume=false;simPlay=true;simKick()}renderSimAborts();return}EX.raf=requestAnimationFrame(whyLoop)}
 function whyStart(a,resume){EX.ab=a;EX.el=0;EX.last=null;EX.resume=resume;renderWhy();renderSimAborts();if(EX.raf==null)EX.raf=requestAnimationFrame(whyLoop)}
-function renderSimAborts(){const L=simAborts(simT);$('#sim-aborts').innerHTML=L.length?L.map((a,j)=>`<button class="chipb ${EX.ab&&EX.ab.i===a.i&&EX.ab.att===a.att?'on':a.abT<=simNow?'done':''}" data-ab="${j}" style="${a.abT>simNow?'opacity:.45':''}">${a.type==='apply'?`tx ${a.i} ↺ apply failed`:`tx ${a.i} ✗ ${a.key} · tx ${a.w}`}</button>`).join(''):'<span class="small">none in this run</span>'}
+function renderSimAborts(){const L=simAborts(simT);$('#sim-aborts').innerHTML=L.length?L.map((a,j)=>`<button class="chipb ${EX.ab&&EX.ab.i===a.i&&EX.ab.att===a.att?'on':a.abT<=simNow?'done':''}" data-ab="${j}" style="${a.abT>simNow?'opacity:.45':''}">${a.type==='apply'?(a.proto==='new'?`tx ${a.i} ⏳ settle`:`tx ${a.i} ↺ apply failed`):`tx ${a.i} ✗ ${a.key} · tx ${a.w}${a.early?' · early':''}`}</button>`).join(''):'<span class="small">none in this run</span>'}
 
 /* =========================================================
    05 MERKLE
@@ -1554,6 +1580,13 @@ FIND.push(
  ['The donor holds its keeper snapshot through the whole replay','RECOVER blocks with wait_live_ms until the damaged node is LIVE, and only then does the manager send RELEASE. The donor keeps a REPEATABLE READ transaction open for repair plus catch-up (about 7.5–8.2 s). Its xmin pins old row versions for that whole time.','run_recovery(): control(RECOVER …wait_live_ms) → control(ref, "RELEASE snapshot=…")','Release right after the repair digest matches (before replay). Replay reads only the damaged node\'s own Raft log, so it does not need the donor snapshot.'],
  ['A damaged leader keeps ordering while its database is repaired','In L_mix_prio replica 1 was both the Raft leader and the damaged node. Quarantine stops only its executor. NuRaft keeps appending and replicating, the handler keeps accepting gateway batches, and commits continue on replicas 2 and 4.','L_mix_prio: QUARANTINE node=1 last_commit=299; REPLAY_LIVE from=300 to=627; TPS stayed ≈8.85k','Separating ordering from execution is what makes this possible without a leadership change.']
 );
+FIND.push(
+ ['Conflicts are now caught while a transaction waits, not while it holds the turn','The serial turn used to run the full write-set map probe (about 145 tags, 115 µs at TPC-C W100) and every conflict retry while all later transactions waited. A waiting transaction now validates against write-sets as they are published (one full map check, then a per-transaction digest ring) and restarts before its turn. At the turn it compares only the digests published since its last check.','W100/32 traces: in-turn check 115 → 4 µs; 80–92% of conflicts caught early. TPC-C v2 (fast-disk median): W5 983 → 1,182, W30 2,102 → 2,390, W100 3,107 → 3,275 TPS; W100 at 48 workers 3,133 → 3,695 (+18%)','Base gets slower above 32 workers; the new build scales. Report det at its best worker count. Branch detopt/combined, switches BCDB_DT_EARLY_VALIDATE and BCDB_GATE_LOOKAHEAD.'],
+ ['A failed apply after the turn re-ran the transaction out of order (fixed)','Three apply-failure branches (settled unique retry, unique-conflict restart, and the *_proc unique fast path) aborted and re-executed the business SQL after published_max had already released successors. The fresh snapshot could include a later transaction\'s commit, so tx N could read tx N+k\'s write. The re-check ignores writers with a larger id.','post_publish_repro on .247 (16 workers, failpoint on every 7th tx): main protocol det ≠ serial in 3 / 3 runs; settle det = serial in 7 / 7 runs, including 1,309 deterministic 23505s that match the serial run exactly','Settle (BCDB_DT_POST_PUBLISH_SETTLE, default on): never re-execute after release; wait for every predecessor to commit, re-apply the same validated writes, end with a deterministic 23505 / no-op / BC001 invariant error. Case "tx 10 fails after publishing" in tab 04 shows both protocols.'],
+ ['Only one unique index per table was tagged (fixed)','Write tags came from a single key index (the primary key, else the smallest unique index). A later transaction inserting the same value of another unique index did not conflict, applied first, and turned the earlier transaction\'s insert into a 23505: the later one won.','bcdb_reserve_write_key_tags / bcdb_keytag_index in shm_transaction.c','Every plain unique index now gets its own checked write tag; partial or expression unique indexes fall back to one relation-wide tag. TPC-C has none, so its tag count is unchanged.'],
+ ['Ranking TPC-C throughput is bimodal because of its disk','The same binary gives about 980 or 455 TPS at W5. In slow runs the root NVMe (Crucial P3, QLC, 73% full) flushes in 6–29 ms instead of 1.9 ms; CPU and context switches are unchanged. CPU pinning made no difference.','iostat per run: f_await 1.9 ms (fast) vs 7.8 ms (slow); detopt A/B ab_status.txt','Record iostat with every run and compare only runs in the same disk mode, or move pg_wal to a faster device.']
+);
+FINDMETA.push(['postgres','pg',null],['postgres','pg',null],['postgres','pg',null],['storage','bench',null]);
 let findFilter='all';
 function initFind2(){const tags=['all',...new Set(FINDMETA.map(m=>m[0]))];
  $('#findgrid').insertAdjacentHTML('beforebegin',`<div class="row" style="margin-top:10px"><span class="small">Layer</span><div class="seg" id="find-f" role="group" aria-label="Finding filter">${tags.map(t=>`<button data-f="${t}" aria-pressed="${t==='all'}">${t}</button>`).join('')}</div></div>`);
