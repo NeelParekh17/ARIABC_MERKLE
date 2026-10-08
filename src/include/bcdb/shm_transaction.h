@@ -300,6 +300,11 @@ extern void conflict_check(void);
 
 /* DT key tags: hash of the relation's key columns (see shm_transaction.c). */
 extern void bcdb_reserve_write_key_tags(Relation rel, TupleTableSlot *slot);
+extern void bcdb_reserve_write_relation_tag(Oid relid);
+/* Direct DML callers use the same helper above: full, prefix, unique, relation. */
+extern void bcdb_reserve_old_write_key_tags(Relation rel, ItemPointer tid,
+										  Bitmapset *updated, Bitmapset *extra, Snapshot snapshot);
+extern void bcdb_reserve_read_relation_tag(Oid relid);
 extern void bcdb_reserve_read_key_tag_heap(Relation rel, HeapTuple tuple);
 extern void bcdb_reserve_read_key_tag_scan(Relation heapRel, Relation indexRel,
 										   struct ScanKeyData **startKeys, int keysCount);

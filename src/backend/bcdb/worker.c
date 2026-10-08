@@ -750,7 +750,9 @@ bcdb_ptrace_open(void)
 			"rs_reservations,ws_reservations,publish_only_reservations,"
 			"rs_distinct,ws_distinct,publish_only_distinct,rs_ws_overlap,"
 			"conflict_turn_checks,early_rotation_count,early_rotation_skipped_count,"
-			"post_publish_settles,post_publish_terminal_unique,post_publish_invariant\n");
+			"post_publish_settles,post_publish_terminal_unique,post_publish_invariant,"
+			"dt_rel_read_tags,dt_rel_conflicts,dt_old_key_fetches,dt_long_sql,"
+			"dt_bitmap_key_tags\n");
 }
 
 static inline uint64

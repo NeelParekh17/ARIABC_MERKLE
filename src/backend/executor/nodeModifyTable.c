@@ -1856,7 +1856,10 @@ lreplace:;
 
 				/* Tag 2: key-based (full key, plus publish-only key prefixes) */
 				bcdb_reserve_write_key_tags(resultRelationDesc, slot);
-				
+				bcdb_reserve_old_write_key_tags(resultRelationDesc, tupleid,
+					exec_rt_fetch(resultRelInfo->ri_RangeTableIndex, estate)->updatedCols,
+					exec_rt_fetch(resultRelInfo->ri_RangeTableIndex, estate)->extraUpdatedCols,
+					estate->es_snapshot);
 				/*
 				 * Deferred Merkle update:
 				 * We do NOT update the Merkle tree here because we are in optimistic mode.

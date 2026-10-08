@@ -979,6 +979,10 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	 * the tree.  Walk down that edge to the first or last key, and scan from
 	 * there.
 	 */
+	if (is_bcdb_worker && activeTx != NULL && bcdb_tx_context != NULL &&
+		rel->rd_index->indrelid >= FirstNormalObjectId)
+		bcdb_reserve_read_key_tag_scan(scan->heapRelation, rel, startKeys, keysCount);
+
 	if (keysCount == 0)
 	{
 		bool		match;
@@ -993,11 +997,6 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 
 		return match;
 	}
-
-	if (is_bcdb_worker && activeTx != NULL && bcdb_tx_context != NULL &&
-		scan->heapRelation != NULL && !IsSystemRelation(scan->heapRelation) &&
-		keysCount >= 1)
-		bcdb_reserve_read_key_tag_scan(scan->heapRelation, rel, startKeys, keysCount);
 
 	/*
 	 * We want to start the scan somewhere within the index.  Set up an

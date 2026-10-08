@@ -44,6 +44,8 @@
 #include "storage/predicate_internals.h"
 #include "access/stratnum.h"
 #include "catalog/pg_index.h"
+#include "catalog/pg_attribute.h"
+#include "access/sysattr.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -162,6 +164,8 @@ typedef struct BCDBDTDigest
 static BCDBDTDigest *bcdb_dt_digests;
 static uint64 *bcdb_dt_checked_hashes;
 static bool *bcdb_dt_checked_used;
+static bool *bcdb_dt_checked_relation;
+static bool bcdb_dt_has_relation_read;
 static Size bcdb_dt_checked_mask;
 static BCTxID bcdb_dt_validated_through;
 static bool bcdb_dt_validation_started;
@@ -1255,6 +1259,17 @@ bcdb_keytag_tracking(void)
 	return bcdb_dt_conflict_tracking && bcdb_tx_context != NULL && activeTx != NULL;
 }
 
+void
+bcdb_reserve_write_relation_tag(Oid relid)
+{
+	PREDICATELOCKTARGETTAG tag;
+
+	if (!bcdb_keytag_tracking())
+		return;
+	bcdb_keytag_make(&tag, relid, 0, 0);
+	ws_table_reserve_publish_onlyDT(&tag);
+}
+
 /*
  * bcdb_reserve_write_key_tags - write-set tags for a row being inserted,
  * updated or deleted.  slot holds the row's key columns.
@@ -1271,6 +1286,8 @@ bcdb_reserve_write_key_tags(Relation rel, TupleTableSlot *slot)
 		return;
 
 	info = bcdb_keytag_info(rel);
+	/* All readers without a key bound share this publish-only footprint. */
+	bcdb_reserve_write_relation_tag(RelationGetRelid(rel));
 	for (i = 0; i < info->ncols; i++)
 	{
 		bool		isnull;
@@ -1340,8 +1357,8 @@ bcdb_reserve_read_key_tag_heap(Relation rel, HeapTuple tuple)
  *
  * startKeys are the positioning keys _bt_first() chose.  The tag covers the
  * longest run of leading key columns bound by an equality key whose argument
- * hashes like the column; a scan that binds none reserves nothing here and
- * relies on the per-tuple tags of the rows it returns.
+ * hashes like the column; an unbound scan reserves the relation tag, including
+ * an empty scan (where per-tuple read tags cannot cover phantoms).
  */
 void
 bcdb_reserve_read_key_tag_scan(Relation heapRel, Relation indexRel,
@@ -1352,9 +1369,18 @@ bcdb_reserve_read_key_tag_scan(Relation heapRel, Relation indexRel,
 	uint32		h = 0;
 	int			bound = 0;
 	int			i;
+	bool		close_heap = false;
 
-	if (!bcdb_keytag_tracking() || heapRel == NULL || indexRel == NULL)
+	if (!bcdb_keytag_tracking() || indexRel == NULL ||
+		indexRel->rd_index->indrelid < FirstNormalObjectId)
 		return;
+	/* Bitmap scans do not populate IndexScanDesc.heapRelation. */
+	if (heapRel == NULL)
+	{
+		heapRel = table_open(indexRel->rd_index->indrelid, NoLock);
+		close_heap = true;
+		bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_BITMAP_KEY_TAGS, 1);
+	}
 
 	info = bcdb_keytag_info(heapRel);
 	for (i = 0; i < info->ncols; i++)
@@ -1388,9 +1414,54 @@ bcdb_reserve_read_key_tag_scan(Relation heapRel, Relation indexRel,
 	}
 
 	if (bound == 0)
+		bcdb_reserve_read_relation_tag(RelationGetRelid(heapRel));
+	else
+	{
+		bcdb_keytag_make(&tag, RelationGetRelid(heapRel), bound, h);
+		rs_table_reserveDT(&tag);
+	}
+	if (close_heap)
+		table_close(heapRel, NoLock);
+}
+
+/* Also used by heap scans and non-B-tree AMs, including bitmap scans. */
+void
+bcdb_reserve_read_relation_tag(Oid relid)
+{
+	PREDICATELOCKTARGETTAG tag;
+
+	if (!is_bcdb_worker || !bcdb_keytag_tracking() || relid < FirstNormalObjectId)
 		return;
-	bcdb_keytag_make(&tag, RelationGetRelid(heapRel), bound, h);
+	bcdb_keytag_make(&tag, relid, 0, 0);
 	rs_table_reserveDT(&tag);
+	bcdb_dt_has_relation_read = true;
+	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_REL_READ_TAGS, 1);
+}
+
+/* Fetch the old version only if UPDATE targets a chosen-key column. */
+void
+bcdb_reserve_old_write_key_tags(Relation rel, ItemPointer tid,
+								Bitmapset *updated, Bitmapset *extra, Snapshot snapshot)
+{
+	const BCDBKeyTagInfo *info;
+	int			i;
+
+	if (!bcdb_keytag_tracking())
+		return;
+	info = bcdb_keytag_info(rel);
+	for (i = 0; i < info->ncols; i++)
+		if (bms_is_member(info->attnums[i] - FirstLowInvalidHeapAttributeNumber, updated) ||
+			bms_is_member(info->attnums[i] - FirstLowInvalidHeapAttributeNumber, extra))
+		{
+			TupleTableSlot *oldslot = table_slot_create(rel, NULL);
+
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_OLD_KEY_FETCHES, 1);
+			if (!table_tuple_fetch_row_version(rel, tid, snapshot, oldslot))
+				elog(ERROR, "BCDB cannot fetch UPDATE old key");
+			bcdb_reserve_write_key_tags(rel, oldslot);
+			ExecDropSingleTupleTableSlot(oldslot);
+			break;
+		}
 }
 
 /*
@@ -1469,6 +1540,7 @@ bcdb_dt_tag_dedup_enabled(void)
 void
 bcdb_dt_tag_set_reset(void)
 {
+	bcdb_dt_has_relation_read = false;
 	bcdb_dt_tags = NULL;
 	bcdb_dt_tags_capacity = 0;
 	bcdb_dt_tags_count = 0;
@@ -2521,6 +2593,8 @@ void store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot)
 {
     OptimWriteEntry *write_entry;
     MemoryContext old_context;
+	if (slot == NULL || TTS_EMPTY(slot))
+		bcdb_reserve_write_relation_tag(relOid);
     DEBUGMSG("[ZL] tx %s storing delete (rel: %d)", activeTx->hash, relOid);
     old_context = MemoryContextSwitchTo(bcdb_tx_context);
     write_entry = palloc(sizeof(OptimWriteEntry));
@@ -2545,6 +2619,7 @@ void store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid)
 {
     OptimWriteEntry *write_entry;
     MemoryContext old_context;
+	bcdb_reserve_write_relation_tag(relOid);
 
     DEBUGMSG("[ZL] tx %s storing deferred delete-by-key (rel: %d key: %d)",
              activeTx->hash, relOid, keyval);
@@ -3715,6 +3790,8 @@ int conflict_checkDT()
                           (int)getpid(),
                           activeTx ? (int)activeTx->tx_id : -1,
                           (int)bcdb_get_last_conflict_txid());
+			if (record->tag.locktag_field1 == BCDB_KEYTAG_DB_BASE)
+				bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_REL_CONFLICTS, 1);
             bcdb_ptrace_timer_stop(BCDB_PTRACE_METRIC_CONFLICT_RS_US,
                                    rs_check_start);
             return 1;
@@ -3753,6 +3830,8 @@ bcdb_dt_prepare_validation(void)
 												 capacity * sizeof(uint64));
 	bcdb_dt_checked_used = MemoryContextAllocZero(bcdb_tx_context,
 													capacity * sizeof(bool));
+	bcdb_dt_checked_relation = bcdb_dt_has_relation_read ?
+		MemoryContextAllocZero(bcdb_tx_context, capacity * sizeof(bool)) : NULL;
 	for (int pass = 0; pass < 2; pass++)
 	{
 		LIST_FOREACH(record, pass == 0 ? &ws_table_record : &rs_table_record, link)
@@ -3764,6 +3843,9 @@ bcdb_dt_prepare_validation(void)
 				slot = (slot + 1) & bcdb_dt_checked_mask;
 			bcdb_dt_checked_used[slot] = true;
 			bcdb_dt_checked_hashes[slot] = hash;
+			if (bcdb_dt_checked_relation != NULL &&
+				record->tag.locktag_field1 == BCDB_KEYTAG_DB_BASE)
+				bcdb_dt_checked_relation[slot] = true;
 		}
 	}
 	bcdb_dt_validated_through = activeTx->tx_id_committed;
@@ -3778,7 +3860,11 @@ bcdb_dt_digest_intersects(uint64 hash)
 	while (bcdb_dt_checked_used[slot])
 	{
 		if (bcdb_dt_checked_hashes[slot] == hash)
+		{
+			if (bcdb_dt_checked_relation != NULL && bcdb_dt_checked_relation[slot])
+				bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_REL_CONFLICTS, 1);
 			return true;
+		}
 		slot = (slot + 1) & bcdb_dt_checked_mask;
 	}
 	return false;

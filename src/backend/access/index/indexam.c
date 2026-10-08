@@ -50,6 +50,9 @@
 #include "access/transam.h"
 #include "access/xlog.h"
 #include "catalog/index.h"
+#include "catalog/pg_am_d.h"
+#include "bcdb/globals.h"
+#include "bcdb/shm_transaction.h"
 #include "catalog/pg_type.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
@@ -252,6 +255,9 @@ index_beginscan_internal(Relation indexRelation,
 
 	RELATION_CHECKS;
 	CHECK_REL_PROCEDURE(ambeginscan);
+	if (is_bcdb_worker && activeTx != NULL && bcdb_tx_context != NULL &&
+		indexRelation->rd_rel->relam != BTREE_AM_OID)
+		bcdb_reserve_read_relation_tag(indexRelation->rd_index->indrelid);
 
 	if (!(indexRelation->rd_indam->ampredlocks))
 		PredicateLockRelation(indexRelation, snapshot);

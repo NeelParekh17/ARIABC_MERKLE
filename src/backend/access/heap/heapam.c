@@ -1190,6 +1190,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 		 */
 		Assert(snapshot);
 		PredicateLockRelation(relation, snapshot);
+		bcdb_reserve_read_relation_tag(RelationGetRelid(relation));
 	}
 
 	/* we only need to set this up once */
