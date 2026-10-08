@@ -95,6 +95,21 @@ BCDB_INIT_BLOCK_SIZE="${BCDB_INIT_BLOCK_SIZE:-}" # Legacy bcdb_init(True,N) argu
 BCDB_WORKER_COUNT="${BCDB_WORKER_COUNT:-}"    # Defaults to DB_CONN_POOL_SIZE after args are parsed
 RESULT_RING_CAPACITY="${RESULT_RING_CAPACITY:-2048}"
 
+# Optional whitespace-separated NAME=VALUE tokens for replica postmasters.
+# Quote each assignment before embedding it in the remote shell command.
+BCDB_PG_EXTRA_ENV="${BCDB_PG_EXTRA_ENV:-}"
+BCDB_PG_ENV_PREFIX=""
+read -r -a bcdb_pg_env_tokens <<< "${BCDB_PG_EXTRA_ENV//$'\n'/ }"
+for bcdb_pg_env_token in "${bcdb_pg_env_tokens[@]}"; do
+  [[ "$bcdb_pg_env_token" =~ ^BCDB_[A-Z0-9_]+=.*$ ]] || {
+    echo "Invalid BCDB_PG_EXTRA_ENV token: $bcdb_pg_env_token" >&2
+    exit 2
+  }
+  printf -v bcdb_pg_env_quoted '%q ' "$bcdb_pg_env_token"
+  BCDB_PG_ENV_PREFIX+="$bcdb_pg_env_quoted"
+done
+[[ -z "$BCDB_PG_ENV_PREFIX" ]] || BCDB_PG_ENV_PREFIX="env $BCDB_PG_ENV_PREFIX"
+
 REMOTE_REPO_ROOT="/home/neel/Desktop/ariabc_cluster"
 REMOTE_INSTALL_DIR="/home/neel/Desktop/ariabc_install"
 LOCAL_INSTALL_DIR="${LOCAL_INSTALL_DIR:-/work/ARIABC/install}"
@@ -230,7 +245,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     ARIABC_ALLOW_DET_RESUME \
     ARIABC_OS_PROFILE \
     POSTGRES_LOG_MODE CLUSTER_STOP_POSTGRES_ON_EXIT \
-    BCDB_WORKER_COUNT DB_CONN_POOL_SIZE BCDB_INIT_BLOCK_SIZE \
+    BCDB_WORKER_COUNT DB_CONN_POOL_SIZE BCDB_INIT_BLOCK_SIZE BCDB_PG_EXTRA_ENV \
     BCDB_DECOUPLE_WORKERS \
     BCDB_BLOCK_RETURN_ACTUAL_RESULTS \
     BCDB_DET_QUEUE_HIGH_WM BCDB_DET_QUEUE_LOW_WM \
@@ -1967,6 +1982,7 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'server_pg_connections=%s\n' "$SERVER_PG_CONNECTIONS"
   printf 'bcdb_init_arg_size=%s\n' "$BCDB_INIT_BLOCK_SIZE"
   printf 'bcdb_workers=%s\n' "$BCDB_WORKER_COUNT"
+  printf 'bcdb_pg_extra_env=%s\n' "$BCDB_PG_EXTRA_ENV"
   printf 'completion_path=%s\n' "$RUN_META_COMPLETION_PATH"
   printf 'kafka_completion_mode=%s\n' "$KAFKA_COMPLETION_MODE"
   printf 'kafka_routing_mode=%s\n' "$KAFKA_ROUTING_MODE"
@@ -3236,7 +3252,7 @@ for idx in "${!NODE_IDS[@]}"; do
       hard_stop_benchmark_postgres
       echo '  attempting postgres start'
       ulimit -c unlimited
-      \$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log' 2>&1 || echo 'start attempted'
+      $BCDB_PG_ENV_PREFIX\$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log' 2>&1 || echo 'start attempted'
       sleep 3
       \$BIN/pg_isready -h 127.0.0.1 -p $DB_PORT -U $DB_USER >/dev/null 2>&1 || {
         echo 'WARNING: postgres may not be ready'
@@ -3247,10 +3263,10 @@ for idx in "${!NODE_IDS[@]}"; do
     if [[ "$FORCE_PG_RESTART" -eq 1 ]]; then
       echo '  restarting postgres to clear stale benchmark backends'
       ulimit -c unlimited
-      if ! \$BIN/pg_ctl -D \$PGDATA -w -t 120 restart -l '$REMOTE_REPO_ROOT/server.log'; then
+      if ! $BCDB_PG_ENV_PREFIX\$BIN/pg_ctl -D \$PGDATA -w -t 120 restart -l '$REMOTE_REPO_ROOT/server.log'; then
         hard_stop_benchmark_postgres
         ulimit -c unlimited
-        \$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log'
+        $BCDB_PG_ENV_PREFIX\$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log'
       fi
       ensure_ready
     fi
@@ -3368,10 +3384,10 @@ for idx in "${!NODE_IDS[@]}"; do
         \$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET max_connections = '\$min_max_connections';\"
       fi
       ulimit -c unlimited
-      if ! \$BIN/pg_ctl -D \$PGDATA -w -t 120 restart -l '$REMOTE_REPO_ROOT/server.log'; then
+      if ! $BCDB_PG_ENV_PREFIX\$BIN/pg_ctl -D \$PGDATA -w -t 120 restart -l '$REMOTE_REPO_ROOT/server.log'; then
         hard_stop_benchmark_postgres
         ulimit -c unlimited
-        \$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log'
+        $BCDB_PG_ENV_PREFIX\$BIN/pg_ctl -D \$PGDATA -w -t 120 start -l '$REMOTE_REPO_ROOT/server.log'
       fi
       ensure_ready
       worker_count=\$(\$BIN/psql -X -q -h 127.0.0.1 -p $DB_PORT -U $DB_USER $DB_NAME -At -c 'show bcdb_worker_count;' | tr -d '[:space:]')
@@ -3648,7 +3664,7 @@ if [[ "${BENCH_COLD_CACHE:-0}" -eq 1 ]]; then
       '$REMOTE_INSTALL_DIR/bin/psql' -X -v ON_ERROR_STOP=1 -p '$DB_PORT' -U postgres postgres -c CHECKPOINT;
       '$REMOTE_INSTALL_DIR/bin/pg_ctl' -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' -m fast -w -t 120 stop;
       python3 -c \"import base64; exec(base64.b64decode('$CACHE_HELPER_B64'))\" '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata';
-      '$REMOTE_INSTALL_DIR/bin/pg_ctl' -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' -l '$REMOTE_REPO_ROOT/server.log' -w -t 120 start
+      $BCDB_PG_ENV_PREFIX'$REMOTE_INSTALL_DIR/bin/pg_ctl' -D '$REMOTE_REPO_ROOT/.bench_tmp/single_node_pgdata' -l '$REMOTE_REPO_ROOT/server.log' -w -t 120 start
     " > "$LOG_DIR/cache_node${idx}.log" 2>&1 || die "Cache preparation failed on ${NODE_NAMES[$idx]}"
   done
 fi
