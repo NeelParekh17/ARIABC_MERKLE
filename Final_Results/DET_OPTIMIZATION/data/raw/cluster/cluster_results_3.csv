@@ -1,0 +1,6 @@
+section,workload,workers,trial,tps,divergence,permanent_failures,merkle_pass,run_id,config
+recovery_C,ycsb_workload_a_skew_0_00_160k.txt,8,1,,,,0,cluster4_3_C_default_t1_20261008_122537,default
+recovery_C,ycsb_workload_a_skew_0_00_160k.txt,8,1,,,,0,cluster4_3_C_noev_t1_20261008_123340,noev
+recovery_C,ycsb_workload_a_skew_0_00_160k.txt,8,2,,,,0,cluster4_3_C_default_t2_20261008_123607,default
+recovery_C,ycsb_workload_a_skew_0_00_160k.txt,8,2,,,,0,cluster4_3_C_noev_t2_20261008_123844,noev
+recovery_A,ycsb_workload_a_skew_0_00_160k.txt,8,1,8823.69,0,0,1,cluster4_3_A_default_t1_20261008_124120,default

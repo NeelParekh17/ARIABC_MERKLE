@@ -47,6 +47,7 @@ TPCC_TRIALS=5
 | `TPCC/v2_20261002/headline_ab` | W100/32 workers; C1..C5 geometry/fillfactor A/B; SERIALIZABLE; 20K tx; C1 stall trial excluded from means | 11 accepted / 10 included |
 | `TPCC/workers_w100`, previous | 100 warehouses; workers 8/16/24/32/48/64; pg, det, Merkle (hash % 200 and warehouse routing); 20K transactions; 32GB buffers; 3 initial trials | 72 + 9 extras |
 | `TPCC/warehouses_w32`, previous | warehouses 5/10/20/30/50/75/100; 32 workers; pg, det, Merkle (hash % 200 and warehouse routing); 20K transactions; 32GB buffers; 3 trials | 84 |
+| [DET_OPTIMIZATION](DET_OPTIMIZATION/README.md), 2026-10-08 | Det v2 A/B, W5/30/100 at 32 workers and W100 at 48/64; fast f_await < 2.1 ms; settle micro reproducer | 120 A/B lines / 84 fast; 12 valid m2 reproducer runs |
 | `Recovery/ariabc-recovery-size-scaling-k75-c300-20260920T110603Z-007325` | 11 sizes from 1M to 50M; fanout 32; K=75; C=300; 10 repetitions | 110 |
 
 Prerequisites: SSH access to the named hosts, the custom PostgreSQL/gateway/server
@@ -649,3 +650,191 @@ records and Merkle PASS. Record per-user-table `n_tup_upd` and
 publication. The historical ff90 node table contains dead tuples from the
 pre-fix rebuild path. A later compact rebuild changes the physical baseline;
 use matched node preparation for both fillfactors and label it a new campaign.
+
+## Det-mode optimisation (2026-10-08)
+
+Report, parsed observations, figures and small source evidence:
+[DET_OPTIMIZATION/README.md](DET_OPTIMIZATION/README.md). Main merge `19e8acb2`.
+The A/B uses the ranking-only `~/claude_checks/detopt_20261007/harness/ab.sh`,
+with `SYNC_BEFORE_MEASURE=1` and per-run iostat; its exact argument interface
+and harness body are not in the local reports. Preserve that host harness and
+inspect its interface before a new campaign. Do not substitute v3 or the
+ordinary branch harness for its disk-filtered A/B. The exact branch command
+below is recorded in the early-validation report (historical trial shown;
+use a fresh trial number for any new attempt):
+
+```bash
+# ON ranking, protectdr@10.129.7.57; DB/server/gateway/driver all stay there.
+# Recorded A/B harness: ~/claude_checks/detopt_20261007/harness/ab.sh
+BCDB_DT_EARLY_VALIDATE=1 PORT=55442 CLIENT_PORT=18102 RAFT_PORT=19102 \
+  ~/claude_checks/detopt_20261007/harness/bench.sh early_validate 100 32 6 on
+```
+
+The lab-only reproducer interface is
+`run_repro.sh <root> <label> <workers> <workload> [VAR=VALUE ...]`.
+These invocations reconstruct matrix configurations from the recorded m2
+headers and repository script; use fresh labels in the isolated root (the
+script refuses existing run directories). The root needs its prepared
+`install/`, `src/` and workload inputs; no build/setup is implied below.
+
+```bash
+# ON lab, neel@10.129.148.247; never the workstation or ranking.
+DET_REPRO_ROOT="$HOME/claude_checks/detopt_settle_20261008"
+DET_REPRO_RUNNER="$DET_REPRO_ROOT/src/scripts/distributed/post_publish_repro/run_repro.sh"
+DET_REPRO_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+bash "$DET_REPRO_RUNNER" "$DET_REPRO_ROOT" "off_fp7_$DET_REPRO_STAMP" 16 \
+  "$DET_REPRO_ROOT/wl/ab_s7.txt" BCDB_DT_POST_PUBLISH_SETTLE=0 \
+  BCDB_DT_EARLY_VALIDATE=0 BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+bash "$DET_REPRO_RUNNER" "$DET_REPRO_ROOT" "on_fp7_$DET_REPRO_STAMP" 16 \
+  "$DET_REPRO_ROOT/wl/ab_s7.txt" BCDB_DT_POST_PUBLISH_SETTLE=1 \
+  BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+bash "$DET_REPRO_RUNNER" "$DET_REPRO_ROOT" "on_uq_fp7_$DET_REPRO_STAMP" 16 \
+  "$DET_REPRO_ROOT/wl/abuq_s7.txt" BCDB_DT_POST_PUBLISH_SETTLE=1 \
+  BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+```
+
+Check `state_equal` against the serial reference, not only divergence/failure
+counters. Only the `m2_*` historical runs were valid. Cluster validation is
+recorded below, including unfinalised recovery C failures. Regenerate the curated
+CSVs and figures locally without executing any remote harness:
+
+```bash
+python3 Final_Results/DET_OPTIMIZATION/scripts/regenerate.py
+```
+
+
+### Det-optimisation: 4-node cluster commands (recorded Oct 8)
+
+Sources: [initial report](DET_OPTIMIZATION/evidence/cluster/CLUSTER_REPORT.md),
+[matched A/B and Merkle report](DET_OPTIMIZATION/evidence/cluster/CLUSTER_REPORT_2.md),
+and [canonical recovery follow-up](DET_OPTIMIZATION/evidence/cluster/CLUSTER_REPORT_3.md).
+These are historical commands, retained for provenance; this curation executes
+only the local regeneration command above. The original output roots and run IDs
+must not be reused. Replicas were `.247/.246/.248`, with gateway `.111`; no TPC-C
+pipeline is involved. Report 2 used isolated pgdata copies. Report 3's historical
+canonical-pgdata runs are evidence, not instructions to touch that protected path
+in a future check; prepare isolated directories/ports and fresh output roots.
+No authentication secrets or credential-bearing command strings are included.
+
+Initial merged-default YCSB-A θ0 (W1/4/8/16, three trials) and YCSB-D θ0.99
+(W16, two trials), 32MB, cold runs, window 1024:
+
+```bash
+cd /work/ARIABC/AriaBC
+mkdir scripts/bench_full_results/detopt_cluster_ycsb_20261008
+CLUSTER_DET_WINDOW=1024 python3 -u scripts/distributed/run_all_modes_gateway_sweep.py --benchmark ycsb --gateway-host 10.129.27.111 --gateway-user neel --gateway-repo /home/neel/ARIABC/AriaBC --db-host 10.129.148.247 --db-user neel --db-port 5438 --server-port 8000 --workloads scripts/ycsb_suite/ycsb_workload_a_skew_0_00_20k.txt --workers 1,4,8,16 --modes cluster --run-cluster --db-shared-buffers 32MB --cold-runs --order-seed 42 --trials 3 --out-dir /work/ARIABC/AriaBC/scripts/bench_full_results/detopt_cluster_ycsb_20261008 > scripts/bench_full_results/detopt_cluster_ycsb_20261008/runner.log 2>&1
+mkdir scripts/bench_full_results/detopt_cluster_ycsbd_20261008
+SKIP_SYNC=1 SKIP_BUILD=1 CLUSTER_DET_WINDOW=1024 python3 -u scripts/distributed/run_all_modes_gateway_sweep.py --benchmark ycsb --gateway-host 10.129.27.111 --gateway-user neel --gateway-repo /home/neel/ARIABC/AriaBC --db-host 10.129.148.247 --db-user neel --db-port 5438 --server-port 8000 --workloads scripts/ycsb_suite/ycsb_workload_d_skew_0_99_20k.txt --workers 16 --modes cluster --run-cluster --db-shared-buffers 32MB --cold-runs --order-seed 42 --trials 2 --out-dir /work/ARIABC/AriaBC/scripts/bench_full_results/detopt_cluster_ycsbd_20261008 > scripts/bench_full_results/detopt_cluster_ycsbd_20261008/runner.log 2>&1
+```
+
+Artifacts: `scripts/bench_full_results/detopt_cluster_ycsb_20261008/`,
+`scripts/bench_full_results/detopt_cluster_ycsbd_20261008/`, and each run ID's
+individual directory. All measured rows have zero divergence/permanent failures
+and matching post-marker roots with native Merkle PASS on every replica.
+
+Matched same-day A/B uses opt-in passthrough commit `3bde2fdc`.
+Select one configuration for each recorded matrix cell:
+
+```bash
+# default
+unset BCDB_PG_EXTRA_ENV
+# nolookahead
+export BCDB_PG_EXTRA_ENV='BCDB_GATE_LOOKAHEAD=0'
+# noev (also disables lookahead via the early-validation prerequisite)
+export BCDB_PG_EXTRA_ENV='BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=0'
+```
+
+The selections above are alternatives. Settle was never overridden. The driver
+supplied `W`, `TRIAL`, `CONFIG` and `OUT`; preserve its `2_ab_driver.py` and command
+JSONs from `.bench_tmp/detopt_cluster_20261008/`. W16 precedes W8 for each trial;
+config order rotates default/nolookahead/noev, nolookahead/noev/default,
+noev/default/nolookahead. First cell synced/built; later cells reused that build.
+
+```bash
+# Run on gateway .111, with source first synced from the workstation.
+export TMPDIR=$HOME/ariabc_data/detopt_cluster_20261008/scratch
+export BYPASS_DELEGATION=1 CLUSTER_STOP_POSTGRES_ON_EXIT=1 CLUSTER_DET_WINDOW=1024
+# BCDB_PG_EXTRA_ENV is unset/default, nolookahead, or noev as shown above.
+# First case: SKIP_SYNC=0 SKIP_BUILD=0; every later case: both =1.
+python3 -u scripts/distributed/run_all_modes_gateway_sweep.py \
+  --benchmark ycsb --gateway-host 10.129.27.111 --gateway-user neel \
+  --gateway-repo /home/neel/ARIABC/AriaBC \
+  --db-host 10.129.148.247 --db-user neel --db-port 5438 --server-port 8000 \
+  --workloads scripts/ycsb_suite/ycsb_workload_a_skew_0_00_20k.txt \
+  --workers "$W" --modes cluster --run-cluster --db-shared-buffers 32MB \
+  --cold-runs --order-seed 42 --trials 1 \
+  --out-dir "$OUT/2_ab_t${TRIAL}_w${W}_${CONFIG}"
+```
+
+The first standalone startup failed on stale `ariabc_kv_test` metadata:
+
+```bash
+ssh -o BatchMode=yes neel@10.129.27.111 'mkdir -p /home/neel/ariabc_data/detopt_cluster_20261008/scratch; cd /home/neel/ARIABC/AriaBC; export PATH="$HOME/bin:$HOME/.local/bin:$PATH"; export TMPDIR=/home/neel/ariabc_data/detopt_cluster_20261008/scratch; SKIP_SYNC=1 SKIP_BUILD=1 SKIP_RDKAFKA_SETUP=1 CLUSTER_RUN_ID=cluster4_detopt_merkle_startup_20261008 ./scripts/distributed/run_4node_raft_cluster.sh --skip-sync --skip-build --skip-rdkafka-setup --skip-restore --skip-workload --ordering-mode raft-kafka --kafka-completion-mode majority_async_all3 --db-port 5438 --db-shared-buffers 32MB --server-exec-workers 16 --server-pg-connections 16 --pool-size 16 --bcdb-workers 16 --bcdb-init-block-size 16 --bcdb-decouple-workers 1 --raft-apply-ledger-mode off --enable-merkle-index 1' > .bench_tmp/detopt_cluster_20261008/merkle_startup_valid.log 2>&1
+```
+
+Report 2 removed the stale fixture only in isolated copies. Another skip-restore
+startup encountered missing `merkle_node_warehouse`; successful retry used normal
+YCSB restore, with `--skip-sync --skip-build --skip-rdkafka-setup --skip-workload`.
+The exact retry command is retained in `2_merkle_startup_retry_command.json`.
+After that successful startup, the standalone test command was:
+
+```bash
+export TMPDIR=$HOME/ariabc_data/detopt_cluster_20261008/scratch
+bash scripts/distributed/test_merkle_consistency.sh
+```
+
+Result: PASS on all three replicas, 50 rows each, equal roots and native verify.
+Report 2's recovery A and C invocations (same-day merged defaults, W8, 160k):
+
+```bash
+R=scripts/distributed/recovery/run_recovery_cluster_test.sh
+$R --recovery-mode off --skip-build
+$R --recovery-mode both --inject-fault-node utkarsh --inject-fault-count 100 \
+   --inject-fault-delay-sec 5 --skip-build
+```
+
+A passed at 8,824.18 TPS. C's live repair passed but the gateway audit never
+finalised, exited 143, and did not produce valid terminal TPS or Phase 8 roots.
+The canonical follow-up used an external collector/watchdog, current source and
+a fresh first build, then retained the same build for the interleaved controls:
+
+```bash
+export TMPDIR=$HOME/ariabc_data/detopt_cluster_20261008/scratch
+export BYPASS_DELEGATION=1 CLUSTER_STOP_POSTGRES_ON_EXIT=1
+export CALLER_GIT_HEAD=3bde2fdcd7a88a41a4bbe7c127efdd844192481c
+export LOCAL_INSTALL_DIR=/home/neel/ARIABC/install
+export GATEWAY_STALL_WATCHDOG=0  # same-threshold external watchdog
+R=scripts/distributed/recovery/run_recovery_cluster_test.sh
+
+# 1. C default, FORCE_BUILD=1; CLUSTER_RUN_ID unique for each command.
+unset BCDB_PG_EXTRA_ENV
+FORCE_BUILD=1 bash "$R" --recovery-mode both --inject-fault-node utkarsh \
+  --inject-fault-count 100 --inject-fault-delay-sec 5
+
+# 2. C noev
+BCDB_PG_EXTRA_ENV="BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=0" \
+  bash "$R" --recovery-mode both --inject-fault-node utkarsh \
+  --inject-fault-count 100 --inject-fault-delay-sec 5 --skip-sync --skip-build
+
+# 3. C default
+unset BCDB_PG_EXTRA_ENV
+bash "$R" --recovery-mode both --inject-fault-node utkarsh \
+  --inject-fault-count 100 --inject-fault-delay-sec 5 --skip-sync --skip-build
+
+# 4. C noev: same command/environment as #2.
+# 5. A default
+unset BCDB_PG_EXTRA_ENV
+bash "$R" --recovery-mode off --skip-sync --skip-build
+```
+
+Unique per-command `CLUSTER_RUN_ID` values and full invocation metadata are in
+`3_run1_C_default.json` through `3_run5_A_default.json`. The external collector is
+`3_campaign_driver.py`; setting `GATEWAY_STALL_WATCHDOG=0` was paired with that
+collector, not unsupervised execution. Default and noev C both failed 2/2; all
+160,000 requests have independent Kafka coverage from all three replicas, but
+final gateway audit/Phase 8 remained unavailable. Canonical same-day A passed at
+8,823.69 TPS. The pre-existing 30-second audit-consumer exit explains the observed
+hang after roughly 54-second repairs; settle stayed enabled and the repair
+slowdown relative to the published 59 ms remains unexplained. Retain the complete
+`2_runs/`, `3_runs/`, environment samples, Kafka audits and watchdog traces;
+the curated normalised rows are `DET_OPTIMIZATION/data/cluster_runs.csv`.

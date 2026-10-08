@@ -1,0 +1,76 @@
+2026-10-07T21:03:36+05:30 RUN base det W=5 k=32 t=1 ptrace=off window=65536
+2026-10-07T21:04:45+05:30 DONE base det W=5 k=32 t=1 ptrace=off rc=0 completed_tps=973.67 divergence_count=0 permanent_failures=0 total_restarts=0  state=fdb9545f1c588209
+2026-10-07T21:04:45+05:30 RUN base det W=30 k=32 t=1 ptrace=off window=65536
+2026-10-07T21:06:25+05:30 DONE base det W=30 k=32 t=1 ptrace=off rc=0 completed_tps=2099.71 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T21:06:26+05:30 RUN base det W=100 k=32 t=1 ptrace=off window=65536
+2026-10-07T21:10:35+05:30 DONE base det W=100 k=32 t=1 ptrace=off rc=0 completed_tps=2842.82 divergence_count=0 permanent_failures=0 total_restarts=0  state=e82921e1ebb1b7ab
+2026-10-07T21:10:38+05:30 RUN base det W=5 k=32 t=2 ptrace=off window=65536
+2026-10-07T21:11:49+05:30 DONE base det W=5 k=32 t=2 ptrace=off rc=0 completed_tps=973.36 divergence_count=0 permanent_failures=0 total_restarts=0  state=fdb9545f1c588209
+2026-10-07T21:11:49+05:30 RUN base det W=30 k=32 t=2 ptrace=off window=65536
+2026-10-07T21:14:08+05:30 DONE base det W=30 k=32 t=2 ptrace=off rc=0 completed_tps=550.12 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T21:14:09+05:30 RUN base det W=100 k=32 t=2 ptrace=off window=65536
+2026-10-07T21:18:51+05:30 DONE base det W=100 k=32 t=2 ptrace=off rc=0 completed_tps=868.94 divergence_count=0 permanent_failures=0 total_restarts=0  state=e82921e1ebb1b7ab
+2026-10-07T21:18:54+05:30 RUN tag_dedup det W=5 k=32 t=1 ptrace=on window=65536
+2026-10-07T21:20:33+05:30 DONE tag_dedup det W=5 k=32 t=1 ptrace=on rc=0 completed_tps=413.37 divergence_count=0 permanent_failures=0 total_restarts=14817  state=fdb9545f1c588209
+2026-10-07T21:20:33+05:30 RUN early_validate det W=5 k=32 t=1 ptrace=on window=65536
+2026-10-07T21:21:43+05:30 DONE early_validate det W=5 k=32 t=1 ptrace=on rc=0 completed_tps=1178.60 divergence_count=0 permanent_failures=0 total_restarts=32299  state=fdb9545f1c588209
+2026-10-07T21:21:43+05:30 RUN commit_set det W=5 k=32 t=1 ptrace=on window=65536
+2026-10-07T21:23:54+05:30 DONE commit_set det W=5 k=32 t=1 ptrace=on rc=0 completed_tps=281.64 divergence_count=0 permanent_failures=0 total_restarts=14804  state=fdb9545f1c588209
+2026-10-07T21:23:54+05:30 RUN base det W=5 k=32 t=1 ptrace=on window=65536
+2026-10-07T21:25:07+05:30 DONE base det W=5 k=32 t=1 ptrace=on rc=0 completed_tps=896.90 divergence_count=0 permanent_failures=0 total_restarts=14758  state=fdb9545f1c588209
+2026-10-07T21:25:07+05:30 RUN trace_rot det W=5 k=32 t=1 ptrace=off window=65536
+2026-10-07T21:26:43+05:30 DONE trace_rot det W=5 k=32 t=1 ptrace=off rc=0 completed_tps=487.76 divergence_count=0 permanent_failures=0 total_restarts=0  state=fdb9545f1c588209
+2026-10-07T21:26:43+05:30 RUN early_validate det W=5 k=32 t=2 ptrace=on window=65536
+2026-10-07T21:28:06+05:30 DONE early_validate det W=5 k=32 t=2 ptrace=on rc=0 completed_tps=663.75 divergence_count=0 permanent_failures=0 total_restarts=14762  state=fdb9545f1c588209
+2026-10-07T21:28:06+05:30 RUN early_validate det W=30 k=32 t=3 ptrace=on window=65536
+2026-10-07T21:28:45+05:30 DONE early_validate det W=30 k=32 t=3 ptrace=on rc=1  state=
+2026-10-07T21:28:45+05:30 RUN tag_dedup det W=5 k=32 t=2 ptrace=on window=65536
+2026-10-07T21:30:08+05:30 DONE tag_dedup det W=5 k=32 t=2 ptrace=on rc=0 completed_tps=885.61 divergence_count=0 permanent_failures=0 total_restarts=14746  state=fdb9545f1c588209
+2026-10-07T21:30:08+05:30 RUN commit_set det W=30 k=32 t=2 ptrace=off window=65536
+2026-10-07T21:32:04+05:30 DONE commit_set det W=30 k=32 t=2 ptrace=off rc=0 completed_tps=2090.32 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T21:32:05+05:30 RUN early_validate det W=30 k=32 t=4 ptrace=on window=65536
+2026-10-07T21:35:54+05:30 DONE early_validate det W=30 k=32 t=4 ptrace=on rc=0 completed_tps=1273.35 divergence_count=0 permanent_failures=0 total_restarts=4548  state=dcb895e5961ab8e8
+2026-10-07T21:35:55+05:30 RUN commit_set det W=5 k=32 t=3 ptrace=on window=65536
+2026-10-07T21:37:08+05:30 DONE commit_set det W=5 k=32 t=3 ptrace=on rc=0 completed_tps=907.82 divergence_count=0 permanent_failures=0 total_restarts=14786  state=fdb9545f1c588209
+2026-10-07T21:37:08+05:30 RUN base det W=30 k=32 t=1 ptrace=on window=65536
+2026-10-07T21:39:10+05:30 DONE base det W=30 k=32 t=1 ptrace=on rc=0 completed_tps=812.40 divergence_count=0 permanent_failures=0 total_restarts=4334  state=dcb895e5961ab8e8
+2026-10-07T21:39:11+05:30 RUN trace_rot det W=30 k=32 t=1 ptrace=off window=65536
+2026-10-07T21:41:47+05:30 DONE trace_rot det W=30 k=32 t=1 ptrace=off rc=0 completed_tps=2061.91 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T21:41:48+05:30 RUN trace_rot det W=30 k=32 t=2 ptrace=off window=65536
+2026-10-07T21:44:24+05:30 DONE trace_rot det W=30 k=32 t=2 ptrace=off rc=0 completed_tps=733.81 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T21:44:25+05:30 RUN tag_dedup det W=5 k=32 t=3 ptrace=on window=65536
+2026-10-07T21:45:37+05:30 DONE tag_dedup det W=5 k=32 t=3 ptrace=on rc=0 completed_tps=914.61 divergence_count=0 permanent_failures=0 total_restarts=14782  state=fdb9545f1c588209
+2026-10-07T21:45:38+05:30 RUN early_validate det W=30 k=32 t=5 ptrace=on window=65536
+2026-10-07T21:47:40+05:30 DONE early_validate det W=30 k=32 t=5 ptrace=on rc=0 completed_tps=862.61 divergence_count=0 permanent_failures=0 total_restarts=5043  state=dcb895e5961ab8e8
+2026-10-07T21:47:41+05:30 RUN trace_rot det W=5 k=32 t=2 ptrace=off window=65536
+2026-10-07T21:49:58+05:30 DONE trace_rot det W=5 k=32 t=2 ptrace=off rc=0 completed_tps=389.49 divergence_count=0 permanent_failures=0 total_restarts=0  state=fdb9545f1c588209
+2026-10-07T21:49:58+05:30 RUN early_validate det W=100 k=32 t=6 ptrace=on window=65536
+2026-10-07T21:55:16+05:30 DONE early_validate det W=100 k=32 t=6 ptrace=on rc=0 completed_tps=3307.88 divergence_count=0 permanent_failures=0 total_restarts=1497  state=e82921e1ebb1b7ab
+2026-10-07T21:55:19+05:30 RUN early_validate det W=100 k=32 t=7 ptrace=off window=65536
+2026-10-07T22:01:33+05:30 DONE early_validate det W=100 k=32 t=7 ptrace=off rc=0 completed_tps=585.90 divergence_count=0 permanent_failures=0 total_restarts=0  state=e82921e1ebb1b7ab
+2026-10-07T22:01:37+05:30 RUN commit_set det W=30 k=32 t=4 ptrace=off window=65536
+2026-10-07T22:03:18+05:30 DONE commit_set det W=30 k=32 t=4 ptrace=off rc=0 completed_tps=2125.26 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T22:03:19+05:30 RUN base det W=100 k=32 t=1 ptrace=on window=65536
+2026-10-07T22:08:35+05:30 DONE base det W=100 k=32 t=1 ptrace=on rc=0 completed_tps=2773.80 divergence_count=0 permanent_failures=0 total_restarts=1481  state=e82921e1ebb1b7ab
+2026-10-07T22:08:38+05:30 RUN commit_set det W=5 k=32 t=7 ptrace=on window=65536
+2026-10-07T22:10:39+05:30 DONE commit_set det W=5 k=32 t=7 ptrace=on rc=0 completed_tps=323.57 divergence_count=0 permanent_failures=0 total_restarts=14786  state=fdb9545f1c588209
+2026-10-07T22:10:39+05:30 RUN trace_rot det W=100 k=32 t=1 ptrace=on window=65536
+2026-10-07T22:16:07+05:30 DONE trace_rot det W=100 k=32 t=1 ptrace=on rc=0 completed_tps=3036.31 divergence_count=0 permanent_failures=0 total_restarts=1475  state=e82921e1ebb1b7ab
+2026-10-07T22:16:09+05:30 RUN tag_dedup det W=30 k=32 t=4 ptrace=off window=65536
+2026-10-07T22:18:00+05:30 DONE tag_dedup det W=30 k=32 t=4 ptrace=off rc=0 completed_tps=2091.72 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T22:18:01+05:30 RUN trace_rot det W=100 k=32 t=2 ptrace=off window=65536
+2026-10-07T22:24:39+05:30 DONE trace_rot det W=100 k=32 t=2 ptrace=off rc=0 completed_tps=3046.85 divergence_count=0 permanent_failures=0 total_restarts=0  state=e82921e1ebb1b7ab
+2026-10-07T22:24:42+05:30 RUN commit_set det W=5 k=32 t=8 ptrace=on window=65536
+2026-10-07T22:25:56+05:30 DONE commit_set det W=5 k=32 t=8 ptrace=on rc=0 completed_tps=891.42 divergence_count=0 permanent_failures=0 total_restarts=14784  state=fdb9545f1c588209
+2026-10-07T22:25:56+05:30 RUN commit_set det W=100 k=32 t=5 ptrace=on window=65536
+2026-10-07T22:31:25+05:30 DONE commit_set det W=100 k=32 t=5 ptrace=on rc=0 completed_tps=2834.59 divergence_count=0 permanent_failures=0 total_restarts=1461  state=e82921e1ebb1b7ab
+2026-10-07T22:31:28+05:30 RUN base det W=5 k=32 t=3 ptrace=off window=65536
+2026-10-07T22:32:40+05:30 DONE base det W=5 k=32 t=3 ptrace=off rc=0 completed_tps=976.26 divergence_count=0 permanent_failures=0 total_restarts=0  state=fdb9545f1c588209
+2026-10-07T22:32:40+05:30 RUN tag_dedup det W=30 k=32 t=5 ptrace=off window=65536
+2026-10-07T22:35:12+05:30 DONE tag_dedup det W=30 k=32 t=5 ptrace=off rc=0 completed_tps=877.07 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T22:37:00+05:30 RUN base det W=30 k=32 t=3 ptrace=off window=65536
+2026-10-07T22:40:08+05:30 DONE base det W=30 k=32 t=3 ptrace=off rc=0 completed_tps=2093.31 divergence_count=0 permanent_failures=0 total_restarts=0  state=dcb895e5961ab8e8
+2026-10-07T22:41:24+05:30 RUN base det W=100 k=32 t=3 ptrace=off window=65536
+2026-10-07T22:46:12+05:30 DONE base det W=100 k=32 t=3 ptrace=off rc=0 completed_tps=1257.27 divergence_count=0 permanent_failures=0 total_restarts=0  state=e82921e1ebb1b7ab
+2026-10-08T07:16:24+05:30 RUN settle det W=100 k=32 t=61 ptrace=on window=65536
+2026-10-08T07:23:07+05:30 DONE settle det W=100 k=32 t=61 ptrace=on rc=0 completed_tps=3272.17 divergence_count=0 permanent_failures=0 total_restarts=1481  state=e82921e1ebb1b7ab

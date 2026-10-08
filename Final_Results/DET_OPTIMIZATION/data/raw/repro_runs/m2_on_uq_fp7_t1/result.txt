@@ -1,0 +1,6 @@
+serial_errors=1309
+completed_tps=3289.39
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=64475 post_publish_settles=3988 terminal_unique=1309 invariant=0
+restart_log_lines=0 invariant_warnings=0

@@ -1,0 +1,85 @@
+=== m2_off_fp7_t1 16 /home/neel/claude_checks/detopt_settle_20261008/wl/ab_s7.txt BCDB_DT_POST_PUBLISH_SETTLE=0 BCDB_DT_EARLY_VALIDATE=0 BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=0
+completed_tps=5027.63
+divergence_count=0 permanent_failures=0 
+state_equal=NO
+traced_tx=20000 restarts=15611 post_publish_settles=0 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_on_fp7_t1 16 /home/neel/claude_checks/detopt_settle_20261008/wl/ab_s7.txt BCDB_DT_POST_PUBLISH_SETTLE=1 BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=0
+completed_tps=3992.75
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=45637 post_publish_settles=2858 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_off_fp7_t2 16 /home/neel/claude_checks/detopt_settle_20261008/wl/ab_s7.txt BCDB_DT_POST_PUBLISH_SETTLE=0 BCDB_DT_EARLY_VALIDATE=0 BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=0
+completed_tps=5072.41
+divergence_count=0 permanent_failures=0 
+state_equal=NO
+traced_tx=20000 restarts=15594 post_publish_settles=0 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_on_fp7_t2 16 /home/neel/claude_checks/detopt_settle_20261008/wl/ab_s7.txt BCDB_DT_POST_PUBLISH_SETTLE=1 BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=0
+completed_tps=4007.24
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=45598 post_publish_settles=2858 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_off_fp7_t3 16 /home/neel/claude_checks/detopt_settle_20261008/wl/ab_s7.txt BCDB_DT_POST_PUBLISH_SETTLE=0 BCDB_DT_EARLY_VALIDATE=0 BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=0
+completed_tps=5035.58
+divergence_count=0 permanent_failures=0 
+state_equal=NO
+traced_tx=20000 restarts=15600 post_publish_settles=0 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_on_fp7_t3 16 /home/neel/claude_checks/detopt_settle_20261008/wl/ab_s7.txt BCDB_DT_POST_PUBLISH_SETTLE=1 BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=0
+completed_tps=3973.40
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=45658 post_publish_settles=2858 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_on_uq_fp7_t1 16 /home/neel/claude_checks/detopt_settle_20261008/wl/abuq_s7.txt BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=1309
+completed_tps=3289.39
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=64475 post_publish_settles=3988 terminal_unique=1309 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_on_uq_t1 16 /home/neel/claude_checks/detopt_settle_20261008/wl/abuq_s7.txt
+serial_errors=1309
+completed_tps=3956.28
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=38846 post_publish_settles=1309 terminal_unique=1309 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_on_uq_fp7_t2 16 /home/neel/claude_checks/detopt_settle_20261008/wl/abuq_s7.txt BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=1309
+completed_tps=3287.84
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=64446 post_publish_settles=3988 terminal_unique=1309 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_on_uq_t2 16 /home/neel/claude_checks/detopt_settle_20261008/wl/abuq_s7.txt
+serial_errors=1309
+completed_tps=3945.99
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=38881 post_publish_settles=1309 terminal_unique=1309 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_off_nofp_t1 16 /home/neel/claude_checks/detopt_settle_20261008/wl/ab_s7.txt BCDB_DT_POST_PUBLISH_SETTLE=0 BCDB_DT_EARLY_VALIDATE=0
+serial_errors=0
+completed_tps=5100.07
+divergence_count=0 permanent_failures=0 
+state_equal=yes
+traced_tx=20000 restarts=12741 post_publish_settles=0 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0
+=== m2_offEV_fp7_t1 16 /home/neel/claude_checks/detopt_settle_20261008/wl/ab_s7.txt BCDB_DT_POST_PUBLISH_SETTLE=0 BCDB_FAILPOINT_POST_PUBLISH_APPLY=7
+serial_errors=0
+completed_tps=4938.65
+divergence_count=0 permanent_failures=0 
+state_equal=NO
+traced_tx=20000 restarts=19876 post_publish_settles=0 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0
+MATRIX_DONE

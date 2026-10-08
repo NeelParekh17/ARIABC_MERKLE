@@ -1,0 +1,246 @@
+2026-10-07T22:35:13+05:30 RUN ab base W=5 t=1 []
+2026-10-07T22:37:00+05:30 DONE ab base W=5 t=1 rc=0 dirty_kb_at_start=176 sync_wait_s=1 completed_tps=391.58 divergence_count=0 permanent_failures=0  state=fdb9545f1c588209
+2026-10-07T22:40:09+05:30 RUN ab ev W=5 t=1 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T22:41:23+05:30 DONE ab ev W=5 t=1 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1188.78 divergence_count=0 permanent_failures=0  state=fdb9545f1c588209
+2026-10-07T22:46:14+05:30 RUN ab dd W=5 t=1 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T22:47:28+05:30 DONE ab dd W=5 t=1 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=974.82 divergence_count=0 permanent_failures=0  state=fdb9545f1c588209
+=== 2026-10-07T22:57:17+05:30 restart with io capture (trials 11-14); earlier ab lines discarded
+2026-10-07T22:57:17+05:30 RUN ab base W=5 t=11 []
+2026-10-07T22:58:53+05:30 DONE ab base W=5 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=523.07 divergence_count=0 permanent_failures=0  f_await=5.45 w_await=4.25 util=91 io_n=38 state=fdb9545f1c588209
+2026-10-07T22:58:53+05:30 RUN ab ev W=5 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:00:16+05:30 DONE ab ev W=5 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=915.46 divergence_count=0 permanent_failures=0  f_await=3.35 w_await=1.56 util=89 io_n=22 state=fdb9545f1c588209
+2026-10-07T23:00:16+05:30 RUN ab dd W=5 t=11 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:02:25+05:30 DONE ab dd W=5 t=11 rc=0 dirty_kb_at_start=208 sync_wait_s=1 completed_tps=412.34 divergence_count=0 permanent_failures=0  f_await=7.99 w_await=6.57 util=92 io_n=48 state=fdb9545f1c588209
+2026-10-07T23:02:25+05:30 RUN ab nr W=5 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:03:46+05:30 DONE ab nr W=5 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1101.88 divergence_count=0 permanent_failures=0  f_await=2.70 w_await=1.43 util=89 io_n=18 state=fdb9545f1c588209
+2026-10-07T23:03:46+05:30 RUN ab all W=5 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-07T23:04:56+05:30 DONE ab all W=5 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1179.87 divergence_count=0 permanent_failures=0  f_await=1.92 w_await=0.96 util=84 io_n=17 state=fdb9545f1c588209
+2026-10-07T23:04:56+05:30 RUN ab off W=5 t=11 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:07:07+05:30 DONE ab off W=5 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=267.29 divergence_count=0 permanent_failures=0  f_await=9.98 w_await=4.82 util=94 io_n=75 state=fdb9545f1c588209
+2026-10-07T23:07:07+05:30 RUN ab base W=30 t=11 []
+2026-10-07T23:08:55+05:30 DONE ab base W=30 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2088.00 divergence_count=0 permanent_failures=0  f_await=1.98 w_await=0.70 util=79 io_n=10 state=dcb895e5961ab8e8
+2026-10-07T23:08:55+05:30 RUN ab ev W=30 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:10:39+05:30 DONE ab ev W=30 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2402.58 divergence_count=0 permanent_failures=0  f_await=2.00 w_await=0.68 util=78 io_n=8 state=dcb895e5961ab8e8
+2026-10-07T23:10:39+05:30 RUN ab dd W=30 t=11 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:13:06+05:30 DONE ab dd W=30 t=11 rc=0 dirty_kb_at_start=212 sync_wait_s=1 completed_tps=2103.81 divergence_count=0 permanent_failures=0  f_await=1.96 w_await=0.69 util=82 io_n=9 state=dcb895e5961ab8e8
+2026-10-07T23:13:07+05:30 RUN ab nr W=30 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:14:51+05:30 DONE ab nr W=30 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2390.21 divergence_count=0 permanent_failures=0  f_await=1.99 w_await=0.67 util=77 io_n=9 state=dcb895e5961ab8e8
+2026-10-07T23:14:52+05:30 RUN ab all W=30 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-07T23:17:22+05:30 DONE ab all W=30 t=11 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2371.56 divergence_count=0 permanent_failures=0  f_await=2.00 w_await=0.66 util=83 io_n=8 state=dcb895e5961ab8e8
+2026-10-07T23:17:23+05:30 RUN ab off W=30 t=11 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:19:42+05:30 DONE ab off W=30 t=11 rc=0 dirty_kb_at_start=316 sync_wait_s=1 completed_tps=641.39 divergence_count=0 permanent_failures=0  f_await=6.57 w_await=4.54 util=90 io_n=32 state=dcb895e5961ab8e8
+2026-10-07T23:19:43+05:30 RUN ab base W=100 t=11 []
+2026-10-07T23:24:28+05:30 DONE ab base W=100 t=11 rc=0 dirty_kb_at_start=640 sync_wait_s=1 completed_tps=3058.71 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.55 util=76 io_n=7 state=e82921e1ebb1b7ab
+2026-10-07T23:24:31+05:30 RUN ab ev W=100 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:29:52+05:30 DONE ab ev W=100 t=11 rc=0 dirty_kb_at_start=1224 sync_wait_s=1 completed_tps=3314.82 divergence_count=0 permanent_failures=0  f_await=2.05 w_await=0.54 util=81 io_n=6 state=e82921e1ebb1b7ab
+2026-10-07T23:29:55+05:30 RUN ab dd W=100 t=11 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:35:19+05:30 DONE ab dd W=100 t=11 rc=0 dirty_kb_at_start=60 sync_wait_s=1 completed_tps=3072.14 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.55 util=76 io_n=7 state=e82921e1ebb1b7ab
+2026-10-07T23:35:22+05:30 RUN ab nr W=100 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:40:34+05:30 DONE ab nr W=100 t=11 rc=0 dirty_kb_at_start=600 sync_wait_s=1 completed_tps=3258.43 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.54 util=76 io_n=6 state=e82921e1ebb1b7ab
+2026-10-07T23:40:37+05:30 RUN ab all W=100 t=11 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-07T23:45:36+05:30 DONE ab all W=100 t=11 rc=0 dirty_kb_at_start=12 sync_wait_s=1 completed_tps=3253.36 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.55 util=78 io_n=6 state=e82921e1ebb1b7ab
+2026-10-07T23:45:39+05:30 RUN ab off W=100 t=11 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:51:11+05:30 DONE ab off W=100 t=11 rc=0 dirty_kb_at_start=692 sync_wait_s=1 completed_tps=3099.76 divergence_count=0 permanent_failures=0  f_await=2.05 w_await=0.55 util=76 io_n=7 state=e82921e1ebb1b7ab
+2026-10-07T23:51:14+05:30 RUN ab ev W=5 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:52:26+05:30 DONE ab ev W=5 t=12 rc=0 dirty_kb_at_start=248 sync_wait_s=1 completed_tps=1175.08 divergence_count=0 permanent_failures=0  f_await=1.92 w_await=0.96 util=85 io_n=17 state=fdb9545f1c588209
+2026-10-07T23:52:26+05:30 RUN ab dd W=5 t=12 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:53:40+05:30 DONE ab dd W=5 t=12 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=977.48 divergence_count=0 permanent_failures=0  f_await=1.90 w_await=0.97 util=85 io_n=20 state=fdb9545f1c588209
+2026-10-07T23:53:40+05:30 RUN ab nr W=5 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:54:53+05:30 DONE ab nr W=5 t=12 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1182.35 divergence_count=0 permanent_failures=0  f_await=1.92 w_await=0.96 util=88 io_n=16 state=fdb9545f1c588209
+2026-10-07T23:54:54+05:30 RUN ab all W=5 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-07T23:56:03+05:30 DONE ab all W=5 t=12 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1175.44 divergence_count=0 permanent_failures=0  f_await=1.92 w_await=0.95 util=85 io_n=17 state=fdb9545f1c588209
+2026-10-07T23:56:04+05:30 RUN ab base W=5 t=12 []
+2026-10-07T23:57:46+05:30 DONE ab base W=5 t=12 rc=0 dirty_kb_at_start=288 sync_wait_s=1 completed_tps=559.62 divergence_count=0 permanent_failures=0  f_await=6.78 w_await=3.01 util=89 io_n=36 state=fdb9545f1c588209
+2026-10-07T23:57:46+05:30 RUN ab ev W=30 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-07T23:59:41+05:30 DONE ab ev W=30 t=12 rc=0 dirty_kb_at_start=728 sync_wait_s=1 completed_tps=2418.37 divergence_count=0 permanent_failures=0  f_await=1.99 w_await=0.67 util=84 io_n=8 state=dcb895e5961ab8e8
+2026-10-07T23:59:42+05:30 RUN ab dd W=30 t=12 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:02:22+05:30 DONE ab dd W=30 t=12 rc=0 dirty_kb_at_start=296 sync_wait_s=1 completed_tps=529.79 divergence_count=0 permanent_failures=0  f_await=9.17 w_await=4.92 util=93 io_n=38 state=dcb895e5961ab8e8
+2026-10-08T00:02:23+05:30 RUN ab nr W=30 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:04:12+05:30 DONE ab nr W=30 t=12 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2388.16 divergence_count=0 permanent_failures=0  f_await=2.00 w_await=0.67 util=78 io_n=9 state=dcb895e5961ab8e8
+2026-10-08T00:04:13+05:30 RUN ab all W=30 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-08T00:06:35+05:30 DONE ab all W=30 t=12 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=844.84 divergence_count=0 permanent_failures=0  f_await=6.41 w_await=2.22 util=89 io_n=24 state=dcb895e5961ab8e8
+2026-10-08T00:06:36+05:30 RUN ab base W=30 t=12 []
+2026-10-08T00:09:46+05:30 DONE ab base W=30 t=12 rc=0 dirty_kb_at_start=736 sync_wait_s=1 completed_tps=2120.19 divergence_count=0 permanent_failures=0  f_await=1.96 w_await=0.69 util=82 io_n=9 state=dcb895e5961ab8e8
+2026-10-08T00:09:47+05:30 RUN ab ev W=100 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:15:42+05:30 DONE ab ev W=100 t=12 rc=0 dirty_kb_at_start=460 sync_wait_s=1 completed_tps=3256.32 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.54 util=77 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T00:15:45+05:30 RUN ab dd W=100 t=12 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:21:11+05:30 DONE ab dd W=100 t=12 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3137.54 divergence_count=0 permanent_failures=0  f_await=2.01 w_await=0.54 util=75 io_n=7 state=e82921e1ebb1b7ab
+2026-10-08T00:21:14+05:30 RUN ab nr W=100 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:25:46+05:30 DONE ab nr W=100 t=12 rc=0 dirty_kb_at_start=292 sync_wait_s=1 completed_tps=3312.63 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.55 util=81 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T00:25:49+05:30 RUN ab all W=100 t=12 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-08T00:32:13+05:30 DONE ab all W=100 t=12 rc=0 dirty_kb_at_start=956 sync_wait_s=1 completed_tps=979.92 divergence_count=0 permanent_failures=0  f_await=9.18 w_await=3.28 util=93 io_n=20 state=e82921e1ebb1b7ab
+2026-10-08T00:32:16+05:30 RUN ab base W=100 t=12 []
+2026-10-08T00:36:58+05:30 DONE ab base W=100 t=12 rc=0 dirty_kb_at_start=416 sync_wait_s=1 completed_tps=3126.93 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.55 util=84 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T00:37:01+05:30 RUN ab dd W=5 t=13 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:38:25+05:30 DONE ab dd W=5 t=13 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=975.61 divergence_count=0 permanent_failures=0  f_await=1.91 w_await=0.98 util=84 io_n=20 state=fdb9545f1c588209
+2026-10-08T00:38:25+05:30 RUN ab nr W=5 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:39:39+05:30 DONE ab nr W=5 t=13 rc=0 dirty_kb_at_start=776 sync_wait_s=1 completed_tps=1187.30 divergence_count=0 permanent_failures=0  f_await=1.91 w_await=0.95 util=87 io_n=17 state=fdb9545f1c588209
+2026-10-08T00:39:40+05:30 RUN ab all W=5 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-08T00:40:50+05:30 DONE ab all W=5 t=13 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1173.85 divergence_count=0 permanent_failures=0  f_await=1.92 w_await=0.94 util=85 io_n=17 state=fdb9545f1c588209
+2026-10-08T00:40:50+05:30 RUN ab base W=5 t=13 []
+2026-10-08T00:42:17+05:30 DONE ab base W=5 t=13 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=663.88 divergence_count=0 permanent_failures=0  f_await=4.43 w_await=2.39 util=89 io_n=30 state=fdb9545f1c588209
+2026-10-08T00:42:18+05:30 RUN ab ev W=5 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:44:03+05:30 DONE ab ev W=5 t=13 rc=0 dirty_kb_at_start=488 sync_wait_s=1 completed_tps=545.41 divergence_count=0 permanent_failures=0  f_await=7.71 w_await=3.43 util=92 io_n=37 state=fdb9545f1c588209
+2026-10-08T00:44:03+05:30 RUN ab dd W=30 t=13 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:46:02+05:30 DONE ab dd W=30 t=13 rc=0 dirty_kb_at_start=424 sync_wait_s=1 completed_tps=2093.39 divergence_count=0 permanent_failures=0  f_await=1.98 w_await=0.80 util=78 io_n=10 state=dcb895e5961ab8e8
+2026-10-08T00:46:03+05:30 RUN ab nr W=30 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:48:02+05:30 DONE ab nr W=30 t=13 rc=0 dirty_kb_at_start=528 sync_wait_s=1 completed_tps=926.30 divergence_count=0 permanent_failures=0  f_await=6.86 w_await=3.81 util=91 io_n=22 state=dcb895e5961ab8e8
+2026-10-08T00:48:03+05:30 RUN ab all W=30 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-08T00:50:08+05:30 DONE ab all W=30 t=13 rc=0 dirty_kb_at_start=84 sync_wait_s=1 completed_tps=2392.27 divergence_count=0 permanent_failures=0  f_await=1.97 w_await=0.67 util=83 io_n=8 state=dcb895e5961ab8e8
+2026-10-08T00:50:09+05:30 RUN ab base W=30 t=13 []
+2026-10-08T00:52:28+05:30 DONE ab base W=30 t=13 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2101.72 divergence_count=0 permanent_failures=0  f_await=1.98 w_await=0.69 util=82 io_n=9 state=dcb895e5961ab8e8
+2026-10-08T00:52:29+05:30 RUN ab ev W=30 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T00:55:31+05:30 DONE ab ev W=30 t=13 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=875.80 divergence_count=0 permanent_failures=0  f_await=6.82 w_await=4.27 util=92 io_n=23 state=dcb895e5961ab8e8
+2026-10-08T00:55:32+05:30 RUN ab dd W=100 t=13 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:00:57+05:30 DONE ab dd W=100 t=13 rc=0 dirty_kb_at_start=28 sync_wait_s=1 completed_tps=3083.89 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.55 util=75 io_n=7 state=e82921e1ebb1b7ab
+2026-10-08T01:01:01+05:30 RUN ab nr W=100 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:07:28+05:30 DONE ab nr W=100 t=13 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3271.17 divergence_count=0 permanent_failures=0  f_await=2.06 w_await=0.54 util=79 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T01:07:31+05:30 RUN ab all W=100 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-08T01:13:09+05:30 DONE ab all W=100 t=13 rc=0 dirty_kb_at_start=192 sync_wait_s=1 completed_tps=1060.56 divergence_count=0 permanent_failures=0  f_await=8.77 w_await=3.13 util=90 io_n=19 state=e82921e1ebb1b7ab
+2026-10-08T01:13:12+05:30 RUN ab base W=100 t=13 []
+2026-10-08T01:19:49+05:30 DONE ab base W=100 t=13 rc=0 dirty_kb_at_start=284 sync_wait_s=1 completed_tps=268.18 divergence_count=0 permanent_failures=0  f_await=28.99 w_await=50.70 util=97 io_n=75 state=e82921e1ebb1b7ab
+2026-10-08T01:19:52+05:30 RUN ab ev W=100 t=13 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:25:51+05:30 DONE ab ev W=100 t=13 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=722.04 divergence_count=0 permanent_failures=0  f_await=7.86 w_await=6.73 util=94 io_n=27 state=e82921e1ebb1b7ab
+2026-10-08T01:25:54+05:30 RUN ab nr W=5 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:27:05+05:30 DONE ab nr W=5 t=14 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1179.98 divergence_count=0 permanent_failures=0  f_await=1.93 w_await=0.97 util=88 io_n=16 state=fdb9545f1c588209
+2026-10-08T01:27:06+05:30 RUN ab all W=5 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-08T01:28:39+05:30 DONE ab all W=5 t=14 rc=0 dirty_kb_at_start=60 sync_wait_s=1 completed_tps=837.32 divergence_count=0 permanent_failures=0  f_await=4.92 w_await=2.12 util=90 io_n=24 state=fdb9545f1c588209
+2026-10-08T01:28:39+05:30 RUN ab base W=5 t=14 []
+2026-10-08T01:29:51+05:30 DONE ab base W=5 t=14 rc=0 dirty_kb_at_start=88 sync_wait_s=1 completed_tps=982.72 divergence_count=0 permanent_failures=0  f_await=1.92 w_await=0.97 util=82 io_n=21 state=fdb9545f1c588209
+2026-10-08T01:29:51+05:30 RUN ab ev W=5 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:31:02+05:30 DONE ab ev W=5 t=14 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1177.53 divergence_count=0 permanent_failures=0  f_await=1.93 w_await=0.96 util=88 io_n=17 state=fdb9545f1c588209
+2026-10-08T01:31:02+05:30 RUN ab dd W=5 t=14 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:32:34+05:30 DONE ab dd W=5 t=14 rc=0 dirty_kb_at_start=124 sync_wait_s=1 completed_tps=575.75 divergence_count=0 permanent_failures=0  f_await=5.34 w_await=4.69 util=90 io_n=34 state=fdb9545f1c588209
+2026-10-08T01:32:34+05:30 RUN ab nr W=30 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:34:46+05:30 DONE ab nr W=30 t=14 rc=0 dirty_kb_at_start=100 sync_wait_s=1 completed_tps=2403.04 divergence_count=0 permanent_failures=0  f_await=1.99 w_await=0.68 util=79 io_n=8 state=dcb895e5961ab8e8
+2026-10-08T01:34:47+05:30 RUN ab all W=30 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-08T01:36:30+05:30 DONE ab all W=30 t=14 rc=0 dirty_kb_at_start=12 sync_wait_s=1 completed_tps=2352.80 divergence_count=0 permanent_failures=0  f_await=1.99 w_await=0.67 util=77 io_n=9 state=dcb895e5961ab8e8
+2026-10-08T01:36:31+05:30 RUN ab base W=30 t=14 []
+2026-10-08T01:40:21+05:30 DONE ab base W=30 t=14 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=796.76 divergence_count=0 permanent_failures=0  f_await=7.06 w_await=3.94 util=91 io_n=25 state=dcb895e5961ab8e8
+2026-10-08T01:40:22+05:30 RUN ab ev W=30 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:42:32+05:30 DONE ab ev W=30 t=14 rc=0 dirty_kb_at_start=152 sync_wait_s=1 completed_tps=2414.63 divergence_count=0 permanent_failures=0  f_await=1.99 w_await=0.66 util=81 io_n=8 state=dcb895e5961ab8e8
+2026-10-08T01:42:33+05:30 RUN ab dd W=30 t=14 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:45:03+05:30 DONE ab dd W=30 t=14 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2092.98 divergence_count=0 permanent_failures=0  f_await=1.97 w_await=0.69 util=82 io_n=9 state=dcb895e5961ab8e8
+2026-10-08T01:45:04+05:30 RUN ab nr W=100 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T01:50:16+05:30 DONE ab nr W=100 t=14 rc=0 dirty_kb_at_start=376 sync_wait_s=1 completed_tps=3278.74 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.54 util=80 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T01:50:19+05:30 RUN ab all W=100 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=1]
+2026-10-08T01:55:04+05:30 DONE ab all W=100 t=14 rc=0 dirty_kb_at_start=208 sync_wait_s=1 completed_tps=3170.55 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.55 util=81 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T01:55:07+05:30 RUN ab base W=100 t=14 []
+2026-10-08T02:00:58+05:30 DONE ab base W=100 t=14 rc=0 dirty_kb_at_start=328 sync_wait_s=1 completed_tps=3106.98 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.56 util=84 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T02:01:01+05:30 RUN ab ev W=100 t=14 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=0 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T02:05:40+05:30 DONE ab ev W=100 t=14 rc=0 dirty_kb_at_start=24 sync_wait_s=1 completed_tps=3251.99 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.54 util=72 io_n=7 state=e82921e1ebb1b7ab
+2026-10-08T02:05:43+05:30 RUN ab dd W=100 t=14 [BCDB_DT_EARLY_VALIDATE=0 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T02:11:02+05:30 DONE ab dd W=100 t=14 rc=0 dirty_kb_at_start=16 sync_wait_s=1 completed_tps=3146.58 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.55 util=83 io_n=6 state=e82921e1ebb1b7ab
+AB_QUEUE_DONE
+2026-10-08T02:13:15+05:30 RUN ab base W=100 k=64 t=21 []
+2026-10-08T02:19:08+05:30 DONE ab base W=100 k=64 t=21 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2873.90 divergence_count=0 permanent_failures=0  f_await=2.01 w_await=0.54 util=73 io_n=7 state=e82921e1ebb1b7ab
+2026-10-08T02:19:11+05:30 RUN ab nr W=100 k=64 t=21 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T02:24:22+05:30 DONE ab nr W=100 k=64 t=21 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3435.03 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.53 util=77 io_n=5 state=e82921e1ebb1b7ab
+2026-10-08T02:24:25+05:30 RUN ab base W=100 k=48 t=21 []
+2026-10-08T02:31:15+05:30 DONE ab base W=100 k=48 t=21 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3125.30 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.54 util=79 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T02:31:18+05:30 RUN ab nr W=100 k=48 t=21 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T02:36:26+05:30 DONE ab nr W=100 k=48 t=21 rc=0 dirty_kb_at_start=160 sync_wait_s=1 completed_tps=3747.96 divergence_count=0 permanent_failures=0  f_await=2.05 w_await=0.53 util=79 io_n=5 state=e82921e1ebb1b7ab
+2026-10-08T02:36:29+05:30 RUN ab base W=100 k=64 t=22 []
+2026-10-08T02:41:31+05:30 DONE ab base W=100 k=64 t=22 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2872.28 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.55 util=74 io_n=7 state=e82921e1ebb1b7ab
+2026-10-08T02:41:34+05:30 RUN ab nr W=100 k=64 t=22 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T02:46:18+05:30 DONE ab nr W=100 k=64 t=22 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3574.15 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.53 util=79 io_n=5 state=e82921e1ebb1b7ab
+2026-10-08T02:46:21+05:30 RUN ab base W=100 k=48 t=22 []
+2026-10-08T02:51:05+05:30 DONE ab base W=100 k=48 t=22 rc=0 dirty_kb_at_start=584 sync_wait_s=1 completed_tps=3142.89 divergence_count=0 permanent_failures=0  f_await=2.02 w_await=0.54 util=78 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T02:51:08+05:30 RUN ab nr W=100 k=48 t=22 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T02:56:04+05:30 DONE ab nr W=100 k=48 t=22 rc=0 dirty_kb_at_start=268 sync_wait_s=1 completed_tps=3641.06 divergence_count=0 permanent_failures=0  f_await=2.02 w_await=0.52 util=82 io_n=5 state=e82921e1ebb1b7ab
+2026-10-08T02:56:07+05:30 RUN ab base W=100 k=64 t=23 []
+2026-10-08T03:01:54+05:30 DONE ab base W=100 k=64 t=23 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2941.48 divergence_count=0 permanent_failures=0  f_await=2.01 w_await=0.55 util=71 io_n=7 state=e82921e1ebb1b7ab
+2026-10-08T03:01:57+05:30 RUN ab nr W=100 k=64 t=23 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T03:07:14+05:30 DONE ab nr W=100 k=64 t=23 rc=0 dirty_kb_at_start=80 sync_wait_s=1 completed_tps=3476.83 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.53 util=74 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T03:07:17+05:30 RUN ab base W=100 k=48 t=23 []
+2026-10-08T03:13:08+05:30 DONE ab base W=100 k=48 t=23 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3133.12 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.54 util=80 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T03:13:11+05:30 RUN ab nr W=100 k=48 t=23 [BCDB_DT_EARLY_VALIDATE=1 BCDB_DT_TAG_DEDUP=1 BCDB_DT_EARLY_ROTATION=0]
+2026-10-08T03:18:58+05:30 DONE ab nr W=100 k=48 t=23 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1367.58 divergence_count=0 permanent_failures=0  f_await=6.63 w_await=1.79 util=90 io_n=14 state=e82921e1ebb1b7ab
+AB_K_DONE
+2026-10-08T03:22:53+05:30 RUN ab final W=5 k=32 t=31 []
+2026-10-08T03:24:01+05:30 DONE ab final W=5 k=32 t=31 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1173.85 divergence_count=0 permanent_failures=0  f_await=1.93 w_await=0.97 util=85 io_n=17 state=fdb9545f1c588209
+2026-10-08T03:24:01+05:30 RUN ab final W=30 k=32 t=31 []
+2026-10-08T03:26:24+05:30 DONE ab final W=30 k=32 t=31 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2404.72 divergence_count=0 permanent_failures=0  f_await=1.97 w_await=0.65 util=82 io_n=8 state=dcb895e5961ab8e8
+2026-10-08T03:26:25+05:30 RUN ab final W=100 k=32 t=31 []
+2026-10-08T03:31:49+05:30 DONE ab final W=100 k=32 t=31 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3262.54 divergence_count=0 permanent_failures=0  f_await=2.02 w_await=0.55 util=73 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T03:31:52+05:30 RUN ab final W=100 k=48 t=31 []
+2026-10-08T03:37:10+05:30 DONE ab final W=100 k=48 t=31 rc=0 dirty_kb_at_start=504 sync_wait_s=1 completed_tps=1749.96 divergence_count=0 permanent_failures=0  f_await=5.81 w_await=4.25 util=88 io_n=11 state=e82921e1ebb1b7ab
+2026-10-08T03:37:13+05:30 RUN ab final W=5 k=32 t=32 []
+2026-10-08T03:38:50+05:30 DONE ab final W=5 k=32 t=32 rc=0 dirty_kb_at_start=64 sync_wait_s=1 completed_tps=660.13 divergence_count=0 permanent_failures=0  f_await=6.41 w_await=2.83 util=92 io_n=30 state=fdb9545f1c588209
+2026-10-08T03:38:50+05:30 RUN ab final W=30 k=32 t=32 []
+2026-10-08T03:40:53+05:30 DONE ab final W=30 k=32 t=32 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=846.47 divergence_count=0 permanent_failures=0  f_await=6.40 w_await=2.25 util=90 io_n=24 state=dcb895e5961ab8e8
+2026-10-08T03:40:54+05:30 RUN ab final W=100 k=32 t=32 []
+2026-10-08T03:46:59+05:30 DONE ab final W=100 k=32 t=32 rc=0 dirty_kb_at_start=476 sync_wait_s=1 completed_tps=3314.93 divergence_count=0 permanent_failures=0  f_await=2.02 w_await=0.54 util=73 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T03:47:02+05:30 RUN ab final W=100 k=48 t=32 []
+2026-10-08T03:52:14+05:30 DONE ab final W=100 k=48 t=32 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3627.13 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.52 util=81 io_n=5 state=e82921e1ebb1b7ab
+AB_FINAL_DONE
+2026-10-08T04:48:00+05:30 RUN ab settle W=5 k=32 t=41 []
+2026-10-08T04:49:55+05:30 DONE ab settle W=5 k=32 t=41 rc=0 dirty_kb_at_start=28 sync_wait_s=1 completed_tps=423.15 divergence_count=0 permanent_failures=0  f_await=8.64 w_await=4.03 util=94 io_n=47 state=fdb9545f1c588209
+2026-10-08T04:49:55+05:30 RUN ab final W=5 k=32 t=41 []
+2026-10-08T04:51:03+05:30 DONE ab final W=5 k=32 t=41 rc=0 dirty_kb_at_start=1036 sync_wait_s=1 completed_tps=1174.44 divergence_count=0 permanent_failures=0  f_await=1.93 w_await=0.97 util=87 io_n=17 state=fdb9545f1c588209
+2026-10-08T04:51:03+05:30 RUN ab settle W=30 k=32 t=41 []
+2026-10-08T04:52:45+05:30 DONE ab settle W=30 k=32 t=41 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2394.00 divergence_count=0 permanent_failures=0  f_await=1.99 w_await=0.67 util=83 io_n=8 state=dcb895e5961ab8e8
+2026-10-08T04:52:46+05:30 RUN ab final W=30 k=32 t=41 []
+2026-10-08T04:54:26+05:30 DONE ab final W=30 k=32 t=41 rc=0 dirty_kb_at_start=420 sync_wait_s=1 completed_tps=2408.50 divergence_count=0 permanent_failures=0  f_await=2.00 w_await=0.67 util=84 io_n=8 state=dcb895e5961ab8e8
+2026-10-08T04:54:27+05:30 RUN ab settle W=100 k=32 t=41 []
+2026-10-08T04:58:28+05:30 DONE ab settle W=100 k=32 t=41 rc=0 dirty_kb_at_start=140 sync_wait_s=1 completed_tps=3231.11 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.55 util=77 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T04:58:31+05:30 RUN ab final W=100 k=32 t=41 []
+2026-10-08T05:05:03+05:30 DONE ab final W=100 k=32 t=41 rc=0 dirty_kb_at_start=196 sync_wait_s=1 completed_tps=987.33 divergence_count=0 permanent_failures=0  f_await=6.11 w_await=5.98 util=90 io_n=20 state=e82921e1ebb1b7ab
+2026-10-08T05:05:06+05:30 RUN ab settle W=5 k=32 t=42 []
+2026-10-08T05:06:15+05:30 DONE ab settle W=5 k=32 t=42 rc=0 dirty_kb_at_start=304 sync_wait_s=1 completed_tps=1185.49 divergence_count=0 permanent_failures=0  f_await=1.92 w_await=0.94 util=84 io_n=17 state=fdb9545f1c588209
+2026-10-08T05:06:16+05:30 RUN ab final W=5 k=32 t=42 []
+2026-10-08T05:07:26+05:30 DONE ab final W=5 k=32 t=42 rc=0 dirty_kb_at_start=2828 sync_wait_s=1 completed_tps=1176.32 divergence_count=0 permanent_failures=0  f_await=1.93 w_await=0.96 util=88 io_n=17 state=fdb9545f1c588209
+2026-10-08T05:07:26+05:30 RUN ab settle W=30 k=32 t=42 []
+2026-10-08T05:09:20+05:30 DONE ab settle W=30 k=32 t=42 rc=0 dirty_kb_at_start=136 sync_wait_s=1 completed_tps=2381.94 divergence_count=0 permanent_failures=0  f_await=2.00 w_await=0.66 util=80 io_n=8 state=dcb895e5961ab8e8
+2026-10-08T05:09:21+05:30 RUN ab final W=30 k=32 t=42 []
+2026-10-08T05:11:15+05:30 DONE ab final W=30 k=32 t=42 rc=0 dirty_kb_at_start=744 sync_wait_s=1 completed_tps=2422.86 divergence_count=0 permanent_failures=0  f_await=1.99 w_await=0.67 util=85 io_n=8 state=dcb895e5961ab8e8
+2026-10-08T05:11:16+05:30 RUN ab settle W=100 k=32 t=42 []
+2026-10-08T05:17:18+05:30 DONE ab settle W=100 k=32 t=42 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3284.59 divergence_count=0 permanent_failures=0  f_await=2.05 w_await=0.55 util=77 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T05:17:21+05:30 RUN ab final W=100 k=32 t=42 []
+2026-10-08T05:22:02+05:30 DONE ab final W=100 k=32 t=42 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3333.56 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.54 util=76 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T05:22:05+05:30 RUN ab settle W=5 k=32 t=43 []
+2026-10-08T05:23:13+05:30 DONE ab settle W=5 k=32 t=43 rc=0 dirty_kb_at_start=84 sync_wait_s=1 completed_tps=1177.28 divergence_count=0 permanent_failures=0  f_await=1.93 w_await=0.96 util=87 io_n=17 state=fdb9545f1c588209
+2026-10-08T05:23:13+05:30 RUN ab final W=5 k=32 t=43 []
+2026-10-08T05:24:21+05:30 DONE ab final W=5 k=32 t=43 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=1173.80 divergence_count=0 permanent_failures=0  f_await=1.92 w_await=0.96 util=87 io_n=17 state=fdb9545f1c588209
+2026-10-08T05:24:21+05:30 RUN ab settle W=30 k=32 t=43 []
+2026-10-08T05:26:42+05:30 DONE ab settle W=30 k=32 t=43 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=2413.35 divergence_count=0 permanent_failures=0  f_await=1.99 w_await=0.67 util=77 io_n=9 state=dcb895e5961ab8e8
+2026-10-08T05:26:43+05:30 RUN ab final W=30 k=32 t=43 []
+2026-10-08T05:29:30+05:30 DONE ab final W=30 k=32 t=43 rc=0 dirty_kb_at_start=296 sync_wait_s=1 completed_tps=2371.45 divergence_count=0 permanent_failures=0  f_await=2.00 w_await=0.67 util=78 io_n=9 state=dcb895e5961ab8e8
+2026-10-08T05:29:31+05:30 RUN ab settle W=100 k=32 t=43 []
+2026-10-08T05:34:59+05:30 DONE ab settle W=100 k=32 t=43 rc=0 dirty_kb_at_start=780 sync_wait_s=1 completed_tps=3185.99 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.55 util=73 io_n=7 state=e82921e1ebb1b7ab
+2026-10-08T05:35:02+05:30 RUN ab final W=100 k=32 t=43 []
+2026-10-08T05:40:38+05:30 DONE ab final W=100 k=32 t=43 rc=0 dirty_kb_at_start=192 sync_wait_s=1 completed_tps=3335.44 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.54 util=73 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T05:40:41+05:30 RUN ab settle W=100 k=48 t=41 []
+2026-10-08T05:47:01+05:30 DONE ab settle W=100 k=48 t=41 rc=0 dirty_kb_at_start=472 sync_wait_s=1 completed_tps=3602.88 divergence_count=0 permanent_failures=0  f_await=2.02 w_await=0.53 util=73 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T05:47:04+05:30 RUN ab final W=100 k=48 t=41 []
+2026-10-08T05:51:45+05:30 DONE ab final W=100 k=48 t=41 rc=0 dirty_kb_at_start=28 sync_wait_s=1 completed_tps=3752.49 divergence_count=0 permanent_failures=0  f_await=2.02 w_await=0.53 util=70 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T05:51:48+05:30 RUN ab settle W=100 k=48 t=42 []
+2026-10-08T05:57:17+05:30 DONE ab settle W=100 k=48 t=42 rc=0 dirty_kb_at_start=136 sync_wait_s=1 completed_tps=3640.11 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.52 util=80 io_n=5 state=e82921e1ebb1b7ab
+2026-10-08T05:57:20+05:30 RUN ab final W=100 k=48 t=42 []
+2026-10-08T06:02:23+05:30 DONE ab final W=100 k=48 t=42 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3652.81 divergence_count=0 permanent_failures=0  f_await=2.05 w_await=0.52 util=71 io_n=6 state=e82921e1ebb1b7ab
+AB_SETTLE_DONE
+2026-10-08T06:03:53+05:30 RUN ab final W=100 k=32 t=51 []
+2026-10-08T06:10:01+05:30 DONE ab final W=100 k=32 t=51 rc=0 dirty_kb_at_start=700 sync_wait_s=1 completed_tps=3343.15 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.54 util=79 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T06:10:04+05:30 RUN ab settle W=100 k=32 t=51 []
+2026-10-08T06:16:07+05:30 DONE ab settle W=100 k=32 t=51 rc=0 dirty_kb_at_start=104 sync_wait_s=1 completed_tps=3244.50 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.56 util=81 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T06:16:10+05:30 RUN ab settleoff W=100 k=32 t=51 [BCDB_DT_POST_PUBLISH_SETTLE=0]
+2026-10-08T06:21:52+05:30 DONE ab settleoff W=100 k=32 t=51 rc=0 dirty_kb_at_start=512 sync_wait_s=1 completed_tps=3280.17 divergence_count=0 permanent_failures=0  f_await=2.03 w_await=0.54 util=81 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T06:21:55+05:30 RUN ab final W=100 k=32 t=52 []
+2026-10-08T06:26:59+05:30 DONE ab final W=100 k=32 t=52 rc=0 dirty_kb_at_start=180 sync_wait_s=1 completed_tps=1904.55 divergence_count=0 permanent_failures=0  f_await=5.11 w_await=3.25 util=85 io_n=11 state=e82921e1ebb1b7ab
+2026-10-08T06:27:02+05:30 RUN ab settle W=100 k=32 t=52 []
+2026-10-08T06:32:38+05:30 DONE ab settle W=100 k=32 t=52 rc=0 dirty_kb_at_start=616 sync_wait_s=1 completed_tps=1248.88 divergence_count=0 permanent_failures=0  f_await=6.57 w_await=1.87 util=90 io_n=16 state=e82921e1ebb1b7ab
+2026-10-08T06:32:41+05:30 RUN ab settleoff W=100 k=32 t=52 [BCDB_DT_POST_PUBLISH_SETTLE=0]
+2026-10-08T06:37:54+05:30 DONE ab settleoff W=100 k=32 t=52 rc=0 dirty_kb_at_start=404 sync_wait_s=1 completed_tps=1267.25 divergence_count=0 permanent_failures=0  f_await=6.52 w_await=1.78 util=91 io_n=15 state=e82921e1ebb1b7ab
+2026-10-08T06:37:57+05:30 RUN ab final W=100 k=32 t=53 []
+2026-10-08T06:43:42+05:30 DONE ab final W=100 k=32 t=53 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=3257.82 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.54 util=79 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T06:43:45+05:30 RUN ab settle W=100 k=32 t=53 []
+2026-10-08T06:50:01+05:30 DONE ab settle W=100 k=32 t=53 rc=0 dirty_kb_at_start=492 sync_wait_s=1 completed_tps=1266.05 divergence_count=0 permanent_failures=0  f_await=6.21 w_await=2.35 util=91 io_n=15 state=e82921e1ebb1b7ab
+2026-10-08T06:50:04+05:30 RUN ab settleoff W=100 k=32 t=53 [BCDB_DT_POST_PUBLISH_SETTLE=0]
+2026-10-08T06:56:20+05:30 DONE ab settleoff W=100 k=32 t=53 rc=0 dirty_kb_at_start=0 sync_wait_s=1 completed_tps=721.37 divergence_count=0 permanent_failures=0  f_await=8.09 w_await=6.88 util=94 io_n=27 state=e82921e1ebb1b7ab
+2026-10-08T06:56:23+05:30 RUN ab final W=100 k=32 t=54 []
+2026-10-08T07:02:20+05:30 DONE ab final W=100 k=32 t=54 rc=0 dirty_kb_at_start=676 sync_wait_s=1 completed_tps=3284.76 divergence_count=0 permanent_failures=0  f_await=2.04 w_await=0.56 util=78 io_n=6 state=e82921e1ebb1b7ab
+2026-10-08T07:02:23+05:30 RUN ab settle W=100 k=32 t=54 []
+2026-10-08T07:09:10+05:30 DONE ab settle W=100 k=32 t=54 rc=0 dirty_kb_at_start=140 sync_wait_s=1 completed_tps=881.16 divergence_count=0 permanent_failures=0  f_await=7.41 w_await=5.91 util=90 io_n=23 state=e82921e1ebb1b7ab
+2026-10-08T07:09:13+05:30 RUN ab settleoff W=100 k=32 t=54 [BCDB_DT_POST_PUBLISH_SETTLE=0]
+2026-10-08T07:14:19+05:30 DONE ab settleoff W=100 k=32 t=54 rc=0 dirty_kb_at_start=312 sync_wait_s=1 completed_tps=2855.47 divergence_count=0 permanent_failures=0  f_await=2.60 w_await=2.61 util=83 io_n=7 state=e82921e1ebb1b7ab
+AB_SETTLE2_DONE

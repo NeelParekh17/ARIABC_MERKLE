@@ -1,0 +1,6 @@
+serial_errors=0
+completed_tps=5072.41
+divergence_count=0 permanent_failures=0 
+state_equal=NO
+traced_tx=20000 restarts=15594 post_publish_settles=0 terminal_unique=0 invariant=0
+restart_log_lines=0 invariant_warnings=0

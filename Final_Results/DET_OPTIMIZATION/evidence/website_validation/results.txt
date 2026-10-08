@@ -1,0 +1,15 @@
+PASS tab 04 initialised with protocol toggle
+PASS speed select has 0.125x
+PASS new protocol never re-runs after publishing (all cases)
+PASS old protocol re-runs tx 10 after publishing (postpub)
+PASS new postpub settles instead
+PASS publication order is monotonic in every case
+PASS new random has early aborts and fewer turn-held aborts
+PASS new random finishes no later than old
+PASS postpub explainer (new)
+PASS postpub explainer (old)
+PASS early-abort explainer renders
+PASS 0.125x playback advances
+PASS findings include the new entries
+PASS no JS errors
+PASS mobile: controls fit the viewport
