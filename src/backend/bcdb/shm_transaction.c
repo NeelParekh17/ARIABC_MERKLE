@@ -643,6 +643,7 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     tx->snap_xmin = InvalidTransactionId;
     tx->isolation = isolation;
     tx->pred_lock = pred_lock;
+	tx->needs_opf = false;
     tx->queue_link.tqe_prev = NULL;
     tx->create_time = 0;
     tx->has_raw = false;
