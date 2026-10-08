@@ -2763,6 +2763,11 @@ public:
         cv_.notify_all();
     }
 
+    bool audit_stopped() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return audit_stopped_;
+    }
+
     vote_store_profile profile() {
         std::lock_guard<std::mutex> lk(mu_);
         vote_store_profile out;
@@ -4943,6 +4948,10 @@ int main(int argc, char** argv) {
     std::mutex            fatal_gateway_error_mu;
     std::atomic<uint64_t> async_all3_capacity_exhausted_count(0);
     std::atomic<bool>     async_audit_stop(false);
+    // True while the async all-3 audit consumer runs; drain checks it so a dead
+    // consumer fails the run instead of waiting forever for counters to move.
+    std::atomic<bool>     async_audit_alive(false);
+    std::atomic<uint64_t> async_audit_idle_waits(0);
     std::thread async_audit_thread;
 
     ariabc_pg::blake3_tx_signer tx_signer;
@@ -6237,12 +6246,25 @@ int main(int argc, char** argv) {
 
             auto start_async_audit_thread = [&]() {
                 if (!majority_async_all3_validation) return;
+                async_audit_alive.store(true, std::memory_order_release);
                 async_audit_thread = std::thread([&]() {
                     while (!async_audit_stop.load(std::memory_order_relaxed)) {
                         uint64_t rid = 0;
                         std::string all_err;
                         if (!votes.wait_next_all3_ready(rid, all_err, opt.poll_interval_us, opt.poll_count)) {
-                            break;
+                            /*
+                             * false means either "stopped" or "nothing became ready
+                             * within one wait window".  The second is normal while a
+                             * replica is quarantined and repaired: its votes arrive
+                             * only after replay, and per-entry deadlines are being
+                             * extended meanwhile.  Exit only on an explicit stop;
+                             * expired entries still surface as all_nodes_timeout.
+                             */
+                            if (async_audit_stop.load(std::memory_order_relaxed) || votes.audit_stopped()) {
+                                break;
+                            }
+                            async_audit_idle_waits.fetch_add(1, std::memory_order_relaxed);
+                            continue;
                         }
 
                         votes.unpin_audit(rid);
@@ -6272,6 +6294,7 @@ int main(int argc, char** argv) {
                             async_all3_verified_count.fetch_add(1, std::memory_order_relaxed);
                         }
                     }
+                    async_audit_alive.store(false, std::memory_order_release);
                 });
             };
             start_async_audit_thread();
@@ -6344,6 +6367,7 @@ int main(int argc, char** argv) {
                 }
                 // Measure only the actual drain phase, not the full thread lifetime.
                 const auto drain_start = std::chrono::steady_clock::now();
+                bool async_audit_consumer_lost = false;
 
                 uint64_t completed = client_quorum_complete_count.load(std::memory_order_relaxed);
                 while (true) {
@@ -6356,6 +6380,13 @@ int main(int argc, char** argv) {
                         break;
                     }
                     if (fatal_gateway_error.load(std::memory_order_relaxed)) {
+                        break;
+                    }
+                    if (!async_audit_alive.load(std::memory_order_acquire)) {
+                        // The consumer is gone, so these counters can never move.
+                        std::cerr << "async_all3_audit_consumer_exited processed=" << processed
+                                  << " completed=" << completed << std::endl;
+                        async_audit_consumer_lost = true;
                         break;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -6372,6 +6403,7 @@ int main(int argc, char** argv) {
                          std::chrono::duration_cast<std::chrono::nanoseconds>(drain_end - drain_start).count()),
                      std::memory_order_relaxed);
                 return !fatal_gateway_error.load(std::memory_order_acquire) &&
+                       !async_audit_consumer_lost &&
                        async_all3_failure_count.load() == 0 &&
                        async_all3_timeout_count.load() == 0 &&
                        async_all3_missing_count.load() == 0 &&
@@ -7824,6 +7856,8 @@ int main(int argc, char** argv) {
                       << async_all3_capacity_exhausted_count.load(std::memory_order_relaxed)
                       << " audit_drain_ms="
                       << (async_all3_audit_drain_ns.load(std::memory_order_relaxed) / 1000000.0)
+                      << " audit_idle_waits="
+                      << async_audit_idle_waits.load(std::memory_order_relaxed)
                       << std::endl;
         }
 
