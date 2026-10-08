@@ -122,6 +122,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
 	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
 		bool		tuple_from_heap = false;
+		bool		pending_writes = bcdb_dt_simulating && bcdb_have_pending_writes &&
+			bcdb_pending_writes(RelationGetRelid(scandesc->heapRelation));
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -159,12 +161,12 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 * It's worth going through this complexity to avoid needing to lock
 		 * the VM buffer, which could cause significant contention.
 		 */
-		if (bcdb_pending_writes(RelationGetRelid(scandesc->heapRelation)) ||
+		if (pending_writes ||
 			!VM_ALL_VISIBLE(scandesc->heapRelation,
 							ItemPointerGetBlockNumber(tid),
 							&node->ioss_VMBuffer))
 		{
-			if (bcdb_pending_writes(RelationGetRelid(scandesc->heapRelation)))
+			if (pending_writes)
 				bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_INDEXONLY_HEAP_FETCHES, 1);
 			/*
 			 * Rats, we have to visit the heap to check visibility.

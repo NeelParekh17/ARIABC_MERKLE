@@ -2579,6 +2579,9 @@ bcdb_check_pending_index_scan_slow(Oid relid, Relation index)
 	pending = bcdb_pending_relation(relid, false);
 	if (!pending->indexed_update)
 		return;
+	/* A predicate change can add a row that has no old index entry to fetch. */
+	if (RelationGetIndexPredicate(index) != NIL)
+		bcdb_request_opf(BCDB_OPF_OWN_INDEXED_UPDATE);
 	for (i = 0; i < index->rd_index->indnatts; i++)
 	{
 		int attnum = index->rd_index->indkey.values[i];
