@@ -42,6 +42,7 @@
  */
 
 #include "postgres.h"
+#include "bcdb/shm_transaction.h"
 
 #include "access/amapi.h"
 #include "access/heapam.h"
@@ -510,6 +511,8 @@ index_getnext_tid(IndexScanDesc scan, ScanDirection direction)
 {
 	bool		found;
 
+	bcdb_check_pending_index_scan(scan->indexRelation->rd_index->indrelid,
+								  scan->indexRelation);
 	SCAN_CHECKS;
 	CHECK_SCAN_PROCEDURE(amgettuple);
 
@@ -653,6 +656,8 @@ index_getbitmap(IndexScanDesc scan, TIDBitmap *bitmap)
 {
 	int64		ntids;
 
+	bcdb_check_pending_index_scan(scan->indexRelation->rd_index->indrelid,
+								  scan->indexRelation);
 	SCAN_CHECKS;
 	CHECK_SCAN_PROCEDURE(amgetbitmap);
 

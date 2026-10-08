@@ -161,6 +161,7 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
 
 		slot->tts_tableOid = RelationGetRelid(scan->rel);
 		ExecStoreBufferHeapTuple(&bslot->base.tupdata, slot, hscan->xs_cbuf);
+		got_heap_tuple = bcdb_overlay_slot(scan->rel, slot);
 	}
 	else
 	{
@@ -187,6 +188,7 @@ heapam_fetch_row_version(Relation relation,
 	Buffer		buffer;
 
 	Assert(TTS_IS_BUFFERTUPLE(slot));
+	bcdb_check_pending_scan(RelationGetRelid(relation));
 
 	bslot->base.tupdata.t_self = *tid;
 	if (heap_fetch(relation, snapshot, &bslot->base.tupdata, &buffer))
@@ -195,7 +197,7 @@ heapam_fetch_row_version(Relation relation,
 		ExecStorePinnedBufferHeapTuple(&bslot->base.tupdata, slot, buffer);
 		slot->tts_tableOid = RelationGetRelid(relation);
 
-		return true;
+		return bcdb_overlay_slot(relation, slot);
 	}
 
 	return false;
@@ -2208,6 +2210,8 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 	Page		dp;
 	ItemId		lp;
 
+next_pending_tuple:
+	bcdb_check_pending_scan(RelationGetRelid(scan->rs_rd));
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
 	 */
@@ -2235,6 +2239,8 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 							 hscan->rs_cbuf);
 
 	hscan->rs_cindex++;
+	if (!bcdb_overlay_slot(scan->rs_rd, slot))
+		goto next_pending_tuple;
 
 	return true;
 }
@@ -2397,6 +2403,12 @@ heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
 				LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
 
 			ExecStoreBufferHeapTuple(tuple, slot, hscan->rs_cbuf);
+			if (!bcdb_overlay_slot(scan->rs_rd, slot))
+			{
+				if (!pagemode)
+					LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
+				continue;
+			}
 
 			/* Count successfully-fetched tuples as heap fetches */
 			pgstat_count_heap_getnext(scan->rs_rd);

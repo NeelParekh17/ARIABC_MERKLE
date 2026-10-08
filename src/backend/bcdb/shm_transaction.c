@@ -1,5 +1,7 @@
 #include "postgres.h"
 #include "utils/hashutils.h"
+#include "utils/datum.h"
+#include "catalog/pg_attribute.h"
 #include "bcdb/shm_transaction.h"
 #include "bcdb/utils/aligned_heap.h"
 #include "utils/elog.h"
@@ -2450,20 +2452,274 @@ bcdb_dirty_xid_is_ordered_predecessor(TransactionId xid)
     return mapped_txid >= 0 && mapped_txid < activeTx->tx_id;
 }
 
-void store_optim_update(TupleTableSlot *slot, ItemPointer old_tid)
+bool bcdb_dt_simulating = false;
+
+typedef struct BCDBPendingKey
+{
+	Oid relid;
+	ItemPointerData tid;
+} BCDBPendingKey;
+
+typedef struct BCDBPendingTuple
+{
+	BCDBPendingKey key;
+	OptimWriteEntry *entry;
+} BCDBPendingTuple;
+
+typedef struct BCDBPendingRelation
+{
+	Oid relid;
+	uint32 inserts;
+	uint32 writes;
+	bool indexed_update;
+	bool attrs_loaded;
+	Bitmapset *indexed_attrs;
+	Bitmapset *changed_attrs;
+} BCDBPendingRelation;
+
+static HTAB *bcdb_pending_tids;
+static HTAB *bcdb_pending_relations;
+
+void
+bcdb_request_opf(BCDBOpfReason reason)
+{
+	if (!bcdb_dt_simulating)
+		return;
+	activeTx->needs_opf = true;
+	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_OPF, 1);
+	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_OPF_TRIGGER + reason, 1);
+	ereport(ERROR,
+			(errcode(ERRCODE_BCDB_OPF),
+			 errmsg("BCDB ordered physical fallback required (reason %d)", reason)));
+}
+
+static void
+bcdb_pending_reset(void *arg)
+{
+	bcdb_pending_tids = NULL;
+	bcdb_pending_relations = NULL;
+}
+
+static BCDBPendingRelation *
+bcdb_pending_relation(Oid relid, bool create)
+{
+	bool found;
+	BCDBPendingRelation *pending;
+
+	if (bcdb_pending_relations == NULL)
+	{
+		HASHCTL ctl;
+		MemoryContextCallback *cb;
+
+		if (!create)
+			return NULL;
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.hcxt = bcdb_tx_context;
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(BCDBPendingRelation);
+		bcdb_pending_relations = hash_create("BCDB own relations", 16, &ctl,
+											 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		ctl.keysize = sizeof(BCDBPendingKey);
+		ctl.entrysize = sizeof(BCDBPendingTuple);
+		bcdb_pending_tids = hash_create("BCDB own TIDs", 32, &ctl,
+										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		cb = MemoryContextAlloc(bcdb_tx_context, sizeof(*cb));
+		cb->func = bcdb_pending_reset;
+		cb->arg = NULL;
+		MemoryContextRegisterResetCallback(bcdb_tx_context, cb);
+	}
+	pending = hash_search(bcdb_pending_relations, &relid,
+						  create ? HASH_ENTER : HASH_FIND, &found);
+	if (create && !found)
+	{
+		pending->inserts = 0;
+		pending->writes = 0;
+		pending->indexed_update = false;
+		pending->attrs_loaded = false;
+		pending->indexed_attrs = NULL;
+		pending->changed_attrs = NULL;
+	}
+	return pending;
+}
+
+bool
+bcdb_pending_writes(Oid relid)
+{
+	return bcdb_dt_simulating && bcdb_pending_relations != NULL &&
+		bcdb_pending_relation(relid, false) != NULL;
+}
+
+void
+bcdb_check_pending_scan(Oid relid)
+{
+	BCDBPendingRelation *pending;
+
+	if (!bcdb_dt_simulating || bcdb_pending_relations == NULL)
+		return;
+	pending = bcdb_pending_relation(relid, false);
+	if (pending == NULL)
+		return;
+	if (pending->inserts)
+		bcdb_request_opf(BCDB_OPF_OWN_INSERT);
+
+}
+
+void
+bcdb_check_pending_index_scan(Oid relid, Relation index)
+{
+	BCDBPendingRelation *pending;
+	int i;
+
+	bcdb_check_pending_scan(relid);
+	if (!bcdb_pending_writes(relid))
+		return;
+	pending = bcdb_pending_relation(relid, false);
+	if (!pending->indexed_update)
+		return;
+	for (i = 0; i < index->rd_index->indnatts; i++)
+	{
+		int attnum = index->rd_index->indkey.values[i];
+		if (attnum == 0 || bms_is_member(attnum - FirstLowInvalidHeapAttributeNumber,
+											  pending->changed_attrs))
+			bcdb_request_opf(BCDB_OPF_OWN_INDEXED_UPDATE);
+	}
+}
+
+static BCDBPendingTuple *
+bcdb_pending_tuple(Oid relid, ItemPointer tid, HASHACTION action)
+{
+	BCDBPendingKey key;
+	bool found;
+	BCDBPendingTuple *pending;
+
+	memset(&key, 0, sizeof(key));
+	key.relid = relid;
+	key.tid = *tid;
+	pending = hash_search(bcdb_pending_tids, &key, action, &found);
+	if (action == HASH_ENTER && !found)
+		pending->entry = NULL;
+	return pending;
+}
+
+bool
+bcdb_overlay_slot(Relation rel, TupleTableSlot *slot)
+{
+	BCDBPendingTuple *pending;
+	OptimWriteEntry *entry;
+	HeapTuple tuple;
+
+	if (!bcdb_pending_writes(RelationGetRelid(rel)))
+		return true;
+	bcdb_check_pending_scan(RelationGetRelid(rel));
+	pending = bcdb_pending_tuple(RelationGetRelid(rel), &slot->tts_tid, HASH_FIND);
+	if (pending == NULL || pending->entry == NULL)
+		return true;
+	entry = pending->entry;
+	/* A write in this command is not visible until CommandCounterIncrement. */
+	if (entry->cid >= GetCurrentCommandId(false))
+		return true;
+	if (entry->operation == CMD_UPDATE && entry->indexed_changed)
+		bcdb_request_opf(BCDB_OPF_OWN_INDEXED_UPDATE);
+	bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_OVERLAY_HITS, 1);
+	if (entry->operation == CMD_DELETE)
+	{
+		ExecClearTuple(slot);
+		return false;
+	}
+	tuple = ExecCopySlotHeapTuple(entry->slot);
+	tuple->t_self = entry->old_tid;
+	ExecForceStoreHeapTuple(tuple, slot, true);
+	slot->tts_tid = entry->old_tid;
+	slot->tts_tableOid = RelationGetRelid(rel);
+	return true;
+}
+
+static bool
+bcdb_indexed_columns_changed(Relation rel, Bitmapset *indexed_attrs,
+							 TupleTableSlot *oldslot,
+							 TupleTableSlot *newslot, Bitmapset **changed_attrs)
+{
+	Bitmapset *attrs = bms_copy(indexed_attrs);
+	int member;
+	bool changed = false;
+
+	while ((member = bms_first_member(attrs)) >= 0)
+	{
+		int attnum = member + FirstLowInvalidHeapAttributeNumber;
+		bool oldnull, newnull;
+		Datum oldvalue, newvalue;
+		Form_pg_attribute att;
+
+		if (attnum <= 0)
+		{
+			*changed_attrs = bms_union(*changed_attrs, indexed_attrs);
+			changed = true;
+			break;
+		}
+		oldvalue = slot_getattr(oldslot, attnum, &oldnull);
+		newvalue = slot_getattr(newslot, attnum, &newnull);
+		att = TupleDescAttr(RelationGetDescr(rel), attnum - 1);
+		if (oldnull != newnull || (!oldnull &&
+			!datumIsEqual(oldvalue, newvalue, att->attbyval, att->attlen)))
+		{
+			*changed_attrs = bms_add_member(*changed_attrs, member);
+			changed = true;
+		}
+	}
+	bms_free(attrs);
+	return changed;
+}
+
+void store_optim_update(Relation rel, TupleTableSlot *slot, ItemPointer old_tid,
+						RangeTblEntry *rte)
 {
     OptimWriteEntry *write_entry;
     MemoryContext old_context;
     DEBUGMSG("[ZL] tx %s storing update to (%d %d %d)", activeTx->hash, slot->tts_tableOid, *(int *)&old_tid->ip_blkid, (int)old_tid->ip_posid);
     old_context = MemoryContextSwitchTo(bcdb_tx_context);
-    write_entry = palloc(sizeof(OptimWriteEntry));
-    write_entry->operation = CMD_UPDATE;
-    write_entry->old_tid = *old_tid;
-    write_entry->slot = clone_slot(slot);
-    write_entry->cid = GetCurrentCommandId(true);
-    write_entry->relOid = InvalidOid;
-    write_entry->keyval = -1;
-    SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
+	{
+		BCDBPendingRelation *relation = bcdb_pending_relation(RelationGetRelid(rel), true);
+		BCDBPendingTuple *pending = bcdb_pending_tuple(RelationGetRelid(rel), old_tid, HASH_ENTER);
+		TupleTableSlot *oldslot = NULL;
+		bool check_indexed;
+
+		if (!relation->attrs_loaded)
+		{
+			relation->indexed_attrs = RelationGetIndexAttrBitmap(rel, INDEX_ATTR_BITMAP_ALL);
+			relation->attrs_loaded = true;
+		}
+		check_indexed = bms_overlap(relation->indexed_attrs, rte->updatedCols) ||
+			bms_overlap(relation->indexed_attrs, rte->extraUpdatedCols);
+		write_entry = pending->entry;
+		if (write_entry == NULL)
+		{
+			if (check_indexed)
+			{
+				oldslot = table_slot_create(rel, NULL);
+				if (!table_tuple_fetch_row_version(rel, old_tid, GetActiveSnapshot(), oldslot))
+					elog(ERROR, "BCDB pending UPDATE lost its visible tuple");
+			}
+			write_entry = palloc(sizeof(OptimWriteEntry));
+			write_entry->old_tid = *old_tid;
+			write_entry->relOid = RelationGetRelid(rel);
+			write_entry->keyval = -1;
+			write_entry->indexed_changed = false;
+			SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
+			pending->entry = write_entry;
+			relation->writes++;
+		}
+		else
+			oldslot = write_entry->slot;
+		if (check_indexed)
+			write_entry->indexed_changed |= bcdb_indexed_columns_changed(rel,
+																 relation->indexed_attrs, oldslot, slot, &relation->changed_attrs);
+		relation->indexed_update |= write_entry->indexed_changed;
+		if (oldslot != NULL)
+			ExecDropSingleTupleTableSlot(oldslot);
+		write_entry->operation = CMD_UPDATE;
+		write_entry->slot = clone_slot(slot);
+		write_entry->cid = GetCurrentCommandId(true);
+	}
     MemoryContextSwitchTo(old_context);
 #if SAFEDBG1
     printf("safeDB %s : %s: %d tx %d cid %d\n",
@@ -2500,11 +2756,17 @@ void store_optim_insert(TupleTableSlot *slot)
     old_context = MemoryContextSwitchTo(bcdb_tx_context);
     write_entry = palloc(sizeof(OptimWriteEntry));
     write_entry->operation = CMD_INSERT;
+	write_entry->indexed_changed = false;
     write_entry->slot = clone_slot(slot);
     ItemPointerSetInvalid(&write_entry->old_tid);
     write_entry->cid = GetCurrentCommandId(true);
     write_entry->relOid = InvalidOid;
     write_entry->keyval = -1;
+	{
+		BCDBPendingRelation *pending = bcdb_pending_relation(slot->tts_tableOid, true);
+		pending->inserts++;
+		pending->writes++;
+	}
     SIMPLEQ_INSERT_TAIL(&activeTx->optim_write_list, write_entry, link);
     MemoryContextSwitchTo(old_context);
 
@@ -2523,8 +2785,24 @@ void store_optim_delete(Oid relOid, ItemPointer tupleid, TupleTableSlot *slot)
     MemoryContext old_context;
     DEBUGMSG("[ZL] tx %s storing delete (rel: %d)", activeTx->hash, relOid);
     old_context = MemoryContextSwitchTo(bcdb_tx_context);
-    write_entry = palloc(sizeof(OptimWriteEntry));
+	{
+		BCDBPendingRelation *relation = bcdb_pending_relation(relOid, true);
+		BCDBPendingTuple *pending = bcdb_pending_tuple(relOid, tupleid, HASH_ENTER);
+
+		write_entry = pending->entry;
+		if (write_entry != NULL)
+		{
+			write_entry->operation = CMD_DELETE;
+			write_entry->cid = GetCurrentCommandId(true);
+			MemoryContextSwitchTo(old_context);
+			return;
+		}
+		write_entry = palloc(sizeof(OptimWriteEntry));
+		pending->entry = write_entry;
+		relation->writes++;
+	}
     write_entry->operation = CMD_DELETE;
+	write_entry->indexed_changed = false;
     write_entry->slot = slot ? clone_slot(slot) : NULL;
 	write_entry->old_tid = *tupleid;
 	write_entry->relOid = relOid;
@@ -2552,6 +2830,7 @@ void store_optim_delete_by_key(Oid relOid, int32 keyval, CommandId cid)
     old_context = MemoryContextSwitchTo(bcdb_tx_context);
     write_entry = palloc(sizeof(OptimWriteEntry));
     write_entry->operation = CMD_DELETE;
+	write_entry->indexed_changed = false;
     write_entry->slot = NULL;
     ItemPointerSetInvalid(&write_entry->old_tid);
     write_entry->relOid = relOid;

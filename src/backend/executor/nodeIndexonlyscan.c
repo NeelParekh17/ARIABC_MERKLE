@@ -29,6 +29,7 @@
  *		ExecIndexOnlyScanInitializeWorker attach to DSM info in parallel worker
  */
 #include "postgres.h"
+#include "bcdb/shm_transaction.h"
 
 #include "access/genam.h"
 #include "access/relscan.h"
@@ -158,7 +159,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 * It's worth going through this complexity to avoid needing to lock
 		 * the VM buffer, which could cause significant contention.
 		 */
-		if (!VM_ALL_VISIBLE(scandesc->heapRelation,
+		if (bcdb_pending_writes(RelationGetRelid(scandesc->heapRelation)) ||
+			!VM_ALL_VISIBLE(scandesc->heapRelation,
 							ItemPointerGetBlockNumber(tid),
 							&node->ioss_VMBuffer))
 		{

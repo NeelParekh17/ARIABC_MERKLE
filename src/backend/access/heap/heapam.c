@@ -1148,6 +1148,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	 * the scan has a pointer to it.  Caller should be holding the rel open
 	 * anyway, so this is redundant in all normal scenarios...
 	 */
+	bcdb_check_pending_scan(RelationGetRelid(relation));
 	RelationIncrementReferenceCount(relation);
 
 	/*
@@ -1355,6 +1356,8 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 {
 	HeapScanDesc scan = (HeapScanDesc) sscan;
 
+next_pending_tuple:
+	bcdb_check_pending_scan(RelationGetRelid(sscan->rs_rd));
 	/* Note: no locking manipulations needed */
 
 	HEAPAMSLOTDEBUG_1;			/* heap_getnextslot( info ) */
@@ -1381,6 +1384,8 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 
 	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot,
 							 scan->rs_cbuf);
+	if (!bcdb_overlay_slot(sscan->rs_rd, slot))
+		goto next_pending_tuple;
 	return true;
 }
 
