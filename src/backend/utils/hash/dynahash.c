@@ -374,6 +374,54 @@ shm_hash_clear(HTAB *hashp, long nelem)
 	}
 }
 
+/*
+ * Detach one fixed partition under the caller's partition lock.  Unlike
+ * shm_hash_clear(), leave bucket masks, allocator mutexes and other partitions
+ * untouched.  The caller excludes inserts until EVERY partition is detached
+ * and bcdb_shm_hash_reset_allocations() has rebuilt the allocator lists.
+ */
+void
+bcdb_shm_hash_clear_partition(HTAB *hashp, uint32 partition)
+{
+	HASHHDR    *hctl = hashp->hctl;
+	uint32		bucket;
+
+	Assert(IS_PARTITIONED(hctl));
+	Assert(partition < hctl->num_partitions);
+
+	for (bucket = partition; bucket <= hctl->max_bucket;
+		 bucket += hctl->num_partitions)
+	{
+		HASHSEGMENT segp = hashp->dir[bucket >> hashp->sshift];
+
+		segp[MOD(bucket, hashp->ssize)] = NULL;
+	}
+}
+
+/*
+ * All buckets must be empty, and every old reader must have released its
+ * partition lock.  Readers now find NULL bucket heads and never touch these
+ * allocation arrays.  Inserts remain excluded until the caller publishes
+ * rotation completion.  DT shards are fixed-size, preallocated hash tables.
+ */
+void
+bcdb_shm_hash_reset_allocations(HTAB *hashp)
+{
+	HASHHDR    *hctl = hashp->hctl;
+	int			i;
+
+	Assert(IS_PARTITIONED(hctl));
+	Assert(hashp->isfixed);
+	for (i = 0; i < NUM_FREELISTS; i++)
+	{
+		/* Build a fresh list; never link it back into the old allocation list. */
+		SpinLockAcquire(&hctl->freeList[i].mutex);
+		hctl->freeList[i].freeList = NULL;
+		SpinLockRelease(&hctl->freeList[i].mutex);
+		element_reset(hashp, hctl->freeList[i].cap, i);
+	}
+}
+
 /************************** CREATE ROUTINES **********************/
 
 /*

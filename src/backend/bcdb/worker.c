@@ -79,6 +79,10 @@ struct timeval tx_start_time;
 
 #define BCDB_APPLY_RETRY_MAX 64
 #define BCDB_APPLY_RETRY_BACKOFF_MAX_US 256
+/* Quick apply retries before settling on predecessor commit (settle mode). */
+#define BCDB_APPLY_SETTLE_QUICK_RETRIES 8
+/* Terminal SQLSTATE when validated writes fail after settle (should never happen). */
+#define BCDB_SQLSTATE_POST_PUBLISH_INVARIANT "BC001"
 
 /*
  * Hot-path debug I/O gate. /tmp/timestamps.txt open/fprintf/close per-tx is
@@ -478,6 +482,62 @@ bcdb_dt_light_snapshot_enabled(void)
     return cached == 1;
 }
 
+/*
+ * BCDB_DT_POST_PUBLISH_SETTLE (default on).
+ *
+ * Once a transaction has released its serial turn (published_max advanced),
+ * successors may validate, apply and commit.  Re-executing its business SQL
+ * after that point would take a snapshot that can include those successors'
+ * commits and break the prescribed order.  With settle on, an apply failure
+ * after release never re-executes: the worker waits until every predecessor
+ * has committed, re-applies the same validated deferred writes, and turns a
+ * persistent failure into a deterministic terminal outcome.  0 restores the
+ * historical full-restart branches (kept only for A/B and reproduction).
+ */
+static bool
+bcdb_dt_post_publish_settle_enabled(void)
+{
+	static int	cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_DT_POST_PUBLISH_SETTLE");
+
+		cached = !(v != NULL &&
+				   (strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
+					strcmp(v, "FALSE") == 0 || strcmp(v, "no") == 0 ||
+					strcmp(v, "NO") == 0));
+	}
+	return cached == 1;
+}
+
+/*
+ * BCDB_FAILPOINT_POST_PUBLISH_APPLY=<N>: for transactions with tx_id % N == 0,
+ * every attempt of the FIRST post-publication apply call fails as a unique
+ * violation, so the caller's failure handling runs (historical restart, or
+ * settle).  Later apply calls for the same transaction succeed.  Test-only;
+ * off unless the variable is set.  Called once per apply call.
+ */
+static bool
+bcdb_failpoint_post_publish_apply(BCDBShmXact *tx)
+{
+	static int	modulus = -1;
+	static BCTxID seen_txid = -1;
+
+	if (modulus < 0)
+	{
+		const char *v = getenv("BCDB_FAILPOINT_POST_PUBLISH_APPLY");
+
+		modulus = (v != NULL) ? atoi(v) : 0;
+		if (modulus < 0)
+			modulus = 0;
+	}
+	if (modulus == 0 || tx == NULL || tx->tx_id == seen_txid)
+		return false;
+	seen_txid = tx->tx_id;
+	return tx->tx_id % modulus == 0;
+}
+
 static bool
 bcdb_dt_skip_readonly_gate_enabled(void)
 {
@@ -601,6 +661,21 @@ bool bcdb_ptrace_enabled(void)
     return cached == 1;
 }
 
+/* Fine lock/hash timings add clock reads to every serial-turn probe. */
+bool
+bcdb_ptrace_fine_enabled(void)
+{
+	static int cached = -1;
+
+	if (cached < 0)
+	{
+		const char *v = getenv("BCDB_PHASE_TRACE_FINE");
+
+		cached = (v != NULL && strcmp(v, "1") == 0);
+	}
+	return cached == 1 && bcdb_ptrace_enabled();
+}
+
 uint64
 bcdb_ptrace_now_us(void)
 {
@@ -670,14 +745,22 @@ bcdb_ptrace_open(void)
             "apply_insert_count,apply_update_count,apply_delete_count,"
             "apply_update_tm_being_modified_count,apply_delete_tm_being_modified_count,"
             "apply_update_wait_incident_count,apply_delete_wait_incident_count,"
-            "merkle_update_count,apply_retry_count,publish_hash_clear_count\n");
+			"merkle_update_count,apply_retry_count,publish_hash_clear_count,"
+			"early_conflict_hits,turn_conflict_hits,ring_fallbacks,incremental_txs_checked,"
+			"rs_reservations,ws_reservations,publish_only_reservations,"
+			"rs_distinct,ws_distinct,publish_only_distinct,rs_ws_overlap,"
+			"conflict_turn_checks,early_rotation_count,early_rotation_skipped_count,"
+			"post_publish_settles,post_publish_terminal_unique,post_publish_invariant\n");
 }
 
 static inline uint64
 bcdb_ptrace_delta_us(struct timespec *start, struct timespec *end)
 {
-    return ((uint64)(end->tv_sec - start->tv_sec) * 1000000ULL) +
-           ((uint64)(end->tv_nsec - start->tv_nsec) / 1000ULL);
+	int64 delta_ns = ((int64) end->tv_sec - (int64) start->tv_sec) *
+		INT64CONST(1000000000) + ((int64) end->tv_nsec - (int64) start->tv_nsec);
+
+	Assert(delta_ns >= 0);
+	return delta_ns > 0 ? (uint64) (delta_ns / 1000) : 0;
 }
 
 #define PTRACE_BEGIN(phase)                                                    \
@@ -727,7 +810,7 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             "%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
             "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-            "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+			"%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu",
             tx_id, restarts,
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PARSE_PLAN],
             (unsigned long long)bcdb_ptrace_phase_us[BCDB_PHASE_PORTAL_RUN],
@@ -774,6 +857,11 @@ bcdb_ptrace_emit(int tx_id, int restarts)
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT],
             (unsigned long long)bcdb_ptrace_counter[BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT]);
+	for (int i = BCDB_PTRACE_COUNTER_EARLY_CONFLICT_HITS;
+		 i < BCDB_PTRACE_COUNTER_COUNT; i++)
+		fprintf(bcdb_ptrace_fp, ",%llu",
+				(unsigned long long)bcdb_ptrace_counter[i]);
+	fputc('\n', bcdb_ptrace_fp);
 }
 MemoryContext bcdb_tx_context;
 MemoryContext bcdb_worker_context;
@@ -879,6 +967,9 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 	int retries = 0;
 	int backoff_us = 1;
 	int attempt = 1;
+	const bool settle = bcdb_dt_post_publish_settle_enabled();
+	const int retry_max = settle ? BCDB_APPLY_SETTLE_QUICK_RETRIES : BCDB_APPLY_RETRY_MAX;
+	const bool failpoint = bcdb_failpoint_post_publish_apply(tx);
 
 	bcdb_emit_ledger_boundary("ledger_apply_stage_begin");
 
@@ -906,7 +997,14 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 				 (unsigned) (tx ? tx->raft_item_ordinal : 0),
 				 attempt,
 				 GetCurrentTransactionNestLevel());
-			apply_ok = apply_optim_writes();
+			if (failpoint)
+			{
+				/* Test failpoint: behave exactly like a 23505 from apply. */
+				bcdb_set_apply_unique_violation(true);
+				apply_ok = false;
+			}
+			else
+				apply_ok = apply_optim_writes();
 			apply_failed_unique = (!apply_ok && bcdb_apply_had_unique_violation());
 			if (apply_ok)
 				ReleaseCurrentSubTransaction();
@@ -978,6 +1076,31 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 				apply_ok = false;
 				apply_failed_unique = false;
 				FreeErrorData(edata);
+				if (settle)
+				{
+					/* Same stored writes, same error: retrying cannot help. */
+					if (num_apply_retries)
+						*num_apply_retries = retries;
+					if (nonretryable_error)
+						*nonretryable_error = true;
+					return false;
+				}
+			}
+			else if (settle && state_str &&
+					 (strcmp(state_str, "40001") == 0 ||
+					  strcmp(state_str, "40P01") == 0 ||
+					  strcmp(state_str, "55P03") == 0))
+			{
+				/*
+				 * Lock or serialization failure while applying validated writes:
+				 * the subtransaction released its locks, so retry/settle the same
+				 * writes instead of letting a timing-dependent error escape.
+				 */
+				BCDB_FLOW_LOG("[BCDB_FLOW] apply_transient_error pid=%d txid=%d sqlstate=%s",
+							  getpid(), tx ? (int)tx->tx_id : -1, state_str);
+				apply_ok = false;
+				apply_failed_unique = false;
+				FreeErrorData(edata);
 			}
 			else
 			{
@@ -1005,7 +1128,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 
 		if (!attempt_end_logged)
 		{
-			int will_retry = (!apply_ok && (retries < BCDB_APPLY_RETRY_MAX));
+			int will_retry = (!apply_ok && (retries < retry_max));
 			bcdb_emit_apply_attempt_end(
 				(unsigned long long) (tx ? tx->raft_log_index : 0),
 				tx ? (unsigned) tx->raft_item_ordinal : 0,
@@ -1022,7 +1145,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 			return true;
 		}
 
-		if (apply_failed_unique && tx && tx->sql && strstr(tx->sql, "_proc"))
+		if (!settle && apply_failed_unique && tx && tx->sql && strstr(tx->sql, "_proc"))
 		{
 			if (num_apply_retries)
 				*num_apply_retries = retries;
@@ -1037,7 +1160,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 		}
 
 		retries++;
-		if (retries > BCDB_APPLY_RETRY_MAX)
+		if (retries > retry_max)
 		{
 			if (num_apply_retries)
 				*num_apply_retries = retries;
@@ -1293,8 +1416,8 @@ bcdb_wait_for_dt_parse_barrier(BCDBShmXact *tx, bool *barrier_done)
         *barrier_done = true;
 }
 
-static inline void
-bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
+static inline bool
+bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block, bool early_validate)
 {
     /*
      * Lever D publish gate: wait until `published_max_tx_id + 1 >= tx->tx_id`.
@@ -1320,6 +1443,8 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
     bool gate_debug = bcdb_gate_debug_enabled();
 	const bool collect_gate_stats = unlikely(bcdb_gate_telemetry_enabled);
 	bool active_wait_registered = false;
+	bool conflict = false;
+	const bool lookahead = bcdb_dt_gate_lookahead_enabled();
 
     if (gate_debug)
         next_log_us = wait_start_us + 1000000;
@@ -1363,11 +1488,22 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 
     for (;;)
     {
-        if ((get_published_max_txid(tx) + 1) >= tx->tx_id)
+		BCTxID published = get_published_max_txid(tx);
+
+		if ((published + 1) >= tx->tx_id)
 		{
 			if (active_wait_registered)
 				gate_stats_finish_wait();
             break;
+		}
+
+		if (early_validate && bcdb_dt_validate_published(published, false))
+		{
+			conflict = true;
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_EARLY_CONFLICT_HITS, 1);
+			if (active_wait_registered)
+				gate_stats_finish_wait();
+			break;
 		}
 
         if (fresh_guard_start_us != 0)
@@ -1448,7 +1584,29 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 
         CHECK_FOR_INTERRUPTS();
 
-		if (spins < 1024)
+		if (lookahead)
+		{
+			if (get_published_max_txid(tx) + 2 >= tx->tx_id)
+			{
+				spins++;
+				pg_spin_delay();
+			}
+			else
+			{
+				ConditionVariable *cv = &block->done_conds[tx->tx_id % MAX_TX_PER_BLOCK];
+
+				ConditionVariablePrepareToSleep(cv);
+				if (get_published_max_txid(tx) + 2 < tx->tx_id)
+				{
+					if (collect_gate_stats)
+						SHARD_INC(serial_gate_cv_sleep_count);
+					/* PostgreSQL CV timeouts are integer milliseconds. */
+					ConditionVariableTimedSleep(cv, 1, WAIT_EVENT_BLOCK_COMMIT);
+				}
+				ConditionVariableCancelSleep();
+			}
+		}
+		else if (spins < 1024)
 		{
 			/* Hot neighbour finishing any moment — spin without syscall. */
 			spins++;
@@ -1518,6 +1676,7 @@ bcdb_wait_for_serial_slot(BCDBShmXact *tx, BCBlock *block)
 		SHARD_UPDATE_MAX(serial_gate_wait_max_us, total_us);
 		SHARD_ADD(serial_gate_spin_iterations, (uint64)spins);
 	}
+	return conflict;
 }
 
 /*
@@ -2537,6 +2696,8 @@ static bool parse_recovery_query(const char *sql, char *snapId, size_t snapId_sz
 void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 {
     BCBlock *block = NULL;
+	/* The shared tx slot can be reused immediately after delete_tx(). */
+	const int trace_tx_id = tx ? tx->tx_id : -1;
     Snapshot snapshot;
 
     int latest_tx_id = 0;
@@ -2555,6 +2716,9 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	bool apply_idempotent_noop = false;
     bool published_max_advanced = false;
     bool parse_barrier_done = false;
+	const bool early_validate = bcdb_dt_early_validate_enabled() &&
+		bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED;
+	bool early_conflict = false;
 	bool in_business_sql_execution = false;
 	bool optimistic_worker_active = false;
     BCTxID retry_wait_committed_txid = -1;
@@ -2576,6 +2740,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     LIST_INIT(&ws_table_record);
 	LIST_INIT(&ws_table_publish_record);
     LIST_INIT(&rs_table_record);
+	bcdb_dt_tag_set_reset();
 
     tv1.tv_sec = 0;
     tv2.tv_sec = 0;
@@ -2614,7 +2779,6 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             !bcdb_block_return_actual_results_enabled() &&
             bcdb_query_is_select(tx->sql))
         {
-            BCTxID fast_tx_id = tx->tx_id;
             int mem_txid;
             BCBlock *committed_block;
 
@@ -2664,7 +2828,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             delete_tx(tx);
             MemoryContextReset(bcdb_tx_context);
             PTRACE_END(BCDB_PHASE_TOTAL);
-            bcdb_ptrace_emit(fast_tx_id, 0);
+			bcdb_ptrace_emit(trace_tx_id, 0);
             return;
         }
 
@@ -2685,6 +2849,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 LIST_INIT(&ws_table_record);
 				LIST_INIT(&ws_table_publish_record);
                 LIST_INIT(&rs_table_record);
+				bcdb_dt_tag_set_reset();
 
                 if (init)
                 {
@@ -2743,7 +2908,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                  * refresh this baseline, otherwise conflict_checkDT will repeatedly
                  * flag already-committed txs as conflicts and can livelock.
                  */
-                activeTx->tx_id_committed = get_last_committed_txid(tx);
+		activeTx->tx_id_committed = bcdb_dt_snapshot_baseline(tx);
                 init = false;
                 if (bcdb_dt_light_snapshot_enabled() && !bcdb_dt_conflict_tracking)
                     XactIsoLevel = XACT_READ_COMMITTED;
@@ -2998,7 +3163,13 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				}
 				else
 				{
+					/*
+					 * The read-only skip releases the turn before validation, so a
+					 * later conflict would re-execute after release; settle mode
+					 * therefore ignores it.
+					 */
 					if (bcdb_dt_skip_readonly_gate_enabled() &&
+						!bcdb_dt_post_publish_settle_enabled() &&
 						bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED &&
 						LIST_EMPTY(&ws_table_record))
 					{
@@ -3038,12 +3209,16 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                  * This avoids ConditionVariable wait-list corruption observed
                  * under concurrent direct "s <txid> ..." execution.
                  */
+				early_conflict = false;
+				if (early_validate && apply_outcome != BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
+					bcdb_dt_prepare_validation();
                 PTRACE_BEGIN(BCDB_PHASE_GATE);
                 bcdb_wait_for_dt_parse_barrier(tx, &parse_barrier_done);
                 if (bcdb_serial_gate_source == BCDB_GATE_SRC_LAST_COMMITTED)
                     bcdb_wait_for_prev_committed(tx); /* paper-style: gate on full predecessor commit */
                 else
-                    bcdb_wait_for_serial_slot(tx, block); /* Lever D: gate on published_max */
+					early_conflict = bcdb_wait_for_serial_slot(tx, block,
+						early_validate && apply_outcome != BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR);
                 PTRACE_END(BCDB_PHASE_GATE);
 				strlcpy(tx_result, tx->select_result, sizeof(tx_result));
 
@@ -3054,8 +3229,17 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 PTRACE_BEGIN(BCDB_PHASE_CONFLICT);
 				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
 					rw_conflicts = 0;
+				else if (early_conflict)
+					rw_conflicts = 1;
 				else
-					rw_conflicts = conflict_checkDT();
+				{
+					bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_CONFLICT_TURN_CHECKS, 1);
+					rw_conflicts = early_validate ?
+						bcdb_dt_validate_published(get_published_max_txid(tx), true) :
+						conflict_checkDT();
+					if (rw_conflicts == 1)
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_TURN_CONFLICT_HITS, 1);
+				}
                 PTRACE_END(BCDB_PHASE_CONFLICT);
                 // conflict_check();
             }
@@ -3082,6 +3266,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                    getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id);
 #endif
             publish_ws_tableDT(tx->tx_id); // HASHTAB_SWITCH_THRESHOLD
+			bcdb_dt_snapshot_validated(tx);
             BCDB_FLOW_LOG("[BCDB_FLOW] publish_ws_done pid=%d txid=%d xid=%u last_committed=%d published_max_before=%d",
                           getpid(),
                           tx ? (int)tx->tx_id : -1,
@@ -3104,6 +3289,9 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 published_max_advanced = true;
             }
 
+			/* The turn is released; a boundary publisher waits for this clear. */
+			bcdb_dt_finish_early_rotation(tx);
+
             PTRACE_BEGIN(BCDB_PHASE_APPLY);
             apply_nonretryable = false;
             apply_terminal_noop = false;
@@ -3114,7 +3302,92 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             {
                 PTRACE_END(BCDB_PHASE_APPLY);
 
-                if (apply_nonretryable)
+				if (bcdb_dt_post_publish_settle_enabled() &&
+					bcdb_serial_gate_source != BCDB_GATE_SRC_LAST_COMMITTED)
+				{
+					/*
+					 * Post-publication settle.  Successors already passed the
+					 * gate, so this transaction must not re-execute its business
+					 * SQL.  Successors cannot write any key this transaction
+					 * published (their check sees our tag and waits for our
+					 * commit), and write tags cover every unique index, so once
+					 * all predecessors have committed the outcome of re-applying
+					 * the same deferred writes depends only on the prefix state:
+					 * it is the same on every replica.
+					 */
+					bool		settled_ok = false;
+					bool		unique_failure = bcdb_apply_had_unique_violation();
+
+					bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_POST_PUBLISH_SETTLES, 1);
+					BCDB_FLOW_LOG("[BCDB_FLOW] apply_post_publish_settle pid=%d txid=%d retries=%d unique=%d last_committed=%d",
+								  getpid(), (int)tx->tx_id, apply_retries, (int)unique_failure,
+								  (int)get_last_committed_txid(tx));
+					if (!apply_nonretryable || unique_failure)
+					{
+						int			settled_apply_retries = 0;
+						bool		settled_nonretryable = false;
+
+						if (get_last_committed_txid(tx) < (tx->tx_id - 1))
+							bcdb_wait_for_prev_committed(tx);
+						PTRACE_BEGIN(BCDB_PHASE_APPLY);
+						settled_ok = bcdb_apply_optim_writes_with_retry(tx,
+																		&settled_apply_retries,
+																		&settled_nonretryable,
+																		det_err_sqlstate, det_err_msg);
+						PTRACE_END(BCDB_PHASE_APPLY);
+						apply_retries += settled_apply_retries;
+						apply_nonretryable = settled_nonretryable;
+						unique_failure = !settled_ok && bcdb_apply_had_unique_violation();
+					}
+
+					if (settled_ok)
+						apply_nonretryable = false;
+					else if (unique_failure &&
+							 bcdb_sql_is_insert_on_conflict_do_nothing(tx->sql))
+					{
+						apply_terminal_noop = true;
+						apply_idempotent_noop = true;
+					}
+					else if (unique_failure)
+					{
+						/* The statement would raise 23505 at its serial position. */
+						strlcpy(det_err_sqlstate, "23505", sizeof(det_err_sqlstate));
+						snprintf(det_err_msg, sizeof(det_err_msg),
+								 "format_version=1\nsqlstate=23505\nerror_class=unique_violation\n");
+						apply_outcome = BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR;
+						apply_terminal_noop = true;
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_POST_PUBLISH_TERMINAL_UNIQUE, 1);
+					}
+					else if (apply_nonretryable &&
+							 is_whitelisted_deterministic(det_err_sqlstate))
+					{
+						apply_outcome = BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR;
+						apply_terminal_noop = true;
+					}
+					else
+					{
+						/*
+						 * Validated writes failed although every predecessor has
+						 * committed: a protocol invariant broke.  Fail loudly with
+						 * a terminal error instead of re-executing out of order.
+						 */
+						ereport(WARNING,
+								(errmsg("BCDB_INVARIANT_POST_PUBLISH_APPLY txid=%d retries=%d sqlstate=%s last_committed=%d published_max=%d",
+										(int)tx->tx_id, apply_retries,
+										det_err_sqlstate[0] ? det_err_sqlstate : "none",
+										(int)get_last_committed_txid(tx),
+										(int)get_published_max_txid(tx))));
+						bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_POST_PUBLISH_INVARIANT, 1);
+						strlcpy(det_err_sqlstate, BCDB_SQLSTATE_POST_PUBLISH_INVARIANT,
+								sizeof(det_err_sqlstate));
+						snprintf(det_err_msg, sizeof(det_err_msg),
+								 "format_version=1\nsqlstate=%s\nerror_class=post_publish_apply_invariant\n",
+								 BCDB_SQLSTATE_POST_PUBLISH_INVARIANT);
+						apply_outcome = BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR;
+						apply_terminal_noop = true;
+					}
+				}
+				else if (apply_nonretryable)
                 {
                     /*
                      * Lever D advances published_max before PostgreSQL commit, so a
@@ -3525,7 +3798,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             MemoryContextReset(bcdb_tx_context);
             PTRACE_END(BCDB_PHASE_FINISH);
             PTRACE_END(BCDB_PHASE_TOTAL);
-            bcdb_ptrace_emit(tx->tx_id, num_restarts);
+			bcdb_ptrace_emit(trace_tx_id, num_restarts);
             break;
         }
     }
@@ -3536,6 +3809,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 		char      *message_copy = NULL;
 
         ConditionVariableCancelSleep();
+		bcdb_dt_snapshot_validated(tx);
+		bcdb_dt_cancel_early_rotation(tx);
 		if (optimistic_worker_active)
 		{
 			bcdb_optimistic_worker_end();
@@ -3593,7 +3868,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 				bcdb_wait_for_prev_committed(tx);
 			else
 			{
-				bcdb_wait_for_serial_slot(tx, block);
+				bcdb_wait_for_serial_slot(tx, block, false);
 				if (!published_max_advanced)
 					mark_published_ready_txid(tx);
 				/* Finish in serial order even though this item has no writes. */
@@ -3605,7 +3880,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 			bcdb_finish_terminal_item(tx, abort_result, false, false, InvalidTransactionId);
 			ereport(LOG, (errmsg("[BCDB_USER_ABORT] txid=%d sqlstate=TP001 rollback_complete=1",
 								(int) tx->tx_id)));
-			bcdb_ptrace_emit(tx->tx_id, num_restarts);
+			bcdb_ptrace_emit(trace_tx_id, num_restarts);
 			delete_tx(tx);
 			activeTx = NULL;
 			MemoryContextReset(bcdb_tx_context);
@@ -3793,6 +4068,7 @@ void bcdb_worker_process_tx(BCDBShmXact *tx)
     LIST_INIT(&ws_table_record);
 	LIST_INIT(&ws_table_publish_record);
     LIST_INIT(&rs_table_record);
+	bcdb_dt_tag_set_reset();
 
     PG_TRY();
     {

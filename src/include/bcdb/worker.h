@@ -66,10 +66,28 @@ typedef enum
     BCDB_PTRACE_COUNTER_MERKLE_UPDATE_COUNT,
     BCDB_PTRACE_COUNTER_APPLY_RETRY_COUNT,
     BCDB_PTRACE_COUNTER_PUBLISH_HASH_CLEAR_COUNT,
+	BCDB_PTRACE_COUNTER_EARLY_CONFLICT_HITS,
+	BCDB_PTRACE_COUNTER_TURN_CONFLICT_HITS,
+	BCDB_PTRACE_COUNTER_RING_FALLBACKS,
+	BCDB_PTRACE_COUNTER_INCREMENTAL_TXS_CHECKED,
+	BCDB_PTRACE_COUNTER_RS_RESERVATIONS,
+	BCDB_PTRACE_COUNTER_WS_RESERVATIONS,
+	BCDB_PTRACE_COUNTER_PUBLISH_ONLY_RESERVATIONS,
+	BCDB_PTRACE_COUNTER_RS_DISTINCT,
+	BCDB_PTRACE_COUNTER_WS_DISTINCT,
+	BCDB_PTRACE_COUNTER_PUBLISH_ONLY_DISTINCT,
+	BCDB_PTRACE_COUNTER_RS_WS_OVERLAP,
+	BCDB_PTRACE_COUNTER_CONFLICT_TURN_CHECKS,
+	BCDB_PTRACE_COUNTER_EARLY_ROTATION_COUNT,
+	BCDB_PTRACE_COUNTER_EARLY_ROTATION_SKIPPED_COUNT,
+	BCDB_PTRACE_COUNTER_POST_PUBLISH_SETTLES,
+	BCDB_PTRACE_COUNTER_POST_PUBLISH_TERMINAL_UNIQUE,
+	BCDB_PTRACE_COUNTER_POST_PUBLISH_INVARIANT,
     BCDB_PTRACE_COUNTER_COUNT
 } bcdb_ptrace_counter_id;
 
 bool bcdb_ptrace_enabled(void);
+bool bcdb_ptrace_fine_enabled(void);
 uint64 bcdb_ptrace_now_us(void);
 void bcdb_ptrace_add_us(bcdb_ptrace_metric_id metric, uint64 delta_us);
 void bcdb_ptrace_inc_counter(bcdb_ptrace_counter_id counter, uint64 delta);
@@ -81,6 +99,14 @@ bcdb_ptrace_timer_start(void)
     if (!bcdb_ptrace_enabled())
         return 0;
     return bcdb_ptrace_now_us();
+}
+
+static inline uint64
+bcdb_ptrace_fine_timer_start(void)
+{
+	if (!bcdb_ptrace_fine_enabled())
+		return 0;
+	return bcdb_ptrace_now_us();
 }
 
 static inline void

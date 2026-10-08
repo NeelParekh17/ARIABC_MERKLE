@@ -986,13 +986,21 @@ bcdb_published_ready_slot_for_txid(BCTxID tx_id)
 static inline void
 bcdb_signal_serial_successor(BCBlock *blk, BCTxID published_txid)
 {
-    if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR)
+	if (bcdb_serial_gate_mode == BCDB_SERIAL_GATE_MODE_CONDVAR ||
+		bcdb_dt_gate_lookahead_enabled())
     {
         int wake_slot = (int) ((published_txid + 1) % MAX_TX_PER_BLOCK);
 
         if (wake_slot < 0)
             wake_slot += MAX_TX_PER_BLOCK;
         ConditionVariableSignal(&blk->done_conds[wake_slot]);
+		if (bcdb_dt_gate_lookahead_enabled())
+		{
+			wake_slot = (int) ((published_txid + 2) % MAX_TX_PER_BLOCK);
+			if (wake_slot < 0)
+				wake_slot += MAX_TX_PER_BLOCK;
+			ConditionVariableSignal(&blk->done_conds[wake_slot]);
+		}
     }
 }
 
