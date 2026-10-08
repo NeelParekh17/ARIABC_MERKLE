@@ -1,12 +1,13 @@
 # Det-mode optimisation (2026-10-08)
 
-The measured trade-off is workload-dependent: **single-node contended TPC-C v2 gains about +5% to +21%** for early validation plus dedup in the accepted fast-disk A/B, while **replicated conflict-free YCSB-A loses about 1.6% (W8) to 3.9% (W16)** against `noev` in the same-day matched cluster A/B (exact deltas −1.65% / −3.92%). Disabling lookahead recovers about half the W16 deficit on the 16-core replicas; this estimates its throughput cost, not CPU time. Accepted merged-default TPC-C state checks and completed replicated campaigns held correctness: **0 divergence, 0 permanent failures and equal replica roots where checked**. Recovery C remains unaccepted: its all-three audit never finalises, terminal counters and Phase 8 roots are unavailable, and settle-off unsafe reproducer controls remain unequal as documented below.
+The measured trade-off is workload-dependent: **single-node contended TPC-C v2 gains about +5% to +21%** for early validation plus dedup in the accepted fast-disk A/B, while **replicated conflict-free YCSB-A loses about 1.6% (W8) to 3.9% (W16)** against `noev` in the same-day matched cluster A/B (exact deltas −1.65% / −3.92%). Disabling lookahead recovers about half the W16 deficit on the 16-core replicas; this estimates its throughput cost, not CPU time. Accepted merged-default TPC-C state checks and completed replicated campaigns held correctness: **0 divergence, 0 permanent failures and equal replica roots where checked**. Recovery C failed before the gateway fix `025c9be5` (all-three audit never finalised, 0/5) and **passes after it (2/2: audit 160,000/160,000, Phase 8 PASS on all replicas)**; its throughput stays below the published run because repair from donor user4 takes ~55 s. Settle-off unsafe reproducer controls remain unequal as documented below.
 
 **Next levers:**
 
 - Spin for lookahead only when next in line, with a bounded budget.
 - Make the 1 ms timed revalidation adaptive or add backoff.
-- Retry the gateway audit-thread wait during recovery; its exit-on-timeout path is a pre-existing bug.
+- ~~Retry the gateway audit-thread wait during recovery~~ — fixed in `025c9be5`, validated below.
+- Explain why repair from donor user4 takes ~55 s (published donor admin123: 59 ms repair).
 
 Early validation moves conflict detection and resimulation out of the ordered publication turn. Exact tag deduplication reduces redundant probes; trace repairs make timing and transaction identity usable. The post-publication **settle** fix freezes business execution after handoff and repairs unique-index write coverage. These changes were merged into main at `19e8acb2`; commit-set sampling was rejected, and early rotation remains off by default.
 
@@ -335,6 +336,19 @@ Each C has an observed live repair PASS, client completions reach 160,000, and a
 
 Default C fails **2/2** and noev C fails **2/2** in the canonical matrix, plus report 2's earlier default C failure. Thus early-validation/dedup/lookahead switch-off does not resolve it. **Settle was never disabled in C**, so the experiment does not rule out its effect on recovery duration. Repair takes roughly **54 seconds with donor user4** (53,763–55,328 ms in the canonical trials), versus **59 ms with donor admin123** in the published C (total recovery 10,824 ms). The donor difference and repair slowdown remain **unexplained**; these observations do not establish that every merged change is exonerated or that recovery is accepted.
 
+
+### Gateway audit-consumer fix (`025c9be5`) — recovery C revalidated
+
+The async all-three audit consumer exited whenever `wait_next_all3_ready()` returned false, which also happens when nothing becomes ready within one 30 s wait window. During a long repair that is the normal state, so the consumer quit and `drain_async_all3_audit` waited forever. The consumer now exits only on an explicit stop (idle windows are counted as `audit_idle_waits`), and drain fails the run with `async_all3_audit_consumer_exited` if the consumer ever dies. Source: [CLUSTER_REPORT_4](evidence/cluster/CLUSTER_REPORT_4.md), [CSV](data/raw/cluster/cluster_results_4.csv).
+
+| Run (canonical path, merged det defaults) | TPS majority-visible | Empty 100 ms buckets | All-3 audit | audit_idle_waits | Phase 8 admin123 / user4 / utkarsh |
+|---|---:|---:|---|---:|---|
+| Recovery C, trial 1 | 7,802.21 | 0 | finalised, 160,000/160,000 | 1 | PASS / PASS / PASS |
+| Recovery C, trial 2 | 4,893.27 | 11 | finalised, 160,000/160,000 | 1 | PASS / PASS / PASS |
+| Recovery A | 8,774.82 | 0 | finalised, 160,000/160,000 | 0 | PASS / PASS / PASS |
+| YCSB-A θ0, W16 (normal run) | 13,679.89 | 0 | finalised, 20,000/20,000 | 0 | PASS / PASS / PASS |
+
+Both C repairs used donor user4 (repair_ms 55,182 / 54,332; published: donor admin123, 59 ms), which keeps C throughput below the published 8,693 TPS; the fix makes the run complete and verifiable, it does not speed up repair.
 
 ## Risks / not tested
 
