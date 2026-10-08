@@ -4430,7 +4430,8 @@ void pg_executor::worker_loop() {
         if (kafka_enabled_ &&
             should_publish_kafka_result(node_id_) &&
             db_opt_.raft_apply_ledger_mode != "safe") {
-            const std::string fail_reason = (is_error || confirmed.terminal_state == "ERROR" || result.rfind("ERROR", 0) == 0) ? result : "";
+            const std::string fail_reason = (!is_finalized_error_result(result) &&
+                 (is_error || confirmed.terminal_state == "ERROR" || result.rfind("ERROR", 0) == 0)) ? result : "";
             if (t.dispatch_seq == 0) {
                 if (fail_reason.empty()) {
                     notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
@@ -4496,7 +4497,8 @@ void pg_executor::worker_loop() {
             const std::string msg =
                 t.req_id + "  " + std::to_string(node_id_) + "  " + result;
             std::cout << msg << std::endl;
-            const std::string fail_reason = (is_error || confirmed.terminal_state == "ERROR" || result.rfind("ERROR", 0) == 0) ? result : "";
+            const std::string fail_reason = (!is_finalized_error_result(result) &&
+                 (is_error || confirmed.terminal_state == "ERROR" || result.rfind("ERROR", 0) == 0)) ? result : "";
             if (t.dispatch_seq == 0) {
                 if (fail_reason.empty()) {
                     notify_task_applied(t.raft_log_idx, t.raft_item_ordinal);
@@ -4797,7 +4799,8 @@ void pg_executor::event_loop() {
         const std::string eff_terminal_state =
             terminal_state.empty() ? (is_error ? "ERROR" : "OK") : terminal_state;
         const std::string fail_reason =
-            (is_error || eff_terminal_state == "ERROR" || out.rfind("ERROR", 0) == 0) ? out : "";
+            (!is_finalized_error_result(out) &&
+             (is_error || eff_terminal_state == "ERROR" || out.rfind("ERROR", 0) == 0)) ? out : "";
         if (kafka_enabled_) {
             if (should_publish_kafka_result(node_id_)) {
                 if (async_kafka_publisher_active()) {
@@ -6006,6 +6009,9 @@ void pg_executor::event_loop() {
                     }
                     if (!retry) {
                         out = err_msg;
+                        const char* detail = last ? PQresultErrorField(last, PG_DIAG_MESSAGE_DETAIL) : nullptr;
+                        if (detail && strstr(detail, "bcdb_finalized=1") != nullptr)
+                            out += ariabc_pg::finalized_error_suffix();
                         if (is_expected_user_abort_result(out)) is_error = false;
                     }
                 }

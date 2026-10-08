@@ -84,6 +84,8 @@ struct timeval tx_start_time;
 #define BCDB_APPLY_SETTLE_QUICK_RETRIES 8
 /* Terminal SQLSTATE when validated writes fail after settle (should never happen). */
 #define BCDB_SQLSTATE_POST_PUBLISH_INVARIANT "BC001"
+/* errdetail marking an ERROR whose item is already finalized in log order. */
+#define BCDB_FINALIZED_ERROR_DETAIL "bcdb_finalized=1"
 
 /*
  * Hot-path debug I/O gate. /tmp/timestamps.txt open/fprintf/close per-tx is
@@ -2736,6 +2738,8 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 	char det_err_sqlstate[6] = "XX000";
 	char det_err_msg[512] = "";
 	int mem_txid = 0;
+	volatile bool send_terminal_error = false;
+	char terminal_err_sqlstate[6] = "XX000";
 
 	const bool dedicated_worker = is_bcdb_worker;
 
@@ -3827,7 +3831,18 @@ opf_retry:
                    getpid(), __FILE__, __FUNCTION__,
                    __LINE__, get_last_committed_txid(tx), tx->tx_id);
 #endif
-            EndCommand(completionTag, dest);
+			/*
+			 * Serial execution raises a terminal deterministic error; the inline
+			 * "s <txid>" client gets it once the item is finalized (after the
+			 * PG_TRY, so the catch path never sees the deleted tx).
+			 */
+			if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR && !dedicated_worker)
+			{
+				strlcpy(terminal_err_sqlstate, det_err_sqlstate, sizeof(terminal_err_sqlstate));
+				send_terminal_error = true;
+			}
+			else
+				EndCommand(completionTag, dest);
             bcdb_cleanup_optim_write_list(activeTx, true);
             delete_tx(tx);
 			activeTx = NULL;
@@ -3988,6 +4003,7 @@ opf_retry:
          * AbortCurrentTransaction() which properly cleans up all resources. */
 		bool ledger_enabled = (tx != NULL && tx->raft_ledger_enabled);
 		bool handled_ledger_nonterminal_failure = false;
+		bool finalized_error_item = false;
 
 		if (condSig == 0 && tx != NULL)
 		{
@@ -4041,6 +4057,7 @@ opf_retry:
 				if (block == NULL)
 					block = bcdb_get_block1();
 				bcdb_publish_error_result(block, tx, sqlstate);
+				finalized_error_item = true;
 				if (!published_max_advanced)
 				{
 					mark_published_ready_txid(tx);
@@ -4097,7 +4114,19 @@ opf_retry:
 			if (ledger_enabled && handled_ledger_nonterminal_failure)
 				FreeErrorData(edata);
 			else
+			{
+				/* The item is finalized in log order; executors must not report a failure. */
+				if (finalized_error_item)
+				{
+					MemoryContext ectx = MemoryContextSwitchTo(GetMemoryChunkContext(edata));
+
+					edata->detail = edata->detail ?
+						psprintf("%s\n%s", edata->detail, BCDB_FINALIZED_ERROR_DETAIL) :
+						pstrdup(BCDB_FINALIZED_ERROR_DETAIL);
+					MemoryContextSwitchTo(ectx);
+				}
 				ReThrowError(edata);
+			}
 		}
 		else
 		{
@@ -4110,6 +4139,15 @@ opf_retry:
 		}
 	}
 	PG_END_TRY();
+
+	if (send_terminal_error)
+		ereport(ERROR,
+				(errcode(MAKE_SQLSTATE(terminal_err_sqlstate[0], terminal_err_sqlstate[1],
+									   terminal_err_sqlstate[2], terminal_err_sqlstate[3],
+									   terminal_err_sqlstate[4])),
+				 errmsg("deterministic terminal error %s at its log position",
+						terminal_err_sqlstate),
+				 errdetail(BCDB_FINALIZED_ERROR_DETAIL)));
 }
 
 void bcdb_worker_process_tx(BCDBShmXact *tx)

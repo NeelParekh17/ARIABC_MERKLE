@@ -13,6 +13,17 @@ inline bool is_expected_user_abort_result(const std::string& result) {
            result == std::string("SELECT 1 ") + expected_user_abort_result();
 }
 
+// The backend marks an ERROR whose ordered item it already finalized (errdetail
+// "bcdb_finalized=1"). Such a result is the item's deterministic terminal
+// outcome: it completes the item instead of failing it.
+inline const char* finalized_error_suffix() { return " finalized=1"; }
+
+inline bool is_finalized_error_result(const std::string& result) {
+    const std::string suffix = finalized_error_suffix();
+    return result.rfind("ERROR", 0) == 0 && result.size() >= suffix.size() &&
+           result.compare(result.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 // Local index OIDs are diagnostic identifiers, not deterministic SQL outcomes.
 // Retain the error class in the voted result; the original message stays in the
 // PostgreSQL/server log. The reserved business abort completes successfully.
