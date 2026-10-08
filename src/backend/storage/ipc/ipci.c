@@ -153,6 +153,7 @@ CreateSharedMemoryAndSemaphores(void)
 		size = add_size(size, AsyncShmemSize());
 		size = add_size(size, block_pool_size());
 		size = add_size(size, tx_pool_size());
+		size = add_size(size, bcdb_dsa_shm_size());
 #ifdef EXEC_BACKEND
 		size = add_size(size, ShmemBackendArraySize());
 #endif
@@ -285,6 +286,7 @@ CreateSharedMemoryAndSemaphores(void)
 	/* Initialize dynamic shared memory facilities. */
 	if (!IsUnderPostmaster)
 		dsm_postmaster_startup(shim);
+	create_bcdb_dsa();
 
 	/*
 	 * Now give loadable modules a chance to set up their shmem allocations

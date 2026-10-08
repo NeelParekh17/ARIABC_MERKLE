@@ -592,6 +592,8 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     bool found;
     char key[TX_HASH_SIZE];
     Size hash_len;
+	Size sql_len = strlen(sql);
+	dsa_pointer sql_long = InvalidDsaPointer;
 
     MemSet(&info, 0, sizeof(info));
     Assert(tx_pool != NULL);
@@ -613,6 +615,12 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
      */
     MemSet(key, 0, sizeof(key));
     memcpy(key, hash, hash_len);
+	if (sql_len >= sizeof(tx->sql))
+	{
+		attach_bcdb_dsa();
+		sql_long = dsa_allocate(bcdb_dsa_area, sql_len + 1);
+		memcpy(dsa_get_address(bcdb_dsa_area, sql_long), sql, sql_len + 1);
+	}
     SpinLockAcquire(tx_pool_lock);
     tx = hash_search(tx_pool, key, HASH_ENTER, &found);
     if (found)
@@ -623,6 +631,8 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
         ereport(DEBUG3,
                 (errmsg("[ZL] transaction (%s) exists", hash)));
         SpinLockRelease(tx_pool_lock);
+		if (DsaPointerIsValid(sql_long))
+			dsa_free(bcdb_dsa_area, sql_long);
         return NULL;
     }
 	__atomic_store_n(&tx->dt_snapshot_baseline, PG_INT32_MAX, __ATOMIC_RELEASE);
@@ -631,7 +641,11 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
 	LWLockAcquire(&tx->lock, LW_EXCLUSIVE);
 
     /* hash_search() already copied key bytes into tx->hash */
-    strcpy(tx->sql, sql);
+	tx->sql_long = sql_long;
+	if (DsaPointerIsValid(sql_long))
+		tx->sql[0] = '\0';
+	else
+		memcpy(tx->sql, sql, sql_len + 1);
     tx->block_id_snapshot = snapshot_block;
     tx->block_id_committed = BCDBMaxBid;
     tx->tx_id = tx_id;
@@ -684,6 +698,13 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
     return tx;
 }
 
+const char *
+bcdb_tx_long_sql(BCDBShmXact *tx)
+{
+	attach_bcdb_dsa();
+	return dsa_get_address(bcdb_dsa_area, tx->sql_long);
+}
+
 /*
  * delete_tx
  *
@@ -705,6 +726,12 @@ void delete_tx(BCDBShmXact *tx)
                     (int)tx->status, tx->hash);
     DEBUGNOCHECK("[ZL] deleting tx %s", tx->hash);
     remove_tx_xid_map(tx->xid);
+	if (DsaPointerIsValid(tx->sql_long))
+	{
+		attach_bcdb_dsa();
+		dsa_free(bcdb_dsa_area, tx->sql_long);
+		tx->sql_long = InvalidDsaPointer;
+	}
 
     SpinLockAcquire(tx_pool_lock);
     hash_search(tx_pool, tx->hash, HASH_REMOVE, &found);
@@ -2100,7 +2127,7 @@ void tx_queue_insert(BCDBShmXact *tx, int32 partition)
 
 #if SAFEDBG
     DEBUGNOCHECK("safeDB %s:%s:%d partition %d num_queue %d txsql %s",
-                 __FILE__, __FUNCTION__, __LINE__, partition, num_queue, tx->sql);
+				 __FILE__, __FUNCTION__, __LINE__, partition, num_queue, bcdb_tx_sql(tx));
 #endif
     TxQueue *queue = tx_queues + (partition % num_queue);
     ConditionVariablePrepareToSleep(&queue->full_cond);
@@ -4376,12 +4403,12 @@ bcdb_emit_ledger_boundary(const char *phase)
 			raft_log_index = activeTx->raft_log_index;
 			item_ordinal   = activeTx->raft_item_ordinal;
 		}
-		else if (activeTx->sql[0] != '\0')
+		else if (bcdb_tx_sql(activeTx)[0] != '\0')
 		{
-			const char *p = strstr(activeTx->sql, "raft_log_index=");
+			const char *p = strstr(bcdb_tx_sql(activeTx), "raft_log_index=");
 			if (p)
 				raft_log_index = strtoull(p + 15, NULL, 10);
-			p = strstr(activeTx->sql, "item_ordinal=");
+			p = strstr(bcdb_tx_sql(activeTx), "item_ordinal=");
 			if (p)
 				item_ordinal = (uint32) atoi(p + 13);
 		}

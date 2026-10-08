@@ -1147,7 +1147,7 @@ bcdb_apply_optim_writes_with_retry(BCDBShmXact *tx,
 			return true;
 		}
 
-		if (!settle && apply_failed_unique && tx && tx->sql && strstr(tx->sql, "_proc"))
+		if (!settle && apply_failed_unique && tx && bcdb_tx_sql(tx) && strstr(bcdb_tx_sql(tx), "_proc"))
 		{
 			if (num_apply_retries)
 				*num_apply_retries = retries;
@@ -2147,7 +2147,7 @@ bcdb_maybe_enqueue_deferred_delete0_by_key(BCDBShmXact *tx)
 	if (tx == NULL || !completiontag_is_delete_0(completionTag))
 		return;
 
-	sql = skip_ws(tx->sql);
+	sql = skip_ws(bcdb_tx_sql(tx));
 	if (pg_strncasecmp(sql, "DELETE", 6) != 0)
 		return;
 
@@ -2219,7 +2219,7 @@ bool bcdb_worker_init(void)
 
 void get_write_set(BCDBShmXact *tx, Snapshot snapshot)
 {
-    const char *query_string = tx->sql;
+	const char *query_string = bcdb_tx_sql(tx);
 
     MemoryContext oldcontext;
     List *parsetree_list;
@@ -2235,6 +2235,9 @@ void get_write_set(BCDBShmXact *tx, Snapshot snapshot)
     int16 format;
     RawStmt *parsetree;
     bool snapshot_set = false;
+
+	if (DsaPointerIsValid(tx->sql_long))
+		bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_LONG_SQL, 1);
     dest = whereToSendOutput;
 
     /*
@@ -2779,7 +2782,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
     {
         if (bcdb_dt_completion_only_skip_reads_enabled() &&
             !bcdb_block_return_actual_results_enabled() &&
-            bcdb_query_is_select(tx->sql))
+			bcdb_query_is_select(bcdb_tx_sql(tx)))
         {
             int mem_txid;
             BCBlock *committed_block;
@@ -3345,7 +3348,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 					if (settled_ok)
 						apply_nonretryable = false;
 					else if (unique_failure &&
-							 bcdb_sql_is_insert_on_conflict_do_nothing(tx->sql))
+							 bcdb_sql_is_insert_on_conflict_do_nothing(bcdb_tx_sql(tx)))
 					{
 						apply_terminal_noop = true;
 						apply_idempotent_noop = true;
@@ -3451,7 +3454,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
                     if (apply_nonretryable)
                     {
-						if (bcdb_sql_is_insert_on_conflict_do_nothing(tx->sql))
+						if (bcdb_sql_is_insert_on_conflict_do_nothing(bcdb_tx_sql(tx)))
 						{
 							apply_terminal_noop = true;
 							apply_idempotent_noop = true;
@@ -3542,7 +3545,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 t_delta += 1000000;
 #if SAFEDBG1
             printf("\nsafeDbg id= %d start= %ld.%ld finish= %ld.%ld restarts= %d exec= %d tx= %s\n",
-                   tx->tx_id, tv1.tv_sec, tv1.tv_usec, tv2.tv_sec, tv2.tv_usec, total_num_restarts, t_delta, tx->sql);
+				   tx->tx_id, tv1.tv_sec, tv1.tv_usec, tv2.tv_sec, tv2.tv_usec, total_num_restarts, t_delta, bcdb_tx_sql(tx));
 #endif
             t_sinceTx1 += t_delta;
 #elif defined(bcdb_trace_timestamps_enabled)
@@ -3588,7 +3591,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
                 bool is_save = false;
                 bool is_release = false;
 
-                if (parse_recovery_query(tx->sql, snapId, sizeof(snapId), &is_save, &is_release))
+				if (parse_recovery_query(bcdb_tx_sql(tx), snapId, sizeof(snapId), &is_save, &is_release))
                 {
                     if (is_save)
                     {
@@ -3646,19 +3649,19 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
             printf("safeDbg txid= %d mem-txid = %d \n", tx->tx_id, mem_txid);
 
             printf("\n\n ** safeDbg pid %d %s : %s: %d tx sql %s \n",
-                   getpid(), __FILE__, __FUNCTION__, __LINE__, tx->sql);
+				   getpid(), __FILE__, __FUNCTION__, __LINE__, bcdb_tx_sql(tx));
 #endif
 #if SAFEDBG1
             if ((tx->tx_id) % 2000 < 2)
                 printf("\n *** safeDbg pid %d signaling %s : %s: %d "
                        "latest-vs-myId= %d %d myquery= %s\n",
                        getpid(), __FILE__, __FUNCTION__,
-                       __LINE__, get_last_committed_txid(tx), tx->tx_id, tx->sql);
+					   __LINE__, get_last_committed_txid(tx), tx->tx_id, bcdb_tx_sql(tx));
 #endif
 
 			{
 				uint64 finish_result_start = bcdb_ptrace_timer_start();
-				int qtype = bcdb_fast_query_type(tx->sql);
+				int qtype = bcdb_fast_query_type(bcdb_tx_sql(tx));
 
 				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
 				{
@@ -3913,7 +3916,7 @@ void bcdb_worker_process_tx_dt(BCDBShmXact *tx, bool dualTab)
 
 #if SAFEDBG1
         printf("safeDbg pg-catch() pid %d %s : %s: %d  tx %d %s \n",
-               getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id, tx->sql);
+			   getpid(), __FILE__, __FUNCTION__, __LINE__, tx->tx_id, bcdb_tx_sql(tx));
 #endif
         // goto retry;
 

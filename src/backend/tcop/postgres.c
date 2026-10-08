@@ -4653,10 +4653,10 @@ void PostgresMain(int argc, char *argv[],
 				i = sig_sep - query_string;
 				sign = 1;
 			}
-			char query_string2[1024] = {};
+			char *query_string2 = palloc(qlen + 1);
 			int valid = -1;
 			if (sign == 1)
-				strlcpy(query_string2, sig_sep + 2, sizeof(query_string2));
+				strcpy(query_string2, sig_sep + 2);
 
 			/*valid = verify_signature_b64key( publicKey2, msg2, signature2);
 			printf("msg %s sig valid: %d\n", msg2, valid);

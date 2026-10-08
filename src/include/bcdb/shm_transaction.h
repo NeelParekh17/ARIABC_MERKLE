@@ -27,6 +27,7 @@
 #include "storage/spin.h"
 #include "openssl/sha.h"
 #include "access/merkle.h"
+#include "bcdb/bcdb_dsa.h"
 
 /* Raft ledger metadata constants (D1) */
 #define BCDB_RAFT_DIGEST_BYTES 32
@@ -131,6 +132,7 @@ typedef struct _BCDBShmXact
     BCBlockID          block_id_snapshot;
     BCBlockID volatile block_id_committed;
     char               sql[1024];
+	dsa_pointer        sql_long; /* only queries exceeding the inline buffer */
 
     TxStatus volatile  status;
     QueryDesc          *queryDesc;
@@ -269,6 +271,8 @@ extern void         add_tx_xid_map(TransactionId id, BCDBShmXact *tx);
 extern void         remove_tx_xid_map(TransactionId id);
 extern void         bcdb_emit_ledger_boundary(const char *phase);
 extern BCDBShmXact* create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int isolation, bool pred_lock);
+extern const char *bcdb_tx_long_sql(BCDBShmXact *tx);
+#define bcdb_tx_sql(tx) ((tx)->sql_long == InvalidDsaPointer ? (tx)->sql : bcdb_tx_long_sql(tx))
 extern void         delete_tx(BCDBShmXact* tx);
 
 /* compose_tuple_hash, compose_index_hash, compose_tx_hash removed — no callers */
