@@ -758,7 +758,7 @@ bcdb_ptrace_open(void)
 			"dt_bitmap_key_tags,"
 			"dt_opf,dt_opf_trigger,dt_opf_upsert,dt_opf_sequence,"
 			"dt_opf_own_insert,dt_opf_own_indexed_update,dt_overlay_hits,dt_lockrows_skipped,"
-			"dt_indexed_update_checks,dt_write_compositions,dt_indexonly_heap_fetches,dt_opf_caught\n");
+			"dt_indexed_update_checks,dt_write_compositions,dt_indexonly_heap_fetches,dt_opf_caught,dt_opf_stale_error\n");
 }
 
 static inline uint64
@@ -3137,6 +3137,19 @@ opf_retry:
 							is_deterministic = true;
 						}
 
+						/* Stale-snapshot error: re-run on the ordered physical route
+						 * (see the outer catch) instead of finalizing it. */
+						if (is_deterministic && bcdb_dt_simulating && !tx->needs_opf &&
+							activeTx->tx_id_committed < tx->tx_id - 1)
+						{
+							tx->needs_opf = true;
+							bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_OPF_STALE_ERROR, 1);
+							FreeErrorData(edata);
+							ereport(ERROR,
+									(errcode(ERRCODE_BCDB_OPF),
+									 errmsg("BCDB ordered physical fallback required (stale-snapshot error)")));
+						}
+
 						if (is_deterministic)
 						{
 							const char *err_class = "unknown_error_class";
@@ -3895,6 +3908,24 @@ opf_retry:
 			* valid and will be rethrown after result-ring cleanup.
 			*/
 		FlushErrorState();
+
+		/*
+		 * A business SQL error raised while simulating on a snapshot that may
+		 * miss predecessors is a stale decision, not a serial outcome (e.g. a
+		 * CHECK that a predecessor's write would satisfy).  Re-run it through
+		 * the ordered physical route: once every predecessor has committed,
+		 * an error on that run is the serial one.
+		 */
+		if (bcdb_dt_simulating && edata->sqlerrcode != ERRCODE_BCDB_OPF &&
+			!tx->needs_opf && !tx->raft_ledger_enabled &&
+			!published_max_advanced &&
+			activeTx->tx_id_committed < tx->tx_id - 1 &&
+			strcmp(sqlstate, "TP001") != 0)
+		{
+			tx->needs_opf = true;
+			bcdb_ptrace_inc_counter(BCDB_PTRACE_COUNTER_DT_OPF_STALE_ERROR, 1);
+			edata->sqlerrcode = ERRCODE_BCDB_OPF;
+		}
 
 		if (bcdb_dt_simulating && edata->sqlerrcode == ERRCODE_BCDB_OPF &&
 			tx->needs_opf &&

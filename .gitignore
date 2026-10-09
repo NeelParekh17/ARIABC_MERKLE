@@ -53,6 +53,7 @@ lib*.pc
 # Exclude log, markdown, diff files
 *.log
 *.md
+!DETERMINISM_GUIDE.md
 !Dynamic_merkle_docs/*.md
 !DISTRIBUTED_ARCHITECTURE_DIAGRAM.md
 !NuRaft/*.md
@@ -66,6 +67,8 @@ lib*.pc
 
 # Exclude scripts by default (but allow whitelisting specific files)
 /scripts/*
+!/scripts/build_determinism_evidence.py
+!/scripts/check_determinism_explorer.py
 !/scripts/bench_full_results/
 /scripts/bench_full_results/*
 !/scripts/bench_full_results/README.md
@@ -113,7 +116,9 @@ lib*.pc
 /ariabc_pg/build/
 
 # Local analysis, scratch outputs, and accidental pasted command fragments
-/docs/
+/docs/*
+!/docs/determinism/
+!/docs/determinism/README.md
 /2026-04-21-154054-analysis_issues.txt
 /2026-04-22-053752-important_inf0.txt
 /2026-04-22-215511-this-session-is-being-continued-from-a-previous-c.txt
