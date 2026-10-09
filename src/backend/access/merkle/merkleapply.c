@@ -1746,26 +1746,12 @@ merkle_apply_single_coalesced_entry(Relation catalog_rel, Relation pkey_idx_rel,
 									int max_retries)
 {
 	Oid index_oid = entry->key.index_oid;
-	int64 count_delta = 0;
+	int64 count_delta = entry->count_delta;
 	int attempt;
 	bool applied = false;
 
-	if (entry->key.event_type == MERKLE_DELTA_INSERT)
-	{
-		count_delta = 1;
-	}
-	else if (entry->key.event_type == MERKLE_DELTA_DELETE)
-	{
-		count_delta = -1;
-	}
-	else if (entry->key.event_type == MERKLE_DELTA_UPDATE_SAME_LEAF)
-	{
-		count_delta = 0;
-	}
-	else
-	{
+	if (entry->key.event_type > MERKLE_DELTA_UPDATE_SAME_LEAF)
 		elog(ERROR, "unrecognized Merkle delta event type: %u", entry->key.event_type);
-	}
 
 	for (attempt = 0; attempt < max_retries; attempt++)
 	{
@@ -2429,14 +2415,10 @@ merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)
 				const MerkleDeltaEntry *delta_entry = sorted_entries[start_idx + j].entry;
 				MerkleEntryRoute *route = &routes[j];
 
-				if (delta_entry->key.event_type == MERKLE_DELTA_INSERT)
-					route->count_delta = 1;
-				else if (delta_entry->key.event_type == MERKLE_DELTA_DELETE)
-					route->count_delta = -1;
-				else if (delta_entry->key.event_type == MERKLE_DELTA_UPDATE_SAME_LEAF)
-					route->count_delta = 0;
-				else
+				if (delta_entry->key.event_type > MERKLE_DELTA_UPDATE_SAME_LEAF)
 					elog(ERROR, "unrecognized Merkle delta event type: %u", delta_entry->key.event_type);
+				/* Net count of every event merged into this entry, not one per entry. */
+				route->count_delta = delta_entry->count_delta;
 
 				route->prefix_len = merkle_resolve_route_leaf(catalog_rel, pkey_idx_rel, slot,
 															 curr_index_oid, sorted_entries[start_idx + j].partition_id,

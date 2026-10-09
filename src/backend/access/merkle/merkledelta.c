@@ -124,9 +124,11 @@ merkle_delta_merge_one(HTAB *target, const MerkleDeltaEntry *source)
 	{
 		entry->key = source->key;
 		merkle_hash_zero(&entry->xor_delta);
+		entry->count_delta = 0;
 	}
 	merkle_hash_xor(&entry->xor_delta, &source->xor_delta);
-	if (merkle_hash_is_zero(&entry->xor_delta))
+	entry->count_delta += source->count_delta;
+	if (merkle_hash_is_zero(&entry->xor_delta) && entry->count_delta == 0)
 		(void) hash_search(target, &source->key, HASH_REMOVE, NULL);
 }
 
@@ -203,9 +205,14 @@ merkle_stage_delta_event(Relation indexRel, MerkleDeltaEventType event_type,
 	{
 		entry->key = key;
 		merkle_hash_zero(&entry->xor_delta);
+		entry->count_delta = 0;
 	}
 	merkle_hash_xor(&entry->xor_delta, hash);
-	if (merkle_hash_is_zero(&entry->xor_delta))
+	if (event_type == MERKLE_DELTA_INSERT)
+		entry->count_delta++;
+	else if (event_type == MERKLE_DELTA_DELETE)
+		entry->count_delta--;
+	if (merkle_hash_is_zero(&entry->xor_delta) && entry->count_delta == 0)
 		(void) hash_search(frame->entries, &key, HASH_REMOVE, NULL);
 
 	merkle_crash_failpoint("after_merkle_delta_staged");

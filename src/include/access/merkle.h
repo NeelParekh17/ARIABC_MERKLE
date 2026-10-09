@@ -153,6 +153,12 @@ typedef struct MerkleDeltaEntry
 {
 	MerkleDeltaKey key;
 	MerkleHash	xor_delta;
+	/*
+	 * Net leaf row-count change of the events merged into this entry.  XOR
+	 * cancels repeated events of one key (e.g. UPDATE staged as DELETE+INSERT
+	 * followed by DELETE), so the count cannot be derived from event_type.
+	 */
+	int32		count_delta;
 } MerkleDeltaEntry;
 
 /*
