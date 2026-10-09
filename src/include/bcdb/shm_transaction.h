@@ -289,7 +289,8 @@ typedef enum
 	BCDB_OPF_OWN_INSERT,
 	BCDB_OPF_OWN_INDEXED_UPDATE,
 	BCDB_OPF_DELETE_RETURNING,
-	BCDB_OPF_EXCEPTION_BLOCK
+	BCDB_OPF_EXCEPTION_BLOCK,
+	BCDB_OPF_EXCLUSION
 } BCDBOpfReason;
 extern bool bcdb_dt_simulating;
 extern void bcdb_request_opf(BCDBOpfReason reason);

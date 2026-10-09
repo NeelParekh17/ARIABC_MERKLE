@@ -791,6 +791,8 @@ ExecInsert(ModifyTableState *mtstate,
 	bcdb_log_dml_route("INSERT", resultRelationDesc, defer_bcdb_dml);
 	if (defer_bcdb_dml && onconflict != ONCONFLICT_NONE)
 		bcdb_request_opf(BCDB_OPF_UPSERT);
+	if (defer_bcdb_dml && resultRelInfo->ri_HasExclusionIndex)
+		bcdb_request_opf(BCDB_OPF_EXCLUSION);
 	/*
 	 * BEFORE ROW INSERT Triggers.
 	 *
@@ -1604,6 +1606,8 @@ ExecUpdate(ModifyTableState *mtstate,
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
 	defer_bcdb_dml = bcdb_should_defer_dml(resultRelationDesc);
 	bcdb_log_dml_route("UPDATE", resultRelationDesc, defer_bcdb_dml);
+	if (defer_bcdb_dml && resultRelInfo->ri_HasExclusionIndex)
+		bcdb_request_opf(BCDB_OPF_EXCLUSION);
 	if (!bcdb_dt_simulating && activeTx != NULL &&
 		activeTx->needs_opf && tupleid != NULL)
 	{
