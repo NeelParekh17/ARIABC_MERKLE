@@ -256,13 +256,16 @@ merkle_build_reset_node_table(Oid index_oid)
 	HeapTuple	tuple;
 	Oid			heap_oid = IndexGetRelation(index_oid, false);
 	char		tablename[2 * NAMEDATALEN + sizeof("merkle_node_")];
+	int			max_name_len = NAMEDATALEN - 1 -
+		Max(strlen("_prefix_idx"), Max(strlen("_root_idx"), strlen("_pkey")));
 
 	merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
-	if (strlen(tablename) >= NAMEDATALEN)
+	if (strlen(tablename) > max_name_len)
 		ereport(ERROR,
 				(errcode(ERRCODE_NAME_TOO_LONG),
 				 errmsg("Merkle backing table name \"%s\" is too long", tablename),
-				 errdetail("The name must not exceed %d bytes.", NAMEDATALEN - 1)));
+				 errdetail("The backing table name must not exceed %d bytes to allow auxiliary index names.",
+						   max_name_len)));
 
 	merkle_ensure_node_table(index_oid);
 	node_rel = table_open(merkle_get_node_table_relid(index_oid), AccessExclusiveLock);
