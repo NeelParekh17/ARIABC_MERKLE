@@ -2327,6 +2327,11 @@ void get_write_set(BCDBShmXact *tx, Snapshot snapshot)
      */
     use_implicit_block = (list_length(parsetree_list) > 1);
 
+	if (parsetree_list == NIL || use_implicit_block)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("a deterministic request must contain exactly one SQL statement")));
+
     /*
      * Run through the raw parsetree(s) and process each one.
      */
