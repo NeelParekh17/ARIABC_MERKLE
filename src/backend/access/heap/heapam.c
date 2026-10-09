@@ -1934,6 +1934,16 @@ heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
 				GetPerTupleExprContext(estate)->ecxt_scantuple = slot;
 			}
 
+			/* Skip partial indexes whose predicate isn't satisfied. */
+			if (indexInfo->ii_Predicate != NIL)
+			{
+				ExprState  *predicate;
+
+				predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
+				if (!ExecQual(predicate, GetPerTupleExprContext(estate)))
+					goto index_cleanup;
+			}
+
 			FormIndexDatum(indexInfo,
 					slot,
 					estate,
@@ -1948,6 +1958,7 @@ heap_apply_index_phase(Relation relation, TupleTableSlot *slot,
 					indexUniqueCheck,
 					indexInfo);
 
+		index_cleanup:
 			if (estate != NULL)
 				FreeExecutorState(estate);
 
