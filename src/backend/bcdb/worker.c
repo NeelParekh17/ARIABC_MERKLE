@@ -757,7 +757,7 @@ bcdb_ptrace_open(void)
 			"dt_rel_read_tags,dt_rel_conflicts,dt_old_key_fetches,dt_long_sql,"
 			"dt_bitmap_key_tags,"
 			"dt_opf,dt_opf_trigger,dt_opf_upsert,dt_opf_sequence,"
-			"dt_opf_own_insert,dt_opf_own_indexed_update,dt_opf_delete_returning,dt_overlay_hits,dt_lockrows_skipped,"
+			"dt_opf_own_insert,dt_opf_own_indexed_update,dt_opf_delete_returning,dt_opf_exception_block,dt_overlay_hits,dt_lockrows_skipped,"
 			"dt_indexed_update_checks,dt_write_compositions,dt_indexonly_heap_fetches,dt_opf_caught,dt_opf_stale_error\n");
 }
 
