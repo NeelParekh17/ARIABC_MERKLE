@@ -1589,6 +1589,16 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
         }
         list_free(indexList);
     }
+
+	if (indexInfo->ii_Expressions != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("expressions are not supported for Merkle indexes")));
+
+	if (indexInfo->ii_Predicate != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("partial Merkle indexes are not supported")));
     
     buildstate.fanout = opts->fanout;
 	buildstate.split_threshold = opts->split_threshold;
