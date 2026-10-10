@@ -337,8 +337,74 @@ bool commit_or_rollback(PGconn* local, bool ok, std::string& err) {
     return false;
 }
 
+bool roots_equal(PGconn* ref, PGconn* local, const table_info& t, bool& equal, std::string& err) {
+    std::map<int, std::string> a, b;
+    if (!read_partition_roots(ref, t, a, err)) return false;
+    if (!read_partition_roots(local, t, b, err)) return false;
+    equal = (a == b);
+    return true;
+}
+
+bool heap_verify_ok(PGconn* local, const table_info& t, bool& ok, std::string& err) {
+    rows_t rows;
+    const std::string tbl = "public." + quote_ident(local, t.name);
+    char* literal = PQescapeLiteral(local, tbl.c_str(), tbl.size());
+    if (!literal) {
+        err = conn_error(local);
+        return false;
+    }
+    const std::string statement = "SELECT merkle_verify(" + std::string(literal) + "::regclass)";
+    PQfreemem(literal);
+    if (!query_rows(local,
+                    statement,
+                    rows, err)) {
+        return false;
+    }
+    ok = !rows.empty() && rows[0][0] == "t";
+    return true;
+}
+
+bool rebuild_merkle_indexes(PGconn* local, const table_info& t, std::string& err) {
+    const std::string tbl = "public." + quote_ident(local, t.name);
+    char* literal = PQescapeLiteral(local, tbl.c_str(), tbl.size());
+    if (!literal) {
+        err = conn_error(local);
+        return false;
+    }
+    const std::string statement =
+        "SELECT n.nspname, c.relname FROM pg_index i "
+        "JOIN pg_class c ON c.oid = i.indexrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "JOIN pg_am am ON am.oid = c.relam "
+        "WHERE i.indrelid = " + std::string(literal) + "::regclass "
+        "AND am.amname = 'merkle' ORDER BY c.oid";
+    PQfreemem(literal);
+    rows_t indexes;
+    if (!query_rows(local, statement, indexes, err)) return false;
+    if (indexes.empty()) {
+        if (t.merkle_key.empty()) return true;
+        err = "Merkle index missing before full copy";
+        return false;
+    }
+
+    if (!exec_cmd(local, "BEGIN", err)) return false;
+    for (const auto& index : indexes) {
+        if (!exec_cmd(local, "REINDEX INDEX " + quote_ident(local, index[0]) + "." +
+                          quote_ident(local, index[1]), err)) {
+            return commit_or_rollback(local, false, err);
+        }
+    }
+    return commit_or_rollback(local, true, err);
+}
+
 bool full_table_copy(PGconn* ref, PGconn* local, const table_info& t,
                      replica_repair_stats& st, std::string& err) {
+    /* Re-anchor incremental maintenance to the actual heap before copying.
+     * DELETE + COPY coalesces changes at commit and cannot remove existing
+     * errors in leaf summaries. Native REINDEX must run in its own transaction
+     * before DML; rebuilding first also avoids committing restored rows with
+     * stale metadata if the rebuild fails or recovery is interrupted. */
+    if (!rebuild_merkle_indexes(local, t, err)) return false;
     const std::string tbl = "public." + quote_ident(local, t.name);
     uint64_t deleted = 0;
     uint64_t rows = 0;
@@ -351,25 +417,19 @@ bool full_table_copy(PGconn* ref, PGconn* local, const table_info& t,
     st.rows_upserted += rows;
     st.candidate_rows += rows;
     st.full_table_copies++;
-    return true;
-}
 
-bool roots_equal(PGconn* ref, PGconn* local, const table_info& t, bool& equal, std::string& err) {
-    std::map<int, std::string> a, b;
-    if (!read_partition_roots(ref, t, a, err)) return false;
-    if (!read_partition_roots(local, t, b, err)) return false;
-    equal = (a == b);
-    return true;
-}
-
-bool heap_verify_ok(PGconn* local, const table_info& t, bool& ok, std::string& err) {
-    rows_t rows;
-    if (!query_rows(local,
-                    "SELECT merkle_verify(" + std::string("'public.") + t.name + "'::regclass)",
-                    rows, err)) {
-        return false;
+    if (!t.merkle_key.empty()) {
+        const uint64_t v0 = now_us();
+        bool equal = false;
+        bool heap_ok = false;
+        if (!roots_equal(ref, local, t, equal, err) ||
+            !heap_verify_ok(local, t, heap_ok, err)) return false;
+        st.verify_us += now_us() - v0;
+        if (!equal || !heap_ok) {
+            err = "table " + t.name + " failed verification after full copy and Merkle rebuild";
+            return false;
+        }
     }
-    ok = !rows.empty() && rows[0][0] == "t";
     return true;
 }
 
@@ -522,13 +582,7 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
     st.verify_us += now_us() - v0;
     if (equal && heap_ok) return true;
 
-    if (!full_table_copy(ref, local, t, st, err)) return false;
-    if (!roots_equal(ref, local, t, equal, err)) return false;
-    if (!equal) {
-        err = "table " + t.name + " still differs from the snapshot after a full copy";
-        return false;
-    }
-    return true;
+    return full_table_copy(ref, local, t, st, err);
 }
 
 bool checksum(PGconn* c, const table_info& t, std::string& out, std::string& err) {
