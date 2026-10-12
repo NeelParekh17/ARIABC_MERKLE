@@ -120,7 +120,7 @@ bulk_node_set_add(MerkleBulkNodeSet *bs, int partition_id, const uint8 *node_id,
  * merkle_build_tree_pass1 - compute full tree in C, emit records into bs.
  *
  * Zero-copy slice recursion over sorted MerkleEntryArray.
- * Returns the XOR-hash of the current subtree.
+ * Returns the AdHash sum of the current subtree.
  */
 static MerkleHash
 merkle_build_tree_pass1(MerkleBulkNodeSet *bs,

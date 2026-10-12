@@ -176,9 +176,22 @@ bool read_partition_roots(PGconn* c, const table_info& t,
                           std::map<int, std::string>& out, std::string& err) {
     out.clear();
     rows_t rows;
+    const std::string tbl = "public." + quote_ident(c, t.name);
+    char* literal = PQescapeLiteral(c, tbl.c_str(), tbl.size());
+    if (!literal) {
+        err = conn_error(c);
+        return false;
+    }
+    // The native helper checks the index format before returning roots.
+    const std::string sql =
+        "SELECT roots.partition, roots.hash FROM pg_index i "
+        "JOIN pg_class ic ON ic.oid = i.indexrelid "
+        "JOIN pg_am am ON am.oid = ic.relam "
+        "CROSS JOIN LATERAL pg_catalog.merkle_get_partition_root_hashes(i.indexrelid) roots "
+        "WHERE i.indrelid = " + std::string(literal) + "::regclass AND am.amname = 'merkle'";
+    PQfreemem(literal);
     if (!query_rows(c,
-                    "SELECT partition_id, encode(hash, 'hex') FROM " + node_table(c, t) +
-                        " WHERE prefix_len = 0",
+                    sql,
                     rows, err)) {
         return false;
     }
@@ -633,12 +646,19 @@ bool compute_merkle_digest(PGconn* c, std::string& out_digest, std::string& err)
         if (t.merkle_key.empty()) continue;
         std::map<int, std::string> roots;
         if (!read_partition_roots(c, t, roots, err)) return false;
-        std::vector<uint8_t> acc;
+        std::vector<uint8_t> acc(32, 0);
         for (const auto& kv : roots) {
             std::vector<uint8_t> h;
-            if (!hex_to_bytes(kv.second, h)) continue;
-            if (acc.size() < h.size()) acc.resize(h.size(), 0);
-            for (size_t i = 0; i < h.size(); ++i) acc[i] ^= h[i];
+            if (!hex_to_bytes(kv.second, h) || h.size() != acc.size()) {
+                err = "invalid 256-bit Merkle partition root";
+                return false;
+            }
+            unsigned int carry = 0;
+            for (size_t i = 0; i < acc.size(); ++i) {
+                const unsigned int sum = static_cast<unsigned int>(acc[i]) + h[i] + carry;
+                acc[i] = static_cast<uint8_t>(sum);
+                carry = sum >> 8;
+            }
         }
         if (!first) out << ",";
         first = false;

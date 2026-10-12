@@ -199,6 +199,8 @@ merkle_open_consistent_index(Oid index_oid)
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("relation %u is not a Merkle index on relation %u",
 						index_oid, heap_oid)));
+	/* Root reads must also refuse legacy XOR nodes, even on an empty heap. */
+	merkle_read_meta(index_rel, NULL, NULL, NULL, NULL);
 	return index_rel;
 }
 
@@ -313,7 +315,7 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 		SPI_finish();
 	}
 
-	/* 2. Recompute XOR sum of all heap tuples */
+	/* 2. Recompute AdHash sum of all heap tuples */
 	{
 		TupleTableSlot *slot = table_slot_create(heapRel, NULL);
 		TableScanDesc scan = table_beginscan(heapRel, GetActiveSnapshot(), 0, NULL);
@@ -333,7 +335,7 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 	match = (memcmp(stored_root_hash.data, heap_tuple_xor_hash.data, MERKLE_HASH_BYTES) == 0);
 	if (!match)
 	{
-		elog(WARNING, "merkle_verify_index mismatch: found_catalog=%d stored=%s heap_xor=%s",
+		elog(WARNING, "merkle_verify_index mismatch: found_catalog=%d stored=%s heap_sum=%s",
 			 found_catalog_leaves,
 			 merkle_hash_to_hex(&stored_root_hash),
 			 merkle_hash_to_hex(&heap_tuple_xor_hash));
@@ -424,7 +426,7 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 				memcmp(VARDATA_ANY(node_hash), children_hash.data, MERKLE_HASH_BYTES) != 0)
 			{
 				elog(WARNING, "merkle_verify_index structural mismatch: partition=%d node=%s prefix_len=%d "
-					 "stored_hash=%s children_xor=%s stored_count=%d children_count=%lld",
+					 "stored_hash=%s children_sum=%s stored_count=%d children_count=%lld",
 					 DatumGetInt16(SPI_getbinval(tup, td, 1, &isnull)),
 					 TextDatumGetCString(SPI_getbinval(tup, td, 2, &isnull)),
 					 DatumGetInt16(SPI_getbinval(tup, td, 3, &isnull)),

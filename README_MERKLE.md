@@ -3,7 +3,9 @@
 Reviewed against the working tree on **2026-09-22**. The native `merkle` index
 maintains partitioned, dynamic trees over a logged PostgreSQL table. Keys choose
 where a row belongs; **all live row attributes** contribute to its BLAKE3-256
-hash. Tree hashes are XOR aggregates of those row hashes.
+hash. Tree hashes are unsigned sums of those row hashes modulo 2^256 (AdHash).
+The 32-byte values are little-endian integers; carry crosses all bytes.
+INSERT adds the row hash, DELETE subtracts it, and UPDATE adds new minus old.
 
 Use this guide for SQL and verification. The
 [implementation reference](MERKLE_INDEX_COMPLETE_DETAILS.md) explains the source,
@@ -21,20 +23,20 @@ flowchart TD
     Route --> Partition[Partition and key-prefix path]
     Value --> Hash[BLAKE3 row hash: 32 bytes]
     Partition --> Leaf[Dynamic leaf]
-    Hash -->|XOR contribution| Leaf
-    Leaf -->|XOR| Ancestors[Ancestor and partition hashes]
-    Ancestors -->|XOR partition roots| Root[Global aggregate root]
+    Hash -->|AdHash contribution| Leaf
+    Leaf -->|Add| Ancestors[Ancestor and partition hashes]
+    Ancestors -->|Add partition roots| Root[Global aggregate root]
 ```
 
 The index metapage stores format and geometry. Actual nodes live in
 `ariabc_internal.merkle_node_<index_oid>`, an ordinary PostgreSQL relation with
-MVCC and WAL. Current versions are **index format 10**, **routing format 4**, and
+MVCC and WAL. Current versions are **index format 11**, **routing format 4**, and
 **row-hash format 1**. There are no immutable copy-on-write node pages or retained
 Merkle root journals in this implementation.
 
 Merkle does not support query scans, uniqueness enforcement, or inclusion
-proofs. Keep a primary key or ordinary index for lookups. XOR is order independent,
-but equal duplicate contributions cancel; matching roots alone are not a proof
+proofs. Keep a primary key or ordinary index for lookups. AdHash is order independent and preserves duplicate multiplicity modulo 2^256;
+matching roots alone are not a proof
 against adversarial changes or a substitute for exact row comparison.
 
 ## Create an index
@@ -134,7 +136,7 @@ accepting untracked writes.
 
 Rollback and savepoint abort discard their staged changes. PostgreSQL rollback
 also handles any node writes already made in that transaction; there is no
-separate XOR undo replay. Synchronous maintenance refers to transaction ordering;
+separate hash undo replay. Synchronous maintenance refers to transaction ordering;
 WAL flush durability still depends on PostgreSQL settings.
 
 ## Supported inspection and verification
@@ -203,3 +205,30 @@ See [merkle_functional_index.sql](src/test/regress/sql/merkle_functional_index.s
 For backend execution details read
 [BCDB/Merkle flow](ARIABC_BCNDB_MERKLE_FLOW.md); for replicated completion and
 restart semantics read the [distributed diagrams](DISTRIBUTED_ARCHITECTURE_DIAGRAM.md).
+
+## Upgrade from XOR aggregates
+
+Index format 11 uses AdHash; format 10 and earlier must be rebuilt. Canonical
+row-hash format 1 and routing format 4 are unchanged. The reserved durable-delta version is 2 for signed AdHash contributions.
+This checkout applies deltas synchronously; it has no active durable-delta
+encoder/decoder using that reserved version.
+
+Quiesce writers and finish applying all old committed deltas with the old
+binaries before upgrading. Do not replay old XOR deltas with the new binaries.
+After installing the new PostgreSQL and replica-server binaries, run as an
+administrator in every database with Merkle indexes:
+
+```sql
+SELECT merkle_rebuild_legacy_indexes();
+-- Alternatively rebuild each index explicitly:
+-- REINDEX INDEX public.merkle_demo_idx;
+SELECT merkle_verify_index(indexrelid)
+FROM pg_index JOIN pg_class ON pg_class.oid = indexrelid
+WHERE relam = (SELECT oid FROM pg_am WHERE amname = 'merkle');
+```
+
+The rebuild helper requires recovery to be caught up and verifies rebuilt
+trees. Normal metadata reads reject incompatible indexes with a REINDEX hint;
+never mix XOR nodes or baselines with AdHash nodes. Rebuild benchmark baselines
+before reuse. AdHash fixes systematic pair cancellation; it is a multiset
+checksum, not an adversarial cryptographic commitment.

@@ -11,6 +11,7 @@ CREATE SCHEMA IF NOT EXISTS ariabc_internal;
 -- Register SQL wrappers for the v7 built-ins so bootstrap/recovery works
 -- without requiring a destructive initdb.  On fresh clusters this is an
 -- idempotent CREATE OR REPLACE of the catalog-defined functions.
+-- Historical name; current implementation adds LE 256-bit hashes modulo 2^256.
 CREATE OR REPLACE FUNCTION pg_catalog.merkle_hash_xor_sql(bytea, bytea)
 RETURNS bytea
 AS 'merkle_hash_xor_sql'
