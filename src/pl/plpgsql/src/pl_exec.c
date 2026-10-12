@@ -21,6 +21,7 @@
 #include "access/htup_details.h"
 #include "access/transam.h"
 #include "access/tupconvert.h"
+#include "bcdb/shm_transaction.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
@@ -1577,6 +1578,10 @@ exec_stmt_block(PLpgSQL_execstate *estate, PLpgSQL_stmt_block *block)
 {
 	volatile int rc = -1;
 	int			i;
+
+	/* Request fallback before this block can catch the internal error. */
+	if (block->exceptions && is_bcdb_worker)
+		bcdb_request_opf(BCDB_OPF_EXCEPTION_BLOCK);
 
 	/*
 	 * First initialize all variables declared in this block

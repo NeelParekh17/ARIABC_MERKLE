@@ -160,6 +160,7 @@ ExecOpenIndices(ResultRelInfo *resultRelInfo, bool speculative)
 	IndexInfo **indexInfoArray;
 
 	resultRelInfo->ri_NumIndices = 0;
+	resultRelInfo->ri_HasExclusionIndex = false;
 
 	/* fast path if no indexes */
 	if (!RelationGetForm(resultRelation)->relhasindex)
@@ -201,6 +202,8 @@ ExecOpenIndices(ResultRelInfo *resultRelInfo, bool speculative)
 
 		/* extract index key information from the index's pg_index info */
 		ii = BuildIndexInfo(indexDesc);
+		if (ii->ii_ExclusionOps != NULL)
+			resultRelInfo->ri_HasExclusionIndex = true;
 
 		/*
 		 * If the indexes are to be used for speculative insertion, add extra

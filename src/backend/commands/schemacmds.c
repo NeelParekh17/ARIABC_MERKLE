@@ -14,7 +14,10 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/merkle.h"
+#include "access/relation.h"
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
@@ -23,6 +26,7 @@
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_namespace.h"
 #include "commands/dbcommands.h"
 #include "commands/event_trigger.h"
@@ -32,6 +36,7 @@
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
@@ -246,6 +251,10 @@ RenameSchema(const char *oldname, const char *newname)
 	AclResult	aclresult;
 	ObjectAddress address;
 	Form_pg_namespace nspform;
+	Relation	classrel;
+	SysScanDesc scan;
+	ScanKeyData key;
+	HeapTuple	classtup;
 
 	rel = table_open(NamespaceRelationId, RowExclusiveLock);
 
@@ -280,6 +289,30 @@ RenameSchema(const char *oldname, const char *newname)
 				(errcode(ERRCODE_RESERVED_NAME),
 				 errmsg("unacceptable schema name \"%s\"", newname),
 				 errdetail("The prefix \"pg_\" is reserved for system schemas.")));
+
+	classrel = table_open(RelationRelationId, AccessShareLock);
+	ScanKeyInit(&key, Anum_pg_class_relnamespace, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(nspOid));
+	scan = systable_beginscan(classrel, InvalidOid, false, NULL, 1, &key);
+	while ((classtup = systable_getnext(scan)) != NULL)
+	{
+		Form_pg_class classform = (Form_pg_class) GETSTRUCT(classtup);
+		Relation	tablerel;
+
+		if (classform->relkind != RELKIND_RELATION &&
+			classform->relkind != RELKIND_PARTITIONED_TABLE)
+			continue;
+		/* Keep index creation from racing the check. */
+		tablerel = relation_open(classform->oid, ShareUpdateExclusiveLock);
+		if (RelationGetNamespace(tablerel) == nspOid &&
+			merkle_relation_has_index(tablerel))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot rename a schema containing a table with a Merkle index")));
+		relation_close(tablerel, NoLock);
+	}
+	systable_endscan(scan);
+	table_close(classrel, AccessShareLock);
 
 	/* rename */
 	namestrcpy(&nspform->nspname, newname);

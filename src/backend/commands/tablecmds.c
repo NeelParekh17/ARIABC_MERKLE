@@ -3303,6 +3303,7 @@ RenameRelation(RenameStmt *stmt)
 {
 	bool		is_index = stmt->renameType == OBJECT_INDEX;
 	Oid			relid;
+	Relation	rel;
 	ObjectAddress address;
 
 	/*
@@ -3326,6 +3327,15 @@ RenameRelation(RenameStmt *stmt)
 						stmt->relation->relname)));
 		return InvalidObjectAddress;
 	}
+
+	rel = relation_open(relid, NoLock);
+	if (rel->rd_rel->relkind != RELKIND_INDEX &&
+		rel->rd_rel->relkind != RELKIND_PARTITIONED_INDEX &&
+		merkle_relation_has_index(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot rename a table with a Merkle index")));
+	relation_close(rel, NoLock);
 
 	/* Do the work */
 	RenameRelationInternal(relid, stmt->newname, false, is_index);
@@ -14296,6 +14306,11 @@ AlterTableNamespace(AlterObjectSchemaStmt *stmt, Oid *oldschema)
 	}
 
 	rel = relation_open(relid, NoLock);
+
+	if (merkle_relation_has_index(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot move a table with a Merkle index to another schema")));
 
 	oldNspOid = RelationGetNamespace(rel);
 

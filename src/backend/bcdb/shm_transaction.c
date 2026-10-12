@@ -3309,7 +3309,7 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
 	}
 
 	if (update_indexes)
-		heap_apply_index_phase(relation, actual_slot, false, false, HEAP_INDEX_NO_MERKLE);
+		heap_apply_index_phase(relation, actual_slot, false, true, HEAP_INDEX_NO_MERKLE);
 
 	/*
 	 * Merkle UPDATE maintenance:

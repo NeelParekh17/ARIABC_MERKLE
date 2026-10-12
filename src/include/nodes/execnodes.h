@@ -418,6 +418,9 @@ typedef struct ResultRelInfo
 	/* array of key/attr info for indices */
 	IndexInfo **ri_IndexRelationInfo;
 
+	/* true if any index enforces an exclusion constraint */
+	bool		ri_HasExclusionIndex;
+
 	/* triggers to be fired, if any */
 	TriggerDesc *ri_TrigDesc;
 

@@ -26,8 +26,10 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "catalog/heap.h"
+#include "catalog/index.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
 #include "commands/tablecmds.h"
 #include "common/blake3.h"
@@ -249,9 +251,53 @@ static void
 merkle_build_reset_node_table(Oid index_oid)
 {
 	Relation	node_rel;
+	Relation	class_rel;
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	Oid			heap_oid = IndexGetRelation(index_oid, false);
+	char		tablename[2 * NAMEDATALEN + sizeof("merkle_node_")];
+	int			max_name_len = NAMEDATALEN - 1 -
+		Max(strlen("_prefix_idx"), Max(strlen("_root_idx"), strlen("_pkey")));
+
+	merkle_get_node_tablename(index_oid, tablename, sizeof(tablename));
+	if (strlen(tablename) > max_name_len)
+		ereport(ERROR,
+				(errcode(ERRCODE_NAME_TOO_LONG),
+				 errmsg("Merkle backing table name \"%s\" is too long", tablename),
+				 errdetail("The backing table name must not exceed %d bytes to allow auxiliary index names.",
+						   max_name_len)));
 
 	merkle_ensure_node_table(index_oid);
 	node_rel = table_open(merkle_get_node_table_relid(index_oid), AccessExclusiveLock);
+
+	/* Check ownership before replacing any backing storage. */
+	class_rel = table_open(RelationRelationId, AccessShareLock);
+	scan = systable_beginscan(class_rel, InvalidOid, false, NULL, 0, NULL);
+	while ((tuple = systable_getnext(scan)) != NULL)
+	{
+		Form_pg_class classform = (Form_pg_class) GETSTRUCT(tuple);
+		Oid			other_heap_oid;
+		char		other_tablename[NAMEDATALEN];
+
+		if (classform->relkind != RELKIND_INDEX ||
+			classform->relam != MERKLE_AM_OID)
+			continue;
+		other_heap_oid = IndexGetRelation(classform->oid, true);
+		if (!OidIsValid(other_heap_oid) || other_heap_oid == heap_oid)
+			continue;
+		merkle_get_node_tablename(classform->oid, other_tablename,
+								  sizeof(other_tablename));
+		if (strcmp(tablename, other_tablename) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_DUPLICATE_TABLE),
+					 errmsg("Merkle backing table \"ariabc_internal.%s\" is already used by another table",
+							tablename),
+					 errdetail("The existing Merkle index belongs to table %u.",
+							   other_heap_oid)));
+	}
+	systable_endscan(scan);
+	table_close(class_rel, AccessShareLock);
+
 	merkle_build_replace_node_storage(node_rel);
 
 	/*
@@ -1589,6 +1635,16 @@ merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)
         }
         list_free(indexList);
     }
+
+	if (indexInfo->ii_Expressions != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("expressions are not supported for Merkle indexes")));
+
+	if (indexInfo->ii_Predicate != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("partial Merkle indexes are not supported")));
     
     buildstate.fanout = opts->fanout;
 	buildstate.split_threshold = opts->split_threshold;

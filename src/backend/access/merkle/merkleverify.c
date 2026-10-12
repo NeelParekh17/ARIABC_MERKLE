@@ -264,6 +264,8 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 	bool match = false;
 	MerkleHash stored_root_hash;
 	MerkleHash heap_tuple_xor_hash;
+	int64 root_tuple_count = 0;
+	int64 heap_tuple_count = 0;
 	bool found_catalog_leaves = false;
 	int spi_rc;
 
@@ -280,7 +282,7 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 		char *sql;
 		merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
 		sql = psprintf(
-			"SELECT hash FROM ariabc_internal.%s"
+			"SELECT hash, tuple_count FROM ariabc_internal.%s"
 			" WHERE prefix_len = 0",
 			tablename);
 
@@ -293,7 +295,9 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 			for (root_i = 0; root_i < (int) SPI_processed; root_i++)
 			{
 				bool isnull;
+				Datum count_d = SPI_getbinval(SPI_tuptable->vals[root_i], SPI_tuptable->tupdesc, 2, &isnull);
 				Datum h_d = SPI_getbinval(SPI_tuptable->vals[root_i], SPI_tuptable->tupdesc, 1, &isnull);
+				root_tuple_count += DatumGetInt32(count_d);
 				if (!isnull)
 				{
 					bytea *h_b = DatumGetByteaPP(h_d);
@@ -320,13 +324,11 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 			MerkleHash th;
 			merkle_compute_slot_hash(heapRel, slot, &th);
 			merkle_hash_xor(&heap_tuple_xor_hash, &th);
+			heap_tuple_count++;
 		}
 		table_endscan(scan);
 		ExecDropSingleTupleTableSlot(slot);
 	}
-
-	index_close(indexRel, NoLock);
-	table_close(heapRel, NoLock);
 
 	match = (memcmp(stored_root_hash.data, heap_tuple_xor_hash.data, MERKLE_HASH_BYTES) == 0);
 	if (!match)
@@ -336,6 +338,110 @@ merkle_verify_index(PG_FUNCTION_ARGS)
 			 merkle_hash_to_hex(&stored_root_hash),
 			 merkle_hash_to_hex(&heap_tuple_xor_hash));
 	}
+	if (match && root_tuple_count != heap_tuple_count)
+	{
+		elog(WARNING, "merkle_verify_index count mismatch: roots=%lld heap=%lld",
+			 (long long) root_tuple_count, (long long) heap_tuple_count);
+		match = false;
+	}
+
+	/* Check direct children by clearing the suffix as merkle_parent_of does. */
+	if (match)
+	{
+		int fanout;
+		int bits_per_split;
+		char tablename[64];
+		char *sql;
+		uint64 node_i;
+
+		merkle_read_meta(indexRel, &fanout, NULL, NULL, NULL);
+		bits_per_split = merkle_bits_per_split_for_fanout(fanout);
+		merkle_get_node_tablename(indexOid, tablename, sizeof(tablename));
+		if (SPI_connect() != SPI_OK_CONNECT)
+			elog(ERROR, "SPI_connect failed in merkle_verify_index");
+		sql = psprintf(
+			"SELECT p.partition_id, encode(p.node_id, 'hex'), p.prefix_len,"
+			" p.hash, p.tuple_count, COALESCE(c.child_count, 0), c.child_hashes"
+			" FROM ariabc_internal.%s p LEFT JOIN ("
+			" SELECT partition_id, prefix_len - %d AS parent_len,"
+			" (('x' || encode(node_id, 'hex'))::bit(64)"
+			" >> (64 - prefix_len + %d))"
+			" << (64 - prefix_len + %d) AS parent_id,"
+			" sum(tuple_count) AS child_count, array_agg(hash) AS child_hashes"
+			" FROM ariabc_internal.%s WHERE prefix_len > 0 GROUP BY 1, 2, 3"
+			" ) c ON c.partition_id = p.partition_id AND c.parent_len = p.prefix_len"
+			" AND c.parent_id = ('x' || encode(p.node_id, 'hex'))::bit(64)"
+			" WHERE NOT p.is_leaf ORDER BY p.partition_id, p.prefix_len, p.node_id",
+			tablename, bits_per_split, bits_per_split, bits_per_split, tablename);
+		spi_rc = SPI_execute(sql, true, 0);
+		pfree(sql);
+		if (spi_rc != SPI_OK_SELECT)
+			elog(ERROR, "merkle_verify_index structural query failed (rc=%d)", spi_rc);
+
+		for (node_i = 0; node_i < SPI_processed; node_i++)
+		{
+			HeapTuple tup = SPI_tuptable->vals[node_i];
+			TupleDesc td = SPI_tuptable->tupdesc;
+			bool isnull;
+			bytea *node_hash;
+			MerkleHash children_hash;
+			int32 node_count;
+			int64 children_count;
+			Datum hashes_d;
+
+			node_hash = DatumGetByteaPP(SPI_getbinval(tup, td, 4, &isnull));
+			node_count = DatumGetInt32(SPI_getbinval(tup, td, 5, &isnull));
+			children_count = DatumGetInt64(SPI_getbinval(tup, td, 6, &isnull));
+			merkle_hash_zero(&children_hash);
+			hashes_d = SPI_getbinval(tup, td, 7, &isnull);
+			if (!isnull)
+			{
+				Datum *hashes;
+				bool *nulls;
+				int nhashes;
+				int child_i;
+
+				deconstruct_array(DatumGetArrayTypeP(hashes_d), BYTEAOID, -1,
+								  false, 'i', &hashes, &nulls, &nhashes);
+				for (child_i = 0; child_i < nhashes; child_i++)
+				{
+					bytea *child_hash = DatumGetByteaPP(hashes[child_i]);
+					MerkleHash h;
+
+					if (VARSIZE_ANY_EXHDR(child_hash) != MERKLE_HASH_BYTES)
+					{
+						match = false;
+						break;
+					}
+					memcpy(h.data, VARDATA_ANY(child_hash), MERKLE_HASH_BYTES);
+					merkle_hash_xor(&children_hash, &h);
+				}
+				pfree(hashes);
+				pfree(nulls);
+			}
+			if (!match || node_count != children_count ||
+				VARSIZE_ANY_EXHDR(node_hash) != MERKLE_HASH_BYTES ||
+				memcmp(VARDATA_ANY(node_hash), children_hash.data, MERKLE_HASH_BYTES) != 0)
+			{
+				elog(WARNING, "merkle_verify_index structural mismatch: partition=%d node=%s prefix_len=%d "
+					 "stored_hash=%s children_xor=%s stored_count=%d children_count=%lld",
+					 DatumGetInt16(SPI_getbinval(tup, td, 1, &isnull)),
+					 TextDatumGetCString(SPI_getbinval(tup, td, 2, &isnull)),
+					 DatumGetInt16(SPI_getbinval(tup, td, 3, &isnull)),
+					 DatumGetCString(DirectFunctionCall1(byteaout, PointerGetDatum(node_hash))),
+					 merkle_hash_to_hex(&children_hash), node_count,
+					 (long long) children_count);
+				match = false;
+				break;
+			}
+		}
+		if (SPI_tuptable != NULL)
+			SPI_freetuptable(SPI_tuptable);
+		SPI_finish();
+	}
+
+	index_close(indexRel, NoLock);
+	table_close(heapRel, NoLock);
 	PG_RETURN_BOOL(match);
 }
 
