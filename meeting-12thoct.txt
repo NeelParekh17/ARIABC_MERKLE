@@ -1,0 +1,147 @@
+**Speaker 1:** So the other part, have you removed this thing and merged it into one single dynamic Merkle tree section?
+
+**Speaker 2:** Oh, yes.
+
+**Speaker 1:** Okay.
+
+**Speaker 2:** Uh, but yeah, I mean I still... I mean, uh... I still end up expanded versions, so I had a hard time...
+
+**Speaker 1:** You don't like it? It's not an option. If you're going to get a 15-page paper, it's not going to be even viewed. It's going to be thrown out. So what are you trying to do?
+
+**Speaker 2:** Yeah.
+
+**Speaker 1:** You can't be attached to something which is meaningless.
+
+**Speaker 2:** Yes.
+
+**Speaker 1:** Keep that—say, I'm not saying delete it completely. Have it in an archive version. Put it in your thesis when the thesis is done, but not in the paper.
+
+**Speaker 2:** Yeah, but I mean much of the description that we have there is not about the Merkle tree, but how we implemented, how we use that, how we map, and how we do those things.
+
+**Speaker 1:** No, no, that is... See, two things: for the—again, all the details will go into your thesis. But for the research paper, it has to be a higher-level thing. You can't do every single detail, but the important details have to be there: how we mapped it to a relation and how the B+ tree on that gives us what we want, all that has to be there. What I wanted you to do was to remove the duplication. We initially had the static Merkle tree and then we had the dynamic.
+
+**Speaker 2:** Yes.
+
+**Speaker 1:** So I wanted you to get rid of the static part because that is a known thing. What are we achieving? And uh, so we'll directly go into the dynamic. We don't have to say how we implemented static. It's not important. We can directly go into the dynamic thing and describe how we implemented it. That's all we want to do.
+
+**Speaker 2:** Okay. Yeah.
+
+**Speaker 1:** The implementation of static should go, because it's not a good scheme. We did it as a first cut, then when we realized it's a bottleneck, we replaced it. So we are not going to again describe the old stuff in the paper. There is no use. It'll damage the paper. People will say, "Why are you describing all this which is all known?"
+
+**Speaker 2:** Yes. Yeah, so that much of the static description—well, the whole static description comes in that corruption detection and recovery part. So it's...
+
+**Speaker 1:** No, I want you to have uh... See, corruption detection and recovery, there is a second part when you are using it. This is the data structure.
+
+**Speaker 2:** Yes.
+
+**Speaker 1:** That is what you describe up front.
+
+**Speaker 2:** Yes.
+
+**Speaker 1:** Then during normal execution, how the data structure gets updated is part of the basic Merkle tree. That is when you describe the data structure.
+
+**Speaker 2:** Sure.
+
+**Speaker 1:** Then how to efficiently detect uh this, including the fact that it's on a snapshot, all that will come in the corruption detection and recovery. You can mention it up front that the second benefit of doing it this way is we get snapshots.
+
+**Speaker 2:** Sure.
+
+**Speaker 1:** It's not like—it's actually a data structure on the snapshot. If we created our own tree, then we would have to maintain all that. So all that should come in. That it's a part of a clever system design which, by pushing it into this relation, gets us what we want. That should be described somewhere. Is that there?
+
+**Speaker 2:** Yes, that is there.
+
+**Speaker 1:** Okay, fine. Okay, we'll go over it, but before that, high-level, what are the other things, uh other than that?
+
+**Speaker 2:** Uh, yeah, so much of it is—I mean, there were some places where the old references were there. So references in the sense, old discussion was there, so I changed that, and also made it a bit compact on the deterministic part and this thing. Uh, the system model also, compressed that a little bit. Even introduction, I have compressed a little bit. Uh, but I mean...
+
+**Speaker 1:** Compressed meaning, compressed from the paper version?
+
+**Speaker 2:** Huh, from the paper version.
+
+**Speaker 1:** Okay. Not the archive version?
+
+**Speaker 2:** No, no. Not that. That is even longer. So, yeah, so I think, yeah, some of it we can take a look. Dynamic is still the biggest part, about uh, 1 and 1/2 pages or something.
+
+**Speaker 1:** Okay. That is acceptable. One page at least will have to be there, even if it's not 1 and 1/2.
+
+**Speaker 2:** Sure.
+
+**Speaker 3:** Should we have more talk about recovery? Recovery also, more talk?
+
+**Speaker 1:** Yeah, we will talk about it, because that is what we are doing. That was anyway part of the old feedback, that the focus should be on the recovery, not on the determinism.
+
+**Speaker 3:** Okay.
+
+**Speaker 1:** Only thing in the determinism, we'll say that a lot of the work is on batch, but we are not doing the batch. We're doing... because it'll affect latency and so on. Although, theoretically, we could also do batch if we don't care about latency. But what will it imply for us? Maybe it will uh on on the... blockchain side, it may speed up things because we have fewer transactions, but I don't think that is a big deal. Databases anyway, it's like group commit, right, for us. We're using Postgres. Postgres will do its own group commit automatically.
+
+**Speaker 2:** Yes.
+
+**Speaker 1:** This is interesting. We should discuss this. We're not doing anything specially here.
+
+**Speaker 2:** Yeah, built-in optimization where it batches multiple concurrent transactions to flush, uh instead of doing it on each one.
+
+**Speaker 1:** So this we should say. Because we're not doing batching, we're just depending on this, at the Postgres level. But at the other level, at the uh what what are we using now, uh NuRaft?
+
+**Speaker 3:** NuRaft. I don't think group commit is happening actually there, as of now. Because we are actually dependent on last commit, na?
+
+**Speaker 1:** Yeah, but it can do multiple at once. So we can look at that also, if that is the bottleneck. Maybe it's not. In NuRaft, is it?
+
+**Speaker 3:** Yes. No, no, but I'm saying that for Postgres side.
+
+**Speaker 1:** Postgres side we don't have to do it. So now I'm asking you what is there in NuRaft?
+
+**Speaker 3:** Yeah. Batching and all is already there.
+
+**Speaker 1:** It's there already?
+
+**Speaker 3:** Yes, yes, yes. We are using it also.
+
+**Speaker 1:** Within Raft, right? So we'll say on both things. Because what we're saying is we're not doing determinism by batching, because we want to preserve the order, but we are still getting part of the benefit of batching because we are doing group commit on Postgres side, and as well as on NuRaft side. But we don't allow changing the order because the application which we consider demands that. It's not just deterministic. There are many applications where the externally visible order must be the same as the serialization order. Otherwise, that creates a problem. So we will say that this application requirement, it's not—we have to do it, it's not an option for us.
+
+**Speaker 3:** Few days ago, I was discussing one issue with ma'am about that row, same rows.
+
+**Speaker 1:** Hm?
+
+**Speaker 3:** So like if two rows are exactly similar...
+
+**Speaker 1:** No, you can't say exactly similar. Exactly same.
+
+**Speaker 3:** Yes.
+
+**Speaker 1:** Similar means not the same.
+
+**Speaker 3:** Yes, my bad. So if same...
+
+**Speaker 1:** Yeah.
+
+**Speaker 3:** ...then their hashes will be also same, right?
+
+**Speaker 1:** Yes.
+
+**Speaker 3:** So if we do XOR, then it will get cancel out.
+
+**Speaker 1:** So if you...
+
+**Speaker 3:** So an empty database will also have same hash, same similar to...
+
+**Speaker 1:** If you have every row doubled.
+
+**Speaker 3:** Yes, kind of like, yes, yes, yes, yes.
+
+**Speaker 1:** That's uh that is true. It's very unusual to have. As long as a primary key, this will not happen.
+
+**Speaker 3:** We already established a fact that we don't need, it can be like that can't be that no primary key, and nothing can be unique.
+
+**Speaker 1:** Problem is if we do order independent... If you don't do XOR, then what else can we do? There are some options. You can add it up, but...
+
+**Speaker 3:** Right.
+
+**Speaker 1:** ...and then take the cyclic thing, meaning if it overflows, we'll drop the carry.
+
+**Speaker 3:** But then how about when, so like if you are at an initial state $X$, after addition, insertion, you go back to $Y$. Now if you perform delete on this, you again have to go back on $X$, na?
+
+**Speaker 1:** That will work! As long as the addition is cyclic.
+
+**Speaker 3:** Okay.
+
+**Speaker 1:** Integer overflow is fine, as long as it's cyclic. Unsigned integer addition: if you add something and it overflows, then from that you subtract, you will come back here. It is symmetric. That is an option. I don't know how important it is, but we can easily flip it if we want. Costs nothing to change XOR to plus, minus. Okay. What else, before we go into the paper? Is there any other problem, anything?
