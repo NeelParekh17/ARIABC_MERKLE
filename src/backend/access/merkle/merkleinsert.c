@@ -34,7 +34,7 @@
  * 1. Fetch the full tuple from the heap
  * 2. Compute its hash
  * 3. Determine which leaf it maps to
- * 4. XOR the hash into the leaf and propagate up the partition-root
+ * 4. Add the hash to the leaf and propagate up the partition-root
  *
  * Note: For UPDATE, PostgreSQL calls ambulkdelete for the old row
  * and aminsert for the new row (or just aminsert if the key didn't change).
@@ -101,7 +101,7 @@ merkleInsert(Relation indexRel, Datum *values, bool *isnull,
  * IMPORTANT: This function does NOT actually delete anything from the Merkle index!
  *
  * PostgreSQL's index AM API requires this callback, but for Merkle indexes,
- * the actual hash removal (XOR-out) happens BEFORE deletion in the executor
+ * the actual hash subtraction happens BEFORE deletion in the executor
  * layer (see ExecDeleteMerkleIndexes in nodeModifyTable.c). This is necessary
  * because:
  *

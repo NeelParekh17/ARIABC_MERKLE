@@ -127,7 +127,7 @@ merkle_mark_recovery_state(MerkleRecoveryState state, const char *reason)
 
 
 static bool
-merkle_index_page_is_v7(Oid index_oid)
+merkle_index_page_is_current(Oid index_oid)
 {
 	Relation index_rel;
 	Buffer buf = InvalidBuffer;
@@ -199,7 +199,8 @@ merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS)
 	index_count = (int) SPI_processed;
 	if (index_count > 0)
 	{
-		index_oids = palloc(sizeof(Oid) * index_count);
+		/* The list is used after SPI_finish(), which frees SPI's context. */
+		index_oids = SPI_palloc(sizeof(Oid) * index_count);
 		for (i = 0; i < index_count; i++)
 		{
 			bool isnull;
@@ -216,10 +217,10 @@ merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS)
 		PopActiveSnapshot();
 
 	for (i = 0; i < index_count; i++)
-		if (!merkle_index_page_is_v7(index_oids[i]))
+		if (!merkle_index_page_is_current(index_oids[i]))
 			legacy_count++;
 
-	/* Normal v7 startup lag is replayed by the applier, not by migration. */
+	/* Normal current-format startup lag is replayed by the applier, not by migration. */
 	if (legacy_count == 0)
 	{
 		if (index_oids != NULL)
@@ -248,19 +249,19 @@ merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS)
 	merkle_mark_recovery_state(MERKLE_STATE_READY, NULL);
 	for (i = 0; i < index_count; i++)
 	{
-		if (merkle_index_page_is_v7(index_oids[i]))
+		if (merkle_index_page_is_current(index_oids[i]))
 			continue;
 		reindex_index(index_oids[i], true, RELPERSISTENCE_PERMANENT, 0);
-		if (!merkle_index_page_is_v7(index_oids[i]))
+		if (!merkle_index_page_is_current(index_oids[i]))
 		{
 			Oid failed_index = index_oids[i];
 
 			merkle_mark_recovery_state(MERKLE_STATE_REBUILD_REQUIRED,
-									   "Merkle index rebuild did not produce v7 metadata");
+									   "Merkle index rebuild did not produce current-format metadata");
 			pfree(index_oids);
 			ereport(ERROR,
 					(errcode(ERRCODE_INDEX_CORRUPTED),
-					 errmsg("Merkle index %u failed v7 rebuild validation", failed_index)));
+					 errmsg("Merkle index %u failed current-format rebuild validation", failed_index)));
 		}
 	}
 	/* Metadata validation is necessary but not sufficient: audit every
@@ -272,11 +273,13 @@ merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS)
 		bool verify_ok;
 		bool verify_null;
 
-		if (!ActiveSnapshotSet())
-		{
-			PushActiveSnapshot(GetTransactionSnapshot());
-			pushed_snapshot = true;
-		}
+		/* A read-only SPI query otherwise reuses the caller's pre-rebuild
+		 * command ID and cannot see the node rows just created by REINDEX.
+		 * Preserve SERIALIZABLE's transaction snapshot, with a fresh command ID.
+		 */
+		CommandCounterIncrement();
+		PushActiveSnapshot(GetTransactionSnapshot());
+		pushed_snapshot = true;
 		if (SPI_connect() != SPI_OK_CONNECT)
 			elog(ERROR, "Merkle rebuild verification SPI_connect failed");
 		/*
@@ -606,7 +609,7 @@ merkle_do_split_in_memory(Oid index_oid, int partition_id, const uint8 *node_id,
 		pfree(node_id_bytea);
 		pfree(hash_bytea);
 
-		/* Splits re-partition existing entries without changing total ancestor count or XOR hash */
+		/* Splits re-partition existing entries without changing total ancestor count or AdHash sum */
 	}
 
 	pfree(bucket_counts);
@@ -2703,7 +2706,7 @@ merkle_apply_staged_synchronous_safe(HTAB *combined_delta_map)
 	/*
 	 * The BCDB worker already performs deterministic serial-equivalent
 	 * conflict detection from the transaction read/write sets.  The rows in
-	 * merkle_node are an internal commutative XOR aggregate, not application
+	 * merkle_node are an internal commutative AdHash aggregate, not application
 	 * data: concurrent updates to the same ancestor are protected by normal
 	 * row locking and are rolled back with the enclosing transaction.  Letting
 	 * PostgreSQL SSI observe the route reads followed by the aggregate updates

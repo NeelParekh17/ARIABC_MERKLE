@@ -3,7 +3,7 @@
  * merkleutil.c
  *    Utility functions for Merkle tree operations
  *
- * This file contains helper functions for hash computation, XOR operations,
+ * This file contains helper functions for hash computation, AdHash operations,
  * tree traversal, and page access.
  *
  * IDENTIFICATION
@@ -312,18 +312,41 @@ merkle_meta_cache_store(Oid relid, int fanout, int split_threshold,
 }
 
 /*
- * merkle_hash_xor() - XOR two hashes together
+ * merkle_hash_xor() - Add two little-endian 256-bit hashes modulo 2^256
  *
- * dest = dest XOR src
- * This is the core operation for Merkle tree updates.
+ * The historical symbol (and its SQL wrapper) is retained for compatibility.
+ * Carry crosses every byte; only the final carry is discarded.  src may alias
+ * dest.  Removal uses merkle_hash_negate() before adding the contribution.
  */
 void
 merkle_hash_xor(MerkleHash *dest, const MerkleHash *src)
 {
-    int i;
+	unsigned int carry = 0;
+	int i;
 
-    for (i = 0; i < MERKLE_HASH_BYTES; i++)
-        dest->data[i] ^= src->data[i];
+	for (i = 0; i < MERKLE_HASH_BYTES; i++)
+	{
+		unsigned int sum = (unsigned int) dest->data[i] + src->data[i] + carry;
+
+		dest->data[i] = (uint8) sum;
+		carry = sum >> 8;
+	}
+}
+
+/* In-place two's complement: hash = -hash modulo 2^256. */
+void
+merkle_hash_negate(MerkleHash *hash)
+{
+	unsigned int carry = 1;
+	int i;
+
+	for (i = 0; i < MERKLE_HASH_BYTES; i++)
+	{
+		unsigned int sum = (unsigned int) (hash->data[i] ^ 0xff) + carry;
+
+		hash->data[i] = (uint8) sum;
+		carry = sum >> 8;
+	}
 }
 
 /*

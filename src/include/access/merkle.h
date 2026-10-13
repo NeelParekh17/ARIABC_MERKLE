@@ -102,7 +102,7 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
  * Page layout constants
  */
 #define MERKLE_METAPAGE_BLKNO       0
-#define MERKLE_VERSION              10  /* Partitioned dynamic Merkle index format */
+#define MERKLE_VERSION              11  /* AdHash aggregate; v10 used XOR */
 #define MERKLE_ROUTE_FORMAT_VERSION 4
 #define MERKLE_ROW_HASH_FORMAT_VERSION 1
 
@@ -137,7 +137,7 @@ typedef struct MerkleDeltaKey
 
 /* Versioned, endian-stable durable transaction-delta encoding. */
 #define MERKLE_DELTA_MAGIC          ((uint32) 0x4D444C54) /* "MDLT" */
-#define MERKLE_DELTA_VERSION        1
+#define MERKLE_DELTA_VERSION        2   /* Signed AdHash contributions; v1 used XOR */
 #define MERKLE_DELTA_HEADER_BYTES   40
 #define MERKLE_DELTA_ENTRY_BYTES    72
 
@@ -154,9 +154,9 @@ typedef struct MerkleDeltaEntry
 	MerkleDeltaKey key;
 	MerkleHash	xor_delta;
 	/*
-	 * Net leaf row-count change of the events merged into this entry.  XOR
-	 * cancels repeated events of one key (e.g. UPDATE staged as DELETE+INSERT
-	 * followed by DELETE), so the count cannot be derived from event_type.
+	 * Net leaf row-count change of the events merged into this entry.  Hash
+	 * contributions are signed AdHash deltas (the field keeps its historical
+	 * name).  The count cannot be derived from the coalesced event_type.
 	 */
 	int32		count_delta;
 } MerkleDeltaEntry;
@@ -327,9 +327,10 @@ extern void merkle_mark_recovery_state(MerkleRecoveryState state,
 extern Datum merkle_rebuild_legacy_indexes(PG_FUNCTION_ARGS);
 
 /*
- * XOR operations on hashes
+ * AdHash operations on little-endian 256-bit hashes (historical add name)
  */
 extern void merkle_hash_xor(MerkleHash *dest, const MerkleHash *src);
+extern void merkle_hash_negate(MerkleHash *hash);
 extern void merkle_hash_zero(MerkleHash *hash);
 extern bool merkle_hash_is_zero(const MerkleHash *hash);
 extern char *merkle_hash_to_hex(const MerkleHash *hash);

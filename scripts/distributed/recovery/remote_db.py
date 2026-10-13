@@ -183,18 +183,22 @@ class NodeConnection:
 
     def get_merkle_root_hash(self, table: str) -> str:
         """Fetch the top-level Merkle root hash for the specified table."""
-        # Fast non-blocking path: read partition roots directly from ariabc_internal catalog table and XOR them
+        # The native helper checks format before we add LE roots modulo 2^256.
         try:
             rows = self.execute(
-                f"SELECT hash FROM ariabc_internal.merkle_node_{table} WHERE prefix_len = 0 ORDER BY partition_id"
+                f"SELECT decode(hash, 'hex') AS hash FROM merkle_get_partition_root_hashes("
+                f"(SELECT i.indexrelid FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+                f"JOIN pg_am am ON am.oid=c.relam WHERE i.indrelid='{table}'::regclass "
+                f"AND am.amname='merkle' LIMIT 1)::regclass) ORDER BY partition"
             )
             if rows:
-                xor_hash = bytearray(32)
+                accumulator = 0
                 for r in rows:
                     h = bytes(r["hash"])
-                    for i in range(min(len(xor_hash), len(h))):
-                        xor_hash[i] ^= h[i]
-                return xor_hash.hex()
+                    if len(h) != 32:
+                        raise ValueError("invalid 256-bit Merkle partition root")
+                    accumulator = (accumulator + int.from_bytes(h, "little")) % (1 << 256)
+                return accumulator.to_bytes(32, "little").hex()
         except Exception:
             pass
         # Fallback to C function
@@ -208,11 +212,13 @@ class NodeConnection:
 
     def get_partition_root_hashes(self, table: str) -> Dict[int, str]:
         """Fetch all partition root hashes as a mapping of partition_id -> hex_hash."""
-        # Fast non-blocking path: read partition roots directly from ariabc_internal catalog table
+        # Validate the format through the native root helper before comparison.
         try:
             rows = self.execute(
-                f"SELECT partition_id, encode(hash, 'hex') AS hash FROM ariabc_internal.merkle_node_{table} "
-                f"WHERE prefix_len = 0 ORDER BY partition_id"
+                f"SELECT partition AS partition_id, hash FROM merkle_get_partition_root_hashes("
+                f"(SELECT i.indexrelid FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+                f"JOIN pg_am am ON am.oid=c.relam WHERE i.indrelid='{table}'::regclass "
+                f"AND am.amname='merkle' LIMIT 1)::regclass) ORDER BY partition"
             )
             if rows:
                 return {int(r["partition_id"]): str(r["hash"]).strip() for r in rows}

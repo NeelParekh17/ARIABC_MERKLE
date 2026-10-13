@@ -302,7 +302,7 @@ ApplyMerkleDeletePlan(MerkleDeletePlan *plan)
 /*
  * ExecDeleteMerkleIndexes - Update merkle indexes before DELETE
  *
- * When a row is deleted, we need to XOR out its hash from any merkle
+ * When a row is deleted, we need to subtract its hash from any merkle
  * indexes on the table. This must be done BEFORE the row is deleted
  * because we need to read the row to compute its hash.
  */
@@ -434,7 +434,7 @@ ExecDeleteMerkleIndexes(Relation heapRel, ItemPointer tupleid)
 /*
  * ExecInsertMerkleIndexes - Insert new row hash into merkle indexes after UPDATE
  *
- * After an UPDATE, we need to XOR in the NEW row's hash into any merkle
+ * After an UPDATE, we need to add the NEW row's hash into any merkle
  * indexes. This is called after table_tuple_update completes, using the
  * new tuple's TID.
  */
@@ -1232,7 +1232,7 @@ ldelete:;
 		 * BCDB WORKER: Defer DELETE to serial phase.
 		 * Just like INSERT and UPDATE, store the operation for later
 		 * execution in apply_optim_writes(). This prevents Merkle tree
-		 * XOR-out from happening during the parallel phase, which would
+		 * hash subtraction from happening during the parallel phase, which would
 		 * cause hash corruption due to concurrent unprotected access.
 		 */
 		if (defer_bcdb_dml)
@@ -1293,7 +1293,7 @@ ldelete:;
 		/*
 		 * Update Merkle indexes BEFORE deleting the tuple.
 		 * We need to do this before the tuple is gone so we can
-		 * read the row data to compute the hash to XOR out.
+		 * read the row data to compute the hash to subtract.
 		 */
 		merkleDeletePlan = CaptureMerkleDeletePlan(resultRelationDesc, tupleid);
 	
@@ -1916,7 +1916,7 @@ lreplace:;
 				/*
 				 * Deferred Merkle update:
 				 * We do NOT update the Merkle tree here because we are in optimistic mode.
-				 * The actual XOR OUT (old) and XOR IN (new) will happen in 
+				 * The actual hash subtraction (old) and addition (new) will happen in
 				 * apply_optim_update() when the update is actually applied to the heap.
 				 * This prevents double-counting and handling invalid TIDs for unwritten tuples.
 				 */
@@ -2093,8 +2093,8 @@ lreplace:;
 
 			/*
 			 * Exact-once Merkle UPDATE maintenance:
-			 * - old-row XOR-out is handled by ApplyMerkleDeletePlan() above
-			 * - new-row XOR-in must happen exactly once regardless of HOT/non-HOT
+			 * - old-row hash subtraction is handled by ApplyMerkleDeletePlan() above
+			 * - new-row addition must happen exactly once regardless of HOT/non-HOT
 			 *
 			 * The generic ExecInsertIndexTuples() path also invokes the Merkle
 			 * AM on non-HOT updates. Suppress that temporarily so UPDATE owns the

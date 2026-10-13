@@ -3382,6 +3382,7 @@ bool apply_optim_update(ItemPointer tid, TupleTableSlot *slot, CommandId cid)
 					if (memcmp(pending[i].old_key_hash, new_key_hash, 8) == 0)
 					{
 						MerkleHash delta = oldHash;
+						merkle_hash_negate(&delta);
 						merkle_hash_xor(&delta, &newHash);
 						merkle_stage_delta_event(indexRel, MERKLE_DELTA_UPDATE_SAME_LEAF,
 												 pending[i].old_key_hash, new_key_hash, &delta);
@@ -3866,7 +3867,7 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
         /*
          * Row genuinely doesn't exist (e.g., first DELETE of this key
          * that already committed and the INSERT hasn't come yet).
-         * Nothing to XOR-out, nothing to delete. This is normal.
+		 * No hash to subtract, nothing to delete. This is normal.
          */
         if (oldSlot)
             ExecDropSingleTupleTableSlot(oldSlot);
@@ -3881,7 +3882,7 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
     merkle_compute_row_hash(relation, &currentTid, &oldHash);
     hasOldHash = !merkle_hash_is_zero(&oldHash);
 
-    /* XOR-out from all Merkle indexes */
+	/* Subtract the old row from all Merkle indexes */
     if (hasOldHash)
     {
         indexList = RelationGetIndexList(relation);
@@ -3935,7 +3936,7 @@ bool apply_deferred_delete_by_key(Oid relOid, int keyval)
                   ItemPointerGetOffsetNumberNoCheck(&currentTid),
                   (int)result);
 
-    /* Apply Merkle XOR-outs after successful heap delete */
+	/* Apply Merkle hash subtractions after successful heap delete */
     if (result == TM_Ok && hasOldHash)
     {
         uint64 merkle_update_start = bcdb_ptrace_timer_start();

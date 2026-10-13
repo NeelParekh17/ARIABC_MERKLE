@@ -3,7 +3,7 @@
  * merkledelta.c
  *    Transaction-local Merkle delta staging and synchronous application.
  *
- * Transactions aggregate Merkle XOR deltas by index/leaf.  Direct/plain
+ * Transactions aggregate signed Merkle AdHash deltas by index/leaf.  Direct/plain
  * transactions can materialize those deltas in PRE_COMMIT; Raft-ledger
  * transactions serialize them into the ledger and use the ordered applier.
  *
@@ -207,7 +207,18 @@ merkle_stage_delta_event(Relation indexRel, MerkleDeltaEventType event_type,
 		merkle_hash_zero(&entry->xor_delta);
 		entry->count_delta = 0;
 	}
-	merkle_hash_xor(&entry->xor_delta, hash);
+	/* DELETE callers supply the positive old-row hash.  Negate exactly here;
+	 * UPDATE_SAME_LEAF already supplies new-minus-old and must not be negated.
+	 */
+	if (event_type == MERKLE_DELTA_DELETE)
+	{
+		MerkleHash removal = *hash;
+
+		merkle_hash_negate(&removal);
+		merkle_hash_xor(&entry->xor_delta, &removal);
+	}
+	else
+		merkle_hash_xor(&entry->xor_delta, hash);
 	if (event_type == MERKLE_DELTA_INSERT)
 		entry->count_delta++;
 	else if (event_type == MERKLE_DELTA_DELETE)
