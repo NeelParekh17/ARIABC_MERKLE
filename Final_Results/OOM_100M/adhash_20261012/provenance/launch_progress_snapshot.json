@@ -1,0 +1,16 @@
+{
+  "updated_utc": "2026-10-12T16:25:43.648010+00:00",
+  "smoke_accepted": 2,
+  "campaign_dir": "/home/neel/claude_ctl/f15_adhash_20261012/results/campaign/run_20261012_213147_24c8a32a",
+  "accepted": 3,
+  "planned": 112,
+  "accepted_by_mode": {
+    "bcdb_merkle": 3,
+    "bcdb_det": 0
+  },
+  "attempts": 3,
+  "noise_excluded": 0,
+  "mean_observed_case_spacing_s": 279.6874202489853,
+  "eta_utc": "2026-10-13T00:51:09.368917+00:00",
+  "eta_limit": "Provisional from completed case spacing; early mode mix, restores and verification can change it."
+}

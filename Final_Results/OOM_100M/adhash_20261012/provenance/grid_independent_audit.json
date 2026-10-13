@@ -1,0 +1,49 @@
+[
+  {
+    "case": "/home/neel/claude_ctl/f15_adhash_20261012/results/campaign/run_20261012_213147_24c8a32a/c_s0.99_bcdb_merkle_w16_t1",
+    "mode": "bcdb_merkle",
+    "workers": 16,
+    "trial": 1,
+    "terminals": 20000,
+    "operation_counts": {
+      "SELECT": 20000
+    },
+    "gateway_exit": 0,
+    "failures": 0,
+    "merkle_verify": "PASS",
+    "noise_excluded": false,
+    "pass_check": true
+  },
+  {
+    "case": "/home/neel/claude_ctl/f15_adhash_20261012/results/campaign/run_20261012_213147_24c8a32a/b_s0.99_bcdb_merkle_w8_t1",
+    "mode": "bcdb_merkle",
+    "workers": 8,
+    "trial": 1,
+    "terminals": 20000,
+    "operation_counts": {
+      "SELECT": 19031,
+      "UPDATE": 969
+    },
+    "gateway_exit": 0,
+    "failures": 0,
+    "merkle_verify": "PASS",
+    "noise_excluded": false,
+    "pass_check": true
+  },
+  {
+    "case": "/home/neel/claude_ctl/f15_adhash_20261012/results/campaign/run_20261012_213147_24c8a32a/a_s1.2_bcdb_merkle_w8_t1",
+    "mode": "bcdb_merkle",
+    "workers": 8,
+    "trial": 1,
+    "terminals": 20000,
+    "operation_counts": {
+      "SELECT": 9953,
+      "UPDATE": 10047
+    },
+    "gateway_exit": 0,
+    "failures": 0,
+    "merkle_verify": "PASS",
+    "noise_excluded": false,
+    "pass_check": true
+  }
+]

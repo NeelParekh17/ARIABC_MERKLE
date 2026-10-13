@@ -1,0 +1,302 @@
+diff --git a/work/ARIABC/AriaBC/.bench_tmp/paper_rerun_20261010/clone_oom/scripts/distributed/run_oom_100m_benchmark.py b/../agents/f15/harness/scripts/distributed/run_oom_100m_benchmark.py
+index 84d12e33..e7e3d52c 100755
+--- a/work/ARIABC/AriaBC/.bench_tmp/paper_rerun_20261010/clone_oom/scripts/distributed/run_oom_100m_benchmark.py
++++ b/../agents/f15/harness/scripts/distributed/run_oom_100m_benchmark.py
+@@ -66,9 +66,19 @@ CANONICAL_BCDB_SETTINGS = {
+ }
+ 
+ 
++F15_PAPER = "/home/neel/ariabc_data/paper_20261010_oom"
++F15_BASELINES = {"merkle": F15_PAPER + "/pgdata", "plain": F15_PAPER + "/pgdata_base_v2_ff90_plain"}
++F15_WORKING = {"merkle": F15_PAPER + "/pgdata_merkle", "plain": F15_PAPER + "/pgdata_plain"}
++
++
++def baseline_path(args, name=None):
++    assert args.remote_dir == "/home/neel/ariabc_data/f15_adhash_20261012/oom"
++    return F15_BASELINES["plain" if (name or args.base_dir_name).endswith("_plain") else "merkle"]
++
++
+ def pgdata(args):
+     """Working data directory of the current case."""
+-    return getattr(args, "_pgdata", f"{args.remote_dir}/pgdata")
++    return getattr(args, "_pgdata", F15_WORKING["merkle"])
+ 
+ 
+ PG_ISOLATION = {"pg": "serializable", "pg_rc": "read committed"}
+@@ -99,10 +109,20 @@ def base_dir_name_for(args, mode):
+ 
+ def work_dir_for(args, mode):
+     if args.reset_mode == "delta":
+-        return f"{args.remote_dir}/pgdata_{variant(mode)}"
++        return F15_WORKING[variant(mode)]
+     return f"{args.remote_dir}/pgdata"
+ 
+ 
++def f15_cases(args):
++    points = [(wl, skew, workers) for wl, skew in args.combos for workers in args.workers]
++    control_block = {tuple(point): i % args.trials + 1 for i, point in enumerate(points)}
++    for wl, skew, workers, mode, trial in balanced_cases(points, args.modes, args.trials, args.seed):
++        if mode == "bcdb_det":
++            if trial != control_block[(wl, skew, workers)]:continue
++            trial = 1  # One det control per point, distributed across trial blocks.
++        yield wl, skew, mode, workers, trial
++
++
+ def manifest_path_for(args, base_name):
+     name = f".ariabc_golden_manifest_{base_name}.json" if base_name != "pgdata_base" else ".ariabc_golden_manifest.json"
+     return f"{args.remote_dir}/{name}"
+@@ -140,7 +160,7 @@ def run_remote(host, user, cmd, timeout=600, check=True, retry_on_drop=False):
+ 
+ 
+ def db_shell(args):
+-    return f"export LD_LIBRARY_PATH={args.install_dir}/lib:/home/neel/Desktop/rdkafka_local/lib:${{LD_LIBRARY_PATH:-}}\n"
++    return f"export TMPDIR=/home/neel/claude_checks/f15_adhash_20261012/scratch\nexport LD_LIBRARY_PATH={args.install_dir}/lib:/home/neel/Desktop/rdkafka_local/lib:${{LD_LIBRARY_PATH:-}}\n"
+ 
+ 
+ def sudo_command(command):
+@@ -189,7 +209,7 @@ def sql(args, statement, timeout=600):
+ 
+ 
+ def check_remote_db_exists(args):
+-    base_dir = f"{args.remote_dir}/{getattr(args, 'base_dir_name', 'pgdata_base')}"
++    base_dir = baseline_path(args)
+     result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+ if [ -f {base_dir}/PG_VERSION ]; then
+     {args.install_dir}/bin/pg_controldata {base_dir}
+@@ -208,6 +228,7 @@ fi
+ 
+ 
+ def generate_remote_100m_database(args):
++    raise RuntimeError("F15 must reuse its approved, verified scratch baseline; generation disabled")
+     """
+     Creates the requested keyspace with 16 streaming COPY workers.
+     """
+@@ -218,7 +239,7 @@ def generate_remote_100m_database(args):
+ 
+     start_total = time.time()
+     base_name = getattr(args, "base_dir_name", "pgdata_base")
+-    base_dir = f"{args.remote_dir}/{base_name}"
++    base_dir = baseline_path(args, base_name)
+ 
+     schema = (REPO_ROOT / "scripts/distributed/sql/raft_apply_ledger_schema.sql").read_text()
+     run_remote(args.remote_host, args.remote_user,
+@@ -501,10 +522,11 @@ fi
+ 
+ def stop_postgres(args):
+     # Any working directory may hold the running instance (delta mode keeps one per variant).
+-    dirs = [f"{args.remote_dir}/{name}" for name in ("pgdata", "pgdata_merkle", "pgdata_plain")]
++    dirs = [work_dir_for(args, mode) for mode in ("bcdb_merkle", "bcdb_det")]
+     return run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+ for d in {' '.join(dirs)}; do
+     if [ -f "$d/postmaster.pid" ] && {args.install_dir}/bin/pg_ctl -D "$d" status >/dev/null 2>&1; then
++        test "$(sed -n '4p' "$d/postmaster.pid")" = "{args.db_port}"
+         {args.install_dir}/bin/pg_ctl -D "$d" -w -t 120 stop -m fast
+     fi
+ done
+@@ -512,7 +534,10 @@ done
+ 
+ 
+ def start_postgres(args):
++    assert pgdata(args) in F15_WORKING.values()
+     return run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
++free -g
++test "$(df -B1 --output=avail {args.remote_dir} | tail -1)" -ge 5368709120
+ if ! {args.install_dir}/bin/pg_ctl -D {pgdata(args)} status >/dev/null 2>&1; then
+     {args.install_dir}/bin/pg_ctl -D {pgdata(args)} -l {args.remote_dir}/postgres.log -w -t 120 start
+ fi
+@@ -557,7 +582,7 @@ def prepare_ledger_schema(args):
+ 
+ def get_remote_baseline_identity(args, base_name=None):
+     """Inspect active baseline directory to obtain fresh control, checksum and sizing metadata."""
+-    base_dir = f"{args.remote_dir}/{base_name or getattr(args, 'base_dir_name', 'pgdata_base')}"
++    base_dir = baseline_path(args, base_name)
+     cmd = db_shell(args) + f"""
+ {args.install_dir}/bin/pg_controldata {base_dir} | grep -E 'Database system identifier|Latest checkpoint location|Database cluster state' | sed 's/.*: *//'
+ sha256sum {base_dir}/global/pg_control {base_dir}/PG_VERSION
+@@ -586,7 +611,7 @@ def validate_golden_baseline(args):
+     fidelity before postmaster starts, followed by exact O(1) relation size and bound checks.
+     """
+     base_name = getattr(args, "base_dir_name", "pgdata_base")
+-    base_dir = f"{args.remote_dir}/{base_name}"
++    base_dir = baseline_path(args, base_name)
+     manifest_name = f".ariabc_golden_manifest_{base_name}.json" if base_name != "pgdata_base" else ".ariabc_golden_manifest.json"
+     manifest_path = f"{args.remote_dir}/{manifest_name}"
+     meta = get_remote_baseline_identity(args)
+@@ -616,6 +641,8 @@ def validate_golden_baseline(args):
+             return manifest
+         print(f"  Golden manifest is missing, stale, or baseline changed; re-validating golden baseline...")
+ 
++    raise RuntimeError("F15 baseline manifest missing or changed; rerun explicit baseline verification")
++
+     # Start PG against a temporary check copy to run the full verification scan.
+     check_dir = f"{args.remote_dir}/pgdata_golden_check"
+     stop_server(args)
+@@ -695,89 +722,20 @@ rm -rf {check_dir}
+ 
+ 
+ def ensure_plain_baseline(args, golden):
+-    """Derive the pg/det baseline: the golden copy with both Merkle indexes dropped.
+-
+-    This is exactly the state the per-case cp reset produced after its DROP
+-    INDEX, made once and stopped cleanly so delta restores never rewrite the
+-    Merkle index files. It is rebuilt whenever the golden baseline changes.
+-    """
++    """Reuse the published plain baseline READ ONLY; never derive/rebuild it."""
+     name = args.base_dir_name + "_plain"
+-    plain = f"{args.remote_dir}/{name}"
+-    golden_dir = f"{args.remote_dir}/{args.base_dir_name}"
+     path = manifest_path_for(args, name)
+-    exists = run_remote(args.remote_host, args.remote_user,
+-                        f"test -f {plain}/PG_VERSION && echo YES || echo NO", timeout=15).stdout.strip()
+-    if exists == "YES":
+-        raw = run_remote(args.remote_host, args.remote_user,
+-                         f"cat {path} 2>/dev/null || echo MISSING", timeout=15).stdout.strip()
+-        meta = get_remote_baseline_identity(args, name)
+-        try:
+-            manifest = json.loads(raw)
+-        except ValueError:
+-            manifest = {}
+-        if (manifest.get("derived_from_checkpoint_lsn") == golden["checkpoint_lsn"] and
+-                manifest.get("derived_from_pg_control_sha256") == golden["pg_control_sha256"] and
+-                meta["cluster_state"] == "shut down" and
+-                all(manifest.get(k) == meta[k] for k in ("db_system_id", "checkpoint_lsn",
+-                                                         "pg_control_sha256", "file_count", "total_bytes"))):
+-            print(f"  Plain baseline verified: {manifest['file_count']} files, "
+-                  f"{manifest['total_bytes'] / 2**30:.2f} GiB", flush=True)
+-            return manifest
+-        print("  Plain baseline is stale or unverified; rebuilding it from the golden baseline", flush=True)
+-
+-    stop_server(args)
+-    stop_postgres(args)
+-    tmp = plain + ".tmp"
+-    conf = (f"port = {args.db_port}\nlisten_addresses = '*'\nshared_buffers = '128MB'\n"
+-            "enable_merkle_index = off\nbcdb_worker_count = 1\nbcdb_ledger_trace = off\n"
+-            "autovacuum = off\nmax_parallel_maintenance_workers = 0\n")
+-    run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+-rm -rf -- {plain} {tmp}
+-cp -a --reflink=never {golden_dir} {tmp}
+-printf %s {shlex.quote(conf)} > {tmp}/postgresql.auto.conf
+-{args.install_dir}/bin/pg_ctl -D {tmp} -l {args.remote_dir}/plain_baseline.log -w -t 120 start
+-""", timeout=args.reset_timeout)
+-    saved = getattr(args, "_pgdata", None)
+-    args._pgdata = tmp
+-    try:
+-        prepare_ledger_schema(args)
+-        sql(args, "DROP INDEX usertable_merkle_idx; DROP INDEX usertable_merkle_lookup_idx;")
+-        stats = sql(args, "SELECT pg_relation_size('usertable'), pg_relation_size('usertable_pkey1'), "
+-                          "relpages FROM pg_class WHERE relname='usertable';")
+-        if stats != f"{golden['heap_bytes']}|{golden['index_bytes']}|{golden['relpages']}":
+-            raise RuntimeError(f"Plain baseline relation sizes differ from golden: {stats}")
+-        indexes = json.loads(sql(args, "SELECT json_agg(row_to_json(i)) FROM (SELECT indexname, indexdef "
+-                                       "FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;"))
+-        if any("merkle" in i["indexname"] for i in indexes):
+-            raise RuntimeError(f"Merkle index survived in plain baseline: {indexes}")
+-        sql(args, "CHECKPOINT;")
+-    finally:
+-        run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+-if [ -f {tmp}/postmaster.pid ]; then {args.install_dir}/bin/pg_ctl -D {tmp} -w -t 120 stop -m fast; fi
+-""", timeout=150)
+-        if saved is None:
+-            del args._pgdata
+-        else:
+-            args._pgdata = saved
+-    run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+-cp -a {golden_dir}/postgresql.auto.conf {tmp}/postgresql.auto.conf
+-rm -f {tmp}/postmaster.opts
+-{args.install_dir}/bin/pg_controldata {tmp} | grep -Eq 'Database cluster state:[[:space:]]+shut down$'
+-sync
+-mv {tmp} {plain}
+-""", timeout=args.reset_timeout)
++    manifest = json.loads(run_remote(args.remote_host, args.remote_user, f"cat {path}").stdout)
+     meta = get_remote_baseline_identity(args, name)
+-    manifest = dict(version=2, db_rows=args.db_rows, keyspace=golden["keyspace"],
+-                    heap_bytes=golden["heap_bytes"], index_bytes=golden["index_bytes"],
+-                    relpages=golden["relpages"], indexes=indexes,
+-                    derived_from_checkpoint_lsn=golden["checkpoint_lsn"],
+-                    derived_from_pg_control_sha256=golden["pg_control_sha256"],
+-                    **{k: meta[k] for k in ("db_system_id", "checkpoint_lsn", "pg_control_sha256",
+-                                            "pg_version_sha256", "file_count", "total_bytes")})
+-    run_remote(args.remote_host, args.remote_user,
+-               f"printf %s {shlex.quote(json.dumps(manifest))} > {path}", timeout=15)
+-    print(f"  Plain baseline written: {manifest['file_count']} files, "
+-          f"{manifest['total_bytes'] / 2**30:.2f} GiB", flush=True)
++    if meta["cluster_state"] != "shut down":
++        raise RuntimeError("Published plain baseline is not stopped")
++    for k in ("db_system_id", "checkpoint_lsn", "pg_control_sha256", "pg_version_sha256", "file_count", "total_bytes"):
++        if manifest[k] != meta[k]:raise RuntimeError("Published plain baseline identity changed: " + k)
++    for k in ("heap_bytes", "index_bytes", "relpages", "keyspace"):
++        if manifest[k] != golden[k]:raise RuntimeError("Plain/Merkle baseline mismatch: " + k)
++    if {i["indexname"] for i in manifest["indexes"]} != {"usertable_pkey1"}:
++        raise RuntimeError("Plain baseline contains unexpected indexes")
++    print("  Read-only published plain baseline verified; det working copy is approved pgdata_plain", flush=True)
+     return manifest
+ 
+ 
+@@ -794,7 +752,7 @@ def upload_probe(args):
+ def run_probe(args, probe_args, timeout):
+     # Reads the never-modified golden baseline with O_DIRECT: no page-cache effect.
+     command = (f"python3 {args.remote_dir}/device_settle_probe.py {probe_args} "
+-               f"--data-dir {args.remote_dir}/{args.base_dir_name} --device-stat {device_stat_path(args)} "
++               f"--data-dir {baseline_path(args)} --device-stat {device_stat_path(args)} "
+                f"--write-file {args.remote_dir}/.device_probe_write")
+     result = run_remote(args.remote_host, args.remote_user, command, timeout=timeout, check=False)
+     lines = result.stdout.strip().splitlines()
+@@ -866,7 +824,7 @@ fsync = on
+ full_page_writes = on
+ autovacuum = off
+ work_mem = '4MB'
+-maintenance_work_mem = '2GB'
++maintenance_work_mem = '256MB'
+ effective_cache_size = '4GB'
+ max_parallel_maintenance_workers = 4
+ max_parallel_workers_per_gather = 0
+@@ -889,7 +847,7 @@ merkle_apply_synchronous_direct = on
+ default_transaction_isolation = '{isolation_for(mode)}'
+ """
+     base_name = base_dir_name_for(args, mode)
+-    base_dir = f"{args.remote_dir}/{base_name}"
++    base_dir = baseline_path(args, base_name)
+     work = pgdata(args)
+     manifest_path = manifest_path_for(args, base_name)
+     manifest = (getattr(args, '_plain_manifest', None) if base_name != args.base_dir_name
+@@ -968,6 +926,9 @@ test -f {base_dir}/PG_VERSION
+ test ! -f {base_dir}/postmaster.pid
+ test ! -L {work}
+ test ! -L {base_dir}
++# F15 reuses only approved existing scratch copies; never seed a new full copy.
++test -f {work}/PG_VERSION
++test "$(df -B1 --output=avail {args.remote_dir} | tail -1)" -ge 5368709120
+ # Require room for a full copy plus WAL growth; do not consume all free space.
+ if [ ! -d {work} ]; then
+     needed=$(du -sb {base_dir} | cut -f1)
+@@ -980,6 +941,7 @@ sync
+ printf %s {shlex.quote(config)} > {work}/postgresql.auto.conf
+ : > {args.remote_dir}/postgres.log
+ rm -f {work}/.merkle_index_dropped
++test "$(df -B1 --output=avail {args.remote_dir} | tail -1)" -ge 5368709120
+ """, timeout=args.reset_timeout)
+     device_after_restore = get_remote_nvme_stats(args)
+     restore_write_mib = delta(device_before_restore, device_after_restore, "write_sectors") / 2048
+@@ -1602,6 +1564,10 @@ def main(argv=None):
+                                                     queries=args.txs)
+     if not args.resume_dir:
+         (out_dir / "campaign.json").write_text(json.dumps(manifest, indent=2) + "\n")
++    with (out_dir / "planned_case_order.csv").open("w", newline="") as handle:
++        writer = csv.writer(handle)
++        writer.writerow(["workload", "skew", "mode", "workers", "trial"])
++        writer.writerows(f15_cases(args))
+     if args.dry_run:
+         print(f"Dry run: generated {len(files)} workloads; no remote commands executed.")
+         return
+@@ -1680,10 +1646,7 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
+                                         str(row_data["mode"]), int(row_data["workers"]), int(row_data["trial"])))
+             print(f"Resuming {out_dir}: {len(rows)} cases already completed.", flush=True)
+ 
+-        cases = [(wl, skew, mode, workers, trial)
+-                 for wl, skew, workers, mode, trial in balanced_cases(
+-                     [(wl, skew, workers) for wl, skew in args.combos for workers in args.workers],
+-                     args.modes, args.trials, args.seed)]
++        cases = list(f15_cases(args))
+ 
+         for wl, skew, mode, workers, trial in cases:
+             key = (str(wl), float(skew), str(mode), int(workers), int(trial))

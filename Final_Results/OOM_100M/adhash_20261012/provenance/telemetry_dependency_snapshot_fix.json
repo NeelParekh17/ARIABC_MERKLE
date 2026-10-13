@@ -1,0 +1,9 @@
+{
+  "time": 1791820459.9877508,
+  "fixed": [
+    "/home/neel/claude_ctl/f15_adhash_20261012/results/preflight/run_20261012_211721_577c0dda/campaign.json",
+    "/home/neel/claude_ctl/f15_adhash_20261012/results/smoke/run_20261012_211725_e5b80c6e/campaign.json"
+  ],
+  "measured_cases_started": false,
+  "other_source_hashes_unchanged": true
+}

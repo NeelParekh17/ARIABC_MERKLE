@@ -1,0 +1,166 @@
+{
+  "version": 2,
+  "db_rows": 100000000,
+  "keyspace": "100000000|1|100000000",
+  "db_system_id": "7695110858662784567",
+  "checkpoint_lsn": "5/41EBAA30",
+  "pg_control_sha256": "fb6bbe818e284813e2bb375dbf6290988567d0f1b688fa1f287f07642bbb3969",
+  "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+  "file_count": 1144,
+  "total_bytes": 35832970910,
+  "heap_bytes": 28248276992,
+  "index_bytes": 2246197248,
+  "total_relation_bytes": 33655717888,
+  "relpages": 3448276,
+  "indexes": [
+    {
+      "indexname": "usertable_merkle_idx",
+      "indexdef": "CREATE INDEX usertable_merkle_idx ON public.usertable USING merkle (ycsb_key) WITH (partitions='200', fanout='32', split_threshold='1024', merge_threshold='256')"
+    },
+    {
+      "indexname": "usertable_merkle_lookup_idx",
+      "indexdef": "CREATE INDEX usertable_merkle_lookup_idx ON public.usertable USING btree (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200), merkle_key_hash(ycsb_key), ycsb_key)"
+    },
+    {
+      "indexname": "usertable_pkey1",
+      "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+    }
+  ],
+  "cluster_state": "shut down",
+  "merkle_format": 11,
+  "engine_commit": "6a1c66d67b25d6e23f4393c65b59ffdf0e197492",
+  "merkle_stats": {
+    "version": 11,
+    "fanout": 32,
+    "partitions": 200,
+    "partition_key_columns": 0,
+    "subpartitions": 1,
+    "split_threshold": 1024,
+    "merge_threshold": 256,
+    "total_nodes": 211400,
+    "leaf_nodes": 204800,
+    "hash_bits": 256,
+    "route_format_version": 4,
+    "row_hash_format_version": 1,
+    "baseline_apply_seq": 0,
+    "crash_recovery": "ordered_committed_delta_wal",
+    "recovery_state": "READY",
+    "applied_seq": 0,
+    "target_seq": 0,
+    "lag_items": 0,
+    "index_keys": [
+      "ycsb_key"
+    ]
+  },
+  "baseline_dir": "/home/neel/ariabc_data/paper_20261010_oom/pgdata",
+  "verification": {
+    "pass_check": true,
+    "keyspace": "100000000|1|100000000",
+    "merkle_verify": "t",
+    "before": {
+      "catalog": {
+        "heap_bytes": 28248276992,
+        "index_bytes": 2246197248,
+        "relpages": 3448276,
+        "bounds": [
+          1,
+          100000000
+        ],
+        "fillfactor": [
+          "fillfactor=90"
+        ],
+        "root_count": 100000000,
+        "indexes": [
+          {
+            "indexname": "usertable_merkle_idx",
+            "indexdef": "CREATE INDEX usertable_merkle_idx ON public.usertable USING merkle (ycsb_key) WITH (partitions='200', fanout='32', split_threshold='1024', merge_threshold='256')"
+          },
+          {
+            "indexname": "usertable_merkle_lookup_idx",
+            "indexdef": "CREATE INDEX usertable_merkle_lookup_idx ON public.usertable USING btree (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200), merkle_key_hash(ycsb_key), ycsb_key)"
+          },
+          {
+            "indexname": "usertable_pkey1",
+            "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+          }
+        ]
+      },
+      "merkle_stats": {
+        "version": 10,
+        "fanout": 32,
+        "partitions": 200,
+        "partition_key_columns": 0,
+        "subpartitions": 1,
+        "split_threshold": 1024,
+        "merge_threshold": 256,
+        "total_nodes": 211400,
+        "leaf_nodes": 204800,
+        "hash_bits": 256,
+        "route_format_version": 4,
+        "row_hash_format_version": 1,
+        "baseline_apply_seq": 0,
+        "crash_recovery": "ordered_committed_delta_wal",
+        "recovery_state": "READY",
+        "applied_seq": 0,
+        "target_seq": 0,
+        "lag_items": 0,
+        "index_keys": [
+          "ycsb_key"
+        ]
+      }
+    },
+    "after": {
+      "catalog": {
+        "heap_bytes": 28248276992,
+        "index_bytes": 2246197248,
+        "relpages": 3448276,
+        "bounds": [
+          1,
+          100000000
+        ],
+        "fillfactor": [
+          "fillfactor=90"
+        ],
+        "root_count": 100000000,
+        "indexes": [
+          {
+            "indexname": "usertable_merkle_idx",
+            "indexdef": "CREATE INDEX usertable_merkle_idx ON public.usertable USING merkle (ycsb_key) WITH (partitions='200', fanout='32', split_threshold='1024', merge_threshold='256')"
+          },
+          {
+            "indexname": "usertable_merkle_lookup_idx",
+            "indexdef": "CREATE INDEX usertable_merkle_lookup_idx ON public.usertable USING btree (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200), merkle_key_hash(ycsb_key), ycsb_key)"
+          },
+          {
+            "indexname": "usertable_pkey1",
+            "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+          }
+        ]
+      },
+      "merkle_stats": {
+        "version": 11,
+        "fanout": 32,
+        "partitions": 200,
+        "partition_key_columns": 0,
+        "subpartitions": 1,
+        "split_threshold": 1024,
+        "merge_threshold": 256,
+        "total_nodes": 211400,
+        "leaf_nodes": 204800,
+        "hash_bits": 256,
+        "route_format_version": 4,
+        "row_hash_format_version": 1,
+        "baseline_apply_seq": 0,
+        "crash_recovery": "ordered_committed_delta_wal",
+        "recovery_state": "READY",
+        "applied_seq": 0,
+        "target_seq": 0,
+        "lag_items": 0,
+        "index_keys": [
+          "ycsb_key"
+        ]
+      }
+    },
+    "reindex_seconds": 365.2524709709978
+  }
+}

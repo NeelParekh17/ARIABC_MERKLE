@@ -1,8 +1,11 @@
 # OOM 100M: three-trial paper re-measurement
 
-The completed campaign contains **252 accepted cases across 84 configuration points**, plus **three accepted smoke cases**. All **5,100,000 terminal results** passed the raw completion and row-result audit; divergence, permanent failures and exhausted retries are zero. Every Merkle case passed post-run verification: **84 campaign + one smoke**. No attempt was rejected or excluded, and the independent audit found no incorrectly accepted case under the recorded contract. Counts are in [audit_counts.csv](paper_20261010/phase2/audit_counts.csv); per-case checks are in [audit_cases.csv](paper_20261010/phase2/audit_cases.csv).
+<!-- adhash_20261012 -->
+> **Merkle rows are the AdHash re-measurement (2026-10-12/13).** Since merge `6b19ff92` (commit `6a1c66d6`), Merkle nodes combine row hashes by addition mod 2^256 instead of XOR, so identical rows no longer cancel. Every Merkle number, Merkle ratio and Merkle figure on this page comes from [adhash_20261012/](adhash_20261012/README.md): 84 accepted cases (28 points × 3 trials, all `merkle_verify` PASS) on the same hosts, harness, workload hashes and settings, against an AdHash-format baseline rebuilt from the same paper heap. PG and det rows remain the 16577072 paper campaign below; they do not use the Merkle hash. The previous XOR Merkle rows were removed from this page and from [summary.csv](summary.csv); they remain in git history (commit `d63a4cad`) and in the frozen audit archive [paper_20261010/phase2/](paper_20261010/phase2/README.md). AdHash/XOR Merkle median ratio across the 28 points: **1.003** (range 0.963–1.048); a one-trial det control measured host drift at **0.984**, so the drift-adjusted ratio is **1.017**. The AdHash change has no measurable throughput cost.
 
-Primary values are medians of three trials. Across the 28 matched workload/skew/worker points, the median **det/PG ratio is 0.846**, **Merkle/det is 0.898**, and **Merkle/PG is 0.755**. These are medians of matched ratios, not aggregate throughput. Merkle/det ranges **0.815–0.992**. Source: [headline_numbers.csv](paper_20261010/phase2/headline_numbers.csv) and [matched_ratios.csv](paper_20261010/phase2/matched_ratios.csv).
+The completed campaign contains **252 accepted cases across 84 configuration points**, plus **three accepted smoke cases**. All **5,100,000 terminal results** passed the raw completion and row-result audit; divergence, permanent failures and exhausted retries are zero. Every Merkle case passed post-run verification: **84 campaign + one smoke** (and all 84 AdHash replacement cases). No attempt was rejected or excluded, and the independent audit found no incorrectly accepted case under the recorded contract. Counts are in [audit_counts.csv](paper_20261010/phase2/audit_counts.csv); per-case checks are in [audit_cases.csv](paper_20261010/phase2/audit_cases.csv).
+
+Primary values are medians of three trials. Across the 28 matched workload/skew/worker points, the median **det/PG ratio is 0.846**, **Merkle/det is 0.908**, and **Merkle/PG is 0.760**. These are medians of matched ratios, not aggregate throughput. Merkle/det ranges **0.819–0.998**. Source: [headline_numbers.csv](adhash_20261012/headline_numbers.csv) and [matched_ratios.csv](adhash_20261012/matched_ratios.csv).
 
 ## Setup and frozen provenance
 
@@ -62,13 +65,13 @@ The same predeclared exclusion rule applies to every mode: invalid/error telemet
 
 Campaign PG logs contain **39,661 serialization errors**, exactly matching successful retry attempts. The audit also found readiness-probe `FATAL: role "neel" does not exist` messages and expected administrative connection termination during controlled shutdowns. No other PostgreSQL ERROR/FATAL/PANIC category appeared; the full counts are retained in [log_messages.csv](paper_20261010/phase2/log_messages.csv). Readiness probes omit a DB username; these messages do not correspond to failed workload terminals. No accepted case failed the recorded acceptance contract.
 
-Three trials satisfy this campaign's requested design, but the harness's separate repeatability qualification asks for five; its saved [qualification report](paper_20261010/phase2/evidence/campaign/MEASUREMENT_QUALIFICATION.md) labels all points `insufficient_repeats`. CV is sample standard deviation / mean × 100, with no observations discarded. **No point exceeds the 10% CV diagnostic; maximum CV is 4.65%**. Bands are observed min–max, not confidence intervals. Throughput orderings and Merkle internal-consistency PASS do not prove general SQL serializability, cross-mode row equality or recovery correctness. This is the modified PostgreSQL fork with det/Merkle disabled in PG mode, not upstream PostgreSQL; the dataset exceeds RAM but 32MB buffers do not cap Linux page cache or other shared memory. No replicated-cluster or recovery-fault test ran in this campaign, and “OOM” does not assert an OOM-killer event.
+Three trials satisfy this campaign's requested design, but the harness's separate repeatability qualification asks for five; its saved [qualification report](paper_20261010/phase2/evidence/campaign/MEASUREMENT_QUALIFICATION.md) labels all points `insufficient_repeats`. CV is sample standard deviation / mean × 100, with no observations discarded. **One point exceeds the 10% CV diagnostic: AdHash Merkle A θ1.2 workers 8 (47.71%), whose trial 3 ran at 1908.76 TPS against ~5,400 for the other two. It passed every acceptance check and the noise rule, so it is kept; it does not move the median. Every other point is at most 4.52%**. Bands are observed min–max, not confidence intervals. Throughput orderings and Merkle internal-consistency PASS do not prove general SQL serializability, cross-mode row equality or recovery correctness. This is the modified PostgreSQL fork with det/Merkle disabled in PG mode, not upstream PostgreSQL; the dataset exceeds RAM but 32MB buffers do not cap Linux page cache or other shared memory. No replicated-cluster or recovery-fault test ran in this campaign, and “OOM” does not assert an OOM-killer event.
 
 Preparation had an initial build hash-path failure and a host reboot during the first load. The incomplete campaign-owned load was discarded and regenerated before measurements; no timed case used that partial data. The reboot cause is unestablished. Storage authorization, budget and preparation evidence remain in the [phase-one archive](paper_20261010/evidence/) and [provenance](paper_20261010/phase2/evidence/provenance/).
 
 ## All configuration summaries and previous-v2 comparison
 
-Values below are statements/s, rounded only for display. **Best equals max**; each point has n=3. Previous-v2 TPS is its **single Oct 1 trial (n=1)**. The comparison input is [previous_v2_trials.csv](paper_20261010/phase2/previous_v2_trials.csv), copied specifically from `runs/v2_20261001/summary.csv`; the old root summary mixed multiple historical campaigns and is not used. Full precision and I/O/retry comparisons: [configuration_summary.csv](paper_20261010/phase2/configuration_summary.csv), [previous_v2_comparison.csv](paper_20261010/phase2/previous_v2_comparison.csv).
+Values below are statements/s, rounded only for display. **Best equals max**; each point has n=3. Previous-v2 TPS is its **single Oct 1 trial (n=1)**. The comparison input is [previous_v2_trials.csv](paper_20261010/phase2/previous_v2_trials.csv), copied specifically from `runs/v2_20261001/summary.csv`; the old root summary mixed multiple historical campaigns and is not used. Full precision and I/O/retry comparisons: [configuration_summary.csv](adhash_20261012/configuration_summary.csv), [previous_v2_comparison.csv](adhash_20261012/previous_v2_comparison.csv).
 
 ### A, θ = 0
 
@@ -80,16 +83,16 @@ Values below are statements/s, rounded only for display. **Best equals max**; ea
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | PG | 3 | 1525.20 | 1429.59 | 1532.33 | 1532.33 | 3.84 | 1554.61 | 0.981 |
 | 1 | det | 3 | 1475.14 | 1415.03 | 1505.57 | 1505.57 | 3.14 | 1452.96 | 1.015 |
-| 1 | Merkle | 3 | 1322.49 | 1312.08 | 1395.77 | 1395.77 | 3.40 | 1327.76 | 0.996 |
+| 1 | Merkle | 3 | 1319.00 | 1312.51 | 1323.63 | 1323.63 | 0.42 | 1327.76 | 0.993 |
 | 4 | PG | 3 | 2871.50 | 2862.87 | 2976.19 | 2976.19 | 2.17 | 2909.94 | 0.987 |
 | 4 | det | 3 | 2793.30 | 2791.74 | 2905.29 | 2905.29 | 2.30 | 2972.21 | 0.940 |
-| 4 | Merkle | 3 | 2635.05 | 2582.64 | 2645.50 | 2645.50 | 1.29 | 2636.09 | 1.000 |
+| 4 | Merkle | 3 | 2605.86 | 2601.46 | 2616.77 | 2616.77 | 0.30 | 2636.09 | 0.989 |
 | 8 | PG | 3 | 3906.25 | 3867.72 | 3908.54 | 3908.54 | 0.59 | 4075.81 | 0.958 |
 | 8 | det | 3 | 3881.23 | 3739.72 | 3886.51 | 3886.51 | 2.17 | 3805.90 | 1.020 |
-| 8 | Merkle | 3 | 3739.02 | 3510.62 | 3752.35 | 3752.35 | 3.71 | 3858.02 | 0.969 |
+| 8 | Merkle | 3 | 3723.70 | 3660.32 | 3741.81 | 3741.81 | 1.15 | 3858.02 | 0.965 |
 | 16 | PG | 3 | 5374.90 | 5347.59 | 5420.05 | 5420.05 | 0.68 | 5701.25 | 0.943 |
 | 16 | det | 3 | 5274.26 | 5011.28 | 5274.26 | 5274.26 | 2.93 | 5592.84 | 0.943 |
-| 16 | Merkle | 3 | 4614.67 | 4587.16 | 4654.41 | 4654.41 | 0.73 | 4656.58 | 0.991 |
+| 16 | Merkle | 3 | 4663.09 | 4607.23 | 4935.83 | 4935.83 | 3.71 | 4656.58 | 1.001 |
 
 ### A, θ = 0.99
 
@@ -101,16 +104,16 @@ Values below are statements/s, rounded only for display. **Best equals max**; ea
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | PG | 3 | 2066.97 | 1955.03 | 2108.15 | 2108.15 | 3.88 | 2066.33 | 1.000 |
 | 1 | det | 3 | 2040.82 | 2038.53 | 2055.29 | 2055.29 | 0.44 | 2119.77 | 0.963 |
-| 1 | Merkle | 3 | 1780.31 | 1776.36 | 1865.67 | 1865.67 | 2.79 | 1853.91 | 0.960 |
+| 1 | Merkle | 3 | 1797.75 | 1781.10 | 1856.84 | 1856.84 | 2.20 | 1853.91 | 0.970 |
 | 4 | PG | 3 | 4260.76 | 4059.27 | 4264.39 | 4264.39 | 2.80 | 4442.47 | 0.959 |
 | 4 | det | 3 | 3695.49 | 3605.55 | 3706.45 | 3706.45 | 1.51 | 3644.98 | 1.014 |
-| 4 | Merkle | 3 | 3280.30 | 3241.49 | 3424.66 | 3424.66 | 2.91 | 3471.02 | 0.945 |
+| 4 | Merkle | 3 | 3410.06 | 3324.47 | 3442.93 | 3442.93 | 1.80 | 3471.02 | 0.982 |
 | 8 | PG | 3 | 6395.91 | 5910.17 | 6400.00 | 6400.00 | 4.52 | 6521.03 | 0.981 |
 | 8 | det | 3 | 4991.27 | 4808.85 | 5115.09 | 5115.09 | 3.10 | 5543.24 | 0.900 |
-| 8 | Merkle | 3 | 4517.73 | 4488.33 | 4558.92 | 4558.92 | 0.78 | 4757.37 | 0.950 |
+| 8 | Merkle | 3 | 4602.99 | 4573.52 | 4774.41 | 4774.41 | 2.33 | 4757.37 | 0.968 |
 | 16 | PG | 3 | 9447.33 | 9310.99 | 9523.81 | 9523.81 | 1.14 | 9881.42 | 0.956 |
 | 16 | det | 3 | 7142.86 | 6889.42 | 7331.38 | 7331.38 | 3.11 | 8006.41 | 0.892 |
-| 16 | Merkle | 3 | 6142.51 | 6055.10 | 6487.19 | 6487.19 | 3.67 | 6743.09 | 0.911 |
+| 16 | Merkle | 3 | 6437.08 | 6159.53 | 6510.42 | 6510.42 | 2.91 | 6743.09 | 0.955 |
 
 ### A, θ = 1.2
 
@@ -122,16 +125,16 @@ Values below are statements/s, rounded only for display. **Best equals max**; ea
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | PG | 3 | 2640.61 | 2628.81 | 2654.63 | 2654.63 | 0.49 | 2738.60 | 0.964 |
 | 1 | det | 3 | 2537.43 | 2526.85 | 2562.46 | 2562.46 | 0.72 | 2603.49 | 0.975 |
-| 1 | Merkle | 3 | 2279.72 | 2250.73 | 2282.58 | 2282.58 | 0.78 | 2378.40 | 0.959 |
+| 1 | Merkle | 3 | 2279.72 | 2254.54 | 2289.64 | 2289.64 | 0.80 | 2378.40 | 0.959 |
 | 4 | PG | 3 | 5434.78 | 5422.99 | 5491.49 | 5491.49 | 0.67 | 5868.54 | 0.926 |
 | 4 | det | 3 | 4479.28 | 4474.27 | 4493.37 | 4493.37 | 0.22 | 4626.42 | 0.968 |
-| 4 | Merkle | 3 | 4022.53 | 4005.61 | 4030.63 | 4030.63 | 0.32 | 4158.87 | 0.967 |
+| 4 | Merkle | 3 | 4018.49 | 4015.26 | 4022.53 | 4022.53 | 0.09 | 4158.87 | 0.966 |
 | 8 | PG | 3 | 6487.19 | 6215.04 | 6633.50 | 6633.50 | 3.29 | 8061.27 | 0.805 |
 | 8 | det | 3 | 6134.97 | 6084.58 | 6211.18 | 6211.18 | 1.04 | 6622.52 | 0.926 |
-| 8 | Merkle | 3 | 5396.65 | 5230.13 | 5418.59 | 5418.59 | 1.93 | 5468.96 | 0.987 |
+| 8 | Merkle | 3 | 5402.49 | 1908.76 | 5437.74 | 5437.74 | 47.71 | 5468.96 | 0.988 |
 | 16 | PG | 3 | 6038.65 | 5775.34 | 6064.28 | 6064.28 | 2.68 | 10411.24 | 0.580 |
 | 16 | det | 3 | 7471.05 | 7344.84 | 7510.33 | 7510.33 | 1.16 | 8067.77 | 0.926 |
-| 16 | Merkle | 3 | 6357.28 | 6236.36 | 6391.82 | 6391.82 | 1.29 | 6631.30 | 0.959 |
+| 16 | Merkle | 3 | 6119.95 | 5950.61 | 6404.10 | 6404.10 | 3.72 | 6631.30 | 0.923 |
 
 ### B, θ = 0.99
 
@@ -143,16 +146,16 @@ Values below are statements/s, rounded only for display. **Best equals max**; ea
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | PG | 3 | 3881.23 | 3827.02 | 3958.04 | 3958.04 | 1.69 | 4124.56 | 0.941 |
 | 1 | det | 3 | 3678.50 | 3677.82 | 3778.58 | 3778.58 | 1.56 | 3943.22 | 0.933 |
-| 1 | Merkle | 3 | 3451.25 | 3386.96 | 3519.27 | 3519.27 | 1.92 | 3561.89 | 0.969 |
+| 1 | Merkle | 3 | 3471.02 | 3470.41 | 3517.41 | 3517.41 | 0.77 | 3561.89 | 0.974 |
 | 4 | PG | 3 | 11198.21 | 11104.94 | 11305.82 | 11305.82 | 0.90 | 11806.38 | 0.948 |
 | 4 | det | 3 | 7990.41 | 7964.95 | 8032.13 | 8032.13 | 0.42 | 8438.82 | 0.947 |
-| 4 | Merkle | 3 | 7315.29 | 7225.43 | 7336.76 | 7336.76 | 0.81 | 7454.34 | 0.981 |
+| 4 | Merkle | 3 | 7352.94 | 7342.14 | 7443.25 | 7443.25 | 0.75 | 7454.34 | 0.986 |
 | 8 | PG | 3 | 14326.65 | 13898.54 | 14587.89 | 14587.89 | 2.44 | 15588.46 | 0.919 |
 | 8 | det | 3 | 10509.72 | 10219.72 | 10520.78 | 10520.78 | 1.64 | 11019.28 | 0.954 |
-| 8 | Merkle | 3 | 9487.67 | 9237.88 | 9555.66 | 9555.66 | 1.78 | 10025.06 | 0.946 |
+| 8 | Merkle | 3 | 9573.96 | 9560.23 | 9770.40 | 9770.40 | 1.22 | 10025.06 | 0.955 |
 | 16 | PG | 3 | 16366.61 | 16326.53 | 16474.46 | 16474.46 | 0.47 | 17746.23 | 0.922 |
 | 16 | det | 3 | 12570.71 | 12523.48 | 12578.62 | 12578.62 | 0.24 | 13831.26 | 0.909 |
-| 16 | Merkle | 3 | 11383.04 | 11357.18 | 11383.04 | 11383.04 | 0.13 | 12322.86 | 0.924 |
+| 16 | Merkle | 3 | 11461.32 | 11331.44 | 11474.47 | 11474.47 | 0.69 | 12322.86 | 0.930 |
 
 ### C, θ = 0.99
 
@@ -164,16 +167,16 @@ Values below are statements/s, rounded only for display. **Best equals max**; ea
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | PG | 3 | 4418.91 | 4416.96 | 4450.38 | 4450.38 | 0.42 | 4582.95 | 0.964 |
 | 1 | det | 3 | 4232.80 | 4076.64 | 4286.33 | 4286.33 | 2.59 | 4281.74 | 0.989 |
-| 1 | Merkle | 3 | 4102.56 | 4027.39 | 4128.82 | 4128.82 | 1.29 | 4125.41 | 0.994 |
+| 1 | Merkle | 3 | 4105.93 | 4043.67 | 4122.86 | 4122.86 | 1.02 | 4125.41 | 0.995 |
 | 4 | PG | 3 | 14673.51 | 14275.52 | 14760.15 | 14760.15 | 1.77 | 15649.45 | 0.938 |
 | 4 | det | 3 | 9496.68 | 9496.68 | 9519.28 | 9519.28 | 0.14 | 10075.57 | 0.943 |
-| 4 | Merkle | 3 | 9398.50 | 9136.59 | 9420.63 | 9420.63 | 1.70 | 9794.32 | 0.960 |
+| 4 | Merkle | 3 | 9402.91 | 9225.09 | 9416.20 | 9416.20 | 1.14 | 9794.32 | 0.960 |
 | 8 | PG | 3 | 21208.91 | 20876.83 | 21390.37 | 21390.37 | 1.23 | 23980.82 | 0.884 |
 | 8 | det | 3 | 13351.13 | 13123.36 | 13513.51 | 13513.51 | 1.47 | 14598.54 | 0.915 |
-| 8 | Merkle | 3 | 13131.98 | 13037.81 | 13245.03 | 13245.03 | 0.79 | 14184.40 | 0.926 |
+| 8 | Merkle | 3 | 13297.87 | 13003.90 | 13315.58 | 13315.58 | 1.33 | 14184.40 | 0.938 |
 | 16 | PG | 3 | 26041.67 | 25940.34 | 26212.32 | 26212.32 | 0.53 | 30581.04 | 0.852 |
 | 16 | det | 3 | 17021.28 | 16077.17 | 17196.90 | 17196.90 | 3.59 | 18450.18 | 0.923 |
-| 16 | Merkle | 3 | 16877.64 | 16625.10 | 17182.13 | 17182.13 | 1.65 | 18621.97 | 0.906 |
+| 16 | Merkle | 3 | 16992.35 | 16792.61 | 17167.38 | 17167.38 | 1.10 | 18621.97 | 0.912 |
 
 ### D, θ = 0.99
 
@@ -185,16 +188,16 @@ Values below are statements/s, rounded only for display. **Best equals max**; ea
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | PG | 3 | 4008.02 | 3954.91 | 4009.62 | 4009.62 | 0.78 | 4127.12 | 0.971 |
 | 1 | det | 3 | 3805.90 | 3800.84 | 3858.02 | 3858.02 | 0.83 | 3907.01 | 0.974 |
-| 1 | Merkle | 3 | 3337.23 | 3323.92 | 3343.36 | 3343.36 | 0.30 | 3498.34 | 0.954 |
+| 1 | Merkle | 3 | 3327.79 | 3320.05 | 3333.33 | 3333.33 | 0.20 | 3498.34 | 0.951 |
 | 4 | PG | 3 | 11293.05 | 11074.20 | 11441.65 | 11441.65 | 1.64 | 12262.42 | 0.921 |
 | 4 | det | 3 | 8156.61 | 8061.27 | 8193.36 | 8193.36 | 0.84 | 8496.18 | 0.960 |
-| 4 | Merkle | 3 | 6811.99 | 6749.92 | 6875.21 | 6875.21 | 0.92 | 6680.03 | 1.020 |
+| 4 | Merkle | 3 | 6781.96 | 6777.36 | 6939.63 | 6939.63 | 1.35 | 6680.03 | 1.015 |
 | 8 | PG | 3 | 14749.26 | 14577.26 | 14771.05 | 14771.05 | 0.72 | 15785.32 | 0.934 |
 | 8 | det | 3 | 10638.30 | 10520.78 | 10706.64 | 10706.64 | 0.89 | 11080.33 | 0.960 |
-| 8 | Merkle | 3 | 8673.03 | 8583.69 | 8695.65 | 8695.65 | 0.68 | 9095.04 | 0.954 |
+| 8 | Merkle | 3 | 8729.81 | 8714.60 | 8988.76 | 8988.76 | 1.75 | 9095.04 | 0.960 |
 | 16 | PG | 3 | 16542.60 | 16488.05 | 16638.94 | 16638.94 | 0.46 | 17953.32 | 0.921 |
 | 16 | det | 3 | 12722.65 | 12698.41 | 12836.97 | 12836.97 | 0.58 | 13306.72 | 0.956 |
-| 16 | Merkle | 3 | 10504.20 | 10395.01 | 10537.41 | 10537.41 | 0.71 | 11198.21 | 0.938 |
+| 16 | Merkle | 3 | 10509.72 | 10493.18 | 10621.35 | 10621.35 | 0.66 | 11198.21 | 0.939 |
 
 ### F, θ = 0.99
 
@@ -206,16 +209,16 @@ Values below are statements/s, rounded only for display. **Best equals max**; ea
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | PG | 3 | 1966.96 | 1928.27 | 1974.14 | 1974.14 | 1.26 | 2001.60 | 0.983 |
 | 1 | det | 3 | 1917.18 | 1884.13 | 1917.55 | 1917.55 | 1.01 | 1962.13 | 0.977 |
-| 1 | Merkle | 3 | 1745.66 | 1658.10 | 1747.95 | 1747.95 | 2.98 | 1789.23 | 0.976 |
+| 1 | Merkle | 3 | 1738.37 | 1722.65 | 1745.05 | 1745.05 | 0.66 | 1789.23 | 0.972 |
 | 4 | PG | 3 | 4168.40 | 4078.30 | 4206.98 | 4206.98 | 1.59 | 4248.09 | 0.981 |
 | 4 | det | 3 | 3632.40 | 3518.03 | 3644.98 | 3644.98 | 1.94 | 3795.79 | 0.957 |
-| 4 | Merkle | 3 | 3240.97 | 3181.17 | 3253.09 | 3253.09 | 1.19 | 3301.42 | 0.982 |
+| 4 | Merkle | 3 | 3254.15 | 3155.07 | 3354.02 | 3354.02 | 3.06 | 3301.42 | 0.986 |
 | 8 | PG | 3 | 6295.25 | 6255.86 | 6345.18 | 6345.18 | 0.71 | 6756.76 | 0.932 |
 | 8 | det | 3 | 5111.17 | 4889.98 | 5124.26 | 5124.26 | 2.61 | 5070.99 | 1.008 |
-| 8 | Merkle | 3 | 4656.58 | 4518.75 | 4659.83 | 4659.83 | 1.75 | 4747.21 | 0.981 |
+| 8 | Merkle | 3 | 4646.84 | 4518.75 | 4675.08 | 4675.08 | 1.81 | 4747.21 | 0.979 |
 | 16 | PG | 3 | 9229.35 | 9203.87 | 9242.14 | 9242.14 | 0.21 | 9871.67 | 0.935 |
 | 16 | det | 3 | 6884.68 | 6788.87 | 7119.97 | 7119.97 | 2.46 | 7344.84 | 0.937 |
-| 16 | Merkle | 3 | 6103.14 | 5793.74 | 6359.30 | 6359.30 | 4.65 | 6327.11 | 0.965 |
+| 16 | Merkle | 3 | 6319.12 | 6045.95 | 6365.37 | 6365.37 | 2.76 | 6327.11 | 0.999 |
 
 ## Matched ratios from medians
 
@@ -223,34 +226,34 @@ Each row uses three-trial medians for the same workload/skew/worker point. Merkl
 
 | Workload | θ | W | det/PG | Merkle/det | Merkle/PG | Read MiB M/det | Write MiB M/det |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| A | 0 | 1 | 0.967 | 0.897 | 0.867 | 1.098 | 1.162 |
-| A | 0 | 4 | 0.973 | 0.943 | 0.918 | 1.095 | 1.148 |
-| A | 0 | 8 | 0.994 | 0.963 | 0.957 | 1.089 | 1.167 |
-| A | 0 | 16 | 0.981 | 0.875 | 0.859 | 1.094 | 1.222 |
-| A | 0.99 | 1 | 0.987 | 0.872 | 0.861 | 1.212 | 1.222 |
-| A | 0.99 | 4 | 0.867 | 0.888 | 0.770 | 1.221 | 1.231 |
-| A | 0.99 | 8 | 0.780 | 0.905 | 0.706 | 1.213 | 1.284 |
-| A | 0.99 | 16 | 0.756 | 0.860 | 0.650 | 1.245 | 1.357 |
-| A | 1.2 | 1 | 0.961 | 0.898 | 0.863 | 1.639 | 1.317 |
-| A | 1.2 | 4 | 0.824 | 0.898 | 0.740 | 1.595 | 1.421 |
-| A | 1.2 | 8 | 0.946 | 0.880 | 0.832 | 1.638 | 1.529 |
-| A | 1.2 | 16 | 1.237 | 0.851 | 1.053 | 1.643 | 1.612 |
-| B | 0.99 | 1 | 0.948 | 0.938 | 0.889 | 1.095 | 1.861 |
-| B | 0.99 | 4 | 0.714 | 0.916 | 0.653 | 1.097 | 1.735 |
-| B | 0.99 | 8 | 0.734 | 0.903 | 0.662 | 1.097 | 1.668 |
-| B | 0.99 | 16 | 0.768 | 0.906 | 0.696 | 1.096 | 1.649 |
-| C | 0.99 | 1 | 0.958 | 0.969 | 0.928 | 1.001 | 1.071 |
-| C | 0.99 | 4 | 0.647 | 0.990 | 0.641 | 1.001 | 1.073 |
-| C | 0.99 | 8 | 0.630 | 0.984 | 0.619 | 1.001 | 1.000 |
-| C | 0.99 | 16 | 0.654 | 0.992 | 0.648 | 1.001 | 0.936 |
-| D | 0.99 | 1 | 0.950 | 0.877 | 0.833 | 1.238 | 4.578 |
-| D | 0.99 | 4 | 0.722 | 0.835 | 0.603 | 1.223 | 3.887 |
-| D | 0.99 | 8 | 0.721 | 0.815 | 0.588 | 1.221 | 3.716 |
-| D | 0.99 | 16 | 0.769 | 0.826 | 0.635 | 1.230 | 3.800 |
-| F | 0.99 | 1 | 0.975 | 0.911 | 0.887 | 1.206 | 1.204 |
-| F | 0.99 | 4 | 0.871 | 0.892 | 0.778 | 1.213 | 1.228 |
-| F | 0.99 | 8 | 0.812 | 0.911 | 0.740 | 1.214 | 1.277 |
-| F | 0.99 | 16 | 0.746 | 0.886 | 0.661 | 1.242 | 1.349 |
+| A | 0 | 1 | 0.967 | 0.894 | 0.865 | 1.092 | 1.170 |
+| A | 0 | 4 | 0.973 | 0.933 | 0.907 | 1.092 | 1.152 |
+| A | 0 | 8 | 0.994 | 0.959 | 0.953 | 1.073 | 1.175 |
+| A | 0 | 16 | 0.981 | 0.884 | 0.868 | 1.092 | 1.227 |
+| A | 0.99 | 1 | 0.987 | 0.881 | 0.870 | 1.206 | 1.228 |
+| A | 0.99 | 4 | 0.867 | 0.923 | 0.800 | 1.208 | 1.230 |
+| A | 0.99 | 8 | 0.780 | 0.922 | 0.720 | 1.208 | 1.287 |
+| A | 0.99 | 16 | 0.756 | 0.901 | 0.681 | 1.208 | 1.348 |
+| A | 1.2 | 1 | 0.961 | 0.898 | 0.863 | 1.621 | 1.325 |
+| A | 1.2 | 4 | 0.824 | 0.897 | 0.739 | 1.579 | 1.433 |
+| A | 1.2 | 8 | 0.946 | 0.881 | 0.833 | 1.624 | 1.537 |
+| A | 1.2 | 16 | 1.237 | 0.819 | 1.013 | 1.627 | 1.631 |
+| B | 0.99 | 1 | 0.948 | 0.944 | 0.894 | 1.059 | 1.901 |
+| B | 0.99 | 4 | 0.714 | 0.920 | 0.657 | 1.092 | 1.706 |
+| B | 0.99 | 8 | 0.734 | 0.911 | 0.668 | 1.092 | 1.686 |
+| B | 0.99 | 16 | 0.768 | 0.912 | 0.700 | 1.061 | 1.670 |
+| C | 0.99 | 1 | 0.958 | 0.970 | 0.929 | 0.967 | 3.000 |
+| C | 0.99 | 4 | 0.647 | 0.990 | 0.641 | 0.995 | 1.610 |
+| C | 0.99 | 8 | 0.630 | 0.996 | 0.627 | 0.996 | 1.545 |
+| C | 0.99 | 16 | 0.654 | 0.998 | 0.653 | 0.967 | 1.170 |
+| D | 0.99 | 1 | 0.950 | 0.874 | 0.830 | 1.224 | 4.690 |
+| D | 0.99 | 4 | 0.722 | 0.831 | 0.601 | 1.186 | 3.929 |
+| D | 0.99 | 8 | 0.721 | 0.821 | 0.592 | 1.215 | 3.728 |
+| D | 0.99 | 16 | 0.769 | 0.826 | 0.635 | 1.225 | 3.814 |
+| F | 0.99 | 1 | 0.975 | 0.907 | 0.884 | 1.171 | 1.214 |
+| F | 0.99 | 4 | 0.871 | 0.896 | 0.781 | 1.210 | 1.234 |
+| F | 0.99 | 8 | 0.812 | 0.909 | 0.738 | 1.207 | 1.284 |
+| F | 0.99 | 16 | 0.746 | 0.918 | 0.685 | 1.208 | 1.342 |
 
 ![Merkle/det matched ratios](figures/merkle_over_det.png)
 
@@ -258,15 +261,15 @@ Each row uses three-trial medians for the same workload/skew/worker point. Merkl
 
 ## Trial spread
 
-Largest five sample CVs; all points remain included. Complete ranking: [variability.csv](paper_20261010/phase2/variability.csv).
+Largest five sample CVs; all points remain included. Complete ranking: [variability.csv](adhash_20261012/variability.csv).
 
 | Workload | θ | W | Mode | Median | Min–Max | CV % | Range/median % |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| F | 0.99 | 16 | Merkle | 6103.14 | 5793.74–6359.30 | 4.65 | 9.27 |
+| A | 1.2 | 8 | Merkle | 5402.49 | 1908.76–5437.74 | 47.71 | 65.32 |
 | A | 0.99 | 8 | PG | 6395.91 | 5910.17–6400.00 | 4.52 | 7.66 |
 | A | 0.99 | 1 | PG | 2066.97 | 1955.03–2108.15 | 3.88 | 7.41 |
 | A | 0 | 1 | PG | 1525.20 | 1429.59–1532.33 | 3.84 | 6.74 |
-| A | 0 | 8 | Merkle | 3739.02 | 3510.62–3752.35 | 3.71 | 6.46 |
+| A | 1.2 | 16 | Merkle | 6119.95 | 5950.61–6404.10 | 3.72 | 7.41 |
 
 ## What changed relative to Oct 1 v2
 
@@ -276,7 +279,7 @@ The old v2 run used a different frozen working-tree snapshot (git HEAD `19562ae`
 | --- | --- | --- | --- |
 | PG | 0.942 | 0.580 | 1.000 |
 | det | 0.955 | 0.892 | 1.020 |
-| Merkle | 0.962 | 0.906 | 1.020 |
+| Merkle (AdHash) | 0.969 | 0.912 | 1.015 |
 
 The largest change is **PG A θ1.2 at workers 16: 10,411.24 → 6,038.65 TPS (-42.00%)**. New median read await is **0.496ms**, versus **0.499ms** previously; new median retries are **7,236**, versus **11,865** previously. Thus these counters do not support explaining the decrease as more read latency or more retries. The most likely cause is a known configuration difference: the gateway submission window default changed from 65536 to 1024 on 2026-10-06 (this campaign's gateway logs record `window=1024`, `det_window=1024`); the Oct 1 run used 65536. A controlled same-dataset check on 2026-10-06 (`.111:~/claude_ctl/results/oom_verify_20261006`: `campaign/`, `control_v2bin/`, `control_cur65k/`) measured exactly this point at 5,779 TPS with window 1024 versus 9,818 (v2 binaries) and 9,926 (current binaries) with window 65536, i.e. about −42% from the window alone, with fewer retries, matching this observation. The next largest changes are also PG: A θ1.2 workers 8 (−19.5%) and C θ0.99 workers 16 (−14.8%); every other point is within −12% to +2%. The 2026-10-06 control covered only A θ1.2 and B θ0.99 at workers 1/16, so those other PG drops are consistent with, but not separately attributed to, the window change. Requested retry backoff is a cumulative concurrent counter, not a wall-time subtraction.
 
@@ -284,7 +287,7 @@ Read-only publication did not start or stop any database, server, benchmark, or 
 
 ## Evidence, figures and regeneration
 
-- [Accepted trials](summary.csv), [configuration_summary.csv](paper_20261010/phase2/configuration_summary.csv), [matched_ratios.csv](paper_20261010/phase2/matched_ratios.csv), [previous_v2_comparison.csv](paper_20261010/phase2/previous_v2_comparison.csv), [audit_counts.csv](paper_20261010/phase2/audit_counts.csv), [audit_cases.csv](paper_20261010/phase2/audit_cases.csv), [telemetry_summary.csv](paper_20261010/phase2/telemetry_summary.csv) and [log_messages.csv](paper_20261010/phase2/log_messages.csv).
+- [Accepted trials](summary.csv), [configuration_summary.csv](adhash_20261012/configuration_summary.csv), [matched_ratios.csv](adhash_20261012/matched_ratios.csv), [previous_v2_comparison.csv](adhash_20261012/previous_v2_comparison.csv), [audit_counts.csv](paper_20261010/phase2/audit_counts.csv), [audit_cases.csv](paper_20261010/phase2/audit_cases.csv), [telemetry_summary.csv](paper_20261010/phase2/telemetry_summary.csv) and [log_messages.csv](paper_20261010/phase2/log_messages.csv).
 - [All evidence and analysis](paper_20261010/phase2/README.md); [checksums](paper_20261010/phase2/SHA256SUMS); [analysis source](paper_20261010/phase2/analyze.py); [README generator](paper_20261010/phase2/publish_readme.py).
 - [Figures](figures/): every figure has PDF + PNG. Individual throughput panels are 3.35-inch wide, use colorblind-safe colors plus different markers, and show median/min–max. Additional ratio and historical-comparison heatmaps use the same CSV inputs. The combined `oom_scaling_all` is a tall reference panel; individual PDFs are the preferred paper panels.
 - Exact remote raw roots: `.111:/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2/` and `results/smoke/run_20261011_013308_3b13566e/`. Baselines/builds remain under `.247:/home/neel/ariabc_data/paper_20261010_oom/`. Full source/golden archives remain remote; their hashes are published.

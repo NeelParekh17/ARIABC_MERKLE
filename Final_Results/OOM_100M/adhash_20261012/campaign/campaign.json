@@ -1,0 +1,143 @@
+{
+  "version": 3,
+  "arguments": {
+    "remote_host": "10.129.148.247",
+    "remote_user": "neel",
+    "remote_dir": "/home/neel/ariabc_data/f15_adhash_20261012/oom",
+    "install_dir": "/home/neel/claude_checks/f15_adhash_20261012/install",
+    "cluster_dir": "/home/neel/claude_checks/f15_adhash_20261012/cluster",
+    "gateway_host": "10.129.27.111",
+    "gateway_user": "neel",
+    "gateway_repo": "/home/neel/claude_ctl/f15_adhash_20261012/oom_repo",
+    "db_port": 5478,
+    "server_port": 8078,
+    "raft_port": 9078,
+    "db_rows": 100000000,
+    "shared_buffers": "32MB",
+    "usertable_fillfactor": 90,
+    "gen_shared_buffers": "512MB",
+    "gen_maintenance_work_mem": "256MB",
+    "gen_parallel_maintenance_workers": 0,
+    "gen_min_mem_available_mb": 4608,
+    "generation_timeout": 21600,
+    "txs": 20000,
+    "seed": 42,
+    "trials": 3,
+    "modes": [
+      "bcdb_merkle",
+      "bcdb_det"
+    ],
+    "workers": [
+      1,
+      4,
+      8,
+      16
+    ],
+    "skews": [
+      0.0,
+      0.99,
+      1.2
+    ],
+    "workloads": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "f"
+    ],
+    "combos": [
+      [
+        "a",
+        0.0
+      ],
+      [
+        "a",
+        0.99
+      ],
+      [
+        "a",
+        1.2
+      ],
+      [
+        "b",
+        0.99
+      ],
+      [
+        "c",
+        0.99
+      ],
+      [
+        "d",
+        0.99
+      ],
+      [
+        "f",
+        0.99
+      ]
+    ],
+    "out_dir": "/home/neel/claude_ctl/f15_adhash_20261012/results/campaign",
+    "gateway_timeout": 1800,
+    "reset_timeout": 7200,
+    "verify_timeout": 7200,
+    "base_dir_name": "pgdata_adhash",
+    "skip_gen": true,
+    "gen_only": false,
+    "reset_mode": "delta",
+    "delta_content_check": "sampled",
+    "settle_factor": 1.25,
+    "settle_min_s": 20,
+    "settle_max_s": 1800,
+    "calibrate_min_wait_s": 300,
+    "verify_mode": "fast",
+    "dry_run": false,
+    "preflight_only": false,
+    "resume_dir": null,
+    "auto_resume": true,
+    "pg_retry_jitter": "on",
+    "pg_exec_mode": "event"
+  },
+  "cache_policy": "cold_start_os_cache_unbounded",
+  "timing": "gateway_overall_time_taken",
+  "workloads": {
+    "ycsb_a_skew_0.0_20000.sql": {
+      "sha256": "7a031904b743e46ac36c81f8ee675141eec90f2831dd31f8788bed7a36bd1b83",
+      "queries": 20000
+    },
+    "ycsb_a_skew_0.99_20000.sql": {
+      "sha256": "a3f07805d1b15666b9ef9ce62daa7f441b622c08d151bc1c8d5ab67cfc97559b",
+      "queries": 20000
+    },
+    "ycsb_a_skew_1.2_20000.sql": {
+      "sha256": "4f763c4243628beba2cf3841e69b2056e518dcb24ad3bc1c9ff7d255ff9700f2",
+      "queries": 20000
+    },
+    "ycsb_b_skew_0.99_20000.sql": {
+      "sha256": "983f19f6c60e9a602d47968b1c1b8ff0badda0e023f82d0d49dc6030e1f1e91c",
+      "queries": 20000
+    },
+    "ycsb_c_skew_0.99_20000.sql": {
+      "sha256": "9609a417912694edc40eb9b1141750954187084fb5285000075b6d4ea7a0e483",
+      "queries": 20000
+    },
+    "ycsb_d_skew_0.99_20000.sql": {
+      "sha256": "9c025251db4a79632681b1a6274fd67924245a97d6d200314b84b4336900c34a",
+      "queries": 20000
+    },
+    "ycsb_f_skew_0.99_20000.sql": {
+      "sha256": "89dec3212c59cd9d38b0d7209c328955087abeef4f88b6f02a54643a4ba7e050",
+      "queries": 20000
+    }
+  },
+  "source_sha256": {
+    "scripts/generate_ycsb_workloads.py": "e239de1ec2b5800017951a042bc8bec3ce871f65d29f039b65cc1a6874249ed3",
+    "scripts/distributed/sql/raft_apply_ledger_schema.sql": "46a7eaa1ab92630db30f077b83dbb392620ebed2991991c0a3a74a96d48e39ed",
+    "scripts/distributed/oom_v2/paper_noise.py": "13e59426ab7aa86762805d0b05a5cecb6b706c1510e24c5a09321bed3b6fd2e0",
+    "scripts/distributed/benchmark_contract.py": "9dc089c858ac3e861d980eff4b666de1f8e193d439b0a77d2766184fb8c3906f",
+    "scripts/distributed/benchmark_telemetry.py": "6534764fa4d8c06cb7b3f0cbc7ab6d796aa32edd63d789009b4cc805c1d986b1",
+    "scripts/distributed/benchmark_validation.py": "adba0d1b27ca6680e50e10ba9abb0d0e475f90d37fe1583351641189ddd68bdd",
+    "scripts/distributed/device_settle_probe.py": "cc7a327bef9609e91138a76e567ee94e81d9d24749db8be3e8864ff07be90ac1",
+    "scripts/distributed/large_zipf.py": "75c3d95dc4e31363a696bd342f0342247569a0359c42b65e4bd23f3d8074ae22",
+    "scripts/distributed/run_oom_100m_benchmark.py": "50055253f3c4edf506e0c2fac9be112169729742959dd32317b1f72a566e92ff",
+    "scripts/distributed/run_4node_raft_cluster.sh": "a8af15f392deb3bafdf7edafe1e9e8ebad63c7d731d59ff75c1e609fb4d5c97a"
+  }
+}

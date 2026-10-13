@@ -1,0 +1,34 @@
+[
+  {
+    "case": "/home/neel/claude_ctl/f15_adhash_20261012/results/smoke/run_20261012_211725_e5b80c6e/a_s0.99_bcdb_det_w1_t1",
+    "mode": "bcdb_det",
+    "workers": 1,
+    "trial": 1,
+    "terminals": 20000,
+    "operation_counts": {
+      "UPDATE": 10008,
+      "SELECT": 9992
+    },
+    "gateway_exit": 0,
+    "failures": 0,
+    "merkle_verify": "N/A",
+    "noise_excluded": false,
+    "pass_check": true
+  },
+  {
+    "case": "/home/neel/claude_ctl/f15_adhash_20261012/results/smoke/run_20261012_211725_e5b80c6e/a_s0.99_bcdb_merkle_w1_t1",
+    "mode": "bcdb_merkle",
+    "workers": 1,
+    "trial": 1,
+    "terminals": 20000,
+    "operation_counts": {
+      "UPDATE": 10008,
+      "SELECT": 9992
+    },
+    "gateway_exit": 0,
+    "failures": 0,
+    "merkle_verify": "PASS",
+    "noise_excluded": false,
+    "pass_check": true
+  }
+]

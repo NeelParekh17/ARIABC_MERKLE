@@ -1,5 +1,18 @@
 # Benchmark corrections and qualification
 
+## OOM Merkle rows replaced by the AdHash re-measurement (2026-10-13)
+
+Merkle hashes now combine rows by addition mod 2^256 instead of XOR (F15: identical rows cancelled under XOR;
+merged as `6b19ff92`, commit `6a1c66d6`, `MERKLE_VERSION` 11). All 28 OOM_100M Merkle points were re-measured
+with that build on the same hosts and harness, 3 trials each, against an AdHash-format baseline REINDEXed from
+the same paper heap: 84/84 accepted, all `merkle_verify` PASS, plus a one-trial det control per point. The
+primary `OOM_100M/README.md`, `summary.csv` and Merkle figures now use these rows; PG/det rows remain the
+16577072 campaign. AdHash/XOR Merkle median ratio 1.003 (0.963–1.048), drift-adjusted 1.017: no measurable
+cost. Merkle/det median moves 0.898 → 0.908, Merkle/PG 0.755 → 0.760. One accepted AdHash trial
+(A θ1.2 w8 t3, 1,909 TPS) is a stall outlier kept under the acceptance rules; the point median is unaffected.
+The XOR Merkle rows were removed from the primary publication and remain in git history (`d63a4cad`) and in
+`OOM_100M/paper_20261010/phase2/`. Evidence: `OOM_100M/adhash_20261012/`.
+
 ## Primary online recovery updated to three-repetition campaign (2026-10-12)
 
 `ONLINE_RECOVERY/README.md` is the new primary report: 9 scenarios × 3 rotated repetitions on frozen commit

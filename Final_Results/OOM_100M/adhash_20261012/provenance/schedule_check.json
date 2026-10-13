@@ -1,0 +1,66 @@
+{
+  "cases": 112,
+  "counts": {
+    "bcdb_merkle": 84,
+    "bcdb_det": 28
+  },
+  "first": [
+    {
+      "workload": "c",
+      "skew": "0.99",
+      "mode": "bcdb_merkle",
+      "workers": "16",
+      "trial": "1"
+    },
+    {
+      "workload": "b",
+      "skew": "0.99",
+      "mode": "bcdb_merkle",
+      "workers": "8",
+      "trial": "1"
+    },
+    {
+      "workload": "a",
+      "skew": "1.2",
+      "mode": "bcdb_merkle",
+      "workers": "8",
+      "trial": "1"
+    },
+    {
+      "workload": "f",
+      "skew": "0.99",
+      "mode": "bcdb_merkle",
+      "workers": "8",
+      "trial": "1"
+    },
+    {
+      "workload": "d",
+      "skew": "0.99",
+      "mode": "bcdb_merkle",
+      "workers": "8",
+      "trial": "1"
+    },
+    {
+      "workload": "a",
+      "skew": "0.99",
+      "mode": "bcdb_det",
+      "workers": "8",
+      "trial": "1"
+    },
+    {
+      "workload": "a",
+      "skew": "0.99",
+      "mode": "bcdb_merkle",
+      "workers": "8",
+      "trial": "1"
+    },
+    {
+      "workload": "a",
+      "skew": "0.99",
+      "mode": "bcdb_merkle",
+      "workers": "4",
+      "trial": "1"
+    }
+  ],
+  "pass_check": true
+}

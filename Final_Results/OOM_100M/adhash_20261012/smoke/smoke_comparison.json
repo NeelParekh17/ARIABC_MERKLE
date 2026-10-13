@@ -1,0 +1,26 @@
+[
+  {
+    "mode": "bcdb_det",
+    "workload": "a",
+    "skew": 0.99,
+    "workers": 1,
+    "new_tps": 1951.02916788606,
+    "published_median_tps": 2040.8163265306123,
+    "published_min_tps": 2038.5281826521248,
+    "published_max_tps": 2055.287226389888,
+    "ratio": 0.9560042922641693,
+    "artifact_dir": "/home/neel/claude_ctl/f15_adhash_20261012/results/smoke/run_20261012_211725_e5b80c6e/a_s0.99_bcdb_det_w1_t1"
+  },
+  {
+    "mode": "bcdb_merkle",
+    "workload": "a",
+    "skew": 0.99,
+    "workers": 1,
+    "new_tps": 1790.8309455587394,
+    "published_median_tps": 1780.309773900659,
+    "published_min_tps": 1776.3566924238387,
+    "published_max_tps": 1865.6716417910447,
+    "ratio": 1.0059097421203438,
+    "artifact_dir": "/home/neel/claude_ctl/f15_adhash_20261012/results/smoke/run_20261012_211725_e5b80c6e/a_s0.99_bcdb_merkle_w1_t1"
+  }
+]
