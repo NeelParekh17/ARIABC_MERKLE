@@ -1,0 +1,10 @@
+{
+  "time_utc": "2026-10-10T21:11:23.234703+00:00",
+  "run_dir": "/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2",
+  "target": 252,
+  "driver_accepted": 6,
+  "failed_attempts": 0,
+  "noise_excluded_attempts": 0,
+  "merkle_pass": 2,
+  "scope": "driver CSV status after independent audit of first 3; later rows not included in that fixed audit snapshot"
+}

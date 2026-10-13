@@ -95,104 +95,93 @@ while the all-three follower audit drain metrics are tracked in attempt metadata
 reads recently completed inserts via point selects under the latest distribution,
 preserving true read-latest behavior while ensuring reads only target committed records.
 
-## 2. OOM 100M — fresh v2 primary result
+## 2. OOM 100M — three-trial paper publication (2026-10-12)
 
-Completed output: `.111:/home/neel/claude_ctl/results/oom_v2_20261001/`.
-Curated evidence: `OOM_100M/runs/v2_20261001/`. All 84 cases accepted;
-28 post-workload Merkle PASS; no divergence/permanent failures/exhausted retries.
-The fresh fillfactor-90 dataset and v2 binaries replace the primary OOM graphs.
-Previous values and figures remain archived; v2 includes C for all three modes.
+Completed frozen commit: `16577072ecf888fbbbb5d80d0e90fc340c8ca342`.
+252 accepted cases (84 configurations × three trials), plus three smoke cases.
+All 5,100,000 terminal results passed; 85/85 Merkle verification PASS; no
+incorrectly accepted case under the recorded contract, failures or exclusions.
+Primary [README](OOM_100M/README.md) shows medians, min/max/best/n, sample CV,
+matched ratios of medians and the historical Oct 1 single-trial comparison.
+Raw completion: `.111:/home/neel/claude_checks/paper_20261010_oom/results/status.txt`
+ends `2026-10-11T11:13:44Z CAMPAIGN_DONE 252/252`.
 
-The exact completed controller invocation was:
+**Online recovery now uses the hosts. The commands below are a historical
+record, not instructions to launch or restart anything during publication.**
+Phase 2 used read-only SSH and rsync to fetch evidence; it started/stopped no
+DB, server, benchmark or observer. No commit was made.
+
+The completed controller ran detached in .111 tmux `oom_paper_20261010`:
 
 ```bash
-# Historical invocation on neel@10.129.27.111; campaign is already complete.
-cd /home/neel/claude_ctl/AriaBC_v2
-bash scripts/distributed/oom_v2/campaign_v2.sh /home/neel/claude_ctl/results/oom_v2_20261001
+# Historical completed launch on .111; do not rerun against the completed output.
+cd /home/neel/claude_checks/paper_20261010_oom/repo
+bash scripts/distributed/oom_v2/campaign_v2.sh /home/neel/claude_checks/paper_20261010_oom/results
 ```
 
-`campaign_v2.sh` runs the PG build on .247, builds matching C++ binaries on .111,
-generates data, verifies the baseline, performs preflight/hash checks, runs one
-balanced 84-case invocation, then verifies and writes the campaign summary.
-The final settings are in `scripts/distributed/oom_v2/arguments.sh`; the literal
-generation and timed-case commands expand the following shared argument array:
+The saved [arguments](OOM_100M/paper_20261010/phase2/evidence/campaign/campaign.json)
+and [commands.log](OOM_100M/paper_20261010/phase2/evidence/controller/commands.log)
+are authoritative. Paths: isolated PG/data/builds
+`.247:/home/neel/ariabc_data/paper_20261010_oom/`; isolated controller/gateway
+`.111:/home/neel/claude_checks/paper_20261010_oom/`. Ports DB 5468, server 8068,
+Raft endpoint 9068 (Raft bypassed). The harness uses SERIALIZABLE + jitter,
+100M fresh rows, fillfactor 90, 32MB shared buffers, 20,000 statements, seed 42,
+workers 1/4/8/16, A θ0/.99/1.2 + B/C/D/F θ.99 and three balanced rotated trials.
+Merkle geometry is 200/32/1024/256 with synchronous maintenance. Delta restore,
+sampled stopped-file byte checks, SSD settling, cache dropping, checkpoint and
+post-run verification follow the README; they are outside workload TPS.
+
+Recorded stage command structure (historical, already complete):
 
 ```bash
-# Commands executed on .111 against the isolated DB/server on .247.
-V2_REPO=/home/neel/claude_ctl/AriaBC_v2
-V2_OUT=/home/neel/claude_ctl/results/oom_v2_20261001
-V2_REMOTE=/tmp/ariabc_oom_v2_20261001
-V2_INSTALL=/home/neel/claude_opt/install_v2
-V2_CLUSTER=/home/neel/claude_opt/cluster_v2
-V2_COMMON=(--remote-host 10.129.148.247 --remote-user neel
-  --remote-dir "$V2_REMOTE" --install-dir "$V2_INSTALL" --cluster-dir "$V2_CLUSTER"
-  --gateway-host 10.129.27.111 --gateway-user neel --gateway-repo "$V2_REPO"
-  --db-port 5458 --server-port 8058 --base-dir-name pgdata_base_v2_ff90
-  --db-rows 100000000 --shared-buffers 32MB --txs 20000 --seed 42
-  --trials 1 --modes pg bcdb_det bcdb_merkle --workers 1 4 8 16
-  --combos a:0.0 a:0.99 a:1.2 b:0.99 c:0.99 d:0.99 f:0.99
-  --pg-retry-jitter on --pg-exec-mode event --verify-mode fast
-  --reset-mode delta --delta-content-check sampled
-  --gateway-timeout 1800 --reset-timeout 7200 --verify-timeout 7200
-  --settle-factor 1.25 --settle-min-s 20 --settle-max-s 1800 --calibrate-min-wait-s 300
-  --usertable-fillfactor 90 --gen-shared-buffers 512MB
-  --gen-maintenance-work-mem 1GB --gen-parallel-maintenance-workers 2
-  --gen-min-mem-available-mb 4608 --generation-timeout 21600)
-cd "$V2_REPO"
+source scripts/distributed/oom_v2/arguments.sh /home/neel/claude_checks/paper_20261010_oom/results
+# Builds were isolated and completed before these stages.
 python3 -u scripts/distributed/run_oom_100m_benchmark.py "${V2_COMMON[@]}" --gen-only --out-dir "$V2_OUT/generation"
 python3 -u scripts/distributed/oom_v2/verify_baseline.py "$V2_OUT/baseline_evidence" "${V2_COMMON[@]}"
 python3 -u scripts/distributed/run_oom_100m_benchmark.py "${V2_COMMON[@]}" --skip-gen --preflight-only --out-dir "$V2_OUT/preflight"
 python3 scripts/distributed/oom_v2/check_workloads.py "$V2_OUT/provenance/published_workloads.json" "$V2_OUT/generation"
+python3 -u scripts/distributed/oom_v2/smoke_paper.py "$V2_OUT"
 python3 -u scripts/distributed/run_oom_100m_benchmark.py "${V2_COMMON[@]}" --skip-gen --auto-resume --out-dir "$V2_OUT/campaign"
 python3 scripts/distributed/oom_v2/summarize.py "$V2_OUT"
 ```
 
-This is a record of executed commands, not an instruction to overwrite or regenerate
-the completed dataset. Use the immutable final source archive and matching executable
-hashes in `OOM_100M/README.md` for reproduction; git HEAD alone omits uncommitted changes.
-The final successful snapshot SHA-256 is
-`b376a4586ee96f263db61190f9dcdd69a330f2478cf3181b8e8135dc368cf171`.
-Bulky archives remain on .111; published `remote_bulk_sha256.txt` lists their hashes.
-The launch report's earlier snapshot hash is an intermediate failed attempt.
-The measured runner hash and successful build manifest match the frozen source.
-The controller's memory-guard and rsync corrections were made after source freeze;
-supplied final copies are archived in `OOM_100M/runs/v2_20261001/controller_scripts/`.
-Use those orchestration settings with the frozen PG/C++/runner source rather than
-the older controller scripts embedded in the tarball. Their README records that
-these script copies came from the supplied workspace, not a new remote fetch.
+The source archive hash is
+`bce56e38179adf8d34cb480e1310b92f8d77d265bf14ba64909d0e84f70aa193`.
+Every archived file matches the frozen git commit; engine/build hashes and core
+binary hashes are published. Harness overlays, restored ignored generator,
+200GiB storage-guard computation, preparation build failure and interrupted load
+are retained in [provenance](OOM_100M/paper_20261010/phase2/evidence/provenance/).
+A fresh clean generation completed before any timed cases.
 
-Preparation history: failed builds produced no data. The first load was aborted
-because its 12288MB MemAvailable guard could not pass with this fork's shared-memory
-allocation; the guard was lowered to 4608MB and the partial load deleted. The completed
-generation is a single clean run. Stale same-size source/build state on .247 was moved
-aside; snapshot synchronization now uses `rsync -a --checksum`. These attempts are
-kept under the v2 archive with failed build logs under `failed_preparation_no_data/`.
-
-PG is SERIALIZABLE only; serialization failures are retried client-side. No new
-READ COMMITTED measurements exist. Merkle maintenance stays synchronous inside the
-user transaction. All modes use the fresh fillfactor-90 heap. One trial per point
-does not establish stable rankings or isolate changes from the older datasets.
-
-Publication and regeneration are local artifact analysis only. The one-time
-publication commands already run were:
+Read-only status commands (do not run preflight or a resume helper):
 
 ```bash
-python3 scripts/distributed/oom_v2/publish_v2.py --source .bench_tmp/oom_v2_20261001
-MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign v2
-python3 scripts/distributed/oom_v2/publish_readme.py
+ssh neel@10.129.27.111 'tail -8 /home/neel/claude_checks/paper_20261010_oom/results/status.txt'
+ssh neel@10.129.27.111 'wc -l /home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2/summary.csv'
 ```
 
-Repeatable orchestrator checks (no benchmark rerun required):
+Repeatable **local-only** analysis, figure generation and checksum validation:
 
 ```bash
-python3 scripts/distributed/oom_v2/publish_v2.py --source Final_Results/OOM_100M/runs/v2_20261001 --validate-only
-(cd Final_Results/OOM_100M/runs/v2_20261001 && sha256sum -c ARCHIVE_SHA256SUMS)
-MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py --campaign v2
-python3 scripts/distributed/oom_v2/publish_readme.py
-# Preserve the archived historical PNGs; regenerate into a separate directory.
-MPLCONFIGDIR=$HOME/.cache/ariabc-matplotlib python3 scripts/distributed/plot_oom_figures.py \
-  --campaign previous --out $HOME/ariabc_data/figures/oom_previous
+MPLCONFIGDIR=/tmp/oom_phase2_matplotlib python3 Final_Results/OOM_100M/paper_20261010/phase2/analyze.py
+python3 Final_Results/OOM_100M/paper_20261010/phase2/publish_readme.py
+(cd Final_Results/OOM_100M/paper_20261010/phase2 && sha256sum -c SHA256SUMS)
+(cd Final_Results/OOM_100M && sha256sum -c PUBLICATION_SHA256SUMS)
 ```
+
+All numeric tables use the checked CSVs in `OOM_100M/paper_20261010/phase2/`.
+Figures have PDF+PNG, colorblind-safe median curves and min–max bands. Ratios
+use medians, never best-of-trial values. Three repeats do not meet the saved
+five-repeat qualification; no CV exceeds 10%, but short runs limit noise
+sensitivity and observed extrema are not confidence intervals. Det counters
+were unavailable, not zero. Largest historical PG change (A θ1.2/w16, −42%) is
+due to the gateway window default 65536 → 1024; old v2 has only one observation per point.
+
+The exact former section and complete former root README/figures/combined
+historical CSV are preserved in
+`OOM_100M/previous/root_before_phase2_20261012/`. The clean Oct 1 v2 publication
+is in `OOM_100M/previous/v2_20261001_publication/`; its 84-row source remains
+`OOM_100M/runs/v2_20261001/summary.csv`. Older histories below are unchanged.
 
 ## 2 (previous). OOM 100M — pg, det and det + Merkle
 
@@ -505,7 +494,23 @@ series order. The saved config leaves warmup unspecified; six cycles and affinit
 176–183 come from the replication wrapper. Do not call the new run an exact
 reproduction of the old audit/cache conditions.
 
-## 6. Distributed Online Replica Recovery — 3-node cluster, YCSB 160k, in-flight fault injection
+## 6. Distributed Online Replica Recovery — paper re-measurement (2026-10-12)
+
+Primary result: [ONLINE_RECOVERY/README.md](ONLINE_RECOVERY/README.md). Frozen commit `16577072`;
+9 scenarios × 3 rotated repetitions + 1 extra attempt, all accepted; isolated installs, ports 5448/9018/8018/8019,
+isolated Kafka 9192/9193. Controller and scripts: `ONLINE_RECOVERY/paper_20261010/harness/preparation/`
+(deployed to `.111:/home/neel/ariabc_data/paper_20261010_recov/`). Executed on `.111`:
+
+```bash
+B=/home/neel/ariabc_data/paper_20261010_recov
+tmux new-session -d -s recov_paper_20261010 "cd $B; exec python3 controller.py --phase matrix >> results/controller_matrix.log 2>&1"
+# extra attempt for the storage-flagged M_active r2 a1:
+cd $B && bash run_case.sh M_active 2 2 matrix && python3 collect_run.py repo/scripts/bench_full_results/cluster4_paper_20261010_recov_matrix_M_active_r2_a2
+# tables and figures (from the curated copy):
+cd Final_Results/ONLINE_RECOVERY/paper_20261010 && python3 analyze.py
+```
+
+## 6 (previous). Distributed Online Replica Recovery — 3-node cluster, YCSB 160k, in-flight fault injection
 
 Evaluates ProtectDB Algorithm 2 running inside the replicated Raft-Kafka cluster
 (`admin123` = 1, `user4` = 2, `utkarsh` = 4) under 160,000 transactions and 96 client lanes.

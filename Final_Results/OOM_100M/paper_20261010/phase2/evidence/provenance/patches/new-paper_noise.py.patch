@@ -1,0 +1,38 @@
+diff --git a/scripts/distributed/oom_v2/paper_noise.py b/scripts/distributed/oom_v2/paper_noise.py
+new file mode 100644
+--- /dev/null
++++ b/scripts/distributed/oom_v2/paper_noise.py
+@@ -0,0 +1,33 @@
++"""Uniform predeclared severe-stall rule; unrelated load is retained for analysis."""
++import json
++from pathlib import Path
++
++def qualify(case):
++    findings=[]
++    for name in ('telemetry.jsonl', 'gateway_telemetry.jsonl'):
++        records=[]
++        for line in (Path(case)/name).read_text().splitlines():
++            try: obj=json.loads(line)
++            except ValueError:
++                findings.append(dict(file=name,reason='invalid telemetry record')); continue
++            if 'error' in obj: findings.append(dict(file=name,reason='telemetry error',detail=obj['error']))
++            elif 'monotonic_ns' in obj: records.append(obj)
++        for before,after in zip(records, records[1:]):
++            gap=(after['monotonic_ns']-before['monotonic_ns'])/1e9
++            if gap>=10: findings.append(dict(file=name,reason='sampler gap >=10s',seconds=gap))
++        # A ten-second window avoids excluding normal brief synchronous I/O waits.
++        for start,before in enumerate(records):
++            later=next((x for x in records[start+1:] if (x['monotonic_ns']-before['monotonic_ns'])/1e9>=10),None)
++            if later is None: continue
++            elapsed=(later['monotonic_ns']-before['monotonic_ns'])/1e9
++            for key,bound in (('pressure/io',.95),('pressure/memory',.5)):
++                def total(obj):
++                    for line in (obj.get(key) or '').splitlines():
++                        if line.startswith('full '): return int(dict(p.split('=') for p in line.split()[1:])['total'])
++                    return None
++                lo,hi=total(before),total(later)
++                if lo is not None and hi is not None and (hi-lo)/(elapsed*1e6)>=bound:
++                    findings.append(dict(file=name,reason=key+' full pressure',fraction=(hi-lo)/(elapsed*1e6),seconds=elapsed))
++    result=dict(excluded=bool(findings),findings=findings,rule='sampler gap >=10s; full IO PSI >=95% or full memory PSI >=50% over >=10s; telemetry error; same all modes')
++    (Path(case)/'noise_qualification.json').write_text(json.dumps(result,indent=2)+'\n')
++    return result

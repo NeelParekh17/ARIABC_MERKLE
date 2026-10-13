@@ -1,0 +1,929 @@
+{
+  "settings": {
+    "allow_system_table_mods": "off",
+    "application_name": "psql",
+    "archive_cleanup_command": "",
+    "archive_command": "(disabled)",
+    "archive_mode": "off",
+    "archive_timeout": "0",
+    "array_nulls": "on",
+    "authentication_timeout": "60",
+    "autovacuum": "off",
+    "autovacuum_analyze_scale_factor": "0.1",
+    "autovacuum_analyze_threshold": "50",
+    "autovacuum_freeze_max_age": "200000000",
+    "autovacuum_max_workers": "3",
+    "autovacuum_multixact_freeze_max_age": "400000000",
+    "autovacuum_naptime": "60",
+    "autovacuum_vacuum_cost_delay": "2",
+    "autovacuum_vacuum_cost_limit": "-1",
+    "autovacuum_vacuum_scale_factor": "0.2",
+    "autovacuum_vacuum_threshold": "50",
+    "autovacuum_work_mem": "-1",
+    "backend_flush_after": "0",
+    "backslash_quote": "safe_encoding",
+    "backtrace_functions": "",
+    "bcdb_advance_commit_watermark": "on",
+    "bcdb_client_public_key": "",
+    "bcdb_dt_completion_only_skip_reads": "off",
+    "bcdb_dt_conflict_tracking": "on",
+    "bcdb_dt_hashtab_switch_threshold": "1500",
+    "bcdb_enforce_signatures": "off",
+    "bcdb_gate_snapshot_each_block": "off",
+    "bcdb_gate_telemetry": "off",
+    "bcdb_ledger_trace": "off",
+    "bcdb_result_ring_slots": "2048",
+    "bcdb_serial_gate_mode": "1",
+    "bcdb_serial_gate_source": "0",
+    "bcdb_worker_count": "16",
+    "bgwriter_delay": "200",
+    "bgwriter_flush_after": "64",
+    "bgwriter_lru_maxpages": "100",
+    "bgwriter_lru_multiplier": "2",
+    "block_size": "8192",
+    "blocksize": "0",
+    "bonjour": "off",
+    "bonjour_name": "",
+    "bytea_output": "hex",
+    "check_function_bodies": "on",
+    "checkpoint_completion_target": "0.5",
+    "checkpoint_flush_after": "32",
+    "checkpoint_timeout": "1800",
+    "checkpoint_warning": "30",
+    "client_encoding": "UTF8",
+    "client_min_messages": "notice",
+    "cluster_name": "",
+    "commit_delay": "0",
+    "commit_siblings": "5",
+    "config_file": "/home/neel/ariabc_data/paper_20261010_oom/pgdata_plain/postgresql.conf",
+    "constraint_exclusion": "partition",
+    "cpu_index_tuple_cost": "0.005",
+    "cpu_operator_cost": "0.0025",
+    "cpu_tuple_cost": "0.01",
+    "cursor_tuple_fraction": "0.1",
+    "data_checksums": "off",
+    "data_directory": "/home/neel/ariabc_data/paper_20261010_oom/pgdata_plain",
+    "data_directory_mode": "0700",
+    "data_sync_retry": "off",
+    "DateStyle": "ISO, MDY",
+    "db_user_namespace": "off",
+    "deadlock_timeout": "1000",
+    "debug_assertions": "off",
+    "debug_pretty_print": "on",
+    "debug_print_parse": "off",
+    "debug_print_plan": "off",
+    "debug_print_rewritten": "off",
+    "default_statistics_target": "100",
+    "default_table_access_method": "heap",
+    "default_tablespace": "",
+    "default_text_search_config": "pg_catalog.english",
+    "default_transaction_deferrable": "off",
+    "default_transaction_isolation": "serializable",
+    "default_transaction_read_only": "off",
+    "dynamic_library_path": "$libdir",
+    "dynamic_shared_memory_type": "posix",
+    "effective_cache_size": "524288",
+    "effective_io_concurrency": "1",
+    "enable_bitmapscan": "on",
+    "enable_gathermerge": "on",
+    "enable_hashagg": "on",
+    "enable_hashjoin": "on",
+    "enable_indexonlyscan": "on",
+    "enable_indexscan": "on",
+    "enable_material": "on",
+    "enable_mergejoin": "on",
+    "enable_merkle_index": "off",
+    "enable_nestloop": "on",
+    "enable_parallel_append": "on",
+    "enable_parallel_hash": "on",
+    "enable_partition_pruning": "on",
+    "enable_partitionwise_aggregate": "off",
+    "enable_partitionwise_join": "off",
+    "enable_seqscan": "off",
+    "enable_sort": "on",
+    "enable_tidscan": "on",
+    "escape_string_warning": "on",
+    "event_source": "PostgreSQL",
+    "exit_on_error": "off",
+    "external_pid_file": "",
+    "extra_float_digits": "1",
+    "force_parallel_mode": "off",
+    "from_collapse_limit": "8",
+    "fsync": "on",
+    "full_page_writes": "on",
+    "geqo": "on",
+    "geqo_effort": "5",
+    "geqo_generations": "0",
+    "geqo_pool_size": "0",
+    "geqo_seed": "0",
+    "geqo_selection_bias": "2",
+    "geqo_threshold": "12",
+    "gin_fuzzy_search_limit": "0",
+    "gin_pending_list_limit": "4096",
+    "hba_file": "/home/neel/ariabc_data/paper_20261010_oom/pgdata_plain/pg_hba.conf",
+    "hot_standby": "on",
+    "hot_standby_feedback": "off",
+    "huge_pages": "try",
+    "ident_file": "/home/neel/ariabc_data/paper_20261010_oom/pgdata_plain/pg_ident.conf",
+    "idle_in_transaction_session_timeout": "0",
+    "ignore_checksum_failure": "off",
+    "ignore_system_indexes": "off",
+    "integer_datetimes": "on",
+    "IntervalStyle": "postgres",
+    "is_bcdb_master": "off",
+    "is_bcdb_worker": "off",
+    "jit": "on",
+    "jit_above_cost": "100000",
+    "jit_debugging_support": "off",
+    "jit_dump_bitcode": "off",
+    "jit_expressions": "on",
+    "jit_inline_above_cost": "500000",
+    "jit_optimize_above_cost": "500000",
+    "jit_profiling_support": "off",
+    "jit_provider": "llvmjit",
+    "jit_tuple_deforming": "on",
+    "join_collapse_limit": "8",
+    "krb_caseins_users": "off",
+    "krb_server_keyfile": "",
+    "lc_collate": "C",
+    "lc_ctype": "C",
+    "lc_messages": "C",
+    "lc_monetary": "C",
+    "lc_numeric": "C",
+    "lc_time": "C",
+    "listen_addresses": "*",
+    "lo_compat_privileges": "off",
+    "local_preload_libraries": "",
+    "lock_timeout": "0",
+    "log_autovacuum_min_duration": "-1",
+    "log_checkpoints": "on",
+    "log_connections": "off",
+    "log_destination": "stderr",
+    "log_directory": "log",
+    "log_disconnections": "off",
+    "log_duration": "off",
+    "log_error_verbosity": "default",
+    "log_executor_stats": "off",
+    "log_file_mode": "0600",
+    "log_filename": "postgresql-%Y-%m-%d_%H%M%S.log",
+    "log_hostname": "off",
+    "log_line_prefix": "%m [%p] ",
+    "log_lock_waits": "off",
+    "log_min_duration_sample": "-1",
+    "log_min_duration_statement": "-1",
+    "log_min_error_statement": "error",
+    "log_min_messages": "warning",
+    "log_parser_stats": "off",
+    "log_planner_stats": "off",
+    "log_replication_commands": "off",
+    "log_rotation_age": "1440",
+    "log_rotation_size": "10240",
+    "log_statement": "none",
+    "log_statement_sample_rate": "1",
+    "log_statement_stats": "off",
+    "log_temp_files": "-1",
+    "log_timezone": "Asia/Kolkata",
+    "log_transaction_sample_rate": "0",
+    "log_truncate_on_rotation": "off",
+    "logging_collector": "off",
+    "logical_decoding_work_mem": "65536",
+    "maintenance_work_mem": "2097152",
+    "max_connections": "256",
+    "max_files_per_process": "1000",
+    "max_function_args": "100",
+    "max_identifier_length": "63",
+    "max_index_keys": "32",
+    "max_locks_per_transaction": "4012",
+    "max_logical_replication_workers": "4",
+    "max_parallel_maintenance_workers": "4",
+    "max_parallel_workers": "2",
+    "max_parallel_workers_per_gather": "0",
+    "max_pred_locks_per_page": "512",
+    "max_pred_locks_per_relation": "-2",
+    "max_pred_locks_per_transaction": "4012",
+    "max_prepared_transactions": "0",
+    "max_replication_slots": "10",
+    "max_stack_depth": "2048",
+    "max_standby_archive_delay": "30000",
+    "max_standby_streaming_delay": "30000",
+    "max_sync_workers_per_subscription": "2",
+    "max_wal_senders": "0",
+    "max_wal_size": "20480",
+    "max_worker_processes": "8",
+    "merkle_apply_batch_bytes": "1048576",
+    "merkle_apply_batch_items": "256",
+    "merkle_apply_batch_pages": "128",
+    "merkle_apply_batch_time_ms": "1",
+    "merkle_apply_synchronous_direct": "on",
+    "merkle_read_lag_policy": "error",
+    "merkle_recovery_profile_enabled": "off",
+    "merkle_update_detection": "off",
+    "merkle_update_detection_suppress": "on",
+    "min_parallel_index_scan_size": "64",
+    "min_parallel_table_scan_size": "1024",
+    "min_wal_size": "80",
+    "OEP_mode": "off",
+    "old_snapshot_threshold": "-1",
+    "operator_precedence_warning": "off",
+    "parallel_leader_participation": "on",
+    "parallel_setup_cost": "1000",
+    "parallel_tuple_cost": "0.1",
+    "password_encryption": "md5",
+    "plan_cache_mode": "auto",
+    "port": "5468",
+    "post_auth_delay": "0",
+    "pre_auth_delay": "0",
+    "primary_conninfo": "",
+    "primary_slot_name": "",
+    "promote_trigger_file": "",
+    "quote_all_identifiers": "off",
+    "random_page_cost": "4",
+    "recovery_end_command": "",
+    "recovery_min_apply_delay": "0",
+    "recovery_target": "",
+    "recovery_target_action": "pause",
+    "recovery_target_inclusive": "on",
+    "recovery_target_lsn": "",
+    "recovery_target_name": "",
+    "recovery_target_time": "",
+    "recovery_target_timeline": "latest",
+    "recovery_target_xid": "",
+    "restart_after_crash": "on",
+    "restore_command": "",
+    "row_security": "on",
+    "search_path": "\"$user\", public",
+    "segment_size": "131072",
+    "seq_page_cost": "1",
+    "server_encoding": "UTF8",
+    "server_version": "13devel",
+    "server_version_num": "130000",
+    "session_preload_libraries": "",
+    "session_replication_role": "origin",
+    "shared_buffers": "4096",
+    "shared_memory_type": "mmap",
+    "shared_preload_libraries": "",
+    "ssl": "off",
+    "ssl_ca_file": "",
+    "ssl_cert_file": "server.crt",
+    "ssl_ciphers": "none",
+    "ssl_crl_file": "",
+    "ssl_dh_params_file": "",
+    "ssl_ecdh_curve": "none",
+    "ssl_key_file": "server.key",
+    "ssl_library": "",
+    "ssl_max_protocol_version": "",
+    "ssl_min_protocol_version": "TLSv1.2",
+    "ssl_passphrase_command": "",
+    "ssl_passphrase_command_supports_reload": "off",
+    "ssl_prefer_server_ciphers": "on",
+    "standard_conforming_strings": "on",
+    "statement_timeout": "0",
+    "stats_temp_directory": "pg_stat_tmp",
+    "superuser_reserved_connections": "3",
+    "synchronize_seqscans": "on",
+    "synchronous_commit": "on",
+    "synchronous_standby_names": "",
+    "syslog_facility": "local0",
+    "syslog_ident": "postgres",
+    "syslog_sequence_numbers": "on",
+    "syslog_split_messages": "on",
+    "tcp_keepalives_count": "9",
+    "tcp_keepalives_idle": "7200",
+    "tcp_keepalives_interval": "75",
+    "tcp_user_timeout": "0",
+    "temp_buffers": "1024",
+    "temp_file_limit": "-1",
+    "temp_tablespaces": "",
+    "TimeZone": "Asia/Kolkata",
+    "timezone_abbreviations": "Default",
+    "trace_notify": "off",
+    "trace_recovery_messages": "log",
+    "trace_sort": "off",
+    "track_activities": "on",
+    "track_activity_query_size": "1024",
+    "track_commit_timestamp": "off",
+    "track_counts": "on",
+    "track_functions": "none",
+    "track_io_timing": "on",
+    "transaction_deferrable": "off",
+    "transaction_isolation": "serializable",
+    "transaction_read_only": "off",
+    "transform_null_equals": "off",
+    "unix_socket_directories": "/tmp",
+    "unix_socket_group": "",
+    "unix_socket_permissions": "0777",
+    "update_process_title": "on",
+    "vacuum_cleanup_index_scale_factor": "0.1",
+    "vacuum_cost_delay": "0",
+    "vacuum_cost_limit": "200",
+    "vacuum_cost_page_dirty": "20",
+    "vacuum_cost_page_hit": "1",
+    "vacuum_cost_page_miss": "10",
+    "vacuum_defer_cleanup_age": "0",
+    "vacuum_freeze_min_age": "50000000",
+    "vacuum_freeze_table_age": "150000000",
+    "vacuum_multixact_freeze_min_age": "5000000",
+    "vacuum_multixact_freeze_table_age": "150000000",
+    "wal_block_size": "8192",
+    "wal_buffers": "128",
+    "wal_compression": "off",
+    "wal_consistency_checking": "",
+    "wal_init_zero": "on",
+    "wal_keep_segments": "0",
+    "wal_level": "minimal",
+    "wal_log_hints": "off",
+    "wal_receiver_status_interval": "10",
+    "wal_receiver_timeout": "60000",
+    "wal_recycle": "on",
+    "wal_retrieve_retry_interval": "5000",
+    "wal_segment_size": "16777216",
+    "wal_sender_timeout": "60000",
+    "wal_sync_method": "fdatasync",
+    "wal_writer_delay": "200",
+    "wal_writer_flush_after": "128",
+    "work_mem": "4096",
+    "worker_id": "0",
+    "xmlbinary": "base64",
+    "xmloption": "content",
+    "zero_damaged_pages": "off"
+  },
+  "sizes": {
+    "heap_bytes": 28248276992,
+    "table_total_bytes": 30501445632,
+    "database_bytes": 30548371807
+  },
+  "keyspace": "100000000|1|100000000",
+  "indexes": [
+    {
+      "indexname": "usertable_pkey1",
+      "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+    }
+  ],
+  "merkle_stats": null,
+  "provenance": {
+    "install_dir": "/home/neel/ariabc_data/paper_20261010_oom/install",
+    "cluster_dir": "/home/neel/ariabc_data/paper_20261010_oom/cluster",
+    "gateway_repo": "/home/neel/claude_checks/paper_20261010_oom/repo",
+    "baseline_dir": "/home/neel/ariabc_data/paper_20261010_oom/pgdata_base_v2_ff90_plain",
+    "baseline_manifest": {
+      "version": 2,
+      "db_rows": 100000000,
+      "keyspace": "100000000|1|100000000",
+      "heap_bytes": 28248276992,
+      "index_bytes": 2246197248,
+      "relpages": 3448276,
+      "indexes": [
+        {
+          "indexname": "usertable_pkey1",
+          "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+        }
+      ],
+      "derived_from_checkpoint_lsn": "5/3F3BEE70",
+      "derived_from_pg_control_sha256": "c8b6ad9e7cdbbea4fc9603066f733bbfab0b8b2a71eb355b05b397b2ccea73f3",
+      "db_system_id": "7695110858662784567",
+      "checkpoint_lsn": "5/3F40C6C8",
+      "pg_control_sha256": "006f129e73306522f6ae4b18084755caa06370294d7c2da915cb3e2fc5479b5a",
+      "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+      "file_count": 1141,
+      "total_bytes": 32712269772
+    },
+    "executables": [
+      {
+        "host": "10.129.148.247",
+        "path": "/home/neel/ariabc_data/paper_20261010_oom/install/bin/postgres",
+        "sha256": "ec3edb9d3e72ea377f4c6c75df6d14a5cf9b218d770f26bdd4453bd3b4c2e067"
+      },
+      {
+        "host": "10.129.148.247",
+        "path": "/home/neel/ariabc_data/paper_20261010_oom/cluster/ariabc_pg/build/bin/ariabc_pg_server",
+        "sha256": "28300bf543cf0512476482e72e3dfc3b119603ea79c65f2e299dcededd1b0e76"
+      },
+      {
+        "host": "10.129.27.111",
+        "path": "/home/neel/claude_checks/paper_20261010_oom/repo/ariabc_pg/build/bin/ariabc_pg_gateway",
+        "sha256": "f7a6c682900e88e3daa403e2c8a1c53584338dbf85d71efb616cf08d85eb727d"
+      }
+    ]
+  },
+  "reset_output": "\nNumber of files: 1,168 (reg: 1,141, dir: 27)\nNumber of created files: 0\nNumber of deleted files: 2 (reg: 2)\nNumber of regular files transferred: 36\nTotal file size: 32,712,269,772 bytes\nTotal transferred file size: 20,369,739 bytes\nLiteral data: 568,945 bytes\nMatched data: 19,800,794 bytes\nFile list size: 0\nFile list generation time: 0.001 seconds\nFile list transfer time: 0.000 seconds\nTotal bytes sent: 626,659\nTotal bytes received: 55,204\n\nsent 626,659 bytes  received 55,204 bytes  1,363,726.00 bytes/sec\ntotal size is 32,712,269,772  speedup is 47,974.84\nRESTORE_METHOD=delta\n",
+  "cache_drop_output": "CACHES_DROPPED\nMemTotal:       15743352 kB\nMemFree:         9752320 kB\nMemAvailable:   11257392 kB\nBuffers:            1404 kB\nCached:           690680 kB\nSwapCached:        84528 kB\nActive:          3163376 kB\nInactive:        1365968 kB\nActive(anon):    2803440 kB\nInactive(anon):   118944 kB\nActive(file):     359936 kB\nInactive(file):  1247024 kB\nUnevictable:         176 kB\nMlocked:             176 kB\nSwapTotal:       4194300 kB\nSwapFree:        3706992 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:               696 kB\nWriteback:             4 kB\nAnonPages:       3820952 kB\nMapped:           658952 kB\nShmem:            210880 kB\nKReclaimable:     232656 kB\nSlab:             508008 kB\nSReclaimable:     232656 kB\nSUnreclaim:       275352 kB\nKernelStack:       25476 kB\nPageTables:        59984 kB\nSecPageTables:      4028 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    12065976 kB\nCommitted_AS:   12217112 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       76308 kB\nVmallocChunk:          0 kB\nPercpu:            18368 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:          874776 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nGPUActive:       1972816 kB\nGPUReclaim:            0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:     2441192 kB\nDirectMap2M:    12654592 kB\nDirectMap1G:     2097152 kB\n",
+  "restore_write_mib": 12.73046875,
+  "settle": {
+    "mode": "settle",
+    "settled": true,
+    "wait_s": 230.0,
+    "probes": 23,
+    "files": 32,
+    "qd1_median_us": 110.5265,
+    "qd8_median_us": 242.51799999999997,
+    "wr_median_us": 392.433,
+    "history": [
+      {
+        "t": 21089.097,
+        "qd1": {
+          "median_us": 143.1225,
+          "p99_us": 348.13,
+          "mean_us": 144.671151
+        },
+        "qd8": {
+          "median_us": 245.644,
+          "p99_us": 756.893,
+          "mean_us": 288.81515974999996
+        },
+        "wr": {
+          "median_us": 392.448,
+          "p99_us": 718.191,
+          "mean_us": 421.215235
+        },
+        "write_mib": 0.0,
+        "elapsed_s": 10.0
+      },
+      {
+        "t": 21099.097,
+        "qd1": {
+          "median_us": 122.854,
+          "p99_us": 242.122,
+          "mean_us": 138.102903
+        },
+        "qd8": {
+          "median_us": 252.78199999999998,
+          "p99_us": 713.422,
+          "mean_us": 291.78601425
+        },
+        "wr": {
+          "median_us": 394.4915,
+          "p99_us": 716.358,
+          "mean_us": 420.41830999999996
+        },
+        "write_mib": 1.051,
+        "elapsed_s": 20.0
+      },
+      {
+        "t": 21109.098,
+        "qd1": {
+          "median_us": 103.924,
+          "p99_us": 233.405,
+          "mean_us": 136.580929
+        },
+        "qd8": {
+          "median_us": 245.984,
+          "p99_us": 801.847,
+          "mean_us": 294.51813425
+        },
+        "wr": {
+          "median_us": 392.959,
+          "p99_us": 718.061,
+          "mean_us": 418.14475
+        },
+        "write_mib": 4.832,
+        "elapsed_s": 30.0
+      },
+      {
+        "t": 21119.098,
+        "qd1": {
+          "median_us": 116.5625,
+          "p99_us": 246.851,
+          "mean_us": 137.068367
+        },
+        "qd8": {
+          "median_us": 244.647,
+          "p99_us": 770.088,
+          "mean_us": 294.479259
+        },
+        "wr": {
+          "median_us": 393.35400000000004,
+          "p99_us": 718.302,
+          "mean_us": 425.49553999999995
+        },
+        "write_mib": 1.742,
+        "elapsed_s": 40.0
+      },
+      {
+        "t": 21129.098,
+        "qd1": {
+          "median_us": 139.721,
+          "p99_us": 255.327,
+          "mean_us": 139.436631
+        },
+        "qd8": {
+          "median_us": 245.23250000000002,
+          "p99_us": 737.527,
+          "mean_us": 285.50316399999997
+        },
+        "wr": {
+          "median_us": 394.076,
+          "p99_us": 746.133,
+          "mean_us": 421.366445
+        },
+        "write_mib": 5.965,
+        "elapsed_s": 50.0
+      },
+      {
+        "t": 21139.099,
+        "qd1": {
+          "median_us": 105.407,
+          "p99_us": 235.459,
+          "mean_us": 136.293004
+        },
+        "qd8": {
+          "median_us": 253.173,
+          "p99_us": 871.517,
+          "mean_us": 305.739731
+        },
+        "wr": {
+          "median_us": 393.66999999999996,
+          "p99_us": 718.121,
+          "mean_us": 419.574595
+        },
+        "write_mib": 7.094,
+        "elapsed_s": 60.0
+      },
+      {
+        "t": 21149.099,
+        "qd1": {
+          "median_us": 143.88400000000001,
+          "p99_us": 238.806,
+          "mean_us": 142.34901399999998
+        },
+        "qd8": {
+          "median_us": 249.9115,
+          "p99_us": 934.645,
+          "mean_us": 301.80428875
+        },
+        "wr": {
+          "median_us": 391.786,
+          "p99_us": 717.7,
+          "mean_us": 419.833905
+        },
+        "write_mib": 3.086,
+        "elapsed_s": 70.0
+      },
+      {
+        "t": 21159.1,
+        "qd1": {
+          "median_us": 112.926,
+          "p99_us": 270.465,
+          "mean_us": 142.312105
+        },
+        "qd8": {
+          "median_us": 244.0655,
+          "p99_us": 782.761,
+          "mean_us": 292.53866775
+        },
+        "wr": {
+          "median_us": 391.21500000000003,
+          "p99_us": 707.841,
+          "mean_us": 416.43451500000003
+        },
+        "write_mib": 1.961,
+        "elapsed_s": 80.0
+      },
+      {
+        "t": 21169.1,
+        "qd1": {
+          "median_us": 140.1415,
+          "p99_us": 234.578,
+          "mean_us": 139.633414
+        },
+        "qd8": {
+          "median_us": 246.05450000000002,
+          "p99_us": 740.623,
+          "mean_us": 289.96585200000004
+        },
+        "wr": {
+          "median_us": 388.215,
+          "p99_us": 745.592,
+          "mean_us": 520.0958400000001
+        },
+        "write_mib": 4.109,
+        "elapsed_s": 90.0
+      },
+      {
+        "t": 21179.1,
+        "qd1": {
+          "median_us": 106.1685,
+          "p99_us": 244.056,
+          "mean_us": 138.419399
+        },
+        "qd8": {
+          "median_us": 244.697,
+          "p99_us": 881.246,
+          "mean_us": 297.23882799999996
+        },
+        "wr": {
+          "median_us": 389.37199999999996,
+          "p99_us": 715.085,
+          "mean_us": 419.45991499999997
+        },
+        "write_mib": 10.285,
+        "elapsed_s": 100.0
+      },
+      {
+        "t": 21189.1,
+        "qd1": {
+          "median_us": 124.4375,
+          "p99_us": 243.445,
+          "mean_us": 138.03489499999998
+        },
+        "qd8": {
+          "median_us": 247.71800000000002,
+          "p99_us": 767.072,
+          "mean_us": 293.07418325
+        },
+        "wr": {
+          "median_us": 394.577,
+          "p99_us": 724.824,
+          "mean_us": 429.338895
+        },
+        "write_mib": 2.957,
+        "elapsed_s": 110.0
+      },
+      {
+        "t": 21199.101,
+        "qd1": {
+          "median_us": 142.3555,
+          "p99_us": 247.092,
+          "mean_us": 142.490494
+        },
+        "qd8": {
+          "median_us": 245.574,
+          "p99_us": 762.183,
+          "mean_us": 289.74277425
+        },
+        "wr": {
+          "median_us": 393.2195,
+          "p99_us": 718.422,
+          "mean_us": 418.91821000000004
+        },
+        "write_mib": 1.949,
+        "elapsed_s": 120.0
+      },
+      {
+        "t": 21209.101,
+        "qd1": {
+          "median_us": 144.891,
+          "p99_us": 237.033,
+          "mean_us": 140.68230400000002
+        },
+        "qd8": {
+          "median_us": 245.328,
+          "p99_us": 761.011,
+          "mean_us": 292.45424275
+        },
+        "wr": {
+          "median_us": 391.962,
+          "p99_us": 904.258,
+          "mean_us": 430.24569499999996
+        },
+        "write_mib": 2.684,
+        "elapsed_s": 130.0
+      },
+      {
+        "t": 21219.101,
+        "qd1": {
+          "median_us": 141.208,
+          "p99_us": 237.303,
+          "mean_us": 139.539414
+        },
+        "qd8": {
+          "median_us": 242.68849999999998,
+          "p99_us": 720.355,
+          "mean_us": 281.9612
+        },
+        "wr": {
+          "median_us": 395.594,
+          "p99_us": 735.373,
+          "mean_us": 421.560415
+        },
+        "write_mib": 2.484,
+        "elapsed_s": 140.0
+      },
+      {
+        "t": 21229.102,
+        "qd1": {
+          "median_us": 104.219,
+          "p99_us": 232.544,
+          "mean_us": 138.161985
+        },
+        "qd8": {
+          "median_us": 244.20600000000002,
+          "p99_us": 734.201,
+          "mean_us": 291.13590074999996
+        },
+        "wr": {
+          "median_us": 393.164,
+          "p99_us": 714.905,
+          "mean_us": 419.02766499999996
+        },
+        "write_mib": 0.0,
+        "elapsed_s": 150.0
+      },
+      {
+        "t": 21239.103,
+        "qd1": {
+          "median_us": 110.9425,
+          "p99_us": 239.187,
+          "mean_us": 137.364019
+        },
+        "qd8": {
+          "median_us": 241.69600000000003,
+          "p99_us": 706.369,
+          "mean_us": 282.01063400000004
+        },
+        "wr": {
+          "median_us": 391.942,
+          "p99_us": 716.578,
+          "mean_us": 417.25199
+        },
+        "write_mib": 6.637,
+        "elapsed_s": 160.0
+      },
+      {
+        "t": 21249.103,
+        "qd1": {
+          "median_us": 103.488,
+          "p99_us": 260.135,
+          "mean_us": 140.191163
+        },
+        "qd8": {
+          "median_us": 246.0445,
+          "p99_us": 734.051,
+          "mean_us": 290.0107625
+        },
+        "wr": {
+          "median_us": 392.398,
+          "p99_us": 723.181,
+          "mean_us": 425.027135
+        },
+        "write_mib": 2.473,
+        "elapsed_s": 170.0
+      },
+      {
+        "t": 21259.104,
+        "qd1": {
+          "median_us": 112.355,
+          "p99_us": 443.669,
+          "mean_us": 143.052967
+        },
+        "qd8": {
+          "median_us": 248.7095,
+          "p99_us": 741.043,
+          "mean_us": 292.56744825000004
+        },
+        "wr": {
+          "median_us": 392.98400000000004,
+          "p99_us": 718.943,
+          "mean_us": 424.67960500000004
+        },
+        "write_mib": 0.0,
+        "elapsed_s": 180.0
+      },
+      {
+        "t": 21269.104,
+        "qd1": {
+          "median_us": 146.0675,
+          "p99_us": 244.176,
+          "mean_us": 141.578053
+        },
+        "qd8": {
+          "median_us": 242.638,
+          "p99_us": 722.018,
+          "mean_us": 284.03838175
+        },
+        "wr": {
+          "median_us": 391.16499999999996,
+          "p99_us": 714.214,
+          "mean_us": 416.16540000000003
+        },
+        "write_mib": 0.0,
+        "elapsed_s": 190.0
+      },
+      {
+        "t": 21279.104,
+        "qd1": {
+          "median_us": 145.567,
+          "p99_us": 235.43,
+          "mean_us": 142.150251
+        },
+        "qd8": {
+          "median_us": 244.0755,
+          "p99_us": 774.316,
+          "mean_us": 289.751986
+        },
+        "wr": {
+          "median_us": 391.3605,
+          "p99_us": 711.769,
+          "mean_us": 415.81029
+        },
+        "write_mib": 2.613,
+        "elapsed_s": 200.0
+      },
+      {
+        "t": 21289.105,
+        "qd1": {
+          "median_us": 140.738,
+          "p99_us": 257.19,
+          "mean_us": 141.617127
+        },
+        "qd8": {
+          "median_us": 246.4955,
+          "p99_us": 780.317,
+          "mean_us": 290.088499
+        },
+        "wr": {
+          "median_us": 393.54999999999995,
+          "p99_us": 717.971,
+          "mean_us": 419.44321
+        },
+        "write_mib": 0.0,
+        "elapsed_s": 210.0
+      },
+      {
+        "t": 21299.105,
+        "qd1": {
+          "median_us": 110.5265,
+          "p99_us": 231.483,
+          "mean_us": 138.009098
+        },
+        "qd8": {
+          "median_us": 250.7335,
+          "p99_us": 743.067,
+          "mean_us": 289.71604924999997
+        },
+        "wr": {
+          "median_us": 393.3245,
+          "p99_us": 728.701,
+          "mean_us": 421.16701500000005
+        },
+        "write_mib": 0.0,
+        "elapsed_s": 220.0
+      },
+      {
+        "t": 21309.106,
+        "qd1": {
+          "median_us": 143.2825,
+          "p99_us": 243.305,
+          "mean_us": 139.805441
+        },
+        "qd8": {
+          "median_us": 242.51799999999997,
+          "p99_us": 801.496,
+          "mean_us": 290.527224
+        },
+        "wr": {
+          "median_us": 392.433,
+          "p99_us": 718.672,
+          "mean_us": 417.64254
+        },
+        "write_mib": 1.816,
+        "elapsed_s": 230.0
+      }
+    ]
+  },
+  "server": {
+    "command": [
+      "/home/neel/ariabc_data/paper_20261010_oom/cluster/ariabc_pg/build/bin/ariabc_pg_server",
+      "--id",
+      "1",
+      "--raftEndpoint",
+      "127.0.0.1:9068",
+      "--clientPort",
+      "8068",
+      "--raftMembers",
+      "1=127.0.0.1:9068",
+      "--dbName",
+      "postgres",
+      "--dbHost",
+      "127.0.0.1",
+      "--dbPort",
+      "5468",
+      "--dbUser",
+      "postgres",
+      "--dbType",
+      "1",
+      "--safedb",
+      "1",
+      "--dbConnPoolSize",
+      "16",
+      "--bypassRaft",
+      "1",
+      "--pgExecMode",
+      "event",
+      "--bcdbInitBlockSize",
+      "16"
+    ],
+    "environment": {
+      "ARIABC_PROFILE": "1",
+      "ARIABC_PG_MAX_RETRIES": "100",
+      "BCDB_DET_QUEUE_HIGH_WM": "65536",
+      "BCDB_DET_QUEUE_LOW_WM": "32768",
+      "ARIABC_PG_RETRY_JITTER": "1",
+      "BCDB_DECOUPLE_WORKERS": "1",
+      "ARIABC_DET_BLOCK_PARALLEL": "64",
+      "ARIABC_DET_BLOCK_PIPELINE": "4",
+      "ARIABC_DET_BLOCK_MAX": "2048",
+      "ARIABC_DET_ORDER_START_SEQ": "0",
+      "ARIABC_DET_PREFIXED_DIRECT_PARALLEL": "1"
+    }
+  }
+}

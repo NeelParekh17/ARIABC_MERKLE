@@ -1,0 +1,2 @@
+relation|12695|12143||||||||20/116|577238|AccessShareLock|t|t
+virtualxid|||||20/116|||||20/116|577238|ExclusiveLock|t|t

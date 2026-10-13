@@ -1,0 +1,5 @@
+{
+  "excluded": false,
+  "findings": [],
+  "rule": "sampler gap >=10s; full IO PSI >=95% or full memory PSI >=50% over >=10s; telemetry error; same all modes"
+}

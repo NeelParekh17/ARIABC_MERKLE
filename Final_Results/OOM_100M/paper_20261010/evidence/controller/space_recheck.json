@@ -1,0 +1,9 @@
+{
+  "free_bytes": 120801132544,
+  "remaining_merkle_work_bytes": 35866524242,
+  "remaining_plain_work_bytes": 32712269772,
+  "wal_growth_reserve_bytes": 21474836480,
+  "temporary_slack_bytes": 8589934592,
+  "required_bytes": 98643565086,
+  "pass_space": true
+}

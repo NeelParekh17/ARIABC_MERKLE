@@ -1,0 +1,42 @@
+[
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "/bin/bash"
+            ],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Labels": {
+                "org.opencontainers.image.version": "22.04"
+            }
+        },
+        "Created": "2026-10-12T00:50:24.647483536+05:30",
+        "Descriptor": {
+            "digest": "sha256:e4b9543424f8c3f0609817043be63309248ff04dac5a96a229c36d8d9e6262e0",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 752
+        },
+        "Id": "sha256:e4b9543424f8c3f0609817043be63309248ff04dac5a96a229c36d8d9e6262e0",
+        "Metadata": {
+            "LastTagTime": "2026-10-11T19:20:26.944353615Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401",
+        "RepoDigests": [
+            "ariabc-recov-paper-20261010@sha256:e4b9543424f8c3f0609817043be63309248ff04dac5a96a229c36d8d9e6262e0"
+        ],
+        "RepoTags": [
+            "ariabc-recov-paper-20261010:u22"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:cbaf391e670933f026c05c7dedec3faf8f194b6c2d83b0d5694ad68323c8077c",
+                "sha256:5b07228f70c93a299735868b88c2d7c39517f863134b3237402d91a32ccf1849"
+            ],
+            "Type": "layers"
+        },
+        "Size": 189589374
+    }
+]

@@ -1,0 +1,30 @@
+{
+  "ycsb_a_skew_0.0_20000.sql": {
+    "sha256": "7a031904b743e46ac36c81f8ee675141eec90f2831dd31f8788bed7a36bd1b83",
+    "queries": 20000
+  },
+  "ycsb_a_skew_0.99_20000.sql": {
+    "sha256": "a3f07805d1b15666b9ef9ce62daa7f441b622c08d151bc1c8d5ab67cfc97559b",
+    "queries": 20000
+  },
+  "ycsb_a_skew_1.2_20000.sql": {
+    "sha256": "4f763c4243628beba2cf3841e69b2056e518dcb24ad3bc1c9ff7d255ff9700f2",
+    "queries": 20000
+  },
+  "ycsb_b_skew_0.99_20000.sql": {
+    "sha256": "983f19f6c60e9a602d47968b1c1b8ff0badda0e023f82d0d49dc6030e1f1e91c",
+    "queries": 20000
+  },
+  "ycsb_c_skew_0.99_20000.sql": {
+    "sha256": "9609a417912694edc40eb9b1141750954187084fb5285000075b6d4ea7a0e483",
+    "queries": 20000
+  },
+  "ycsb_d_skew_0.99_20000.sql": {
+    "sha256": "9c025251db4a79632681b1a6274fd67924245a97d6d200314b84b4336900c34a",
+    "queries": 20000
+  },
+  "ycsb_f_skew_0.99_20000.sql": {
+    "sha256": "89dec3212c59cd9d38b0d7209c328955087abeef4f88b6f02a54643a4ba7e050",
+    "queries": 20000
+  }
+}

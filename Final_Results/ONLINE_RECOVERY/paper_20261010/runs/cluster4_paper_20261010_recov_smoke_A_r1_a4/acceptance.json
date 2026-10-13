@@ -1,0 +1,122 @@
+{
+  "dataset": "new",
+  "run_id": "cluster4_paper_20261010_recov_smoke_A_r1_a4",
+  "scenario": "A",
+  "group": "f32s1024",
+  "tps_majority_visible": "8798.46",
+  "overhead_vs_baseline_pct": "UNKNOWN",
+  "published_run_id": "UNKNOWN",
+  "tps_change_vs_published_pct": "UNKNOWN",
+  "cut_ms": 0,
+  "repair_ms": 0,
+  "catchup_ms": 0,
+  "total_recovery_ms": 0,
+  "mismatched_partitions": 0,
+  "differing_leaves": 0,
+  "rows_upserted": 0,
+  "rows_deleted": 0,
+  "candidate_rows": 0,
+  "full_copies": 0,
+  "empty_100ms_buckets": 0,
+  "max_completion_gap_ms": 24.71,
+  "phase8_merkle_pass": "PASS",
+  "phase8_root": "80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5",
+  "all3_audit_valid": "yes",
+  "divergence_count": "0",
+  "permanent_failures": "0",
+  "recovery_triggered_count": "0",
+  "recovery_success_count": "0",
+  "recovery_failure_count": "0",
+  "event_count": 0,
+  "event_failures": 0,
+  "event_live": "UNKNOWN",
+  "evidence_status": "PASS",
+  "warnings": "",
+  "stage": "smoke",
+  "rep": 1,
+  "attempt": 4,
+  "quorum_completions": "160000",
+  "raw_divergence_count": "0",
+  "gateway_exit_code": "0",
+  "final_all_three": {
+    "1_admin123": {
+      "raw": [
+        "12001",
+        "80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5",
+        "t",
+        "9a15b0794b52e087376bc7190d48cc58"
+      ]
+    },
+    "2_user4": {
+      "raw": [
+        "12001",
+        "80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5",
+        "t",
+        "9a15b0794b52e087376bc7190d48cc58"
+      ]
+    },
+    "4_utkarsh": {
+      "raw": [
+        "12001",
+        "80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5",
+        "t",
+        "9a15b0794b52e087376bc7190d48cc58"
+      ]
+    }
+  },
+  "events": [],
+  "health": {
+    "10.129.148.247": {
+      "samples": 9,
+      "min_mem_available_kb": 6740080,
+      "min_mem_free_kb": 2427588,
+      "swap_io_bytes": 0,
+      "max_lag_txids": 201,
+      "max_load1": 1.1181640625
+    },
+    "10.129.148.246": {
+      "samples": 9,
+      "min_mem_available_kb": 666348,
+      "min_mem_free_kb": 4284704,
+      "swap_io_bytes": 8192,
+      "max_lag_txids": 200,
+      "max_load1": 1.2744140625
+    },
+    "10.129.148.248": {
+      "samples": 9,
+      "min_mem_available_kb": 1771912,
+      "min_mem_free_kb": 207080,
+      "swap_io_bytes": 11153408,
+      "max_lag_txids": 22004,
+      "max_load1": 5.4541015625
+    },
+    "10.129.27.111": {
+      "samples": 9,
+      "min_mem_available_kb": 7739432,
+      "min_mem_free_kb": 227892,
+      "swap_io_bytes": 0,
+      "max_lag_txids": null,
+      "max_load1": 0.16455078125
+    }
+  },
+  "det_counters": {
+    "dt_opf": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    },
+    "dt_opf_stale_error": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    },
+    "dt_rel_read_tags": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    }
+  },
+  "failures": [],
+  "noise": [],
+  "status": "ACCEPTED"
+}

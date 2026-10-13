@@ -1,0 +1,9 @@
+{
+  "curated_files": 2125,
+  "curated_bytes": 10158196,
+  "errors": [],
+  "archive_sha256": "bce56e38179adf8d34cb480e1310b92f8d77d265bf14ba64909d0e84f70aa193",
+  "source_files_checked": 9862,
+  "frozen_git_files_checked": 9862,
+  "manifest_files": 7301
+}

@@ -1,0 +1,9 @@
+host,path,allocated_bytes,GiB,role,origin
+10.129.148.247,/home/neel/ariabc_data/oom_100m_20261006/golden,5375303680,5.006142,compressed golden archive,oom_verify_20261006; source HEAD 51daba6d3844ca0b704b5fe060d0a02578bfa5ce plus working tree
+10.129.148.247,/home/neel/ariabc_data/oom_100m_20261006/pgdata_base_v2_ff90,35866824704,33.403584,stopped Merkle baseline,oom_verify_20261006; source HEAD 51daba6d3844ca0b704b5fe060d0a02578bfa5ce plus working tree
+10.129.148.247,/home/neel/ariabc_data/oom_100m_20261006/pgdata_base_v2_ff90_plain,32712556544,30.465942,stopped plain baseline,oom_verify_20261006; source HEAD 51daba6d3844ca0b704b5fe060d0a02578bfa5ce plus working tree
+10.129.148.247,/home/neel/ariabc_data/oom_100m_20261006/pgdata,35866828800,33.403587,original generation / working directory,oom_verify_20261006; source HEAD 51daba6d3844ca0b704b5fe060d0a02578bfa5ce plus working tree
+10.129.148.247,/home/neel/ariabc_data/oom_100m_20261006/pgdata_plain,32696393728,30.450890,plain delta working copy,oom_verify_20261006; source HEAD 51daba6d3844ca0b704b5fe060d0a02578bfa5ce plus working tree
+10.129.148.247,/home/neel/ariabc_data/oom_100m_20261006/pgdata_merkle,35833372672,33.372429,Merkle delta working copy,oom_verify_20261006; source HEAD 51daba6d3844ca0b704b5fe060d0a02578bfa5ce plus working tree
+10.129.148.247,/home/neel/ariabc_data/oom_100m_20261006/scripts,36864,0.000034,campaign SQL/harness inputs,oom_verify_20261006; source HEAD 51daba6d3844ca0b704b5fe060d0a02578bfa5ce plus working tree
+10.129.148.247,/home/neel/ariabc_data/oom_100m_20261006,178427260928,166.173336,entire directory; do not sum with child rows,oom_verify_20261006

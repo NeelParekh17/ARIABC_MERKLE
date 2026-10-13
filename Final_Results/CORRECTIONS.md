@@ -1,5 +1,55 @@
 # Benchmark corrections and qualification
 
+## Primary online recovery updated to three-repetition campaign (2026-10-12)
+
+`ONLINE_RECOVERY/README.md` is the new primary report: 9 scenarios × 3 rotated repetitions on frozen commit
+`16577072`, all 27 planned runs accepted plus one extra attempt; identical final roots and `merkle_verify()` on all
+three replicas in every run, zero full copies. The earlier single-trial `Report.md` and its runs are unchanged.
+Differences from that report: SERIALIZABLE fault injector with full-jitter retries, isolated Kafka cluster,
+180 s audit deadline, isolated builds. One accepted run (M_active r2 a1, 4,765 TPS) was caused by a storage
+stall on `.247` (Raft-log fdatasync total 6.2 s vs 1.0 s median); a post-hoc rule applied uniformly to all nodes
+and runs (fdatasync total > 2× node median) flags only that run, which is retained as evidence and replaced in
+the primary statistics by one extra attempt. The old unprioritized slow-reference leader runs cannot be
+reproduced with current code and remain history only.
+
+## Primary OOM updated to frozen three-trial campaign (2026-10-12)
+
+The primary `OOM_100M/README.md`, `summary.csv` and figures now use the completed
+commit-16577072 campaign: 252 accepted measurements over 84 points, with a
+separate three-case smoke. Independent raw-log/settings/hash/noise/settle audit
+passes all 255 cases and 5,100,000 terminal results; all 85 Merkle cases have
+post-run `t`. No failure/exclusion/extra attempt or incorrectly accepted case
+was found under the recorded contract. PostgreSQL transient errors are reported,
+not hidden: 39,661 campaign serialization errors match successful retries;
+readiness-role and administrative shutdown messages remain documented.
+
+Publication uses median-of-three and min–max bands, plus min/max/best/n and
+sample CV for every point. Matched median det/PG, Merkle/det and Merkle/PG ratios
+are 0.846, 0.898 and 0.755 (median across 28 matched points). Maximum CV is 4.65%;
+none exceeds 10%. Det counters are absent/null, not zero. Three trials meet the
+requested design but remain below the harness's five-repeat qualification.
+Most runs are too short for the ten-second pressure test; stable boot IDs,
+clocksource tsc and clean exclusion checks do not prove absence of host noise.
+
+Historical comparison uses exactly `runs/v2_20261001/summary.csv` (84 old
+single-trial observations), not the former root CSV's mixed 220 observations.
+The largest difference, PG A θ1.2/w16, is approximately −42%. It is explained by the
+gateway submission window default changing 65536 → 1024 on 2026-10-06 (this run: window=1024;
+Oct 1: 65536); the 2026-10-06 same-dataset control measured 5,779 vs 9,818/9,926 TPS at this point
+(see OOM_100M/README.md). Read latency and retry counts do not explain it.
+Commit/build snapshot, fresh physical state, environment and repetition design
+differ, so this is not an isolated causal claim about a code change.
+
+The entire former root README/figure tree/combined CSV was moved intact to
+`OOM_100M/previous/root_before_phase2_20261012/`; the previous v2 publication,
+older raw evidence and phase-one snapshots are preserved. Full-precision
+summaries, 28 matched ratios, all-case audit, checksums and scripts are in
+`OOM_100M/paper_20261010/phase2/`. Every new figure has one-column-readable PDF
+and PNG with colorblind-safe encoding. `COMMANDS.md` section 2 records the
+completed launch and local-only regeneration. Phase 2 made no remote mutations
+or DB/server/benchmark starts/stops, and no commit. All figures are observations,
+not serializability, cross-mode state-equality or recovery-fault proofs.
+
 ## Primary TPC-C figures updated to v2 (2026-10-02)
 
 `TPCC/tpcc_warehouses_scaling.png` and `TPCC/tpcc_workers_scaling.png` now show

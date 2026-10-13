@@ -1,0 +1,5 @@
+ec3edb9d3e72ea377f4c6c75df6d14a5cf9b218d770f26bdd4453bd3b4c2e067  /home/neel/ariabc_data/paper_20261010_oom/install/bin/postgres
+28300bf543cf0512476482e72e3dfc3b119603ea79c65f2e299dcededd1b0e76  /home/neel/ariabc_data/paper_20261010_oom/cluster/ariabc_pg/build/bin/ariabc_pg_server
+90d4021a8f121beb4c2ab4d86e67db756af13ee9821dd3175b42a57f01ed5e23  -
+Filesystem        1B-blocks         Used   Available Use% Mounted on
+/dev/nvme0n1p2 501809635328 426514624512 49729208320  90% /

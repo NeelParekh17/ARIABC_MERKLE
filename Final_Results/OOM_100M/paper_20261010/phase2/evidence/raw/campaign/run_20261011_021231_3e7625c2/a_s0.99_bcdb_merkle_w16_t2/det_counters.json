@@ -1,0 +1,14 @@
+{
+  "dt_opf": {
+    "samples": [],
+    "max_observed": null
+  },
+  "dt_opf_stale_error": {
+    "samples": [],
+    "max_observed": null
+  },
+  "dt_rel_read_tags": {
+    "samples": [],
+    "max_observed": null
+  }
+}

@@ -1,0 +1,20 @@
+diff --git a/scripts/distributed/oom_v2/check_space_paper.py b/scripts/distributed/oom_v2/check_space_paper.py
+new file mode 100644
+--- /dev/null
++++ b/scripts/distributed/oom_v2/check_space_paper.py
+@@ -0,0 +1,15 @@
++#!/usr/bin/env python3
++"""Recompute remaining space from the newly verified physical baselines."""
++import json, sys
++from pathlib import Path
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++import run_oom_100m_benchmark as r
++out=Path(sys.argv[1]); args=r.parse_args(sys.argv[2:])
++merkle=r.get_remote_baseline_identity(args)
++plain=r.get_remote_baseline_identity(args, args.base_dir_name + '_plain')
++free=int(r.run_remote(args.remote_host, args.remote_user, f'df -B1 --output=avail {args.remote_dir} | tail -1').stdout.strip())
++required=merkle['total_bytes']+plain['total_bytes']+20*2**30+8*2**30
++record=dict(free_bytes=free, remaining_merkle_work_bytes=merkle['total_bytes'], remaining_plain_work_bytes=plain['total_bytes'], wal_growth_reserve_bytes=20*2**30, temporary_slack_bytes=8*2**30, required_bytes=required, pass_space=free>required)
++(out/'space_recheck.json').write_text(json.dumps(record, indent=2)+'\n')
++print(json.dumps(record, indent=2), flush=True)
++if not record['pass_space']: raise RuntimeError('Fresh measured baseline sizes do not fit remaining disk budget; stop without deleting old data')

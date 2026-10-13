@@ -1,0 +1,7 @@
+dataset,severity,message,count
+smoke,error_or_fatal,"FATAL: role ""neel"" does not exist",9
+smoke,error_or_fatal,FATAL: terminating connection due to administrator command,2
+campaign,error_or_fatal,"FATAL: role ""neel"" does not exist",756
+campaign,error_or_fatal,FATAL: terminating connection due to administrator command,1218
+campaign,error_or_fatal,ERROR: could not serialize access due to concurrent update,39279
+campaign,error_or_fatal,ERROR: could not serialize access due to read/write dependencies among transactions,382

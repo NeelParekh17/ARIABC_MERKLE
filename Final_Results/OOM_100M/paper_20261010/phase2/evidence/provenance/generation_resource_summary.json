@@ -1,0 +1,10 @@
+{
+  "samples": 452,
+  "boot_ids": [
+    "9a6f5f9b-1487-4cc1-9861-48d6954ff623"
+  ],
+  "minimum_MemAvailable_kib": 2480160,
+  "minimum_SwapFree_kib": 0,
+  "maximum_single_postgres_RssAnon_kib": 7845724,
+  "scope": "5-second preparation observer, partial generation coverage; not timed-case telemetry"
+}

@@ -1,0 +1,92 @@
+# Measurement qualification
+
+Successful SQL/verification does not establish stable throughput or serializability.
+A throughput ordering is not a correctness invariant. No observations are discarded.
+Five repeats is the minimum qualification check; CV <= 10% is a diagnostic, not a confidence interval.
+
+| Configuration | Trials | Median TPS | Min | Max | Sample CV % | Status |
+|---|---:|---:|---:|---:|---:|---|
+| bcdb_det / a / 0.0 / 1 | 3 | 1475.14 | 1415.03 | 1505.57 | 3.14 | insufficient_repeats |
+| bcdb_det / a / 0.0 / 16 | 3 | 5274.26 | 5011.28 | 5274.26 | 2.93 | insufficient_repeats |
+| bcdb_det / a / 0.0 / 4 | 3 | 2793.30 | 2791.74 | 2905.29 | 2.30 | insufficient_repeats |
+| bcdb_det / a / 0.0 / 8 | 3 | 3881.23 | 3739.72 | 3886.51 | 2.17 | insufficient_repeats |
+| bcdb_det / a / 0.99 / 1 | 3 | 2040.82 | 2038.53 | 2055.29 | 0.44 | insufficient_repeats |
+| bcdb_det / a / 0.99 / 16 | 3 | 7142.86 | 6889.42 | 7331.38 | 3.11 | insufficient_repeats |
+| bcdb_det / a / 0.99 / 4 | 3 | 3695.49 | 3605.55 | 3706.45 | 1.51 | insufficient_repeats |
+| bcdb_det / a / 0.99 / 8 | 3 | 4991.27 | 4808.85 | 5115.09 | 3.10 | insufficient_repeats |
+| bcdb_det / a / 1.2 / 1 | 3 | 2537.43 | 2526.85 | 2562.46 | 0.72 | insufficient_repeats |
+| bcdb_det / a / 1.2 / 16 | 3 | 7471.05 | 7344.84 | 7510.33 | 1.16 | insufficient_repeats |
+| bcdb_det / a / 1.2 / 4 | 3 | 4479.28 | 4474.27 | 4493.37 | 0.22 | insufficient_repeats |
+| bcdb_det / a / 1.2 / 8 | 3 | 6134.97 | 6084.58 | 6211.18 | 1.04 | insufficient_repeats |
+| bcdb_det / b / 0.99 / 1 | 3 | 3678.50 | 3677.82 | 3778.58 | 1.56 | insufficient_repeats |
+| bcdb_det / b / 0.99 / 16 | 3 | 12570.71 | 12523.48 | 12578.62 | 0.24 | insufficient_repeats |
+| bcdb_det / b / 0.99 / 4 | 3 | 7990.41 | 7964.95 | 8032.13 | 0.42 | insufficient_repeats |
+| bcdb_det / b / 0.99 / 8 | 3 | 10509.72 | 10219.72 | 10520.78 | 1.64 | insufficient_repeats |
+| bcdb_det / c / 0.99 / 1 | 3 | 4232.80 | 4076.64 | 4286.33 | 2.59 | insufficient_repeats |
+| bcdb_det / c / 0.99 / 16 | 3 | 17021.28 | 16077.17 | 17196.90 | 3.59 | insufficient_repeats |
+| bcdb_det / c / 0.99 / 4 | 3 | 9496.68 | 9496.68 | 9519.28 | 0.14 | insufficient_repeats |
+| bcdb_det / c / 0.99 / 8 | 3 | 13351.13 | 13123.36 | 13513.51 | 1.47 | insufficient_repeats |
+| bcdb_det / d / 0.99 / 1 | 3 | 3805.90 | 3800.84 | 3858.02 | 0.83 | insufficient_repeats |
+| bcdb_det / d / 0.99 / 16 | 3 | 12722.65 | 12698.41 | 12836.97 | 0.58 | insufficient_repeats |
+| bcdb_det / d / 0.99 / 4 | 3 | 8156.61 | 8061.27 | 8193.36 | 0.84 | insufficient_repeats |
+| bcdb_det / d / 0.99 / 8 | 3 | 10638.30 | 10520.78 | 10706.64 | 0.89 | insufficient_repeats |
+| bcdb_det / f / 0.99 / 1 | 3 | 1917.18 | 1884.13 | 1917.55 | 1.01 | insufficient_repeats |
+| bcdb_det / f / 0.99 / 16 | 3 | 6884.68 | 6788.87 | 7119.97 | 2.46 | insufficient_repeats |
+| bcdb_det / f / 0.99 / 4 | 3 | 3632.40 | 3518.03 | 3644.98 | 1.94 | insufficient_repeats |
+| bcdb_det / f / 0.99 / 8 | 3 | 5111.17 | 4889.98 | 5124.26 | 2.61 | insufficient_repeats |
+| bcdb_merkle / a / 0.0 / 1 | 3 | 1322.49 | 1312.08 | 1395.77 | 3.40 | insufficient_repeats |
+| bcdb_merkle / a / 0.0 / 16 | 3 | 4614.67 | 4587.16 | 4654.41 | 0.73 | insufficient_repeats |
+| bcdb_merkle / a / 0.0 / 4 | 3 | 2635.05 | 2582.64 | 2645.50 | 1.29 | insufficient_repeats |
+| bcdb_merkle / a / 0.0 / 8 | 3 | 3739.02 | 3510.62 | 3752.35 | 3.71 | insufficient_repeats |
+| bcdb_merkle / a / 0.99 / 1 | 3 | 1780.31 | 1776.36 | 1865.67 | 2.79 | insufficient_repeats |
+| bcdb_merkle / a / 0.99 / 16 | 3 | 6142.51 | 6055.10 | 6487.19 | 3.67 | insufficient_repeats |
+| bcdb_merkle / a / 0.99 / 4 | 3 | 3280.30 | 3241.49 | 3424.66 | 2.91 | insufficient_repeats |
+| bcdb_merkle / a / 0.99 / 8 | 3 | 4517.73 | 4488.33 | 4558.92 | 0.78 | insufficient_repeats |
+| bcdb_merkle / a / 1.2 / 1 | 3 | 2279.72 | 2250.73 | 2282.58 | 0.78 | insufficient_repeats |
+| bcdb_merkle / a / 1.2 / 16 | 3 | 6357.28 | 6236.36 | 6391.82 | 1.29 | insufficient_repeats |
+| bcdb_merkle / a / 1.2 / 4 | 3 | 4022.53 | 4005.61 | 4030.63 | 0.32 | insufficient_repeats |
+| bcdb_merkle / a / 1.2 / 8 | 3 | 5396.65 | 5230.13 | 5418.59 | 1.93 | insufficient_repeats |
+| bcdb_merkle / b / 0.99 / 1 | 3 | 3451.25 | 3386.96 | 3519.27 | 1.92 | insufficient_repeats |
+| bcdb_merkle / b / 0.99 / 16 | 3 | 11383.04 | 11357.18 | 11383.04 | 0.13 | insufficient_repeats |
+| bcdb_merkle / b / 0.99 / 4 | 3 | 7315.29 | 7225.43 | 7336.76 | 0.81 | insufficient_repeats |
+| bcdb_merkle / b / 0.99 / 8 | 3 | 9487.67 | 9237.88 | 9555.66 | 1.78 | insufficient_repeats |
+| bcdb_merkle / c / 0.99 / 1 | 3 | 4102.56 | 4027.39 | 4128.82 | 1.29 | insufficient_repeats |
+| bcdb_merkle / c / 0.99 / 16 | 3 | 16877.64 | 16625.10 | 17182.13 | 1.65 | insufficient_repeats |
+| bcdb_merkle / c / 0.99 / 4 | 3 | 9398.50 | 9136.59 | 9420.63 | 1.70 | insufficient_repeats |
+| bcdb_merkle / c / 0.99 / 8 | 3 | 13131.98 | 13037.81 | 13245.03 | 0.79 | insufficient_repeats |
+| bcdb_merkle / d / 0.99 / 1 | 3 | 3337.23 | 3323.92 | 3343.36 | 0.30 | insufficient_repeats |
+| bcdb_merkle / d / 0.99 / 16 | 3 | 10504.20 | 10395.01 | 10537.41 | 0.71 | insufficient_repeats |
+| bcdb_merkle / d / 0.99 / 4 | 3 | 6811.99 | 6749.92 | 6875.21 | 0.92 | insufficient_repeats |
+| bcdb_merkle / d / 0.99 / 8 | 3 | 8673.03 | 8583.69 | 8695.65 | 0.68 | insufficient_repeats |
+| bcdb_merkle / f / 0.99 / 1 | 3 | 1745.66 | 1658.10 | 1747.95 | 2.98 | insufficient_repeats |
+| bcdb_merkle / f / 0.99 / 16 | 3 | 6103.14 | 5793.74 | 6359.30 | 4.65 | insufficient_repeats |
+| bcdb_merkle / f / 0.99 / 4 | 3 | 3240.97 | 3181.17 | 3253.09 | 1.19 | insufficient_repeats |
+| bcdb_merkle / f / 0.99 / 8 | 3 | 4656.58 | 4518.75 | 4659.83 | 1.75 | insufficient_repeats |
+| pg / a / 0.0 / 1 | 3 | 1525.20 | 1429.59 | 1532.33 | 3.84 | insufficient_repeats |
+| pg / a / 0.0 / 16 | 3 | 5374.90 | 5347.59 | 5420.05 | 0.68 | insufficient_repeats |
+| pg / a / 0.0 / 4 | 3 | 2871.50 | 2862.87 | 2976.19 | 2.17 | insufficient_repeats |
+| pg / a / 0.0 / 8 | 3 | 3906.25 | 3867.72 | 3908.54 | 0.59 | insufficient_repeats |
+| pg / a / 0.99 / 1 | 3 | 2066.97 | 1955.03 | 2108.15 | 3.88 | insufficient_repeats |
+| pg / a / 0.99 / 16 | 3 | 9447.33 | 9310.99 | 9523.81 | 1.14 | insufficient_repeats |
+| pg / a / 0.99 / 4 | 3 | 4260.76 | 4059.27 | 4264.39 | 2.80 | insufficient_repeats |
+| pg / a / 0.99 / 8 | 3 | 6395.91 | 5910.17 | 6400.00 | 4.52 | insufficient_repeats |
+| pg / a / 1.2 / 1 | 3 | 2640.61 | 2628.81 | 2654.63 | 0.49 | insufficient_repeats |
+| pg / a / 1.2 / 16 | 3 | 6038.65 | 5775.34 | 6064.28 | 2.68 | insufficient_repeats |
+| pg / a / 1.2 / 4 | 3 | 5434.78 | 5422.99 | 5491.49 | 0.67 | insufficient_repeats |
+| pg / a / 1.2 / 8 | 3 | 6487.19 | 6215.04 | 6633.50 | 3.29 | insufficient_repeats |
+| pg / b / 0.99 / 1 | 3 | 3881.23 | 3827.02 | 3958.04 | 1.69 | insufficient_repeats |
+| pg / b / 0.99 / 16 | 3 | 16366.61 | 16326.53 | 16474.46 | 0.47 | insufficient_repeats |
+| pg / b / 0.99 / 4 | 3 | 11198.21 | 11104.94 | 11305.82 | 0.90 | insufficient_repeats |
+| pg / b / 0.99 / 8 | 3 | 14326.65 | 13898.54 | 14587.89 | 2.44 | insufficient_repeats |
+| pg / c / 0.99 / 1 | 3 | 4418.91 | 4416.96 | 4450.38 | 0.42 | insufficient_repeats |
+| pg / c / 0.99 / 16 | 3 | 26041.67 | 25940.34 | 26212.32 | 0.53 | insufficient_repeats |
+| pg / c / 0.99 / 4 | 3 | 14673.51 | 14275.52 | 14760.15 | 1.77 | insufficient_repeats |
+| pg / c / 0.99 / 8 | 3 | 21208.91 | 20876.83 | 21390.37 | 1.23 | insufficient_repeats |
+| pg / d / 0.99 / 1 | 3 | 4008.02 | 3954.91 | 4009.62 | 0.78 | insufficient_repeats |
+| pg / d / 0.99 / 16 | 3 | 16542.60 | 16488.05 | 16638.94 | 0.46 | insufficient_repeats |
+| pg / d / 0.99 / 4 | 3 | 11293.05 | 11074.20 | 11441.65 | 1.64 | insufficient_repeats |
+| pg / d / 0.99 / 8 | 3 | 14749.26 | 14577.26 | 14771.05 | 0.72 | insufficient_repeats |
+| pg / f / 0.99 / 1 | 3 | 1966.96 | 1928.27 | 1974.14 | 1.26 | insufficient_repeats |
+| pg / f / 0.99 / 16 | 3 | 9229.35 | 9203.87 | 9242.14 | 0.21 | insufficient_repeats |
+| pg / f / 0.99 / 4 | 3 | 4168.40 | 4078.30 | 4206.98 | 1.59 | insufficient_repeats |
+| pg / f / 0.99 / 8 | 3 | 6295.25 | 6255.86 | 6345.18 | 0.71 | insufficient_repeats |

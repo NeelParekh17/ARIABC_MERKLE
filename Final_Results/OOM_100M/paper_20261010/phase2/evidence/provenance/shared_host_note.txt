@@ -1,0 +1,12 @@
+2026-10-10T19:40:10Z
+tsc
+USER         PID COMMAND
+naresh    689890 /home/naresh/SEMESTER_1/Rnd/postgres_local/postgresql/install/bin/postgres -D /home/naresh/SEMESTER_1/Rnd/postgres_local/postgresql/install/data
+naresh    689891 postgres: io worker 0
+naresh    689892 postgres: io worker 1
+naresh    689893 postgres: io worker 2
+naresh    689894 postgres: checkpointer 
+naresh    689895 postgres: background writer 
+naresh    689897 postgres: walwriter 
+naresh    689898 postgres: autovacuum launcher 
+naresh    689899 postgres: logical replication launcher 

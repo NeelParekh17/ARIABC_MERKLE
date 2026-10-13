@@ -1,0 +1,70 @@
+{
+  "pg_before": {
+    "blks_read": 13732919,
+    "blks_hit": 12734734,
+    "blk_read_time": 41.823,
+    "blk_write_time": 0,
+    "buffers_clean": 0,
+    "buffers_backend": 10223870,
+    "checkpoint_write_time": 471199,
+    "checkpoint_sync_time": 61,
+    "checkpoints_req": 18,
+    "buffers_checkpoint": 39343,
+    "buffers_alloc": 38940
+  },
+  "pg_after": {
+    "blks_read": 13752537,
+    "blks_hit": 12820837,
+    "blk_read_time": 7347.981,
+    "blk_write_time": 2.116,
+    "buffers_clean": 324,
+    "buffers_backend": 10224065,
+    "checkpoint_write_time": 471202,
+    "checkpoint_sync_time": 75,
+    "checkpoints_req": 19,
+    "buffers_checkpoint": 39488,
+    "buffers_alloc": 58482
+  },
+  "device_before": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 14303269,
+    "read_sectors": 1972820066,
+    "read_ms": 20479476,
+    "write_ios": 2813017,
+    "write_sectors": 664126672,
+    "write_ms": 105995325,
+    "io_ms": 6588513
+  },
+  "device_after": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 14320534,
+    "read_sectors": 1973121618,
+    "read_ms": 20486741,
+    "write_ios": 2815155,
+    "write_sectors": 664156040,
+    "write_ms": 105996104,
+    "io_ms": 6589918
+  },
+  "checkpoint_before": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 14320542,
+    "read_sectors": 1973122202,
+    "read_ms": 20486743,
+    "write_ios": 2815197,
+    "write_sectors": 664165704,
+    "write_ms": 105996192,
+    "io_ms": 6589924
+  },
+  "checkpoint_after": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 14320547,
+    "read_sectors": 1973122314,
+    "read_ms": 20486744,
+    "write_ios": 2815542,
+    "write_sectors": 664171488,
+    "write_ms": 105996225,
+    "io_ms": 6589942
+  },
+  "continuous_write_mib": 21.8828125,
+  "interphase_write_mib": 4.71875
+}

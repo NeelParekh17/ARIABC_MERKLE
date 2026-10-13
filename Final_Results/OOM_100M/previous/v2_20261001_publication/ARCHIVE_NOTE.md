@@ -1,0 +1,1 @@
+The v2 README, summary and figures were copied before the phase-1 status pointer was added. Original raw runs remain at their existing paths; the runs link preserves the archived README references. New remeasurement evidence is in ../../paper_20261010/.

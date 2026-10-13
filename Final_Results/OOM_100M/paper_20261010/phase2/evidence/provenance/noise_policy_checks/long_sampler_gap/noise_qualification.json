@@ -1,0 +1,16 @@
+{
+  "excluded": true,
+  "findings": [
+    {
+      "file": "telemetry.jsonl",
+      "reason": "sampler gap >=10s",
+      "seconds": 11.0
+    },
+    {
+      "file": "gateway_telemetry.jsonl",
+      "reason": "sampler gap >=10s",
+      "seconds": 11.0
+    }
+  ],
+  "rule": "sampler gap >=10s; full IO PSI >=95% or full memory PSI >=50% over >=10s; telemetry error; same all modes"
+}

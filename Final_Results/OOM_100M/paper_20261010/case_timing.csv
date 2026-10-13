@@ -1,0 +1,7 @@
+group,artifact_dir,elapsed_estimate_s,accepted_unix_ns
+smoke,/home/neel/claude_checks/paper_20261010_oom/results/smoke/run_20261011_013308_3b13566e/a_s0.99_bcdb_det_w1_t1,833.5006293579423,1791663742030853328
+smoke,/home/neel/claude_checks/paper_20261010_oom/results/smoke/run_20261011_013308_3b13566e/a_s0.99_pg_w1_t1,226.55038879198216,1791663969234527130
+smoke,/home/neel/claude_checks/paper_20261010_oom/results/smoke/run_20261011_013308_3b13566e/a_s0.99_bcdb_merkle_w1_t1,981.4451498609014,1791664950790849716
+campaign,/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2/c_s0.99_pg_w16_t1,262.57192165401,1791665580283147155
+campaign,/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2/c_s0.99_bcdb_merkle_w16_t1,440.4159635299625,1791666021085991654
+campaign,/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2/c_s0.99_bcdb_det_w16_t1,90.9726058360447,1791666112170266710

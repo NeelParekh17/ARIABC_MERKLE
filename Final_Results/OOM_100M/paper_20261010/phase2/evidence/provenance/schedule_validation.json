@@ -1,0 +1,49 @@
+{
+  "cases": 252,
+  "unique": 252,
+  "first_six": [
+    [
+      "c",
+      0.99,
+      16,
+      "pg",
+      1
+    ],
+    [
+      "c",
+      0.99,
+      16,
+      "bcdb_merkle",
+      1
+    ],
+    [
+      "c",
+      0.99,
+      16,
+      "bcdb_det",
+      1
+    ],
+    [
+      "b",
+      0.99,
+      8,
+      "bcdb_merkle",
+      1
+    ],
+    [
+      "b",
+      0.99,
+      8,
+      "bcdb_det",
+      1
+    ],
+    [
+      "b",
+      0.99,
+      8,
+      "pg",
+      1
+    ]
+  ],
+  "rotation_each_mode_each_position": true
+}

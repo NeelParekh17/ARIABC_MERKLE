@@ -1,3 +1,5 @@
+> **Superseded (2026-10-12):** the primary online-recovery result is now [README.md](README.md) (three repetitions per scenario, frozen commit `16577072`). This report is kept unchanged below as the earlier single-trial evaluation.
+
 # AriaBC Distributed Online Replica Recovery (ProtectDB Algorithm 2): Final Evaluation Report
 
 > **Location**: `Final_Results/ONLINE_RECOVERY/`

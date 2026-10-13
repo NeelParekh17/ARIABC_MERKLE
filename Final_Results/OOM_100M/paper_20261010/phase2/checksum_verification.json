@@ -1,0 +1,8 @@
+{
+  "publication_case_files_match_remote": 2125,
+  "case_hash_errors": 0,
+  "metadata_files_match_remote": 82,
+  "remote_raw_case_files": 3655,
+  "publication_manifest": "../../PUBLICATION_SHA256SUMS",
+  "curated_manifest": "SHA256SUMS"
+}

@@ -1,0 +1,12 @@
+{"monotonic_ns": 0, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=0"}
+{"monotonic_ns": 1000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=980000"}
+{"monotonic_ns": 2000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=1960000"}
+{"monotonic_ns": 3000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=2940000"}
+{"monotonic_ns": 4000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=3920000"}
+{"monotonic_ns": 5000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=4900000"}
+{"monotonic_ns": 6000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=5880000"}
+{"monotonic_ns": 7000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=6860000"}
+{"monotonic_ns": 8000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=7840000"}
+{"monotonic_ns": 9000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=8820000"}
+{"monotonic_ns": 10000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=9800000"}
+{"monotonic_ns": 11000000000, "pressure/io": "full avg10=0 avg60=0 avg300=0 total=10780000"}

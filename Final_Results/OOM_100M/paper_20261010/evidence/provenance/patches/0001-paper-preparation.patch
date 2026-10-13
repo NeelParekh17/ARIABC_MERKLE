@@ -1,0 +1,395 @@
+diff --git a/scripts/distributed/benchmark_contract.py b/scripts/distributed/benchmark_contract.py
+index 16fc1181..59656927 100644
+--- a/scripts/distributed/benchmark_contract.py
++++ b/scripts/distributed/benchmark_contract.py
+@@ -31,7 +31,8 @@ def balanced_cases(configurations, modes, trials, seed=42):
+ def source_hashes(repo):
+     paths = [repo / 'scripts/generate_ycsb_workloads.py',
+              repo / 'scripts/restore_usertable_small.sql',
+-             repo / 'scripts/distributed/sql/raft_apply_ledger_schema.sql']
++             repo / 'scripts/distributed/sql/raft_apply_ledger_schema.sql',
++             repo / 'scripts/distributed/oom_v2/paper_noise.py']
+     paths += sorted((repo / 'scripts/distributed').glob('*.py'))
+     paths += [repo / 'scripts/distributed/run_4node_raft_cluster.sh']
+     return {str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
+diff --git a/scripts/distributed/benchmark_telemetry.py b/scripts/distributed/benchmark_telemetry.py
+index d0549b87..9f362732 100644
+--- a/scripts/distributed/benchmark_telemetry.py
++++ b/scripts/distributed/benchmark_telemetry.py
+@@ -1,6 +1,7 @@
+ """Read-only 1 Hz host and PostgreSQL wait telemetry; JSONL, monotonic timestamps."""
+ import argparse
+ import json
++import platform
+ from pathlib import Path
+ import signal
+ import subprocess
+@@ -8,7 +9,10 @@ import time
+ 
+ 
+ def snapshot(psql=None, port=5432):
+-    result = dict(monotonic_ns=time.monotonic_ns(), unix_ns=time.time_ns())
++    result = dict(monotonic_ns=time.monotonic_ns(), unix_ns=time.time_ns(),
++                  kernel=platform.release(),
++                  boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
++                  clocksource=Path("/sys/devices/system/clocksource/clocksource0/current_clocksource").read_text().strip())
+     for name in ('meminfo', 'vmstat', 'diskstats', 'stat', 'loadavg', 'pressure/io', 'pressure/memory', 'pressure/cpu'):
+         p = Path('/proc') / name
+         result[name] = p.read_text() if p.exists() else None
+diff --git a/scripts/distributed/oom_v2/arguments.sh b/scripts/distributed/oom_v2/arguments.sh
+index 66646696..6c9b3e6b 100644
+--- a/scripts/distributed/oom_v2/arguments.sh
++++ b/scripts/distributed/oom_v2/arguments.sh
+@@ -1,16 +1,16 @@
+ #!/bin/bash
+ # Source on .111; fixed paths keep the v2 campaign independent of other installs.
+-V2_REPO=/home/neel/claude_ctl/AriaBC_v2
+-V2_OUT=${1:-/home/neel/claude_ctl/results/oom_v2_20261001}
+-V2_REMOTE=/home/neel/ariabc_data/oom_v2_20261001
+-V2_INSTALL=/home/neel/claude_opt/install_v2
+-V2_CLUSTER=/home/neel/claude_opt/cluster_v2
++V2_REPO=/home/neel/claude_checks/paper_20261010_oom/repo
++V2_OUT=${1:-/home/neel/claude_checks/paper_20261010_oom/results}
++V2_REMOTE=/home/neel/ariabc_data/paper_20261010_oom
++V2_INSTALL=/home/neel/ariabc_data/paper_20261010_oom/install
++V2_CLUSTER=/home/neel/ariabc_data/paper_20261010_oom/cluster
+ V2_COMMON=(--remote-host 10.129.148.247 --remote-user neel
+   --remote-dir "$V2_REMOTE" --install-dir "$V2_INSTALL" --cluster-dir "$V2_CLUSTER"
+   --gateway-host 10.129.27.111 --gateway-user neel --gateway-repo "$V2_REPO"
+-  --db-port 5458 --server-port 8058 --base-dir-name pgdata_base_v2_ff90
++  --db-port 5468 --server-port 8068 --raft-port 9068 --base-dir-name pgdata_base_v2_ff90
+   --db-rows 100000000 --shared-buffers 32MB --txs 20000 --seed 42
+-  --trials 1 --modes pg bcdb_det bcdb_merkle --workers 1 4 8 16
++  --trials 3 --modes pg bcdb_det bcdb_merkle --workers 1 4 8 16
+   --combos a:0.0 a:0.99 a:1.2 b:0.99 c:0.99 d:0.99 f:0.99
+   --pg-retry-jitter on --pg-exec-mode event --verify-mode fast
+   --reset-mode delta --delta-content-check sampled
+diff --git a/scripts/distributed/oom_v2/build_pg.sh b/scripts/distributed/oom_v2/build_pg.sh
+index 7ac96576..13b70e1d 100644
+--- a/scripts/distributed/oom_v2/build_pg.sh
++++ b/scripts/distributed/oom_v2/build_pg.sh
+@@ -2,10 +2,10 @@
+ # Runs under nohup ON .247. Only writes the dedicated v2 paths.
+ set -euo pipefail
+ export LC_ALL=C
+-V2_EVIDENCE=/home/neel/claude_opt/oom_v2_evidence
+-V2_SRC=/home/neel/claude_opt/source_v2
+-V2_BUILD=/home/neel/claude_opt/pg_build_v2_inplace
+-V2_INSTALL=/home/neel/claude_opt/install_v2
++V2_EVIDENCE=/home/neel/ariabc_data/paper_20261010_oom/build_evidence
++V2_SRC=/home/neel/ariabc_data/paper_20261010_oom/source
++V2_BUILD=/home/neel/ariabc_data/paper_20261010_oom/pg_build
++V2_INSTALL=/home/neel/ariabc_data/paper_20261010_oom/install
+ mkdir -p "$V2_EVIDENCE"
+ exec > >(tee -a "$V2_EVIDENCE/build_pg.log") 2>&1
+ trap 'rc=$?; printf "FAILED rc=%s line=%s\n" "$rc" "$LINENO" > "$V2_EVIDENCE/BUILD_STATUS"; exit "$rc"' ERR
+@@ -27,11 +27,13 @@ if [[ ! -f "$V2_BUILD/.snapshot_sha256" ]]; then
+   cp source.tar.gz.sha256 "$V2_BUILD/.snapshot_sha256"
+ fi
+ cmp source.tar.gz.sha256 "$V2_BUILD/.snapshot_sha256"
++cd "$V2_SRC"
++sha256sum --quiet -c "$V2_EVIDENCE/engine_SHA256SUMS"
+ cd "$V2_BUILD"
+ # Configure a dedicated build COPY in place, like the canonical workflow.
+ # The source_v2 copy and source archive remain separate from generated files.
+ if [[ ! -f config.status ]]; then
+-  ./configure --prefix="$V2_INSTALL" --without-readline CFLAGS=-O2 CPPFLAGS=-D_GNU_SOURCE
++  ./configure --prefix="$V2_INSTALL" --enable-depend --without-readline CFLAGS=-O2 CPPFLAGS=-D_GNU_SOURCE
+ fi
+ # This fork's common objects include backend headers before the backend build.
+ make -C src/backend generated-headers
+@@ -42,5 +44,5 @@ make -C contrib/pg_prewarm install
+ export LD_LIBRARY_PATH="$V2_INSTALL/lib:${LD_LIBRARY_PATH:-}"
+ "$V2_INSTALL/bin/postgres" --version
+ "$V2_INSTALL/bin/pg_config" --configure
+-sha256sum "$V2_INSTALL/bin/postgres" "$V2_INSTALL/lib/libpq.so.5" > "$V2_EVIDENCE/postgres.sha256"
++sha256sum "$V2_INSTALL/bin/postgres" "$V2_INSTALL/lib/libpq.so.5" "$V2_INSTALL/bin/initdb" "$V2_INSTALL/bin/pg_ctl" "$V2_INSTALL/bin/psql" "$V2_INSTALL/bin/pg_controldata" "$V2_INSTALL/bin/pg_isready" "$V2_INSTALL/bin/pg_config" "$V2_INSTALL/lib/postgresql/pg_prewarm.so" > "$V2_EVIDENCE/postgres.sha256"
+ printf 'OK\n' > "$V2_EVIDENCE/BUILD_STATUS"
+diff --git a/scripts/distributed/oom_v2/campaign_v2.sh b/scripts/distributed/oom_v2/campaign_v2.sh
+index b5cb74b6..35651e7f 100644
+--- a/scripts/distributed/oom_v2/campaign_v2.sh
++++ b/scripts/distributed/oom_v2/campaign_v2.sh
+@@ -2,7 +2,7 @@
+ # Launch ONLY on .111 in tmux/nohup. Reinvoke with the same output to resume.
+ set -Eeuo pipefail
+ export LC_ALL=C
+-source "$(dirname "$0")/arguments.sh" "${1:-/home/neel/claude_ctl/results/oom_v2_20261001}"
++source "$(dirname "$0")/arguments.sh" "${1:-/home/neel/claude_checks/paper_20261010_oom/results}"
+ cd "$V2_REPO"
+ mkdir -p "$V2_OUT/stages"
+ exec 9>"$V2_OUT/controller.lock"
+@@ -27,12 +27,12 @@ run_stage() {
+   log "OK $STAGE"
+ }
+ build_pg() {
+-  remote 'mkdir -p /home/neel/claude_opt/oom_v2_evidence'
+-  printf '%s\n' 'rsync immutable snapshot to .247:/home/neel/claude_opt/oom_v2_evidence/' >> "$V2_OUT/commands.log"
+-  rsync -a --checksum -e 'ssh -o BatchMode=yes' "$V2_OUT/provenance/source.tar.gz" "$V2_OUT/provenance/source.tar.gz.sha256" "$V2_REPO/scripts/distributed/oom_v2/build_pg.sh" neel@10.129.148.247:/home/neel/claude_opt/oom_v2_evidence/
+-  remote 'bash -n /home/neel/claude_opt/oom_v2_evidence/build_pg.sh'
++  remote 'mkdir -p /home/neel/ariabc_data/paper_20261010_oom/build_evidence'
++  printf '%s\n' 'rsync immutable snapshot to .247:/home/neel/ariabc_data/paper_20261010_oom/build_evidence/' >> "$V2_OUT/commands.log"
++  rsync -a --checksum -e 'ssh -o BatchMode=yes' "$V2_OUT/provenance/source.tar.gz" "$V2_OUT/provenance/source.tar.gz.sha256" "$V2_OUT/provenance/engine_SHA256SUMS" "$V2_OUT/provenance/git_head.txt" "$V2_OUT/provenance/git_status.txt" "$V2_REPO/scripts/distributed/oom_v2/build_pg.sh" neel@10.129.148.247:/home/neel/ariabc_data/paper_20261010_oom/build_evidence/
++  remote 'bash -n /home/neel/ariabc_data/paper_20261010_oom/build_evidence/build_pg.sh'
+   local status
+-  status=$(remote 'cat /home/neel/claude_opt/oom_v2_evidence/BUILD_STATUS 2>/dev/null || true')
++  status=$(remote 'cat /home/neel/ariabc_data/paper_20261010_oom/build_evidence/BUILD_STATUS 2>/dev/null || true')
+   if [[ $status == OK ]]; then return; fi
+   if [[ $status == RUNNING* ]]; then
+     local pid=${status#*pid=}
+@@ -41,13 +41,13 @@ build_pg() {
+       echo 'Stale RUNNING build status; inspect build evidence before resuming'; return 1
+     fi
+   else
+-    remote 'nohup bash /home/neel/claude_opt/oom_v2_evidence/build_pg.sh > /home/neel/claude_opt/oom_v2_evidence/nohup.log 2>&1 < /dev/null & echo $! > /home/neel/claude_opt/oom_v2_evidence/build.pid'
++    remote 'nohup bash /home/neel/ariabc_data/paper_20261010_oom/build_evidence/build_pg.sh > /home/neel/ariabc_data/paper_20261010_oom/build_evidence/nohup.log 2>&1 < /dev/null & echo $! > /home/neel/ariabc_data/paper_20261010_oom/build_evidence/build.pid'
+     log 'PG_BUILD_DETACHED_STARTED on .247'
+   fi
+   for ((i=0; i<720; i++)); do
+-    status=$(remote 'cat /home/neel/claude_opt/oom_v2_evidence/BUILD_STATUS 2>/dev/null || true')
++    status=$(remote 'cat /home/neel/ariabc_data/paper_20261010_oom/build_evidence/BUILD_STATUS 2>/dev/null || true')
+     if [[ $status == OK ]]; then
+-      rsync -a -e 'ssh -o BatchMode=yes' neel@10.129.148.247:/home/neel/claude_opt/oom_v2_evidence/ "$V2_OUT/build_evidence/"
++      rsync -a -e 'ssh -o BatchMode=yes' neel@10.129.148.247:/home/neel/ariabc_data/paper_20261010_oom/build_evidence/ "$V2_OUT/build_evidence/"
+       return
+     fi
+     if [[ $status == FAILED* ]]; then echo "$status"; return 1; fi
+@@ -72,24 +72,28 @@ build_cpp() {
+     info=$(ldd "$binary"); printf '%s\n' "$info"
+     if [[ $info == *'not found'* ]]; then return 1; fi
+   done
+-  sha256sum ariabc_pg/build/bin/ariabc_pg_gateway ariabc_pg/build/bin/ariabc_pg_server
++  sha256sum ariabc_pg/build/bin/ariabc_pg_gateway ariabc_pg/build/bin/ariabc_pg_server | tee "$V2_OUT/provenance/cpp_binaries.sha256"
++  sha256sum "$V2_INSTALL/lib/libpq.so.5" /home/neel/Desktop/rdkafka_local/lib/librdkafka.so.1 > "$V2_OUT/provenance/cpp_dynamic_dependencies.sha256"
+   remote "export LD_LIBRARY_PATH=$V2_INSTALL/lib:/home/neel/Desktop/rdkafka_local/lib:\${LD_LIBRARY_PATH:-}; for b in $V2_INSTALL/bin/postgres $V2_CLUSTER/ariabc_pg/build/bin/ariabc_pg_server; do info=\$(ldd \"\$b\"); printf '%s\\n' \"\$info\"; case \"\$info\" in *'not found'*) exit 1;; esac; sha256sum \"\$b\"; done"
+ }
+ generation() {
+-  remote "mkdir -p $V2_REMOTE; df -h $V2_REMOTE; free -m; ps -eo pid,comm,rss --sort=-rss | sed -n '1,15p'; test ! -d /home/neel/ariabc_data/oom_100m/benchmark.lock; test \$(df -B1 --output=avail $V2_REMOTE | tail -1) -ge 240000000000"
++  remote "mkdir -p $V2_REMOTE; df -h $V2_REMOTE; free -m; ps -eo pid,comm,rss --sort=-rss | sed -n '1,15p'; test ! -d $V2_REMOTE/benchmark.lock; test \$(df -B1 --output=avail $V2_REMOTE | tail -1) -ge 214748364800"
+   python3 -u scripts/distributed/run_oom_100m_benchmark.py "${V2_COMMON[@]}" --gen-only --out-dir "$V2_OUT/generation"
+   remote "test -f $V2_REMOTE/golden/done.flag"
+ }
+ campaign() {
+   python3 -u scripts/distributed/run_oom_100m_benchmark.py "${V2_COMMON[@]}" --skip-gen --auto-resume --out-dir "$V2_OUT/campaign"
+ }
+-log 'CAMPAIGN_START frozen v2 source, SERIALIZABLE 84 cases'
++test "$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)" = tsc
++log 'CAMPAIGN_START frozen v2 source, SERIALIZABLE 252 cases'
+ run_stage build_pg build_pg
+ run_stage build_cpp build_cpp
+ run_stage generation generation
+ run_stage verification python3 -u scripts/distributed/oom_v2/verify_baseline.py "$V2_OUT/baseline_evidence" "${V2_COMMON[@]}"
++run_stage space_recheck python3 -u scripts/distributed/oom_v2/check_space_paper.py "$V2_OUT" "${V2_COMMON[@]}"
+ run_stage preflight python3 -u scripts/distributed/run_oom_100m_benchmark.py "${V2_COMMON[@]}" --skip-gen --preflight-only --out-dir "$V2_OUT/preflight"
+ run_stage workload_hashes python3 scripts/distributed/oom_v2/check_workloads.py "$V2_OUT/provenance/published_workloads.json" "$V2_OUT/generation"
++run_stage smoke python3 -u scripts/distributed/oom_v2/smoke_paper.py "$V2_OUT/smoke" "${V2_COMMON[@]}"
+ run_stage campaign campaign
+ run_stage summary python3 scripts/distributed/oom_v2/summarize.py "$V2_OUT"
+-log 'CAMPAIGN_DONE 84/84; summary.csv and summary.md written'
++log 'CAMPAIGN_DONE 252/252; summary.csv and summary.md written'
+diff --git a/scripts/distributed/oom_v2/summarize.py b/scripts/distributed/oom_v2/summarize.py
+index 80f3070a..ee8a685c 100644
+--- a/scripts/distributed/oom_v2/summarize.py
++++ b/scripts/distributed/oom_v2/summarize.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Copy the accepted 84-case CSV and verify its evidence before marking DONE."""
++"""Copy the accepted 252-case CSV and verify its evidence before marking DONE."""
+ import csv
+ import json
+ import shutil
+@@ -11,9 +11,9 @@ runs = sorted((out / 'campaign').glob('run_*/summary.csv'))
+ assert len(runs) == 1, runs
+ source = runs[0]
+ rows = list(csv.DictReader(source.open()))
+-expected = {(w, str(float(s)), m, n, 1) for w, s in [('a', 0), ('a', .99), ('a', 1.2), ('b', .99), ('c', .99), ('d', .99), ('f', .99)] for m in ['pg', 'bcdb_det', 'bcdb_merkle'] for n in [1, 4, 8, 16]}
++expected = {(w, str(float(s)), m, n, t) for w, s in [('a', 0), ('a', .99), ('a', 1.2), ('b', .99), ('c', .99), ('d', .99), ('f', .99)] for m in ['pg', 'bcdb_det', 'bcdb_merkle'] for n in [1, 4, 8, 16] for t in [1, 2, 3]}
+ actual = {(r['workload'], str(float(r['skew'])), r['mode'], int(r['workers']), int(r['trial'])) for r in rows}
+-assert len(rows) == 84 and actual == expected, (len(rows), expected - actual)
++assert len(rows) == 252 and actual == expected, (len(rows), expected - actual)
+ hashes = json.loads((out / 'provenance/published_workloads.json').read_text())
+ for row in rows:
+     assert row['isolation'] == 'serializable', row
+@@ -31,14 +31,14 @@ for row in rows:
+         for key, value in dict(partitions=200, fanout=32, split_threshold=1024, merge_threshold=256).items():
+             assert setup['merkle_stats'][key] == value
+ shutil.copy2(source, out / 'summary.csv')
+-text = ['Fresh OOM v2 campaign: 84/84 accepted cases.', '',
++text = ['Fresh OOM v2 campaign: 252/252 accepted cases.', '',
+         '100M freshly loaded rows; heap fillfactor 90; synchronous Merkle 200 partitions / fanout 32 / split 1024 / merge 256.',
+         'SERIALIZABLE only; seed 42; 20K statements; workers 1,4,8,16; jitter on; delta/cold reset; 32MB timed shared_buffers.',
+         'All seven SQL workload hashes match the published manifests. Zero divergence, permanent failures, and exhausted retries.',
+-        'All 28 Merkle cases have post-workload verification PASS. One trial per point; throughput differences are observations.', '',
++        'All 84 Merkle cases have post-workload verification PASS. Three trials per point; use medians and retain best/min/n in phase 2.', '',
+         '| Workload | Skew | Mode | Workers | TPS | Read MiB | Write MiB |',
+         '| --- | --- | --- | ---: | ---: | ---: | ---: |']
+ for r in sorted(rows, key=lambda r: (r['workload'], float(r['skew']), r['mode'], int(r['workers']))):
+     text.append(f"| {r['workload']} | {r['skew']} | {r['mode']} | {r['workers']} | {float(r['tps']):.2f} | {float(r['device_read_mib']):.2f} | {float(r['device_write_mib']):.2f} |")
+ (out / 'summary.md').write_text('\n'.join(text) + '\n')
+-print('SUMMARY_PASS: 84 accepted cases')
++print('SUMMARY_PASS: 252 accepted cases')
+diff --git a/scripts/distributed/oom_v2/verify_baseline.py b/scripts/distributed/oom_v2/verify_baseline.py
+index c64bdd72..bf746bf5 100644
+--- a/scripts/distributed/oom_v2/verify_baseline.py
++++ b/scripts/distributed/oom_v2/verify_baseline.py
+@@ -12,8 +12,9 @@ import run_oom_100m_benchmark as runner
+ def main():
+     evidence = Path(sys.argv[1])
+     args = runner.parse_args(sys.argv[2:])
+-    assert args.remote_dir == '/home/neel/ariabc_data/oom_v2_20261001'
+-    assert args.install_dir == '/home/neel/claude_opt/install_v2'
++    assert args.remote_dir == '/home/neel/ariabc_data/paper_20261010_oom'
++    assert args.install_dir == '/home/neel/ariabc_data/paper_20261010_oom/install'
++    assert args.db_port == 5468
+     assert args.usertable_fillfactor == 90
+     assert args.db_rows == 100000000
+     assert set(args.modes) == {'pg', 'bcdb_det', 'bcdb_merkle'}
+@@ -23,7 +24,7 @@ def main():
+     (evidence / 'golden_manifest.json').write_text(json.dumps(golden, indent=2) + '\n')
+     check_dir = args.remote_dir + '/pgdata_v2_verification'
+     base_dir = args.remote_dir + '/' + args.base_dir_name
+-    conf = """port = 5458
++    conf = f"""port = {args.db_port}
+ listen_addresses = '127.0.0.1'
+ shared_buffers = '32MB'
+ maintenance_work_mem = '1GB'
+diff --git a/scripts/distributed/run_oom_100m_benchmark.py b/scripts/distributed/run_oom_100m_benchmark.py
+index a3f69fcb..84d12e33 100755
+--- a/scripts/distributed/run_oom_100m_benchmark.py
++++ b/scripts/distributed/run_oom_100m_benchmark.py
+@@ -448,7 +448,7 @@ command -v timeout
+ test -x {args.install_dir}/bin/postgres
+ test -x {args.cluster_dir}/ariabc_pg/build/bin/ariabc_pg_server
+ mkdir -p {args.remote_dir}
+-for port in {args.db_port} {args.server_port} 9000; do
++for port in {args.db_port} {args.server_port} {args.raft_port}; do
+     if fuser "$port"/tcp >/dev/null 2>&1; then
+         echo "Port $port is occupied; stop the existing benchmark first" >&2
+         exit 1
+@@ -467,6 +467,7 @@ sha256sum {args.install_dir}/bin/postgres {args.cluster_dir}/ariabc_pg/build/bin
+     if args.gateway_host not in ("localhost", "127.0.0.1"):
+         gw = run_remote(args.gateway_host, args.gateway_user,
+                         f"test -x {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway\n"
++                        f"test \"$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)\" = tsc\n"
+                         f"command -v timeout\nsha256sum {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway",
+                         timeout=30).stdout
+     else:
+@@ -1080,8 +1081,8 @@ rm -f {work}/.merkle_index_dropped
+ 
+ def start_remote_ariabc_server(args, mode, workers):
+     command = [f"{args.cluster_dir}/ariabc_pg/build/bin/ariabc_pg_server",
+-               "--id", "1", "--raftEndpoint", "127.0.0.1:9000", "--clientPort", str(args.server_port),
+-               "--raftMembers", "1=127.0.0.1:9000", "--dbName", "postgres", "--dbHost", "127.0.0.1",
++               "--id", "1", "--raftEndpoint", f"127.0.0.1:{args.raft_port}", "--clientPort", str(args.server_port),
++               "--raftMembers", f"1=127.0.0.1:{args.raft_port}", "--dbName", "postgres", "--dbHost", "127.0.0.1",
+                "--dbPort", str(args.db_port), "--dbUser", "postgres", "--dbType", "0" if base_mode(mode) == "pg" else "1",
+                "--safedb", "0" if base_mode(mode) == "pg" else "1", "--dbConnPoolSize", str(workers), "--bypassRaft", "1"]
+     environment = {
+@@ -1157,7 +1158,7 @@ cat /sys/dev/block/"$major_minor"/stat
+ 
+ def gateway_workload_path(args, digest):
+     # Kept under the gateway user's home, never /tmp (wiped on reboot).
+-    return f"/home/{args.gateway_user}/ariabc_data/oom_workloads/oom_{digest}.sql"
++    return f"{args.gateway_repo}/.bench_tmp/oom_workloads/oom_{digest}.sql"
+ 
+ 
+ def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
+@@ -1177,7 +1178,8 @@ def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
+     start = time.monotonic()
+     try:
+         if remote:
+-            result = run_remote(args.gateway_host, args.gateway_user, shlex.join(timed_command),
++            result = run_remote(args.gateway_host, args.gateway_user,
++                                "test \"$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)\" = tsc\n" + shlex.join(timed_command),
+                                 timeout=args.gateway_timeout + 30, check=False)
+         else:
+             result = subprocess.run(timed_command, capture_output=True, text=True,
+@@ -1231,7 +1233,8 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
+         device_before = get_remote_nvme_stats(args)
+         measurement_start = time.monotonic()
+         with RemoteTelemetry(args.remote_host, args.remote_user, case_dir / "telemetry.jsonl",
+-                             args.install_dir + "/bin/psql", args.db_port, args.install_dir + "/lib"):
++                             args.install_dir + "/bin/psql", args.db_port, args.install_dir + "/lib"), \
++             RemoteTelemetry(args.gateway_host, args.gateway_user, case_dir / "gateway_telemetry.jsonl"):
+             metrics = run_local_gateway_benchmark(args, workload_file, mode, workers, case_dir / "gateway.log")
+ 
+         device_after = get_remote_nvme_stats(args)
+@@ -1292,6 +1295,12 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
+         if base_mode(mode) == "pg" and retries.get("retry_jitter") != ("1" if args.pg_retry_jitter == "on" else "0"):
+             raise RuntimeError(f"Server reports retry_jitter={retries.get('retry_jitter')!r}, "
+                                f"expected --pg-retry-jitter {args.pg_retry_jitter} (stale server binary?)")
++        counters = {}
++        profile_logs = server_log + "\n" + (case_dir / "server.err.log").read_text(errors="replace") + "\n" + (case_dir / "postgres.log").read_text(errors="replace")
++        for key in ("dt_opf", "dt_opf_stale_error", "dt_rel_read_tags"):
++            values = [int(v) for v in re.findall(r"\b" + key + r"=(\d+)", profile_logs)]
++            counters[key] = dict(samples=values, max_observed=max(values) if values else None)
++        (case_dir / "det_counters.json").write_text(json.dumps(counters, indent=2) + "\n")
+         row = dict(workload=workload, skew=skew, mode=mode, workers=workers, trial=trial,
+                    isolation=isolation_for(mode),
+                    retry_attempts=int(retries.get("retry_attempts_total", 0)),
+@@ -1329,7 +1338,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
+                    divergence_count=metrics["divergence_count"], permanent_failures=metrics["permanent_failures"],
+                    validated_completed_queries=metrics["validated_completed_queries"], merkle_verify=merkle,
+                    workload_sha256=hashlib.sha256(workload_file.read_bytes()).hexdigest(),
+-                   artifact_dir=str(case_dir))
++                   artifact_dir=str(case_dir), **{k: v["max_observed"] for k, v in counters.items()})
+         (case_dir / "result.json").write_text(json.dumps(dict(
+             row=row, gateway=metrics, provenance=setup["provenance"],
+             merkle_stats=setup["merkle_stats"]), indent=2) + "\n")
+@@ -1360,6 +1369,7 @@ def parse_args(argv=None):
+         parser.add_argument("--" + name, default=default)
+     parser.add_argument("--db-port", type=int, default=DEFAULT_DB_PORT)
+     parser.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT)
++    parser.add_argument("--raft-port", type=int, default=9068)
+     parser.add_argument("--db-rows", type=int, default=100000000)
+     parser.add_argument("--shared-buffers", default="32MB")
+     parser.add_argument("--usertable-fillfactor", type=int, default=100,
+@@ -1492,7 +1502,7 @@ def parse_args(argv=None):
+             parser.error(f"Invalid --{name.replace('_', '-')}")
+     if args.remote_host == args.gateway_host:
+         parser.error("Use a separate gateway host for comparison with the suite")
+-    if any(not 1024 <= p <= 65535 for p in (args.db_port, args.server_port)) or len({args.db_port, args.server_port, 9000}) != 3:
++    if any(not 1024 <= p <= 65535 for p in (args.db_port, args.server_port, args.raft_port)) or len({args.db_port, args.server_port, args.raft_port}) != 3:
+         parser.error("Database, server, and Raft ports must be distinct unprivileged ports")
+     return args
+ 
+@@ -1652,8 +1662,12 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
+                         row_data = json.loads((case_dir / "result.json").read_text())["row"]
+                     else:
+                         raise RuntimeError(f"Missing per-case evidence on resume: {case_dir}")
+-                    if (case_dir / "FAILED.txt").exists() or (case_dir / "cleanup_errors.txt").exists():
++                    if any((case_dir / name).exists() for name in
++                           ("FAILED.txt", "cleanup_errors.txt", "NOISE_EXCLUDED.txt")):
+                         raise RuntimeError(f"Cannot resume an accepted row with failure evidence: {case_dir}")
++                    qualification = json.loads((case_dir / "noise_qualification.json").read_text())
++                    if qualification["excluded"] or row_data.get("noise_excluded") is not False:
++                        raise RuntimeError(f"Cannot resume an accepted row without clean noise evidence: {case_dir}")
+                     saved = json.loads((case_dir / "result.json").read_text())
+                     parse_gateway_result((case_dir / "gateway.log").read_text(), int(row_data["total_queries"]),
+                                          saved["gateway"]["gateway_returncode"], mode=base_mode(row_data["mode"]))
+@@ -1681,7 +1695,25 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
+             if case_dir.is_dir():
+                 case_dir = out_dir / (name + "_attempt_" + uuid.uuid4().hex[:8])
+             print(f"Running {name}: pristine restore, validation, then cold start", flush=True)
+-            row = run_case(args, wl, skew, mode, workers, trial, files[wl, skew], case_dir)
++            from oom_v2.paper_noise import qualify
++            for noise_attempt in range(1, 4):
++                row = run_case(args, wl, skew, mode, workers, trial, files[wl, skew], case_dir)
++                qualification = qualify(case_dir)
++                row['noise_excluded'] = qualification['excluded']
++                result_path = case_dir / "result.json"
++                saved = json.loads(result_path.read_text())
++                saved["row"] = row
++                result_path.write_text(json.dumps(saved, indent=2) + "\n")
++                all_exists = (out_dir / "all_attempts.csv").is_file()
++                with (out_dir / "all_attempts.csv").open("a", newline="") as handle:
++                    writer = csv.DictWriter(handle, fieldnames=list(row))
++                    if not all_exists: writer.writeheader()
++                    writer.writerow(row)
++                if not qualification['excluded']: break
++                (case_dir / "NOISE_EXCLUDED.txt").write_text(json.dumps(qualification) + "\n")
++                print(f"  NOISE_EXCLUDED: {case_dir}; retaining raw attempt and rerunning", flush=True)
++                if noise_attempt == 3: raise RuntimeError("Three severe-stall attempts; stop and investigate host noise")
++                case_dir = out_dir / (name + "_noise_attempt_" + uuid.uuid4().hex[:8])
+             rows.append(row)
+             summary_exists = (out_dir / "summary.csv").is_file() and (out_dir / "summary.csv").stat().st_size > 0
+             with (out_dir / "summary.csv").open("a", newline="") as handle:

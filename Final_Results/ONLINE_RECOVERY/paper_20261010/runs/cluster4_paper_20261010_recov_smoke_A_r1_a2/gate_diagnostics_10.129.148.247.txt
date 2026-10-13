@@ -1,0 +1,23 @@
+BCDB GATE DIAGNOSTICS SNAPSHOT
+--------------------------------------------------
+Watermarks:
+  published_max_tx_id: 24575
+  last_committed_tx_id: 24575
+  next_enqueue_block_id: 2
+
+Aggregated Statistics Across Shards:
+  serial_gate_calls: 0, total_us: 0, max_us: 0, cv_sleeps: 0, spin_iters: 0
+  commit_advance_calls: 0, cas_failures: 0, prefix_steps: 0, broadcast_count: 0
+  published_ready_calls: 0, prefix_steps: 0, cas_failures: 0
+  block_enqueue_turn_calls: 0, total_us: 0, max_us: 0
+  block_watermark_wait_calls: 0, total_us: 0, max_us: 0
+  block_slot_wait_calls: 0, total_us: 0, max_us: 0
+  result_slot_consumable_wait_calls: 0, total_us: 0, max_us: 0
+  slot_fallback_wait_calls: 0, total_us: 0, max_us: 0
+  prev_commit_wait_calls: 0, total_us: 0, max_us: 0
+  target_commit_wait_calls: 0, total_us: 0, max_us: 0
+
+Active Wait States:
+  pid      shard_idx  wait_txid    block_id     phase        elapsed_us  
+  ----------------------------------------------------------------------------
+

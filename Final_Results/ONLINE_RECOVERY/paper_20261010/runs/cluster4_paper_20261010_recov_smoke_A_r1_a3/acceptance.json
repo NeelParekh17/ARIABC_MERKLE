@@ -1,0 +1,133 @@
+{
+  "dataset": "new",
+  "run_id": "cluster4_paper_20261010_recov_smoke_A_r1_a3",
+  "scenario": "A",
+  "group": "f32s1024",
+  "tps_majority_visible": "8638.84",
+  "overhead_vs_baseline_pct": "UNKNOWN",
+  "published_run_id": "UNKNOWN",
+  "tps_change_vs_published_pct": "UNKNOWN",
+  "cut_ms": 0,
+  "repair_ms": 0,
+  "catchup_ms": 0,
+  "total_recovery_ms": 0,
+  "mismatched_partitions": 0,
+  "differing_leaves": 0,
+  "rows_upserted": 0,
+  "rows_deleted": 0,
+  "candidate_rows": 0,
+  "full_copies": 0,
+  "empty_100ms_buckets": 0,
+  "max_completion_gap_ms": 32.95,
+  "phase8_merkle_pass": "PASS",
+  "phase8_root": "80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5",
+  "all3_audit_valid": "yes",
+  "divergence_count": "0",
+  "permanent_failures": "0",
+  "recovery_triggered_count": "0",
+  "recovery_success_count": "0",
+  "recovery_failure_count": "0",
+  "event_count": 0,
+  "event_failures": 0,
+  "event_live": "UNKNOWN",
+  "evidence_status": "INCOMPLETE_OR_FAIL",
+  "warnings": "nonzero collection exit code",
+  "stage": "smoke",
+  "rep": 1,
+  "attempt": 3,
+  "quorum_completions": "160000",
+  "raw_divergence_count": "0",
+  "gateway_exit_code": "0",
+  "final_all_three": {
+    "1_admin123": {
+      "raw": [
+        "12001",
+        "80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5",
+        "t",
+        "9a15b0794b52e087376bc7190d48cc58"
+      ]
+    },
+    "2_user4": {
+      "raw": [
+        "12001",
+        "80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5",
+        "t",
+        "9a15b0794b52e087376bc7190d48cc58"
+      ]
+    },
+    "4_utkarsh": {
+      "raw": [
+        "12001",
+        "80566f7114b529dda1e6da732dab5462a8cdbce998afa5fec073e224d0ea6ad5",
+        "t",
+        "9a15b0794b52e087376bc7190d48cc58"
+      ]
+    }
+  },
+  "events": [],
+  "health": {
+    "10.129.148.247": {
+      "samples": 10,
+      "min_mem_available_kb": 6713048,
+      "min_mem_free_kb": 2479696,
+      "swap_io_bytes": 0,
+      "max_lag_txids": 1789,
+      "max_load1": 1.4560546875
+    },
+    "10.129.148.246": {
+      "samples": 10,
+      "min_mem_available_kb": 607120,
+      "min_mem_free_kb": 3882044,
+      "swap_io_bytes": 73728,
+      "max_lag_txids": 460,
+      "max_load1": 1.14453125
+    },
+    "10.129.148.248": {
+      "samples": 10,
+      "min_mem_available_kb": 1687344,
+      "min_mem_free_kb": 166792,
+      "swap_io_bytes": 24027136,
+      "max_lag_txids": 28673,
+      "max_load1": 4.34423828125
+    },
+    "10.129.27.111": {
+      "samples": 10,
+      "min_mem_available_kb": 7737952,
+      "min_mem_free_kb": 152360,
+      "swap_io_bytes": 29650944,
+      "max_lag_txids": null,
+      "max_load1": 0.6240234375
+    }
+  },
+  "det_counters": {
+    "dt_opf": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    },
+    "dt_opf_stale_error": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    },
+    "dt_rel_read_tags": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    }
+  },
+  "failures": [
+    "runner/collection exit",
+    "10.129.148.247 fsync",
+    "10.129.148.247 synchronous_commit",
+    "10.129.148.247 full_page_writes",
+    "10.129.148.246 fsync",
+    "10.129.148.246 synchronous_commit",
+    "10.129.148.246 full_page_writes",
+    "10.129.148.248 fsync",
+    "10.129.148.248 synchronous_commit",
+    "10.129.148.248 full_page_writes"
+  ],
+  "noise": [],
+  "status": "REJECTED"
+}

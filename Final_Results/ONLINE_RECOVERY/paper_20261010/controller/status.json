@@ -1,0 +1,10 @@
+{
+  "time": "2026-10-11T20:25:44.890606+00:00",
+  "phase": "matrix",
+  "state": "DONE",
+  "pid": 2077032,
+  "planned": 27,
+  "accepted": 27,
+  "rejected": 0,
+  "noise_excluded": 0
+}

@@ -1,0 +1,224 @@
+{
+  "time_utc": "2026-10-10T21:03:11.627693+00:00",
+  "HEAD": "16577072ecf888fbbbb5d80d0e90fc340c8ca342",
+  "datasets": {
+    "smoke": {
+      "run_dir": "/home/neel/claude_checks/paper_20261010_oom/results/smoke/run_20261011_013308_3b13566e",
+      "accepted": 3,
+      "failed_attempts": 0,
+      "noise_excluded_attempts": 0,
+      "merkle_pass": 1,
+      "terminal_results": 60000,
+      "records": [
+        {
+          "configuration": [
+            "a",
+            0.99,
+            "bcdb_det",
+            1,
+            1
+          ],
+          "artifact_dir": "/home/neel/claude_checks/paper_20261010_oom/results/smoke/run_20261011_013308_3b13566e/a_s0.99_bcdb_det_w1_t1",
+          "tps": 1953.5065442469233,
+          "terminal_results": {
+            "validated_row_results": 20000,
+            "empty_results": 0
+          },
+          "gateway_returncode": 0,
+          "merkle_verify": "N/A",
+          "case_elapsed_estimate_s": 833.5006293579423,
+          "accepted_unix_ns": 1791663742030853328,
+          "det_counters": {
+            "dt_opf": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_opf_stale_error": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_rel_read_tags": {
+              "samples": [],
+              "max_observed": null
+            }
+          }
+        },
+        {
+          "configuration": [
+            "a",
+            0.99,
+            "pg",
+            1,
+            1
+          ],
+          "artifact_dir": "/home/neel/claude_checks/paper_20261010_oom/results/smoke/run_20261011_013308_3b13566e/a_s0.99_pg_w1_t1",
+          "tps": 2092.050209205021,
+          "terminal_results": {
+            "validated_row_results": 20000,
+            "empty_results": 0
+          },
+          "gateway_returncode": 0,
+          "merkle_verify": "N/A",
+          "case_elapsed_estimate_s": 226.55038879198216,
+          "accepted_unix_ns": 1791663969234527130,
+          "det_counters": {
+            "dt_opf": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_opf_stale_error": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_rel_read_tags": {
+              "samples": [],
+              "max_observed": null
+            }
+          }
+        },
+        {
+          "configuration": [
+            "a",
+            0.99,
+            "bcdb_merkle",
+            1,
+            1
+          ],
+          "artifact_dir": "/home/neel/claude_checks/paper_20261010_oom/results/smoke/run_20261011_013308_3b13566e/a_s0.99_bcdb_merkle_w1_t1",
+          "tps": 1757.469244288225,
+          "terminal_results": {
+            "validated_row_results": 20000,
+            "empty_results": 0
+          },
+          "gateway_returncode": 0,
+          "merkle_verify": "PASS",
+          "case_elapsed_estimate_s": 981.4451498609014,
+          "accepted_unix_ns": 1791664950790849716,
+          "det_counters": {
+            "dt_opf": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_opf_stale_error": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_rel_read_tags": {
+              "samples": [],
+              "max_observed": null
+            }
+          }
+        }
+      ]
+    },
+    "campaign": {
+      "run_dir": "/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2",
+      "accepted": 3,
+      "failed_attempts": 0,
+      "noise_excluded_attempts": 0,
+      "merkle_pass": 1,
+      "terminal_results": 60000,
+      "records": [
+        {
+          "configuration": [
+            "c",
+            0.99,
+            "pg",
+            16,
+            1
+          ],
+          "artifact_dir": "/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2/c_s0.99_pg_w16_t1",
+          "tps": 26041.666666666668,
+          "terminal_results": {
+            "validated_row_results": 20000,
+            "empty_results": 0
+          },
+          "gateway_returncode": 0,
+          "merkle_verify": "N/A",
+          "case_elapsed_estimate_s": 262.57192165401,
+          "accepted_unix_ns": 1791665580283147155,
+          "det_counters": {
+            "dt_opf": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_opf_stale_error": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_rel_read_tags": {
+              "samples": [],
+              "max_observed": null
+            }
+          }
+        },
+        {
+          "configuration": [
+            "c",
+            0.99,
+            "bcdb_merkle",
+            16,
+            1
+          ],
+          "artifact_dir": "/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2/c_s0.99_bcdb_merkle_w16_t1",
+          "tps": 16625.103906899418,
+          "terminal_results": {
+            "validated_row_results": 20000,
+            "empty_results": 0
+          },
+          "gateway_returncode": 0,
+          "merkle_verify": "PASS",
+          "case_elapsed_estimate_s": 440.4159635299625,
+          "accepted_unix_ns": 1791666021085991654,
+          "det_counters": {
+            "dt_opf": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_opf_stale_error": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_rel_read_tags": {
+              "samples": [],
+              "max_observed": null
+            }
+          }
+        },
+        {
+          "configuration": [
+            "c",
+            0.99,
+            "bcdb_det",
+            16,
+            1
+          ],
+          "artifact_dir": "/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2/c_s0.99_bcdb_det_w16_t1",
+          "tps": 16077.170418006432,
+          "terminal_results": {
+            "validated_row_results": 20000,
+            "empty_results": 0
+          },
+          "gateway_returncode": 0,
+          "merkle_verify": "N/A",
+          "case_elapsed_estimate_s": 90.9726058360447,
+          "accepted_unix_ns": 1791666112170266710,
+          "det_counters": {
+            "dt_opf": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_opf_stale_error": {
+              "samples": [],
+              "max_observed": null
+            },
+            "dt_rel_read_tags": {
+              "samples": [],
+              "max_observed": null
+            }
+          }
+        }
+      ]
+    }
+  }
+}

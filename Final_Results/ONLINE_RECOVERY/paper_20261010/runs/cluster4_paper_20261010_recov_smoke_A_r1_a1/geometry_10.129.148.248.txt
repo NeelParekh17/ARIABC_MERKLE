@@ -1,0 +1,8 @@
+                               data_directory                                | port | default_isolation | synchronous_merkle 
+-----------------------------------------------------------------------------+------+-------------------+--------------------
+ /home/neel/ariabc_data/paper_20261010_recov/repo/.bench_tmp/recovery_pgdata | 5448 | serializable      | on
+(1 row)
+
+psql:/home/neel/ariabc_data/paper_20261010_recov/geometry.sql:7: ERROR:  relation "public.usertable_small" does not exist
+LINE 1: SELECT count(*) AS heap_rows FROM public.usertable_small;
+                                          ^

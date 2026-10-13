@@ -1,0 +1,126 @@
+{
+  "dataset": "new",
+  "run_id": "cluster4_paper_20261010_recov_smoke_A_r1_a1",
+  "scenario": "A",
+  "group": "f32s1024",
+  "tps_majority_visible": "UNKNOWN",
+  "overhead_vs_baseline_pct": "UNKNOWN",
+  "published_run_id": "UNKNOWN",
+  "tps_change_vs_published_pct": "UNKNOWN",
+  "cut_ms": "UNKNOWN",
+  "repair_ms": "UNKNOWN",
+  "catchup_ms": "UNKNOWN",
+  "total_recovery_ms": "UNKNOWN",
+  "mismatched_partitions": "UNKNOWN",
+  "differing_leaves": "UNKNOWN",
+  "rows_upserted": "UNKNOWN",
+  "rows_deleted": "UNKNOWN",
+  "candidate_rows": "UNKNOWN",
+  "full_copies": "UNKNOWN",
+  "empty_100ms_buckets": "UNKNOWN",
+  "max_completion_gap_ms": "UNKNOWN",
+  "phase8_merkle_pass": "UNKNOWN",
+  "phase8_root": "UNKNOWN",
+  "all3_audit_valid": "UNKNOWN",
+  "divergence_count": "UNKNOWN",
+  "permanent_failures": "UNKNOWN",
+  "recovery_triggered_count": "UNKNOWN",
+  "recovery_success_count": "UNKNOWN",
+  "recovery_failure_count": "UNKNOWN",
+  "event_count": 0,
+  "event_failures": 0,
+  "event_live": "UNKNOWN",
+  "evidence_status": "INCOMPLETE_OR_FAIL",
+  "warnings": "nonzero runner exit code; nonzero collection exit code; unexpected recovery in no-fault scenario",
+  "stage": "smoke",
+  "rep": 1,
+  "attempt": 1,
+  "quorum_completions": null,
+  "raw_divergence_count": null,
+  "gateway_exit_code": null,
+  "final_all_three": {
+    "1_admin123": {
+      "raw": [
+        ""
+      ]
+    },
+    "2_user4": {
+      "raw": [
+        ""
+      ]
+    },
+    "4_utkarsh": {
+      "raw": [
+        ""
+      ]
+    }
+  },
+  "events": [],
+  "health": {},
+  "det_counters": {
+    "dt_opf": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    },
+    "dt_opf_stale_error": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    },
+    "dt_rel_read_tags": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    }
+  },
+  "failures": [
+    "workload_transactions=None",
+    "client_quorum_complete_count=None",
+    "all3_audit_valid=None",
+    "divergence_count=None",
+    "permanent_failures=None",
+    "recovery_failure_count=None",
+    "async_all3_failure_count=None",
+    "async_all3_timeout_count=None",
+    "async_all3_missing_count=None",
+    "all-three verified plus recovery-attributed count",
+    "gateway exit missing/nonzero",
+    "runner/collection exit",
+    "final all-three audit",
+    "1_admin123 final count/verify",
+    "2_user4 final count/verify",
+    "4_utkarsh final count/verify",
+    "unexpected no-fault recovery",
+    "missing metric empty_100ms_buckets",
+    "missing metric max_completion_gap_ms",
+    "missing metric tps_majority_visible",
+    "10.129.148.247 geometry partitions",
+    "10.129.148.247 geometry fanout",
+    "10.129.148.247 geometry split_threshold",
+    "10.129.148.247 geometry merge_threshold",
+    "10.129.148.247 fsync",
+    "10.129.148.247 synchronous_commit",
+    "10.129.148.247 full_page_writes",
+    "10.129.148.246 geometry partitions",
+    "10.129.148.246 geometry fanout",
+    "10.129.148.246 geometry split_threshold",
+    "10.129.148.246 geometry merge_threshold",
+    "10.129.148.246 fsync",
+    "10.129.148.246 synchronous_commit",
+    "10.129.148.246 full_page_writes",
+    "10.129.148.248 geometry partitions",
+    "10.129.148.248 geometry fanout",
+    "10.129.148.248 geometry split_threshold",
+    "10.129.148.248 geometry merge_threshold",
+    "10.129.148.248 fsync",
+    "10.129.148.248 synchronous_commit",
+    "10.129.148.248 full_page_writes",
+    "10.129.148.247 insufficient measured health samples",
+    "10.129.148.246 insufficient measured health samples",
+    "10.129.148.248 insufficient measured health samples",
+    "10.129.27.111 insufficient measured health samples"
+  ],
+  "noise": [],
+  "status": "REJECTED"
+}

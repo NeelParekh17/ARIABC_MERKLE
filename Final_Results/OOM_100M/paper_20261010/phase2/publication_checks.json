@@ -1,0 +1,110 @@
+{
+  "errors": [],
+  "checked_remote_metadata_files": 82,
+  "preserved_original_figure_and_summary_files": 27,
+  "verified_readme_configuration_rows": 84,
+  "checked_primary_links": 59,
+  "figures": [
+    {
+      "name": "det_over_pg",
+      "width_pt": 241.2,
+      "height_pt": 201.6,
+      "png_width": 1005,
+      "png_height": 840
+    },
+    {
+      "name": "merkle_over_det",
+      "width_pt": 241.2,
+      "height_pt": 201.6,
+      "png_width": 1005,
+      "png_height": 840
+    },
+    {
+      "name": "merkle_over_pg",
+      "width_pt": 241.2,
+      "height_pt": 201.6,
+      "png_width": 1005,
+      "png_height": 840
+    },
+    {
+      "name": "oom_scaling_all",
+      "width_pt": 241.2,
+      "height_pt": 648.0,
+      "png_width": 1005,
+      "png_height": 2700
+    },
+    {
+      "name": "previous_v2_bcdb_det",
+      "width_pt": 241.2,
+      "height_pt": 201.6,
+      "png_width": 1005,
+      "png_height": 840
+    },
+    {
+      "name": "previous_v2_bcdb_merkle",
+      "width_pt": 241.2,
+      "height_pt": 201.6,
+      "png_width": 1005,
+      "png_height": 840
+    },
+    {
+      "name": "previous_v2_pg",
+      "width_pt": 241.2,
+      "height_pt": 201.6,
+      "png_width": 1005,
+      "png_height": 840
+    },
+    {
+      "name": "scaling_a_0.0",
+      "width_pt": 241.2,
+      "height_pt": 172.8,
+      "png_width": 1005,
+      "png_height": 720
+    },
+    {
+      "name": "scaling_a_0.99",
+      "width_pt": 241.2,
+      "height_pt": 172.8,
+      "png_width": 1005,
+      "png_height": 720
+    },
+    {
+      "name": "scaling_a_1.2",
+      "width_pt": 241.2,
+      "height_pt": 172.8,
+      "png_width": 1005,
+      "png_height": 720
+    },
+    {
+      "name": "scaling_b_0.99",
+      "width_pt": 241.2,
+      "height_pt": 172.8,
+      "png_width": 1005,
+      "png_height": 720
+    },
+    {
+      "name": "scaling_c_0.99",
+      "width_pt": 241.2,
+      "height_pt": 172.8,
+      "png_width": 1005,
+      "png_height": 720
+    },
+    {
+      "name": "scaling_d_0.99",
+      "width_pt": 241.2,
+      "height_pt": 172.8,
+      "png_width": 1005,
+      "png_height": 720
+    },
+    {
+      "name": "scaling_f_0.99",
+      "width_pt": 241.2,
+      "height_pt": 172.8,
+      "png_width": 1005,
+      "png_height": 720
+    }
+  ],
+  "figure_pairs": 14,
+  "frozen_head": "16577072ecf888fbbbb5d80d0e90fc340c8ca342",
+  "no_engine_changes": true
+}

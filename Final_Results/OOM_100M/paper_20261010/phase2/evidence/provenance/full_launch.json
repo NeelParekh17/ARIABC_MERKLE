@@ -1,0 +1,55 @@
+{
+  "auto_resume": true,
+  "trials": 3,
+  "txs": 20000,
+  "db_rows": 100000000,
+  "shared_buffers": "32MB",
+  "db_port": 5468,
+  "server_port": 8068,
+  "raft_port": 9068,
+  "pg_retry_jitter": "on",
+  "reset_mode": "delta",
+  "modes": [
+    "pg",
+    "bcdb_det",
+    "bcdb_merkle"
+  ],
+  "workers": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "combos": [
+    [
+      "a",
+      0.0
+    ],
+    [
+      "a",
+      0.99
+    ],
+    [
+      "a",
+      1.2
+    ],
+    [
+      "b",
+      0.99
+    ],
+    [
+      "c",
+      0.99
+    ],
+    [
+      "d",
+      0.99
+    ],
+    [
+      "f",
+      0.99
+    ]
+  ],
+  "run_dir": "/home/neel/claude_checks/paper_20261010_oom/results/campaign/run_20261011_021231_3e7625c2",
+  "target_cases": 252
+}

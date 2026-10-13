@@ -1,0 +1,30 @@
+{
+  "excluded": true,
+  "findings": [
+    {
+      "file": "telemetry.jsonl",
+      "reason": "pressure/io full pressure",
+      "fraction": 0.98,
+      "seconds": 10.0
+    },
+    {
+      "file": "telemetry.jsonl",
+      "reason": "pressure/io full pressure",
+      "fraction": 0.98,
+      "seconds": 10.0
+    },
+    {
+      "file": "gateway_telemetry.jsonl",
+      "reason": "pressure/io full pressure",
+      "fraction": 0.98,
+      "seconds": 10.0
+    },
+    {
+      "file": "gateway_telemetry.jsonl",
+      "reason": "pressure/io full pressure",
+      "fraction": 0.98,
+      "seconds": 10.0
+    }
+  ],
+  "rule": "sampler gap >=10s; full IO PSI >=95% or full memory PSI >=50% over >=10s; telemetry error; same all modes"
+}

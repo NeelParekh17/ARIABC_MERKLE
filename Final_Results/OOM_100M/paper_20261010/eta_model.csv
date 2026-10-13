@@ -1,0 +1,2 @@
+snapshot_utc,sampled_cases,remaining_cases,mean_case_elapsed_estimate_s,point_hours,lower_hours,upper_hours,basis
+2026-10-10T21:03:11.627693+00:00,3,249,264.6534970066724,18.305200209628175,9.152600104814088,36.61040041925635,"reset_time_ms plus setup/result file modification interval; first accepted block; range 0.5x to 2x extrapolation, not confidence bounds"
