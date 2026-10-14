@@ -108,7 +108,7 @@ function renderLens(st){
    for(let j=0;j<3;j++)content+=circle(85+j*77,y,'r₁['+j+']',row===0?'var(--accent)':'var(--token1)');
   }height=139;
  }else if(l.type==='merkle'){
-  content+=text(105,17,'Hash XOR')+text(235,17,'Count sum');
+  content+=text(105,17,'Hash Σ mod 2²⁵⁶')+text(235,17,'Count sum');
   content+=text(30,53,'INSERT',9)+circle(105,49,l.ih,'var(--accent)')+circle(235,49,(l.ic>0?'+':'')+l.ic,'var(--accent)');
   content+=text(30,113,'DELETE',9)+circle(105,108,l.dh,'var(--token1)')+circle(235,108,l.dc,'var(--token1)');height=145;
  }

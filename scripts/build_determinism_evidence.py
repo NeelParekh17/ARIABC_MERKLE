@@ -82,6 +82,8 @@ EXCERPTS = {
  'errorcomplete': (E, 'const std::string fail_reason = (!is_finalized_error_result(result) &&', 6, 15, 'SQL errors complete instead of failing the task'),
  'merklemerge': ('src/backend/access/merkle/merkledelta.c', 'entry->count_delta += source->count_delta;', 11, 32, 'Merge hash and count; rollback discards frames'),
  'merklestage': ('src/backend/access/merkle/merkledelta.c', 'entry->count_delta++;', 25, 10, 'Stage row-count contributions'),
+ 'merklenegate': ('src/backend/access/merkle/merkledelta.c', 'merkle_hash_negate(&removal);', 7, 6, 'DELETE stages the negated row hash (AdHash)'),
+ 'adhashadd': ('src/backend/access/merkle/merkleutil.c', 'merkle_hash_negate(MerkleHash *hash)', 22, 12, 'AdHash: add and negate modulo 2^256'),
  'merkleapply': ('src/backend/access/merkle/merkleapply.c', 'int64 count_delta = entry->count_delta;', 6, 43, 'Apply accumulated row counts'),
  'lanes': (E, 'void pg_executor::push_task_ordered(task&& t)', 0, 18, 'Sequence modulo connection lanes'),
  'fifo': (E, 't = std::move(conn_qs_[conn_idx].front());', 8, 16, 'FIFO lane-front dispatch'),
@@ -96,6 +98,8 @@ OCCURRENCES = {'staleerror': 1, 'execconstraints': 1, 'opfwait': 0, 'upsert': 0,
 EXPECTED_MATCHES = {'staleerror': 2, 'execconstraints': 2, 'upsert': 2, 'sequence': 2, 'errorcomplete': 2, 'delivery': 2,
                     'indexguard': 2, 'exclusion': 2, 'exclusionupd': 2}
 ASSET_NAMES = ['model.js', 'view.js', 'style.css', 'template.html']
+SUITE = ROOT / 'docs/explorers'
+SUITE_NAMES = ['suite-boot.js', 'suite.css', 'suite.js']
 
 
 def build(head, provenance):
@@ -128,6 +132,7 @@ def build(head, provenance):
         excerpts['paper'] = {'path': paper.name, 'paper': True, 'label': 'ProtectDB §4 / Algorithm 1 · printed pages 6–7',
                              'text': text[start:end]}
     assets = {name: sha256_bytes((ASSETS / name).read_bytes()) for name in ASSET_NAMES}
+    assets.update({'../explorers/' + name: sha256_bytes((SUITE / name).read_bytes()) for name in SUITE_NAMES})
     return {'reviewed_date': REVIEWED_DATE,
             'head': head,
             'previous_review': PREVIOUS_REVIEW,
@@ -142,11 +147,12 @@ def build(head, provenance):
 
 def render(data):
     html = (ASSETS / 'template.html').read_text()
-    for marker, name in [('/* STYLE_PLACEHOLDER */', 'style.css'), ('/* MODEL_PLACEHOLDER */', 'model.js'),
-                         ('/* VIEW_PLACEHOLDER */', 'view.js')]:
+    for marker, path in [('/* SUITE_BOOT */', SUITE / 'suite-boot.js'), ('/* SUITE_CSS */', SUITE / 'suite.css'),
+                         ('/* STYLE_PLACEHOLDER */', ASSETS / 'style.css'), ('/* SUITE_JS */', SUITE / 'suite.js'),
+                         ('/* MODEL_PLACEHOLDER */', ASSETS / 'model.js'), ('/* VIEW_PLACEHOLDER */', ASSETS / 'view.js')]:
         if html.count(marker) != 1:
             raise SystemExit('Template marker must be unique: ' + marker)
-        html = html.replace(marker, (ASSETS / name).read_text())
+        html = html.replace(marker, path.read_text())
     if html.count('EVIDENCE_PLACEHOLDER') != 1:
         raise SystemExit('Template evidence marker must be unique')
     return html.replace('EVIDENCE_PLACEHOLDER', json.dumps(data).replace('<', '\\u003c'))

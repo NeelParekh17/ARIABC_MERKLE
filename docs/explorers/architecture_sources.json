@@ -1,0 +1,239 @@
+{
+ "assets": {
+  "docs/explorers/architecture/app.js": "cfeb5c3f29e628b7b8a10c8ad1e006f88f018168d3f149610d7fd880edbf87f2",
+  "docs/explorers/architecture/architecture.css": "7e28b8dc99a424f5bb37a3fb169f200e9935c9b088b0184f770ab4d4e3ac19f9",
+  "docs/explorers/architecture/evidence.js": "239453996cb4fd9bb56e3e3b00b34725abdf58652debdb21ce01b37d0cef064c",
+  "docs/explorers/architecture/main.js": "9c520e412c3adaded05ff9d1a54615e3bc9773783de3b7dc7f96543892b32603",
+  "docs/explorers/architecture/page.html": "cb12c64c08f467a64ebd42b5b2dea5dbbcbcf1d2738df48b5f1836b8ebffb25e",
+  "docs/explorers/suite-boot.js": "3f9b73e4485b6fedf3cbe564d1f922e81a5311ef6d2274880b39c601f89df017",
+  "docs/explorers/suite.css": "ddf37c0c6a764fca1f0e4e4688d73a2cdca689bab10f18029e3457aec63dfcdc",
+  "docs/explorers/suite.js": "6ce60eb8555d58ab4ebe730370688c9648a0202cbbd03d292c912208cd2c7732"
+ },
+ "files": {
+  "NuRaft/src/asio_service.cxx": {
+   "bytes": 89490,
+   "purpose": "NuRaft network workers",
+   "sha256": "d01e735be8347257551d7473b481cff4a4b4ea516a3580a9a60c1c441ed2d4a2"
+  },
+  "NuRaft/src/raft_server.cxx": {
+   "bytes": 73678,
+   "purpose": "NuRaft background threads",
+   "sha256": "595d61d8dbde5fbbbe3f01228617c9da8c7524df12121f34dfffa4869aeece6a"
+  },
+  "ariabc_pg/src/ariabc_pg_gateway.cxx": {
+   "bytes": 393457,
+   "purpose": "gateway pipeline, vote store, all-3 audit",
+   "sha256": "258bc5bda79e57c71b2cdeb9223ac584be5ca2cda14648ce4c5691a9fa37db6b"
+  },
+  "ariabc_pg/src/ariabc_pg_server.cxx": {
+   "bytes": 109474,
+   "purpose": "server, raft orderer, direct path, raft params",
+   "sha256": "a2b948cf43a434f0ab08ca7fdc47d3bbff14139c84f08ac0cd4391408ed1fde6"
+  },
+  "ariabc_pg/src/async_cluster_submitter.cxx": {
+   "bytes": 16474,
+   "purpose": "submit socket I/O thread",
+   "sha256": "9b8e9eb98e1b4f2de7f905e785bd37eb215e69525ccb9046ce652d3a9c00e951"
+  },
+  "ariabc_pg/src/blake3_tx_signer.hxx": {
+   "bytes": 3129,
+   "purpose": "gateway-side BLAKE3 tag",
+   "sha256": "42d5a987372d8300230bbb9f9ed794a5079e56ce5e271db0533e28f5758a5ed6"
+  },
+  "ariabc_pg/src/durable_log_store.cxx": {
+   "bytes": 59225,
+   "purpose": "Raft log fsync",
+   "sha256": "f13c77b5d57ffeafa7df4561544e3a004e88524e0dc2783019cd3a53924f77f0"
+  },
+  "ariabc_pg/src/gateway_recovery_manager.hxx": {
+   "bytes": 31340,
+   "purpose": "detection, donor ranking, attempts",
+   "sha256": "ddbb6d37815003f760efdbd31973fa18edfa52ef7e202612f5ba5084ada47e73"
+  },
+  "ariabc_pg/src/kafka_console.cxx": {
+   "bytes": 28563,
+   "purpose": "Kafka producer / consumer config",
+   "sha256": "37e62c664d9202303f4ae44fb452a8fd1f53295ef365919eca6856c854792d89"
+  },
+  "ariabc_pg/src/pg_executor.cxx": {
+   "bytes": 280466,
+   "purpose": "executor lanes, Kafka receipts",
+   "sha256": "449d63bd87e4e81575b56516ffe04bd5ea03f2e61b018a54ca324c4b5f2c57d7"
+  },
+  "ariabc_pg/src/pg_state_machine.cxx": {
+   "bytes": 62202,
+   "purpose": "commit \u2192 deterministic sequence",
+   "sha256": "87a4e10f99bc7440bc351c7e4377b7142d3f377f4af62f8ecd784e2ed3f8d11e"
+  },
+  "ariabc_pg/src/pg_state_machine_recovery.cxx": {
+   "bytes": 29037,
+   "purpose": "QUARANTINE / CUT / RECOVER / replay",
+   "sha256": "e343487d91e040baf271fc8cf70835c0d6496ba3f95129edc03afe841e04b199"
+  },
+  "ariabc_pg/src/replica_repair.cxx": {
+   "bytes": 30932,
+   "purpose": "localise, COPY ranges, REINDEX-then-full-copy, AdHash digest",
+   "sha256": "2fc660e3d87f7d2d1cbe02e3ae262ad59e4b9c025cc618e8f6d0aeb6d7a2f88e"
+  },
+  "scripts/distributed/cluster_sweep_support.py": {
+   "bytes": 15573,
+   "purpose": "cluster flags",
+   "sha256": "a12ee9013845487b0a8d377478f52c3f8454ae53788186650aa898792ac335ec"
+  },
+  "scripts/distributed/recovery/fault_injector.py": {
+   "bytes": 9718,
+   "purpose": "recovery fault injection",
+   "sha256": "ff09237215093acf3ac7d5a6365b7ef93a958f9752859efd00d233055105abf6"
+  },
+  "scripts/distributed/recovery/remote_db.py": {
+   "bytes": 17112,
+   "purpose": "Python recovery digest (AdHash)",
+   "sha256": "0e011a780f6bf8993fa7e4b01fab76e144c26cf0f1bd9a033956c64cc3d343ad"
+  },
+  "scripts/distributed/run_4node_raft_cluster.sh": {
+   "bytes": 244821,
+   "purpose": "cluster runner",
+   "sha256": "a8af15f392deb3bafdf7edafe1e9e8ebad63c7d731d59ff75c1e609fb4d5c97a"
+  },
+  "scripts/distributed/run_all_modes_gateway_sweep.py": {
+   "bytes": 141460,
+   "purpose": "single-node / ranking runner",
+   "sha256": "11fa3cc77cffb4cc7ae8cb6388c0a9ba7100efe0684bcfe4ece3b4654808193b"
+  },
+  "src/backend/access/heap/heapam.c": {
+   "bytes": 280025,
+   "purpose": "deferred index phase, partial predicates",
+   "sha256": "e8dca64583a541f230853a12c355e03b0be022f2ab955247a5a2e22b710482f5"
+  },
+  "src/backend/access/merkle/merkle.c": {
+   "bytes": 17115,
+   "purpose": "reloptions: fanout 2..256 power of two",
+   "sha256": "f8be98351e9944c3dddf3dca0d80da42da5cfc3d2430d7bae68ef043a92880c4"
+  },
+  "src/backend/access/merkle/merkleapply.c": {
+   "bytes": 88466,
+   "purpose": "synchronous apply, split/merge, legacy rebuild",
+   "sha256": "f57c5e2dae3cd41676b061d50e8a1a9cb40df73d355f258ea71006b289453a2d"
+  },
+  "src/backend/access/merkle/merklebuild.c": {
+   "bytes": 64232,
+   "purpose": "bulk build, shape and backing-name guards",
+   "sha256": "6374eca65bbc0af770d22d8f9e523ab94613f2cae48c532f74adbfb55fe4d12e"
+  },
+  "src/backend/access/merkle/merkledelta.c": {
+   "bytes": 13221,
+   "purpose": "signed AdHash staging",
+   "sha256": "083a81e57f65273388ad1d23b8e54ca05f9ad7625124fb9f46e1d14b13f7c5f5"
+  },
+  "src/backend/access/merkle/merkleinsert.c": {
+   "bytes": 6100,
+   "purpose": "index AM insert path",
+   "sha256": "1dfc7a16372a04e1b4b0bede2a79910dc81552b0e3edcbde37ae95e474556320"
+  },
+  "src/backend/access/merkle/merkleutil.c": {
+   "bytes": 50017,
+   "purpose": "row hash, route, AdHash add / negate, backing name",
+   "sha256": "d2b182050f9d6984421a09555e5bb7656df5b4b0c5127c5a7e8d5d626b95d527"
+  },
+  "src/backend/access/merkle/merkleverify.c": {
+   "bytes": 47757,
+   "purpose": "format, hash, count and internal-node checks",
+   "sha256": "76049ee3ed6c5bc8a4a69e28e87f8fca21e8eb4a140549a0a3cbc6ccd7e9fb60"
+  },
+  "src/backend/bcdb/globals.c": {
+   "bytes": 2594,
+   "purpose": "source defaults",
+   "sha256": "9f518c63cc9d5331795130004444874144444ee203ca81ce35e09902299dfd06"
+  },
+  "src/backend/bcdb/middleware.c": {
+   "bytes": 90656,
+   "purpose": "result payloads",
+   "sha256": "1e015fcdfa0f86e5f4fac642f09cebd2ec6a3359cea3d66ad867828a1cf0f239"
+  },
+  "src/backend/bcdb/recovery.c": {
+   "bytes": 8264,
+   "purpose": "CUT snapshot export, rebase",
+   "sha256": "adbad7429d215e1c8055d241020d7d265b97e74f69cd765e1de07d07bc9879d6"
+  },
+  "src/backend/bcdb/shm_block.c": {
+   "bytes": 43800,
+   "purpose": "finalized prefix",
+   "sha256": "c1bc71f8862a41d844a4990cc98f7d0a52631392c495c235425d7ecd4ed47b02"
+  },
+  "src/backend/bcdb/shm_transaction.c": {
+   "bytes": 155311,
+   "purpose": "tags, validation, OPF request, deferred apply",
+   "sha256": "4cdcc7056a2f1e84c25e8d9ad16ae27dd7bfeb9276612aae6718c8722995853d"
+  },
+  "src/backend/bcdb/worker.c": {
+   "bytes": 147288,
+   "purpose": "admission, gate, OPF, settle, stale-error, commit",
+   "sha256": "043a52fb95f21ff14f749c16812d7be47bf00528a6ad6c1d6c78a8f708abc15c"
+  },
+  "src/backend/bcdb/worker_controller.c": {
+   "bytes": 4532,
+   "purpose": "idle worker backends",
+   "sha256": "043111bc047a0631f688d4ad6fc0889e7eb59dde071e741599a43a50708fa43d"
+  },
+  "src/backend/commands/schemacmds.c": {
+   "bytes": 13960,
+   "purpose": "schema rename guard",
+   "sha256": "90a103dd0252879f08e008d7c1ed779cc768b28036066b54931d863ad001197d"
+  },
+  "src/backend/commands/tablecmds.c": {
+   "bytes": 525504,
+   "purpose": "rename / SET SCHEMA guards",
+   "sha256": "1d8f3bc520ad6a1b00572a458e9add9fcebec0374b6e6825a3473310ad584925"
+  },
+  "src/backend/executor/execIndexing.c": {
+   "bytes": 29629,
+   "purpose": "exclusion-constraint flag",
+   "sha256": "f33cc2722c75b39e5889ec543d06d97d9bfd9a13c83592cc26f1723a15dac9ff"
+  },
+  "src/backend/executor/nodeModifyTable.c": {
+   "bytes": 111992,
+   "purpose": "DML fallback guards, Merkle delete/insert",
+   "sha256": "d48b86a60984f0ceccfac16161b08d5210c351ad02a940058b644255f3912b5b"
+  },
+  "src/backend/tcop/postgres.c": {
+   "bytes": 147042,
+   "purpose": "s-prefix dispatch",
+   "sha256": "c75e6a5511a522616988dbf93627d2571ea165dc07af6e2591cf0c56700157b4"
+  },
+  "src/include/access/merkle.h": {
+   "bytes": 16547,
+   "purpose": "Merkle defaults, format 11",
+   "sha256": "2940a3bcaf059a72906bfaab6ebc504dfdb53d10c61e90154c4534f5960a124b"
+  },
+  "src/include/bcdb/globals.h": {
+   "bytes": 15847,
+   "purpose": "default ring and hashtab sizes",
+   "sha256": "8480a8b5682fff96aa371c0542faa290a1b9b713995685f42e042a491167239f"
+  },
+  "src/include/bcdb/shm_transaction.h": {
+   "bytes": 14217,
+   "purpose": "the eight fallback reasons",
+   "sha256": "49007965809e9b3f0a9b6be577452061862721dd8d38bdd336d71e3d5f3d656e"
+  },
+  "src/pl/plpgsql/src/pl_exec.c": {
+   "bytes": 253440,
+   "purpose": "exception-block guard",
+   "sha256": "f59070a8a789b9b8ba550ca0aaf528c5b2dc846adebebe81914d520319c5e46e"
+  }
+ },
+ "head": "9cf6c70a39e9bf848c93c2c24bdb55181f4b3356",
+ "previous_review": {
+  "date": "2026-10-09",
+  "head": "c165637f21cc25411af302a56f83717fd340c303"
+ },
+ "provenance": {
+  "declared_head": "9cf6c70a39e9bf848c93c2c24bdb55181f4b3356",
+  "manifest_sha256": "2e57aca9a715f2b036bd4ac25dcfc6af951626ad954ac9fdb9dd83dc084398a0",
+  "mode": "snapshot",
+  "note": "Identity declared by the snapshot manifest; file hashes below are the evidence.",
+  "origin_root": "/work/ARIABC/AriaBC",
+  "snapshot_root": "/home/neel/Desktop/ariabc_cluster/.bench_tmp/explorer_redesign_20261013/source"
+ },
+ "reviewed_date": "2026-10-13",
+ "scope": "Reviewed source semantics for the animations and settings; result campaigns keep their own frozen commits."
+}

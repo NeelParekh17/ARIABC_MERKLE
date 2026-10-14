@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Source-reviewed, animated explorer of the AriaBC architecture: hosts, threads, ordering, the deterministic gate, Merkle integrity, online recovery and measured results.">
+<title>AriaBC · Architecture explorer</title>
+<script>/* SUITE_BOOT */</script>
+<style>/* SUITE_CSS */
+/* ARCH_CSS */</style>
+</head>
+<body data-manifest="explorer-sources" data-page="architecture">
+<script>window.uiErrors=[];addEventListener('error',e=>uiErrors.push(e.message));addEventListener('unhandledrejection',e=>uiErrors.push(String(e.reason)));</script>
+<header class="suitebar">
+ <a class="brand" href="ARCHITECTURE_EXPLORER.html"><span class="brand-mark">A</span>AriaBC <small>explorers</small></a>
+ <nav class="pageswitch" aria-label="Explorer pages"><a href="ARCHITECTURE_EXPLORER.html" aria-current="page">Architecture</a><a href="DETERMINISM_EXPLORER.html">Determinism</a></nav>
+ <span class="grow"></span>
+ <button id="search-btn" class="searchbtn" aria-label="Search the explorer">⌕ <span class="slabel">Search everything</span> <kbd>/</kbd></button>
+ <div class="review"><span class="rlabel">Reviewed source</span> <code id="review-head">—</code> <span id="review-date"></span> <button id="fresh" class="fresh" data-state="idle" title="Source freshness"><i></i><span>not checked</span></button></div>
+ <button id="theme-btn" class="iconbtn" aria-label="Toggle theme">☾</button>
+</header>
+<div class="frame">
+<nav class="rail tabs" role="tablist" aria-label="Explorer sections" aria-orientation="vertical">
+ <div class="group" role="presentation">System</div>
+ <button role="tab" data-tab="topo" aria-selected="true"><span class="n">01</span><span>Hosts &amp; connections</span></button>
+ <button role="tab" data-tab="threads" aria-selected="false"><span class="n">02</span><span>Threads &amp; queues</span></button>
+ <button role="tab" data-tab="seq" aria-selected="false"><span class="n">03</span><span>One batch, step by step</span></button>
+ <div class="group" role="presentation">Execution</div>
+ <button role="tab" data-tab="pg" aria-selected="false"><span class="n">04</span><span>The ordered gate</span></button>
+ <div class="group" role="presentation">Integrity</div>
+ <button role="tab" data-tab="merkle" aria-selected="false"><span class="n">05</span><span>Merkle integrity</span></button>
+ <button role="tab" data-tab="recov" aria-selected="false"><span class="n">06</span><span>Online recovery</span></button>
+ <div class="group" role="presentation">Evidence</div>
+ <button role="tab" data-tab="meas" aria-selected="false"><span class="n">07</span><span>Measured timing</span></button>
+ <button role="tab" data-tab="bench" aria-selected="false"><span class="n">08</span><span>Results &amp; settings</span></button>
+ <button role="tab" data-tab="find" aria-selected="false"><span class="n">09</span><span>Findings</span></button>
+ <button role="tab" data-tab="src" aria-selected="false"><span class="n">10</span><span>Sources &amp; freshness</span></button>
+ <p class="railnote">Every chapter animates real code paths. Labels say what each number is: <span class="tag code">code</span> <span class="tag meas">measured</span> <span class="tag model">model</span> <span class="tag hist">historical</span><br><br><kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd> switch sections · <kbd>/</kbd> search · all players offer 0.125× and 0.25×.</p>
+</nav>
+<main class="content">
+<header class="hero">
+ <div>
+  <div class="eyebrow">Source-reviewed architecture explorer</div>
+  <h1>How every request, connection and thread actually runs</h1>
+  <p class="lead">Follow one batch from the gateway through Raft ordering, the deterministic gate inside PostgreSQL, synchronous Merkle maintenance and Kafka result voting, then see how a damaged replica is repaired online. Animations follow the reviewed source; numbers come from the curated runs in <code>Final_Results</code>, each with its own engine commit.</p>
+ </div>
+ <aside class="refcard" aria-label="Reference run">
+  <b>Reference run for chapters 01–03 and 07</b> <span class="tag meas">measured</span>
+  <div class="kvs"><span>run</span><span class="mono">cluster4_20261006_174923</span><span>workload</span><span>YCSB-A uniform · 20,000 tx</span><span>shape</span><span>W = 16 · window 1,024 · 3 replicas</span><span>result</span><span>14,094 tx/s · mean e2e 62.58 ms</span><span>checks</span><span>0 divergence · roots equal on 3/3</span></div>
+ </aside>
+</header>
+
+<!-- ============ 01 TOPOLOGY ============ -->
+<section class="view on" id="v-topo" aria-labelledby="h-topo">
+ <div class="vhead"><div><div class="kicker">01 · System</div><h2 id="h-topo">Physical deployment, processes and every connection</h2><p class="lede">Choose a deployment, then click any process or line. Its inside plays in the panel below, built from the same code paths. TPC-C runs the whole single-node stack on the ranking host instead.</p></div>
+  <div class="seg" role="group" aria-label="Deployment"><button data-dep="cluster" aria-pressed="true">Cluster · raft-kafka</button><button data-dep="single" aria-pressed="false">Single node · pg / det / Merkle</button></div></div>
+ <div class="panel pad"><div class="scroll-x"><div id="topo-svg" style="min-width:860px"></div></div>
+  <div class="legend" style="margin-top:10px" id="topo-legend"></div>
+  <div class="row" style="margin-top:12px"><button class="primary" id="trace-btn">▶ Trace a request</button><span class="small" id="trace-cap" style="flex:1">Press “Trace a request” to animate one batch over these connections.</span></div></div>
+ <div class="panel" style="margin-top:18px"><div class="pad" style="padding-bottom:6px"><div class="row"><span class="eyebrow">inside</span><h3 id="zoom-title"></h3><span class="spacer"></span><button class="primary" id="zoom-play">Ⅱ Pause</button><label class="small" for="zoom-speed">Speed</label><select id="zoom-speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="3">3×</option></select></div></div><div class="scroll-x" style="padding:0 12px 14px"><div id="zoom-svg" style="min-width:820px"></div></div></div>
+ <details><summary>Connection ledger (table)</summary><div class="panel scroll-x" style="margin-top:10px"><table class="t" id="ledger"></table></div></details>
+</section>
+
+<!-- ============ 02 THREADS ============ -->
+<section class="view" id="v-threads" aria-labelledby="h-threads">
+ <div class="vhead"><div><div class="kicker">02 · System</div><h2 id="h-threads">Threads and queues, live</h2><p class="lede">Each box is a real thread or pool (blue) or a queue (amber). Dots are work items; each waits in a box for the time recorded at the selected W, so piles form where time is actually spent. 1 ms of recorded wait = 60 ms on screen. Hover for numbers, click for details, or press <b>Follow one</b> to narrate a single item.</p></div>
+  <div class="seg" role="group" aria-label="Workers" id="tm-w"><button data-w="1" aria-pressed="false">W 1</button><button data-w="4" aria-pressed="false">W 4</button><button data-w="8" aria-pressed="false">W 8</button><button data-w="16" aria-pressed="true">W 16</button></div></div>
+ <div class="grid2">
+  <div class="panel">
+   <div class="pad" style="padding-bottom:6px"><div class="row">
+    <button class="primary" id="tm-play">Ⅱ Pause</button><button id="tm-follow">◎ Follow one</button><label class="small" for="tm-speed">Speed</label><select id="tm-speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+    <label class="small"><input type="checkbox" id="tm-block">show what each thread blocks on</label><span class="spacer"></span>
+    <div class="seg" role="group" aria-label="Process filter" id="tm-proc"><button data-p="all" aria-pressed="true">All</button><button data-p="gw" aria-pressed="false">Gateway</button><button data-p="lead" aria-pressed="false">Raft</button><button data-p="rep" aria-pressed="false">Replica server</button><button data-p="pg" aria-pressed="false">PostgreSQL</button><button data-p="kafka" aria-pressed="false">Kafka</button></div>
+   </div></div>
+   <div class="scroll-x" style="padding:0 10px"><div class="chartbox" style="min-width:880px"><div id="tm-svg"></div><div class="tip" id="tm-tip"></div></div></div>
+   <div class="pad" style="padding-top:6px">
+    <div class="row"><h3>Where one transaction's <span id="tm-total"></span> goes (mean, recorded)</h3><span class="small">click a segment to select its box</span></div>
+    <div id="tm-bar" style="margin-top:8px"></div>
+   </div>
+  </div>
+  <aside class="panel pad detail" id="tm-detail" aria-live="polite"></aside>
+ </div>
+ <details><summary>Full text inventory: every thread with its creation site, and the hand-off chain</summary>
+  <div class="procgrid" id="procgrid" style="margin-top:14px"></div>
+  <div class="panel pad" style="margin-top:18px"><h3>The hand-off chain</h3><div class="pipeline" id="pipeline" style="margin-top:12px"></div></div>
+ </details>
+</section>
+
+<!-- ============ 03 SEQUENCE ============ -->
+<section class="view" id="v-seq" aria-labelledby="h-seq">
+ <div class="vhead"><div><div class="kicker">03 · System</div><h2 id="h-seq">One 256-transaction batch across ten thread lanes</h2><p class="lede">Arrows accumulate as you step. Horizontal arrows cross threads or hosts; a loop marker means the work stays in one lane. Lanes marked ×3 run on each replica independently and are drawn once. Click a lane header to isolate its steps; ← → also step.</p><div class="vtags"><span class="tag code">order from code</span><span class="tag meas">values: W = 16 run</span></div></div></div>
+ <div class="grid2">
+  <div class="panel">
+   <div class="scroll-x" style="padding:14px 10px 0"><div id="seq-svg" style="min-width:900px"></div></div>
+   <div class="controls"><button class="primary" id="seq-play">▶ Play</button><button id="seq-back">← Back</button><button id="seq-next">Next →</button><button id="seq-reset">↺ Reset</button><label class="small" for="seq-speed">Speed</label><select id="seq-speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><input class="range" id="seq-range" type="range" min="0" value="0" aria-label="Step"><span class="counter" id="seq-count"></span></div>
+  </div>
+  <aside class="panel pad narr" aria-live="polite" id="seq-narr"></aside>
+ </div>
+</section>
+
+<!-- ============ 04 PG GATE ============ -->
+<section class="view" id="v-pg" aria-labelledby="h-pg">
+ <div class="vhead"><div><div class="kicker">04 · Execution</div><h2 id="h-pg">Inside one replica: parallel backends, one ordered gate</h2><p class="lede">Backends speculate in parallel, then pass the gate in sequence order: validate against everything published since their snapshot, publish their footprint (P), apply heap and Merkle writes, and commit; the finalized prefix (C) only advances contiguously. Pick a case to watch a specific rule. Admission comes first: a deterministic request is exactly <b>one top-level SQL statement</b> (else 0A000); one statement may still be a function or DO block with many internal commands.</p><div class="vtags"><span class="tag model">model</span><span class="tag code" title="BCDB_DT_EARLY_VALIDATE=1, BCDB_DT_POST_PUBLISH_SETTLE=1 (both default on)">early validation + settle</span><a class="tag code" href="src/backend/bcdb/worker.c" target="_blank" rel="noopener">worker.c</a><a class="tag code" href="src/backend/bcdb/shm_transaction.c" target="_blank" rel="noopener">shm_transaction.c</a><a class="tag code" href="src/backend/bcdb/shm_block.c" target="_blank" rel="noopener">shm_block.c</a></div></div></div>
+ <div class="panel">
+  <div class="pad" style="padding-bottom:6px"><div class="row" style="gap:8px">
+   <label class="small" for="sim-sc">Case</label><select id="sim-sc" aria-label="Scenario"><option value="random">random workload</option><option value="samekey">tx 6, 10, 12 update the same key</option><option value="twokeys">tx 12 needs tx 6 (k5) and tx 10 (k6)</option><option value="outoforder">tx 12 commits before tx 10</option><option value="postpub">tx 10 fails after publishing</option><option value="opf">tx 10 needs ordered physical fallback (BC010)</option></select>
+   <span class="small" style="margin-left:6px">Backends</span><div class="seg" role="group" aria-label="Backends" id="sim-w"><button data-w="1" aria-pressed="false">1</button><button data-w="4" aria-pressed="false">4</button><button data-w="8" aria-pressed="true">8</button><button data-w="16" aria-pressed="false">16</button></div>
+   <span class="small" style="margin-left:6px">Hot keys</span><div class="seg" role="group" aria-label="Hot-key share" id="sim-h"><button data-h="0" aria-pressed="false">0%</button><button data-h="0.15" aria-pressed="false">15%</button><button data-h="0.4" aria-pressed="true">40%</button></div>
+   <span class="spacer"></span><button class="primary" id="sim-play">▶ Play</button><button id="sim-restart" aria-label="Restart">↺</button><select id="sim-speed" aria-label="Speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+  </div>
+  <input class="range" id="sim-range" type="range" min="0" max="10" step="0.001" value="0" aria-label="Model time" style="width:100%;margin-top:12px">
+  <div class="row" id="sim-sel" style="gap:6px;margin-top:6px;min-height:24px"></div></div>
+  <div class="scroll-x" style="padding:0 10px"><div class="chartbox" style="min-width:900px"><div id="sim-svg"></div><div class="tip" id="sim-tip"></div></div></div>
+  <div class="pad" style="padding-top:8px;padding-bottom:0"><div class="row" style="gap:8px;align-items:center"><span class="small">Aborts</span><div class="chips" id="sim-aborts" style="flex:1"></div><label class="small" style="white-space:nowrap"><input type="checkbox" id="sim-explain" checked>pause and explain each abort</label></div>
+   <div class="scroll-x" style="margin-top:8px"><div class="chartbox" style="min-width:900px"><div id="sim-why"></div><div class="tip" id="why-tip"></div></div></div>
+   <div class="controls whyctl" id="why-ctl" hidden><button class="primary" id="why-play" aria-label="Play or pause the abort replay">Ⅱ Pause</button><button id="why-prev" aria-label="Previous event">⏮ Event</button><button id="why-next" aria-label="Next event">Event ⏭</button><button id="why-replay" aria-label="Replay from the first event">↺ Replay</button><label class="small" for="why-speed">Speed</label><select id="why-speed" aria-label="Replay speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><input class="range" id="why-range" type="range" min="0" max="1" step="0.01" value="0" aria-label="Abort replay timeline"><span class="counter" id="why-count"></span><button id="why-close" aria-label="Close the replay and continue the model">✕ Close &amp; continue</button></div></div>
+  <div class="pad" style="padding-top:8px"><div class="legend" id="sim-legend"></div><div class="wm" id="sim-wm"></div></div>
+ </div>
+ <div class="grid-even" style="margin-top:18px">
+  <div class="panel pad"><div class="panel-title"><h3>Ordered physical fallback: the eight reasons</h3><span class="tag code">shm_transaction.h</span></div>
+   <p class="small" style="margin-top:4px">Each guard raises internal BC010 <em>before</em> its statement takes a speculative effect. The whole unpublished attempt is discarded; the retry waits for its turn and for every predecessor to commit, then runs ordinary SQL. Case “tx 10 needs ordered physical fallback” above plays this route.</p>
+   <ol class="codepath" id="opf-reasons"></ol></div>
+  <div class="panel pad"><div class="panel-title"><h3>Outcome rules that changed since the last review</h3><span class="tag code">4921f6a5</span></div>
+   <ul class="checks">
+    <li><b>One top-level statement.</b> Empty or multi-statement requests fail with 0A000 before anything runs; the failure is a deterministic outcome in its slot.</li>
+    <li><b>Deferred UPDATE checks unique indexes.</b> The index phase runs with unique checking on; a duplicate surfaces at apply time and follows the post-publication settle rules, never a SQL rerun.</li>
+    <li><b>Partial indexes honour their predicate.</b> A new tuple outside the WHERE clause gets no entry.</li>
+    <li><b>Stale errors re-run.</b> An error raised on a snapshot that may miss predecessors (baseline &lt; s−1) takes BC010 instead of being finalized; only an error on the ordered physical run is final (committed in 56fc1552).</li>
+    <li><b>EXCEPTION blocks never trap BC010.</b> The guard fires at block entry; the worker's post-SQL check (dt_opf_caught) remains as defence in depth.</li>
+   </ul>
+   <p class="small" style="margin-top:10px">Step-by-step versions of each rule are in the <a href="DETERMINISM_EXPLORER.html">Determinism explorer</a>.</p></div>
+ </div>
+</section>
+
+<!-- ============ 05 MERKLE ============ -->
+<section class="view" id="v-merkle" aria-labelledby="h-merkle">
+ <div class="vhead"><div><div class="kicker">05 · Integrity</div><h2 id="h-merkle">Merkle integrity, live</h2><p class="lede">A working model of the index code with 4 partitions, fanout 4 (2 key-hash bits per level), split above 8 rows and merge at 2 or fewer. Row hashes are 32-bit stand-ins for BLAKE3-256, and nodes hold their <b>AdHash</b> sum: the engine adds 256-bit values mod 2^256, the model adds 32-bit values mod 2^32. Pick a row and run a statement: every hash, route, staged delta, leaf and ancestor write, split and merge plays in the order <code>merkleapply.c</code> performs it.</p><div class="vtags"><span class="tag model">model</span><span class="tag code">format 11 · AdHash</span></div></div></div>
+ <div class="panel">
+  <div class="pad" style="padding-bottom:6px">
+   <div class="row" style="gap:6px">
+    <span class="small">Row</span><button class="mk2b" data-op="upd">UPDATE value</button><button class="mk2b" data-op="updkey">UPDATE key (moves route)</button><button class="mk2b" data-op="del">DELETE</button><button class="mk2b" data-op="ins">INSERT new row</button>
+    <span class="small" style="margin-left:10px">Txn</span><button class="mk2b" data-op="begin">BEGIN</button><button class="mk2b" data-op="sp">SAVEPOINT</button><button class="mk2b" data-op="rbsp">ROLLBACK TO SP</button><button class="mk2b" data-op="rel">RELEASE</button><button class="mk2b primary" data-op="commit">COMMIT</button><button class="mk2b" data-op="rollback">ROLLBACK</button>
+   </div>
+   <div class="row" style="gap:6px;margin-top:8px">
+    <span class="small">Audit</span><button class="mk2b" data-op="verify">merkle_verify()</button><button class="mk2b" data-op="corrupt" title="Change a heap row directly: check ① (hash) fails">⚡ heap row</button><button class="mk2b" data-op="corruptcnt" title="Root tuple_count +1, hash unchanged: ① passes, ② (count) fails">⚡ root count</button><button class="mk2b" data-op="corruptnode" title="Edit a leaf node row: ① and ② pass, ③ (internal nodes) fails">⚡ node row</button><button class="mk2b" data-op="reindex">REINDEX (bulk build)</button>
+    <span class="small" style="margin-left:10px">Demos</span><button class="mk2b" data-op="d_coal">coalescing</button><button class="mk2b" data-op="d_split">hot leaf → split</button><button class="mk2b" data-op="d_merge">deletes → merge</button><button class="mk2b" data-op="d_sp">savepoint rollback</button><button class="mk2b" data-op="d_reins" title="INSERT, DELETE and re-INSERT the same row in one transaction: the INSERT entry sums to 2H and count +2; the count must travel with it">insert · delete · reinsert</button><button class="mk2b" data-op="reset">↺ reset</button>
+    <span class="spacer"></span><button id="mk2-play">Ⅱ Pause</button><button id="mk2-step">Step ⏭</button><select id="mk2-speed" aria-label="Speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+   </div>
+  </div>
+  <div class="row phase-row"><span class="tag code" id="mk2-ph">idle</span><span id="mk2-cap" class="cap"></span><span class="spacer"></span><span class="small mono" id="mk2-q"></span></div>
+  <div class="scroll-x" style="padding:0 10px"><div class="chartbox" style="min-width:900px"><div id="mk2-svg"></div><div class="tip" id="mk2-tip"></div></div></div>
+  <div class="pad" style="padding-top:8px"><div class="tiles" id="mk2-work"></div></div>
+ </div>
+ <div class="grid-even" style="margin-top:18px">
+  <div class="panel pad"><div class="panel-title"><h3>Why AdHash replaced XOR</h3><span class="tag code">6b19ff92</span></div>
+   <p class="small" style="margin-top:4px">Add identical rows and compare the two aggregates. XOR is its own inverse, so every identical pair cancels.</p>
+   <div class="row" style="margin-top:10px"><button id="adhd-minus">− copy</button><button id="adhd-plus">+ identical copy</button><label class="small"><input type="checkbox" id="adhd-other">add one different row</label></div>
+   <div class="chips" id="adhd-rows" style="margin-top:10px;min-height:26px"></div>
+   <div class="tiles" id="adhd-out" style="margin-top:10px"></div>
+   <p class="small" id="adhd-cap" style="margin-top:10px"></p>
+   <ul class="checks small" style="margin-top:8px">
+    <li>INSERT adds H, DELETE adds −H (<code>merkle_hash_negate</code>), a same-leaf UPDATE adds H(new) − H(old); carry crosses every byte of the little-endian value.</li>
+    <li>Index format 11 refuses format-10 (XOR) nodes with a REINDEX hint; <code>merkle_rebuild_legacy_indexes()</code> rebuilds and verifies them. Never mix XOR baselines with AdHash nodes.</li>
+    <li>A multiset checksum, not an adversarial commitment: equal roots are evidence, not proof.</li>
+   </ul></div>
+  <div class="panel pad"><div class="panel-title"><h3>What <code>merkle_verify()</code> checks</h3><span class="tag code">merkleverify.c</span></div>
+   <ol class="codepath">
+    <li><b>Format.</b> The metapage must be the current format, even on an empty heap.<small>merkle_open_consistent_index → merkle_read_meta</small></li>
+    <li><b>① Hash.</b> Σ of every visible heap row hash = Σ of the partition root hashes.<small>WARNING “mismatch … stored / heap_sum”</small></li>
+    <li><b>② Count.</b> Heap row count = Σ of the root tuple_counts (only after ① matched).<small>WARNING “count mismatch roots / heap”</small></li>
+    <li><b>③ Internal nodes.</b> Every non-leaf node = Σ of its direct children, hash and count, in (partition, prefix, node) order.<small>WARNING “structural mismatch … children_sum”</small></li>
+   </ol>
+   <p class="note warn" style="margin-top:12px"><b>Not checked:</b> that each row sits in the leaf its key routes to, or errors that compensate each other so every sum stays equal.</p></div>
+ </div>
+ <div class="grid-even" style="margin-top:18px">
+  <div class="panel pad"><div class="panel-title"><h3>Supported operations and DDL boundaries</h3><span class="tag code">4921f6a5</span></div>
+   <ul class="checks">
+    <li><b>Supported:</b> INSERT, UPDATE (same leaf or route move), DELETE, COPY, savepoints and rollback, REINDEX, deterministic and plain transactions. Maintenance is synchronous: leaves and every ancestor through the partition root are exact at commit.</li>
+    <li><b>Geometry:</b> <code>fanout</code> must be a power of two from 2 to 256; <code>partitions</code> 1 to 32,767. Split defaults to 1,024 at fanout 32, merge to split ÷ 4.</li>
+    <li><b>Index shape:</b> expression and partial Merkle indexes are rejected. Merkle serves no scans and enforces no uniqueness: keep a primary key for lookups.</li>
+    <li><b>Private backing table:</b> nodes live in <code>ariabc_internal.merkle_node_&lt;schema&gt;_&lt;table&gt;</code>, an ordinary MVCC + WAL relation. Its name must fit NAMEDATALEN with room for <code>_prefix_idx</code> / <code>_root_idx</code> and must not already belong to another table.</li>
+    <li><b>Names are fixed:</b> renaming a table with a Merkle index, moving it to another schema, or renaming its schema is refused, because the backing name derives from them.</li>
+   </ul>
+   <p class="note" style="margin-top:12px"><b>Access:</b> the backing table is ordinary catalog-visible SQL storage. Nothing here protects it from a superuser or table owner; integrity comes from comparing replicas and recomputing from the heap.</p></div>
+  <div class="panel pad"><div class="panel-title"><h3>Real geometry by benchmark profile</h3></div>
+   <div class="scroll-x"><table class="t" style="margin-top:8px"><thead><tr><th>Profile</th><th class="num">Partitions</th><th class="num">Fanout</th><th class="num">Split / merge</th><th>Aggregate</th><th>Where set</th></tr></thead><tbody>
+    <tr><td>Cluster YCSB (usertable_small, 12k rows)</td><td class="num">200</td><td class="num">4</td><td class="num">32 / 8</td><td>XOR (format 10)</td><td>cluster runner restore</td></tr>
+    <tr><td>OOM 100M (100M rows, ff 90)</td><td class="num" id="geo-oom-p">200</td><td class="num" id="geo-oom-f">32</td><td class="num" id="geo-oom-s">1024 / 256</td><td>AdHash (format 11) in the primary Merkle rows; XOR (format 10) in the paper_20261010 archive · <span id="geo-oom-n"></span></td><td><code>OOM_100M/adhash_20261012</code></td></tr>
+    <tr><td>Online recovery paper campaign</td><td class="num">200</td><td class="num">32</td><td class="num">1024 / 256</td><td>XOR (format 10)</td><td><code>ONLINE_RECOVERY/paper_20261010</code></td></tr>
+    <tr><td>TPC-C v2 (9 tables, published)</td><td class="num">16,384</td><td class="num">32</td><td class="num">1024 / 256</td><td>XOR; leading-key routing, 16 subpartitions</td><td><code>TPCC/README.md</code></td></tr>
+   </tbody></table></div>
+   <div class="src" style="flex-direction:row;flex-wrap:wrap;gap:14px;margin-top:12px"><a href="src/backend/access/merkle/merkleutil.c" target="_blank" rel="noopener">merkleutil.c — row hash, AdHash add/negate ↗</a><a href="src/backend/access/merkle/merkledelta.c" target="_blank" rel="noopener">merkledelta.c — signed staging ↗</a><a href="src/backend/access/merkle/merkleapply.c" target="_blank" rel="noopener">merkleapply.c — phases, split/merge ↗</a><a href="src/backend/access/merkle/merklebuild.c" target="_blank" rel="noopener">merklebuild.c — bulk build, DDL guards ↗</a><a href="src/backend/access/merkle/merkleverify.c" target="_blank" rel="noopener">merkleverify.c — three checks ↗</a><a href="README_MERKLE.md" target="_blank" rel="noopener">README_MERKLE.md ↗</a></div>
+  </div>
+ </div>
+</section>
+
+<!-- ============ 06 RECOVERY ============ -->
+<section class="view" id="v-recov" aria-labelledby="h-recov">
+ <div class="vhead"><div><div class="kicker">06 · Integrity</div><h2 id="h-recov">Online recovery: repair one replica while the cluster keeps committing</h2><p class="lede">Detection quarantines the minority replica, a donor exports an exact snapshot at a Raft boundary (CUT), the damaged replica repairs only the differing Merkle ranges, rebases its sequence and replays its own Raft log. Recovery is <b>off</b> in every throughput and latency run (recovery_mode=off).</p></div></div>
+
+ <div class="panel pad"><div class="panel-title"><h3>Campaign 2026-10-10: nine scenarios × three repetitions</h3><span class="tag meas">scenario_summary.csv · all_attempts.csv</span><span class="spacer"></span><span class="small" id="cam-meta"></span></div>
+  <div class="tiles" id="cam-tiles" style="margin-top:12px"></div>
+  <div class="scroll-x" style="margin-top:12px"><div id="cam-svg" style="min-width:860px"></div></div>
+  <div class="legend" id="cam-legend" style="margin-top:6px"></div>
+  <div class="well pad" style="margin-top:14px"><div id="cam-head"></div><div class="scroll-x" id="cam-runs" style="margin-top:8px"></div></div>
+  <p class="small" style="margin-top:10px">Follower recovery shows no client stall (max completion gap ≈ 20 ms, as in the baseline). Leader recovery produces one 77–193 ms gap per run, cause not isolated. M_active r2 a1 is kept as raw evidence and replaced by an extra attempt: a post-hoc storage-stall rule (node fdatasync total &gt; 2× its median) flags exactly that run.</p>
+ </div>
+
+ <div class="panel" style="margin-top:18px">
+  <div class="pad" style="padding-bottom:8px"><div class="row">
+   <h3>Replay a recorded run, phase by phase</h3><span class="tag hist">historical runs</span>
+   <span class="spacer"></span><div class="seg" role="group" aria-label="Recovery scenario" id="rv-sc"><button data-sc="C" aria-pressed="true">Follower · active detection</button><button data-sc="P" aria-pressed="false">Follower · passive Merkle compare</button><button data-sc="L" aria-pressed="false">Leader damaged · mixed faults</button></div>
+   <span class="tag meas" id="rv-run"></span></div>
+   <p class="small" style="margin-top:6px">Single-trial runs from 2026-09-27 and 2026-10-01, kept for their full log traces. Roles, Raft indices L and B, phase durations, partition and row counts and log lines are copied from those logs; positions marked ≈ are reconstructed from gateway progress. The 2026-10-10 campaign above supersedes their numbers.</p></div>
+  <div class="grid2" style="padding:0 16px 10px;gap:16px">
+   <div><div class="scroll-x"><div id="rv-stage" style="min-width:860px"></div></div></div>
+   <aside class="narr" aria-live="polite">
+    <div class="row small"><span class="kicker" id="rv-phase-n" style="margin:0"></span><span class="spacer"></span><span class="tag" id="rv-clock"></span></div>
+    <h2 id="rv-phase-t" style="margin:6px 0 8px"></h2><p class="body" id="rv-phase-b"></p>
+    <div class="metric"><span>Recorded</span><p id="rv-phase-m"></p></div>
+    <div class="src" id="rv-phase-s"></div>
+    <div style="margin-top:14px"><span class="small">Log lines emitted so far (verbatim, trimmed)</span><div id="rv-log" class="mono logbox"></div></div>
+   </aside>
+  </div>
+  <div style="padding:0 16px 8px"><div class="chartbox"><div id="rv-gantt"></div><div class="tip" id="rv-tip"></div></div></div>
+  <div class="chips" id="rv-chips" style="padding:0 16px 12px"></div>
+  <div class="controls"><button class="primary" id="rv-play">▶ Play</button><button id="rv-prev">⏮ Phase</button><button id="rv-nextp">Phase ⏭</button><label class="small" for="rv-speed">Speed</label><select id="rv-speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select><input class="range" id="rv-range" type="range" min="0" max="1000" value="0" aria-label="Recovery timeline"><span class="counter" id="rv-count"></span></div>
+ </div>
+
+ <div class="panel" style="margin-top:18px">
+  <div class="pad" style="padding-bottom:6px">
+   <div class="row"><h3>Repair, tuple by tuple</h3><span class="tag code">replica_repair.cxx · pg_state_machine_recovery.cxx</span><span class="tag model">model: 6 partitions, fanout 4, 60 rows</span></div>
+   <p class="small" style="margin-top:4px">Donor snapshot at L on the left, damaged replica on the right; every cell is a tuple. Watch detection, root comparison, leaf-map comparison, COPY of candidate ranges, deletion of extras, upsert of differences and verification in the order the code runs them. The <b>heap only</b> fault takes the full-copy path: REINDEX commits first in its own transaction, then DELETE + COPY, then roots and <code>merkle_verify</code> must both pass.</p>
+   <div class="row" style="margin-top:10px;gap:8px">
+    <span class="small">Fault</span><div class="seg" role="group" aria-label="Fault type" id="rr-sc"><button data-sc="mixed" aria-pressed="true">SQL: UPDATE + DELETE + INSERT</button><button data-sc="upd" aria-pressed="false">SQL: UPDATE only</button><button data-sc="heap" aria-pressed="false">heap only → REINDEX + full copy</button></div>
+    <label class="small" for="rr-n">tuples <b id="rr-nv">9</b></label><input id="rr-n" type="range" min="3" max="18" value="9" style="width:120px">
+    <span class="spacer"></span><button class="primary" id="rr-play">▶ Play</button><button id="rr-step">Step ⏭</button><button id="rr-restart">↺ Restart</button><select id="rr-speed" aria-label="Speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+   </div>
+  </div>
+  <div class="chips" id="rr-chips" style="padding:0 18px 6px"></div>
+  <div class="row phase-row"><span class="tag code" id="rr-ph">ready</span><span id="rr-cap" class="cap"></span></div>
+  <div class="scroll-x" style="padding:0 10px"><div class="chartbox" style="min-width:900px"><div id="rr-svg"></div><div class="tip" id="rr-tip"></div></div></div>
+  <div class="pad" style="padding-top:8px"><div class="tiles" id="rr-stats"></div></div>
+ </div>
+
+ <div class="panel pad" style="margin-top:18px" id="cut-panel">
+  <div class="row"><h3>How CUT exports an exact prefix while execution continues</h3><span class="tag model">model</span><span class="spacer"></span><a class="tag code" href="src/backend/bcdb/recovery.c" target="_blank" rel="noopener" title="Snapshot construction">recovery.c</a><a class="tag code" href="ariabc_pg/src/pg_state_machine_recovery.cxx" target="_blank" rel="noopener" title="Keeper preparation and export">pg_state_machine_recovery.cxx</a></div>
+  <div class="chips" id="cut-beats" style="margin-top:10px"></div>
+  <div id="cut-svg" style="margin-top:8px"></div>
+  <div class="row" style="margin-top:8px">
+   <button id="cut-play" class="primary" aria-label="Pause CUT animation" title="Play / pause">Ⅱ</button><button id="cut-back" aria-label="Previous CUT phase" title="Previous phase">⏮</button><button id="cut-next" aria-label="Next CUT phase" title="Next phase">⏭</button><button id="cut-reset" aria-label="Restart CUT animation" title="Restart">↺</button>
+   <select id="cut-speed" aria-label="CUT animation speed" title="Playback speed"><option value="0.125">0.125×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+   <input id="cut-range" class="range" type="range" min="0" max="38" step="0.01" value="0" aria-label="CUT animation timeline">
+   <button id="cut-overflow" aria-label="Simulate precommit ring overflow" aria-pressed="false" title="Toggle ring-overflow failure">⊘ ring overflow</button>
+  </div>
+ </div>
+
+ <div class="grid-even" style="margin-top:18px">
+  <div class="panel pad"><div class="row"><h3>Earlier single-trial phase timings</h3><span class="tag hist">analysis_s1024.md</span></div>
+   <div class="chartbox" style="margin-top:8px"><div id="rv-bars"></div><div class="tip" id="rv-btip"></div></div><div class="legend" id="rv-blegend" style="margin-top:6px"></div>
+   <p class="small" style="margin-top:8px">CUT is not Merkle comparison: <code>export_us</code> ≈ 2.7–3.1 s is the donor's keeper backend waiting for its own execution backlog (about 100 Raft entries ≈ 25k transactions at window 65,536) to reach L. Repair is 50–97 ms in the 2026-10-10 campaign. Catch-up chases a moving commit index.</p></div>
+  <div class="panel pad"><h3>Safety rules enforced in code</h3>
+   <ol class="codepath" id="rv-rules"></ol></div>
+ </div>
+</section>
+
+<!-- ============ 07 MEASURED ============ -->
+<section class="view" id="v-meas" aria-labelledby="h-meas">
+ <div class="vhead"><div><div class="kicker">07 · Evidence</div><h2 id="h-meas">Recorded timing: where 62 ms goes</h2><p class="lede">Four representative runs from <code>Final_Results/WORKER_THREAD_LATENCY</code> (window 1,024, YCSB-A θ0, 20,000 tx, 3 replicas, 2026-10-06, before the c165637f det fixes). Gateway timestamps come from <code>tx_latency.csv</code>; replica-internal queue and PQexec times from each server's <code>PROFILE_SERVER</code> line.</p><div class="vtags"><span class="tag meas">measured</span><span class="tag hist">pre-c165637f build</span></div></div>
+  <div class="seg" role="group" aria-label="Workers" id="meas-w"><button data-w="1" aria-pressed="false">W 1</button><button data-w="4" aria-pressed="false">W 4</button><button data-w="8" aria-pressed="false">W 8</button><button data-w="16" aria-pressed="true">W 16</button></div></div>
+ <div class="tiles" id="meas-tiles"></div>
+ <div class="grid-even" style="margin-top:18px">
+  <div class="panel pad"><h3>Per-batch offsets from submit (79 batches × 256 tx)</h3><p class="small">Mean of each batch's 256 transactions, by submit time. Client completion sits 0.05–0.13 ms after the majority line, so it is not drawn separately.</p>
+   <div class="chartbox" style="margin-top:8px"><div id="batch-svg"></div><div class="tip" id="batch-tip"></div></div><div class="legend" id="batch-legend" style="margin-top:6px"></div></div>
+  <div class="panel pad"><h3>End-to-end latency distribution</h3><p class="small">Submit → client completion, all 20,000 transactions.</p>
+   <div class="chartbox" style="margin-top:8px"><div id="hist-svg"></div><div class="tip" id="hist-tip"></div></div></div>
+ </div>
+ <div class="panel pad" style="margin-top:18px"><div class="row"><h3>Per-replica server profile</h3><span class="tag meas">PROFILE_SERVER</span></div>
+  <div class="scroll-x"><table class="t" id="prof-table" style="margin-top:8px"></table></div>
+  <div class="well pad" style="margin-top:12px" id="meas-explain"></div>
+ </div>
+</section>
+
+<!-- ============ 08 RESULTS ============ -->
+<section class="view" id="v-bench" aria-labelledby="h-bench">
+ <div class="vhead"><div><div class="kicker">08 · Evidence</div><h2 id="h-bench">Results and the settings behind them</h2><p class="lede">The current campaigns first, each with its frozen engine commit, then the code path every published result family exercised. Nothing here was re-measured on the reviewed head; campaign commits are shown on each panel.</p></div></div>
+ <div class="statusgrid">
+  <div class="status ok"><small>OOM 100M · primary table</small><b>252 + 3 accepted</b><span>PG/det 2026-10-10 at 16577072 · Merkle 2026-10-12/13 at 6a1c66d6 (AdHash) · 3 trials</span></div>
+  <div class="status ok"><small>Online recovery · paper campaign</small><b>28 accepted</b><span>9 scenarios × 3 + 1 extra · frozen 16577072</span></div>
+  <div class="status ok"><small>AdHash Merkle re-measurement</small><b>112 / 112 accepted</b><span>84 Merkle + 28 det control · AdHash ÷ XOR ≈ 1.003 · OOM_100M/adhash_20261012</span></div>
+  <div class="status"><small>TPC-C</small><b>v2 published 2026-10-02</b><span>v3 deck_20261012 blocked at the 2026-10-12T10:25Z snapshot: no accepted v3 results</span></div>
+  <div class="status hist"><small>YCSB · latency · TX_SIGN</small><b>historical</b><span>pre-c165637f builds; kept as recorded</span></div>
+ </div>
+
+ <div class="panel pad" style="margin-top:18px">
+  <div class="panel-title"><h3>OOM 100M: three trials per point</h3><span class="tag meas">adhash_20261012 · configuration_summary.csv</span><span class="spacer"></span><div class="seg" role="group" aria-label="View" id="oom-view"><button data-v="tps" aria-pressed="true">Throughput</button><button data-v="ratio" aria-pressed="false">Ratios</button></div></div>
+  <p class="small" id="oom-meta" style="margin-top:6px"></p>
+  <div class="row" style="margin-top:12px"><div class="seg" role="group" aria-label="Workload" id="oom-cfg"></div><span class="spacer"></span><label class="small"><input type="checkbox" id="oom-xor">overlay XOR Merkle (historical)</label><label class="small"><input type="checkbox" id="oom-v2">overlay previous v2 (historical)</label><button id="oom-tbl">Show table</button></div>
+  <p class="small" id="oom-cap" style="margin-top:8px"></p>
+  <div class="scroll-x"><div class="chartbox" style="margin-top:6px;min-width:760px"><div id="oom-svg"></div><div class="tip" id="oom-tip"></div></div></div>
+  <div class="legend" id="oom-legend" style="margin-top:6px"></div>
+  <div class="scroll-x" id="oom-table" hidden style="margin-top:12px"></div>
+  <div class="tiles" id="oom-tiles" style="margin-top:14px"></div>
+  <details><summary>Campaign settings and binaries (setup_and_audit_facts.csv, AdHash provenance)</summary><div class="scroll-x" style="margin-top:8px"><table class="t" id="oom-settings"></table></div></details>
+  <p class="note warn" style="margin-top:14px"><b>Counters:</b> the detailed det trace counters (<code>dt_opf</code>, <code>dt_opf_stale_error</code>, <code>dt_rel_read_tags</code>) were not emitted in this campaign. They are unavailable, not zero; older “dt_opf = 0” evidence does not carry over.</p>
+ </div>
+
+ <div class="panel pad" style="margin-top:18px">
+  <div class="panel-title"><h3>AdHash versus XOR: does duplicate-safe hashing cost throughput?</h3><span class="tag meas">adhash_20261012/comparison</span><span class="tag code">6a1c66d6 = merged 6b19ff92</span></div>
+  <p class="small" style="margin-top:6px">The 28 OOM Merkle points re-measured on a REINDEXed format-11 baseline (same 211,400 nodes / 204,800 leaves), against the XOR Merkle medians of paper_20261010. One det trial per point is a host-drift control. Engine commits and host states differ, so read the ratios as “no measurable cost”, not as a causal effect. These AdHash rows are the Merkle rows of the primary table above.</p>
+  <div class="tiles" id="adh-tiles" style="margin-top:12px"></div>
+  <div class="scroll-x"><div class="chartbox" style="margin-top:10px;min-width:760px"><div id="adh-svg"></div><div class="tip" id="adh-tip"></div></div></div>
+ </div>
+
+ <div class="panel pad" style="margin-top:18px"><h3>Which code path each result family exercised</h3>
+  <p class="small" style="margin-top:4px">The same binaries run in very different shapes. Single-node runs bypass Raft and Kafka entirely. Each row lists the exact flags the harness passes.</p>
+  <div class="scroll-x" style="margin-top:10px"><table class="t" id="bench-table"></table></div></div>
+
+ <div class="panel pad" style="margin-top:18px">
+  <div class="row"><h3>YCSB median throughput by mode</h3><span class="tag hist">summary_median.csv</span><span class="spacer"></span><label class="small" for="ycsb-sel">Workload</label><select id="ycsb-sel"></select><label class="small"><input type="checkbox" id="ycsb-norm">relative to det</label><button id="ycsb-tbl">Show table</button></div>
+  <p class="small" style="margin-top:4px">Cluster series: original campaign with window 65,536. pg series: 2026-09-29 rerun with retry jitter (median of 3). det and det+Merkle: single trials. All pre-c165637f.</p>
+  <div class="chartbox" style="margin-top:8px"><div id="ycsb-svg"></div><div class="tip" id="ycsb-tip"></div></div>
+  <div class="legend" id="ycsb-legend" style="margin-top:6px"></div>
+  <div id="ycsb-table" class="scroll-x" style="display:none;margin-top:10px"></div>
+ </div>
+</section>
+
+<!-- ============ 09 FINDINGS ============ -->
+<section class="view" id="v-find" aria-labelledby="h-find">
+ <div class="vhead"><div><div class="kicker">09 · Evidence</div><h2 id="h-find">What reading the code against the logs reveals</h2><p class="lede">Each card states a precise behaviour, the counter or source that shows it, and where relevant an improvement to try. Ideas are untested proposals, not results.</p></div></div>
+ <div class="findgrid" id="findgrid"></div>
+</section>
+
+<!-- ============ 10 SOURCES ============ -->
+<section class="view" id="v-src" aria-labelledby="h-src">
+ <div class="vhead"><div><div class="kicker">10 · Evidence</div><h2 id="h-src">Sources, settings and freshness</h2><p class="lede">The animations model one reviewed commit. The builder refuses to stamp a different head until someone reviews the diff and updates the models; the browser then re-hashes every cited file to show whether the checkout still matches that review.</p></div></div>
+ <div id="src-state"></div>
+ <div class="grid-even" style="margin-top:14px">
+  <div class="panel pad"><h3>Review identity</h3><div id="src-id" style="margin-top:10px"></div></div>
+  <div class="panel pad"><h3>Refreshing after a source change</h3>
+   <ol class="codepath">
+    <li><b>Read the diff</b> since the reviewed head and update the affected models and texts.<small>git diff &lt;reviewed&gt;..HEAD -- src ariabc_pg scripts</small></li>
+    <li><b>Bump the pin</b> in <code>scripts/explorer_common.py</code> (REVIEWED_HEAD, REVIEWED_DATE).<small>the builders refuse any other head or dirty cited files</small></li>
+    <li><b>Rebuild on the lab host</b> and run the browser checks there.<small>build_architecture_explorer.py · build_determinism_evidence.py · check_*_explorer.py</small></li>
+   </ol></div>
+ </div>
+ <div class="panel pad" style="margin-top:18px"><div class="panel-title"><h3>Settings: source defaults versus the profiles actually run</h3><span class="tag code">source / profile</span><span class="tag meas">recorded</span></div>
+  <div class="scroll-x" style="margin-top:10px"><table class="t" id="src-settings"></table></div></div>
+ <div class="panel pad" style="margin-top:18px"><h3>Cited files</h3>
+  <div class="scroll-x" style="margin-top:10px"><table class="t" id="src-files"></table></div></div>
+</section>
+
+<footer class="foot"><span>Source review <span id="foot-review"></span>. Recorded runs identify their own binaries and commits. The page issues no cluster commands and starts no database.</span><span><a href="ARCHITECTURE_FINAL_RESULTS.md">Markdown analysis</a> · <a href="Final_Results/WORKER_THREAD_LATENCY/Report.md">Latency report</a> · <a href="DETERMINISM_GUIDE.md">Determinism guide</a></span></footer>
+</main>
+</div>
+<script id="explorer-results" type="application/json">{}</script><!-- explorer-results-end -->
+<script id="explorer-sources" type="application/json">{}</script><!-- explorer-sources-end -->
+<script>/* SUITE_JS */</script>
+<script>/* APP_JS */</script>
+</body>
+</html>

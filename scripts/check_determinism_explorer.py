@@ -15,6 +15,10 @@ import time
 import urllib.error
 import urllib.request
 
+EXPECTED_CHAPTERS = ['overview', 'admission', 'paper', 'overlap', 'early', 'relation', 'oldkey', 'overlay', 'fallback',
+                     'caught', 'settle', 'digest', 'random', 'errors', 'staleerror', 'merkle', 'lanes', 'boundaries']
+
+
 def main():
     if not Path('/home/neel/Desktop/ariabc_cluster').is_dir() or not Path('/snap/bin/geckodriver').exists():
         raise SystemExit('Run on lab 10.129.148.247; Firefox/geckodriver required.')
@@ -64,8 +68,17 @@ def main():
         call(f'/session/{sid}/url', {'url': f'http://127.0.0.1:{web.server_port}/DETERMINISM_EXPLORER.html'})
         check('page initialized without errors', js("return typeof determinismExplorer==='object' && uiErrors.length===0"))
         n=js('return determinismExplorer.chapters.length')
-        check('all 17 chapters available', n==17)
-        check('model validates all schedules', js('return determinismExplorer.validateModel().scenes===17'))
+        ids=js('return determinismExplorer.chapters.map(c=>c.id)')
+        def ch(name):
+            return ids.index(name)  # chapters are addressed by id, never by position
+        check(f'all {len(EXPECTED_CHAPTERS)} chapters available in order', ids==EXPECTED_CHAPTERS)
+        check('model validates all schedules', js('return determinismExplorer.validateModel().scenes')==n)
+        reviewed=json.loads((source/'docs/determinism/source_manifest.json').read_text())['head']
+        check('suite bar shows the reviewed head', js("return document.getElementById('review-head').textContent")==reviewed[:8])
+        for _ in range(100):
+            if js('return window.SUITE_FRESH && ["ok","drift","na"].includes(SUITE_FRESH.state)'): break
+            time.sleep(.1)
+        check('freshness: every cited file matches the reviewed hash', js("return SUITE_FRESH.state==='ok' && SUITE_FRESH.checked===SUITE_FRESH.total"))
         check('paused on load', js('return !determinismExplorer.state.playing'))
         event_count=0
         for width in (1440,736):
@@ -88,35 +101,40 @@ def main():
                 check(f'seeking reconstructs scene {i} at {width}',js('return JSON.stringify(determinismExplorer.model)')==saved)
                 check(f'scene {i} containment at {width}',js('return document.documentElement.scrollWidth<=innerWidth+1'))
                 check(f'scene {i} reverse/next at {width}',js("document.getElementById('prev').click();document.getElementById('next').click();return !determinismExplorer.state.playing"))
-            js('determinismExplorer.choose(2);determinismExplorer.seek(15)')
+            js(f"determinismExplorer.choose({ch('overlap')});determinismExplorer.seek(15)")
             shot(f'overlap_{width}')
         # Independently specified expected outcomes for the illustrated schedules.
-        for scene_index,expected in [(2,{'P':2,'C':2,'db':{'A':1,'B':1,'D':1}}),
-                (4,{'P':1,'C':1,'db':{'matches':1,'B':1}}),
-                (5,{'P':1,'C':1,'db':{'row key':8,'found key 7':False}}),
-                (6,{'P':0,'C':0,'db':{'value':'absent'}}),
-                (9,{'P':2,'C':2,'db':{'A':1,'B':0,'D':1}}),
-                (12,{'P':1,'C':1,'db':{'value':11}}),
-                (13,{'P':1,'C':1,'db':{'v':0}}),
-                (14,{'P':0,'C':0,'db':{'rows at leaf':1}})]:
-            got=js(f"determinismExplorer.choose({scene_index});determinismExplorer.seek(determinismExplorer.chapters[{scene_index}].duration);const m=determinismExplorer.model;return {{P:m.P,C:m.C,db:m.db}}")
-            check(f'specified final outcome scene {scene_index}',got==expected)
-        check('out-of-order completion leaves a hole',js('determinismExplorer.choose(2);determinismExplorer.seek(15);return determinismExplorer.model.C===-1 && determinismExplorer.model.ready.length===2 && document.querySelectorAll(".slot.hole").length===1'))
-        check('P release does not expose DB writes',js('determinismExplorer.choose(2);determinismExplorer.seek(9);return determinismExplorer.model.P===2 && determinismExplorer.model.db.A===0 && determinismExplorer.model.db.B===0'))
-        check('stale-snapshot error re-runs before it is finalized',js('determinismExplorer.choose(12);determinismExplorer.seek(3);const a=determinismExplorer.model;determinismExplorer.seek(9);const b=determinismExplorer.model;return a.tx[1].opf && !a.tx[1].done && b.P===1 && b.C===1 && b.tx[1].outcome==="ERROR 23514" && b.tx[1].mode==="physical"'))
-        check('stale error re-run matches serial order',js('determinismExplorer.choose(13);determinismExplorer.seek(determinismExplorer.chapters[13].duration);const m=determinismExplorer.model;return m.tx[1].outcome==="committed" && m.tx[1].sqlRuns===2 && m.db.v===0'))
-        check('conflict frame draws a dependency arrow',js('determinismExplorer.choose(3);determinismExplorer.seek(9);return document.querySelectorAll("#effects .fx-dep").length===1 && document.querySelectorAll("#effects .fx-abort").length===1'))
-        check('event change summary lists frontier moves',js('determinismExplorer.choose(2);determinismExplorer.seek(18);return document.getElementById("changes").textContent.includes("C -1 → 2")'))
-        check('settle keeps SQL and queue frozen',js('determinismExplorer.choose(9);determinismExplorer.seek(15);const tx=determinismExplorer.model.tx[1];return tx.sqlRuns===1 && tx.queue[0]==="B ← 0"'))
-        for reason,ref in [('trigger','trigger'),('upsert','upsert'),('sequence','sequence'),('insert','scanpending'),('indexed','indexpending')]:
-            js(f"determinismExplorer.choose(7);document.getElementById('variant').value='{reason}';document.getElementById('variant').dispatchEvent(new Event('change'));determinismExplorer.seek(3)")
+        for name,expected in [('admission',{'P':1,'C':1,'db':{'A':5,'B':9}}),
+                ('overlap',{'P':2,'C':2,'db':{'A':1,'B':1,'D':1}}),
+                ('relation',{'P':1,'C':1,'db':{'matches':1,'B':1}}),
+                ('oldkey',{'P':1,'C':1,'db':{'row key':8,'found key 7':False}}),
+                ('overlay',{'P':0,'C':0,'db':{'value':'absent'}}),
+                ('settle',{'P':2,'C':2,'db':{'A':1,'B':0,'D':1}}),
+                ('errors',{'P':1,'C':1,'db':{'value':11}}),
+                ('staleerror',{'P':1,'C':1,'db':{'v':0}}),
+                ('merkle',{'P':0,'C':0,'db':{'rows at leaf':1}})]:
+            i=ch(name)
+            got=js(f"determinismExplorer.choose({i});determinismExplorer.seek(determinismExplorer.chapters[{i}].duration);const m=determinismExplorer.model;return {{P:m.P,C:m.C,db:m.db}}")
+            check(f'specified final outcome {name}',got==expected)
+        check('multi-statement request is rejected with 0A000, then finalized in order',js(f"determinismExplorer.choose({ch('admission')});determinismExplorer.seek(3);const a=determinismExplorer.model;const r1=a.tx[0].error==='0A000' && !a.tx[0].done;determinismExplorer.seek(6);const b=determinismExplorer.model;return r1 && b.tx[0].outcome==='ERROR 0A000' && b.P===0 && b.C===0"))
+        check('out-of-order completion leaves a hole',js(f'determinismExplorer.choose({ch("overlap")});determinismExplorer.seek(15);return determinismExplorer.model.C===-1 && determinismExplorer.model.ready.length===2 && document.querySelectorAll(".slot.hole").length===1'))
+        check('P release does not expose DB writes',js(f'determinismExplorer.choose({ch("overlap")});determinismExplorer.seek(9);return determinismExplorer.model.P===2 && determinismExplorer.model.db.A===0 && determinismExplorer.model.db.B===0'))
+        check('stale-snapshot error re-runs before it is finalized',js(f'determinismExplorer.choose({ch("errors")});determinismExplorer.seek(3);const a=determinismExplorer.model;determinismExplorer.seek(9);const b=determinismExplorer.model;return a.tx[1].opf && !a.tx[1].done && b.P===1 && b.C===1 && b.tx[1].outcome==="ERROR 23514" && b.tx[1].mode==="physical"'))
+        check('stale error re-run matches serial order',js(f'determinismExplorer.choose({ch("staleerror")});determinismExplorer.seek(determinismExplorer.chapters[{ch("staleerror")}].duration);const m=determinismExplorer.model;return m.tx[1].outcome==="committed" && m.tx[1].sqlRuns===2 && m.db.v===0'))
+        check('conflict frame draws a dependency arrow',js(f'determinismExplorer.choose({ch("early")});determinismExplorer.seek(9);return document.querySelectorAll("#effects .fx-dep").length===1 && document.querySelectorAll("#effects .fx-abort").length===1'))
+        check('event change summary lists frontier moves',js(f'determinismExplorer.choose({ch("overlap")});determinismExplorer.seek(18);return document.getElementById("changes").textContent.includes("C -1 → 2")'))
+        check('settle keeps SQL and queue frozen',js(f'determinismExplorer.choose({ch("settle")});determinismExplorer.seek(15);const tx=determinismExplorer.model.tx[1];return tx.sqlRuns===1 && tx.queue[0]==="B ← 0"'))
+        for reason,ref in [('trigger','trigger'),('upsert','upsert'),('sequence','sequence'),('insert','scanpending'),('indexed','indexpending'),
+                           ('deletereturning','deletereturning'),('exclusion','exclusion'),('exception','exceptionblock')]:
+            js(f"determinismExplorer.choose({ch('fallback')});document.getElementById('variant').value='{reason}';document.getElementById('variant').dispatchEvent(new Event('change'));determinismExplorer.seek(3)")
             check('fallback reason source '+reason,js(f"return document.getElementById('source-select').value==='{ref}' && determinismExplorer.model.tx[1].opf"))
             js('determinismExplorer.seek(12)')
             check('fallback physical route '+reason,js('return determinismExplorer.model.C===0 && determinismExplorer.model.P===0 && determinismExplorer.model.tx[1].mode==="physical"'))
             js('determinismExplorer.seek(15)')
             check('fallback releases after SQL before commit '+reason,js('return determinismExplorer.model.P===1 && !determinismExplorer.model.tx[1].done && determinismExplorer.model.db.effect===0'))
+        check('exception-block chapter: BC010 before any handler, then physical',js(f"determinismExplorer.choose({ch('caught')});determinismExplorer.seek(3);const a=determinismExplorer.model;determinismExplorer.seek(9);const b=determinismExplorer.model;return a.tx[0].opf && b.tx[0].mode==='physical'"))
         # Check actual SVG movement during requestAnimationFrame playback.
-        js("determinismExplorer.choose(2);determinismExplorer.seek(3);document.getElementById('play').click()")
+        js(f"determinismExplorer.choose({ch('overlap')});determinismExplorer.seek(3);document.getElementById('play').click()")
         time.sleep(.12)
         pos1=js("return document.querySelector('[data-tx=\"0\"]').getAttribute('transform')")
         time.sleep(.35)
@@ -124,14 +142,14 @@ def main():
         js("document.getElementById('play').click()")
         check('transaction SVG visibly moves during playback',pos1!=pos2)
         for speed in (.125,.25,.5,1,2):
-            js(f"determinismExplorer.choose(2);document.getElementById('speed').value='{speed}';document.getElementById('speed').dispatchEvent(new Event('change'));document.getElementById('play').click()")
+            js(f"determinismExplorer.choose({ch('overlap')});document.getElementById('speed').value='{speed}';document.getElementById('speed').dispatchEvent(new Event('change'));document.getElementById('play').click()")
             time.sleep(1.1)
             elapsed=js("document.getElementById('play').click();return determinismExplorer.state.t")
             check(f'real playback at {speed}x',.4*speed<elapsed<1.8*speed)
             time.sleep(.15)
             check(f'pause at {speed}x',js('return determinismExplorer.state.t')==elapsed)
         # A real Firefox desktop window can stop RAF while document.hidden is false.
-        js("window.qaOriginalRaf=requestAnimationFrame;window.requestAnimationFrame=()=>0;determinismExplorer.choose(2);determinismExplorer.seek(3);document.getElementById('speed').value='1';document.getElementById('speed').dispatchEvent(new Event('change'));document.getElementById('play').click()")
+        js(f"window.qaOriginalRaf=requestAnimationFrame;window.requestAnimationFrame=()=>0;determinismExplorer.choose({ch('overlap')});determinismExplorer.seek(3);document.getElementById('speed').value='1';document.getElementById('speed').dispatchEvent(new Event('change'));document.getElementById('play').click()")
         time.sleep(.9)
         check('playback survives withheld animation frames',js("return determinismExplorer.state.t>3.3 && !document.hidden"))
         js("document.getElementById('play').click();window.requestAnimationFrame=window.qaOriginalRaf;requestAnimationFrame(tick)")
@@ -142,7 +160,7 @@ def main():
         call(f'/session/{sid}/url',{'url':f'http://127.0.0.1:{web.server_port}/DETERMINISM_EXPLORER.html#overlay'})
         check('chapter deep link',js('return determinismExplorer.chapters[determinismExplorer.state.chapter].id==="overlay"'))
         check('dependency lens follows command counter',js('determinismExplorer.seek(6);return determinismExplorer.model.lens.visible==="11" && document.querySelector(".lens").textContent.includes("Command 1")'))
-        check('Merkle lens preserves +2 with zero hash',js('determinismExplorer.choose(14);determinismExplorer.seek(9);const l=determinismExplorer.model.lens;return l.ih==="0" && l.ic===2 && document.querySelector(".lens").textContent.includes("+2")'))
+        check('Merkle lens: identical INSERTs sum to 2h with count +2',js(f'determinismExplorer.choose({ch("merkle")});determinismExplorer.seek(9);const l=determinismExplorer.model.lens;return l.ih==="2h" && l.ic===2 && l.dh==="−h" && document.querySelector(".lens").textContent.includes("+2")'))
         # Independently verify served bytes and the exact line text behind each excerpt.
         manifest=json.loads((source/'docs/determinism/source_manifest.json').read_text())
         for name,meta in manifest['files'].items():
@@ -159,8 +177,8 @@ def main():
                 check('related link '+name,response.status==200)
         call(f'/session/{sid}/window/rect',{'width':1440,'height':1200})
         js('window.scrollTo(0,0);document.getElementById("source-details").open=false')
-        for i,t,name in [(7,12,'physical_fallback'),(6,9,'own_write_overlay'),(4,6,'relation_coverage'),(9,12,'frozen_settle'),(12,9,'terminal_error'),(13,12,'stale_error_rerun'),(14,9,'merkle_net_count'),(3,9,'early_conflict_arrow')]:
-            js(f'determinismExplorer.choose({i});determinismExplorer.seek({t});window.scrollTo(0,0)')
+        for cid,t,name in [('admission',6,'admission'),('fallback',12,'physical_fallback'),('caught',3,'exception_block'),('overlay',9,'own_write_overlay'),('relation',6,'relation_coverage'),('settle',12,'frozen_settle'),('errors',9,'terminal_error'),('staleerror',12,'stale_error_rerun'),('merkle',9,'merkle_net_count'),('early',9,'early_conflict_arrow')]:
+            js(f'determinismExplorer.choose({ch(cid)});determinismExplorer.seek({t});window.scrollTo(0,0)')
             shot(name)
         check('zero captured JS errors',js('return uiErrors.length===0'))
         # Firefox can emulate the theme preference without modifying the page CSS.
@@ -169,6 +187,9 @@ def main():
         call(f'/session/{sid}/moz/context', {'context': 'content'})
         time.sleep(.2)
         check('dark theme preference', js('return matchMedia("(prefers-color-scheme: dark)").matches'))
+        js("try{localStorage.removeItem('ariabc_theme')}catch(e){};location.reload()")
+        time.sleep(1.2)
+        check('dark theme applied from the preference at load', js("return document.documentElement.dataset.theme==='dark' && uiErrors.length===0"))
         shot('dark')
         call(f'/session/{sid}/window/rect', {'width':360,'height':1000})
         check('dark mobile containment', js('return document.documentElement.scrollWidth<=innerWidth+1'))
@@ -189,7 +210,7 @@ def main():
                 js(f"document.querySelector('[data-chapter=\"{i}\"]').click();")
                 check(f'exact {width}px chapter {i} containment', js('return document.documentElement.scrollWidth<=innerWidth+1'))
                 check(f'exact {width}px chapter {i} event controls', js("const d=determinismExplorer;for(let n=0;n<d.chapters[d.state.chapter].frames.length+1;n++)document.getElementById('next').click();return d.state.t===d.chapters[d.state.chapter].duration"))
-            js('determinismExplorer.choose(2);determinismExplorer.seek(7)')
+            js(f"determinismExplorer.choose({ch('overlap')});determinismExplorer.seek(7)")
             time.sleep(.25)
             call(f'/session/{sid}/frame', {'id':None})
             element_id = iframe['element-6066-11e4-a52e-4f735466cecf']

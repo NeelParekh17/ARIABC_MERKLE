@@ -1,6 +1,6 @@
 # Determinism in ProtectDB and the updated AriaBC implementation
 
-Reviewed 9 October 2026 against source commit c165637f21cc25411af302a56f83717fd340c303 and the current local ProtectDB_arxiv-3.pdf. Open [the animation](http://127.0.0.1:8765/DETERMINISM_EXPLORER.html). The page contains 17 chapters, moving transaction tokens, dependency arrows, discard/retry and publish/commit cues, a per-event change summary, private write queues, visible database state, completion holes, dependency diagrams, source excerpts, and slow playback down to 0.125×.
+Reviewed 13 October 2026 against source commit 9cf6c70a39e9bf848c93c2c24bdb55181f4b3356 (engine identical to merge 6b19ff92; previous review c165637f, 9 October) and the current local ProtectDB_arxiv-3.pdf. Open [the animation](http://127.0.0.1:8765/DETERMINISM_EXPLORER.html) with `./open_websites.sh`. The page contains 18 chapters, moving transaction tokens, dependency arrows, discard/retry and publish/commit cues, a per-event change summary, private write queues, visible database state, completion holes, dependency diagrams, source excerpts, and slow playback down to 0.125×.
 
 The [source manifest](docs/determinism/source_manifest.json) records exact file hashes, anchored excerpts, and the reviewed commit. Timings and schedules are illustrative. The diagrams explain reviewed source behavior; they are not traces captured from PostgreSQL. This refresh ran browser checks on the lab machine, not a new database correctness or TPS campaign. Latest Claude/Codex handoffs were used to locate changes and then checked against source.
 
@@ -96,6 +96,14 @@ An overlay cannot invent physical heap/index entries for pending INSERTs, nor sa
 
 Source: shm_transaction.c overlay/compose/scanpending/indexpending and nodeIndexonlyscan.c indexonly.
 
+## Admission: one top-level statement per request
+
+get_write_set parses the request text before anything runs. An empty request, or a simple-query string that parses to more than one top-level statement, fails with 0A000 “a deterministic request must contain exactly one SQL statement”. That rejection is an ordinary ordered outcome: the slot is finalized as ERROR 0A000 and P and C advance over it. One statement may still be `SELECT f()` or a DO block whose body runs many commands; those internal commands belong to the same speculative attempt.
+
+Two apply-time rules also changed in 4921f6a5. A deferred UPDATE applies its index phase with unique checking on (apply_optim_update → heap_apply_index_phase(…, true, …)), so a duplicate key surfaces at apply time and follows the post-publication settle rules rather than a SQL rerun. The index phase evaluates partial-index predicates, so a new tuple outside an index's WHERE clause gets no entry. Chapter 2 animates admission and both rules.
+
+Source: worker.c singlestmt; shm_transaction.c deferredunique; heapam.c partialpred.
+
 ## Ordered physical fallback: the precise order
 
 bcdb_request_opf sets needs_opf and raises the internal SQLSTATE BC010 only during simulation. The worker's catch restarts this route only before publication. It aborts/discards the original attempt and deferred queue; it does not switch to physical execution halfway through a speculative transaction.
@@ -107,6 +115,9 @@ bcdb_request_opf sets needs_opf and raises the internal SQLSTATE BC010 only duri
 | nextval/setval | Avoid mutating the sequence during discarded speculative attempts |
 | Scan after pending own INSERT | The inserted row is absent from the physical scan structures |
 | Scan affected by own indexed UPDATE | A new indexed value or partial-index membership can have no old index entry to fetch |
+| DELETE … RETURNING | A deferred DELETE cannot produce its RETURNING rows |
+| PL/pgSQL block with EXCEPTION handlers | Requested at block entry, before any handler exists that could trap BC010 |
+| INSERT/UPDATE on a table with an exclusion constraint | Deferred apply cannot check exclusion; ExecOpenIndices sets ri_HasExclusionIndex |
 
 The retry order is:
 
@@ -122,9 +133,9 @@ P is released after physical SQL but before final PostgreSQL commit. Describing 
 
 A later optimistic transaction can already be simulating; after the fallback writer publishes, dependency checks protect missing relevant effects. No later ordered publisher can overtake the unpublished fallback item. External writes bypassing this protocol require a separate contract.
 
-A PL/pgSQL exception handler cannot silently absorb the fallback requirement. If it catches BC010 and SQL returns while bcdb_dt_simulating and needs_opf are both true, the worker raises BC010 again. The whole unpublished attempt is still rejected. This is why the page includes a dedicated caught-error chapter.
+A PL/pgSQL exception handler cannot silently absorb the fallback requirement. Since 4921f6a5, exec_stmt_block requests BC010 when it enters a block that has exception handlers, before the block initializes, so no handler is active to catch it. The older defence remains: if any path traps BC010 and SQL returns while bcdb_dt_simulating and needs_opf are both true, the worker raises BC010 again (dt_opf_caught). Chapter 10, “Exception blocks fall back before they run”, shows the primary guard and the post-SQL check.
 
-Source: shm_transaction.c opf/scanpending/indexpending; worker.c opfwait/opfretry/caught; nodeModifyTable.c physical/trigger/upsert; sequence.c sequence.
+Source: shm_transaction.h opfheader; shm_transaction.c opf/scanpending/indexpending; worker.c opfwait/opfretry/caught; nodeModifyTable.c physical/trigger/upsert/deletereturning/exclusion/exclusionupd; execIndexing.c exclusionflag; pl_exec.c exceptionblock; sequence.c sequence.
 
 ## Freeze the accepted decision after publication
 
@@ -164,16 +175,16 @@ Source: worker.c seed, float.c random, shm_transaction.c longsql; postgres.c len
 
 Where the error is raised matters. CHECK and NOT NULL constraints run in ExecInsert/ExecUpdate (ExecConstraints) before a write is deferred, so they fail inside the speculative attempt. Outside the safe ledger, that error reaches the worker's outer PG_CATCH: bcdb_publish_error_result writes ERROR <sqlstate> into the item's result slot, mark_published_ready_txid marks the slot publication-ready and advance_last_committed_txid tries to advance C. The slot does not wait for its turn; P and C scan forward over it once its predecessors finish, so log order is kept.
 
-**Stale-snapshot errors (bug found and fixed 2026-10-09, uncommitted in the working tree).** Before the fix, that catch path finalized the error without validating the reads that produced it. On the ledger path, terminal outcomes also skipped the turn conflict check. So an error that depended on a stale snapshot became final: at W=8, a slow v←v+1 alternating with v←v−1 under CHECK(v≥0) returned 23514 for 32/32 UPDATEs that succeed serially.
+**Stale-snapshot errors (bug found 2026-10-09, fix committed in 56fc1552).** Before the fix, that catch path finalized the error without validating the reads that produced it. On the ledger path, terminal outcomes also skipped the turn conflict check. So an error that depended on a stale snapshot became final: at W=8, a slow v←v+1 alternating with v←v−1 under CHECK(v≥0) returned 23514 for 32/32 UPDATEs that succeed serially.
 
 The fix is in worker.c, both catch paths, plus the dt_opf_stale_error trace counter. An error raised while simulating with baseline < s−1 sets needs_opf and restarts through the ordered physical route (BC010): the transaction waits for its turn and for every predecessor to commit, then re-runs. An error on that run, or one raised with baseline = s−1, is the serial outcome and is finalized as before. The TPC-C TP001 business abort keeps its own path.
 
-Verified on .247 against the serial oracle:
+Verified on .247 against the serial oracle on 2026-10-09, before the commit (historical evidence, not a run of the reviewed head):
 - 5 stale-error families (CHECK, division by zero, NOT NULL, PL/pgSQL RAISE, and a mixed case with genuine serial errors) fail 5/5 on the old build and pass 15/15 at W=8 on the fixed build. The mixed case returns exactly the 21 genuine errors.
 - All 62 existing detfix families pass at W=8. `volatile_random` needs the audit_A.py oracle, which seeds random() correctly; the other script mismatches on the old build too.
-- The safe-ledger branch has not been exercised by these native tests.
+- The safe-ledger branch has not been exercised by these native tests. In source it applies the same rule to its whitelisted SQLSTATEs and fails closed on others.
 
-Chapter 14 animates the fixed behaviour.
+Chapter 15 animates the fixed behaviour.
 
 The backend now retains the real terminal SQLSTATE, finalizes the item at its ordered position, and returns a marked error. Inline terminal errors are raised after PG_TRY so the catch cannot revisit a deleted transaction. The catch-path finalization also attaches bcdb_finalized=1 when it already finalized an error item.
 
@@ -183,13 +194,13 @@ A completed 23514 or 23505 is still a failed SQL operation. It is not a successf
 
 Source: worker.c terminalerror/finalized, pg_error_result.hxx errorhelper, pg_executor.cxx errorcomplete.
 
-## The newest Merkle fix: hash XOR and count sum
+## Merkle deltas: signed AdHash sums and a separate count
 
-A staged delta is keyed by index identity, event type and relevant old/new key hashes. Multiple changes sharing that key can coalesce. The hash contribution combines with XOR; count contributions add. INSERT contributes +1, DELETE −1 and UPDATE's direct delta has no net count change.
+A staged delta is keyed by index identity, event type and relevant old/new key hashes. Multiple changes sharing that key can coalesce. Since 6b19ff92 the hash contributions are AdHash values: 32-byte little-endian integers added modulo 2^256. INSERT adds h, DELETE adds −h (merkle_stage_delta_event negates the positive old-row hash), and a same-leaf UPDATE adds h(new) − h(old). Count contributions add: INSERT +1, DELETE −1, UPDATE's direct delta 0. Index format 11 refuses format-10 XOR nodes until they are rebuilt.
 
-The newest commit carries count_delta in each entry through staging, subtransaction merge and apply. An entry is removed only when both its XOR hash and its net count are zero. Ordinary and batched application use the accumulated count instead of deriving one row per retained entry.
+The newest commit carries count_delta in each entry through staging, subtransaction merge and apply. An entry is removed only when both its hash sum and its net count are zero. Ordinary and batched application use the accumulated count instead of deriving one row per retained entry.
 
-Example on an initially empty leaf: insert row h, delete it, reinsert identical row h. The two INSERT contributions coalesce to hash 0 but count +2. The DELETE contribution has hash h and count −1. The combined effect must be hash h and count +1. Removing the zero-hash INSERT entry would lose its +2 count and can lead to incorrect zero-count/hash treatment. Keeping both components gives the final one-row leaf.
+Example on an initially empty leaf: insert row h, delete it, reinsert identical row h. The two INSERT contributions coalesce to 2h with count +2; the DELETE contribution is −h with count −1; the combined effect is h and +1. Under the earlier XOR sum the INSERT entry cancelled to hash 0, and dropping it lost its +2 count — the bug fixed in c165637f. XOR also made identical rows cancel in the tree itself ({r,r} hashed like {}), which AdHash removes. The count still travels separately because it cannot be derived from a coalesced entry.
 
 Only changes with the same delta key coalesce; arbitrary distinct rows are not automatically one entry. Failed subtransactions discard their staged frames with both components. The animation shows symbolic algebra and state, not freshly measured root values.
 
@@ -227,6 +238,8 @@ For an admitted SQL class, the proof obligations remain: same input/state, conse
 
 The standalone page is built from docs/determinism/model.js, view.js, style.css and template.html by scripts/build_determinism_evidence.py. Source references use reviewed literal anchors rather than hard-coded old line numbers. The builder fails when an anchor is missing or ambiguous; repeated call sites have explicitly selected occurrences. Review semantics before rebuilding after a source change.
 
-scripts/check_determinism_explorer.py runs only on lab 10.129.148.247 using an isolated Firefox profile and temporary HTTP server. It exercises all scene events, expected illustrative outcomes, P/C holes, SVG motion, slower speeds, scrubbing/reverse/replay, five fallback reasons, source bytes/excerpts, theme, reduced motion and exact mobile viewports. It starts no database or gateway. Screenshots and result JSON are preserved under .bench_tmp/determinism_refresh_20261009_*/.
+scripts/check_determinism_explorer.py runs only on lab 10.129.148.247 using an isolated Firefox profile and temporary HTTP server. It addresses chapters by id and exercises all scene events, expected illustrative outcomes, P/C holes, SVG motion, slower speeds, scrubbing/reverse/replay, all eight fallback reasons, admission, the AdHash lens, source bytes/excerpts, the live freshness check, theme, reduced motion and exact mobile viewports. It starts no database or gateway. Screenshots and result JSON go to <checkout>/.bench_tmp/determinism_ui_<date>_*/ on the lab host.
+
+The page shares its design system (docs/explorers/suite.css, suite-boot.js, suite.js) with the architecture explorer. When served from the checkout, the top bar re-hashes every cited file and reports whether the checkout still matches the reviewed bytes; a rebuilt page alone never counts as fresh.
 
 Historical context consulted: Claude 09a68b55-60dd-43e6-b156-e08c0b922875 (merged fixes and newest count fix), Codex 01a11ce2-b167-7bb2-ab2c-57a8cd98e4cd (coverage/seed/program fidelity audit), and the previous paper/settle analysis. These chats guide source review; the current code and current PDF determine this explanation.
