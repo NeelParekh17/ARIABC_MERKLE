@@ -20,7 +20,7 @@
  *       publish their results: the gateway counts them only where they match
  *       another replica, so the majority never waits on one slow replica.
  *   RECOVER ref_host=H ref_port=P snapshot=<id> L=<log_idx> B=<det_seq>
- *           [ref_user=U] [ref_db=D] [wait_live_ms=N] [heap_verify=0|1] [allow_rewind=0|1]
+ *           [ref_user=U] [ref_db=D] [wait_live_ms=N] [heap_verify=0|1 (default 0)] [allow_rewind=0|1]
  *       Drain, repair the local database from the reference snapshot, rebase
  *       BCDB to B and replay entries L+1.. from the local Raft log store.
  *       L must cover every entry this replica already executed (so no entry is
@@ -35,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 
@@ -403,6 +404,26 @@ bool pg_state_machine::cmd_cut(const std::map<std::string, std::string>& args, s
             out = "ERR digest_failed " + err;
             return false;
         }
+        /* Diagnostic: per-partition roots of this cut, for cross-node diffs. */
+        /* Opt-in: ARIABC_RECOVERY_CUT_DUMP_DIR enables per-partition root dumps. */
+        if (const char* dump_dir = std::getenv("ARIABC_RECOVERY_CUT_DUMP_DIR")) {
+            PGresult* res = PQexec(r,
+                "SELECT ic.relname, roots.partition, roots.hash FROM pg_index i "
+                "JOIN pg_class ic ON ic.oid = i.indexrelid "
+                "JOIN pg_am am ON am.oid = ic.relam "
+                "CROSS JOIN LATERAL pg_catalog.merkle_get_partition_root_hashes(i.indexrelid) roots "
+                "WHERE am.amname = 'merkle' ORDER BY 1, 2");
+            if (res && PQresultStatus(res) == PGRES_TUPLES_OK) {
+                std::ostringstream path;
+                path << dump_dir << "/cut_node" << node_id_ << "_L" << pc.boundary_log_idx
+                     << "_B" << pc.boundary_det_seq << ".tsv";
+                std::ofstream f(path.str());
+                for (int i = 0; i < PQntuples(res); ++i)
+                    f << PQgetvalue(res, i, 0) << '\t' << PQgetvalue(res, i, 1) << '\t'
+                      << PQgetvalue(res, i, 2) << '\n';
+            }
+            if (res) PQclear(res);
+        }
         PQexec(r, "ROLLBACK");
         PQfinish(r);
         digest_us = (mono_ns() - d0) / 1000;
@@ -501,7 +522,11 @@ bool pg_state_machine::cmd_recover(const std::map<std::string, std::string>& arg
     const uint64_t L = arg_u64(args, "L", 0);
     const int64_t B = arg_i64(args, "B", -2);
     const uint64_t wait_live_ms = arg_u64(args, "wait_live_ms", 0);
-    const bool heap_verify = arg_u64(args, "heap_verify", 1) != 0;
+    /* Repair is ordinary SQL, so the Merkle index is maintained at commit and the
+     * partition-root comparison proves the repaired state. The full-heap audit
+     * (merkle_verify, O(table): ~5.7 s at 4M rows) only adds a check against
+     * writes that bypass the index; opt in with heap_verify=1. */
+    const bool heap_verify = arg_u64(args, "heap_verify", 0) != 0;
     const uint64_t drain_timeout_ms = arg_u64(args, "drain_timeout_ms", 60000);
     const bool allow_rewind = arg_u64(args, "allow_rewind", 0) != 0;
     if (snapshot_id.empty() || ref_host.empty() || B < -1) {

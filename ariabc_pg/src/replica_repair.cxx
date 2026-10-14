@@ -269,6 +269,20 @@ std::string range_pred(const table_info& t, const std::string& key_expr) {
            ") = b.p AND " + h + " BETWEEN b.lo AND b.hi";
 }
 
+/* The planner overestimates rows per leaf range (~2k vs ~80 at 4M rows) and
+ * prefers a hash join over a full-table walk to ~100 parameterized scans of
+ * the Merkle lookup index (3.5 s vs 40 ms). Steer only the range-join
+ * statements; the caller is inside a transaction and restores the defaults after. */
+bool force_range_index_join(PGconn* c, std::string& err) {
+    return exec_cmd(c, "SET LOCAL enable_hashjoin = off", err) &&
+           exec_cmd(c, "SET LOCAL enable_mergejoin = off", err);
+}
+
+bool restore_join_planning(PGconn* c, std::string& err) {
+    return exec_cmd(c, "SET LOCAL enable_hashjoin TO DEFAULT", err) &&
+           exec_cmd(c, "SET LOCAL enable_mergejoin TO DEFAULT", err);
+}
+
 /* Stream `copy_out_sql` from ref into `copy_in_sql` on local. */
 bool stream_copy(PGconn* ref, const std::string& copy_out_sql,
                  PGconn* local, const std::string& copy_in_sql,
@@ -533,8 +547,10 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
         "COPY (" + cte + "SELECT DISTINCT ON (" + pk_list_t + ") " + join_quoted(local, t.cols, "t.") +
         " FROM b JOIN " + tbl + " t ON " + range_pred(t, "t." + key) +
         " ORDER BY " + pk_list_t + ") TO STDOUT";
-    if (!stream_copy(ref, copy_out, local, "COPY " + tmp + " (" + cols + ") FROM STDIN",
-                     candidates, err)) {
+    if (!force_range_index_join(ref, err) ||
+        !stream_copy(ref, copy_out, local, "COPY " + tmp + " (" + cols + ") FROM STDIN",
+                     candidates, err) ||
+        !restore_join_planning(ref, err)) {
         return commit_or_rollback(local, false, err);
     }
     st.candidate_rows += candidates;
@@ -549,10 +565,12 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
         pk_match += "r." + c + " = t." + c;
     }
     uint64_t deleted = 0;
-    if (!exec_cmd(local,
+    if (!force_range_index_join(local, err) ||
+        !exec_cmd(local,
                   cte + "DELETE FROM " + tbl + " t USING b WHERE " + range_pred(t, "t." + key) +
                       " AND NOT EXISTS (SELECT 1 FROM " + tmp + " r WHERE " + pk_match + ")",
-                  err, &deleted)) {
+                  err, &deleted) ||
+        !restore_join_planning(local, err)) {
         return commit_or_rollback(local, false, err);
     }
     std::vector<std::string> data_cols;

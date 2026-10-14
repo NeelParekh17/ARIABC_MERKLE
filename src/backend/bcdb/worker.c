@@ -3018,6 +3018,9 @@ opf_retry:
 							/* Force a new lookup transaction XID during replay */
 							replay_xid = GetCurrentTransactionId();
 
+							/* Recovery cut: register the commit xid like every other commit path. */
+							bcdb_note_precommit_xid(tx->tx_id, replay_xid);
+
 							/* Close the lookup transaction cleanly. */
 							finish_xact_command();
 							bcdb_complete_replayed_item(tx, local_payload, false, replay_xid);
@@ -3043,6 +3046,9 @@ opf_retry:
 
 							/* Force a new lookup transaction XID during replay */
 							replay_xid = GetCurrentTransactionId();
+
+							/* Recovery cut: register the commit xid like every other commit path. */
+							bcdb_note_precommit_xid(tx->tx_id, replay_xid);
 
 							/* Close the lookup transaction cleanly. */
 							finish_xact_command();
@@ -3071,6 +3077,7 @@ opf_retry:
 								 (unsigned long long) tx->raft_log_index,
 								 (unsigned) tx->raft_item_ordinal,
 								 (unsigned) replay_xid);
+							bcdb_note_precommit_xid(tx->tx_id, replay_xid);
 							finish_xact_command();
 							BCDB_FLOW_LOG(
 								 "LEDGER_STAGE pid=%d tx=%d log=%llu ord=%u stage=replay_nonterminal_publish xid=%u",
@@ -4074,6 +4081,7 @@ opf_retry:
 							 (unsigned long long) tx->raft_log_index,
 							 (unsigned) tx->raft_item_ordinal);
 					}
+					bcdb_note_precommit_xid(tx->tx_id, GetTopTransactionIdIfAny());
 					finish_xact_command();
 
 					bcdb_complete_nonterminal_failure_item(tx, &stored_failure, false);

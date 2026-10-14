@@ -201,6 +201,72 @@ bcdb_cut_snapshot_export(PG_FUNCTION_ARGS)
 	cut.whenTaken = fresh.whenTaken;
 	cut.lsn = fresh.lsn;
 
+	/*
+	 * Self-check (logged, never changes the snapshot): every writer <=
+	 * boundary whose precommit slot is still owned must be visible, and every
+	 * writer beyond it that committed before the fresh snapshot must be
+	 * hidden.  Clean cuts log at LOG; any violation is raised to WARNING so
+	 * evidence survives the default log_min_messages.
+	 */
+	if (blk != NULL)
+	{
+		int			prefix_invisible = 0;
+		int			prefix_uncommitted = 0;
+		int			post_leak = 0;
+		int			prefix_owned = 0;
+		BCTxID		first_bad = -1;
+		BCTxID		wm = get_last_committed_txid(NULL);
+		BCTxID		pmax = (BCTxID) __atomic_load_n(&blk->precommit_max_txid, __ATOMIC_SEQ_CST);
+
+		for (int i = -(BCDB_RESULT_RING_CAPACITY - 1); i <= BCDB_RESULT_RING_CAPACITY; i++)
+		{
+			BCTxID		id = boundary + i;
+			int			slot = (int) (id % (BCTxID) BCDB_RESULT_RING_CAPACITY);
+			TransactionId xid;
+			bool		in_cut;
+
+			if (id < 0)
+				continue;
+			if (slot < 0)
+				slot += BCDB_RESULT_RING_CAPACITY;
+			if ((BCTxID) __atomic_load_n(&blk->precommit_txid[slot], __ATOMIC_ACQUIRE) != id)
+				continue;
+			xid = __atomic_load_n(&blk->precommit_xid[slot], __ATOMIC_RELAXED);
+			if (!TransactionIdIsNormal(xid))
+				continue;
+			in_cut = TransactionIdPrecedes(xid, cut.xmin) ? false :
+				(!TransactionIdPrecedes(xid, cut.xmax) ||
+				 bsearch(&xid, cut.xip, cut.xcnt, sizeof(TransactionId), xid_cmp) != NULL);
+			if (i <= 0)
+			{
+				prefix_owned++;
+				if (in_cut)
+				{
+					prefix_invisible++;
+					if (first_bad < 0)
+						first_bad = id;
+				}
+				else if (!TransactionIdDidCommit(xid))
+				{
+					prefix_uncommitted++;
+					if (first_bad < 0)
+						first_bad = id;
+				}
+			}
+			else if (!in_cut && TransactionIdDidCommit(xid))
+			{
+				post_leak++;
+				if (first_bad < 0)
+					first_bad = id;
+			}
+		}
+		elog((prefix_invisible || prefix_uncommitted || post_leak) ? WARNING : LOG,
+			 "BCDB_CUT_CHECK boundary=%d wm=%d pmax=%d keeper_xmin=%u fresh_xmin=%u xmax=%u in_progress=%d hidden=%d prefix_owned=%d prefix_invisible=%d prefix_uncommitted=%d post_leak=%d first_bad=%d",
+			 boundary, (int) wm, (int) pmax, keeper_xmin, fresh.xmin, cut.xmax,
+			 fresh.xcnt, nhidden, prefix_owned, prefix_invisible,
+			 prefix_uncommitted, post_leak, (int) first_bad);
+	}
+
 	snapshot_id = ExportSnapshot(&cut);
 
 	elog(LOG,

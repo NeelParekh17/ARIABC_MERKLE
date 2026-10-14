@@ -7815,6 +7815,8 @@ int main(int argc, char** argv) {
             std::cout << "recovery_total_ms=" << recovery_mgr->total_ms() << std::endl;
             std::cout << "recovery_compare_rounds=" << recovery_mgr->compare_rounds() << std::endl;
             std::cout << "recovery_compare_mismatches=" << recovery_mgr->compare_mismatches() << std::endl;
+            std::cout << "recovery_confirmed_mismatches=" << recovery_mgr->confirmed_mismatches() << std::endl;
+            std::cout << "recovery_transient_mismatches=" << recovery_mgr->transient_mismatches() << std::endl;
             std::cout << "recovery_excused_divergences=" << votes.recovery_excused_divergences() << std::endl;
             std::cout << "async_all3_recovery_attributed_count="
                       << async_all3_recovery_attributed_count.load() << std::endl;

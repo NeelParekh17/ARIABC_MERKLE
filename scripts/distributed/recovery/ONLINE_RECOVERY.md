@@ -54,6 +54,9 @@ STATUS                                                  -> OK mode=LIVE|QUARANTI
 `CUT` waits up to `target_timeout_ms` for entry T to commit and up to
 `timeout_ms` for the replica's execution to reach the boundary.
 `allow_rewind=1` lets a replica recover from its own older cut (single-node test only).
+`heap_verify` defaults to 0: after repair, matching partition roots prove the repaired state
+(repair is ordinary SQL, so the Merkle index is maintained at commit). `heap_verify=1` also runs
+the full-heap `merkle_verify` audit, which costs ~5.7 s at 4M rows.
 
 `ariabc_recovery_tool ctl <host:client_port> STATUS` sends them by hand;
 `ariabc_recovery_tool repair|digest` run the repair and digest directly.

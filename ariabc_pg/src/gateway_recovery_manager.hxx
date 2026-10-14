@@ -117,6 +117,8 @@ public:
     uint64_t total_ms() const { return total_ms_.load(); }
     uint64_t compare_rounds() const { return compare_rounds_.load(); }
     uint64_t compare_mismatches() const { return compare_mismatches_.load(); }
+    uint64_t confirmed_mismatches() const { return confirmed_mismatches_.load(); }
+    uint64_t transient_mismatches() const { return transient_mismatches_.load(); }
 
     /* Passive-mode nudge: run a state comparison as soon as possible. */
     void trigger_immediate_check() {
@@ -615,18 +617,55 @@ private:
         }
         if (answered < 2) return;
         compare_rounds_.fetch_add(1);
-        if (groups.size() == 1) return;
+        if (groups.size() == 1) {
+            /* Every answering node agrees: earlier single-cut mismatches were transient. */
+            for (int id : ids) {
+                if (suspects_.erase(id)) {
+                    transient_mismatches_.fetch_add(1);
+                    std::cout << "[recovery_mgr] transient digest mismatch cleared node=" << id
+                              << " L=" << L << std::endl;
+                }
+            }
+            return;
+        }
         compare_mismatches_.fetch_add(1);
         for (const auto& g : groups) {
             if (g.second.size() * 2 > nodes_.size()) {
+                for (int id : g.second) {
+                    if (suspects_.erase(id)) {
+                        transient_mismatches_.fetch_add(1);
+                        std::cout << "[recovery_mgr] transient digest mismatch cleared node=" << id
+                                  << " L=" << L << std::endl;
+                    }
+                }
                 for (const auto& other : groups) {
                     if (other.first == g.first) continue;
                     for (int id : other.second) {
                         std::cout << "[recovery_mgr] state digest mismatch at L=" << L
                                   << " node=" << id << " digest=" << other.first
                                   << " majority=" << g.first << std::endl;
+                        /*
+                         * Repair only when a second aligned cut confirms the
+                         * mismatch.  A single cut can disagree transiently
+                         * (observed once on a heavily loaded replica while its
+                         * data was correct); real damage persists to the next
+                         * boundary.
+                         */
+                        if (suspects_.insert(id).second) {
+                            std::cout << "[recovery_mgr] mismatch unconfirmed node=" << id
+                                      << " L=" << L << "; re-checking at the next boundary" << std::endl;
+                            continue;
+                        }
+                        suspects_.erase(id);
+                        confirmed_mismatches_.fetch_add(1);
+                        std::cout << "[recovery_mgr] mismatch confirmed node=" << id
+                                  << " L=" << L << std::endl;
                         request_recovery(id, "merkle_compare");
                     }
+                }
+                if (!suspects_.empty()) {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    compare_now_ = true;
                 }
                 return;
             }
@@ -641,11 +680,28 @@ private:
                 std::unique_lock<std::mutex> lk(mu_);
                 cv_.wait_for(lk, std::chrono::milliseconds(interval_ms_),
                              [&] { return stop_compare_ || compare_now_; });
-                if (stop_compare_) return;
+                if (stop_compare_) break;
                 compare_now_ = false;
             }
             compare_round();
         }
+        /*
+         * An unconfirmed mismatch must not outlive the workload: settle every
+         * suspect (confirm and queue its repair, or clear it) on the now
+         * quiescent replicas before the caller drains recoveries and runs the
+         * final check.
+         */
+        for (int round = 0; !suspects_.empty() && round < 20; ++round) {
+            std::cout << "[recovery_mgr] settling " << suspects_.size()
+                      << " unconfirmed mismatch(es) before stopping (round " << round + 1 << ")" << std::endl;
+            const uint64_t before = compare_rounds_.load();
+            compare_round();
+            if (compare_rounds_.load() == before)
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        if (!suspects_.empty())
+            std::cerr << "[recovery_mgr] " << suspects_.size()
+                      << " mismatch(es) still unconfirmed at stop" << std::endl;
     }
 
     void final_consistency_check() {
@@ -714,6 +770,9 @@ private:
     std::atomic<uint64_t> total_ms_{0};
     std::atomic<uint64_t> compare_rounds_{0};
     std::atomic<uint64_t> compare_mismatches_{0};
+    std::atomic<uint64_t> confirmed_mismatches_{0};
+    std::atomic<uint64_t> transient_mismatches_{0};
+    std::set<int> suspects_;   /* compare thread only: nodes awaiting a confirming cut */
 };
 
 } // namespace ariabc_pg

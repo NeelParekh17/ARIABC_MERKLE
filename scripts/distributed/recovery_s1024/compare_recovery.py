@@ -127,11 +127,13 @@ def extract(path):
         record["candidate_rows"] = 0
     ctrl = []
     for name in ("server_node1_admin123.log", "server_node2_user4.log", "server_node4_utkarsh.log"):
-        ctrl.extend(kv(line) for line in read_text(path / name).splitlines()
-                    if line.startswith("RECOVERY_CTRL ") and "verb=RECOVER " in line and "candidate_rows=" in line)
+        # Concurrent server writes can prepend another record mid-line.
+        ctrl.extend(kv(line) for line in re.findall(r"RECOVERY_CTRL\s+[^\r\n]*", read_text(path / name))
+                    if "verb=RECOVER " in line and "candidate_rows=" in line)
     if ctrl:
         record["candidate_rows"] = aggregate(ctrl, "candidate_rows")
-    timeline = [kv(line) for line in runner.splitlines() if line.startswith("TPS_TIMELINE ")]
+    timeline = [kv(line) for line in runner.splitlines()
+                if re.match(r"^(?:\[[^\]]+\]\s*)?TPS_TIMELINE ", line)]
     if timeline:
         record["empty_100ms_buckets"] = timeline[-1].get("empty_buckets", "UNKNOWN")
         record["max_completion_gap_ms"] = timeline[-1].get("max_completion_gap_ms", "UNKNOWN")
