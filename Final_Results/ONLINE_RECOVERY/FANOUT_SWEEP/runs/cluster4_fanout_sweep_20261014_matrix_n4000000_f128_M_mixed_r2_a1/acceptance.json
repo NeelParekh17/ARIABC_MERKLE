@@ -1,0 +1,133 @@
+{
+  "dataset": "new",
+  "run_id": "cluster4_fanout_sweep_20261014_matrix_n4000000_f128_M_mixed_r2_a1",
+  "scenario": "M_mixed",
+  "group": "n4000000_f128",
+  "tps_majority_visible": "7783.24",
+  "overhead_vs_baseline_pct": "UNKNOWN",
+  "published_run_id": "UNKNOWN",
+  "tps_change_vs_published_pct": "UNKNOWN",
+  "cut_ms": "UNKNOWN",
+  "repair_ms": "UNKNOWN",
+  "catchup_ms": "UNKNOWN",
+  "total_recovery_ms": "UNKNOWN",
+  "mismatched_partitions": "UNKNOWN",
+  "differing_leaves": "UNKNOWN",
+  "rows_upserted": "UNKNOWN",
+  "rows_deleted": "UNKNOWN",
+  "candidate_rows": "UNKNOWN",
+  "full_copies": "UNKNOWN",
+  "empty_100ms_buckets": "0",
+  "max_completion_gap_ms": "27.61",
+  "phase8_merkle_pass": "FAIL",
+  "phase8_root": "2a6f6a6505faffa539b58ca70a86dfa0c2e6c1fc49f16e47c01819ca20839958",
+  "all3_audit_valid": "yes",
+  "divergence_count": "0",
+  "permanent_failures": "0",
+  "recovery_triggered_count": "0",
+  "recovery_success_count": "0",
+  "recovery_failure_count": "0",
+  "event_count": 0,
+  "event_failures": 0,
+  "event_live": "UNKNOWN",
+  "evidence_status": "INCOMPLETE_OR_FAIL",
+  "warnings": "nonzero runner exit code; fault scenario has no recovery event",
+  "rows": 4000000,
+  "fanout": 128,
+  "stage": "matrix",
+  "rep": 2,
+  "attempt": 1,
+  "quorum_completions": "160000",
+  "raw_divergence_count": "0",
+  "gateway_exit_code": "0",
+  "final_all_three": {
+    "1_admin123": {
+      "raw": [
+        "4000001",
+        "2a6f6a6505faffa539b58ca70a86dfa0c2e6c1fc49f16e47c01819ca20839958",
+        "t",
+        "793aebca8f9caec09c91dcf99bc4362f98ffc77a544e76f40675223038e558eb"
+      ]
+    },
+    "2_user4": {
+      "raw": [
+        "4000001",
+        "2a6f6a6505faffa539b58ca70a86dfa0c2e6c1fc49f16e47c01819ca20839958",
+        "t",
+        "793aebca8f9caec09c91dcf99bc4362f98ffc77a544e76f40675223038e558eb"
+      ]
+    },
+    "4_utkarsh": {
+      "raw": [
+        "4000002",
+        "05d9c4701720b9aa6cf8015e34216fceda64fb91bc54eea3cf66018210f3d20a",
+        "t",
+        "59c7c409d49cec6bb48797ffcc34b7520b1bdbaaf7899bb0ab2fe0f2d4933d06"
+      ]
+    }
+  },
+  "events": [],
+  "health": {
+    "10.129.148.247": {
+      "samples": 9,
+      "min_mem_available_kb": 6620928,
+      "min_mem_free_kb": 190696,
+      "swap_io_bytes": 0,
+      "max_lag_txids": 2522,
+      "max_load1": 2.4501953125
+    },
+    "10.129.148.246": {
+      "samples": 9,
+      "min_mem_available_kb": 4483820,
+      "min_mem_free_kb": 245972,
+      "swap_io_bytes": 5406720,
+      "max_lag_txids": 2459,
+      "max_load1": 1.68701171875
+    },
+    "10.129.148.248": {
+      "samples": 9,
+      "min_mem_available_kb": 5581772,
+      "min_mem_free_kb": 172864,
+      "swap_io_bytes": 0,
+      "max_lag_txids": 1915,
+      "max_load1": 1.18017578125
+    }
+  },
+  "det_counters": {
+    "dt_opf": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    },
+    "dt_opf_stale_error": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    },
+    "dt_rel_read_tags": {
+      "samples": 0,
+      "sum": null,
+      "max": null
+    }
+  },
+  "failures": [
+    "runner/collection exit",
+    "final all-three audit",
+    "4_utkarsh final count/verify",
+    "successful live recovery event missing/wrong target",
+    "missing metric cut_ms",
+    "missing metric repair_ms",
+    "missing metric catchup_ms",
+    "missing metric total_recovery_ms",
+    "missing metric mismatched_partitions",
+    "missing metric differing_leaves",
+    "missing metric rows_upserted",
+    "missing metric rows_deleted",
+    "missing metric full_copies",
+    "missing fetched rows",
+    "expected exactly one controlled recovery event",
+    "full-table copy fallback"
+  ],
+  "noise": [],
+  "status": "REJECTED"
+}

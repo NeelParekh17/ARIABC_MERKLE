@@ -1,0 +1,128 @@
+[
+  {
+    "scenario": "A",
+    "mutation": "valid",
+    "expected": "ACCEPTED",
+    "actual": "ACCEPTED"
+  },
+  {
+    "scenario": "A",
+    "mutation": "missing_vote",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "A",
+    "mutation": "wrong_fanout",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "A",
+    "mutation": "wrong_heap",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "A",
+    "mutation": "bad_merkle",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "A",
+    "mutation": "missing_health",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "A",
+    "mutation": "failed_gateway",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "A",
+    "mutation": "wrong_head",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "A",
+    "mutation": "missing_profile",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "valid",
+    "expected": "ACCEPTED",
+    "actual": "ACCEPTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "missing_vote",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "wrong_fanout",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "wrong_heap",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "bad_merkle",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "missing_health",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "failed_gateway",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "wrong_head",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "missing_profile",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "interleaved_recovery",
+    "expected": "ACCEPTED",
+    "actual": "ACCEPTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "missing_fetched_rows",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  },
+  {
+    "scenario": "M_passive",
+    "mutation": "interleaved_without_fetched_rows",
+    "expected": "REJECTED",
+    "actual": "REJECTED"
+  }
+]

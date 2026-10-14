@@ -1,0 +1,306 @@
+[
+  {
+    "run_id": "cluster4_fanout_sweep_20261014_smoke_n12000_f16_A_r1_a4",
+    "rows": 12000,
+    "fanout": 16,
+    "scenario": "A",
+    "shapes": {
+      "10.129.148.247": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 106496.0
+      },
+      "10.129.148.246": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 106496.0
+      },
+      "10.129.148.248": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 106496.0
+      }
+    },
+    "final_row_count": "12001",
+    "final_root": "6efcf9335e72c219cb3f8bfd3ed273d0a6f92181c0bd2f3e7e14b11c0aecd316",
+    "final_digest": "9a15b0794b52e087376bc7190d48cc58"
+  },
+  {
+    "run_id": "cluster4_fanout_sweep_20261014_smoke_n12000_f16_M_passive_r1_a2",
+    "rows": 12000,
+    "fanout": 16,
+    "scenario": "M_passive",
+    "shapes": {
+      "10.129.148.247": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 5480448.0
+      },
+      "10.129.148.246": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 7045120.0
+      },
+      "10.129.148.248": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 2965504.0
+      }
+    },
+    "final_row_count": "12001",
+    "final_root": "6efcf9335e72c219cb3f8bfd3ed273d0a6f92181c0bd2f3e7e14b11c0aecd316",
+    "final_digest": "9a15b0794b52e087376bc7190d48cc58"
+  },
+  {
+    "run_id": "cluster4_fanout_sweep_20261014_smoke_n12000_f256_A_r1_a1",
+    "rows": 12000,
+    "fanout": 256,
+    "scenario": "A",
+    "shapes": {
+      "10.129.148.247": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 106496.0
+      },
+      "10.129.148.246": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 106496.0
+      },
+      "10.129.148.248": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 106496.0
+      }
+    },
+    "final_row_count": "12001",
+    "final_root": "6efcf9335e72c219cb3f8bfd3ed273d0a6f92181c0bd2f3e7e14b11c0aecd316",
+    "final_digest": "9a15b0794b52e087376bc7190d48cc58"
+  },
+  {
+    "run_id": "cluster4_fanout_sweep_20261014_smoke_n12000_f256_M_passive_r1_a1",
+    "rows": 12000,
+    "fanout": 256,
+    "scenario": "M_passive",
+    "shapes": {
+      "10.129.148.247": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 5390336.0
+      },
+      "10.129.148.246": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 7036928.0
+      },
+      "10.129.148.248": {
+        "nodes": 200.0,
+        "leaves": 200.0,
+        "internal_nodes": 0.0,
+        "max_prefix_bits": 0.0,
+        "avg_nonempty_occupancy": 60.005,
+        "max_occupancy": 80.0,
+        "node_storage_bytes": 2998272.0
+      }
+    },
+    "final_row_count": "12001",
+    "final_root": "6efcf9335e72c219cb3f8bfd3ed273d0a6f92181c0bd2f3e7e14b11c0aecd316",
+    "final_digest": "9a15b0794b52e087376bc7190d48cc58"
+  },
+  {
+    "run_id": "cluster4_fanout_sweep_20261014_smoke_n4000000_f16_A_r1_a3",
+    "rows": 4000000,
+    "fanout": 16,
+    "scenario": "A",
+    "shapes": {
+      "10.129.148.247": {
+        "nodes": 54600.0,
+        "leaves": 51200.0,
+        "internal_nodes": 3400.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 9830400.0
+      },
+      "10.129.148.246": {
+        "nodes": 54600.0,
+        "leaves": 51200.0,
+        "internal_nodes": 3400.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 9830400.0
+      },
+      "10.129.148.248": {
+        "nodes": 54600.0,
+        "leaves": 51200.0,
+        "internal_nodes": 3400.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 9830400.0
+      }
+    },
+    "final_row_count": "4000001",
+    "final_root": "2a6f6a6505faffa539b58ca70a86dfa0c2e6c1fc49f16e47c01819ca20839958",
+    "final_digest": "793aebca8f9caec09c91dcf99bc4362f98ffc77a544e76f40675223038e558eb"
+  },
+  {
+    "run_id": "cluster4_fanout_sweep_20261014_smoke_n4000000_f16_M_passive_r1_a1",
+    "rows": 4000000,
+    "fanout": 16,
+    "scenario": "M_passive",
+    "shapes": {
+      "10.129.148.247": {
+        "nodes": 54600.0,
+        "leaves": 51200.0,
+        "internal_nodes": 3400.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 20226048.0
+      },
+      "10.129.148.246": {
+        "nodes": 54600.0,
+        "leaves": 51200.0,
+        "internal_nodes": 3400.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 27230208.0
+      },
+      "10.129.148.248": {
+        "nodes": 54600.0,
+        "leaves": 51200.0,
+        "internal_nodes": 3400.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 17342464.0
+      }
+    },
+    "final_row_count": "4000001",
+    "final_root": "2a6f6a6505faffa539b58ca70a86dfa0c2e6c1fc49f16e47c01819ca20839958",
+    "final_digest": "793aebca8f9caec09c91dcf99bc4362f98ffc77a544e76f40675223038e558eb"
+  },
+  {
+    "run_id": "cluster4_fanout_sweep_20261014_smoke_n4000000_f256_A_r1_a1",
+    "rows": 4000000,
+    "fanout": 256,
+    "scenario": "A",
+    "shapes": {
+      "10.129.148.247": {
+        "nodes": 51400.0,
+        "leaves": 51200.0,
+        "internal_nodes": 200.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 9379840.0
+      },
+      "10.129.148.246": {
+        "nodes": 51400.0,
+        "leaves": 51200.0,
+        "internal_nodes": 200.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 9379840.0
+      },
+      "10.129.148.248": {
+        "nodes": 51400.0,
+        "leaves": 51200.0,
+        "internal_nodes": 200.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 9379840.0
+      }
+    },
+    "final_row_count": "4000001",
+    "final_root": "2a6f6a6505faffa539b58ca70a86dfa0c2e6c1fc49f16e47c01819ca20839958",
+    "final_digest": "793aebca8f9caec09c91dcf99bc4362f98ffc77a544e76f40675223038e558eb"
+  },
+  {
+    "run_id": "cluster4_fanout_sweep_20261014_smoke_n4000000_f256_M_passive_r1_a1",
+    "rows": 4000000,
+    "fanout": 256,
+    "scenario": "M_passive",
+    "shapes": {
+      "10.129.148.247": {
+        "nodes": 51400.0,
+        "leaves": 51200.0,
+        "internal_nodes": 200.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 16056320.0
+      },
+      "10.129.148.246": {
+        "nodes": 51400.0,
+        "leaves": 51200.0,
+        "internal_nodes": 200.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 19685376.0
+      },
+      "10.129.148.248": {
+        "nodes": 51400.0,
+        "leaves": 51200.0,
+        "internal_nodes": 200.0,
+        "max_prefix_bits": 8.0,
+        "avg_nonempty_occupancy": 78.12501953125,
+        "max_occupancy": 120.0,
+        "node_storage_bytes": 14180352.0
+      }
+    },
+    "final_row_count": "4000001",
+    "final_root": "2a6f6a6505faffa539b58ca70a86dfa0c2e6c1fc49f16e47c01819ca20839958",
+    "final_digest": "793aebca8f9caec09c91dcf99bc4362f98ffc77a544e76f40675223038e558eb"
+  }
+]

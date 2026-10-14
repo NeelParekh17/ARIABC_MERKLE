@@ -1,0 +1,19 @@
+ M .gitignore
+ M ARCHITECTURE_EXPLORER.html
+ M DETERMINISM_EXPLORER.html
+ M DETERMINISM_GUIDE.md
+ M docs/determinism/README.md
+ M docs/determinism/model.js
+ M docs/determinism/source_manifest.json
+ M docs/determinism/style.css
+ M docs/determinism/template.html
+ M docs/determinism/view.js
+ M scripts/build_determinism_evidence.py
+ M scripts/check_determinism_explorer.py
+?? docs/explorers/
+?? scripts/build_architecture_explorer.py
+?? scripts/check_architecture_explorer.py
+?? scripts/distributed/recovery_fanout/
+?? scripts/explorer_common.py
+?? scripts/explorer_webdriver.py
+?? scripts/open_architecture_explorer.py

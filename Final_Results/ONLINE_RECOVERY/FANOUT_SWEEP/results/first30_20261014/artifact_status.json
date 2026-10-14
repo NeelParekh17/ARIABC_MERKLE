@@ -1,0 +1,7 @@
+{
+  "matrix_complete": true,
+  "figures_complete": true,
+  "time": "2026-10-14T06:06:44.171434+00:00",
+  "figure_error": null,
+  "figure_note": "python3-venv unavailable on .247 (no sudo); matplotlib 3.10.7 installed with pip --target into analysis_pylib and analyze.py --plot run with PYTHONPATH"
+}
