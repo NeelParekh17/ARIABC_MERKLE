@@ -1037,8 +1037,9 @@ rm -f {work}/.merkle_index_dropped
         # Since 00fae31 the backend resolves ariabc_internal.merkle_node_<table>;
         # when absent it silently creates an EMPTY tree (older baselines used
         # merkle_node_<index oid>). Refuse to measure against an empty tree.
-        node_pages = sql(args, "SELECT coalesce((SELECT relpages FROM pg_class WHERE oid = "
-                               "to_regclass('ariabc_internal.merkle_node_usertable')), -1);")
+        # Physical size, not relpages: an unanalyzed but populated table has relpages=0.
+        node_pages = sql(args, "SELECT coalesce(pg_relation_size(to_regclass("
+                               "'ariabc_internal.merkle_node_usertable')) / 8192, -1);")
         if int(node_pages) <= 0:
             raise RuntimeError("ariabc_internal.merkle_node_usertable is missing or empty; "
                                "use a baseline migrated to table-named Merkle node storage")
