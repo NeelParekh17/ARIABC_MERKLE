@@ -12,6 +12,7 @@ SELECT merkle_create_lookup_index('usertable');
 -- Historical comparison:
 -- SELECT merkle_create_lookup_index('usertable', 'btree');
 SELECT merkle_lsm_config('usertable_merkle_lookup_idx');
+SELECT merkle_lsm_stats('usertable_merkle_lookup_idx');  -- cheap: merge counters, phase, sizes
 SELECT * FROM merkle_lsm_components('usertable_merkle_lookup_idx');
 SELECT merkle_lsm_flush('usertable_merkle_lookup_idx');
 ```

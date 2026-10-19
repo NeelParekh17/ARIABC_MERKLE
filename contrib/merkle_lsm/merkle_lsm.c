@@ -23,6 +23,7 @@
 #include "catalog/pg_opclass.h"
 #include "commands/defrem.h"
 #include "funcapi.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "utils/acl.h"
@@ -52,6 +53,7 @@ PG_FUNCTION_INFO_V1(merkle_lsm_meta_handler);
 PG_FUNCTION_INFO_V1(merkle_lsm_components);
 PG_FUNCTION_INFO_V1(merkle_lsm_flush);
 PG_FUNCTION_INFO_V1(merkle_lsm_config);
+PG_FUNCTION_INFO_V1(merkle_lsm_stats);
 
 static relopt_kind ml_relopt_kind;
 static Oid ml_cached_base;
@@ -682,6 +684,50 @@ merkle_lsm_config(PG_FUNCTION_ARGS)
 	json = psprintf("{\"levels\":%d,\"top_index_size\":%d,\"size_ratio\":%d}",
 					data.levels, data.top_size, data.size_ratio);
 	PG_RETURN_DATUM(DirectFunctionCall1(json_in, CStringGetDatum(json)));
+}
+
+/* Cheap enough to poll during a benchmark: one metadata page and smgr sizes,
+ * no component scans (merkle_lsm_components counts entries by scanning). */
+Datum
+merkle_lsm_stats(PG_FUNCTION_ARGS)
+{
+	Relation	base = ml_checked_base(PG_GETARG_OID(0));
+	Relation	meta = ml_open_meta(base, AccessShareLock, false);
+	MlMeta		data;
+	StringInfoData buf;
+	int			level;
+	int			slot;
+
+	ml_read_meta(meta, &data);
+	index_close(meta, AccessShareLock);
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "{\"phase\":\"%s\",\"merge_level\":%d,\"epoch\":" UINT64_FORMAT
+					 ",\"flush\":%s,\"last_merge_us\":" INT64_FORMAT ",\"merges\":[",
+					 data.phase == MLSM_COPY ? "copy" : (data.phase == MLSM_COPIED ? "copied" : "idle"),
+					 data.merge_level, data.epoch, data.flush ? "true" : "false", data.last_us);
+	for (level = 0; level < data.levels - 1; level++)
+		appendStringInfo(&buf, "%s" UINT64_FORMAT, level ? "," : "", data.merges[level]);
+	appendStringInfoString(&buf, "],\"active\":[");
+	for (level = 0; level < data.levels - 1; level++)
+		appendStringInfo(&buf, "%s%d", level ? "," : "", data.active[level]);
+	appendStringInfoString(&buf, "],\"bytes\":[");
+	for (level = 0; level < data.levels - 1; level++)
+	{
+		appendStringInfo(&buf, "%s[", level ? "," : "");
+		for (slot = 0; slot < 2; slot++)
+		{
+			Relation	part = index_open(data.component[level][slot], AccessShareLock);
+
+			appendStringInfo(&buf, "%s" INT64_FORMAT, slot ? "," : "",
+							 (int64) RelationGetNumberOfBlocks(part) * BLCKSZ);
+			index_close(part, AccessShareLock);
+		}
+		appendStringInfoChar(&buf, ']');
+	}
+	appendStringInfo(&buf, "],\"base_bytes\":" INT64_FORMAT "}",
+					 (int64) RelationGetNumberOfBlocks(base) * BLCKSZ);
+	index_close(base, AccessShareLock);
+	PG_RETURN_DATUM(DirectFunctionCall1(json_in, CStringGetDatum(buf.data)));
 }
 
 Datum

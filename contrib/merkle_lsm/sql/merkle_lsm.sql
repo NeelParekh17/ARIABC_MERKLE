@@ -13,6 +13,9 @@ VACUUM ml_test;
 SELECT count(*), sum(k) FROM ml_test WHERE k>0;
 SELECT merkle_lsm_config('ml_test_idx');
 SELECT merkle_lsm_flush('ml_test_idx');
+SELECT s->>'phase' AS phase, s->>'flush' AS flush,
+ json_array_length(s->'merges') AS upper_levels, s->>'bytes' AS upper_bytes
+ FROM merkle_lsm_stats('ml_test_idx') s;
 SELECT count(*), sum(k) FROM ml_test WHERE k>0;
 SELECT level, count(*) AS components, sum(entries) AS physical_entries
  FROM merkle_lsm_components('ml_test_idx') GROUP BY level ORDER BY level;
