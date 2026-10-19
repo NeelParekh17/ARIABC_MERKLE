@@ -1,0 +1,20 @@
+{
+  "pgdata_base_v2_ff90": {
+    "db_system_id": "7695110858662784567",
+    "cluster_state": "shut down",
+    "checkpoint_lsn": "5/3F3BEE70",
+    "pg_control_sha256": "c8b6ad9e7cdbbea4fc9603066f733bbfab0b8b2a71eb355b05b397b2ccea73f3",
+    "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+    "file_count": 1146,
+    "total_bytes": 35866524242
+  },
+  "pgdata_base_v2_ff90_plain": {
+    "db_system_id": "7695110858662784567",
+    "cluster_state": "shut down",
+    "checkpoint_lsn": "5/3F40C6C8",
+    "pg_control_sha256": "006f129e73306522f6ae4b18084755caa06370294d7c2da915cb3e2fc5479b5a",
+    "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+    "file_count": 1141,
+    "total_bytes": 32712269772
+  }
+}

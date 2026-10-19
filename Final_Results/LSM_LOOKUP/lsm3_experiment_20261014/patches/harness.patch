@@ -1,0 +1,777 @@
+diff --git a/scripts/distributed/benchmark_contract.py b/scripts/distributed/benchmark_contract.py
+index 16fc1181..59656927 100644
+--- a/scripts/distributed/benchmark_contract.py
++++ b/scripts/distributed/benchmark_contract.py
+@@ -31,7 +31,8 @@ def balanced_cases(configurations, modes, trials, seed=42):
+ def source_hashes(repo):
+     paths = [repo / 'scripts/generate_ycsb_workloads.py',
+              repo / 'scripts/restore_usertable_small.sql',
+-             repo / 'scripts/distributed/sql/raft_apply_ledger_schema.sql']
++             repo / 'scripts/distributed/sql/raft_apply_ledger_schema.sql',
++             repo / 'scripts/distributed/oom_v2/paper_noise.py']
+     paths += sorted((repo / 'scripts/distributed').glob('*.py'))
+     paths += [repo / 'scripts/distributed/run_4node_raft_cluster.sh']
+     return {str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
+diff --git a/scripts/distributed/benchmark_telemetry.py b/scripts/distributed/benchmark_telemetry.py
+index d0549b87..a948fe93 100644
+--- a/scripts/distributed/benchmark_telemetry.py
++++ b/scripts/distributed/benchmark_telemetry.py
+@@ -1,6 +1,7 @@
+ """Read-only 1 Hz host and PostgreSQL wait telemetry; JSONL, monotonic timestamps."""
+ import argparse
+ import json
++import platform
+ from pathlib import Path
+ import signal
+ import subprocess
+@@ -8,7 +9,10 @@ import time
+ 
+ 
+ def snapshot(psql=None, port=5432):
+-    result = dict(monotonic_ns=time.monotonic_ns(), unix_ns=time.time_ns())
++    result = dict(monotonic_ns=time.monotonic_ns(), unix_ns=time.time_ns(),
++                  kernel=platform.release(),
++                  boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
++                  clocksource=Path("/sys/devices/system/clocksource/clocksource0/current_clocksource").read_text().strip())
+     for name in ('meminfo', 'vmstat', 'diskstats', 'stat', 'loadavg', 'pressure/io', 'pressure/memory', 'pressure/cpu'):
+         p = Path('/proc') / name
+         result[name] = p.read_text() if p.exists() else None
+@@ -16,7 +20,7 @@ def snapshot(psql=None, port=5432):
+     result['processes'] = subprocess.run(['ps', '-eo', 'pid,ppid,stat,pcpu,pmem,comm', '--sort=-pcpu'], capture_output=True, text=True, timeout=3).stdout
+     if psql:
+         sql = "SELECT coalesce(json_agg(t),'[]') FROM (SELECT backend_type,state,wait_event_type,wait_event,count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() GROUP BY 1,2,3,4) t;"
+-        r = subprocess.run([psql, '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-p', str(port), '-U', 'postgres', '-d', 'postgres', '-c', sql], capture_output=True, text=True, timeout=5)
++        r = subprocess.run([psql, '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1', '-p', str(port), '-U', 'postgres', '-d', 'postgres', '-c', sql], capture_output=True, text=True, timeout=5)
+         result['pg_waits'] = dict(returncode=r.returncode, stdout=r.stdout, stderr=r.stderr)
+     return result
+ 
+diff --git a/scripts/distributed/run_oom_100m_benchmark.py b/scripts/distributed/run_oom_100m_benchmark.py
+index a3f69fcb..64e7b9ab 100755
+--- a/scripts/distributed/run_oom_100m_benchmark.py
++++ b/scripts/distributed/run_oom_100m_benchmark.py
+@@ -66,9 +66,22 @@ CANONICAL_BCDB_SETTINGS = {
+ }
+ 
+ 
++LSM_DATA = "/home/neel/ariabc_data/lsm_lookup_20261014"
++LSM_WORKING = {v: LSM_DATA + "/pgdata_" + v for v in ("merkle", "lsm", "plain")}
++
++
++def baseline_path(args, name=None):
++    assert args.remote_dir == LSM_DATA
++    return args.remote_dir + "/" + (name or args.base_dir_name)
++
++
++def is_merkle(mode):
++    return mode in ("merkle_btree", "merkle_lsm", "bcdb_merkle")
++
++
+ def pgdata(args):
+     """Working data directory of the current case."""
+-    return getattr(args, "_pgdata", f"{args.remote_dir}/pgdata")
++    return getattr(args, "_pgdata", LSM_WORKING["merkle"])
+ 
+ 
+ PG_ISOLATION = {"pg": "serializable", "pg_rc": "read committed"}
+@@ -76,7 +89,7 @@ PG_ISOLATION = {"pg": "serializable", "pg_rc": "read committed"}
+ 
+ def base_mode(mode):
+     """pg_rc is plain PostgreSQL at READ COMMITTED; everything else treats it as pg."""
+-    return "pg" if mode in PG_ISOLATION else mode
++    return "bcdb_merkle" if is_merkle(mode) else "bcdb_det" if mode == "det" else "pg" if mode in PG_ISOLATION else mode
+ 
+ 
+ def isolation_for(mode):
+@@ -86,23 +99,31 @@ def isolation_for(mode):
+ 
+ 
+ def variant(mode):
+-    return "merkle" if mode == "bcdb_merkle" else "plain"
++    return "lsm" if mode == "merkle_lsm" else "merkle" if is_merkle(mode) else "plain"
+ 
+ 
+ def base_dir_name_for(args, mode):
+     # pg/det run without the Merkle indexes. In delta mode they restore from a
+     # baseline that already lacks them, so no mode rewrites ~6GB of index files.
+-    if args.reset_mode == "delta" and variant(mode) == "plain":
+-        return args.base_dir_name + "_plain"
++    if variant(mode) in ("plain", "lsm"):
++        return args.base_dir_name + "_" + variant(mode)
+     return args.base_dir_name
+ 
+ 
+ def work_dir_for(args, mode):
++    if args.single_working_copy:
++        return LSM_DATA + "/pgdata_shared"
+     if args.reset_mode == "delta":
+-        return f"{args.remote_dir}/pgdata_{variant(mode)}"
++        return LSM_WORKING[variant(mode)]
+     return f"{args.remote_dir}/pgdata"
+ 
+ 
++def lsm_cases(args):
++    points = [(wl, skew, workers) for wl, skew in args.combos for workers in args.workers]
++    for wl, skew, workers, mode, trial in balanced_cases(points, args.modes, args.trials, args.seed):
++        yield wl, skew, mode, workers, trial
++
++
+ def manifest_path_for(args, base_name):
+     name = f".ariabc_golden_manifest_{base_name}.json" if base_name != "pgdata_base" else ".ariabc_golden_manifest.json"
+     return f"{args.remote_dir}/{name}"
+@@ -140,7 +161,7 @@ def run_remote(host, user, cmd, timeout=600, check=True, retry_on_drop=False):
+ 
+ 
+ def db_shell(args):
+-    return f"export LD_LIBRARY_PATH={args.install_dir}/lib:/home/neel/Desktop/rdkafka_local/lib:${{LD_LIBRARY_PATH:-}}\n"
++    return f"export TMPDIR=/home/neel/claude_checks/lsm_lookup_20261014/scratch\nexport LD_LIBRARY_PATH={args.install_dir}/lib:/home/neel/Desktop/rdkafka_local/lib:${{LD_LIBRARY_PATH:-}}\n"
+ 
+ 
+ def sudo_command(command):
+@@ -189,7 +210,7 @@ def sql(args, statement, timeout=600):
+ 
+ 
+ def check_remote_db_exists(args):
+-    base_dir = f"{args.remote_dir}/{getattr(args, 'base_dir_name', 'pgdata_base')}"
++    base_dir = baseline_path(args)
+     result = run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+ if [ -f {base_dir}/PG_VERSION ]; then
+     {args.install_dir}/bin/pg_controldata {base_dir}
+@@ -208,6 +229,7 @@ fi
+ 
+ 
+ def generate_remote_100m_database(args):
++    raise RuntimeError("LSM must reuse its verified baseline; generation disabled")
+     """
+     Creates the requested keyspace with 16 streaming COPY workers.
+     """
+@@ -218,7 +240,7 @@ def generate_remote_100m_database(args):
+ 
+     start_total = time.time()
+     base_name = getattr(args, "base_dir_name", "pgdata_base")
+-    base_dir = f"{args.remote_dir}/{base_name}"
++    base_dir = baseline_path(args, base_name)
+ 
+     schema = (REPO_ROOT / "scripts/distributed/sql/raft_apply_ledger_schema.sql").read_text()
+     run_remote(args.remote_host, args.remote_user,
+@@ -448,7 +470,7 @@ command -v timeout
+ test -x {args.install_dir}/bin/postgres
+ test -x {args.cluster_dir}/ariabc_pg/build/bin/ariabc_pg_server
+ mkdir -p {args.remote_dir}
+-for port in {args.db_port} {args.server_port} 9000; do
++for port in {args.db_port} {args.server_port} {args.raft_port}; do
+     if fuser "$port"/tcp >/dev/null 2>&1; then
+         echo "Port $port is occupied; stop the existing benchmark first" >&2
+         exit 1
+@@ -463,10 +485,12 @@ findmnt -n -o MAJ:MIN -T {args.remote_dir}
+ df -B1 {args.remote_dir}
+ {args.install_dir}/bin/postgres --version
+ sha256sum {args.install_dir}/bin/postgres {args.cluster_dir}/ariabc_pg/build/bin/ariabc_pg_server
++sha256sum {args.install_dir}/lib/postgresql/lsm3.so | sed 's/^/LSM3_MODULE_SHA256 /'
+ """, timeout=30)
+     if args.gateway_host not in ("localhost", "127.0.0.1"):
+         gw = run_remote(args.gateway_host, args.gateway_user,
+                         f"test -x {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway\n"
++                        f"test \"$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)\" = tsc\n"
+                         f"command -v timeout\nsha256sum {args.gateway_repo}/ariabc_pg/build/bin/ariabc_pg_gateway",
+                         timeout=30).stdout
+     else:
+@@ -500,10 +524,11 @@ fi
+ 
+ def stop_postgres(args):
+     # Any working directory may hold the running instance (delta mode keeps one per variant).
+-    dirs = [f"{args.remote_dir}/{name}" for name in ("pgdata", "pgdata_merkle", "pgdata_plain")]
++    dirs = [work_dir_for(args, mode) for mode in ("merkle_btree", "merkle_lsm", "det")]
+     return run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+ for d in {' '.join(dirs)}; do
+     if [ -f "$d/postmaster.pid" ] && {args.install_dir}/bin/pg_ctl -D "$d" status >/dev/null 2>&1; then
++        test "$(sed -n '4p' "$d/postmaster.pid")" = "{args.db_port}"
+         {args.install_dir}/bin/pg_ctl -D "$d" -w -t 120 stop -m fast
+     fi
+ done
+@@ -511,7 +536,12 @@ done
+ 
+ 
+ def start_postgres(args):
++    assert pgdata(args) in (*LSM_WORKING.values(), LSM_DATA + "/pgdata_shared")
+     return run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
++date -Is >> {args.remote_dir}/free_before_pg_start.log
++free -g | tee -a {args.remote_dir}/free_before_pg_start.log
++test -z "$(find {pgdata(args)}/base -type f -links +1 -print -quit)"
++test "$(df -B1 --output=avail {args.remote_dir} | tail -1)" -ge 42949672960
+ if ! {args.install_dir}/bin/pg_ctl -D {pgdata(args)} status >/dev/null 2>&1; then
+     {args.install_dir}/bin/pg_ctl -D {pgdata(args)} -l {args.remote_dir}/postgres.log -w -t 120 start
+ fi
+@@ -556,7 +586,7 @@ def prepare_ledger_schema(args):
+ 
+ def get_remote_baseline_identity(args, base_name=None):
+     """Inspect active baseline directory to obtain fresh control, checksum and sizing metadata."""
+-    base_dir = f"{args.remote_dir}/{base_name or getattr(args, 'base_dir_name', 'pgdata_base')}"
++    base_dir = baseline_path(args, base_name)
+     cmd = db_shell(args) + f"""
+ {args.install_dir}/bin/pg_controldata {base_dir} | grep -E 'Database system identifier|Latest checkpoint location|Database cluster state' | sed 's/.*: *//'
+ sha256sum {base_dir}/global/pg_control {base_dir}/PG_VERSION
+@@ -585,7 +615,7 @@ def validate_golden_baseline(args):
+     fidelity before postmaster starts, followed by exact O(1) relation size and bound checks.
+     """
+     base_name = getattr(args, "base_dir_name", "pgdata_base")
+-    base_dir = f"{args.remote_dir}/{base_name}"
++    base_dir = baseline_path(args, base_name)
+     manifest_name = f".ariabc_golden_manifest_{base_name}.json" if base_name != "pgdata_base" else ".ariabc_golden_manifest.json"
+     manifest_path = f"{args.remote_dir}/{manifest_name}"
+     meta = get_remote_baseline_identity(args)
+@@ -615,6 +645,8 @@ def validate_golden_baseline(args):
+             return manifest
+         print(f"  Golden manifest is missing, stale, or baseline changed; re-validating golden baseline...")
+ 
++    raise RuntimeError("LSM baseline manifest missing or changed; rerun explicit baseline verification")
++
+     # Start PG against a temporary check copy to run the full verification scan.
+     check_dir = f"{args.remote_dir}/pgdata_golden_check"
+     stop_server(args)
+@@ -694,89 +726,20 @@ rm -rf {check_dir}
+ 
+ 
+ def ensure_plain_baseline(args, golden):
+-    """Derive the pg/det baseline: the golden copy with both Merkle indexes dropped.
+-
+-    This is exactly the state the per-case cp reset produced after its DROP
+-    INDEX, made once and stopped cleanly so delta restores never rewrite the
+-    Merkle index files. It is rebuilt whenever the golden baseline changes.
+-    """
++    """Reuse the published plain baseline READ ONLY; never derive/rebuild it."""
+     name = args.base_dir_name + "_plain"
+-    plain = f"{args.remote_dir}/{name}"
+-    golden_dir = f"{args.remote_dir}/{args.base_dir_name}"
+     path = manifest_path_for(args, name)
+-    exists = run_remote(args.remote_host, args.remote_user,
+-                        f"test -f {plain}/PG_VERSION && echo YES || echo NO", timeout=15).stdout.strip()
+-    if exists == "YES":
+-        raw = run_remote(args.remote_host, args.remote_user,
+-                         f"cat {path} 2>/dev/null || echo MISSING", timeout=15).stdout.strip()
+-        meta = get_remote_baseline_identity(args, name)
+-        try:
+-            manifest = json.loads(raw)
+-        except ValueError:
+-            manifest = {}
+-        if (manifest.get("derived_from_checkpoint_lsn") == golden["checkpoint_lsn"] and
+-                manifest.get("derived_from_pg_control_sha256") == golden["pg_control_sha256"] and
+-                meta["cluster_state"] == "shut down" and
+-                all(manifest.get(k) == meta[k] for k in ("db_system_id", "checkpoint_lsn",
+-                                                         "pg_control_sha256", "file_count", "total_bytes"))):
+-            print(f"  Plain baseline verified: {manifest['file_count']} files, "
+-                  f"{manifest['total_bytes'] / 2**30:.2f} GiB", flush=True)
+-            return manifest
+-        print("  Plain baseline is stale or unverified; rebuilding it from the golden baseline", flush=True)
+-
+-    stop_server(args)
+-    stop_postgres(args)
+-    tmp = plain + ".tmp"
+-    conf = (f"port = {args.db_port}\nlisten_addresses = '*'\nshared_buffers = '128MB'\n"
+-            "enable_merkle_index = off\nbcdb_worker_count = 1\nbcdb_ledger_trace = off\n"
+-            "autovacuum = off\nmax_parallel_maintenance_workers = 0\n")
+-    run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+-rm -rf -- {plain} {tmp}
+-cp -a --reflink=never {golden_dir} {tmp}
+-printf %s {shlex.quote(conf)} > {tmp}/postgresql.auto.conf
+-{args.install_dir}/bin/pg_ctl -D {tmp} -l {args.remote_dir}/plain_baseline.log -w -t 120 start
+-""", timeout=args.reset_timeout)
+-    saved = getattr(args, "_pgdata", None)
+-    args._pgdata = tmp
+-    try:
+-        prepare_ledger_schema(args)
+-        sql(args, "DROP INDEX usertable_merkle_idx; DROP INDEX usertable_merkle_lookup_idx;")
+-        stats = sql(args, "SELECT pg_relation_size('usertable'), pg_relation_size('usertable_pkey1'), "
+-                          "relpages FROM pg_class WHERE relname='usertable';")
+-        if stats != f"{golden['heap_bytes']}|{golden['index_bytes']}|{golden['relpages']}":
+-            raise RuntimeError(f"Plain baseline relation sizes differ from golden: {stats}")
+-        indexes = json.loads(sql(args, "SELECT json_agg(row_to_json(i)) FROM (SELECT indexname, indexdef "
+-                                       "FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;"))
+-        if any("merkle" in i["indexname"] for i in indexes):
+-            raise RuntimeError(f"Merkle index survived in plain baseline: {indexes}")
+-        sql(args, "CHECKPOINT;")
+-    finally:
+-        run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+-if [ -f {tmp}/postmaster.pid ]; then {args.install_dir}/bin/pg_ctl -D {tmp} -w -t 120 stop -m fast; fi
+-""", timeout=150)
+-        if saved is None:
+-            del args._pgdata
+-        else:
+-            args._pgdata = saved
+-    run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
+-cp -a {golden_dir}/postgresql.auto.conf {tmp}/postgresql.auto.conf
+-rm -f {tmp}/postmaster.opts
+-{args.install_dir}/bin/pg_controldata {tmp} | grep -Eq 'Database cluster state:[[:space:]]+shut down$'
+-sync
+-mv {tmp} {plain}
+-""", timeout=args.reset_timeout)
++    manifest = json.loads(run_remote(args.remote_host, args.remote_user, f"cat {path}").stdout)
+     meta = get_remote_baseline_identity(args, name)
+-    manifest = dict(version=2, db_rows=args.db_rows, keyspace=golden["keyspace"],
+-                    heap_bytes=golden["heap_bytes"], index_bytes=golden["index_bytes"],
+-                    relpages=golden["relpages"], indexes=indexes,
+-                    derived_from_checkpoint_lsn=golden["checkpoint_lsn"],
+-                    derived_from_pg_control_sha256=golden["pg_control_sha256"],
+-                    **{k: meta[k] for k in ("db_system_id", "checkpoint_lsn", "pg_control_sha256",
+-                                            "pg_version_sha256", "file_count", "total_bytes")})
+-    run_remote(args.remote_host, args.remote_user,
+-               f"printf %s {shlex.quote(json.dumps(manifest))} > {path}", timeout=15)
+-    print(f"  Plain baseline written: {manifest['file_count']} files, "
+-          f"{manifest['total_bytes'] / 2**30:.2f} GiB", flush=True)
++    if meta["cluster_state"] != "shut down":
++        raise RuntimeError("Published plain baseline is not stopped")
++    for k in ("db_system_id", "checkpoint_lsn", "pg_control_sha256", "pg_version_sha256", "file_count", "total_bytes"):
++        if manifest[k] != meta[k]:raise RuntimeError("Published plain baseline identity changed: " + k)
++    for k in ("heap_bytes", "index_bytes", "relpages", "keyspace"):
++        if manifest[k] != golden[k]:raise RuntimeError("Plain/Merkle baseline mismatch: " + k)
++    if {i["indexname"] for i in manifest["indexes"]} != {"usertable_pkey1"}:
++        raise RuntimeError("Plain baseline contains unexpected indexes")
++    print("  Read-only published plain baseline verified; det working copy is approved pgdata_plain", flush=True)
+     return manifest
+ 
+ 
+@@ -793,7 +756,7 @@ def upload_probe(args):
+ def run_probe(args, probe_args, timeout):
+     # Reads the never-modified golden baseline with O_DIRECT: no page-cache effect.
+     command = (f"python3 {args.remote_dir}/device_settle_probe.py {probe_args} "
+-               f"--data-dir {args.remote_dir}/{args.base_dir_name} --device-stat {device_stat_path(args)} "
++               f"--data-dir {baseline_path(args)} --device-stat {device_stat_path(args)} "
+                f"--write-file {args.remote_dir}/.device_probe_write")
+     result = run_remote(args.remote_host, args.remote_user, command, timeout=timeout, check=False)
+     lines = result.stdout.strip().splitlines()
+@@ -848,10 +811,13 @@ def wait_for_device_settle(args):
+ def reset_remote_pgdata(args, mode, workers):
+     if getattr(args, "reset_mode", "cp") not in ("cp", "delta"):
+         raise RuntimeError("Benchmark resets require a full pristine physical copy (--reset-mode cp or delta)")
++    module_hash = run_remote(args.remote_host,args.remote_user,
++        "sha256sum " + args.install_dir + "/lib/postgresql/lsm3.so").stdout.split()[0]
++    if module_hash != args._lsm3_module['sha256']: raise RuntimeError('LSM3 module changed during campaign')
+     stop_server(args)
+     stop_postgres(args)
+     args._pgdata = work_dir_for(args, mode)
+-    enable = "on" if mode == "bcdb_merkle" else "off"
++    enable = "on" if is_merkle(mode) else "off"
+     bcdb_workers = workers if base_mode(mode) != "pg" else 1
+     # auto.conf is replaced on the disposable copy so old ALTER SYSTEM values
+     # cannot silently override the campaign contract.
+@@ -865,7 +831,7 @@ fsync = on
+ full_page_writes = on
+ autovacuum = off
+ work_mem = '4MB'
+-maintenance_work_mem = '2GB'
++maintenance_work_mem = '256MB'
+ effective_cache_size = '4GB'
+ max_parallel_maintenance_workers = 4
+ max_parallel_workers_per_gather = 0
+@@ -886,13 +852,16 @@ bcdb_gate_telemetry = off
+ bcdb_gate_snapshot_each_block = off
+ merkle_apply_synchronous_direct = on
+ default_transaction_isolation = '{isolation_for(mode)}'
++shared_preload_libraries = 'lsm3'
++lsm3.top_index_size = 1024
++max_worker_processes = 32
++unix_socket_directories = '/home/neel/claude_checks/lsm_lookup_20261014/scratch'
+ """
+     base_name = base_dir_name_for(args, mode)
+-    base_dir = f"{args.remote_dir}/{base_name}"
++    base_dir = baseline_path(args, base_name)
+     work = pgdata(args)
+     manifest_path = manifest_path_for(args, base_name)
+-    manifest = (getattr(args, '_plain_manifest', None) if base_name != args.base_dir_name
+-                else getattr(args, '_golden_manifest', None))
++    manifest = args._manifests[base_name]
+     if manifest is None and base_name != args.base_dir_name:
+         raise RuntimeError(f"Missing validated manifest for {base_name}")
+     if manifest is None:
+@@ -967,11 +936,13 @@ test -f {base_dir}/PG_VERSION
+ test ! -f {base_dir}/postmaster.pid
+ test ! -L {work}
+ test ! -L {base_dir}
++# Only campaign-owned working copies may be seeded.
++test "$(df -B1 --output=avail {args.remote_dir} | tail -1)" -ge 42949672960
+ # Require room for a full copy plus WAL growth; do not consume all free space.
+ if [ ! -d {work} ]; then
+     needed=$(du -sb {base_dir} | cut -f1)
+     available=$(df -B1 --output=avail {args.remote_dir} | tail -1)
+-    test "$available" -gt "$((needed + 21474836480))"
++    test "$available" -gt "$((needed + 42949672960))"
+ fi
+ {restore_cmd}
+ {copy_verify_cmd}
+@@ -979,13 +950,14 @@ sync
+ printf %s {shlex.quote(config)} > {work}/postgresql.auto.conf
+ : > {args.remote_dir}/postgres.log
+ rm -f {work}/.merkle_index_dropped
++test "$(df -B1 --output=avail {args.remote_dir} | tail -1)" -ge 42949672960
+ """, timeout=args.reset_timeout)
+     device_after_restore = get_remote_nvme_stats(args)
+     restore_write_mib = delta(device_before_restore, device_after_restore, "write_sectors") / 2048
+ 
+     start_postgres(args)
+     prepare_ledger_schema(args)
+-    if mode != "bcdb_merkle":
++    if not is_merkle(mode):
+         sql(args, "DROP INDEX IF EXISTS usertable_merkle_idx; "
+                   "DROP INDEX IF EXISTS usertable_merkle_lookup_idx;")
+         args._merkle_index_dropped = True
+@@ -1021,17 +993,20 @@ rm -f {work}/.merkle_index_dropped
+             raise RuntimeError(f"Post-copy relpages mismatch: {relpages} != {manifest['relpages']}")
+     indexes = sql(args, "SELECT json_agg(row_to_json(i)) FROM "
+                        "(SELECT indexname, indexdef FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;")
+-    if ("USING merkle" in indexes) != (mode == "bcdb_merkle"):
++    if ("USING merkle" in indexes) != (is_merkle(mode)):
+         raise RuntimeError(f"Wrong Merkle index state: {indexes}")
+-    if ("merkle_lookup_idx" in indexes) != (mode == "bcdb_merkle"):
++    if ("merkle_lookup_idx" in indexes) != (is_merkle(mode)):
+         raise RuntimeError("Merkle lookup index does not match mode")
+     merkle_stats = None
+-    if mode == "bcdb_merkle":
++    lookup_probe = None
++    if is_merkle(mode):
+         # Since 00fae31 the backend resolves ariabc_internal.merkle_node_<table>;
+         # when absent it silently creates an EMPTY tree (older baselines used
+         # merkle_node_<index oid>). Refuse to measure against an empty tree.
+-        node_pages = sql(args, "SELECT coalesce((SELECT relpages FROM pg_class WHERE oid = "
+-                               "to_regclass('ariabc_internal.merkle_node_usertable')), -1);")
++        # Use the physical size, not pg_class.relpages: baselines whose node
++        # table was rebuilt but never ANALYZEd report relpages=0 for a full tree.
++        node_pages = sql(args, "SELECT coalesce(pg_relation_size(to_regclass("
++                               "'ariabc_internal.merkle_node_usertable')) / 8192, -1);")
+         if int(node_pages) <= 0:
+             raise RuntimeError("ariabc_internal.merkle_node_usertable is missing or empty; "
+                                "use a baseline migrated to table-named Merkle node storage")
+@@ -1039,6 +1014,7 @@ rm -f {work}/.merkle_index_dropped
+         # using this binary's defaults. This scan precedes the cold cache drop.
+         merkle_stats = json.loads(sql(args, "SELECT merkle_tree_stats('usertable');",
+                                       timeout=args.verify_timeout))
++        lookup_probe = lookup_plan_probe(args, mode)
+         if merkle_stats["total_nodes"] <= 0:
+             raise RuntimeError("Merkle node table contains no visible nodes")
+     stop_postgres(args)
+@@ -1069,19 +1045,19 @@ rm -f {work}/.merkle_index_dropped
+                           "'database_bytes', pg_database_size(current_database()));"))
+     return dict(settings=settings, sizes=sizes,
+                 keyspace=f"{args.db_rows}|{bounds}", indexes=json.loads(indexes),
+-                merkle_stats=merkle_stats,
++                merkle_stats=merkle_stats, lookup_probe=lookup_probe,
+                 provenance=dict(install_dir=args.install_dir, cluster_dir=args.cluster_dir,
+                                 gateway_repo=args.gateway_repo, baseline_dir=base_dir,
+                                 baseline_manifest=manifest,
+-                                executables=getattr(args, "_executables", [])),
++                                executables=getattr(args, "_executables", []),lsm3_module=args._lsm3_module),
+                 reset_output=result.stdout, cache_drop_output=cache.stdout,
+                 restore_write_mib=restore_write_mib, settle=settle)
+ 
+ 
+ def start_remote_ariabc_server(args, mode, workers):
+     command = [f"{args.cluster_dir}/ariabc_pg/build/bin/ariabc_pg_server",
+-               "--id", "1", "--raftEndpoint", "127.0.0.1:9000", "--clientPort", str(args.server_port),
+-               "--raftMembers", "1=127.0.0.1:9000", "--dbName", "postgres", "--dbHost", "127.0.0.1",
++               "--id", "1", "--raftEndpoint", f"127.0.0.1:{args.raft_port}", "--clientPort", str(args.server_port),
++               "--raftMembers", f"1=127.0.0.1:{args.raft_port}", "--dbName", "postgres", "--dbHost", "127.0.0.1",
+                "--dbPort", str(args.db_port), "--dbUser", "postgres", "--dbType", "0" if base_mode(mode) == "pg" else "1",
+                "--safedb", "0" if base_mode(mode) == "pg" else "1", "--dbConnPoolSize", str(workers), "--bypassRaft", "1"]
+     environment = {
+@@ -1117,6 +1093,39 @@ exit 1
+     return dict(command=command, environment=environment)
+ 
+ 
++def lookup_plan_probe(args, mode):
++    key = (pgdata(args), mode)
++    cached = getattr(args, '_lookup_probes', {})
++    if key in cached: return cached[key]
++    bounds = json.loads(sql(args, "SELECT row_to_json(t) FROM (SELECT partition_id,encode(node_id,'hex') lo,encode(merkle_node_upper_bound(node_id,prefix_len),'hex') hi FROM ariabc_internal.merkle_node_usertable WHERE partition_id=0 AND is_leaf AND prefix_len>0 ORDER BY node_id LIMIT 1)t"))
++    lo,hi = bounds['lo'],bounds['hi']
++    query = "SELECT merkle_key_hash(ycsb_key),merkle_tuple_hash(u.*) FROM usertable u WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),$3)=$4 AND merkle_key_hash(ycsb_key) BETWEEN $1 AND $2"
++    plan = sql(args, "PREPARE lookup_probe(bytea,bytea,int,smallint) AS " + query + "; EXPLAIN (COSTS OFF) EXECUTE lookup_probe(decode('" + lo + "','hex'),decode('" + hi + "','hex'),200,0)")
++    cte = "WITH b(p,lo,hi) AS (SELECT u.p,u.lo,merkle_node_upper_bound(u.lo,u.l) FROM unnest(ARRAY[0]::int4[],ARRAY[decode('" + lo + "','hex')]::bytea[],ARRAY[10]::int4[])u(p,lo,l)) "
++    # The actual bounds length is read rather than inferred from geometry.
++    prefix = int(sql(args, "SELECT prefix_len FROM ariabc_internal.merkle_node_usertable WHERE partition_id=0 AND node_id=decode('" + lo + "','hex') AND is_leaf"))
++    cte = cte.replace('ARRAY[10]::int4[]', 'ARRAY[' + str(prefix) + ']::int4[]')
++    transfer = cte + "SELECT DISTINCT ON(t.ycsb_key) t.* FROM b JOIN usertable t ON merkle_partition_for_hash(merkle_key_hash(t.ycsb_key),200)=b.p AND merkle_key_hash(t.ycsb_key) BETWEEN b.lo AND b.hi ORDER BY t.ycsb_key"
++    repair_plan = sql(args, "SET enable_hashjoin=off; SET enable_mergejoin=off; EXPLAIN (COSTS OFF) " + transfer)
++    fingerprint = sql(args, "SELECT count(*),min(ycsb_key),max(ycsb_key),md5(string_agg(ycsb_key::text||':'||encode(merkle_tuple_hash(u.*),'hex'),',' ORDER BY ycsb_key)) FROM usertable u WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=0 AND merkle_key_hash(ycsb_key) BETWEEN decode('" + lo + "','hex') AND decode('" + hi + "','hex')")
++    cached[key] = dict(bounds=bounds,prefix_len=prefix,split_plan=plan,repair_plan=repair_plan,range_fingerprint=fingerprint)
++    args._lookup_probes = cached
++    return cached[key]
++
++
++def detailed_stats(args, mode):
++    result = json.loads(sql(args, """SELECT json_build_object(
++      'lsn',pg_current_wal_insert_lsn()::text,
++      'tables',(SELECT json_agg(t) FROM (SELECT schemaname,relname,heap_blks_read,heap_blks_hit,idx_blks_read,idx_blks_hit FROM pg_statio_all_tables WHERE relname LIKE '%usertable%')t),
++      'indexes',(SELECT json_agg(t) FROM (SELECT schemaname,relname,indexrelname,idx_blks_read,idx_blks_hit FROM pg_statio_all_indexes WHERE relname LIKE '%usertable%')t),
++      'updates',(SELECT json_agg(t) FROM (SELECT schemaname,relname,n_tup_ins,n_tup_upd,n_tup_del,n_tup_hot_upd FROM pg_stat_all_tables WHERE relname LIKE '%usertable%')t),
++      'sizes',(SELECT json_agg(t) FROM (SELECT n.nspname,c.relname,pg_relation_size(c.oid) bytes FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relname LIKE '%usertable%')t)
++    )"""))
++    if mode == 'merkle_lsm':
++        result['merges_requested'] = int(sql(args, "SELECT lsm3_get_merge_count('usertable_merkle_lookup_idx')"))
++    return result
++
++
+ def get_pg_io_stats(args):
+     # These are PostgreSQL buffer misses, not necessarily physical device reads.
+     return json.loads(sql(args, "SELECT row_to_json(s) FROM (SELECT d.blks_read, d.blks_hit, "
+@@ -1157,7 +1166,7 @@ cat /sys/dev/block/"$major_minor"/stat
+ 
+ def gateway_workload_path(args, digest):
+     # Kept under the gateway user's home, never /tmp (wiped on reboot).
+-    return f"/home/{args.gateway_user}/ariabc_data/oom_workloads/oom_{digest}.sql"
++    return f"{args.gateway_repo}/.bench_tmp/oom_workloads/oom_{digest}.sql"
+ 
+ 
+ def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
+@@ -1177,7 +1186,8 @@ def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
+     start = time.monotonic()
+     try:
+         if remote:
+-            result = run_remote(args.gateway_host, args.gateway_user, shlex.join(timed_command),
++            result = run_remote(args.gateway_host, args.gateway_user,
++                                "test \"$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)\" = tsc\n" + shlex.join(timed_command),
+                                 timeout=args.gateway_timeout + 30, check=False)
+         else:
+             result = subprocess.run(timed_command, capture_output=True, text=True,
+@@ -1202,7 +1212,7 @@ def delta(before, after, key):
+ 
+ 
+ def collect_logs(args, case_dir):
+-    for name in ("server.log", "server.err.log", "postgres.log"):
++    for name in ("server.log", "server.err.log", "postgres.log", "free_before_pg_start.log"):
+         result = run_remote(args.remote_host, args.remote_user,
+                             f"cat {args.remote_dir}/{name} 2>/dev/null || true", timeout=60, check=False)
+         (case_dir / name).write_text(result.stdout + result.stderr)
+@@ -1228,15 +1238,33 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
+         # settle; after the run disconnect the server before the final snapshot.
+         time.sleep(1)
+         pg_before = get_pg_io_stats(args)
++        detailed_before = detailed_stats(args, mode)
+         device_before = get_remote_nvme_stats(args)
+         measurement_start = time.monotonic()
+         with RemoteTelemetry(args.remote_host, args.remote_user, case_dir / "telemetry.jsonl",
+-                             args.install_dir + "/bin/psql", args.db_port, args.install_dir + "/lib"):
++                             args.install_dir + "/bin/psql", args.db_port, args.install_dir + "/lib"), \
++             RemoteTelemetry(args.gateway_host, args.gateway_user, case_dir / "gateway_telemetry.jsonl"):
+             metrics = run_local_gateway_benchmark(args, workload_file, mode, workers, case_dir / "gateway.log")
+ 
+         device_after = get_remote_nvme_stats(args)
+         device_window_ms = (time.monotonic() - measurement_start) * 1000
+         stop_server(args)
++        compaction_start = time.monotonic()
++        detailed_at_end = detailed_stats(args, mode)
++        if mode == 'merkle_lsm':
++            sql(args, "SET statement_timeout='10min'; SELECT lsm3_wait_merge_completion('usertable_merkle_lookup_idx');", timeout=660)
++        detailed_drained = detailed_stats(args, mode)
++        compaction_drain_ms = (time.monotonic() - compaction_start) * 1000
++        device_after_drain = get_remote_nvme_stats(args)
++        wal_bytes = int(sql(args, "SELECT pg_wal_lsn_diff('" + detailed_drained['lsn'] + "','" + detailed_before['lsn'] + "')::bigint"))
++        if wal_bytes:
++            wal = run_remote(args.remote_host, args.remote_user, db_shell(args) +
++                f"{args.install_dir}/bin/pg_waldump --path={pgdata(args)}/pg_wal --start={detailed_before['lsn']} --end={detailed_drained['lsn']} --stats", timeout=600)
++            (case_dir / 'wal_stats.txt').write_text(wal.stdout + wal.stderr)
++            count_code = "import json,subprocess,sys; p=subprocess.Popen(sys.argv[1:],stdout=subprocess.PIPE,text=True); n=sum(line.count(' FPW') for line in p.stdout); rc=p.wait(); assert rc==0,rc; print(json.dumps(dict(fpi_count=n)))"
++            count_cmd = [args.install_dir + '/bin/pg_waldump', '--path=' + pgdata(args) + '/pg_wal', '--start=' + detailed_before['lsn'], '--end=' + detailed_drained['lsn']]
++            fpi = run_remote(args.remote_host,args.remote_user,db_shell(args) + 'python3 -c ' + shlex.quote(count_code) + ' ' + shlex.join(count_cmd),timeout=600)
++            (case_dir / 'wal_fpi_count.json').write_text(fpi.stdout)
+         collect_logs(args, case_dir)
+         if workload in ("a", "b", "c", "d", "f"):
+             metrics.update(validate_ycsb_results((case_dir / "server.log").read_text(), args.txs, mode=base_mode(mode)))
+@@ -1268,6 +1296,11 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
+         stop_postgres(args)
+         start_postgres(args)
+         pg_after = get_pg_io_stats(args)
++        detailed_after = detailed_stats(args, mode)
++        (case_dir / 'detailed_counters.json').write_text(json.dumps(dict(before=detailed_before,
++            at_gateway_end=detailed_at_end,after_compaction_drain=detailed_drained,
++            after_shutdown_restart=detailed_after,wal_bytes=wal_bytes,device_after_drain=device_after_drain,
++            compaction_drain_ms=compaction_drain_ms), indent=2) + "\n")
+         snapshots = dict(pg_before=pg_before, pg_after=pg_after, device_before=device_before,
+                          device_after=device_after, checkpoint_before=checkpoint_before,
+                          checkpoint_after=checkpoint_after,
+@@ -1276,7 +1309,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
+         (case_dir / "io.json").write_text(json.dumps(snapshots, indent=2) + "\n")
+         (case_dir / "cache_policy.txt").write_text("Cold start; OS page cache and storage-controller cache are not memory-bounded.\n")
+         merkle = "N/A"
+-        if mode == "bcdb_merkle":
++        if is_merkle(mode):
+             merkle = sql(args, "SELECT merkle_verify('usertable');", timeout=args.verify_timeout)
+             (case_dir / "merkle_verify.txt").write_text(merkle + "\n")
+             if merkle != "t":
+@@ -1292,8 +1325,14 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
+         if base_mode(mode) == "pg" and retries.get("retry_jitter") != ("1" if args.pg_retry_jitter == "on" else "0"):
+             raise RuntimeError(f"Server reports retry_jitter={retries.get('retry_jitter')!r}, "
+                                f"expected --pg-retry-jitter {args.pg_retry_jitter} (stale server binary?)")
++        counters = {}
++        profile_logs = server_log + "\n" + (case_dir / "server.err.log").read_text(errors="replace") + "\n" + (case_dir / "postgres.log").read_text(errors="replace")
++        for key in ("dt_opf", "dt_opf_stale_error", "dt_rel_read_tags"):
++            values = [int(v) for v in re.findall(r"\b" + key + r"=(\d+)", profile_logs)]
++            counters[key] = dict(samples=values, max_observed=max(values) if values else None)
++        (case_dir / "det_counters.json").write_text(json.dumps(counters, indent=2) + "\n")
+         row = dict(workload=workload, skew=skew, mode=mode, workers=workers, trial=trial,
+-                   isolation=isolation_for(mode),
++                   isolation=isolation_for(mode),fillfactor=args.usertable_fillfactor,wal_bytes=wal_bytes,compaction_drain_ms=compaction_drain_ms,
+                    retry_attempts=int(retries.get("retry_attempts_total", 0)),
+                    retry_backoff_requested_ms=int(retries.get("retry_backoff_requested_ms", 0)),
+                    retry_exhausted=int(retries.get("retry_exhausted_total", 0)),
+@@ -1329,7 +1368,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
+                    divergence_count=metrics["divergence_count"], permanent_failures=metrics["permanent_failures"],
+                    validated_completed_queries=metrics["validated_completed_queries"], merkle_verify=merkle,
+                    workload_sha256=hashlib.sha256(workload_file.read_bytes()).hexdigest(),
+-                   artifact_dir=str(case_dir))
++                   artifact_dir=str(case_dir), **{k: v["max_observed"] for k, v in counters.items()})
+         (case_dir / "result.json").write_text(json.dumps(dict(
+             row=row, gateway=metrics, provenance=setup["provenance"],
+             merkle_stats=setup["merkle_stats"]), indent=2) + "\n")
+@@ -1360,6 +1399,7 @@ def parse_args(argv=None):
+         parser.add_argument("--" + name, default=default)
+     parser.add_argument("--db-port", type=int, default=DEFAULT_DB_PORT)
+     parser.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT)
++    parser.add_argument("--raft-port", type=int, default=9068)
+     parser.add_argument("--db-rows", type=int, default=100000000)
+     parser.add_argument("--shared-buffers", default="32MB")
+     parser.add_argument("--usertable-fillfactor", type=int, default=100,
+@@ -1374,6 +1414,7 @@ def parse_args(argv=None):
+     parser.add_argument("--txs", type=int, default=20000, help="SQL statements per case, as in the in-memory suite")
+     parser.add_argument("--seed", type=int, default=42, help="Suite base seed; adds int(skew * 100)")
+     parser.add_argument("--trials", type=int, default=5, help="Independent cold restores per case")
++    parser.add_argument("--single-working-copy", action="store_true", help="Use one owned working copy to preserve disk reserve")
+     parser.add_argument("--modes", nargs="+", default=["pg", "bcdb_det", "bcdb_merkle"])
+     parser.add_argument("--workers", nargs="+", default=["1", "8", "16"])
+     parser.add_argument("--skews", nargs="+", default=["0.0", "0.99"])
+@@ -1456,8 +1497,8 @@ def parse_args(argv=None):
+         if not values or len(values) != len(set(values)):
+             parser.error(f"--{name} must be nonempty and contain no duplicates")
+         setattr(args, name, values)
+-    if set(args.modes) - {"pg", "pg_rc", "bcdb_det", "bcdb_merkle"}:
+-        parser.error("--modes supports pg, pg_rc, bcdb_det, bcdb_merkle")
++    if set(args.modes) - {"det", "merkle_btree", "merkle_lsm"}:
++        parser.error("--modes supports det, merkle_btree, merkle_lsm (SERIALIZABLE only)")
+     if set(args.workloads) - set(SUPPORTED_WORKLOADS):
+         parser.error("Supported large-keyspace workloads: " + ", ".join(SUPPORTED_WORKLOADS) +
+                      "; custom DML key-recycling semantics require a separate large-keyspace generator")
+@@ -1492,7 +1533,7 @@ def parse_args(argv=None):
+             parser.error(f"Invalid --{name.replace('_', '-')}")
+     if args.remote_host == args.gateway_host:
+         parser.error("Use a separate gateway host for comparison with the suite")
+-    if any(not 1024 <= p <= 65535 for p in (args.db_port, args.server_port)) or len({args.db_port, args.server_port, 9000}) != 3:
++    if any(not 1024 <= p <= 65535 for p in (args.db_port, args.server_port, args.raft_port)) or len({args.db_port, args.server_port, args.raft_port}) != 3:
+         parser.error("Database, server, and Raft ports must be distinct unprivileged ports")
+     return args
+ 
+@@ -1524,7 +1565,7 @@ def write_report(out_dir, rows):
+         return
+     for wl, skew in sorted({(str(r["workload"]), float(r["skew"])) for r in rows}):
+         fig, ax = plt.subplots(figsize=(8, 5))
+-        for mode in ("pg", "pg_rc", "bcdb_det", "bcdb_merkle"):
++        for mode in ("det", "merkle_btree", "merkle_lsm"):
+             keys = sorted(k for k in groups if k[:3] == (wl, skew, mode))
+             if keys:
+                 ax.plot([int(k[3]) for k in keys], [statistics.median(float(r["tps"]) for r in groups[k]) for k in keys],
+@@ -1592,6 +1633,10 @@ def main(argv=None):
+                                                     queries=args.txs)
+     if not args.resume_dir:
+         (out_dir / "campaign.json").write_text(json.dumps(manifest, indent=2) + "\n")
++    with (out_dir / "planned_case_order.csv").open("w", newline="") as handle:
++        writer = csv.writer(handle)
++        writer.writerow(["workload", "skew", "mode", "workers", "trial"])
++        writer.writerows(lsm_cases(args))
+     if args.dry_run:
+         print(f"Dry run: generated {len(files)} workloads; no remote commands executed.")
+         return
+@@ -1607,6 +1652,9 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
+     try:
+         ensure_cache_drop_access(args)
+         current_preflight = preflight(args)
++        module = re.search(r"^LSM3_MODULE_SHA256 ([0-9a-f]{64})\s+(\S+)", current_preflight, re.M)
++        if not module: raise RuntimeError('Preflight missing LSM3 module hash')
++        args._lsm3_module = dict(sha256=module[1],path=module[2])
+         hashes = re.findall(r"^([0-9a-f]{64})\s+(\S+)", current_preflight, re.M)
+         if len(hashes) != 3:
+             raise RuntimeError("Preflight did not record all three executable hashes")
+@@ -1615,6 +1663,8 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
+                                  (args.remote_host, args.remote_host, args.gateway_host), hashes)]
+         preflight_path = out_dir / "preflight.txt"
+         if preflight_path.exists():
++            prior_module = re.search(r"^LSM3_MODULE_SHA256 ([0-9a-f]{64})\s+(\S+)", preflight_path.read_text(), re.M)
++            if not prior_module or prior_module[0] != module[0]: raise RuntimeError('LSM3 module changed on resume')
+             old = re.findall(r"^[0-9a-f]{64}\s+\S+", preflight_path.read_text(), re.M)
+             new = re.findall(r"^[0-9a-f]{64}\s+\S+", current_preflight, re.M)
+             if len(new) != 3 or new != old:
+@@ -1639,8 +1689,16 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
+         upload_probe(args)
+         # Calibrate before any large write this campaign makes (plain baseline).
+         args._probe_thresholds = calibrate_device(args, out_dir)
+-        if args.reset_mode == "delta" and set(args.modes) - {"bcdb_merkle"}:
+-            args._plain_manifest = ensure_plain_baseline(args, golden)
++        args._manifests = {args.base_dir_name: golden}
++        args._plain_manifest = ensure_plain_baseline(args, golden)
++        args._manifests[args.base_dir_name + "_plain"] = args._plain_manifest
++        lsm_name = args.base_dir_name + "_lsm"
++        lsm_manifest = json.loads(run_remote(args.remote_host, args.remote_user, "cat " + manifest_path_for(args, lsm_name)).stdout)
++        identity = get_remote_baseline_identity(args, lsm_name)
++        for k, value in identity.items():
++            if lsm_manifest[k] != value: raise RuntimeError("LSM baseline identity changed: " + k)
++        if lsm_manifest["root"] != golden["root"]: raise RuntimeError("Baseline roots differ")
++        args._manifests[lsm_name] = lsm_manifest
+         rows = []
+         completed_keys = set()
+         if args.resume_dir and (out_dir / "summary.csv").is_file():
+@@ -1652,25 +1710,27 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
+                         row_data = json.loads((case_dir / "result.json").read_text())["row"]
+                     else:
+                         raise RuntimeError(f"Missing per-case evidence on resume: {case_dir}")
+-                    if (case_dir / "FAILED.txt").exists() or (case_dir / "cleanup_errors.txt").exists():
++                    if any((case_dir / name).exists() for name in
++                           ("FAILED.txt", "cleanup_errors.txt", "NOISE_EXCLUDED.txt")):
+                         raise RuntimeError(f"Cannot resume an accepted row with failure evidence: {case_dir}")
++                    qualification = json.loads((case_dir / "noise_qualification.json").read_text())
++                    if qualification["excluded"] or row_data.get("noise_excluded") is not False:
++                        raise RuntimeError(f"Cannot resume an accepted row without clean noise evidence: {case_dir}")
+                     saved = json.loads((case_dir / "result.json").read_text())
+                     parse_gateway_result((case_dir / "gateway.log").read_text(), int(row_data["total_queries"]),
+                                          saved["gateway"]["gateway_returncode"], mode=base_mode(row_data["mode"]))
+                     if row_data["workload"] in ("a", "b", "c", "d", "f"):
+                         validate_ycsb_results((case_dir / "server.log").read_text(), int(row_data["total_queries"]), mode=base_mode(row_data["mode"]))
+-                    if row_data["mode"] == "bcdb_merkle" and (case_dir / "merkle_verify.txt").read_text().strip() != "t":
++                    if is_merkle(row_data["mode"]) and (case_dir / "merkle_verify.txt").read_text().strip() != "t":
+                         raise RuntimeError("Missing saved Merkle PASS on resume")
+                     rows.append(row_data)
+                     completed_keys.add((str(row_data["workload"]), float(row_data["skew"]),
+                                         str(row_data["mode"]), int(row_data["workers"]), int(row_data["trial"])))
+             print(f"Resuming {out_dir}: {len(rows)} cases already completed.", flush=True)
+ 
+-        cases = [(wl, skew, mode, workers, trial)
+-                 for wl, skew, workers, mode, trial in balanced_cases(
+-                     [(wl, skew, workers) for wl, skew in args.combos for workers in args.workers],
+-                     args.modes, args.trials, args.seed)]
++        cases = list(lsm_cases(args))
+ 
++        (out_dir / "planned_cases.json").write_text(json.dumps(cases, indent=2) + "\n")
+         for wl, skew, mode, workers, trial in cases:
+             key = (str(wl), float(skew), str(mode), int(workers), int(trial))
+             name = f"{wl}_s{skew}_{mode}_w{workers}_t{trial}"
+@@ -1681,7 +1741,25 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
+             if case_dir.is_dir():
+                 case_dir = out_dir / (name + "_attempt_" + uuid.uuid4().hex[:8])
+             print(f"Running {name}: pristine restore, validation, then cold start", flush=True)
+-            row = run_case(args, wl, skew, mode, workers, trial, files[wl, skew], case_dir)
++            from oom_v2.paper_noise import qualify
++            for noise_attempt in range(1, 4):
++                row = run_case(args, wl, skew, mode, workers, trial, files[wl, skew], case_dir)
++                qualification = qualify(case_dir)
++                row['noise_excluded'] = qualification['excluded']
++                result_path = case_dir / "result.json"
++                saved = json.loads(result_path.read_text())
++                saved["row"] = row
++                result_path.write_text(json.dumps(saved, indent=2) + "\n")
++                all_exists = (out_dir / "all_attempts.csv").is_file()
++                with (out_dir / "all_attempts.csv").open("a", newline="") as handle:
++                    writer = csv.DictWriter(handle, fieldnames=list(row))
++                    if not all_exists: writer.writeheader()
++                    writer.writerow(row)
++                if not qualification['excluded']: break
++                (case_dir / "NOISE_EXCLUDED.txt").write_text(json.dumps(qualification) + "\n")
++                print(f"  NOISE_EXCLUDED: {case_dir}; retaining raw attempt and rerunning", flush=True)
++                if noise_attempt == 3: raise RuntimeError("Three severe-stall attempts; stop and investigate host noise")
++                case_dir = out_dir / (name + "_noise_attempt_" + uuid.uuid4().hex[:8])
+             rows.append(row)
+             summary_exists = (out_dir / "summary.csv").is_file() and (out_dir / "summary.csv").stat().st_size > 0
+             with (out_dir / "summary.csv").open("a", newline="") as handle:

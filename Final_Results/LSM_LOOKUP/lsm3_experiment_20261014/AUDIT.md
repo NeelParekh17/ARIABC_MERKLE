@@ -1,0 +1,9 @@
+# Independent final audit
+
+PASS: exact authorized dataset smoke 3 + ff90 72 =75 cases and1,500,000 terminal/row results. Stage counts, unique configurations/trials and all expected points checked. Each mode has24 grid cases and1 smoke case. Merkle verifications:50/50 PASS. SELECT results:750,375; UPDATE results:749,625. Gateway exits 0; divergence, permanent failures, nonterminal failures and deterministic errors all 0. Accepted cases have no FAILED, cleanup error or NOISE_EXCLUDED marker.
+
+The audit independently re-parses every server row result and request ID against the published-hash workload files, re-parses gateway success/error totals, and checks geometry, 100M keyspace, SERIALIZABLE, 32 MiB shared buffers, 96 terminals/client workers, synchronous Merkle, cold cache drop, physical reset evidence, actual lookup AM, split/repair plans and equal range fingerprints. All cases share the same binary/module/source contracts. LSM requested and completed merge counts agree in every run:0. No ff100 or sustained case is required or included.
+
+Evidence: final_audit.json, audit.py, analysis_status.json, results/{smoke,ff90}/run_*/ and results/failed_attempts/. Local independent audit after FF90_GRID_DONE_72_CASES and detached .111 audit both pass. Source baseline and own normalized baseline control/size identities remain unchanged: baseline_evidence/final_baseline_identities.json (metadata/control/size proof, not a full content rehash).
+
+No final-grid failure or noise exclusion occurred. Three earlier setup smoke campaigns were preserved, with three failed cases and one old-module completed B-tree case; these four attempts are excluded from the final uniform-build dataset. All final75 attempts are retained in attempts.csv. Raw per-host telemetry, PG/server/gateway logs, WAL statistics, checkpoints, resets, device counters and free-before-start logs remain in each case directory.

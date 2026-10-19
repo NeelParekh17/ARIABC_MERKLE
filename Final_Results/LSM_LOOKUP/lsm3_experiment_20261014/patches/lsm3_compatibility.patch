@@ -1,0 +1,560 @@
+diff --git a/lsm3--1.0.sql b/lsm3--1.0.sql
+index 26fa8d4..5b1b03a 100644
+--- a/lsm3--1.0.sql
++++ b/lsm3--1.0.sql
+@@ -89,11 +89,7 @@ ALTER OPERATOR FAMILY integer_ops USING lsm3 ADD
+     FUNCTION 3(int4,int8)  in_range(int4,int4,int8,bool,bool),
+     FUNCTION 3(int4,int4)  in_range(int4,int4,int4,bool,bool),
+     FUNCTION 3(int4,int2)  in_range(int4,int4,int2,bool,bool),
+-    FUNCTION 3(int8,int8)  in_range(int8,int8,int8,bool,bool),
+-
+-    FUNCTION 4(int2,int2)  btequalimage(oid),
+-    FUNCTION 4(int4,int4)  btequalimage(oid),
+-    FUNCTION 4(int8,int8)  btequalimage(oid);
++    FUNCTION 3(int8,int8)  in_range(int8,int8,int8,bool,bool);
+ 
+ CREATE OPERATOR FAMILY float_ops USING lsm3;
+ 
+@@ -148,8 +144,7 @@ CREATE OPERATOR CLASS bool_ops DEFAULT
+ 	OPERATOR 3  =,
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+-	FUNCTION 1  btboolcmp(bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 1  btboolcmp(bool,bool);
+ 
+ CREATE OPERATOR CLASS bpchar_ops DEFAULT
+ 	FOR TYPE bpchar USING lsm3 AS
+@@ -159,8 +154,7 @@ CREATE OPERATOR CLASS bpchar_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  bpcharcmp(bpchar,bpchar),
+-	FUNCTION 2  bpchar_sortsupport(internal),
+-    FUNCTION 4  btvarstrequalimage(oid);
++	FUNCTION 2  bpchar_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS bytea_ops DEFAULT
+ 	FOR TYPE bytea USING lsm3 AS
+@@ -170,8 +164,7 @@ CREATE OPERATOR CLASS bytea_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  byteacmp(bytea,bytea),
+-	FUNCTION 2  bytea_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  bytea_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS char_ops DEFAULT
+ 	FOR TYPE "char" USING lsm3 AS
+@@ -180,8 +173,7 @@ CREATE OPERATOR CLASS char_ops DEFAULT
+ 	OPERATOR 3  =,
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+-	FUNCTION 1  btcharcmp("char","char"),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 1  btcharcmp("char","char");
+ 
+ CREATE OPERATOR FAMILY datetime_ops USING lsm3;
+ 
+@@ -193,8 +185,7 @@ CREATE OPERATOR CLASS date_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  date_cmp(date,date),
+-	FUNCTION 2  date_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  date_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS timestamp_ops DEFAULT
+ 	FOR TYPE timestamp USING lsm3 FAMILY datetime_ops AS
+@@ -204,8 +195,7 @@ CREATE OPERATOR CLASS timestamp_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  timestamp_cmp(timestamp,timestamp),
+-	FUNCTION 2  timestamp_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  timestamp_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS timestamptz_ops DEFAULT
+ 	FOR TYPE timestamptz USING lsm3 FAMILY datetime_ops AS
+@@ -215,8 +205,7 @@ CREATE OPERATOR CLASS timestamptz_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  timestamptz_cmp(timestamptz,timestamptz),
+-	FUNCTION 2  timestamp_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  timestamp_sortsupport(internal);
+ 
+ ALTER OPERATOR FAMILY datetime_ops USING lsm3 ADD
+ 	OPERATOR 1  <  (date,timestamp),
+@@ -273,8 +262,7 @@ CREATE OPERATOR CLASS interval_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  interval_cmp(interval,interval),
+-    FUNCTION 3  in_range(interval,interval,interval,bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++    FUNCTION 3  in_range(interval,interval,interval,bool,bool);
+ 
+ CREATE OPERATOR CLASS macaddr_ops DEFAULT
+ 	FOR TYPE macaddr USING lsm3 AS
+@@ -284,8 +272,7 @@ CREATE OPERATOR CLASS macaddr_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  macaddr_cmp(macaddr,macaddr),
+-	FUNCTION 2  macaddr_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  macaddr_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS numeric_ops DEFAULT
+ 	FOR TYPE numeric USING lsm3 AS
+@@ -296,8 +283,7 @@ CREATE OPERATOR CLASS numeric_ops DEFAULT
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  numeric_cmp(numeric,numeric),
+ 	FUNCTION 2  numeric_sortsupport(internal),
+-    FUNCTION 3  in_range(numeric,numeric,numeric,bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++    FUNCTION 3  in_range(numeric,numeric,numeric,bool,bool);
+ 
+ CREATE OPERATOR CLASS oid_ops DEFAULT
+ 	FOR TYPE oid USING lsm3 AS
+@@ -307,8 +293,7 @@ CREATE OPERATOR CLASS oid_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  btoidcmp(oid,oid),
+-	FUNCTION 2  btoidsortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  btoidsortsupport(internal);
+ 
+ CREATE OPERATOR FAMILY text_ops USING lsm3;
+ 
+@@ -320,8 +305,7 @@ CREATE OPERATOR CLASS text_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  bttextcmp(text,text),
+-	FUNCTION 2  bttextsortsupport(internal),
+-    FUNCTION 4  btvarstrequalimage(oid);
++	FUNCTION 2  bttextsortsupport(internal);
+ 
+ CREATE OPERATOR CLASS name_ops DEFAULT
+ 	FOR TYPE name USING lsm3 FAMILY text_ops AS
+@@ -331,8 +315,7 @@ CREATE OPERATOR CLASS name_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  btnamecmp(name,name),
+-	FUNCTION 2  btnamesortsupport(internal),
+-    FUNCTION 4  btvarstrequalimage(oid);
++	FUNCTION 2  btnamesortsupport(internal);
+ 
+ ALTER OPERATOR FAMILY text_ops USING lsm3 ADD
+ 	OPERATOR 1  <  (text,name),
+@@ -357,8 +340,7 @@ CREATE OPERATOR CLASS time_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  time_cmp(time,time),
+-    FUNCTION 3  in_range(time,time,interval,bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++    FUNCTION 3  in_range(time,time,interval,bool,bool);
+ 
+ CREATE OPERATOR CLASS timetz_ops DEFAULT
+ 	FOR TYPE timetz USING lsm3 AS
+@@ -368,8 +350,7 @@ CREATE OPERATOR CLASS timetz_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  timetz_cmp(timetz,timetz),
+-    FUNCTION 3  in_range(timetz,timetz,interval,bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++    FUNCTION 3  in_range(timetz,timetz,interval,bool,bool);
+ 
+ CREATE OPERATOR CLASS money_ops DEFAULT
+ 	FOR TYPE money USING lsm3 AS
+@@ -378,8 +359,7 @@ CREATE OPERATOR CLASS money_ops DEFAULT
+ 	OPERATOR 3  =,
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+-	FUNCTION 1  cash_cmp(money,money),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 1  cash_cmp(money,money);
+ 
+ CREATE OPERATOR CLASS uuid_ops DEFAULT
+ 	FOR TYPE uuid USING lsm3 AS
+@@ -389,8 +369,7 @@ CREATE OPERATOR CLASS uuid_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  uuid_cmp(uuid,uuid),
+-	FUNCTION 2  uuid_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  uuid_sortsupport(internal);
+ 
+ -- lsm3_bree_wrapper operators
+ 
+@@ -483,11 +462,7 @@ ALTER OPERATOR FAMILY integer_ops USING lsm3_btree_wrapper ADD
+     FUNCTION 3(int4,int8)  in_range(int4,int4,int8,bool,bool),
+     FUNCTION 3(int4,int4)  in_range(int4,int4,int4,bool,bool),
+     FUNCTION 3(int4,int2)  in_range(int4,int4,int2,bool,bool),
+-    FUNCTION 3(int8,int8)  in_range(int8,int8,int8,bool,bool),
+-
+-    FUNCTION 4(int2,int2)  btequalimage(oid),
+-    FUNCTION 4(int4,int4)  btequalimage(oid),
+-    FUNCTION 4(int8,int8)  btequalimage(oid);
++    FUNCTION 3(int8,int8)  in_range(int8,int8,int8,bool,bool);
+ 
+ CREATE OPERATOR FAMILY float_ops USING lsm3_btree_wrapper;
+ 
+@@ -542,8 +517,7 @@ CREATE OPERATOR CLASS bool_ops DEFAULT
+ 	OPERATOR 3  =,
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+-	FUNCTION 1  btboolcmp(bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 1  btboolcmp(bool,bool);
+ 
+ CREATE OPERATOR CLASS bpchar_ops DEFAULT
+ 	FOR TYPE bpchar USING lsm3_btree_wrapper AS
+@@ -553,8 +527,7 @@ CREATE OPERATOR CLASS bpchar_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  bpcharcmp(bpchar,bpchar),
+-	FUNCTION 2  bpchar_sortsupport(internal),
+-    FUNCTION 4  btvarstrequalimage(oid);
++	FUNCTION 2  bpchar_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS bytea_ops DEFAULT
+ 	FOR TYPE bytea USING lsm3_btree_wrapper AS
+@@ -564,8 +537,7 @@ CREATE OPERATOR CLASS bytea_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  byteacmp(bytea,bytea),
+-	FUNCTION 2  bytea_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  bytea_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS char_ops DEFAULT
+ 	FOR TYPE "char" USING lsm3_btree_wrapper AS
+@@ -574,8 +546,7 @@ CREATE OPERATOR CLASS char_ops DEFAULT
+ 	OPERATOR 3  =,
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+-	FUNCTION 1  btcharcmp("char","char"),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 1  btcharcmp("char","char");
+ 
+ CREATE OPERATOR FAMILY datetime_ops USING lsm3_btree_wrapper;
+ 
+@@ -587,8 +558,7 @@ CREATE OPERATOR CLASS date_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  date_cmp(date,date),
+-	FUNCTION 2  date_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  date_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS timestamp_ops DEFAULT
+ 	FOR TYPE timestamp USING lsm3_btree_wrapper FAMILY datetime_ops AS
+@@ -598,8 +568,7 @@ CREATE OPERATOR CLASS timestamp_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  timestamp_cmp(timestamp,timestamp),
+-	FUNCTION 2  timestamp_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  timestamp_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS timestamptz_ops DEFAULT
+ 	FOR TYPE timestamptz USING lsm3_btree_wrapper FAMILY datetime_ops AS
+@@ -609,8 +578,7 @@ CREATE OPERATOR CLASS timestamptz_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  timestamptz_cmp(timestamptz,timestamptz),
+-	FUNCTION 2  timestamp_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  timestamp_sortsupport(internal);
+ 
+ ALTER OPERATOR FAMILY datetime_ops USING lsm3_btree_wrapper ADD
+ 	OPERATOR 1  <  (date,timestamp),
+@@ -667,8 +635,7 @@ CREATE OPERATOR CLASS interval_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  interval_cmp(interval,interval),
+-    FUNCTION 3  in_range(interval,interval,interval,bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++    FUNCTION 3  in_range(interval,interval,interval,bool,bool);
+ 
+ CREATE OPERATOR CLASS macaddr_ops DEFAULT
+ 	FOR TYPE macaddr USING lsm3_btree_wrapper AS
+@@ -678,8 +645,7 @@ CREATE OPERATOR CLASS macaddr_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  macaddr_cmp(macaddr,macaddr),
+-	FUNCTION 2  macaddr_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  macaddr_sortsupport(internal);
+ 
+ CREATE OPERATOR CLASS numeric_ops DEFAULT
+ 	FOR TYPE numeric USING lsm3_btree_wrapper AS
+@@ -690,8 +656,7 @@ CREATE OPERATOR CLASS numeric_ops DEFAULT
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  numeric_cmp(numeric,numeric),
+ 	FUNCTION 2  numeric_sortsupport(internal),
+-    FUNCTION 3  in_range(numeric,numeric,numeric,bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++    FUNCTION 3  in_range(numeric,numeric,numeric,bool,bool);
+ 
+ CREATE OPERATOR CLASS oid_ops DEFAULT
+ 	FOR TYPE oid USING lsm3_btree_wrapper AS
+@@ -701,8 +666,7 @@ CREATE OPERATOR CLASS oid_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  btoidcmp(oid,oid),
+-	FUNCTION 2  btoidsortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  btoidsortsupport(internal);
+ 
+ CREATE OPERATOR FAMILY text_ops USING lsm3_btree_wrapper;
+ 
+@@ -714,8 +678,7 @@ CREATE OPERATOR CLASS text_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  bttextcmp(text,text),
+-	FUNCTION 2  bttextsortsupport(internal),
+-    FUNCTION 4  btvarstrequalimage(oid);
++	FUNCTION 2  bttextsortsupport(internal);
+ 
+ CREATE OPERATOR CLASS name_ops DEFAULT
+ 	FOR TYPE name USING lsm3_btree_wrapper FAMILY text_ops AS
+@@ -725,8 +688,7 @@ CREATE OPERATOR CLASS name_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  btnamecmp(name,name),
+-	FUNCTION 2  btnamesortsupport(internal),
+-    FUNCTION 4  btvarstrequalimage(oid);
++	FUNCTION 2  btnamesortsupport(internal);
+ 
+ ALTER OPERATOR FAMILY text_ops USING lsm3_btree_wrapper ADD
+ 	OPERATOR 1  <  (text,name),
+@@ -751,8 +713,7 @@ CREATE OPERATOR CLASS time_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  time_cmp(time,time),
+-    FUNCTION 3  in_range(time,time,interval,bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++    FUNCTION 3  in_range(time,time,interval,bool,bool);
+ 
+ CREATE OPERATOR CLASS timetz_ops DEFAULT
+ 	FOR TYPE timetz USING lsm3_btree_wrapper AS
+@@ -762,8 +723,7 @@ CREATE OPERATOR CLASS timetz_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  timetz_cmp(timetz,timetz),
+-    FUNCTION 3  in_range(timetz,timetz,interval,bool,bool),
+-    FUNCTION 4  btequalimage(oid);
++    FUNCTION 3  in_range(timetz,timetz,interval,bool,bool);
+ 
+ CREATE OPERATOR CLASS money_ops DEFAULT
+ 	FOR TYPE money USING lsm3_btree_wrapper AS
+@@ -772,8 +732,7 @@ CREATE OPERATOR CLASS money_ops DEFAULT
+ 	OPERATOR 3  =,
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+-	FUNCTION 1  cash_cmp(money,money),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 1  cash_cmp(money,money);
+ 
+ CREATE OPERATOR CLASS uuid_ops DEFAULT
+ 	FOR TYPE uuid USING lsm3_btree_wrapper AS
+@@ -783,8 +742,7 @@ CREATE OPERATOR CLASS uuid_ops DEFAULT
+ 	OPERATOR 4  >=,
+ 	OPERATOR 5  >,
+ 	FUNCTION 1  uuid_cmp(uuid,uuid),
+-	FUNCTION 2  uuid_sortsupport(internal),
+-    FUNCTION 4  btequalimage(oid);
++	FUNCTION 2  uuid_sortsupport(internal);
+ 
+ -- Number of index merges since server start
+ CREATE FUNCTION lsm3_get_merge_count(index regclass) returns bigint
+diff --git a/lsm3.c b/lsm3.c
+index 12b58b5..93a827e 100644
+--- a/lsm3.c
++++ b/lsm3.c
+@@ -26,6 +26,7 @@
+ #include "tcop/utility.h"
+ #include "postmaster/bgworker.h"
+ #include "pgstat.h"
++#include "parser/parse_utilcmd.h"
+ #include "executor/executor.h"
+ #include "storage/ipc.h"
+ #include "storage/latch.h"
+@@ -199,7 +200,7 @@ lsm3_launch_bgworker(Lsm3DictEntry* entry)
+ 		elog(ERROR, "Lsm3: startup of background worker is failed");
+ 	}
+ 	entry->merger = BackendPidGetProc(bgw_pid);
+-	for (int n_attempts = 0; entry->merger == NULL || n_attempts < 100; n_attempts++)
++	for (int n_attempts = 0; entry->merger == NULL && n_attempts < 100; n_attempts++)
+ 	{
+ 		pg_usleep(10000); /* wait background worker to be registered in procarray */
+ 		entry->merger = BackendPidGetProc(bgw_pid);
+@@ -258,6 +259,7 @@ lsm3_merge_indexes(Oid dst_oid, Oid src_oid, Oid heap_oid)
+ 	for (ok = _bt_first(scan, ForwardScanDirection); ok; ok = _bt_next(scan, ForwardScanDirection))
+ 	{
+ 		IndexTuple itup = scan->xs_itup;
++		#ifndef ARIABC_PRE13
+ 		if (BTreeTupleIsPosting(itup))
+ 		{
+ 			/* Some dirty coding here related with handling of posting items (index deduplication).
+@@ -278,6 +280,7 @@ tes */
+ 			itup->t_info = save_info;
+ 		}
+ 		else
++		#endif
+ 		{
+ 			_bt_doinsert(base_index, itup, INSERT_FLAGS, heap); /* lsm3 index is not unique so need not to heck for duplica
+ tes */
+@@ -299,8 +302,10 @@ lsm3_options(Datum reloptions, bool validate)
+ 		{"fillfactor", RELOPT_TYPE_INT, offsetof(BTOptions, fillfactor)},
+ 		{"vacuum_cleanup_index_scale_factor", RELOPT_TYPE_REAL,
+ 		offsetof(BTOptions, vacuum_cleanup_index_scale_factor)},
++#ifndef ARIABC_PRE13
+ 		{"deduplicate_items", RELOPT_TYPE_BOOL,
+ 		 offsetof(BTOptions, deduplicate_items)},
++#endif
+ 		{"top_index_size", RELOPT_TYPE_INT, offsetof(Lsm3Options, top_index_size)},
+ 		{"unique", RELOPT_TYPE_BOOL, offsetof(Lsm3Options, unique)}
+ 	};
+@@ -492,6 +497,7 @@ lsm3_insert(Relation rel, Datum *values, bool *isnull,
+ 
+ 	int active_index;
+ 	uint64 n_merges; /* used to check if merge was initiated by somebody else */
++	uint64 insert_number; /* reserve the periodic size check under the spinlock */
+ 	Relation index;
+ 	Oid  save_am;
+ 	bool overflow;
+@@ -506,6 +512,9 @@ lsm3_insert(Relation rel, Datum *values, bool *isnull,
+ 	else
+ 		is_initialized = false;
+ 	n_merges = entry->n_merges;
++	insert_number = entry->n_inserts;
++	if (is_initialized)
++		entry->n_inserts += 1;
+ 	SpinLockRelease(&entry->spinlock);
+ 
+ 	if (!is_initialized)
+@@ -534,7 +543,7 @@ lsm3_insert(Relation rel, Datum *values, bool *isnull,
+ 	index->rd_rel->relam = save_am;
+ 
+ 	overflow = !entry->merge_in_progress /* do not check for overflow if merge was already initiated */
+- 		&& (entry->n_inserts % LSM3_CHECK_TOP_INDEX_SIZE_PERIOD) == 0 /* perform check only each N-th insert  */
++		&& (insert_number % LSM3_CHECK_TOP_INDEX_SIZE_PERIOD) == 0 /* perform check only each N-th insert  */
+ 		&& RelationGetNumberOfBlocks(index)*(BLCKSZ/1024) > top_index_size;
+ 
+ 	SpinLockAcquire(&entry->spinlock);
+@@ -548,7 +557,6 @@ lsm3_insert(Relation rel, Datum *values, bool *isnull,
+ 	}
+ 	Assert(entry->access_count[active_index] > 0);
+ 	entry->access_count[active_index] -= 1;
+-	entry->n_inserts += 1;
+ 	if (entry->merge_in_progress)
+ 	{
+ 		LOCKTAG		tag;
+@@ -776,7 +784,9 @@ lsm3_handler(PG_FUNCTION_ARGS)
+ 
+ 	amroutine->amstrategies = BTMaxStrategyNumber;
+ 	amroutine->amsupport = BTNProcs;
++#ifndef ARIABC_PRE13
+ 	amroutine->amoptsprocnum = BTOPTIONS_PROC;
++#endif
+ 	amroutine->amcanorder = true;
+ 	amroutine->amcanorderbyop = false;
+ 	amroutine->amcanbackward = true;
+@@ -790,8 +800,12 @@ lsm3_handler(PG_FUNCTION_ARGS)
+ 	amroutine->ampredlocks = true;
+ 	amroutine->amcanparallel = false; /* TODO: parallel scac is not supported yet */
+ 	amroutine->amcaninclude = true;
++#ifndef ARIABC_PRE13
+ 	amroutine->amusemaintenanceworkmem = false;
++#endif
++#ifndef ARIABC_PRE13
+ 	amroutine->amparallelvacuumoptions = 0;
++#endif
+ 	amroutine->amkeytype = InvalidOid;
+ 
+ 	amroutine->ambuild = lsm3_build;
+@@ -831,7 +845,11 @@ lsm3_build_empty(Relation heap, Relation index, IndexInfo *indexInfo)
+ 
+ 	/* Construct metapage. */
+ 	metapage = (Page) palloc(BLCKSZ);
++#ifdef ARIABC_PRE13
++	_bt_initmetapage(metapage, BTREE_METAPAGE, 0);
++#else
+ 	_bt_initmetapage(metapage, BTREE_METAPAGE, 0, _bt_allequalimage(index, false));
++#endif
+ 
+ #if PG_VERSION_NUM>=150000
+ 	RelationGetSmgr(index);
+@@ -886,7 +904,9 @@ lsm3_btree_wrapper(PG_FUNCTION_ARGS)
+ 
+ 	amroutine->amstrategies = BTMaxStrategyNumber;
+ 	amroutine->amsupport = BTNProcs;
++#ifndef ARIABC_PRE13
+ 	amroutine->amoptsprocnum = BTOPTIONS_PROC;
++#endif
+ 	amroutine->amcanorder = true;
+ 	amroutine->amcanorderbyop = false;
+ 	amroutine->amcanbackward = true;
+@@ -900,8 +920,12 @@ lsm3_btree_wrapper(PG_FUNCTION_ARGS)
+ 	amroutine->ampredlocks = true;
+ 	amroutine->amcanparallel = false;
+ 	amroutine->amcaninclude = true;
++#ifndef ARIABC_PRE13
+ 	amroutine->amusemaintenanceworkmem = false;
++#endif
++#ifndef ARIABC_PRE13
+ 	amroutine->amparallelvacuumoptions = 0;
++#endif
+ 	amroutine->amkeytype = InvalidOid;
+ 
+ 	amroutine->ambuild = lsm3_build_empty;
+@@ -942,7 +966,7 @@ lsm3_process_utility(PlannedStmt *plannedStmt,
+ 					 ParamListInfo paramListInfo,
+ 					 QueryEnvironment *queryEnvironment,
+ 					 DestReceiver *destReceiver,
+-#if PG_VERSION_NUM>=130000
++#if PG_VERSION_NUM>=130000 && !defined(ARIABC_PRE13)
+ 					 QueryCompletion *completionTag
+ #else
+ 	                 char *completionTag
+@@ -965,7 +989,10 @@ lsm3_process_utility(PlannedStmt *plannedStmt,
+ 			foreach (cell, drop->objects)
+ 			{
+ 				RangeVar* rv = makeRangeVarFromNameList((List *) lfirst(cell));
+-				Relation index = relation_openrv(rv, ExclusiveLock);
++				/* Honour DROP INDEX IF EXISTS: a missing index is not ours to handle */
++				Relation index = relation_openrv_extended(rv, ExclusiveLock, drop->missing_ok);
++				if (index == NULL)
++					continue;
+ 				if (index->rd_indam->ambuild  == lsm3_build)
+ 				{
+ 					Lsm3DictEntry* entry = lsm3_get_entry(index);
+@@ -1015,7 +1042,7 @@ lsm3_process_utility(PlannedStmt *plannedStmt,
+ 			Oid top_index[2];
+ 			if (IsA(parseTree, IndexStmt)) /* This is Lsm3 creation statement */
+ 			{
+-				IndexStmt* stmt = (IndexStmt*)parseTree;
++				IndexStmt* stmt = transformIndexStmt(entry->heap, (IndexStmt*)parseTree, queryString);
+ 				char* originIndexName = stmt->idxname;
+ 				char* originAccessMethod = stmt->accessMethod;
+ 
+@@ -1159,9 +1186,11 @@ _PG_init(void)
+ 	add_real_reloption(Lsm3ReloptKind, "vacuum_cleanup_index_scale_factor",
+ 					  "Packs btree index pages only to this percentage",
+ 					  -1, 0.0, 1e10, ShareUpdateExclusiveLock);
++#ifndef ARIABC_PRE13
+ 	add_bool_reloption(Lsm3ReloptKind, "deduplicate_items",
+ 					   "Enables \"deduplicate items\" feature for this btree index",
+ 					   true, AccessExclusiveLock);
++#endif
+ 
+ 	PreviousShmemStartupHook = shmem_startup_hook;
+ 	shmem_startup_hook = lsm3_shmem_startup;
+@@ -1244,5 +1273,5 @@ lsm3_top_index_size(PG_FUNCTION_ARGS)
+ 	Relation index = index_open(relid, AccessShareLock);
+ 	Lsm3DictEntry* entry = lsm3_get_entry(index);
+ 	index_close(index, AccessShareLock);
+-	PG_RETURN_INT64((uint64)lsm3_get_index_size(lsm3_get_index_size(entry->top[entry->active_index]))*BLCKSZ);
++	PG_RETURN_INT64((uint64)lsm3_get_index_size(entry->top[entry->active_index])*BLCKSZ);
+ }

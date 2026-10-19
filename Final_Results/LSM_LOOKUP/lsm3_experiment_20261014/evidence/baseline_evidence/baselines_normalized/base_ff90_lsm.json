@@ -1,0 +1,120 @@
+{
+  "version": 2,
+  "db_rows": 100000000,
+  "keyspace": "100000000|1|100000000",
+  "heap_bytes": 28248276992,
+  "index_bytes": 2246197248,
+  "total_relation_bytes": 33656602624,
+  "relpages": 3448276,
+  "fillfactor": [
+    "fillfactor=90"
+  ],
+  "indexes": [
+    {
+      "indexname": "usertable_merkle_idx",
+      "indexdef": "CREATE INDEX usertable_merkle_idx ON public.usertable USING merkle (ycsb_key) WITH (partitions='200', fanout='32', split_threshold='1024', merge_threshold='256')"
+    },
+    {
+      "indexname": "usertable_merkle_lookup_idx",
+      "indexdef": "CREATE INDEX usertable_merkle_lookup_idx ON public.usertable USING lsm3 (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200), merkle_key_hash(ycsb_key), ycsb_key) WITH (top_index_size='1024')"
+    },
+    {
+      "indexname": "usertable_merkle_lookup_idx_top0",
+      "indexdef": "CREATE INDEX usertable_merkle_lookup_idx_top0 ON public.usertable USING lsm3_btree_wrapper (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200), merkle_key_hash(ycsb_key), ycsb_key) WITH (top_index_size='1024')"
+    },
+    {
+      "indexname": "usertable_merkle_lookup_idx_top1",
+      "indexdef": "CREATE INDEX usertable_merkle_lookup_idx_top1 ON public.usertable USING lsm3_btree_wrapper (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200), merkle_key_hash(ycsb_key), ycsb_key) WITH (top_index_size='1024')"
+    },
+    {
+      "indexname": "usertable_pkey1",
+      "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+    }
+  ],
+  "sizes": [
+    {
+      "nspname": "ariabc_internal",
+      "relname": "merkle_node_usertable",
+      "bytes": 24739840
+    },
+    {
+      "nspname": "ariabc_internal",
+      "relname": "merkle_node_usertable_pkey",
+      "bytes": 6676480
+    },
+    {
+      "nspname": "ariabc_internal",
+      "relname": "merkle_node_usertable_prefix_idx",
+      "bytes": 7004160
+    },
+    {
+      "nspname": "ariabc_internal",
+      "relname": "merkle_node_usertable_root_idx",
+      "bytes": 16384
+    },
+    {
+      "nspname": "public",
+      "relname": "usertable",
+      "bytes": 28248276992
+    },
+    {
+      "nspname": "public",
+      "relname": "usertable_merkle_idx",
+      "bytes": 8192
+    },
+    {
+      "nspname": "public",
+      "relname": "usertable_merkle_lookup_idx",
+      "bytes": 3154264064
+    },
+    {
+      "nspname": "public",
+      "relname": "usertable_merkle_lookup_idx_top0",
+      "bytes": 8192
+    },
+    {
+      "nspname": "public",
+      "relname": "usertable_merkle_lookup_idx_top1",
+      "bytes": 8192
+    },
+    {
+      "nspname": "public",
+      "relname": "usertable_pkey1",
+      "bytes": 2246197248
+    }
+  ],
+  "db_system_id": "7695110858662784567",
+  "cluster_state": "shut down",
+  "checkpoint_lsn": "5/4F352790",
+  "pg_control_sha256": "14db14fd4dc3d1a46ea04395a1e6c74fb6ad79b68b293d812b5dcebdc2f21821",
+  "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+  "file_count": 1133,
+  "total_bytes": 35599247824,
+  "merkle_stats": {
+    "version": 11,
+    "fanout": 32,
+    "partitions": 200,
+    "partition_key_columns": 0,
+    "subpartitions": 1,
+    "split_threshold": 1024,
+    "merge_threshold": 256,
+    "total_nodes": 211400,
+    "leaf_nodes": 204800,
+    "hash_bits": 256,
+    "route_format_version": 4,
+    "row_hash_format_version": 1,
+    "baseline_apply_seq": 0,
+    "crash_recovery": "ordered_committed_delta_wal",
+    "recovery_state": "READY",
+    "applied_seq": 0,
+    "target_seq": 0,
+    "lag_items": 0,
+    "index_keys": [
+      "ycsb_key"
+    ]
+  },
+  "root": "136ddf6edd207060c2352dc97c8c3977fd8146adcc3ad6b5fa2cd465c52bec28",
+  "baseline_dir": "/home/neel/ariabc_data/lsm_lookup_20261014/base_ff90_lsm",
+  "fillfactor_value": 90,
+  "build_commit": "a7fc519dfdd0713247922abff3bc3c80b752e27e"
+}

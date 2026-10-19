@@ -1,0 +1,53 @@
+{
+  "published": {
+    "pgdata_base_v2_ff90": {
+      "db_system_id": "7695110858662784567",
+      "cluster_state": "shut down",
+      "checkpoint_lsn": "5/3F3BEE70",
+      "pg_control_sha256": "c8b6ad9e7cdbbea4fc9603066f733bbfab0b8b2a71eb355b05b397b2ccea73f3",
+      "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+      "file_count": 1146,
+      "total_bytes": 35866524242
+    },
+    "pgdata_base_v2_ff90_plain": {
+      "db_system_id": "7695110858662784567",
+      "cluster_state": "shut down",
+      "checkpoint_lsn": "5/3F40C6C8",
+      "pg_control_sha256": "006f129e73306522f6ae4b18084755caa06370294d7c2da915cb3e2fc5479b5a",
+      "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+      "file_count": 1141,
+      "total_bytes": 32712269772
+    }
+  },
+  "own": {
+    "base_ff90": {
+      "db_system_id": "7695110858662784567",
+      "cluster_state": "shut down",
+      "checkpoint_lsn": "5/4F2B5A38",
+      "pg_control_sha256": "4be7ab2ceeffd9a0b32d0656f8c9511732814075a1146b168c3721bb22af7797",
+      "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+      "file_count": 1131,
+      "total_bytes": 35598991502
+    },
+    "base_ff90_plain": {
+      "db_system_id": "7695110858662784567",
+      "cluster_state": "shut down",
+      "checkpoint_lsn": "5/4C814078",
+      "pg_control_sha256": "c8d15628954134be656e268327db33a2c2b64dfd1ad31ea600390b7be02f0295",
+      "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+      "file_count": 1130,
+      "total_bytes": 32495059768
+    },
+    "base_ff90_lsm": {
+      "db_system_id": "7695110858662784567",
+      "cluster_state": "shut down",
+      "checkpoint_lsn": "5/4F352790",
+      "pg_control_sha256": "14db14fd4dc3d1a46ea04395a1e6c74fb6ad79b68b293d812b5dcebdc2f21821",
+      "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+      "file_count": 1133,
+      "total_bytes": 35599247824
+    }
+  },
+  "pass_check": true,
+  "scope": "metadata/control/size identities, not a full content rehash"
+}

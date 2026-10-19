@@ -1,0 +1,150 @@
+{
+  "checked_on": "2026-10-15",
+  "host": "10.129.27.111",
+  "source": "/home/neel/claude_ctl/lsm_lookup_20261014/results/ycsb_d/run_20261015_031850_81506eff",
+  "summary_sha256": "8ee36798c9a6db78db07eb338f7b69367e09b1465b6e85dc28fb7e78d367497d",
+  "cases": [
+    {
+      "case": "d_s0.99_merkle_lsm_w16_t1",
+      "tps": 11474.469305794608,
+      "wal_bytes": 8539128,
+      "device_read_mib": 155.7109375,
+      "device_write_mib": 20.19921875,
+      "wall_time_ms": 1743.0,
+      "inserts": 1024,
+      "updates": 0,
+      "merges_requested_before": 0,
+      "merges_requested_after": 0,
+      "top_sizes": [
+        {
+          "nspname": "public",
+          "relname": "usertable_merkle_lookup_idx_top0",
+          "bytes": 57344
+        },
+        {
+          "nspname": "public",
+          "relname": "usertable_merkle_lookup_idx_top1",
+          "bytes": 8192
+        }
+      ],
+      "lookup_buffer_activity": [
+        {
+          "name": "usertable_merkle_lookup_idx",
+          "reads": 0,
+          "hits": 0
+        },
+        {
+          "name": "usertable_merkle_lookup_idx_top0",
+          "reads": 7,
+          "hits": 1811
+        },
+        {
+          "name": "usertable_merkle_lookup_idx_top1",
+          "reads": 0,
+          "hits": 0
+        }
+      ],
+      "divergence_count": 0,
+      "permanent_failures": 0,
+      "validated_requests": 20000,
+      "merkle_verify": "PASS",
+      "source": "/home/neel/claude_ctl/lsm_lookup_20261014/results/ycsb_d/run_20261015_031850_81506eff/d_s0.99_merkle_lsm_w16_t1"
+    },
+    {
+      "case": "d_s0.99_merkle_btree_w16_t1",
+      "tps": 10293.36078229542,
+      "wal_bytes": 16111416,
+      "device_read_mib": 170.16796875,
+      "device_write_mib": 31.1171875,
+      "wall_time_ms": 1943.0,
+      "inserts": 1024,
+      "updates": 0,
+      "merges_requested_before": null,
+      "merges_requested_after": null,
+      "top_sizes": [],
+      "lookup_buffer_activity": [
+        {
+          "name": "usertable_merkle_lookup_idx",
+          "reads": 2002,
+          "hits": 2110
+        }
+      ],
+      "divergence_count": 0,
+      "permanent_failures": 0,
+      "validated_requests": 20000,
+      "merkle_verify": "PASS",
+      "source": "/home/neel/claude_ctl/lsm_lookup_20261014/results/ycsb_d/run_20261015_031850_81506eff/d_s0.99_merkle_btree_w16_t1"
+    },
+    {
+      "case": "d_s0.99_merkle_btree_w16_t2",
+      "tps": 10793.308148947652,
+      "wal_bytes": 16119336,
+      "device_read_mib": 170.0703125,
+      "device_write_mib": 30.03125,
+      "wall_time_ms": 1853.0,
+      "inserts": 1024,
+      "updates": 0,
+      "merges_requested_before": null,
+      "merges_requested_after": null,
+      "top_sizes": [],
+      "lookup_buffer_activity": [
+        {
+          "name": "usertable_merkle_lookup_idx",
+          "reads": 2003,
+          "hits": 2109
+        }
+      ],
+      "divergence_count": 0,
+      "permanent_failures": 0,
+      "validated_requests": 20000,
+      "merkle_verify": "PASS",
+      "source": "/home/neel/claude_ctl/lsm_lookup_20261014/results/ycsb_d/run_20261015_031850_81506eff/d_s0.99_merkle_btree_w16_t2"
+    },
+    {
+      "case": "d_s0.99_merkle_lsm_w16_t2",
+      "tps": 11454.75372279496,
+      "wal_bytes": 8549768,
+      "device_read_mib": 155.703125,
+      "device_write_mib": 20.12109375,
+      "wall_time_ms": 1746.0,
+      "inserts": 1024,
+      "updates": 0,
+      "merges_requested_before": 0,
+      "merges_requested_after": 0,
+      "top_sizes": [
+        {
+          "nspname": "public",
+          "relname": "usertable_merkle_lookup_idx_top0",
+          "bytes": 57344
+        },
+        {
+          "nspname": "public",
+          "relname": "usertable_merkle_lookup_idx_top1",
+          "bytes": 8192
+        }
+      ],
+      "lookup_buffer_activity": [
+        {
+          "name": "usertable_merkle_lookup_idx",
+          "reads": 0,
+          "hits": 0
+        },
+        {
+          "name": "usertable_merkle_lookup_idx_top0",
+          "reads": 7,
+          "hits": 1811
+        },
+        {
+          "name": "usertable_merkle_lookup_idx_top1",
+          "reads": 0,
+          "hits": 0
+        }
+      ],
+      "divergence_count": 0,
+      "permanent_failures": 0,
+      "validated_requests": 20000,
+      "merkle_verify": "PASS",
+      "source": "/home/neel/claude_ctl/lsm_lookup_20261014/results/ycsb_d/run_20261015_031850_81506eff/d_s0.99_merkle_lsm_w16_t2"
+    }
+  ]
+}

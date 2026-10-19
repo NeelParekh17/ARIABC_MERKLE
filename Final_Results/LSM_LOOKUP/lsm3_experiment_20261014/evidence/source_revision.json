@@ -1,0 +1,10 @@
+{
+  "revision": "a7fc519dfdd0713247922abff3bc3c80b752e27e",
+  "lsm3_upstream": "3bac10420e7738ddbd78e0eea7e3967afdd35aac",
+  "sha256": {
+    "lsm3_full.patch": "b4ab1fac22961f98101c82b44483e6c37d110b5a1163ac34d88c9666e3aace4f",
+    "lsm3_compatibility.patch": "00c9ce647648bacc234db3ea3ba1e3657768e200ba3c293e23739468a91e951e",
+    "harness_added_files.patch": "ace0fbef5a8a1353efb66c96ec58661eca3fcee1aeeb65b07d97b56a6b411730",
+    "harness.patch": "1597b2a733177725261a11e8465deb7a8db03cb93e2562afa756b800a662b715"
+  }
+}

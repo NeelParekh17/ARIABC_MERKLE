@@ -1,0 +1,9 @@
+skew,workers,det_trials,det_updates_sum,det_hot_updates_sum,det_non_hot_updates_sum,det_inferred_lookup_inserts_sum,det_merges_requested_sum,det_merges_completed_sum,merkle_btree_trials,merkle_btree_updates_sum,merkle_btree_hot_updates_sum,merkle_btree_non_hot_updates_sum,merkle_btree_inferred_lookup_inserts_sum,merkle_btree_merges_requested_sum,merkle_btree_merges_completed_sum,merkle_lsm_trials,merkle_lsm_updates_sum,merkle_lsm_hot_updates_sum,merkle_lsm_non_hot_updates_sum,merkle_lsm_inferred_lookup_inserts_sum,merkle_lsm_merges_requested_sum,merkle_lsm_merges_completed_sum,top0_end_bytes_min,top0_end_bytes_max,top1_end_bytes_min,top1_end_bytes_max
+0.0,1,3,29949,29949,0,0,0,0,3,29949,29949,0,0,0,0,3,29949,29949,0,0,0,0,8192,8192,8192,8192
+0.0,4,3,29949,29949,0,0,0,0,3,29949,29949,0,0,0,0,3,29949,29949,0,0,0,0,8192,8192,8192,8192
+0.0,8,3,29949,29949,0,0,0,0,3,29949,29949,0,0,0,0,3,29949,29949,0,0,0,0,8192,8192,8192,8192
+0.0,16,3,29949,29949,0,0,0,0,3,29949,29949,0,0,0,0,3,29949,29949,0,0,0,0,8192,8192,8192,8192
+0.99,1,3,30024,30024,0,0,0,0,3,30024,30024,0,0,0,0,3,30024,30024,0,0,0,0,8192,8192,8192,8192
+0.99,4,3,30024,30012,12,0,0,0,3,30024,30013,11,11,0,0,3,30024,30013,11,11,0,0,16384,16384,8192,8192
+0.99,8,3,30024,30007,17,0,0,0,3,30024,30008,16,16,0,0,3,30024,30009,15,15,0,0,16384,16384,8192,8192
+0.99,16,3,30024,29986,38,0,0,0,3,30024,29981,43,43,0,0,3,30024,29979,45,45,0,0,16384,16384,8192,8192

@@ -1,0 +1,10 @@
+INSERT INTO b.usertable VALUES(1001,'det');
+INSERT INTO l.usertable VALUES(1001,'det');
+UPDATE b.usertable SET v='det-change' WHERE ycsb_key=1001;
+UPDATE l.usertable SET v='det-change' WHERE ycsb_key=1001;
+UPDATE b.usertable SET ycsb_key=1002 WHERE ycsb_key=1001;
+UPDATE l.usertable SET ycsb_key=1002 WHERE ycsb_key=1001;
+DELETE FROM b.usertable WHERE ycsb_key=1002;
+DELETE FROM l.usertable WHERE ycsb_key=1002;
+INSERT INTO b.usertable VALUES(1003,'persist');
+INSERT INTO l.usertable VALUES(1003,'persist');

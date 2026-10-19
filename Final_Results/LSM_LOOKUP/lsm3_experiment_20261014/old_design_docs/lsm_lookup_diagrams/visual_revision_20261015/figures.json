@@ -1,0 +1,104 @@
+[
+  {
+    "name": "09_baselines",
+    "title": "Two baselines, two independent changes",
+    "width": 2240,
+    "height": 1708
+  },
+  {
+    "name": "10_heap_math",
+    "title": "Why the heap is 28.25 GB",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "11_node_indexes",
+    "title": "Three B-trees over the Merkle node heap",
+    "width": 2240,
+    "height": 1148
+  },
+  {
+    "name": "12_entry_bytes",
+    "title": "One lookup leaf entry consumes 28 bytes",
+    "width": 2240,
+    "height": 1260
+  },
+  {
+    "name": "13_capacity",
+    "title": "Top capacity: estimate versus observation",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "14_size_checks",
+    "title": "Why a 1 MiB setting can overshoot",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "15_sparse_merge",
+    "title": "Sorting does not remove sparse base updates",
+    "width": 2240,
+    "height": 1372
+  },
+  {
+    "name": "16_wal",
+    "title": "The merge uses PostgreSQL WAL machinery",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "17_crash_boundaries",
+    "title": "Crash recovery: mechanism is not qualification",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "18_copy_locks",
+    "title": "COPY has a special merger-lock workaround",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "19_creation",
+    "title": "How we built the experimental lookup index",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "20_extension_fixes",
+    "title": "Four lsm3 defects fixed in the experiment",
+    "width": 2240,
+    "height": 1708
+  },
+  {
+    "name": "21_harness_fixes",
+    "title": "Two setup failures, two harness fixes",
+    "width": 2240,
+    "height": 1106
+  },
+  {
+    "name": "22_d_results",
+    "title": "YCSB D: the short-window insertion benefit",
+    "width": 2240,
+    "height": 1708
+  },
+  {
+    "name": "23_a_results",
+    "title": "Workload A barely writes the lookup index",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "24_evidence_limits",
+    "title": "What was tested, what remains open",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "25_review_corrections",
+    "title": "Corrections to the proposed additions",
+    "width": 2240,
+    "height": 1407
+  }
+]

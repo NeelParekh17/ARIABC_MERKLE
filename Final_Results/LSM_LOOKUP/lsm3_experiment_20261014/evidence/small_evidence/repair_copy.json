@@ -1,0 +1,53 @@
+{
+  "pass_check": true,
+  "plans": {
+    "b": [
+      [
+        "Unique"
+      ],
+      [
+        "  ->  Sort"
+      ],
+      [
+        "        Sort Key: t.ycsb_key"
+      ],
+      [
+        "        ->  Nested Loop"
+      ],
+      [
+        "              ->  Function Scan on u"
+      ],
+      [
+        "              ->  Index Scan using usertable_merkle_lookup_idx on usertable t"
+      ],
+      [
+        "                    Index Cond: ((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 4) = u.p) AND (merkle_key_hash(ycsb_key) >= u.lo) AND (merkle_key_hash(ycsb_key) <= merkle_node_upper_bound(u.lo, u.l)))"
+      ]
+    ],
+    "l": [
+      [
+        "Unique"
+      ],
+      [
+        "  ->  Sort"
+      ],
+      [
+        "        Sort Key: t.ycsb_key"
+      ],
+      [
+        "        ->  Nested Loop"
+      ],
+      [
+        "              Join Filter: ((merkle_key_hash(t.ycsb_key) >= u.lo) AND (merkle_key_hash(t.ycsb_key) <= merkle_node_upper_bound(u.lo, u.l)) AND (u.p = merkle_partition_for_hash(merkle_key_hash(t.ycsb_key), 4)))"
+      ],
+      [
+        "              ->  Index Scan using usertable_merkle_lookup_idx on usertable t"
+      ],
+      [
+        "              ->  Function Scan on u"
+      ]
+    ]
+  },
+  "copy_bytes": 3639,
+  "rows": 42
+}

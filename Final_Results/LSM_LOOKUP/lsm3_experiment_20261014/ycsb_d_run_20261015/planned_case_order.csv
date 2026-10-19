@@ -1,0 +1,5 @@
+workload,skew,mode,workers,trial
+d,0.99,merkle_lsm,16,1
+d,0.99,merkle_btree,16,1
+d,0.99,merkle_btree,16,2
+d,0.99,merkle_lsm,16,2

@@ -1,0 +1,22 @@
+/usr/bin/python3
+/usr/bin/findmnt
+/usr/bin/fuser
+/usr/bin/flock
+/usr/bin/timeout
+Neel
+               total        used        free      shared  buff/cache   available
+Mem:     16121192448  2181136384 12737085440     5513216  1551052800 13940056064
+Swap:     4294963200   908013568  3386949632
+SOURCE         FSTYPE TARGET
+/dev/nvme0n1p2 ext4   /
+259:2  
+Filesystem        1B-blocks         Used    Available Use% Mounted on
+/dev/nvme0n1p2 501809635328 369187815424 107056017408  78% /
+postgres (PostgreSQL) 13devel
+7c3d6f0c2e6020d45569428cf42e8e2c15917fdc195b7dde841c39948c3d5092  /home/neel/claude_checks/lsm_lookup_20261014/install/bin/postgres
+970521f9c951d2b2c3a3afd5ed32e1a484c108190598d530ccf0c9b5a243aa1f  /home/neel/claude_checks/lsm_lookup_20261014/cluster/ariabc_pg/build/bin/ariabc_pg_server
+LSM3_MODULE_SHA256 3d5d9913d45a54e164c4fd42540885ab0e95a062ba608c76bfcca0a71b55e8ad  /home/neel/claude_checks/lsm_lookup_20261014/install/lib/postgresql/lsm3.so
+
+Gateway:
+/usr/bin/timeout
+58a5663d6aaacfeb1bfb8a982cbe9026463de76d86d67b666376b4a09bb3742d  /home/neel/claude_ctl/lsm_lookup_20261014/src/ariabc_pg/build/bin/ariabc_pg_gateway

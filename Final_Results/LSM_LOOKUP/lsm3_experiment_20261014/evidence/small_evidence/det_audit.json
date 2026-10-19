@@ -1,0 +1,14 @@
+{
+  "b": {
+    "root": "3e53ec825a523682a1a9213f64ebe7a43eadff3e04ec1222f9437e9da7d02183",
+    "oracle": "3e53ec825a523682a1a9213f64ebe7a43eadff3e04ec1222f9437e9da7d02183",
+    "verify": true,
+    "rows": 194
+  },
+  "l": {
+    "root": "3e53ec825a523682a1a9213f64ebe7a43eadff3e04ec1222f9437e9da7d02183",
+    "oracle": "3e53ec825a523682a1a9213f64ebe7a43eadff3e04ec1222f9437e9da7d02183",
+    "verify": true,
+    "rows": 194
+  }
+}
