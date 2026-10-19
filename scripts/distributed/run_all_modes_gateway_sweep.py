@@ -187,7 +187,7 @@ def restore_tpcc_db(args, warehouses, enable_merkle):
         {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'ALTER TABLE warehouse SET LOGGED; ALTER TABLE district SET LOGGED; ALTER TABLE customer SET LOGGED; ALTER TABLE history SET LOGGED; ALTER TABLE oorder SET LOGGED; ALTER TABLE order_line SET LOGGED; ALTER TABLE new_order SET LOGGED; ALTER TABLE stock SET LOGGED; ALTER TABLE item SET LOGGED;' 2>&1
 
         # Create stored procs, indexes, and merkle indexes across all 9 tables (in-memory parallel builds)
-        {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -v bench_merkle_split_threshold={args.tpcc_merkle_split_threshold} -v bench_merkle_merge_threshold={args.tpcc_merkle_merge_threshold} -v bench_merkle_partition_key_columns={args.tpcc_merkle_partition_key_columns} -v bench_merkle_subpartitions={args.tpcc_merkle_subpartitions} -f {repo}/scripts/restore_tpcc_procs.sql 2>&1
+        {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_merkle_lookup_am={args.merkle_lookup_am} -v bench_merkle_lookup_levels={args.merkle_lookup_levels} -v bench_merkle_lookup_size={args.merkle_lookup_size} -v bench_merkle_lookup_ratio={args.merkle_lookup_size_ratio} -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -v bench_merkle_split_threshold={args.tpcc_merkle_split_threshold} -v bench_merkle_merge_threshold={args.tpcc_merkle_merge_threshold} -v bench_merkle_partition_key_columns={args.tpcc_merkle_partition_key_columns} -v bench_merkle_subpartitions={args.tpcc_merkle_subpartitions} -f {repo}/scripts/tpcc_v3/tpcc_procs.sql 2>&1
 
         # Fast ANALYZE (freshly inserted rows have zero dead tuples, VACUUM is redundant)
         {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'ANALYZE public.warehouse, public.district, public.customer, public.stock, public.item, public.oorder, public.new_order, public.order_line, public.history;' >/dev/null
@@ -261,6 +261,7 @@ TPCC_BCDB_SETTINGS = {
     "bcdb_gate_snapshot_each_block": "off",
     "merkle_apply_synchronous_direct": "on",
     "max_connections": "832",
+    "shared_preload_libraries": "merkle_lsm",
 }
 
 
@@ -445,6 +446,10 @@ def main():
     except Exception:
         pass
     parser = argparse.ArgumentParser(description="Multi-Mode Gateway Benchmark Sweep")
+    parser.add_argument("--merkle-lookup-am", choices=("btree", "merkle_lsm"), default="merkle_lsm")
+    parser.add_argument("--merkle-lookup-levels", type=int, choices=(2,3,4), default=3)
+    parser.add_argument("--merkle-lookup-size-ratio", type=int, default=16)
+    parser.add_argument("--merkle-lookup-size", type=int, default=1024)
     parser.add_argument("--gateway-host", default="10.129.27.111", help="Gateway host IP")
     parser.add_argument("--gateway-user", default="neel", help="Gateway SSH user")
     parser.add_argument("--gateway-repo", default="/home/neel/ARIABC/AriaBC", help="Repo path on Gateway")
@@ -619,6 +624,8 @@ def main():
     )
     parser.add_argument("--order-seed", type=int, default=42)
     args = parser.parse_args()
+    if not 16 <= args.merkle_lookup_size <= 2147483647 or not 2 <= args.merkle_lookup_size_ratio <= 1024:
+        parser.error("lookup size must be >=16 KiB and size ratio must be between 2 and 1024")
     global DB_RUNTIME_DIR, GW_WORKLOAD_DIR
     DB_RUNTIME_DIR = f"/home/{args.db_user}/ariabc_data/gateway_sweep"
     GW_WORKLOAD_DIR = f"/home/{args.gateway_user}/ariabc_data/workloads"
@@ -669,7 +676,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
     warehouse_counts = [int(w.strip()) for w in args.warehouses.split(",") if w.strip()]
     tpcc_workers = [int(w.strip()) for w in str(args.tpcc_workers).split(",") if w.strip()]
     campaign_contract(repo_root, out_dir, args,
-                      ["scripts/restore_tpcc_procs.sql", "scripts/restore_tpcc_scale.py", "scripts/generate_tpcc_workload.py", "scripts/tpcc/tpcc-pgdump-full.sql"],
+                      ["scripts/tpcc_v3/tpcc_procs.sql", "scripts/restore_tpcc_scale.py", "scripts/generate_tpcc_workload.py", "scripts/tpcc/tpcc-pgdump-full.sql"],
                       tpcc_workers, modes)
 
 
@@ -733,7 +740,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
             writer = csv.writer(f)
             writer.writerow(TPCC_CSV_FIELDS)
 
-    verify_remote_inputs(args, repo_root, ["scripts/restore_tpcc_procs.sql", "scripts/restore_tpcc_scale.py", "scripts/restore_tpcc_drop.sql"], run_cmd_args)
+    verify_remote_inputs(args, repo_root, ["scripts/tpcc_v3/tpcc_procs.sql", "scripts/restore_tpcc_scale.py", "scripts/restore_tpcc_drop.sql"], run_cmd_args)
     # Preflight: Create TPC-C drop-merkle SQL on DB node
     setup_tpcc_drop_merkle_sql(args)
     preflight_health_check(args)
@@ -745,7 +752,7 @@ def _run_tpcc_sweep(args, repo_root, out_dir, modes):
         for f in {TPCC_REMOTE_REPO}/scripts/tpcc/tpcc-pgdump-full.sql \
                  {TPCC_REMOTE_REPO}/scripts/restore_tpcc_drop.sql \
                  {TPCC_REMOTE_REPO}/scripts/restore_tpcc_scale.py \
-                 {TPCC_REMOTE_REPO}/scripts/restore_tpcc_procs.sql \
+                 {TPCC_REMOTE_REPO}/scripts/tpcc_v3/tpcc_procs.sql \
                  {TPCC_REMOTE_REPO}/scripts/generate_tpcc_workload.py; do
             if [ ! -f \\$f ]; then
                 echo MISSING: \\$f

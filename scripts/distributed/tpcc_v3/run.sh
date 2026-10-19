@@ -21,6 +21,14 @@ FILLFACTOR=${FILLFACTOR:-90} SPLIT=${SPLIT:-1024} MERGE=${MERGE:-256}
 P=${P:-16384} PKC=${PKC:-1} SUB=${SUB:-16} SEED=${SEED:-42}
 SHARED_BUFFERS=${SHARED_BUFFERS:-32GB} CHECKPOINT_TIMEOUT=${CHECKPOINT_TIMEOUT:-5min}
 MAX_WAL_SIZE=${MAX_WAL_SIZE:-64GB} GATEWAY_TIMEOUT_S=${GATEWAY_TIMEOUT_S:-7200}
+MERKLE_LOOKUP_AM=${MERKLE_LOOKUP_AM:-merkle_lsm}
+MERKLE_LOOKUP_LEVELS=${MERKLE_LOOKUP_LEVELS:-3}
+MERKLE_LOOKUP_SIZE=${MERKLE_LOOKUP_SIZE:-1024}
+MERKLE_LOOKUP_RATIO=${MERKLE_LOOKUP_RATIO:-16}
+case $MERKLE_LOOKUP_AM in btree|merkle_lsm) ;; *) exit 2;; esac
+[[ $MERKLE_LOOKUP_LEVELS =~ ^[234]$ && $MERKLE_LOOKUP_SIZE =~ ^[0-9]+$ && $MERKLE_LOOKUP_RATIO =~ ^[0-9]+$ ]] || exit 2
+(( MERKLE_LOOKUP_SIZE >= 16 && MERKLE_LOOKUP_RATIO >= 2 && MERKLE_LOOKUP_RATIO <= 1024 )) || exit 2
+export MERKLE_LOOKUP_AM MERKLE_LOOKUP_LEVELS MERKLE_LOOKUP_SIZE MERKLE_LOOKUP_RATIO
 DET_WINDOW=${DET_WINDOW:-1024} DET_PIPELINE_DEPTH=${DET_PIPELINE_DEPTH:-1024}
 [[ $RUNROOT == "$C"/B_* && $RUNROOT != *"'"* && $RUNROOT != *$'\n'* ]] || exit 2
 for value in "$PORT" "$CLIENT_PORT" "$RAFT_PORT" "$FILLFACTOR" "$SPLIT" "$MERGE" "$P" "$PKC" "$SUB" "$SEED" "$GATEWAY_TIMEOUT_S" "$DET_WINDOW" "$DET_PIPELINE_DEPTH"; do
@@ -128,7 +136,7 @@ mem = {line.split(':')[0]: int(line.split()[1]) for line in Path('/proc/meminfo'
 buf = int(os.environ['SHARED_BUFFERS'][:-2])*1024*1024
 if mem['MemAvailable'] < buf*2:
     raise SystemExit('Need available memory >= twice shared_buffers; do not disturb other users')
-expected = dict(default_transaction_isolation='serializable', synchronous_commit='on', fsync='on',
+expected = dict(shared_preload_libraries='merkle_lsm', default_transaction_isolation='serializable', synchronous_commit='on', fsync='on',
     full_page_writes='on', autovacuum='on', enable_seqscan='off', log_checkpoints='on',
     shared_buffers=str(buf//8), checkpoint_timeout=str(int(os.environ['CHECKPOINT_TIMEOUT'][:-3])*60
     if os.environ['CHECKPOINT_TIMEOUT'].endswith('min') else int(os.environ['CHECKPOINT_TIMEOUT'][:-1])),
@@ -145,6 +153,10 @@ cfg = dict(mode=os.environ['MODE'], warehouses=int(os.environ['W']), count=int(o
     smoke=os.environ['SMOKE']=='1', cpuset=os.environ['CPUSET'], expected_settings=expected,
     load_noise_threshold=os.cpu_count(), other_cpu_noise_threshold=100,
     progress_interval_ms=1000, completion_counter_includes_aborts=True)
+cfg['merkle_lookup_am'] = os.environ['MERKLE_LOOKUP_AM']
+cfg['merkle_lookup_levels'] = int(os.environ['MERKLE_LOOKUP_LEVELS'])
+cfg['merkle_lookup_size'] = int(os.environ['MERKLE_LOOKUP_SIZE'])
+cfg['merkle_lookup_size_ratio'] = int(os.environ['MERKLE_LOOKUP_RATIO'])
 cfg['det_window'] = int(os.environ['DET_WINDOW'])
 cfg['det_pipeline_depth'] = int(os.environ['DET_PIPELINE_DEPTH'])
 Path(os.environ['RUN'], 'config.json').write_text(json.dumps(cfg, indent=2)+'\n')
@@ -176,6 +188,7 @@ max_wal_size = '$MAX_WAL_SIZE'
 wal_keep_segments = ${WAL_KEEP_SEGMENTS:-7680}
 bcdb_worker_count = $BCDB_WORKERS
 enable_merkle_index = $MERKLE_GUC
+shared_preload_libraries = 'merkle_lsm'
 bcdb_serial_gate_mode = 1
 bcdb_serial_gate_source = 0
 bcdb_dt_conflict_tracking = on
@@ -206,7 +219,7 @@ python3 "$SRC/scripts/tpcc_v3/tpcc_load.py" --warehouses "$W" --seed "$SEED" \
 for table in warehouse district customer stock oorder order_line new_order history item; do
   "${PSQL[@]}" -c "ALTER TABLE public.$table SET (fillfactor=$FILLFACTOR); ALTER TABLE public.$table SET LOGGED;" >>"$RUN/logged.log" 2>&1
 done
-"${PSQL[@]}" -v bench_enable_merkle="$MERKLE" -v bench_merkle_fanout=32 -v bench_merkle_partitions="$P" \
+"${PSQL[@]}" -v bench_merkle_lookup_am="$MERKLE_LOOKUP_AM" -v bench_merkle_lookup_levels="$MERKLE_LOOKUP_LEVELS" -v bench_merkle_lookup_size="$MERKLE_LOOKUP_SIZE" -v bench_merkle_lookup_ratio="$MERKLE_LOOKUP_RATIO" -v bench_enable_merkle="$MERKLE" -v bench_merkle_fanout=32 -v bench_merkle_partitions="$P" \
   -v bench_merkle_split_threshold="$SPLIT" -v bench_merkle_merge_threshold="$MERGE" \
   -v bench_merkle_partition_key_columns="$PKC" -v bench_merkle_subpartitions="$SUB" \
   -f "$SRC/scripts/tpcc_v3/tpcc_procs.sql" >"$RUN/procs.log" 2>&1
@@ -289,6 +302,12 @@ SAMPLER_RC=0
 wait "$SAMPLER_PID" || SAMPLER_RC=$?
 SAMPLER_PID=
 cp "$RUN/postgres.log" "$RUN/postgres_workload.log"
+# Drain outside the sampled throughput/WAL window, with separate evidence.
+if [[ $MODE == merkle && $MERKLE_LOOKUP_AM == merkle_lsm ]]; then
+  date -Is >"$RUN/lsm_drain.log"
+  "${PSQL[@]}" -c "SET statement_timeout='10min'; SELECT merkle_lsm_flush(c.oid) FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE a.amname='merkle_lsm';" >>"$RUN/lsm_drain.log" 2>&1
+  date -Is >>"$RUN/lsm_drain.log"
+fi
 # Dump exactly the sampled steady window, not init/load/warmup/drain.
 if python3 "$HERE/summary.py" "$RUN" --window-only >"$RUN/window_selection.log" 2>&1; then
   read -r L0 L1 < <(python3 - "$RUN/window.json" <<'PY'

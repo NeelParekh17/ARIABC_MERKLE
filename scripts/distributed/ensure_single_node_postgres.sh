@@ -127,6 +127,9 @@ rm -f "$PGDATA_DIR/bench_single_auto.conf"
 # Reset ALTER SYSTEM state between runs. This avoids startup failures when
 # previous runs wrote custom GUCs that are not recognized by the current binary.
 rm -f "$PGDATA_DIR/postgresql.auto.conf"
+if [[ "$BIN_DIR" == "$INSTALL_DIR/bin" ]]; then
+  echo "shared_preload_libraries = 'merkle_lsm'" >> "$PGDATA_DIR/postgresql.auto.conf"
+fi
 if ! grep -Eq '^host\s+all\s+all\s+127\.0\.0\.1/32\s+trust$' "$PGDATA_DIR/pg_hba.conf"; then
   echo "host all all 127.0.0.1/32 trust" >> "$PGDATA_DIR/pg_hba.conf"
 fi
@@ -197,6 +200,9 @@ _reinit_pgdata() {
   fi
   sed -i "/include_if_exists = 'bench_single_auto.conf'/d" "$PGDATA_DIR/postgresql.conf"
   rm -f "$PGDATA_DIR/bench_single_auto.conf" "$PGDATA_DIR/postgresql.auto.conf"
+  if [[ "$BIN_DIR" == "$INSTALL_DIR/bin" ]]; then
+    echo "shared_preload_libraries = 'merkle_lsm'" >> "$PGDATA_DIR/postgresql.auto.conf"
+  fi
   if ! grep -Eq '^host\s+all\s+all\s+127\.0\.0\.1/32\s+trust$' "$PGDATA_DIR/pg_hba.conf"; then
     echo "host all all 127.0.0.1/32 trust" >> "$PGDATA_DIR/pg_hba.conf"
   fi

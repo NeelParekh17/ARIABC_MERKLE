@@ -283,47 +283,28 @@ CREATE INDEX oorder_merkle_idx     ON public.oorder     USING merkle (o_w_id, o_
 CREATE INDEX new_order_merkle_idx  ON public.new_order  USING merkle (no_w_id, no_d_id, no_o_id)            WITH (:bench_merkle_with);
 CREATE INDEX order_line_merkle_idx ON public.order_line USING merkle (ol_w_id, ol_d_id, ol_o_id, ol_number) WITH (:bench_merkle_with);
 
--- Lookup indexes serve the Merkle split query.  Their route-hash expression
--- must be the one get_index_key_expr_str() (merkleapply.c) generates for the
--- index, so it is derived from the catalog and the index's routing options.
-DO $$
-DECLARE
-  r record;
-  key_cols text;
-  lead_cols text;
-  key_hash text;
-BEGIN
-  FOR r IN
-    SELECT t.relname AS tbl, i.indexrelid, i.indnatts,
-           coalesce((SELECT (regexp_match(array_to_string(c.reloptions, ','), '(?:^|,)partitions=(\d+)'))[1]::int), 200) AS partitions,
-           coalesce((SELECT (regexp_match(array_to_string(c.reloptions, ','), '(?:^|,)partition_key_columns=(\d+)'))[1]::int), 0) AS lead_n,
-           coalesce((SELECT (regexp_match(array_to_string(c.reloptions, ','), '(?:^|,)subpartitions=(\d+)'))[1]::int), 1) AS subparts
-      FROM pg_index i
-      JOIN pg_class c ON c.oid = i.indexrelid
-      JOIN pg_class t ON t.oid = i.indrelid
-      JOIN pg_am am ON am.oid = c.relam
-     WHERE am.amname = 'merkle' AND t.relnamespace = 'public'::regnamespace
-       AND t.relname IN ('warehouse', 'district', 'customer', 'history', 'item',
-                         'stock', 'oorder', 'new_order', 'order_line')
-  LOOP
-    SELECT string_agg(pg_get_indexdef(r.indexrelid, k, true), ', ' ORDER BY k),
-           string_agg(pg_get_indexdef(r.indexrelid, k, true), ', ' ORDER BY k)
-             FILTER (WHERE k <= r.lead_n)
-      INTO key_cols, lead_cols
-      FROM generate_series(1, r.indnatts) AS k;
-
-    IF r.lead_n > 0 THEN
-      key_hash := format('merkle_key_hash_routed(ROW(%s), ROW(%s), %s, %s)',
-                         key_cols, lead_cols, r.partitions, r.subparts);
-    ELSIF r.indnatts > 1 THEN
-      key_hash := format('merkle_key_hash(ROW(%s))', key_cols);
-    ELSE
-      key_hash := format('merkle_key_hash(%s)', key_cols);
-    END IF;
-
-    EXECUTE format('CREATE INDEX %I ON public.%I (merkle_partition_for_hash(%s, %s), %s, %s)',
-                   r.tbl || '_merkle_lookup_idx', r.tbl, key_hash, r.partitions, key_hash, key_cols);
-  END LOOP;
-END
-$$;
+-- One canonical expression builder, shared with YCSB and setup tools.
+CREATE EXTENSION IF NOT EXISTS merkle_lsm;
+\if :{?bench_merkle_lookup_am}
+\else
+\set bench_merkle_lookup_am merkle_lsm
+\endif
+\if :{?bench_merkle_lookup_levels}
+\else
+\set bench_merkle_lookup_levels 3
+\endif
+\if :{?bench_merkle_lookup_size}
+\else
+\set bench_merkle_lookup_size 1024
+\endif
+\if :{?bench_merkle_lookup_ratio}
+\else
+\set bench_merkle_lookup_ratio 16
+\endif
+SELECT merkle_create_lookup_index(t.oid, :'bench_merkle_lookup_am',
+                                 :bench_merkle_lookup_levels, :bench_merkle_lookup_size, :bench_merkle_lookup_ratio)
+FROM pg_class t
+WHERE t.relnamespace='public'::regnamespace
+  AND t.relname IN ('warehouse','district','customer','history','item','stock',
+                    'oorder','new_order','order_line');
 \endif

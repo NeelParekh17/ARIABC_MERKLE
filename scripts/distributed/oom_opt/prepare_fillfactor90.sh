@@ -40,6 +40,7 @@ max_parallel_maintenance_workers = 0
 max_parallel_workers_per_gather = 0
 bcdb_worker_count = 1
 bcdb_ledger_trace = off
+shared_preload_libraries = 'merkle_lsm'
 enable_merkle_index = on
 merkle_apply_synchronous_direct = on
 default_transaction_isolation = 'serializable'
@@ -73,11 +74,10 @@ DROP INDEX usertable_merkle_idx;
 DROP INDEX usertable_merkle_lookup_idx;
 ALTER TABLE usertable SET (fillfactor=90);
 VACUUM (FULL, ANALYZE) usertable;
-CREATE INDEX usertable_merkle_lookup_idx ON usertable
-    (merkle_partition_for_hash(merkle_key_hash(ycsb_key),200),
-     merkle_key_hash(ycsb_key), ycsb_key);
 CREATE INDEX usertable_merkle_idx ON usertable USING merkle (ycsb_key)
     WITH (partitions=200, fanout=32, split_threshold=1024, merge_threshold=256);
+CREATE EXTENSION IF NOT EXISTS merkle_lsm;
+SELECT merkle_create_lookup_index('usertable');
 ANALYZE usertable;
 ANALYZE ariabc_internal.merkle_node_usertable;
 SELECT count(*), min(ycsb_key), max(ycsb_key) FROM usertable;

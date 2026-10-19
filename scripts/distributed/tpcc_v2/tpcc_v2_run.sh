@@ -78,6 +78,7 @@ checkpoint_timeout = 30min
 max_wal_size = 20GB
 bcdb_worker_count = $BCDB_WORKERS
 enable_merkle_index = $MERKLE_GUC
+shared_preload_libraries = 'merkle_lsm'
 bcdb_serial_gate_mode = 1
 bcdb_serial_gate_source = 0
 bcdb_dt_conflict_tracking = on
@@ -120,7 +121,7 @@ restore_start=$(date +%s)
 $PSQL -v bench_enable_merkle=$MERKLE -v bench_merkle_fanout=32 -v bench_merkle_partitions=$P \
   -v bench_merkle_split_threshold=$SPLIT -v bench_merkle_merge_threshold=$MERGE \
   -v bench_merkle_partition_key_columns=$PKC -v bench_merkle_subpartitions=$SUB \
-  -f $SRC/scripts/restore_tpcc_procs.sql >$RUN/procs.log 2>&1
+  -f $SRC/scripts/tpcc_v3/tpcc_procs.sql >$RUN/procs.log 2>&1
 echo "merkle_build_s=$(( $(date +%s) - restore_start ))" > $RUN/result.txt
 $PSQL --csv -c "SELECT c.relname,COALESCE(array_to_string(c.reloptions,';'),'') AS reloptions FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE a.amname='merkle' ORDER BY c.relname" > "$RUN/merkle_options.csv"
 $PSQL --csv -c "SELECT name,setting FROM pg_settings WHERE name IN ('default_transaction_isolation','synchronous_commit','fsync','full_page_writes','merkle_apply_synchronous_direct','shared_buffers','bcdb_worker_count') ORDER BY name" > "$RUN/settings.csv"

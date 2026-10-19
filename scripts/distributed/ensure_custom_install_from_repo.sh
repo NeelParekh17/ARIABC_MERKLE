@@ -58,6 +58,8 @@ fi
 
 verify_install() {
   local dir="$1"
+  [[ -f "$dir/lib/postgresql/merkle_lsm.so" ]] || return 1
+  [[ -f "$dir/share/postgresql/extension/merkle_lsm.control" ]] || return 1
   [[ -x "$dir/bin/postgres" ]] || return 1
   [[ -x "$dir/bin/initdb" ]] || return 1
   [[ -x "$dir/bin/pg_ctl" ]] || return 1
@@ -97,7 +99,7 @@ install_is_stale() {
       "$REPO_ROOT/src" \
       "$REPO_ROOT/contrib" \
       -type f \
-      \( -name '*.c' -o -name '*.h' -o -name '*.l' -o -name '*.y' -o -name 'Makefile' -o -name 'GNUmakefile' \) \
+      \( -name '*.c' -o -name '*.h' -o -name '*.l' -o -name '*.y' -o -name '*.sql' -o -name '*.control' -o -name 'Makefile' -o -name 'GNUmakefile' \) \
       -newer "$postgres_bin" \
       -print -quit 2>/dev/null || true
   )"

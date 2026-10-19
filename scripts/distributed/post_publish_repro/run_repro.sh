@@ -38,6 +38,7 @@ autovacuum = off
 default_transaction_isolation = 'serializable'
 bcdb_worker_count = $WORKERS
 enable_merkle_index = off
+shared_preload_libraries = 'merkle_lsm'
 bcdb_serial_gate_mode = 1
 bcdb_serial_gate_source = 0
 bcdb_dt_conflict_tracking = on

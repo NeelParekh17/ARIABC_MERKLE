@@ -61,7 +61,7 @@ printf %s {shlex.quote(conf)} > {check_dir}/postgresql.auto.conf
         sizes = json.loads(runner.sql(args, "SELECT json_build_object('heap_bytes', pg_relation_size('ariabc_internal.merkle_node_usertable'), 'total_bytes', pg_total_relation_size('ariabc_internal.merkle_node_usertable'), 'nodes', (SELECT count(*) FROM ariabc_internal.merkle_node_usertable));"))
         assert sizes['nodes'] == stats['total_nodes'] > 0, sizes
         assert sizes['heap_bytes'] / sizes['nodes'] < 512, sizes
-        indexes = json.loads(runner.sql(args, "SELECT json_agg(row_to_json(i)) FROM (SELECT indexname,indexdef FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;"))
+        indexes = json.loads(runner.sql(args, "SELECT json_agg(row_to_json(i)) FROM (SELECT indexname,indexdef FROM pg_indexes p WHERE tablename='usertable' AND EXISTS (SELECT 1 FROM pg_index x WHERE x.indexrelid=to_regclass(quote_ident(p.schemaname)||'.'||quote_ident(p.indexname)) AND x.indislive) ORDER BY indexname) i;"))
         assert {i['indexname'] for i in indexes} == {'usertable_pkey1', 'usertable_merkle_idx', 'usertable_merkle_lookup_idx'}, indexes
         record = dict(keyspace=keyspace, reloptions=options, merkle_stats=stats, merkle_verify=verified, node_storage=sizes, indexes=indexes)
         (evidence / 'verification.json').write_text(json.dumps(record, indent=2) + '\n')

@@ -34,6 +34,10 @@ def source_hashes(repo):
              repo / 'scripts/distributed/sql/raft_apply_ledger_schema.sql']
     paths += sorted((repo / 'scripts/distributed').glob('*.py'))
     paths += [repo / 'scripts/distributed/run_4node_raft_cluster.sh']
+    paths += sorted((repo / 'contrib/merkle_lsm').glob('*.c'))
+    paths += sorted((repo / 'contrib/merkle_lsm').glob('*.h'))
+    paths += sorted((repo / 'contrib/merkle_lsm').glob('*.sql'))
+    paths += [repo / 'contrib/merkle_lsm/Makefile', repo / 'contrib/merkle_lsm/merkle_lsm.control']
     return {str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in paths if p.is_file()}
 
@@ -68,7 +72,7 @@ def validate_settings(settings, buffers, workers, mode):
     expected_bytes = int(size[1]) * {'kB':1024, 'MB':1024**2, 'GB':1024**3}[size[2]]
     if int(settings['shared_buffers']) * int(settings['block_size']) != expected_bytes:
         raise RuntimeError('Effective shared_buffers differs from campaign contract')
-    expected = dict(fsync='on', full_page_writes='on', synchronous_commit='on',
+    expected = dict(shared_preload_libraries='merkle_lsm', fsync='on', full_page_writes='on', synchronous_commit='on',
                     autovacuum='off', track_io_timing='on',
                     enable_merkle_index='on' if mode == 'bcdb_merkle' else 'off',
                     bcdb_worker_count=str(workers if mode != 'pg' else 1))

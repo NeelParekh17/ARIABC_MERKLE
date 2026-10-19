@@ -317,6 +317,7 @@ max_wal_size = 2GB
 synchronous_commit = off
 fsync = off
 full_page_writes = off
+shared_preload_libraries = 'merkle_lsm'
 enable_merkle_index = on
 merkle_apply_synchronous_direct = on
 default_transaction_isolation = 'serializable'
@@ -370,24 +371,16 @@ EOF
         ALTER TABLE usertable ADD CONSTRAINT usertable_pkey1 PRIMARY KEY (ycsb_key);
     "
 
-    echo '  [5/6] Building Merkle Covering Lookup Index...'
-    {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "
-        SET max_parallel_maintenance_workers = {args.gen_parallel_maintenance_workers};
-        SET maintenance_work_mem = '{args.gen_maintenance_work_mem}';
-        DROP INDEX IF EXISTS usertable_merkle_lookup_idx;
-        CREATE INDEX usertable_merkle_lookup_idx ON usertable (
-            merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200),
-            merkle_key_hash(ycsb_key),
-            ycsb_key
-        );
-    "
     # The custom Merkle build allocations are not capped by maintenance_work_mem.
-    # Check after the lookup build has released its memory, before Merkle starts.
+    # Check available memory before building the Merkle integrity index.
     awk '/MemAvailable:/ {{available=$2; found=1}} END {{if (!found || available < {args.gen_min_mem_available_mb} * 1024) exit 1}}' /proc/meminfo
     free -m
     {args.install_dir}/bin/psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {args.db_port} -U postgres -d postgres -c "
         CREATE INDEX usertable_merkle_idx ON usertable USING merkle (ycsb_key)
         WITH (partitions = 200, fanout = 32, split_threshold = 1024, merge_threshold = 256);
+        CREATE EXTENSION IF NOT EXISTS merkle_lsm;
+        SELECT merkle_create_lookup_index('usertable', '{args.merkle_lookup_am}',
+            {args.merkle_lookup_levels}, {args.merkle_lookup_size}, {args.merkle_lookup_size_ratio});
     "
 
     echo '  [6/6] Analyzing table statistics...'
@@ -624,6 +617,7 @@ def validate_golden_baseline(args):
 rm -rf {check_dir}
 cp -a --reflink=never {base_dir} {check_dir}
 cat > {check_dir}/postgresql.auto.conf <<'EOCONF'
+shared_preload_libraries = 'merkle_lsm'
 port = {args.db_port}
 listen_addresses = '*'
 shared_buffers = '256MB'
@@ -657,8 +651,8 @@ EOCONF
         heap_bytes, index_bytes, total_rel_bytes, relpages = [int(x) for x in table_stats.split('|')]
 
         indexes = golden_sql("SELECT json_agg(row_to_json(i)) FROM "
-                             "(SELECT indexname, indexdef FROM pg_indexes "
-                             "WHERE tablename='usertable' ORDER BY indexname) i;")
+                             "(SELECT indexname, indexdef FROM pg_indexes p WHERE EXISTS (SELECT 1 FROM pg_index x WHERE x.indexrelid=to_regclass(quote_ident(p.schemaname)||'.'||quote_ident(p.indexname)) AND x.indislive) AND "
+                             "tablename='usertable' ORDER BY indexname) i;")
     finally:
         # Guaranteed cleanup of the temporary check instance
         run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
@@ -727,7 +721,7 @@ def ensure_plain_baseline(args, golden):
     stop_server(args)
     stop_postgres(args)
     tmp = plain + ".tmp"
-    conf = (f"port = {args.db_port}\nlisten_addresses = '*'\nshared_buffers = '128MB'\n"
+    conf = (f"shared_preload_libraries = 'merkle_lsm'\nport = {args.db_port}\nlisten_addresses = '*'\nshared_buffers = '128MB'\n"
             "enable_merkle_index = off\nbcdb_worker_count = 1\nbcdb_ledger_trace = off\n"
             "autovacuum = off\nmax_parallel_maintenance_workers = 0\n")
     run_remote(args.remote_host, args.remote_user, db_shell(args) + f"""
@@ -746,7 +740,7 @@ printf %s {shlex.quote(conf)} > {tmp}/postgresql.auto.conf
         if stats != f"{golden['heap_bytes']}|{golden['index_bytes']}|{golden['relpages']}":
             raise RuntimeError(f"Plain baseline relation sizes differ from golden: {stats}")
         indexes = json.loads(sql(args, "SELECT json_agg(row_to_json(i)) FROM (SELECT indexname, indexdef "
-                                       "FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;"))
+                                       "FROM pg_indexes p WHERE EXISTS (SELECT 1 FROM pg_index x WHERE x.indexrelid=to_regclass(quote_ident(p.schemaname)||'.'||quote_ident(p.indexname)) AND x.indislive) AND tablename='usertable' ORDER BY indexname) i;"))
         if any("merkle" in i["indexname"] for i in indexes):
             raise RuntimeError(f"Merkle index survived in plain baseline: {indexes}")
         sql(args, "CHECKPOINT;")
@@ -855,7 +849,8 @@ def reset_remote_pgdata(args, mode, workers):
     bcdb_workers = workers if base_mode(mode) != "pg" else 1
     # auto.conf is replaced on the disposable copy so old ALTER SYSTEM values
     # cannot silently override the campaign contract.
-    config = f"""port = {args.db_port}
+    config = f"""shared_preload_libraries = 'merkle_lsm'
+port = {args.db_port}
 listen_addresses = '*'
 shared_buffers = '{args.shared_buffers}'
 enable_merkle_index = {enable}
@@ -991,6 +986,18 @@ rm -f {work}/.merkle_index_dropped
         args._merkle_index_dropped = True
         run_remote(args.remote_host, args.remote_user, f"touch {work}/.merkle_index_dropped", check=False)
     else:
+        actual_lookup_am = sql(args, "SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid=c.relam "
+                               "WHERE c.oid='usertable_merkle_lookup_idx'::regclass;")
+        if actual_lookup_am != args.merkle_lookup_am:
+            raise RuntimeError(f"Golden lookup AM is {actual_lookup_am}; requested {args.merkle_lookup_am}. "
+                               "Rebuild the baseline lookup via merkle_create_lookup_index, or select --merkle-lookup-am btree explicitly.")
+        if actual_lookup_am == "merkle_lsm":
+            actual_config = json.loads(sql(args, "SELECT merkle_lsm_config('usertable_merkle_lookup_idx');"))
+            requested_config = dict(levels=args.merkle_lookup_levels, top_index_size=args.merkle_lookup_size,
+                                    size_ratio=args.merkle_lookup_size_ratio)
+            if actual_config != requested_config:
+                raise RuntimeError(f"Golden lookup settings are {actual_config}; requested {requested_config}. "
+                                   "Rebuild the baseline lookup before changing its LSM settings.")
         args._merkle_index_dropped = False
         run_remote(args.remote_host, args.remote_user, f"rm -f {work}/.merkle_index_dropped", check=False)
     # Verification phase:
@@ -1020,8 +1027,8 @@ rm -f {work}/.merkle_index_dropped
         if relpages != manifest['relpages']:
             raise RuntimeError(f"Post-copy relpages mismatch: {relpages} != {manifest['relpages']}")
     indexes = sql(args, "SELECT json_agg(row_to_json(i)) FROM "
-                       "(SELECT indexname, indexdef FROM pg_indexes WHERE tablename='usertable' ORDER BY indexname) i;")
-    if ("USING merkle" in indexes) != (mode == "bcdb_merkle"):
+                       "(SELECT indexname, indexdef FROM pg_indexes p WHERE EXISTS (SELECT 1 FROM pg_index x WHERE x.indexrelid=to_regclass(quote_ident(p.schemaname)||'.'||quote_ident(p.indexname)) AND x.indislive) AND tablename='usertable' ORDER BY indexname) i;")
+    if bool(re.search(r"USING merkle\s*\(", indexes)) != (mode == "bcdb_merkle"):
         raise RuntimeError(f"Wrong Merkle index state: {indexes}")
     if ("merkle_lookup_idx" in indexes) != (mode == "bcdb_merkle"):
         raise RuntimeError("Merkle lookup index does not match mode")
@@ -1060,6 +1067,7 @@ rm -f {work}/.merkle_index_dropped
                        "fsync": "on", "full_page_writes": "on", "synchronous_commit": "on",
                        "track_counts": "on", "track_io_timing": "on",
                        "log_checkpoints": "on", "bcdb_ledger_trace": "off",
+                       "shared_preload_libraries": "merkle_lsm",
                        "default_transaction_isolation": isolation_for(mode),
                        **CANONICAL_BCDB_SETTINGS}.items():
         if settings[key] != value:
@@ -1244,6 +1252,10 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         # CHECKPOINT is measured separately, outside the TPS interval. It makes
         # deferred dirty heap/index writeback visible instead of counting only
         # writes that happened to reach the device during the short workload.
+        if mode == "bcdb_merkle" and args.merkle_lookup_am == "merkle_lsm":
+            drain_start = time.monotonic()
+            sql(args, "SELECT merkle_lsm_flush('usertable_merkle_lookup_idx');", timeout=args.verify_timeout)
+            metrics["lsm_drain_ms"] = (time.monotonic() - drain_start) * 1000
         checkpoint_pg_before = get_pg_io_stats(args)
         memory_before = run_remote(args.remote_host, args.remote_user,
                                    "cat /proc/meminfo", timeout=15).stdout
@@ -1293,6 +1305,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
             raise RuntimeError(f"Server reports retry_jitter={retries.get('retry_jitter')!r}, "
                                f"expected --pg-retry-jitter {args.pg_retry_jitter} (stale server binary?)")
         row = dict(workload=workload, skew=skew, mode=mode, workers=workers, trial=trial,
+                   merkle_lookup_am=args.merkle_lookup_am, lsm_drain_ms=metrics.get("lsm_drain_ms", 0),
                    isolation=isolation_for(mode),
                    retry_attempts=int(retries.get("retry_attempts_total", 0)),
                    retry_backoff_requested_ms=int(retries.get("retry_backoff_requested_ms", 0)),
@@ -1353,6 +1366,10 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--merkle-lookup-am", choices=("btree", "merkle_lsm"), default="merkle_lsm")
+    parser.add_argument("--merkle-lookup-levels", type=int, choices=(2, 3, 4), default=3)
+    parser.add_argument("--merkle-lookup-size-ratio", type=int, default=16)
+    parser.add_argument("--merkle-lookup-size", type=int, default=1024, help="L0 target size in KiB")
     for name, default in (("remote-host", DEFAULT_REMOTE_HOST), ("remote-user", DEFAULT_REMOTE_USER),
                           ("remote-dir", DEFAULT_REMOTE_DIR), ("install-dir", DEFAULT_INSTALL_DIR),
                           ("cluster-dir", DEFAULT_CLUSTER_DIR), ("gateway-host", DEFAULT_GATEWAY_HOST),
@@ -1419,6 +1436,8 @@ def parse_args(argv=None):
     parser.add_argument("--pg-exec-mode", choices=["event", "threaded"], default="event",
                         help="Executor mode for pg (default 'event' matches YCSB/TPC-C; 'threaded' matches archived OOM runs)")
     args = parser.parse_args(argv)
+    if not 16 <= args.merkle_lookup_size <= 2147483647 or not 2 <= args.merkle_lookup_size_ratio <= 1024:
+        parser.error("lookup size must be >=16 KiB and size ratio must be between 2 and 1024")
     if not 10 <= args.usertable_fillfactor <= 100:
         parser.error("--usertable-fillfactor must be between 10 and 100")
     for name in ("gen_shared_buffers", "gen_maintenance_work_mem"):

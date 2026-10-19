@@ -197,7 +197,7 @@ class RunnerTests(unittest.TestCase):
             args = oom.parse_args(['--reset-mode', 'cp'])
             args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
                                          total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
-            settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+            settings = dict(shared_preload_libraries='merkle_lsm', shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                             enable_merkle_index='off', fsync='on', full_page_writes='on',
                             synchronous_commit='on', track_counts='on', track_io_timing='on',
                             log_checkpoints='on', bcdb_ledger_trace='off',
@@ -327,7 +327,7 @@ class RunnerTests(unittest.TestCase):
         def fake_remote(host, user, command, **kwargs):
             commands.append(command)
             return subprocess.CompletedProcess([], 0, '', '')
-        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+        settings = dict(shared_preload_libraries='merkle_lsm', shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
                         synchronous_commit='on', track_counts='on', track_io_timing='on',
                         log_checkpoints='on', bcdb_ledger_trace='off',
@@ -372,7 +372,7 @@ class RunnerTests(unittest.TestCase):
             if 'test -f' in command and 'PG_VERSION' in command:
                 return subprocess.CompletedProcess([], 0, '', '')
             return subprocess.CompletedProcess([], 0, '', '')
-        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+        settings = dict(shared_preload_libraries='merkle_lsm', shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
                         synchronous_commit='on', track_counts='on', track_io_timing='on',
                         log_checkpoints='on', bcdb_ledger_trace='off',
@@ -397,7 +397,7 @@ class RunnerTests(unittest.TestCase):
         args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
                                      total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
         args._plain_manifest = dict(args._golden_manifest, file_count=40)
-        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='8',
+        settings = dict(shared_preload_libraries='merkle_lsm', shared_buffers='4096', block_size='8192', bcdb_worker_count='8',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
                         synchronous_commit='on', track_counts='on', track_io_timing='on',
                         log_checkpoints='on', bcdb_ledger_trace='off',
@@ -409,10 +409,11 @@ class RunnerTests(unittest.TestCase):
                 commands.append(command)
                 return subprocess.CompletedProcess([], 0, '', '')
             merkle = mode == 'bcdb_merkle'
-            index_json = ('[{"indexname":"usertable_merkle_lookup_idx","indexdef":"USING merkle"}]'
+            index_json = ('[{"indexname":"usertable_merkle_idx","indexdef":"USING merkle (ycsb_key)"},'
+                          '{"indexname":"usertable_merkle_lookup_idx","indexdef":"USING merkle_lsm (ycsb_key)"}]'
                           if merkle else '[{"indexname":"usertable_pkey1"}]')
-            responses = ([] if merkle else ['']) + ['1|100000000', '1|2|3', index_json] + \
-                        (['24000'] if merkle else []) + [
+            responses = (['merkle_lsm', '{"levels":3,"top_index_size":1024,"size_ratio":16}'] if merkle else ['']) + ['1|100000000', '1|2|3', index_json] + \
+                        (['24000', '{"total_nodes":1}'] if merkle else []) + [
                          json.dumps(dict(settings, enable_merkle_index='on' if merkle else 'off')), '{}']
             with self.subTest(mode=mode), \
                  mock.patch.object(oom, 'run_remote', side_effect=fake_remote), \
@@ -438,16 +439,31 @@ class RunnerTests(unittest.TestCase):
                 check = subprocess.run(['bash', '-n'], input=command, text=True, capture_output=True)
                 self.assertEqual(check.returncode, 0, check.stderr)
 
+    def test_reset_rejects_mixed_lookup_am_before_measurement(self):
+        for requested, actual in [('merkle_lsm', 'btree'), ('btree', 'merkle_lsm')]:
+            args = oom.parse_args(['--reset-mode', 'cp', '--merkle-lookup-am', requested])
+            args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
+                                        total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
+            with self.subTest(requested=requested, actual=actual), \
+                 mock.patch.object(oom, 'run_remote', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+                 mock.patch.object(oom, 'prepare_ledger_schema'), \
+                 mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
+                 mock.patch.object(oom, 'wait_for_device_settle') as settle, \
+                 mock.patch.object(oom, 'sql', return_value=actual):
+                with self.assertRaisesRegex(RuntimeError, 'Golden lookup AM is '+actual):
+                    oom.reset_remote_pgdata(args, 'bcdb_merkle', 1)
+                settle.assert_not_called()
+
     def test_merkle_reset_rejects_empty_table_named_tree(self):
         args = oom.parse_args(['--reset-mode', 'cp'])
         args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
                                      total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
-        index_json = '[{"indexname":"usertable_merkle_lookup_idx","indexdef":"USING merkle"}]'
+        index_json = '[{"indexname":"usertable_merkle_idx","indexdef":"USING merkle (ycsb_key)"},{"indexname":"usertable_merkle_lookup_idx","indexdef":"USING merkle_lsm (ycsb_key)"}]'
         with mock.patch.object(oom, 'run_remote', return_value=subprocess.CompletedProcess([], 0, '', '')), \
              mock.patch.object(oom, 'prepare_ledger_schema'), \
              mock.patch.object(oom, 'wait_for_device_settle', return_value=SETTLE) as settle, \
              mock.patch.object(oom, 'get_remote_nvme_stats', return_value=DEVICE), \
-             mock.patch.object(oom, 'sql', side_effect=['1|100000000', '1|2|3', index_json, '-1']):
+             mock.patch.object(oom, 'sql', side_effect=['merkle_lsm', '{"levels":3,"top_index_size":1024,"size_ratio":16}', '1|100000000', '1|2|3', index_json, '-1']):
             with self.assertRaisesRegex(RuntimeError, 'merkle_node_usertable is missing or empty'):
                 oom.reset_remote_pgdata(args, 'bcdb_merkle', 1)
             settle.assert_not_called()
@@ -457,7 +473,7 @@ class RunnerTests(unittest.TestCase):
         args._golden_manifest = dict(heap_bytes=1, index_bytes=2, relpages=3, file_count=42,
                                      total_bytes=9, pg_version_sha256='v', pg_control_sha256='c')
         args._plain_manifest = dict(args._golden_manifest)
-        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+        settings = dict(shared_preload_libraries='merkle_lsm', shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
                         synchronous_commit='on', track_counts='on', track_io_timing='on',
                         log_checkpoints='on', bcdb_ledger_trace='off',
@@ -500,7 +516,7 @@ class RunnerTests(unittest.TestCase):
             file_count=42, total_bytes=31200000000,
             pg_version_sha256='abc123', pg_control_sha256='ctrl456',
             indexes=[{'indexname': 'usertable_pkey1', 'indexdef': 'USING btree'}])
-        settings = dict(shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
+        settings = dict(shared_preload_libraries='merkle_lsm', shared_buffers='4096', block_size='8192', bcdb_worker_count='1',
                         enable_merkle_index='off', fsync='on', full_page_writes='on',
                         synchronous_commit='on', track_counts='on', track_io_timing='on',
                         log_checkpoints='on', bcdb_ledger_trace='off',

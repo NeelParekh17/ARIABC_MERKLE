@@ -408,6 +408,7 @@ CFG
 if [[ "\$USE_CUSTOM_BIN" == "1" ]]; then
   cat >> "\$AUTO_CONF" <<CFG
 merkle_update_detection = $merkle_update_detection_node
+shared_preload_libraries = 'merkle_lsm'
 enable_merkle_index = $enable_merkle_index_node
 merkle_update_detection_suppress = $merkle_update_detection_suppress_node
 bcdb_worker_count = $worker_count

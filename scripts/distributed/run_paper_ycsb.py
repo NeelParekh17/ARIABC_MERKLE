@@ -234,6 +234,7 @@ max_locks_per_transaction = 4012
 maintenance_work_mem = '2GB'
 bcdb_worker_count = {workers}
 bcdb_advance_commit_watermark = on
+shared_preload_libraries = 'merkle_lsm'
 bcdb_serial_gate_mode = 1
 bcdb_serial_gate_source = 0
 bcdb_dt_conflict_tracking = on

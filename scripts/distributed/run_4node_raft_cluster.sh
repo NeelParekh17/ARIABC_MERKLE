@@ -3149,6 +3149,7 @@ for idx in "${!NODE_IDS[@]}"; do
       fi
     }
     if [[ -f \"\$PGDATA/postgresql.auto.conf\" ]]; then
+      set_auto_conf shared_preload_libraries merkle_lsm
       set_auto_conf shared_buffers \"$DB_SHARED_BUFFERS\"
       set_auto_conf bcdb_worker_count \"$BCDB_WORKER_COUNT\"
       set_auto_conf bcdb_serial_gate_mode \"$BCDB_SERIAL_GATE_MODE\"

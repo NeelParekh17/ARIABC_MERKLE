@@ -64,6 +64,7 @@ checkpoint_timeout = 30min
 max_wal_size = 20GB
 bcdb_worker_count = 1
 enable_merkle_index = $2
+shared_preload_libraries = 'merkle_lsm'
 bcdb_serial_gate_mode = 1
 bcdb_serial_gate_source = 0
 bcdb_dt_conflict_tracking = on
