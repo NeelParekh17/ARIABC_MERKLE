@@ -827,6 +827,7 @@ struct IndexOptInfo
 	bool		hypothetical;	/* true if index doesn't really exist */
 
 	/* Remaining fields are copied from the index AM's API struct: */
+	bool		amcanbackward;	/* does AM support backward scans? */
 	bool		amcanorderbyop; /* does AM support order by operator result? */
 	bool		amoptionalkey;	/* can query omit key for the first column? */
 	bool		amsearcharray;	/* can AM handle ScalarArrayOpExpr quals? */
