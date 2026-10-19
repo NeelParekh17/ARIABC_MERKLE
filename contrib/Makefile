@@ -26,6 +26,7 @@ SUBDIRS = \
 		isn		\
 		lo		\
 		ltree		\
+		merkle_lsm	\
 		oid2name	\
 		pageinspect	\
 		passwordcheck	\

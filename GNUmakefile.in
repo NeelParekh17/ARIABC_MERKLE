@@ -8,7 +8,11 @@ subdir =
 top_builddir = .
 include $(top_builddir)/src/Makefile.global
 
-$(call recurse,all install,src config)
+$(call recurse,all install,src config contrib/merkle_lsm)
+
+# The lookup AM is part of every AriaBC install, including non-Merkle modes.
+all-contrib/merkle_lsm-recurse: all-src-recurse
+install-contrib/merkle_lsm-recurse: install-src-recurse
 
 all:
 	+@echo "All of PostgreSQL successfully made. Ready to install."
@@ -39,7 +43,8 @@ install-world:
 # build src/ before contrib/
 install-world-contrib-recurse: install-world-src-recurse
 
-$(call recurse,installdirs uninstall init-po update-po,doc src config)
+$(call recurse,installdirs uninstall,doc src config contrib/merkle_lsm)
+$(call recurse,init-po update-po,doc src config)
 
 $(call recurse,distprep coverage,doc src config contrib)
 

@@ -1,0 +1,4 @@
+comment = 'Multi-level WAL-logged Merkle lookup index'
+default_version = '1.0'
+module_pathname = '$libdir/merkle_lsm'
+relocatable = false

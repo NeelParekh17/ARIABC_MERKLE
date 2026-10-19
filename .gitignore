@@ -185,3 +185,9 @@ scripts/benchmark/recovery/results/
 *.pyo
 
 graphify-out/
+
+# Integrated lookup architecture and contrib documentation.
+!doc/*.md
+!contrib/merkle_lsm/README.md
+!contrib/merkle_lsm/tests/README.md
+!/scripts/generate_ycsb_workloads.py
