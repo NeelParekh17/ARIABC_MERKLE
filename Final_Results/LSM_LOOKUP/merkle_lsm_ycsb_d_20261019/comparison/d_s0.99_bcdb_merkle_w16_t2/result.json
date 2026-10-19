@@ -1,0 +1,267 @@
+{
+  "row": {
+    "workload": "d",
+    "skew": 0.99,
+    "mode": "bcdb_merkle",
+    "workers": 16,
+    "trial": 2,
+    "merkle_lookup_am": "btree",
+    "lsm_drain_ms": 0,
+    "isolation": "serializable",
+    "retry_attempts": 0,
+    "retry_backoff_requested_ms": 0,
+    "retry_exhausted": 0,
+    "pg_retry_jitter": "",
+    "total_queries": 2400000,
+    "shared_buffers": "32MB",
+    "db_rows": 100000000,
+    "reset_time_ms": 132370.99656499777,
+    "reset_mode": "delta",
+    "restore_write_mib": 3080.44921875,
+    "settle_wait_s": 80.0,
+    "settle_qd1_median_us": 102.862,
+    "settle_qd8_median_us": 240.409,
+    "settle_wr_median_us": 391.671,
+    "wall_time_ms": 183336,
+    "wall_including_drains_ms": 183336,
+    "tps": 13090.718680455557,
+    "completed_tps": 13090.67,
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "device_window_ms": 186725.77232500043,
+    "device_read_mib": 6729.87890625,
+    "device_write_mib": 3617.20703125,
+    "device_read_ios": 798443,
+    "device_read_await_ms": 0.4585274089697073,
+    "device_write_ios": 379786,
+    "checkpoint_ms": 309.1880450010649,
+    "checkpoint_write_ms": 7.0,
+    "checkpoint_sync_ms": 1.0,
+    "checkpoint_total_ms": 73.0,
+    "checkpoint_sync_files": 11,
+    "checkpoint_longest_sync_ms": 0.0,
+    "checkpoint_write_mib": 6.1171875,
+    "blks_read": 2786417,
+    "blks_hit": 11962276,
+    "hit_ratio_pct": 81.10736320838734,
+    "blk_read_time_ms": 364249.40400000004,
+    "blk_write_time_ms": 1541.807,
+    "buffers_backend": 197076,
+    "divergence_count": 0,
+    "permanent_failures": 0,
+    "validated_completed_queries": 2400000,
+    "merkle_verify": "PASS",
+    "workload_sha256": "ae78761fed624edacea9e66ebf356df619b41179948b25007f314fe661d69415",
+    "artifact_dir": "/home/neel/claude_ctl/lsm_bench_20261019/results/ycsb_d_cmp/run/run_20261019_224057_04ae2c3d/d_s0.99_bcdb_merkle_w16_t2"
+  },
+  "gateway": {
+    "divergence_count": 0,
+    "permanent_failures": 0,
+    "success_count": 0,
+    "deterministic_error_count": 0,
+    "nonterminal_failure_count": 0,
+    "client_quorum_complete_count": 0,
+    "duplicate_key_errors": 0,
+    "total_queries": 2400000,
+    "validated_completed_queries": 2400000,
+    "completion_evidence": "direct_all_request_terminal_results_v2",
+    "wall_time_ms": 183336,
+    "wall_including_drains_ms": 183336,
+    "tps": 13090.718680455557,
+    "completed_tps": 13090.67,
+    "gateway_returncode": 0,
+    "gateway_process_wall_ms": 185913.63387700403,
+    "command": [
+      "/home/neel/claude_ctl/lsm_bench_20261019/src/ariabc_pg/build/bin/ariabc_pg_gateway",
+      "--nodes",
+      "10.129.148.247:8088",
+      "--queryFrom",
+      "/home/neel/ariabc_data/oom_workloads/oom_ae78761fed624edacea9e66ebf356df619b41179948b25007f314fe661d69415.sql",
+      "--dbType",
+      "1",
+      "--detStartSeq",
+      "0",
+      "--reqIdOffset",
+      "1",
+      "--detWindow",
+      "1024",
+      "--detBatchSize",
+      "256",
+      "--dbConnPoolSize",
+      "16",
+      "--detSubmitPipeline",
+      "1",
+      "--detPipelineDepth",
+      "1024",
+      "--detClientMode",
+      "event",
+      "--detClientWorkers",
+      "96",
+      "--detClientInflight",
+      "16",
+      "--clientId",
+      "single-gateway-direct",
+      "--numTerminals",
+      "96",
+      "--submitMode",
+      "event",
+      "--connFanout",
+      "1",
+      "--waitMajority",
+      "0",
+      "--completionPath",
+      "direct",
+      "--totalNodes",
+      "1"
+    ],
+    "validated_row_results": 2400000,
+    "empty_results": 0
+  },
+  "provenance": {
+    "install_dir": "/home/neel/claude_checks/lsm_bench_20261019/install",
+    "cluster_dir": "/home/neel/claude_checks/lsm_bench_20261019/cluster",
+    "gateway_repo": "/home/neel/claude_ctl/lsm_bench_20261019/src",
+    "baseline_dir": "/home/neel/ariabc_data/lsm_lookup_20261014/base_ff90",
+    "baseline_manifest": {
+      "version": 2,
+      "db_rows": 100000000,
+      "keyspace": "100000000|1|100000000",
+      "heap_bytes": 28248276992,
+      "index_bytes": 2246197248,
+      "total_relation_bytes": 33656586240,
+      "relpages": 3448276,
+      "fillfactor": [
+        "fillfactor=90"
+      ],
+      "indexes": [
+        {
+          "indexname": "usertable_merkle_idx",
+          "indexdef": "CREATE INDEX usertable_merkle_idx ON public.usertable USING merkle (ycsb_key) WITH (partitions='200', fanout='32', split_threshold='1024', merge_threshold='256')"
+        },
+        {
+          "indexname": "usertable_merkle_lookup_idx",
+          "indexdef": "CREATE INDEX usertable_merkle_lookup_idx ON public.usertable USING btree (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200), merkle_key_hash(ycsb_key), ycsb_key)"
+        },
+        {
+          "indexname": "usertable_pkey1",
+          "indexdef": "CREATE UNIQUE INDEX usertable_pkey1 ON public.usertable USING btree (ycsb_key)"
+        }
+      ],
+      "sizes": [
+        {
+          "nspname": "ariabc_internal",
+          "relname": "merkle_node_usertable",
+          "bytes": 24739840
+        },
+        {
+          "nspname": "ariabc_internal",
+          "relname": "merkle_node_usertable_pkey",
+          "bytes": 6676480
+        },
+        {
+          "nspname": "ariabc_internal",
+          "relname": "merkle_node_usertable_prefix_idx",
+          "bytes": 7004160
+        },
+        {
+          "nspname": "ariabc_internal",
+          "relname": "merkle_node_usertable_root_idx",
+          "bytes": 16384
+        },
+        {
+          "nspname": "public",
+          "relname": "usertable",
+          "bytes": 28248276992
+        },
+        {
+          "nspname": "public",
+          "relname": "usertable_merkle_idx",
+          "bytes": 8192
+        },
+        {
+          "nspname": "public",
+          "relname": "usertable_merkle_lookup_idx",
+          "bytes": 3154264064
+        },
+        {
+          "nspname": "public",
+          "relname": "usertable_pkey1",
+          "bytes": 2246197248
+        }
+      ],
+      "db_system_id": "7695110858662784567",
+      "cluster_state": "shut down",
+      "checkpoint_lsn": "5/4F2B5A38",
+      "pg_control_sha256": "4be7ab2ceeffd9a0b32d0656f8c9511732814075a1146b168c3721bb22af7797",
+      "pg_version_sha256": "1a252402972f6057fa53cc172b52b9ffca698e18311facd0f3b06ecaaef79e17",
+      "file_count": 1131,
+      "total_bytes": 35598991502,
+      "merkle_stats": {
+        "version": 11,
+        "fanout": 32,
+        "partitions": 200,
+        "partition_key_columns": 0,
+        "subpartitions": 1,
+        "split_threshold": 1024,
+        "merge_threshold": 256,
+        "total_nodes": 211400,
+        "leaf_nodes": 204800,
+        "hash_bits": 256,
+        "route_format_version": 4,
+        "row_hash_format_version": 1,
+        "baseline_apply_seq": 0,
+        "crash_recovery": "ordered_committed_delta_wal",
+        "recovery_state": "READY",
+        "applied_seq": 0,
+        "target_seq": 0,
+        "lag_items": 0,
+        "index_keys": [
+          "ycsb_key"
+        ]
+      },
+      "root": "136ddf6edd207060c2352dc97c8c3977fd8146adcc3ad6b5fa2cd465c52bec28",
+      "baseline_dir": "/home/neel/ariabc_data/lsm_lookup_20261014/base_ff90",
+      "fillfactor_value": 90,
+      "build_commit": "a7fc519dfdd0713247922abff3bc3c80b752e27e"
+    },
+    "executables": [
+      {
+        "host": "10.129.148.247",
+        "path": "/home/neel/claude_checks/lsm_bench_20261019/install/bin/postgres",
+        "sha256": "6b8df4aeb7f4118d6e7bb9d8d584a09cde3e327ef1adcf7add70ec2392a5a1df"
+      },
+      {
+        "host": "10.129.148.247",
+        "path": "/home/neel/claude_checks/lsm_bench_20261019/cluster/ariabc_pg/build/bin/ariabc_pg_server",
+        "sha256": "d8c33549ba259ad3ea29f2340c910d2cbd2392e401f172f1799da1619cf6c9b4"
+      },
+      {
+        "host": "10.129.27.111",
+        "path": "/home/neel/claude_ctl/lsm_bench_20261019/src/ariabc_pg/build/bin/ariabc_pg_gateway",
+        "sha256": "18b476741442f4ae57f81e75013ee48290879ebdc5cc359e5a114ca5d51db24c"
+      }
+    ]
+  },
+  "merkle_stats": {
+    "version": 11,
+    "fanout": 32,
+    "partitions": 200,
+    "partition_key_columns": 0,
+    "subpartitions": 1,
+    "split_threshold": 1024,
+    "merge_threshold": 256,
+    "total_nodes": 211400,
+    "leaf_nodes": 204800,
+    "hash_bits": 256,
+    "route_format_version": 4,
+    "row_hash_format_version": 1,
+    "baseline_apply_seq": 0,
+    "crash_recovery": "ordered_committed_delta_wal",
+    "recovery_state": "READY",
+    "applied_seq": 0,
+    "target_seq": 0,
+    "lag_items": 0,
+    "index_keys": [
+      "ycsb_key"
+    ]
+  }
+}
