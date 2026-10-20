@@ -18,6 +18,7 @@ def fixture(root, mode='merkle', exclusive=False):
     (root/'runtime.json').write_text(json.dumps(dict(gateway_rc=0, consistency_rc=0,
         state_hash_rc=0, waldump_rc=0, finished=True, sampler_rc=0, stop_rc=0, postgres_stopped=True)))
     (root/'provenance.json').write_text('{}')
+    (root/'clocksource.txt').write_text('tsc\n')
     (root/'workload.sql.meta.json').write_text(json.dumps({'expected_rollbacks':500, 'counts':{'new_order':22500}}))
     (root/'initial_district_next.txt').write_text('150050\n')
     (root/'final_district_next.txt').write_text('172050\n')
@@ -30,8 +31,8 @@ def fixture(root, mode='merkle', exclusive=False):
         f.write('relname,relpersistence,reloptions\n')
         f.writelines(t+',p,fillfactor=90\n' for t in sorted(TABLES))
     with (root/'indexes.csv').open('w') as f:
-        f.write('tablename,indexname\n')
-        f.writelines(t+','+t+'_merkle_lookup_idx\n' for t in sorted(TABLES))
+        f.write('tablename,indexname,indexdef\n')
+        f.writelines(f'{t},{t}_merkle_lookup_idx,"CREATE INDEX {t}_merkle_lookup_idx ON public.{t} USING btree (k)"\n' for t in sorted(TABLES))
     (root/'merkle_verify.txt').write_text(''.join(t+'|t\n' for t in sorted(TABLES)))
     (root/'consistency.txt').write_text(''.join(f'condition_{i}_test=true\n' for i in range(1,5))+'consistency_ok=t\n')
     (root/'postgres_workload.log').write_text('2026-01-01 00:03:00.000 UTC [123] LOG:  checkpoint starting: time\n'
@@ -76,6 +77,21 @@ def main():
         assert len(r['checkpoints_in_window']) == 2
         assert r['serialization_failures'] == '7'
         assert r['nopm_label'] == LABEL
+        # Campaign correctness gates must fail on observed divergence or failed
+        # native verification, even when completion/window accounting looks good.
+        original_log = (run/'gateway.log').read_text()
+        (run/'gateway.log').write_text(original_log.replace('divergence_count=0', 'divergence_count=1'))
+        assert 'divergence_zero' in attempt(run)['acceptance']['failed_checks']
+        (run/'gateway.log').write_text(original_log)
+        original_merkle = (run/'merkle_verify.txt').read_text()
+        (run/'merkle_verify.txt').write_text(original_merkle.replace('|t', '|f', 1))
+        assert 'merkle_verify' in attempt(run)['acceptance']['failed_checks']
+        (run/'merkle_verify.txt').write_text(original_merkle)
+        (run/'ptrace.123').write_text('tx_id,restarts,dt_opf,dt_opf_stale_error,dt_rel_read_tags\n'
+                                    '1,2,3,1,7\n2,4,5,2,11\n')
+        counters = attempt(run)
+        assert counters['det_counters'] == dict(dt_opf=8, dt_opf_stale_error=3, dt_rel_read_tags=18)
+        assert counters['total_restarts'] == 6
         other = fixture(base/'det', mode='det', exclusive=True)
         exclusive = attempt(other)
         assert exclusive['acceptance']['accepted'], exclusive['acceptance']

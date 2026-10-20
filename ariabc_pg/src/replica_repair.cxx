@@ -283,6 +283,26 @@ bool restore_join_planning(PGconn* c, std::string& err) {
            exec_cmd(c, "SET LOCAL enable_mergejoin TO DEFAULT", err);
 }
 
+/* Collect a connection's results after COPY. If it is still mid-COPY (e.g.
+ * PQgetCopyData failed with -2), PQgetResult keeps returning PGRES_COPY_OUT/IN,
+ * so report failure instead of looping. */
+bool drain_copy_results(PGconn* c, const char* what, bool& ok, std::string& err) {
+    while (PGresult* x = PQgetResult(c)) {
+        const ExecStatusType st = PQresultStatus(x);
+        PQclear(x);
+        if (st == PGRES_COPY_OUT || st == PGRES_COPY_IN || st == PGRES_COPY_BOTH) {
+            if (ok) err = std::string(what) + "connection still in COPY: " + conn_error(c);
+            ok = false;
+            return false;
+        }
+        if (ok && st != PGRES_COMMAND_OK) {
+            err = std::string(what) + conn_error(c);
+            ok = false;
+        }
+    }
+    return true;
+}
+
 /* Stream `copy_out_sql` from ref into `copy_in_sql` on local. */
 bool stream_copy(PGconn* ref, const std::string& copy_out_sql,
                  PGconn* local, const std::string& copy_in_sql,
@@ -299,8 +319,10 @@ bool stream_copy(PGconn* ref, const std::string& copy_out_sql,
     if (!rout || PQresultStatus(rout) != PGRES_COPY_OUT) {
         err = "COPY OUT failed: " + conn_error(ref);
         if (rout) PQclear(rout);
-        PQputCopyEnd(local, "reference copy failed");
-        while (PGresult* x = PQgetResult(local)) PQclear(x);
+        bool ignored_ok = false;
+        std::string ignored;
+        if (PQputCopyEnd(local, "reference copy failed") == 1)
+            drain_copy_results(local, "", ignored_ok, ignored);
         return false;
     }
     PQclear(rout);
@@ -310,12 +332,13 @@ bool stream_copy(PGconn* ref, const std::string& copy_out_sql,
         const int n = PQgetCopyData(ref, &buf, 0);
         if (n > 0) {
             ++rows;
-            if (PQputCopyData(local, buf, n) != 1) {
+            if (ok && PQputCopyData(local, buf, n) != 1) {
                 err = "PQputCopyData failed: " + conn_error(local);
                 ok = false;
             }
             PQfreemem(buf);
-            if (!ok) break;
+            /* On a local failure keep draining: the reference stays in COPY OUT
+             * (and PQgetResult keeps returning PGRES_COPY_OUT) until it is consumed. */
             continue;
         }
         if (n == -2) {
@@ -324,24 +347,14 @@ bool stream_copy(PGconn* ref, const std::string& copy_out_sql,
         }
         break;
     }
-    while (PGresult* x = PQgetResult(ref)) {
-        if (ok && PQresultStatus(x) != PGRES_COMMAND_OK) {
-            err = "reference COPY failed: " + conn_error(ref);
-            ok = false;
-        }
-        PQclear(x);
-    }
+    if (!drain_copy_results(ref, "reference COPY failed: ", ok, err)) return false;
     if (PQputCopyEnd(local, ok ? nullptr : "reference copy failed") != 1) {
+        /* Still in COPY IN: collecting results would loop. Fail; the caller's
+         * connections are closed, which rolls the transaction back. */
         if (ok) err = "PQputCopyEnd failed: " + conn_error(local);
-        ok = false;
+        return false;
     }
-    while (PGresult* x = PQgetResult(local)) {
-        if (ok && PQresultStatus(x) != PGRES_COMMAND_OK) {
-            err = "local COPY failed: " + conn_error(local);
-            ok = false;
-        }
-        PQclear(x);
-    }
+    if (!drain_copy_results(local, "local COPY failed: ", ok, err)) return false;
     return ok;
 }
 
@@ -556,8 +569,15 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
     st.candidate_rows += candidates;
     st.transfer_us += now_us() - x0;
 
-    /* One set-oriented pass: drop extra rows, upsert differing rows. */
+    /* One set-oriented pass: drop extra rows, upsert differing rows. With hash
+     * and merge joins off, the DELETE's NOT EXISTS probes the candidate rows per
+     * deleted-range row, so they need a primary-key index (else it is quadratic). */
     const uint64_t a0 = now_us();
+    if (!t.pk.empty() &&
+        (!exec_cmd(local, "CREATE INDEX ON " + tmp + " (" + pk_list + ")", err) ||
+         !exec_cmd(local, "ANALYZE " + tmp, err))) {
+        return commit_or_rollback(local, false, err);
+    }
     std::string pk_match;
     for (size_t i = 0; i < t.pk.size(); ++i) {
         if (i) pk_match += " AND ";

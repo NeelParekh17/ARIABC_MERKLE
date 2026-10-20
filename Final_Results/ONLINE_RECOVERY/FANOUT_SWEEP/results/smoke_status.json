@@ -1,0 +1,9 @@
+{
+  "time": "2026-10-14T23:12:37.429934+00:00",
+  "state": "DONE",
+  "phase": "smoke",
+  "pid": 2267254,
+  "planned": 2,
+  "accepted": 2,
+  "attempts": 3
+}

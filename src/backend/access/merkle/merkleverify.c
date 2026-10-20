@@ -1233,7 +1233,7 @@ merkle_get_descendants_batch(PG_FUNCTION_ARGS)
 				{
 					bytea *child_bytea = (bytea *) palloc(VARHDRSZ + 8);
 					SET_VARSIZE(child_bytea, VARHDRSZ + 8);
-					merkle_bytea_extend((uint8 *) VARDATA(child_bytea), found_id_bytes, current_prefix_len, (uint8) b, bits_per_split);
+					merkle_bytea_extend((uint8 *) VARDATA(child_bytea), found_id_bytes, current_prefix_len, (uint16) b, bits_per_split);
 
 					if (num_next_nodes >= max_next_nodes)
 					{
@@ -1451,7 +1451,7 @@ merkle_get_descendants_batch_array(PG_FUNCTION_ARGS)
 				{
 					bytea *child_bytea = (bytea *) palloc(VARHDRSZ + 8);
 					SET_VARSIZE(child_bytea, VARHDRSZ + 8);
-					merkle_bytea_extend((uint8 *) VARDATA(child_bytea), found_id_bytes, current_prefix_len, (uint8) b, bits_per_split);
+					merkle_bytea_extend((uint8 *) VARDATA(child_bytea), found_id_bytes, current_prefix_len, (uint16) b, bits_per_split);
 
 					if (num_next_nodes >= max_next_nodes)
 					{

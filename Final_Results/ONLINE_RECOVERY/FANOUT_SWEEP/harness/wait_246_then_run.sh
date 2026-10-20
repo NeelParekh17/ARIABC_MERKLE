@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the fanout 2/4/8 extension once .246 has >= 9.5 GB available for 3 consecutive minutes.
+# Start the 2026-10-15 campaign once .246 has >= 9.5 GB available for 3 consecutive minutes.
 set -uo pipefail
 S=/home/neel/ariabc_data/fanout_sweep_20261014
 export PATH=$S/tools:$PATH
@@ -11,6 +11,6 @@ while (( ok < 3 )); do
   echo "$(date -u +%FT%TZ) avail_kb=${avail:-?} consecutive_ok=$ok" >> $LOG
   (( ok < 3 )) && sleep 60
 done
-echo "$(date -u +%FT%TZ) START sweep (fanout 2/4/8 extension)" >> $LOG
+echo "$(date -u +%FT%TZ) START campaign 20261015" >> $LOG
 rm -f $S/results/supervisor_exit.env $S/results/artifact_status.json
-env RESUME=--resume bash $S/sweep_supervise.sh
+bash $S/campaign_supervise.sh

@@ -1721,6 +1721,9 @@ struct vote_entry {
     uint32_t audit_generation = 0;
     uint64_t audit_deadline_ns = 0;
     uint64_t all3_ready_ns = 0;
+    // Set once the client has taken this request's terminal result. Until then
+    // the entry must never be evicted: the client is still waiting on it.
+    bool delivered = false;
 };
 
 struct vote_store_profile {
@@ -1908,6 +1911,12 @@ private:
             }
         }
 
+        if (rec.req_num <= retired_floor_ ||
+            (!retired_above_.empty() && retired_above_.count(rec.req_num) != 0)) {
+            ++late_replies_after_retire_;
+            return;
+        }
+
         bool replace_allowed = false;
         if (!node_recovery_.empty()) {
             auto rs = node_recovery_.find(rec.node_id);
@@ -1921,20 +1930,18 @@ private:
         vote_key key{safe_ledger_mode_ ? rec.epoch_hex : expected_epoch_hex_, rec.req_num};
 
         auto emplace_res = m_.insert(std::make_pair(key, vote_entry()));
-        if (seen_reqs_.insert(key).second) {
+        if (order_pos_.find(key) == order_pos_.end()) {
             req_order_.push_back(key);
+            order_pos_.emplace(key, std::prev(req_order_.end()));
         }
         if (!evict_if_needed_locked(key)) {
             out_recovery_note = "vote_store_capacity_exhausted: req_num=" + std::to_string(rec.req_num);
             if (emplace_res.second) {
-                m_.erase(emplace_res.first);
-                seen_reqs_.erase(key);
-                if (!req_order_.empty() && req_order_.back() == key) {
-                    req_order_.pop_back();
-                }
+                forget_locked(key, emplace_res.first);
             }
             return;
         }
+        occupancy_max_ = std::max(occupancy_max_, m_.size());
         vote_entry& e = emplace_res.first->second;
         if (e.first_reply_ns == 0) {
             e.first_reply_ns = add_ns;
@@ -2113,7 +2120,9 @@ public:
         vote_key key{expected_epoch_hex_, req_num};
 
         auto terminal = [&]() -> bool {
-            return resolve_terminal_locked(key, out_result, out_error);
+            if (!resolve_terminal_locked(key, out_result, out_error)) return false;
+            mark_delivered_locked(key);
+            return true;
         };
 
         if (terminal()) return out_error.empty();
@@ -2664,6 +2673,51 @@ public:
         }
     }
 
+    // Drops a request whose all-3 audit has been consumed: nothing reads it again.
+    // Without this, every finished request stayed in the store until capacity
+    // eviction, so the store filled up on long runs.
+    void retire(uint64_t req_num) {
+        std::lock_guard<std::mutex> lk(mu_);
+        vote_key key{expected_epoch_hex_, req_num};
+        auto it = m_.find(key);
+        if (it == m_.end() || it->second.audit_pending) return;
+        forget_locked(key, it);
+        ++retired_total_;
+        // Remember it so a late or replayed reply cannot recreate an entry that
+        // no client takes (it could never be evicted). Audits finish nearly in
+        // order, so a floor plus a small set above it stays compact.
+        if (req_num > retired_floor_) {
+            retired_above_.insert(req_num);
+            while (!retired_above_.empty() && *retired_above_.begin() == retired_floor_ + 1) {
+                retired_above_.erase(retired_above_.begin());
+                ++retired_floor_;
+            }
+        }
+    }
+
+    // Entries currently held (requests in flight plus audits not yet finished).
+    size_t occupancy() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return m_.size();
+    }
+
+    size_t max_entries() const { return max_entries_; }
+
+    size_t occupancy_max() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return occupancy_max_;
+    }
+
+    uint64_t retired_total() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return retired_total_;
+    }
+
+    uint64_t late_replies_after_retire() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return late_replies_after_retire_;
+    }
+
     bool wait_next_all3_ready(uint64_t& out_req_num, std::string& out_error, int poll_interval_us, int poll_count) {
         out_error.clear();
         std::unique_lock<std::mutex> lk(mu_);
@@ -3028,39 +3082,55 @@ private:
         }
     }
 
+    void mark_delivered_locked(const vote_key& key) {
+        auto it = m_.find(key);
+        if (it != m_.end()) {
+            it->second.delivered = true;
+        }
+    }
+
+    // Drops a key from the store and the eviction order. map_it may be m_.end().
+    void forget_locked(const vote_key& key,
+                       std::unordered_map<vote_key, vote_entry, vote_key_hash>::iterator map_it) {
+        auto pos = order_pos_.find(key);
+        if (pos != order_pos_.end()) {
+            req_order_.erase(pos->second);
+            order_pos_.erase(pos);
+        }
+        if (map_it != m_.end()) {
+            m_.erase(map_it);
+        }
+        ready_members_.erase(key);
+    }
+
+    // Only entries the client has already taken and that no audit still needs may
+    // be evicted. Others are rotated to the back as they are passed, so a later
+    // call does not rescan them; one call makes at most one pass over the order.
+    // (Rescanning a long audit-pinned prefix on every reply made the store
+    // quadratic, and evicting entries still collecting votes lost requests.)
     bool evict_if_needed_locked(const vote_key& protected_req) {
-        while (m_.size() > max_entries_ && !req_order_.empty()) {
-            bool evicted_any = false;
-            for (auto it = req_order_.begin(); it != req_order_.end(); ) {
-                const vote_key old_req = *it;
-                if (old_req == protected_req) {
-                    ++it;
-                    continue;
-                }
-                auto map_it = m_.find(old_req);
-                if (map_it != m_.end() && map_it->second.audit_pending) {
-                    ++it;
-                    continue;
-                }
-                it = req_order_.erase(it);
-                seen_reqs_.erase(old_req);
-                if (map_it != m_.end()) {
-                    m_.erase(map_it);
-                }
-                ready_members_.erase(old_req);
-                evicted_any = true;
-                if (m_.size() <= max_entries_) {
-                    break;
-                }
+        size_t budget = req_order_.size();
+        while (m_.size() > max_entries_ && budget > 0) {
+            --budget;
+            const vote_key old_req = req_order_.front();
+            auto map_it = m_.find(old_req);
+            const bool keep =
+                old_req == protected_req ||
+                (map_it != m_.end() &&
+                 (map_it->second.audit_pending || !map_it->second.delivered));
+            if (keep) {
+                req_order_.splice(req_order_.end(), req_order_, req_order_.begin());
+                continue;
             }
-            if (!evicted_any && m_.size() > max_entries_) {
-                // Cannot safely throw from background thread (would call terminate).
-                // Signal the gateway-wide error via the atomic capacity_exhausted_ flag
-                // which is checked in record_async_all3_pending and the client loop.
-                capacity_exhausted_.store(true, std::memory_order_release);
-                cv_.notify_all();
-                return false;
-            }
+            forget_locked(old_req, map_it);
+        }
+        if (m_.size() > max_entries_) {
+            // Cannot safely throw from background thread (would call terminate).
+            // Signal the gateway-wide error via the atomic capacity_exhausted_ flag
+            // which is checked in record_async_all3_pending and the client loop.
+            capacity_exhausted_.store(true, std::memory_order_release);
+            cv_.notify_all();
+            return false;
         }
         return true;
     }
@@ -3323,6 +3393,7 @@ private:
                 continue;
             }
 
+            mark_delivered_locked(key);
             out_req_num = key.req_num;
             out_result = std::move(result);
             out_error = std::move(err);
@@ -3343,6 +3414,7 @@ private:
                 continue;
             }
 
+            mark_delivered_locked(key);
             out_req_num = *it_req;
             out_result = std::move(result);
             out_error = std::move(err);
@@ -3376,6 +3448,7 @@ private:
                 continue;
             }
 
+            mark_delivered_locked(key);
             out_req_num = key.req_num;
             out_result = std::move(result);
             out_error = std::move(err);
@@ -3408,6 +3481,7 @@ private:
                 continue;
             }
 
+            mark_delivered_locked(key);
             terminal_majority_item item;
             item.req_num = key.req_num;
             item.result = std::move(result);
@@ -3510,8 +3584,15 @@ private:
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::unordered_map<vote_key, vote_entry, vote_key_hash> m_;
+    // Insertion order for eviction, plus each key's list node so an entry can be
+    // removed in O(1) when it is retired or evicted.
     std::list<vote_key> req_order_;
-    std::unordered_set<vote_key, vote_key_hash> seen_reqs_;
+    std::unordered_map<vote_key, std::list<vote_key>::iterator, vote_key_hash> order_pos_;
+    size_t occupancy_max_ = 0;
+    uint64_t retired_total_ = 0;
+    uint64_t retired_floor_ = 0;          // every req_num <= floor has been retired
+    std::set<uint64_t> retired_above_;    // retired req_nums above the floor
+    uint64_t late_replies_after_retire_ = 0;
     std::deque<vote_key> ready_reqs_;
     std::unordered_set<vote_key, vote_key_hash> ready_members_;
     uint64_t consume_to_ready_sum_ns_ = 0;
@@ -3641,24 +3722,58 @@ bool run_early_ready_race_self_test()
         }
     }
 
-    // Scenario A: Quorum completion followed by entry eviction prior to audit pin (returns MISSING, no hang).
+    // Takes every terminal result for the given requests, as the client loop does.
+    auto deliver = [](vote_store& v, const std::vector<uint64_t>& reqs) {
+        std::list<uint64_t> inflight(reqs.begin(), reqs.end());
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos;
+        for (auto it = inflight.begin(); it != inflight.end(); ++it) pos[*it] = it;
+        std::vector<vote_store::terminal_majority_item> batch;
+        v.note_inflight_registered_batch(reqs);
+        size_t got = 0;
+        while (v.try_pop_any_majority_batch(inflight, pos, batch, 256)) got += batch.size();
+        return got;
+    };
+
+    // Scenario A1: a delivered request evicted before its audit pin returns MISSING (no hang).
     {
         vote_store votes_a(3, 2, 1, sig_key); // max capacity = 1
 
-        votes_a.note_inflight_registered(1);
         std::string rec1_1, rec1_2, rec2_2;
         votes_a.add_reply(make_rec_for(1, 1, true), rec1_1);
         votes_a.add_reply(make_rec_for(1, 2, false), rec1_2);
+        if (deliver(votes_a, {1}) != 1) {
+            std::cerr << "Scenario A1 failed: request 1 not delivered" << std::endl;
+            return false;
+        }
 
-        votes_a.note_inflight_registered(2);
-        votes_a.add_reply(make_rec_for(2, 2, true), rec2_2); // evicts req 1
+        votes_a.add_reply(make_rec_for(2, 2, true), rec2_2); // evicts delivered req 1
 
         audit_mark_status status = votes_a.mark_audit_pending(1, 1000, 100);
         if (status != audit_mark_status::MISSING) {
-            std::cerr << "Scenario A failed: expected MISSING, got " << (int)status << std::endl;
+            std::cerr << "Scenario A1 failed: expected MISSING, got " << (int)status << std::endl;
             return false;
         }
-        std::cout << "Scenario A PASS" << std::endl;
+        std::cout << "Scenario A1 PASS" << std::endl;
+    }
+
+    // Scenario A2: a request the client has not taken yet is never evicted; a full
+    // store reports capacity exhaustion instead of silently losing it.
+    {
+        vote_store votes_a2(3, 2, 1, sig_key);
+        std::string note;
+        votes_a2.add_reply(make_rec_for(1, 1, true), note);
+        votes_a2.add_reply(make_rec_for(1, 2, false), note);
+        note.clear();
+        votes_a2.add_reply(make_rec_for(2, 2, true), note);
+        if (note.find("vote_store_capacity_exhausted") == std::string::npos) {
+            std::cerr << "Scenario A2 failed: undelivered request was evicted, note=" << note << std::endl;
+            return false;
+        }
+        if (deliver(votes_a2, {1}) != 1) {
+            std::cerr << "Scenario A2 failed: request 1 lost" << std::endl;
+            return false;
+        }
+        std::cout << "Scenario A2 PASS" << std::endl;
     }
 
     // Scenario B: Quorum completed but the third node reply never arrives (returns TIMEOUT after deadline).
@@ -3834,6 +3949,76 @@ bool run_early_ready_race_self_test()
         }
 
         std::cout << "Scenario G PASS" << std::endl;
+    }
+
+    // Scenario H: requests are retired once their audit is consumed, so a store far
+    // smaller than the run never fills; replies after retirement are ignored.
+    {
+        vote_store votes_h(3, 2, 4, sig_key);
+        for (uint64_t r = 1; r <= 2000; ++r) {
+            std::string note;
+            votes_h.add_reply(make_rec_for(r, 1, true), note);
+            votes_h.add_reply(make_rec_for(r, 2, false), note);
+            if (deliver(votes_h, {r}) != 1) {
+                std::cerr << "Scenario H failed: request " << r << " not delivered" << std::endl;
+                return false;
+            }
+            votes_h.mark_audit_pending(r, 1000, 1000);
+            votes_h.add_reply(make_rec_for(r, 4, false), note);
+            uint64_t out_req = 0;
+            std::string out_err;
+            if (!votes_h.wait_next_all3_ready(out_req, out_err, 1000, 1000) || out_req != r || !out_err.empty()) {
+                std::cerr << "Scenario H failed: audit of " << r << " err=" << out_err << std::endl;
+                return false;
+            }
+            votes_h.unpin_audit(r);
+            votes_h.retire(r);
+            votes_h.add_reply(make_rec_for(r, 4, false), note); // late duplicate
+        }
+        if (votes_h.capacity_exhausted() || votes_h.occupancy() != 0 ||
+            votes_h.retired_total() != 2000 || votes_h.late_replies_after_retire() != 2000) {
+            std::cerr << "Scenario H failed: occupancy=" << votes_h.occupancy()
+                      << " retired=" << votes_h.retired_total()
+                      << " late=" << votes_h.late_replies_after_retire() << std::endl;
+            return false;
+        }
+        std::cout << "Scenario H PASS" << std::endl;
+    }
+
+    // Scenario I: a long audit-pinned prefix does not make eviction rescan it on every
+    // reply (the old loop did, quadratically).
+    {
+        const uint64_t pinned = 20000;
+        const uint64_t extra = 100000;
+        vote_store votes_i(3, 2, pinned + 1000, sig_key);
+        std::string note;
+        std::vector<uint64_t> batch;
+        for (uint64_t r = 1; r <= pinned; ++r) {
+            votes_i.add_reply(make_rec_for(r, 1, true), note);
+            votes_i.add_reply(make_rec_for(r, 2, false), note);
+            batch.push_back(r);
+        }
+        deliver(votes_i, batch);
+        votes_i.mark_audit_pending_batch(batch, 1000000, 100);
+        const auto t0 = std::chrono::steady_clock::now();
+        for (uint64_t r = pinned + 1; r <= pinned + extra; ++r) {
+            votes_i.add_reply(make_rec_for(r, 1, true), note);
+            votes_i.add_reply(make_rec_for(r, 2, false), note);
+            if (deliver(votes_i, {r}) != 1) {
+                std::cerr << "Scenario I failed: request " << r << " not delivered" << std::endl;
+                return false;
+            }
+        }
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (votes_i.capacity_exhausted() || votes_i.occupancy() > pinned + 1000 || ms > 20000) {
+            std::cerr << "Scenario I failed: occupancy=" << votes_i.occupancy()
+                      << " exhausted=" << votes_i.capacity_exhausted() << " ms=" << ms << std::endl;
+            return false;
+        }
+        std::cout << "Scenario I: " << extra << " inserts past " << pinned
+                  << " pinned entries in " << ms << " ms" << std::endl;
+        std::cout << "Scenario I PASS" << std::endl;
     }
 
     std::cout << "early-ready self-test PASS" << std::endl;
@@ -4947,6 +5132,8 @@ int main(int argc, char** argv) {
     std::string           fatal_gateway_error_message;
     std::mutex            fatal_gateway_error_mu;
     std::atomic<uint64_t> async_all3_capacity_exhausted_count(0);
+    std::atomic<uint64_t> vote_store_backpressure_waits(0);
+    std::atomic<uint64_t> vote_store_backpressure_ns(0);
     std::atomic<bool>     async_audit_stop(false);
     // True while the async all-3 audit consumer runs; drain checks it so a dead
     // consumer fails the run instead of waiting forever for counters to move.
@@ -6293,6 +6480,9 @@ int main(int argc, char** argv) {
                         } else {
                             async_all3_verified_count.fetch_add(1, std::memory_order_relaxed);
                         }
+                        // After the result has been reported (emit_recovery_event reads
+                        // the entry), nothing needs this request any more.
+                        votes.retire(rid);
                     }
                     async_audit_alive.store(false, std::memory_order_release);
                 });
@@ -7064,13 +7254,30 @@ int main(int argc, char** argv) {
                     return pace_t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double>(static_cast<double>(idx) / opt.target_tps));
                 };
+                // Back-pressure: requests stay in the vote store until their all-3
+                // audit finishes, so a lagging replica grows it. Stop submitting while
+                // less than one full window of room is left, instead of overrunning
+                // the store (which used to evict requests still collecting votes).
+                const size_t vote_store_reserve =
+                    std::min(window, std::max<size_t>(1, votes.max_entries() / 2));
+                auto vote_store_full = [&]() -> bool {
+                    return majority_async_all3_validation &&
+                           votes.occupancy() + vote_store_reserve >= votes.max_entries();
+                };
+                std::chrono::steady_clock::time_point backpressure_since;
+                bool backpressure_active = false;
                 while (!failed && (next_idx < queries.size() || !pending_accepts.empty())) {
                     bool paced_wait = false;
+                    bool store_wait = false;
                     while (!failed &&
                            next_idx < queries.size() &&
                            pending_request_count < det_submit_limit) {
                         if (!harvest_ready_majorities()) {
                             failed = true;
+                            break;
+                        }
+                        if (vote_store_full()) {
+                            store_wait = true;
                             break;
                         }
                         size_t batch_cap = desired_det_batch_slots(next_idx);
@@ -7228,6 +7435,20 @@ int main(int argc, char** argv) {
                     if (paced_wait) {
                         std::this_thread::sleep_for(std::chrono::microseconds(50));
                     }
+                    if (store_wait) {
+                        if (!backpressure_active) {
+                            backpressure_active = true;
+                            backpressure_since = std::chrono::steady_clock::now();
+                            vote_store_backpressure_waits.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        std::this_thread::sleep_for(std::chrono::microseconds(200));
+                    } else if (backpressure_active) {
+                        backpressure_active = false;
+                        vote_store_backpressure_ns.fetch_add(
+                            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - backpressure_since).count()),
+                            std::memory_order_relaxed);
+                    }
 
                     if (majority_wait_enabled && next_idx < queries.size()) {
                         const size_t next_batch_slots = desired_det_batch_slots(next_idx);
@@ -7253,6 +7474,12 @@ int main(int argc, char** argv) {
                             break;
                         }
                     }
+                }
+                if (backpressure_active) {
+                    vote_store_backpressure_ns.fetch_add(
+                        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - backpressure_since).count()),
+                        std::memory_order_relaxed);
                 }
                 if (opt.target_tps > 0.0) {
                     std::cout << "PACING target_tps=" << opt.target_tps
@@ -8050,6 +8277,12 @@ int main(int argc, char** argv) {
             << " audit_deadline_heap_timeout_pops=" << vote_prof.audit_deadline_heap_timeout_pops
             << " audit_drain_ms=" << (async_all3_audit_drain_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " audit_capacity_exhausted=" << (fatal_gateway_error.load(std::memory_order_relaxed) ? 1 : 0)
+            << " vote_store_max=" << votes.max_entries()
+            << " vote_store_occupancy_max=" << votes.occupancy_max()
+            << " vote_store_retired=" << votes.retired_total()
+            << " vote_store_late_after_retire=" << votes.late_replies_after_retire()
+            << " vote_store_backpressure_waits=" << vote_store_backpressure_waits.load(std::memory_order_relaxed)
+            << " vote_store_backpressure_ms=" << (vote_store_backpressure_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " submit_wall_ms=" << submit_wall_ms_stat.load(std::memory_order_relaxed)
             << " err_send_calls=" << ep.send_calls
             << " err_send_ok=" << ep.send_ok

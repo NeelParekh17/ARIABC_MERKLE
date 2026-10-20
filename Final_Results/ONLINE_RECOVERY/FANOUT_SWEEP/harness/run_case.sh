@@ -4,7 +4,7 @@ B=/home/neel/ariabc_data/fanout_sweep_20261014
 CASE=${1:?}; REP=${2:?}; ATTEMPT=${3:?}; STAGE=${4:?}; ROWS=${5:?}; FANOUT=${6:?}
 export FANOUT_ROWS="$ROWS" FANOUT_FAULT_SEED="$((20261013+REP))"
 [[ "$ROWS" == 12000 || "$ROWS" == 4000000 ]]
-[[ "$FANOUT" =~ ^(2|4|8|16|32|64|128|256)$ ]]
+[[ "$FANOUT" =~ ^(2|4|8|16|32|64|128|256|512|1024)$ ]]
 export PATH="$B/tools:$PATH"
 python3 "$B/select_restore.py" "$ROWS"
 [[ $(hostname -I) == *10.129.148.247* ]]
@@ -23,8 +23,8 @@ export POLL_COUNT=360000 POLL_INTERVAL_US=500 NODE_SSH_COMMAND_TIMEOUT=300
 export KAFKA_HOST=10.129.148.247 KAFKA_PORT=9192 KAFKA_FAST_RESET=1
 export KAFKA_BOOTSTRAP=10.129.148.247:9192,10.129.148.246:9192,10.129.148.248:9192 KAFKA_ROUTING_MODE=colocated
 export BCDB_GATE_TELEMETRY=0 BCDB_PHASE_TRACE_ON=0 BCDB_BLOCK_PROFILE=0 ARIABC_OS_PROFILE=0
-export CLUSTER_RUN_ID="cluster4_fanout_sweep_20261014_${STAGE}_n${ROWS}_f${FANOUT}_${CASE}_r${REP}_a${ATTEMPT}"
-export KAFKA_RESULT_TOPIC="fanout_sweep_20261014_${STAGE}_n${ROWS}_f${FANOUT}_${CASE}_r${REP}_a${ATTEMPT}"
+export CLUSTER_RUN_ID="cluster4_fanout_sweep_20261015_${STAGE}_n${ROWS}_f${FANOUT}_${CASE}_r${REP}_a${ATTEMPT}"
+export KAFKA_RESULT_TOPIC="fanout_sweep_20261015_${STAGE}_n${ROWS}_f${FANOUT}_${CASE}_r${REP}_a${ATTEMPT}"
 RUNNER="$B/repo/scripts/distributed/recovery_s1024/cluster_runner_fanout_sweep_20261014.sh"
 OUT="$B/repo/scripts/bench_full_results/$CLUSTER_RUN_ID"
 test ! -e "$OUT"

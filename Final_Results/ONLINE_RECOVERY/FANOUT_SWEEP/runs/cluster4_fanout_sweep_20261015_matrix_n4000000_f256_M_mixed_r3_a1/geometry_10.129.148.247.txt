@@ -1,0 +1,46 @@
+                                data_directory                                | port | default_isolation | synchronous_merkle 
+------------------------------------------------------------------------------+------+-------------------+--------------------
+ /home/neel/ariabc_data/fanout_sweep_20261014/repo/.bench_tmp/recovery_pgdata | 5448 | serializable      | on
+(1 row)
+
+ heap_rows 
+-----------
+   4000001
+(1 row)
+
+                                                                                                          definition                                                                                                          |                                                  reloptions                                                  
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------
+ CREATE INDEX usertable_small_merkle_idx ON public.usertable_small USING merkle (ycsb_key) WITH (partitions='200', fanout='256', split_threshold='1024', merge_threshold='256', partition_key_columns='0', subpartitions='1') | {partitions=200,fanout=256,split_threshold=1024,merge_threshold=256,partition_key_columns=0,subpartitions=1}
+(1 row)
+
+ nodes | leaves | internal_nodes | max_prefix_bits | avg_nonempty_occupancy | max_occupancy | node_storage_bytes 
+-------+--------+----------------+-----------------+------------------------+---------------+--------------------
+ 51400 |  51200 |            200 |               8 |    78.1250195312500000 |           120 |           17637376
+(1 row)
+
+ prefix_len | is_leaf | nodes | tuple_count_sum 
+------------+---------+-------+-----------------
+          0 | f       |   200 |         4000001
+          8 | t       | 51200 |         4000001
+(2 rows)
+
+                               root                               | verified 
+------------------------------------------------------------------+----------
+ 2a6f6a6505faffa539b58ca70a86dfa0c2e6c1fc49f16e47c01819ca20839958 | t
+(1 row)
+
+ fsync 
+-------
+ on
+(1 row)
+
+ synchronous_commit 
+--------------------
+ on
+(1 row)
+
+ full_page_writes 
+------------------
+ on
+(1 row)
+

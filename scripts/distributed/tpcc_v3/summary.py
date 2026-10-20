@@ -3,12 +3,13 @@
 import argparse
 import csv
 import datetime as dt
+import gzip
 import json
 import re
 import statistics
 from pathlib import Path
 
-LABEL = 'tpmC-equivalent, unaudited (no keying/think time)'
+LABEL = 'TPC-C-derived, unaudited committed-only NewOrders/min (NOPM)'
 TABLES = {'warehouse', 'district', 'customer', 'history', 'item', 'stock',
           'oorder', 'new_order', 'order_line'}
 
@@ -39,7 +40,11 @@ def read_json(path, default=None):
 
 
 def text(path):
-    return path.read_text(errors='replace') if path.exists() else ''
+    if path.exists():return path.read_text(errors='replace')
+    archive=path.with_name(path.name+'.gz')
+    if archive.exists():
+        with gzip.open(archive,'rt',errors='replace') as f:return f.read()
+    return ''
 
 
 def samples(path):
@@ -209,6 +214,7 @@ def attempt(run):
         check('documented_completion_counter', inclusive)
     if 'user_abort_poll_failures' in last:
         check('abort_counter_polling', integer('user_abort_poll_failures') == 0)
+    initial_next = final_next = None
     try:
         initial_next = int(text(run / 'initial_district_next.txt').strip())
         final_next = int(text(run / 'final_district_next.txt').strip())
@@ -240,19 +246,42 @@ def attempt(run):
             indexes = list(csv.DictReader(f))
         lookup_tables = {r['tablename'] for r in indexes if r['indexname'].endswith('_merkle_lookup_idx')}
         check('merkle_lookup_indexes', cfg.get('mode') != 'merkle' or lookup_tables == TABLES)
+        am = cfg.get('merkle_lookup_am', 'btree')
+        check('merkle_lookup_am', cfg.get('mode') != 'merkle' or all(f' USING {am} (' in r['indexdef']
+              for r in indexes if r['indexname'].endswith('_merkle_lookup_idx')))
     except (OSError, KeyError):
         check('relation_index_evidence', False)
     state = text(run / 'state.hash').strip()
     check('state_hash_all_tables', rt.get('state_hash_rc') == 0 and
           all(re.search(r'\b' + t + r'[=:]', state) for t in TABLES))
     check('provenance_present', (run / 'provenance.json').exists())
+    check('clocksource_tsc', text(run / 'clocksource.txt').strip() == 'tsc')
     result = dict(path=str(run), mode=cfg.get('mode'), warehouses=cfg.get('warehouses'),
                   workers=cfg.get('workers'), trial=cfg.get('trial'), count=n,
                   completed_total=completed, user_aborts_total=aborts, expected_aborts=expected_aborts,
                   nopm_label=LABEL, settings=settings, state_hash=state, noise_flags=[])
     try:
         rows = samples(run / 'samples.csv')
-        win = select_window(rows, cfg.get('warmup_s', 60), inclusive, tx_ratio(run))
+        if cfg.get('measurement_method') == 'direct_fixed':
+            from direct_metrics import window as direct_window
+            win = direct_window(run, cfg, rows)
+            metrics = read_json(run / 'direct_metrics.json')
+            result['direct_metrics'] = metrics
+            result['metric_label'] = metrics['metric_label']
+            check('direct_completion_count', metrics['completion_records'] == n)
+            check('direct_window_fully_covered', metrics['window_fully_covered_before_submission_ends'])
+            check('direct_clock_alignment', metrics['clock_alignment_valid'])
+            for kind, passed in metrics['mix_minimum_checks'].items():
+                check('mix_minimum_' + kind, passed)
+            check('direct_db_new_order_parity', initial_next is not None and final_next is not None and aborts is not None and
+                  metrics['whole_completed_counts']['new_order'] == final_next - initial_next + aborts)
+            check('initial_consistency', 'consistency_ok=t' in text(run / 'initial_consistency.txt'))
+            if not cfg.get('smoke'):
+                check('ramp_300s', cfg['warmup_s'] >= 300)
+                check('steady_state', metrics['steady_state']['passed'])
+                check('fixed_duration', cfg['min_window_s'] == (7200 if cfg.get('run_kind') == 'headline' else 600))
+        else:
+            win = select_window(rows, cfg.get('warmup_s', 60), inclusive, tx_ratio(run))
         (run / 'window.json').write_text(json.dumps(win, indent=2) + '\n')
         result['window'] = win
         check('window_300s', win['duration_s'] >= 300)
@@ -286,6 +315,18 @@ def attempt(run):
         result['wal'] = ws
         check('wal_stats', rt.get('waldump_rc') == 0 and ws is not None and
               ws['record_bytes'] + ws['fpi_bytes'] == ws['combined_bytes'])
+        if cfg.get('wal_accounting') == 'incremental_record_ranges_v1':
+            import hashlib
+            collection = read_json(run / 'wal_collection.json')
+            parts = read_json(run / 'wal_chunks.json')
+            valid = bool(parts) and collection.get('covered') and collection['start']['wal_lsn']==win['start']['wal_lsn'] and collection['end']['wal_lsn']==win['end']['wal_lsn']
+            valid = valid and parts[0]['start_lsn']==win['start']['wal_lsn'] and parts[-1]['end_lsn']==win['end']['wal_lsn']
+            valid = valid and all(a['end_lsn']==b['start_lsn'] for a,b in zip(parts,parts[1:]))
+            valid = valid and all(sum(p['stats'][k] for p in parts)==ws[k] for k in ('records','record_bytes','fpi_bytes','combined_bytes'))
+            for i,part in enumerate(parts):
+                raw=(run/'wal_chunks'/f'part{i:04d}.txt').read_bytes()
+                valid = valid and hashlib.sha256(raw).hexdigest()==part['raw_sha256'] and wal_stats(raw.decode())==part['stats']
+            check('wal_incremental_ranges', valid)
         if ws and win['committed_delta'] and win['committed_delta'] > 0:
             for k in ('record_bytes', 'fpi_bytes', 'combined_bytes'):
                 ws[k + '_per_committed_tx'] = ws[k] / win['committed_delta']
@@ -301,17 +342,28 @@ def attempt(run):
     result['executor_retry_attempts'] = sf.get('retry_attempts_total')
     result['executor_retry_exhausted'] = sf.get('retry_exhausted_total')
     restarts = 0
+    det_counters = {k: 0 for k in ('dt_opf', 'dt_opf_stale_error', 'dt_rel_read_tags')}
+    det_counter_rows = {k: 0 for k in det_counters}
     trace_count = 0
     for path in run.glob('ptrace*.*'):
         if not path.is_file():
             continue
-        for row in csv.reader(path.open()):
+        reader = csv.reader(gzip.open(path,'rt') if path.suffix=='.gz' else path.open())
+        header = next(reader, [])
+        positions = {k: header.index(k) for k in det_counters if k in header}
+        for row in reader:
             try:
                 restarts += int(row[1]); trace_count += 1
             except (ValueError, IndexError):
                 pass
+            for key, index in positions.items():
+                try:
+                    det_counters[key] += int(row[index]); det_counter_rows[key] += 1
+                except (ValueError, IndexError):
+                    pass
     result['total_restarts'] = restarts if trace_count else None
     result['traced_transactions'] = trace_count
+    result['det_counters'] = {k: det_counters[k] if det_counter_rows[k] else None for k in det_counters}
     check('attempt_finished', rt.get('finished') is True)
     check('sampler_rc_zero', rt.get('sampler_rc') == 0)
     check('postgres_stopped', rt.get('stop_rc') == 0 and rt.get('postgres_stopped') is True)
@@ -403,7 +455,11 @@ def main():
         prog = [progress(s) for s in text(args.root / 'gateway.log').splitlines()]
         final = next((p for p in reversed(prog) if p and p['final'] == 1), None)
         inclusive = final is None or final['completed'] == cfg.get('count')
-        w = select_window(samples(args.root / 'samples.csv'), cfg.get('warmup_s', 60), inclusive, tx_ratio(args.root))
+        if cfg.get('measurement_method') == 'direct_fixed':
+            from direct_metrics import window as direct_window
+            w = direct_window(args.root, cfg, samples(args.root / 'samples.csv'))
+        else:
+            w = select_window(samples(args.root / 'samples.csv'), cfg.get('warmup_s', 60), inclusive, tx_ratio(args.root))
         (args.root / 'window.json').write_text(json.dumps(w, indent=2) + '\n')
     else:
         summarize(args.root)

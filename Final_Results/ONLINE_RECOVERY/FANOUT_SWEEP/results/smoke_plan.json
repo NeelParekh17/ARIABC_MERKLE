@@ -1,0 +1,14 @@
+[
+  {
+    "rows": 4000000,
+    "fanout": 1024,
+    "scenario": "M_mixed",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 512,
+    "scenario": "M_mixed",
+    "rep": 1
+  }
+]

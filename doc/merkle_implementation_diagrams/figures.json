@@ -1,0 +1,356 @@
+[
+  {
+    "name": "m01_overview",
+    "title": "From SQL mutation to a committed Merkle tree",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m02_forest",
+    "title": "One application table owns many partition roots",
+    "width": 2240,
+    "height": 1988
+  },
+  {
+    "name": "m03_storage",
+    "title": "Physical storage: application data and tree metadata",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "m04_prefix_walk",
+    "title": "Follow the leading bits until a bucket leaf",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m05_settings",
+    "title": "Four controls determine the tree geometry",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "m06_three_lookups",
+    "title": "Three questions use three different indexes",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "m07_range_lookup",
+    "title": "A leaf prefix becomes a user-row range query",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m08_two_hashes",
+    "title": "One row, two hashes, two different jobs",
+    "width": 2240,
+    "height": 1470
+  },
+  {
+    "name": "m09_leading_route",
+    "title": "Leading-key groups choose the partition",
+    "width": 2240,
+    "height": 1568
+  },
+  {
+    "name": "m10_sum_tree",
+    "title": "Node hashes add row contributions",
+    "width": 2240,
+    "height": 1148
+  },
+  {
+    "name": "m11_insert_callback",
+    "title": "INSERT: stage the new row contribution",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m12_insert_path",
+    "title": "INSERT: the same delta reaches every ancestor",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m13_delete_capture",
+    "title": "DELETE: capture first, subtract only after success",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m14_update_sql",
+    "title": "Ordinary UPDATE: maintain Merkle exactly once",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m15_same_leaf",
+    "title": "A same-leaf UPDATE keeps the count unchanged",
+    "width": 2240,
+    "height": 1148
+  },
+  {
+    "name": "m16_bcdb_shortcut",
+    "title": "BCDB UPDATE chooses one event or two",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "m17_apply_timing",
+    "title": "When the staged Merkle changes are applied",
+    "width": 2240,
+    "height": 1911
+  },
+  {
+    "name": "m18_move_same_partition",
+    "title": "A key move can change two branches",
+    "width": 2240,
+    "height": 1148
+  },
+  {
+    "name": "m19_move_partition",
+    "title": "A key move can change two partition roots",
+    "width": 2240,
+    "height": 1148
+  },
+  {
+    "name": "m20_stage_combine",
+    "title": "Repeated staging events combine in memory",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "m21_savepoints",
+    "title": "SAVEPOINT frames follow transaction outcomes",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "m22_commit_coalesce",
+    "title": "Commit-time apply combines work twice",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m23_shared_ancestor",
+    "title": "Many events can produce one root update",
+    "width": 2240,
+    "height": 1148
+  },
+  {
+    "name": "m24_leaf_resolution",
+    "title": "Resolve a leaf: cache first, then indexed traversal",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "m25_physical_node_update",
+    "title": "Update one physical node tuple safely",
+    "width": 2240,
+    "height": 1911
+  },
+  {
+    "name": "m26_concurrent_shape",
+    "title": "A cached leaf can become stale",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m27_split_process",
+    "title": "Split an oversized bucket into child buckets",
+    "width": 2240,
+    "height": 1568
+  },
+  {
+    "name": "m28_merge_process",
+    "title": "Merge only when the whole sibling set qualifies",
+    "width": 2240,
+    "height": 1911
+  },
+  {
+    "name": "m29_bulk_build",
+    "title": "CREATE INDEX / REINDEX builds nodes in bulk",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m30_verify",
+    "title": "What merkle_verify_index actually checks",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "m31_replica_repair",
+    "title": "Replica repair: roots \u2192 leaf ranges \u2192 actual rows",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "m32_source_map",
+    "title": "Where each responsibility lives in the source",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "t01_metapage",
+    "title": "Custom index block 0 stores configuration",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "t02_node_names",
+    "title": "Application tables determine node-table names",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t03_node_record",
+    "title": "One node is a six-column PostgreSQL tuple",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t04_prefix_tree",
+    "title": "Node IDs are padded route prefixes",
+    "width": 2240,
+    "height": 1512
+  },
+  {
+    "name": "t05_prefix_bounds",
+    "title": "A prefix describes an inclusive route interval",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t06_btree_point",
+    "title": "A node B-tree lookup ends at a node heap tuple",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "t07_node_indexes",
+    "title": "The three node-table B-trees use different ordering",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t08_lookup_order",
+    "title": "The lookup B-tree groups user rows by route",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t09_canonical_bytes",
+    "title": "Canonical encoding separates row and key domains",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "t10_composite_keys",
+    "title": "Composite routing preserves index-key order",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t11_partition_groups",
+    "title": "Leading keys share a group of partitions",
+    "width": 2240,
+    "height": 1148
+  },
+  {
+    "name": "t12_hash_equations",
+    "title": "The same additive rule applies at every level",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "t13_arithmetic",
+    "title": "A small arithmetic example shows the signs",
+    "width": 2240,
+    "height": 1078
+  },
+  {
+    "name": "t14_delete_before_after",
+    "title": "DELETE removes one contribution from a bucket",
+    "width": 2240,
+    "height": 1106
+  },
+  {
+    "name": "t15_delta_memory",
+    "title": "What transaction-local staging stores",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t16_hot_chain",
+    "title": "A node HOT update can reuse its B-tree entries",
+    "width": 2240,
+    "height": 742
+  },
+  {
+    "name": "t17_split_tree",
+    "title": "Before / after: a leaf becomes an internal node",
+    "width": 2240,
+    "height": 1470
+  },
+  {
+    "name": "t18_fanout",
+    "title": "Fanout controls bits consumed and children created",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t19_merge_tree",
+    "title": "Before / after: sibling leaves collapse into a bucket",
+    "width": 2240,
+    "height": 1470
+  },
+  {
+    "name": "t20_hysteresis",
+    "title": "Identical rows need not produce identical topology",
+    "width": 2240,
+    "height": 1407
+  },
+  {
+    "name": "t21_verification_boundary",
+    "title": "Verification has a precise boundary",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t22_repair_leaf",
+    "title": "A differing leaf identifies a user-row route range",
+    "width": 2240,
+    "height": 1407
+  },
+  {
+    "name": "t23_tpcc_storage",
+    "title": "Each configured TPC-C table has the same families",
+    "width": 2240,
+    "height": 1148
+  },
+  {
+    "name": "t24_count_rules",
+    "title": "Direct updates clamp counts and clear empty hashes",
+    "width": 2240,
+    "height": 1309
+  },
+  {
+    "name": "t25_split_rebuild",
+    "title": "Split rebuilds local sums, not ancestor state",
+    "width": 2240,
+    "height": 1610
+  },
+  {
+    "name": "t26_repair_routes",
+    "title": "Repair decisions choose rows, partitions, or a full copy",
+    "width": 2240,
+    "height": 2212
+  },
+  {
+    "name": "t27_tpcc_repair",
+    "title": "The inspected TPC-C schema uses checksum-based repair",
+    "width": 2240,
+    "height": 1610
+  }
+]

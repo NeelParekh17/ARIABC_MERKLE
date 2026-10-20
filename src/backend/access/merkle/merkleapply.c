@@ -505,7 +505,7 @@ merkle_do_split_in_memory(Oid index_oid, int partition_id, const uint8 *node_id,
 
 	for (i = 0; i < num_entries; i++)
 	{
-		uint8 b = merkle_next_bits(entries[i].key_hash, prefix_len, bits_per_split);
+		uint16 b = merkle_next_bits(entries[i].key_hash, prefix_len, bits_per_split);
 		if (b < fanout)
 		{
 			bucket_counts[b]++;
@@ -528,7 +528,7 @@ merkle_do_split_in_memory(Oid index_oid, int partition_id, const uint8 *node_id,
 
 		for (i = 0; i < num_entries; i++)
 		{
-			uint8 b = merkle_next_bits(entries[i].key_hash, prefix_len, bits_per_split);
+			uint16 b = merkle_next_bits(entries[i].key_hash, prefix_len, bits_per_split);
 			if (b < fanout)
 			{
 				partitioned_entries[current_offsets[b]++] = entries[i];
@@ -543,7 +543,7 @@ merkle_do_split_in_memory(Oid index_oid, int partition_id, const uint8 *node_id,
 			bytea	   *child_hash_bytea = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
 			Datum		ins_values[5];
 
-			merkle_bytea_extend(child_node_id, node_id, prefix_len, (uint8) i, bits_per_split);
+			merkle_bytea_extend(child_node_id, node_id, prefix_len, (uint16) i, bits_per_split);
 			SET_VARSIZE(child_id_bytea, VARHDRSZ + 8);
 			memcpy(VARDATA(child_id_bytea), child_node_id, 8);
 
@@ -1658,7 +1658,7 @@ merkle_resolve_route_leaf(Relation catalog_rel, Relation pkey_idx_rel, TupleTabl
 			}
 			else
 			{
-				uint8 bits = merkle_next_bits(routing_key, prefix_len, bits_per_split);
+				uint16 bits = merkle_next_bits(routing_key, prefix_len, bits_per_split);
 				uint8 next_node_id[8];
 				merkle_bytea_extend(next_node_id, node_id, prefix_len, bits, bits_per_split);
 				memcpy(node_id, next_node_id, 8);

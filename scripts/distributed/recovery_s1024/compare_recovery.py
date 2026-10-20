@@ -129,7 +129,7 @@ def extract(path):
     for name in ("server_node1_admin123.log", "server_node2_user4.log", "server_node4_utkarsh.log"):
         # Concurrent server writes can prepend another record mid-line.
         ctrl.extend(kv(line) for line in re.findall(r"RECOVERY_CTRL\s+[^\r\n]*", read_text(path / name))
-                    if "verb=RECOVER " in line and "candidate_rows=" in line)
+                    if "candidate_rows=" in line and "RECOVER" in line)
     if ctrl:
         record["candidate_rows"] = aggregate(ctrl, "candidate_rows")
     timeline = [kv(line) for line in runner.splitlines()

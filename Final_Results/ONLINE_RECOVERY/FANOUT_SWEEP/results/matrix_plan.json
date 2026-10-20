@@ -1,6 +1,42 @@
 [
   {
     "rows": 4000000,
+    "fanout": 2,
+    "scenario": "A",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 2,
+    "scenario": "M_mixed",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 4,
+    "scenario": "A",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 4,
+    "scenario": "M_mixed",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 8,
+    "scenario": "A",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 8,
+    "scenario": "M_mixed",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
     "fanout": 16,
     "scenario": "A",
     "rep": 1
@@ -61,6 +97,66 @@
   },
   {
     "rows": 4000000,
+    "fanout": 512,
+    "scenario": "A",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 512,
+    "scenario": "M_mixed",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 1024,
+    "scenario": "A",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 1024,
+    "scenario": "M_mixed",
+    "rep": 1
+  },
+  {
+    "rows": 4000000,
+    "fanout": 4,
+    "scenario": "M_mixed",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 4,
+    "scenario": "A",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 8,
+    "scenario": "M_mixed",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 8,
+    "scenario": "A",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 16,
+    "scenario": "M_mixed",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 16,
+    "scenario": "A",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
     "fanout": 32,
     "scenario": "M_mixed",
     "rep": 2
@@ -109,15 +205,75 @@
   },
   {
     "rows": 4000000,
-    "fanout": 16,
+    "fanout": 512,
     "scenario": "M_mixed",
     "rep": 2
   },
   {
     "rows": 4000000,
-    "fanout": 16,
+    "fanout": 512,
     "scenario": "A",
     "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 1024,
+    "scenario": "M_mixed",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 1024,
+    "scenario": "A",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 2,
+    "scenario": "M_mixed",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 2,
+    "scenario": "A",
+    "rep": 2
+  },
+  {
+    "rows": 4000000,
+    "fanout": 8,
+    "scenario": "A",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 8,
+    "scenario": "M_mixed",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 16,
+    "scenario": "A",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 16,
+    "scenario": "M_mixed",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 32,
+    "scenario": "A",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 32,
+    "scenario": "M_mixed",
+    "rep": 3
   },
   {
     "rows": 4000000,
@@ -157,25 +313,49 @@
   },
   {
     "rows": 4000000,
-    "fanout": 16,
+    "fanout": 512,
     "scenario": "A",
     "rep": 3
   },
   {
     "rows": 4000000,
-    "fanout": 16,
+    "fanout": 512,
     "scenario": "M_mixed",
     "rep": 3
   },
   {
     "rows": 4000000,
-    "fanout": 32,
+    "fanout": 1024,
     "scenario": "A",
     "rep": 3
   },
   {
     "rows": 4000000,
-    "fanout": 32,
+    "fanout": 1024,
+    "scenario": "M_mixed",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 2,
+    "scenario": "A",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 2,
+    "scenario": "M_mixed",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 4,
+    "scenario": "A",
+    "rep": 3
+  },
+  {
+    "rows": 4000000,
+    "fanout": 4,
     "scenario": "M_mixed",
     "rep": 3
   }

@@ -1,0 +1,3 @@
+rows,fanout,scenario,n,median_tps,min_tps,max_tps,cv_pct,delta_vs_same_fanout_baseline_pct,median_cut_ms,min_cut_ms,max_cut_ms,median_repair_ms,min_repair_ms,max_repair_ms,median_catchup_ms,min_catchup_ms,max_catchup_ms,median_total_recovery_ms,min_total_recovery_ms,max_total_recovery_ms,median_candidate_rows,min_candidate_rows,max_candidate_rows
+4000000,512,M_mixed,1,7499.41,7499.41,7499.41,,,3566.0,3566.0,3566.0,343.0,343.0,343.0,9036.0,9036.0,9036.0,13004.0,13004.0,13004.0,3956.0,3956.0,3956.0
+4000000,1024,M_mixed,1,7408.78,7408.78,7408.78,,,3512.0,3512.0,3512.0,426.0,426.0,426.0,9176.0,9176.0,9176.0,13196.0,13196.0,13196.0,2020.0,2020.0,2020.0

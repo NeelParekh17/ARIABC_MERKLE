@@ -115,6 +115,16 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 /* Legacy 32/8 geometry; unspecified merge thresholds use split / 4. */
 #define MERKLE_MERGE_THRESHOLD      8
 #define MAX_PREFIX_LEN              60
+
+/*
+ * Fanout is a power of two up to 1024: one split consumes up to 10 key-hash bits,
+ * so a child index needs uint16. Prefix levels are multiples of bits_per_split and
+ * splitting stops once a child prefix reaches MAX_PREFIX_LEN (60); the largest
+ * multiple below 60 plus one split is <= 64 for every width 1..10, so node ids
+ * stay 8 bytes.
+ */
+#define MERKLE_MAX_FANOUT           1024
+#define MERKLE_MAX_BITS_PER_SPLIT   10
 #define MERKLE_DEFAULT_PARTITIONS   200
 /* Node tables and merkle_partition_for_hash() store partition ids as int2. */
 #define MERKLE_MAX_PARTITIONS       32767
@@ -339,7 +349,7 @@ static inline int
 merkle_bits_per_split_for_fanout(int fanout)
 {
 	int bits = 0;
-	while ((1 << bits) < fanout && bits < 8)
+	while ((1 << bits) < fanout && bits < MERKLE_MAX_BITS_PER_SPLIT)
 		bits++;
 	return bits > 0 ? bits : 2;
 }
@@ -349,7 +359,7 @@ extern void do_split(Oid index_oid, int partition_id, const uint8 *node_id,
 					 int prefix_len, int64 target_count);
 
 /* Bit manipulation helpers for Dynamic Merkle tree prefix traversal */
-static inline uint8
+static inline uint16
 merkle_next_bits(const uint8 *key_hash, int prefix_len, int w)
 {
 	uint32 res = 0;
@@ -362,11 +372,11 @@ merkle_next_bits(const uint8 *key_hash, int prefix_len, int w)
 		uint8 bit = (key_hash[byte_pos] >> bit_pos) & 1;
 		res = (res << 1) | bit;
 	}
-	return (uint8) res;
+	return (uint16) res;
 }
 
 static inline void
-merkle_bytea_extend(uint8 *result_node_id, const uint8 *node_id, int prefix_len, uint8 bits, int w)
+merkle_bytea_extend(uint8 *result_node_id, const uint8 *node_id, int prefix_len, uint16 bits, int w)
 {
 	int i;
 	memcpy(result_node_id, node_id, 8);

@@ -172,7 +172,7 @@ merkle_register_relopts(void)
 
 	add_int_reloption(merkle_relopt_kind, "fanout",
 					  "Branching factor (children per internal node)",
-					  MERKLE_DEFAULT_FANOUT, 2, 256, AccessExclusiveLock);
+					  MERKLE_DEFAULT_FANOUT, 2, MERKLE_MAX_FANOUT, AccessExclusiveLock);
 
 	add_int_reloption(merkle_relopt_kind, "split_threshold",
 					  "Node size to trigger a split",
@@ -246,14 +246,14 @@ merkle_options(Datum reloptions, bool validate)
 
 	if (validate && opts != NULL)
 	{
-		if (opts->fanout < 2 || opts->fanout > 256 ||
+		if (opts->fanout < 2 || opts->fanout > MERKLE_MAX_FANOUT ||
 			!merkle_is_power_of(opts->fanout, 2) ||
 			opts->num_partitions < 1 || opts->num_partitions > MERKLE_MAX_PARTITIONS)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("fanout must be a power of two between 2 and 256 and partitions must be between 1 and %d",
-							MERKLE_MAX_PARTITIONS)));
+					 errmsg("fanout must be a power of two between 2 and %d and partitions must be between 1 and %d",
+							MERKLE_MAX_FANOUT, MERKLE_MAX_PARTITIONS)));
 		}
 		if (opts->split_threshold < 2 || opts->split_threshold > 100000)
 		{
@@ -341,7 +341,7 @@ merkle_get_options(Relation indexRel)
 	}
 
 	/* Validate options - if values look corrupt, use defaults independently */
-	if (opts->fanout < 2 || opts->fanout > 1024)
+	if (opts->fanout < 2 || opts->fanout > MERKLE_MAX_FANOUT)
 		opts->fanout = MERKLE_DEFAULT_FANOUT;
 
 	if (opts->num_partitions < 1 || opts->num_partitions > MERKLE_MAX_PARTITIONS)

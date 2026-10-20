@@ -154,7 +154,7 @@ merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
 	for (i = 0; i < (int) num_entries; i++)
 	{
 		const MerkleTupleHashEntry *e = entries_base ? &entries_base[i] : merkle_entry_at(ea, start_idx + (size_t) i);
-		uint8 val = merkle_next_bits(e->key_hash, prefix_len, bits_per_split);
+		uint16 val = merkle_next_bits(e->key_hash, prefix_len, bits_per_split);
 		while (b < (int) val && b < fanout)
 		{
 			b++;
@@ -174,7 +174,7 @@ merkle_build_tree_pass1(MerkleBulkNodeSet *bs,
 		uint8	child_node_id[8];
 		int		child_prefix_len = prefix_len + bits_per_split;
 
-		merkle_bytea_extend(child_node_id, node_id, prefix_len, (uint8) i, bits_per_split);
+		merkle_bytea_extend(child_node_id, node_id, prefix_len, (uint16) i, bits_per_split);
 
 		if (bucket_counts[i] > split_threshold && child_prefix_len < max_prefix_len)
 		{

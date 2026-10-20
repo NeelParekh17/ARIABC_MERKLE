@@ -34,8 +34,9 @@ def main():
                 rotated = modes[(rep - 1) % len(modes):] + modes[:(rep - 1) % len(modes)]
                 plan.extend(dict(rows=size, fanout=fanout, scenario=m, rep=rep) for m in rotated)
     if a.phase == 'smoke':
-        plan = [dict(rows=n, fanout=f, scenario=m, rep=1)
-                for n in config['sizes'] for f in (16, 256) for m in ('A', 'M_passive')]
+        # Qualify the widest new fanouts with a full online repair before the matrix.
+        plan = [dict(rows=n, fanout=f, scenario='M_mixed', rep=1)
+                for n in config['sizes'] for f in (1024, 512)]
     (results / (a.phase + '_plan.json')).write_text(json.dumps(plan, indent=2) + '\n')
     record_file = results / (a.phase + '_attempts.jsonl')
     records = [json.loads(s) for s in record_file.read_text().splitlines()] if record_file.exists() else []

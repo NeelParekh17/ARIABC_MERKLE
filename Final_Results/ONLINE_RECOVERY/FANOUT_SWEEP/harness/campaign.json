@@ -1,5 +1,5 @@
 {
-  "tag": "fanout_sweep_20261014",
+  "tag": "fanout_sweep_20261015",
   "source_head": "9cf6c70a39e9bf848c93c2c24bdb55181f4b3356",
   "sizes": [
     4000000
@@ -12,7 +12,9 @@
     32,
     64,
     128,
-    256
+    256,
+    512,
+    1024
   ],
   "scenarios": [
     "A",
@@ -34,5 +36,5 @@
   "fault_seed": 20261013,
   "workload_seed": 42,
   "noise_rule": "retain and stop if any host swaps >64MiB during measured interval",
-  "note": "Reduced fanout sweep (owner choice 2026-10-14): 4M rows x 5 fanouts x {A, M_mixed} x 3 reps = 30. Build includes confirm-before-repair, ledger replay xid registration, cut self-check. Extended 2026-10-14 (owner request): fanouts 2,4,8 added, same build/harness; run_case.sh fanout allowlist widened only."
+  "note": "Fanout sweep 2026-10-15 (owner request): 4M rows x 10 fanouts (2..1024) x {A, M_mixed} x 3 reps = 60. Build adds: Merkle fanout up to 1024 (10-bit splits), repair transfer/apply use the lookup index (hash/merge join off), RECOVER heap_verify default 0 (root compare only), plus the 2026-10-14 confirm-before-repair/settle/injector fixes. Previous 30-run campaign archived in results_20261014."
 }

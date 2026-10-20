@@ -1,0 +1,332 @@
+{
+  "kind": "manual_static_source_review",
+  "status": "SOURCE_INSPECTION_COMPLETED",
+  "reviewed_at_utc": "2026-10-15T10:45:35.698244+00:00",
+  "head": "a7fc519dfdd0713247922abff3bc3c80b752e27e",
+  "scope": "Current local working tree including user uncommitted engine changes; focused review of Claude findings and affected claims/figures, not an exhaustive proof of all guide claims.",
+  "document_sha256": "646b02db454d52390e63efad88590a1f50e4489147a0277d3bb320ef5244d271",
+  "renderer_sha256": "93721747a852bb47d67643edd587adcad9cd361e31126a8c23dfa7e06df63eab",
+  "runtime_validation": {
+    "build": false,
+    "database": false,
+    "benchmark": false,
+    "live_catalog": false
+  },
+  "findings": [
+    {
+      "id": "working_tree_scope",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S01",
+        "S12",
+        "S13",
+        "S25"
+      ],
+      "conclusion": "Guide retains working-tree fanout 1024 / uint16 selectors / temporary repair index, explicitly distinguishing committed a7fc519d."
+    },
+    {
+      "id": "precommit_finalization",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S05",
+        "S23",
+        "S28",
+        "S30"
+      ],
+      "conclusion": "Earlier apply finalizes transaction deltas; later nonzero staging is rejected; PRE_COMMIT applies only when not finalized."
+    },
+    {
+      "id": "callback_anchors",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S23",
+        "S30",
+        "S40"
+      ],
+      "conclusion": "Synchronous apply, transaction callback and subtransaction callback have separate exact anchors."
+    },
+    {
+      "id": "split_merge_anchors",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S08",
+        "S31"
+      ],
+      "conclusion": "Split retrieval and merge checker are linked separately."
+    },
+    {
+      "id": "defaults",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S01",
+        "S12",
+        "S14",
+        "S32"
+      ],
+      "conclusion": "Bare backend 4/32/8 differs from OOM-100M and TPC-C setup defaults 32/1024/256; overrides remain possible."
+    },
+    {
+      "id": "direct_count_zero",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S09",
+        "S33"
+      ],
+      "conclusion": "Direct updater clamps a negative calculated count to zero and writes a zero hash whenever resulting count is zero; this is not a heap-emptiness proof."
+    },
+    {
+      "id": "spi_leaf_count",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S48"
+      ],
+      "conclusion": "SPI leaf UPDATE requires a nonnegative result and clears hash at zero; ancestor SPI plan clamps with GREATEST."
+    },
+    {
+      "id": "split_heap_rebuild",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S08",
+        "S24",
+        "S41"
+      ],
+      "conclusion": "A nonempty successful split recomputes child and splitting-node totals from scanned heap rows; ancestors are not reconciled."
+    },
+    {
+      "id": "split_mismatch_log",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S34"
+      ],
+      "conclusion": "Only a nonzero scan count differing from a positive target count logs DEBUG1; hash-only mismatch has no corresponding check."
+    },
+    {
+      "id": "split_empty_scan",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S34"
+      ],
+      "conclusion": "Zero scanned rows returns before split rebuild and before count-mismatch logging."
+    },
+    {
+      "id": "build_staged_guard",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S03"
+      ],
+      "conclusion": "Build actively rejects already-staged DML in the same transaction."
+    },
+    {
+      "id": "build_pending_guard",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S35",
+        "S27"
+      ],
+      "conclusion": "Non-READY branch is present with caught-up INVALID/REBUILD_REQUIRED exception; current status helper always READY makes it inactive."
+    },
+    {
+      "id": "selective_eligibility",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S36",
+        "S44"
+      ],
+      "conclusion": "Selective discovery requires one Merkle key column, an existing node table and an indisprimary application index."
+    },
+    {
+      "id": "ineligible_checksum",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S39"
+      ],
+      "conclusion": "Ineligible tables present locally are checksummed; full copy occurs only for mismatch. Absent local ineligible tables are skipped."
+    },
+    {
+      "id": "matching_root_heap_failure",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S42"
+      ],
+      "conclusion": "Matching roots with enabled failed heap verification cause full copy; matching roots with verify off/pass return."
+    },
+    {
+      "id": "whole_partition_ranges",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S37"
+      ],
+      "conclusion": "Roots differing without differing leaf ranges expand to whole-partition ranges in selective machinery, not an immediate full-table copy."
+    },
+    {
+      "id": "post_selective_fallback",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S38"
+      ],
+      "conclusion": "Post-selective unequal roots or enabled failed heap verification cause full copy; operational errors can return failure."
+    },
+    {
+      "id": "full_copy_order",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S43"
+      ],
+      "conclusion": "Full copy rebuilds local Merkle indexes in a separate transaction before DELETE plus COPY."
+    },
+    {
+      "id": "tpcc_setup_eligibility",
+      "basis": "manual source inspection",
+      "source_refs": [
+        "S26",
+        "S17",
+        "S44",
+        "S45",
+        "S46",
+        "S47"
+      ],
+      "conclusion": "Inspected dump/scale/index pipeline creates no application PK constraints. Seven Merkle keys are composite; warehouse/item also lack real PKs. No nine-table selective path is implied by this setup."
+    },
+    {
+      "id": "evidence_boundary",
+      "basis": "manual source inspection",
+      "source_refs": [],
+      "conclusion": "Artifact validation and static/manual source review are separate; no build, database instance, benchmark, or live catalog inspection was run."
+    }
+  ],
+  "constraint_text_scan": {
+    "scripts/tpcc/tpcc-pgdump-full.sql": [],
+    "scripts/restore_tpcc_scale.py": [],
+    "scripts/restore_tpcc_procs.sql": [
+      {
+        "line": 8,
+        "matched": "primary key"
+      }
+    ]
+  },
+  "files": {
+    "ariabc_pg/src/replica_repair.cxx": {
+      "sha256": "b4e478b968395a4b066cccf4e11d7dc20c3925f6eb144f9edebdce7a9057ca45",
+      "bytes": 33096
+    },
+    "scripts/distributed/run_all_modes_gateway_sweep.py": {
+      "sha256": "11fa3cc77cffb4cc7ae8cb6388c0a9ba7100efe0684bcfe4ece3b4654808193b",
+      "bytes": 141460
+    },
+    "scripts/distributed/run_oom_100m_benchmark.py": {
+      "sha256": "df9e0a43d03868ca8e342bcc7027a19ddd3d753b17e41cfa8d62628e6c442dc0",
+      "bytes": 92354
+    },
+    "scripts/restore_tpcc_procs.sql": {
+      "sha256": "61d4df5d6fbf24bb8af8ad86a49064e1d6abdd8a4678c34fb36c3da5fe280a6d",
+      "bytes": 29497
+    },
+    "scripts/restore_tpcc_scale.py": {
+      "sha256": "395ec1977c7917f539f2659fbe8ed5d0343af557be4d7367f0463755b310deac",
+      "bytes": 8958
+    },
+    "scripts/tpcc/tpcc-pgdump-full.sql": {
+      "sha256": "17794b95f3db3791355f4bd060c69c2163ab0aba33c6d37cc91f6100cde12c3d",
+      "bytes": 87573897
+    },
+    "src/backend/access/merkle/merkle.c": {
+      "sha256": "3cddc9cbcdd128b0a0056354ec364f3fc116413a635992ed4ebc9f7fb10d4a4d",
+      "bytes": 17174
+    },
+    "src/backend/access/merkle/merkleapply.c": {
+      "sha256": "0bd302217a8c84f6c54b983f756bc59a43b107a64300f87aa8e5a80a0ed59ec1",
+      "bytes": 88470
+    },
+    "src/backend/access/merkle/merklebuild.c": {
+      "sha256": "a2fbbd469f3df60e35bab2ce1330f20a7af388f3301687ff7f543ae060a793e3",
+      "bytes": 64234
+    },
+    "src/backend/access/merkle/merkledelta.c": {
+      "sha256": "083a81e57f65273388ad1d23b8e54ca05f9ad7625124fb9f46e1d14b13f7c5f5",
+      "bytes": 13221
+    },
+    "src/backend/access/merkle/merkleinsert.c": {
+      "sha256": "1dfc7a16372a04e1b4b0bede2a79910dc81552b0e3edcbde37ae95e474556320",
+      "bytes": 6100
+    },
+    "src/backend/access/merkle/merkleutil.c": {
+      "sha256": "d2b182050f9d6984421a09555e5bb7656df5b4b0c5127c5a7e8d5d626b95d527",
+      "bytes": 50017
+    },
+    "src/backend/access/merkle/merkleverify.c": {
+      "sha256": "fa75ac410286d27cc38cf5392345f7c97e56e23ffd87ca45bcd174519d59edbf",
+      "bytes": 47759
+    },
+    "src/backend/bcdb/raft_apply_ledger.c": {
+      "sha256": "b35b5f0ceab1ac13cbf9340f29b9fffee019a274319475c43d153db362338fd3",
+      "bytes": 77546
+    },
+    "src/backend/bcdb/shm_transaction.c": {
+      "sha256": "4cdcc7056a2f1e84c25e8d9ad16ae27dd7bfeb9276612aae6718c8722995853d",
+      "bytes": 155311
+    },
+    "src/backend/bcdb/worker.c": {
+      "sha256": "ccfec79431349efcb65840dc8bf3c6b2d2127dfb5c10c28c35350b77760ef00e",
+      "bytes": 147686
+    },
+    "src/backend/executor/nodeModifyTable.c": {
+      "sha256": "d48b86a60984f0ceccfac16161b08d5210c351ad02a940058b644255f3912b5b",
+      "bytes": 111992
+    },
+    "src/include/access/merkle.h": {
+      "sha256": "1632883080dad7e72c63ddba187980b022a48ca67549f56ce24beb0fa4d013d9",
+      "bytes": 17006
+    }
+  },
+  "note": "Source hashes bind this review to the inspected bytes. Artifact/PNG checks belong in validation.json and do not establish source correctness.",
+  "source_anchor_lines": {
+    "S01": "static void",
+    "S02": "merkle_hash_xor(MerkleHash *dest, const MerkleHash *src)",
+    "S03": "merkleBuild(Relation heapRel, Relation indexRel, struct IndexInfo *indexInfo)",
+    "S04": "merkle_get_node_tablename(Oid index_oid, char *buf, size_t buflen)",
+    "S05": "merkle_stage_delta_event(Relation indexRel, MerkleDeltaEventType event_type,",
+    "S06": "merkle_apply_staged_synchronous_impl(HTAB *combined_delta_map)",
+    "S07": "merkle_resolve_route_leaf(Relation catalog_rel, Relation pkey_idx_rel, TupleTableSlot *slot,",
+    "S08": "do_split(Oid index_oid, int partition_id, const uint8 *node_id, int prefix_len, int64 target_count)",
+    "S09": "merkle_direct_update_node(Relation catalog_rel, Relation pkey_idx_rel,",
+    "S10": "merkle_verify_index(PG_FUNCTION_ARGS)",
+    "S11": "merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,",
+    "S12": "#define MERKLE_METAPAGE_BLKNO       0",
+    "S13": "merkle_next_bits(const uint8 *key_hash, int prefix_len, int w)",
+    "S14": "        CREATE INDEX usertable_merkle_lookup_idx ON usertable (",
+    "S15": "bool discover_tables(PGconn* ref, std::vector<table_info>& out, std::string& err) {",
+    "S16": "merkle_compute_canonical_route_digest_impl(Datum *values, bool *isnull, int nkeys,",
+    "S17": "\\set bench_merkle_with 'partitions=' :bench_merkle_partitions ', fanout=' :bench_merkle_fanout ', split_threshold=' :bench_merkle_split_threshold ', merge_threshold=' :bench_merkle_merge_threshold ', partition_key_columns=' :bench_merkle_partition_key_columns ', subpartitions=' :bench_merkle_subpartitions",
+    "S18": "             ItemPointer ht_ctid, Relation heapRel,",
+    "S19": "CaptureMerkleDeletePlan(Relation heapRel, ItemPointer tupleid)",
+    "S20": "\t\tmerkleDeletePlan = CaptureMerkleDeletePlan(resultRelationDesc, tupleid);",
+    "S21": "\t\t\t\tmerkleDeletePlan = CaptureMerkleDeletePlan(resultRelationDesc, tupleid);",
+    "S22": "\t * Merkle UPDATE maintenance:",
+    "S23": "merkle_apply_staged_deltas_synchronously(void)",
+    "S24": "merkle_do_split_in_memory(Oid index_oid, int partition_id, const uint8 *node_id, int prefix_len,",
+    "S25": "bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int table_no,",
+    "S26": "-- Standard TPCC primary key and query indexes (not in dump; required for query performance).",
+    "S27": "merkle_apply_until_internal(uint64 required_seq)",
+    "S28": "",
+    "S29": "\tmerkle_delta_blob = NULL;",
+    "S30": "merkle_delta_xact_callback(XactEvent event, void *arg)",
+    "S31": "do_merge_check(Oid index_oid, int partition_id, const uint8 *node_id, int prefix_len, int merge_thresh)",
+    "S32": "\\if :{?bench_merkle_fanout}",
+    "S33": "\t\tcalc_count = (int64) old_count + count_delta;",
+    "S34": "\t\tif (scan_rows == 0)",
+    "S35": "\tif (recovery_status.state != MERKLE_STATE_READY)",
+    "S36": "        if (mk.size() == 1 && node_table_exists && !t.pk.empty()) {",
+    "S37": "    if (ranges.empty()) {",
+    "S38": "    /* The table must now match the snapshot exactly. */",
+    "S39": "        if (t.merkle_key.empty()) {",
+    "S40": "merkle_delta_subxact_callback(SubXactEvent event,",
+    "S41": "\t\tupd_values[3] = Int32GetDatum((int32) total_split_count);",
+    "S42": "    if (parts.empty()) {",
+    "S43": "bool full_table_copy(PGconn* ref, PGconn* local, const table_info& t,",
+    "S44": "const char* kTableDiscoverySql =",
+    "S45": "def restore_tpcc_db(args, warehouses, enable_merkle):",
+    "S46": "--",
+    "S47": "#!/usr/bin/env python3",
+    "S48": "merkle_sync_prepare_plans(Oid index_oid)"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "tag": "fanout_sweep_20261015",
+  "source_head": "9cf6c70a39e9bf848c93c2c24bdb55181f4b3356",
+  "sizes": [
+    4000000
+  ],
+  "fanouts": [
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024
+  ],
+  "scenarios": [
+    "A",
+    "M_mixed"
+  ],
+  "repetitions": 3,
+  "transactions": 160000,
+  "partitions": 200,
+  "split": 1024,
+  "merge": 256,
+  "gateway_host": "10.129.148.247",
+  "replica_hosts": [
+    "10.129.148.247",
+    "10.129.148.246",
+    "10.129.148.248"
+  ],
+  "fault_rows": 100,
+  "fault_delay_seconds": 5,
+  "fault_seed": 20261013,
+  "workload_seed": 42,
+  "noise_rule": "retain and stop if any host swaps >64MiB during measured interval",
+  "note": "Fanout sweep 2026-10-15 (owner request): 4M rows x 10 fanouts (2..1024) x {A, M_mixed} x 3 reps = 60. Build adds: Merkle fanout up to 1024 (10-bit splits), repair transfer/apply use the lookup index (hash/merge join off), RECOVER heap_verify default 0 (root compare only), plus the 2026-10-14 confirm-before-repair/settle/injector fixes. Previous 30-run campaign archived in results_20261014.",
+  "recheck_fanouts": [
+    2,
+    256,
+    1024
+  ],
+  "recheck_note": "2026-10-15: low M_mixed TPS at f2/f1024 rechecked (same seeds) with f256 as control; separate recheck ledger."
+}

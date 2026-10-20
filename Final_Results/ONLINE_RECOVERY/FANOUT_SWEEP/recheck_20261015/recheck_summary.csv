@@ -1,0 +1,4 @@
+rows,fanout,scenario,n,median_tps,min_tps,max_tps,cv_pct,delta_vs_same_fanout_baseline_pct,median_cut_ms,min_cut_ms,max_cut_ms,median_repair_ms,min_repair_ms,max_repair_ms,median_catchup_ms,min_catchup_ms,max_catchup_ms,median_total_recovery_ms,min_total_recovery_ms,max_total_recovery_ms,median_candidate_rows,min_candidate_rows,max_candidate_rows
+4000000,2,M_mixed,3,6265.42,5522.57,6752.48,10.021951217484546,,3753.0,3740.0,28185.0,2372.0,2358.0,2934.0,9920.0,2.0,18758.0,24914.0,16557.0,31187.0,62592.0,62523.0,62814.0
+4000000,256,M_mixed,3,7591.57,7387.57,7658.07,1.8679977184742453,,3183.0,3038.0,3574.0,443.0,440.0,600.0,8375.0,2455.0,9013.0,12857.0,6003.0,12857.0,7915.0,7761.0,7917.0
+4000000,1024,M_mixed,3,7431.49,6466.74,7533.31,8.239222280443858,,3637.0,3253.0,3652.0,397.0,393.0,695.0,8419.0,2527.0,8748.0,12834.0,6241.0,13065.0,2043.0,2020.0,4372.0

@@ -7,11 +7,12 @@ set -euo pipefail
 SRC=${SRC:?set the new A_src source snapshot}
 INST=${INST:?set the new A_install with worker/middleware changes}
 BINDIR=${BINDIR:?set the new A_build/bin}
-ROOT=$HOME/claude_checks/v3
+ROOT=${CAMPAIGN_HOME:-$HOME/claude_checks/v3}
+[[ $ROOT == "$HOME/claude_checks/paper_20261010_tpcc" || $ROOT == "$HOME/claude_checks/tpcc_20261020" || $ROOT == "$HOME/claude_checks/v3" ]] || exit 2
 CPUSET=${CPUSET:?set a fixed subset of the ranking CPU affinity}
 export LD_LIBRARY_PATH=$INST/lib:$HOME/Desktop/compat_lib:$HOME/Desktop/rdkafka_local/lib
 export LC_ALL=C TZ=UTC
-PORT=55449 CLIENT_PORT=18110 RAFT_PORT=19110 WORKERS=8
+PORT=55469 CLIENT_PORT=18130 RAFT_PORT=19130 WORKERS=8
 TAG=${TAG:-$(date -u +%Y%m%dT%H%M%SZ)}
 RUNROOT=$ROOT/A_validation_$TAG
 [[ ! -e $RUNROOT ]] || { echo 'Refusing existing output root' >&2; exit 2; }
@@ -54,7 +55,7 @@ for label in load1 load2 abort_pg abort_det abort_merkle pg det merkle; do
   # Never kill another user's listener. Check ports before starting anything.
   python3 - <<'PY'
 import socket
-for port in (55449,18110,19110):
+for port in (55469,18130,19130):
     with socket.socket() as s: s.bind(('127.0.0.1',port))
 PY
   MODE=${label#abort_}; [[ $label != load* ]] || MODE=pg
@@ -118,6 +119,8 @@ CONF
   "${PSQL[@]}" -At -c "SELECT sum(pg_prewarm(c.oid::regclass,'buffer')) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('public','ariabc_internal') AND c.relkind IN ('r','i','m')" > "$RUN/prewarm.txt"
   "${PSQL[@]}" -At -c 'SELECT sum(d_next_o_id) FROM public.district' > "$RUN/district_before.txt"
   # Every process in the pipeline runs on ranking and inherits this CPU set.
+  mkdir "$RUN/server_state"
+  pushd "$RUN/server_state" >/dev/null
   env BCDB_DECOUPLE_WORKERS=1 BCDB_DET_QUEUE_HIGH_WM=65536 BCDB_DET_QUEUE_LOW_WM=32768 ARIABC_PROFILE=1 \
     ARIABC_PG_MAX_RETRIES=100 ARIABC_DET_BLOCK_PARALLEL=64 ARIABC_DET_BLOCK_PIPELINE=4 ARIABC_DET_BLOCK_MAX=2048 \
     ARIABC_DET_ORDER_START_SEQ=0 ARIABC_DET_PREFIXED_DIRECT_PARALLEL=1 \
@@ -126,6 +129,7 @@ CONF
     --dbType "$DBTYPE" --safedb "$DBTYPE" --dbConnPoolSize "$WORKERS" --bcdbInitBlockSize "$WORKERS" \
     --pgExecMode event --bypassRaft 1 </dev/null > "$RUN/server.log" 2> "$RUN/server.err.log" &
   SERVER_PID=$!
+  popd >/dev/null
   for i in $(seq 1 100); do
     kill -0 "$SERVER_PID"
     if python3 - "$CLIENT_PORT" <<'PY'

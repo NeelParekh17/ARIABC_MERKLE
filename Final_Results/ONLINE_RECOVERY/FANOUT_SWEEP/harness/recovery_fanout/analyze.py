@@ -22,13 +22,16 @@ def geometry(path):
 
 
 FANOUT_ALLOWLIST = re.compile(rb'\[\[ "\$FANOUT" =~ \^\([0-9|]+\)\$ \]\]')
+STAGE_ALLOWLIST = re.compile(rb'\$STAGE =~ \^\([a-z|]+\)\$')
 
 
 def harness_bytes(path):
-    # Widening run_case.sh's fanout allowlist (e.g. adding 2/4/8 to a finished
-    # matrix) does not change how any already-allowed case runs.
+    # Widening run_case.sh's fanout or stage allowlist (e.g. adding 2/4/8 to a
+    # finished matrix, or a recheck stage) does not change how any case runs.
     data = path.read_bytes()
-    return FANOUT_ALLOWLIST.sub(b'[[ FANOUT_ALLOWLIST ]]', data) if path.name == 'run_case.sh' else data
+    if path.name != 'run_case.sh':
+        return data
+    return STAGE_ALLOWLIST.sub(b'$STAGE =~ STAGE_ALLOWLIST', FANOUT_ALLOWLIST.sub(b'[[ FANOUT_ALLOWLIST ]]', data))
 
 
 def write_csv(path, rows):
@@ -44,6 +47,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--base', type=Path, required=True)
     p.add_argument('--plot', action='store_true', help='also render PDF/PNG figures with matplotlib')
+    p.add_argument('--recheck', choices=('off', 'pool', 'replace'), default='off',
+                   help='use accepted runs from results/recheck_attempts.jsonl (same build, same seeds): '
+                        'pool = add them to the matrix runs; replace = for every rechecked (fanout, scenario) '
+                        'use only the recheck runs')
     a = p.parse_args()
     base = a.base.resolve()
     config = json.loads((base / 'campaign.json').read_text())
@@ -58,6 +65,21 @@ def main():
         raise RuntimeError('duplicate accepted target; investigate before summarizing')
     if set(actual) - expected:
         raise RuntimeError('accepted target outside the frozen plan')
+    pooled = list(accepted)
+    if a.recheck != 'off' and (results / 'recheck_attempts.jsonl').exists():
+        recheck = [dict(json.loads(s), stage='recheck')
+                   for s in (results / 'recheck_attempts.jsonl').read_text().splitlines()]
+        if any((r['rows'], r['fanout'], r['scenario']) not in {(n, f, m) for n, f, m, _ in expected} for r in recheck):
+            raise RuntimeError('recheck target outside the frozen plan')
+        rechecked = [r for r in recheck if r['status'] == 'ACCEPTED']
+        if a.recheck == 'replace':
+            groups = {(r['rows'], r['fanout'], r['scenario']) for r in rechecked}
+            for r in records:
+                if r['status'] == 'ACCEPTED' and (r['rows'], r['fanout'], r['scenario']) in groups:
+                    r['replaced_by_recheck'] = True
+            pooled = [r for r in pooled if not r.get('replaced_by_recheck')]
+        records = records + recheck
+        pooled += rechecked
     enriched = []
     identities = set()
     for r in records:
@@ -89,12 +111,32 @@ def main():
             if recovered:
                 # The repaired node's own split of repair_ms (server clock).
                 rec = dict(re.findall(r'(\w+)=([0-9.]+)', recovered[0]))
+                # A missing field stays None (unavailable), never a measured zero.
+                num = lambda k, scale=1.0: float(rec[k]) * scale if k in rec else None
                 for k in ('localise', 'transfer', 'apply', 'verify'):
-                    row[k + '_ms'] = float(rec.get(k + '_us', 0)) / 1000
-                row['drain_ms_server'] = float(rec.get('drain_ms', 0))
-                row['rebase_ms'] = float(rec.get('rebase_ms', 0))
-                row['repair_other_ms'] = max(0.0, float(rec.get('repair_ms', 0)) - sum(
-                    row[k + '_ms'] for k in ('localise', 'transfer', 'apply', 'verify')))
+                    row[k + '_ms'] = num(k + '_us', 1e-3)
+                row['drain_ms_server'] = num('drain_ms')
+                row['rebase_ms'] = num('rebase_ms')
+                parts = [row[k + '_ms'] for k in ('localise', 'transfer', 'apply', 'verify')]
+                if None not in parts and 'repair_ms' in rec:
+                    row['repair_other_ms'] = max(0.0, float(rec['repair_ms']) - sum(parts))
+                if None not in (row['drain_ms_server'], row['rebase_ms']) and 'repair_ms' in rec:
+                    # Everything the RECOVER call does before replay starts.
+                    row['repair_total_ms'] = row['drain_ms_server'] + float(rec['repair_ms']) + row['rebase_ms']
+                if 'replay_target' in rec and 'replay_from' in rec:
+                    row['replay_backlog_blocks'] = float(rec['replay_target']) - float(rec['replay_from']) + 1
+            replays = re.findall(r'RECOVERY_REPLAY_LIVE[^\n]*', text)
+            if replays:
+                rep = dict(re.findall(r'(\w+)=([0-9.]+)', replays[0]))
+                row['replay_entries'] = float(rep['entries']) if 'entries' in rep else None
+                row['replay_ms_server'] = float(rep['ms']) if 'ms' in rep else None
+            if ev.get('L') is not None:
+                # The held cut the repair used is the reference node's CUT at the event's L.
+                held = re.findall(r'verb=CUT result=OK L=%s B=[^\n]*held=1' % ev.get('L'), text)
+                if held:
+                    cut = dict(re.findall(r'(\w+_us)=([0-9]+)', held[0]))
+                    for k in ('prepare', 'export', 'digest'):
+                        row['cut_' + k + '_ms'] = float(cut[k + '_us']) / 1000 if k + '_us' in cut else None
             profiles = re.findall(r'PROFILE_RAFT_STORAGE[^\n]*', text)
             metrics = dict(re.findall(r'(fdatasync_\w+)=([0-9.]+)', profiles[-1])) if profiles else {}
             row[node + '_fsync_total_ms'] = metrics.get('fdatasync_total_ms')
@@ -109,12 +151,12 @@ def main():
             baseline = [float(r['tps_majority_visible']) for r in accepted
                         if (r['rows'], r['fanout'], r['scenario']) == (n, f, 'A')]
             for mode in config['scenarios']:
-                good = [r for r in accepted if (r['rows'], r['fanout'], r['scenario']) == (n, f, mode)]
+                good = [r for r in pooled if (r['rows'], r['fanout'], r['scenario']) == (n, f, mode)]
                 if not good:
                     continue
                 vals = [float(r['tps_majority_visible']) for r in good]
                 row = dict(rows=n, fanout=f, scenario=mode, repetitions=len(vals),
-                           complete=len(vals) == config['repetitions'], median_tps=statistics.median(vals),
+                           complete=len(vals) >= config['repetitions'], median_tps=statistics.median(vals),
                            min_tps=min(vals), max_tps=max(vals),
                            cv_pct=100 * statistics.stdev(vals) / statistics.mean(vals) if len(vals) > 1 else None,
                            delta_vs_same_fanout_baseline_pct=100 * (statistics.median(vals) / statistics.median(baseline) - 1) if baseline else None)
@@ -124,6 +166,12 @@ def main():
                     row['median_' + k] = statistics.median(numbers)
                     row['min_' + k] = min(numbers)
                     row['max_' + k] = max(numbers)
+                # Sub-phase timings parsed from the server logs (enriched rows).
+                rich = [e for e in enriched if e['status'] == 'ACCEPTED' and not e.get('replaced_by_recheck') and
+                        (e['rows'], e['fanout'], e['scenario']) == (n, f, mode)]
+                for k in SUBPHASE_KEYS:
+                    numbers = [float(e[k]) for e in rich if e.get(k) not in (None, '')]
+                    row['median_' + k] = statistics.median(numbers) if numbers else None
                 groups.append(row)
     write_csv(results / 'fanout_summary.csv', groups)
     complete = set(actual) == expected
@@ -170,22 +218,35 @@ def main():
     if predating:
         lines.extend([f'{len(predating)} host-change note(s) in the inherited provenance log predate this campaign\'s first run and are not applied here.', ''])
     lines.extend(['Harness identity ignores only the fanout allowlist line of `run_case.sh`, so widening the fanout set does not split the identity.',
-                  'Figures: `figures/fanout_overview.png` plus one figure each: TPS, total recovery split into every phase, Merkle repair split into localise/transfer/apply/verify, percent share per phase, each phase as a line, repair work/tree depth.', ''])
+                  'Figures: `figures/fanout_overview.png` plus one figure each: TPS; total recovery split into every phase; cut (prepare/export/digest); repair (drain/localise/transfer/apply/verify/rebase); replay (catch-up time, blocks replayed, backlog); percent share per phase; each phase as a line; repair work/tree depth.', ''])
+    if a.recheck == 'pool':
+        lines.extend(['Recheck runs (`recheck_attempts.jsonl`, same build and fault seeds) are pooled into the statistics and figures;',
+                      'pooled fanouts have more repetitions (see the n column).', ''])
+    elif a.recheck == 'replace':
+        lines.extend(['For every rechecked (fanout, scenario), the statistics and figures use only the recheck runs',
+                      '(`recheck_attempts.jsonl`, same build and fault seeds); the matrix runs they replace stay in the attempt tables.', ''])
     (results / 'REPORT.md').write_text('\n'.join(lines))
     if a.plot and groups:
-        plot(results / 'figures', config, [r for r in enriched if r['status'] == 'ACCEPTED'], complete)
+        plot(results / 'figures', config,
+             [r for r in enriched if r['status'] == 'ACCEPTED' and not r.get('replaced_by_recheck')], complete)
     print(json.dumps(audit))
 
 
+SUBPHASE_KEYS = ('cut_prepare_ms', 'cut_export_ms', 'cut_digest_ms', 'drain_ms_server', 'localise_ms',
+                 'transfer_ms', 'apply_ms', 'verify_ms', 'rebase_ms', 'repair_total_ms',
+                 'replay_entries', 'replay_backlog_blocks', 'replay_ms_server')
+CUT_PHASES = [('cut_prepare_ms', 'Prepare (reach target entry)', '#9db4d8'),
+              ('cut_export_ms', 'Export (wait for replica backlog + snapshot export)', '#4c72b0'),
+              ('cut_digest_ms', 'Digest (Merkle roots at the cut)', '#2a4d7f')]
 PHASES = [('cut_ms', 'Cut (wait for replica backlog + snapshot)', '#4c72b0'),
           ('drain_ms_server', 'Drain', '#64b5cd'),
           ('localise_ms', 'Repair: localise (roots + leaves)', '#ccb974'),
           ('transfer_ms', 'Repair: transfer (fetch ref rows)', '#dd8452'),
           ('apply_ms', 'Repair: apply (delete + upsert)', '#c44e52'),
-          ('verify_ms', 'Repair: verify (roots + merkle_verify)', '#8172b3'),
+          ('verify_ms', 'Repair: verify (partition roots; optional heap audit)', '#8172b3'),
           ('rebase_ms', 'Rebase', '#937860'),
           ('catchup_ms', 'Catch-up (replay missed blocks)', '#55a868')]
-REPAIR_PHASES = PHASES[2:6]
+REPAIR_PHASES = PHASES[1:7]  # drain, localise, transfer, apply, verify, rebase
 SCENARIO_STYLE = {'A': ('No fault (A)', '#4c72b0', 'o'), 'M_mixed': ('Fault + online recovery (M_mixed)', '#c44e52', 's')}
 
 
@@ -236,47 +297,99 @@ def plot(figures, config, accepted, complete):
         axis(ax, 'Throughput (TPS)', 'Cluster throughput vs fanout')
         ax.legend(fontsize=8, loc='lower right')
 
-    def medians(n, s, key):
-        return [statistics.median(values(runs(n, f, s), key) or [0]) / 1000 for f in config['fanouts']]
+    def representative(n, f, s, total_key):
+        """The repetition whose total is the median (lower middle for even counts)."""
+        rs = sorted((r for r in runs(n, f, s) if r.get(total_key) not in (None, '')),
+                    key=lambda r: float(r[total_key]))
+        return rs[(len(rs) - 1) // 2] if rs else None
 
-    def stack(ax, n, s, phases, total_key, percent=False):
-        """Stacked median phases; the remainder of the median total is 'Other'."""
-        parts = [(name, color, medians(n, s, key)) for key, name, color in phases]
-        totals = medians(n, s, total_key)
-        other = [max(0.0, t - sum(p[2][i] for p in parts)) for i, t in enumerate(totals)]
-        parts.append(('Other (gateway / unattributed)', '#bbbbbb', other))
-        scale = [100 / (sum(p[2][i] for p in parts) or 1) if percent else 1 for i in range(len(totals))]
-        bottom = [0.0] * len(totals)
-        for name, color, med in parts:
-            med = [m * k for m, k in zip(med, scale)]
-            ax.bar(range(len(med)), med, .6, bottom=bottom, color=color, label=name, alpha=.9,
-                   edgecolor='white', linewidth=.5)
-            if percent:
-                for i, (b, m) in enumerate(zip(bottom, med)):
-                    if m >= 6:
-                        ax.text(i, b + m / 2, f'{m:.0f}%', ha='center', va='center', fontsize=6.5, color='white')
-            bottom = [b + m for b, m in zip(bottom, med)]
+    def stack(ax, n, s, phases, total_key, percent=False, other_label='Other (gateway / unattributed)'):
+        """Stack the phases of each fanout's median-total run, so the parts add up to that
+        run's total exactly ('Other' = total - measured phases). Unavailable phases are
+        not drawn as zero: the bar is marked 'n/a'."""
+        for i, f in enumerate(config['fanouts']):
+            r = representative(n, f, s, total_key)
+            if r is None:
+                if runs(n, f, s):
+                    ax.text(i, 0, 'n/a', ha='center', va='bottom', fontsize=7, color='#c44e52')
+                continue
+            total_s = float(r[total_key]) / 1000
+            parts = [(name, color, float(r[key]) / 1000 if r.get(key) not in (None, '') else None)
+                     for key, name, color in phases]
+            missing = [name for name, _, v in parts if v is None]
+            measured = sum(v for _, _, v in parts if v is not None)
+            parts.append((other_label, '#bbbbbb', max(0.0, total_s - measured)))
+            if percent and measured > total_s * 1.001:
+                # Phases exceed the total (clock skew); a % of the total is undefined.
+                ax.text(i, 0, 'phases > total', ha='center', va='bottom', fontsize=6, color='#c44e52', rotation=90)
+                continue
+            denom = total_s or 1.0
+            bottom = 0.0
+            for name, color, v in parts:
+                if v is None:
+                    continue
+                h = 100 * v / denom if percent else v
+                labelled = ax.__dict__.setdefault('_stack_labels', set())
+                ax.bar(i, h, .6, bottom=bottom, color=color, alpha=.9, edgecolor='white', linewidth=.5,
+                       label=None if name in labelled else name)
+                labelled.add(name)
+                if percent and h >= 6:
+                    ax.text(i, bottom + h / 2, f'{h:.0f}%', ha='center', va='center', fontsize=6.5, color='white')
+                bottom += h
+            if missing:
+                ax.text(i, bottom, 'n/a: ' + ', '.join(m.split(' (')[0] for m in missing),
+                        ha='center', va='bottom', fontsize=6, color='#c44e52', rotation=90)
+            if measured > total_s * 1.001:
+                ax.text(i, bottom, 'phases > total', ha='center', va='bottom', fontsize=6, color='#c44e52')
 
     def total(ax, n):
         for s in fault:
             stack(ax, n, s, PHASES, 'total_recovery_ms')
             series(ax, n, s, 'total_recovery_ms', scale=1e-3, label='Total (median; dots = runs)', color='black', marker='D')
-        axis(ax, 'Recovery time (s)', 'Recovery time vs fanout — every phase (medians)')
+        axis(ax, 'Recovery time (s)', 'Recovery time vs fanout — every phase (bars: median-total run)')
         ax.legend(fontsize=7, loc='upper left', ncol=2)
 
     def share(ax, n):
         for s in fault:
             stack(ax, n, s, PHASES, 'total_recovery_ms', percent=True)
-        axis(ax, 'Share of total recovery (%)', 'Where recovery time goes (% of median total)')
+        axis(ax, 'Share of total recovery (%)', "Where recovery time goes (% of the median-total run's total)")
         ax.set_ylim(0, 100)
         ax.legend(fontsize=6.5, loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=3, frameon=False)
 
+    def cut(ax, n):
+        for s in fault:
+            stack(ax, n, s, CUT_PHASES, 'cut_ms', other_label='Other (control RPCs, gateway)')
+            series(ax, n, s, 'cut_ms', scale=1e-3, label='Cut total (median; dots = runs)', color='black', marker='D')
+        axis(ax, 'Cut time (s)', 'Cut breakdown vs fanout (bars: median-total run)')
+        ax.legend(fontsize=7, loc='upper left', ncol=2)
+
     def repair(ax, n):
         for s in fault:
-            stack(ax, n, s, REPAIR_PHASES, 'repair_ms')
-            series(ax, n, s, 'repair_ms', scale=1e-3, label='Repair total (median; dots = runs)', color='black', marker='D')
-        axis(ax, 'Repair time (s)', 'Merkle repair breakdown vs fanout (medians)')
+            stack(ax, n, s, REPAIR_PHASES, 'repair_total_ms', other_label='Other (unattributed)')
+            series(ax, n, s, 'repair_total_ms', scale=1e-3, label='Repair total: drain..rebase (median; dots = runs)',
+                   color='black', marker='D')
+        axis(ax, 'Repair time (s)', 'Repair breakdown vs fanout (bars: median-total run)')
         ax.legend(fontsize=7, loc='upper left', ncol=2)
+
+    def replay(ax, n):
+        for s in fault:
+            xs, med = [], []
+            for i, f in enumerate(config['fanouts']):
+                v = values(runs(n, f, s), 'catchup_ms')
+                if v:
+                    xs.append(i)
+                    med.append(statistics.median(v) / 1000)
+            ax.bar(xs, med, .6, color='#55a868', alpha=.9, label='Catch-up time (median)')
+            series(ax, n, s, 'catchup_ms', scale=1e-3, label='Catch-up per run', color='black', marker='D')
+        axis(ax, 'Catch-up time (s)', 'Replay (catch-up) vs fanout')
+        twin = ax.twinx()
+        for s in fault:
+            series(twin, n, s, 'replay_entries', label='Blocks replayed', color='#8172b3', marker='^')
+            series(twin, n, s, 'replay_backlog_blocks', label='Blocks behind when replay started', color='#dd8452', marker='v')
+        twin.set_ylabel('Raft log blocks')
+        twin.set_ylim(bottom=0)
+        lines = ax.get_legend_handles_labels(), twin.get_legend_handles_labels()
+        ax.legend(lines[0][0] + lines[1][0], lines[0][1] + lines[1][1], fontsize=7, loc='upper left')
 
     def phases(ax, n):
         for s in fault:
@@ -300,9 +413,17 @@ def plot(figures, config, accepted, complete):
     status = 'complete matrix' if complete else 'INCOMPLETE matrix'
     for n in config['sizes']:
         suffix = f'_n{n}' if len(config['sizes']) > 1 else ''
-        caption = (f'{n:,} rows · P200/S1024/M256 · median of {config["repetitions"]} runs (dots = individual runs) · {status}')
-        fig, axes = plt.subplots(3, 2, figsize=(15, 15))
-        for draw, ax in zip((tps, total, repair, share, phases, work), axes.flat):
+        extra = sorted({r['fanout'] for r in accepted if r.get('stage') == 'recheck' and r['rows'] == n})
+        runs_note = (f'median of {config["repetitions"]} runs' if not extra else
+                     f'median of {config["repetitions"]} runs, {2 * config["repetitions"]} at fanout '
+                     + '/'.join(map(str, extra)) + ' (fault runs, recheck pooled)')
+        if extra and not any(r.get('stage') != 'recheck' and r['fanout'] in extra and r['scenario'] != 'A'
+                             for r in accepted if r['rows'] == n):
+            runs_note = (f'median of {config["repetitions"]} runs; fault runs at fanout '
+                         + '/'.join(map(str, extra)) + ' are the latest recheck runs')
+        caption = f'{n:,} rows · P200/S1024/M256 · {runs_note} (dots = individual runs) · {status}'
+        fig, axes = plt.subplots(4, 2, figsize=(15, 20))
+        for draw, ax in zip((tps, total, cut, repair, replay, share, phases, work), axes.flat):
             draw(ax, n)
         fig.suptitle('Merkle fanout: throughput and online recovery\n' + caption, fontsize=12)
         fig.tight_layout()
@@ -310,7 +431,8 @@ def plot(figures, config, accepted, complete):
             fig.savefig(figures / f'fanout_overview{suffix}.{extension}', dpi=160)
         plt.close(fig)
         for name, draw in (('tps_vs_fanout', tps), ('recovery_time_vs_fanout', total),
-                           ('repair_breakdown_vs_fanout', repair), ('recovery_share_vs_fanout', share),
+                           ('cut_breakdown_vs_fanout', cut), ('repair_breakdown_vs_fanout', repair),
+                           ('replay_vs_fanout', replay), ('recovery_share_vs_fanout', share),
                            ('recovery_phases_vs_fanout', phases), ('repair_work_vs_fanout', work)):
             fig, ax = plt.subplots(figsize=(9, 5.5))
             draw(ax, n)
