@@ -647,5 +647,16 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(args_custom.base_dir_name, 'pgdata_base')
 
 
+class ResultDocumentTests(unittest.TestCase):
+    def test_merkle_stats_are_split_into_before_and_after_run(self):
+        setup = dict(provenance={'source': 'x'}, merkle_stats={'total_nodes': 10})
+        doc = oom.result_document({'tps': 1}, {'ok': 1}, setup, {'total_nodes': 12})
+        self.assertEqual(doc['merkle_stats_before_run'], {'total_nodes': 10})
+        self.assertEqual(doc['merkle_stats_after_run'], {'total_nodes': 12})
+        self.assertNotIn('merkle_stats', doc)
+        plain = oom.result_document({'tps': 1}, {}, dict(provenance={}, merkle_stats=None), None)
+        self.assertIsNone(plain['merkle_stats_after_run'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -121,7 +121,7 @@ def run_remote(host, user, cmd, timeout=600, check=True, retry_on_drop=False):
     retried for idempotent callers (retry_on_drop=True).
     """
     for attempt in range(8):
-        res = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        res = subprocess.run(["ssh", "-o", "ControlMaster=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                               "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8",
                               f"{user}@{host}", "bash -s"],
                              input="set -euo pipefail\nexport LC_ALL=C\n" + cmd,
@@ -608,6 +608,9 @@ def validate_golden_baseline(args):
             return manifest
         print(f"  Golden manifest is missing, stale, or baseline changed; re-validating golden baseline...")
 
+    if args.require_existing_baselines:
+        raise RuntimeError(f"Validated existing baseline manifest required: {base_name}")
+
     # Start PG against a temporary check copy to run the full verification scan.
     check_dir = f"{args.remote_dir}/pgdata_golden_check"
     stop_server(args)
@@ -718,6 +721,8 @@ def ensure_plain_baseline(args, golden):
             return manifest
         print("  Plain baseline is stale or unverified; rebuilding it from the golden baseline", flush=True)
 
+    if args.require_existing_baselines:
+        raise RuntimeError(f"Refusing to create or rebuild read-only baseline: {name}")
     stop_server(args)
     stop_postgres(args)
     tmp = plain + ".tmp"
@@ -882,6 +887,9 @@ bcdb_gate_snapshot_each_block = off
 merkle_apply_synchronous_direct = on
 default_transaction_isolation = '{isolation_for(mode)}'
 """
+    if args.socket_dir:
+        config += f"unix_socket_directories = '{args.socket_dir}'\n"
+        run_remote(args.remote_host, args.remote_user, f"mkdir -p {args.socket_dir}")
     base_name = base_dir_name_for(args, mode)
     base_dir = f"{args.remote_dir}/{base_name}"
     work = pgdata(args)
@@ -1166,7 +1174,8 @@ cat /sys/dev/block/"$major_minor"/stat
 
 def gateway_workload_path(args, digest):
     # Kept under the gateway user's home, never /tmp (wiped on reboot).
-    return f"/home/{args.gateway_user}/ariabc_data/oom_workloads/oom_{digest}.sql"
+    directory = args.gateway_workload_dir or f"/home/{args.gateway_user}/ariabc_data/oom_workloads"
+    return f"{directory}/oom_{digest}.sql"
 
 
 def run_local_gateway_benchmark(args, workload_file, mode, workers, log_path):
@@ -1221,6 +1230,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
     case_dir.mkdir()
     started = time.monotonic()
     try:
+        sampler_context(args, case_dir, "setup")
         setup = reset_remote_pgdata(args, mode, workers)
         setup["server"] = start_remote_ariabc_server(args, mode, workers)
         (case_dir / "setup.json").write_text(json.dumps(setup, indent=2) + "\n")
@@ -1230,13 +1240,15 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
             gateway_wl = gateway_workload_path(args, digest)
             run_remote(args.gateway_host, args.gateway_user,
                        f"mkdir -p {shlex.quote(os.path.dirname(gateway_wl))}", timeout=60)
-            subprocess.run(["scp", "-o", "BatchMode=yes", str(workload_file),
+            subprocess.run(["scp", "-o", "ControlMaster=no", "-o", "BatchMode=yes", str(workload_file),
                             f"{args.gateway_user}@{args.gateway_host}:{gateway_wl}"],
                            check=True, timeout=60)
         # PG13 collector publishes asynchronously. Allow startup counters to
         # settle; after the run disconnect the server before the final snapshot.
         time.sleep(1)
         pg_before = get_pg_io_stats(args)
+        wal_before = wal_snapshot(args)
+        sampler_context(args, case_dir, "measurement")
         device_before = get_remote_nvme_stats(args)
         measurement_start = time.monotonic()
         with RemoteTelemetry(args.remote_host, args.remote_user, case_dir / "telemetry.jsonl",
@@ -1250,6 +1262,15 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         if workload in ("a", "b", "c", "d", "f"):
             metrics.update(validate_ycsb_results((case_dir / "server.log").read_text(), args.txs, mode=base_mode(mode)))
         time.sleep(1)
+        wal_after = wal_snapshot(args)
+        sampler_context(args, case_dir, "drain_checkpoint")
+        wal_bytes = lsn_bytes(wal_after["lsn"]) - lsn_bytes(wal_before["lsn"])
+        if wal_bytes < 0 or wal_before["postmaster_start"] != wal_after["postmaster_start"]:
+            raise RuntimeError("WAL counter reset during measurement")
+        (case_dir / "wal.json").write_text(json.dumps(dict(
+            before=wal_before, after=wal_after, wal_bytes=wal_bytes,
+            bytes_per_statement=wal_bytes / args.txs,
+            scope="gateway plus telemetry/start-stop and collector settling; excludes LSM drain/checkpoint"), indent=2) + "\n")
         # CHECKPOINT is measured separately, outside the TPS interval. It makes
         # deferred dirty heap/index writeback visible instead of counting only
         # writes that happened to reach the device during the short workload.
@@ -1265,6 +1286,9 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         sql(args, "CHECKPOINT;", timeout=args.verify_timeout)
         checkpoint_ms = (time.monotonic() - checkpoint_start) * 1000
         checkpoint_after = get_remote_nvme_stats(args)
+        wal_checkpoint = wal_snapshot(args)
+        (case_dir / "wal_post_checkpoint.json").write_text(json.dumps(wal_checkpoint, indent=2) + "\n")
+        sampler_context(args, case_dir, "verify")
         memory_after = run_remote(args.remote_host, args.remote_user,
                                   "cat /proc/meminfo", timeout=15).stdout
         checkpoint_log = run_remote(args.remote_host, args.remote_user,
@@ -1289,11 +1313,14 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
         (case_dir / "io.json").write_text(json.dumps(snapshots, indent=2) + "\n")
         (case_dir / "cache_policy.txt").write_text("Cold start; OS page cache and storage-controller cache are not memory-bounded.\n")
         merkle = "N/A"
+        merkle_stats_after = None
         if mode == "bcdb_merkle":
             merkle = sql(args, "SELECT merkle_verify('usertable');", timeout=args.verify_timeout)
             (case_dir / "merkle_verify.txt").write_text(merkle + "\n")
             if merkle != "t":
                 raise RuntimeError(f"Merkle verification failed: {merkle}")
+            merkle_stats_after = json.loads(sql(args, "SELECT merkle_tree_stats('usertable');",
+                                                timeout=args.verify_timeout))
             merkle = "PASS"
         read = delta(pg_before, pg_after, "blks_read")
         hits = delta(pg_before, pg_after, "blks_hit")
@@ -1311,6 +1338,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
                    retry_attempts=int(retries.get("retry_attempts_total", 0)),
                    retry_backoff_requested_ms=int(retries.get("retry_backoff_requested_ms", 0)),
                    retry_exhausted=int(retries.get("retry_exhausted_total", 0)),
+                   wal_bytes=wal_bytes, wal_bytes_per_statement=wal_bytes / args.txs,
                    pg_retry_jitter=args.pg_retry_jitter if base_mode(mode) == "pg" else "",
                    total_queries=metrics["total_queries"], shared_buffers=args.shared_buffers,
                    db_rows=args.db_rows, reset_time_ms=reset_ms,
@@ -1344,9 +1372,8 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
                    validated_completed_queries=metrics["validated_completed_queries"], merkle_verify=merkle,
                    workload_sha256=hashlib.sha256(workload_file.read_bytes()).hexdigest(),
                    artifact_dir=str(case_dir))
-        (case_dir / "result.json").write_text(json.dumps(dict(
-            row=row, gateway=metrics, provenance=setup["provenance"],
-            merkle_stats=setup["merkle_stats"]), indent=2) + "\n")
+        (case_dir / "result.json").write_text(json.dumps(
+            result_document(row, metrics, setup, merkle_stats_after), indent=2) + "\n")
         return row
     except BaseException as exc:
         (case_dir / "FAILED.txt").write_text(str(exc) + "\n")
@@ -1364,6 +1391,33 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
             (case_dir / "cleanup_errors.txt").write_text("\n".join(cleanup_errors))
             if sys.exc_info()[0] is None:
                 raise RuntimeError("Cleanup failed; see cleanup_errors.txt")
+
+
+def result_document(row, metrics, setup, merkle_stats_after):
+    # The setup scan precedes the run; keep it apart from the post-run tree.
+    return dict(row=row, gateway=metrics, provenance=setup["provenance"],
+                merkle_stats_before_run=setup["merkle_stats"],
+                merkle_stats_after_run=merkle_stats_after)
+
+
+def lsn_bytes(lsn):
+    high, low = lsn.split("/")
+    return (int(high, 16) << 32) + int(low, 16)
+
+
+def wal_snapshot(args):
+    return json.loads(sql(args, "SELECT json_build_object('lsn', pg_current_wal_lsn()::text, "
+                          "'commits', (SELECT xact_commit FROM pg_stat_database WHERE datname=current_database()), "
+                          "'postmaster_start', pg_postmaster_start_time()::text, "
+                          "'time', clock_timestamp()::text);"))
+
+
+def sampler_context(args, case_dir, phase):
+    if args.wal_sampler_root:
+        value = json.dumps(dict(case_dir=str(case_dir), phase=phase))
+        path = args.wal_sampler_root + "/sampler_context.json"
+        run_remote(args.remote_host, args.remote_user,
+                   f"printf %s {shlex.quote(value)} > {path}.new\nmv {path}.new {path}")
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1409,6 +1463,11 @@ def parse_args(argv=None):
                              "golden copy migrated to table-named Merkle node storage "
                              "(ariabc_internal.merkle_node_usertable), required by binaries since 00fae31")
     parser.add_argument("--skip-gen", action="store_true", help="Require an existing clean baseline database")
+    parser.add_argument("--require-existing-baselines", action="store_true",
+                        help="Fail closed instead of creating, rebuilding, or revalidating baseline inputs")
+    parser.add_argument("--socket-dir", default=None, help="Explicit PostgreSQL Unix socket directory")
+    parser.add_argument("--wal-sampler-root", default=None, help="Remote sampler root for per-case phase markers")
+    parser.add_argument("--gateway-workload-dir", default=None, help="Gateway staging directory for workload files")
     parser.add_argument("--gen-only", action="store_true")
     parser.add_argument("--reset-mode", choices=["delta", "cp"], default="delta",
                         help="delta (default): byte-identical rsync restore from a per-variant stopped baseline, "
@@ -1507,6 +1566,10 @@ def parse_args(argv=None):
         if not re.fullmatch(r"/[a-zA-Z0-9_./-]+", value) or ".." in Path(value).parts or len(Path(value).parts) < 3:
             parser.error(f"--{name.replace('_', '-')} must be a specific absolute path without shell metacharacters")
         setattr(args, name, value.rstrip("/"))
+    for name in ("socket_dir", "wal_sampler_root", "gateway_workload_dir"):
+        value = getattr(args, name)
+        if value and (not re.fullmatch(r"/[a-zA-Z0-9_./-]+", value) or ".." in Path(value).parts):
+            parser.error(f"Invalid --{name.replace('_', '-')}")
     for name in ("remote_host", "remote_user", "gateway_host", "gateway_user"):
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", getattr(args, name)):
             parser.error(f"Invalid --{name.replace('_', '-')}")
@@ -1560,6 +1623,7 @@ def write_report(out_dir, rows):
 
 
 def main(argv=None):
+    setup_started = time.monotonic()
     args = parse_args(argv)
     if args.auto_resume and not args.resume_dir and args.out_dir:
         out_root = (REPO_ROOT / args.out_dir).resolve()
@@ -1625,8 +1689,10 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
     run_remote(args.remote_host, args.remote_user, lock_cmd)
     generating = False
     try:
+        phase_started = time.monotonic()
         ensure_cache_drop_access(args)
         current_preflight = preflight(args)
+        setup_timing = dict(preflight_s=time.monotonic() - phase_started)
         hashes = re.findall(r"^([0-9a-f]{64})\s+(\S+)", current_preflight, re.M)
         if len(hashes) != 3:
             raise RuntimeError("Preflight did not record all three executable hashes")
@@ -1654,13 +1720,22 @@ printf '%s\\n' {shlex.quote(str(out_dir))} > {args.remote_dir}/benchmark.lock/ow
             generating = False
         if args.gen_only:
             return
+        phase_started = time.monotonic()
         golden = validate_golden_baseline(args)
         args._golden_manifest = golden
         upload_probe(args)
+        setup_timing["golden_validation_s"] = time.monotonic() - phase_started
         # Calibrate before any large write this campaign makes (plain baseline).
+        phase_started = time.monotonic()
         args._probe_thresholds = calibrate_device(args, out_dir)
+        setup_timing["calibration_s"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
         if args.reset_mode == "delta" and set(args.modes) - {"bcdb_merkle"}:
             args._plain_manifest = ensure_plain_baseline(args, golden)
+        setup_timing["plain_validation_s"] = time.monotonic() - phase_started
+        setup_timing["total_before_cases_s"] = time.monotonic() - setup_started
+        (out_dir / ("campaign_setup_timing_" + uuid.uuid4().hex[:8] + ".json")).write_text(
+            json.dumps(setup_timing, indent=2) + "\n")
         rows = []
         completed_keys = set()
         if args.resume_dir and (out_dir / "summary.csv").is_file():

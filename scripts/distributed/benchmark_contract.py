@@ -171,7 +171,7 @@ class RemoteTelemetry:
         if self.lib:
             command = 'export LD_LIBRARY_PATH=' + shlex.quote(self.lib) + '; ' + command
         self.stream = self.path.open('w')
-        self.proc = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+        self.proc = subprocess.Popen(['ssh', '-o', 'ControlMaster=no', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
                                      f'{self.user}@{self.host}', command], stdout=self.stream, stderr=subprocess.STDOUT)
         for _ in range(100):
             if self.path.stat().st_size and self.path.read_text().endswith('\n'):

@@ -16,7 +16,7 @@ def snapshot(psql=None, port=5432):
     result['processes'] = subprocess.run(['ps', '-eo', 'pid,ppid,stat,pcpu,pmem,comm', '--sort=-pcpu'], capture_output=True, text=True, timeout=3).stdout
     if psql:
         sql = "SELECT coalesce(json_agg(t),'[]') FROM (SELECT backend_type,state,wait_event_type,wait_event,count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() GROUP BY 1,2,3,4) t;"
-        r = subprocess.run([psql, '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-p', str(port), '-U', 'postgres', '-d', 'postgres', '-c', sql], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([psql, '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1', '-p', str(port), '-U', 'postgres', '-d', 'postgres', '-c', sql], capture_output=True, text=True, timeout=5)
         result['pg_waits'] = dict(returncode=r.returncode, stdout=r.stdout, stderr=r.stderr)
     return result
 
