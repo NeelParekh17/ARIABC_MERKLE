@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "completed_cases": 64,
+  "statements_validated": 153600000,
+  "workload_files_scanned": 20,
+  "SQL_statements_counted": 48000000,
+  "all_case_SHA_match_actual_file": true,
+  "HOT_fraction_not_measured": true,
+  "node_stats_are_prerun": true,
+  "sampler_cases": 16,
+  "measurement_sampler_errors": 0,
+  "live_harness_generator_controller_hashes_unchanged": true,
+  "report_sha256": "254f2c38bc7b59076c7d363f25bb918da7ff5a46fea41ac63d0f91fe9413112a"
+}

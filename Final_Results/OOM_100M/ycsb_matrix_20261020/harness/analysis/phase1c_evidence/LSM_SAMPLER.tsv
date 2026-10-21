@@ -1,0 +1,17 @@
+case	max_L0_slots_KiB	max_L1_slots_KiB	measurement_stats_samples	measurement_merges	full_merges	final_components_KiB	drain_s	artifact_path
+D/0	1016/1024	4920/8	276	[5, 0]	[6, 2]	8/8/8/8	31.044	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/d_lsm/run_20261020_153530_0577f49b/d_s0.0_bcdb_merkle_w16_t1
+D/0.5	1024/1024	4912/8	271	[5, 0]	[6, 2]	8/8/8/8	9.455	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/d_lsm/run_20261020_153530_0577f49b/d_s0.5_bcdb_merkle_w16_t1
+D/0.99	1032/1024	4808/8	204	[5, 0]	[6, 2]	8/8/8/8	8.554	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/d_lsm/run_20261020_153530_0577f49b/d_s0.99_bcdb_merkle_w16_t1
+D/1.2	1024/1016	4920/8	174	[5, 0]	[6, 2]	8/8/8/8	8.651	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/d_lsm/run_20261020_153530_0577f49b/d_s1.2_bcdb_merkle_w16_t1
+C/0	8/8	8/8	213	[0, 0]	[0, 0]	8/8/8/8	0.337	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/c_lsm/run_20261020_182747_fb8741d6/c_s0.0_bcdb_merkle_w16_t1
+C/0.5	8/8	8/8	207	[0, 0]	[0, 0]	8/8/8/8	0.335	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/c_lsm/run_20261020_182747_fb8741d6/c_s0.5_bcdb_merkle_w16_t1
+C/0.99	8/8	8/8	156	[0, 0]	[0, 0]	8/8/8/8	0.335	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/c_lsm/run_20261020_182747_fb8741d6/c_s0.99_bcdb_merkle_w16_t1
+C/1.2	8/8	8/8	134	[0, 0]	[0, 0]	8/8/8/8	0.337	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/c_lsm/run_20261020_182747_fb8741d6/c_s1.2_bcdb_merkle_w16_t1
+B/0	8/8	8/8	383	[0, 0]	[0, 0]	8/8/8/8	0.330	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/b_lsm/run_20261020_210222_90170ef1/b_s0.0_bcdb_merkle_w16_t1
+B/0.5	8/8	8/8	376	[0, 0]	[0, 0]	8/8/8/8	0.441	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/b_lsm/run_20261020_210222_90170ef1/b_s0.5_bcdb_merkle_w16_t1
+B/0.99	16/8	8/8	216	[0, 0]	[1, 1]	8/8/8/8	1.047	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/b_lsm/run_20261020_210222_90170ef1/b_s0.99_bcdb_merkle_w16_t1
+B/1.2	16/8	8/8	190	[0, 0]	[1, 1]	8/8/8/8	1.036	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/b_lsm/run_20261020_210222_90170ef1/b_s1.2_bcdb_merkle_w16_t1
+A/0	8/8	8/8	970	[0, 0]	[0, 0]	8/8/8/8	0.355	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/a_lsm/run_20261021_014559_2f8d8318/a_s0.0_bcdb_merkle_w16_t1
+A/0.5	8/8	8/8	952	[0, 0]	[0, 0]	8/8/8/8	0.346	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/a_lsm/run_20261021_014559_2f8d8318/a_s0.5_bcdb_merkle_w16_t1
+A/0.99	16/8	8/8	587	[0, 0]	[1, 1]	8/8/8/8	3.372	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/a_lsm/run_20261021_014559_2f8d8318/a_s0.99_bcdb_merkle_w16_t1
+A/1.2	16/8	8/8	478	[0, 0]	[1, 1]	8/8/8/8	1.037	/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/a_lsm/run_20261021_014559_2f8d8318/a_s1.2_bcdb_merkle_w16_t1

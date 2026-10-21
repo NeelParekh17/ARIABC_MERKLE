@@ -1,0 +1,17 @@
+{
+  "before": {
+    "lsn": "5/4F347828",
+    "commits": 366,
+    "postmaster_start": "2026-10-20 18:12:15.822575+05:30",
+    "time": "2026-10-20 18:12:19.312092+05:30"
+  },
+  "after": {
+    "lsn": "5/4F347828",
+    "commits": 2400879,
+    "postmaster_start": "2026-10-20 18:12:15.822575+05:30",
+    "time": "2026-10-20 18:14:54.31844+05:30"
+  },
+  "wal_bytes": 0,
+  "bytes_per_statement": 0.0,
+  "scope": "gateway plus telemetry/start-stop and collector settling; excludes LSM drain/checkpoint"
+}

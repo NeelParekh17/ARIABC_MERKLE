@@ -1,0 +1,757 @@
+{
+  "snapshot": 1792542811.4016266,
+  "files": [
+    {
+      "workload": "a",
+      "filename": "ycsb_a_skew_0.0_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/a_plain/run_20261020_225630_45b6921a/workloads/ycsb_a_skew_0.0_2400000.sql",
+      "bytes": 485741392,
+      "sha256": "4f95ade1ea680e34bf23a5be69e74372360abb5bf809ada9ab64d3ac637b376c",
+      "manifest_sha256": "4f95ade1ea680e34bf23a5be69e74372360abb5bf809ada9ab64d3ac637b376c",
+      "counts": {
+        "update": 1200024,
+        "read": 1199976
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 1200024
+      },
+      "anomalies": {},
+      "examples": {
+        "update": "UPDATE usertable SET FIELD1='VrpoiVgRV5IfLBcbfnoG', FIELD2='MbJmTPSIAoCLrZ3aWZkS', FIELD3='Bvrjn9Wvgfygw2wMqZcU', FIELD4='DIh7yfJs1ON43xKmTecQ', FIELD5='oXsf2o3gyrDO1xkxwnQr', FIELD6='S7RPeMOkIUpkDyr7OSJo', FIELD7='Ru1XXdo0cZuzren68K4T', FIELD8='unPFz46PDjqipVJIqVLB', FIELD9='5LzxoiGFfWd3hjOkYRBM', FIELD10='eyyMDHqJ38aRUhR4IWrX' WHERE YCSB_KEY=3356887;",
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=83303778;"
+      },
+      "example_lines": {
+        "update": 1,
+        "read": 4
+      },
+      "read_key_range": [
+        189,
+        99999923
+      ],
+      "update_key_range": [
+        38,
+        99999988
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "a",
+      "filename": "ycsb_a_skew_0.5_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/a_plain/run_20261020_225630_45b6921a/workloads/ycsb_a_skew_0.5_2400000.sql",
+      "bytes": 484962327,
+      "sha256": "4893899a85bbe56d13eca97bcde5614a669f0e45392dde81b2f2090612506bba",
+      "manifest_sha256": "4893899a85bbe56d13eca97bcde5614a669f0e45392dde81b2f2090612506bba",
+      "counts": {
+        "read": 1199772,
+        "update": 1200228
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 1200228
+      },
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=31916455;",
+        "update": "UPDATE usertable SET FIELD1='ZZ94RWZgKHEk11eKQOvd', FIELD2='c3bP4OZk3LkMNkUAEVRX', FIELD3='kThR38jYDeBxAcr6kSlo', FIELD4='Ml9o3MjEYayP3sssQX5g', FIELD5='404PKHdwyiMM7tuTef9Z', FIELD6='T61FFjsu4iWxoJJ9992F', FIELD7='0nl9uaceiRJMwFRgZf4l', FIELD8='8842GvOIXgbSHgAzYJmQ', FIELD9='1OoxDAJ9tkUnZP8A7SMz', FIELD10='ZIlLCeWIOvluLmXH2zcY' WHERE YCSB_KEY=34677983;"
+      },
+      "example_lines": {
+        "read": 1,
+        "update": 2
+      },
+      "read_key_range": [
+        1,
+        99999964
+      ],
+      "update_key_range": [
+        1,
+        99999952
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "a",
+      "filename": "ycsb_a_skew_0.99_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/a_plain/run_20261020_225630_45b6921a/workloads/ycsb_a_skew_0.99_2400000.sql",
+      "bytes": 477824229,
+      "sha256": "f33e74e6781e9f18ae2876a65bc6a3aa00e8ef76beeb5a1233749435d6b9da48",
+      "manifest_sha256": "f33e74e6781e9f18ae2876a65bc6a3aa00e8ef76beeb5a1233749435d6b9da48",
+      "counts": {
+        "update": 1200538,
+        "read": 1199462
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 1200538
+      },
+      "anomalies": {},
+      "examples": {
+        "update": "UPDATE usertable SET FIELD1='YElKSDa7rPJaR5vAprGw', FIELD2='NVE0IlkUwxKoMVIqEIEq', FIELD3='ErAkH2oZxWcQMJFI8OKC', FIELD4='bgbsbuKOJ1ND6zzxlKDS', FIELD5='yHmre1Ecvuea0rRNQPbu', FIELD6='qvoMaSacLTeEhBIHGlxJ', FIELD7='OisSk9O5ym0W6L03OlvT', FIELD8='t59UxlrlS3tW8lMLkfRt', FIELD9='MqfCJUXld893nzDX8vbS', FIELD10='b7Nyq6Iaq1taiAquC5mt' WHERE YCSB_KEY=1;",
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=7048766;"
+      },
+      "example_lines": {
+        "update": 1,
+        "read": 2
+      },
+      "read_key_range": [
+        1,
+        99998023
+      ],
+      "update_key_range": [
+        1,
+        99999950
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "a",
+      "filename": "ycsb_a_skew_1.2_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/a_plain/run_20261020_225630_45b6921a/workloads/ycsb_a_skew_1.2_2400000.sql",
+      "bytes": 472439098,
+      "sha256": "509d85b8788e509813492a1b6171fbaecdf1ea394ce96ad4c45c7d6dcddb2e85",
+      "manifest_sha256": "509d85b8788e509813492a1b6171fbaecdf1ea394ce96ad4c45c7d6dcddb2e85",
+      "counts": {
+        "read": 1199985,
+        "update": 1200015
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 1200015
+      },
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=25703;",
+        "update": "UPDATE usertable SET FIELD1='DblhAYuP6JeDKbP0X1re', FIELD2='jADYc3a6n9PVlG89aNhC', FIELD3='GqoJr8nz4Vp1qzmQ0QSM', FIELD4='w920RONpbqYT9TbKoaOt', FIELD5='Sx42M6FA5ZF0TnpPVFMt', FIELD6='yRA6Yr2uLuD4lgZ3zPVl', FIELD7='leMcJw7r3QovTDkGLk5K', FIELD8='qSDOAVW49BdBT6RDjHGW', FIELD9='6d0NlfArgoW0G5lBX7Yb', FIELD10='w9SlF6kNuWvvBK7sj30a' WHERE YCSB_KEY=3;"
+      },
+      "example_lines": {
+        "read": 1,
+        "update": 4
+      },
+      "read_key_range": [
+        1,
+        99994919
+      ],
+      "update_key_range": [
+        1,
+        99968954
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "b",
+      "filename": "ycsb_b_skew_0.0_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/b_plain/run_20261020_194839_03577827/workloads/ycsb_b_skew_0.0_2400000.sql",
+      "bytes": 154198032,
+      "sha256": "e9f9e53298d7404b74373f31b67c4e076e80d9ba2fea226faa040c62e1ce8f69",
+      "manifest_sha256": "e9f9e53298d7404b74373f31b67c4e076e80d9ba2fea226faa040c62e1ce8f69",
+      "counts": {
+        "read": 2279919,
+        "update": 120081
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 120081
+      },
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=3356887;",
+        "update": "UPDATE usertable SET FIELD1='gfygw2wMqZcUDIh7yfJs', FIELD2='1ON43xKmTecQoXsf2o3g', FIELD3='yrDO1xkxwnQrS7RPeMOk', FIELD4='IUpkDyr7OSJoRu1XXdo0', FIELD5='cZuzren68K4TunPFz46P', FIELD6='DjqipVJIqVLB5LzxoiGF', FIELD7='fWd3hjOkYRBMeyyMDHqJ', FIELD8='38aRUhR4IWrXPvhsBkDa', FIELD9='9U4UqGWlG6g3Ot1OGMmj', FIELD10='xWkI9X7H6aMuFbh7x41Z' WHERE YCSB_KEY=45176956;"
+      },
+      "example_lines": {
+        "read": 1,
+        "update": 17
+      },
+      "read_key_range": [
+        89,
+        99999867
+      ],
+      "update_key_range": [
+        52,
+        99999655
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "b",
+      "filename": "ycsb_b_skew_0.5_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/b_plain/run_20261020_194839_03577827/workloads/ycsb_b_skew_0.5_2400000.sql",
+      "bytes": 153217931,
+      "sha256": "59ffee8a8e2b1d3946dc1659df94f6e4136e30b24a20f2fdd13edb6019a37225",
+      "manifest_sha256": "59ffee8a8e2b1d3946dc1659df94f6e4136e30b24a20f2fdd13edb6019a37225",
+      "counts": {
+        "read": 2280369,
+        "update": 119631
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 119631
+      },
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=31916455;",
+        "update": "UPDATE usertable SET FIELD1='1FFjsu4iWxoJJ9992F0n', FIELD2='l9uaceiRJMwFRgZf4l88', FIELD3='42GvOIXgbSHgAzYJmQ1O', FIELD4='oxDAJ9tkUnZP8A7SMzZI', FIELD5='lLCeWIOvluLmXH2zcYfP', FIELD6='tzam3TZmYSJiuQDMe700', FIELD7='nBVUvSk8yztZ8hcGwtBN', FIELD8='GJaLZTxIO4puqSsZuK4T', FIELD9='mvav9inN88RB3tBDDnYZ', FIELD10='CWDqgbOrf3hp42EQuVD4' WHERE YCSB_KEY=51362121;"
+      },
+      "example_lines": {
+        "read": 1,
+        "update": 28
+      },
+      "read_key_range": [
+        1,
+        99999994
+      ],
+      "update_key_range": [
+        1,
+        99998145
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "b",
+      "filename": "ycsb_b_skew_0.99_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/b_plain/run_20261020_194839_03577827/workloads/ycsb_b_skew_0.99_2400000.sql",
+      "bytes": 145944198,
+      "sha256": "5a5fd70496f8f427d525e667351918e799ef8decb390d6ac1ad43d4d9a94e56b",
+      "manifest_sha256": "5a5fd70496f8f427d525e667351918e799ef8decb390d6ac1ad43d4d9a94e56b",
+      "counts": {
+        "read": 2280481,
+        "update": 119519
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 119519
+      },
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=1;",
+        "update": "UPDATE usertable SET FIELD1='rlS3tW8lMLkfRtMqfCJU', FIELD2='Xld893nzDX8vbSb7Nyq6', FIELD3='Iaq1taiAquC5mtcz2BFR', FIELD4='9VIZQozakFeqIkdE80Vt', FIELD5='VtOfvqPTIKqi3yIxPArL', FIELD6='levzkhNGCajOWk2lRZw9', FIELD7='1U1KnmUflYBh1r5sH0ja', FIELD8='FAim6zZefz5K0dBaog6g', FIELD9='rRjEDI7rZaSyRmmiCXAw', FIELD10='HVCeHKUDYCfnRLm6qZhF' WHERE YCSB_KEY=1069;"
+      },
+      "example_lines": {
+        "read": 1,
+        "update": 38
+      },
+      "read_key_range": [
+        1,
+        99999162
+      ],
+      "update_key_range": [
+        1,
+        99960038
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "b",
+      "filename": "ycsb_b_skew_1.2_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/b_plain/run_20261020_194839_03577827/workloads/ycsb_b_skew_1.2_2400000.sql",
+      "bytes": 140932513,
+      "sha256": "c31206610a7a00eeebdb780832a69dedd8f11a90c0d3ccc595225b29a8132cee",
+      "manifest_sha256": "c31206610a7a00eeebdb780832a69dedd8f11a90c0d3ccc595225b29a8132cee",
+      "counts": {
+        "read": 2279809,
+        "update": 120191
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 120191
+      },
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=25703;",
+        "update": "UPDATE usertable SET FIELD1='DblhAYuP6JeDKbP0X1re', FIELD2='jADYc3a6n9PVlG89aNhC', FIELD3='GqoJr8nz4Vp1qzmQ0QSM', FIELD4='w920RONpbqYT9TbKoaOt', FIELD5='Sx42M6FA5ZF0TnpPVFMt', FIELD6='yRA6Yr2uLuD4lgZ3zPVl', FIELD7='leMcJw7r3QovTDkGLk5K', FIELD8='qSDOAVW49BdBT6RDjHGW', FIELD9='6d0NlfArgoW0G5lBX7Yb', FIELD10='w9SlF6kNuWvvBK7sj30a' WHERE YCSB_KEY=3;"
+      },
+      "example_lines": {
+        "read": 1,
+        "update": 4
+      },
+      "read_key_range": [
+        1,
+        99995782
+      ],
+      "update_key_range": [
+        1,
+        99968955
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "c",
+      "filename": "ycsb_c_skew_0.0_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/c_plain/run_20261020_173706_073191e2/workloads/ycsb_c_skew_0.0_2400000.sql",
+      "bytes": 117333053,
+      "sha256": "98aba6ae82ce9dfacac646e4a986950c95a6d85bb398f25f383da7ea36cd3c21",
+      "manifest_sha256": "98aba6ae82ce9dfacac646e4a986950c95a6d85bb398f25f383da7ea36cd3c21",
+      "counts": {
+        "read": 2400000
+      },
+      "statements": 2400000,
+      "update_columns": {},
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=3356887;"
+      },
+      "example_lines": {
+        "read": 1
+      },
+      "read_key_range": [
+        60,
+        99999997
+      ],
+      "update_key_range": [
+        null,
+        null
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "c",
+      "filename": "ycsb_c_skew_0.5_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/c_plain/run_20261020_173706_073191e2/workloads/ycsb_c_skew_0.5_2400000.sql",
+      "bytes": 116492048,
+      "sha256": "5ddfae9fbdfc23f34a8c36a0b9405af6639be68add8e959ec61fec11ac68385a",
+      "manifest_sha256": "5ddfae9fbdfc23f34a8c36a0b9405af6639be68add8e959ec61fec11ac68385a",
+      "counts": {
+        "read": 2400000
+      },
+      "statements": 2400000,
+      "update_columns": {},
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=31916455;"
+      },
+      "example_lines": {
+        "read": 1
+      },
+      "read_key_range": [
+        1,
+        99999952
+      ],
+      "update_key_range": [
+        null,
+        null
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "c",
+      "filename": "ycsb_c_skew_0.99_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/c_plain/run_20261020_173706_073191e2/workloads/ycsb_c_skew_0.99_2400000.sql",
+      "bytes": 109253403,
+      "sha256": "9275307087756a2ef05fff33fe514d0d10be6b79931df9497e229f253d57fbe5",
+      "manifest_sha256": "9275307087756a2ef05fff33fe514d0d10be6b79931df9497e229f253d57fbe5",
+      "counts": {
+        "read": 2400000
+      },
+      "statements": 2400000,
+      "update_columns": {},
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=1;"
+      },
+      "example_lines": {
+        "read": 1
+      },
+      "read_key_range": [
+        1,
+        99998952
+      ],
+      "update_key_range": [
+        null,
+        null
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "c",
+      "filename": "ycsb_c_skew_1.2_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/c_plain/run_20261020_173706_073191e2/workloads/ycsb_c_skew_1.2_2400000.sql",
+      "bytes": 104038084,
+      "sha256": "a8576c0534769cda89b47cd70bcf49c06f471e16efc86230c8d123d35ae4ce1c",
+      "manifest_sha256": "a8576c0534769cda89b47cd70bcf49c06f471e16efc86230c8d123d35ae4ce1c",
+      "counts": {
+        "read": 2400000
+      },
+      "statements": 2400000,
+      "update_columns": {},
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=25703;"
+      },
+      "example_lines": {
+        "read": 1
+      },
+      "read_key_range": [
+        1,
+        99995118
+      ],
+      "update_key_range": [
+        null,
+        null
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "d",
+      "filename": "ycsb_d_skew_0.0_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/d_plain/run_20261020_143959_37a62875/workloads/ycsb_d_skew_0.0_2400000.sql",
+      "bytes": 156525174,
+      "sha256": "e67005b7426cdb825b3f2c858edc337ec0069f1a61eecff87896c44899929a26",
+      "manifest_sha256": "e67005b7426cdb825b3f2c858edc337ec0069f1a61eecff87896c44899929a26",
+      "counts": {
+        "read": 2279469,
+        "insert": 120531
+      },
+      "statements": 2400000,
+      "update_columns": {},
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=96643114;",
+        "insert": "INSERT INTO usertable (YCSB_KEY, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9, FIELD10) VALUES (100000001, 'vgfygw2wMqZcUDIh7yfJ', 's1ON43xKmTecQoXsf2o3', 'gyrDO1xkxwnQrS7RPeMO', 'kIUpkDyr7OSJoRu1XXdo', '0cZuzren68K4TunPFz46', 'PDjqipVJIqVLB5LzxoiG', 'FfWd3hjOkYRBMeyyMDHq', 'J38aRUhR4IWrXPvhsBkD', 'a9U4UqGWlG6g3Ot1OGMm', 'jxWkI9X7H6aMuFbh7x41');"
+      },
+      "example_lines": {
+        "read": 1,
+        "insert": 17
+      },
+      "read_key_range": [
+        6429,
+        100118157
+      ],
+      "update_key_range": [
+        null,
+        null
+      ],
+      "insert_key_range": [
+        100000001,
+        100120531
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 1317
+    },
+    {
+      "workload": "d",
+      "filename": "ycsb_d_skew_0.5_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/d_plain/run_20261020_143959_37a62875/workloads/ycsb_d_skew_0.5_2400000.sql",
+      "bytes": 156607537,
+      "sha256": "e5323f203fc4dc09fc04bb39ee016f1382b09875753ffd1d3be6dd397b11ac07",
+      "manifest_sha256": "e5323f203fc4dc09fc04bb39ee016f1382b09875753ffd1d3be6dd397b11ac07",
+      "counts": {
+        "read": 2279746,
+        "insert": 120254
+      },
+      "statements": 2400000,
+      "update_columns": {},
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=68083546;",
+        "insert": "INSERT INTO usertable (YCSB_KEY, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9, FIELD10) VALUES (100000001, 'T61FFjsu4iWxoJJ9992F', '0nl9uaceiRJMwFRgZf4l', '8842GvOIXgbSHgAzYJmQ', '1OoxDAJ9tkUnZP8A7SMz', 'ZIlLCeWIOvluLmXH2zcY', 'fPtzam3TZmYSJiuQDMe7', '00nBVUvSk8yztZ8hcGwt', 'BNGJaLZTxIO4puqSsZuK', '4Tmvav9inN88RB3tBDDn', 'YZCWDqgbOrf3hp42EQuV');"
+      },
+      "example_lines": {
+        "read": 1,
+        "insert": 28
+      },
+      "read_key_range": [
+        4329,
+        100120074
+      ],
+      "update_key_range": [
+        null,
+        null
+      ],
+      "insert_key_range": [
+        100000001,
+        100120254
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 52531
+    },
+    {
+      "workload": "d",
+      "filename": "ycsb_d_skew_0.99_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/d_plain/run_20261020_143959_37a62875/workloads/ycsb_d_skew_0.99_2400000.sql",
+      "bytes": 157770975,
+      "sha256": "ae78761fed624edacea9e66ebf356df619b41179948b25007f314fe661d69415",
+      "manifest_sha256": "ae78761fed624edacea9e66ebf356df619b41179948b25007f314fe661d69415",
+      "counts": {
+        "read": 2280350,
+        "insert": 119650
+      },
+      "statements": 2400000,
+      "update_columns": {},
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=100000000;",
+        "insert": "INSERT INTO usertable (YCSB_KEY, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9, FIELD10) VALUES (100000001, 'xlrlS3tW8lMLkfRtMqfC', 'JUXld893nzDX8vbSb7Ny', 'q6Iaq1taiAquC5mtcz2B', 'FR9VIZQozakFeqIkdE80', 'VtVtOfvqPTIKqi3yIxPA', 'rLlevzkhNGCajOWk2lRZ', 'w91U1KnmUflYBh1r5sH0', 'jaFAim6zZefz5K0dBaog', '6grRjEDI7rZaSyRmmiCX', 'AwHVCeHKUDYCfnRLm6qZ');"
+      },
+      "example_lines": {
+        "read": 1,
+        "insert": 38
+      },
+      "read_key_range": [
+        25486,
+        100119586
+      ],
+      "update_key_range": [
+        null,
+        null
+      ],
+      "insert_key_range": [
+        100000001,
+        100119650
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 1299927
+    },
+    {
+      "workload": "d",
+      "filename": "ycsb_d_skew_1.2_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/d_plain/run_20261020_143959_37a62875/workloads/ycsb_d_skew_1.2_2400000.sql",
+      "bytes": 158716188,
+      "sha256": "f6ab0c589c4e297b85fc82c844e3f34aa0073f4f07923dee115f32dc2e2e72b7",
+      "manifest_sha256": "f6ab0c589c4e297b85fc82c844e3f34aa0073f4f07923dee115f32dc2e2e72b7",
+      "counts": {
+        "read": 2279885,
+        "insert": 120115
+      },
+      "statements": 2400000,
+      "update_columns": {},
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=99974298;",
+        "insert": "INSERT INTO usertable (YCSB_KEY, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9, FIELD10) VALUES (100000001, 'sCDblhAYuP6JeDKbP0X1', 'rejADYc3a6n9PVlG89aN', 'hCGqoJr8nz4Vp1qzmQ0Q', 'SMw920RONpbqYT9TbKoa', 'OtSx42M6FA5ZF0TnpPVF', 'MtyRA6Yr2uLuD4lgZ3zP', 'VlleMcJw7r3QovTDkGLk', '5KqSDOAVW49BdBT6RDjH', 'GW6d0NlfArgoW0G5lBX7', 'Ybw9SlF6kNuWvvBK7sj3');"
+      },
+      "example_lines": {
+        "read": 1,
+        "insert": 4
+      },
+      "read_key_range": [
+        31584,
+        100120037
+      ],
+      "update_key_range": [
+        null,
+        null
+      ],
+      "insert_key_range": [
+        100000001,
+        100120115
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 2079729
+    },
+    {
+      "workload": "f",
+      "filename": "ycsb_f_skew_0.0_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/f_plain/run_20261021_054559_55734ac8/workloads/ycsb_f_skew_0.0_2400000.sql",
+      "bytes": 651344704,
+      "sha256": "346ba4acb07e970b81fc8e3501931484a1ecb1e5d6b2f9a7e75b554def6540f1",
+      "manifest_sha256": "346ba4acb07e970b81fc8e3501931484a1ecb1e5d6b2f9a7e75b554def6540f1",
+      "counts": {
+        "rmw": 1200024,
+        "read": 1199976
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 1200024
+      },
+      "anomalies": {},
+      "examples": {
+        "rmw": "WITH ycsb_read AS MATERIALIZED (SELECT * FROM usertable WHERE YCSB_KEY=3356887) UPDATE usertable SET FIELD1='VrpoiVgRV5IfLBcbfnoG', FIELD2='MbJmTPSIAoCLrZ3aWZkS', FIELD3='Bvrjn9Wvgfygw2wMqZcU', FIELD4='DIh7yfJs1ON43xKmTecQ', FIELD5='oXsf2o3gyrDO1xkxwnQr', FIELD6='S7RPeMOkIUpkDyr7OSJo', FIELD7='Ru1XXdo0cZuzren68K4T', FIELD8='unPFz46PDjqipVJIqVLB', FIELD9='5LzxoiGFfWd3hjOkYRBM', FIELD10='eyyMDHqJ38aRUhR4IWrX' FROM ycsb_read WHERE usertable.YCSB_KEY=ycsb_read.YCSB_KEY RETURNING usertable.*;",
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=83303778;"
+      },
+      "example_lines": {
+        "rmw": 1,
+        "read": 4
+      },
+      "read_key_range": [
+        189,
+        99999923
+      ],
+      "update_key_range": [
+        38,
+        99999988
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "f",
+      "filename": "ycsb_f_skew_0.5_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/f_plain/run_20261021_054559_55734ac8/workloads/ycsb_f_skew_0.5_2400000.sql",
+      "bytes": 650593791,
+      "sha256": "e3d807ed1cda090000e64acbe78cabc1e3756712efe7a07474df04722233302a",
+      "manifest_sha256": "e3d807ed1cda090000e64acbe78cabc1e3756712efe7a07474df04722233302a",
+      "counts": {
+        "read": 1199772,
+        "rmw": 1200228
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 1200228
+      },
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=31916455;",
+        "rmw": "WITH ycsb_read AS MATERIALIZED (SELECT * FROM usertable WHERE YCSB_KEY=34677983) UPDATE usertable SET FIELD1='ZZ94RWZgKHEk11eKQOvd', FIELD2='c3bP4OZk3LkMNkUAEVRX', FIELD3='kThR38jYDeBxAcr6kSlo', FIELD4='Ml9o3MjEYayP3sssQX5g', FIELD5='404PKHdwyiMM7tuTef9Z', FIELD6='T61FFjsu4iWxoJJ9992F', FIELD7='0nl9uaceiRJMwFRgZf4l', FIELD8='8842GvOIXgbSHgAzYJmQ', FIELD9='1OoxDAJ9tkUnZP8A7SMz', FIELD10='ZIlLCeWIOvluLmXH2zcY' FROM ycsb_read WHERE usertable.YCSB_KEY=ycsb_read.YCSB_KEY RETURNING usertable.*;"
+      },
+      "example_lines": {
+        "read": 1,
+        "rmw": 2
+      },
+      "read_key_range": [
+        1,
+        99999964
+      ],
+      "update_key_range": [
+        1,
+        99999952
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "f",
+      "filename": "ycsb_f_skew_0.99_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/f_plain/run_20261021_054559_55734ac8/workloads/ycsb_f_skew_0.99_2400000.sql",
+      "bytes": 643498473,
+      "sha256": "e05e1c76afab75254e6297d2739c69bd32b649562d6bb984d7d25c56281fb9f6",
+      "manifest_sha256": "e05e1c76afab75254e6297d2739c69bd32b649562d6bb984d7d25c56281fb9f6",
+      "counts": {
+        "rmw": 1200538,
+        "read": 1199462
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 1200538
+      },
+      "anomalies": {},
+      "examples": {
+        "rmw": "WITH ycsb_read AS MATERIALIZED (SELECT * FROM usertable WHERE YCSB_KEY=1) UPDATE usertable SET FIELD1='YElKSDa7rPJaR5vAprGw', FIELD2='NVE0IlkUwxKoMVIqEIEq', FIELD3='ErAkH2oZxWcQMJFI8OKC', FIELD4='bgbsbuKOJ1ND6zzxlKDS', FIELD5='yHmre1Ecvuea0rRNQPbu', FIELD6='qvoMaSacLTeEhBIHGlxJ', FIELD7='OisSk9O5ym0W6L03OlvT', FIELD8='t59UxlrlS3tW8lMLkfRt', FIELD9='MqfCJUXld893nzDX8vbS', FIELD10='b7Nyq6Iaq1taiAquC5mt' FROM ycsb_read WHERE usertable.YCSB_KEY=ycsb_read.YCSB_KEY RETURNING usertable.*;",
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=7048766;"
+      },
+      "example_lines": {
+        "rmw": 1,
+        "read": 2
+      },
+      "read_key_range": [
+        1,
+        99998023
+      ],
+      "update_key_range": [
+        1,
+        99999950
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    },
+    {
+      "workload": "f",
+      "filename": "ycsb_f_skew_1.2_2400000.sql",
+      "path": "/home/neel/claude_ctl/ycsb_matrix_20261020/results/matrix/f_plain/run_20261021_054559_55734ac8/workloads/ycsb_f_skew_1.2_2400000.sql",
+      "bytes": 638041168,
+      "sha256": "12e1f577c2df115998683b0be71e9024ddd2d89ee4be48ad2b0a59af3b2ea873",
+      "manifest_sha256": "12e1f577c2df115998683b0be71e9024ddd2d89ee4be48ad2b0a59af3b2ea873",
+      "counts": {
+        "read": 1199985,
+        "rmw": 1200015
+      },
+      "statements": 2400000,
+      "update_columns": {
+        "FIELD1,FIELD2,FIELD3,FIELD4,FIELD5,FIELD6,FIELD7,FIELD8,FIELD9,FIELD10": 1200015
+      },
+      "anomalies": {},
+      "examples": {
+        "read": "SELECT * FROM usertable WHERE YCSB_KEY=25703;",
+        "rmw": "WITH ycsb_read AS MATERIALIZED (SELECT * FROM usertable WHERE YCSB_KEY=3) UPDATE usertable SET FIELD1='DblhAYuP6JeDKbP0X1re', FIELD2='jADYc3a6n9PVlG89aNhC', FIELD3='GqoJr8nz4Vp1qzmQ0QSM', FIELD4='w920RONpbqYT9TbKoaOt', FIELD5='Sx42M6FA5ZF0TnpPVFMt', FIELD6='yRA6Yr2uLuD4lgZ3zPVl', FIELD7='leMcJw7r3QovTDkGLk5K', FIELD8='qSDOAVW49BdBT6RDjHGW', FIELD9='6d0NlfArgoW0G5lBX7Yb', FIELD10='w9SlF6kNuWvvBK7sj30a' FROM ycsb_read WHERE usertable.YCSB_KEY=ycsb_read.YCSB_KEY RETURNING usertable.*;"
+      },
+      "example_lines": {
+        "read": 1,
+        "rmw": 4
+      },
+      "read_key_range": [
+        1,
+        99994919
+      ],
+      "update_key_range": [
+        1,
+        99968954
+      ],
+      "insert_key_range": [
+        null,
+        null
+      ],
+      "insert_nonsequential": 0,
+      "reads_of_new_keys": 0
+    }
+  ]
+}

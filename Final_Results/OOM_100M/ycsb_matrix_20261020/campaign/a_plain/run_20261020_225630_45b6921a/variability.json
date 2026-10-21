@@ -1,0 +1,138 @@
+[
+  {
+    "configuration": [
+      "bcdb_det",
+      "a",
+      "0.0",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 2829.121086382497,
+    "mean": 2829.121086382497,
+    "min": 2829.121086382497,
+    "max": 2829.121086382497,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "a",
+      "0.5",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 2772.0988253231226,
+    "mean": 2772.0988253231226,
+    "min": 2772.0988253231226,
+    "max": 2772.0988253231226,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "a",
+      "0.99",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 4882.584026219476,
+    "mean": 4882.584026219476,
+    "min": 4882.584026219476,
+    "max": 4882.584026219476,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_det",
+      "a",
+      "1.2",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 5916.620032196274,
+    "mean": 5916.620032196274,
+    "min": 5916.620032196274,
+    "max": 5916.620032196274,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "a",
+      "0.0",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 2935.2125216166173,
+    "mean": 2935.2125216166173,
+    "min": 2935.2125216166173,
+    "max": 2935.2125216166173,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "a",
+      "0.5",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 3437.755145889734,
+    "mean": 3437.755145889734,
+    "min": 3437.755145889734,
+    "max": 3437.755145889734,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "a",
+      "0.99",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 7428.385718928455,
+    "mean": 7428.385718928455,
+    "min": 7428.385718928455,
+    "max": 7428.385718928455,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "pg",
+      "a",
+      "1.2",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 4339.665628763304,
+    "mean": 4339.665628763304,
+    "min": 4339.665628763304,
+    "max": 4339.665628763304,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  }
+]

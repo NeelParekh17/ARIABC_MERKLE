@@ -1,0 +1,70 @@
+[
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "b",
+      "0.0",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 8519.036496972192,
+    "mean": 8519.036496972192,
+    "min": 8519.036496972192,
+    "max": 8519.036496972192,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "b",
+      "0.5",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 7782.050700060311,
+    "mean": 7782.050700060311,
+    "min": 7782.050700060311,
+    "max": 7782.050700060311,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "b",
+      "0.99",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 14789.708827607457,
+    "mean": 14789.708827607457,
+    "min": 14789.708827607457,
+    "max": 14789.708827607457,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  },
+  {
+    "configuration": [
+      "bcdb_merkle",
+      "b",
+      "1.2",
+      "",
+      "16",
+      ""
+    ],
+    "trials": 1,
+    "median": 20774.364434288087,
+    "mean": 20774.364434288087,
+    "min": 20774.364434288087,
+    "max": 20774.364434288087,
+    "cv_pct": null,
+    "status": "insufficient_repeats"
+  }
+]

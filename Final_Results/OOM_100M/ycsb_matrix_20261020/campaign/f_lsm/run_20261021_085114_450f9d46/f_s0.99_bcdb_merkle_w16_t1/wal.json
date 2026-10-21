@@ -1,0 +1,17 @@
+{
+  "before": {
+    "lsn": "5/4F37E240",
+    "commits": 702,
+    "postmaster_start": "2026-10-21 09:18:02.230288+05:30",
+    "time": "2026-10-21 09:18:06.919187+05:30"
+  },
+  "after": {
+    "lsn": "6/DFDEC30",
+    "commits": 2402348,
+    "postmaster_start": "2026-10-21 09:18:02.230288+05:30",
+    "time": "2026-10-21 09:27:51.56414+05:30"
+  },
+  "wal_bytes": 3200649712,
+  "bytes_per_statement": 1333.6040466666666,
+  "scope": "gateway plus telemetry/start-stop and collector settling; excludes LSM drain/checkpoint"
+}

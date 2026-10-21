@@ -1,0 +1,70 @@
+{
+  "pg_before": {
+    "blks_read": 32229694,
+    "blks_hit": 16817743,
+    "blk_read_time": 89.721,
+    "blk_write_time": 0,
+    "buffers_clean": 372,
+    "buffers_backend": 13681613,
+    "checkpoint_write_time": 471201,
+    "checkpoint_sync_time": 10,
+    "checkpoints_req": 19,
+    "buffers_checkpoint": 42130,
+    "buffers_alloc": 4047218
+  },
+  "pg_after": {
+    "blks_read": 33003317,
+    "blks_hit": 56320931,
+    "blk_read_time": 104558.859,
+    "blk_write_time": 1708.62,
+    "buffers_clean": 182290,
+    "buffers_backend": 13899656,
+    "checkpoint_write_time": 471218,
+    "checkpoint_sync_time": 14,
+    "checkpoints_req": 20,
+    "buffers_checkpoint": 44038,
+    "buffers_alloc": 4823087
+  },
+  "device_before": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 176866045,
+    "read_sectors": 14651558922,
+    "read_ms": 131826592,
+    "write_ios": 54018074,
+    "write_sectors": 2063300896,
+    "write_ms": 211364668,
+    "io_ms": 36260303
+  },
+  "device_after": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 177025897,
+    "read_sectors": 14654293210,
+    "read_ms": 131932083,
+    "write_ios": 55307528,
+    "write_sectors": 2079499808,
+    "write_ms": 212452966,
+    "io_ms": 36621406
+  },
+  "checkpoint_before": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 177025905,
+    "read_sectors": 14654293506,
+    "read_ms": 131932089,
+    "write_ios": 55312531,
+    "write_sectors": 2079600104,
+    "write_ms": 212459445,
+    "io_ms": 36622297
+  },
+  "checkpoint_after": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 177025909,
+    "read_sectors": 14654293610,
+    "read_ms": 131932090,
+    "write_ios": 55314074,
+    "write_sectors": 2079635320,
+    "write_ms": 212459602,
+    "io_ms": 36622396
+  },
+  "continuous_write_mib": 7975.79296875,
+  "interphase_write_mib": 48.97265625
+}

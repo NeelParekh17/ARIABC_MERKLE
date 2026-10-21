@@ -1,0 +1,7 @@
+{
+  "preflight_s": 1.0879060500010382,
+  "golden_validation_s": 0.7168032560002757,
+  "calibration_s": 300.3166588210006,
+  "plain_validation_s": 0.7250302879983792,
+  "total_before_cases_s": 608.3985427259904
+}
