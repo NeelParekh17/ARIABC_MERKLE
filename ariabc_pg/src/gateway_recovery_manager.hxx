@@ -523,6 +523,8 @@ private:
                           << " live=" << (live ? 1 : 0)
                           << " mismatched_partitions=" << field(rreply, "mismatched_partitions")
                           << " differing_leaves=" << field(rreply, "differing_leaves")
+                          << " descent_levels=" << field(rreply, "descent_levels")
+                          << " nodes_compared=" << field(rreply, "nodes_compared")
                           << " rows_deleted=" << field(rreply, "rows_deleted")
                           << " rows_upserted=" << field(rreply, "rows_upserted")
                           << " full_copies=" << field(rreply, "full_copies")

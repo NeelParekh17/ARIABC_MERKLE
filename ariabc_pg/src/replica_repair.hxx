@@ -15,8 +15,10 @@ namespace ariabc_pg {
  * The reference connection imports `snapshot_id`, so every read of the
  * healthy node (user rows and Merkle node tables) observes exactly the cut
  * boundary.  For each Merkle-indexed table the damaged node's partition roots
- * and leaves are compared with the snapshot's, only rows in differing leaf
- * ranges are streamed (COPY) into a temporary table on the damaged node, and
+ * are compared with the snapshot's, the tree is descended from each differing
+ * root level by level (following only children whose hashes differ) down to
+ * the differing leaves, only rows in those leaf ranges are streamed (COPY)
+ * into a temporary table on the damaged node, and
  * one set-oriented DELETE + INSERT .. ON CONFLICT makes those ranges equal.
  * Tables without a usable Merkle index are compared by checksum and copied
  * in full when they differ.  Every repaired table must end with partition
@@ -31,6 +33,8 @@ struct replica_repair_stats {
     int full_table_copies = 0;
     int mismatched_partitions = 0;
     int differing_leaves = 0;
+    int descent_levels = 0;   // node-table reads per side during the descent
+    int nodes_compared = 0;   // nodes read from both sides during the descent
     uint64_t candidate_rows = 0;
     uint64_t rows_deleted = 0;
     uint64_t rows_upserted = 0;

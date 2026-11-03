@@ -12,10 +12,15 @@ const uint32_t kMaxReqIdBytes = 16u * 1024u * 1024u;
 const uint32_t kMaxSqlBytes = 64u * 1024u * 1024u;
 const uint32_t kBatchFrameTag = 0xFFFFFFFFu;
 const uint32_t kSingleRequestFrameV2Tag = 0xFFFFFFFEu;
+// Batch frame v2: per-item flags word, optional 32-byte request tag per item.
+const uint32_t kBatchFrameV2Tag = 0xFFFFFFFDu;
 const uint32_t kMaxBatchItems = 4096u;
 const char kRaftBatchMarker[] = "__ARIABC_RAFT_BATCH_V1__";
 const char kRaftBatchMarkerV2[] = "__ARIABC_RAFT_BATCH_V2__";
+// V3 = V2 plus a per-item request tag (u8 present, then 32 raw bytes).
+const char kRaftBatchMarkerV3[] = "__ARIABC_RAFT_BATCH_V3__";
 const uint32_t kRequestFlagWaitForTerminal = 0x1u;
+const uint32_t kRequestFlagHasTxTag = 0x2u;
 
 bool read_exact(int fd, void* buf, size_t n, std::string& err) {
     uint8_t* p = reinterpret_cast<uint8_t*>(buf);
@@ -90,13 +95,33 @@ bool request_has_assigned_det_seq(const client_api_request& req) {
     return false;
 }
 
+bool request_has_tx_tag(const client_api_request& req) {
+    if (!req.is_batch()) return req.has_tx_tag;
+    for (const client_api_request_item& item : req.batch_items) {
+        if (item.has_tx_tag) return true;
+    }
+    return false;
+}
+
 } // namespace
+
+client_api_request_item request_as_item(const client_api_request& req) {
+    client_api_request_item item;
+    item.req_id = req.req_id;
+    item.sql = req.sql;
+    item.has_assigned_det_seq = req.has_assigned_det_seq;
+    item.assigned_det_seq = req.assigned_det_seq;
+    item.has_tx_tag = req.has_tx_tag;
+    ::memcpy(item.tx_tag, req.tx_tag, kTxTagBytes);
+    return item;
+}
 
 bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
     out_req.req_id.clear();
     out_req.sql.clear();
     out_req.has_assigned_det_seq = false;
     out_req.assigned_det_seq = 0;
+    out_req.has_tx_tag = false;
     out_req.batch_items.clear();
     out_req.wait_for_terminal = false;
     out_req.terminal_timeout_ms = 30000;
@@ -116,13 +141,17 @@ bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
             err = "frame too large";
             return false;
         }
+        if ((flags & kRequestFlagHasTxTag) != 0) {
+            if (!read_exact(fd, out_req.tx_tag, kTxTagBytes, err)) return false;
+            out_req.has_tx_tag = true;
+        }
         if (!read_bytes(fd, req_len, out_req.req_id, err)) return false;
         if (!read_bytes(fd, sql_len, out_req.sql, err)) return false;
         out_req.wait_for_terminal = (flags & kRequestFlagWaitForTerminal) != 0;
         out_req.terminal_timeout_ms = timeout_ms;
         return true;
     }
-    if (header != kBatchFrameTag) {
+    if (header != kBatchFrameTag && header != kBatchFrameV2Tag) {
         uint32_t sql_len = 0;
         const uint32_t req_len = header;
         if (!read_u32(fd, sql_len, err)) return false;
@@ -142,10 +171,13 @@ bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
         return false;
     }
 
+    const bool batch_v2 = (header == kBatchFrameV2Tag);
     out_req.batch_items.reserve(item_count);
     for (uint32_t i = 0; i < item_count; ++i) {
+        uint32_t item_flags = 0;
         uint32_t req_len = 0;
         uint32_t sql_len = 0;
+        if (batch_v2 && !read_u32(fd, item_flags, err)) return false;
         if (!read_u32(fd, req_len, err)) return false;
         if (!read_u32(fd, sql_len, err)) return false;
         if (req_len > kMaxReqIdBytes || sql_len > kMaxSqlBytes) {
@@ -153,6 +185,10 @@ bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
             return false;
         }
         client_api_request_item item;
+        if ((item_flags & kRequestFlagHasTxTag) != 0) {
+            if (!read_exact(fd, item.tx_tag, kTxTagBytes, err)) return false;
+            item.has_tx_tag = true;
+        }
         if (!read_bytes(fd, req_len, item.req_id, err)) return false;
         if (!read_bytes(fd, sql_len, item.sql, err)) return false;
         out_req.batch_items.push_back(std::move(item));
@@ -178,13 +214,15 @@ bool write_request_frame(int fd, const client_api_request& req, std::string& err
             err = "request too large";
             return false;
         }
-        if (req.wait_for_terminal) {
-            const uint32_t flags = kRequestFlagWaitForTerminal;
+        if (req.wait_for_terminal || req.has_tx_tag) {
+            const uint32_t flags = (req.wait_for_terminal ? kRequestFlagWaitForTerminal : 0u) |
+                                   (req.has_tx_tag ? kRequestFlagHasTxTag : 0u);
             if (!write_u32(fd, kSingleRequestFrameV2Tag, err)) return false;
             if (!write_u32(fd, flags, err)) return false;
             if (!write_u32(fd, req.terminal_timeout_ms, err)) return false;
             if (!write_u32(fd, static_cast<uint32_t>(req.req_id.size()), err)) return false;
             if (!write_u32(fd, static_cast<uint32_t>(req.sql.size()), err)) return false;
+            if (req.has_tx_tag && !write_exact(fd, req.tx_tag, kTxTagBytes, err)) return false;
             if (!req.req_id.empty() && !write_exact(fd, req.req_id.data(), req.req_id.size(), err)) return false;
             if (!req.sql.empty() && !write_exact(fd, req.sql.data(), req.sql.size(), err)) return false;
             return true;
@@ -204,13 +242,19 @@ bool write_request_frame(int fd, const client_api_request& req, std::string& err
         err = "invalid batch item count";
         return false;
     }
-    if (!write_u32(fd, kBatchFrameTag, err)) return false;
+    const bool batch_v2 = request_has_tx_tag(req);
+    if (!write_u32(fd, batch_v2 ? kBatchFrameV2Tag : kBatchFrameTag, err)) return false;
     if (!write_u32(fd, static_cast<uint32_t>(req.batch_items.size()), err)) return false;
     for (size_t i = 0; i < req.batch_items.size(); ++i) {
         const client_api_request_item& item = req.batch_items[i];
         if (!validate_request_item(item, err)) return false;
+        if (batch_v2 &&
+            !write_u32(fd, item.has_tx_tag ? kRequestFlagHasTxTag : 0u, err)) {
+            return false;
+        }
         if (!write_u32(fd, static_cast<uint32_t>(item.req_id.size()), err)) return false;
         if (!write_u32(fd, static_cast<uint32_t>(item.sql.size()), err)) return false;
+        if (item.has_tx_tag && !write_exact(fd, item.tx_tag, kTxTagBytes, err)) return false;
         if (!item.req_id.empty() &&
             !write_exact(fd, item.req_id.data(), item.req_id.size(), err)) {
             return false;
@@ -242,7 +286,8 @@ nuraft::ptr<nuraft::buffer> build_raft_request_log(const client_api_request& req
                                                    std::string& err) {
     err.clear();
 
-    const bool force_v2 = request_has_assigned_det_seq(req);
+    const bool has_tag = request_has_tx_tag(req);
+    const bool force_v2 = request_has_assigned_det_seq(req) || has_tag;
     if ((!req.is_batch() || req.batch_items.size() == 1) && !force_v2) {
         client_api_request_item item;
         if (req.is_batch()) {
@@ -267,12 +312,7 @@ nuraft::ptr<nuraft::buffer> build_raft_request_log(const client_api_request& req
     if (req.is_batch()) {
         items = req.batch_items;
     } else {
-        client_api_request_item item;
-        item.req_id = req.req_id;
-        item.sql = req.sql;
-        item.has_assigned_det_seq = req.has_assigned_det_seq;
-        item.assigned_det_seq = req.assigned_det_seq;
-        items.push_back(std::move(item));
+        items.push_back(request_as_item(req));
     }
 
     if (items.empty() || items.size() > kMaxBatchItems) {
@@ -280,8 +320,10 @@ nuraft::ptr<nuraft::buffer> build_raft_request_log(const client_api_request& req
         return nullptr;
     }
 
-    const bool use_v2 = request_has_assigned_det_seq(req);
-    const char* marker = use_v2 ? kRaftBatchMarkerV2 : kRaftBatchMarker;
+    const bool use_v3 = has_tag;
+    const bool use_v2 = use_v3 || request_has_assigned_det_seq(req);
+    const char* marker = use_v3 ? kRaftBatchMarkerV3
+                       : (use_v2 ? kRaftBatchMarkerV2 : kRaftBatchMarker);
     size_t sz = sizeof(uint32_t) + ::strlen(marker) +
                 sizeof(int32_t) + sizeof(uint32_t);
     for (size_t i = 0; i < items.size(); ++i) {
@@ -292,6 +334,10 @@ nuraft::ptr<nuraft::buffer> build_raft_request_log(const client_api_request& req
         if (use_v2) {
             sz += sizeof(uint8_t);
             sz += sizeof(uint64_t);
+        }
+        if (use_v3) {
+            sz += sizeof(uint8_t);
+            if (items[i].has_tx_tag) sz += kTxTagBytes;
         }
     }
 
@@ -307,6 +353,10 @@ nuraft::ptr<nuraft::buffer> build_raft_request_log(const client_api_request& req
             bs.put_u8(items[i].has_assigned_det_seq ? 1 : 0);
             bs.put_u64(items[i].assigned_det_seq);
         }
+        if (use_v3) {
+            bs.put_u8(items[i].has_tx_tag ? 1 : 0);
+            if (items[i].has_tx_tag) bs.put_raw(items[i].tx_tag, kTxTagBytes);
+        }
     }
     return log;
 }
@@ -321,8 +371,10 @@ bool parse_raft_request_log(nuraft::buffer& data,
     try {
         nuraft::buffer_serializer bs(data);
         const std::string first = bs.get_str();
-        if (first == kRaftBatchMarker || first == kRaftBatchMarkerV2) {
-            const bool is_v2 = (first == kRaftBatchMarkerV2);
+        if (first == kRaftBatchMarker || first == kRaftBatchMarkerV2 ||
+            first == kRaftBatchMarkerV3) {
+            const bool is_v3 = (first == kRaftBatchMarkerV3);
+            const bool is_v2 = is_v3 || (first == kRaftBatchMarkerV2);
             out.leader_node_hint = bs.get_i32();
             const uint32_t item_count = bs.get_u32();
             if (item_count == 0 || item_count > kMaxBatchItems) {
@@ -337,6 +389,10 @@ bool parse_raft_request_log(nuraft::buffer& data,
                 if (is_v2) {
                     item.has_assigned_det_seq = (bs.get_u8() != 0);
                     item.assigned_det_seq = bs.get_u64();
+                }
+                if (is_v3 && bs.get_u8() != 0) {
+                    ::memcpy(item.tx_tag, bs.get_raw(kTxTagBytes), kTxTagBytes);
+                    item.has_tx_tag = true;
                 }
                 out.items.push_back(std::move(item));
             }

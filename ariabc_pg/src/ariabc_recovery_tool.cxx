@@ -113,6 +113,8 @@ int main(int argc, char** argv) {
                   << " full_copies=" << st.full_table_copies
                   << " mismatched_partitions=" << st.mismatched_partitions
                   << " differing_leaves=" << st.differing_leaves
+                  << " descent_levels=" << st.descent_levels
+                  << " nodes_compared=" << st.nodes_compared
                   << " candidate_rows=" << st.candidate_rows
                   << " rows_deleted=" << st.rows_deleted
                   << " rows_upserted=" << st.rows_upserted

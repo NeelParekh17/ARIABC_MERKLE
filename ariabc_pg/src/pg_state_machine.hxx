@@ -8,12 +8,15 @@
 #include <atomic>
 #include <condition_variable>
 #include <map>
+#include <memory>
 #include <thread>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace ariabc_pg {
+
+class blake3_tx_signer;
 
 /*
  * F1: per-Raft-entry completion tracker.
@@ -103,15 +106,35 @@ public:
         return executor_.wait_for_admission_drain(max_wait_ns);
     }
 
+    /*
+     * Request tag verification (keyed BLAKE3, see blake3_tx_signer.hxx).
+     * When required, every ordered item must carry a tag that verifies under
+     * the configured key; otherwise its SQL is replaced by a fixed failing
+     * statement before it reaches the executor.  The decision depends only on
+     * the item bytes in the log entry and the shared key, so every replica
+     * rejects the same items and records the same error result.
+     */
+    bool configure_tx_tag(const std::string& key_file, bool required, std::string& err);
+    bool tx_tag_required() const { return tx_tag_required_; }
+    struct tx_tag_stats {
+        uint64_t verified = 0;
+        uint64_t rejected_missing = 0;
+        uint64_t rejected_mismatch = 0;
+        uint64_t verify_ns = 0;
+    };
+    tx_tag_stats tx_tag_profile() const;
+
     // Bypass-Raft path: directly enqueue a request with a caller-provided
     // monotonic sequence number, skipping Raft log deserialization.
-    void direct_enqueue(const std::string& req_id, const std::string& sql, uint64_t seq) {
-        client_api_request_item item;
-        item.req_id = req_id;
-        item.sql = sql;
-        item.has_assigned_det_seq = true;
-        item.assigned_det_seq = seq;
-        register_result_batch(seq, std::vector<client_api_request_item>{item});
+    void direct_enqueue(client_api_request_item item, uint64_t seq) {
+        std::vector<client_api_request_item> one{std::move(item)};
+        apply_tx_tag_policy(one, seq);
+        client_api_request_item& tagged = one.front();
+        tagged.has_assigned_det_seq = true;
+        tagged.assigned_det_seq = seq;
+        const std::string req_id = tagged.req_id;
+        const std::string sql = tagged.sql;
+        register_result_batch(seq, one);
         {
             std::lock_guard<std::mutex> lk(tracker_mu_);
             entry_tracker_record& rec = entry_tracker_[seq];
@@ -127,8 +150,9 @@ public:
         executor_.enqueue_batch(req_ids, sqls, -1, seq, "", {}, assigned_det_seqs,
                                 assigned_det_seq_valid);
     }
-    void direct_enqueue_batch(const std::vector<client_api_request_item>& items, uint64_t first_seq) {
+    void direct_enqueue_batch(std::vector<client_api_request_item> items, uint64_t first_seq) {
         if (items.empty()) return;
+        apply_tx_tag_policy(items, first_seq);
         const uint64_t last_seq = first_seq + static_cast<uint64_t>(items.size() - 1);
         register_result_batch(last_seq, items);
         {
@@ -282,6 +306,8 @@ private:
      */
     void maybe_advance_prefix_locked();
 
+    void apply_tx_tag_policy(std::vector<client_api_request_item>& items, uint64_t entry_idx);
+
     /* Existing commit body; caller holds commit_mu_. */
     nuraft::ptr<nuraft::buffer> commit_apply_locked(uint64_t log_idx, nuraft::buffer& data);
     void commit_noop_locked(uint64_t log_idx);
@@ -384,6 +410,13 @@ private:
     std::mutex committed_det_seq_mu_;
     bool committed_det_seq_initialized_ = false;
     uint64_t next_committed_det_seq_ = 0;
+
+    std::unique_ptr<blake3_tx_signer> tx_tag_signer_;
+    bool tx_tag_required_ = false;
+    std::atomic<uint64_t> tx_tag_verified_{0};
+    std::atomic<uint64_t> tx_tag_rejected_missing_{0};
+    std::atomic<uint64_t> tx_tag_rejected_mismatch_{0};
+    std::atomic<uint64_t> tx_tag_verify_ns_{0};
 };
 
 } // namespace ariabc_pg

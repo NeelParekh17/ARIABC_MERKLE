@@ -643,6 +643,7 @@ bool pg_state_machine::cmd_recover(const std::map<std::string, std::string>& arg
       << " full_copies=" << rs.full_table_copies
       << " mismatched_partitions=" << rs.mismatched_partitions
       << " differing_leaves=" << rs.differing_leaves
+      << " descent_levels=" << rs.descent_levels << " nodes_compared=" << rs.nodes_compared
       << " candidate_rows=" << rs.candidate_rows
       << " rows_deleted=" << rs.rows_deleted << " rows_upserted=" << rs.rows_upserted
       << " localise_us=" << rs.localise_us << " transfer_us=" << rs.transfer_us

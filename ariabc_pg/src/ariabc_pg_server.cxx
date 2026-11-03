@@ -1,4 +1,5 @@
 #include "pg_state_machine.hxx"
+#include "blake3_tx_signer.hxx"
 #include "wire_protocol.hxx"
 
 #include "ariabc_pg_util.hxx"
@@ -372,6 +373,10 @@ struct server_options {
     // Commit B2: cluster epoch as 64-char lowercase hex (32 bytes)
     std::string raft_epoch_hex;
 
+    // Request tag verification: auto (require when a key file resolves), require, off.
+    std::string tx_tag_verify = "auto";
+    std::string tx_tag_key_file;
+
     db_options db;
     kafka_options kafka;
 };
@@ -389,7 +394,10 @@ void usage(const char* argv0) {
         << "    [--raft-storage-mode <in_memory|durable>]\n"
         << "    [--raft-storage-dir <path>]\n"
         << "    [--raft-apply-ledger off|safe]   # B1: safe-mode ledger gate\n"
-        << "    [--raft-epoch-hex <64-hex-chars>] # B2: cluster epoch identifier\n";
+        << "    [--raft-epoch-hex <64-hex-chars>] # B2: cluster epoch identifier\n"
+        << "    [--txTagVerify auto|require|off] [--txTagKeyFile <path>]\n"
+        << "        # keyed BLAKE3 request tags; key file = 64 hex chars; default path\n"
+        << "        # $ARIABC_TX_TAG_KEY_FILE, else ~/.ariabc/tx_tag.key\n";
 }
 
 bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
@@ -450,6 +458,10 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.raft_apply_ledger_mode = need("--raft-apply-ledger");
             } else if (a == "--raft-epoch-hex") {
                 opt.raft_epoch_hex = need("--raft-epoch-hex");
+            } else if (a == "--txTagVerify") {
+                opt.tx_tag_verify = need("--txTagVerify");
+            } else if (a == "--txTagKeyFile") {
+                opt.tx_tag_key_file = need("--txTagKeyFile");
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -534,6 +546,15 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                     return false;
                 }
             }
+        }
+    }
+    {
+        const char* env_verify = std::getenv("ARIABC_TX_TAG_VERIFY");
+        if (env_verify && *env_verify) opt.tx_tag_verify = env_verify;
+        const std::string& tv = opt.tx_tag_verify;
+        if (tv != "auto" && tv != "require" && tv != "off") {
+            err = "invalid --txTagVerify '" + tv + "' (expected auto, require or off)";
+            return false;
         }
     }
     opt.db.raft_apply_ledger_mode = opt.raft_apply_ledger_mode;
@@ -740,12 +761,7 @@ client_api_request coalesce_raft_ordered_entries(
                                    entry->req.batch_items.begin(),
                                    entry->req.batch_items.end());
         } else {
-            client_api_request_item item;
-            item.req_id = entry->req.req_id;
-            item.sql = entry->req.sql;
-            item.has_assigned_det_seq = entry->req.has_assigned_det_seq;
-            item.assigned_det_seq = entry->req.assigned_det_seq;
-            out.batch_items.push_back(std::move(item));
+            out.batch_items.push_back(request_as_item(entry->req));
         }
     }
     return out;
@@ -1438,7 +1454,7 @@ void direct_enqueue_to_state_machine(pg_state_machine* psm,
     if (req.is_batch()) {
         psm->direct_enqueue_batch(req.batch_items, first_seq);
     } else {
-        psm->direct_enqueue(req.req_id, req.sql, first_seq);
+        psm->direct_enqueue(request_as_item(req), first_seq);
     }
 }
 
@@ -1724,6 +1740,8 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
     pg_executor_stats exec;
     kafka_producer_stats kprod;
     pg_state_machine::result_tracker_profile result_prof;
+    pg_state_machine::tx_tag_stats tx_tag;
+    bool tx_tag_required = false;
     if (sm) {
         // Safe in this example: we construct this concrete state machine.
         pg_state_machine* psm = dynamic_cast<pg_state_machine*>(sm.get());
@@ -1731,6 +1749,8 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
             exec = psm->executor_stats();
             kprod = psm->kafka_stats();
             result_prof = psm->result_profile();
+            tx_tag = psm->tx_tag_profile();
+            tx_tag_required = psm->tx_tag_required();
         }
     }
 
@@ -1752,6 +1772,11 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " append_stall_ms=" << (g_prof.append_stall_ns.load(std::memory_order_relaxed) / 1000000.0)
         << " append_stall_max_ms=" << (g_prof.append_stall_max_ns.load(std::memory_order_relaxed) / 1000000.0)
         << " append_stall_reason_admission=" << g_prof.append_stall_admission.load(std::memory_order_relaxed)
+        << " tx_tag_verify=" << (tx_tag_required ? "require" : "off")
+        << " tx_tag_verified=" << tx_tag.verified
+        << " tx_tag_rejected_missing=" << tx_tag.rejected_missing
+        << " tx_tag_rejected_mismatch=" << tx_tag.rejected_mismatch
+        << " tx_tag_verify_ms=" << (tx_tag.verify_ns / 1000000.0)
         << " req_id_map_size_current=" << result_prof.req_id_map_size_current
         << " req_id_map_size_max=" << result_prof.req_id_map_size_max
         << " result_token_map_size_current=" << result_prof.result_token_map_size_current
@@ -2079,6 +2104,28 @@ int main(int argc, char** argv) {
     // State machine (always needed: owns pg_executor + Kafka publisher).
     ptr<state_machine> sm =
         cs_new<ariabc_pg::pg_state_machine>(opt.id, opt.db, opt.kafka);
+
+    // Request tags must be configured before the first commit()/direct enqueue.
+    {
+        ariabc_pg::pg_state_machine* psm =
+            dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
+        const std::string key_file = ariabc_pg::resolve_tx_tag_key_file(opt.tx_tag_key_file);
+        const bool require = opt.tx_tag_verify == "require" ||
+                             (opt.tx_tag_verify == "auto" && !key_file.empty());
+        std::string tag_err;
+        if (!psm || !psm->configure_tx_tag(key_file, require, tag_err)) {
+            std::cerr << "TX_TAG_CONFIG_FAILED: " << tag_err << std::endl;
+            return 1;
+        }
+        if (require) {
+            std::cout << "TX_TAG_VERIFY=require key_file=" << key_file << std::endl;
+        } else {
+            std::cout << "TX_TAG_VERIFY=off"
+                      << (opt.tx_tag_verify == "off" ? " (disabled by flag)"
+                                                     : " (WARNING: no key file found)")
+                      << std::endl;
+        }
+    }
 
     if (opt.db.db_type == 1 && opt.db.raft_apply_ledger_mode != "safe") {
         ariabc_pg::pg_state_machine* psm =

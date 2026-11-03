@@ -255,7 +255,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     FAILPOINT_NODE_ID FAILPOINT_ENV FAILPOINT_RAFT_LOG_INDEX FAILPOINT_ITEM_ORDINAL \
     ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE \
     ARIABC_PHASE3_INVOCATION_ID \
-    TX_SIGN ARIABC_TX_SIGN \
+    TX_SIGN ARIABC_TX_SIGN TX_TAG_VERIFY \
     RECOVERY_MODE RECOVERY_INTERVAL_MS RECOVERY_DB_PORT RECOVERY_TABLE RECOVERY_NODES \
     INJECT_FAULT_NODE INJECT_FAULT_COUNT INJECT_FAULT_TYPE INJECT_FAULT_DELAY_SEC \
     ARIABC_RECOVERY_COMPARE_MARGIN ARIABC_RECOVERY_REPLAY_WINDOW ARIABC_RECOVERY_CATCHUP_WAIT_MS \
@@ -547,6 +547,10 @@ SKIP_WORKLOAD="${SKIP_WORKLOAD:-0}"          # 1=start cluster and leader only; 
 KAFKA_FAST_RESET="${KAFKA_FAST_RESET:-1}"    # 1=fast Kafka reset (skip JVM console consumer smoke check)
 DUMP_VERIFY_CSV="${DUMP_VERIFY_CSV:-0}"      # 0=skip slow 2.7MB CSV dump; use cryptographic root and row count
 TX_SIGN="${TX_SIGN:-${ARIABC_TX_SIGN:-blake3}}" # blake3|1=sign txs with blake3; 0|off=disable tx signing
+# Replicas verify the gateway's request tags before execution. Default follows
+# TX_SIGN: require when the gateway tags, off when it does not. The key file is
+# ~/.ariabc/tx_tag.key on every node and on the gateway host (64 hex chars).
+TX_TAG_VERIFY="${TX_TAG_VERIFY:-}"
 
 # ===========================================================================
 # Function: usage
@@ -835,6 +839,7 @@ while [[ $# -gt 0 ]]; do
     --txSign)       TX_SIGN="${2:-}"; shift 2 ;;
     --enable-tx-sign) TX_SIGN="${2:-}"; shift 2 ;;
     --no-tx-sign)   TX_SIGN="0"; shift ;;
+    --tx-tag-verify) TX_TAG_VERIFY="${2:-}"; shift 2 ;;
     --no-kafka)     NO_KAFKA=1; shift ;;
     --node-ids) NODE_IDS_CSV="${2:-}"; shift 2 ;;
     --node-ips) NODE_IPS_CSV="${2:-}"; shift 2 ;;
@@ -940,6 +945,14 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+if [[ -z "$TX_TAG_VERIFY" ]]; then
+  case "$TX_SIGN" in
+    0|off|none|false|no|disable|disabled) TX_TAG_VERIFY=off ;;
+    *) TX_TAG_VERIFY=require ;;
+  esac
+fi
+[[ "$TX_TAG_VERIFY" == require || "$TX_TAG_VERIFY" == off ]] || die "--tx-tag-verify must be require or off"
 
 apply_topology_overrides
 
@@ -1995,6 +2008,7 @@ log "Cluster ordering mode: $ORDERING_MODE (ordering_path=$ORDERING_PATH, bypass
   printf 'raft_epoch_hex=%s\n' "$RAFT_EPOCH_HEX"
   printf 'skip_workload=%s\n' "$SKIP_WORKLOAD"
   printf 'tx_sign=%s\n' "$TX_SIGN"
+  printf 'tx_tag_verify=%s\n' "$TX_TAG_VERIFY"
   printf 'phase3_invocation_id=%s\n' "${ARIABC_PHASE3_INVOCATION_ID:-}"
 } > "$LOG_DIR/run_meta.env"
 
@@ -3833,6 +3847,7 @@ for start_pos in "${!START_ORDER[@]}"; do
       --raft-cluster-id $RAFT_CLUSTER_ID \
       --raft-apply-ledger $RAFT_APPLY_LEDGER_MODE \
       --raft-epoch-hex \"$RAFT_EPOCH_HEX\" \
+      --txTagVerify $TX_TAG_VERIFY \
       $KAFKA_ARGS \
       >>'$REMOTE_SRV_LOG' 2>&1 &
     echo \"started pid=\$!\"
@@ -3934,6 +3949,14 @@ fi
 if [[ "$ALL_UP" -eq 1 ]]; then
   phase_marker "PHASE_5_CLUSTER_READY"
 fi
+
+# Every replica must report the request-tag mode this run expects.
+for idx in "${!NODE_IDS[@]}"; do
+  id="${NODE_IDS[$idx]}"
+  tag_line="$(node_ssh "$idx" "grep -E '^TX_TAG_VERIFY=' '$REMOTE_LOG_DIR/server_node${id}.log' 2>/dev/null | tail -1" 2>/dev/null || true)"
+  log "  node${id}: ${tag_line:-TX_TAG_VERIFY line missing}"
+  [[ "$tag_line" == "TX_TAG_VERIFY=$TX_TAG_VERIFY"* ]] || die "node${id} request-tag mode '${tag_line}' != expected '$TX_TAG_VERIFY'"
+done
 
 # ---------------------------------------------------------------------------
 # Phase 6: Gateway test
@@ -4230,6 +4253,7 @@ if [[ "$PARALLELISM_MODE" == "pipeline" ]]; then
     --clientId "cluster-ycsb" \
     --numTerminals "$NUM_TERMINALS" \
     --connFanout "$CONN_FANOUT" \
+    --txSign "$TX_SIGN" \
     --raft-epoch-hex "$RAFT_EPOCH_HEX" \
     --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
     --txLatencyCsv "$LOG_DIR/tx_latency.csv" \
@@ -4399,6 +4423,7 @@ else
       --clientId "cluster-ycsb-shard${s}" \
       --numTerminals 1 \
       --connFanout 1 \
+      --txSign "$TX_SIGN" \
       --raft-epoch-hex "$RAFT_EPOCH_HEX" \
       --raft-apply-ledger "$RAFT_APPLY_LEDGER_MODE" \
       --txLatencyCsv "$LOG_DIR/tx_latency_shard${s}.csv" \

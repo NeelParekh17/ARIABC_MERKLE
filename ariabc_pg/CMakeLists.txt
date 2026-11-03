@@ -93,6 +93,18 @@ if(ARIABC_HAVE_KAFKA)
     add_compile_definitions(ARIABC_HAVE_RDKAFKA)
 endif()
 
+# Request tags: the gateway signs and the server's state machine verifies.
+set(BLAKE3_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3.c
+    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3_dispatch.c
+    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3_portable.c)
+
+set_source_files_properties(${BLAKE3_SOURCES} PROPERTIES
+    COMPILE_DEFINITIONS "BLAKE3_NO_SSE2;BLAKE3_NO_SSE41;BLAKE3_NO_AVX2;BLAKE3_NO_AVX512")
+
+set(BLAKE3_INCLUDES
+    ${CMAKE_CURRENT_LIST_DIR}/../src/common)
+
 if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
     add_executable(ariabc_pg_server
                    src/ariabc_pg_server.cxx
@@ -105,11 +117,13 @@ if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
                    src/raft_storage_common.cxx
                    src/durable_state_mgr.cxx
                    src/durable_log_store.cxx
-                   ${ARIABC_COMMON_SRC})
+                   ${ARIABC_COMMON_SRC}
+                   ${BLAKE3_SOURCES})
 
     target_include_directories(ariabc_pg_server
                               PRIVATE
                                 ${ARIABC_COMMON_INC}
+                                ${BLAKE3_INCLUDES}
                                 ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                                 ${LIBPQ_INCLUDE_DIR}
                                 ${POSTGRES_INCLUDE_DIR}
@@ -126,17 +140,6 @@ if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
 else()
     message(WARNING "libpq not found (libpq-fe.h / -lpq). Skipping ariabc_pg_server build.")
 endif()
-
-set(BLAKE3_SOURCES
-    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3.c
-    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3_dispatch.c
-    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3_portable.c)
-
-set_source_files_properties(${BLAKE3_SOURCES} PROPERTIES
-    COMPILE_DEFINITIONS "BLAKE3_NO_SSE2;BLAKE3_NO_SSE41;BLAKE3_NO_AVX2;BLAKE3_NO_AVX512")
-
-set(BLAKE3_INCLUDES
-    ${CMAKE_CURRENT_LIST_DIR}/../src/common)
 
 add_executable(ariabc_pg_gateway
                src/ariabc_pg_gateway.cxx
@@ -180,15 +183,22 @@ target_link_libraries(ariabc_recovery_tool
 
 add_executable(blake3_tx_sign_test
                tests/blake3_tx_sign_test.cxx
+               src/wire_protocol.cxx
+               src/wire_protocol_async.cxx
                ${BLAKE3_SOURCES})
 
 target_include_directories(blake3_tx_sign_test
                           PRIVATE
                             ${ARIABC_COMMON_INC}
+                            ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                             ${BLAKE3_INCLUDES})
 
+target_compile_definitions(blake3_tx_sign_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
+
 target_link_libraries(blake3_tx_sign_test
+                      NuRaft::static_lib
                       pthread)
+add_test(NAME blake3_tx_sign_test COMMAND blake3_tx_sign_test ${CMAKE_CURRENT_BINARY_DIR})
 
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/wire_protocol_test.cxx")
     add_executable(ariabc_pg_wire_protocol_test
@@ -342,11 +352,13 @@ add_executable(pg_state_machine_test
                src/replica_repair.cxx
                src/pg_executor.cxx
                src/kafka_console.cxx
-               src/wire_protocol.cxx)
+               src/wire_protocol.cxx
+               ${BLAKE3_SOURCES})
 
 target_include_directories(pg_state_machine_test
                             PRIVATE
                               ${ARIABC_COMMON_INC}
+                              ${BLAKE3_INCLUDES}
                               ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                               ${LIBPQ_INCLUDE_DIR}
                               ${POSTGRES_INCLUDE_DIR}
@@ -381,11 +393,13 @@ add_executable(durable_raft_pg_apply_contract_test
                src/durable_state_mgr.cxx
                src/durable_log_store.cxx
                src/logger.cc
-               src/in_memory_log_store.cxx)
+               src/in_memory_log_store.cxx
+               ${BLAKE3_SOURCES})
 
 target_include_directories(durable_raft_pg_apply_contract_test
                             PRIVATE
                               ${ARIABC_COMMON_INC}
+                              ${BLAKE3_INCLUDES}
                               ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                               ${LIBPQ_INCLUDE_DIR}
                               ${POSTGRES_INCLUDE_DIR}

@@ -1,6 +1,7 @@
 #include "pg_state_machine.hxx"
 
 #include "ariabc_pg_util.hxx"
+#include "blake3_tx_signer.hxx"
 #include <openssl/sha.h>
 #include <libpq-fe.h>
 
@@ -269,7 +270,95 @@ void validate_assigned_det_seq_or_abort(const client_api_request_item& item,
     }
 }
 
+// A rejected item keeps its ordering prefix ("s " or "s <seq> ") so its slot in
+// the deterministic order is still consumed, and runs a statement that fails
+// identically on every replica.  22012 is the error the ordered worker
+// finalizes deterministically in every ledger mode.
+std::string tx_tag_rejected_sql(const std::string& sql) {
+    static const char kRejectBody[] = "SELECT 1/0 AS ariabc_tx_tag_rejected";
+    const std::string t = trim_copy(sql);
+    if (t.size() < 2 || !(t[0] == 's' || t[0] == 'S') ||
+        !std::isspace(static_cast<unsigned char>(t[1]))) {
+        return kRejectBody;
+    }
+    size_t pos = 2;
+    while (pos < t.size() && std::isspace(static_cast<unsigned char>(t[pos]))) ++pos;
+    const size_t digits_begin = pos;
+    while (pos < t.size() && std::isdigit(static_cast<unsigned char>(t[pos]))) ++pos;
+    if (pos > digits_begin && pos < t.size() &&
+        std::isspace(static_cast<unsigned char>(t[pos]))) {
+        return "s " + t.substr(digits_begin, pos - digits_begin) + " " + kRejectBody;
+    }
+    return std::string("s ") + kRejectBody;
+}
+
+bool tx_tag_log_should_print(uint64_t n) {
+    return n <= 20 || (n % 10000) == 0;
+}
+
 } // namespace
+
+bool pg_state_machine::configure_tx_tag(const std::string& key_file,
+                                        bool required,
+                                        std::string& err) {
+    tx_tag_required_ = false;
+    tx_tag_signer_.reset();
+    if (!required) return true;
+    if (key_file.empty()) {
+        err = "tx tag verification required but no key file configured";
+        return false;
+    }
+    std::unique_ptr<blake3_tx_signer> signer(new blake3_tx_signer());
+    if (!signer->load_key_file(key_file, err)) return false;
+    tx_tag_signer_ = std::move(signer);
+    tx_tag_required_ = true;
+    return true;
+}
+
+pg_state_machine::tx_tag_stats pg_state_machine::tx_tag_profile() const {
+    tx_tag_stats out;
+    out.verified = tx_tag_verified_.load(std::memory_order_relaxed);
+    out.rejected_missing = tx_tag_rejected_missing_.load(std::memory_order_relaxed);
+    out.rejected_mismatch = tx_tag_rejected_mismatch_.load(std::memory_order_relaxed);
+    out.verify_ns = tx_tag_verify_ns_.load(std::memory_order_relaxed);
+    return out;
+}
+
+void pg_state_machine::apply_tx_tag_policy(std::vector<client_api_request_item>& items,
+                                           uint64_t entry_idx) {
+    if (!tx_tag_required_) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < items.size(); ++i) {
+        client_api_request_item& item = items[i];
+        const bool missing = !item.has_tx_tag;
+        if (!missing) {
+            blake3_sig_256 tag;
+            std::memcpy(tag.bytes, item.tx_tag, sizeof(tag.bytes));
+            if (tx_tag_signer_->verify(item.req_id, item.sql, tag)) {
+                tx_tag_verified_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+        }
+        const uint64_t n = missing
+            ? tx_tag_rejected_missing_.fetch_add(1, std::memory_order_relaxed) + 1
+            : tx_tag_rejected_mismatch_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (tx_tag_log_should_print(n)) {
+            std::cerr << "TX_TAG_REJECTED"
+                      << " node=" << node_id_
+                      << " entry=" << entry_idx
+                      << " ord=" << i
+                      << " req_id=" << item.req_id
+                      << " reason=" << (missing ? "missing" : "mismatch")
+                      << " count=" << n
+                      << std::endl;
+        }
+        item.sql = tx_tag_rejected_sql(item.sql);
+    }
+    tx_tag_verify_ns_.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t0).count()),
+        std::memory_order_relaxed);
+}
 
 pg_state_machine::pg_state_machine(int node_id,
                                    const db_options& db_opt,
@@ -405,7 +494,8 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit_apply_locked(uint64_t log_i
 
     raft_request_batch batch;
     std::string parse_err;
-    if (!parse_raft_request_log(data, batch, parse_err)) {
+    const bool parsed = parse_raft_request_log(data, batch, parse_err);
+    if (!parsed) {
         if (db_opt_.raft_apply_ledger_mode == "safe") {
             std::cerr << "pg_state_machine commit parse FAILED at log " << log_idx
                       << " (safe mode): " << parse_err
@@ -440,6 +530,12 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit_apply_locked(uint64_t log_i
         note_item_applied(log_idx, 0);
         nuraft::ptr<nuraft::buffer> ack = nuraft::buffer::alloc(0);
         return ack;
+    }
+
+    // The tag covers the item exactly as the gateway sent it, so check it
+    // before the leader-assigned rewrite below changes the det-seq prefix.
+    if (parsed) {
+        apply_tx_tag_policy(batch.items, static_cast<uint64_t>(log_idx));
     }
 
     const bool leader_assigned = state_machine_leader_assigned_ordering_enabled();

@@ -1,164 +1,112 @@
-Ran command: `graphify query "modulo hash xor"`
-Ran command: `graphify query "AdHash addition modulo"`
-Viewed COMBINE_SITES.md:1-39
-Ran command: `find Final_Results/OOM_100M/adhash_20261012 -type f`
-Viewed README.md:1-56
-Viewed CORRECTNESS.md:1-100
-Viewed merkleutil.c:310-370
-Ran command: `git log -n 1 6b19ff92 --stat`
-Ran command: `git log -n 1 6a1c66d6`
-Ran command: `git show --stat 6a1c66d6`
-Viewed README_MERKLE.md:1-100
-Viewed README_MERKLE.md:101-200
-Viewed README_MERKLE.md:201-235
-Viewed replica_repair.cxx:670-715
-Viewed remote_db.py:125-165
-Viewed remote_db.py:190-250
-Viewed merkledelta.c:165-210
-Viewed merkledelta.c:211-240
-Viewed shm_transaction.c:3075-3110
-Viewed shm_transaction.c:3250-3290
-Viewed shm_transaction.c:3360-3430
-Viewed merkle.h:20-60
-Viewed merkle.h:61-120
+Ran command: `graphify query "gateway leader assigned mode sequencer raft flags"`
+Ran command: `graphify query "ariabc_pg gateway leader assigned mode"`
+Ran command: `graphify query "gateway_mode"`
+Listed directory ariabc_pg
+Listed directory src
+Viewed ARIABC_PG_ARCHITECTURE.md:1-100
+Viewed ARIABC_PG_ARCHITECTURE.md:101-200
+Viewed ARIABC_PG_ARCHITECTURE.md:201-300
+Viewed ARIABC_PG_ARCHITECTURE.md:301-407
+Searched for "bypassRaft"
+Searched for "bypassRaft"
+Searched for "broadcast"
+Viewed ariabc_pg_gateway.cxx:145-185
+Viewed ariabc_pg_gateway.cxx:210-240
+Searched for "ordering-mode"
+Viewed run_4node_raft_cluster.sh:20-60
+Searched for "ORDERING_MODE"
+Viewed run_4node_raft_cluster.sh:1180-1230
+Searched for "BYPASS_RAFT"
+Searched for "GATEWAY_BROADCAST_TO_ALL"
+Viewed run_4node_raft_cluster.sh:4070-4115
+Viewed run_4node_raft_cluster.sh:3835-3880
+Searched for "ordering_mode"
+Searched for "ordering-mode"
+Searched for "bypass"
+Viewed run_all_modes_gateway_sweep.py:880-945
+Searched for "ARIABC_RAFT_ORDERING_POLICY"
+Viewed ariabc_pg_server.cxx:285-325
+Searched for "raft_leader_assigned_ordering_enabled"
+Viewed ariabc_pg_server.cxx:990-1040
+Viewed ariabc_pg_server.cxx:1040-1070
+Searched for "detStartSeq"
+Searched for "format_deterministic"
+Searched for "det_start_seq"
+Viewed ariabc_pg_gateway.cxx:5415-5450
+Viewed ariabc_pg_gateway.cxx:6265-6300
+Searched for "leader_assigned"
+Viewed pg_state_machine.cxx:530-570
+Searched for "bypass_raft"
+Viewed ariabc_pg_server.cxx:1570-1620
+Viewed ariabc_pg_server.cxx:1620-1680
+Viewed ariabc_pg_server.cxx:1681-1750
+Viewed ariabc_pg_server.cxx:2130-2170
+Searched for "direct_enqueue_ordered"
+Viewed ariabc_pg_server.cxx:1461-1520
+Searched for "RAFT_ORDERING_POLICY"
+Viewed run_4node_raft_cluster.sh:1235-1255
 
-### Executive Summary
+Yes, **it is completely possible and already implemented in AriaBC**.
 
-In AriaBC, the Merkle tree and partition root digest computation transitioned from **bitwise XOR ($\oplus$)** to **unsigned little-endian addition modulo $2^{256}$ (AdHash)** (introduced in commit `6a1c66d6`, merged in commit `6b19ff92`). 
-
-While the historical C/SQL function name [`merkle_hash_xor()`](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleutil.c#L321-L334) and struct member names like `xor_delta` were retained to avoid wide code churn, **the underlying arithmetic was replaced entirely with 256-bit addition with byte carry, paired with two's complement negation for deletions.**
-
----
-
-### 1. Why Was XOR Replaced? The Pair-Cancellation Flaw
-
-In the earlier architecture (`MERKLE_VERSION 10`), node and root hashes were combined using bitwise XOR:
-$$\text{Digest} = h(r_1) \oplus h(r_2) \oplus \dots \oplus h(r_n)$$
-
-Because XOR is self-inverting ($x \oplus x = 0$):
-* **Identical rows cancelled out in pairs:** In tables without a unique constraint or primary key, if a table had two identical rows $\{r, r\}$, their BLAKE3 hashes satisfied:
-  $$h(r) \oplus h(r) = 0$$
-* A table containing $\{r, r\}$ hashed to the exact same Merkle root as an **empty table** $\{\}$.
-* Similarly, three duplicate rows $\{r, r, r\}$ hashed identically to a single row $\{r\}$.
-* This created severe false-equality vulnerabilities in replica consistency checks and Merkle verification on tables with duplicate records.
-
----
-
-### 2. What Addition Modulo $2^{256}$ (AdHash) Does
-
-To solve this without breaking multiset order-independence, the system adopted **AdHash** over the abelian group $(\mathbb{Z}_{2^{256}}, +)$:
-$$\text{Digest} = \left( \sum_{i=1}^{n} h(r_i) \right) \pmod{2^{256}}$$
-
-1. **Order Independence:** Addition is commutative ($A + B = B + A$) and associative, so row insertion order does not affect the final Merkle root.
-2. **Duplicate-Sensitive:** Identical rows now accumulate rather than cancelling:
-   $$h(r) + h(r) = 2 \cdot h(r) \pmod{2^{256}} \neq 0$$
-   Multiplicity is preserved modulo $2^{256}$.
-3. **Constant-Time Incremental Updates & Deletions:** Deleting an element is equivalent to adding its additive inverse (two's complement negation $-h \pmod{2^{256}}$), and updates can be staged as a direct delta $(\text{new} - \text{old})$.
+In AriaBC, this execution path is known as the **"kafka-only" / "bypass-Raft" / "preordered direct broadcast"** mode.
 
 ---
 
-### 3. Core Engine Implementation
+### 1. How Ordering Works: Leader-Assigned vs. Preassigned
 
-Each hash is a 32-byte array (`uint8 data[32]`) interpreted as an unsigned 256-bit integer in little-endian byte order.
+* **Leader-Assigned Mode** (`--raft-ordering-policy leader-assigned`):
+  The gateway submits unsequenced queries (`s <SQL>`), and the **Raft leader/server state machine** assigns deterministic sequences in Raft commit delivery order, rewriting queries to `s <assigned_seq> <SQL>`.
+* **Preassigned Mode** (`--dbType 1` with `--detStartSeq`):
+  The **gateway determines the deterministic execution order upfront** and prefixes each statement with an 8-digit sequence (`s 00000001 <SQL>`).
 
-#### 3.1 256-Bit Addition: [`merkle_hash_xor()`](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleutil.c#L321-L334)
-In [src/backend/access/merkle/merkleutil.c](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleutil.c#L321-L334), [`merkle_hash_xor()`](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleutil.c#L321-L334) computes:
-$$\text{dest} = (\text{dest} + \text{src}) \pmod{2^{256}}$$
+When you want to **skip Raft consensus entirely and determine the order earlier**, the gateway acts as the centralized sequencer and broadcasts the pre-ordered stream directly to the replica nodes.
 
-```c
-void
-merkle_hash_xor(MerkleHash *dest, const MerkleHash *src)
-{
-    unsigned int carry = 0;
-    int i;
+---
 
-    for (i = 0; i < MERKLE_HASH_BYTES; i++) /* 32 bytes */
-    {
-        unsigned int sum = (unsigned int) dest->data[i] + src->data[i] + carry;
+### 2. Available Flags
 
-        dest->data[i] = (uint8) sum;
-        carry = sum >> 8;
-    }
-    /* Final carry past byte 31 is discarded, giving modulo 2^256 */
-}
+Depending on whether you run via the cluster runner script or invoke the binaries directly, the relevant flags are:
+
+#### A. In Cluster Scripts ([`run_4node_raft_cluster.sh`](file:///work/ARIABC/AriaBC/scripts/distributed/run_4node_raft_cluster.sh#L1187-L1192))
+The high-level flag to skip Raft is:
+```bash
+./scripts/distributed/run_4node_raft_cluster.sh --ordering-mode kafka-only
 ```
-
-#### 3.2 Two's Complement Negation: [`merkle_hash_negate()`](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleutil.c#L337-L350)
-Subtraction is performed by computing the two's complement: $-h \equiv (\sim h) + 1 \pmod{2^{256}}$:
-
-```c
-void
-merkle_hash_negate(MerkleHash *hash)
-{
-    unsigned int carry = 1; /* + 1 for two's complement */
-    int i;
-
-    for (i = 0; i < MERKLE_HASH_BYTES; i++)
-    {
-        unsigned int sum = (unsigned int) (hash->data[i] ^ 0xff) + carry;
-
-        hash->data[i] = (uint8) sum;
-        carry = sum >> 8;
-    }
-}
-```
+Setting `--ordering-mode kafka-only` automatically:
+1. Sets `BYPASS_RAFT=1` on all server nodes.
+2. Sets `GATEWAY_BROADCAST_TO_ALL=1` on the gateway.
+3. Sets `ORDERING_PATH="preordered_direct_broadcast"`.
 
 ---
 
-### 4. How Database Operations (INSERT, DELETE, UPDATE) Work
+#### B. Direct Binary Flags
 
-The addition modulo model flows through the transaction delta staging pipeline in [src/backend/access/merkle/merkledelta.c](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkledelta.c#L210-L228):
+##### 1. On `ariabc_pg_server` ([`ariabc_pg_server.cxx`](file:///work/ARIABC/AriaBC/ariabc_pg/src/ariabc_pg_server.cxx#L2138-L2169))
+* **`--bypassRaft 1`**:
+  * Skips NuRaft initialization and Raft consensus altogether.
+  * Launches the direct TCP client handler ([`handle_client_fd_direct`](file:///work/ARIABC/AriaBC/ariabc_pg/src/ariabc_pg_server.cxx#L2166)).
+  * Uses [`direct_enqueue_ordered()`](file:///work/ARIABC/AriaBC/ariabc_pg/src/ariabc_pg_server.cxx#L1461-L1509) to parse the preassigned sequence range (`first_seq` .. `last_seq`) sent by the gateway, queues them locally in a `direct_orderer`, and feeds them straight into the database executor ([`pg_state_machine`](file:///work/ARIABC/AriaBC/ariabc_pg/src/pg_state_machine.cxx) / [`pg_executor`](file:///work/ARIABC/AriaBC/ariabc_pg/src/pg_executor.cxx)).
 
-* **INSERT:**
-  Supplies the positive 32-byte BLAKE3 row hash $+h$ and $+1$ tuple count.
-  $$\Delta_{\text{hash}} = +h, \quad \Delta_{\text{count}} = +1$$
-* **DELETE:**
-  The caller provides the positive old row hash. Staging negates it once using [`merkle_hash_negate()`](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleutil.c#L337-L350) to produce $-h$, and adds it to the staged accumulator:
-  $$\Delta_{\text{hash}} = -h, \quad \Delta_{\text{count}} = -1$$
-* **UPDATE:**
-  * **Same Leaf / Same Route:** Handled in [`apply_optim_update()`](file:///work/ARIABC/AriaBC/src/backend/bcdb/shm_transaction.c#L3382-L3390) by calculating $(\text{new} - \text{old})$:
-    ```c
-    MerkleHash delta = oldHash;
-    merkle_hash_negate(&delta);           /* -old */
-    merkle_hash_xor(&delta, &newHash);   /* (-old) + new = new - old */
-    merkle_stage_delta_event(..., MERKLE_DELTA_UPDATE_SAME_LEAF, ..., &delta);
-    ```
-    This updates the leaf in a single operation with $\Delta_{\text{count}} = 0$.
-  * **Cross Leaf / Route Move:** Staged as a paired DELETE of old hash ($-h_{\text{old}}$) and INSERT of new hash ($+h_{\text{new}}$).
-* **Transaction Rollback:**
-  Because deltas are kept in sub-transaction memory frames until commit, an abort simply frees the frame; no complex undo replay or reverse arithmetic is required.
+##### 2. On `ariabc_pg_gateway` ([`ariabc_pg_gateway.cxx`](file:///work/ARIABC/AriaBC/ariabc_pg/src/ariabc_pg_gateway.cxx#L157-L177))
+* **`--dbType 1` & `--detStartSeq <n>`**:
+  * Tells the gateway to pre-assign deterministic sequences monotonically to all SQL statements (`s <seq> <SQL>`) before sending.
+* **`--broadcastToAll 1`**:
+  * Tells the gateway to broadcast each ordered request directly to every server replica in the cluster (instead of searching for and sending only to the Raft leader).
+* **Quorum & Pipelining Controls**:
+  * `--broadcastAcceptQuorum <n>`: The number of replica accept responses the gateway waits for before pipelining subsequent requests (e.g., `1` for fast pipelining, or a majority).
+  * `--broadcastResultQuorum <n>`: For direct completion mode, the number of replicas required to finish executing the batch before marking it complete.
+  * `--broadcastDrainInTimedRun 0|1`: Whether to include the final late-accept drain in the reported workload wall time.
+  * `--completionPath direct|kafka_majority`: Choose between waiting for direct server execution ACKs or Kafka result topic consensus.
 
 ---
 
-### 5. Cross-Subsystem Consistency
+### Summary Architecture Comparison
 
-Every component across the stack uses identical little-endian 256-bit modular addition:
-
-1. **PostgreSQL C Engine:**
-   * [`merkle_hash_xor()`](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleutil.c#L321-L334) and [`merkle_hash_negate()`](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleutil.c#L337-L350) in `merkleutil.c`.
-   * Dynamic split/merge logic in [merkleapply.c](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleapply.c) aggregates child buckets and ancestor sums using addition.
-   * Internal verification ([`merkle_verify`](file:///work/ARIABC/AriaBC/src/backend/access/merkle/merkleverify.c)) computes heap sums and compares them with partition root sums.
-2. **C++ Server / Replica Repair ([replica_repair.cxx](file:///work/ARIABC/AriaBC/ariabc_pg/src/replica_repair.cxx#L687-L703)):**
-   [`compute_merkle_digest()`](file:///work/ARIABC/AriaBC/ariabc_pg/src/replica_repair.cxx#L678-L707) aggregates 32-byte partition root hashes into the table digest via a byte accumulator with carry:
-   ```cpp
-   unsigned int carry = 0;
-   for (size_t i = 0; i < acc.size(); ++i) {
-       const unsigned int sum = static_cast<unsigned int>(acc[i]) + h[i] + carry;
-       acc[i] = static_cast<uint8_t>(sum);
-       carry = sum >> 8;
-   }
-   ```
-3. **Python Orchestrator ([remote_db.py](file:///work/ARIABC/AriaBC/scripts/distributed/recovery/remote_db.py#L195-L201)):**
-   Computes root digests in Python using native arbitrary-precision arithmetic:
-   ```python
-   accumulator = (accumulator + int.from_bytes(h, "little")) % (1 << 256)
-   root_hex = accumulator.to_bytes(32, "little").hex()
-   ```
-
----
-
-### 6. Version Guard & Performance
-
-* **Format Barrier:** [`MERKLE_VERSION`](file:///work/ARIABC/AriaBC/src/include/access/merkle.h#L105) was bumped to **11** (format 10 was XOR). Old format 10 indexes are refused by the engine with SQLSTATE `XX002` and an instruction to run `REINDEX` or `SELECT merkle_rebuild_legacy_indexes()`.
-* **Zero Performance Cost:** As documented in the [OOM 100M campaign results](file:///work/ARIABC/AriaBC/Final_Results/OOM_100M/adhash_20261012/README.md), the 256-bit addition loop has virtually zero overhead compared to XOR:
-  * Across 28 benchmark points (84 Merkle trials), the median AdHash / XOR TPS ratio was **1.003** (21 of 28 points were within $\pm 1\%$).
+| Feature | Raft-Kafka Mode (`--ordering-mode raft-kafka`) | Bypass-Raft Broadcast (`--ordering-mode kafka-only`) |
+|---|---|---|
+| **Ordering Source** | Raft consensus log / Raft leader | Gateway preassigned sequence (`--dbType 1`) |
+| **Replication Path** | NuRaft log replication among servers | Gateway broadcast (`--broadcastToAll 1`) |
+| **Server Engine** | Raft state machine commit delivery | Direct queue ([`direct_enqueue_ordered`](file:///work/ARIABC/AriaBC/ariabc_pg/src/ariabc_pg_server.cxx#L1461)) |
+| **Consensus Overhead** | Raft leader election, RPCs, disk/log flush | **None (Zero Raft overhead)** |
+| **Server Flag** | `--bypassRaft 0` | `--bypassRaft 1` |
+| **Gateway Flag** | `--broadcastToAll 0` (sends to leader) | `--broadcastToAll 1` |

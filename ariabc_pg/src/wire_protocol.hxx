@@ -9,11 +9,16 @@
 
 namespace ariabc_pg {
 
+// Keyed BLAKE3 request tag (see blake3_tx_signer.hxx), carried opaquely here.
+const size_t kTxTagBytes = 32;
+
 struct client_api_request_item {
     std::string req_id;
     std::string sql;
     bool has_assigned_det_seq = false;
     uint64_t assigned_det_seq = 0;
+    bool has_tx_tag = false;
+    uint8_t tx_tag[kTxTagBytes] = {};
 };
 
 struct client_api_request {
@@ -21,6 +26,8 @@ struct client_api_request {
     std::string sql;
     bool has_assigned_det_seq = false;
     uint64_t assigned_det_seq = 0;
+    bool has_tx_tag = false;
+    uint8_t tx_tag[kTxTagBytes] = {};
     std::vector<client_api_request_item> batch_items;
     bool wait_for_terminal = false;
     uint32_t terminal_timeout_ms = 30000;
@@ -39,6 +46,9 @@ struct raft_request_batch {
     int leader_node_hint = -1;
     std::vector<client_api_request_item> items;
 };
+
+// Copy a single (non-batch) request into an item, tag included.
+client_api_request_item request_as_item(const client_api_request& req);
 
 bool read_request_frame(int fd, client_api_request& out_req, std::string& err);
 bool write_response_frame(int fd, const client_api_response& resp, std::string& err);

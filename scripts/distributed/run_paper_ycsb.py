@@ -307,7 +307,8 @@ log_min_messages = warning
                 "--dbName", "postgres", "--dbHost", "127.0.0.1", "--dbPort", str(PORTS["pg"]),
                 "--dbUser", "postgres", "--dbType", str(int(det)), "--safedb", str(int(det)),
                 "--dbConnPoolSize", str(request["workers"]), "--bcdbInitBlockSize", str(request["workers"]),
-                "--pgExecMode", "event", "--bypassRaft", "0" if cluster else "1"]
+                "--pgExecMode", "event", "--bypassRaft", "0" if cluster else "1",
+                "--txTagVerify", "require"]
         if cluster:
             env["ARIABC_RAFT_CLUSTER_ID"] = request["case"]
             env["ARIABC_RAFT_NODE_ID"] = str(nid)
@@ -490,7 +491,7 @@ class Campaign:
             expected = dict(async_all3_verified_count=str(terminal_count), async_all3_failure_count="0",
                             async_all3_timeout_count="0", async_all3_missing_count="0",
                             async_all3_capacity_exhausted_count="0", audit_pending_current="0",
-                            kafka_parse_failures="0", tx_signature_mismatches="0")
+                            kafka_parse_failures="0", tx_sign_mode="blake3")
             for nid in IDS:
                 expected[f"reply_records_from_node{nid}"] = str(terminal_count)
             for key, value in expected.items():
@@ -588,7 +589,9 @@ class Campaign:
                 values = dict(re.findall(r"(\w+)=(\S+)", profiles[-1])) if profiles else {}
                 expected = dict(exec_calls=str(count + 1), retry_exhausted_total="0", backlog_cur="0",
                                 inflight_cur="0", unique_owned_pg_connections=str(workers),
-                                bcdb_init_enabled="0" if mode == "pg" else "1")
+                                bcdb_init_enabled="0" if mode == "pg" else "1",
+                                tx_tag_verify="require", tx_tag_verified=str(count + 1),
+                                tx_tag_rejected_missing="0", tx_tag_rejected_mismatch="0")
                 if mode != "pg":
                     expected["bcdb_init_arg_size_configured"] = str(workers)
                 for key, value in expected.items():

@@ -12,8 +12,10 @@ const uint32_t kMaxSqlBytes = 64u * 1024u * 1024u;
 const uint32_t kMaxMsgBytes = 16u * 1024u * 1024u;
 const uint32_t kBatchFrameTag = 0xFFFFFFFFu;
 const uint32_t kSingleRequestFrameV2Tag = 0xFFFFFFFEu;
+const uint32_t kBatchFrameV2Tag = 0xFFFFFFFDu;
 const uint32_t kMaxBatchItems = 4096u;
 const uint32_t kRequestFlagWaitForTerminal = 0x1u;
+const uint32_t kRequestFlagHasTxTag = 0x2u;
 
 bool read_u32_be(const char* p, uint32_t& out) {
     if (!p) return false;
@@ -39,13 +41,15 @@ bool encode_request_frame(const client_api_request& req, std::string& out, std::
             err = "request too large";
             return false;
         }
-        if (req.wait_for_terminal) {
-            out.reserve(20 + req.req_id.size() + req.sql.size());
+        if (req.wait_for_terminal || req.has_tx_tag) {
+            out.reserve(20 + kTxTagBytes + req.req_id.size() + req.sql.size());
             append_u32_be(out, kSingleRequestFrameV2Tag);
-            append_u32_be(out, kRequestFlagWaitForTerminal);
+            append_u32_be(out, (req.wait_for_terminal ? kRequestFlagWaitForTerminal : 0u) |
+                               (req.has_tx_tag ? kRequestFlagHasTxTag : 0u));
             append_u32_be(out, req.terminal_timeout_ms);
             append_u32_be(out, static_cast<uint32_t>(req.req_id.size()));
             append_u32_be(out, static_cast<uint32_t>(req.sql.size()));
+            if (req.has_tx_tag) out.append(reinterpret_cast<const char*>(req.tx_tag), kTxTagBytes);
             if (!req.req_id.empty()) out.append(req.req_id);
             if (!req.sql.empty()) out.append(req.sql);
             return true;
@@ -67,6 +71,7 @@ bool encode_request_frame(const client_api_request& req, std::string& out, std::
         return false;
     }
 
+    bool batch_v2 = false;
     size_t total = 8;
     for (size_t i = 0; i < req.batch_items.size(); ++i) {
         if (req.batch_items[i].req_id.size() > kMaxReqIdBytes ||
@@ -74,14 +79,18 @@ bool encode_request_frame(const client_api_request& req, std::string& out, std::
             err = "request too large";
             return false;
         }
-        total += 8 + req.batch_items[i].req_id.size() + req.batch_items[i].sql.size();
+        if (req.batch_items[i].has_tx_tag) batch_v2 = true;
+        total += 12 + kTxTagBytes + req.batch_items[i].req_id.size() + req.batch_items[i].sql.size();
     }
     out.reserve(total);
-    append_u32_be(out, kBatchFrameTag);
+    append_u32_be(out, batch_v2 ? kBatchFrameV2Tag : kBatchFrameTag);
     append_u32_be(out, static_cast<uint32_t>(req.batch_items.size()));
     for (size_t i = 0; i < req.batch_items.size(); ++i) {
+        const client_api_request_item& item = req.batch_items[i];
+        if (batch_v2) append_u32_be(out, item.has_tx_tag ? kRequestFlagHasTxTag : 0u);
         append_u32_be(out, static_cast<uint32_t>(req.batch_items[i].req_id.size()));
         append_u32_be(out, static_cast<uint32_t>(req.batch_items[i].sql.size()));
+        if (item.has_tx_tag) out.append(reinterpret_cast<const char*>(item.tx_tag), kTxTagBytes);
         if (!req.batch_items[i].req_id.empty()) out.append(req.batch_items[i].req_id);
         if (!req.batch_items[i].sql.empty()) out.append(req.batch_items[i].sql);
     }
@@ -117,6 +126,7 @@ decode_status try_decode_request_frame(io_buffer& buf, client_api_request& out_r
     out_req.sql.clear();
     out_req.has_assigned_det_seq = false;
     out_req.assigned_det_seq = 0;
+    out_req.has_tx_tag = false;
     out_req.batch_items.clear();
     out_req.wait_for_terminal = false;
     out_req.terminal_timeout_ms = 30000;
@@ -138,18 +148,24 @@ decode_status try_decode_request_frame(io_buffer& buf, client_api_request& out_r
             err = "frame too large";
             return decode_status::ERROR;
         }
-        const size_t total = 20ull + static_cast<size_t>(req_len) +
+        const bool has_tag = (flags & kRequestFlagHasTxTag) != 0;
+        const size_t body = 20ull + (has_tag ? kTxTagBytes : 0u);
+        const size_t total = body + static_cast<size_t>(req_len) +
                              static_cast<size_t>(sql_len);
         if (avail < total) return decode_status::NEED_MORE;
-        out_req.req_id.assign(p + 20, p + 20 + req_len);
-        out_req.sql.assign(p + 20 + req_len, p + total);
+        if (has_tag) {
+            std::memcpy(out_req.tx_tag, p + 20, kTxTagBytes);
+            out_req.has_tx_tag = true;
+        }
+        out_req.req_id.assign(p + body, p + body + req_len);
+        out_req.sql.assign(p + body + req_len, p + total);
         out_req.wait_for_terminal = (flags & kRequestFlagWaitForTerminal) != 0;
         out_req.terminal_timeout_ms = timeout_ms;
         buf.consume(total);
         return decode_status::OK;
     }
 
-    if (header != kBatchFrameTag) {
+    if (header != kBatchFrameTag && header != kBatchFrameV2Tag) {
         uint32_t sql_len = 0;
         const uint32_t req_len = header;
         if (!read_u32_be(p + 4, sql_len)) {
@@ -178,15 +194,26 @@ decode_status try_decode_request_frame(io_buffer& buf, client_api_request& out_r
         return decode_status::ERROR;
     }
 
+    const bool batch_v2 = (header == kBatchFrameV2Tag);
+    const size_t item_hdr = batch_v2 ? 12u : 8u;
     size_t need = 8;
     size_t off = 8;
     std::vector<client_api_request_item> items;
     items.reserve(item_count);
     for (uint32_t i = 0; i < item_count; ++i) {
-        if (avail < off + 8) return decode_status::NEED_MORE;
+        if (avail < off + item_hdr) return decode_status::NEED_MORE;
+        uint32_t item_flags = 0;
         uint32_t req_len = 0;
         uint32_t sql_len = 0;
-        if (!read_u32_be(p + off, req_len) || !read_u32_be(p + off + 4, sql_len)) {
+        const char* h = p + off;
+        if (batch_v2) {
+            if (!read_u32_be(h, item_flags)) {
+                err = "bad header";
+                return decode_status::ERROR;
+            }
+            h += 4;
+        }
+        if (!read_u32_be(h, req_len) || !read_u32_be(h + 4, sql_len)) {
             err = "bad header";
             return decode_status::ERROR;
         }
@@ -194,11 +221,17 @@ decode_status try_decode_request_frame(io_buffer& buf, client_api_request& out_r
             err = "frame too large";
             return decode_status::ERROR;
         }
-        const size_t item_total = 8ull + static_cast<size_t>(req_len) + static_cast<size_t>(sql_len);
+        const bool has_tag = (item_flags & kRequestFlagHasTxTag) != 0;
+        const size_t body = item_hdr + (has_tag ? kTxTagBytes : 0u);
+        const size_t item_total = body + static_cast<size_t>(req_len) + static_cast<size_t>(sql_len);
         if (avail < off + item_total) return decode_status::NEED_MORE;
         client_api_request_item item;
-        item.req_id.assign(p + off + 8, p + off + 8 + req_len);
-        item.sql.assign(p + off + 8 + req_len, p + off + item_total);
+        if (has_tag) {
+            std::memcpy(item.tx_tag, p + off + item_hdr, kTxTagBytes);
+            item.has_tx_tag = true;
+        }
+        item.req_id.assign(p + off + body, p + off + body + req_len);
+        item.sql.assign(p + off + body + req_len, p + off + item_total);
         items.push_back(std::move(item));
         off += item_total;
         need += item_total;

@@ -210,29 +210,8 @@ struct leaf_key {
     }
 };
 
-bool read_leaves(PGconn* c, const table_info& t, const std::string& part_array,
-                 std::map<leaf_key, std::string>& out, std::string& err) {
-    out.clear();
-    rows_t rows;
-    if (!query_rows(c,
-                    "SELECT partition_id, encode(node_id, 'hex'), prefix_len, encode(hash, 'hex') FROM " +
-                        node_table(c, t) + " WHERE is_leaf AND partition_id = ANY('" + part_array +
-                        "'::int[])",
-                    rows, err)) {
-        return false;
-    }
-    for (const auto& r : rows) {
-        leaf_key k;
-        k.partition = std::atoi(r[0].c_str());
-        k.node_hex = r[1];
-        k.prefix_len = std::atoi(r[2].c_str());
-        out[k] = r[3];
-    }
-    return true;
-}
-
-/* WITH-clause relation b(p, lo, hi) holding the differing leaf key ranges. */
-std::string bounds_cte(const std::vector<leaf_key>& ranges) {
+/* unnest(...) AS u(p, lo, l) over node coordinates. */
+std::string unnest_nodes(const std::vector<leaf_key>& ranges) {
     std::ostringstream p, n, l;
     p << "ARRAY[";
     n << "ARRAY[";
@@ -250,8 +229,139 @@ std::string bounds_cte(const std::vector<leaf_key>& ranges) {
     p << "]::int4[]";
     n << "]::bytea[]";
     l << "]::int4[]";
-    return "WITH b(p, lo, hi) AS (SELECT u.p, u.lo, merkle_node_upper_bound(u.lo, u.l) FROM unnest(" +
-           p.str() + ", " + n.str() + ", " + l.str() + ") AS u(p, lo, l)) ";
+    return "unnest(" + p.str() + ", " + n.str() + ", " + l.str() + ") AS u(p, lo, l)";
+}
+
+/* WITH-clause relation b(p, lo, hi) holding the differing leaf key ranges. */
+std::string bounds_cte(const std::vector<leaf_key>& ranges) {
+    return "WITH b(p, lo, hi) AS (SELECT u.p, u.lo, merkle_node_upper_bound(u.lo, u.l) FROM " +
+           unnest_nodes(ranges) + ") ";
+}
+
+struct node_row {
+    bool is_leaf = false;
+    std::string hash;
+    leaf_key parent;
+};
+
+/* Nodes child_bits below each parent (child_bits = 0 reads the parents themselves).
+ * The LATERAL probe keeps each parent on the (partition_id, prefix_len, node_id) index. */
+bool read_children(PGconn* c, const table_info& t, const std::vector<leaf_key>& parents,
+                   int child_bits, std::map<leaf_key, node_row>& out, std::string& err) {
+    out.clear();
+    rows_t rows;
+    const std::string bits = std::to_string(child_bits);
+    if (!query_rows(c,
+                    "SELECT n.partition_id, encode(n.node_id, 'hex'), n.prefix_len, n.is_leaf, "
+                    "encode(n.hash, 'hex'), u.p, encode(u.lo, 'hex'), u.l FROM " +
+                        unnest_nodes(parents) + " CROSS JOIN LATERAL (SELECT * FROM " +
+                        node_table(c, t) +
+                        " n WHERE n.partition_id = u.p::int2 AND n.prefix_len = (u.l + " + bits +
+                        ")::int2 AND n.node_id BETWEEN u.lo AND merkle_node_upper_bound(u.lo, u.l)) n",
+                    rows, err)) {
+        return false;
+    }
+    for (const auto& r : rows) {
+        leaf_key k;
+        k.partition = std::atoi(r[0].c_str());
+        k.node_hex = r[1];
+        k.prefix_len = std::atoi(r[2].c_str());
+        node_row& nr = out[k];
+        nr.is_leaf = (r[3] == "t");
+        nr.hash = r[4];
+        nr.parent.partition = std::atoi(r[5].c_str());
+        nr.parent.node_hex = r[6];
+        nr.parent.prefix_len = std::atoi(r[7].c_str());
+    }
+    return true;
+}
+
+/* Prefix bits per tree level: the shallowest non-root level of a split partition. */
+bool read_split_bits(PGconn* c, const table_info& t, int partition, int& bits, std::string& err) {
+    rows_t rows;
+    if (!query_rows(c,
+                    "SELECT min(prefix_len) FROM " + node_table(c, t) + " WHERE partition_id = " +
+                        std::to_string(partition) + " AND prefix_len > 0",
+                    rows, err)) {
+        return false;
+    }
+    bits = (rows.empty() || rows[0][0].empty()) ? 0 : std::atoi(rows[0][0].c_str());
+    return true;
+}
+
+/*
+ * Localise the differing ranges by descending from the differing partition
+ * roots: at each level read the children of the differing internal nodes on
+ * both sides and follow only children whose hashes differ.  A differing node
+ * that is a leaf, or missing, on either side becomes a repair range; its key
+ * range also covers whatever subtree the other side has there.
+ */
+bool descend_differing(PGconn* ref, PGconn* local, const table_info& t, const std::set<int>& parts,
+                       std::vector<leaf_key>& ranges, replica_repair_stats& st, std::string& err) {
+    std::vector<leaf_key> frontier;
+    for (int p : parts) {
+        leaf_key k;
+        k.partition = p;
+        k.node_hex = "0000000000000000";
+        k.prefix_len = 0;
+        frontier.push_back(k);
+    }
+    int bits = 0; /* first pass reads the roots themselves */
+    while (!frontier.empty()) {
+        std::map<leaf_key, node_row> ref_nodes, loc_nodes;
+        if (!read_children(ref, t, frontier, bits, ref_nodes, err)) return false;
+        if (!read_children(local, t, frontier, bits, loc_nodes, err)) return false;
+        st.descent_levels++;
+        st.nodes_compared += static_cast<int>(ref_nodes.size() + loc_nodes.size());
+
+        /* An internal node with no children on one side cannot be compared below: repair it whole. */
+        std::set<leaf_key> ref_parents, loc_parents;
+        for (const auto& kv : ref_nodes) ref_parents.insert(kv.second.parent);
+        for (const auto& kv : loc_nodes) loc_parents.insert(kv.second.parent);
+        std::set<leaf_key> whole;
+        for (const leaf_key& f : frontier) {
+            if (!ref_parents.count(f) || !loc_parents.count(f)) {
+                whole.insert(f);
+                ranges.push_back(f);
+            }
+        }
+
+        std::set<leaf_key> keys;
+        for (const auto& kv : ref_nodes) keys.insert(kv.first);
+        for (const auto& kv : loc_nodes) keys.insert(kv.first);
+        std::vector<leaf_key> next;
+        for (const leaf_key& k : keys) {
+            auto r = ref_nodes.find(k);
+            auto l = loc_nodes.find(k);
+            const leaf_key& parent = (r != ref_nodes.end() ? r->second : l->second).parent;
+            if (whole.count(parent)) continue;
+            if (r != ref_nodes.end() && l != loc_nodes.end() && r->second.hash == l->second.hash) continue;
+            if (r == ref_nodes.end() || l == loc_nodes.end() || r->second.is_leaf || l->second.is_leaf) {
+                ranges.push_back(k);
+            } else {
+                next.push_back(k);
+            }
+        }
+        if (next.empty()) break;
+        if (bits == 0) {
+            int ref_bits = 0, loc_bits = 0;
+            if (!read_split_bits(ref, t, next.front().partition, ref_bits, err)) return false;
+            if (!read_split_bits(local, t, next.front().partition, loc_bits, err)) return false;
+            if (ref_bits <= 0 || ref_bits != loc_bits) {
+                err = "merkle level width differs or is unknown for " + t.name + " (reference " +
+                      std::to_string(ref_bits) + ", local " + std::to_string(loc_bits) + ")";
+                return false;
+            }
+            bits = ref_bits;
+        }
+        /* Node ids are 64 bits; a deeper level cannot exist. */
+        if (next.front().prefix_len + bits > 64) {
+            ranges.insert(ranges.end(), next.begin(), next.end());
+            break;
+        }
+        frontier.swap(next);
+    }
+    return true;
 }
 
 /* Route hash of a single-column Merkle key, as merkle_compute_route() computes it. */
@@ -506,29 +616,9 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
     st.tables_repaired++;
     st.mismatched_partitions += static_cast<int>(parts.size());
 
-    std::string part_array = "{";
-    bool first = true;
-    for (int p : parts) {
-        if (!first) part_array += ",";
-        first = false;
-        part_array += std::to_string(p);
-    }
-    part_array += "}";
-
-    std::map<leaf_key, std::string> ref_leaves, loc_leaves;
-    if (!read_leaves(ref, t, part_array, ref_leaves, err)) return false;
-    if (!read_leaves(local, t, part_array, loc_leaves, err)) return false;
-
     std::vector<leaf_key> ranges;
-    for (const auto& kv : ref_leaves) {
-        auto it = loc_leaves.find(kv.first);
-        if (it == loc_leaves.end() || it->second != kv.second) ranges.push_back(kv.first);
-    }
-    for (const auto& kv : loc_leaves) {
-        auto it = ref_leaves.find(kv.first);
-        if (it == ref_leaves.end()) ranges.push_back(kv.first);
-    }
-    /* Partition roots differ but no leaf does (should not happen): whole partitions. */
+    if (!descend_differing(ref, local, t, parts, ranges, st, err)) return false;
+    /* Partition roots differ but no node below does (should not happen): whole partitions. */
     if (ranges.empty()) {
         for (int p : parts) {
             leaf_key k;

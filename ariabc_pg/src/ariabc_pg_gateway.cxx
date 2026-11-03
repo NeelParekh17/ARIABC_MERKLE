@@ -59,7 +59,7 @@ struct gateway_options {
     std::string pub_key_file;
     std::string priv_key_file;
     std::string tx_sign = "blake3";
-    std::string tx_sig_key;
+    std::string tx_tag_key_file;
 
     // 0: "s <SQL>" (safe wrapper), 1: "s <8digit(seq)> <SQL>" (det), 2: "<SQL>" (raw).
     int db_type = 2;
@@ -208,7 +208,7 @@ void usage(const char* argv0) {
         << "  " << argv0 << " \\\n"
         << "    --queryFrom <file|port> --nodes <host:port,host:port,...> [--raft-node-ids <id,id,...>] \\\n"
         << "    [--querySign 0|1] [--pubKeyFile <path>] [--privKeyFile <path>] \\\n"
-        << "    [--txSign 0|blake3] [--txSigKey <key>] \\\n"
+        << "    [--txSign 0|blake3] [--txTagKeyFile <path>] \\\n"
         << "    [--dbType 0|1|2] [--detStartSeq <n>] [--detRawSql 0|1] [--qrate <n>] [--targetTps <tx/s>] [--paceTickMs <ms>] [--txIntervalMs <ms>] \\\n"
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] [--progressIntervalMs <ms>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
@@ -238,8 +238,11 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.tx_sign = ariabc_pg::trim_copy(need(a.c_str()));
             } else if (a == "--no-tx-sign" || a == "--disable-tx-sign") {
                 opt.tx_sign = "0";
+            } else if (a == "--txTagKeyFile" || a == "--tx-tag-key-file") {
+                opt.tx_tag_key_file = need(a.c_str());
             } else if (a == "--txSigKey" || a == "--tx-sig-key") {
-                opt.tx_sig_key = need(a.c_str());
+                throw std::runtime_error(a + " (literal key) was removed: write the key as 64 hex "
+                                         "chars to a file and pass --txTagKeyFile <path>");
             } else if (a == "--pubKeyFile") {
                 opt.pub_key_file = need("--pubKeyFile");
             } else if (a == "--privKeyFile") {
@@ -567,7 +570,7 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     }
     const char* env_tx_sig_key = std::getenv("ARIABC_TX_SIG_KEY");
     if (env_tx_sig_key && *env_tx_sig_key) {
-        opt.tx_sig_key = env_tx_sig_key;
+        std::cerr << "ARIABC_TX_SIG_KEY is ignored; use ARIABC_TX_TAG_KEY_FILE" << std::endl;
     }
     return true;
 }
@@ -5145,20 +5148,46 @@ int main(int argc, char** argv) {
     const bool tx_sign_enable = (opt.tx_sign != "0" && opt.tx_sign != "off" && opt.tx_sign != "none" &&
                                  opt.tx_sign != "false" && opt.tx_sign != "no" && opt.tx_sign != "disable" &&
                                  opt.tx_sign != "disabled");
-    tx_signer.init(tx_sign_enable, opt.tx_sig_key);
-    if (tx_signer.is_enabled()) {
-        std::cout << "BLAKE3 on-the-fly transaction signing & verification: ENABLED" << std::endl;
+    if (tx_sign_enable) {
+        // The tag is checked by every replica's state machine, never here: a
+        // gateway re-checking its own tag would prove nothing.
+        const std::string key_file = ariabc_pg::resolve_tx_tag_key_file(opt.tx_tag_key_file);
+        std::string key_err = key_file.empty()
+            ? std::string("no key file (--txTagKeyFile, $ARIABC_TX_TAG_KEY_FILE or ~/.ariabc/tx_tag.key)")
+            : std::string();
+        if (!key_file.empty()) (void)tx_signer.load_key_file(key_file, key_err);
+        if (!tx_signer.is_enabled()) {
+            std::cerr << "BLAKE3 request tags requested but unavailable: " << key_err
+                      << " (pass --txSign 0 to run untagged)" << std::endl;
+            return 1;
+        }
+        if (tx_signer.key_file_world_readable()) {
+            std::cerr << "WARNING: tx tag key file " << key_file
+                      << " is readable by group/others (chmod 600)" << std::endl;
+        }
+        std::cout << "BLAKE3 request tags: ENABLED (gateway tags, replicas verify before execution)"
+                  << " key_file=" << key_file << std::endl;
     } else {
-        std::cout << "BLAKE3 on-the-fly transaction signing & verification: DISABLED" << std::endl;
+        std::cout << "BLAKE3 request tags: DISABLED" << std::endl;
     }
 
-    std::vector<ariabc_pg::blake3_sig_256> query_tx_sigs;
-    std::vector<std::string> query_tx_sqls;
     std::atomic<uint64_t> tx_signatures_signed(0);
-    std::atomic<uint64_t> tx_signatures_verified(0);
-    std::atomic<uint64_t> tx_signature_mismatches(0);
     std::atomic<uint64_t> tx_sign_ns_total(0);
-    std::atomic<uint64_t> tx_verify_ns_total(0);
+
+    // Computes the request tag for (req_id, sql) into out_tag; false when tags are off.
+    auto compute_tx_tag = [&](const std::string& req_id, const std::string& sql,
+                              uint8_t* out_tag) -> bool {
+        if (!tx_signer.is_enabled()) return false;
+        const auto s0 = std::chrono::steady_clock::now();
+        const ariabc_pg::blake3_sig_256 tag = tx_signer.sign(req_id, sql);
+        const auto s1 = std::chrono::steady_clock::now();
+        std::memcpy(out_tag, tag.bytes, ariabc_pg::kTxTagBytes);
+        tx_sign_ns_total.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count(),
+            std::memory_order_relaxed);
+        tx_signatures_signed.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
 
     std::atomic<bool> stop(false);
     std::thread kafka_thread;
@@ -5427,29 +5456,6 @@ int main(int argc, char** argv) {
         return opt.req_id_offset + static_cast<uint64_t>(idx);
     };
 
-    auto verify_completed_item = [&](uint64_t rid) -> bool {
-        if (!tx_signer.is_enabled()) return true;
-        if (rid < opt.req_id_offset) return true;
-        const size_t idx = static_cast<size_t>(rid - opt.req_id_offset);
-        if (idx >= query_tx_sigs.size()) return true;
-
-        const auto v0 = std::chrono::steady_clock::now();
-        const bool ok = tx_signer.verify(rid, req_id_for_idx(idx), query_tx_sqls[idx], query_tx_sigs[idx]);
-        const auto v1 = std::chrono::steady_clock::now();
-        tx_verify_ns_total.fetch_add(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(v1 - v0).count(),
-            std::memory_order_relaxed);
-
-        if (ok) {
-            tx_signatures_verified.fetch_add(1, std::memory_order_relaxed);
-            return true;
-        } else {
-            tx_signature_mismatches.fetch_add(1, std::memory_order_relaxed);
-            std::cerr << "BLAKE3 TX AUTHENTICITY VERIFICATION FAILED req_num=" << rid
-                      << " req_id=" << req_id_for_idx(idx) << std::endl;
-            return false;
-        }
-    };
 
     auto bump_terminal_reason = [&](const std::string& reason) {
         if (reason == "leader_unknown") {
@@ -5506,6 +5512,7 @@ int main(int argc, char** argv) {
         ariabc_pg::client_api_request req;
         req.req_id = req_id;
         req.sql = sql_in;
+        req.has_tx_tag = compute_tx_tag(req.req_id, req.sql, req.tx_tag);
         return submit_request_quiet(req, out_err);
     };
 
@@ -5985,10 +5992,6 @@ int main(int argc, char** argv) {
         votes.set_reply_observer([&tx_lat_tracker](uint64_t req_num, int node_id, uint64_t ns, bool majority) {
             tx_lat_tracker.record_reply(req_num, node_id, ns, majority);
         });
-        if (tx_signer.is_enabled()) {
-            query_tx_sigs.resize(queries.size());
-            query_tx_sqls.resize(queries.size());
-        }
 
         auto t_start = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point client_completion_end;
@@ -6000,6 +6003,9 @@ int main(int argc, char** argv) {
 
         auto warm_leader_route = [&]() -> bool {
             if ((opt.db_type != 1 && opt.db_type != 0) || opt.det_raw_sql == 1) return true;
+            // Broadcast (bypass-Raft) mode sends every request to every replica;
+            // there is no leader, and each bypass server answers IS_LEADER=1.
+            if (opt.broadcast_to_all) return true;
 
             const auto start_time = std::chrono::steady_clock::now();
             std::chrono::milliseconds backoff(2);
@@ -6166,28 +6172,10 @@ int main(int argc, char** argv) {
                 std::string req_id;
                 uint64_t req_num = 0;
                 std::string sql;
-                ariabc_pg::blake3_sig_256 blake3_sig;
+                bool has_tx_tag = false;
+                uint8_t tx_tag[ariabc_pg::kTxTagBytes] = {};
             };
 
-            auto verify_completed_shaped_item = [&](const det_shaped_request& item) -> bool {
-                if (!tx_signer.is_enabled()) return true;
-                const auto v0 = std::chrono::steady_clock::now();
-                const bool ok = tx_signer.verify(item.req_num, item.req_id, item.sql, item.blake3_sig);
-                const auto v1 = std::chrono::steady_clock::now();
-                tx_verify_ns_total.fetch_add(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(v1 - v0).count(),
-                    std::memory_order_relaxed);
-
-                if (ok) {
-                    tx_signatures_verified.fetch_add(1, std::memory_order_relaxed);
-                    return true;
-                } else {
-                    tx_signature_mismatches.fetch_add(1, std::memory_order_relaxed);
-                    std::cerr << "BLAKE3 TX AUTHENTICITY VERIFICATION FAILED req_num=" << item.req_num
-                              << " req_id=" << item.req_id << std::endl;
-                    return false;
-                }
-            };
 
             std::vector<size_t> det_lane_outstanding(det_terminal_count, 0);
             size_t det_total_outstanding = 0;
@@ -6260,7 +6248,8 @@ int main(int argc, char** argv) {
                                          std::string& out_req_id,
                                          uint64_t& out_req_num,
                                          std::string& out_sql,
-                                         ariabc_pg::blake3_sig_256& out_sig) -> bool {
+                                         bool& out_has_tag,
+                                         uint8_t* out_tag) -> bool {
                 out_sql = queries[idx];
                 if (opt.query_sign == 1) {
                     std::string sig_b64;
@@ -6302,19 +6291,7 @@ int main(int argc, char** argv) {
 
                 out_req_id = req_id_for_idx(idx);
                 out_req_num = req_num_for_idx(idx);
-                if (tx_signer.is_enabled()) {
-                    const auto s0 = std::chrono::steady_clock::now();
-                    out_sig = tx_signer.sign(out_req_num, out_req_id, out_sql);
-                    const auto s1 = std::chrono::steady_clock::now();
-                    tx_sign_ns_total.fetch_add(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count(),
-                        std::memory_order_relaxed);
-                    tx_signatures_signed.fetch_add(1, std::memory_order_relaxed);
-                    if (idx < query_tx_sigs.size()) {
-                        query_tx_sigs[idx] = out_sig;
-                        query_tx_sqls[idx] = out_sql;
-                    }
-                }
+                out_has_tag = compute_tx_tag(out_req_id, out_sql, out_tag);
                 return true;
             };
 
@@ -6336,7 +6313,7 @@ int main(int argc, char** argv) {
                      ++idx) {
                     det_shaped_request shaped;
                     shaped.idx = idx;
-                    if (!shape_det_request(idx, shaped.req_id, shaped.req_num, shaped.sql, shaped.blake3_sig)) {
+                    if (!shape_det_request(idx, shaped.req_id, shaped.req_num, shaped.sql, shaped.has_tx_tag, shaped.tx_tag)) {
                         return false;
                     }
                     const bool is_reset = ariabc_pg::is_reset_barrier_sql(shaped.sql);
@@ -6354,6 +6331,8 @@ int main(int argc, char** argv) {
                 if (out_items.size() == 1) {
                     out_req.req_id = out_items.front().req_id;
                     out_req.sql = out_items.front().sql;
+                    out_req.has_tx_tag = out_items.front().has_tx_tag;
+                    std::memcpy(out_req.tx_tag, out_items.front().tx_tag, ariabc_pg::kTxTagBytes);
                     return true;
                 }
 
@@ -6366,6 +6345,8 @@ int main(int argc, char** argv) {
                     ariabc_pg::client_api_request_item item;
                     item.req_id = out_items[i].req_id;
                     item.sql = out_items[i].sql;
+                    item.has_tx_tag = out_items[i].has_tx_tag;
+                    std::memcpy(item.tx_tag, out_items[i].tx_tag, ariabc_pg::kTxTagBytes);
                     out_req.batch_items.push_back(std::move(item));
                 }
                 return true;
@@ -6391,10 +6372,6 @@ int main(int argc, char** argv) {
                         det_inflight_count.fetch_add(1, std::memory_order_relaxed);
                         track_reset_req(items[i].req_num, items[i].sql);
                     } else {
-                        if (!verify_completed_shaped_item(items[i])) {
-                            permanent_failures.fetch_add(1);
-                            return false;
-                        }
                         det_completed_count.fetch_add(1, std::memory_order_relaxed);
                         tx_lat_tracker.record_finish_idx(items[i].idx);
                         release_det_req_lane(items[i].req_num);
@@ -6629,10 +6606,6 @@ int main(int argc, char** argv) {
                 }
                 for (const auto& item : batch_res) {
                     const uint64_t rid = item.req_num;
-                    if (!verify_completed_item(rid)) {
-                        permanent_failures.fetch_add(1);
-                        return false;
-                    }
                     if (!wait_strict_all_nodes_for_req(rid)) {
                         return false;
                     }
@@ -6781,7 +6754,7 @@ int main(int argc, char** argv) {
                              idx += det_threadpool_workers) {
                             det_shaped_request item;
                             item.idx = idx;
-                            if (!shape_det_request(idx, item.req_id, item.req_num, item.sql, item.blake3_sig)) {
+                            if (!shape_det_request(idx, item.req_id, item.req_num, item.sql, item.has_tx_tag, item.tx_tag)) {
                                 threadpool_failed.store(true, std::memory_order_release);
                                 break;
                             }
@@ -6790,6 +6763,8 @@ int main(int argc, char** argv) {
                             ariabc_pg::client_api_request req;
                             req.req_id = item.req_id;
                             req.sql = item.sql;
+                            req.has_tx_tag = item.has_tx_tag;
+                            std::memcpy(req.tx_tag, item.tx_tag, ariabc_pg::kTxTagBytes);
 
                             const auto tx_t0 = std::chrono::steady_clock::now();
                             tx_lat_tracker.record_submit_idx(idx, tx_t0);
@@ -6887,11 +6862,6 @@ int main(int argc, char** argv) {
                                     threadpool_failed.store(true, std::memory_order_release);
                                     break;
                                 }
-                                if (!verify_completed_shaped_item(item)) {
-                                    permanent_failures.fetch_add(1, std::memory_order_relaxed);
-                                    threadpool_failed.store(true, std::memory_order_release);
-                                    break;
-                                }
                                 det_completed_count.fetch_add(1, std::memory_order_relaxed);
                                 tx_lat_tracker.record_finish_idx(item.idx);
                                 det_inflight_count.fetch_sub(1, std::memory_order_relaxed);
@@ -6914,11 +6884,6 @@ int main(int argc, char** argv) {
                                     break;
                                 }
                                 if (direct_wait_on_submit_socket) note_direct_terminal(item.req_id);
-                                if (!verify_completed_shaped_item(item)) {
-                                    permanent_failures.fetch_add(1, std::memory_order_relaxed);
-                                    threadpool_failed.store(true, std::memory_order_release);
-                                    break;
-                                }
                                 det_completed_count.fetch_add(1, std::memory_order_relaxed);
                                 tx_lat_tracker.record_finish_idx(item.idx);
                             }
@@ -7707,11 +7672,6 @@ int main(int argc, char** argv) {
                     }
                     for (const auto& item : batch_res) {
                         const uint64_t rid = item.req_num;
-                        if (!verify_completed_item(rid)) {
-                            permanent_failures.fetch_add(1);
-                            failed = true;
-                            break;
-                        }
                         if (!wait_strict_all_nodes_for_req(rid)) {
                             failed = true;
                             break;
@@ -7839,19 +7799,8 @@ int main(int argc, char** argv) {
                         tx_lat_tracker.record_submit_idx(idx, tx_t0);
                         const std::string req_id = req_id_for_idx(idx);
                         const uint64_t req_num = req_num_for_idx(idx);
-                        if (tx_signer.is_enabled()) {
-                            const auto s0 = std::chrono::steady_clock::now();
-                            const auto sig = tx_signer.sign(req_num, req_id, sql);
-                            const auto s1 = std::chrono::steady_clock::now();
-                            tx_sign_ns_total.fetch_add(
-                                std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count(),
-                                std::memory_order_relaxed);
-                            tx_signatures_signed.fetch_add(1, std::memory_order_relaxed);
-                            if (idx < query_tx_sigs.size()) {
-                                query_tx_sigs[idx] = sig;
-                                query_tx_sqls[idx] = sql;
-                            }
-                        }
+                        uint8_t tx_tag[ariabc_pg::kTxTagBytes];
+                        const bool has_tx_tag = compute_tx_tag(req_id, sql, tx_tag);
                         ariabc_pg::debug_trace_submit(req_num, req_id, sql);
 
                         // Submit + wait for majority (if enabled).
@@ -7865,6 +7814,8 @@ int main(int argc, char** argv) {
                             ariabc_pg::client_api_request request;
                             request.req_id = req_id;
                             request.sql = sql;
+                            request.has_tx_tag = has_tx_tag;
+                            if (has_tx_tag) std::memcpy(request.tx_tag, tx_tag, ariabc_pg::kTxTagBytes);
                             ariabc_pg::client_api_response response;
                             size_t node_idx = 0;
                             submitted = submit_request_quiet(request, sub_err, &response, &node_idx);
@@ -7914,9 +7865,6 @@ int main(int argc, char** argv) {
                                 }
                                 permanent_failures.fetch_add(1);
                             } else {
-                                if (!verify_completed_item(rid)) {
-                                    permanent_failures.fetch_add(1);
-                                }
                                 tx_lat_tracker.record_finish_req(rid);
                                 if (opt.db_type == 2 && !maj.empty() && ariabc_pg::is_duplicate_key_result(maj)) {
                                     duplicate_key_errors.fetch_add(1);
@@ -7963,9 +7911,6 @@ int main(int argc, char** argv) {
                             }
                             permanent_failures.fetch_add(1);
                         } else {
-                            if (!verify_completed_item(rid)) {
-                                permanent_failures.fetch_add(1);
-                            }
                             tx_lat_tracker.record_finish_req(rid);
                             if (opt.db_type == 2 && !maj.empty() && ariabc_pg::is_duplicate_key_result(maj)) {
                                 duplicate_key_errors.fetch_add(1);
@@ -8049,19 +7994,13 @@ int main(int argc, char** argv) {
                       << async_all3_recovery_attributed_count.load() << std::endl;
         }
         if (tx_signer.is_enabled()) {
+            // Verification counts live in each replica's PROFILE_SERVER (tx_tag_*).
             const uint64_t signed_cnt = tx_signatures_signed.load(std::memory_order_relaxed);
-            const uint64_t verified_cnt = tx_signatures_verified.load(std::memory_order_relaxed);
-            const uint64_t mismatch_cnt = tx_signature_mismatches.load(std::memory_order_relaxed);
             const double sign_avg_ns = signed_cnt > 0 ? static_cast<double>(tx_sign_ns_total.load(std::memory_order_relaxed)) / signed_cnt : 0.0;
-            const double verify_avg_ns = verified_cnt > 0 ? static_cast<double>(tx_verify_ns_total.load(std::memory_order_relaxed)) / verified_cnt : 0.0;
             std::cout << "tx_signatures_signed=" << signed_cnt << std::endl;
-            std::cout << "tx_signatures_verified=" << verified_cnt << std::endl;
-            std::cout << "tx_signature_mismatches=" << mismatch_cnt << std::endl;
             std::cout << "BLAKE3_TX_AUTH: signed=" << signed_cnt
-                      << " verified=" << verified_cnt
-                      << " mismatches=" << mismatch_cnt
                       << " avg_sign_ns=" << sign_avg_ns
-                      << " avg_verify_ns=" << verify_avg_ns
+                      << " verified_by=replicas"
                       << std::endl;
         }
         std::cout << "client_quorum_complete_count=" << client_quorum_complete_count.load(std::memory_order_relaxed)
@@ -8141,8 +8080,6 @@ int main(int argc, char** argv) {
             << " direct_completion_protocol=2"
             << " tx_sign_mode=" << (tx_signer.is_enabled() ? "blake3" : "off")
             << " tx_signatures_signed=" << tx_signatures_signed.load(std::memory_order_relaxed)
-            << " tx_signatures_verified=" << tx_signatures_verified.load(std::memory_order_relaxed)
-            << " tx_signature_mismatches=" << tx_signature_mismatches.load(std::memory_order_relaxed)
             << " completion_path=" << opt.completion_path
             << " validation_mode=" << opt.validation_mode
             << " broadcast_to_all=" << (opt.broadcast_to_all ? 1 : 0)
@@ -8331,7 +8268,6 @@ int main(int argc, char** argv) {
                     uint64_t req_num = 0;
                     std::string req_id;
                     std::string sql;
-                    ariabc_pg::blake3_sig_256 blake3_sig;
                 };
                 std::deque<pending_req> pending;
                 const size_t socket_window = effective_det_window();
@@ -8395,21 +8331,6 @@ int main(int argc, char** argv) {
 
                         const pending_req pr = std::move(pending.front());
                         pending.pop_front();
-                        if (tx_signer.is_enabled()) {
-                            const auto v0 = std::chrono::steady_clock::now();
-                            const bool ok = tx_signer.verify(pr.req_num, pr.req_id, pr.sql, pr.blake3_sig);
-                            const auto v1 = std::chrono::steady_clock::now();
-                            tx_verify_ns_total.fetch_add(
-                                std::chrono::duration_cast<std::chrono::nanoseconds>(v1 - v0).count(),
-                                std::memory_order_relaxed);
-                            if (ok) {
-                                tx_signatures_verified.fetch_add(1, std::memory_order_relaxed);
-                            } else {
-                                tx_signature_mismatches.fetch_add(1, std::memory_order_relaxed);
-                                write_error_json("blake3_signature_verification_failed");
-                                return false;
-                            }
-                        }
                         if (!write_ok_json(maj)) {
                             return false;
                         }
@@ -8512,15 +8433,6 @@ int main(int argc, char** argv) {
                     pr.req_num = req_num;
                     pr.req_id = req_id;
                     pr.sql = sql;
-                    if (tx_signer.is_enabled()) {
-                        const auto s0 = std::chrono::steady_clock::now();
-                        pr.blake3_sig = tx_signer.sign(pr.req_num, pr.req_id, pr.sql);
-                        const auto s1 = std::chrono::steady_clock::now();
-                        tx_sign_ns_total.fetch_add(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count(),
-                            std::memory_order_relaxed);
-                        tx_signatures_signed.fetch_add(1, std::memory_order_relaxed);
-                    }
                     pending.push_back(std::move(pr));
                     if (!drain_pending(false)) {
                         break;
