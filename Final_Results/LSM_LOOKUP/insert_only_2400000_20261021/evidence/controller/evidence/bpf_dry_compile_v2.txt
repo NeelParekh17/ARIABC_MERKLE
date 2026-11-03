@@ -1,0 +1,4008 @@
+
+AST after: parser
+-------------------
+Program
+ BEGIN
+  =
+   map: @phase :: type[none, ctx: 0]
+   int: 0 :: type[none, ctx: 0]
+  call: printf :: type[none, ctx: 0]
+   string: AUDIT_TRACE_READY\n :: type[none, ctx: 0]
+ tracepoint:syscalls:sys_enter_getpgid
+  pred
+   && :: type[none, ctx: 0]
+    && :: type[none, ctx: 0]
+     == :: type[none, ctx: 0]
+      builtin: comm :: type[none, ctx: 0]
+      string: audit_phase :: type[none, ctx: 0]
+     < :: type[none, ctx: 0]
+      (int32)
+       .
+        dereference
+         builtin: args :: type[none, ctx: 0]
+        pid
+      int: -1000 :: type[none, ctx: 0]
+    > :: type[none, ctx: 0]
+     (int32)
+      .
+       dereference
+        builtin: args :: type[none, ctx: 0]
+       pid
+     int: -1100 :: type[none, ctx: 0]
+  =
+   map: @phase :: type[none, ctx: 0]
+   - :: type[none, ctx: 0]
+    int: -1000 :: type[none, ctx: 0]
+    (int32)
+     .
+      dereference
+       builtin: args :: type[none, ctx: 0]
+      pid
+  call: printf :: type[none, ctx: 0]
+   string: PHASE %d\n :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+ kprobe:vfs_read
+  pred
+   == :: type[none, ctx: 0]
+    builtin: comm :: type[none, ctx: 0]
+    string: postgres :: type[none, ctx: 0]
+  =
+   variable: $f :: type[none, ctx: 0]
+   (struct file *)
+    builtin: arg0 :: type[none, ctx: 0]
+  =
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[none, ctx: 0]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[none, ctx: 0]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[none, ctx: 0]
+  =
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   int: 0 :: type[none, ctx: 0]
+  =
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+  =
+   map: @names :: type[none, ctx: 0]
+    map: @dev :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+    map: @in :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+   call: str :: type[none, ctx: 0]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[none, ctx: 0]
+         f_path
+        dentry
+      d_name
+     name
+ kprobe:vfs_write
+  pred
+   == :: type[none, ctx: 0]
+    builtin: comm :: type[none, ctx: 0]
+    string: postgres :: type[none, ctx: 0]
+  =
+   variable: $f :: type[none, ctx: 0]
+   (struct file *)
+    builtin: arg0 :: type[none, ctx: 0]
+  =
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[none, ctx: 0]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[none, ctx: 0]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[none, ctx: 0]
+  =
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   int: 1 :: type[none, ctx: 0]
+  =
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+  =
+   map: @names :: type[none, ctx: 0]
+    map: @dev :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+    map: @in :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+   call: str :: type[none, ctx: 0]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[none, ctx: 0]
+         f_path
+        dentry
+      d_name
+     name
+ kretprobe:vfs_read
+ kretprobe:vfs_write
+  pred
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  if
+   > :: type[none, ctx: 0]
+    (int64)
+     builtin: retval :: type[none, ctx: 0]
+    int: 0 :: type[none, ctx: 0]
+   then
+    =
+     variable: $d :: type[none, ctx: 0]
+     map: @dev :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $i :: type[none, ctx: 0]
+     map: @in :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $p :: type[none, ctx: 0]
+     map: @ph :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $o :: type[none, ctx: 0]
+     map: @op :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $s :: type[none, ctx: 0]
+     map: @off :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $n :: type[none, ctx: 0]
+     (unsigned int64)
+      builtin: retval :: type[none, ctx: 0]
+    =
+     map: @ops :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     call: count :: type[none, ctx: 0]
+    =
+     map: @bytes :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     call: sum :: type[none, ctx: 0]
+      variable: $n :: type[none, ctx: 0]
+    if
+     map: @seen :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     then
+      =
+       variable: $prev :: type[none, ctx: 0]
+       map: @last :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+      =
+       variable: $a :: type[none, ctx: 0]
+       ?:
+        > :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+        - :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+        - :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+      =
+       variable: $b :: type[none, ctx: 0]
+       ?:
+        == :: type[none, ctx: 0]
+         variable: $a :: type[none, ctx: 0]
+         int: 0 :: type[none, ctx: 0]
+        int: 0 :: type[none, ctx: 0]
+        ?:
+         == :: type[none, ctx: 0]
+          variable: $s :: type[none, ctx: 0]
+          + :: type[none, ctx: 0]
+           variable: $prev :: type[none, ctx: 0]
+           int: 8192 :: type[none, ctx: 0]
+         int: 1 :: type[none, ctx: 0]
+         ?:
+          == :: type[none, ctx: 0]
+           variable: $prev :: type[none, ctx: 0]
+           + :: type[none, ctx: 0]
+            variable: $s :: type[none, ctx: 0]
+            int: 8192 :: type[none, ctx: 0]
+          int: 2 :: type[none, ctx: 0]
+          ?:
+           < :: type[none, ctx: 0]
+            variable: $a :: type[none, ctx: 0]
+            int: 65536 :: type[none, ctx: 0]
+           int: 3 :: type[none, ctx: 0]
+           ?:
+            < :: type[none, ctx: 0]
+             variable: $a :: type[none, ctx: 0]
+             int: 524288 :: type[none, ctx: 0]
+            int: 4 :: type[none, ctx: 0]
+            ?:
+             < :: type[none, ctx: 0]
+              variable: $a :: type[none, ctx: 0]
+              int: 8388608 :: type[none, ctx: 0]
+             int: 5 :: type[none, ctx: 0]
+             int: 6 :: type[none, ctx: 0]
+      =
+       map: @distance :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+        variable: $b :: type[none, ctx: 0]
+       call: count :: type[none, ctx: 0]
+      if
+       == :: type[none, ctx: 0]
+        variable: $s :: type[none, ctx: 0]
+        map: @end :: type[none, ctx: 0]
+         builtin: pid :: type[none, ctx: 0]
+         variable: $d :: type[none, ctx: 0]
+         variable: $i :: type[none, ctx: 0]
+         variable: $p :: type[none, ctx: 0]
+         variable: $o :: type[none, ctx: 0]
+       then
+        =
+         map: @contiguous :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         call: count :: type[none, ctx: 0]
+        =
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         + :: type[none, ctx: 0]
+          map: @run :: type[none, ctx: 0]
+           builtin: pid :: type[none, ctx: 0]
+           variable: $d :: type[none, ctx: 0]
+           variable: $i :: type[none, ctx: 0]
+           variable: $p :: type[none, ctx: 0]
+           variable: $o :: type[none, ctx: 0]
+          / :: type[none, ctx: 0]
+           + :: type[none, ctx: 0]
+            variable: $n :: type[none, ctx: 0]
+            int: 8191 :: type[none, ctx: 0]
+           int: 8192 :: type[none, ctx: 0]
+       else
+        =
+         variable: $r :: type[none, ctx: 0]
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+        =
+         variable: $b :: type[none, ctx: 0]
+         ?:
+          <= :: type[none, ctx: 0]
+           variable: $r :: type[none, ctx: 0]
+           int: 1 :: type[none, ctx: 0]
+          int: 0 :: type[none, ctx: 0]
+          ?:
+           <= :: type[none, ctx: 0]
+            variable: $r :: type[none, ctx: 0]
+            int: 2 :: type[none, ctx: 0]
+           int: 1 :: type[none, ctx: 0]
+           ?:
+            <= :: type[none, ctx: 0]
+             variable: $r :: type[none, ctx: 0]
+             int: 4 :: type[none, ctx: 0]
+            int: 2 :: type[none, ctx: 0]
+            ?:
+             <= :: type[none, ctx: 0]
+              variable: $r :: type[none, ctx: 0]
+              int: 8 :: type[none, ctx: 0]
+             int: 3 :: type[none, ctx: 0]
+             ?:
+              <= :: type[none, ctx: 0]
+               variable: $r :: type[none, ctx: 0]
+               int: 16 :: type[none, ctx: 0]
+              int: 4 :: type[none, ctx: 0]
+              ?:
+               <= :: type[none, ctx: 0]
+                variable: $r :: type[none, ctx: 0]
+                int: 32 :: type[none, ctx: 0]
+               int: 5 :: type[none, ctx: 0]
+               ?:
+                <= :: type[none, ctx: 0]
+                 variable: $r :: type[none, ctx: 0]
+                 int: 64 :: type[none, ctx: 0]
+                int: 6 :: type[none, ctx: 0]
+                int: 7 :: type[none, ctx: 0]
+        =
+         map: @runs :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+          variable: $b :: type[none, ctx: 0]
+         call: count :: type[none, ctx: 0]
+        =
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         / :: type[none, ctx: 0]
+          + :: type[none, ctx: 0]
+           variable: $n :: type[none, ctx: 0]
+           int: 8191 :: type[none, ctx: 0]
+          int: 8192 :: type[none, ctx: 0]
+     else
+      =
+       map: @run :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+       / :: type[none, ctx: 0]
+        + :: type[none, ctx: 0]
+         variable: $n :: type[none, ctx: 0]
+         int: 8191 :: type[none, ctx: 0]
+        int: 8192 :: type[none, ctx: 0]
+    =
+     map: @seen :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     int: 1 :: type[none, ctx: 0]
+    =
+     map: @last :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     variable: $s :: type[none, ctx: 0]
+    =
+     map: @end :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     + :: type[none, ctx: 0]
+      variable: $s :: type[none, ctx: 0]
+      variable: $n :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+ END
+  call: clear :: type[none, ctx: 0]
+   map: @seen :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @last :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @end :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @in :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @dev :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @off :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @op :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @ph :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+
+
+AST after: ConfigAnalyser
+-------------------
+Program
+ BEGIN
+  =
+   map: @phase :: type[none, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  call: printf :: type[none, ctx: 0]
+   string: AUDIT_TRACE_READY\n :: type[string[19], ctx: 0]
+ tracepoint:syscalls:sys_enter_getpgid
+  pred
+   && :: type[none, ctx: 0]
+    && :: type[none, ctx: 0]
+     == :: type[none, ctx: 0]
+      builtin: comm :: type[none, ctx: 0]
+      string: audit_phase :: type[string[12], ctx: 0]
+     < :: type[none, ctx: 0]
+      (int32)
+       .
+        dereference
+         builtin: args :: type[none, ctx: 0]
+        pid
+      int: -1000 :: type[int64, ctx: 0]
+    > :: type[none, ctx: 0]
+     (int32)
+      .
+       dereference
+        builtin: args :: type[none, ctx: 0]
+       pid
+     int: -1100 :: type[int64, ctx: 0]
+  =
+   map: @phase :: type[none, ctx: 0]
+   - :: type[none, ctx: 0]
+    int: -1000 :: type[int64, ctx: 0]
+    (int32)
+     .
+      dereference
+       builtin: args :: type[none, ctx: 0]
+      pid
+  call: printf :: type[none, ctx: 0]
+   string: PHASE %d\n :: type[string[10], ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+ kprobe:vfs_read
+  pred
+   == :: type[none, ctx: 0]
+    builtin: comm :: type[none, ctx: 0]
+    string: postgres :: type[string[9], ctx: 0]
+  =
+   variable: $f :: type[none, ctx: 0]
+   (struct file *)
+    builtin: arg0 :: type[none, ctx: 0]
+  =
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[none, ctx: 0]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[none, ctx: 0]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[none, ctx: 0]
+  =
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  =
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+  =
+   map: @names :: type[none, ctx: 0]
+    map: @dev :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+    map: @in :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+   call: str :: type[none, ctx: 0]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[none, ctx: 0]
+         f_path
+        dentry
+      d_name
+     name
+ kprobe:vfs_write
+  pred
+   == :: type[none, ctx: 0]
+    builtin: comm :: type[none, ctx: 0]
+    string: postgres :: type[string[9], ctx: 0]
+  =
+   variable: $f :: type[none, ctx: 0]
+   (struct file *)
+    builtin: arg0 :: type[none, ctx: 0]
+  =
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[none, ctx: 0]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[none, ctx: 0]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[none, ctx: 0]
+  =
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   int: 1 :: type[int64, ctx: 0]
+  =
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+  =
+   map: @names :: type[none, ctx: 0]
+    map: @dev :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+    map: @in :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+   call: str :: type[none, ctx: 0]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[none, ctx: 0]
+         f_path
+        dentry
+      d_name
+     name
+ kretprobe:vfs_read
+ kretprobe:vfs_write
+  pred
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  if
+   > :: type[none, ctx: 0]
+    (int64)
+     builtin: retval :: type[none, ctx: 0]
+    int: 0 :: type[int64, ctx: 0]
+   then
+    =
+     variable: $d :: type[none, ctx: 0]
+     map: @dev :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $i :: type[none, ctx: 0]
+     map: @in :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $p :: type[none, ctx: 0]
+     map: @ph :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $o :: type[none, ctx: 0]
+     map: @op :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $s :: type[none, ctx: 0]
+     map: @off :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $n :: type[none, ctx: 0]
+     (unsigned int64)
+      builtin: retval :: type[none, ctx: 0]
+    =
+     map: @ops :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     call: count :: type[none, ctx: 0]
+    =
+     map: @bytes :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     call: sum :: type[none, ctx: 0]
+      variable: $n :: type[none, ctx: 0]
+    if
+     map: @seen :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     then
+      =
+       variable: $prev :: type[none, ctx: 0]
+       map: @last :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+      =
+       variable: $a :: type[none, ctx: 0]
+       ?:
+        > :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+        - :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+        - :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+      =
+       variable: $b :: type[none, ctx: 0]
+       ?:
+        == :: type[none, ctx: 0]
+         variable: $a :: type[none, ctx: 0]
+         int: 0 :: type[int64, ctx: 0]
+        int: 0 :: type[int64, ctx: 0]
+        ?:
+         == :: type[none, ctx: 0]
+          variable: $s :: type[none, ctx: 0]
+          + :: type[none, ctx: 0]
+           variable: $prev :: type[none, ctx: 0]
+           int: 8192 :: type[int64, ctx: 0]
+         int: 1 :: type[int64, ctx: 0]
+         ?:
+          == :: type[none, ctx: 0]
+           variable: $prev :: type[none, ctx: 0]
+           + :: type[none, ctx: 0]
+            variable: $s :: type[none, ctx: 0]
+            int: 8192 :: type[int64, ctx: 0]
+          int: 2 :: type[int64, ctx: 0]
+          ?:
+           < :: type[none, ctx: 0]
+            variable: $a :: type[none, ctx: 0]
+            int: 65536 :: type[int64, ctx: 0]
+           int: 3 :: type[int64, ctx: 0]
+           ?:
+            < :: type[none, ctx: 0]
+             variable: $a :: type[none, ctx: 0]
+             int: 524288 :: type[int64, ctx: 0]
+            int: 4 :: type[int64, ctx: 0]
+            ?:
+             < :: type[none, ctx: 0]
+              variable: $a :: type[none, ctx: 0]
+              int: 8388608 :: type[int64, ctx: 0]
+             int: 5 :: type[int64, ctx: 0]
+             int: 6 :: type[int64, ctx: 0]
+      =
+       map: @distance :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+        variable: $b :: type[none, ctx: 0]
+       call: count :: type[none, ctx: 0]
+      if
+       == :: type[none, ctx: 0]
+        variable: $s :: type[none, ctx: 0]
+        map: @end :: type[none, ctx: 0]
+         builtin: pid :: type[none, ctx: 0]
+         variable: $d :: type[none, ctx: 0]
+         variable: $i :: type[none, ctx: 0]
+         variable: $p :: type[none, ctx: 0]
+         variable: $o :: type[none, ctx: 0]
+       then
+        =
+         map: @contiguous :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         call: count :: type[none, ctx: 0]
+        =
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         + :: type[none, ctx: 0]
+          map: @run :: type[none, ctx: 0]
+           builtin: pid :: type[none, ctx: 0]
+           variable: $d :: type[none, ctx: 0]
+           variable: $i :: type[none, ctx: 0]
+           variable: $p :: type[none, ctx: 0]
+           variable: $o :: type[none, ctx: 0]
+          / :: type[none, ctx: 0]
+           + :: type[none, ctx: 0]
+            variable: $n :: type[none, ctx: 0]
+            int: 8191 :: type[int64, ctx: 0]
+           int: 8192 :: type[int64, ctx: 0]
+       else
+        =
+         variable: $r :: type[none, ctx: 0]
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+        =
+         variable: $b :: type[none, ctx: 0]
+         ?:
+          <= :: type[none, ctx: 0]
+           variable: $r :: type[none, ctx: 0]
+           int: 1 :: type[int64, ctx: 0]
+          int: 0 :: type[int64, ctx: 0]
+          ?:
+           <= :: type[none, ctx: 0]
+            variable: $r :: type[none, ctx: 0]
+            int: 2 :: type[int64, ctx: 0]
+           int: 1 :: type[int64, ctx: 0]
+           ?:
+            <= :: type[none, ctx: 0]
+             variable: $r :: type[none, ctx: 0]
+             int: 4 :: type[int64, ctx: 0]
+            int: 2 :: type[int64, ctx: 0]
+            ?:
+             <= :: type[none, ctx: 0]
+              variable: $r :: type[none, ctx: 0]
+              int: 8 :: type[int64, ctx: 0]
+             int: 3 :: type[int64, ctx: 0]
+             ?:
+              <= :: type[none, ctx: 0]
+               variable: $r :: type[none, ctx: 0]
+               int: 16 :: type[int64, ctx: 0]
+              int: 4 :: type[int64, ctx: 0]
+              ?:
+               <= :: type[none, ctx: 0]
+                variable: $r :: type[none, ctx: 0]
+                int: 32 :: type[int64, ctx: 0]
+               int: 5 :: type[int64, ctx: 0]
+               ?:
+                <= :: type[none, ctx: 0]
+                 variable: $r :: type[none, ctx: 0]
+                 int: 64 :: type[int64, ctx: 0]
+                int: 6 :: type[int64, ctx: 0]
+                int: 7 :: type[int64, ctx: 0]
+        =
+         map: @runs :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+          variable: $b :: type[none, ctx: 0]
+         call: count :: type[none, ctx: 0]
+        =
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         / :: type[none, ctx: 0]
+          + :: type[none, ctx: 0]
+           variable: $n :: type[none, ctx: 0]
+           int: 8191 :: type[int64, ctx: 0]
+          int: 8192 :: type[int64, ctx: 0]
+     else
+      =
+       map: @run :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+       / :: type[none, ctx: 0]
+        + :: type[none, ctx: 0]
+         variable: $n :: type[none, ctx: 0]
+         int: 8191 :: type[int64, ctx: 0]
+        int: 8192 :: type[int64, ctx: 0]
+    =
+     map: @seen :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     int: 1 :: type[int64, ctx: 0]
+    =
+     map: @last :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     variable: $s :: type[none, ctx: 0]
+    =
+     map: @end :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     + :: type[none, ctx: 0]
+      variable: $s :: type[none, ctx: 0]
+      variable: $n :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+ END
+  call: clear :: type[none, ctx: 0]
+   map: @seen :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @last :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @end :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @in :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @dev :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @off :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @op :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @ph :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+
+
+AST after: Semantic
+-------------------
+Program
+ BEGIN
+  =
+   map: @phase :: type[int64, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  call: printf :: type[none, ctx: 0]
+   string: AUDIT_TRACE_READY\n :: type[string[19], ctx: 0]
+ tracepoint:syscalls:sys_enter_getpgid
+  pred
+   && :: type[unsigned int64, ctx: 0, AS(user)]
+    && :: type[unsigned int64, ctx: 0]
+     == :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+      string: audit_phase :: type[string[12], ctx: 0, AS(kernel)]
+     < :: type[int64, ctx: 0, AS(user)]
+      (int32)
+       .
+        dereference
+         builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+        pid
+      int: -1000 :: type[int64, ctx: 0]
+    > :: type[int64, ctx: 0, AS(user)]
+     (int32)
+      .
+       dereference
+        builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+       pid
+     int: -1100 :: type[int64, ctx: 0]
+  =
+   map: @phase :: type[int64, ctx: 0]
+   - :: type[int64, ctx: 0, AS(user)]
+    int: -1000 :: type[int64, ctx: 0]
+    (int32)
+     .
+      dereference
+       builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+      pid
+  call: printf :: type[none, ctx: 0]
+   string: PHASE %d\n :: type[string[10], ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+ kprobe:vfs_read
+  pred
+   == :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+    string: postgres :: type[string[9], ctx: 0, AS(kernel)]
+  =
+   variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+   (struct file *)
+    builtin: arg0 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  =
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+  =
+   map: @names :: type[string[64], ctx: 0, AS(kernel)]
+    map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+    map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+   call: str :: type[string[64], ctx: 0, AS(kernel)]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+         f_path
+        dentry
+      d_name
+     name
+ kprobe:vfs_write
+  pred
+   == :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+    string: postgres :: type[string[9], ctx: 0, AS(kernel)]
+  =
+   variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+   (struct file *)
+    builtin: arg0 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   int: 1 :: type[int64, ctx: 0]
+  =
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+  =
+   map: @names :: type[string[64], ctx: 0, AS(kernel)]
+    map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+    map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+   call: str :: type[string[64], ctx: 0, AS(kernel)]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+         f_path
+        dentry
+      d_name
+     name
+ kretprobe:vfs_read
+ kretprobe:vfs_write
+  pred
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  if
+   > :: type[int64, ctx: 0, AS(kernel)]
+    (int64)
+     builtin: retval :: type[unsigned int64, ctx: 0, AS(kernel)]
+    int: 0 :: type[int64, ctx: 0]
+   then
+    =
+     variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $p :: type[int64, ctx: 0]
+     map: @ph :: type[int64, ctx: 0]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $o :: type[int64, ctx: 0]
+     map: @op :: type[int64, ctx: 0]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+     (unsigned int64)
+      builtin: retval :: type[unsigned int64, ctx: 0, AS(kernel)]
+    =
+     map: @ops :: type[count, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     call: count :: type[count, ctx: 0]
+    =
+     map: @bytes :: type[sum, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     call: sum :: type[sum, ctx: 0]
+      variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+    if
+     map: @seen :: type[int64, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     then
+      =
+       variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+       map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+      =
+       variable: $a :: type[unsigned int64, ctx: 0]
+       ?:
+        > :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+        - :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+        - :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+      =
+       variable: $b :: type[int64, ctx: 0]
+       ?:
+        == :: type[unsigned int64, ctx: 0]
+         variable: $a :: type[unsigned int64, ctx: 0]
+         int: 0 :: type[int64, ctx: 0]
+        int: 0 :: type[int64, ctx: 0]
+        ?:
+         == :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+          + :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 8192 :: type[int64, ctx: 0]
+         int: 1 :: type[int64, ctx: 0]
+         ?:
+          == :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+           + :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 8192 :: type[int64, ctx: 0]
+          int: 2 :: type[int64, ctx: 0]
+          ?:
+           < :: type[unsigned int64, ctx: 0]
+            variable: $a :: type[unsigned int64, ctx: 0]
+            int: 65536 :: type[int64, ctx: 0]
+           int: 3 :: type[int64, ctx: 0]
+           ?:
+            < :: type[unsigned int64, ctx: 0]
+             variable: $a :: type[unsigned int64, ctx: 0]
+             int: 524288 :: type[int64, ctx: 0]
+            int: 4 :: type[int64, ctx: 0]
+            ?:
+             < :: type[unsigned int64, ctx: 0]
+              variable: $a :: type[unsigned int64, ctx: 0]
+              int: 8388608 :: type[int64, ctx: 0]
+             int: 5 :: type[int64, ctx: 0]
+             int: 6 :: type[int64, ctx: 0]
+      =
+       map: @distance :: type[count, ctx: 0]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+        variable: $b :: type[int64, ctx: 0]
+       call: count :: type[count, ctx: 0]
+      if
+       == :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+        map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+         builtin: pid :: type[unsigned int64, ctx: 0]
+         variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $p :: type[int64, ctx: 0]
+         variable: $o :: type[int64, ctx: 0]
+       then
+        =
+         map: @contiguous :: type[count, ctx: 0]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         call: count :: type[count, ctx: 0]
+        =
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         + :: type[unsigned int64, ctx: 0, AS(kernel)]
+          map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+           builtin: pid :: type[unsigned int64, ctx: 0]
+           variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $p :: type[int64, ctx: 0]
+           variable: $o :: type[int64, ctx: 0]
+          / :: type[unsigned int64, ctx: 0, AS(kernel)]
+           + :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 8191 :: type[int64, ctx: 0]
+           int: 8192 :: type[int64, ctx: 0]
+       else
+        =
+         variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+        =
+         variable: $b :: type[int64, ctx: 0]
+         ?:
+          <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 1 :: type[int64, ctx: 0]
+          int: 0 :: type[int64, ctx: 0]
+          ?:
+           <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 2 :: type[int64, ctx: 0]
+           int: 1 :: type[int64, ctx: 0]
+           ?:
+            <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+             variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+             int: 4 :: type[int64, ctx: 0]
+            int: 2 :: type[int64, ctx: 0]
+            ?:
+             <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+              variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+              int: 8 :: type[int64, ctx: 0]
+             int: 3 :: type[int64, ctx: 0]
+             ?:
+              <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+               variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+               int: 16 :: type[int64, ctx: 0]
+              int: 4 :: type[int64, ctx: 0]
+              ?:
+               <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+                variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+                int: 32 :: type[int64, ctx: 0]
+               int: 5 :: type[int64, ctx: 0]
+               ?:
+                <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+                 variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+                 int: 64 :: type[int64, ctx: 0]
+                int: 6 :: type[int64, ctx: 0]
+                int: 7 :: type[int64, ctx: 0]
+        =
+         map: @runs :: type[count, ctx: 0]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+          variable: $b :: type[int64, ctx: 0]
+         call: count :: type[count, ctx: 0]
+        =
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         / :: type[unsigned int64, ctx: 0, AS(kernel)]
+          + :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 8191 :: type[int64, ctx: 0]
+          int: 8192 :: type[int64, ctx: 0]
+     else
+      =
+       map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+       / :: type[unsigned int64, ctx: 0, AS(kernel)]
+        + :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+         int: 8191 :: type[int64, ctx: 0]
+        int: 8192 :: type[int64, ctx: 0]
+    =
+     map: @seen :: type[int64, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     int: 1 :: type[int64, ctx: 0]
+    =
+     map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+    =
+     map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     + :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: delete :: type[none, ctx: 0]
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+ END
+  call: clear :: type[none, ctx: 0]
+   map: @seen :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @op :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @ph :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+
+
+AST after: NodeCounter
+-------------------
+Program
+ BEGIN
+  =
+   map: @phase :: type[int64, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  call: printf :: type[none, ctx: 0]
+   string: AUDIT_TRACE_READY\n :: type[string[19], ctx: 0]
+ tracepoint:syscalls:sys_enter_getpgid
+  pred
+   && :: type[unsigned int64, ctx: 0, AS(user)]
+    && :: type[unsigned int64, ctx: 0]
+     == :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+      string: audit_phase :: type[string[12], ctx: 0, AS(kernel)]
+     < :: type[int64, ctx: 0, AS(user)]
+      (int32)
+       .
+        dereference
+         builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+        pid
+      int: -1000 :: type[int64, ctx: 0]
+    > :: type[int64, ctx: 0, AS(user)]
+     (int32)
+      .
+       dereference
+        builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+       pid
+     int: -1100 :: type[int64, ctx: 0]
+  =
+   map: @phase :: type[int64, ctx: 0]
+   - :: type[int64, ctx: 0, AS(user)]
+    int: -1000 :: type[int64, ctx: 0]
+    (int32)
+     .
+      dereference
+       builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+      pid
+  call: printf :: type[none, ctx: 0]
+   string: PHASE %d\n :: type[string[10], ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+ kprobe:vfs_read
+  pred
+   == :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+    string: postgres :: type[string[9], ctx: 0, AS(kernel)]
+  =
+   variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+   (struct file *)
+    builtin: arg0 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  =
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+  =
+   map: @names :: type[string[64], ctx: 0, AS(kernel)]
+    map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+    map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+   call: str :: type[string[64], ctx: 0, AS(kernel)]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+         f_path
+        dentry
+      d_name
+     name
+ kprobe:vfs_write
+  pred
+   == :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+    string: postgres :: type[string[9], ctx: 0, AS(kernel)]
+  =
+   variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+   (struct file *)
+    builtin: arg0 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   int: 1 :: type[int64, ctx: 0]
+  =
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+  =
+   map: @names :: type[string[64], ctx: 0, AS(kernel)]
+    map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+    map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+   call: str :: type[string[64], ctx: 0, AS(kernel)]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+         f_path
+        dentry
+      d_name
+     name
+ kretprobe:vfs_read
+ kretprobe:vfs_write
+  pred
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  if
+   > :: type[int64, ctx: 0, AS(kernel)]
+    (int64)
+     builtin: retval :: type[unsigned int64, ctx: 0, AS(kernel)]
+    int: 0 :: type[int64, ctx: 0]
+   then
+    =
+     variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $p :: type[int64, ctx: 0]
+     map: @ph :: type[int64, ctx: 0]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $o :: type[int64, ctx: 0]
+     map: @op :: type[int64, ctx: 0]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+     (unsigned int64)
+      builtin: retval :: type[unsigned int64, ctx: 0, AS(kernel)]
+    =
+     map: @ops :: type[count, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     call: count :: type[count, ctx: 0]
+    =
+     map: @bytes :: type[sum, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     call: sum :: type[sum, ctx: 0]
+      variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+    if
+     map: @seen :: type[int64, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     then
+      =
+       variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+       map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+      =
+       variable: $a :: type[unsigned int64, ctx: 0]
+       ?:
+        > :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+        - :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+        - :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+      =
+       variable: $b :: type[int64, ctx: 0]
+       ?:
+        == :: type[unsigned int64, ctx: 0]
+         variable: $a :: type[unsigned int64, ctx: 0]
+         int: 0 :: type[int64, ctx: 0]
+        int: 0 :: type[int64, ctx: 0]
+        ?:
+         == :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+          + :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 8192 :: type[int64, ctx: 0]
+         int: 1 :: type[int64, ctx: 0]
+         ?:
+          == :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+           + :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 8192 :: type[int64, ctx: 0]
+          int: 2 :: type[int64, ctx: 0]
+          ?:
+           < :: type[unsigned int64, ctx: 0]
+            variable: $a :: type[unsigned int64, ctx: 0]
+            int: 65536 :: type[int64, ctx: 0]
+           int: 3 :: type[int64, ctx: 0]
+           ?:
+            < :: type[unsigned int64, ctx: 0]
+             variable: $a :: type[unsigned int64, ctx: 0]
+             int: 524288 :: type[int64, ctx: 0]
+            int: 4 :: type[int64, ctx: 0]
+            ?:
+             < :: type[unsigned int64, ctx: 0]
+              variable: $a :: type[unsigned int64, ctx: 0]
+              int: 8388608 :: type[int64, ctx: 0]
+             int: 5 :: type[int64, ctx: 0]
+             int: 6 :: type[int64, ctx: 0]
+      =
+       map: @distance :: type[count, ctx: 0]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+        variable: $b :: type[int64, ctx: 0]
+       call: count :: type[count, ctx: 0]
+      if
+       == :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+        map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+         builtin: pid :: type[unsigned int64, ctx: 0]
+         variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $p :: type[int64, ctx: 0]
+         variable: $o :: type[int64, ctx: 0]
+       then
+        =
+         map: @contiguous :: type[count, ctx: 0]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         call: count :: type[count, ctx: 0]
+        =
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         + :: type[unsigned int64, ctx: 0, AS(kernel)]
+          map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+           builtin: pid :: type[unsigned int64, ctx: 0]
+           variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $p :: type[int64, ctx: 0]
+           variable: $o :: type[int64, ctx: 0]
+          / :: type[unsigned int64, ctx: 0, AS(kernel)]
+           + :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 8191 :: type[int64, ctx: 0]
+           int: 8192 :: type[int64, ctx: 0]
+       else
+        =
+         variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+        =
+         variable: $b :: type[int64, ctx: 0]
+         ?:
+          <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 1 :: type[int64, ctx: 0]
+          int: 0 :: type[int64, ctx: 0]
+          ?:
+           <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 2 :: type[int64, ctx: 0]
+           int: 1 :: type[int64, ctx: 0]
+           ?:
+            <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+             variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+             int: 4 :: type[int64, ctx: 0]
+            int: 2 :: type[int64, ctx: 0]
+            ?:
+             <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+              variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+              int: 8 :: type[int64, ctx: 0]
+             int: 3 :: type[int64, ctx: 0]
+             ?:
+              <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+               variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+               int: 16 :: type[int64, ctx: 0]
+              int: 4 :: type[int64, ctx: 0]
+              ?:
+               <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+                variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+                int: 32 :: type[int64, ctx: 0]
+               int: 5 :: type[int64, ctx: 0]
+               ?:
+                <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+                 variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+                 int: 64 :: type[int64, ctx: 0]
+                int: 6 :: type[int64, ctx: 0]
+                int: 7 :: type[int64, ctx: 0]
+        =
+         map: @runs :: type[count, ctx: 0]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+          variable: $b :: type[int64, ctx: 0]
+         call: count :: type[count, ctx: 0]
+        =
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         / :: type[unsigned int64, ctx: 0, AS(kernel)]
+          + :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 8191 :: type[int64, ctx: 0]
+          int: 8192 :: type[int64, ctx: 0]
+     else
+      =
+       map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+       / :: type[unsigned int64, ctx: 0, AS(kernel)]
+        + :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+         int: 8191 :: type[int64, ctx: 0]
+        int: 8192 :: type[int64, ctx: 0]
+    =
+     map: @seen :: type[int64, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     int: 1 :: type[int64, ctx: 0]
+    =
+     map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+    =
+     map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     + :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: delete :: type[none, ctx: 0]
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+ END
+  call: clear :: type[none, ctx: 0]
+   map: @seen :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @op :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @ph :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+
+
+AST after: ResourceAnalyser
+-------------------
+Program
+ BEGIN
+  =
+   map: @phase :: type[int64, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  call: printf :: type[none, ctx: 0]
+   string: AUDIT_TRACE_READY\n :: type[string[19], ctx: 0]
+ tracepoint:syscalls:sys_enter_getpgid
+  pred
+   && :: type[unsigned int64, ctx: 0, AS(user)]
+    && :: type[unsigned int64, ctx: 0]
+     == :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+      string: audit_phase :: type[string[12], ctx: 0, AS(kernel)]
+     < :: type[int64, ctx: 0, AS(user)]
+      (int32)
+       .
+        dereference
+         builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+        pid
+      int: -1000 :: type[int64, ctx: 0]
+    > :: type[int64, ctx: 0, AS(user)]
+     (int32)
+      .
+       dereference
+        builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+       pid
+     int: -1100 :: type[int64, ctx: 0]
+  =
+   map: @phase :: type[int64, ctx: 0]
+   - :: type[int64, ctx: 0, AS(user)]
+    int: -1000 :: type[int64, ctx: 0]
+    (int32)
+     .
+      dereference
+       builtin: args :: type[struct _tracepoint_syscalls_sys_enter_getpgid, ctx: 1, AS(user)]
+      pid
+  call: printf :: type[none, ctx: 0]
+   string: PHASE %d\n :: type[string[10], ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+ kprobe:vfs_read
+  pred
+   == :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+    string: postgres :: type[string[9], ctx: 0, AS(kernel)]
+  =
+   variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+   (struct file *)
+    builtin: arg0 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  =
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+  =
+   map: @names :: type[string[64], ctx: 0, AS(kernel)]
+    map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+    map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+   call: str :: type[string[64], ctx: 0, AS(kernel)]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+         f_path
+        dentry
+      d_name
+     name
+ kprobe:vfs_write
+  pred
+   == :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: comm :: type[string[16], ctx: 0, AS(kernel)]
+    string: postgres :: type[string[9], ctx: 0, AS(kernel)]
+  =
+   variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+   (struct file *)
+    builtin: arg0 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[unsigned int64, ctx: 0, AS(kernel)]
+  =
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   int: 1 :: type[int64, ctx: 0]
+  =
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+  =
+   map: @names :: type[string[64], ctx: 0, AS(kernel)]
+    map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+    map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+     builtin: tid :: type[unsigned int64, ctx: 0]
+   call: str :: type[string[64], ctx: 0, AS(kernel)]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[struct file *, ctx: 0, AS(kernel)]
+         f_path
+        dentry
+      d_name
+     name
+ kretprobe:vfs_read
+ kretprobe:vfs_write
+  pred
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  if
+   > :: type[int64, ctx: 0, AS(kernel)]
+    (int64)
+     builtin: retval :: type[unsigned int64, ctx: 0, AS(kernel)]
+    int: 0 :: type[int64, ctx: 0]
+   then
+    =
+     variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $p :: type[int64, ctx: 0]
+     map: @ph :: type[int64, ctx: 0]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $o :: type[int64, ctx: 0]
+     map: @op :: type[int64, ctx: 0]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+     map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: tid :: type[unsigned int64, ctx: 0]
+    =
+     variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+     (unsigned int64)
+      builtin: retval :: type[unsigned int64, ctx: 0, AS(kernel)]
+    =
+     map: @ops :: type[count, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     call: count :: type[count, ctx: 0]
+    =
+     map: @bytes :: type[sum, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     call: sum :: type[sum, ctx: 0]
+      variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+    if
+     map: @seen :: type[int64, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     then
+      =
+       variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+       map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+      =
+       variable: $a :: type[unsigned int64, ctx: 0]
+       ?:
+        > :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+        - :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+        - :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+      =
+       variable: $b :: type[int64, ctx: 0]
+       ?:
+        == :: type[unsigned int64, ctx: 0]
+         variable: $a :: type[unsigned int64, ctx: 0]
+         int: 0 :: type[int64, ctx: 0]
+        int: 0 :: type[int64, ctx: 0]
+        ?:
+         == :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+          + :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 8192 :: type[int64, ctx: 0]
+         int: 1 :: type[int64, ctx: 0]
+         ?:
+          == :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $prev :: type[unsigned int64, ctx: 0, AS(kernel)]
+           + :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 8192 :: type[int64, ctx: 0]
+          int: 2 :: type[int64, ctx: 0]
+          ?:
+           < :: type[unsigned int64, ctx: 0]
+            variable: $a :: type[unsigned int64, ctx: 0]
+            int: 65536 :: type[int64, ctx: 0]
+           int: 3 :: type[int64, ctx: 0]
+           ?:
+            < :: type[unsigned int64, ctx: 0]
+             variable: $a :: type[unsigned int64, ctx: 0]
+             int: 524288 :: type[int64, ctx: 0]
+            int: 4 :: type[int64, ctx: 0]
+            ?:
+             < :: type[unsigned int64, ctx: 0]
+              variable: $a :: type[unsigned int64, ctx: 0]
+              int: 8388608 :: type[int64, ctx: 0]
+             int: 5 :: type[int64, ctx: 0]
+             int: 6 :: type[int64, ctx: 0]
+      =
+       map: @distance :: type[count, ctx: 0]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+        variable: $b :: type[int64, ctx: 0]
+       call: count :: type[count, ctx: 0]
+      if
+       == :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+        map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+         builtin: pid :: type[unsigned int64, ctx: 0]
+         variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $p :: type[int64, ctx: 0]
+         variable: $o :: type[int64, ctx: 0]
+       then
+        =
+         map: @contiguous :: type[count, ctx: 0]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         call: count :: type[count, ctx: 0]
+        =
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         + :: type[unsigned int64, ctx: 0, AS(kernel)]
+          map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+           builtin: pid :: type[unsigned int64, ctx: 0]
+           variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $p :: type[int64, ctx: 0]
+           variable: $o :: type[int64, ctx: 0]
+          / :: type[unsigned int64, ctx: 0, AS(kernel)]
+           + :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 8191 :: type[int64, ctx: 0]
+           int: 8192 :: type[int64, ctx: 0]
+       else
+        =
+         variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+        =
+         variable: $b :: type[int64, ctx: 0]
+         ?:
+          <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 1 :: type[int64, ctx: 0]
+          int: 0 :: type[int64, ctx: 0]
+          ?:
+           <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+            variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+            int: 2 :: type[int64, ctx: 0]
+           int: 1 :: type[int64, ctx: 0]
+           ?:
+            <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+             variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+             int: 4 :: type[int64, ctx: 0]
+            int: 2 :: type[int64, ctx: 0]
+            ?:
+             <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+              variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+              int: 8 :: type[int64, ctx: 0]
+             int: 3 :: type[int64, ctx: 0]
+             ?:
+              <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+               variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+               int: 16 :: type[int64, ctx: 0]
+              int: 4 :: type[int64, ctx: 0]
+              ?:
+               <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+                variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+                int: 32 :: type[int64, ctx: 0]
+               int: 5 :: type[int64, ctx: 0]
+               ?:
+                <= :: type[unsigned int64, ctx: 0, AS(kernel)]
+                 variable: $r :: type[unsigned int64, ctx: 0, AS(kernel)]
+                 int: 64 :: type[int64, ctx: 0]
+                int: 6 :: type[int64, ctx: 0]
+                int: 7 :: type[int64, ctx: 0]
+        =
+         map: @runs :: type[count, ctx: 0]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+          variable: $b :: type[int64, ctx: 0]
+         call: count :: type[count, ctx: 0]
+        =
+         map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+          builtin: pid :: type[unsigned int64, ctx: 0]
+          variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+          variable: $p :: type[int64, ctx: 0]
+          variable: $o :: type[int64, ctx: 0]
+         / :: type[unsigned int64, ctx: 0, AS(kernel)]
+          + :: type[unsigned int64, ctx: 0, AS(kernel)]
+           variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+           int: 8191 :: type[int64, ctx: 0]
+          int: 8192 :: type[int64, ctx: 0]
+     else
+      =
+       map: @run :: type[unsigned int64, ctx: 0, AS(kernel)]
+        builtin: pid :: type[unsigned int64, ctx: 0]
+        variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+        variable: $p :: type[int64, ctx: 0]
+        variable: $o :: type[int64, ctx: 0]
+       / :: type[unsigned int64, ctx: 0, AS(kernel)]
+        + :: type[unsigned int64, ctx: 0, AS(kernel)]
+         variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+         int: 8191 :: type[int64, ctx: 0]
+        int: 8192 :: type[int64, ctx: 0]
+    =
+     map: @seen :: type[int64, ctx: 0]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     int: 1 :: type[int64, ctx: 0]
+    =
+     map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+    =
+     map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+      builtin: pid :: type[unsigned int64, ctx: 0]
+      variable: $d :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $i :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $p :: type[int64, ctx: 0]
+      variable: $o :: type[int64, ctx: 0]
+     + :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $s :: type[unsigned int64, ctx: 0, AS(kernel)]
+      variable: $n :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: delete :: type[none, ctx: 0]
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @op :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @ph :: type[int64, ctx: 0]
+    builtin: tid :: type[unsigned int64, ctx: 0]
+ END
+  call: clear :: type[none, ctx: 0]
+   map: @seen :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @last :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @end :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @in :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @dev :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @off :: type[unsigned int64, ctx: 0, AS(kernel)]
+  call: clear :: type[none, ctx: 0]
+   map: @op :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @ph :: type[int64, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @phase :: type[int64, ctx: 0]
+
+; ModuleID = 'bpftrace'
+source_filename = "bpftrace"
+target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+target triple = "bpf-pc-linux"
+
+%printf_t = type { i64 }
+%printf_t.0 = type { i64, i64 }
+%clear_t = type <{ i64, i32 }>
+
+; Function Attrs: nounwind
+declare i64 @llvm.bpf.pseudo(i64 %0, i64 %1) #0
+
+define noundef i64 @BEGIN(ptr nocapture readnone %0) local_unnamed_addr section "s_BEGIN_1" !dbg !3 {
+entry:
+  %key = alloca i32, align 4
+  %printf_args = alloca %printf_t, align 8
+  %"@phase_val" = alloca i64, align 8
+  %"@phase_key" = alloca i64, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@phase_key")
+  store i64 0, ptr %"@phase_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@phase_val")
+  store i64 0, ptr %"@phase_val", align 8
+  %pseudo = tail call i64 @llvm.bpf.pseudo(i64 1, i64 12)
+  %update_elem = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo, ptr nonnull %"@phase_key", ptr nonnull %"@phase_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@phase_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@phase_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %printf_args)
+  store i64 0, ptr %printf_args, align 8
+  %pseudo1 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo1, ptr nonnull %printf_args, i64 8, i64 0)
+  %ringbuf_loss = icmp slt i64 %ringbuf_output, 0
+  br i1 %ringbuf_loss, label %event_loss_counter, label %counter_merge
+
+event_loss_counter:                               ; preds = %entry
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key)
+  store i32 0, ptr %key, align 4
+  %pseudo2 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo2, ptr nonnull %key)
+  %map_lookup_cond.not = icmp eq ptr %lookup_elem, null
+  br i1 %map_lookup_cond.not, label %lookup_merge, label %lookup_success
+
+counter_merge:                                    ; preds = %lookup_merge, %entry
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %printf_args)
+  ret i64 0
+
+lookup_success:                                   ; preds = %event_loss_counter
+  %1 = atomicrmw add ptr %lookup_elem, i64 1 seq_cst, align 8
+  br label %lookup_merge
+
+lookup_merge:                                     ; preds = %event_loss_counter, %lookup_success
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key)
+  br label %counter_merge
+}
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.lifetime.start.p0(i64 immarg %0, ptr nocapture %1) #1
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.lifetime.end.p0(i64 immarg %0, ptr nocapture %1) #1
+
+; Function Attrs: mustprogress nocallback nofree nounwind willreturn memory(argmem: write)
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly %0, i8 %1, i64 %2, i1 immarg %3) #2
+
+define noundef i64 @"tracepoint:syscalls:sys_enter_getpgid"(ptr %0) local_unnamed_addr section "s_tracepoint:syscalls:sys_enter_getpgid_2" !dbg !12 {
+entry:
+  %key = alloca i32, align 4
+  %"@phase_key54" = alloca i64, align 8
+  %printf_args = alloca %printf_t.0, align 8
+  %"@phase_val" = alloca i64, align 8
+  %"@phase_key" = alloca i64, align 8
+  %comm = alloca [16 x i8], align 1
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %comm)
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 1 dereferenceable(16) %comm, i8 0, i64 16, i1 false)
+  %get_comm = call i64 inttoptr (i64 16 to ptr)(ptr nonnull %comm, i64 16)
+  %1 = load i8, ptr %comm, align 1
+  %strcmp.cmp = icmp ne i8 %1, 97
+  %2 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 1
+  %3 = load i8, ptr %2, align 1
+  %strcmp.cmp8 = icmp ne i8 %3, 117
+  %or.cond = select i1 %strcmp.cmp, i1 true, i1 %strcmp.cmp8
+  %4 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 2
+  %5 = load i8, ptr %4, align 1
+  %strcmp.cmp12 = icmp ne i8 %5, 100
+  %or.cond65 = select i1 %or.cond, i1 true, i1 %strcmp.cmp12
+  %6 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 3
+  %7 = load i8, ptr %6, align 1
+  %strcmp.cmp16 = icmp ne i8 %7, 105
+  %or.cond67 = select i1 %or.cond65, i1 true, i1 %strcmp.cmp16
+  %8 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 4
+  %9 = load i8, ptr %8, align 1
+  %strcmp.cmp20 = icmp ne i8 %9, 116
+  %or.cond69 = select i1 %or.cond67, i1 true, i1 %strcmp.cmp20
+  %10 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 5
+  %11 = load i8, ptr %10, align 1
+  %strcmp.cmp24 = icmp ne i8 %11, 95
+  %or.cond71 = select i1 %or.cond69, i1 true, i1 %strcmp.cmp24
+  %12 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 6
+  %13 = load i8, ptr %12, align 1
+  %strcmp.cmp28 = icmp ne i8 %13, 112
+  %or.cond73 = select i1 %or.cond71, i1 true, i1 %strcmp.cmp28
+  %14 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 7
+  %15 = load i8, ptr %14, align 1
+  %strcmp.cmp32 = icmp ne i8 %15, 104
+  %or.cond75 = select i1 %or.cond73, i1 true, i1 %strcmp.cmp32
+  %16 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 8
+  %17 = load i8, ptr %16, align 1
+  %strcmp.cmp36 = icmp ne i8 %17, 97
+  %or.cond77 = select i1 %or.cond75, i1 true, i1 %strcmp.cmp36
+  %18 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 9
+  %19 = load i8, ptr %18, align 1
+  %strcmp.cmp40 = icmp ne i8 %19, 115
+  %or.cond79 = select i1 %or.cond77, i1 true, i1 %strcmp.cmp40
+  %20 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 10
+  %21 = load i8, ptr %20, align 1
+  %strcmp.cmp44 = icmp ne i8 %21, 101
+  %or.cond81 = select i1 %or.cond79, i1 true, i1 %strcmp.cmp44
+  %22 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 11
+  %23 = load i8, ptr %22, align 1
+  %strcmp.cmp48 = icmp ne i8 %23, 0
+  %or.cond83 = select i1 %or.cond81, i1 true, i1 %strcmp.cmp48
+  br i1 %or.cond83, label %"&&_false3", label %"&&_lhs_true1"
+
+common.ret:                                       ; preds = %"&&_merge4", %"&&_false3", %counter_merge
+  ret i64 1
+
+pred_true:                                        ; preds = %"&&_merge4"
+  %24 = load volatile i64, ptr %29, align 8
+  %sext = shl i64 %24, 32
+  %25 = ashr exact i64 %sext, 32
+  %26 = sub nsw i64 -1000, %25
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@phase_key")
+  store i64 0, ptr %"@phase_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@phase_val")
+  store i64 %26, ptr %"@phase_val", align 8
+  %pseudo = call i64 @llvm.bpf.pseudo(i64 1, i64 12)
+  %update_elem = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo, ptr nonnull %"@phase_key", ptr nonnull %"@phase_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@phase_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@phase_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %printf_args)
+  store i64 1, ptr %printf_args, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@phase_key54")
+  store i64 0, ptr %"@phase_key54", align 8
+  %pseudo55 = call i64 @llvm.bpf.pseudo(i64 1, i64 12)
+  %lookup_elem = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo55, ptr nonnull %"@phase_key54")
+  %map_lookup_cond.not = icmp eq ptr %lookup_elem, null
+  br i1 %map_lookup_cond.not, label %lookup_merge, label %lookup_success
+
+"&&_lhs_true1":                                   ; preds = %entry
+  %27 = ptrtoint ptr %0 to i64
+  %28 = add i64 %27, 16
+  %29 = inttoptr i64 %28 to ptr
+  %30 = load volatile i64, ptr %29, align 8
+  %31 = trunc i64 %30 to i32
+  %32 = icmp slt i32 %31, -1000
+  br i1 %32, label %"&&_merge4", label %"&&_false3"
+
+"&&_false3":                                      ; preds = %entry, %"&&_lhs_true1"
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %comm)
+  br label %common.ret
+
+"&&_merge4":                                      ; preds = %"&&_lhs_true1"
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %comm)
+  %33 = load volatile i64, ptr %29, align 8
+  %34 = trunc i64 %33 to i32
+  %35 = icmp sgt i32 %34, -1100
+  br i1 %35, label %pred_true, label %common.ret
+
+lookup_success:                                   ; preds = %pred_true
+  %36 = load i64, ptr %lookup_elem, align 8
+  br label %lookup_merge
+
+lookup_merge:                                     ; preds = %pred_true, %lookup_success
+  %lookup_elem_val.0 = phi i64 [ %36, %lookup_success ], [ 0, %pred_true ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@phase_key54")
+  %37 = getelementptr inbounds %printf_t.0, ptr %printf_args, i64 0, i32 1
+  store i64 %lookup_elem_val.0, ptr %37, align 8
+  %pseudo56 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo56, ptr nonnull %printf_args, i64 16, i64 0)
+  %ringbuf_loss = icmp slt i64 %ringbuf_output, 0
+  br i1 %ringbuf_loss, label %event_loss_counter, label %counter_merge
+
+event_loss_counter:                               ; preds = %lookup_merge
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key)
+  store i32 0, ptr %key, align 4
+  %pseudo57 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem58 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo57, ptr nonnull %key)
+  %map_lookup_cond62.not = icmp eq ptr %lookup_elem58, null
+  br i1 %map_lookup_cond62.not, label %lookup_merge61, label %lookup_success59
+
+counter_merge:                                    ; preds = %lookup_merge61, %lookup_merge
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %printf_args)
+  br label %common.ret
+
+lookup_success59:                                 ; preds = %event_loss_counter
+  %38 = atomicrmw add ptr %lookup_elem58, i64 1 seq_cst, align 8
+  br label %lookup_merge61
+
+lookup_merge61:                                   ; preds = %event_loss_counter, %lookup_success59
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key)
+  br label %counter_merge
+}
+
+define noundef i64 @"kprobe:vfs_read"(ptr %0) local_unnamed_addr section "s_kprobe:vfs_read_3" !dbg !16 {
+entry:
+  %"@in_key64" = alloca i64, align 8
+  %"@dev_key55" = alloca i64, align 8
+  %"@names_key" = alloca [16 x i8], align 1
+  %"struct qstr.name" = alloca i64, align 8
+  %"struct path.dentry" = alloca i64, align 8
+  %str = alloca [64 x i8], align 1
+  %"@ph_val" = alloca i64, align 8
+  %"@ph_key" = alloca i64, align 8
+  %"@phase_key" = alloca i64, align 8
+  %"@op_val" = alloca i64, align 8
+  %"@op_key" = alloca i64, align 8
+  %"@off_val" = alloca i64, align 8
+  %"@off_key" = alloca i64, align 8
+  %deref = alloca i64, align 8
+  %"@dev_val" = alloca i64, align 8
+  %"@dev_key" = alloca i64, align 8
+  %"struct super_block.s_dev" = alloca i32, align 4
+  %"struct inode.i_sb" = alloca i64, align 8
+  %"struct file.f_inode34" = alloca i64, align 8
+  %"@in_val" = alloca i64, align 8
+  %"@in_key" = alloca i64, align 8
+  %"struct inode.i_ino" = alloca i64, align 8
+  %"struct file.f_inode" = alloca i64, align 8
+  %comm = alloca [16 x i8], align 1
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %comm)
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 1 dereferenceable(16) %comm, i8 0, i64 16, i1 false)
+  %get_comm = call i64 inttoptr (i64 16 to ptr)(ptr nonnull %comm, i64 16)
+  %1 = load i8, ptr %comm, align 1
+  %strcmp.cmp = icmp ne i8 %1, 112
+  %2 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 1
+  %3 = load i8, ptr %2, align 1
+  %strcmp.cmp3 = icmp ne i8 %3, 111
+  %or.cond = select i1 %strcmp.cmp, i1 true, i1 %strcmp.cmp3
+  %4 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 2
+  %5 = load i8, ptr %4, align 1
+  %strcmp.cmp7 = icmp ne i8 %5, 115
+  %or.cond76 = select i1 %or.cond, i1 true, i1 %strcmp.cmp7
+  %6 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 3
+  %7 = load i8, ptr %6, align 1
+  %strcmp.cmp11 = icmp ne i8 %7, 116
+  %or.cond78 = select i1 %or.cond76, i1 true, i1 %strcmp.cmp11
+  %8 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 4
+  %9 = load i8, ptr %8, align 1
+  %strcmp.cmp15 = icmp ne i8 %9, 103
+  %or.cond80 = select i1 %or.cond78, i1 true, i1 %strcmp.cmp15
+  %10 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 5
+  %11 = load i8, ptr %10, align 1
+  %strcmp.cmp19 = icmp ne i8 %11, 114
+  %or.cond82 = select i1 %or.cond80, i1 true, i1 %strcmp.cmp19
+  %12 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 6
+  %13 = load i8, ptr %12, align 1
+  %strcmp.cmp23 = icmp ne i8 %13, 101
+  %or.cond84 = select i1 %or.cond82, i1 true, i1 %strcmp.cmp23
+  %14 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 7
+  %15 = load i8, ptr %14, align 1
+  %strcmp.cmp27 = icmp ne i8 %15, 115
+  %or.cond86 = select i1 %or.cond84, i1 true, i1 %strcmp.cmp27
+  %16 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 8
+  %17 = load i8, ptr %16, align 1
+  %strcmp.cmp31 = icmp ne i8 %17, 0
+  %or.cond88 = select i1 %or.cond86, i1 true, i1 %strcmp.cmp31
+  br i1 %or.cond88, label %common.ret, label %pred_true
+
+common.ret:                                       ; preds = %entry, %lookup_merge69
+  ret i64 0
+
+pred_true:                                        ; preds = %entry
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %comm)
+  %18 = getelementptr i64, ptr %0, i64 14
+  %arg0 = load volatile i64, ptr %18, align 8
+  %19 = add i64 %arg0, 32
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct file.f_inode")
+  %probe_read_kernel = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct file.f_inode", i32 8, i64 %19)
+  %20 = load i64, ptr %"struct file.f_inode", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct file.f_inode")
+  %21 = add i64 %20, 64
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct inode.i_ino")
+  %probe_read_kernel33 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct inode.i_ino", i32 8, i64 %21)
+  %22 = load i64, ptr %"struct inode.i_ino", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct inode.i_ino")
+  %get_pid_tgid = call i64 inttoptr (i64 14 to ptr)()
+  %23 = and i64 %get_pid_tgid, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_key")
+  store i64 %23, ptr %"@in_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_val")
+  store i64 %22, ptr %"@in_val", align 8
+  %pseudo = call i64 @llvm.bpf.pseudo(i64 1, i64 5)
+  %update_elem = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo, ptr nonnull %"@in_key", ptr nonnull %"@in_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct file.f_inode34")
+  %probe_read_kernel35 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct file.f_inode34", i32 8, i64 %19)
+  %24 = load i64, ptr %"struct file.f_inode34", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct file.f_inode34")
+  %25 = add i64 %24, 40
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct inode.i_sb")
+  %probe_read_kernel36 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct inode.i_sb", i32 8, i64 %25)
+  %26 = load i64, ptr %"struct inode.i_sb", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct inode.i_sb")
+  %27 = add i64 %26, 16
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct super_block.s_dev")
+  %probe_read_kernel37 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct super_block.s_dev", i32 4, i64 %27)
+  %28 = load i32, ptr %"struct super_block.s_dev", align 4
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct super_block.s_dev")
+  %get_pid_tgid38 = call i64 inttoptr (i64 14 to ptr)()
+  %29 = and i64 %get_pid_tgid38, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@dev_key")
+  store i64 %29, ptr %"@dev_key", align 8
+  %30 = zext i32 %28 to i64
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@dev_val")
+  store i64 %30, ptr %"@dev_val", align 8
+  %pseudo39 = call i64 @llvm.bpf.pseudo(i64 1, i64 2)
+  %update_elem40 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo39, ptr nonnull %"@dev_key", ptr nonnull %"@dev_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@dev_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@dev_key")
+  %31 = getelementptr i64, ptr %0, i64 11
+  %arg3 = load volatile i64, ptr %31, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %deref)
+  %probe_read_kernel41 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %deref, i32 8, i64 %arg3)
+  %32 = load i64, ptr %deref, align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %deref)
+  %get_pid_tgid42 = call i64 inttoptr (i64 14 to ptr)()
+  %33 = and i64 %get_pid_tgid42, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@off_key")
+  store i64 %33, ptr %"@off_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@off_val")
+  store i64 %32, ptr %"@off_val", align 8
+  %pseudo43 = call i64 @llvm.bpf.pseudo(i64 1, i64 8)
+  %update_elem44 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo43, ptr nonnull %"@off_key", ptr nonnull %"@off_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@off_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@off_key")
+  %get_pid_tgid45 = call i64 inttoptr (i64 14 to ptr)()
+  %34 = and i64 %get_pid_tgid45, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@op_key")
+  store i64 %34, ptr %"@op_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@op_val")
+  store i64 0, ptr %"@op_val", align 8
+  %pseudo46 = call i64 @llvm.bpf.pseudo(i64 1, i64 9)
+  %update_elem47 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo46, ptr nonnull %"@op_key", ptr nonnull %"@op_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@op_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@op_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@phase_key")
+  store i64 0, ptr %"@phase_key", align 8
+  %pseudo48 = call i64 @llvm.bpf.pseudo(i64 1, i64 12)
+  %lookup_elem = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo48, ptr nonnull %"@phase_key")
+  %map_lookup_cond.not = icmp eq ptr %lookup_elem, null
+  br i1 %map_lookup_cond.not, label %lookup_merge, label %lookup_success
+
+lookup_success:                                   ; preds = %pred_true
+  %35 = load i64, ptr %lookup_elem, align 8
+  br label %lookup_merge
+
+lookup_merge:                                     ; preds = %pred_true, %lookup_success
+  %lookup_elem_val.0 = phi i64 [ %35, %lookup_success ], [ 0, %pred_true ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@phase_key")
+  %get_pid_tgid49 = call i64 inttoptr (i64 14 to ptr)()
+  %36 = and i64 %get_pid_tgid49, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@ph_key")
+  store i64 %36, ptr %"@ph_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@ph_val")
+  store i64 %lookup_elem_val.0, ptr %"@ph_val", align 8
+  %pseudo50 = call i64 @llvm.bpf.pseudo(i64 1, i64 11)
+  %update_elem51 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo50, ptr nonnull %"@ph_key", ptr nonnull %"@ph_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@ph_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@ph_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %str)
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 1 dereferenceable(64) %str, i8 0, i64 64, i1 false)
+  %37 = add i64 %arg0, 72
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct path.dentry")
+  %probe_read_kernel52 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct path.dentry", i32 8, i64 %37)
+  %38 = load i64, ptr %"struct path.dentry", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct path.dentry")
+  %39 = add i64 %38, 40
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct qstr.name")
+  %probe_read_kernel53 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct qstr.name", i32 8, i64 %39)
+  %40 = load i64, ptr %"struct qstr.name", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct qstr.name")
+  %probe_read_kernel_str = call i64 inttoptr (i64 115 to ptr)(ptr nonnull %str, i32 64, i64 %40)
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@names_key")
+  %get_pid_tgid54 = call i64 inttoptr (i64 14 to ptr)()
+  %41 = and i64 %get_pid_tgid54, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@dev_key55")
+  store i64 %41, ptr %"@dev_key55", align 8
+  %pseudo56 = call i64 @llvm.bpf.pseudo(i64 1, i64 2)
+  %lookup_elem57 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo56, ptr nonnull %"@dev_key55")
+  %map_lookup_cond62.not = icmp eq ptr %lookup_elem57, null
+  br i1 %map_lookup_cond62.not, label %lookup_merge60, label %lookup_success58
+
+lookup_success58:                                 ; preds = %lookup_merge
+  %42 = load i64, ptr %lookup_elem57, align 8
+  br label %lookup_merge60
+
+lookup_merge60:                                   ; preds = %lookup_merge, %lookup_success58
+  %lookup_elem_val61.0 = phi i64 [ %42, %lookup_success58 ], [ 0, %lookup_merge ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@dev_key55")
+  store i64 %lookup_elem_val61.0, ptr %"@names_key", align 8
+  %get_pid_tgid63 = call i64 inttoptr (i64 14 to ptr)()
+  %43 = and i64 %get_pid_tgid63, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_key64")
+  store i64 %43, ptr %"@in_key64", align 8
+  %pseudo65 = call i64 @llvm.bpf.pseudo(i64 1, i64 5)
+  %lookup_elem66 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo65, ptr nonnull %"@in_key64")
+  %map_lookup_cond71.not = icmp eq ptr %lookup_elem66, null
+  br i1 %map_lookup_cond71.not, label %lookup_merge69, label %lookup_success67
+
+lookup_success67:                                 ; preds = %lookup_merge60
+  %44 = load i64, ptr %lookup_elem66, align 8
+  br label %lookup_merge69
+
+lookup_merge69:                                   ; preds = %lookup_merge60, %lookup_success67
+  %lookup_elem_val70.0 = phi i64 [ %44, %lookup_success67 ], [ 0, %lookup_merge60 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_key64")
+  %45 = getelementptr inbounds [16 x i8], ptr %"@names_key", i64 0, i64 8
+  store i64 %lookup_elem_val70.0, ptr %45, align 8
+  %pseudo72 = call i64 @llvm.bpf.pseudo(i64 1, i64 7)
+  %update_elem73 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo72, ptr nonnull %"@names_key", ptr nonnull %str, i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@names_key")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %str)
+  br label %common.ret
+}
+
+define noundef i64 @"kprobe:vfs_write"(ptr %0) local_unnamed_addr section "s_kprobe:vfs_write_4" !dbg !20 {
+entry:
+  %"@in_key64" = alloca i64, align 8
+  %"@dev_key55" = alloca i64, align 8
+  %"@names_key" = alloca [16 x i8], align 1
+  %"struct qstr.name" = alloca i64, align 8
+  %"struct path.dentry" = alloca i64, align 8
+  %str = alloca [64 x i8], align 1
+  %"@ph_val" = alloca i64, align 8
+  %"@ph_key" = alloca i64, align 8
+  %"@phase_key" = alloca i64, align 8
+  %"@op_val" = alloca i64, align 8
+  %"@op_key" = alloca i64, align 8
+  %"@off_val" = alloca i64, align 8
+  %"@off_key" = alloca i64, align 8
+  %deref = alloca i64, align 8
+  %"@dev_val" = alloca i64, align 8
+  %"@dev_key" = alloca i64, align 8
+  %"struct super_block.s_dev" = alloca i32, align 4
+  %"struct inode.i_sb" = alloca i64, align 8
+  %"struct file.f_inode34" = alloca i64, align 8
+  %"@in_val" = alloca i64, align 8
+  %"@in_key" = alloca i64, align 8
+  %"struct inode.i_ino" = alloca i64, align 8
+  %"struct file.f_inode" = alloca i64, align 8
+  %comm = alloca [16 x i8], align 1
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %comm)
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 1 dereferenceable(16) %comm, i8 0, i64 16, i1 false)
+  %get_comm = call i64 inttoptr (i64 16 to ptr)(ptr nonnull %comm, i64 16)
+  %1 = load i8, ptr %comm, align 1
+  %strcmp.cmp = icmp ne i8 %1, 112
+  %2 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 1
+  %3 = load i8, ptr %2, align 1
+  %strcmp.cmp3 = icmp ne i8 %3, 111
+  %or.cond = select i1 %strcmp.cmp, i1 true, i1 %strcmp.cmp3
+  %4 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 2
+  %5 = load i8, ptr %4, align 1
+  %strcmp.cmp7 = icmp ne i8 %5, 115
+  %or.cond76 = select i1 %or.cond, i1 true, i1 %strcmp.cmp7
+  %6 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 3
+  %7 = load i8, ptr %6, align 1
+  %strcmp.cmp11 = icmp ne i8 %7, 116
+  %or.cond78 = select i1 %or.cond76, i1 true, i1 %strcmp.cmp11
+  %8 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 4
+  %9 = load i8, ptr %8, align 1
+  %strcmp.cmp15 = icmp ne i8 %9, 103
+  %or.cond80 = select i1 %or.cond78, i1 true, i1 %strcmp.cmp15
+  %10 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 5
+  %11 = load i8, ptr %10, align 1
+  %strcmp.cmp19 = icmp ne i8 %11, 114
+  %or.cond82 = select i1 %or.cond80, i1 true, i1 %strcmp.cmp19
+  %12 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 6
+  %13 = load i8, ptr %12, align 1
+  %strcmp.cmp23 = icmp ne i8 %13, 101
+  %or.cond84 = select i1 %or.cond82, i1 true, i1 %strcmp.cmp23
+  %14 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 7
+  %15 = load i8, ptr %14, align 1
+  %strcmp.cmp27 = icmp ne i8 %15, 115
+  %or.cond86 = select i1 %or.cond84, i1 true, i1 %strcmp.cmp27
+  %16 = getelementptr inbounds [16 x i8], ptr %comm, i64 0, i64 8
+  %17 = load i8, ptr %16, align 1
+  %strcmp.cmp31 = icmp ne i8 %17, 0
+  %or.cond88 = select i1 %or.cond86, i1 true, i1 %strcmp.cmp31
+  br i1 %or.cond88, label %common.ret, label %pred_true
+
+common.ret:                                       ; preds = %entry, %lookup_merge69
+  ret i64 0
+
+pred_true:                                        ; preds = %entry
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %comm)
+  %18 = getelementptr i64, ptr %0, i64 14
+  %arg0 = load volatile i64, ptr %18, align 8
+  %19 = add i64 %arg0, 32
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct file.f_inode")
+  %probe_read_kernel = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct file.f_inode", i32 8, i64 %19)
+  %20 = load i64, ptr %"struct file.f_inode", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct file.f_inode")
+  %21 = add i64 %20, 64
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct inode.i_ino")
+  %probe_read_kernel33 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct inode.i_ino", i32 8, i64 %21)
+  %22 = load i64, ptr %"struct inode.i_ino", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct inode.i_ino")
+  %get_pid_tgid = call i64 inttoptr (i64 14 to ptr)()
+  %23 = and i64 %get_pid_tgid, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_key")
+  store i64 %23, ptr %"@in_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_val")
+  store i64 %22, ptr %"@in_val", align 8
+  %pseudo = call i64 @llvm.bpf.pseudo(i64 1, i64 5)
+  %update_elem = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo, ptr nonnull %"@in_key", ptr nonnull %"@in_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct file.f_inode34")
+  %probe_read_kernel35 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct file.f_inode34", i32 8, i64 %19)
+  %24 = load i64, ptr %"struct file.f_inode34", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct file.f_inode34")
+  %25 = add i64 %24, 40
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct inode.i_sb")
+  %probe_read_kernel36 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct inode.i_sb", i32 8, i64 %25)
+  %26 = load i64, ptr %"struct inode.i_sb", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct inode.i_sb")
+  %27 = add i64 %26, 16
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct super_block.s_dev")
+  %probe_read_kernel37 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct super_block.s_dev", i32 4, i64 %27)
+  %28 = load i32, ptr %"struct super_block.s_dev", align 4
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct super_block.s_dev")
+  %get_pid_tgid38 = call i64 inttoptr (i64 14 to ptr)()
+  %29 = and i64 %get_pid_tgid38, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@dev_key")
+  store i64 %29, ptr %"@dev_key", align 8
+  %30 = zext i32 %28 to i64
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@dev_val")
+  store i64 %30, ptr %"@dev_val", align 8
+  %pseudo39 = call i64 @llvm.bpf.pseudo(i64 1, i64 2)
+  %update_elem40 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo39, ptr nonnull %"@dev_key", ptr nonnull %"@dev_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@dev_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@dev_key")
+  %31 = getelementptr i64, ptr %0, i64 11
+  %arg3 = load volatile i64, ptr %31, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %deref)
+  %probe_read_kernel41 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %deref, i32 8, i64 %arg3)
+  %32 = load i64, ptr %deref, align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %deref)
+  %get_pid_tgid42 = call i64 inttoptr (i64 14 to ptr)()
+  %33 = and i64 %get_pid_tgid42, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@off_key")
+  store i64 %33, ptr %"@off_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@off_val")
+  store i64 %32, ptr %"@off_val", align 8
+  %pseudo43 = call i64 @llvm.bpf.pseudo(i64 1, i64 8)
+  %update_elem44 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo43, ptr nonnull %"@off_key", ptr nonnull %"@off_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@off_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@off_key")
+  %get_pid_tgid45 = call i64 inttoptr (i64 14 to ptr)()
+  %34 = and i64 %get_pid_tgid45, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@op_key")
+  store i64 %34, ptr %"@op_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@op_val")
+  store i64 1, ptr %"@op_val", align 8
+  %pseudo46 = call i64 @llvm.bpf.pseudo(i64 1, i64 9)
+  %update_elem47 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo46, ptr nonnull %"@op_key", ptr nonnull %"@op_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@op_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@op_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@phase_key")
+  store i64 0, ptr %"@phase_key", align 8
+  %pseudo48 = call i64 @llvm.bpf.pseudo(i64 1, i64 12)
+  %lookup_elem = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo48, ptr nonnull %"@phase_key")
+  %map_lookup_cond.not = icmp eq ptr %lookup_elem, null
+  br i1 %map_lookup_cond.not, label %lookup_merge, label %lookup_success
+
+lookup_success:                                   ; preds = %pred_true
+  %35 = load i64, ptr %lookup_elem, align 8
+  br label %lookup_merge
+
+lookup_merge:                                     ; preds = %pred_true, %lookup_success
+  %lookup_elem_val.0 = phi i64 [ %35, %lookup_success ], [ 0, %pred_true ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@phase_key")
+  %get_pid_tgid49 = call i64 inttoptr (i64 14 to ptr)()
+  %36 = and i64 %get_pid_tgid49, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@ph_key")
+  store i64 %36, ptr %"@ph_key", align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@ph_val")
+  store i64 %lookup_elem_val.0, ptr %"@ph_val", align 8
+  %pseudo50 = call i64 @llvm.bpf.pseudo(i64 1, i64 11)
+  %update_elem51 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo50, ptr nonnull %"@ph_key", ptr nonnull %"@ph_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@ph_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@ph_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %str)
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 1 dereferenceable(64) %str, i8 0, i64 64, i1 false)
+  %37 = add i64 %arg0, 72
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct path.dentry")
+  %probe_read_kernel52 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct path.dentry", i32 8, i64 %37)
+  %38 = load i64, ptr %"struct path.dentry", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct path.dentry")
+  %39 = add i64 %38, 40
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"struct qstr.name")
+  %probe_read_kernel53 = call i64 inttoptr (i64 113 to ptr)(ptr nonnull %"struct qstr.name", i32 8, i64 %39)
+  %40 = load i64, ptr %"struct qstr.name", align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"struct qstr.name")
+  %probe_read_kernel_str = call i64 inttoptr (i64 115 to ptr)(ptr nonnull %str, i32 64, i64 %40)
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@names_key")
+  %get_pid_tgid54 = call i64 inttoptr (i64 14 to ptr)()
+  %41 = and i64 %get_pid_tgid54, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@dev_key55")
+  store i64 %41, ptr %"@dev_key55", align 8
+  %pseudo56 = call i64 @llvm.bpf.pseudo(i64 1, i64 2)
+  %lookup_elem57 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo56, ptr nonnull %"@dev_key55")
+  %map_lookup_cond62.not = icmp eq ptr %lookup_elem57, null
+  br i1 %map_lookup_cond62.not, label %lookup_merge60, label %lookup_success58
+
+lookup_success58:                                 ; preds = %lookup_merge
+  %42 = load i64, ptr %lookup_elem57, align 8
+  br label %lookup_merge60
+
+lookup_merge60:                                   ; preds = %lookup_merge, %lookup_success58
+  %lookup_elem_val61.0 = phi i64 [ %42, %lookup_success58 ], [ 0, %lookup_merge ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@dev_key55")
+  store i64 %lookup_elem_val61.0, ptr %"@names_key", align 8
+  %get_pid_tgid63 = call i64 inttoptr (i64 14 to ptr)()
+  %43 = and i64 %get_pid_tgid63, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_key64")
+  store i64 %43, ptr %"@in_key64", align 8
+  %pseudo65 = call i64 @llvm.bpf.pseudo(i64 1, i64 5)
+  %lookup_elem66 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo65, ptr nonnull %"@in_key64")
+  %map_lookup_cond71.not = icmp eq ptr %lookup_elem66, null
+  br i1 %map_lookup_cond71.not, label %lookup_merge69, label %lookup_success67
+
+lookup_success67:                                 ; preds = %lookup_merge60
+  %44 = load i64, ptr %lookup_elem66, align 8
+  br label %lookup_merge69
+
+lookup_merge69:                                   ; preds = %lookup_merge60, %lookup_success67
+  %lookup_elem_val70.0 = phi i64 [ %44, %lookup_success67 ], [ 0, %lookup_merge60 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_key64")
+  %45 = getelementptr inbounds [16 x i8], ptr %"@names_key", i64 0, i64 8
+  store i64 %lookup_elem_val70.0, ptr %45, align 8
+  %pseudo72 = call i64 @llvm.bpf.pseudo(i64 1, i64 7)
+  %update_elem73 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo72, ptr nonnull %"@names_key", ptr nonnull %str, i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@names_key")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %str)
+  br label %common.ret
+}
+
+define noundef i64 @"kretprobe:vfs_read,kretprobe:vfs_write"(ptr %0) local_unnamed_addr section "s_kretprobe:vfs_read,kretprobe:vfs_write_5" !dbg !24 {
+entry:
+  %"@ph_key265" = alloca i64, align 8
+  %"@op_key261" = alloca i64, align 8
+  %"@off_key257" = alloca i64, align 8
+  %"@dev_key253" = alloca i64, align 8
+  %"@in_key250" = alloca i64, align 8
+  %"@end_val" = alloca i64, align 8
+  %"@end_key245" = alloca [40 x i8], align 1
+  %"@last_val" = alloca i64, align 8
+  %"@last_key241" = alloca [40 x i8], align 1
+  %"@seen_val" = alloca i64, align 8
+  %"@seen_key237" = alloca [40 x i8], align 1
+  %"@run_val234" = alloca i64, align 8
+  %"@run_key232" = alloca [40 x i8], align 1
+  %"@run_val229" = alloca i64, align 8
+  %"@run_key227" = alloca [40 x i8], align 1
+  %initial_value224 = alloca i64, align 8
+  %"@runs_key" = alloca [48 x i8], align 1
+  %"@run_key165" = alloca [40 x i8], align 1
+  %"@run_val" = alloca i64, align 8
+  %"@run_key161" = alloca [40 x i8], align 1
+  %"@run_key" = alloca [40 x i8], align 1
+  %initial_value150 = alloca i64, align 8
+  %"@contiguous_key" = alloca [40 x i8], align 1
+  %"@end_key" = alloca [40 x i8], align 1
+  %initial_value127 = alloca i64, align 8
+  %"@distance_key" = alloca [48 x i8], align 1
+  %"@last_key" = alloca [40 x i8], align 1
+  %"@seen_key" = alloca [40 x i8], align 1
+  %initial_value60 = alloca i64, align 8
+  %"@bytes_key" = alloca [40 x i8], align 1
+  %initial_value = alloca i64, align 8
+  %"@ops_key" = alloca [40 x i8], align 1
+  %"@off_key" = alloca i64, align 8
+  %"@op_key" = alloca i64, align 8
+  %"@ph_key" = alloca i64, align 8
+  %"@in_key10" = alloca i64, align 8
+  %"@dev_key" = alloca i64, align 8
+  %"@in_key" = alloca i64, align 8
+  %get_pid_tgid = tail call i64 inttoptr (i64 14 to ptr)()
+  %1 = and i64 %get_pid_tgid, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_key")
+  store i64 %1, ptr %"@in_key", align 8
+  %pseudo = tail call i64 @llvm.bpf.pseudo(i64 1, i64 5)
+  %lookup_elem = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo, ptr nonnull %"@in_key")
+  %map_lookup_cond.not = icmp eq ptr %lookup_elem, null
+  br i1 %map_lookup_cond.not, label %lookup_merge.thread, label %lookup_merge
+
+lookup_merge.thread:                              ; preds = %entry
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_key")
+  br label %common.ret
+
+common.ret:                                       ; preds = %lookup_merge.thread, %lookup_merge, %if_end
+  ret i64 0
+
+pred_true:                                        ; preds = %lookup_merge
+  %2 = getelementptr i64, ptr %0, i64 10
+  %retval = load volatile i64, ptr %2, align 8
+  %3 = icmp sgt i64 %retval, 0
+  br i1 %3, label %if_body, label %if_end
+
+lookup_merge:                                     ; preds = %entry
+  %4 = load i64, ptr %lookup_elem, align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_key")
+  %predcond = icmp eq i64 %4, 0
+  br i1 %predcond, label %common.ret, label %pred_true
+
+if_body:                                          ; preds = %pred_true
+  %get_pid_tgid1 = call i64 inttoptr (i64 14 to ptr)()
+  %5 = and i64 %get_pid_tgid1, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@dev_key")
+  store i64 %5, ptr %"@dev_key", align 8
+  %pseudo2 = call i64 @llvm.bpf.pseudo(i64 1, i64 2)
+  %lookup_elem3 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo2, ptr nonnull %"@dev_key")
+  %map_lookup_cond8.not = icmp eq ptr %lookup_elem3, null
+  br i1 %map_lookup_cond8.not, label %lookup_merge6, label %lookup_success4
+
+if_end:                                           ; preds = %if_end64, %pred_true
+  %get_pid_tgid249 = call i64 inttoptr (i64 14 to ptr)()
+  %6 = and i64 %get_pid_tgid249, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_key250")
+  store i64 %6, ptr %"@in_key250", align 8
+  %pseudo251 = call i64 @llvm.bpf.pseudo(i64 1, i64 5)
+  %delete_elem = call i64 inttoptr (i64 3 to ptr)(i64 %pseudo251, ptr nonnull %"@in_key250")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_key250")
+  %get_pid_tgid252 = call i64 inttoptr (i64 14 to ptr)()
+  %7 = and i64 %get_pid_tgid252, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@dev_key253")
+  store i64 %7, ptr %"@dev_key253", align 8
+  %pseudo254 = call i64 @llvm.bpf.pseudo(i64 1, i64 2)
+  %delete_elem255 = call i64 inttoptr (i64 3 to ptr)(i64 %pseudo254, ptr nonnull %"@dev_key253")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@dev_key253")
+  %get_pid_tgid256 = call i64 inttoptr (i64 14 to ptr)()
+  %8 = and i64 %get_pid_tgid256, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@off_key257")
+  store i64 %8, ptr %"@off_key257", align 8
+  %pseudo258 = call i64 @llvm.bpf.pseudo(i64 1, i64 8)
+  %delete_elem259 = call i64 inttoptr (i64 3 to ptr)(i64 %pseudo258, ptr nonnull %"@off_key257")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@off_key257")
+  %get_pid_tgid260 = call i64 inttoptr (i64 14 to ptr)()
+  %9 = and i64 %get_pid_tgid260, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@op_key261")
+  store i64 %9, ptr %"@op_key261", align 8
+  %pseudo262 = call i64 @llvm.bpf.pseudo(i64 1, i64 9)
+  %delete_elem263 = call i64 inttoptr (i64 3 to ptr)(i64 %pseudo262, ptr nonnull %"@op_key261")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@op_key261")
+  %get_pid_tgid264 = call i64 inttoptr (i64 14 to ptr)()
+  %10 = and i64 %get_pid_tgid264, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@ph_key265")
+  store i64 %10, ptr %"@ph_key265", align 8
+  %pseudo266 = call i64 @llvm.bpf.pseudo(i64 1, i64 11)
+  %delete_elem267 = call i64 inttoptr (i64 3 to ptr)(i64 %pseudo266, ptr nonnull %"@ph_key265")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@ph_key265")
+  br label %common.ret
+
+lookup_success4:                                  ; preds = %if_body
+  %11 = load i64, ptr %lookup_elem3, align 8
+  br label %lookup_merge6
+
+lookup_merge6:                                    ; preds = %if_body, %lookup_success4
+  %lookup_elem_val7.0 = phi i64 [ %11, %lookup_success4 ], [ 0, %if_body ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@dev_key")
+  %get_pid_tgid9 = call i64 inttoptr (i64 14 to ptr)()
+  %12 = and i64 %get_pid_tgid9, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@in_key10")
+  store i64 %12, ptr %"@in_key10", align 8
+  %pseudo11 = call i64 @llvm.bpf.pseudo(i64 1, i64 5)
+  %lookup_elem12 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo11, ptr nonnull %"@in_key10")
+  %map_lookup_cond17.not = icmp eq ptr %lookup_elem12, null
+  br i1 %map_lookup_cond17.not, label %lookup_merge15, label %lookup_success13
+
+lookup_success13:                                 ; preds = %lookup_merge6
+  %13 = load i64, ptr %lookup_elem12, align 8
+  br label %lookup_merge15
+
+lookup_merge15:                                   ; preds = %lookup_merge6, %lookup_success13
+  %lookup_elem_val16.0 = phi i64 [ %13, %lookup_success13 ], [ 0, %lookup_merge6 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@in_key10")
+  %get_pid_tgid18 = call i64 inttoptr (i64 14 to ptr)()
+  %14 = and i64 %get_pid_tgid18, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@ph_key")
+  store i64 %14, ptr %"@ph_key", align 8
+  %pseudo19 = call i64 @llvm.bpf.pseudo(i64 1, i64 11)
+  %lookup_elem20 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo19, ptr nonnull %"@ph_key")
+  %map_lookup_cond25.not = icmp eq ptr %lookup_elem20, null
+  br i1 %map_lookup_cond25.not, label %lookup_merge23, label %lookup_success21
+
+lookup_success21:                                 ; preds = %lookup_merge15
+  %15 = load i64, ptr %lookup_elem20, align 8
+  br label %lookup_merge23
+
+lookup_merge23:                                   ; preds = %lookup_merge15, %lookup_success21
+  %lookup_elem_val24.0 = phi i64 [ %15, %lookup_success21 ], [ 0, %lookup_merge15 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@ph_key")
+  %get_pid_tgid26 = call i64 inttoptr (i64 14 to ptr)()
+  %16 = and i64 %get_pid_tgid26, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@op_key")
+  store i64 %16, ptr %"@op_key", align 8
+  %pseudo27 = call i64 @llvm.bpf.pseudo(i64 1, i64 9)
+  %lookup_elem28 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo27, ptr nonnull %"@op_key")
+  %map_lookup_cond33.not = icmp eq ptr %lookup_elem28, null
+  br i1 %map_lookup_cond33.not, label %lookup_merge31, label %lookup_success29
+
+lookup_success29:                                 ; preds = %lookup_merge23
+  %17 = load i64, ptr %lookup_elem28, align 8
+  br label %lookup_merge31
+
+lookup_merge31:                                   ; preds = %lookup_merge23, %lookup_success29
+  %lookup_elem_val32.0 = phi i64 [ %17, %lookup_success29 ], [ 0, %lookup_merge23 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@op_key")
+  %get_pid_tgid34 = call i64 inttoptr (i64 14 to ptr)()
+  %18 = and i64 %get_pid_tgid34, 4294967295
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@off_key")
+  store i64 %18, ptr %"@off_key", align 8
+  %pseudo35 = call i64 @llvm.bpf.pseudo(i64 1, i64 8)
+  %lookup_elem36 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo35, ptr nonnull %"@off_key")
+  %map_lookup_cond41.not = icmp eq ptr %lookup_elem36, null
+  br i1 %map_lookup_cond41.not, label %lookup_merge39, label %lookup_success37
+
+lookup_success37:                                 ; preds = %lookup_merge31
+  %19 = load i64, ptr %lookup_elem36, align 8
+  br label %lookup_merge39
+
+lookup_merge39:                                   ; preds = %lookup_merge31, %lookup_success37
+  %lookup_elem_val40.0 = phi i64 [ %19, %lookup_success37 ], [ 0, %lookup_merge31 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@off_key")
+  %retval42 = load volatile i64, ptr %2, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@ops_key")
+  %get_pid_tgid43 = call i64 inttoptr (i64 14 to ptr)()
+  %20 = lshr i64 %get_pid_tgid43, 32
+  store i64 %20, ptr %"@ops_key", align 8
+  %21 = getelementptr inbounds [40 x i8], ptr %"@ops_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %21, align 8
+  %22 = getelementptr inbounds [40 x i8], ptr %"@ops_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %22, align 8
+  %23 = getelementptr inbounds [40 x i8], ptr %"@ops_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %23, align 8
+  %24 = getelementptr inbounds [40 x i8], ptr %"@ops_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %24, align 8
+  %pseudo44 = call i64 @llvm.bpf.pseudo(i64 1, i64 10)
+  %lookup_elem45 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo44, ptr nonnull %"@ops_key")
+  %map_lookup_cond50.not = icmp eq ptr %lookup_elem45, null
+  br i1 %map_lookup_cond50.not, label %lookup_failure47, label %lookup_success46
+
+lookup_success46:                                 ; preds = %lookup_merge39
+  %25 = load i64, ptr %lookup_elem45, align 8
+  %26 = add i64 %25, 1
+  store i64 %26, ptr %lookup_elem45, align 8
+  br label %lookup_merge48
+
+lookup_failure47:                                 ; preds = %lookup_merge39
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %initial_value)
+  store i64 1, ptr %initial_value, align 8
+  %pseudo51 = call i64 @llvm.bpf.pseudo(i64 1, i64 10)
+  %update_elem = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo51, ptr nonnull %"@ops_key", ptr nonnull %initial_value, i64 1)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %initial_value)
+  br label %lookup_merge48
+
+lookup_merge48:                                   ; preds = %lookup_failure47, %lookup_success46
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@ops_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@bytes_key")
+  %get_pid_tgid52 = call i64 inttoptr (i64 14 to ptr)()
+  %27 = lshr i64 %get_pid_tgid52, 32
+  store i64 %27, ptr %"@bytes_key", align 8
+  %28 = getelementptr inbounds [40 x i8], ptr %"@bytes_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %28, align 8
+  %29 = getelementptr inbounds [40 x i8], ptr %"@bytes_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %29, align 8
+  %30 = getelementptr inbounds [40 x i8], ptr %"@bytes_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %30, align 8
+  %31 = getelementptr inbounds [40 x i8], ptr %"@bytes_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %31, align 8
+  %pseudo53 = call i64 @llvm.bpf.pseudo(i64 1, i64 0)
+  %lookup_elem54 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo53, ptr nonnull %"@bytes_key")
+  %map_lookup_cond59.not = icmp eq ptr %lookup_elem54, null
+  br i1 %map_lookup_cond59.not, label %lookup_failure56, label %lookup_success55
+
+lookup_success55:                                 ; preds = %lookup_merge48
+  %32 = load i64, ptr %lookup_elem54, align 8
+  %33 = add i64 %32, %retval42
+  store i64 %33, ptr %lookup_elem54, align 8
+  br label %lookup_merge57
+
+lookup_failure56:                                 ; preds = %lookup_merge48
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %initial_value60)
+  store i64 %retval42, ptr %initial_value60, align 8
+  %pseudo61 = call i64 @llvm.bpf.pseudo(i64 1, i64 0)
+  %update_elem62 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo61, ptr nonnull %"@bytes_key", ptr nonnull %initial_value60, i64 1)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %initial_value60)
+  br label %lookup_merge57
+
+lookup_merge57:                                   ; preds = %lookup_failure56, %lookup_success55
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@bytes_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@seen_key")
+  %get_pid_tgid65 = call i64 inttoptr (i64 14 to ptr)()
+  %34 = lshr i64 %get_pid_tgid65, 32
+  store i64 %34, ptr %"@seen_key", align 8
+  %35 = getelementptr inbounds [40 x i8], ptr %"@seen_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %35, align 8
+  %36 = getelementptr inbounds [40 x i8], ptr %"@seen_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %36, align 8
+  %37 = getelementptr inbounds [40 x i8], ptr %"@seen_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %37, align 8
+  %38 = getelementptr inbounds [40 x i8], ptr %"@seen_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %38, align 8
+  %pseudo66 = call i64 @llvm.bpf.pseudo(i64 1, i64 15)
+  %lookup_elem67 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo66, ptr nonnull %"@seen_key")
+  %map_lookup_cond72.not = icmp eq ptr %lookup_elem67, null
+  br i1 %map_lookup_cond72.not, label %lookup_merge70.thread, label %lookup_merge70
+
+lookup_merge70.thread:                            ; preds = %lookup_merge57
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@seen_key")
+  br label %else_body
+
+if_body63:                                        ; preds = %lookup_merge70
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@last_key")
+  %get_pid_tgid74 = call i64 inttoptr (i64 14 to ptr)()
+  %39 = lshr i64 %get_pid_tgid74, 32
+  store i64 %39, ptr %"@last_key", align 8
+  %40 = getelementptr inbounds [40 x i8], ptr %"@last_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %40, align 8
+  %41 = getelementptr inbounds [40 x i8], ptr %"@last_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %41, align 8
+  %42 = getelementptr inbounds [40 x i8], ptr %"@last_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %42, align 8
+  %43 = getelementptr inbounds [40 x i8], ptr %"@last_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %43, align 8
+  %pseudo75 = call i64 @llvm.bpf.pseudo(i64 1, i64 6)
+  %lookup_elem76 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo75, ptr nonnull %"@last_key")
+  %map_lookup_cond81.not = icmp eq ptr %lookup_elem76, null
+  br i1 %map_lookup_cond81.not, label %lookup_merge79, label %lookup_success77
+
+if_end64:                                         ; preds = %lookup_merge158, %lookup_merge221, %else_body
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@seen_key237")
+  %get_pid_tgid238 = call i64 inttoptr (i64 14 to ptr)()
+  %44 = lshr i64 %get_pid_tgid238, 32
+  store i64 %44, ptr %"@seen_key237", align 8
+  %45 = getelementptr inbounds [40 x i8], ptr %"@seen_key237", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %45, align 8
+  %46 = getelementptr inbounds [40 x i8], ptr %"@seen_key237", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %46, align 8
+  %47 = getelementptr inbounds [40 x i8], ptr %"@seen_key237", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %47, align 8
+  %48 = getelementptr inbounds [40 x i8], ptr %"@seen_key237", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %48, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@seen_val")
+  store i64 1, ptr %"@seen_val", align 8
+  %pseudo239 = call i64 @llvm.bpf.pseudo(i64 1, i64 15)
+  %update_elem240 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo239, ptr nonnull %"@seen_key237", ptr nonnull %"@seen_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@seen_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@seen_key237")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@last_key241")
+  %get_pid_tgid242 = call i64 inttoptr (i64 14 to ptr)()
+  %49 = lshr i64 %get_pid_tgid242, 32
+  store i64 %49, ptr %"@last_key241", align 8
+  %50 = getelementptr inbounds [40 x i8], ptr %"@last_key241", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %50, align 8
+  %51 = getelementptr inbounds [40 x i8], ptr %"@last_key241", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %51, align 8
+  %52 = getelementptr inbounds [40 x i8], ptr %"@last_key241", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %52, align 8
+  %53 = getelementptr inbounds [40 x i8], ptr %"@last_key241", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %53, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@last_val")
+  store i64 %lookup_elem_val40.0, ptr %"@last_val", align 8
+  %pseudo243 = call i64 @llvm.bpf.pseudo(i64 1, i64 6)
+  %update_elem244 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo243, ptr nonnull %"@last_key241", ptr nonnull %"@last_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@last_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@last_key241")
+  %54 = add i64 %retval42, %lookup_elem_val40.0
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@end_key245")
+  %get_pid_tgid246 = call i64 inttoptr (i64 14 to ptr)()
+  %55 = lshr i64 %get_pid_tgid246, 32
+  store i64 %55, ptr %"@end_key245", align 8
+  %56 = getelementptr inbounds [40 x i8], ptr %"@end_key245", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %56, align 8
+  %57 = getelementptr inbounds [40 x i8], ptr %"@end_key245", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %57, align 8
+  %58 = getelementptr inbounds [40 x i8], ptr %"@end_key245", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %58, align 8
+  %59 = getelementptr inbounds [40 x i8], ptr %"@end_key245", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %59, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@end_val")
+  store i64 %54, ptr %"@end_val", align 8
+  %pseudo247 = call i64 @llvm.bpf.pseudo(i64 1, i64 4)
+  %update_elem248 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo247, ptr nonnull %"@end_key245", ptr nonnull %"@end_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@end_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@end_key245")
+  br label %if_end
+
+lookup_merge70:                                   ; preds = %lookup_merge57
+  %60 = load i64, ptr %lookup_elem67, align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@seen_key")
+  %true_cond73.not = icmp eq i64 %60, 0
+  br i1 %true_cond73.not, label %else_body, label %if_body63
+
+else_body:                                        ; preds = %lookup_merge70.thread, %lookup_merge70
+  %61 = add i64 %retval42, 8191
+  %62 = lshr i64 %61, 13
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@run_key232")
+  %get_pid_tgid233 = call i64 inttoptr (i64 14 to ptr)()
+  %63 = lshr i64 %get_pid_tgid233, 32
+  store i64 %63, ptr %"@run_key232", align 8
+  %64 = getelementptr inbounds [40 x i8], ptr %"@run_key232", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %64, align 8
+  %65 = getelementptr inbounds [40 x i8], ptr %"@run_key232", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %65, align 8
+  %66 = getelementptr inbounds [40 x i8], ptr %"@run_key232", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %66, align 8
+  %67 = getelementptr inbounds [40 x i8], ptr %"@run_key232", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %67, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@run_val234")
+  store i64 %62, ptr %"@run_val234", align 8
+  %pseudo235 = call i64 @llvm.bpf.pseudo(i64 1, i64 13)
+  %update_elem236 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo235, ptr nonnull %"@run_key232", ptr nonnull %"@run_val234", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_val234")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_key232")
+  br label %if_end64
+
+lookup_success77:                                 ; preds = %if_body63
+  %68 = load i64, ptr %lookup_elem76, align 8
+  br label %lookup_merge79
+
+lookup_merge79:                                   ; preds = %if_body63, %lookup_success77
+  %lookup_elem_val80.0 = phi i64 [ %68, %lookup_success77 ], [ 0, %if_body63 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@last_key")
+  %69 = icmp ugt i64 %lookup_elem_val40.0, %lookup_elem_val80.0
+  %70 = sub i64 %lookup_elem_val40.0, %lookup_elem_val80.0
+  %71 = sub i64 %lookup_elem_val80.0, %lookup_elem_val40.0
+  %result.0 = select i1 %69, i64 %70, i64 %71
+  %72 = icmp eq i64 %result.0, 0
+  br i1 %72, label %done85, label %right84
+
+right84:                                          ; preds = %lookup_merge79
+  %73 = add i64 %lookup_elem_val80.0, 8192
+  %74 = icmp eq i64 %lookup_elem_val40.0, %73
+  br i1 %74, label %done85, label %right90
+
+done85:                                           ; preds = %right108, %right102, %right96, %right90, %right84, %lookup_merge79
+  %result86.0 = phi i64 [ 0, %lookup_merge79 ], [ 1, %right84 ], [ 2, %right90 ], [ 3, %right96 ], [ %., %right108 ], [ 4, %right102 ]
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@distance_key")
+  %get_pid_tgid119 = call i64 inttoptr (i64 14 to ptr)()
+  %75 = lshr i64 %get_pid_tgid119, 32
+  store i64 %75, ptr %"@distance_key", align 8
+  %76 = getelementptr inbounds [48 x i8], ptr %"@distance_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %76, align 8
+  %77 = getelementptr inbounds [48 x i8], ptr %"@distance_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %77, align 8
+  %78 = getelementptr inbounds [48 x i8], ptr %"@distance_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %78, align 8
+  %79 = getelementptr inbounds [48 x i8], ptr %"@distance_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %79, align 8
+  %80 = getelementptr inbounds [48 x i8], ptr %"@distance_key", i64 0, i64 40
+  store i64 %result86.0, ptr %80, align 8
+  %pseudo120 = call i64 @llvm.bpf.pseudo(i64 1, i64 3)
+  %lookup_elem121 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo120, ptr nonnull %"@distance_key")
+  %map_lookup_cond126.not = icmp eq ptr %lookup_elem121, null
+  br i1 %map_lookup_cond126.not, label %lookup_failure123, label %lookup_success122
+
+right90:                                          ; preds = %right84
+  %81 = add i64 %lookup_elem_val40.0, 8192
+  %82 = icmp eq i64 %lookup_elem_val80.0, %81
+  br i1 %82, label %done85, label %right96
+
+right96:                                          ; preds = %right90
+  %83 = icmp ult i64 %result.0, 65536
+  br i1 %83, label %done85, label %right102
+
+right102:                                         ; preds = %right96
+  %84 = icmp ult i64 %result.0, 524288
+  br i1 %84, label %done85, label %right108
+
+right108:                                         ; preds = %right102
+  %85 = icmp ult i64 %result.0, 8388608
+  %. = select i1 %85, i64 5, i64 6
+  br label %done85
+
+lookup_success122:                                ; preds = %done85
+  %86 = load i64, ptr %lookup_elem121, align 8
+  %87 = add i64 %86, 1
+  store i64 %87, ptr %lookup_elem121, align 8
+  br label %lookup_merge124
+
+lookup_failure123:                                ; preds = %done85
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %initial_value127)
+  store i64 1, ptr %initial_value127, align 8
+  %pseudo128 = call i64 @llvm.bpf.pseudo(i64 1, i64 3)
+  %update_elem129 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo128, ptr nonnull %"@distance_key", ptr nonnull %initial_value127, i64 1)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %initial_value127)
+  br label %lookup_merge124
+
+lookup_merge124:                                  ; preds = %lookup_failure123, %lookup_success122
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@distance_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@end_key")
+  %get_pid_tgid132 = call i64 inttoptr (i64 14 to ptr)()
+  %88 = lshr i64 %get_pid_tgid132, 32
+  store i64 %88, ptr %"@end_key", align 8
+  %89 = getelementptr inbounds [40 x i8], ptr %"@end_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %89, align 8
+  %90 = getelementptr inbounds [40 x i8], ptr %"@end_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %90, align 8
+  %91 = getelementptr inbounds [40 x i8], ptr %"@end_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %91, align 8
+  %92 = getelementptr inbounds [40 x i8], ptr %"@end_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %92, align 8
+  %pseudo133 = call i64 @llvm.bpf.pseudo(i64 1, i64 4)
+  %lookup_elem134 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo133, ptr nonnull %"@end_key")
+  %map_lookup_cond139.not = icmp eq ptr %lookup_elem134, null
+  br i1 %map_lookup_cond139.not, label %lookup_merge137, label %lookup_success135
+
+if_body130:                                       ; preds = %lookup_merge137
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@contiguous_key")
+  %get_pid_tgid142 = call i64 inttoptr (i64 14 to ptr)()
+  %93 = lshr i64 %get_pid_tgid142, 32
+  store i64 %93, ptr %"@contiguous_key", align 8
+  %94 = getelementptr inbounds [40 x i8], ptr %"@contiguous_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %94, align 8
+  %95 = getelementptr inbounds [40 x i8], ptr %"@contiguous_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %95, align 8
+  %96 = getelementptr inbounds [40 x i8], ptr %"@contiguous_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %96, align 8
+  %97 = getelementptr inbounds [40 x i8], ptr %"@contiguous_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %97, align 8
+  %pseudo143 = call i64 @llvm.bpf.pseudo(i64 1, i64 1)
+  %lookup_elem144 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo143, ptr nonnull %"@contiguous_key")
+  %map_lookup_cond149.not = icmp eq ptr %lookup_elem144, null
+  br i1 %map_lookup_cond149.not, label %lookup_failure146, label %lookup_success145
+
+lookup_success135:                                ; preds = %lookup_merge124
+  %98 = load i64, ptr %lookup_elem134, align 8
+  br label %lookup_merge137
+
+lookup_merge137:                                  ; preds = %lookup_merge124, %lookup_success135
+  %lookup_elem_val138.0 = phi i64 [ %98, %lookup_success135 ], [ 0, %lookup_merge124 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@end_key")
+  %99 = icmp eq i64 %lookup_elem_val40.0, %lookup_elem_val138.0
+  br i1 %99, label %if_body130, label %else_body141
+
+else_body141:                                     ; preds = %lookup_merge137
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@run_key165")
+  %get_pid_tgid166 = call i64 inttoptr (i64 14 to ptr)()
+  %100 = lshr i64 %get_pid_tgid166, 32
+  store i64 %100, ptr %"@run_key165", align 8
+  %101 = getelementptr inbounds [40 x i8], ptr %"@run_key165", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %101, align 8
+  %102 = getelementptr inbounds [40 x i8], ptr %"@run_key165", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %102, align 8
+  %103 = getelementptr inbounds [40 x i8], ptr %"@run_key165", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %103, align 8
+  %104 = getelementptr inbounds [40 x i8], ptr %"@run_key165", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %104, align 8
+  %pseudo167 = call i64 @llvm.bpf.pseudo(i64 1, i64 13)
+  %lookup_elem168 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo167, ptr nonnull %"@run_key165")
+  %map_lookup_cond173.not = icmp eq ptr %lookup_elem168, null
+  br i1 %map_lookup_cond173.not, label %lookup_merge171.thread, label %lookup_merge171
+
+lookup_merge171.thread:                           ; preds = %else_body141
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_key165")
+  br label %done176
+
+lookup_success145:                                ; preds = %if_body130
+  %105 = load i64, ptr %lookup_elem144, align 8
+  %106 = add i64 %105, 1
+  store i64 %106, ptr %lookup_elem144, align 8
+  br label %lookup_merge147
+
+lookup_failure146:                                ; preds = %if_body130
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %initial_value150)
+  store i64 1, ptr %initial_value150, align 8
+  %pseudo151 = call i64 @llvm.bpf.pseudo(i64 1, i64 1)
+  %update_elem152 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo151, ptr nonnull %"@contiguous_key", ptr nonnull %initial_value150, i64 1)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %initial_value150)
+  br label %lookup_merge147
+
+lookup_merge147:                                  ; preds = %lookup_failure146, %lookup_success145
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@contiguous_key")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@run_key")
+  %get_pid_tgid153 = call i64 inttoptr (i64 14 to ptr)()
+  %107 = lshr i64 %get_pid_tgid153, 32
+  store i64 %107, ptr %"@run_key", align 8
+  %108 = getelementptr inbounds [40 x i8], ptr %"@run_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %108, align 8
+  %109 = getelementptr inbounds [40 x i8], ptr %"@run_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %109, align 8
+  %110 = getelementptr inbounds [40 x i8], ptr %"@run_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %110, align 8
+  %111 = getelementptr inbounds [40 x i8], ptr %"@run_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %111, align 8
+  %pseudo154 = call i64 @llvm.bpf.pseudo(i64 1, i64 13)
+  %lookup_elem155 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo154, ptr nonnull %"@run_key")
+  %map_lookup_cond160.not = icmp eq ptr %lookup_elem155, null
+  br i1 %map_lookup_cond160.not, label %lookup_merge158, label %lookup_success156
+
+lookup_success156:                                ; preds = %lookup_merge147
+  %112 = load i64, ptr %lookup_elem155, align 8
+  br label %lookup_merge158
+
+lookup_merge158:                                  ; preds = %lookup_merge147, %lookup_success156
+  %lookup_elem_val159.0 = phi i64 [ %112, %lookup_success156 ], [ 0, %lookup_merge147 ]
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_key")
+  %113 = add i64 %retval42, 8191
+  %114 = lshr i64 %113, 13
+  %115 = add i64 %lookup_elem_val159.0, %114
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@run_key161")
+  %get_pid_tgid162 = call i64 inttoptr (i64 14 to ptr)()
+  %116 = lshr i64 %get_pid_tgid162, 32
+  store i64 %116, ptr %"@run_key161", align 8
+  %117 = getelementptr inbounds [40 x i8], ptr %"@run_key161", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %117, align 8
+  %118 = getelementptr inbounds [40 x i8], ptr %"@run_key161", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %118, align 8
+  %119 = getelementptr inbounds [40 x i8], ptr %"@run_key161", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %119, align 8
+  %120 = getelementptr inbounds [40 x i8], ptr %"@run_key161", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %120, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@run_val")
+  store i64 %115, ptr %"@run_val", align 8
+  %pseudo163 = call i64 @llvm.bpf.pseudo(i64 1, i64 13)
+  %update_elem164 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo163, ptr nonnull %"@run_key161", ptr nonnull %"@run_val", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_val")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_key161")
+  br label %if_end64
+
+lookup_merge171:                                  ; preds = %else_body141
+  %121 = load i64, ptr %lookup_elem168, align 8
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_key165")
+  %122 = icmp ult i64 %121, 2
+  br i1 %122, label %done176, label %right175
+
+right175:                                         ; preds = %lookup_merge171
+  %123 = icmp eq i64 %121, 2
+  br i1 %123, label %done176, label %right181
+
+done176:                                          ; preds = %lookup_merge171.thread, %right205, %right199, %right193, %right187, %right181, %right175, %lookup_merge171
+  %result177.0 = phi i64 [ 0, %lookup_merge171 ], [ 1, %right175 ], [ 2, %right181 ], [ 3, %right187 ], [ 4, %right193 ], [ %.353, %right205 ], [ 5, %right199 ], [ 0, %lookup_merge171.thread ]
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@runs_key")
+  %get_pid_tgid216 = call i64 inttoptr (i64 14 to ptr)()
+  %124 = lshr i64 %get_pid_tgid216, 32
+  store i64 %124, ptr %"@runs_key", align 8
+  %125 = getelementptr inbounds [48 x i8], ptr %"@runs_key", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %125, align 8
+  %126 = getelementptr inbounds [48 x i8], ptr %"@runs_key", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %126, align 8
+  %127 = getelementptr inbounds [48 x i8], ptr %"@runs_key", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %127, align 8
+  %128 = getelementptr inbounds [48 x i8], ptr %"@runs_key", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %128, align 8
+  %129 = getelementptr inbounds [48 x i8], ptr %"@runs_key", i64 0, i64 40
+  store i64 %result177.0, ptr %129, align 8
+  %pseudo217 = call i64 @llvm.bpf.pseudo(i64 1, i64 14)
+  %lookup_elem218 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo217, ptr nonnull %"@runs_key")
+  %map_lookup_cond223.not = icmp eq ptr %lookup_elem218, null
+  br i1 %map_lookup_cond223.not, label %lookup_failure220, label %lookup_success219
+
+right181:                                         ; preds = %right175
+  %130 = icmp ult i64 %121, 5
+  br i1 %130, label %done176, label %right187
+
+right187:                                         ; preds = %right181
+  %131 = icmp ult i64 %121, 9
+  br i1 %131, label %done176, label %right193
+
+right193:                                         ; preds = %right187
+  %132 = icmp ult i64 %121, 17
+  br i1 %132, label %done176, label %right199
+
+right199:                                         ; preds = %right193
+  %133 = icmp ult i64 %121, 33
+  br i1 %133, label %done176, label %right205
+
+right205:                                         ; preds = %right199
+  %134 = icmp ult i64 %121, 65
+  %.353 = select i1 %134, i64 6, i64 7
+  br label %done176
+
+lookup_success219:                                ; preds = %done176
+  %135 = load i64, ptr %lookup_elem218, align 8
+  %136 = add i64 %135, 1
+  store i64 %136, ptr %lookup_elem218, align 8
+  br label %lookup_merge221
+
+lookup_failure220:                                ; preds = %done176
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %initial_value224)
+  store i64 1, ptr %initial_value224, align 8
+  %pseudo225 = call i64 @llvm.bpf.pseudo(i64 1, i64 14)
+  %update_elem226 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo225, ptr nonnull %"@runs_key", ptr nonnull %initial_value224, i64 1)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %initial_value224)
+  br label %lookup_merge221
+
+lookup_merge221:                                  ; preds = %lookup_failure220, %lookup_success219
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@runs_key")
+  %137 = add i64 %retval42, 8191
+  %138 = lshr i64 %137, 13
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@run_key227")
+  %get_pid_tgid228 = call i64 inttoptr (i64 14 to ptr)()
+  %139 = lshr i64 %get_pid_tgid228, 32
+  store i64 %139, ptr %"@run_key227", align 8
+  %140 = getelementptr inbounds [40 x i8], ptr %"@run_key227", i64 0, i64 8
+  store i64 %lookup_elem_val7.0, ptr %140, align 8
+  %141 = getelementptr inbounds [40 x i8], ptr %"@run_key227", i64 0, i64 16
+  store i64 %lookup_elem_val16.0, ptr %141, align 8
+  %142 = getelementptr inbounds [40 x i8], ptr %"@run_key227", i64 0, i64 24
+  store i64 %lookup_elem_val24.0, ptr %142, align 8
+  %143 = getelementptr inbounds [40 x i8], ptr %"@run_key227", i64 0, i64 32
+  store i64 %lookup_elem_val32.0, ptr %143, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"@run_val229")
+  store i64 %138, ptr %"@run_val229", align 8
+  %pseudo230 = call i64 @llvm.bpf.pseudo(i64 1, i64 13)
+  %update_elem231 = call i64 inttoptr (i64 2 to ptr)(i64 %pseudo230, ptr nonnull %"@run_key227", ptr nonnull %"@run_val229", i64 0)
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_val229")
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"@run_key227")
+  br label %if_end64
+}
+
+define noundef i64 @END(ptr nocapture readnone %0) local_unnamed_addr section "s_END_6" !dbg !28 {
+entry:
+  %key91 = alloca i32, align 4
+  %"clear_@phase" = alloca %clear_t, align 8
+  %key79 = alloca i32, align 4
+  %"clear_@ph" = alloca %clear_t, align 8
+  %key67 = alloca i32, align 4
+  %"clear_@op" = alloca %clear_t, align 8
+  %key55 = alloca i32, align 4
+  %"clear_@off" = alloca %clear_t, align 8
+  %key43 = alloca i32, align 4
+  %"clear_@dev" = alloca %clear_t, align 8
+  %key31 = alloca i32, align 4
+  %"clear_@in" = alloca %clear_t, align 8
+  %key19 = alloca i32, align 4
+  %"clear_@end" = alloca %clear_t, align 8
+  %key7 = alloca i32, align 4
+  %"clear_@last" = alloca %clear_t, align 8
+  %key = alloca i32, align 4
+  %"clear_@seen" = alloca %clear_t, align 8
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@seen")
+  store i64 30002, ptr %"clear_@seen", align 8
+  %1 = getelementptr inbounds %clear_t, ptr %"clear_@seen", i64 0, i32 1
+  store i32 15, ptr %1, align 8
+  %pseudo = tail call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo, ptr nonnull %"clear_@seen", i64 12, i64 0)
+  %ringbuf_loss = icmp slt i64 %ringbuf_output, 0
+  br i1 %ringbuf_loss, label %event_loss_counter, label %counter_merge
+
+event_loss_counter:                               ; preds = %entry
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key)
+  store i32 0, ptr %key, align 4
+  %pseudo1 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo1, ptr nonnull %key)
+  %map_lookup_cond.not = icmp eq ptr %lookup_elem, null
+  br i1 %map_lookup_cond.not, label %lookup_merge, label %lookup_success
+
+counter_merge:                                    ; preds = %lookup_merge, %entry
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@seen")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@last")
+  store i64 30002, ptr %"clear_@last", align 8
+  %2 = getelementptr inbounds %clear_t, ptr %"clear_@last", i64 0, i32 1
+  store i32 6, ptr %2, align 8
+  %pseudo2 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output3 = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo2, ptr nonnull %"clear_@last", i64 12, i64 0)
+  %ringbuf_loss6 = icmp slt i64 %ringbuf_output3, 0
+  br i1 %ringbuf_loss6, label %event_loss_counter4, label %counter_merge5
+
+lookup_success:                                   ; preds = %event_loss_counter
+  %3 = atomicrmw add ptr %lookup_elem, i64 1 seq_cst, align 8
+  br label %lookup_merge
+
+lookup_merge:                                     ; preds = %event_loss_counter, %lookup_success
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key)
+  br label %counter_merge
+
+event_loss_counter4:                              ; preds = %counter_merge
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key7)
+  store i32 0, ptr %key7, align 4
+  %pseudo8 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem9 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo8, ptr nonnull %key7)
+  %map_lookup_cond13.not = icmp eq ptr %lookup_elem9, null
+  br i1 %map_lookup_cond13.not, label %lookup_merge12, label %lookup_success10
+
+counter_merge5:                                   ; preds = %lookup_merge12, %counter_merge
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@last")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@end")
+  store i64 30002, ptr %"clear_@end", align 8
+  %4 = getelementptr inbounds %clear_t, ptr %"clear_@end", i64 0, i32 1
+  store i32 4, ptr %4, align 8
+  %pseudo14 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output15 = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo14, ptr nonnull %"clear_@end", i64 12, i64 0)
+  %ringbuf_loss18 = icmp slt i64 %ringbuf_output15, 0
+  br i1 %ringbuf_loss18, label %event_loss_counter16, label %counter_merge17
+
+lookup_success10:                                 ; preds = %event_loss_counter4
+  %5 = atomicrmw add ptr %lookup_elem9, i64 1 seq_cst, align 8
+  br label %lookup_merge12
+
+lookup_merge12:                                   ; preds = %event_loss_counter4, %lookup_success10
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key7)
+  br label %counter_merge5
+
+event_loss_counter16:                             ; preds = %counter_merge5
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key19)
+  store i32 0, ptr %key19, align 4
+  %pseudo20 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem21 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo20, ptr nonnull %key19)
+  %map_lookup_cond25.not = icmp eq ptr %lookup_elem21, null
+  br i1 %map_lookup_cond25.not, label %lookup_merge24, label %lookup_success22
+
+counter_merge17:                                  ; preds = %lookup_merge24, %counter_merge5
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@end")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@in")
+  store i64 30002, ptr %"clear_@in", align 8
+  %6 = getelementptr inbounds %clear_t, ptr %"clear_@in", i64 0, i32 1
+  store i32 5, ptr %6, align 8
+  %pseudo26 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output27 = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo26, ptr nonnull %"clear_@in", i64 12, i64 0)
+  %ringbuf_loss30 = icmp slt i64 %ringbuf_output27, 0
+  br i1 %ringbuf_loss30, label %event_loss_counter28, label %counter_merge29
+
+lookup_success22:                                 ; preds = %event_loss_counter16
+  %7 = atomicrmw add ptr %lookup_elem21, i64 1 seq_cst, align 8
+  br label %lookup_merge24
+
+lookup_merge24:                                   ; preds = %event_loss_counter16, %lookup_success22
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key19)
+  br label %counter_merge17
+
+event_loss_counter28:                             ; preds = %counter_merge17
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key31)
+  store i32 0, ptr %key31, align 4
+  %pseudo32 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem33 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo32, ptr nonnull %key31)
+  %map_lookup_cond37.not = icmp eq ptr %lookup_elem33, null
+  br i1 %map_lookup_cond37.not, label %lookup_merge36, label %lookup_success34
+
+counter_merge29:                                  ; preds = %lookup_merge36, %counter_merge17
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@in")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@dev")
+  store i64 30002, ptr %"clear_@dev", align 8
+  %8 = getelementptr inbounds %clear_t, ptr %"clear_@dev", i64 0, i32 1
+  store i32 2, ptr %8, align 8
+  %pseudo38 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output39 = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo38, ptr nonnull %"clear_@dev", i64 12, i64 0)
+  %ringbuf_loss42 = icmp slt i64 %ringbuf_output39, 0
+  br i1 %ringbuf_loss42, label %event_loss_counter40, label %counter_merge41
+
+lookup_success34:                                 ; preds = %event_loss_counter28
+  %9 = atomicrmw add ptr %lookup_elem33, i64 1 seq_cst, align 8
+  br label %lookup_merge36
+
+lookup_merge36:                                   ; preds = %event_loss_counter28, %lookup_success34
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key31)
+  br label %counter_merge29
+
+event_loss_counter40:                             ; preds = %counter_merge29
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key43)
+  store i32 0, ptr %key43, align 4
+  %pseudo44 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem45 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo44, ptr nonnull %key43)
+  %map_lookup_cond49.not = icmp eq ptr %lookup_elem45, null
+  br i1 %map_lookup_cond49.not, label %lookup_merge48, label %lookup_success46
+
+counter_merge41:                                  ; preds = %lookup_merge48, %counter_merge29
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@dev")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@off")
+  store i64 30002, ptr %"clear_@off", align 8
+  %10 = getelementptr inbounds %clear_t, ptr %"clear_@off", i64 0, i32 1
+  store i32 8, ptr %10, align 8
+  %pseudo50 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output51 = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo50, ptr nonnull %"clear_@off", i64 12, i64 0)
+  %ringbuf_loss54 = icmp slt i64 %ringbuf_output51, 0
+  br i1 %ringbuf_loss54, label %event_loss_counter52, label %counter_merge53
+
+lookup_success46:                                 ; preds = %event_loss_counter40
+  %11 = atomicrmw add ptr %lookup_elem45, i64 1 seq_cst, align 8
+  br label %lookup_merge48
+
+lookup_merge48:                                   ; preds = %event_loss_counter40, %lookup_success46
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key43)
+  br label %counter_merge41
+
+event_loss_counter52:                             ; preds = %counter_merge41
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key55)
+  store i32 0, ptr %key55, align 4
+  %pseudo56 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem57 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo56, ptr nonnull %key55)
+  %map_lookup_cond61.not = icmp eq ptr %lookup_elem57, null
+  br i1 %map_lookup_cond61.not, label %lookup_merge60, label %lookup_success58
+
+counter_merge53:                                  ; preds = %lookup_merge60, %counter_merge41
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@off")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@op")
+  store i64 30002, ptr %"clear_@op", align 8
+  %12 = getelementptr inbounds %clear_t, ptr %"clear_@op", i64 0, i32 1
+  store i32 9, ptr %12, align 8
+  %pseudo62 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output63 = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo62, ptr nonnull %"clear_@op", i64 12, i64 0)
+  %ringbuf_loss66 = icmp slt i64 %ringbuf_output63, 0
+  br i1 %ringbuf_loss66, label %event_loss_counter64, label %counter_merge65
+
+lookup_success58:                                 ; preds = %event_loss_counter52
+  %13 = atomicrmw add ptr %lookup_elem57, i64 1 seq_cst, align 8
+  br label %lookup_merge60
+
+lookup_merge60:                                   ; preds = %event_loss_counter52, %lookup_success58
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key55)
+  br label %counter_merge53
+
+event_loss_counter64:                             ; preds = %counter_merge53
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key67)
+  store i32 0, ptr %key67, align 4
+  %pseudo68 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem69 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo68, ptr nonnull %key67)
+  %map_lookup_cond73.not = icmp eq ptr %lookup_elem69, null
+  br i1 %map_lookup_cond73.not, label %lookup_merge72, label %lookup_success70
+
+counter_merge65:                                  ; preds = %lookup_merge72, %counter_merge53
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@op")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@ph")
+  store i64 30002, ptr %"clear_@ph", align 8
+  %14 = getelementptr inbounds %clear_t, ptr %"clear_@ph", i64 0, i32 1
+  store i32 11, ptr %14, align 8
+  %pseudo74 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output75 = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo74, ptr nonnull %"clear_@ph", i64 12, i64 0)
+  %ringbuf_loss78 = icmp slt i64 %ringbuf_output75, 0
+  br i1 %ringbuf_loss78, label %event_loss_counter76, label %counter_merge77
+
+lookup_success70:                                 ; preds = %event_loss_counter64
+  %15 = atomicrmw add ptr %lookup_elem69, i64 1 seq_cst, align 8
+  br label %lookup_merge72
+
+lookup_merge72:                                   ; preds = %event_loss_counter64, %lookup_success70
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key67)
+  br label %counter_merge65
+
+event_loss_counter76:                             ; preds = %counter_merge65
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key79)
+  store i32 0, ptr %key79, align 4
+  %pseudo80 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem81 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo80, ptr nonnull %key79)
+  %map_lookup_cond85.not = icmp eq ptr %lookup_elem81, null
+  br i1 %map_lookup_cond85.not, label %lookup_merge84, label %lookup_success82
+
+counter_merge77:                                  ; preds = %lookup_merge84, %counter_merge65
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@ph")
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %"clear_@phase")
+  store i64 30002, ptr %"clear_@phase", align 8
+  %16 = getelementptr inbounds %clear_t, ptr %"clear_@phase", i64 0, i32 1
+  store i32 12, ptr %16, align 8
+  %pseudo86 = call i64 @llvm.bpf.pseudo(i64 1, i64 16)
+  %ringbuf_output87 = call i64 inttoptr (i64 130 to ptr)(i64 %pseudo86, ptr nonnull %"clear_@phase", i64 12, i64 0)
+  %ringbuf_loss90 = icmp slt i64 %ringbuf_output87, 0
+  br i1 %ringbuf_loss90, label %event_loss_counter88, label %counter_merge89
+
+lookup_success82:                                 ; preds = %event_loss_counter76
+  %17 = atomicrmw add ptr %lookup_elem81, i64 1 seq_cst, align 8
+  br label %lookup_merge84
+
+lookup_merge84:                                   ; preds = %event_loss_counter76, %lookup_success82
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key79)
+  br label %counter_merge77
+
+event_loss_counter88:                             ; preds = %counter_merge77
+  call void @llvm.lifetime.start.p0(i64 -1, ptr nonnull %key91)
+  store i32 0, ptr %key91, align 4
+  %pseudo92 = call i64 @llvm.bpf.pseudo(i64 1, i64 17)
+  %lookup_elem93 = call ptr inttoptr (i64 1 to ptr)(i64 %pseudo92, ptr nonnull %key91)
+  %map_lookup_cond97.not = icmp eq ptr %lookup_elem93, null
+  br i1 %map_lookup_cond97.not, label %lookup_merge96, label %lookup_success94
+
+counter_merge89:                                  ; preds = %lookup_merge96, %counter_merge77
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %"clear_@phase")
+  ret i64 0
+
+lookup_success94:                                 ; preds = %event_loss_counter88
+  %18 = atomicrmw add ptr %lookup_elem93, i64 1 seq_cst, align 8
+  br label %lookup_merge96
+
+lookup_merge96:                                   ; preds = %event_loss_counter88, %lookup_success94
+  call void @llvm.lifetime.end.p0(i64 -1, ptr nonnull %key91)
+  br label %counter_merge89
+}
+
+attributes #0 = { nounwind }
+attributes #1 = { mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }
+attributes #2 = { mustprogress nocallback nofree nounwind willreturn memory(argmem: write) }
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!2}
+
+!0 = distinct !DICompileUnit(language: DW_LANG_C, file: !1, producer: "bpftrace", isOptimized: false, runtimeVersion: 0, emissionKind: LineTablesOnly)
+!1 = !DIFile(filename: "bpftrace.bpf.o", directory: ".")
+!2 = !{i32 2, !"Debug Info Version", i32 3}
+!3 = distinct !DISubprogram(name: "BEGIN", linkageName: "BEGIN", scope: !1, file: !1, type: !4, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !9)
+!4 = !DISubroutineType(types: !5)
+!5 = !{!6, !7}
+!6 = !DIBasicType(name: "int64", size: 64, encoding: DW_ATE_signed)
+!7 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !8, size: 64)
+!8 = !DIBasicType(name: "int8", size: 8, encoding: DW_ATE_signed)
+!9 = !{!10, !11}
+!10 = !DILocalVariable(name: "var0", scope: !3, file: !1, type: !6)
+!11 = !DILocalVariable(name: "var1", arg: 1, scope: !3, file: !1, type: !7)
+!12 = distinct !DISubprogram(name: "tracepoint_syscalls_sys_enter_getpgid", linkageName: "tracepoint_syscalls_sys_enter_getpgid", scope: !1, file: !1, type: !4, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !13)
+!13 = !{!14, !15}
+!14 = !DILocalVariable(name: "var0", scope: !12, file: !1, type: !6)
+!15 = !DILocalVariable(name: "var1", arg: 1, scope: !12, file: !1, type: !7)
+!16 = distinct !DISubprogram(name: "kprobe_vfs_read", linkageName: "kprobe_vfs_read", scope: !1, file: !1, type: !4, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !17)
+!17 = !{!18, !19}
+!18 = !DILocalVariable(name: "var0", scope: !16, file: !1, type: !6)
+!19 = !DILocalVariable(name: "var1", arg: 1, scope: !16, file: !1, type: !7)
+!20 = distinct !DISubprogram(name: "kprobe_vfs_write", linkageName: "kprobe_vfs_write", scope: !1, file: !1, type: !4, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !21)
+!21 = !{!22, !23}
+!22 = !DILocalVariable(name: "var0", scope: !20, file: !1, type: !6)
+!23 = !DILocalVariable(name: "var1", arg: 1, scope: !20, file: !1, type: !7)
+!24 = distinct !DISubprogram(name: "kretprobe_vfs_read_kretprobe_vfs_write", linkageName: "kretprobe_vfs_read_kretprobe_vfs_write", scope: !1, file: !1, type: !4, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !25)
+!25 = !{!26, !27}
+!26 = !DILocalVariable(name: "var0", scope: !24, file: !1, type: !6)
+!27 = !DILocalVariable(name: "var1", arg: 1, scope: !24, file: !1, type: !7)
+!28 = distinct !DISubprogram(name: "END", linkageName: "END", scope: !1, file: !1, type: !4, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !0, retainedNodes: !29)
+!29 = !{!30, !31}
+!30 = !DILocalVariable(name: "var0", scope: !28, file: !1, type: !6)
+!31 = !DILocalVariable(name: "var1", arg: 1, scope: !28, file: !1, type: !7)

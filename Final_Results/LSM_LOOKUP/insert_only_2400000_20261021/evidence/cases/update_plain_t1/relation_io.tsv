@@ -1,0 +1,41 @@
+case	phase	relation	pg_buffer_reads_total	file_read_blocks	file_write_blocks	file_read_main_blocks	file_write_main_blocks	dirtied	dirty_calls	wal_bytes	fpis	fpi_bytes	wal_block_references	unique_wal_referenced_pages
+update_plain_t1	foreground	public.usertable	1187944	1187921.0	1186990.0	1187759.0	1186957.0	1188694	7954169	4453371415.0	503503	3818565744	3654791	503526
+update_plain_t1	drain	public.usertable	1187944	0.0	51.0	0.0	51.0	0	0					
+update_plain_t1	checkpoint	public.usertable	1187944	0.0	1676.0	0.0	1570.0	0	0					
+update_plain_t1	shutdown	public.usertable	1187944	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	drain	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	shutdown	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	drain	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	shutdown	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	public.usertable_pkey1	1094298	1094298.0	6.0	1094298.0	6.0	28	287	201528.0	26	192400	146	26
+update_plain_t1	drain	public.usertable_pkey1	1094298	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	public.usertable_pkey1	1094298	0.0	22.0	0.0	22.0	0	0					
+update_plain_t1	shutdown	public.usertable_pkey1	1094298	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	ariabc_internal.merkle_node_usertable	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	drain	ariabc_internal.merkle_node_usertable	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	ariabc_internal.merkle_node_usertable	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	shutdown	ariabc_internal.merkle_node_usertable	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	drain	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	shutdown	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	drain	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	shutdown	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	ariabc_internal.merkle_node_usertable_pkey	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	drain	ariabc_internal.merkle_node_usertable_pkey	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	ariabc_internal.merkle_node_usertable_pkey	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	shutdown	ariabc_internal.merkle_node_usertable_pkey	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	ariabc_internal.merkle_node_usertable_prefix_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	drain	ariabc_internal.merkle_node_usertable_prefix_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	ariabc_internal.merkle_node_usertable_prefix_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	shutdown	ariabc_internal.merkle_node_usertable_prefix_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	foreground	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	drain	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	checkpoint	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_plain_t1	shutdown	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					

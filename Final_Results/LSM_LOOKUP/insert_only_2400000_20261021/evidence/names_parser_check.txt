@@ -1,0 +1,1 @@
+PASS: numeric WAL names retain all 24 digits and numeric counters retain integer type

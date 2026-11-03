@@ -1,0 +1,1276 @@
+[
+  {
+    "key": 1,
+    "pid": 1443230,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Actual Startup Time": 3.983,
+          "Actual Total Time": 3.984,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 10) AND (merkle_key_hash(ycsb_key) = '\\x162c998eafc78b92'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 9,
+          "Shared Read Blocks": 14,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 3.808,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 3.153,
+              "Actual Total Time": 3.153,
+              "Actual Rows": 3,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 10) AND (merkle_key_hash(ycsb_key) = '\\x162c998eafc78b92'::bytea))",
+              "Shared Hit Blocks": 8,
+              "Shared Read Blocks": 12,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 3.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.069,
+        "Triggers": [],
+        "Execution Time": 4.043
+      }
+    ],
+    "default_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 10) AND (merkle_key_hash(ycsb_key) = '\\x162c998eafc78b92'::bytea))",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 10) AND (merkle_key_hash(ycsb_key) = '\\x162c998eafc78b92'::bytea))"
+            }
+          ]
+        }
+      }
+    ],
+    "forced": false,
+    "rows": [
+      {
+        "ycsb_key": 1,
+        "field1": "XNfbZiIa8l8t13Rf0yzZ",
+        "field2": "3CNEb4biAcXttCQ0OGaG",
+        "field3": "17NCbUBqnPE53BrqMW4f",
+        "field4": "FzSnvMV8OwT5OgIKB8XM",
+        "field5": "h7nL8ilORUh5JHS5eVtj",
+        "field6": "c7emFQKRKKFASTnfUVpj",
+        "field7": "hV2jIU01PCUntN5qI7gL",
+        "field8": "AkKMymwx3iHgdKXK2ib0",
+        "field9": "dX7kVHSlpbfiCQuvjQbG",
+        "field10": "LKrXsIlVv4x1fQ0Yru2j"
+      }
+    ],
+    "sql": "SELECT * FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=10 AND merkle_key_hash(ycsb_key)=decode('162c998eafc78b92','hex')",
+    "split_sql": "SELECT merkle_key_hash(ycsb_key) AS kh, merkle_tuple_hash(usertable.*) AS th FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=10 AND merkle_key_hash(ycsb_key) BETWEEN decode('162c998eafc78b92','hex') AND decode('162c998eafc78b92','hex')",
+    "split_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 96.08,
+          "Total Cost": 9979.34,
+          "Plan Rows": 2501,
+          "Plan Width": 64,
+          "Actual Startup Time": 0.047,
+          "Actual Total Time": 0.047,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 10) AND (merkle_key_hash(ycsb_key) >= '\\x162c998eafc78b92'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x162c998eafc78b92'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 15,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 95.45,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.024,
+              "Actual Total Time": 0.024,
+              "Actual Rows": 3,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 10) AND (merkle_key_hash(ycsb_key) >= '\\x162c998eafc78b92'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x162c998eafc78b92'::bytea))",
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.077,
+        "Triggers": [],
+        "Execution Time": 0.077
+      }
+    ]
+  },
+  {
+    "key": 2,
+    "pid": 1443230,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Actual Startup Time": 0.669,
+          "Actual Total Time": 0.669,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 32) AND (merkle_key_hash(ycsb_key) = '\\x346f3ca68a2ed600'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 10,
+          "Shared Read Blocks": 4,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.648,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.666,
+              "Actual Total Time": 0.666,
+              "Actual Rows": 2,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 32) AND (merkle_key_hash(ycsb_key) = '\\x346f3ca68a2ed600'::bytea))",
+              "Shared Hit Blocks": 8,
+              "Shared Read Blocks": 4,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.648,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.021,
+        "Triggers": [],
+        "Execution Time": 0.69
+      }
+    ],
+    "default_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 32) AND (merkle_key_hash(ycsb_key) = '\\x346f3ca68a2ed600'::bytea))",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 32) AND (merkle_key_hash(ycsb_key) = '\\x346f3ca68a2ed600'::bytea))"
+            }
+          ]
+        }
+      }
+    ],
+    "forced": false,
+    "rows": [
+      {
+        "ycsb_key": 2,
+        "field1": "bPzWOXSeoFJmGFoZLaPv",
+        "field2": "Nhkex1j5oKQrBcfwLh51",
+        "field3": "tcQkVOtVuaJvb1PcwjHF",
+        "field4": "1370lxicZPajIuW1FJAQ",
+        "field5": "vVwq2uejgVixvACc3gWc",
+        "field6": "syGvd7emxDx1Gd9HCbjU",
+        "field7": "2zvOYgHqz50JHDHI4IB8",
+        "field8": "sxH0p3BtOKsGLre2pUYA",
+        "field9": "FkBppERRKaI15IBuyiSo",
+        "field10": "sK6gFe7pt6VoLs8i68yW"
+      }
+    ],
+    "sql": "SELECT * FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=32 AND merkle_key_hash(ycsb_key)=decode('346f3ca68a2ed600','hex')",
+    "split_sql": "SELECT merkle_key_hash(ycsb_key) AS kh, merkle_tuple_hash(usertable.*) AS th FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=32 AND merkle_key_hash(ycsb_key) BETWEEN decode('346f3ca68a2ed600','hex') AND decode('346f3ca68a2ed600','hex')",
+    "split_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 96.08,
+          "Total Cost": 9979.34,
+          "Plan Rows": 2501,
+          "Plan Width": 64,
+          "Actual Startup Time": 0.026,
+          "Actual Total Time": 0.026,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 32) AND (merkle_key_hash(ycsb_key) >= '\\x346f3ca68a2ed600'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x346f3ca68a2ed600'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 14,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 95.45,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.018,
+              "Actual Total Time": 0.018,
+              "Actual Rows": 2,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 32) AND (merkle_key_hash(ycsb_key) >= '\\x346f3ca68a2ed600'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x346f3ca68a2ed600'::bytea))",
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.023,
+        "Triggers": [],
+        "Execution Time": 0.047
+      }
+    ]
+  },
+  {
+    "key": 1000,
+    "pid": 1443230,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Actual Startup Time": 0.779,
+          "Actual Total Time": 0.78,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 145) AND (merkle_key_hash(ycsb_key) = '\\xd02e442158a48749'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 9,
+          "Shared Read Blocks": 4,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.74,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.777,
+              "Actual Total Time": 0.777,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 145) AND (merkle_key_hash(ycsb_key) = '\\xd02e442158a48749'::bytea))",
+              "Shared Hit Blocks": 8,
+              "Shared Read Blocks": 4,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.74,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.019,
+        "Triggers": [],
+        "Execution Time": 0.801
+      }
+    ],
+    "default_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 145) AND (merkle_key_hash(ycsb_key) = '\\xd02e442158a48749'::bytea))",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 145) AND (merkle_key_hash(ycsb_key) = '\\xd02e442158a48749'::bytea))"
+            }
+          ]
+        }
+      }
+    ],
+    "forced": false,
+    "rows": [
+      {
+        "ycsb_key": 1000,
+        "field1": "MmPuQ8mLiYj8qemMPb6r",
+        "field2": "hlS59298WxDGqLIwCLDJ",
+        "field3": "e02dSWpruL0QYNkM4Y6H",
+        "field4": "NLsgNDdNMn8MhTQHymET",
+        "field5": "v4LFZk1MSwTaaskkptoS",
+        "field6": "Yv0WDjAsQJ82ctKYO95N",
+        "field7": "PKqtdhkniue5yPufyKC9",
+        "field8": "LwEQLJuJZ5UBx78qDtsX",
+        "field9": "osmHFsJPGAbKN0ZI2YOu",
+        "field10": "iTTv8nJswiovrUawkWq8"
+      }
+    ],
+    "sql": "SELECT * FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=145 AND merkle_key_hash(ycsb_key)=decode('d02e442158a48749','hex')",
+    "split_sql": "SELECT merkle_key_hash(ycsb_key) AS kh, merkle_tuple_hash(usertable.*) AS th FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=145 AND merkle_key_hash(ycsb_key) BETWEEN decode('d02e442158a48749','hex') AND decode('d02e442158a48749','hex')",
+    "split_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 96.08,
+          "Total Cost": 9979.34,
+          "Plan Rows": 2501,
+          "Plan Width": 64,
+          "Actual Startup Time": 0.037,
+          "Actual Total Time": 0.037,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 145) AND (merkle_key_hash(ycsb_key) >= '\\xd02e442158a48749'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\xd02e442158a48749'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 13,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 95.45,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.028,
+              "Actual Total Time": 0.028,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 145) AND (merkle_key_hash(ycsb_key) >= '\\xd02e442158a48749'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\xd02e442158a48749'::bytea))",
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.022,
+        "Triggers": [],
+        "Execution Time": 0.058
+      }
+    ]
+  },
+  {
+    "key": 100000000,
+    "pid": 1443230,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Actual Startup Time": 0.622,
+          "Actual Total Time": 0.622,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 40) AND (merkle_key_hash(ycsb_key) = '\\x6dd4b39040d76240'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 10,
+          "Shared Read Blocks": 3,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.596,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.62,
+              "Actual Total Time": 0.62,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 40) AND (merkle_key_hash(ycsb_key) = '\\x6dd4b39040d76240'::bytea))",
+              "Shared Hit Blocks": 9,
+              "Shared Read Blocks": 3,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.596,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.019,
+        "Triggers": [],
+        "Execution Time": 0.642
+      }
+    ],
+    "default_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 40) AND (merkle_key_hash(ycsb_key) = '\\x6dd4b39040d76240'::bytea))",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 40) AND (merkle_key_hash(ycsb_key) = '\\x6dd4b39040d76240'::bytea))"
+            }
+          ]
+        }
+      }
+    ],
+    "forced": false,
+    "rows": [
+      {
+        "ycsb_key": 100000000,
+        "field1": "iOnsd624MAE86PWtzjxU",
+        "field2": "D0sRX4I8IipmO50fSlqP",
+        "field3": "L2lVSID1u7a67h9DpLm4",
+        "field4": "IWxHwqFEg8D04wzInjq5",
+        "field5": "JzjuxZEOQpY7NEkXkSE4",
+        "field6": "HNdc06PVz0oRaFxMPMDE",
+        "field7": "aIaGr8bYPX4gfjlGYqyx",
+        "field8": "zJ9oQ0O1VfxIdakEAWJ1",
+        "field9": "fGcn13Dce53Ic5t7KUSy",
+        "field10": "ekoZy3uUi9SF8dBZvV7y"
+      }
+    ],
+    "sql": "SELECT * FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=40 AND merkle_key_hash(ycsb_key)=decode('6dd4b39040d76240','hex')",
+    "split_sql": "SELECT merkle_key_hash(ycsb_key) AS kh, merkle_tuple_hash(usertable.*) AS th FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=40 AND merkle_key_hash(ycsb_key) BETWEEN decode('6dd4b39040d76240','hex') AND decode('6dd4b39040d76240','hex')",
+    "split_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 96.08,
+          "Total Cost": 9979.34,
+          "Plan Rows": 2501,
+          "Plan Width": 64,
+          "Actual Startup Time": 0.031,
+          "Actual Total Time": 0.031,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 40) AND (merkle_key_hash(ycsb_key) >= '\\x6dd4b39040d76240'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x6dd4b39040d76240'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 13,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 95.45,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.024,
+              "Actual Total Time": 0.024,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 40) AND (merkle_key_hash(ycsb_key) >= '\\x6dd4b39040d76240'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x6dd4b39040d76240'::bytea))",
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.021,
+        "Triggers": [],
+        "Execution Time": 0.051
+      }
+    ]
+  },
+  {
+    "key": 110000001,
+    "pid": 1443230,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Actual Startup Time": 0.539,
+          "Actual Total Time": 0.539,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 7) AND (merkle_key_hash(ycsb_key) = '\\xa8a9ef6767d0a1bf'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 10,
+          "Shared Read Blocks": 3,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.51,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.537,
+              "Actual Total Time": 0.537,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 7) AND (merkle_key_hash(ycsb_key) = '\\xa8a9ef6767d0a1bf'::bytea))",
+              "Shared Hit Blocks": 9,
+              "Shared Read Blocks": 3,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.51,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.02,
+        "Triggers": [],
+        "Execution Time": 0.559
+      }
+    ],
+    "default_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 7) AND (merkle_key_hash(ycsb_key) = '\\xa8a9ef6767d0a1bf'::bytea))",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 7) AND (merkle_key_hash(ycsb_key) = '\\xa8a9ef6767d0a1bf'::bytea))"
+            }
+          ]
+        }
+      }
+    ],
+    "forced": false,
+    "rows": [
+      {
+        "ycsb_key": 110000001,
+        "field1": "PPPPPPPPPPPPPPPPPPPP",
+        "field2": "PPPPPPPPPPPPPPPPPPPP",
+        "field3": "PPPPPPPPPPPPPPPPPPPP",
+        "field4": "PPPPPPPPPPPPPPPPPPPP",
+        "field5": "PPPPPPPPPPPPPPPPPPPP",
+        "field6": "PPPPPPPPPPPPPPPPPPPP",
+        "field7": "PPPPPPPPPPPPPPPPPPPP",
+        "field8": "PPPPPPPPPPPPPPPPPPPP",
+        "field9": "PPPPPPPPPPPPPPPPPPPP",
+        "field10": "PPPPPPPPPPPPPPPPPPPP"
+      }
+    ],
+    "sql": "SELECT * FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=7 AND merkle_key_hash(ycsb_key)=decode('a8a9ef6767d0a1bf','hex')",
+    "split_sql": "SELECT merkle_key_hash(ycsb_key) AS kh, merkle_tuple_hash(usertable.*) AS th FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=7 AND merkle_key_hash(ycsb_key) BETWEEN decode('a8a9ef6767d0a1bf','hex') AND decode('a8a9ef6767d0a1bf','hex')",
+    "split_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 96.08,
+          "Total Cost": 9979.34,
+          "Plan Rows": 2501,
+          "Plan Width": 64,
+          "Actual Startup Time": 0.014,
+          "Actual Total Time": 0.015,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 7) AND (merkle_key_hash(ycsb_key) >= '\\xa8a9ef6767d0a1bf'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\xa8a9ef6767d0a1bf'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 13,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 95.45,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.008,
+              "Actual Total Time": 0.008,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 7) AND (merkle_key_hash(ycsb_key) >= '\\xa8a9ef6767d0a1bf'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\xa8a9ef6767d0a1bf'::bytea))",
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.022,
+        "Triggers": [],
+        "Execution Time": 0.034
+      }
+    ]
+  },
+  {
+    "key": 110025000,
+    "pid": 1443230,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Actual Startup Time": 0.575,
+          "Actual Total Time": 0.576,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 45) AND (merkle_key_hash(ycsb_key) = '\\xc6b306586a529d95'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 9,
+          "Shared Read Blocks": 4,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.548,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.574,
+              "Actual Total Time": 0.574,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 45) AND (merkle_key_hash(ycsb_key) = '\\xc6b306586a529d95'::bytea))",
+              "Shared Hit Blocks": 8,
+              "Shared Read Blocks": 4,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.548,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.019,
+        "Triggers": [],
+        "Execution Time": 0.595
+      }
+    ],
+    "default_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 45) AND (merkle_key_hash(ycsb_key) = '\\xc6b306586a529d95'::bytea))",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 45) AND (merkle_key_hash(ycsb_key) = '\\xc6b306586a529d95'::bytea))"
+            }
+          ]
+        }
+      }
+    ],
+    "forced": false,
+    "rows": [
+      {
+        "ycsb_key": 110025000,
+        "field1": "PPPPPPPPPPPPPPPPPPPP",
+        "field2": "PPPPPPPPPPPPPPPPPPPP",
+        "field3": "PPPPPPPPPPPPPPPPPPPP",
+        "field4": "PPPPPPPPPPPPPPPPPPPP",
+        "field5": "PPPPPPPPPPPPPPPPPPPP",
+        "field6": "PPPPPPPPPPPPPPPPPPPP",
+        "field7": "PPPPPPPPPPPPPPPPPPPP",
+        "field8": "PPPPPPPPPPPPPPPPPPPP",
+        "field9": "PPPPPPPPPPPPPPPPPPPP",
+        "field10": "PPPPPPPPPPPPPPPPPPPP"
+      }
+    ],
+    "sql": "SELECT * FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=45 AND merkle_key_hash(ycsb_key)=decode('c6b306586a529d95','hex')",
+    "split_sql": "SELECT merkle_key_hash(ycsb_key) AS kh, merkle_tuple_hash(usertable.*) AS th FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=45 AND merkle_key_hash(ycsb_key) BETWEEN decode('c6b306586a529d95','hex') AND decode('c6b306586a529d95','hex')",
+    "split_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 96.08,
+          "Total Cost": 9979.34,
+          "Plan Rows": 2501,
+          "Plan Width": 64,
+          "Actual Startup Time": 0.015,
+          "Actual Total Time": 0.016,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 45) AND (merkle_key_hash(ycsb_key) >= '\\xc6b306586a529d95'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\xc6b306586a529d95'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 13,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 95.45,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.009,
+              "Actual Total Time": 0.009,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 45) AND (merkle_key_hash(ycsb_key) >= '\\xc6b306586a529d95'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\xc6b306586a529d95'::bytea))",
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.022,
+        "Triggers": [],
+        "Execution Time": 0.035
+      }
+    ]
+  },
+  {
+    "key": 110051000,
+    "pid": 1443230,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Actual Startup Time": 0.353,
+          "Actual Total Time": 0.353,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 51) AND (merkle_key_hash(ycsb_key) = '\\x91ff371d33b7d983'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 10,
+          "Shared Read Blocks": 3,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.33,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.351,
+              "Actual Total Time": 0.351,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 51) AND (merkle_key_hash(ycsb_key) = '\\x91ff371d33b7d983'::bytea))",
+              "Shared Hit Blocks": 9,
+              "Shared Read Blocks": 3,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.33,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.019,
+        "Triggers": [],
+        "Execution Time": 0.373
+      }
+    ],
+    "default_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 89.82,
+          "Total Cost": 9948.08,
+          "Plan Rows": 2501,
+          "Plan Width": 214,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 51) AND (merkle_key_hash(ycsb_key) = '\\x91ff371d33b7d983'::bytea))",
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 89.2,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 51) AND (merkle_key_hash(ycsb_key) = '\\x91ff371d33b7d983'::bytea))"
+            }
+          ]
+        }
+      }
+    ],
+    "forced": false,
+    "rows": [
+      {
+        "ycsb_key": 110051000,
+        "field1": "PPPPPPPPPPPPPPPPPPPP",
+        "field2": "PPPPPPPPPPPPPPPPPPPP",
+        "field3": "PPPPPPPPPPPPPPPPPPPP",
+        "field4": "PPPPPPPPPPPPPPPPPPPP",
+        "field5": "PPPPPPPPPPPPPPPPPPPP",
+        "field6": "PPPPPPPPPPPPPPPPPPPP",
+        "field7": "PPPPPPPPPPPPPPPPPPPP",
+        "field8": "PPPPPPPPPPPPPPPPPPPP",
+        "field9": "PPPPPPPPPPPPPPPPPPPP",
+        "field10": "PPPPPPPPPPPPPPPPPPPP"
+      }
+    ],
+    "sql": "SELECT * FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=51 AND merkle_key_hash(ycsb_key)=decode('91ff371d33b7d983','hex')",
+    "split_sql": "SELECT merkle_key_hash(ycsb_key) AS kh, merkle_tuple_hash(usertable.*) AS th FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=51 AND merkle_key_hash(ycsb_key) BETWEEN decode('91ff371d33b7d983','hex') AND decode('91ff371d33b7d983','hex')",
+    "split_plan": [
+      {
+        "Plan": {
+          "Node Type": "Bitmap Heap Scan",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 96.08,
+          "Total Cost": 9979.34,
+          "Plan Rows": 2501,
+          "Plan Width": 64,
+          "Actual Startup Time": 0.016,
+          "Actual Total Time": 0.016,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Recheck Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 51) AND (merkle_key_hash(ycsb_key) >= '\\x91ff371d33b7d983'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x91ff371d33b7d983'::bytea))",
+          "Rows Removed by Index Recheck": 0,
+          "Exact Heap Blocks": 1,
+          "Lossy Heap Blocks": 0,
+          "Shared Hit Blocks": 13,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Bitmap Index Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Index Name": "usertable_merkle_lookup_idx",
+              "Startup Cost": 0.0,
+              "Total Cost": 95.45,
+              "Plan Rows": 2501,
+              "Plan Width": 0,
+              "Actual Startup Time": 0.01,
+              "Actual Total Time": 0.01,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 51) AND (merkle_key_hash(ycsb_key) >= '\\x91ff371d33b7d983'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x91ff371d33b7d983'::bytea))",
+              "Shared Hit Blocks": 12,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.021,
+        "Triggers": [],
+        "Execution Time": 0.035
+      }
+    ]
+  }
+]

@@ -1,0 +1,3 @@
+lookup_entries=102400000
+heap_rows=102400000
+equal=True

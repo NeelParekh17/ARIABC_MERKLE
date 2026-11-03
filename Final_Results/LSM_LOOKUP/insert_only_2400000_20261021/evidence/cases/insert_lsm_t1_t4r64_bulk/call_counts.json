@@ -1,0 +1,93 @@
+[
+  {
+    "function": "_bt_doinsert",
+    "pid": 1569128,
+    "oid": 16507,
+    "relation": "ariabc_internal.merkle_node_usertable_root_idx",
+    "calls": 1
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1569128,
+    "oid": 16506,
+    "relation": "ariabc_internal.merkle_node_usertable_prefix_idx",
+    "calls": 2590
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1569128,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 2590
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1569128,
+    "oid": 16857,
+    "relation": "public.ml_16856_l0_s0",
+    "calls": 50000
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1569128,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 50000
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1569128,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 149685
+  },
+  {
+    "function": "btinsert",
+    "pid": 1569128,
+    "oid": 16507,
+    "relation": "ariabc_internal.merkle_node_usertable_root_idx",
+    "calls": 1
+  },
+  {
+    "function": "btinsert",
+    "pid": 1569128,
+    "oid": 16506,
+    "relation": "ariabc_internal.merkle_node_usertable_prefix_idx",
+    "calls": 2590
+  },
+  {
+    "function": "btinsert",
+    "pid": 1569128,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 2590
+  },
+  {
+    "function": "btinsert",
+    "pid": 1569128,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 50000
+  },
+  {
+    "function": "btinsert",
+    "pid": 1569128,
+    "oid": 16857,
+    "relation": "public.ml_16856_l0_s0",
+    "calls": 50000
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1569128,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 149685
+  },
+  {
+    "function": "ml_insert",
+    "pid": 1569128,
+    "oid": 16856,
+    "relation": "public.usertable_merkle_lookup_idx",
+    "calls": 50000
+  }
+]

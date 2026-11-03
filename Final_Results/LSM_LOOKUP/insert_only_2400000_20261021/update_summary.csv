@@ -1,0 +1,7 @@
+case,workload,configuration,trial,profiled,statements,gateway_s,transaction_tps,post_run_drain_s,checkpoint_s,case_status,merkle_verify,evidence_dir
+update_btree_t1,update,merkle_btree_lookup,1,0,2400000,777.946,3085.0470341129076,0,0.9637463092803955,PASS,t,evidence/cases/update_btree_t1
+update_btree_t2,update,merkle_btree_lookup,2,0,2400000,877.147,2736.1434286385293,0,0.04799056053161621,PASS,t,evidence/cases/update_btree_t2
+update_lsm_t1,update,merkle_lsm_levels3_l0_1MiB_ratio16,1,0,2400000,852.107,2816.5476870862462,0.9154407978057861,1.7529871463775635,PASS,t,evidence/cases/update_lsm_t1
+update_lsm_t2,update,merkle_lsm_levels3_l0_1MiB_ratio16,2,0,2400000,865.553,2772.7938092756885,1.1321280002593994,7.371455907821655,PASS,t,evidence/cases/update_lsm_t2
+update_plain_t1,update,det_no_merkle,1,0,2400000,677.762,3541.066037930719,0,11.30414867401123,PASS,N/A,evidence/cases/update_plain_t1
+update_plain_t2,update,det_no_merkle,2,0,2400000,777.627,3086.3125894548416,0,26.727980375289917,PASS,N/A,evidence/cases/update_plain_t2

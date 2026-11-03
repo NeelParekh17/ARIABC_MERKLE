@@ -1,0 +1,13 @@
+case,workload,configuration,trial,profiled,statements,gateway_s,transaction_tps,post_run_drain_s,checkpoint_s,case_status,merkle_verify,evidence_dir
+insert_btree_t1,insert,merkle_btree_lookup,1,0,2400000,704.816,3405.14403759279,0,0.21086859703063965,PASS,t,evidence/cases/insert_btree_t1
+insert_btree_t1_nolookup,insert,merkle_no_lookup,1,0,2400000,376.149,6380.450300279942,0,1.310776948928833,PASS,t,evidence/cases/insert_btree_t1_nolookup
+insert_btree_t2,insert,merkle_btree_lookup,2,0,2400000,792.957,3026.6458332545144,0,12.83226466178894,PASS,t,evidence/cases/insert_btree_t2
+insert_lsm_t1,insert,merkle_lsm_levels3_l0_1MiB_ratio16,1,0,2400000,605.585,3963.1100506122175,11.749110698699951,2.180204391479492,PASS,t,evidence/cases/insert_lsm_t1
+insert_lsm_t1_l4_bulk,insert,merkle_lsm_levels4_l0_1MiB_ratio16_bulk,1,0,2400000,487.923,4918.808910422341,127.13847374916077,0.22795820236206055,PASS,t,evidence/cases/insert_lsm_t1_l4_bulk
+insert_lsm_t1_t4r64,insert,merkle_lsm_levels3_l0_4MiB_ratio64,1,0,2400000,460.739,5209.022895826054,123.31212711334229,4.627609968185425,PASS,t,evidence/cases/insert_lsm_t1_t4r64
+insert_lsm_t1_t4r64_bulk,insert,merkle_lsm_levels3_l0_4MiB_ratio64_bulk,1,0,2400000,478.729,5013.274733722002,132.50164413452148,1.8786420822143555,POST_RUN_DIAGNOSTIC_FAILED,t,evidence/cases/insert_lsm_t1_t4r64_bulk
+insert_lsm_t2,insert,merkle_lsm_levels3_l0_1MiB_ratio16,2,0,2400000,681.033,3524.058305544665,45.78882622718811,0.07027411460876465,PASS,t,evidence/cases/insert_lsm_t2
+insert_plain_t1,insert,det_no_merkle,1,0,2400000,277.75,8640.864086408641,0,0.05726218223571777,PASS,N/A,evidence/cases/insert_plain_t1
+insert_plain_t2,insert,det_no_merkle,2,0,2400000,291.869,8222.867108188948,0,1.802231788635254,PASS,N/A,evidence/cases/insert_plain_t2
+insert_btree_t1_nolookup_prof,insert,merkle_no_lookup,1,1,2400000,386.586,6208.191708959973,0,3.031125068664551,PASS,t,evidence/profile/insert_btree_t1_nolookup_prof
+insert_lsm_t1_t4r64_prof,insert,merkle_lsm_levels3_l0_4MiB_ratio64,1,1,2400000,492.94,4868.746703452753,153.84464573860168,0.0478060245513916,PASS,t,evidence/profile/insert_lsm_t1_t4r64_prof

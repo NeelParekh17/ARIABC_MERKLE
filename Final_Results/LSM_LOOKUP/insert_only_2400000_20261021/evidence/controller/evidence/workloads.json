@@ -1,0 +1,14 @@
+{
+  "insert": {
+    "path": "/home/neel/claude_ctl/lsm_relation_audit_20261021/workloads/insert_2400000_seed42.sql",
+    "sha256": "1b74d87f18bff3af492349b044d5d58f6a5b15151d65152d0370ed589efb45dc",
+    "statements": 2400000,
+    "distribution": "monotonic new keys"
+  },
+  "update": {
+    "path": "/home/neel/claude_ctl/lsm_relation_audit_20261021/workloads/update_2400000_seed42.sql",
+    "sha256": "524e00d6ad1db34a923b8df2690d5bdeb8c967c3e05b1f2fb93b9c4e15e65d4c",
+    "statements": 2400000,
+    "distribution": "finite Zipf theta .99, seed 42"
+  }
+}

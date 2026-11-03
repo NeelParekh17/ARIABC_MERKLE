@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 549, in case_run
+    if kind!='plain':obs(h,'probes',case,timeout=7200)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 355, in obs
+    return h.run_remote(DBHOST,'neel',f"TMPDIR={DBROOT}/scratch python3 {DBROOT}/scripts/observer.py {action} --port {PORT} --case {case} {extra}",timeout=timeout).stdout
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 131, in run_remote
+    raise RuntimeError(f'Detached job failed: {job} rc={status}\n{stdout}\n{stderr}')
+RuntimeError: Detached job failed: /home/neel/claude_checks/lsm_relation_audit_20261021/jobs/ef58fca785154b6d9ce299408a981d06 rc=1
+
+Traceback (most recent call last):
+  File "/home/neel/claude_checks/lsm_relation_audit_20261021/scripts/observer.py", line 239, in <module>
+    if __name__=='__main__': main()
+                             ^^^^^^
+  File "/home/neel/claude_checks/lsm_relation_audit_20261021/scripts/observer.py", line 233, in main
+    elif args.action=='probes': probes(args)
+                                ^^^^^^^^^^^^
+  File "/home/neel/claude_checks/lsm_relation_audit_20261021/scripts/observer.py", line 129, in probes
+    if time.monotonic()>deadline:raise RuntimeError('Diagnostic L0->L1 merge did not finish')
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Diagnostic L0->L1 merge did not finish
+

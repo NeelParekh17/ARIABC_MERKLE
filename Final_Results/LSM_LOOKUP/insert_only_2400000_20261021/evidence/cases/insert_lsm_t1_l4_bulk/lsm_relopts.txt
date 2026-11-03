@@ -1,0 +1,2 @@
+{"levels":4,"top_index_size":1024,"size_ratio":16}
+recreate_and_checkpoint_s=246.8

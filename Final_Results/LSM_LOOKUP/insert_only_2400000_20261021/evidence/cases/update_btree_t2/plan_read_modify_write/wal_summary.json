@@ -1,0 +1,149 @@
+{
+  "command": [
+    "/home/neel/claude_checks/ycsb_matrix_20261020/install/bin/pg_waldump",
+    "-p",
+    "/home/neel/ariabc_data/lsm_lookup_20261014/pgdata_merkle/pg_wal",
+    "-s",
+    "7/99EA75E0",
+    "-e",
+    "7/99EA78D8",
+    "-b"
+  ],
+  "returncode": 0,
+  "intervals": [
+    [
+      "foreground",
+      32647050720,
+      32647051480
+    ],
+    [
+      "drain",
+      32647051480,
+      32647051480
+    ],
+    [
+      "checkpoint",
+      32647051480,
+      32647051480
+    ],
+    [
+      "shutdown",
+      32647051480,
+      32647051480
+    ]
+  ],
+  "rmgr": [
+    {
+      "phase": "foreground",
+      "rmgr": "Heap",
+      "records": 4,
+      "record_bytes": 577,
+      "total_bytes": 577,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap2",
+      "records": 2,
+      "record_bytes": 120,
+      "total_bytes": 120,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Transaction",
+      "records": 1,
+      "record_bytes": 34,
+      "total_bytes": 34,
+      "fpi_bytes": 0
+    }
+  ],
+  "relations": [
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "rmgr": "Heap",
+      "records": 1,
+      "record_bytes": 277.0,
+      "block_refs": 1,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap",
+      "records": 3,
+      "record_bytes": 300.0,
+      "block_refs": 3,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap2",
+      "records": 2,
+      "record_bytes": 120.0,
+      "block_refs": 2,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "Transaction",
+      "records": 1,
+      "record_bytes": 34.0
+    }
+  ],
+  "descriptions": [
+    {
+      "rmgr": "Heap",
+      "description": "HOT_UPDATE",
+      "records": 4
+    },
+    {
+      "rmgr": "Heap2",
+      "description": "CLEAN",
+      "records": 2
+    },
+    {
+      "rmgr": "Transaction",
+      "description": "COMMIT",
+      "records": 1
+    }
+  ],
+  "blocks": [
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "unique_wal_referenced_main_blocks": 3,
+      "distance": {
+        "0": 1,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 1,
+        "5": 0,
+        "6": 2
+      },
+      "xid_nonzero": 5
+    }
+  ]
+}

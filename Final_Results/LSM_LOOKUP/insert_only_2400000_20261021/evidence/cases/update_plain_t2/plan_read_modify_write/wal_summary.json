@@ -1,0 +1,101 @@
+{
+  "command": [
+    "/home/neel/claude_checks/ycsb_matrix_20261020/install/bin/pg_waldump",
+    "-p",
+    "/home/neel/ariabc_data/lsm_lookup_20261014/pgdata_plain/pg_wal",
+    "-s",
+    "7/400AEF40",
+    "-e",
+    "7/400AF080",
+    "-b"
+  ],
+  "returncode": 0,
+  "intervals": [
+    [
+      "foreground",
+      31139229504,
+      31139229824
+    ],
+    [
+      "drain",
+      31139229824,
+      31139229824
+    ],
+    [
+      "checkpoint",
+      31139229824,
+      31139229824
+    ],
+    [
+      "shutdown",
+      31139229824,
+      31139229824
+    ]
+  ],
+  "rmgr": [
+    {
+      "phase": "foreground",
+      "rmgr": "Heap",
+      "records": 1,
+      "record_bytes": 277,
+      "total_bytes": 277,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Transaction",
+      "records": 1,
+      "record_bytes": 34,
+      "total_bytes": 34,
+      "fpi_bytes": 0
+    }
+  ],
+  "relations": [
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "rmgr": "Heap",
+      "records": 1,
+      "record_bytes": 277.0,
+      "block_refs": 1,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "Transaction",
+      "records": 1,
+      "record_bytes": 34.0
+    }
+  ],
+  "descriptions": [
+    {
+      "rmgr": "Heap",
+      "description": "HOT_UPDATE",
+      "records": 1
+    },
+    {
+      "rmgr": "Transaction",
+      "description": "COMMIT",
+      "records": 1
+    }
+  ],
+  "blocks": [
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 1
+    }
+  ]
+}

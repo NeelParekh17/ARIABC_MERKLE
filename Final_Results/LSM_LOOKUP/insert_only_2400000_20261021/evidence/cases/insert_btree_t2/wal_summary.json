@@ -1,0 +1,317 @@
+{
+  "command": [
+    "/home/neel/claude_checks/ycsb_matrix_20261020/install/bin/pg_waldump",
+    "-p",
+    "/home/neel/ariabc_data/lsm_lookup_20261014/pgdata_merkle/pg_wal",
+    "-s",
+    "5/4F300C78",
+    "-e",
+    "6/8274FAB0",
+    "-b"
+  ],
+  "returncode": 0,
+  "intervals": [
+    [
+      "foreground",
+      22803385464,
+      27958507968
+    ],
+    [
+      "drain",
+      27958507968,
+      27958507968
+    ],
+    [
+      "checkpoint",
+      27958507968,
+      27958508088
+    ],
+    [
+      "shutdown",
+      27958508088,
+      27958508208
+    ]
+  ],
+  "rmgr": [
+    {
+      "phase": "checkpoint",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114,
+      "total_bytes": 114,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Btree",
+      "records": 4806579,
+      "record_bytes": 324150735,
+      "total_bytes": 3155130639,
+      "fpi_bytes": 2830979904
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "CLOG",
+      "records": 146,
+      "record_bytes": 4380,
+      "total_bytes": 4380,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap",
+      "records": 9600000,
+      "record_bytes": 1487842744,
+      "total_bytes": 1507648440,
+      "fpi_bytes": 19805696
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap2",
+      "records": 4945413,
+      "record_bytes": 308768279,
+      "total_bytes": 308776115,
+      "fpi_bytes": 7836
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Transaction",
+      "records": 2400000,
+      "record_bytes": 110400000,
+      "total_bytes": 110400000,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "shutdown",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114,
+      "total_bytes": 114,
+      "fpi_bytes": 0
+    }
+  ],
+  "relations": [
+    {
+      "phase": "checkpoint",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1255",
+      "rmgr": "Heap2",
+      "records": 1,
+      "record_bytes": 59.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 7836
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "rmgr": "Heap",
+      "records": 2400000,
+      "record_bytes": 645599785.0,
+      "block_refs": 2400000,
+      "fpis": 1,
+      "fpi_bytes": 6576
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16493",
+      "rmgr": "Btree",
+      "records": 2406579,
+      "record_bytes": 158615537.0,
+      "block_refs": 2419737,
+      "fpis": 3,
+      "fpi_bytes": 3044
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16495",
+      "rmgr": "Btree",
+      "records": 2400000,
+      "record_bytes": 165535198.0,
+      "block_refs": 2400000,
+      "fpis": 382358,
+      "fpi_bytes": 2830976860
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap",
+      "records": 7200000,
+      "record_bytes": 842242959.0,
+      "block_refs": 7200000,
+      "fpis": 3020,
+      "fpi_bytes": 19799120
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap2",
+      "records": 4945412,
+      "record_bytes": 308768220.0,
+      "block_refs": 4945412,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "CLOG",
+      "records": 146,
+      "record_bytes": 4380.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "Transaction",
+      "records": 2400000,
+      "record_bytes": 110400000.0
+    },
+    {
+      "phase": "shutdown",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114.0
+    }
+  ],
+  "descriptions": [
+    {
+      "rmgr": "Btree",
+      "description": "INSERT_LEAF",
+      "records": 4793443
+    },
+    {
+      "rmgr": "Btree",
+      "description": "INSERT_UPPER",
+      "records": 6557
+    },
+    {
+      "rmgr": "Btree",
+      "description": "SPLIT_R",
+      "records": 6579
+    },
+    {
+      "rmgr": "CLOG",
+      "description": "ZEROPAGE",
+      "records": 146
+    },
+    {
+      "rmgr": "Heap",
+      "description": "HOT_UPDATE",
+      "records": 7200000
+    },
+    {
+      "rmgr": "Heap",
+      "description": "INSERT",
+      "records": 2317232
+    },
+    {
+      "rmgr": "Heap",
+      "description": "INSERT+INIT",
+      "records": 82768
+    },
+    {
+      "rmgr": "Heap2",
+      "description": "CLEAN",
+      "records": 4945413
+    },
+    {
+      "rmgr": "Transaction",
+      "description": "COMMIT",
+      "records": 2400000
+    },
+    {
+      "rmgr": "XLOG",
+      "description": "CHECKPOINT_ONLINE",
+      "records": 1
+    },
+    {
+      "rmgr": "XLOG",
+      "description": "CHECKPOINT_SHUTDOWN",
+      "records": 1
+    }
+  ],
+  "blocks": [
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1255",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "unique_wal_referenced_main_blocks": 82769,
+      "distance": {
+        "0": 12652,
+        "1": 770047,
+        "2": 261116,
+        "3": 855460,
+        "4": 469525,
+        "5": 31199,
+        "6": 0
+      },
+      "xid_nonzero": 2400000
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16493",
+      "unique_wal_referenced_main_blocks": 6582,
+      "distance": {
+        "0": 2393442,
+        "1": 13070,
+        "2": 44,
+        "3": 330,
+        "4": 2563,
+        "5": 10243,
+        "6": 44
+      },
+      "xid_nonzero": 2406579
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16495",
+      "unique_wal_referenced_main_blocks": 382358,
+      "distance": {
+        "0": 13,
+        "1": 5,
+        "2": 7,
+        "3": 102,
+        "4": 844,
+        "5": 12138,
+        "6": 2386890
+      },
+      "xid_nonzero": 2400000
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "unique_wal_referenced_main_blocks": 3020,
+      "distance": {
+        "0": 1022473,
+        "1": 248941,
+        "2": 69438,
+        "3": 414074,
+        "4": 829223,
+        "5": 5198105,
+        "6": 4363157
+      },
+      "xid_nonzero": 12145412
+    }
+  ]
+}

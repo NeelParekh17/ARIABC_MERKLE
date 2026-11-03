@@ -1,0 +1,58 @@
+{
+  "pg_before": {
+    "blks_read": 39130188,
+    "blks_hit": 16870164,
+    "blk_read_time": 9764.086,
+    "blk_write_time": 0,
+    "buffers_clean": 372,
+    "buffers_backend": 13681650,
+    "checkpoint_write_time": 471201,
+    "checkpoint_sync_time": 14,
+    "checkpoints_req": 21,
+    "buffers_checkpoint": 42150,
+    "buffers_alloc": 4047927
+  },
+  "pg_after": {
+    "blks_read": 44561593,
+    "blks_hit": 103425552,
+    "blk_read_time": 115172.222,
+    "blk_write_time": 10816.885,
+    "buffers_clean": 184491,
+    "buffers_backend": 14764800,
+    "checkpoint_write_time": 472983,
+    "checkpoint_sync_time": 45,
+    "checkpoints_req": 22,
+    "buffers_checkpoint": 44059,
+    "buffers_alloc": 9376778
+  },
+  "device_before": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 286050161,
+    "read_sectors": 24154210146,
+    "read_ms": 217614726,
+    "write_ios": 125611610,
+    "write_sectors": 4642814144,
+    "write_ms": 566296985,
+    "io_ms": 74573688
+  },
+  "device_after": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 286058004,
+    "read_sectors": 24154814626,
+    "read_ms": 217635889,
+    "write_ios": 126547653,
+    "write_sectors": 4660788168,
+    "write_ms": 570302332,
+    "io_ms": 74989326
+  },
+  "device_checkpoint": {
+    "device": "/sys/devices/pci0000:00/0000:00:02.2/0000:23:00.0/nvme/nvme0/nvme0n1/nvme0n1p2",
+    "read_ios": 286082385,
+    "read_sectors": 24160921298,
+    "read_ms": 217670033,
+    "write_ios": 126639691,
+    "write_sectors": 4679077584,
+    "write_ms": 575561683,
+    "io_ms": 75113194
+  }
+}

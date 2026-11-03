@@ -1,0 +1,14 @@
+function	pid	oid	relation	calls
+_bt_doinsert	1569128	16507	ariabc_internal.merkle_node_usertable_root_idx	1
+_bt_doinsert	1569128	16506	ariabc_internal.merkle_node_usertable_prefix_idx	2590
+_bt_doinsert	1569128	16504	ariabc_internal.merkle_node_usertable_pkey	2590
+_bt_doinsert	1569128	16857	public.ml_16856_l0_s0	50000
+_bt_doinsert	1569128	16493	public.usertable_pkey1	50000
+btbeginscan	1569128	16504	ariabc_internal.merkle_node_usertable_pkey	149685
+btinsert	1569128	16507	ariabc_internal.merkle_node_usertable_root_idx	1
+btinsert	1569128	16506	ariabc_internal.merkle_node_usertable_prefix_idx	2590
+btinsert	1569128	16504	ariabc_internal.merkle_node_usertable_pkey	2590
+btinsert	1569128	16493	public.usertable_pkey1	50000
+btinsert	1569128	16857	public.ml_16856_l0_s0	50000
+index_beginscan	1569128	16504	ariabc_internal.merkle_node_usertable_pkey	149685
+ml_insert	1569128	16856	public.usertable_merkle_lookup_idx	50000

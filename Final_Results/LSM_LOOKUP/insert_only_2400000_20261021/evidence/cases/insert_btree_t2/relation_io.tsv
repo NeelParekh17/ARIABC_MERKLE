@@ -1,0 +1,49 @@
+case	phase	relation	pg_buffer_reads_total	file_read_blocks	file_write_blocks	file_read_main_blocks	file_write_main_blocks	dirtied	dirty_calls	wal_bytes	fpis	fpi_bytes	wal_block_references	unique_wal_referenced_pages
+insert_btree_t2	foreground	public.usertable	138992	56143.0	166453.0	55245.0	165534.0	83671	2649930	645606361.0	1	6576	2400000	82769
+insert_btree_t2	drain	public.usertable	138992	0.0	2.0	0.0	2.0	0	0					
+insert_btree_t2	checkpoint	public.usertable	138992	0.0	85.0	0.0	82.0	0	0					
+insert_btree_t2	shutdown	public.usertable	138992	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	drain	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	checkpoint	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	shutdown	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	drain	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	checkpoint	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	shutdown	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	public.usertable_pkey1	6584	5.0	13153.0	5.0	13153.0	6582	2419737	158618581.0	3	3044	2419737	6582
+insert_btree_t2	drain	public.usertable_pkey1	6584	0.0	1.0	0.0	1.0	0	0					
+insert_btree_t2	checkpoint	public.usertable_pkey1	6584	0.0	7.0	0.0	7.0	0	0					
+insert_btree_t2	shutdown	public.usertable_pkey1	6584	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	public.usertable_merkle_lookup_idx	3939843	3939843.0	2394618.0	3939843.0	2394618.0	2394989	2400000	2996512058.0	382358	2830976860	2400000	382358
+insert_btree_t2	drain	public.usertable_merkle_lookup_idx	3939843	0.0	57.0	0.0	57.0	0	0					
+insert_btree_t2	checkpoint	public.usertable_merkle_lookup_idx	3939843	0.0	314.0	0.0	314.0	0	0					
+insert_btree_t2	shutdown	public.usertable_merkle_lookup_idx	3939843	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	public.usertable_merkle_idx	1	1.0	0.0	1.0	0.0	0	0					
+insert_btree_t2	drain	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	checkpoint	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	shutdown	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	ariabc_internal.merkle_node_usertable	1289555	1289555.0	1290437.0	1289555.0	1290437.0	1291866	26537328	1170810299.0	3020	19799120	12145412	3020
+insert_btree_t2	drain	ariabc_internal.merkle_node_usertable	1289555	0.0	35.0	0.0	35.0	0	0					
+insert_btree_t2	checkpoint	ariabc_internal.merkle_node_usertable	1289555	0.0	1424.0	0.0	1424.0	0	0					
+insert_btree_t2	shutdown	ariabc_internal.merkle_node_usertable	1289555	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	drain	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	checkpoint	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	shutdown	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	drain	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	checkpoint	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	shutdown	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	ariabc_internal.merkle_node_usertable_pkey	221120	221120.0	0.0	221120.0	0.0	0	0					
+insert_btree_t2	drain	ariabc_internal.merkle_node_usertable_pkey	221120	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	checkpoint	ariabc_internal.merkle_node_usertable_pkey	221120	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	shutdown	ariabc_internal.merkle_node_usertable_pkey	221120	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	ariabc_internal.merkle_node_usertable_prefix_idx	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	drain	ariabc_internal.merkle_node_usertable_prefix_idx	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	checkpoint	ariabc_internal.merkle_node_usertable_prefix_idx	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	shutdown	ariabc_internal.merkle_node_usertable_prefix_idx	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	foreground	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	drain	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	checkpoint	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+insert_btree_t2	shutdown	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					

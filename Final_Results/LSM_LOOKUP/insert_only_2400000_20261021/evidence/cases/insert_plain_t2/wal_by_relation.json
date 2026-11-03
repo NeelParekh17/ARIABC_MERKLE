@@ -1,0 +1,44 @@
+[
+  {
+    "phase": "checkpoint",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 114.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  },
+  {
+    "phase": "foreground",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 110404380.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.usertable",
+    "wal_bytes": 645606361.0,
+    "fpis": 1,
+    "fpi_bytes": 6576,
+    "wal_block_references": 2400000,
+    "unique_wal_referenced_pages": 82770
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.usertable_pkey1",
+    "wal_bytes": 158618581.0,
+    "fpis": 3,
+    "fpi_bytes": 3044,
+    "wal_block_references": 2419737,
+    "unique_wal_referenced_pages": 6582
+  },
+  {
+    "phase": "shutdown",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 114.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  }
+]

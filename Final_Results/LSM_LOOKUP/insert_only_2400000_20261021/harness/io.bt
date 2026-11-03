@@ -1,0 +1,83 @@
+/* File-offset observations, not a claim that a buffered read missed page cache.
+ * Keys: pid, device, inode, generation, phase, operation (0 read, 1 write).
+ * Histogram distance: same, +1 page, -1 page, 2..7, 8..63, 64..1023, >=1024.
+ * Runs: 1, 2, 3..4, 5..8, 9..16, 17..32, 33..64, >=65 contiguous 8KB blocks.
+ * A tiny audit_phase process sets phases using getpgid(-1000-phase).
+ */
+BEGIN { @phase = 0; printf("AUDIT_TRACE_READY\n"); }
+tracepoint:syscalls:sys_enter_getpgid
+/comm == "audit_phase" && (int32)args->pid < -1000 && (int32)args->pid > -1100/
+{ @phase = -1000 - (int32)args->pid; printf("PHASE %d\n", @phase); }
+kprobe:vfs_read
+/comm == "postgres"/
+{
+  $f = (struct file *)arg0;
+  @in[tid] = $f->f_inode->i_ino;
+  @dev[tid] = $f->f_inode->i_sb->s_dev;
+  @generation[tid] = $f->f_inode->i_generation;
+  @off[tid] = *(uint64 *)arg3;
+  @op[tid] = 0;
+  @ph[tid] = @phase;
+  $name = str($f->f_path.dentry->d_name.name);
+  if (@names[@dev[tid],@in[tid],@generation[tid]] != "" &&
+      @names[@dev[tid],@in[tid],@generation[tid]] != $name) {
+    @renamed[@dev[tid],@in[tid],@generation[tid]] = count();
+  }
+  @names[@dev[tid],@in[tid],@generation[tid]] = $name;
+}
+kprobe:vfs_write
+/comm == "postgres"/
+{
+  $f = (struct file *)arg0;
+  @in[tid] = $f->f_inode->i_ino;
+  @dev[tid] = $f->f_inode->i_sb->s_dev;
+  @generation[tid] = $f->f_inode->i_generation;
+  @off[tid] = *(uint64 *)arg3;
+  @op[tid] = 1;
+  @ph[tid] = @phase;
+  $name = str($f->f_path.dentry->d_name.name);
+  if (@names[@dev[tid],@in[tid],@generation[tid]] != "" &&
+      @names[@dev[tid],@in[tid],@generation[tid]] != $name) {
+    @renamed[@dev[tid],@in[tid],@generation[tid]] = count();
+  }
+  @names[@dev[tid],@in[tid],@generation[tid]] = $name;
+}
+kretprobe:vfs_read,kretprobe:vfs_write
+/@in[tid]/
+{
+  if ((int64)retval > 0) {
+    $d = @dev[tid]; $i = @in[tid]; $g = @generation[tid]; $p = @ph[tid]; $o = @op[tid];
+    $s = @off[tid]; $n = (uint64)retval;
+    @ops[pid,$d,$i,$g,$p,$o] = count();
+    @bytes[pid,$d,$i,$g,$p,$o] = sum($n);
+    if (@seen[pid,$d,$i,$g,$p,$o]) {
+      $prev = @last[pid,$d,$i,$g,$p,$o];
+      $a = $s > $prev ? $s - $prev : $prev - $s;
+      $b = $a == 0 ? 0 : ($s == $prev + 8192 ? 1 :
+        ($prev == $s + 8192 ? 2 : ($a < 65536 ? 3 :
+        ($a < 524288 ? 4 : ($a < 8388608 ? 5 : 6)))));
+      @distance[pid,$d,$i,$g,$p,$o,$b] = count();
+      if ($s == @end[pid,$d,$i,$g,$p,$o]) {
+        @contiguous[pid,$d,$i,$g,$p,$o] = count();
+        @run[pid,$d,$i,$g,$p,$o] += ($n + 8191) / 8192;
+      } else {
+        $r = @run[pid,$d,$i,$g,$p,$o];
+        $b = $r <= 1 ? 0 : ($r <= 2 ? 1 : ($r <= 4 ? 2 :
+          ($r <= 8 ? 3 : ($r <= 16 ? 4 : ($r <= 32 ? 5 : ($r <= 64 ? 6 : 7))))));
+        @runs[pid,$d,$i,$g,$p,$o,$b] = count();
+        @run[pid,$d,$i,$g,$p,$o] = ($n + 8191) / 8192;
+      }
+    } else {
+      @run[pid,$d,$i,$g,$p,$o] = ($n + 8191) / 8192;
+    }
+    @seen[pid,$d,$i,$g,$p,$o] = 1;
+    @last[pid,$d,$i,$g,$p,$o] = $s;
+    @end[pid,$d,$i,$g,$p,$o] = $s + $n;
+  }
+  delete(@in[tid]); delete(@dev[tid]); delete(@off[tid]);
+  delete(@op[tid]); delete(@ph[tid]); delete(@generation[tid]);
+}
+END {
+  clear(@seen); clear(@last); clear(@end);
+  clear(@in); clear(@dev); clear(@off); clear(@op); clear(@ph); clear(@generation); clear(@phase);
+}

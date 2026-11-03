@@ -1,0 +1,24 @@
+{
+  "result": "PASS",
+  "counts": {
+    "dirty_calls_0": 30,
+    "dirty_calls_1": 30,
+    "dirtied_0": 10,
+    "dirtied_1": 6
+  },
+  "file_read_ops": 3,
+  "file_write_ops": 3,
+  "bytes_per_direction": 24576,
+  "distance_bins_per_direction": {
+    "+1 block": 1,
+    "2..7 blocks": 1
+  },
+  "contiguous_pairs_per_direction": 1,
+  "replacement": [
+    16399,
+    17000
+  ],
+  "file_generation": 84105198,
+  "pie_base_address_verified": true,
+  "evidence": "/home/neel/claude_ctl/lsm_relation_audit_20261021/scratch/instrumentation_smoke"
+}

@@ -1,0 +1,17 @@
+[DEBUG] libbpf: loading kernel BTF '/sys/kernel/btf/vmlinux': 0
+[DEBUG] libbpf: loading kernel BTF '/sys/kernel/btf/vmlinux': 0
+/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/io.bt:9:37-38: WARNING: comparison of integers of different signs: 'unsigned int64' and 'int64' can lead to undefined behavior
+/comm == "audit_phase" && args->pid < -1000 && args->pid > -1100/
+                                    ~
+/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/io.bt:9:24-26: WARNING: Addrspace mismatch
+/comm == "audit_phase" && args->pid < -1000 && args->pid > -1100/
+                       ~~
+/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/io.bt:9:58-59: WARNING: comparison of integers of different signs: 'unsigned int64' and 'int64' can lead to undefined behavior
+/comm == "audit_phase" && args->pid < -1000 && args->pid > -1100/
+                                                         ~
+/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/io.bt:10:18-19: WARNING: arithmetic on integers of different signs: 'int64' and 'unsigned int64' can lead to undefined behavior
+{ @phase = -1000 - args->pid; printf("PHASE %d\n", @phase); }
+                 ~
+/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/io.bt:18:14-41: ERROR: Type mismatch for '==': comparing 'probe' with 'string[17]'
+  @op[tid] = probe == "kprobe:vfs_write";
+             ~~~~~~~~~~~~~~~~~~~~~~~~~~~

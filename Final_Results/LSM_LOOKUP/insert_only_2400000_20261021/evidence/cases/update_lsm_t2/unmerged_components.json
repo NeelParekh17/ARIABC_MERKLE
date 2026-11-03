@@ -1,0 +1,55 @@
+{
+  "before": {
+    "phase": "idle",
+    "merge_level": 1,
+    "epoch": 2,
+    "flush": false,
+    "last_merge_us": 475797,
+    "merges": [
+      1,
+      1
+    ],
+    "active": [
+      1,
+      1
+    ],
+    "bytes": [
+      [
+        8192,
+        8192
+      ],
+      [
+        8192,
+        8192
+      ]
+    ],
+    "base_bytes": 3154264064
+  },
+  "after": {
+    "phase": "idle",
+    "merge_level": 0,
+    "epoch": 3,
+    "flush": false,
+    "last_merge_us": 2426147,
+    "merges": [
+      2,
+      1
+    ],
+    "active": [
+      0,
+      1
+    ],
+    "bytes": [
+      [
+        983040,
+        8192
+      ],
+      [
+        8192,
+        933888
+      ]
+    ],
+    "base_bytes": 3154264064
+  },
+  "last_key": 110051000
+}

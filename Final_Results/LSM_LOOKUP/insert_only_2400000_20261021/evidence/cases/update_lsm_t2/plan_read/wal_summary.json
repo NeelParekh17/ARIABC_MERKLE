@@ -1,0 +1,40 @@
+{
+  "command": [
+    "/home/neel/claude_checks/ycsb_matrix_20261020/install/bin/pg_waldump",
+    "-p",
+    "/home/neel/ariabc_data/lsm_lookup_20261014/pgdata_merkle/pg_wal",
+    "-s",
+    "7/84ED58D8",
+    "-e",
+    "7/84ED58D8",
+    "-b"
+  ],
+  "returncode": 0,
+  "note": "Identical insert-LSN endpoints: no WAL records in this interval",
+  "intervals": [
+    [
+      "foreground",
+      32294918360,
+      32294918360
+    ],
+    [
+      "drain",
+      32294918360,
+      32294918360
+    ],
+    [
+      "checkpoint",
+      32294918360,
+      32294918360
+    ],
+    [
+      "shutdown",
+      32294918360,
+      32294918360
+    ]
+  ],
+  "rmgr": [],
+  "relations": [],
+  "descriptions": [],
+  "blocks": []
+}

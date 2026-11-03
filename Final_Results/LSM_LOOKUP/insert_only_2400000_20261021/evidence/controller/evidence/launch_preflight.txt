@@ -1,0 +1,9 @@
+       Avail
+117716258816
+/home/neel/claude_checks/ycsb_matrix_20261020/install/bin/postgres: OK
+/home/neel/claude_checks/ycsb_matrix_20261020/install/lib/postgresql/merkle_lsm.so: OK
+/home/neel/claude_checks/ycsb_matrix_20261020/install/lib/libpq.so: OK
+142bdca5f71fac3c599ec52fced42317f722c4c8f973cd3f97f4748622903352  /home/neel/claude_checks/ycsb_matrix_20261020/cluster/ariabc_pg/build/bin/ariabc_pg_server
+bpftrace v0.20.2
+/usr/bin/strace
+/usr/bin/gdb

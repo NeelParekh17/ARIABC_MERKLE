@@ -1,0 +1,89 @@
+[
+  {
+    "phase": "checkpoint",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 114.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  },
+  {
+    "phase": "foreground",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 110404380.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  },
+  {
+    "phase": "foreground",
+    "relation": "UNMAPPED:1663/12695/1255",
+    "wal_bytes": 7895.0,
+    "fpis": 1,
+    "fpi_bytes": 7836,
+    "wal_block_references": 1,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "ariabc_internal.merkle_node_usertable",
+    "wal_bytes": 1038795982.0,
+    "fpis": 3020,
+    "fpi_bytes": 19799120,
+    "wal_block_references": 11985459,
+    "unique_wal_referenced_pages": 3021
+  },
+  {
+    "phase": "foreground",
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "wal_bytes": 7485.0,
+    "fpis": 1,
+    "fpi_bytes": 7432,
+    "wal_block_references": 1,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "ariabc_internal.merkle_node_usertable_prefix_idx",
+    "wal_bytes": 8241.0,
+    "fpis": 1,
+    "fpi_bytes": 8188,
+    "wal_block_references": 1,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.usertable",
+    "wal_bytes": 4451695474.0,
+    "fpis": 503503,
+    "fpi_bytes": 3818565744,
+    "wal_block_references": 3625617,
+    "unique_wal_referenced_pages": 503523
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.usertable_merkle_lookup_idx",
+    "wal_bytes": 1171973.0,
+    "fpis": 157,
+    "fpi_bytes": 1162428,
+    "wal_block_references": 174,
+    "unique_wal_referenced_pages": 157
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.usertable_pkey1",
+    "wal_bytes": 203518.0,
+    "fpis": 26,
+    "fpi_bytes": 192400,
+    "wal_block_references": 176,
+    "unique_wal_referenced_pages": 26
+  },
+  {
+    "phase": "shutdown",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 114.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  }
+]

@@ -1,0 +1,21 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 178K of event 'cpu/cycles/P'
+# Event count (approx.): 650821280449
+#
+# Overhead  Command        
+# ........  ...............
+#
+    77.65%  postgres       
+    12.95%  swapper        
+     7.77%  ariabc_pg_serve
+     1.01%  python3        
+     0.10%  data-plane-kafk
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

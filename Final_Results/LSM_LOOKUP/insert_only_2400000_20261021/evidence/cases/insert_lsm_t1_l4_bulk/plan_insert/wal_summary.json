@@ -1,0 +1,217 @@
+{
+  "command": [
+    "/home/neel/claude_checks/ycsb_matrix_20261020/install/bin/pg_waldump",
+    "-p",
+    "/home/neel/ariabc_data/lsm_lookup_20261014/pgdata_merkle/pg_wal",
+    "-s",
+    "6/8D1CEF80",
+    "-e",
+    "6/8D1CF2E8",
+    "-b"
+  ],
+  "returncode": 0,
+  "intervals": [
+    [
+      "foreground",
+      28137287552,
+      28137288424
+    ],
+    [
+      "drain",
+      28137288424,
+      28137288424
+    ],
+    [
+      "checkpoint",
+      28137288424,
+      28137288424
+    ],
+    [
+      "shutdown",
+      28137288424,
+      28137288424
+    ]
+  ],
+  "rmgr": [
+    {
+      "phase": "foreground",
+      "rmgr": "Btree",
+      "records": 2,
+      "record_bytes": 136,
+      "total_bytes": 136,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap",
+      "records": 4,
+      "record_bytes": 620,
+      "total_bytes": 620,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap2",
+      "records": 1,
+      "record_bytes": 60,
+      "total_bytes": 60,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Transaction",
+      "records": 1,
+      "record_bytes": 34,
+      "total_bytes": 34,
+      "fpi_bytes": 0
+    }
+  ],
+  "relations": [
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "rmgr": "Heap",
+      "records": 1,
+      "record_bytes": 269.0,
+      "block_refs": 1,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16493",
+      "rmgr": "Btree",
+      "records": 1,
+      "record_bytes": 64.0,
+      "block_refs": 1,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap",
+      "records": 3,
+      "record_bytes": 351.0,
+      "block_refs": 3,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap2",
+      "records": 1,
+      "record_bytes": 60.0,
+      "block_refs": 1,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/17091",
+      "rmgr": "Btree",
+      "records": 1,
+      "record_bytes": 72.0,
+      "block_refs": 1,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "Transaction",
+      "records": 1,
+      "record_bytes": 34.0
+    }
+  ],
+  "descriptions": [
+    {
+      "rmgr": "Btree",
+      "description": "INSERT_LEAF",
+      "records": 2
+    },
+    {
+      "rmgr": "Heap",
+      "description": "HOT_UPDATE",
+      "records": 3
+    },
+    {
+      "rmgr": "Heap",
+      "description": "INSERT",
+      "records": 1
+    },
+    {
+      "rmgr": "Heap2",
+      "description": "CLEAN",
+      "records": 1
+    },
+    {
+      "rmgr": "Transaction",
+      "description": "COMMIT",
+      "records": 1
+    }
+  ],
+  "blocks": [
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16493",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "unique_wal_referenced_main_blocks": 3,
+      "distance": {
+        "0": 1,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 1,
+        "5": 1,
+        "6": 0
+      },
+      "xid_nonzero": 4
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/17091",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 1
+    }
+  ]
+}

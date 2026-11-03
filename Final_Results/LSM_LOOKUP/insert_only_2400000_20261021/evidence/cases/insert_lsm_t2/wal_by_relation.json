@@ -1,0 +1,268 @@
+[
+  {
+    "phase": "checkpoint",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 114.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  },
+  {
+    "phase": "drain",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 162.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  },
+  {
+    "phase": "drain",
+    "relation": "UNMAPPED:1663/12695/1259",
+    "wal_bytes": 237.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 3,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "drain",
+    "relation": "UNMAPPED:1663/12695/2662",
+    "wal_bytes": 192.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 3,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "drain",
+    "relation": "UNMAPPED:1663/12695/2663",
+    "wal_bytes": 240.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 3,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "drain",
+    "relation": "UNMAPPED:1663/12695/3455",
+    "wal_bytes": 192.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 3,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "drain",
+    "relation": "public.ml_16856_l0_s1",
+    "wal_bytes": 171.0,
+    "fpis": 1,
+    "fpi_bytes": 80,
+    "wal_block_references": 1,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "drain",
+    "relation": "public.ml_16856_l1_s0",
+    "wal_bytes": 1366885.0,
+    "fpis": 1,
+    "fpi_bytes": 80,
+    "wal_block_references": 18387,
+    "unique_wal_referenced_pages": 73
+  },
+  {
+    "phase": "drain",
+    "relation": "public.ml_16856_l1_s1",
+    "wal_bytes": 171.0,
+    "fpis": 1,
+    "fpi_bytes": 80,
+    "wal_block_references": 1,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "drain",
+    "relation": "public.ml_16856_meta",
+    "wal_bytes": 651.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 11,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "drain",
+    "relation": "public.usertable_merkle_lookup_idx",
+    "wal_bytes": 31140744.0,
+    "fpis": 984,
+    "fpi_bytes": 7285536,
+    "wal_block_references": 331582,
+    "unique_wal_referenced_pages": 221652
+  },
+  {
+    "phase": "foreground",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 110409918.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  },
+  {
+    "phase": "foreground",
+    "relation": "UNMAPPED:1663/12695/1255",
+    "wal_bytes": 7895.0,
+    "fpis": 1,
+    "fpi_bytes": 7836,
+    "wal_block_references": 1,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "UNMAPPED:1663/12695/1259",
+    "wal_bytes": 11644.0,
+    "fpis": 1,
+    "fpi_bytes": 3196,
+    "wal_block_references": 106,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "UNMAPPED:1663/12695/2662",
+    "wal_bytes": 9957.0,
+    "fpis": 1,
+    "fpi_bytes": 3440,
+    "wal_block_references": 102,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "UNMAPPED:1663/12695/2663",
+    "wal_bytes": 15069.0,
+    "fpis": 1,
+    "fpi_bytes": 6636,
+    "wal_block_references": 104,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "UNMAPPED:1663/12695/3455",
+    "wal_bytes": 8617.0,
+    "fpis": 1,
+    "fpi_bytes": 2100,
+    "wal_block_references": 102,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "ariabc_internal.merkle_node_usertable",
+    "wal_bytes": 954687773.0,
+    "fpis": 3020,
+    "fpi_bytes": 19799120,
+    "wal_block_references": 8495292,
+    "unique_wal_referenced_pages": 5769
+  },
+  {
+    "phase": "foreground",
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "wal_bytes": 17339323.0,
+    "fpis": 814,
+    "fpi_bytes": 6018400,
+    "wal_block_references": 118825,
+    "unique_wal_referenced_pages": 1628
+  },
+  {
+    "phase": "foreground",
+    "relation": "ariabc_internal.merkle_node_usertable_prefix_idx",
+    "wal_bytes": 18136600.0,
+    "fpis": 854,
+    "fpi_bytes": 5921536,
+    "wal_block_references": 119623,
+    "unique_wal_referenced_pages": 1937
+  },
+  {
+    "phase": "foreground",
+    "relation": "ariabc_internal.merkle_node_usertable_root_idx",
+    "wal_bytes": 2316587.0,
+    "fpis": 1,
+    "fpi_bytes": 4060,
+    "wal_block_references": 30112,
+    "unique_wal_referenced_pages": 129
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.ml_16856_l0_s0",
+    "wal_bytes": 107754875.0,
+    "fpis": 49,
+    "fpi_bytes": 3920,
+    "wal_block_references": 1209111,
+    "unique_wal_referenced_pages": 6450
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.ml_16856_l0_s1",
+    "wal_bytes": 110604046.0,
+    "fpis": 48,
+    "fpi_bytes": 3840,
+    "wal_block_references": 1242004,
+    "unique_wal_referenced_pages": 6586
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.ml_16856_l1_s0",
+    "wal_bytes": 112190775.0,
+    "fpis": 3,
+    "fpi_bytes": 240,
+    "wal_block_references": 1274245,
+    "unique_wal_referenced_pages": 6385
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.ml_16856_l1_s1",
+    "wal_bytes": 101069754.0,
+    "fpis": 2,
+    "fpi_bytes": 160,
+    "wal_block_references": 1155295,
+    "unique_wal_referenced_pages": 5765
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.ml_16856_meta",
+    "wal_bytes": 18572.0,
+    "fpis": 1,
+    "fpi_bytes": 152,
+    "wal_block_references": 306,
+    "unique_wal_referenced_pages": 1
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.usertable",
+    "wal_bytes": 645606361.0,
+    "fpis": 1,
+    "fpi_bytes": 6576,
+    "wal_block_references": 2400000,
+    "unique_wal_referenced_pages": 82763
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.usertable_merkle_lookup_idx",
+    "wal_bytes": 2965371314.0,
+    "fpis": 381374,
+    "fpi_bytes": 2823691324,
+    "wal_block_references": 2068418,
+    "unique_wal_referenced_pages": 381374
+  },
+  {
+    "phase": "foreground",
+    "relation": "public.usertable_pkey1",
+    "wal_bytes": 158618581.0,
+    "fpis": 3,
+    "fpi_bytes": 3044,
+    "wal_block_references": 2419737,
+    "unique_wal_referenced_pages": 6582
+  },
+  {
+    "phase": "shutdown",
+    "relation": "NO_BLOCK_REFERENCE",
+    "wal_bytes": 114.0,
+    "fpis": 0,
+    "fpi_bytes": 0,
+    "wal_block_references": 0
+  }
+]

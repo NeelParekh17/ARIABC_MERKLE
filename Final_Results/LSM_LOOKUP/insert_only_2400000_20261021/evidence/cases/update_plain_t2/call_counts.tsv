@@ -1,0 +1,9 @@
+function	pid	oid	relation	calls
+_bt_doinsert	1482801	16493	public.usertable_pkey1	1
+btbeginscan	1482790	16493	public.usertable_pkey1	1
+btbeginscan	1482794	16493	public.usertable_pkey1	1
+btbeginscan	1482858	16493	public.usertable_pkey1	2
+btinsert	1482801	16493	public.usertable_pkey1	1
+index_beginscan	1482790	16493	public.usertable_pkey1	1
+index_beginscan	1482794	16493	public.usertable_pkey1	1
+index_beginscan	1482858	16493	public.usertable_pkey1	2

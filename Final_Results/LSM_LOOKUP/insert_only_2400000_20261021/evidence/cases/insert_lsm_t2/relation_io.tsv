@@ -1,0 +1,69 @@
+case	phase	relation	pg_buffer_reads_total	file_read_blocks	file_write_blocks	file_read_main_blocks	file_write_main_blocks	dirtied	dirty_calls	wal_bytes	fpis	fpi_bytes	wal_block_references	unique_wal_referenced_pages
+insert_lsm_t2	foreground	public.usertable	125192	42414.0	166155.0	41799.0	165520.0	83465	2649876	645606361.0	1	6576	2400000	82763
+insert_lsm_t2	drain	public.usertable	125192	0.0	108.0	0.0	107.0	0	0					
+insert_lsm_t2	checkpoint	public.usertable	125192	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	public.usertable	125192	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	drain	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	checkpoint	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	drain	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	checkpoint	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	public.usertable_pkey1	6584	5.0	13150.0	5.0	13150.0	6582	2419737	158618581.0	3	3044	2419737	6582
+insert_lsm_t2	drain	public.usertable_pkey1	6584	0.0	11.0	0.0	11.0	0	0					
+insert_lsm_t2	checkpoint	public.usertable_pkey1	6584	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	public.usertable_pkey1	6584	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	public.usertable_merkle_idx	1	1.0	0.0	1.0	0.0	0	0					
+insert_lsm_t2	drain	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	checkpoint	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	ariabc_internal.merkle_node_usertable	1478655	1475900.0	1454074.0	1475659.0	1453858.0	1453297	22837114	954687773.0	3020	19799120	8495292	5769
+insert_lsm_t2	drain	ariabc_internal.merkle_node_usertable	1478655	0.0	2033.0	0.0	2033.0	0	0					
+insert_lsm_t2	checkpoint	ariabc_internal.merkle_node_usertable	1478655	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	ariabc_internal.merkle_node_usertable	1478655	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	drain	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	checkpoint	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	drain	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	checkpoint	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	ariabc_internal.merkle_node_usertable_pkey	534200	533386.0	84657.0	533386.0	84657.0	84040	167963	17339323.0	814	6018400	118825	1628
+insert_lsm_t2	drain	ariabc_internal.merkle_node_usertable_pkey	534200	0.0	197.0	0.0	197.0	0	0					
+insert_lsm_t2	checkpoint	ariabc_internal.merkle_node_usertable_pkey	534200	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	ariabc_internal.merkle_node_usertable_pkey	534200	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	ariabc_internal.merkle_node_usertable_prefix_idx	79667	78584.0	79973.0	78584.0	79973.0	78890	119623	18136600.0	854	5921536	119623	1937
+insert_lsm_t2	drain	ariabc_internal.merkle_node_usertable_prefix_idx	79667	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	checkpoint	ariabc_internal.merkle_node_usertable_prefix_idx	79667	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	ariabc_internal.merkle_node_usertable_prefix_idx	79667	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	ariabc_internal.merkle_node_usertable_root_idx	12945	12818.0	13028.0	12818.0	13028.0	12901	30112	2316587.0	1	4060	30112	129
+insert_lsm_t2	drain	ariabc_internal.merkle_node_usertable_root_idx	12945	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	checkpoint	ariabc_internal.merkle_node_usertable_root_idx	12945	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	ariabc_internal.merkle_node_usertable_root_idx	12945	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	public.usertable_merkle_lookup_idx	1508550	1273222.0	1263725.0	1273222.0	1263725.0	1263725	2068418	2965371314.0	381374	2823691324	2068418	381374
+insert_lsm_t2	drain	public.usertable_merkle_lookup_idx	1508550	235328.0	229246.0	235328.0	229246.0	231531	331582	31140744.0	984	7285536	331582	221652
+insert_lsm_t2	checkpoint	public.usertable_merkle_lookup_idx	1508550	0.0	2285.0	0.0	2285.0	0	0					
+insert_lsm_t2	shutdown	public.usertable_merkle_lookup_idx	1508550	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	public.ml_16856_l0_s0	13784	7334.0	17349.0	7334.0	17349.0	12841	1209111	107754875.0	49	3920	1209111	6450
+insert_lsm_t2	drain	public.ml_16856_l0_s0	13784	1.0	0.0	1.0	0.0	0	0					
+insert_lsm_t2	checkpoint	public.ml_16856_l0_s0	13784	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	public.ml_16856_l0_s0	13784	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	public.ml_16856_l0_s1	27395	20726.0	30817.0	20726.0	30817.0	26308	1242004	110604046.0	48	3840	1242004	6586
+insert_lsm_t2	drain	public.ml_16856_l0_s1	27395	83.0	84.0	83.0	84.0	1	1	171.0	1	80	1	1
+insert_lsm_t2	checkpoint	public.ml_16856_l0_s1	27395	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	public.ml_16856_l0_s1	27395	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	public.ml_16856_l1_s0	63836	57334.0	63691.0	57334.0	63691.0	57307	1274245	112190775.0	3	240	1274245	6385
+insert_lsm_t2	drain	public.ml_16856_l1_s0	63836	46.0	144.0	46.0	144.0	73	18387	1366885.0	1	80	18387	73
+insert_lsm_t2	checkpoint	public.ml_16856_l1_s0	63836	0.0	1.0	0.0	1.0	0	0					
+insert_lsm_t2	shutdown	public.ml_16856_l1_s0	63836	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	public.ml_16856_l1_s1	54102	46754.0	54075.0	46754.0	54075.0	48311	1155295	101069754.0	2	160	1155295	5765
+insert_lsm_t2	drain	public.ml_16856_l1_s1	54102	1583.0	2.0	1583.0	2.0	1	1	171.0	1	80	1	1
+insert_lsm_t2	checkpoint	public.ml_16856_l1_s1	54102	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	shutdown	public.ml_16856_l1_s1	54102	0.0	0.0	0.0	0.0	0	0					
+insert_lsm_t2	foreground	public.ml_16856_meta	38	0.0	0.0	0.0	0.0	1	306	18572.0	1	152	306	1
+insert_lsm_t2	drain	public.ml_16856_meta	38	37.0	1.0	37.0	1.0	1	11	651.0	0	0	11	1
+insert_lsm_t2	checkpoint	public.ml_16856_meta	38	0.0	1.0	0.0	1.0	0	0					
+insert_lsm_t2	shutdown	public.ml_16856_meta	38	0.0	0.0	0.0	0.0	0	0					

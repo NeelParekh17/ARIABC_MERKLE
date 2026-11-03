@@ -1,0 +1,1519 @@
+
+### contrib/merkle_lsm/merkle_lsm.c:205-237
+
+205: 	UnlockReleaseBuffer(buffer);
+206: }
+207: 
+208: /* Internal components must not appear in RelationGetIndexList: COPY and
+209:  * ExecOpenIndices would otherwise retain locks on every frozen component. */
+210: static void
+211: ml_hide_component(Oid oid, Relation heap, Oid base)
+212: {
+213: 	Relation	catalog = table_open(IndexRelationId, RowExclusiveLock);
+214: 	HeapTuple	tuple = SearchSysCacheCopy1(INDEXRELID, ObjectIdGetDatum(oid));
+215: 	Form_pg_index form = (Form_pg_index) GETSTRUCT(tuple);
+216: 	ObjectAddress child;
+217: 	ObjectAddress parent;
+218: 
+219: 	form->indisvalid = false;
+220: 	form->indisready = false;
+221: 	form->indislive = false;
+222: 	CatalogTupleUpdate(catalog, &tuple->t_self, tuple);
+223: 	heap_freetuple(tuple);
+224: 	table_close(catalog, RowExclusiveLock);
+225: 	ObjectAddressSet(child, RelationRelationId, oid);
+226: 	ObjectAddressSet(parent, RelationRelationId, base);
+227: 	recordDependencyOn(&child, &parent, DEPENDENCY_INTERNAL);
+228: 	CacheInvalidateRelcache(heap);
+229: 	CommandCounterIncrement();
+230: }
+231: 
+232: static Oid
+233: ml_create_component(Relation heap, Relation base, IndexInfo *info,
+234: 					const char *suffix, Oid am, Oid *classes)
+235: {
+236: 	List	   *names = NIL;
+237: 	char		name[NAMEDATALEN];
+
+### contrib/merkle_lsm/merkle_lsm.c:270-380
+
+270: 	MlOptions  *options = (MlOptions *) base->rd_options;
+271: 	Relation	meta;
+272: 	Oid			classes[INDEX_MAX_KEYS];
+273: 	IndexInfo  *component_info;
+274: 	int			level;
+275: 	int			slot;
+276: 	int			i;
+277: 
+278: 	if (heap->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT || info->ii_Concurrent)
+279: 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+280: 						errmsg("merkle_lsm requires a permanent table and nonconcurrent index build")));
+281: 	meta = ml_open_meta(base, AccessExclusiveLock, true);
+282: 	memset(&data, 0, sizeof(data));
+283: 	data.magic = MLSM_MAGIC;
+284: 	data.version = MLSM_VERSION;
+285: 	data.base = RelationGetRelid(base);
+286: 	data.levels = options ? options->levels : 3;
+287: 	data.top_size = options ? options->top_size : 1024;
+288: 	data.size_ratio = options ? options->size_ratio : 16;
+289: 	{
+290: 		Relation build_relation = palloc(sizeof(RelationData));
+291: 		Form_pg_class build_class = palloc(sizeof(FormData_pg_class));
+292: 		IndexInfo build_info = *info;
+293: 
+294: 		/* tuplesort requires a B-tree descriptor. A private view avoids any
+295: 		 * relcache relam mutation. Its smgr owner must also have a lifetime
+296: 		 * bounded by this call, including the ERROR path. */
+297: 		RelationCloseSmgr(base);
+298: 		*build_relation = *base;
+299: 		*build_class = *base->rd_rel;
+300: 		build_class->relam = BTREE_AM_OID;
+301: 		build_relation->rd_rel = build_class;
+302: 		build_relation->rd_amcache = NULL;
+303: 		build_info.ii_ParallelWorkers = 0;
+304: 		PG_TRY();
+305: 		{
+306: 			result = btbuild(heap, build_relation, &build_info);
+307: 			info->ii_BrokenHotChain = build_info.ii_BrokenHotChain;
+308: 			RelationCloseSmgr(build_relation);
+309: 		}
+310: 		PG_CATCH();
+311: 		{
+312: 			RelationCloseSmgr(build_relation);
+313: 			if (build_relation->rd_amcache)
+314: 				pfree(build_relation->rd_amcache);
+315: 			PG_RE_THROW();
+316: 		}
+317: 		PG_END_TRY();
+318: 		if (build_relation->rd_amcache)
+319: 			pfree(build_relation->rd_amcache);
+320: 		pfree(build_class);
+321: 		pfree(build_relation);
+322: 	}
+323: 	if (meta != NULL)
+324: 	{
+325: 		MlMeta		old;
+326: 
+327: 		ml_read_meta(meta, &old);
+328: 		if (old.levels != data.levels)
+329: 			ereport(ERROR, (errmsg("changing merkle_lsm levels requires DROP INDEX and CREATE INDEX")));
+330: 		memcpy(data.component, old.component, sizeof(data.component));
+331: 		for (level = 0; level < data.levels - 1; level++)
+332: 			for (slot = 0; slot < 2; slot++)
+333: 			{
+334: 				Relation c = index_open(data.component[level][slot], AccessExclusiveLock);
+335: 
+336: 				TransferPredicateLocksToHeapRelation(c);
+337: 				RelationSetNewRelfilenode(c, c->rd_rel->relpersistence);
+338: 				ml_empty_btree(c);
+339: 				index_close(c, NoLock);
+340: 			}
+341: 		RelationSetNewRelfilenode(meta, meta->rd_rel->relpersistence);
+342: 	}
+343: 	else
+344: 	{
+345: 		/* The public opclasses mirror the built-in B-tree names. */
+346: 		for (i = 0; i < info->ii_NumIndexKeyAttrs; i++)
+347: 		{
+348: 			Oid			classid = get_index_column_opclass(RelationGetRelid(base), i + 1);
+349: 			HeapTuple	tuple = SearchSysCache1(CLAOID, ObjectIdGetDatum(classid));
+350: 			Form_pg_opclass opclass = (Form_pg_opclass) GETSTRUCT(tuple);
+351: 			List	   *name = list_make2(makeString("pg_catalog"), makeString(pstrdup(NameStr(opclass->opcname))));
+352: 
+353: 			classes[i] = get_opclass_oid(BTREE_AM_OID, name, false);
+354: 			ReleaseSysCache(tuple);
+355: 		}
+356: 		component_info = BuildIndexInfo(base);
+357: 		component_info->ii_Concurrent = false;
+358: 		component_info->ii_Unique = false;
+359: 		for (level = 0; level < data.levels - 1; level++)
+360: 			for (slot = 0; slot < 2; slot++)
+361: 			{
+362: 				char		suffix[24];
+363: 				Relation	component;
+364: 
+365: 				snprintf(suffix, sizeof(suffix), "l%d_s%d", level, slot);
+366: 				data.component[level][slot] = ml_create_component(heap, base, component_info, suffix, BTREE_AM_OID, classes);
+367: 				component = index_open(data.component[level][slot], AccessExclusiveLock);
+368: 				ml_empty_btree(component);
+369: 				index_close(component, NoLock);
+370: 			}
+371: 		meta = index_open(ml_create_component(heap, base, component_info, "meta",
+372: 											 get_am_oid("merkle_lsm_meta", false), classes), AccessExclusiveLock);
+373: 	}
+374: 	ml_initialize_meta(meta, &data);
+375: 	index_close(meta, NoLock);
+376: 	return result;
+377: }
+378: 
+379: static bytea *
+380: ml_options(Datum reloptions, bool validate)
+
+### contrib/merkle_lsm/merkle_lsm.c:393-418
+
+393: 
+394: static bool
+395: ml_insert(Relation base, Datum *values, bool *isnull, ItemPointer tid,
+396: 		  Relation heap, IndexUniqueCheck check, IndexInfo *info)
+397: {
+398: 	Relation	meta = ml_open_meta(base, AccessShareLock, false);
+399: 	Buffer		buffer = ReadBuffer(meta, 0);
+400: 	MlMeta	   *data;
+401: 	Relation	active;
+402: 
+403: 	/* Freeze waits only for insert callbacks, never for transaction completion.
+404: 	 * Keep the SHARE buffer lock until btinsert has released its page locks.
+405: 	 * ERROR cleanup releases buffer locks and relation references normally. */
+406: 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+407: 	data = ml_page_meta(BufferGetPage(buffer));
+408: 	active = index_open(data->component[0][data->active[0]], RowExclusiveLock);
+409: 	btinsert(active, values, isnull, tid, heap, UNIQUE_CHECK_NO, info);
+410: 	index_close(active, RowExclusiveLock);
+411: 	UnlockReleaseBuffer(buffer);
+412: 	index_close(meta, AccessShareLock);
+413: 	return false;
+414: }
+415: 
+416: /* Compare using the actual opclass order function; no relcache relam writes
+417:  * and no dependency on sortsupport's B-tree-AM-only assertion. */
+418: static int
+
+### contrib/merkle_lsm/merkle_lsm.c:450-536
+
+450: 	Relation	meta = ml_open_meta(base, AccessShareLock, true);
+451: 	MlMeta		data;
+452: 	int			i;
+453: 	int			j;
+454: 
+455: 	so->relation[so->count++] = base;
+456: 	if (meta)
+457: 	{
+458: 		ml_read_meta(meta, &data);
+459: 		index_close(meta, AccessShareLock);
+460: 		for (i = 0; i < data.levels - 1; i++)
+461: 			for (j = 0; j < 2; j++)
+462: 				so->relation[so->count++] = index_open(data.component[i][j], AccessShareLock);
+463: 	}
+464: 	so->compare = _bt_mkscankey(base, NULL);
+465: 	/* With no tuple, nbtree initializes keysz to zero. We compare full keys. */
+466: 	so->compare->keysz = IndexRelationGetNumberOfKeyAttributes(base);
+467: 	for (i = 0; i < so->count; i++)
+468: 	{
+469: 		so->scan[i] = ml_btbegin(so->relation[i], nkeys, norderbys);
+470: 		so->scan[i]->xs_want_itup = true;
+471: 	}
+472: 	scan->opaque = so;
+473: 	scan->xs_itupdesc = RelationGetDescr(base);
+474: 	return scan;
+475: }
+476: 
+477: static void
+478: ml_rescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
+479: {
+480: 	MlScan	   *so = scan->opaque;
+481: 	int			i;
+482: 
+483: 	if (so->last)
+484: 		pfree(so->last);
+485: 	so->last = NULL;
+486: 	so->started = false;
+487: 	for (i = 0; i < so->count; i++)
+488: 	{
+489: 		btrescan(so->scan[i], keys, nkeys, orderbys, norderbys);
+490: 		so->eof[i] = false;
+491: 	}
+492: }
+493: 
+494: static bool
+495: ml_gettuple(IndexScanDesc scan, ScanDirection dir)
+496: {
+497: 	MlScan	   *so = scan->opaque;
+498: 	int			best = -1;
+499: 	int			i;
+500: 
+501: 	if (!ScanDirectionIsForward(dir))
+502: 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("merkle_lsm supports forward scans only")));
+503: 	for (i = 0; i < so->count; i++)
+504: 	{
+505: 		IndexScanDesc part = so->scan[i];
+506: 
+507: 		part->xs_snapshot = scan->xs_snapshot;
+508: 		if (!so->started)
+509: 			so->eof[i] = !btgettuple(part, dir);
+510: 		/* Skip every copy of the last emitted (key,TID), including repeated
+511: 		 * copies within one component and duplicates in three or more trees. */
+512: 		while (!so->eof[i] && so->last &&
+513: 			   ml_compare(so, part->xs_itup, so->last, scan->xs_itupdesc) == 0)
+514: 			so->eof[i] = !btgettuple(part, dir);
+515: 		if (!so->eof[i] && (best < 0 ||
+516: 			ml_compare(so, part->xs_itup, so->scan[best]->xs_itup, scan->xs_itupdesc) < 0))
+517: 			best = i;
+518: 	}
+519: 	so->started = true;
+520: 	if (best < 0)
+521: 		return false;
+522: 	if (so->last)
+523: 		pfree(so->last);
+524: 	so->last = CopyIndexTuple(so->scan[best]->xs_itup);
+525: 	scan->xs_heaptid = so->scan[best]->xs_heaptid;
+526: 	scan->xs_recheck = false;
+527: 	scan->xs_itup = so->last;
+528: 	return true;
+529: }
+530: 
+531: static int64
+532: ml_getbitmap(IndexScanDesc scan, TIDBitmap *bitmap)
+533: {
+534: 	MlScan	   *so = scan->opaque;
+535: 	int64		count = 0;
+536: 	int			i;
+
+### contrib/merkle_lsm/merkle_lsm.c:674-728
+
+674: merkle_lsm_config(PG_FUNCTION_ARGS)
+675: {
+676: 	Relation	base = ml_checked_base(PG_GETARG_OID(0));
+677: 	Relation	meta = ml_open_meta(base, AccessShareLock, false);
+678: 	MlMeta		data;
+679: 	char	   *json;
+680: 
+681: 	ml_read_meta(meta, &data);
+682: 	index_close(meta, AccessShareLock);
+683: 	index_close(base, AccessShareLock);
+684: 	json = psprintf("{\"levels\":%d,\"top_index_size\":%d,\"size_ratio\":%d}",
+685: 					data.levels, data.top_size, data.size_ratio);
+686: 	PG_RETURN_DATUM(DirectFunctionCall1(json_in, CStringGetDatum(json)));
+687: }
+688: 
+689: /* Cheap enough to poll during a benchmark: one metadata page and smgr sizes,
+690:  * no component scans (merkle_lsm_components counts entries by scanning). */
+691: Datum
+692: merkle_lsm_stats(PG_FUNCTION_ARGS)
+693: {
+694: 	Relation	base = ml_checked_base(PG_GETARG_OID(0));
+695: 	Relation	meta = ml_open_meta(base, AccessShareLock, false);
+696: 	MlMeta		data;
+697: 	StringInfoData buf;
+698: 	int			level;
+699: 	int			slot;
+700: 
+701: 	ml_read_meta(meta, &data);
+702: 	index_close(meta, AccessShareLock);
+703: 	initStringInfo(&buf);
+704: 	appendStringInfo(&buf, "{\"phase\":\"%s\",\"merge_level\":%d,\"epoch\":" UINT64_FORMAT
+705: 					 ",\"flush\":%s,\"last_merge_us\":" INT64_FORMAT ",\"merges\":[",
+706: 					 data.phase == MLSM_COPY ? "copy" : (data.phase == MLSM_COPIED ? "copied" : "idle"),
+707: 					 data.merge_level, data.epoch, data.flush ? "true" : "false", data.last_us);
+708: 	for (level = 0; level < data.levels - 1; level++)
+709: 		appendStringInfo(&buf, "%s" UINT64_FORMAT, level ? "," : "", data.merges[level]);
+710: 	appendStringInfoString(&buf, "],\"active\":[");
+711: 	for (level = 0; level < data.levels - 1; level++)
+712: 		appendStringInfo(&buf, "%s%d", level ? "," : "", data.active[level]);
+713: 	appendStringInfoString(&buf, "],\"bytes\":[");
+714: 	for (level = 0; level < data.levels - 1; level++)
+715: 	{
+716: 		appendStringInfo(&buf, "%s[", level ? "," : "");
+717: 		for (slot = 0; slot < 2; slot++)
+718: 		{
+719: 			Relation	part = index_open(data.component[level][slot], AccessShareLock);
+720: 
+721: 			appendStringInfo(&buf, "%s" INT64_FORMAT, slot ? "," : "",
+722: 							 (int64) RelationGetNumberOfBlocks(part) * BLCKSZ);
+723: 			index_close(part, AccessShareLock);
+724: 		}
+725: 		appendStringInfoChar(&buf, ']');
+726: 	}
+727: 	appendStringInfo(&buf, "],\"base_bytes\":" INT64_FORMAT "}",
+728: 					 (int64) RelationGetNumberOfBlocks(base) * BLCKSZ);
+
+### contrib/merkle_lsm/merkle_lsm.h:17-53
+
+17: #define MLSM_IDLE 0
+18: #define MLSM_COPY 1
+19: #define MLSM_COPIED 2
+20: 
+21: typedef struct MlOptions
+22: {
+23: 	BTOptions	bt;
+24: 	int			levels;
+25: 	int			top_size;
+26: 	int			size_ratio;
+27: } MlOptions;
+28: 
+29: /* One WAL-logged page in an internal metadata AM relation, never in a
+30:  * B-tree metapage (nbtree full-page WAL rebuilds that page independently). */
+31: typedef struct MlMeta
+32: {
+33: 	uint32		magic;
+34: 	uint32		version;
+35: 	Oid			base;
+36: 	int			levels;
+37: 	int			top_size;
+38: 	int			size_ratio;
+39: 	Oid			component[MLSM_MAX_LEVELS - 1][2];
+40: 	int			active[MLSM_MAX_LEVELS - 1];
+41: 	int			phase;
+42: 	int			merge_level;
+43: 	int			merge_slot;
+44: 	bool		flush;
+45: 	uint64		epoch;
+46: 	uint64		merges[MLSM_MAX_LEVELS - 1];
+47: 	int64		last_us;
+48: 	int64		started_us;
+49: } MlMeta;
+50: 
+51: static inline IndexScanDesc
+52: ml_btbegin(Relation relation, int nkeys, int norderbys)
+53: {
+
+### contrib/merkle_lsm/merge.c:175-257
+
+175: 	if (entry && entry->pid == MyProcPid)
+176: 		hash_search(ml_worker_owners, &MyDatabaseId, HASH_REMOVE, NULL);
+177: 	LWLockRelease(ml_worker_lock);
+178: }
+179: 
+180: /* Exact (all key attributes, heap TID) search in a heapkeyspace B-tree.
+181:  * Destination has a single merger writer; no check/insert race is possible. */
+182: static bool
+183: ml_contains(Relation destination, IndexTuple tuple)
+184: {
+185: 	BTScanInsert key = _bt_mkscankey(destination, tuple);
+186: 	BTStack		stack;
+187: 	Buffer		buffer = InvalidBuffer;
+188: 	bool		found = false;
+189: 
+190: 	stack = _bt_search(destination, key, &buffer, BT_READ, NULL);
+191: 	if (BufferIsValid(buffer))
+192: 	{
+193: 		Page		page = BufferGetPage(buffer);
+194: 		BTPageOpaque opaque = (BTPageOpaque) PageGetSpecialPointer(page);
+195: 		int			low = P_FIRSTDATAKEY(opaque);
+196: 		int			high = PageGetMaxOffsetNumber(page) + 1;
+197: 
+198: 		while (low < high)
+199: 		{
+200: 			int			mid = low + (high - low) / 2;
+201: 
+202: 			if (_bt_compare(destination, key, page, mid) > 0)
+203: 				low = mid + 1;
+204: 			else
+205: 				high = mid;
+206: 		}
+207: 		found = low <= PageGetMaxOffsetNumber(page) &&
+208: 			_bt_compare(destination, key, page, low) == 0;
+209: 		_bt_relbuf(destination, buffer);
+210: 	}
+211: 	_bt_freestack(stack);
+212: 	pfree(key);
+213: 	return found;
+214: }
+215: 
+216: static bool
+217: ml_nonempty(Relation relation)
+218: {
+219: 	IndexScanDesc scan = ml_btbegin(relation, 0, 0);
+220: 	bool		result;
+221: 
+222: 	scan->xs_snapshot = SnapshotAny;
+223: 	btrescan(scan, NULL, 0, NULL, 0);
+224: 	result = btgettuple(scan, ForwardScanDirection);
+225: 	ml_btend(scan);
+226: 	return result;
+227: }
+228: 
+229: static void
+230: ml_copy(Relation heap, Relation base, const MlMeta *data)
+231: {
+232: 	int			level = data->merge_level;
+233: 	Oid			sourceid = data->component[level][data->merge_slot];
+234: 	Oid			destid = level + 1 == data->levels - 1 ? data->base :
+235: 		data->component[level + 1][data->active[level + 1]];
+236: 	Relation	source = index_open(sourceid, AccessShareLock);
+237: 	Relation	destination = index_open(destid, RowExclusiveLock);
+238: 	IndexScanDesc scan = ml_btbegin(source, 0, 0);
+239: 	uint64		count = 0;
+240: 
+241: 	scan->xs_snapshot = SnapshotAny;
+242: 	scan->xs_want_itup = true;
+243: 	btrescan(scan, NULL, 0, NULL, 0);
+244: 	while (btgettuple(scan, ForwardScanDirection))
+245: 	{
+246: 		CHECK_FOR_INTERRUPTS();
+247: 		if (!ml_contains(destination, scan->xs_itup))
+248: 			_bt_doinsert(destination, scan->xs_itup, UNIQUE_CHECK_NO, heap);
+249: 		if (++count == 32)
+250: 			ml_inject(1, level);
+251: 	}
+252: 	ml_btend(scan);
+253: 	index_close(destination, RowExclusiveLock);
+254: 	index_close(source, AccessShareLock);
+255: 	elog(DEBUG1, "merkle_lsm copied " UINT64_FORMAT " entries from %u", count, sourceid);
+256: }
+257: 
+
+### contrib/merkle_lsm/merge.c:290-323
+
+290: 	if (data.phase == MLSM_IDLE)
+291: 	{
+292: 		/* Drain the largest overflowing level first, leaving room below L0. */
+293: 		int64		target[MLSM_MAX_LEVELS - 1];
+294: 
+295: 		target[0] = (int64) data.top_size * 1024;
+296: 		for (level = 1; level < data.levels - 1; level++)
+297: 			target[level] = Min(target[level - 1] * data.size_ratio, (int64) MaxBlockNumber * BLCKSZ);
+298: 		for (level = data.levels - 2; level >= 0; level--)
+299: 		{
+300: 			Relation	active = index_open(data.component[level][data.active[level]], AccessShareLock);
+301: 			bool		ready = data.flush ? ml_nonempty(active) :
+302: 				(int64) RelationGetNumberOfBlocks(active) * BLCKSZ >= target[level];
+303: 
+304: 			index_close(active, AccessShareLock);
+305: 			if (ready)
+306: 			{
+307: 				/* Writers hold this buffer SHARE only for their btinsert call.
+308: 				 * No copying or source lock is acquired under this lock. */
+309: 				data.merge_level = level;
+310: 				data.merge_slot = data.active[level];
+311: 				data.active[level] ^= 1;
+312: 				data.phase = MLSM_COPY;
+313: 				data.epoch++;
+314: 				data.started_us = GetCurrentTimestamp();
+315: 				ml_write_meta(meta, &data);
+316: 				work = true;
+317: 				break;
+318: 			}
+319: 		}
+320: 		if (!work && data.flush)
+321: 		{
+322: 			Buffer		buffer = ReadBuffer(meta, 0);
+323: 			GenericXLogState *state;
+
+### contrib/merkle_lsm/merge.c:335-400
+
+335: 				 * this final empty check while metadata is EXCLUSIVE. */
+336: 				if (!ml_nonempty(active))
+337: 					((MlMeta *) PageGetContents(page))->flush = false;
+338: 				index_close(active, AccessShareLock);
+339: 			}
+340: 			GenericXLogFinish(state);
+341: 			UnlockReleaseBuffer(buffer);
+342: 		}
+343: 	}
+344: 	else if (data.phase == MLSM_COPY)
+345: 	{
+346: 		ml_hold_base(base);
+347: 		ml_copy(heap, base, &data);
+348: 		/* Copy WAL must commit BEFORE the durable copied marker. */
+349: 		index_close(meta, AccessShareLock);
+350: 		table_close(heap, NoLock);
+351: 		index_close(base, NoLock);
+352: 		PopActiveSnapshot();
+353: 		CommitTransactionCommand();
+354: 		ml_inject(2, data.merge_level);
+355: 		StartTransactionCommand();
+356: 		PushActiveSnapshot(GetTransactionSnapshot());
+357: 		base = index_open(baseoid, AccessShareLock);
+358: 		meta = ml_open_meta(base, AccessShareLock, false);
+359: 		data.phase = MLSM_COPIED;
+360: 		ml_write_meta(meta, &data);
+361: 		index_close(meta, AccessShareLock);
+362: 		index_close(base, AccessShareLock);
+363: 		ml_release_session_lock(0, (Datum) 0);
+364: 		return true;
+365: 	}
+366: 	else if (data.phase == MLSM_COPIED)
+367: 	{
+368: 		Oid			sourceid = data.component[data.merge_level][data.merge_slot];
+369: 		Relation	source;
+370: 
+371: 		if (ConditionalLockRelationOid(sourceid, AccessExclusiveLock))
+372: 		{
+373: 			ml_hold_base(base);
+374: 			source = index_open(sourceid, NoLock);
+375: 			TransferPredicateLocksToHeapRelation(source);
+376: 			/* Transactional relfilenode replacement, never in-place truncate.
+377: 			 * An ERROR/kill restores the old source. A committed copy exists
+378: 			 * already; after restart repeating the replacement is harmless. */
+379: 			RelationSetNewRelfilenode(source, source->rd_rel->relpersistence);
+380: 			ml_empty_btree(source);
+381: 			ml_inject(3, data.merge_level);
+382: 			index_close(source, NoLock);
+383: 			index_close(meta, AccessShareLock);
+384: 			table_close(heap, NoLock);
+385: 			index_close(base, NoLock);
+386: 			PopActiveSnapshot();
+387: 			CommitTransactionCommand();
+388: 			StartTransactionCommand();
+389: 			PushActiveSnapshot(GetTransactionSnapshot());
+390: 			base = index_open(baseoid, AccessShareLock);
+391: 			meta = ml_open_meta(base, AccessShareLock, false);
+392: 			data.phase = MLSM_IDLE;
+393: 			data.merges[data.merge_level]++;
+394: 			data.last_us = GetCurrentTimestamp() - data.started_us;
+395: 			ml_write_meta(meta, &data);
+396: 			index_close(meta, AccessShareLock);
+397: 			index_close(base, AccessShareLock);
+398: 			ml_release_session_lock(0, (Datum) 0);
+399: 			return true;
+400: 		}
+
+### contrib/merkle_lsm/merge.c:437-445
+
+437: 	BackgroundWorkerUnblockSignals();
+438: 	SetConfigOption("default_transaction_isolation", "read committed", PGC_USERSET, PGC_S_SESSION);
+439: 	BackgroundWorkerInitializeConnectionByOid(DatumGetObjectId(arg), BOOTSTRAP_SUPERUSERID, 0);
+440: 	before_shmem_exit(ml_release_session_lock, (Datum) 0);
+441: 	if (!ml_claim_worker())
+442: 		proc_exit(0);
+443: 	before_shmem_exit(ml_release_worker, (Datum) 0);
+444: 	while (!ml_shutdown)
+445: 	{
+
+### contrib/merkle_lsm/merkle_lsm--1.0.sql:404-459
+
+404: CREATE FUNCTION merkle_create_lookup_index(target regclass,
+405:  am text DEFAULT 'merkle_lsm', levels integer DEFAULT 3,
+406:  top_index_size integer DEFAULT 1024, size_ratio integer DEFAULT 16)
+407: RETURNS regclass LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+408: DECLARE
+409:  m record;
+410:  key_cols text;
+411:  lead_cols text;
+412:  hash_expr text;
+413:  lookup_name text;
+414:  table_name text;
+415:  schema_name text;
+416:  existing regclass;
+417:  existing_am text;
+418:  result regclass;
+419:  options text := '';
+420: BEGIN
+421:  IF am NOT IN ('btree', 'merkle_lsm') THEN
+422:    RAISE EXCEPTION 'lookup AM must be btree or merkle_lsm';
+423:  END IF;
+424:  SELECT i.indexrelid, i.indnkeyatts,
+425:    coalesce((SELECT option_value::int FROM pg_options_to_table(c.reloptions) WHERE option_name='partitions'),200) AS partitions,
+426:    coalesce((SELECT option_value::int FROM pg_options_to_table(c.reloptions) WHERE option_name='partition_key_columns'),0) AS lead_n,
+427:    coalesce((SELECT option_value::int FROM pg_options_to_table(c.reloptions) WHERE option_name='subpartitions'),1) AS subparts
+428:  INTO STRICT m FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+429:  JOIN pg_am a ON a.oid=c.relam WHERE i.indrelid=target AND a.amname='merkle' AND i.indisvalid;
+430:  SELECT string_agg(pg_get_indexdef(m.indexrelid,k,true), ', ' ORDER BY k),
+431:    string_agg(pg_get_indexdef(m.indexrelid,k,true), ', ' ORDER BY k) FILTER (WHERE k<=m.lead_n)
+432:  INTO key_cols, lead_cols FROM generate_series(1,m.indnkeyatts) k;
+433:  IF m.lead_n>0 THEN
+434:    hash_expr := format('merkle_key_hash_routed(ROW(%s),ROW(%s),%s,%s)',key_cols,lead_cols,m.partitions,m.subparts);
+435:  ELSIF m.indnkeyatts>1 THEN
+436:    hash_expr := format('merkle_key_hash(ROW(%s))',key_cols);
+437:  ELSE
+438:    hash_expr := format('merkle_key_hash(%s)',key_cols);
+439:  END IF;
+440:  SELECT n.nspname,c.relname INTO schema_name,table_name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=target;
+441:  lookup_name := table_name || '_merkle_lookup_idx';
+442:  -- Long table names retain a deterministic suffix and a table OID disambiguator.
+443:  IF octet_length(lookup_name)>63 THEN
+444:    lookup_name := 'merkle_lookup_' || target::oid || '_idx';
+445:  END IF;
+446:  existing := to_regclass(format('%I.%I',schema_name,lookup_name));
+447:  IF existing IS NOT NULL THEN
+448:    SELECT a.amname INTO existing_am FROM pg_class c JOIN pg_am a ON a.oid=c.relam WHERE c.oid=existing;
+449:    RAISE EXCEPTION 'lookup index % already exists using %; drop it explicitly before conversion to %',existing,existing_am,am;
+450:  END IF;
+451:  IF am='merkle_lsm' THEN
+452:    options := format(' WITH (levels=%s,top_index_size=%s,size_ratio=%s)',levels,top_index_size,size_ratio);
+453:  END IF;
+454:  EXECUTE format('CREATE INDEX %I ON %s USING %I (merkle_partition_for_hash(%s,%s),%s,%s)%s',
+455:    lookup_name,target,am,hash_expr,m.partitions,hash_expr,key_cols,options);
+456:  result := to_regclass(format('%I.%I',schema_name,lookup_name));
+457:  RETURN result;
+458: END $$;
+
+### src/backend/access/merkle/merkle.c:380-448
+
+380: Datum
+381: merklehandler(PG_FUNCTION_ARGS)
+382: {
+383:     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
+384:     
+385:     /* Ensure reloptions are registered when AM is loaded */
+386:     merkle_register_relopts();
+387: 
+388:     /*
+389:      * Index properties
+390:      * 
+391:      * The Merkle index is NOT a traditional search index - it's for
+392:      * integrity verification. So most search-related properties are false.
+393:      */
+394:     amroutine->amstrategies = 0;            /* no operator strategies */
+395:     amroutine->amsupport = 0;               /* no support functions (partition logic is inline) */
+396:     amroutine->amcanorder = false;          /* cannot order results */
+397:     amroutine->amcanorderbyop = false;      /* no ordering operators */
+398:     amroutine->amcanbackward = false;       /* no backward scans */
+399:     amroutine->amcanunique = false;         /* not for uniqueness */
+400:     amroutine->amcanmulticol = true;        /* multi-column keys supported */
+401:     amroutine->amoptionalkey = true;        /* key is optional for scan */
+402:     amroutine->amsearcharray = false;       /* no array searches */
+403:     amroutine->amsearchnulls = false;       /* no null searches */
+404:     amroutine->amstorage = false;           /* no special storage */
+405:     amroutine->amclusterable = false;       /* cannot cluster on */
+406:     amroutine->ampredlocks = false;         /* no predicate locks */
+407:     amroutine->amcanparallel = false;       /* no parallel scans */
+408:     amroutine->amcaninclude = false;        /* no included columns */
+409:     amroutine->amkeytype = InvalidOid;      /* no specific key type */
+410: 
+411:     /*
+412:      * Callback functions
+413:      */
+414:     /* Build functions */
+415:     amroutine->ambuild = merkleBuild;
+416:     amroutine->ambuildempty = merkleBuildempty;
+417:     
+418:     /* Insert/delete functions */
+419:     amroutine->aminsert = merkleInsert;
+420:     amroutine->ambulkdelete = merkleBulkdelete;
+421:     amroutine->amvacuumcleanup = merkleVacuumcleanup;
+422:     
+423:     /* Scan functions - NOT SUPPORTED for Merkle index */
+424:     /* 
+425:      * The Merkle index does not support traditional index scans.
+426:      * Verification is done through explicit SQL functions (merkle_verify, etc.)
+427:      * which read the index pages directly via ReadBuffer().
+428:      */
+429:     amroutine->amcanreturn = NULL;          /* no index-only scans */
+430:     amroutine->amcostestimate = merkleCostEstimate;
+431:     amroutine->amoptions = merkle_options;  /* parse partitions, leaves_per_partition */
+432:     amroutine->amproperty = NULL;           /* no special properties */
+433:     amroutine->ambuildphasename = NULL;     /* no build phases */
+434:     amroutine->amvalidate = NULL;           /* no opclass validation needed */
+435:     amroutine->ambeginscan = NULL;          /* no scan support */
+436:     amroutine->amrescan = NULL;             /* no scan support */
+437:     amroutine->amgettuple = NULL;           /* no scan support */
+438:     amroutine->amgetbitmap = NULL;          /* no bitmap scans */
+439:     amroutine->amendscan = NULL;            /* no scan support */
+440:     amroutine->ammarkpos = NULL;            /* no mark/restore */
+441:     amroutine->amrestrpos = NULL;
+442:     
+443:     /* Parallel scan functions */
+444:     amroutine->amestimateparallelscan = NULL;
+445:     amroutine->aminitparallelscan = NULL;
+446:     amroutine->amparallelrescan = NULL;
+447: 
+448:     PG_RETURN_POINTER(amroutine);
+
+### src/backend/access/merkle/merkleutil.c:999-1060
+
+999:  */
+1000: void
+1001: merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
+1002: 				 uint64 baseline_apply_seq)
+1003: {
+1004: 	Buffer          metabuf;
+1005: 	Page            metapage;
+1006: 	MerkleMetaPageData *meta;
+1007: 	int             fanout;
+1008: 	int             split_threshold;
+1009: 	int             merge_threshold;
+1010: 	int             num_partitions;
+1011: 	int             partition_key_columns;
+1012: 	int             subpartitions;
+1013: 
+1014: 	if (opts != NULL)
+1015: 	{
+1016: 		fanout = opts->fanout;
+1017: 		split_threshold = opts->split_threshold;
+1018: 		merge_threshold = opts->merge_threshold;
+1019: 		num_partitions = opts->num_partitions;
+1020: 		partition_key_columns = opts->partition_key_columns;
+1021: 		subpartitions = opts->subpartitions;
+1022: 	}
+1023: 	else
+1024: 	{
+1025: 		fanout = MERKLE_DEFAULT_FANOUT;
+1026: 		split_threshold = SPLIT_THRESHOLD;
+1027: 		merge_threshold = MERKLE_MERGE_THRESHOLD;
+1028: 		num_partitions = MERKLE_DEFAULT_PARTITIONS;
+1029: 		partition_key_columns = 0;
+1030: 		subpartitions = 1;
+1031: 	}
+1032: 
+1033: 	metabuf = ReadBuffer(indexRel, P_NEW);
+1034: 	Assert(BufferGetBlockNumber(metabuf) == MERKLE_METAPAGE_BLKNO);
+1035: 	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+1036: 	metapage = BufferGetPage(metabuf);
+1037: 	PageInit(metapage, BLCKSZ, 0);
+1038: 
+1039: 	meta = MerklePageGetMeta(metapage);
+1040: 	meta->version = MERKLE_VERSION;
+1041: 	meta->heapRelid = heapOid;
+1042: 	meta->fanout = fanout;
+1043: 	meta->split_threshold = split_threshold;
+1044: 	meta->merge_threshold = merge_threshold;
+1045: 	meta->num_partitions = num_partitions;
+1046: 	meta->routeFormatVersion = MERKLE_ROUTE_FORMAT_VERSION;
+1047: 	meta->rowHashFormatVersion = MERKLE_ROW_HASH_FORMAT_VERSION;
+1048: 	meta->baselineApplySeq = baseline_apply_seq;
+1049: 	meta->partition_key_columns = partition_key_columns;
+1050: 	meta->subpartitions = subpartitions;
+1051: 
+1052: 	START_CRIT_SECTION();
+1053: 	MarkBufferDirty(metabuf);
+1054: 	if (RelationNeedsWAL(indexRel))
+1055: 		log_newpage_buffer(metabuf, true);
+1056: 	END_CRIT_SECTION();
+1057: 	UnlockReleaseBuffer(metabuf);
+1058: }
+1059: 
+1060: typedef struct MerkleKeyHashCache
+
+### src/backend/access/merkle/merkleutil.c:1640-1660
+
+1640: 	snprintf(root_idx, sizeof(root_idx), "%s_root_idx", tablename);
+1641: 
+1642: 	sql = psprintf(
+1643: 		"CREATE SCHEMA IF NOT EXISTS ariabc_internal;\n"
+1644: 		"CREATE TABLE IF NOT EXISTS ariabc_internal.%s (\n"
+1645: 		"    tuple_count  integer  NOT NULL DEFAULT 0,\n"
+1646: 		"    partition_id smallint NOT NULL,\n"
+1647: 		"    prefix_len   smallint NOT NULL,\n"
+1648: 		"    is_leaf      boolean  NOT NULL,\n"
+1649: 		"    node_id      bytea    NOT NULL,\n"
+1650: 		"    hash         bytea    NOT NULL,\n"
+1651: 		"    PRIMARY KEY (partition_id, node_id, prefix_len)\n"
+1652: 		") WITH (fillfactor = 80);\n"
+1653: 		"CREATE INDEX IF NOT EXISTS %s\n"
+1654: 		"    ON ariabc_internal.%s (partition_id, prefix_len, node_id);\n"
+1655: 		"CREATE INDEX IF NOT EXISTS %s\n"
+1656: 		"    ON ariabc_internal.%s (partition_id)\n"
+1657: 		"    WHERE prefix_len = 0;\n",
+1658: 		tablename, prefix_idx, tablename, root_idx, tablename);
+1659: 
+1660: 	rc = SPI_connect();
+
+### src/backend/access/merkle/merkleapply.c:650-711
+
+650: 		RelationGetRelationName(heap_rel));
+651: 	table_close(heap_rel, AccessShareLock);
+652: 
+653: 	key_expr = get_index_key_expr_str(index_oid);
+654: 
+655: 	initStringInfo(&buf);
+656: 	/*
+657: 	 * Streamlined split row retrieval: scan directly using the covering
+658: 	 * B-tree index (usertable_small_merkle_lookup_idx) avoiding table-wide
+659: 	 * sequential scans, CTE materialization, and sorting overhead.
+660: 	 */
+661: 	appendStringInfo(&buf,
+662: 		"SELECT %s AS kh, merkle_tuple_hash(u.*) AS th"
+663: 		"  FROM %s u"
+664: 		" WHERE merkle_partition_for_hash(%s, $3) = $4"
+665: 		"   AND %s BETWEEN $1 AND $2",
+666: 		key_expr, heap_name, key_expr, key_expr);
+667: 
+668: 	{
+669: 		Oid			argtypes[4] = {BYTEAOID, BYTEAOID, INT4OID, INT2OID};
+670: 		Datum		values[4];
+671: 		bytea	   *lower_bytea = (bytea *) palloc(VARHDRSZ + 8);
+672: 		bytea	   *upper_bytea = (bytea *) palloc(VARHDRSZ + 8);
+673: 		uint64		scan_rows;
+674: 
+675: 		SET_VARSIZE(lower_bytea, VARHDRSZ + 8);
+676: 		SET_VARSIZE(upper_bytea, VARHDRSZ + 8);
+677: 		memcpy(VARDATA(lower_bytea), lower, 8);
+678: 		memcpy(VARDATA(upper_bytea), upper, 8);
+679: 		values[0] = PointerGetDatum(lower_bytea);
+680: 		values[1] = PointerGetDatum(upper_bytea);
+681: 		values[2] = Int32GetDatum(num_partitions);
+682: 		values[3] = Int16GetDatum((int16) partition_id);
+683: 
+684: 		PushActiveSnapshot(GetLatestSnapshot());
+685: 		spi_rc = SPI_execute_with_args(buf.data, 4, argtypes, values, NULL, true, 0);
+686: 		scan_rows = SPI_processed;
+687: 		PopActiveSnapshot();
+688: 
+689: 		if (scan_rows == 0)
+690: 		{
+691: 			if (SPI_tuptable != NULL)
+692: 				SPI_freetuptable(SPI_tuptable);
+693: 			pfree(lower_bytea);
+694: 			pfree(upper_bytea);
+695: 			pfree(buf.data);
+696: 			return;
+697: 		}
+698: 
+699: 		if (target_count > 0 && scan_rows != (uint64) target_count)
+700: 		{
+701: 			elog(DEBUG1,
+702: 				 "Merkle split row count differs from node tuple_count (index %u prefix %d: tuple_count %lld, heap scan %llu)",
+703: 				 index_oid, prefix_len, (long long) target_count, (unsigned long long) scan_rows);
+704: 		}
+705: 
+706: 		if (spi_rc == SPI_OK_SELECT && scan_rows > 0)
+707: 		{
+708: 			int						i;
+709: 			int						num_entries;
+710: 			MerkleTupleHashEntry *entries;
+711: 
+
+### src/backend/access/merkle/merkleapply.c:1538-1558
+
+1538: 				IndexScanDesc iscan;
+1539: 
+1540: 				SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
+1541: 				memcpy(VARDATA(node_id_bytea), node_id, 8);
+1542: 
+1543: 				ScanKeyInit(&skey[0], 1, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) partition_id));
+1544: 				ScanKeyInit(&skey[1], 2, BTEqualStrategyNumber, F_BYTEAEQ, PointerGetDatum(node_id_bytea));
+1545: 				ScanKeyInit(&skey[2], 3, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) prefix_len));
+1546: 
+1547: 				iscan = index_beginscan(catalog_rel, pkey_idx_rel, traversal_snapshot, 3, 0);
+1548: 				index_rescan(iscan, skey, 3, NULL, 0);
+1549: 				ExecClearTuple(slot);
+1550: 				found_node = index_getnext_slot(iscan, ForwardScanDirection, slot);
+1551: 				if (found_node)
+1552: 				{
+1553: 					bool isnull;
+1554: 
+1555: 					if (route_tids != NULL)
+1556: 						route_tids[prefix_len / bits_per_split] = slot->tts_tid;
+1557: 					merkle_init_cat_col_offsets(slot->tts_tupleDescriptor);
+1558: 					if (g_cat_att_is_leaf > 0)
+
+### src/backend/access/merkle/merkleapply.c:2060-2090
+
+2060: 				found = ItemPointerEquals(&cur_tid, &oldTup->t_data->t_ctid);
+2061: 			}
+2062: 		}
+2063: 	}
+2064: 
+2065: 	if (!found)
+2066: 	{
+2067: 		ScanKeyData skey[3];
+2068: 		bytea *node_id_bytea = (bytea *) palloc(VARHDRSZ + 8);
+2069: 		IndexScanDesc iscan;
+2070: 
+2071: 		SET_VARSIZE(node_id_bytea, VARHDRSZ + 8);
+2072: 		memcpy(VARDATA(node_id_bytea), node_id, 8);
+2073: 		ScanKeyInit(&skey[0], 1, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) partition_id));
+2074: 		ScanKeyInit(&skey[1], 2, BTEqualStrategyNumber, F_BYTEAEQ, PointerGetDatum(node_id_bytea));
+2075: 		ScanKeyInit(&skey[2], 3, BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum((int16) prefix_len));
+2076: 
+2077: 		iscan = index_beginscan(catalog_rel, pkey_idx_rel, lookup_snapshot, 3, 0);
+2078: 		index_rescan(iscan, skey, 3, NULL, 0);
+2079: 		ExecClearTuple(scan_slot);
+2080: 		found = index_getnext_slot(iscan, ForwardScanDirection, scan_slot);
+2081: 		index_endscan(iscan);
+2082: 		pfree(node_id_bytea);
+2083: 	}
+2084: 
+2085: 	if (!found)
+2086: 		return is_leaf ? MERKLE_NODE_UPDATE_STALE_LEAF : MERKLE_NODE_UPDATE_MISSING;
+2087: 
+2088: 	cur_tid = scan_slot->tts_tid;
+2089: 
+2090: 	for (;;)
+
+### src/backend/access/merkle/merkleapply.c:2150-2190
+
+2150: 		oldTup = ExecFetchSlotHeapTuple(scan_slot, false, NULL);
+2151: 		newTup = heap_modify_tuple(oldTup, td, repl_values, repl_nulls, repl_do);
+2152: 		pfree(new_hash_bytea);
+2153: 
+2154: 		ExecClearTuple(update_slot);
+2155: 		ExecStoreHeapTuple(newTup, update_slot, true);
+2156: 
+2157: 		lockmode = LockTupleExclusive;
+2158: 		memset(&tmfd, 0, sizeof(tmfd));
+2159: 		result = table_tuple_update(catalog_rel, &cur_tid, update_slot,
+2160: 									GetCurrentCommandId(true),
+2161: 									GetActiveSnapshot(),
+2162: 									InvalidSnapshot,
+2163: 									true /* wait */,
+2164: 									&tmfd, &lockmode,
+2165: 									&update_indexes);
+2166: 
+2167: 		if (result == TM_Ok)
+2168: 		{
+2169: 			if (unlikely(update_indexes))
+2170: 			{
+2171: 				/* Non-HOT update: update indexes pointing to the new heap tuple */
+2172: 				if (index_state->estate == NULL)
+2173: 				{
+2174: 					index_state->estate = CreateExecutorState();
+2175: 					index_state->rri = makeNode(ResultRelInfo);
+2176: 					InitResultRelInfo(index_state->rri, catalog_rel, 1, NULL, 0);
+2177: 					ExecOpenIndices(index_state->rri, false);
+2178: 					index_state->indices_open = true;
+2179: 					index_state->estate->es_result_relations = index_state->rri;
+2180: 					index_state->estate->es_num_result_relations = 1;
+2181: 					index_state->estate->es_result_relation_info = index_state->rri;
+2182: 				}
+2183: 				ExecInsertIndexTuples(update_slot, index_state->estate, false, NULL, NIL);
+2184: 				ResetPerTupleExprContext(index_state->estate);
+2185: 			}
+2186: 
+2187: 			if (new_count_out)
+2188: 				*new_count_out = new_count;
+2189: 			return MERKLE_NODE_UPDATE_OK;
+2190: 		}
+
+### src/backend/executor/nodeModifyTable.c:2095-2132
+
+2095: 			 * Exact-once Merkle UPDATE maintenance:
+2096: 			 * - old-row hash subtraction is handled by ApplyMerkleDeletePlan() above
+2097: 			 * - new-row addition must happen exactly once regardless of HOT/non-HOT
+2098: 			 *
+2099: 			 * The generic ExecInsertIndexTuples() path also invokes the Merkle
+2100: 			 * AM on non-HOT updates. Suppress that temporarily so UPDATE owns the
+2101: 			 * Merkle insert path uniformly, then apply ExecInsertMerkleIndexes()
+2102: 			 * exactly once below.
+2103: 			 */
+2104: 			if (!defer_bcdb_dml && update_indexes && saved_enable_merkle_index)
+2105: 			{
+2106: 				enable_merkle_index = false;
+2107: 				merkle_index_maintenance_suppress = true;
+2108: 			}
+2109: 			PG_TRY();
+2110: 			{
+2111: 				/* insert non-Merkle index entries for tuple if necessary */
+2112: 				if (resultRelInfo->ri_NumIndices > 0 && update_indexes)
+2113: 					recheckIndexes = ExecInsertIndexTuples(slot, estate, false, NULL, NIL);
+2114: 			}
+2115: 			PG_CATCH();
+2116: 			{
+2117: 				enable_merkle_index = saved_enable_merkle_index;
+2118: 				merkle_index_maintenance_suppress =
+2119: 					saved_merkle_index_maintenance_suppress;
+2120: 				PG_RE_THROW();
+2121: 			}
+2122: 			PG_END_TRY();
+2123: 			enable_merkle_index = saved_enable_merkle_index;
+2124: 			merkle_index_maintenance_suppress =
+2125: 				saved_merkle_index_maintenance_suppress;
+2126: 
+2127: 			need_exec_update_merkle_insert = (!defer_bcdb_dml && saved_enable_merkle_index);
+2128: 			if (need_exec_update_merkle_insert)
+2129: 				ExecInsertMerkleIndexes(resultRelationDesc, slot);
+2130: 		}
+2131: 	}
+2132: 
+
+### src/backend/executor/execIndexing.c:151-180
+
+151: void
+152: ExecOpenIndices(ResultRelInfo *resultRelInfo, bool speculative)
+153: {
+154: 	Relation	resultRelation = resultRelInfo->ri_RelationDesc;
+155: 	List	   *indexoidlist;
+156: 	ListCell   *l;
+157: 	int			len,
+158: 				i;
+159: 	RelationPtr relationDescs;
+160: 	IndexInfo **indexInfoArray;
+161: 
+162: 	resultRelInfo->ri_NumIndices = 0;
+163: 	resultRelInfo->ri_HasExclusionIndex = false;
+164: 
+165: 	/* fast path if no indexes */
+166: 	if (!RelationGetForm(resultRelation)->relhasindex)
+167: 		return;
+168: 
+169: 	/*
+170: 	 * Get cached list of index OIDs
+171: 	 */
+172: 	indexoidlist = RelationGetIndexList(resultRelation);
+173: 	len = list_length(indexoidlist);
+174: 	if (len == 0)
+175: 		return;
+176: 
+177: 	/*
+178: 	 * allocate space for result arrays
+179: 	 */
+180: 	relationDescs = (RelationPtr) palloc(len * sizeof(Relation));
+
+### src/backend/utils/cache/relcache.c:4380-4404
+
+4380: 								 NULL, 1, &skey);
+4381: 
+4382: 	while (HeapTupleIsValid(htup = systable_getnext(indscan)))
+4383: 	{
+4384: 		Form_pg_index index = (Form_pg_index) GETSTRUCT(htup);
+4385: 
+4386: 		/*
+4387: 		 * Ignore any indexes that are currently being dropped.  This will
+4388: 		 * prevent them from being searched, inserted into, or considered in
+4389: 		 * HOT-safety decisions.  It's unsafe to touch such an index at all
+4390: 		 * since its catalog entries could disappear at any instant.
+4391: 		 */
+4392: 		if (!index->indislive)
+4393: 			continue;
+4394: 
+4395: 		/* add index's OID to result list */
+4396: 		result = lappend_oid(result, index->indexrelid);
+4397: 
+4398: 		/*
+4399: 		 * Invalid, non-unique, non-immediate or predicate indexes aren't
+4400: 		 * interesting for either oid indexes or replication identity indexes,
+4401: 		 * so don't check them.
+4402: 		 */
+4403: 		if (!index->indisvalid || !index->indisunique ||
+4404: 			!index->indimmediate ||
+
+### src/include/access/merkle.h:175-195
+
+175:  * MerkleMetaPageData - Metadata stored on page 0
+176:  */
+177: typedef struct MerkleMetaPageData
+178: {
+179:     uint32          version;            /* format version */
+180:     Oid             heapRelid;          /* OID of indexed table */
+181:     int32           fanout;             /* branching factor (children per internal node) */
+182: 	int32           split_threshold;    /* max tuples before node split */
+183: 	int32           merge_threshold;    /* min tuples before node merge */
+184: 	int32           num_partitions;     /* independent top-level Merkle roots */
+185: 	uint32          routeFormatVersion; /* deterministic key-routing format */
+186: 	uint32          rowHashFormatVersion; /* canonical row serialization format */
+187: 	uint64          baselineApplySeq;   /* heap snapshot represented at build */
+188: 	/*
+189: 	 * Leading-key partition routing (see merkle_route_digest_apply_leading).
+190: 	 * Metapages written before these fields existed read them as zero, which
+191: 	 * selects plain full-key hash routing.
+192: 	 */
+193: 	int32           partition_key_columns; /* 0 = route by full-key hash only */
+194: 	int32           subpartitions;      /* partitions per leading-key group */
+195: } MerkleMetaPageData;
+
+### src/backend/storage/buffer/bufmgr.c:1450-1520
+
+1450: 
+1451: /*
+1452:  * MarkBufferDirty
+1453:  *
+1454:  *		Marks buffer contents as dirty (actual write happens later).
+1455:  *
+1456:  * Buffer must be pinned and exclusive-locked.  (If caller does not hold
+1457:  * exclusive lock, then somebody could be in process of writing the buffer,
+1458:  * leading to risk of bad data written to disk.)
+1459:  */
+1460: void
+1461: MarkBufferDirty(Buffer buffer)
+1462: {
+1463: 	BufferDesc *bufHdr;
+1464: 	uint32		buf_state;
+1465: 	uint32		old_buf_state;
+1466: 
+1467: 	if (!BufferIsValid(buffer))
+1468: 		elog(ERROR, "bad buffer ID: %d", buffer);
+1469: 
+1470: 	if (BufferIsLocal(buffer))
+1471: 	{
+1472: 		MarkLocalBufferDirty(buffer);
+1473: 		return;
+1474: 	}
+1475: 
+1476: 	bufHdr = GetBufferDescriptor(buffer - 1);
+1477: 
+1478: 	Assert(BufferIsPinned(buffer));
+1479: 	Assert(LWLockHeldByMeInMode(BufferDescriptorGetContentLock(bufHdr),
+1480: 								LW_EXCLUSIVE));
+1481: 
+1482: 	old_buf_state = pg_atomic_read_u32(&bufHdr->state);
+1483: 	for (;;)
+1484: 	{
+1485: 		if (old_buf_state & BM_LOCKED)
+1486: 			old_buf_state = WaitBufHdrUnlocked(bufHdr);
+1487: 
+1488: 		buf_state = old_buf_state;
+1489: 
+1490: 		Assert(BUF_STATE_GET_REFCOUNT(buf_state) > 0);
+1491: 		buf_state |= BM_DIRTY | BM_JUST_DIRTIED;
+1492: 
+1493: 		if (pg_atomic_compare_exchange_u32(&bufHdr->state, &old_buf_state,
+1494: 										   buf_state))
+1495: 			break;
+1496: 	}
+1497: 
+1498: 	/*
+1499: 	 * If the buffer was not dirty already, do vacuum accounting.
+1500: 	 */
+1501: 	if (!(old_buf_state & BM_DIRTY))
+1502: 	{
+1503: 		VacuumPageDirty++;
+1504: 		pgBufferUsage.shared_blks_dirtied++;
+1505: 		if (VacuumCostActive)
+1506: 			VacuumCostBalance += VacuumCostPageDirty;
+1507: 	}
+1508: }
+1509: 
+1510: /*
+1511:  * ReleaseAndReadBuffer -- combine ReleaseBuffer() and ReadBuffer()
+1512:  *
+1513:  * Formerly, this saved one cycle of acquiring/releasing the BufMgrLock
+1514:  * compared to calling the two routines separately.  Now it's mainly just
+1515:  * a convenience function.  However, if the passed buffer is valid and
+1516:  * already contains the desired block, we just return it as-is; and that
+1517:  * does save considerable work compared to a full release and reacquire.
+1518:  *
+1519:  * Note: it is OK to pass buffer == InvalidBuffer, indicating that no old
+1520:  * buffer actually needs to be released.  This case is the same as ReadBuffer,
+
+### src/backend/storage/buffer/bufmgr.c:3543-3565
+
+3543: 			 * If checksums are enabled, you might think we should reset the
+3544: 			 * checksum here. That will happen when the page is written
+3545: 			 * sometime later in this checkpoint cycle.
+3546: 			 */
+3547: 			if (!XLogRecPtrIsInvalid(lsn))
+3548: 				PageSetLSN(page, lsn);
+3549: 		}
+3550: 
+3551: 		buf_state |= BM_DIRTY | BM_JUST_DIRTIED;
+3552: 		UnlockBufHdr(bufHdr, buf_state);
+3553: 
+3554: 		if (delayChkpt)
+3555: 			MyPgXact->delayChkpt = false;
+3556: 
+3557: 		if (dirtied)
+3558: 		{
+3559: 			VacuumPageDirty++;
+3560: 			pgBufferUsage.shared_blks_dirtied++;
+3561: 			if (VacuumCostActive)
+3562: 				VacuumCostBalance += VacuumCostPageDirty;
+3563: 		}
+3564: 	}
+3565: }
+
+### src/backend/storage/file/fd.c:1895-1920
+
+1895: FileRead(File file, char *buffer, int amount, off_t offset,
+1896: 		 uint32 wait_event_info)
+1897: {
+1898: 	int			returnCode;
+1899: 	Vfd		   *vfdP;
+1900: 
+1901: 	Assert(FileIsValid(file));
+1902: 
+1903: 	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %d %p",
+1904: 			   file, VfdCache[file].fileName,
+1905: 			   (int64) offset,
+1906: 			   amount, buffer));
+1907: 
+1908: 	returnCode = FileAccess(file);
+1909: 	if (returnCode < 0)
+1910: 		return returnCode;
+1911: 
+1912: 	vfdP = &VfdCache[file];
+1913: 
+1914: retry:
+1915: 	pgstat_report_wait_start(wait_event_info);
+1916: 	returnCode = pg_pread(vfdP->fd, buffer, amount, offset);
+1917: 	pgstat_report_wait_end();
+1918: 
+1919: 	if (returnCode < 0)
+1920: 	{
+
+### src/backend/storage/file/fd.c:1989-2002
+
+1989: 						(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
+1990: 						 errmsg("temporary file size exceeds temp_file_limit (%dkB)",
+1991: 								temp_file_limit)));
+1992: 		}
+1993: 	}
+1994: 
+1995: retry:
+1996: 	errno = 0;
+1997: 	pgstat_report_wait_start(wait_event_info);
+1998: 	returnCode = pg_pwrite(VfdCache[file].fd, buffer, amount, offset);
+1999: 	pgstat_report_wait_end();
+2000: 
+2001: 	/* if write didn't set errno, assume problem is no disk space */
+2002: 	if (returnCode != amount && errno == 0)
+
+### src/backend/storage/smgr/md.c:609-635
+
+609: mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+610: 	   char *buffer)
+611: {
+612: 	off_t		seekpos;
+613: 	int			nbytes;
+614: 	MdfdVec    *v;
+615: 
+616: 	TRACE_POSTGRESQL_SMGR_MD_READ_START(forknum, blocknum,
+617: 										reln->smgr_rnode.node.spcNode,
+618: 										reln->smgr_rnode.node.dbNode,
+619: 										reln->smgr_rnode.node.relNode,
+620: 										reln->smgr_rnode.backend);
+621: 
+622: 	v = _mdfd_getseg(reln, forknum, blocknum, false,
+623: 					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
+624: 
+625: 	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+626: 
+627: 	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+628: 
+629: 	nbytes = FileRead(v->mdfd_vfd, buffer, BLCKSZ, seekpos, WAIT_EVENT_DATA_FILE_READ);
+630: 
+631: 	TRACE_POSTGRESQL_SMGR_MD_READ_DONE(forknum, blocknum,
+632: 									   reln->smgr_rnode.node.spcNode,
+633: 									   reln->smgr_rnode.node.dbNode,
+634: 									   reln->smgr_rnode.node.relNode,
+635: 									   reln->smgr_rnode.backend,
+
+### src/backend/storage/smgr/md.c:674-703
+
+674: mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+675: 		char *buffer, bool skipFsync)
+676: {
+677: 	off_t		seekpos;
+678: 	int			nbytes;
+679: 	MdfdVec    *v;
+680: 
+681: 	/* This assert is too expensive to have on normally ... */
+682: #ifdef CHECK_WRITE_VS_EXTEND
+683: 	Assert(blocknum < mdnblocks(reln, forknum));
+684: #endif
+685: 
+686: 	TRACE_POSTGRESQL_SMGR_MD_WRITE_START(forknum, blocknum,
+687: 										 reln->smgr_rnode.node.spcNode,
+688: 										 reln->smgr_rnode.node.dbNode,
+689: 										 reln->smgr_rnode.node.relNode,
+690: 										 reln->smgr_rnode.backend);
+691: 
+692: 	v = _mdfd_getseg(reln, forknum, blocknum, skipFsync,
+693: 					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
+694: 
+695: 	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+696: 
+697: 	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+698: 
+699: 	nbytes = FileWrite(v->mdfd_vfd, buffer, BLCKSZ, seekpos, WAIT_EVENT_DATA_FILE_WRITE);
+700: 
+701: 	TRACE_POSTGRESQL_SMGR_MD_WRITE_DONE(forknum, blocknum,
+702: 										reln->smgr_rnode.node.spcNode,
+703: 										reln->smgr_rnode.node.dbNode,
+
+### scripts/generate_ycsb_workloads.py:69-101
+
+69:         return min(idx + 1, self.n)
+70: 
+71: 
+72: def generate_random_field(length: int = 20, rng: random.Random = None) -> str:
+73:     """Generates a random 20-character alphanumeric string matching YCSB fields."""
+74:     if rng is None:
+75:         rng = random
+76:     chars = string.ascii_letters + string.digits
+77:     return "".join(rng.choice(chars) for _ in range(length))
+78: 
+79: 
+80: def generate_sql_select(table: str, key_col: str, key_val: int) -> str:
+81:     return f"SELECT * FROM {table} WHERE {key_col}={key_val};"
+82: 
+83: 
+84: def generate_sql_update(table: str, key_col: str, key_val: int, num_fields: int = 10, rng: random.Random = None) -> str:
+85:     set_clauses = [f"FIELD{i}='{generate_random_field(20, rng)}'" for i in range(1, num_fields + 1)]
+86:     return f"UPDATE {table} SET {', '.join(set_clauses)} WHERE {key_col}={key_val};"
+87: 
+88: 
+89: def generate_sql_rmw(table: str, key_col: str, key_val: int, num_fields: int, rng: random.Random) -> str:
+90:     """One SQL request and transaction: materialize the read, then update its row."""
+91:     update = generate_sql_update(table, key_col, key_val, num_fields, rng)
+92:     assignments = update.split(' SET ', 1)[1].split(' WHERE ', 1)[0]
+93:     return (f"WITH ycsb_read AS MATERIALIZED (SELECT * FROM {table} WHERE {key_col}={key_val}) "
+94:             f"UPDATE {table} SET {assignments} FROM ycsb_read "
+95:             f"WHERE {table}.{key_col}=ycsb_read.{key_col} RETURNING {table}.*;")
+96: 
+97: 
+98: def generate_sql_insert(table: str, key_col: str, key_val: int, num_fields: int = 10, rng: random.Random = None) -> str:
+99:     col_names = [key_col] + [f"FIELD{i}" for i in range(1, num_fields + 1)]
+100:     field_values = [str(key_val)] + [f"'{generate_random_field(20, rng)}'" for _ in range(num_fields)]
+101:     return f"INSERT INTO {table} ({', '.join(col_names)}) VALUES ({', '.join(field_values)});"
+
+### scripts/generate_ycsb_workloads.py:221-250
+
+221: 
+222:     wl_upper = workload_type.upper()
+223: 
+224:     # Specialized pure single-operation workloads
+225:     if wl_upper == "ALL_UPDATE":
+226:         zipf_gen = zipf_factory(num_keys, skew, rng)
+227:         statements = []
+228:         for _ in range(num_tx):
+229:             candidate = zipf_gen.next_index()
+230:             statements.append(generate_sql_update(table_name, key_column, candidate, num_fields, rng))
+231:         return statements
+232: 
+233:     if wl_upper == "ALL_INSERT":
+234:         # Clustered B-tree leaf page skew:
+235:         # Partition key space into buckets of size B = 32 keys (matching an 8KB leaf page)
+236:         # ZipfGenerator selects which bucket/page to insert into.
+237:         # Within that bucket, a unique sequential key is allocated.
+238:         num_buckets = max(10, num_tx // 32)
+239:         bucket_zipf = zipf_factory(num_buckets, skew, rng)
+240:         bucket_offsets = defaultdict(int)
+241:         base_insert_key = num_keys + 1
+242:         statements = []
+243:         for _ in range(num_tx):
+244:             b = bucket_zipf.next_index()
+245:             offset = bucket_offsets[b]
+246:             bucket_offsets[b] += 1
+247:             key = base_insert_key + (b - 1) * (num_tx * 2) + offset
+248:             statements.append(generate_sql_insert(table_name, key_column, key, num_fields, rng))
+249:         return statements
+250: 
+
+### Final_Results/LSM_LOOKUP/lsm3_experiment_20261014/lsm3_source/lsm3.c:242-289
+
+242: /* Merge top index into base index */
+243: static void
+244: lsm3_merge_indexes(Oid dst_oid, Oid src_oid, Oid heap_oid)
+245: {
+246: 	Relation top_index = index_open(src_oid, AccessShareLock);
+247: 	Relation heap = table_open(heap_oid, AccessShareLock);
+248: 	Relation base_index = index_open(dst_oid, RowExclusiveLock);
+249: 	IndexScanDesc scan;
+250: 	bool ok;
+251: 	Oid  save_am = base_index->rd_rel->relam;
+252: 
+253: 	elog(LOG, "Lsm3: merge top index %s with size %d blocks", RelationGetRelationName(top_index), RelationGetNumberOfBlocks(top_index));
+254: 
+255: 	base_index->rd_rel->relam = BTREE_AM_OID;
+256: 	scan = index_beginscan(heap, top_index, SnapshotAny, 0, 0);
+257: 	scan->xs_want_itup = true;
+258: 	btrescan(scan, NULL, 0, 0, 0);
+259: 	for (ok = _bt_first(scan, ForwardScanDirection); ok; ok = _bt_next(scan, ForwardScanDirection))
+260: 	{
+261: 		IndexTuple itup = scan->xs_itup;
+262: 		#ifndef ARIABC_PRE13
+263: 		if (BTreeTupleIsPosting(itup))
+264: 		{
+265: 			/* Some dirty coding here related with handling of posting items (index deduplication).
+266: 			 * If index tuple is posting item, we need to transfer it to normal index tuple.
+267: 			 * Posting list is representing by index tuple with INDEX_ALT_TID_MASK bit set in t_info and
+268: 			 * BT_IS_POSTING bit in TID offset, following by array of TIDs.
+269: 			 * We need to store right TID (taken from xs_heaptid) and correct index tuple length
+270: 			 * (not including size of TIDs array), clearing INDEX_ALT_TID_MASK.
+271: 			 * For efficiency reasons let's do it in place, saving and restoring original values after insertion is done.
+272: 			 */
+273: 			ItemPointerData save_tid = itup->t_tid;
+274: 			unsigned short save_info = itup->t_info;
+275: 			itup->t_info = (save_info & ~(INDEX_SIZE_MASK | INDEX_ALT_TID_MASK)) + BTreeTupleGetPostingOffset(itup);
+276: 			itup->t_tid = scan->xs_heaptid;
+277: 			_bt_doinsert(base_index, itup, INSERT_FLAGS, heap); /* lsm3 index is not unique so need not to heck for duplica
+278: tes */
+279: 			itup->t_tid = save_tid;
+280: 			itup->t_info = save_info;
+281: 		}
+282: 		else
+283: 		#endif
+284: 		{
+285: 			_bt_doinsert(base_index, itup, INSERT_FLAGS, heap); /* lsm3 index is not unique so need not to heck for duplica
+286: tes */
+287: 		}
+288: 	}
+289: 	index_endscan(scan);
+
+### Final_Results/LSM_LOOKUP/lsm3_experiment_20261014/lsm3_source/lsm3.c:488-543
+
+488: lsm3_insert(Relation rel, Datum *values, bool *isnull,
+489: 			ItemPointer ht_ctid, Relation heapRel,
+490: 			IndexUniqueCheck checkUnique,
+491: #if PG_VERSION_NUM>=140000
+492: 			bool indexUnchanged,
+493: #endif
+494: 			IndexInfo *indexInfo)
+495: {
+496: 	Lsm3DictEntry* entry = lsm3_get_entry(rel);
+497: 
+498: 	int active_index;
+499: 	uint64 n_merges; /* used to check if merge was initiated by somebody else */
+500: 	uint64 insert_number; /* reserve the periodic size check under the spinlock */
+501: 	Relation index;
+502: 	Oid  save_am;
+503: 	bool overflow;
+504: 	int top_index_size = entry->top_index_size ? entry->top_index_size : Lsm3TopIndexSize;
+505: 	bool is_initialized = true;
+506: 
+507: 	/* Obtain current active index and increment access counter under spinlock */
+508: 	SpinLockAcquire(&entry->spinlock);
+509: 	active_index = entry->active_index;
+510: 	if (entry->top[active_index])
+511: 		entry->access_count[active_index] += 1;
+512: 	else
+513: 		is_initialized = false;
+514: 	n_merges = entry->n_merges;
+515: 	insert_number = entry->n_inserts;
+516: 	if (is_initialized)
+517: 		entry->n_inserts += 1;
+518: 	SpinLockRelease(&entry->spinlock);
+519: 
+520: 	if (!is_initialized)
+521: 	{
+522: 		bool res;
+523: 		save_am = rel->rd_rel->relam;
+524: 		rel->rd_rel->relam = BTREE_AM_OID;
+525: 		res = btinsert(rel, values, isnull, ht_ctid, heapRel, checkUnique,
+526: #if PG_VERSION_NUM>=140000
+527: 			 indexUnchanged,
+528: #endif
+529: 			 indexInfo);
+530: 		rel->rd_rel->relam = save_am;
+531: 		return res;
+532: 	}
+533: 	/* Do insert in top index */
+534: 	index = index_open(entry->top[active_index], RowExclusiveLock);
+535: 	index->rd_rel->relam = BTREE_AM_OID;
+536: 	save_am = index->rd_rel->relam;
+537: 	btinsert(index, values, isnull, ht_ctid, heapRel, checkUnique,
+538: #if PG_VERSION_NUM>=140000
+539: 			 indexUnchanged,
+540: #endif
+541: 			 indexInfo);
+542: 	index_close(index, RowExclusiveLock);
+543: 	index->rd_rel->relam = save_am;
+
+### Final_Results/LSM_LOOKUP/lsm3_experiment_20261014/lsm3_source/lsm3.c:605-649
+
+605: static IndexScanDesc
+606: lsm3_beginscan(Relation rel, int nkeys, int norderbys)
+607: {
+608: 	IndexScanDesc scan;
+609: 	Lsm3ScanOpaque* so;
+610: 	int i;
+611: 
+612: 	/* no order by operators allowed */
+613: 	Assert(norderbys == 0);
+614: 
+615: 	/* get the scan */
+616: 	scan = RelationGetIndexScan(rel, nkeys, norderbys);
+617: 	scan->xs_itupdesc = RelationGetDescr(rel);
+618: 	so = (Lsm3ScanOpaque*)palloc(sizeof(Lsm3ScanOpaque));
+619: 	so->entry = lsm3_get_entry(rel);
+620: 	so->sortKeys = lsm3_build_sortkeys(rel);
+621: 	for (i = 0; i < 2; i++)
+622: 	{
+623: 		if (so->entry->top[i])
+624: 		{
+625: 			so->top_index[i] = index_open(so->entry->top[i], AccessShareLock);
+626: 			so->scan[i] = btbeginscan(so->top_index[i], nkeys, norderbys);
+627: 		}
+628: 		else
+629: 		{
+630: 			so->top_index[i] = NULL;
+631: 			so->scan[i] = NULL;
+632: 		}
+633: 	}
+634: 	so->scan[2] = btbeginscan(rel, nkeys, norderbys);
+635: 	for (i = 0; i < 3; i++)
+636: 	{
+637: 		if (so->scan[i])
+638: 		{
+639: 			so->eof[i] = false;
+640: 			so->scan[i]->xs_want_itup = true;
+641: 			so->scan[i]->parallel_scan = NULL;
+642: 		}
+643: 	}
+644: 	so->unique = rel->rd_options ? ((Lsm3Options*)rel->rd_options)->unique : false;
+645: 	so->curr_index = -1;
+646: 	scan->opaque = so;
+647: 
+648: 	return scan;
+649: }

@@ -1,0 +1,651 @@
+{
+  "command": [
+    "/home/neel/claude_checks/ycsb_matrix_20261020/install/bin/pg_waldump",
+    "-p",
+    "/home/neel/ariabc_data/lsm_lookup_20261014/pgdata_merkle/pg_wal",
+    "-s",
+    "5/4F3817D0",
+    "-e",
+    "6/A2542938",
+    "-b"
+  ],
+  "returncode": 0,
+  "intervals": [
+    [
+      "foreground",
+      22803912656,
+      28492052896
+    ],
+    [
+      "drain",
+      28492052896,
+      28493228104
+    ],
+    [
+      "checkpoint",
+      28493228104,
+      28493228224
+    ],
+    [
+      "shutdown",
+      28493228224,
+      28493228344
+    ]
+  ],
+  "rmgr": [
+    {
+      "phase": "checkpoint",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114,
+      "total_bytes": 114,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Btree",
+      "records": 335,
+      "record_bytes": 21170,
+      "total_bytes": 1166158,
+      "fpi_bytes": 1144988
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Generic",
+      "records": 10,
+      "record_bytes": 556,
+      "total_bytes": 868,
+      "fpi_bytes": 312
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Heap",
+      "records": 2,
+      "record_bytes": 144,
+      "total_bytes": 3340,
+      "fpi_bytes": 3196
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Storage",
+      "records": 2,
+      "record_bytes": 84,
+      "total_bytes": 84,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Transaction",
+      "records": 2,
+      "record_bytes": 108,
+      "total_bytes": 108,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 30,
+      "total_bytes": 30,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Btree",
+      "records": 330,
+      "record_bytes": 22213,
+      "total_bytes": 236813,
+      "fpi_bytes": 214600
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "CLOG",
+      "records": 146,
+      "record_bytes": 4380,
+      "total_bytes": 4380,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap",
+      "records": 9600164,
+      "record_bytes": 1277903033,
+      "total_bytes": 5116267897,
+      "fpi_bytes": 3838364864
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap2",
+      "records": 6023836,
+      "record_bytes": 375041857,
+      "total_bytes": 375049693,
+      "fpi_bytes": 7836
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Transaction",
+      "records": 2400000,
+      "record_bytes": 110400000,
+      "total_bytes": 110400000,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "shutdown",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114,
+      "total_bytes": 114,
+      "fpi_bytes": 0
+    }
+  ],
+  "relations": [
+    {
+      "phase": "checkpoint",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114.0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/1259",
+      "rmgr": "Heap",
+      "records": 2,
+      "record_bytes": 144.0,
+      "block_refs": 2,
+      "fpis": 1,
+      "fpi_bytes": 3196
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16856",
+      "rmgr": "Btree",
+      "records": 164,
+      "record_bytes": 8901.0,
+      "block_refs": 164,
+      "fpis": 153,
+      "fpi_bytes": 1132812
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16859",
+      "rmgr": "Btree",
+      "records": 165,
+      "record_bytes": 11902.0,
+      "block_refs": 166,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16861",
+      "rmgr": "Generic",
+      "records": 8,
+      "record_bytes": 458.0,
+      "block_refs": 8,
+      "fpis": 1,
+      "fpi_bytes": 152
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16868",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16868",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16869",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16869",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/2662",
+      "rmgr": "Btree",
+      "records": 2,
+      "record_bytes": 117.0,
+      "block_refs": 2,
+      "fpis": 1,
+      "fpi_bytes": 3440
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/2663",
+      "rmgr": "Btree",
+      "records": 2,
+      "record_bytes": 133.0,
+      "block_refs": 2,
+      "fpis": 1,
+      "fpi_bytes": 6636
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/3455",
+      "rmgr": "Btree",
+      "records": 2,
+      "record_bytes": 117.0,
+      "block_refs": 2,
+      "fpis": 1,
+      "fpi_bytes": 2100
+    },
+    {
+      "phase": "drain",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "Transaction",
+      "records": 2,
+      "record_bytes": 108.0
+    },
+    {
+      "phase": "drain",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 30.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1255",
+      "rmgr": "Heap2",
+      "records": 1,
+      "record_bytes": 59.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 7836
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "rmgr": "Heap",
+      "records": 2400164,
+      "record_bytes": 558036640.0,
+      "block_refs": 2400328,
+      "fpis": 503503,
+      "fpi_bytes": 3818565744
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "rmgr": "Heap2",
+      "records": 1238890,
+      "record_bytes": 75855654.0,
+      "block_refs": 1238890,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16493",
+      "rmgr": "Btree",
+      "records": 165,
+      "record_bytes": 10311.0,
+      "block_refs": 165,
+      "fpis": 29,
+      "fpi_bytes": 214600
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap",
+      "records": 7200000,
+      "record_bytes": 719866393.0,
+      "block_refs": 7200000,
+      "fpis": 3020,
+      "fpi_bytes": 19799120
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap2",
+      "records": 4784945,
+      "record_bytes": 299186144.0,
+      "block_refs": 4784945,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16857",
+      "rmgr": "Btree",
+      "records": 165,
+      "record_bytes": 11902.0,
+      "block_refs": 166,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "CLOG",
+      "records": 146,
+      "record_bytes": 4380.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "Transaction",
+      "records": 2400000,
+      "record_bytes": 110400000.0
+    },
+    {
+      "phase": "shutdown",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114.0
+    }
+  ],
+  "descriptions": [
+    {
+      "rmgr": "Btree",
+      "description": "DELETE",
+      "records": 1
+    },
+    {
+      "rmgr": "Btree",
+      "description": "INSERT_LEAF",
+      "records": 662
+    },
+    {
+      "rmgr": "Btree",
+      "description": "NEWROOT",
+      "records": 2
+    },
+    {
+      "rmgr": "CLOG",
+      "description": "ZEROPAGE",
+      "records": 146
+    },
+    {
+      "rmgr": "Generic",
+      "description": "Generic",
+      "records": 10
+    },
+    {
+      "rmgr": "Heap",
+      "description": "HOT_UPDATE",
+      "records": 9599836
+    },
+    {
+      "rmgr": "Heap",
+      "description": "LOCK",
+      "records": 164
+    },
+    {
+      "rmgr": "Heap",
+      "description": "UPDATE",
+      "records": 143
+    },
+    {
+      "rmgr": "Heap",
+      "description": "UPDATE+INIT",
+      "records": 23
+    },
+    {
+      "rmgr": "Heap2",
+      "description": "CLEAN",
+      "records": 6023836
+    },
+    {
+      "rmgr": "Storage",
+      "description": "CREATE",
+      "records": 2
+    },
+    {
+      "rmgr": "Transaction",
+      "description": "COMMIT",
+      "records": 2400002
+    },
+    {
+      "rmgr": "XLOG",
+      "description": "CHECKPOINT_ONLINE",
+      "records": 1
+    },
+    {
+      "rmgr": "XLOG",
+      "description": "CHECKPOINT_SHUTDOWN",
+      "records": 1
+    },
+    {
+      "rmgr": "XLOG",
+      "description": "NEXTOID",
+      "records": 1
+    }
+  ],
+  "blocks": [
+    {
+      "phase": "drain",
+      "rel": "1663/12695/1259",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 1,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 2
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16856",
+      "unique_wal_referenced_main_blocks": 153,
+      "distance": {
+        "0": 11,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 2,
+        "5": 50,
+        "6": 100
+      },
+      "xid_zero": 164
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16859",
+      "unique_wal_referenced_main_blocks": 2,
+      "distance": {
+        "0": 163,
+        "1": 1,
+        "2": 1,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 165
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16861",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 7,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 8
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16868",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16869",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/2662",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 1,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 2
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/2663",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 1,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 2
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/3455",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 1,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 2
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1255",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "unique_wal_referenced_main_blocks": 503526,
+      "distance": {
+        "0": 94151,
+        "1": 7011,
+        "2": 7259,
+        "3": 35820,
+        "4": 62502,
+        "5": 218187,
+        "6": 3214287
+      },
+      "xid_nonzero": 2400164,
+      "xid_zero": 1238890
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16493",
+      "unique_wal_referenced_main_blocks": 29,
+      "distance": {
+        "0": 63,
+        "1": 11,
+        "2": 9,
+        "3": 44,
+        "4": 34,
+        "5": 3,
+        "6": 0
+      },
+      "xid_nonzero": 165
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "unique_wal_referenced_main_blocks": 3020,
+      "distance": {
+        "0": 1149563,
+        "1": 166479,
+        "2": 33505,
+        "3": 274092,
+        "4": 673565,
+        "5": 5213703,
+        "6": 4474037
+      },
+      "xid_nonzero": 11984945
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16857",
+      "unique_wal_referenced_main_blocks": 2,
+      "distance": {
+        "0": 163,
+        "1": 1,
+        "2": 1,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 165
+    }
+  ]
+}

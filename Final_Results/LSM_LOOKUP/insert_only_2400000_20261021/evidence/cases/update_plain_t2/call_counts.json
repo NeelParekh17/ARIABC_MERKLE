@@ -1,0 +1,58 @@
+[
+  {
+    "function": "_bt_doinsert",
+    "pid": 1482801,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1482790,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1482794,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1482858,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 2
+  },
+  {
+    "function": "btinsert",
+    "pid": 1482801,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1482790,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1482794,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1482858,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 2
+  }
+]

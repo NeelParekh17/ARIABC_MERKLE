@@ -1,0 +1,38 @@
+{
+  "gateway_s": 386.586,
+  "drain_s": 0,
+  "checkpoint_s": 3.031125068664551,
+  "drain_rpc_s": 5.809997674077749e-07,
+  "checkpoint_rpc_s": 4.537491010996746,
+  "run_drain_checkpoint_s": 389.61712506866456,
+  "total_tps": 6159.893509755337,
+  "continuous_bracket_s": 411.1891048469988,
+  "continuous_bracket_tps": 5836.730525467173,
+  "markers": {
+    "foreground": {
+      "t": 1792644415.6604326,
+      "monotonic": 250232.084386711,
+      "lsn": "5/4F306AF0"
+    },
+    "drain": {
+      "t": 1792644819.8209295,
+      "monotonic": 250636.244882696,
+      "lsn": "5/CF304B58"
+    },
+    "checkpoint": {
+      "t": 1792644821.3702629,
+      "monotonic": 250637.794216423,
+      "lsn": "5/CF304B58"
+    },
+    "shutdown": {
+      "t": 1792644826.8495383,
+      "monotonic": 250643.273491558,
+      "lsn": "5/CF304BD0"
+    },
+    "end": {
+      "t": 1792644845.847929,
+      "monotonic": 250662.271882296,
+      "lsn": "5/CF304C48"
+    }
+  }
+}

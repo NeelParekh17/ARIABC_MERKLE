@@ -1,0 +1,38 @@
+{
+  "gateway_s": 777.946,
+  "drain_s": 0,
+  "checkpoint_s": 0.9637463092803955,
+  "drain_rpc_s": 1.081993104889989e-06,
+  "checkpoint_rpc_s": 4.411352330993395,
+  "run_drain_checkpoint_s": 778.9097463092804,
+  "total_tps": 3081.2299003471912,
+  "continuous_bracket_s": 797.773881850997,
+  "continuous_bracket_tps": 3008.3712372627615,
+  "markers": {
+    "foreground": {
+      "t": 1792596093.7832248,
+      "monotonic": 201910.207178905,
+      "lsn": "5/4F300C78"
+    },
+    "drain": {
+      "t": 1792596884.6506355,
+      "monotonic": 202701.07458908,
+      "lsn": "6/A23DF888"
+    },
+    "checkpoint": {
+      "t": 1792596886.1895604,
+      "monotonic": 202702.613513808,
+      "lsn": "6/A23DF888"
+    },
+    "shutdown": {
+      "t": 1792596891.5571074,
+      "monotonic": 202707.981060756,
+      "lsn": "6/A23DF900"
+    },
+    "end": {
+      "t": 1792596910.6292138,
+      "monotonic": 202727.053167141,
+      "lsn": "6/A23DF978"
+    }
+  }
+}

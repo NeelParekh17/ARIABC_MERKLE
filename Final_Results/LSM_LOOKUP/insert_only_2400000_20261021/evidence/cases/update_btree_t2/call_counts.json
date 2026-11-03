@@ -1,0 +1,226 @@
+[
+  {
+    "function": "_bt_doinsert",
+    "pid": 1465137,
+    "oid": 16495,
+    "relation": "public.usertable_merkle_lookup_idx",
+    "calls": 1
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1465137,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1464107,
+    "oid": 16507,
+    "relation": "ariabc_internal.merkle_node_usertable_root_idx",
+    "calls": 135
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1464107,
+    "oid": 16506,
+    "relation": "ariabc_internal.merkle_node_usertable_prefix_idx",
+    "calls": 7377
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1464107,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 7377
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1464107,
+    "oid": 16495,
+    "relation": "public.usertable_merkle_lookup_idx",
+    "calls": 51000
+  },
+  {
+    "function": "_bt_doinsert",
+    "pid": 1464107,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 51000
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1465085,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1465130,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1465166,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 2
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1465166,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 3
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1465130,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 3
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1465137,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 3
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1464107,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 14
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1464107,
+    "oid": 16495,
+    "relation": "public.usertable_merkle_lookup_idx",
+    "calls": 30
+  },
+  {
+    "function": "btbeginscan",
+    "pid": 1464107,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 152684
+  },
+  {
+    "function": "btinsert",
+    "pid": 1465137,
+    "oid": 16495,
+    "relation": "public.usertable_merkle_lookup_idx",
+    "calls": 1
+  },
+  {
+    "function": "btinsert",
+    "pid": 1465137,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "btinsert",
+    "pid": 1464107,
+    "oid": 16507,
+    "relation": "ariabc_internal.merkle_node_usertable_root_idx",
+    "calls": 135
+  },
+  {
+    "function": "btinsert",
+    "pid": 1464107,
+    "oid": 16506,
+    "relation": "ariabc_internal.merkle_node_usertable_prefix_idx",
+    "calls": 7377
+  },
+  {
+    "function": "btinsert",
+    "pid": 1464107,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 7377
+  },
+  {
+    "function": "btinsert",
+    "pid": 1464107,
+    "oid": 16495,
+    "relation": "public.usertable_merkle_lookup_idx",
+    "calls": 51000
+  },
+  {
+    "function": "btinsert",
+    "pid": 1464107,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 51000
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1465130,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1465085,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 1
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1465166,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 2
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1465130,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 3
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1465166,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 3
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1465137,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 3
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1464107,
+    "oid": 16493,
+    "relation": "public.usertable_pkey1",
+    "calls": 14
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1464107,
+    "oid": 16495,
+    "relation": "public.usertable_merkle_lookup_idx",
+    "calls": 30
+  },
+  {
+    "function": "index_beginscan",
+    "pid": 1464107,
+    "oid": 16504,
+    "relation": "ariabc_internal.merkle_node_usertable_pkey",
+    "calls": 152684
+  }
+]

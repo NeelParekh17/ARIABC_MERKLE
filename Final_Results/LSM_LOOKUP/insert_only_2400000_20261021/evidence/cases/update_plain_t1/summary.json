@@ -1,0 +1,202 @@
+{
+  "case": "update_plain_t1",
+  "relations": [
+    {
+      "relation": "public.usertable",
+      "oid": 16487,
+      "before_bytes": 28248276992,
+      "after_bytes": 28248465408,
+      "delta": {
+        "idx_scan": 2507483,
+        "seq_scan": 0,
+        "n_tup_del": 0,
+        "n_tup_ins": 0,
+        "n_tup_upd": 2400000,
+        "n_dead_tup": 504001,
+        "n_live_tup": 0,
+        "seq_tup_read": 0,
+        "vacuum_count": 0,
+        "analyze_count": 0,
+        "idx_tup_fetch": 2507483,
+        "n_tup_hot_upd": 2399855,
+        "autovacuum_count": 0,
+        "autoanalyze_count": 0,
+        "n_mod_since_analyze": 2400000,
+        "idx_blks_hit": 8936371,
+        "heap_blks_hit": 6623586,
+        "idx_blks_read": 1094298,
+        "tidx_blks_hit": 0,
+        "heap_blks_read": 1187944,
+        "tidx_blks_read": 0,
+        "toast_blks_hit": 0,
+        "toast_blks_read": 0
+      }
+    },
+    {
+      "relation": "pg_toast.pg_toast_16487",
+      "oid": 16490,
+      "before_bytes": 0,
+      "after_bytes": 0,
+      "delta": {
+        "idx_scan": 0,
+        "seq_scan": 0,
+        "n_tup_del": 0,
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_dead_tup": 0,
+        "n_live_tup": 0,
+        "seq_tup_read": 0,
+        "vacuum_count": 0,
+        "analyze_count": 0,
+        "idx_tup_fetch": 0,
+        "n_tup_hot_upd": 0,
+        "autovacuum_count": 0,
+        "autoanalyze_count": 0,
+        "n_mod_since_analyze": 0,
+        "idx_blks_hit": 0,
+        "heap_blks_hit": 0,
+        "idx_blks_read": 0,
+        "heap_blks_read": 0
+      }
+    },
+    {
+      "relation": "pg_toast.pg_toast_16487_index",
+      "oid": 16492,
+      "before_bytes": 8192,
+      "after_bytes": 8192,
+      "delta": {
+        "idx_scan": 0,
+        "idx_tup_read": 0,
+        "idx_tup_fetch": 0,
+        "idx_blks_hit": 0,
+        "idx_blks_read": 0
+      }
+    },
+    {
+      "relation": "public.usertable_pkey1",
+      "oid": 16493,
+      "before_bytes": 2246197248,
+      "after_bytes": 2246197248,
+      "delta": {
+        "idx_scan": 2507483,
+        "idx_tup_read": 2507636,
+        "idx_tup_fetch": 2507483,
+        "idx_blks_hit": 8936371,
+        "idx_blks_read": 1094298
+      }
+    },
+    {
+      "relation": "ariabc_internal.merkle_node_usertable",
+      "oid": 16497,
+      "before_bytes": 24739840,
+      "after_bytes": 24739840,
+      "delta": {
+        "idx_scan": 0,
+        "seq_scan": 0,
+        "n_tup_del": 0,
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_dead_tup": 0,
+        "n_live_tup": 0,
+        "seq_tup_read": 0,
+        "vacuum_count": 0,
+        "analyze_count": 0,
+        "idx_tup_fetch": 0,
+        "n_tup_hot_upd": 0,
+        "autovacuum_count": 0,
+        "autoanalyze_count": 0,
+        "n_mod_since_analyze": 0,
+        "idx_blks_hit": 0,
+        "heap_blks_hit": 0,
+        "idx_blks_read": 0,
+        "tidx_blks_hit": 0,
+        "heap_blks_read": 0,
+        "tidx_blks_read": 0,
+        "toast_blks_hit": 0,
+        "toast_blks_read": 0
+      }
+    },
+    {
+      "relation": "pg_toast.pg_toast_16497",
+      "oid": 16501,
+      "before_bytes": 0,
+      "after_bytes": 0,
+      "delta": {
+        "idx_scan": 0,
+        "seq_scan": 0,
+        "n_tup_del": 0,
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_dead_tup": 0,
+        "n_live_tup": 0,
+        "seq_tup_read": 0,
+        "vacuum_count": 0,
+        "analyze_count": 0,
+        "idx_tup_fetch": 0,
+        "n_tup_hot_upd": 0,
+        "autovacuum_count": 0,
+        "autoanalyze_count": 0,
+        "n_mod_since_analyze": 0,
+        "idx_blks_hit": 0,
+        "heap_blks_hit": 0,
+        "idx_blks_read": 0,
+        "heap_blks_read": 0
+      }
+    },
+    {
+      "relation": "pg_toast.pg_toast_16497_index",
+      "oid": 16503,
+      "before_bytes": 8192,
+      "after_bytes": 8192,
+      "delta": {
+        "idx_scan": 0,
+        "idx_tup_read": 0,
+        "idx_tup_fetch": 0,
+        "idx_blks_hit": 0,
+        "idx_blks_read": 0
+      }
+    },
+    {
+      "relation": "ariabc_internal.merkle_node_usertable_pkey",
+      "oid": 16504,
+      "before_bytes": 6676480,
+      "after_bytes": 6676480,
+      "delta": {
+        "idx_scan": 0,
+        "idx_tup_read": 0,
+        "idx_tup_fetch": 0,
+        "idx_blks_hit": 0,
+        "idx_blks_read": 0
+      }
+    },
+    {
+      "relation": "ariabc_internal.merkle_node_usertable_prefix_idx",
+      "oid": 16506,
+      "before_bytes": 7004160,
+      "after_bytes": 7004160,
+      "delta": {
+        "idx_scan": 0,
+        "idx_tup_read": 0,
+        "idx_tup_fetch": 0,
+        "idx_blks_hit": 0,
+        "idx_blks_read": 0
+      }
+    },
+    {
+      "relation": "ariabc_internal.merkle_node_usertable_root_idx",
+      "oid": 16507,
+      "before_bytes": 16384,
+      "after_bytes": 16384,
+      "delta": {
+        "idx_scan": 0,
+        "idx_tup_read": 0,
+        "idx_tup_fetch": 0,
+        "idx_blks_hit": 0,
+        "idx_blks_read": 0
+      }
+    }
+  ],
+  "lsm_before": null,
+  "lsm_after_run": null,
+  "lsm_after_drain": null
+}

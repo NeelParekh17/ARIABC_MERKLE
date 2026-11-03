@@ -1,0 +1,3 @@
+/home/neel/claude_checks/ycsb_matrix_20261020/install/bin/postgres: OK
+/home/neel/claude_checks/ycsb_matrix_20261020/install/lib/postgresql/merkle_lsm.so: OK
+/home/neel/claude_checks/ycsb_matrix_20261020/install/lib/libpq.so: OK

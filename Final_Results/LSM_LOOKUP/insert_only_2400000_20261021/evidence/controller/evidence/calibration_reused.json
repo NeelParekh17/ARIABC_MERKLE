@@ -1,0 +1,8 @@
+{
+  "source": "/home/neel/claude_ctl/lsm_relation_audit_20261021/evidence/device_calibration_40a481a9.json",
+  "thresholds": {
+    "qd1_us": 156.1478125,
+    "qd8_us": 308.21281250000004,
+    "wr_us": 489.7921875
+  }
+}

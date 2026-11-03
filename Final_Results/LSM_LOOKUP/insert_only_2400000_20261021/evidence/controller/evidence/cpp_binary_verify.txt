@@ -1,0 +1,2 @@
+/home/neel/claude_ctl/ycsb_matrix_20261020/src/ariabc_pg/build/bin/ariabc_pg_server: OK
+/home/neel/claude_ctl/ycsb_matrix_20261020/src/ariabc_pg/build/bin/ariabc_pg_gateway: OK

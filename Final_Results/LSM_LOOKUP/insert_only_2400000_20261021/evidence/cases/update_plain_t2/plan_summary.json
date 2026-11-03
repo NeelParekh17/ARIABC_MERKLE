@@ -1,0 +1,513 @@
+[
+  {
+    "operation": "read",
+    "sql": "SELECT * FROM usertable WHERE ycsb_key=1;",
+    "pid": 1482790,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "Index Scan",
+          "Parallel Aware": false,
+          "Scan Direction": "Forward",
+          "Index Name": "usertable_pkey1",
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 0.57,
+          "Total Cost": 8.59,
+          "Plan Rows": 1,
+          "Plan Width": 214,
+          "Actual Startup Time": 0.732,
+          "Actual Total Time": 0.733,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Index Cond": "(ycsb_key = 1)",
+          "Rows Removed by Index Recheck": 0,
+          "Shared Hit Blocks": 0,
+          "Shared Read Blocks": 5,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.672,
+          "I/O Write Time": 0.0
+        },
+        "Planning Time": 2.026,
+        "Triggers": [],
+        "Execution Time": 0.746
+      }
+    ],
+    "lsn_before": "7/400ABDB0",
+    "lsn_after": "7/400ABDB0",
+    "counter_changes": [
+      {
+        "relation": "public.usertable",
+        "delta": {
+          "idx_scan": 1,
+          "idx_tup_fetch": 1,
+          "idx_blks_read": 5,
+          "heap_blks_read": 1
+        }
+      },
+      {
+        "relation": "public.usertable_pkey1",
+        "delta": {
+          "idx_scan": 1,
+          "idx_tup_read": 1,
+          "idx_tup_fetch": 1,
+          "idx_blks_read": 5
+        }
+      }
+    ],
+    "wal": []
+  },
+  {
+    "operation": "update",
+    "sql": "UPDATE usertable SET FIELD1='OhbVrpoiVgRV5IfLBcbf', FIELD2='noGMbJmTPSIAoCLrZ3aW', FIELD3='ZkSBvrjn9Wvgfygw2wMq', FIELD4='ZcUDIh7yfJs1ON43xKmT', FIELD5='ecQoXsf2o3gyrDO1xkxw', FIELD6='nQrS7RPeMOkIUpkDyr7O', FIELD7='SJoRu1XXdo0cZuzren68', FIELD8='K4TunPFz46PDjqipVJIq', FIELD9='VLB5LzxoiGFfWd3hjOkY', FIELD10='RBMeyyMDHqJ38aRUhR4I' WHERE ycsb_key=1;",
+    "pid": 1482794,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Update",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 0.57,
+          "Total Cost": 8.59,
+          "Plan Rows": 1,
+          "Plan Width": 330,
+          "Actual Startup Time": 0.103,
+          "Actual Total Time": 0.103,
+          "Actual Rows": 0,
+          "Actual Loops": 1,
+          "Shared Hit Blocks": 6,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 1,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Index Scan",
+              "Parent Relationship": "Member",
+              "Parallel Aware": false,
+              "Scan Direction": "Forward",
+              "Index Name": "usertable_pkey1",
+              "Relation Name": "usertable",
+              "Alias": "usertable",
+              "Startup Cost": 0.57,
+              "Total Cost": 8.59,
+              "Plan Rows": 1,
+              "Plan Width": 330,
+              "Actual Startup Time": 0.063,
+              "Actual Total Time": 0.063,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "(ycsb_key = 1)",
+              "Rows Removed by Index Recheck": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.303,
+        "Triggers": [],
+        "Execution Time": 0.118
+      }
+    ],
+    "lsn_before": "7/400ABDB0",
+    "lsn_after": "7/400AD750",
+    "counter_changes": [
+      {
+        "relation": "public.usertable",
+        "delta": {
+          "idx_scan": 1,
+          "n_tup_upd": 1,
+          "n_dead_tup": 1,
+          "idx_tup_fetch": 1,
+          "n_tup_hot_upd": 1,
+          "n_mod_since_analyze": 1,
+          "idx_blks_hit": 5,
+          "heap_blks_hit": 2
+        }
+      },
+      {
+        "relation": "public.usertable_pkey1",
+        "delta": {
+          "idx_scan": 1,
+          "idx_tup_read": 1,
+          "idx_tup_fetch": 1,
+          "idx_blks_hit": 5
+        }
+      }
+    ],
+    "wal": [
+      {
+        "phase": "foreground",
+        "rel": "1663/12695/16487",
+        "rmgr": "Heap",
+        "records": 1,
+        "record_bytes": 65.0,
+        "block_refs": 1,
+        "fpis": 1,
+        "fpi_bytes": 6424,
+        "relation": "public.usertable"
+      },
+      {
+        "phase": "foreground",
+        "rel": "NO_BLOCK_REFERENCE",
+        "rmgr": "Transaction",
+        "records": 1,
+        "record_bytes": 34.0,
+        "relation": "NO_BLOCK_REFERENCE"
+      }
+    ]
+  },
+  {
+    "operation": "insert",
+    "sql": "INSERT INTO usertable (ycsb_key, FIELD1, FIELD2, FIELD3, FIELD4, FIELD5, FIELD6, FIELD7, FIELD8, FIELD9, FIELD10) VALUES (110100001, 'OhbVrpoiVgRV5IfLBcbf', 'noGMbJmTPSIAoCLrZ3aW', 'ZkSBvrjn9Wvgfygw2wMq', 'ZcUDIh7yfJs1ON43xKmT', 'ecQoXsf2o3gyrDO1xkxw', 'nQrS7RPeMOkIUpkDyr7O', 'SJoRu1XXdo0cZuzren68', 'K4TunPFz46PDjqipVJIq', 'VLB5LzxoiGFfWd3hjOkY', 'RBMeyyMDHqJ38aRUhR4I');",
+    "pid": 1482801,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Insert",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 0.0,
+          "Total Cost": 0.01,
+          "Plan Rows": 1,
+          "Plan Width": 324,
+          "Actual Startup Time": 0.566,
+          "Actual Total Time": 0.566,
+          "Actual Rows": 0,
+          "Actual Loops": 1,
+          "Shared Hit Blocks": 3,
+          "Shared Read Blocks": 4,
+          "Shared Dirtied Blocks": 2,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.397,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Result",
+              "Parent Relationship": "Member",
+              "Parallel Aware": false,
+              "Startup Cost": 0.0,
+              "Total Cost": 0.01,
+              "Plan Rows": 1,
+              "Plan Width": 324,
+              "Actual Startup Time": 0.001,
+              "Actual Total Time": 0.001,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Shared Hit Blocks": 0,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            }
+          ]
+        },
+        "Planning Time": 0.01,
+        "Triggers": [],
+        "Execution Time": 0.645
+      }
+    ],
+    "lsn_before": "7/400AD750",
+    "lsn_after": "7/400AEF40",
+    "counter_changes": [
+      {
+        "relation": "public.usertable",
+        "delta": {
+          "n_tup_ins": 1,
+          "n_live_tup": 1,
+          "n_mod_since_analyze": 1,
+          "idx_blks_hit": 3,
+          "idx_blks_read": 2,
+          "heap_blks_read": 2
+        }
+      },
+      {
+        "relation": "public.usertable_pkey1",
+        "delta": {
+          "idx_blks_hit": 3,
+          "idx_blks_read": 2
+        }
+      }
+    ],
+    "wal": [
+      {
+        "phase": "foreground",
+        "rel": "1663/12695/16487",
+        "rmgr": "Heap",
+        "records": 1,
+        "record_bytes": 54.0,
+        "block_refs": 1,
+        "fpis": 1,
+        "fpi_bytes": 5568,
+        "relation": "public.usertable"
+      },
+      {
+        "phase": "foreground",
+        "rel": "1663/12695/16493",
+        "rmgr": "Btree",
+        "records": 1,
+        "record_bytes": 53.0,
+        "block_refs": 1,
+        "fpis": 1,
+        "fpi_bytes": 380,
+        "relation": "public.usertable_pkey1"
+      },
+      {
+        "phase": "foreground",
+        "rel": "NO_BLOCK_REFERENCE",
+        "rmgr": "Transaction",
+        "records": 1,
+        "record_bytes": 34.0,
+        "relation": "NO_BLOCK_REFERENCE"
+      }
+    ]
+  },
+  {
+    "operation": "read_modify_write",
+    "sql": "WITH ycsb_read AS MATERIALIZED (SELECT * FROM usertable WHERE ycsb_key=1) UPDATE usertable SET FIELD1='csSWj9DxQSYgDMFMbGBK', FIELD2='xN28J4W8Bzld2g0hyjgk', FIELD3='G1FiXyMGrKlyedLdl8d1', FIELD4='ksr4eHNg20LP7PRdg2ND', FIELD5='YP5UvvHQSCki2fXud4Lr', FIELD6='xUlRMeJQhtF5XU9xTBcE', FIELD7='9AMXfwiPf3QUjKZtgSIB', FIELD8='CLcjag5Y0hiVbX504Xvh', FIELD9='TIFq7WSD1v28yfTcfTn2', FIELD10='7RzmR7KzqMLA6ZuzwdlI' FROM ycsb_read WHERE usertable.ycsb_key=ycsb_read.ycsb_key RETURNING usertable.*;",
+    "pid": 1482858,
+    "plan": [
+      {
+        "Plan": {
+          "Node Type": "ModifyTable",
+          "Operation": "Update",
+          "Parallel Aware": false,
+          "Relation Name": "usertable",
+          "Alias": "usertable",
+          "Startup Cost": 9.15,
+          "Total Cost": 17.19,
+          "Plan Rows": 1,
+          "Plan Width": 366,
+          "Actual Startup Time": 0.128,
+          "Actual Total Time": 0.128,
+          "Actual Rows": 1,
+          "Actual Loops": 1,
+          "Shared Hit Blocks": 11,
+          "Shared Read Blocks": 0,
+          "Shared Dirtied Blocks": 0,
+          "Shared Written Blocks": 0,
+          "Local Hit Blocks": 0,
+          "Local Read Blocks": 0,
+          "Local Dirtied Blocks": 0,
+          "Local Written Blocks": 0,
+          "Temp Read Blocks": 0,
+          "Temp Written Blocks": 0,
+          "I/O Read Time": 0.0,
+          "I/O Write Time": 0.0,
+          "Plans": [
+            {
+              "Node Type": "Index Scan",
+              "Parent Relationship": "InitPlan",
+              "Subplan Name": "CTE ycsb_read",
+              "Parallel Aware": false,
+              "Scan Direction": "Forward",
+              "Index Name": "usertable_pkey1",
+              "Relation Name": "usertable",
+              "Alias": "usertable_1",
+              "Startup Cost": 0.57,
+              "Total Cost": 8.59,
+              "Plan Rows": 1,
+              "Plan Width": 214,
+              "Actual Startup Time": 0.06,
+              "Actual Total Time": 0.061,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Index Cond": "(ycsb_key = 1)",
+              "Rows Removed by Index Recheck": 0,
+              "Shared Hit Blocks": 5,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0
+            },
+            {
+              "Node Type": "Nested Loop",
+              "Parent Relationship": "Member",
+              "Parallel Aware": false,
+              "Join Type": "Inner",
+              "Startup Cost": 0.57,
+              "Total Cost": 8.61,
+              "Plan Rows": 1,
+              "Plan Width": 366,
+              "Actual Startup Time": 0.082,
+              "Actual Total Time": 0.083,
+              "Actual Rows": 1,
+              "Actual Loops": 1,
+              "Inner Unique": true,
+              "Shared Hit Blocks": 10,
+              "Shared Read Blocks": 0,
+              "Shared Dirtied Blocks": 0,
+              "Shared Written Blocks": 0,
+              "Local Hit Blocks": 0,
+              "Local Read Blocks": 0,
+              "Local Dirtied Blocks": 0,
+              "Local Written Blocks": 0,
+              "Temp Read Blocks": 0,
+              "Temp Written Blocks": 0,
+              "I/O Read Time": 0.0,
+              "I/O Write Time": 0.0,
+              "Plans": [
+                {
+                  "Node Type": "CTE Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "CTE Name": "ycsb_read",
+                  "Alias": "ycsb_read",
+                  "Startup Cost": 0.0,
+                  "Total Cost": 0.02,
+                  "Plan Rows": 1,
+                  "Plan Width": 40,
+                  "Actual Startup Time": 0.072,
+                  "Actual Total Time": 0.072,
+                  "Actual Rows": 1,
+                  "Actual Loops": 1,
+                  "Shared Hit Blocks": 5,
+                  "Shared Read Blocks": 0,
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Dirtied Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "I/O Read Time": 0.0,
+                  "I/O Write Time": 0.0
+                },
+                {
+                  "Node Type": "Index Scan",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Scan Direction": "Forward",
+                  "Index Name": "usertable_pkey1",
+                  "Relation Name": "usertable",
+                  "Alias": "usertable",
+                  "Startup Cost": 0.57,
+                  "Total Cost": 8.59,
+                  "Plan Rows": 1,
+                  "Plan Width": 10,
+                  "Actual Startup Time": 0.009,
+                  "Actual Total Time": 0.009,
+                  "Actual Rows": 1,
+                  "Actual Loops": 1,
+                  "Index Cond": "(ycsb_key = ycsb_read.ycsb_key)",
+                  "Rows Removed by Index Recheck": 0,
+                  "Shared Hit Blocks": 5,
+                  "Shared Read Blocks": 0,
+                  "Shared Dirtied Blocks": 0,
+                  "Shared Written Blocks": 0,
+                  "Local Hit Blocks": 0,
+                  "Local Read Blocks": 0,
+                  "Local Dirtied Blocks": 0,
+                  "Local Written Blocks": 0,
+                  "Temp Read Blocks": 0,
+                  "Temp Written Blocks": 0,
+                  "I/O Read Time": 0.0,
+                  "I/O Write Time": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        "Planning Time": 0.591,
+        "Triggers": [],
+        "Execution Time": 0.183
+      }
+    ],
+    "lsn_before": "7/400AEF40",
+    "lsn_after": "7/400AF080",
+    "counter_changes": [
+      {
+        "relation": "public.usertable",
+        "delta": {
+          "idx_scan": 2,
+          "n_tup_upd": 1,
+          "n_dead_tup": 1,
+          "idx_tup_fetch": 2,
+          "n_tup_hot_upd": 1,
+          "n_mod_since_analyze": 1,
+          "idx_blks_hit": 9,
+          "heap_blks_hit": 3
+        }
+      },
+      {
+        "relation": "public.usertable_pkey1",
+        "delta": {
+          "idx_scan": 2,
+          "idx_tup_read": 2,
+          "idx_tup_fetch": 2,
+          "idx_blks_hit": 9
+        }
+      }
+    ],
+    "wal": [
+      {
+        "phase": "foreground",
+        "rel": "1663/12695/16487",
+        "rmgr": "Heap",
+        "records": 1,
+        "record_bytes": 277.0,
+        "block_refs": 1,
+        "fpis": 0,
+        "fpi_bytes": 0,
+        "relation": "public.usertable"
+      },
+      {
+        "phase": "foreground",
+        "rel": "NO_BLOCK_REFERENCE",
+        "rmgr": "Transaction",
+        "records": 1,
+        "record_bytes": 34.0,
+        "relation": "NO_BLOCK_REFERENCE"
+      }
+    ]
+  }
+]

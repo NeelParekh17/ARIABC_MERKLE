@@ -1,0 +1,56 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 165K of event 'cpu/cycles/P'
+# Event count (approx.): 610467946746
+#
+# Overhead  Command          Shared Object                                                                                                                                              Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+# ........  ...............  .........................................................................................................................................................  .............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+     7.04%  postgres         postgres                                                                                                                                                   [.] bcdb_wait_for_serial_slot
+     3.59%  postgres         [vdso]                                                                                                                                                     [.] 0x0000000000000997
+     2.07%  postgres         postgres                                                                                                                                                   [.] heap_page_prune
+     1.34%  swapper          [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb83f7aff
+     1.30%  postgres         [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb76001bd
+     1.27%  postgres         [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb76011b2
+     0.91%  postgres         postgres                                                                                                                                                   [.] hash_search_with_hash_value
+     0.89%  postgres         [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb770410b
+     0.84%  postgres         postgres                                                                                                                                                   [.] pg_qsort
+     0.82%  postgres         postgres                                                                                                                                                   [.] bcdb_dt_validate_published
+     0.71%  postgres         postgres                                                                                                                                                   [.] AllocSetAlloc
+     0.63%  postgres         [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb7704109
+     0.62%  postgres         bpf_prog_72ced8f13e1784f1_uretprobe__home_neel_claude_checks_ycsb_matrix_20261020_install_bin_postgres_MarkBufferDirty_uretprobe__home_n_3855d74b421a8c9a  [k] bpf_prog_72ced8f13e1784f1_uretprobe__home_neel_claude_checks_ycsb_matrix_20261020_install_bin_postgres_MarkBufferDirty_uretprobe__home_n_3855d74b421a8c9a
+     0.56%  postgres         libc.so.6                                                                                                                                                  [.] __memset_avx2_unaligned_erms
+     0.55%  postgres         postgres                                                                                                                                                   [.] bcdb_get_time
+     0.55%  postgres         libc.so.6                                                                                                                                                  [.] __memmove_avx_unaligned_erms
+     0.50%  postgres         postgres                                                                                                                                                   [.] element_reset.isra.0
+     0.50%  postgres         postgres                                                                                                                                                   [.] base_yyparse
+     0.48%  postgres         postgres                                                                                                                                                   [.] LWLockRelease
+     0.42%  postgres         postgres                                                                                                                                                   [.] BufferGetBlockNumber
+     0.38%  ariabc_pg_serve  [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb76001bd
+     0.36%  postgres         [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb8c8bac8
+     0.35%  postgres         [uprobes]                                                                                                                                                  [.] 0x0000000000000084
+     0.34%  postgres         postgres                                                                                                                                                   [.] core_yylex
+     0.34%  postgres         postgres                                                                                                                                                   [.] nocache_index_getattr
+     0.33%  swapper          [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb770410b
+     0.33%  postgres         postgres                                                                                                                                                   [.] hash_any
+     0.31%  postgres         postgres                                                                                                                                                   [.] _bt_compare
+     0.30%  postgres         postgres                                                                                                                                                   [.] HeapTupleSatisfiesVacuum
+     0.29%  postgres         [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb7704104
+     0.27%  postgres         libc.so.6                                                                                                                                                  [.] clock_gettime@@GLIBC_2.17
+     0.26%  postgres         postgres                                                                                                                                                   [.] swapfunc
+     0.25%  postgres         bpf_prog_f324669458e8e46a_kretprobe_vfs_read_kretprobe_vfs_write                                                                                           [k] bpf_prog_f324669458e8e46a_kretprobe_vfs_read_kretprobe_vfs_write
+     0.24%  postgres         libc.so.6                                                                                                                                                  [.] _int_malloc
+     0.24%  postgres         [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb7cdbbfd
+     0.23%  postgres         postgres                                                                                                                                                   [.] hash_create
+     0.23%  swapper          [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb8c8c953
+     0.22%  postgres         postgres                                                                                                                                                   [.] bcdb_worker_process_tx_dt
+     0.21%  postgres         postgres                                                                                                                                                   [.] LWLockAcquire
+     0.21%  postgres         [kernel.kallsyms]                                                                                                                                          [k] 0xffffffffb7601268
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

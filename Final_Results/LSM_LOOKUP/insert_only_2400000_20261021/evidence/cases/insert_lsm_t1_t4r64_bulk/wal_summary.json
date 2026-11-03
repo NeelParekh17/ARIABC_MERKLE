@@ -1,0 +1,2151 @@
+{
+  "command": [
+    "/home/neel/claude_checks/lsm_bulkmerge_20261022/install/bin/pg_waldump",
+    "-p",
+    "/home/neel/ariabc_data/lsm_lookup_20261014/pgdata_merkle/pg_wal",
+    "-s",
+    "5/4F3874B8",
+    "-e",
+    "6/8A262FE0",
+    "-b"
+  ],
+  "returncode": 0,
+  "intervals": [
+    [
+      "foreground",
+      22803936440,
+      25079555344
+    ],
+    [
+      "drain",
+      25079555344,
+      28087561968
+    ],
+    [
+      "checkpoint",
+      28087561968,
+      28087562088
+    ],
+    [
+      "shutdown",
+      28087562088,
+      28087562208
+    ]
+  ],
+  "rmgr": [
+    {
+      "phase": "checkpoint",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114,
+      "total_bytes": 114,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Btree",
+      "records": 2400012,
+      "record_bytes": 165536030,
+      "total_bytes": 2996512890,
+      "fpi_bytes": 2830976860
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Generic",
+      "records": 14,
+      "record_bytes": 793,
+      "total_bytes": 1033,
+      "fpi_bytes": 240
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Heap",
+      "records": 4,
+      "record_bytes": 317,
+      "total_bytes": 317,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Storage",
+      "records": 4,
+      "record_bytes": 168,
+      "total_bytes": 168,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rmgr": "Transaction",
+      "records": 4,
+      "record_bytes": 216,
+      "total_bytes": 216,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Btree",
+      "records": 4958888,
+      "record_bytes": 389396760,
+      "total_bytes": 401301868,
+      "fpi_bytes": 11905108
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "CLOG",
+      "records": 146,
+      "record_bytes": 4380,
+      "total_bytes": 4380,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Generic",
+      "records": 100,
+      "record_bytes": 5746,
+      "total_bytes": 7898,
+      "fpi_bytes": 2152
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap",
+      "records": 9649703,
+      "record_bytes": 1490925169,
+      "total_bytes": 1510735509,
+      "fpi_bytes": 19810340
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Heap2",
+      "records": 3038453,
+      "record_bytes": 198799841,
+      "total_bytes": 198807677,
+      "fpi_bytes": 7836
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Storage",
+      "records": 50,
+      "record_bytes": 2100,
+      "total_bytes": 2100,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rmgr": "Transaction",
+      "records": 2400050,
+      "record_bytes": 110402700,
+      "total_bytes": 110402700,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "shutdown",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114,
+      "total_bytes": 114,
+      "fpi_bytes": 0
+    }
+  ],
+  "relations": [
+    {
+      "phase": "checkpoint",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114.0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/1259",
+      "rmgr": "Heap",
+      "records": 4,
+      "record_bytes": 317.0,
+      "block_refs": 4,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16868",
+      "rmgr": "Btree",
+      "records": 2400000,
+      "record_bytes": 165535198.0,
+      "block_refs": 2400000,
+      "fpis": 382358,
+      "fpi_bytes": 2830976860
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16873",
+      "rmgr": "Generic",
+      "records": 11,
+      "record_bytes": 646.0,
+      "block_refs": 11,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16924",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16924",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16925",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16926",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16926",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16927",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16927",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/2662",
+      "rmgr": "Btree",
+      "records": 4,
+      "record_bytes": 256.0,
+      "block_refs": 4,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/2663",
+      "rmgr": "Btree",
+      "records": 4,
+      "record_bytes": 320.0,
+      "block_refs": 4,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/3455",
+      "rmgr": "Btree",
+      "records": 4,
+      "record_bytes": 256.0,
+      "block_refs": 4,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "drain",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "Transaction",
+      "records": 4,
+      "record_bytes": 216.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1255",
+      "rmgr": "Heap2",
+      "records": 1,
+      "record_bytes": 59.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 7836
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1259",
+      "rmgr": "Heap",
+      "records": 50,
+      "record_bytes": 3939.0,
+      "block_refs": 50,
+      "fpis": 1,
+      "fpi_bytes": 4644
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1259",
+      "rmgr": "Heap2",
+      "records": 2,
+      "record_bytes": 198.0,
+      "block_refs": 2,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "rmgr": "Heap",
+      "records": 2400000,
+      "record_bytes": 645599785.0,
+      "block_refs": 2400000,
+      "fpis": 1,
+      "fpi_bytes": 6576
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16493",
+      "rmgr": "Btree",
+      "records": 2406579,
+      "record_bytes": 158615537.0,
+      "block_refs": 2419737,
+      "fpis": 3,
+      "fpi_bytes": 3044
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap",
+      "records": 7249653,
+      "record_bytes": 845321445.0,
+      "block_refs": 7299306,
+      "fpis": 3020,
+      "fpi_bytes": 19799120
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "rmgr": "Heap2",
+      "records": 3038450,
+      "record_bytes": 198799584.0,
+      "block_refs": 3038450,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16528",
+      "rmgr": "Btree",
+      "records": 51512,
+      "record_bytes": 3856079.0,
+      "block_refs": 51614,
+      "fpis": 813,
+      "fpi_bytes": 6019636
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16529",
+      "rmgr": "Btree",
+      "records": 50023,
+      "record_bytes": 4901712.0,
+      "block_refs": 51132,
+      "fpis": 844,
+      "fpi_bytes": 5865772
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16530",
+      "rmgr": "Btree",
+      "records": 37744,
+      "record_bytes": 2826411.0,
+      "block_refs": 38127,
+      "fpis": 1,
+      "fpi_bytes": 4060
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16869",
+      "rmgr": "Btree",
+      "records": 96165,
+      "record_bytes": 8751714.0,
+      "block_refs": 97712,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16870",
+      "rmgr": "Btree",
+      "records": 95037,
+      "record_bytes": 8637518.0,
+      "block_refs": 96566,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16873",
+      "rmgr": "Generic",
+      "records": 75,
+      "record_bytes": 4521.0,
+      "block_refs": 75,
+      "fpis": 1,
+      "fpi_bytes": 152
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16874",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16875",
+      "rmgr": "Btree",
+      "records": 94436,
+      "record_bytes": 8609466.0,
+      "block_refs": 95971,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16875",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16875",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16876",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16877",
+      "rmgr": "Btree",
+      "records": 94190,
+      "record_bytes": 8581824.0,
+      "block_refs": 95716,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16877",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16877",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16878",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16879",
+      "rmgr": "Btree",
+      "records": 98862,
+      "record_bytes": 8914418.0,
+      "block_refs": 100385,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16879",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16879",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16880",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16881",
+      "rmgr": "Btree",
+      "records": 95320,
+      "record_bytes": 8685162.0,
+      "block_refs": 96867,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16881",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16881",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16882",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16883",
+      "rmgr": "Btree",
+      "records": 95117,
+      "record_bytes": 8658066.0,
+      "block_refs": 96652,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16883",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16883",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16884",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16885",
+      "rmgr": "Btree",
+      "records": 94783,
+      "record_bytes": 8634372.0,
+      "block_refs": 96315,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16885",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16885",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16886",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16887",
+      "rmgr": "Btree",
+      "records": 95357,
+      "record_bytes": 8677008.0,
+      "block_refs": 96895,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16887",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16887",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16888",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16889",
+      "rmgr": "Btree",
+      "records": 98873,
+      "record_bytes": 8928614.0,
+      "block_refs": 100402,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16889",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16889",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16890",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16891",
+      "rmgr": "Btree",
+      "records": 97538,
+      "record_bytes": 8825384.0,
+      "block_refs": 99064,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16891",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16891",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16892",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16893",
+      "rmgr": "Btree",
+      "records": 96024,
+      "record_bytes": 8724962.0,
+      "block_refs": 97559,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16893",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16893",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16894",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16895",
+      "rmgr": "Btree",
+      "records": 98249,
+      "record_bytes": 8877592.0,
+      "block_refs": 99775,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16895",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16895",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16896",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16897",
+      "rmgr": "Btree",
+      "records": 96418,
+      "record_bytes": 8755402.0,
+      "block_refs": 97953,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16897",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16897",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16898",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16899",
+      "rmgr": "Btree",
+      "records": 95936,
+      "record_bytes": 8703858.0,
+      "block_refs": 97459,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16899",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16899",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16900",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16901",
+      "rmgr": "Btree",
+      "records": 93066,
+      "record_bytes": 8489952.0,
+      "block_refs": 94592,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16901",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16901",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16902",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16903",
+      "rmgr": "Btree",
+      "records": 97666,
+      "record_bytes": 8850614.0,
+      "block_refs": 99207,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16903",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16903",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16904",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16905",
+      "rmgr": "Btree",
+      "records": 95063,
+      "record_bytes": 8663458.0,
+      "block_refs": 96598,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16905",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16905",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16906",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16907",
+      "rmgr": "Btree",
+      "records": 97678,
+      "record_bytes": 8841274.0,
+      "block_refs": 99213,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16907",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16907",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16908",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16909",
+      "rmgr": "Btree",
+      "records": 94154,
+      "record_bytes": 8586332.0,
+      "block_refs": 95686,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16909",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16909",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16910",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16911",
+      "rmgr": "Btree",
+      "records": 95971,
+      "record_bytes": 8724536.0,
+      "block_refs": 97509,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16911",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16911",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16912",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16913",
+      "rmgr": "Btree",
+      "records": 93780,
+      "record_bytes": 8569888.0,
+      "block_refs": 95318,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16913",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16913",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16914",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16915",
+      "rmgr": "Btree",
+      "records": 94732,
+      "record_bytes": 8616970.0,
+      "block_refs": 96255,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16915",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16915",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16916",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16917",
+      "rmgr": "Btree",
+      "records": 97996,
+      "record_bytes": 8880092.0,
+      "block_refs": 99540,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16917",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16917",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16918",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16919",
+      "rmgr": "Btree",
+      "records": 98748,
+      "record_bytes": 8937146.0,
+      "block_refs": 100295,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16919",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16919",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16920",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16921",
+      "rmgr": "Btree",
+      "records": 11720,
+      "record_bytes": 1060902.0,
+      "block_refs": 11909,
+      "fpis": 0,
+      "fpi_bytes": 0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16921",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16921",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16922",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16923",
+      "rmgr": "Generic",
+      "records": 1,
+      "record_bytes": 49.0,
+      "block_refs": 1,
+      "fpis": 1,
+      "fpi_bytes": 80
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16923",
+      "rmgr": "Storage",
+      "records": 1,
+      "record_bytes": 42.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/2662",
+      "rmgr": "Btree",
+      "records": 50,
+      "record_bytes": 3189.0,
+      "block_refs": 50,
+      "fpis": 1,
+      "fpi_bytes": 3560
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/2663",
+      "rmgr": "Btree",
+      "records": 51,
+      "record_bytes": 4119.0,
+      "block_refs": 51,
+      "fpis": 1,
+      "fpi_bytes": 6816
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/3455",
+      "rmgr": "Btree",
+      "records": 50,
+      "record_bytes": 3189.0,
+      "block_refs": 50,
+      "fpis": 1,
+      "fpi_bytes": 2220
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "CLOG",
+      "records": 146,
+      "record_bytes": 4380.0
+    },
+    {
+      "phase": "foreground",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "Transaction",
+      "records": 2400050,
+      "record_bytes": 110402700.0
+    },
+    {
+      "phase": "shutdown",
+      "rel": "NO_BLOCK_REFERENCE",
+      "rmgr": "XLOG",
+      "records": 1,
+      "record_bytes": 114.0
+    }
+  ],
+  "descriptions": [
+    {
+      "rmgr": "Btree",
+      "description": "DELETE",
+      "records": 1826
+    },
+    {
+      "rmgr": "Btree",
+      "description": "INSERT_LEAF",
+      "records": 7317193
+    },
+    {
+      "rmgr": "Btree",
+      "description": "INSERT_UPPER",
+      "records": 19839
+    },
+    {
+      "rmgr": "Btree",
+      "description": "NEWROOT",
+      "records": 78
+    },
+    {
+      "rmgr": "Btree",
+      "description": "SPLIT_L",
+      "records": 6703
+    },
+    {
+      "rmgr": "Btree",
+      "description": "SPLIT_R",
+      "records": 13261
+    },
+    {
+      "rmgr": "CLOG",
+      "description": "ZEROPAGE",
+      "records": 146
+    },
+    {
+      "rmgr": "Generic",
+      "description": "Generic",
+      "records": 114
+    },
+    {
+      "rmgr": "Heap",
+      "description": "HOT_UPDATE",
+      "records": 7150347
+    },
+    {
+      "rmgr": "Heap",
+      "description": "INSERT",
+      "records": 2317234
+    },
+    {
+      "rmgr": "Heap",
+      "description": "INSERT+INIT",
+      "records": 82766
+    },
+    {
+      "rmgr": "Heap",
+      "description": "LOCK",
+      "records": 49653
+    },
+    {
+      "rmgr": "Heap",
+      "description": "UPDATE",
+      "records": 47321
+    },
+    {
+      "rmgr": "Heap",
+      "description": "UPDATE+INIT",
+      "records": 2386
+    },
+    {
+      "rmgr": "Heap2",
+      "description": "CLEAN",
+      "records": 3038453
+    },
+    {
+      "rmgr": "Storage",
+      "description": "CREATE",
+      "records": 54
+    },
+    {
+      "rmgr": "Transaction",
+      "description": "COMMIT",
+      "records": 2400054
+    },
+    {
+      "rmgr": "XLOG",
+      "description": "CHECKPOINT_ONLINE",
+      "records": 1
+    },
+    {
+      "rmgr": "XLOG",
+      "description": "CHECKPOINT_SHUTDOWN",
+      "records": 1
+    }
+  ],
+  "blocks": [
+    {
+      "phase": "drain",
+      "rel": "1663/12695/1259",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 3,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 4
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16868",
+      "unique_wal_referenced_main_blocks": 382358,
+      "distance": {
+        "0": 2006161,
+        "1": 380003,
+        "2": 0,
+        "3": 4570,
+        "4": 7521,
+        "5": 1743,
+        "6": 1
+      },
+      "xid_zero": 2400000
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16873",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 10,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 11
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16924",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16926",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/16927",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/2662",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 3,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 4
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/2663",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 3,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 4
+    },
+    {
+      "phase": "drain",
+      "rel": "1663/12695/3455",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 3,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 4
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1255",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/1259",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 51,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 52
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16487",
+      "unique_wal_referenced_main_blocks": 82767,
+      "distance": {
+        "0": 12356,
+        "1": 769665,
+        "2": 258941,
+        "3": 865799,
+        "4": 460642,
+        "5": 32596,
+        "6": 0
+      },
+      "xid_nonzero": 2400000
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16493",
+      "unique_wal_referenced_main_blocks": 6582,
+      "distance": {
+        "0": 2393442,
+        "1": 13070,
+        "2": 44,
+        "3": 330,
+        "4": 2563,
+        "5": 10243,
+        "6": 44
+      },
+      "xid_nonzero": 2406579
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16527",
+      "unique_wal_referenced_main_blocks": 5406,
+      "distance": {
+        "0": 737999,
+        "1": 179485,
+        "2": 56862,
+        "3": 297407,
+        "4": 494774,
+        "5": 3415564,
+        "6": 5155664
+      },
+      "xid_nonzero": 10288103
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16528",
+      "unique_wal_referenced_main_blocks": 847,
+      "distance": {
+        "0": 2896,
+        "1": 29,
+        "2": 293,
+        "3": 1110,
+        "4": 6299,
+        "5": 40986,
+        "6": 0
+      },
+      "xid_nonzero": 51512
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16529",
+      "unique_wal_referenced_main_blocks": 1214,
+      "distance": {
+        "0": 695,
+        "1": 82,
+        "2": 177,
+        "3": 1072,
+        "4": 5316,
+        "5": 42957,
+        "6": 832
+      },
+      "xid_nonzero": 50023
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16530",
+      "unique_wal_referenced_main_blocks": 131,
+      "distance": {
+        "0": 1318,
+        "1": 920,
+        "2": 923,
+        "3": 8814,
+        "4": 23511,
+        "5": 2640,
+        "6": 0
+      },
+      "xid_nonzero": 37744
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16869",
+      "unique_wal_referenced_main_blocks": 520,
+      "distance": {
+        "0": 1432,
+        "1": 946,
+        "2": 928,
+        "3": 9292,
+        "4": 41953,
+        "5": 43160,
+        "6": 0
+      },
+      "xid_nonzero": 96165
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16870",
+      "unique_wal_referenced_main_blocks": 514,
+      "distance": {
+        "0": 1425,
+        "1": 933,
+        "2": 910,
+        "3": 9347,
+        "4": 41889,
+        "5": 42061,
+        "6": 0
+      },
+      "xid_nonzero": 95037
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16873",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 74,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 75
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16875",
+      "unique_wal_referenced_main_blocks": 516,
+      "distance": {
+        "0": 1417,
+        "1": 936,
+        "2": 929,
+        "3": 9299,
+        "4": 41852,
+        "5": 41538,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 94437
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16877",
+      "unique_wal_referenced_main_blocks": 513,
+      "distance": {
+        "0": 1403,
+        "1": 961,
+        "2": 930,
+        "3": 9345,
+        "4": 41554,
+        "5": 41523,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 94191
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16879",
+      "unique_wal_referenced_main_blocks": 512,
+      "distance": {
+        "0": 1393,
+        "1": 951,
+        "2": 914,
+        "3": 9460,
+        "4": 42645,
+        "5": 45022,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 98863
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16881",
+      "unique_wal_referenced_main_blocks": 520,
+      "distance": {
+        "0": 1418,
+        "1": 888,
+        "2": 848,
+        "3": 9285,
+        "4": 41799,
+        "5": 42629,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 95321
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16883",
+      "unique_wal_referenced_main_blocks": 516,
+      "distance": {
+        "0": 1438,
+        "1": 865,
+        "2": 915,
+        "3": 9257,
+        "4": 42181,
+        "5": 41996,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 95118
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16885",
+      "unique_wal_referenced_main_blocks": 515,
+      "distance": {
+        "0": 1418,
+        "1": 927,
+        "2": 970,
+        "3": 9143,
+        "4": 41895,
+        "5": 41962,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 94784
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16887",
+      "unique_wal_referenced_main_blocks": 517,
+      "distance": {
+        "0": 1411,
+        "1": 932,
+        "2": 910,
+        "3": 9286,
+        "4": 41637,
+        "5": 42719,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 95358
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16889",
+      "unique_wal_referenced_main_blocks": 514,
+      "distance": {
+        "0": 1397,
+        "1": 1009,
+        "2": 972,
+        "3": 9387,
+        "4": 42749,
+        "5": 44888,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 98874
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16891",
+      "unique_wal_referenced_main_blocks": 513,
+      "distance": {
+        "0": 1451,
+        "1": 953,
+        "2": 967,
+        "3": 9504,
+        "4": 42128,
+        "5": 44061,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 97539
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16893",
+      "unique_wal_referenced_main_blocks": 516,
+      "distance": {
+        "0": 1493,
+        "1": 888,
+        "2": 875,
+        "3": 9327,
+        "4": 41884,
+        "5": 43092,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 96025
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16895",
+      "unique_wal_referenced_main_blocks": 513,
+      "distance": {
+        "0": 1369,
+        "1": 926,
+        "2": 863,
+        "3": 9509,
+        "4": 42442,
+        "5": 44666,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 98250
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16897",
+      "unique_wal_referenced_main_blocks": 516,
+      "distance": {
+        "0": 1429,
+        "1": 913,
+        "2": 984,
+        "3": 9379,
+        "4": 42052,
+        "5": 43196,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 96419
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16899",
+      "unique_wal_referenced_main_blocks": 512,
+      "distance": {
+        "0": 1422,
+        "1": 988,
+        "2": 904,
+        "3": 9460,
+        "4": 41901,
+        "5": 42784,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 95937
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16901",
+      "unique_wal_referenced_main_blocks": 513,
+      "distance": {
+        "0": 1436,
+        "1": 888,
+        "2": 934,
+        "3": 9287,
+        "4": 41104,
+        "5": 40943,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 93067
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16903",
+      "unique_wal_referenced_main_blocks": 518,
+      "distance": {
+        "0": 1513,
+        "1": 908,
+        "2": 883,
+        "3": 9373,
+        "4": 42233,
+        "5": 44297,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 97667
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16905",
+      "unique_wal_referenced_main_blocks": 516,
+      "distance": {
+        "0": 1423,
+        "1": 900,
+        "2": 952,
+        "3": 9529,
+        "4": 41556,
+        "5": 42238,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 95064
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16907",
+      "unique_wal_referenced_main_blocks": 516,
+      "distance": {
+        "0": 1457,
+        "1": 875,
+        "2": 893,
+        "3": 9417,
+        "4": 42389,
+        "5": 44182,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 97679
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16909",
+      "unique_wal_referenced_main_blocks": 515,
+      "distance": {
+        "0": 1439,
+        "1": 901,
+        "2": 857,
+        "3": 9437,
+        "4": 41296,
+        "5": 41756,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 94155
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16911",
+      "unique_wal_referenced_main_blocks": 517,
+      "distance": {
+        "0": 1429,
+        "1": 915,
+        "2": 914,
+        "3": 9392,
+        "4": 42082,
+        "5": 42777,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 95972
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16913",
+      "unique_wal_referenced_main_blocks": 517,
+      "distance": {
+        "0": 1452,
+        "1": 959,
+        "2": 944,
+        "3": 9398,
+        "4": 41334,
+        "5": 41231,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 93781
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16915",
+      "unique_wal_referenced_main_blocks": 512,
+      "distance": {
+        "0": 1370,
+        "1": 876,
+        "2": 940,
+        "3": 9390,
+        "4": 41701,
+        "5": 41978,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 94733
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16917",
+      "unique_wal_referenced_main_blocks": 519,
+      "distance": {
+        "0": 1482,
+        "1": 948,
+        "2": 883,
+        "3": 9529,
+        "4": 42320,
+        "5": 44378,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 97997
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16919",
+      "unique_wal_referenced_main_blocks": 520,
+      "distance": {
+        "0": 1490,
+        "1": 908,
+        "2": 897,
+        "3": 9361,
+        "4": 42460,
+        "5": 45179,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 98749
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16921",
+      "unique_wal_referenced_main_blocks": 66,
+      "distance": {
+        "0": 1028,
+        "1": 517,
+        "2": 490,
+        "3": 4291,
+        "4": 5583,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 11721
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/16923",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 0,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_zero": 1,
+      "xid_nonzero": 1
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/2662",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 49,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 50
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/2663",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 50,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 51
+    },
+    {
+      "phase": "foreground",
+      "rel": "1663/12695/3455",
+      "unique_wal_referenced_main_blocks": 1,
+      "distance": {
+        "0": 49,
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "xid_nonzero": 50
+    }
+  ]
+}

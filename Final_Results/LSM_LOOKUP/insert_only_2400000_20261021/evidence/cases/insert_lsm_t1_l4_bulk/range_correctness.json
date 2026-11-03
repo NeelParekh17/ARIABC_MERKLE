@@ -1,0 +1,194 @@
+{
+  "pid": 1592966,
+  "sql": "SELECT * FROM usertable WHERE merkle_partition_for_hash(merkle_key_hash(ycsb_key),200)=51 AND merkle_key_hash(ycsb_key) BETWEEN decode('91ff000000000000','hex') AND decode('91ffffffffffffff','hex') ORDER BY merkle_key_hash(ycsb_key),ycsb_key",
+  "index_plan": [
+    {
+      "Plan": {
+        "Node Type": "Index Scan",
+        "Parallel Aware": false,
+        "Scan Direction": "Forward",
+        "Index Name": "usertable_merkle_lookup_idx",
+        "Relation Name": "usertable",
+        "Alias": "usertable",
+        "Startup Cost": 24.19,
+        "Total Cost": 10372.21,
+        "Plan Rows": 2561,
+        "Plan Width": 246,
+        "Actual Startup Time": 0.286,
+        "Actual Total Time": 1.192,
+        "Actual Rows": 9,
+        "Actual Loops": 1,
+        "Index Cond": "((merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 51) AND (merkle_key_hash(ycsb_key) >= '\\x91ff000000000000'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x91ffffffffffffff'::bytea))",
+        "Rows Removed by Index Recheck": 0,
+        "Shared Hit Blocks": 18,
+        "Shared Read Blocks": 9,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 9,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0,
+        "I/O Read Time": 1.089,
+        "I/O Write Time": 0.037
+      },
+      "Planning Time": 0.043,
+      "Triggers": [],
+      "Execution Time": 1.201
+    }
+  ],
+  "oracle_plan": [
+    {
+      "Plan": {
+        "Node Type": "Sort",
+        "Parallel Aware": false,
+        "Startup Cost": 6350348.49,
+        "Total Cost": 6350354.89,
+        "Plan Rows": 2561,
+        "Plan Width": 246,
+        "Sort Key": [
+          "(merkle_key_hash(ycsb_key))",
+          "ycsb_key"
+        ],
+        "Plans": [
+          {
+            "Node Type": "Seq Scan",
+            "Parent Relationship": "Outer",
+            "Parallel Aware": false,
+            "Relation Name": "usertable",
+            "Alias": "usertable",
+            "Startup Cost": 0.0,
+            "Total Cost": 6350203.51,
+            "Plan Rows": 2561,
+            "Plan Width": 246,
+            "Filter": "((merkle_key_hash(ycsb_key) >= '\\x91ff000000000000'::bytea) AND (merkle_key_hash(ycsb_key) <= '\\x91ffffffffffffff'::bytea) AND (merkle_partition_for_hash(merkle_key_hash(ycsb_key), 200) = 51))"
+          }
+        ]
+      }
+    }
+  ],
+  "rows": 9,
+  "old_rows": 7,
+  "new_rows": 1,
+  "equal": true,
+  "actual": [
+    {
+      "ycsb_key": 54703930,
+      "field1": "P0st9aEQhaLhgmDZBdhz",
+      "field2": "8Y0HYQ1MANlYOkTHDrP7",
+      "field3": "EPyRgzAbCIasN3Mc47DS",
+      "field4": "r8w1FvRydOvSvSWrVsy4",
+      "field5": "NxDOJ5WGiu7vMzc0jfg5",
+      "field6": "DV8YTo3k3UAdLh0eVL05",
+      "field7": "tRx9JmpBrmkYYlKNPmY3",
+      "field8": "wzHelT4NEZJDvMIieAxe",
+      "field9": "eWshoLun65pRe28eJ05F",
+      "field10": "ydRgD4qbuquViHT5P2oe"
+    },
+    {
+      "ycsb_key": 795266,
+      "field1": "wj0wxrv82fTB9XrX8A3i",
+      "field2": "KfmD19e7Ufz4zISUilxI",
+      "field3": "cZZsICbaq7ZDO3zEQphr",
+      "field4": "9eUKJ1MDRhFJ0kdt2ikq",
+      "field5": "A4wrG6FVlfUH2ZQsQQfJ",
+      "field6": "ZaGxEv4gjnl3MZGGIUhC",
+      "field7": "eY5DtwY3LVvSbYn1iohi",
+      "field8": "eQWeWUcgXFdhpePUW5m3",
+      "field9": "lvf066vjFToJgJanlr3H",
+      "field10": "8gnFRwKB7lvxnog9hgiV"
+    },
+    {
+      "ycsb_key": 85782795,
+      "field1": "1E9KZrTTpuJ3KjJa8cDV",
+      "field2": "cGDXYCoIaT6isOfDsR1U",
+      "field3": "bCV2zWwCN1e3ucAq6HXW",
+      "field4": "f2Td6P3gwMwkIeRm8ohD",
+      "field5": "6J7nUnvqQrdvEGhSQHsM",
+      "field6": "X6Y6e3Ce3r7grRE2GMs8",
+      "field7": "HivBNsd2o6NzvOuKR0Bs",
+      "field8": "iWkqE8VcvCk5Sr80QPjo",
+      "field9": "cthqlIctvxHks5zEjCta",
+      "field10": "T8uRDr68JjJ4BQT3iIty"
+    },
+    {
+      "ycsb_key": 102137815,
+      "field1": "9Xx426CFSrBlwWSg6FUy",
+      "field2": "xsxf37qEkTvMoNpHJFR2",
+      "field3": "TDAEeIXJCiCR6mQHUBab",
+      "field4": "KgjtA20vpe3gmTzbaxLe",
+      "field5": "2bdMwni1GZd9IPPudYrR",
+      "field6": "gZi4R5zqfI4d85lbuUfi",
+      "field7": "CM35zusxhhkdC3frjUGk",
+      "field8": "KKh77FJVb7ivqhyomgxG",
+      "field9": "f3e3P4w8oa23P4ZQqZQY",
+      "field10": "eK5Kl1TeOh4Agp7YOpml"
+    },
+    {
+      "ycsb_key": 110051000,
+      "field1": "PPPPPPPPPPPPPPPPPPPP",
+      "field2": "PPPPPPPPPPPPPPPPPPPP",
+      "field3": "PPPPPPPPPPPPPPPPPPPP",
+      "field4": "PPPPPPPPPPPPPPPPPPPP",
+      "field5": "PPPPPPPPPPPPPPPPPPPP",
+      "field6": "PPPPPPPPPPPPPPPPPPPP",
+      "field7": "PPPPPPPPPPPPPPPPPPPP",
+      "field8": "PPPPPPPPPPPPPPPPPPPP",
+      "field9": "PPPPPPPPPPPPPPPPPPPP",
+      "field10": "PPPPPPPPPPPPPPPPPPPP"
+    },
+    {
+      "ycsb_key": 91699392,
+      "field1": "AhirSY1w8dBzmuo2t48W",
+      "field2": "IJumhtN8oKoYEDbFfUMf",
+      "field3": "EL37qBWXri0dpNuZDjqt",
+      "field4": "9LHZO7LhTTmXrXAYaqib",
+      "field5": "OVeC4jMIKVgqrRCkh7h1",
+      "field6": "IwtSIMOyuZcrJJ2dSide",
+      "field7": "jG6oU8uzUEHGNyjZYBh4",
+      "field8": "qoNId0ncnoj1FuUPbVEP",
+      "field9": "RIcKmKaRKw3knH4UrIFj",
+      "field10": "mLuuqhrbLOFzlcXU2mJU"
+    },
+    {
+      "ycsb_key": 19559876,
+      "field1": "zuWRrj2bUFaZQ2IZ4FRA",
+      "field2": "j8G8hnMnlUI0YDtNZkXO",
+      "field3": "mgeL0brHeLUtINcq8JIW",
+      "field4": "ct6awrymUS8RgzTgYjKx",
+      "field5": "K0rjC2fS2YOVj7GTO5vW",
+      "field6": "vw1A3VymLejMEXi1H8Wf",
+      "field7": "ft5krwflVpDp2OihJc1y",
+      "field8": "14hw07xQFq2QMNTpYa0s",
+      "field9": "jyeyCfCN3CfT45Vmut9E",
+      "field10": "RDrcjDNtbLx6wADd17Qq"
+    },
+    {
+      "ycsb_key": 24675580,
+      "field1": "V8aDGyS9h2kK6BWaXB9z",
+      "field2": "qkYeT5dGoVDovKxUcI8N",
+      "field3": "wqFthIUF2wU6cPAswOuj",
+      "field4": "m2g6jSBVMT8QMYfBVVps",
+      "field5": "NUEb1IxkeDSOd0LxpcuN",
+      "field6": "cLXoSFiMo02a11WTFSyD",
+      "field7": "r40vkp47qAZnHweLnRIa",
+      "field8": "QUXPoKjCFO2TXJAKFj2Q",
+      "field9": "d9tJiDrBixcfTLUxpq4Z",
+      "field10": "OKkoJg89OEyY6J8GFdJ5"
+    },
+    {
+      "ycsb_key": 11342935,
+      "field1": "hEcrxZfrLE1xcmlAdsHv",
+      "field2": "bL354YKUvZAATTdgySQ1",
+      "field3": "6CJJGkxU5iaX6fpHuyMw",
+      "field4": "OWYLhJtqlCBC7D0nd6rL",
+      "field5": "tdlVr1hNjMdhcQ1JcSdS",
+      "field6": "qpQ1vSLveBFouxZzN2iu",
+      "field7": "WuzOD8Mjc54bLYFWFKvn",
+      "field8": "ZcTx9ee6nFJHzT0GdDGB",
+      "field9": "qZsppVwCUhoT2wvF4OLB",
+      "field10": "zJZhHWzKiqrtfA8JNV32"
+    }
+  ]
+}

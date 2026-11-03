@@ -1,0 +1,69 @@
+case	phase	relation	pg_buffer_reads_total	file_read_blocks	file_write_blocks	file_read_main_blocks	file_write_main_blocks	dirtied	dirty_calls	wal_bytes	fpis	fpi_bytes	wal_block_references	unique_wal_referenced_pages
+update_lsm_t2	foreground	public.usertable	1347469	1347447.0	1347786.0	1314580.0	1314460.0	1348538	7920443	4451199402.0	503503	3818565744	3620924	503525
+update_lsm_t2	drain	public.usertable	1347469	0.0	235.0	0.0	216.0	0	0					
+update_lsm_t2	checkpoint	public.usertable	1347469	0.0	542.0	0.0	483.0	0	0					
+update_lsm_t2	shutdown	public.usertable	1347469	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	pg_toast.pg_toast_16487	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	pg_toast.pg_toast_16487_index	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	public.usertable_pkey1	1345188	1345188.0	26.0	1345188.0	26.0	40	325	217520.0	28	207200	165	28
+update_lsm_t2	drain	public.usertable_pkey1	1345188	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	public.usertable_pkey1	1345188	0.0	14.0	0.0	14.0	0	0					
+update_lsm_t2	shutdown	public.usertable_pkey1	1345188	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	public.usertable_merkle_idx	1	1.0	0.0	1.0	0.0	0	0					
+update_lsm_t2	drain	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	public.usertable_merkle_idx	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	ariabc_internal.merkle_node_usertable	1017089	1017088.0	1018548.0	1017086.0	1018547.0	1019860	26376375	1038787410.0	3020	19799120	11985321	3021
+update_lsm_t2	drain	ariabc_internal.merkle_node_usertable	1017089	0.0	176.0	0.0	176.0	0	0					
+update_lsm_t2	checkpoint	ariabc_internal.merkle_node_usertable	1017089	0.0	1159.0	0.0	1159.0	0	0					
+update_lsm_t2	shutdown	ariabc_internal.merkle_node_usertable	1017089	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	pg_toast.pg_toast_16497	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	pg_toast.pg_toast_16497_index	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	ariabc_internal.merkle_node_usertable_pkey	181078	181078.0	0.0	181078.0	0.0	1	2	7485.0	1	7432	1	1
+update_lsm_t2	drain	ariabc_internal.merkle_node_usertable_pkey	181078	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	ariabc_internal.merkle_node_usertable_pkey	181078	0.0	1.0	0.0	1.0	0	0					
+update_lsm_t2	shutdown	ariabc_internal.merkle_node_usertable_pkey	181078	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	ariabc_internal.merkle_node_usertable_prefix_idx	4	4.0	1.0	4.0	1.0	1	1	8241.0	1	8188	1	1
+update_lsm_t2	drain	ariabc_internal.merkle_node_usertable_prefix_idx	4	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	ariabc_internal.merkle_node_usertable_prefix_idx	4	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	ariabc_internal.merkle_node_usertable_prefix_idx	4	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	checkpoint	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	ariabc_internal.merkle_node_usertable_root_idx	0	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	public.usertable_merkle_lookup_idx	330	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	public.usertable_merkle_lookup_idx	330	330.0	0.0	330.0	0.0	160	164	1193408.0	160	1184640	164	160
+update_lsm_t2	checkpoint	public.usertable_merkle_lookup_idx	330	0.0	160.0	0.0	160.0	0	0					
+update_lsm_t2	shutdown	public.usertable_merkle_lookup_idx	330	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	public.ml_16856_l0_s0	139	135.0	132.0	135.0	132.0	131	166	11902.0	0	0	166	2
+update_lsm_t2	drain	public.ml_16856_l0_s0	139	2.0	1.0	2.0	1.0	1	1	171.0	1	80	1	1
+update_lsm_t2	checkpoint	public.ml_16856_l0_s0	139	0.0	1.0	0.0	1.0	0	0					
+update_lsm_t2	shutdown	public.ml_16856_l0_s0	139	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	public.ml_16856_l0_s1	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	public.ml_16856_l0_s1	1	1.0	0.0	1.0	0.0	0	0					
+update_lsm_t2	checkpoint	public.ml_16856_l0_s1	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	public.ml_16856_l0_s1	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	public.ml_16856_l1_s0	3	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	public.ml_16856_l1_s0	3	1.0	2.0	1.0	2.0	3	167	12073.0	1	80	167	3
+update_lsm_t2	checkpoint	public.ml_16856_l1_s0	3	0.0	1.0	0.0	1.0	0	0					
+update_lsm_t2	shutdown	public.ml_16856_l1_s0	3	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	public.ml_16856_l1_s1	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	drain	public.ml_16856_l1_s1	1	1.0	0.0	1.0	0.0	0	0					
+update_lsm_t2	checkpoint	public.ml_16856_l1_s1	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	shutdown	public.ml_16856_l1_s1	1	0.0	0.0	0.0	0.0	0	0					
+update_lsm_t2	foreground	public.ml_16856_meta	318	317.0	0.0	317.0	0.0	0	0					
+update_lsm_t2	drain	public.ml_16856_meta	318	0.0	0.0	0.0	0.0	1	8	610.0	1	152	8	1
+update_lsm_t2	checkpoint	public.ml_16856_meta	318	0.0	1.0	0.0	1.0	0	0					
+update_lsm_t2	shutdown	public.ml_16856_meta	318	0.0	0.0	0.0	0.0	0	0					

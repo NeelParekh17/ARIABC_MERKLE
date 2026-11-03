@@ -1,0 +1,1 @@
+{"lookup_am" : "merkle_lsm", "config" : {"levels":3,"top_index_size":4096,"size_ratio":64}, "fillfactor" : ["fillfactor=90"], "shared_buffers" : "32MB", "workers" : "16", "isolation" : "serializable", "fsync" : "on", "synchronous_commit" : "on", "full_page_writes" : "on", "merkle_sync" : "on", "old_marker" : false}

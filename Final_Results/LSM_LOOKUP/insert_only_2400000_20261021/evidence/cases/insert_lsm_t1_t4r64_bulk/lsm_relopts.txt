@@ -1,0 +1,3 @@
+{levels=3,top_index_size=4096,size_ratio=64}
+{"levels":3,"top_index_size":4096,"size_ratio":64}
+reindex_and_checkpoint_s=248.6

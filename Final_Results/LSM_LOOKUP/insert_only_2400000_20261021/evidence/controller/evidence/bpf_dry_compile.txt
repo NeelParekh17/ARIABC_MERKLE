@@ -1,0 +1,824 @@
+
+AST after: parser
+-------------------
+Program
+ BEGIN
+  =
+   map: @phase :: type[none, ctx: 0]
+   int: 0 :: type[none, ctx: 0]
+  call: printf :: type[none, ctx: 0]
+   string: AUDIT_TRACE_READY\n :: type[none, ctx: 0]
+ tracepoint:syscalls:sys_enter_getpgid
+  pred
+   && :: type[none, ctx: 0]
+    && :: type[none, ctx: 0]
+     == :: type[none, ctx: 0]
+      builtin: comm :: type[none, ctx: 0]
+      string: audit_phase :: type[none, ctx: 0]
+     < :: type[none, ctx: 0]
+      .
+       dereference
+        builtin: args :: type[none, ctx: 0]
+       pid
+      int: -1000 :: type[none, ctx: 0]
+    > :: type[none, ctx: 0]
+     .
+      dereference
+       builtin: args :: type[none, ctx: 0]
+      pid
+     int: -1100 :: type[none, ctx: 0]
+  =
+   map: @phase :: type[none, ctx: 0]
+   - :: type[none, ctx: 0]
+    int: -1000 :: type[none, ctx: 0]
+    .
+     dereference
+      builtin: args :: type[none, ctx: 0]
+     pid
+  call: printf :: type[none, ctx: 0]
+   string: PHASE %d\n :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+ kprobe:vfs_read
+ kprobe:vfs_write
+  pred
+   == :: type[none, ctx: 0]
+    builtin: comm :: type[none, ctx: 0]
+    string: postgres :: type[none, ctx: 0]
+  =
+   variable: $f :: type[none, ctx: 0]
+   (struct file *)
+    builtin: arg0 :: type[none, ctx: 0]
+  =
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[none, ctx: 0]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[none, ctx: 0]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[none, ctx: 0]
+  =
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   == :: type[none, ctx: 0]
+    builtin: probe :: type[none, ctx: 0]
+    string: kprobe:vfs_write :: type[none, ctx: 0]
+  =
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+  =
+   map: @names :: type[none, ctx: 0]
+    map: @dev :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+    map: @in :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+   call: str :: type[none, ctx: 0]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[none, ctx: 0]
+         f_path
+        dentry
+      d_name
+     name
+ kretprobe:vfs_read
+ kretprobe:vfs_write
+  pred
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  if
+   > :: type[none, ctx: 0]
+    (int64)
+     builtin: retval :: type[none, ctx: 0]
+    int: 0 :: type[none, ctx: 0]
+   then
+    =
+     variable: $d :: type[none, ctx: 0]
+     map: @dev :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $i :: type[none, ctx: 0]
+     map: @in :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $p :: type[none, ctx: 0]
+     map: @ph :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $o :: type[none, ctx: 0]
+     map: @op :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $s :: type[none, ctx: 0]
+     map: @off :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $n :: type[none, ctx: 0]
+     (unsigned int64)
+      builtin: retval :: type[none, ctx: 0]
+    =
+     map: @ops :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     call: count :: type[none, ctx: 0]
+    =
+     map: @bytes :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     call: sum :: type[none, ctx: 0]
+      variable: $n :: type[none, ctx: 0]
+    if
+     map: @seen :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     then
+      =
+       variable: $prev :: type[none, ctx: 0]
+       map: @last :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+      =
+       variable: $a :: type[none, ctx: 0]
+       ?:
+        > :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+        - :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+        - :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+      =
+       variable: $b :: type[none, ctx: 0]
+       ?:
+        == :: type[none, ctx: 0]
+         variable: $a :: type[none, ctx: 0]
+         int: 0 :: type[none, ctx: 0]
+        int: 0 :: type[none, ctx: 0]
+        ?:
+         == :: type[none, ctx: 0]
+          variable: $s :: type[none, ctx: 0]
+          + :: type[none, ctx: 0]
+           variable: $prev :: type[none, ctx: 0]
+           int: 8192 :: type[none, ctx: 0]
+         int: 1 :: type[none, ctx: 0]
+         ?:
+          == :: type[none, ctx: 0]
+           variable: $prev :: type[none, ctx: 0]
+           + :: type[none, ctx: 0]
+            variable: $s :: type[none, ctx: 0]
+            int: 8192 :: type[none, ctx: 0]
+          int: 2 :: type[none, ctx: 0]
+          ?:
+           < :: type[none, ctx: 0]
+            variable: $a :: type[none, ctx: 0]
+            int: 65536 :: type[none, ctx: 0]
+           int: 3 :: type[none, ctx: 0]
+           ?:
+            < :: type[none, ctx: 0]
+             variable: $a :: type[none, ctx: 0]
+             int: 524288 :: type[none, ctx: 0]
+            int: 4 :: type[none, ctx: 0]
+            ?:
+             < :: type[none, ctx: 0]
+              variable: $a :: type[none, ctx: 0]
+              int: 8388608 :: type[none, ctx: 0]
+             int: 5 :: type[none, ctx: 0]
+             int: 6 :: type[none, ctx: 0]
+      =
+       map: @distance :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+        variable: $b :: type[none, ctx: 0]
+       call: count :: type[none, ctx: 0]
+      if
+       == :: type[none, ctx: 0]
+        variable: $s :: type[none, ctx: 0]
+        map: @end :: type[none, ctx: 0]
+         builtin: pid :: type[none, ctx: 0]
+         variable: $d :: type[none, ctx: 0]
+         variable: $i :: type[none, ctx: 0]
+         variable: $p :: type[none, ctx: 0]
+         variable: $o :: type[none, ctx: 0]
+       then
+        =
+         map: @contiguous :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         call: count :: type[none, ctx: 0]
+        =
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         + :: type[none, ctx: 0]
+          map: @run :: type[none, ctx: 0]
+           builtin: pid :: type[none, ctx: 0]
+           variable: $d :: type[none, ctx: 0]
+           variable: $i :: type[none, ctx: 0]
+           variable: $p :: type[none, ctx: 0]
+           variable: $o :: type[none, ctx: 0]
+          / :: type[none, ctx: 0]
+           + :: type[none, ctx: 0]
+            variable: $n :: type[none, ctx: 0]
+            int: 8191 :: type[none, ctx: 0]
+           int: 8192 :: type[none, ctx: 0]
+       else
+        =
+         variable: $r :: type[none, ctx: 0]
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+        =
+         variable: $b :: type[none, ctx: 0]
+         ?:
+          <= :: type[none, ctx: 0]
+           variable: $r :: type[none, ctx: 0]
+           int: 1 :: type[none, ctx: 0]
+          int: 0 :: type[none, ctx: 0]
+          ?:
+           <= :: type[none, ctx: 0]
+            variable: $r :: type[none, ctx: 0]
+            int: 2 :: type[none, ctx: 0]
+           int: 1 :: type[none, ctx: 0]
+           ?:
+            <= :: type[none, ctx: 0]
+             variable: $r :: type[none, ctx: 0]
+             int: 4 :: type[none, ctx: 0]
+            int: 2 :: type[none, ctx: 0]
+            ?:
+             <= :: type[none, ctx: 0]
+              variable: $r :: type[none, ctx: 0]
+              int: 8 :: type[none, ctx: 0]
+             int: 3 :: type[none, ctx: 0]
+             ?:
+              <= :: type[none, ctx: 0]
+               variable: $r :: type[none, ctx: 0]
+               int: 16 :: type[none, ctx: 0]
+              int: 4 :: type[none, ctx: 0]
+              ?:
+               <= :: type[none, ctx: 0]
+                variable: $r :: type[none, ctx: 0]
+                int: 32 :: type[none, ctx: 0]
+               int: 5 :: type[none, ctx: 0]
+               ?:
+                <= :: type[none, ctx: 0]
+                 variable: $r :: type[none, ctx: 0]
+                 int: 64 :: type[none, ctx: 0]
+                int: 6 :: type[none, ctx: 0]
+                int: 7 :: type[none, ctx: 0]
+        =
+         map: @runs :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+          variable: $b :: type[none, ctx: 0]
+         call: count :: type[none, ctx: 0]
+        =
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         / :: type[none, ctx: 0]
+          + :: type[none, ctx: 0]
+           variable: $n :: type[none, ctx: 0]
+           int: 8191 :: type[none, ctx: 0]
+          int: 8192 :: type[none, ctx: 0]
+     else
+      =
+       map: @run :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+       / :: type[none, ctx: 0]
+        + :: type[none, ctx: 0]
+         variable: $n :: type[none, ctx: 0]
+         int: 8191 :: type[none, ctx: 0]
+        int: 8192 :: type[none, ctx: 0]
+    =
+     map: @seen :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     int: 1 :: type[none, ctx: 0]
+    =
+     map: @last :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     variable: $s :: type[none, ctx: 0]
+    =
+     map: @end :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     + :: type[none, ctx: 0]
+      variable: $s :: type[none, ctx: 0]
+      variable: $n :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+ END
+  call: clear :: type[none, ctx: 0]
+   map: @seen :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @last :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @end :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @in :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @dev :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @off :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @op :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @ph :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+
+
+AST after: ConfigAnalyser
+-------------------
+Program
+ BEGIN
+  =
+   map: @phase :: type[none, ctx: 0]
+   int: 0 :: type[int64, ctx: 0]
+  call: printf :: type[none, ctx: 0]
+   string: AUDIT_TRACE_READY\n :: type[string[19], ctx: 0]
+ tracepoint:syscalls:sys_enter_getpgid
+  pred
+   && :: type[none, ctx: 0]
+    && :: type[none, ctx: 0]
+     == :: type[none, ctx: 0]
+      builtin: comm :: type[none, ctx: 0]
+      string: audit_phase :: type[string[12], ctx: 0]
+     < :: type[none, ctx: 0]
+      .
+       dereference
+        builtin: args :: type[none, ctx: 0]
+       pid
+      int: -1000 :: type[int64, ctx: 0]
+    > :: type[none, ctx: 0]
+     .
+      dereference
+       builtin: args :: type[none, ctx: 0]
+      pid
+     int: -1100 :: type[int64, ctx: 0]
+  =
+   map: @phase :: type[none, ctx: 0]
+   - :: type[none, ctx: 0]
+    int: -1000 :: type[int64, ctx: 0]
+    .
+     dereference
+      builtin: args :: type[none, ctx: 0]
+     pid
+  call: printf :: type[none, ctx: 0]
+   string: PHASE %d\n :: type[string[10], ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+ kprobe:vfs_read
+ kprobe:vfs_write
+  pred
+   == :: type[none, ctx: 0]
+    builtin: comm :: type[none, ctx: 0]
+    string: postgres :: type[string[9], ctx: 0]
+  =
+   variable: $f :: type[none, ctx: 0]
+   (struct file *)
+    builtin: arg0 :: type[none, ctx: 0]
+  =
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       variable: $f :: type[none, ctx: 0]
+      f_inode
+    i_ino
+  =
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   .
+    dereference
+     .
+      dereference
+       .
+        dereference
+         variable: $f :: type[none, ctx: 0]
+        f_inode
+      i_sb
+    s_dev
+  =
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   dereference
+    (unsigned int64 *)
+     builtin: arg3 :: type[none, ctx: 0]
+  =
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   == :: type[none, ctx: 0]
+    builtin: probe :: type[none, ctx: 0]
+    string: kprobe:vfs_write :: type[string[17], ctx: 0]
+  =
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+  =
+   map: @names :: type[none, ctx: 0]
+    map: @dev :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+    map: @in :: type[none, ctx: 0]
+     builtin: tid :: type[none, ctx: 0]
+   call: str :: type[none, ctx: 0]
+    .
+     .
+      dereference
+       .
+        .
+         dereference
+          variable: $f :: type[none, ctx: 0]
+         f_path
+        dentry
+      d_name
+     name
+ kretprobe:vfs_read
+ kretprobe:vfs_write
+  pred
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  if
+   > :: type[none, ctx: 0]
+    (int64)
+     builtin: retval :: type[none, ctx: 0]
+    int: 0 :: type[int64, ctx: 0]
+   then
+    =
+     variable: $d :: type[none, ctx: 0]
+     map: @dev :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $i :: type[none, ctx: 0]
+     map: @in :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $p :: type[none, ctx: 0]
+     map: @ph :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $o :: type[none, ctx: 0]
+     map: @op :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $s :: type[none, ctx: 0]
+     map: @off :: type[none, ctx: 0]
+      builtin: tid :: type[none, ctx: 0]
+    =
+     variable: $n :: type[none, ctx: 0]
+     (unsigned int64)
+      builtin: retval :: type[none, ctx: 0]
+    =
+     map: @ops :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     call: count :: type[none, ctx: 0]
+    =
+     map: @bytes :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     call: sum :: type[none, ctx: 0]
+      variable: $n :: type[none, ctx: 0]
+    if
+     map: @seen :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     then
+      =
+       variable: $prev :: type[none, ctx: 0]
+       map: @last :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+      =
+       variable: $a :: type[none, ctx: 0]
+       ?:
+        > :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+        - :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+        - :: type[none, ctx: 0]
+         variable: $prev :: type[none, ctx: 0]
+         variable: $s :: type[none, ctx: 0]
+      =
+       variable: $b :: type[none, ctx: 0]
+       ?:
+        == :: type[none, ctx: 0]
+         variable: $a :: type[none, ctx: 0]
+         int: 0 :: type[int64, ctx: 0]
+        int: 0 :: type[int64, ctx: 0]
+        ?:
+         == :: type[none, ctx: 0]
+          variable: $s :: type[none, ctx: 0]
+          + :: type[none, ctx: 0]
+           variable: $prev :: type[none, ctx: 0]
+           int: 8192 :: type[int64, ctx: 0]
+         int: 1 :: type[int64, ctx: 0]
+         ?:
+          == :: type[none, ctx: 0]
+           variable: $prev :: type[none, ctx: 0]
+           + :: type[none, ctx: 0]
+            variable: $s :: type[none, ctx: 0]
+            int: 8192 :: type[int64, ctx: 0]
+          int: 2 :: type[int64, ctx: 0]
+          ?:
+           < :: type[none, ctx: 0]
+            variable: $a :: type[none, ctx: 0]
+            int: 65536 :: type[int64, ctx: 0]
+           int: 3 :: type[int64, ctx: 0]
+           ?:
+            < :: type[none, ctx: 0]
+             variable: $a :: type[none, ctx: 0]
+             int: 524288 :: type[int64, ctx: 0]
+            int: 4 :: type[int64, ctx: 0]
+            ?:
+             < :: type[none, ctx: 0]
+              variable: $a :: type[none, ctx: 0]
+              int: 8388608 :: type[int64, ctx: 0]
+             int: 5 :: type[int64, ctx: 0]
+             int: 6 :: type[int64, ctx: 0]
+      =
+       map: @distance :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+        variable: $b :: type[none, ctx: 0]
+       call: count :: type[none, ctx: 0]
+      if
+       == :: type[none, ctx: 0]
+        variable: $s :: type[none, ctx: 0]
+        map: @end :: type[none, ctx: 0]
+         builtin: pid :: type[none, ctx: 0]
+         variable: $d :: type[none, ctx: 0]
+         variable: $i :: type[none, ctx: 0]
+         variable: $p :: type[none, ctx: 0]
+         variable: $o :: type[none, ctx: 0]
+       then
+        =
+         map: @contiguous :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         call: count :: type[none, ctx: 0]
+        =
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         + :: type[none, ctx: 0]
+          map: @run :: type[none, ctx: 0]
+           builtin: pid :: type[none, ctx: 0]
+           variable: $d :: type[none, ctx: 0]
+           variable: $i :: type[none, ctx: 0]
+           variable: $p :: type[none, ctx: 0]
+           variable: $o :: type[none, ctx: 0]
+          / :: type[none, ctx: 0]
+           + :: type[none, ctx: 0]
+            variable: $n :: type[none, ctx: 0]
+            int: 8191 :: type[int64, ctx: 0]
+           int: 8192 :: type[int64, ctx: 0]
+       else
+        =
+         variable: $r :: type[none, ctx: 0]
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+        =
+         variable: $b :: type[none, ctx: 0]
+         ?:
+          <= :: type[none, ctx: 0]
+           variable: $r :: type[none, ctx: 0]
+           int: 1 :: type[int64, ctx: 0]
+          int: 0 :: type[int64, ctx: 0]
+          ?:
+           <= :: type[none, ctx: 0]
+            variable: $r :: type[none, ctx: 0]
+            int: 2 :: type[int64, ctx: 0]
+           int: 1 :: type[int64, ctx: 0]
+           ?:
+            <= :: type[none, ctx: 0]
+             variable: $r :: type[none, ctx: 0]
+             int: 4 :: type[int64, ctx: 0]
+            int: 2 :: type[int64, ctx: 0]
+            ?:
+             <= :: type[none, ctx: 0]
+              variable: $r :: type[none, ctx: 0]
+              int: 8 :: type[int64, ctx: 0]
+             int: 3 :: type[int64, ctx: 0]
+             ?:
+              <= :: type[none, ctx: 0]
+               variable: $r :: type[none, ctx: 0]
+               int: 16 :: type[int64, ctx: 0]
+              int: 4 :: type[int64, ctx: 0]
+              ?:
+               <= :: type[none, ctx: 0]
+                variable: $r :: type[none, ctx: 0]
+                int: 32 :: type[int64, ctx: 0]
+               int: 5 :: type[int64, ctx: 0]
+               ?:
+                <= :: type[none, ctx: 0]
+                 variable: $r :: type[none, ctx: 0]
+                 int: 64 :: type[int64, ctx: 0]
+                int: 6 :: type[int64, ctx: 0]
+                int: 7 :: type[int64, ctx: 0]
+        =
+         map: @runs :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+          variable: $b :: type[none, ctx: 0]
+         call: count :: type[none, ctx: 0]
+        =
+         map: @run :: type[none, ctx: 0]
+          builtin: pid :: type[none, ctx: 0]
+          variable: $d :: type[none, ctx: 0]
+          variable: $i :: type[none, ctx: 0]
+          variable: $p :: type[none, ctx: 0]
+          variable: $o :: type[none, ctx: 0]
+         / :: type[none, ctx: 0]
+          + :: type[none, ctx: 0]
+           variable: $n :: type[none, ctx: 0]
+           int: 8191 :: type[int64, ctx: 0]
+          int: 8192 :: type[int64, ctx: 0]
+     else
+      =
+       map: @run :: type[none, ctx: 0]
+        builtin: pid :: type[none, ctx: 0]
+        variable: $d :: type[none, ctx: 0]
+        variable: $i :: type[none, ctx: 0]
+        variable: $p :: type[none, ctx: 0]
+        variable: $o :: type[none, ctx: 0]
+       / :: type[none, ctx: 0]
+        + :: type[none, ctx: 0]
+         variable: $n :: type[none, ctx: 0]
+         int: 8191 :: type[int64, ctx: 0]
+        int: 8192 :: type[int64, ctx: 0]
+    =
+     map: @seen :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     int: 1 :: type[int64, ctx: 0]
+    =
+     map: @last :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     variable: $s :: type[none, ctx: 0]
+    =
+     map: @end :: type[none, ctx: 0]
+      builtin: pid :: type[none, ctx: 0]
+      variable: $d :: type[none, ctx: 0]
+      variable: $i :: type[none, ctx: 0]
+      variable: $p :: type[none, ctx: 0]
+      variable: $o :: type[none, ctx: 0]
+     + :: type[none, ctx: 0]
+      variable: $s :: type[none, ctx: 0]
+      variable: $n :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @in :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @dev :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @off :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @op :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+  call: delete :: type[none, ctx: 0]
+   map: @ph :: type[none, ctx: 0]
+    builtin: tid :: type[none, ctx: 0]
+ END
+  call: clear :: type[none, ctx: 0]
+   map: @seen :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @last :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @end :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @in :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @dev :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @off :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @op :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @ph :: type[none, ctx: 0]
+  call: clear :: type[none, ctx: 0]
+   map: @phase :: type[none, ctx: 0]
+

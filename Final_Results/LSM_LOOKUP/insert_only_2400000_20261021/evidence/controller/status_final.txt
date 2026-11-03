@@ -1,0 +1,287 @@
+2026-10-21T01:37:09.140440+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T01:45:55.857371+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T01:52:41.080402+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T01:57:55.175809+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T02:07:09.393636+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T02:08:38.371861+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T02:18:34.688480+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T02:22:16.571079+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T02:32:16.594210+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T02:42:16.619239+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T02:52:16.643677+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T03:02:16.666231+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T03:12:16.688527+00:00 WAIT_FOR_MATRIX 2026-10-21T00:15:59Z CAMPAIGN_START f_plain txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T03:22:16.710725+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T03:25:59.931642+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T03:35:59.955753+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T03:45:59.978760+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T03:56:00.001942+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T04:06:00.024249+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T04:16:00.047444+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T04:26:00.070250+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T04:36:00.094675+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T04:46:00.118815+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T04:54:56.246417+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T05:04:56.269157+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T05:14:56.291592+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T05:15:00.420318+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T05:25:00.445031+00:00 WAIT_FOR_MATRIX 2026-10-21T03:21:14Z CAMPAIGN_START f_lsm txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T05:35:00.467368+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T05:45:00.489588+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T05:55:00.512640+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T06:05:00.534890+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T06:15:00.557560+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T06:25:00.581116+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T06:35:00.604069+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T06:45:00.626346+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T06:55:00.648710+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T07:05:00.671710+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T07:15:00.695104+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T07:25:00.718165+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T07:35:00.740382+00:00 WAIT_FOR_MATRIX 2026-10-21T05:28:31Z CAMPAIGN_START f_btree txs=2400000 combos=f:0,f:0.5,f:0.99,f:1.2
+2026-10-21T07:45:01.008536+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T07:45:07.059695+00:00 AUDIT_FAILED Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 537, in <module>
+    try:main()
+        ^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 523, in main
+    prepare(h,args)
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 255, in prepare
+    data=h.run_remote(DBHOST,'neel',command).stdout
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 127, in run_remote
+    raise RuntimeError(f'Detached job failed: {job} rc={status}\n{stdout}\n{stderr}')
+RuntimeError: Detached job failed: /home/neel/claude_checks/lsm_relation_audit_20261021/jobs/759fcdbf4d3d4baab21f3bac6bd1b059 rc=1
+
+No symbol table is loaded.  Use the "file" command.
+No symbol table is loaded.  Use the "file" command.
+No symbol table is loaded.  Use the "file" command.
+No symbol table is loaded.  Use the "file" command.
+No symbol table is loaded.  Use the "file" command.
+No symbol table is loaded.  Use the "file" command.
+No symbol table is loaded.  Use the "file" command.
+No symbol table is loaded.  Use the "file" command.
+No symbol table is loaded.  Use the "file" command.
+
+
+2026-10-21T08:03:13+00:00 CLAUDE_TAKEOVER: gdb offsets replaced by headers+nm; smoke start
+2026-10-21T08:03:13.920097+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T08:05:50+00:00 CLAUDE: smoke v2 with wal_keep_size=40GB
+2026-10-21T08:05:50.426880+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T08:21:18.591756+00:00 CASE_START insert_lsm_t1_smoke
+2026-10-21T08:38:34.559405+00:00 AUDIT_FAILED Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 566, in <module>
+    try:main()
+        ^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 554, in main
+    case_run(h,args,workload,kind,int(trial),workloads,diagnostic=diag=='1')
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 433, in case_run
+    h.sql(args,"ALTER SYSTEM SET wal_keep_size='40GB';")
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 134, in sql
+    return base_sql(args,statement,timeout=60 if timeout==600 else timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/ycsb_matrix_20261020/src/scripts/distributed/run_oom_100m_benchmark.py", line 188, in sql
+    return run_remote(args.remote_host, args.remote_user, command, timeout=timeout).stdout.strip()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 129, in run_remote
+    return base_remote(host,user,cmd,**kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/ycsb_matrix_20261020/src/scripts/distributed/run_oom_100m_benchmark.py", line 138, in run_remote
+    raise RuntimeError(f"Remote command failed on {host} ({res.returncode}):\n{res.stdout}\n{res.stderr}")
+RuntimeError: Remote command failed on 10.129.148.247 (1):
+
+ERROR:  unrecognized configuration parameter "wal_keep_size"
+
+
+2026-10-21T08:39:19+00:00 CLAUDE: smoke v3 with wal_keep_segments=2560
+2026-10-21T08:39:19.500766+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T09:44:35.296507+00:00 AUDIT_FAILED Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 566, in <module>
+    try:main()
+        ^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 545, in main
+    prepare(h,args)
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 331, in prepare
+    args._probe_thresholds=h.calibrate_device(args,ROOT/'evidence')
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/ycsb_matrix_20261020/src/scripts/distributed/run_oom_100m_benchmark.py", line 811, in calibrate_device
+    raise RuntimeError("Device never became write-idle during calibration")
+RuntimeError: Device never became write-idle during calibration
+
+2026-10-21T09:46:46+00:00 CLAUDE: smoke v4 (v3 calibration never idle)
+2026-10-21T09:46:47.146188+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T10:52:01.659134+00:00 AUDIT_FAILED Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 566, in <module>
+    try:main()
+        ^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 545, in main
+    prepare(h,args)
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 331, in prepare
+    args._probe_thresholds=h.calibrate_device(args,ROOT/'evidence')
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/ycsb_matrix_20261020/src/scripts/distributed/run_oom_100m_benchmark.py", line 811, in calibrate_device
+    raise RuntimeError("Device never became write-idle during calibration")
+RuntimeError: Device never became write-idle during calibration
+
+2026-10-21T10:55:45+00:00 CLAUDE: smoke v5 reusing calibration 40a481a9
+2026-10-21T10:55:46.214458+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T10:56:01.235776+00:00 CASE_START insert_lsm_t1_smoke
+2026-10-21T11:07:47.326690+00:00 CASE_PASS insert_lsm_t1_smoke TPS=10048.74 total_TPS=3880.97
+2026-10-21T11:07:51.063850+00:00 CASE_START update_plain_t1_smoke
+2026-10-21T11:23:51.624541+00:00 CASE_PASS update_plain_t1_smoke TPS=6554.15 total_TPS=6427.33
+2026-10-21T11:23:53.026332+00:00 AUDIT_SMOKE_COMPLETE
+2026-10-21T11:23:55+00:00 CLAUDE: full run launched by chain_full.sh
+2026-10-21T11:23:55.866774+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T11:28:04.282794+00:00 CASE_START insert_plain_t1
+2026-10-21T11:42:43.236285+00:00 CASE_PASS insert_plain_t1 TPS=8640.86 total_TPS=8639.08
+2026-10-21T11:42:46.935016+00:00 CASE_START insert_btree_t1
+2026-10-21T12:09:53.311988+00:00 AUDIT_FAILED Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 575, in <module>
+    try:main()
+        ^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 568, in main
+    case_run(h,args,workload,kind,trial,workloads,diagnostic=(trial==2 and workload=='update'))
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 532, in case_run
+    subprocess.run(['python3',str(ROOT/'scripts/summarize.py'),'--case',case],check=True)
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['python3', '/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/summarize.py', '--case', 'insert_btree_t1']' returned non-zero exit status 1.
+
+2026-10-21T13:18:23+00:00 CLAUDE: full run v2 (rename check relaxed to >10 events)
+2026-10-21T13:18:24.268601+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T13:18:38.767379+00:00 SKIP_ALREADY_COMPLETE insert_plain_t1
+2026-10-21T13:18:41.305106+00:00 CASE_START insert_btree_t1
+2026-10-21T13:52:17.642359+00:00 AUDIT_FAILED Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 575, in <module>
+    try:main()
+        ^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 568, in main
+    case_run(h,args,workload,kind,trial,workloads,diagnostic=(trial==2 and workload=='update'))
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 437, in case_run
+    setup=h.reset_remote_pgdata(args,mode,16)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/ycsb_matrix_20261020/src/scripts/distributed/run_oom_100m_benchmark.py", line 1062, in reset_remote_pgdata
+    settle = wait_for_device_settle(args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/ycsb_matrix_20261020/src/scripts/distributed/run_oom_100m_benchmark.py", line 841, in wait_for_device_settle
+    raise RuntimeError(f"SSD did not return to idle read latency within {args.settle_max_s}s: {last}")
+RuntimeError: SSD did not return to idle read latency within 1800s: {'t': 168172.564, 'qd1': {'median_us': 148.788, 'p99_us': 231.203, 'mean_us': 142.327144}, 'qd8': {'median_us': 248.8855, 'p99_us': 776.863, 'mean_us': 297.1753535}, 'wr': {'median_us': 391.16650000000004, 'p99_us': 714.526, 'mean_us': 418.31675}, 'write_mib': 7.027, 'elapsed_s': 1800.1}
+
+2026-10-21T13:55:41+00:00 CLAUDE: full run v3 (detached-job poll backs off to 30s)
+2026-10-21T13:55:41.625373+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-21T13:55:55.705750+00:00 SKIP_ALREADY_COMPLETE insert_plain_t1
+2026-10-21T13:55:58.243822+00:00 CASE_START insert_btree_t1
+2026-10-21T14:23:28.011557+00:00 CASE_PASS insert_btree_t1 TPS=3405.14 total_TPS=3404.13
+2026-10-21T14:23:31.705492+00:00 CASE_START insert_lsm_t1
+2026-10-21T14:51:54.560702+00:00 CASE_PASS insert_lsm_t1 TPS=3963.11 total_TPS=3874.00
+2026-10-21T14:51:58.377701+00:00 CASE_START update_plain_t1
+2026-10-21T15:16:13.882218+00:00 CASE_PASS update_plain_t1 TPS=3541.07 total_TPS=3482.97
+2026-10-21T15:16:17.592560+00:00 CASE_START update_btree_t1
+2026-10-21T15:46:49.347422+00:00 CASE_PASS update_btree_t1 TPS=3085.05 total_TPS=3081.23
+2026-10-21T15:46:53.093652+00:00 CASE_START update_lsm_t1
+2026-10-21T16:28:41.737994+00:00 CASE_PASS update_lsm_t1 TPS=2816.55 total_TPS=2807.76
+2026-10-21T16:28:45.470863+00:00 CASE_START insert_lsm_t2
+2026-10-21T17:04:01.096952+00:00 CASE_PASS insert_lsm_t2 TPS=3524.06 total_TPS=3301.73
+2026-10-21T17:04:04.842186+00:00 CASE_START insert_btree_t2
+2026-10-21T17:33:20.643417+00:00 CASE_PASS insert_btree_t2 TPS=3026.65 total_TPS=2978.45
+2026-10-21T17:33:24.368211+00:00 CASE_START insert_plain_t2
+2026-10-21T17:57:31.532135+00:00 CASE_PASS insert_plain_t2 TPS=8222.87 total_TPS=8172.40
+2026-10-21T17:57:35.250018+00:00 CASE_START update_lsm_t2
+2026-10-21T18:35:56.302249+00:00 CASE_PASS update_lsm_t2 TPS=2772.79 total_TPS=2745.82
+2026-10-21T18:36:00.007232+00:00 CASE_START update_btree_t2
+2026-10-21T19:21:12.189372+00:00 CASE_PASS update_btree_t2 TPS=2736.14 total_TPS=2735.99
+2026-10-21T19:21:15.876287+00:00 CASE_START update_plain_t2
+2026-10-21T19:46:28.741296+00:00 CASE_PASS update_plain_t2 TPS=3086.31 total_TPS=2983.76
+2026-10-21T19:46:31.318749+00:00 AUDIT_COMPLETE
+2026-10-22T00:49:44Z t4r64 run start
+2026-10-22T00:49:45.210555+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-22T00:50:01.809992+00:00 CASE_START insert_lsm_t1_t4r64
+2026-10-22T01:25:57.143729+00:00 CASE_PASS insert_lsm_t1_t4r64 TPS=5209.02 total_TPS=4076.93
+2026-10-22T01:25:58.529076+00:00 AUDIT_SMOKE_COMPLETE
+2026-10-22T01:34:03Z nolookup run start
+2026-10-22T01:34:03.608506+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-22T01:34:20.461965+00:00 CASE_START insert_btree_t1_nolookup
+2026-10-22T01:56:24.164127+00:00 CASE_PASS insert_btree_t1_nolookup TPS=6380.45 total_TPS=6358.29
+2026-10-22T01:56:25.550808+00:00 AUDIT_SMOKE_COMPLETE
+2026-10-22T02:40:45Z bulk chain start
+2026-10-22T02:44:46Z bulk validation PASS
+2026-10-22T02:44:46.878392+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-22T02:45:03.666674+00:00 CASE_START insert_lsm_t1_t4r64_bulk
+2026-10-22T03:18:43.095998+00:00 AUDIT_FAILED Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 606, in <module>
+    try:main()
+        ^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 594, in main
+    case_run(h,args,workload,kind,int(trial),workloads,diagnostic=diag=='1')
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 549, in case_run
+    if kind!='plain':obs(h,'probes',case,timeout=7200)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 355, in obs
+    return h.run_remote(DBHOST,'neel',f"TMPDIR={DBROOT}/scratch python3 {DBROOT}/scripts/observer.py {action} --port {PORT} --case {case} {extra}",timeout=timeout).stdout
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 131, in run_remote
+    raise RuntimeError(f'Detached job failed: {job} rc={status}\n{stdout}\n{stderr}')
+RuntimeError: Detached job failed: /home/neel/claude_checks/lsm_relation_audit_20261021/jobs/ef58fca785154b6d9ce299408a981d06 rc=1
+
+Traceback (most recent call last):
+  File "/home/neel/claude_checks/lsm_relation_audit_20261021/scripts/observer.py", line 239, in <module>
+    if __name__=='__main__': main()
+                             ^^^^^^
+  File "/home/neel/claude_checks/lsm_relation_audit_20261021/scripts/observer.py", line 233, in main
+    elif args.action=='probes': probes(args)
+                                ^^^^^^^^^^^^
+  File "/home/neel/claude_checks/lsm_relation_audit_20261021/scripts/observer.py", line 129, in probes
+    if time.monotonic()>deadline:raise RuntimeError('Diagnostic L0->L1 merge did not finish')
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Diagnostic L0->L1 merge did not finish
+
+
+2026-10-22T03:18:43Z bulk chain end rc=1
+2026-10-22T03:44:43Z l4 bulk run start
+2026-10-22T03:44:44.067095+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-22T03:45:00.702911+00:00 CASE_START insert_lsm_t1_l4_bulk
+2026-10-22T04:22:16.555165+00:00 CASE_PASS insert_lsm_t1_l4_bulk TPS=4918.81 total_TPS=3900.60
+2026-10-22T04:22:17.947180+00:00 AUDIT_SMOKE_COMPLETE
+2026-10-22T04:22:17Z l4 bulk run end rc=0
+2026-10-22T04:36:12Z prof chain start
+2026-10-22T04:36:12.768022+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-22T04:36:29.797231+00:00 CASE_START insert_lsm_t1_t4r64_prof
+2026-10-22T04:42:47.054359+00:00 AUDIT_FAILED Traceback (most recent call last):
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 628, in <module>
+    try:main()
+        ^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 616, in main
+    case_run(h,args,workload,kind,int(trial),workloads,diagnostic=diag=='1')
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 454, in case_run
+    (h.sql(args,'SHOW merkle_lsm.bulk_merge;') if kind=='lsm' else '')+'\n')
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 138, in sql
+    return base_sql(args,statement,timeout=60 if timeout==600 else timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/ycsb_matrix_20261020/src/scripts/distributed/run_oom_100m_benchmark.py", line 188, in sql
+    return run_remote(args.remote_host, args.remote_user, command, timeout=timeout).stdout.strip()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/lsm_relation_audit_20261021/scripts/audit.py", line 133, in run_remote
+    return base_remote(host,user,cmd,**kw)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/neel/claude_ctl/ycsb_matrix_20261020/src/scripts/distributed/run_oom_100m_benchmark.py", line 138, in run_remote
+    raise RuntimeError(f"Remote command failed on {host} ({res.returncode}):\n{res.stdout}\n{res.stderr}")
+RuntimeError: Remote command failed on 10.129.148.247 (1):
+
+ERROR:  unrecognized configuration parameter "merkle_lsm.bulk_merge"
+
+
+2026-10-22T04:42:47Z prof lsm rc=1
+2026-10-22T04:42:48.243450+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-22T04:43:05.295801+00:00 CASE_START insert_btree_t1_nolookup_prof
+2026-10-22T05:03:13.065358+00:00 CASE_PASS insert_btree_t1_nolookup_prof TPS=6208.19 total_TPS=6159.89
+2026-10-22T05:03:14.450106+00:00 AUDIT_SMOKE_COMPLETE
+2026-10-22T05:03:14Z prof nolookup rc=0
+2026-10-22T05:03:15Z prof chain end
+2026-10-22T05:03:29Z prof2 start
+2026-10-22T05:03:30.271820+00:00 GATE_OPEN: f_btree ended; run_matrix exited; no postgres on DB host
+2026-10-22T05:03:47.551370+00:00 CASE_START insert_lsm_t1_t4r64_prof
+2026-10-22T05:36:20.731369+00:00 CASE_PASS insert_lsm_t1_t4r64_prof TPS=4868.75 total_TPS=3710.39
+2026-10-22T05:36:22.108182+00:00 AUDIT_SMOKE_COMPLETE
+2026-10-22T05:36:22Z prof lsm rc=0
+2026-10-22T05:36:23Z prof2 end
