@@ -6,6 +6,7 @@
 #include "result_envelope.hxx"
 #include "tx_request_sig.hxx"
 #include "gateway_recovery_manager.hxx"
+#include "request_retry_filter.hxx"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -33,6 +34,7 @@
 #include <mutex>
 #include <deque>
 #include <functional>
+#include <random>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -191,6 +193,10 @@ struct gateway_options {
     // benchmark workload keeps the default single-node wait; correctness
     // markers can raise this to all nodes as a catch-up barrier.
     int direct_completion_quorum = 1;
+    // Leader failover for the deterministic event pipeline (see det_failover).
+    int failover = 1;
+    int failover_timeout_ms = 300000;  // give up after this long without a completed request
+    int failover_stall_ms = 10000;     // probe the leader after this long without one
 
     // Number of parallel TCP connections to open per logical node. >1 gives
     // the gateway multiple concurrent write paths into a single server and
@@ -225,7 +231,7 @@ void usage(const char* argv0) {
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] [--progressIntervalMs <ms>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
-        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--detClientMode event|threadpool] [--detClientWorkers <n>] [--detClientInflight <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--txLatencyCsv <path>] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>] \\\n"
+        << "    [--pollIntervalUs <us>] [--pollCount <n>] [--waitMajority 0|1] [--completionPath direct|kafka_majority] [--validationMode async_hash|strict_majority|majority_async_all3] [--detWindow <n>] [--detBatchSize <n>] [--dbConnPoolSize <n>] [--submitLimit <n>] [--submitMode blocking|event] [--detSubmitPipeline 0|1] [--detPipelineDepth <n>] [--detClientMode event|threadpool] [--detClientWorkers <n>] [--detClientInflight <n>] [--nondetWindow <n>] [--totalNodes <n>] [--voteStoreMax <n>] [--broadcastToAll 0|1] [--broadcastAcceptQuorum <n>] [--broadcastResultQuorum <n>] [--broadcastDrainInTimedRun 0|1] [--directCompletionQuorum <n>] [--failover 0|1] [--failoverTimeoutMs <ms>] [--failoverStallMs <ms>] [--connFanout <N>] [--selfTestEarlyReadyRace 0|1] [--txLatencyCsv <path>] [--raft-epoch-hex <hex>] [--raft-apply-ledger <mode>] \\\n"
         << "    [--recoveryMode off|active|passive|both] [--recoveryIntervalMs <ms>] [--recoveryDbPort <port>] [--recoveryDbUser <user>] [--recoveryDbName <name>] [--recoveryDbPassword <pass>] [--recoveryTable <auto|table>] [--recoveryNodes <nodes_csv>] [--recoveryHookScript <path>] [--recoveryCompareScript <path>]\n";
 }
 
@@ -360,6 +366,12 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.total_nodes = std::stoi(need("--totalNodes"));
             } else if (a == "--voteStoreMax") {
                 opt.vote_store_max_entries = static_cast<size_t>(std::stoull(need("--voteStoreMax")));
+            } else if (a == "--failover") {
+                opt.failover = std::stoi(need("--failover"));
+            } else if (a == "--failoverTimeoutMs") {
+                opt.failover_timeout_ms = std::max(1000, std::stoi(need("--failoverTimeoutMs")));
+            } else if (a == "--failoverStallMs") {
+                opt.failover_stall_ms = std::max(100, std::stoi(need("--failoverStallMs")));
             } else if (a == "--broadcastToAll") {
                 opt.broadcast_to_all = std::stoi(need("--broadcastToAll"));
             } else if (a == "--broadcastAcceptQuorum") {
@@ -2612,7 +2624,8 @@ public:
         int poll_interval_us,
         int poll_count,
         std::vector<terminal_majority_item>& out_batch,
-        size_t max_batch = 64)
+        size_t max_batch = 64,
+        bool quiet_timeout = false)
     {
         out_batch.clear();
         std::unique_lock<std::mutex> lk(mu_);
@@ -2645,6 +2658,7 @@ public:
             record_wait_sleep_locked(static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(wait_t1 - wait_t0).count()));
             if (st == std::cv_status::timeout && !terminal()) {
+                if (quiet_timeout) return false;
                 std::cerr << "vote_store timeout inflight="
                           << describe_inflight_locked(inflight)
                           << std::endl;
@@ -5339,6 +5353,9 @@ int main(int argc, char** argv) {
     std::atomic<bool>     async_audit_alive(false);
     std::atomic<uint64_t> async_audit_idle_waits(0);
     std::thread async_audit_thread;
+    std::atomic<uint64_t> gateway_failovers(0);
+    std::atomic<uint64_t> gateway_failover_resubmitted(0);
+    std::atomic<uint64_t> replica_absent_marks(0);
 
     ariabc_pg::tx_request_signer tx_signer;
     const bool tx_sign_enable = (opt.tx_sign != "0" && opt.tx_sign != "off" && opt.tx_sign != "none" &&
@@ -5671,9 +5688,28 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> det_total_outstanding_max(0);
     std::atomic<uint64_t> det_lane_outstanding_max(0);
 
+    // Failover resubmits requests whose outcome is unknown, which is safe only
+    // because replicas drop retried ids (request_retry_filter).  The session makes
+    // ids unique to this process, so a later run's numbers are not taken for retries.
+    const bool det_failover_on =
+        opt.failover == 1 && opt.db_type == 1 && opt.det_raw_sql != 1 &&
+        !opt.broadcast_to_all && !socket_mode && submit_mode == "event" &&
+        opt.det_submit_pipeline == 1 && opt.det_client_mode != "threadpool" &&
+        static_cast<uint64_t>(std::max(0, opt.det_window)) < ariabc_pg::request_retry_filter::kMaxOutstanding;
+    std::string req_id_client = opt.client_id;
+    if (det_failover_on) {
+        std::random_device rd;
+        std::ostringstream session;
+        session << std::hex << rd() << rd();
+        req_id_client += "~" + session.str();
+    }
+    std::cout << "gateway_failover=" << (det_failover_on ? 1 : 0)
+              << " timeout_ms=" << opt.failover_timeout_ms
+              << " stall_ms=" << opt.failover_stall_ms << std::endl;
+
     auto req_id_for_idx = [&](size_t idx) -> std::string {
         const uint64_t id_num = opt.req_id_offset + static_cast<uint64_t>(idx);
-        return opt.client_id + "-" + std::to_string(id_num);
+        return req_id_client + "-" + std::to_string(id_num);
     };
 
     auto req_num_for_idx = [&](size_t idx) -> uint64_t {
@@ -5908,6 +5944,9 @@ int main(int argc, char** argv) {
         direct_terminal_success_ids.insert(id);
     };
 
+    // Set when a completion wait failed because the replica or its result went
+    // missing rather than because the transaction failed; failover then retries.
+    std::atomic<bool> direct_wait_retryable(false);
     auto wait_direct_completion = [&](size_t node_idx,
                                       const ariabc_pg::client_api_response& submit_resp,
                                       const std::string& req_label) -> bool {
@@ -5968,6 +6007,10 @@ int main(int argc, char** argv) {
             std::cerr << "direct completion wait failed for " << req_label
                       << " wait_cmd=" << wait_cmd
                       << " err=" << cerr << std::endl;
+            if (det_failover_on) {
+                direct_wait_retryable.store(true);
+                return false;
+            }
             permanent_failures.fetch_add(1);
             return false;
         }
@@ -5975,6 +6018,12 @@ int main(int argc, char** argv) {
             std::cerr << "direct completion wait rejected for " << req_label
                       << " wait_cmd=" << wait_cmd
                       << " msg=" << wait_resp.msg << std::endl;
+            if (det_failover_on &&
+                (wait_resp.msg.find("reason=timeout") != std::string::npos ||
+                 wait_resp.msg.find("_TIMEOUT") != std::string::npos)) {
+                direct_wait_retryable.store(true);
+                return false;
+            }
             permanent_failures.fetch_add(1);
             return false;
         }
@@ -6225,7 +6274,7 @@ int main(int argc, char** argv) {
             consumer.set_busy_hint(true);
         }
 
-        auto warm_leader_route = [&]() -> bool {
+        auto warm_leader_route = [&](int wait_s) -> bool {
             if ((opt.db_type != 1 && opt.db_type != 0) || opt.det_raw_sql == 1) return true;
             // Broadcast (bypass-Raft) mode sends every request to every replica;
             // there is no leader, and each bypass server answers IS_LEADER=1.
@@ -6243,8 +6292,9 @@ int main(int argc, char** argv) {
                     ariabc_pg::client_api_response resp;
                     std::string ctrl_err;
 
+                    // A paused replica must not hold up the search for the leader.
                     if (!ariabc_pg::send_control_req_to_node(
-                            nodes[i], "__ARIABC_CTRL_IS_LEADER", resp, ctrl_err)) {
+                            nodes[i], "__ARIABC_CTRL_IS_LEADER", resp, ctrl_err, false, 3000)) {
                         continue;
                     }
 
@@ -6273,13 +6323,13 @@ int main(int argc, char** argv) {
 
                 const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now() - start_time).count();
-                if (elapsed >= 30) break;
+                if (elapsed >= wait_s) break;
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
 
             std::cerr << "leader warmup failed: no single elected leader reported "
-                         "by control plane within 30 seconds"
+                         "by control plane within " << wait_s << " seconds"
                       << std::endl;
             return false;
         };
@@ -6294,12 +6344,12 @@ int main(int argc, char** argv) {
         // that sequencer: request idx is assigned to lane idx % numTerminals,
         // and each lane may have at most detPipelineDepth requests outstanding.
         if (opt.db_type == 1 || opt.db_type == 0) {
-            if (!warm_leader_route()) {
-                permanent_failures.fetch_add(1);
-                if (majority_wait_enabled && kafka_enabled) {
-                    consumer.set_busy_hint(false);
-                }
-                return 1;
+            if (!warm_leader_route(det_failover_on ? opt.failover_timeout_ms / 1000 : 30)) {
+                // Consumer and dispatch threads are running: unwinding here hung
+                // the process, and there is nothing to report yet.
+                std::cout.flush();
+                std::cerr.flush();
+                std::_Exit(1);
             }
             const size_t window = effective_det_window();
             const size_t det_terminal_count =
@@ -6520,6 +6570,30 @@ int main(int argc, char** argv) {
                 return true;
             };
 
+            auto assemble_det_request = [&](const std::vector<det_shaped_request>& out_items,
+                                            ariabc_pg::client_api_request& out_req) {
+                if (out_items.size() == 1) {
+                    out_req.req_id = out_items.front().req_id;
+                    out_req.sql = out_items.front().sql;
+                    out_req.has_tx_tag = out_items.front().has_tx_tag;
+                    std::memcpy(out_req.tx_tag, out_items.front().tx_tag, ariabc_pg::kTxTagBytes);
+                    return;
+                }
+                out_req.req_id = out_items.front().req_id;
+                out_req.sql = "__ARIABC_BATCH items=" + std::to_string(out_items.size()) +
+                              " first=" + out_items.front().req_id +
+                              " last=" + out_items.back().req_id;
+                out_req.batch_items.reserve(out_items.size());
+                for (size_t i = 0; i < out_items.size(); ++i) {
+                    ariabc_pg::client_api_request_item item;
+                    item.req_id = out_items[i].req_id;
+                    item.sql = out_items[i].sql;
+                    item.has_tx_tag = out_items[i].has_tx_tag;
+                    std::memcpy(item.tx_tag, out_items[i].tx_tag, ariabc_pg::kTxTagBytes);
+                    out_req.batch_items.push_back(std::move(item));
+                }
+            };
+
             auto build_det_request_batch = [&](size_t start_idx,
                                                size_t max_items,
                                                ariabc_pg::client_api_request& out_req,
@@ -6560,29 +6634,10 @@ int main(int argc, char** argv) {
                         it.has_tx_tag = compute_tx_tag(it.req_id, it.sql, it.tx_tag);
                     }, 8);
                 }
-                if (out_items.size() == 1) {
-                    out_req.req_id = out_items.front().req_id;
-                    out_req.sql = out_items.front().sql;
-                    out_req.has_tx_tag = out_items.front().has_tx_tag;
-                    std::memcpy(out_req.tx_tag, out_items.front().tx_tag, ariabc_pg::kTxTagBytes);
-                    return true;
-                }
-
-                out_req.req_id = out_items.front().req_id;
-                out_req.sql = "__ARIABC_BATCH items=" + std::to_string(out_items.size()) +
-                              " first=" + out_items.front().req_id +
-                              " last=" + out_items.back().req_id;
-                out_req.batch_items.reserve(out_items.size());
-                for (size_t i = 0; i < out_items.size(); ++i) {
-                    ariabc_pg::client_api_request_item item;
-                    item.req_id = out_items[i].req_id;
-                    item.sql = out_items[i].sql;
-                    item.has_tx_tag = out_items[i].has_tx_tag;
-                    std::memcpy(item.tx_tag, out_items[i].tx_tag, ariabc_pg::kTxTagBytes);
-                    out_req.batch_items.push_back(std::move(item));
-                }
+                assemble_det_request(out_items, out_req);
                 return true;
             };
+
 
             auto on_det_batch_accepted = [&](const std::vector<det_shaped_request>& items) -> bool {
                 std::vector<uint64_t> registered_rids;
@@ -6697,6 +6752,44 @@ int main(int argc, char** argv) {
                 });
             };
             start_async_audit_thread();
+
+            // A crashed replica sends no more votes, and a rejoined one never votes
+            // for what it got through repair.  Stop the all-replica audit from waiting
+            // on such a node (and its entries from filling the vote store).  Client
+            // results still need a verified majority; the audit just covers fewer nodes.
+            std::atomic<bool> replica_monitor_stop(false);
+            std::thread replica_monitor;
+            if (det_failover_on && majority_async_all3_validation && !recovery_mgr &&
+                ariabc_pg::g_raft_node_ids.size() == nodes.size()) {
+                replica_monitor = std::thread([&]() {
+                    std::vector<int> misses(nodes.size(), 0);
+                    std::vector<uint8_t> absent(nodes.size(), 0);
+                    while (!replica_monitor_stop.load(std::memory_order_relaxed)) {
+                        for (size_t i = 0; i < nodes.size(); ++i) {
+                            if (absent[i]) continue;
+                            ariabc_pg::client_api_response resp;
+                            std::string ctrl_err;
+                            const bool up = ariabc_pg::send_control_req_to_node(
+                                nodes[i], "__ARIABC_CTRL_RECOVERY STATUS", resp, ctrl_err, false, 3000);
+                            const bool repaired = up &&
+                                (resp.msg.find(" mode=LIVE") == std::string::npos ||
+                                 resp.msg.find(" recoveries=0") == std::string::npos);
+                            misses[i] = up ? 0 : misses[i] + 1;
+                            if (repaired || misses[i] >= 3) {
+                                absent[i] = 1;
+                                replica_absent_marks.fetch_add(1, std::memory_order_relaxed);
+                                std::cerr << "REPLICA_ABSENT node=" << ariabc_pg::g_raft_node_ids[i]
+                                          << " reason=" << (repaired ? "repaired" : "unreachable")
+                                          << "; all-replica audit continues without it" << std::endl;
+                                votes.set_node_recovery_boundary(ariabc_pg::g_raft_node_ids[i], UINT64_MAX);
+                            }
+                        }
+                        for (int t = 0; t < 20 && !replica_monitor_stop.load(std::memory_order_relaxed); ++t) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
+                    }
+                });
+            }
 
             auto record_async_all3_pending = [&](uint64_t rid) {
                 if (!majority_async_all3_validation) {
@@ -6853,7 +6946,12 @@ int main(int argc, char** argv) {
                 return true;
             };
 
+            // With failover on, waits wake up regularly so a lost leader is noticed.
+            std::function<bool()> det_stall_hook;
             auto wait_det_majority_window = [&](size_t max_outstanding) -> bool {
+                const int wait_poll_count = det_stall_hook
+                    ? std::max(1, 500000 / std::max(1, opt.poll_interval_us))
+                    : opt.poll_count;
                 while (majority_wait_enabled && inflight.size() > max_outstanding) {
                     if (fatal_gateway_error.load(std::memory_order_relaxed)) {
                         std::lock_guard<std::mutex> eg(fatal_gateway_error_mu);
@@ -6865,11 +6963,15 @@ int main(int argc, char** argv) {
                     std::vector<ariabc_pg::vote_store::terminal_majority_item> batch_res;
                     const auto w0 = std::chrono::steady_clock::now();
                     const bool ok_wait = votes.wait_any_majority_batch(
-                        inflight, inflight_pos, opt.poll_interval_us, opt.poll_count,
-                        batch_res, pop_batch_size);
+                        inflight, inflight_pos, opt.poll_interval_us, wait_poll_count,
+                        batch_res, pop_batch_size, /*quiet_timeout=*/static_cast<bool>(det_stall_hook));
                     const auto w1 = std::chrono::steady_clock::now();
                     total_majority_wait_ns.fetch_add(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
+                    if (det_stall_hook && !ok_wait) {
+                        if (!det_stall_hook()) return false;
+                        continue;
+                    }
                     if (!ok_wait || batch_res.empty()) {
                         std::string wait_err = (batch_res.empty() || batch_res[0].error.empty()) ? "majority_timeout" : batch_res[0].error;
                         bump_terminal_reason(wait_err);
@@ -7183,7 +7285,7 @@ int main(int argc, char** argv) {
                     : det_pipeline_cap;
                 const size_t det_submit_limit =
                     std::max<size_t>(1, std::min(det_pipeline_cap, configured_det_submit_limit));
-                const size_t single_submit_node_idx = opt.broadcast_to_all
+                size_t single_submit_node_idx = opt.broadcast_to_all
                     ? 0
                     : static_cast<size_t>(event_leader_idx);
                 std::deque<det_submit_ticket> pending_accepts;
@@ -7267,6 +7369,123 @@ int main(int argc, char** argv) {
                     return true;
                 };
 
+                /*
+                 * Move everything without a result to the current leader.  A request
+                 * the old leader acknowledged may never have committed, and one it did
+                 * not acknowledge may have, so all of them go again and replicas drop
+                 * the ones already in the log.  Lanes stay held and latency keeps
+                 * counting from the first submission.
+                 */
+                auto det_progress_tp = std::chrono::steady_clock::now();
+                auto det_probe_tp = det_progress_tp;
+                size_t det_progress_seen = 0;
+                auto det_failover = [&](const std::string& why) -> bool {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    const auto stalled_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        t0 - det_progress_tp).count();
+                    const int left_s = static_cast<int>((opt.failover_timeout_ms - stalled_ms) / 1000);
+                    std::vector<size_t> idxs;
+                    idxs.reserve(pending_request_count + inflight.size());
+                    for (const auto& t : pending_accepts) {
+                        for (const auto& it : t.items) idxs.push_back(it.idx);
+                    }
+                    for (uint64_t rid : inflight) {
+                        idxs.push_back(static_cast<size_t>(rid - opt.req_id_offset));
+                    }
+                    std::sort(idxs.begin(), idxs.end());
+                    det_pending_accept_count.fetch_sub(pending_request_count, std::memory_order_relaxed);
+                    pending_request_count = 0;
+                    pending_accepts.clear();
+                    det_inflight_count.fetch_sub(inflight.size(), std::memory_order_relaxed);
+                    det_accepted_count.fetch_sub(inflight.size(), std::memory_order_relaxed);
+                    inflight.clear();
+                    inflight_pos.clear();
+
+                    std::cerr << "GATEWAY_FAILOVER begin why=" << why
+                              << " outstanding=" << idxs.size() << std::endl;
+                    if (left_s <= 0 || !warm_leader_route(left_s)) {
+                        std::cerr << "GATEWAY_FAILOVER gave up: no leader" << std::endl;
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+                    single_submit_node_idx = static_cast<size_t>(
+                        ariabc_pg::g_event_submit_leader_idx.load(std::memory_order_relaxed));
+                    const size_t cap = std::max<size_t>(1, static_cast<size_t>(opt.det_batch_size));
+                    for (size_t i = 0; i < idxs.size(); i += cap) {
+                        det_submit_ticket ticket;
+                        for (size_t j = i; j < std::min(idxs.size(), i + cap); ++j) {
+                            det_shaped_request shaped;
+                            shaped.idx = idxs[j];
+                            if (!shape_det_request(shaped.idx, shaped.req_id, shaped.req_num, shaped.sql,
+                                                   shaped.has_tx_tag, shaped.tx_tag, /*sign_now=*/true)) {
+                                return false;
+                            }
+                            ticket.items.push_back(std::move(shaped));
+                        }
+                        ariabc_pg::client_api_request req;
+                        assemble_det_request(ticket.items, req);
+                        std::shared_ptr<ariabc_pg::async_cluster_submitter::submit_ctx> ctx;
+                        std::string err_submit;
+                        if (!submitter->submit_async_to_node(single_submit_node_idx, req, ctx, err_submit)) {
+                            std::cerr << "GATEWAY_FAILOVER resubmit failed err=" << err_submit << std::endl;
+                            permanent_failures.fetch_add(1);
+                            return false;
+                        }
+                        ticket.ctxs.push_back(std::move(ctx));
+                        ticket.submit_node_idx = single_submit_node_idx;
+                        ticket.submit_started_at = std::chrono::steady_clock::now();
+                        pending_request_count += ticket.items.size();
+                        det_pending_accept_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
+                        pending_accepts.push_back(std::move(ticket));
+                    }
+                    gateway_failovers.fetch_add(1, std::memory_order_relaxed);
+                    gateway_failover_resubmitted.fetch_add(idxs.size(), std::memory_order_relaxed);
+                    det_probe_tp = std::chrono::steady_clock::now();
+                    std::cerr << "GATEWAY_FAILOVER done leader_idx=" << single_submit_node_idx
+                              << " resubmitted=" << idxs.size() << " took_ms="
+                              << std::chrono::duration_cast<std::chrono::milliseconds>(det_probe_tp - t0).count()
+                              << std::endl;
+                    // A request failing right away must not turn into a tight resubmit loop.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    return true;
+                };
+
+                // Covers what no error reports: requests accepted by a leader that then
+                // lost them, or a leader that went silent.  Only a completed request
+                // counts as progress, so retries that go nowhere still end at the timeout.
+                auto det_stall_check = [&]() -> bool {
+                    const auto now = std::chrono::steady_clock::now();
+                    const size_t completed = det_completed_count.load(std::memory_order_relaxed);
+                    if (completed != det_progress_seen ||
+                        (pending_request_count == 0 && inflight.empty())) {
+                        det_progress_seen = completed;
+                        det_progress_tp = now;
+                        det_probe_tp = now;
+                        return true;
+                    }
+                    const auto stalled_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - det_progress_tp).count();
+                    if (stalled_ms >= opt.failover_timeout_ms) {
+                        std::cerr << "GATEWAY_FAILOVER gave up: no request completed for "
+                                  << stalled_ms << " ms" << std::endl;
+                        permanent_failures.fetch_add(1);
+                        return false;
+                    }
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - det_probe_tp).count() <
+                        opt.failover_stall_ms) {
+                        return true;
+                    }
+                    det_probe_tp = now;
+                    ariabc_pg::client_api_response resp;
+                    std::string probe_err;
+                    const bool same_leader = ariabc_pg::send_control_req_to_node(
+                        nodes[single_submit_node_idx], "__ARIABC_CTRL_IS_LEADER", resp, probe_err, false, 3000) &&
+                        resp.status == 0 && ariabc_pg::trim_copy(resp.msg) == "1";
+                    // Same leader: probably just slow, so resubmit only after a longer wait.
+                    if (same_leader && stalled_ms < 3LL * opt.failover_stall_ms) return true;
+                    return det_failover(same_leader ? "stalled_same_leader" : "leader_lost");
+                };
+
                 auto drain_one_accept = [&]() -> bool {
                     if (pending_accepts.empty()) return true;
                     det_submit_ticket ticket = pending_accepts.front();
@@ -7285,6 +7504,7 @@ int main(int argc, char** argv) {
                     bool ok_submit = true;
                     std::string batch_label = "ids:";
                     for (const auto& item : ticket.items) batch_label += item.req_id + " ";
+                    bool retry_elsewhere = false;
                     std::vector<std::pair<size_t, ariabc_pg::client_api_response>>
                         broadcast_result_waits;
                     if (opt.broadcast_to_all && !majority_wait_enabled) {
@@ -7386,13 +7606,21 @@ int main(int argc, char** argv) {
                                         : node_err;
                                 }
                                 ok_submit = false;
+                                retry_elsewhere = det_failover_on;
                                 continue;
+                            }
+                            // Still in flight on this leader from an earlier submission.
+                            if (det_failover_on && node_resp.status == 1 &&
+                                node_resp.msg.rfind("LEADER_ASSIGNED_INFLIGHT_DUPLICATE", 0) == 0) {
+                                node_resp.status = 0;
                             }
                             if (node_resp.status != 0) {
                                 if (ok_submit) {
                                     submit_err = node_resp.msg;
                                 }
                                 ok_submit = false;
+                                // status 2 means the request itself was rejected.
+                                retry_elsewhere = det_failover_on && node_resp.status == 1;
                                 continue;
                             }
                             if (ctx_idx == 0) {
@@ -7408,6 +7636,15 @@ int main(int argc, char** argv) {
                         for (const auto& itm : ticket.items) {
                             tx_lat_tracker.record_accept_idx(itm.idx, submit_done_at);
                         }
+                    }
+                    auto requeue_for_failover = [&](const std::string& why) -> bool {
+                        pending_request_count += ticket.items.size();
+                        det_pending_accept_count.fetch_add(ticket.items.size(), std::memory_order_relaxed);
+                        pending_accepts.push_front(ticket);
+                        return det_failover(why);
+                    };
+                    if (!ok_submit && retry_elsewhere) {
+                        return requeue_for_failover(submit_err);
                     }
                     if (!ok_submit) {
                         std::cerr << "det pipeline submit failed req="
@@ -7431,6 +7668,9 @@ int main(int argc, char** argv) {
                             ticket.submit_node_idx,
                             resp,
                             batch_label)) {
+                        if (direct_wait_retryable.exchange(false)) {
+                            return requeue_for_failover("completion_wait_failed");
+                        }
                         release_det_item_lanes(ticket.items);
                         return false;
                     }
@@ -7464,9 +7704,30 @@ int main(int argc, char** argv) {
                 };
                 std::chrono::steady_clock::time_point backpressure_since;
                 bool backpressure_active = false;
-                while (!failed && (next_idx < queries.size() || !pending_accepts.empty())) {
+                if (det_failover_on) {
+                    det_stall_hook = [&]() -> bool {
+                        // The window wait must still see leader errors on pending submits.
+                        while (!pending_accepts.empty()) {
+                            ariabc_pg::client_api_response tmp_resp;
+                            std::string tmp_err;
+                            bool front_done = false;
+                            submitter->try_collect_submit(
+                                pending_accepts.front().ctxs.front(), tmp_resp, tmp_err, front_done);
+                            if (!front_done) break;
+                            if (!drain_one_accept()) return false;
+                        }
+                        return det_stall_check();
+                    };
+                }
+                while (!failed &&
+                       (next_idx < queries.size() || !pending_accepts.empty() ||
+                        (det_failover_on && !inflight.empty()))) {
                     bool paced_wait = false;
                     bool store_wait = false;
+                    if (det_failover_on && !det_stall_check()) {
+                        failed = true;
+                        break;
+                    }
                     while (!failed &&
                            next_idx < queries.size() &&
                            pending_request_count < det_submit_limit) {
@@ -7619,12 +7880,28 @@ int main(int argc, char** argv) {
                                 std::this_thread::sleep_for(std::chrono::microseconds(50));
                                 break;
                             }
+                            // Never block indefinitely on a leader that went silent.
+                            if (det_failover_on &&
+                                !submitter->wait_submit_done_for(pending_accepts.front().ctxs.front(), 200)) {
+                                break;
+                            }
                             if (!drain_one_accept()) {
                                 failed = true;
                                 break;
                             }
                             break;
                         }
+                    }
+                    if (failed) break;
+                    // All sent and acknowledged: stay here until the results are in, so a
+                    // leader lost now can still be recovered from.
+                    if (det_failover_on && majority_wait_enabled &&
+                        next_idx >= queries.size() && pending_accepts.empty() && !inflight.empty()) {
+                        if (!wait_det_majority_window(0)) {
+                            failed = true;
+                            break;
+                        }
+                        continue;
                     }
                     if (!drain_late_accepts(false)) {
                         failed = true;
@@ -7929,6 +8206,9 @@ int main(int argc, char** argv) {
             if (!failed && !drain_async_all3_audit()) {
                 failed = true;
             }
+            det_stall_hook = nullptr;
+            replica_monitor_stop.store(true, std::memory_order_relaxed);
+            if (replica_monitor.joinable()) replica_monitor.join();
 
             det_progress_stop.store(true, std::memory_order_relaxed);
             det_progress_cv.notify_all();
@@ -8213,6 +8493,9 @@ int main(int argc, char** argv) {
         std::cout << "user_abort_counter_supported=" << (user_abort_counter_supported ? 1 : 0) << std::endl;
         std::cout << "user_abort_poll_failures=" << user_abort_poll_failures.load() << std::endl;
         std::cout << "permanent_failures=" << permanent_failures.load() << std::endl;
+        std::cout << "gateway_failovers=" << gateway_failovers.load()
+                  << " gateway_failover_resubmitted=" << gateway_failover_resubmitted.load()
+                  << " replica_absent_marks=" << replica_absent_marks.load() << std::endl;
         if (recovery_mgr) {
             std::cout << "recovery_triggered_count=" << recovery_mgr->triggered_count() << std::endl;
             std::cout << "recovery_success_count=" << recovery_mgr->success_count() << std::endl;

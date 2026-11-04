@@ -239,6 +239,13 @@ bool async_cluster_submitter::wait_submit(const std::shared_ptr<submit_ctx>& ctx
     return true;
 }
 
+bool async_cluster_submitter::wait_submit_done_for(const std::shared_ptr<submit_ctx>& ctx,
+                                                   int timeout_ms) {
+    if (!ctx) return true;
+    std::unique_lock<std::mutex> lk(ctx->mu);
+    return ctx->cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [&] { return ctx->done; });
+}
+
 bool async_cluster_submitter::try_collect_submit(const std::shared_ptr<submit_ctx>& ctx,
                                                  client_api_response& out_resp,
                                                  std::string& err,

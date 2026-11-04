@@ -373,6 +373,7 @@ struct server_options {
 
     // Commit B1: safe-mode ledger gate: "off" or "safe"
     std::string raft_apply_ledger_mode = "off";
+    bool raft_rejoin = false;
 
     // Commit B2: cluster epoch as 64-char lowercase hex (32 bytes)
     std::string raft_epoch_hex;
@@ -411,6 +412,9 @@ void usage(const char* argv0) {
         << "    [--raft-storage-mode <in_memory|durable>]\n"
         << "    [--raft-storage-dir <path>]\n"
         << "    [--raft-apply-ledger off|safe]   # B1: safe-mode ledger gate\n"
+        << "    [--raft-rejoin]                  # restart a crashed replica on its durable Raft log:\n"
+        << "        # stays quarantined until ariabc_recovery_tool rejoin repairs it from a live replica;\n"
+        << "        # restart its PostgreSQL first, so in-flight BCDB state is gone\n"
         << "    [--raft-epoch-hex <64-hex-chars>] # B2: cluster epoch identifier\n"
         << "    [--txTagVerify auto|require|off] [--txClientKeyDir <dir>]\n"
         << "        # per-client Ed25519 request signatures, verified from the log before\n"
@@ -489,6 +493,8 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.raft_cluster_id = need("--raft-cluster-id");
             } else if (a == "--raft-apply-ledger") {
                 opt.raft_apply_ledger_mode = need("--raft-apply-ledger");
+            } else if (a == "--raft-rejoin") {
+                opt.raft_rejoin = true;
             } else if (a == "--raft-epoch-hex") {
                 opt.raft_epoch_hex = need("--raft-epoch-hex");
             } else if (a == "--txTagVerify") {
@@ -1152,6 +1158,11 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
               << std::endl;
 
     auto fail_pending_after = [&](uint64_t blocker_seq) {
+        // The failed sequence numbers will never arrive again, so skip over them;
+        // otherwise every later leader-assigned request waits behind the gap forever.
+        if (leader_assigned) {
+            orderer.next_seq = std::max(orderer.next_seq, orderer.next_assigned_seq);
+        }
         for (auto& kv : orderer.pending) {
             std::shared_ptr<raft_ordered_entry> blocked = kv.second;
             blocked->resp.status = 1;
@@ -1237,7 +1248,7 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
                       << " entries=" << ready_batch.size()
                       << std::endl;
             g_prof.orderer_drains.fetch_add(1, std::memory_order_relaxed);
-            orderer.next_seq = ready_batch.back()->last_seq + 1;
+            orderer.next_seq = std::max(orderer.next_seq, ready_batch.back()->last_seq + 1);
             if (g_leader_trace)
             std::cerr << "SAFE_RAFT_ORDERER_ADVANCE"
                       << " next_seq=" << orderer.next_seq
@@ -2196,16 +2207,31 @@ int main(int argc, char** argv) {
         std::cout << std::endl;
     }
 
-    // B1: Recovered durable storage + off: reject startup.
+    // B1: Recovered durable storage + off: reject startup, because replaying the
+    // log would execute entries twice.  --raft-rejoin replaces that replay with
+    // quarantine + repair from a live replica.
+    if (opt.raft_rejoin && (opt.raft_apply_ledger_mode != "off" || opt.bypass_raft)) {
+        std::cerr << "--raft-rejoin requires --raft-apply-ledger off and Raft enabled" << std::endl;
+        return 1;
+    }
     if (opt.raft_apply_ledger_mode == "off" && !opt.raft_storage_dir.empty()) {
         struct stat st;
         std::string identity_p = opt.raft_storage_dir + "/identity.bin";
-        if (::stat(identity_p.c_str(), &st) == 0) {
+        const bool recovered = ::stat(identity_p.c_str(), &st) == 0;
+        if (recovered && !opt.raft_rejoin) {
             std::cerr << "Startup rejected: Recovered durable storage found at "
                       << opt.raft_storage_dir << " but --raft-apply-ledger is set to 'off'."
                       << std::endl;
             return 1;
         }
+        if (!recovered && opt.raft_rejoin) {
+            std::cerr << "--raft-rejoin found no durable Raft storage at "
+                      << opt.raft_storage_dir << std::endl;
+            return 1;
+        }
+    } else if (opt.raft_rejoin) {
+        std::cerr << "--raft-rejoin requires --raft-storage-mode durable" << std::endl;
+        return 1;
     }
 
     // Ignore SIGPIPE so a broken client connection doesn't kill the server.
@@ -2222,6 +2248,16 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cerr << "STATE_MACHINE_INIT_FAILED: " << e.what() << std::endl;
         return 1;
+    }
+
+    if (opt.raft_rejoin) {
+        std::string rejoin_err;
+        ariabc_pg::pg_state_machine* psm =
+            dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
+        if (!psm || !psm->start_quarantined(rejoin_err)) {
+            std::cerr << "RAFT_REJOIN_FAILED: " << rejoin_err << std::endl;
+            return 1;
+        }
     }
 
     // Request tags must be configured before the first commit()/direct enqueue.
@@ -2360,13 +2396,15 @@ int main(int argc, char** argv) {
                 std::cout << "[Raft Storage] Fresh storage initialized. Initializing fresh cluster." << std::endl;
                 ptr<cluster_config> conf = cs_new<cluster_config>();
                 for (const auto& m : members) {
-                    const int priority = (preferred_leader_id > 0 && m.id == preferred_leader_id) ? 100 : 1;
+                    // Equal priorities: a higher one makes followers wait for it to decay
+                    // before electing a replacement (77 s measured).  The preferred leader
+                    // takes over through request_leadership() below instead.
                     conf->get_servers().push_back(cs_new<srv_config>(m.id,
                                                                      0,
                                                                      m.endpoint,
                                                                      "",
                                                                      false,
-                                                                     priority));
+                                                                     1));
                 }
                 d_smgr->initialize_fresh(*conf);
             } else {
@@ -2415,13 +2453,12 @@ int main(int argc, char** argv) {
             smgr = cs_new<inmem_state_mgr>(opt.id, opt.raft_endpoint);
             ptr<cluster_config> conf = cs_new<cluster_config>();
             for (const auto& m : members) {
-                const int priority = (preferred_leader_id > 0 && m.id == preferred_leader_id) ? 100 : 1;
                 conf->get_servers().push_back(cs_new<srv_config>(m.id,
                                                                  0,
                                                                  m.endpoint,
                                                                  "",
                                                                  false,
-                                                                 priority));
+                                                                 1));
             }
             smgr->save_config(*conf);
         }
@@ -2578,7 +2615,8 @@ int main(int argc, char** argv) {
               << " leaderTransferWaitMs=" << (preferred_leader_id > 0 ? preferred_leader_transfer_wait_ms : 0)
               << std::endl;
 
-    if (preferred_leader_id == opt.id) {
+    // A rejoining replica is quarantined and may be behind: it must not take over.
+    if (preferred_leader_id == opt.id && !opt.raft_rejoin) {
         ptr<raft_server> preferred_raft = raft;
         std::thread([preferred_raft, preferred_leader_id] {
             for (int attempt = 1; attempt <= 40 && !ariabc_pg::g_stop.load(); ++attempt) {

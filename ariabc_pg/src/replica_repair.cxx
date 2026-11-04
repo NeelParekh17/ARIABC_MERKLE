@@ -591,11 +591,21 @@ bool commit_or_rollback(PGconn* local, bool ok, std::string& err) {
     return false;
 }
 
-bool roots_equal(PGconn* ref, PGconn* local, const table_info& t, bool& equal, std::string& err) {
+bool roots_equal(PGconn* ref, PGconn* local, const table_info& t, bool& equal, std::string& err,
+                 std::string* detail = nullptr) {
     std::map<int, std::string> a, b;
     if (!read_partition_roots(ref, t, a, err)) return false;
     if (!read_partition_roots(local, t, b, err)) return false;
     equal = (a == b);
+    if (detail) {
+        size_t differing = 0;
+        for (const auto& kv : a) {
+            const auto it = b.find(kv.first);
+            if (it == b.end() || it->second != kv.second) ++differing;
+        }
+        *detail = "ref_partitions=" + std::to_string(a.size()) + " local_partitions=" +
+                  std::to_string(b.size()) + " differing=" + std::to_string(differing);
+    }
     return true;
 }
 
@@ -676,11 +686,13 @@ bool full_table_copy(PGconn* ref, PGconn* local, const table_info& t,
         const uint64_t v0 = now_us();
         bool equal = false;
         bool heap_ok = false;
-        if (!roots_equal(ref, local, t, equal, err) ||
+        std::string detail;
+        if (!roots_equal(ref, local, t, equal, err, &detail) ||
             !heap_verify_ok(local, t, heap_ok, err)) return false;
         st.verify_us += now_us() - v0;
         if (!equal || !heap_ok) {
-            err = "table " + t.name + " failed verification after full copy and Merkle rebuild";
+            err = "table " + t.name + " failed verification after full copy and Merkle rebuild (" +
+                  detail + " local_tree_matches_heap=" + (heap_ok ? "1" : "0") + ")";
             return false;
         }
     }
@@ -1003,13 +1015,15 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
     /* The table must now match the snapshot exactly. */
     const uint64_t v0 = now_us();
     bool equal = false;
-    if (!roots_equal(ref, local, t, equal, err)) return false;
+    std::string detail;
+    if (!roots_equal(ref, local, t, equal, err, &detail)) return false;
     if (equal && heap_verify) {
         if (!heap_verify_ok(local, t, heap_ok, err)) return false;
     }
     st.verify_us += now_us() - v0;
     if (equal && heap_ok) return true;
 
+    std::cerr << "REPLICA_REPAIR sparse_mismatch table=" << t.name << " " << detail << std::endl;
     return full_table_copy(ref, local, t, st, err);
 }
 

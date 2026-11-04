@@ -26,12 +26,17 @@
  *       L must cover every entry this replica already executed (so no entry is
  *       executed, and its result published, twice) unless allow_rewind=1.
  *   STATUS
+ *
+ * A crashed replica rejoins through the same path: --raft-rejoin starts it
+ * QUARANTINED, then "ariabc_recovery_tool rejoin" runs CUT on a live replica and
+ * RECOVER here.  Needs at least one replica that stayed LIVE.
  */
 #include "pg_state_machine.hxx"
 #include "replica_repair.hxx"
 
 #include <libpq-fe.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -286,6 +291,76 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::quarantine_ack(uint64_t log_idx, n
     return ack;
 }
 
+bool pg_state_machine::start_quarantined(std::string& err) {
+    PGconn* c = PQconnectdb(pg_conninfo().c_str());
+    if (!c || PQstatus(c) != CONNECTION_OK) {
+        err = "connect: " + pq_err(c);
+        if (c) PQfinish(c);
+        return false;
+    }
+    std::string watermark;
+    const bool ok = pq_exec(c, "SELECT bcdb_last_committed_txid()", err, &watermark);
+    PQfinish(c);
+    if (!ok) return false;
+    /* Workers of the crashed server may still be parked at BCDB's commit gate. */
+    if (std::strtoll(watermark.c_str(), nullptr, 10) > 0) {
+        err = "PostgreSQL still holds BCDB state (watermark=" + watermark +
+              "); restart it before rejoining";
+        return false;
+    }
+    recov_mode_.store(1, std::memory_order_release);
+    std::cerr << "RAFT_REJOIN_QUARANTINED node=" << node_id_ << std::endl;
+    return true;
+}
+
+/*
+ * Bring the retry filter up to entry L, reading only entries this replica knows
+ * are committed: its log tail may hold entries a new leader will overwrite.
+ */
+bool pg_state_machine::rebuild_retry_filter(uint64_t last_applied, uint64_t L,
+                                            uint64_t timeout_ms, std::string& err) {
+    const uint64_t deadline = mono_ns() + timeout_ms * 1000000ULL;
+    for (;;) {
+        uint64_t seen = 0;
+        {
+            std::lock_guard<std::mutex> lk(commit_mu_);
+            seen = last_commit_seen_;
+        }
+        if (seen >= L) break;
+        if (mono_ns() > deadline) {
+            err = "commit_behind_boundary last_commit=" + std::to_string(seen) + " L=" + std::to_string(L);
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    uint64_t from = last_applied + 1;
+    if (L < last_applied) {
+        retry_filter_.clear();
+        from = 1;
+    }
+    for (uint64_t idx = from; idx <= L; ++idx) {
+        nuraft::ptr<nuraft::log_entry> le = log_store_->entry_at(idx);
+        if (!le) {
+            err = "log_entry_missing idx=" + std::to_string(idx);
+            return false;
+        }
+        if (le->get_val_type() != nuraft::log_val_type::app_log || le->is_buf_null()) continue;
+        nuraft::ptr<nuraft::buffer> buf = le->get_buf_ptr();
+        if (buf->size() == 0) continue;
+        buf->pos(0);
+        raft_request_batch batch;
+        std::string parse_err;
+        const bool parsed = parse_raft_request_log(*buf, batch, parse_err);
+        buf->pos(0);
+        if (!parsed) continue;
+        apply_tx_tag_policy(batch.items, idx);
+        for (const auto& item : batch.items) {
+            if (!item.tx_tag_rejected) retry_filter_.seen_or_add(item.req_id);
+        }
+    }
+    return true;
+}
+
 bool pg_state_machine::handle_recovery_control(const std::string& command,
                                                std::string& out_msg) {
     std::istringstream in(command);
@@ -309,8 +384,10 @@ bool pg_state_machine::handle_recovery_control(const std::string& command,
         return false;
     }
     if (!ok && out_msg.rfind("ERR", 0) != 0) out_msg = "ERR " + out_msg;
-    std::cerr << "RECOVERY_CTRL node=" << node_id_ << " verb=" << verb
-              << " result=" << out_msg << std::endl;
+    if (verb != "STATUS") {  /* gateways poll STATUS */
+        std::cerr << "RECOVERY_CTRL node=" << node_id_ << " verb=" << verb
+                  << " result=" << out_msg << std::endl;
+    }
     return ok;
 }
 
@@ -563,11 +640,22 @@ bool pg_state_machine::cmd_recover(const std::map<std::string, std::string>& arg
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     const uint64_t t_drained = mono_ns();
+    uint64_t last_applied = 0;
     {
         std::lock_guard<std::mutex> lk(commit_mu_);
         if (L < last_enqueued_idx_ && !allow_rewind) {
             out = "ERR boundary_behind_local L=" + std::to_string(L) +
                   " last_enqueued=" + std::to_string(last_enqueued_idx_);
+            return false;
+        }
+        last_applied = last_enqueued_idx_;
+    }
+    /* Also holds commit() back: once this returns, NuRaft has delivered every
+     * entry <= L, so none of them can be applied again after going LIVE. */
+    {
+        std::string filter_err;
+        if (!rebuild_retry_filter(last_applied, L, drain_timeout_ms, filter_err)) {
+            out = "ERR " + filter_err;
             return false;
         }
     }
@@ -731,6 +819,7 @@ bool pg_state_machine::cmd_status(std::string& out) {
       << " det_seq=" << last_assigned_det_seq_
       << " replay_next=" << replay_next_.load(std::memory_order_acquire)
       << " recoveries=" << recoveries_done_.load(std::memory_order_relaxed)
+      << " retries_dropped=" << retries_dropped_.load(std::memory_order_relaxed)
       << " suppressed=" << (executor_.publish_suppressed() ? 1 : 0);
     {
         std::lock_guard<std::mutex> clk(cuts_mu_);

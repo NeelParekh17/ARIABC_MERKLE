@@ -1049,6 +1049,10 @@ merkle_init_tree(Relation indexRel, Oid heapOid, MerkleOptions *opts,
 	meta->partition_key_columns = partition_key_columns;
 	meta->subpartitions = subpartitions;
 
+	/* Cover the meta struct, or the standard-page image below omits it as the hole. */
+	((PageHeader) metapage)->pd_lower =
+		((char *) meta + sizeof(MerkleMetaPageData)) - (char *) metapage;
+
 	START_CRIT_SECTION();
 	MarkBufferDirty(metabuf);
 	if (RelationNeedsWAL(indexRel))

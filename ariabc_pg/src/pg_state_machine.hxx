@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pg_executor.hxx"
+#include "request_retry_filter.hxx"
 #include "wire_protocol.hxx"
 
 #include "nuraft.hxx"
@@ -267,6 +268,16 @@ public:
                                  std::string& out_msg);
     bool recovery_live() const { return recov_mode_.load(std::memory_order_acquire) == 0; }
 
+    /*
+     * --raft-rejoin: start QUARANTINED, because the database of a crashed replica
+     * can hold transactions beyond its commit watermark (deterministic commits are
+     * out of order), so no log position describes it.  Entries are acknowledged but
+     * not executed until RECOVER repairs it from a live replica's cut.  Requires a
+     * freshly started PostgreSQL: returns false if BCDB still holds state from
+     * before the crash.
+     */
+    bool start_quarantined(std::string& err);
+
 #ifdef BUILDING_UNIT_TESTS
     struct result_tracker_debug_counts {
         size_t pending_result_counts = 0;
@@ -326,6 +337,11 @@ private:
 
     void apply_tx_tag_policy(std::vector<client_api_request_item>& items, uint64_t entry_idx);
 
+    /* Removes retried items; true when none remain.  Caller holds commit_mu_. */
+    bool drop_retried_items(std::vector<client_api_request_item>& items);
+    /* Brings retry_filter_ up to entry L.  Caller guarantees nothing else applies entries. */
+    bool rebuild_retry_filter(uint64_t last_applied, uint64_t L, uint64_t timeout_ms, std::string& err);
+
     /* Existing commit body; caller holds commit_mu_. */
     nuraft::ptr<nuraft::buffer> commit_apply_locked(uint64_t log_idx, nuraft::buffer& data);
     void commit_noop_locked(uint64_t log_idx);
@@ -367,6 +383,8 @@ private:
 
     std::mutex commit_mu_;                 /* serialises commit()/replay/cut prepare */
     uint64_t last_commit_seen_ = 0;        /* highest log idx delivered by NuRaft */
+    request_retry_filter retry_filter_;    /* guarded by commit_mu_; fed in log order */
+    std::atomic<uint64_t> retries_dropped_{0};
     uint64_t last_enqueued_idx_ = 0;       /* highest log idx applied via commit_apply_locked */
     int64_t last_assigned_det_seq_ = -1;   /* det seq of the last item enqueued */
     std::atomic<int> recov_mode_{0};       /* 0=LIVE 1=QUARANTINED 2=REPLAYING */
@@ -414,6 +432,8 @@ private:
     std::unordered_map<uint64_t, size_t> pending_result_counts_;
     std::unordered_map<std::string, uint64_t> result_token_by_req_id_;
     std::unordered_map<std::string, result_item_key> result_item_by_req_id_;
+    /* Retried requests whose first execution finished before this replica tracked it. */
+    std::unordered_set<std::string> retry_done_req_ids_;
     std::unordered_map<uint64_t, std::vector<std::string>> req_ids_by_result_token_;
     std::unordered_set<uint64_t> completed_result_tokens_;
     std::unordered_map<uint64_t, std::unordered_set<uint32_t>> completed_result_ordinals_;

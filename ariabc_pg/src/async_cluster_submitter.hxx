@@ -81,6 +81,9 @@ public:
                      client_api_response& out_resp,
                      std::string& err);
 
+    // True once the request has finished, false if it is still running after timeout_ms.
+    bool wait_submit_done_for(const std::shared_ptr<submit_ctx>& ctx, int timeout_ms);
+
     bool try_collect_submit(const std::shared_ptr<submit_ctx>& ctx,
                             client_api_response& out_resp,
                             std::string& err,

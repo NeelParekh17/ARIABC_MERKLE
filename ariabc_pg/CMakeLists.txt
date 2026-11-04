@@ -450,3 +450,8 @@ add_executable(pg_retry_policy_test tests/pg_retry_policy_test.cxx)
 target_include_directories(pg_retry_policy_test PRIVATE src)
 target_compile_options(pg_retry_policy_test PRIVATE -UNDEBUG)
 add_test(NAME pg_retry_policy_test COMMAND pg_retry_policy_test)
+
+add_executable(request_retry_filter_test tests/request_retry_filter_test.cxx)
+target_include_directories(request_retry_filter_test PRIVATE src)
+target_compile_options(request_retry_filter_test PRIVATE -UNDEBUG)
+add_test(NAME request_retry_filter_test COMMAND request_retry_filter_test)

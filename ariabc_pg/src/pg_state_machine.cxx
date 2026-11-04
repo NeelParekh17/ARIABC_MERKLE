@@ -385,11 +385,29 @@ void pg_state_machine::apply_tx_tag_policy(std::vector<client_api_request_item>&
             std::cerr << " count=" << n << std::endl;
         }
         item.sql = tx_tag_rejected_sql(item.sql);
+        item.tx_tag_rejected = true;
     }
     tx_tag_verify_ns_.fetch_add(
         static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - t0).count()),
         std::memory_order_relaxed);
+}
+
+bool pg_state_machine::drop_retried_items(std::vector<client_api_request_item>& items) {
+    auto retried = [&](const client_api_request_item& item) {
+        // A rejected item proves nothing about its id: it must not block the real request.
+        if (item.tx_tag_rejected || !retry_filter_.seen_or_add(item.req_id)) return false;
+        retries_dropped_.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(result_mu_);
+        if (result_item_by_req_id_.count(item.req_id) == 0 &&
+            result_token_by_req_id_.count(item.req_id) == 0) {
+            retry_done_req_ids_.insert(item.req_id);
+            result_cv_.notify_all();
+        }
+        return true;
+    };
+    items.erase(std::remove_if(items.begin(), items.end(), retried), items.end());
+    return items.empty();
 }
 
 pg_state_machine::pg_state_machine(int node_id,
@@ -577,6 +595,12 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit_apply_locked(uint64_t log_i
     // before the leader-assigned rewrite below changes the det-seq prefix.
     if (parsed) {
         apply_tx_tag_policy(batch.items, static_cast<uint64_t>(log_idx));
+        // Every replica drops the same retried items before sequence numbers are
+        // assigned, so a retry neither runs twice nor shifts later transactions.
+        if (drop_retried_items(batch.items)) {
+            commit_noop_locked(log_idx);
+            return nuraft::buffer::alloc(0);
+        }
     }
 
     const bool leader_assigned = state_machine_leader_assigned_ordering_enabled();
@@ -902,7 +926,7 @@ bool pg_state_machine::wait_for_result_id(const std::string& req_id,
         } else {
             auto mapped = result_token_by_req_id_.find(req_id);
             if (mapped == result_token_by_req_id_.end()) {
-                return false;
+                return retry_done_req_ids_.count(req_id) > 0;
             }
             result_token = mapped->second;
             item_key = result_item_key{};
@@ -910,6 +934,11 @@ bool pg_state_machine::wait_for_result_id(const std::string& req_id,
                    failed_result_tokens_.find(result_token) != failed_result_tokens_.end();
         }
     });
+    if (ready && result_token == 0) {
+        // Retried after its first execution had already finished here.
+        if (failure_reason != nullptr) failure_reason->clear();
+        return true;
+    }
     if (!ready || result_token == 0) return false;
 
     auto token_failed = failed_result_tokens_.find(result_token);

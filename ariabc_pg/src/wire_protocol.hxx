@@ -20,6 +20,8 @@ struct client_api_request_item {
     uint64_t assigned_det_seq = 0;
     bool has_tx_tag = false;
     uint8_t tx_tag[kTxTagBytes] = {};
+    // Set on a replica when signature verification rejected this item; not on the wire.
+    bool tx_tag_rejected = false;
 };
 
 struct client_api_request {
