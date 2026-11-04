@@ -3096,6 +3096,7 @@ pg_executor_stats pg_executor::stats() const {
     out.det_block_fallbacks = st_det_block_fallbacks_.load(std::memory_order_relaxed);
     out.det_block_skipped_readonly = st_det_block_skipped_readonly_.load(std::memory_order_relaxed);
     out.det_result_adhash_missing = st_det_result_adhash_missing_.load(std::memory_order_relaxed);
+    out.det_superseded_results = st_det_superseded_results_.load(std::memory_order_relaxed);
     out.ready_det_results_max = st_ready_det_results_max_.load(std::memory_order_relaxed);
     out.ordered_emit_wait_ns = st_ordered_emit_wait_ns_.load(std::memory_order_relaxed);
     out.kafka_immediate_records = st_kafka_immediate_records_.load(std::memory_order_relaxed);
@@ -5908,6 +5909,10 @@ void pg_executor::event_loop() {
 
             if (cs.st == conn_state::state::READING && (re & POLLIN)) {
                 if (PQconsumeInput(cs.c) != 1) {
+                    if (cs.partial_result) {
+                        PQclear(cs.partial_result);
+                        cs.partial_result = nullptr;
+                    }
                     cs.st = conn_state::state::IDLE;
                     cs.has_task = false;
                     cs.has_det_block = false;
@@ -5915,15 +5920,31 @@ void pg_executor::event_loop() {
                     cs.det_block_backend_mask.clear();
                     continue;
                 }
-                if (PQisBusy(cs.c)) continue;
 
-                // Drain all results; keep the last (PQexec-like behavior).
-                PGresult* last = nullptr;
-                PGresult* r = nullptr;
-                while ((r = PQgetResult(cs.c)) != nullptr) {
-                    if (last) PQclear(last);
-                    last = r;
+                // Drain results and keep the last (PQexec-like behavior), without
+                // ever blocking this thread.  "Not busy" only means one result is
+                // ready, not that the statement ended: a deterministic SELECT sends
+                // its rows before validation, so a conflict retry sends a second
+                // RowDescription, which makes libpq hand over the first attempt's
+                // partial result while the backend is still at the serial gate.
+                // PQgetResult would then wait for ReadyForQuery, while that backend
+                // waits for a predecessor only this thread can send: a deadlock.
+                bool statement_done = false;
+                while (!PQisBusy(cs.c)) {
+                    PGresult* r = PQgetResult(cs.c);
+                    if (!r) {
+                        statement_done = true;
+                        break;
+                    }
+                    if (cs.partial_result) {
+                        PQclear(cs.partial_result);
+                        st_det_superseded_results_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    cs.partial_result = r;
                 }
+                if (!statement_done) continue;
+                PGresult* last = cs.partial_result;
+                cs.partial_result = nullptr;
 
                 const uint64_t query_end_ns = now_steady_ns();
                 if (cs.exec_start_ns != 0 && query_end_ns >= cs.exec_start_ns) {

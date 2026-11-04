@@ -20,6 +20,7 @@
 
 struct pg_conn;
 typedef struct pg_conn PGconn;
+typedef struct pg_result PGresult;
 
 namespace ariabc_pg {
 
@@ -134,6 +135,7 @@ struct pg_executor_stats {
     uint64_t det_block_fallbacks = 0;
     uint64_t det_block_skipped_readonly = 0;
     uint64_t det_result_adhash_missing = 0;
+    uint64_t det_superseded_results = 0;
     uint64_t ready_det_results_max = 0;
     uint64_t ordered_emit_wait_ns = 0;
     uint64_t kafka_immediate_records = 0;
@@ -459,6 +461,8 @@ private:
         std::vector<task> det_block_tasks;
         std::vector<uint8_t> det_block_backend_mask;
         uint64_t exec_start_ns = 0;
+        // Latest result of the statement being read; held across poll rounds.
+        PGresult* partial_result = nullptr;
     };
     std::vector<conn_state> conns_;
     std::vector<std::queue<task>> conn_qs_;
@@ -592,6 +596,7 @@ private:
     std::atomic<uint64_t> st_det_block_fallbacks_{0};
     std::atomic<uint64_t> st_det_block_skipped_readonly_{0};
     std::atomic<uint64_t> st_det_result_adhash_missing_{0};
+    std::atomic<uint64_t> st_det_superseded_results_{0};
     std::atomic<uint64_t> st_ready_det_results_max_{0};
     std::atomic<uint64_t> st_ordered_emit_wait_ns_{0};
     std::atomic<uint64_t> st_kafka_immediate_records_{0};
