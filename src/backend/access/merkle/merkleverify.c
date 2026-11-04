@@ -502,7 +502,7 @@ merkle_root_hash_index(PG_FUNCTION_ARGS)
 	if (found)
 		result = merkle_hash_to_hex(&root_h);
 	else
-		result = pstrdup("0000000000000000000000000000000000000000000000000000000000000000");
+		result = pstrdup("0000000000000000");
 
 	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
@@ -834,7 +834,7 @@ merkle_get_partition_root_hash(PG_FUNCTION_ARGS)
 	}
 
 	result = found ? merkle_hash_to_hex(&root_hash) :
-		pstrdup("0000000000000000000000000000000000000000000000000000000000000000");
+		pstrdup("0000000000000000");
 	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
 

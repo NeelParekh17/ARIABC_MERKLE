@@ -3,6 +3,7 @@
 #include "pg_retry_policy.hxx"
 
 #include "ariabc_pg_util.hxx"
+#include "result_envelope.hxx"
 
 #include <algorithm>
 #include <chrono>
@@ -59,8 +60,11 @@ constexpr size_t kDetQueueHighWatermarkFactor = 2;  // high = max(minHigh, 2*poo
 constexpr size_t kDetQueueLowWatermarkFactor = 1;   // low  = max(minLow,  1*pool)
 constexpr uint64_t kDefaultDetPartialBlockMaxWaitNs = 2ULL * 1000ULL * 1000ULL;
 constexpr uint64_t kDetExplicitTxidMaxSeq = 80000000ULL;
-constexpr const char* kHashAlgo = "sha256";
-constexpr uint8_t kHashAlgoId = 1;
+// B3/B4 records carry the write and read AdHash (8 bytes each) instead of a
+// SHA-256 of the result text.
+constexpr const char* kHashAlgo = "adhash64";
+constexpr uint8_t kHashAlgoId = 2;
+constexpr size_t kResultAdhashBytes = 16;
 constexpr const char* kDefaultResultSigKey = "ariabc-result-v2-dev-key";
 
 bool debug_req_trace_enabled() {
@@ -693,11 +697,15 @@ bool hex_decode_string(const std::string& in, std::string& out) {
     return true;
 }
 
+// One line per tx: "<tx hash>\t<hex result or empty>\t<32 hex AdHashes>".
+// out_adhash_by_hash (optional) receives the write+read AdHash pair.
 bool parse_bcdb_block_results_text(
     const std::string& payload,
-    std::unordered_map<std::string, std::string>& out_by_hash)
+    std::unordered_map<std::string, std::string>& out_by_hash,
+    std::unordered_map<std::string, std::string>* out_adhash_by_hash = nullptr)
 {
     out_by_hash.clear();
+    if (out_adhash_by_hash) out_adhash_by_hash->clear();
     size_t pos = 0;
     while (pos < payload.size()) {
         const size_t nl = payload.find('\n', pos);
@@ -705,11 +713,19 @@ bool parse_bcdb_block_results_text(
         if (end > pos) {
             const size_t tab = payload.find('\t', pos);
             if (tab == std::string::npos || tab >= end) return false;
+            const size_t tab2 = payload.find('\t', tab + 1);
+            if (tab2 == std::string::npos || tab2 >= end) return false;
             const std::string hash = payload.substr(pos, tab - pos);
-            const std::string hex = payload.substr(tab + 1, end - (tab + 1));
+            const std::string hex = payload.substr(tab + 1, tab2 - (tab + 1));
+            std::string adhash = payload.substr(tab2 + 1, end - (tab2 + 1));
+            if (adhash.size() != kResultAdhashBytes * 2) return false;
+            for (char c : adhash) {
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+            }
             std::string decoded;
             if (!hex_decode_string(hex, decoded)) return false;
             out_by_hash.emplace(hash, std::move(decoded));
+            if (out_adhash_by_hash) out_adhash_by_hash->emplace(hash, std::move(adhash));
         }
         pos = (nl == std::string::npos) ? payload.size() : (nl + 1);
     }
@@ -976,19 +992,10 @@ std::string hex_encode(const unsigned char* data, size_t len) {
     return oss.str();
 }
 
-std::string canonical_result_hash(const std::string& result) {
-#ifndef SSL_LIBRARY_NOT_FOUND
-    unsigned char md[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(result.data()),
-           static_cast<size_t>(result.size()),
-           md);
-    return hex_encode(md, SHA256_DIGEST_LENGTH);
-#else
-    return fnv1a64_hex(result);
-#endif
-}
-
 std::string sign_payload(const std::string& key, const std::string& payload) {
+    // Empty key: records are not signed one by one (Ed25519 mode seals the
+    // whole message instead, see result_envelope.hxx).
+    if (key.empty()) return std::string();
 #ifndef SSL_LIBRARY_NOT_FOUND
     unsigned int out_len = 0;
     unsigned char mac[EVP_MAX_MD_SIZE];
@@ -1016,14 +1023,18 @@ uint64_t now_steady_ns() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
 
-std::string make_sig_payload(uint64_t req_num,
-                             uint64_t raft_log_idx,
-                             const std::string& req_id,
-                             int node_id,
-                             int leader_node_id,
-                             const std::string& result_hash,
-                             uint64_t timestamp_ms,
-                             bool has_full_result)
+// Signed bytes of one B3 record.  The result is identified by its terminal
+// state and its two AdHashes (write then read, 32 hex chars); the result text
+// itself is not hashed or voted on.
+std::string make_sig_payload_v3(uint64_t req_num,
+                                uint64_t raft_log_idx,
+                                const std::string& req_id,
+                                int node_id,
+                                int leader_node_id,
+                                const std::string& terminal_state,
+                                const std::string& result_adhash,
+                                uint64_t timestamp_ms,
+                                bool has_full_result)
 {
     std::ostringstream oss;
     oss << req_num << "|"
@@ -1031,13 +1042,15 @@ std::string make_sig_payload(uint64_t req_num,
         << req_id << "|"
         << node_id << "|"
         << leader_node_id << "|"
-        << result_hash << "|"
+        << terminal_state << "|"
+        << result_adhash << "|"
         << kHashAlgo << "|"
         << timestamp_ms << "|"
         << (has_full_result ? 1 : 0);
     return oss.str();
 }
 
+// Signed bytes of one B4 record (safe ledger mode).
 std::string make_sig_payload_v4(uint64_t req_num,
                                  uint64_t raft_log_idx,
                                  uint32_t raft_item_ordinal,
@@ -1046,7 +1059,7 @@ std::string make_sig_payload_v4(uint64_t req_num,
                                  int leader_node_id,
                                  const std::string& epoch_hex,
                                  const std::string& terminal_state,
-                                 const std::string& terminal_digest,
+                                 const std::string& result_adhash,
                                  int format_version,
                                  uint64_t timestamp_ms,
                                  bool has_full_result)
@@ -1060,13 +1073,40 @@ std::string make_sig_payload_v4(uint64_t req_num,
         << leader_node_id << "|"
         << epoch_hex << "|"
         << terminal_state << "|"
-        << terminal_digest << "|"
+        << result_adhash << "|"
+        << kHashAlgo << "|"
         << format_version << "|"
         << timestamp_ms << "|"
         << (has_full_result ? 1 : 0);
     return oss.str();
 }
 
+namespace {
+
+// 32 lowercase hex chars (write AdHash then read AdHash).  Empty means the
+// backend reported none (non-deterministic or fallback execution): zeros.
+std::string normalized_result_adhash(const std::vector<std::string>& result_adhashes,
+                                     size_t i,
+                                     const std::string& req_id) {
+    std::string hex = (i < result_adhashes.size()) ? result_adhashes[i] : std::string();
+    if (hex.empty()) hex.assign(kResultAdhashBytes * 2, '0');
+    bool ok = (hex.size() == kResultAdhashBytes * 2);
+    for (char c : hex) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) ok = false;
+    }
+    if (!ok) {
+        std::cerr << "build_batch_payload: FATAL: invalid result_adhash='" << hex
+                  << "' for req_id=" << req_id << std::endl;
+        std::abort();
+    }
+    return hex;
+}
+
+}  // namespace
+
+// result_adhashes[i]: 32 hex chars (ConfirmedResult::result_adhash); empty or
+// missing entries are sent as zero.  terminal_digests is no longer sent: the
+// vote is on the terminal state and the AdHashes.
 std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
                                        const std::vector<std::string>& results,
                                        const std::vector<uint64_t>& raft_log_idxs,
@@ -1078,14 +1118,16 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
                                        uint16_t node_id,
                                        const std::string& sig_key,
                                        const std::string& raft_epoch_hex,
-                                       bool safe_ledger_mode)
+                                       bool safe_ledger_mode,
+                                       const std::vector<std::string>& result_adhashes = std::vector<std::string>())
 {
+    (void) terminal_digests;
     std::string out;
     out.reserve(8 + req_ids.size() * 128);
 
     // Encode to B4 only if safe ledger mode is active.
     if (safe_ledger_mode) {
-        if (safe_ledger_mode && raft_epoch_hex.empty()) {
+        if (raft_epoch_hex.empty()) {
             std::cerr << "build_bin_batch_payload_v2: FATAL: epoch is empty in safe mode" << std::endl;
             std::abort();
         }
@@ -1097,21 +1139,15 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
 
         std::vector<uint8_t> epoch_bytes = decode_hex_string(raft_epoch_hex);
         if (epoch_bytes.size() != 32) {
-            if (safe_ledger_mode) {
-                std::cerr << "build_bin_batch_payload_v2: FATAL: invalid epoch length for epoch=" << raft_epoch_hex << std::endl;
-                std::abort();
-            }
-            epoch_bytes.assign(32, 0);
+            std::cerr << "build_bin_batch_payload_v2: FATAL: invalid epoch length for epoch=" << raft_epoch_hex << std::endl;
+            std::abort();
         }
 
         for (size_t i = 0; i < req_ids.size(); ++i) {
             uint64_t req_num = 0;
             if (!parse_req_num(req_ids[i], req_num)) {
-                if (safe_ledger_mode) {
-                    std::cerr << "build_bin_batch_payload_v2: FATAL: cannot parse req_num from req_id='" << req_ids[i] << "' in safe mode" << std::endl;
-                    std::abort();
-                }
-                req_num = static_cast<uint64_t>(std::hash<std::string>{}(req_ids[i]));
+                std::cerr << "build_bin_batch_payload_v2: FATAL: cannot parse req_num from req_id='" << req_ids[i] << "' in safe mode" << std::endl;
+                std::abort();
             }
 
             const int leader_node_id = (i < leader_node_hints.size()) ? leader_node_hints[i] : -1;
@@ -1141,25 +1177,8 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
                  (full_result_limit > 0 && static_cast<int>(node_id) <= full_result_limit));
             const uint64_t ts_ms = now_epoch_ms();
 
-            std::string term_digest_hex;
-            if (i < terminal_digests.size() && terminal_digests[i].size() == 64) {
-                term_digest_hex = terminal_digests[i];
-            } else {
-                if (safe_ledger_mode) {
-                    std::cerr << "build_bin_batch_payload_v2: FATAL: missing 64-hex terminal digest in safe mode for req_id="
-                              << req_ids[i] << " log_idx=" << raft_log_idx << std::endl;
-                    std::abort();
-                }
-                term_digest_hex = canonical_result_hash(results[i]);
-            }
-            std::vector<uint8_t> digest_bytes = decode_hex_string(term_digest_hex);
-            if (digest_bytes.size() != 32) {
-                if (safe_ledger_mode) {
-                    std::cerr << "build_bin_batch_payload_v2: FATAL: invalid terminal digest size for term_digest_hex=" << term_digest_hex << std::endl;
-                    std::abort();
-                }
-                digest_bytes.assign(32, 0);
-            }
+            const std::string adhash_hex = normalized_result_adhash(result_adhashes, i, req_ids[i]);
+            const std::vector<uint8_t> adhash_bytes = decode_hex_string(adhash_hex);
 
             const std::string sig_payload = make_sig_payload_v4(
                 req_num,
@@ -1170,7 +1189,7 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
                 leader_node_id,
                 raft_epoch_hex,
                 term_state,
-                term_digest_hex,
+                adhash_hex,
                 format_ver,
                 ts_ms,
                 include_full_result
@@ -1201,7 +1220,7 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
 
             // variable part of record
             out.append(reinterpret_cast<const char*>(epoch_bytes.data()), 32);
-            out.append(reinterpret_cast<const char*>(digest_bytes.data()), 32);
+            out.append(reinterpret_cast<const char*>(adhash_bytes.data()), kResultAdhashBytes);
             out.append(req_ids[i]);
             out.append(sig);
             if (include_full_result) {
@@ -1211,7 +1230,7 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
         return out;
     }
 
-    // B3 format fallback
+    // B3 format (ledger off)
     out.push_back('B');
     out.push_back('3');
     append_u16_le(out, static_cast<uint16_t>(req_ids.size()));
@@ -1220,37 +1239,33 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
     for (size_t i = 0; i < req_ids.size(); ++i) {
         uint64_t req_num = 0;
         if (!parse_req_num(req_ids[i], req_num)) {
-            if (safe_ledger_mode) {
-                std::cerr << "build_bin_batch_payload: FATAL: cannot parse req_num from req_id='" << req_ids[i] << "' in safe mode" << std::endl;
-                std::abort();
-            }
             // Fallback hash keeps the pipeline alive for unexpected req ids in legacy mode.
             req_num = static_cast<uint64_t>(std::hash<std::string>{}(req_ids[i]));
         }
 
         const int leader_node_id = (i < leader_node_hints.size()) ? leader_node_hints[i] : -1;
         const uint64_t raft_log_idx = (i < raft_log_idxs.size()) ? raft_log_idxs[i] : 0;
+        const bool is_error = (i < terminal_states.size()) && terminal_states[i] != "OK";
+        const std::string term_state = is_error ? "ERROR" : "OK";
         const int full_result_limit = full_result_replica_limit();
         const bool include_full_result =
             (full_result_limit == 0 ||
              (full_result_limit > 0 && static_cast<int>(node_id) <= full_result_limit));
         const uint64_t ts_ms = now_epoch_ms();
-        std::string result_hash;
-        if (i < terminal_digests.size() && terminal_digests[i].size() == 64) {
-            result_hash = terminal_digests[i];
-        } else {
-            result_hash = canonical_result_hash(results[i]);
-        }
-        const std::string sig_payload = make_sig_payload(req_num,
-                                                         raft_log_idx,
-                                                         req_ids[i],
-                                                         static_cast<int>(node_id),
-                                                         leader_node_id,
-                                                         result_hash,
-                                                         ts_ms,
-                                                         include_full_result);
+        const std::string adhash_hex = normalized_result_adhash(result_adhashes, i, req_ids[i]);
+        const std::vector<uint8_t> adhash_bytes = decode_hex_string(adhash_hex);
+        const std::string sig_payload = make_sig_payload_v3(req_num,
+                                                            raft_log_idx,
+                                                            req_ids[i],
+                                                            static_cast<int>(node_id),
+                                                            leader_node_id,
+                                                            term_state,
+                                                            adhash_hex,
+                                                            ts_ms,
+                                                            include_full_result);
         const std::string sig = sign_payload(sig_key, sig_payload);
-        const uint8_t flags = include_full_result ? 0x1u : 0x0u;
+        const uint8_t flags = static_cast<uint8_t>((include_full_result ? 0x1u : 0x0u) |
+                                                   (is_error ? 0x2u : 0x0u));
 
         append_u64_le(out, req_num);
         append_u64_le(out, raft_log_idx);
@@ -1260,11 +1275,10 @@ std::string build_bin_batch_payload_v2(const std::vector<std::string>& req_ids,
         append_u8(out, flags);
         append_u8(out, kHashAlgoId);
         append_u16_le(out, static_cast<uint16_t>(req_ids[i].size()));
-        append_u16_le(out, static_cast<uint16_t>(result_hash.size()));
         append_u16_le(out, static_cast<uint16_t>(sig.size()));
         append_u32_le(out, static_cast<uint32_t>(include_full_result ? results[i].size() : 0));
+        out.append(reinterpret_cast<const char*>(adhash_bytes.data()), kResultAdhashBytes);
         out.append(req_ids[i]);
-        out.append(result_hash);
         out.append(sig);
         if (include_full_result) {
             out.append(results[i]);
@@ -1289,8 +1303,10 @@ std::string build_text_batch_payload(const std::vector<std::string>& req_ids,
                                      uint16_t node_id,
                                      const std::string& sig_key,
                                      const std::string& raft_epoch_hex,
-                                     bool safe_ledger_mode)
+                                     bool safe_ledger_mode,
+                                     const std::vector<std::string>& result_adhashes)
 {
+    (void) terminal_digests;
     std::string out;
     out.reserve(req_ids.size() * 128);
 
@@ -1309,12 +1325,8 @@ std::string build_text_batch_payload(const std::vector<std::string>& req_ids,
         const uint64_t raft_log_idx = (i < raft_log_idxs.size()) ? raft_log_idxs[i] : 0;
         const uint32_t raft_item_ordinal = (i < raft_item_ordinals.size()) ? raft_item_ordinals[i] : 0;
 
-        std::string term_digest_hex;
-        if (i < terminal_digests.size() && terminal_digests[i].size() == 64) {
-            term_digest_hex = terminal_digests[i];
-        } else {
-            term_digest_hex = canonical_result_hash(results[i]);
-        }
+        // The digest column carries the write+read AdHash pair (32 hex).
+        const std::string term_digest_hex = normalized_result_adhash(result_adhashes, i, req_ids[i]);
 
         out += "T1\t";
         out += std::to_string(req_num) + "\t";
@@ -1343,16 +1355,19 @@ std::string build_batch_payload(const std::vector<std::string>& req_ids,
                                 uint16_t node_id,
                                 const std::string& sig_key,
                                 const std::string& raft_epoch_hex,
-                                bool safe_ledger_mode)
+                                bool safe_ledger_mode,
+                                const std::vector<std::string>& result_adhashes = std::vector<std::string>())
 {
     if (is_kafka_text_format()) {
         return build_text_batch_payload(req_ids, results, raft_log_idxs, leader_node_hints,
                                         terminal_digests, raft_item_ordinals, terminal_states,
-                                        format_versions, node_id, sig_key, raft_epoch_hex, safe_ledger_mode);
+                                        format_versions, node_id, sig_key, raft_epoch_hex, safe_ledger_mode,
+                                        result_adhashes);
     }
     return build_bin_batch_payload_v2(req_ids, results, raft_log_idxs, leader_node_hints,
                                       terminal_digests, raft_item_ordinals, terminal_states,
-                                      format_versions, node_id, sig_key, raft_epoch_hex, safe_ledger_mode);
+                                      format_versions, node_id, sig_key, raft_epoch_hex, safe_ledger_mode,
+                                      result_adhashes);
 }
 
 static std::string hex_preview(const std::string& input)
@@ -1465,6 +1480,56 @@ void trigger_safe_failpoint(const char* name,
 }
 
 } // namespace
+
+void pg_executor::configure_result_signing() {
+    const std::string mode = kafka_opt_.result_sig_mode.empty() ? "auto" : kafka_opt_.result_sig_mode;
+    std::string key_file = kafka_opt_.result_sign_key_file;
+    if (key_file.empty()) {
+        const std::string dir = resolve_key_dir(kafka_opt_.key_dir);
+        if (!dir.empty()) key_file = private_key_path(dir, "node", static_cast<uint32_t>(node_id_));
+    }
+    const bool want = (mode == "ed25519") || (mode == "auto" && key_file_exists(key_file));
+    if (!want) {
+        if (kafka_opt_.bootstrap.empty()) return;
+        std::cout << "RESULT_SIG_MODE=hmac node=" << node_id_
+                  << " (WARNING: shared key; any replica can forge another replica's results"
+                  << (mode == "auto" ? "; no node key at " + key_file : std::string())
+                  << ")" << std::endl;
+        return;
+    }
+    std::shared_ptr<ed25519_private_key> key(new ed25519_private_key());
+    std::string err;
+    if (key_file.empty() || !key->load_pem_file(key_file, err)) {
+        throw std::runtime_error("result signing key unusable for node " + std::to_string(node_id_) +
+                                 ": " + (key_file.empty() ? std::string("no key file") : err));
+    }
+    if (key->readable_by_others()) {
+        std::cerr << "WARNING: result signing key " << key_file
+                  << " is readable by group/others (chmod 600)" << std::endl;
+    }
+    result_signer_ = key;
+    result_sig_key_.clear();  // no per-record HMAC: the message signature covers every record
+    std::cout << "RESULT_SIG_MODE=ed25519 node=" << node_id_ << " key_file=" << key_file
+              << " pub=" << result_signer_->public_fingerprint() << std::endl;
+}
+
+std::string pg_executor::seal_result_payload(std::string inner) {
+    if (!result_signer_) return inner;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string sealed;
+    if (!seal_result_envelope(*result_signer_, static_cast<uint16_t>(node_id_), inner, sealed)) {
+        // Unsigned output would be rejected by every gateway anyway; fail loudly.
+        std::cerr << "RESULT_SIG_FAILED node=" << node_id_ << ": Ed25519 signing error" << std::endl;
+        std::abort();
+    }
+    st_result_sig_ns_.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t0).count()),
+        std::memory_order_relaxed);
+    st_result_sig_messages_.fetch_add(1, std::memory_order_relaxed);
+    return sealed;
+}
+
 
 pg_executor::ConfirmedResult pg_executor::accept_safe_confirmed_result(const pg_executor::task& t, const std::string& raw_backend_result) {
     if (t.raft_log_idx == 0) {
@@ -2371,6 +2436,7 @@ pg_executor::pg_executor(int node_id,
             result_sig_key_ = kDefaultResultSigKey;
         }
     }
+    configure_result_signing();
 
     // Kafka producer (optional).
     if (!kafka_opt_.bootstrap.empty()) {
@@ -2944,6 +3010,9 @@ pg_executor_stats pg_executor::stats() const {
     out.kafka_flush_calls = st_kafka_flush_calls_.load(std::memory_order_relaxed);
     out.kafka_payload_bytes = st_kafka_payload_bytes_.load(std::memory_order_relaxed);
     out.kafka_build_payload_ns = st_kafka_build_payload_ns_.load(std::memory_order_relaxed);
+    out.result_sig_mode = result_signer_ ? "ed25519" : "hmac";
+    out.result_sig_messages = st_result_sig_messages_.load(std::memory_order_relaxed);
+    out.result_sig_ns = st_result_sig_ns_.load(std::memory_order_relaxed);
     out.kafka_send_ns = st_kafka_send_ns_.load(std::memory_order_relaxed);
     out.kafka_batch_records = st_kafka_batch_records_.load(std::memory_order_relaxed);
     out.kafka_batch_records_max = st_kafka_batch_records_max_.load(std::memory_order_relaxed);
@@ -3128,6 +3197,7 @@ void pg_executor::enqueue_kafka_result(const task& t, const ConfirmedResult& con
     rec.raft_log_idx = t.raft_log_idx;
     rec.leader_hint = t.leader_node_hint;
     rec.terminal_digest = confirmed.terminal_digest;
+    rec.result_adhash = confirmed.result_adhash;
     rec.append_ns = now_steady_ns();
     rec.raft_item_ordinal = t.raft_item_ordinal;
     rec.terminal_state = confirmed.terminal_state;
@@ -3175,6 +3245,7 @@ void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& b
     std::vector<uint64_t> batch_raft_log_idxs;
     std::vector<int> batch_leader_hints;
     std::vector<std::string> batch_terminal_digests;
+    std::vector<std::string> batch_result_adhashes;
     std::vector<uint32_t> batch_raft_item_ordinals;
     std::vector<std::string> batch_terminal_states;
     std::vector<int> batch_format_versions;
@@ -3183,6 +3254,7 @@ void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& b
     batch_raft_log_idxs.reserve(batch.size());
     batch_leader_hints.reserve(batch.size());
     batch_terminal_digests.reserve(batch.size());
+    batch_result_adhashes.reserve(batch.size());
     batch_raft_item_ordinals.reserve(batch.size());
     batch_terminal_states.reserve(batch.size());
     batch_format_versions.reserve(batch.size());
@@ -3195,6 +3267,7 @@ void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& b
         batch_raft_log_idxs.push_back(rec.raft_log_idx);
         batch_leader_hints.push_back(rec.leader_hint);
         batch_terminal_digests.push_back(rec.terminal_digest);
+        batch_result_adhashes.push_back(rec.result_adhash);
         batch_raft_item_ordinals.push_back(rec.raft_item_ordinal);
         batch_terminal_states.push_back(rec.terminal_state);
         batch_format_versions.push_back(rec.format_version);
@@ -3282,7 +3355,7 @@ void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& b
 
     std::string err;
     const auto b0 = std::chrono::steady_clock::now();
-    const std::string payload = build_batch_payload(
+    const std::string payload = seal_result_payload(build_batch_payload(
         batch_req_ids,
         batch_results,
         batch_raft_log_idxs,
@@ -3294,7 +3367,8 @@ void pg_executor::publish_kafka_result_batch(std::vector<kafka_result_record>& b
         static_cast<uint16_t>(node_id_),
         result_sig_key_,
         db_opt_.raft_epoch_hex,
-        false);
+        false,
+        batch_result_adhashes));
     const auto b1 = std::chrono::steady_clock::now();
     st_kafka_build_payload_ns_.fetch_add(
         static_cast<uint64_t>(
@@ -3908,6 +3982,7 @@ void pg_executor::worker_loop() {
     std::vector<uint64_t> batch_raft_log_idxs;
     std::vector<int> batch_leader_hints;
     std::vector<std::string> batch_terminal_digests;
+    std::vector<std::string> batch_result_adhashes;
     std::vector<uint64_t> batch_append_ns;
     std::vector<uint32_t> batch_raft_item_ordinals;
     std::vector<std::string> batch_terminal_states;
@@ -3944,6 +4019,7 @@ void pg_executor::worker_loop() {
             batch_raft_log_idxs.clear();
             batch_leader_hints.clear();
             batch_terminal_digests.clear();
+            batch_result_adhashes.clear();
             batch_append_ns.clear();
             batch_raft_item_ordinals.clear();
             batch_terminal_states.clear();
@@ -4048,7 +4124,7 @@ void pg_executor::worker_loop() {
         // send ONCE. The consumer (gateway) already decodes 'B3' payloads
         // with N>1 records via parse_kafka_payload_records.
         const auto b0 = std::chrono::steady_clock::now();
-        const std::string payload = build_batch_payload(
+        const std::string payload = seal_result_payload(build_batch_payload(
             batch_req_ids,
             batch_results,
             batch_raft_log_idxs,
@@ -4060,7 +4136,8 @@ void pg_executor::worker_loop() {
             static_cast<uint16_t>(node_id_),
             result_sig_key_,
             db_opt_.raft_epoch_hex,
-            db_opt_.raft_apply_ledger_mode == "safe");
+            db_opt_.raft_apply_ledger_mode == "safe",
+            batch_result_adhashes));
         const auto b1 = std::chrono::steady_clock::now();
         st_kafka_build_payload_ns_.fetch_add(
             static_cast<uint64_t>(
@@ -4139,6 +4216,7 @@ void pg_executor::worker_loop() {
         batch_raft_log_idxs.clear();
         batch_leader_hints.clear();
         batch_terminal_digests.clear();
+        batch_result_adhashes.clear();
         batch_append_ns.clear();
         batch_raft_item_ordinals.clear();
         batch_terminal_states.clear();
@@ -4265,6 +4343,7 @@ void pg_executor::worker_loop() {
                         batch_raft_log_idxs.push_back(t.raft_log_idx);
                         batch_leader_hints.push_back(t.leader_node_hint);
                         batch_terminal_digests.push_back(""); // non-det loop doesn't have terminal digest yet
+                        batch_result_adhashes.push_back("");
                         batch_append_ns.push_back(now_steady_ns());
                         batch_raft_item_ordinals.push_back(t.raft_item_ordinal);
                         batch_terminal_states.push_back("ERROR");
@@ -4461,6 +4540,7 @@ void pg_executor::worker_loop() {
                     batch_raft_log_idxs.push_back(t.raft_log_idx);
                     batch_leader_hints.push_back(t.leader_node_hint);
                     batch_terminal_digests.push_back(confirmed.terminal_digest);
+                    batch_result_adhashes.push_back(confirmed.result_adhash);
                     batch_append_ns.push_back(now_steady_ns());
                     batch_raft_item_ordinals.push_back(t.raft_item_ordinal);
                     batch_terminal_states.push_back(confirmed.terminal_state);
@@ -4542,6 +4622,7 @@ void pg_executor::event_loop() {
     std::vector<uint64_t> batch_raft_log_idxs;
     std::vector<int> batch_leader_hints;
     std::vector<std::string> batch_terminal_digests;
+    std::vector<std::string> batch_result_adhashes;
     std::vector<uint64_t> batch_append_ns;
     std::vector<uint32_t> batch_raft_item_ordinals;
     std::vector<std::string> batch_terminal_states;
@@ -4578,6 +4659,7 @@ void pg_executor::event_loop() {
             batch_raft_log_idxs.clear();
             batch_leader_hints.clear();
             batch_terminal_digests.clear();
+            batch_result_adhashes.clear();
             batch_append_ns.clear();
             batch_raft_item_ordinals.clear();
             batch_terminal_states.clear();
@@ -4680,7 +4762,7 @@ void pg_executor::event_loop() {
         std::string err;
         // True batching: build ONE multi-record payload, send ONCE.
         const auto b0 = std::chrono::steady_clock::now();
-        const std::string payload = build_batch_payload(
+        const std::string payload = seal_result_payload(build_batch_payload(
             batch_req_ids,
             batch_results,
             batch_raft_log_idxs,
@@ -4692,7 +4774,8 @@ void pg_executor::event_loop() {
             static_cast<uint16_t>(node_id_),
             result_sig_key_,
             db_opt_.raft_epoch_hex,
-            db_opt_.raft_apply_ledger_mode == "safe");
+            db_opt_.raft_apply_ledger_mode == "safe",
+            batch_result_adhashes));
         const auto b1 = std::chrono::steady_clock::now();
         st_kafka_build_payload_ns_.fetch_add(
             static_cast<uint64_t>(
@@ -4771,6 +4854,7 @@ void pg_executor::event_loop() {
         batch_raft_log_idxs.clear();
         batch_leader_hints.clear();
         batch_terminal_digests.clear();
+        batch_result_adhashes.clear();
         batch_append_ns.clear();
         batch_raft_item_ordinals.clear();
         batch_terminal_states.clear();
@@ -4784,6 +4868,7 @@ void pg_executor::event_loop() {
     struct ready_det_block {
         std::vector<task> tasks;
         std::vector<std::string> results;
+        std::vector<std::string> adhashes;  // 32 hex per task; empty = none reported
         std::vector<bool> errors;
         uint64_t ready_ns = 0;
     };
@@ -4793,7 +4878,7 @@ void pg_executor::event_loop() {
     uint64_t last_inflight_sample_ns = now_steady_ns();
     size_t last_inflight_level = 0;
 
-    auto emit_det_result = [&](const task& done_task, const std::string& out, bool is_error = false, const std::string& terminal_digest = "", const std::string& terminal_state = "", int format_version = 1) {
+    auto emit_det_result = [&](const task& done_task, const std::string& out, bool is_error = false, const std::string& terminal_digest = "", const std::string& terminal_state = "", int format_version = 1, const std::string& result_adhash = "") {
         if (is_expected_user_abort_result(out))
             st_user_aborts_.fetch_add(1, std::memory_order_relaxed);
         const std::string eff_terminal_state =
@@ -4807,6 +4892,7 @@ void pg_executor::event_loop() {
                     ConfirmedResult conf;
                     conf.payload = out;
                     conf.terminal_digest = terminal_digest;
+                    conf.result_adhash = result_adhash;
                     conf.terminal_state = eff_terminal_state;
                     conf.format_version = format_version;
                     enqueue_kafka_result(done_task, conf);
@@ -4834,6 +4920,7 @@ void pg_executor::event_loop() {
                     batch_raft_log_idxs.push_back(done_task.raft_log_idx);
                     batch_leader_hints.push_back(done_task.leader_node_hint);
                     batch_terminal_digests.push_back(terminal_digest);
+                    batch_result_adhashes.push_back(result_adhash);
                     batch_append_ns.push_back(now_steady_ns());
                     batch_raft_item_ordinals.push_back(done_task.raft_item_ordinal);
                     batch_terminal_states.push_back(eff_terminal_state);
@@ -4908,6 +4995,7 @@ void pg_executor::event_loop() {
                               << std::endl;
                 }
                 ConfirmedResult conf = accept_safe_confirmed_result(ready.tasks[i], ready.results[i]);
+                if (i < ready.adhashes.size()) conf.result_adhash = ready.adhashes[i];
                 // Fail closed: do not publish Kafka and do not advance Raft applied tracker
                 if (conf.raft_log_index == static_cast<uint64_t>(-1)) {
                     std::cerr << "SAFE_PROTOCOL_FAILURE_NOT_APPLIED"
@@ -4926,7 +5014,8 @@ void pg_executor::event_loop() {
                     conf.terminal_state == "ERROR",
                     conf.terminal_digest,
                     conf.terminal_state,
-                    conf.format_version
+                    conf.format_version,
+                    conf.result_adhash
                 );
                 if (db_opt_.raft_apply_ledger_mode == "safe" &&
                     kafka_enabled_ &&
@@ -5011,7 +5100,8 @@ void pg_executor::event_loop() {
             conf.terminal_state == "ERROR",
             conf.terminal_digest,
             conf.terminal_state,
-            conf.format_version
+            conf.format_version,
+            conf.result_adhash
         );
         if (db_opt_.raft_apply_ledger_mode == "safe" &&
             kafka_enabled_ &&
@@ -5833,11 +5923,14 @@ void pg_executor::event_loop() {
                         const auto f0 = std::chrono::steady_clock::now();
                         const char* val = PQgetvalue(last, 0, 0);
                         std::unordered_map<std::string, std::string> result_by_hash;
+                        std::unordered_map<std::string, std::string> adhash_by_hash;
                         batch_ok = parse_bcdb_block_results_text(
                             val ? std::string(val) : std::string(),
-                            result_by_hash);
+                            result_by_hash,
+                            &adhash_by_hash);
                         if (batch_ok) {
                             ready.results.assign(ready.tasks.size(), "");
+                            ready.adhashes.assign(ready.tasks.size(), "");
                             ready.errors.assign(ready.tasks.size(), false);
                             for (size_t i = 0; i < ready.tasks.size(); ++i) {
                                 if (backend_mask[i] == 0) {
@@ -5852,6 +5945,8 @@ void pg_executor::event_loop() {
                                     break;
                                 }
                                 ready.results[i] = it->second;
+                                auto ait = adhash_by_hash.find(key);
+                                if (ait != adhash_by_hash.end()) ready.adhashes[i] = ait->second;
                             }
                         }
                         const auto f1 = std::chrono::steady_clock::now();
@@ -5879,6 +5974,7 @@ void pg_executor::event_loop() {
                         }
                         ready.results.clear();
                         ready.results.reserve(ready.tasks.size());
+                        ready.adhashes.clear();  // fallback execution reports no AdHash
                         ready.errors.clear();
                         ready.errors.reserve(ready.tasks.size());
                         for (size_t i = 0; i < ready.tasks.size(); ++i) {
@@ -6130,8 +6226,9 @@ std::string test_build_bin_batch_payload_v2(const std::vector<std::string>& req_
                                             uint16_t node_id,
                                             const std::string& sig_key,
                                             const std::string& raft_epoch_hex,
-                                            bool safe_ledger_mode) {
-    return build_bin_batch_payload_v2(req_ids, results, raft_log_idxs, leader_node_hints, terminal_digests, raft_item_ordinals, terminal_states, format_versions, node_id, sig_key, raft_epoch_hex, safe_ledger_mode);
+                                            bool safe_ledger_mode,
+                                            const std::vector<std::string>& result_adhashes) {
+    return build_bin_batch_payload_v2(req_ids, results, raft_log_idxs, leader_node_hints, terminal_digests, raft_item_ordinals, terminal_states, format_versions, node_id, sig_key, raft_epoch_hex, safe_ledger_mode, result_adhashes);
 }
 }
 #endif

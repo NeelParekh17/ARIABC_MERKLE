@@ -12,7 +12,9 @@ const uint32_t kMaxSqlBytes = 64u * 1024u * 1024u;
 const uint32_t kMaxMsgBytes = 16u * 1024u * 1024u;
 const uint32_t kBatchFrameTag = 0xFFFFFFFFu;
 const uint32_t kSingleRequestFrameV2Tag = 0xFFFFFFFEu;
-const uint32_t kBatchFrameV2Tag = 0xFFFFFFFDu;
+// Signed frames, see wire_protocol.cxx.
+const uint32_t kSingleRequestFrameSigTag = 0xFFFFFFFBu;
+const uint32_t kBatchFrameV2Tag = 0xFFFFFFFCu;
 const uint32_t kMaxBatchItems = 4096u;
 const uint32_t kRequestFlagWaitForTerminal = 0x1u;
 const uint32_t kRequestFlagHasTxTag = 0x2u;
@@ -43,7 +45,7 @@ bool encode_request_frame(const client_api_request& req, std::string& out, std::
         }
         if (req.wait_for_terminal || req.has_tx_tag) {
             out.reserve(20 + kTxTagBytes + req.req_id.size() + req.sql.size());
-            append_u32_be(out, kSingleRequestFrameV2Tag);
+            append_u32_be(out, req.has_tx_tag ? kSingleRequestFrameSigTag : kSingleRequestFrameV2Tag);
             append_u32_be(out, (req.wait_for_terminal ? kRequestFlagWaitForTerminal : 0u) |
                                (req.has_tx_tag ? kRequestFlagHasTxTag : 0u));
             append_u32_be(out, req.terminal_timeout_ms);
@@ -131,7 +133,7 @@ decode_status try_decode_request_frame(io_buffer& buf, client_api_request& out_r
     out_req.wait_for_terminal = false;
     out_req.terminal_timeout_ms = 30000;
 
-    if (header == kSingleRequestFrameV2Tag) {
+    if (header == kSingleRequestFrameV2Tag || header == kSingleRequestFrameSigTag) {
         if (avail < 20) return decode_status::NEED_MORE;
         uint32_t flags = 0;
         uint32_t timeout_ms = 0;
@@ -149,6 +151,10 @@ decode_status try_decode_request_frame(io_buffer& buf, client_api_request& out_r
             return decode_status::ERROR;
         }
         const bool has_tag = (flags & kRequestFlagHasTxTag) != 0;
+        if (has_tag && header != kSingleRequestFrameSigTag) {
+            err = "retired request tag format (32-byte BLAKE3); upgrade the gateway";
+            return decode_status::ERROR;
+        }
         const size_t body = 20ull + (has_tag ? kTxTagBytes : 0u);
         const size_t total = body + static_cast<size_t>(req_len) +
                              static_cast<size_t>(sql_len);

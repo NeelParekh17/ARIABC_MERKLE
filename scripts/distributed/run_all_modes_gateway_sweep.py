@@ -187,7 +187,7 @@ def restore_tpcc_db(args, warehouses, enable_merkle):
         {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'ALTER TABLE warehouse SET LOGGED; ALTER TABLE district SET LOGGED; ALTER TABLE customer SET LOGGED; ALTER TABLE history SET LOGGED; ALTER TABLE oorder SET LOGGED; ALTER TABLE order_line SET LOGGED; ALTER TABLE new_order SET LOGGED; ALTER TABLE stock SET LOGGED; ALTER TABLE item SET LOGGED;' 2>&1
 
         # Create stored procs, indexes, and merkle indexes across all 9 tables (in-memory parallel builds)
-        {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_merkle_lookup_am={args.merkle_lookup_am} -v bench_merkle_lookup_levels={args.merkle_lookup_levels} -v bench_merkle_lookup_size={args.merkle_lookup_size} -v bench_merkle_lookup_ratio={args.merkle_lookup_size_ratio} -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -v bench_merkle_split_threshold={args.tpcc_merkle_split_threshold} -v bench_merkle_merge_threshold={args.tpcc_merkle_merge_threshold} -v bench_merkle_partition_key_columns={args.tpcc_merkle_partition_key_columns} -v bench_merkle_subpartitions={args.tpcc_merkle_subpartitions} -f {repo}/scripts/tpcc_v3/tpcc_procs.sql 2>&1
+        {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -v bench_merkle_lookup_am={args.merkle_lookup_am} -v bench_merkle_lookup_levels={args.merkle_lookup_levels} -v bench_merkle_lookup_size={args.merkle_lookup_size} -v bench_merkle_lookup_ratio={args.merkle_lookup_size_ratio} -v bench_merkle_lookup_mode={args.merkle_lookup_mode} -v bench_enable_merkle={merkle_val} -v bench_merkle_fanout={args.tpcc_merkle_fanout} -v bench_merkle_partitions={args.tpcc_merkle_partitions} -v bench_merkle_split_threshold={args.tpcc_merkle_split_threshold} -v bench_merkle_merge_threshold={args.tpcc_merkle_merge_threshold} -v bench_merkle_partition_key_columns={args.tpcc_merkle_partition_key_columns} -v bench_merkle_subpartitions={args.tpcc_merkle_subpartitions} -f {repo}/scripts/tpcc_v3/tpcc_procs.sql 2>&1
 
         # Fast ANALYZE (freshly inserted rows have zero dead tuples, VACUUM is redundant)
         {psql} -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p {port} -U postgres -d postgres -c 'ANALYZE public.warehouse, public.district, public.customer, public.stock, public.item, public.oorder, public.new_order, public.order_line, public.history;' >/dev/null
@@ -447,6 +447,8 @@ def main():
         pass
     parser = argparse.ArgumentParser(description="Multi-Mode Gateway Benchmark Sweep")
     parser.add_argument("--merkle-lookup-am", choices=("btree", "merkle_lsm"), default="merkle_lsm")
+    parser.add_argument("--merkle-lookup-mode", choices=("tuplehash", "keyhash"), default="tuplehash",
+                        help="lookup index columns: tuplehash (partition, key hash, tuple hash) or keyhash (partition, key hash, key)")
     parser.add_argument("--merkle-lookup-levels", type=int, choices=(2,3,4), default=3)
     parser.add_argument("--merkle-lookup-size-ratio", type=int, default=16)
     parser.add_argument("--merkle-lookup-size", type=int, default=1024)

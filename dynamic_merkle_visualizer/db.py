@@ -318,7 +318,7 @@ class Inspector:
                     if not isinstance(locator, dict) or not re.fullmatch(r"\(\d+,\d+\)", str(locator.get("ctid", ""))) or not re.fullmatch(r"\d+", str(locator.get("xmin", ""))):
                         raise InspectorError("Select a current row before editing or deleting it")
                     row_hash = locator.get("hash", "")
-                    if not re.fullmatch(r"[0-9a-f]{64}", str(row_hash)):
+                    if not re.fullmatch(r"[0-9a-f]{16}", str(row_hash)):
                         raise InspectorError("The selected row must include its native hash")
                     where = sql.SQL("t.ctid=%s::tid AND t.xmin::text=%s AND encode(merkle_tuple_hash(t),'hex')=%s")
                     params = [locator["ctid"], locator["xmin"], row_hash]

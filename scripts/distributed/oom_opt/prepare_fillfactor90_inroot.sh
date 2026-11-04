@@ -78,6 +78,7 @@ VACUUM (FULL, ANALYZE) usertable;
 CREATE INDEX usertable_merkle_idx ON usertable USING merkle (ycsb_key)
     WITH (partitions=200, fanout=32, split_threshold=1024, merge_threshold=256);
 CREATE EXTENSION IF NOT EXISTS merkle_lsm;
+ALTER EXTENSION merkle_lsm UPDATE;
 SELECT merkle_create_lookup_index('usertable');
 ANALYZE usertable;
 ANALYZE ariabc_internal.merkle_node_usertable;

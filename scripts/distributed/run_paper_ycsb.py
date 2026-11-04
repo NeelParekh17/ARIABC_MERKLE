@@ -63,7 +63,7 @@ ENVIRONMENT = {
     # WAIT_RESULTS accepts at most 600000 ms in the installed server protocol.
     "ARIABC_GATEWAY_DISPATCH_WORKERS": "8", "ARIABC_WAIT_RESULT_TIMEOUT_MS": "600000",
     # The saved runner uses compact unsigned T1 receipts inside the trusted lab.
-    # Transaction BLAKE3 authentication remains enabled; full state is checked.
+    # Per-client Ed25519 request signatures remain enabled; full state is checked.
     "ARIABC_TRUSTED_RESULT_SIG_FASTPATH": "1",
 }
 
@@ -459,7 +459,7 @@ class Campaign:
                 "--detClientMode", "event", "--detClientWorkers", "1" if marker else "96",
                 "--detClientInflight", "1" if marker else "16", "--numTerminals", "1" if marker else "96",
                 "--clientId", "paper-marker" if marker else "paper-ycsb", "--connFanout", "1",
-                "--txSign", "blake3", "--totalNodes", str(len(hosts))]
+                "--txSign", "ed25519", "--totalNodes", str(len(hosts))]
         if cluster:
             argv += ["--raft-node-ids", "1,2,4", "--kafkaBootstrap",
                      ",".join(f"{h}:{PORTS['kafka']}" for h in HOSTS), "--resultTopic", case.name,
@@ -491,7 +491,7 @@ class Campaign:
             expected = dict(async_all3_verified_count=str(terminal_count), async_all3_failure_count="0",
                             async_all3_timeout_count="0", async_all3_missing_count="0",
                             async_all3_capacity_exhausted_count="0", audit_pending_current="0",
-                            kafka_parse_failures="0", tx_sign_mode="blake3")
+                            kafka_parse_failures="0", tx_sign_mode="ed25519")
             for nid in IDS:
                 expected[f"reply_records_from_node{nid}"] = str(terminal_count)
             for key, value in expected.items():

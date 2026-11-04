@@ -115,7 +115,13 @@ int main(int argc, char** argv) {
                   << " differing_leaves=" << st.differing_leaves
                   << " descent_levels=" << st.descent_levels
                   << " nodes_compared=" << st.nodes_compared
+                  << " leaf_mode_tables=" << st.leaf_mode_tables
+      << " tuplehash_mode_tables=" << st.tuplehash_mode_tables
+      << " entries_compared=" << st.entries_compared
+                  << " differing_entries=" << st.differing_entries
+                  << " ref_hash_bytes=" << st.ref_hash_bytes
                   << " candidate_rows=" << st.candidate_rows
+      << " ref_row_bytes=" << st.ref_row_bytes
                   << " rows_deleted=" << st.rows_deleted
                   << " rows_upserted=" << st.rows_upserted
                   << " localise_us=" << st.localise_us

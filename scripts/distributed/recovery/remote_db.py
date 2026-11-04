@@ -195,10 +195,10 @@ class NodeConnection:
                 accumulator = 0
                 for r in rows:
                     h = bytes(r["hash"])
-                    if len(h) != 32:
-                        raise ValueError("invalid 256-bit Merkle partition root")
-                    accumulator = (accumulator + int.from_bytes(h, "little")) % (1 << 256)
-                return accumulator.to_bytes(32, "little").hex()
+                    if len(h) != 8:
+                        raise ValueError("invalid 64-bit Merkle partition root")
+                    accumulator = (accumulator + int.from_bytes(h, "little")) % (1 << 64)
+                return accumulator.to_bytes(8, "little").hex()
         except Exception:
             pass
         # Fallback to C function

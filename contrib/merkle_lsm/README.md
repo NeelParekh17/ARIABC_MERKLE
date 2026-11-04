@@ -22,9 +22,23 @@ baseline; command-line options cannot silently reconfigure a restored index.
 `merkle_lsm_config()` reads persisted targets without scanning entries.
 
 The helper derives plain, composite, and leading-key-routed expressions from
-one valid Merkle index. Existing lookup indexes are reported with their AM and
-must be dropped explicitly before conversion. Core Merkle does not depend on
-this extension; calling the helper requires installing the extension.
+one valid Merkle index. Since extension version 1.1 its last argument,
+`mode`, picks the key columns (run `ALTER EXTENSION merkle_lsm UPDATE` in
+databases created with 1.0):
+
+| mode | key columns | normal DML | node split | replica repair |
+|---|---|---|---|---|
+| `tuplehash` (default) | `(merkle_partition_for_hash(H, P), H, merkle_tuple_hash(<table>.*))` | the whole-row column disables HOT: every UPDATE adds an entry | reads `(H, tuple hash)` from the index | ships 8-byte tuple hashes per differing leaf, then only the mismatching rows |
+| `keyhash` | `(merkle_partition_for_hash(H, P), H, <key columns>)` (the 1.0 shape) | non-key UPDATEs can stay HOT | re-hashes the node's heap rows | ships every row of each differing leaf, reconciled by primary key |
+
+`merkle_lookup_index(table)` returns the tuple-hash index (NULL in keyhash
+mode); `merkle_range_entries()` lists its `(H, tuple hash)` pairs. Replica
+repair uses tuple-hash mode only when both replicas have a tuple-hash index
+and otherwise ships whole leaves; the recovery log reports `leaf_mode_tables`,
+`tuplehash_mode_tables`, `ref_hash_bytes` and `ref_row_bytes`. Existing
+lookup indexes are reported with their AM and must be dropped explicitly
+before conversion. Core Merkle does not depend on this extension; calling the
+helper requires installing the extension.
 
 Options: `levels=2..4` (default 3), `top_index_size` in KiB (default 1024,
 minimum 16), `size_ratio=2..1024` (default 16). Every non-base level has an active

@@ -144,9 +144,9 @@ SELECT octet_length(merkle_key_hash(12345::bigint)) = 8 AS key_hash_len_8;
  t
 (1 row)
 
-SELECT octet_length(merkle_tuple_hash(r)) = 32 AS tuple_hash_len_32 FROM (SELECT 1::int AS a, 'test'::text AS b) r;
- tuple_hash_len_32 
--------------------
+SELECT octet_length(merkle_tuple_hash(r)) = 8 AS tuple_hash_len_8 FROM (SELECT 1::int AS a, 'test'::text AS b) r;
+ tuple_hash_len_8 
+------------------
  t
 (1 row)
 

@@ -696,7 +696,8 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 		"       terminal_digest, entry_digest, item_digest,"
 		"       failure_digest, failure_sqlstate, failure_class,"
 		"       failure_retryable, failure_format_version,"
-		"       failure_recorded_at IS NOT NULL"
+		"       failure_recorded_at IS NOT NULL,"
+		"       write_adhash, read_adhash"
 		"  FROM ariabc_internal.raft_apply_item"
 		" WHERE epoch_id = $1"
 		"   AND raft_log_index = $2"
@@ -812,6 +813,43 @@ bcdb_raft_ledger_claim(BCDBShmXact  *tx,
 											   SPI_tuptable->tupdesc, 14, &failure_fmtver_isnull);
 		Datum failure_recorded_d = SPI_getbinval(SPI_tuptable->vals[0],
 												 SPI_tuptable->tupdesc, 15, &failure_recorded_isnull);
+		bool  write_adhash_isnull = false;
+		bool  read_adhash_isnull = false;
+		Datum write_adhash_d = SPI_getbinval(SPI_tuptable->vals[0],
+											 SPI_tuptable->tupdesc, 16, &write_adhash_isnull);
+		Datum read_adhash_d = SPI_getbinval(SPI_tuptable->vals[0],
+											SPI_tuptable->tupdesc, 17, &read_adhash_isnull);
+
+		/*
+		 * Replay reports the AdHashes the original apply stored.  Rows that
+		 * predate the columns, errors and failures carry NULL, read as zero.
+		 */
+		memset(tx->raft_write_adhash, 0, MERKLE_HASH_BYTES);
+		memset(tx->raft_read_adhash, 0, MERKLE_HASH_BYTES);
+		if (!write_adhash_isnull)
+		{
+			bytea *adhash_ba = DatumGetByteaPP(write_adhash_d);
+
+			if (VARSIZE_ANY_EXHDR(adhash_ba) != MERKLE_HASH_BYTES)
+			{
+				ledger_spi_end(&spi_scope);
+				elog(ERROR, "AriaBC ledger corruption: write_adhash is not %d bytes", MERKLE_HASH_BYTES);
+			}
+			if (existing_state == RAFT_ITEM_STATE_APPLIED_OK)
+				memcpy(tx->raft_write_adhash, VARDATA_ANY(adhash_ba), MERKLE_HASH_BYTES);
+		}
+		if (!read_adhash_isnull)
+		{
+			bytea *adhash_ba = DatumGetByteaPP(read_adhash_d);
+
+			if (VARSIZE_ANY_EXHDR(adhash_ba) != MERKLE_HASH_BYTES)
+			{
+				ledger_spi_end(&spi_scope);
+				elog(ERROR, "AriaBC ledger corruption: read_adhash is not %d bytes", MERKLE_HASH_BYTES);
+			}
+			if (existing_state == RAFT_ITEM_STATE_APPLIED_OK)
+				memcpy(tx->raft_read_adhash, VARDATA_ANY(adhash_ba), MERKLE_HASH_BYTES);
+		}
 
 		/* Validate entry_digest and item_digest invariants first */
 		if (entry_digest_isnull)
@@ -1308,9 +1346,9 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 	int    spi_rc;
 	char   sql_buf[2048];
 	uint8  terminal_digest[BCDB_RAFT_DIGEST_BYTES];
-	Oid    argtypes[8];
-	Datum  values[8];
-	char   nulls[8];
+	Oid    argtypes[10];
+	Datum  values[10];
+	char   nulls[10];
 	int    payload_len = result_payload ? strlen(result_payload) : 0;
 	uint64 processed_ok;
 	bytea *merkle_delta_blob;
@@ -1321,6 +1359,11 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 
 	compute_terminal_digest(false, result_fmtver, NULL, result_payload, terminal_digest);
 	memcpy(tx->raft_terminal_digest, terminal_digest, BCDB_RAFT_DIGEST_BYTES);
+	/*
+	 * tx->raft_write_adhash / raft_read_adhash were set by the worker just
+	 * before this call; they are stored in the ledger row so a replay reports
+	 * the same values.
+	 */
 	tx->raft_terminal_format_version = result_fmtver;
 	tx->raft_terminal_state = RAFT_ITEM_STATE_APPLIED_OK;
 
@@ -1348,6 +1391,8 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 		"       terminal_digest       = $5,"
 		"       merkle_delta_version  = $7,"
 		"       merkle_delta_blob     = $8,"
+		"       write_adhash          = $9,"
+		"       read_adhash           = $10,"
 		"       committed_at          = clock_timestamp()"
 		" WHERE epoch_id = $1"
 		"   AND raft_log_index = $2"
@@ -1367,6 +1412,8 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 	argtypes[5] = INT4OID;
 	argtypes[6] = INT4OID;
 	argtypes[7] = BYTEAOID;
+	argtypes[8] = BYTEAOID;
+	argtypes[9] = BYTEAOID;
 	values[0] = PointerGetDatum(make_bytea(tx->raft_epoch_id, BCDB_RAFT_DIGEST_BYTES));
 	values[1] = Int64GetDatum((int64) tx->raft_log_index);
 	values[2] = Int32GetDatum(result_fmtver);
@@ -1378,12 +1425,14 @@ bcdb_raft_ledger_finalize_ok(BCDBShmXact *tx,
 		values[7] = PointerGetDatum(merkle_delta_blob);
 	else
 		values[7] = (Datum) 0;
-	memset(nulls, ' ', 8);
+	values[8] = PointerGetDatum(make_bytea(tx->raft_write_adhash, MERKLE_HASH_BYTES));
+	values[9] = PointerGetDatum(make_bytea(tx->raft_read_adhash, MERKLE_HASH_BYTES));
+	memset(nulls, ' ', 10);
 	if (merkle_delta_blob == NULL)
 		nulls[7] = 'n';
 
 	EMIT_SAFE_LEDGER_XACT(tx, "finalize_ok_before");
-	spi_rc = SPI_execute_with_args(sql_buf, 8, argtypes, values, nulls,
+	spi_rc = SPI_execute_with_args(sql_buf, 10, argtypes, values, nulls,
 								   false, 1);
 	EMIT_SAFE_LEDGER_XACT(tx, "finalize_ok_after");
 	processed_ok = SPI_processed;
@@ -1436,6 +1485,8 @@ bcdb_raft_ledger_finalize_error(BCDBShmXact *tx,
 
 	compute_terminal_digest(true, error_fmtver, sqlstate, error_payload, terminal_digest);
 	memcpy(tx->raft_terminal_digest, terminal_digest, BCDB_RAFT_DIGEST_BYTES);
+	memset(tx->raft_write_adhash, 0, MERKLE_HASH_BYTES); /* error: no rows changed */
+	memset(tx->raft_read_adhash, 0, MERKLE_HASH_BYTES);
 	tx->raft_terminal_format_version = error_fmtver;
 	tx->raft_terminal_state = RAFT_ITEM_STATE_APPLIED_ERROR;
 
@@ -2050,6 +2101,10 @@ bcdb_finish_terminal_item(BCDBShmXact *tx,
 			 strlen(payload));
 		strlcpy(result_block->result[mem_txid], payload,
 				sizeof(result_block->result[mem_txid]));
+		memcpy(result_block->result_adhash[mem_txid],
+			   tx->raft_write_adhash, MERKLE_HASH_BYTES);
+		memcpy(result_block->result_adhash[mem_txid] + MERKLE_HASH_BYTES,
+			   tx->raft_read_adhash, MERKLE_HASH_BYTES);
 
 		pg_write_barrier();
 		__atomic_store_n(&result_block->result_commit_xid[mem_txid],
@@ -2198,6 +2253,7 @@ bcdb_complete_nonterminal_failure_item(BCDBShmXact *tx,
 	{
 		strlcpy(result_block->result[mem_txid], allocated_payload,
 				sizeof(result_block->result[mem_txid]));
+		memset(result_block->result_adhash[mem_txid], 0, BCDB_RESULT_ADHASH_BYTES);
 
 		pg_write_barrier();
 		__atomic_store_n(&result_block->result_commit_xid[mem_txid],

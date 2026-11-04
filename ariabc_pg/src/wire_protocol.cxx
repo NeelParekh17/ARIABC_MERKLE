@@ -1,24 +1,34 @@
 #include "wire_protocol.hxx"
 
 #include <arpa/inet.h>
+#include <cctype>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
 
 namespace ariabc_pg {
+
+const char kControlStatsRequestIdPrefix[] = "ctrl-stats-v1-";
 namespace {
 
 const uint32_t kMaxReqIdBytes = 16u * 1024u * 1024u;
 const uint32_t kMaxSqlBytes = 64u * 1024u * 1024u;
 const uint32_t kBatchFrameTag = 0xFFFFFFFFu;
 const uint32_t kSingleRequestFrameV2Tag = 0xFFFFFFFEu;
-// Batch frame v2: per-item flags word, optional 32-byte request tag per item.
-const uint32_t kBatchFrameV2Tag = 0xFFFFFFFDu;
+// Signed frames: same layouts as single-v2 / batch-v2, but a set
+// kRequestFlagHasTxTag means a kTxTagBytes (68-byte Ed25519) request signature.
+// 0xFFFFFFFD (batch with 32-byte BLAKE3 tags) is retired: receivers reject it
+// as an oversized legacy frame, and older binaries reject these tags the same
+// way, so mixed versions fail instead of misparsing.
+const uint32_t kSingleRequestFrameSigTag = 0xFFFFFFFBu;
+const uint32_t kBatchFrameV2Tag = 0xFFFFFFFCu;
 const uint32_t kMaxBatchItems = 4096u;
 const char kRaftBatchMarker[] = "__ARIABC_RAFT_BATCH_V1__";
 const char kRaftBatchMarkerV2[] = "__ARIABC_RAFT_BATCH_V2__";
-// V3 = V2 plus a per-item request tag (u8 present, then 32 raw bytes).
-const char kRaftBatchMarkerV3[] = "__ARIABC_RAFT_BATCH_V3__";
+// V4 = V2 plus a per-item Ed25519 request signature (u8 present, then
+// kTxTagBytes raw bytes).  V3 (32-byte BLAKE3 tag) entries are rejected.
+const char kRaftBatchMarkerV3[] = "__ARIABC_RAFT_BATCH_V4__";
+const char kRaftBatchMarkerRetiredV3[] = "__ARIABC_RAFT_BATCH_V3__";
 const uint32_t kRequestFlagWaitForTerminal = 0x1u;
 const uint32_t kRequestFlagHasTxTag = 0x2u;
 
@@ -116,6 +126,87 @@ client_api_request_item request_as_item(const client_api_request& req) {
     return item;
 }
 
+namespace {
+
+size_t skip_sql_trivia(const std::string& sql, size_t pos) {
+    while (pos < sql.size()) {
+        if (std::isspace(static_cast<unsigned char>(sql[pos])) || sql[pos] == ';') {
+            ++pos;
+        } else if (sql.compare(pos, 2, "--") == 0) {
+            pos = sql.find('\n', pos + 2);
+            if (pos == std::string::npos) return sql.size();
+        } else if (sql.compare(pos, 2, "/*") == 0) {
+            size_t depth = 1;
+            pos += 2;
+            while (pos < sql.size() && depth != 0) {
+                if (sql.compare(pos, 2, "/*") == 0) {
+                    ++depth;
+                    pos += 2;
+                } else if (sql.compare(pos, 2, "*/") == 0) {
+                    --depth;
+                    pos += 2;
+                } else {
+                    ++pos;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    return pos;
+}
+
+bool control_prefix_at(const std::string& sql, size_t pos, const char* prefix) {
+    for (size_t i = 0; prefix[i]; ++i) {
+        if (pos + i >= sql.size() ||
+            std::toupper(static_cast<unsigned char>(sql[pos + i])) != prefix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool is_control_sql(const std::string& sql) {
+    size_t pos = skip_sql_trivia(sql, 0);
+    // Inspect both the safe "s <SQL>" and deterministic "s <sequence> <SQL>"
+    // forms too. Only a leading command token is reserved, never SQL literals.
+    if (pos + 1 < sql.size() && (sql[pos] == 's' || sql[pos] == 'S') &&
+        std::isspace(static_cast<unsigned char>(sql[pos + 1]))) {
+        pos = skip_sql_trivia(sql, pos + 1);
+        size_t seq = pos;
+        const size_t begin = seq;
+        while (seq < sql.size() && std::isdigit(static_cast<unsigned char>(sql[seq]))) ++seq;
+        if (seq > begin && seq < sql.size() &&
+            std::isspace(static_cast<unsigned char>(sql[seq]))) {
+            pos = skip_sql_trivia(sql, seq);
+        }
+    }
+    return control_prefix_at(sql, pos, "__ARIABC_CTRL") ||
+           control_prefix_at(sql, pos, "WAIT_RESULT");
+}
+
+bool validate_workload_items(const std::vector<client_api_request_item>& items,
+                             std::string& err) {
+    err.clear();
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (is_control_sql(items[i].sql)) {
+            err = "CONTROL_COMMAND_IN_WORKLOAD ord=" + std::to_string(i);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validate_workload_request(const client_api_request& req, std::string& err) {
+    if (req.is_batch()) return validate_workload_items(req.batch_items, err);
+    err.clear();
+    if (!is_control_sql(req.sql)) return true;
+    err = "UNKNOWN_OR_MALFORMED_CONTROL_COMMAND";
+    return false;
+}
+
 bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
     out_req.req_id.clear();
     out_req.sql.clear();
@@ -128,7 +219,7 @@ bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
 
     uint32_t header = 0;
     if (!read_u32(fd, header, err)) return false;
-    if (header == kSingleRequestFrameV2Tag) {
+    if (header == kSingleRequestFrameV2Tag || header == kSingleRequestFrameSigTag) {
         uint32_t flags = 0;
         uint32_t timeout_ms = 0;
         uint32_t req_len = 0;
@@ -142,6 +233,10 @@ bool read_request_frame(int fd, client_api_request& out_req, std::string& err) {
             return false;
         }
         if ((flags & kRequestFlagHasTxTag) != 0) {
+            if (header != kSingleRequestFrameSigTag) {
+                err = "retired request tag format (32-byte BLAKE3); upgrade the gateway";
+                return false;
+            }
             if (!read_exact(fd, out_req.tx_tag, kTxTagBytes, err)) return false;
             out_req.has_tx_tag = true;
         }
@@ -217,7 +312,10 @@ bool write_request_frame(int fd, const client_api_request& req, std::string& err
         if (req.wait_for_terminal || req.has_tx_tag) {
             const uint32_t flags = (req.wait_for_terminal ? kRequestFlagWaitForTerminal : 0u) |
                                    (req.has_tx_tag ? kRequestFlagHasTxTag : 0u);
-            if (!write_u32(fd, kSingleRequestFrameV2Tag, err)) return false;
+            if (!write_u32(fd, req.has_tx_tag ? kSingleRequestFrameSigTag : kSingleRequestFrameV2Tag,
+                           err)) {
+                return false;
+            }
             if (!write_u32(fd, flags, err)) return false;
             if (!write_u32(fd, req.terminal_timeout_ms, err)) return false;
             if (!write_u32(fd, static_cast<uint32_t>(req.req_id.size()), err)) return false;
@@ -285,6 +383,8 @@ nuraft::ptr<nuraft::buffer> build_raft_request_log(const client_api_request& req
                                                    int leader_node_hint,
                                                    std::string& err) {
     err.clear();
+
+    if (!validate_workload_request(req, err)) return nullptr;
 
     const bool has_tag = request_has_tx_tag(req);
     const bool force_v2 = request_has_assigned_det_seq(req) || has_tag;
@@ -371,6 +471,10 @@ bool parse_raft_request_log(nuraft::buffer& data,
     try {
         nuraft::buffer_serializer bs(data);
         const std::string first = bs.get_str();
+        if (first == kRaftBatchMarkerRetiredV3) {
+            err = "retired raft batch format V3 (32-byte BLAKE3 request tags)";
+            return false;
+        }
         if (first == kRaftBatchMarker || first == kRaftBatchMarkerV2 ||
             first == kRaftBatchMarkerV3) {
             const bool is_v3 = (first == kRaftBatchMarkerV3);

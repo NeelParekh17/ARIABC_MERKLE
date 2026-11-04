@@ -12,6 +12,9 @@
 #include "storage/spin.h"
 #include "c.h"
 
+/* Write AdHash (8 bytes) followed by read AdHash (8 bytes). */
+#define BCDB_RESULT_ADHASH_BYTES 16
+
 #define BCDB_FIRST_SUBMIT_BLOCK_ID 2
 
 
@@ -122,6 +125,14 @@ typedef struct
 	 * no slot in its window was overwritten.
 	 */
 	int32 volatile         precommit_max_txid;
+	/*
+	 * Per-slot result AdHashes: bytes 0..7 are the write AdHash, 8..15 the
+	 * read AdHash of the tx that owns the slot (tx->raft_write_adhash /
+	 * raft_read_adhash).  Written before result_committed_txid (release), so
+	 * a reader that observes the owner also sees them.  The gateway votes on
+	 * these instead of a hash of the result text.  Must remain LAST in BCBlock.
+	 */
+	uint8                  result_adhash[BCDB_RESULT_RING_CAPACITY][BCDB_RESULT_ADHASH_BYTES];
 } BCBlock;
 
 typedef struct

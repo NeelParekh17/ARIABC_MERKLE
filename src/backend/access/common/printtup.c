@@ -17,7 +17,9 @@
 
 #include "bcdb/globals.h"
 #include "bcdb/shm_block.h"
+#include "access/merkle.h"
 #include "access/printtup.h"
+#include "common/blake3.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "tcop/pquery.h"
@@ -455,6 +457,8 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 	int			i;
 	char		rowStr[1024] = "";
 	int		offset = 0;
+	blake3_hasher row_hasher;
+	static const uint8 row_magic[] = {'A', 'R', 'I', 'A', 'R', 'O', 'W', '1'};
 
 	/* Set or update my derived attribute info, if needed */
 	if (myState->attrinfo != typeinfo || myState->nattrs != natts)
@@ -474,12 +478,35 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 	pq_sendint16(buf, natts);
 
 	/*
+	 * BCDB workers hash every row they return (column types, NULL flags and
+	 * the exact bytes sent) into the transaction's read AdHash, which the
+	 * gateway votes on instead of the result text.
+	 */
+	if (is_bcdb_worker)
+	{
+		uint32		n = (uint32) natts;
+
+		blake3_hasher_init(&row_hasher);
+		blake3_hasher_update(&row_hasher, row_magic, sizeof(row_magic));
+		blake3_hasher_update(&row_hasher, &n, sizeof(n));
+	}
+
+	/*
 	 * send the attributes of this tuple
 	 */
 	for (i = 0; i < natts; ++i)
 	{
 		PrinttupAttrInfo *thisState = myState->myinfo + i;
 		Datum		attr = slot->tts_values[i];
+
+		if (is_bcdb_worker)
+		{
+			uint32		typid = (uint32) TupleDescAttr(typeinfo, i)->atttypid;
+			uint8		tag = slot->tts_isnull[i] ? 0 : (thisState->format == 0 ? 1 : 2);
+
+			blake3_hasher_update(&row_hasher, &typid, sizeof(typid));
+			blake3_hasher_update(&row_hasher, &tag, sizeof(tag));
+		}
 
     //printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
 		if (slot->tts_isnull[i])
@@ -521,6 +548,13 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 					}
 				}
 			}
+			if (is_bcdb_worker)
+			{
+				uint32		len = (uint32) strlen(outputstr);
+
+				blake3_hasher_update(&row_hasher, &len, sizeof(len));
+				blake3_hasher_update(&row_hasher, outputstr, len);
+			}
 			pq_sendcountedtext(buf, outputstr, strlen(outputstr), false);
     //printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
 		}
@@ -531,6 +565,13 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 
     //printf("safedb pid %d %s : %s: %d \n", getpid(), __FILE__, __FUNCTION__, __LINE__);
 			outputbytes = SendFunctionCall(&thisState->finfo, attr);
+			if (is_bcdb_worker)
+			{
+				uint32		len = (uint32) (VARSIZE(outputbytes) - VARHDRSZ);
+
+				blake3_hasher_update(&row_hasher, &len, sizeof(len));
+				blake3_hasher_update(&row_hasher, VARDATA(outputbytes), len);
+			}
 			pq_sendint32(buf, VARSIZE(outputbytes) - VARHDRSZ);
 			pq_sendbytes(buf, VARDATA(outputbytes),
 						 VARSIZE(outputbytes) - VARHDRSZ);
@@ -544,6 +585,11 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 
 	if (is_bcdb_worker)
 	{
+		MerkleHash	row_hash;
+
+		blake3_hasher_finalize(&row_hasher, row_hash.data, MERKLE_HASH_BYTES);
+		merkle_read_adhash_add_row(&row_hash);
+
 		if (activeTx != NULL)
 		{
 			strlcpy(activeTx->select_result, rowStr, sizeof(activeTx->select_result));

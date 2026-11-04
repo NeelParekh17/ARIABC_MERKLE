@@ -2,7 +2,9 @@
 #include "async_cluster_submitter.hxx"
 #include "kafka_console.hxx"
 #include "wire_protocol.hxx"
-#include "blake3_tx_signer.hxx"
+#include "parallel_for_pool.hxx"
+#include "result_envelope.hxx"
+#include "tx_request_sig.hxx"
 #include "gateway_recovery_manager.hxx"
 
 #include <arpa/inet.h>
@@ -58,8 +60,17 @@ struct gateway_options {
     int query_sign = 0;
     std::string pub_key_file;
     std::string priv_key_file;
-    std::string tx_sign = "blake3";
-    std::string tx_tag_key_file;
+    // Per-client Ed25519 request signatures: "ed25519" or "0"/off.
+    std::string tx_sign = "ed25519";
+    // Private key PEM; default $ARIABC_TX_SIGN_KEY_FILE, else <keyDir>/client_<txClientId>.key.pem.
+    std::string tx_sign_key_file;
+    uint32_t tx_client_id = 1;
+    // Ed25519 key directory; default $ARIABC_KEY_DIR, else ~/.ariabc/keys.
+    std::string key_dir;
+    // Result message signatures: auto (ed25519 when node public keys exist), ed25519, hmac.
+    std::string result_sig_mode = "auto";
+    // Directory of node_<id>.pub.pem; default = key dir.
+    std::string result_key_dir;
 
     // 0: "s <SQL>" (safe wrapper), 1: "s <8digit(seq)> <SQL>" (det), 2: "<SQL>" (raw).
     int db_type = 2;
@@ -208,8 +219,9 @@ void usage(const char* argv0) {
         << "  " << argv0 << " \\\n"
         << "    --queryFrom <file|port> --nodes <host:port,host:port,...> [--raft-node-ids <id,id,...>] \\\n"
         << "    [--querySign 0|1] [--pubKeyFile <path>] [--privKeyFile <path>] \\\n"
-        << "    [--txSign 0|blake3] [--txTagKeyFile <path>] \\\n"
-        << "    [--dbType 0|1|2] [--detStartSeq <n>] [--detRawSql 0|1] [--qrate <n>] [--targetTps <tx/s>] [--paceTickMs <ms>] [--txIntervalMs <ms>] \\\n"
+        << "    [--txSign 0|ed25519] [--txSignKeyFile <pem>] [--txClientId <n>] [--keyDir <dir>] \\\n"
+        << "    [--resultSigMode auto|ed25519|hmac] [--resultKeyDir <dir>] \\\n"
+        << "    --dbType 0|1|2 [--detStartSeq <n>] [--detRawSql 0|1] [--qrate <n>] [--targetTps <tx/s>] [--paceTickMs <ms>] [--txIntervalMs <ms>] \\\n"
         << "    [--numTerminals <N>] [--clientId <id>] [--reqIdOffset <n>] [--progressIntervalMs <ms>] \\\n"
         << "    [--kafkaBootstrap <host:port>] \\\n"
         << "    [--resultTopic <t>] [--errTopic <t>] [--resultSigKey <k>] \\\n"
@@ -219,6 +231,8 @@ void usage(const char* argv0) {
 
 bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     bool completion_path_explicit = false;
+    // --dbType is required (see ariabc_pg_server parse_args).
+    bool db_type_set = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto need = [&](const char* flag) -> std::string {
@@ -238,17 +252,32 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
                 opt.tx_sign = ariabc_pg::trim_copy(need(a.c_str()));
             } else if (a == "--no-tx-sign" || a == "--disable-tx-sign") {
                 opt.tx_sign = "0";
+            } else if (a == "--txSignKeyFile" || a == "--tx-sign-key-file") {
+                opt.tx_sign_key_file = need(a.c_str());
             } else if (a == "--txTagKeyFile" || a == "--tx-tag-key-file") {
-                opt.tx_tag_key_file = need(a.c_str());
+                throw std::runtime_error(a + " (shared BLAKE3 key) was removed: requests are signed with "
+                                         "this client's Ed25519 key; pass --txSignKeyFile <pem> or put "
+                                         "client_<id>.key.pem in --keyDir");
+            } else if (a == "--txClientId") {
+                const unsigned long long v = std::stoull(need("--txClientId"));
+                if (v > 0xFFFFFFFFull) throw std::runtime_error("--txClientId out of range");
+                opt.tx_client_id = static_cast<uint32_t>(v);
+            } else if (a == "--keyDir") {
+                opt.key_dir = need("--keyDir");
+            } else if (a == "--resultSigMode") {
+                opt.result_sig_mode = need("--resultSigMode");
+            } else if (a == "--resultKeyDir") {
+                opt.result_key_dir = need("--resultKeyDir");
             } else if (a == "--txSigKey" || a == "--tx-sig-key") {
-                throw std::runtime_error(a + " (literal key) was removed: write the key as 64 hex "
-                                         "chars to a file and pass --txTagKeyFile <path>");
+                throw std::runtime_error(a + " (literal shared key) was removed: requests are signed "
+                                         "with this client's Ed25519 key (--txSignKeyFile <pem>)");
             } else if (a == "--pubKeyFile") {
                 opt.pub_key_file = need("--pubKeyFile");
             } else if (a == "--privKeyFile") {
                 opt.priv_key_file = need("--privKeyFile");
             } else if (a == "--dbType") {
                 opt.db_type = std::stoi(need("--dbType"));
+                db_type_set = true;
             } else if (a == "--detStartSeq") {
                 opt.det_start_seq = static_cast<uint64_t>(std::stoull(need("--detStartSeq")));
             } else if (a == "--detRawSql") {
@@ -386,6 +415,10 @@ bool parse_args(int argc, char** argv, gateway_options& opt, std::string& err) {
     }
     if (opt.nodes_csv.empty()) {
         err = "missing --nodes";
+        return false;
+    }
+    if (!db_type_set) {
+        err = "missing --dbType (required: 0, 1 = deterministic, or 2; must match the servers)";
         return false;
     }
     if (opt.db_type != 0 && opt.db_type != 1 && opt.db_type != 2) {
@@ -736,7 +769,8 @@ bool send_control_req_to_node(const host_port& hp,
                               client_api_response& out_resp,
                               std::string& err,
                               bool reuse_connection = false,
-                              int recv_timeout_ms = 0)
+                              int recv_timeout_ms = 0,
+                              bool request_stats = false)
 {
     err.clear();
     // Completion waits are a data-plane operation: opening a socket for every
@@ -772,7 +806,8 @@ bool send_control_req_to_node(const host_port& hp,
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
     client_api_request req;
-    req.req_id = "ctrl-" + std::to_string(ts_ms);
+    req.req_id = std::string(request_stats ? kControlStatsRequestIdPrefix : "ctrl-") +
+                 std::to_string(ts_ms);
     req.sql = control_sql;
 
     std::string io_err;
@@ -839,10 +874,47 @@ struct kafka_reply_record {
     int format_version = 0;
     std::string epoch_hex;
     int wire_version = 3;
+
+    // Set when the record arrived inside an "S1" message (result_envelope.hxx):
+    // envelope_verified means envelope_signer's Ed25519 key signed the message.
+    bool in_envelope = false;
+    bool envelope_verified = false;
+    uint32_t envelope_signer = 0;
+
+    // B3/B4/T1: write AdHash (rows the replica changed) then read AdHash
+    // (rows it returned), 32 hex chars.  These replace the SHA-256 of the
+    // result text: replicas vote on terminal_state + result_adhash.
+    // result_hash is only set by the legacy B1/B2/line formats.
+    std::string result_adhash;
 };
 
-constexpr const char* kHashAlgo = "sha256";
+// What replicas must agree on for one item: the terminal state and both
+// AdHashes, or the legacy result hash for formats that carry no AdHash.
+inline std::string vote_digest(const kafka_reply_record& r) {
+    if (r.result_adhash.empty()) return r.result_hash;
+    return (r.terminal_state.empty() ? std::string("OK") : r.terminal_state) + "|" + r.result_adhash;
+}
+
+// True when the record carries something to vote on.
+inline bool has_vote(const kafka_reply_record& r) {
+    return !r.result_adhash.empty() || !r.result_hash.empty();
+}
+
+enum class result_sig_mode_t { HMAC = 0, ED25519 = 1 };
+
+// Set once in main() before the Kafka consumer starts; read-only afterwards.
+result_sig_mode_t g_result_sig_mode = result_sig_mode_t::HMAC;
+const ed25519_key_roster* g_result_node_keys = nullptr;
+std::atomic<uint64_t> g_result_env_verified{0};
+std::atomic<uint64_t> g_result_env_rejected{0};
+std::atomic<uint64_t> g_result_env_unsealed{0};
+std::atomic<uint64_t> g_result_env_verify_ns{0};
+
+constexpr const char* kHashAlgo = "sha256";        // legacy B1/B2/line formats
 constexpr uint8_t kHashAlgoIdSha256 = 1;
+constexpr const char* kAdHashAlgo = "adhash64";    // B3/B4/T1: write+read AdHash
+constexpr uint8_t kAdHashAlgoId = 2;
+constexpr size_t kResultAdhashBytes = 16;
 constexpr const char* kDefaultResultSigKey = "ariabc-result-v2-dev-key";
 
 uint8_t read_u8(const char* p) {
@@ -985,7 +1057,7 @@ std::string make_sig_payload_v4(uint64_t req_num,
                                  int leader_node_id,
                                  const std::string& epoch_hex,
                                  const std::string& terminal_state,
-                                 const std::string& terminal_digest,
+                                 const std::string& result_adhash,
                                  int format_version,
                                  uint64_t timestamp_ms,
                                  bool has_full_result)
@@ -999,8 +1071,34 @@ std::string make_sig_payload_v4(uint64_t req_num,
         << leader_node_id << "|"
         << epoch_hex << "|"
         << terminal_state << "|"
-        << terminal_digest << "|"
+        << result_adhash << "|"
+        << kAdHashAlgo << "|"
         << format_version << "|"
+        << timestamp_ms << "|"
+        << (has_full_result ? 1 : 0);
+    return oss.str();
+}
+
+// Must match pg_executor.cxx make_sig_payload_v3 (B3 records).
+std::string make_sig_payload_v3(uint64_t req_num,
+                                uint64_t raft_log_idx,
+                                const std::string& req_id,
+                                int node_id,
+                                int leader_node_id,
+                                const std::string& terminal_state,
+                                const std::string& result_adhash,
+                                uint64_t timestamp_ms,
+                                bool has_full_result)
+{
+    std::ostringstream oss;
+    oss << req_num << "|"
+        << raft_log_idx << "|"
+        << req_id << "|"
+        << node_id << "|"
+        << leader_node_id << "|"
+        << terminal_state << "|"
+        << result_adhash << "|"
+        << kAdHashAlgo << "|"
         << timestamp_ms << "|"
         << (has_full_result ? 1 : 0);
     return oss.str();
@@ -1028,10 +1126,19 @@ std::string make_sig_payload_legacy(uint64_t req_num,
 
 bool verify_result_signature(const kafka_reply_record& rec, const std::string& sig_key) {
     if (rec.req_id.empty()) return false;
-    if (rec.hash_algo != kHashAlgo) return false;
-    if (trusted_result_sig_fastpath_enabled()) {
-        return !rec.result_hash.empty();
+    if (rec.hash_algo != (rec.result_adhash.empty() ? kHashAlgo : kAdHashAlgo)) return false;
+    if (g_result_sig_mode == result_sig_mode_t::ED25519) {
+        // The message signature covers every byte of the record; the record
+        // only counts for the node whose key signed it.  The trusted fastpath
+        // below never applies here: the check was already paid once per message.
+        return rec.in_envelope && rec.envelope_verified && rec.node_id > 0 &&
+               static_cast<uint32_t>(rec.node_id) == rec.envelope_signer &&
+               has_vote(rec);
     }
+    if (trusted_result_sig_fastpath_enabled()) {
+        return has_vote(rec);
+    }
+    if (rec.in_envelope) return false;  // sealed message but gateway in legacy HMAC mode
     if (rec.server_sig.empty()) return false;
 
     if (rec.wire_version == 4) {
@@ -1045,14 +1152,27 @@ bool verify_result_signature(const kafka_reply_record& rec, const std::string& s
                                                         rec.leader_node_id,
                                                         rec.epoch_hex,
                                                         rec.terminal_state,
-                                                        rec.result_hash,
+                                                        rec.result_adhash,
                                                         rec.format_version,
                                                         rec.timestamp_ms,
                                                         has_full);
         const std::string expected = sign_payload(sig_key, payload);
         return (!expected.empty() && expected == rec.server_sig);
+    } else if (!rec.result_adhash.empty()) {
+        // B3: state + AdHashes
+        const std::string payload = make_sig_payload_v3(rec.req_num,
+                                                        rec.raft_log_idx,
+                                                        rec.req_id,
+                                                        rec.node_id,
+                                                        rec.leader_node_id,
+                                                        rec.terminal_state,
+                                                        rec.result_adhash,
+                                                        rec.timestamp_ms,
+                                                        rec.has_full_result);
+        const std::string expected = sign_payload(sig_key, payload);
+        return (!expected.empty() && expected == rec.server_sig);
     } else {
-        // B3 / legacy signature verification only
+        // Legacy (B2 and older) signature verification only
         const bool has_full = rec.has_full_result;
         const std::string payload = make_sig_payload(rec.req_num,
                                                      rec.raft_log_idx,
@@ -1084,10 +1204,43 @@ bool verify_result_signature(const kafka_reply_record& rec, const std::string& s
     }
 }
 
+static bool parse_plain_kafka_records(const std::string& payload,
+                                      std::vector<kafka_reply_record>& out);
+
 bool parse_kafka_payload_records(const std::string& payload,
                                  std::vector<kafka_reply_record>& out)
 {
     out.clear();
+    if (is_result_envelope(payload)) {
+        uint16_t signer = 0;
+        std::string inner;
+        const auto v0 = std::chrono::steady_clock::now();
+        const envelope_status st = open_result_envelope(payload, g_result_node_keys, signer, inner);
+        g_result_env_verify_ns.fetch_add(
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - v0).count()),
+            std::memory_order_relaxed);
+        if (st == envelope_status::MALFORMED || is_result_envelope(inner)) return false;
+        if (!parse_plain_kafka_records(inner, out)) return false;
+        const bool ok = (st == envelope_status::OK);
+        (ok ? g_result_env_verified : g_result_env_rejected).fetch_add(1, std::memory_order_relaxed);
+        for (kafka_reply_record& r : out) {
+            r.in_envelope = true;
+            r.envelope_verified = ok;
+            r.envelope_signer = signer;
+        }
+        return true;
+    }
+    if (g_result_sig_mode == result_sig_mode_t::ED25519) {
+        g_result_env_unsealed.fetch_add(1, std::memory_order_relaxed);
+    }
+    return parse_plain_kafka_records(payload, out);
+}
+
+// Records of one plain (not enveloped) B3/B4/T1 payload; `out` is already cleared.
+static bool parse_plain_kafka_records(const std::string& payload,
+                                      std::vector<kafka_reply_record>& out)
+{
     if (payload.size() >= 3 && payload[0] == 'T' && payload[1] == '1' && payload[2] == '\t') {
         const char* p = payload.data();
         const char* end = p + payload.size();
@@ -1119,9 +1272,9 @@ bool parse_kafka_payload_records(const std::string& payload,
                     r.leader_node_id = std::stoi(std::string(t3 + 1, t4));
                     r.raft_log_idx = std::stoull(std::string(t4 + 1, t5));
                     r.has_full_result = (std::stoi(std::string(t5 + 1, t6)) != 0);
-                    r.result_hash.assign(t6 + 1, t7);
+                    r.result_adhash.assign(t6 + 1, t7);  // write+read AdHash pair
                     r.full_result.assign(t7 + 1, line_end);
-                    r.hash_algo = kHashAlgo;
+                    r.hash_algo = kAdHashAlgo;
                     r.terminal_state = "OK";
                     out.push_back(std::move(r));
                 } catch (...) {
@@ -1159,7 +1312,7 @@ bool parse_kafka_payload_records(const std::string& payload,
 
             // Reject invalid flags, unknown terminal-state codes, unsupported format versions, etc.
             if (flags > 1) return false;
-            if (hash_algo_id != 1) return false;
+            if (hash_algo_id != kAdHashAlgoId) return false;
             if (term_state_code == 1) {
                 r.terminal_state = "OK";
             } else if (term_state_code == 2) {
@@ -1172,10 +1325,11 @@ bool parse_kafka_payload_records(const std::string& payload,
             if (r.format_version != 1) return false; // unsupported format version
 
             pos += 47;
-            if (pos + 64 > payload.size()) return false;
+            // epoch (32) + write AdHash (8) + read AdHash (8)
+            if (pos + 32 + kResultAdhashBytes > payload.size()) return false;
             const unsigned char* raw_epoch = reinterpret_cast<const unsigned char*>(p + pos);
-            const unsigned char* raw_digest = reinterpret_cast<const unsigned char*>(p + pos + 32);
-            pos += 64;
+            const unsigned char* raw_adhash = reinterpret_cast<const unsigned char*>(p + pos + 32);
+            pos += 32 + kResultAdhashBytes;
 
             if (pos + req_id_len + sig_len + full_len > payload.size()) return false;
             r.req_id.assign(p + pos, p + pos + req_id_len);
@@ -1189,8 +1343,8 @@ bool parse_kafka_payload_records(const std::string& payload,
             pos += full_len;
 
             r.epoch_hex = hex_encode(raw_epoch, 32);
-            r.result_hash = hex_encode(raw_digest, 32);
-            r.hash_algo = kHashAlgo;
+            r.result_adhash = hex_encode(raw_adhash, kResultAdhashBytes);
+            r.hash_algo = kAdHashAlgo;
             out.push_back(std::move(r));
         }
         if (pos != payload.size()) return false; // reject trailing bytes
@@ -1198,13 +1352,15 @@ bool parse_kafka_payload_records(const std::string& payload,
     }
 
     if (payload.size() >= 8 && payload[0] == 'B' && payload[1] == '3') {
+        // B3 record: fixed 38 bytes, write+read AdHash (16 raw bytes),
+        // request id, MAC text, optional full result.
         const char* p = payload.data();
         size_t pos = 0;
         const uint16_t nrec = read_u16_le(p + 2);
         pos = 8; // magic+ver+count+reserved
         out.reserve(nrec);
         for (uint16_t i = 0; i < nrec; ++i) {
-            if (pos + 40 > payload.size()) return false;
+            if (pos + 38 + kResultAdhashBytes > payload.size()) return false;
             kafka_reply_record r;
             r.req_num = read_u64_le(p + pos);
             pos += 8;
@@ -1223,17 +1379,18 @@ bool parse_kafka_payload_records(const std::string& payload,
             pos += 1;
             const uint16_t req_id_len = read_u16_le(p + pos);
             pos += 2;
-            const uint16_t hash_len = read_u16_le(p + pos);
-            pos += 2;
             const uint16_t sig_len = read_u16_le(p + pos);
             pos += 2;
             const uint32_t full_len = read_u32_le(p + pos);
             pos += 4;
-            if (pos + req_id_len + hash_len + sig_len + full_len > payload.size()) return false;
+            if (flags > 3) return false;
+            if (hash_algo_id != kAdHashAlgoId) return false;
+            r.result_adhash = hex_encode(reinterpret_cast<const unsigned char*>(p + pos),
+                                         kResultAdhashBytes);
+            pos += kResultAdhashBytes;
+            if (pos + req_id_len + sig_len + full_len > payload.size()) return false;
             r.req_id.assign(p + pos, p + pos + req_id_len);
             pos += req_id_len;
-            r.result_hash.assign(p + pos, p + pos + hash_len);
-            pos += hash_len;
             r.server_sig.assign(p + pos, p + pos + sig_len);
             pos += sig_len;
             r.has_full_result = ((flags & 0x1u) != 0u);
@@ -1241,14 +1398,11 @@ bool parse_kafka_payload_records(const std::string& payload,
                 r.full_result.assign(p + pos, p + pos + full_len);
             }
             pos += full_len;
-            if (hash_algo_id == kHashAlgoIdSha256) {
-                r.hash_algo = kHashAlgo;
-            } else {
-                r.hash_algo = "unknown";
-            }
-            r.terminal_state = "OK";
+            r.hash_algo = kAdHashAlgo;
+            r.terminal_state = ((flags & 0x2u) != 0u) ? "ERROR" : "OK";
             out.push_back(std::move(r));
         }
+        if (pos != payload.size()) return false; // reject trailing bytes
         return true;
     }
 
@@ -1432,6 +1586,9 @@ void debug_trace_kafka(const kafka_reply_record& rec, bool sig_valid) {
               << " raft_log_idx=" << rec.raft_log_idx
               << " sig=" << (sig_valid ? 1 : 0)
               << " full=" << (rec.has_full_result ? 1 : 0)
+              << " state=" << (rec.terminal_state.empty() ? "-" : rec.terminal_state)
+              << " result_adhash=" << (rec.result_adhash.empty() ? "-" : rec.result_adhash)
+              << " result_hash=" << (rec.result_hash.empty() ? "-" : rec.result_hash)
               << std::endl;
 }
 
@@ -1982,7 +2139,7 @@ private:
 
         const vote_entry::reply_identity reply_identity{rec.node_id, rec.raft_log_idx, rec.raft_item_ordinal, rec.epoch_hex};
         const vote_entry::reply_payload_fingerprint reply_fingerprint{
-            rec.result_hash,
+            vote_digest(rec),
             rec.has_full_result
         };
         auto it_seen = e.seen_reply_keys.find(reply_identity);
@@ -2023,8 +2180,8 @@ private:
         auto prev_it = e.by_node.find(node_id);
         if (prev_it != e.by_node.end()) {
             const vote_entry::node_obs& prev_obs = prev_it->second;
-            if (prev_obs.sig_valid && !prev_obs.rec.result_hash.empty()) {
-                auto it_hash = e.hash_to_nodes_valid.find(prev_obs.rec.result_hash);
+            if (prev_obs.sig_valid && has_vote(prev_obs.rec)) {
+                auto it_hash = e.hash_to_nodes_valid.find(vote_digest(prev_obs.rec));
                 if (it_hash != e.hash_to_nodes_valid.end()) {
                     it_hash->second &= ~node_bit(node_id);
                     if (it_hash->second == 0) {
@@ -2038,8 +2195,8 @@ private:
         stored_obs.sig_valid = sig_valid;
         stored_obs.rec = std::move(rec);
 
-        if (stored_obs.sig_valid && !stored_obs.rec.result_hash.empty()) {
-            e.hash_to_nodes_valid[stored_obs.rec.result_hash] |= node_bit(node_id);
+        if (stored_obs.sig_valid && has_vote(stored_obs.rec)) {
+            e.hash_to_nodes_valid[vote_digest(stored_obs.rec)] |= node_bit(node_id);
         }
         increment_node_counter_locked(reply_records_by_node_, node_id);
         if (reply_observer_) reply_observer_(rec_req_num, node_id, add_ns, false);
@@ -2093,7 +2250,7 @@ private:
                     if (sample.size() > 96) sample.resize(96);
                     oss << kv.first
                         << "|sig=" << (kv.second.sig_valid ? 1 : 0)
-                        << "|hash=" << kv.second.rec.result_hash
+                        << "|hash=" << vote_digest(kv.second.rec)
                         << "|has_full=" << (kv.second.rec.has_full_result ? 1 : 0)
                         << "|full=" << json_escape(sample);
                 }
@@ -3181,11 +3338,12 @@ private:
 
         {
             /*
-             * For signed wire protocols (B3 and B4), result_hash is cryptographically
-             * signed and verified by the node's signature. If any node in the majority
-             * included full_result, we verify and use it; otherwise the agreed terminal
-             * state is returned. This prevents blocking quorum resolution when followers
-             * or all replicas offload full results and publish compact hashes only.
+             * For signed wire protocols (B3 and B4), the vote key (terminal
+             * state + write/read AdHash) is signed and verified per node.  The
+             * result text is not voted on: the first full result from a node
+             * in the majority is returned, else just the agreed terminal state.
+             * This does not block quorum resolution when replicas publish the
+             * AdHashes only.
              */
             std::string first_state;
             std::string first_full;
@@ -3194,19 +3352,15 @@ private:
             for (const auto& kv2 : e.by_node) {
                 if ((it_maj->second & node_bit(kv2.first)) == 0) continue;
                 if (!kv2.second.sig_valid) continue;
-                if (kv2.second.rec.result_hash != e.majority_hash) continue;
+                if (vote_digest(kv2.second.rec) != e.majority_hash) continue;
                 if (kv2.second.rec.wire_version >= 3) any_signed_wire = true;
                 if (first_state.empty()) {
                     first_state = kv2.second.rec.terminal_state;
                 } else if (first_state != kv2.second.rec.terminal_state) {
                     mismatch = true;
                 }
-                if (kv2.second.rec.has_full_result) {
-                    if (first_full.empty()) {
-                        first_full = kv2.second.rec.full_result;
-                    } else if (first_full != kv2.second.rec.full_result) {
-                        mismatch = true;
-                    }
+                if (kv2.second.rec.has_full_result && first_full.empty()) {
+                    first_full = kv2.second.rec.full_result;
                 }
             }
             if (any_signed_wire) {
@@ -3232,10 +3386,10 @@ private:
             if ((it_maj->second & node_bit(node_id)) == 0) continue;
             const vote_entry::node_obs& obs = kv.second;
             if (!obs.sig_valid) continue;
-            if (obs.rec.result_hash != e.majority_hash) continue;
+            if (vote_digest(obs.rec) != e.majority_hash) continue;
             if (!obs.rec.has_full_result) continue;
             const std::string full_hash = canonical_result_hash(obs.rec.full_result);
-            if (full_hash != e.majority_hash) continue;
+            if (full_hash != obs.rec.result_hash) continue;
             out_result = obs.rec.full_result;
             e.terminal_set = true;
             e.terminal_result = out_result;
@@ -3530,7 +3684,7 @@ private:
             const vote_entry::node_obs& obs = kv.second;
             oss << kv.first
                 << "[sig=" << (obs.sig_valid ? 1 : 0)
-                << ",hash=" << (obs.rec.result_hash.empty() ? "<none>" : obs.rec.result_hash)
+                << ",hash=" << (!has_vote(obs.rec) ? "<none>" : vote_digest(obs.rec))
                 << ",full=" << (obs.rec.has_full_result ? 1 : 0)
                 << ",raft_log_idx=" << obs.rec.raft_log_idx
                 << "]";
@@ -4984,6 +5138,46 @@ int main(int argc, char** argv) {
             result_sig_key = ariabc_pg::kDefaultResultSigKey;
         }
     }
+    // Result signatures.  The roster must outlive the Kafka consumer thread.
+    static ariabc_pg::ed25519_key_roster result_node_keys;
+    {
+        const char* env_mode = std::getenv("ARIABC_RESULT_SIG_MODE");
+        std::string mode = (env_mode && *env_mode) ? std::string(env_mode) : opt.result_sig_mode;
+        if (mode != "auto" && mode != "ed25519" && mode != "hmac") {
+            std::cerr << "invalid --resultSigMode '" << mode << "' (expected auto, ed25519 or hmac)" << std::endl;
+            return 1;
+        }
+        const std::string dir = ariabc_pg::resolve_key_dir(
+            opt.result_key_dir.empty() ? opt.key_dir : opt.result_key_dir);
+        std::string kerr;
+        bool loaded = false;
+        if (mode != "hmac" && !dir.empty()) {
+            loaded = result_node_keys.load_dir(dir, "node", kerr);
+            if (!loaded && (mode == "ed25519" ||
+                            kerr.compare(0, 26, "cannot open key directory ") != 0)) {
+                std::cerr << "RESULT_SIG_CONFIG_FAILED: " << kerr << std::endl;
+                return 1;
+            }
+        }
+        if (mode == "ed25519" || (mode == "auto" && loaded && !result_node_keys.empty())) {
+            if (result_node_keys.empty()) {
+                std::cerr << "RESULT_SIG_CONFIG_FAILED: no node_<id>.pub.pem in " << dir << std::endl;
+                return 1;
+            }
+            if (static_cast<int>(result_node_keys.size()) < total_nodes) {
+                std::cerr << "WARNING: result public keys for nodes " << result_node_keys.ids_csv()
+                          << " only (" << total_nodes << " nodes configured); other nodes' votes are invalid"
+                          << std::endl;
+            }
+            ariabc_pg::g_result_node_keys = &result_node_keys;
+            ariabc_pg::g_result_sig_mode = ariabc_pg::result_sig_mode_t::ED25519;
+            std::cout << "RESULT_SIG_MODE=ed25519 key_dir=" << dir
+                      << " nodes=" << result_node_keys.ids_csv() << std::endl;
+        } else {
+            std::cout << "RESULT_SIG_MODE=hmac (WARNING: shared key; any replica can forge another "
+                      << "replica's results)" << std::endl;
+        }
+    }
     ariabc_pg::vote_store votes(total_nodes, majority, opt.vote_store_max_entries, result_sig_key, opt.raft_epoch_hex, opt.raft_apply_ledger_mode == "safe");
 
     std::unique_ptr<ariabc_pg::gateway_recovery_manager> recovery_mgr;
@@ -5113,7 +5307,9 @@ int main(int argc, char** argv) {
         ariabc_pg::client_api_response response;
         std::string error;
         return !nodes.empty() && ariabc_pg::send_control_req_to_node(
-            nodes.front(), "__ARIABC_CTRL_GET_USER_ABORTS", response, error, true, 2000) &&
+            // Opt-in stats on an existing verb: an older server safely returns
+            // only its commit index. Never probe a possibly unknown SQL verb.
+            nodes.front(), "__ARIABC_CTRL_GET_COMMIT_INDEX", response, error, true, 2000, true) &&
             response.status == 0 &&
             ariabc_pg::parse_named_u64_field(response.msg, "user_aborts=", value);
     };
@@ -5144,44 +5340,72 @@ int main(int argc, char** argv) {
     std::atomic<uint64_t> async_audit_idle_waits(0);
     std::thread async_audit_thread;
 
-    ariabc_pg::blake3_tx_signer tx_signer;
+    ariabc_pg::tx_request_signer tx_signer;
     const bool tx_sign_enable = (opt.tx_sign != "0" && opt.tx_sign != "off" && opt.tx_sign != "none" &&
                                  opt.tx_sign != "false" && opt.tx_sign != "no" && opt.tx_sign != "disable" &&
                                  opt.tx_sign != "disabled");
     if (tx_sign_enable) {
-        // The tag is checked by every replica's state machine, never here: a
-        // gateway re-checking its own tag would prove nothing.
-        const std::string key_file = ariabc_pg::resolve_tx_tag_key_file(opt.tx_tag_key_file);
-        std::string key_err = key_file.empty()
-            ? std::string("no key file (--txTagKeyFile, $ARIABC_TX_TAG_KEY_FILE or ~/.ariabc/tx_tag.key)")
-            : std::string();
-        if (!key_file.empty()) (void)tx_signer.load_key_file(key_file, key_err);
-        if (!tx_signer.is_enabled()) {
-            std::cerr << "BLAKE3 request tags requested but unavailable: " << key_err
-                      << " (pass --txSign 0 to run untagged)" << std::endl;
+        if (opt.tx_sign == "blake3") {
+            std::cerr << "--txSign blake3 was removed (a shared key lets any replica forge requests); "
+                      << "use --txSign ed25519 with a per-client key" << std::endl;
             return 1;
         }
-        if (tx_signer.key_file_world_readable()) {
-            std::cerr << "WARNING: tx tag key file " << key_file
+        if (opt.tx_sign != "ed25519" && opt.tx_sign != "1" && opt.tx_sign != "on" &&
+            opt.tx_sign != "true" && opt.tx_sign != "yes") {
+            std::cerr << "invalid --txSign '" << opt.tx_sign << "' (expected ed25519 or 0)" << std::endl;
+            return 1;
+        }
+        // Signatures are checked by every replica's state machine, never here:
+        // a gateway re-checking its own signature would prove nothing.
+        const std::string key_file =
+            ariabc_pg::resolve_tx_sign_key_file(opt.tx_sign_key_file, opt.key_dir, opt.tx_client_id);
+        std::string key_err = key_file.empty()
+            ? std::string("no key file (--txSignKeyFile, $ARIABC_TX_SIGN_KEY_FILE or <keyDir>/client_") +
+                  std::to_string(opt.tx_client_id) + ".key.pem)"
+            : std::string();
+        if (!key_file.empty()) (void)tx_signer.load(key_file, opt.tx_client_id, key_err);
+        if (!tx_signer.is_enabled()) {
+            std::cerr << "Ed25519 request signatures requested but unavailable: " << key_err
+                      << " (pass --txSign 0 to run unsigned)" << std::endl;
+            return 1;
+        }
+        if (tx_signer.key().readable_by_others()) {
+            std::cerr << "WARNING: request signing key " << key_file
                       << " is readable by group/others (chmod 600)" << std::endl;
         }
-        std::cout << "BLAKE3 request tags: ENABLED (gateway tags, replicas verify before execution)"
-                  << " key_file=" << key_file << std::endl;
+        std::cout << "Ed25519 request signatures: ENABLED (gateway signs, replicas verify before execution)"
+                  << " client_id=" << opt.tx_client_id
+                  << " key_file=" << key_file
+                  << " pub=" << tx_signer.key().public_fingerprint() << std::endl;
     } else {
-        std::cout << "BLAKE3 request tags: DISABLED" << std::endl;
+        std::cout << "Ed25519 request signatures: DISABLED" << std::endl;
     }
 
     std::atomic<uint64_t> tx_signatures_signed(0);
     std::atomic<uint64_t> tx_sign_ns_total(0);
+    // Ed25519 signing costs tens of microseconds per item, so batched det
+    // submission signs a whole batch in parallel ($ARIABC_TX_SIGN_THREADS
+    // helper threads, default min(8, cores/2)).
+    std::unique_ptr<ariabc_pg::parallel_for_pool> tx_sign_pool;
+    if (tx_signer.is_enabled()) {
+        size_t helpers = std::min<size_t>(8, std::max<unsigned>(1u, std::thread::hardware_concurrency() / 2));
+        if (const char* v = std::getenv("ARIABC_TX_SIGN_THREADS")) {
+            const long n = std::strtol(v, nullptr, 10);
+            if (n >= 0) helpers = static_cast<size_t>(std::min<long>(n, 64));
+        }
+        tx_sign_pool.reset(new ariabc_pg::parallel_for_pool(helpers));
+    }
 
     // Computes the request tag for (req_id, sql) into out_tag; false when tags are off.
     auto compute_tx_tag = [&](const std::string& req_id, const std::string& sql,
                               uint8_t* out_tag) -> bool {
         if (!tx_signer.is_enabled()) return false;
         const auto s0 = std::chrono::steady_clock::now();
-        const ariabc_pg::blake3_sig_256 tag = tx_signer.sign(req_id, sql);
+        if (!tx_signer.sign(req_id, sql, out_tag)) {
+            std::cerr << "FATAL: Ed25519 request signing failed for req_id=" << req_id << std::endl;
+            std::abort();
+        }
         const auto s1 = std::chrono::steady_clock::now();
-        std::memcpy(out_tag, tag.bytes, ariabc_pg::kTxTagBytes);
         tx_sign_ns_total.fetch_add(
             std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count(),
             std::memory_order_relaxed);
@@ -6249,7 +6473,8 @@ int main(int argc, char** argv) {
                                          uint64_t& out_req_num,
                                          std::string& out_sql,
                                          bool& out_has_tag,
-                                         uint8_t* out_tag) -> bool {
+                                         uint8_t* out_tag,
+                                         bool sign_now) -> bool {
                 out_sql = queries[idx];
                 if (opt.query_sign == 1) {
                     std::string sig_b64;
@@ -6291,7 +6516,7 @@ int main(int argc, char** argv) {
 
                 out_req_id = req_id_for_idx(idx);
                 out_req_num = req_num_for_idx(idx);
-                out_has_tag = compute_tx_tag(out_req_id, out_sql, out_tag);
+                out_has_tag = sign_now && compute_tx_tag(out_req_id, out_sql, out_tag);
                 return true;
             };
 
@@ -6313,7 +6538,8 @@ int main(int argc, char** argv) {
                      ++idx) {
                     det_shaped_request shaped;
                     shaped.idx = idx;
-                    if (!shape_det_request(idx, shaped.req_id, shaped.req_num, shaped.sql, shaped.has_tx_tag, shaped.tx_tag)) {
+                    if (!shape_det_request(idx, shaped.req_id, shaped.req_num, shaped.sql, shaped.has_tx_tag, shaped.tx_tag,
+                                           /*sign_now=*/false)) {
                         return false;
                     }
                     const bool is_reset = ariabc_pg::is_reset_barrier_sql(shaped.sql);
@@ -6328,6 +6554,12 @@ int main(int argc, char** argv) {
                 }
 
                 if (out_items.empty()) return true;
+                if (tx_sign_pool) {
+                    tx_sign_pool->run(out_items.size(), [&](size_t i) {
+                        det_shaped_request& it = out_items[i];
+                        it.has_tx_tag = compute_tx_tag(it.req_id, it.sql, it.tx_tag);
+                    }, 8);
+                }
                 if (out_items.size() == 1) {
                     out_req.req_id = out_items.front().req_id;
                     out_req.sql = out_items.front().sql;
@@ -6754,7 +6986,8 @@ int main(int argc, char** argv) {
                              idx += det_threadpool_workers) {
                             det_shaped_request item;
                             item.idx = idx;
-                            if (!shape_det_request(idx, item.req_id, item.req_num, item.sql, item.has_tx_tag, item.tx_tag)) {
+                            if (!shape_det_request(idx, item.req_id, item.req_num, item.sql, item.has_tx_tag, item.tx_tag,
+                                                   /*sign_now=*/true)) {
                                 threadpool_failed.store(true, std::memory_order_release);
                                 break;
                             }
@@ -7998,7 +8231,8 @@ int main(int argc, char** argv) {
             const uint64_t signed_cnt = tx_signatures_signed.load(std::memory_order_relaxed);
             const double sign_avg_ns = signed_cnt > 0 ? static_cast<double>(tx_sign_ns_total.load(std::memory_order_relaxed)) / signed_cnt : 0.0;
             std::cout << "tx_signatures_signed=" << signed_cnt << std::endl;
-            std::cout << "BLAKE3_TX_AUTH: signed=" << signed_cnt
+            std::cout << "ED25519_TX_AUTH: client_id=" << tx_signer.client_id()
+                      << " signed=" << signed_cnt
                       << " avg_sign_ns=" << sign_avg_ns
                       << " verified_by=replicas"
                       << std::endl;
@@ -8078,7 +8312,14 @@ int main(int argc, char** argv) {
             << "PROFILE_GATEWAY "
             << " direct_terminal_success_count=" << direct_terminal_success_ids.size()
             << " direct_completion_protocol=2"
-            << " tx_sign_mode=" << (tx_signer.is_enabled() ? "blake3" : "off")
+            << " tx_sign_mode=" << (tx_signer.is_enabled() ? "ed25519" : "off")
+            << " result_sig_mode="
+            << (ariabc_pg::g_result_sig_mode == ariabc_pg::result_sig_mode_t::ED25519 ? "ed25519" : "hmac")
+            << " result_msgs_verified=" << ariabc_pg::g_result_env_verified.load(std::memory_order_relaxed)
+            << " result_msgs_rejected=" << ariabc_pg::g_result_env_rejected.load(std::memory_order_relaxed)
+            << " result_msgs_unsealed=" << ariabc_pg::g_result_env_unsealed.load(std::memory_order_relaxed)
+            << " result_sig_verify_ms="
+            << (ariabc_pg::g_result_env_verify_ns.load(std::memory_order_relaxed) / 1000000.0)
             << " tx_signatures_signed=" << tx_signatures_signed.load(std::memory_order_relaxed)
             << " completion_path=" << opt.completion_path
             << " validation_mode=" << opt.validation_mode
@@ -8475,11 +8716,13 @@ bool test_vote_store_b4_logic() {
 
     const std::string ep1 = "1111111111111111111111111111111111111111111111111111111111111111";
     const std::string ep2 = "2222222222222222222222222222222222222222222222222222222222222222";
-    const std::string dig1 = canonical_result_hash("result");
-    const std::string dig2 = canonical_result_hash("different_result");
+    // Write AdHash (16 hex) + read AdHash (16 hex).
+    const std::string dig1 = "1111111111111111aaaaaaaaaaaaaaaa";
+    const std::string dig2 = "2222222222222222aaaaaaaaaaaaaaaa";
 
     // Helper to make records
-    auto make_rec = [&](uint64_t req_num, int node_id, const std::string& epoch_hex, uint64_t log_idx, uint32_t ordinal, const std::string& digest) {
+    auto make_rec = [&](uint64_t req_num, int node_id, const std::string& epoch_hex, uint64_t log_idx, uint32_t ordinal, const std::string& adhash,
+                        const std::string& state = "OK") {
         kafka_reply_record rec;
         rec.wire_version = 4;
         rec.format_version = 1;
@@ -8490,17 +8733,18 @@ bool test_vote_store_b4_logic() {
         rec.epoch_hex = epoch_hex;
         rec.raft_log_idx = log_idx;
         rec.raft_item_ordinal = ordinal;
-        rec.result_hash = digest;
-        rec.hash_algo = kHashAlgo;
+        rec.result_adhash = adhash;
+        rec.hash_algo = kAdHashAlgo;
         rec.timestamp_ms = 12345;
         rec.has_full_result = true;
-        rec.full_result = digest == dig1 ? "result" : "different_result";
-        rec.terminal_state = "OK";
+        rec.full_result = "result";
+        rec.terminal_state = state;
         rec.server_sig = sign_payload(
             sig_key,
             make_sig_payload_v4(rec.req_num, rec.raft_log_idx, rec.raft_item_ordinal, rec.req_id,
                                 rec.node_id, rec.leader_node_id, rec.epoch_hex, rec.terminal_state,
-                                rec.result_hash, rec.format_version, rec.timestamp_ms, rec.has_full_result));
+                                rec.result_adhash, rec.format_version, rec.timestamp_ms,
+                                rec.has_full_result));
         return rec;
     };
 
@@ -8574,7 +8818,8 @@ bool test_vote_store_b4_logic() {
             sig_key,
             make_sig_payload_v4(rec2.req_num, rec2.raft_log_idx, rec2.raft_item_ordinal, rec2.req_id,
                                 rec2.node_id, rec2.leader_node_id, rec2.epoch_hex, rec2.terminal_state,
-                                rec2.result_hash, rec2.format_version, rec2.timestamp_ms, rec2.has_full_result));
+                                rec2.result_adhash, rec2.format_version, rec2.timestamp_ms,
+                                rec2.has_full_result));
         votes.add_reply(rec1, recovery);
         votes.add_reply(rec2, recovery);
         std::list<uint64_t> in = {6};
@@ -8595,6 +8840,71 @@ bool test_vote_store_b4_logic() {
         uint64_t r = 0; std::string res, err;
         bool ok = votes.wait_any_majority(in, pos, 0, 1, r, res, err);
         if (ok) return false;
+    }
+
+    // 8. Same result text, different rows changed: the write AdHash splits
+    //    the vote.  Two of three agree -> majority on their pair.
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(8, 1, ep1, 100, 0, dig1), recovery);
+        votes.add_reply(make_rec(8, 2, ep1, 100, 0, dig2), recovery);
+        std::list<uint64_t> in = {8};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[8] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        if (votes.wait_any_majority(in, pos, 0, 1, r, res, err)) return false; // 1-1: no majority yet
+        votes.add_reply(make_rec(8, 3, ep1, 100, 0, dig2), recovery);
+        if (!votes.wait_any_majority(in, pos, 0, 1, r, res, err) || r != 8 || res != "result") return false;
+    }
+
+    // 9. Same result text, all three changed different rows -> no majority.
+    {
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(9, 1, ep1, 100, 0, dig1), recovery);
+        votes.add_reply(make_rec(9, 2, ep1, 100, 0, dig2), recovery);
+        votes.add_reply(make_rec(9, 3, ep1, 100, 0, "3333333333333333aaaaaaaaaaaaaaaa"), recovery);
+        std::list<uint64_t> in = {9};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[9] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        const bool ok = votes.wait_any_majority(in, pos, 0, 1, r, res, err);
+        if (ok && err.empty()) return false;
+    }
+
+    // 10. A tampered write or read AdHash fails HMAC verification.
+    {
+        kafka_reply_record rec = make_rec(10, 1, ep1, 100, 0, dig1);
+        if (!verify_result_signature(rec, sig_key)) return false;
+        rec.result_adhash = "1111111111111112aaaaaaaaaaaaaaaa";
+        if (verify_result_signature(rec, sig_key)) return false;
+        rec.result_adhash = "1111111111111111aaaaaaaaaaaaaaab";
+        if (verify_result_signature(rec, sig_key)) return false;
+    }
+
+    // 11. Same rows changed, different rows returned: the read AdHash splits
+    //     the vote; the third reply decides.
+    {
+        const std::string read_b = "1111111111111111bbbbbbbbbbbbbbbb";
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(11, 1, ep1, 100, 0, dig1), recovery);
+        votes.add_reply(make_rec(11, 2, ep1, 100, 0, read_b), recovery);
+        std::list<uint64_t> in = {11};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[11] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        if (votes.wait_any_majority(in, pos, 0, 1, r, res, err)) return false;
+        votes.add_reply(make_rec(11, 3, ep1, 100, 0, dig1), recovery);
+        if (!votes.wait_any_majority(in, pos, 0, 1, r, res, err) || r != 11) return false;
+    }
+
+    // 12. Same AdHashes but OK vs ERROR: the terminal state is part of the
+    //     vote, so the two do not form a majority.
+    {
+        const std::string zero(32, '0');
+        vote_store votes(3, 2, 10, sig_key, ep1);
+        votes.add_reply(make_rec(12, 1, ep1, 100, 0, zero, "OK"), recovery);
+        votes.add_reply(make_rec(12, 2, ep1, 100, 0, zero, "ERROR"), recovery);
+        std::list<uint64_t> in = {12};
+        std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos; pos[12] = --in.end();
+        uint64_t r = 0; std::string res, err;
+        if (votes.wait_any_majority(in, pos, 0, 1, r, res, err)) return false;
     }
 
     return true;

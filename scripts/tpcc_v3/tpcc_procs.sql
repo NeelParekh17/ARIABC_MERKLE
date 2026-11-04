@@ -285,6 +285,7 @@ CREATE INDEX order_line_merkle_idx ON public.order_line USING merkle (ol_w_id, o
 
 -- One canonical expression builder, shared with YCSB and setup tools.
 CREATE EXTENSION IF NOT EXISTS merkle_lsm;
+ALTER EXTENSION merkle_lsm UPDATE;
 \if :{?bench_merkle_lookup_am}
 \else
 \set bench_merkle_lookup_am merkle_lsm
@@ -301,8 +302,13 @@ CREATE EXTENSION IF NOT EXISTS merkle_lsm;
 \else
 \set bench_merkle_lookup_ratio 16
 \endif
+\if :{?bench_merkle_lookup_mode}
+\else
+\set bench_merkle_lookup_mode tuplehash
+\endif
 SELECT merkle_create_lookup_index(t.oid, :'bench_merkle_lookup_am',
-                                 :bench_merkle_lookup_levels, :bench_merkle_lookup_size, :bench_merkle_lookup_ratio)
+                                 :bench_merkle_lookup_levels, :bench_merkle_lookup_size, :bench_merkle_lookup_ratio,
+                                 :'bench_merkle_lookup_mode')
 FROM pg_class t
 WHERE t.relnamespace='public'::regnamespace
   AND t.relname IN ('warehouse','district','customer','history','item','stock',

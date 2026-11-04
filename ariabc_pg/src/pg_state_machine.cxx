@@ -1,10 +1,12 @@
 #include "pg_state_machine.hxx"
 
 #include "ariabc_pg_util.hxx"
-#include "blake3_tx_signer.hxx"
+#include "parallel_for_pool.hxx"
+#include "tx_request_sig.hxx"
 #include <openssl/sha.h>
 #include <libpq-fe.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -296,23 +298,48 @@ bool tx_tag_log_should_print(uint64_t n) {
     return n <= 20 || (n % 10000) == 0;
 }
 
+size_t tx_sig_verify_threads_from_env() {
+    const char* v = std::getenv("ARIABC_TX_SIG_VERIFY_THREADS");
+    if (v && *v) {
+        const long n = std::strtol(v, nullptr, 10);
+        if (n >= 0) return static_cast<size_t>(std::min<long>(n, 64));
+    }
+    const unsigned hw = std::thread::hardware_concurrency();
+    const size_t def = hw >= 8 ? hw / 4 : 1;
+    return std::min<size_t>(def, 8);
+}
+
 } // namespace
 
-bool pg_state_machine::configure_tx_tag(const std::string& key_file,
+bool pg_state_machine::configure_tx_tag(const std::string& client_key_dir,
                                         bool required,
                                         std::string& err) {
     tx_tag_required_ = false;
-    tx_tag_signer_.reset();
+    tx_tag_verifier_.reset();
+    tx_tag_pool_.reset();
     if (!required) return true;
-    if (key_file.empty()) {
-        err = "tx tag verification required but no key file configured";
+    if (client_key_dir.empty()) {
+        err = "request signature verification required but no key directory configured";
         return false;
     }
-    std::unique_ptr<blake3_tx_signer> signer(new blake3_tx_signer());
-    if (!signer->load_key_file(key_file, err)) return false;
-    tx_tag_signer_ = std::move(signer);
+    std::unique_ptr<tx_request_verifier> verifier(new tx_request_verifier());
+    if (!verifier->load_dir(client_key_dir, err)) return false;
+    if (verifier->roster().empty()) {
+        err = "no client public keys (client_<id>.pub.pem) in " + client_key_dir;
+        return false;
+    }
+    tx_tag_verifier_ = std::move(verifier);
+    tx_tag_pool_.reset(new parallel_for_pool(tx_sig_verify_threads_from_env()));
     tx_tag_required_ = true;
     return true;
+}
+
+std::string pg_state_machine::tx_tag_client_ids() const {
+    return tx_tag_verifier_ ? tx_tag_verifier_->roster().ids_csv() : std::string();
+}
+
+size_t pg_state_machine::tx_tag_verify_threads() const {
+    return tx_tag_pool_ ? tx_tag_pool_->helper_threads() : 0;
 }
 
 pg_state_machine::tx_tag_stats pg_state_machine::tx_tag_profile() const {
@@ -320,6 +347,7 @@ pg_state_machine::tx_tag_stats pg_state_machine::tx_tag_profile() const {
     out.verified = tx_tag_verified_.load(std::memory_order_relaxed);
     out.rejected_missing = tx_tag_rejected_missing_.load(std::memory_order_relaxed);
     out.rejected_mismatch = tx_tag_rejected_mismatch_.load(std::memory_order_relaxed);
+    out.rejected_unknown_client = tx_tag_rejected_unknown_client_.load(std::memory_order_relaxed);
     out.verify_ns = tx_tag_verify_ns_.load(std::memory_order_relaxed);
     return out;
 }
@@ -328,29 +356,33 @@ void pg_state_machine::apply_tx_tag_policy(std::vector<client_api_request_item>&
                                            uint64_t entry_idx) {
     if (!tx_tag_required_) return;
     const auto t0 = std::chrono::steady_clock::now();
+    // Verification is pure (item bytes + public keys), so the items can be
+    // checked in any order and on any thread; the rewrite below is serial and
+    // in ordinal order, so logs and results are identical on every replica.
+    std::vector<tx_sig_check> checks(items.size(), tx_sig_check::MISSING);
+    const tx_request_verifier& verifier = *tx_tag_verifier_;
+    tx_tag_pool_->run(items.size(), [&](size_t i) { checks[i] = verifier.check(items[i]); });
     for (size_t i = 0; i < items.size(); ++i) {
         client_api_request_item& item = items[i];
-        const bool missing = !item.has_tx_tag;
-        if (!missing) {
-            blake3_sig_256 tag;
-            std::memcpy(tag.bytes, item.tx_tag, sizeof(tag.bytes));
-            if (tx_tag_signer_->verify(item.req_id, item.sql, tag)) {
-                tx_tag_verified_.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
+        const tx_sig_check c = checks[i];
+        if (c == tx_sig_check::OK) {
+            tx_tag_verified_.fetch_add(1, std::memory_order_relaxed);
+            continue;
         }
-        const uint64_t n = missing
-            ? tx_tag_rejected_missing_.fetch_add(1, std::memory_order_relaxed) + 1
-            : tx_tag_rejected_mismatch_.fetch_add(1, std::memory_order_relaxed) + 1;
+        std::atomic<uint64_t>& counter =
+            c == tx_sig_check::MISSING ? tx_tag_rejected_missing_
+            : c == tx_sig_check::UNKNOWN_CLIENT ? tx_tag_rejected_unknown_client_
+                                                : tx_tag_rejected_mismatch_;
+        const uint64_t n = counter.fetch_add(1, std::memory_order_relaxed) + 1;
         if (tx_tag_log_should_print(n)) {
             std::cerr << "TX_TAG_REJECTED"
                       << " node=" << node_id_
                       << " entry=" << entry_idx
                       << " ord=" << i
                       << " req_id=" << item.req_id
-                      << " reason=" << (missing ? "missing" : "mismatch")
-                      << " count=" << n
-                      << std::endl;
+                      << " reason=" << tx_sig_check_name(c);
+            if (item.has_tx_tag) std::cerr << " client=" << tx_tag_client_id(item.tx_tag);
+            std::cerr << " count=" << n << std::endl;
         }
         item.sql = tx_tag_rejected_sql(item.sql);
     }
@@ -530,6 +562,15 @@ nuraft::ptr<nuraft::buffer> pg_state_machine::commit_apply_locked(uint64_t log_i
         note_item_applied(log_idx, 0);
         nuraft::ptr<nuraft::buffer> ack = nuraft::buffer::alloc(0);
         return ack;
+    }
+
+    // A historical/bypassed admission error must never execute control text as
+    // SQL during replay. Preserve the log and fail closed rather than skipping
+    // or rewriting an already committed item.
+    std::string control_err;
+    if (!validate_workload_items(batch.items, control_err)) {
+        throw std::runtime_error("CONTROL_COMMAND_IN_RAFT_LOG log=" +
+                                 std::to_string(log_idx) + " " + control_err);
     }
 
     // The tag covers the item exactly as the gateway sent it, so check it

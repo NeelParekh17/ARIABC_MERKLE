@@ -683,6 +683,8 @@ create_tx(char *hash, char *sql, BCTxID tx_id, BCBlockID snapshot_block, int iso
 	memset(tx->raft_entry_digest, 0, BCDB_RAFT_DIGEST_BYTES);
 	memset(tx->raft_item_digest, 0, BCDB_RAFT_DIGEST_BYTES);
 	memset(tx->raft_terminal_digest, 0, BCDB_RAFT_DIGEST_BYTES);
+	memset(tx->raft_write_adhash, 0, MERKLE_HASH_BYTES);
+	memset(tx->raft_read_adhash, 0, MERKLE_HASH_BYTES);
 	tx->raft_terminal_format_version = 0;
 	tx->raft_terminal_state = 0;
 	tx->raft_terminal_update_confirmed = false;

@@ -35,7 +35,13 @@ struct replica_repair_stats {
     int differing_leaves = 0;
     int descent_levels = 0;   // node-table reads per side during the descent
     int nodes_compared = 0;   // nodes read from both sides during the descent
-    uint64_t candidate_rows = 0;
+    int leaf_mode_tables = 0;        // repaired by shipping full leaf contents (key-hash lookup)
+    int tuplehash_mode_tables = 0;   // repaired by tuple-hash comparison (tuple-hash lookup)
+    uint64_t entries_compared = 0;   // tuple hashes compared, both sides
+    uint64_t differing_entries = 0;  // tuple hashes whose count differs between the sides
+    uint64_t ref_hash_bytes = 0;     // tuple-hash bytes received from the reference
+    uint64_t candidate_rows = 0;     // reference rows fetched
+    uint64_t ref_row_bytes = 0;      // COPY bytes of the reference rows fetched
     uint64_t rows_deleted = 0;
     uint64_t rows_upserted = 0;
     uint64_t localise_us = 0;

@@ -184,6 +184,8 @@ typedef struct _BCDBShmXact
 	uint8           raft_entry_digest[BCDB_RAFT_DIGEST_BYTES]; /* SHA-256 of raw entry bytes */
 	uint8           raft_item_digest[BCDB_RAFT_DIGEST_BYTES];  /* SHA-256 of item sql+req_id */
 	uint8           raft_terminal_digest[BCDB_RAFT_DIGEST_BYTES]; /* SHA-256 of the terminal result/error payload */
+	uint8           raft_write_adhash[MERKLE_HASH_BYTES]; /* AdHash of the rows this item changed (merkle_staged_write_adhash); zero for errors */
+	uint8           raft_read_adhash[MERKLE_HASH_BYTES];  /* AdHash of the rows this item returned (merkle_staged_read_adhash); zero for errors */
 	int             raft_terminal_format_version;   /* format version stored in ledger row; propagated to result-ring envelope */
 	int             raft_terminal_state;            /* RAFT_ITEM_STATE_APPLIED_* once finalize/replay reaches a terminal row */
 	bool            raft_terminal_update_confirmed; /* true only after terminal ledger row update/replay validation succeeds */

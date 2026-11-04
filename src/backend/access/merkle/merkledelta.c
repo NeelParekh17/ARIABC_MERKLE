@@ -43,6 +43,13 @@ static bool merkle_delta_callbacks_registered = false;
 static bool merkle_staged_delta_persisted = false;
 static uint64 merkle_delta_generation = 0;
 
+/*
+ * Read AdHash of the current transaction: sum mod 2^64 of the hashes of the
+ * rows it returned to the client (see printtup()).  Cleared with the staged
+ * deltas at commit and abort, so a retried attempt starts from zero.
+ */
+static MerkleHash merkle_read_adhash;
+
 static void merkle_delta_xact_callback(XactEvent event, void *arg);
 static void merkle_delta_subxact_callback(SubXactEvent event,
 										  SubTransactionId mySubid,
@@ -156,6 +163,7 @@ merkle_delta_reset(void)
 		merkle_delta_unlink_frame(merkle_delta_frames);
 	merkle_staged_delta_persisted = false;
 	merkle_delta_generation = 0;
+	merkle_hash_zero(&merkle_read_adhash);
 }
 
 static void
@@ -251,6 +259,63 @@ merkle_staged_entry_count(void)
 	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
 		count += (uint64) hash_get_num_entries(frame->entries);
 	return count;
+}
+
+/*
+ * merkle_staged_write_adhash
+ *
+ * AdHash (sum mod 2^64) of every signed contribution the current transaction
+ * has staged: the hashes of the rows it inserted minus the hashes of the rows
+ * it deleted, an UPDATE contributing new minus old.  Rolled-back
+ * subtransactions have already dropped their frames, so the sum covers
+ * exactly the changes that will commit.  Addition is commutative, so the value
+ * does not depend on statement or hash-table order; replicas that changed the
+ * same rows of Merkle-indexed tables get the same 8 bytes.  Tables without a
+ * Merkle index stage nothing and are not covered.  Zero when nothing changed.
+ */
+void
+merkle_staged_write_adhash(MerkleHash *out)
+{
+	MerkleSubxactFrame *frame;
+
+	merkle_hash_zero(out);
+	for (frame = merkle_delta_frames; frame != NULL; frame = frame->next)
+	{
+		HASH_SEQ_STATUS seq;
+		MerkleDeltaEntry *entry;
+
+		hash_seq_init(&seq, frame->entries);
+		while ((entry = hash_seq_search(&seq)) != NULL)
+			merkle_hash_xor(out, &entry->xor_delta);
+	}
+}
+
+/*
+ * merkle_read_adhash_add_row
+ *
+ * Add the hash of one row returned to the client to the transaction's read
+ * AdHash.  Registers the transaction callbacks so the sum is cleared at the
+ * end of a read-only transaction too.
+ */
+void
+merkle_read_adhash_add_row(const MerkleHash *row_hash)
+{
+	merkle_delta_register_callbacks();
+	merkle_hash_xor(&merkle_read_adhash, row_hash);
+}
+
+/*
+ * merkle_staged_read_adhash
+ *
+ * AdHash (sum mod 2^64) of the hashes of every row the current transaction
+ * returned to the client.  Addition is commutative, so the value does not
+ * depend on row order: replicas that returned the same multiset of rows get
+ * the same 8 bytes.  Zero when no rows were returned.
+ */
+void
+merkle_staged_read_adhash(MerkleHash *out)
+{
+	*out = merkle_read_adhash;
 }
 
 void

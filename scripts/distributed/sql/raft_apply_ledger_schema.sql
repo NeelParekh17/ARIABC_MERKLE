@@ -11,7 +11,7 @@ CREATE SCHEMA IF NOT EXISTS ariabc_internal;
 -- Register SQL wrappers for the v7 built-ins so bootstrap/recovery works
 -- without requiring a destructive initdb.  On fresh clusters this is an
 -- idempotent CREATE OR REPLACE of the catalog-defined functions.
--- Historical name; current implementation adds LE 256-bit hashes modulo 2^256.
+-- Historical name; current implementation adds LE 64-bit hashes modulo 2^64.
 CREATE OR REPLACE FUNCTION pg_catalog.merkle_hash_xor_sql(bytea, bytea)
 RETURNS bytea
 AS 'merkle_hash_xor_sql'
@@ -78,6 +78,18 @@ CREATE OR REPLACE FUNCTION pg_catalog.merkle_partition_for_hash(key_hash bytea, 
 RETURNS smallint
 AS 'merkle_partition_for_hash'
 LANGUAGE internal IMMUTABLE STRICT PARALLEL SAFE;
+
+-- Lookup-index reader used by node splits and replica repair.
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_lookup_index(tbl regclass)
+RETURNS regclass
+AS 'merkle_lookup_index_sql'
+LANGUAGE internal STABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION pg_catalog.merkle_range_entries(
+    tbl regclass, partition integer, lo bytea, hi bytea)
+RETURNS TABLE(key_hash bytea, tuple_hash bytea)
+AS 'merkle_range_entries_sql'
+LANGUAGE internal STABLE STRICT PARALLEL RESTRICTED ROWS 1000;
 
 CREATE OR REPLACE FUNCTION public.merkle_partition_for_hash(key_hash bytea, partitions integer)
 RETURNS smallint
@@ -314,6 +326,13 @@ CREATE TABLE IF NOT EXISTS ariabc_internal.raft_apply_item (
     merkle_delta_version   integer NOT NULL DEFAULT 0,
     merkle_delta_blob      bytea,
 
+    -- AdHashes (8 bytes each, sum mod 2^64): write_adhash over the tuple
+    -- hashes of the rows this item changed (inserted minus deleted),
+    -- read_adhash over the rows it returned.  Set on APPLIED_OK, sent in the
+    -- B4 result record and replayed from here after a restart.
+    write_adhash           bytea,
+    read_adhash            bytea,
+
     PRIMARY KEY (epoch_id, raft_log_index, item_ordinal),
 
     CHECK (octet_length(epoch_id) = 32),
@@ -402,7 +421,20 @@ ALTER TABLE ariabc_internal.raft_apply_item
     ADD COLUMN IF NOT EXISTS failure_recorded_at timestamptz,
     ADD COLUMN IF NOT EXISTS merkle_apply_seq bigint,
     ADD COLUMN IF NOT EXISTS merkle_delta_version integer NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS merkle_delta_blob bytea;
+    ADD COLUMN IF NOT EXISTS merkle_delta_blob bytea,
+    ADD COLUMN IF NOT EXISTS write_adhash bytea,
+    ADD COLUMN IF NOT EXISTS read_adhash bytea;
+
+ALTER TABLE ariabc_internal.raft_apply_item
+    DROP CONSTRAINT IF EXISTS raft_apply_item_write_adhash_len;
+ALTER TABLE ariabc_internal.raft_apply_item
+    ADD CONSTRAINT raft_apply_item_write_adhash_len
+    CHECK (write_adhash IS NULL OR octet_length(write_adhash) = 8);
+ALTER TABLE ariabc_internal.raft_apply_item
+    DROP CONSTRAINT IF EXISTS raft_apply_item_read_adhash_len;
+ALTER TABLE ariabc_internal.raft_apply_item
+    ADD CONSTRAINT raft_apply_item_read_adhash_len
+    CHECK (read_adhash IS NULL OR octet_length(read_adhash) = 8);
 
 -- Existing v2 manifests predate Merkle deltas.  Give them deterministic
 -- sequence ranges and initialize the durable watermark past them: their

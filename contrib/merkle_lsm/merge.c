@@ -533,7 +533,9 @@ merkle_lsm_launcher(Datum arg)
 			foreach(wc, workers)
 				if (((MlWorker *) lfirst(wc))->database == database)
 					entry = lfirst(wc);
-			if (entry && GetBackgroundWorkerPid(entry->handle, &pid) != BGWH_STOPPED)
+			/* A failed registration (no free slot) leaves handle NULL: retry it. */
+			if (entry && entry->handle &&
+				GetBackgroundWorkerPid(entry->handle, &pid) != BGWH_STOPPED)
 				continue;
 			if (!entry)
 			{

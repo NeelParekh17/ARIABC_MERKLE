@@ -1,5 +1,5 @@
 #include "pg_state_machine.hxx"
-#include "blake3_tx_signer.hxx"
+#include "tx_request_sig.hxx"
 #include "wire_protocol.hxx"
 
 #include "ariabc_pg_util.hxx"
@@ -90,6 +90,10 @@ struct server_profile_stats {
 
 server_profile_stats g_prof;
 std::atomic<bool> g_stop{false};
+// Per-request leader traces (SAFE_RAFT_APPEND_RESULT, SAFE_RAFT_ORDERER_*,
+// ...).  Set once in parse_args() before any thread starts.  Failure and
+// verification lines are never gated by this.
+bool g_leader_trace = true;
 int g_listen_fd = -1;
 std::atomic<uint64_t> g_debug_server_trace_count{0};
 
@@ -373,9 +377,17 @@ struct server_options {
     // Commit B2: cluster epoch as 64-char lowercase hex (32 bytes)
     std::string raft_epoch_hex;
 
-    // Request tag verification: auto (require when a key file resolves), require, off.
+    // Request signature verification: auto (require when the client key
+    // directory holds at least one client_<id>.pub.pem), require, off.
     std::string tx_tag_verify = "auto";
-    std::string tx_tag_key_file;
+    // Directory of client_<id>.pub.pem; default = key dir.
+    std::string tx_client_key_dir;
+    // Common key directory (--keyDir), else $ARIABC_KEY_DIR, else ~/.ariabc/keys.
+    std::string key_dir;
+
+    // Per-request leader append/orderer traces: "on", "off", or empty
+    // (fall back to $ARIABC_LEADER_TRACE, default on).
+    std::string leader_trace;
 
     db_options db;
     kafka_options kafka;
@@ -388,19 +400,31 @@ void usage(const char* argv0) {
         << "    --id <int> --raftEndpoint <host:port> --clientPort <port> \\\n"
         << "    --raftMembers <id=host:port,id=host:port,...> \\\n"
         << "    --dbName <name> --dbPort <port> [--dbHost <host>] [--dbUser <user>] [--dbPass <pass>] \\\n"
-        << "    [--dbType <0|1|2>] [--safedb <0|1|2>] [--dbConnPoolSize <N>] [--bcdbInitBlockSize <legacy-init-arg>] [--pgExecMode threaded|event] \\\n"
-        << "    [--kafkaBootstrap <host:port>] [--resultTopic <t>] [--resultSigKey <k>] \\\n"
+        << "    --dbType <0|1|2> [--safedb <0|1|2>] [--dbConnPoolSize <N>] [--bcdbInitBlockSize <legacy-init-arg>] [--pgExecMode threaded|event] \\\n"
+        << "    [--kafkaBootstrap <host:port>] [--resultTopic <t>] \\\n"
+        << "    [--keyDir <dir>]   # Ed25519 keys; default $ARIABC_KEY_DIR, else ~/.ariabc/keys\n"
+        << "    [--resultSigMode auto|ed25519|hmac] [--resultSignKeyFile <pem>] [--resultSigKey <k>]\n"
+        << "        # ed25519: sign each Kafka result message with this node's own key\n"
+        << "        # (default <keyDir>/node_<id>.key.pem); auto = ed25519 when that file exists;\n"
+        << "        # hmac = legacy shared key, NOT safe against a faulty replica\n"
         << "    [--bypassRaft 0|1]  # skip Raft, direct-enqueue to executor (kafka-only profile)\n"
         << "    [--raft-storage-mode <in_memory|durable>]\n"
         << "    [--raft-storage-dir <path>]\n"
         << "    [--raft-apply-ledger off|safe]   # B1: safe-mode ledger gate\n"
         << "    [--raft-epoch-hex <64-hex-chars>] # B2: cluster epoch identifier\n"
-        << "    [--txTagVerify auto|require|off] [--txTagKeyFile <path>]\n"
-        << "        # keyed BLAKE3 request tags; key file = 64 hex chars; default path\n"
-        << "        # $ARIABC_TX_TAG_KEY_FILE, else ~/.ariabc/tx_tag.key\n";
+        << "    [--txTagVerify auto|require|off] [--txClientKeyDir <dir>]\n"
+        << "        # per-client Ed25519 request signatures, verified from the log before\n"
+        << "        # execution against <dir>/client_<id>.pub.pem (default dir = keyDir);\n"
+        << "        # auto = require when at least one client public key is present\n"
+        << "    [--leader-trace on|off]          # per-request SAFE_RAFT_APPEND_RESULT/ORDERER lines;\n"
+        << "        # default $ARIABC_LEADER_TRACE, else on\n";
 }
 
 bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
+    // --dbType is required: the server default (0) and the gateway default (2)
+    // used to differ, so a launch that forgot the flag on one side silently ran
+    // the two binaries in different modes.
+    bool db_type_set = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto need = [&](const char* flag) -> std::string {
@@ -424,6 +448,7 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.db.safedb = std::stoi(need("--safedb"));
             } else if (a == "--dbType") {
                 opt.db.db_type = std::stoi(need("--dbType"));
+                db_type_set = true;
             } else if (a == "--dbName") {
                 opt.db.dbname = need("--dbName");
             } else if (a == "--dbHost") {
@@ -446,6 +471,14 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.kafka.result_topic = need("--resultTopic");
             } else if (a == "--resultSigKey") {
                 opt.kafka.result_sig_key = need("--resultSigKey");
+            } else if (a == "--resultSigMode") {
+                opt.kafka.result_sig_mode = need("--resultSigMode");
+            } else if (a == "--resultSignKeyFile") {
+                opt.kafka.result_sign_key_file = need("--resultSignKeyFile");
+            } else if (a == "--keyDir") {
+                opt.key_dir = need("--keyDir");
+            } else if (a == "--txClientKeyDir") {
+                opt.tx_client_key_dir = need("--txClientKeyDir");
             } else if (a == "--bypassRaft") {
                 opt.bypass_raft = (std::stoi(need("--bypassRaft")) != 0);
             } else if (a == "--raft-storage-mode") {
@@ -461,7 +494,11 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
             } else if (a == "--txTagVerify") {
                 opt.tx_tag_verify = need("--txTagVerify");
             } else if (a == "--txTagKeyFile") {
-                opt.tx_tag_key_file = need("--txTagKeyFile");
+                throw std::runtime_error("--txTagKeyFile (shared BLAKE3 key) was removed: replicas now "
+                                         "verify per-client Ed25519 signatures; pass "
+                                         "--txClientKeyDir <dir with client_<id>.pub.pem>");
+            } else if (a == "--leader-trace") {
+                opt.leader_trace = need("--leader-trace");
             } else {
                 throw std::runtime_error("unknown flag: " + a);
             }
@@ -486,8 +523,12 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
         err = "missing --dbName/--dbPort";
         return false;
     }
+    if (!db_type_set) {
+        err = "missing --dbType (required: 0, 1 = deterministic, or 2; must match the gateway)";
+        return false;
+    }
     if (opt.db.db_type < 0 || opt.db.db_type > 2) {
-        err = "invalid --dbType";
+        err = "invalid --dbType (expected 0, 1, or 2)";
         return false;
     }
     if (opt.db.conn_pool_size <= 0) {
@@ -557,6 +598,27 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
             return false;
         }
     }
+    {
+        opt.key_dir = ariabc_pg::resolve_key_dir(opt.key_dir);
+        opt.kafka.key_dir = opt.key_dir;
+        const char* env_mode = std::getenv("ARIABC_RESULT_SIG_MODE");
+        if (env_mode && *env_mode) opt.kafka.result_sig_mode = env_mode;
+        const std::string& rm = opt.kafka.result_sig_mode;
+        if (rm != "auto" && rm != "ed25519" && rm != "hmac") {
+            err = "invalid --resultSigMode '" + rm + "' (expected auto, ed25519 or hmac)";
+            return false;
+        }
+    }
+    if (opt.leader_trace.empty()) {
+        g_leader_trace = env_flag_enabled("ARIABC_LEADER_TRACE", true);
+    } else if (opt.leader_trace == "on") {
+        g_leader_trace = true;
+    } else if (opt.leader_trace == "off") {
+        g_leader_trace = false;
+    } else {
+        err = "invalid --leader-trace '" + opt.leader_trace + "' (expected on or off)";
+        return false;
+    }
     opt.db.raft_apply_ledger_mode = opt.raft_apply_ledger_mode;
     opt.db.raft_epoch_hex = opt.raft_epoch_hex;
     return true;
@@ -586,7 +648,10 @@ std::vector<raft_member> parse_raft_members(const server_options& opt) {
         const std::string id_s = trim_copy(kv[0]);
         const std::string ep_s = trim_copy(kv[1]);
         const int id = std::stoi(id_s);
-        if (id <= 0) throw std::runtime_error("invalid member id: " + id_s);
+        if (id <= 0) {
+            throw std::runtime_error("invalid member id " + id_s + " in --raftMembers entry '" + p +
+                                     "': Raft member ids start at 1 (use 1..N, not 0..N-1)");
+        }
         const host_port hp = parse_host_port(ep_s);
         raft_member m;
         m.id = id;
@@ -709,7 +774,7 @@ void append_request_to_raft(nuraft::ptr<nuraft::raft_server> raft,
     const bool accepted = r && r->get_accepted();
     const int result_code = r ? static_cast<int>(r->get_result_code()) : -1;
     debug_trace_server_append(req, accepted, result_code, raft->get_leader());
-    if (psm) {
+    if (psm && g_leader_trace) {
         std::cerr << "SAFE_RAFT_APPEND_RESULT"
                   << " accepted=" << (accepted ? 1 : 0)
                   << " code=" << result_code
@@ -782,6 +847,7 @@ void append_requests_to_raft_batch(
         client_api_request coalesced = coalesce_raft_ordered_entries(entries);
         client_api_response batch_resp;
         append_request_to_raft(raft, psm, coalesced, batch_resp);
+        if (g_leader_trace)
         std::cerr << "SAFE_RAFT_ORDERER_COALESCE_LOG"
                   << " status=" << static_cast<int>(batch_resp.status)
                   << " entries=" << entries.size()
@@ -857,6 +923,7 @@ void append_requests_to_raft_batch(
     const int result_code = r ? static_cast<int>(r->get_result_code()) : -1;
     const uint64_t raft_log_idx_hint =
         static_cast<uint64_t>(raft->get_last_log_idx());
+    if (g_leader_trace)
     std::cerr << "SAFE_RAFT_APPEND_BATCH_RESULT"
               << " accepted=" << (accepted ? 1 : 0)
               << " code=" << result_code
@@ -1076,6 +1143,7 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
     g_prof.orderer_arrivals.fetch_add(1, std::memory_order_relaxed);
     atomic_max_u64(g_prof.orderer_pending_depth_max,
                    static_cast<uint64_t>(orderer.pending.size()));
+    if (g_leader_trace)
     std::cerr << "SAFE_RAFT_ORDERER_ENQUEUE"
               << " first_seq=" << first_seq
               << " last_seq=" << last_seq
@@ -1161,6 +1229,7 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
                 g_prof.orderer_flush_reason_idle.fetch_add(1, std::memory_order_relaxed);
             }
 
+            if (g_leader_trace)
             std::cerr << "SAFE_RAFT_ORDERER_DRAIN"
                       << " first_seq=" << ready_batch.front()->first_seq
                       << " last_seq=" << ready_batch.back()->last_seq
@@ -1169,6 +1238,7 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
                       << std::endl;
             g_prof.orderer_drains.fetch_add(1, std::memory_order_relaxed);
             orderer.next_seq = ready_batch.back()->last_seq + 1;
+            if (g_leader_trace)
             std::cerr << "SAFE_RAFT_ORDERER_ADVANCE"
                       << " next_seq=" << orderer.next_seq
                       << std::endl;
@@ -1262,6 +1332,16 @@ void handle_client_fd(int fd,
 
         pg_state_machine* psm = sm ? dynamic_cast<pg_state_machine*>(sm.get()) : nullptr;
 
+        // A batch is entirely workload data. Reject it before any item can be
+        // ordered or appended, even when only one item is a control command.
+        if (req.is_batch() && !validate_workload_request(req, err)) {
+            client_api_response resp;
+            resp.status = 2;
+            resp.msg = err;
+            if (!write_response_frame(fd, resp, err)) break;
+            continue;
+        }
+
         // Local control-plane commands used by gateway barriers.
         if (req.sql == "__ARIABC_CTRL_GET_LEADER") {
             client_api_response resp;
@@ -1283,6 +1363,9 @@ void handle_client_fd(int fd,
             client_api_response resp;
             resp.status = 0;
             resp.msg = std::to_string(static_cast<uint64_t>(psm->last_commit_index()));
+            if (starts_with(req.req_id, kControlStatsRequestIdPrefix)) {
+                resp.msg += " user_aborts=" + std::to_string(psm->executor_stats().user_aborts);
+            }
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
             continue;
@@ -1401,6 +1484,12 @@ void handle_client_fd(int fd,
         }
 
         client_api_response resp;
+        if (!validate_workload_request(req, err)) {
+            resp.status = 2;
+            resp.msg = err;
+            if (!write_response_frame(fd, resp, err)) break;
+            continue;
+        }
         if (!orderer || !append_raft_ordered(raft, psm, req, *orderer, resp)) {
             append_request_to_raft(raft, psm, req, resp);
         }
@@ -1587,6 +1676,14 @@ void handle_client_fd_direct(int fd,
             break;
         }
 
+        if (req.is_batch() && !validate_workload_request(req, err)) {
+            client_api_response resp;
+            resp.status = 2;
+            resp.msg = err;
+            if (!write_response_frame(fd, resp, err)) break;
+            continue;
+        }
+
         if (req.sql == "__ARIABC_CTRL_GET_LEADER") {
             client_api_response resp;
             resp.status = 0;
@@ -1608,6 +1705,9 @@ void handle_client_fd_direct(int fd,
             client_api_response resp;
             resp.status = 0;
             resp.msg = std::to_string(seq_counter.load(std::memory_order_relaxed));
+            if (starts_with(req.req_id, kControlStatsRequestIdPrefix)) {
+                resp.msg += " user_aborts=" + std::to_string(psm->executor_stats().user_aborts);
+            }
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
             continue;
@@ -1684,6 +1784,14 @@ void handle_client_fd_direct(int fd,
             }
             const bool ok_write = write_response_frame(fd, resp, err);
             if (!ok_write) break;
+            continue;
+        }
+
+        if (!validate_workload_request(req, err)) {
+            client_api_response resp;
+            resp.status = 2;
+            resp.msg = err;
+            if (!write_response_frame(fd, resp, err)) break;
             continue;
         }
 
@@ -1776,7 +1884,11 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " tx_tag_verified=" << tx_tag.verified
         << " tx_tag_rejected_missing=" << tx_tag.rejected_missing
         << " tx_tag_rejected_mismatch=" << tx_tag.rejected_mismatch
+        << " tx_tag_rejected_unknown_client=" << tx_tag.rejected_unknown_client
         << " tx_tag_verify_ms=" << (tx_tag.verify_ns / 1000000.0)
+        << " result_sig_mode=" << exec.result_sig_mode
+        << " result_sig_messages=" << exec.result_sig_messages
+        << " result_sig_ms=" << (exec.result_sig_ns / 1000000.0)
         << " req_id_map_size_current=" << result_prof.req_id_map_size_current
         << " req_id_map_size_max=" << result_prof.req_id_map_size_max
         << " result_token_map_size_current=" << result_prof.result_token_map_size_current
@@ -2102,27 +2214,48 @@ int main(int argc, char** argv) {
     ::signal(SIGINT, ariabc_pg::on_term);
 
     // State machine (always needed: owns pg_executor + Kafka publisher).
-    ptr<state_machine> sm =
-        cs_new<ariabc_pg::pg_state_machine>(opt.id, opt.db, opt.kafka);
+    // The executor loads this node's result-signing key here and throws when
+    // an explicitly requested key cannot be used.
+    ptr<state_machine> sm;
+    try {
+        sm = cs_new<ariabc_pg::pg_state_machine>(opt.id, opt.db, opt.kafka);
+    } catch (const std::exception& e) {
+        std::cerr << "STATE_MACHINE_INIT_FAILED: " << e.what() << std::endl;
+        return 1;
+    }
 
     // Request tags must be configured before the first commit()/direct enqueue.
     {
         ariabc_pg::pg_state_machine* psm =
             dynamic_cast<ariabc_pg::pg_state_machine*>(sm.get());
-        const std::string key_file = ariabc_pg::resolve_tx_tag_key_file(opt.tx_tag_key_file);
-        const bool require = opt.tx_tag_verify == "require" ||
-                             (opt.tx_tag_verify == "auto" && !key_file.empty());
+        const std::string client_dir =
+            opt.tx_client_key_dir.empty() ? opt.key_dir : opt.tx_client_key_dir;
+        bool require = opt.tx_tag_verify == "require";
+        if (opt.tx_tag_verify == "auto" && !client_dir.empty()) {
+            ariabc_pg::ed25519_key_roster probe;
+            std::string probe_err;
+            // A directory that exists but holds a bad key must fail, not
+            // silently turn verification off: only "no keys at all" means off.
+            if (probe.load_dir(client_dir, "client", probe_err)) {
+                require = !probe.empty();
+            } else if (probe_err.compare(0, 26, "cannot open key directory ") != 0) {
+                std::cerr << "TX_TAG_CONFIG_FAILED: " << probe_err << std::endl;
+                return 1;
+            }
+        }
         std::string tag_err;
-        if (!psm || !psm->configure_tx_tag(key_file, require, tag_err)) {
+        if (!psm || !psm->configure_tx_tag(client_dir, require, tag_err)) {
             std::cerr << "TX_TAG_CONFIG_FAILED: " << tag_err << std::endl;
             return 1;
         }
         if (require) {
-            std::cout << "TX_TAG_VERIFY=require key_file=" << key_file << std::endl;
+            std::cout << "TX_TAG_VERIFY=require scheme=ed25519 client_key_dir=" << client_dir
+                      << " clients=" << psm->tx_tag_client_ids()
+                      << " verify_threads=" << psm->tx_tag_verify_threads() << std::endl;
         } else {
             std::cout << "TX_TAG_VERIFY=off"
                       << (opt.tx_tag_verify == "off" ? " (disabled by flag)"
-                                                     : " (WARNING: no key file found)")
+                                                     : " (WARNING: no client public keys found)")
                       << std::endl;
         }
     }
@@ -2190,6 +2323,17 @@ int main(int argc, char** argv) {
     const int preferred_leader_id = ariabc_pg::preferred_leader_id_from_env();
     const int preferred_leader_transfer_wait_ms =
         ariabc_pg::preferred_leader_transfer_wait_ms_from_env();
+    if (preferred_leader_id > 0) {
+        bool preferred_is_member = false;
+        for (const auto& m : members) {
+            if (m.id == preferred_leader_id) preferred_is_member = true;
+        }
+        if (!preferred_is_member) {
+            std::cerr << "Raft members error: ARIABC_PREFERRED_LEADER_ID=" << preferred_leader_id
+                      << " is not one of the --raftMembers ids" << std::endl;
+            return 1;
+        }
+    }
 
     try {
         if (opt.raft_storage_mode == "durable") {
@@ -2428,7 +2572,9 @@ int main(int argc, char** argv) {
               << " raft=" << opt.raft_endpoint
               << " clientPort=" << opt.client_port
               << " members=" << members.size()
-              << " preferredLeaderId=" << preferred_leader_id
+              << " preferredLeaderId="
+              << (preferred_leader_id > 0 ? std::to_string(preferred_leader_id)
+                                          : std::string("none(normal election)"))
               << " leaderTransferWaitMs=" << (preferred_leader_id > 0 ? preferred_leader_transfer_wait_ms : 0)
               << std::endl;
 

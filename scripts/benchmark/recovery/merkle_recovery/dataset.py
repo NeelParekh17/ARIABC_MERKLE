@@ -296,7 +296,7 @@ def _create_lookup_btree_index(conn, schema: str, partitions: int = 200) -> floa
             ON {schema}.usertable (
                 merkle_partition_for_hash(merkle_key_hash(ycsb_key), {partitions}),
                 merkle_key_hash(ycsb_key),
-                ycsb_key
+                merkle_tuple_hash(usertable.*)
             )
             """,
         )

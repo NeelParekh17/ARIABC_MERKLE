@@ -93,17 +93,15 @@ if(ARIABC_HAVE_KAFKA)
     add_compile_definitions(ARIABC_HAVE_RDKAFKA)
 endif()
 
-# Request tags: the gateway signs and the server's state machine verifies.
-set(BLAKE3_SOURCES
-    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3.c
-    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3_dispatch.c
-    ${CMAKE_CURRENT_LIST_DIR}/../src/common/blake3_portable.c)
-
-set_source_files_properties(${BLAKE3_SOURCES} PROPERTIES
-    COMPILE_DEFINITIONS "BLAKE3_NO_SSE2;BLAKE3_NO_SSE41;BLAKE3_NO_AVX2;BLAKE3_NO_AVX512")
-
-set(BLAKE3_INCLUDES
-    ${CMAKE_CURRENT_LIST_DIR}/../src/common)
+# Ed25519 request/result signatures (ed25519_keys.hxx) need libcrypto.
+# NuRaft normally links OpenSSL already; link it explicitly when found.
+find_package(OpenSSL QUIET)
+if(OPENSSL_FOUND)
+    set(ARIABC_CRYPTO_LIBS OpenSSL::Crypto)
+else()
+    message(WARNING "OpenSSL not found: Ed25519 request/result signatures are unavailable.")
+    set(ARIABC_CRYPTO_LIBS "")
+endif()
 
 if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
     add_executable(ariabc_pg_server
@@ -117,13 +115,11 @@ if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
                    src/raft_storage_common.cxx
                    src/durable_state_mgr.cxx
                    src/durable_log_store.cxx
-                   ${ARIABC_COMMON_SRC}
-                   ${BLAKE3_SOURCES})
+                   ${ARIABC_COMMON_SRC})
 
     target_include_directories(ariabc_pg_server
                               PRIVATE
                                 ${ARIABC_COMMON_INC}
-                                ${BLAKE3_INCLUDES}
                                 ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                                 ${LIBPQ_INCLUDE_DIR}
                                 ${POSTGRES_INCLUDE_DIR}
@@ -133,6 +129,7 @@ if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
 
     target_link_libraries(ariabc_pg_server
                           NuRaft::static_lib
+                      ${ARIABC_CRYPTO_LIBS}
                           ${LIBPQ_LIBRARY}
                           ${ARIABC_PG_KAFKA_LIBS}
                           z
@@ -146,20 +143,19 @@ add_executable(ariabc_pg_gateway
                src/async_cluster_submitter.cxx
                src/kafka_console.cxx
                src/wire_protocol_async.cxx
-               src/wire_protocol.cxx
-               ${BLAKE3_SOURCES})
+               src/wire_protocol.cxx)
 
 target_include_directories(ariabc_pg_gateway
                           PRIVATE
                             ${ARIABC_COMMON_INC}
                             ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
-                            ${RDKAFKA_INCLUDE_DIR}
-                            ${BLAKE3_INCLUDES})
+                            ${RDKAFKA_INCLUDE_DIR})
 
 target_compile_definitions(ariabc_pg_gateway PRIVATE ${ARIABC_TRANSPORT_DEFS})
 
 target_link_libraries(ariabc_pg_gateway
                       NuRaft::static_lib
+                      ${ARIABC_CRYPTO_LIBS}
                       ${ARIABC_PG_KAFKA_LIBS}
                       z
                       dl)
@@ -173,6 +169,7 @@ target_include_directories(ariabc_recovery_tool
                           PRIVATE
                             ${ARIABC_COMMON_INC}
                             ${LIBPQ_INCLUDE_DIR}
+                            ${POSTGRES_INCLUDE_DIR}
                             ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
 
 target_compile_definitions(ariabc_recovery_tool PRIVATE ${ARIABC_TRANSPORT_DEFS})
@@ -181,24 +178,23 @@ target_link_libraries(ariabc_recovery_tool
                       NuRaft::static_lib
                       ${LIBPQ_LIBRARY})
 
-add_executable(blake3_tx_sign_test
-               tests/blake3_tx_sign_test.cxx
+add_executable(tx_sig_test
+               tests/tx_sig_test.cxx
                src/wire_protocol.cxx
-               src/wire_protocol_async.cxx
-               ${BLAKE3_SOURCES})
+               src/wire_protocol_async.cxx)
 
-target_include_directories(blake3_tx_sign_test
+target_include_directories(tx_sig_test
                           PRIVATE
                             ${ARIABC_COMMON_INC}
-                            ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
-                            ${BLAKE3_INCLUDES})
+                            ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include)
 
-target_compile_definitions(blake3_tx_sign_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
+target_compile_definitions(tx_sig_test PRIVATE ${ARIABC_TRANSPORT_DEFS})
 
-target_link_libraries(blake3_tx_sign_test
+target_link_libraries(tx_sig_test
                       NuRaft::static_lib
+                      ${ARIABC_CRYPTO_LIBS}
                       pthread)
-add_test(NAME blake3_tx_sign_test COMMAND blake3_tx_sign_test ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME tx_sig_test COMMAND tx_sig_test ${CMAKE_CURRENT_BINARY_DIR})
 
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/wire_protocol_test.cxx")
     add_executable(ariabc_pg_wire_protocol_test
@@ -307,8 +303,7 @@ add_executable(b4_codec_sig_test
                src/durable_state_mgr.cxx
                src/durable_log_store.cxx
                src/logger.cc
-               src/in_memory_log_store.cxx
-               ${BLAKE3_SOURCES})
+               src/in_memory_log_store.cxx)
 
 target_include_directories(b4_codec_sig_test
                             PRIVATE
@@ -316,19 +311,22 @@ target_include_directories(b4_codec_sig_test
                               ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                               ${LIBPQ_INCLUDE_DIR}
                               ${POSTGRES_INCLUDE_DIR}
-                              ${RDKAFKA_INCLUDE_DIR}
-                              ${BLAKE3_INCLUDES})
+                              ${RDKAFKA_INCLUDE_DIR})
 
 target_compile_definitions(b4_codec_sig_test PRIVATE ${ARIABC_TRANSPORT_DEFS} BUILDING_UNIT_TESTS)
 
 target_link_libraries(b4_codec_sig_test
                       NuRaft::static_lib
+                      ${ARIABC_CRYPTO_LIBS}
                       ${LIBPQ_LIBRARY}
                       ${ARIABC_PG_KAFKA_LIBS}
                       z
                       dl)
 
 enable_testing()
+if(TARGET ariabc_pg_wire_protocol_test)
+    add_test(NAME ariabc_pg_wire_protocol_test COMMAND ariabc_pg_wire_protocol_test)
+endif()
 if(ARIABC_HAVE_KAFKA AND EXISTS "${RDKAFKA_INCLUDE_DIR}/librdkafka/rdkafka_mock.h")
     add_executable(kafka_producer_readiness_test
                    tests/kafka_producer_readiness_test.cxx
@@ -352,13 +350,11 @@ add_executable(pg_state_machine_test
                src/replica_repair.cxx
                src/pg_executor.cxx
                src/kafka_console.cxx
-               src/wire_protocol.cxx
-               ${BLAKE3_SOURCES})
+               src/wire_protocol.cxx)
 
 target_include_directories(pg_state_machine_test
                             PRIVATE
                               ${ARIABC_COMMON_INC}
-                              ${BLAKE3_INCLUDES}
                               ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                               ${LIBPQ_INCLUDE_DIR}
                               ${POSTGRES_INCLUDE_DIR}
@@ -368,6 +364,7 @@ target_compile_definitions(pg_state_machine_test PRIVATE ${ARIABC_TRANSPORT_DEFS
 
 target_link_libraries(pg_state_machine_test
                       NuRaft::static_lib
+                      ${ARIABC_CRYPTO_LIBS}
                       ${LIBPQ_LIBRARY}
                       ${ARIABC_PG_KAFKA_LIBS}
                       z
@@ -393,13 +390,11 @@ add_executable(durable_raft_pg_apply_contract_test
                src/durable_state_mgr.cxx
                src/durable_log_store.cxx
                src/logger.cc
-               src/in_memory_log_store.cxx
-               ${BLAKE3_SOURCES})
+               src/in_memory_log_store.cxx)
 
 target_include_directories(durable_raft_pg_apply_contract_test
                             PRIVATE
                               ${ARIABC_COMMON_INC}
-                              ${BLAKE3_INCLUDES}
                               ${CMAKE_CURRENT_LIST_DIR}/../NuRaft/asio/asio/include
                               ${LIBPQ_INCLUDE_DIR}
                               ${POSTGRES_INCLUDE_DIR}
@@ -409,6 +404,7 @@ target_compile_definitions(durable_raft_pg_apply_contract_test PRIVATE ${ARIABC_
 
 target_link_libraries(durable_raft_pg_apply_contract_test
                       NuRaft::static_lib
+                      ${ARIABC_CRYPTO_LIBS}
                       ${LIBPQ_LIBRARY}
                       ${ARIABC_PG_KAFKA_LIBS}
                       z
@@ -438,6 +434,7 @@ target_compile_definitions(durable_raft_restart_contract_test PRIVATE ${ARIABC_T
 
 target_link_libraries(durable_raft_restart_contract_test
                       NuRaft::static_lib
+                      ${ARIABC_CRYPTO_LIBS}
                       z
                       dl)
 

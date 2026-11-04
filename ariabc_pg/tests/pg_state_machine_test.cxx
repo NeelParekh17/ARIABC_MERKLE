@@ -333,6 +333,44 @@ int main() {
     kafka_options k_opt;
     pg_state_machine sm(1, db_opt, k_opt);
 
+    // Reject direct API misuse and historical Raft entries before they can
+    // register result waiters, advance the applied prefix, or enqueue SQL.
+    {
+        client_api_request_item item;
+        item.req_id = "historical-control";
+        item.sql = "__ARIABC_CTRL_GET_USER_ABORTS";
+        bool rejected = false;
+        try { sm.direct_enqueue(item, 1); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        REQUIRE(rejected);
+        client_api_request_item valid;
+        valid.req_id = "valid-peer";
+        valid.sql = "SELECT 1";
+        rejected = false;
+        try { sm.direct_enqueue_batch({valid, item}, 1); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        REQUIRE(rejected);
+
+        // Construct the old log format directly; the new log builder correctly
+        // refuses to produce a log containing control SQL.
+        auto log = nuraft::buffer::alloc(256);
+        nuraft::buffer_serializer bs(log);
+        bs.put_str(item.req_id);
+        bs.put_str(item.sql);
+        bs.put_i32(1);
+        rejected = false;
+        try { sm.commit(1, *log); }
+        catch (const std::runtime_error& e) {
+            rejected = std::string(e.what()).find("CONTROL_COMMAND_IN_RAFT_LOG log=1") == 0;
+        }
+        REQUIRE(rejected);
+        REQUIRE(sm.last_commit_index() == 0);
+        const auto counts = sm.test_result_tracker_counts();
+        REQUIRE(counts.pending_result_counts == 0);
+        REQUIRE(counts.result_token_by_req_id == 0);
+        std::cout << "Direct and historical control rejection tests passed." << std::endl;
+    }
+
     // 1. Test zero-byte empty commit (Raft no-op entry, data.size() == 0)
     {
         sm.seed_durable_prefix(99);

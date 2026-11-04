@@ -616,22 +616,138 @@ merkle_do_split_in_memory(Oid index_oid, int partition_id, const uint8 *node_id,
 	pfree(bucket_hashes);
 }
 
+/*
+ * merkle_collect_node_entries() - (key hash, tuple hash) of the rows in one
+ * Merkle node range, as seen by snapshot.
+ *
+ * With a lookup index of the current shape the values are read from its
+ * entries (heap pages are visited only for visibility checks on pages that
+ * are not all-visible).  Otherwise every row in the range is re-read from the
+ * heap and re-hashed.  The caller must be SPI-connected for that fallback.
+ */
+MerkleTupleHashEntry *
+merkle_collect_node_entries(Oid index_oid, int partition_id,
+							const uint8 *lower, const uint8 *upper,
+							Snapshot snapshot, int *num_entries_out,
+							bool *used_lookup_out)
+{
+	Relation	index_rel;
+	Relation	heap_rel;
+	Oid			heap_oid;
+	Oid			lookup_oid;
+	int			num_partitions = MERKLE_DEFAULT_PARTITIONS;
+	char	   *heap_name;
+	char	   *key_expr;
+	StringInfoData buf;
+	Oid			argtypes[4] = {BYTEAOID, BYTEAOID, INT4OID, INT2OID};
+	Datum		values[4];
+	bytea	   *lower_bytea;
+	bytea	   *upper_bytea;
+	MerkleTupleHashEntry *entries = NULL;
+	uint64		scan_rows;
+	int			spi_rc;
+	int			i;
+
+	*num_entries_out = 0;
+	if (used_lookup_out)
+		*used_lookup_out = false;
+
+	index_rel = index_open(index_oid, AccessShareLock);
+	merkle_read_meta(index_rel, NULL, NULL, NULL, &num_partitions);
+	heap_oid = index_rel->rd_index->indrelid;
+	index_close(index_rel, AccessShareLock);
+
+	heap_rel = table_open(heap_oid, AccessShareLock);
+	lookup_oid = merkle_find_lookup_index(heap_rel, num_partitions, snapshot);
+	if (OidIsValid(lookup_oid))
+	{
+		entries = merkle_lookup_scan(heap_rel, lookup_oid, partition_id, lower, upper,
+									 snapshot, num_entries_out, NULL);
+		table_close(heap_rel, AccessShareLock);
+		if (used_lookup_out)
+			*used_lookup_out = true;
+		return entries;
+	}
+	heap_name = quote_qualified_identifier(
+		get_namespace_name(RelationGetNamespace(heap_rel)),
+		RelationGetRelationName(heap_rel));
+	table_close(heap_rel, AccessShareLock);
+
+	/* No usable lookup index: re-hash the range's rows from the heap. */
+	key_expr = get_index_key_expr_str(index_oid);
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+		"SELECT %s AS kh, merkle_tuple_hash(u.*) AS th"
+		"  FROM %s u"
+		" WHERE merkle_partition_for_hash(%s, $3) = $4"
+		"   AND %s BETWEEN $1 AND $2",
+		key_expr, heap_name, key_expr, key_expr);
+
+	lower_bytea = (bytea *) palloc(VARHDRSZ + 8);
+	upper_bytea = (bytea *) palloc(VARHDRSZ + 8);
+	SET_VARSIZE(lower_bytea, VARHDRSZ + 8);
+	SET_VARSIZE(upper_bytea, VARHDRSZ + 8);
+	memcpy(VARDATA(lower_bytea), lower, 8);
+	memcpy(VARDATA(upper_bytea), upper, 8);
+	values[0] = PointerGetDatum(lower_bytea);
+	values[1] = PointerGetDatum(upper_bytea);
+	values[2] = Int32GetDatum(num_partitions);
+	values[3] = Int16GetDatum((int16) partition_id);
+
+	PushActiveSnapshot(snapshot);
+	spi_rc = SPI_execute_with_args(buf.data, 4, argtypes, values, NULL, true, 0);
+	scan_rows = SPI_processed;
+	PopActiveSnapshot();
+
+	if (spi_rc != SPI_OK_SELECT)
+		elog(ERROR, "Merkle node row scan failed: %s", SPI_result_code_string(spi_rc));
+	if (scan_rows > PG_INT32_MAX)
+		elog(ERROR, "too many rows in Merkle node range (%llu)",
+			 (unsigned long long) scan_rows);
+
+	if (scan_rows > 0)
+	{
+		entries = (MerkleTupleHashEntry *) palloc((size_t) scan_rows * sizeof(MerkleTupleHashEntry));
+		/* Copy all data out of the SPI tuptable before freeing it. */
+		for (i = 0; i < (int) scan_rows; i++)
+		{
+			HeapTuple	tup = SPI_tuptable->vals[i];
+			TupleDesc	td = SPI_tuptable->tupdesc;
+			bool		isnull;
+			bytea	   *kh_b = DatumGetByteaPP(SPI_getbinval(tup, td, 1, &isnull));
+			bytea	   *th_b = DatumGetByteaPP(SPI_getbinval(tup, td, 2, &isnull));
+
+			if (VARSIZE_ANY_EXHDR(th_b) != MERKLE_TUPLE_HASH_BYTES)
+				elog(ERROR, "merkle_tuple_hash returned %d bytes, expected %d",
+					 (int) VARSIZE_ANY_EXHDR(th_b), MERKLE_TUPLE_HASH_BYTES);
+			memcpy(entries[i].key_hash, VARDATA_ANY(kh_b), 8);
+			entries[i].partition_id = (uint32) partition_id;
+			memcpy(entries[i].tuple_hash.data, VARDATA_ANY(th_b), MERKLE_TUPLE_HASH_BYTES);
+		}
+	}
+	if (SPI_tuptable != NULL)
+		SPI_freetuptable(SPI_tuptable);
+
+	pfree(lower_bytea);
+	pfree(upper_bytea);
+	pfree(buf.data);
+	*num_entries_out = (int) scan_rows;
+	return entries;
+}
+
 void
 do_split(Oid index_oid, int partition_id, const uint8 *node_id, int prefix_len, int64 target_count)
 {
 	uint8		lower[8];
 	uint8		upper[8];
 	Relation	index_rel;
-	Relation	heap_rel;
-	Oid			heap_oid;
-	char	   *heap_name;
-	char	   *key_expr;
-	int			spi_rc;
-	StringInfoData buf;
 	int			fanout;
 	int			bits_per_split;
 	int			split_threshold;
 	int			num_partitions;
+	Snapshot	snapshot;
+	MerkleTupleHashEntry *entries;
+	int			num_entries = 0;
 
 	memcpy(lower, node_id, 8);
 	merkle_bytea_upper_bound(upper, node_id, prefix_len);
@@ -641,110 +757,30 @@ do_split(Oid index_oid, int partition_id, const uint8 *node_id, int prefix_len, 
 	split_threshold = SPLIT_THRESHOLD;
 	merkle_read_meta(index_rel, &fanout, &split_threshold, NULL, &num_partitions);
 	bits_per_split = merkle_bits_per_split_for_fanout(fanout);
-	heap_oid = index_rel->rd_index->indrelid;
 	index_close(index_rel, AccessShareLock);
 
-	heap_rel = table_open(heap_oid, AccessShareLock);
-	heap_name = quote_qualified_identifier(
-		get_namespace_name(RelationGetNamespace(heap_rel)),
-		RelationGetRelationName(heap_rel));
-	table_close(heap_rel, AccessShareLock);
+	/* Same snapshot the heap re-scan used: the latest, including our own rows. */
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	entries = merkle_collect_node_entries(index_oid, partition_id, lower, upper,
+										  snapshot, &num_entries, NULL);
+	UnregisterSnapshot(snapshot);
 
-	key_expr = get_index_key_expr_str(index_oid);
+	if (num_entries == 0)
+		return;
 
-	initStringInfo(&buf);
-	/*
-	 * Streamlined split row retrieval: scan directly using the covering
-	 * B-tree index (usertable_small_merkle_lookup_idx) avoiding table-wide
-	 * sequential scans, CTE materialization, and sorting overhead.
-	 */
-	appendStringInfo(&buf,
-		"SELECT %s AS kh, merkle_tuple_hash(u.*) AS th"
-		"  FROM %s u"
-		" WHERE merkle_partition_for_hash(%s, $3) = $4"
-		"   AND %s BETWEEN $1 AND $2",
-		key_expr, heap_name, key_expr, key_expr);
-
+	if (target_count > 0 && num_entries != target_count)
 	{
-		Oid			argtypes[4] = {BYTEAOID, BYTEAOID, INT4OID, INT2OID};
-		Datum		values[4];
-		bytea	   *lower_bytea = (bytea *) palloc(VARHDRSZ + 8);
-		bytea	   *upper_bytea = (bytea *) palloc(VARHDRSZ + 8);
-		uint64		scan_rows;
-
-		SET_VARSIZE(lower_bytea, VARHDRSZ + 8);
-		SET_VARSIZE(upper_bytea, VARHDRSZ + 8);
-		memcpy(VARDATA(lower_bytea), lower, 8);
-		memcpy(VARDATA(upper_bytea), upper, 8);
-		values[0] = PointerGetDatum(lower_bytea);
-		values[1] = PointerGetDatum(upper_bytea);
-		values[2] = Int32GetDatum(num_partitions);
-		values[3] = Int16GetDatum((int16) partition_id);
-
-		PushActiveSnapshot(GetLatestSnapshot());
-		spi_rc = SPI_execute_with_args(buf.data, 4, argtypes, values, NULL, true, 0);
-		scan_rows = SPI_processed;
-		PopActiveSnapshot();
-
-		if (scan_rows == 0)
-		{
-			if (SPI_tuptable != NULL)
-				SPI_freetuptable(SPI_tuptable);
-			pfree(lower_bytea);
-			pfree(upper_bytea);
-			pfree(buf.data);
-			return;
-		}
-
-		if (target_count > 0 && scan_rows != (uint64) target_count)
-		{
-			elog(DEBUG1,
-				 "Merkle split row count differs from node tuple_count (index %u prefix %d: tuple_count %lld, heap scan %llu)",
-				 index_oid, prefix_len, (long long) target_count, (unsigned long long) scan_rows);
-		}
-
-		if (spi_rc == SPI_OK_SELECT && scan_rows > 0)
-		{
-			int						i;
-			int						num_entries;
-			MerkleTupleHashEntry *entries;
-
-			if (scan_rows > PG_INT32_MAX)
-				elog(ERROR, "too many rows returned while splitting Merkle node (%llu)",
-					 (unsigned long long) scan_rows);
-			num_entries = (int) scan_rows;
-			entries = (MerkleTupleHashEntry *) palloc((size_t) num_entries * sizeof(MerkleTupleHashEntry));
-
-			/* Copy all data out of the SPI tuptable before freeing it. */
-			for (i = 0; i < num_entries; i++)
-			{
-				HeapTuple	tup = SPI_tuptable->vals[i];
-				TupleDesc	td = SPI_tuptable->tupdesc;
-				bool		isnull;
-				Datum		kh_d = SPI_getbinval(tup, td, 1, &isnull);
-				Datum		th_d = SPI_getbinval(tup, td, 2, &isnull);
-				bytea	   *kh_b = DatumGetByteaPP(kh_d);
-				bytea	   *th_b = DatumGetByteaPP(th_d);
-
-				memcpy(entries[i].key_hash, VARDATA_ANY(kh_b), 8);
-				memcpy(entries[i].tuple_hash.data, VARDATA_ANY(th_b), MERKLE_HASH_BYTES);
-			}
-			SPI_freetuptable(SPI_tuptable);
-
-			merkle_do_split_in_memory(index_oid, partition_id, node_id, prefix_len, entries, num_entries, fanout, bits_per_split, split_threshold);
-			merkle_route_cache_clear_partition(index_oid, partition_id);
-			CommandCounterIncrement();
-
-			pfree(entries);
-		}
-		else if (SPI_tuptable != NULL)
-			SPI_freetuptable(SPI_tuptable);
-
-		pfree(lower_bytea);
-		pfree(upper_bytea);
+		elog(DEBUG1,
+			 "Merkle split row count differs from node tuple_count (index %u prefix %d: tuple_count %lld, scan %d)",
+			 index_oid, prefix_len, (long long) target_count, num_entries);
 	}
 
-	pfree(buf.data);
+	merkle_do_split_in_memory(index_oid, partition_id, node_id, prefix_len, entries, num_entries,
+							  fanout, bits_per_split, split_threshold);
+	merkle_route_cache_clear_partition(index_oid, partition_id);
+	CommandCounterIncrement();
+
+	pfree(entries);
 }
 
 static void
@@ -1252,7 +1288,7 @@ merkle_sync_prepare_plans(Oid index_oid)
 	{
 		sql = psprintf(
 			"UPDATE ariabc_internal.%s"
-			"   SET hash = CASE WHEN tuple_count + $2 = 0 THEN '\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea ELSE pg_catalog.merkle_hash_xor_sql(hash, $1) END,"
+			"   SET hash = CASE WHEN tuple_count + $2 = 0 THEN '\\x0000000000000000'::bytea ELSE pg_catalog.merkle_hash_xor_sql(hash, $1) END,"
 			"       tuple_count = tuple_count + $2"
 			" WHERE partition_id = $3 AND node_id = $4 AND prefix_len = $5"
 			"   AND is_leaf = true"
@@ -1271,7 +1307,7 @@ merkle_sync_prepare_plans(Oid index_oid)
 	{
 		sql = psprintf(
 			"UPDATE ariabc_internal.%s"
-			"   SET hash = CASE WHEN GREATEST(tuple_count + $2, 0) = 0 THEN '\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea ELSE pg_catalog.merkle_hash_xor_sql(hash, $1) END,"
+			"   SET hash = CASE WHEN GREATEST(tuple_count + $2, 0) = 0 THEN '\\x0000000000000000'::bytea ELSE pg_catalog.merkle_hash_xor_sql(hash, $1) END,"
 			"       tuple_count = GREATEST(tuple_count + $2, 0)"
 			" WHERE partition_id = $3 AND node_id = $4 AND prefix_len = $5",
 			tablename);

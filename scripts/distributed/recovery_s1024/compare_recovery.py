@@ -85,7 +85,7 @@ def phase8(path, runner):
     vals = []
     for node in ("1_admin123", "2_user4", "4_utkarsh"):
         parts = read_text(path / ("post_verify_readback_node" + node + ".out")).strip().split("|")
-        if len(parts) != 4 or not parts[0].isdigit() or not re.fullmatch(r"[0-9a-f]{64}", parts[1]):
+        if len(parts) != 4 or not parts[0].isdigit() or not re.fullmatch(r"[0-9a-f]{16}|[0-9a-f]{64}", parts[1]):
             return "UNKNOWN", "UNKNOWN"
         vals.append(parts)
     ok = all(v[2] == "t" and v == vals[0] for v in vals)

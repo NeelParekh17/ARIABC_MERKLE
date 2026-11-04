@@ -177,7 +177,7 @@ def measure_dataset_creation_single_run(
         ON usertable (
             merkle_partition_for_hash(merkle_key_hash(ycsb_key), {partitions}),
             merkle_key_hash(ycsb_key),
-            ycsb_key
+            merkle_tuple_hash(usertable.*)
         )
     """
     execute_sql(conn, lookup_index_sql)

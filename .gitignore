@@ -130,6 +130,9 @@ lib*.pc
 /2026-04-22-215511-this-session-is-being-continued-from-a-previous-c.txt
 /ACM_arxiv-3.pdf
 /ProtectDB_arxiv-2.pdf
+/*.pdf
+/transcript-*.txt
+/.aws
 /BCDB_ARCHITECTURE.md.bak
 /codex_output.txt
 /analysis.txt

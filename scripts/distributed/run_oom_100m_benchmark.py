@@ -379,8 +379,10 @@ EOF
         CREATE INDEX usertable_merkle_idx ON usertable USING merkle (ycsb_key)
         WITH (partitions = 200, fanout = 32, split_threshold = 1024, merge_threshold = 256);
         CREATE EXTENSION IF NOT EXISTS merkle_lsm;
+        ALTER EXTENSION merkle_lsm UPDATE;
         SELECT merkle_create_lookup_index('usertable', '{args.merkle_lookup_am}',
-            {args.merkle_lookup_levels}, {args.merkle_lookup_size}, {args.merkle_lookup_size_ratio});
+            {args.merkle_lookup_levels}, {args.merkle_lookup_size}, {args.merkle_lookup_size_ratio},
+            '{args.merkle_lookup_mode}');
     "
 
     echo '  [6/6] Analyzing table statistics...'
@@ -999,6 +1001,12 @@ rm -f {work}/.merkle_index_dropped
         if actual_lookup_am != args.merkle_lookup_am:
             raise RuntimeError(f"Golden lookup AM is {actual_lookup_am}; requested {args.merkle_lookup_am}. "
                                "Rebuild the baseline lookup via merkle_create_lookup_index, or select --merkle-lookup-am btree explicitly.")
+        lookup_def = sql(args, "SELECT pg_get_indexdef('usertable_merkle_lookup_idx'::regclass);")
+        actual_lookup_mode = "tuplehash" if "merkle_tuple_hash(" in lookup_def else "keyhash"
+        if actual_lookup_mode != args.merkle_lookup_mode:
+            raise RuntimeError(f"Golden lookup index is {actual_lookup_mode} mode ({lookup_def}); requested "
+                               f"--merkle-lookup-mode {args.merkle_lookup_mode}. Use a baseline built in that mode "
+                               "(--base-dir-name) or rebuild it with merkle_create_lookup_index(..., mode).")
         if actual_lookup_am == "merkle_lsm":
             actual_config = json.loads(sql(args, "SELECT merkle_lsm_config('usertable_merkle_lookup_idx');"))
             requested_config = dict(levels=args.merkle_lookup_levels, top_index_size=args.merkle_lookup_size,
@@ -1333,7 +1341,7 @@ def run_case(args, workload, skew, mode, workers, trial, workload_file, case_dir
             raise RuntimeError(f"Server reports retry_jitter={retries.get('retry_jitter')!r}, "
                                f"expected --pg-retry-jitter {args.pg_retry_jitter} (stale server binary?)")
         row = dict(workload=workload, skew=skew, mode=mode, workers=workers, trial=trial,
-                   merkle_lookup_am=args.merkle_lookup_am, lsm_drain_ms=metrics.get("lsm_drain_ms", 0),
+                   merkle_lookup_am=args.merkle_lookup_am, merkle_lookup_mode=args.merkle_lookup_mode, lsm_drain_ms=metrics.get("lsm_drain_ms", 0),
                    isolation=isolation_for(mode),
                    retry_attempts=int(retries.get("retry_attempts_total", 0)),
                    retry_backoff_requested_ms=int(retries.get("retry_backoff_requested_ms", 0)),
@@ -1422,6 +1430,10 @@ def sampler_context(args, case_dir, phase):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--merkle-lookup-am", choices=("btree", "merkle_lsm"), default="merkle_lsm")
+    parser.add_argument("--merkle-lookup-mode", choices=("tuplehash", "keyhash"), default="tuplehash",
+                        help="lookup index columns: tuplehash = (partition, key hash, tuple hash), every UPDATE "
+                             "writes it and repair ships only mismatching rows; keyhash = (partition, key hash, "
+                             "key), non-key UPDATEs stay HOT and repair ships whole differing leaves")
     parser.add_argument("--merkle-lookup-levels", type=int, choices=(2, 3, 4), default=3)
     parser.add_argument("--merkle-lookup-size-ratio", type=int, default=16)
     parser.add_argument("--merkle-lookup-size", type=int, default=1024, help="L0 target size in KiB")

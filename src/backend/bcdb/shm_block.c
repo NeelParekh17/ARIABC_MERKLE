@@ -342,6 +342,7 @@ bcdb_reset_block_entry(BCBlock *block, BCBlockID id)
         block->result_committed_txid[i] = -1;
         block->result_commit_xid[i] = InvalidTransactionId;
         block->result_consumed_txid[i] = -1;
+		memset(block->result_adhash[i], 0, BCDB_RESULT_ADHASH_BYTES);
     }
 
 	/* Lever D publish-phase ready-bitset; -1 = txid not yet published. */
@@ -611,6 +612,7 @@ bcdb_rebase_block1(BCTxID boundary)
 		blk->result_consumed_txid[i] = -1;
 		blk->precommit_txid[i] = -1;
 		blk->precommit_xid[i] = InvalidTransactionId;
+		memset(blk->result_adhash[i], 0, BCDB_RESULT_ADHASH_BYTES);
 	}
 	blk->precommit_max_txid = boundary;
 	blk->published_max_tx_id = boundary;

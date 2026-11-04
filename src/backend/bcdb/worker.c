@@ -1361,6 +1361,7 @@ bcdb_publish_error_result(BCBlock *block, BCDBShmXact *tx, const char *sqlstate)
              "\n\t*%s* ERROR %s\n",
              tx->hash,
              (sqlstate != NULL && sqlstate[0] != '\0') ? sqlstate : "XX000");
+	memset(block->result_adhash[mem_txid], 0, BCDB_RESULT_ADHASH_BYTES);
 
     pg_write_barrier();
     __atomic_store_n(&block->result_commit_xid[mem_txid],
@@ -2812,6 +2813,7 @@ opf_retry:
             bcdb_wait_for_slot_consumable(block, tx->tx_id, mem_txid);
 			memset(tx->select_result, 0, sizeof(tx->select_result));
             memset(block->result[mem_txid], 0, sizeof(block->result[mem_txid]));
+			memset(block->result_adhash[mem_txid], 0, BCDB_RESULT_ADHASH_BYTES);
             pg_write_barrier();
             __atomic_store_n(&block->result_commit_xid[mem_txid],
                              tx->xid, __ATOMIC_RELEASE);
@@ -3761,6 +3763,29 @@ opf_retry:
                              "\n\t*%s* %s\n", tx->hash, completionTag);
                 }
 
+				/*
+				 * Result AdHashes, in every ledger mode.  They must be read
+				 * here: the staged Merkle deltas and the read sum are cleared
+				 * when finish_xact_command() commits.  Errors and aborted
+				 * no-ops changed nothing and returned nothing: zero.
+				 */
+				if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR ||
+					(apply_terminal_noop && !apply_idempotent_noop))
+				{
+					memset(tx->raft_write_adhash, 0, MERKLE_HASH_BYTES);
+					memset(tx->raft_read_adhash, 0, MERKLE_HASH_BYTES);
+				}
+				else
+				{
+					MerkleHash	write_adhash;
+					MerkleHash	read_adhash;
+
+					merkle_staged_write_adhash(&write_adhash);
+					merkle_staged_read_adhash(&read_adhash);
+					memcpy(tx->raft_write_adhash, write_adhash.data, MERKLE_HASH_BYTES);
+					memcpy(tx->raft_read_adhash, read_adhash.data, MERKLE_HASH_BYTES);
+				}
+
 				if (tx->raft_ledger_enabled)
 				{
 					if (apply_outcome == BCDB_OUTCOME_TERMINAL_DETERMINISTIC_ERROR)
@@ -3999,6 +4024,8 @@ opf_retry:
 				bcdb_wait_for_prev_committed(tx);
 			}
 			tx->status = TX_COMMITED; /* terminal slot; SQL transaction aborted */
+			memset(tx->raft_write_adhash, 0, MERKLE_HASH_BYTES); /* rolled back: no rows changed */
+			memset(tx->raft_read_adhash, 0, MERKLE_HASH_BYTES);
 			mem_txid = bcdb_result_slot_for_txid(tx->tx_id);
 			bcdb_wait_for_slot_consumable(block, tx->tx_id, mem_txid);
 			bcdb_finish_terminal_item(tx, abort_result, false, false, InvalidTransactionId);

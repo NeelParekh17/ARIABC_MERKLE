@@ -312,7 +312,7 @@ merkle_meta_cache_store(Oid relid, int fanout, int split_threshold,
 }
 
 /*
- * merkle_hash_xor() - Add two little-endian 256-bit hashes modulo 2^256
+ * merkle_hash_xor() - Add two little-endian 64-bit hashes modulo 2^64
  *
  * The historical symbol (and its SQL wrapper) is retained for compatibility.
  * Carry crosses every byte; only the final carry is discarded.  src may alias
@@ -333,7 +333,7 @@ merkle_hash_xor(MerkleHash *dest, const MerkleHash *src)
 	}
 }
 
-/* In-place two's complement: hash = -hash modulo 2^256. */
+/* In-place two's complement: hash = -hash modulo 2^64. */
 void
 merkle_hash_negate(MerkleHash *hash)
 {
@@ -472,7 +472,7 @@ merkle_hash_slot_canonical_desc_impl(TupleDesc tupdesc, TupleTableSlot *slot,
 		}
 	}
 
-	blake3_hasher_finalize(&hasher, result->data, MERKLE_HASH_BYTES);
+	blake3_hasher_finalize(&hasher, result->data, MERKLE_TUPLE_HASH_BYTES);
 }
 
 void
@@ -657,7 +657,7 @@ static void
 merkle_compute_canonical_route_digest_impl(Datum *values, bool *isnull, int nkeys,
 											TupleDesc tupdesc, FmgrInfo *send_functions,
 											MerkleSendCacheEntry *cache,
-											uint8 digest[MERKLE_HASH_BYTES])
+											uint8 digest[MERKLE_ROUTE_DIGEST_BYTES])
 {
 	blake3_hasher hasher;
 	int			i;
@@ -696,13 +696,13 @@ merkle_compute_canonical_route_digest_impl(Datum *values, bool *isnull, int nkey
 		}
 	}
 
-	blake3_hasher_finalize(&hasher, digest, MERKLE_HASH_BYTES);
+	blake3_hasher_finalize(&hasher, digest, MERKLE_ROUTE_DIGEST_BYTES);
 }
 
 void
 merkle_compute_canonical_route_digest_fast(Datum *values, bool *isnull, int nkeys,
 											TupleDesc tupdesc, FmgrInfo *send_functions,
-											uint8 digest[MERKLE_HASH_BYTES])
+											uint8 digest[MERKLE_ROUTE_DIGEST_BYTES])
 {
 	MerkleSendCacheEntry *cache;
 
@@ -736,7 +736,7 @@ merkle_compute_canonical_route_digest_fast(Datum *values, bool *isnull, int nkey
 
 static void
 merkle_compute_canonical_route_digest(Datum *values, bool *isnull, int nkeys,
-									  TupleDesc tupdesc, uint8 digest[MERKLE_HASH_BYTES])
+									  TupleDesc tupdesc, uint8 digest[MERKLE_ROUTE_DIGEST_BYTES])
 {
 	merkle_compute_canonical_route_digest_fast(values, isnull, nkeys, tupdesc, NULL, digest);
 }
@@ -830,7 +830,7 @@ merkle_compute_route(Relation indexRel, Datum *values, bool *isnull, int nkeys,
 						   &subpartitions);
 	if (partition_key_columns > 0)
 	{
-		uint8		lead_digest[MERKLE_HASH_BYTES];
+		uint8		lead_digest[MERKLE_ROUTE_DIGEST_BYTES];
 
 		if (partition_key_columns > nkeys)
 			ereport(ERROR,
@@ -1181,7 +1181,7 @@ merkle_find_spurious_key_sql(PG_FUNCTION_ARGS)
 	{
 		blake3_hasher hasher = base_hasher;
 		uint8 key_bytes[8];
-		uint8 digest[MERKLE_HASH_BYTES];
+		uint8 digest[MERKLE_ROUTE_DIGEST_BYTES];
 		uint64 route_value = 0;
 		int64 candidate = base_offset - i;
 		int p;
@@ -1196,7 +1196,7 @@ merkle_find_spurious_key_sql(PG_FUNCTION_ARGS)
 		key_bytes[7] = (uint8) candidate;
 
 		blake3_hasher_update(&hasher, key_bytes, 8);
-		blake3_hasher_finalize(&hasher, digest, MERKLE_HASH_BYTES);
+		blake3_hasher_finalize(&hasher, digest, MERKLE_ROUTE_DIGEST_BYTES);
 
 		for (p = 0; p < 8; p++)
 			route_value = (route_value << 8) | digest[p];
@@ -1225,7 +1225,7 @@ merkle_find_spurious_key_sql(PG_FUNCTION_ARGS)
 static void
 merkle_key_hash_arg_digest(FunctionCallInfo fcinfo, int argno,
 						   MerkleKeyHashCache **cache_slot,
-						   uint8 digest[MERKLE_HASH_BYTES])
+						   uint8 digest[MERKLE_ROUTE_DIGEST_BYTES])
 {
 	Datum		val;
 	Oid			argtype;
@@ -1343,7 +1343,7 @@ merkle_key_hash_arg_digest(FunctionCallInfo fcinfo, int argno,
 		}
 		else
 		{
-			memset(digest, 0, MERKLE_HASH_BYTES);
+			memset(digest, 0, MERKLE_ROUTE_DIGEST_BYTES);
 		}
 	}
 	else
@@ -1392,7 +1392,7 @@ merkle_key_hash_arg_digest(FunctionCallInfo fcinfo, int argno,
 Datum
 merkle_key_hash_sql(PG_FUNCTION_ARGS)
 {
-	uint8		digest[MERKLE_HASH_BYTES];
+	uint8		digest[MERKLE_ROUTE_DIGEST_BYTES];
 	bytea	   *result;
 
 	merkle_key_hash_arg_digest(fcinfo, 0,
@@ -1421,8 +1421,8 @@ Datum
 merkle_key_hash_routed_sql(PG_FUNCTION_ARGS)
 {
 	MerkleKeyHashCache **caches = (MerkleKeyHashCache **) fcinfo->flinfo->fn_extra;
-	uint8		digest[MERKLE_HASH_BYTES];
-	uint8		lead_digest[MERKLE_HASH_BYTES];
+	uint8		digest[MERKLE_ROUTE_DIGEST_BYTES];
+	uint8		lead_digest[MERKLE_ROUTE_DIGEST_BYTES];
 	int32		num_partitions = PG_GETARG_INT32(2);
 	int32		subpartitions = PG_GETARG_INT32(3);
 	bytea	   *result;
@@ -1477,9 +1477,9 @@ merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
 
 	if (PG_ARGISNULL(0))
 	{
-		result = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
-		SET_VARSIZE(result, VARHDRSZ + MERKLE_HASH_BYTES);
-		memset(VARDATA(result), 0, MERKLE_HASH_BYTES);
+		result = (bytea *) palloc(VARHDRSZ + MERKLE_TUPLE_HASH_BYTES);
+		SET_VARSIZE(result, VARHDRSZ + MERKLE_TUPLE_HASH_BYTES);
+		memset(VARDATA(result), 0, MERKLE_TUPLE_HASH_BYTES);
 		PG_RETURN_BYTEA_P(result);
 	}
 
@@ -1538,9 +1538,10 @@ merkle_tuple_hash_sql(PG_FUNCTION_ARGS)
 
 	merkle_hash_slot_canonical_desc_fast(tupdesc, cache->slot, cache->send_functions, &hash);
 
-	result = (bytea *) palloc(VARHDRSZ + MERKLE_HASH_BYTES);
-	SET_VARSIZE(result, VARHDRSZ + MERKLE_HASH_BYTES);
-	memcpy(VARDATA(result), hash.data, MERKLE_HASH_BYTES);
+	/* Only the low MERKLE_TUPLE_HASH_BYTES are meaningful; the rest are zero. */
+	result = (bytea *) palloc(VARHDRSZ + MERKLE_TUPLE_HASH_BYTES);
+	SET_VARSIZE(result, VARHDRSZ + MERKLE_TUPLE_HASH_BYTES);
+	memcpy(VARDATA(result), hash.data, MERKLE_TUPLE_HASH_BYTES);
 
 	PG_RETURN_BYTEA_P(result);
 }

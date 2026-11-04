@@ -23,6 +23,7 @@
 #include "storage/bufmgr.h"
 #include "storage/relfilenode.h"
 #include "utils/relcache.h"
+#include "utils/snapshot.h"
 
 /* GUC: Enable/disable Merkle index updates */
 extern bool enable_merkle_index;
@@ -92,11 +93,16 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 
 /*
  * Hash configuration
- * Using 256-bit (32-byte) hashes from BLAKE3
+ *
+ * Tuple and node hashes are 64-bit.  A tuple hash is the first
+ * MERKLE_HASH_BYTES bytes of the row's BLAKE3 digest; a node hash is the
+ * AdHash sum (mod 2^64) of its rows' tuple hashes read as little-endian
+ * integers.  Key routing still uses a full 32-byte BLAKE3 digest
+ * (MERKLE_ROUTE_DIGEST_BYTES), of which the first 8 bytes form the key hash.
  */
-#define MERKLE_HASH_BITS            256
-#define MERKLE_HASH_BYTES           32
-#define MERKLE_BLAKE3_LEN           32  /* BLAKE3 output = 32 bytes */
+#define MERKLE_HASH_BITS            64
+#define MERKLE_HASH_BYTES           8
+#define MERKLE_ROUTE_DIGEST_BYTES   32
 
 /*
  * Page layout constants
@@ -104,7 +110,10 @@ extern MerkleRecoveryProfileStats merkle_recovery_profile_state;
 #define MERKLE_METAPAGE_BLKNO       0
 #define MERKLE_VERSION              11  /* AdHash aggregate; v10 used XOR */
 #define MERKLE_ROUTE_FORMAT_VERSION 4
-#define MERKLE_ROW_HASH_FORMAT_VERSION 1
+#define MERKLE_ROW_HASH_FORMAT_VERSION 3  /* v3: 8-byte tuple and node hashes; v2 8-byte tuple/32-byte node; v1 32/32 */
+
+/* Per-tuple hash width; equal to the node hash width. */
+#define MERKLE_TUPLE_HASH_BYTES     MERKLE_HASH_BYTES
 
 /* Dynamic Merkle tree configuration constants */
 #define DYNAMIC_MERKLE_FANOUT       4
@@ -152,7 +161,7 @@ typedef struct MerkleDeltaKey
 #define MERKLE_DELTA_ENTRY_BYTES    72
 
 /*
- * MerkleHash - 256-bit hash value stored in 32 bytes
+ * MerkleHash - 64-bit hash value stored in 8 little-endian bytes
  */
 typedef struct MerkleHash
 {
@@ -218,7 +227,7 @@ typedef struct MerkleOptions
  */
 typedef struct MerkleRoute
 {
-	uint8		route_digest[MERKLE_HASH_BYTES];
+	uint8		route_digest[MERKLE_ROUTE_DIGEST_BYTES];
 	uint64		static_route_value;
 	int			partition_id;
 } MerkleRoute;
@@ -322,6 +331,9 @@ extern void merkle_stage_delta_event(Relation indexRel, MerkleDeltaEventType eve
 									 const MerkleHash *hash);
 extern void merkle_mark_staged_delta_persisted(void);
 extern bool merkle_has_staged_delta(void);
+extern void merkle_staged_write_adhash(MerkleHash *out);
+extern void merkle_read_adhash_add_row(const MerkleHash *row_hash);
+extern void merkle_staged_read_adhash(MerkleHash *out);
 extern void merkle_apply_staged_synchronous_safe(HTAB *combined_delta_map);
 extern void merkle_apply_staged_deltas_synchronously(void);
 extern void merkle_crash_failpoint(const char *name);
@@ -449,6 +461,27 @@ extern void merkle_do_split_in_memory(Oid index_oid, int partition_id,
 									  const uint8 *node_id, int prefix_len,
 									  MerkleTupleHashEntry *entries, int num_entries,
 									  int fanout, int bits_per_split, int split_threshold);
+
+/*
+ * Lookup-index reader (merklelookup.c).  The lookup index has key columns
+ * (merkle_partition_for_hash(H, P), H, merkle_tuple_hash(<table>.*)).
+ */
+extern Oid merkle_find_lookup_index(Relation heapRel, int num_partitions,
+									Snapshot snapshot);
+extern MerkleTupleHashEntry *merkle_lookup_scan(Relation heapRel, Oid lookupOid,
+												int partition_id,
+												const uint8 *lower, const uint8 *upper,
+												Snapshot snapshot, int *num_entries,
+												uint64 *heap_fetches);
+/* (key hash, tuple hash) of one node range; caller must be SPI-connected. */
+extern MerkleTupleHashEntry *merkle_collect_node_entries(Oid index_oid, int partition_id,
+														 const uint8 *lower,
+														 const uint8 *upper,
+														 Snapshot snapshot,
+														 int *num_entries,
+														 bool *used_lookup);
+extern Datum merkle_lookup_index_sql(PG_FUNCTION_ARGS);
+extern Datum merkle_range_entries_sql(PG_FUNCTION_ARGS);
 
 /*
  * SQL-callable verification functions

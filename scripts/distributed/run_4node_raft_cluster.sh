@@ -253,7 +253,7 @@ if [[ "${BYPASS_DELEGATION:-0}" != "1" &&
     GATEWAY_STALL_WATCHDOG GATEWAY_STALL_POLL_SECONDS GATEWAY_STALL_MAX_CYCLES \
     RAFT_STORAGE_MODE RAFT_STORAGE_DIR RAFT_STORAGE_ACTION RAFT_STORAGE_ROOT RAFT_CLUSTER_ID \
     FAILPOINT_NODE_ID FAILPOINT_ENV FAILPOINT_RAFT_LOG_INDEX FAILPOINT_ITEM_ORDINAL \
-    ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE \
+    ARIABC_SAFE_POSTCOMMIT_WITNESS ARIABC_SAFE_EXTERNAL_PROBE ARIABC_SAFE_TRACE ARIABC_LEADER_TRACE \
     ARIABC_PHASE3_INVOCATION_ID \
     TX_SIGN ARIABC_TX_SIGN TX_TAG_VERIFY \
     RECOVERY_MODE RECOVERY_INTERVAL_MS RECOVERY_DB_PORT RECOVERY_TABLE RECOVERY_NODES \
@@ -424,6 +424,7 @@ FAILPOINT_ITEM_ORDINAL="${FAILPOINT_ITEM_ORDINAL:-}"
 ARIABC_SAFE_POSTCOMMIT_WITNESS="${ARIABC_SAFE_POSTCOMMIT_WITNESS:-}"
 ARIABC_SAFE_EXTERNAL_PROBE="${ARIABC_SAFE_EXTERNAL_PROBE:-}"
 ARIABC_SAFE_TRACE="${ARIABC_SAFE_TRACE:-}"
+ARIABC_LEADER_TRACE="${ARIABC_LEADER_TRACE:-}"
 SKIP_SYNC="${SKIP_SYNC:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_KAFKA="${SKIP_KAFKA:-0}"
@@ -546,10 +547,12 @@ GATEWAY_STALL_MAX_CYCLES="${GATEWAY_STALL_MAX_CYCLES:-12}"
 SKIP_WORKLOAD="${SKIP_WORKLOAD:-0}"          # 1=start cluster and leader only; do not start gateway or submit SQL
 KAFKA_FAST_RESET="${KAFKA_FAST_RESET:-1}"    # 1=fast Kafka reset (skip JVM console consumer smoke check)
 DUMP_VERIFY_CSV="${DUMP_VERIFY_CSV:-0}"      # 0=skip slow 2.7MB CSV dump; use cryptographic root and row count
-TX_SIGN="${TX_SIGN:-${ARIABC_TX_SIGN:-blake3}}" # blake3|1=sign txs with blake3; 0|off=disable tx signing
-# Replicas verify the gateway's request tags before execution. Default follows
-# TX_SIGN: require when the gateway tags, off when it does not. The key file is
-# ~/.ariabc/tx_tag.key on every node and on the gateway host (64 hex chars).
+TX_SIGN="${TX_SIGN:-${ARIABC_TX_SIGN:-ed25519}}" # ed25519|1=sign each request with the client key; 0|off=unsigned
+# Replicas verify the gateway's per-client Ed25519 request signatures before
+# execution. Default follows TX_SIGN: require when the gateway signs, off when
+# it does not. Keys live in ~/.ariabc/keys (scripts/distributed/gen_ed25519_keys.sh):
+# gateway = client_1.key.pem + node_*.pub.pem, replica <id> = node_<id>.key.pem +
+# client_*.pub.pem.
 TX_TAG_VERIFY="${TX_TAG_VERIFY:-}"
 
 # ===========================================================================
@@ -573,8 +576,8 @@ Options:
   --enable-merkle-index N
                   Set the server default for Merkle maintenance: 0|1
                   (default: 1). Use 0 only for explicit overhead controls.
-  --tx-sign MODE  Transaction signing mode: blake3|1 (enabled) or 0|off (disabled).
-                  (default: blake3)
+  --tx-sign MODE  Request signing: ed25519|1 (per-client Ed25519) or 0|off (disabled).
+                  (default: ed25519)
   --merkle-partitions N
                   Number of independent hash-routed Merkle partitions (default: 200)
   --merkle-fanout N
@@ -2044,6 +2047,7 @@ local_src_fingerprint="$(_compute_src_fingerprint)"
   printf 'ariabc_safe_postcommit_witness=%s\n' "${ARIABC_SAFE_POSTCOMMIT_WITNESS:-}"
   printf 'ariabc_safe_external_probe=%s\n' "${ARIABC_SAFE_EXTERNAL_PROBE:-}"
   printf 'ariabc_safe_trace=%s\n' "${ARIABC_SAFE_TRACE:-}"
+  printf 'ariabc_leader_trace=%s\n' "${ARIABC_LEADER_TRACE:-}"
 } >> "$LOG_DIR/run_meta.env"
 
 
@@ -3141,6 +3145,7 @@ for idx in "${!NODE_IDS[@]}"; do
     export ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK='${ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK:-}'
     export ARIABC_SAFE_POSTCOMMIT_WITNESS='${ARIABC_SAFE_POSTCOMMIT_WITNESS:-}'
     export ARIABC_SAFE_TRACE='${ARIABC_SAFE_TRACE:-}'
+    export ARIABC_LEADER_TRACE='${ARIABC_LEADER_TRACE:-}'
     export ARIABC_RAFT_NODE_ID=\"${id}\"
     export ARIABC_RAFT_CLUSTER_ID=\"$RAFT_CLUSTER_ID\"
     export ARIABC_RAFT_EPOCH_HEX=\"$RAFT_EPOCH_HEX\"
@@ -3827,6 +3832,7 @@ for start_pos in "${!START_ORDER[@]}"; do
 	      export ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK='${ARIABC_FAILPOINT_AFTER_KAFKA_PUBLISH_BEFORE_APPLIED_MARK:-}'
 	    export ARIABC_SAFE_EXTERNAL_PROBE='${ARIABC_SAFE_EXTERNAL_PROBE:-}'
 	    export ARIABC_SAFE_TRACE='${ARIABC_SAFE_TRACE:-}'
+	    export ARIABC_LEADER_TRACE='${ARIABC_LEADER_TRACE:-}'
 	    nohup '$srv_bin' \
       --id $id \
       --raftEndpoint ${ip}:${RAFT_PORT} \
@@ -4047,11 +4053,9 @@ if [[ ! -x "$GW_BIN" ]]; then
   die "ariabc_pg_gateway not found at $GW_BIN — build it: cmake --build ariabc_pg/build -j\$(nproc)"
 fi
 log "  Gateway binary: $GW_BIN"
-# Skip per-record HMAC signature verification in trusted cluster runs.
-# verify_result_signature() is called for every single Kafka reply record
-# (N nodes x 20k tx = many HMAC-SHA256 calls per run). In a trusted cluster
-# the hash-based majority check is sufficient; full sig verification is only
-# needed when running against potentially Byzantine nodes.
+# Legacy HMAC result mode only: skip per-record HMAC verification.  It has no
+# effect in Ed25519 result mode (the default when node_<id>.pub.pem keys are in
+# ~/.ariabc/keys on the gateway), where each Kafka message is verified once.
 export ARIABC_TRUSTED_RESULT_SIG_FASTPATH=1
 
 

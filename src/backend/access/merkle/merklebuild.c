@@ -588,12 +588,12 @@ merkle_build_finish_route(MerkleBuildState *buildstate,
 						  blake3_hasher *lead_hasher,
 						  MerkleRoute *route)
 {
-	blake3_hasher_finalize(route_hasher, route->route_digest, MERKLE_HASH_BYTES);
+	blake3_hasher_finalize(route_hasher, route->route_digest, MERKLE_ROUTE_DIGEST_BYTES);
 	if (buildstate->partition_key_columns > 0)
 	{
-		uint8		lead_digest[MERKLE_HASH_BYTES];
+		uint8		lead_digest[MERKLE_ROUTE_DIGEST_BYTES];
 
-		blake3_hasher_finalize(lead_hasher, lead_digest, MERKLE_HASH_BYTES);
+		blake3_hasher_finalize(lead_hasher, lead_digest, MERKLE_ROUTE_DIGEST_BYTES);
 		merkle_route_digest_apply_leading(route->route_digest, lead_digest,
 										  buildstate->num_partitions,
 										  buildstate->subpartitions);
@@ -1100,7 +1100,7 @@ merkle_compute_route_and_hash_direct(Relation indexRel,
 	}
 
 	merkle_build_finish_route(buildstate, &route_hasher, &lead_hasher, route);
-	blake3_hasher_finalize(&tuple_hasher, tuple_hash->data, MERKLE_HASH_BYTES);
+	blake3_hasher_finalize(&tuple_hasher, tuple_hash->data, MERKLE_TUPLE_HASH_BYTES);
 }
 
 /*
@@ -1414,7 +1414,7 @@ merkle_heapam_index_build_scan(Relation heapRelation,
 									  &buildstate->send_functions[i]);
 				}
 
-				blake3_hasher_finalize(&tuple_hasher, page_hashes[j].data, MERKLE_HASH_BYTES);
+				blake3_hasher_finalize(&tuple_hasher, page_hashes[j].data, MERKLE_TUPLE_HASH_BYTES);
 			}
 			INSTR_TIME_SET_CURRENT(t_sub_end);
 			INSTR_TIME_ACCUM_DIFF(thash_accum, t_sub_end, t_sub_start);

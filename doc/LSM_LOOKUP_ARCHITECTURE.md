@@ -1,6 +1,17 @@
 # Integrated multi-level Merkle lookup index
 
-The auxiliary lookup maps `(partition, route hash, user key...)` to heap TIDs.
+The auxiliary lookup maps `(partition, route hash, X)` to heap TIDs, where
+`merkle_create_lookup_index(..., mode)` picks X:
+
+- `tuplehash` (default): X is the row's 8-byte tuple hash. Node splits and
+  replica repair read `(route hash, tuple hash)` from the index
+  (`merkle_range_entries`) instead of re-hashing heap rows, and repair ships
+  only tuple hashes plus the mismatching rows. The whole-row argument disables
+  HOT, so every INSERT and UPDATE adds an entry for the new row version.
+- `keyhash`: X is the key columns (the 1.0 shape). Non-key UPDATEs can stay
+  HOT (given free page space), splits re-hash heap rows, and repair ships the
+  full contents of every differing leaf.
+
 Merkle hashing and synchronous node maintenance remain in core. The default
 setup AM is now `merkle_lsm`; historical comparisons select `btree` explicitly.
 

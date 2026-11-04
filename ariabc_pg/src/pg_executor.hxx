@@ -62,6 +62,10 @@ struct pg_executor_stats {
     uint64_t kafka_flush_calls = 0;
     uint64_t kafka_payload_bytes = 0;
     uint64_t kafka_build_payload_ns = 0;
+    // Result message signatures: "ed25519" (per-node key) or "hmac" (legacy shared key).
+    const char* result_sig_mode = "hmac";
+    uint64_t result_sig_messages = 0;
+    uint64_t result_sig_ns = 0;
     uint64_t kafka_send_ns = 0;
     uint64_t kafka_batch_records = 0;
     uint64_t kafka_batch_records_max = 0;
@@ -206,8 +210,16 @@ struct db_options {
 struct kafka_options {
     std::string bootstrap;
     std::string result_topic = "topic2";
+    // Legacy shared HMAC key (result_sig_mode=hmac only).
     std::string result_sig_key;
+    // auto: ed25519 when the node key file exists, else hmac (with a warning).
+    std::string result_sig_mode = "auto";
+    // Default <key_dir>/node_<id>.key.pem.
+    std::string result_sign_key_file;
+    std::string key_dir;
 };
+
+class ed25519_private_key;
 
 class pg_executor {
 public:
@@ -245,6 +257,11 @@ public:
         uint64_t raft_log_index = 0;
         uint32_t raft_item_ordinal = 0;
         std::string terminal_digest;
+        // 32 hex chars: write AdHash (rows this item changed) then read
+        // AdHash (rows it returned), from the third field of
+        // bcdb_block_submit_results.  Empty when the backend did not report
+        // one (non-deterministic or fallback execution): sent as zeros.
+        std::string result_adhash;
         std::string terminal_state;
         std::string failure_sqlstate;
         std::string failure_class;
@@ -353,6 +370,7 @@ private:
         uint64_t raft_log_idx = 0;
         int leader_hint = -1;
         std::string terminal_digest;
+        std::string result_adhash;
         uint64_t append_ns = 0;
         uint32_t raft_item_ordinal = 0;
         std::string terminal_state;
@@ -384,6 +402,13 @@ private:
 
     kafka_options kafka_opt_;
     std::string result_sig_key_;
+    // Set when results are signed with this node's Ed25519 key; then the
+    // per-record HMAC is omitted and each Kafka message is sealed instead.
+    std::shared_ptr<ed25519_private_key> result_signer_;
+    std::atomic<uint64_t> st_result_sig_messages_{0};
+    std::atomic<uint64_t> st_result_sig_ns_{0};
+    std::string seal_result_payload(std::string inner);
+    void configure_result_signing();
     kafka_console_producer kafka_prod_;
     bool kafka_enabled_;
     bool kafka_async_publisher_enabled_ = false;

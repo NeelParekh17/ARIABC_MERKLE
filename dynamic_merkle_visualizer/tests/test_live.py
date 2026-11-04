@@ -64,7 +64,7 @@ class LiveDatabaseContract(unittest.TestCase):
         for partition in range(4):
             snapshot=self.get("/api/snapshot",{"index_oid":oid,"partition":partition,"verify":"1"})
             self.assertTrue(snapshot["verification"])
-            self.assertTrue(all(len(n["hash"])==64 and len(n["node_id"])==16 for n in snapshot["nodes"]))
+            self.assertTrue(all(len(n["hash"])==16 and len(n["node_id"])==16 for n in snapshot["nodes"]))
             combined.extend(snapshot["nodes"])
             # Compare every displayed record to the exact dedicated SQL relation.
             tbl_rel = f"merkle_node_{catalog['indexes'][0]['table_name']}"

@@ -1,7 +1,7 @@
 MODULE_big = merkle_lsm
 OBJS = merkle_lsm.o merge.o $(WIN32RES)
 EXTENSION = merkle_lsm
-DATA = merkle_lsm--1.0.sql
+DATA = merkle_lsm--1.0.sql merkle_lsm--1.0--1.1.sql
 PGFILEDESC = "merkle_lsm - multi-level Merkle lookup index"
 REGRESS = merkle_lsm
 

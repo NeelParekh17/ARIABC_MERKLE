@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ariabc_pg {
@@ -232,10 +233,14 @@ std::string unnest_nodes(const std::vector<leaf_key>& ranges) {
     return "unnest(" + p.str() + ", " + n.str() + ", " + l.str() + ") AS u(p, lo, l)";
 }
 
-/* WITH-clause relation b(p, lo, hi) holding the differing leaf key ranges. */
+/* WITH-clause relation b(i, p, lo, hi) holding the differing leaf key ranges;
+ * i numbers them 1..n in vector order. */
 std::string bounds_cte(const std::vector<leaf_key>& ranges) {
-    return "WITH b(p, lo, hi) AS (SELECT u.p, u.lo, merkle_node_upper_bound(u.lo, u.l) FROM " +
-           unnest_nodes(ranges) + ") ";
+    std::string u = unnest_nodes(ranges);
+    const std::string alias = " AS u(p, lo, l)";
+    u = u.substr(0, u.size() - alias.size()) + " WITH ORDINALITY AS u(p, lo, l, i)";
+    return "WITH b(i, p, lo, hi) AS (SELECT u.i::int4, u.p, u.lo, merkle_node_upper_bound(u.lo, u.l) FROM " +
+           u + ") ";
 }
 
 struct node_row {
@@ -379,6 +384,103 @@ std::string range_pred(const table_info& t, const std::string& key_expr) {
            ") = b.p AND " + h + " BETWEEN b.lo AND b.hi";
 }
 
+/* One row's identity for repair: (Merkle partition, route hash, tuple hash), hex. */
+struct row_pair {
+    int partition;
+    std::string key_hash_hex;
+    std::string tuple_hash_hex;
+    row_pair(int p, const std::string& kh, const std::string& th)
+        : partition(p), key_hash_hex(kh), tuple_hash_hex(th) {}
+    bool operator<(const row_pair& o) const {
+        if (partition != o.partition) return partition < o.partition;
+        if (key_hash_hex != o.key_hash_hex) return key_hash_hex < o.key_hash_hex;
+        return tuple_hash_hex < o.tuple_hash_hex;
+    }
+};
+
+/* WITH-clause relation d(p, kh, th) holding the differing row pairs. */
+std::string pairs_cte(const std::vector<row_pair>& pairs) {
+    std::ostringstream p, k, h;
+    p << "ARRAY[";
+    k << "ARRAY[";
+    h << "ARRAY[";
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        if (i) {
+            p << ",";
+            k << ",";
+            h << ",";
+        }
+        p << pairs[i].partition;
+        k << "decode('" << pairs[i].key_hash_hex << "','hex')";
+        h << "decode('" << pairs[i].tuple_hash_hex << "','hex')";
+    }
+    p << "]::int2[]";
+    k << "]::bytea[]";
+    h << "]::bytea[]";
+    return "WITH d(p, kh, th) AS (SELECT u.p, u.kh, u.th FROM unnest(" + p.str() + ", " + k.str() +
+           ", " + h.str() + ") AS u(p, kh, th)) ";
+}
+
+/* WITH-clause relation f(p, lo, hi, th): a differing tuple hash and the leaf
+ * range it was listed in.  Sent to the reference, which never sees key hashes. */
+std::string fetch_cte(const std::vector<leaf_key>& ranges,
+                      const std::vector<std::pair<int, std::string>>& wanted) {
+    std::ostringstream p, n, l, h;
+    p << "ARRAY[";
+    n << "ARRAY[";
+    l << "ARRAY[";
+    h << "ARRAY[";
+    for (size_t i = 0; i < wanted.size(); ++i) {
+        const leaf_key& r = ranges[static_cast<size_t>(wanted[i].first - 1)];
+        if (i) {
+            p << ",";
+            n << ",";
+            l << ",";
+            h << ",";
+        }
+        p << r.partition;
+        n << "decode('" << r.node_hex << "','hex')";
+        l << r.prefix_len;
+        h << "decode('" << wanted[i].second << "','hex')";
+    }
+    p << "]::int4[]";
+    n << "]::bytea[]";
+    l << "]::int4[]";
+    h << "]::bytea[]";
+    return "WITH f(p, lo, hi, th) AS (SELECT u.p, u.lo, merkle_node_upper_bound(u.lo, u.l), u.th FROM unnest(" +
+           p.str() + ", " + n.str() + ", " + l.str() + ", " + h.str() + ") AS u(p, lo, l, th)) ";
+}
+
+/* Row t lies in f's range and has f's tuple hash: one lookup-index range probe. */
+std::string fetch_pred(const table_info& t, const std::string& key_expr) {
+    const std::string h = route_hash_expr(t, key_expr);
+    return "merkle_partition_for_hash(" + h + ", " + std::to_string(t.partitions) + ") = f.p AND " + h +
+           " BETWEEN f.lo AND f.hi AND merkle_tuple_hash(t.*) = f.th";
+}
+
+/* Hex of each 8-byte tuple hash packed in a binary bytea value. */
+bool split_tuple_hashes(const char* data, int len, std::vector<std::string>& out) {
+    static const char* k = "0123456789abcdef";
+    if (len < 0 || len % 8 != 0) return false;
+    for (int off = 0; off < len; off += 8) {
+        std::string hex(16, '0');
+        for (int j = 0; j < 8; ++j) {
+            const unsigned char v = static_cast<unsigned char>(data[off + j]);
+            hex[2 * j] = k[v >> 4];
+            hex[2 * j + 1] = k[v & 0xF];
+        }
+        out.push_back(hex);
+    }
+    return true;
+}
+
+/* Row t matches pair d: the three lookup-index columns, so it is an index probe. */
+std::string pair_pred(const table_info& t, const std::string& key_expr) {
+    const std::string h = route_hash_expr(t, key_expr);
+    return "merkle_partition_for_hash(" + h + ", " + std::to_string(t.partitions) + ") = d.p AND " + h +
+           " = d.kh AND merkle_tuple_hash(t.*) = d.th";
+}
+
 /* The planner overestimates rows per leaf range (~2k vs ~80 at 4M rows) and
  * prefers a hash join over a full-table walk to ~100 parameterized scans of
  * the Merkle lookup index (3.5 s vs 40 ms). Steer only the range-join
@@ -416,8 +518,9 @@ bool drain_copy_results(PGconn* c, const char* what, bool& ok, std::string& err)
 /* Stream `copy_out_sql` from ref into `copy_in_sql` on local. */
 bool stream_copy(PGconn* ref, const std::string& copy_out_sql,
                  PGconn* local, const std::string& copy_in_sql,
-                 uint64_t& rows, std::string& err) {
+                 uint64_t& rows, std::string& err, uint64_t* bytes = nullptr) {
     rows = 0;
+    if (bytes) *bytes = 0;
     PGresult* rin = PQexec(local, copy_in_sql.c_str());
     if (!rin || PQresultStatus(rin) != PGRES_COPY_IN) {
         err = "COPY IN failed: " + conn_error(local);
@@ -442,6 +545,7 @@ bool stream_copy(PGconn* ref, const std::string& copy_out_sql,
         const int n = PQgetCopyData(ref, &buf, 0);
         if (n > 0) {
             ++rows;
+            if (bytes) *bytes += static_cast<uint64_t>(n);
             if (ok && PQputCopyData(local, buf, n) != 1) {
                 err = "PQputCopyData failed: " + conn_error(local);
                 ok = false;
@@ -583,55 +687,30 @@ bool full_table_copy(PGconn* ref, PGconn* local, const table_info& t,
     return true;
 }
 
-bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int table_no,
-                         bool heap_verify, replica_repair_stats& st, std::string& err) {
-    const uint64_t t0 = now_us();
-    std::map<int, std::string> ref_roots, loc_roots;
-    if (!read_partition_roots(ref, t, ref_roots, err)) return false;
-    if (!read_partition_roots(local, t, loc_roots, err)) return false;
+/* True when `tbl_lit` (an SQL literal) has a tuple-hash lookup index.  A
+ * server without the lookup functions (older build) has none. */
+bool has_tuplehash_lookup(PGconn* c, const std::string& tbl_lit, bool& out, std::string& err) {
+    out = false;
+    rows_t rows;
+    if (!query_rows(c,
+                    "SELECT to_regprocedure('pg_catalog.merkle_lookup_index(regclass)') IS NOT NULL AND "
+                    "to_regprocedure('pg_catalog.merkle_range_entries(regclass,integer,bytea,bytea)') IS NOT NULL",
+                    rows, err)) return false;
+    if (rows.empty() || rows[0][0] != "t") return true;
+    rows.clear();
+    if (!query_rows(c, "SELECT pg_catalog.merkle_lookup_index(" + tbl_lit + "::regclass) IS NOT NULL", rows, err))
+        return false;
+    out = !rows.empty() && rows[0][0] == "t";
+    return true;
+}
 
-    std::set<int> parts;
-    for (const auto& kv : ref_roots) {
-        auto it = loc_roots.find(kv.first);
-        if (it == loc_roots.end() || it->second != kv.second) parts.insert(kv.first);
-    }
-    for (const auto& kv : loc_roots) {
-        if (!ref_roots.count(kv.first)) parts.insert(kv.first);
-    }
-
-    bool heap_ok = true;
-    if (parts.empty()) {
-        st.localise_us += now_us() - t0;
-        if (heap_verify) {
-            const uint64_t v0 = now_us();
-            if (!heap_verify_ok(local, t, heap_ok, err)) return false;
-            st.verify_us += now_us() - v0;
-        }
-        if (heap_ok) return true;
-        /* Heap diverged from the (matching) Merkle nodes: copy the table. */
-        st.tables_repaired++;
-        return full_table_copy(ref, local, t, st, err);
-    }
-
-    st.tables_repaired++;
-    st.mismatched_partitions += static_cast<int>(parts.size());
-
-    std::vector<leaf_key> ranges;
-    if (!descend_differing(ref, local, t, parts, ranges, st, err)) return false;
-    /* Partition roots differ but no node below does (should not happen): whole partitions. */
-    if (ranges.empty()) {
-        for (int p : parts) {
-            leaf_key k;
-            k.partition = p;
-            k.node_hex = "0000000000000000";
-            k.prefix_len = 0;
-            ranges.push_back(k);
-        }
-    }
-    st.differing_leaves += static_cast<int>(ranges.size());
-    st.localise_us += now_us() - t0;
-
-    /* Stream the reference rows of the differing ranges into a temp table. */
+/* Key-hash lookup mode: stream every reference row of the differing leaf
+ * ranges into a temp table, delete local range rows absent from it, and
+ * upsert the rest by primary key.  Range probes use whatever index covers
+ * (partition, route hash): the key-hash lookup index or the planner's choice. */
+bool repair_ranges_full_leaf(PGconn* ref, PGconn* local, const table_info& t, int table_no,
+                             const std::vector<leaf_key>& ranges, replica_repair_stats& st,
+                             std::string& err) {
     const uint64_t x0 = now_us();
     const std::string tbl = "public." + quote_ident(local, t.name);
     const std::string tmp = "ariabc_repair_rows_" + std::to_string(table_no);
@@ -646,17 +725,19 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
         return commit_or_rollback(local, false, err);
     }
     uint64_t candidates = 0;
+    uint64_t bytes = 0;
     const std::string copy_out =
         "COPY (" + cte + "SELECT DISTINCT ON (" + pk_list_t + ") " + join_quoted(local, t.cols, "t.") +
         " FROM b JOIN " + tbl + " t ON " + range_pred(t, "t." + key) +
         " ORDER BY " + pk_list_t + ") TO STDOUT";
     if (!force_range_index_join(ref, err) ||
         !stream_copy(ref, copy_out, local, "COPY " + tmp + " (" + cols + ") FROM STDIN",
-                     candidates, err) ||
+                     candidates, err, &bytes) ||
         !restore_join_planning(ref, err)) {
         return commit_or_rollback(local, false, err);
     }
     st.candidate_rows += candidates;
+    st.ref_row_bytes += bytes;
     st.transfer_us += now_us() - x0;
 
     /* One set-oriented pass: drop extra rows, upsert differing rows. With hash
@@ -712,6 +793,212 @@ bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int ta
     st.rows_deleted += deleted;
     st.rows_upserted += upserted;
     st.apply_us += now_us() - a0;
+    return true;
+}
+
+/* Tuple-hash lookup mode, per differing leaf range (localised by key hash in
+ * the descent).  The reference sends only its tuple hashes, packed as one
+ * binary bytea per range (8 bytes per row); the local side lists (key hash,
+ * tuple hash) from its own lookup index without any network.  Both read
+ * merkle_range_entries, which serves them from the lookup index.  A tuple
+ * hash whose count differs between the sides marks bad rows: local copies are
+ * deleted by (key hash, tuple hash), and the reference copies are fetched by
+ * (range, tuple hash).  A row with the same key but different content shows
+ * up as two differing tuple hashes. */
+bool repair_ranges_by_tuple_hash(PGconn* ref, PGconn* local, const table_info& t, int table_no,
+                                 const std::vector<leaf_key>& ranges, const std::string& tbl_lit,
+                                 replica_repair_stats& st, std::string& err) {
+    const uint64_t x0 = now_us();
+    const std::string tbl = "public." + quote_ident(local, t.name);
+    const std::string tmp = "ariabc_repair_rows_" + std::to_string(table_no);
+    const std::string key = quote_ident(local, t.merkle_key);
+    const std::string cte = bounds_cte(ranges);
+    const std::string cols = join_quoted(local, t.cols, "");
+    const std::string lateral = " FROM b CROSS JOIN LATERAL pg_catalog.merkle_range_entries(" +
+                                tbl_lit + "::regclass, b.p, b.lo, b.hi) e";
+    const std::string ref_sql = cte + "SELECT b.i, string_agg(e.tuple_hash, ''::bytea)" + lateral + " GROUP BY b.i";
+    const std::string local_sql = cte + "SELECT b.i, encode(e.key_hash, 'hex'), encode(e.tuple_hash, 'hex')" + lateral;
+
+    std::map<std::pair<int, std::string>, long> balance;  // (range, tuple hash): ref count - local count
+    std::set<std::pair<int, std::string>> on_ref;         // (range, tuple hash) listed by the reference
+    {
+        PGresult* r = PQexecParams(ref, ref_sql.c_str(), 0, nullptr, nullptr, nullptr, nullptr, 1);
+        if (!r || PQresultStatus(r) != PGRES_TUPLES_OK) {
+            err = conn_error(ref) + " [sql: " + ref_sql.substr(0, 240) + "]";
+            if (r) PQclear(r);
+            return false;
+        }
+        for (int row = 0; row < PQntuples(r); ++row) {
+            if (PQgetlength(r, row, 0) != 4 || PQgetisnull(r, row, 1)) {
+                PQclear(r);
+                err = "malformed reference tuple-hash list";
+                return false;
+            }
+            const unsigned char* ib = reinterpret_cast<const unsigned char*>(PQgetvalue(r, row, 0));
+            const int range_no = static_cast<int>((static_cast<uint32_t>(ib[0]) << 24) |
+                                                  (static_cast<uint32_t>(ib[1]) << 16) |
+                                                  (static_cast<uint32_t>(ib[2]) << 8) | ib[3]);
+            std::vector<std::string> hashes;
+            if (range_no < 1 || range_no > static_cast<int>(ranges.size()) ||
+                !split_tuple_hashes(PQgetvalue(r, row, 1), PQgetlength(r, row, 1), hashes)) {
+                PQclear(r);
+                err = "malformed reference tuple-hash list";
+                return false;
+            }
+            st.ref_hash_bytes += static_cast<uint64_t>(PQgetlength(r, row, 1));
+            st.entries_compared += hashes.size();
+            for (const std::string& h : hashes) {
+                balance[std::make_pair(range_no, h)]++;
+                on_ref.insert(std::make_pair(range_no, h));
+            }
+        }
+        PQclear(r);
+    }
+    rows_t local_entries;
+    if (!query_rows(local, local_sql, local_entries, err)) return false;
+    st.entries_compared += local_entries.size();
+    for (const auto& e : local_entries) balance[std::make_pair(std::atoi(e[0].c_str()), e[2])]--;
+
+    /* Every local copy of a differing tuple hash is deleted and every
+     * reference copy fetched (duplicate rows keep their multiplicity). */
+    std::vector<std::pair<int, std::string>> wanted;  // differing and listed by the reference
+    std::set<std::pair<int, std::string>> differing;
+    for (const auto& kv : balance) {
+        if (kv.second == 0) continue;
+        differing.insert(kv.first);
+        if (on_ref.count(kv.first)) wanted.push_back(kv.first);
+    }
+    on_ref.clear();
+    std::set<row_pair> bad_local;
+    for (const auto& e : local_entries) {
+        const int range_no = std::atoi(e[0].c_str());
+        if (differing.count(std::make_pair(range_no, e[2])))
+            bad_local.insert(row_pair(ranges[static_cast<size_t>(range_no - 1)].partition, e[1], e[2]));
+    }
+    local_entries.clear();
+    st.differing_entries += differing.size();
+
+    if (differing.empty()) {
+        /* Nodes differ but every row matches: the node summaries are wrong.
+         * The caller's root check fails and the full copy rebuilds them. */
+        st.transfer_us += now_us() - x0;
+        return true;
+    }
+
+    uint64_t candidates = 0;
+    uint64_t bytes = 0;
+    uint64_t deleted = 0;
+    uint64_t inserted = 0;
+    const std::vector<row_pair> bad(bad_local.begin(), bad_local.end());
+    const std::string match = pair_pred(t, "t." + key);
+
+    if (!exec_cmd(local, "BEGIN", err)) return false;
+    if (!exec_cmd(local, "CREATE TEMP TABLE " + tmp + " (LIKE " + tbl + ") ON COMMIT DROP", err)) {
+        return commit_or_rollback(local, false, err);
+    }
+    /* Fetch only the reference rows whose tuple hash differs. */
+    const std::string copy_out = "COPY (" + fetch_cte(ranges, wanted) + "SELECT " +
+                                 join_quoted(local, t.cols, "t.") + " FROM f JOIN " + tbl + " t ON " +
+                                 fetch_pred(t, "t." + key) + ") TO STDOUT";
+    if (!wanted.empty() &&
+        (!force_range_index_join(ref, err) ||
+         !stream_copy(ref, copy_out, local, "COPY " + tmp + " (" + cols + ") FROM STDIN",
+                      candidates, err, &bytes) ||
+         !restore_join_planning(ref, err))) {
+        return commit_or_rollback(local, false, err);
+    }
+    st.candidate_rows += candidates;
+    st.ref_row_bytes += bytes;
+    st.transfer_us += now_us() - x0;
+
+    /* Replace every local row whose pair differs by the reference copies. */
+    const uint64_t a0 = now_us();
+    if (!force_range_index_join(local, err) ||
+        (!bad.empty() &&
+         !exec_cmd(local, pairs_cte(bad) + "DELETE FROM " + tbl + " t USING d WHERE " + match, err, &deleted)) ||
+        !restore_join_planning(local, err) ||
+        !exec_cmd(local, "INSERT INTO " + tbl + " (" + cols + ") SELECT " + cols + " FROM " + tmp,
+                  err, &inserted)) {
+        return commit_or_rollback(local, false, err);
+    }
+    if (!commit_or_rollback(local, true, err)) return false;
+    st.rows_deleted += deleted;
+    st.rows_upserted += inserted;
+    st.apply_us += now_us() - a0;
+    return true;
+}
+
+bool repair_merkle_table(PGconn* ref, PGconn* local, const table_info& t, int table_no,
+                         bool heap_verify, replica_repair_stats& st, std::string& err) {
+    const uint64_t t0 = now_us();
+    std::map<int, std::string> ref_roots, loc_roots;
+    if (!read_partition_roots(ref, t, ref_roots, err)) return false;
+    if (!read_partition_roots(local, t, loc_roots, err)) return false;
+
+    std::set<int> parts;
+    for (const auto& kv : ref_roots) {
+        auto it = loc_roots.find(kv.first);
+        if (it == loc_roots.end() || it->second != kv.second) parts.insert(kv.first);
+    }
+    for (const auto& kv : loc_roots) {
+        if (!ref_roots.count(kv.first)) parts.insert(kv.first);
+    }
+
+    bool heap_ok = true;
+    if (parts.empty()) {
+        st.localise_us += now_us() - t0;
+        if (heap_verify) {
+            const uint64_t v0 = now_us();
+            if (!heap_verify_ok(local, t, heap_ok, err)) return false;
+            st.verify_us += now_us() - v0;
+        }
+        if (heap_ok) return true;
+        /* Heap diverged from the (matching) Merkle nodes: copy the table. */
+        st.tables_repaired++;
+        return full_table_copy(ref, local, t, st, err);
+    }
+
+    st.tables_repaired++;
+    st.mismatched_partitions += static_cast<int>(parts.size());
+
+    std::vector<leaf_key> ranges;
+    if (!descend_differing(ref, local, t, parts, ranges, st, err)) return false;
+    /* Partition roots differ but no node below does (should not happen): whole partitions. */
+    if (ranges.empty()) {
+        for (int p : parts) {
+            leaf_key k;
+            k.partition = p;
+            k.node_hex = "0000000000000000";
+            k.prefix_len = 0;
+            ranges.push_back(k);
+        }
+    }
+    st.differing_leaves += static_cast<int>(ranges.size());
+    st.localise_us += now_us() - t0;
+
+    /* The lookup index on both sides selects the row-level algorithm:
+     *  - tuple-hash lookup (merkle_create_lookup_index(..., mode => 'tuplehash'))
+     *    on both: compare tuple hashes and fetch only the mismatching rows;
+     *  - otherwise (key-hash lookup, or none, on either side): ship the full
+     *    contents of every differing leaf range and reconcile by primary key. */
+    const std::string tbl = "public." + quote_ident(local, t.name);
+    char* literal = PQescapeLiteral(local, tbl.c_str(), tbl.size());
+    if (!literal) {
+        err = conn_error(local);
+        return false;
+    }
+    const std::string tbl_lit = literal;
+    PQfreemem(literal);
+    bool ref_lookup = false, local_lookup = false;
+    if (!has_tuplehash_lookup(ref, tbl_lit, ref_lookup, err) ||
+        !has_tuplehash_lookup(local, tbl_lit, local_lookup, err)) return false;
+    if (ref_lookup && local_lookup) {
+        st.tuplehash_mode_tables++;
+        if (!repair_ranges_by_tuple_hash(ref, local, t, table_no, ranges, tbl_lit, st, err)) return false;
+    } else {
+        st.leaf_mode_tables++;
+        if (!repair_ranges_full_leaf(ref, local, t, table_no, ranges, st, err)) return false;
+    }
 
     /* The table must now match the snapshot exactly. */
     const uint64_t v0 = now_us();
@@ -774,11 +1061,11 @@ bool compute_merkle_digest(PGconn* c, std::string& out_digest, std::string& err)
         if (t.merkle_key.empty()) continue;
         std::map<int, std::string> roots;
         if (!read_partition_roots(c, t, roots, err)) return false;
-        std::vector<uint8_t> acc(32, 0);
+        std::vector<uint8_t> acc(8, 0);  // partition roots are 64-bit AdHash sums
         for (const auto& kv : roots) {
             std::vector<uint8_t> h;
             if (!hex_to_bytes(kv.second, h) || h.size() != acc.size()) {
-                err = "invalid 256-bit Merkle partition root";
+                err = "invalid 64-bit Merkle partition root";
                 return false;
             }
             unsigned int carry = 0;
@@ -832,6 +1119,15 @@ bool repair_replica_from_snapshot(const std::string& local_conninfo,
                        "  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_key_hash' AND pronamespace = 'pg_catalog'::regnamespace) THEN "
                        "    CREATE FUNCTION pg_catalog.merkle_key_hash(anyelement) "
                        "    RETURNS bytea LANGUAGE internal IMMUTABLE STRICT AS 'merkle_key_hash_sql'; "
+                       "  END IF; "
+                       "  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_lookup_index' AND pronamespace = 'pg_catalog'::regnamespace) THEN "
+                       "    CREATE FUNCTION pg_catalog.merkle_lookup_index(tbl regclass) "
+                       "    RETURNS regclass LANGUAGE internal STABLE STRICT AS 'merkle_lookup_index_sql'; "
+                       "  END IF; "
+                       "  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_range_entries' AND pronamespace = 'pg_catalog'::regnamespace) THEN "
+                       "    CREATE FUNCTION pg_catalog.merkle_range_entries(tbl regclass, partition integer, lo bytea, hi bytea) "
+                       "    RETURNS TABLE(key_hash bytea, tuple_hash bytea) LANGUAGE internal STABLE STRICT ROWS 1000 "
+                       "    AS 'merkle_range_entries_sql'; "
                        "  END IF; "
                        "  IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'merkle_key_hash_routed' AND pronamespace = 'pg_catalog'::regnamespace) THEN "
                        "    CREATE FUNCTION pg_catalog.merkle_key_hash_routed(full_key \"any\", leading_key \"any\", partitions integer, subpartitions integer) "

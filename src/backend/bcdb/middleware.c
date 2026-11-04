@@ -1555,6 +1555,8 @@ parse_block_with_txs(const char *json)
 				memset(tx->raft_entry_digest, 0, BCDB_RAFT_DIGEST_BYTES);
 				memset(tx->raft_item_digest, 0, BCDB_RAFT_DIGEST_BYTES);
 				memset(tx->raft_terminal_digest, 0, BCDB_RAFT_DIGEST_BYTES);
+				memset(tx->raft_write_adhash, 0, MERKLE_HASH_BYTES);
+				memset(tx->raft_read_adhash, 0, MERKLE_HASH_BYTES);
 			}
 		}
 
@@ -1752,7 +1754,9 @@ bcdb_middleware_submit_block(const char* block_json)
  *   5. marks each slot consumed so workers can reuse the ring.
  *
  * Returned payload format (one line per tx, in submission order):
- *   "<tx_hash>\t<optional hex payload>\n"
+ *   "<tx_hash>\t<optional hex payload>\t<write AdHash 16 hex><read AdHash 16 hex>\n"
+ *
+ * The AdHashes are always present; the gateway votes on them.
  *
  * The optional payload is included only when BCDB_BLOCK_RETURN_ACTUAL_RESULTS
  * is set; the production default is completion-only.  Rationale: workers
@@ -1964,6 +1968,14 @@ bcdb_middleware_submit_block_results(const char* block_json)
 
 			append_hex_encoded(&out, result_text);
 		}
+		/*
+		 * Third field, always present: the slot's write and read AdHashes as
+		 * 32 lowercase hex chars.  The result ring stores them next to the
+		 * text, published by the same release store on result_committed_txid.
+		 */
+		appendStringInfoChar(&out, '\t');
+		for (int b = 0; b < BCDB_RESULT_ADHASH_BYTES; ++b)
+			appendStringInfo(&out, "%02x", result_block->result_adhash[mem_txid][b]);
 		appendStringInfoChar(&out, '\n');
 
 		/* Hand the slot back: publish result_consumed_txid = tx_id with

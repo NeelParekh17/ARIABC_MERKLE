@@ -29,10 +29,12 @@ MERKLE_LOOKUP_AM=${MERKLE_LOOKUP_AM:-merkle_lsm}
 MERKLE_LOOKUP_LEVELS=${MERKLE_LOOKUP_LEVELS:-3}
 MERKLE_LOOKUP_SIZE=${MERKLE_LOOKUP_SIZE:-1024}
 MERKLE_LOOKUP_RATIO=${MERKLE_LOOKUP_RATIO:-16}
+MERKLE_LOOKUP_MODE=${MERKLE_LOOKUP_MODE:-tuplehash}
 case $MERKLE_LOOKUP_AM in btree|merkle_lsm) ;; *) exit 2;; esac
+case $MERKLE_LOOKUP_MODE in tuplehash|keyhash) ;; *) exit 2;; esac
 [[ $MERKLE_LOOKUP_LEVELS =~ ^[234]$ && $MERKLE_LOOKUP_SIZE =~ ^[0-9]+$ && $MERKLE_LOOKUP_RATIO =~ ^[0-9]+$ ]] || exit 2
 (( MERKLE_LOOKUP_SIZE >= 16 && MERKLE_LOOKUP_RATIO >= 2 && MERKLE_LOOKUP_RATIO <= 1024 )) || exit 2
-export MERKLE_LOOKUP_AM MERKLE_LOOKUP_LEVELS MERKLE_LOOKUP_SIZE MERKLE_LOOKUP_RATIO
+export MERKLE_LOOKUP_AM MERKLE_LOOKUP_LEVELS MERKLE_LOOKUP_SIZE MERKLE_LOOKUP_RATIO MERKLE_LOOKUP_MODE
 DET_WINDOW=${DET_WINDOW:-1024} DET_PIPELINE_DEPTH=${DET_PIPELINE_DEPTH:-1024}
 # Per-transaction phase trace (one CSV row per tx per worker) is a diagnostic,
 # not timed-run configuration: off by default and identical for every mode.
@@ -181,6 +183,7 @@ cfg['merkle_lookup_am'] = os.environ['MERKLE_LOOKUP_AM']
 cfg['merkle_lookup_levels'] = int(os.environ['MERKLE_LOOKUP_LEVELS'])
 cfg['merkle_lookup_size'] = int(os.environ['MERKLE_LOOKUP_SIZE'])
 cfg['merkle_lookup_size_ratio'] = int(os.environ['MERKLE_LOOKUP_RATIO'])
+cfg['merkle_lookup_mode'] = os.environ['MERKLE_LOOKUP_MODE']
 cfg['det_window'] = int(os.environ['DET_WINDOW'])
 cfg['det_pipeline_depth'] = int(os.environ['DET_PIPELINE_DEPTH'])
 cfg['phase_trace'] = os.environ['PHASE_TRACE'] == '1'
@@ -269,7 +272,7 @@ python3 "$SRC/scripts/tpcc_v3/tpcc_load.py" --warehouses "$W" --seed "$SEED" \
 for table in warehouse district customer stock oorder order_line new_order history item; do
   "${PSQL[@]}" -c "ALTER TABLE public.$table SET (fillfactor=$FILLFACTOR); ALTER TABLE public.$table SET LOGGED;" >>"$RUN/logged.log" 2>&1
 done
-"${PSQL[@]}" -v bench_merkle_lookup_am="$MERKLE_LOOKUP_AM" -v bench_merkle_lookup_levels="$MERKLE_LOOKUP_LEVELS" -v bench_merkle_lookup_size="$MERKLE_LOOKUP_SIZE" -v bench_merkle_lookup_ratio="$MERKLE_LOOKUP_RATIO" -v bench_enable_merkle="$MERKLE" -v bench_merkle_fanout=32 -v bench_merkle_partitions="$P" \
+"${PSQL[@]}" -v bench_merkle_lookup_am="$MERKLE_LOOKUP_AM" -v bench_merkle_lookup_levels="$MERKLE_LOOKUP_LEVELS" -v bench_merkle_lookup_size="$MERKLE_LOOKUP_SIZE" -v bench_merkle_lookup_ratio="$MERKLE_LOOKUP_RATIO" -v bench_merkle_lookup_mode="$MERKLE_LOOKUP_MODE" -v bench_enable_merkle="$MERKLE" -v bench_merkle_fanout=32 -v bench_merkle_partitions="$P" \
   -v bench_merkle_split_threshold="$SPLIT" -v bench_merkle_merge_threshold="$MERGE" \
   -v bench_merkle_partition_key_columns="$PKC" -v bench_merkle_subpartitions="$SUB" \
   -f "$SRC/scripts/tpcc_v3/tpcc_procs.sql" >"$RUN/procs.log" 2>&1

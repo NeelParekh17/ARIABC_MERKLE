@@ -31,6 +31,41 @@ logging.basicConfig(
 logger = logging.getLogger("fault_injector")
 
 
+def _random_keys(node, table: str, n: int, exclude=()) -> list:
+    """n distinct random existing keys, found through the primary-key index.
+
+    Keys are drawn uniformly from [min, max] and kept if they exist, so a large
+    table is never scanned or sorted (ORDER BY random() reads the whole heap:
+    minutes on a 100M-row replica, during the measured workload).  Falls back to
+    ORDER BY random() only when the key space is too sparse.
+    """
+    lo = node.scalar(f"SELECT min(ycsb_key) FROM {table}")
+    hi = node.scalar(f"SELECT max(ycsb_key) FROM {table}")
+    if lo is None or hi is None:
+        return []
+    lo, hi = int(lo), int(hi)
+    found = []
+    seen = set(int(k) for k in exclude)
+    for _ in range(20):
+        need = n - len(found)
+        if need <= 0:
+            break
+        cand = list({random.randint(lo, hi) for _ in range(need * 4 + 8)} - seen)
+        rows = node.execute(f"SELECT ycsb_key FROM {table} WHERE ycsb_key = ANY(%s)", (cand,))
+        for r in rows:
+            k = int(r["ycsb_key"])
+            if k not in seen and len(found) < n:
+                found.append(k)
+                seen.add(k)
+    if len(found) < n:
+        rows = node.execute(
+            f"SELECT ycsb_key FROM {table} WHERE ycsb_key != ALL(%s) ORDER BY random() LIMIT %s",
+            (list(seen), n - len(found)),
+        )
+        found.extend(int(r["ycsb_key"]) for r in rows)
+    return found
+
+
 def inject_fault(
     host: str,
     port: int,
@@ -95,14 +130,10 @@ def inject_fault(
                         if key is not None and num_rows == 1:
                             updated_keys = [key]
                         else:
-                            rows = node.execute(
-                                f"SELECT ycsb_key FROM {table} ORDER BY random() LIMIT %s",
-                                (n_update,),
-                            )
-                            if not rows:
+                            updated_keys = _random_keys(node, table, n_update)
+                            if not updated_keys:
                                 logger.error("Table '%s' has no rows for UPDATE corruption", table)
                                 return False
-                            updated_keys = [int(r["ycsb_key"]) for r in rows]
 
                         corrupt_val = f"CORRUPTED_{int(time.time())}"
                         logger.info(
@@ -121,20 +152,10 @@ def inject_fault(
                         if key is not None and num_rows == 1 and n_update == 0:
                             deleted_keys = [key]
                         else:
-                            if updated_keys:
-                                rows = node.execute(
-                                    f"SELECT ycsb_key FROM {table} WHERE ycsb_key != ALL(%s) ORDER BY random() LIMIT %s",
-                                    (updated_keys, n_delete),
-                                )
-                            else:
-                                rows = node.execute(
-                                    f"SELECT ycsb_key FROM {table} ORDER BY random() LIMIT %s",
-                                    (n_delete,),
-                                )
-                            if not rows:
+                            deleted_keys = _random_keys(node, table, n_delete, exclude=updated_keys)
+                            if not deleted_keys:
                                 logger.error("Table '%s' has no rows for DELETE corruption", table)
                                 return False
-                            deleted_keys = [int(r["ycsb_key"]) for r in rows]
 
                         logger.info(
                             "Injecting DELETE corruption on %d tuples (sample key %d, attempt %d)",

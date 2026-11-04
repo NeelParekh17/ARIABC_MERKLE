@@ -122,7 +122,7 @@ $$;
 
 -- Test SQL functional hash functions and dynamic Merkle functional covering index
 SELECT octet_length(merkle_key_hash(12345::bigint)) = 8 AS key_hash_len_8;
-SELECT octet_length(merkle_tuple_hash(r)) = 32 AS tuple_hash_len_32 FROM (SELECT 1::int AS a, 'test'::text AS b) r;
+SELECT octet_length(merkle_tuple_hash(r)) = 8 AS tuple_hash_len_8 FROM (SELECT 1::int AS a, 'test'::text AS b) r;
 
 CREATE TABLE functional_index_test (id bigint primary key, val text);
 CREATE INDEX functional_covering_idx ON functional_index_test (merkle_key_hash(id), merkle_tuple_hash(functional_index_test.*), id);

@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <mutex>
 #include <unordered_map>
@@ -16,7 +17,8 @@
 
 namespace ariabc_pg {
 
-class blake3_tx_signer;
+class tx_request_verifier;
+class parallel_for_pool;
 
 /*
  * F1: per-Raft-entry completion tracker.
@@ -107,19 +109,27 @@ public:
     }
 
     /*
-     * Request tag verification (keyed BLAKE3, see blake3_tx_signer.hxx).
-     * When required, every ordered item must carry a tag that verifies under
-     * the configured key; otherwise its SQL is replaced by a fixed failing
-     * statement before it reaches the executor.  The decision depends only on
-     * the item bytes in the log entry and the shared key, so every replica
-     * rejects the same items and records the same error result.
+     * Request signature verification (per-client Ed25519, see
+     * tx_request_sig.hxx).  When required, every ordered item must carry a
+     * signature by a client whose public key is in <key_dir>/client_<id>.pub.pem;
+     * otherwise its SQL is replaced by a fixed failing statement before it
+     * reaches the executor.  The decision depends only on the item bytes in
+     * the log entry and the client public keys, so every replica rejects the
+     * same items and records the same error result.  Replicas hold no client
+     * private key, so a faulty replica or leader cannot forge a request.
+     * The items of one entry are verified in parallel
+     * ($ARIABC_TX_SIG_VERIFY_THREADS helper threads).
      */
-    bool configure_tx_tag(const std::string& key_file, bool required, std::string& err);
+    bool configure_tx_tag(const std::string& client_key_dir, bool required, std::string& err);
     bool tx_tag_required() const { return tx_tag_required_; }
+    // Client ids with a loaded public key, e.g. "1,2"; empty when off.
+    std::string tx_tag_client_ids() const;
+    size_t tx_tag_verify_threads() const;
     struct tx_tag_stats {
         uint64_t verified = 0;
         uint64_t rejected_missing = 0;
         uint64_t rejected_mismatch = 0;
+        uint64_t rejected_unknown_client = 0;
         uint64_t verify_ns = 0;
     };
     tx_tag_stats tx_tag_profile() const;
@@ -128,6 +138,10 @@ public:
     // monotonic sequence number, skipping Raft log deserialization.
     void direct_enqueue(client_api_request_item item, uint64_t seq) {
         std::vector<client_api_request_item> one{std::move(item)};
+        std::string control_err;
+        if (!validate_workload_items(one, control_err)) {
+            throw std::invalid_argument(control_err);
+        }
         apply_tx_tag_policy(one, seq);
         client_api_request_item& tagged = one.front();
         tagged.has_assigned_det_seq = true;
@@ -152,6 +166,10 @@ public:
     }
     void direct_enqueue_batch(std::vector<client_api_request_item> items, uint64_t first_seq) {
         if (items.empty()) return;
+        std::string control_err;
+        if (!validate_workload_items(items, control_err)) {
+            throw std::invalid_argument(control_err);
+        }
         apply_tx_tag_policy(items, first_seq);
         const uint64_t last_seq = first_seq + static_cast<uint64_t>(items.size() - 1);
         register_result_batch(last_seq, items);
@@ -411,8 +429,10 @@ private:
     bool committed_det_seq_initialized_ = false;
     uint64_t next_committed_det_seq_ = 0;
 
-    std::unique_ptr<blake3_tx_signer> tx_tag_signer_;
+    std::unique_ptr<tx_request_verifier> tx_tag_verifier_;
+    std::unique_ptr<parallel_for_pool> tx_tag_pool_;
     bool tx_tag_required_ = false;
+    std::atomic<uint64_t> tx_tag_rejected_unknown_client_{0};
     std::atomic<uint64_t> tx_tag_verified_{0};
     std::atomic<uint64_t> tx_tag_rejected_missing_{0};
     std::atomic<uint64_t> tx_tag_rejected_mismatch_{0};

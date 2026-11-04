@@ -16,7 +16,7 @@ ON healthy.usertable
 (
   merkle_partition_for_hash(merkle_key_hash(ycsb_key), :partitions),
   merkle_key_hash(ycsb_key),
-  ycsb_key
+  merkle_tuple_hash(usertable.*)
 );
 
 CREATE INDEX usertable_merkle_partition_lookup_idx
@@ -24,7 +24,7 @@ ON damaged.usertable
 (
   merkle_partition_for_hash(merkle_key_hash(ycsb_key), :partitions),
   merkle_key_hash(ycsb_key),
-  ycsb_key
+  merkle_tuple_hash(usertable.*)
 );
 
 ANALYZE healthy.usertable;

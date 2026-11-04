@@ -9,8 +9,9 @@
 
 namespace ariabc_pg {
 
-// Keyed BLAKE3 request tag (see blake3_tx_signer.hxx), carried opaquely here.
-const size_t kTxTagBytes = 32;
+// Per-client request signature (see tx_request_sig.hxx), carried opaquely
+// here: u32be client id || 64-byte Ed25519 signature.
+const size_t kTxTagBytes = 68;
 
 struct client_api_request_item {
     std::string req_id;
@@ -49,6 +50,15 @@ struct raft_request_batch {
 
 // Copy a single (non-batch) request into an item, tag included.
 client_api_request_item request_as_item(const client_api_request& req);
+
+// Opt in to stats on the long-standing GET_COMMIT_INDEX command. Older
+// servers return only the index, so querying support never submits unknown SQL.
+extern const char kControlStatsRequestIdPrefix[];
+
+bool is_control_sql(const std::string& sql);
+bool validate_workload_items(const std::vector<client_api_request_item>& items,
+                             std::string& err);
+bool validate_workload_request(const client_api_request& req, std::string& err);
 
 bool read_request_frame(int fd, client_api_request& out_req, std::string& err);
 bool write_response_frame(int fd, const client_api_response& resp, std::string& err);

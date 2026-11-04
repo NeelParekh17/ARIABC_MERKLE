@@ -14,7 +14,7 @@ def audit(label):
  for schema in ['mb','m2','m3','m4']:
   table=schema+'.usertable'
   rows=q(f'SELECT merkle_tuple_hash(t.*) FROM {table} t').fetchall()
-  expected=(sum(int.from_bytes(r[0],'little') for r in rows)%(1<<256)).to_bytes(32,'little').hex()
+  expected=(sum(int.from_bytes(r[0],'little') for r in rows)%(1<<64)).to_bytes(8,'little').hex()
   root,verify,stats=q('SELECT merkle_root_hash(%s::regclass),merkle_verify(%s::regclass),merkle_tree_stats(%s::regclass)',(table,)*3).fetchone()
   assert root==expected and verify,(table,label,root,expected,verify)
   roots.append(root);rec(label,schema=schema,root=root,rows=len(rows),stats=stats)
