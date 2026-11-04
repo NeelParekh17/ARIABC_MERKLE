@@ -1977,6 +1977,7 @@ void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
         << " det_block_bin_128_plus=" << exec.det_block_bin_128_plus
         << " det_block_fallbacks=" << exec.det_block_fallbacks
         << " det_block_skipped_readonly=" << exec.det_block_skipped_readonly
+        << " det_result_adhash_missing=" << exec.det_result_adhash_missing
         << " ready_det_results_max=" << exec.ready_det_results_max
         << " ordered_emit_wait_ms=" << (exec.ordered_emit_wait_ns / 1000000.0)
         << " kafka_immediate_records=" << exec.kafka_immediate_records

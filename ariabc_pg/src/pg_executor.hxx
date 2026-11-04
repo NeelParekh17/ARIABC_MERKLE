@@ -133,6 +133,7 @@ struct pg_executor_stats {
     uint64_t det_block_bin_128_plus = 0;
     uint64_t det_block_fallbacks = 0;
     uint64_t det_block_skipped_readonly = 0;
+    uint64_t det_result_adhash_missing = 0;
     uint64_t ready_det_results_max = 0;
     uint64_t ordered_emit_wait_ns = 0;
     uint64_t kafka_immediate_records = 0;
@@ -590,6 +591,7 @@ private:
     std::atomic<uint64_t> st_det_block_bin_128_plus_{0};
     std::atomic<uint64_t> st_det_block_fallbacks_{0};
     std::atomic<uint64_t> st_det_block_skipped_readonly_{0};
+    std::atomic<uint64_t> st_det_result_adhash_missing_{0};
     std::atomic<uint64_t> st_ready_det_results_max_{0};
     std::atomic<uint64_t> st_ordered_emit_wait_ns_{0};
     std::atomic<uint64_t> st_kafka_immediate_records_{0};

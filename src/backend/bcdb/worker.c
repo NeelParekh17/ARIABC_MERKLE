@@ -373,6 +373,35 @@ bcdb_emit_completion_only_select_result(void)
 }
 
 /*
+ * bcdb_send_result_adhash
+ *
+ * Reports the committed tx's write and read AdHashes to an inline "s <txid>"
+ * client as a ParameterStatus message, just before CommandComplete.  The value
+ * is "<txid prefix>:<32 hex>": libpq keeps the last value per name, so the
+ * prefix lets the client reject a value left over from an earlier statement.
+ */
+static void
+bcdb_send_result_adhash(const BCDBShmXact *tx, CommandDest dest)
+{
+    StringInfoData buf;
+    char        hex[MERKLE_HASH_BYTES * 4 + 1];
+    char        value[NAMEDATALEN + sizeof(hex) + 1];
+
+    if (dest != DestRemote && dest != DestRemoteExecute && dest != DestRemoteSimple)
+        return;
+
+    hex_encode((const char *) tx->raft_write_adhash, MERKLE_HASH_BYTES, hex);
+    hex_encode((const char *) tx->raft_read_adhash, MERKLE_HASH_BYTES, hex + MERKLE_HASH_BYTES * 2);
+    hex[MERKLE_HASH_BYTES * 4] = '\0';
+    snprintf(value, sizeof(value), "%s:%s", tx->hash, hex);
+
+    pq_beginmessage(&buf, 'S');
+    pq_sendstring(&buf, "bcdb_result_adhash");
+    pq_sendstring(&buf, value);
+    pq_endmessage(&buf);
+}
+
+/*
  * Gate wait diagnostics are intentionally opt-in because they can be chatty
  * under high concurrency.
  */
@@ -3892,7 +3921,11 @@ opf_retry:
 				send_terminal_error = true;
 			}
 			else
+			{
+				if (!dedicated_worker)
+					bcdb_send_result_adhash(tx, dest);
 				EndCommand(completionTag, dest);
+			}
             bcdb_cleanup_optim_write_list(activeTx, true);
             delete_tx(tx);
 			activeTx = NULL;

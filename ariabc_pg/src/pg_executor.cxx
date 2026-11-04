@@ -361,6 +361,18 @@ bool is_retryable_sqlstate(const char* sqlstate) {
            (strcmp(sqlstate, "57014") == 0);
 }
 
+// Write+read AdHash pair the backend reported for this "s <8-digit txid> ..."
+// statement, or empty if none.  libpq keeps the last ParameterStatus value, so
+// the txid prefix rejects a value left over from an earlier statement.
+std::string backend_result_adhash(PGconn* c, const std::string& sql) {
+    constexpr size_t kTxidLen = 8;
+    constexpr size_t kPairLen = 32;
+    const char* v = PQparameterStatus(c, "bcdb_result_adhash");
+    if (!v || strlen(v) != kTxidLen + 1 + kPairLen || v[kTxidLen] != ':') return "";
+    if (sql.size() <= 2 + kTxidLen || sql.compare(2, kTxidLen, v, kTxidLen) != 0) return "";
+    return std::string(v + kTxidLen + 1, kPairLen);
+}
+
 std::string format_result(PGresult* res) {
     if (!res) return "ERROR null_result";
     const ExecStatusType st = PQresultStatus(res);
@@ -1084,7 +1096,7 @@ std::string make_sig_payload_v4(uint64_t req_num,
 namespace {
 
 // 32 lowercase hex chars (write AdHash then read AdHash).  Empty means the
-// backend reported none (non-deterministic or fallback execution): zeros.
+// backend reported none (non-deterministic execution or an error): zeros.
 std::string normalized_result_adhash(const std::vector<std::string>& result_adhashes,
                                      size_t i,
                                      const std::string& req_id) {
@@ -3083,6 +3095,7 @@ pg_executor_stats pg_executor::stats() const {
     out.det_block_bin_128_plus = st_det_block_bin_128_plus_.load(std::memory_order_relaxed);
     out.det_block_fallbacks = st_det_block_fallbacks_.load(std::memory_order_relaxed);
     out.det_block_skipped_readonly = st_det_block_skipped_readonly_.load(std::memory_order_relaxed);
+    out.det_result_adhash_missing = st_det_result_adhash_missing_.load(std::memory_order_relaxed);
     out.ready_det_results_max = st_ready_det_results_max_.load(std::memory_order_relaxed);
     out.ordered_emit_wait_ns = st_ordered_emit_wait_ns_.load(std::memory_order_relaxed);
     out.kafka_immediate_records = st_kafka_immediate_records_.load(std::memory_order_relaxed);
@@ -4422,6 +4435,13 @@ void pg_executor::worker_loop() {
             maybe_strip_det_prefix_for_compat(t.sql, det_raw_compat_mode_, db_opt_.db_type);
         bool is_error = false;
         const std::string result = exec_sql(c, sql_exec, &is_error);
+        std::string result_adhash;
+        if (!is_error && db_opt_.db_type == 1 && is_det_prefixed_sql(sql_exec)) {
+            result_adhash = backend_result_adhash(c, sql_exec);
+            if (result_adhash.empty() && !is_expected_user_abort_result(result)) {
+                st_det_result_adhash_missing_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         static const bool s_trace_backend_reply = (::getenv("ARIABC_TRACE_BACKEND_REPLY") != nullptr);
         if (s_trace_backend_reply) {
             std::cerr << "SAFE_BACKEND_REPLY"
@@ -4434,6 +4454,7 @@ void pg_executor::worker_loop() {
             det_finish_apply(det_tx_seq);
         }
         ConfirmedResult confirmed = accept_safe_confirmed_result(t, result);
+        if (confirmed.result_adhash.empty()) confirmed.result_adhash = result_adhash;
         if (is_expected_user_abort_result(confirmed.payload))
             st_user_aborts_.fetch_add(1, std::memory_order_relaxed);
         // Fail closed: do not publish Kafka and do not advance Raft applied tracker
@@ -5059,7 +5080,7 @@ void pg_executor::event_loop() {
         }
     };
 
-    auto mark_det_result_ready = [&](PGconn* durable_conn, task done_task, const std::string& out, bool is_error = false) {
+    auto mark_det_result_ready = [&](PGconn* durable_conn, task done_task, const std::string& out, bool is_error = false, const std::string& result_adhash = "") {
         const uint64_t ready_ns = now_steady_ns();
         static const bool s_trace_backend_reply = (::getenv("ARIABC_TRACE_BACKEND_REPLY") != nullptr);
         if (s_trace_backend_reply) {
@@ -5070,6 +5091,7 @@ void pg_executor::event_loop() {
                       << std::endl;
         }
         ConfirmedResult conf = accept_safe_confirmed_result(done_task, out);
+        if (conf.result_adhash.empty()) conf.result_adhash = result_adhash;
         // Fail closed: do not publish Kafka and do not advance Raft applied tracker
         if (conf.raft_log_index == static_cast<uint64_t>(-1)) {
             std::cerr << "SAFE_PROTOCOL_FAILURE_NOT_APPLIED"
@@ -6064,6 +6086,7 @@ void pg_executor::event_loop() {
                 bool retry = false;
                 std::string err_msg;
                 std::string retry_sqlstate;
+                std::string result_adhash;
                 const ExecStatusType st = last ? PQresultStatus(last) : PGRES_FATAL_ERROR;
                 bool is_error = !(st == PGRES_TUPLES_OK || st == PGRES_COMMAND_OK);
                 if (!is_error) {
@@ -6071,6 +6094,12 @@ void pg_executor::event_loop() {
                     const bool expected_abort = last && PQntuples(last) == 1 &&
                         PQnfields(last) == 1 &&
                         is_expected_user_abort_result(PQgetvalue(last, 0, 0));
+                    if (db_opt_.db_type == 1 && is_det_prefixed_sql(cs.cur.sql)) {
+                        result_adhash = backend_result_adhash(cs.c, cs.cur.sql);
+                        if (result_adhash.empty() && !expected_abort) {
+                            st_det_result_adhash_missing_.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
                     if (!expected_abort && det_completion_only_success_ &&
                         db_opt_.db_type == 1 &&
                         is_det_prefixed_sql(cs.cur.sql)) {
@@ -6150,7 +6179,7 @@ void pg_executor::event_loop() {
                 if (done_task.exec_begin_ns != 0 && finish_ns >= done_task.exec_begin_ns) {
                     st_exec_ns_.fetch_add(finish_ns - done_task.exec_begin_ns, std::memory_order_relaxed);
                 }
-                mark_det_result_ready(cs.c, std::move(done_task), out, is_error);
+                mark_det_result_ready(cs.c, std::move(done_task), out, is_error, result_adhash);
             }
         }
 

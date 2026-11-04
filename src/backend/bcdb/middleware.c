@@ -1760,10 +1760,8 @@ bcdb_middleware_submit_block(const char* block_json)
  *
  * The optional payload is included only when BCDB_BLOCK_RETURN_ACTUAL_RESULTS
  * is set; the production default is completion-only.  Rationale: workers
- * apply writes in deterministic order so final database state is identical
- * across replicas, but read-row text can reflect local worker timing.  The
- * post-run Merkle gate validates state; completion-only payloads avoid
- * coupling correctness to per-tx text comparison.
+ * apply writes in deterministic order, and the gateway compares the AdHashes
+ * rather than the result text.
  *
  * Hot correctness rule -- slot ownership:
  *   result_committed_txid[slot] MUST equal tx->tx_id at the moment of read.
