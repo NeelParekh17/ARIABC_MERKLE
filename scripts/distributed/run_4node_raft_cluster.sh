@@ -415,6 +415,8 @@ if [[ -n "$RAFT_STORAGE_ROOT" ]]; then
 fi
 RAFT_CLUSTER_ID="${RAFT_CLUSTER_ID:-ariabc_cluster}"
 RAFT_APPLY_LEDGER_MODE="${RAFT_APPLY_LEDGER_MODE:-off}"
+# raft or hotstuff; hotstuff needs gen_hotstuff_keys.sh output in each replica's key dir.
+CONSENSUS="${CONSENSUS:-raft}"
 RAFT_EPOCH_HEX="${RAFT_EPOCH_HEX:-}"
 FAILPOINT_NODE_ID="${FAILPOINT_NODE_ID:-}"
 FAILPOINT_ENV="${FAILPOINT_ENV:-}"
@@ -929,6 +931,7 @@ while [[ $# -gt 0 ]]; do
     --raft-storage-root) RAFT_STORAGE_ROOT="${2:-}"; RAFT_STORAGE_DIR="$RAFT_STORAGE_ROOT"; shift 2 ;;
     --raft-cluster-id) RAFT_CLUSTER_ID="${2:-ariabc_cluster}"; shift 2 ;;
     --raft-apply-ledger-mode) RAFT_APPLY_LEDGER_MODE="${2:-off}"; shift 2 ;;
+    --consensus) CONSENSUS="${2:-raft}"; shift 2 ;;
     --raft-epoch-hex) RAFT_EPOCH_HEX="${2:-}"; shift 2 ;;
     --failpoint-node-id) FAILPOINT_NODE_ID="${2:-}"; shift 2 ;;
     --failpoint-env) FAILPOINT_ENV="${2:-}"; shift 2 ;;
@@ -3852,6 +3855,7 @@ for start_pos in "${!START_ORDER[@]}"; do
       --raft-storage-dir \"$RAFT_STORAGE_DIR/$RAFT_CLUSTER_ID/node$id\" \
       --raft-cluster-id $RAFT_CLUSTER_ID \
       --raft-apply-ledger $RAFT_APPLY_LEDGER_MODE \
+      --consensus $CONSENSUS \
       --raft-epoch-hex \"$RAFT_EPOCH_HEX\" \
       --txTagVerify $TX_TAG_VERIFY \
       $KAFKA_ARGS \

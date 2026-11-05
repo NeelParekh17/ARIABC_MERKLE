@@ -1,4 +1,5 @@
 #include "pg_state_machine.hxx"
+#include "hotstuff_engine.hxx"
 #include "tx_request_sig.hxx"
 #include "wire_protocol.hxx"
 
@@ -375,6 +376,11 @@ struct server_options {
     std::string raft_apply_ledger_mode = "off";
     bool raft_rejoin = false;
 
+    // Ordering protocol: "raft" or "hotstuff".  Everything else is the same for both.
+    std::string consensus = "raft";
+    int hotstuff_impeach_ms = 5000;
+    size_t hotstuff_max_block_bytes = 4u << 20;
+
     // Commit B2: cluster epoch as 64-char lowercase hex (32 bytes)
     std::string raft_epoch_hex;
 
@@ -416,6 +422,12 @@ void usage(const char* argv0) {
         << "        # stays quarantined until ariabc_recovery_tool rejoin repairs it from a live replica;\n"
         << "        # restart its PostgreSQL first, so in-flight BCDB state is gone\n"
         << "    [--raft-epoch-hex <64-hex-chars>] # B2: cluster epoch identifier\n"
+        << "    [--consensus raft|hotstuff]      # ordering protocol, default raft; hotstuff uses\n"
+        << "        # <keyDir>/hs_node_<id>.{key,pub} (scripts/distributed/gen_hotstuff_keys.sh) and\n"
+        << "        # requires --raft-apply-ledger off and --raft-storage-mode durable, keeps its vote\n"
+        << "        # state in hs_vote_state.bin there; --raftEndpoint/--raftMembers are its addresses\n"
+        << "    [--hotstuff-impeach-ms <n>]      # replace the leader after this long with no commit\n"
+        << "    [--hotstuff-max-block-bytes <n>]\n"
         << "    [--txTagVerify auto|require|off] [--txClientKeyDir <dir>]\n"
         << "        # per-client Ed25519 request signatures, verified from the log before\n"
         << "        # execution against <dir>/client_<id>.pub.pem (default dir = keyDir);\n"
@@ -495,6 +507,12 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
                 opt.raft_apply_ledger_mode = need("--raft-apply-ledger");
             } else if (a == "--raft-rejoin") {
                 opt.raft_rejoin = true;
+            } else if (a == "--consensus") {
+                opt.consensus = need("--consensus");
+            } else if (a == "--hotstuff-impeach-ms") {
+                opt.hotstuff_impeach_ms = std::stoi(need("--hotstuff-impeach-ms"));
+            } else if (a == "--hotstuff-max-block-bytes") {
+                opt.hotstuff_max_block_bytes = std::stoull(need("--hotstuff-max-block-bytes"));
             } else if (a == "--raft-epoch-hex") {
                 opt.raft_epoch_hex = need("--raft-epoch-hex");
             } else if (a == "--txTagVerify") {
@@ -519,6 +537,19 @@ bool parse_args(int argc, char** argv, server_options& opt, std::string& err) {
     }
     if (!opt.bypass_raft && opt.raft_endpoint.empty()) {
         err = "missing --raftEndpoint";
+        return false;
+    }
+    if (opt.consensus != "raft" && opt.consensus != "hotstuff") {
+        err = "invalid --consensus (expected raft or hotstuff)";
+        return false;
+    }
+    if (opt.consensus == "hotstuff" &&
+        (opt.bypass_raft || opt.raft_apply_ledger_mode != "off" ||
+         opt.raft_storage_mode != "durable" ||
+         opt.hotstuff_impeach_ms <= 0 || opt.hotstuff_max_block_bytes == 0)) {
+        err = "--consensus hotstuff requires --bypassRaft 0, --raft-apply-ledger off, "
+              "--raft-storage-mode durable and "
+              "positive --hotstuff-impeach-ms/--hotstuff-max-block-bytes";
         return false;
     }
     if (opt.client_port <= 0 || opt.client_port > 65535) {
@@ -741,7 +772,25 @@ void wait_for_admission_drain(pg_state_machine* psm) {
     }
 }
 
-void append_request_to_raft(nuraft::ptr<nuraft::raft_server> raft,
+// --consensus raft: the same calls, straight through to NuRaft.
+class raft_consensus : public consensus_engine {
+public:
+    explicit raft_consensus(nuraft::ptr<nuraft::raft_server> server) : server_(server) {}
+    nuraft::int32 get_leader() const override { return server_->get_leader(); }
+    bool is_leader() const override { return server_->is_leader(); }
+    bool is_initialized() const override { return server_->is_initialized(); }
+    nuraft::ulong get_last_log_idx() const override { return server_->get_last_log_idx(); }
+    bool request_leadership() override { return server_->request_leadership(); }
+    nuraft::ptr<nuraft::cmd_result<nuraft::ptr<nuraft::buffer>>>
+    append_entries(const std::vector<nuraft::ptr<nuraft::buffer>>& logs) override {
+        return server_->append_entries(logs);
+    }
+
+private:
+    nuraft::ptr<nuraft::raft_server> server_;
+};
+
+void append_request_to_raft(nuraft::ptr<consensus_engine> raft,
                             pg_state_machine* psm,
                             const client_api_request& req,
                             client_api_response& resp) {
@@ -839,7 +888,7 @@ client_api_request coalesce_raft_ordered_entries(
 }
 
 void append_requests_to_raft_batch(
-    nuraft::ptr<nuraft::raft_server> raft,
+    nuraft::ptr<consensus_engine> raft,
     pg_state_machine* psm,
     const std::vector<std::shared_ptr<raft_ordered_entry>>& entries) {
     if (entries.empty()) {
@@ -1061,7 +1110,7 @@ struct raft_orderer {
     std::unordered_map<std::string, uint64_t> req_id_to_seq;
 };
 
-bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
+bool append_raft_ordered(nuraft::ptr<consensus_engine> raft,
                          pg_state_machine* psm,
                          const client_api_request& req,
                          raft_orderer& orderer,
@@ -1317,7 +1366,7 @@ bool append_raft_ordered(nuraft::ptr<nuraft::raft_server> raft,
 }
 
 void handle_client_fd(int fd,
-                      nuraft::ptr<nuraft::raft_server> raft,
+                      nuraft::ptr<consensus_engine> raft,
                       nuraft::ptr<nuraft::state_machine> sm,
                       std::shared_ptr<raft_orderer> orderer) {
     // Low-latency request/response: avoid Nagle delays on small frames.
@@ -1850,7 +1899,7 @@ void handle_client_fd_direct(int fd,
     ::close(fd);
 }
 
-void dump_profile(nuraft::ptr<nuraft::raft_server> raft,
+void dump_profile(nuraft::ptr<consensus_engine> raft,
                   nuraft::ptr<nuraft::state_machine> sm,
                   nuraft::ptr<nuraft::state_mgr> smgr = nullptr)
 {
@@ -2573,22 +2622,42 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Initialize Raft server listening on raftEndpoint port.
-    const ariabc_pg::host_port raft_hp = ariabc_pg::parse_host_port(opt.raft_endpoint);
+    // Initialize the ordering protocol listening on the raftEndpoint port.
     raft_launcher launcher;
-    ptr<raft_server> raft = launcher.init(sm, smgr, raft_logger,
-                                          raft_hp.port, asio_opt, params);
-    if (!raft) {
-        std::cerr << "Failed to init raft server (see log: " << log_file << ")" << std::endl;
-        return 1;
-    }
-    if (durable_async_flush) {
-        auto d_smgr = std::dynamic_pointer_cast<ariabc_raft::durable_state_mgr>(smgr);
-        if (d_smgr) {
-            auto lstore = std::dynamic_pointer_cast<ariabc_raft::durable_log_store>(
-                d_smgr->load_log_store());
-            if (lstore) {
-                lstore->enable_async_flush(raft.get());
+    ptr<ariabc_pg::consensus_engine> raft;
+    ptr<raft_server> raft_srv;
+    if (opt.consensus == "hotstuff") {
+        ariabc_pg::hotstuff_config hs_cfg;
+        hs_cfg.node_id = opt.id;
+        for (const auto& m : members) hs_cfg.members.emplace_back(m.id, m.endpoint);
+        hs_cfg.key_dir = opt.key_dir;
+        hs_cfg.vote_state_path = opt.raft_storage_dir + "/hs_vote_state.bin";
+        hs_cfg.rejoin = opt.raft_rejoin;
+        hs_cfg.impeach_ms = opt.hotstuff_impeach_ms;
+        hs_cfg.max_block_bytes = opt.hotstuff_max_block_bytes;
+        std::string hs_err;
+        raft = ariabc_pg::make_hotstuff_engine(hs_cfg, sm, smgr->load_log_store(), hs_err);
+        if (!raft) {
+            std::cerr << "HOTSTUFF_INIT_FAILED: " << hs_err << std::endl;
+            return 1;
+        }
+    } else {
+        const ariabc_pg::host_port raft_hp = ariabc_pg::parse_host_port(opt.raft_endpoint);
+        raft_srv = launcher.init(sm, smgr, raft_logger,
+                                 raft_hp.port, asio_opt, params);
+        if (!raft_srv) {
+            std::cerr << "Failed to init raft server (see log: " << log_file << ")" << std::endl;
+            return 1;
+        }
+        raft = cs_new<ariabc_pg::raft_consensus>(raft_srv);
+        if (durable_async_flush) {
+            auto d_smgr = std::dynamic_pointer_cast<ariabc_raft::durable_state_mgr>(smgr);
+            if (d_smgr) {
+                auto lstore = std::dynamic_pointer_cast<ariabc_raft::durable_log_store>(
+                    d_smgr->load_log_store());
+                if (lstore) {
+                    lstore->enable_async_flush(raft_srv.get());
+                }
             }
         }
     }
@@ -2608,6 +2677,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "ariabc_pg_server ready: id=" << opt.id
+              << " consensus=" << opt.consensus
               << " raft=" << opt.raft_endpoint
               << " clientPort=" << opt.client_port
               << " members=" << members.size()
@@ -2618,8 +2688,9 @@ int main(int argc, char** argv) {
               << std::endl;
 
     // A rejoining replica is quarantined and may be behind: it must not take over.
-    if (preferred_leader_id == opt.id && !opt.raft_rejoin) {
-        ptr<raft_server> preferred_raft = raft;
+    // HotStuff's first leader is the first member, and it has no leadership transfer.
+    if (preferred_leader_id == opt.id && !opt.raft_rejoin && raft_srv) {
+        ptr<raft_server> preferred_raft = raft_srv;
         std::thread([preferred_raft, preferred_leader_id] {
             for (int attempt = 1; attempt <= 40 && !ariabc_pg::g_stop.load(); ++attempt) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));

@@ -103,6 +103,61 @@ else()
     set(ARIABC_CRYPTO_LIBS "")
 endif()
 
+# --consensus hotstuff: libhotstuff and its dependencies, built from source here
+# so that hosts need neither autotools nor libuv development packages.
+set(ARIABC_HOTSTUFF_DIR ${CMAKE_CURRENT_LIST_DIR}/../libhotstuff)
+set(LIBUV_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(LIBUV_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LIBUV_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+add_subdirectory(${ARIABC_HOTSTUFF_DIR}/libuv ${CMAKE_CURRENT_BINARY_DIR}/libuv-build EXCLUDE_FROM_ALL)
+
+add_library(ariabc_secp256k1 OBJECT ${ARIABC_HOTSTUFF_DIR}/secp256k1/src/secp256k1.c)
+target_include_directories(ariabc_secp256k1 PRIVATE
+                           ${ARIABC_HOTSTUFF_DIR}/secp256k1
+                           ${ARIABC_HOTSTUFF_DIR}/secp256k1/src)
+target_compile_definitions(ariabc_secp256k1 PRIVATE
+                           USE_NUM_NONE=1 USE_FIELD_INV_BUILTIN=1 USE_SCALAR_INV_BUILTIN=1
+                           USE_FIELD_5X52=1 USE_SCALAR_4X64=1 HAVE___INT128=1 USE_ASM_X86_64=1)
+target_compile_options(ariabc_secp256k1 PRIVATE -w)
+
+set(SALTICIDAE_NORMAL_LOG 1)
+set(SALTICIDAE_CBINDINGS 1)  # event.cpp defines a symbol the C++ code needs inside this block
+set(HOTSTUFF_NORMAL_LOG 1)
+configure_file(${ARIABC_HOTSTUFF_DIR}/salticidae/src/config.h.in
+               ${CMAKE_CURRENT_BINARY_DIR}/hotstuff-gen/salticidae/config.h @ONLY)
+configure_file(${ARIABC_HOTSTUFF_DIR}/src/config.h.in
+               ${CMAKE_CURRENT_BINARY_DIR}/hotstuff-gen/hotstuff/config.h @ONLY)
+
+add_library(ariabc_hotstuff STATIC
+            src/hotstuff_engine.cxx
+            ${ARIABC_HOTSTUFF_DIR}/src/util.cpp
+            ${ARIABC_HOTSTUFF_DIR}/src/client.cpp
+            ${ARIABC_HOTSTUFF_DIR}/src/crypto.cpp
+            ${ARIABC_HOTSTUFF_DIR}/src/entity.cpp
+            ${ARIABC_HOTSTUFF_DIR}/src/consensus.cpp
+            ${ARIABC_HOTSTUFF_DIR}/src/hotstuff.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/type.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/util.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/event.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/crypto.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/stream.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/msg.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/netaddr.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/conn.cpp
+            ${ARIABC_HOTSTUFF_DIR}/salticidae/src/network.cpp
+            $<TARGET_OBJECTS:ariabc_secp256k1>)
+set_target_properties(ariabc_hotstuff PROPERTIES CXX_STANDARD 17)
+# GCC 13 no longer pulls <cstdint> in for these 2021 sources.
+target_compile_options(ariabc_hotstuff PRIVATE -include cstdint -Wno-deprecated-declarations)
+target_include_directories(ariabc_hotstuff PRIVATE
+                           ${ARIABC_COMMON_INC}
+                           ${CMAKE_CURRENT_BINARY_DIR}/hotstuff-gen
+                           ${CMAKE_CURRENT_BINARY_DIR}/hotstuff-gen/salticidae
+                           ${ARIABC_HOTSTUFF_DIR}/include
+                           ${ARIABC_HOTSTUFF_DIR}/salticidae/include
+                           ${ARIABC_HOTSTUFF_DIR}/secp256k1/include)
+target_link_libraries(ariabc_hotstuff PUBLIC uv_a NuRaft::static_lib ${ARIABC_CRYPTO_LIBS} ssl pthread)
+
 if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
     add_executable(ariabc_pg_server
                    src/ariabc_pg_server.cxx
@@ -128,6 +183,7 @@ if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
     target_compile_definitions(ariabc_pg_server PRIVATE ${ARIABC_TRANSPORT_DEFS})
 
     target_link_libraries(ariabc_pg_server
+                          ariabc_hotstuff
                           NuRaft::static_lib
                       ${ARIABC_CRYPTO_LIBS}
                           ${LIBPQ_LIBRARY}
@@ -450,6 +506,35 @@ add_executable(pg_retry_policy_test tests/pg_retry_policy_test.cxx)
 target_include_directories(pg_retry_policy_test PRIVATE src)
 target_compile_options(pg_retry_policy_test PRIVATE -UNDEBUG)
 add_test(NAME pg_retry_policy_test COMMAND pg_retry_policy_test)
+
+add_executable(hotstuff_engine_test
+               tests/hotstuff_engine_test.cxx
+               src/in_memory_log_store.cxx)
+set_target_properties(hotstuff_engine_test PROPERTIES CXX_STANDARD 17)
+target_include_directories(hotstuff_engine_test PRIVATE
+                           ${ARIABC_COMMON_INC}
+                           ${CMAKE_CURRENT_BINARY_DIR}/hotstuff-gen
+                           ${CMAKE_CURRENT_BINARY_DIR}/hotstuff-gen/salticidae
+                           ${ARIABC_HOTSTUFF_DIR}/include
+                           ${ARIABC_HOTSTUFF_DIR}/salticidae/include
+                           ${ARIABC_HOTSTUFF_DIR}/secp256k1/include)
+target_compile_options(hotstuff_engine_test PRIVATE -UNDEBUG -include cstdint -Wno-deprecated-declarations)
+target_link_libraries(hotstuff_engine_test ariabc_hotstuff NuRaft::static_lib z dl)
+add_test(NAME hotstuff_engine_test COMMAND hotstuff_engine_test ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(hotstuff_engine_test PROPERTIES TIMEOUT 900)
+
+add_executable(hotstuff_vote_state_test tests/hotstuff_vote_state_test.cxx)
+set_target_properties(hotstuff_vote_state_test PROPERTIES CXX_STANDARD 17)
+target_include_directories(hotstuff_vote_state_test PRIVATE
+                           src
+                           ${CMAKE_CURRENT_BINARY_DIR}/hotstuff-gen
+                           ${CMAKE_CURRENT_BINARY_DIR}/hotstuff-gen/salticidae
+                           ${ARIABC_HOTSTUFF_DIR}/include
+                           ${ARIABC_HOTSTUFF_DIR}/salticidae/include
+                           ${ARIABC_HOTSTUFF_DIR}/secp256k1/include)
+target_compile_options(hotstuff_vote_state_test PRIVATE -UNDEBUG -include cstdint -Wno-deprecated-declarations)
+target_link_libraries(hotstuff_vote_state_test ariabc_hotstuff NuRaft::static_lib z dl)
+add_test(NAME hotstuff_vote_state_test COMMAND hotstuff_vote_state_test ${CMAKE_CURRENT_BINARY_DIR})
 
 add_executable(request_retry_filter_test tests/request_retry_filter_test.cxx)
 target_include_directories(request_retry_filter_test PRIVATE src)

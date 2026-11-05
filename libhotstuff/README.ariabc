@@ -1,0 +1,21 @@
+Vendored consensus library for ariabc_pg --consensus hotstuff.
+
+libhotstuff  https://github.com/hot-stuff/libhotstuff  34aa50796f201aaab91c4db5aae9d3b7aceddb5c (Apache-2.0)
+salticidae   https://github.com/Determinant/salticidae bec7c8fee67ee34d888d2fdc118aefbd65f454c9
+secp256k1    https://github.com/bitcoin-core/secp256k1 1e6f1f5ad5e7f1e3ef79313ec02023902bf8175c
+libuv        https://github.com/libuv/libuv            v1.48.0
+
+Source changes:
+- include/hotstuff/crypto.h: SigSecp256k1::serialize no longer uses a static output
+  buffer, which corrupted signatures when several replicas share a process
+  (hotstuff_engine_test).
+- src/consensus.cpp, include/hotstuff/consensus.h: VoteState, do_persist_vote() before
+  each vote, restore_vote_state() with no votes until the lock is back.  The voting
+  rules themselves are unchanged (hotstuff_vote_state_test).
+- include/hotstuff/liveness.h: PMRoundRobinProposer::sync_proposer(), so a replica
+  follows the proposer of committed blocks.  on_consensus() restarts a rotation it
+  does not end; deleting its timer left the replica rotating forever, ignoring
+  impeach().  on_exp_timeout() skips a turn on which on_propose() would throw, as it
+  can for a replica that voted above the chain.
+Other sources are unmodified. Docs, demos, tests and upstream autotools files are left out;
+ariabc_pg/CMakeLists.txt builds these directly, so hosts need no autotools or libuv-dev.
